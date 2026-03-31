@@ -63,6 +63,31 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(es_exe);
 
     // ==========================================================================
+    // Input Guardian macOS (HID-based anti-cheat)
+    // ==========================================================================
+    // Uses IOHIDManager for system-wide HID input monitoring.
+    // Requires: DriverKit HID entitlement
+    // Reuses the same Grimoire pattern engine as Linux (/dev/input)
+
+    const input_mod = b.createModule(.{
+        .root_source_file = b.path("../input_sovereignty/input-guardian.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
+    // Link IOKit framework for IOHIDManager
+    input_mod.linkFramework("IOKit", .{});
+    input_mod.linkFramework("CoreFoundation", .{});
+
+    const input_exe = b.addExecutable(.{
+        .name = "input-guardian",
+        .root_module = input_mod,
+    });
+
+    b.installArtifact(input_exe);
+
+    // ==========================================================================
     // Sign step (optional - for signed builds)
     // ==========================================================================
 

@@ -502,7 +502,7 @@ pub fn getPatternById(id_hash: u64) ?*const InputPattern {
 // PATTERN VALIDATION
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Compile-time pattern validation
+// Compile-time pattern validation
 comptime {
     // Ensure all patterns have unique IDs
     for (GAMING_CHEAT_PATTERNS, 0..) |pattern1, i| {

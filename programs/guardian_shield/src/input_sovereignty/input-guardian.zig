@@ -43,8 +43,10 @@
 //!   If hands perform physically impossible actions → judgment is passed.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const time_compat = @import("time_compat.zig");
 const patterns = @import("patterns/gaming_cheats.zig");
+const macos_hid = if (builtin.os.tag == .macos) @import("macos_hid.zig") else struct {};
 
 /// Linux input event structure (from linux/input.h)
 pub const InputEvent = extern struct {
@@ -94,7 +96,7 @@ const MatchState = struct {
 
     pub fn reset(self: *MatchState) void {
         self.current_step = 0;
-        self.first_timestamp_us = 0,
+        self.first_timestamp_us = 0;
         self.last_timestamp_us = 0;
         self.events_since_last = 0;
     }
@@ -307,8 +309,19 @@ pub const InputGuardian = struct {
         return null;
     }
 
-    /// Monitor an input device
-    pub fn monitorDevice(self: *Self, device_path: []const u8, duration_sec: ?u32) !void {
+    /// Monitor input devices (platform-dispatched)
+    pub fn monitor(self: *Self, device_path: ?[]const u8, duration_sec: ?u32) !void {
+        if (comptime builtin.os.tag == .macos) {
+            // macOS: use IOHIDManager for all devices (device_path not used)
+            try macos_hid.monitorAllDevices(self, duration_sec);
+        } else {
+            // Linux: read from /dev/input/eventX
+            try self.monitorLinuxDevice(device_path orelse return error.MissingDevice, duration_sec);
+        }
+    }
+
+    /// Linux: Monitor a specific /dev/input/eventX device
+    fn monitorLinuxDevice(self: *Self, device_path: []const u8, duration_sec: ?u32) !void {
         std.log.info("Opening input device: {s}", .{device_path});
 
         const fd = try std.posix.open(device_path, .{ .ACCMODE = .RDONLY }, 0);
@@ -355,8 +368,13 @@ pub const InputGuardian = struct {
         std.log.info("Total events processed: {d}", .{self.event_count});
     }
 
+    /// Backwards compat — delegates to monitor()
+    pub fn monitorDevice(self: *Self, device_path: []const u8, duration_sec: ?u32) !void {
+        return self.monitor(device_path, duration_sec);
+    }
+
     /// Handle a pattern detection
-    fn handleDetection(self: *Self, result: MatchResult) !void {
+    pub fn handleDetection(self: *Self, result: MatchResult) !void {
         const pattern = result.pattern.?;
 
         // Log to JSON
@@ -378,8 +396,6 @@ pub const InputGuardian = struct {
 
     /// Log detection to JSON file
     fn logDetectionJSON(self: *Self, result: MatchResult) !void {
-        _ = self;
-
         const pattern = result.pattern.?;
 
         // Create JSON log entry
@@ -395,111 +411,106 @@ pub const InputGuardian = struct {
         });
         defer self.allocator.free(json_log);
 
-        // Write to log file
-        const log_file = try std.Io.Dir.cwd().createFile("/tmp/input-guardian-alerts.json", .{ .truncate = false });
-        defer log_file.close();
+        // Write to log file using C API
+        const fp = std.c.fopen("/tmp/input-guardian-alerts.json", "a") orelse return;
+        defer _ = std.c.fclose(fp);
+        _ = std.c.fwrite(json_log.ptr, 1, json_log.len, fp);
 
-        try log_file.seekFromEnd(0);
-        _ = try log_file.write(json_log);
-
-        std.log.info("Detection logged to /tmp/input-guardian-alerts.json", .{});
+        std.debug.print("Detection logged to /tmp/input-guardian-alerts.json\n", .{});
     }
 };
 
 /// Main entry point
-pub fn main() !void {
-    const allocator = std.heap.c_allocator;
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
 
     // Parse command line arguments
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    var args_iter = std.process.Args.Iterator.init(init.minimal.args);
+    _ = args_iter.next(); // skip program name
 
     var device_path: ?[]const u8 = null;
     var duration_sec: ?u32 = null;
     var debug_mode = false;
     var enforce_mode = false;
 
-    var i: usize = 1;
-    while (i < args.len) : (i += 1) {
-        const arg = args[i];
-
+    while (args_iter.next()) |arg| {
         if (std.mem.eql(u8, arg, "--device")) {
-            i += 1;
-            if (i >= args.len) {
-                std.log.err("--device requires a path", .{});
+            device_path = args_iter.next() orelse {
+                std.debug.print("--device requires a path\n", .{});
                 return error.InvalidArgument;
-            }
-            device_path = args[i];
+            };
         } else if (std.mem.eql(u8, arg, "--duration")) {
-            i += 1;
-            if (i >= args.len) {
-                std.log.err("--duration requires a number", .{});
+            const dur_str = args_iter.next() orelse {
+                std.debug.print("--duration requires a number\n", .{});
                 return error.InvalidArgument;
-            }
-            duration_sec = try std.fmt.parseInt(u32, args[i], 10);
+            };
+            duration_sec = std.fmt.parseInt(u32, dur_str, 10) catch return error.InvalidArgument;
         } else if (std.mem.eql(u8, arg, "--debug")) {
             debug_mode = true;
         } else if (std.mem.eql(u8, arg, "--enforce")) {
             enforce_mode = true;
         } else if (std.mem.eql(u8, arg, "--help")) {
-            try printUsage();
+            printUsage();
             return;
         } else {
-            std.log.err("Unknown argument: {s}", .{arg});
+            std.debug.print("Unknown argument: {s}\n", .{arg});
             return error.InvalidArgument;
         }
     }
 
-    if (device_path == null) {
-        std.log.err("--device is required", .{});
-        try printUsage();
-        return error.MissingArgument;
+    if (comptime builtin.os.tag != .macos) {
+        if (device_path == null) {
+            std.debug.print("--device is required on Linux\n", .{});
+            printUsage();
+            return error.MissingArgument;
+        }
     }
 
     // Print header
-    try printHeader();
+    printHeader();
 
     // Initialize guardian
     var guardian = try InputGuardian.init(allocator, debug_mode, enforce_mode);
     defer guardian.deinit();
 
-    // Monitor device
-    try guardian.monitorDevice(device_path.?, duration_sec);
+    // Monitor (macOS: all devices via IOHIDManager, Linux: specific /dev/input device)
+    try guardian.monitor(device_path, duration_sec);
 }
 
-fn printHeader() !void {
-    const stderr = std.io.getStdErr().writer();
-    try stderr.print(
+fn printHeader() void {
+    std.debug.print(
         \\═══════════════════════════════════════════════════════════════
-        \\⚖️  THE INPUT GUARDIAN: Sovereign Behavioral Monitor
+        \\  THE INPUT GUARDIAN: Sovereign Behavioral Monitor
         \\═══════════════════════════════════════════════════════════════
         \\
         \\We do not scan memory. We do not inspect files.
         \\We observe only the player's hands.
-        \\If hands perform the forbidden incantation → judgment is passed.
+        \\If hands perform the forbidden incantation -> judgment is passed.
         \\
         \\
     , .{});
 }
 
-fn printUsage() !void {
-    const stderr = std.io.getStdErr().writer();
-    try stderr.print(
+fn printUsage() void {
+    std.debug.print(
         \\Usage: input-guardian [OPTIONS]
         \\
         \\OPTIONS:
-        \\  --device PATH       Input device to monitor (e.g., /dev/input/event5)
-        \\  --duration SECONDS  Monitor for N seconds (optional, default: infinite)
-        \\  --debug             Enable debug mode (print all events)
-        \\  --enforce           Enable enforcement mode (take action on detection)
-        \\  --help              Show this help message
+        \\  --device PATH       Input device to monitor (Linux: /dev/input/event5)
+        \\  --duration SECONDS  Monitor for N seconds (default: infinite)
+        \\  --debug             Print all events
+        \\  --enforce           Take action on detection
+        \\  --help              Show this help
+        \\
+        \\macOS: --device not required (monitors all HID devices via IOHIDManager)
+        \\Linux: --device is required (specify /dev/input/eventX)
         \\
         \\EXAMPLES:
-        \\  # Monitor gamepad in debug mode
-        \\  sudo ./input-guardian --device /dev/input/event5 --debug
+        \\  # macOS: monitor all devices
+        \\  ./input-guardian --debug
         \\
-        \\  # Monitor for 60 seconds with enforcement
-        \\  sudo ./input-guardian --device /dev/input/event5 --duration 60 --enforce
+        \\  # Linux: monitor specific gamepad
+        \\  sudo ./input-guardian --device /dev/input/event5 --debug
         \\
         \\
     , .{});
