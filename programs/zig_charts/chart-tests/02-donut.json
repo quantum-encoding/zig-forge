@@ -1,0 +1,20 @@
+{
+  "type": "pie",
+  "title": "Revenue by Service",
+  "width": 600,
+  "height": 500,
+  "data": {
+    "segments": [
+      {"label": "Solar PV", "value": 340000},
+      {"label": "Heat Pumps", "value": 185000},
+      {"label": "Battery Storage", "value": 92000},
+      {"label": "EV Chargers", "value": 67000},
+      {"label": "Insulation", "value": 45000},
+      {"label": "Maintenance", "value": 28000},
+      {"label": "Consulting", "value": 12000}
+    ]
+  },
+  "config": {
+    "inner_radius": 0.5
+  }
+}

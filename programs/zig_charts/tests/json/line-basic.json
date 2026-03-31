@@ -1,0 +1,18 @@
+{
+  "type": "line",
+  "width": 800,
+  "height": 400,
+  "data": {
+    "series": [
+      {
+        "name": "Temperature",
+        "values": [20, 22, 25, 23, 27, 30, 28, 26, 24, 22]
+      }
+    ],
+    "categories": ["6am", "8am", "10am", "12pm", "2pm", "4pm", "6pm", "8pm", "10pm", "12am"]
+  },
+  "config": {
+    "show_points": true,
+    "show_grid": true
+  }
+}

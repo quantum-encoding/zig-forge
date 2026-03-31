@@ -1,0 +1,34 @@
+From: Community Contributor
+Subject: [PATCH] Fix DNS CNAME parsing with null terminator
+
+The expand() function was including a null terminator byte in the
+hostname slice before validation. The null byte (0x00) fails hostname
+validation since it is not alphanumeric, '.', or '-'.
+
+This caused InvalidDnsCnameRecord errors when resolving hosts behind
+Cloudflare CDN (e.g., api.deepseek.com -> api.deepseek.com.cdn.cloudflare.net).
+
+The fix removes the unnecessary null terminator assignment since the
+hostname slice is correctly bounded by dest_i without it.
+
+Tested with domains using Cloudflare CNAME records.
+---
+ lib/std/Io/net/HostName.zig | 4 +---
+ 1 file changed, 1 insertion(+), 3 deletions(-)
+
+diff --git a/lib/std/Io/net/HostName.zig b/lib/std/Io/net/HostName.zig
+index 1234567..abcdefg 100644
+--- a/lib/std/Io/net/HostName.zig
++++ b/lib/std/Io/net/HostName.zig
+@@ -135,9 +135,7 @@ pub fn expand(noalias packet: []const u8, start_i: usize, noalias dest_buffer: [
+             dest_i += label_len;
+             i += 1 + label_len;
+         } else {
+-            dest[dest_i] = 0;
+-            dest_i += 1;
++            // Don't include null terminator in hostname validation
+             return .{
+                 len orelse i - start_i + 1,
+                 try .init(dest[0..dest_i]),
+--
+2.43.0

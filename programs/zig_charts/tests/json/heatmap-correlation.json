@@ -1,0 +1,19 @@
+{
+  "type": "heatmap",
+  "width": 500,
+  "height": 500,
+  "data": {
+    "matrix": [
+      [1.00, 0.85, 0.32, -0.15],
+      [0.85, 1.00, 0.45, -0.22],
+      [0.32, 0.45, 1.00, 0.68],
+      [-0.15, -0.22, 0.68, 1.00]
+    ],
+    "x_labels": ["Var A", "Var B", "Var C", "Var D"],
+    "y_labels": ["Var A", "Var B", "Var C", "Var D"]
+  },
+  "config": {
+    "show_values": true,
+    "title": "Correlation Matrix"
+  }
+}

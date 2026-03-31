@@ -1,0 +1,7 @@
+metric,value,description
+total_components,53,Number of unique compression components
+total_component_variations,279,Components × parameter variations
+classic_algorithms,10,Well-known algorithm pipelines
+generated_pipelines,161224,Valid pipeline combinations (depth ≤ 4)
+generation_timestamp,2025-12-02T15:00:49.254246,UTC timestamp of generation
+categories,"ENTROPY_MEASURE, TRANSFORM, PREDICTOR, DICTIONARY, ENTROPY_CODER, RUN_LENGTH, CONTEXT_MODEL, FILTER, INTEGER_CODER",Component categories in taxonomy

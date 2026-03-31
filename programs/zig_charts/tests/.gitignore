@@ -1,0 +1,5 @@
+# Ignore generated output files
+output/
+
+# Keep the output directory structure
+!output/.gitkeep

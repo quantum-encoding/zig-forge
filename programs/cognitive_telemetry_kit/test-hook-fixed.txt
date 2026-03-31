@@ -1,0 +1,2 @@
+Testing the fixed hook with corrected sed pattern.
+This should capture cognitive state properly now.

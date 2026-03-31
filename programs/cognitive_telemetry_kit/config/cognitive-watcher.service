@@ -1,0 +1,24 @@
+[Unit]
+Description=Cognitive Watcher V2 - eBPF TTY Subsystem Monitor for Claude Cognitive States
+Documentation=https://quantumencoding.io
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/cognitive-watcher
+WorkingDirectory=/var/lib/cognitive-watcher
+Restart=always
+RestartSec=10
+
+# Security
+NoNewPrivileges=false
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/sys/fs/bpf /var/lib/cognitive-watcher
+
+# eBPF requires elevated privileges
+AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_NET_ADMIN CAP_SYS_RESOURCE
+
+[Install]
+WantedBy=multi-user.target

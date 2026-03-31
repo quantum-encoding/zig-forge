@@ -1,0 +1,17 @@
+{
+  "type": "bar",
+  "width": 600,
+  "height": 400,
+  "data": {
+    "series": [
+      {
+        "name": "Sales",
+        "values": [150, 230, 180, 290, 210]
+      }
+    ],
+    "categories": ["Product A", "Product B", "Product C", "Product D", "Product E"]
+  },
+  "config": {
+    "show_values": true
+  }
+}

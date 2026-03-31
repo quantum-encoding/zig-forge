@@ -1,0 +1,648 @@
+{
+  "page_size": { "width": 842, "height": 595 },
+  "pages": [
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 842,
+          "height": 280,
+          "fill_color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "CRG",
+          "x": 60,
+          "y": 70,
+          "font_size": 48,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "text",
+          "content": "DIRECT",
+          "x": 170,
+          "y": 70,
+          "font_size": 48,
+          "font_weight": "bold",
+          "color": "#D1FAE5"
+        },
+        {
+          "type": "text",
+          "content": "Renewable Energy Solutions",
+          "x": 60,
+          "y": 100,
+          "font_size": 14,
+          "color": "#A7F3D0"
+        },
+        {
+          "type": "text",
+          "content": "SOLAR INSTALLATION",
+          "x": 60,
+          "y": 180,
+          "font_size": 36,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "text",
+          "content": "PROPOSAL",
+          "x": 60,
+          "y": 220,
+          "font_size": 36,
+          "font_weight": "bold",
+          "color": "#D1FAE5"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 550,
+          "y": 50,
+          "width": 242,
+          "height": 80,
+          "fill_color": "#059669"
+        },
+        {
+          "type": "text",
+          "content": "QUOTE REFERENCE",
+          "x": 671,
+          "y": 75,
+          "font_size": 10,
+          "color": "#A7F3D0",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "CRG-2026-00123",
+          "x": 671,
+          "y": 105,
+          "font_size": 18,
+          "font_weight": "bold",
+          "color": "#ffffff",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "Prepared Exclusively For",
+          "x": 60,
+          "y": 330,
+          "font_size": 14,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "Mr & Mrs Johnson",
+          "x": 60,
+          "y": 365,
+          "font_size": 32,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "42 Oak Lane, Southampton, SO16 3BX",
+          "x": 60,
+          "y": 400,
+          "font_size": 14,
+          "color": "#374151"
+        },
+        {
+          "type": "text",
+          "content": "1 February 2026",
+          "x": 60,
+          "y": 425,
+          "font_size": 12,
+          "color": "#6B7280"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 500,
+          "y": 320,
+          "width": 292,
+          "height": 120,
+          "fill_color": "#ECFDF5",
+          "stroke_color": "#10B981",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "TOTAL INVESTMENT",
+          "x": 646,
+          "y": 355,
+          "font_size": 12,
+          "color": "#065F46",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "£12,300",
+          "x": 646,
+          "y": 400,
+          "font_size": 36,
+          "font_weight": "bold",
+          "color": "#10B981",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "0% VAT Included",
+          "x": 646,
+          "y": 425,
+          "font_size": 11,
+          "color": "#6B7280",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 545,
+          "width": 842,
+          "height": 50,
+          "fill_color": "#065F46"
+        },
+        {
+          "type": "text",
+          "content": "0330 133 2497  •  info@crgdirect.co.uk  •  crgdirect.co.uk",
+          "x": 421,
+          "y": 575,
+          "font_size": 12,
+          "color": "#ffffff",
+          "align": "center"
+        }
+      ]
+    },
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 842,
+          "height": 60,
+          "fill_color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "CRG DIRECT",
+          "x": 50,
+          "y": 38,
+          "font_size": 18,
+          "font_weight": "bold",
+          "color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "System Specification",
+          "x": 792,
+          "y": 38,
+          "font_size": 14,
+          "color": "#ffffff",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "Your Recommended System",
+          "x": 50,
+          "y": 100,
+          "font_size": 24,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 115,
+          "width": 120,
+          "height": 0,
+          "stroke_color": "#10B981",
+          "stroke_width": 3
+        },
+        {
+          "type": "text",
+          "content": "Solar PV System",
+          "x": 50,
+          "y": 150,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "From £7,500",
+          "x": 700,
+          "y": 150,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#111827",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "• 5.28kWp Solar PV System",
+          "x": 70,
+          "y": 175,
+          "font_size": 11,
+          "color": "#374151"
+        },
+        {
+          "type": "text",
+          "content": "Includes:",
+          "x": 70,
+          "y": 193,
+          "font_size": 10,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "✓ Full technical site survey",
+          "x": 80,
+          "y": 208,
+          "font_size": 9,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "✓ Installation by certified team",
+          "x": 80,
+          "y": 220,
+          "font_size": 9,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "✓ MCS Certification",
+          "x": 80,
+          "y": 232,
+          "font_size": 9,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "✓ 25-Year Panel Warranty",
+          "x": 80,
+          "y": 244,
+          "font_size": 9,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "Battery Storage System",
+          "x": 50,
+          "y": 280,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "From £3,500",
+          "x": 700,
+          "y": 280,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#111827",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "• High-Capacity Battery System",
+          "x": 70,
+          "y": 305,
+          "font_size": 11,
+          "color": "#374151"
+        },
+        {
+          "type": "text",
+          "content": "Includes:",
+          "x": 70,
+          "y": 323,
+          "font_size": 10,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "✓ Smart energy management",
+          "x": 80,
+          "y": 338,
+          "font_size": 9,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "✓ Mobile app control",
+          "x": 80,
+          "y": 350,
+          "font_size": 9,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "✓ 10-Year Warranty",
+          "x": 80,
+          "y": 362,
+          "font_size": 9,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "Smart EV Charging Point",
+          "x": 50,
+          "y": 398,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "From £1,300",
+          "x": 700,
+          "y": 398,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#111827",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "• 7kW Smart EV Charger",
+          "x": 70,
+          "y": 423,
+          "font_size": 11,
+          "color": "#374151"
+        },
+        {
+          "type": "text",
+          "content": "Includes:",
+          "x": 70,
+          "y": 441,
+          "font_size": 10,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "✓ Professional installation",
+          "x": 80,
+          "y": 456,
+          "font_size": 9,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "✓ Solar integration",
+          "x": 80,
+          "y": 468,
+          "font_size": 9,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "✓ 3-Year Warranty",
+          "x": 80,
+          "y": 480,
+          "font_size": 9,
+          "color": "#6B7280"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 545,
+          "width": 842,
+          "height": 50,
+          "fill_color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "MCS Certified  •  Which? Trusted Trader  •  RECC Member  •  TrustMark",
+          "x": 421,
+          "y": 575,
+          "font_size": 11,
+          "color": "#ffffff",
+          "align": "center"
+        }
+      ]
+    },
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 842,
+          "height": 60,
+          "fill_color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "CRG DIRECT",
+          "x": 50,
+          "y": 38,
+          "font_size": 18,
+          "font_weight": "bold",
+          "color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "Terms & Acceptance",
+          "x": 792,
+          "y": 38,
+          "font_size": 14,
+          "color": "#ffffff",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "Accept This Proposal",
+          "x": 50,
+          "y": 100,
+          "font_size": 24,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 115,
+          "width": 100,
+          "height": 0,
+          "stroke_color": "#10B981",
+          "stroke_width": 3
+        },
+        {
+          "type": "text",
+          "content": "By signing below, I confirm that I have read and agree to the terms outlined in this proposal.",
+          "x": 50,
+          "y": 150,
+          "font_size": 11,
+          "color": "#374151"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 50,
+          "y": 200,
+          "width": 350,
+          "height": 120,
+          "fill_color": "#ffffff",
+          "stroke_color": "#E5E7EB",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Customer Signature",
+          "x": 70,
+          "y": 225,
+          "font_size": 10,
+          "color": "#6B7280"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 70,
+          "y": 290,
+          "width": 280,
+          "height": 0,
+          "stroke_color": "#9CA3AF",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Date:",
+          "x": 70,
+          "y": 310,
+          "font_size": 10,
+          "color": "#6B7280"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 442,
+          "y": 200,
+          "width": 350,
+          "height": 120,
+          "fill_color": "#ffffff",
+          "stroke_color": "#E5E7EB",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "CRG Direct Representative",
+          "x": 462,
+          "y": 225,
+          "font_size": 10,
+          "color": "#6B7280"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 462,
+          "y": 290,
+          "width": 280,
+          "height": 0,
+          "stroke_color": "#9CA3AF",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Date:",
+          "x": 462,
+          "y": 310,
+          "font_size": 10,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "What Happens Next?",
+          "x": 50,
+          "y": 370,
+          "font_size": 16,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "1. We schedule a technical site survey at your convenience",
+          "x": 50,
+          "y": 400,
+          "font_size": 11,
+          "color": "#374151"
+        },
+        {
+          "type": "text",
+          "content": "2. Our engineers confirm the final system design",
+          "x": 50,
+          "y": 420,
+          "font_size": 11,
+          "color": "#374151"
+        },
+        {
+          "type": "text",
+          "content": "3. Installation is scheduled within 4-6 weeks",
+          "x": 50,
+          "y": 440,
+          "font_size": 11,
+          "color": "#374151"
+        },
+        {
+          "type": "text",
+          "content": "4. Your system is commissioned and you start saving",
+          "x": 50,
+          "y": 460,
+          "font_size": 11,
+          "color": "#374151"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 50,
+          "y": 490,
+          "width": 742,
+          "height": 50,
+          "fill_color": "#ECFDF5",
+          "stroke_color": "#10B981",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Questions? Call us on 0330 133 2497 or email info@crgdirect.co.uk",
+          "x": 421,
+          "y": 520,
+          "font_size": 13,
+          "font_weight": "bold",
+          "color": "#065F46",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 555,
+          "width": 842,
+          "height": 40,
+          "fill_color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "Quote valid for 30 days from 1 February 2026  •  CRG-2026-00123",
+          "x": 421,
+          "y": 580,
+          "font_size": 10,
+          "color": "#9CA3AF",
+          "align": "center"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,261 @@
+{
+  "profile_name": "aegis-safe",
+  "description": "Sovereign Blue Team security audit profile - Internal reconnaissance only",
+  "version": "1.0.0",
+  "author": "Quantum Garden Forge - The Triumvirate",
+  "threat_model": "Trusted security tools (nmap, tcpdump, tshark) scanning own infrastructure. Kernel-enforced network boundary prevents external targeting.",
+
+  "syscalls": {
+    "default_action": "errno",
+    "comment": "Security audit tools require network and process spawning capabilities, but with strict network filtering",
+    "errno_value": 13,
+
+    "allowed": [
+      "read",
+      "pread64",
+      "readv",
+      "preadv",
+      "preadv2",
+      "write",
+      "writev",
+      "pwrite64",
+      "pwritev",
+      "pwritev2",
+      "open",
+      "openat",
+      "close",
+      "stat",
+      "fstat",
+      "lstat",
+      "newfstatat",
+      "statx",
+      "access",
+      "faccessat",
+      "faccessat2",
+      "readlink",
+      "readlinkat",
+      "getcwd",
+      "chdir",
+      "fchdir",
+      "getdents",
+      "getdents64",
+      "lseek",
+      "dup",
+      "dup2",
+      "dup3",
+      "fcntl",
+      "ioctl",
+      "getrlimit",
+      "prlimit64",
+      "gettimeofday",
+      "clock_gettime",
+      "nanosleep",
+      "getpid",
+      "gettid",
+      "getppid",
+      "getuid",
+      "geteuid",
+      "getgid",
+      "getegid",
+      "prctl",
+      "arch_prctl",
+      "mmap",
+      "munmap",
+      "mremap",
+      "mprotect",
+      "madvise",
+      "brk",
+      "rt_sigaction",
+      "rt_sigprocmask",
+      "rt_sigreturn",
+      "sigaltstack",
+      "uname",
+      "getrandom",
+      "futex",
+      "set_tid_address",
+      "set_robust_list",
+      "exit",
+      "exit_group",
+      "poll",
+      "ppoll",
+      "select",
+      "pselect6",
+      "epoll_create",
+      "epoll_create1",
+      "epoll_ctl",
+      "epoll_wait",
+      "epoll_pwait",
+      "sched_yield",
+      "sched_getaffinity",
+      "rseq",
+      "clone",
+      "clone3",
+      "fork",
+      "vfork",
+      "execve",
+      "wait4",
+      "waitid",
+      "pipe",
+      "pipe2",
+      "socket",
+      "socketpair",
+      "bind",
+      "connect",
+      "listen",
+      "accept",
+      "accept4",
+      "sendto",
+      "sendmsg",
+      "sendmmsg",
+      "recvfrom",
+      "recvmsg",
+      "recvmmsg",
+      "shutdown",
+      "getsockname",
+      "getpeername",
+      "setsockopt",
+      "getsockopt",
+      "sendfile",
+      "splice",
+      "tee",
+      "copy_file_range",
+      "eventfd",
+      "eventfd2"
+    ],
+
+    "blocked": [
+      "unlink",
+      "unlinkat",
+      "rmdir",
+      "rename",
+      "renameat",
+      "renameat2",
+      "link",
+      "linkat",
+      "symlink",
+      "symlinkat",
+      "mknod",
+      "mknodat",
+      "chmod",
+      "fchmod",
+      "fchmodat",
+      "chown",
+      "fchown",
+      "lchown",
+      "fchownat",
+      "truncate",
+      "ftruncate",
+      "mount",
+      "umount",
+      "umount2",
+      "pivot_root",
+      "chroot",
+      "ptrace",
+      "process_vm_readv",
+      "process_vm_writev",
+      "bpf",
+      "userfaultfd",
+      "perf_event_open",
+      "kexec_load",
+      "kexec_file_load",
+      "reboot",
+      "init_module",
+      "finit_module",
+      "delete_module"
+    ],
+
+    "conditional": [
+      {
+        "comment": "Allow raw sockets for packet capture (tcpdump/tshark), but only for localhost/LAN",
+        "syscall": "socket",
+        "args": [
+          {"index": 0, "value": 17, "op": "SCMP_CMP_EQ", "comment": "AF_PACKET for packet capture"}
+        ]
+      }
+    ]
+  },
+
+  "capabilities": {
+    "comment": "CAP_NET_RAW needed for packet capture, CAP_NET_ADMIN for network probing",
+    "drop_all": true,
+    "keep": ["CAP_NET_RAW", "CAP_NET_ADMIN"]
+  },
+
+  "namespaces": {
+    "comment": "Network namespace isolation not used - need access to real network stack for auditing",
+    "enabled": [],
+    "network": "host"
+  },
+
+  "filesystem": {
+    "comment": "Read-only access to system configs for integrity monitoring",
+    "protected_paths": [
+      "/etc/passwd",
+      "/etc/shadow",
+      "/etc/sudoers",
+      "/boot"
+    ],
+    "writable_sandbox": []
+  },
+
+  "network_filter": {
+    "comment": "CRITICAL: Kernel-enforced network boundary - prevents external targeting",
+    "mode": "whitelist",
+    "allowed_destinations": [
+      "127.0.0.0/8",
+      "192.168.0.0/16",
+      "10.0.0.0/8",
+      "172.16.0.0/12"
+    ],
+    "blocked_destinations": [
+      "0.0.0.0/0"
+    ],
+    "allowed_ports": [
+      "1-65535"
+    ],
+    "note": "Whitelist takes precedence - only localhost and RFC1918 private networks allowed"
+  },
+
+  "limits": {
+    "max_open_files": 1024,
+    "max_memory_mb": 512,
+    "max_cpu_time_sec": 300,
+    "max_processes": 16
+  },
+
+  "audit": {
+    "log_violations": true,
+    "log_allowed": false,
+    "log_target": "stderr",
+    "auditd_integration": true,
+    "auditd_key": "zig_jail_aegis_safe"
+  },
+
+  "metadata": {
+    "created": "2025-10-18",
+    "tested_with": ["nmap 7.94", "tcpdump 4.99", "tshark 4.0"],
+    "use_cases": [
+      "Sovereign Blue Team security auditing",
+      "Internal vulnerability scanning (localhost/LAN only)",
+      "Network traffic analysis (own systems)",
+      "System integrity monitoring"
+    ],
+    "known_limitations": [
+      "Cannot scan external/internet targets (by design - kernel-enforced)",
+      "Cannot modify files (read-only posture)",
+      "Requires CAP_NET_RAW for packet capture",
+      "Network filter is iptables-based (requires zig-jail v2.1+)"
+    ],
+    "security_guarantees": [
+      "Kernel-level network firewall prevents external connections",
+      "Cannot delete or modify system files",
+      "Cannot escalate privileges (capabilities dropped)",
+      "All operations audited via auditd"
+    ],
+    "usage_examples": [
+      "zig-jail --profile=aegis-safe -- nmap -sV localhost",
+      "zig-jail --profile=aegis-safe -- tcpdump -i lo -c 100",
+      "zig-jail --profile=aegis-safe -- tshark -i any -f 'host 127.0.0.1' -c 50"
+    ]
+  }
+}

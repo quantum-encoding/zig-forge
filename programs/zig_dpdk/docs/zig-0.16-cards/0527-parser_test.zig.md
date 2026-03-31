@@ -1,0 +1,3 @@
+SKIP: Internal implementation file - no public migration impact
+
+**Analysis:** The provided file `parser_test.zig` is completely empty (0 bytes), containing no code, imports, or exports. This indicates it's either a placeholder, intentionally blank, or part of a test structure with no actual implementation. Since there are no public APIs, structs, functions, or any code patterns to analyze, this file has no migration impact between Zig 0.11 and 0.16.

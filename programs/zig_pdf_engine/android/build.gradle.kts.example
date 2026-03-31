@@ -1,0 +1,66 @@
+// Example build.gradle.kts for Android app using Zig PDF Renderer
+//
+// Copy this to your app module's build.gradle.kts and adjust as needed.
+//
+// Prerequisites:
+//   1. Build the Zig libraries: zig build android-all
+//   2. Copy libraries to jniLibs: ./android/setup-jniLibs.sh ./app
+//   3. Copy PdfRenderer.java to your source tree
+
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+}
+
+android {
+    namespace = "com.yourapp.pdfviewer"
+    compileSdk = 34
+
+    defaultConfig {
+        applicationId = "com.yourapp.pdfviewer"
+        minSdk = 21
+        targetSdk = 34
+        versionCode = 1
+        versionName = "1.0"
+
+        // Supported ABIs - must match what Zig built
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+        }
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_1_8
+        targetCompatibility = JavaVersion.VERSION_1_8
+    }
+
+    kotlinOptions {
+        jvmTarget = "1.8"
+    }
+
+    // Option 1: Use prebuilt libraries in jniLibs (simplest)
+    // Just copy the .so files to app/src/main/jniLibs/<abi>/
+
+    // Option 2: Use CMake to build JNI bridge (if you need the C JNI layer)
+    // externalNativeBuild {
+    //     cmake {
+    //         path = file("src/main/cpp/CMakeLists.txt")
+    //         version = "3.22.1"
+    //     }
+    // }
+}
+
+dependencies {
+    implementation("androidx.core:core-ktx:1.12.0")
+    implementation("androidx.appcompat:appcompat:1.6.1")
+}

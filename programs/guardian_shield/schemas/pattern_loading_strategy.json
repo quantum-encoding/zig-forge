@@ -1,0 +1,325 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Guardian Shield Pattern Loading Strategy",
+  "description": "Defines how patterns are selected and loaded based on hardware capabilities",
+  "version": "1.0.0",
+
+  "loading_strategies": {
+    "tier_0_embedded": {
+      "profile": "embedded",
+      "max_total_patterns": 5,
+      "max_memory_mb": 1,
+      "priority": [
+        {
+          "category": "reverse_shell",
+          "patterns": ["reverse_shell_classic"],
+          "reason": "Most critical remote access threat"
+        },
+        {
+          "category": "privilege_escalation",
+          "patterns": ["privesc_suid_abuse"],
+          "reason": "Common privilege escalation vector"
+        },
+        {
+          "category": "fork_bomb",
+          "patterns": ["fork_bomb_rapid"],
+          "reason": "Resource exhaustion protection"
+        }
+      ],
+      "features": {
+        "multi_dimensional": false,
+        "input_sovereignty": false,
+        "resource_monitoring": false,
+        "network_monitoring": false
+      },
+      "optimization": {
+        "hot_patterns_only": true,
+        "minimize_memory_footprint": true,
+        "disable_logging": false,
+        "minimal_debug_info": true
+      }
+    },
+
+    "tier_1_laptop": {
+      "profile": "laptop",
+      "max_total_patterns": 20,
+      "max_memory_mb": 30,
+      "priority": [
+        {
+          "category": "reverse_shell",
+          "patterns": ["all"],
+          "weight": 10
+        },
+        {
+          "category": "privilege_escalation",
+          "patterns": ["all"],
+          "weight": 9
+        },
+        {
+          "category": "fork_bomb",
+          "patterns": ["all"],
+          "weight": 8
+        },
+        {
+          "category": "crypto_mining",
+          "patterns": ["crypto_miner_gpu", "crypto_miner_cpu"],
+          "weight": 7,
+          "note": "Common on developer machines"
+        }
+      ],
+      "features": {
+        "multi_dimensional": true,
+        "input_sovereignty": false,
+        "resource_monitoring": true,
+        "resource_monitoring_interval_sec": 5,
+        "network_monitoring": false
+      },
+      "optimization": {
+        "hot_patterns_only": true,
+        "l3_cache_aware": true,
+        "batch_size": 20
+      }
+    },
+
+    "tier_2_server": {
+      "profile": "server",
+      "max_total_patterns": 1000,
+      "max_memory_mb": 150,
+      "priority": [
+        {
+          "category": "reverse_shell",
+          "patterns": ["all"],
+          "weight": 10
+        },
+        {
+          "category": "privilege_escalation",
+          "patterns": ["all"],
+          "weight": 10
+        },
+        {
+          "category": "container_escape",
+          "patterns": ["all"],
+          "weight": 9
+        },
+        {
+          "category": "crypto_mining",
+          "patterns": ["all"],
+          "weight": 8
+        },
+        {
+          "category": "ransomware",
+          "patterns": ["all"],
+          "weight": 8
+        },
+        {
+          "category": "data_exfiltration",
+          "patterns": ["all"],
+          "weight": 7
+        },
+        {
+          "category": "rootkit",
+          "patterns": ["all"],
+          "weight": 7
+        },
+        {
+          "category": "fork_bomb",
+          "patterns": ["all"],
+          "weight": 6
+        }
+      ],
+      "features": {
+        "multi_dimensional": true,
+        "input_sovereignty": false,
+        "resource_monitoring": true,
+        "resource_monitoring_interval_sec": 2,
+        "network_monitoring": true,
+        "network_monitoring_interval_sec": 5
+      },
+      "optimization": {
+        "hot_patterns_only": false,
+        "l3_cache_aware": true,
+        "batch_size": 100,
+        "enable_pattern_caching": true
+      }
+    },
+
+    "tier_3_c4d": {
+      "profile": "c4d_instance",
+      "max_total_patterns": 100000,
+      "max_memory_mb": 15000,
+      "l3_cache_target_mb": 150,
+      "priority": [
+        {
+          "category": "all",
+          "patterns": ["all"],
+          "weight": 10,
+          "note": "C4D loads EVERYTHING - full threat intelligence"
+        }
+      ],
+      "features": {
+        "multi_dimensional": true,
+        "input_sovereignty": true,
+        "resource_monitoring": true,
+        "resource_monitoring_interval_sec": 1,
+        "network_monitoring": true,
+        "network_monitoring_interval_sec": 1,
+        "xdp_layer": true,
+        "dpdk_layer": true,
+        "ml_behavioral_analysis": true,
+        "threat_intelligence_feed": true
+      },
+      "optimization": {
+        "hot_patterns_only": false,
+        "l3_cache_aware": true,
+        "l3_cache_pinning": true,
+        "numa_aware": true,
+        "batch_size": 10000,
+        "enable_pattern_caching": true,
+        "prefetch_patterns": true,
+        "parallel_loading": true,
+        "loading_threads": 64
+      },
+      "external_feeds": {
+        "threat_intelligence": {
+          "enabled": true,
+          "sources": [
+            "mitre_attack",
+            "cve_database",
+            "threat_exchange",
+            "custom_industry_feeds"
+          ],
+          "update_interval_hours": 1
+        }
+      }
+    },
+
+    "tier_2_gaming": {
+      "profile": "gaming_sentinel",
+      "max_total_patterns": 100,
+      "max_memory_mb": 20,
+      "priority": [
+        {
+          "category": "gaming_cheats",
+          "patterns": ["all"],
+          "weight": 10,
+          "note": "Primary focus: input device cheating"
+        },
+        {
+          "category": "reverse_shell",
+          "patterns": ["reverse_shell_classic"],
+          "weight": 5,
+          "note": "Basic system protection"
+        }
+      ],
+      "features": {
+        "multi_dimensional": false,
+        "input_sovereignty": true,
+        "input_monitoring_rate_hz": 1000,
+        "input_devices": ["controller", "mouse", "keyboard"],
+        "resource_monitoring": false,
+        "network_monitoring": false
+      },
+      "optimization": {
+        "hot_patterns_only": true,
+        "ultra_low_latency": true,
+        "input_event_buffering": true,
+        "buffer_size_events": 10000
+      }
+    }
+  },
+
+  "dynamic_adjustment": {
+    "description": "Rules for adjusting pattern loading based on runtime conditions",
+    "memory_pressure": {
+      "trigger_threshold_percent": 80,
+      "action": "unload_lowest_priority_patterns",
+      "min_patterns_to_keep": 5
+    },
+    "cpu_pressure": {
+      "trigger_threshold_percent": 90,
+      "action": "increase_monitoring_intervals",
+      "max_interval_multiplier": 4
+    },
+    "cache_thrashing": {
+      "detection": "l3_miss_rate_gt_10_percent",
+      "action": "reduce_hot_pattern_set",
+      "target_cache_occupancy_percent": 80
+    }
+  },
+
+  "pattern_selection_algorithm": {
+    "name": "weighted_priority_with_constraints",
+    "steps": [
+      {
+        "step": 1,
+        "action": "detect_hardware_capabilities",
+        "methods": ["read_cpuinfo", "read_meminfo", "detect_cache_size"]
+      },
+      {
+        "step": 2,
+        "action": "select_hardware_profile",
+        "method": "best_fit_tier_matching"
+      },
+      {
+        "step": 3,
+        "action": "load_loading_strategy",
+        "source": "pattern_loading_strategy.json"
+      },
+      {
+        "step": 4,
+        "action": "enumerate_available_patterns",
+        "sources": [
+          "src/zig-sentinel/patterns/*.zig",
+          "external_threat_feeds/*.json"
+        ]
+      },
+      {
+        "step": 5,
+        "action": "sort_patterns_by_priority",
+        "criteria": ["weight", "severity", "category_priority"]
+      },
+      {
+        "step": 6,
+        "action": "select_patterns_within_constraints",
+        "constraints": ["max_total_patterns", "max_memory_mb", "l3_cache_target_mb"]
+      },
+      {
+        "step": 7,
+        "action": "load_selected_patterns",
+        "optimization": "cache_locality_aware"
+      },
+      {
+        "step": 8,
+        "action": "enable_runtime_features",
+        "based_on": "features_section"
+      }
+    ]
+  },
+
+  "pattern_cost_estimation": {
+    "base_pattern_size_kb": 1.5,
+    "per_step_overhead_bytes": 128,
+    "state_tracking_per_pattern_bytes": 256,
+    "multi_dimensional_overhead_multiplier": 1.5,
+    "input_sovereignty_overhead_multiplier": 1.2,
+
+    "example_calculations": {
+      "simple_4_step_pattern": {
+        "steps": 4,
+        "multi_dimensional": false,
+        "calculation": "1.5KB + (4 * 128B) + 256B = 2.3KB"
+      },
+      "complex_6_step_multidim": {
+        "steps": 6,
+        "multi_dimensional": true,
+        "calculation": "(1.5KB + (6 * 128B) + 256B) * 1.5 = 3.8KB"
+      },
+      "100k_patterns_c4d": {
+        "patterns": 100000,
+        "avg_pattern_size_kb": 1.5,
+        "total_mb": "150MB",
+        "l3_cache_percent": "10% of 1.5GB cache"
+      }
+    }
+  }
+}

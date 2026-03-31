@@ -1,0 +1,12 @@
+[Unit]
+Description=DuckCache Scribe Daemon - The Sovereign Scribe for AI Memory
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/path/to/your/zig-out/bin/duckcache-scribe
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

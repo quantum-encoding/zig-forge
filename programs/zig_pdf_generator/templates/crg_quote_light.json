@@ -1,0 +1,1114 @@
+{
+  "page_size": { "width": 842, "height": 595 },
+  "pages": [
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 842,
+          "height": 80,
+          "fill_color": "#F9FAFB"
+        },
+        {
+          "type": "image",
+          "base64": "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",
+          "x": 50,
+          "y": 15,
+          "width": 50,
+          "height": 50,
+          "maintain_aspect": true
+        },
+        {
+          "type": "text",
+          "content": "CRG",
+          "x": 110,
+          "y": 48,
+          "font_size": 28,
+          "font_weight": "bold",
+          "color": "#059669"
+        },
+        {
+          "type": "text",
+          "content": "DIRECT",
+          "x": 182,
+          "y": 48,
+          "font_size": 28,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "Renewable Energy Solutions",
+          "x": 110,
+          "y": 65,
+          "font_size": 10,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "ENERGY QUOTE",
+          "x": 792,
+          "y": 40,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#059669",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "CRG-2026-00847",
+          "x": 792,
+          "y": 55,
+          "font_size": 12,
+          "font_weight": "bold",
+          "color": "#111827",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "1st February 2026",
+          "x": 792,
+          "y": 70,
+          "font_size": 9,
+          "color": "#6B7280",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "Complete Renewable Energy Package",
+          "x": 50,
+          "y": 120,
+          "font_size": 28,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 135,
+          "width": 80,
+          "height": 0,
+          "stroke_color": "#059669",
+          "stroke_width": 3
+        },
+        {
+          "type": "text",
+          "content": "Prepared for Mr & Mrs Johnson  -  42 Oak Lane, Southampton",
+          "x": 50,
+          "y": 160,
+          "font_size": 12,
+          "color": "#6B7280"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 50,
+          "y": 190,
+          "width": 180,
+          "height": 90,
+          "fill_color": "#059669"
+        },
+        {
+          "type": "text",
+          "content": "TOTAL INVESTMENT",
+          "x": 60,
+          "y": 210,
+          "font_size": 9,
+          "color": "#D1FAE5"
+        },
+        {
+          "type": "text",
+          "content": "From 38,350",
+          "x": 60,
+          "y": 250,
+          "font_size": 24,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "text",
+          "content": "0% VAT",
+          "x": 60,
+          "y": 270,
+          "font_size": 10,
+          "color": "#A7F3D0"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 245,
+          "y": 190,
+          "width": 140,
+          "height": 90,
+          "fill_color": "#F3F4F6",
+          "stroke_color": "#E5E7EB",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "ANNUAL SAVINGS",
+          "x": 255,
+          "y": 210,
+          "font_size": 9,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "4,200",
+          "x": 255,
+          "y": 250,
+          "font_size": 24,
+          "font_weight": "bold",
+          "color": "#059669"
+        },
+        {
+          "type": "text",
+          "content": "estimated",
+          "x": 255,
+          "y": 270,
+          "font_size": 10,
+          "color": "#9CA3AF"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 400,
+          "y": 190,
+          "width": 140,
+          "height": 90,
+          "fill_color": "#F3F4F6",
+          "stroke_color": "#E5E7EB",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "PAYBACK",
+          "x": 410,
+          "y": 210,
+          "font_size": 9,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "9.1 years",
+          "x": 410,
+          "y": 250,
+          "font_size": 24,
+          "font_weight": "bold",
+          "color": "#059669"
+        },
+        {
+          "type": "text",
+          "content": "approx.",
+          "x": 410,
+          "y": 270,
+          "font_size": 10,
+          "color": "#9CA3AF"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 555,
+          "y": 190,
+          "width": 237,
+          "height": 90,
+          "fill_color": "#F3F4F6",
+          "stroke_color": "#E5E7EB",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "25 YEAR VALUE",
+          "x": 565,
+          "y": 210,
+          "font_size": 9,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "105,000+",
+          "x": 565,
+          "y": 250,
+          "font_size": 24,
+          "font_weight": "bold",
+          "color": "#059669"
+        },
+        {
+          "type": "text",
+          "content": "lifetime savings",
+          "x": 565,
+          "y": 270,
+          "font_size": 10,
+          "color": "#9CA3AF"
+        },
+        {
+          "type": "text",
+          "content": "Your Complete Package",
+          "x": 50,
+          "y": 320,
+          "font_size": 16,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 50,
+          "y": 340,
+          "width": 240,
+          "height": 70,
+          "fill_color": "#F9FAFB",
+          "stroke_color": "#E5E7EB",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Solar PV System",
+          "x": 65,
+          "y": 360,
+          "font_size": 11,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "5.28kW - 12 panels - 25yr warranty",
+          "x": 65,
+          "y": 378,
+          "font_size": 9,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "From 7,500",
+          "x": 275,
+          "y": 368,
+          "font_size": 11,
+          "font_weight": "bold",
+          "color": "#059669",
+          "align": "right"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 301,
+          "y": 340,
+          "width": 240,
+          "height": 70,
+          "fill_color": "#F9FAFB",
+          "stroke_color": "#E5E7EB",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Battery Storage",
+          "x": 316,
+          "y": 360,
+          "font_size": 11,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "9.5kWh GivEnergy - 12yr warranty",
+          "x": 316,
+          "y": 378,
+          "font_size": 9,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "From 3,500",
+          "x": 526,
+          "y": 368,
+          "font_size": 11,
+          "font_weight": "bold",
+          "color": "#059669",
+          "align": "right"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 552,
+          "y": 340,
+          "width": 240,
+          "height": 70,
+          "fill_color": "#F9FAFB",
+          "stroke_color": "#E5E7EB",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Air Source Heat Pump",
+          "x": 567,
+          "y": 360,
+          "font_size": 11,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "Vaillant aroTHERM - 7,500 grant",
+          "x": 567,
+          "y": 378,
+          "font_size": 9,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "From 6,000*",
+          "x": 777,
+          "y": 368,
+          "font_size": 11,
+          "font_weight": "bold",
+          "color": "#059669",
+          "align": "right"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 50,
+          "y": 420,
+          "width": 240,
+          "height": 70,
+          "fill_color": "#F9FAFB",
+          "stroke_color": "#E5E7EB",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Hybrid Heat Pump",
+          "x": 65,
+          "y": 440,
+          "font_size": 11,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "Dual-fuel efficiency system",
+          "x": 65,
+          "y": 458,
+          "font_size": 9,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "From 8,500",
+          "x": 275,
+          "y": 448,
+          "font_size": 11,
+          "font_weight": "bold",
+          "color": "#059669",
+          "align": "right"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 301,
+          "y": 420,
+          "width": 240,
+          "height": 70,
+          "fill_color": "#F9FAFB",
+          "stroke_color": "#E5E7EB",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Loft Insulation",
+          "x": 316,
+          "y": 440,
+          "font_size": 11,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "300mm depth - 25yr guarantee",
+          "x": 316,
+          "y": 458,
+          "font_size": 9,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "From 850",
+          "x": 526,
+          "y": 448,
+          "font_size": 11,
+          "font_weight": "bold",
+          "color": "#059669",
+          "align": "right"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 552,
+          "y": 420,
+          "width": 240,
+          "height": 70,
+          "fill_color": "#F9FAFB",
+          "stroke_color": "#E5E7EB",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Heating System Upgrade",
+          "x": 567,
+          "y": 440,
+          "font_size": 11,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "Smart TRVs & controls",
+          "x": 567,
+          "y": 458,
+          "font_size": 9,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "From 3,500",
+          "x": 777,
+          "y": 448,
+          "font_size": 11,
+          "font_weight": "bold",
+          "color": "#059669",
+          "align": "right"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 50,
+          "y": 500,
+          "width": 180,
+          "height": 55,
+          "fill_color": "#F9FAFB",
+          "stroke_color": "#E5E7EB",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "EV Charger",
+          "x": 65,
+          "y": 518,
+          "font_size": 11,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "7kW smart charger",
+          "x": 65,
+          "y": 534,
+          "font_size": 9,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "From 1,300",
+          "x": 215,
+          "y": 526,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#059669",
+          "align": "right"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 245,
+          "y": 500,
+          "width": 180,
+          "height": 55,
+          "fill_color": "#F9FAFB",
+          "stroke_color": "#E5E7EB",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Energy Survey",
+          "x": 260,
+          "y": 518,
+          "font_size": 11,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "Full thermal assessment",
+          "x": 260,
+          "y": 534,
+          "font_size": 9,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "From 450",
+          "x": 410,
+          "y": 526,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#059669",
+          "align": "right"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 440,
+          "y": 500,
+          "width": 180,
+          "height": 55,
+          "fill_color": "#F9FAFB",
+          "stroke_color": "#E5E7EB",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Commercial",
+          "x": 455,
+          "y": 518,
+          "font_size": 11,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "Bespoke business solutions",
+          "x": 455,
+          "y": 534,
+          "font_size": 9,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "Contact us",
+          "x": 605,
+          "y": 518,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#059669",
+          "align": "right"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 635,
+          "y": 500,
+          "width": 157,
+          "height": 55,
+          "fill_color": "#059669"
+        },
+        {
+          "type": "text",
+          "content": "Call to book",
+          "x": 713,
+          "y": 518,
+          "font_size": 10,
+          "color": "#D1FAE5",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "0330 133 2497",
+          "x": 713,
+          "y": 538,
+          "font_size": 12,
+          "font_weight": "bold",
+          "color": "#ffffff",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 565,
+          "width": 842,
+          "height": 30,
+          "fill_color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "MCS Certified  -  Which? Trusted Trader  -  RECC Member  -  TrustMark  -  HIES Accredited",
+          "x": 421,
+          "y": 584,
+          "font_size": 9,
+          "color": "#9CA3AF",
+          "align": "center"
+        }
+      ]
+    },
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 842,
+          "height": 55,
+          "fill_color": "#F9FAFB"
+        },
+        {
+          "type": "image",
+          "base64": "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",
+          "x": 50,
+          "y": 10,
+          "width": 35,
+          "height": 35,
+          "maintain_aspect": true
+        },
+        {
+          "type": "text",
+          "content": "CRG",
+          "x": 95,
+          "y": 35,
+          "font_size": 20,
+          "font_weight": "bold",
+          "color": "#059669"
+        },
+        {
+          "type": "text",
+          "content": "DIRECT",
+          "x": 145,
+          "y": 35,
+          "font_size": 20,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "System Details",
+          "x": 792,
+          "y": 35,
+          "font_size": 11,
+          "color": "#6B7280",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "Whats Included",
+          "x": 50,
+          "y": 95,
+          "font_size": 22,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 108,
+          "width": 60,
+          "height": 0,
+          "stroke_color": "#059669",
+          "stroke_width": 3
+        },
+        {
+          "type": "text",
+          "content": "Solar PV System",
+          "x": 65,
+          "y": 150,
+          "font_size": 13,
+          "font_weight": "bold",
+          "color": "#059669"
+        },
+        {
+          "type": "bullet_list",
+          "x": 65,
+          "y": 175,
+          "font_size": 10,
+          "color": "#374151",
+          "bullet_color": "#059669",
+          "line_spacing": 13,
+          "indent": 12,
+          "items": [
+            "12 x JA Solar 440W All-Black Panels",
+            "5.28kWp total system capacity",
+            "GivEnergy 5.0kW Hybrid Inverter",
+            "MCS certification & DNO notification",
+            "25-year panel warranty, 10-year inverter"
+          ]
+        },
+        {
+          "type": "text",
+          "content": "Battery Storage",
+          "x": 445,
+          "y": 150,
+          "font_size": 13,
+          "font_weight": "bold",
+          "color": "#059669"
+        },
+        {
+          "type": "bullet_list",
+          "x": 445,
+          "y": 175,
+          "font_size": 10,
+          "color": "#374151",
+          "bullet_color": "#059669",
+          "line_spacing": 13,
+          "indent": 12,
+          "items": [
+            "GivEnergy 9.5kWh All-in-One",
+            "Expandable to 19kWh if needed",
+            "Smart energy management system",
+            "Emergency backup power capability",
+            "12-year unlimited cycle warranty"
+          ]
+        },
+        {
+          "type": "text",
+          "content": "Air Source Heat Pump",
+          "x": 65,
+          "y": 295,
+          "font_size": 13,
+          "font_weight": "bold",
+          "color": "#059669"
+        },
+        {
+          "type": "bullet_list",
+          "x": 65,
+          "y": 320,
+          "font_size": 10,
+          "color": "#374151",
+          "bullet_color": "#059669",
+          "line_spacing": 13,
+          "indent": 12,
+          "items": [
+            "Vaillant aroTHERM Plus A+++ rated",
+            "300-400% efficiency (SCOP)",
+            "Heating and hot water year-round",
+            "7,500 BUS grant applied*",
+            "7-year manufacturer warranty"
+          ]
+        },
+        {
+          "type": "text",
+          "content": "Heating & Insulation",
+          "x": 445,
+          "y": 295,
+          "font_size": 13,
+          "font_weight": "bold",
+          "color": "#059669"
+        },
+        {
+          "type": "bullet_list",
+          "x": 445,
+          "y": 320,
+          "font_size": 10,
+          "color": "#374151",
+          "bullet_color": "#059669",
+          "line_spacing": 13,
+          "indent": 12,
+          "items": [
+            "Professional loft insulation to 300mm",
+            "Smart thermostatic radiator valves",
+            "Wireless room thermostats",
+            "System power flush & treatment",
+            "Full commissioning & balancing"
+          ]
+        },
+        {
+          "type": "text",
+          "content": "EV Charging & Survey",
+          "x": 65,
+          "y": 450,
+          "font_size": 13,
+          "font_weight": "bold",
+          "color": "#059669"
+        },
+        {
+          "type": "bullet_list",
+          "x": 65,
+          "y": 475,
+          "font_size": 10,
+          "color": "#374151",
+          "bullet_color": "#059669",
+          "line_spacing": 13,
+          "indent": 12,
+          "items": [
+            "7kW smart EV charger with solar integration",
+            "Full home energy assessment",
+            "Thermal imaging & air tightness test",
+            "Detailed improvement report"
+          ]
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 430,
+          "y": 445,
+          "width": 360,
+          "height": 75,
+          "fill_color": "#ECFDF5",
+          "stroke_color": "#059669",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Available Grants",
+          "x": 445,
+          "y": 467,
+          "font_size": 13,
+          "font_weight": "bold",
+          "color": "#065F46"
+        },
+        {
+          "type": "bullet_list",
+          "x": 445,
+          "y": 490,
+          "font_size": 10,
+          "color": "#047857",
+          "bullet_color": "#059669",
+          "line_spacing": 13,
+          "indent": 12,
+          "items": [
+            "7,500 Boiler Upgrade Scheme (heat pump)",
+            "0% VAT on all energy-saving materials"
+          ]
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 560,
+          "width": 842,
+          "height": 35,
+          "fill_color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "Page 2 of 3  -  0330 133 2497  -  info@crgdirect.co.uk  -  crgdirect.co.uk",
+          "x": 421,
+          "y": 582,
+          "font_size": 9,
+          "color": "#9CA3AF",
+          "align": "center"
+        }
+      ]
+    },
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 842,
+          "height": 55,
+          "fill_color": "#F9FAFB"
+        },
+        {
+          "type": "image",
+          "base64": "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",
+          "x": 50,
+          "y": 10,
+          "width": 35,
+          "height": 35,
+          "maintain_aspect": true
+        },
+        {
+          "type": "text",
+          "content": "CRG",
+          "x": 95,
+          "y": 35,
+          "font_size": 20,
+          "font_weight": "bold",
+          "color": "#059669"
+        },
+        {
+          "type": "text",
+          "content": "DIRECT",
+          "x": 145,
+          "y": 35,
+          "font_size": 20,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "Next Steps",
+          "x": 792,
+          "y": 35,
+          "font_size": 11,
+          "color": "#6B7280",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "Your Investment Summary",
+          "x": 50,
+          "y": 95,
+          "font_size": 22,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 108,
+          "width": 60,
+          "height": 0,
+          "stroke_color": "#059669",
+          "stroke_width": 3
+        },
+        {
+          "type": "table",
+          "x": 50,
+          "y": 130,
+          "columns": ["Service", "From Price"],
+          "column_widths": [520, 140],
+          "rows": [
+            ["Solar PV System (5.28kW, 12 panels)", "7,500"],
+            ["Battery Storage (GivEnergy 9.5kWh)", "3,500"],
+            ["Air Source Heat Pump (after 7,500 BUS grant)", "6,000"],
+            ["Hybrid Heat Pump System", "8,500"],
+            ["Loft Insulation (300mm)", "850"],
+            ["Heating System Upgrade", "3,500"],
+            ["EV Charger (7kW smart)", "1,300"],
+            ["Energy Survey (full assessment)", "450"],
+            ["Commercial Assessment", "POA"]
+          ],
+          "header_bg_color": "#059669",
+          "header_text_color": "#ffffff",
+          "row_bg_color": "#ffffff",
+          "alt_row_bg_color": "#F9FAFB",
+          "text_color": "#374151",
+          "border_color": "#E5E7EB",
+          "font_size": 10,
+          "header_font_size": 11,
+          "padding": 10,
+          "row_height": 26,
+          "header_height": 30
+        },
+        {
+          "type": "text",
+          "content": "What Happens Next?",
+          "x": 50,
+          "y": 420,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "bullet_list",
+          "x": 50,
+          "y": 440,
+          "font_size": 10,
+          "color": "#374151",
+          "bullet_color": "#059669",
+          "line_spacing": 13,
+          "indent": 12,
+          "items": [
+            "Get in touch for your personalised quote",
+            "Our team will confirm your final price",
+            "Installation scheduled at your convenience",
+            "You start saving from day one"
+          ]
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 500,
+          "y": 415,
+          "width": 290,
+          "height": 75,
+          "fill_color": "#059669"
+        },
+        {
+          "type": "text",
+          "content": "TOTAL ESTIMATE",
+          "x": 520,
+          "y": 435,
+          "font_size": 10,
+          "color": "#D1FAE5"
+        },
+        {
+          "type": "text",
+          "content": "From 38,350",
+          "x": 520,
+          "y": 465,
+          "font_size": 28,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "text",
+          "content": "0% VAT on energy-saving materials",
+          "x": 520,
+          "y": 485,
+          "font_size": 9,
+          "color": "#A7F3D0"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 500,
+          "y": 495,
+          "width": 290,
+          "height": 40,
+          "fill_color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "Ready to proceed?  0330 133 2497",
+          "x": 645,
+          "y": 520,
+          "font_size": 11,
+          "font_weight": "bold",
+          "color": "#059669",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 50,
+          "y": 500,
+          "width": 440,
+          "height": 35,
+          "fill_color": "#F9FAFB",
+          "stroke_color": "#E5E7EB",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "This is an estimate based on typical installations. Contact us for your personalised final quote.",
+          "x": 65,
+          "y": 522,
+          "font_size": 9,
+          "font_style": "italic",
+          "color": "#6B7280",
+          "max_width": 420
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 560,
+          "width": 842,
+          "height": 35,
+          "fill_color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "Quote valid 30 days  -  CRG-2026-00847  -  MCS Certified  -  Which? Trusted Trader",
+          "x": 421,
+          "y": 582,
+          "font_size": 9,
+          "color": "#9CA3AF",
+          "align": "center"
+        }
+      ]
+    }
+  ]
+}

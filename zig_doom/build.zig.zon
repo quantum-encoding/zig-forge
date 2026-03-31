@@ -1,0 +1,11 @@
+.{
+    .name = .zig_doom,
+    .version = "0.1.0",
+    .fingerprint = 0xcf87ba3b70d0bce7,
+    .minimum_zig_version = "0.14.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

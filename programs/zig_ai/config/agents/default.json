@@ -1,0 +1,87 @@
+{
+  "agent_name": "default",
+  "description": "Default AI coding assistant with sandbox access",
+
+  "provider": {
+    "name": "claude",
+    "model": "claude-sonnet-4-5-20250929",
+    "max_tokens": 32768,
+    "max_turns": 50,
+    "temperature": 0.7
+  },
+
+  "sandbox": {
+    "root": ".",
+    "writable_paths": ["."],
+    "readonly_paths": [],
+    "allow_network": false
+  },
+
+  "tools": {
+    "enabled": ["read_file", "write_file", "list_files", "search_files", "execute_command", "confirm_action", "trash_file", "grep", "cat", "wc", "find", "rm", "cp", "mv", "mkdir", "touch"],
+
+    "permissions": {
+      "auto": ["grep", "cat", "wc", "find", "read_file", "list_files", "search_files"],
+      "confirm": ["write_file", "trash_file", "rm", "cp", "mv", "mkdir", "touch"],
+      "blocked_commands": ["dd", "shred", "chroot", "mkfifo", "mknod"]
+    },
+
+    "external_commands": {
+      "auto": ["npm", "node", "zig", "cargo", "python", "python3", "git", "make", "cmake"],
+      "confirm": ["curl", "wget", "pip", "brew", "apt"],
+      "blocked": ["docker", "podman", "systemctl", "launchctl", "reboot", "shutdown"]
+    },
+
+    "external_rules": {
+      "git": {
+        "auto_subcommands": ["status", "log", "diff", "branch", "show", "remote"],
+        "confirm_subcommands": ["push", "merge", "rebase", "reset", "checkout"],
+        "blocked_subcommands": []
+      },
+      "npm": {
+        "auto_subcommands": ["list", "info", "ls", "view", "outdated"],
+        "confirm_subcommands": ["install", "update", "uninstall", "publish"],
+        "blocked_subcommands": []
+      }
+    },
+
+    "require_confirmation": [
+      {"tool": "trash_file", "risk_level": "high"},
+      {"tool": "execute_command", "pattern": "rm *", "risk_level": "critical"},
+      {"tool": "execute_command", "pattern": "chmod *", "risk_level": "medium"},
+      {"tool": "write_file", "pattern": "*.env", "risk_level": "critical"},
+      {"tool": "write_file", "pattern": "*config*", "risk_level": "high"}
+    ],
+
+    "execute_command": {
+      "allowed_commands": ["ls", "cat", "grep", "find", "wc", "diff", "head", "tail", "pwd", "echo", "git", "npm", "node", "zig", "cargo", "python", "python3", "make", "cmake"],
+      "banned_patterns": [
+        "rm -rf /",
+        "rm -rf ~",
+        "rm -rf /*",
+        "dd if=/dev/",
+        "mkfs",
+        "> /dev/",
+        ":(){ :|:& };:",
+        "chmod 777 /",
+        "curl*|*sh",
+        "wget*|*sh",
+        "sudo *",
+        "su -",
+        "chown -R",
+        "chmod -R 777"
+      ],
+      "timeout_ms": 30000,
+      "max_output_bytes": 65536,
+      "kill_process_group": true
+    }
+  },
+
+  "limits": {
+    "max_file_size_bytes": 1048576,
+    "max_files_per_operation": 100,
+    "max_directory_depth": 10
+  },
+
+  "system_prompt": "You are a helpful coding assistant with file system access within your sandbox. Use the tools available to accomplish tasks efficiently. Always explain what you're doing before executing commands. Use trash_file instead of rm to delete files safely."
+}

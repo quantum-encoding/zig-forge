@@ -1,0 +1,3 @@
+Testing if the asterisk extraction works now.
+
+The script should find lines starting with * and extract them.

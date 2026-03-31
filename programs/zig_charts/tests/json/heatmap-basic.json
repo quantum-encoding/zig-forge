@@ -1,0 +1,19 @@
+{
+  "type": "heatmap",
+  "width": 600,
+  "height": 400,
+  "data": {
+    "matrix": [
+      [12, 24, 18, 30],
+      [45, 32, 28, 15],
+      [8, 16, 42, 35],
+      [22, 38, 25, 20]
+    ],
+    "x_labels": ["Q1", "Q2", "Q3", "Q4"],
+    "y_labels": ["2021", "2022", "2023", "2024"]
+  },
+  "config": {
+    "show_values": true,
+    "title": "Quarterly Performance"
+  }
+}

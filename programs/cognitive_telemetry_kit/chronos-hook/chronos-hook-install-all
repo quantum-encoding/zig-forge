@@ -1,0 +1,49 @@
+#!/bin/bash
+# Install chronos-hook symlinks in all git repositories
+# This script can be installed globally in /usr/local/bin
+
+HOOK_BINARY="/usr/local/bin/chronos-hook"
+
+if [ ! -f "$HOOK_BINARY" ]; then
+    echo "❌ chronos-hook not found at $HOOK_BINARY"
+    echo "Please install it first with: cd chronos-hook && ./install.sh"
+    exit 1
+fi
+
+echo "🔍 Searching for git repositories in $HOME..."
+echo ""
+
+count=0
+find "$HOME" -name ".git" -type d 2>/dev/null | while read -r git_dir; do
+    repo_dir=$(dirname "$git_dir")
+
+    # Skip if not a directory or not accessible
+    [ ! -d "$repo_dir" ] && continue
+
+    # Create .claude/hooks directory
+    hooks_dir="$repo_dir/.claude/hooks"
+    mkdir -p "$hooks_dir"
+
+    # Create symlink to global hook binary
+    hook_file="$hooks_dir/tool-result-hook.sh"
+
+    # Remove old hook if it exists
+    [ -e "$hook_file" ] && rm -f "$hook_file"
+
+    # Create symlink
+    ln -sf "$HOOK_BINARY" "$hook_file"
+
+    count=$((count + 1))
+    echo "✅ $repo_dir"
+done
+
+echo ""
+echo "🎉 chronos-hook symlinks installed in all repositories!"
+echo ""
+echo "Benefits of this approach:"
+echo "  ✅ Single binary - update once, applies everywhere"
+echo "  ✅ Faster execution (compiled Zig vs bash)"
+echo "  ✅ Better error handling"
+echo "  ✅ Consistent behavior across all projects"
+echo ""
+echo "The unwrit moment is now written everywhere, efficiently."

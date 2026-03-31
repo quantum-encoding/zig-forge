@@ -1,0 +1,16 @@
+{
+  "type": "progress",
+  "width": 600,
+  "height": 200,
+  "data": {
+    "bars": [
+      { "label": "Project Alpha", "current": 85, "target": 100 },
+      { "label": "Project Beta", "current": 60, "target": 100 },
+      { "label": "Project Gamma", "current": 100, "target": 100 },
+      { "label": "Project Delta", "current": 35, "target": 100 }
+    ]
+  },
+  "config": {
+    "show_percentage": true
+  }
+}

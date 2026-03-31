@@ -1,0 +1,11 @@
+{
+  "type": "sparkline",
+  "width": 200,
+  "height": 40,
+  "data": {
+    "values": [12, 18, 15, 22, 28, 24, 31]
+  },
+  "config": {
+    "variant": "line"
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "tenant_id": "TENANT_002",
+  "tenant_name": "Multi-Symbol Momentum Scanner",
+  "status": "active",
+  "tier": "SILVER",
+  "algorithm": {
+    "type": "momentum_breakout",
+    "version": "2.1.0",
+    "description": "Scans multiple tech stocks for momentum breakouts",
+    "parameters": {
+      "target_symbols": ["AAPL", "MSFT", "NVDA", "TSLA", "AMD"],
+      "momentum_window": 300,
+      "volume_threshold": 1000000,
+      "breakout_percentage": 0.015,
+      "order_size": 10,
+      "order_type": "limit",
+      "max_positions_per_symbol": 1
+    }
+  },
+  "resource_limits": {
+    "cpu_cores": [10, 11],
+    "memory_mb": 256,
+    "max_orders_per_minute": 5,
+    "max_api_calls_per_second": 50
+  },
+  "billing": {
+    "pricing_model": "usage_based",
+    "rate_per_1000_packets": 0.0008,
+    "rate_per_order": 0.002,
+    "revenue_share_percentage": 0
+  },
+  "monitoring": {
+    "enable_real_time_metrics": true,
+    "alert_on_anomaly": true,
+    "performance_tracking": true
+  },
+  "credentials": {
+    "api_key_env": "TENANT_002_API_KEY",
+    "api_secret_env": "TENANT_002_API_SECRET"
+  }
+}

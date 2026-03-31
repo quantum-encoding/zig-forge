@@ -1,0 +1,50 @@
+{
+  "profile_name": "web-safe",
+  "description": "Secure web scraping - allows HTTP/HTTPS network access, read-only system, write to sandbox only",
+  "version": "1.0.0",
+  "author": "Zig Guardian Forge",
+  "threat_model": "Untrusted web scraping tools accessing external URLs",
+
+  "syscalls": {
+    "default_action": "kill",
+    "comment": "Default to SECCOMP_RET_KILL - any unlisted syscall terminates process",
+
+    "allowed": [
+      "read", "write", "open", "openat", "close", "stat", "fstat", "lstat",
+      "newfstatat", "statx", "lseek", "mmap", "mprotect", "munmap", "brk",
+      "rt_sigaction", "rt_sigprocmask", "rt_sigreturn", "ioctl", "pread64",
+      "pwrite64", "readv", "writev", "access", "pipe", "select", "sched_yield",
+      "mremap", "msync", "mincore", "madvise", "dup", "dup2", "dup3",
+      "pause", "nanosleep", "getitimer", "alarm", "setitimer", "getpid",
+      "sendfile", "getcwd", "chdir", "fchdir", "getdents", "getdents64",
+      "fcntl", "flock", "fsync", "fdatasync", "truncate", "ftruncate",
+      "gettimeofday", "getrlimit", "getrusage", "sysinfo", "times",
+      "getuid", "getgid", "geteuid", "getegid", "getppid", "getpgrp",
+      "getsid", "gettid", "readahead", "getxattr", "lgetxattr", "fgetxattr",
+      "listxattr", "llistxattr", "flistxattr", "futex", "sched_getaffinity",
+      "set_thread_area", "get_thread_area", "set_tid_address", "restart_syscall",
+      "clock_gettime", "clock_getres", "clock_nanosleep", "exit_group",
+      "tgkill", "futimesat", "readlinkat", "faccessat", "pselect6", "ppoll",
+      "set_robust_list", "get_robust_list", "splice", "tee", "vmsplice",
+      "epoll_pwait", "timerfd_create", "eventfd", "timerfd_settime",
+      "timerfd_gettime", "signalfd4", "eventfd2", "epoll_create1", "pipe2",
+      "inotify_init1", "preadv", "pwritev", "rt_tgsigqueueinfo",
+      "recvmmsg", "prlimit64", "getcpu", "sched_setattr", "sched_getattr",
+      "getrandom", "memfd_create", "execveat", "mlock2", "copy_file_range",
+      "preadv2", "pwritev2", "statx", "rseq", "close_range", "faccessat2",
+      "epoll_pwait2", "poll", "exit", "arch_prctl", "uname", "prctl",
+      "clone", "clone3", "execve", "wait4", "sigaltstack",
+      "socket", "connect", "accept", "accept4", "sendto", "recvfrom",
+      "sendmsg", "recvmsg", "sendmmsg", "shutdown", "bind", "listen",
+      "getsockname", "getpeername", "socketpair", "setsockopt", "getsockopt",
+      "epoll_create", "epoll_ctl", "epoll_wait"
+    ],
+
+    "blocked": [
+      "ptrace", "perf_event_open", "process_vm_readv", "process_vm_writev",
+      "kcmp", "finit_module", "kexec_load", "kexec_file_load", "reboot",
+      "mount", "umount2", "swapon", "swapoff", "sethostname", "setdomainname",
+      "iopl", "ioperm", "create_module", "init_module", "delete_module"
+    ]
+  }
+}

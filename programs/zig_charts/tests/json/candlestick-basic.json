@@ -1,0 +1,23 @@
+{
+  "type": "candlestick",
+  "width": 800,
+  "height": 400,
+  "data": {
+    "candles": [
+      { "open": 100, "high": 110, "low": 95, "close": 105 },
+      { "open": 105, "high": 115, "low": 100, "close": 112 },
+      { "open": 112, "high": 120, "low": 108, "close": 108 },
+      { "open": 108, "high": 112, "low": 102, "close": 110 },
+      { "open": 110, "high": 118, "low": 105, "close": 115 },
+      { "open": 115, "high": 125, "low": 112, "close": 122 },
+      { "open": 122, "high": 128, "low": 118, "close": 120 },
+      { "open": 120, "high": 124, "low": 115, "close": 118 },
+      { "open": 118, "high": 122, "low": 110, "close": 112 },
+      { "open": 112, "high": 118, "low": 108, "close": 116 }
+    ]
+  },
+  "config": {
+    "bull_color": "#10B981",
+    "bear_color": "#EF4444"
+  }
+}

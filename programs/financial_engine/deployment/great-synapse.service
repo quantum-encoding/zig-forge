@@ -1,0 +1,52 @@
+[Unit]
+Description=The Great Synapse - Unified HFT Trading System
+Documentation=https://github.com/yourusername/zig-financial-engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rich
+Group=rich
+WorkingDirectory=/home/rich/productions/zig-financial-engine/go-bridge
+
+# Environment variables
+Environment="LD_LIBRARY_PATH=/home/rich/productions/zig-financial-engine/go-bridge"
+Environment="ALPACA_API_KEY="
+Environment="ALPACA_API_SECRET="
+Environment="SYNAPSE_LOG_LEVEL=INFO"
+Environment="SYNAPSE_MODE=PRODUCTION"
+
+# The immortal command
+ExecStart=/home/rich/productions/zig-financial-engine/go-bridge/unified_system_daemon
+
+# Restart policy - resurrect upon death
+Restart=always
+RestartSec=5
+StartLimitBurst=3
+StartLimitInterval=60
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=32768
+LimitCORE=infinity
+
+# Performance tuning
+CPUSchedulingPolicy=fifo
+CPUSchedulingPriority=99
+IOSchedulingClass=realtime
+IOSchedulingPriority=0
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=great-synapse
+
+# Security hardening
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

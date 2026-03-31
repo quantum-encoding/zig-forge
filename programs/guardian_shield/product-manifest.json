@@ -1,0 +1,88 @@
+{
+  "name": "Guardian Shield",
+  "slug": "guardian-shield",
+  "category": "security",
+  "tagline": "Multi-Layered Linux Security Framework",
+  "description": "Comprehensive Linux security system implementing defense-in-depth through three independent protection layers: user-space LD_PRELOAD interception (The Warden), kernel-level LSM BPF execution control (The Inquisitor), and filesystem immutability (The Vault). Battle-tested and operational with kernel-level veto authority.",
+
+  "features": [
+    "User-space LD_PRELOAD interception blocking dangerous commands (rm, shred, dd)",
+    "Kernel-level LSM BPF execution control with -EPERM veto authority",
+    "Process-aware security policies with path-based protection rules",
+    "Cannot be bypassed by systemd, cron, or direct syscalls",
+    "Configurable blocking vs monitoring modes with real-time enforcement",
+    "BPF CO-RE support for cross-kernel compatibility"
+  ],
+
+  "stats": {
+    "primary": "3-layer defense",
+    "secondary": [
+      {
+        "label": "Protection Layers",
+        "value": "User-space + Kernel-space + Filesystem"
+      },
+      {
+        "label": "Bypass Resistance",
+        "value": "Systemd, cron, direct syscall proof"
+      },
+      {
+        "label": "Response Time",
+        "value": "Pre-execution blocking (nanoseconds)"
+      }
+    ]
+  },
+
+  "status": "production",
+
+  "availability": {
+    "type": "open-source",
+    "badge": "Open Source"
+  },
+
+  "technology": {
+    "languages": ["Zig", "C"],
+    "platforms": ["Linux"],
+    "architectures": ["CPU"]
+  },
+
+  "links": {
+    "repository": "https://github.com/quantumencoding/guardian-shield",
+    "documentation": "https://github.com/quantumencoding/guardian-shield/blob/main/README.md",
+    "contact": "/contact"
+  },
+
+  "media": {
+    "placeholder": "GUARDIAN SHIELD",
+    "thumbnail": "/images/products/guardian-shield-thumb.png",
+    "hero": "/images/products/guardian-shield-hero.png"
+  },
+
+  "integration": {
+    "relatedProducts": ["ai-code-guardian", "zig-sentinel", "zig-jail"],
+    "apis": ["CLI"]
+  },
+
+  "metadata": {
+    "createdDate": "2025-10-01",
+    "lastUpdated": "2025-11-05T20:00:00Z",
+    "version": "7.1.0",
+    "priority": 90,
+    "featured": true,
+    "searchKeywords": [
+      "Linux security",
+      "eBPF",
+      "LSM BPF",
+      "kernel security",
+      "LD_PRELOAD",
+      "defense in depth",
+      "execution control"
+    ],
+    "generatedBy": "claude-code-main-agent",
+    "investigationTimestamp": "2025-11-05T20:00:00Z"
+  },
+
+  "licensing": {
+    "license": "MIT",
+    "copyright": "© 2025 Guardian Shield Contributors"
+  }
+}

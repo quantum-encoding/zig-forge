@@ -1,0 +1,13 @@
+{
+  "type": "gauge",
+  "width": 400,
+  "height": 300,
+  "data": {
+    "value": 72,
+    "label": "CPU Usage"
+  },
+  "config": {
+    "min": 0,
+    "max": 100
+  }
+}

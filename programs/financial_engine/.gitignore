@@ -1,0 +1,104 @@
+# Environment and secrets
+.env
+.env.*
+
+# MCP server (not needed for core engine)
+alpaca-mcp-server/
+
+# Python virtual environments
+ml_training/venv/
+ml_training/gpu_venv/
+ml_training/onnx-training/venv/
+**/venv/
+verify_env/
+**/__pycache__/
+
+# Build artifacts
+zig-cache/
+.zig-cache/
+zig-out/
+zig-master/
+*.o
+*.a
+quantum_alpaca_bridge_final
+test_alpaca_parsing
+
+# ML models (too large)
+ml_training/models/*.pt
+ml_training/models/*.onnx
+ml_training/free_data/
+ml_training/onnx-training/
+nuclear_all_folders/
+libs/websocket
+
+# Temporary files
+*.tmp
+*.log
+*.swp
+research/
+
+# Compiled binaries
+alpaca_test
+alpaca_trading_api
+hft_alpaca_real
+hft_system
+test_*
+test_http_api
+test_http_client
+test_arraylist_api
+test_real_websocket
+test_alpaca_websocket
+test_shared_client
+test_zig_fixes
+test-trade-ipc
+test_config
+test_config_demo
+test_runaway
+test_asian_markets
+test_european_markets
+test_api
+quantum_alpaca_bridge
+quantum_alpaca_bridge_real
+quantum_benchmark
+quantum_cerebrum
+quantum_cerebrum_connected
+quantum_synapse_v2
+real-hft-system
+reality_check
+simple_demo
+neural_test
+live_trading
+main
+main_v2
+trade_executor
+multi_tenant_engine
+multi_tenant_engine_praetorian
+stress_test_concurrent_orders
+libc_api.so
+*.exe
+
+# Go binaries in go-bridge
+go-bridge/check_account
+go-bridge/crypto_trader
+go-bridge/crypto_wallets
+go-bridge/data_collector_v2
+go-bridge/demo
+go-bridge/journals_demo
+go-bridge/lct_trader
+go-bridge/live_trader
+go-bridge/synapse_enhanced
+go-bridge/unified_system
+go-bridge/unified_system_daemon
+go-bridge/websocket_test
+go-bridge/zig-hft-bridge
+
+# Archives
+*.tar.gz
+*.tar
+*.zip
+
+# Large data files
+go-bridge/market_data/raw/*.csv
+go-bridge/market_data/raw/*.json
+ml_training/ml_training/free_data/*.csv
+

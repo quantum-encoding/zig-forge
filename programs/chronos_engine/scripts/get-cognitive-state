@@ -1,0 +1,82 @@
+#!/bin/bash
+# Get Real-Time Cognitive State for Chronos Git Stamps
+# Extracts cognitive state from raw_content using the universal pattern
+#
+# Usage: get-cognitive-state [PID]
+#   If PID is provided, use it directly
+#   Otherwise, walk up process tree to find Claude
+
+DB_PATH="/var/lib/cognitive-watcher/cognitive-states.db"
+
+# Get parent Claude Code PID
+get_claude_pid() {
+    # Method 1: Walk up process tree looking for "claude"
+    local pid=$$
+    local max_depth=20
+    local depth=0
+
+    while [ $pid -ne 1 ] && [ $depth -lt $max_depth ]; do
+        local comm=$(cat /proc/$pid/comm 2>/dev/null)
+        local cmdline=$(cat /proc/$pid/cmdline 2>/dev/null | tr '\0' ' ')
+
+        # Check if this is a Claude process
+        if [[ "$comm" == "claude" ]] || [[ "$cmdline" =~ "claude-code" ]] || [[ "$cmdline" =~ "@anthropic/claude-code" ]]; then
+            echo $pid
+            return 0
+        fi
+
+        # Get parent PID
+        local ppid=$(awk '{print $4}' /proc/$pid/stat 2>/dev/null)
+        if [ -z "$ppid" ] || [ "$ppid" = "0" ]; then
+            break
+        fi
+        pid=$ppid
+        depth=$((depth + 1))
+    done
+
+    # Method 2: Find most recent active PID from database
+    local recent_pid=$(sqlite3 "$DB_PATH" "SELECT pid FROM cognitive_states ORDER BY id DESC LIMIT 1;" 2>/dev/null)
+    if [ -n "$recent_pid" ]; then
+        echo "$recent_pid"
+        return 0
+    fi
+
+    echo ""
+}
+
+# Get cognitive state from database using universal extraction pattern
+# Pattern: extract text between "* " and " (" from raw_content
+get_state_from_db() {
+    local claude_pid=${1:-$(get_claude_pid)}
+
+    if [ -z "$claude_pid" ]; then
+        echo "NOT-DETECTED"
+        return
+    fi
+
+    # Extract cognitive state from raw_content
+    # raw_content is multiline and contains the status line with format:
+    #   " Befuddling (esc to interrupt  7s   69 tokens)"
+    # or with asterisk:
+    #   "* Finagling (esc to interrupt  66s   2.3k tokens)"
+    # Strategy: Find the line with "(esc to interrupt", extract text before it, trim whitespace and "*"
+
+    # Get the raw_content, extract lines with "(esc to interrupt", take text before it
+    local cognitive_state=$(sqlite3 "$DB_PATH" "
+        SELECT raw_content
+        FROM cognitive_states
+        WHERE pid=$claude_pid
+            AND raw_content LIKE '%(esc to interrupt%'
+        ORDER BY id DESC
+        LIMIT 1;" 2>/dev/null | grep -oE ".*\(esc to interrupt" | head -1 | sed 's/(esc to interrupt.*$//' | sed 's/^[[:space:]]*\*[[:space:]]*//' | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')
+
+    if [ -n "$cognitive_state" ]; then
+        echo "$cognitive_state"
+    else
+        echo "NOT-DETECTED"
+    fi
+}
+
+# Main execution
+STATE=$(get_state_from_db "$1")
+echo "$STATE"

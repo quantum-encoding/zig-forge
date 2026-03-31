@@ -1,0 +1,81 @@
+{
+  "_comment": "warden-config-docker-test.json - V6 Docker Test Configuration",
+  "_comment_purpose": "Test configuration for Citadel and Scriptorium doctrine validation",
+
+  "global": {
+    "enabled": true,
+    "log_level": "normal",
+    "log_target": "stderr",
+    "block_emoji": "🛡️",
+    "warning_emoji": "⚠️",
+    "allow_emoji": "✓"
+  },
+
+  "protection": {
+    "protected_paths": [
+      {
+        "path": "/etc/",
+        "description": "System configuration files",
+        "block_operations": ["unlink", "unlinkat", "rmdir", "open_write", "rename"]
+      }
+    ],
+
+    "whitelisted_paths": [
+      {
+        "path": "/tmp/",
+        "description": "System temporary directory"
+      },
+      {
+        "path": "/home/testuser/tmp/",
+        "description": "User temporary directory"
+      }
+    ]
+  },
+
+  "directory_protection": {
+    "enabled": true,
+    "description": "Citadel Protection: Protect directory structures, allow file modifications",
+    "protected_roots": [
+      "/home/testuser/zig_forge",
+      "/home/testuser/rust_programs"
+    ],
+    "protected_patterns": [
+      "**/.git"
+    ]
+  },
+
+  "operations": {
+    "unlink": {
+      "enabled": true,
+      "extra_blocked": [],
+      "extra_allowed": []
+    },
+    "rmdir": {
+      "enabled": true,
+      "extra_blocked": [],
+      "extra_allowed": []
+    },
+    "open_write": {
+      "enabled": true,
+      "blocked_flags": ["O_WRONLY", "O_RDWR", "O_TRUNC"],
+      "extra_blocked": [],
+      "extra_allowed": []
+    },
+    "rename": {
+      "enabled": true,
+      "check_both_paths": true,
+      "extra_blocked": [],
+      "extra_allowed": []
+    }
+  },
+
+  "advanced": {
+    "cache_path_checks": true,
+    "max_cache_size": 1000,
+    "allow_symlink_bypass": false,
+    "canonicalize_paths": true,
+    "notify_auditd": true,
+    "auditd_key": "libwarden_block",
+    "allow_env_override": false
+  }
+}

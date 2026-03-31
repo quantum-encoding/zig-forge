@@ -1,0 +1,153 @@
+# THE LAMB - Guardian Shield Protected Container
+# Purpose: Defender with full Guardian Shield V8.2 protection
+# Base: Arch Linux - libwarden.so is copied in pre-built
+#
+# Build from guardian_shield directory with pre-built artifacts:
+#   docker build -f crucible/Dockerfile.lamb -t crucible-lamb:v8.2 .
+#
+# V8.2 CRITICAL: This container now runs a "normal operations" battery test
+# to verify libwarden does NOT break legitimate system operations.
+
+FROM archlinux:latest
+
+LABEL crucible.role="defender"
+LABEL crucible.protection="guardian-shield-v8.2"
+LABEL crucible.doctrine="path-fortress"
+
+# Update system and install tools needed for battery testing
+# Note: Arch containers need keyring refresh to avoid signature errors
+RUN pacman-key --init && \
+    pacman-key --populate archlinux && \
+    pacman -Sy --noconfirm archlinux-keyring && \
+    pacman -Syu --noconfirm && \
+    pacman -S --noconfirm \
+    openssh \
+    sudo \
+    strace \
+    git \
+    gcc \
+    make \
+    python
+
+# Create test user (restricted process)
+RUN useradd -m -s /bin/bash testuser && \
+    echo "testuser:testpass" | chpasswd && \
+    echo "root:root" | chpasswd
+
+# Create protected directories structure
+RUN mkdir -p /protected/data /protected/config
+
+# Create test files in protected directories
+RUN echo "CRITICAL DATA - DO NOT DELETE" > /protected/data/important.txt && \
+    echo "SECRET CONFIG - PROTECTED" > /protected/config/secrets.conf
+
+# Create directories for Guardian Shield
+RUN mkdir -p /usr/local/lib/security /etc/warden
+
+# Copy pre-built Guardian Shield artifacts from host
+# These must exist in zig-out/ before building the container
+COPY zig-out/lib/libwarden.so /usr/local/lib/security/libwarden.so
+COPY zig-out/bin/wardenctl /usr/local/bin/wardenctl
+RUN chmod 755 /usr/local/bin/wardenctl
+
+# Create custom test config
+RUN cat > /etc/warden/warden-config.json << 'EOF'
+{
+  "_comment": "Guardian Shield V8.0 - Crucible Test Configuration",
+  "_version": "8.0.0",
+  "global": {
+    "enabled": true,
+    "log_level": "verbose",
+    "log_target": "stderr",
+    "block_emoji": "🛡️",
+    "warning_emoji": "⚠️",
+    "allow_emoji": "✓"
+  },
+  "protection": {
+    "protected_paths": [
+      {
+        "path": "/etc/",
+        "description": "System configuration",
+        "block_operations": ["unlink", "unlinkat", "rmdir", "open_write", "rename", "symlink", "link", "truncate", "mkdir"]
+      },
+      {
+        "path": "/usr/bin/",
+        "description": "System binaries",
+        "block_operations": ["unlink", "unlinkat", "rmdir", "open_write", "symlink", "symlink_target", "link", "truncate", "mkdir"]
+      },
+      {
+        "path": "/usr/lib/",
+        "description": "System libraries",
+        "block_operations": ["unlink", "unlinkat", "rmdir", "open_write", "symlink", "symlink_target", "link", "truncate", "mkdir"]
+      },
+      {
+        "path": "/protected/",
+        "description": "Crucible protected test data",
+        "block_operations": ["unlink", "unlinkat", "rmdir", "open_write", "rename", "symlink", "link", "truncate", "mkdir"]
+      }
+    ],
+    "whitelisted_paths": [
+      {
+        "path": "/tmp/",
+        "description": "Temporary directory"
+      },
+      {
+        "path": "/forge/",
+        "description": "Build directory"
+      }
+    ]
+  },
+  "process_restrictions": {
+    "enabled": true,
+    "description": "Restrict untrusted processes",
+    "restricted_processes": [
+      {
+        "name": "python",
+        "description": "Python interpreter",
+        "restrictions": {
+          "block_tmp_write": false,
+          "block_tmp_execute": true,
+          "block_dotfile_write": true,
+          "monitored_dotfiles": [".bashrc", ".zshrc", ".profile"]
+        }
+      }
+    ]
+  },
+  "process_exemptions": {
+    "enabled": true,
+    "description": "Exempt trusted build tools",
+    "exempt_processes": ["zig", "gcc", "cargo", "rustc", "make"]
+  },
+  "advanced": {
+    "cache_path_checks": true,
+    "max_cache_size": 1000,
+    "allow_symlink_bypass": false,
+    "canonicalize_paths": true,
+    "notify_auditd": false,
+    "allow_env_override": false
+  }
+}
+EOF
+
+# Setup SSH for Wolf access
+RUN ssh-keygen -A && \
+    echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
+
+# Copy the normal operations battery test and startup script
+COPY crucible/lamb/test-normal-ops.sh /usr/local/bin/test-normal-ops.sh
+COPY crucible/lamb/startup.sh /usr/local/bin/startup.sh
+RUN chmod +x /usr/local/bin/test-normal-ops.sh /usr/local/bin/startup.sh
+
+# CRITICAL: Use /etc/ld.so.preload for system-wide protection
+# This ensures ALL processes (including SSH sessions) load libwarden.so
+# Docker ENV LD_PRELOAD does NOT propagate to SSH child processes
+RUN echo "/usr/local/lib/security/libwarden.so" > /etc/ld.so.preload
+
+# Also set ENV for processes started by docker exec
+ENV LD_PRELOAD=/usr/local/lib/security/libwarden.so
+
+# Expose SSH for Wolf to connect
+EXPOSE 22
+
+# Start with battery test, then SSH daemon
+CMD ["/usr/local/bin/startup.sh"]

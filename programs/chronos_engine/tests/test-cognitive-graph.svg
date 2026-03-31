@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="1200" height="800" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <style>
+      .title { font-family: 'Courier New', monospace; font-size: 24px; font-weight: bold; }
+      .subtitle { font-family: 'Courier New', monospace; font-size: 14px; fill: #666; }
+      .label { font-family: 'Courier New', monospace; font-size: 12px; }
+      .grid { stroke: #e0e0e0; stroke-width: 1; }
+      .confidence-line { fill: none; stroke: white; stroke-width: 3; stroke-opacity: 0.9; }
+      .state-band { opacity: 0.75; }
+      .tool-marker { stroke: white; stroke-width: 2; }
+    </style>
+  </defs>
+
+  <text x="20" y="30" class="title">🔮 Cognitive Oracle Graph</text>
+  <text x="20" y="50" class="subtitle">Window: 60s | State: Channelling | Confidence: 90% | Tool Rate: 5.0/min</text>
+
+  <text x="20" y="75" class="label">COGNITIVE STATE TIMELINE</text>
+  <rect x="20" y="80" width="1160" height="250" fill="#f9f9f9" stroke="#ccc" stroke-width="1"/>
+  <line x1="20" y1="80" x2="20" y2="330" class="grid"/>
+  <text x="10" y="342" class="label" font-size="10" fill="#999">0s</text>
+  <line x1="268" y1="80" x2="268" y2="330" class="grid"/>
+  <text x="258" y="342" class="label" font-size="10" fill="#999">10s</text>
+  <line x1="517" y1="80" x2="517" y2="330" class="grid"/>
+  <text x="507" y="342" class="label" font-size="10" fill="#999">20s</text>
+  <line x1="765" y1="80" x2="765" y2="330" class="grid"/>
+  <text x="755" y="342" class="label" font-size="10" fill="#999">30s</text>
+  <line x1="1014" y1="80" x2="1014" y2="330" class="grid"/>
+  <text x="1004" y="342" class="label" font-size="10" fill="#999">40s</text>
+  <rect x="20" y="80" width="165" height="250" fill="#9966FF" class="state-band"/>
+  <rect x="185" y="80" width="166" height="250" fill="#6699FF" class="state-band"/>
+  <rect x="351" y="80" width="166" height="250" fill="#FFCC66" class="state-band"/>
+  <rect x="517" y="80" width="165" height="250" fill="#66CC66" class="state-band"/>
+  <rect x="682" y="80" width="166" height="250" fill="#66CCFF" class="state-band"/>
+  <rect x="848" y="80" width="166" height="250" fill="#66CC66" class="state-band"/>
+  <rect x="1014" y="80" width="166" height="250" fill="#66FF99" class="state-band"/>
+  <path d="M 20,105 185,142 351,230 517,105 682,142 848,105 1014,105 1180,105" class="confidence-line"/>
+  <text x="5" y="90" class="label" font-size="10" fill="#666">100%</text>
+  <text x="5" y="205" class="label" font-size="10" fill="#666">50%</text>
+  <text x="5" y="330" class="label" font-size="10" fill="#666">0%</text>
+  <text x="20" y="355" class="label">TOOL ACTIVITY BREAKDOWN</text>
+  <rect x="20" y="365" width="580" height="3" fill="#FF6B6B" opacity="0.8"/>
+  <text x="30" y="370" class="label" font-size="11">executing-command: 1 events (8%)</text>
+  <rect x="20" y="404" width="1160" height="3" fill="#45B7D1" opacity="0.8"/>
+  <text x="30" y="409" class="label" font-size="11">writing-file: 2 events (15%)</text>
+  <rect x="20" y="417" width="1160" height="3" fill="#FFA07A" opacity="0.8"/>
+  <text x="30" y="422" class="label" font-size="11">editing-file: 2 events (15%)</text>
+  <text x="20" y="565" class="label">COGNITIVE HEALTH METRICS</text>
+  <text x="30" y="580" class="label">Completion Rate: <tspan font-weight="bold">100%</tspan></text>
+  <text x="30" y="605" class="label">Avg State Duration: <tspan font-weight="bold">6.67s</tspan></text>
+  <text x="30" y="630" class="label">Retry Rate: <tspan font-weight="bold">0%</tspan></text>
+  <text x="30" y="655" class="label">Uncertainty Events: <tspan font-weight="bold">1</tspan></text>
+  <text x="30" y="680" class="label">Total Events: <tspan font-weight="bold">13</tspan></text>
+  <text x="30" y="705" class="label">Current Activity: <tspan font-weight="bold">editing_file</tspan></text>
+  <circle cx="1130" cy="670" r="15" fill="#4CAF50"/>
+  <text x="1130" y="670" class="label" fill="white" font-weight="bold" text-anchor="middle" dominant-baseline="middle">90%</text>
+</svg>

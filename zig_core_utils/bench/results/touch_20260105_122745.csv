@@ -1,0 +1,5 @@
+tool,avg_ms,median_ms,min_ms,max_ms
+gnu_touch_single,6,7,6,7
+ztouch_single,6,6,6,7
+gnu_touch_many,41,41,38,45
+ztouch_many,40,42,38,43

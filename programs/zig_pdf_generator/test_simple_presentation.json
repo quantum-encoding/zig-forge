@@ -1,0 +1,21 @@
+{
+  "page_size": {
+    "width": 800,
+    "height": 600
+  },
+  "pages": [
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "text",
+          "content": "Hello World",
+          "x": 100,
+          "y": 100,
+          "font_size": 48,
+          "color": "#000000"
+        }
+      ]
+    }
+  ]
+}

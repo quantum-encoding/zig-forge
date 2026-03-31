@@ -1,0 +1,84 @@
+# Guardian Shield V8.2 - Crucible Docker Compose
+# Orchestrates the Wolf (attacker) and Lamb (defender) containers
+#
+# Usage:
+#   docker-compose up -d          # Start the arena
+#   docker-compose logs -f lamb   # Monitor defender
+#   docker-compose exec wolf bash # Interactive attacker shell
+#   docker-compose down -v        # Destroy the arena
+
+networks:
+  crucible-arena:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+services:
+  # THE LAMB - Guardian Shield Protected Defender
+  lamb:
+    build:
+      context: ..
+      dockerfile: crucible/Dockerfile.lamb
+    image: crucible-lamb:v8.2
+    container_name: crucible-lamb
+    hostname: lamb
+    networks:
+      crucible-arena:
+        ipv4_address: 172.28.0.10
+    labels:
+      - "crucible.role=defender"
+      - "crucible.protection=guardian-shield-v8.2"
+      - "crucible.doctrine=path-fortress"
+    environment:
+      - LD_PRELOAD=/usr/local/lib/security/libwarden.so
+      - WARDEN_LOG_LEVEL=verbose
+    volumes:
+      - lamb-logs:/var/log
+    cap_add:
+      - SYS_PTRACE  # Allow strace for debugging
+    security_opt:
+      - seccomp:unconfined  # Required for LD_PRELOAD to function properly
+    healthcheck:
+      test: ["CMD", "pgrep", "-x", "sshd"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  # THE WOLF - Attack Container
+  wolf:
+    build:
+      context: .
+      dockerfile: Dockerfile.wolf
+    image: crucible-wolf:v8.2
+    container_name: crucible-wolf
+    hostname: wolf
+    networks:
+      crucible-arena:
+        ipv4_address: 172.28.0.20
+    labels:
+      - "crucible.role=attacker"
+      - "crucible.mission=bypass-guardian-shield"
+      - "crucible.doctrine=sovereign-crucible"
+    environment:
+      - LAMB_HOST=lamb
+      - LAMB_USER=root
+      - LAMB_PASS=root
+    volumes:
+      - wolf-results:/wolf/results
+      - wolf-logs:/wolf/logs
+    depends_on:
+      lamb:
+        condition: service_healthy
+    stdin_open: true
+    tty: true
+    command: /bin/bash
+
+volumes:
+  lamb-logs:
+    name: crucible-lamb-logs
+  wolf-results:
+    name: crucible-wolf-results
+  wolf-logs:
+    name: crucible-wolf-logs

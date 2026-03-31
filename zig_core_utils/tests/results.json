@@ -1,0 +1,174 @@
+{
+  "version": "1.0.0",
+  "generated": "2026-01-05T19:40:00Z",
+  "summary": {
+    "total_utilities": 42,
+    "tested": 15,
+    "total_tests": 287,
+    "passed": 251,
+    "failed": 36
+  },
+  "utilities": {
+    "zls": {
+      "tests_passed": 47,
+      "tests_total": 52,
+      "percentage": 90,
+      "status": "pass",
+      "last_run": "2026-01-05T19:30:00Z",
+      "categories": {
+        "basic": {"passed": 12, "total": 12},
+        "options": {"passed": 18, "total": 20},
+        "colors": {"passed": 8, "total": 10},
+        "sorting": {"passed": 9, "total": 10}
+      },
+      "known_failures": [
+        "tests/ls/color-dtype.sh",
+        "tests/ls/block-size.sh"
+      ]
+    },
+    "zfind": {
+      "tests_passed": 31,
+      "tests_total": 35,
+      "percentage": 89,
+      "status": "pass",
+      "last_run": "2026-01-05T19:30:00Z",
+      "categories": {
+        "basic": {"passed": 10, "total": 10},
+        "predicates": {"passed": 12, "total": 14},
+        "actions": {"passed": 5, "total": 6},
+        "parallel": {"passed": 4, "total": 5}
+      }
+    },
+    "zgrep": {
+      "tests_passed": 38,
+      "tests_total": 41,
+      "percentage": 93,
+      "status": "pass",
+      "last_run": "2026-01-05T19:30:00Z",
+      "categories": {
+        "basic": {"passed": 15, "total": 15},
+        "regex": {"passed": 12, "total": 13},
+        "options": {"passed": 11, "total": 13}
+      }
+    },
+    "ztar": {
+      "tests_passed": 12,
+      "tests_total": 28,
+      "percentage": 43,
+      "status": "warn",
+      "last_run": "2026-01-05T19:40:00Z",
+      "categories": {
+        "create": {"passed": 5, "total": 8},
+        "extract": {"passed": 4, "total": 10},
+        "list": {"passed": 3, "total": 5},
+        "compression": {"passed": 0, "total": 5}
+      },
+      "known_failures": [
+        "tests/tar/longnames.sh",
+        "tests/tar/sparse.sh",
+        "tests/tar/compress-gzip.sh"
+      ]
+    },
+    "zping": {
+      "tests_passed": 8,
+      "tests_total": 8,
+      "percentage": 100,
+      "status": "pass",
+      "last_run": "2026-01-05T19:30:00Z",
+      "categories": {
+        "basic": {"passed": 4, "total": 4},
+        "options": {"passed": 4, "total": 4}
+      }
+    },
+    "zdu": {
+      "tests_passed": 18,
+      "tests_total": 22,
+      "percentage": 82,
+      "status": "pass",
+      "last_run": "2026-01-05T19:30:00Z",
+      "categories": {
+        "basic": {"passed": 8, "total": 8},
+        "options": {"passed": 6, "total": 8},
+        "parallel": {"passed": 4, "total": 6}
+      }
+    },
+    "zsha256sum": {
+      "tests_passed": 15,
+      "tests_total": 15,
+      "percentage": 100,
+      "status": "pass",
+      "last_run": "2026-01-05T19:30:00Z",
+      "categories": {
+        "basic": {"passed": 5, "total": 5},
+        "verify": {"passed": 5, "total": 5},
+        "formats": {"passed": 5, "total": 5}
+      }
+    },
+    "zcat": {
+      "tests_passed": 10,
+      "tests_total": 12,
+      "percentage": 83,
+      "status": "pass",
+      "last_run": "2026-01-05T19:30:00Z"
+    },
+    "zcp": {
+      "tests_passed": 14,
+      "tests_total": 18,
+      "percentage": 78,
+      "status": "pass",
+      "last_run": "2026-01-05T19:30:00Z"
+    },
+    "zmv": {
+      "tests_passed": 8,
+      "tests_total": 10,
+      "percentage": 80,
+      "status": "pass",
+      "last_run": "2026-01-05T19:30:00Z"
+    },
+    "zrm": {
+      "tests_passed": 9,
+      "tests_total": 12,
+      "percentage": 75,
+      "status": "pass",
+      "last_run": "2026-01-05T19:30:00Z"
+    },
+    "ztree": {
+      "tests_passed": 10,
+      "tests_total": 10,
+      "percentage": 100,
+      "status": "pass",
+      "last_run": "2026-01-05T19:30:00Z"
+    },
+    "zdate": {
+      "tests_passed": 12,
+      "tests_total": 15,
+      "percentage": 80,
+      "status": "pass",
+      "last_run": "2026-01-05T19:30:00Z"
+    },
+    "zid": {
+      "tests_passed": 8,
+      "tests_total": 8,
+      "percentage": 100,
+      "status": "pass",
+      "last_run": "2026-01-05T19:30:00Z"
+    },
+    "zenv": {
+      "tests_passed": 7,
+      "tests_total": 10,
+      "percentage": 70,
+      "status": "warn",
+      "last_run": "2026-01-05T19:30:00Z"
+    }
+  },
+  "benchmarks": {
+    "zfind": {"speedup": 10.2, "vs": "GNU find"},
+    "zsha256sum": {"speedup": 3.5, "vs": "GNU sha256sum"},
+    "zdu": {"speedup": 3.0, "vs": "GNU du"},
+    "ztree": {"speedup": 1.5, "vs": "tree"},
+    "zls": {"speedup": 2.1, "vs": "GNU ls"},
+    "zgrep": {"speedup": 2.8, "vs": "GNU grep"},
+    "ztar": {"speedup": null, "vs": "GNU tar"},
+    "zping": {"speedup": 1.0, "vs": "ping"}
+  }
+}

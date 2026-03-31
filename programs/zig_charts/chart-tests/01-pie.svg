@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="600" height="500"
+     viewBox="0 0 600 500">
+  <path d="M320.00,162.00 L320.00,30.00 A132.00,132.00 0.00 0,1 439.75,217.53 Z " fill="#3b82f6" stroke="#ffffff" stroke-width="1.00"/>
+  <path d="M320.00,162.00 L439.75,217.53 A132.00,132.00 0.00 0,1 287.71,289.99 Z " fill="#ef4444" stroke="#ffffff" stroke-width="1.00"/>
+  <path d="M320.00,162.00 L287.71,289.99 A132.00,132.00 0.00 0,1 192.12,194.74 Z " fill="#10b981" stroke="#ffffff" stroke-width="1.00"/>
+  <path d="M320.00,162.00 L192.12,194.74 A132.00,132.00 0.00 0,1 204.92,97.35 Z " fill="#f59e0b" stroke="#ffffff" stroke-width="1.00"/>
+  <path d="M320.00,162.00 L204.92,97.35 A132.00,132.00 0.00 0,1 259.04,44.92 Z " fill="#8b5cf6" stroke="#ffffff" stroke-width="1.00"/>
+  <path d="M320.00,162.00 L259.04,44.92 A132.00,132.00 0.00 0,1 299.58,31.59 Z " fill="#ec4899" stroke="#ffffff" stroke-width="1.00"/>
+  <path d="M320.00,162.00 L299.58,31.59 A132.00,132.00 0.00 0,1 320.00,30.00 Z " fill="#06b6d4" stroke="#ffffff" stroke-width="1.00"/>
+  <rect x="70.00" y="304.00" width="8.00" height="8.00" fill="#3b82f6"/>
+  <text x="84.00" y="310.00" font-family="sans-serif" font-size="12.0" fill="#404040">Google Ads  31.9%</text>
+  <rect x="330.00" y="304.00" width="8.00" height="8.00" fill="#ef4444"/>
+  <text x="344.00" y="310.00" font-family="sans-serif" font-size="12.0" fill="#404040">Referral  22.0%</text>
+  <rect x="70.00" y="322.00" width="8.00" height="8.00" fill="#10b981"/>
+  <text x="84.00" y="328.00" font-family="sans-serif" font-size="12.0" fill="#404040">Facebook  17.1%</text>
+  <rect x="330.00" y="322.00" width="8.00" height="8.00" fill="#f59e0b"/>
+  <text x="344.00" y="328.00" font-family="sans-serif" font-size="12.0" fill="#404040">Door Knock  12.1%</text>
+  <rect x="70.00" y="340.00" width="8.00" height="8.00" fill="#8b5cf6"/>
+  <text x="84.00" y="346.00" font-family="sans-serif" font-size="12.0" fill="#404040">Website  9.2%</text>
+  <rect x="330.00" y="340.00" width="8.00" height="8.00" fill="#ec4899"/>
+  <text x="344.00" y="346.00" font-family="sans-serif" font-size="12.0" fill="#404040">Trade Show  5.2%</text>
+  <rect x="70.00" y="358.00" width="8.00" height="8.00" fill="#06b6d4"/>
+  <text x="84.00" y="364.00" font-family="sans-serif" font-size="12.0" fill="#404040">Cold Call  2.5%</text>
+</svg>

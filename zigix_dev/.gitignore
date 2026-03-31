@@ -1,0 +1,28 @@
+# Build artifacts
+zig-out/
+.zig-cache/
+*.o
+
+# ISO and disk images
+*.iso
+*.img
+iso_root/
+
+# Limine bootloader (cloned separately)
+limine/
+
+# Core dumps
+*.core
+
+# Test results (per-run logs)
+test-results/run_*/
+test-logs/
+
+# Demo logs (may contain internal IPs)
+demo_logs/
+
+# Zig cache backup
+.zig-cache.bak/
+
+# Stray binaries
+hello

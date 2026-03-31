@@ -1,0 +1,23 @@
+[package]
+name = "quantum-vault-sys"
+version = "0.1.0"
+edition = "2021"
+description = "FFI bindings to Quantum Vault post-quantum cryptography library (ML-KEM-768, ML-DSA-65, Hybrid)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/quantum-encoding/quantum-zig-forge"
+keywords = ["cryptography", "post-quantum", "ml-kem", "ml-dsa", "ffi"]
+categories = ["cryptography", "external-ffi-bindings"]
+
+[dependencies]
+thiserror = "1.0"
+zeroize = { version = "1.8", features = ["derive"] }
+
+[build-dependencies]
+
+[features]
+default = []
+# Use pre-built libraries instead of building from source
+prebuilt = []
+
+[lib]
+name = "quantum_vault_sys"

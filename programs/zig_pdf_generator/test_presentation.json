@@ -1,0 +1,549 @@
+{
+  "page_size": {
+    "width": 1920,
+    "height": 1080
+  },
+  "default_background": "#ffffff",
+  "pages": [
+    {
+      "background_color": "#1a1a2e",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 1920,
+          "height": 200,
+          "fill_color": "#16213e"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 100,
+          "y": 200,
+          "width": 1720,
+          "height": 0,
+          "stroke_color": "#e94560",
+          "stroke_width": 4
+        },
+        {
+          "type": "text",
+          "content": "QUANTUM ENCODING",
+          "x": 960,
+          "y": 100,
+          "font_size": 32,
+          "font_weight": "bold",
+          "color": "#e94560",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "ZigPDF Presentation Engine",
+          "x": 960,
+          "y": 380,
+          "font_size": 72,
+          "font_weight": "bold",
+          "color": "#ffffff",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "High-Performance Document Generation",
+          "x": 960,
+          "y": 480,
+          "font_size": 36,
+          "color": "#a0a0a0",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "Built with Zig for Speed, Safety, and Simplicity",
+          "x": 960,
+          "y": 540,
+          "font_size": 28,
+          "color": "#e94560",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 760,
+          "y": 620,
+          "width": 400,
+          "height": 60,
+          "fill_color": "#e94560",
+          "stroke_color": "#ffffff",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "February 2026",
+          "x": 960,
+          "y": 658,
+          "font_size": 24,
+          "font_weight": "bold",
+          "color": "#ffffff",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 100,
+          "y": 980,
+          "width": 1720,
+          "height": 0,
+          "stroke_color": "#333333",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Confidential - For Internal Use Only",
+          "x": 960,
+          "y": 1020,
+          "font_size": 14,
+          "color": "#666666",
+          "align": "center"
+        }
+      ]
+    },
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 1920,
+          "height": 120,
+          "fill_color": "#1a1a2e"
+        },
+        {
+          "type": "text",
+          "content": "Platform Features",
+          "x": 100,
+          "y": 60,
+          "font_size": 42,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "text",
+          "content": "QUANTUM ENCODING",
+          "x": 1820,
+          "y": 60,
+          "font_size": 18,
+          "color": "#e94560",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "Core Capabilities",
+          "x": 100,
+          "y": 180,
+          "font_size": 28,
+          "font_weight": "bold",
+          "color": "#1a1a2e"
+        },
+        {
+          "type": "bullet_list",
+          "x": 100,
+          "y": 240,
+          "font_size": 22,
+          "color": "#333333",
+          "bullet_color": "#e94560",
+          "line_spacing": 16,
+          "indent": 30,
+          "items": [
+            "Native PDF generation without external dependencies",
+            "WASM support for edge deployment (Cloudflare Workers, browsers)",
+            "Professional document templates (invoices, contracts, certificates)",
+            "Canvas-style freeform layouts for presentations",
+            "MCP server integration for AI-assisted document generation",
+            "Cross-platform: macOS, Linux, iOS, Android, WebAssembly"
+          ]
+        },
+        {
+          "type": "text",
+          "content": "Performance Benchmarks",
+          "x": 100,
+          "y": 520,
+          "font_size": 28,
+          "font_weight": "bold",
+          "color": "#1a1a2e"
+        },
+        {
+          "type": "table",
+          "x": 100,
+          "y": 570,
+          "columns": ["Document Type", "Generation Time", "File Size", "Memory Usage"],
+          "column_widths": [400, 250, 200, 250],
+          "rows": [
+            ["Simple Invoice (1 page)", "0.8ms", "4.2 KB", "128 KB"],
+            ["Contract (10 pages)", "3.2ms", "18.5 KB", "256 KB"],
+            ["Presentation (20 slides)", "8.1ms", "42.3 KB", "512 KB"],
+            ["Share Certificate", "1.1ms", "6.8 KB", "128 KB"],
+            ["Board Resolution", "1.4ms", "8.2 KB", "192 KB"]
+          ],
+          "header_bg_color": "#1a1a2e",
+          "header_text_color": "#ffffff",
+          "row_bg_color": "#f8f9fa",
+          "alt_row_bg_color": "#ffffff",
+          "text_color": "#333333",
+          "border_color": "#dee2e6",
+          "font_size": 16,
+          "header_font_size": 18,
+          "padding": 15,
+          "row_height": 45,
+          "header_height": 50
+        },
+        {
+          "type": "text",
+          "content": "* Benchmarks measured on Apple M1, Release build",
+          "x": 100,
+          "y": 870,
+          "font_size": 14,
+          "color": "#888888",
+          "font_style": "italic"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 100,
+          "y": 980,
+          "width": 1720,
+          "height": 0,
+          "stroke_color": "#dee2e6",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Page 2 of 3",
+          "x": 960,
+          "y": 1020,
+          "font_size": 14,
+          "color": "#888888",
+          "align": "center"
+        }
+      ]
+    },
+    {
+      "background_color": "#f0f4f8",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 1920,
+          "height": 120,
+          "fill_color": "#1a1a2e"
+        },
+        {
+          "type": "text",
+          "content": "Architecture Overview",
+          "x": 100,
+          "y": 60,
+          "font_size": 42,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "text",
+          "content": "QUANTUM ENCODING",
+          "x": 1820,
+          "y": 60,
+          "font_size": 18,
+          "color": "#e94560",
+          "align": "right"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 100,
+          "y": 180,
+          "width": 500,
+          "height": 300,
+          "fill_color": "#ffffff",
+          "stroke_color": "#1a1a2e",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "Zig Core Library",
+          "x": 350,
+          "y": 210,
+          "font_size": 24,
+          "font_weight": "bold",
+          "color": "#1a1a2e",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "document.zig - PDF primitives",
+          "x": 130,
+          "y": 270,
+          "font_size": 16,
+          "color": "#555555"
+        },
+        {
+          "type": "text",
+          "content": "presentation.zig - Canvas layouts",
+          "x": 130,
+          "y": 300,
+          "font_size": 16,
+          "color": "#555555"
+        },
+        {
+          "type": "text",
+          "content": "invoice.zig - Business templates",
+          "x": 130,
+          "y": 330,
+          "font_size": 16,
+          "color": "#555555"
+        },
+        {
+          "type": "text",
+          "content": "contract.zig - Legal documents",
+          "x": 130,
+          "y": 360,
+          "font_size": 16,
+          "color": "#555555"
+        },
+        {
+          "type": "text",
+          "content": "wasm.zig - WASM exports",
+          "x": 130,
+          "y": 390,
+          "font_size": 16,
+          "color": "#555555"
+        },
+        {
+          "type": "text",
+          "content": "ffi.zig - C/Swift/Rust bindings",
+          "x": 130,
+          "y": 420,
+          "font_size": 16,
+          "color": "#555555"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 600,
+          "y": 330,
+          "width": 120,
+          "height": 0,
+          "stroke_color": "#e94560",
+          "stroke_width": 3
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 720,
+          "y": 180,
+          "width": 500,
+          "height": 300,
+          "fill_color": "#ffffff",
+          "stroke_color": "#e94560",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "Integration Layer",
+          "x": 970,
+          "y": 210,
+          "font_size": 24,
+          "font_weight": "bold",
+          "color": "#e94560",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "MCP Server (TypeScript)",
+          "x": 750,
+          "y": 270,
+          "font_size": 16,
+          "color": "#555555"
+        },
+        {
+          "type": "text",
+          "content": "Tauri Desktop App (Rust)",
+          "x": 750,
+          "y": 300,
+          "font_size": 16,
+          "color": "#555555"
+        },
+        {
+          "type": "text",
+          "content": "Swift iOS/macOS Wrapper",
+          "x": 750,
+          "y": 330,
+          "font_size": 16,
+          "color": "#555555"
+        },
+        {
+          "type": "text",
+          "content": "JNI Android Bridge",
+          "x": 750,
+          "y": 360,
+          "font_size": 16,
+          "color": "#555555"
+        },
+        {
+          "type": "text",
+          "content": "JavaScript WASM Loader",
+          "x": 750,
+          "y": 390,
+          "font_size": 16,
+          "color": "#555555"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 1220,
+          "y": 330,
+          "width": 120,
+          "height": 0,
+          "stroke_color": "#e94560",
+          "stroke_width": 3
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 1340,
+          "y": 180,
+          "width": 480,
+          "height": 300,
+          "fill_color": "#ffffff",
+          "stroke_color": "#16213e",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "Applications",
+          "x": 1580,
+          "y": 210,
+          "font_size": 24,
+          "font_weight": "bold",
+          "color": "#16213e",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "Claude Desktop (via MCP)",
+          "x": 1370,
+          "y": 270,
+          "font_size": 16,
+          "color": "#555555"
+        },
+        {
+          "type": "text",
+          "content": "Quantum Quote (Tauri)",
+          "x": 1370,
+          "y": 300,
+          "font_size": 16,
+          "color": "#555555"
+        },
+        {
+          "type": "text",
+          "content": "Quantum PDF (Mobile)",
+          "x": 1370,
+          "y": 330,
+          "font_size": 16,
+          "color": "#555555"
+        },
+        {
+          "type": "text",
+          "content": "Web Browser (WASM)",
+          "x": 1370,
+          "y": 360,
+          "font_size": 16,
+          "color": "#555555"
+        },
+        {
+          "type": "text",
+          "content": "Edge Workers (Cloudflare)",
+          "x": 1370,
+          "y": 390,
+          "font_size": 16,
+          "color": "#555555"
+        },
+        {
+          "type": "text",
+          "content": "Supported Document Types",
+          "x": 100,
+          "y": 540,
+          "font_size": 28,
+          "font_weight": "bold",
+          "color": "#1a1a2e"
+        },
+        {
+          "type": "table",
+          "x": 100,
+          "y": 590,
+          "columns": ["Category", "Document Types", "Status"],
+          "column_widths": [300, 600, 200],
+          "rows": [
+            ["Business", "Invoices, Quotes, Contracts, Letters, Memos", "Production"],
+            ["Corporate", "Share Certificates, Dividend Vouchers, Stock Transfers", "Production"],
+            ["Governance", "Board Resolutions, Written Resolutions, Minutes", "Production"],
+            ["Directors", "Appointments, Resignations, Consent Forms", "Production"],
+            ["Presentations", "Pitch Decks, Canvas Layouts, Slides", "Beta"]
+          ],
+          "header_bg_color": "#16213e",
+          "header_text_color": "#ffffff",
+          "row_bg_color": "#ffffff",
+          "alt_row_bg_color": "#f0f4f8",
+          "text_color": "#333333",
+          "border_color": "#cbd5e1",
+          "font_size": 16,
+          "header_font_size": 18,
+          "padding": 15,
+          "row_height": 45,
+          "header_height": 50
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 1500,
+          "y": 900,
+          "width": 320,
+          "height": 80,
+          "fill_color": "#e94560",
+          "stroke_color": "#1a1a2e",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "github.com/anthropics",
+          "x": 1660,
+          "y": 930,
+          "font_size": 20,
+          "font_weight": "bold",
+          "color": "#ffffff",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 100,
+          "y": 980,
+          "width": 1720,
+          "height": 0,
+          "stroke_color": "#cbd5e1",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Page 3 of 3",
+          "x": 960,
+          "y": 1020,
+          "font_size": 14,
+          "color": "#888888",
+          "align": "center"
+        }
+      ]
+    }
+  ]
+}

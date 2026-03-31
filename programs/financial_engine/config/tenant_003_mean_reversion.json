@@ -1,0 +1,42 @@
+{
+  "tenant_id": "TENANT_003",
+  "tenant_name": "Statistical Mean Reversion",
+  "status": "active",
+  "tier": "BRONZE",
+  "algorithm": {
+    "type": "mean_reversion_bollinger",
+    "version": "1.5.0",
+    "description": "Bollinger band mean reversion on liquid ETFs",
+    "parameters": {
+      "target_symbols": ["QQQ", "IWM", "DIA"],
+      "bollinger_period": 20,
+      "bollinger_std_dev": 2.0,
+      "entry_threshold": 0.95,
+      "exit_threshold": 0.5,
+      "order_size": 5,
+      "order_type": "limit",
+      "max_positions": 3
+    }
+  },
+  "resource_limits": {
+    "cpu_cores": [12],
+    "memory_mb": 128,
+    "max_orders_per_minute": 2,
+    "max_api_calls_per_second": 10
+  },
+  "billing": {
+    "pricing_model": "usage_based",
+    "rate_per_1000_packets": 0.001,
+    "rate_per_order": 0.005,
+    "revenue_share_percentage": 0
+  },
+  "monitoring": {
+    "enable_real_time_metrics": true,
+    "alert_on_anomaly": false,
+    "performance_tracking": true
+  },
+  "credentials": {
+    "api_key_env": "TENANT_003_API_KEY",
+    "api_secret_env": "TENANT_003_API_SECRET"
+  }
+}

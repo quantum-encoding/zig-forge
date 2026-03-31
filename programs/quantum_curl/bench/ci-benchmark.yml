@@ -1,0 +1,174 @@
+# GitHub Actions Workflow for Quantum Curl Performance Benchmarks
+#
+# This workflow runs on every push and PR to detect performance regressions.
+# Results are stored as artifacts and compared against baseline.
+
+name: Performance Benchmarks
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'programs/quantum_curl/**'
+      - 'programs/http_sentinel/**'
+  pull_request:
+    branches: [main, master]
+    paths:
+      - 'programs/quantum_curl/**'
+      - 'programs/http_sentinel/**'
+  workflow_dispatch:  # Manual trigger
+
+env:
+  BENCH_THRESHOLD: 15  # 15% regression threshold for CI
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.14.0
+
+      - name: Cache Zig
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/zig
+            programs/quantum_curl/.zig-cache
+            programs/http_sentinel/.zig-cache
+          key: ${{ runner.os }}-zig-${{ hashFiles('**/build.zig') }}
+
+      - name: Build quantum-curl (Release)
+        run: |
+          cd programs/quantum_curl
+          zig build -Doptimize=ReleaseFast
+
+      - name: Download baseline (if exists)
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          workflow: ci-benchmark.yml
+          name: benchmark-baseline
+          path: programs/quantum_curl/bench/results
+          if_no_artifact_found: warn
+        continue-on-error: true
+
+      - name: Run Performance Benchmarks
+        id: benchmark
+        run: |
+          cd programs/quantum_curl
+          mkdir -p bench/results
+
+          # Start echo server
+          ./zig-out/bin/bench-echo-server 8888 &
+          ECHO_PID=$!
+          sleep 2
+
+          # Run benchmarks
+          ./zig-out/bin/bench-quantum-curl --json > bench/results/current.json
+
+          # Stop echo server
+          kill $ECHO_PID || true
+
+          # Output summary
+          cat bench/results/current.json | jq '.summary'
+
+      - name: Check for Regression
+        id: regression
+        run: |
+          cd programs/quantum_curl/bench/results
+
+          if [ -f "baseline.json" ]; then
+            BASELINE_RPS=$(jq -r '.summary.avg_requests_per_second' baseline.json)
+            CURRENT_RPS=$(jq -r '.summary.avg_requests_per_second' current.json)
+
+            BASELINE_P99=$(jq -r '.summary.avg_p99_latency_ms' baseline.json)
+            CURRENT_P99=$(jq -r '.summary.avg_p99_latency_ms' current.json)
+
+            # Calculate changes
+            RPS_CHANGE=$(echo "scale=2; (($CURRENT_RPS - $BASELINE_RPS) / $BASELINE_RPS) * 100" | bc)
+            P99_CHANGE=$(echo "scale=2; (($CURRENT_P99 - $BASELINE_P99) / $BASELINE_P99) * 100" | bc)
+
+            echo "RPS Change: ${RPS_CHANGE}%"
+            echo "P99 Change: ${P99_CHANGE}%"
+
+            echo "rps_change=${RPS_CHANGE}" >> $GITHUB_OUTPUT
+            echo "p99_change=${P99_CHANGE}" >> $GITHUB_OUTPUT
+
+            # Check thresholds
+            if (( $(echo "$RPS_CHANGE < -$BENCH_THRESHOLD" | bc -l) )); then
+              echo "::error::Performance regression detected: Throughput decreased by ${RPS_CHANGE}%"
+              exit 1
+            fi
+
+            if (( $(echo "$P99_CHANGE > $BENCH_THRESHOLD" | bc -l) )); then
+              echo "::error::Performance regression detected: P99 latency increased by ${P99_CHANGE}%"
+              exit 1
+            fi
+
+            echo "::notice::No regression detected (RPS: ${RPS_CHANGE}%, P99: ${P99_CHANGE}%)"
+          else
+            echo "No baseline found, creating initial baseline"
+            cp current.json baseline.json
+          fi
+
+      - name: Upload Benchmark Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: programs/quantum_curl/bench/results/current.json
+          retention-days: 30
+
+      - name: Update Baseline (main branch only)
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-baseline
+          path: programs/quantum_curl/bench/results/current.json
+          retention-days: 90
+
+      - name: Post Results to PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const results = JSON.parse(fs.readFileSync('programs/quantum_curl/bench/results/current.json', 'utf8'));
+
+            const summary = results.summary;
+            const benchmarks = results.benchmarks;
+
+            let body = '## Quantum Curl Performance Results\n\n';
+            body += '| Metric | Value |\n';
+            body += '|--------|-------|\n';
+            body += `| Avg Throughput | ${summary.avg_requests_per_second.toFixed(0)} req/sec |\n`;
+            body += `| Avg P99 Latency | ${summary.avg_p99_latency_ms} ms |\n\n`;
+
+            body += '### Detailed Results\n\n';
+            body += '| Test | Requests | RPS | P50 | P95 | P99 |\n';
+            body += '|------|----------|-----|-----|-----|-----|\n';
+
+            for (const b of benchmarks) {
+              body += `| ${b.name} | ${b.total_requests} | ${b.throughput.requests_per_second.toFixed(0)} | ${b.latency.p50_ms}ms | ${b.latency.p95_ms}ms | ${b.latency.p99_ms}ms |\n`;
+            }
+
+            const rpsChange = '${{ steps.regression.outputs.rps_change }}';
+            const p99Change = '${{ steps.regression.outputs.p99_change }}';
+
+            if (rpsChange && p99Change) {
+              body += '\n### Comparison to Baseline\n\n';
+              body += `- Throughput: ${rpsChange}%\n`;
+              body += `- P99 Latency: ${p99Change}%\n`;
+            }
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });

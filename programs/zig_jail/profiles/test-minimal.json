@@ -1,0 +1,10 @@
+{
+  "profile_name": "test-minimal",
+  "description": "Test - only exit_group allowed",
+  "version": "1.0.0",
+  "syscalls": {
+    "default_action": "kill",
+    "allowed": ["exit_group"],
+    "blocked": []
+  }
+}

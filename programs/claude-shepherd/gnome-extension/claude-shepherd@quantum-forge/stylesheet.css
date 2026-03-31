@@ -1,0 +1,90 @@
+/* Claude Shepherd GNOME Extension Styles */
+
+.claude-shepherd-header {
+    padding: 8px 12px;
+}
+
+.claude-shepherd-title {
+    font-size: 14px;
+    font-weight: bold;
+    color: #4CAF50;
+}
+
+.claude-agent-item {
+    padding: 4px 0;
+    min-width: 280px;
+}
+
+.claude-approve-btn {
+    background-color: #4CAF50;
+    color: white;
+    border-radius: 4px;
+    padding: 2px 12px;
+    margin-right: 8px;
+}
+
+.claude-approve-btn:hover {
+    background-color: #45a049;
+}
+
+.claude-deny-btn {
+    background-color: #F44336;
+    color: white;
+    border-radius: 4px;
+    padding: 2px 12px;
+}
+
+.claude-deny-btn:hover {
+    background-color: #da190b;
+}
+
+.popup-menu-item .claude-agent-item {
+    padding: 6px 0;
+}
+
+/* Status dot colors */
+.status-running {
+    color: #4CAF50;
+}
+
+.status-waiting {
+    color: #FF9800;
+}
+
+.status-paused {
+    color: #2196F3;
+}
+
+.status-completed {
+    color: #9E9E9E;
+}
+
+.status-failed {
+    color: #F44336;
+}
+
+/* Permission request styling */
+.permission-command {
+    font-family: monospace;
+    color: #FF9800;
+    font-size: 12px;
+}
+
+.permission-reason {
+    font-size: 11px;
+    color: #888;
+    margin-top: 2px;
+}
+
+/* Panel icon states */
+.panel-status-icon-warning {
+    color: #FF9800;
+}
+
+.panel-status-icon-active {
+    color: #4CAF50;
+}
+
+.panel-status-icon-inactive {
+    color: #888;
+}

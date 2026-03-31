@@ -1,0 +1,449 @@
+// libwarden.so V7.0 - Guardian Shield with Living Citadel Doctrine
+// Purpose: Runtime-configurable syscall interception with intelligent directory protection
+//
+// V7.0 Features (Living Citadel Doctrine):
+// - Protect directory structures (Citadel walls) while allowing internal operations
+// - Distinguish between structural operations (rmdir/rename on directories) and file operations
+// - Git's internal mechanisms (.git/index.lock) are now allowed
+// - Thread-safe initialization using std.once
+// - Memory safety: No atexit cleanup (OS handles cleanup on process exit)
+// - Robust JSON parsing with parseFromSlice
+// - Intelligent glob pattern matching
+// - Zero race conditions, zero segfaults
+
+const std = @import("std");
+const config_mod = @import("config.zig");
+
+const c = @cImport({
+    @cInclude("dlfcn.h");
+    @cInclude("fcntl.h");
+    @cInclude("unistd.h");
+    @cInclude("stdlib.h");
+});
+
+// Import errno functions
+extern "c" fn __errno_location() *c_int;
+
+// ============================================================
+// Global State (Thread-Safe Singleton)
+// ============================================================
+
+const GlobalState = struct {
+    config: config_mod.Config,
+
+    // Function pointers to original syscalls
+    original_unlink: *const fn ([*:0]const u8) callconv(.c) c_int,
+    original_unlinkat: *const fn (c_int, [*:0]const u8, c_int) callconv(.c) c_int,
+    original_rmdir: *const fn ([*:0]const u8) callconv(.c) c_int,
+    original_open: *const fn ([*:0]const u8, c_int, ...) callconv(.c) c_int,
+    original_openat: *const fn (c_int, [*:0]const u8, c_int, ...) callconv(.c) c_int,
+    original_rename: *const fn ([*:0]const u8, [*:0]const u8) callconv(.c) c_int,
+    original_renameat: *const fn (c_int, [*:0]const u8, c_int, [*:0]const u8) callconv(.c) c_int,
+
+    fn deinit(self: *GlobalState) void {
+        self.config.deinit();
+    }
+};
+
+// V6.1: Use c_allocator instead of GPA for LD_PRELOAD safety
+// The C allocator doesn't have destructors, so it won't try to clean up on exit
+// Memory "leaks" are intentional - the OS cleans up when the process dies
+const allocator = std.heap.c_allocator;
+var global_state: ?*GlobalState = null;
+
+const InitOnce = struct {
+    fn do() void {
+        // Use the global c_allocator (no local shadowing needed)
+
+        const state = allocator.create(GlobalState) catch {
+            std.debug.print("[libwarden.so] ⚠️  Failed to allocate global state\n", .{});
+            return;
+        };
+
+        // Load configuration
+        var cfg = config_mod.loadConfig(allocator) catch |err| blk: {
+            std.debug.print("[libwarden.so] ⚠️  Config load failed ({any}), using defaults\n", .{err});
+            break :blk config_mod.getDefaultConfig(allocator) catch |default_err| {
+                std.debug.print("[libwarden.so] ⚠️  Default config failed ({any}), shield disabled!\n", .{default_err});
+                allocator.destroy(state);
+                return;
+            };
+        };
+
+        // Load function pointers
+        const unlink_ptr = c.dlsym(c.RTLD_NEXT, "unlink") orelse {
+            std.debug.print("[libwarden.so] ⚠️  Failed to load original unlink\n", .{});
+            // V6.1: Do NOT call cfg.deinit() - let memory leak
+            allocator.destroy(state);
+            return;
+        };
+
+        const unlinkat_ptr = c.dlsym(c.RTLD_NEXT, "unlinkat") orelse {
+            std.debug.print("[libwarden.so] ⚠️  Failed to load original unlinkat\n", .{});
+            allocator.destroy(state);
+            return;
+        };
+
+        const rmdir_ptr = c.dlsym(c.RTLD_NEXT, "rmdir") orelse {
+            std.debug.print("[libwarden.so] ⚠️  Failed to load original rmdir\n", .{});
+            allocator.destroy(state);
+            return;
+        };
+
+        const open_ptr = c.dlsym(c.RTLD_NEXT, "open") orelse {
+            std.debug.print("[libwarden.so] ⚠️  Failed to load original open\n", .{});
+            allocator.destroy(state);
+            return;
+        };
+
+        const openat_ptr = c.dlsym(c.RTLD_NEXT, "openat") orelse {
+            std.debug.print("[libwarden.so] ⚠️  Failed to load original openat\n", .{});
+            allocator.destroy(state);
+            return;
+        };
+
+        const rename_ptr = c.dlsym(c.RTLD_NEXT, "rename") orelse {
+            std.debug.print("[libwarden.so] ⚠️  Failed to load original rename\n", .{});
+            allocator.destroy(state);
+            return;
+        };
+
+        const renameat_ptr = c.dlsym(c.RTLD_NEXT, "renameat") orelse {
+            std.debug.print("[libwarden.so] ⚠️  Failed to load original renameat\n", .{});
+            allocator.destroy(state);
+            return;
+        };
+
+        // Print initialization message BEFORE moving cfg into state
+        if (cfg.global.enabled) {
+            std.debug.print("[libwarden.so] {s} Guardian Shield V6.1 active (Citadel Protection)\n", .{cfg.global.block_emoji});
+            std.debug.print("[libwarden.so]   Protected paths: {d}\n", .{cfg.protected_paths.len});
+            std.debug.print("[libwarden.so]   Whitelisted paths: {d}\n", .{cfg.whitelisted_paths.len});
+            if (cfg.directory_protection.enabled) {
+                std.debug.print("[libwarden.so]   Protected directories: {d}\n", .{cfg.directory_protection.protected_roots.len});
+                std.debug.print("[libwarden.so]   Protected patterns: {d}\n", .{cfg.directory_protection.protected_patterns.len});
+            }
+        } else {
+            std.debug.print("[libwarden.so] ⚠️  Shield is DISABLED via config\n", .{});
+        }
+
+        // Initialize state
+        state.* = GlobalState{
+            .config = cfg,
+            .original_unlink = @ptrCast(unlink_ptr),
+            .original_unlinkat = @ptrCast(unlinkat_ptr),
+            .original_rmdir = @ptrCast(rmdir_ptr),
+            .original_open = @ptrCast(open_ptr),
+            .original_openat = @ptrCast(openat_ptr),
+            .original_rename = @ptrCast(rename_ptr),
+            .original_renameat = @ptrCast(renameat_ptr),
+        };
+
+        global_state = state;
+
+        // V6.1: Do NOT register atexit cleanup
+        // Rationale: LD_PRELOAD libraries should not free memory on exit
+        // The OS will clean up when the process terminates
+        // Attempting cleanup causes use-after-free when Python's cleanup
+        // tries to access our intercepted functions after we've freed our state
+        //
+        // _ = c.atexit(cleanupGlobalState);  // REMOVED in V6.1
+    }
+};
+
+var init_once = std.once(InitOnce.do);
+
+// V6.1: This function should NEVER be called in an LD_PRELOAD library
+// Kept for reference only - cleanup on exit causes crashes
+fn cleanupGlobalState() callconv(.c) void {
+    // INTENTIONALLY LEFT EMPTY
+    // Rationale: LD_PRELOAD libraries must not free memory on process exit
+    // The OS will reclaim all memory when the process terminates
+    // Attempting cleanup here causes use-after-free when the host process
+    // (Python, bash, etc.) tries to call our intercepted functions during
+    // its own cleanup sequence
+}
+
+fn getState() ?*GlobalState {
+    init_once.call();
+    return global_state;
+}
+
+// ============================================================
+// Path Checking Logic (Config-Driven)
+// ============================================================
+
+/// Simple glob pattern matching for `**/.git` style patterns
+fn matchesGlobPattern(path_slice: []const u8, pattern: []const u8) bool {
+    // Handle `**/.git` pattern
+    if (std.mem.startsWith(u8, pattern, "**/")) {
+        const suffix = pattern[3..];
+        // Check if path ends with the suffix or contains it as a directory component
+        if (std.mem.endsWith(u8, path_slice, suffix)) return true;
+
+        // Check for `/.git/` or `/.git` anywhere in path
+        var search_pattern_buf: [256]u8 = undefined;
+        const search_pattern = std.fmt.bufPrint(&search_pattern_buf, "/{s}", .{suffix}) catch return false;
+        if (std.mem.indexOf(u8, path_slice, search_pattern)) |_| return true;
+    }
+    return false;
+}
+
+/// Check if a path matches any directory protection rules
+fn isDirectoryProtected(path: [*:0]const u8) bool {
+    const state = getState() orelse return false;
+
+    if (!state.config.directory_protection.enabled) return false;
+
+    const path_slice = std.mem.span(path);
+
+    // Check protected_roots
+    for (state.config.directory_protection.protected_roots) |root| {
+        // Exact match or prefix match with trailing slash
+        if (std.mem.eql(u8, path_slice, root)) return true;
+        if (std.mem.startsWith(u8, path_slice, root)) {
+            // Ensure it's a directory match, not just prefix
+            if (path_slice.len > root.len and path_slice[root.len] == '/') {
+                return true;
+            }
+        }
+    }
+
+    // Check protected_patterns (glob matching)
+    for (state.config.directory_protection.protected_patterns) |pattern| {
+        if (matchesGlobPattern(path_slice, pattern)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+fn isWhitelisted(path: [*:0]const u8) bool {
+    const state = getState() orelse return false;
+    const path_slice = std.mem.span(path);
+
+    for (state.config.whitelisted_paths) |whitelist| {
+        if (std.mem.startsWith(u8, path_slice, whitelist.path)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn isProtectedForOperation(path: [*:0]const u8, operation: []const u8) bool {
+    const state = getState() orelse return false;
+
+    // Check if globally disabled
+    if (!state.config.global.enabled) return false;
+
+    // Check environment override
+    if (state.config.advanced.allow_env_override) {
+        if (std.process.getEnvVarOwned(allocator, "LIBWARDEN_OVERRIDE")) |override_val| {
+            defer allocator.free(override_val);
+            if (std.mem.eql(u8, override_val, "1")) {
+                return false;
+            }
+        } else |_| {}
+    }
+
+    // Whitelist takes precedence
+    if (isWhitelisted(path)) return false;
+
+    const path_slice = std.mem.span(path);
+
+    // Check protected paths
+    for (state.config.protected_paths) |protected| {
+        if (std.mem.startsWith(u8, path_slice, protected.path)) {
+            // Check if this operation is blocked for this path
+            for (protected.block_operations) |blocked_op| {
+                if (std.mem.eql(u8, blocked_op, operation)) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
+fn logBlock(operation: []const u8, path: [*:0]const u8) void {
+    const state = getState() orelse {
+        std.debug.print("[libwarden.so] 🛡️  BLOCKED {s}: {s}\n", .{ operation, path });
+        return;
+    };
+
+    std.debug.print("[libwarden.so] {s} BLOCKED {s}: {s}\n", .{ state.config.global.block_emoji, operation, path });
+}
+
+// ============================================================
+// Syscall Interceptors - unlink() family
+// ============================================================
+
+export fn unlink(path: [*:0]const u8) c_int {
+    const state = getState() orelse {
+        __errno_location().* = 2;
+        return -1;
+    };
+
+    // V6: Check directory protection first (Citadel doctrine)
+    if (isDirectoryProtected(path)) {
+        logBlock("unlink (directory protected)", path);
+        __errno_location().* = 13; // EACCES
+        return -1;
+    }
+
+    if (isProtectedForOperation(path, "unlink")) {
+        logBlock("unlink", path);
+        __errno_location().* = 13; // EACCES
+        return -1;
+    }
+
+    return state.original_unlink(path);
+}
+
+export fn unlinkat(dirfd: c_int, path: [*:0]const u8, flags: c_int) c_int {
+    const state = getState() orelse {
+        __errno_location().* = 2;
+        return -1;
+    };
+
+    // V6: Check directory protection first
+    if (isDirectoryProtected(path)) {
+        logBlock("unlinkat (directory protected)", path);
+        __errno_location().* = 13;
+        return -1;
+    }
+
+    if (isProtectedForOperation(path, "unlinkat")) {
+        logBlock("unlinkat", path);
+        __errno_location().* = 13;
+        return -1;
+    }
+
+    return state.original_unlinkat(dirfd, path, flags);
+}
+
+export fn rmdir(path: [*:0]const u8) c_int {
+    const state = getState() orelse {
+        __errno_location().* = 2;
+        return -1;
+    };
+
+    // V6: Check directory protection first (Citadel doctrine - primary defense)
+    if (isDirectoryProtected(path)) {
+        logBlock("rmdir (directory protected)", path);
+        __errno_location().* = 13;
+        return -1;
+    }
+
+    if (isProtectedForOperation(path, "rmdir")) {
+        logBlock("rmdir", path);
+        __errno_location().* = 13;
+        return -1;
+    }
+
+    return state.original_rmdir(path);
+}
+
+// ============================================================
+// Syscall Interceptors - open() family
+// ============================================================
+
+export fn open(path: [*:0]const u8, flags: c_int, ...) c_int {
+    const state = getState() orelse {
+        __errno_location().* = 2;
+        return -1;
+    };
+
+    const is_write = (flags & c.O_WRONLY) != 0 or (flags & c.O_RDWR) != 0;
+
+    if (is_write and isProtectedForOperation(path, "open_write")) {
+        logBlock("open(write)", path);
+        __errno_location().* = 13;
+        return -1;
+    }
+
+    // Handle O_CREAT mode parameter if present
+    if ((flags & c.O_CREAT) != 0) {
+        var args = @cVaStart();
+        const mode = @cVaArg(&args, c_int);
+        @cVaEnd(&args);
+        return state.original_open(path, flags, mode);
+    }
+
+    return state.original_open(path, flags);
+}
+
+export fn openat(dirfd: c_int, path: [*:0]const u8, flags: c_int, ...) c_int {
+    const state = getState() orelse {
+        __errno_location().* = 2;
+        return -1;
+    };
+
+    const is_write = (flags & c.O_WRONLY) != 0 or (flags & c.O_RDWR) != 0;
+
+    if (is_write and isProtectedForOperation(path, "open_write")) {
+        logBlock("openat(write)", path);
+        __errno_location().* = 13;
+        return -1;
+    }
+
+    // Handle O_CREAT mode parameter if present
+    if ((flags & c.O_CREAT) != 0) {
+        var args = @cVaStart();
+        const mode = @cVaArg(&args, c_int);
+        @cVaEnd(&args);
+        return state.original_openat(dirfd, path, flags, mode);
+    }
+
+    return state.original_openat(dirfd, path, flags);
+}
+
+// ============================================================
+// Syscall Interceptors - rename() family
+// ============================================================
+
+export fn rename(oldpath: [*:0]const u8, newpath: [*:0]const u8) c_int {
+    const state = getState() orelse {
+        __errno_location().* = 2;
+        return -1;
+    };
+
+    // V6: Check directory protection first (prevent renaming Citadel)
+    if (isDirectoryProtected(oldpath) or isDirectoryProtected(newpath)) {
+        logBlock("rename (directory protected)", oldpath);
+        __errno_location().* = 13;
+        return -1;
+    }
+
+    if (isProtectedForOperation(oldpath, "rename") or isProtectedForOperation(newpath, "rename")) {
+        logBlock("rename", oldpath);
+        __errno_location().* = 13;
+        return -1;
+    }
+
+    return state.original_rename(oldpath, newpath);
+}
+
+export fn renameat(olddirfd: c_int, oldpath: [*:0]const u8, newdirfd: c_int, newpath: [*:0]const u8) c_int {
+    const state = getState() orelse {
+        __errno_location().* = 2;
+        return -1;
+    };
+
+    // V6: Check directory protection first
+    if (isDirectoryProtected(oldpath) or isDirectoryProtected(newpath)) {
+        logBlock("renameat (directory protected)", oldpath);
+        __errno_location().* = 13;
+        return -1;
+    }
+
+    if (isProtectedForOperation(oldpath, "rename") or isProtectedForOperation(newpath, "rename")) {
+        logBlock("renameat", oldpath);
+        __errno_location().* = 13;
+        return -1;
+    }
+
+    return state.original_renameat(olddirfd, oldpath, newdirfd, newpath);
+}

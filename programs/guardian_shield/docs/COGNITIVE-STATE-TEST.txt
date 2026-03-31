@@ -1,0 +1,5 @@
+Testing cognitive state capture in chronos commits
+
+The cognitive state should appear in brackets at the end of the commit message.
+
+Current cognitive state from monitor: Channelling

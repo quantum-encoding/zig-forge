@@ -1,0 +1,72 @@
+# Maintainer: Quantum Encoding Ltd
+pkgname=zig-coreutils-local
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="High-performance Zig implementations of GNU coreutils (131 utilities)"
+arch=('x86_64')
+url="https://github.com/quantum-encoding/quantum-zig-forge"
+license=('MIT')
+depends=('glibc')
+
+_utilities=(
+    zarch zawk zb2sum zbackup zbase32 zbase64 zbasename zbasenc
+    zcat zchcon zchgrp zchmod zchown zchroot zcksum zclip zcomm zcp
+    zcsplit zcurl zcut zdate zdd zdf zdir zdircolors zdirname zdu
+    zecho zenv zexpand zexpr zfactor zfalse zfind zfmt zfold zfree
+    zgrep zgroups zgzip zhashsum zhead zhostid zhostname zid zinstall
+    zjoin zjq zkill zlink zln zlogname zls zmd5sum zmkdir zmkfifo
+    zmknod zmktemp zmore zmv znice znl znohup znproc znumfmt zod
+    zpaste zpathchk zpgrep zping zpinky zpkill zpr zprintenv zprintf
+    zps zptx zpwd zreadlink zrealpath zregex zrm zrmdir zruncon zsed
+    zseq zsha1sum zsha256sum zsha512sum zshred zshuf zsleep zsort
+    zsplit zstat zstdbuf zstty zsudo zsum zsync zsys ztac ztail ztar
+    ztee ztest ztime ztimeout ztouch ztr ztree ztrue ztruncate ztsort
+    ztty zuname zunexpand zuniq zunlink zuptime zusers zvdir zwc zwho
+    zwhoami zxargs zxz zyes zzstd
+)
+
+_srcdir="/home/founder/github_public/quantum-zig-forge/programs/zig_core_utils"
+_zig="/usr/local/zig/zig"
+
+build() {
+    cd "$_srcdir"
+    
+    local success=0
+    local failed=()
+    
+    for util in "${_utilities[@]}"; do
+        if [[ -d "$util" ]]; then
+            echo -n "Building $util... "
+            if (cd "$util" && $_zig build -Doptimize=ReleaseFast 2>/dev/null); then
+                echo "OK"
+                ((success++))
+            else
+                echo "FAIL"
+                failed+=("$util")
+            fi
+        fi
+    done
+    
+    echo ""
+    echo "Built $success/${#_utilities[@]} utilities"
+    [[ ${#failed[@]} -gt 0 ]] && echo "Failed: ${failed[*]}"
+}
+
+package() {
+    cd "$_srcdir"
+    
+    install -dm755 "${pkgdir}/usr/bin"
+    
+    local installed=0
+    for util in "${_utilities[@]}"; do
+        if [[ -f "${util}/zig-out/bin/${util}" ]]; then
+            install -Dm755 "${util}/zig-out/bin/${util}" "${pkgdir}/usr/bin/${util}"
+            ((installed++))
+        fi
+    done
+    
+    echo "Installed $installed utilities"
+    
+    install -Dm644 README.md "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+    install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}

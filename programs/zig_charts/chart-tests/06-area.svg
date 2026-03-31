@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="700" height="400"
+     viewBox="0 0 700 400">
+  <line x1="60.00" y1="360.00" x2="680.00" y2="360.00" stroke="#e5e5e5" stroke-width="1.00"/>
+  <line x1="60.00" y1="263.34" x2="680.00" y2="263.34" stroke="#e5e5e5" stroke-width="1.00"/>
+  <line x1="60.00" y1="166.68" x2="680.00" y2="166.68" stroke="#e5e5e5" stroke-width="1.00"/>
+  <line x1="60.00" y1="70.02" x2="680.00" y2="70.02" stroke="#e5e5e5" stroke-width="1.00"/>
+  <line x1="60.00" y1="20.00" x2="60.00" y2="360.00" stroke="#e5e5e5" stroke-width="1.00"/>
+  <line x1="163.33" y1="20.00" x2="163.33" y2="360.00" stroke="#e5e5e5" stroke-width="1.00"/>
+  <line x1="266.67" y1="20.00" x2="266.67" y2="360.00" stroke="#e5e5e5" stroke-width="1.00"/>
+  <line x1="370.00" y1="20.00" x2="370.00" y2="360.00" stroke="#e5e5e5" stroke-width="1.00"/>
+  <line x1="473.33" y1="20.00" x2="473.33" y2="360.00" stroke="#e5e5e5" stroke-width="1.00"/>
+  <line x1="576.67" y1="20.00" x2="576.67" y2="360.00" stroke="#e5e5e5" stroke-width="1.00"/>
+  <line x1="680.00" y1="20.00" x2="680.00" y2="360.00" stroke="#e5e5e5" stroke-width="1.00"/>
+  <defs><clipPath id="clip1"><rect x="60.00" y="20.00" width="620.00" height="340.00"/></clipPath></defs>
+  <g clip-path="url(#clip1)">
+    <path d="M60.00,360.00 L60.00,360.00 L163.33,359.03 L266.67,359.03 L370.00,358.07 L473.33,359.03 L576.67,358.07 L680.00,357.10 L680.00,360.00 Z " fill="rgba(59,130,246,0.70)"/>
+    <path d="M60.00,360.00 L163.33,359.03 L266.67,359.03 L370.00,358.07 L473.33,359.03 L576.67,358.07 L680.00,357.10 " fill="none" stroke="#3b82f6" stroke-width="2.00"/>
+    <path d="M60.00,360.00 L60.00,359.03 L163.33,358.07 L266.67,357.10 L370.00,355.17 L473.33,356.13 L576.67,354.20 L680.00,352.27 L680.00,360.00 Z " fill="rgba(59,130,246,0.70)"/>
+    <path d="M60.00,359.03 L163.33,358.07 L266.67,357.10 L370.00,355.17 L473.33,356.13 L576.67,354.20 L680.00,352.27 " fill="none" stroke="#3b82f6" stroke-width="2.00"/>
+    <path d="M60.00,360.00 L60.00,358.07 L163.33,357.10 L266.67,355.17 L370.00,356.13 L473.33,354.20 L576.67,352.27 L680.00,350.33 L680.00,360.00 Z " fill="rgba(59,130,246,0.70)"/>
+    <path d="M60.00,358.07 L163.33,357.10 L266.67,355.17 L370.00,356.13 L473.33,354.20 L576.67,352.27 L680.00,350.33 " fill="none" stroke="#3b82f6" stroke-width="2.00"/>
+    <path d="M60.00,360.00 L60.00,357.10 L163.33,355.17 L266.67,356.13 L370.00,354.20 L473.33,352.27 L576.67,355.17 L680.00,353.23 L680.00,360.00 Z " fill="rgba(59,130,246,0.70)"/>
+    <path d="M60.00,357.10 L163.33,355.17 L266.67,356.13 L370.00,354.20 L473.33,352.27 L576.67,355.17 L680.00,353.23 " fill="none" stroke="#3b82f6" stroke-width="2.00"/>
+    <path d="M60.00,360.00 L60.00,352.27 L163.33,348.40 L266.67,345.50 L370.00,350.33 L473.33,342.60 L576.67,338.73 L680.00,335.84 L680.00,360.00 Z " fill="rgba(59,130,246,0.70)"/>
+    <path d="M60.00,352.27 L163.33,348.40 L266.67,345.50 L370.00,350.33 L473.33,342.60 L576.67,338.73 L680.00,335.84 " fill="none" stroke="#3b82f6" stroke-width="2.00"/>
+    <path d="M60.00,360.00 L60.00,345.50 L163.33,342.60 L266.67,338.73 L370.00,335.84 L473.33,340.67 L576.67,332.94 L680.00,329.07 L680.00,360.00 Z " fill="rgba(59,130,246,0.70)"/>
+    <path d="M60.00,345.50 L163.33,342.60 L266.67,338.73 L370.00,335.84 L473.33,340.67 L576.67,332.94 L680.00,329.07 " fill="none" stroke="#3b82f6" stroke-width="2.00"/>
+    <path d="M60.00,360.00 L60.00,244.01 L163.33,219.84 L266.67,187.95 L370.00,157.01 L473.33,120.28 L576.67,79.69 L680.00,36.19 L680.00,360.00 Z " fill="rgba(59,130,246,0.70)"/>
+    <path d="M60.00,244.01 L163.33,219.84 L266.67,187.95 L370.00,157.01 L473.33,120.28 L576.67,79.69 L680.00,36.19 " fill="none" stroke="#3b82f6" stroke-width="2.00"/>
+  </g>
+  <line x1="60.00" y1="20.00" x2="60.00" y2="360.00" stroke="#a3a3a3" stroke-width="1.00"/>
+  <line x1="55.00" y1="360.00" x2="60.00" y2="360.00" stroke="#a3a3a3" stroke-width="1.00"/>
+  <text x="47.00" y="360.00" font-family="sans-serif" font-size="11.0" fill="#525252" text-anchor="end" dominant-baseline="middle">0</text>
+  <line x1="55.00" y1="263.34" x2="60.00" y2="263.34" stroke="#a3a3a3" stroke-width="1.00"/>
+  <text x="47.00" y="263.34" font-family="sans-serif" font-size="11.0" fill="#525252" text-anchor="end" dominant-baseline="middle">100</text>
+  <line x1="55.00" y1="166.68" x2="60.00" y2="166.68" stroke="#a3a3a3" stroke-width="1.00"/>
+  <text x="47.00" y="166.68" font-family="sans-serif" font-size="11.0" fill="#525252" text-anchor="end" dominant-baseline="middle">200</text>
+  <line x1="55.00" y1="70.02" x2="60.00" y2="70.02" stroke="#a3a3a3" stroke-width="1.00"/>
+  <text x="47.00" y="70.02" font-family="sans-serif" font-size="11.0" fill="#525252" text-anchor="end" dominant-baseline="middle">300</text>
+  <line x1="60.00" y1="360.00" x2="680.00" y2="360.00" stroke="#a3a3a3" stroke-width="1.00"/>
+  <line x1="60.00" y1="360.00" x2="60.00" y2="365.00" stroke="#a3a3a3" stroke-width="1.00"/>
+  <text x="60.00" y="373.00" font-family="sans-serif" font-size="11.0" fill="#525252" text-anchor="middle" dominant-baseline="hanging">0</text>
+  <line x1="163.33" y1="360.00" x2="163.33" y2="365.00" stroke="#a3a3a3" stroke-width="1.00"/>
+  <text x="163.33" y="373.00" font-family="sans-serif" font-size="11.0" fill="#525252" text-anchor="middle" dominant-baseline="hanging">1</text>
+  <line x1="266.67" y1="360.00" x2="266.67" y2="365.00" stroke="#a3a3a3" stroke-width="1.00"/>
+  <text x="266.67" y="373.00" font-family="sans-serif" font-size="11.0" fill="#525252" text-anchor="middle" dominant-baseline="hanging">2</text>
+  <line x1="370.00" y1="360.00" x2="370.00" y2="365.00" stroke="#a3a3a3" stroke-width="1.00"/>
+  <text x="370.00" y="373.00" font-family="sans-serif" font-size="11.0" fill="#525252" text-anchor="middle" dominant-baseline="hanging">3</text>
+  <line x1="473.33" y1="360.00" x2="473.33" y2="365.00" stroke="#a3a3a3" stroke-width="1.00"/>
+  <text x="473.33" y="373.00" font-family="sans-serif" font-size="11.0" fill="#525252" text-anchor="middle" dominant-baseline="hanging">4</text>
+  <line x1="576.67" y1="360.00" x2="576.67" y2="365.00" stroke="#a3a3a3" stroke-width="1.00"/>
+  <text x="576.67" y="373.00" font-family="sans-serif" font-size="11.0" fill="#525252" text-anchor="middle" dominant-baseline="hanging">5</text>
+  <line x1="680.00" y1="360.00" x2="680.00" y2="365.00" stroke="#a3a3a3" stroke-width="1.00"/>
+  <text x="680.00" y="373.00" font-family="sans-serif" font-size="11.0" fill="#525252" text-anchor="middle" dominant-baseline="hanging">6</text>
+  <rect x="550.00" y="30.00" width="120.00" height="146.00" fill="rgba(255,255,255,0.90)" stroke="#d4d4d4" stroke-width="1.00"/>
+  <rect x="560.00" y="42.00" width="12.00" height="12.00" fill="#3b82f6"/>
+  <text x="578.00" y="52.00" font-family="sans-serif" font-size="11.0" fill="#404040">Completed</text>
+  <rect x="560.00" y="60.00" width="12.00" height="12.00" fill="#3b82f6"/>
+  <text x="578.00" y="70.00" font-family="sans-serif" font-size="11.0" fill="#404040">In Progress</text>
+  <rect x="560.00" y="78.00" width="12.00" height="12.00" fill="#3b82f6"/>
+  <text x="578.00" y="88.00" font-family="sans-serif" font-size="11.0" fill="#404040">Scheduled</text>
+  <rect x="560.00" y="96.00" width="12.00" height="12.00" fill="#3b82f6"/>
+  <text x="578.00" y="106.00" font-family="sans-serif" font-size="11.0" fill="#404040">On Hold</text>
+  <rect x="560.00" y="114.00" width="12.00" height="12.00" fill="#3b82f6"/>
+  <text x="578.00" y="124.00" font-family="sans-serif" font-size="11.0" fill="#404040">Cancelled</text>
+  <rect x="560.00" y="132.00" width="12.00" height="12.00" fill="#3b82f6"/>
+  <text x="578.00" y="142.00" font-family="sans-serif" font-size="11.0" fill="#404040">Warranty</text>
+  <rect x="560.00" y="150.00" width="12.00" height="12.00" fill="#3b82f6"/>
+  <text x="578.00" y="160.00" font-family="sans-serif" font-size="11.0" fill="#404040">Rework</text>
+</svg>

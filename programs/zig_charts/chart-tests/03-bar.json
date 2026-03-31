@@ -1,0 +1,17 @@
+{
+  "type": "bar",
+  "title": "Monthly Installations by Type",
+  "width": 700,
+  "height": 400,
+  "data": {
+    "categories": ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul"],
+    "series": [
+      {"name": "Solar PV", "values": [8, 12, 15, 22, 28, 31, 35]},
+      {"name": "Heat Pumps", "values": [5, 7, 9, 11, 14, 12, 16]},
+      {"name": "Battery", "values": [2, 3, 4, 6, 8, 10, 12]}
+    ]
+  },
+  "config": {
+    "mode": "grouped"
+  }
+}

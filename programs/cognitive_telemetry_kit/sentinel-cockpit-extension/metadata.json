@@ -1,0 +1,7 @@
+{
+  "name": "Sentinel Cockpit",
+  "description": "Real-time strategic intelligence dashboard for The Conductor's behavioral analysis",
+  "uuid": "sentinel-cockpit@jesternet.org",
+  "shell-version": ["42", "43", "44", "45", "46", "47", "48", "49"],
+  "url": "https://github.com/jesternet/guardian-shield"
+}

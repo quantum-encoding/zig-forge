@@ -1,0 +1,26 @@
+{
+  "type": "scatter",
+  "width": 800,
+  "height": 500,
+  "data": {
+    "series": [
+      {
+        "name": "Dataset A",
+        "points": [
+          { "x": 1, "y": 5 },
+          { "x": 2, "y": 8 },
+          { "x": 3, "y": 4 },
+          { "x": 4, "y": 9 },
+          { "x": 5, "y": 6 },
+          { "x": 6, "y": 11 },
+          { "x": 7, "y": 8 }
+        ]
+      }
+    ]
+  },
+  "config": {
+    "show_trend_line": true,
+    "x_label": "Time (hours)",
+    "y_label": "Value"
+  }
+}

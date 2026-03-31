@@ -1,0 +1,40 @@
+# This is a TOML document
+
+title = "TOML Example"
+
+[owner]
+name = "Tom Preston-Werner"
+dob = "1979-05-27T07:32:00-08:00"
+
+[database]
+server = "192.168.1.1"
+ports = [ 8000, 8001, 8002 ]
+connection_max = 5000
+enabled = true
+
+[servers]
+
+  [servers.alpha]
+  ip = "10.0.0.1"
+  dc = "eqdc10"
+
+  [servers.beta]
+  ip = "10.0.0.2"
+  dc = "eqdc10"
+
+[clients]
+data = [ ["delta", "phi"], [3.14, 2.71] ]
+
+[package]
+version = "0.1.0"
+authors = ["Alice", "Bob"]
+keywords = ["parser", "toml", "zig"]
+
+[strings]
+basic = "Hello, World!"
+multiline = """
+The quick brown
+fox jumps over
+the lazy dog."""
+escaped = "Path: C:\\Users\\name\\file.txt"
+unicode = "Hello \u0048\u0065\u006c\u006c\u006f"

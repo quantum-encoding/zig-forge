@@ -1,0 +1,10 @@
+{"id":"get-test","method":"GET","url":"https://httpbin.org/get"}
+{"id":"post-json","method":"POST","url":"https://httpbin.org/post","headers":{"Content-Type":"application/json"},"body":"{\"test\":\"data\",\"timestamp\":1234567890}"}
+{"id":"status-200","method":"GET","url":"https://httpbin.org/status/200"}
+{"id":"status-404","method":"GET","url":"https://httpbin.org/status/404"}
+{"id":"status-500","method":"GET","url":"https://httpbin.org/status/500"}
+{"id":"delay-1s","method":"GET","url":"https://httpbin.org/delay/1"}
+{"id":"delay-2s","method":"GET","url":"https://httpbin.org/delay/2"}
+{"id":"headers","method":"GET","url":"https://httpbin.org/headers","headers":{"X-Custom-Header":"test-value","X-Request-ID":"12345"}}
+{"id":"user-agent","method":"GET","url":"https://httpbin.org/user-agent"}
+{"id":"delete","method":"DELETE","url":"https://httpbin.org/delete"}

@@ -1,0 +1,7 @@
+tool,avg_ms,median_ms,min_ms,max_ms
+gnu_mkdir_single,7,7,7,7
+zmkdir_single,6,6,6,7
+gnu_mkdir_nested,7,7,7,8
+zmkdir_nested,7,7,7,8
+gnu_mkdir_many,32,,164,
+zmkdir_many,41,42,39,44

@@ -1,0 +1,10 @@
+{"id":"auth-health","method":"GET","url":"http://auth-service:8080/health"}
+{"id":"user-health","method":"GET","url":"http://user-service:8080/health"}
+{"id":"order-health","method":"GET","url":"http://order-service:8080/health"}
+{"id":"payment-health","method":"GET","url":"http://payment-service:8080/health"}
+{"id":"notification-health","method":"GET","url":"http://notification-service:8080/health"}
+{"id":"inventory-health","method":"GET","url":"http://inventory-service:8080/health"}
+{"id":"search-health","method":"GET","url":"http://search-service:8080/health"}
+{"id":"analytics-health","method":"GET","url":"http://analytics-service:8080/health"}
+{"id":"gateway-health","method":"GET","url":"http://api-gateway:8080/health"}
+{"id":"cache-health","method":"GET","url":"http://cache-service:6379/health"}

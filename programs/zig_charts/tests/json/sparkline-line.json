@@ -1,0 +1,12 @@
+{
+  "type": "sparkline",
+  "width": 150,
+  "height": 40,
+  "data": {
+    "values": [3, 7, 4, 8, 5, 9, 6, 10, 7, 11]
+  },
+  "config": {
+    "fill": false,
+    "line_color": "#3B82F6"
+  }
+}

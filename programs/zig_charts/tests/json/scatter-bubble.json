@@ -1,0 +1,23 @@
+{
+  "type": "scatter",
+  "width": 800,
+  "height": 500,
+  "data": {
+    "series": [
+      {
+        "name": "Countries",
+        "points": [
+          { "x": 50000, "y": 80, "size": 330 },
+          { "x": 45000, "y": 82, "size": 67 },
+          { "x": 35000, "y": 75, "size": 1400 },
+          { "x": 25000, "y": 70, "size": 210 },
+          { "x": 15000, "y": 65, "size": 126 }
+        ]
+      }
+    ]
+  },
+  "config": {
+    "x_label": "GDP per capita ($)",
+    "y_label": "Life expectancy (years)"
+  }
+}

@@ -1,0 +1,7 @@
+ORACLE FINAL TEST
+=================
+Testing the Cognitive Oracle's ability to see and report.
+The Watcher should capture this Write tool invocation.
+Time: 2025-10-27 20:15:00
+
+EDIT: Added via Edit tool to test detection.

@@ -1,0 +1,41 @@
+{
+  "tenant_id": "TENANT_001",
+  "tenant_name": "SPY Hunter Algorithm",
+  "status": "active",
+  "tier": "GOLD",
+  "algorithm": {
+    "type": "spy_momentum_hunter",
+    "version": "1.0.0",
+    "description": "Aggressive SPY momentum trading with immediate market orders",
+    "parameters": {
+      "target_symbol": "SPY",
+      "order_size": 1,
+      "order_type": "market",
+      "trigger_threshold": 0.001,
+      "max_positions": 5,
+      "stop_loss_percentage": 0.02,
+      "take_profit_percentage": 0.01
+    }
+  },
+  "resource_limits": {
+    "cpu_cores": [8, 9],
+    "memory_mb": 512,
+    "max_orders_per_minute": 10,
+    "max_api_calls_per_second": 100
+  },
+  "billing": {
+    "pricing_model": "usage_based",
+    "rate_per_1000_packets": 0.0005,
+    "rate_per_order": 0.001,
+    "revenue_share_percentage": 10
+  },
+  "monitoring": {
+    "enable_real_time_metrics": true,
+    "alert_on_anomaly": true,
+    "performance_tracking": true
+  },
+  "credentials": {
+    "api_key_env": "TENANT_001_API_KEY",
+    "api_secret_env": "TENANT_001_API_SECRET"
+  }
+}

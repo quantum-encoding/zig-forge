@@ -1,0 +1,32 @@
+# /etc/systemd/system/cognitive-watcher.service
+[Unit]
+Description=Cognitive Watcher V2 - eBPF TTY Subsystem Monitor for Claude Cognitive States
+Documentation=https://quantumencoding.io
+After=network.target chronosd-cognitive.service
+Requires=chronosd-cognitive.service
+
+[Service]
+Type=simple
+WorkingDirectory=/var/lib/cognitive-watcher
+ExecStart=/usr/local/bin/cognitive-watcher
+Restart=on-failure
+RestartSec=5s
+
+# Security hardening
+NoNewPrivileges=false
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/sys/fs/bpf /var/lib/cognitive-watcher
+
+# Capabilities needed for eBPF
+AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_NET_ADMIN CAP_SYS_ADMIN
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_NET_ADMIN CAP_SYS_ADMIN
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cognitive-watcher
+
+[Install]
+WantedBy=multi-user.target

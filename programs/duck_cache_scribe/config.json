@@ -1,0 +1,8 @@
+{
+  "repo_path": "/home/founder/apps_and_extensions/duck-cache-scribe",
+  "remote_name": "origin",
+  "branch_name": "master",
+  "chronos_stamp_path": "/usr/local/bin/chronos-stamp",
+  "agent_id": "duckcache-scribe",
+  "debounce_ms": 5000
+}

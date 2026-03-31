@@ -1,0 +1,16 @@
+{
+  "type": "bar",
+  "width": 700,
+  "height": 400,
+  "data": {
+    "series": [
+      { "name": "Revenue", "values": [100, 150, 120, 180] },
+      { "name": "Expenses", "values": [80, 100, 90, 120] },
+      { "name": "Profit", "values": [20, 50, 30, 60] }
+    ],
+    "categories": ["Q1", "Q2", "Q3", "Q4"]
+  },
+  "config": {
+    "mode": "stacked"
+  }
+}

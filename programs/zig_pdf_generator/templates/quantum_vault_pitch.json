@@ -1,0 +1,2815 @@
+{
+  "page_size": { "width": 842, "height": 595 },
+  "pages": [
+    {
+      "background_color": "#0F172A",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 842,
+          "height": 4,
+          "fill_color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "QUANTUM",
+          "x": 60,
+          "y": 55,
+          "font_size": 18,
+          "font_weight": "bold",
+          "color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "VAULT",
+          "x": 172,
+          "y": 55,
+          "font_size": 18,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "text",
+          "content": "Your Keys. Your Coins. Your Edge.",
+          "x": 60,
+          "y": 75,
+          "font_size": 10,
+          "color": "#94A3B8"
+        },
+        {
+          "type": "text",
+          "content": "PARTNERSHIP DECK",
+          "x": 782,
+          "y": 55,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#06B6D4",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "February 2026",
+          "x": 782,
+          "y": 72,
+          "font_size": 9,
+          "color": "#64748B",
+          "align": "right"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 90,
+          "width": 722,
+          "height": 0,
+          "stroke_color": "#1E293B",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Non-Custodial",
+          "x": 60,
+          "y": 200,
+          "font_size": 42,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "text",
+          "content": "True Ownership",
+          "x": 60,
+          "y": 250,
+          "font_size": 42,
+          "font_weight": "bold",
+          "color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "Crypto Wallet",
+          "x": 60,
+          "y": 300,
+          "font_size": 42,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 325,
+          "width": 80,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 3
+        },
+        {
+          "type": "text",
+          "content": "A production-grade cryptocurrency wallet built on a hybrid Rust/Zig architecture for maximum performance and security. Multi-chain support across 12 blockchains with Lightning Network, cross-chain bridges, AI-powered analysis, and hardware wallet integration.",
+          "x": 60,
+          "y": 355,
+          "font_size": 13,
+          "color": "#94A3B8",
+          "max_width": 500,
+          "line_height": 1.5
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 600,
+          "y": 140,
+          "width": 185,
+          "height": 75,
+          "fill_color": "#1E293B",
+          "stroke_color": "#334155",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "BLOCKCHAINS",
+          "x": 692,
+          "y": 165,
+          "font_size": 9,
+          "color": "#64748B",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "12",
+          "x": 692,
+          "y": 198,
+          "font_size": 28,
+          "font_weight": "bold",
+          "color": "#06B6D4",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 600,
+          "y": 225,
+          "width": 185,
+          "height": 75,
+          "fill_color": "#1E293B",
+          "stroke_color": "#334155",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "FIAT CURRENCIES",
+          "x": 692,
+          "y": 250,
+          "font_size": 9,
+          "color": "#64748B",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "45+",
+          "x": 692,
+          "y": 283,
+          "font_size": 28,
+          "font_weight": "bold",
+          "color": "#06B6D4",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 600,
+          "y": 310,
+          "width": 185,
+          "height": 75,
+          "fill_color": "#1E293B",
+          "stroke_color": "#334155",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "PLATFORMS",
+          "x": 692,
+          "y": 335,
+          "font_size": 9,
+          "color": "#64748B",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "5",
+          "x": 692,
+          "y": 368,
+          "font_size": 28,
+          "font_weight": "bold",
+          "color": "#06B6D4",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 600,
+          "y": 395,
+          "width": 185,
+          "height": 75,
+          "fill_color": "#1E293B",
+          "stroke_color": "#334155",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "TOKENS",
+          "x": 692,
+          "y": 420,
+          "font_size": 9,
+          "color": "#64748B",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "1000+",
+          "x": 692,
+          "y": 453,
+          "font_size": 28,
+          "font_weight": "bold",
+          "color": "#06B6D4",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 510,
+          "width": 842,
+          "height": 85,
+          "fill_color": "#020617"
+        },
+        {
+          "type": "text",
+          "content": "Quantum Encoding LTD",
+          "x": 60,
+          "y": 535,
+          "font_size": 12,
+          "font_weight": "bold",
+          "color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "UK Company No. 16575953",
+          "x": 60,
+          "y": 555,
+          "font_size": 9,
+          "color": "#64748B"
+        },
+        {
+          "type": "text",
+          "content": "Quantum Encoding Europe Limited (Ireland)",
+          "x": 60,
+          "y": 572,
+          "font_size": 9,
+          "color": "#64748B"
+        },
+        {
+          "type": "text",
+          "content": "rich@quantumencoding.io  |  quantumencoding.io",
+          "x": 782,
+          "y": 555,
+          "font_size": 9,
+          "color": "#64748B",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "CONFIDENTIAL - For Partner Review",
+          "x": 782,
+          "y": 572,
+          "font_size": 8,
+          "color": "#475569",
+          "align": "right"
+        }
+      ]
+    },
+
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 842,
+          "height": 55,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "QUANTUM VAULT",
+          "x": 60,
+          "y": 35,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "The Problem",
+          "x": 782,
+          "y": 35,
+          "font_size": 11,
+          "color": "#94A3B8",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "The Problem",
+          "x": 60,
+          "y": 95,
+          "font_size": 26,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 108,
+          "width": 60,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 3
+        },
+        {
+          "type": "text",
+          "content": "Crypto users face critical challenges that existing solutions fail to address",
+          "x": 60,
+          "y": 130,
+          "font_size": 12,
+          "color": "#64748B"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 155,
+          "width": 230,
+          "height": 180,
+          "fill_color": "#F0F9FF",
+          "stroke_color": "#BAE6FD",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "SECURITY NIGHTMARES",
+          "x": 80,
+          "y": 180,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#0891B2"
+        },
+        {
+          "type": "bullet_list",
+          "x": 80,
+          "y": 200,
+          "font_size": 9,
+          "color": "#334155",
+          "bullet_color": "#06B6D4",
+          "line_spacing": 13,
+          "indent": 10,
+          "max_width": 200,
+          "items": [
+            "$3.4B+ stolen in crypto fraud by 2025",
+            "Exchange collapses (FTX, Celsius, BlockFi)",
+            "Phishing & address poisoning rising",
+            "Custodial failures lose user funds"
+          ]
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 305,
+          "y": 155,
+          "width": 230,
+          "height": 180,
+          "fill_color": "#F0F9FF",
+          "stroke_color": "#BAE6FD",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "FRAGMENTED EXPERIENCE",
+          "x": 325,
+          "y": 180,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#0891B2"
+        },
+        {
+          "type": "bullet_list",
+          "x": 325,
+          "y": 200,
+          "font_size": 10,
+          "color": "#334155",
+          "bullet_color": "#06B6D4",
+          "line_spacing": 14,
+          "indent": 12,
+          "items": [
+            "Different wallets for different chains",
+            "Manual trading across platforms",
+            "No unified portfolio view",
+            "Complex multi-app workflows"
+          ]
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 550,
+          "y": 155,
+          "width": 230,
+          "height": 180,
+          "fill_color": "#F0F9FF",
+          "stroke_color": "#BAE6FD",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "MISSING INNOVATION",
+          "x": 570,
+          "y": 180,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#0891B2"
+        },
+        {
+          "type": "bullet_list",
+          "x": 570,
+          "y": 200,
+          "font_size": 10,
+          "color": "#334155",
+          "bullet_color": "#06B6D4",
+          "line_spacing": 14,
+          "indent": 12,
+          "items": [
+            "No AI trading tools for retail",
+            "Lightning Network still inaccessible",
+            "Fiat on/off ramps often missing",
+            "Hardware wallets poorly integrated"
+          ]
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 360,
+          "width": 720,
+          "height": 65,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "THE OPPORTUNITY",
+          "x": 80,
+          "y": 385,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "Users are demanding self-custody solutions with institutional-grade features. The market needs a single wallet that combines security, multi-chain support, AI trading, Lightning payments, and seamless fiat integration — all without custodial risk.",
+          "x": 80,
+          "y": 405,
+          "font_size": 10,
+          "color": "#CBD5E1",
+          "max_width": 680
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 545,
+          "width": 722,
+          "height": 0,
+          "stroke_color": "#E2E8F0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Page 2 of 13  |  Quantum Vault Partnership Deck  |  CONFIDENTIAL",
+          "x": 421,
+          "y": 567,
+          "font_size": 9,
+          "color": "#94A3B8",
+          "align": "center"
+        }
+      ]
+    },
+
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 842,
+          "height": 55,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "QUANTUM VAULT",
+          "x": 60,
+          "y": 35,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "The Solution",
+          "x": 782,
+          "y": 35,
+          "font_size": 11,
+          "color": "#94A3B8",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "The Solution",
+          "x": 60,
+          "y": 95,
+          "font_size": 26,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 108,
+          "width": 60,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 3
+        },
+        {
+          "type": "text",
+          "content": "One wallet to rule them all — self-custodial, multi-chain, AI-powered",
+          "x": 60,
+          "y": 130,
+          "font_size": 12,
+          "color": "#64748B"
+        },
+        {
+          "type": "table",
+          "x": 60,
+          "y": 155,
+          "columns": ["Feature", "Description"],
+          "column_widths": [220, 500],
+          "rows": [
+            ["Self-Custodial Security", "Your keys, your crypto. Always. Zero custodial risk. AES-256-GCM encryption with Argon2id key derivation."],
+            ["12 Chain Support", "BTC, ETH, SOL, LTC, DOGE, XRP, TRX, ADA, Polygon, BNB, Base, Arbitrum, Optimism — unified interface."],
+            ["AI-Powered Analysis", "Gemini-powered market analysis with real-time technical indicators (RSI, MACD, Bollinger Bands)."],
+            ["Lightning Network", "Instant Bitcoin payments via Breez SDK. LNURL support, Lightning addresses, near-zero fees."],
+            ["Cross-Chain Bridges", "Li.Fi aggregator with 100+ bridges. Optimal routing and price impact calculation."],
+            ["Non-Custodial Swaps", "SideShift integration for privacy-preserving swaps. BTC, ETH, SOL, USDT, USDC, XMR and more."],
+            ["Hardware Wallets", "Trezor and Ledger integration. Keys never leave the hardware device."],
+            ["Multi-Signature", "Gnosis Safe integration on 6 EVM chains with custom M-of-N thresholds."],
+            ["Fiat On/Off Ramps", "Seamless conversion between crypto and 45+ fiat currencies via integrated partners."]
+          ],
+          "header_bg_color": "#06B6D4",
+          "header_text_color": "#ffffff",
+          "row_bg_color": "#ffffff",
+          "alt_row_bg_color": "#F0F9FF",
+          "text_color": "#334155",
+          "border_color": "#E2E8F0",
+          "font_size": 10,
+          "header_font_size": 11,
+          "padding": 8,
+          "row_height": 36,
+          "header_height": 32
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 545,
+          "width": 722,
+          "height": 0,
+          "stroke_color": "#E2E8F0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Page 3 of 13  |  Quantum Vault Partnership Deck  |  CONFIDENTIAL",
+          "x": 421,
+          "y": 567,
+          "font_size": 9,
+          "color": "#94A3B8",
+          "align": "center"
+        }
+      ]
+    },
+
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 842,
+          "height": 55,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "QUANTUM VAULT",
+          "x": 60,
+          "y": 35,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "Product Deep Dive",
+          "x": 782,
+          "y": 35,
+          "font_size": 11,
+          "color": "#94A3B8",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "Product Deep Dive",
+          "x": 60,
+          "y": 95,
+          "font_size": 26,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 108,
+          "width": 60,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 3
+        },
+        {
+          "type": "text",
+          "content": "A complete crypto operating system — not just a wallet",
+          "x": 60,
+          "y": 130,
+          "font_size": 12,
+          "color": "#64748B"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 150,
+          "width": 235,
+          "height": 175,
+          "fill_color": "#F0F9FF",
+          "stroke_color": "#BAE6FD",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "WALLET & CUSTODY",
+          "x": 75,
+          "y": 172,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#0891B2"
+        },
+        {
+          "type": "bullet_list",
+          "x": 75,
+          "y": 190,
+          "font_size": 9,
+          "color": "#334155",
+          "bullet_color": "#06B6D4",
+          "line_spacing": 12,
+          "indent": 10,
+          "items": [
+            "HD wallets (BIP32/39/44)",
+            "Multiple wallets & accounts",
+            "Account isolation & permissions",
+            "Shamir Secret Sharing backup",
+            "Steganographic seed storage",
+            "Address book with categories",
+            "Dust transaction filtering"
+          ]
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 305,
+          "y": 150,
+          "width": 235,
+          "height": 175,
+          "fill_color": "#F0F9FF",
+          "stroke_color": "#BAE6FD",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "TRADING & ANALYSIS",
+          "x": 320,
+          "y": 172,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#0891B2"
+        },
+        {
+          "type": "bullet_list",
+          "x": 320,
+          "y": 190,
+          "font_size": 9,
+          "color": "#334155",
+          "bullet_color": "#06B6D4",
+          "line_spacing": 12,
+          "indent": 10,
+          "items": [
+            "AI market analysis (Gemini)",
+            "TradingView charts",
+            "RSI, MACD, Bollinger Bands",
+            "Limit orders",
+            "US equities via Alpaca",
+            "Real-time WebSocket quotes",
+            "Portfolio tracking & CSV export"
+          ]
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 550,
+          "y": 150,
+          "width": 235,
+          "height": 175,
+          "fill_color": "#F0F9FF",
+          "stroke_color": "#BAE6FD",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "PAYMENTS & BRIDGES",
+          "x": 565,
+          "y": 172,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#0891B2"
+        },
+        {
+          "type": "bullet_list",
+          "x": 565,
+          "y": 190,
+          "font_size": 9,
+          "color": "#334155",
+          "bullet_color": "#06B6D4",
+          "line_spacing": 12,
+          "indent": 10,
+          "items": [
+            "Lightning Network (Breez SDK)",
+            "LNURL pay/withdraw/auth",
+            "Lightning addresses",
+            "Li.Fi cross-chain bridges",
+            "SideShift swaps (no KYC)",
+            "Fiat on/off ramps",
+            "PDF receipt generation"
+          ]
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 340,
+          "width": 235,
+          "height": 175,
+          "fill_color": "#F0F9FF",
+          "stroke_color": "#BAE6FD",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "SECURITY & HARDWARE",
+          "x": 75,
+          "y": 362,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#0891B2"
+        },
+        {
+          "type": "bullet_list",
+          "x": 75,
+          "y": 380,
+          "font_size": 9,
+          "color": "#334155",
+          "bullet_color": "#06B6D4",
+          "line_spacing": 12,
+          "indent": 10,
+          "items": [
+            "AES-256-GCM encryption",
+            "Argon2id key derivation",
+            "Trezor & Ledger support",
+            "Gnosis Safe multi-sig",
+            "PIN + biometrics",
+            "Address poisoning detection",
+            "Secure memory zeroization"
+          ]
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 305,
+          "y": 340,
+          "width": 235,
+          "height": 175,
+          "fill_color": "#F0F9FF",
+          "stroke_color": "#BAE6FD",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "DEFI & NFTS",
+          "x": 320,
+          "y": 362,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#0891B2"
+        },
+        {
+          "type": "bullet_list",
+          "x": 320,
+          "y": 380,
+          "font_size": 9,
+          "color": "#334155",
+          "bullet_color": "#06B6D4",
+          "line_spacing": 12,
+          "indent": 10,
+          "items": [
+            "WalletConnect V2",
+            "dApp session management",
+            "Isolated dApp account",
+            "NFT gallery (multi-chain)",
+            "QNFT (photo signing)",
+            "ERC-20/721/1155 support",
+            "Custom token addition"
+          ]
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 550,
+          "y": 340,
+          "width": 235,
+          "height": 175,
+          "fill_color": "#F0F9FF",
+          "stroke_color": "#BAE6FD",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "STABLECOINS & TOKENS",
+          "x": 565,
+          "y": 362,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#0891B2"
+        },
+        {
+          "type": "bullet_list",
+          "x": 565,
+          "y": 380,
+          "font_size": 9,
+          "color": "#334155",
+          "bullet_color": "#06B6D4",
+          "line_spacing": 12,
+          "indent": 10,
+          "items": [
+            "USDT/USDC multi-chain",
+            "Unified balance view",
+            "ERC-20, TRC-20, SPL, BEP-20",
+            "Custom token search & add",
+            "Auto metadata fetch",
+            "Cross-chain stablecoin sends",
+            "Dedicated stablecoin UI"
+          ]
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 545,
+          "width": 722,
+          "height": 0,
+          "stroke_color": "#E2E8F0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Page 4 of 13  |  Quantum Vault Partnership Deck  |  CONFIDENTIAL",
+          "x": 421,
+          "y": 567,
+          "font_size": 9,
+          "color": "#94A3B8",
+          "align": "center"
+        }
+      ]
+    },
+
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 842,
+          "height": 55,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "QUANTUM VAULT",
+          "x": 60,
+          "y": 35,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "Fiat Integration",
+          "x": 782,
+          "y": 35,
+          "font_size": 11,
+          "color": "#94A3B8",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "Fiat Integration",
+          "x": 60,
+          "y": 95,
+          "font_size": 26,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 108,
+          "width": 60,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 3
+        },
+        {
+          "type": "text",
+          "content": "Seamless fiat on/off ramp experience — the bridge between traditional and decentralised finance",
+          "x": 60,
+          "y": 130,
+          "font_size": 12,
+          "color": "#64748B"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 155,
+          "width": 350,
+          "height": 140,
+          "fill_color": "#F0F9FF",
+          "stroke_color": "#BAE6FD",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "WHY FIAT INTEGRATION MATTERS",
+          "x": 80,
+          "y": 178,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#0891B2"
+        },
+        {
+          "type": "bullet_list",
+          "x": 80,
+          "y": 198,
+          "font_size": 10,
+          "color": "#334155",
+          "bullet_color": "#06B6D4",
+          "line_spacing": 14,
+          "indent": 12,
+          "items": [
+            "Users need frictionless fiat-to-crypto conversion",
+            "Self-custodial wallets traditionally lack fiat options",
+            "Compliant on/off ramps build trust and expand reach",
+            "Direct deposit to user's self-custodial addresses",
+            "Embedded widget keeps users in-app"
+          ]
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 425,
+          "y": 155,
+          "width": 355,
+          "height": 140,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "INTEGRATION APPROACH",
+          "x": 445,
+          "y": 178,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#06B6D4"
+        },
+        {
+          "type": "bullet_list",
+          "x": 445,
+          "y": 198,
+          "font_size": 10,
+          "color": "#CBD5E1",
+          "bullet_color": "#06B6D4",
+          "line_spacing": 14,
+          "indent": 12,
+          "items": [
+            "Embedded widget within wallet interface",
+            "User remains in-app throughout flow",
+            "Direct deposit to self-custodial addresses",
+            "Multiple payment methods supported",
+            "Partner handles KYC/AML compliance"
+          ]
+        },
+        {
+          "type": "text",
+          "content": "Supported Fiat Currencies",
+          "x": 60,
+          "y": 320,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "table",
+          "x": 60,
+          "y": 340,
+          "columns": ["Region", "Currencies", "Payment Methods"],
+          "column_widths": [150, 370, 200],
+          "rows": [
+            ["Europe", "EUR, GBP, CHF, SEK, NOK, DKK, PLN, CZK, HUF, TRY, UAH", "SEPA, Cards, Apple Pay, Google Pay"],
+            ["Americas", "USD, CAD, BRL, MXN, ARS, CLP", "Cards, ACH, PIX, SPEI"],
+            ["Asia Pacific", "AUD, NZD, JPY, KRW, CNY, HKD, SGD, INR, PHP, THB, IDR", "Cards, PayID, Local Methods"],
+            ["Middle East", "SAR, AED, KWD, BHD, ILS", "Cards, Local Methods"],
+            ["Africa", "ZAR, NGN, KES, GHS, EGP", "Cards, Mobile Money"]
+          ],
+          "header_bg_color": "#06B6D4",
+          "header_text_color": "#ffffff",
+          "row_bg_color": "#ffffff",
+          "alt_row_bg_color": "#F0F9FF",
+          "text_color": "#334155",
+          "border_color": "#E2E8F0",
+          "font_size": 9,
+          "header_font_size": 10,
+          "padding": 8,
+          "row_height": 30,
+          "header_height": 28
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 500,
+          "width": 720,
+          "height": 30,
+          "fill_color": "#ECFEFF",
+          "stroke_color": "#06B6D4",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "45+ supported fiat currencies  |  Global coverage  |  Self-custodial — user funds never held by Quantum Vault",
+          "x": 421,
+          "y": 520,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#0891B2",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 545,
+          "width": 722,
+          "height": 0,
+          "stroke_color": "#E2E8F0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Page 5 of 13  |  Quantum Vault Partnership Deck  |  CONFIDENTIAL",
+          "x": 421,
+          "y": 567,
+          "font_size": 9,
+          "color": "#94A3B8",
+          "align": "center"
+        }
+      ]
+    },
+
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 842,
+          "height": 55,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "QUANTUM VAULT",
+          "x": 60,
+          "y": 35,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "Security Architecture",
+          "x": 782,
+          "y": 35,
+          "font_size": 11,
+          "color": "#94A3B8",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "Security Architecture",
+          "x": 60,
+          "y": 95,
+          "font_size": 26,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 108,
+          "width": 60,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 3
+        },
+        {
+          "type": "text",
+          "content": "Bank-grade protection with self-custodial control — no data sent to our servers",
+          "x": 60,
+          "y": 130,
+          "font_size": 12,
+          "color": "#64748B"
+        },
+        {
+          "type": "table",
+          "x": 60,
+          "y": 155,
+          "columns": ["Security Layer", "Implementation"],
+          "column_widths": [200, 520],
+          "rows": [
+            ["Encryption", "AES-256-GCM authenticated encryption for all sensitive data at rest"],
+            ["Key Derivation", "Argon2id memory-hard KDF — resistant to GPU/ASIC brute-force attacks"],
+            ["Access Control", "6-digit PIN with rate limiting, configurable auto-lock, Face ID / Touch ID / Fingerprint"],
+            ["Hardware Wallets", "Trezor (One, Model T, Safe 3) and Ledger (Nano S, X, S Plus) — keys never leave device"],
+            ["Multi-Signature", "Gnosis Safe on 6 EVM chains with custom M-of-N signing thresholds"],
+            ["Memory Safety", "Sensitive data zeroization after use via zeroize crate. Secure memory handling throughout."],
+            ["Address Protection", "Automatic address poisoning detection, similar address warnings, visual identicons"],
+            ["dApp Isolation", "Separate derivation path for WalletConnect — dApp compromise cannot access main funds"],
+            ["Backup Security", "Shamir Secret Sharing (M-of-N), steganographic seed embedding in photos"]
+          ],
+          "header_bg_color": "#06B6D4",
+          "header_text_color": "#ffffff",
+          "row_bg_color": "#ffffff",
+          "alt_row_bg_color": "#F0F9FF",
+          "text_color": "#334155",
+          "border_color": "#E2E8F0",
+          "font_size": 10,
+          "header_font_size": 11,
+          "padding": 8,
+          "row_height": 34,
+          "header_height": 32
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 498,
+          "width": 720,
+          "height": 35,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "Zero Trust Model: All wallet data stored locally. Only blockchain queries, broadcasts, and price requests leave the device.",
+          "x": 421,
+          "y": 520,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#06B6D4",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 545,
+          "width": 722,
+          "height": 0,
+          "stroke_color": "#E2E8F0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Page 6 of 13  |  Quantum Vault Partnership Deck  |  CONFIDENTIAL",
+          "x": 421,
+          "y": 567,
+          "font_size": 9,
+          "color": "#94A3B8",
+          "align": "center"
+        }
+      ]
+    },
+
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 842,
+          "height": 55,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "QUANTUM VAULT",
+          "x": 60,
+          "y": 35,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "User Safety",
+          "x": 782,
+          "y": 35,
+          "font_size": 11,
+          "color": "#94A3B8",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "User Safety Features",
+          "x": 60,
+          "y": 95,
+          "font_size": 26,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 108,
+          "width": 60,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 3
+        },
+        {
+          "type": "text",
+          "content": "Designed to protect users from common crypto mistakes and attacks",
+          "x": 60,
+          "y": 130,
+          "font_size": 12,
+          "color": "#64748B"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 155,
+          "width": 235,
+          "height": 175,
+          "fill_color": "#F0F9FF",
+          "stroke_color": "#BAE6FD",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "VISUAL ADDRESS SAFETY",
+          "x": 75,
+          "y": 178,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#0891B2"
+        },
+        {
+          "type": "bullet_list",
+          "x": 75,
+          "y": 198,
+          "font_size": 9,
+          "color": "#334155",
+          "bullet_color": "#06B6D4",
+          "line_spacing": 13,
+          "indent": 10,
+          "max_width": 195,
+          "items": [
+            "Unique emoji identicons for every address",
+            "Visual confirmation before sending",
+            "Instant recognition of saved contacts",
+            "Prevents copy-paste address swaps",
+            "Works across all 12 blockchains"
+          ]
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 305,
+          "y": 155,
+          "width": 235,
+          "height": 175,
+          "fill_color": "#F0F9FF",
+          "stroke_color": "#BAE6FD",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "ATTACK PREVENTION GUIDE",
+          "x": 320,
+          "y": 178,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#0891B2"
+        },
+        {
+          "type": "bullet_list",
+          "x": 320,
+          "y": 198,
+          "font_size": 9,
+          "color": "#334155",
+          "bullet_color": "#06B6D4",
+          "line_spacing": 13,
+          "indent": 10,
+          "max_width": 195,
+          "items": [
+            "Built-in security education hub",
+            "Real-world attack examples",
+            "Phishing detection guidance",
+            "Social engineering warnings",
+            "Regular security tips & updates"
+          ]
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 550,
+          "y": 155,
+          "width": 235,
+          "height": 175,
+          "fill_color": "#F0F9FF",
+          "stroke_color": "#BAE6FD",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "IN-APP HELP SYSTEM",
+          "x": 565,
+          "y": 178,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#0891B2"
+        },
+        {
+          "type": "bullet_list",
+          "x": 565,
+          "y": 198,
+          "font_size": 9,
+          "color": "#334155",
+          "bullet_color": "#06B6D4",
+          "line_spacing": 13,
+          "indent": 10,
+          "max_width": 195,
+          "items": [
+            "Contextual help on every screen",
+            "Step-by-step transaction guides",
+            "Fee estimation explanations",
+            "Network status indicators",
+            "Recovery procedure walkthroughs"
+          ]
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 350,
+          "width": 355,
+          "height": 130,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "ADDRESS POISONING PROTECTION",
+          "x": 80,
+          "y": 375,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#06B6D4"
+        },
+        {
+          "type": "bullet_list",
+          "x": 80,
+          "y": 395,
+          "font_size": 9,
+          "color": "#CBD5E1",
+          "bullet_color": "#06B6D4",
+          "line_spacing": 13,
+          "indent": 10,
+          "max_width": 315,
+          "items": [
+            "Automatic detection of similar-looking addresses",
+            "Warnings when addresses differ by only a few characters",
+            "Transaction history analysis to flag suspicious patterns",
+            "Dust transaction filtering to prevent confusion"
+          ]
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 425,
+          "y": 350,
+          "width": 355,
+          "height": 130,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "TRANSACTION CONFIRMATION",
+          "x": 445,
+          "y": 375,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#06B6D4"
+        },
+        {
+          "type": "bullet_list",
+          "x": 445,
+          "y": 395,
+          "font_size": 9,
+          "color": "#CBD5E1",
+          "bullet_color": "#06B6D4",
+          "line_spacing": 13,
+          "indent": 10,
+          "max_width": 315,
+          "items": [
+            "Clear breakdown of transaction details before signing",
+            "Gas/fee estimates in both crypto and fiat values",
+            "Warning thresholds for unusually large transactions",
+            "Multi-step confirmation for high-value transfers"
+          ]
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 495,
+          "width": 720,
+          "height": 35,
+          "fill_color": "#ECFEFF",
+          "stroke_color": "#06B6D4",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "User safety is not an afterthought — it's built into every interaction, from first launch to daily use.",
+          "x": 421,
+          "y": 518,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#0891B2",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 545,
+          "width": 722,
+          "height": 0,
+          "stroke_color": "#E2E8F0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Page 7 of 13  |  Quantum Vault Partnership Deck  |  CONFIDENTIAL",
+          "x": 421,
+          "y": 567,
+          "font_size": 9,
+          "color": "#94A3B8",
+          "align": "center"
+        }
+      ]
+    },
+
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 842,
+          "height": 55,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "QUANTUM VAULT",
+          "x": 60,
+          "y": 35,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "Technology",
+          "x": 782,
+          "y": 35,
+          "font_size": 11,
+          "color": "#94A3B8",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "Technology Stack",
+          "x": 60,
+          "y": 95,
+          "font_size": 26,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 108,
+          "width": 60,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 3
+        },
+        {
+          "type": "text",
+          "content": "Hybrid Rust/Zig architecture — built for performance, security, and cross-platform deployment",
+          "x": 60,
+          "y": 130,
+          "font_size": 12,
+          "color": "#64748B"
+        },
+        {
+          "type": "table",
+          "x": 60,
+          "y": 155,
+          "columns": ["Layer", "Technologies"],
+          "column_widths": [170, 295],
+          "rows": [
+            ["Frontend", "Svelte 5, TypeScript 5.6, Tailwind CSS 3.4, TradingView Charts"],
+            ["Desktop Framework", "Tauri 2.0 with Rust backend, Tokio async runtime"],
+            ["Blockchain", "Alloy (Ethereum/EVM), bip39/bip32, ed25519-dalek, secp256k1"],
+            ["Database", "sled embedded DB, AES-256-GCM at rest"],
+            ["Mobile", "Tauri Mobile (iOS + Android), WebHID for hardware wallets"]
+          ],
+          "header_bg_color": "#06B6D4",
+          "header_text_color": "#ffffff",
+          "row_bg_color": "#ffffff",
+          "alt_row_bg_color": "#F0F9FF",
+          "text_color": "#334155",
+          "border_color": "#E2E8F0",
+          "font_size": 10,
+          "header_font_size": 11,
+          "padding": 8,
+          "row_height": 30,
+          "header_height": 30
+        },
+        {
+          "type": "text",
+          "content": "ZIG ACCELERATION LAYER",
+          "x": 545,
+          "y": 170,
+          "font_size": 12,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 545,
+          "y": 185,
+          "width": 235,
+          "height": 120,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "bullet_list",
+          "x": 560,
+          "y": 205,
+          "font_size": 9,
+          "color": "#CBD5E1",
+          "bullet_color": "#06B6D4",
+          "line_spacing": 14,
+          "indent": 10,
+          "items": [
+            "SIMD-accelerated cryptography",
+            "High-speed JSON parsing",
+            "PDF document generation",
+            "Memory-safe allocators",
+            "Zero external dependencies"
+          ]
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 340,
+          "width": 235,
+          "height": 80,
+          "fill_color": "#F0F9FF",
+          "stroke_color": "#BAE6FD",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "INSTANT RESPONSE",
+          "x": 75,
+          "y": 362,
+          "font_size": 9,
+          "font_weight": "bold",
+          "color": "#0891B2"
+        },
+        {
+          "type": "text",
+          "content": "Sub-millisecond wallet operations. No waiting for signatures or confirmations.",
+          "x": 75,
+          "y": 380,
+          "font_size": 9,
+          "color": "#334155",
+          "max_width": 205
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 305,
+          "y": 340,
+          "width": 235,
+          "height": 80,
+          "fill_color": "#F0F9FF",
+          "stroke_color": "#BAE6FD",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "NATIVE PERFORMANCE",
+          "x": 320,
+          "y": 362,
+          "font_size": 9,
+          "font_weight": "bold",
+          "color": "#0891B2"
+        },
+        {
+          "type": "text",
+          "content": "Desktop-class speed on mobile. Same codebase runs everywhere.",
+          "x": 320,
+          "y": 380,
+          "font_size": 9,
+          "color": "#334155",
+          "max_width": 205
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 550,
+          "y": 340,
+          "width": 230,
+          "height": 80,
+          "fill_color": "#F0F9FF",
+          "stroke_color": "#BAE6FD",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "AUDITABLE CODE",
+          "x": 565,
+          "y": 362,
+          "font_size": 9,
+          "font_weight": "bold",
+          "color": "#0891B2"
+        },
+        {
+          "type": "text",
+          "content": "Memory-safe Rust + Zig. No hidden dependencies or supply chain risk.",
+          "x": 565,
+          "y": 380,
+          "font_size": 9,
+          "color": "#334155",
+          "max_width": 200
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 435,
+          "width": 720,
+          "height": 70,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "WHY THIS MATTERS",
+          "x": 80,
+          "y": 455,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "Unlike wallets built on slow frameworks, Quantum Vault uses a hybrid Rust/Zig architecture. Rust provides memory safety for the application. Zig accelerates cryptography, document generation, and data processing — delivering institutional-grade performance on consumer hardware.",
+          "x": 80,
+          "y": 475,
+          "font_size": 9,
+          "color": "#CBD5E1",
+          "max_width": 680
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 545,
+          "width": 722,
+          "height": 0,
+          "stroke_color": "#E2E8F0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Page 8 of 13  |  Quantum Vault Partnership Deck  |  CONFIDENTIAL",
+          "x": 421,
+          "y": 567,
+          "font_size": 9,
+          "color": "#94A3B8",
+          "align": "center"
+        }
+      ]
+    },
+
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 842,
+          "height": 55,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "QUANTUM VAULT",
+          "x": 60,
+          "y": 35,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "Multi-Chain Support",
+          "x": 782,
+          "y": 35,
+          "font_size": 11,
+          "color": "#94A3B8",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "Multi-Chain Support",
+          "x": 60,
+          "y": 95,
+          "font_size": 26,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 108,
+          "width": 60,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 3
+        },
+        {
+          "type": "text",
+          "content": "12 blockchains with native support — not wrapped tokens or bridges",
+          "x": 60,
+          "y": 130,
+          "font_size": 12,
+          "color": "#64748B"
+        },
+        {
+          "type": "table",
+          "x": 60,
+          "y": 155,
+          "columns": ["Blockchain", "Key Features", "Token Standards"],
+          "column_widths": [170, 340, 210],
+          "rows": [
+            ["Bitcoin", "Native SegWit (bc1...), Lightning Network, UTXO optimization, Electrum", "BTC"],
+            ["Ethereum", "ERC-20, ERC-721, ERC-1155, EIP-712 signing, MEV protection", "ERC-20, NFTs"],
+            ["Solana", "SPL tokens, sub-second finality", "SPL"],
+            ["Polygon", "L2 scaling, low fees, full EVM compatibility", "ERC-20"],
+            ["BNB Smart Chain", "BEP-20 tokens, low-cost transactions", "BEP-20"],
+            ["Tron", "TRC-20 tokens (major USDT chain), energy/bandwidth model", "TRC-20"],
+            ["Cardano", "Native ADA transactions, extended UTXO model", "ADA"],
+            ["XRP (Ripple)", "Fast cross-border settlements, payment channels", "XRP"],
+            ["Litecoin", "Native SegWit, fast confirmations", "LTC"],
+            ["Dogecoin", "Native DOGE support", "DOGE"],
+            ["Layer 2s", "Base, Arbitrum, Optimism — full EVM with low fees", "ERC-20"]
+          ],
+          "header_bg_color": "#06B6D4",
+          "header_text_color": "#ffffff",
+          "row_bg_color": "#ffffff",
+          "alt_row_bg_color": "#F0F9FF",
+          "text_color": "#334155",
+          "border_color": "#E2E8F0",
+          "font_size": 9,
+          "header_font_size": 10,
+          "padding": 8,
+          "row_height": 28,
+          "header_height": 28
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 470,
+          "width": 350,
+          "height": 55,
+          "fill_color": "#F0F9FF",
+          "stroke_color": "#BAE6FD",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "CROSS-CHAIN BRIDGES",
+          "x": 80,
+          "y": 490,
+          "font_size": 9,
+          "font_weight": "bold",
+          "color": "#0891B2"
+        },
+        {
+          "type": "text",
+          "content": "Li.Fi aggregator: 100+ bridges and DEXes across Ethereum, Polygon, Arbitrum, Optimism, Base, Avalanche, BSC, Fantom, Gnosis, Linea",
+          "x": 80,
+          "y": 507,
+          "font_size": 9,
+          "color": "#334155",
+          "max_width": 310
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 420,
+          "y": 470,
+          "width": 360,
+          "height": 55,
+          "fill_color": "#F0F9FF",
+          "stroke_color": "#BAE6FD",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "NON-CUSTODIAL SWAPS",
+          "x": 440,
+          "y": 490,
+          "font_size": 9,
+          "font_weight": "bold",
+          "color": "#0891B2"
+        },
+        {
+          "type": "text",
+          "content": "SideShift integration: BTC, ETH, SOL, LTC, DOGE, XRP, USDT, USDC, TRX, XMR, MATIC, AVAX. Fixed and variable rates. No KYC required.",
+          "x": 440,
+          "y": 507,
+          "font_size": 9,
+          "color": "#334155",
+          "max_width": 320
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 545,
+          "width": 722,
+          "height": 0,
+          "stroke_color": "#E2E8F0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Page 9 of 13  |  Quantum Vault Partnership Deck  |  CONFIDENTIAL",
+          "x": 421,
+          "y": 567,
+          "font_size": 9,
+          "color": "#94A3B8",
+          "align": "center"
+        }
+      ]
+    },
+
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 842,
+          "height": 55,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "QUANTUM VAULT",
+          "x": 60,
+          "y": 35,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "Platform Support",
+          "x": 782,
+          "y": 35,
+          "font_size": 11,
+          "color": "#94A3B8",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "Platform Support",
+          "x": 60,
+          "y": 95,
+          "font_size": 26,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 108,
+          "width": 60,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 3
+        },
+        {
+          "type": "text",
+          "content": "True cross-platform — one codebase, every major OS, native performance",
+          "x": 60,
+          "y": 130,
+          "font_size": 12,
+          "color": "#64748B"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 160,
+          "width": 140,
+          "height": 130,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "LINUX",
+          "x": 130,
+          "y": 200,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#06B6D4",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "Primary Dev",
+          "x": 130,
+          "y": 220,
+          "font_size": 9,
+          "color": "#94A3B8",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "Full Support",
+          "x": 130,
+          "y": 275,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#22D3EE",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 208,
+          "y": 160,
+          "width": 140,
+          "height": 130,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "macOS",
+          "x": 278,
+          "y": 200,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#06B6D4",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "Apple Silicon + Intel",
+          "x": 278,
+          "y": 220,
+          "font_size": 9,
+          "color": "#94A3B8",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "Full Support",
+          "x": 278,
+          "y": 275,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#22D3EE",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 356,
+          "y": 160,
+          "width": 140,
+          "height": 130,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "WINDOWS",
+          "x": 426,
+          "y": 200,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#06B6D4",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "Windows 10/11",
+          "x": 426,
+          "y": 220,
+          "font_size": 9,
+          "color": "#94A3B8",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "Full Support",
+          "x": 426,
+          "y": 275,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#22D3EE",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 504,
+          "y": 160,
+          "width": 140,
+          "height": 130,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "ANDROID",
+          "x": 574,
+          "y": 200,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#06B6D4",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "Google Play, USB OTG",
+          "x": 574,
+          "y": 220,
+          "font_size": 9,
+          "color": "#94A3B8",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "Full Support",
+          "x": 574,
+          "y": 275,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#22D3EE",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 652,
+          "y": 160,
+          "width": 140,
+          "height": 130,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "iOS",
+          "x": 722,
+          "y": 200,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#06B6D4",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "Face ID / Touch ID",
+          "x": 722,
+          "y": 220,
+          "font_size": 9,
+          "color": "#94A3B8",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "Full Support",
+          "x": 722,
+          "y": 275,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#22D3EE",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "API Integrations",
+          "x": 60,
+          "y": 325,
+          "font_size": 16,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "table",
+          "x": 60,
+          "y": 345,
+          "columns": ["Category", "Services"],
+          "column_widths": [180, 540],
+          "rows": [
+            ["Blockchain RPCs", "Electrum, Infura, Alchemy, BSC RPC, TronGrid, Solana RPC, Blockstream"],
+            ["Price & Market Data", "CoinGecko, CoinMarketCap, Etherscan Gas Oracle"],
+            ["Trading", "Alpaca (US Equities + Crypto), SideShift (Non-custodial swaps)"],
+            ["Fiat Services", "Alchemy Pay (45+ fiat currencies, global coverage)"],
+            ["AI Analysis", "Google Gemini (anonymized market analysis queries)"],
+            ["Lightning", "Breez SDK (non-custodial Lightning payments)"],
+            ["Connectivity", "WalletConnect V2 (80,000+ dApps), Li.Fi Bridge Aggregator"]
+          ],
+          "header_bg_color": "#06B6D4",
+          "header_text_color": "#ffffff",
+          "row_bg_color": "#ffffff",
+          "alt_row_bg_color": "#F0F9FF",
+          "text_color": "#334155",
+          "border_color": "#E2E8F0",
+          "font_size": 9,
+          "header_font_size": 10,
+          "padding": 8,
+          "row_height": 24,
+          "header_height": 26
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 545,
+          "width": 722,
+          "height": 0,
+          "stroke_color": "#E2E8F0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Page 10 of 13  |  Quantum Vault Partnership Deck  |  CONFIDENTIAL",
+          "x": 421,
+          "y": 567,
+          "font_size": 9,
+          "color": "#94A3B8",
+          "align": "center"
+        }
+      ]
+    },
+
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 842,
+          "height": 55,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "QUANTUM VAULT",
+          "x": 60,
+          "y": 35,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "Competitive Landscape",
+          "x": 782,
+          "y": 35,
+          "font_size": 11,
+          "color": "#94A3B8",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "Competitive Landscape",
+          "x": 60,
+          "y": 95,
+          "font_size": 26,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 108,
+          "width": 60,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 3
+        },
+        {
+          "type": "text",
+          "content": "No other wallet combines self-custody, AI analysis, Lightning, and multi-chain in one app",
+          "x": 60,
+          "y": 130,
+          "font_size": 12,
+          "color": "#64748B"
+        },
+        {
+          "type": "table",
+          "x": 60,
+          "y": 155,
+          "columns": ["Feature", "Quantum Vault", "MetaMask", "Phantom", "Trust Wallet", "Ledger Live"],
+          "column_widths": [170, 120, 100, 100, 100, 100],
+          "rows": [
+            ["Self-Custodial", "Yes", "Yes", "Yes", "Partial", "Yes"],
+            ["Multi-Chain (10+)", "12 chains", "EVM only", "4 chains", "70+ chains", "10+ chains"],
+            ["AI Analysis", "Yes (Gemini)", "No", "No", "No", "No"],
+            ["Lightning Network", "Yes (Breez)", "No", "No", "No", "No"],
+            ["Hardware Wallets", "Trezor + Ledger", "Partial", "Ledger", "No", "Ledger only"],
+            ["Cross-Chain Bridge", "Li.Fi (100+)", "Bridges tab", "No", "Built-in", "Paraswap"],
+            ["Non-Custodial Swaps", "SideShift", "Swaps", "Jupiter", "Trust Swap", "Paraswap"],
+            ["Multi-Sig (Safe)", "Yes (6 chains)", "Via Snap", "No", "No", "No"],
+            ["Fiat On/Off Ramp", "Alchemy Pay", "Transak", "MoonPay", "Built-in", "Coinify"],
+            ["WalletConnect V2", "Yes", "No (is MetaMask)", "Yes", "Yes", "Yes"],
+            ["dApp Isolation", "Yes", "No", "No", "No", "No"],
+            ["Shamir Backup", "Yes + Stegano", "No", "No", "No", "Shamir (Trezor)"],
+            ["Desktop App", "Yes (native)", "Browser ext.", "Browser ext.", "No", "Yes"],
+            ["Open Pricing", "All features free", "Free + Gas", "Free + Gas", "Free + Gas", "Device cost"]
+          ],
+          "header_bg_color": "#06B6D4",
+          "header_text_color": "#ffffff",
+          "row_bg_color": "#ffffff",
+          "alt_row_bg_color": "#F0F9FF",
+          "text_color": "#334155",
+          "border_color": "#E2E8F0",
+          "font_size": 8,
+          "header_font_size": 9,
+          "padding": 6,
+          "row_height": 22,
+          "header_height": 26
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 490,
+          "width": 720,
+          "height": 40,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "Quantum Vault is the only wallet offering AI analysis + Lightning Network + hardware wallet support + multi-sig + fiat ramps — all free, fully non-custodial.",
+          "x": 80,
+          "y": 515,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#06B6D4",
+          "max_width": 680
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 545,
+          "width": 722,
+          "height": 0,
+          "stroke_color": "#E2E8F0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Page 11 of 13  |  Quantum Vault Partnership Deck  |  CONFIDENTIAL",
+          "x": 421,
+          "y": 567,
+          "font_size": 9,
+          "color": "#94A3B8",
+          "align": "center"
+        }
+      ]
+    },
+
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 842,
+          "height": 55,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "QUANTUM VAULT",
+          "x": 60,
+          "y": 35,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "Company & Compliance",
+          "x": 782,
+          "y": 35,
+          "font_size": 11,
+          "color": "#94A3B8",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "Company & Compliance",
+          "x": 60,
+          "y": 95,
+          "font_size": 26,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 108,
+          "width": 60,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 3
+        },
+        {
+          "type": "text",
+          "content": "Dual-jurisdiction structure for UK and EU regulatory compliance",
+          "x": 60,
+          "y": 130,
+          "font_size": 12,
+          "color": "#64748B"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 155,
+          "width": 350,
+          "height": 160,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "QUANTUM ENCODING LTD",
+          "x": 80,
+          "y": 180,
+          "font_size": 12,
+          "font_weight": "bold",
+          "color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "United Kingdom",
+          "x": 80,
+          "y": 198,
+          "font_size": 10,
+          "color": "#94A3B8"
+        },
+        {
+          "type": "bullet_list",
+          "x": 80,
+          "y": 220,
+          "font_size": 9,
+          "color": "#CBD5E1",
+          "bullet_color": "#06B6D4",
+          "line_spacing": 14,
+          "indent": 10,
+          "items": [
+            "Company No. 16575953",
+            "Incorporated 11th July 2025",
+            "Registered in England and Wales",
+            "Primary entity — owns all IP",
+            "UK market operations"
+          ]
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 425,
+          "y": 155,
+          "width": 355,
+          "height": 160,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "QUANTUM ENCODING EUROPE LTD",
+          "x": 445,
+          "y": 180,
+          "font_size": 12,
+          "font_weight": "bold",
+          "color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "Ireland",
+          "x": 445,
+          "y": 198,
+          "font_size": 10,
+          "color": "#94A3B8"
+        },
+        {
+          "type": "bullet_list",
+          "x": 445,
+          "y": 220,
+          "font_size": 9,
+          "color": "#CBD5E1",
+          "bullet_color": "#06B6D4",
+          "line_spacing": 14,
+          "indent": 10,
+          "items": [
+            "EU subsidiary",
+            "EU/EEA regulatory compliance",
+            "Alchemy Pay partnership entity",
+            "EU market operations",
+            "Fiat on/off ramp integration"
+          ]
+        },
+        {
+          "type": "text",
+          "content": "Compliance & KYC Approach",
+          "x": 60,
+          "y": 345,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 365,
+          "width": 720,
+          "height": 90,
+          "fill_color": "#F0F9FF",
+          "stroke_color": "#BAE6FD",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Quantum Vault is a self-custodial wallet — we do not custody user funds or hold user assets. For fiat on/off ramp services, we rely on our payment partner's KYC/AML processes for end-user verification. We implement security measures including PIN protection, biometric authentication, and hardware wallet integration for enhanced security. No user data is transmitted to Quantum Encoding servers.",
+          "x": 80,
+          "y": 388,
+          "font_size": 10,
+          "color": "#334155",
+          "max_width": 680,
+          "line_height": 1.6
+        },
+        {
+          "type": "text",
+          "content": "Business Model",
+          "x": 60,
+          "y": 485,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 500,
+          "width": 235,
+          "height": 30,
+          "fill_color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "All features free to users",
+          "x": 177,
+          "y": 520,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#ffffff",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 305,
+          "y": 500,
+          "width": 235,
+          "height": 30,
+          "fill_color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "Revenue via partner commissions",
+          "x": 422,
+          "y": 520,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#ffffff",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 550,
+          "y": 500,
+          "width": 230,
+          "height": 30,
+          "fill_color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "Swap/bridge affiliate fees",
+          "x": 665,
+          "y": 520,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#ffffff",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 545,
+          "width": 722,
+          "height": 0,
+          "stroke_color": "#E2E8F0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Page 12 of 13  |  Quantum Vault Partnership Deck  |  CONFIDENTIAL",
+          "x": 421,
+          "y": 567,
+          "font_size": 9,
+          "color": "#94A3B8",
+          "align": "center"
+        }
+      ]
+    },
+
+    {
+      "background_color": "#0F172A",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 842,
+          "height": 4,
+          "fill_color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "QUANTUM",
+          "x": 421,
+          "y": 120,
+          "font_size": 42,
+          "font_weight": "bold",
+          "color": "#06B6D4",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "VAULT",
+          "x": 421,
+          "y": 170,
+          "font_size": 42,
+          "font_weight": "bold",
+          "color": "#ffffff",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 371,
+          "y": 190,
+          "width": 100,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 3
+        },
+        {
+          "type": "text",
+          "content": "Your Keys. Your Coins. Your Edge.",
+          "x": 421,
+          "y": 225,
+          "font_size": 16,
+          "color": "#94A3B8",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "Non-custodial crypto wallet with AI-powered analysis, Lightning Network, cross-chain bridges, hardware wallet support, and seamless fiat integration across 12 blockchains and 5 platforms.",
+          "x": 171,
+          "y": 265,
+          "font_size": 11,
+          "color": "#64748B",
+          "max_width": 500,
+          "line_height": 1.5
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 221,
+          "y": 340,
+          "width": 400,
+          "height": 100,
+          "fill_color": "#1E293B",
+          "stroke_color": "#334155",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "GET IN TOUCH",
+          "x": 421,
+          "y": 368,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#06B6D4",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "Richard Tune  |  Founder & Lead Developer",
+          "x": 421,
+          "y": 392,
+          "font_size": 12,
+          "font_weight": "bold",
+          "color": "#ffffff",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "rich@quantumencoding.io  |  quantumencoding.io",
+          "x": 421,
+          "y": 415,
+          "font_size": 11,
+          "color": "#94A3B8",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 171,
+          "y": 470,
+          "width": 500,
+          "height": 40,
+          "fill_color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "Quantum Vault — Institutional-Grade Self-Custodial Wallet",
+          "x": 421,
+          "y": 495,
+          "font_size": 12,
+          "font_weight": "bold",
+          "color": "#0F172A",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 540,
+          "width": 842,
+          "height": 55,
+          "fill_color": "#020617"
+        },
+        {
+          "type": "text",
+          "content": "Quantum Encoding LTD (UK: 16575953)  |  Quantum Encoding Europe Limited (Ireland)",
+          "x": 421,
+          "y": 562,
+          "font_size": 9,
+          "color": "#475569",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "CONFIDENTIAL - For Partner Review  |  February 2026",
+          "x": 421,
+          "y": 580,
+          "font_size": 8,
+          "color": "#334155",
+          "align": "center"
+        }
+      ]
+    }
+  ]
+}

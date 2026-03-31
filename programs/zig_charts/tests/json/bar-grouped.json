@@ -1,0 +1,16 @@
+{
+  "type": "bar",
+  "width": 700,
+  "height": 400,
+  "data": {
+    "series": [
+      { "name": "2023", "values": [100, 150, 120, 180] },
+      { "name": "2024", "values": [120, 180, 150, 220] }
+    ],
+    "categories": ["Q1", "Q2", "Q3", "Q4"]
+  },
+  "config": {
+    "mode": "grouped",
+    "show_values": false
+  }
+}

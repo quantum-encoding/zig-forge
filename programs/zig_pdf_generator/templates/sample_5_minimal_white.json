@@ -1,0 +1,345 @@
+{
+  "page_size": { "width": 842, "height": 595 },
+  "pages": [
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "text",
+          "content": "CRG",
+          "x": 50,
+          "y": 50,
+          "font_size": 28,
+          "font_weight": "bold",
+          "color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "DIRECT",
+          "x": 112,
+          "y": 50,
+          "font_size": 28,
+          "font_weight": "bold",
+          "color": "#374151"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 70,
+          "width": 742,
+          "height": 0,
+          "stroke_color": "#E5E7EB",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "SOLAR QUOTE",
+          "x": 792,
+          "y": 40,
+          "font_size": 10,
+          "color": "#10B981",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "CRG-2026-00847",
+          "x": 792,
+          "y": 55,
+          "font_size": 10,
+          "color": "#9CA3AF",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "Prepared for",
+          "x": 50,
+          "y": 110,
+          "font_size": 12,
+          "color": "#9CA3AF"
+        },
+        {
+          "type": "text",
+          "content": "Mr & Mrs Johnson",
+          "x": 50,
+          "y": 135,
+          "font_size": 24,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "42 Oak Lane, Southampton  •  1st February 2026",
+          "x": 50,
+          "y": 158,
+          "font_size": 11,
+          "color": "#6B7280"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 50,
+          "y": 190,
+          "width": 742,
+          "height": 2,
+          "fill_color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "£12,910",
+          "x": 50,
+          "y": 260,
+          "font_size": 56,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "Total investment  •  0% VAT",
+          "x": 50,
+          "y": 290,
+          "font_size": 14,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "5.28kW",
+          "x": 350,
+          "y": 235,
+          "font_size": 32,
+          "font_weight": "bold",
+          "color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "System Size",
+          "x": 350,
+          "y": 260,
+          "font_size": 11,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "£1,420",
+          "x": 500,
+          "y": 235,
+          "font_size": 32,
+          "font_weight": "bold",
+          "color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "Annual Savings",
+          "x": 500,
+          "y": 260,
+          "font_size": 11,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "9.1 yrs",
+          "x": 665,
+          "y": 235,
+          "font_size": 32,
+          "font_weight": "bold",
+          "color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "Payback",
+          "x": 665,
+          "y": 260,
+          "font_size": 11,
+          "color": "#6B7280"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 320,
+          "width": 742,
+          "height": 0,
+          "stroke_color": "#E5E7EB",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "What's Included",
+          "x": 50,
+          "y": 355,
+          "font_size": 16,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "12 x JA Solar 440W All-Black Panels",
+          "x": 50,
+          "y": 385,
+          "font_size": 12,
+          "color": "#374151"
+        },
+        {
+          "type": "text",
+          "content": "GivEnergy 5.0kW Hybrid Inverter",
+          "x": 50,
+          "y": 405,
+          "font_size": 12,
+          "color": "#374151"
+        },
+        {
+          "type": "text",
+          "content": "GivEnergy 9.5kWh Battery Storage",
+          "x": 50,
+          "y": 425,
+          "font_size": 12,
+          "color": "#374151"
+        },
+        {
+          "type": "text",
+          "content": "Professional 2-day installation",
+          "x": 320,
+          "y": 385,
+          "font_size": 12,
+          "color": "#374151"
+        },
+        {
+          "type": "text",
+          "content": "Full scaffolding & site setup",
+          "x": 320,
+          "y": 405,
+          "font_size": 12,
+          "color": "#374151"
+        },
+        {
+          "type": "text",
+          "content": "MCS certification & DNO notification",
+          "x": 320,
+          "y": 425,
+          "font_size": 12,
+          "color": "#374151"
+        },
+        {
+          "type": "text",
+          "content": "25-year panel warranty",
+          "x": 580,
+          "y": 385,
+          "font_size": 12,
+          "color": "#374151"
+        },
+        {
+          "type": "text",
+          "content": "10-year workmanship guarantee",
+          "x": 580,
+          "y": 405,
+          "font_size": 12,
+          "color": "#374151"
+        },
+        {
+          "type": "text",
+          "content": "Smart monitoring app",
+          "x": 580,
+          "y": 425,
+          "font_size": 12,
+          "color": "#374151"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 460,
+          "width": 742,
+          "height": 0,
+          "stroke_color": "#E5E7EB",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Environmental Impact",
+          "x": 50,
+          "y": 495,
+          "font_size": 16,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "4,800 kWh",
+          "x": 50,
+          "y": 530,
+          "font_size": 20,
+          "font_weight": "bold",
+          "color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "clean energy per year",
+          "x": 145,
+          "y": 530,
+          "font_size": 11,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "2.1 tonnes",
+          "x": 320,
+          "y": 530,
+          "font_size": 20,
+          "font_weight": "bold",
+          "color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "CO₂ saved annually",
+          "x": 415,
+          "y": 530,
+          "font_size": 11,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "£42,500",
+          "x": 580,
+          "y": 530,
+          "font_size": 20,
+          "font_weight": "bold",
+          "color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "25-year total savings",
+          "x": 660,
+          "y": 530,
+          "font_size": 11,
+          "color": "#6B7280"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 560,
+          "width": 842,
+          "height": 35,
+          "fill_color": "#F9FAFB"
+        },
+        {
+          "type": "text",
+          "content": "0330 133 2497  •  info@crgdirect.co.uk  •  crgdirect.co.uk",
+          "x": 50,
+          "y": 582,
+          "font_size": 10,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "MCS Certified  •  Which? Trusted Trader  •  RECC Member",
+          "x": 792,
+          "y": 582,
+          "font_size": 10,
+          "color": "#9CA3AF",
+          "align": "right"
+        }
+      ]
+    }
+  ]
+}

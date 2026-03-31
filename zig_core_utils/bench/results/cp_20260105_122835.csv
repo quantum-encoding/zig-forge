@@ -1,0 +1,7 @@
+tool,avg_ms,median_ms,min_ms,max_ms
+gnu_cp_1m,7,8,7,8
+zcp_1m,7,7,7,8
+gnu_cp_10m,17,16,15,22
+zcp_10m,19,19,18,21
+gnu_cp_100m,67,66,66,70
+zcp_100m,83,78,75,110

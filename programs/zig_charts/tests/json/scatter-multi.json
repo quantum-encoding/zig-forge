@@ -1,0 +1,31 @@
+{
+  "type": "scatter",
+  "width": 800,
+  "height": 500,
+  "data": {
+    "series": [
+      {
+        "name": "Group A",
+        "points": [
+          { "x": 1, "y": 5 },
+          { "x": 2, "y": 7 },
+          { "x": 3, "y": 6 },
+          { "x": 4, "y": 8 }
+        ]
+      },
+      {
+        "name": "Group B",
+        "points": [
+          { "x": 1, "y": 3 },
+          { "x": 2, "y": 5 },
+          { "x": 3, "y": 4 },
+          { "x": 4, "y": 6 }
+        ]
+      }
+    ]
+  },
+  "config": {
+    "show_legend": true,
+    "show_grid": true
+  }
+}

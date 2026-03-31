@@ -1,0 +1,20 @@
+{
+  "type": "area",
+  "title": "Cumulative Jobs by Status",
+  "width": 700,
+  "height": 400,
+  "data": {
+    "series": [
+      {"name": "Completed", "values": [120, 145, 178, 210, 248, 290, 335]},
+      {"name": "In Progress", "values": [15, 18, 22, 25, 20, 28, 32]},
+      {"name": "Scheduled", "values": [8, 12, 15, 10, 18, 22, 25]},
+      {"name": "On Hold", "values": [3, 5, 4, 6, 8, 5, 7]},
+      {"name": "Cancelled", "values": [2, 3, 5, 4, 6, 8, 10]},
+      {"name": "Warranty", "values": [1, 2, 3, 5, 4, 6, 8]},
+      {"name": "Rework", "values": [0, 1, 1, 2, 1, 2, 3]}
+    ]
+  },
+  "config": {
+    "mode": "stacked"
+  }
+}

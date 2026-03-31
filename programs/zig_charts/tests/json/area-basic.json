@@ -1,0 +1,26 @@
+{
+  "type": "area",
+  "width": 800,
+  "height": 400,
+  "data": {
+    "series": [
+      {
+        "name": "Revenue",
+        "points": [
+          { "x": 1, "y": 100 },
+          { "x": 2, "y": 150 },
+          { "x": 3, "y": 130 },
+          { "x": 4, "y": 180 },
+          { "x": 5, "y": 200 },
+          { "x": 6, "y": 175 },
+          { "x": 7, "y": 220 }
+        ]
+      }
+    ]
+  },
+  "config": {
+    "show_line": true,
+    "x_label": "Month",
+    "y_label": "Revenue ($K)"
+  }
+}

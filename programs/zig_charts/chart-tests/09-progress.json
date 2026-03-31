@@ -1,0 +1,17 @@
+{
+  "type": "progress",
+  "title": "Q3 Targets Progress",
+  "width": 600,
+  "height": 350,
+  "data": {
+    "bars": [
+      {"label": "Solar Installs", "current": 89, "target": 100, "color": "#22C55E"},
+      {"label": "Heat Pump Installs", "current": 62, "target": 100, "color": "#3B82F6"},
+      {"label": "Revenue Target", "current": 78, "target": 100, "color": "#F59E0B"},
+      {"label": "New Leads", "current": 95, "target": 100, "color": "#10B981"},
+      {"label": "Customer Satisfaction", "current": 92, "target": 100, "color": "#8B5CF6"},
+      {"label": "Response Time", "current": 45, "target": 100, "color": "#EF4444"},
+      {"label": "Warranty Claims", "current": 12, "target": 100, "color": "#EC4899"}
+    ]
+  }
+}

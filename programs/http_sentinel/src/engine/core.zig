@@ -1,0 +1,254 @@
+// Copyright (c) 2025 QUANTUM ENCODING LTD
+// Author: Rich <rich@quantumencoding.io>
+// Website: https://quantumencoding.io
+//
+// Licensed under the MIT License. See LICENSE file for details.
+
+//! Universal HTTP Engine Core
+//! Processes HTTP request manifests with full concurrency, retry, and circuit breaking
+
+const std = @import("std");
+const HttpClient = @import("../http_client.zig").HttpClient;
+const RetryEngine = @import("../retry/retry.zig").RetryEngine;
+const manifest = @import("manifest.zig");
+
+/// Simple mutex wrapper using pthread (std.Thread.Mutex removed in Zig 0.16)
+const Mutex = struct {
+    inner: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER,
+
+    pub fn lock(self: *Mutex) void {
+        _ = std.c.pthread_mutex_lock(&self.inner);
+    }
+
+    pub fn unlock(self: *Mutex) void {
+        _ = std.c.pthread_mutex_unlock(&self.inner);
+    }
+};
+
+/// Timer using clock_gettime (Timer removed in Zig 0.16)
+const Timer = struct {
+    start_ts: std.c.timespec,
+
+    pub fn start() error{}!Timer {
+        var ts: std.c.timespec = undefined;
+        _ = std.c.clock_gettime(.MONOTONIC, &ts);
+        return Timer{ .start_ts = ts };
+    }
+
+    pub fn read(self: *const Timer) u64 {
+        var now: std.c.timespec = undefined;
+        _ = std.c.clock_gettime(.MONOTONIC, &now);
+        const start_ns: i128 = @as(i128, self.start_ts.sec) * 1_000_000_000 + self.start_ts.nsec;
+        const now_ns: i128 = @as(i128, now.sec) * 1_000_000_000 + now.nsec;
+        const diff = now_ns - start_ns;
+        return if (diff > 0) @intCast(diff) else 0;
+    }
+};
+
+pub const EngineConfig = struct {
+    /// Maximum concurrent requests
+    max_concurrency: u32 = 50,
+
+    /// Default timeout for requests (can be overridden per-request)
+    default_timeout_ms: u64 = 30_000,
+
+    /// Default retry attempts (can be overridden per-request)
+    default_max_retries: u32 = 3,
+};
+
+pub fn Engine(comptime WriterType: type) type {
+    return struct {
+        const Self = @This();
+
+        allocator: std.mem.Allocator,
+        config: EngineConfig,
+        retry_engine: RetryEngine,
+
+        /// Output writer for streaming results
+        output_writer: WriterType,
+
+        /// Mutex for synchronized output
+        output_mutex: Mutex,
+
+        pub fn init(allocator: std.mem.Allocator, config: EngineConfig, output_writer: WriterType) !Self {
+            return Self{
+                .allocator = allocator,
+                .config = config,
+                .retry_engine = RetryEngine.init(allocator, .{}),
+                .output_writer = output_writer,
+                .output_mutex = .{},
+            };
+        }
+
+        pub fn deinit(_: *Self) void {
+            // Nothing to deinit
+        }
+
+        /// Process a batch of request manifests
+        pub fn processBatch(self: *Self, requests: []manifest.RequestManifest) !void {
+            const max_concurrent = @min(self.config.max_concurrency, requests.len);
+
+            // Simple approach: spawn a thread for each request up to max_concurrency
+            var threads = try self.allocator.alloc(std.Thread, max_concurrent);
+            defer self.allocator.free(threads);
+
+            var request_index: usize = 0;
+            while (request_index < requests.len) {
+                // Spawn threads up to max_concurrency
+                const batch_size = @min(max_concurrent, requests.len - request_index);
+
+                for (0..batch_size) |i| {
+                    const req_idx = request_index + i;
+                    threads[i] = try std.Thread.spawn(.{}, processRequestThread, .{ self, &requests[req_idx] });
+                }
+
+                // Wait for this batch to complete
+                for (threads[0..batch_size]) |thread| {
+                    thread.join();
+                }
+
+                request_index += batch_size;
+            }
+        }
+
+        /// Thread entry point
+        fn processRequestThread(self: *Self, request: *manifest.RequestManifest) void {
+            self.processRequest(request);
+        }
+
+        /// Process a single request
+        fn processRequest(self: *Self, request: *manifest.RequestManifest) void {
+            var timer = Timer.start() catch unreachable;
+
+            // Create thread-local HTTP client
+            var http_client = HttpClient.init(self.allocator) catch {
+                self.writeError(request.id, "Failed to initialize HTTP client");
+                return;
+            };
+            defer http_client.deinit();
+
+            var response = manifest.ResponseManifest{
+                .id = undefined,
+                .status = 0,
+                .latency_ms = 0,
+                .allocator = self.allocator,
+            };
+
+            // Duplicate ID for response
+            response.id = self.allocator.dupe(u8, request.id) catch {
+                self.writeError(request.id, "Memory allocation failed");
+                return;
+            };
+
+            // Execute request with retry
+            const max_retries = request.max_retries orelse self.config.default_max_retries;
+            var retry_count: u32 = 0;
+
+            while (retry_count <= max_retries) : (retry_count += 1) {
+                var result = self.executeHttpRequest(&http_client, request);
+
+                if (result) |*http_response| {
+                    defer http_response.deinit();
+
+                    response.status = @intFromEnum(http_response.status);
+                    response.body = self.allocator.dupe(u8, http_response.body) catch null;
+                    response.retry_count = retry_count;
+                    break;
+                } else |err| {
+                    if (retry_count < max_retries) {
+                        // Calculate exponential backoff
+                        const backoff_ms = @as(u64, 100) * (@as(u64, 1) << @intCast(retry_count));
+                        const backoff_ns = backoff_ms * std.time.ns_per_ms;
+                        const ts: std.c.timespec = .{
+                            .sec = @intCast(backoff_ns / std.time.ns_per_s),
+                            .nsec = @intCast(backoff_ns % std.time.ns_per_s),
+                        };
+                        _ = std.c.nanosleep(&ts, null);
+                        continue;
+                    } else {
+                        // Final failure
+                        response.error_message = std.fmt.allocPrint(
+                            self.allocator,
+                            "{}",
+                            .{err},
+                        ) catch null;
+                        response.retry_count = retry_count;
+                        break;
+                    }
+                }
+            }
+
+            const elapsed_ns = timer.read();
+            response.latency_ms = @intCast(elapsed_ns / std.time.ns_per_ms);
+
+            self.writeResponse(&response);
+            response.deinit();
+        }
+
+        /// Execute HTTP request
+        fn executeHttpRequest(self: *Self, http_client: *HttpClient, request: *manifest.RequestManifest) !HttpClient.Response {
+            // Build headers
+            var headers: std.ArrayList(std.http.Header) = .empty;
+            defer headers.deinit(self.allocator);
+
+            if (request.headers) |*req_headers| {
+                var it = req_headers.map.iterator();
+                while (it.next()) |entry| {
+                    try headers.append(self.allocator, .{
+                        .name = entry.key_ptr.*,
+                        .value = entry.value_ptr.*,
+                    });
+                }
+            }
+
+            // Execute based on method
+            return switch (request.method) {
+                .GET => try http_client.get(request.url, headers.items),
+                .POST, .PUT, .PATCH => blk: {
+                    const body = request.body orelse "";
+                    if (request.method == .POST) {
+                        break :blk try http_client.post(request.url, headers.items, body);
+                    } else if (request.method == .PUT) {
+                        break :blk try http_client.put(request.url, headers.items, body);
+                    } else {
+                        break :blk try http_client.patch(request.url, headers.items, body);
+                    }
+                },
+                .DELETE => try http_client.delete(request.url, headers.items),
+                .HEAD, .OPTIONS => error.MethodNotSupported,
+            };
+        }
+
+        /// Write response to output (thread-safe)
+        fn writeResponse(self: *Self, response: *manifest.ResponseManifest) void {
+            self.output_mutex.lock();
+            defer self.output_mutex.unlock();
+
+            // Format response as JSON and write to output
+            const json = response.toJsonString(self.allocator) catch |err| {
+                std.debug.print("Error formatting response: {}\n", .{err});
+                return;
+            };
+            defer self.allocator.free(json);
+
+            _ = self.output_writer.write(json) catch |err| {
+                std.debug.print("Error writing response: {}\n", .{err});
+            };
+        }
+
+        /// Write error to output (thread-safe)
+        fn writeError(self: *Self, id: []const u8, error_message: []const u8) void {
+            self.output_mutex.lock();
+            defer self.output_mutex.unlock();
+
+            const json = std.fmt.allocPrint(
+                self.allocator,
+                "{{\"id\":\"{s}\",\"status\":0,\"error\":\"{s}\"}}\n",
+                .{ id, error_message },
+            ) catch return;
+            defer self.allocator.free(json);
+
+            _ = self.output_writer.write(json) catch {};
+        }
+    };
+}

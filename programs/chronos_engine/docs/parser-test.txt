@@ -1,0 +1,6 @@
+Parser Test - Post-Fix Validation
+==================================
+Testing improved multi-line tool name parsing.
+The Oracle should now correctly identify all tool names.
+
+EDIT: This line added to test Edit tool detection with improved parser.

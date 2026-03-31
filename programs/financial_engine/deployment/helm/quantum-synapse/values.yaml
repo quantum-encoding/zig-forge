@@ -1,0 +1,159 @@
+# Default values for Quantum Synapse Engine
+replicaCount: 1
+
+image:
+  repository: quantum-synapse-engine
+  pullPolicy: IfNotPresent
+  tag: "1.0.0"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "9090"
+  prometheus.io/path: "/metrics"
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  fsGroup: 65532
+
+securityContext:
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+
+service:
+  type: ClusterIP
+  port: 8080
+  metricsPort: 9090
+
+ingress:
+  enabled: false
+  className: "nginx"
+  annotations: {}
+  hosts:
+    - host: quantum-synapse.local
+      paths:
+        - path: /
+          pathType: ImplementationSpecific
+  tls: []
+
+resources:
+  limits:
+    memory: 2Gi
+    cpu: 2000m
+  requests:
+    memory: 512Mi
+    cpu: 500m
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 80
+
+# Persistent volumes for state and logs
+persistence:
+  logs:
+    enabled: true
+    storageClass: "standard"
+    accessMode: ReadWriteOnce
+    size: 10Gi
+    mountPath: /var/log/quantum-synapse
+  state:
+    enabled: true
+    storageClass: "standard"
+    accessMode: ReadWriteOnce
+    size: 5Gi
+    mountPath: /var/lib/quantum-synapse
+
+# Application configuration
+config:
+  environment: production
+  logLevel: info
+  
+  # Market data configuration
+  marketData:
+    provider: alpaca
+    mode: realtime
+    
+  # Risk management defaults
+  riskManagement:
+    maxDailyLossUsd: 5000
+    maxTotalExposurePercent: 80
+    
+  # Performance tuning
+  performance:
+    threadPoolSize: 8
+    orderQueueSize: 1024
+    quoteQueueSize: 4096
+
+# Secrets for API credentials
+secrets:
+  # Create secret with: kubectl create secret generic quantum-synapse-secrets \
+  #   --from-literal=api-key=YOUR_KEY \
+  #   --from-literal=api-secret=YOUR_SECRET
+  existingSecret: "quantum-synapse-secrets"
+  apiKeyField: "api-key"
+  apiSecretField: "api-secret"
+
+# Health checks
+livenessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 30
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  successThreshold: 1
+
+# Node selection
+nodeSelector: {}
+
+tolerations: []
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - quantum-synapse
+          topologyKey: kubernetes.io/hostname
+
+# ServiceMonitor for Prometheus Operator
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+
+# PodDisruptionBudget
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1

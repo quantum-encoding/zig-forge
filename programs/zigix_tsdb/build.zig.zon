@@ -1,0 +1,7 @@
+.{
+    .name = .zigix_tsdb,
+    .version = "0.1.0",
+    .fingerprint = 0x7bd472ef120ec6e5,
+    .dependencies = .{},
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
+}

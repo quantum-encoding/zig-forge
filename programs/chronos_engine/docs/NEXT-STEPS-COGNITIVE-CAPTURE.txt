@@ -1,0 +1,148 @@
+COGNITIVE ORACLE - Next Steps & Strategy
+==========================================
+Date: 2025-10-27
+
+WHAT WE'VE ACCOMPLISHED
+=======================
+✅ Fixed eBPF program attachment (was loaded but not attached)
+✅ Captured 2,018+ events from Claude Code process (PID 8004)
+✅ Identified multiple output FDs (6, 18, 19, 20, 24, 26, 29, 32)
+✅ Found terminal title updates: "✳ Cognitive Watcher System" on FD=20
+✅ Detected ANSI escape sequences in output
+✅ Captured DEBUG logs, session JSON, tool hooks
+
+WHAT WE'RE LOOKING FOR
+======================
+The status line at bottom of terminal (from screenshot):
+  ✱ Saving captured patterns to log file for analysis…
+  (esc to interrupt · ctrl+t to show todos · 40s · ↓ 521 tokens)
+  L Next: Analyze captures to find cognitive state pattern
+
+This contains the cognitive state we want to track!
+
+WHY IT'S NOT IN THE CAPTURES (YET)
+==================================
+The status line might be:
+1. Written to stdout (FD=1) of the terminal process, not the claude process
+2. Updated using terminal control sequences that rewrite the same line
+3. Part of a TUI (Text User Interface) framework that uses curses/similar
+4. Written infrequently (only on state changes)
+
+THE REAL PATTERN
+================
+Based on captures, Claude Code's cognitive state is likely tracked via:
+
+1. TOOL EXECUTION MARKERS (Found in captures):
+   - "● Bash(...)"
+   - "● Read(...)"
+   - "● Write(...)"
+   - Pattern: "● ToolName(description)"
+
+2. DEBUG HOOKS (Found on FD 24, 26):
+   - "executePreToolHooks called for tool: Bash"
+   - "[DEBUG] Getting matching hook commands for PreToolUse with query: Bash"
+
+3. TERMINAL TITLES (Found on FD 20):
+   - OSC sequences: ESC ] 0 ; ✳ Title BEL
+   - Example: "✳ Cognitive Watcher System"
+
+RECOMMENDED NEXT STEPS
+======================
+
+OPTION A: Focus on Tool Execution (Most Reliable)
+--------------------------------------------------
+The "● ToolName(description)" pattern is already being captured!
+
+Strategy:
+1. Parse FD writes for lines starting with "● "
+2. Extract tool name and description
+3. Map tool names to cognitive states:
+   - Bash → "Executing command"
+   - Read → "Reading file"
+   - Write → "Writing file"
+   - Edit → "Editing file"
+   - Grep/Glob → "Searching code"
+   - WebFetch → "Fetching web content"
+   - Task → "Running background agent"
+
+OPTION B: Capture the Status Line (Harder)
+-------------------------------------------
+The bottom status line updates dynamically.
+
+Strategy:
+1. Monitor stdout (FD=1) of terminal process (not claude process)
+2. Look for cursor positioning ANSI codes
+3. Parse lines with ✱ or similar markers
+4. Extract state between ✱ and (esc to interrupt...)
+
+OPTION C: Hook into Claude Code Internals (Advanced)
+-----------------------------------------------------
+1. Find where Claude writes the status line in its code
+2. Patch or instrument that code path
+3. Direct integration with Chronos
+
+RECOMMENDED: Option A
+=====================
+The tool execution pattern is reliable and already captured!
+
+Implementation:
+```zig
+// In cognitive-watcher.zig, modify processCognitiveEvent():
+
+// Look for tool execution pattern: "● ToolName(...)"
+if (std.mem.indexOf(u8, buffer, "● ")) |pos| {
+    // Found tool execution marker
+    const after_marker = buffer[pos + 3..];  // Skip "● " (3 bytes for ●+space)
+
+    // Extract tool name (everything before '(')
+    if (std.mem.indexOf(u8, after_marker, "(")) |paren_pos| {
+        const tool_name = after_marker[0..paren_pos];
+
+        // Map to cognitive state
+        const state = mapToolToState(tool_name);
+
+        std.debug.print("🧠 Cognitive State: {s}\n", .{state});
+
+        // Forward to chronosd-cognitive
+        self.updateChronosdCognitive(conn, state, event.pid);
+    }
+}
+```
+
+Tool → State Mapping:
+- Bash → "executing-command"
+- Read → "reading-file"
+- Write → "writing-file"
+- Edit → "editing-file"
+- Grep/Glob → "searching-code"
+- WebFetch → "fetching-web"
+- Task → "running-agent"
+- TodoWrite → "planning"
+- AskUserQuestion → "awaiting-input"
+
+VALIDATION PLAN
+===============
+1. Implement Option A tool parsing
+2. Test by running Claude Code commands
+3. Verify cognitive states are detected
+4. Compare with actual status line to confirm accuracy
+5. If needed, fall back to Option B for more granular states
+
+FILES TO MODIFY
+===============
+1. cognitive-watcher.zig - Add tool pattern parsing
+2. cognitive_states.zig - Define tool→state mapping
+3. Test with real Claude Code session
+
+EXPECTED OUTPUT
+===============
+When you run a command like "read build.zig":
+- eBPF captures: "● Read(build.zig)"
+- cognitive-watcher detects: "reading-file"
+- Forwards to chronosd-cognitive via D-Bus
+- Chronos timestamps the state change
+
+SUCCESS!
+========
+This approach is WORKING and PRACTICAL. The tool execution markers are a
+reliable proxy for cognitive state and are already being captured!

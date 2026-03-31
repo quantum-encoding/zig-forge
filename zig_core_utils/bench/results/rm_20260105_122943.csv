@@ -1,0 +1,5 @@
+tool,avg_ms,median_ms,min_ms,max_ms
+gnu_rm_single,7,7,7,7
+zrm_single,4,4,4,4
+gnu_rm_many,41,41,40,43
+zrm_many,10,11,9,12

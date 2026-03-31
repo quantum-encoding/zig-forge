@@ -1,0 +1,106 @@
+# zig_ai Model Configuration
+# Edit this file to change default models for each provider
+# Location: ~/.config/zig_ai/models.toml (user) or ./config/models.toml (project)
+#
+# Tiered defaults (like Claude Code):
+#   main  = best quality model (used by default)
+#   small = cheapest/fastest model (for summarization, quick tasks)
+#
+# Override in user config to change defaults without recompiling.
+
+[anthropic]
+# Claude models - updated 2026-02
+main = "claude-opus-4-6"
+small = "claude-haiku-4-5-20251001"
+default = "claude-opus-4-6"
+model_1 = "claude-opus-4-6"
+model_2 = "claude-sonnet-4-5-20250929"
+model_3 = "claude-haiku-4-5-20251001"
+# 1M context variants (requires beta header)
+model_4_1m = "claude-sonnet-4-5-20250929-1m"
+model_5_1m = "claude-sonnet-4-20250514-1m"
+
+[deepseek]
+# DeepSeek models
+# NOTE: deepseek-reasoner does NOT support tool calling
+main = "deepseek-chat"
+small = "deepseek-chat"
+default = "deepseek-chat"
+model_1 = "deepseek-chat"
+model_2 = "deepseek-reasoner"
+
+[google]
+# Google Gemini models (GenAI API) - updated 2026-02
+main = "gemini-2.5-flash"
+small = "gemini-2.5-flash-lite"
+default = "gemini-2.5-flash"
+model_1 = "gemini-3-flash-preview"
+model_2 = "gemini-3.1-pro-preview"
+model_3 = "gemini-2.5-flash"
+model_4 = "gemini-2.5-pro"
+model_5 = "gemini-2.5-flash-lite"
+
+[vertex]
+# Google Vertex AI models
+main = "gemini-2.5-pro"
+small = "gemini-2.5-flash"
+default = "gemini-2.5-pro"
+model_1 = "gemini-2.5-pro"
+model_2 = "gemini-2.5-flash"
+
+[xai]
+# xAI Grok models - updated 2026-02
+main = "grok-4-1-fast-non-reasoning"
+small = "grok-4-1-fast-non-reasoning"
+default = "grok-4-1-fast-non-reasoning"
+model_1 = "grok-4-1-fast-non-reasoning"
+model_2 = "grok-4-1-fast-reasoning"
+model_3 = "grok-4-fast-non-reasoning"
+model_4 = "grok-4-fast-reasoning"
+code = "grok-code-fast-1"
+
+[openai]
+# OpenAI GPT-5 models - updated 2026-02
+main = "gpt-5.2"
+small = "gpt-5-mini"
+default = "gpt-5.2"
+model_1 = "gpt-5.2"
+model_2 = "gpt-5.2-pro"
+model_3 = "gpt-5.2-codex"
+model_4 = "gpt-5-mini"
+model_5 = "gpt-5-nano"
+# Legacy models
+legacy_1 = "gpt-4o"
+legacy_2 = "gpt-4-turbo"
+# Image models
+image_model = "dall-e-3"
+image_model_2 = "dall-e-2"
+
+[image]
+# Image generation models - updated 2026-02
+# OpenAI DALL-E
+dalle3 = "dall-e-3"
+dalle2 = "dall-e-2"
+gpt_image = "gpt-image-1"
+gpt_image_15 = "gpt-image-1.5"
+# xAI Grok
+grok = "grok-2-image"
+# Google Imagen 4 (GenAI API — same models work on both GenAI and Vertex)
+imagen_ultra = "imagen-4.0-ultra-generate-001"
+imagen = "imagen-4.0-generate-001"
+imagen_fast = "imagen-4.0-fast-generate-001"
+# Gemini native image gen
+gemini_flash = "gemini-2.5-flash-image"
+gemini_pro = "gemini-3-pro-image-preview"
+
+[video]
+# Video generation models - updated 2026-02
+sora = "sora-2-2025-12-08"
+sora_pro = "sora-2-pro-2025-10-06"
+veo = "veo-3.1-generate-001"
+veo_fast = "veo-3.1-fast-generate-001"
+
+[music]
+# Music generation models
+lyria = "lyria-002"
+lyria_realtime = "lyria-realtime-exp"

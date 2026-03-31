@@ -1,0 +1,16 @@
+{
+  "type": "pie",
+  "width": 600,
+  "height": 400,
+  "data": {
+    "segments": [
+      { "label": "Complete", "value": 75 },
+      { "label": "In Progress", "value": 15 },
+      { "label": "Pending", "value": 10 }
+    ]
+  },
+  "config": {
+    "inner_radius": 0.5,
+    "show_percentage": true
+  }
+}

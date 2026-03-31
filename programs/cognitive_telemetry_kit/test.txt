@@ -1,0 +1,1 @@
+Testing cognitive telemetry hook

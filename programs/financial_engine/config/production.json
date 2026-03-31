@@ -1,0 +1,184 @@
+{
+  "service": {
+    "name": "quantum-synapse-engine",
+    "version": "1.0.0",
+    "environment": "production",
+    "runtime_mode": "continuous",
+    "node_id": "node-01",
+    "shutdown_timeout_seconds": 30
+  },
+  
+  "market_data": {
+    "provider": "alpaca",
+    "mode": "realtime",
+    "websocket": {
+      "reconnect_attempts": 5,
+      "reconnect_delay_ms": 5000,
+      "heartbeat_interval_seconds": 30
+    },
+    "symbols": [
+      "SPY", "QQQ", "AAPL", "MSFT", "NVDA", 
+      "TSLA", "AMD", "META", "IWM", "DIA"
+    ]
+  },
+  
+  "api": {
+    "base_url": "https://paper-api.alpaca.markets",
+    "key_env_var": "APCA_API_KEY_ID",
+    "secret_env_var": "APCA_API_SECRET_KEY",
+    "rate_limits": {
+      "orders_per_minute": 200,
+      "api_calls_per_minute": 200
+    }
+  },
+  
+  "risk_management": {
+    "global": {
+      "max_daily_loss_usd": 5000,
+      "max_total_exposure_percent": 80,
+      "position_sizing_mode": "kelly_criterion",
+      "update_account_interval_seconds": 60
+    },
+    "default_tenant_limits": {
+      "max_position_size_usd": 10000,
+      "max_orders_per_minute": 20,
+      "max_drawdown_percent": 5.0,
+      "max_total_exposure_usd": 50000,
+      "max_positions": 10,
+      "max_concentration_percent": 20.0,
+      "min_order_value_usd": 100.0,
+      "max_order_value_usd": 25000.0
+    }
+  },
+  
+  "tenants": [
+    {
+      "id": "QSE_SPY_HUNTER_001",
+      "name": "SPY Hunter Algorithm",
+      "enabled": true,
+      "tier": "GOLD",
+      "algorithm": {
+        "type": "spy_hunter",
+        "parameters": {
+          "spread_threshold": 0.0005,
+          "volume_threshold": 100000,
+          "execution_mode": "aggressive"
+        }
+      },
+      "capital_allocation_percent": 30,
+      "risk_override": {
+        "max_position_size_usd": 5000,
+        "max_orders_per_minute": 10,
+        "max_total_exposure_usd": 20000,
+        "max_positions": 5
+      }
+    },
+    {
+      "id": "QSE_MOMENTUM_001",
+      "name": "Momentum Scanner",
+      "enabled": true,
+      "tier": "SILVER",
+      "algorithm": {
+        "type": "momentum_scanner",
+        "parameters": {
+          "momentum_threshold": 0.02,
+          "volume_spike_multiplier": 2.5,
+          "symbols": ["AAPL", "MSFT", "NVDA", "TSLA", "SPY", "QQQ"]
+        }
+      },
+      "capital_allocation_percent": 40,
+      "risk_override": {
+        "max_position_size_usd": 10000,
+        "max_orders_per_minute": 20,
+        "max_total_exposure_usd": 40000,
+        "max_positions": 8
+      }
+    },
+    {
+      "id": "QSE_MEAN_REV_001",
+      "name": "Mean Reversion Engine",
+      "enabled": true,
+      "tier": "BRONZE",
+      "algorithm": {
+        "type": "mean_reversion",
+        "parameters": {
+          "bollinger_bands_period": 20,
+          "bollinger_bands_std": 2.0,
+          "spread_threshold_percent": 0.2,
+          "symbols": ["SPY", "QQQ", "IWM", "DIA"]
+        }
+      },
+      "capital_allocation_percent": 30,
+      "risk_override": {
+        "max_position_size_usd": 3000,
+        "max_orders_per_minute": 30,
+        "max_total_exposure_usd": 15000,
+        "max_positions": 10
+      }
+    }
+  ],
+  
+  "observability": {
+    "logging": {
+      "level": "info",
+      "format": "json",
+      "output": "stdout",
+      "include_timestamp": true,
+      "include_caller": false
+    },
+    "metrics": {
+      "enabled": true,
+      "prometheus": {
+        "port": 9090,
+        "path": "/metrics"
+      }
+    },
+    "telemetry": {
+      "enabled": true,
+      "export_interval_seconds": 10,
+      "destinations": [
+        {
+          "type": "file",
+          "path": "/var/log/quantum-synapse/telemetry.jsonl"
+        }
+      ]
+    }
+  },
+  
+  "operations": {
+    "health_check": {
+      "enabled": true,
+      "port": 8080,
+      "path": "/health"
+    },
+    "graceful_shutdown": {
+      "enabled": true,
+      "drain_timeout_seconds": 10,
+      "cancel_pending_orders": true,
+      "close_positions": false
+    },
+    "backup": {
+      "state_snapshot_interval_minutes": 5,
+      "state_file_path": "/var/lib/quantum-synapse/state.json"
+    }
+  },
+  
+  "performance": {
+    "thread_pool_size": 8,
+    "order_queue_size": 1024,
+    "quote_queue_size": 4096,
+    "memory_limit_mb": 2048,
+    "cpu_affinity": []
+  },
+  
+  "billing": {
+    "enabled": true,
+    "rates": {
+      "per_1000_packets": 0.001,
+      "per_order": 0.002,
+      "per_api_call": 0.0001
+    },
+    "export_interval_hours": 24,
+    "export_path": "/var/lib/quantum-synapse/billing/"
+  }
+}

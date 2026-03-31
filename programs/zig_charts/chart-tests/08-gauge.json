@@ -1,0 +1,21 @@
+{
+  "type": "gauge",
+  "title": "Conversion Rate",
+  "width": 400,
+  "height": 300,
+  "data": {
+    "value": 68.5,
+    "min": 0,
+    "max": 100,
+    "zones": [
+      {"min": 0, "max": 30, "color": "#EF4444"},
+      {"min": 30, "max": 50, "color": "#F59E0B"},
+      {"min": 50, "max": 70, "color": "#3B82F6"},
+      {"min": 70, "max": 85, "color": "#10B981"},
+      {"min": 85, "max": 100, "color": "#22C55E"}
+    ]
+  },
+  "config": {
+    "label": "%"
+  }
+}

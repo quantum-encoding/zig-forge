@@ -1,0 +1,127 @@
+# GitHub Actions CI/CD - API Testing with quantum-curl
+# Place in: .github/workflows/api-tests.yml
+
+name: Pre-Production API Tests
+
+on:
+  push:
+    branches: [staging, develop]
+  pull_request:
+    branches: [main, staging]
+  workflow_dispatch:  # Manual trigger
+
+jobs:
+  api-tests:
+    name: API Endpoint Tests
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        environment: [staging, dev]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download quantum-curl binary
+        run: |
+          # Option 1: Download pre-built binary
+          wget https://github.com/your-org/zig-http-concurrent/releases/latest/download/quantum-curl
+          chmod +x quantum-curl
+
+          # Option 2: Build from source (if Zig is installed)
+          # zig build
+          # cp zig-out/bin/quantum-curl ./quantum-curl
+
+      - name: Prepare test suite
+        run: |
+          # Replace environment variables in test suite
+          export API_BASE_URL="${{ secrets[format('{0}_API_URL', matrix.environment)] }}"
+          export API_TOKEN="${{ secrets[format('{0}_API_TOKEN', matrix.environment)] }}"
+
+          # Generate test suite with env vars
+          sed "s|__API_BASE_URL__|$API_BASE_URL|g" examples/api-test-suite.jsonl | \
+          sed "s|__API_TOKEN__|$API_TOKEN|g" > test-suite-final.jsonl
+
+      - name: Run API tests
+        id: api_tests
+        run: |
+          echo "Running API tests against ${{ matrix.environment }}..."
+
+          # Execute tests with quantum-curl
+          ./quantum-curl --file test-suite-final.jsonl \
+            --concurrency 20 \
+            > results.jsonl
+
+          # Parse results
+          TOTAL=$(wc -l < results.jsonl)
+          SUCCESS=$(jq -r 'select(.status >= 200 and .status < 400)' results.jsonl | wc -l)
+          FAILED=$(( TOTAL - SUCCESS ))
+          AVG_LATENCY=$(jq -s 'map(.latency_ms) | add / length' results.jsonl)
+
+          echo "total=$TOTAL" >> $GITHUB_OUTPUT
+          echo "success=$SUCCESS" >> $GITHUB_OUTPUT
+          echo "failed=$FAILED" >> $GITHUB_OUTPUT
+          echo "avg_latency=$AVG_LATENCY" >> $GITHUB_OUTPUT
+
+      - name: Validate results
+        run: |
+          ./examples/validate-results.sh results.jsonl
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-test-results-${{ matrix.environment }}
+          path: results.jsonl
+          retention-days: 30
+
+      - name: Comment PR with results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const results = fs.readFileSync('results.jsonl', 'utf8')
+              .split('\n')
+              .filter(line => line.trim())
+              .map(line => JSON.parse(line));
+
+            const success = results.filter(r => r.status >= 200 && r.status < 400).length;
+            const failed = results.length - success;
+            const avgLatency = (results.reduce((sum, r) => sum + r.latency_ms, 0) / results.length).toFixed(0);
+
+            const body = `
+            ## API Test Results (${{ matrix.environment }})
+
+            | Metric | Value |
+            |--------|-------|
+            | ✅ Success | ${success}/${results.length} |
+            | ❌ Failed | ${failed}/${results.length} |
+            | ⚡ Avg Latency | ${avgLatency}ms |
+
+            <details>
+            <summary>Detailed Results</summary>
+
+            ${results.map(r => `- ${r.status >= 400 ? '❌' : '✅'} \`${r.id}\`: ${r.status} (${r.latency_ms}ms)`).join('\n')}
+
+            </details>
+            `;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+      - name: Fail if tests failed
+        if: steps.api_tests.outputs.failed != '0'
+        run: |
+          echo "::error::${{ steps.api_tests.outputs.failed }} API tests failed"
+          exit 1
+
+      - name: Performance regression check
+        if: steps.api_tests.outputs.avg_latency > 500
+        run: |
+          echo "::warning::Average latency (${{ steps.api_tests.outputs.avg_latency }}ms) exceeds threshold (500ms)"

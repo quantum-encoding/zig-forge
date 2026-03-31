@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="700" height="400"
+     viewBox="0 0 700 400">
+  <line x1="60.00" y1="287.49" x2="680.00" y2="287.49" stroke="#e5e5e5" stroke-width="1.00"/>
+  <line x1="60.00" y1="248.24" x2="680.00" y2="248.24" stroke="#e5e5e5" stroke-width="1.00"/>
+  <line x1="60.00" y1="208.99" x2="680.00" y2="208.99" stroke="#e5e5e5" stroke-width="1.00"/>
+  <line x1="60.00" y1="169.74" x2="680.00" y2="169.74" stroke="#e5e5e5" stroke-width="1.00"/>
+  <line x1="60.00" y1="130.49" x2="680.00" y2="130.49" stroke="#e5e5e5" stroke-width="1.00"/>
+  <line x1="60.00" y1="91.24" x2="680.00" y2="91.24" stroke="#e5e5e5" stroke-width="1.00"/>
+  <line x1="60.00" y1="51.99" x2="680.00" y2="51.99" stroke="#e5e5e5" stroke-width="1.00"/>
+  <line x1="60.00" y1="20.00" x2="60.00" y2="360.00" stroke="#e5e5e5" stroke-width="1.00"/>
+  <line x1="266.67" y1="20.00" x2="266.67" y2="360.00" stroke="#e5e5e5" stroke-width="1.00"/>
+  <line x1="473.33" y1="20.00" x2="473.33" y2="360.00" stroke="#e5e5e5" stroke-width="1.00"/>
+  <line x1="680.00" y1="20.00" x2="680.00" y2="360.00" stroke="#e5e5e5" stroke-width="1.00"/>
+  <g id="volume">
+    <rect x="45.00" y="319.79" width="30.00" height="40.21" fill="rgba(34,197,94,0.50)"/>
+    <rect x="148.33" y="315.98" width="30.00" height="44.02" fill="rgba(34,197,94,0.50)"/>
+    <rect x="251.67" y="300.61" width="30.00" height="59.39" fill="rgba(239,68,68,0.50)"/>
+    <rect x="355.00" y="309.49" width="30.00" height="50.51" fill="rgba(34,197,94,0.50)"/>
+    <rect x="458.33" y="292.00" width="30.00" height="68.00" fill="rgba(34,197,94,0.50)"/>
+    <rect x="561.67" y="304.84" width="30.00" height="55.16" fill="rgba(34,197,94,0.50)"/>
+    <rect x="665.00" y="312.74" width="30.00" height="47.26" fill="rgba(239,68,68,0.50)"/>
+  </g>
+  <g id="candles">
+    <line x1="60.00" y1="161.89" x2="60.00" y2="256.09" stroke="#22c55e" stroke-width="1.00"/>
+    <rect x="45.00" y="177.59" width="30.00" height="51.02" fill="#22c55e" stroke="#22c55e" stroke-width="1.00"/>
+    <line x1="163.33" y1="126.56" x2="163.33" y2="201.14" stroke="#22c55e" stroke-width="1.00"/>
+    <rect x="148.33" y="150.11" width="30.00" height="27.47" fill="#22c55e" stroke="#22c55e" stroke-width="1.00"/>
+    <line x1="266.67" y1="138.34" x2="266.67" y2="244.31" stroke="#ef4444" stroke-width="1.00"/>
+    <rect x="251.67" y="150.11" width="30.00" height="82.42" fill="#ef4444" stroke="#ef4444" stroke-width="1.00"/>
+    <line x1="370.00" y1="189.36" x2="370.00" y2="279.64" stroke="#22c55e" stroke-width="1.00"/>
+    <rect x="355.00" y="205.06" width="30.00" height="27.47" fill="#22c55e" stroke="#22c55e" stroke-width="1.00"/>
+    <line x1="473.33" y1="83.39" x2="473.33" y2="216.84" stroke="#22c55e" stroke-width="1.00"/>
+    <rect x="458.33" y="99.09" width="30.00" height="105.97" fill="#22c55e" stroke="#22c55e" stroke-width="1.00"/>
+    <line x1="576.67" y1="32.36" x2="576.67" y2="126.56" stroke="#22c55e" stroke-width="1.00"/>
+    <rect x="561.67" y="55.91" width="30.00" height="43.17" fill="#22c55e" stroke="#22c55e" stroke-width="1.00"/>
+    <line x1="680.00" y1="44.14" x2="680.00" y2="150.11" stroke="#ef4444" stroke-width="1.00"/>
+    <rect x="665.00" y="55.91" width="30.00" height="82.42" fill="#ef4444" stroke="#ef4444" stroke-width="1.00"/>
+  </g>
+  <line x1="60.00" y1="20.00" x2="60.00" y2="360.00" stroke="#a3a3a3" stroke-width="1.00"/>
+  <line x1="55.00" y1="287.49" x2="60.00" y2="287.49" stroke="#a3a3a3" stroke-width="1.00"/>
+  <text x="47.00" y="287.49" font-family="sans-serif" font-size="11.0" fill="#525252" text-anchor="end" dominant-baseline="middle">68000.00</text>
+  <line x1="55.00" y1="248.24" x2="60.00" y2="248.24" stroke="#a3a3a3" stroke-width="1.00"/>
+  <text x="47.00" y="248.24" font-family="sans-serif" font-size="11.0" fill="#525252" text-anchor="end" dominant-baseline="middle">69000.00</text>
+  <line x1="55.00" y1="208.99" x2="60.00" y2="208.99" stroke="#a3a3a3" stroke-width="1.00"/>
+  <text x="47.00" y="208.99" font-family="sans-serif" font-size="11.0" fill="#525252" text-anchor="end" dominant-baseline="middle">70000.00</text>
+  <line x1="55.00" y1="169.74" x2="60.00" y2="169.74" stroke="#a3a3a3" stroke-width="1.00"/>
+  <text x="47.00" y="169.74" font-family="sans-serif" font-size="11.0" fill="#525252" text-anchor="end" dominant-baseline="middle">71000.00</text>
+  <line x1="55.00" y1="130.49" x2="60.00" y2="130.49" stroke="#a3a3a3" stroke-width="1.00"/>
+  <text x="47.00" y="130.49" font-family="sans-serif" font-size="11.0" fill="#525252" text-anchor="end" dominant-baseline="middle">72000.00</text>
+  <line x1="55.00" y1="91.24" x2="60.00" y2="91.24" stroke="#a3a3a3" stroke-width="1.00"/>
+  <text x="47.00" y="91.24" font-family="sans-serif" font-size="11.0" fill="#525252" text-anchor="end" dominant-baseline="middle">73000.00</text>
+  <line x1="55.00" y1="51.99" x2="60.00" y2="51.99" stroke="#a3a3a3" stroke-width="1.00"/>
+  <text x="47.00" y="51.99" font-family="sans-serif" font-size="11.0" fill="#525252" text-anchor="end" dominant-baseline="middle">74000.00</text>
+  <line x1="60.00" y1="360.00" x2="680.00" y2="360.00" stroke="#a3a3a3" stroke-width="1.00"/>
+  <line x1="60.00" y1="360.00" x2="60.00" y2="365.00" stroke="#a3a3a3" stroke-width="1.00"/>
+  <text x="60.00" y="373.00" font-family="sans-serif" font-size="11.0" fill="#525252" text-anchor="middle" dominant-baseline="hanging">2024-04-01 00:00</text>
+  <line x1="266.67" y1="360.00" x2="266.67" y2="365.00" stroke="#a3a3a3" stroke-width="1.00"/>
+  <text x="266.67" y="373.00" font-family="sans-serif" font-size="11.0" fill="#525252" text-anchor="middle" dominant-baseline="hanging">2024-04-03 00:00</text>
+  <line x1="473.33" y1="360.00" x2="473.33" y2="365.00" stroke="#a3a3a3" stroke-width="1.00"/>
+  <text x="473.33" y="373.00" font-family="sans-serif" font-size="11.0" fill="#525252" text-anchor="middle" dominant-baseline="hanging">2024-04-05 00:00</text>
+  <line x1="680.00" y1="360.00" x2="680.00" y2="365.00" stroke="#a3a3a3" stroke-width="1.00"/>
+  <text x="680.00" y="373.00" font-family="sans-serif" font-size="11.0" fill="#525252" text-anchor="middle" dominant-baseline="hanging">2024-04-07 00:00</text>
+</svg>

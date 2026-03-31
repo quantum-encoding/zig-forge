@@ -1,0 +1,7 @@
+.{
+    .name = .zigix_chat,
+    .version = "0.1.0",
+    .fingerprint = 0x2fca104c07d3b153,
+    .dependencies = .{},
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
+}

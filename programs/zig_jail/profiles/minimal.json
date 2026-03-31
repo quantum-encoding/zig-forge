@@ -1,0 +1,115 @@
+{
+  "profile_name": "minimal",
+  "description": "Absolute minimum syscalls - useful for testing and as a baseline for custom profiles",
+  "version": "1.0.0",
+  "author": "Zig Guardian Forge",
+  "threat_model": "Maximum isolation - only allow bare essentials to run and exit",
+
+  "syscalls": {
+    "default_action": "kill",
+    "comment": "Kill on any unlisted syscall - this is the most restrictive profile",
+
+    "allowed": [
+      "read",
+      "write",
+      "open",
+      "openat",
+      "close",
+      "stat",
+      "fstat",
+      "lstat",
+      "newfstatat",
+      "lseek",
+      "mmap",
+      "munmap",
+      "mprotect",
+      "brk",
+      "rt_sigaction",
+      "rt_sigprocmask",
+      "rt_sigreturn",
+      "exit",
+      "exit_group"
+    ],
+
+    "blocked": [
+      "unlink",
+      "unlinkat",
+      "rmdir",
+      "rename",
+      "renameat",
+      "link",
+      "symlink",
+      "mkdir",
+      "chmod",
+      "chown",
+      "mount",
+      "umount",
+      "reboot",
+      "socket",
+      "bind",
+      "connect",
+      "execve",
+      "fork",
+      "clone",
+      "ptrace",
+      "kill",
+      "tkill",
+      "tgkill"
+    ],
+
+    "conditional": []
+  },
+
+  "capabilities": {
+    "drop_all": true,
+    "keep": []
+  },
+
+  "namespaces": {
+    "enabled": [],
+    "network": "none"
+  },
+
+  "filesystem": {
+    "protected_paths": ["*"],
+    "writable_sandbox": []
+  },
+
+  "limits": {
+    "max_open_files": 64,
+    "max_memory_mb": 128,
+    "max_cpu_time_sec": 10,
+    "max_processes": 1
+  },
+
+  "audit": {
+    "log_violations": true,
+    "log_allowed": true,
+    "log_target": "stderr",
+    "auditd_integration": true,
+    "auditd_key": "zig_jail_minimal"
+  },
+
+  "metadata": {
+    "created": "2025-10-06",
+    "tested_with": ["Static binaries", "Simple C programs"],
+    "use_cases": [
+      "Testing seccomp-BPF enforcement",
+      "Baseline for building custom profiles",
+      "Running statically-linked programs with minimal privileges",
+      "Security research and syscall auditing"
+    ],
+    "known_limitations": [
+      "Cannot fork or exec - single process only",
+      "Cannot access network",
+      "Cannot modify filesystem",
+      "Most complex programs will fail immediately",
+      "Use this as a starting point, not a production profile"
+    ],
+    "usage_examples": [
+      "zig-jail --profile=minimal -- /bin/echo 'hello world'",
+      "zig-jail --profile=minimal -- ./simple_static_binary",
+      "zig-jail --profile=minimal --log-allowed -- strace -c true"
+    ]
+  }
+}

@@ -1,0 +1,42 @@
+CRITICAL DISCOVERY - eBPF Program Not Attached
+==============================================
+Date: 2025-10-27
+
+ROOT CAUSE FOUND
+----------------
+The eBPF programs are being LOADED but NOT ATTACHED to tracepoints!
+
+Evidence:
+- Program ID 102 (test_write): LOADED but no 'pids' field
+- Program ID 42 (cognitive-watch): LOADED + ATTACHED (pids cognitive-watch(1152))
+- Counter stays at 0 because program never executes
+
+FIX NEEDED
+----------
+The cognitive-watcher.c needs to:
+1. Load the BPF program
+2. **ATTACH it to the tracepoint** ← THIS IS MISSING!
+
+Commands to manually attach:
+```bash
+# Stop watcher
+sudo systemctl stop cognitive-watcher
+
+# Attach test program to tracepoint
+sudo bpftool prog attach id 102 tracepoint /sys/kernel/tracing/events/syscalls/sys_enter_write
+
+# Generate writes
+echo "test" > /tmp/test.txt
+
+# Check counter
+sudo bpftool map dump name test_counter
+```
+
+NEXT STEPS
+----------
+1. Check cognitive-watcher.c for attachment code
+2. Verify libbpf is calling bpf_program__attach()
+3. Fix attachment logic if missing
+4. Recompile and test
+
+The tracepoint EXISTS and is correct - we just need to attach to it!

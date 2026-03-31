@@ -1,0 +1,68 @@
+{
+  "company_name": "AI Generations CRM",
+  "company_address": "123 Business Lane, Dublin",
+  "client_name": "ACME Corp",
+  "client_address": "456 Client Street",
+  "reference": "RPT-2026-56387",
+  "date": "27 March 2026",
+  "primary_color": "#2563EB",
+  "secondary_color": "#1e3a5f",
+  "sections": [
+    {
+      "type": "metrics",
+      "heading": "Key Metrics",
+      "metric_items": [
+        {"label": "Total Leads", "value": "247"},
+        {"label": "Active Deals", "value": "89"},
+        {"label": "Won This Month", "value": "23"},
+        {"label": "Revenue", "value": "142K"}
+      ]
+    },
+    {
+      "type": "chart",
+      "heading": "Leads by Status",
+      "chart_spec": {
+        "chart_type": "pie",
+        "segments": [
+          {"label": "New", "value": 34.4, "color": "#EF4444"},
+          {"label": "Contacted", "value": 25.1, "color": "#3B82F6"},
+          {"label": "Qualified", "value": 18.2, "color": "#F97316"},
+          {"label": "Proposal Sent", "value": 12.6, "color": "#F59E0B"},
+          {"label": "Closed Won", "value": 9.7, "color": "#8B5CF6"}
+        ]
+      }
+    },
+    {
+      "type": "chart",
+      "heading": "Customer Pipeline",
+      "chart_spec": {
+        "chart_type": "pie",
+        "segments": [
+          {"label": "Discovery", "value": 40.4, "color": "#EF4444"},
+          {"label": "Proposal", "value": 26.9, "color": "#3B82F6"},
+          {"label": "Negotiation", "value": 14.4, "color": "#F97316"},
+          {"label": "Closed", "value": 18.3, "color": "#10B981"}
+        ]
+      }
+    },
+    {
+      "type": "table",
+      "heading": "Jobs Summary",
+      "table_items": [
+        {"description": "Website Redesign", "quantity": 1, "unit_price": 12000, "total": 12000},
+        {"description": "SEO Optimization", "quantity": 3, "unit_price": 1500, "total": 4500},
+        {"description": "Content Creation", "quantity": 10, "unit_price": 350, "total": 3500},
+        {"description": "Social Media Management", "quantity": 6, "unit_price": 800, "total": 4800},
+        {"description": "Email Marketing Campaign", "quantity": 4, "unit_price": 600, "total": 2400}
+      ],
+      "subtotal": 27200,
+      "tax_rate": 0.23,
+      "total": 33456
+    }
+  ],
+  "footer": {
+    "phone": "",
+    "email": "",
+    "website": ""
+  }
+}

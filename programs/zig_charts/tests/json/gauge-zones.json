@@ -1,0 +1,18 @@
+{
+  "type": "gauge",
+  "width": 400,
+  "height": 300,
+  "data": {
+    "value": 85,
+    "label": "Temperature"
+  },
+  "config": {
+    "min": 0,
+    "max": 120,
+    "zones": [
+      { "max": 60, "color": "#10B981" },
+      { "max": 90, "color": "#F59E0B" },
+      { "max": 120, "color": "#EF4444" }
+    ]
+  }
+}

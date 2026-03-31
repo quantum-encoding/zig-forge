@@ -1,0 +1,104 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "quantum-synapse.fullname" . }}
+  labels:
+    {{- include "quantum-synapse.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "quantum-synapse.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "quantum-synapse.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "quantum-synapse.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+      - name: {{ .Chart.Name }}
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 12 }}
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        - name: metrics
+          containerPort: 9090
+          protocol: TCP
+        env:
+        - name: QSE_ENVIRONMENT
+          value: {{ .Values.config.environment }}
+        - name: QSE_LOG_LEVEL
+          value: {{ .Values.config.logLevel }}
+        - name: QSE_CONFIG_PATH
+          value: /app/config/production.json
+        - name: APCA_API_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.secrets.existingSecret }}
+              key: {{ .Values.secrets.apiKeyField }}
+        - name: APCA_API_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.secrets.existingSecret }}
+              key: {{ .Values.secrets.apiSecretField }}
+        livenessProbe:
+          {{- toYaml .Values.livenessProbe | nindent 12 }}
+        readinessProbe:
+          {{- toYaml .Values.readinessProbe | nindent 12 }}
+        resources:
+          {{- toYaml .Values.resources | nindent 12 }}
+        volumeMounts:
+        - name: config
+          mountPath: /app/config
+          readOnly: true
+        {{- if .Values.persistence.logs.enabled }}
+        - name: logs
+          mountPath: {{ .Values.persistence.logs.mountPath }}
+        {{- end }}
+        {{- if .Values.persistence.state.enabled }}
+        - name: state
+          mountPath: {{ .Values.persistence.state.mountPath }}
+        {{- end }}
+      volumes:
+      - name: config
+        configMap:
+          name: {{ include "quantum-synapse.fullname" . }}
+      {{- if .Values.persistence.logs.enabled }}
+      - name: logs
+        persistentVolumeClaim:
+          claimName: {{ include "quantum-synapse.fullname" . }}-logs
+      {{- end }}
+      {{- if .Values.persistence.state.enabled }}
+      - name: state
+        persistentVolumeClaim:
+          claimName: {{ include "quantum-synapse.fullname" . }}-state
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

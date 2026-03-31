@@ -1,0 +1,98 @@
+/* Sentinel Cockpit - Strategic Intelligence Dashboard Styles */
+
+/* Top bar icon */
+.sentinel-icon {
+    icon-size: 16px;
+}
+
+/* Alert badge for critical behavioral alerts */
+.sentinel-alert-badge {
+    background-color: #e74c3c;
+    color: white;
+    border-radius: 10px;
+    padding: 2px 6px;
+    font-size: 10px;
+    font-weight: bold;
+    margin-left: 4px;
+}
+
+/* Header styling */
+.sentinel-header {
+    padding: 12px;
+    background-color: rgba(0, 0, 0, 0.05);
+    border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+}
+
+.sentinel-title {
+    font-size: 16px;
+    font-weight: bold;
+    color: #2c3e50;
+    margin-bottom: 4px;
+}
+
+.sentinel-status {
+    font-size: 12px;
+    color: #27ae60;
+    font-weight: 500;
+}
+
+/* Alert severity styling */
+.sentinel-alert-critical {
+    background-color: rgba(231, 76, 60, 0.1);
+    border-left: 3px solid #e74c3c;
+    padding: 8px 12px;
+    margin: 2px 0;
+}
+
+.sentinel-alert-high {
+    background-color: rgba(230, 126, 34, 0.1);
+    border-left: 3px solid #e67e22;
+    padding: 8px 12px;
+    margin: 2px 0;
+}
+
+.sentinel-alert-medium {
+    background-color: rgba(241, 196, 15, 0.1);
+    border-left: 3px solid #f1c40f;
+    padding: 8px 12px;
+    margin: 2px 0;
+}
+
+.sentinel-alert-info {
+    background-color: rgba(52, 152, 219, 0.1);
+    border-left: 3px solid #3498db;
+    padding: 8px 12px;
+    margin: 2px 0;
+}
+
+/* Process chain items */
+.sentinel-process-chain {
+    background-color: rgba(52, 73, 94, 0.05);
+    border-left: 3px solid #34495e;
+    padding: 8px 12px;
+    margin: 2px 0;
+    font-family: monospace;
+    font-size: 11px;
+}
+
+/* Status items */
+.sentinel-status-item {
+    background-color: rgba(46, 204, 113, 0.05);
+    border-left: 3px solid #2ecc71;
+    padding: 8px 12px;
+    margin: 2px 0;
+    font-size: 11px;
+}
+
+/* Wider menu styling */
+.popup-menu-content {
+    min-width: 600px !important;
+}
+
+/* Section separators */
+.popup-separator-menu-item {
+    background-color: rgba(0, 0, 0, 0.1);
+    font-weight: bold;
+    color: #2c3e50;
+    padding: 6px 12px;
+}

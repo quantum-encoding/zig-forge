@@ -1,0 +1,20 @@
+{
+  "type": "candlestick",
+  "title": "BTC/USD Daily",
+  "width": 700,
+  "height": 400,
+  "data": {
+    "candles": [
+      {"timestamp": 1711929600, "open": 69500, "high": 71200, "low": 68800, "close": 70800, "volume": 28500},
+      {"timestamp": 1712016000, "open": 70800, "high": 72100, "low": 70200, "close": 71500, "volume": 31200},
+      {"timestamp": 1712102400, "open": 71500, "high": 71800, "low": 69100, "close": 69400, "volume": 42100},
+      {"timestamp": 1712188800, "open": 69400, "high": 70500, "low": 68200, "close": 70100, "volume": 35800},
+      {"timestamp": 1712275200, "open": 70100, "high": 73200, "low": 69800, "close": 72800, "volume": 48200},
+      {"timestamp": 1712361600, "open": 72800, "high": 74500, "low": 72100, "close": 73900, "volume": 39100},
+      {"timestamp": 1712448000, "open": 73900, "high": 74200, "low": 71500, "close": 71800, "volume": 33500}
+    ]
+  },
+  "config": {
+    "show_volume": true
+  }
+}

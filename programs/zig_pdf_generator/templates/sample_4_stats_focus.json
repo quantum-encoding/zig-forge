@@ -1,0 +1,379 @@
+{
+  "page_size": { "width": 842, "height": 595 },
+  "pages": [
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 842,
+          "height": 70,
+          "fill_color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "CRG",
+          "x": 50,
+          "y": 42,
+          "font_size": 22,
+          "font_weight": "bold",
+          "color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "DIRECT",
+          "x": 100,
+          "y": 42,
+          "font_size": 22,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "text",
+          "content": "Renewable Energy Solutions",
+          "x": 50,
+          "y": 58,
+          "font_size": 9,
+          "color": "#6EE7B7"
+        },
+        {
+          "type": "text",
+          "content": "Quote CRG-2026-00847  •  1st February 2026",
+          "x": 792,
+          "y": 42,
+          "font_size": 10,
+          "color": "#9CA3AF",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "0330 133 2497",
+          "x": 792,
+          "y": 58,
+          "font_size": 11,
+          "font_weight": "bold",
+          "color": "#10B981",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "Solar Quote for",
+          "x": 50,
+          "y": 105,
+          "font_size": 14,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "Mr & Mrs Johnson",
+          "x": 50,
+          "y": 135,
+          "font_size": 28,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "42 Oak Lane, Southampton",
+          "x": 50,
+          "y": 160,
+          "font_size": 12,
+          "color": "#4B5563"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 50,
+          "y": 190,
+          "width": 180,
+          "height": 130,
+          "fill_color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "TOTAL COST",
+          "x": 70,
+          "y": 215,
+          "font_size": 10,
+          "color": "#D1FAE5"
+        },
+        {
+          "type": "text",
+          "content": "£12,910",
+          "x": 70,
+          "y": 265,
+          "font_size": 36,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "text",
+          "content": "0% VAT included",
+          "x": 70,
+          "y": 295,
+          "font_size": 10,
+          "color": "#A7F3D0"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 250,
+          "y": 190,
+          "width": 140,
+          "height": 130,
+          "fill_color": "#059669"
+        },
+        {
+          "type": "text",
+          "content": "YEAR 1",
+          "x": 270,
+          "y": 215,
+          "font_size": 10,
+          "color": "#D1FAE5"
+        },
+        {
+          "type": "text",
+          "content": "£1,420",
+          "x": 270,
+          "y": 260,
+          "font_size": 28,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "text",
+          "content": "savings",
+          "x": 270,
+          "y": 290,
+          "font_size": 10,
+          "color": "#A7F3D0"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 410,
+          "y": 190,
+          "width": 140,
+          "height": 130,
+          "fill_color": "#047857"
+        },
+        {
+          "type": "text",
+          "content": "PAYBACK",
+          "x": 430,
+          "y": 215,
+          "font_size": 10,
+          "color": "#D1FAE5"
+        },
+        {
+          "type": "text",
+          "content": "9.1",
+          "x": 430,
+          "y": 260,
+          "font_size": 28,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "text",
+          "content": "years",
+          "x": 430,
+          "y": 290,
+          "font_size": 10,
+          "color": "#A7F3D0"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 570,
+          "y": 190,
+          "width": 222,
+          "height": 130,
+          "fill_color": "#065F46"
+        },
+        {
+          "type": "text",
+          "content": "25 YEAR RETURN",
+          "x": 590,
+          "y": 215,
+          "font_size": 10,
+          "color": "#D1FAE5"
+        },
+        {
+          "type": "text",
+          "content": "£42,500",
+          "x": 590,
+          "y": 260,
+          "font_size": 28,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "text",
+          "content": "lifetime savings",
+          "x": 590,
+          "y": 290,
+          "font_size": 10,
+          "color": "#A7F3D0"
+        },
+        {
+          "type": "text",
+          "content": "System Specification",
+          "x": 50,
+          "y": 360,
+          "font_size": 18,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 372,
+          "width": 60,
+          "height": 0,
+          "stroke_color": "#10B981",
+          "stroke_width": 3
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 50,
+          "y": 390,
+          "width": 360,
+          "height": 140,
+          "fill_color": "#F9FAFB",
+          "stroke_color": "#E5E7EB",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "5.28kW Solar PV + 9.5kWh Battery",
+          "x": 70,
+          "y": 415,
+          "font_size": 13,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "bullet_list",
+          "x": 70,
+          "y": 445,
+          "font_size": 10,
+          "color": "#4B5563",
+          "bullet_color": "#10B981",
+          "line_spacing": 14,
+          "indent": 12,
+          "items": [
+            "12 x JA Solar 440W All-Black Panels",
+            "GivEnergy 5.0kW Hybrid Inverter",
+            "GivEnergy 9.5kWh Battery",
+            "Professional installation & MCS certification"
+          ]
+        },
+        {
+          "type": "text",
+          "content": "Why Choose CRG Direct?",
+          "x": 432,
+          "y": 360,
+          "font_size": 18,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 432,
+          "y": 372,
+          "width": 60,
+          "height": 0,
+          "stroke_color": "#10B981",
+          "stroke_width": 3
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 432,
+          "y": 390,
+          "width": 360,
+          "height": 140,
+          "fill_color": "#F9FAFB",
+          "stroke_color": "#E5E7EB",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "2,500+",
+          "x": 460,
+          "y": 425,
+          "font_size": 20,
+          "font_weight": "bold",
+          "color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "Installations",
+          "x": 525,
+          "y": 425,
+          "font_size": 10,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "4.9/5",
+          "x": 630,
+          "y": 425,
+          "font_size": 20,
+          "font_weight": "bold",
+          "color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "Rating",
+          "x": 675,
+          "y": 425,
+          "font_size": 10,
+          "color": "#6B7280"
+        },
+        {
+          "type": "bullet_list",
+          "x": 452,
+          "y": 460,
+          "font_size": 10,
+          "color": "#4B5563",
+          "bullet_color": "#10B981",
+          "line_spacing": 14,
+          "indent": 12,
+          "items": [
+            "MCS Certified Installer",
+            "Which? Trusted Trader",
+            "RECC Member  •  TrustMark",
+            "15 years experience"
+          ]
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 545,
+          "width": 842,
+          "height": 50,
+          "fill_color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "Ready to proceed? Call 0330 133 2497 or email info@crgdirect.co.uk",
+          "x": 421,
+          "y": 575,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#ffffff",
+          "align": "center"
+        }
+      ]
+    }
+  ]
+}

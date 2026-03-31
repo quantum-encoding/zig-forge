@@ -1,0 +1,40 @@
+{
+  "tenant_id": "GOLDEN_001",
+  "name": "Midas Market Maker",
+  "tier": "GOLD",
+  "api_credentials": {
+    "api_key": "${ALPACA_API_KEY}",
+    "api_secret": "${ALPACA_API_SECRET}",
+    "base_url": "https://paper-api.alpaca.markets"
+  },
+  "algorithm": {
+    "type": "market_maker",
+    "strategy": "hft_system",
+    "parameters": {
+      "max_position": 1000,
+      "max_spread": 0.10,
+      "min_edge": 0.02,
+      "tick_window": 100,
+      "symbols": ["SPY", "QQQ", "AAPL", "MSFT", "NVDA"],
+      "risk_limits": {
+        "max_daily_loss": 1000,
+        "max_position_value": 50000,
+        "max_order_size": 500
+      }
+    }
+  },
+  "execution": {
+    "max_threads": 4,
+    "order_rate_limit": 200,
+    "tick_buffer_size": 10000,
+    "execution_mode": "paper"
+  },
+  "monitoring": {
+    "report_interval": 60,
+    "performance_metrics": true,
+    "send_alerts": false
+  },
+  "status": "active",
+  "created_at": "2025-01-10T00:00:00Z",
+  "notes": "Golden Tenant - Our first production customer using market making strategy"
+}

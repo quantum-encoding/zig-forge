@@ -1,0 +1,97 @@
+#!/bin/bash
+# Cognitive State Query Tool
+# Pre-approved for Claude Code to query its own cognitive state database
+# This tool has sudo permissions granted in Claude Code settings
+
+DB_PATH="/home/founder/github_public/guardian-shield/src/chronos-engine/cognitive-states.db"
+
+# Function to get current cognitive state for a PID
+get_current_state() {
+    local pid=$1
+    sqlite3 "$DB_PATH" "SELECT tool_name, status, raw_content FROM cognitive_states WHERE pid=$pid ORDER BY id DESC LIMIT 1;" 2>/dev/null
+}
+
+# Function to get latest state regardless of PID
+get_latest_state() {
+    sqlite3 "$DB_PATH" "SELECT pid, tool_name, status FROM cognitive_states ORDER BY id DESC LIMIT 1;" 2>/dev/null
+}
+
+# Function to get state summary for PID
+get_state_summary() {
+    local pid=$1
+    sqlite3 "$DB_PATH" <<EOF
+SELECT
+    COUNT(*) as total_states,
+    COUNT(DISTINCT tool_name) as unique_tools,
+    MAX(timestamp_human) as last_activity
+FROM cognitive_states
+WHERE pid=$pid;
+EOF
+}
+
+# Function to get recent states for PID
+get_recent_states() {
+    local pid=$1
+    local limit=${2:-10}
+    sqlite3 "$DB_PATH" "SELECT id, timestamp_human, tool_name, status FROM cognitive_states WHERE pid=$pid ORDER BY id DESC LIMIT $limit;" 2>/dev/null
+}
+
+# Function to get all active PIDs
+get_active_pids() {
+    sqlite3 "$DB_PATH" "SELECT DISTINCT pid, COUNT(*) as state_count FROM cognitive_states GROUP BY pid ORDER BY MAX(id) DESC;" 2>/dev/null
+}
+
+# Main command dispatcher
+case "$1" in
+    current)
+        if [ -z "$2" ]; then
+            get_latest_state
+        else
+            get_current_state "$2"
+        fi
+        ;;
+    summary)
+        if [ -z "$2" ]; then
+            echo "Usage: cognitive-query summary <PID>"
+            exit 1
+        fi
+        get_state_summary "$2"
+        ;;
+    recent)
+        if [ -z "$2" ]; then
+            echo "Usage: cognitive-query recent <PID> [limit]"
+            exit 1
+        fi
+        get_recent_states "$2" "$3"
+        ;;
+    pids)
+        get_active_pids
+        ;;
+    stats)
+        sqlite3 "$DB_PATH" "SELECT * FROM cognitive_stats;" 2>/dev/null
+        ;;
+    session)
+        sqlite3 "$DB_PATH" "SELECT * FROM session_summary;" 2>/dev/null
+        ;;
+    raw)
+        shift
+        sqlite3 "$DB_PATH" "$@" 2>/dev/null
+        ;;
+    *)
+        echo "Cognitive State Query Tool"
+        echo ""
+        echo "Usage:"
+        echo "  cognitive-query current [PID]     - Get current state (latest if no PID)"
+        echo "  cognitive-query summary <PID>     - Get summary stats for PID"
+        echo "  cognitive-query recent <PID> [N]  - Get recent N states for PID"
+        echo "  cognitive-query pids               - List all active PIDs"
+        echo "  cognitive-query stats              - View cognitive statistics"
+        echo "  cognitive-query session            - View session summaries"
+        echo "  cognitive-query raw <SQL>          - Run raw SQL query"
+        echo ""
+        echo "Examples:"
+        echo "  cognitive-query current 302079"
+        echo "  cognitive-query recent 302079 20"
+        echo "  cognitive-query raw 'SELECT COUNT(*) FROM cognitive_states;'"
+        ;;
+esac

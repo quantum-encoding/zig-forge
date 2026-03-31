@@ -1,0 +1,17 @@
+.{
+    .name = .http_sentinel,
+    .version = "1.0.0",
+    .fingerprint = 0xf485ee52813847f0,
+    .minimum_zig_version = "0.14.0",
+
+    .dependencies = .{},
+
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "examples",
+        "tests",
+        "README.md",
+    },
+}

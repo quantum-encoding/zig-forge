@@ -1,0 +1,17 @@
+{
+  "type": "bar",
+  "title": "Quarterly Revenue Breakdown",
+  "width": 700,
+  "height": 400,
+  "data": {
+    "categories": ["Q1 2025", "Q2 2025", "Q3 2025", "Q4 2025", "Q1 2026", "Q2 2026", "Q3 2026"],
+    "series": [
+      {"name": "Residential", "values": [45000, 62000, 78000, 55000, 71000, 89000, 95000]},
+      {"name": "Commercial", "values": [28000, 35000, 41000, 32000, 48000, 52000, 61000]},
+      {"name": "Government", "values": [12000, 18000, 22000, 15000, 25000, 31000, 28000]}
+    ]
+  },
+  "config": {
+    "mode": "stacked"
+  }
+}

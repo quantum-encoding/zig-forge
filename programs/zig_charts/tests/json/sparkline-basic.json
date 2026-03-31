@@ -1,0 +1,13 @@
+{
+  "type": "sparkline",
+  "width": 200,
+  "height": 50,
+  "data": {
+    "values": [5, 10, 8, 15, 12, 18, 14, 20, 17, 22, 19, 25]
+  },
+  "config": {
+    "fill": true,
+    "show_min": true,
+    "show_max": true
+  }
+}

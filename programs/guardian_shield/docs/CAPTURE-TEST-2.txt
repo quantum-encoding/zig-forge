@@ -1,0 +1,2 @@
+Second capture test
+This should trigger write() syscalls from Claude

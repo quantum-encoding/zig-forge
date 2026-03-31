@@ -1,0 +1,93 @@
+#!/bin/bash
+# Get Real-Time Cognitive State for Chronos Git Stamps
+# Replaces the old Python "Pondering" snapshot with live database query
+#
+# Usage: get-cognitive-state [PID]
+#   If PID is provided, use it directly
+#   Otherwise, walk up process tree to find Claude
+
+DB_PATH="/var/lib/cognitive-watcher/cognitive-states.db"
+
+# Get parent Claude Code PID (this script is called from Claude's bash)
+get_claude_pid() {
+    # Try multiple methods to find Claude PID
+
+    # Method 1: Walk up process tree looking for "claude" or "node" (Claude runs in Node.js)
+    local pid=$$
+    local max_depth=20
+    local depth=0
+
+    while [ $pid -ne 1 ] && [ $depth -lt $max_depth ]; do
+        local comm=$(cat /proc/$pid/comm 2>/dev/null)
+        local cmdline=$(cat /proc/$pid/cmdline 2>/dev/null | tr '\0' ' ')
+
+        # Check if this is a Claude process
+        if [[ "$comm" == "claude" ]] || [[ "$cmdline" =~ "claude-code" ]] || [[ "$cmdline" =~ "@anthropic/claude-code" ]]; then
+            echo $pid
+            return 0
+        fi
+
+        # Get parent PID
+        local ppid=$(awk '{print $4}' /proc/$pid/stat 2>/dev/null)
+        if [ -z "$ppid" ] || [ "$ppid" = "0" ]; then
+            break
+        fi
+        pid=$ppid
+        depth=$((depth + 1))
+    done
+
+    # Method 2: Find most recent active PID from database
+    local recent_pid=$(sqlite3 "$DB_PATH" "SELECT pid FROM cognitive_states ORDER BY id DESC LIMIT 1;" 2>/dev/null)
+    if [ -n "$recent_pid" ]; then
+        echo "$recent_pid"
+        return 0
+    fi
+
+    echo ""
+}
+
+# Get cognitive state from cache file or database
+get_state_from_db() {
+    # Use PID from argument if provided, otherwise auto-detect
+    local claude_pid=${1:-$(get_claude_pid)}
+
+    if [ -z "$claude_pid" ]; then
+        echo "Active"
+        return
+    fi
+
+    # Try cache file first (instant, written by watcher on every event)
+    local cache_file="/tmp/cognitive-state-cache-${claude_pid}"
+    if [ -f "$cache_file" ]; then
+        local cached_state=$(cat "$cache_file" 2>/dev/null)
+        if [ -n "$cached_state" ]; then
+            # Clean up: remove leading/trailing whitespace and newlines, collapse multiple spaces
+            cached_state=$(echo "$cached_state" | tr '\n' ' ' | tr -s ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            echo "$cached_state"
+            return
+        fi
+    fi
+
+    # Query database for most recent status line
+    # Status lines contain "(esc to interrupt" and don't have tool patterns
+    if [ -n "$claude_pid" ]; then
+        # Get entries containing status line pattern, excluding tool execution
+        local raw_content=$(sqlite3 "$DB_PATH" "SELECT raw_content FROM cognitive_states WHERE pid=$claude_pid AND raw_content LIKE '%(esc to interrupt%' AND raw_content NOT LIKE '%Bash(%' AND raw_content NOT LIKE '%Read(%' AND raw_content NOT LIKE '%Write(%' AND raw_content NOT LIKE '%Edit(%' AND raw_content NOT LIKE '%Grep(%' ORDER BY id DESC LIMIT 1;" 2>/dev/null)
+    else
+        # No PID found, search recent entries
+        local raw_content=$(sqlite3 "$DB_PATH" "SELECT raw_content FROM cognitive_states WHERE raw_content LIKE '%(esc to interrupt%' AND raw_content NOT LIKE '%Bash(%' AND raw_content NOT LIKE '%Read(%' AND raw_content NOT LIKE '%Write(%' AND raw_content NOT LIKE '%Edit(%' AND raw_content NOT LIKE '%Grep(%' ORDER BY id DESC LIMIT 1;" 2>/dev/null)
+    fi
+
+    if [ -n "$raw_content" ]; then
+        # Extract text before "(esc to interrupt" - that's the cognitive state
+        local cognitive_state=$(echo "$raw_content" | grep -o '.*(' | sed 's/[[:space:]]*([[:space:]]*$//' | tail -1 | sed 's/^[[:space:]>*]*//')
+        if [ -n "$cognitive_state" ]; then
+            echo "$cognitive_state"
+        fi
+    fi
+}
+
+# Main execution
+# Accept PID as first argument
+STATE=$(get_state_from_db "$1")
+echo "$STATE"

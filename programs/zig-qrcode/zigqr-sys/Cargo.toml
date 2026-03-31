@@ -1,0 +1,13 @@
+[package]
+name = "zigqr-sys"
+version = "0.1.0"
+edition = "2021"
+description = "High-performance QR code generator - Rust bindings for zig-qrcode"
+license = "MIT"
+authors = ["Quantum Encoding"]
+repository = "https://github.com/nicholasgasior/quantum-zig-forge"
+keywords = ["qrcode", "qr", "png", "svg", "encoding"]
+categories = ["encoding", "graphics"]
+
+[build-dependencies]
+# No bindgen needed - manual bindings for a small, stable API

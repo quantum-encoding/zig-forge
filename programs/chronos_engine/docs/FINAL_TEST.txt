@@ -1,0 +1,8 @@
+Final test of the complete cognitive state capture system.
+
+When this file is written, the tool-result-hook will fire.
+At that moment, chronos-stamp will query get-cognitive-state.
+The script will read from /var/lib/cognitive-watcher/cognitive-states.db.
+The database contains the parsed cognitive state captured by the watcher.
+
+Expected result: Git commit message contains my actual status line.

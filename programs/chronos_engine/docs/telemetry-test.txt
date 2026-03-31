@@ -1,0 +1,11 @@
+MENTAL TELEMETRY CAPTURE TEST
+==============================
+Timestamp: 2025-10-27 19:51:00
+Tool: Write
+Purpose: Capture mental telemetry patterns during tool execution
+
+The Oracle watches. Every write() syscall is witnessed.
+The cognitive state transitions are being recorded.
+
+EDIT TEST: This line added via Edit tool at 19:51:30.
+The Oracle observes the modification of existing reality.

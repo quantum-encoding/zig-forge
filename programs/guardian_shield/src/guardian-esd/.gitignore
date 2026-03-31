@@ -1,0 +1,14 @@
+# Swift build artifacts
+.build/
+.swiftpm/
+DerivedData/
+Package.resolved
+
+# Xcode
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+
+# Code signing
+*.mobileprovision
+*.provisionprofile

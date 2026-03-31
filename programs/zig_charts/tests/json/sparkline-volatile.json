@@ -1,0 +1,14 @@
+{
+  "type": "sparkline",
+  "width": 200,
+  "height": 60,
+  "data": {
+    "values": [50, 35, 60, 25, 70, 40, 80, 30, 65, 45, 75, 55]
+  },
+  "config": {
+    "fill": true,
+    "show_min": true,
+    "show_max": true,
+    "line_color": "#8B5CF6"
+  }
+}

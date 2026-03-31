@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="600" height="500"
+     viewBox="0 0 600 500">
+  <path d="M320.00,30.00 A132.00,132.00 0.00 0,1 366.94,285.37 L343.47,223.69 A66.00,66.00 0.00 0,0 320.00,96.00 Z " fill="#3b82f6" stroke="#ffffff" stroke-width="1.00"/>
+  <path d="M366.94,285.37 A132.00,132.00 0.00 0,1 199.62,216.17 L259.81,189.08 A66.00,66.00 0.00 0,0 343.47,223.69 Z " fill="#ef4444" stroke="#ffffff" stroke-width="1.00"/>
+  <path d="M199.62,216.17 A132.00,132.00 0.00 0,1 195.07,119.37 L257.54,140.68 A66.00,66.00 0.00 0,0 259.81,189.08 Z " fill="#10b981" stroke="#ffffff" stroke-width="1.00"/>
+  <path d="M195.07,119.37 A132.00,132.00 0.00 0,1 235.52,60.57 L277.76,111.29 A66.00,66.00 0.00 0,0 257.54,140.68 Z " fill="#f59e0b" stroke="#ffffff" stroke-width="1.00"/>
+  <path d="M235.52,60.57 A132.00,132.00 0.00 0,1 277.62,36.99 L298.81,99.49 A66.00,66.00 0.00 0,0 277.76,111.29 Z " fill="#8b5cf6" stroke="#ffffff" stroke-width="1.00"/>
+  <path d="M277.62,36.99 A132.00,132.00 0.00 0,1 307.08,30.63 L313.54,96.32 A66.00,66.00 0.00 0,0 298.81,99.49 Z " fill="#ec4899" stroke="#ffffff" stroke-width="1.00"/>
+  <path d="M307.08,30.63 A132.00,132.00 0.00 0,1 320.00,30.00 L320.00,96.00 A66.00,66.00 0.00 0,0 313.54,96.32 Z " fill="#06b6d4" stroke="#ffffff" stroke-width="1.00"/>
+  <rect x="70.00" y="304.00" width="8.00" height="8.00" fill="#3b82f6"/>
+  <text x="84.00" y="310.00" font-family="sans-serif" font-size="12.0" fill="#404040">Solar PV  44.2%</text>
+  <rect x="330.00" y="304.00" width="8.00" height="8.00" fill="#ef4444"/>
+  <text x="344.00" y="310.00" font-family="sans-serif" font-size="12.0" fill="#404040">Heat Pumps  24.1%</text>
+  <rect x="70.00" y="322.00" width="8.00" height="8.00" fill="#10b981"/>
+  <text x="84.00" y="328.00" font-family="sans-serif" font-size="12.0" fill="#404040">Battery Storage  12.0%</text>
+  <rect x="330.00" y="322.00" width="8.00" height="8.00" fill="#f59e0b"/>
+  <text x="344.00" y="328.00" font-family="sans-serif" font-size="12.0" fill="#404040">EV Chargers  8.7%</text>
+  <rect x="70.00" y="340.00" width="8.00" height="8.00" fill="#8b5cf6"/>
+  <text x="84.00" y="346.00" font-family="sans-serif" font-size="12.0" fill="#404040">Insulation  5.9%</text>
+  <rect x="330.00" y="340.00" width="8.00" height="8.00" fill="#ec4899"/>
+  <text x="344.00" y="346.00" font-family="sans-serif" font-size="12.0" fill="#404040">Maintenance  3.6%</text>
+  <rect x="70.00" y="358.00" width="8.00" height="8.00" fill="#06b6d4"/>
+  <text x="84.00" y="364.00" font-family="sans-serif" font-size="12.0" fill="#404040">Consulting  1.6%</text>
+</svg>

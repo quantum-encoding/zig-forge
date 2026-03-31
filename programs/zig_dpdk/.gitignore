@@ -1,0 +1,130 @@
+# Zig build artifacts
+zig-out/
+.zig-cache/
+zig-cache/
+
+# Build artifacts in program directories
+programs/*/zig-out/
+programs/*/.zig-cache/
+programs/**/zig-out/
+programs/**/.zig-cache/
+
+# Prebuilt binaries (should be built from source)
+programs/*/bin/
+programs/*/bin_prebuilt/
+programs/**/bin/
+programs/**/bin_prebuilt/
+
+# Compiled test binaries and artifacts
+programs/*/tests/main
+programs/**/tests/main
+test_*
+!test_*.zig
+
+# Go binaries in financial_engine
+programs/financial_engine/go-bridge/account-check
+programs/financial_engine/go-bridge/trading_system_complete
+programs/financial_engine/go-bridge/crypto_demo
+programs/financial_engine/go-bridge/margin_demo
+programs/financial_engine/go-bridge/*.exe
+
+# Misc compiled binaries in source dirs
+programs/chronos_engine/src/chronos*
+programs/chronos_engine/src/cognitive-watcher
+programs/chronos_engine/src/cognitive-watcher-v2
+!programs/chronos_engine/src/*.zig
+programs/stratum_engine_claude/test_*
+!programs/stratum_engine_claude/test_*.zig
+
+# Compiled binaries without extension (ELF executables)
+programs/chronos_engine/tests/chronosd-dbus-test
+programs/timeseries_db/cli
+programs/stratum_engine_grok/mempool-sniffer
+programs/stratum_engine_grok/client
+
+# ML model weights (GGUF, etc)
+models/
+**/models/*.gguf
+
+# Large generated files
+vmlinux.h
+*.bpf.o
+*.db
+docs/files/pipeline_combinations.csv
+programs/variable_tester/formulas.txt
+
+# Large test data files
+programs/zig_core_utils/zregex/tests/data/*.txt
+
+# Compiled binaries and libraries
+programs/zero_copy_net/main
+programs/market_data_parser/debug_test*
+programs/simd_crypto_ffi/*.a
+
+# Images (screenshots/pasted) - keep only essential diagrams
+programs/*/docs/*.png
+programs/**/docs/*.png
+
+# Test artifacts
+*.test
+test_stdio
+
+# Batch processing results
+batch_results_*.csv
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment files
+.env
+.env.local
+
+# Logs
+*.log
+
+# OS-specific
+Thumbs.db
+
+# Swift build artifacts
+.build/
+**/.build/
+*.xcodeproj/
+DerivedData/
+
+# AUR build artifacts
+programs/zig_core_utils/aur/pkg/
+programs/zig_core_utils/aur/src/
+
+# Generated visualization files
+programs/zig_silicon/*.svg
+
+# Claude Code local session files
+**/.claude/*.local.md
+
+# WASM binaries
+*.wasm
+
+# Node.js (zigpdf-mcp-server, etc)
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+package-lock.json
+
+# Compiled shared libraries
+*.so
+*.dylib
+
+# Generated PDFs (test outputs)
+programs/zig_pdf_generator/test_*.pdf
+programs/zig_pdf_generator/output/
+
+# Tauri/Rust build artifacts
+target/
+**/target/
+Cargo.lock

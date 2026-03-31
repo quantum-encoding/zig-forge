@@ -1,0 +1,15 @@
+{
+  "embedding_dim": 64,
+  "hidden_units": [
+    256,
+    128,
+    64
+  ],
+  "dropout_rate": 0.2,
+  "num_features": 16,
+  "region_size": 10000000,
+  "backend": "jax",
+  "version": "v2",
+  "match_probability": 0.5,
+  "train_regions": 100000
+}

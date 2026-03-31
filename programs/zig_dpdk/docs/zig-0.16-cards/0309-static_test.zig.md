@@ -1,0 +1,3 @@
+SKIP: Internal implementation file - no public migration impact
+
+The provided file `/home/founder/Downloads/zig-x86_64-linux-0.16.0-dev.1303+ee0a0f119/lib/std/json/static_test.zig` is completely empty (0 bytes), containing no code or public API definitions. This appears to be a test file that was either intentionally left blank or has been cleared. Since there are no public interfaces, types, or functions defined, there is no migration impact for developers.

@@ -1,0 +1,19 @@
+.{
+    .name = .zig_token_service,
+    .version = "0.1.0",
+    .fingerprint = 0xd30b938f30874ddf,
+    .minimum_zig_version = "0.14.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+    .dependencies = .{
+        .zig_uuid = .{ .path = "../zig_uuid" },
+        .zig_jwt = .{ .path = "../zig_jwt" },
+        .zig_ratelimit = .{ .path = "../zig_ratelimit" },
+        .zig_metrics = .{ .path = "../zig_metrics" },
+        .zig_bloom = .{ .path = "../zig_bloom" },
+        .zig_base58 = .{ .path = "../zig_base58" },
+    },
+}

@@ -1,0 +1,49 @@
+Cognitive Oracle Trinity - Testing Status
+==========================================
+Date: 2025-10-27
+
+CURRENT ISSUE:
+--------------
+The eBPF program (cognitive-oracle) is loaded and attached to the
+tracepoint/syscalls/sys_enter_write tracepoint, but all statistics are zero.
+This means it's not intercepting ANY write() syscalls.
+
+eBPF PROGRAM STATUS:
+-------------------
+- Program loaded: YES (confirmed via bpftool)
+- Tracepoint: tracepoint/syscalls/sys_enter_write
+- Process filter: Checks for "claude" in comm
+- Stats all zero: PROBLEM
+
+DEBUGGING STEPS:
+----------------
+1. Created test-minimal.bpf.c - a minimal eBPF program that counts ALL writes
+   with no filtering. This will verify if the tracepoint fires at all.
+
+2. If test-minimal works (counter increases):
+   - Problem is in cognitive-oracle.bpf.c logic
+   - Likely the is_claude_process() check is failing
+
+3. If test-minimal doesn't work (counter stays zero):
+   - Tracepoint isn't firing on this kernel
+   - May need different tracepoint or approach
+
+FILES CREATED:
+--------------
+- cognitive-oracle.bpf.c - Main eBPF program (14K)
+- cognitive-watcher.zig - Userspace consumer (7.5M binary)
+- test-minimal.bpf.c - Minimal test (6.5K)
+- test-claude-capture.c - ptrace test program
+
+NEXT STEPS:
+-----------
+1. Test minimal eBPF to verify tracepoint works
+2. If tracepoint works, debug why is_claude_process() isn't matching
+3. Consider alternative: use raw_tracepoint or kprobe instead
+4. Once writes detected, verify cognitive state parsing
+
+ARCHITECTURE:
+-------------
+Kernel (eBPF) → Ring Buffer → cognitive-watcher → D-Bus → chronosd-cognitive
+                                                         ↓
+                                                  chronos-stamp-cognitive

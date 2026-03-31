@@ -1,0 +1,34 @@
+Commands to Test the Minimal eBPF Program
+===========================================
+
+1. STOP COGNITIVE WATCHER:
+   sudo systemctl stop cognitive-watcher
+
+2. LOAD TEST PROGRAM:
+   sudo bpftool prog load test-minimal.bpf.o /sys/fs/bpf/test_minimal
+
+3. CHECK IF LOADED:
+   sudo bpftool prog list | grep test_write
+
+4. GENERATE SOME WRITES:
+   echo "test" > /tmp/test.txt
+   cat /tmp/test.txt
+   date
+
+5. CHECK COUNTER:
+   sudo bpftool map list | grep test
+   sudo bpftool map dump name test_counter
+
+6. IF COUNTER IS NON-ZERO:
+   - Tracepoint works!
+   - Problem is in cognitive-oracle.bpf.c logic
+   - Need to debug is_claude_process() function
+
+7. IF COUNTER IS STILL ZERO:
+   - Tracepoint not firing on this kernel
+   - Try alternative: raw_tracepoint/sys_enter
+   - Or use kprobe on __x64_sys_write
+
+8. CLEANUP:
+   sudo rm /sys/fs/bpf/test_minimal
+   sudo systemctl start cognitive-watcher

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="600" height="350"
+     viewBox="0 0 600 350">
+  <text x="60.00" y="32.00" font-family="sans-serif" font-size="14.0" fill="#404040" dominant-baseline="middle">Solar Installs</text>
+  <rect x="180.00" y="20.00" width="320.00" height="24.00" fill="none" stroke="#e5e5e5" stroke-width="1.00"/>
+  <rect x="180.00" y="20.00" width="284.80" height="24.00" fill="none" stroke="#22c55e" stroke-width="1.00"/>
+  <line x1="500.00" y1="18.00" x2="500.00" y2="46.00" stroke="#737373" stroke-width="2.00"/>
+  <text x="510.00" y="32.00" font-family="sans-serif" font-size="12.0" fill="#525252" dominant-baseline="middle">89%</text>
+  <text x="60.00" y="72.00" font-family="sans-serif" font-size="14.0" fill="#404040" dominant-baseline="middle">Heat Pump Installs</text>
+  <rect x="180.00" y="60.00" width="320.00" height="24.00" fill="none" stroke="#e5e5e5" stroke-width="1.00"/>
+  <rect x="180.00" y="60.00" width="198.40" height="24.00" fill="none" stroke="#3b82f6" stroke-width="1.00"/>
+  <line x1="500.00" y1="58.00" x2="500.00" y2="86.00" stroke="#737373" stroke-width="2.00"/>
+  <text x="510.00" y="72.00" font-family="sans-serif" font-size="12.0" fill="#525252" dominant-baseline="middle">62%</text>
+  <text x="60.00" y="112.00" font-family="sans-serif" font-size="14.0" fill="#404040" dominant-baseline="middle">Revenue Target</text>
+  <rect x="180.00" y="100.00" width="320.00" height="24.00" fill="none" stroke="#e5e5e5" stroke-width="1.00"/>
+  <rect x="180.00" y="100.00" width="249.60" height="24.00" fill="none" stroke="#f59e0b" stroke-width="1.00"/>
+  <line x1="500.00" y1="98.00" x2="500.00" y2="126.00" stroke="#737373" stroke-width="2.00"/>
+  <text x="510.00" y="112.00" font-family="sans-serif" font-size="12.0" fill="#525252" dominant-baseline="middle">78%</text>
+  <text x="60.00" y="152.00" font-family="sans-serif" font-size="14.0" fill="#404040" dominant-baseline="middle">New Leads</text>
+  <rect x="180.00" y="140.00" width="320.00" height="24.00" fill="none" stroke="#e5e5e5" stroke-width="1.00"/>
+  <rect x="180.00" y="140.00" width="304.00" height="24.00" fill="none" stroke="#10b981" stroke-width="1.00"/>
+  <line x1="500.00" y1="138.00" x2="500.00" y2="166.00" stroke="#737373" stroke-width="2.00"/>
+  <text x="510.00" y="152.00" font-family="sans-serif" font-size="12.0" fill="#525252" dominant-baseline="middle">95%</text>
+  <text x="60.00" y="192.00" font-family="sans-serif" font-size="14.0" fill="#404040" dominant-baseline="middle">Customer Satisfaction</text>
+  <rect x="180.00" y="180.00" width="320.00" height="24.00" fill="none" stroke="#e5e5e5" stroke-width="1.00"/>
+  <rect x="180.00" y="180.00" width="294.40" height="24.00" fill="none" stroke="#8b5cf6" stroke-width="1.00"/>
+  <line x1="500.00" y1="178.00" x2="500.00" y2="206.00" stroke="#737373" stroke-width="2.00"/>
+  <text x="510.00" y="192.00" font-family="sans-serif" font-size="12.0" fill="#525252" dominant-baseline="middle">92%</text>
+  <text x="60.00" y="232.00" font-family="sans-serif" font-size="14.0" fill="#404040" dominant-baseline="middle">Response Time</text>
+  <rect x="180.00" y="220.00" width="320.00" height="24.00" fill="none" stroke="#e5e5e5" stroke-width="1.00"/>
+  <rect x="180.00" y="220.00" width="144.00" height="24.00" fill="none" stroke="#ef4444" stroke-width="1.00"/>
+  <line x1="500.00" y1="218.00" x2="500.00" y2="246.00" stroke="#737373" stroke-width="2.00"/>
+  <text x="510.00" y="232.00" font-family="sans-serif" font-size="12.0" fill="#525252" dominant-baseline="middle">45%</text>
+  <text x="60.00" y="272.00" font-family="sans-serif" font-size="14.0" fill="#404040" dominant-baseline="middle">Warranty Claims</text>
+  <rect x="180.00" y="260.00" width="320.00" height="24.00" fill="none" stroke="#e5e5e5" stroke-width="1.00"/>
+  <rect x="180.00" y="260.00" width="38.40" height="24.00" fill="none" stroke="#ec4899" stroke-width="1.00"/>
+  <line x1="500.00" y1="258.00" x2="500.00" y2="286.00" stroke="#737373" stroke-width="2.00"/>
+  <text x="510.00" y="272.00" font-family="sans-serif" font-size="12.0" fill="#525252" dominant-baseline="middle">12%</text>
+</svg>

@@ -1,0 +1,15 @@
+{
+  "type": "pie",
+  "width": 600,
+  "height": 400,
+  "data": {
+    "segments": [
+      { "label": "Sales", "value": 45 },
+      { "label": "Marketing", "value": 30 },
+      { "label": "Development", "value": 25 }
+    ]
+  },
+  "config": {
+    "show_percentage": true
+  }
+}

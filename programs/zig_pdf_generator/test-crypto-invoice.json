@@ -1,0 +1,30 @@
+{
+  "document_type": "invoice",
+  "company_name": "Quantum Labs",
+  "company_address": "789 Blockchain Ave, Crypto City, CC 12345",
+  "company_vat": "US987654321",
+  "client_name": "DeFi Protocol Inc",
+  "client_address": "123 Smart Contract Blvd, Web3 Town",
+  "client_vat": "US123456789",
+  "invoice_number": "CRYPTO-2026-001",
+  "invoice_date": "2026-01-04",
+  "due_date": "2026-01-14",
+  "items": [
+    {"description": "Smart Contract Development", "quantity": 40, "unit_price": 250, "total": 10000},
+    {"description": "Security Audit", "quantity": 1, "unit_price": 5000, "total": 5000},
+    {"description": "Deployment & Integration", "quantity": 8, "unit_price": 200, "total": 1600}
+  ],
+  "subtotal": 16600,
+  "tax_rate": 0,
+  "tax_amount": 0,
+  "total": 16600,
+  "notes": "Payment accepted in cryptocurrency. Equivalent value in USD: $16,600",
+  "payment_terms": "Payment due within 10 days",
+  "qr_mode": "crypto",
+  "crypto_wallet": "0x742d35Cc6634C0532925a3b844Bc9e7595f7ABCD",
+  "crypto_network": "ethereum",
+  "crypto_amount": 5.5,
+  "crypto_sender_wallet": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+  "show_crypto_identicons": true,
+  "primary_color": "#627eea"
+}

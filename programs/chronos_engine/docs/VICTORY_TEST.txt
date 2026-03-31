@@ -1,0 +1,5 @@
+Testing the 100ms delay fix.
+
+This should capture the REAL cognitive state after the status line updates.
+
+Expected: Git commit will show my actual status line, not "Initializing".

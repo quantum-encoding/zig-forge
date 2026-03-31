@@ -1,0 +1,99 @@
+# ═══════════════════════════════════════════════════════════════════
+# Zig Forge — comprehensive .gitignore
+# ═══════════════════════════════════════════════════════════════════
+
+# ── Zig ───────────────────────────────────────────────────────────
+.zig-cache/
+.zig-cache.bak/
+zig-cache/
+zig-out/
+
+# ── Rust ──────────────────────────────────────────────────────────
+target/
+Cargo.lock
+# Keep Cargo.lock for binaries (zig-qrcode, quantum-vault-sys)
+!programs/zig-qrcode/zigqr-sys/Cargo.lock
+!programs/zig-quantum-encryption/*/Cargo.lock
+
+# ── Swift ─────────────────────────────────────────────────────────
+.build/
+.swiftpm/
+Package.resolved
+
+# ── Go ────────────────────────────────────────────────────────────
+# go.sum is checked in (reproducible builds)
+
+# ── Node ──────────────────────────────────────────────────────────
+node_modules/
+package-lock.json
+pnpm-lock.yaml
+
+# ── Python ────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# ── OS / Desktop ─────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# ── IDE ───────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.xcodeproj/
+*.xcworkspace/
+
+# ── Claude Code (machine-specific) ───────────────────────────────
+.claude/settings.local.json
+
+# ── Build artifacts ───────────────────────────────────────────────
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.lib
+*.exe
+
+# Keep iOS pre-built static libraries (intentional distribution)
+!libs/ios-libs/**/*.a
+
+# ── Zigix OS build artifacts ─────────────────────────────────────
+*.img
+*.iso
+*.qcow2
+iso_root/
+zigix_dev/zigix
+zigix_dev/limine/
+zigix-public/limine/
+
+# ── Logs ──────────────────────────────────────────────────────────
+# Sub-project .gitignore files handle their own log exclusions
+# Root only catches stray logs
+*.log
+
+# ── Secrets / credentials ────────────────────────────────────────
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+service-account.json
+
+# ── Miscellaneous ────────────────────────────────────────────────
+*.bak
+*.tmp
+*.temp
+.mcp.json
+
+# ── ML model files (too large for git, download separately) ──────
+*.gguf
+*.ggml
+*.bin

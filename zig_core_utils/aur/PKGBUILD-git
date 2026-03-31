@@ -1,0 +1,92 @@
+# Maintainer: Quantum Encoding Ltd <maintainer@quantumencoding.com>
+pkgname=zig-coreutils-git
+pkgver=r131.HEAD
+pkgrel=1
+pkgdesc="High-performance Zig implementations of GNU coreutils (131 utilities) - up to 10x faster (git version)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/quantum-encoding/quantum-zig-forge"
+license=('MIT')
+depends=('glibc')
+makedepends=('zig>=0.14.0' 'git')
+provides=('zig-coreutils')
+conflicts=('zig-coreutils')
+optdepends=(
+    'wl-clipboard: Wayland clipboard support for zclip'
+    'xclip: X11 clipboard support for zclip'
+)
+install=zig-coreutils.install
+source=("${pkgname}::git+${url}.git")
+sha256sums=('SKIP')
+
+# List of all utilities to build
+_utilities=(
+    zarch zawk zb2sum zbackup zbase32 zbase64 zbasename zbasenc
+    zcat zchcon zchgrp zchmod zchown zchroot zcksum zclip zcomm zcp
+    zcsplit zcurl zcut zdate zdd zdf zdir zdircolors zdirname zdu
+    zecho zenv zexpand zexpr zfactor zfalse zfind zfmt zfold zfree
+    zgrep zgroups zgzip zhashsum zhead zhostid zhostname zid zinstall
+    zjoin zjq zkill zlink zln zlogname zls zmd5sum zmkdir zmkfifo
+    zmknod zmktemp zmore zmv znice znl znohup znproc znumfmt zod
+    zpaste zpathchk zpgrep zping zpinky zpkill zpr zprintenv zprintf
+    zps zptx zpwd zreadlink zrealpath zregex zrm zrmdir zruncon zsed
+    zseq zsha1sum zsha256sum zsha512sum zshred zshuf zsleep zsort
+    zsplit zstat zstdbuf zstty zsudo zsum zsync zsys ztac ztail ztar
+    ztee ztest ztime ztimeout ztouch ztr ztree ztrue ztruncate ztsort
+    ztty zuname zunexpand zuniq zunlink zuptime zusers zvdir zwc zwho
+    zwhoami zxargs zxz zyes zzstd
+)
+
+pkgver() {
+    cd "${srcdir}/${pkgname}"
+    printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+    cd "${srcdir}/${pkgname}/programs/zig_core_utils"
+
+    local failed=()
+    local success=0
+
+    for util in "${_utilities[@]}"; do
+        if [[ -d "$util" ]]; then
+            echo "Building $util..."
+            pushd "$util" > /dev/null
+            if zig build -Doptimize=ReleaseFast 2>/dev/null; then
+                ((success++))
+            else
+                failed+=("$util")
+            fi
+            popd > /dev/null
+        fi
+    done
+
+    echo ""
+    echo "Successfully built: $success utilities"
+    if [[ ${#failed[@]} -gt 0 ]]; then
+        echo "Failed to build: ${failed[*]}"
+    fi
+}
+
+package() {
+    cd "${srcdir}/${pkgname}/programs/zig_core_utils"
+
+    install -dm755 "${pkgdir}/usr/bin"
+    install -dm755 "${pkgdir}/usr/share/licenses/${pkgname%-git}"
+    install -dm755 "${pkgdir}/usr/share/doc/${pkgname%-git}"
+
+    local installed=0
+    for util in "${_utilities[@]}"; do
+        if [[ -f "${util}/zig-out/bin/${util}" ]]; then
+            install -Dm755 "${util}/zig-out/bin/${util}" "${pkgdir}/usr/bin/${util}"
+            ((installed++))
+        fi
+    done
+
+    echo "Installed $installed utilities to /usr/bin/"
+
+    # Install documentation
+    install -Dm644 README.md "${pkgdir}/usr/share/doc/${pkgname%-git}/README.md"
+
+    # Install license
+    install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname%-git}/LICENSE"
+}

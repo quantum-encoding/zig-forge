@@ -1,0 +1,1522 @@
+{
+  "page_size": {
+    "width": 842,
+    "height": 595
+  },
+  "pages": [
+    {
+      "background_color": "#1e3a5f",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 842,
+          "height": 595,
+          "fill_color": "#1e3a5f"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 480,
+          "width": 842,
+          "height": 115,
+          "fill_color": "#f59e0b"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 160,
+          "width": 120,
+          "height": 0,
+          "stroke_color": "#f59e0b",
+          "stroke_width": 4
+        },
+        {
+          "type": "text",
+          "content": "SUMMIT",
+          "x": 60,
+          "y": 80,
+          "font_size": 42,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "text",
+          "content": "CONSTRUCTION",
+          "x": 60,
+          "y": 125,
+          "font_size": 18,
+          "color": "#f59e0b",
+          "font_weight": "bold"
+        },
+        {
+          "type": "text",
+          "content": "PROJECT PROPOSAL",
+          "x": 60,
+          "y": 200,
+          "font_size": 14,
+          "color": "#94a3b8",
+          "font_weight": "bold"
+        },
+        {
+          "type": "text",
+          "content": "Commercial Office Renovation",
+          "x": 60,
+          "y": 240,
+          "font_size": 36,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "text",
+          "content": "123 Business Park, Dublin 2",
+          "x": 60,
+          "y": 290,
+          "font_size": 20,
+          "color": "#cbd5e1"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 340,
+          "width": 200,
+          "height": 80,
+          "fill_color": "#0f2744",
+          "stroke_color": "#334155",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "PREPARED FOR",
+          "x": 75,
+          "y": 358,
+          "font_size": 10,
+          "color": "#64748b"
+        },
+        {
+          "type": "text",
+          "content": "Acme Corporation Ltd",
+          "x": 75,
+          "y": 385,
+          "font_size": 16,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 280,
+          "y": 340,
+          "width": 200,
+          "height": 80,
+          "fill_color": "#0f2744",
+          "stroke_color": "#334155",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "DATE",
+          "x": 295,
+          "y": 358,
+          "font_size": 10,
+          "color": "#64748b"
+        },
+        {
+          "type": "text",
+          "content": "1st February 2026",
+          "x": 295,
+          "y": 385,
+          "font_size": 16,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 500,
+          "y": 340,
+          "width": 200,
+          "height": 80,
+          "fill_color": "#0f2744",
+          "stroke_color": "#334155",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "QUOTE REF",
+          "x": 515,
+          "y": 358,
+          "font_size": 10,
+          "color": "#64748b"
+        },
+        {
+          "type": "text",
+          "content": "SC-2026-0142",
+          "x": 515,
+          "y": 385,
+          "font_size": 16,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "text",
+          "content": "Building Excellence Since 1987",
+          "x": 60,
+          "y": 520,
+          "font_size": 24,
+          "font_weight": "bold",
+          "color": "#1e3a5f"
+        },
+        {
+          "type": "text",
+          "content": "www.summitconstruction.ie  |  info@summitconstruction.ie  |  +353 1 234 5678",
+          "x": 60,
+          "y": 555,
+          "font_size": 12,
+          "color": "#1e3a5f"
+        }
+      ]
+    },
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 842,
+          "height": 60,
+          "fill_color": "#1e3a5f"
+        },
+        {
+          "type": "text",
+          "content": "SUMMIT CONSTRUCTION",
+          "x": 60,
+          "y": 35,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "text",
+          "content": "Why Choose Us",
+          "x": 782,
+          "y": 35,
+          "font_size": 12,
+          "color": "#f59e0b",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "Why Partner With Summit?",
+          "x": 60,
+          "y": 100,
+          "font_size": 28,
+          "font_weight": "bold",
+          "color": "#1e3a5f"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 115,
+          "width": 80,
+          "height": 0,
+          "stroke_color": "#f59e0b",
+          "stroke_width": 3
+        },
+        {
+          "type": "text",
+          "content": "With over 35 years of experience delivering commercial and residential projects across Ireland, Summit Construction has built a reputation for excellence, reliability, and exceptional craftsmanship.",
+          "x": 60,
+          "y": 145,
+          "font_size": 12,
+          "color": "#475569",
+          "max_width": 350
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 210,
+          "width": 170,
+          "height": 100,
+          "fill_color": "#f8fafc",
+          "stroke_color": "#e2e8f0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "500+",
+          "x": 145,
+          "y": 245,
+          "font_size": 32,
+          "font_weight": "bold",
+          "color": "#f59e0b",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "Projects Completed",
+          "x": 145,
+          "y": 280,
+          "font_size": 11,
+          "color": "#64748b",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 245,
+          "y": 210,
+          "width": 170,
+          "height": 100,
+          "fill_color": "#f8fafc",
+          "stroke_color": "#e2e8f0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "98%",
+          "x": 330,
+          "y": 245,
+          "font_size": 32,
+          "font_weight": "bold",
+          "color": "#f59e0b",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "On-Time Delivery",
+          "x": 330,
+          "y": 280,
+          "font_size": 11,
+          "color": "#64748b",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 325,
+          "width": 170,
+          "height": 100,
+          "fill_color": "#f8fafc",
+          "stroke_color": "#e2e8f0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "35",
+          "x": 145,
+          "y": 360,
+          "font_size": 32,
+          "font_weight": "bold",
+          "color": "#f59e0b",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "Years Experience",
+          "x": 145,
+          "y": 395,
+          "font_size": 11,
+          "color": "#64748b",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 245,
+          "y": 325,
+          "width": 170,
+          "height": 100,
+          "fill_color": "#f8fafc",
+          "stroke_color": "#e2e8f0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "A+",
+          "x": 330,
+          "y": 360,
+          "font_size": 32,
+          "font_weight": "bold",
+          "color": "#f59e0b",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "Safety Rating",
+          "x": 330,
+          "y": 395,
+          "font_size": 11,
+          "color": "#64748b",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 450,
+          "y": 100,
+          "width": 340,
+          "height": 340,
+          "fill_color": "#1e3a5f",
+          "stroke_color": "#0f2744",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "Our Certifications",
+          "x": 470,
+          "y": 130,
+          "font_size": 16,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 470,
+          "y": 145,
+          "width": 50,
+          "height": 0,
+          "stroke_color": "#f59e0b",
+          "stroke_width": 2
+        },
+        {
+          "type": "bullet_list",
+          "x": 470,
+          "y": 170,
+          "font_size": 11,
+          "color": "#cbd5e1",
+          "bullet_color": "#f59e0b",
+          "line_spacing": 14,
+          "indent": 15,
+          "items": [
+            "ISO 9001:2015 Quality Management",
+            "ISO 14001:2015 Environmental",
+            "ISO 45001:2018 Health & Safety",
+            "Safe-T-Cert Accredited",
+            "CIRI Registered Contractor",
+            "Tier 1 Government Approved",
+            "BER Assessor Certified",
+            "SEAI Registered Partner"
+          ]
+        },
+        {
+          "type": "text",
+          "content": "Fully Insured",
+          "x": 470,
+          "y": 370,
+          "font_size": 12,
+          "font_weight": "bold",
+          "color": "#f59e0b"
+        },
+        {
+          "type": "text",
+          "content": "€10M Public Liability",
+          "x": 470,
+          "y": 390,
+          "font_size": 11,
+          "color": "#94a3b8"
+        },
+        {
+          "type": "text",
+          "content": "€5M Employer's Liability",
+          "x": 470,
+          "y": 408,
+          "font_size": 11,
+          "color": "#94a3b8"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 450,
+          "width": 722,
+          "height": 70,
+          "fill_color": "#fef3c7",
+          "stroke_color": "#f59e0b",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "CLIENT TESTIMONIAL",
+          "x": 80,
+          "y": 468,
+          "font_size": 9,
+          "font_weight": "bold",
+          "color": "#92400e"
+        },
+        {
+          "type": "text",
+          "content": "\"Summit delivered our office renovation on time and under budget. Their attention to detail and professionalism was outstanding. We've since used them for two more projects.\"",
+          "x": 80,
+          "y": 488,
+          "font_size": 11,
+          "font_style": "italic",
+          "color": "#78350f"
+        },
+        {
+          "type": "text",
+          "content": "— Sarah Murphy, CFO, TechCorp Ireland",
+          "x": 762,
+          "y": 505,
+          "font_size": 10,
+          "color": "#92400e",
+          "align": "right"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 545,
+          "width": 722,
+          "height": 0,
+          "stroke_color": "#e2e8f0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Page 2 of 6",
+          "x": 421,
+          "y": 565,
+          "font_size": 10,
+          "color": "#94a3b8",
+          "align": "center"
+        }
+      ]
+    },
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 842,
+          "height": 60,
+          "fill_color": "#1e3a5f"
+        },
+        {
+          "type": "text",
+          "content": "SUMMIT CONSTRUCTION",
+          "x": 60,
+          "y": 35,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "text",
+          "content": "Project Scope",
+          "x": 782,
+          "y": 35,
+          "font_size": 12,
+          "color": "#f59e0b",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "Scope of Works",
+          "x": 60,
+          "y": 100,
+          "font_size": 28,
+          "font_weight": "bold",
+          "color": "#1e3a5f"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 115,
+          "width": 80,
+          "height": 0,
+          "stroke_color": "#f59e0b",
+          "stroke_width": 3
+        },
+        {
+          "type": "text",
+          "content": "The following works are included in this proposal for the complete renovation of the ground floor office space at 123 Business Park, Dublin 2. Total floor area: 2,500 sq ft.",
+          "x": 60,
+          "y": 140,
+          "font_size": 12,
+          "color": "#475569",
+          "max_width": 720
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 185,
+          "width": 350,
+          "height": 160,
+          "fill_color": "#f8fafc",
+          "stroke_color": "#e2e8f0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "DEMOLITION & STRIP-OUT",
+          "x": 80,
+          "y": 208,
+          "font_size": 12,
+          "font_weight": "bold",
+          "color": "#1e3a5f"
+        },
+        {
+          "type": "bullet_list",
+          "x": 80,
+          "y": 230,
+          "font_size": 10,
+          "color": "#475569",
+          "bullet_color": "#f59e0b",
+          "line_spacing": 10,
+          "indent": 12,
+          "items": [
+            "Remove existing partition walls",
+            "Strip existing floor coverings",
+            "Remove suspended ceiling tiles",
+            "Disconnect and remove old M&E",
+            "Clear and dispose of all debris"
+          ]
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 430,
+          "y": 185,
+          "width": 350,
+          "height": 160,
+          "fill_color": "#f8fafc",
+          "stroke_color": "#e2e8f0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "STRUCTURAL WORKS",
+          "x": 450,
+          "y": 208,
+          "font_size": 12,
+          "font_weight": "bold",
+          "color": "#1e3a5f"
+        },
+        {
+          "type": "bullet_list",
+          "x": 450,
+          "y": 230,
+          "font_size": 10,
+          "color": "#475569",
+          "bullet_color": "#f59e0b",
+          "line_spacing": 10,
+          "indent": 12,
+          "items": [
+            "Install new steel support beam",
+            "Create open-plan layout",
+            "New stud partition walls",
+            "Fire-rated meeting room walls",
+            "Sound insulation to all partitions"
+          ]
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 360,
+          "width": 350,
+          "height": 160,
+          "fill_color": "#f8fafc",
+          "stroke_color": "#e2e8f0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "MECHANICAL & ELECTRICAL",
+          "x": 80,
+          "y": 383,
+          "font_size": 12,
+          "font_weight": "bold",
+          "color": "#1e3a5f"
+        },
+        {
+          "type": "bullet_list",
+          "x": 80,
+          "y": 405,
+          "font_size": 10,
+          "color": "#475569",
+          "bullet_color": "#f59e0b",
+          "line_spacing": 10,
+          "indent": 12,
+          "items": [
+            "New LED lighting throughout",
+            "CAT6 data cabling (48 points)",
+            "New distribution board",
+            "HVAC system upgrade",
+            "Emergency lighting & signage"
+          ]
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 430,
+          "y": 360,
+          "width": 350,
+          "height": 160,
+          "fill_color": "#f8fafc",
+          "stroke_color": "#e2e8f0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "FINISHES & FIT-OUT",
+          "x": 450,
+          "y": 383,
+          "font_size": 12,
+          "font_weight": "bold",
+          "color": "#1e3a5f"
+        },
+        {
+          "type": "bullet_list",
+          "x": 450,
+          "y": 405,
+          "font_size": 10,
+          "color": "#475569",
+          "bullet_color": "#f59e0b",
+          "line_spacing": 10,
+          "indent": 12,
+          "items": [
+            "Premium carpet tiles throughout",
+            "Painted plasterboard ceilings",
+            "Full decoration to all surfaces",
+            "Glazed meeting room frontage",
+            "Reception desk & joinery"
+          ]
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 545,
+          "width": 722,
+          "height": 0,
+          "stroke_color": "#e2e8f0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Page 3 of 6",
+          "x": 421,
+          "y": 565,
+          "font_size": 10,
+          "color": "#94a3b8",
+          "align": "center"
+        }
+      ]
+    },
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 842,
+          "height": 60,
+          "fill_color": "#1e3a5f"
+        },
+        {
+          "type": "text",
+          "content": "SUMMIT CONSTRUCTION",
+          "x": 60,
+          "y": 35,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "text",
+          "content": "Investment",
+          "x": 782,
+          "y": 35,
+          "font_size": 12,
+          "color": "#f59e0b",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "Your Investment",
+          "x": 60,
+          "y": 100,
+          "font_size": 28,
+          "font_weight": "bold",
+          "color": "#1e3a5f"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 115,
+          "width": 80,
+          "height": 0,
+          "stroke_color": "#f59e0b",
+          "stroke_width": 3
+        },
+        {
+          "type": "table",
+          "x": 60,
+          "y": 140,
+          "columns": ["Description", "Unit", "Qty", "Rate", "Amount"],
+          "column_widths": [340, 80, 60, 100, 120],
+          "rows": [
+            ["Demolition & Strip-out Works", "Item", "1", "€8,500.00", "€8,500.00"],
+            ["Structural Works (inc. steel beam)", "Item", "1", "€12,750.00", "€12,750.00"],
+            ["Stud Partitions & Fire Walls", "m²", "85", "€95.00", "€8,075.00"],
+            ["Mechanical Services (HVAC)", "Item", "1", "€18,500.00", "€18,500.00"],
+            ["Electrical Installation", "Item", "1", "€22,350.00", "€22,350.00"],
+            ["Data Cabling (48 CAT6 points)", "Point", "48", "€85.00", "€4,080.00"],
+            ["Suspended Ceilings", "m²", "230", "€42.00", "€9,660.00"],
+            ["Premium Carpet Tiles (Interface)", "m²", "230", "€58.00", "€13,340.00"],
+            ["Decoration (walls & ceilings)", "m²", "680", "€12.00", "€8,160.00"],
+            ["Glazed Meeting Room Frontage", "m", "12", "€425.00", "€5,100.00"],
+            ["Reception Desk & Joinery", "Item", "1", "€6,800.00", "€6,800.00"],
+            ["Project Management & Prelims", "Item", "1", "€9,500.00", "€9,500.00"]
+          ],
+          "header_bg_color": "#1e3a5f",
+          "header_text_color": "#ffffff",
+          "row_bg_color": "#ffffff",
+          "alt_row_bg_color": "#f8fafc",
+          "text_color": "#334155",
+          "border_color": "#e2e8f0",
+          "font_size": 9,
+          "header_font_size": 10,
+          "padding": 8,
+          "row_height": 26,
+          "header_height": 32
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 520,
+          "y": 465,
+          "width": 260,
+          "height": 90,
+          "fill_color": "#f8fafc",
+          "stroke_color": "#1e3a5f",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "Subtotal (excl. VAT)",
+          "x": 540,
+          "y": 485,
+          "font_size": 11,
+          "color": "#475569"
+        },
+        {
+          "type": "text",
+          "content": "€126,815.00",
+          "x": 760,
+          "y": 485,
+          "font_size": 11,
+          "color": "#475569",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "VAT @ 13.5%",
+          "x": 540,
+          "y": 505,
+          "font_size": 11,
+          "color": "#475569"
+        },
+        {
+          "type": "text",
+          "content": "€17,120.03",
+          "x": 760,
+          "y": 505,
+          "font_size": 11,
+          "color": "#475569",
+          "align": "right"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 540,
+          "y": 522,
+          "width": 220,
+          "height": 0,
+          "stroke_color": "#1e3a5f",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "TOTAL",
+          "x": 540,
+          "y": 540,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#1e3a5f"
+        },
+        {
+          "type": "text",
+          "content": "€143,935.03",
+          "x": 760,
+          "y": 540,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#f59e0b",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "* All prices valid for 30 days from date of issue",
+          "x": 60,
+          "y": 480,
+          "font_size": 9,
+          "font_style": "italic",
+          "color": "#94a3b8"
+        },
+        {
+          "type": "text",
+          "content": "* Excludes any unforeseen structural works",
+          "x": 60,
+          "y": 495,
+          "font_size": 9,
+          "font_style": "italic",
+          "color": "#94a3b8"
+        },
+        {
+          "type": "text",
+          "content": "* Subject to site survey confirmation",
+          "x": 60,
+          "y": 510,
+          "font_size": 9,
+          "font_style": "italic",
+          "color": "#94a3b8"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 545,
+          "width": 722,
+          "height": 0,
+          "stroke_color": "#e2e8f0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Page 4 of 6",
+          "x": 421,
+          "y": 565,
+          "font_size": 10,
+          "color": "#94a3b8",
+          "align": "center"
+        }
+      ]
+    },
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 842,
+          "height": 60,
+          "fill_color": "#1e3a5f"
+        },
+        {
+          "type": "text",
+          "content": "SUMMIT CONSTRUCTION",
+          "x": 60,
+          "y": 35,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "text",
+          "content": "Timeline",
+          "x": 782,
+          "y": 35,
+          "font_size": 12,
+          "color": "#f59e0b",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "Project Timeline",
+          "x": 60,
+          "y": 100,
+          "font_size": 28,
+          "font_weight": "bold",
+          "color": "#1e3a5f"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 115,
+          "width": 80,
+          "height": 0,
+          "stroke_color": "#f59e0b",
+          "stroke_width": 3
+        },
+        {
+          "type": "text",
+          "content": "Estimated project duration: 8 weeks from commencement. Works scheduled Monday-Friday, 08:00-18:00.",
+          "x": 60,
+          "y": 140,
+          "font_size": 12,
+          "color": "#475569"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 100,
+          "y": 180,
+          "width": 4,
+          "height": 300,
+          "stroke_color": "#e2e8f0",
+          "stroke_width": 4
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 88,
+          "y": 180,
+          "width": 24,
+          "height": 24,
+          "fill_color": "#f59e0b"
+        },
+        {
+          "type": "text",
+          "content": "WEEK 1",
+          "x": 130,
+          "y": 185,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#f59e0b"
+        },
+        {
+          "type": "text",
+          "content": "Mobilisation, site setup, demolition begins",
+          "x": 130,
+          "y": 200,
+          "font_size": 11,
+          "color": "#475569"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 88,
+          "y": 230,
+          "width": 24,
+          "height": 24,
+          "fill_color": "#f59e0b"
+        },
+        {
+          "type": "text",
+          "content": "WEEK 2",
+          "x": 130,
+          "y": 235,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#f59e0b"
+        },
+        {
+          "type": "text",
+          "content": "Complete demolition, structural works, steel beam installation",
+          "x": 130,
+          "y": 250,
+          "font_size": 11,
+          "color": "#475569"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 88,
+          "y": 280,
+          "width": 24,
+          "height": 24,
+          "fill_color": "#1e3a5f"
+        },
+        {
+          "type": "text",
+          "content": "WEEK 3-4",
+          "x": 130,
+          "y": 285,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#1e3a5f"
+        },
+        {
+          "type": "text",
+          "content": "First fix M&E, partition walls, ceiling grid installation",
+          "x": 130,
+          "y": 300,
+          "font_size": 11,
+          "color": "#475569"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 88,
+          "y": 330,
+          "width": 24,
+          "height": 24,
+          "fill_color": "#1e3a5f"
+        },
+        {
+          "type": "text",
+          "content": "WEEK 5-6",
+          "x": 130,
+          "y": 335,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#1e3a5f"
+        },
+        {
+          "type": "text",
+          "content": "Second fix M&E, ceiling tiles, glazing installation, initial decoration",
+          "x": 130,
+          "y": 350,
+          "font_size": 11,
+          "color": "#475569"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 88,
+          "y": 380,
+          "width": 24,
+          "height": 24,
+          "fill_color": "#1e3a5f"
+        },
+        {
+          "type": "text",
+          "content": "WEEK 7",
+          "x": 130,
+          "y": 385,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#1e3a5f"
+        },
+        {
+          "type": "text",
+          "content": "Floor finishes, joinery installation, final decoration",
+          "x": 130,
+          "y": 400,
+          "font_size": 11,
+          "color": "#475569"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 88,
+          "y": 430,
+          "width": 24,
+          "height": 24,
+          "fill_color": "#10b981"
+        },
+        {
+          "type": "text",
+          "content": "WEEK 8",
+          "x": 130,
+          "y": 435,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#10b981"
+        },
+        {
+          "type": "text",
+          "content": "Snagging, commissioning, cleaning, handover",
+          "x": 130,
+          "y": 450,
+          "font_size": 11,
+          "color": "#475569"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 450,
+          "y": 180,
+          "width": 330,
+          "height": 300,
+          "fill_color": "#f8fafc",
+          "stroke_color": "#e2e8f0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Payment Schedule",
+          "x": 470,
+          "y": 210,
+          "font_size": 16,
+          "font_weight": "bold",
+          "color": "#1e3a5f"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 470,
+          "y": 225,
+          "width": 50,
+          "height": 0,
+          "stroke_color": "#f59e0b",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "Stage 1 - Deposit",
+          "x": 470,
+          "y": 255,
+          "font_size": 11,
+          "font_weight": "bold",
+          "color": "#475569"
+        },
+        {
+          "type": "text",
+          "content": "20% on acceptance",
+          "x": 470,
+          "y": 272,
+          "font_size": 10,
+          "color": "#64748b"
+        },
+        {
+          "type": "text",
+          "content": "€28,787.01",
+          "x": 760,
+          "y": 262,
+          "font_size": 12,
+          "font_weight": "bold",
+          "color": "#1e3a5f",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "Stage 2 - First Valuation",
+          "x": 470,
+          "y": 305,
+          "font_size": 11,
+          "font_weight": "bold",
+          "color": "#475569"
+        },
+        {
+          "type": "text",
+          "content": "30% at Week 3",
+          "x": 470,
+          "y": 322,
+          "font_size": 10,
+          "color": "#64748b"
+        },
+        {
+          "type": "text",
+          "content": "€43,180.51",
+          "x": 760,
+          "y": 312,
+          "font_size": 12,
+          "font_weight": "bold",
+          "color": "#1e3a5f",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "Stage 3 - Second Valuation",
+          "x": 470,
+          "y": 355,
+          "font_size": 11,
+          "font_weight": "bold",
+          "color": "#475569"
+        },
+        {
+          "type": "text",
+          "content": "30% at Week 6",
+          "x": 470,
+          "y": 372,
+          "font_size": 10,
+          "color": "#64748b"
+        },
+        {
+          "type": "text",
+          "content": "€43,180.51",
+          "x": 760,
+          "y": 362,
+          "font_size": 12,
+          "font_weight": "bold",
+          "color": "#1e3a5f",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "Stage 4 - Final Payment",
+          "x": 470,
+          "y": 405,
+          "font_size": 11,
+          "font_weight": "bold",
+          "color": "#475569"
+        },
+        {
+          "type": "text",
+          "content": "20% on completion",
+          "x": 470,
+          "y": 422,
+          "font_size": 10,
+          "color": "#64748b"
+        },
+        {
+          "type": "text",
+          "content": "€28,787.00",
+          "x": 760,
+          "y": 412,
+          "font_size": 12,
+          "font_weight": "bold",
+          "color": "#1e3a5f",
+          "align": "right"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 470,
+          "y": 445,
+          "width": 290,
+          "height": 0,
+          "stroke_color": "#1e3a5f",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Total",
+          "x": 470,
+          "y": 462,
+          "font_size": 12,
+          "font_weight": "bold",
+          "color": "#1e3a5f"
+        },
+        {
+          "type": "text",
+          "content": "€143,935.03",
+          "x": 760,
+          "y": 462,
+          "font_size": 12,
+          "font_weight": "bold",
+          "color": "#f59e0b",
+          "align": "right"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 545,
+          "width": 722,
+          "height": 0,
+          "stroke_color": "#e2e8f0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Page 5 of 6",
+          "x": 421,
+          "y": 565,
+          "font_size": 10,
+          "color": "#94a3b8",
+          "align": "center"
+        }
+      ]
+    },
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 842,
+          "height": 60,
+          "fill_color": "#1e3a5f"
+        },
+        {
+          "type": "text",
+          "content": "SUMMIT CONSTRUCTION",
+          "x": 60,
+          "y": 35,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "text",
+          "content": "Terms & Acceptance",
+          "x": 782,
+          "y": 35,
+          "font_size": 12,
+          "color": "#f59e0b",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "Terms & Conditions",
+          "x": 60,
+          "y": 100,
+          "font_size": 28,
+          "font_weight": "bold",
+          "color": "#1e3a5f"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 115,
+          "width": 80,
+          "height": 0,
+          "stroke_color": "#f59e0b",
+          "stroke_width": 3
+        },
+        {
+          "type": "bullet_list",
+          "x": 60,
+          "y": 140,
+          "font_size": 10,
+          "color": "#475569",
+          "bullet_color": "#1e3a5f",
+          "line_spacing": 8,
+          "indent": 12,
+          "items": [
+            "This quotation is valid for 30 days from the date of issue.",
+            "A signed acceptance and 20% deposit is required to secure your project start date.",
+            "All works carried out in accordance with Irish Building Regulations and relevant standards.",
+            "Summit Construction maintains full public liability and employer's liability insurance.",
+            "Any variations to the scope of works will be quoted separately and agreed in writing.",
+            "The client is responsible for obtaining any necessary planning permissions or consents.",
+            "Final account subject to re-measurement of provisional quantities where applicable.",
+            "Defects liability period of 12 months from practical completion.",
+            "Payment terms: 14 days from date of invoice. Late payment subject to interest at 8% p.a."
+          ]
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 300,
+          "width": 722,
+          "height": 180,
+          "fill_color": "#f8fafc",
+          "stroke_color": "#1e3a5f",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "ACCEPTANCE",
+          "x": 80,
+          "y": 325,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#1e3a5f"
+        },
+        {
+          "type": "text",
+          "content": "I/We accept this quotation and authorise Summit Construction to proceed with the works as described.",
+          "x": 80,
+          "y": 350,
+          "font_size": 11,
+          "color": "#475569"
+        },
+        {
+          "type": "text",
+          "content": "Signed: _______________________________________",
+          "x": 80,
+          "y": 390,
+          "font_size": 11,
+          "color": "#334155"
+        },
+        {
+          "type": "text",
+          "content": "Date: ___________________",
+          "x": 500,
+          "y": 390,
+          "font_size": 11,
+          "color": "#334155"
+        },
+        {
+          "type": "text",
+          "content": "Print Name: ___________________________________",
+          "x": 80,
+          "y": 420,
+          "font_size": 11,
+          "color": "#334155"
+        },
+        {
+          "type": "text",
+          "content": "Position: ___________________",
+          "x": 500,
+          "y": 420,
+          "font_size": 11,
+          "color": "#334155"
+        },
+        {
+          "type": "text",
+          "content": "Company: ______________________________________",
+          "x": 80,
+          "y": 450,
+          "font_size": 11,
+          "color": "#334155"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 500,
+          "width": 842,
+          "height": 95,
+          "fill_color": "#1e3a5f"
+        },
+        {
+          "type": "text",
+          "content": "SUMMIT CONSTRUCTION LTD",
+          "x": 60,
+          "y": 525,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "text",
+          "content": "Unit 5, Industrial Estate, Sandyford, Dublin 18  |  CRO: 123456  |  VAT: IE1234567A",
+          "x": 60,
+          "y": 548,
+          "font_size": 10,
+          "color": "#94a3b8"
+        },
+        {
+          "type": "text",
+          "content": "Tel: +353 1 234 5678  |  Email: info@summitconstruction.ie  |  Web: www.summitconstruction.ie",
+          "x": 60,
+          "y": 565,
+          "font_size": 10,
+          "color": "#94a3b8"
+        },
+        {
+          "type": "text",
+          "content": "Page 6 of 6",
+          "x": 782,
+          "y": 565,
+          "font_size": 10,
+          "color": "#64748b",
+          "align": "right"
+        }
+      ]
+    }
+  ]
+}

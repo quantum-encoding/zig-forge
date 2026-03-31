@@ -1,0 +1,408 @@
+{
+  "version": "1.0",
+  "last_updated": "2026-02-08",
+  "description": "CRG Direct product database for proposal auto-population. Each product has a proposal_section that maps directly to a ProposalSection in the PDF generator. The admin UI selects products, and the corresponding sections are injected into the proposal JSON.",
+
+  "categories": {
+    "solar_panels": {
+      "label": "Solar Panels",
+      "products": [
+        {
+          "id": "ja-solar-420w",
+          "name": "JA Solar 420W All-Black Mono PERC",
+          "manufacturer": "JA Solar",
+          "unit_price": 185.00,
+          "warranty_years": 25,
+          "tags": ["tier-1", "all-black", "residential"],
+          "table_item": {
+            "description": "JA Solar 420W All-Black Mono PERC Panels",
+            "unit_price": 185.00
+          },
+          "proposal_section": {
+            "type": "text",
+            "heading": "About Your Solar Panels",
+            "content": "The JA Solar 420W All-Black panels specified in this quote are tier-1 rated modules with industry-leading efficiency of 21.3%. Key features:\n\n- Half-cut cell technology for improved shade tolerance and higher yield\n- All-black aesthetic design that blends seamlessly with your roof\n- 25-year product warranty and 30-year linear performance guarantee\n- Rated for wind loads up to 2400Pa and snow loads up to 5400Pa\n- Anti-PID (Potential Induced Degradation) certified\n\nThese panels are manufactured by JA Solar, one of the world's largest and most trusted solar manufacturers, with over 100GW shipped globally."
+          }
+        },
+        {
+          "id": "longi-425w",
+          "name": "LONGi Hi-MO 6 425W All-Black",
+          "manufacturer": "LONGi",
+          "unit_price": 195.00,
+          "warranty_years": 25,
+          "tags": ["tier-1", "all-black", "high-efficiency"],
+          "table_item": {
+            "description": "LONGi Hi-MO 6 425W All-Black Panels",
+            "unit_price": 195.00
+          },
+          "proposal_section": {
+            "type": "text",
+            "heading": "About Your Solar Panels",
+            "content": "The LONGi Hi-MO 6 425W All-Black panels are premium tier-1 modules featuring the latest HPDC cell technology with 22.0% efficiency. Key features:\n\n- HPDC (High-Performance Direct Connection) cell technology for maximum output\n- All-black frameless-look design for a sleek roof appearance\n- 25-year product warranty and 30-year performance guarantee (minimum 87.4% output at year 30)\n- Enhanced low-light performance for better generation on cloudy days\n- IP68 rated junction box for superior weather resistance\n\nLONGi is the world's largest solar panel manufacturer with an AA bankability rating from BloombergNEF, ensuring long-term warranty support."
+          }
+        },
+        {
+          "id": "canadian-solar-440w",
+          "name": "Canadian Solar HiKu7 440W",
+          "manufacturer": "Canadian Solar",
+          "unit_price": 175.00,
+          "warranty_years": 25,
+          "tags": ["tier-1", "value", "high-output"],
+          "table_item": {
+            "description": "Canadian Solar HiKu7 440W Panels",
+            "unit_price": 175.00
+          },
+          "proposal_section": {
+            "type": "text",
+            "heading": "About Your Solar Panels",
+            "content": "The Canadian Solar HiKu7 440W panels offer excellent value with high power output using N-type TOPCon cell technology. Key features:\n\n- N-type TOPCon cells with 22.3% efficiency for maximum generation per panel\n- Excellent temperature coefficient (-0.29%/\u00b0C) for better summer performance\n- 25-year product warranty and 30-year linear power output warranty\n- Multi-busbar design for improved reliability and shade tolerance\n- Bifacial technology capable of harvesting light from both sides\n\nCanadian Solar has been a global top-5 manufacturer for over 20 years with installations in 180+ countries."
+          }
+        }
+      ]
+    },
+
+    "batteries": {
+      "label": "Battery Storage",
+      "products": [
+        {
+          "id": "givenergy-5.2kwh-aio",
+          "name": "GivEnergy 5.2kWh All-in-One",
+          "manufacturer": "GivEnergy",
+          "unit_price": 2895.00,
+          "capacity_kwh": 5.2,
+          "warranty_years": 12,
+          "tags": ["compact", "hybrid", "entry-level"],
+          "table_item": {
+            "description": "GivEnergy 5.2kWh All-in-One Battery System",
+            "unit_price": 2895.00
+          },
+          "proposal_section": {
+            "type": "text",
+            "heading": "About Your Battery Storage",
+            "content": "The GivEnergy 5.2kWh All-in-One system combines a hybrid inverter and battery in a single compact unit. This is what makes a real difference to your energy bills:\n\n- Store excess solar generation during the day for use in the evening peak hours\n- Intelligent time-of-use tariff support \u2014 charge overnight at cheap rates, use during expensive peak periods\n- Emergency Power Supply (EPS) \u2014 keeps essential circuits running during power cuts\n- Remote monitoring and control via the GivEnergy app on your phone\n- Expandable \u2014 add a second battery later to increase storage to 10.4kWh\n\nBased on typical usage, the battery increases your self-consumption rate from approximately 35% to 75%, meaning you use far more of the energy your panels generate rather than exporting it."
+          }
+        },
+        {
+          "id": "givenergy-9.5kwh",
+          "name": "GivEnergy 9.5kWh Battery",
+          "manufacturer": "GivEnergy",
+          "unit_price": 4250.00,
+          "capacity_kwh": 9.5,
+          "warranty_years": 12,
+          "tags": ["high-capacity", "popular"],
+          "table_item": {
+            "description": "GivEnergy 9.5kWh Battery Storage System",
+            "unit_price": 4250.00
+          },
+          "proposal_section": {
+            "type": "text",
+            "heading": "About Your Battery Storage",
+            "content": "The GivEnergy 9.5kWh battery system provides substantial storage capacity for larger homes or higher energy usage. Key benefits:\n\n- 9.5kWh usable capacity \u2014 enough to power an average home through the entire evening peak\n- Charge from solar during the day and discharge in the evening when electricity is most expensive\n- Intelligent time-of-use tariff integration \u2014 automatically charge at cheapest overnight rates\n- Emergency Power Supply (EPS) keeps lights and essentials running during power cuts\n- Stack up to 3 batteries for 28.5kWh total capacity\n- 12-year warranty, designed for 6,000+ full charge cycles\n- Monitor generation, storage and consumption in real-time via the GivEnergy app\n\nWith a 9.5kWh battery, you can typically achieve 80-85% self-consumption, dramatically reducing grid imports and maximising the return on your solar investment."
+          }
+        },
+        {
+          "id": "tesla-powerwall-3",
+          "name": "Tesla Powerwall 3",
+          "manufacturer": "Tesla",
+          "unit_price": 7500.00,
+          "capacity_kwh": 13.5,
+          "warranty_years": 10,
+          "tags": ["premium", "high-capacity", "integrated-inverter"],
+          "table_item": {
+            "description": "Tesla Powerwall 3 (13.5kWh, integrated inverter)",
+            "unit_price": 7500.00
+          },
+          "proposal_section": {
+            "type": "text",
+            "heading": "About Your Battery Storage",
+            "content": "The Tesla Powerwall 3 is a premium all-in-one energy storage system with an integrated solar inverter and 13.5kWh of usable capacity. Key features:\n\n- 13.5kWh usable storage \u2014 enough to power most homes overnight and through the morning\n- Integrated 11.5kW solar inverter eliminates the need for a separate inverter\n- Storm Watch \u2014 automatically charges to full when severe weather is forecast\n- Seamless whole-home backup during power outages (no manual switching)\n- Tesla app provides real-time energy flow monitoring and remote control\n- Time-Based Control mode automatically optimises for your electricity tariff\n- Stackable up to 4 units for 54kWh total capacity\n\nThe Powerwall 3 is designed for 10+ years of daily cycling with a 10-year warranty. Tesla's over-the-air updates mean your system improves over time with new features and optimisations."
+          }
+        }
+      ]
+    },
+
+    "inverters": {
+      "label": "Inverters",
+      "products": [
+        {
+          "id": "solaredge-se5000h",
+          "name": "SolarEdge HD-Wave SE5000H",
+          "manufacturer": "SolarEdge",
+          "unit_price": 1195.00,
+          "power_kw": 5.0,
+          "warranty_years": 12,
+          "tags": ["optimiser-based", "monitoring", "popular"],
+          "table_item": {
+            "description": "SolarEdge HD-Wave SE5000H Inverter",
+            "unit_price": 1195.00
+          },
+          "proposal_section": {
+            "type": "text",
+            "heading": "About Your Inverter",
+            "content": "The SolarEdge HD-Wave SE5000H is a 5kW string inverter with panel-level power optimisation. It converts the DC electricity generated by your solar panels into AC electricity for your home. Key features:\n\n- HD-Wave technology \u2014 99% weighted efficiency, the highest in its class\n- Panel-level power optimisers maximise output even with partial shading\n- Built-in monitoring \u2014 track each individual panel's performance via the mySolarEdge app\n- 12-year standard warranty (extendable to 20 or 25 years)\n- Compact, lightweight design for easy wall mounting\n- Arc fault detection (AFCI) for enhanced safety\n\nSolarEdge's optimiser-based system means that shade on one panel does not reduce output from the rest of the array, which is particularly beneficial for roofs with chimneys, aerials, or nearby trees."
+          }
+        },
+        {
+          "id": "givenergy-hybrid-5kw",
+          "name": "GivEnergy 5kW Hybrid Inverter",
+          "manufacturer": "GivEnergy",
+          "unit_price": 1350.00,
+          "power_kw": 5.0,
+          "warranty_years": 12,
+          "tags": ["hybrid", "battery-ready"],
+          "table_item": {
+            "description": "GivEnergy 5kW Hybrid Inverter",
+            "unit_price": 1350.00
+          },
+          "proposal_section": {
+            "type": "text",
+            "heading": "About Your Inverter",
+            "content": "The GivEnergy 5kW Hybrid Inverter manages both your solar panels and battery storage through a single unit. Key features:\n\n- Hybrid design handles solar generation and battery charge/discharge in one device\n- 97.8% peak efficiency for minimal energy losses\n- Compatible with all GivEnergy batteries (5.2kWh to 28.5kWh configurations)\n- Built-in EPS (Emergency Power Supply) port for backup power during outages\n- WiFi and Ethernet connectivity for remote monitoring via the GivEnergy portal\n- 12-year manufacturer warranty\n- Time-of-use tariff programming for automated cost savings\n\nThe hybrid inverter is the brain of your system \u2014 it intelligently decides when to use solar directly, when to charge the battery, and when to export surplus to the grid for maximum financial benefit."
+          }
+        }
+      ]
+    },
+
+    "heat_pumps": {
+      "label": "Air Source Heat Pumps",
+      "products": [
+        {
+          "id": "daikin-altherma-3-8kw",
+          "name": "Daikin Altherma 3 (8kW)",
+          "manufacturer": "Daikin",
+          "unit_price": 8500.00,
+          "output_kw": 8.0,
+          "warranty_years": 5,
+          "tags": ["popular", "quiet", "residential"],
+          "table_item": {
+            "description": "Daikin Altherma 3 Air Source Heat Pump (8kW)",
+            "unit_price": 8500.00
+          },
+          "proposal_section": {
+            "type": "text",
+            "heading": "About Your Air Source Heat Pump",
+            "content": "The Daikin Altherma 3 is a high-efficiency air source heat pump that provides both heating and hot water for your home. It extracts heat energy from the outside air \u2014 even at temperatures as low as -25\u00b0C \u2014 and uses it to heat your home and domestic hot water. Key features:\n\n- SCOP of 4.6 (A7/W35) \u2014 for every 1kW of electricity used, it produces 4.6kW of heat\n- Operating range from -25\u00b0C to +35\u00b0C outdoor temperature\n- Quiet operation at just 37dB(A) in low-noise mode (quieter than a library)\n- R-32 refrigerant with low Global Warming Potential (GWP of 675)\n- Built-in weather compensation for automatic efficiency optimisation\n- Compatible with existing radiators (may need upsizing some radiators)\n- Qualifies for the Boiler Upgrade Scheme (BUS) grant of \u00a37,500\n\nDaikin is the world's leading heat pump manufacturer with over 100 years of HVAC experience. The Altherma 3 is their flagship residential model, designed specifically for the UK climate."
+          }
+        },
+        {
+          "id": "mitsubishi-ecodan-8.5kw",
+          "name": "Mitsubishi Ecodan (8.5kW)",
+          "manufacturer": "Mitsubishi Electric",
+          "unit_price": 8200.00,
+          "output_kw": 8.5,
+          "warranty_years": 5,
+          "tags": ["reliable", "proven", "residential"],
+          "table_item": {
+            "description": "Mitsubishi Ecodan Air Source Heat Pump (8.5kW)",
+            "unit_price": 8200.00
+          },
+          "proposal_section": {
+            "type": "text",
+            "heading": "About Your Air Source Heat Pump",
+            "content": "The Mitsubishi Ecodan is the UK's best-selling air source heat pump, with over 300,000 units installed nationwide. It provides efficient heating and hot water by extracting heat energy from the outside air. Key features:\n\n- SCOP of 4.3 (A7/W35) \u2014 generates over 4 units of heat for every 1 unit of electricity\n- Proven reliability with the lowest failure rate of any heat pump brand in UK field data\n- Operating range from -25\u00b0C to +35\u00b0C\n- Ultra-quiet operation with Night Mode reducing sound to just 35dB(A)\n- MELCloud app for remote monitoring, scheduling and control from your phone\n- Weather compensation adjusts output automatically for maximum efficiency\n- Qualifies for the Boiler Upgrade Scheme (BUS) grant of \u00a37,500\n\nMitsubishi Electric offer a 5-year manufacturer warranty with optional extension to 7 years. The Ecodan range is designed and tested specifically for UK homes and has a proven track record across thousands of installations."
+          }
+        },
+        {
+          "id": "vaillant-arotherm-7kw",
+          "name": "Vaillant aroTHERM plus (7kW)",
+          "manufacturer": "Vaillant",
+          "unit_price": 9200.00,
+          "output_kw": 7.0,
+          "warranty_years": 7,
+          "tags": ["premium", "natural-refrigerant", "quiet"],
+          "table_item": {
+            "description": "Vaillant aroTHERM plus Air Source Heat Pump (7kW)",
+            "unit_price": 9200.00
+          },
+          "proposal_section": {
+            "type": "text",
+            "heading": "About Your Air Source Heat Pump",
+            "content": "The Vaillant aroTHERM plus is a premium air source heat pump using natural R-290 (propane) refrigerant for the lowest possible environmental impact. Key features:\n\n- Natural R-290 refrigerant with a GWP of just 3 (vs 675 for R-32 systems) \u2014 future-proof against refrigerant regulations\n- SCOP of 4.8 (A7/W35) \u2014 one of the highest efficiencies available\n- Flow temperatures up to 75\u00b0C without backup heating \u2014 compatible with existing radiators without changes\n- Whisper-quiet operation at just 34dB(A) at 3 metres\n- sensoNET connectivity for remote control via the myVAILLANT app\n- 7-year manufacturer warranty as standard\n- Qualifies for the Boiler Upgrade Scheme (BUS) grant of \u00a37,500\n\nVaillant has been manufacturing heating systems since 1874. The aroTHERM plus represents the cutting edge of heat pump technology and is the preferred choice for environmentally conscious homeowners."
+          }
+        }
+      ]
+    },
+
+    "ev_chargers": {
+      "label": "EV Chargers",
+      "products": [
+        {
+          "id": "myenergi-zappi-v2",
+          "name": "myenergi zappi V2 (7kW)",
+          "manufacturer": "myenergi",
+          "unit_price": 895.00,
+          "power_kw": 7.0,
+          "warranty_years": 3,
+          "tags": ["solar-divert", "smart", "popular"],
+          "table_item": {
+            "description": "myenergi zappi V2 EV Charger (7kW, tethered)",
+            "unit_price": 895.00
+          },
+          "proposal_section": {
+            "type": "text",
+            "heading": "About Your EV Charger",
+            "content": "The myenergi zappi V2 is a smart EV charger specifically designed to work with solar panels. It can divert surplus solar energy to charge your car for free. Key features:\n\n- ECO mode \u2014 automatically uses surplus solar energy to charge your EV at zero cost\n- ECO+ mode \u2014 charges only from solar with no grid import at all\n- FAST mode \u2014 full 7kW charging when you need a quick charge regardless of solar\n- Works with any electric vehicle (Type 2 connector, tethered cable included)\n- myenergi app for remote scheduling, monitoring and boost control\n- Built-in energy monitoring with CT clamp (included)\n- OZEV grant eligible (where applicable)\n\nWith solar panels and a zappi, many EV owners find they can charge their car almost entirely from free solar energy during the summer months, with typical savings of \u00a3800-\u00a31,200 per year compared to public charging."
+          }
+        },
+        {
+          "id": "ohme-home-pro",
+          "name": "Ohme Home Pro (7.4kW)",
+          "manufacturer": "Ohme",
+          "unit_price": 750.00,
+          "power_kw": 7.4,
+          "warranty_years": 3,
+          "tags": ["smart-tariff", "compact", "value"],
+          "table_item": {
+            "description": "Ohme Home Pro EV Charger (7.4kW, tethered)",
+            "unit_price": 750.00
+          },
+          "proposal_section": {
+            "type": "text",
+            "heading": "About Your EV Charger",
+            "content": "The Ohme Home Pro is a smart EV charger with intelligent tariff integration that automatically charges your car at the cheapest electricity rates. Key features:\n\n- Intelligent tariff integration \u2014 connects directly to Octopus, OVO and other smart tariffs\n- Automatically schedules charging during cheapest half-hour slots\n- 7.4kW charging speed for a full overnight charge\n- Solar-aware charging when paired with compatible inverters\n- Compact, sleek design with LED status indicator\n- Ohme app for remote control, scheduling and charge history\n- OZEV grant eligible (where applicable)\n\nOhme users on Octopus Intelligent Go typically pay around 7p/kWh for overnight EV charging, equivalent to about 1.5p per mile \u2014 compared to 8-10p per mile at public chargers."
+          }
+        }
+      ]
+    },
+
+    "installation": {
+      "label": "Installation & Services",
+      "products": [
+        {
+          "id": "solar-install-standard",
+          "name": "Standard Solar Installation",
+          "manufacturer": "CRG Direct",
+          "unit_price": 1450.00,
+          "warranty_years": 10,
+          "tags": ["standard"],
+          "table_item": {
+            "description": "Full Electrical Installation & Commissioning",
+            "unit_price": 1450.00
+          }
+        },
+        {
+          "id": "scaffolding-standard",
+          "name": "Scaffolding & Access",
+          "manufacturer": "CRG Direct",
+          "unit_price": 385.00,
+          "tags": ["standard"],
+          "table_item": {
+            "description": "Scaffolding & Access Equipment",
+            "unit_price": 385.00
+          }
+        },
+        {
+          "id": "heat-pump-install",
+          "name": "Heat Pump Installation",
+          "manufacturer": "CRG Direct",
+          "unit_price": 3500.00,
+          "warranty_years": 10,
+          "tags": ["heat-pump"],
+          "table_item": {
+            "description": "Heat Pump Installation, Pipework & Commissioning",
+            "unit_price": 3500.00
+          }
+        },
+        {
+          "id": "ev-charger-install",
+          "name": "EV Charger Installation",
+          "manufacturer": "CRG Direct",
+          "unit_price": 350.00,
+          "warranty_years": 2,
+          "tags": ["ev"],
+          "table_item": {
+            "description": "EV Charger Installation & Electrical Connection",
+            "unit_price": 350.00
+          }
+        }
+      ]
+    },
+
+    "grants": {
+      "label": "Grants & Schemes",
+      "products": [
+        {
+          "id": "bus-grant",
+          "name": "Boiler Upgrade Scheme Grant",
+          "manufacturer": "Government",
+          "unit_price": -7500.00,
+          "tags": ["grant", "heat-pump"],
+          "table_item": {
+            "description": "Boiler Upgrade Scheme (BUS) Grant",
+            "unit_price": -7500.00
+          },
+          "proposal_section": {
+            "type": "text",
+            "heading": "Boiler Upgrade Scheme (BUS) Grant",
+            "content": "Your installation qualifies for the government's Boiler Upgrade Scheme, which provides a grant of \u00a37,500 towards the cost of an air source heat pump. Key details:\n\n- \u00a37,500 grant applied automatically \u2014 deducted from your total price\n- Available for homes in England and Wales replacing fossil fuel heating\n- Your property must have a valid EPC (Energy Performance Certificate)\n- CRG Direct handles the entire application process on your behalf\n- No upfront cost for the grant amount \u2014 we claim directly from Ofgem\n\nThe BUS grant is funded until March 2028 but is allocated on a first-come, first-served basis. We recommend proceeding promptly to secure your grant allocation."
+          }
+        },
+        {
+          "id": "warm-home-local-grant",
+          "name": "Warm Home: Local Grant",
+          "manufacturer": "Government",
+          "unit_price": -15000.00,
+          "tags": ["grant", "means-tested"],
+          "table_item": {
+            "description": "Warm Home: Local Grant",
+            "unit_price": -15000.00
+          },
+          "proposal_section": {
+            "type": "text",
+            "heading": "Warm Home: Local Grant Scheme",
+            "content": "You may qualify for the Warm Home: Local Grant scheme, which can provide up to \u00a315,000 towards energy efficiency improvements including insulation, solar panels, and heat pumps. Key details:\n\n- Grants of up to \u00a315,000 for eligible homeowners\n- Covers solar PV, battery storage, heat pumps, insulation and more\n- Means-tested \u2014 based on household income and property EPC rating\n- Can be combined with other measures for a whole-house approach\n- CRG Direct is an approved installer under the scheme\n\nEligibility is assessed by your local authority. We can help you check whether you qualify and guide you through the application process. Properties with an EPC rating of D or below are typically eligible."
+          }
+        },
+        {
+          "id": "octopus-zero-bills",
+          "name": "Octopus Energy Zero Bills",
+          "manufacturer": "Octopus Energy",
+          "unit_price": 0,
+          "tags": ["tariff", "finance"],
+          "table_item": {
+            "description": "Octopus Energy Zero Bills Programme",
+            "unit_price": 0
+          },
+          "proposal_section": {
+            "type": "text",
+            "heading": "Octopus Energy Zero Bills",
+            "content": "The Octopus Energy Zero Bills programme bundles solar panels, battery storage, and a heat pump with an energy tariff that aims to reduce your bills to zero. Key details:\n\n- Octopus installs solar, battery and heat pump at no upfront cost to you\n- In return, you switch to an Octopus tariff with a fixed monthly payment\n- The system is designed so your solar generation offsets your energy usage\n- Excess generation is exported and credited to your account\n- Smart tariff integration optimises battery charging for lowest cost\n- 15-year agreement with full maintenance and monitoring included\n\nCRG Direct is an approved installation partner for the Octopus Zero Bills programme. We handle the full installation while Octopus manages the finance and tariff. This is ideal for homeowners who want to go green without any upfront investment."
+          }
+        }
+      ]
+    }
+  },
+
+  "bundles": {
+    "solar_only": {
+      "label": "Solar Only",
+      "description": "Solar panels with standard inverter",
+      "default_products": ["ja-solar-420w", "solaredge-se5000h", "solar-install-standard", "scaffolding-standard"]
+    },
+    "solar_battery": {
+      "label": "Solar + Battery",
+      "description": "Solar panels with battery storage",
+      "default_products": ["ja-solar-420w", "givenergy-5.2kwh-aio", "solar-install-standard", "scaffolding-standard"]
+    },
+    "solar_battery_ev": {
+      "label": "Solar + Battery + EV",
+      "description": "Complete energy package with EV charging",
+      "default_products": ["ja-solar-420w", "givenergy-9.5kwh", "givenergy-hybrid-5kw", "myenergi-zappi-v2", "solar-install-standard", "scaffolding-standard", "ev-charger-install"]
+    },
+    "heat_pump": {
+      "label": "Heat Pump",
+      "description": "Air source heat pump installation",
+      "default_products": ["daikin-altherma-3-8kw", "heat-pump-install", "bus-grant"]
+    },
+    "warm_home_grant": {
+      "label": "Warm Home Grant Package",
+      "description": "Full package under Warm Home: Local Grant",
+      "default_products": ["canadian-solar-440w", "givenergy-9.5kwh", "givenergy-hybrid-5kw", "daikin-altherma-3-8kw", "solar-install-standard", "scaffolding-standard", "heat-pump-install", "warm-home-local-grant"]
+    },
+    "zero_bills": {
+      "label": "Octopus Zero Bills",
+      "description": "No upfront cost with Octopus Energy programme",
+      "default_products": ["longi-425w", "tesla-powerwall-3", "daikin-altherma-3-8kw", "solar-install-standard", "scaffolding-standard", "heat-pump-install", "octopus-zero-bills"]
+    }
+  }
+}

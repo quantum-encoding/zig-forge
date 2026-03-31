@@ -1,0 +1,9 @@
+Final test of integrated Zig cognitive monitor with chronos-stamp
+
+This commit should show:
+- Cognitive state embedded in timestamp after agent-id
+- Format: claude-code::StateName::TICK-XXXXXXX
+- Tool description from hook
+
+Testing complete integration!
+test

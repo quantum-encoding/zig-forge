@@ -1,0 +1,15 @@
+{"id":"health-check","method":"GET","url":"https://api.staging.example.com/health"}
+{"id":"version-check","method":"GET","url":"https://api.staging.example.com/version"}
+{"id":"metrics","method":"GET","url":"https://api.staging.example.com/metrics"}
+{"id":"login-valid","method":"POST","url":"https://api.staging.example.com/auth/login","headers":{"Content-Type":"application/json"},"body":"{\"email\":\"test@example.com\",\"password\":\"test123\"}"}
+{"id":"login-invalid","method":"POST","url":"https://api.staging.example.com/auth/login","headers":{"Content-Type":"application/json"},"body":"{\"email\":\"bad@example.com\",\"password\":\"wrong\"}"}
+{"id":"users-list","method":"GET","url":"https://api.staging.example.com/api/v1/users","headers":{"Authorization":"Bearer test-token-here"}}
+{"id":"user-create","method":"POST","url":"https://api.staging.example.com/api/v1/users","headers":{"Authorization":"Bearer test-token-here","Content-Type":"application/json"},"body":"{\"name\":\"Test User\",\"email\":\"newuser@test.com\"}"}
+{"id":"user-get","method":"GET","url":"https://api.staging.example.com/api/v1/users/123","headers":{"Authorization":"Bearer test-token-here"}}
+{"id":"user-update","method":"PUT","url":"https://api.staging.example.com/api/v1/users/123","headers":{"Authorization":"Bearer test-token-here","Content-Type":"application/json"},"body":"{\"name\":\"Updated User\"}"}
+{"id":"user-delete","method":"DELETE","url":"https://api.staging.example.com/api/v1/users/123","headers":{"Authorization":"Bearer test-token-here"}}
+{"id":"not-found","method":"GET","url":"https://api.staging.example.com/api/v1/users/99999","headers":{"Authorization":"Bearer test-token-here"}}
+{"id":"unauthorized","method":"GET","url":"https://api.staging.example.com/api/v1/admin/users"}
+{"id":"rate-limit","method":"GET","url":"https://api.staging.example.com/api/v1/users","headers":{"Authorization":"Bearer test-token-here"}}
+{"id":"database-check","method":"GET","url":"https://api.staging.example.com/internal/db/status"}
+{"id":"cache-check","method":"GET","url":"https://api.staging.example.com/internal/cache/status"}

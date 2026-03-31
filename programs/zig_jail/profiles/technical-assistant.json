@@ -1,0 +1,371 @@
+{
+  "profile_name": "technical-assistant",
+  "description": "Consumer-friendly voice assistant diagnostic profile - Safe, read-only system information gathering",
+  "version": "1.0.0",
+  "author": "Quantum Garden Forge - Voice Assistant Security Team",
+  "threat_model": "Consumer voice assistant executing Claude-generated diagnostic scripts. User may not understand commands. Maximum safety required.",
+
+  "syscalls": {
+    "default_action": "errno",
+    "comment": "Return EPERM instead of killing process - allows graceful error handling and user feedback",
+    "errno_value": 13,
+
+    "allowed": [
+      "read",
+      "pread64",
+      "readv",
+      "preadv",
+      "preadv2",
+      "open",
+      "openat",
+      "close",
+      "stat",
+      "fstat",
+      "lstat",
+      "newfstatat",
+      "statx",
+      "access",
+      "faccessat",
+      "faccessat2",
+      "readlink",
+      "readlinkat",
+      "getcwd",
+      "getdents",
+      "getdents64",
+      "lseek",
+      "dup",
+      "dup2",
+      "dup3",
+      "pipe",
+      "pipe2",
+      "ioctl",
+      "fcntl",
+      "getrlimit",
+      "prlimit64",
+      "getrusage",
+      "gettimeofday",
+      "clock_gettime",
+      "clock_getres",
+      "nanosleep",
+      "time",
+      "times",
+      "getpid",
+      "gettid",
+      "getppid",
+      "getuid",
+      "geteuid",
+      "getgid",
+      "getegid",
+      "getgroups",
+      "getresuid",
+      "getresgid",
+      "prctl",
+      "arch_prctl",
+      "mmap",
+      "munmap",
+      "mremap",
+      "mprotect",
+      "madvise",
+      "brk",
+      "rt_sigaction",
+      "rt_sigprocmask",
+      "rt_sigreturn",
+      "sigaltstack",
+      "uname",
+      "getrandom",
+      "sysinfo",
+      "futex",
+      "set_tid_address",
+      "set_robust_list",
+      "exit",
+      "exit_group",
+      "wait4",
+      "waitid",
+      "poll",
+      "ppoll",
+      "select",
+      "pselect6",
+      "clone",
+      "vfork",
+      "execve",
+      "sched_yield",
+      "sched_getaffinity",
+      "rseq"
+    ],
+
+    "blocked": [
+      "write",
+      "pwrite64",
+      "writev",
+      "pwritev",
+      "pwritev2",
+      "unlink",
+      "unlinkat",
+      "rmdir",
+      "rename",
+      "renameat",
+      "renameat2",
+      "link",
+      "linkat",
+      "symlink",
+      "symlinkat",
+      "mkdir",
+      "mkdirat",
+      "mknod",
+      "mknodat",
+      "chmod",
+      "fchmod",
+      "fchmodat",
+      "chown",
+      "fchown",
+      "lchown",
+      "fchownat",
+      "truncate",
+      "ftruncate",
+      "fsync",
+      "fdatasync",
+      "sync",
+      "syncfs",
+      "flock",
+      "mount",
+      "umount",
+      "umount2",
+      "pivot_root",
+      "chroot",
+      "fork",
+      "clone3",
+      "acct",
+      "swapon",
+      "swapoff",
+      "reboot",
+      "kexec_load",
+      "kexec_file_load",
+      "init_module",
+      "finit_module",
+      "delete_module",
+      "iopl",
+      "ioperm",
+      "quotactl",
+      "bpf",
+      "userfaultfd",
+      "perf_event_open",
+      "ptrace",
+      "process_vm_readv",
+      "process_vm_writev",
+      "socket",
+      "socketpair",
+      "bind",
+      "listen",
+      "accept",
+      "accept4",
+      "connect",
+      "sendto",
+      "sendmsg",
+      "sendmmsg",
+      "recvfrom",
+      "recvmsg",
+      "recvmmsg",
+      "shutdown",
+      "setsockopt",
+      "getsockopt"
+    ],
+
+    "conditional": [
+      {
+        "comment": "Block any open() with write flags - critical safety control",
+        "syscall": "open",
+        "rules": [
+          {
+            "description": "Block all write operations (O_WRONLY|O_RDWR|O_CREAT|O_TRUNC|O_APPEND)",
+            "arg": 1,
+            "op": "masked_eq",
+            "mask": "O_WRONLY|O_RDWR|O_CREAT|O_TRUNC|O_APPEND",
+            "action_if_match": "errno",
+            "errno": 13
+          }
+        ]
+      },
+      {
+        "comment": "Block any openat() with write flags",
+        "syscall": "openat",
+        "rules": [
+          {
+            "description": "Block all write operations",
+            "arg": 2,
+            "op": "masked_eq",
+            "mask": "O_WRONLY|O_RDWR|O_CREAT|O_TRUNC|O_APPEND",
+            "action_if_match": "errno",
+            "errno": 13
+          }
+        ]
+      },
+      {
+        "comment": "Prevent spawning interactive shells - only allow diagnostic tools",
+        "syscall": "execve",
+        "rules": [
+          {
+            "description": "Block interactive shells (bash, sh, zsh, fish)",
+            "arg": 0,
+            "op": "path_match",
+            "patterns": [
+              "*/bash",
+              "*/sh",
+              "*/zsh",
+              "*/fish",
+              "*/csh",
+              "*/tcsh",
+              "*/ksh"
+            ],
+            "action_if_match": "errno",
+            "errno": 13
+          }
+        ]
+      }
+    ]
+  },
+
+  "capabilities": {
+    "comment": "No elevated capabilities - fully unprivileged operation",
+    "drop_all": true,
+    "keep": []
+  },
+
+  "namespaces": {
+    "comment": "No network access - diagnostic operations only",
+    "enabled": [],
+    "network": "none"
+  },
+
+  "filesystem": {
+    "comment": "Read-only access. Sensitive files explicitly protected.",
+    "protected_paths": [
+      "/etc/shadow",
+      "/etc/gshadow",
+      "/etc/sudoers",
+      "/etc/sudoers.d/*",
+      "/root",
+      "/home/*/.ssh",
+      "/home/*/.gnupg",
+      "/var/log/auth.log",
+      "/var/log/secure"
+    ],
+    "writable_sandbox": [],
+    "allowed_commands": [
+      "/usr/bin/lsblk",
+      "/usr/bin/lsusb",
+      "/usr/bin/lspci",
+      "/usr/bin/dmesg",
+      "/usr/bin/uname",
+      "/usr/bin/df",
+      "/usr/bin/free",
+      "/usr/bin/uptime",
+      "/usr/bin/ps",
+      "/usr/bin/top",
+      "/usr/bin/systemctl",
+      "/usr/bin/journalctl",
+      "/usr/bin/lscpu",
+      "/usr/bin/lsmod",
+      "/usr/bin/ip",
+      "/usr/bin/iwconfig",
+      "/usr/bin/rfkill"
+    ]
+  },
+
+  "limits": {
+    "max_open_files": 512,
+    "max_memory_mb": 256,
+    "max_cpu_time_sec": 60,
+    "max_processes": 4,
+    "max_execution_time_sec": 120
+  },
+
+  "audit": {
+    "log_violations": true,
+    "log_allowed": true,
+    "log_target": "syslog",
+    "auditd_integration": true,
+    "auditd_key": "zig_jail_technical_assistant",
+    "user_feedback": true,
+    "user_feedback_on_block": "This command requires elevated permissions and cannot be run by the voice assistant for your safety."
+  },
+
+  "sanitization": {
+    "comment": "Sanitize output before sending to Claude/user",
+    "enabled": true,
+    "patterns_to_redact": [
+      "api[_-]?key",
+      "password",
+      "secret",
+      "token",
+      "bearer",
+      "jwt",
+      "ssh[_-]?key",
+      "private[_-]?key",
+      "access[_-]?key",
+      "client[_-]?secret",
+      "[0-9]{4}[- ]?[0-9]{4}[- ]?[0-9]{4}[- ]?[0-9]{4}",
+      "\\b(?:[0-9]{1,3}\\.){3}[0-9]{1,3}\\b",
+      "steam_[0-9]+",
+      "STEAM_[0-9A-F]+",
+      "([a-z0-9]{20,})"
+    ],
+    "redaction_replacement": "[REDACTED]",
+    "log_sanitization": true
+  },
+
+  "metadata": {
+    "created": "2025-10-26",
+    "tested_with": ["lsblk", "lsusb", "dmesg", "systemctl status", "uname -a"],
+    "use_cases": [
+      "Consumer voice assistant diagnostics",
+      "Safe system information gathering for non-technical users",
+      "Claude-powered technical support (read-only operations)",
+      "Hardware/software inventory for support tickets"
+    ],
+    "known_limitations": [
+      "Cannot write to ANY file or directory",
+      "Cannot modify system configuration",
+      "No network access (no ping, curl, wget)",
+      "Cannot spawn interactive shells",
+      "Limited to 60 seconds CPU time per command",
+      "Maximum 4 concurrent processes"
+    ],
+    "security_guarantees": [
+      "Zero write permissions - cannot modify anything",
+      "No network access - cannot exfiltrate data",
+      "No privilege escalation - all capabilities dropped",
+      "Sensitive files protected from reading",
+      "Output sanitized before transmission to AI/user",
+      "All commands logged and audited",
+      "Interactive shells blocked"
+    ],
+    "usage_examples": [
+      "zig-jail --profile=technical-assistant -- lsblk",
+      "zig-jail --profile=technical-assistant -- dmesg | tail -50",
+      "zig-jail --profile=technical-assistant -- systemctl status NetworkManager",
+      "zig-jail --profile=technical-assistant -- lsusb -v"
+    ],
+    "voice_assistant_integration": {
+      "recommended_workflow": [
+        "1. User describes issue via voice",
+        "2. Claude generates diagnostic command",
+        "3. Local binary sanitizes command (no rm, dd, etc)",
+        "4. Execute in technical-assistant sandbox",
+        "5. Sanitize output (redact IPs, keys, personal data)",
+        "6. Send sanitized output to Claude for analysis",
+        "7. Claude explains diagnosis in plain language",
+        "8. If remediation needed, generate script for user approval",
+        "9. User explicitly approves before execution",
+        "10. Execute remediation in appropriate sandbox",
+        "11. Report results back to Claude"
+      ],
+      "prompt_injection_defense": [
+        "Command whitelist validation before execution",
+        "Syscall filtering prevents unexpected behaviors",
+        "Network isolation prevents data exfiltration",
+        "Output sanitization prevents leaking sensitive data in logs",
+        "All commands logged for security review"
+      ]
+    }
+  }
+}

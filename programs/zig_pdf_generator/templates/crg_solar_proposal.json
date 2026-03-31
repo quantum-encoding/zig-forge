@@ -1,0 +1,60 @@
+{
+  "company_name": "CRG Direct",
+  "company_address": "Unit 7 Solent Business Park, Fareham, Hampshire PO15 7FH",
+  "client_name": "Mr & Mrs Thompson",
+  "client_address": "18 Maple Drive\nPortsmouth\nPO6 2TN",
+  "reference": "CRG-2026-00456",
+  "date": "12 February 2026",
+  "valid_until": "14 March 2026",
+  "primary_color": "#16a34a",
+  "secondary_color": "#1e3a2f",
+  "footer": {
+    "phone": "01329 800 123",
+    "email": "info@crgdirect.co.uk",
+    "website": "www.crgdirect.co.uk",
+    "dashboard_text": "Sign in to your CRG Direct dashboard at dashboard.crgdirect.co.uk to view your quote, track progress and manage your installation.",
+    "dashboard_url": "https://dashboard.crgdirect.co.uk/quotes/CRG-2026-00456"
+  },
+  "sections": [
+    {
+      "type": "text",
+      "heading": "Executive Summary",
+      "content": "Following our recent site survey, we are pleased to present this tailored solar energy proposal for your property. Our assessment confirms your south-facing roof is ideally positioned for optimal solar generation, and we anticipate excellent energy yields throughout the year.\n\nThis system has been designed to maximise your self-consumption rate, significantly reducing your reliance on grid electricity and protecting you against future energy price increases."
+    },
+    {
+      "type": "metrics",
+      "heading": "System Performance",
+      "metric_items": [
+        { "label": "System Size", "value": "5.6 kWp" },
+        { "label": "Annual Output", "value": "5,100 kWh" },
+        { "label": "Annual Savings", "value": "\u00a31,530/yr" },
+        { "label": "Payback Period", "value": "5.8 years" }
+      ]
+    },
+    {
+      "type": "table",
+      "heading": "System Components & Pricing",
+      "table_items": [
+        { "description": "JA Solar 420W All-Black Mono PERC Panels", "quantity": 14, "unit_price": 185.00, "total": 2590.00 },
+        { "description": "GivEnergy 9.5kWh Battery Storage System", "quantity": 1, "unit_price": 4250.00, "total": 4250.00 },
+        { "description": "SolarEdge HD-Wave SE5000H Inverter", "quantity": 1, "unit_price": 1195.00, "total": 1195.00 },
+        { "description": "Full Electrical Installation & Commissioning", "quantity": 1, "unit_price": 1650.00, "total": 1650.00 },
+        { "description": "Scaffolding & Roof Access", "quantity": 1, "unit_price": 450.00, "total": 450.00 }
+      ],
+      "subtotal": 10135.00,
+      "tax_rate": 0.0,
+      "total": 10135.00,
+      "notes": "Includes: MCS certification, 10-year workmanship warranty, DNO application, G99 compliance testing, system monitoring setup, Bird guard mesh"
+    },
+    {
+      "type": "text",
+      "heading": "Battery Storage Benefits",
+      "content": "The GivEnergy 9.5kWh battery system included in this proposal allows you to:\n\n- Store excess solar generation during the day for use in the evening\n- Take advantage of off-peak electricity tariffs (charge overnight at low rates)\n- Maintain power during grid outages with the Emergency Power Supply (EPS) feature\n- Monitor and control your system remotely via the GivEnergy app\n\nBased on typical usage patterns, we estimate the battery will increase your self-consumption from 35% to approximately 75%, dramatically reducing your electricity imports."
+    },
+    {
+      "type": "text",
+      "heading": "Terms & Next Steps",
+      "content": "This proposal is valid for 30 days from the date shown above. To proceed:\n\n- Confirm your acceptance by signing the enclosed installation agreement\n- A deposit of 25% is required to secure your installation date\n- CRG Direct will handle all DNO applications and approvals (typically 4-6 weeks)\n- Installation is completed within 1-2 days, with minimal disruption\n- Full commissioning, testing, and handover including app setup\n\nAll installations are carried out by MCS-certified engineers to the highest industry standards. For finance options, please speak with your account manager."
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "name": "Claude Shepherd",
+  "description": "Monitor and control Claude Code instances from your desktop",
+  "uuid": "claude-shepherd@quantum-forge",
+  "version": 1,
+  "shell-version": ["45", "46", "47"],
+  "url": "https://github.com/quantum-forge/claude-shepherd",
+  "settings-schema": "org.gnome.shell.extensions.claude-shepherd"
+}

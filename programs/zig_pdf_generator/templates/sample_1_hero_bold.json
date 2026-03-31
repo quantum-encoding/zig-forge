@@ -1,0 +1,298 @@
+{
+  "page_size": { "width": 842, "height": 595 },
+  "pages": [
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 842,
+          "height": 200,
+          "fill_color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "CRG",
+          "x": 60,
+          "y": 55,
+          "font_size": 32,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "text",
+          "content": "DIRECT",
+          "x": 138,
+          "y": 55,
+          "font_size": 32,
+          "font_weight": "bold",
+          "color": "#065F46"
+        },
+        {
+          "type": "text",
+          "content": "Your Solar Quote",
+          "x": 60,
+          "y": 110,
+          "font_size": 42,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "text",
+          "content": "Cut your energy bills by up to 70%",
+          "x": 60,
+          "y": 155,
+          "font_size": 18,
+          "color": "#D1FAE5"
+        },
+        {
+          "type": "text",
+          "content": "Prepared for Mr & Mrs Johnson",
+          "x": 60,
+          "y": 180,
+          "font_size": 14,
+          "color": "#A7F3D0"
+        },
+        {
+          "type": "text",
+          "content": "CRG-2026-00847",
+          "x": 782,
+          "y": 55,
+          "font_size": 12,
+          "color": "#A7F3D0",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "1st February 2026",
+          "x": 782,
+          "y": 75,
+          "font_size": 11,
+          "color": "#D1FAE5",
+          "align": "right"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 230,
+          "width": 170,
+          "height": 100,
+          "fill_color": "#ECFDF5",
+          "stroke_color": "#A7F3D0",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "5.28kW",
+          "x": 145,
+          "y": 275,
+          "font_size": 32,
+          "font_weight": "bold",
+          "color": "#059669",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "System Size",
+          "x": 145,
+          "y": 305,
+          "font_size": 12,
+          "color": "#065F46",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 250,
+          "y": 230,
+          "width": 170,
+          "height": 100,
+          "fill_color": "#ECFDF5",
+          "stroke_color": "#A7F3D0",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "£1,420",
+          "x": 335,
+          "y": 275,
+          "font_size": 32,
+          "font_weight": "bold",
+          "color": "#059669",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "Annual Savings",
+          "x": 335,
+          "y": 305,
+          "font_size": 12,
+          "color": "#065F46",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 440,
+          "y": 230,
+          "width": 170,
+          "height": 100,
+          "fill_color": "#ECFDF5",
+          "stroke_color": "#A7F3D0",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "9.1 yrs",
+          "x": 525,
+          "y": 275,
+          "font_size": 32,
+          "font_weight": "bold",
+          "color": "#059669",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "Payback Period",
+          "x": 525,
+          "y": 305,
+          "font_size": 12,
+          "color": "#065F46",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 630,
+          "y": 230,
+          "width": 152,
+          "height": 100,
+          "fill_color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "£12,910",
+          "x": 706,
+          "y": 275,
+          "font_size": 32,
+          "font_weight": "bold",
+          "color": "#ffffff",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "Total Investment",
+          "x": 706,
+          "y": 305,
+          "font_size": 12,
+          "color": "#D1FAE5",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "Your Recommended System",
+          "x": 60,
+          "y": 375,
+          "font_size": 20,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 385,
+          "width": 80,
+          "height": 0,
+          "stroke_color": "#10B981",
+          "stroke_width": 3
+        },
+        {
+          "type": "bullet_list",
+          "x": 60,
+          "y": 415,
+          "font_size": 11,
+          "color": "#374151",
+          "bullet_color": "#10B981",
+          "line_spacing": 14,
+          "indent": 15,
+          "items": [
+            "12 x JA Solar 440W All-Black Panels",
+            "GivEnergy 5.0kW Hybrid Inverter",
+            "GivEnergy 9.5kWh Battery Storage",
+            "Full installation, scaffolding & commissioning",
+            "MCS certification & 25-year panel warranty"
+          ]
+        },
+        {
+          "type": "text",
+          "content": "Why CRG Direct?",
+          "x": 480,
+          "y": 375,
+          "font_size": 20,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 480,
+          "y": 385,
+          "width": 80,
+          "height": 0,
+          "stroke_color": "#10B981",
+          "stroke_width": 3
+        },
+        {
+          "type": "bullet_list",
+          "x": 480,
+          "y": 415,
+          "font_size": 11,
+          "color": "#374151",
+          "bullet_color": "#10B981",
+          "line_spacing": 14,
+          "indent": 15,
+          "items": [
+            "MCS Certified Installer",
+            "4.9/5 Customer Rating",
+            "2,500+ Installations Completed",
+            "15 Years Industry Experience",
+            "10-Year Workmanship Warranty"
+          ]
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 530,
+          "width": 842,
+          "height": 65,
+          "fill_color": "#065F46"
+        },
+        {
+          "type": "text",
+          "content": "Ready to start saving? Call us on 0330 133 2497 or email info@crgdirect.co.uk",
+          "x": 421,
+          "y": 555,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#ffffff",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "crgdirect.co.uk  •  MCS Certified  •  Which? Trusted Trader  •  RECC Member",
+          "x": 421,
+          "y": 578,
+          "font_size": 10,
+          "color": "#A7F3D0",
+          "align": "center"
+        }
+      ]
+    }
+  ]
+}

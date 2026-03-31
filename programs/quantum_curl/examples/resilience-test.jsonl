@@ -1,0 +1,6 @@
+{"id":"flaky-api-1","method":"GET","url":"http://unreliable-service:8080/data","max_retries":5}
+{"id":"flaky-api-2","method":"GET","url":"http://unreliable-service:8080/data","max_retries":5}
+{"id":"flaky-api-3","method":"GET","url":"http://unreliable-service:8080/data","max_retries":5}
+{"id":"critical-write-1","method":"POST","url":"http://database-api:8080/write","body":"{\"key\":\"value1\"}","max_retries":10}
+{"id":"critical-write-2","method":"POST","url":"http://database-api:8080/write","body":"{\"key\":\"value2\"}","max_retries":10}
+{"id":"timeout-test","method":"GET","url":"http://slow-service:8080/slow-endpoint","timeout_ms":5000,"max_retries":3}

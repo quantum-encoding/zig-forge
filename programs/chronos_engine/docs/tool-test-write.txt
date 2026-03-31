@@ -1,0 +1,8 @@
+Tool Test - Write Tool
+======================
+This file was created to test the Write tool and capture its pattern.
+Timestamp: 2025-10-27 19:15:00
+
+This will help us map all Claude Code tools and their cognitive states!
+
+EDIT TEST: This line was added using the Edit tool to test its pattern capture.

@@ -1,0 +1,3 @@
+*.bin
+*.gguf
+# ML model files — download separately

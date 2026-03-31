@@ -1,0 +1,431 @@
+{
+  "page_size": { "width": 842, "height": 595 },
+  "pages": [
+    {
+      "background_color": "#F9FAFB",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 842,
+          "height": 80,
+          "fill_color": "#ffffff"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 0,
+          "y": 80,
+          "width": 842,
+          "height": 0,
+          "stroke_color": "#E5E7EB",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "CRG",
+          "x": 50,
+          "y": 48,
+          "font_size": 24,
+          "font_weight": "bold",
+          "color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "DIRECT",
+          "x": 102,
+          "y": 48,
+          "font_size": 24,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "Solar Quote for Mr & Mrs Johnson",
+          "x": 50,
+          "y": 68,
+          "font_size": 11,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "CRG-2026-00847",
+          "x": 792,
+          "y": 40,
+          "font_size": 10,
+          "color": "#6B7280",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "1st February 2026",
+          "x": 792,
+          "y": 55,
+          "font_size": 10,
+          "color": "#9CA3AF",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "0330 133 2497",
+          "x": 792,
+          "y": 70,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#10B981",
+          "align": "right"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 50,
+          "y": 100,
+          "width": 742,
+          "height": 90,
+          "fill_color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "Your Investment Summary",
+          "x": 75,
+          "y": 125,
+          "font_size": 14,
+          "color": "#D1FAE5"
+        },
+        {
+          "type": "text",
+          "content": "£12,910",
+          "x": 75,
+          "y": 165,
+          "font_size": 36,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "text",
+          "content": "Total (0% VAT)",
+          "x": 230,
+          "y": 165,
+          "font_size": 12,
+          "color": "#D1FAE5"
+        },
+        {
+          "type": "text",
+          "content": "£1,420/yr savings",
+          "x": 480,
+          "y": 140,
+          "font_size": 18,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "text",
+          "content": "9.1 year payback",
+          "x": 480,
+          "y": 165,
+          "font_size": 14,
+          "color": "#D1FAE5"
+        },
+        {
+          "type": "text",
+          "content": "£42,500 lifetime savings",
+          "x": 680,
+          "y": 140,
+          "font_size": 13,
+          "color": "#ffffff"
+        },
+        {
+          "type": "text",
+          "content": "over 25 years",
+          "x": 680,
+          "y": 160,
+          "font_size": 10,
+          "color": "#A7F3D0"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 50,
+          "y": 210,
+          "width": 240,
+          "height": 160,
+          "fill_color": "#ffffff",
+          "stroke_color": "#E5E7EB",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Solar Panels",
+          "x": 70,
+          "y": 235,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 70,
+          "y": 248,
+          "width": 40,
+          "height": 0,
+          "stroke_color": "#10B981",
+          "stroke_width": 2
+        },
+        {
+          "type": "bullet_list",
+          "x": 70,
+          "y": 275,
+          "font_size": 10,
+          "color": "#4B5563",
+          "bullet_color": "#10B981",
+          "line_spacing": 14,
+          "indent": 12,
+          "items": [
+            "12 x JA Solar 440W",
+            "All-black aesthetic design",
+            "5.28kWp total capacity",
+            "25-year warranty"
+          ]
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 301,
+          "y": 210,
+          "width": 240,
+          "height": 160,
+          "fill_color": "#ffffff",
+          "stroke_color": "#E5E7EB",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Inverter & Battery",
+          "x": 321,
+          "y": 235,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 321,
+          "y": 248,
+          "width": 40,
+          "height": 0,
+          "stroke_color": "#10B981",
+          "stroke_width": 2
+        },
+        {
+          "type": "bullet_list",
+          "x": 321,
+          "y": 275,
+          "font_size": 10,
+          "color": "#4B5563",
+          "bullet_color": "#10B981",
+          "line_spacing": 14,
+          "indent": 12,
+          "items": [
+            "GivEnergy 5kW Hybrid",
+            "9.5kWh Battery Storage",
+            "Smart energy management",
+            "10-year warranty"
+          ]
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 552,
+          "y": 210,
+          "width": 240,
+          "height": 160,
+          "fill_color": "#ffffff",
+          "stroke_color": "#E5E7EB",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Installation",
+          "x": 572,
+          "y": 235,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 572,
+          "y": 248,
+          "width": 40,
+          "height": 0,
+          "stroke_color": "#10B981",
+          "stroke_width": 2
+        },
+        {
+          "type": "bullet_list",
+          "x": 572,
+          "y": 275,
+          "font_size": 10,
+          "color": "#4B5563",
+          "bullet_color": "#10B981",
+          "line_spacing": 14,
+          "indent": 12,
+          "items": [
+            "Professional 2-day install",
+            "Full scaffolding included",
+            "DNO notification",
+            "MCS certification"
+          ]
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 50,
+          "y": 390,
+          "width": 360,
+          "height": 100,
+          "fill_color": "#ffffff",
+          "stroke_color": "#E5E7EB",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Annual Performance",
+          "x": 70,
+          "y": 415,
+          "font_size": 12,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "4,800 kWh",
+          "x": 70,
+          "y": 450,
+          "font_size": 24,
+          "font_weight": "bold",
+          "color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "generated annually",
+          "x": 175,
+          "y": 450,
+          "font_size": 10,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "2.1 tonnes CO₂ saved per year",
+          "x": 70,
+          "y": 475,
+          "font_size": 11,
+          "color": "#4B5563"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 432,
+          "y": 390,
+          "width": 360,
+          "height": 100,
+          "fill_color": "#ffffff",
+          "stroke_color": "#E5E7EB",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Why CRG Direct?",
+          "x": 452,
+          "y": 415,
+          "font_size": 12,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "2,500+",
+          "x": 452,
+          "y": 455,
+          "font_size": 16,
+          "font_weight": "bold",
+          "color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "installs",
+          "x": 510,
+          "y": 455,
+          "font_size": 10,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "4.9/5",
+          "x": 580,
+          "y": 455,
+          "font_size": 16,
+          "font_weight": "bold",
+          "color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "rating",
+          "x": 618,
+          "y": 455,
+          "font_size": 10,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "15 yrs",
+          "x": 680,
+          "y": 455,
+          "font_size": 16,
+          "font_weight": "bold",
+          "color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "experience",
+          "x": 725,
+          "y": 455,
+          "font_size": 10,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "MCS Certified • RECC Member • TrustMark Registered",
+          "x": 452,
+          "y": 475,
+          "font_size": 9,
+          "color": "#9CA3AF"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 50,
+          "y": 510,
+          "width": 742,
+          "height": 50,
+          "fill_color": "#065F46"
+        },
+        {
+          "type": "text",
+          "content": "Next Steps: Call 0330 133 2497 or reply to this quote to book your free site survey",
+          "x": 421,
+          "y": 540,
+          "font_size": 13,
+          "font_weight": "bold",
+          "color": "#ffffff",
+          "align": "center"
+        }
+      ]
+    }
+  ]
+}

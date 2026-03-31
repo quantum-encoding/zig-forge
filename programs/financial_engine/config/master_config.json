@@ -1,0 +1,38 @@
+{
+  "engine_version": "2.0.0",
+  "deployment_mode": "paper_trading",
+  "global_settings": {
+    "market_data_source": "alpaca_paper",
+    "execution_venue": "alpaca_paper",
+    "enable_real_trading": false,
+    "max_total_orders_per_minute": 100,
+    "global_risk_limits": {
+      "max_position_value": 100000,
+      "max_daily_loss": 5000,
+      "circuit_breaker_threshold": 0.05
+    }
+  },
+  "infrastructure": {
+    "total_cpu_cores": 16,
+    "total_memory_gb": 32,
+    "network_interface": "eth0",
+    "monitoring_port": 9090,
+    "api_port": 8080
+  },
+  "active_tenants": [
+    "TENANT_001",
+    "TENANT_002",
+    "TENANT_003"
+  ],
+  "billing_settings": {
+    "billing_cycle": "real_time",
+    "payment_processor": "stripe_test",
+    "invoice_frequency": "monthly"
+  },
+  "monitoring": {
+    "prometheus_enabled": true,
+    "grafana_enabled": true,
+    "log_level": "info",
+    "performance_sampling_rate_ms": 100
+  }
+}

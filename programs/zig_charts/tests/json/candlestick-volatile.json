@@ -1,0 +1,17 @@
+{
+  "type": "candlestick",
+  "width": 800,
+  "height": 400,
+  "data": {
+    "candles": [
+      { "open": 150, "high": 180, "low": 140, "close": 175 },
+      { "open": 175, "high": 195, "low": 160, "close": 165 },
+      { "open": 165, "high": 190, "low": 155, "close": 188 },
+      { "open": 188, "high": 210, "low": 175, "close": 178 },
+      { "open": 178, "high": 200, "low": 165, "close": 195 },
+      { "open": 195, "high": 220, "low": 185, "close": 185 },
+      { "open": 185, "high": 205, "low": 170, "close": 202 },
+      { "open": 202, "high": 225, "low": 195, "close": 218 }
+    ]
+  }
+}

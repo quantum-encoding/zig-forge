@@ -1,0 +1,64 @@
+[Unit]
+Description=Quantum Synapse Engine - Multi-Tenant Algorithmic Trading Platform
+Documentation=https://github.com/quantum-encoding/zig-financial-engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=quantum-synapse
+Group=quantum-synapse
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/quantum-synapse /var/lib/quantum-synapse
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+MemoryDenyWriteExecute=true
+LockPersonality=true
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+MemoryMax=2G
+CPUQuota=200%
+
+# Environment configuration
+Environment="QSE_CONFIG_PATH=/etc/quantum-synapse/production.json"
+Environment="QSE_ENVIRONMENT=production"
+Environment="QSE_LOG_LEVEL=info"
+
+# API credentials should be in a separate environment file
+EnvironmentFile=/etc/quantum-synapse/credentials.env
+
+# Working directory
+WorkingDirectory=/opt/quantum-synapse
+
+# Executable
+ExecStart=/opt/quantum-synapse/quantum-synapse-engine --config /etc/quantum-synapse/production.json
+
+# Restart policy
+Restart=always
+RestartSec=10
+StartLimitInterval=300
+StartLimitBurst=5
+
+# Graceful shutdown
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=quantum-synapse
+
+[Install]
+WantedBy=multi-user.target

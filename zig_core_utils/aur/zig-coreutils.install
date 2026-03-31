@@ -1,0 +1,23 @@
+post_install() {
+    echo "==> Zig Coreutils installed successfully!"
+    echo ""
+    echo "  131 high-performance utilities available with 'z' prefix:"
+    echo "    zls, zfind, zgrep, zdu, zjq, zawk, zsed, zcurl, etc."
+    echo ""
+    echo "  Performance highlights:"
+    echo "    - zfind: 10x faster than GNU find"
+    echo "    - zsha256sum: 3.5x faster (SIMD)"
+    echo "    - zjq: 2x faster than jq"
+    echo "    - zdu: 3x faster (parallel)"
+    echo ""
+    echo "==> Optional: Enable raw socket for zping (requires root):"
+    echo "    sudo setcap cap_net_raw+ep /usr/bin/zping"
+    echo ""
+    echo "==> Optional: Enable setuid for zsudo (requires root):"
+    echo "    sudo chown root:root /usr/bin/zsudo"
+    echo "    sudo chmod 4755 /usr/bin/zsudo"
+}
+
+post_upgrade() {
+    post_install
+}

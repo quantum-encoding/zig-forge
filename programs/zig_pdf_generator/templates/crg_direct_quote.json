@@ -1,0 +1,1307 @@
+{
+  "page_size": {
+    "width": 842,
+    "height": 595
+  },
+  "pages": [
+    {
+      "background_color": "#111827",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 842,
+          "height": 595,
+          "fill_color": "#111827"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 480,
+          "width": 842,
+          "height": 115,
+          "fill_color": "#10B981"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 140,
+          "width": 100,
+          "height": 0,
+          "stroke_color": "#10B981",
+          "stroke_width": 4
+        },
+        {
+          "type": "text",
+          "content": "CRG",
+          "x": 60,
+          "y": 80,
+          "font_size": 48,
+          "font_weight": "bold",
+          "color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "DIRECT",
+          "x": 155,
+          "y": 80,
+          "font_size": 48,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "text",
+          "content": "RENEWABLE ENERGY SOLUTIONS",
+          "x": 60,
+          "y": 115,
+          "font_size": 14,
+          "color": "#6EE7B7",
+          "font_weight": "bold"
+        },
+        {
+          "type": "text",
+          "content": "YOUR PERSONALISED QUOTE",
+          "x": 60,
+          "y": 180,
+          "font_size": 12,
+          "color": "#9CA3AF",
+          "font_weight": "bold"
+        },
+        {
+          "type": "text",
+          "content": "Solar PV & Battery Storage",
+          "x": 60,
+          "y": 220,
+          "font_size": 36,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "text",
+          "content": "Installation Package",
+          "x": 60,
+          "y": 260,
+          "font_size": 36,
+          "font_weight": "bold",
+          "color": "#10B981"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 310,
+          "width": 200,
+          "height": 80,
+          "fill_color": "#1F2937",
+          "stroke_color": "#374151",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "PREPARED FOR",
+          "x": 75,
+          "y": 328,
+          "font_size": 10,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "Mr & Mrs Johnson",
+          "x": 75,
+          "y": 355,
+          "font_size": 16,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 280,
+          "y": 310,
+          "width": 200,
+          "height": 80,
+          "fill_color": "#1F2937",
+          "stroke_color": "#374151",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "PROPERTY",
+          "x": 295,
+          "y": 328,
+          "font_size": 10,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "42 Oak Lane, Southampton",
+          "x": 295,
+          "y": 355,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 500,
+          "y": 310,
+          "width": 200,
+          "height": 80,
+          "fill_color": "#1F2937",
+          "stroke_color": "#374151",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "QUOTE REF",
+          "x": 515,
+          "y": 328,
+          "font_size": 10,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "CRG-2026-00847",
+          "x": 515,
+          "y": 355,
+          "font_size": 16,
+          "font_weight": "bold",
+          "color": "#10B981"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 410,
+          "width": 150,
+          "height": 50,
+          "fill_color": "#1F2937",
+          "stroke_color": "#374151",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "DATE",
+          "x": 75,
+          "y": 425,
+          "font_size": 9,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "1st February 2026",
+          "x": 75,
+          "y": 445,
+          "font_size": 12,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 225,
+          "y": 410,
+          "width": 150,
+          "height": 50,
+          "fill_color": "#1F2937",
+          "stroke_color": "#374151",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "VALID UNTIL",
+          "x": 240,
+          "y": 425,
+          "font_size": 9,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "1st March 2026",
+          "x": 240,
+          "y": 445,
+          "font_size": 12,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 390,
+          "y": 410,
+          "width": 150,
+          "height": 50,
+          "fill_color": "#1F2937",
+          "stroke_color": "#374151",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "YOUR ADVISOR",
+          "x": 405,
+          "y": 425,
+          "font_size": 9,
+          "color": "#6B7280"
+        },
+        {
+          "type": "text",
+          "content": "James Mitchell",
+          "x": 405,
+          "y": 445,
+          "font_size": 12,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "text",
+          "content": "Powering Hampshire's Sustainable Future",
+          "x": 60,
+          "y": 520,
+          "font_size": 22,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "crgdirect.co.uk  |  0800 123 4567  |  hello@crgdirect.co.uk",
+          "x": 60,
+          "y": 555,
+          "font_size": 12,
+          "color": "#065F46"
+        },
+        {
+          "type": "text",
+          "content": "MCS Certified  |  RECC Member  |  TrustMark Registered",
+          "x": 782,
+          "y": 555,
+          "font_size": 10,
+          "color": "#065F46",
+          "align": "right"
+        }
+      ]
+    },
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 842,
+          "height": 55,
+          "fill_color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "CRG DIRECT",
+          "x": 60,
+          "y": 33,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "Why Choose Us",
+          "x": 782,
+          "y": 33,
+          "font_size": 11,
+          "color": "#6EE7B7",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "Why CRG Direct?",
+          "x": 60,
+          "y": 95,
+          "font_size": 26,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 108,
+          "width": 60,
+          "height": 0,
+          "stroke_color": "#10B981",
+          "stroke_width": 3
+        },
+        {
+          "type": "text",
+          "content": "Hampshire's trusted renewable energy experts. We've helped over 2,500 homeowners reduce their energy bills and carbon footprint with quality solar, battery, and heat pump installations.",
+          "x": 60,
+          "y": 135,
+          "font_size": 11,
+          "color": "#4B5563",
+          "max_width": 360
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 195,
+          "width": 170,
+          "height": 90,
+          "fill_color": "#ECFDF5",
+          "stroke_color": "#A7F3D0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "2,500+",
+          "x": 145,
+          "y": 230,
+          "font_size": 28,
+          "font_weight": "bold",
+          "color": "#059669",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "Installations",
+          "x": 145,
+          "y": 262,
+          "font_size": 11,
+          "color": "#065F46",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 245,
+          "y": 195,
+          "width": 170,
+          "height": 90,
+          "fill_color": "#ECFDF5",
+          "stroke_color": "#A7F3D0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "4.9/5",
+          "x": 330,
+          "y": 230,
+          "font_size": 28,
+          "font_weight": "bold",
+          "color": "#059669",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "Customer Rating",
+          "x": 330,
+          "y": 262,
+          "font_size": 11,
+          "color": "#065F46",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 300,
+          "width": 170,
+          "height": 90,
+          "fill_color": "#ECFDF5",
+          "stroke_color": "#A7F3D0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "15 Years",
+          "x": 145,
+          "y": 335,
+          "font_size": 28,
+          "font_weight": "bold",
+          "color": "#059669",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "Experience",
+          "x": 145,
+          "y": 367,
+          "font_size": 11,
+          "color": "#065F46",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 245,
+          "y": 300,
+          "width": 170,
+          "height": 90,
+          "fill_color": "#ECFDF5",
+          "stroke_color": "#A7F3D0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "25 Year",
+          "x": 330,
+          "y": 335,
+          "font_size": 28,
+          "font_weight": "bold",
+          "color": "#059669",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "Panel Warranty",
+          "x": 330,
+          "y": 367,
+          "font_size": 11,
+          "color": "#065F46",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 450,
+          "y": 90,
+          "width": 340,
+          "height": 310,
+          "fill_color": "#111827",
+          "stroke_color": "#1F2937",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "Our Accreditations",
+          "x": 470,
+          "y": 120,
+          "font_size": 15,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 470,
+          "y": 133,
+          "width": 50,
+          "height": 0,
+          "stroke_color": "#10B981",
+          "stroke_width": 2
+        },
+        {
+          "type": "bullet_list",
+          "x": 470,
+          "y": 158,
+          "font_size": 10,
+          "color": "#D1D5DB",
+          "bullet_color": "#10B981",
+          "line_spacing": 12,
+          "indent": 14,
+          "items": [
+            "MCS Certified Installer (Solar & Heat Pumps)",
+            "RECC Member (Consumer Code)",
+            "TrustMark Government Endorsed",
+            "NAPIT Approved Contractor",
+            "Tesla Powerwall Certified",
+            "GivEnergy Approved Installer",
+            "NICEIC Approved Contractor",
+            "Gas Safe Registered (Heat Pumps)"
+          ]
+        },
+        {
+          "type": "text",
+          "content": "Insurance Cover",
+          "x": 470,
+          "y": 310,
+          "font_size": 11,
+          "font_weight": "bold",
+          "color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "£5M Public Liability",
+          "x": 470,
+          "y": 330,
+          "font_size": 10,
+          "color": "#9CA3AF"
+        },
+        {
+          "type": "text",
+          "content": "10 Year Workmanship Warranty",
+          "x": 470,
+          "y": 348,
+          "font_size": 10,
+          "color": "#9CA3AF"
+        },
+        {
+          "type": "text",
+          "content": "IWA Insurance-Backed Guarantee",
+          "x": 470,
+          "y": 366,
+          "font_size": 10,
+          "color": "#9CA3AF"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 415,
+          "width": 722,
+          "height": 65,
+          "fill_color": "#F0FDF4",
+          "stroke_color": "#10B981",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "CUSTOMER TESTIMONIAL",
+          "x": 80,
+          "y": 433,
+          "font_size": 9,
+          "font_weight": "bold",
+          "color": "#065F46"
+        },
+        {
+          "type": "text",
+          "content": "\"Brilliant service from start to finish. The team were professional, tidy, and explained everything clearly. Our electricity bills have dropped by 70% since installation. Highly recommend!\"",
+          "x": 80,
+          "y": 453,
+          "font_size": 10,
+          "font_style": "italic",
+          "color": "#047857",
+          "max_width": 680
+        },
+        {
+          "type": "text",
+          "content": "— David & Sarah T., Eastleigh (Dec 2025)",
+          "x": 762,
+          "y": 467,
+          "font_size": 9,
+          "color": "#065F46",
+          "align": "right"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 505,
+          "width": 722,
+          "height": 0,
+          "stroke_color": "#E5E7EB",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Page 2 of 5",
+          "x": 421,
+          "y": 525,
+          "font_size": 10,
+          "color": "#9CA3AF",
+          "align": "center"
+        }
+      ]
+    },
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 842,
+          "height": 55,
+          "fill_color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "CRG DIRECT",
+          "x": 60,
+          "y": 33,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "Your System",
+          "x": 782,
+          "y": 33,
+          "font_size": 11,
+          "color": "#6EE7B7",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "Your Recommended System",
+          "x": 60,
+          "y": 95,
+          "font_size": 26,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 108,
+          "width": 60,
+          "height": 0,
+          "stroke_color": "#10B981",
+          "stroke_width": 3
+        },
+        {
+          "type": "text",
+          "content": "Based on your property survey and energy usage, we recommend the following system to maximise your savings and self-consumption.",
+          "x": 60,
+          "y": 135,
+          "font_size": 11,
+          "color": "#4B5563",
+          "max_width": 720
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 175,
+          "width": 350,
+          "height": 180,
+          "fill_color": "#F9FAFB",
+          "stroke_color": "#E5E7EB",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "SOLAR PV SYSTEM",
+          "x": 80,
+          "y": 198,
+          "font_size": 11,
+          "font_weight": "bold",
+          "color": "#10B981"
+        },
+        {
+          "type": "bullet_list",
+          "x": 80,
+          "y": 220,
+          "font_size": 10,
+          "color": "#374151",
+          "bullet_color": "#10B981",
+          "line_spacing": 10,
+          "indent": 12,
+          "items": [
+            "12 x JA Solar 440W All-Black Panels",
+            "5.28kWp Total System Size",
+            "GivEnergy 5.0kW Hybrid Inverter",
+            "South-facing roof, 35° pitch",
+            "Estimated annual yield: 4,800 kWh"
+          ]
+        },
+        {
+          "type": "text",
+          "content": "£6,480.00",
+          "x": 390,
+          "y": 338,
+          "font_size": 18,
+          "font_weight": "bold",
+          "color": "#111827",
+          "align": "right"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 430,
+          "y": 175,
+          "width": 350,
+          "height": 180,
+          "fill_color": "#F9FAFB",
+          "stroke_color": "#E5E7EB",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "BATTERY STORAGE",
+          "x": 450,
+          "y": 198,
+          "font_size": 11,
+          "font_weight": "bold",
+          "color": "#10B981"
+        },
+        {
+          "type": "bullet_list",
+          "x": 450,
+          "y": 220,
+          "font_size": 10,
+          "color": "#374151",
+          "bullet_color": "#10B981",
+          "line_spacing": 10,
+          "indent": 12,
+          "items": [
+            "GivEnergy 9.5kWh Battery",
+            "Stackable design (future expansion)",
+            "10 year manufacturer warranty",
+            "Smart energy management",
+            "EV charging integration ready"
+          ]
+        },
+        {
+          "type": "text",
+          "content": "£4,250.00",
+          "x": 760,
+          "y": 338,
+          "font_size": 18,
+          "font_weight": "bold",
+          "color": "#111827",
+          "align": "right"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 370,
+          "width": 720,
+          "height": 100,
+          "fill_color": "#F9FAFB",
+          "stroke_color": "#E5E7EB",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "INSTALLATION & ANCILLARY",
+          "x": 80,
+          "y": 393,
+          "font_size": 11,
+          "font_weight": "bold",
+          "color": "#10B981"
+        },
+        {
+          "type": "bullet_list",
+          "x": 80,
+          "y": 415,
+          "font_size": 10,
+          "color": "#374151",
+          "bullet_color": "#10B981",
+          "line_spacing": 10,
+          "indent": 12,
+          "items": [
+            "Full scaffolding and site setup",
+            "Electrical consumer unit upgrade (if required)",
+            "DNO G99 notification and approval"
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "x": 420,
+          "y": 415,
+          "font_size": 10,
+          "color": "#374151",
+          "bullet_color": "#10B981",
+          "line_spacing": 10,
+          "indent": 12,
+          "items": [
+            "MCS certification and handover pack",
+            "Smart meter compatibility check",
+            "System commissioning and walkthrough"
+          ]
+        },
+        {
+          "type": "text",
+          "content": "£1,650.00",
+          "x": 760,
+          "y": 450,
+          "font_size": 18,
+          "font_weight": "bold",
+          "color": "#111827",
+          "align": "right"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 505,
+          "width": 722,
+          "height": 0,
+          "stroke_color": "#E5E7EB",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Page 3 of 5",
+          "x": 421,
+          "y": 525,
+          "font_size": 10,
+          "color": "#9CA3AF",
+          "align": "center"
+        }
+      ]
+    },
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 842,
+          "height": 55,
+          "fill_color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "CRG DIRECT",
+          "x": 60,
+          "y": 33,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "Investment & Savings",
+          "x": 782,
+          "y": 33,
+          "font_size": 11,
+          "color": "#6EE7B7",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "Your Investment",
+          "x": 60,
+          "y": 95,
+          "font_size": 26,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 108,
+          "width": 60,
+          "height": 0,
+          "stroke_color": "#10B981",
+          "stroke_width": 3
+        },
+        {
+          "type": "table",
+          "x": 60,
+          "y": 130,
+          "columns": ["Description", "Amount"],
+          "column_widths": [520, 140],
+          "rows": [
+            ["12 x JA Solar 440W All-Black Panels (5.28kWp)", "£3,960.00"],
+            ["GivEnergy 5.0kW Hybrid Inverter", "£1,520.00"],
+            ["Panel mounting kit & fixings", "£480.00"],
+            ["DC/AC cabling and accessories", "£520.00"],
+            ["GivEnergy 9.5kWh Battery", "£3,450.00"],
+            ["Battery mounting bracket & accessories", "£280.00"],
+            ["Installation labour (2-day install)", "£1,650.00"],
+            ["Scaffolding", "£420.00"],
+            ["Electrical work & consumer unit upgrade", "£380.00"],
+            ["DNO notification & MCS certification", "£250.00"]
+          ],
+          "header_bg_color": "#111827",
+          "header_text_color": "#ffffff",
+          "row_bg_color": "#ffffff",
+          "alt_row_bg_color": "#F9FAFB",
+          "text_color": "#374151",
+          "border_color": "#E5E7EB",
+          "font_size": 10,
+          "header_font_size": 11,
+          "padding": 10,
+          "row_height": 28,
+          "header_height": 32
+        },
+        {
+          "type": "text",
+          "content": "* 0% VAT applies to residential solar installations under the Energy Saving Materials scheme",
+          "x": 60,
+          "y": 460,
+          "font_size": 9,
+          "font_style": "italic",
+          "color": "#6B7280"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 460,
+          "y": 480,
+          "width": 320,
+          "height": 90,
+          "fill_color": "#111827",
+          "stroke_color": "#1F2937",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "Subtotal",
+          "x": 480,
+          "y": 500,
+          "font_size": 11,
+          "color": "#9CA3AF"
+        },
+        {
+          "type": "text",
+          "content": "£12,910.00",
+          "x": 760,
+          "y": 500,
+          "font_size": 11,
+          "color": "#ffffff",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "VAT (0% - Energy Saving Materials)",
+          "x": 480,
+          "y": 520,
+          "font_size": 11,
+          "color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "£0.00",
+          "x": 760,
+          "y": 520,
+          "font_size": 11,
+          "color": "#10B981",
+          "align": "right"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 480,
+          "y": 535,
+          "width": 280,
+          "height": 0,
+          "stroke_color": "#374151",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "TOTAL",
+          "x": 480,
+          "y": 555,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "text",
+          "content": "£12,910.00",
+          "x": 760,
+          "y": 555,
+          "font_size": 16,
+          "font_weight": "bold",
+          "color": "#10B981",
+          "align": "right"
+        }
+      ]
+    },
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 842,
+          "height": 55,
+          "fill_color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "CRG DIRECT",
+          "x": 60,
+          "y": 33,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "Accept & Proceed",
+          "x": 782,
+          "y": 33,
+          "font_size": 11,
+          "color": "#6EE7B7",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "Your Estimated Savings",
+          "x": 60,
+          "y": 95,
+          "font_size": 26,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 60,
+          "y": 108,
+          "width": 60,
+          "height": 0,
+          "stroke_color": "#10B981",
+          "stroke_width": 3
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 130,
+          "width": 175,
+          "height": 85,
+          "fill_color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "YEAR 1 SAVINGS",
+          "x": 80,
+          "y": 150,
+          "font_size": 9,
+          "color": "#D1FAE5"
+        },
+        {
+          "type": "text",
+          "content": "£1,420",
+          "x": 80,
+          "y": 190,
+          "font_size": 28,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 250,
+          "y": 130,
+          "width": 175,
+          "height": 85,
+          "fill_color": "#059669"
+        },
+        {
+          "type": "text",
+          "content": "25 YEAR SAVINGS",
+          "x": 270,
+          "y": 150,
+          "font_size": 9,
+          "color": "#D1FAE5"
+        },
+        {
+          "type": "text",
+          "content": "£42,500",
+          "x": 270,
+          "y": 190,
+          "font_size": 28,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 440,
+          "y": 130,
+          "width": 175,
+          "height": 85,
+          "fill_color": "#047857"
+        },
+        {
+          "type": "text",
+          "content": "PAYBACK PERIOD",
+          "x": 460,
+          "y": 150,
+          "font_size": 9,
+          "color": "#D1FAE5"
+        },
+        {
+          "type": "text",
+          "content": "9.1 Years",
+          "x": 460,
+          "y": 190,
+          "font_size": 28,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 630,
+          "y": 130,
+          "width": 150,
+          "height": 85,
+          "fill_color": "#065F46"
+        },
+        {
+          "type": "text",
+          "content": "CO2 SAVED/YR",
+          "x": 650,
+          "y": 150,
+          "font_size": 9,
+          "color": "#D1FAE5"
+        },
+        {
+          "type": "text",
+          "content": "2.1 t",
+          "x": 650,
+          "y": 190,
+          "font_size": 28,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "text",
+          "content": "* Savings based on current energy prices (34p/kWh), 80% self-consumption, and SEG export at 15p/kWh",
+          "x": 60,
+          "y": 230,
+          "font_size": 9,
+          "font_style": "italic",
+          "color": "#6B7280"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 60,
+          "y": 255,
+          "width": 722,
+          "height": 165,
+          "fill_color": "#F9FAFB",
+          "stroke_color": "#111827",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "ACCEPTANCE",
+          "x": 80,
+          "y": 280,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "I/We accept this quotation and authorise CRG Direct to proceed with the installation as described.",
+          "x": 80,
+          "y": 305,
+          "font_size": 10,
+          "color": "#4B5563"
+        },
+        {
+          "type": "text",
+          "content": "A 25% deposit (£3,227.50) is required to secure your installation date. Balance due on completion.",
+          "x": 80,
+          "y": 322,
+          "font_size": 10,
+          "color": "#4B5563"
+        },
+        {
+          "type": "text",
+          "content": "Signed: ___________________________________________",
+          "x": 80,
+          "y": 360,
+          "font_size": 10,
+          "color": "#374151"
+        },
+        {
+          "type": "text",
+          "content": "Date: ___________________",
+          "x": 480,
+          "y": 360,
+          "font_size": 10,
+          "color": "#374151"
+        },
+        {
+          "type": "text",
+          "content": "Print Name: ________________________________________",
+          "x": 80,
+          "y": 390,
+          "font_size": 10,
+          "color": "#374151"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 440,
+          "width": 842,
+          "height": 155,
+          "fill_color": "#111827"
+        },
+        {
+          "type": "text",
+          "content": "CRG DIRECT LTD",
+          "x": 60,
+          "y": 470,
+          "font_size": 14,
+          "font_weight": "bold",
+          "color": "#10B981"
+        },
+        {
+          "type": "text",
+          "content": "Unit 7, Solent Business Park, Whiteley, Hampshire PO15 7FJ",
+          "x": 60,
+          "y": 495,
+          "font_size": 10,
+          "color": "#9CA3AF"
+        },
+        {
+          "type": "text",
+          "content": "Company Reg: 12345678  |  VAT: GB 123 4567 89  |  MCS: NAP-12345",
+          "x": 60,
+          "y": 515,
+          "font_size": 10,
+          "color": "#9CA3AF"
+        },
+        {
+          "type": "text",
+          "content": "Tel: 0800 123 4567  |  Email: hello@crgdirect.co.uk  |  Web: crgdirect.co.uk",
+          "x": 60,
+          "y": 535,
+          "font_size": 10,
+          "color": "#9CA3AF"
+        },
+        {
+          "type": "text",
+          "content": "Next Steps",
+          "x": 550,
+          "y": 470,
+          "font_size": 12,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "bullet_list",
+          "x": 550,
+          "y": 492,
+          "font_size": 9,
+          "color": "#D1D5DB",
+          "bullet_color": "#10B981",
+          "line_spacing": 10,
+          "indent": 12,
+          "items": [
+            "Sign and return this quote",
+            "Pay 25% deposit to confirm",
+            "We'll schedule your install date",
+            "Installation typically 1-2 days"
+          ]
+        },
+        {
+          "type": "text",
+          "content": "Page 5 of 5",
+          "x": 782,
+          "y": 575,
+          "font_size": 10,
+          "color": "#6B7280",
+          "align": "right"
+        }
+      ]
+    }
+  ]
+}

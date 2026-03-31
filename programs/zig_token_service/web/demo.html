@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Token Service - WASM Auth Demo</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #1a1a2e;
+            color: #eee;
+        }
+        h1 { color: #00d9ff; }
+        h2 { color: #ff6b6b; margin-top: 20px; font-size: 1.1em; }
+        .card {
+            background: #16213e;
+            border-radius: 8px;
+            padding: 15px 20px;
+            margin: 10px 0;
+            border: 1px solid #0f3460;
+        }
+        input, button {
+            padding: 8px 12px;
+            border-radius: 5px;
+            border: none;
+            margin: 3px;
+            font-size: 14px;
+        }
+        input {
+            background: #0f3460;
+            color: #fff;
+            width: 180px;
+        }
+        input.wide { width: 350px; }
+        button {
+            background: #00d9ff;
+            color: #1a1a2e;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        button:hover { background: #00b8d4; }
+        button:disabled { background: #666; cursor: not-allowed; }
+        button.secondary { background: #ff6b6b; }
+        button.secondary:hover { background: #ff5252; }
+        .output {
+            background: #0f0f23;
+            border-radius: 5px;
+            padding: 12px;
+            margin-top: 10px;
+            font-family: 'Monaco', 'Consolas', monospace;
+            font-size: 12px;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        .success { color: #4ade80; }
+        .error { color: #f87171; }
+        .info { color: #60a5fa; }
+        .label { color: #888; font-size: 11px; }
+        #status { padding: 10px; margin: 10px 0; border-radius: 5px; font-weight: bold; }
+        #status.loading { background: #3b82f6; }
+        #status.ready { background: #22c55e; }
+        #status.error { background: #ef4444; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        @media (max-width: 700px) { .grid { grid-template-columns: 1fr; } }
+    </style>
+</head>
+<body>
+    <h1>Token Service - WASM Auth</h1>
+    <p>High-performance JWT + UUID + Base58 powered by Zig + WebAssembly</p>
+
+    <div id="status" class="loading">Loading WASM module...</div>
+
+    <div class="grid">
+        <div class="card">
+            <h2>1. Initialize Secret</h2>
+            <input type="password" id="secret" placeholder="Secret key" value="my-secret-key-123">
+            <button onclick="initService()">Initialize</button>
+            <div id="initOutput" class="output" style="display:none;"></div>
+        </div>
+
+        <div class="card">
+            <h2>2. Sign JWT Token</h2>
+            <input type="text" id="userId" placeholder="User ID" value="user123">
+            <input type="number" id="expiresIn" placeholder="Expires (sec)" value="3600" style="width:100px;">
+            <button onclick="signToken()">Sign</button>
+            <div id="signOutput" class="output" style="display:none;"></div>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>3. Verify JWT Token</h2>
+        <input type="text" id="tokenInput" placeholder="Paste JWT token here" class="wide">
+        <button onclick="verifyToken()">Verify</button>
+        <div id="verifyOutput" class="output" style="display:none;"></div>
+    </div>
+
+    <div class="grid">
+        <div class="card">
+            <h2>4. UUID Generation</h2>
+            <button onclick="generateUuidV4()">UUID v4 (Random)</button>
+            <button onclick="generateUuidV7()" class="secondary">UUID v7 (Time)</button>
+            <div id="uuidOutput" class="output" style="display:none;"></div>
+        </div>
+
+        <div class="card">
+            <h2>5. Base58 Encoding</h2>
+            <input type="text" id="base58Input" placeholder="Text to encode" value="Hello WASM!">
+            <button onclick="base58Encode()">Encode</button>
+            <button onclick="base58Decode()" class="secondary">Decode</button>
+            <div id="base58Output" class="output" style="display:none;"></div>
+        </div>
+    </div>
+
+    <script type="module">
+        let wasm = null;
+        let memory = null;
+
+        const encoder = new TextEncoder();
+        const decoder = new TextDecoder();
+
+        function writeToInput(str) {
+            const bytes = encoder.encode(str);
+            const inputPtr = wasm.get_input_ptr();
+            const maxSize = wasm.get_input_size();
+            if (bytes.length > maxSize) throw new Error(`Input too large: ${bytes.length} > ${maxSize}`);
+            new Uint8Array(memory.buffer, inputPtr, bytes.length).set(bytes);
+            return { ptr: inputPtr, len: bytes.length };
+        }
+
+        function readResult() {
+            const ptr = wasm.get_result_ptr();
+            const len = wasm.get_result_len();
+            return decoder.decode(new Uint8Array(memory.buffer, ptr, len));
+        }
+
+        function readResultBytes() {
+            const ptr = wasm.get_result_ptr();
+            const len = wasm.get_result_len();
+            return new Uint8Array(memory.buffer, ptr, len).slice();
+        }
+
+        async function loadWasm() {
+            const status = document.getElementById('status');
+            try {
+                const imports = {
+                    env: {
+                        js_get_timestamp: () => Math.floor(Date.now() / 1000),
+                        js_get_random_bytes: (ptr, len) => {
+                            const bytes = new Uint8Array(memory.buffer, ptr, len);
+                            crypto.getRandomValues(bytes);
+                        },
+                    },
+                };
+
+                const response = await fetch('../zig-out/wasm/token_service.wasm');
+                if (!response.ok) throw new Error('WASM not found. Run: zig build wasm');
+
+                const { instance } = await WebAssembly.instantiateStreaming(response, imports);
+                wasm = instance.exports;
+                memory = instance.exports.memory;
+
+                const version = `${wasm.get_version_major()}.${wasm.get_version_minor()}.${wasm.get_version_patch()}`;
+                const size = (await response.clone().arrayBuffer()).byteLength;
+                status.textContent = `WASM loaded! v${version} | ${(size/1024).toFixed(1)}KB | JWT + UUID + Base58`;
+                status.className = 'ready';
+
+                document.querySelectorAll('button').forEach(btn => btn.disabled = false);
+            } catch (err) {
+                status.textContent = `Error: ${err.message}`;
+                status.className = 'error';
+                console.error(err);
+            }
+        }
+
+        window.initService = function() {
+            const output = document.getElementById('initOutput');
+            output.style.display = 'block';
+            try {
+                const { ptr, len } = writeToInput(document.getElementById('secret').value);
+                const result = wasm.init(ptr, len);
+                output.innerHTML = result === 0
+                    ? `<span class="success">Initialized!</span> Secret: ${len} bytes`
+                    : `<span class="error">Failed: ${result}</span>`;
+            } catch (err) {
+                output.innerHTML = `<span class="error">${err.message}</span>`;
+            }
+        };
+
+        window.signToken = function() {
+            const output = document.getElementById('signOutput');
+            output.style.display = 'block';
+            try {
+                const { ptr, len } = writeToInput(document.getElementById('userId').value);
+                const expiresIn = parseInt(document.getElementById('expiresIn').value) || 3600;
+                const tokenLen = wasm.sign_token(ptr, len, expiresIn);
+
+                if (tokenLen === 0) {
+                    const err = wasm.get_error_code();
+                    output.innerHTML = `<span class="error">Failed: ${err === -1 ? 'Not initialized' : 'Error ' + err}</span>`;
+                } else {
+                    const token = readResult();
+                    output.innerHTML = `<span class="success">Signed!</span>\n${token}`;
+                    document.getElementById('tokenInput').value = token;
+                }
+            } catch (err) {
+                output.innerHTML = `<span class="error">${err.message}</span>`;
+            }
+        };
+
+        window.verifyToken = function() {
+            const output = document.getElementById('verifyOutput');
+            output.style.display = 'block';
+            const token = document.getElementById('tokenInput').value;
+            if (!token) { output.innerHTML = '<span class="error">Enter a token</span>'; return; }
+
+            try {
+                const { ptr, len } = writeToInput(token);
+                const valid = wasm.verify_token(ptr, len);
+
+                if (valid === 1) {
+                    output.innerHTML = `<span class="success">VALID</span> | User: ${readResult()}`;
+                } else {
+                    const err = wasm.get_error_code();
+                    const msgs = { [-1]: 'Not initialized', [-4]: 'Bad signature', [-5]: 'Expired' };
+                    output.innerHTML = `<span class="error">INVALID</span> | ${msgs[err] || 'Error ' + err}`;
+                }
+            } catch (err) {
+                output.innerHTML = `<span class="error">${err.message}</span>`;
+            }
+        };
+
+        window.generateUuidV4 = function() {
+            const output = document.getElementById('uuidOutput');
+            output.style.display = 'block';
+            try {
+                wasm.uuid_v4();
+                output.innerHTML = `<span class="info">UUID v4:</span> ${readResult()}`;
+            } catch (err) {
+                output.innerHTML = `<span class="error">${err.message}</span>`;
+            }
+        };
+
+        window.generateUuidV7 = function() {
+            const output = document.getElementById('uuidOutput');
+            output.style.display = 'block';
+            try {
+                wasm.uuid_v7();
+                output.innerHTML = `<span class="info">UUID v7:</span> ${readResult()}`;
+            } catch (err) {
+                output.innerHTML = `<span class="error">${err.message}</span>`;
+            }
+        };
+
+        window.base58Encode = function() {
+            const output = document.getElementById('base58Output');
+            output.style.display = 'block';
+            const input = document.getElementById('base58Input').value;
+            try {
+                const { ptr, len } = writeToInput(input);
+                const resultLen = wasm.base58_encode(ptr, len);
+                if (resultLen === 0) {
+                    output.innerHTML = `<span class="error">Encode failed</span>`;
+                } else {
+                    const encoded = readResult();
+                    output.innerHTML = `<span class="success">Encoded:</span> ${encoded}\n<span class="label">"${input}" → Base58</span>`;
+                    document.getElementById('base58Input').value = encoded;
+                }
+            } catch (err) {
+                output.innerHTML = `<span class="error">${err.message}</span>`;
+            }
+        };
+
+        window.base58Decode = function() {
+            const output = document.getElementById('base58Output');
+            output.style.display = 'block';
+            const input = document.getElementById('base58Input').value;
+            try {
+                const { ptr, len } = writeToInput(input);
+                const resultLen = wasm.base58_decode(ptr, len);
+                if (resultLen === 0) {
+                    output.innerHTML = `<span class="error">Decode failed (invalid Base58)</span>`;
+                } else {
+                    const bytes = readResultBytes();
+                    const decoded = decoder.decode(bytes);
+                    output.innerHTML = `<span class="success">Decoded:</span> "${decoded}"\n<span class="label">Base58 → text</span>`;
+                    document.getElementById('base58Input').value = decoded;
+                }
+            } catch (err) {
+                output.innerHTML = `<span class="error">${err.message}</span>`;
+            }
+        };
+
+        loadWasm();
+    </script>
+</body>
+</html>

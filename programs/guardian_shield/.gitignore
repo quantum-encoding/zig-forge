@@ -1,0 +1,59 @@
+# Zig build artifacts
+zig-out/
+zig-cache/
+.zig-cache/
+
+# C/C++ artifacts
+*.o
+*.so
+*.a
+*.dylib
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Test files
+test-output/
+*.test
+test-*
+test_*
+!test-*.c
+!test_*.zig
+!test-*.sh
+
+# Local config (don't commit actual production configs)
+warden-config.json
+!warden-config.example.json
+
+# Backup files
+*.backup
+*.bak
+
+# Generated eBPF headers
+src/zig-sentinel/ebpf/vmlinux.h
+
+# Compiled binaries
+chronos-ctl
+chronos-ctl-*
+chronosd
+chronosd-*
+chronos-stamp
+debug_bytes
+scripts/debug_bytes
+scripts/test_*
+scripts/test-*
+src/chronos-engine/chronos-ctl*
+src/chronos-engine/chronosd*
+src/chronos-engine/chronos-stamp
+
+# Temporary/deploy artifacts
+deploy-backups/
+deploy.sh.tmp.*
+
+# Logs
+*.log

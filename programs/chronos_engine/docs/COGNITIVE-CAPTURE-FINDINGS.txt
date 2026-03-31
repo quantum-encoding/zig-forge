@@ -1,0 +1,89 @@
+COGNITIVE ORACLE - Capture Analysis & Findings
+===============================================
+Date: 2025-10-27
+Status: IN PROGRESS - Pattern Identified
+
+BREAKTHROUGH DISCOVERIES
+========================
+
+1. THE ATTACHMENT FIX
+   - Problem: eBPF program was LOADED but NOT ATTACHED to tracepoint
+   - Solution: Added bpf_program__attach() call in cognitive-watcher.zig:195
+   - Result: Program now capturing syscalls successfully!
+   - Stats: 39,332 total writes → 2,510 claude writes → 2,018 events emitted ✅
+
+2. FILE DESCRIPTOR DISCOVERY
+   - Claude Code does NOT write status to stdout/stderr (FD 1/2)
+   - Status output goes to various FDs: 6, 18, 19, 20, 24, 26, 29, 32
+   - FD 24: Session JSON data
+   - FD 26/32: DEBUG logs
+   - FD with ANSI codes: Contains tool execution status
+
+3. STATUS LINE FORMAT (From Screenshot)
+   ✱ Saving captured patterns to log file for analysis… (esc to interrupt · ctrl+t to show todos · 40s · ↓ 521 tokens)
+   L Next: Analyze captures to find cognitive state pattern
+
+   Components:
+   - ✱ or ● icon (status indicator)
+   - Action description (e.g., "Saving captured patterns...")
+   - Metadata (esc to interrupt, ctrl+t, timing, tokens)
+   - L prefix with next todo item
+
+4. ANSI ESCAPE CODES DETECTED
+   - HEX pattern: 1b 5b ... (ESC [ = ANSI escape sequence)
+   - Example capture:
+     RAW: ● Bash(zig build ebpf && sudo cp cognitive-oracle.bpf.o...)
+     HEX: 1b 5b 3f 32 30 32 36 68 1b 5b 32 4b 1b 5b 31 41...
+
+   - These are terminal control codes for cursor positioning
+
+5. CAPTURED PATTERNS
+   - [DEBUG] messages on FD 24, 26, 32
+   - Session JSON: {"sessionID":"...","startTime":...,"lastUpdate":...}
+   - Tool hooks: "executePreToolHooks called for tool: Bash"
+   - File operations: "Writing to temp file: /home/founder/.claude.json.tmp..."
+
+CURRENT CHALLENGE
+=================
+The status line (✱ Saving captured patterns...) is NOT appearing in the RAW captures.
+
+Possible reasons:
+1. Written to a PTY (pseudo-terminal) with different FD
+2. Using ioctl() instead of write() for terminal control
+3. Journalctl filtering the output (blob data)
+4. Status updates happen on a different process/thread
+
+NEXT STEPS
+==========
+1. Capture to stderr directly (bypass journalctl filtering)
+2. Look for the ✱ or ● characters in HEX dumps
+3. Monitor the exact FD that contains ANSI codes + status text
+4. Decode the ANSI sequences to extract the status text
+
+PATTERN TO SEARCH FOR
+======================
+The cognitive state will likely match one of these patterns:
+- Tool execution: "● Bash(...)" or "● Read(...)" or "● Write(...)"
+- Status updates: "✱ [Action description]..."
+- State keywords: Thinking, Reading, Writing, Executing, Planning
+
+FDs TO FOCUS ON
+===============
+- FDs with ANSI codes (ESC sequences starting with 0x1b 0x5b)
+- Look for patterns with ● or ✱ characters (UTF-8: e2 97 8f, e2 9c b1)
+- Monitor all FDs for now until we identify the correct one
+
+SUCCESS METRICS
+===============
+✅ eBPF program attached and capturing
+✅ 2,018 events captured from Claude process
+✅ ANSI escape codes detected in output
+✅ Tool execution patterns visible
+⏳ Need to isolate exact status line format
+⏳ Need to parse cognitive state from captures
+
+FILES MODIFIED
+==============
+1. cognitive-watcher.zig - Added bpf_program__attach() + debug logging
+2. cognitive-oracle.bpf.c - Removed FD filter to capture all writes
+3. /tmp/claude-captures.log - 2,018 captured events for analysis

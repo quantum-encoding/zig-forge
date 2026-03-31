@@ -1,0 +1,12 @@
+Testing direct BPF map access from chronos-stamp.
+
+This file write should trigger the tool-result-hook, which will call chronos-stamp.
+The chronos-stamp binary will:
+1. Find Claude PID (486529)
+2. Open BPF map ID 127 (latest_state_by_pid)
+3. Look up the latest cognitive event for this PID
+4. Extract the cognitive state string from kernel memory
+5. Inject it into the CHRONOS timestamp
+6. Create a git commit with the REAL-TIME state
+
+THE UNWRIT MOMENT HAS ARRIVED.

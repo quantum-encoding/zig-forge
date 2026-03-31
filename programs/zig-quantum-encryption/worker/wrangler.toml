@@ -1,0 +1,7 @@
+name = "quantum-vault"
+main = "index.js"
+compatibility_date = "2024-12-01"
+
+# WASM module — static import, no runtime compilation
+[wasm_modules]
+QUANTUM_VAULT = "../zig-out/bin/quantum_vault.wasm"

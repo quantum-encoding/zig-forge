@@ -1,0 +1,1827 @@
+{
+  "page_size": { "width": 595, "height": 842 },
+  "pages": [
+    {
+      "background_color": "#0F172A",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 595,
+          "height": 4,
+          "fill_color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "QUANTUM",
+          "x": 298,
+          "y": 180,
+          "font_size": 38,
+          "font_weight": "bold",
+          "color": "#06B6D4",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "VAULT",
+          "x": 298,
+          "y": 225,
+          "font_size": 38,
+          "font_weight": "bold",
+          "color": "#ffffff",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 248,
+          "y": 245,
+          "width": 100,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 3
+        },
+        {
+          "type": "text",
+          "content": "Terms of Service",
+          "x": 298,
+          "y": 290,
+          "font_size": 24,
+          "font_weight": "bold",
+          "color": "#ffffff",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "&",
+          "x": 298,
+          "y": 320,
+          "font_size": 16,
+          "color": "#64748B",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "Privacy Policy",
+          "x": 298,
+          "y": 350,
+          "font_size": 24,
+          "font_weight": "bold",
+          "color": "#ffffff",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 148,
+          "y": 400,
+          "width": 300,
+          "height": 80,
+          "fill_color": "#1E293B",
+          "stroke_color": "#334155",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Effective Date: 1st February 2026",
+          "x": 298,
+          "y": 428,
+          "font_size": 11,
+          "color": "#94A3B8",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "Version 2.0",
+          "x": 298,
+          "y": 450,
+          "font_size": 11,
+          "color": "#06B6D4",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "DOCUMENT REFERENCE: QV-LEGAL-2026-02",
+          "x": 298,
+          "y": 466,
+          "font_size": 8,
+          "color": "#475569",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 750,
+          "width": 595,
+          "height": 92,
+          "fill_color": "#020617"
+        },
+        {
+          "type": "text",
+          "content": "Quantum Encoding Europe Limited",
+          "x": 298,
+          "y": 775,
+          "font_size": 12,
+          "font_weight": "bold",
+          "color": "#06B6D4",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "Republic of Ireland",
+          "x": 298,
+          "y": 795,
+          "font_size": 10,
+          "color": "#64748B",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "legal@quantumencoding.eu  |  quantumvaultapp.com",
+          "x": 298,
+          "y": 815,
+          "font_size": 9,
+          "color": "#475569",
+          "align": "center"
+        }
+      ]
+    },
+
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 595,
+          "height": 45,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "QUANTUM VAULT",
+          "x": 50,
+          "y": 28,
+          "font_size": 11,
+          "font_weight": "bold",
+          "color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "Terms of Service & Privacy Policy",
+          "x": 545,
+          "y": 28,
+          "font_size": 9,
+          "color": "#94A3B8",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "Table of Contents",
+          "x": 50,
+          "y": 75,
+          "font_size": 20,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 88,
+          "width": 60,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 3
+        },
+        {
+          "type": "text",
+          "content": "PART A — TERMS OF SERVICE",
+          "x": 50,
+          "y": 115,
+          "font_size": 12,
+          "font_weight": "bold",
+          "color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "1.  Acceptance of Terms",
+          "x": 65,
+          "y": 140,
+          "font_size": 10,
+          "color": "#334155"
+        },
+        {
+          "type": "text",
+          "content": "2.  Description of Services",
+          "x": 65,
+          "y": 160,
+          "font_size": 10,
+          "color": "#334155"
+        },
+        {
+          "type": "text",
+          "content": "3.  Self-Custody Responsibilities",
+          "x": 65,
+          "y": 180,
+          "font_size": 10,
+          "color": "#334155"
+        },
+        {
+          "type": "text",
+          "content": "4.  Supported Blockchains & Features",
+          "x": 65,
+          "y": 200,
+          "font_size": 10,
+          "color": "#334155"
+        },
+        {
+          "type": "text",
+          "content": "5.  Third-Party Services & Integrations",
+          "x": 65,
+          "y": 220,
+          "font_size": 10,
+          "color": "#334155"
+        },
+        {
+          "type": "text",
+          "content": "6.  AI Analysis Features Disclaimer",
+          "x": 65,
+          "y": 240,
+          "font_size": 10,
+          "color": "#334155"
+        },
+        {
+          "type": "text",
+          "content": "7.  Fiat On/Off Ramp Services",
+          "x": 65,
+          "y": 260,
+          "font_size": 10,
+          "color": "#334155"
+        },
+        {
+          "type": "text",
+          "content": "8.  Risk Acknowledgment",
+          "x": 65,
+          "y": 280,
+          "font_size": 10,
+          "color": "#334155"
+        },
+        {
+          "type": "text",
+          "content": "9.  Prohibited Uses",
+          "x": 65,
+          "y": 300,
+          "font_size": 10,
+          "color": "#334155"
+        },
+        {
+          "type": "text",
+          "content": "10. Intellectual Property",
+          "x": 65,
+          "y": 320,
+          "font_size": 10,
+          "color": "#334155"
+        },
+        {
+          "type": "text",
+          "content": "11. Limitation of Liability",
+          "x": 65,
+          "y": 340,
+          "font_size": 10,
+          "color": "#334155"
+        },
+        {
+          "type": "text",
+          "content": "12. Indemnification",
+          "x": 65,
+          "y": 360,
+          "font_size": 10,
+          "color": "#334155"
+        },
+        {
+          "type": "text",
+          "content": "13. Termination",
+          "x": 65,
+          "y": 380,
+          "font_size": 10,
+          "color": "#334155"
+        },
+        {
+          "type": "text",
+          "content": "14. Dispute Resolution & Governing Law",
+          "x": 65,
+          "y": 400,
+          "font_size": 10,
+          "color": "#334155"
+        },
+        {
+          "type": "text",
+          "content": "15. General Provisions",
+          "x": 65,
+          "y": 420,
+          "font_size": 10,
+          "color": "#334155"
+        },
+        {
+          "type": "text",
+          "content": "PART B — PRIVACY POLICY",
+          "x": 50,
+          "y": 520,
+          "font_size": 12,
+          "font_weight": "bold",
+          "color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "16. No Data Collection",
+          "x": 65,
+          "y": 545,
+          "font_size": 10,
+          "color": "#334155"
+        },
+        {
+          "type": "text",
+          "content": "17. Local Storage Only",
+          "x": 65,
+          "y": 565,
+          "font_size": 10,
+          "color": "#334155"
+        },
+        {
+          "type": "text",
+          "content": "18. Network Communications",
+          "x": 65,
+          "y": 585,
+          "font_size": 10,
+          "color": "#334155"
+        },
+        {
+          "type": "text",
+          "content": "19. Third-Party Service Providers",
+          "x": 65,
+          "y": 605,
+          "font_size": 10,
+          "color": "#334155"
+        },
+        {
+          "type": "text",
+          "content": "20. Your Rights",
+          "x": 65,
+          "y": 625,
+          "font_size": 10,
+          "color": "#334155"
+        },
+        {
+          "type": "text",
+          "content": "21. GDPR Compliance",
+          "x": 65,
+          "y": 645,
+          "font_size": 10,
+          "color": "#334155"
+        },
+        {
+          "type": "text",
+          "content": "22. Contact Information",
+          "x": 65,
+          "y": 665,
+          "font_size": 10,
+          "color": "#334155"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 50,
+          "y": 705,
+          "width": 495,
+          "height": 60,
+          "fill_color": "#F0F9FF",
+          "stroke_color": "#BAE6FD",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "IMPORTANT NOTICE",
+          "x": 70,
+          "y": 722,
+          "font_size": 9,
+          "font_weight": "bold",
+          "color": "#0891B2"
+        },
+        {
+          "type": "text",
+          "content": "Quantum Vault is a self-custodial wallet. We do not have access to your private keys, seed phrases, or funds. If you lose your credentials, we cannot recover them.",
+          "x": 70,
+          "y": 738,
+          "font_size": 9,
+          "color": "#334155",
+          "max_width": 455,
+          "line_height": 1.4
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 800,
+          "width": 495,
+          "height": 0,
+          "stroke_color": "#E2E8F0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Page 2  |  QV-LEGAL-2026-02  |  Quantum Encoding Europe Limited",
+          "x": 298,
+          "y": 820,
+          "font_size": 8,
+          "color": "#94A3B8",
+          "align": "center"
+        }
+      ]
+    },
+
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 595,
+          "height": 45,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "QUANTUM VAULT",
+          "x": 50,
+          "y": 28,
+          "font_size": 11,
+          "font_weight": "bold",
+          "color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "Part A: Terms of Service",
+          "x": 545,
+          "y": 28,
+          "font_size": 9,
+          "color": "#94A3B8",
+          "align": "right"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 50,
+          "y": 60,
+          "width": 495,
+          "height": 30,
+          "fill_color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "PART A — TERMS OF SERVICE",
+          "x": 70,
+          "y": 80,
+          "font_size": 12,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "text",
+          "content": "1. ACCEPTANCE OF TERMS",
+          "x": 50,
+          "y": 115,
+          "font_size": 13,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 125,
+          "width": 40,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "These Terms of Service (\"Terms\") constitute a legally binding agreement between you (\"User\", \"you\", or \"your\") and Quantum Encoding Europe Limited, a company registered in the Republic of Ireland (\"Company\", \"we\", \"us\", or \"our\").",
+          "x": 50,
+          "y": 145,
+          "font_size": 10,
+          "color": "#334155",
+          "max_width": 495,
+          "line_height": 1.5
+        },
+        {
+          "type": "text",
+          "content": "By downloading, installing, accessing, or using the Quantum Vault application (\"App\"), you acknowledge that you have read, understood, and agree to be bound by these Terms and our Privacy Policy. If you do not agree to these Terms, you must not use the App or Services.",
+          "x": 50,
+          "y": 195,
+          "font_size": 10,
+          "color": "#334155",
+          "max_width": 495,
+          "line_height": 1.5
+        },
+        {
+          "type": "text",
+          "content": "You must be at least 18 years old and capable of forming a binding contract to use the App. By using the App, you represent and warrant that you meet these requirements.",
+          "x": 50,
+          "y": 250,
+          "font_size": 10,
+          "color": "#334155",
+          "max_width": 495,
+          "line_height": 1.5
+        },
+        {
+          "type": "text",
+          "content": "We reserve the right to modify these Terms at any time. Changes will be effective upon posting to the App or our website. Your continued use of the App following any changes constitutes acceptance of the revised Terms.",
+          "x": 50,
+          "y": 295,
+          "font_size": 10,
+          "color": "#334155",
+          "max_width": 495,
+          "line_height": 1.5
+        },
+        {
+          "type": "text",
+          "content": "2. DESCRIPTION OF SERVICES",
+          "x": 50,
+          "y": 340,
+          "font_size": 13,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 350,
+          "width": 40,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "Quantum Vault is a self-custodial cryptocurrency wallet application. This means:",
+          "x": 50,
+          "y": 367,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#334155",
+          "max_width": 495
+        },
+        {
+          "type": "bullet_list",
+          "x": 50,
+          "y": 387,
+          "font_size": 10,
+          "color": "#334155",
+          "bullet_color": "#06B6D4",
+          "line_spacing": 18,
+          "indent": 12,
+          "items": [
+            "You control your private keys. We do not have access to, store, or hold your private keys, seed phrases, or passwords.",
+            "You are solely responsible for the security and backup of your wallet credentials.",
+            "We cannot recover your wallet if you lose your seed phrase or private keys.",
+            "We cannot reverse or modify any transactions you initiate.",
+            "We do not custody, hold, or manage user funds at any time."
+          ]
+        },
+        {
+          "type": "text",
+          "content": "The App provides features including multi-chain wallet management across 12+ blockchain networks, Lightning Network payments, cross-chain bridges and non-custodial swaps, hardware wallet integration (Trezor, Ledger), multi-signature wallet support, AI-powered market analysis, fiat on/off ramp integration, WalletConnect dApp connectivity, and NFT gallery and management.",
+          "x": 50,
+          "y": 520,
+          "font_size": 10,
+          "color": "#334155",
+          "max_width": 495,
+          "line_height": 1.5
+        },
+        {
+          "type": "text",
+          "content": "All features are provided free of charge to all users. No subscription tiers, premium features, or in-app purchases are required.",
+          "x": 50,
+          "y": 575,
+          "font_size": 10,
+          "color": "#334155",
+          "max_width": 495,
+          "line_height": 1.5
+        },
+        {
+          "type": "text",
+          "content": "3. SELF-CUSTODY RESPONSIBILITIES",
+          "x": 50,
+          "y": 620,
+          "font_size": 13,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 630,
+          "width": 40,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "As a user of a self-custodial wallet, you accept full responsibility for:",
+          "x": 50,
+          "y": 650,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#334155",
+          "max_width": 495
+        },
+        {
+          "type": "bullet_list",
+          "x": 60,
+          "y": 665,
+          "font_size": 10,
+          "color": "#334155",
+          "bullet_color": "#06B6D4",
+          "line_spacing": 16,
+          "indent": 12,
+          "items": [
+            "Securely storing and backing up your seed phrase (12 or 24 words)",
+            "Protecting your PIN code and biometric credentials",
+            "Verifying all transaction details before confirmation",
+            "Maintaining device security (software updates, malware protection)",
+            "Ensuring compliance with applicable laws in your jurisdiction",
+            "Understanding the risks of cryptocurrency storage and transactions"
+          ]
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 805,
+          "width": 495,
+          "height": 0,
+          "stroke_color": "#E2E8F0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Page 3  |  QV-LEGAL-2026-02  |  Quantum Encoding Europe Limited",
+          "x": 298,
+          "y": 825,
+          "font_size": 8,
+          "color": "#94A3B8",
+          "align": "center"
+        }
+      ]
+    },
+
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 595,
+          "height": 45,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "QUANTUM VAULT",
+          "x": 50,
+          "y": 28,
+          "font_size": 11,
+          "font_weight": "bold",
+          "color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "Part A: Terms of Service",
+          "x": 545,
+          "y": 28,
+          "font_size": 9,
+          "color": "#94A3B8",
+          "align": "right"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 50,
+          "y": 60,
+          "width": 495,
+          "height": 55,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "CRITICAL WARNING",
+          "x": 70,
+          "y": 78,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "If you lose your seed phrase and do not have a valid backup, your wallet and all associated funds will be permanently and irretrievably lost. Neither the Company nor any third party can recover lost credentials.",
+          "x": 70,
+          "y": 96,
+          "font_size": 9,
+          "color": "#CBD5E1",
+          "max_width": 455,
+          "line_height": 1.4
+        },
+        {
+          "type": "text",
+          "content": "4. SUPPORTED BLOCKCHAINS & FEATURES",
+          "x": 50,
+          "y": 140,
+          "font_size": 13,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 150,
+          "width": 40,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "Quantum Vault supports the following blockchain networks: Bitcoin (BIP84 SegWit), Ethereum (ERC-20, ERC-721, ERC-1155), Solana (SPL tokens), Polygon, BNB Smart Chain, Tron (TRC-20), Cardano, XRP, Litecoin, Dogecoin, and Layer 2 networks including Base, Arbitrum, and Optimism.",
+          "x": 50,
+          "y": 170,
+          "font_size": 10,
+          "color": "#334155",
+          "max_width": 495,
+          "line_height": 1.5
+        },
+        {
+          "type": "text",
+          "content": "We may add or remove supported blockchains and features at our discretion. We do not guarantee uninterrupted access to any particular blockchain network or feature. Blockchain networks are independent and decentralised; their availability, performance, and fees are outside our control.",
+          "x": 50,
+          "y": 235,
+          "font_size": 10,
+          "color": "#334155",
+          "max_width": 495,
+          "line_height": 1.5
+        },
+        {
+          "type": "text",
+          "content": "5. THIRD-PARTY SERVICES & INTEGRATIONS",
+          "x": 50,
+          "y": 305,
+          "font_size": 13,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 315,
+          "width": 40,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "The App integrates with various third-party services. When you use these integrations, you are also subject to the terms and privacy policies of those providers. We do not control and are not responsible for the actions or policies of third-party service providers.",
+          "x": 50,
+          "y": 335,
+          "font_size": 10,
+          "color": "#334155",
+          "max_width": 495,
+          "line_height": 1.5
+        },
+        {
+          "type": "table",
+          "x": 50,
+          "y": 390,
+          "columns": ["Service Category", "Providers", "Data Shared"],
+          "column_widths": [140, 180, 175],
+          "rows": [
+            ["Blockchain RPCs", "Infura, Alchemy, Electrum, TronGrid, Solana RPC", "Public blockchain queries only"],
+            ["Price Data", "CoinGecko, CoinMarketCap, Etherscan", "No personal data"],
+            ["Fiat On/Off Ramp", "Alchemy Pay", "Per provider KYC policy"],
+            ["Non-Custodial Swaps", "SideShift.ai", "Transaction data only"],
+            ["Cross-Chain Bridges", "Li.Fi Aggregator", "Transaction data only"],
+            ["Lightning Network", "Breez SDK", "Payment channel data"],
+            ["dApp Connectivity", "WalletConnect V2", "Session and signing data"],
+            ["AI Analysis", "Google Gemini", "Anonymised market queries"],
+            ["Trading", "Alpaca (equities)", "User's API credentials (local)"]
+          ],
+          "header_bg_color": "#06B6D4",
+          "header_text_color": "#ffffff",
+          "row_bg_color": "#ffffff",
+          "alt_row_bg_color": "#F0F9FF",
+          "text_color": "#334155",
+          "border_color": "#E2E8F0",
+          "font_size": 8,
+          "header_font_size": 9,
+          "padding": 6,
+          "row_height": 22,
+          "header_height": 24
+        },
+        {
+          "type": "text",
+          "content": "All third-party API credentials (exchange keys, etc.) are stored exclusively on your local device, encrypted with AES-256-GCM. They are never transmitted to Quantum Encoding servers.",
+          "x": 50,
+          "y": 625,
+          "font_size": 10,
+          "color": "#334155",
+          "max_width": 495,
+          "line_height": 1.5
+        },
+        {
+          "type": "text",
+          "content": "6. AI TRADING FEATURES DISCLAIMER",
+          "x": 50,
+          "y": 675,
+          "font_size": 13,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 685,
+          "width": 40,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "Quantum Vault includes AI-powered market analysis features. These features are provided for informational purposes only and do not constitute financial advice, investment advice, trading advice, or any other form of professional advice. The AI analysis is generated by third-party large language models and may contain errors, inaccuracies, or outdated information. You should always conduct your own research and consult with qualified financial advisors before making investment decisions. Past performance is not indicative of future results.",
+          "x": 50,
+          "y": 705,
+          "font_size": 10,
+          "color": "#334155",
+          "max_width": 495,
+          "line_height": 1.5
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 800,
+          "width": 495,
+          "height": 0,
+          "stroke_color": "#E2E8F0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Page 4  |  QV-LEGAL-2026-02  |  Quantum Encoding Europe Limited",
+          "x": 298,
+          "y": 820,
+          "font_size": 8,
+          "color": "#94A3B8",
+          "align": "center"
+        }
+      ]
+    },
+
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 595,
+          "height": 45,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "QUANTUM VAULT",
+          "x": 50,
+          "y": 28,
+          "font_size": 11,
+          "font_weight": "bold",
+          "color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "Part A: Terms of Service",
+          "x": 545,
+          "y": 28,
+          "font_size": 9,
+          "color": "#94A3B8",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "7. FIAT ON/OFF RAMP SERVICES",
+          "x": 50,
+          "y": 80,
+          "font_size": 13,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 90,
+          "width": 40,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "Fiat on/off ramp services (buying and selling cryptocurrency with fiat currency) are provided by Alchemy Pay, a third-party payment partner, not by Quantum Encoding Europe Limited. Alchemy Pay operates under its own regulatory framework, terms of service, and privacy policy. Quantum Encoding Europe Limited receives a commission of 1% of the transaction value for fiat on/off ramp transactions processed through Alchemy Pay. This commission is included in the fees displayed to you and does not represent an additional charge.",
+          "x": 50,
+          "y": 110,
+          "font_size": 10,
+          "color": "#334155",
+          "max_width": 495,
+          "line_height": 1.5
+        },
+        {
+          "type": "text",
+          "content": "When using fiat services, you may be required to complete Know Your Customer (KYC) verification directly with Alchemy Pay. This process is managed entirely by Alchemy Pay. Quantum Vault does not collect, process, or store any KYC data. Fiat service availability, supported currencies, payment methods, and fees are determined by Alchemy Pay and may vary by jurisdiction. Quantum Encoding Europe Limited is not responsible for the availability, performance, fees, or compliance of fiat services.",
+          "x": 50,
+          "y": 205,
+          "font_size": 10,
+          "color": "#334155",
+          "max_width": 495,
+          "line_height": 1.5
+        },
+        {
+          "type": "text",
+          "content": "8. RISK ACKNOWLEDGMENT",
+          "x": 50,
+          "y": 300,
+          "font_size": 13,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 310,
+          "width": 40,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "By using Quantum Vault, you acknowledge and accept the following risks:",
+          "x": 50,
+          "y": 330,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#334155",
+          "max_width": 495
+        },
+        {
+          "type": "bullet_list",
+          "x": 60,
+          "y": 350,
+          "font_size": 9,
+          "color": "#334155",
+          "bullet_color": "#06B6D4",
+          "line_spacing": 15,
+          "indent": 12,
+          "items": [
+            "Cryptocurrency values are highly volatile; you may lose some or all of your investment.",
+            "Blockchain transactions are irreversible; incorrect addresses may cause permanent loss.",
+            "Smart contract interactions carry inherent risks including bugs, exploits, and loss of funds.",
+            "Cross-chain bridges and swaps involve counterparty and smart contract risks.",
+            "Lightning Network channels may require on-chain settlement; fees may vary.",
+            "Regulatory changes may affect feature availability in your jurisdiction.",
+            "Hardware wallet issues are the responsibility of the hardware manufacturer.",
+            "Internet connectivity issues may prevent timely transaction submission.",
+            "Price data, market analysis, and third-party information accuracy is not guaranteed."
+          ]
+        },
+        {
+          "type": "text",
+          "content": "9. PROHIBITED USES",
+          "x": 50,
+          "y": 580,
+          "font_size": 13,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 590,
+          "width": 40,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "You agree not to use the App for any unlawful purpose or in violation of any applicable laws or regulations. Prohibited uses include but are not limited to: money laundering or terrorist financing, sanctions evasion, fraud or deceptive practices, market manipulation, circumventing any regulatory requirements, reverse engineering or decompiling the App (except as permitted by law), and any activity that could harm the App, its users, or the Company's reputation.",
+          "x": 50,
+          "y": 608,
+          "font_size": 10,
+          "color": "#334155",
+          "max_width": 495,
+          "line_height": 1.4
+        },
+        {
+          "type": "text",
+          "content": "10. INTELLECTUAL PROPERTY",
+          "x": 50,
+          "y": 690,
+          "font_size": 13,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 700,
+          "width": 40,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "The Quantum Vault application, including its source code, design, documentation, branding, and all related intellectual property, is owned by Quantum Encoding Europe Limited and/or its parent company Quantum Encoding LTD (UK Company No. 16575953). The App is provided under licence for personal use. This licence does not transfer ownership of any intellectual property rights to you. You may not reproduce, distribute, modify, or create derivative works of the App without prior written consent.",
+          "x": 50,
+          "y": 718,
+          "font_size": 10,
+          "color": "#334155",
+          "max_width": 495,
+          "line_height": 1.4
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 785,
+          "width": 495,
+          "height": 0,
+          "stroke_color": "#E2E8F0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Page 5  |  QV-LEGAL-2026-02  |  Quantum Encoding Europe Limited",
+          "x": 298,
+          "y": 805,
+          "font_size": 8,
+          "color": "#94A3B8",
+          "align": "center"
+        }
+      ]
+    },
+
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 595,
+          "height": 45,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "QUANTUM VAULT",
+          "x": 50,
+          "y": 28,
+          "font_size": 11,
+          "font_weight": "bold",
+          "color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "Part A: Terms of Service",
+          "x": 545,
+          "y": 28,
+          "font_size": 9,
+          "color": "#94A3B8",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "11. LIMITATION OF LIABILITY",
+          "x": 50,
+          "y": 80,
+          "font_size": 13,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 90,
+          "width": 40,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THE APP AND ALL SERVICES ARE PROVIDED \"AS IS\" AND \"AS AVAILABLE\" WITHOUT WARRANTIES OF ANY KIND, WHETHER EXPRESS, IMPLIED, STATUTORY, OR OTHERWISE, INCLUDING IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.",
+          "x": 50,
+          "y": 110,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#334155",
+          "max_width": 495,
+          "line_height": 1.5
+        },
+        {
+          "type": "text",
+          "content": "In no event shall Quantum Encoding Europe Limited, its directors, employees, partners, agents, suppliers, or affiliates be liable for any indirect, incidental, special, consequential, or punitive damages, including without limitation: loss of profits, data, or cryptocurrency; loss of goodwill; service interruption; computer damage; system failure; or the cost of substitute services, whether arising from use of or inability to use the App, unauthorised access to or alteration of your transmissions or data, or any other matter relating to the App.",
+          "x": 50,
+          "y": 180,
+          "font_size": 10,
+          "color": "#334155",
+          "max_width": 495,
+          "line_height": 1.5
+        },
+        {
+          "type": "text",
+          "content": "In jurisdictions where limitation of liability for consequential or incidental damages is not permitted, our liability shall be limited to the maximum extent permitted by law.",
+          "x": 50,
+          "y": 265,
+          "font_size": 10,
+          "color": "#334155",
+          "max_width": 495,
+          "line_height": 1.5
+        },
+        {
+          "type": "text",
+          "content": "12. INDEMNIFICATION",
+          "x": 50,
+          "y": 310,
+          "font_size": 13,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 320,
+          "width": 40,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "You agree to defend, indemnify, and hold harmless Quantum Encoding Europe Limited and its officers, directors, employees, and agents from and against any claims, damages, obligations, losses, liabilities, costs, or expenses arising from: your use of the App; your violation of these Terms; your violation of any third-party right, including intellectual property rights; or any claim that your use of the App caused damage to a third party.",
+          "x": 50,
+          "y": 340,
+          "font_size": 10,
+          "color": "#334155",
+          "max_width": 495,
+          "line_height": 1.5
+        },
+        {
+          "type": "text",
+          "content": "13. TERMINATION",
+          "x": 50,
+          "y": 420,
+          "font_size": 13,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 430,
+          "width": 40,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "You may stop using the App at any time. As a self-custodial wallet, your cryptocurrency remains accessible via your seed phrase through any compatible wallet application, regardless of whether you continue to use Quantum Vault.",
+          "x": 50,
+          "y": 450,
+          "font_size": 10,
+          "color": "#334155",
+          "max_width": 495,
+          "line_height": 1.5
+        },
+        {
+          "type": "text",
+          "content": "We may suspend or terminate your access to the App at any time, with or without cause, including if you breach these Terms, we are required to do so by law, or we discontinue the App or Services. Upon termination, your licence to use the App ends but your cryptocurrency remains accessible via your seed phrase through any compatible wallet application.",
+          "x": 50,
+          "y": 500,
+          "font_size": 10,
+          "color": "#334155",
+          "max_width": 495,
+          "line_height": 1.5
+        },
+        {
+          "type": "text",
+          "content": "14. DISPUTE RESOLUTION & GOVERNING LAW",
+          "x": 50,
+          "y": 575,
+          "font_size": 13,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 585,
+          "width": 40,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "These Terms shall be governed by and construed in accordance with the laws of the Republic of Ireland, without regard to conflict of law principles.",
+          "x": 50,
+          "y": 605,
+          "font_size": 10,
+          "color": "#334155",
+          "max_width": 495,
+          "line_height": 1.5
+        },
+        {
+          "type": "text",
+          "content": "Before initiating formal dispute resolution, you agree to contact us at legal@quantumencoding.eu to attempt to resolve any dispute informally. Any disputes that cannot be resolved informally shall be subject to the exclusive jurisdiction of the courts of Ireland.",
+          "x": 50,
+          "y": 645,
+          "font_size": 10,
+          "color": "#334155",
+          "max_width": 495,
+          "line_height": 1.5
+        },
+        {
+          "type": "text",
+          "content": "15. GENERAL PROVISIONS",
+          "x": 50,
+          "y": 710,
+          "font_size": 13,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 720,
+          "width": 40,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "These Terms, together with the Privacy Policy, constitute the entire agreement between you and the Company. If any provision is found unenforceable, the remaining provisions continue in full force. Our failure to enforce any provision shall not constitute a waiver. You may not assign your rights under these Terms. We may assign our rights without restriction. We shall not be liable for failure or delay due to circumstances beyond our reasonable control, including natural disasters, war, pandemic, strikes, or government actions.",
+          "x": 50,
+          "y": 735,
+          "font_size": 10,
+          "color": "#334155",
+          "max_width": 495,
+          "line_height": 1.5
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 805,
+          "width": 495,
+          "height": 0,
+          "stroke_color": "#E2E8F0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Page 6  |  QV-LEGAL-2026-02  |  Quantum Encoding Europe Limited",
+          "x": 298,
+          "y": 825,
+          "font_size": 8,
+          "color": "#94A3B8",
+          "align": "center"
+        }
+      ]
+    },
+
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 595,
+          "height": 45,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "QUANTUM VAULT",
+          "x": 50,
+          "y": 28,
+          "font_size": 11,
+          "font_weight": "bold",
+          "color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "Part B: Privacy Policy",
+          "x": 545,
+          "y": 28,
+          "font_size": 9,
+          "color": "#94A3B8",
+          "align": "right"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 50,
+          "y": 60,
+          "width": 495,
+          "height": 30,
+          "fill_color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "PART B — PRIVACY POLICY",
+          "x": 70,
+          "y": 80,
+          "font_size": 12,
+          "font_weight": "bold",
+          "color": "#ffffff"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 50,
+          "y": 105,
+          "width": 495,
+          "height": 50,
+          "fill_color": "#ECFEFF",
+          "stroke_color": "#06B6D4",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Your Data Stays With You. Quantum Encoding Europe Limited does not collect, store, or have access to any of your personal data, wallet information, or transaction history.",
+          "x": 70,
+          "y": 125,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#0891B2",
+          "max_width": 455,
+          "line_height": 1.4
+        },
+        {
+          "type": "text",
+          "content": "16. NO DATA COLLECTION",
+          "x": 50,
+          "y": 185,
+          "font_size": 13,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 195,
+          "width": 40,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "Quantum Vault is a self-custodial wallet. We do not collect, transmit, or store any of the following: personal information or identity documents, wallet addresses or public keys, seed phrases or private keys, PIN codes or biometric data, transaction data or history, usage analytics or telemetry, IP addresses or device identifiers, or any other personally identifiable information.",
+          "x": 50,
+          "y": 215,
+          "font_size": 10,
+          "color": "#334155",
+          "max_width": 495,
+          "line_height": 1.5
+        },
+        {
+          "type": "text",
+          "content": "17. LOCAL STORAGE ONLY",
+          "x": 50,
+          "y": 300,
+          "font_size": 13,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 310,
+          "width": 40,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "All wallet data, including encrypted seed phrases, account information, transaction history, and application settings, is stored exclusively on your local device using the sled embedded database. This data is encrypted with AES-256-GCM using keys derived via Argon2id. This data never leaves your device and is not accessible to Quantum Encoding Europe Limited or any third party. When you uninstall the App, all locally stored data is removed from your device.",
+          "x": 50,
+          "y": 330,
+          "font_size": 10,
+          "color": "#334155",
+          "max_width": 495,
+          "line_height": 1.5
+        },
+        {
+          "type": "text",
+          "content": "18. NETWORK COMMUNICATIONS",
+          "x": 50,
+          "y": 415,
+          "font_size": 13,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 425,
+          "width": 40,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "The only network communications made by Quantum Vault are:",
+          "x": 50,
+          "y": 445,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#334155"
+        },
+        {
+          "type": "bullet_list",
+          "x": 50,
+          "y": 468,
+          "font_size": 10,
+          "color": "#334155",
+          "bullet_color": "#06B6D4",
+          "line_spacing": 18,
+          "indent": 12,
+          "items": [
+            "Blockchain RPC queries to fetch balance, transaction, and token data from public nodes",
+            "Transaction broadcasts to the relevant blockchain network",
+            "Price data requests from public APIs (CoinGecko, CoinMarketCap)",
+            "Lightning Network payment channel operations via Breez SDK",
+            "WalletConnect session data when you connect to dApps",
+            "AI market analysis queries (anonymised, no personal data included)"
+          ]
+        },
+        {
+          "type": "text",
+          "content": "None of these communications include personally identifiable information. No data is sent to Quantum Encoding servers at any time.",
+          "x": 50,
+          "y": 620,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#0891B2",
+          "max_width": 495,
+          "line_height": 1.4
+        },
+        {
+          "type": "text",
+          "content": "19. THIRD-PARTY SERVICE PROVIDERS",
+          "x": 50,
+          "y": 685,
+          "font_size": 13,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 695,
+          "width": 40,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "When you use integrated third-party services (exchange trading, fiat on/off ramps, etc.), you are subject to the privacy policies of those providers. Quantum Vault only stores third-party API credentials locally on your device, encrypted at rest. We encourage you to review the privacy policies of any third-party services you choose to use through the App.",
+          "x": 50,
+          "y": 715,
+          "font_size": 10,
+          "color": "#334155",
+          "max_width": 495,
+          "line_height": 1.5
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 800,
+          "width": 495,
+          "height": 0,
+          "stroke_color": "#E2E8F0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Page 7  |  QV-LEGAL-2026-02  |  Quantum Encoding Europe Limited",
+          "x": 298,
+          "y": 820,
+          "font_size": 8,
+          "color": "#94A3B8",
+          "align": "center"
+        }
+      ]
+    },
+
+    {
+      "background_color": "#ffffff",
+      "elements": [
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 0,
+          "y": 0,
+          "width": 595,
+          "height": 45,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "QUANTUM VAULT",
+          "x": 50,
+          "y": 28,
+          "font_size": 11,
+          "font_weight": "bold",
+          "color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "Part B: Privacy Policy",
+          "x": 545,
+          "y": 28,
+          "font_size": 9,
+          "color": "#94A3B8",
+          "align": "right"
+        },
+        {
+          "type": "text",
+          "content": "20. YOUR RIGHTS",
+          "x": 50,
+          "y": 80,
+          "font_size": 13,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 90,
+          "width": 40,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "Since we do not collect any personal data, there is nothing to delete, export, modify, or request access to. You have complete and sole control over your data at all times. Your wallet data exists only on your device and can be deleted at any time by uninstalling the application or using the in-app wallet reset function.",
+          "x": 50,
+          "y": 110,
+          "font_size": 10,
+          "color": "#334155",
+          "max_width": 495,
+          "line_height": 1.5
+        },
+        {
+          "type": "text",
+          "content": "21. GDPR COMPLIANCE",
+          "x": 50,
+          "y": 180,
+          "font_size": 13,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 190,
+          "width": 40,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "As Quantum Encoding Europe Limited is established in the Republic of Ireland, we are subject to the General Data Protection Regulation (GDPR). However, as we do not collect, process, or store any personal data, the data subject rights under GDPR (right of access, rectification, erasure, restriction, portability, and objection) do not apply in the traditional sense, as there is no personal data held by us to which these rights could attach. If you believe we hold any personal data about you, or if you have any questions about our data practices, please contact our Data Protection contact at legal@quantumencoding.eu.",
+          "x": 50,
+          "y": 210,
+          "font_size": 10,
+          "color": "#334155",
+          "max_width": 495,
+          "line_height": 1.5
+        },
+        {
+          "type": "text",
+          "content": "22. CONTACT INFORMATION",
+          "x": 50,
+          "y": 320,
+          "font_size": 13,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 330,
+          "width": 40,
+          "height": 0,
+          "stroke_color": "#06B6D4",
+          "stroke_width": 2
+        },
+        {
+          "type": "text",
+          "content": "For questions about these Terms or our Privacy Policy, please contact:",
+          "x": 50,
+          "y": 350,
+          "font_size": 10,
+          "color": "#334155",
+          "max_width": 495
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 50,
+          "y": 375,
+          "width": 495,
+          "height": 90,
+          "fill_color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "Quantum Encoding Europe Limited",
+          "x": 70,
+          "y": 400,
+          "font_size": 12,
+          "font_weight": "bold",
+          "color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "Republic of Ireland",
+          "x": 70,
+          "y": 420,
+          "font_size": 10,
+          "color": "#94A3B8"
+        },
+        {
+          "type": "text",
+          "content": "Email: legal@quantumencoding.eu   |   Web: quantumvaultapp.com",
+          "x": 70,
+          "y": 445,
+          "font_size": 10,
+          "color": "#CBD5E1"
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 50,
+          "y": 490,
+          "width": 495,
+          "height": 4,
+          "fill_color": "#06B6D4"
+        },
+        {
+          "type": "text",
+          "content": "ACKNOWLEDGMENT",
+          "x": 50,
+          "y": 520,
+          "font_size": 13,
+          "font_weight": "bold",
+          "color": "#0F172A"
+        },
+        {
+          "type": "text",
+          "content": "BY USING QUANTUM VAULT, YOU ACKNOWLEDGE THAT:",
+          "x": 50,
+          "y": 545,
+          "font_size": 10,
+          "font_weight": "bold",
+          "color": "#334155"
+        },
+        {
+          "type": "bullet_list",
+          "x": 60,
+          "y": 568,
+          "font_size": 10,
+          "color": "#334155",
+          "bullet_color": "#06B6D4",
+          "line_spacing": 16,
+          "indent": 12,
+          "items": [
+            "You have read and understood these Terms of Service and Privacy Policy.",
+            "You understand that Quantum Vault is a self-custodial wallet.",
+            "You are solely responsible for securing your seed phrase and private keys.",
+            "Lost credentials cannot be recovered by anyone, including the Company.",
+            "Cryptocurrency transactions are irreversible.",
+            "Cryptocurrency values are volatile and you may lose money.",
+            "AI features are informational only and do not constitute financial advice.",
+            "You are responsible for compliance with laws in your jurisdiction."
+          ]
+        },
+        {
+          "type": "shape",
+          "shape": "rectangle",
+          "x": 50,
+          "y": 715,
+          "width": 495,
+          "height": 50,
+          "fill_color": "#F0F9FF",
+          "stroke_color": "#BAE6FD",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Document Reference: QV-LEGAL-2026-02  |  Version 2.0  |  Effective: 1st February 2026",
+          "x": 298,
+          "y": 735,
+          "font_size": 9,
+          "color": "#0891B2",
+          "align": "center"
+        },
+        {
+          "type": "text",
+          "content": "Approved by: Richard, Director, Quantum Encoding Europe Limited",
+          "x": 298,
+          "y": 752,
+          "font_size": 9,
+          "color": "#64748B",
+          "align": "center"
+        },
+        {
+          "type": "shape",
+          "shape": "line",
+          "x": 50,
+          "y": 800,
+          "width": 495,
+          "height": 0,
+          "stroke_color": "#E2E8F0",
+          "stroke_width": 1
+        },
+        {
+          "type": "text",
+          "content": "Page 8  |  QV-LEGAL-2026-02  |  Quantum Encoding Europe Limited",
+          "x": 298,
+          "y": 820,
+          "font_size": 8,
+          "color": "#94A3B8",
+          "align": "center"
+        }
+      ]
+    }
+  ]
+}

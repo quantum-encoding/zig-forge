@@ -1,0 +1,17 @@
+{
+  "type": "line",
+  "title": "Weekly Lead Conversion Funnel",
+  "width": 700,
+  "height": 400,
+  "data": {
+    "series": [
+      {"name": "New Leads", "values": [45, 52, 38, 61, 55, 48, 67]},
+      {"name": "Contacted", "values": [32, 41, 28, 45, 39, 35, 51]},
+      {"name": "Quote Sent", "values": [18, 24, 15, 28, 22, 19, 31]},
+      {"name": "Site Visit", "values": [12, 16, 10, 19, 14, 13, 22]},
+      {"name": "Converted", "values": [6, 9, 5, 12, 8, 7, 14]},
+      {"name": "Lost", "values": [8, 11, 7, 14, 10, 9, 16]},
+      {"name": "Disqualified", "values": [3, 5, 4, 6, 4, 3, 7]}
+    ]
+  }
+}
