@@ -173,3 +173,55 @@ test "config: parse line" {
     try std.testing.expect(parseLine("# comment") == null);
     try std.testing.expect(parseLine("") == null);
 }
+
+test "config: parseLine agent rule keys" {
+    const r1 = parseLine("agent_deny = rm").?;
+    try std.testing.expectEqual(Rule.Kind.agent_deny, r1.kind);
+    try std.testing.expectEqualStrings("rm", r1.pattern);
+    try std.testing.expectEqual(policy.Decision.deny, r1.decision);
+
+    const r2 = parseLine("agent_allow = cat").?;
+    try std.testing.expectEqual(Rule.Kind.agent_allow, r2.kind);
+    try std.testing.expectEqualStrings("cat", r2.pattern);
+    try std.testing.expectEqual(policy.Decision.allow, r2.decision);
+
+    const r3 = parseLine("agent_askpass = sudo").?;
+    try std.testing.expectEqual(Rule.Kind.agent_askpass, r3.kind);
+    try std.testing.expectEqualStrings("sudo", r3.pattern);
+    try std.testing.expectEqual(policy.Decision.allow, r3.decision);
+}
+
+test "config: parseLine all supported keys" {
+    try std.testing.expect(parseLine("whitelist = /tmp/") != null);
+    try std.testing.expect(parseLine("trusted = /usr/bin/git") != null);
+    try std.testing.expect(parseLine("allow_command = cat") != null);
+    try std.testing.expect(parseLine("deny_command = sudo") != null);
+    try std.testing.expect(parseLine("prompt_command = rm") != null);
+    try std.testing.expect(parseLine("observe = claude") != null);
+    try std.testing.expect(parseLine("agent_deny = wget") != null);
+    try std.testing.expect(parseLine("agent_allow = ls") != null);
+    try std.testing.expect(parseLine("agent_askpass = sudo") != null);
+}
+
+test "config: parseLine rejects invalid input" {
+    // Unknown key
+    try std.testing.expect(parseLine("unknown_key = value") == null);
+    // Missing value after equals
+    try std.testing.expect(parseLine("protected =") == null);
+    // No equals sign
+    try std.testing.expect(parseLine("protected /etc/") == null);
+    // Whitespace-only
+    try std.testing.expect(parseLine("   \t  ") == null);
+}
+
+test "config: parseLine preserves pattern values" {
+    const r = parseLine("whitelist = /usr/local/bin/").?;
+    try std.testing.expectEqual(Rule.Kind.whitelisted_path, r.kind);
+    try std.testing.expectEqualStrings("/usr/local/bin/", r.pattern);
+
+    const r2 = parseLine("network_allow = *.github.com").?;
+    try std.testing.expectEqualStrings("*.github.com", r2.pattern);
+
+    const r3 = parseLine("observe = claude-code").?;
+    try std.testing.expectEqualStrings("claude-code", r3.pattern);
+}

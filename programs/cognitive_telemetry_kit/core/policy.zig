@@ -266,3 +266,113 @@ test "policy: network allowlist" {
     };
     try std.testing.expectEqual(Decision.deny, engine.evaluate(&deny_event));
 }
+
+test "policy: agent_deny blocks command only from agent processes" {
+    const rules = [_]Rule{
+        .{ .kind = .agent_deny, .pattern = "rm", .decision = .deny },
+    };
+    const engine = PolicyEngine{ .rules = &rules };
+
+    // Agent (has agent_id) running a denied command → deny
+    const agent_event = Event{
+        .timestamp_ns = 0,
+        .pid = 42,
+        .process_path = "/usr/bin/claude",
+        .kind = .exec,
+        .detail = "rm -rf /tmp/foo",
+        .agent_id = "agent-1",
+    };
+    try std.testing.expectEqual(Decision.deny, engine.evaluate(&agent_event));
+
+    // Non-agent running the same command → allow (no agent_deny applies)
+    const non_agent_event = Event{
+        .timestamp_ns = 0,
+        .pid = 43,
+        .process_path = "/usr/bin/bash",
+        .kind = .exec,
+        .detail = "rm -rf /tmp/foo",
+    };
+    try std.testing.expectEqual(Decision.allow, engine.evaluate(&non_agent_event));
+}
+
+test "policy: agent_allow allowlist mode blocks unlisted agent commands" {
+    const rules = [_]Rule{
+        .{ .kind = .agent_allow, .pattern = "cat", .decision = .allow },
+        .{ .kind = .agent_allow, .pattern = "ls", .decision = .allow },
+    };
+    const engine = PolicyEngine{ .rules = &rules };
+
+    // Command in allowlist → allow
+    const allowed_event = Event{
+        .timestamp_ns = 0,
+        .pid = 42,
+        .process_path = "/usr/bin/claude",
+        .kind = .exec,
+        .detail = "cat README.md",
+        .agent_id = "agent-1",
+    };
+    try std.testing.expectEqual(Decision.allow, engine.evaluate(&allowed_event));
+
+    // Command not in allowlist → deny
+    const denied_event = Event{
+        .timestamp_ns = 0,
+        .pid = 42,
+        .process_path = "/usr/bin/claude",
+        .kind = .exec,
+        .detail = "wget http://example.com",
+        .agent_id = "agent-1",
+    };
+    try std.testing.expectEqual(Decision.deny, engine.evaluate(&denied_event));
+}
+
+test "policy: agent_allow does not restrict non-agent processes" {
+    const rules = [_]Rule{
+        .{ .kind = .agent_allow, .pattern = "cat", .decision = .allow },
+    };
+    const engine = PolicyEngine{ .rules = &rules };
+
+    // Non-agent running something not in agent allowlist → still allowed (no agent context)
+    const event = Event{
+        .timestamp_ns = 0,
+        .pid = 10,
+        .process_path = "/usr/bin/bash",
+        .kind = .exec,
+        .detail = "wget http://example.com",
+    };
+    try std.testing.expectEqual(Decision.allow, engine.evaluate(&event));
+}
+
+test "policy: agent_askpass returns allow_if_askpass for agent" {
+    const rules = [_]Rule{
+        .{ .kind = .agent_askpass, .pattern = "sudo", .decision = .allow },
+    };
+    const engine = PolicyEngine{ .rules = &rules };
+
+    const event = Event{
+        .timestamp_ns = 0,
+        .pid = 42,
+        .process_path = "/usr/bin/claude",
+        .kind = .exec,
+        .detail = "sudo apt-get install curl",
+        .agent_id = "agent-1",
+    };
+    try std.testing.expectEqual(Decision.allow_if_askpass, engine.evaluate(&event));
+}
+
+test "policy: agent rules via observe_process detect agent by process name" {
+    const rules = [_]Rule{
+        .{ .kind = .observe_process, .pattern = "claude", .decision = .allow },
+        .{ .kind = .agent_deny, .pattern = "dd", .decision = .deny },
+    };
+    const engine = PolicyEngine{ .rules = &rules };
+
+    // Process named "claude" is treated as an observed agent — no explicit agent_id needed
+    const event = Event{
+        .timestamp_ns = 0,
+        .pid = 55,
+        .process_path = "/usr/local/bin/claude",
+        .kind = .exec,
+        .detail = "dd if=/dev/zero of=/tmp/f",
+    };
+    try std.testing.expectEqual(Decision.deny, engine.evaluate(&event));
+}

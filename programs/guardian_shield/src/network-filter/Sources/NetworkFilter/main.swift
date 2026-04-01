@@ -410,8 +410,18 @@ func main() {
     print("[*] Deploy as System Extension for live flow interception")
     print("[*] Or use with 'guardian-netfilter --test' for policy simulation")
 
-    // Check for --test flag
+    // Check for --test-policy flag (no ES, no root needed — pure policy logic)
+    if CommandLine.arguments.contains("--test-policy") {
+        runPolicyTests()
+        return
+    }
+
+    // Check for --test flag (full test with ES)
     if CommandLine.arguments.contains("--test") {
+        guard guardian!.start() else {
+            print("[-] Failed to start — try --test-policy for policy-only tests")
+            exit(1)
+        }
         runPolicyTests()
         return
     }
