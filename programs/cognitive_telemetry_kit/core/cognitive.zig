@@ -188,6 +188,47 @@ pub fn confidenceFromState(state: []const u8) Confidence {
     return .neutral;
 }
 
+test "cognitive: confidenceFromState coverage" {
+    // Excellent tier
+    try std.testing.expectEqual(Confidence.excellent, confidenceFromState("Channelling"));
+    try std.testing.expectEqual(Confidence.excellent, confidenceFromState("Synthesizing"));
+    try std.testing.expectEqual(Confidence.excellent, confidenceFromState("Accomplishing"));
+    try std.testing.expectEqual(Confidence.excellent, confidenceFromState("Computing"));
+    try std.testing.expectEqual(Confidence.excellent, confidenceFromState("Forging"));
+
+    // Good tier
+    try std.testing.expectEqual(Confidence.good, confidenceFromState("Processing"));
+    try std.testing.expectEqual(Confidence.good, confidenceFromState("Working"));
+    try std.testing.expectEqual(Confidence.good, confidenceFromState("Creating"));
+    try std.testing.expectEqual(Confidence.good, confidenceFromState("Crafting"));
+    try std.testing.expectEqual(Confidence.good, confidenceFromState("Generating"));
+
+    // Neutral tier (default for any unrecognised state)
+    try std.testing.expectEqual(Confidence.neutral, confidenceFromState("Thinking"));
+    try std.testing.expectEqual(Confidence.neutral, confidenceFromState("Pondering"));
+    try std.testing.expectEqual(Confidence.neutral, confidenceFromState("UnknownState"));
+
+    // Concerning tier
+    try std.testing.expectEqual(Confidence.concerning, confidenceFromState("Noodling"));
+    try std.testing.expectEqual(Confidence.concerning, confidenceFromState("Meandering"));
+    try std.testing.expectEqual(Confidence.concerning, confidenceFromState("Wandering"));
+    try std.testing.expectEqual(Confidence.concerning, confidenceFromState("Finagling"));
+
+    // Problematic tier
+    try std.testing.expectEqual(Confidence.problematic, confidenceFromState("Discombobulating"));
+    try std.testing.expectEqual(Confidence.problematic, confidenceFromState("Wibbling"));
+    try std.testing.expectEqual(Confidence.problematic, confidenceFromState("Honking"));
+    try std.testing.expectEqual(Confidence.problematic, confidenceFromState("Smooshing"));
+}
+
+test "cognitive: confidenceFromState score values" {
+    try std.testing.expectApproxEqAbs(@as(f32, 0.95), confidenceFromState("Channelling").score(), 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.80), confidenceFromState("Working").score(), 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.60), confidenceFromState("Thinking").score(), 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.40), confidenceFromState("Noodling").score(), 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.15), confidenceFromState("Wibbling").score(), 0.001);
+}
+
 /// Extract cognitive state from Claude status line output.
 /// Matches patterns like "* Thinking (esc to interrupt" or "⏺ Thinking… (ctrl+c"
 pub fn extractState(output: []const u8) ?[]const u8 {
@@ -202,4 +243,33 @@ pub fn extractState(output: []const u8) ?[]const u8 {
         }
     }
     return null;
+}
+
+test "cognitive: extractState with paren delimiter" {
+    // "* STATE (esc to interrupt)"
+    const r1 = extractState("* Thinking (esc to interrupt)");
+    try std.testing.expect(r1 != null);
+    try std.testing.expectEqualStrings("Thinking", r1.?);
+
+    const r2 = extractState("* Synthesizing (ctrl+c to stop)");
+    try std.testing.expect(r2 != null);
+    try std.testing.expectEqualStrings("Synthesizing", r2.?);
+}
+
+test "cognitive: extractState with ellipsis delimiter" {
+    // "* STATE…" — U+2026 encoded as \xe2\x80\xa6
+    const r1 = extractState("* Forging\xe2\x80\xa6");
+    try std.testing.expect(r1 != null);
+    try std.testing.expectEqualStrings("Forging", r1.?);
+
+    const r2 = extractState("* Processing\xe2\x80\xa6 (ctrl+c)");
+    try std.testing.expect(r2 != null);
+    try std.testing.expectEqualStrings("Processing", r2.?);
+}
+
+test "cognitive: extractState returns null when no match" {
+    try std.testing.expect(extractState("") == null);
+    try std.testing.expect(extractState("some other output") == null);
+    // Has "* " but no terminator → null
+    try std.testing.expect(extractState("* Thinking without end") == null);
 }
