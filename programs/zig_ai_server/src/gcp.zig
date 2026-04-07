@@ -52,9 +52,9 @@ pub const GcpContext = struct {
         return gcp_auth.apiPost(&self.provider, &self.http_client, self.allocator, url, body);
     }
 
-    /// Authenticated PATCH/PUT
+    /// Authenticated PATCH (Firestore upsert, etc.)
     pub fn patch(self: *GcpContext, url: []const u8, body: []const u8) !hs.HttpClient.Response {
-        return gcp_auth.apiPut(&self.provider, &self.http_client, self.allocator, url, body);
+        return gcp_auth.apiPatch(&self.provider, &self.http_client, self.allocator, url, body);
     }
 
     /// Authenticated DELETE

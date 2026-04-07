@@ -542,6 +542,23 @@ pub fn apiPut(
     }, body);
 }
 
+pub fn apiPatch(
+    auth: *TokenProvider,
+    client: *HttpClient,
+    allocator: std.mem.Allocator,
+    url: []const u8,
+    body: []const u8,
+) !HttpClient.Response {
+    const token = try auth.getToken(client);
+    const auth_header = try std.fmt.allocPrint(allocator, "Bearer {s}", .{token});
+    defer allocator.free(auth_header);
+
+    return client.patch(url, &.{
+        .{ .name = "Authorization", .value = auth_header },
+        .{ .name = "Content-Type", .value = "application/json" },
+    }, body);
+}
+
 pub fn apiDelete(
     auth: *TokenProvider,
     client: *HttpClient,
