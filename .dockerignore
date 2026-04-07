@@ -1,0 +1,9 @@
+# Only include what's needed for zig-ai-server build
+*
+!programs/http_sentinel/src/
+!programs/http_sentinel/build.zig
+!programs/http_sentinel/build.zig.zon
+!programs/zig_ai_server/src/
+!programs/zig_ai_server/data/
+!programs/zig_ai_server/build.zig
+!programs/zig_ai_server/build.zig.zon

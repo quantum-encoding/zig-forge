@@ -1,0 +1,52 @@
+# Cloud Build configuration for zig-ai-server
+# Triggered by: gcloud builds submit --config=programs/zig_ai_server/deploy/cloudbuild.yaml .
+
+steps:
+  # Build the Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-f'
+      - 'programs/zig_ai_server/Dockerfile'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/zig-ai-server:$BUILD_ID'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/zig-ai-server:latest'
+      - '.'
+    timeout: '600s'
+
+  # Push to GCR
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/zig-ai-server:$BUILD_ID']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/zig-ai-server:latest']
+
+  # Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    args:
+      - 'gcloud'
+      - 'run'
+      - 'deploy'
+      - 'zig-ai-server'
+      - '--image=gcr.io/$PROJECT_ID/zig-ai-server:$BUILD_ID'
+      - '--region=europe-west1'
+      - '--platform=managed'
+      - '--allow-unauthenticated'
+      - '--port=8080'
+      - '--cpu=1'
+      - '--memory=512Mi'
+      - '--min-instances=0'
+      - '--max-instances=10'
+      - '--concurrency=80'
+      - '--timeout=300s'
+
+images:
+  - 'gcr.io/$PROJECT_ID/zig-ai-server:$BUILD_ID'
+  - 'gcr.io/$PROJECT_ID/zig-ai-server:latest'
+
+timeout: '900s'
+
+options:
+  machineType: 'E2_HIGHCPU_8'
+  logging: CLOUD_LOGGING_ONLY
