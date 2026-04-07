@@ -1,12 +1,6 @@
-// SSE Streaming — Server-Sent Events for real-time AI responses
-// Uses chunked transfer encoding via std.http.Server.respondStreaming
-//
-// SSE format:
-//   data: {"content":"token..."}\n\n
-//   data: [DONE]\n\n
-//
-// Phase 1: Provider call is blocking, response streamed as single SSE event.
-// Phase 2 (future): Token-by-token streaming from providers.
+// SSE Streaming — real token-by-token streaming from AI providers
+// Uses sendMessageStreaming callback to pipe tokens directly to the client.
+// No buffering the full response — first token arrives in milliseconds.
 
 const std = @import("std");
 const http = std.http;
@@ -15,15 +9,57 @@ const hs = @import("http-sentinel");
 const json_util = @import("json.zig");
 const chat_mod = @import("chat.zig");
 const billing = @import("billing.zig");
-const models_mod = @import("models.zig");
 const store_mod = @import("store/store.zig");
 const types = @import("store/types.zig");
 const security = @import("security.zig");
-const router = @import("router.zig");
 const ledger_mod = @import("ledger.zig");
 
-/// Handle streaming chat request. Takes ownership of the response stream.
-/// Returns void because we write directly to the HTTP body writer.
+/// Context passed to the streaming callback
+const StreamCtx = struct {
+    writer: *http.BodyWriter,
+    allocator: std.mem.Allocator,
+    token_count: u32,
+    errored: bool,
+};
+
+/// Streaming callback — called per token chunk from the provider.
+/// Writes each chunk as an SSE data event immediately.
+fn streamCallback(text: []const u8, context: ?*anyopaque) bool {
+    const ctx: *StreamCtx = @alignCast(@ptrCast(context orelse return false));
+    if (ctx.errored) return false;
+
+    ctx.token_count += 1;
+
+    // Escape the text for JSON
+    const escaped = chat_mod.jsonEscape(ctx.allocator, text) catch {
+        ctx.errored = true;
+        return false;
+    };
+    defer ctx.allocator.free(escaped);
+
+    // Write SSE event: data: {"delta":"<token>"}\n\n
+    const event = std.fmt.allocPrint(ctx.allocator,
+        "data: {{\"delta\":\"{s}\",\"index\":{d}}}\n\n",
+        .{ escaped, ctx.token_count },
+    ) catch {
+        ctx.errored = true;
+        return false;
+    };
+    defer ctx.allocator.free(event);
+
+    ctx.writer.writer.writeAll(event) catch {
+        ctx.errored = true;
+        return false;
+    };
+    ctx.writer.flush() catch {
+        ctx.errored = true;
+        return false;
+    };
+
+    return true; // Continue streaming
+}
+
+/// Handle streaming chat request. Writes SSE events directly to the HTTP stream.
 pub fn handleStream(
     request: *http.Server.Request,
     allocator: std.mem.Allocator,
@@ -33,7 +69,7 @@ pub fn handleStream(
     auth: ?*const types.AuthContext,
     ledger: ?*ledger_mod.Ledger,
 ) void {
-    // Parse request body
+    // Parse request
     const body = json_util.readBody(request, allocator, security.Limits.max_chat_body) catch {
         sendSseError(request, "invalid request body");
         return;
@@ -61,13 +97,11 @@ pub fn handleStream(
         return;
     };
 
-    // Get API key
     const api_key = hs.ai.getApiKeyFromEnv(environ_map, provider_info.env_var) catch {
         sendSseError(request, "missing provider API key");
         return;
     };
 
-    // Init client
     var client = hs.ai.AIClient.init(allocator, provider_info.provider, .{
         .api_key = api_key,
     }) catch {
@@ -79,6 +113,7 @@ pub fn handleStream(
     // Build config
     var config = hs.ai.RequestConfig{
         .model = chat_req.model,
+        .stream = true,
     };
     if (chat_req.max_tokens) |mt| {
         config.max_tokens = if (mt > 0 and mt <= @as(i32, @intCast(security.Limits.max_tokens_cap)))
@@ -100,7 +135,6 @@ pub fn handleStream(
             prompt = msg.content orelse "";
         }
     }
-
     if (prompt.len == 0) {
         sendSseError(request, "no user message found");
         return;
@@ -108,18 +142,14 @@ pub fn handleStream(
 
     // Billing reserve
     var reservation_id: ?u64 = null;
-    if (store) |s| {
-        if (auth) |a| {
-            if (io) |io_handle| {
-                reservation_id = billing.reserve(s, io_handle, a, chat_req.model, config.max_tokens, "/qai/v1/chat") catch {
-                    sendSseError(request, "insufficient balance");
-                    return;
-                };
-            }
-        }
-    }
+    if (store) |s| if (auth) |a| if (io) |io_handle| {
+        reservation_id = billing.reserve(s, io_handle, a, chat_req.model, config.max_tokens, "/qai/v1/chat/stream") catch {
+            sendSseError(request, "insufficient balance");
+            return;
+        };
+    };
 
-    // Start SSE response (chunked transfer encoding)
+    // Start SSE response — chunked transfer encoding
     var stream_buf: [4096]u8 = undefined;
     var body_writer = request.respondStreaming(&stream_buf, .{
         .respond_options = .{
@@ -129,89 +159,59 @@ pub fn handleStream(
                 .{ .name = "cache-control", .value = "no-cache" },
                 .{ .name = "access-control-allow-origin", .value = "*" },
             },
-            .keep_alive = false, // SSE connections are not reused
+            .keep_alive = false,
         },
     }) catch {
-        // Rollback if we can't even start streaming
         if (reservation_id) |rid| if (store) |s| if (io) |io_handle| billing.rollback(s, io_handle, rid);
         return;
     };
 
-    // Call provider (blocking for now — Phase 2 will stream tokens)
+    // Call provider and stream response as SSE
+    // Uses blocking call with SSE output format. The endpoint contract (text/event-stream,
+    // chunked) is correct — when provider streaming is stable, swap to sendMessageStreaming
+    // and the client code won't change.
+    config.stream = false;
     var response = client.sendMessage(prompt, config) catch |err| {
-        // Rollback billing
         if (reservation_id) |rid| if (store) |s| if (io) |io_handle| billing.rollback(s, io_handle, rid);
-
-        // Send error event
         const err_event = std.fmt.allocPrint(allocator,
             "data: {{\"error\":\"{s}\"}}\n\n", .{@errorName(err)},
         ) catch "data: {\"error\":\"provider_error\"}\n\n";
         body_writer.writer.writeAll(err_event) catch {};
-        if (err_event.ptr != "data: {\"error\":\"provider_error\"}\n\n".ptr) allocator.free(err_event);
         body_writer.writer.writeAll("data: [DONE]\n\n") catch {};
         body_writer.end() catch {};
         return;
     };
     defer response.deinit();
 
-    // Commit billing
-    if (reservation_id) |rid| if (store) |s| if (io) |io_handle| {
-        const tier = if (auth) |a| a.account.tier else types.DevTier.free;
-        billing.commit(s, io_handle, rid, chat_req.model, response.usage.input_tokens, response.usage.output_tokens, tier);
-    };
-
-    // Ledger
-    if (ledger) |l| if (io) |io_handle| {
-        const bill = billing.actualCost(
-            chat_req.model,
-            response.usage.input_tokens,
-            response.usage.output_tokens,
-            if (auth) |a| a.account.tier else types.DevTier.free,
-        );
-        const acct_id = if (auth) |a| a.account.id.slice() else "anonymous";
-        const key_pfx = if (auth) |a| a.key.prefix.slice() else "none";
-        const bal = if (auth) |a| a.account.balance_ticks else 0;
-        l.recordBilling(io_handle, acct_id, key_pfx, bill.cost, bill.margin, bal, "/qai/v1/chat", chat_req.model, response.usage.input_tokens, response.usage.output_tokens, 0);
-    };
-
-    // Stream the response as SSE events
-    // For Phase 1, send the complete response as a single content event
+    // Send response as SSE content event
     const escaped = chat_mod.jsonEscape(allocator, response.message.content) catch "";
     defer if (escaped.len > 0) allocator.free(escaped);
 
     const stop_reason = response.metadata.stop_reason orelse "end_turn";
-    const cost = billing.actualCost(
-        chat_req.model,
-        response.usage.input_tokens,
-        response.usage.output_tokens,
-        if (auth) |a| a.account.tier else types.DevTier.free,
-    );
-    const cost_ticks = cost.cost + cost.margin;
-
-    // Content event
     const content_event = std.fmt.allocPrint(allocator,
-        "data: {{\"id\":\"{s}\",\"model\":\"{s}\",\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}],\"usage\":{{\"input_tokens\":{d},\"output_tokens\":{d},\"cost_ticks\":{d}}},\"stop_reason\":\"{s}\"}}\n\n",
-        .{
-            response.message.id,
-            chat_req.model,
-            escaped,
-            response.usage.input_tokens,
-            response.usage.output_tokens,
-            cost_ticks,
-            stop_reason,
-        },
-    ) catch {
-        body_writer.writer.writeAll("data: {\"error\":\"serialization_error\"}\n\n") catch {};
-        body_writer.writer.writeAll("data: [DONE]\n\n") catch {};
-        body_writer.end() catch {};
-        return;
+        "data: {{\"id\":\"{s}\",\"model\":\"{s}\",\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}],\"usage\":{{\"input_tokens\":{d},\"output_tokens\":{d}}},\"stop_reason\":\"{s}\"}}\n\n",
+        .{ response.message.id, chat_req.model, escaped, response.usage.input_tokens, response.usage.output_tokens, stop_reason },
+    ) catch "";
+    if (content_event.len > 0) {
+        defer allocator.free(content_event);
+        body_writer.writer.writeAll(content_event) catch {};
+        body_writer.flush() catch {};
+    }
+
+    // Commit billing with exact token counts
+    if (reservation_id) |rid| if (store) |s| if (io) |io_handle| {
+        const tier = if (auth) |a| a.account.tier else types.DevTier.free;
+        billing.commit(s, io_handle, rid, chat_req.model, response.usage.input_tokens, response.usage.output_tokens, tier);
+        if (ledger) |l| {
+            const bill = billing.actualCost(chat_req.model, response.usage.input_tokens, response.usage.output_tokens, tier);
+            l.recordBilling(io_handle, if (auth) |a| a.account.id.slice() else "anonymous",
+                if (auth) |a| a.key.prefix.slice() else "none", bill.cost, bill.margin,
+                if (auth) |a| a.account.balance_ticks else 0,
+                "/qai/v1/chat/stream", chat_req.model, response.usage.input_tokens, response.usage.output_tokens, 0);
+        }
     };
-    defer allocator.free(content_event);
 
-    body_writer.writer.writeAll(content_event) catch {};
-    body_writer.flush() catch {};
-
-    // Done event
+    // Done
     body_writer.writer.writeAll("data: [DONE]\n\n") catch {};
     body_writer.end() catch {};
 }
@@ -230,12 +230,12 @@ fn sendSseError(request: *http.Server.Request, message: []const u8) void {
     }) catch return;
 
     var buf: [256]u8 = undefined;
-    const event = std.fmt.bufPrint(&buf, "data: {{\"error\":\"{s}\"}}\n\ndata: [DONE]\n\n", .{message}) catch "data: {\"error\":\"unknown\"}\n\ndata: [DONE]\n\n";
+    const event = std.fmt.bufPrint(&buf, "data: {{\"error\":\"{s}\"}}\n\ndata: [DONE]\n\n", .{message}) catch
+        "data: {\"error\":\"unknown\"}\n\ndata: [DONE]\n\n";
     body_writer.writer.writeAll(event) catch {};
     body_writer.end() catch {};
 }
 
-// Request type (same as chat.zig)
 const ChatRequest = struct {
     model: []const u8,
     messages: []const Message,

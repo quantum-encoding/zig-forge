@@ -180,7 +180,7 @@ pub const HttpClient = struct {
                 const line = self.reader.takeDelimiterExclusive('\n') catch return null;
 
                 // Skip empty lines (SSE event separator) and carriage returns
-                const trimmed = std.mem.trimRight(u8, line, "\r");
+                const trimmed = std.mem.trimEnd(u8, line, "\r");
                 if (trimmed.len == 0) continue;
 
                 // SSE data line: "data: <payload>" or "data:<payload>"

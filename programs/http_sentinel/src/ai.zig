@@ -145,6 +145,24 @@ pub const AIClient = struct {
         };
     }
 
+    /// Stream a message — calls callback per token chunk
+    pub fn sendMessageStreaming(
+        self: *AIClient,
+        prompt: []const u8,
+        config: RequestConfig,
+        callback: common.StreamCallback,
+        context: ?*anyopaque,
+    ) !void {
+        return switch (self.provider) {
+            .claude => self.claude.?.client.sendMessageStreaming(prompt, config, callback, context),
+            .deepseek => self.deepseek.?.client.sendMessageStreaming(prompt, config, callback, context),
+            .gemini => self.gemini.?.sendMessageStreaming(prompt, config, callback, context),
+            .grok => self.grok.?.sendMessageStreaming(prompt, config, callback, context),
+            .openai => self.openai.?.sendMessageStreaming(prompt, config, callback, context),
+            .vertex => return error.ProviderUnavailable, // Vertex streaming TBD
+        };
+    }
+
     /// Send a message with conversation context
     pub fn sendMessageWithContext(
         self: *AIClient,
