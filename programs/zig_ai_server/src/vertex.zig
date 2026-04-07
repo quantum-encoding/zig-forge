@@ -309,6 +309,14 @@ const VertexChatRequest = struct {
     max_tokens: ?i32 = null,
     system_prompt: ?[]const u8 = null,
     stream: ?bool = null,
+    tools: ?[]const ToolDef = null,
+    tool_choice: ?[]const u8 = null, // "auto", "none", "required"
+};
+
+const ToolDef = struct {
+    name: []const u8,
+    description: []const u8 = "",
+    input_schema: ?[]const u8 = null, // JSON schema string
 };
 
 const Message = struct {
@@ -659,13 +667,61 @@ fn parseMaasResponse(allocator: std.mem.Allocator, body: []u8, model: []const u8
         }
     }
 
+    // Extract tool_calls from choices[0].message.tool_calls
+    var tool_calls_json: []u8 = "";
+    var tc_alloc = false;
+    if (obj.get("choices")) |choices_tc| {
+        if (choices_tc == .array and choices_tc.array.items.len > 0) {
+            const choice_tc = choices_tc.array.items[0];
+            if (choice_tc == .object) {
+                if (choice_tc.object.get("message")) |msg_tc| {
+                    if (msg_tc == .object) {
+                        if (msg_tc.object.get("tool_calls")) |tcs| {
+                            if (tcs == .array and tcs.array.items.len > 0) {
+                                var buf: std.ArrayListUnmanaged(u8) = .empty;
+                                buf.appendSlice(allocator, ",\"tool_calls\":[") catch {};
+                                for (tcs.array.items, 0..) |tc, i| {
+                                    if (i > 0) buf.append(allocator, ',') catch continue;
+                                    if (tc != .object) continue;
+                                    const tc_id = if (tc.object.get("id")) |id| (if (id == .string) id.string else "") else "";
+                                    const func = tc.object.get("function") orelse continue;
+                                    if (func != .object) continue;
+                                    const fn_name = if (func.object.get("name")) |n| (if (n == .string) n.string else "") else "";
+                                    const fn_args = if (func.object.get("arguments")) |a| (if (a == .string) a.string else "{}") else "{}";
+                                    const args_escaped = chat_mod.jsonEscape(allocator, fn_args) catch continue;
+                                    defer allocator.free(args_escaped);
+                                    const entry = std.fmt.allocPrint(allocator,
+                                        \\{{"id":"{s}","name":"{s}","arguments":"{s}"}}
+                                    , .{ tc_id, fn_name, args_escaped }) catch continue;
+                                    defer allocator.free(entry);
+                                    buf.appendSlice(allocator, entry) catch continue;
+                                }
+                                buf.append(allocator, ']') catch {};
+                                tool_calls_json = buf.toOwnedSlice(allocator) catch "";
+                                tc_alloc = true;
+                            }
+                        }
+                    }
+                }
+                // Check stop reason for tool_use
+                if (choice_tc.object.get("finish_reason")) |fr| {
+                    if (fr == .string and std.mem.eql(u8, fr.string, "tool_calls")) {
+                        // Will be reflected in stop_reason below
+                    }
+                }
+            }
+        }
+    }
+    defer if (tc_alloc) allocator.free(tool_calls_json);
+
     const escaped = try chat_mod.jsonEscape(allocator, text);
     defer allocator.free(escaped);
 
     const provider = providerName(model);
+    const stop = if (tc_alloc) "tool_use" else "end_turn";
     const json = try std.fmt.allocPrint(allocator,
-        \\{{"model":"{s}","provider":"{s}","content":[{{"type":"text","text":"{s}"}}],"usage":{{"input_tokens":{d},"output_tokens":{d}}},"stop_reason":"end_turn"}}
-    , .{ model, provider, escaped, input_tokens, output_tokens });
+        \\{{"model":"{s}","provider":"{s}","content":[{{"type":"text","text":"{s}"}}],"usage":{{"input_tokens":{d},"output_tokens":{d}}},"stop_reason":"{s}"{s}}}
+    , .{ model, provider, escaped, input_tokens, output_tokens, stop, tool_calls_json });
 
     return .{ .json = json, .input_tokens = input_tokens, .output_tokens = output_tokens };
 }
@@ -1084,11 +1140,37 @@ fn buildMaasPayload(allocator: std.mem.Allocator, req: VertexChatRequest, max_to
 
     const temp: f64 = if (req.temperature) |t| t else 0.7;
     const cfg = try std.fmt.allocPrint(allocator,
-        \\],"max_tokens":{d},"temperature":{d:.2},"stream":{s}}}
+        \\],"max_tokens":{d},"temperature":{d:.2},"stream":{s}
     , .{ max_tokens, temp, if (stream) "true" else "false" });
     defer allocator.free(cfg);
     try payload.appendSlice(allocator, cfg);
 
+    // Inject tools array (OpenAI function calling format)
+    if (req.tools) |tools| {
+        if (tools.len > 0) {
+            try payload.appendSlice(allocator, ",\"tools\":[");
+            for (tools, 0..) |tool, i| {
+                if (i > 0) try payload.append(allocator, ',');
+                const schema = tool.input_schema orelse "{}";
+                const t = try std.fmt.allocPrint(allocator,
+                    \\{{"type":"function","function":{{"name":"{s}","description":"{s}","parameters":{s}}}}}
+                , .{ tool.name, tool.description, schema });
+                defer allocator.free(t);
+                try payload.appendSlice(allocator, t);
+            }
+            try payload.appendSlice(allocator, "]");
+            // Tool choice — map "any" → "required" for MaaS (OpenAI format)
+            const raw_tc = req.tool_choice orelse "auto";
+            const tc = if (std.mem.eql(u8, raw_tc, "any")) "required" else raw_tc;
+            const tc_part = try std.fmt.allocPrint(allocator,
+                \\,"tool_choice":"{s}"
+            , .{tc});
+            defer allocator.free(tc_part);
+            try payload.appendSlice(allocator, tc_part);
+        }
+    }
+
+    try payload.append(allocator, '}');
     return payload.toOwnedSlice(allocator);
 }
 

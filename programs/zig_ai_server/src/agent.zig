@@ -196,13 +196,18 @@ fn runAgentLoop(
     enable_rag: bool,
     custom_system: ?[]const u8,
 ) ![]u8 {
+    // DeepSeek quirk: system prompts degrade function calling quality.
+    // Move system instructions into the first user message instead.
+    const is_deepseek = std.mem.startsWith(u8, model, "deepseek");
+    const sys_prompt = custom_system orelse (if (enable_rag) RAG_SYSTEM_PROMPT else SYSTEM_PROMPT);
+
     var config = hs.ai.RequestConfig{
         .model = model,
         .max_tokens = 16384,
         .temperature = 0.7,
         .tools = &tool_definitions,
-        .tool_choice = .auto,
-        .system_prompt = custom_system orelse (if (enable_rag) RAG_SYSTEM_PROMPT else SYSTEM_PROMPT),
+        .tool_choice = .required, // Force tool use on first turn
+        .system_prompt = if (is_deepseek) null else sys_prompt, // DeepSeek: no system with tools
     };
     _ = &config;
 
@@ -225,7 +230,16 @@ fn runAgentLoop(
     while (iter < max_iters) : (iter += 1) {
         iterations_used = iter + 1;
 
-        const prompt = if (iter == 0) goal else "";
+        // First turn: force tool use. Subsequent turns: let model choose.
+        config.tool_choice = if (iter == 0) .required else .auto;
+
+        // For DeepSeek: prepend system instructions to the goal (first user message only)
+        const prompt = if (iter == 0) blk: {
+            if (is_deepseek) {
+                break :blk std.fmt.allocPrint(allocator, "{s}\n\n{s}", .{ sys_prompt, goal }) catch goal;
+            }
+            break :blk goal;
+        } else "";
         var response = if (messages.items.len > 0)
             try client.sendMessageWithContext(prompt, messages.items, config)
         else

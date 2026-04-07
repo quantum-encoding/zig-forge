@@ -171,6 +171,23 @@ pub fn handle(
         config.system_prompt = sp;
     }
 
+    // Pass tools to provider (convert our Tool → http_sentinel ToolDefinition)
+    var tool_defs: std.ArrayListUnmanaged(hs.ai.common.ToolDefinition) = .empty;
+    defer tool_defs.deinit(allocator);
+    if (chat_req.tools) |tools| {
+        for (tools) |tool| {
+            tool_defs.append(allocator, .{
+                .name = tool.name,
+                .description = tool.description,
+                .input_schema = tool.input_schema orelse "{}",
+            }) catch continue;
+        }
+        if (tool_defs.items.len > 0) {
+            config.tools = tool_defs.items;
+            config.tool_choice = .auto;
+        }
+    }
+
     // Extract the last user message as the prompt
     // Build conversation context from previous messages
     var prompt: []const u8 = "";
@@ -287,16 +304,39 @@ fn buildResponse(
     response: *hs.ai.AIResponse,
     model: []const u8,
 ) ![]u8 {
-    // Escape the content for JSON
     const escaped_content = try jsonEscape(allocator, response.message.content);
     defer allocator.free(escaped_content);
 
     const stop_reason = response.metadata.stop_reason orelse "end_turn";
-
     const ticks = costTicks(response, model);
 
+    // Build tool_calls array if present
+    var tool_calls_json: []u8 = "";
+    var tool_calls_alloc = false;
+    if (response.message.tool_calls) |calls| {
+        if (calls.len > 0) {
+            var buf: std.ArrayListUnmanaged(u8) = .empty;
+            defer buf.deinit(allocator);
+            buf.appendSlice(allocator, ",\"tool_calls\":[") catch {};
+            for (calls, 0..) |call, i| {
+                if (i > 0) buf.append(allocator, ',') catch continue;
+                const escaped_args = jsonEscape(allocator, call.arguments) catch continue;
+                defer allocator.free(escaped_args);
+                const tc = std.fmt.allocPrint(allocator,
+                    \\{{"id":"{s}","name":"{s}","arguments":"{s}"}}
+                , .{ call.id, call.name, escaped_args }) catch continue;
+                defer allocator.free(tc);
+                buf.appendSlice(allocator, tc) catch continue;
+            }
+            buf.append(allocator, ']') catch {};
+            tool_calls_json = buf.toOwnedSlice(allocator) catch "";
+            tool_calls_alloc = true;
+        }
+    }
+    defer if (tool_calls_alloc) allocator.free(tool_calls_json);
+
     return std.fmt.allocPrint(allocator,
-        \\{{"id":"{s}","model":"{s}","content":[{{"type":"text","text":"{s}"}}],"usage":{{"input_tokens":{d},"output_tokens":{d},"cost_ticks":{d}}},"stop_reason":"{s}","cost_ticks":{d},"request_id":""}}
+        \\{{"id":"{s}","model":"{s}","content":[{{"type":"text","text":"{s}"}}],"usage":{{"input_tokens":{d},"output_tokens":{d},"cost_ticks":{d}}},"stop_reason":"{s}","cost_ticks":{d}{s}}}
     , .{
         response.message.id,
         model,
@@ -306,6 +346,7 @@ fn buildResponse(
         ticks,
         stop_reason,
         ticks,
+        tool_calls_json,
     });
 }
 
