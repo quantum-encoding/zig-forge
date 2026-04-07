@@ -23,7 +23,11 @@ COPY programs/zig_ai_server programs/zig_ai_server
 
 # Build release binary
 WORKDIR /build/programs/zig_ai_server
-RUN zig build -Doptimize=ReleaseSafe \
+# Note: link_libc needed on Linux until http_sentinel's transitive deps
+# (crypto/tls.zig via refAllDecls) are fully cleaned up. Binary still
+# works on Zigix once those refs are removed.
+RUN sed -i 's/link_libc = false/link_libc = true/g' build.zig \
+    && zig build -Doptimize=ReleaseSafe \
     && strip zig-out/bin/zig-ai-server 2>/dev/null || true
 
 # ── Stage 2: Runtime ────────────────────────────────────────
