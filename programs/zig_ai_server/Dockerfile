@@ -9,10 +9,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
-ARG ZIG_VERSION=0.16.0-dev.3091+557caecaa
-RUN curl -fsSL "https://ziglang.org/builds/zig-linux-x86_64-${ZIG_VERSION}.tar.xz" \
+# Zig 0.16 — uses zig-x86_64-linux URL format
+ARG ZIG_VERSION=0.16.0-dev.3128+ad7a02822
+RUN curl -fsSL "https://ziglang.org/builds/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" \
     | tar -xJ -C /opt \
-    && ln -s /opt/zig-linux-x86_64-${ZIG_VERSION}/zig /usr/local/bin/zig
+    && ln -s "/opt/zig-x86_64-linux-${ZIG_VERSION}/zig" /usr/local/bin/zig
 
 # Copy source
 WORKDIR /build
@@ -37,8 +38,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy binary
 COPY --from=builder /build/programs/zig_ai_server/zig-out/bin/zig-ai-server /usr/local/bin/zig-ai-server
 
-# Copy models CSV (embedded at compile time, but keep for reference)
-COPY programs/zig_ai_server/data/models.csv /app/data/models.csv
+# Models CSV is embedded at compile time — copy for reference only
+COPY --from=builder /build/programs/zig_ai_server/data/models.csv /app/data/models.csv
 
 # Data directory for WAL, snapshots, ledger
 RUN mkdir -p /app/data
