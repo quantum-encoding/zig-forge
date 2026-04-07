@@ -9,6 +9,7 @@ const auth = @import("auth.zig");
 const chat = @import("chat.zig");
 const models = @import("models.zig");
 const account = @import("account.zig");
+const agent = @import("agent.zig");
 
 pub const Response = struct {
     status: http.Status = .ok,
@@ -167,7 +168,8 @@ fn routeApiV1(path: []const u8, method: http.Method, request: *http.Server.Reque
 
     // ── Agents & Missions ───────────────────────────────────
     if (std.mem.eql(u8, path, "agent")) {
-        return handlers.stub(request, allocator, "POST /qai/v1/agent");
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        return agent.handle(request, allocator);
     }
     if (std.mem.eql(u8, path, "missions")) {
         return handlers.stub(request, allocator, "POST /qai/v1/missions");

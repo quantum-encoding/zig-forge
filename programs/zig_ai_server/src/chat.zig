@@ -35,7 +35,7 @@ const Tool = struct {
 };
 
 /// Provider env var mapping
-const ProviderInfo = struct {
+pub const ProviderInfo = struct {
     provider: hs.ai.Provider,
     env_var: []const u8,
     default_model: []const u8,
@@ -50,7 +50,7 @@ const providers = [_]ProviderInfo{
 };
 
 /// Resolve which provider to use based on the model name
-fn resolveProvider(model: []const u8) ?ProviderInfo {
+pub fn resolveProvider(model: []const u8) ?ProviderInfo {
     // Match by model prefix
     if (std.mem.startsWith(u8, model, "claude")) {
         return providers[0]; // claude
@@ -231,7 +231,7 @@ fn costTicks(response: *hs.ai.AIResponse, model: []const u8) i64 {
     return @intFromFloat(cost * 10_000_000_000.0);
 }
 
-fn jsonEscape(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+pub fn jsonEscape(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(allocator);
 

@@ -1,0 +1,615 @@
+// Agent endpoint — POST /qai/v1/agent
+// Single model, single loop, three tools: bash, write_file, read_file
+// Direct to providers via http_sentinel tool calling
+
+const std = @import("std");
+const http = std.http;
+const hs = @import("http-sentinel");
+const json_util = @import("json.zig");
+const router = @import("router.zig");
+const models_mod = @import("models.zig");
+const account_mod = @import("account.zig");
+const chat_mod = @import("chat.zig");
+const Response = router.Response;
+
+// C stdlib extern (available with link_libc)
+extern "c" fn system(command: [*:0]const u8) c_int;
+
+// ── Request / Response types ────────────────────────────────
+
+const AgentRequest = struct {
+    goal: []const u8,
+    model: []const u8 = "deepseek-chat",
+    max_iterations: ?i32 = null,
+    ephemeral: ?bool = null,
+    enable_rag: ?bool = null,
+    system_prompt: ?[]const u8 = null,
+    workspace_id: ?[]const u8 = null,
+};
+
+// ── Tool definitions (3 tools) ──────────────────────────────
+
+const tool_definitions = [_]hs.ai.common.ToolDefinition{
+    .{
+        .name = "bash",
+        .description = "Run a shell command in the workspace directory. Use for: ls, grep, git, zig build, rag search, cat, etc. The working directory is the agent workspace.",
+        .input_schema =
+        \\{"type":"object","properties":{"command":{"type":"string","description":"The bash command to execute"}},"required":["command"]}
+        ,
+    },
+    .{
+        .name = "write_file",
+        .description = "Write content to a file in the workspace. Creates parent directories if needed. Use this instead of heredocs in bash.",
+        .input_schema =
+        \\{"type":"object","properties":{"path":{"type":"string","description":"Relative file path within workspace"},"content":{"type":"string","description":"Complete file content to write"}},"required":["path","content"]}
+        ,
+    },
+    .{
+        .name = "read_file",
+        .description = "Read the contents of a file in the workspace. Returns the file content as text. Max 100KB.",
+        .input_schema =
+        \\{"type":"object","properties":{"path":{"type":"string","description":"Relative file path within workspace"}},"required":["path"]}
+        ,
+    },
+};
+
+// ── System prompts ──────────────────────────────────────────
+
+const SYSTEM_PROMPT =
+    \\You are an expert software engineer. You have access to three tools: bash, write_file, and read_file.
+    \\
+    \\Guidelines:
+    \\- Use bash for all shell operations: ls, grep, git, compilers, package managers, etc.
+    \\- Use write_file to create/modify files (avoids heredoc quoting issues).
+    \\- Use read_file to inspect existing files.
+    \\- Always check your work: after writing code, compile/test it with bash.
+    \\- Fix errors iteratively — read the error, fix, rebuild.
+    \\- Be concise in explanations. Let the code speak.
+;
+
+const RAG_SYSTEM_PROMPT =
+    \\You are an expert software engineer with access to a RAG knowledge base. You have three tools: bash, write_file, and read_file.
+    \\
+    \\Guidelines:
+    \\- BEFORE writing code, search the RAG for relevant documentation:
+    \\  bash: rag search -c "Zig" "std.http.Server listen accept"
+    \\  bash: rag search -c "Zig 0.16 Example Programs" "echo server thread"
+    \\- Use bash for all shell operations: ls, grep, git, compilers, etc.
+    \\- Use write_file to create/modify files.
+    \\- Use read_file to inspect existing files.
+    \\- After compiler errors, search RAG for the correct API before guessing.
+    \\- Always compile/test your code after writing it.
+    \\- Fix errors iteratively. Let the code speak.
+;
+
+// ── Handler ─────────────────────────────────────────────────
+
+pub fn handle(request: *http.Server.Request, allocator: std.mem.Allocator) Response {
+    // Parse request
+    const parsed = json_util.parseBody(AgentRequest, request, allocator) catch |err| {
+        return errorResp(err);
+    };
+    defer parsed.deinit();
+    const req = parsed.value;
+
+    // Resolve provider
+    const provider_info = chat_mod.resolveProvider(req.model) orelse {
+        return .{
+            .status = .bad_request,
+            .body =
+            \\{"error":"invalid_model","message":"Unknown model. Use claude-*, deepseek-*, gemini-*, grok-*, gpt-*"}
+            ,
+        };
+    };
+
+    // Get API key
+    const api_key = hs.ai.getApiKeyFromEnv(allocator, provider_info.env_var) catch {
+        return .{
+            .status = .internal_server_error,
+            .body =
+            \\{"error":"config_error","message":"Missing provider API key"}
+            ,
+        };
+    };
+    defer allocator.free(api_key);
+
+    // Init provider client
+    var client = hs.ai.AIClient.init(allocator, provider_info.provider, .{
+        .api_key = api_key,
+    }) catch {
+        return .{
+            .status = .internal_server_error,
+            .body =
+            \\{"error":"provider_error","message":"Failed to init AI client"}
+            ,
+        };
+    };
+    defer client.deinit();
+
+    // Create workspace
+    const workspace_id = req.workspace_id orelse "agent-session";
+    const is_ephemeral = req.ephemeral orelse true;
+    const workspace_path = createWorkspace(allocator, workspace_id, is_ephemeral) catch {
+        return .{
+            .status = .internal_server_error,
+            .body =
+            \\{"error":"workspace_error","message":"Failed to create workspace"}
+            ,
+        };
+    };
+    defer allocator.free(workspace_path);
+
+    // Run the agent loop
+    const max_iters: u32 = if (req.max_iterations) |mi| @intCast(@max(mi, 1)) else 25;
+    const enable_rag = req.enable_rag orelse false;
+
+    const result = runAgentLoop(
+        allocator,
+        &client,
+        req.goal,
+        req.model,
+        workspace_path,
+        max_iters,
+        enable_rag,
+        req.system_prompt,
+    ) catch |err| {
+        const msg = std.fmt.allocPrint(allocator,
+            \\{{"error":"agent_error","message":"Agent loop failed: {s}"}}
+        , .{@errorName(err)}) catch
+            \\{"error":"agent_error","message":"Agent loop failed"}
+        ;
+        return .{ .status = .internal_server_error, .body = msg };
+    };
+
+    return .{ .body = result };
+}
+
+// ── Agent Loop ──────────────────────────────────────────────
+
+fn runAgentLoop(
+    allocator: std.mem.Allocator,
+    client: *hs.ai.AIClient,
+    goal: []const u8,
+    model: []const u8,
+    workspace: []const u8,
+    max_iters: u32,
+    enable_rag: bool,
+    custom_system: ?[]const u8,
+) ![]u8 {
+    // Build config
+    var config = hs.ai.RequestConfig{
+        .model = model,
+        .max_tokens = 16384,
+        .temperature = 0.7,
+        .tools = &tool_definitions,
+        .tool_choice = .auto,
+        .system_prompt = custom_system orelse (if (enable_rag) RAG_SYSTEM_PROMPT else SYSTEM_PROMPT),
+    };
+    _ = &config;
+
+    // Conversation history
+    var messages: std.ArrayListUnmanaged(hs.ai.AIMessage) = .empty;
+    defer {
+        for (messages.items) |*msg| msg.deinit();
+        messages.deinit(allocator);
+    }
+
+    // Track totals
+    var total_input_tokens: u32 = 0;
+    var total_output_tokens: u32 = 0;
+    var iterations_used: u32 = 0;
+    var files_written: u32 = 0;
+    var tool_calls_total: u32 = 0;
+    var final_text: []const u8 = "";
+    var final_text_alloc: ?[]u8 = null;
+    defer if (final_text_alloc) |ft| allocator.free(ft);
+
+    // Iteration loop
+    var iter: u32 = 0;
+    while (iter < max_iters) : (iter += 1) {
+        iterations_used = iter + 1;
+
+        // Send to provider
+        const prompt = if (iter == 0) goal else "";
+        var response = if (messages.items.len > 0)
+            try client.sendMessageWithContext(prompt, messages.items, config)
+        else
+            try client.sendMessage(prompt, config);
+
+        total_input_tokens += response.usage.input_tokens;
+        total_output_tokens += response.usage.output_tokens;
+
+        // Check for tool calls
+        if (response.message.tool_calls) |tool_calls| {
+            // Add assistant message (with tool_calls) to history
+            try messages.append(allocator, response.message);
+            // Don't deinit response.message since it's now owned by messages
+
+            // Execute each tool
+            var results: std.ArrayListUnmanaged(hs.ai.common.ToolResult) = .empty;
+            defer {
+                for (results.items) |*r| r.deinit();
+                results.deinit(allocator);
+            }
+
+            for (tool_calls) |call| {
+                tool_calls_total += 1;
+                const result = executeTool(allocator, call, workspace) catch |err| {
+                    const err_content = std.fmt.allocPrint(allocator, "Error: {s}", .{@errorName(err)}) catch
+                        allocator.dupe(u8, "Error: tool execution failed") catch continue;
+                    try results.append(allocator, .{
+                        .tool_call_id = try allocator.dupe(u8, call.id),
+                        .content = err_content,
+                        .is_error = true,
+                        .allocator = allocator,
+                    });
+                    continue;
+                };
+
+                if (std.mem.eql(u8, call.name, "write_file")) {
+                    files_written += 1;
+                }
+
+                try results.append(allocator, result);
+            }
+
+            // Add tool results as user message
+            const results_owned = try allocator.dupe(hs.ai.common.ToolResult, results.items);
+            // Clear results so they don't get double-freed
+            results.items.len = 0;
+
+            try messages.append(allocator, .{
+                .id = try hs.ai.common.generateId(allocator),
+                .role = .user,
+                .content = try allocator.dupe(u8, ""),
+                .timestamp = 0,
+                .tool_results = results_owned,
+                .allocator = allocator,
+            });
+        } else {
+            // No tool calls — model is done
+            final_text_alloc = try allocator.dupe(u8, response.message.content);
+            final_text = final_text_alloc.?;
+            response.deinit();
+            break;
+        }
+    }
+
+    // Record cost
+    const pricing = models_mod.getPricing(model);
+    const cost_usd = (@as(f64, @floatFromInt(total_input_tokens)) / 1_000_000.0) * pricing.input +
+        (@as(f64, @floatFromInt(total_output_tokens)) / 1_000_000.0) * pricing.output;
+    account_mod.recordCost(cost_usd);
+    const cost_ticks: i64 = @intFromFloat(cost_usd * 10_000_000_000.0);
+
+    // Escape final text for JSON
+    const escaped = try chat_mod.jsonEscape(allocator, final_text);
+    defer allocator.free(escaped);
+
+    // Build response
+    return std.fmt.allocPrint(allocator,
+        \\{{"status":"completed","model":"{s}","iterations":{d},"tool_calls":{d},"files_written":{d},"usage":{{"input_tokens":{d},"output_tokens":{d},"cost_ticks":{d}}},"response":"{s}"}}
+    , .{
+        model,
+        iterations_used,
+        tool_calls_total,
+        files_written,
+        total_input_tokens,
+        total_output_tokens,
+        cost_ticks,
+        escaped,
+    });
+}
+
+// ── Tool Execution ──────────────────────────────────────────
+
+fn executeTool(
+    allocator: std.mem.Allocator,
+    call: hs.ai.common.ToolCall,
+    workspace: []const u8,
+) !hs.ai.common.ToolResult {
+    // Parse arguments JSON
+    const args = std.json.parseFromSlice(std.json.Value, allocator, call.arguments, .{}) catch {
+        return .{
+            .tool_call_id = try allocator.dupe(u8, call.id),
+            .content = try allocator.dupe(u8, "Error: invalid JSON arguments"),
+            .is_error = true,
+            .allocator = allocator,
+        };
+    };
+    defer args.deinit();
+
+    if (std.mem.eql(u8, call.name, "bash")) {
+        return execBash(allocator, call.id, args.value, workspace);
+    } else if (std.mem.eql(u8, call.name, "write_file")) {
+        return execWriteFile(allocator, call.id, args.value, workspace);
+    } else if (std.mem.eql(u8, call.name, "read_file")) {
+        return execReadFile(allocator, call.id, args.value, workspace);
+    }
+
+    return .{
+        .tool_call_id = try allocator.dupe(u8, call.id),
+        .content = try allocator.dupe(u8, "Error: unknown tool"),
+        .is_error = true,
+        .allocator = allocator,
+    };
+}
+
+// C popen for capturing command output
+extern "c" fn popen(command: [*:0]const u8, mode: [*:0]const u8) ?*std.c.FILE;
+extern "c" fn pclose(stream: *std.c.FILE) c_int;
+
+fn execBash(
+    allocator: std.mem.Allocator,
+    call_id: []const u8,
+    args: std.json.Value,
+    workspace: []const u8,
+) !hs.ai.common.ToolResult {
+    const command = getStr(args, "command") orelse {
+        return .{
+            .tool_call_id = try allocator.dupe(u8, call_id),
+            .content = try allocator.dupe(u8, "Error: missing 'command' argument"),
+            .is_error = true,
+            .allocator = allocator,
+        };
+    };
+
+    // Build command with cd to workspace, capture both stdout and stderr
+    const full_cmd = try std.fmt.allocPrint(allocator, "cd '{s}' && {s} 2>&1", .{ workspace, command });
+    defer allocator.free(full_cmd);
+    const cmd_z = try allocator.dupeZ(u8, full_cmd);
+    defer allocator.free(cmd_z);
+
+    // Execute via popen
+    const pipe = popen(cmd_z, "r") orelse {
+        return .{
+            .tool_call_id = try allocator.dupe(u8, call_id),
+            .content = try allocator.dupe(u8, "Error: failed to execute command"),
+            .is_error = true,
+            .allocator = allocator,
+        };
+    };
+
+    // Read output
+    var output: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer output.deinit(allocator);
+
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const n = std.c.fread(&buf, 1, buf.len, pipe);
+        if (n == 0) break;
+        try output.appendSlice(allocator, buf[0..n]);
+        if (output.items.len > 512 * 1024) break; // cap at 512KB
+    }
+
+    const exit_raw = pclose(pipe);
+    const exit_code: i32 = @divTrunc(exit_raw, 256); // WEXITSTATUS
+
+    // Truncate if needed
+    const content = if (output.items.len > 0)
+        try output.toOwnedSlice(allocator)
+    else
+        try allocator.dupe(u8, "(no output)");
+
+    return .{
+        .tool_call_id = try allocator.dupe(u8, call_id),
+        .content = content,
+        .is_error = exit_code != 0,
+        .allocator = allocator,
+    };
+}
+
+fn execWriteFile(
+    allocator: std.mem.Allocator,
+    call_id: []const u8,
+    args: std.json.Value,
+    workspace: []const u8,
+) !hs.ai.common.ToolResult {
+    const path = getStr(args, "path") orelse {
+        return .{
+            .tool_call_id = try allocator.dupe(u8, call_id),
+            .content = try allocator.dupe(u8, "Error: missing 'path' argument"),
+            .is_error = true,
+            .allocator = allocator,
+        };
+    };
+    const content = getStr(args, "content") orelse {
+        return .{
+            .tool_call_id = try allocator.dupe(u8, call_id),
+            .content = try allocator.dupe(u8, "Error: missing 'content' argument"),
+            .is_error = true,
+            .allocator = allocator,
+        };
+    };
+
+    // Path traversal protection
+    if (std.mem.indexOf(u8, path, "..") != null) {
+        return .{
+            .tool_call_id = try allocator.dupe(u8, call_id),
+            .content = try allocator.dupe(u8, "Error: path traversal not allowed"),
+            .is_error = true,
+            .allocator = allocator,
+        };
+    }
+
+    // Build full path
+    const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ workspace, path });
+    defer allocator.free(full_path);
+
+    // Create parent directories via mkdir -p
+    if (std.mem.lastIndexOfScalar(u8, full_path, '/')) |last_slash| {
+        makeDirRecursive(allocator, full_path[0..last_slash]);
+    }
+
+    // Write file via C stdio (always available with libc)
+    writeFileC(full_path, content) catch |err| {
+        const msg = try std.fmt.allocPrint(allocator, "Error writing file: {s}", .{@errorName(err)});
+        return .{
+            .tool_call_id = try allocator.dupe(u8, call_id),
+            .content = msg,
+            .is_error = true,
+            .allocator = allocator,
+        };
+    };
+
+    // Git auto-commit
+    gitAutoCommit(allocator, workspace, path);
+
+    const msg = try std.fmt.allocPrint(allocator, "Wrote {d} bytes to {s}", .{ content.len, path });
+    return .{
+        .tool_call_id = try allocator.dupe(u8, call_id),
+        .content = msg,
+        .allocator = allocator,
+    };
+}
+
+fn execReadFile(
+    allocator: std.mem.Allocator,
+    call_id: []const u8,
+    args: std.json.Value,
+    workspace: []const u8,
+) !hs.ai.common.ToolResult {
+    const path = getStr(args, "path") orelse {
+        return .{
+            .tool_call_id = try allocator.dupe(u8, call_id),
+            .content = try allocator.dupe(u8, "Error: missing 'path' argument"),
+            .is_error = true,
+            .allocator = allocator,
+        };
+    };
+
+    // Path traversal protection
+    if (std.mem.indexOf(u8, path, "..") != null) {
+        return .{
+            .tool_call_id = try allocator.dupe(u8, call_id),
+            .content = try allocator.dupe(u8, "Error: path traversal not allowed"),
+            .is_error = true,
+            .allocator = allocator,
+        };
+    }
+
+    const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ workspace, path });
+    defer allocator.free(full_path);
+
+    const content = readFileC(allocator, full_path) catch |err| {
+        const msg = try std.fmt.allocPrint(allocator, "Error reading file: {s}", .{@errorName(err)});
+        return .{
+            .tool_call_id = try allocator.dupe(u8, call_id),
+            .content = msg,
+            .is_error = true,
+            .allocator = allocator,
+        };
+    };
+
+    return .{
+        .tool_call_id = try allocator.dupe(u8, call_id),
+        .content = content,
+        .allocator = allocator,
+    };
+}
+
+// ── Workspace Management ────────────────────────────────────
+
+fn createWorkspace(allocator: std.mem.Allocator, id: []const u8, ephemeral: bool) ![]u8 {
+    const path = if (ephemeral)
+        try std.fmt.allocPrint(allocator, "/tmp/qai-agent-{s}", .{id})
+    else
+        try std.fmt.allocPrint(allocator, "/tmp/qai-workspace-{s}", .{id});
+
+    // Create directory + git init via system()
+    const cmd = try std.fmt.allocPrint(allocator, "mkdir -p '{s}' && cd '{s}' && git init -q 2>/dev/null", .{ path, path });
+    defer allocator.free(cmd);
+    const cmd_z = try allocator.dupeZ(u8, cmd);
+    defer allocator.free(cmd_z);
+    _ = system(cmd_z);
+
+    return path;
+}
+
+fn gitAutoCommit(allocator: std.mem.Allocator, workspace: []const u8, file_path: []const u8) void {
+    const cmd = std.fmt.allocPrint(allocator,
+        "cd '{s}' && git add '{s}' && git commit -q -m 'agent: write {s}' 2>/dev/null",
+        .{ workspace, file_path, file_path },
+    ) catch return;
+    defer allocator.free(cmd);
+    const cmd_z = allocator.dupeZ(u8, cmd) catch return;
+    defer allocator.free(cmd_z);
+    _ = system(cmd_z);
+}
+
+// ── Helpers ─────────────────────────────────────────────────
+
+fn getStr(value: std.json.Value, key: []const u8) ?[]const u8 {
+    if (value != .object) return null;
+    const v = value.object.get(key) orelse return null;
+    if (v == .string) return v.string;
+    return null;
+}
+
+// ── C File I/O (libc, portable) ─────────────────────────────
+
+fn writeFileC(path: []const u8, content: []const u8) !void {
+    const path_z = std.heap.c_allocator.dupeZ(u8, path) catch return error.OutOfMemory;
+    defer std.heap.c_allocator.free(path_z);
+    const f = std.c.fopen(path_z, "w") orelse return error.FileOpenFailed;
+    defer _ = std.c.fclose(f);
+    const written = std.c.fwrite(content.ptr, 1, content.len, f);
+    if (written != content.len) return error.WriteFailed;
+}
+
+extern "c" fn fseek(stream: *std.c.FILE, offset: c_long, whence: c_int) c_int;
+extern "c" fn ftell(stream: *std.c.FILE) c_long;
+const SEEK_END: c_int = 2;
+const SEEK_SET: c_int = 0;
+
+fn readFileC(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+    const f = std.c.fopen(path_z, "r") orelse return error.FileOpenFailed;
+    defer _ = std.c.fclose(f);
+
+    // Get file size
+    _ = fseek(f, 0, SEEK_END);
+    const size_long = ftell(f);
+    if (size_long < 0) return error.FileReadFailed;
+    const size: usize = @intCast(size_long);
+    if (size > 100 * 1024) return error.FileTooLarge;
+    _ = fseek(f, 0, SEEK_SET);
+
+    const buf = try allocator.alloc(u8, size);
+    errdefer allocator.free(buf);
+    const read = std.c.fread(buf.ptr, 1, size, f);
+    if (read != size) return error.FileReadFailed;
+    return buf;
+}
+
+fn makeDirRecursive(allocator: std.mem.Allocator, path: []const u8) void {
+    const cmd = std.fmt.allocPrint(allocator, "mkdir -p '{s}'", .{path}) catch return;
+    defer allocator.free(cmd);
+    const cmd_z = allocator.dupeZ(u8, cmd) catch return;
+    defer allocator.free(cmd_z);
+    _ = system(cmd_z);
+}
+
+fn errorResp(err: anyerror) Response {
+    return switch (err) {
+        error.PayloadTooLarge => .{
+            .status = .payload_too_large,
+            .body =
+            \\{"error":"payload_too_large","message":"Request body exceeds limit"}
+            ,
+        },
+        error.EmptyBody => .{
+            .status = .bad_request,
+            .body =
+            \\{"error":"invalid_request","message":"Request body is empty. Send JSON with goal and model."}
+            ,
+        },
+        else => .{
+            .status = .bad_request,
+            .body =
+            \\{"error":"invalid_json","message":"Failed to parse request body"}
+            ,
+        },
+    };
+}
