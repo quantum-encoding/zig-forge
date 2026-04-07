@@ -26,8 +26,10 @@ WORKDIR /build/programs/zig_ai_server
 # Note: link_libc needed on Linux until http_sentinel's transitive deps
 # (crypto/tls.zig via refAllDecls) are fully cleaned up. Binary still
 # works on Zigix once those refs are removed.
+# Target x86_64-linux baseline CPU (Cloud Run), link libc for Linux compat
+# Build for baseline x86_64 (Cloud Run may have older CPUs)
 RUN sed -i 's/link_libc = false/link_libc = true/g' build.zig \
-    && zig build -Doptimize=ReleaseSafe \
+    && zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-gnu \
     && strip zig-out/bin/zig-ai-server 2>/dev/null || true
 
 # ── Stage 2: Runtime ────────────────────────────────────────
