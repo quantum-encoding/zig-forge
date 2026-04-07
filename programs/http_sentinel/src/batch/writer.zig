@@ -4,7 +4,7 @@
 //
 // Licensed under the MIT License. See LICENSE file for details.
 
-//! Result writer - Write batch results to CSV
+//! Result writer - Write batch results to CSV (pure Zig — no libc)
 
 const std = @import("std");
 const types = @import("types.zig");
@@ -16,53 +16,48 @@ pub fn writeResults(
     output_path: []const u8,
     full_responses: bool,
 ) !void {
-    // Convert path to null-terminated string
-    const path_z = try allocator.dupeZ(u8, output_path);
-    defer allocator.free(path_z);
+    var io_threaded: std.Io.Threaded = .init(allocator, .{});
+    defer io_threaded.deinit();
+    const io = io_threaded.io();
 
-    // Open file for writing
-    const fd = try std.posix.openatZ(
-        std.posix.AT.FDCWD,
-        path_z,
-        .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true },
-        0o644,
-    );
-    defer _ = std.c.close(fd);
+    const dir_path = std.fs.path.dirname(output_path) orelse ".";
+    const file_name = std.fs.path.basename(output_path);
 
-    // Write CSV header
-    const header = "id,provider,prompt,response,input_tokens,output_tokens,cost,execution_time_ms,error\n";
-    _ = try writeAll(fd, header);
+    var dir = try std.Io.Dir.openDirAbsolute(io, dir_path, .{});
+    defer dir.close(io);
+
+    // Build CSV content in memory
+    var csv: std.ArrayList(u8) = .empty;
+    defer csv.deinit(allocator);
+
+    // CSV header
+    try csv.appendSlice(allocator, "id,provider,prompt,response,input_tokens,output_tokens,cost,execution_time_ms,error\n");
 
     // Write each result
     for (results) |*result| {
         const csv_line = try result.toCsv(allocator);
         defer allocator.free(csv_line);
-        _ = try writeAll(fd, csv_line);
+        try csv.appendSlice(allocator, csv_line);
     }
+
+    // Write file atomically
+    try dir.writeFile(io, .{
+        .sub_path = file_name,
+        .data = csv.items,
+    });
 
     std.debug.print("Results written to: {s}\n", .{output_path});
 
     // Write full responses if requested
     if (full_responses) {
-        try writeFullResponses(allocator, results, output_path);
+        try writeFullResponses(allocator, io, results, output_path);
     }
-}
-
-/// Write all bytes to file descriptor
-fn writeAll(fd: std.posix.fd_t, data: []const u8) !usize {
-    var written: usize = 0;
-    while (written < data.len) {
-        const n = std.c.write(fd, data.ptr + written, data.len - written);
-        if (n < 0) return error.WriteError;
-        if (n == 0) break;
-        written += @intCast(n);
-    }
-    return written;
 }
 
 /// Write full responses to separate files
 fn writeFullResponses(
     allocator: std.mem.Allocator,
+    io: std.Io,
     results: []types.BatchResult,
     output_path: []const u8,
 ) !void {
@@ -74,35 +69,33 @@ fn writeFullResponses(
     );
     defer allocator.free(dir_name);
 
-    const dir_name_z = try allocator.dupeZ(u8, dir_name);
-    defer allocator.free(dir_name_z);
+    // Create directory (pure Zig via Io)
+    const parent_path = std.fs.path.dirname(dir_name) orelse ".";
+    const sub_dir_name = std.fs.path.basename(dir_name);
 
-    // Try to create directory (ignore if exists)
-    _ = std.c.mkdir(dir_name_z, 0o755);
+    var parent_dir = try std.Io.Dir.openDirAbsolute(io, parent_path, .{});
+    defer parent_dir.close(io);
+
+    parent_dir.createDir(io, sub_dir_name, .default_dir) catch {};
+
+    var resp_dir = parent_dir.openDir(io, sub_dir_name, .{}) catch return;
+    defer resp_dir.close(io);
 
     // Write each response to a separate file
     for (results) |*result| {
         if (result.response) |response| {
             const provider_name = @tagName(result.provider);
-            const filename = try std.fmt.allocPrint(
+            const filename = std.fmt.allocPrint(
                 allocator,
-                "{s}/{d}_{s}.txt",
-                .{ dir_name, result.id, provider_name },
-            );
+                "{d}_{s}.txt",
+                .{ result.id, provider_name },
+            ) catch continue;
             defer allocator.free(filename);
 
-            const filename_z = try allocator.dupeZ(u8, filename);
-            defer allocator.free(filename_z);
-
-            const fd = std.posix.openatZ(
-                std.posix.AT.FDCWD,
-                filename_z,
-                .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true },
-                0o644,
-            ) catch continue;
-            defer _ = std.c.close(fd);
-
-            _ = writeAll(fd, response) catch {};
+            resp_dir.writeFile(io, .{
+                .sub_path = filename,
+                .data = response,
+            }) catch {};
         }
     }
 
@@ -111,9 +104,9 @@ fn writeFullResponses(
 
 /// Generate default output filename with timestamp
 pub fn generateOutputFilename(allocator: std.mem.Allocator) ![]u8 {
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.REALTIME, &ts);
-    const timestamp = ts.sec;
+    var io_threaded: std.Io.Threaded = .init(allocator, .{});
+    defer io_threaded.deinit();
+    const timestamp = std.Io.Timestamp.now(io_threaded.io(), .real).toSeconds();
     return try std.fmt.allocPrint(
         allocator,
         "batch_results_{d}.csv",

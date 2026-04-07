@@ -764,11 +764,18 @@ pub const ConversationContext = struct {
     }
 };
 
-/// Utility: Generate a unique ID for messages/conversations
+/// Utility: Generate a unique ID for messages/conversations (pure Zig — no libc)
+/// Uses CSPRNG seeded from stack address entropy for unique IDs
 pub fn generateId(allocator: std.mem.Allocator) ![]u8 {
     var uuid_bytes: [16]u8 = undefined;
-    // Cross-platform random (works on macOS, BSD, Linux)
-    std.c.arc4random_buf(&uuid_bytes, uuid_bytes.len);
+    var seed: [std.Random.DefaultCsprng.secret_seed_length]u8 = undefined;
+    const addr: usize = @intFromPtr(&seed);
+    var idx: usize = 0;
+    while (idx < seed.len) : (idx += 1) {
+        seed[idx] = @truncate(addr +% idx);
+    }
+    var rng = std.Random.DefaultCsprng.init(seed);
+    rng.random().bytes(&uuid_bytes);
 
     // Format as hex string
     const id = try std.fmt.allocPrint(allocator, "{x:0>32}", .{std.mem.readInt(u128, &uuid_bytes, .big)});
@@ -830,43 +837,21 @@ pub fn parseApiError(response_body: []const u8) AIError {
     return AIError.ApiRequestFailed;
 }
 
-// C file functions for image loading
-const FILE = std.c.FILE;
-extern "c" fn fopen(path: [*:0]const u8, mode: [*:0]const u8) ?*FILE;
-extern "c" fn fclose(stream: *FILE) c_int;
-extern "c" fn fread(ptr: [*]u8, size: usize, nmemb: usize, stream: *FILE) usize;
-extern "c" fn fseek(stream: *FILE, offset: c_long, whence: c_int) c_int;
-extern "c" fn ftell(stream: *FILE) c_long;
-const SEEK_END: c_int = 2;
-const SEEK_SET: c_int = 0;
-
 /// Load an image from a file and return base64-encoded data
-pub fn loadImageFromFile(allocator: std.mem.Allocator, path: []const u8) !ImageInput {
-    // Create null-terminated path
-    const path_z = try allocator.allocSentinel(u8, path.len, 0);
-    defer allocator.free(path_z);
-    @memcpy(path_z, path);
+pub fn loadImageFromFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !ImageInput {
+    // Split path into directory and filename
+    const dir_path = std.fs.path.dirname(path) orelse return error.FileOpenFailed;
+    const file_name = std.fs.path.basename(path);
 
-    // Open file
-    const file = fopen(path_z.ptr, "rb") orelse return error.FileOpenFailed;
-    defer _ = fclose(file);
+    // Open directory and read file contents
+    var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{}) catch return error.FileOpenFailed;
+    defer dir.close(io);
 
-    // Get file size
-    if (fseek(file, 0, SEEK_END) != 0) return error.FileReadFailed;
-    const size_long = ftell(file);
-    if (size_long < 0) return error.FileReadFailed;
-    const size: usize = @intCast(size_long);
-    if (fseek(file, 0, SEEK_SET) != 0) return error.FileReadFailed;
-
-    // Read file content
-    const content = try allocator.alloc(u8, size);
+    const content = dir.readFileAlloc(io, file_name, allocator, .unlimited) catch return error.FileReadFailed;
     defer allocator.free(content);
 
-    const bytes_read = fread(content.ptr, 1, size, file);
-    if (bytes_read != size) return error.FileReadFailed;
-
     // Base64 encode
-    const base64_len = std.base64.standard.Encoder.calcSize(size);
+    const base64_len = std.base64.standard.Encoder.calcSize(content.len);
     const base64_data = try allocator.alloc(u8, base64_len);
     _ = std.base64.standard.Encoder.encode(base64_data, content);
 

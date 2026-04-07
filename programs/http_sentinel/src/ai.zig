@@ -175,19 +175,12 @@ pub const ProviderConfig = struct {
     location: ?[]const u8 = null,
 };
 
-/// Get API key from environment variable (Zig 0.16 compatible)
-pub fn getApiKeyFromEnv(allocator: std.mem.Allocator, var_name: []const u8) ![]const u8 {
-    const key_z = allocator.dupeZ(u8, var_name) catch {
-        std.debug.print("Error: Memory allocation failed\n", .{});
-        return error.OutOfMemory;
-    };
-    defer allocator.free(key_z);
-    const ptr = std.c.getenv(key_z) orelse {
+/// Get API key from environment variable (pure Zig — no libc)
+pub fn getApiKeyFromEnv(environ_map: *const std.process.Environ.Map, var_name: []const u8) ![]const u8 {
+    return environ_map.get(var_name) orelse {
         std.debug.print("Error: Environment variable '{s}' not set\n", .{var_name});
         return error.EnvironmentVariableNotFound;
     };
-    const len = std.mem.len(ptr);
-    return try allocator.dupe(u8, ptr[0..len]);
 }
 
 /// Pricing information for all providers (as of 2026-03)

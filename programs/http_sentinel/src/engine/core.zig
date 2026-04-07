@@ -12,36 +12,34 @@ const HttpClient = @import("../http_client.zig").HttpClient;
 const RetryEngine = @import("../retry/retry.zig").RetryEngine;
 const manifest = @import("manifest.zig");
 
-/// Simple mutex wrapper using pthread (std.Thread.Mutex removed in Zig 0.16)
+/// Pure Zig mutex using atomics (no libc)
 const Mutex = struct {
-    inner: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER,
+    state: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
     pub fn lock(self: *Mutex) void {
-        _ = std.c.pthread_mutex_lock(&self.inner);
+        while (self.state.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) {
+            std.atomic.spinLoopHint();
+        }
     }
 
     pub fn unlock(self: *Mutex) void {
-        _ = std.c.pthread_mutex_unlock(&self.inner);
+        self.state.store(0, .release);
     }
 };
 
-/// Timer using clock_gettime (Timer removed in Zig 0.16)
+/// Pure Zig timer using Io.Timestamp (no libc)
 const Timer = struct {
-    start_ts: std.c.timespec,
+    start_ts: std.Io.Timestamp,
+    io: std.Io,
 
-    pub fn start() error{}!Timer {
-        var ts: std.c.timespec = undefined;
-        _ = std.c.clock_gettime(.MONOTONIC, &ts);
-        return Timer{ .start_ts = ts };
+    pub fn start(io: std.Io) Timer {
+        return .{ .start_ts = std.Io.Timestamp.now(io, .awake), .io = io };
     }
 
     pub fn read(self: *const Timer) u64 {
-        var now: std.c.timespec = undefined;
-        _ = std.c.clock_gettime(.MONOTONIC, &now);
-        const start_ns: i128 = @as(i128, self.start_ts.sec) * 1_000_000_000 + self.start_ts.nsec;
-        const now_ns: i128 = @as(i128, now.sec) * 1_000_000_000 + now.nsec;
-        const diff = now_ns - start_ns;
-        return if (diff > 0) @intCast(diff) else 0;
+        const elapsed = self.start_ts.untilNow(self.io, .awake);
+        const ns = elapsed.toNanoseconds();
+        return if (ns > 0) @intCast(ns) else 0;
     }
 };
 
@@ -70,18 +68,23 @@ pub fn Engine(comptime WriterType: type) type {
         /// Mutex for synchronized output
         output_mutex: Mutex,
 
+        /// Io for timing and sleep
+        io_threaded: std.Io.Threaded,
+
         pub fn init(allocator: std.mem.Allocator, config: EngineConfig, output_writer: WriterType) !Self {
+            var io_threaded: std.Io.Threaded = .init(allocator, .{});
             return Self{
                 .allocator = allocator,
                 .config = config,
-                .retry_engine = RetryEngine.init(allocator, .{}),
+                .retry_engine = RetryEngine.init(allocator, .{}, io_threaded.io()),
                 .output_writer = output_writer,
                 .output_mutex = .{},
+                .io_threaded = io_threaded,
             };
         }
 
-        pub fn deinit(_: *Self) void {
-            // Nothing to deinit
+        pub fn deinit(self: *Self) void {
+            self.io_threaded.deinit();
         }
 
         /// Process a batch of request manifests
@@ -118,14 +121,15 @@ pub fn Engine(comptime WriterType: type) type {
 
         /// Process a single request
         fn processRequest(self: *Self, request: *manifest.RequestManifest) void {
-            var timer = Timer.start() catch unreachable;
-
             // Create thread-local HTTP client
             var http_client = HttpClient.init(self.allocator) catch {
                 self.writeError(request.id, "Failed to initialize HTTP client");
                 return;
             };
             defer http_client.deinit();
+
+            const io = http_client.io();
+            var timer = Timer.start(io);
 
             var response = manifest.ResponseManifest{
                 .id = undefined,
@@ -158,12 +162,7 @@ pub fn Engine(comptime WriterType: type) type {
                     if (retry_count < max_retries) {
                         // Calculate exponential backoff
                         const backoff_ms = @as(u64, 100) * (@as(u64, 1) << @intCast(retry_count));
-                        const backoff_ns = backoff_ms * std.time.ns_per_ms;
-                        const ts: std.c.timespec = .{
-                            .sec = @intCast(backoff_ns / std.time.ns_per_s),
-                            .nsec = @intCast(backoff_ns % std.time.ns_per_s),
-                        };
-                        _ = std.c.nanosleep(&ts, null);
+                        io.sleep(std.Io.Duration.fromMilliseconds(@intCast(backoff_ms)), .awake) catch {};
                         continue;
                     } else {
                         // Final failure

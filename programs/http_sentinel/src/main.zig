@@ -11,7 +11,7 @@ const cli = @import("cli.zig");
 const batch = @import("batch.zig");
 
 pub fn main(init: std.process.Init) !void {
-    const allocator = std.heap.c_allocator;
+    const allocator = std.heap.smp_allocator;
 
     // Collect args into array for indexed access
     var args_list: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -177,7 +177,7 @@ pub fn main(init: std.process.Init) !void {
         };
 
         // Execute batch
-        var executor = try batch.BatchExecutor.init(allocator, requests, batch_config);
+        var executor = try batch.BatchExecutor.init(allocator, requests, batch_config, init.environ_map);
         defer executor.deinit();
 
         try executor.execute();
@@ -191,13 +191,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Check if API key is set
     const env_var = config.provider.getEnvVar();
-    // Check if environment variable is set using std.c.getenv
-    const env_var_z = allocator.dupeZ(u8, env_var) catch {
-        std.debug.print("Error: Memory allocation failed\n", .{});
-        return error.OutOfMemory;
-    };
-    defer allocator.free(env_var_z);
-    const has_key = std.c.getenv(env_var_z) != null;
+    const has_key = init.environ_map.get(env_var) != null;
     if (!has_key) {
         std.debug.print("Error: {s} environment variable not set\n", .{env_var});
         std.debug.print("\n   Set it with:\n", .{});
@@ -205,7 +199,7 @@ pub fn main(init: std.process.Init) !void {
         return error.MissingApiKey;
     }
 
-    var tool = cli.CLI.init(allocator, config);
+    var tool = cli.CLI.init(allocator, config, init.environ_map);
 
     // Run interactive or one-shot mode
     if (config.interactive) {

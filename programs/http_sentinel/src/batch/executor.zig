@@ -16,36 +16,34 @@ const gemini = @import("../ai/gemini.zig");
 const grok = @import("../ai/grok.zig");
 const vertex = @import("../ai/vertex.zig");
 
-/// Simple mutex wrapper using pthread (Mutex removed in Zig 0.16)
+/// Pure Zig mutex using atomics (no libc)
 const Mutex = struct {
-    inner: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER,
+    state: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
     pub fn lock(self: *Mutex) void {
-        _ = std.c.pthread_mutex_lock(&self.inner);
+        while (self.state.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) {
+            std.atomic.spinLoopHint();
+        }
     }
 
     pub fn unlock(self: *Mutex) void {
-        _ = std.c.pthread_mutex_unlock(&self.inner);
+        self.state.store(0, .release);
     }
 };
 
-/// Timer using clock_gettime (Timer removed in Zig 0.16)
+/// Pure Zig timer using Io.Timestamp (no libc)
 const Timer = struct {
-    start_ts: std.c.timespec,
+    start_ts: std.Io.Timestamp,
+    io: std.Io,
 
-    pub fn start() error{}!Timer {
-        var ts: std.c.timespec = undefined;
-        _ = std.c.clock_gettime(.MONOTONIC, &ts);
-        return Timer{ .start_ts = ts };
+    pub fn start(io: std.Io) Timer {
+        return .{ .start_ts = std.Io.Timestamp.now(io, .awake), .io = io };
     }
 
     pub fn read(self: *const Timer) u64 {
-        var now: std.c.timespec = undefined;
-        _ = std.c.clock_gettime(.MONOTONIC, &now);
-        const start_ns: i128 = @as(i128, self.start_ts.sec) * 1_000_000_000 + self.start_ts.nsec;
-        const now_ns: i128 = @as(i128, now.sec) * 1_000_000_000 + now.nsec;
-        const diff = now_ns - start_ns;
-        return if (diff > 0) @intCast(diff) else 0;
+        const elapsed = self.start_ts.untilNow(self.io, .awake);
+        const ns = elapsed.toNanoseconds();
+        return if (ns > 0) @intCast(ns) else 0;
     }
 };
 
@@ -60,11 +58,13 @@ pub const BatchExecutor = struct {
     completed: std.atomic.Value(u32),
     failed: std.atomic.Value(u32),
     config: types.BatchConfig,
+    environ_map: *const std.process.Environ.Map,
 
     pub fn init(
         allocator: std.mem.Allocator,
         requests: []types.BatchRequest,
         config: types.BatchConfig,
+        environ_map: *const std.process.Environ.Map,
     ) !BatchExecutor {
         return .{
             .allocator = allocator,
@@ -76,6 +76,7 @@ pub const BatchExecutor = struct {
             .completed = std.atomic.Value(u32).init(0),
             .failed = std.atomic.Value(u32).init(0),
             .config = config,
+            .environ_map = environ_map,
         };
     }
 
@@ -109,13 +110,16 @@ pub const BatchExecutor = struct {
 
     /// Execute all requests using thread pool
     pub fn execute(self: *BatchExecutor) !void {
-        var timer = try Timer.start();
+        // Create a thread-local Io for timing in the main execute thread
+        var io_threaded: std.Io.Threaded = .init(self.allocator, .{});
+        defer io_threaded.deinit();
+        var timer = Timer.start(io_threaded.io());
 
         // Determine concurrency level (cap at request count and concurrency limit)
         const thread_count = @min(self.requests.len, self.config.concurrency);
 
         if (self.config.show_progress) {
-            std.debug.print("\n🔄 Starting batch processing...\n", .{});
+            std.debug.print("\n Starting batch processing...\n", .{});
             std.debug.print("   Requests: {}\n", .{self.requests.len});
             std.debug.print("   Concurrency: {}\n", .{thread_count});
             std.debug.print("   Retry count: {}\n\n", .{self.config.retry_count});
@@ -161,7 +165,11 @@ pub const BatchExecutor = struct {
 
     /// Execute a single request (called by worker thread)
     fn executeRequest(self: *BatchExecutor, request: *const types.BatchRequest) void {
-        var timer = Timer.start() catch unreachable;
+        // Create thread-local Io for timing and sleep
+        var io_threaded: std.Io.Threaded = .init(self.allocator, .{});
+        defer io_threaded.deinit();
+        const io = io_threaded.io();
+        var timer = Timer.start(io);
 
         var result = types.BatchResult{
             .id = request.id,
@@ -195,15 +203,9 @@ pub const BatchExecutor = struct {
 
         while (attempts < max_attempts) : (attempts += 1) {
             if (attempts > 0) {
-                // Exponential backoff using std.Thread.sleep
+                // Exponential backoff
                 const delay_ms = @as(u64, 1000) * (@as(u64, 1) << @intCast(attempts - 1));
-                const delay_ns = delay_ms * std.time.ns_per_ms;
-                // Cross-platform nanosleep via libc
-                const ts: std.c.timespec = .{
-                    .sec = @intCast(delay_ns / std.time.ns_per_s),
-                    .nsec = @intCast(delay_ns % std.time.ns_per_s),
-                };
-                _ = std.c.nanosleep(&ts, null);
+                io.sleep(std.Io.Duration.fromMilliseconds(@intCast(delay_ms)), .awake) catch {};
             }
 
             // Execute the request
@@ -266,11 +268,9 @@ pub const BatchExecutor = struct {
         }
     }
 
-    /// Get environment variable as owned slice (compatible with Zig 0.16)
-    fn getEnvVar(allocator: std.mem.Allocator, key: [:0]const u8) ?[]const u8 {
-        const ptr = std.c.getenv(key) orelse return null;
-        const len = std.mem.len(ptr);
-        return allocator.dupe(u8, ptr[0..len]) catch null;
+    /// Get environment variable from environ map (pure Zig — no libc)
+    fn getEnvVar(self: *BatchExecutor, key: []const u8) ?[]const u8 {
+        return self.environ_map.get(key);
     }
 
     /// Execute request with appropriate provider
@@ -291,9 +291,8 @@ pub const BatchExecutor = struct {
         // Execute based on provider
         return switch (request.provider) {
             .claude => blk: {
-                const api_key = getEnvVar(self.allocator, "ANTHROPIC_API_KEY") orelse
+                const api_key = self.getEnvVar("ANTHROPIC_API_KEY") orelse
                     return ai_common.AIError.AuthenticationFailed;
-                defer self.allocator.free(api_key);
 
                 var client = try anthropic.AnthropicClient.init(
                     self.allocator,
@@ -304,9 +303,8 @@ pub const BatchExecutor = struct {
                 break :blk try client.sendMessage(request.prompt, req_config);
             },
             .deepseek => blk: {
-                const api_key = getEnvVar(self.allocator, "DEEPSEEK_API_KEY") orelse
+                const api_key = self.getEnvVar("DEEPSEEK_API_KEY") orelse
                     return ai_common.AIError.AuthenticationFailed;
-                defer self.allocator.free(api_key);
 
                 var client = try deepseek.DeepSeekClient.init(
                     self.allocator,
@@ -317,9 +315,8 @@ pub const BatchExecutor = struct {
                 break :blk try client.sendMessage(request.prompt, req_config);
             },
             .gemini => blk: {
-                const api_key = getEnvVar(self.allocator, "GEMINI_API_KEY") orelse getEnvVar(self.allocator, "GOOGLE_GENAI_API_KEY") orelse
+                const api_key = self.getEnvVar("GEMINI_API_KEY") orelse self.getEnvVar("GOOGLE_GENAI_API_KEY") orelse
                     return ai_common.AIError.AuthenticationFailed;
-                defer self.allocator.free(api_key);
 
                 var client = try gemini.GeminiClient.init(
                     self.allocator,
@@ -330,9 +327,8 @@ pub const BatchExecutor = struct {
                 break :blk try client.sendMessage(request.prompt, req_config);
             },
             .grok => blk: {
-                const api_key = getEnvVar(self.allocator, "XAI_API_KEY") orelse
+                const api_key = self.getEnvVar("XAI_API_KEY") orelse
                     return ai_common.AIError.AuthenticationFailed;
-                defer self.allocator.free(api_key);
 
                 var client = try grok.GrokClient.init(
                     self.allocator,
@@ -343,9 +339,8 @@ pub const BatchExecutor = struct {
                 break :blk try client.sendMessage(request.prompt, req_config);
             },
             .vertex => blk: {
-                const project_id = getEnvVar(self.allocator, "VERTEX_PROJECT_ID") orelse
+                const project_id = self.getEnvVar("VERTEX_PROJECT_ID") orelse
                     return ai_common.AIError.AuthenticationFailed;
-                defer self.allocator.free(project_id);
 
                 var client = try vertex.VertexClient.init(
                     self.allocator,
@@ -364,7 +359,7 @@ pub const BatchExecutor = struct {
         defer self.results_mutex.unlock();
 
         self.results.append(self.allocator, result) catch |err| {
-            std.debug.print("⚠️  Warning: Failed to store result {}: {}\n", .{ result.id, err });
+            std.debug.print("Warning: Failed to store result {}: {}\n", .{ result.id, err });
         };
     }
 

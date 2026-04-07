@@ -9,7 +9,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/lib.zig"),
         .target = target,
         .optimize = optimize,
-        .link_libc = true,
+        .link_libc = false,
     });
 
     // Tests
@@ -35,7 +35,7 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = builder.path(src),
                 .target = tgt,
                 .optimize = opt,
-                .link_libc = true,
+                .link_libc = false,
             });
             exe_module.addImport("http-sentinel", module);
 

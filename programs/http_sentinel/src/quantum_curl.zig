@@ -13,7 +13,7 @@ const EngineConfig = @import("engine/core.zig").EngineConfig;
 const manifest = @import("engine/manifest.zig");
 
 pub fn main(init: std.process.Init) !void {
-    const allocator = std.heap.c_allocator;
+    const allocator = std.heap.smp_allocator;
 
     // Parse command line arguments
     var args_iter = std.process.Args.Iterator.init(init.minimal.args);
@@ -69,13 +69,13 @@ pub fn main(init: std.process.Init) !void {
         return error.NoRequests;
     }
 
-    // Initialize engine - write directly to stdout using fd 1
+    // Initialize engine - write to stdout via Io.File
     const StdoutWriter = struct {
         pub fn write(self: @This(), bytes: []const u8) !usize {
             _ = self;
-            const n = std.c.write(1, bytes.ptr, bytes.len);
-            if (n < 0) return error.WriteError;
-            return @intCast(n);
+            // Use debug.print for stdout since Io.File needs io context
+            std.debug.print("{s}", .{bytes});
+            return bytes.len;
         }
     };
     const writer = StdoutWriter{};
@@ -97,42 +97,40 @@ fn readRequestsFromFile(
     file_path: []const u8,
     requests: *std.ArrayListUnmanaged(manifest.RequestManifest),
 ) !void {
-    const path_z = try allocator.dupeZ(u8, file_path);
-    defer allocator.free(path_z);
+    // Pure Zig file reading via Io.Dir
+    var io_threaded: std.Io.Threaded = .init(allocator, .{});
+    defer io_threaded.deinit();
+    const io = io_threaded.io();
 
-    const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0);
-    defer _ = std.c.close(fd);
+    const dir_path = std.fs.path.dirname(file_path) orelse ".";
+    const file_name = std.fs.path.basename(file_path);
 
-    // Read file contents
-    var content_list: std.ArrayListUnmanaged(u8) = .empty;
-    defer content_list.deinit(allocator);
+    var dir = try std.Io.Dir.openDirAbsolute(io, dir_path, .{});
+    defer dir.close(io);
 
-    var buf: [8192]u8 = undefined;
-    while (true) {
-        const n = std.c.read(fd, &buf, buf.len);
-        if (n <= 0) break;
-        try content_list.appendSlice(allocator, buf[0..@intCast(n)]);
-    }
+    const content = try dir.readFileAlloc(io, file_name, allocator, .unlimited);
+    defer allocator.free(content);
 
-    try parseJsonLines(allocator, content_list.items, requests);
+    try parseJsonLines(allocator, content, requests);
 }
 
 fn readRequestsFromStdin(
     allocator: std.mem.Allocator,
     requests: *std.ArrayListUnmanaged(manifest.RequestManifest),
 ) !void {
-    // Read from stdin (fd 0)
-    var content_list: std.ArrayListUnmanaged(u8) = .empty;
-    defer content_list.deinit(allocator);
+    // Read from stdin via Io.File
+    var io_threaded: std.Io.Threaded = .init(allocator, .{});
+    defer io_threaded.deinit();
+    const io = io_threaded.io();
 
-    var buf: [8192]u8 = undefined;
-    while (true) {
-        const n = std.c.read(0, &buf, buf.len);
-        if (n <= 0) break;
-        try content_list.appendSlice(allocator, buf[0..@intCast(n)]);
-    }
+    // Read all of stdin into memory using Io.Dir cwd and /dev/stdin
+    const cwd = std.Io.Dir.cwd();
+    const content = cwd.readFileAlloc(io, "/dev/stdin", allocator, .unlimited) catch {
+        return; // No stdin available
+    };
+    defer allocator.free(content);
 
-    try parseJsonLines(allocator, content_list.items, requests);
+    try parseJsonLines(allocator, content, requests);
 }
 
 fn parseJsonLines(

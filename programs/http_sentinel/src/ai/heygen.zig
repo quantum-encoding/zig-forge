@@ -134,9 +134,8 @@ pub const HeyGenClient = struct {
                 return common.AIError.ApiRequestFailed;
             }
 
-            // Sleep 5 seconds
-            const c = @cImport({ @cInclude("unistd.h"); });
-            _ = c.usleep(POLL_INTERVAL_MS * 1000);
+            // Sleep between polls (pure Zig via Io)
+            self.http_client.io().sleep(std.Io.Duration.fromMilliseconds(POLL_INTERVAL_MS), .awake) catch {};
         }
 
         return common.AIError.RequestTimeout;

@@ -10,24 +10,24 @@
 const std = @import("std");
 const common = @import("common.zig");
 
-/// Simple mutex wrapper using pthread (Mutex removed in Zig 0.16)
+/// Pure Zig mutex using atomics (no libc)
 const Mutex = struct {
-    inner: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER,
+    state: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
     pub fn lock(self: *Mutex) void {
-        _ = std.c.pthread_mutex_lock(&self.inner);
+        while (self.state.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) {
+            std.atomic.spinLoopHint();
+        }
     }
 
     pub fn unlock(self: *Mutex) void {
-        _ = std.c.pthread_mutex_unlock(&self.inner);
+        self.state.store(0, .release);
     }
 };
 
-/// Get current Unix timestamp in seconds (REALTIME clock)
-fn getCurrentTimestamp() i64 {
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.REALTIME, &ts);
-    return ts.sec;
+/// Get current Unix timestamp in seconds (pure Zig via Io)
+fn getCurrentTimestamp(io: std.Io) i64 {
+    return std.Io.Timestamp.now(io, .real).toSeconds();
 }
 
 /// Thread-safe response storage and management
@@ -62,6 +62,7 @@ pub const ResponseManager = struct {
     /// Store a response (thread-safe)
     pub fn storeResponse(
         self: *ResponseManager,
+        io: std.Io,
         conversation_id: []const u8,
         request: Request,
         response: common.AIResponse,
@@ -71,6 +72,7 @@ pub const ResponseManager = struct {
 
         const stored = try StoredResponse.init(
             self.allocator,
+            io,
             conversation_id,
             request,
             response,
@@ -206,6 +208,7 @@ pub const StoredResponse = struct {
 
     pub fn init(
         allocator: std.mem.Allocator,
+        io: std.Io,
         conversation_id: []const u8,
         request: Request,
         response: common.AIResponse,
@@ -213,7 +216,7 @@ pub const StoredResponse = struct {
         return .{
             .id = try common.generateId(allocator),
             .conversation_id = try allocator.dupe(u8, conversation_id),
-            .timestamp = getCurrentTimestamp(),
+            .timestamp = getCurrentTimestamp(io),
             .request = try request.clone(allocator),
             .response = response, // Ownership transferred
             .allocator = allocator,
@@ -325,6 +328,8 @@ pub const ConversationStats = struct {
 
 test "ResponseManager basic operations" {
     const allocator = std.testing.allocator;
+    var io_threaded = std.Io.Threaded.init_single_threaded;
+    const io = io_threaded.io();
 
     var manager = ResponseManager.init(allocator);
     defer manager.deinit();
@@ -343,7 +348,7 @@ test "ResponseManager basic operations" {
             .id = try allocator.dupe(u8, "msg-1"),
             .role = .assistant,
             .content = try allocator.dupe(u8, "Hi there!"),
-            .timestamp = getCurrentTimestamp(),
+            .timestamp = getCurrentTimestamp(io),
             .allocator = allocator,
         },
         .usage = .{
@@ -358,7 +363,7 @@ test "ResponseManager basic operations" {
         },
     };
 
-    try manager.storeResponse(conv_id, request, response);
+    try manager.storeResponse(io, conv_id, request, response);
 
     // Get conversation stats
     const stats = manager.getConversationStats(conv_id);
