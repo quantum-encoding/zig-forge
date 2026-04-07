@@ -527,6 +527,343 @@ fn callGenai(allocator: std.mem.Allocator, req: VertexChatRequest, max_tokens: u
     return parseGeminiResponse(allocator, resp.body, req.model);
 }
 
+// ── Vertex Streaming (SSE) ───────────────────────────────────
+// POST /qai/v1/vertex/chat/stream
+// Same routing as blocking, but uses streaming endpoints + SSE output.
+
+pub fn handleStream(
+    request: *http.Server.Request,
+    allocator: std.mem.Allocator,
+    gcp_ctx: ?*gcp.GcpContext,
+    store: ?*store_mod.Store,
+    auth: ?*const types.AuthContext,
+    io: ?std.Io,
+    _ledger: ?*ledger_mod.Ledger,
+    environ_map: *const std.process.Environ.Map,
+) void {
+    _ = _ledger; // Ledger recorded in billing.commit
+    const ctx = gcp_ctx orelse {
+        sendSseError(request, "GCP auth not available");
+        return;
+    };
+
+    // Parse request
+    const body = json_util.readBody(request, allocator, security.Limits.max_chat_body) catch {
+        sendSseError(request, "invalid request body");
+        return;
+    };
+    defer allocator.free(body);
+    if (body.len == 0) { sendSseError(request, "empty body"); return; }
+
+    const parsed = std.json.parseFromSlice(VertexChatRequest, allocator, body, .{
+        .ignore_unknown_fields = true, .allocate = .alloc_always,
+    }) catch { sendSseError(request, "invalid JSON"); return; };
+    defer parsed.deinit();
+    const req = parsed.value;
+
+    const max_tokens: u32 = if (req.max_tokens) |mt|
+        if (mt > 0 and mt <= @as(i32, @intCast(security.Limits.max_tokens_cap))) @intCast(mt) else 8192
+    else 8192;
+
+    // Billing reserve
+    var reservation_id: ?u64 = null;
+    if (store) |s| if (auth) |a| if (io) |io_handle| {
+        reservation_id = billing.reserve(s, io_handle, a, req.model, max_tokens, "/qai/v1/vertex/chat/stream") catch {
+            sendSseError(request, "insufficient balance");
+            return;
+        };
+    };
+
+    // Start SSE response
+    var stream_buf: [4096]u8 = undefined;
+    var body_writer = request.respondStreaming(&stream_buf, .{
+        .respond_options = .{
+            .status = .ok,
+            .extra_headers = &.{
+                .{ .name = "content-type", .value = "text/event-stream" },
+                .{ .name = "cache-control", .value = "no-cache" },
+                .{ .name = "access-control-allow-origin", .value = "*" },
+            },
+            .keep_alive = false,
+        },
+    }) catch {
+        if (reservation_id) |rid| if (store) |s| if (io) |io_handle| billing.rollback(s, io_handle, rid);
+        return;
+    };
+
+    const route = routeModel(req.model);
+
+    // Build streaming URL + payload
+    const stream_result = buildStreamingRequest(allocator, ctx, req, max_tokens, route, environ_map);
+    if (stream_result) |sr| {
+        defer allocator.free(sr.url);
+        defer allocator.free(sr.payload);
+
+        // Make streaming request
+        const sse_stream = if (sr.use_gcp_auth)
+            (ctx.postStreaming(sr.url, sr.payload) catch null)
+        else blk: {
+            // GenAI: plain HTTP (API key in URL), no GCP auth
+            var hc = @import("http-sentinel").HttpClient.init(allocator) catch break :blk null;
+            break :blk hc.postStreaming(sr.url, &.{
+                .{ .name = "Content-Type", .value = "application/json" },
+            }, sr.payload) catch {
+                hc.deinit();
+                break :blk null;
+            };
+        };
+
+        if (sse_stream) |stream| {
+            defer stream.deinit();
+
+            // Stream SSE events from provider to client
+            var chunk_count: u32 = 0;
+            while (stream.next()) |event| {
+                if (event.done) break;
+
+                // Extract text delta from the SSE JSON
+                const text_delta = extractDelta(allocator, event.data, route);
+                if (text_delta) |delta| {
+                    defer allocator.free(delta);
+                    if (delta.len > 0) {
+                        chunk_count += 1;
+                        const escaped = chat_mod.jsonEscape(allocator, delta) catch continue;
+                        defer allocator.free(escaped);
+                        const sse_event = std.fmt.allocPrint(allocator,
+                            "data: {{\"delta\":\"{s}\",\"index\":{d}}}\n\n", .{ escaped, chunk_count },
+                        ) catch continue;
+                        defer allocator.free(sse_event);
+                        body_writer.writer.writeAll(sse_event) catch break;
+                        body_writer.flush() catch break;
+                    }
+                }
+            }
+
+            // Commit billing (estimate tokens from chunks)
+            if (reservation_id) |rid| if (store) |s| if (io) |io_handle| {
+                const tier = if (auth) |a| a.account.tier else types.DevTier.free;
+                const est_in: u32 = @intCast(@min(@divFloor(body.len, 4) + 10, 100000));
+                billing.commit(s, io_handle, rid, req.model, est_in, chunk_count * 2, tier);
+            };
+        } else {
+            // Streaming failed — rollback
+            if (reservation_id) |rid| if (store) |s| if (io) |io_handle| billing.rollback(s, io_handle, rid);
+            body_writer.writer.writeAll("data: {\"error\":\"streaming_failed\"}\n\n") catch {};
+        }
+    } else |_| {
+        if (reservation_id) |rid| if (store) |s| if (io) |io_handle| billing.rollback(s, io_handle, rid);
+        body_writer.writer.writeAll("data: {\"error\":\"request_build_failed\"}\n\n") catch {};
+    }
+
+    body_writer.writer.writeAll("data: [DONE]\n\n") catch {};
+    body_writer.end() catch {};
+}
+
+const StreamReq = struct {
+    url: []u8,
+    payload: []u8,
+    use_gcp_auth: bool,
+};
+
+fn buildStreamingRequest(
+    allocator: std.mem.Allocator,
+    ctx: *gcp.GcpContext,
+    req: VertexChatRequest,
+    max_tokens: u32,
+    route: ModelRoute,
+    environ_map: *const std.process.Environ.Map,
+) !StreamReq {
+    _ = ctx;
+    switch (route) {
+        .gemini => {
+            // Vertex streaming: streamGenerateContent
+            const url = try std.fmt.allocPrint(allocator,
+                "https://{s}-aiplatform.googleapis.com/v1/projects/{s}/locations/{s}/publishers/google/models/{s}:streamGenerateContent",
+                .{ DEFAULT_REGION, PROJECT_ID, DEFAULT_REGION, req.model });
+            const payload = try buildGeminiPayload(allocator, req, max_tokens);
+            return .{ .url = url, .payload = payload, .use_gcp_auth = true };
+        },
+        .maas_openai => {
+            const url = try buildMaasUrl(allocator);
+            const payload = try buildMaasPayload(allocator, req, max_tokens, true); // stream=true
+            return .{ .url = url, .payload = payload, .use_gcp_auth = true };
+        },
+        .maas_mistral => {
+            // Mistral streaming: streamRawPredict
+            const url = try std.fmt.allocPrint(allocator,
+                "https://{s}-aiplatform.googleapis.com/v1/projects/{s}/locations/{s}/publishers/mistralai/models/{s}:streamRawPredict",
+                .{ MISTRAL_REGION, PROJECT_ID, MISTRAL_REGION, req.model });
+            const payload = try buildMaasPayload(allocator, req, max_tokens, true);
+            return .{ .url = url, .payload = payload, .use_gcp_auth = true };
+        },
+        .genai => {
+            const api_key = environ_map.get("GEMINI_API_KEY") orelse return error.ApiRequestFailed;
+            const url = try std.fmt.allocPrint(allocator,
+                "https://generativelanguage.googleapis.com/v1beta/models/{s}:streamGenerateContent?key={s}",
+                .{ req.model, api_key });
+            const payload = try buildGeminiPayload(allocator, req, max_tokens);
+            return .{ .url = url, .payload = payload, .use_gcp_auth = false };
+        },
+    }
+}
+
+fn buildGeminiPayload(allocator: std.mem.Allocator, req: VertexChatRequest, max_tokens: u32) ![]u8 {
+    var payload: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer payload.deinit(allocator);
+
+    try payload.appendSlice(allocator, "{\"contents\":[");
+    var first = true;
+    for (req.messages) |msg| {
+        const content = msg.content orelse continue;
+        if (std.mem.eql(u8, msg.role, "system")) continue;
+        if (!first) try payload.append(allocator, ',');
+        first = false;
+        const role = if (std.mem.eql(u8, msg.role, "assistant")) "model" else "user";
+        const escaped = try chat_mod.jsonEscape(allocator, content);
+        defer allocator.free(escaped);
+        const part = try std.fmt.allocPrint(allocator,
+            \\{{"role":"{s}","parts":[{{"text":"{s}"}}]}}
+        , .{ role, escaped });
+        defer allocator.free(part);
+        try payload.appendSlice(allocator, part);
+    }
+    try payload.appendSlice(allocator, "]");
+
+    if (req.system_prompt) |sys| {
+        const se = try chat_mod.jsonEscape(allocator, sys);
+        defer allocator.free(se);
+        const sp = try std.fmt.allocPrint(allocator,
+            \\,"systemInstruction":{{"parts":[{{"text":"{s}"}}]}}
+        , .{se});
+        defer allocator.free(sp);
+        try payload.appendSlice(allocator, sp);
+    }
+
+    const temp: f64 = if (req.temperature) |t| t else 0.7;
+    const gc = try std.fmt.allocPrint(allocator,
+        \\,"generationConfig":{{"temperature":{d:.2},"maxOutputTokens":{d}}}}}
+    , .{ temp, max_tokens });
+    defer allocator.free(gc);
+    try payload.appendSlice(allocator, gc);
+
+    return payload.toOwnedSlice(allocator);
+}
+
+fn buildMaasPayload(allocator: std.mem.Allocator, req: VertexChatRequest, max_tokens: u32, stream: bool) ![]u8 {
+    var payload: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer payload.deinit(allocator);
+
+    const me = try chat_mod.jsonEscape(allocator, req.model);
+    defer allocator.free(me);
+    try payload.appendSlice(allocator, "{\"model\":\"");
+    try payload.appendSlice(allocator, me);
+    try payload.appendSlice(allocator, "\",\"messages\":[");
+
+    const sys = req.system_prompt orelse "You are a helpful assistant. Respond in English unless the user explicitly writes in another language.";
+    const se = try chat_mod.jsonEscape(allocator, sys);
+    defer allocator.free(se);
+    try payload.appendSlice(allocator, "{\"role\":\"system\",\"content\":\"");
+    try payload.appendSlice(allocator, se);
+    try payload.appendSlice(allocator, "\"}");
+
+    for (req.messages) |msg| {
+        const content = msg.content orelse continue;
+        if (std.mem.eql(u8, msg.role, "system")) continue;
+        try payload.append(allocator, ',');
+        const role = if (std.mem.eql(u8, msg.role, "assistant")) "assistant" else "user";
+        const ce = try chat_mod.jsonEscape(allocator, content);
+        defer allocator.free(ce);
+        const part = try std.fmt.allocPrint(allocator,
+            \\{{"role":"{s}","content":"{s}"}}
+        , .{ role, ce });
+        defer allocator.free(part);
+        try payload.appendSlice(allocator, part);
+    }
+
+    const temp: f64 = if (req.temperature) |t| t else 0.7;
+    const cfg = try std.fmt.allocPrint(allocator,
+        \\],"max_tokens":{d},"temperature":{d:.2},"stream":{s}}}
+    , .{ max_tokens, temp, if (stream) "true" else "false" });
+    defer allocator.free(cfg);
+    try payload.appendSlice(allocator, cfg);
+
+    return payload.toOwnedSlice(allocator);
+}
+
+/// Extract text delta from a streaming SSE JSON event.
+/// Handles Gemini format (candidates[0].content.parts[*].text)
+/// and OpenAI format (choices[0].delta.content).
+fn extractDelta(allocator: std.mem.Allocator, data: []const u8, route: ModelRoute) ?[]u8 {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch return null;
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+
+    switch (route) {
+        .gemini, .genai => {
+            // Gemini streaming: candidates[0].content.parts[*].text
+            if (obj.get("candidates")) |candidates| {
+                if (candidates == .array and candidates.array.items.len > 0) {
+                    const c = candidates.array.items[0];
+                    if (c == .object) if (c.object.get("content")) |content| {
+                        if (content == .object) if (content.object.get("parts")) |parts| {
+                            if (parts == .array) {
+                                // Take last text part
+                                var i = parts.array.items.len;
+                                while (i > 0) {
+                                    i -= 1;
+                                    if (parts.array.items[i] == .object) {
+                                        if (parts.array.items[i].object.get("text")) |t| {
+                                            if (t == .string and t.string.len > 0)
+                                                return allocator.dupe(u8, t.string) catch null;
+                                        }
+                                    }
+                                }
+                            }
+                        };
+                    };
+                }
+            }
+            return null;
+        },
+        .maas_openai, .maas_mistral => {
+            // OpenAI streaming: choices[0].delta.content
+            if (obj.get("choices")) |choices| {
+                if (choices == .array and choices.array.items.len > 0) {
+                    const c = choices.array.items[0];
+                    if (c == .object) if (c.object.get("delta")) |delta| {
+                        if (delta == .object) {
+                            if (delta.object.get("content")) |ct| {
+                                if (ct == .string and ct.string.len > 0)
+                                    return allocator.dupe(u8, ct.string) catch null;
+                            }
+                            // Fallback: reasoning_content (GLM-5)
+                            if (delta.object.get("reasoning_content")) |rc| {
+                                if (rc == .string and rc.string.len > 0)
+                                    return allocator.dupe(u8, rc.string) catch null;
+                            }
+                        }
+                    };
+                }
+            }
+            return null;
+        },
+    }
+}
+
+fn sendSseError(request: *http.Server.Request, message: []const u8) void {
+    var buf: [1024]u8 = undefined;
+    var bw = request.respondStreaming(&buf, .{
+        .respond_options = .{ .status = .bad_request, .extra_headers = &.{
+            .{ .name = "content-type", .value = "text/event-stream" },
+            .{ .name = "access-control-allow-origin", .value = "*" },
+        }, .keep_alive = false },
+    }) catch return;
+    var eb: [256]u8 = undefined;
+    const ev = std.fmt.bufPrint(&eb, "data: {{\"error\":\"{s}\"}}\n\ndata: [DONE]\n\n", .{message}) catch "data: {\"error\":\"unknown\"}\n\ndata: [DONE]\n\n";
+    bw.writer.writeAll(ev) catch {};
+    bw.end() catch {};
+}
+
 fn chatError(err: anyerror) Response {
     return switch (err) {
         error.EmptyBody => .{ .status = .bad_request, .body =

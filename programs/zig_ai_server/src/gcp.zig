@@ -61,4 +61,9 @@ pub const GcpContext = struct {
     pub fn delete(self: *GcpContext, url: []const u8) !hs.HttpClient.Response {
         return gcp_auth.apiDelete(&self.provider, &self.http_client, self.allocator, url);
     }
+
+    /// Authenticated streaming POST — returns SSE event reader
+    pub fn postStreaming(self: *GcpContext, url: []const u8, body: []const u8) !*hs.HttpClient.StreamingResponse {
+        return gcp_auth.apiPostStreaming(&self.provider, &self.http_client, self.allocator, url, body);
+    }
 };

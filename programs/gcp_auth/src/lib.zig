@@ -505,6 +505,26 @@ pub fn apiPost(
     }, body);
 }
 
+/// Authenticated streaming POST — returns SSE event reader for real-time token streaming.
+/// Caller MUST call response.deinit() when done.
+pub fn apiPostStreaming(
+    auth: *TokenProvider,
+    client: *HttpClient,
+    allocator: std.mem.Allocator,
+    url: []const u8,
+    body: []const u8,
+) !*HttpClient.StreamingResponse {
+    const token = try auth.getToken(client);
+    const auth_header = try std.fmt.allocPrint(allocator, "Bearer {s}", .{token});
+    defer allocator.free(auth_header);
+
+    return client.postStreaming(url, &.{
+        .{ .name = "Authorization", .value = auth_header },
+        .{ .name = "Content-Type", .value = "application/json" },
+        .{ .name = "Accept", .value = "text/event-stream" },
+    }, body);
+}
+
 pub fn apiPut(
     auth: *TokenProvider,
     client: *HttpClient,
