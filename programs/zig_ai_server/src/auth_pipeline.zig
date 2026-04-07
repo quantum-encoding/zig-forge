@@ -147,19 +147,26 @@ pub fn authenticate(
     } };
 }
 
-/// Extract Bearer token from Authorization header.
-/// Returns null if header is missing or malformed.
+/// Extract API key from headers. Checks in order:
+/// 1. X-API-Key header (preferred — avoids clash with Cloud Run IAM)
+/// 2. Authorization: Bearer <token>
 fn extractBearerToken(request: *const http.Server.Request) ?[]const u8 {
+    var bearer_token: ?[]const u8 = null;
+
     var it = request.iterateHeaders();
     while (it.next()) |header| {
+        // X-API-Key takes priority (works alongside Cloud Run's Authorization header)
+        if (std.ascii.eqlIgnoreCase(header.name, "x-api-key")) {
+            const value = std.mem.trim(u8, header.value, " ");
+            if (value.len > 0) return value;
+        }
         if (std.ascii.eqlIgnoreCase(header.name, "authorization")) {
             const value = std.mem.trim(u8, header.value, " ");
             if (std.mem.startsWith(u8, value, "Bearer ")) {
                 const token = std.mem.trim(u8, value[7..], " ");
-                if (token.len > 0) return token;
+                if (token.len > 0) bearer_token = token;
             }
-            return null;
         }
     }
-    return null;
+    return bearer_token;
 }
