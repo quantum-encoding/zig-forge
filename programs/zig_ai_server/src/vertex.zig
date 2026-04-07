@@ -30,19 +30,51 @@ const ModelRoute = enum {
     gemini, // Vertex generateContent API (GCP auth)
     maas_openai, // Global OpenAI-compatible endpoint (GCP auth)
     maas_mistral, // Regional rawPredict (GCP auth)
+    dedicated, // Self-hosted on Vertex dedicated endpoint (GCP auth)
     genai, // Google GenAI / AI Studio (API key auth)
 };
 
+/// Dedicated endpoint registry — maps model names to endpoint IDs + regions.
+/// Add entries here when you deploy models on your own GPU clusters.
+const DedicatedEndpoint = struct {
+    model_prefix: []const u8,
+    endpoint_id: []const u8,
+    region: []const u8,
+    /// Inject into request body for models that need special config (e.g., GLM-5.1 thinking)
+    extra_params: ?[]const u8 = null,
+};
+
+/// Register dedicated endpoints here. Check Vertex AI console for endpoint IDs.
+const dedicated_endpoints = [_]DedicatedEndpoint{
+    // Example: GLM-5.1 on B200 cluster
+    // .{
+    //     .model_prefix = "glm-5.1",
+    //     .endpoint_id = "YOUR_ENDPOINT_ID",
+    //     .region = "us-east1",
+    //     .extra_params = "\"chat_template_kwargs\":{\"enable_thinking\":true,\"clear_thinking\":false}",
+    // },
+};
+
 fn routeModel(model: []const u8) ModelRoute {
+    // Check dedicated endpoints first
+    for (dedicated_endpoints) |ep| {
+        if (std.mem.startsWith(u8, model, ep.model_prefix)) return .dedicated;
+    }
     if (std.mem.startsWith(u8, model, "deepseek-ai/")) return .maas_openai;
     if (std.mem.startsWith(u8, model, "zai-org/")) return .maas_openai;
     if (std.mem.startsWith(u8, model, "qwen/")) return .maas_openai;
     if (std.mem.startsWith(u8, model, "codestral")) return .maas_mistral;
     if (std.mem.startsWith(u8, model, "mistral-")) return .maas_mistral;
-    // GenAI models: gemma-4, imagen-4, gemini-*-image, lyria, veo via AI Studio
     if (std.mem.startsWith(u8, model, "gemma-")) return .genai;
     if (std.mem.startsWith(u8, model, "imagen-")) return .genai;
     return .gemini;
+}
+
+fn getDedicatedEndpoint(model: []const u8) ?DedicatedEndpoint {
+    for (dedicated_endpoints) |ep| {
+        if (std.mem.startsWith(u8, model, ep.model_prefix)) return ep;
+    }
+    return null;
 }
 
 fn providerName(model: []const u8) []const u8 {
@@ -68,6 +100,13 @@ fn buildMaasUrl(allocator: std.mem.Allocator) ![]u8 {
     return std.fmt.allocPrint(allocator,
         "https://aiplatform.googleapis.com/v1beta1/projects/{s}/locations/global/endpoints/openapi/chat/completions",
         .{PROJECT_ID},
+    );
+}
+
+fn buildDedicatedUrl(allocator: std.mem.Allocator, ep: DedicatedEndpoint) ![]u8 {
+    return std.fmt.allocPrint(allocator,
+        "https://{s}-aiplatform.googleapis.com/v1/projects/{s}/locations/{s}/endpoints/{s}:predict",
+        .{ ep.region, PROJECT_ID, ep.region, ep.endpoint_id },
     );
 }
 
@@ -159,6 +198,7 @@ pub fn handle(
     const result = switch (route) {
         .gemini => callGemini(allocator, ctx, req, max_tokens),
         .maas_openai, .maas_mistral => callMaas(allocator, ctx, req, max_tokens, route),
+        .dedicated => callDedicated(allocator, ctx, req, max_tokens),
         .genai => callGenai(allocator, req, max_tokens, environ_map),
     };
 
@@ -454,6 +494,75 @@ fn parseMaasResponse(allocator: std.mem.Allocator, body: []u8, model: []const u8
     return .{ .json = json, .input_tokens = input_tokens, .output_tokens = output_tokens };
 }
 
+// ── Dedicated Endpoint (self-hosted on Vertex GPU cluster) ───
+// Uses OpenAI chat/completions format at a private endpoint URL.
+// Supports model-specific config injection (e.g., GLM-5.1 thinking mode).
+
+fn callDedicated(allocator: std.mem.Allocator, ctx: *gcp.GcpContext, req: VertexChatRequest, max_tokens: u32) !VertexResponse {
+    const ep = getDedicatedEndpoint(req.model) orelse return error.ApiRequestFailed;
+
+    const url = try buildDedicatedUrl(allocator, ep);
+    defer allocator.free(url);
+
+    // Build OpenAI-format payload with optional extra params
+    var payload: std.ArrayListUnmanaged(u8) = .empty;
+    defer payload.deinit(allocator);
+
+    const me = try chat_mod.jsonEscape(allocator, req.model);
+    defer allocator.free(me);
+    try payload.appendSlice(allocator, "{\"model\":\"");
+    try payload.appendSlice(allocator, me);
+    try payload.appendSlice(allocator, "\",\"messages\":[");
+
+    // System prompt
+    const sys = req.system_prompt orelse "You are a helpful assistant. Respond in English unless the user explicitly writes in another language.";
+    const se = try chat_mod.jsonEscape(allocator, sys);
+    defer allocator.free(se);
+    try payload.appendSlice(allocator, "{\"role\":\"system\",\"content\":\"");
+    try payload.appendSlice(allocator, se);
+    try payload.appendSlice(allocator, "\"}");
+
+    // Messages
+    for (req.messages) |msg| {
+        const content = msg.content orelse continue;
+        if (std.mem.eql(u8, msg.role, "system")) continue;
+        try payload.append(allocator, ',');
+        const role = if (std.mem.eql(u8, msg.role, "assistant")) "assistant" else "user";
+        const ce = try chat_mod.jsonEscape(allocator, content);
+        defer allocator.free(ce);
+        const part = try std.fmt.allocPrint(allocator,
+            \\{{"role":"{s}","content":"{s}"}}
+        , .{ role, ce });
+        defer allocator.free(part);
+        try payload.appendSlice(allocator, part);
+    }
+
+    // Close messages + config
+    const temp: f64 = if (req.temperature) |t| t else 0.7;
+    const cfg = try std.fmt.allocPrint(allocator,
+        \\],"max_tokens":{d},"temperature":{d:.2},"stream":false
+    , .{ max_tokens, temp });
+    defer allocator.free(cfg);
+    try payload.appendSlice(allocator, cfg);
+
+    // Inject model-specific extra params (e.g., GLM-5.1 thinking mode)
+    if (ep.extra_params) |extra| {
+        try payload.append(allocator, ',');
+        try payload.appendSlice(allocator, extra);
+    }
+
+    try payload.append(allocator, '}');
+
+    // Call dedicated endpoint
+    var resp = try ctx.post(url, payload.items);
+    defer resp.deinit();
+
+    if (@intFromEnum(resp.status) >= 400) return error.ApiRequestFailed;
+
+    // Parse OpenAI-format response (same as MaaS)
+    return parseMaasResponse(allocator, resp.body, req.model);
+}
+
 // ── Google GenAI (generativelanguage.googleapis.com) ─────────
 // API key auth (not GCP tokens). Used for Gemma 4, Imagen, consumer models.
 // Same generateContent format as Vertex Gemini, but different auth.
@@ -594,9 +703,9 @@ pub fn handleStream(
     const route = routeModel(req.model);
 
     // MaaS uses real SSE (data: prefix) → use postStreaming for token-by-token.
-    // Gemini/GenAI use JSON array stream (not SSE) → blocking call + single SSE event.
+    // MaaS/Dedicated use real SSE. Gemini/GenAI use JSON array → blocking + SSE output.
     switch (route) {
-        .maas_openai, .maas_mistral => {
+        .maas_openai, .maas_mistral, .dedicated => {
             const sr = buildStreamingRequest(allocator, ctx, req, max_tokens, route, environ_map) catch {
                 if (reservation_id) |rid| if (store) |s| if (io) |io_handle| billing.rollback(s, io_handle, rid);
                 body_writer.writer.writeAll("data: {\"error\":\"request_build_failed\"}\n\n") catch {};
@@ -703,6 +812,13 @@ fn buildStreamingRequest(
             const url = try std.fmt.allocPrint(allocator,
                 "https://{s}-aiplatform.googleapis.com/v1/projects/{s}/locations/{s}/publishers/mistralai/models/{s}:streamRawPredict",
                 .{ MISTRAL_REGION, PROJECT_ID, MISTRAL_REGION, req.model });
+            const payload = try buildMaasPayload(allocator, req, max_tokens, true);
+            return .{ .url = url, .payload = payload, .use_gcp_auth = true };
+        },
+        .dedicated => {
+            const ep = getDedicatedEndpoint(req.model) orelse return error.ApiRequestFailed;
+            // Dedicated endpoints use same URL for streaming (SGLang handles stream param)
+            const url = try buildDedicatedUrl(allocator, ep);
             const payload = try buildMaasPayload(allocator, req, max_tokens, true);
             return .{ .url = url, .payload = payload, .use_gcp_auth = true };
         },
@@ -835,7 +951,7 @@ fn extractDelta(allocator: std.mem.Allocator, data: []const u8, route: ModelRout
             }
             return null;
         },
-        .maas_openai, .maas_mistral => {
+        .maas_openai, .maas_mistral, .dedicated => {
             // OpenAI streaming: choices[0].delta.content
             if (obj.get("choices")) |choices| {
                 if (choices == .array and choices.array.items.len > 0) {
