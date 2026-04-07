@@ -171,34 +171,53 @@ pub const HttpClient = struct {
         request: http.Client.Request,
         transfer_buffer: [8192]u8,
         allocator: std.mem.Allocator,
+        done: bool = false,
+
+        /// Maximum non-data lines to skip before giving up.
+        /// Prevents CPU spin on malformed streams.
+        const MAX_SKIP_LINES: u32 = 500;
 
         /// Read the next SSE event from the stream.
-        /// Returns null at end-of-stream or after [DONE].
+        /// Returns null at end-of-stream, after [DONE], or on read error/timeout.
         /// Returned SseEvent.data is a borrowed slice valid until the next call.
         pub fn next(self: *StreamingResponse) ?SseEvent {
-            while (true) {
-                const line = self.reader.takeDelimiterExclusive('\n') catch return null;
+            if (self.done) return null;
+
+            var skip_count: u32 = 0;
+            while (skip_count < MAX_SKIP_LINES) {
+                const line = self.reader.takeDelimiterExclusive('\n') catch {
+                    // Read error, EOF, or timeout — stream is over
+                    self.done = true;
+                    return null;
+                };
 
                 // Skip empty lines (SSE event separator) and carriage returns
-                const trimmed = std.mem.trimEnd(u8, line, "\r");
-                if (trimmed.len == 0) continue;
+                const trimmed = std.mem.trimRight(u8, line, "\r");
+                if (trimmed.len == 0) {
+                    skip_count += 1;
+                    continue;
+                }
 
                 // SSE data line: "data: <payload>" or "data:<payload>"
                 if (std.mem.startsWith(u8, trimmed, "data:")) {
                     var payload = trimmed["data:".len..];
-                    // Skip optional space after "data:"
                     if (payload.len > 0 and payload[0] == ' ') payload = payload[1..];
 
-                    // Check for stream terminator
                     if (std.mem.eql(u8, payload, "[DONE]")) {
+                        self.done = true;
                         return SseEvent{ .data = payload, .done = true };
                     }
 
                     return SseEvent{ .data = payload, .done = false };
                 }
 
-                // Skip other SSE fields (event:, id:, retry:, comments starting with :)
+                // Non-data SSE field (event:, id:, retry:, comment) — skip
+                skip_count += 1;
             }
+
+            // Too many non-data lines — malformed stream, bail out
+            self.done = true;
+            return null;
         }
 
         /// Clean up the streaming response
@@ -247,8 +266,16 @@ pub const HttpClient = struct {
 
         var response = try stream.request.receiveHead(&.{});
         stream.status = response.head.status;
-        stream.reader = response.reader(&stream.transfer_buffer);
 
+        // If server returned an error status, don't try to parse SSE
+        const status_code = @intFromEnum(response.head.status);
+        if (status_code >= 400) {
+            stream.reader = response.reader(&stream.transfer_buffer);
+            stream.done = true; // Mark as done so next() returns null immediately
+            return stream;
+        }
+
+        stream.reader = response.reader(&stream.transfer_buffer);
         return stream;
     }
 
