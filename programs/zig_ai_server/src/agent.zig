@@ -268,7 +268,7 @@ fn runAgentLoop(
             results.items.len = 0;
 
             try messages.append(allocator, .{
-                .id = try hs.ai.common.generateId(allocator),
+                .id = try hs.ai.common.generateId(allocator, io),
                 .role = .user,
                 .content = try allocator.dupe(u8, ""),
                 .timestamp = 0,
