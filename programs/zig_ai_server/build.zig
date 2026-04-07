@@ -34,9 +34,9 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Start the AI API server");
     run_step.dependOn(&run.step);
 
-    // Tests
+    // Tests — dedicated test file covering security, billing, store, models
     const test_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
+        .root_source_file = b.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = false,
