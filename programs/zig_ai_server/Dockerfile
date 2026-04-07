@@ -44,7 +44,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /build/programs/zig_ai_server/zig-out/bin/zig-ai-server /usr/local/bin/zig-ai-server
 
 # Models CSV is embedded at compile time — copy for reference only
-COPY --from=builder /build/programs/zig_ai_server/data/models.csv /app/data/models.csv
+COPY --from=builder /build/programs/zig_ai_server/src/models.csv /app/data/models.csv
 
 # Data directory for WAL, snapshots, ledger
 RUN mkdir -p /app/data
