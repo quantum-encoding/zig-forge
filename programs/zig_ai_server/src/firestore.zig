@@ -42,9 +42,18 @@ pub fn saveAccount(ctx: *gcp.GcpContext, account: types.Account) !void {
     const body = try buildAccountDocument(ctx.allocator, account);
     defer ctx.allocator.free(body);
 
-    var resp = try ctx.patch(url, body);
+    var resp = ctx.patch(url, body) catch |err| {
+        std.debug.print("  Firestore saveAccount FAILED: {s} (account={s})\n", .{ @errorName(err), account.id.slice() });
+        return err;
+    };
     defer resp.deinit();
-    // 200 = updated, 404 would mean collection doesn't exist (auto-creates)
+
+    if (@intFromEnum(resp.status) >= 400) {
+        std.debug.print("  Firestore saveAccount HTTP {d} (account={s}): {s}\n", .{
+            @intFromEnum(resp.status), account.id.slice(),
+            if (resp.body.len > 200) resp.body[0..200] else resp.body,
+        });
+    }
 }
 
 pub fn loadAccount(ctx: *gcp.GcpContext, account_id: []const u8) !?types.Account {
@@ -93,8 +102,18 @@ pub fn saveKey(ctx: *gcp.GcpContext, key: types.ApiKey) !void {
     const body = try buildKeyDocument(ctx.allocator, key);
     defer ctx.allocator.free(body);
 
-    var resp = try ctx.patch(url, body);
+    var resp = ctx.patch(url, body) catch |err| {
+        std.debug.print("  Firestore saveKey FAILED: {s}\n", .{@errorName(err)});
+        return err;
+    };
     defer resp.deinit();
+
+    if (@intFromEnum(resp.status) >= 400) {
+        std.debug.print("  Firestore saveKey HTTP {d}: {s}\n", .{
+            @intFromEnum(resp.status),
+            if (resp.body.len > 200) resp.body[0..200] else resp.body,
+        });
+    }
 }
 
 pub fn updateAccountBalance(ctx: *gcp.GcpContext, account_id: []const u8, balance_ticks: i64) !void {
