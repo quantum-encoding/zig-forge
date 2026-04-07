@@ -9,6 +9,9 @@ const router = @import("router.zig");
 const models_mod = @import("models.zig");
 const account_mod = @import("account.zig");
 const security = @import("security.zig");
+const billing = @import("billing.zig");
+const store_mod = @import("store/store.zig");
+const types = @import("store/types.zig");
 const Response = router.Response;
 
 /// Inbound chat request (matches quantum-sdk ChatRequest)
@@ -68,7 +71,14 @@ pub fn resolveProvider(model: []const u8) ?ProviderInfo {
 }
 
 /// Handle POST /qai/v1/chat
-pub fn handle(request: *http.Server.Request, allocator: std.mem.Allocator, environ_map: *const std.process.Environ.Map) Response {
+pub fn handle(
+    request: *http.Server.Request,
+    allocator: std.mem.Allocator,
+    environ_map: *const std.process.Environ.Map,
+    io: ?std.Io,
+    store: ?*store_mod.Store,
+    auth: ?*const types.AuthContext,
+) Response {
     // Parse JSON body (1MB limit for chat)
     const body = json_util.readBody(request, allocator, security.Limits.max_chat_body) catch |err| {
         return errorResp(allocator, err);
@@ -203,16 +213,42 @@ pub fn handle(request: *http.Server.Request, allocator: std.mem.Allocator, envir
         };
     }
 
+    // Billing: reserve balance before provider call
+    var reservation_id: ?u64 = null;
+    if (store) |s| {
+        if (auth) |a| {
+            if (io) |io_handle| {
+                reservation_id = billing.reserve(s, io_handle, a, chat_req.model, config.max_tokens, "/qai/v1/chat") catch {
+                    return .{
+                        .status = .payment_required,
+                        .body =
+                        \\{"error":"insufficient_balance","message":"Not enough balance for this request"}
+                        ,
+                    };
+                };
+            }
+        }
+    }
+
     // Call the AI provider
     var response = if (context_messages.items.len > 0)
         client.sendMessageWithContext(prompt, context_messages.items, config) catch |err| {
+            // ROLLBACK on provider failure
+            if (reservation_id) |rid| if (store) |s| if (io) |io_handle| billing.rollback(s, io_handle, rid);
             return providerError(allocator, err);
         }
     else
         client.sendMessage(prompt, config) catch |err| {
+            if (reservation_id) |rid| if (store) |s| if (io) |io_handle| billing.rollback(s, io_handle, rid);
             return providerError(allocator, err);
         };
     defer response.deinit();
+
+    // COMMIT billing with actual token usage
+    if (reservation_id) |rid| if (store) |s| if (io) |io_handle| {
+        const tier = if (auth) |a| a.account.tier else types.DevTier.free;
+        billing.commit(s, io_handle, rid, chat_req.model, response.usage.input_tokens, response.usage.output_tokens, tier);
+    };
 
     // Build JSON response (matches quantum-sdk ChatResponse)
     const response_json = buildResponse(allocator, &response, chat_req.model) catch {
@@ -258,18 +294,8 @@ fn buildResponse(
 }
 
 fn costTicks(response: *hs.ai.AIResponse, model: []const u8) i64 {
-    const pricing = models_mod.getPricing(model);
-    // Integer arithmetic: price_per_million * tokens / 1M = USD cost
-    // Convert to ticks: USD * 10B = ticks
-    // Combined: (price_microdollars * tokens) / 1M * 10B
-    // We use millidollars (price * 1000) to stay in integer land
-    const input_millidollars: i64 = @intFromFloat(pricing.input * 1000.0);
-    const output_millidollars: i64 = @intFromFloat(pricing.output * 1000.0);
-    const input_ticks = @divFloor(input_millidollars * @as(i64, response.usage.input_tokens) * 10_000_000, 1_000_000);
-    const output_ticks = @divFloor(output_millidollars * @as(i64, response.usage.output_tokens) * 10_000_000, 1_000_000);
-    const total = input_ticks + output_ticks;
-    account_mod.recordTicks(total);
-    return total;
+    const cost = billing.actualCost(model, response.usage.input_tokens, response.usage.output_tokens, .free);
+    return cost.cost + cost.margin;
 }
 
 pub fn jsonEscape(allocator: std.mem.Allocator, input: []const u8) ![]u8 {

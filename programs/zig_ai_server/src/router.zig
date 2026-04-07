@@ -108,7 +108,7 @@ fn routeApiV1Authed(
     // ── Chat ────────────────────────────────────────────
     if (std.mem.eql(u8, path, "chat")) {
         if (method != .POST) return handlers.methodNotAllowed(request, allocator);
-        return chat.handle(request, allocator, environ_map);
+        return chat.handle(request, allocator, environ_map, io, store, auth);
     }
 
     // ── Agent ───────────────────────────────────────────
@@ -190,7 +190,7 @@ fn routeApiV1Legacy(
 ) Response {
     if (std.mem.eql(u8, path, "chat")) {
         if (method != .POST) return handlers.methodNotAllowed(request, allocator);
-        return chat.handle(request, allocator, environ_map);
+        return chat.handle(request, allocator, environ_map, null, null, null);
     }
     if (std.mem.eql(u8, path, "agent")) {
         if (method != .POST) return handlers.methodNotAllowed(request, allocator);
