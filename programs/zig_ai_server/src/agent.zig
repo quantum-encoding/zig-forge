@@ -283,12 +283,13 @@ fn runAgentLoop(
         }
     }
 
-    // Record cost
+    // Record cost — integer arithmetic, no floats in billing
     const pricing = models_mod.getPricing(model);
-    const cost_usd = (@as(f64, @floatFromInt(total_input_tokens)) / 1_000_000.0) * pricing.input +
-        (@as(f64, @floatFromInt(total_output_tokens)) / 1_000_000.0) * pricing.output;
-    account_mod.recordCost(cost_usd);
-    const cost_ticks: i64 = @intFromFloat(cost_usd * 10_000_000_000.0);
+    const input_millidollars: i64 = @intFromFloat(pricing.input * 1000.0);
+    const output_millidollars: i64 = @intFromFloat(pricing.output * 1000.0);
+    const cost_ticks = @divFloor(input_millidollars * @as(i64, total_input_tokens) * 10_000_000, 1_000_000) +
+        @divFloor(output_millidollars * @as(i64, total_output_tokens) * 10_000_000, 1_000_000);
+    account_mod.recordTicks(cost_ticks);
 
     const escaped = try chat_mod.jsonEscape(allocator, final_text);
     defer allocator.free(escaped);

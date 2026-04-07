@@ -1,30 +1,32 @@
 // Account endpoint — GET /qai/v1/account/balance
-// Tracks in-memory usage from API calls
+// Tracks in-memory usage from API calls using integer ticks (no floats in billing)
 
 const std = @import("std");
 const http = std.http;
 const router = @import("router.zig");
 const Response = router.Response;
 
-const TICKS_PER_USD: f64 = 10_000_000_000.0;
+// 1 USD = 10,000,000,000 ticks (10B). All billing in integer ticks.
+pub const TICKS_PER_USD: i64 = 10_000_000_000;
 
 /// Global usage tracker (atomic for thread safety)
-var total_cost_ticks: std.atomic.Value(i64) = .init(0);
+var total_spent_ticks: std.atomic.Value(i64) = .init(0);
 
-/// Record cost from a chat completion
-pub fn recordCost(cost_usd: f64) void {
-    const ticks: i64 = @intFromFloat(cost_usd * TICKS_PER_USD);
-    _ = total_cost_ticks.fetchAdd(ticks, .monotonic);
+/// Record cost in integer ticks (no floating point in billing path)
+pub fn recordTicks(ticks: i64) void {
+    _ = total_spent_ticks.fetchAdd(ticks, .monotonic);
 }
 
 /// GET /qai/v1/account/balance
 pub fn handleBalance(_: *http.Server.Request, allocator: std.mem.Allocator) Response {
-    const spent_ticks = total_cost_ticks.load(.acquire);
-    const spent_usd = @as(f64, @floatFromInt(spent_ticks)) / TICKS_PER_USD;
+    const spent = total_spent_ticks.load(.acquire);
+    // Integer division for USD: spent_ticks / TICKS_PER_USD
+    // We report microdollars for precision without floats
+    const spent_microdollars = @divFloor(spent * 1_000_000, TICKS_PER_USD);
 
     const json = std.fmt.allocPrint(allocator,
-        \\{{"balance_ticks":{d},"balance_usd":{d:.6},"spent_ticks":{d},"spent_usd":{d:.6}}}
-    , .{ -spent_ticks, -spent_usd, spent_ticks, spent_usd }) catch {
+        \\{{"spent_ticks":{d},"spent_microdollars":{d},"ticks_per_usd":{d}}}
+    , .{ spent, spent_microdollars, TICKS_PER_USD }) catch {
         return .{ .status = .internal_server_error, .body =
             \\{"error":"internal","message":"Failed to build balance response"}
         };

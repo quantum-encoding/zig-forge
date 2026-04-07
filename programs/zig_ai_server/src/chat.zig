@@ -259,10 +259,17 @@ fn buildResponse(
 
 fn costTicks(response: *hs.ai.AIResponse, model: []const u8) i64 {
     const pricing = models_mod.getPricing(model);
-    const cost = response.usage.estimateCost(pricing.input, pricing.output);
-    // Record for account balance tracking
-    account_mod.recordCost(cost);
-    return @intFromFloat(cost * 10_000_000_000.0);
+    // Integer arithmetic: price_per_million * tokens / 1M = USD cost
+    // Convert to ticks: USD * 10B = ticks
+    // Combined: (price_microdollars * tokens) / 1M * 10B
+    // We use millidollars (price * 1000) to stay in integer land
+    const input_millidollars: i64 = @intFromFloat(pricing.input * 1000.0);
+    const output_millidollars: i64 = @intFromFloat(pricing.output * 1000.0);
+    const input_ticks = @divFloor(input_millidollars * @as(i64, response.usage.input_tokens) * 10_000_000, 1_000_000);
+    const output_ticks = @divFloor(output_millidollars * @as(i64, response.usage.output_tokens) * 10_000_000, 1_000_000);
+    const total = input_ticks + output_ticks;
+    account_mod.recordTicks(total);
+    return total;
 }
 
 pub fn jsonEscape(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
@@ -290,14 +297,32 @@ pub fn jsonEscape(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
 }
 
 fn providerError(allocator: std.mem.Allocator, err: anyerror) Response {
-    const msg = std.fmt.allocPrint(allocator,
-        \\{{"error":"provider_error","message":"AI provider returned error: {s}"}}
-    , .{@errorName(err)}) catch
-        \\{"error":"provider_error","message":"AI provider request failed"}
-    ;
+    // Sanitize: map to generic categories, never leak raw error names
+    // which could reveal internal provider details or API key issues
+    _ = allocator;
+    const body = switch (err) {
+        error.AuthenticationFailed, error.InvalidApiKey =>
+            \\{"error":"provider_auth_error","message":"Provider authentication failed. Check server API key configuration."}
+        ,
+        error.RateLimitExceeded =>
+            \\{"error":"rate_limited","message":"Provider rate limit exceeded. Try again shortly."}
+        ,
+        error.RequestTimeout, error.ConnectionTimeout =>
+            \\{"error":"timeout","message":"Provider request timed out."}
+        ,
+        error.InvalidModel =>
+            \\{"error":"invalid_model","message":"The specified model is not available from the provider."}
+        ,
+        error.ServiceUnavailable, error.ProviderUnavailable =>
+            \\{"error":"provider_unavailable","message":"AI provider is temporarily unavailable."}
+        ,
+        else =>
+            \\{"error":"provider_error","message":"AI provider request failed."}
+        ,
+    };
     return .{
         .status = .bad_gateway,
-        .body = msg,
+        .body = body,
     };
 }
 

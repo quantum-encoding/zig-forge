@@ -21,22 +21,25 @@ pub const HttpClient = struct {
     io_threaded: *std.Io.Threaded,
     client: http.Client,
 
-    /// Initialize a new HTTP client
+    /// Initialize a new HTTP client (pure Zig — no libc)
     pub fn init(allocator: std.mem.Allocator) !HttpClient {
         const io_threaded = try allocator.create(std.Io.Threaded);
-        io_threaded.* = std.Io.Threaded.init(allocator, .{
-            .environ = .{ .block = .{ .slice = @ptrCast(std.mem.span(std.c.environ)) } },
-        });
-        const io = io_threaded.io();
+        io_threaded.* = std.Io.Threaded.init(allocator, .{});
+        const io_handle = io_threaded.io();
 
         return .{
             .allocator = allocator,
             .io_threaded = io_threaded,
             .client = http.Client{
                 .allocator = allocator,
-                .io = io,
+                .io = io_handle,
             },
         };
+    }
+
+    /// Get the Io handle for timing, sleep, random, etc.
+    pub fn io(self: *HttpClient) std.Io {
+        return self.io_threaded.io();
     }
 
     /// Clean up client resources
