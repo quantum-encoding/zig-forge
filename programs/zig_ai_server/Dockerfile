@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Zig 0.16 — uses zig-x86_64-linux URL format
-ARG ZIG_VERSION=0.16.0-dev.3128+ad7a02822
+ARG ZIG_VERSION=0.16.0-dev.3091+557caecaa
 RUN curl -fsSL "https://ziglang.org/builds/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" \
     | tar -xJ -C /opt \
     && ln -s "/opt/zig-x86_64-linux-${ZIG_VERSION}/zig" /usr/local/bin/zig
