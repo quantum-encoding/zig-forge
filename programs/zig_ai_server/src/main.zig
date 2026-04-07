@@ -141,10 +141,13 @@ pub fn main(init: std.process.Init) !void {
     var rate_limiter = ratelimit_mod.RateLimiter.init(allocator);
     auth_pipeline_mod.setRateLimiter(&rate_limiter);
 
-    // Set store + ledger + BQ audit in the router
+    // Set store + ledger + BQ audit + GCP context in the router
     router.setStore(&store);
     router.setLedger(&ledger);
     router.setBqAudit(&bq_audit);
+    if (gcp_ctx) |*ctx| {
+        router.setGcpContext(ctx);
+    }
 
     // Also set legacy key for backward compat
     if (legacy_key) |key| {

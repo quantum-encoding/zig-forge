@@ -15,6 +15,8 @@ const types = @import("store/types.zig");
 const ledger_mod = @import("ledger.zig");
 const bq_mod = @import("bq.zig");
 const stream = @import("stream.zig");
+const vertex = @import("vertex.zig");
+const gcp_mod = @import("gcp.zig");
 
 pub const Response = struct {
     status: http.Status = .ok,
@@ -42,6 +44,9 @@ var server_store: ?*store_mod.Store = null;
 /// Ledger for billing + audit
 var server_ledger: ?*ledger_mod.Ledger = null;
 
+/// GCP context for Vertex AI
+var server_gcp: ?*gcp_mod.GcpContext = null;
+
 /// BigQuery audit logger
 var server_bq: ?*bq_mod.BqAudit = null;
 
@@ -54,6 +59,10 @@ pub fn setStore(store: *store_mod.Store) void {
 
 pub fn setLedger(ledger: *ledger_mod.Ledger) void {
     server_ledger = ledger;
+}
+
+pub fn setGcpContext(ctx: *gcp_mod.GcpContext) void {
+    server_gcp = ctx;
 }
 
 pub fn setBqAudit(bq: *bq_mod.BqAudit) void {
@@ -138,6 +147,12 @@ fn routeApiV1Authed(
         if (method != .POST) return handlers.methodNotAllowed(request, allocator);
         stream.handleStream(request, allocator, environ_map, io, store, auth, server_ledger);
         return .{ .handled = true };
+    }
+
+    // ── Vertex AI (MaaS gateway — Gemini, DeepSeek, GLM-5, Qwen, Codestral) ──
+    if (std.mem.eql(u8, path, "vertex/chat")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        return vertex.handle(request, allocator, server_gcp, store, auth, io, server_ledger);
     }
 
     // ── Agent ───────────────────────────────────────────
