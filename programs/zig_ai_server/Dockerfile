@@ -18,6 +18,7 @@ RUN curl -fsSL "https://ziglang.org/builds/zig-x86_64-linux-${ZIG_VERSION}.tar.x
 # Copy source
 WORKDIR /build
 COPY programs/http_sentinel programs/http_sentinel
+COPY programs/gcp_auth programs/gcp_auth
 COPY programs/zig_ai_server programs/zig_ai_server
 
 # Build release binary

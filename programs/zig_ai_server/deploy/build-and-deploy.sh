@@ -18,11 +18,17 @@ trap "rm -rf ${BUILD_CTX}" EXIT
 # Copy only what the Dockerfile needs
 mkdir -p "${BUILD_CTX}/programs/http_sentinel"
 mkdir -p "${BUILD_CTX}/programs/zig_ai_server"
+mkdir -p "${BUILD_CTX}/programs/gcp_auth"
 
 # http_sentinel (dependency)
 cp -r "${REPO_ROOT}/programs/http_sentinel/src" "${BUILD_CTX}/programs/http_sentinel/src"
 cp "${REPO_ROOT}/programs/http_sentinel/build.zig" "${BUILD_CTX}/programs/http_sentinel/"
 cp "${REPO_ROOT}/programs/http_sentinel/build.zig.zon" "${BUILD_CTX}/programs/http_sentinel/"
+
+# gcp_auth (dependency)
+cp -r "${REPO_ROOT}/programs/gcp_auth/src" "${BUILD_CTX}/programs/gcp_auth/src"
+cp "${REPO_ROOT}/programs/gcp_auth/build.zig" "${BUILD_CTX}/programs/gcp_auth/"
+cp "${REPO_ROOT}/programs/gcp_auth/build.zig.zon" "${BUILD_CTX}/programs/gcp_auth/"
 
 # zig_ai_server
 cp -r "${REPO_ROOT}/programs/zig_ai_server/src" "${BUILD_CTX}/programs/zig_ai_server/src"
