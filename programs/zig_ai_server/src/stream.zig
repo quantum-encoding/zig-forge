@@ -110,16 +110,15 @@ pub fn handleStream(
     };
     defer client.deinit();
 
-    // Build config
+    // Build config — max_tokens dynamically capped by billing
     var config = hs.ai.RequestConfig{
         .model = chat_req.model,
         .stream = true,
     };
     if (chat_req.max_tokens) |mt| {
-        config.max_tokens = if (mt > 0 and mt <= @as(i32, @intCast(security.Limits.max_tokens_cap)))
-            @intCast(mt)
-        else
-            4096;
+        if (mt > 0 and mt <= @as(i32, @intCast(security.Limits.max_tokens_cap))) {
+            config.max_tokens = @intCast(mt);
+        }
     }
     if (chat_req.temperature) |t| {
         config.temperature = @floatCast(t);
@@ -140,13 +139,19 @@ pub fn handleStream(
         return;
     }
 
-    // Billing reserve
+    // Dynamic output capping: cap max_tokens to what the user can afford
     var reservation_id: ?u64 = null;
     if (store) |s| if (auth) |a| if (io) |io_handle| {
-        reservation_id = billing.reserve(s, io_handle, a, chat_req.model, config.max_tokens, "/qai/v1/chat/stream") catch {
+        const input_estimate = billing.estimateInputTokens(body.len);
+        const result = billing.reserveWithCap(
+            s, io_handle, a, chat_req.model,
+            config.max_tokens, input_estimate, "/qai/v1/chat/stream",
+        ) catch {
             sendSseError(request, "insufficient balance");
             return;
         };
+        reservation_id = result.reservation_id;
+        config.max_tokens = result.capped_max_tokens;
     };
 
     // Start SSE response — chunked transfer encoding

@@ -13,6 +13,8 @@ const billing = @import("billing.zig");
 const store_mod = @import("store/store.zig");
 const types = @import("store/types.zig");
 const ledger_mod = @import("ledger.zig");
+const vertex = @import("vertex.zig");
+const gcp_mod = @import("gcp.zig");
 const Response = router.Response;
 
 /// Inbound chat request (matches quantum-sdk ChatRequest)
@@ -80,6 +82,7 @@ pub fn handle(
     store: ?*store_mod.Store,
     auth: ?*const types.AuthContext,
     ledger: ?*ledger_mod.Ledger,
+    gcp_ctx: ?*gcp_mod.GcpContext,
 ) Response {
     // Parse JSON body (1MB limit for chat)
     const body = json_util.readBody(request, allocator, security.Limits.max_chat_body) catch |err| {
@@ -118,14 +121,11 @@ pub fn handle(
         };
     }
 
-    // Resolve provider from model name
+    // Resolve provider from model name.
+    // Direct providers: Claude, DeepSeek, Gemini, Grok, OpenAI.
+    // Everything else (GLM, Qwen, Codestral, etc.) routes through Vertex AI.
     const provider_info = resolveProvider(chat_req.model) orelse {
-        return .{
-            .status = .bad_request,
-            .body = makeError(allocator,
-                \\{"error":"invalid_model","message":"Unknown model. Prefix with: claude, deepseek, gemini, grok, gpt"}
-            ),
-        };
+        return vertex.handleParsed(allocator, gcp_ctx, store, auth, io, ledger, environ_map, body);
     };
 
     // Get API key from env
@@ -154,15 +154,15 @@ pub fn handle(
     };
     defer client.deinit();
 
-    // Build request config
+    // Build request config — max_tokens starts at provider default,
+    // then gets dynamically capped by billing to what the user can afford.
     var config = hs.ai.RequestConfig{
         .model = chat_req.model,
     };
     if (chat_req.max_tokens) |mt| {
-        config.max_tokens = if (mt > 0 and mt <= @as(i32, @intCast(security.Limits.max_tokens_cap)))
-            @intCast(mt)
-        else
-            4096;
+        if (mt > 0 and mt <= @as(i32, @intCast(security.Limits.max_tokens_cap))) {
+            config.max_tokens = @intCast(mt);
+        }
     }
     if (chat_req.temperature) |t| {
         config.temperature = @floatCast(t);
@@ -232,12 +232,18 @@ pub fn handle(
         };
     }
 
-    // Billing: reserve balance before provider call
+    // Dynamic output capping: calculate affordable tokens based on balance,
+    // cap max_tokens to what the user can afford, then reserve that amount.
     var reservation_id: ?u64 = null;
     if (store) |s| {
         if (auth) |a| {
             if (io) |io_handle| {
-                reservation_id = billing.reserve(s, io_handle, a, chat_req.model, config.max_tokens, "/qai/v1/chat") catch {
+                // Estimate input tokens from message payload size (~4 chars/token)
+                const input_estimate = billing.estimateInputTokens(body.len);
+                const result = billing.reserveWithCap(
+                    s, io_handle, a, chat_req.model,
+                    config.max_tokens, input_estimate, "/qai/v1/chat",
+                ) catch {
                     return .{
                         .status = .payment_required,
                         .body =
@@ -245,6 +251,8 @@ pub fn handle(
                         ,
                     };
                 };
+                reservation_id = result.reservation_id;
+                config.max_tokens = result.capped_max_tokens;
             }
         }
     }

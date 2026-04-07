@@ -347,6 +347,40 @@ pub fn handle(
         return chatError(err);
     };
     defer allocator.free(body);
+
+    return handleBody(allocator, ctx, store, auth, io, ledger, environ_map, body);
+}
+
+/// Handle a Vertex chat request with a pre-read body.
+/// Called from chat.zig when the model isn't a direct provider (GLM, Qwen, etc.).
+pub fn handleParsed(
+    allocator: std.mem.Allocator,
+    gcp_ctx: ?*gcp.GcpContext,
+    store: ?*store_mod.Store,
+    auth: ?*const types.AuthContext,
+    io: ?std.Io,
+    ledger: ?*ledger_mod.Ledger,
+    environ_map: *const std.process.Environ.Map,
+    body: []const u8,
+) Response {
+    const ctx = gcp_ctx orelse {
+        return .{ .status = .service_unavailable, .body =
+            \\{"error":"no_gcp","message":"GCP authentication not available. Vertex AI requires GCP credentials."}
+        };
+    };
+    return handleBody(allocator, ctx, store, auth, io, ledger, environ_map, body);
+}
+
+fn handleBody(
+    allocator: std.mem.Allocator,
+    ctx: *gcp.GcpContext,
+    store: ?*store_mod.Store,
+    auth: ?*const types.AuthContext,
+    io: ?std.Io,
+    ledger: ?*ledger_mod.Ledger,
+    environ_map: *const std.process.Environ.Map,
+    body: []const u8,
+) Response {
     if (body.len == 0) return chatError(error.EmptyBody);
 
     const parsed = std.json.parseFromSlice(VertexChatRequest, allocator, body, .{
@@ -362,19 +396,25 @@ pub fn handle(
         };
     }
 
-    // Billing reserve
-    const max_tokens: u32 = if (req.max_tokens) |mt|
+    // Dynamic output capping
+    var max_tokens: u32 = if (req.max_tokens) |mt|
         if (mt > 0 and mt <= @as(i32, @intCast(security.Limits.max_tokens_cap))) @intCast(mt) else 8192
     else
         8192;
 
     var reservation_id: ?u64 = null;
     if (store) |s| if (auth) |a| if (io) |io_handle| {
-        reservation_id = billing.reserve(s, io_handle, a, req.model, max_tokens, "/qai/v1/vertex/chat") catch {
+        const input_estimate = billing.estimateInputTokens(body.len);
+        const result = billing.reserveWithCap(
+            s, io_handle, a, req.model,
+            max_tokens, input_estimate, "/qai/v1/vertex/chat",
+        ) catch {
             return .{ .status = .payment_required, .body =
                 \\{"error":"insufficient_balance","message":"Not enough balance for this request"}
             };
         };
+        reservation_id = result.reservation_id;
+        max_tokens = result.capped_max_tokens;
     };
 
     // Route and build request
@@ -902,17 +942,23 @@ pub fn handleStream(
     defer parsed.deinit();
     const req = parsed.value;
 
-    const max_tokens: u32 = if (req.max_tokens) |mt|
+    var max_tokens: u32 = if (req.max_tokens) |mt|
         if (mt > 0 and mt <= @as(i32, @intCast(security.Limits.max_tokens_cap))) @intCast(mt) else 8192
     else 8192;
 
-    // Billing reserve
+    // Dynamic output capping
     var reservation_id: ?u64 = null;
     if (store) |s| if (auth) |a| if (io) |io_handle| {
-        reservation_id = billing.reserve(s, io_handle, a, req.model, max_tokens, "/qai/v1/vertex/chat/stream") catch {
+        const input_estimate = billing.estimateInputTokens(body.len);
+        const result = billing.reserveWithCap(
+            s, io_handle, a, req.model,
+            max_tokens, input_estimate, "/qai/v1/vertex/chat/stream",
+        ) catch {
             sendSseError(request, "insufficient balance");
             return;
         };
+        reservation_id = result.reservation_id;
+        max_tokens = result.capped_max_tokens;
     };
 
     // Start SSE response

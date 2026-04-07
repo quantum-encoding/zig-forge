@@ -149,10 +149,7 @@ fn routeApiV1Authed(
     // ── Chat ────────────────────────────────────────────
     if (std.mem.eql(u8, path, "chat")) {
         if (method != .POST) return handlers.methodNotAllowed(request, allocator);
-
-        // Check for streaming: peek at content-type or use a streaming-specific path
-        // For SSE, client can also POST to /qai/v1/chat/stream explicitly
-        return chat.handle(request, allocator, environ_map, io, store, auth, server_ledger);
+        return chat.handle(request, allocator, environ_map, io, store, auth, server_ledger, server_gcp);
     }
     // Explicit streaming endpoint
     if (std.mem.eql(u8, path, "chat/stream")) {
@@ -286,7 +283,7 @@ fn routeApiV1Legacy(
 ) Response {
     if (std.mem.eql(u8, path, "chat")) {
         if (method != .POST) return handlers.methodNotAllowed(request, allocator);
-        return chat.handle(request, allocator, environ_map, null, null, null, null);
+        return chat.handle(request, allocator, environ_map, null, null, null, null, server_gcp);
     }
     if (std.mem.eql(u8, path, "agent")) {
         if (method != .POST) return handlers.methodNotAllowed(request, allocator);
