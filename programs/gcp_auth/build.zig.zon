@@ -1,20 +1,16 @@
 .{
-    .name = .zig_ai_server,
+    .name = .gcp_auth,
     .version = "0.1.0",
-    .fingerprint = 0xb15a97bbe8a9c30c,
+    .fingerprint = 0x6da91a2da11a0de6,
     .minimum_zig_version = "0.14.0",
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src",
-        "data",
     },
     .dependencies = .{
         .http_sentinel = .{
             .path = "../http_sentinel",
-        },
-        .gcp_auth = .{
-            .path = "../gcp_auth",
         },
     },
 }

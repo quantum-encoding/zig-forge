@@ -11,6 +11,13 @@ pub fn build(b: *std.Build) void {
     });
     const http_sentinel_module = http_sentinel_dep.module("http-sentinel");
 
+    // GCP Auth dependency (for Google Cloud service authentication)
+    const gcp_auth_dep = b.dependency("gcp_auth", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const gcp_auth_module = gcp_auth_dep.module("gcp-auth");
+
     // Server executable
     const exe_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -19,6 +26,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = false,
     });
     exe_module.addImport("http-sentinel", http_sentinel_module);
+    exe_module.addImport("gcp-auth", gcp_auth_module);
 
     const exe = b.addExecutable(.{
         .name = "zig-ai-server",
