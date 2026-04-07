@@ -151,7 +151,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Init Vertex dedicated endpoint registry
     const vertex_mod = @import("vertex.zig");
-    vertex_mod.initRegistry(allocator);
+    vertex_mod.initRegistry(allocator, if (gcp_ctx) |*ctx| ctx else null);
 
     // Also set legacy key for backward compat
     if (legacy_key) |key| {

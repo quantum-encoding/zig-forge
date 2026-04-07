@@ -62,8 +62,79 @@ const SpinLock = struct {
 };
 var registry_lock: SpinLock = .{};
 
-pub fn initRegistry(allocator: std.mem.Allocator) void {
+var registry_gcp: ?*gcp.GcpContext = null;
+
+pub fn initRegistry(allocator: std.mem.Allocator, gcp_ctx: ?*gcp.GcpContext) void {
     registry_allocator = allocator;
+    registry_gcp = gcp_ctx;
+
+    // Load from Firestore on cold start
+    if (gcp_ctx) |ctx| {
+        loadEndpointsFromFirestore(allocator, ctx);
+    }
+}
+
+fn loadEndpointsFromFirestore(allocator: std.mem.Allocator, ctx: *gcp.GcpContext) void {
+    const url = std.fmt.allocPrint(allocator,
+        "https://firestore.googleapis.com/v1/projects/{s}/databases/(default)/documents/zig_dedicated_endpoints",
+        .{PROJECT_ID},
+    ) catch return;
+    defer allocator.free(url);
+
+    var resp = ctx.get(url) catch return;
+    defer resp.deinit();
+    if (resp.status != .ok) return;
+
+    // Parse Firestore list response
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, resp.body, .{}) catch return;
+    defer parsed.deinit();
+
+    const docs = parsed.value.object.get("documents") orelse return;
+    if (docs != .array) return;
+
+    for (docs.array.items) |doc| {
+        if (doc != .object) continue;
+        const fields = doc.object.get("fields") orelse continue;
+        if (fields != .object) continue;
+
+        const model_name = getFirestoreStr(fields, "model_name");
+        const endpoint_id = getFirestoreStr(fields, "endpoint_id");
+        const region = getFirestoreStr(fields, "region");
+        const display_name = getFirestoreStr(fields, "display_name");
+        const extra_params = getFirestoreStr(fields, "extra_params");
+        const active = getFirestoreBool(fields, "active");
+
+        if (model_name.len == 0 or endpoint_id.len == 0) continue;
+
+        endpoint_registry.append(allocator, .{
+            .model_name = allocator.dupe(u8, model_name) catch continue,
+            .endpoint_id = allocator.dupe(u8, endpoint_id) catch continue,
+            .region = allocator.dupe(u8, if (region.len > 0) region else DEFAULT_REGION) catch continue,
+            .display_name = allocator.dupe(u8, if (display_name.len > 0) display_name else model_name) catch continue,
+            .extra_params = if (extra_params.len > 0) (allocator.dupe(u8, extra_params) catch null) else null,
+            .active = active,
+        }) catch continue;
+    }
+
+    std.debug.print("  Loaded {d} dedicated endpoints from Firestore\n", .{endpoint_registry.items.len});
+}
+
+fn getFirestoreStr(fields: std.json.Value, key: []const u8) []const u8 {
+    if (fields != .object) return "";
+    const field = fields.object.get(key) orelse return "";
+    if (field != .object) return "";
+    const sv = field.object.get("stringValue") orelse return "";
+    if (sv == .string) return sv.string;
+    return "";
+}
+
+fn getFirestoreBool(fields: std.json.Value, key: []const u8) bool {
+    if (fields != .object) return true;
+    const field = fields.object.get(key) orelse return true;
+    if (field != .object) return true;
+    const bv = field.object.get("booleanValue") orelse return true;
+    if (bv == .bool) return bv.bool;
+    return true;
 }
 
 /// Register a dedicated endpoint (called from admin API)
@@ -93,6 +164,39 @@ pub fn registerEndpoint(ep: DedicatedEndpoint) !void {
         .extra_params = if (ep.extra_params) |p| try alloc.dupe(u8, p) else null,
         .active = ep.active,
     });
+
+    // Persist to Firestore
+    saveEndpointToFirestore(alloc, ep);
+}
+
+fn saveEndpointToFirestore(allocator: std.mem.Allocator, ep: DedicatedEndpoint) void {
+    const ctx = registry_gcp orelse return;
+    const url = std.fmt.allocPrint(allocator,
+        "https://firestore.googleapis.com/v1/projects/{s}/databases/(default)/documents/zig_dedicated_endpoints/{s}",
+        .{ PROJECT_ID, ep.model_name },
+    ) catch return;
+    defer allocator.free(url);
+
+    const extra_field = if (ep.extra_params) |p|
+        std.fmt.allocPrint(allocator,
+            \\,"extra_params":{{"stringValue":"{s}"}}
+        , .{p}) catch ""
+    else
+        "";
+    defer if (extra_field.len > 0) allocator.free(extra_field);
+
+    const body = std.fmt.allocPrint(allocator,
+        \\{{"fields":{{"model_name":{{"stringValue":"{s}"}},"endpoint_id":{{"stringValue":"{s}"}},"region":{{"stringValue":"{s}"}},"display_name":{{"stringValue":"{s}"}},"active":{{"booleanValue":{s}}}{s}}}}}
+    , .{
+        ep.model_name, ep.endpoint_id, ep.region,
+        if (ep.display_name.len > 0) ep.display_name else ep.model_name,
+        if (ep.active) "true" else "false",
+        extra_field,
+    }) catch return;
+    defer allocator.free(body);
+
+    var resp = ctx.patch(url, body) catch return;
+    resp.deinit();
 }
 
 /// Remove a dedicated endpoint
@@ -102,9 +206,24 @@ pub fn removeEndpoint(model_name: []const u8) void {
     for (endpoint_registry.items, 0..) |item, i| {
         if (std.mem.eql(u8, item.model_name, model_name)) {
             _ = endpoint_registry.orderedRemove(i);
+            // Delete from Firestore
+            deleteEndpointFromFirestore(model_name);
             return;
         }
     }
+}
+
+fn deleteEndpointFromFirestore(model_name: []const u8) void {
+    const alloc = registry_allocator orelse return;
+    const ctx = registry_gcp orelse return;
+    const url = std.fmt.allocPrint(alloc,
+        "https://firestore.googleapis.com/v1/projects/{s}/databases/(default)/documents/zig_dedicated_endpoints/{s}",
+        .{ PROJECT_ID, model_name },
+    ) catch return;
+    defer alloc.free(url);
+
+    var resp = ctx.delete(url) catch return;
+    resp.deinit();
 }
 
 /// List all dedicated endpoints (for admin API)
