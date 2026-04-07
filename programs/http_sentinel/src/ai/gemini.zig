@@ -200,7 +200,7 @@ pub const GeminiClient = struct {
                     try args_stream.write(fn_args);
 
                     // Gemini doesn't provide tool call IDs, generate one
-                    const call_id = try common.generateId(self.allocator);
+                    const call_id = try common.generateId(self.allocator, self.http_client.io());
 
                     try tool_calls_list.append(self.allocator, .{
                         .id = call_id,
@@ -223,7 +223,7 @@ pub const GeminiClient = struct {
 
             return common.AIResponse{
                 .message = .{
-                    .id = try common.generateId(self.allocator),
+                    .id = try common.generateId(self.allocator, self.http_client.io()),
                     .role = .assistant,
                     .content = if (text_content.items.len > 0)
                         try text_content.toOwnedSlice(self.allocator)

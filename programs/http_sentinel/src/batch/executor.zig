@@ -20,8 +20,16 @@ const vertex = @import("../ai/vertex.zig");
 const Mutex = struct {
     state: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
+    const MAX_SPIN: u32 = 1000;
+
     pub fn lock(self: *Mutex) void {
+        var spin: u32 = 0;
         while (self.state.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) {
+            spin += 1;
+            if (spin >= MAX_SPIN) {
+                std.Thread.yield() catch {};
+                spin = 0;
+            }
             std.atomic.spinLoopHint();
         }
     }
@@ -110,6 +118,9 @@ pub const BatchExecutor = struct {
 
     /// Execute all requests using thread pool
     pub fn execute(self: *BatchExecutor) !void {
+        if (self.config.concurrency == 0) return error.InvalidConcurrency;
+        if (self.requests.len == 0) return;
+
         // Create a thread-local Io for timing in the main execute thread
         var io_threaded: std.Io.Threaded = .init(self.allocator, .{});
         defer io_threaded.deinit();

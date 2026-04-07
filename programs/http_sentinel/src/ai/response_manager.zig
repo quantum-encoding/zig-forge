@@ -14,8 +14,16 @@ const common = @import("common.zig");
 const Mutex = struct {
     state: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
+    const MAX_SPIN: u32 = 1000;
+
     pub fn lock(self: *Mutex) void {
+        var spin: u32 = 0;
         while (self.state.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) {
+            spin += 1;
+            if (spin >= MAX_SPIN) {
+                std.Thread.yield() catch {};
+                spin = 0;
+            }
             std.atomic.spinLoopHint();
         }
     }
@@ -214,7 +222,7 @@ pub const StoredResponse = struct {
         response: common.AIResponse,
     ) !StoredResponse {
         return .{
-            .id = try common.generateId(allocator),
+            .id = try common.generateId(allocator, io),
             .conversation_id = try allocator.dupe(u8, conversation_id),
             .timestamp = getCurrentTimestamp(io),
             .request = try request.clone(allocator),

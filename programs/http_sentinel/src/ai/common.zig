@@ -728,8 +728,8 @@ pub const ConversationContext = struct {
     messages: std.ArrayList(AIMessage),
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator) !ConversationContext {
-        const id = try generateId(allocator);
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) !ConversationContext {
+        const id = try generateId(allocator, io);
         return ConversationContext{
             .id = id,
             .messages = std.ArrayList(AIMessage).empty,
@@ -765,21 +765,11 @@ pub const ConversationContext = struct {
 };
 
 /// Utility: Generate a unique ID for messages/conversations (pure Zig — no libc)
-/// Uses CSPRNG seeded from stack address entropy for unique IDs
-pub fn generateId(allocator: std.mem.Allocator) ![]u8 {
+/// Uses io.random() for cryptographically secure randomness
+pub fn generateId(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
     var uuid_bytes: [16]u8 = undefined;
-    var seed: [std.Random.DefaultCsprng.secret_seed_length]u8 = undefined;
-    const addr: usize = @intFromPtr(&seed);
-    var idx: usize = 0;
-    while (idx < seed.len) : (idx += 1) {
-        seed[idx] = @truncate(addr +% idx);
-    }
-    var rng = std.Random.DefaultCsprng.init(seed);
-    rng.random().bytes(&uuid_bytes);
-
-    // Format as hex string
-    const id = try std.fmt.allocPrint(allocator, "{x:0>32}", .{std.mem.readInt(u128, &uuid_bytes, .big)});
-    return id;
+    io.random(&uuid_bytes);
+    return try std.fmt.allocPrint(allocator, "{x:0>32}", .{std.mem.readInt(u128, &uuid_bytes, .big)});
 }
 
 /// Utility: Escape JSON string

@@ -293,7 +293,7 @@ pub const VertexClient = struct {
                     const elapsed_ns = timer.read();
                     return common.AIResponse{
                         .message = .{
-                            .id = try common.generateId(self.allocator),
+                            .id = try common.generateId(self.allocator, self.http_client.io()),
                             .role = .assistant,
                             .content = try func_result.toOwnedSlice(self.allocator),
                             .timestamp = getCurrentTimestamp(self.http_client.io()),
@@ -335,7 +335,7 @@ pub const VertexClient = struct {
 
             return common.AIResponse{
                 .message = .{
-                    .id = try common.generateId(self.allocator),
+                    .id = try common.generateId(self.allocator, self.http_client.io()),
                     .role = .assistant,
                     .content = try text_content.toOwnedSlice(self.allocator),
                     .timestamp = getCurrentTimestamp(self.http_client.io()),
@@ -450,7 +450,7 @@ pub const VertexClient = struct {
 
         return common.AIResponse{
             .message = .{
-                .id = try common.generateId(self.allocator),
+                .id = try common.generateId(self.allocator, self.http_client.io()),
                 .role = .assistant,
                 .content = try self.allocator.dupe(u8, text),
                 .timestamp = getCurrentTimestamp(self.http_client.io()),

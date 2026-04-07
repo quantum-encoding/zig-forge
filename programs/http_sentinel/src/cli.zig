@@ -164,7 +164,7 @@ pub const CLI = struct {
         var io_threaded = std.Io.Threaded.init_single_threaded;
         const io = io_threaded.io();
 
-        var conversation = try ai.ConversationContext.init(self.allocator);
+        var conversation = try ai.ConversationContext.init(self.allocator, io);
         defer conversation.deinit();
 
         const stdin_file = std.Io.File.stdin();
@@ -193,7 +193,7 @@ pub const CLI = struct {
                     break;
                 } else if (std.mem.eql(u8, trimmed, "/clear")) {
                     conversation.deinit();
-                    conversation = try ai.ConversationContext.init(self.allocator);
+                    conversation = try ai.ConversationContext.init(self.allocator, io);
                     std.debug.print("🗑️  Conversation cleared\n", .{});
                     continue;
                 } else if (std.mem.eql(u8, trimmed, "/help")) {
@@ -221,7 +221,7 @@ pub const CLI = struct {
                     if (Provider.fromString(provider_trimmed)) |new_provider| {
                         self.config.provider = new_provider;
                         conversation.deinit();
-                        conversation = try ai.ConversationContext.init(self.allocator);
+                        conversation = try ai.ConversationContext.init(self.allocator, io);
                         std.debug.print("Switched to {s}\n", .{new_provider.displayName()});
                     } else {
                         std.debug.print("Unknown provider\n", .{});
@@ -247,7 +247,7 @@ pub const CLI = struct {
 
             // Add to conversation history
             const user_msg = ai.AIMessage{
-                .id = try ai.common.generateId(self.allocator),
+                .id = try ai.common.generateId(self.allocator, io),
                 .role = .user,
                 .content = try self.allocator.dupe(u8, trimmed),
                 .timestamp = getCurrentTimestamp(io),

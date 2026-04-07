@@ -10,8 +10,16 @@ const std = @import("std");
 const Mutex = struct {
     state: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
+    const MAX_SPIN: u32 = 1000;
+
     pub fn lock(self: *Mutex) void {
+        var spin: u32 = 0;
         while (self.state.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) {
+            spin += 1;
+            if (spin >= MAX_SPIN) {
+                std.Thread.yield() catch {};
+                spin = 0;
+            }
             std.atomic.spinLoopHint();
         }
     }
@@ -284,14 +292,21 @@ pub const RetryEngine = struct {
     }
 
     fn calculateBackoffDelay(self: *RetryEngine, attempt: u32) u64 {
-        var delay = @as(f64, @floatFromInt(self.config.base_delay_ms)) *
-                   std.math.pow(f64, self.config.backoff_multiplier, @as(f64, @floatFromInt(attempt)));
+        const base = @as(f64, @floatFromInt(self.config.base_delay_ms));
+        const exp = @as(f64, @floatFromInt(attempt));
+        var delay = base * std.math.pow(f64, self.config.backoff_multiplier, exp);
+
+        // Guard against infinity/NaN from pow overflow
+        if (!std.math.isFinite(delay) or delay < 0) {
+            delay = @as(f64, @floatFromInt(self.config.max_delay_ms));
+        }
 
         // Cap at max delay
         delay = @min(delay, @as(f64, @floatFromInt(self.config.max_delay_ms)));
 
-        // Add jitter to prevent thundering herd (pure Zig random via Io)
-        const jitter_range = delay * self.config.jitter_factor;
+        // Add jitter — clamp factor to [0, 1] to prevent negative delays
+        const jitter_factor = std.math.clamp(self.config.jitter_factor, 0.0, 1.0);
+        const jitter_range = delay * jitter_factor;
         var rand_bytes: [8]u8 = undefined;
         self.io.random(&rand_bytes);
         const rand_u64 = std.mem.readInt(u64, &rand_bytes, .little);
@@ -299,7 +314,8 @@ pub const RetryEngine = struct {
         const jitter = (rand_frac - 0.5) * jitter_range;
         delay += jitter;
 
-        return @max(1, @as(u64, @intFromFloat(delay)));
+        // Final clamp — ensure positive, prevent @intFromFloat UB on negative
+        return @max(1, @as(u64, @intFromFloat(@max(1.0, delay))));
     }
 
     /// Get current rate limiter status

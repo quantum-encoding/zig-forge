@@ -259,7 +259,7 @@ pub const GrokClient = struct {
                     .id = if (parsed.value.object.get("id")) |id|
                         try self.allocator.dupe(u8, id.string)
                     else
-                        try common.generateId(self.allocator),
+                        try common.generateId(self.allocator, self.http_client.io()),
                     .role = .assistant,
                     .content = try text_content.toOwnedSlice(self.allocator),
                     .timestamp = getCurrentTimestamp(self.http_client.io()),
@@ -638,7 +638,7 @@ pub const GrokClient = struct {
                 .id = if (parsed.value.object.get("id")) |id|
                     try self.allocator.dupe(u8, id.string)
                 else
-                    try common.generateId(self.allocator),
+                    try common.generateId(self.allocator, self.http_client.io()),
                 .role = .assistant,
                 .content = if (text_content.items.len > 0)
                     try text_content.toOwnedSlice(self.allocator)

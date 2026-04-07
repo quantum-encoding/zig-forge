@@ -157,9 +157,16 @@ const TestServer = struct {
             } else if (std.mem.startsWith(u8, target, "/status/")) {
                 // Return specific status code
                 const code_str = target[8..];
-                const code = std.fmt.parseInt(u16, code_str, 10) catch 200;
-                const status: http.Status = @enumFromInt(code);
-                request.respond("", .{ .status = status }) catch break;
+                const code = std.fmt.parseInt(u16, code_str, 10) catch {
+                    request.respond("invalid status code", .{ .status = .bad_request }) catch break;
+                    continue;
+                };
+                if (code < 100 or code > 599) {
+                    request.respond("invalid status code", .{ .status = .bad_request }) catch break;
+                } else {
+                    const status: http.Status = @enumFromInt(code);
+                    request.respond("", .{ .status = status }) catch break;
+                }
             } else if (std.mem.startsWith(u8, target, "/bytes/")) {
                 // Return N bytes of data
                 const n_str = target[7..];

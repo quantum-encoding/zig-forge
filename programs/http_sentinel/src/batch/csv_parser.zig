@@ -18,6 +18,7 @@ pub const ParseError = error{
     InvalidTemperature,
     InvalidMaxTokens,
     UnexpectedEndOfFile,
+    UnterminatedQuote,
 };
 
 /// Parse CSV file into BatchRequest array (pure Zig — no libc)
@@ -217,6 +218,11 @@ fn parseFields(allocator: std.mem.Allocator, line: []const u8) ![][]const u8 {
         } else {
             try field.append(allocator, c);
         }
+    }
+
+    // Reject unclosed quotes — attacker-crafted CSV defense
+    if (in_quotes) {
+        return error.UnterminatedQuote;
     }
 
     // Last field

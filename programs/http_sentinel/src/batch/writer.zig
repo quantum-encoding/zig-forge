@@ -9,6 +9,19 @@
 const std = @import("std");
 const types = @import("types.zig");
 
+/// Reject paths containing directory traversal sequences
+fn validateOutputPath(path: []const u8) !void {
+    var it = std.mem.splitScalar(u8, path, '/');
+    while (it.next()) |component| {
+        if (std.mem.eql(u8, component, "..")) return error.PathTraversal;
+    }
+    // Also check backslash separators
+    var it2 = std.mem.splitScalar(u8, path, '\\');
+    while (it2.next()) |component| {
+        if (std.mem.eql(u8, component, "..")) return error.PathTraversal;
+    }
+}
+
 /// Write batch results to CSV file
 pub fn writeResults(
     allocator: std.mem.Allocator,
@@ -16,6 +29,8 @@ pub fn writeResults(
     output_path: []const u8,
     full_responses: bool,
 ) !void {
+    try validateOutputPath(output_path);
+
     var io_threaded: std.Io.Threaded = .init(allocator, .{});
     defer io_threaded.deinit();
     const io = io_threaded.io();

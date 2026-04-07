@@ -16,8 +16,16 @@ const manifest = @import("manifest.zig");
 const Mutex = struct {
     state: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
+    const MAX_SPIN: u32 = 1000;
+
     pub fn lock(self: *Mutex) void {
+        var spin: u32 = 0;
         while (self.state.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) {
+            spin += 1;
+            if (spin >= MAX_SPIN) {
+                std.Thread.yield() catch {};
+                spin = 0;
+            }
             std.atomic.spinLoopHint();
         }
     }
@@ -143,6 +151,7 @@ pub fn Engine(comptime WriterType: type) type {
                 self.writeError(request.id, "Memory allocation failed");
                 return;
             };
+            defer response.deinit();
 
             // Execute request with retry
             const max_retries = request.max_retries orelse self.config.default_max_retries;
@@ -181,7 +190,6 @@ pub fn Engine(comptime WriterType: type) type {
             response.latency_ms = @intCast(elapsed_ns / std.time.ns_per_ms);
 
             self.writeResponse(&response);
-            response.deinit();
         }
 
         /// Execute HTTP request
