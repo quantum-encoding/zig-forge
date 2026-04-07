@@ -593,66 +593,76 @@ pub fn handleStream(
 
     const route = routeModel(req.model);
 
-    // Build streaming URL + payload
-    const stream_result = buildStreamingRequest(allocator, ctx, req, max_tokens, route, environ_map);
-    if (stream_result) |sr| {
-        defer allocator.free(sr.url);
-        defer allocator.free(sr.payload);
-
-        // Make streaming request
-        const sse_stream = if (sr.use_gcp_auth)
-            (ctx.postStreaming(sr.url, sr.payload) catch null)
-        else blk: {
-            // GenAI: plain HTTP (API key in URL), no GCP auth
-            var hc = @import("http-sentinel").HttpClient.init(allocator) catch break :blk null;
-            break :blk hc.postStreaming(sr.url, &.{
-                .{ .name = "Content-Type", .value = "application/json" },
-            }, sr.payload) catch {
-                hc.deinit();
-                break :blk null;
+    // MaaS uses real SSE (data: prefix) → use postStreaming for token-by-token.
+    // Gemini/GenAI use JSON array stream (not SSE) → blocking call + single SSE event.
+    switch (route) {
+        .maas_openai, .maas_mistral => {
+            const sr = buildStreamingRequest(allocator, ctx, req, max_tokens, route, environ_map) catch {
+                if (reservation_id) |rid| if (store) |s| if (io) |io_handle| billing.rollback(s, io_handle, rid);
+                body_writer.writer.writeAll("data: {\"error\":\"request_build_failed\"}\n\n") catch {};
+                body_writer.writer.writeAll("data: [DONE]\n\n") catch {};
+                body_writer.end() catch {};
+                return;
             };
-        };
+            defer allocator.free(sr.url);
+            defer allocator.free(sr.payload);
 
-        if (sse_stream) |stream| {
-            defer stream.deinit();
+            if (ctx.postStreaming(sr.url, sr.payload)) |stream| {
+                defer stream.deinit();
 
-            // Stream SSE events from provider to client
-            var chunk_count: u32 = 0;
-            while (stream.next()) |event| {
-                if (event.done) break;
-
-                // Extract text delta from the SSE JSON
-                const text_delta = extractDelta(allocator, event.data, route);
-                if (text_delta) |delta| {
-                    defer allocator.free(delta);
-                    if (delta.len > 0) {
-                        chunk_count += 1;
-                        const escaped = chat_mod.jsonEscape(allocator, delta) catch continue;
-                        defer allocator.free(escaped);
-                        const sse_event = std.fmt.allocPrint(allocator,
-                            "data: {{\"delta\":\"{s}\",\"index\":{d}}}\n\n", .{ escaped, chunk_count },
-                        ) catch continue;
-                        defer allocator.free(sse_event);
-                        body_writer.writer.writeAll(sse_event) catch break;
-                        body_writer.flush() catch break;
+                var chunk_count: u32 = 0;
+                while (stream.next()) |event| {
+                    if (event.done) break;
+                    if (extractDelta(allocator, event.data, route)) |delta| {
+                        defer allocator.free(delta);
+                        if (delta.len > 0) {
+                            chunk_count += 1;
+                            const escaped = chat_mod.jsonEscape(allocator, delta) catch continue;
+                            defer allocator.free(escaped);
+                            const sse_event = std.fmt.allocPrint(allocator,
+                                "data: {{\"delta\":\"{s}\",\"index\":{d}}}\n\n", .{ escaped, chunk_count },
+                            ) catch continue;
+                            defer allocator.free(sse_event);
+                            body_writer.writer.writeAll(sse_event) catch break;
+                            body_writer.flush() catch break;
+                        }
                     }
                 }
-            }
 
-            // Commit billing (estimate tokens from chunks)
-            if (reservation_id) |rid| if (store) |s| if (io) |io_handle| {
-                const tier = if (auth) |a| a.account.tier else types.DevTier.free;
-                const est_in: u32 = @intCast(@min(@divFloor(body.len, 4) + 10, 100000));
-                billing.commit(s, io_handle, rid, req.model, est_in, chunk_count * 2, tier);
+                if (reservation_id) |rid| if (store) |s| if (io) |io_handle| {
+                    const tier = if (auth) |a| a.account.tier else types.DevTier.free;
+                    const est_in: u32 = @intCast(@min(@divFloor(body.len, 4) + 10, 100000));
+                    billing.commit(s, io_handle, rid, req.model, est_in, @max(chunk_count * 2, 1), tier);
+                };
+            } else |_| {
+                if (reservation_id) |rid| if (store) |s| if (io) |io_handle| billing.rollback(s, io_handle, rid);
+                body_writer.writer.writeAll("data: {\"error\":\"streaming_failed\"}\n\n") catch {};
+            }
+        },
+        .gemini, .genai => {
+            // Gemini/GenAI return JSON array stream (not SSE format).
+            // Use blocking call + output as SSE event.
+            const result = switch (route) {
+                .genai => callGenai(allocator, req, max_tokens, environ_map),
+                else => callGemini(allocator, ctx, req, max_tokens),
             };
-        } else {
-            // Streaming failed — rollback
-            if (reservation_id) |rid| if (store) |s| if (io) |io_handle| billing.rollback(s, io_handle, rid);
-            body_writer.writer.writeAll("data: {\"error\":\"streaming_failed\"}\n\n") catch {};
-        }
-    } else |_| {
-        if (reservation_id) |rid| if (store) |s| if (io) |io_handle| billing.rollback(s, io_handle, rid);
-        body_writer.writer.writeAll("data: {\"error\":\"request_build_failed\"}\n\n") catch {};
+            if (result) |resp| {
+                defer allocator.free(resp.json);
+                const ev = std.fmt.allocPrint(allocator, "data: {s}\n\n", .{resp.json}) catch "";
+                if (ev.len > 0) {
+                    defer allocator.free(ev);
+                    body_writer.writer.writeAll(ev) catch {};
+                    body_writer.flush() catch {};
+                }
+                if (reservation_id) |rid| if (store) |s| if (io) |io_handle| {
+                    const tier = if (auth) |a| a.account.tier else types.DevTier.free;
+                    billing.commit(s, io_handle, rid, req.model, resp.input_tokens, resp.output_tokens, tier);
+                };
+            } else |_| {
+                if (reservation_id) |rid| if (store) |s| if (io) |io_handle| billing.rollback(s, io_handle, rid);
+                body_writer.writer.writeAll("data: {\"error\":\"provider_error\"}\n\n") catch {};
+            }
+        },
     }
 
     body_writer.writer.writeAll("data: [DONE]\n\n") catch {};
