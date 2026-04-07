@@ -12,6 +12,10 @@ const router = @import("router.zig");
 // ── Graceful Shutdown ───────────────────────────────────────
 var shutdown_requested: std.atomic.Value(u32) = .init(0);
 
+// Active connection count — module-level so it survives serve() returning.
+// Worker threads decrement this in their defer; main thread waits for drain.
+var active_connections: std.atomic.Value(u32) = .init(0);
+
 // ── Request ID counter (atomic, monotonic) ──────────────────
 var request_id_counter: std.atomic.Value(u64) = .init(0);
 
@@ -190,8 +194,18 @@ pub fn main(init: std.process.Init) !void {
     // Start the server (blocks until shutdown)
     serve(allocator, &config, environ_map) catch {};
 
-    // Graceful shutdown: flush state
+    // Graceful shutdown: drain active connections, then flush state
     std.debug.print("\n  Shutting down...\n", .{});
+
+    // Wait for active connections to finish (max 5 seconds)
+    var drain_wait: u32 = 0;
+    while (active_connections.load(.acquire) > 0 and drain_wait < 50) : (drain_wait += 1) {
+        boot_io.sleep(.{ .nanoseconds = 100_000_000 }, .real) catch break; // 100ms
+    }
+    if (active_connections.load(.acquire) > 0) {
+        std.debug.print("  Warning: {d} connections still active after drain timeout\n", .{active_connections.load(.acquire)});
+    }
+
     store.flushDirtyAccounts();
     bq_audit.waitPending();
     store.snapshot(boot_io) catch {};
@@ -217,9 +231,6 @@ fn serve(allocator: std.mem.Allocator, config: *const Config, environ_map: *cons
     };
     defer server.deinit(io);
 
-    // Track active connections for graceful shutdown
-    var active = std.atomic.Value(u32).init(0);
-
     // Accept loop — spawn a thread per connection, stop on SIGTERM
     while (shutdown_requested.load(.acquire) == 0) {
         const stream = server.accept(io) catch |err| {
@@ -228,7 +239,7 @@ fn serve(allocator: std.mem.Allocator, config: *const Config, environ_map: *cons
             continue;
         };
 
-        const current = active.load(.acquire);
+        const current = active_connections.load(.acquire);
         if (current >= config.max_workers) {
             // At capacity — close connection immediately
             var s = stream;
@@ -236,10 +247,10 @@ fn serve(allocator: std.mem.Allocator, config: *const Config, environ_map: *cons
             continue;
         }
 
-        _ = active.fetchAdd(1, .monotonic);
+        _ = active_connections.fetchAdd(1, .monotonic);
 
         const ctx = allocator.create(ConnCtx) catch {
-            _ = active.fetchSub(1, .monotonic);
+            _ = active_connections.fetchSub(1, .monotonic);
             var s = stream;
             s.close(io);
             continue;
@@ -247,12 +258,11 @@ fn serve(allocator: std.mem.Allocator, config: *const Config, environ_map: *cons
         ctx.* = .{
             .stream = stream,
             .allocator = allocator,
-            .active = &active,
             .environ_map = environ_map,
         };
 
         const thread = std.Thread.spawn(.{}, handleConnection, .{ctx}) catch {
-            _ = active.fetchSub(1, .monotonic);
+            _ = active_connections.fetchSub(1, .monotonic);
             allocator.destroy(ctx);
             var s = stream;
             s.close(io);
@@ -265,13 +275,12 @@ fn serve(allocator: std.mem.Allocator, config: *const Config, environ_map: *cons
 const ConnCtx = struct {
     stream: net.Stream,
     allocator: std.mem.Allocator,
-    active: *std.atomic.Value(u32),
     environ_map: *const std.process.Environ.Map,
 };
 
 fn handleConnection(ctx: *ConnCtx) void {
     defer {
-        _ = ctx.active.fetchSub(1, .monotonic);
+        _ = active_connections.fetchSub(1, .monotonic);
         ctx.allocator.destroy(ctx);
     }
 
