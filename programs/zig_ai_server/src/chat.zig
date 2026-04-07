@@ -68,7 +68,7 @@ pub fn resolveProvider(model: []const u8) ?ProviderInfo {
 }
 
 /// Handle POST /qai/v1/chat
-pub fn handle(request: *http.Server.Request, allocator: std.mem.Allocator) Response {
+pub fn handle(request: *http.Server.Request, allocator: std.mem.Allocator, environ_map: *const std.process.Environ.Map) Response {
     // Parse JSON body (1MB limit for chat)
     const body = json_util.readBody(request, allocator, security.Limits.max_chat_body) catch |err| {
         return errorResp(allocator, err);
@@ -117,7 +117,7 @@ pub fn handle(request: *http.Server.Request, allocator: std.mem.Allocator) Respo
     };
 
     // Get API key from env
-    const api_key = hs.ai.getApiKeyFromEnv(allocator, provider_info.env_var) catch {
+    const api_key = hs.ai.getApiKeyFromEnv(environ_map, provider_info.env_var) catch {
         return .{
             .status = .internal_server_error,
             .body = makeError(allocator, std.fmt.allocPrint(allocator,
@@ -127,7 +127,7 @@ pub fn handle(request: *http.Server.Request, allocator: std.mem.Allocator) Respo
             ),
         };
     };
-    defer allocator.free(api_key);
+    // api_key is borrowed from environ_map — no free needed
 
     // Initialize provider client
     var client = hs.ai.AIClient.init(allocator, provider_info.provider, .{

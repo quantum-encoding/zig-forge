@@ -19,6 +19,7 @@ pub const Config = struct {
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.c_allocator;
+    const environ_map = init.environ_map;
     var config = Config{};
 
     // Parse CLI args
@@ -55,7 +56,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // Load server API key from env (optional — if not set, auth is disabled)
-    const api_key = getEnv(allocator, "QAI_API_KEY");
+    const api_key = environ_map.get("QAI_API_KEY");
     if (api_key) |key| {
         router.setApiKey(key);
         std.debug.print(
@@ -80,10 +81,10 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // Start the server
-    try serve(allocator, &config);
+    try serve(allocator, &config, environ_map);
 }
 
-fn serve(allocator: std.mem.Allocator, config: *const Config) !void {
+fn serve(allocator: std.mem.Allocator, config: *const Config, environ_map: *const std.process.Environ.Map) !void {
     // Initialize the I/O subsystem
     var io_threaded: std.Io.Threaded = .init(allocator, .{});
     const io = io_threaded.io();
@@ -132,6 +133,7 @@ fn serve(allocator: std.mem.Allocator, config: *const Config) !void {
             .stream = stream,
             .allocator = allocator,
             .active = &active,
+            .environ_map = environ_map,
         };
 
         const thread = std.Thread.spawn(.{}, handleConnection, .{ctx}) catch {
@@ -149,6 +151,7 @@ const ConnCtx = struct {
     stream: net.Stream,
     allocator: std.mem.Allocator,
     active: *std.atomic.Value(u32),
+    environ_map: *const std.process.Environ.Map,
 };
 
 fn handleConnection(ctx: *ConnCtx) void {
@@ -187,7 +190,7 @@ fn handleConnection(ctx: *ConnCtx) void {
         };
 
         // Route and handle
-        const result = router.dispatch(&request, ctx.allocator, io);
+        const result = router.dispatch(&request, ctx.allocator, io, ctx.environ_map);
 
         // For requests with a body (POST/PUT/PATCH), we must either read
         // the body or close the connection. If the client sent no
@@ -220,10 +223,4 @@ fn sendBadRequest(out: *Io.Writer) void {
     out.flush() catch {};
 }
 
-fn getEnv(allocator: std.mem.Allocator, name: []const u8) ?[]const u8 {
-    const name_z = allocator.dupeZ(u8, name) catch return null;
-    defer allocator.free(name_z);
-    const ptr = std.c.getenv(name_z) orelse return null;
-    const len = std.mem.len(ptr);
-    return allocator.dupe(u8, ptr[0..len]) catch null;
-}
+// getEnv removed — using environ_map from process.Init instead of std.c.getenv

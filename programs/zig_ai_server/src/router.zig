@@ -35,7 +35,7 @@ pub fn setApiKey(key: []const u8) void {
     server_api_key = key;
 }
 
-pub fn dispatch(request: *http.Server.Request, allocator: std.mem.Allocator, io: std.Io) Response {
+pub fn dispatch(request: *http.Server.Request, allocator: std.mem.Allocator, io: std.Io, environ_map: *const std.process.Environ.Map) Response {
     const target = request.head.target;
     const method = request.head.method;
 
@@ -71,17 +71,17 @@ pub fn dispatch(request: *http.Server.Request, allocator: std.mem.Allocator, io:
                 };
             }
         }
-        return routeApiV1(path[8..], method, request, allocator, io);
+        return routeApiV1(path[8..], method, request, allocator, io, environ_map);
     }
 
     return handlers.notFound(request, allocator);
 }
 
-fn routeApiV1(path: []const u8, method: http.Method, request: *http.Server.Request, allocator: std.mem.Allocator, io: std.Io) Response {
+fn routeApiV1(path: []const u8, method: http.Method, request: *http.Server.Request, allocator: std.mem.Allocator, io: std.Io, environ_map: *const std.process.Environ.Map) Response {
     // ── Text Generation ─────────────────────────────────────
     if (std.mem.eql(u8, path, "chat")) {
         if (method != .POST) return handlers.methodNotAllowed(request, allocator);
-        return chat.handle(request, allocator);
+        return chat.handle(request, allocator, environ_map);
     }
     if (std.mem.eql(u8, path, "chat/session")) {
         return handlers.stub(request, allocator, "POST /qai/v1/chat/session");
@@ -169,7 +169,7 @@ fn routeApiV1(path: []const u8, method: http.Method, request: *http.Server.Reque
     // ── Agents & Missions ───────────────────────────────────
     if (std.mem.eql(u8, path, "agent")) {
         if (method != .POST) return handlers.methodNotAllowed(request, allocator);
-        return agent.handle(request, allocator, io);
+        return agent.handle(request, allocator, io, environ_map);
     }
     if (std.mem.eql(u8, path, "missions")) {
         return handlers.stub(request, allocator, "POST /qai/v1/missions");

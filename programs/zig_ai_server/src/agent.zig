@@ -85,7 +85,7 @@ const RAG_SYSTEM_PROMPT =
 
 // ── Handler ─────────────────────────────────────────────────
 
-pub fn handle(request: *http.Server.Request, allocator: std.mem.Allocator, io: Io) Response {
+pub fn handle(request: *http.Server.Request, allocator: std.mem.Allocator, io: Io, environ_map: *const std.process.Environ.Map) Response {
     // Parse with 256KB limit for agent requests
     const body = json_util.readBody(request, allocator, security.Limits.max_agent_body) catch |err| {
         return errorResp(err);
@@ -112,7 +112,7 @@ pub fn handle(request: *http.Server.Request, allocator: std.mem.Allocator, io: I
         };
     };
 
-    const api_key = hs.ai.getApiKeyFromEnv(allocator, provider_info.env_var) catch {
+    const api_key = hs.ai.getApiKeyFromEnv(environ_map, provider_info.env_var) catch {
         return .{
             .status = .internal_server_error,
             .body =
@@ -120,7 +120,7 @@ pub fn handle(request: *http.Server.Request, allocator: std.mem.Allocator, io: I
             ,
         };
     };
-    defer allocator.free(api_key);
+    // api_key is borrowed from environ_map — no free needed
 
     var client = hs.ai.AIClient.init(allocator, provider_info.provider, .{
         .api_key = api_key,
