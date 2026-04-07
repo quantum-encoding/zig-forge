@@ -192,7 +192,7 @@ pub const HttpClient = struct {
                 };
 
                 // Skip empty lines (SSE event separator) and carriage returns
-                const trimmed = std.mem.trimRight(u8, line, "\r");
+                const trimmed = std.mem.trimEnd(u8, line, "\r");
                 if (trimmed.len == 0) {
                     skip_count += 1;
                     continue;
