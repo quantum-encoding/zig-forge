@@ -12,6 +12,7 @@ const models = @import("models.zig");
 const keys = @import("keys.zig");
 const store_mod = @import("store/store.zig");
 const types = @import("store/types.zig");
+const ledger_mod = @import("ledger.zig");
 
 pub const Response = struct {
     status: http.Status = .ok,
@@ -33,11 +34,18 @@ const cors_json_headers: [4]http.Header = .{
 /// Server store — set once at startup
 var server_store: ?*store_mod.Store = null;
 
+/// Ledger for billing + audit
+var server_ledger: ?*ledger_mod.Ledger = null;
+
 /// Legacy single-key mode (deprecated — use store-backed auth)
 var legacy_api_key: ?[]const u8 = null;
 
 pub fn setStore(store: *store_mod.Store) void {
     server_store = store;
+}
+
+pub fn setLedger(ledger: *ledger_mod.Ledger) void {
+    server_ledger = ledger;
 }
 
 pub fn setApiKey(key: []const u8) void {
@@ -108,7 +116,7 @@ fn routeApiV1Authed(
     // ── Chat ────────────────────────────────────────────
     if (std.mem.eql(u8, path, "chat")) {
         if (method != .POST) return handlers.methodNotAllowed(request, allocator);
-        return chat.handle(request, allocator, environ_map, io, store, auth);
+        return chat.handle(request, allocator, environ_map, io, store, auth, server_ledger);
     }
 
     // ── Agent ───────────────────────────────────────────
@@ -155,7 +163,7 @@ fn routeApiV1Authed(
         const after_prefix = path[15..]; // after "admin/accounts/"
         const id_end = std.mem.indexOf(u8, after_prefix, "/") orelse return handlers.notFound(request, allocator);
         const account_id = after_prefix[0..id_end];
-        return keys.handleCreditAccount(request, allocator, io, store, auth, account_id);
+        return keys.handleCreditAccount(request, allocator, io, store, auth, account_id, server_ledger);
     }
 
     // ── Stubs for unimplemented endpoints ───────────────
@@ -190,7 +198,7 @@ fn routeApiV1Legacy(
 ) Response {
     if (std.mem.eql(u8, path, "chat")) {
         if (method != .POST) return handlers.methodNotAllowed(request, allocator);
-        return chat.handle(request, allocator, environ_map, null, null, null);
+        return chat.handle(request, allocator, environ_map, null, null, null, null);
     }
     if (std.mem.eql(u8, path, "agent")) {
         if (method != .POST) return handlers.methodNotAllowed(request, allocator);

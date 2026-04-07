@@ -99,8 +99,13 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    // Set the store in the router
+    // Initialize ledger
+    const ledger_mod = @import("ledger.zig");
+    var ledger = ledger_mod.Ledger.init(allocator, "data");
+
+    // Set store + ledger in the router
     router.setStore(&store);
+    router.setLedger(&ledger);
 
     // Also set legacy key for backward compat
     if (legacy_key) |key| {

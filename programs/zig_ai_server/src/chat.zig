@@ -12,6 +12,7 @@ const security = @import("security.zig");
 const billing = @import("billing.zig");
 const store_mod = @import("store/store.zig");
 const types = @import("store/types.zig");
+const ledger_mod = @import("ledger.zig");
 const Response = router.Response;
 
 /// Inbound chat request (matches quantum-sdk ChatRequest)
@@ -78,6 +79,7 @@ pub fn handle(
     io: ?std.Io,
     store: ?*store_mod.Store,
     auth: ?*const types.AuthContext,
+    ledger: ?*ledger_mod.Ledger,
 ) Response {
     // Parse JSON body (1MB limit for chat)
     const body = json_util.readBody(request, allocator, security.Limits.max_chat_body) catch |err| {
@@ -245,9 +247,23 @@ pub fn handle(
     defer response.deinit();
 
     // COMMIT billing with actual token usage
+    const bill = billing.actualCost(
+        chat_req.model,
+        response.usage.input_tokens,
+        response.usage.output_tokens,
+        if (auth) |a| a.account.tier else types.DevTier.free,
+    );
+
     if (reservation_id) |rid| if (store) |s| if (io) |io_handle| {
-        const tier = if (auth) |a| a.account.tier else types.DevTier.free;
-        billing.commit(s, io_handle, rid, chat_req.model, response.usage.input_tokens, response.usage.output_tokens, tier);
+        billing.commit(s, io_handle, rid, chat_req.model, response.usage.input_tokens, response.usage.output_tokens, if (auth) |a| a.account.tier else types.DevTier.free);
+    };
+
+    // Write ledger entry
+    if (ledger) |l| if (io) |io_handle| {
+        const acct_id = if (auth) |a| a.account.id.slice() else "anonymous";
+        const key_pfx = if (auth) |a| a.key.prefix.slice() else "none";
+        const bal = if (auth) |a| a.account.balance_ticks else 0;
+        l.recordBilling(io_handle, acct_id, key_pfx, bill.cost, bill.margin, bal, "/qai/v1/chat", chat_req.model, response.usage.input_tokens, response.usage.output_tokens, 0);
     };
 
     // Build JSON response (matches quantum-sdk ChatResponse)

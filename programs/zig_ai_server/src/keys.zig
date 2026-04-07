@@ -9,6 +9,7 @@ const store_mod = @import("store/store.zig");
 const types = @import("store/types.zig");
 const auth_pipeline = @import("auth_pipeline.zig");
 const json_util = @import("json.zig");
+const ledger_mod = @import("ledger.zig");
 const router = @import("router.zig");
 const Response = router.Response;
 
@@ -299,6 +300,7 @@ pub fn handleCreditAccount(
     store: *store_mod.Store,
     auth: *const types.AuthContext,
     account_id: []const u8,
+    ledger: ?*ledger_mod.Ledger,
 ) Response {
     if (auth.account.role != .admin) {
         return .{ .status = .forbidden, .body =
@@ -330,8 +332,11 @@ pub fn handleCreditAccount(
         };
     };
 
-    // Read updated balance
+    // Read updated balance and log to ledger
     const balance = if (store.getAccountLocked(account_id)) |acct| acct.balance_ticks else 0;
+    if (ledger) |l| {
+        l.recordCredit(io, account_id, parsed.value.amount_ticks, balance, auth.key.prefix.slice());
+    }
 
     return .{ .body = std.fmt.allocPrint(allocator,
         \\{{"status":"credited","account_id":"{s}","amount_ticks":{d},"balance_after":{d}}}
