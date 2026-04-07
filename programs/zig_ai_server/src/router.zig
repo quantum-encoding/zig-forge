@@ -18,6 +18,7 @@ const stream = @import("stream.zig");
 const vertex = @import("vertex.zig");
 const gcp_mod = @import("gcp.zig");
 const apple_auth = @import("apple_auth.zig");
+const google_auth = @import("google_auth.zig");
 
 pub const Response = struct {
     status: http.Status = .ok,
@@ -103,6 +104,10 @@ pub fn dispatch(
     if (std.mem.eql(u8, path, "/qai/v1/auth/apple")) {
         if (method != .POST) return handlers.methodNotAllowed(request, allocator);
         return apple_auth.handle(request, allocator, io, server_store, server_gcp);
+    }
+    if (std.mem.eql(u8, path, "/qai/v1/auth/google")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        return google_auth.handle(request, allocator, io, server_store, server_gcp);
     }
 
     // All other /qai/v1/* routes require auth

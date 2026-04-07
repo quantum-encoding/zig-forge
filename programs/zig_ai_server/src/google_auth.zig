@@ -1,12 +1,12 @@
-// Apple Sign In — POST /qai/v1/auth/apple
-// Full RS256 signature verification against Apple's JWKS.
+// Google Sign In — POST /qai/v1/auth/google
+// Full RS256 signature verification against Google's JWKS.
 //
 // Flow:
-//   1. Client sends { "id_token": "<apple_jwt>", "name": "...", "nonce": "..." }
-//   2. Fetch Apple's JWKS from https://appleid.apple.com/auth/keys (cached 24h)
-//   3. Verify RS256 signature using Apple's RSA public key
-//   4. Validate claims: issuer, audience, expiration, nonce
-//   5. Find or create account in Firestore (by apple_sub)
+//   1. Client sends { "id_token": "<google_jwt>", "client_id": "<optional>" }
+//   2. Fetch Google's JWKS from https://www.googleapis.com/oauth2/v3/certs (cached 24h)
+//   3. Verify RS256 signature using Google's RSA public key
+//   4. Validate claims: issuer, audience, expiration
+//   5. Find or create account in Firestore (by google_sub)
 //   6. Mint a qai_k_ API key for the account
 //   7. Return { "api_key": "...", "session_token": "...", "email": "...", ... }
 
@@ -21,26 +21,28 @@ const firestore = @import("firestore.zig");
 const gcp = @import("gcp.zig");
 const Response = router.Response;
 
-const APPLE_JWKS_URL = "https://appleid.apple.com/auth/keys";
-const APPLE_ISSUER = "https://appleid.apple.com";
+const GOOGLE_JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs";
 const WELCOME_BONUS: i64 = 10_000_000_000; // $1 welcome credit
 
-/// Allowed audiences — Apple app bundle IDs + Services IDs
-const ALLOWED_AUDIENCES = [_][]const u8{
-    "com.quantumencoding.cosmicduck",
-    "com.quantumencoding.CosmicDuckOS",
-    "com.quantumencoding.vibing-with-grok.web",
+/// Valid Google token issuers
+const GOOGLE_ISSUERS = [_][]const u8{
+    "accounts.google.com",
+    "https://accounts.google.com",
+};
+
+/// Allowed Google OAuth client IDs (web + iOS + Android)
+const ALLOWED_CLIENT_IDS = [_][]const u8{
+    "967904281608-e0u8a4odho83k8ctgs6ju98tcg5p6h30.apps.googleusercontent.com", // VWG web
 };
 
 /// JWKS cache — refreshed every 24h or on kid miss
-var apple_cache: ?oidc.JwksCache = null;
+var google_cache: ?oidc.JwksCache = null;
 
 // ── Request ────────────────────────────────────────────────────
 
 const AuthRequest = struct {
     id_token: []const u8,
-    name: ?[]const u8 = null,
-    nonce: ?[]const u8 = null,
+    client_id: ?[]const u8 = null,
 };
 
 // ── Handler ────────────────────────────────────────────────────
@@ -85,68 +87,80 @@ pub fn handle(
         \\{"error":"invalid_request","message":"id_token is required"}
     };
 
+    // Verify client_id is in our allow list (if provided)
+    if (parsed.value.client_id) |cid| {
+        if (cid.len > 0) {
+            var allowed = false;
+            for (ALLOWED_CLIENT_IDS) |id| {
+                if (std.mem.eql(u8, cid, id)) {
+                    allowed = true;
+                    break;
+                }
+            }
+            if (!allowed) return .{ .status = .bad_request, .body =
+                \\{"error":"invalid_request","message":"Unrecognized client_id"}
+            };
+        }
+    }
+
     const now = oidc.epochSeconds(io);
 
     // Ensure JWKS cache is fresh
-    if (apple_cache == null or apple_cache.?.isStale(now)) {
-        apple_cache = oidc.fetchJwks(allocator, &ctx.http_client, APPLE_JWKS_URL, now) catch {
-            std.debug.print("  Apple JWKS fetch failed\n", .{});
+    if (google_cache == null or google_cache.?.isStale(now)) {
+        google_cache = oidc.fetchJwks(allocator, &ctx.http_client, GOOGLE_JWKS_URL, now) catch {
+            std.debug.print("  Google JWKS fetch failed\n", .{});
             return .{ .status = .service_unavailable, .body =
-                \\{"error":"service_unavailable","message":"Failed to fetch Apple signing keys"}
+                \\{"error":"service_unavailable","message":"Failed to fetch Google signing keys"}
             };
         };
-        std.debug.print("  Apple JWKS: cached {d} keys\n", .{apple_cache.?.count});
+        std.debug.print("  Google JWKS: cached {d} keys\n", .{google_cache.?.count});
     }
 
     // Verify JWT signature + extract claims
-    var claims = oidc.verifyJwt(allocator, parsed.value.id_token, &apple_cache.?) catch |err| {
+    var claims = oidc.verifyJwt(allocator, parsed.value.id_token, &google_cache.?) catch |err| {
         // On KeyNotFound, try refreshing JWKS (key rotation)
         if (err == error.KeyNotFound) {
-            apple_cache = oidc.fetchJwks(allocator, &ctx.http_client, APPLE_JWKS_URL, now) catch {
+            google_cache = oidc.fetchJwks(allocator, &ctx.http_client, GOOGLE_JWKS_URL, now) catch {
                 return .{ .status = .unauthorized, .body =
-                    \\{"error":"authentication_error","message":"Failed to verify Apple ID token (key refresh failed)"}
+                    \\{"error":"authentication_error","message":"Failed to verify Google ID token (key refresh failed)"}
                 };
             };
-            // Retry with refreshed cache
-            var retry_claims = oidc.verifyJwt(allocator, parsed.value.id_token, &apple_cache.?) catch {
+            var retry_claims = oidc.verifyJwt(allocator, parsed.value.id_token, &google_cache.?) catch {
                 return .{ .status = .unauthorized, .body =
-                    \\{"error":"authentication_error","message":"Invalid or expired Apple ID token"}
+                    \\{"error":"authentication_error","message":"Invalid or expired Google ID token"}
                 };
             };
-            return handleVerifiedClaims(allocator, io, s, ctx, &retry_claims, parsed.value.nonce, parsed.value.name, now);
+            return processVerifiedClaims(allocator, io, s, &retry_claims, now);
         }
-        std.debug.print("  Apple JWT verify failed: {}\n", .{err});
+        std.debug.print("  Google JWT verify failed: {}\n", .{err});
         return .{ .status = .unauthorized, .body =
-            \\{"error":"authentication_error","message":"Invalid or expired Apple ID token"}
+            \\{"error":"authentication_error","message":"Invalid or expired Google ID token"}
         };
     };
 
-    return handleVerifiedClaims(allocator, io, s, ctx, &claims, parsed.value.nonce, parsed.value.name, now);
+    return processVerifiedClaims(allocator, io, s, &claims, now);
 }
 
-fn handleVerifiedClaims(
+fn processVerifiedClaims(
     allocator: std.mem.Allocator,
     io: std.Io,
     store: *store_mod.Store,
-    _: *gcp.GcpContext,
     claims: *oidc.VerifiedClaims,
-    raw_nonce: ?[]const u8,
-    name: ?[]const u8,
     now: i64,
 ) Response {
     defer claims.deinit(allocator);
 
-    // Validate issuer
+    // Validate audience — must match one of our client IDs
     if (claims.aud) |aud| {
         var aud_ok = false;
-        for (ALLOWED_AUDIENCES) |allowed| {
-            if (std.mem.eql(u8, aud, allowed)) {
+        for (ALLOWED_CLIENT_IDS) |id| {
+            if (std.mem.eql(u8, aud, id)) {
                 aud_ok = true;
                 break;
             }
         }
         if (!aud_ok) {
-            std.debug.print("  Apple auth: bad audience: {s}\n", .{aud});
+            std.debug.print("  Google auth: bad audience: {s}\n", .{aud});
             return .{ .status = .unauthorized, .body =
                 \\{"error":"authentication_error","message":"Token audience not allowed"}
             };
@@ -156,19 +170,12 @@ fn handleVerifiedClaims(
     // Validate expiration
     if (claims.exp > 0 and now > claims.exp) {
         return .{ .status = .unauthorized, .body =
-            \\{"error":"authentication_error","message":"Apple ID token has expired"}
-        };
-    }
-
-    // Validate nonce (replay protection)
-    if (!oidc.verifyNonce(raw_nonce, claims.nonce)) {
-        return .{ .status = .unauthorized, .body =
-            \\{"error":"authentication_error","message":"Nonce mismatch: possible token replay"}
+            \\{"error":"authentication_error","message":"Google ID token has expired"}
         };
     }
 
     // Find or create account
-    const account_id_str = std.fmt.allocPrint(allocator, "apple_{s}", .{claims.sub}) catch {
+    const account_id_str = std.fmt.allocPrint(allocator, "google_{s}", .{claims.sub}) catch {
         return .{ .status = .internal_server_error, .body =
             \\{"error":"internal","message":"Failed to generate account ID"}
         };
@@ -191,7 +198,7 @@ fn handleVerifiedClaims(
 
     // Build response (matches Go backend format)
     const email = claims.email orelse "";
-    const display_name = name orelse if (claims.email) |e| blk: {
+    const display_name = if (claims.email) |e| blk: {
         if (std.mem.indexOfScalar(u8, e, '@')) |at| break :blk e[0..at];
         break :blk e;
     } else "";
@@ -219,7 +226,6 @@ fn findOrCreateAccount(
     account_id: []const u8,
     claims: *oidc.VerifiedClaims,
 ) bool {
-    // Check if account exists in memory
     if (store.getAccountLocked(account_id) != null) return false;
 
     // Try loading from Firestore (might exist from a previous container)
@@ -239,7 +245,7 @@ fn findOrCreateAccount(
         .updated_at = now_ms,
     }) catch return false;
 
-    std.debug.print("  New Apple user: {s} ({s})\n", .{ account_id, email });
+    std.debug.print("  New Google user: {s} ({s})\n", .{ account_id, email });
     return true;
 }
 
@@ -249,7 +255,6 @@ fn mintApiKey(
     store: *store_mod.Store,
     account_id: []const u8,
 ) ![]u8 {
-    // Generate raw key
     var random_bytes: [32]u8 = undefined;
     io.random(&random_bytes);
 
@@ -259,11 +264,9 @@ fn mintApiKey(
     const raw_key = try std.fmt.allocPrint(allocator, "qai_k_{s}", .{&hex_buf});
     errdefer allocator.free(raw_key);
 
-    // Hash for storage
     var key_hash: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(raw_key, &key_hash, .{});
 
-    // Prefix for display
     var prefix_buf: [14]u8 = undefined;
     @memcpy(prefix_buf[0..6], "qai_k_");
     @memcpy(prefix_buf[6..14], hex_buf[0..8]);
