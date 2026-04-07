@@ -583,6 +583,9 @@ pub const RequestConfig = struct {
     /// Request timeout in milliseconds
     timeout_ms: u64 = 300_000, // 5 minutes default
 
+    /// Enable SSE streaming response (provider sends events incrementally)
+    stream: bool = false,
+
     /// System prompt (if supported)
     system_prompt: ?[]const u8 = null,
 
@@ -763,6 +766,15 @@ pub const ConversationContext = struct {
         return total;
     }
 };
+
+/// Callback type for streaming AI responses.
+/// Called once per token/chunk. Return false to stop the stream.
+pub const StreamCallback = *const fn (
+    /// The text content delta (partial token/chunk)
+    text: []const u8,
+    /// User-provided context pointer
+    context: ?*anyopaque,
+) bool;
 
 /// Utility: Generate a unique ID for messages/conversations (pure Zig — no libc)
 /// Uses io.random() for cryptographically secure randomness

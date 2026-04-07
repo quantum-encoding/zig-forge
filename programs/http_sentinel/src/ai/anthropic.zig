@@ -391,6 +391,92 @@ pub const AnthropicClient = struct {
         return try self.allocator.dupe(u8, response.body);
     }
 
+    /// Send a streaming message — calls callback for each text chunk
+    pub fn sendMessageStreaming(
+        self: *AnthropicClient,
+        prompt: []const u8,
+        config: common.RequestConfig,
+        callback: common.StreamCallback,
+        context: ?*anyopaque,
+    ) !void {
+        // Build messages with just the prompt
+        const escaped = try common.escapeJsonString(self.allocator, prompt);
+        defer self.allocator.free(escaped);
+
+        // Build payload with stream: true
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(self.allocator);
+
+        const model_part = try std.fmt.allocPrint(self.allocator,
+            \\{{"model":"{s}","max_tokens":{d},"stream":true,
+        , .{ config.model, config.max_tokens });
+        defer self.allocator.free(model_part);
+        try payload.appendSlice(self.allocator, model_part);
+
+        if (config.system_prompt) |system| {
+            const sys_escaped = try common.escapeJsonString(self.allocator, system);
+            defer self.allocator.free(sys_escaped);
+            const sys_part = try std.fmt.allocPrint(self.allocator,
+                \\"system":"{s}",
+            , .{sys_escaped});
+            defer self.allocator.free(sys_part);
+            try payload.appendSlice(self.allocator, sys_part);
+        }
+
+        const msg_part = try std.fmt.allocPrint(self.allocator,
+            \\"messages":[{{"role":"user","content":"{s}"}}]}}
+        , .{escaped});
+        defer self.allocator.free(msg_part);
+        try payload.appendSlice(self.allocator, msg_part);
+
+        // Make streaming request
+        const endpoint = try std.fmt.allocPrint(self.allocator, "{s}/v1/messages", .{self.base_url});
+        defer self.allocator.free(endpoint);
+
+        const headers = [_]std.http.Header{
+            .{ .name = "Content-Type", .value = "application/json" },
+            .{ .name = "x-api-key", .value = self.api_key },
+            .{ .name = "anthropic-version", .value = DEFAULT_ANTHROPIC_VERSION },
+            .{ .name = "User-Agent", .value = "zig-http-sentinel/1.0" },
+        };
+
+        var stream = try self.http_client.postStreaming(endpoint, &headers, payload.items);
+        defer stream.deinit();
+
+        if (@intFromEnum(stream.status) >= 400) {
+            return common.AIError.ApiRequestFailed;
+        }
+
+        // Parse SSE events — Claude format:
+        // data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}
+        while (stream.next()) |event| {
+            if (event.done) break;
+
+            // Parse the JSON to extract text delta
+            const parsed = std.json.parseFromSlice(
+                std.json.Value,
+                self.allocator,
+                event.data,
+                .{},
+            ) catch continue;
+            defer parsed.deinit();
+
+            const obj = parsed.value.object;
+            const event_type = obj.get("type") orelse continue;
+            if (event_type != .string) continue;
+
+            if (std.mem.eql(u8, event_type.string, "content_block_delta")) {
+                const delta = obj.get("delta") orelse continue;
+                if (delta != .object) continue;
+                const text = delta.object.get("text") orelse continue;
+                if (text != .string) continue;
+
+                // Call user callback with the text chunk
+                if (!callback(text.string, context)) break;
+            }
+        }
+    }
+
     fn handleErrorResponse(
         self: *AnthropicClient,
         status: std.http.Status,

@@ -70,6 +70,93 @@ pub const GeminiClient = struct {
         return self.sendMessageWithContext(prompt, &[_]common.AIMessage{}, config);
     }
 
+    /// Send a streaming message — calls callback for each text chunk
+    pub fn sendMessageStreaming(
+        self: *GeminiClient,
+        prompt: []const u8,
+        config: common.RequestConfig,
+        callback: common.StreamCallback,
+        context: ?*anyopaque,
+    ) !void {
+        // Build generateContent payload (same format, endpoint handles streaming)
+        const escaped = try common.escapeJsonString(self.allocator, prompt);
+        defer self.allocator.free(escaped);
+
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(self.allocator);
+
+        try payload.appendSlice(self.allocator, "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"");
+        try payload.appendSlice(self.allocator, escaped);
+        try payload.appendSlice(self.allocator, "\"}]}]");
+
+        // System instruction
+        if (config.system_prompt) |system| {
+            const sys_escaped = try common.escapeJsonString(self.allocator, system);
+            defer self.allocator.free(sys_escaped);
+            const sys_part = try std.fmt.allocPrint(self.allocator,
+                \\,"systemInstruction":{{"parts":[{{"text":"{s}"}}]}}
+            , .{sys_escaped});
+            defer self.allocator.free(sys_part);
+            try payload.appendSlice(self.allocator, sys_part);
+        }
+
+        // Generation config
+        const gen_config = try std.fmt.allocPrint(self.allocator,
+            \\,"generationConfig":{{"temperature":{d},"maxOutputTokens":{}}}
+        , .{ config.temperature, config.max_tokens });
+        defer self.allocator.free(gen_config);
+        try payload.appendSlice(self.allocator, gen_config);
+
+        try payload.appendSlice(self.allocator, "}");
+
+        // Streaming endpoint: streamGenerateContent with alt=sse
+        const endpoint = try std.fmt.allocPrint(self.allocator,
+            "{s}/models/{s}:streamGenerateContent?key={s}&alt=sse",
+            .{ GEMINI_API_BASE, config.model, self.api_key },
+        );
+        defer self.allocator.free(endpoint);
+
+        const headers = [_]std.http.Header{
+            .{ .name = "Content-Type", .value = "application/json" },
+        };
+
+        var stream = try self.http_client.postStreaming(endpoint, &headers, payload.items);
+        defer stream.deinit();
+
+        if (@intFromEnum(stream.status) >= 400) {
+            return common.AIError.ApiRequestFailed;
+        }
+
+        // Parse SSE events — Gemini format:
+        // data: {"candidates":[{"content":{"parts":[{"text":"..."}]}}]}
+        while (stream.next()) |event| {
+            if (event.done) break;
+
+            const parsed = std.json.parseFromSlice(
+                std.json.Value,
+                self.allocator,
+                event.data,
+                .{},
+            ) catch continue;
+            defer parsed.deinit();
+
+            const candidates = parsed.value.object.get("candidates") orelse continue;
+            if (candidates != .array or candidates.array.items.len == 0) continue;
+
+            const candidate = candidates.array.items[0];
+            const content = candidate.object.get("content") orelse continue;
+            const parts = content.object.get("parts") orelse continue;
+            if (parts != .array) continue;
+
+            for (parts.array.items) |part| {
+                const text = part.object.get("text") orelse continue;
+                if (text != .string) continue;
+
+                if (!callback(text.string, context)) return;
+            }
+        }
+    }
+
     /// Send a message with conversation context
     pub fn sendMessageWithContext(
         self: *GeminiClient,

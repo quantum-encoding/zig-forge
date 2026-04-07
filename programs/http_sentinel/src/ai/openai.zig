@@ -94,6 +94,88 @@ pub const OpenAIClient = struct {
         return self.sendMessageWithContext(prompt, &[_]common.AIMessage{}, config);
     }
 
+    /// Send a streaming message — calls callback for each text chunk
+    pub fn sendMessageStreaming(
+        self: *OpenAIClient,
+        prompt: []const u8,
+        config: common.RequestConfig,
+        callback: common.StreamCallback,
+        context: ?*anyopaque,
+    ) !void {
+        // Build simple payload with stream: true
+        const escaped = try common.escapeJsonString(self.allocator, prompt);
+        defer self.allocator.free(escaped);
+
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(self.allocator);
+
+        const model_part = try std.fmt.allocPrint(self.allocator,
+            \\{{"model":"{s}","stream":true,"input":"{s}"
+        , .{ config.model, escaped });
+        defer self.allocator.free(model_part);
+        try payload.appendSlice(self.allocator, model_part);
+
+        if (config.system_prompt) |system| {
+            const sys_escaped = try common.escapeJsonString(self.allocator, system);
+            defer self.allocator.free(sys_escaped);
+            const sys_part = try std.fmt.allocPrint(self.allocator,
+                \\,"instructions":"{s}"
+            , .{sys_escaped});
+            defer self.allocator.free(sys_part);
+            try payload.appendSlice(self.allocator, sys_part);
+        }
+
+        try payload.appendSlice(self.allocator, "}");
+
+        // Make streaming request
+        const endpoint = try std.fmt.allocPrint(self.allocator, "{s}/responses", .{OPENAI_API_BASE});
+        defer self.allocator.free(endpoint);
+
+        const auth_header = try std.fmt.allocPrint(self.allocator, "Bearer {s}", .{self.api_key});
+        defer self.allocator.free(auth_header);
+
+        const headers = [_]std.http.Header{
+            .{ .name = "Content-Type", .value = "application/json" },
+            .{ .name = "Authorization", .value = auth_header },
+        };
+
+        var stream = try self.http_client.postStreaming(endpoint, &headers, payload.items);
+        defer stream.deinit();
+
+        if (@intFromEnum(stream.status) >= 400) {
+            return common.AIError.ApiRequestFailed;
+        }
+
+        // Parse SSE events — OpenAI Responses API format:
+        // data: {"type":"response.output_text.delta","delta":"..."}
+        // data: {"type":"response.completed",...}
+        // data: [DONE]
+        while (stream.next()) |event| {
+            if (event.done) break;
+
+            const parsed = std.json.parseFromSlice(
+                std.json.Value,
+                self.allocator,
+                event.data,
+                .{},
+            ) catch continue;
+            defer parsed.deinit();
+
+            const obj = parsed.value.object;
+            const event_type = obj.get("type") orelse continue;
+            if (event_type != .string) continue;
+
+            if (std.mem.eql(u8, event_type.string, "response.output_text.delta")) {
+                const delta = obj.get("delta") orelse continue;
+                if (delta != .string) continue;
+
+                if (!callback(delta.string, context)) break;
+            } else if (std.mem.eql(u8, event_type.string, "response.completed")) {
+                break;
+            }
+        }
+    }
+
     /// Send a message with conversation context
     /// Uses Responses API for all requests (tools and text-only)
     pub fn sendMessageWithContext(

@@ -155,6 +155,103 @@ pub const HttpClient = struct {
         timeout_ns: u64 = 0,
     };
 
+    /// A single Server-Sent Event parsed from an SSE stream
+    pub const SseEvent = struct {
+        /// The event data (JSON payload without "data: " prefix)
+        data: []const u8,
+        /// True when the stream has ended (data is "[DONE]")
+        done: bool,
+    };
+
+    /// Streaming response — wraps the HTTP connection for line-by-line SSE reading.
+    /// Heap-allocated to ensure stable pointers for the reader's internal buffers.
+    pub const StreamingResponse = struct {
+        status: http.Status,
+        reader: *std.Io.Reader,
+        request: http.Client.Request,
+        transfer_buffer: [8192]u8,
+        allocator: std.mem.Allocator,
+
+        /// Read the next SSE event from the stream.
+        /// Returns null at end-of-stream or after [DONE].
+        /// Returned SseEvent.data is a borrowed slice valid until the next call.
+        pub fn next(self: *StreamingResponse) ?SseEvent {
+            while (true) {
+                const line = self.reader.takeDelimiterExclusive('\n') catch return null;
+
+                // Skip empty lines (SSE event separator) and carriage returns
+                const trimmed = std.mem.trimRight(u8, line, "\r");
+                if (trimmed.len == 0) continue;
+
+                // SSE data line: "data: <payload>" or "data:<payload>"
+                if (std.mem.startsWith(u8, trimmed, "data:")) {
+                    var payload = trimmed["data:".len..];
+                    // Skip optional space after "data:"
+                    if (payload.len > 0 and payload[0] == ' ') payload = payload[1..];
+
+                    // Check for stream terminator
+                    if (std.mem.eql(u8, payload, "[DONE]")) {
+                        return SseEvent{ .data = payload, .done = true };
+                    }
+
+                    return SseEvent{ .data = payload, .done = false };
+                }
+
+                // Skip other SSE fields (event:, id:, retry:, comments starting with :)
+            }
+        }
+
+        /// Clean up the streaming response
+        pub fn deinit(self: *StreamingResponse) void {
+            self.request.deinit();
+            self.allocator.destroy(self);
+        }
+    };
+
+    /// Perform a POST request and return a streaming SSE reader.
+    /// Use `response.next()` to read events one at a time.
+    /// Caller MUST call `response.deinit()` when done.
+    ///
+    /// Example:
+    ///   var stream = try client.postStreaming(url, &headers, body);
+    ///   defer stream.deinit();
+    ///   while (stream.next()) |event| {
+    ///       if (event.done) break;
+    ///       // Parse event.data as JSON...
+    ///   }
+    pub fn postStreaming(
+        self: *HttpClient,
+        url: []const u8,
+        headers: []const http.Header,
+        body: []const u8,
+    ) !*StreamingResponse {
+        try validateHeaders(headers);
+        const uri = try std.Uri.parse(url);
+
+        // Heap-allocate so the response struct (and its transfer_buffer) has a stable address
+        const stream = try self.allocator.create(StreamingResponse);
+        errdefer self.allocator.destroy(stream);
+
+        stream.allocator = self.allocator;
+        stream.transfer_buffer = undefined;
+
+        stream.request = try self.client.request(.POST, uri, .{
+            .extra_headers = headers,
+        });
+
+        stream.request.transfer_encoding = .{ .content_length = body.len };
+        var body_writer = try stream.request.sendBodyUnflushed(&.{});
+        try body_writer.writer.writeAll(body);
+        try body_writer.end();
+        try stream.request.connection.?.flush();
+
+        var response = try stream.request.receiveHead(&.{});
+        stream.status = response.head.status;
+        stream.reader = response.reader(&stream.transfer_buffer);
+
+        return stream;
+    }
+
     /// Perform a POST request
     pub fn post(
         self: *HttpClient,

@@ -87,6 +87,95 @@ pub const GrokClient = struct {
         return self.sendMessageWithContext(prompt, &[_]common.AIMessage{}, config);
     }
 
+    /// Send a streaming message — calls callback for each text chunk
+    pub fn sendMessageStreaming(
+        self: *GrokClient,
+        prompt: []const u8,
+        config: common.RequestConfig,
+        callback: common.StreamCallback,
+        context: ?*anyopaque,
+    ) !void {
+        // Build simple payload with stream: true
+        const escaped = try common.escapeJsonString(self.allocator, prompt);
+        defer self.allocator.free(escaped);
+
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(self.allocator);
+
+        const model_part = try std.fmt.allocPrint(self.allocator,
+            \\{{"model":"{s}","stream":true,"input":[
+        , .{config.model});
+        defer self.allocator.free(model_part);
+        try payload.appendSlice(self.allocator, model_part);
+
+        // System prompt as input item (xAI does NOT support `instructions`)
+        var has_item = false;
+        if (config.system_prompt) |system| {
+            const sys_escaped = try common.escapeJsonString(self.allocator, system);
+            defer self.allocator.free(sys_escaped);
+            const sys_part = try std.fmt.allocPrint(self.allocator,
+                \\{{"role":"system","content":"{s}"}}
+            , .{sys_escaped});
+            defer self.allocator.free(sys_part);
+            try payload.appendSlice(self.allocator, sys_part);
+            has_item = true;
+        }
+
+        if (has_item) try payload.appendSlice(self.allocator, ",");
+        const msg_part = try std.fmt.allocPrint(self.allocator,
+            \\{{"role":"user","content":"{s}"}}]}}
+        , .{escaped});
+        defer self.allocator.free(msg_part);
+        try payload.appendSlice(self.allocator, msg_part);
+
+        // Make streaming request
+        const endpoint = try std.fmt.allocPrint(self.allocator, "{s}/responses", .{GROK_API_BASE});
+        defer self.allocator.free(endpoint);
+
+        const auth_header = try std.fmt.allocPrint(self.allocator, "Bearer {s}", .{self.api_key});
+        defer self.allocator.free(auth_header);
+
+        const headers = [_]std.http.Header{
+            .{ .name = "Content-Type", .value = "application/json" },
+            .{ .name = "Authorization", .value = auth_header },
+        };
+
+        var stream = try self.http_client.postStreaming(endpoint, &headers, payload.items);
+        defer stream.deinit();
+
+        if (@intFromEnum(stream.status) >= 400) {
+            return common.AIError.ApiRequestFailed;
+        }
+
+        // Parse SSE events — xAI Responses API format:
+        // data: {"type":"response.output_text.delta","delta":"..."}
+        // data: {"type":"response.completed",...}
+        while (stream.next()) |event| {
+            if (event.done) break;
+
+            const parsed = std.json.parseFromSlice(
+                std.json.Value,
+                self.allocator,
+                event.data,
+                .{},
+            ) catch continue;
+            defer parsed.deinit();
+
+            const obj = parsed.value.object;
+            const event_type = obj.get("type") orelse continue;
+            if (event_type != .string) continue;
+
+            if (std.mem.eql(u8, event_type.string, "response.output_text.delta")) {
+                const delta = obj.get("delta") orelse continue;
+                if (delta != .string) continue;
+
+                if (!callback(delta.string, context)) break;
+            } else if (std.mem.eql(u8, event_type.string, "response.completed")) {
+                break;
+            }
+        }
+    }
+
     /// Send a message with conversation context
     /// Uses Responses API for all requests
     pub fn sendMessageWithContext(
