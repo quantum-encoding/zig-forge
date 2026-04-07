@@ -6,6 +6,8 @@ const http = std.http;
 const hs = @import("http-sentinel");
 const json_util = @import("json.zig");
 const router = @import("router.zig");
+const models_mod = @import("models.zig");
+const account_mod = @import("account.zig");
 const Response = router.Response;
 
 /// Inbound chat request (matches quantum-sdk ChatRequest)
@@ -205,6 +207,8 @@ fn buildResponse(
 
     const stop_reason = response.metadata.stop_reason orelse "end_turn";
 
+    const ticks = costTicks(response, model);
+
     return std.fmt.allocPrint(allocator,
         \\{{"id":"{s}","model":"{s}","content":[{{"type":"text","text":"{s}"}}],"usage":{{"input_tokens":{d},"output_tokens":{d},"cost_ticks":{d}}},"stop_reason":"{s}","cost_ticks":{d},"request_id":""}}
     , .{
@@ -213,15 +217,17 @@ fn buildResponse(
         escaped_content,
         response.usage.input_tokens,
         response.usage.output_tokens,
-        costTicks(response),
+        ticks,
         stop_reason,
-        costTicks(response),
+        ticks,
     });
 }
 
-fn costTicks(response: *hs.ai.AIResponse) i64 {
-    // Convert USD estimate to ticks (1 USD = 10B ticks)
-    const cost = response.usage.estimateCost(3.0, 15.0); // Default to Claude pricing
+fn costTicks(response: *hs.ai.AIResponse, model: []const u8) i64 {
+    const pricing = models_mod.getPricing(model);
+    const cost = response.usage.estimateCost(pricing.input, pricing.output);
+    // Record for account balance tracking
+    account_mod.recordCost(cost);
     return @intFromFloat(cost * 10_000_000_000.0);
 }
 

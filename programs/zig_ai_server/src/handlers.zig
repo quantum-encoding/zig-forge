@@ -8,7 +8,7 @@ const Response = router.Response;
 pub fn health(_: *http.Server.Request, _: std.mem.Allocator) Response {
     return .{
         .body =
-        \\{"status":"ok","service":"zig-ai-server","version":"0.1.0"}
+        \\{"status":"ok","service":"zig-ai-server","version":"0.2.0"}
         ,
     };
 }
@@ -16,7 +16,7 @@ pub fn health(_: *http.Server.Request, _: std.mem.Allocator) Response {
 pub fn root(_: *http.Server.Request, _: std.mem.Allocator) Response {
     return .{
         .body =
-        \\{"service":"zig-ai-server","version":"0.1.0","docs":"/qai/v1/"}
+        \\{"service":"zig-ai-server","version":"0.2.0","api":"/qai/v1/","docs":"https://api.cosmicduck.dev"}
         ,
     };
 }
@@ -39,30 +39,15 @@ pub fn methodNotAllowed(_: *http.Server.Request, _: std.mem.Allocator) Response 
     };
 }
 
-// Placeholder handlers for Phase 2+ endpoints
-pub fn chatPlaceholder(_: *http.Server.Request, _: std.mem.Allocator) Response {
+/// Generic stub for endpoints that exist in the contract but aren't implemented yet
+pub fn stub(_: *http.Server.Request, allocator: std.mem.Allocator, endpoint: []const u8) Response {
+    const body = std.fmt.allocPrint(allocator,
+        \\{{"error":"not_implemented","endpoint":"{s}","message":"This endpoint is registered but not yet implemented"}}
+    , .{endpoint}) catch
+        \\{"error":"not_implemented","message":"Endpoint not yet implemented"}
+    ;
     return .{
-        .status = .service_unavailable,
-        .body =
-        \\{"error":"not_implemented","message":"POST /qai/v1/chat — coming in Phase 3"}
-        ,
-    };
-}
-
-pub fn modelsPlaceholder(_: *http.Server.Request, _: std.mem.Allocator) Response {
-    return .{
-        .status = .service_unavailable,
-        .body =
-        \\{"error":"not_implemented","message":"GET /qai/v1/models — coming in Phase 4"}
-        ,
-    };
-}
-
-pub fn balancePlaceholder(_: *http.Server.Request, _: std.mem.Allocator) Response {
-    return .{
-        .status = .service_unavailable,
-        .body =
-        \\{"error":"not_implemented","message":"GET /qai/v1/account/balance — coming in Phase 4"}
-        ,
+        .status = .not_implemented,
+        .body = body,
     };
 }
