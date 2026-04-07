@@ -28,7 +28,11 @@ pub const RsaPrivateKey = struct {
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *RsaPrivateKey) void {
-        self.allocator.free(self._der_buf);
+        // Zero private key material before freeing to prevent recovery
+        // from core dumps, swap files, or heap forensics.
+        const buf = @constCast(self._der_buf);
+        crypto.secureZero(u8, buf);
+        self.allocator.free(buf);
     }
 
     /// Sign a message with RSASSA-PKCS1-v1_5-SHA256.
@@ -76,9 +80,14 @@ pub const ParseError = error{
     InvalidDer,
     InvalidPkcs8,
     InvalidRsaKey,
+    KeyTooWeak,
     UnsupportedAlgorithm,
     OutOfMemory,
 };
+
+/// Minimum accepted RSA modulus size in bytes (2048 bits).
+/// Smaller keys are trivially factorable and must be rejected.
+const min_modulus_bytes = 256;
 
 /// Parse a PEM-encoded PKCS#8 private key (as found in GCP service account JSON).
 pub fn parsePrivateKeyPem(allocator: std.mem.Allocator, pem: []const u8) ParseError!RsaPrivateKey {
@@ -174,6 +183,7 @@ fn parsePkcs8Der(allocator: std.mem.Allocator, der_bytes: []u8) ParseError!RsaPr
     // Strip leading zero byte (ASN.1 integers are signed, leading 0x00 for positive)
     while (n_bytes.len > 0 and n_bytes[0] == 0) n_bytes = n_bytes[1..];
     if (n_bytes.len == 0 or n_bytes.len > max_modulus_bytes) return error.InvalidRsaKey;
+    if (n_bytes.len < min_modulus_bytes) return error.KeyTooWeak;
 
     // Public exponent (e) — skip, we don't need it for signing
     const e_elem = der.Element.parse(inner_bytes, n_elem.slice.end) catch return error.InvalidDer;

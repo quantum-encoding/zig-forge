@@ -20,6 +20,13 @@ const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 const METADATA_TOKEN_URL = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
 const METADATA_PROJECT_URL = "http://metadata.google.internal/computeMetadata/v1/project/project-id";
 
+/// Allowed token endpoint host suffixes. Prevents SSRF via attacker-controlled
+/// token_uri in service account JSON redirecting signed JWTs to arbitrary URLs.
+const allowed_token_hosts = [_][]const u8{
+    "://oauth2.googleapis.com/",
+    "://accounts.google.com/",
+};
+
 /// Default scope covering most GCP services.
 pub const SCOPE_CLOUD_PLATFORM = "https://www.googleapis.com/auth/cloud-platform";
 
@@ -35,12 +42,17 @@ pub const Token = struct {
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *Token) void {
+        std.crypto.secureZero(u8, self.access_token);
         self.allocator.free(self.access_token);
     }
 
     pub fn isExpired(self: *const Token, now_epoch: i64) bool {
-        // Refresh 60 seconds before actual expiry
-        return now_epoch >= (self.expires_at - 60);
+        // Refresh 60 seconds before actual expiry.
+        // Use saturating subtraction to prevent underflow when expires_at is
+        // near i64 min (which would wrap to a huge positive, making an expired
+        // token appear valid).
+        const threshold = @max(self.expires_at -| 60, std.math.minInt(i64));
+        return now_epoch >= threshold;
     }
 };
 
@@ -120,7 +132,13 @@ pub const ServiceAccountProvider = struct {
         const client_email = try allocator.dupe(u8, sa.client_email);
         errdefer allocator.free(client_email);
 
-        const token_uri = try allocator.dupe(u8, sa.token_uri orelse TOKEN_ENDPOINT);
+        // Validate token_uri against allowlist to prevent SSRF.
+        // An attacker-controlled SA JSON could redirect the signed JWT assertion
+        // to an arbitrary URL, leaking credentials or hitting internal services.
+        const raw_uri = sa.token_uri orelse TOKEN_ENDPOINT;
+        if (!isAllowedTokenUri(raw_uri)) return error.InvalidCredentials;
+
+        const token_uri = try allocator.dupe(u8, raw_uri);
         errdefer allocator.free(token_uri);
 
         const scope_owned = try allocator.dupe(u8, scope);
@@ -261,7 +279,10 @@ pub const ADCProvider = struct {
     pub fn deinit(self: *ADCProvider) void {
         if (self.cached_token) |*t| t.deinit();
         self.allocator.free(self.client_id);
+        // Zero secrets before freeing — prevents recovery from heap forensics
+        std.crypto.secureZero(u8, self.client_secret);
         self.allocator.free(self.client_secret);
+        std.crypto.secureZero(u8, self.refresh_token);
         self.allocator.free(self.refresh_token);
     }
 };
@@ -375,6 +396,16 @@ pub fn autoDetect(allocator: std.mem.Allocator, client: *HttpClient, scope: []co
 // Shared helpers
 // ============================================================================
 
+/// Validate that a token URI points to a known Google endpoint.
+pub fn isAllowedTokenUri(uri: []const u8) bool {
+    // Must be HTTPS
+    if (!std.mem.startsWith(u8, uri, "https://")) return false;
+    for (allowed_token_hosts) |host| {
+        if (std.mem.indexOf(u8, uri, host) != null) return true;
+    }
+    return false;
+}
+
 /// POST to a token endpoint and parse the response.
 fn exchangeToken(allocator: std.mem.Allocator, client: *HttpClient, url: []const u8, body: []const u8, now: i64) !Token {
     var response = client.post(url, &.{
@@ -398,7 +429,12 @@ fn parseTokenResponse(allocator: std.mem.Allocator, body: []const u8, now: i64) 
     const tr = parsed.value;
     const access_token = allocator.dupe(u8, tr.access_token) catch return error.OutOfMemory;
 
-    const expires_in: i64 = tr.expires_in orelse 3600;
+    // Clamp expires_in to a sane range. A malicious token endpoint could
+    // return a huge value (caching a stale/revoked token forever) or a
+    // negative value (causing arithmetic overflow). Google tokens max at 3600s
+    // but we allow up to 7200s for safety margin.
+    const raw_expires: i64 = tr.expires_in orelse 3600;
+    const expires_in: i64 = @max(0, @min(raw_expires, 7200));
 
     return Token{
         .access_token = access_token,

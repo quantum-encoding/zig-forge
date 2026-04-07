@@ -30,13 +30,21 @@ pub fn createSignedJwt(
 ) ![]u8 {
     const now = now_epoch_secs;
 
-    // Build claims JSON
+    // JSON-escape all string fields to prevent claim injection
+    const iss_safe = try jsonEscape(allocator, claims.issuer);
+    defer allocator.free(iss_safe);
+    const scope_safe = try jsonEscape(allocator, claims.scope);
+    defer allocator.free(scope_safe);
+    const aud_safe = try jsonEscape(allocator, claims.audience);
+    defer allocator.free(aud_safe);
+
+    // Build claims JSON with escaped values
     const claims_json = try std.fmt.allocPrint(allocator,
         \\{{"iss":"{s}","scope":"{s}","aud":"{s}","iat":{d},"exp":{d}}}
     , .{
-        claims.issuer,
-        claims.scope,
-        claims.audience,
+        iss_safe,
+        scope_safe,
+        aud_safe,
         now,
         now + claims.lifetime_secs,
     });
@@ -64,6 +72,52 @@ pub fn createSignedJwt(
 
     // Final JWT: header.claims.signature
     return std.fmt.allocPrint(allocator, "{s}.{s}.{s}", .{ header_b64, claims_b64, sig_b64 });
+}
+
+/// Escape a string for safe embedding in a JSON string value.
+/// Handles: " → \", \ → \\, control chars → \uXXXX
+/// Caller owns the returned memory.
+pub fn jsonEscape(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    var list: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer list.deinit(allocator);
+
+    for (input) |c| {
+        switch (c) {
+            '"' => {
+                try list.append(allocator, '\\');
+                try list.append(allocator, '"');
+            },
+            '\\' => {
+                try list.append(allocator, '\\');
+                try list.append(allocator, '\\');
+            },
+            '\n' => {
+                try list.append(allocator, '\\');
+                try list.append(allocator, 'n');
+            },
+            '\r' => {
+                try list.append(allocator, '\\');
+                try list.append(allocator, 'r');
+            },
+            '\t' => {
+                try list.append(allocator, '\\');
+                try list.append(allocator, 't');
+            },
+            0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f => {
+                // Control characters → \u00XX
+                const hex = "0123456789abcdef";
+                try list.append(allocator, '\\');
+                try list.append(allocator, 'u');
+                try list.append(allocator, '0');
+                try list.append(allocator, '0');
+                try list.append(allocator, hex[c >> 4]);
+                try list.append(allocator, hex[c & 0x0f]);
+            },
+            else => try list.append(allocator, c),
+        }
+    }
+
+    return list.toOwnedSlice(allocator);
 }
 
 /// URL-encode a string for use in application/x-www-form-urlencoded bodies.
