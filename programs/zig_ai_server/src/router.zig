@@ -35,7 +35,7 @@ pub fn setApiKey(key: []const u8) void {
     server_api_key = key;
 }
 
-pub fn dispatch(request: *http.Server.Request, allocator: std.mem.Allocator) Response {
+pub fn dispatch(request: *http.Server.Request, allocator: std.mem.Allocator, io: std.Io) Response {
     const target = request.head.target;
     const method = request.head.method;
 
@@ -71,13 +71,13 @@ pub fn dispatch(request: *http.Server.Request, allocator: std.mem.Allocator) Res
                 };
             }
         }
-        return routeApiV1(path[8..], method, request, allocator);
+        return routeApiV1(path[8..], method, request, allocator, io);
     }
 
     return handlers.notFound(request, allocator);
 }
 
-fn routeApiV1(path: []const u8, method: http.Method, request: *http.Server.Request, allocator: std.mem.Allocator) Response {
+fn routeApiV1(path: []const u8, method: http.Method, request: *http.Server.Request, allocator: std.mem.Allocator, io: std.Io) Response {
     // ── Text Generation ─────────────────────────────────────
     if (std.mem.eql(u8, path, "chat")) {
         if (method != .POST) return handlers.methodNotAllowed(request, allocator);
@@ -169,7 +169,7 @@ fn routeApiV1(path: []const u8, method: http.Method, request: *http.Server.Reque
     // ── Agents & Missions ───────────────────────────────────
     if (std.mem.eql(u8, path, "agent")) {
         if (method != .POST) return handlers.methodNotAllowed(request, allocator);
-        return agent.handle(request, allocator);
+        return agent.handle(request, allocator, io);
     }
     if (std.mem.eql(u8, path, "missions")) {
         return handlers.stub(request, allocator, "POST /qai/v1/missions");

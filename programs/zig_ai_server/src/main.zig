@@ -184,7 +184,7 @@ fn handleConnection(ctx: *ConnCtx) void {
         };
 
         // Route and handle
-        const result = router.dispatch(&request, ctx.allocator);
+        const result = router.dispatch(&request, ctx.allocator, io);
 
         // For requests with a body (POST/PUT/PATCH), we must either read
         // the body or close the connection. If the client sent no

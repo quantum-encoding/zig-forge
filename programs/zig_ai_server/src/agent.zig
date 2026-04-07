@@ -1,9 +1,12 @@
 // Agent endpoint — POST /qai/v1/agent
 // Single model, single loop, three tools: bash, write_file, read_file
-// Direct to providers via http_sentinel tool calling
+// Pure Zig — no libc, no C externs, no system(), no popen()
+// Uses std.Io for all I/O, std.process.run for child processes
 
 const std = @import("std");
 const http = std.http;
+const Io = std.Io;
+const Dir = std.Io.Dir;
 const hs = @import("http-sentinel");
 const json_util = @import("json.zig");
 const router = @import("router.zig");
@@ -12,10 +15,7 @@ const account_mod = @import("account.zig");
 const chat_mod = @import("chat.zig");
 const Response = router.Response;
 
-// C stdlib extern (available with link_libc)
-extern "c" fn system(command: [*:0]const u8) c_int;
-
-// ── Request / Response types ────────────────────────────────
+// ── Request type ────────────────────────────────────────────
 
 const AgentRequest = struct {
     goal: []const u8,
@@ -84,15 +84,13 @@ const RAG_SYSTEM_PROMPT =
 
 // ── Handler ─────────────────────────────────────────────────
 
-pub fn handle(request: *http.Server.Request, allocator: std.mem.Allocator) Response {
-    // Parse request
+pub fn handle(request: *http.Server.Request, allocator: std.mem.Allocator, io: Io) Response {
     const parsed = json_util.parseBody(AgentRequest, request, allocator) catch |err| {
         return errorResp(err);
     };
     defer parsed.deinit();
     const req = parsed.value;
 
-    // Resolve provider
     const provider_info = chat_mod.resolveProvider(req.model) orelse {
         return .{
             .status = .bad_request,
@@ -102,7 +100,6 @@ pub fn handle(request: *http.Server.Request, allocator: std.mem.Allocator) Respo
         };
     };
 
-    // Get API key
     const api_key = hs.ai.getApiKeyFromEnv(allocator, provider_info.env_var) catch {
         return .{
             .status = .internal_server_error,
@@ -113,7 +110,6 @@ pub fn handle(request: *http.Server.Request, allocator: std.mem.Allocator) Respo
     };
     defer allocator.free(api_key);
 
-    // Init provider client
     var client = hs.ai.AIClient.init(allocator, provider_info.provider, .{
         .api_key = api_key,
     }) catch {
@@ -126,10 +122,9 @@ pub fn handle(request: *http.Server.Request, allocator: std.mem.Allocator) Respo
     };
     defer client.deinit();
 
-    // Create workspace
     const workspace_id = req.workspace_id orelse "agent-session";
     const is_ephemeral = req.ephemeral orelse true;
-    const workspace_path = createWorkspace(allocator, workspace_id, is_ephemeral) catch {
+    const workspace_path = createWorkspace(allocator, io, workspace_id, is_ephemeral) catch {
         return .{
             .status = .internal_server_error,
             .body =
@@ -139,12 +134,12 @@ pub fn handle(request: *http.Server.Request, allocator: std.mem.Allocator) Respo
     };
     defer allocator.free(workspace_path);
 
-    // Run the agent loop
     const max_iters: u32 = if (req.max_iterations) |mi| @intCast(@max(mi, 1)) else 25;
     const enable_rag = req.enable_rag orelse false;
 
     const result = runAgentLoop(
         allocator,
+        io,
         &client,
         req.goal,
         req.model,
@@ -168,6 +163,7 @@ pub fn handle(request: *http.Server.Request, allocator: std.mem.Allocator) Respo
 
 fn runAgentLoop(
     allocator: std.mem.Allocator,
+    io: Io,
     client: *hs.ai.AIClient,
     goal: []const u8,
     model: []const u8,
@@ -176,7 +172,6 @@ fn runAgentLoop(
     enable_rag: bool,
     custom_system: ?[]const u8,
 ) ![]u8 {
-    // Build config
     var config = hs.ai.RequestConfig{
         .model = model,
         .max_tokens = 16384,
@@ -187,14 +182,12 @@ fn runAgentLoop(
     };
     _ = &config;
 
-    // Conversation history
     var messages: std.ArrayListUnmanaged(hs.ai.AIMessage) = .empty;
     defer {
         for (messages.items) |*msg| msg.deinit();
         messages.deinit(allocator);
     }
 
-    // Track totals
     var total_input_tokens: u32 = 0;
     var total_output_tokens: u32 = 0;
     var iterations_used: u32 = 0;
@@ -204,12 +197,10 @@ fn runAgentLoop(
     var final_text_alloc: ?[]u8 = null;
     defer if (final_text_alloc) |ft| allocator.free(ft);
 
-    // Iteration loop
     var iter: u32 = 0;
     while (iter < max_iters) : (iter += 1) {
         iterations_used = iter + 1;
 
-        // Send to provider
         const prompt = if (iter == 0) goal else "";
         var response = if (messages.items.len > 0)
             try client.sendMessageWithContext(prompt, messages.items, config)
@@ -219,13 +210,9 @@ fn runAgentLoop(
         total_input_tokens += response.usage.input_tokens;
         total_output_tokens += response.usage.output_tokens;
 
-        // Check for tool calls
         if (response.message.tool_calls) |tool_calls| {
-            // Add assistant message (with tool_calls) to history
             try messages.append(allocator, response.message);
-            // Don't deinit response.message since it's now owned by messages
 
-            // Execute each tool
             var results: std.ArrayListUnmanaged(hs.ai.common.ToolResult) = .empty;
             defer {
                 for (results.items) |*r| r.deinit();
@@ -234,7 +221,7 @@ fn runAgentLoop(
 
             for (tool_calls) |call| {
                 tool_calls_total += 1;
-                const result = executeTool(allocator, call, workspace) catch |err| {
+                const result = executeTool(allocator, io, call, workspace) catch |err| {
                     const err_content = std.fmt.allocPrint(allocator, "Error: {s}", .{@errorName(err)}) catch
                         allocator.dupe(u8, "Error: tool execution failed") catch continue;
                     try results.append(allocator, .{
@@ -253,9 +240,7 @@ fn runAgentLoop(
                 try results.append(allocator, result);
             }
 
-            // Add tool results as user message
             const results_owned = try allocator.dupe(hs.ai.common.ToolResult, results.items);
-            // Clear results so they don't get double-freed
             results.items.len = 0;
 
             try messages.append(allocator, .{
@@ -267,7 +252,6 @@ fn runAgentLoop(
                 .allocator = allocator,
             });
         } else {
-            // No tool calls — model is done
             final_text_alloc = try allocator.dupe(u8, response.message.content);
             final_text = final_text_alloc.?;
             response.deinit();
@@ -282,33 +266,22 @@ fn runAgentLoop(
     account_mod.recordCost(cost_usd);
     const cost_ticks: i64 = @intFromFloat(cost_usd * 10_000_000_000.0);
 
-    // Escape final text for JSON
     const escaped = try chat_mod.jsonEscape(allocator, final_text);
     defer allocator.free(escaped);
 
-    // Build response
     return std.fmt.allocPrint(allocator,
         \\{{"status":"completed","model":"{s}","iterations":{d},"tool_calls":{d},"files_written":{d},"usage":{{"input_tokens":{d},"output_tokens":{d},"cost_ticks":{d}}},"response":"{s}"}}
-    , .{
-        model,
-        iterations_used,
-        tool_calls_total,
-        files_written,
-        total_input_tokens,
-        total_output_tokens,
-        cost_ticks,
-        escaped,
-    });
+    , .{ model, iterations_used, tool_calls_total, files_written, total_input_tokens, total_output_tokens, cost_ticks, escaped });
 }
 
 // ── Tool Execution ──────────────────────────────────────────
 
 fn executeTool(
     allocator: std.mem.Allocator,
+    io: Io,
     call: hs.ai.common.ToolCall,
     workspace: []const u8,
 ) !hs.ai.common.ToolResult {
-    // Parse arguments JSON
     const args = std.json.parseFromSlice(std.json.Value, allocator, call.arguments, .{}) catch {
         return .{
             .tool_call_id = try allocator.dupe(u8, call.id),
@@ -320,11 +293,11 @@ fn executeTool(
     defer args.deinit();
 
     if (std.mem.eql(u8, call.name, "bash")) {
-        return execBash(allocator, call.id, args.value, workspace);
+        return execBash(allocator, io, call.id, args.value, workspace);
     } else if (std.mem.eql(u8, call.name, "write_file")) {
-        return execWriteFile(allocator, call.id, args.value, workspace);
+        return execWriteFile(allocator, io, call.id, args.value, workspace);
     } else if (std.mem.eql(u8, call.name, "read_file")) {
-        return execReadFile(allocator, call.id, args.value, workspace);
+        return execReadFile(allocator, io, call.id, args.value, workspace);
     }
 
     return .{
@@ -335,12 +308,11 @@ fn executeTool(
     };
 }
 
-// C popen for capturing command output
-extern "c" fn popen(command: [*:0]const u8, mode: [*:0]const u8) ?*std.c.FILE;
-extern "c" fn pclose(stream: *std.c.FILE) c_int;
+// ── bash tool: std.process.run ──────────────────────────────
 
 fn execBash(
     allocator: std.mem.Allocator,
+    io: Io,
     call_id: []const u8,
     args: std.json.Value,
     workspace: []const u8,
@@ -354,42 +326,39 @@ fn execBash(
         };
     };
 
-    // Build command with cd to workspace, capture both stdout and stderr
-    const full_cmd = try std.fmt.allocPrint(allocator, "cd '{s}' && {s} 2>&1", .{ workspace, command });
-    defer allocator.free(full_cmd);
-    const cmd_z = try allocator.dupeZ(u8, full_cmd);
-    defer allocator.free(cmd_z);
-
-    // Execute via popen
-    const pipe = popen(cmd_z, "r") orelse {
+    // Use std.process.run — pure Zig, captures stdout+stderr
+    const result = std.process.run(allocator, io, .{
+        .argv = &.{ "bash", "-c", command },
+        .cwd = .{ .path = workspace },
+        .stdout_limit = .limited(512 * 1024),
+        .stderr_limit = .limited(512 * 1024),
+    }) catch |err| {
+        const msg = try std.fmt.allocPrint(allocator, "Error spawning process: {s}", .{@errorName(err)});
         return .{
             .tool_call_id = try allocator.dupe(u8, call_id),
-            .content = try allocator.dupe(u8, "Error: failed to execute command"),
+            .content = msg,
             .is_error = true,
             .allocator = allocator,
         };
     };
+    defer allocator.free(result.stderr);
 
-    // Read output
-    var output: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer output.deinit(allocator);
+    const exit_code: u8 = switch (result.term) {
+        .exited => |code| code,
+        else => 1,
+    };
 
-    var buf: [4096]u8 = undefined;
-    while (true) {
-        const n = std.c.fread(&buf, 1, buf.len, pipe);
-        if (n == 0) break;
-        try output.appendSlice(allocator, buf[0..n]);
-        if (output.items.len > 512 * 1024) break; // cap at 512KB
-    }
-
-    const exit_raw = pclose(pipe);
-    const exit_code: i32 = @divTrunc(exit_raw, 256); // WEXITSTATUS
-
-    // Truncate if needed
-    const content = if (output.items.len > 0)
-        try output.toOwnedSlice(allocator)
-    else
-        try allocator.dupe(u8, "(no output)");
+    // Combine stdout + stderr
+    const content = if (exit_code != 0 and result.stderr.len > 0) blk: {
+        defer allocator.free(result.stdout);
+        break :blk try std.fmt.allocPrint(allocator, "Exit code: {d}\n{s}\n{s}", .{ exit_code, result.stdout, result.stderr });
+    } else if (result.stderr.len > 0) blk: {
+        defer allocator.free(result.stdout);
+        break :blk try std.fmt.allocPrint(allocator, "{s}\n{s}", .{ result.stdout, result.stderr });
+    } else if (result.stdout.len == 0) blk: {
+        allocator.free(result.stdout);
+        break :blk try allocator.dupe(u8, "(no output)");
+    } else result.stdout;
 
     return .{
         .tool_call_id = try allocator.dupe(u8, call_id),
@@ -399,8 +368,11 @@ fn execBash(
     };
 }
 
+// ── write_file tool: std.Io.Dir ─────────────────────────────
+
 fn execWriteFile(
     allocator: std.mem.Allocator,
+    io: Io,
     call_id: []const u8,
     args: std.json.Value,
     workspace: []const u8,
@@ -432,17 +404,27 @@ fn execWriteFile(
         };
     }
 
-    // Build full path
-    const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ workspace, path });
-    defer allocator.free(full_path);
+    // Open workspace directory
+    const ws_dir = Dir.openDirAbsolute(io, workspace, .{}) catch |err| {
+        const msg = try std.fmt.allocPrint(allocator, "Error opening workspace: {s}", .{@errorName(err)});
+        return .{
+            .tool_call_id = try allocator.dupe(u8, call_id),
+            .content = msg,
+            .is_error = true,
+            .allocator = allocator,
+        };
+    };
 
-    // Create parent directories via mkdir -p
-    if (std.mem.lastIndexOfScalar(u8, full_path, '/')) |last_slash| {
-        makeDirRecursive(allocator, full_path[0..last_slash]);
+    // Create parent directories if needed
+    if (std.mem.lastIndexOfScalar(u8, path, '/')) |last_slash| {
+        ws_dir.createDirPath(io, path[0..last_slash]) catch {};
     }
 
-    // Write file via C stdio (always available with libc)
-    writeFileC(full_path, content) catch |err| {
+    // Write the file — pure Zig I/O
+    ws_dir.writeFile(io, .{
+        .sub_path = path,
+        .data = content,
+    }) catch |err| {
         const msg = try std.fmt.allocPrint(allocator, "Error writing file: {s}", .{@errorName(err)});
         return .{
             .tool_call_id = try allocator.dupe(u8, call_id),
@@ -452,8 +434,8 @@ fn execWriteFile(
         };
     };
 
-    // Git auto-commit
-    gitAutoCommit(allocator, workspace, path);
+    // Git auto-commit via std.process.run
+    gitAutoCommit(allocator, io, workspace, path);
 
     const msg = try std.fmt.allocPrint(allocator, "Wrote {d} bytes to {s}", .{ content.len, path });
     return .{
@@ -463,8 +445,11 @@ fn execWriteFile(
     };
 }
 
+// ── read_file tool: Dir.readFileAlloc ───────────────────────
+
 fn execReadFile(
     allocator: std.mem.Allocator,
+    io: Io,
     call_id: []const u8,
     args: std.json.Value,
     workspace: []const u8,
@@ -478,7 +463,6 @@ fn execReadFile(
         };
     };
 
-    // Path traversal protection
     if (std.mem.indexOf(u8, path, "..") != null) {
         return .{
             .tool_call_id = try allocator.dupe(u8, call_id),
@@ -488,10 +472,18 @@ fn execReadFile(
         };
     }
 
-    const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ workspace, path });
-    defer allocator.free(full_path);
+    const ws_dir = Dir.openDirAbsolute(io, workspace, .{}) catch |err| {
+        const msg = try std.fmt.allocPrint(allocator, "Error opening workspace: {s}", .{@errorName(err)});
+        return .{
+            .tool_call_id = try allocator.dupe(u8, call_id),
+            .content = msg,
+            .is_error = true,
+            .allocator = allocator,
+        };
+    };
 
-    const content = readFileC(allocator, full_path) catch |err| {
+    // Read file — pure Zig, 100KB cap
+    const content = ws_dir.readFileAlloc(io, path, allocator, .limited(100 * 1024)) catch |err| {
         const msg = try std.fmt.allocPrint(allocator, "Error reading file: {s}", .{@errorName(err)});
         return .{
             .tool_call_id = try allocator.dupe(u8, call_id),
@@ -508,33 +500,41 @@ fn execReadFile(
     };
 }
 
-// ── Workspace Management ────────────────────────────────────
+// ── Workspace Management (pure Zig) ─────────────────────────
 
-fn createWorkspace(allocator: std.mem.Allocator, id: []const u8, ephemeral: bool) ![]u8 {
+fn createWorkspace(allocator: std.mem.Allocator, io: Io, id: []const u8, ephemeral: bool) ![]u8 {
     const path = if (ephemeral)
         try std.fmt.allocPrint(allocator, "/tmp/qai-agent-{s}", .{id})
     else
         try std.fmt.allocPrint(allocator, "/tmp/qai-workspace-{s}", .{id});
 
-    // Create directory + git init via system()
-    const cmd = try std.fmt.allocPrint(allocator, "mkdir -p '{s}' && cd '{s}' && git init -q 2>/dev/null", .{ path, path });
-    defer allocator.free(cmd);
-    const cmd_z = try allocator.dupeZ(u8, cmd);
-    defer allocator.free(cmd_z);
-    _ = system(cmd_z);
+    // Create workspace directory via Zig std.Io.Dir
+    Dir.cwd().createDirPath(io, path) catch {};
+
+    // Git init via std.process.run
+    _ = std.process.run(allocator, io, .{
+        .argv = &.{ "git", "init", "-q" },
+        .cwd = .{ .path = path },
+    }) catch {};
 
     return path;
 }
 
-fn gitAutoCommit(allocator: std.mem.Allocator, workspace: []const u8, file_path: []const u8) void {
-    const cmd = std.fmt.allocPrint(allocator,
-        "cd '{s}' && git add '{s}' && git commit -q -m 'agent: write {s}' 2>/dev/null",
-        .{ workspace, file_path, file_path },
-    ) catch return;
-    defer allocator.free(cmd);
-    const cmd_z = allocator.dupeZ(u8, cmd) catch return;
-    defer allocator.free(cmd_z);
-    _ = system(cmd_z);
+fn gitAutoCommit(allocator: std.mem.Allocator, io: Io, workspace: []const u8, file_path: []const u8) void {
+    // git add <file>
+    _ = std.process.run(allocator, io, .{
+        .argv = &.{ "git", "add", file_path },
+        .cwd = .{ .path = workspace },
+    }) catch return;
+
+    // git commit
+    const msg = std.fmt.allocPrint(allocator, "agent: write {s}", .{file_path}) catch return;
+    defer allocator.free(msg);
+
+    _ = std.process.run(allocator, io, .{
+        .argv = &.{ "git", "commit", "-q", "-m", msg },
+        .cwd = .{ .path = workspace },
+    }) catch return;
 }
 
 // ── Helpers ─────────────────────────────────────────────────
@@ -544,51 +544,6 @@ fn getStr(value: std.json.Value, key: []const u8) ?[]const u8 {
     const v = value.object.get(key) orelse return null;
     if (v == .string) return v.string;
     return null;
-}
-
-// ── C File I/O (libc, portable) ─────────────────────────────
-
-fn writeFileC(path: []const u8, content: []const u8) !void {
-    const path_z = std.heap.c_allocator.dupeZ(u8, path) catch return error.OutOfMemory;
-    defer std.heap.c_allocator.free(path_z);
-    const f = std.c.fopen(path_z, "w") orelse return error.FileOpenFailed;
-    defer _ = std.c.fclose(f);
-    const written = std.c.fwrite(content.ptr, 1, content.len, f);
-    if (written != content.len) return error.WriteFailed;
-}
-
-extern "c" fn fseek(stream: *std.c.FILE, offset: c_long, whence: c_int) c_int;
-extern "c" fn ftell(stream: *std.c.FILE) c_long;
-const SEEK_END: c_int = 2;
-const SEEK_SET: c_int = 0;
-
-fn readFileC(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    const path_z = try allocator.dupeZ(u8, path);
-    defer allocator.free(path_z);
-    const f = std.c.fopen(path_z, "r") orelse return error.FileOpenFailed;
-    defer _ = std.c.fclose(f);
-
-    // Get file size
-    _ = fseek(f, 0, SEEK_END);
-    const size_long = ftell(f);
-    if (size_long < 0) return error.FileReadFailed;
-    const size: usize = @intCast(size_long);
-    if (size > 100 * 1024) return error.FileTooLarge;
-    _ = fseek(f, 0, SEEK_SET);
-
-    const buf = try allocator.alloc(u8, size);
-    errdefer allocator.free(buf);
-    const read = std.c.fread(buf.ptr, 1, size, f);
-    if (read != size) return error.FileReadFailed;
-    return buf;
-}
-
-fn makeDirRecursive(allocator: std.mem.Allocator, path: []const u8) void {
-    const cmd = std.fmt.allocPrint(allocator, "mkdir -p '{s}'", .{path}) catch return;
-    defer allocator.free(cmd);
-    const cmd_z = allocator.dupeZ(u8, cmd) catch return;
-    defer allocator.free(cmd_z);
-    _ = system(cmd_z);
 }
 
 fn errorResp(err: anyerror) Response {
