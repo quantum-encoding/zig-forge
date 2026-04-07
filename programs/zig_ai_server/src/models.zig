@@ -221,6 +221,49 @@ pub fn getPricing(model_id: []const u8) struct { input: f64, output: f64 } {
     return .{ .input = 3.0, .output = 15.0 };
 }
 
+/// Lookup a model by API ID. Returns the full Model (provider, route, pricing, etc.)
+pub fn getModel(model_id: []const u8) ?Model {
+    // Exact match first
+    for (models) |m| {
+        if (std.mem.eql(u8, m.api_model_id, model_id)) return m;
+    }
+    // Prefix match (e.g. "claude-sonnet-4-6" matches "claude-sonnet-4-6-20250929")
+    for (models) |m| {
+        if (model_id.len >= m.api_model_id.len and
+            std.mem.startsWith(u8, model_id, m.api_model_id))
+        {
+            return m;
+        }
+    }
+    return null;
+}
+
+/// Route type for provider dispatch
+pub const Route = enum {
+    direct,        // Direct API: Anthropic, DeepSeek, xAI, OpenAI (API key auth)
+    vertex_maas,   // Vertex Model-as-a-Service (GCP token auth, OpenAI-compat)
+    vertex_native, // Vertex native Gemini (GCP token auth, generateContent)
+    vertex_dedicated, // Vertex dedicated endpoints (GCP token auth)
+    google_genai,  // Google AI Studio (API key auth, generativelanguage.googleapis.com)
+    unknown,
+
+    pub fn fromString(s: []const u8) Route {
+        if (std.mem.eql(u8, s, "direct")) return .direct;
+        if (std.mem.eql(u8, s, "cloud-run-egress")) return .direct; // same as direct
+        if (std.mem.eql(u8, s, "vertex-maas")) return .vertex_maas;
+        if (std.mem.eql(u8, s, "vertex-native")) return .vertex_native;
+        if (std.mem.eql(u8, s, "vertex-dedicated")) return .vertex_dedicated;
+        if (std.mem.eql(u8, s, "google-genai")) return .google_genai;
+        return .unknown;
+    }
+};
+
+/// Get the route for a model — determines which provider handler to use.
+pub fn getRoute(model_id: []const u8) Route {
+    if (getModel(model_id)) |m| return Route.fromString(m.route);
+    return .unknown;
+}
+
 /// Get total number of models in registry
 pub fn getModelCount() usize {
     return model_count;

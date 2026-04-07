@@ -31,7 +31,7 @@ const ModelRoute = enum {
     maas_openai, // Global OpenAI-compatible endpoint (GCP auth)
     maas_mistral, // Regional rawPredict (GCP auth)
     dedicated, // Self-hosted on Vertex dedicated endpoint (GCP auth)
-    genai, // Google GenAI / AI Studio (API key auth)
+    genai, // Delegates to genai.zig (API key auth, not GCP tokens)
 };
 
 /// Dedicated endpoint registry — dynamic, managed via admin API.

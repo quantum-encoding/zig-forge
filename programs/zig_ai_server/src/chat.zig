@@ -14,6 +14,7 @@ const store_mod = @import("store/store.zig");
 const types = @import("store/types.zig");
 const ledger_mod = @import("ledger.zig");
 const vertex = @import("vertex.zig");
+const genai = @import("genai.zig");
 const gcp_mod = @import("gcp.zig");
 const Response = router.Response;
 
@@ -26,6 +27,9 @@ const ChatRequest = struct {
     stream: ?bool = null,
     system_prompt: ?[]const u8 = null,
     tools: ?[]const Tool = null,
+    /// Optional explicit provider override: "anthropic", "vertex", "genai", "openai", etc.
+    /// When null, the model is looked up in models.csv to determine the default route.
+    provider: ?[]const u8 = null,
 };
 
 const Message = struct {
@@ -56,7 +60,30 @@ const providers = [_]ProviderInfo{
     .{ .provider = .openai, .env_var = "OPENAI_API_KEY", .default_model = "gpt-4.1-mini" },
 };
 
-/// Resolve which provider to use based on the model name
+/// Resolve the route for a model: explicit provider override → models.csv registry → prefix match.
+fn resolveRoute(model: []const u8, explicit_provider: ?[]const u8) models_mod.Route {
+    // Explicit provider override (highest priority)
+    if (explicit_provider) |p| {
+        if (std.mem.eql(u8, p, "vertex")) return .vertex_native;
+        if (std.mem.eql(u8, p, "vertex-maas")) return .vertex_maas;
+        if (std.mem.eql(u8, p, "genai") or std.mem.eql(u8, p, "google-genai")) return .google_genai;
+        if (std.mem.eql(u8, p, "anthropic") or std.mem.eql(u8, p, "deepseek") or
+            std.mem.eql(u8, p, "openai") or std.mem.eql(u8, p, "xai")) return .direct;
+        // Unknown provider name — fall through to registry
+    }
+
+    // Registry lookup (models.csv has provider + route for every known model)
+    const route = models_mod.getRoute(model);
+    if (route != .unknown) return route;
+
+    // Fallback: if model prefix matches a direct provider, use direct
+    if (resolveProvider(model) != null) return .direct;
+
+    return .unknown;
+}
+
+/// Resolve which direct provider to use based on the model name (prefix match).
+/// Also used by agent.zig and stream.zig for their own provider dispatch.
 pub fn resolveProvider(model: []const u8) ?ProviderInfo {
     // Match by model prefix
     if (std.mem.startsWith(u8, model, "claude")) {
@@ -121,11 +148,31 @@ pub fn handle(
         };
     }
 
-    // Resolve provider from model name.
-    // Direct providers: Claude, DeepSeek, Gemini, Grok, OpenAI.
-    // Everything else (GLM, Qwen, Codestral, etc.) routes through Vertex AI.
+    // ── Provider Routing ──────────────────────────────────
+    // 1. If request has explicit "provider" field → route by provider name
+    // 2. Else look up model in models.csv → get route (direct, vertex-maas, google-genai, etc.)
+    // 3. Dispatch to the isolated provider handler
+
+    const route = resolveRoute(chat_req.model, chat_req.provider);
+
+    switch (route) {
+        .vertex_maas, .vertex_native, .vertex_dedicated => {
+            return vertex.handleParsed(allocator, gcp_ctx, store, auth, io, ledger, environ_map, body);
+        },
+        .google_genai => {
+            return genai.handleParsed(allocator, store, auth, io, ledger, environ_map, body);
+        },
+        .direct, .unknown => {}, // fall through to direct provider handling below
+    }
+
+    // Direct provider dispatch (API key auth via http-sentinel)
     const provider_info = resolveProvider(chat_req.model) orelse {
-        return vertex.handleParsed(allocator, gcp_ctx, store, auth, io, ledger, environ_map, body);
+        return .{
+            .status = .bad_request,
+            .body = makeError(allocator,
+                \\{"error":"unknown_model","message":"Model not found in registry. Check /qai/v1/models for available models, or pass \"provider\" field to route explicitly."}
+            ),
+        };
     };
 
     // Get API key from env
