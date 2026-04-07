@@ -50,6 +50,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = false,
     });
     test_module.addImport("http-sentinel", http_sentinel_module);
+    test_module.addImport("gcp-auth", gcp_auth_module);
 
     const tests = b.addTest(.{
         .root_module = test_module,

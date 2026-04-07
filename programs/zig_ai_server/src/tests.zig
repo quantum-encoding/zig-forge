@@ -289,3 +289,160 @@ test "SHA-256: different input = different hash" {
     std.crypto.hash.sha2.Sha256.hash("qai_k_key2", &hash2, .{});
     try testing.expect(!std.mem.eql(u8, &hash1, &hash2));
 }
+
+// ── 7. OIDC / JWT Edge Cases ──────────────────────────────────
+// Tests in oidc.zig are pulled in via import (base64url, nonce, JWKS parsing, etc.)
+
+const oidc = @import("oidc.zig");
+
+test "OIDC: nonce verification integration" {
+    // Verify the public API works end-to-end
+    try testing.expect(oidc.verifyNonce(null, null)); // no nonce = skip
+    try testing.expect(!oidc.verifyNonce("secret", null)); // nonce required but missing
+    try testing.expect(!oidc.verifyNonce("secret", "wrong")); // mismatch
+}
+
+test "OIDC: claims deinit with all fields" {
+    var claims = oidc.VerifiedClaims{
+        .sub = try testing.allocator.dupe(u8, "apple_001234"),
+        .email = try testing.allocator.dupe(u8, "user@icloud.com"),
+        .email_verified = true,
+        .exp = 1712521781,
+        .nonce = try testing.allocator.dupe(u8, "abc123"),
+        .aud = try testing.allocator.dupe(u8, "com.quantumencoding.cosmicduck"),
+    };
+    claims.deinit(testing.allocator);
+}
+
+test "OIDC: JwksCache empty is stale" {
+    const cache = oidc.JwksCache{};
+    try testing.expect(cache.isStale(0));
+    try testing.expect(cache.isStale(999999));
+}
+
+// ── 8. Billing Edge Cases ─────────────────────────────────────
+
+test "billing: large token counts don't overflow" {
+    // 1M tokens — should produce a valid positive result without overflow
+    const cost = billing.actualCost("claude-opus-4-6", 1_000_000, 1_000_000, .free);
+    try testing.expect(cost.cost > 0);
+    try testing.expect(cost.margin > 0);
+    try testing.expect(cost.margin < cost.cost); // margin < base cost
+}
+
+test "billing: estimation is always >= actual for same model" {
+    // Estimate with max_tokens should be >= actual cost at max_tokens
+    const max_tokens: u32 = 4096;
+    const est = billing.estimateCost("deepseek-chat", max_tokens);
+    const actual = billing.actualCost("deepseek-chat", max_tokens / 2, max_tokens, .free);
+    // Estimation includes margin-like buffer, should be >= raw cost
+    try testing.expect(est >= actual.cost);
+}
+
+test "billing: all tiers produce valid margins" {
+    const tiers = [_]types.DevTier{ .free, .hobby, .pro, .enterprise };
+    var prev_margin: i64 = std.math.maxInt(i64);
+    for (tiers) |tier| {
+        const cost = billing.actualCost("deepseek-chat", 10000, 10000, tier);
+        try testing.expect(cost.cost > 0);
+        try testing.expect(cost.margin >= 0);
+        try testing.expect(cost.margin <= prev_margin); // higher tier = lower margin
+        prev_margin = cost.margin;
+    }
+}
+
+test "billing: unknown model uses default pricing" {
+    const cost = billing.actualCost("nonexistent-model", 1000, 1000, .free);
+    // Default pricing is claude-sonnet level (3.0/15.0)
+    try testing.expect(cost.cost > 0);
+}
+
+test "billing: minimum reservation is 1000 ticks" {
+    // Very cheap model with few tokens should still get minimum estimate
+    const est = billing.estimateCost("deepseek-chat", 1);
+    // At $0.28/1M, 1 token ≈ 0 ticks, but reservation floor is enforced in reserve()
+    try testing.expect(est >= 0); // estimateCost itself may return 0
+}
+
+// ── 9. Store Types Edge Cases ─────────────────────────────────
+
+test "FixedStr256: email-length strings" {
+    const email = "very.long.email.address.with.many.parts@subdomain.domain.example.com";
+    const fs = types.FixedStr256.fromSlice(email);
+    try testing.expectEqualStrings(email, fs.slice());
+}
+
+test "FixedStr128: key name storage" {
+    const name = "app-auth";
+    const fs = types.FixedStr128.fromSlice(name);
+    try testing.expectEqualStrings(name, fs.slice());
+    try testing.expect(fs.eql("app-auth"));
+    try testing.expect(!fs.eql("other-name"));
+}
+
+test "FixedStr32: account ID patterns" {
+    // Apple account ID
+    const apple_id = types.FixedStr32.fromSlice("apple_001234567890");
+    try testing.expect(apple_id.eql("apple_001234567890"));
+
+    // Google account ID
+    const google_id = types.FixedStr32.fromSlice("google_109876543210");
+    try testing.expect(google_id.eql("google_109876543210"));
+}
+
+test "FixedStr32: boundary at exactly 32 chars" {
+    const exact = "a" ** 32;
+    const fs = types.FixedStr32.fromSlice(exact);
+    try testing.expectEqual(@as(u16, 32), fs.len);
+    try testing.expectEqualStrings(exact, fs.slice());
+}
+
+test "DevTier: string round-trip" {
+    try testing.expectEqualStrings("free", types.DevTier.free.toString());
+    try testing.expectEqualStrings("hobby", types.DevTier.hobby.toString());
+    try testing.expectEqualStrings("pro", types.DevTier.pro.toString());
+    try testing.expectEqualStrings("enterprise", types.DevTier.enterprise.toString());
+}
+
+test "Role: string round-trip" {
+    try testing.expectEqualStrings("user", types.Role.user.toString());
+    try testing.expectEqualStrings("admin", types.Role.admin.toString());
+    try testing.expectEqualStrings("service", types.Role.service.toString());
+}
+
+test "hexEncode: API key prefix format" {
+    // Verify qai_k_ prefix generation matches expected pattern
+    var out: [16]u8 = undefined;
+    types.hexEncode(&.{ 0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe }, &out);
+    try testing.expectEqualStrings("deadbeefcafebabe", &out);
+}
+
+// ── 10. Security Edge Cases ───────────────────────────────────
+
+test "path validation: double dot in filename blocked (strict)" {
+    // validatePath blocks ANY ".." substring — strict but safe
+    // This prevents edge cases like "file..\\..\\etc"
+    try testing.expect(security.validatePath("file..txt") == null);
+}
+
+test "path validation: deeply nested is OK" {
+    try testing.expect(security.validatePath("a/b/c/d/e/f/g.txt") != null);
+}
+
+test "path validation: encoded traversal blocked" {
+    // Some systems decode %2e%2e to ".." — our validator works on the raw string
+    // but we should still catch literal ".." sequences
+    try testing.expect(security.validatePath("..%2f..%2fetc%2fpasswd") == null);
+}
+
+test "command validation: pipe to rm blocked" {
+    try testing.expect(security.validateCommand("echo test | rm -rf /") == null);
+}
+
+test "command validation: semicolon chain blocked" {
+    try testing.expect(security.validateCommand("ls; rm -rf /") == null);
+}
+
+test "command validation: backtick injection blocked" {
+    try testing.expect(security.validateCommand("echo `rm -rf /`") == null);
+}

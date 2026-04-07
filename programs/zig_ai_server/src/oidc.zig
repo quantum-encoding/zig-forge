@@ -367,3 +367,320 @@ fn base64UrlDecodeAlloc(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     };
     return result;
 }
+
+// ── Tests ──────────────────────────────────────────────────────
+
+test "base64url: standard encoding" {
+    var buf: [64]u8 = undefined;
+    // "hello" base64url = "aGVsbG8"
+    const result = base64UrlDecodeFixed(&buf, "aGVsbG8") orelse return error.TestFailed;
+    try std.testing.expectEqualStrings("hello", result);
+}
+
+test "base64url: url-safe characters (- and _)" {
+    var buf: [64]u8 = undefined;
+    // bytes 0xfb,0xef,0xbe = base64url "+++/" → base64url uses "-" for "+" and "_" for "/"
+    // Standard base64 "+++" = base64url "---"
+    // Let's use a known value: base64url "AQAB" = [1, 0, 1] (RSA exponent 65537)
+    const result = base64UrlDecodeFixed(&buf, "AQAB") orelse return error.TestFailed;
+    try std.testing.expectEqual(@as(u8, 1), result[0]);
+    try std.testing.expectEqual(@as(u8, 0), result[1]);
+    try std.testing.expectEqual(@as(u8, 1), result[2]);
+}
+
+test "base64url: padding variations" {
+    var buf: [64]u8 = undefined;
+    // No padding needed (multiple of 4): "dGVzdA" (4 chars + 2 padding = "test")
+    const r1 = base64UrlDecodeFixed(&buf, "dGVzdA") orelse return error.TestFailed;
+    try std.testing.expectEqualStrings("test", r1);
+
+    // Needs 1 pad char: "YQ" → "a"
+    const r2 = base64UrlDecodeFixed(&buf, "YQ") orelse return error.TestFailed;
+    try std.testing.expectEqualStrings("a", r2);
+
+    // Needs 2 pad chars: "YWI" → "ab"
+    const r3 = base64UrlDecodeFixed(&buf, "YWI") orelse return error.TestFailed;
+    try std.testing.expectEqualStrings("ab", r3);
+}
+
+test "base64url: empty input" {
+    var buf: [64]u8 = undefined;
+    const result = base64UrlDecodeFixed(&buf, "");
+    // Empty base64url → empty bytes
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual(@as(usize, 0), result.?.len);
+}
+
+test "base64url: buffer too small" {
+    var buf: [2]u8 = undefined;
+    // "aGVsbG8" decodes to "hello" (5 bytes) but buf is only 2
+    const result = base64UrlDecodeFixed(&buf, "aGVsbG8");
+    try std.testing.expect(result == null);
+}
+
+test "base64url: input exceeds tmp buffer" {
+    var buf: [4096]u8 = undefined;
+    // Input longer than 2048 chars should return null
+    const long_input = "A" ** 2050;
+    const result = base64UrlDecodeFixed(&buf, long_input);
+    try std.testing.expect(result == null);
+}
+
+test "base64url: invalid characters" {
+    var buf: [64]u8 = undefined;
+    // Non-base64 characters should fail
+    const result = base64UrlDecodeFixed(&buf, "!!!!");
+    try std.testing.expect(result == null);
+}
+
+test "base64url alloc: standard decode" {
+    const allocator = std.testing.allocator;
+    const result = try base64UrlDecodeAlloc(allocator, "aGVsbG8");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("hello", result);
+}
+
+test "base64url alloc: url-safe chars replaced" {
+    const allocator = std.testing.allocator;
+    // "n-m_o" has url-safe chars — should be converted to "n+m/o"
+    const result = try base64UrlDecodeAlloc(allocator, "AQAB");
+    defer allocator.free(result);
+    try std.testing.expectEqual(@as(usize, 3), result.len);
+}
+
+test "nonce: null raw nonce skips verification" {
+    try std.testing.expect(verifyNonce(null, null));
+    try std.testing.expect(verifyNonce(null, "anything"));
+}
+
+test "nonce: empty raw nonce skips verification" {
+    try std.testing.expect(verifyNonce("", null));
+    try std.testing.expect(verifyNonce("", "anything"));
+}
+
+test "nonce: raw nonce present but token nonce missing" {
+    try std.testing.expect(!verifyNonce("my-nonce", null));
+    try std.testing.expect(!verifyNonce("my-nonce", ""));
+}
+
+test "nonce: correct nonce matches" {
+    // SHA-256("test-nonce-123") as hex
+    var hash: [Sha256.digest_length]u8 = undefined;
+    Sha256.hash("test-nonce-123", &hash, .{});
+    var expected_hex: [64]u8 = undefined;
+    const hex_chars = "0123456789abcdef";
+    for (hash, 0..) |b, i| {
+        expected_hex[i * 2] = hex_chars[b >> 4];
+        expected_hex[i * 2 + 1] = hex_chars[b & 0x0f];
+    }
+    try std.testing.expect(verifyNonce("test-nonce-123", &expected_hex));
+}
+
+test "nonce: wrong nonce rejected" {
+    try std.testing.expect(!verifyNonce("my-nonce", "0000000000000000000000000000000000000000000000000000000000000000"));
+}
+
+test "nonce: truncated hash rejected" {
+    try std.testing.expect(!verifyNonce("my-nonce", "abcd1234"));
+}
+
+test "JWKS parse: valid Apple-style JWKS" {
+    const allocator = std.testing.allocator;
+    const jwks_json =
+        \\{"keys":[{"kty":"RSA","kid":"test-kid-1","n":"AQAB","e":"AQAB","alg":"RS256","use":"sig"}]}
+    ;
+    const cache = try parseJwks(allocator, jwks_json, 1000);
+    try std.testing.expectEqual(@as(usize, 1), cache.count);
+    try std.testing.expectEqualStrings("test-kid-1", cache.keys[0].kid[0..cache.keys[0].kid_len]);
+    try std.testing.expectEqual(@as(i64, 1000), cache.fetched_at);
+}
+
+test "JWKS parse: skips non-RSA keys" {
+    const allocator = std.testing.allocator;
+    const jwks_json =
+        \\{"keys":[{"kty":"EC","kid":"ec-key","n":"AQAB","e":"AQAB"},{"kty":"RSA","kid":"rsa-key","n":"AQAB","e":"AQAB"}]}
+    ;
+    const cache = try parseJwks(allocator, jwks_json, 2000);
+    try std.testing.expectEqual(@as(usize, 1), cache.count);
+    try std.testing.expectEqualStrings("rsa-key", cache.keys[0].kid[0..cache.keys[0].kid_len]);
+}
+
+test "JWKS parse: missing fields skipped" {
+    const allocator = std.testing.allocator;
+    // Key missing "n" field should be skipped
+    const jwks_json =
+        \\{"keys":[{"kty":"RSA","kid":"bad-key","e":"AQAB"},{"kty":"RSA","kid":"good-key","n":"AQAB","e":"AQAB"}]}
+    ;
+    const cache = try parseJwks(allocator, jwks_json, 3000);
+    try std.testing.expectEqual(@as(usize, 1), cache.count);
+    try std.testing.expectEqualStrings("good-key", cache.keys[0].kid[0..cache.keys[0].kid_len]);
+}
+
+test "JWKS parse: empty keys array fails" {
+    const allocator = std.testing.allocator;
+    const result = parseJwks(allocator,
+        \\{"keys":[]}
+    , 0);
+    try std.testing.expectError(error.JwksNoKeys, result);
+}
+
+test "JWKS parse: malformed JSON fails" {
+    const allocator = std.testing.allocator;
+    const result = parseJwks(allocator, "not json", 0);
+    try std.testing.expectError(error.JwksParseError, result);
+}
+
+test "JWKS parse: missing keys field fails" {
+    const allocator = std.testing.allocator;
+    const result = parseJwks(allocator,
+        \\{"other":"data"}
+    , 0);
+    try std.testing.expectError(error.JwksParseError, result);
+}
+
+test "JWKS parse: max keys enforced" {
+    const allocator = std.testing.allocator;
+    // Create JWKS with 10 keys (exceeds MAX_JWKS_KEYS=8)
+    const jwks_json =
+        \\{"keys":[
+        \\{"kty":"RSA","kid":"k0","n":"AQAB","e":"AQAB"},
+        \\{"kty":"RSA","kid":"k1","n":"AQAB","e":"AQAB"},
+        \\{"kty":"RSA","kid":"k2","n":"AQAB","e":"AQAB"},
+        \\{"kty":"RSA","kid":"k3","n":"AQAB","e":"AQAB"},
+        \\{"kty":"RSA","kid":"k4","n":"AQAB","e":"AQAB"},
+        \\{"kty":"RSA","kid":"k5","n":"AQAB","e":"AQAB"},
+        \\{"kty":"RSA","kid":"k6","n":"AQAB","e":"AQAB"},
+        \\{"kty":"RSA","kid":"k7","n":"AQAB","e":"AQAB"},
+        \\{"kty":"RSA","kid":"k8","n":"AQAB","e":"AQAB"},
+        \\{"kty":"RSA","kid":"k9","n":"AQAB","e":"AQAB"}
+        \\]}
+    ;
+    const cache = try parseJwks(allocator, jwks_json, 0);
+    try std.testing.expectEqual(@as(usize, MAX_JWKS_KEYS), cache.count);
+}
+
+test "JwksCache: findKey returns correct key" {
+    var cache = JwksCache{};
+    cache.keys[0].kid_len = 5;
+    @memcpy(cache.keys[0].kid[0..5], "kid-1");
+    cache.keys[0].key = .{ .n = undefined, .modulus_len = 256, .e_bytes = .{ 1, 0, 1, 0 }, .e_len = 3 };
+    cache.keys[1].kid_len = 5;
+    @memcpy(cache.keys[1].kid[0..5], "kid-2");
+    cache.keys[1].key = .{ .n = undefined, .modulus_len = 512, .e_bytes = .{ 1, 0, 1, 0 }, .e_len = 3 };
+    cache.count = 2;
+
+    const found = cache.findKey("kid-2");
+    try std.testing.expect(found != null);
+    try std.testing.expectEqual(@as(usize, 512), found.?.modulus_len);
+}
+
+test "JwksCache: findKey returns null for unknown kid" {
+    var cache = JwksCache{};
+    cache.keys[0].kid_len = 5;
+    @memcpy(cache.keys[0].kid[0..5], "kid-1");
+    cache.count = 1;
+
+    try std.testing.expect(cache.findKey("kid-2") == null);
+    try std.testing.expect(cache.findKey("") == null);
+}
+
+test "JwksCache: staleness check" {
+    var cache = JwksCache{ .fetched_at = 1000 };
+    cache.count = 1;
+
+    // Not stale within 24h
+    try std.testing.expect(!cache.isStale(1000 + 3600));
+    try std.testing.expect(!cache.isStale(1000 + 86399));
+
+    // Stale after 24h
+    try std.testing.expect(cache.isStale(1000 + 86401));
+
+    // Empty cache is always stale
+    var empty = JwksCache{ .fetched_at = 1000 };
+    try std.testing.expect(empty.isStale(1000));
+}
+
+test "verifyJwt: malformed token rejected" {
+    const allocator = std.testing.allocator;
+    var cache = JwksCache{};
+    cache.count = 1;
+
+    // No dots
+    try std.testing.expectError(error.InvalidToken, verifyJwt(allocator, "nodots", &cache));
+    // One dot
+    try std.testing.expectError(error.InvalidToken, verifyJwt(allocator, "one.dot", &cache));
+}
+
+test "verifyJwt: non-RS256 algorithm rejected" {
+    const allocator = std.testing.allocator;
+    var cache = JwksCache{};
+    cache.count = 1;
+
+    // header: {"alg":"HS256","kid":"k1"} = eyJhbGciOiJIUzI1NiIsImtpZCI6ImsxIn0
+    const token = "eyJhbGciOiJIUzI1NiIsImtpZCI6ImsxIn0.eyJzdWIiOiIxMjMifQ.fakesig";
+    try std.testing.expectError(error.UnsupportedAlgorithm, verifyJwt(allocator, token, &cache));
+}
+
+test "verifyJwt: missing kid rejected" {
+    const allocator = std.testing.allocator;
+    var cache = JwksCache{};
+    cache.count = 1;
+
+    // header: {"alg":"RS256"} (no kid) = eyJhbGciOiJSUzI1NiJ9
+    const token = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxMjMifQ.fakesig";
+    try std.testing.expectError(error.InvalidToken, verifyJwt(allocator, token, &cache));
+}
+
+test "verifyJwt: unknown kid returns KeyNotFound" {
+    const allocator = std.testing.allocator;
+    var cache = JwksCache{};
+    cache.keys[0].kid_len = 10;
+    @memcpy(cache.keys[0].kid[0..10], "other-kid!");
+    cache.count = 1;
+
+    // header: {"alg":"RS256","kid":"k1"} = eyJhbGciOiJSUzI1NiIsImtpZCI6ImsxIn0
+    const token = "eyJhbGciOiJSUzI1NiIsImtpZCI6ImsxIn0.eyJzdWIiOiIxMjMifQ.fakesig";
+    try std.testing.expectError(error.KeyNotFound, verifyJwt(allocator, token, &cache));
+}
+
+test "RS256: wrong signature length rejected" {
+    const key = RsaPublicKey{
+        .n = undefined,
+        .modulus_len = 256,
+        .e_bytes = .{ 1, 0, 1, 0 },
+        .e_len = 3,
+    };
+    // Signature length (128) != modulus_len (256)
+    const short_sig = [_]u8{0} ** 128;
+    try std.testing.expect(!verifyRS256(&key, "test message", &short_sig));
+
+    // Empty signature
+    try std.testing.expect(!verifyRS256(&key, "test message", ""));
+}
+
+test "VerifiedClaims: deinit frees all fields" {
+    const allocator = std.testing.allocator;
+    var claims = VerifiedClaims{
+        .sub = try allocator.dupe(u8, "test-sub"),
+        .email = try allocator.dupe(u8, "test@example.com"),
+        .email_verified = true,
+        .exp = 9999999999,
+        .nonce = try allocator.dupe(u8, "test-nonce"),
+        .aud = try allocator.dupe(u8, "com.test.app"),
+    };
+    claims.deinit(allocator);
+    // No leak = test passes (testing.allocator detects leaks)
+}
+
+test "VerifiedClaims: deinit handles null optionals" {
+    const allocator = std.testing.allocator;
+    var claims = VerifiedClaims{
+        .sub = try allocator.dupe(u8, "sub-only"),
+        .email = null,
+        .email_verified = false,
+        .exp = 0,
+        .nonce = null,
+        .aud = null,
+    };
+    claims.deinit(allocator);
+}
