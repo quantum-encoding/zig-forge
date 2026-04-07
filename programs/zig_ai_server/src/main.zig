@@ -9,6 +9,16 @@ const Io = std.Io;
 
 const router = @import("router.zig");
 
+// ── Graceful Shutdown ───────────────────────────────────────
+var shutdown_requested: std.atomic.Value(u32) = .init(0);
+
+// ── Request ID counter (atomic, monotonic) ──────────────────
+var request_id_counter: std.atomic.Value(u64) = .init(0);
+
+// Pointers to things we need to flush on shutdown (set in main)
+var shutdown_store: ?*@import("store/store.zig").Store = null;
+var shutdown_bq: ?*@import("bq.zig").BqAudit = null;
+
 pub const Config = struct {
     host: []const u8 = "0.0.0.0",
     port: u16 = 8080,
@@ -135,20 +145,44 @@ pub fn main(init: std.process.Init) !void {
         router.setApiKey(key);
     }
 
+    // Set up graceful shutdown references
+    shutdown_store = &store;
+    shutdown_bq = &bq_audit;
+
+    // Register SIGTERM handler (Cloud Run sends this before SIGKILL)
+    if (std.posix.Sigaction != void) {
+        const act: std.posix.Sigaction = .{
+            .handler = .{ .handler = handleSigterm },
+            .mask = std.posix.sigemptyset(),
+            .flags = 0,
+        };
+        std.posix.sigaction(.TERM, &act, null);
+        std.posix.sigaction(.INT, &act, null); // Also handle Ctrl-C
+    }
+
     const auth_mode: []const u8 = if (store.keys.count() > 0) "store" else if (legacy_key != null) "legacy" else "disabled";
+    const gcp_mode: []const u8 = if (gcp_ctx != null) "Firestore+BigQuery" else "local-only";
 
     std.debug.print(
         \\
-        \\  zig-ai-server v0.3.0
+        \\  zig-ai-server v0.4.0
         \\  Listening on {s}:{d}
         \\  Workers: {d}
         \\  Auth: {s} ({d} keys, {d} accounts)
+        \\  Persistence: {s}
         \\
         \\
-    , .{ config.host, config.port, config.max_workers, auth_mode, store.keys.count(), store.accounts.count() });
+    , .{ config.host, config.port, config.max_workers, auth_mode, store.keys.count(), store.accounts.count(), gcp_mode });
 
-    // Start the server
-    try serve(allocator, &config, environ_map);
+    // Start the server (blocks until shutdown)
+    serve(allocator, &config, environ_map) catch {};
+
+    // Graceful shutdown: flush state
+    std.debug.print("\n  Shutting down...\n", .{});
+    store.flushDirtyAccounts();
+    bq_audit.waitPending();
+    store.snapshot(boot_io) catch {};
+    std.debug.print("  Shutdown complete.\n", .{});
 }
 
 fn serve(allocator: std.mem.Allocator, config: *const Config, environ_map: *const std.process.Environ.Map) !void {
@@ -173,9 +207,10 @@ fn serve(allocator: std.mem.Allocator, config: *const Config, environ_map: *cons
     // Track active connections for graceful shutdown
     var active = std.atomic.Value(u32).init(0);
 
-    // Accept loop — spawn a thread per connection
-    while (true) {
+    // Accept loop — spawn a thread per connection, stop on SIGTERM
+    while (shutdown_requested.load(.acquire) == 0) {
         const stream = server.accept(io) catch |err| {
+            if (shutdown_requested.load(.acquire) != 0) return; // Clean shutdown
             std.debug.print("Accept error: {any}\n", .{err});
             continue;
         };
@@ -256,13 +291,15 @@ fn handleConnection(ctx: *ConnCtx) void {
             return;
         };
 
+        // Generate request ID
+        const req_id = request_id_counter.fetchAdd(1, .monotonic) + 1;
+        var req_id_buf: [24]u8 = undefined;
+        const req_id_str = std.fmt.bufPrint(&req_id_buf, "req-{d}", .{req_id}) catch "req-0";
+
         // Route and handle
         const result = router.dispatch(&request, ctx.allocator, io, ctx.environ_map);
 
-        // For requests with a body (POST/PUT/PATCH), we must either read
-        // the body or close the connection. If the client sent no
-        // content-length/transfer-encoding on a method that implies a body,
-        // we can't reuse the connection safely.
+        // Keep-alive safety check
         const has_body_header = request.head.content_length != null or
             request.head.transfer_encoding != .none;
         const method_expects_body = request.head.method == .POST or
@@ -273,16 +310,44 @@ fn handleConnection(ctx: *ConnCtx) void {
         else
             request.head.keep_alive;
 
+        // Build response headers: original + request ID + CORS
+        var resp_headers: [8]http.Header = undefined;
+        var header_count: usize = 0;
+
+        // Copy original headers
+        for (result.headers) |h| {
+            if (header_count < resp_headers.len) {
+                resp_headers[header_count] = h;
+                header_count += 1;
+            }
+        }
+
+        // Add request ID
+        if (header_count < resp_headers.len) {
+            resp_headers[header_count] = .{ .name = "x-request-id", .value = req_id_str };
+            header_count += 1;
+        }
+
+        // Add CORS (on all responses, not just OPTIONS)
+        if (header_count < resp_headers.len) {
+            resp_headers[header_count] = .{ .name = "access-control-allow-origin", .value = "*" };
+            header_count += 1;
+        }
+
         // Send response
         request.respond(result.body, .{
             .status = result.status,
-            .extra_headers = result.headers,
+            .extra_headers = resp_headers[0..header_count],
             .keep_alive = safe_keepalive,
         }) catch return;
 
         // If not keep-alive, we're done
         if (!safe_keepalive) return;
     }
+}
+
+fn handleSigterm(_: std.posix.SIG) callconv(.c) void {
+    shutdown_requested.store(1, .release);
 }
 
 fn sendBadRequest(out: *Io.Writer) void {
