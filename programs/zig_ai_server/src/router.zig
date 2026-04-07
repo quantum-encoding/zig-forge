@@ -17,6 +17,7 @@ const bq_mod = @import("bq.zig");
 const stream = @import("stream.zig");
 const vertex = @import("vertex.zig");
 const gcp_mod = @import("gcp.zig");
+const apple_auth = @import("apple_auth.zig");
 
 pub const Response = struct {
     status: http.Status = .ok,
@@ -98,7 +99,13 @@ pub fn dispatch(
         return handlers.root(request, allocator);
     }
 
-    // All /qai/v1/* routes require auth
+    // Auth endpoints — NO auth required (they ARE the auth entry point)
+    if (std.mem.eql(u8, path, "/qai/v1/auth/apple")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        return apple_auth.handle(request, allocator, io, server_store, server_gcp);
+    }
+
+    // All other /qai/v1/* routes require auth
     if (std.mem.startsWith(u8, path, "/qai/v1/")) {
         // Authenticate via store or legacy mode
         if (server_store) |store| {
