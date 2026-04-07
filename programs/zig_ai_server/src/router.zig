@@ -152,7 +152,7 @@ fn routeApiV1Authed(
     // ── Vertex AI (MaaS gateway — Gemini, DeepSeek, GLM-5, Qwen, Codestral) ──
     if (std.mem.eql(u8, path, "vertex/chat")) {
         if (method != .POST) return handlers.methodNotAllowed(request, allocator);
-        return vertex.handle(request, allocator, server_gcp, store, auth, io, server_ledger);
+        return vertex.handle(request, allocator, server_gcp, store, auth, io, server_ledger, environ_map);
     }
 
     // ── Agent ───────────────────────────────────────────

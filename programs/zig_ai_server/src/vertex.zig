@@ -27,9 +27,10 @@ const MISTRAL_REGION = "europe-west4";
 // ── Model Routing ───────────────────────────────────────────
 
 const ModelRoute = enum {
-    gemini, // Vertex generateContent API
-    maas_openai, // Global OpenAI-compatible endpoint
-    maas_mistral, // Regional rawPredict (Mistral publisher)
+    gemini, // Vertex generateContent API (GCP auth)
+    maas_openai, // Global OpenAI-compatible endpoint (GCP auth)
+    maas_mistral, // Regional rawPredict (GCP auth)
+    genai, // Google GenAI / AI Studio (API key auth)
 };
 
 fn routeModel(model: []const u8) ModelRoute {
@@ -38,6 +39,9 @@ fn routeModel(model: []const u8) ModelRoute {
     if (std.mem.startsWith(u8, model, "qwen/")) return .maas_openai;
     if (std.mem.startsWith(u8, model, "codestral")) return .maas_mistral;
     if (std.mem.startsWith(u8, model, "mistral-")) return .maas_mistral;
+    // GenAI models: gemma-4, imagen-4, gemini-*-image, lyria, veo via AI Studio
+    if (std.mem.startsWith(u8, model, "gemma-")) return .genai;
+    if (std.mem.startsWith(u8, model, "imagen-")) return .genai;
     return .gemini;
 }
 
@@ -46,6 +50,8 @@ fn providerName(model: []const u8) []const u8 {
     if (std.mem.startsWith(u8, model, "zai-org/")) return "zai";
     if (std.mem.startsWith(u8, model, "qwen/")) return "qwen";
     if (std.mem.startsWith(u8, model, "codestral") or std.mem.startsWith(u8, model, "mistral-")) return "mistral";
+    if (std.mem.startsWith(u8, model, "gemma-")) return "google-genai";
+    if (std.mem.startsWith(u8, model, "imagen-")) return "google-genai";
     return "google";
 }
 
@@ -62,6 +68,13 @@ fn buildMaasUrl(allocator: std.mem.Allocator) ![]u8 {
     return std.fmt.allocPrint(allocator,
         "https://aiplatform.googleapis.com/v1beta1/projects/{s}/locations/global/endpoints/openapi/chat/completions",
         .{PROJECT_ID},
+    );
+}
+
+fn buildGenaiUrl(allocator: std.mem.Allocator, model: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator,
+        "https://generativelanguage.googleapis.com/v1beta/models/{s}:generateContent",
+        .{model},
     );
 }
 
@@ -98,6 +111,7 @@ pub fn handle(
     auth: ?*const types.AuthContext,
     io: ?std.Io,
     ledger: ?*ledger_mod.Ledger,
+    environ_map: *const std.process.Environ.Map,
 ) Response {
     const ctx = gcp_ctx orelse {
         return .{ .status = .service_unavailable, .body =
@@ -145,6 +159,7 @@ pub fn handle(
     const result = switch (route) {
         .gemini => callGemini(allocator, ctx, req, max_tokens),
         .maas_openai, .maas_mistral => callMaas(allocator, ctx, req, max_tokens, route),
+        .genai => callGenai(allocator, req, max_tokens, environ_map),
     };
 
     if (result) |resp| {
@@ -244,17 +259,33 @@ fn parseGeminiResponse(allocator: std.mem.Allocator, body: []u8, model: []const 
 
     const obj = parsed.value.object;
 
-    // Extract token count
-    var total_tokens: u32 = 0;
+    // Extract token counts (Gemini provides separate prompt/candidate counts)
+    var input_tokens: u32 = 0;
+    var output_tokens: u32 = 0;
     if (obj.get("usageMetadata")) |usage| {
         if (usage == .object) {
-            if (usage.object.get("totalTokenCount")) |tc| {
-                if (tc == .integer) total_tokens = @intCast(tc.integer);
+            if (usage.object.get("promptTokenCount")) |pt| {
+                if (pt == .integer) input_tokens = @intCast(pt.integer);
+            }
+            if (usage.object.get("candidatesTokenCount")) |ct| {
+                if (ct == .integer) output_tokens = @intCast(ct.integer);
+            }
+            // Fallback to total if split not available
+            if (input_tokens == 0 and output_tokens == 0) {
+                if (usage.object.get("totalTokenCount")) |tc| {
+                    if (tc == .integer) {
+                        const total: u32 = @intCast(tc.integer);
+                        output_tokens = @divFloor(total, 3);
+                        input_tokens = total - output_tokens;
+                    }
+                }
             }
         }
     }
 
-    // Extract text from candidates[0].content.parts[0].text
+    // Extract text from candidates[0].content.parts[*].text
+    // Concatenate ALL text parts — thinking models put thoughts in early parts,
+    // actual response in later parts. We take the LAST text part (the final answer).
     var text: []const u8 = "";
     if (obj.get("candidates")) |candidates| {
         if (candidates == .array and candidates.array.items.len > 0) {
@@ -263,11 +294,19 @@ fn parseGeminiResponse(allocator: std.mem.Allocator, body: []u8, model: []const 
                 if (candidate.object.get("content")) |content| {
                     if (content == .object) {
                         if (content.object.get("parts")) |parts| {
-                            if (parts == .array and parts.array.items.len > 0) {
-                                const part = parts.array.items[0];
-                                if (part == .object) {
-                                    if (part.object.get("text")) |t| {
-                                        if (t == .string) text = t.string;
+                            if (parts == .array) {
+                                // Take the last text part (thinking models: last part = final answer)
+                                var i = parts.array.items.len;
+                                while (i > 0) {
+                                    i -= 1;
+                                    const part = parts.array.items[i];
+                                    if (part == .object) {
+                                        if (part.object.get("text")) |t| {
+                                            if (t == .string and t.string.len > 0) {
+                                                text = t.string;
+                                                break;
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -281,15 +320,11 @@ fn parseGeminiResponse(allocator: std.mem.Allocator, body: []u8, model: []const 
     const escaped = try chat_mod.jsonEscape(allocator, text);
     defer allocator.free(escaped);
 
-    // Estimate input/output split (Gemini only gives total)
-    const output_est: u32 = @divFloor(total_tokens, 3);
-    const input_est: u32 = total_tokens - output_est;
-
     const json = try std.fmt.allocPrint(allocator,
         \\{{"model":"{s}","provider":"google","content":[{{"type":"text","text":"{s}"}}],"usage":{{"input_tokens":{d},"output_tokens":{d}}},"stop_reason":"end_turn"}}
-    , .{ model, escaped, input_est, output_est });
+    , .{ model, escaped, input_tokens, output_tokens });
 
-    return .{ .json = json, .input_tokens = input_est, .output_tokens = output_est };
+    return .{ .json = json, .input_tokens = input_tokens, .output_tokens = output_tokens };
 }
 
 // ── MaaS (OpenAI chat/completions + Mistral rawPredict) ─────
@@ -363,16 +398,31 @@ fn parseMaasResponse(allocator: std.mem.Allocator, body: []u8, model: []const u8
     const obj = parsed.value.object;
 
     // Extract text from choices[0].message.content
+    // Fallback chain: content → reasoning_content → choices[0].text
+    // GLM-5 uses reasoning_content when in reasoning mode (content is null)
     var text: []const u8 = "";
     if (obj.get("choices")) |choices| {
         if (choices == .array and choices.array.items.len > 0) {
             const choice = choices.array.items[0];
             if (choice == .object) {
+                // Standard: choices[0].message.content
                 if (choice.object.get("message")) |message| {
                     if (message == .object) {
                         if (message.object.get("content")) |c| {
                             if (c == .string) text = c.string;
                         }
+                        // Fallback: reasoning_content (GLM-5, DeepSeek Reasoner)
+                        if (text.len == 0) {
+                            if (message.object.get("reasoning_content")) |rc| {
+                                if (rc == .string) text = rc.string;
+                            }
+                        }
+                    }
+                }
+                // Fallback: choices[0].text (completions-style)
+                if (text.len == 0) {
+                    if (choice.object.get("text")) |t| {
+                        if (t == .string) text = t.string;
                     }
                 }
             }
@@ -402,6 +452,79 @@ fn parseMaasResponse(allocator: std.mem.Allocator, body: []u8, model: []const u8
     , .{ model, provider, escaped, input_tokens, output_tokens });
 
     return .{ .json = json, .input_tokens = input_tokens, .output_tokens = output_tokens };
+}
+
+// ── Google GenAI (generativelanguage.googleapis.com) ─────────
+// API key auth (not GCP tokens). Used for Gemma 4, Imagen, consumer models.
+// Same generateContent format as Vertex Gemini, but different auth.
+
+fn callGenai(allocator: std.mem.Allocator, req: VertexChatRequest, max_tokens: u32, environ_map: *const std.process.Environ.Map) !VertexResponse {
+    const api_key = environ_map.get("GEMINI_API_KEY") orelse
+        return error.ApiRequestFailed;
+
+    const base_url = try buildGenaiUrl(allocator, req.model);
+    defer allocator.free(base_url);
+
+    // Append API key as query param
+    const url = try std.fmt.allocPrint(allocator, "{s}?key={s}", .{ base_url, api_key });
+    defer allocator.free(url);
+
+    // Build Gemini-format payload (same as Vertex generateContent)
+    var payload: std.ArrayListUnmanaged(u8) = .empty;
+    defer payload.deinit(allocator);
+
+    try payload.appendSlice(allocator, "{\"contents\":[");
+    var first = true;
+    for (req.messages) |msg| {
+        const content = msg.content orelse continue;
+        if (std.mem.eql(u8, msg.role, "system")) continue;
+        if (!first) try payload.append(allocator, ',');
+        first = false;
+
+        const role = if (std.mem.eql(u8, msg.role, "assistant")) "model" else "user";
+        const escaped = try chat_mod.jsonEscape(allocator, content);
+        defer allocator.free(escaped);
+        const part = try std.fmt.allocPrint(allocator,
+            \\{{"role":"{s}","parts":[{{"text":"{s}"}}]}}
+        , .{ role, escaped });
+        defer allocator.free(part);
+        try payload.appendSlice(allocator, part);
+    }
+    try payload.appendSlice(allocator, "]");
+
+    // System instruction
+    if (req.system_prompt) |sys| {
+        const sys_escaped = try chat_mod.jsonEscape(allocator, sys);
+        defer allocator.free(sys_escaped);
+        const sys_part = try std.fmt.allocPrint(allocator,
+            \\,"systemInstruction":{{"parts":[{{"text":"{s}"}}]}}
+        , .{sys_escaped});
+        defer allocator.free(sys_part);
+        try payload.appendSlice(allocator, sys_part);
+    }
+
+    // Generation config
+    const temp: f64 = if (req.temperature) |t| t else 0.7;
+    const gen_config = try std.fmt.allocPrint(allocator,
+        \\,"generationConfig":{{"temperature":{d:.2},"maxOutputTokens":{d}}}}}
+    , .{ temp, max_tokens });
+    defer allocator.free(gen_config);
+    try payload.appendSlice(allocator, gen_config);
+
+    // Call GenAI — plain HTTP POST with API key in URL (no bearer token)
+    var http_client = @import("http-sentinel").HttpClient.init(allocator) catch
+        return error.ApiRequestFailed;
+    defer http_client.deinit();
+
+    var resp = http_client.post(url, &.{
+        .{ .name = "Content-Type", .value = "application/json" },
+    }, payload.items) catch return error.ApiRequestFailed;
+    defer resp.deinit();
+
+    if (@intFromEnum(resp.status) >= 400) return error.ApiRequestFailed;
+
+    // Same Gemini response format
+    return parseGeminiResponse(allocator, resp.body, req.model);
 }
 
 fn chatError(err: anyerror) Response {
