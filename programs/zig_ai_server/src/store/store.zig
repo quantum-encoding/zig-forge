@@ -8,11 +8,26 @@ const Dir = std.Io.Dir;
 const types = @import("types.zig");
 const wal_mod = @import("wal.zig");
 
+/// Atomic spinlock — no io, no libc, works on Zigix
+const SpinLock = struct {
+    state: std.atomic.Value(u32) = .init(0),
+
+    pub fn lock(self: *SpinLock) void {
+        while (self.state.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) {
+            std.atomic.spinLoopHint();
+        }
+    }
+
+    pub fn unlock(self: *SpinLock) void {
+        self.state.store(0, .release);
+    }
+};
+
 pub const Store = struct {
     allocator: std.mem.Allocator,
 
-    // Thread safety
-    mutex: std.Io.Mutex = .init,
+    // Thread safety — atomic spinlock (no io needed, works on Zigix)
+    mutex: SpinLock = .{},
 
     // In-memory indices
     accounts: std.StringHashMapUnmanaged(types.Account) = .empty,
@@ -34,7 +49,7 @@ pub const Store = struct {
             return std.mem.readInt(u64, key[0..8], .little);
         }
         pub fn eql(_: @This(), a: [32]u8, b: [32]u8) bool {
-            return a == b;
+            return std.mem.eql(u8, &a, &b);
         }
     };
 
@@ -87,8 +102,9 @@ pub const Store = struct {
         defer self.allocator.free(payload);
         try self.wal.append(io, .create_account, payload);
 
-        // Then in-memory
-        try self.accounts.put(self.allocator, account.id.slice(), account);
+        // Then in-memory — key must be a durable copy since FixedStr is inside the value
+        const key_copy = try self.allocator.dupe(u8, account.id.slice());
+        try self.accounts.put(self.allocator, key_copy, account);
     }
 
     pub fn getAccount(self: *Store, account_id: []const u8) ?*types.Account {
@@ -126,9 +142,9 @@ pub const Store = struct {
 
         if (self.keys.getPtr(key_hash)) |key| {
             key.revoked = true;
-            // WAL write
+            // WAL write with hex-encoded hash
             var hash_hex: [64]u8 = undefined;
-            _ = std.fmt.bufPrint(&hash_hex, "{s}", .{std.fmt.fmtSliceHexLower(&key_hash)}) catch {};
+            types.hexEncode(&key_hash, &hash_hex);
             self.wal.append(io, .revoke_key, &hash_hex) catch {};
         }
     }
@@ -159,7 +175,7 @@ pub const Store = struct {
             .amount_ticks = amount_ticks,
             .endpoint = types.FixedStr64.fromSlice(endpoint),
             .model = types.FixedStr128.fromSlice(model),
-            .created_at = std.time.milliTimestamp(),
+            .created_at = types.nowMs(),
         };
 
         // WAL write — if this fails, we need to refund
@@ -195,7 +211,7 @@ pub const Store = struct {
         // Update key spend
         if (self.keys.getPtr(reservation.key_hash)) |key| {
             key.spent_ticks += total_cost;
-            key.last_used_at = std.time.milliTimestamp();
+            key.last_used_at = types.nowMs();
         }
 
         // WAL write (best-effort on commit — reservation already holds are conservative)
@@ -231,7 +247,7 @@ pub const Store = struct {
 
         const account = self.accounts.getPtr(account_id) orelse return error.AccountNotFound;
         account.balance_ticks += amount_ticks;
-        account.updated_at = std.time.milliTimestamp();
+        account.updated_at = types.nowMs();
 
         const payload = std.fmt.allocPrint(self.allocator, "{s}:{d}", .{ account_id, amount_ticks }) catch return error.OutOfMemory;
         defer self.allocator.free(payload);
@@ -310,7 +326,8 @@ pub const Store = struct {
             account.role = std.meta.stringToEnum(types.Role, acct_json.role) orelse .user;
             account.tier = std.meta.stringToEnum(types.DevTier, acct_json.tier) orelse .free;
             account.created_at = acct_json.created_at;
-            self.accounts.put(self.allocator, account.id.slice(), account) catch continue;
+            const key_copy = self.allocator.dupe(u8, account.id.slice()) catch continue;
+            self.accounts.put(self.allocator, key_copy, account) catch continue;
         }
 
         // Load keys
@@ -351,7 +368,7 @@ pub const Store = struct {
 
     fn serializeKey(self: *Store, key: types.ApiKey) ![]u8 {
         var hash_hex: [64]u8 = undefined;
-        _ = std.fmt.bufPrint(&hash_hex, "{s}", .{std.fmt.fmtSliceHexLower(&key.key_hash)}) catch {};
+        types.hexEncode(&key.key_hash, &hash_hex);
 
         return std.fmt.allocPrint(self.allocator,
             \\{{"key_hash":"{s}","account_id":"{s}","name":"{s}","prefix":"{s}","spent_ticks":{d},"revoked":{s},"created_at":{d},"expires_at":{d},"spend_cap_ticks":{d},"rate_limit_rpm":{d},"endpoints":{d}}}

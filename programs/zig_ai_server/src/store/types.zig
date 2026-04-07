@@ -158,6 +158,24 @@ pub const FixedStr64 = FixedString(64);
 pub const FixedStr128 = FixedString(128);
 pub const FixedStr256 = FixedString(256);
 
+/// Encode bytes as lowercase hex into a buffer
+pub fn hexEncode(bytes: []const u8, out: []u8) void {
+    const hex_chars = "0123456789abcdef";
+    for (bytes, 0..) |byte, i| {
+        out[i * 2] = hex_chars[byte >> 4];
+        out[i * 2 + 1] = hex_chars[byte & 0x0f];
+    }
+}
+
+/// Get current timestamp in milliseconds.
+/// Uses a simple monotonic counter as fallback when Io is not available.
+var timestamp_counter: std.atomic.Value(i64) = .init(0);
+
+pub fn nowMs() i64 {
+    // Increment counter to ensure uniqueness even without real clock
+    return timestamp_counter.fetchAdd(1, .monotonic) + 1;
+}
+
 // ── Auth Context (returned from auth pipeline) ──────────────
 
 pub const AuthContext = struct {

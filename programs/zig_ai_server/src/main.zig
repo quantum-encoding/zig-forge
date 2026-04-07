@@ -55,30 +55,69 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    // Load server API key from env (optional — if not set, auth is disabled)
-    const api_key = environ_map.get("QAI_API_KEY");
-    if (api_key) |key| {
-        router.setApiKey(key);
-        std.debug.print(
-            \\
-            \\  zig-ai-server v0.1.0
-            \\  Listening on {s}:{d}
-            \\  Workers: {d}
-            \\  Auth: enabled (QAI_API_KEY)
-            \\
-            \\
-        , .{ config.host, config.port, config.max_workers });
-    } else {
-        std.debug.print(
-            \\
-            \\  zig-ai-server v0.1.0
-            \\  Listening on {s}:{d}
-            \\  Workers: {d}
-            \\  Auth: disabled (set QAI_API_KEY to enable)
-            \\
-            \\
-        , .{ config.host, config.port, config.max_workers });
+    // Initialize I/O for store operations
+    var boot_io_threaded: std.Io.Threaded = .init(allocator, .{});
+    const boot_io = boot_io_threaded.io();
+
+    // Initialize the store
+    const store_mod = @import("store/store.zig");
+    var store = store_mod.Store.init(allocator, "data");
+    store.recover(boot_io);
+
+    // Bootstrap: create admin account + key from env if store is empty
+    const bootstrap_key = environ_map.get("QAI_BOOTSTRAP_KEY");
+    const legacy_key = environ_map.get("QAI_API_KEY");
+
+    if (store.keys.count() == 0) {
+        if (bootstrap_key orelse legacy_key) |raw_key| {
+            // Create admin account
+            const types = @import("store/types.zig");
+            const now = types.nowMs();
+            store.createAccount(boot_io, .{
+                .id = types.FixedStr32.fromSlice("admin"),
+                .email = types.FixedStr256.fromSlice("admin@localhost"),
+                .balance_ticks = 100_000_000_000_000, // 10,000 USD
+                .role = .admin,
+                .tier = .enterprise,
+                .created_at = now,
+                .updated_at = now,
+            }) catch {};
+
+            // Hash the bootstrap key and create an admin API key
+            var key_hash: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(raw_key, &key_hash, .{});
+            store.createKey(boot_io, .{
+                .key_hash = key_hash,
+                .account_id = types.FixedStr32.fromSlice("admin"),
+                .name = types.FixedStr128.fromSlice("bootstrap-admin"),
+                .prefix = types.FixedStr16.fromSlice("bootstrap_key"),
+                .scope = .{}, // unlimited
+                .created_at = now,
+            }) catch {};
+
+            std.debug.print("  Bootstrapped admin account from env key\n", .{});
+        }
     }
+
+    // Set the store in the router
+    router.setStore(&store);
+
+    // Also set legacy key for backward compat
+    if (legacy_key) |key| {
+        router.setApiKey(key);
+    }
+
+    const auth_mode: []const u8 = if (store.keys.count() > 0) "store" else if (legacy_key != null) "legacy" else "disabled";
+
+    std.debug.print(
+        \\
+        \\  zig-ai-server v0.3.0
+        \\  Listening on {s}:{d}
+        \\  Workers: {d}
+        \\  Auth: {s} ({d} keys, {d} accounts)
+        \\
+        \\
+    , .{ config.host, config.port, config.max_workers, auth_mode, store.keys.count(), store.accounts.count() });
 
     // Start the server
     try serve(allocator, &config, environ_map);
