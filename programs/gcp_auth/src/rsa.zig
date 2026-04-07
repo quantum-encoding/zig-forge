@@ -1,11 +1,33 @@
 // RSA-SHA256 signing for GCP service account JWT authentication.
 // Uses std.crypto.ff for modular exponentiation — pure Zig, zero libc.
+//
+// TIMING MODEL:
+// The private key operation uses Modulus.powWithEncodedExponent() (NOT the
+// powWithEncodedPublicExponent variant). The "non-public" path in ff.zig
+// uses cmov (constant-time conditional move) for table lookups and
+// accumulator updates — no branching on exponent bits. This prevents
+// timing side-channel recovery of the private exponent d.
+//
+// CRITICAL: This protection depends on std.options.side_channels_mitigations
+// being enabled (the default). Building with .none strips all constant-time
+// protections and exposes the private key to timing attacks. We enforce this
+// at comptime below.
 
 const std = @import("std");
 const crypto = std.crypto;
 const Sha256 = crypto.hash.sha2.Sha256;
 const Certificate = crypto.Certificate;
 const der = Certificate.der;
+
+// Refuse to compile if side-channel mitigations are disabled.
+// Without this, ff.zig falls back to ct_unprotected which uses branching
+// on secret exponent bits — trivially exploitable via timing analysis.
+comptime {
+    if (std.options.side_channels_mitigations == .none) {
+        @compileError("gcp_auth requires side-channel mitigations for RSA signing. " ++
+            "Do not build with side_channels_mitigations = .none");
+    }
+}
 
 const max_modulus_bits = 4096;
 const Modulus = crypto.ff.Modulus(max_modulus_bits);
@@ -89,6 +111,22 @@ pub const ParseError = error{
 /// Smaller keys are trivially factorable and must be rejected.
 const min_modulus_bytes = 256;
 
+/// Bounds-checking wrapper around der.Element.parse.
+/// The stdlib parser panics on out-of-bounds index (it does bytes[i] without
+/// checking i < bytes.len). A malformed DER with crafted length fields can make
+/// a subsequent parse index past the buffer, crashing the process.
+/// This wrapper returns error.InvalidDer instead.
+fn parseDerElement(bytes: []const u8, index: u32) ParseError!der.Element {
+    // The parser needs at minimum 2 bytes (tag + length) at `index`
+    if (index >= bytes.len or bytes.len - index < 2) return error.InvalidDer;
+    const elem = der.Element.parse(bytes, index) catch return error.InvalidDer;
+    // Validate the returned slice doesn't exceed buffer bounds.
+    // The parser trusts the length field, which is attacker-controlled.
+    if (elem.slice.end > bytes.len) return error.InvalidDer;
+    if (elem.slice.start > elem.slice.end) return error.InvalidDer;
+    return elem;
+}
+
 /// Parse a PEM-encoded PKCS#8 private key (as found in GCP service account JSON).
 pub fn parsePrivateKeyPem(allocator: std.mem.Allocator, pem: []const u8) ParseError!RsaPrivateKey {
     const der_bytes = try decodePem(allocator, pem);
@@ -137,27 +175,30 @@ fn decodePem(allocator: std.mem.Allocator, pem: []const u8) ParseError![]u8 {
 fn parsePkcs8Der(allocator: std.mem.Allocator, der_bytes: []u8) ParseError!RsaPrivateKey {
     const bytes = der_bytes;
 
+    // All DER parsing uses parseDerElement() — a bounds-checking wrapper
+    // that returns error.InvalidDer instead of panicking on malformed input.
+
     // Outer SEQUENCE
-    const outer_seq = der.Element.parse(bytes, 0) catch return error.InvalidDer;
+    const outer_seq = try parseDerElement(bytes, 0);
     if (outer_seq.identifier.tag != .sequence) return error.InvalidPkcs8;
 
     // Version INTEGER (skip it)
-    const version_elem = der.Element.parse(bytes, outer_seq.slice.start) catch return error.InvalidDer;
+    const version_elem = try parseDerElement(bytes, outer_seq.slice.start);
     if (version_elem.identifier.tag != .integer) return error.InvalidPkcs8;
 
     // Algorithm SEQUENCE (verify it's rsaEncryption, then skip)
-    const algo_seq = der.Element.parse(bytes, version_elem.slice.end) catch return error.InvalidDer;
+    const algo_seq = try parseDerElement(bytes, version_elem.slice.end);
     if (algo_seq.identifier.tag != .sequence) return error.InvalidPkcs8;
 
     // Check OID inside algorithm sequence
-    const oid_elem = der.Element.parse(bytes, algo_seq.slice.start) catch return error.InvalidDer;
+    const oid_elem = try parseDerElement(bytes, algo_seq.slice.start);
     if (oid_elem.identifier.tag != .object_identifier) return error.InvalidPkcs8;
     const rsa_oid = [_]u8{ 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01 };
     const oid_bytes = bytes[oid_elem.slice.start..oid_elem.slice.end];
     if (!std.mem.eql(u8, oid_bytes, &rsa_oid)) return error.UnsupportedAlgorithm;
 
     // OCTET STRING containing the RSAPrivateKey
-    const octet_elem = der.Element.parse(bytes, algo_seq.slice.end) catch return error.InvalidDer;
+    const octet_elem = try parseDerElement(bytes, algo_seq.slice.end);
     if (octet_elem.identifier.tag != .octetstring) return error.InvalidPkcs8;
 
     // Parse inner RSAPrivateKey:
@@ -169,15 +210,15 @@ fn parsePkcs8Der(allocator: std.mem.Allocator, der_bytes: []u8) ParseError!RsaPr
     //     ... (p, q, dp, dq, qinv)
     //   }
     const inner_bytes = bytes[octet_elem.slice.start..octet_elem.slice.end];
-    const rsa_seq = der.Element.parse(inner_bytes, 0) catch return error.InvalidDer;
+    const rsa_seq = try parseDerElement(inner_bytes, 0);
     if (rsa_seq.identifier.tag != .sequence) return error.InvalidRsaKey;
 
     // Skip version
-    const rsa_version = der.Element.parse(inner_bytes, rsa_seq.slice.start) catch return error.InvalidDer;
+    const rsa_version = try parseDerElement(inner_bytes, rsa_seq.slice.start);
     if (rsa_version.identifier.tag != .integer) return error.InvalidRsaKey;
 
     // Modulus (n)
-    const n_elem = der.Element.parse(inner_bytes, rsa_version.slice.end) catch return error.InvalidDer;
+    const n_elem = try parseDerElement(inner_bytes, rsa_version.slice.end);
     if (n_elem.identifier.tag != .integer) return error.InvalidRsaKey;
     var n_bytes = inner_bytes[n_elem.slice.start..n_elem.slice.end];
     // Strip leading zero byte (ASN.1 integers are signed, leading 0x00 for positive)
@@ -186,11 +227,11 @@ fn parsePkcs8Der(allocator: std.mem.Allocator, der_bytes: []u8) ParseError!RsaPr
     if (n_bytes.len < min_modulus_bytes) return error.KeyTooWeak;
 
     // Public exponent (e) — skip, we don't need it for signing
-    const e_elem = der.Element.parse(inner_bytes, n_elem.slice.end) catch return error.InvalidDer;
+    const e_elem = try parseDerElement(inner_bytes, n_elem.slice.end);
     if (e_elem.identifier.tag != .integer) return error.InvalidRsaKey;
 
     // Private exponent (d)
-    const d_elem = der.Element.parse(inner_bytes, e_elem.slice.end) catch return error.InvalidDer;
+    const d_elem = try parseDerElement(inner_bytes, e_elem.slice.end);
     if (d_elem.identifier.tag != .integer) return error.InvalidRsaKey;
     var d_bytes = inner_bytes[d_elem.slice.start..d_elem.slice.end];
     while (d_bytes.len > 0 and d_bytes[0] == 0) d_bytes = d_bytes[1..];

@@ -316,7 +316,11 @@ pub const MetadataProvider = struct {
             self.cached_token = null;
         }
 
-        var response = client.get(METADATA_TOKEN_URL, &.{
+        // SECURITY: Use getNoRedirect to prevent the Metadata-Flavor: Google
+        // header from being forwarded to a redirect target. The metadata server
+        // uses plaintext HTTP — an attacker with DNS poisoning or MITM could
+        // inject a 302 to exfiltrate the token. Refusing redirects blocks this.
+        var response = client.getNoRedirect(METADATA_TOKEN_URL, &.{
             .{ .name = "Metadata-Flavor", .value = "Google" },
         }) catch return error.MetadataUnavailable;
         defer response.deinit();
@@ -368,8 +372,9 @@ pub fn autoDetect(allocator: std.mem.Allocator, client: *HttpClient, scope: []co
     } else |_| {}
 
     // 2. Metadata server (fast fail if not on GCP)
+    // SECURITY: No redirects — same reason as MetadataProvider.getToken
     {
-        var response = client.get(METADATA_PROJECT_URL, &.{
+        var response = client.getNoRedirect(METADATA_PROJECT_URL, &.{
             .{ .name = "Metadata-Flavor", .value = "Google" },
         }) catch null;
         if (response) |*r| {

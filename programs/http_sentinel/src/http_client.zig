@@ -7,6 +7,56 @@
 const std = @import("std");
 const http = std.http;
 
+/// Check if a URL targets a private/internal IP address (SSRF defense)
+pub fn isPrivateRedirect(url: []const u8) bool {
+    const uri = std.Uri.parse(url) catch return true;
+    const host_component = uri.host orelse return true;
+
+    // Extract raw host string from Uri.Component
+    const host = switch (host_component) {
+        .raw, .percent_encoded => |s| s,
+    };
+
+    // Block private IPv4 ranges
+    const private_prefixes = [_][]const u8{
+        "10.", "172.16.", "172.17.", "172.18.", "172.19.",
+        "172.20.", "172.21.", "172.22.", "172.23.", "172.24.",
+        "172.25.", "172.26.", "172.27.", "172.28.", "172.29.",
+        "172.30.", "172.31.", "192.168.", "127.", "0.",
+        "169.254.",
+    };
+    for (private_prefixes) |prefix| {
+        if (std.mem.startsWith(u8, host, prefix)) return true;
+    }
+
+    // Block localhost variants
+    const blocked_hosts = [_][]const u8{
+        "localhost", "[::1]", "[::0]", "metadata.google.internal",
+    };
+    for (blocked_hosts) |blocked| {
+        if (std.ascii.eqlIgnoreCase(host, blocked)) return true;
+    }
+
+    // Block non-HTTP schemes
+    if (!std.mem.eql(u8, uri.scheme, "http") and !std.mem.eql(u8, uri.scheme, "https")) {
+        return true;
+    }
+
+    return false;
+}
+
+/// Validate outbound headers — reject CRLF injection attempts
+fn validateHeaders(headers: []const http.Header) !void {
+    for (headers) |header| {
+        for (header.name) |c| {
+            if (c == '\r' or c == '\n') return error.InvalidHeader;
+        }
+        for (header.value) |c| {
+            if (c == '\r' or c == '\n') return error.InvalidHeader;
+        }
+    }
+}
+
 /// A robust, thread-safe HTTP client for Zig 0.16.0-dev.2187+
 ///
 /// Features:
@@ -50,34 +100,23 @@ pub const HttpClient = struct {
     }
 
     /// Process response body with gzip decompression if needed
-    fn processBody(self: *HttpClient, body_data: []const u8, content_encoding: ?[]const u8) ![]u8 {
+    fn processBody(self: *HttpClient, body_data: []const u8, content_encoding: ?[]const u8, max_decompressed_size: usize) ![]u8 {
         if (content_encoding) |encoding| {
             if (std.mem.eql(u8, encoding, "gzip")) {
-                // Decompress gzip data using flate decompressor
                 const flate = std.compress.flate;
-
-                // Create output writer
-                var out: std.Io.Writer.Allocating = .init(self.allocator);
-                defer out.deinit();
-
-                // Create fixed reader from input data
                 var input: std.Io.Reader = .fixed(body_data);
-
-                // Create decompression buffer
                 var decomp_buffer: [flate.max_window_len]u8 = undefined;
-
-                // Initialize decompressor with gzip container
                 var decomp = flate.Decompress.init(&input, .gzip, &decomp_buffer);
 
-                // Stream all decompressed data
-                _ = decomp.reader.streamRemaining(&out.writer) catch {
-                    // If decompression fails, return original data
+                // Bounded decompression — defense against ZIP bombs
+                const decompressed = decomp.reader.allocRemaining(
+                    self.allocator,
+                    std.Io.Limit.limited(max_decompressed_size),
+                ) catch {
+                    // If decompression fails or exceeds limit, return original data
                     return try self.allocator.dupe(u8, body_data);
                 };
-
-                return out.toOwnedSlice() catch {
-                    return try self.allocator.dupe(u8, body_data);
-                };
+                return decompressed;
             }
         }
         return try self.allocator.dupe(u8, body_data);
@@ -134,6 +173,7 @@ pub const HttpClient = struct {
         body: []const u8,
         options: RequestOptions,
     ) !Response {
+        try validateHeaders(headers);
         const uri = try std.Uri.parse(url);
 
         var req = try self.client.request(.POST, uri, .{
@@ -164,7 +204,7 @@ pub const HttpClient = struct {
             .identity => null,
             else => null, // We only support gzip for now
         };
-        const final_body = try self.processBody(body_data, content_encoding_str);
+        const final_body = try self.processBody(body_data, content_encoding_str, options.max_body_size);
 
         return Response{
             .status = response.head.status,
@@ -181,6 +221,7 @@ pub const HttpClient = struct {
         body: []const u8,
         extract_header: []const u8,
     ) !ResponseWithHeader {
+        try validateHeaders(headers);
         const uri = try std.Uri.parse(url);
 
         var req = try self.client.request(.POST, uri, .{
@@ -220,7 +261,7 @@ pub const HttpClient = struct {
             .identity => null,
             else => null,
         };
-        const final_body = try self.processBody(body_data, content_encoding_str);
+        const final_body = try self.processBody(body_data, content_encoding_str, 10 * 1024 * 1024);
 
         return ResponseWithHeader{
             .status = response.head.status,
@@ -246,6 +287,7 @@ pub const HttpClient = struct {
         headers: []const http.Header,
         options: RequestOptions,
     ) !Response {
+        try validateHeaders(headers);
         const uri = try std.Uri.parse(url);
 
         var req = try self.client.request(.GET, uri, .{
@@ -272,7 +314,51 @@ pub const HttpClient = struct {
             .identity => null,
             else => null,
         };
-        const final_body = try self.processBody(body_data, content_encoding_str);
+        const final_body = try self.processBody(body_data, content_encoding_str, options.max_body_size);
+
+        return Response{
+            .status = response.head.status,
+            .body = final_body,
+            .allocator = self.allocator,
+        };
+    }
+
+    /// Perform a GET request that strictly refuses to follow HTTP redirects.
+    /// Use this for security-sensitive requests where headers (e.g., auth tokens,
+    /// metadata-flavor markers) must NOT be forwarded to a redirect target.
+    /// Returns the raw 3xx response if the server sends a redirect.
+    pub fn getNoRedirect(
+        self: *HttpClient,
+        url: []const u8,
+        headers: []const http.Header,
+    ) !Response {
+        const uri = try std.Uri.parse(url);
+
+        var req = try self.client.request(.GET, uri, .{
+            .extra_headers = headers,
+            .redirect_behavior = .not_allowed,
+        });
+        defer req.deinit();
+
+        try req.sendBodiless();
+
+        var response = try req.receiveHead(&.{});
+
+        var transfer_buffer: [8192]u8 = undefined;
+        const response_reader = response.reader(&transfer_buffer);
+
+        const body_data = try response_reader.allocRemaining(
+            self.allocator,
+            std.Io.Limit.limited(1024 * 1024),
+        );
+        defer self.allocator.free(body_data);
+
+        const content_encoding_str: ?[]const u8 = switch (response.head.content_encoding) {
+            .gzip => "gzip",
+            .identity => null,
+            else => null,
+        };
+        const final_body = try self.processBody(body_data, content_encoding_str, 1024 * 1024);
 
         return Response{
             .status = response.head.status,
@@ -299,6 +385,7 @@ pub const HttpClient = struct {
         body: []const u8,
         options: RequestOptions,
     ) !Response {
+        try validateHeaders(headers);
         const uri = try std.Uri.parse(url);
 
         var req = try self.client.request(.PUT, uri, .{
@@ -329,7 +416,7 @@ pub const HttpClient = struct {
             .identity => null,
             else => null,
         };
-        const final_body = try self.processBody(body_data, content_encoding_str);
+        const final_body = try self.processBody(body_data, content_encoding_str, options.max_body_size);
 
         return Response{
             .status = response.head.status,
@@ -356,6 +443,7 @@ pub const HttpClient = struct {
         body: []const u8,
         options: RequestOptions,
     ) !Response {
+        try validateHeaders(headers);
         const uri = try std.Uri.parse(url);
 
         var req = try self.client.request(.PATCH, uri, .{
@@ -386,7 +474,7 @@ pub const HttpClient = struct {
             .identity => null,
             else => null,
         };
-        const final_body = try self.processBody(body_data, content_encoding_str);
+        const final_body = try self.processBody(body_data, content_encoding_str, options.max_body_size);
 
         return Response{
             .status = response.head.status,
@@ -411,6 +499,7 @@ pub const HttpClient = struct {
         headers: []const http.Header,
         options: RequestOptions,
     ) !Response {
+        try validateHeaders(headers);
         const uri = try std.Uri.parse(url);
 
         var req = try self.client.request(.DELETE, uri, .{
@@ -437,7 +526,7 @@ pub const HttpClient = struct {
             .identity => null,
             else => null,
         };
-        const final_body = try self.processBody(body_data, content_encoding_str);
+        const final_body = try self.processBody(body_data, content_encoding_str, options.max_body_size);
 
         return Response{
             .status = response.head.status,
@@ -452,6 +541,7 @@ pub const HttpClient = struct {
         url: []const u8,
         headers: []const http.Header,
     ) !Response {
+        try validateHeaders(headers);
         const uri = try std.Uri.parse(url);
 
         var req = try self.client.request(.HEAD, uri, .{
@@ -478,6 +568,7 @@ pub const HttpClient = struct {
         headers: []const http.Header,
         options: RequestOptions,
     ) !Response {
+        try validateHeaders(headers);
         var current_url = try self.allocator.dupe(u8, initial_url);
         defer self.allocator.free(current_url);
 
@@ -517,6 +608,12 @@ pub const HttpClient = struct {
                     // Free old URL and follow redirect
                     self.allocator.free(current_url);
                     current_url = try self.allocator.dupe(u8, loc);
+
+                    // SSRF defense: block redirects to private/internal addresses
+                    if (isPrivateRedirect(current_url)) {
+                        return error.SsrfBlocked;
+                    }
+
                     redirect_count += 1;
                     continue;
                 }
@@ -538,7 +635,7 @@ pub const HttpClient = struct {
                 .identity => null,
                 else => null,
             };
-            const final_body = try self.processBody(body_data, content_encoding_str);
+            const final_body = try self.processBody(body_data, content_encoding_str, options.max_body_size);
 
             return Response{
                 .status = response.head.status,

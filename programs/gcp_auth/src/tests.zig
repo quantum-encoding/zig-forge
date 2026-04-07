@@ -473,3 +473,114 @@ test "parse service account JSON" {
     try std.testing.expectEqualStrings("test@test.iam.gserviceaccount.com", provider.client_email);
     try std.testing.expectEqualStrings("https://oauth2.googleapis.com/token", provider.token_uri);
 }
+
+// ============================================================================
+// SECURITY: RSA timing side-channel (#6)
+// ============================================================================
+
+// The comptime assertion in rsa.zig ensures side_channels_mitigations != .none.
+// We can't test the "bad" case (it's a @compileError), but we CAN verify the
+// build flag is set correctly in the test binary itself.
+test "side-channel mitigations are enabled" {
+    // This test documents the requirement. If it fails, the build config is wrong.
+    try std.testing.expect(std.options.side_channels_mitigations != .none);
+}
+
+// Verify signing uses constant-time path by checking determinism across
+// runs (a variable-time implementation might still be deterministic, but
+// a non-deterministic one definitely isn't constant-time).
+test "RSA sign timing model: deterministic across repeated calls" {
+    var key = try rsa.parsePrivateKeyPem(std.testing.allocator, test_pem_2048);
+    defer key.deinit();
+
+    const msg = "timing side-channel test message that exercises the full modular exponentiation";
+    var signatures: [4][]u8 = undefined;
+    for (&signatures) |*s| {
+        s.* = try key.sign(msg);
+    }
+    defer for (&signatures) |s| std.testing.allocator.free(s);
+
+    // All signatures must be identical (deterministic PKCS1v1.5)
+    for (signatures[1..]) |s| {
+        try std.testing.expectEqualSlices(u8, signatures[0], s);
+    }
+}
+
+// ============================================================================
+// SECURITY: ASN.1/DER parsing DoS (#7) — fuzz-style tests
+// ============================================================================
+
+test "DER DoS: empty input does not panic" {
+    const result = rsa.parsePrivateKeyPem(std.testing.allocator, "-----BEGIN PRIVATE KEY-----\n-----END PRIVATE KEY-----\n");
+    // Empty base64 decodes to 0 bytes, which hits bounds check in parseDerElement
+    try std.testing.expectError(error.InvalidDer, result);
+}
+
+test "DER DoS: single byte DER does not panic" {
+    // Craft a PEM that base64-decodes to a single byte
+    const result = rsa.parsePrivateKeyPem(std.testing.allocator, "-----BEGIN PRIVATE KEY-----\nAA==\n-----END PRIVATE KEY-----\n");
+    try std.testing.expectError(error.InvalidDer, result);
+}
+
+test "DER DoS: length field claims more bytes than buffer" {
+    // Craft DER: SEQUENCE tag (0x30) + length 0xFF (claims 255 bytes follow)
+    // but only 2 bytes of actual data. Without bounds checking, the parser
+    // would index past the buffer and panic.
+    // Base64 of [0x30, 0x81, 0xFF, 0x02, 0x01, 0x00]: "MIHFAQEAAA=="
+    // This is: SEQUENCE(len=255) containing INTEGER(0), but buffer is only 6 bytes.
+    const result = rsa.parsePrivateKeyPem(std.testing.allocator, "-----BEGIN PRIVATE KEY-----\nMIH/AgEA\n-----END PRIVATE KEY-----\n");
+    // Should return a clean error, NOT panic
+    try std.testing.expect(result == error.InvalidDer or result == error.InvalidPkcs8 or
+        result == error.InvalidRsaKey or result == error.KeyTooWeak);
+}
+
+test "DER DoS: nested sequence with inflated lengths does not panic" {
+    // SEQUENCE(len=4) { SEQUENCE(len=200) {} } — inner length exceeds outer
+    // Base64 of [0x30, 0x04, 0x30, 0x81, 0xC8, 0x00]: "MAQQMIHIAA=="
+    const result = rsa.parsePrivateKeyPem(std.testing.allocator,
+        "-----BEGIN PRIVATE KEY-----\nMAQwgcgA\n-----END PRIVATE KEY-----\n");
+    try std.testing.expect(result == error.InvalidDer or result == error.InvalidPkcs8 or
+        result == error.InvalidRsaKey or result == error.KeyTooWeak);
+}
+
+test "DER DoS: random garbage bytes do not panic" {
+    // Feed 64 bytes of deterministic "garbage" through the parser.
+    // The parser must return an error, never panic or infinite-loop.
+    const garbage = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const result = rsa.parsePrivateKeyPem(std.testing.allocator,
+        "-----BEGIN PRIVATE KEY-----\n" ++ garbage ++ "\n-----END PRIVATE KEY-----\n");
+    try std.testing.expect(result == error.InvalidDer or result == error.InvalidPkcs8 or
+        result == error.InvalidRsaKey or result == error.KeyTooWeak);
+}
+
+test "DER DoS: valid PKCS8 structure but truncated RSA key does not panic" {
+    // Minimal valid PKCS#8 outer structure pointing to truncated inner data.
+    // SEQUENCE { INTEGER(0), SEQUENCE { OID(rsaEncryption), NULL }, OCTET STRING(empty) }
+    //
+    // 30 11         SEQUENCE (17 bytes)
+    //   02 01 00    INTEGER 0
+    //   30 0D       SEQUENCE (13 bytes) — algorithm
+    //     06 09 2A864886F70D010101  OID rsaEncryption
+    //     05 00     NULL
+    //   04 00       OCTET STRING (0 bytes) — empty RSA key!
+    const pem = "-----BEGIN PRIVATE KEY-----\nMBECAQAwDQYJKoZIhvcNAQEBBAA=\n-----END PRIVATE KEY-----\n";
+    const result = rsa.parsePrivateKeyPem(std.testing.allocator, pem);
+    // Should fail cleanly — empty OCTET STRING means no RSA key to parse
+    try std.testing.expect(result == error.InvalidDer or result == error.InvalidRsaKey or result == error.KeyTooWeak);
+}
+
+// ============================================================================
+// SECURITY: Metadata redirect leak (#8)
+// Note: We can't test actual HTTP redirect behavior without a live server,
+// but we verify the API contract exists and the method is callable.
+// ============================================================================
+
+test "HttpClient exposes getNoRedirect method" {
+    // Compile-time verification that getNoRedirect exists on HttpClient.
+    // The method signature must accept (url, headers) and return Response.
+    const http_sentinel = @import("http-sentinel");
+    const T = http_sentinel.HttpClient;
+    // Verify the function exists and has the right type signature
+    const info = @typeInfo(@TypeOf(T.getNoRedirect));
+    try std.testing.expect(info == .@"fn");
+}
