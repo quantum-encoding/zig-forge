@@ -34,32 +34,87 @@ const ModelRoute = enum {
     genai, // Google GenAI / AI Studio (API key auth)
 };
 
-/// Dedicated endpoint registry — maps model names to endpoint IDs + regions.
-/// Add entries here when you deploy models on your own GPU clusters.
-const DedicatedEndpoint = struct {
-    model_prefix: []const u8,
-    endpoint_id: []const u8,
-    region: []const u8,
-    /// Inject into request body for models that need special config (e.g., GLM-5.1 thinking)
+/// Dedicated endpoint registry — dynamic, managed via admin API.
+/// Users deploy models on GPU clusters, register the endpoint ID here.
+pub const DedicatedEndpoint = struct {
+    model_name: []const u8, // e.g., "qwen3.5-35b" — what the user passes as model
+    endpoint_id: []const u8, // Vertex endpoint ID from deploy response
+    region: []const u8, // e.g., "europe-west4", "us-east1"
+    display_name: []const u8, // e.g., "Qwen 3.5 35B on RTX 6000"
+    /// Inject into request body (e.g., GLM-5.1 thinking mode)
     extra_params: ?[]const u8 = null,
+    active: bool = true,
 };
 
-/// Register dedicated endpoints here. Check Vertex AI console for endpoint IDs.
-const dedicated_endpoints = [_]DedicatedEndpoint{
-    // Example: GLM-5.1 on B200 cluster
-    // .{
-    //     .model_prefix = "glm-5.1",
-    //     .endpoint_id = "YOUR_ENDPOINT_ID",
-    //     .region = "us-east1",
-    //     .extra_params = "\"chat_template_kwargs\":{\"enable_thinking\":true,\"clear_thinking\":false}",
-    // },
+/// Runtime endpoint registry (thread-safe via store spinlock)
+var endpoint_registry: std.ArrayListUnmanaged(DedicatedEndpoint) = .empty;
+var registry_allocator: ?std.mem.Allocator = null;
+
+const SpinLock = struct {
+    state: std.atomic.Value(u32) = .init(0),
+    pub fn lock(self: *SpinLock) void {
+        while (self.state.cmpxchgWeak(0, 1, .acquire, .monotonic) != null)
+            std.atomic.spinLoopHint();
+    }
+    pub fn unlock(self: *SpinLock) void {
+        self.state.store(0, .release);
+    }
 };
+var registry_lock: SpinLock = .{};
+
+pub fn initRegistry(allocator: std.mem.Allocator) void {
+    registry_allocator = allocator;
+}
+
+/// Register a dedicated endpoint (called from admin API)
+pub fn registerEndpoint(ep: DedicatedEndpoint) !void {
+    const alloc = registry_allocator orelse return error.OutOfMemory;
+    registry_lock.lock();
+    defer registry_lock.unlock();
+
+    // Check for duplicate model name — update if exists
+    for (endpoint_registry.items) |*existing| {
+        if (std.mem.eql(u8, existing.model_name, ep.model_name)) {
+            existing.endpoint_id = try alloc.dupe(u8, ep.endpoint_id);
+            existing.region = try alloc.dupe(u8, ep.region);
+            existing.display_name = try alloc.dupe(u8, ep.display_name);
+            existing.extra_params = if (ep.extra_params) |p| try alloc.dupe(u8, p) else null;
+            existing.active = ep.active;
+            return;
+        }
+    }
+
+    // New entry
+    try endpoint_registry.append(alloc, .{
+        .model_name = try alloc.dupe(u8, ep.model_name),
+        .endpoint_id = try alloc.dupe(u8, ep.endpoint_id),
+        .region = try alloc.dupe(u8, ep.region),
+        .display_name = try alloc.dupe(u8, ep.display_name),
+        .extra_params = if (ep.extra_params) |p| try alloc.dupe(u8, p) else null,
+        .active = ep.active,
+    });
+}
+
+/// Remove a dedicated endpoint
+pub fn removeEndpoint(model_name: []const u8) void {
+    registry_lock.lock();
+    defer registry_lock.unlock();
+    for (endpoint_registry.items, 0..) |item, i| {
+        if (std.mem.eql(u8, item.model_name, model_name)) {
+            _ = endpoint_registry.orderedRemove(i);
+            return;
+        }
+    }
+}
+
+/// List all dedicated endpoints (for admin API)
+pub fn listEndpoints() []const DedicatedEndpoint {
+    return endpoint_registry.items;
+}
 
 fn routeModel(model: []const u8) ModelRoute {
-    // Check dedicated endpoints first
-    for (dedicated_endpoints) |ep| {
-        if (std.mem.startsWith(u8, model, ep.model_prefix)) return .dedicated;
-    }
+    // Check dynamic dedicated endpoints first
+    if (getDedicatedEndpoint(model) != null) return .dedicated;
     if (std.mem.startsWith(u8, model, "deepseek-ai/")) return .maas_openai;
     if (std.mem.startsWith(u8, model, "zai-org/")) return .maas_openai;
     if (std.mem.startsWith(u8, model, "qwen/")) return .maas_openai;
@@ -71,8 +126,10 @@ fn routeModel(model: []const u8) ModelRoute {
 }
 
 fn getDedicatedEndpoint(model: []const u8) ?DedicatedEndpoint {
-    for (dedicated_endpoints) |ep| {
-        if (std.mem.startsWith(u8, model, ep.model_prefix)) return ep;
+    registry_lock.lock();
+    defer registry_lock.unlock();
+    for (endpoint_registry.items) |ep| {
+        if (ep.active and std.mem.eql(u8, ep.model_name, model)) return ep;
     }
     return null;
 }
@@ -988,6 +1045,105 @@ fn sendSseError(request: *http.Server.Request, message: []const u8) void {
     const ev = std.fmt.bufPrint(&eb, "data: {{\"error\":\"{s}\"}}\n\ndata: [DONE]\n\n", .{message}) catch "data: {\"error\":\"unknown\"}\n\ndata: [DONE]\n\n";
     bw.writer.writeAll(ev) catch {};
     bw.end() catch {};
+}
+
+// ── Admin: Endpoint Management API ───────────────────────────
+
+const RegisterEndpointRequest = struct {
+    model_name: []const u8,
+    endpoint_id: []const u8,
+    region: []const u8,
+    display_name: []const u8 = "",
+    extra_params: ?[]const u8 = null,
+};
+
+/// POST /qai/v1/admin/endpoints — register a dedicated endpoint
+pub fn handleRegisterEndpoint(
+    request: *http.Server.Request,
+    allocator: std.mem.Allocator,
+    auth: ?*const types.AuthContext,
+) Response {
+    if (auth) |a| { if (a.account.role != .admin) return .{ .status = .forbidden, .body =
+        \\{"error":"forbidden","message":"Admin required"}
+    }; } else return .{ .status = .unauthorized, .body =
+        \\{"error":"unauthorized"}
+    };
+
+    const parsed = json_util.parseBody(RegisterEndpointRequest, request, allocator) catch {
+        return .{ .status = .bad_request, .body =
+            \\{"error":"invalid_json","message":"Required: model_name, endpoint_id, region"}
+        };
+    };
+    defer parsed.deinit();
+    const req = parsed.value;
+
+    registerEndpoint(.{
+        .model_name = req.model_name,
+        .endpoint_id = req.endpoint_id,
+        .region = req.region,
+        .display_name = if (req.display_name.len > 0) req.display_name else req.model_name,
+        .extra_params = req.extra_params,
+    }) catch {
+        return .{ .status = .internal_server_error, .body =
+            \\{"error":"internal","message":"Failed to register endpoint"}
+        };
+    };
+
+    return .{ .body = std.fmt.allocPrint(allocator,
+        \\{{"status":"registered","model_name":"{s}","endpoint_id":"{s}","region":"{s}"}}
+    , .{ req.model_name, req.endpoint_id, req.region }) catch
+        \\{"status":"registered"}
+    };
+}
+
+/// GET /qai/v1/admin/endpoints — list all dedicated endpoints
+pub fn handleListEndpoints(
+    _: *http.Server.Request,
+    allocator: std.mem.Allocator,
+    auth: ?*const types.AuthContext,
+) Response {
+    if (auth) |a| { if (a.account.role != .admin) return .{ .status = .forbidden, .body =
+        \\{"error":"forbidden"}
+    }; } else return .{ .status = .unauthorized, .body =
+        \\{"error":"unauthorized"}
+    };
+
+    const endpoints = listEndpoints();
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+
+    buf.appendSlice(allocator, "{\"endpoints\":[") catch return .{ .body = "[]" };
+    for (endpoints, 0..) |ep, i| {
+        if (i > 0) buf.append(allocator, ',') catch continue;
+        const entry = std.fmt.allocPrint(allocator,
+            \\{{"model_name":"{s}","endpoint_id":"{s}","region":"{s}","display_name":"{s}","active":{s}}}
+        , .{ ep.model_name, ep.endpoint_id, ep.region, ep.display_name, if (ep.active) "true" else "false" }) catch continue;
+        defer allocator.free(entry);
+        buf.appendSlice(allocator, entry) catch continue;
+    }
+    buf.appendSlice(allocator, "]}") catch {};
+    return .{ .body = buf.toOwnedSlice(allocator) catch "[]" };
+}
+
+/// DELETE /qai/v1/admin/endpoints/{model_name} — remove a dedicated endpoint
+pub fn handleRemoveEndpoint(
+    _: *http.Server.Request,
+    allocator: std.mem.Allocator,
+    auth: ?*const types.AuthContext,
+    model_name: []const u8,
+) Response {
+    if (auth) |a| { if (a.account.role != .admin) return .{ .status = .forbidden, .body =
+        \\{"error":"forbidden"}
+    }; } else return .{ .status = .unauthorized, .body =
+        \\{"error":"unauthorized"}
+    };
+
+    removeEndpoint(model_name);
+    return .{ .body = std.fmt.allocPrint(allocator,
+        \\{{"status":"removed","model_name":"{s}"}}
+    , .{model_name}) catch
+        \\{"status":"removed"}
+    };
 }
 
 fn chatError(err: anyerror) Response {

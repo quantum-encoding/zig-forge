@@ -228,6 +228,20 @@ fn routeApiV1Authed(
         return handlers.methodNotAllowed(request, allocator);
     }
 
+    // ── Admin: Dedicated Endpoints ─────────────────────
+    if (std.mem.eql(u8, path, "admin/endpoints")) {
+        if (method == .POST) return vertex.handleRegisterEndpoint(request, allocator, auth);
+        if (method == .GET) return vertex.handleListEndpoints(request, allocator, auth);
+        return handlers.methodNotAllowed(request, allocator);
+    }
+    if (std.mem.startsWith(u8, path, "admin/endpoints/")) {
+        if (method == .DELETE) {
+            const model_name = path[16..]; // after "admin/endpoints/"
+            return vertex.handleRemoveEndpoint(request, allocator, auth, model_name);
+        }
+        return handlers.methodNotAllowed(request, allocator);
+    }
+
     // ── Stubs for unimplemented endpoints ───────────────
     if (std.mem.eql(u8, path, "chat/session")) return handlers.stub(request, allocator, "POST /qai/v1/chat/session");
     if (std.mem.eql(u8, path, "search/web")) return handlers.stub(request, allocator, "POST /qai/v1/search/web");

@@ -149,6 +149,10 @@ pub fn main(init: std.process.Init) !void {
         router.setGcpContext(ctx);
     }
 
+    // Init Vertex dedicated endpoint registry
+    const vertex_mod = @import("vertex.zig");
+    vertex_mod.initRegistry(allocator);
+
     // Also set legacy key for backward compat
     if (legacy_key) |key| {
         router.setApiKey(key);
