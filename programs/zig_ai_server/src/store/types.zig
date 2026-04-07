@@ -52,6 +52,7 @@ pub const Account = struct {
     balance_ticks: i64 = 0,
     role: Role = .user,
     tier: DevTier = .free,
+    frozen: bool = false, // Frozen accounts can't make API calls
     created_at: i64 = 0,
     updated_at: i64 = 0,
 };

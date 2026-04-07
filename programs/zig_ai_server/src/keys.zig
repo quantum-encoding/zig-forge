@@ -344,3 +344,190 @@ pub fn handleCreditAccount(
         \\{"status":"credited"}
     };
 }
+
+// ── GET /qai/v1/admin/accounts — List all accounts ─────────
+
+pub fn handleListAccounts(
+    _: *http.Server.Request,
+    allocator: std.mem.Allocator,
+    store: *store_mod.Store,
+    auth: *const types.AuthContext,
+) Response {
+    if (auth.account.role != .admin) {
+        return .{ .status = .forbidden, .body =
+            \\{"error":"forbidden","message":"Admin role required"}
+        };
+    }
+
+    store.mutex.lock();
+    defer store.mutex.unlock();
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+
+    buf.appendSlice(allocator, "{\"accounts\":[") catch return .{ .status = .internal_server_error, .body = "{}" };
+
+    var first = true;
+    var iter = store.accounts.iterator();
+    while (iter.next()) |entry| {
+        const acct = entry.value_ptr;
+        if (!first) buf.append(allocator, ',') catch continue;
+        first = false;
+
+        const json = std.fmt.allocPrint(allocator,
+            \\{{"id":"{s}","email":"{s}","balance_ticks":{d},"role":"{s}","tier":"{s}","frozen":{s},"created_at":{d}}}
+        , .{
+            acct.id.slice(), acct.email.slice(), acct.balance_ticks,
+            acct.role.toString(), acct.tier.toString(),
+            if (acct.frozen) "true" else "false", acct.created_at,
+        }) catch continue;
+        defer allocator.free(json);
+        buf.appendSlice(allocator, json) catch continue;
+    }
+
+    buf.appendSlice(allocator, "]}") catch {};
+    return .{ .body = buf.toOwnedSlice(allocator) catch "{}" };
+}
+
+// ── GET /qai/v1/admin/accounts/{id} — Get single account ───
+
+pub fn handleGetAccount(
+    _: *http.Server.Request,
+    allocator: std.mem.Allocator,
+    store: *store_mod.Store,
+    auth: *const types.AuthContext,
+    account_id: []const u8,
+) Response {
+    if (auth.account.role != .admin) {
+        return .{ .status = .forbidden, .body =
+            \\{"error":"forbidden","message":"Admin role required"}
+        };
+    }
+
+    const acct = store.getAccountLocked(account_id) orelse {
+        return .{ .status = .not_found, .body =
+            \\{"error":"not_found","message":"Account not found"}
+        };
+    };
+
+    // Count keys for this account
+    var key_count: u32 = 0;
+    var total_spent: i64 = 0;
+    store.mutex.lock();
+    var key_iter = store.keys.iterator();
+    while (key_iter.next()) |entry| {
+        if (entry.value_ptr.account_id.eql(account_id)) {
+            key_count += 1;
+            total_spent += entry.value_ptr.spent_ticks;
+        }
+    }
+    store.mutex.unlock();
+
+    return .{ .body = std.fmt.allocPrint(allocator,
+        \\{{"id":"{s}","email":"{s}","balance_ticks":{d},"role":"{s}","tier":"{s}","frozen":{s},"created_at":{d},"key_count":{d},"total_spent_ticks":{d}}}
+    , .{
+        acct.id.slice(), acct.email.slice(), acct.balance_ticks,
+        acct.role.toString(), acct.tier.toString(),
+        if (acct.frozen) "true" else "false", acct.created_at,
+        key_count, total_spent,
+    }) catch
+        \\{"error":"internal"}
+    };
+}
+
+// ── POST /qai/v1/admin/accounts/{id}/freeze — Freeze/unfreeze ──
+
+const FreezeRequest = struct {
+    frozen: bool,
+    reason: ?[]const u8 = null,
+};
+
+pub fn handleFreezeAccount(
+    request: *http.Server.Request,
+    allocator: std.mem.Allocator,
+    store: *store_mod.Store,
+    auth: *const types.AuthContext,
+    account_id: []const u8,
+) Response {
+    if (auth.account.role != .admin) {
+        return .{ .status = .forbidden, .body =
+            \\{"error":"forbidden","message":"Admin role required"}
+        };
+    }
+
+    const parsed = json_util.parseBody(FreezeRequest, request, allocator) catch {
+        return .{ .status = .bad_request, .body =
+            \\{"error":"invalid_json","message":"Required: frozen (bool)"}
+        };
+    };
+    defer parsed.deinit();
+
+    store.mutex.lock();
+    const acct = store.accounts.getPtr(account_id) orelse {
+        store.mutex.unlock();
+        return .{ .status = .not_found, .body =
+            \\{"error":"not_found","message":"Account not found"}
+        };
+    };
+    acct.frozen = parsed.value.frozen;
+    acct.updated_at = types.nowMs();
+    store.dirty_accounts.put(store.allocator, account_id, {}) catch {};
+    store.mutex.unlock();
+
+    return .{ .body = std.fmt.allocPrint(allocator,
+        \\{{"status":"updated","account_id":"{s}","frozen":{s}}}
+    , .{ account_id, if (parsed.value.frozen) "true" else "false" }) catch
+        \\{"status":"updated"}
+    };
+}
+
+// ── POST /qai/v1/admin/accounts/{id}/tier — Change tier ────
+
+const TierRequest = struct {
+    tier: []const u8,
+};
+
+pub fn handleSetTier(
+    request: *http.Server.Request,
+    allocator: std.mem.Allocator,
+    store: *store_mod.Store,
+    auth: *const types.AuthContext,
+    account_id: []const u8,
+) Response {
+    if (auth.account.role != .admin) {
+        return .{ .status = .forbidden, .body =
+            \\{"error":"forbidden","message":"Admin role required"}
+        };
+    }
+
+    const parsed = json_util.parseBody(TierRequest, request, allocator) catch {
+        return .{ .status = .bad_request, .body =
+            \\{"error":"invalid_json","message":"Required: tier (free|hobby|pro|enterprise)"}
+        };
+    };
+    defer parsed.deinit();
+
+    const new_tier = std.meta.stringToEnum(types.DevTier, parsed.value.tier) orelse {
+        return .{ .status = .bad_request, .body =
+            \\{"error":"invalid_request","message":"tier must be: free, hobby, pro, or enterprise"}
+        };
+    };
+
+    store.mutex.lock();
+    const acct = store.accounts.getPtr(account_id) orelse {
+        store.mutex.unlock();
+        return .{ .status = .not_found, .body =
+            \\{"error":"not_found","message":"Account not found"}
+        };
+    };
+    acct.tier = new_tier;
+    acct.updated_at = types.nowMs();
+    store.dirty_accounts.put(store.allocator, account_id, {}) catch {};
+    store.mutex.unlock();
+
+    return .{ .body = std.fmt.allocPrint(allocator,
+        \\{{"status":"updated","account_id":"{s}","tier":"{s}","margin_bps":{d}}}
+    , .{ account_id, new_tier.toString(), new_tier.marginBps() }) catch
+        \\{"status":"updated"}
+    };
+}

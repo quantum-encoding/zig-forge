@@ -175,16 +175,37 @@ fn routeApiV1Authed(
 
     // ── Admin: Account Management ───────────────────────
     if (std.mem.eql(u8, path, "admin/accounts")) {
-        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
-        return keys.handleCreateAccount(request, allocator, io, store, auth);
+        if (method == .POST) return keys.handleCreateAccount(request, allocator, io, store, auth);
+        if (method == .GET) return keys.handleListAccounts(request, allocator, store, auth);
+        return handlers.methodNotAllowed(request, allocator);
     }
-    if (std.mem.startsWith(u8, path, "admin/accounts/") and std.mem.endsWith(u8, path, "/credit")) {
-        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
-        // Extract account ID: "admin/accounts/{id}/credit"
+    if (std.mem.startsWith(u8, path, "admin/accounts/")) {
         const after_prefix = path[15..]; // after "admin/accounts/"
-        const id_end = std.mem.indexOf(u8, after_prefix, "/") orelse return handlers.notFound(request, allocator);
-        const account_id = after_prefix[0..id_end];
-        return keys.handleCreditAccount(request, allocator, io, store, auth, account_id, server_ledger);
+
+        // Routes with sub-path: {id}/credit, {id}/freeze, {id}/tier
+        if (std.mem.indexOf(u8, after_prefix, "/")) |slash_pos| {
+            const account_id = after_prefix[0..slash_pos];
+            const action = after_prefix[slash_pos + 1 ..];
+
+            if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+
+            if (std.mem.eql(u8, action, "credit")) {
+                return keys.handleCreditAccount(request, allocator, io, store, auth, account_id, server_ledger);
+            }
+            if (std.mem.eql(u8, action, "freeze")) {
+                return keys.handleFreezeAccount(request, allocator, store, auth, account_id);
+            }
+            if (std.mem.eql(u8, action, "tier")) {
+                return keys.handleSetTier(request, allocator, store, auth, account_id);
+            }
+            return handlers.notFound(request, allocator);
+        }
+
+        // Route: admin/accounts/{id} (GET single account)
+        if (method == .GET) {
+            return keys.handleGetAccount(request, allocator, store, auth, after_prefix);
+        }
+        return handlers.methodNotAllowed(request, allocator);
     }
 
     // ── Stubs for unimplemented endpoints ───────────────

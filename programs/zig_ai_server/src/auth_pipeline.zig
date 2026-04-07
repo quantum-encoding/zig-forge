@@ -103,7 +103,17 @@ pub fn authenticate(
         } };
     };
 
-    // Step 8: Check balance (non-admin accounts must have positive balance)
+    // Step 8a: Check frozen
+    if (account.frozen) {
+        return .{ .err = .{
+            .status = .forbidden,
+            .body =
+            \\{"error":"account_frozen","message":"Account is frozen. Contact support."}
+            ,
+        } };
+    }
+
+    // Step 8b: Check balance (non-admin accounts must have positive balance)
     if (account.role != .admin and account.balance_ticks <= 0) {
         return .{ .err = .{
             .status = .payment_required,

@@ -22,6 +22,7 @@ pub const AuditRow = struct {
     account_id: []const u8,
     key_prefix: []const u8,
     endpoint: []const u8,
+    provider: []const u8, // "anthropic", "deepseek", "google", "xai", "openai"
     model: []const u8,
     input_tokens: u32,
     output_tokens: u32,
@@ -29,6 +30,7 @@ pub const AuditRow = struct {
     margin_ticks: i64,
     latency_ms: u32,
     status_code: u16,
+    tier: []const u8, // "free", "hobby", "pro", "enterprise"
 };
 
 pub const BqAudit = struct {
@@ -63,12 +65,13 @@ pub const BqAudit = struct {
 
         self.seq += 1;
         const json = std.fmt.allocPrint(self.allocator,
-            \\{{"json":{{"request_id":"req_{d}","account_id":"{s}","key_prefix":"{s}","endpoint":"{s}","model":"{s}","input_tokens":{d},"output_tokens":{d},"cost_ticks":{d},"margin_ticks":{d},"latency_ms":{d},"status_code":{d},"created_at":"{d}"}}}}
+            \\{{"json":{{"request_id":"req_{d}","account_id":"{s}","key_prefix":"{s}","endpoint":"{s}","provider":"{s}","model":"{s}","input_tokens":{d},"output_tokens":{d},"cost_ticks":{d},"margin_ticks":{d},"latency_ms":{d},"status_code":{d},"tier":"{s}","created_at":"{d}"}}}}
         , .{
             self.seq,
             row.account_id,
             row.key_prefix,
             row.endpoint,
+            row.provider,
             row.model,
             row.input_tokens,
             row.output_tokens,
@@ -76,6 +79,7 @@ pub const BqAudit = struct {
             row.margin_ticks,
             row.latency_ms,
             row.status_code,
+            row.tier,
             types.nowMs(),
         }) catch return;
 
