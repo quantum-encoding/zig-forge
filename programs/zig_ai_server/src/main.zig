@@ -173,8 +173,11 @@ fn handleConnection(ctx: *ConnCtx) void {
 
     var http_server = http.Server.init(&stream_reader.interface, &stream_writer.interface);
 
+    const security = @import("security.zig");
+
     // Handle multiple requests on the same connection (keep-alive)
-    while (true) {
+    var request_count: u32 = 0;
+    while (request_count < security.Limits.max_requests_per_conn) : (request_count += 1) {
         var request = http_server.receiveHead() catch |err| {
             switch (err) {
                 error.HttpHeadersInvalid => sendBadRequest(&stream_writer.interface),

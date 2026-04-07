@@ -8,6 +8,7 @@ const json_util = @import("json.zig");
 const router = @import("router.zig");
 const models_mod = @import("models.zig");
 const account_mod = @import("account.zig");
+const security = @import("security.zig");
 const Response = router.Response;
 
 /// Inbound chat request (matches quantum-sdk ChatRequest)
@@ -68,12 +69,42 @@ pub fn resolveProvider(model: []const u8) ?ProviderInfo {
 
 /// Handle POST /qai/v1/chat
 pub fn handle(request: *http.Server.Request, allocator: std.mem.Allocator) Response {
-    // Parse JSON body
-    const parsed = json_util.parseBody(ChatRequest, request, allocator) catch |err| {
+    // Parse JSON body (1MB limit for chat)
+    const body = json_util.readBody(request, allocator, security.Limits.max_chat_body) catch |err| {
         return errorResp(allocator, err);
+    };
+    defer allocator.free(body);
+
+    if (body.len == 0) return errorResp(allocator, error.EmptyBody);
+
+    const parsed = std.json.parseFromSlice(ChatRequest, allocator, body, .{
+        .ignore_unknown_fields = true,
+        .allocate = .alloc_always,
+    }) catch {
+        return errorResp(allocator, error.OutOfMemory);
     };
     defer parsed.deinit();
     const chat_req = parsed.value;
+
+    // Validate model name length
+    if (chat_req.model.len > security.Limits.max_model_name) {
+        return .{
+            .status = .bad_request,
+            .body =
+            \\{"error":"invalid_request","message":"Model name too long"}
+            ,
+        };
+    }
+
+    // Cap messages array
+    if (chat_req.messages.len > security.Limits.max_messages) {
+        return .{
+            .status = .bad_request,
+            .body =
+            \\{"error":"invalid_request","message":"Too many messages (max 200)"}
+            ,
+        };
+    }
 
     // Resolve provider from model name
     const provider_info = resolveProvider(chat_req.model) orelse {
@@ -116,7 +147,10 @@ pub fn handle(request: *http.Server.Request, allocator: std.mem.Allocator) Respo
         .model = chat_req.model,
     };
     if (chat_req.max_tokens) |mt| {
-        config.max_tokens = if (mt > 0) @intCast(mt) else 4096;
+        config.max_tokens = if (mt > 0 and mt <= @as(i32, @intCast(security.Limits.max_tokens_cap)))
+            @intCast(mt)
+        else
+            4096;
     }
     if (chat_req.temperature) |t| {
         config.temperature = @floatCast(t);

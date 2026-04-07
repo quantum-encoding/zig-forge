@@ -13,6 +13,7 @@ const router = @import("router.zig");
 const models_mod = @import("models.zig");
 const account_mod = @import("account.zig");
 const chat_mod = @import("chat.zig");
+const security = @import("security.zig");
 const Response = router.Response;
 
 // ── Request type ────────────────────────────────────────────
@@ -85,8 +86,19 @@ const RAG_SYSTEM_PROMPT =
 // ── Handler ─────────────────────────────────────────────────
 
 pub fn handle(request: *http.Server.Request, allocator: std.mem.Allocator, io: Io) Response {
-    const parsed = json_util.parseBody(AgentRequest, request, allocator) catch |err| {
+    // Parse with 256KB limit for agent requests
+    const body = json_util.readBody(request, allocator, security.Limits.max_agent_body) catch |err| {
         return errorResp(err);
+    };
+    defer allocator.free(body);
+
+    if (body.len == 0) return errorResp(error.EmptyBody);
+
+    const parsed = std.json.parseFromSlice(AgentRequest, allocator, body, .{
+        .ignore_unknown_fields = true,
+        .allocate = .alloc_always,
+    }) catch {
+        return errorResp(error.OutOfMemory);
     };
     defer parsed.deinit();
     const req = parsed.value;
@@ -122,7 +134,16 @@ pub fn handle(request: *http.Server.Request, allocator: std.mem.Allocator, io: I
     };
     defer client.deinit();
 
-    const workspace_id = req.workspace_id orelse "agent-session";
+    // Sanitize workspace ID — alphanumeric, hyphen, underscore only
+    const raw_ws_id = req.workspace_id orelse "agent-session";
+    const workspace_id = security.sanitizeId(raw_ws_id) orelse {
+        return .{
+            .status = .bad_request,
+            .body =
+            \\{"error":"invalid_request","message":"workspace_id must be alphanumeric, hyphens, underscores only (max 128 chars)"}
+            ,
+        };
+    };
     const is_ephemeral = req.ephemeral orelse true;
     const workspace_path = createWorkspace(allocator, io, workspace_id, is_ephemeral) catch {
         return .{
@@ -134,7 +155,10 @@ pub fn handle(request: *http.Server.Request, allocator: std.mem.Allocator, io: I
     };
     defer allocator.free(workspace_path);
 
-    const max_iters: u32 = if (req.max_iterations) |mi| @intCast(@max(mi, 1)) else 25;
+    const max_iters: u32 = if (req.max_iterations) |mi|
+        @intCast(@min(@max(mi, 1), @as(i32, @intCast(security.Limits.max_agent_iterations))))
+    else
+        25;
     const enable_rag = req.enable_rag orelse false;
 
     const result = runAgentLoop(
@@ -326,6 +350,16 @@ fn execBash(
         };
     };
 
+    // Validate command against blocklist
+    if (security.validateCommand(command) == null) {
+        return .{
+            .tool_call_id = try allocator.dupe(u8, call_id),
+            .content = try allocator.dupe(u8, "Error: command blocked by security policy"),
+            .is_error = true,
+            .allocator = allocator,
+        };
+    }
+
     // Use std.process.run — pure Zig, captures stdout+stderr
     const result = std.process.run(allocator, io, .{
         .argv = &.{ "bash", "-c", command },
@@ -394,15 +428,16 @@ fn execWriteFile(
         };
     };
 
-    // Path traversal protection
-    if (std.mem.indexOf(u8, path, "..") != null) {
+    // Strict path validation — no traversal, no absolute, no symlink tricks
+    const safe_path = security.validatePath(path) orelse {
         return .{
             .tool_call_id = try allocator.dupe(u8, call_id),
-            .content = try allocator.dupe(u8, "Error: path traversal not allowed"),
+            .content = try allocator.dupe(u8, "Error: invalid path — must be relative, no '..' or absolute paths"),
             .is_error = true,
             .allocator = allocator,
         };
-    }
+    };
+    _ = safe_path; // validated, use original `path` which is now known safe
 
     // Open workspace directory
     const ws_dir = Dir.openDirAbsolute(io, workspace, .{}) catch |err| {
@@ -463,10 +498,10 @@ fn execReadFile(
         };
     };
 
-    if (std.mem.indexOf(u8, path, "..") != null) {
+    if (security.validatePath(path) == null) {
         return .{
             .tool_call_id = try allocator.dupe(u8, call_id),
-            .content = try allocator.dupe(u8, "Error: path traversal not allowed"),
+            .content = try allocator.dupe(u8, "Error: invalid path — must be relative, no '..' or absolute paths"),
             .is_error = true,
             .allocator = allocator,
         };

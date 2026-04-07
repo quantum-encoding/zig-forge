@@ -1,10 +1,12 @@
 // Auth middleware — Bearer token validation
+// Uses constant-time comparison to prevent timing side-channel attacks
 
 const std = @import("std");
 const http = std.http;
+const security = @import("security.zig");
 
 /// Validate the Authorization header against the server's API key.
-/// Returns null if auth is valid, or an error response body if not.
+/// Returns null if auth is valid, or an error type if not.
 pub fn validateRequest(request: *const http.Server.Request, api_key: []const u8) ?AuthError {
     var it = request.iterateHeaders();
     while (it.next()) |header| {
@@ -12,7 +14,7 @@ pub fn validateRequest(request: *const http.Server.Request, api_key: []const u8)
             const value = std.mem.trim(u8, header.value, " ");
             if (std.mem.startsWith(u8, value, "Bearer ")) {
                 const token = std.mem.trim(u8, value[7..], " ");
-                if (token.len > 0 and std.mem.eql(u8, token, api_key)) {
+                if (token.len > 0 and security.constantTimeEql(token, api_key)) {
                     return null; // Auth OK
                 }
                 return .invalid_token;
