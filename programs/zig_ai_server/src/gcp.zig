@@ -1,6 +1,6 @@
 // GCP Context — TokenProvider + HttpClient for Firestore/BigQuery
 // On Cloud Run: MetadataProvider (auto-tokens from metadata server)
-// Locally: ServiceAccountProvider via GOOGLE_APPLICATION_CREDENTIALS
+// Locally: ServiceAccountProvider via GOOGLE_APPLICATION_CREDENTIALS env var
 // Fallback: ADC from gcloud auth application-default login
 
 const std = @import("std");
@@ -13,20 +13,21 @@ pub const GcpContext = struct {
     provider: gcp_auth.TokenProvider,
     project_id: []const u8,
 
-    /// Initialize GCP context. Tries MetadataProvider first (Cloud Run),
-    /// then SA key from env, then ADC.
-    pub fn init(allocator: std.mem.Allocator, project_id: []const u8) !GcpContext {
+    /// Initialize GCP context via autoDetect (SA key → Metadata → ADC).
+    pub fn init(
+        allocator: std.mem.Allocator,
+        project_id: []const u8,
+        environ_map: *const std.process.Environ.Map,
+    ) !GcpContext {
         var http_client = try hs.HttpClient.init(allocator);
         errdefer http_client.deinit();
 
-        const provider = gcp_auth.autoDetect(
+        const provider = try gcp_auth.autoDetect(
             allocator,
             &http_client,
             gcp_auth.SCOPE_CLOUD_PLATFORM,
-        ) catch {
-            // If auto-detect fails entirely, return error
-            return error.NoGcpCredentials;
-        };
+            environ_map,
+        );
 
         return .{
             .allocator = allocator,
@@ -51,7 +52,7 @@ pub const GcpContext = struct {
         return gcp_auth.apiPost(&self.provider, &self.http_client, self.allocator, url, body);
     }
 
-    /// Authenticated PATCH (uses PUT since gcp-auth provides apiPut)
+    /// Authenticated PATCH/PUT
     pub fn patch(self: *GcpContext, url: []const u8, body: []const u8) !hs.HttpClient.Response {
         return gcp_auth.apiPut(&self.provider, &self.http_client, self.allocator, url, body);
     }

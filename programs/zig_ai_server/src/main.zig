@@ -59,10 +59,32 @@ pub fn main(init: std.process.Init) !void {
     var boot_io_threaded: std.Io.Threaded = .init(allocator, .{});
     const boot_io = boot_io_threaded.io();
 
+    // Initialize GCP context (Firestore + BigQuery)
+    const gcp_mod = @import("gcp.zig");
+    const bq_mod = @import("bq.zig");
+    var gcp_ctx = gcp_mod.GcpContext.init(allocator, "metatron-cloud-prod-v1", environ_map) catch |err| blk: {
+        std.debug.print("  GCP auth not available ({s}) — running without Firestore/BigQuery\n", .{@errorName(err)});
+        break :blk null;
+    };
+    defer if (gcp_ctx) |*ctx| ctx.deinit();
+
     // Initialize the store
     const store_mod = @import("store/store.zig");
     var store = store_mod.Store.init(allocator, "data");
-    store.recover(boot_io);
+
+    // Connect store to Firestore for persistence
+    if (gcp_ctx) |*ctx| {
+        store.setGcpContext(ctx);
+        store.loadFromFirestore(); // Cold start: load state from Firestore
+    }
+    store.recover(boot_io); // Also replay any local WAL (belt + suspenders)
+
+    // Initialize BigQuery audit logger
+    var bq_audit = bq_mod.BqAudit.init(
+        allocator,
+        if (gcp_ctx) |*ctx| ctx else null,
+        "metatron-cloud-prod-v1",
+    );
 
     // Bootstrap: create admin account + key from env if store is empty
     const bootstrap_key = environ_map.get("QAI_BOOTSTRAP_KEY");
@@ -103,9 +125,10 @@ pub fn main(init: std.process.Init) !void {
     const ledger_mod = @import("ledger.zig");
     var ledger = ledger_mod.Ledger.init(allocator, "data");
 
-    // Set store + ledger in the router
+    // Set store + ledger + BQ audit in the router
     router.setStore(&store);
     router.setLedger(&ledger);
+    router.setBqAudit(&bq_audit);
 
     // Also set legacy key for backward compat
     if (legacy_key) |key| {

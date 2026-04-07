@@ -13,6 +13,7 @@ const keys = @import("keys.zig");
 const store_mod = @import("store/store.zig");
 const types = @import("store/types.zig");
 const ledger_mod = @import("ledger.zig");
+const bq_mod = @import("bq.zig");
 
 pub const Response = struct {
     status: http.Status = .ok,
@@ -37,6 +38,9 @@ var server_store: ?*store_mod.Store = null;
 /// Ledger for billing + audit
 var server_ledger: ?*ledger_mod.Ledger = null;
 
+/// BigQuery audit logger
+var server_bq: ?*bq_mod.BqAudit = null;
+
 /// Legacy single-key mode (deprecated — use store-backed auth)
 var legacy_api_key: ?[]const u8 = null;
 
@@ -46,6 +50,10 @@ pub fn setStore(store: *store_mod.Store) void {
 
 pub fn setLedger(ledger: *ledger_mod.Ledger) void {
     server_ledger = ledger;
+}
+
+pub fn setBqAudit(bq: *bq_mod.BqAudit) void {
+    server_bq = bq;
 }
 
 pub fn setApiKey(key: []const u8) void {

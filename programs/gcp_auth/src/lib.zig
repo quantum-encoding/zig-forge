@@ -154,10 +154,11 @@ pub const ServiceAccountProvider = struct {
     }
 
     pub fn fromFile(allocator: std.mem.Allocator, path: []const u8, scope: []const u8) !ServiceAccountProvider {
-        const file = std.fs.openFileAbsolute(path, .{}) catch return error.NoCredentialsFound;
-        defer file.close();
-
-        const json_bytes = file.readToEndAlloc(allocator, 1024 * 1024) catch return error.InvalidCredentials;
+        // Pure Zig file read via std.Io.Dir (no std.fs, no libc)
+        var io_threaded: std.Io.Threaded = .init(allocator, .{});
+        const io = io_threaded.io();
+        const json_bytes = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024)) catch
+            return error.NoCredentialsFound;
         defer allocator.free(json_bytes);
 
         return fromJson(allocator, json_bytes, scope);
@@ -219,10 +220,9 @@ pub const ADCProvider = struct {
     cached_token: ?Token,
 
     /// Load ADC from the standard well-known location.
-    pub fn init(allocator: std.mem.Allocator) !ADCProvider {
-        // Standard ADC path: ~/.config/gcloud/application_default_credentials.json
-        const home = std.process.getEnvVarOwned(allocator, "HOME") catch return error.NoCredentialsFound;
-        defer allocator.free(home);
+    /// Uses environ_map for HOME lookup (pure Zig, no std.process.getEnvVarOwned).
+    pub fn init(allocator: std.mem.Allocator, environ_map: ?*const std.process.Environ.Map) !ADCProvider {
+        const home = if (environ_map) |em| em.get("HOME") orelse return error.NoCredentialsFound else return error.NoCredentialsFound;
 
         const path = try std.fmt.allocPrint(allocator, "{s}/.config/gcloud/application_default_credentials.json", .{home});
         defer allocator.free(path);
@@ -231,10 +231,11 @@ pub const ADCProvider = struct {
     }
 
     pub fn initFromFile(allocator: std.mem.Allocator, path: []const u8) !ADCProvider {
-        const file = std.fs.openFileAbsolute(path, .{}) catch return error.NoCredentialsFound;
-        defer file.close();
-
-        const json_bytes = file.readToEndAlloc(allocator, 1024 * 1024) catch return error.InvalidCredentials;
+        // Pure Zig file read via std.Io.Dir
+        var io_threaded: std.Io.Threaded = .init(allocator, .{});
+        const io = io_threaded.io();
+        const json_bytes = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024)) catch
+            return error.NoCredentialsFound;
         defer allocator.free(json_bytes);
 
         return initFromJson(allocator, json_bytes);
@@ -360,16 +361,17 @@ pub const StaticProvider = struct {
 /// 1. GOOGLE_APPLICATION_CREDENTIALS env var (service account file)
 /// 2. GCP metadata server (Cloud Run / GCE)
 /// 3. Application Default Credentials (~/.config/gcloud/...)
-pub fn autoDetect(allocator: std.mem.Allocator, client: *HttpClient, scope: []const u8) !TokenProvider {
+pub fn autoDetect(allocator: std.mem.Allocator, client: *HttpClient, scope: []const u8, environ_map: ?*const std.process.Environ.Map) !TokenProvider {
     // 1. Explicit service account file via env var
-    if (std.process.getEnvVarOwned(allocator, "GOOGLE_APPLICATION_CREDENTIALS")) |path| {
-        defer allocator.free(path);
-        const sa = ServiceAccountProvider.fromFile(allocator, path, scope) catch |err| switch (err) {
-            error.NoCredentialsFound, error.InvalidCredentials => null,
-            else => return err,
-        };
-        if (sa) |provider| return .{ .service_account = provider };
-    } else |_| {}
+    if (environ_map) |em| {
+        if (em.get("GOOGLE_APPLICATION_CREDENTIALS")) |path| {
+            const sa = ServiceAccountProvider.fromFile(allocator, path, scope) catch |err| switch (err) {
+                error.NoCredentialsFound, error.InvalidCredentials => null,
+                else => return err,
+            };
+            if (sa) |provider| return .{ .service_account = provider };
+        }
+    }
 
     // 2. Metadata server (fast fail if not on GCP)
     // SECURITY: No redirects — same reason as MetadataProvider.getToken
@@ -387,7 +389,7 @@ pub fn autoDetect(allocator: std.mem.Allocator, client: *HttpClient, scope: []co
 
     // 3. Application Default Credentials
     {
-        const adc = ADCProvider.init(allocator) catch |err| switch (err) {
+        const adc = ADCProvider.init(allocator, environ_map) catch |err| switch (err) {
             error.NoCredentialsFound, error.InvalidCredentials => null,
             else => return err,
         };

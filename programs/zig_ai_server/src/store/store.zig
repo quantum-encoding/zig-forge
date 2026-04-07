@@ -7,6 +7,8 @@ const Io = std.Io;
 const Dir = std.Io.Dir;
 const types = @import("types.zig");
 const wal_mod = @import("wal.zig");
+const firestore = @import("../firestore.zig");
+const gcp_mod = @import("../gcp.zig");
 
 /// Atomic spinlock — no io, no libc, works on Zigix
 const SpinLock = struct {
@@ -37,6 +39,11 @@ pub const Store = struct {
     // Persistence
     wal: wal_mod.WalWriter,
     data_dir: []const u8,
+
+    // Firestore write-through (optional — nil when no GCP context)
+    gcp_ctx: ?*gcp_mod.GcpContext = null,
+    // Track dirty accounts for background balance flush (avoids Firestore 1-write/sec contention)
+    dirty_accounts: std.StringHashMapUnmanaged(void) = .empty,
 
     // Monotonic counters
     next_reservation_id: u64 = 1,
@@ -85,6 +92,61 @@ pub const Store = struct {
         // Placeholder — real replay handled in recover()
     }
 
+    pub fn setGcpContext(self: *Store, ctx: *gcp_mod.GcpContext) void {
+        self.gcp_ctx = ctx;
+    }
+
+    /// Load state from Firestore on cold start. Replaces file-based snapshot.
+    pub fn loadFromFirestore(self: *Store) void {
+        const ctx = self.gcp_ctx orelse return;
+
+        // Load accounts
+        const accounts_list = firestore.loadAllAccounts(ctx, self.allocator) catch return;
+        defer self.allocator.free(accounts_list);
+        for (accounts_list) |account| {
+            const key_copy = self.allocator.dupe(u8, account.id.slice()) catch continue;
+            self.accounts.put(self.allocator, key_copy, account) catch continue;
+        }
+
+        // Load keys
+        const keys_list = firestore.loadAllKeys(ctx, self.allocator) catch return;
+        defer self.allocator.free(keys_list);
+        for (keys_list) |key| {
+            self.keys.put(self.allocator, key.key_hash, key) catch continue;
+        }
+
+        std.debug.print("  Loaded {d} accounts, {d} keys from Firestore\n", .{
+            self.accounts.count(), self.keys.count(),
+        });
+    }
+
+    /// Flush all dirty account balances to Firestore. Call periodically + on shutdown.
+    pub fn flushDirtyAccounts(self: *Store) void {
+        const ctx = self.gcp_ctx orelse return;
+
+        self.mutex.lock();
+        // Snapshot dirty set + current balances
+        var to_flush: std.ArrayListUnmanaged(struct { id: []const u8, balance: i64 }) = .empty;
+        defer to_flush.deinit(self.allocator);
+
+        var iter = self.dirty_accounts.iterator();
+        while (iter.next()) |entry| {
+            if (self.accounts.get(entry.key_ptr.*)) |account| {
+                to_flush.append(self.allocator, .{
+                    .id = entry.key_ptr.*,
+                    .balance = account.balance_ticks,
+                }) catch continue;
+            }
+        }
+        self.dirty_accounts.clearRetainingCapacity();
+        self.mutex.unlock();
+
+        // Write outside the lock (no contention with request handling)
+        for (to_flush.items) |item| {
+            firestore.updateAccountBalance(ctx, item.id, item.balance) catch {};
+        }
+    }
+
     pub fn deinit(self: *Store) void {
         self.accounts.deinit(self.allocator);
         self.keys.deinit(self.allocator);
@@ -105,6 +167,11 @@ pub const Store = struct {
         // Then in-memory — key must be a durable copy since FixedStr is inside the value
         const key_copy = try self.allocator.dupe(u8, account.id.slice());
         try self.accounts.put(self.allocator, key_copy, account);
+
+        // Write-through to Firestore (rare operation, no contention risk)
+        if (self.gcp_ctx) |ctx| {
+            firestore.saveAccount(ctx, account) catch {};
+        }
     }
 
     pub fn getAccount(self: *Store, account_id: []const u8) ?*types.Account {
@@ -130,6 +197,11 @@ pub const Store = struct {
         try self.wal.append(io, .create_key, payload);
 
         try self.keys.put(self.allocator, key.key_hash, key);
+
+        // Write-through to Firestore
+        if (self.gcp_ctx) |ctx| {
+            firestore.saveKey(ctx, key) catch {};
+        }
     }
 
     pub fn getKey(self: *Store, key_hash: [32]u8) ?*types.ApiKey {
@@ -146,6 +218,11 @@ pub const Store = struct {
             var hash_hex: [64]u8 = undefined;
             types.hexEncode(&key_hash, &hash_hex);
             self.wal.append(io, .revoke_key, &hash_hex) catch {};
+
+            // Write-through to Firestore (revocation must be durable immediately)
+            if (self.gcp_ctx) |ctx| {
+                firestore.updateKeyRevoked(ctx, key.*) catch {};
+            }
         }
     }
 
@@ -188,6 +265,10 @@ pub const Store = struct {
         };
 
         try self.reservations.put(self.allocator, res_id, reservation);
+
+        // Mark account dirty for background Firestore flush
+        self.dirty_accounts.put(self.allocator, account_id, {}) catch {};
+
         return res_id;
     }
 
@@ -218,6 +299,9 @@ pub const Store = struct {
         const seq_buf = std.fmt.allocPrint(self.allocator, "{d}:{d}:{d}", .{ reservation_id, actual_ticks, margin_ticks }) catch "";
         defer if (seq_buf.len > 0) self.allocator.free(seq_buf);
         self.wal.append(io, .commit_reservation, seq_buf) catch {};
+
+        // Mark dirty
+        self.dirty_accounts.put(self.allocator, reservation.account_id.slice(), {}) catch {};
 
         _ = self.reservations.remove(reservation_id);
     }
@@ -252,6 +336,11 @@ pub const Store = struct {
         const payload = std.fmt.allocPrint(self.allocator, "{s}:{d}", .{ account_id, amount_ticks }) catch return error.OutOfMemory;
         defer self.allocator.free(payload);
         try self.wal.append(io, .update_balance, payload);
+
+        // Credit is an admin action — write-through immediately (not frequent)
+        if (self.gcp_ctx) |ctx| {
+            firestore.updateAccountBalance(ctx, account_id, account.balance_ticks) catch {};
+        }
     }
 
     // ── Snapshot / Recovery ─────────────────────────────────
