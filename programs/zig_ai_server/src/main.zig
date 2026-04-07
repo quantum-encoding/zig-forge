@@ -135,6 +135,12 @@ pub fn main(init: std.process.Init) !void {
     const ledger_mod = @import("ledger.zig");
     var ledger = ledger_mod.Ledger.init(allocator, "data");
 
+    // Initialize rate limiter
+    const ratelimit_mod = @import("ratelimit.zig");
+    const auth_pipeline_mod = @import("auth_pipeline.zig");
+    var rate_limiter = ratelimit_mod.RateLimiter.init(allocator);
+    auth_pipeline_mod.setRateLimiter(&rate_limiter);
+
     // Set store + ledger + BQ audit in the router
     router.setStore(&store);
     router.setLedger(&ledger);
@@ -298,6 +304,11 @@ fn handleConnection(ctx: *ConnCtx) void {
 
         // Route and handle
         const result = router.dispatch(&request, ctx.allocator, io, ctx.environ_map);
+
+        // If handler already wrote the response (SSE streaming), skip respond
+        if (result.handled) {
+            return; // SSE took over the connection — don't reuse
+        }
 
         // Keep-alive safety check
         const has_body_header = request.head.content_length != null or

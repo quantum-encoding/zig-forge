@@ -14,11 +14,15 @@ const store_mod = @import("store/store.zig");
 const types = @import("store/types.zig");
 const ledger_mod = @import("ledger.zig");
 const bq_mod = @import("bq.zig");
+const stream = @import("stream.zig");
 
 pub const Response = struct {
     status: http.Status = .ok,
     body: []const u8 = "",
     headers: []const http.Header = &json_headers,
+    /// Set to true when handler wrote directly to the stream (SSE).
+    /// When true, main.zig skips request.respond().
+    handled: bool = false,
 };
 
 const json_headers: [1]http.Header = .{
@@ -124,7 +128,16 @@ fn routeApiV1Authed(
     // ── Chat ────────────────────────────────────────────
     if (std.mem.eql(u8, path, "chat")) {
         if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+
+        // Check for streaming: peek at content-type or use a streaming-specific path
+        // For SSE, client can also POST to /qai/v1/chat/stream explicitly
         return chat.handle(request, allocator, environ_map, io, store, auth, server_ledger);
+    }
+    // Explicit streaming endpoint
+    if (std.mem.eql(u8, path, "chat/stream")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        stream.handleStream(request, allocator, environ_map, io, store, auth, server_ledger);
+        return .{ .handled = true };
     }
 
     // ── Agent ───────────────────────────────────────────

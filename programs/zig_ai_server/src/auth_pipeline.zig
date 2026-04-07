@@ -7,6 +7,7 @@ const http = std.http;
 const store_mod = @import("store/store.zig");
 const types = @import("store/types.zig");
 const security = @import("security.zig");
+const ratelimit = @import("ratelimit.zig");
 
 pub const AuthResult = union(enum) {
     ok: types.AuthContext,
@@ -20,6 +21,13 @@ pub const AuthError = struct {
 
 /// Authenticate a request against the store. Returns AuthContext or error response.
 /// FAIL-CLOSED: every check that fails returns an error, never proceeds.
+/// Rate limiter instance (set from main.zig)
+var rate_limiter: ?*ratelimit.RateLimiter = null;
+
+pub fn setRateLimiter(rl: *ratelimit.RateLimiter) void {
+    rate_limiter = rl;
+}
+
 pub fn authenticate(
     request: *const http.Server.Request,
     store: *store_mod.Store,
@@ -115,9 +123,21 @@ pub fn authenticate(
         } };
     }
 
-    // Steps 10-11: Endpoint scope and rate limit
-    // (endpoint bitmask check deferred to handler level since we need the path)
-    // (rate limiting is a future phase — tracked in security.zig Limits)
+    // Step 10: Endpoint scope (bitmask check deferred to handler level)
+
+    // Step 11: Per-key rate limiting
+    if (key.scope.rate_limit_rpm > 0) {
+        if (rate_limiter) |rl| {
+            if (!rl.check(key_hash, key.scope.rate_limit_rpm)) {
+                return .{ .err = .{
+                    .status = .too_many_requests,
+                    .body =
+                    \\{"error":"rate_limited","message":"API key rate limit exceeded. Try again shortly."}
+                    ,
+                } };
+            }
+        }
+    }
 
     // Step 12: Success
     return .{ .ok = .{
