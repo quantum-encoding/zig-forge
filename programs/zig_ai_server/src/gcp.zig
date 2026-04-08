@@ -57,6 +57,14 @@ pub const GcpContext = struct {
         return gcp_auth.apiPatch(&self.provider, &self.http_client, self.allocator, url, body);
     }
 
+    /// Authenticated PATCH with a fresh HTTP connection.
+    /// Avoids stale connection pool issues after GET requests.
+    pub fn patchFresh(self: *GcpContext, url: []const u8, body: []const u8) !hs.HttpClient.Response {
+        var fresh = hs.HttpClient.init(self.allocator) catch return error.HttpError;
+        defer fresh.deinit();
+        return gcp_auth.apiPatch(&self.provider, &fresh, self.allocator, url, body);
+    }
+
     /// Authenticated DELETE
     pub fn delete(self: *GcpContext, url: []const u8) !hs.HttpClient.Response {
         return gcp_auth.apiDelete(&self.provider, &self.http_client, self.allocator, url);

@@ -42,14 +42,10 @@ pub fn saveAccount(ctx: *gcp.GcpContext, account: types.Account) !void {
     const body = try buildAccountDocument(ctx.allocator, account);
     defer ctx.allocator.free(body);
 
-    // Retry once on connection errors (stale pool connections after GET)
-    var resp = ctx.patch(url, body) catch {
-        var retry_resp = ctx.patch(url, body) catch |err| {
-            std.debug.print("  Firestore saveAccount FAILED: {s} (account={s})\n", .{ @errorName(err), account.id.slice() });
-            return err;
-        };
-        retry_resp.deinit();
-        return;
+    // Use fresh connection to avoid stale pool after loadFromFirestore GETs
+    var resp = ctx.patchFresh(url, body) catch |err| {
+        std.debug.print("  Firestore saveAccount FAILED: {s} (account={s})\n", .{ @errorName(err), account.id.slice() });
+        return err;
     };
     defer resp.deinit();
 
@@ -107,14 +103,9 @@ pub fn saveKey(ctx: *gcp.GcpContext, key: types.ApiKey) !void {
     const body = try buildKeyDocument(ctx.allocator, key);
     defer ctx.allocator.free(body);
 
-    // Retry once on connection errors (stale pool connections)
-    var resp = ctx.patch(url, body) catch {
-        var retry_resp = ctx.patch(url, body) catch |err| {
-            std.debug.print("  Firestore saveKey FAILED: {s}\n", .{@errorName(err)});
-            return err;
-        };
-        retry_resp.deinit();
-        return;
+    var resp = ctx.patchFresh(url, body) catch |err| {
+        std.debug.print("  Firestore saveKey FAILED: {s}\n", .{@errorName(err)});
+        return err;
     };
     defer resp.deinit();
 
@@ -138,7 +129,7 @@ pub fn updateAccountBalance(ctx: *gcp.GcpContext, account_id: []const u8, balanc
     , .{ balance_ticks, types.nowMs() });
     defer ctx.allocator.free(body);
 
-    var resp = try ctx.patch(url, body);
+    var resp = try ctx.patchFresh(url, body);
     defer resp.deinit();
 }
 
@@ -155,7 +146,7 @@ pub fn updateKeyRevoked(ctx: *gcp.GcpContext, key: types.ApiKey) !void {
         \\{"fields":{"revoked":{"booleanValue":true}}}
     ;
 
-    var resp = try ctx.patch(url, body);
+    var resp = try ctx.patchFresh(url, body);
     defer resp.deinit();
 }
 
