@@ -110,7 +110,7 @@ pub fn main(init: std.process.Init) !void {
             const types = @import("store/types.zig");
             const now = types.nowMs();
             store.createAccount(boot_io, .{
-                .id = types.FixedStr32.fromSlice("admin"),
+                .id = types.FixedStr64.fromSlice("admin"),
                 .email = types.FixedStr256.fromSlice("admin@localhost"),
                 .balance_ticks = 100_000_000_000_000, // 10,000 USD
                 .role = .admin,
@@ -124,7 +124,7 @@ pub fn main(init: std.process.Init) !void {
             std.crypto.hash.sha2.Sha256.hash(raw_key, &key_hash, .{});
             store.createKey(boot_io, .{
                 .key_hash = key_hash,
-                .account_id = types.FixedStr32.fromSlice("admin"),
+                .account_id = types.FixedStr64.fromSlice("admin"),
                 .name = types.FixedStr128.fromSlice("bootstrap-admin"),
                 .prefix = types.FixedStr16.fromSlice("bootstrap_key"),
                 .scope = .{}, // unlimited

@@ -105,7 +105,7 @@ pub fn handleCreateKey(
 
     const key_record = types.ApiKey{
         .key_hash = key_hash,
-        .account_id = types.FixedStr32.fromSlice(target_account_id),
+        .account_id = types.FixedStr64.fromSlice(target_account_id),
         .name = types.FixedStr128.fromSlice(req.name),
         .prefix = types.FixedStr16.fromSlice(&prefix_buf),
         .scope = .{
@@ -269,7 +269,7 @@ pub fn handleCreateAccount(
     const now = types.nowMs();
 
     const account = types.Account{
-        .id = types.FixedStr32.fromSlice(req.id),
+        .id = types.FixedStr64.fromSlice(req.id),
         .email = types.FixedStr256.fromSlice(req.email),
         .balance_ticks = req.initial_credit_ticks orelse 0,
         .role = role,

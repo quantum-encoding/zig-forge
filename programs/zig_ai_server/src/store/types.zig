@@ -47,7 +47,7 @@ pub const DevTier = enum(u8) {
 };
 
 pub const Account = struct {
-    id: FixedStr32 = .{},
+    id: FixedStr64 = .{},
     email: FixedStr256 = .{},
     balance_ticks: i64 = 0,
     role: Role = .user,
@@ -73,7 +73,7 @@ pub const KeyScope = struct {
 
 pub const ApiKey = struct {
     key_hash: [32]u8 = .{0} ** 32,
-    account_id: FixedStr32 = .{},
+    account_id: FixedStr64 = .{},
     name: FixedStr128 = .{},
     prefix: FixedStr16 = .{}, // "qai_k_" + first 8 hex
     scope: KeyScope = .{},
@@ -88,7 +88,7 @@ pub const ApiKey = struct {
 
 pub const Reservation = struct {
     id: u64 = 0,
-    account_id: FixedStr32 = .{},
+    account_id: FixedStr64 = .{},
     key_hash: [32]u8 = .{0} ** 32,
     amount_ticks: i64 = 0,
     endpoint: FixedStr64 = .{},
@@ -98,7 +98,7 @@ pub const Reservation = struct {
 
 pub const LedgerEntry = struct {
     seq: u64 = 0,
-    account_id: FixedStr32 = .{},
+    account_id: FixedStr64 = .{},
     key_prefix: FixedStr16 = .{},
     amount_ticks: i64 = 0, // negative = debit
     margin_ticks: i64 = 0,

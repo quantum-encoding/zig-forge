@@ -247,7 +247,7 @@ pub const Store = struct {
 
         const reservation = types.Reservation{
             .id = res_id,
-            .account_id = types.FixedStr32.fromSlice(account_id),
+            .account_id = types.FixedStr64.fromSlice(account_id),
             .key_hash = key_hash,
             .amount_ticks = amount_ticks,
             .endpoint = types.FixedStr64.fromSlice(endpoint),
@@ -409,7 +409,7 @@ pub const Store = struct {
         // Load accounts
         for (parsed.value.accounts) |acct_json| {
             var account = types.Account{};
-            account.id = types.FixedStr32.fromSlice(acct_json.id);
+            account.id = types.FixedStr64.fromSlice(acct_json.id);
             account.email = types.FixedStr256.fromSlice(acct_json.email);
             account.balance_ticks = acct_json.balance_ticks;
             account.role = std.meta.stringToEnum(types.Role, acct_json.role) orelse .user;
@@ -426,7 +426,7 @@ pub const Store = struct {
             if (key_json.key_hash.len == 64) {
                 _ = std.fmt.hexToBytes(&key.key_hash, key_json.key_hash) catch continue;
             }
-            key.account_id = types.FixedStr32.fromSlice(key_json.account_id);
+            key.account_id = types.FixedStr64.fromSlice(key_json.account_id);
             key.name = types.FixedStr128.fromSlice(key_json.name);
             key.prefix = types.FixedStr16.fromSlice(key_json.prefix);
             key.spent_ticks = key_json.spent_ticks;

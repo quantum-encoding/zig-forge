@@ -230,7 +230,7 @@ fn findOrCreateAccount(
     const now_ms = types.nowMs();
     const email = claims.email orelse "";
     store.createAccount(io, .{
-        .id = types.FixedStr32.fromSlice(account_id),
+        .id = types.FixedStr64.fromSlice(account_id),
         .email = types.FixedStr256.fromSlice(email),
         .balance_ticks = WELCOME_BONUS,
         .role = .user,
@@ -272,7 +272,7 @@ fn mintApiKey(
 
     store.createKey(io, .{
         .key_hash = key_hash,
-        .account_id = types.FixedStr32.fromSlice(account_id),
+        .account_id = types.FixedStr64.fromSlice(account_id),
         .name = types.FixedStr128.fromSlice("app-auth"),
         .prefix = types.FixedStr16.fromSlice(&prefix_buf),
         .scope = .{},

@@ -283,7 +283,7 @@ fn documentToAccount(doc: FirestoreDocument) ?types.Account {
     const doc_id = name[last_slash + 1 ..];
 
     return .{
-        .id = types.FixedStr32.fromSlice(doc_id),
+        .id = types.FixedStr64.fromSlice(doc_id),
         .email = types.FixedStr256.fromSlice(getStringField(fields, "email")),
         .balance_ticks = getIntField(fields, "balance_ticks"),
         .role = std.meta.stringToEnum(types.Role, getStringField(fields, "role")) orelse .user,
@@ -308,7 +308,7 @@ fn documentToKey(doc: FirestoreDocument) ?types.ApiKey {
         _ = std.fmt.hexToBytes(&key.key_hash, hash_hex) catch return null;
     } else return null;
 
-    key.account_id = types.FixedStr32.fromSlice(getStringField(fields, "account_id"));
+    key.account_id = types.FixedStr64.fromSlice(getStringField(fields, "account_id"));
     key.name = types.FixedStr128.fromSlice(getStringField(fields, "name"));
     key.prefix = types.FixedStr16.fromSlice(getStringField(fields, "prefix"));
     key.spent_ticks = getIntField(fields, "spent_ticks");
