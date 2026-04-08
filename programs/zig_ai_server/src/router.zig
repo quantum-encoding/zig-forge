@@ -172,15 +172,22 @@ fn routeApiV1Authed(
 
         const is_stream = std.mem.indexOf(u8, body, "\"stream\":true") != null or
             std.mem.indexOf(u8, body, "\"stream\": true") != null;
-        std.debug.print("  /chat body_len={d} stream={} first80={s}\n", .{
-            body.len, is_stream,
-            if (body.len > 80) body[0..80] else body,
-        });
 
         if (is_stream) {
-            stream.handleStreamWithBody(request, allocator, environ_map, io, store, auth, server_ledger, body);
-            allocator.free(body);
-            return .{ .handled = true };
+            // Check model route — Vertex models need vertex.handleStream
+            const model_route = extractModelRoute(body, allocator);
+            switch (model_route) {
+                .vertex_maas, .vertex_native, .vertex_dedicated => {
+                    vertex.handleStream(request, allocator, server_gcp, store, auth, io, server_ledger, environ_map);
+                    allocator.free(body);
+                    return .{ .handled = true };
+                },
+                else => {
+                    stream.handleStreamWithBody(request, allocator, environ_map, io, store, auth, server_ledger, body);
+                    allocator.free(body);
+                    return .{ .handled = true };
+                },
+            }
         }
 
         const result = chat.handleWithBody(request, allocator, environ_map, io, store, auth, server_ledger, server_gcp, body);
@@ -335,4 +342,17 @@ fn handleAccountBalance(allocator: std.mem.Allocator, auth: *const types.AuthCon
     , .{ balance, spent, ticks_per_usd, auth.account.id.slice(), auth.account.tier.toString() }) catch
         \\{"error":"internal"}
     };
+}
+
+/// Extract model name from JSON body and resolve its route.
+/// Quick string scan — avoids full JSON parse just for routing.
+fn extractModelRoute(body: []const u8, allocator: std.mem.Allocator) models.Route {
+    // Find "model":"<value>" in the JSON body
+    const needle = "\"model\":\"";
+    const start = (std.mem.indexOf(u8, body, needle) orelse return .unknown) + needle.len;
+    const remaining = body[start..];
+    const end = std.mem.indexOfScalar(u8, remaining, '"') orelse return .unknown;
+    const model_name = remaining[0..end];
+    _ = allocator;
+    return models.getRoute(model_name);
 }
