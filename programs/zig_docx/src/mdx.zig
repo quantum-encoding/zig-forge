@@ -50,10 +50,36 @@ pub fn generateMdx(allocator: std.mem.Allocator, doc: *const docx.Document, opti
     var image_counter: u16 = 0;
     var image_refs: std.ArrayListUnmanaged(ImageRef) = .empty;
 
+    // Auto-extract title from first heading if not provided
+    var auto_title: []const u8 = options.title;
+    if (auto_title.len == 0) {
+        for (doc.elements) |elem| {
+            switch (elem) {
+                .paragraph => |p| {
+                    if (p.style == .heading1 or p.style == .title) {
+                        if (p.runs.len > 0) {
+                            // Concatenate all runs' text for the title
+                            var title_buf: std.ArrayList(u8) = .empty;
+                            defer title_buf.deinit(allocator);
+                            for (p.runs) |run| {
+                                title_buf.appendSlice(allocator, run.text) catch break;
+                            }
+                            if (title_buf.items.len > 0) {
+                                auto_title = title_buf.toOwnedSlice(allocator) catch break;
+                            }
+                        }
+                        break;
+                    }
+                },
+                else => {},
+            }
+        }
+    }
+
     // Frontmatter
     try w.print("---\n", .{});
-    if (options.title.len > 0) {
-        try w.print("title: \"{s}\"\n", .{options.title});
+    if (auto_title.len > 0) {
+        try w.print("title: \"{s}\"\n", .{auto_title});
     }
     if (options.description.len > 0) {
         try w.print("description: \"{s}\"\n", .{options.description});
@@ -133,7 +159,25 @@ fn writeParagraph(
         try w.print("{s}", .{prefix});
     }
 
-    // Write runs
+    // Check if paragraph contains inline bullet characters (author typed • manually)
+    var has_inline_bullets = false;
+    for (p.runs) |run| {
+        if (std.mem.indexOfScalar(u8, run.text, 0xE2) != null) {
+            // UTF-8 bullet • is E2 80 A2 — check if the text contains it
+            if (std.mem.indexOf(u8, run.text, "\xe2\x80\xa2") != null) {
+                has_inline_bullets = true;
+                break;
+            }
+        }
+    }
+
+    if (has_inline_bullets) {
+        // Collect all text, then split on • and emit as list items
+        try writeInlineBulletList(allocator, w, p, doc, image_counter, image_refs, image_mode);
+        return;
+    }
+
+    // Write runs normally
     for (p.runs) |run| {
         if (run.image_rel_id) |rel_id| {
             try writeImage(allocator, w, rel_id, doc, image_counter, image_refs, image_mode);
@@ -159,6 +203,89 @@ fn writeParagraph(
 
         if (has_link) {
             try w.print("]({s})", .{run.hyperlink_url.?});
+        }
+    }
+}
+
+/// Handle paragraphs where the author typed • bullet characters manually
+/// instead of using Word's list formatting. Splits on • and emits proper markdown list.
+fn writeInlineBulletList(
+    allocator: std.mem.Allocator,
+    w: anytype,
+    p: *const docx.Paragraph,
+    doc: *const docx.Document,
+    image_counter: *u16,
+    image_refs: *std.ArrayListUnmanaged(ImageRef),
+    image_mode: MdxOptions.ImageMode,
+) !void {
+    // First, collect all text from runs into a single buffer with formatting
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+
+    for (p.runs) |run| {
+        if (run.image_rel_id) |rel_id| {
+            try writeImage(allocator, w, rel_id, doc, image_counter, image_refs, image_mode);
+            continue;
+        }
+        if (run.text.len == 0) continue;
+
+        const text = run.text;
+        // Apply formatting
+        if (run.bold and run.italic) {
+            try buf.appendSlice(allocator, "***");
+            try buf.appendSlice(allocator, text);
+            try buf.appendSlice(allocator, "***");
+        } else if (run.bold) {
+            try buf.appendSlice(allocator, "**");
+            try buf.appendSlice(allocator, text);
+            try buf.appendSlice(allocator, "**");
+        } else if (run.italic) {
+            try buf.appendSlice(allocator, "*");
+            try buf.appendSlice(allocator, text);
+            try buf.appendSlice(allocator, "*");
+        } else {
+            try buf.appendSlice(allocator, text);
+        }
+    }
+
+    // Strip all markdown formatting markers from the collected text.
+    // We'll re-apply bold to the entire list item text instead of inline.
+    // This avoids broken ** markers when bold spans across bullet boundaries.
+    var plain: std.ArrayList(u8) = .empty;
+    defer plain.deinit(allocator);
+    {
+        var i: usize = 0;
+        while (i < buf.items.len) {
+            if (i + 2 < buf.items.len and std.mem.eql(u8, buf.items[i .. i + 3], "***")) {
+                i += 3; // Skip ***
+            } else if (i + 1 < buf.items.len and std.mem.eql(u8, buf.items[i .. i + 2], "**")) {
+                i += 2; // Skip **
+            } else if (buf.items[i] == '*') {
+                i += 1; // Skip *
+            } else {
+                try plain.append(allocator, buf.items[i]);
+                i += 1;
+            }
+        }
+    }
+
+    // Split on • (UTF-8: E2 80 A2) and emit each segment as a list item
+    const bullet_char = "\xe2\x80\xa2";
+    var iter = std.mem.splitSequence(u8, plain.items, bullet_char);
+    var first = true;
+    while (iter.next()) |segment| {
+        const trimmed = std.mem.trim(u8, segment, " \t\r\n");
+        if (trimmed.len == 0) {
+            first = false;
+            continue;
+        }
+
+        if (first) {
+            // Text before the first bullet — emit as a normal paragraph
+            try w.print("{s}\n\n", .{trimmed});
+            first = false;
+        } else {
+            try w.print("- {s}\n", .{trimmed});
         }
     }
 }
