@@ -172,6 +172,10 @@ fn routeApiV1Authed(
 
         const is_stream = std.mem.indexOf(u8, body, "\"stream\":true") != null or
             std.mem.indexOf(u8, body, "\"stream\": true") != null;
+        std.debug.print("  /chat body_len={d} stream={} first80={s}\n", .{
+            body.len, is_stream,
+            if (body.len > 80) body[0..80] else body,
+        });
 
         if (is_stream) {
             stream.handleStreamWithBody(request, allocator, environ_map, io, store, auth, server_ledger, body);
