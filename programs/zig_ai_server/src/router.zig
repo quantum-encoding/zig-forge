@@ -346,13 +346,28 @@ fn handleAccountBalance(allocator: std.mem.Allocator, auth: *const types.AuthCon
 
 /// Extract model name from JSON body and resolve its route.
 /// Quick string scan — avoids full JSON parse just for routing.
+/// Handles JSON-escaped forward slashes (Swift encodes "/" as "\/").
 fn extractModelRoute(body: []const u8, allocator: std.mem.Allocator) models.Route {
     // Find "model":"<value>" in the JSON body
     const needle = "\"model\":\"";
     const start = (std.mem.indexOf(u8, body, needle) orelse return .unknown) + needle.len;
     const remaining = body[start..];
-    const end = std.mem.indexOfScalar(u8, remaining, '"') orelse return .unknown;
-    const model_name = remaining[0..end];
-    _ = allocator;
-    return models.getRoute(model_name);
+
+    // Find the closing quote (skip escaped quotes)
+    var end: usize = 0;
+    while (end < remaining.len) : (end += 1) {
+        if (remaining[end] == '"' and (end == 0 or remaining[end - 1] != '\\')) break;
+    }
+    if (end >= remaining.len) return .unknown;
+
+    const raw_model = remaining[0..end];
+
+    // Unescape \/ → / (Swift JSONEncoder escapes forward slashes)
+    if (std.mem.indexOf(u8, raw_model, "\\/") != null) {
+        const unescaped = std.mem.replaceOwned(u8, allocator, raw_model, "\\/", "/") catch return .unknown;
+        defer allocator.free(unescaped);
+        return models.getRoute(unescaped);
+    }
+
+    return models.getRoute(raw_model);
 }
