@@ -170,9 +170,11 @@ fn routeApiV1Authed(
             };
         };
 
-        if (std.mem.indexOf(u8, body, "\"stream\":true") != null or
-            std.mem.indexOf(u8, body, "\"stream\": true") != null)
-        {
+        const is_stream = std.mem.indexOf(u8, body, "\"stream\":true") != null or
+            std.mem.indexOf(u8, body, "\"stream\": true") != null;
+        std.debug.print("  /chat route: body_len={d} stream={}\n", .{ body.len, is_stream });
+
+        if (is_stream) {
             stream.handleStreamWithBody(request, allocator, environ_map, io, store, auth, server_ledger, body);
             allocator.free(body);
             return .{ .handled = true };
