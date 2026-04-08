@@ -391,7 +391,45 @@ pub const AnthropicClient = struct {
         return try self.allocator.dupe(u8, response.body);
     }
 
-    /// Send a streaming message — calls callback for each text chunk
+    /// SSE callback context — bridges raw SSE events to user's StreamCallback
+    const SseCtx = struct {
+        allocator: std.mem.Allocator,
+        user_callback: common.StreamCallback,
+        user_context: ?*anyopaque,
+    };
+
+    /// Raw SSE event handler — parses Claude JSON, extracts text deltas
+    fn sseEventHandler(event: HttpClient.SseEvent, raw_ctx: ?*anyopaque) bool {
+        const ctx: *SseCtx = @alignCast(@ptrCast(raw_ctx orelse return false));
+        if (event.done) return false;
+
+        // Parse JSON from SSE data line
+        const parsed = std.json.parseFromSlice(
+            std.json.Value,
+            ctx.allocator,
+            event.data,
+            .{},
+        ) catch return true; // Skip unparseable events
+        defer parsed.deinit();
+
+        const obj = parsed.value.object;
+        const event_type = obj.get("type") orelse return true;
+        if (event_type != .string) return true;
+
+        if (std.mem.eql(u8, event_type.string, "content_block_delta")) {
+            const delta = obj.get("delta") orelse return true;
+            if (delta != .object) return true;
+            const text = delta.object.get("text") orelse return true;
+            if (text != .string) return true;
+
+            return ctx.user_callback(text.string, ctx.user_context);
+        }
+
+        return true; // Continue for non-delta events
+    }
+
+    /// Send a streaming message — true incremental SSE, first token in milliseconds.
+    /// Request stays on the stack (TLS pointers valid). Calls callback per text chunk.
     pub fn sendMessageStreaming(
         self: *AnthropicClient,
         prompt: []const u8,
@@ -399,11 +437,9 @@ pub const AnthropicClient = struct {
         callback: common.StreamCallback,
         context: ?*anyopaque,
     ) !void {
-        // Build messages with just the prompt
         const escaped = try common.escapeJsonString(self.allocator, prompt);
         defer self.allocator.free(escaped);
 
-        // Build payload with stream: true
         var payload: std.ArrayList(u8) = .empty;
         defer payload.deinit(self.allocator);
 
@@ -429,7 +465,6 @@ pub const AnthropicClient = struct {
         defer self.allocator.free(msg_part);
         try payload.appendSlice(self.allocator, msg_part);
 
-        // Make streaming request
         const endpoint = try std.fmt.allocPrint(self.allocator, "{s}/v1/messages", .{self.base_url});
         defer self.allocator.free(endpoint);
 
@@ -440,40 +475,23 @@ pub const AnthropicClient = struct {
             .{ .name = "User-Agent", .value = "zig-http-sentinel/1.0" },
         };
 
-        var stream = try self.http_client.postStreaming(endpoint, &headers, payload.items);
-        defer stream.deinit();
+        // True incremental streaming — Request stays on stack, TLS pointers valid
+        var sse_ctx = SseCtx{
+            .allocator = self.allocator,
+            .user_callback = callback,
+            .user_context = context,
+        };
 
-        if (@intFromEnum(stream.status) >= 400) {
+        const status = try self.http_client.postSseStream(
+            endpoint,
+            &headers,
+            payload.items,
+            sseEventHandler,
+            &sse_ctx,
+        );
+
+        if (@intFromEnum(status) >= 400) {
             return common.AIError.ApiRequestFailed;
-        }
-
-        // Parse SSE events — Claude format:
-        // data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}
-        while (stream.next()) |event| {
-            if (event.done) break;
-
-            // Parse the JSON to extract text delta
-            const parsed = std.json.parseFromSlice(
-                std.json.Value,
-                self.allocator,
-                event.data,
-                .{},
-            ) catch continue;
-            defer parsed.deinit();
-
-            const obj = parsed.value.object;
-            const event_type = obj.get("type") orelse continue;
-            if (event_type != .string) continue;
-
-            if (std.mem.eql(u8, event_type.string, "content_block_delta")) {
-                const delta = obj.get("delta") orelse continue;
-                if (delta != .object) continue;
-                const text = delta.object.get("text") orelse continue;
-                if (text != .string) continue;
-
-                // Call user callback with the text chunk
-                if (!callback(text.string, context)) break;
-            }
         }
     }
 

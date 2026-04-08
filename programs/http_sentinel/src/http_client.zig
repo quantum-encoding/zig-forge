@@ -144,9 +144,11 @@ pub const HttpClient = struct {
         done: bool,
     };
 
+    /// Callback for streaming SSE events. Return true to continue, false to stop.
+    pub const SseCallback = *const fn (event: SseEvent, ctx: ?*anyopaque) bool;
+
     /// Streaming response — reads full body then parses SSE events from it.
-    /// Phase 1: blocking read + SSE parse (correct contract, blocking internally)
-    /// Phase 2: TODO — true incremental read with takeDelimiterExclusive
+    /// Used by postStreaming (Phase 1 blocking approach).
     pub const StreamingResponse = struct {
         status: http.Status,
         allocator: std.mem.Allocator,
@@ -180,7 +182,6 @@ pub const HttpClient = struct {
 
                     return SseEvent{ .data = payload, .done = false };
                 }
-                // Skip event:, id:, retry:, comments
             }
             return null;
         }
@@ -191,16 +192,14 @@ pub const HttpClient = struct {
         }
     };
 
-    /// Perform a POST request and return a streaming SSE reader.
-    /// Reads the full response body via post(), then parses SSE events from it.
-    /// Caller MUST call response.deinit() when done.
+    /// Perform a POST and return a buffered StreamingResponse (Phase 1: blocking).
+    /// Reads full body via post(), then parses SSE events from buffer.
     pub fn postStreaming(
         self: *HttpClient,
         url: []const u8,
         headers: []const http.Header,
         body: []const u8,
     ) !*StreamingResponse {
-        // Use the proven post() method which correctly handles TLS + chunked decoding
         var http_response = try self.postWithOptions(url, headers, body, .{
             .max_body_size = 10 * 1024 * 1024,
         });
@@ -212,11 +211,73 @@ pub const HttpClient = struct {
             .body = http_response.body,
             .pos = 0,
         };
-        // Transfer body ownership — don't let http_response free it
         http_response.body = try self.allocator.alloc(u8, 0);
         http_response.deinit();
 
         return stream;
+    }
+
+    /// TRUE incremental SSE streaming — reads line-by-line from TLS connection.
+    /// Request stays on the stack (no copy = no broken TLS pointers).
+    /// Calls `callback` for each SSE data event as it arrives from the server.
+    /// Returns the HTTP status code.
+    pub fn postSseStream(
+        self: *HttpClient,
+        url: []const u8,
+        headers: []const http.Header,
+        body: []const u8,
+        callback: SseCallback,
+        ctx: ?*anyopaque,
+    ) !http.Status {
+        try validateHeaders(headers);
+        const uri = try std.Uri.parse(url);
+
+        // Request lives on THIS stack frame — TLS pointers stay valid
+        var req = try self.client.request(.POST, uri, .{
+            .extra_headers = headers,
+        });
+        defer req.deinit();
+
+        req.transfer_encoding = .{ .content_length = body.len };
+        var body_writer = try req.sendBodyUnflushed(&.{});
+        try body_writer.writer.writeAll(body);
+        try body_writer.end();
+        try req.connection.?.flush();
+
+        var response = try req.receiveHead(&.{});
+        const status = response.head.status;
+
+        if (@intFromEnum(status) >= 400) {
+            return status;
+        }
+
+        // Reader setup — transfer_buffer is also on this stack frame
+        var transfer_buffer: [16384]u8 = undefined;
+        const reader = response.reader(&transfer_buffer);
+
+        // Read SSE events line-by-line using takeDelimiter
+        // This blocks on the TLS connection waiting for each chunk — true streaming
+        while (true) {
+            const line = reader.takeDelimiter('\n') catch break;
+            if (line == null) break; // EOF
+            const raw_line = line.?;
+
+            const trimmed = std.mem.trimEnd(u8, raw_line, "\r\n");
+            if (trimmed.len == 0) continue;
+
+            if (std.mem.startsWith(u8, trimmed, "data:")) {
+                var payload = trimmed["data:".len..];
+                if (payload.len > 0 and payload[0] == ' ') payload = payload[1..];
+
+                const done = std.mem.eql(u8, payload, "[DONE]");
+                const event = SseEvent{ .data = payload, .done = done };
+
+                if (!callback(event, ctx)) break;
+                if (done) break;
+            }
+        }
+
+        return status;
     }
 
     /// Perform a POST request

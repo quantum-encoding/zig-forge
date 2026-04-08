@@ -206,6 +206,37 @@ const TestServer = struct {
                 }) catch break;
             } else if (std.mem.eql(u8, target, "/health")) {
                 request.respond("ok", .{ .status = .ok }) catch break;
+            } else if (std.mem.eql(u8, target, "/sse")) {
+                // SSE endpoint — sends 5 events with small delays between them
+                var stream_buf: [4096]u8 = undefined;
+                var body_w = request.respondStreaming(&stream_buf, .{
+                    .respond_options = .{
+                        .status = .ok,
+                        .extra_headers = &.{
+                            .{ .name = "content-type", .value = "text/event-stream" },
+                            .{ .name = "cache-control", .value = "no-cache" },
+                        },
+                        .keep_alive = false,
+                    },
+                }) catch break;
+
+                // Send 5 content events with 10ms delay between each
+                var i: u32 = 0;
+                while (i < 5) : (i += 1) {
+                    const event = std.fmt.allocPrint(ctx.server.allocator,
+                        "event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"delta\":{{\"type\":\"text_delta\",\"text\":\"chunk{d}\"}}}}\n\n",
+                        .{i},
+                    ) catch break;
+                    defer ctx.server.allocator.free(event);
+                    body_w.writer.writeAll(event) catch break;
+                    body_w.writer.flush() catch break;
+                    io.sleep(std.Io.Duration.fromMilliseconds(10), .awake) catch {};
+                }
+
+                // Send done
+                body_w.writer.writeAll("data: [DONE]\n\n") catch {};
+                body_w.writer.flush() catch {};
+                body_w.end() catch {};
             } else {
                 request.respond("not found", .{ .status = .not_found }) catch break;
             }
@@ -900,6 +931,68 @@ pub fn main(init: std.process.Init) !void {
         const r = try benchMixedWorkload(allocator, base_url, 16);
         r.print();
         try results.append(allocator, r);
+    }
+
+    // ── 9. SSE incremental streaming test ──
+    {
+        std.debug.print(
+            \\
+            \\  SSE incremental streaming (postSseStream)
+            \\  ──────────────────────────────────────
+        , .{});
+
+        var client = try HttpClient.init(allocator);
+        defer client.deinit();
+
+        const sse_url = try std.fmt.allocPrint(allocator, "{s}/sse", .{base_url});
+        defer allocator.free(sse_url);
+
+        const SseTestCtx = struct {
+            events_received: u32 = 0,
+            first_event_ns: u64 = 0,
+            last_event_ns: u64 = 0,
+            io: std.Io,
+
+            fn handler(event: HttpClient.SseEvent, raw_ctx: ?*anyopaque) bool {
+                const ctx: *@This() = @alignCast(@ptrCast(raw_ctx orelse return false));
+                if (event.done) return false;
+                ctx.events_received += 1;
+                const now = Stopwatch.begin(ctx.io).elapsedNs();
+                if (ctx.events_received == 1) ctx.first_event_ns = now;
+                ctx.last_event_ns = now;
+                return true;
+            }
+        };
+
+        var sse_ctx = SseTestCtx{ .io = client.io() };
+        const sse_sw = Stopwatch.begin(client.io());
+
+        const status = client.postSseStream(
+            sse_url,
+            &.{ .{ .name = "content-type", .value = "application/json" } },
+            "{}",
+            SseTestCtx.handler,
+            &sse_ctx,
+        ) catch |err| blk: {
+            std.debug.print("  ERROR: {s}\n", .{@errorName(err)});
+            break :blk @as(std.http.Status, .internal_server_error);
+        };
+
+        const total_ms = sse_sw.elapsedMs();
+
+        std.debug.print(
+            \\
+            \\  Status:       {d}
+            \\  Events:       {d}
+            \\  Duration:     {d:.1}ms
+            \\  Result:       {s}
+            \\
+        , .{
+            @intFromEnum(status),
+            sse_ctx.events_received,
+            total_ms,
+            if (sse_ctx.events_received >= 4) "PASS — incremental SSE working" else "NEEDS WORK",
+        });
     }
 
     // ── Summary ──
