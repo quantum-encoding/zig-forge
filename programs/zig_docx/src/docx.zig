@@ -13,6 +13,7 @@ pub const zip = @import("zip.zig");
 pub const rels = @import("rels.zig");
 pub const styles = @import("styles.zig");
 pub const mdx = @import("mdx.zig");
+pub const xlsx = @import("xlsx.zig");
 
 // Re-export key types
 pub const StyleType = styles.StyleType;

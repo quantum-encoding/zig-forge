@@ -60,7 +60,58 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    // Parse document
+    // Detect XLSX files and route to spreadsheet parser
+    const is_xlsx = std.mem.endsWith(u8, parsed.file_path, ".xlsx") or
+        std.mem.endsWith(u8, parsed.file_path, ".XLSX");
+
+    if (is_xlsx) {
+        var workbook = docx.xlsx.parseXlsx(allocator, &archive) catch |err| {
+            std.debug.print("Error parsing XLSX: {}\n", .{err});
+            return;
+        };
+        defer workbook.deinit();
+
+        if (parsed.info_only) {
+            std.debug.print("Workbook: {d} sheet(s)\n", .{workbook.sheets.len});
+            for (workbook.sheets, 0..) |sheet, i| {
+                std.debug.print("  Sheet {d}: \"{s}\" ({d} cells, {d} cols × {d} rows)\n", .{
+                    i + 1, sheet.name, sheet.cells.len, sheet.max_col + 1, sheet.max_row,
+                });
+            }
+            return;
+        }
+
+        // Output each sheet
+        for (workbook.sheets, 0..) |*sheet, i| {
+            if (workbook.sheets.len > 1) {
+                const header = std.fmt.allocPrint(allocator, "# {s}\n\n", .{sheet.name}) catch continue;
+                defer allocator.free(header);
+                writeToStdout(header);
+            }
+
+            // Default: CSV output. Use --markdown for markdown table format.
+            const output = if (parsed.markdown_mode)
+                docx.xlsx.sheetToMarkdown(allocator, sheet) catch continue
+            else
+                docx.xlsx.sheetToCsv(allocator, sheet) catch continue;
+            defer allocator.free(output);
+
+            if (parsed.output_path) |path| {
+                if (workbook.sheets.len > 1) {
+                    const sheet_path = std.fmt.allocPrint(allocator, "{s}_sheet{d}.csv", .{ path, i + 1 }) catch continue;
+                    defer allocator.free(sheet_path);
+                    writeToFile(allocator, sheet_path, output);
+                } else {
+                    writeToFile(allocator, path, output);
+                }
+            } else {
+                writeToStdout(output);
+            }
+        }
+        return;
+    }
+
+    // Parse DOCX document
     var doc = docx.parseDocument(allocator, &archive) catch |err| {
         std.debug.print("Error parsing DOCX: {}\n", .{err});
         return;
@@ -95,14 +146,11 @@ pub fn main(init: std.process.Init) !void {
 
     if (parsed.output_path) |path| {
         if (has_images) {
-            // Create output folder with MDX + images/
             writeOutputFolder(allocator, path, result.mdx, result.images, &doc);
         } else {
-            // No images — write MDX directly to file
             writeToFile(allocator, path, result.mdx);
         }
     } else {
-        // stdout — just write MDX (images go to stderr as warnings)
         if (has_images) {
             std.debug.print("Note: {d} image(s) found. Use -o <path> to extract them.\n", .{result.images.len});
         }
@@ -245,6 +293,7 @@ const Args = struct {
     list_only: bool = false,
     info_only: bool = false,
     folder_mode: bool = false,
+    markdown_mode: bool = false,
 };
 
 fn parseArgs(args: []const []const u8) ?Args {
@@ -261,6 +310,8 @@ fn parseArgs(args: []const []const u8) ?Args {
             result.list_only = true;
         } else if (std.mem.eql(u8, arg, "--info") or std.mem.eql(u8, arg, "-i")) {
             result.info_only = true;
+        } else if (std.mem.eql(u8, arg, "--markdown") or std.mem.eql(u8, arg, "--md") or std.mem.eql(u8, arg, "-m")) {
+            result.markdown_mode = true;
         } else if (std.mem.eql(u8, arg, "--title")) {
             i += 1;
             if (i >= args.len) {
