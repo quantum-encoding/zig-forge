@@ -40,7 +40,43 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    // Open DOCX file
+    // Detect PDF files — extract text, optionally chunk
+    const is_pdf = std.mem.endsWith(u8, parsed.file_path, ".pdf") or
+        std.mem.endsWith(u8, parsed.file_path, ".PDF");
+
+    if (is_pdf) {
+        var pdf_result = docx.pdf.extractPdf(allocator, parsed.file_path) catch |err| {
+            std.debug.print("Error extracting PDF: {}\n", .{err});
+            std.debug.print("  Requires 'pdftotext' (poppler) or 'mutool' (mupdf) on PATH\n", .{});
+            return;
+        };
+        defer pdf_result.deinit();
+
+        if (parsed.info_only) {
+            std.debug.print("PDF: {s}\n  Pages: {d}\n  Text: {d} bytes\n  Method: {s}\n", .{
+                parsed.file_path, pdf_result.page_count, pdf_result.text.len, pdf_result.method,
+            });
+            return;
+        }
+
+        // Convert to markdown
+        const md = docx.pdf.textToMarkdown(allocator, pdf_result.text) catch |err| {
+            std.debug.print("Error converting to markdown: {}\n", .{err});
+            return;
+        };
+        defer allocator.free(md);
+
+        if (parsed.chunk_mode) {
+            processChunking(allocator, md, parsed);
+        } else if (parsed.output_path) |path| {
+            writeToFile(allocator, path, md);
+        } else {
+            writeToStdout(md);
+        }
+        return;
+    }
+
+    // Open DOCX/XLSX file
     var archive = docx.zip.ZipArchive.open(allocator, parsed.file_path) catch |err| {
         std.debug.print("Error opening '{s}': {}\n", .{ parsed.file_path, err });
         return;
@@ -257,6 +293,61 @@ fn mkdirZ(allocator: std.mem.Allocator, path: []const u8) void {
     _ = mkdir(path_z.ptr, 0o755);
 }
 
+fn processChunking(allocator: std.mem.Allocator, markdown: []const u8, parsed: Args) void {
+    const source = std.fs.path.basename(parsed.file_path);
+    var result = docx.chunker.chunkDocument(allocator, markdown, source, .{}) catch |err| {
+        std.debug.print("Error chunking: {}\n", .{err});
+        return;
+    };
+    defer result.deinit();
+
+    std.debug.print("Chunked '{s}': {d} chunks, {d} total words\n", .{
+        source, result.chunks.len, result.total_words,
+    });
+
+    if (parsed.output_path) |out_dir| {
+        // Create output directory with chunk files
+        // Create output directory
+        {
+            const dir_z = allocator.allocSentinel(u8, out_dir.len, 0) catch return;
+            defer allocator.free(dir_z);
+            @memcpy(dir_z, out_dir);
+            _ = mkdir(dir_z.ptr, 0o755);
+        }
+
+        // Write index.md
+        const index = result.generateIndex(allocator) catch return;
+        defer allocator.free(index);
+        const index_path = std.fmt.allocPrint(allocator, "{s}/index.md", .{out_dir}) catch return;
+        defer allocator.free(index_path);
+        writeToFile(allocator, index_path, index);
+
+        // Write each chunk
+        for (result.chunks, 0..) |chunk, i| {
+            const chunk_md = result.generateChunkMd(allocator, i) catch continue;
+            defer allocator.free(chunk_md);
+            const fname = docx.chunker.chunkFilename(allocator, chunk.index, chunk.title) catch continue;
+            defer allocator.free(fname);
+            const chunk_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ out_dir, fname }) catch continue;
+            defer allocator.free(chunk_path);
+            writeToFile(allocator, chunk_path, chunk_md);
+        }
+
+        std.debug.print("  Written to: {s}/\n", .{out_dir});
+    } else {
+        // Stdout: write index then all chunks
+        const index = result.generateIndex(allocator) catch return;
+        defer allocator.free(index);
+        writeToStdout(index);
+
+        for (result.chunks, 0..) |_, i| {
+            const chunk_md = result.generateChunkMd(allocator, i) catch continue;
+            defer allocator.free(chunk_md);
+            writeToStdout(chunk_md);
+        }
+    }
+}
+
 fn writeToFile(allocator: std.mem.Allocator, path: []const u8, data: []const u8) void {
     const path_z = allocator.allocSentinel(u8, path.len, 0) catch {
         std.debug.print("Error: out of memory\n", .{});
@@ -294,6 +385,7 @@ const Args = struct {
     info_only: bool = false,
     folder_mode: bool = false,
     markdown_mode: bool = false,
+    chunk_mode: bool = false,
 };
 
 fn parseArgs(args: []const []const u8) ?Args {
@@ -312,6 +404,8 @@ fn parseArgs(args: []const []const u8) ?Args {
             result.info_only = true;
         } else if (std.mem.eql(u8, arg, "--markdown") or std.mem.eql(u8, arg, "--md") or std.mem.eql(u8, arg, "-m")) {
             result.markdown_mode = true;
+        } else if (std.mem.eql(u8, arg, "--chunk") or std.mem.eql(u8, arg, "-c")) {
+            result.chunk_mode = true;
         } else if (std.mem.eql(u8, arg, "--title")) {
             i += 1;
             if (i >= args.len) {
