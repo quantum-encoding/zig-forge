@@ -42,9 +42,14 @@ pub fn saveAccount(ctx: *gcp.GcpContext, account: types.Account) !void {
     const body = try buildAccountDocument(ctx.allocator, account);
     defer ctx.allocator.free(body);
 
-    var resp = ctx.patch(url, body) catch |err| {
-        std.debug.print("  Firestore saveAccount FAILED: {s} (account={s})\n", .{ @errorName(err), account.id.slice() });
-        return err;
+    // Retry once on connection errors (stale pool connections after GET)
+    var resp = ctx.patch(url, body) catch {
+        var retry_resp = ctx.patch(url, body) catch |err| {
+            std.debug.print("  Firestore saveAccount FAILED: {s} (account={s})\n", .{ @errorName(err), account.id.slice() });
+            return err;
+        };
+        retry_resp.deinit();
+        return;
     };
     defer resp.deinit();
 
@@ -102,9 +107,14 @@ pub fn saveKey(ctx: *gcp.GcpContext, key: types.ApiKey) !void {
     const body = try buildKeyDocument(ctx.allocator, key);
     defer ctx.allocator.free(body);
 
-    var resp = ctx.patch(url, body) catch |err| {
-        std.debug.print("  Firestore saveKey FAILED: {s}\n", .{@errorName(err)});
-        return err;
+    // Retry once on connection errors (stale pool connections)
+    var resp = ctx.patch(url, body) catch {
+        var retry_resp = ctx.patch(url, body) catch |err| {
+            std.debug.print("  Firestore saveKey FAILED: {s}\n", .{@errorName(err)});
+            return err;
+        };
+        retry_resp.deinit();
+        return;
     };
     defer resp.deinit();
 
