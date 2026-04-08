@@ -45,7 +45,19 @@ echo "║  zig-ai-server deploy               ║"
 echo "╚══════════════════════════════════════╝"
 echo ""
 
-# 0. Local build check (fast, catches errors before cloud build).
+# 0. GCP auth check — refresh tokens before anything touches gcloud
+echo "→ Checking GCP auth..."
+if ! qai token --check >/dev/null 2>&1; then
+  echo "  Token expired, refreshing..."
+  if ! qai token >/dev/null 2>&1; then
+    echo "✗ GCP auth failed. Run: gcloud auth login"
+    exit 1
+  fi
+fi
+echo "✓ GCP auth OK"
+
+# 1. Local build check (fast, catches errors before cloud build).
+echo ""
 echo "→ Local build check..."
 cd "${REPO_ROOT}/programs/zig_ai_server"
 if ! zig build 2>&1; then
