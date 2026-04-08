@@ -163,6 +163,26 @@ pub const AIClient = struct {
         };
     }
 
+    /// Stream a message with full conversation history — calls callback per token chunk
+    pub fn sendMessageStreamingWithContext(
+        self: *AIClient,
+        prompt: []const u8,
+        chat_context: []const AIMessage,
+        config: RequestConfig,
+        callback: common.StreamCallback,
+        cb_context: ?*anyopaque,
+    ) !void {
+        return switch (self.provider) {
+            .claude => self.claude.?.client.sendMessageStreamingWithContext(prompt, chat_context, config, callback, cb_context),
+            // Other providers: fall back to single-prompt streaming for now
+            .deepseek => self.deepseek.?.client.sendMessageStreaming(prompt, config, callback, cb_context),
+            .gemini => self.gemini.?.sendMessageStreaming(prompt, config, callback, cb_context),
+            .grok => self.grok.?.sendMessageStreaming(prompt, config, callback, cb_context),
+            .openai => self.openai.?.sendMessageStreaming(prompt, config, callback, cb_context),
+            .vertex => return error.ProviderUnavailable,
+        };
+    }
+
     /// Send a message with conversation context
     pub fn sendMessageWithContext(
         self: *AIClient,

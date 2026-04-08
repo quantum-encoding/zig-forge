@@ -251,10 +251,6 @@ pub const HttpClient = struct {
             return status;
         }
 
-        // Don't reuse this connection — SSE streams leave partial data in buffers.
-        // Without this, the next request on this connection reads stale SSE events.
-        response.head.keep_alive = false;
-
         // Reader setup — transfer_buffer is also on this stack frame
         var transfer_buffer: [16384]u8 = undefined;
         const reader = response.reader(&transfer_buffer);
@@ -272,7 +268,6 @@ pub const HttpClient = struct {
             if (std.mem.startsWith(u8, trimmed, "data:")) {
                 var payload = trimmed["data:".len..];
                 if (payload.len > 0 and payload[0] == ' ') payload = payload[1..];
-                // Trim trailing whitespace — Anthropic pads SSE data lines with spaces
                 payload = std.mem.trimEnd(u8, payload, " \t");
 
                 const done = std.mem.eql(u8, payload, "[DONE]");
@@ -282,6 +277,10 @@ pub const HttpClient = struct {
                 if (done) break;
             }
         }
+
+        // Drain remaining bytes so the connection can be cleanly closed or reused.
+        // SSE streams often have trailing chunk boundaries after [DONE].
+        _ = reader.discardRemaining() catch {};
 
         return status;
     }

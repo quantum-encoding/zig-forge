@@ -428,42 +428,74 @@ pub const AnthropicClient = struct {
         return true; // Continue for non-delta events
     }
 
-    /// Send a streaming message — true incremental SSE, first token in milliseconds.
-    /// Request stays on the stack (TLS pointers valid). Calls callback per text chunk.
+    /// Send a streaming message (single prompt, no history).
+    /// For multi-turn conversations, use sendMessageStreamingWithContext.
     pub fn sendMessageStreaming(
         self: *AnthropicClient,
         prompt: []const u8,
         config: common.RequestConfig,
         callback: common.StreamCallback,
-        context: ?*anyopaque,
+        cb_context: ?*anyopaque,
     ) !void {
-        const escaped = try common.escapeJsonString(self.allocator, prompt);
-        defer self.allocator.free(escaped);
+        return self.sendMessageStreamingWithContext(prompt, &[_]common.AIMessage{}, config, callback, cb_context);
+    }
 
-        var payload: std.ArrayList(u8) = .empty;
-        defer payload.deinit(self.allocator);
+    /// Send a streaming message with full conversation history.
+    /// True incremental SSE — first token in milliseconds.
+    /// Request stays on the stack (TLS pointers valid).
+    pub fn sendMessageStreamingWithContext(
+        self: *AnthropicClient,
+        prompt: []const u8,
+        context: []const common.AIMessage,
+        config: common.RequestConfig,
+        callback: common.StreamCallback,
+        cb_context: ?*anyopaque,
+    ) !void {
+        // Build messages array from context + prompt (reuses existing logic)
+        var messages: std.ArrayList(std.json.Value) = .empty;
+        defer messages.deinit(self.allocator);
 
-        const model_part = try std.fmt.allocPrint(self.allocator,
-            \\{{"model":"{s}","max_tokens":{d},"stream":true,
-        , .{ config.model, config.max_tokens });
-        defer self.allocator.free(model_part);
-        try payload.appendSlice(self.allocator, model_part);
-
-        if (config.system_prompt) |system| {
-            const sys_escaped = try common.escapeJsonString(self.allocator, system);
-            defer self.allocator.free(sys_escaped);
-            const sys_part = try std.fmt.allocPrint(self.allocator,
-                \\"system":"{s}",
-            , .{sys_escaped});
-            defer self.allocator.free(sys_part);
-            try payload.appendSlice(self.allocator, sys_part);
+        var parsed_objects: std.ArrayList(std.json.Parsed(std.json.Value)) = .empty;
+        defer {
+            for (parsed_objects.items) |*parsed| parsed.deinit();
+            parsed_objects.deinit(self.allocator);
         }
 
-        const msg_part = try std.fmt.allocPrint(self.allocator,
-            \\"messages":[{{"role":"user","content":"{s}"}}]}}
-        , .{escaped});
-        defer self.allocator.free(msg_part);
-        try payload.appendSlice(self.allocator, msg_part);
+        // Add conversation history
+        for (context) |msg| {
+            const parsed = try self.buildMessageJson(msg);
+            try parsed_objects.append(self.allocator, parsed);
+            try messages.append(self.allocator, parsed.value);
+        }
+
+        // Add current prompt
+        if (prompt.len > 0) {
+            const escaped = try common.escapeJsonString(self.allocator, prompt);
+            defer self.allocator.free(escaped);
+            const prompt_json = try std.fmt.allocPrint(self.allocator,
+                \\{{"role":"user","content":"{s}"}}
+            , .{escaped});
+            defer self.allocator.free(prompt_json);
+
+            const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, prompt_json, .{});
+            try parsed_objects.append(self.allocator, parsed);
+            try messages.append(self.allocator, parsed.value);
+        }
+
+        // Build payload using existing method (handles model, max_tokens, system, tools, messages)
+        var base_payload = try self.buildRequestPayload(messages.items, config);
+        defer self.allocator.free(base_payload);
+
+        // Inject "stream":true into the payload (before the closing })
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(self.allocator);
+        // Remove trailing }
+        if (base_payload.len > 0 and base_payload[base_payload.len - 1] == '}') {
+            try payload.appendSlice(self.allocator, base_payload[0 .. base_payload.len - 1]);
+            try payload.appendSlice(self.allocator, ",\"stream\":true}");
+        } else {
+            try payload.appendSlice(self.allocator, base_payload);
+        }
 
         const endpoint = try std.fmt.allocPrint(self.allocator, "{s}/v1/messages", .{self.base_url});
         defer self.allocator.free(endpoint);
@@ -475,11 +507,10 @@ pub const AnthropicClient = struct {
             .{ .name = "User-Agent", .value = "zig-http-sentinel/1.0" },
         };
 
-        // True incremental streaming — Request stays on stack, TLS pointers valid
         var sse_ctx = SseCtx{
             .allocator = self.allocator,
             .user_callback = callback,
-            .user_context = context,
+            .user_context = cb_context,
         };
 
         const status = try self.http_client.postSseStream(
