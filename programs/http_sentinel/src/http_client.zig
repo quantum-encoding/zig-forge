@@ -251,6 +251,10 @@ pub const HttpClient = struct {
             return status;
         }
 
+        // Don't reuse this connection — SSE streams leave partial data in buffers.
+        // Without this, the next request on this connection reads stale SSE events.
+        response.head.keep_alive = false;
+
         // Reader setup — transfer_buffer is also on this stack frame
         var transfer_buffer: [16384]u8 = undefined;
         const reader = response.reader(&transfer_buffer);
