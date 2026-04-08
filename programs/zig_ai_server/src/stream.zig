@@ -157,13 +157,37 @@ fn handleStreamCore(
         config.system_prompt = sp;
     }
 
-    // Extract prompt
+    // Build conversation context — pass full message history to the provider.
+    // Extract last user message as the prompt, everything else as context.
     var prompt: []const u8 = "";
-    for (chat_req.messages) |msg| {
-        if (std.mem.eql(u8, msg.role, "user")) {
-            prompt = msg.content orelse "";
+    var context_messages: std.ArrayListUnmanaged(hs.ai.AIMessage) = .empty;
+    defer {
+        for (context_messages.items) |*msg| msg.deinit();
+        context_messages.deinit(allocator);
+    }
+
+    for (chat_req.messages, 0..) |msg, i| {
+        const content = msg.content orelse "";
+        if (i == chat_req.messages.len - 1 and std.mem.eql(u8, msg.role, "user")) {
+            prompt = content;
+        } else {
+            const role = if (std.mem.eql(u8, msg.role, "assistant"))
+                hs.ai.common.MessageRole.assistant
+            else if (std.mem.eql(u8, msg.role, "system"))
+                hs.ai.common.MessageRole.system
+            else
+                hs.ai.common.MessageRole.user;
+
+            context_messages.append(allocator, .{
+                .id = allocator.dupe(u8, "") catch continue,
+                .role = role,
+                .content = allocator.dupe(u8, content) catch continue,
+                .timestamp = 0,
+                .allocator = allocator,
+            }) catch continue;
         }
     }
+
     if (prompt.len == 0) {
         sendSseError(request, "no user message found");
         return;
@@ -209,7 +233,7 @@ fn handleStreamCore(
         .errored = false,
     };
 
-    client.sendMessageStreaming(prompt, config, streamCallback, &stream_ctx) catch |err| {
+    client.sendMessageStreamingWithContext(prompt, context_messages.items, config, streamCallback, &stream_ctx) catch |err| {
         if (reservation_id) |rid| if (store) |s| if (io) |io_handle| billing.rollback(s, io_handle, rid);
         const err_event = std.fmt.allocPrint(allocator,
             "data: {{\"type\":\"error\",\"message\":\"{s}\"}}\n\n", .{@errorName(err)},
