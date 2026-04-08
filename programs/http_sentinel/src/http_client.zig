@@ -262,12 +262,14 @@ pub const HttpClient = struct {
             if (line == null) break; // EOF
             const raw_line = line.?;
 
-            const trimmed = std.mem.trimEnd(u8, raw_line, "\r\n");
+            const trimmed = std.mem.trimEnd(u8, raw_line, "\r\n \t");
             if (trimmed.len == 0) continue;
 
             if (std.mem.startsWith(u8, trimmed, "data:")) {
                 var payload = trimmed["data:".len..];
                 if (payload.len > 0 and payload[0] == ' ') payload = payload[1..];
+                // Trim trailing whitespace — Anthropic pads SSE data lines with spaces
+                payload = std.mem.trimEnd(u8, payload, " \t");
 
                 const done = std.mem.eql(u8, payload, "[DONE]");
                 const event = SseEvent{ .data = payload, .done = done };
