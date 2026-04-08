@@ -210,6 +210,11 @@ pub fn main(init: std.process.Init) !void {
     bq_audit.waitPending();
     store.snapshot(boot_io) catch {};
     std.debug.print("  Shutdown complete.\n", .{});
+
+    // Exit immediately — skip defer cleanup which panics due to Zig 0.16
+    // I/O subsystem teardown issues (integer overflow in Threaded.deinit).
+    // All state is already flushed to Firestore + WAL.
+    std.process.exit(0);
 }
 
 fn serve(allocator: std.mem.Allocator, config: *const Config, environ_map: *const std.process.Environ.Map) !void {

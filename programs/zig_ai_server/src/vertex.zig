@@ -912,7 +912,40 @@ fn callGenai(allocator: std.mem.Allocator, req: VertexChatRequest, max_tokens: u
 // POST /qai/v1/vertex/chat/stream
 // Same routing as blocking, but uses streaming endpoints + SSE output.
 
+/// Vertex streaming with pre-read body (called from router when stream:true + vertex model).
+pub fn handleStreamWithBody(
+    request: *http.Server.Request,
+    allocator: std.mem.Allocator,
+    gcp_ctx: ?*gcp.GcpContext,
+    store: ?*store_mod.Store,
+    auth: ?*const types.AuthContext,
+    io: ?std.Io,
+    ledger: ?*ledger_mod.Ledger,
+    environ_map: *const std.process.Environ.Map,
+    body: []const u8,
+) void {
+    return handleStreamCore(request, allocator, gcp_ctx, store, auth, io, ledger, environ_map, body);
+}
+
 pub fn handleStream(
+    request: *http.Server.Request,
+    allocator: std.mem.Allocator,
+    gcp_ctx: ?*gcp.GcpContext,
+    store: ?*store_mod.Store,
+    auth: ?*const types.AuthContext,
+    io: ?std.Io,
+    ledger: ?*ledger_mod.Ledger,
+    environ_map: *const std.process.Environ.Map,
+) void {
+    const body = json_util.readBody(request, allocator, security.Limits.max_chat_body) catch {
+        sendSseError(request, "invalid request body");
+        return;
+    };
+    defer allocator.free(body);
+    return handleStreamCore(request, allocator, gcp_ctx, store, auth, io, ledger, environ_map, body);
+}
+
+fn handleStreamCore(
     request: *http.Server.Request,
     allocator: std.mem.Allocator,
     gcp_ctx: ?*gcp.GcpContext,
@@ -921,19 +954,14 @@ pub fn handleStream(
     io: ?std.Io,
     _ledger: ?*ledger_mod.Ledger,
     environ_map: *const std.process.Environ.Map,
+    body: []const u8,
 ) void {
-    _ = _ledger; // Ledger recorded in billing.commit
+    _ = _ledger;
     const ctx = gcp_ctx orelse {
         sendSseError(request, "GCP auth not available");
         return;
     };
 
-    // Parse request
-    const body = json_util.readBody(request, allocator, security.Limits.max_chat_body) catch {
-        sendSseError(request, "invalid request body");
-        return;
-    };
-    defer allocator.free(body);
     if (body.len == 0) { sendSseError(request, "empty body"); return; }
 
     const parsed = std.json.parseFromSlice(VertexChatRequest, allocator, body, .{

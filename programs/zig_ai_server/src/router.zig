@@ -178,7 +178,7 @@ fn routeApiV1Authed(
             const model_route = extractModelRoute(body, allocator);
             switch (model_route) {
                 .vertex_maas, .vertex_native, .vertex_dedicated => {
-                    vertex.handleStream(request, allocator, server_gcp, store, auth, io, server_ledger, environ_map);
+                    vertex.handleStreamWithBody(request, allocator, server_gcp, store, auth, io, server_ledger, environ_map, body);
                     allocator.free(body);
                     return .{ .handled = true };
                 },
