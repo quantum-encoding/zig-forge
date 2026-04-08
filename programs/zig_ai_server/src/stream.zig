@@ -1,6 +1,11 @@
 // SSE Streaming — real token-by-token streaming from AI providers
 // Uses sendMessageStreaming callback to pipe tokens directly to the client.
-// No buffering the full response — first token arrives in milliseconds.
+// No buffering — first token arrives as soon as the provider emits it.
+//
+// SSE event format (matches QuantumSDK StreamEvent):
+//   data: {"type":"content_delta","delta":{"text":"token"}}\n\n
+//   data: {"type":"usage","input_tokens":N,"output_tokens":N}\n\n
+//   data: {"type":"done"}\n\n
 
 const std = @import("std");
 const http = std.http;
@@ -23,24 +28,24 @@ const StreamCtx = struct {
 };
 
 /// Streaming callback — called per token chunk from the provider.
-/// Writes each chunk as an SSE data event immediately.
+/// Emits each chunk as a content_delta SSE event immediately.
 fn streamCallback(text: []const u8, context: ?*anyopaque) bool {
     const ctx: *StreamCtx = @alignCast(@ptrCast(context orelse return false));
     if (ctx.errored) return false;
 
     ctx.token_count += 1;
 
-    // Escape the text for JSON
+    // Escape the text for JSON embedding
     const escaped = chat_mod.jsonEscape(ctx.allocator, text) catch {
         ctx.errored = true;
         return false;
     };
     defer ctx.allocator.free(escaped);
 
-    // Write SSE event: data: {"delta":"<token>"}\n\n
+    // Emit: data: {"type":"content_delta","delta":{"text":"<token>"}}\n\n
     const event = std.fmt.allocPrint(ctx.allocator,
-        "data: {{\"delta\":\"{s}\",\"index\":{d}}}\n\n",
-        .{ escaped, ctx.token_count },
+        "data: {{\"type\":\"content_delta\",\"delta\":{{\"text\":\"{s}\"}}}}\n\n",
+        .{escaped},
     ) catch {
         ctx.errored = true;
         return false;
@@ -64,14 +69,13 @@ pub fn handleStream(
     request: *http.Server.Request,
     allocator: std.mem.Allocator,
     environ_map: *const std.process.Environ.Map,
-    io: ?Io,
+    io: ?std.Io,
     store: ?*store_mod.Store,
     auth: ?*const types.AuthContext,
     ledger: ?*ledger_mod.Ledger,
 ) void {
-    // Parse request
     const body = json_util.readBody(request, allocator, security.Limits.max_chat_body) catch {
-        sendSseError(request, "invalid request body");
+        sendSseError(request, "failed to read request body");
         return;
     };
     defer allocator.free(body);
@@ -81,7 +85,7 @@ pub fn handleStream(
         return;
     }
 
-    const parsed = std.json.parseFromSlice(ChatRequest, allocator, body, .{
+    const parsed = std.json.parseFromSlice(chat_mod.ChatRequest, allocator, body, .{
         .ignore_unknown_fields = true,
         .allocate = .alloc_always,
     }) catch {
@@ -139,7 +143,7 @@ pub fn handleStream(
         return;
     }
 
-    // Dynamic output capping: cap max_tokens to what the user can afford
+    // Dynamic output capping
     var reservation_id: ?u64 = null;
     if (store) |s| if (auth) |a| if (io) |io_handle| {
         const input_estimate = billing.estimateInputTokens(body.len);
@@ -171,53 +175,53 @@ pub fn handleStream(
         return;
     };
 
-    // Call provider and stream response as SSE
-    // Uses blocking call with SSE output format. The endpoint contract (text/event-stream,
-    // chunked) is correct — when provider streaming is stable, swap to sendMessageStreaming
-    // and the client code won't change.
-    config.stream = false;
-    var response = client.sendMessage(prompt, config) catch |err| {
+    // Stream tokens from provider → SSE content_delta events
+    var stream_ctx = StreamCtx{
+        .writer = &body_writer,
+        .allocator = allocator,
+        .token_count = 0,
+        .errored = false,
+    };
+
+    client.sendMessageStreaming(prompt, config, streamCallback, &stream_ctx) catch |err| {
         if (reservation_id) |rid| if (store) |s| if (io) |io_handle| billing.rollback(s, io_handle, rid);
         const err_event = std.fmt.allocPrint(allocator,
-            "data: {{\"error\":\"{s}\"}}\n\n", .{@errorName(err)},
-        ) catch "data: {\"error\":\"provider_error\"}\n\n";
+            "data: {{\"type\":\"error\",\"message\":\"{s}\"}}\n\n", .{@errorName(err)},
+        ) catch "data: {\"type\":\"error\",\"message\":\"provider_error\"}\n\n";
         body_writer.writer.writeAll(err_event) catch {};
-        body_writer.writer.writeAll("data: [DONE]\n\n") catch {};
+        body_writer.writer.writeAll("data: {\"type\":\"done\"}\n\n") catch {};
         body_writer.end() catch {};
         return;
     };
-    defer response.deinit();
 
-    // Send response as SSE content event
-    const escaped = chat_mod.jsonEscape(allocator, response.message.content) catch "";
-    defer if (escaped.len > 0) allocator.free(escaped);
-
-    const stop_reason = response.metadata.stop_reason orelse "end_turn";
-    const content_event = std.fmt.allocPrint(allocator,
-        "data: {{\"id\":\"{s}\",\"model\":\"{s}\",\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}],\"usage\":{{\"input_tokens\":{d},\"output_tokens\":{d}}},\"stop_reason\":\"{s}\"}}\n\n",
-        .{ response.message.id, chat_req.model, escaped, response.usage.input_tokens, response.usage.output_tokens, stop_reason },
-    ) catch "";
-    if (content_event.len > 0) {
-        defer allocator.free(content_event);
-        body_writer.writer.writeAll(content_event) catch {};
-        body_writer.flush() catch {};
-    }
-
-    // Commit billing with exact token counts
+    // Commit billing — use token_count as approximate output tokens
+    // (sendMessageStreaming doesn't return usage metadata, so we estimate)
+    const output_tokens = stream_ctx.token_count;
+    const input_estimate = billing.estimateInputTokens(body.len);
     if (reservation_id) |rid| if (store) |s| if (io) |io_handle| {
         const tier = if (auth) |a| a.account.tier else types.DevTier.free;
-        billing.commit(s, io_handle, rid, chat_req.model, response.usage.input_tokens, response.usage.output_tokens, tier);
+        billing.commit(s, io_handle, rid, chat_req.model, input_estimate, output_tokens, tier);
         if (ledger) |l| {
-            const bill = billing.actualCost(chat_req.model, response.usage.input_tokens, response.usage.output_tokens, tier);
+            const bill = billing.actualCost(chat_req.model, input_estimate, output_tokens, tier);
             l.recordBilling(io_handle, if (auth) |a| a.account.id.slice() else "anonymous",
                 if (auth) |a| a.key.prefix.slice() else "none", bill.cost, bill.margin,
                 if (auth) |a| a.account.balance_ticks else 0,
-                "/qai/v1/chat/stream", chat_req.model, response.usage.input_tokens, response.usage.output_tokens, 0);
+                "/qai/v1/chat/stream", chat_req.model, input_estimate, output_tokens, 0);
         }
     };
 
+    // Emit usage event
+    const usage_event = std.fmt.allocPrint(allocator,
+        "data: {{\"type\":\"usage\",\"input_tokens\":{d},\"output_tokens\":{d}}}\n\n",
+        .{ input_estimate, output_tokens },
+    ) catch "";
+    if (usage_event.len > 0) {
+        defer allocator.free(usage_event);
+        body_writer.writer.writeAll(usage_event) catch {};
+    }
+
     // Done
-    body_writer.writer.writeAll("data: [DONE]\n\n") catch {};
+    body_writer.writer.writeAll("data: {\"type\":\"done\"}\n\n") catch {};
     body_writer.end() catch {};
 }
 
@@ -234,23 +238,10 @@ fn sendSseError(request: *http.Server.Request, message: []const u8) void {
         },
     }) catch return;
 
-    var buf: [256]u8 = undefined;
-    const event = std.fmt.bufPrint(&buf, "data: {{\"error\":\"{s}\"}}\n\ndata: [DONE]\n\n", .{message}) catch
-        "data: {\"error\":\"unknown\"}\n\ndata: [DONE]\n\n";
+    const event = std.fmt.allocPrint(std.heap.c_allocator,
+        "data: {{\"type\":\"error\",\"message\":\"{s}\"}}\n\n", .{message},
+    ) catch "data: {\"type\":\"error\",\"message\":\"internal error\"}\n\n";
     body_writer.writer.writeAll(event) catch {};
+    body_writer.writer.writeAll("data: {\"type\":\"done\"}\n\n") catch {};
     body_writer.end() catch {};
 }
-
-const ChatRequest = struct {
-    model: []const u8,
-    messages: []const Message,
-    temperature: ?f64 = null,
-    max_tokens: ?i32 = null,
-    stream: ?bool = null,
-    system_prompt: ?[]const u8 = null,
-};
-
-const Message = struct {
-    role: []const u8,
-    content: ?[]const u8 = null,
-};

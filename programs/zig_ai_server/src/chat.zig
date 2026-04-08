@@ -19,7 +19,7 @@ const gcp_mod = @import("gcp.zig");
 const Response = router.Response;
 
 /// Inbound chat request (matches quantum-sdk ChatRequest)
-const ChatRequest = struct {
+pub const ChatRequest = struct {
     model: []const u8,
     messages: []const Message,
     temperature: ?f64 = null,
