@@ -147,15 +147,40 @@ fn routeApiV1Authed(
     auth: *const types.AuthContext,
 ) Response {
     // ── Chat ────────────────────────────────────────────
-    if (std.mem.eql(u8, path, "chat")) {
+    // Same endpoint handles both streaming and non-streaming (OpenAI convention).
+    // If "stream":true in the JSON body, route to SSE handler.
+    // /qai/v1/chat/stream is also supported as an explicit streaming path.
+    if (std.mem.eql(u8, path, "chat") or std.mem.eql(u8, path, "chat/stream")) {
         if (method != .POST) return handlers.methodNotAllowed(request, allocator);
-        return chat.handle(request, allocator, environ_map, io, store, auth, server_ledger, server_gcp);
-    }
-    // Explicit streaming endpoint
-    if (std.mem.eql(u8, path, "chat/stream")) {
-        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
-        stream.handleStream(request, allocator, environ_map, io, store, auth, server_ledger);
-        return .{ .handled = true };
+
+        const force_stream = std.mem.eql(u8, path, "chat/stream");
+
+        if (force_stream) {
+            // Explicit streaming path — handler reads its own body
+            stream.handleStream(request, allocator, environ_map, io, store, auth, server_ledger);
+            return .{ .handled = true };
+        }
+
+        // Read body once, check for "stream":true, route accordingly
+        const json_util = @import("json.zig");
+        const security = @import("security.zig");
+        const body = json_util.readBody(request, allocator, security.Limits.max_chat_body) catch {
+            return .{ .status = .bad_request, .body =
+                \\{"error":"invalid_request","message":"Failed to read request body"}
+            };
+        };
+
+        if (std.mem.indexOf(u8, body, "\"stream\":true") != null or
+            std.mem.indexOf(u8, body, "\"stream\": true") != null)
+        {
+            stream.handleStreamWithBody(request, allocator, environ_map, io, store, auth, server_ledger, body);
+            allocator.free(body);
+            return .{ .handled = true };
+        }
+
+        const result = chat.handleWithBody(request, allocator, environ_map, io, store, auth, server_ledger, server_gcp, body);
+        allocator.free(body);
+        return result;
     }
 
     // ── Vertex AI (MaaS gateway — Gemini, DeepSeek, GLM-5, Qwen, Gemma 4, Codestral) ──

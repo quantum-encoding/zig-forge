@@ -100,7 +100,22 @@ pub fn resolveProvider(model: []const u8) ?ProviderInfo {
     return null;
 }
 
-/// Handle POST /qai/v1/chat
+/// Handle POST /qai/v1/chat with pre-read body (called from router).
+pub fn handleWithBody(
+    _: *http.Server.Request,
+    allocator: std.mem.Allocator,
+    environ_map: *const std.process.Environ.Map,
+    io: ?std.Io,
+    store: ?*store_mod.Store,
+    auth: ?*const types.AuthContext,
+    ledger: ?*ledger_mod.Ledger,
+    gcp_ctx: ?*gcp_mod.GcpContext,
+    body: []const u8,
+) Response {
+    return handleCore(allocator, environ_map, io, store, auth, ledger, gcp_ctx, body);
+}
+
+/// Handle POST /qai/v1/chat (reads body from request).
 pub fn handle(
     request: *http.Server.Request,
     allocator: std.mem.Allocator,
@@ -111,12 +126,23 @@ pub fn handle(
     ledger: ?*ledger_mod.Ledger,
     gcp_ctx: ?*gcp_mod.GcpContext,
 ) Response {
-    // Parse JSON body (1MB limit for chat)
     const body = json_util.readBody(request, allocator, security.Limits.max_chat_body) catch |err| {
         return errorResp(allocator, err);
     };
     defer allocator.free(body);
+    return handleCore(allocator, environ_map, io, store, auth, ledger, gcp_ctx, body);
+}
 
+fn handleCore(
+    allocator: std.mem.Allocator,
+    environ_map: *const std.process.Environ.Map,
+    io: ?std.Io,
+    store: ?*store_mod.Store,
+    auth: ?*const types.AuthContext,
+    ledger: ?*ledger_mod.Ledger,
+    gcp_ctx: ?*gcp_mod.GcpContext,
+    body: []const u8,
+) Response {
     if (body.len == 0) return errorResp(allocator, error.EmptyBody);
 
     const parsed = std.json.parseFromSlice(ChatRequest, allocator, body, .{

@@ -64,6 +64,20 @@ fn streamCallback(text: []const u8, context: ?*anyopaque) bool {
     return true; // Continue streaming
 }
 
+/// Handle streaming with a pre-read body (called from router when "stream":true detected).
+pub fn handleStreamWithBody(
+    request: *http.Server.Request,
+    allocator: std.mem.Allocator,
+    environ_map: *const std.process.Environ.Map,
+    io: ?std.Io,
+    store: ?*store_mod.Store,
+    auth: ?*const types.AuthContext,
+    ledger: ?*ledger_mod.Ledger,
+    body: []const u8,
+) void {
+    return handleStreamCore(request, allocator, environ_map, io, store, auth, ledger, body);
+}
+
 /// Handle streaming chat request. Writes SSE events directly to the HTTP stream.
 pub fn handleStream(
     request: *http.Server.Request,
@@ -79,7 +93,19 @@ pub fn handleStream(
         return;
     };
     defer allocator.free(body);
+    return handleStreamCore(request, allocator, environ_map, io, store, auth, ledger, body);
+}
 
+fn handleStreamCore(
+    request: *http.Server.Request,
+    allocator: std.mem.Allocator,
+    environ_map: *const std.process.Environ.Map,
+    io: ?std.Io,
+    store: ?*store_mod.Store,
+    auth: ?*const types.AuthContext,
+    ledger: ?*ledger_mod.Ledger,
+    body: []const u8,
+) void {
     if (body.len == 0) {
         sendSseError(request, "empty request body");
         return;
