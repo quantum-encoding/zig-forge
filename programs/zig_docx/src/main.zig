@@ -18,6 +18,11 @@ const docx = @import("docx");
 
 extern "c" fn fdopen(fd: c_int, mode: [*:0]const u8) ?*FILE;
 extern "c" fn fflush(stream: ?*FILE) c_int;
+extern "c" fn fopen(path: [*:0]const u8, mode: [*:0]const u8) ?*FILE;
+extern "c" fn fclose(stream: *FILE) c_int;
+extern "c" fn fread(ptr: [*]u8, size: usize, nmemb: usize, stream: *FILE) usize;
+extern "c" fn fseek(stream: *FILE, offset: c_long, whence: c_int) c_int;
+extern "c" fn ftell(stream: *FILE) c_long;
 extern "c" fn mkdir(path: [*:0]const u8, mode: c_uint) c_int;
 const FILE = std.c.FILE;
 
@@ -37,6 +42,76 @@ pub fn main(init: std.process.Init) !void {
     // Folder mode: process all .docx files in a directory
     if (parsed.folder_mode) {
         processFolderMode(allocator, parsed);
+        return;
+    }
+
+    // Anthropic conversations.json export
+    const is_json = std.mem.endsWith(u8, parsed.file_path, ".json") or
+        std.mem.endsWith(u8, parsed.file_path, ".JSON") or
+        parsed.anthropic_mode;
+
+    if (is_json) {
+        // Read JSON file
+        const json_data = blk: {
+            const path_z = allocator.allocSentinel(u8, parsed.file_path.len, 0) catch {
+                std.debug.print("Error: out of memory\n", .{});
+                return;
+            };
+            defer allocator.free(path_z);
+            @memcpy(path_z, parsed.file_path);
+
+            const fp = fopen(path_z.ptr, "rb") orelse {
+                std.debug.print("Error opening '{s}'\n", .{parsed.file_path});
+                return;
+            };
+            defer _ = fclose(fp);
+
+            _ = fseek(fp, 0, 2); // SEEK_END
+            const size = ftell(fp);
+            if (size <= 0) {
+                std.debug.print("Error: file is empty\n", .{});
+                return;
+            }
+            _ = fseek(fp, 0, 0); // SEEK_SET
+
+            const buf = allocator.alloc(u8, @intCast(size)) catch {
+                std.debug.print("Error: out of memory ({d} bytes)\n", .{size});
+                return;
+            };
+            const n = fread(buf.ptr, 1, @intCast(size), fp);
+            if (n != @as(usize, @intCast(size))) {
+                allocator.free(buf);
+                std.debug.print("Error: read failed\n", .{});
+                return;
+            }
+            break :blk buf;
+        };
+        defer allocator.free(json_data);
+
+        if (parsed.info_only) {
+            const index = docx.anthropic.generateIndex(allocator, json_data) catch |err| {
+                std.debug.print("Error parsing JSON: {}\n", .{err});
+                return;
+            };
+            defer allocator.free(index);
+            writeToStdout(index);
+            return;
+        }
+
+        const out_dir = parsed.output_path orelse "claude_conversations";
+        std.debug.print("Extracting Anthropic conversations to: {s}/\n", .{out_dir});
+
+        const stats = docx.anthropic.extractExport(
+            allocator, json_data, out_dir, writeToFile, writeDir,
+        ) catch |err| {
+            std.debug.print("Error extracting: {}\n", .{err});
+            return;
+        };
+
+        std.debug.print("\nDone: {d} conversations, {d} messages, {d} artifacts\n", .{
+            stats.conversations, stats.messages, stats.artifacts,
+        });
+        std.debug.print("Input: {d} bytes → Output: {s}/\n", .{ stats.total_bytes, out_dir });
         return;
     }
 
@@ -348,6 +423,13 @@ fn processChunking(allocator: std.mem.Allocator, markdown: []const u8, parsed: A
     }
 }
 
+fn writeDir(allocator: std.mem.Allocator, path: []const u8) void {
+    const path_z = allocator.allocSentinel(u8, path.len, 0) catch return;
+    defer allocator.free(path_z);
+    @memcpy(path_z, path);
+    _ = mkdir(path_z.ptr, 0o755);
+}
+
 fn writeToFile(allocator: std.mem.Allocator, path: []const u8, data: []const u8) void {
     const path_z = allocator.allocSentinel(u8, path.len, 0) catch {
         std.debug.print("Error: out of memory\n", .{});
@@ -386,6 +468,7 @@ const Args = struct {
     folder_mode: bool = false,
     markdown_mode: bool = false,
     chunk_mode: bool = false,
+    anthropic_mode: bool = false,
 };
 
 fn parseArgs(args: []const []const u8) ?Args {
@@ -406,6 +489,8 @@ fn parseArgs(args: []const []const u8) ?Args {
             result.markdown_mode = true;
         } else if (std.mem.eql(u8, arg, "--chunk") or std.mem.eql(u8, arg, "-c")) {
             result.chunk_mode = true;
+        } else if (std.mem.eql(u8, arg, "--anthropic") or std.mem.eql(u8, arg, "--claude")) {
+            result.anthropic_mode = true;
         } else if (std.mem.eql(u8, arg, "--title")) {
             i += 1;
             if (i >= args.len) {

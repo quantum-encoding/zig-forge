@@ -16,6 +16,7 @@ pub const mdx = @import("mdx.zig");
 pub const xlsx = @import("xlsx.zig");
 pub const pdf = @import("pdf.zig");
 pub const chunker = @import("chunker.zig");
+pub const anthropic = @import("anthropic.zig");
 
 // Re-export key types
 pub const StyleType = styles.StyleType;
