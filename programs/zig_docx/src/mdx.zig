@@ -71,21 +71,19 @@ pub fn generateMdx(allocator: std.mem.Allocator, doc: *const docx.Document, opti
 
     // Content
     var prev_was_empty = false;
-    for (doc.elements, 0..) |elem, i| {
+    for (doc.elements) |elem| {
         switch (elem) {
             .paragraph => |p| {
                 // Skip truly empty paragraphs but add spacing
                 if (p.runs.len == 0) {
-                    if (!prev_was_empty and i > 0) {
-                        try w.print("\n", .{});
-                    }
                     prev_was_empty = true;
                     continue;
                 }
                 prev_was_empty = false;
 
                 try writeParagraph(allocator, w, &p, doc, &image_counter, &image_refs, options.image_mode);
-                try w.print("\n", .{});
+                // Blank line after every paragraph — required by Markdown for separate <p> tags
+                try w.print("\n\n", .{});
             },
             .table => |t| {
                 prev_was_empty = false;
