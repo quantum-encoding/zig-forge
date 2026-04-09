@@ -35,6 +35,8 @@ const quantum_curl = @import("quantum-curl");
 const Engine = quantum_curl.Engine;
 const manifest = quantum_curl.manifest;
 const ingest = quantum_curl.ingest;
+const gcp = @import("gcp-auth");
+const http_sentinel = @import("http-sentinel");
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.c_allocator;
@@ -63,6 +65,13 @@ pub fn main(init: std.process.Init) !void {
     var output_ext: []const u8 = "md";
     var base64_field: ?[]const u8 = null;
     var failed_log_path: ?[]const u8 = null;
+    // Auth refresh configuration
+    var refresh_auth_command: ?[]const u8 = null;
+    var refresh_auth_interval_sec: u64 = 1800; // 30 minutes default
+    var auth_header_name: []const u8 = "Authorization";
+    var auth_header_prefix: []const u8 = "Bearer ";
+    var use_gcp_auth: bool = false;
+    var gcp_auth_scope: []const u8 = gcp.SCOPE_CLOUD_PLATFORM;
     var show_help = false;
 
     // Parse command line arguments (skip program name at index 0)
@@ -128,6 +137,43 @@ pub fn main(init: std.process.Init) !void {
                 return error.InvalidArgs;
             }
             failed_log_path = args[i];
+        } else if (std.mem.eql(u8, arg, "--refresh-auth-header-command")) {
+            i += 1;
+            if (i >= args.len) {
+                std.debug.print("Error: --refresh-auth-header-command requires a shell command\n", .{});
+                return error.InvalidArgs;
+            }
+            refresh_auth_command = args[i];
+        } else if (std.mem.eql(u8, arg, "--refresh-auth-interval")) {
+            i += 1;
+            if (i >= args.len) {
+                std.debug.print("Error: --refresh-auth-interval requires seconds\n", .{});
+                return error.InvalidArgs;
+            }
+            refresh_auth_interval_sec = try std.fmt.parseInt(u64, args[i], 10);
+        } else if (std.mem.eql(u8, arg, "--auth-header-name")) {
+            i += 1;
+            if (i >= args.len) {
+                std.debug.print("Error: --auth-header-name requires a header name\n", .{});
+                return error.InvalidArgs;
+            }
+            auth_header_name = args[i];
+        } else if (std.mem.eql(u8, arg, "--auth-header-prefix")) {
+            i += 1;
+            if (i >= args.len) {
+                std.debug.print("Error: --auth-header-prefix requires a prefix string (may be empty)\n", .{});
+                return error.InvalidArgs;
+            }
+            auth_header_prefix = args[i];
+        } else if (std.mem.eql(u8, arg, "--gcp-auth")) {
+            use_gcp_auth = true;
+        } else if (std.mem.eql(u8, arg, "--gcp-auth-scope")) {
+            i += 1;
+            if (i >= args.len) {
+                std.debug.print("Error: --gcp-auth-scope requires an OAuth2 scope URL\n", .{});
+                return error.InvalidArgs;
+            }
+            gcp_auth_scope = args[i];
         } else {
             std.debug.print("Error: Unknown option: {s}\n", .{arg});
             return error.InvalidArgs;
@@ -139,10 +185,105 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    // Enforce mutual exclusion between the two auth refresh strategies.
+    // Both configured would mean two refresh threads stomping on the same
+    // header slot — reject at parse time rather than letting it misbehave.
+    if (use_gcp_auth and refresh_auth_command != null) {
+        std.debug.print(
+            "Error: --gcp-auth and --refresh-auth-header-command are mutually exclusive\n",
+            .{},
+        );
+        return error.InvalidArgs;
+    }
+
     // Initialize the failure logger (if --failed-log provided).
     // Must be alive for the entire batch so worker threads can write to it.
     var fail_logger = try quantum_curl.fail_log.FailLogger.init(allocator, failed_log_path);
     defer fail_logger.deinit();
+
+    // Set up the auth refresher (if requested). This must stay alive for
+    // the entire batch — workers call into it on every outgoing request.
+    // Constructed on the heap so its address remains stable across moves.
+    var auth_refresher_ptr: ?*quantum_curl.AuthRefresher = null;
+    defer if (auth_refresher_ptr) |r| {
+        r.deinit();
+        allocator.destroy(r);
+    };
+
+    if (use_gcp_auth or refresh_auth_command != null) {
+        const source: quantum_curl.auth_refresher.Source = if (use_gcp_auth) blk: {
+            // Build an environ map so autoDetect can find HOME /
+            // GOOGLE_APPLICATION_CREDENTIALS. The minimal env slice from
+            // std.process.Init gives us a raw c-string list; we parse it
+            // into a lookup map here.
+            var env_map = std.process.Environ.Map.init(allocator);
+            defer env_map.deinit();
+            const raw_env = std.mem.span(std.c.environ);
+            for (raw_env) |maybe_cstr| {
+                // Each slot is `?[*:0]u8` — gaps are legal per POSIX but rare.
+                const entry_cstr = maybe_cstr orelse continue;
+                const entry: []const u8 = std.mem.span(entry_cstr);
+                if (std.mem.indexOfScalar(u8, entry, '=')) |eq| {
+                    env_map.put(entry[0..eq], entry[eq + 1 ..]) catch {};
+                }
+            }
+
+            // Spin up a temporary HttpClient for autoDetect (metadata probe,
+            // credential file reads, etc.). The GcpSource constructs its own
+            // long-lived client internally.
+            var probe_client = try http_sentinel.HttpClient.init(allocator);
+            defer probe_client.deinit();
+
+            const provider = gcp.autoDetect(
+                allocator,
+                &probe_client,
+                gcp_auth_scope,
+                &env_map,
+            ) catch |err| {
+                std.debug.print(
+                    "Error: --gcp-auth selected but no credentials found: {}\n" ++
+                        "  Set GOOGLE_APPLICATION_CREDENTIALS, run `gcloud auth application-default login`,\n" ++
+                        "  or deploy on a GCP instance with a service account attached.\n",
+                    .{err},
+                );
+                return err;
+            };
+
+            const gcp_source = try quantum_curl.auth_refresher.GcpSource.init(allocator, provider);
+            break :blk .{ .gcp = gcp_source };
+        } else blk: {
+            const cmd_source = try quantum_curl.auth_refresher.CommandSource.init(
+                allocator,
+                refresh_auth_command.?,
+            );
+            break :blk .{ .command = cmd_source };
+        };
+
+        const refresher = try allocator.create(quantum_curl.AuthRefresher);
+        errdefer allocator.destroy(refresher);
+        refresher.* = try quantum_curl.AuthRefresher.init(allocator, source);
+        refresher.interval_ns = refresh_auth_interval_sec * std.time.ns_per_s;
+        refresher.prefix = auth_header_prefix;
+
+        // Initial synchronous fetch + background thread. Any failure here
+        // aborts the batch — starting with no valid token is always wrong.
+        refresher.start() catch |err| {
+            std.debug.print("Error: auth refresher failed to start: {}\n", .{err});
+            refresher.deinit();
+            allocator.destroy(refresher);
+            return err;
+        };
+
+        auth_refresher_ptr = refresher;
+        std.debug.print(
+            "[quantum-curl] auth refresh: {s}, interval {}s, header '{s}'\n",
+            .{
+                if (use_gcp_auth) "gcp-auth" else "command",
+                refresh_auth_interval_sec,
+                auth_header_name,
+            },
+        );
+    }
 
     // Read input - the Battle Plan
     var requests: std.ArrayList(manifest.RequestManifest) = .empty;
@@ -195,6 +336,7 @@ pub fn main(init: std.process.Init) !void {
             .output_dir = output_dir,
             .output_ext = output_ext,
             .base64_field = base64_field,
+            .auth_header_name = auth_header_name,
         },
         writer,
     );
@@ -203,6 +345,11 @@ pub fn main(init: std.process.Init) !void {
     // Attach the failure logger if enabled
     if (failed_log_path != null) {
         engine.setFailLogger(&fail_logger);
+    }
+
+    // Attach the auth refresher if enabled
+    if (auth_refresher_ptr) |r| {
+        engine.setAuthRefresher(r);
     }
 
     // Execute the Battle Plan
@@ -252,6 +399,26 @@ fn printUsage() void {
         \\                            Also creates {path}.errors.jsonl with diagnostics
         \\                            Rerun failures: quantum-curl --file failed.jsonl
         \\                            Failure criteria: status 0 (transport) or >= 400 (HTTP)
+        \\
+        \\AUTH REFRESH (for long-running batches whose tokens outlive their TTL):
+        \\    --refresh-auth-header-command <cmd>
+        \\                            Run <cmd> via `sh -c` to fetch a fresh bearer token.
+        \\                            Stdout is trimmed and becomes the token value.
+        \\                            Example: "gcloud auth print-access-token"
+        \\    --refresh-auth-interval <seconds>
+        \\                            Refresh interval in seconds (default: 1800 = 30 min)
+        \\    --auth-header-name <name>
+        \\                            Header to override (default: Authorization).
+        \\                            Case-insensitive match against baked-in plan headers.
+        \\    --auth-header-prefix <prefix>
+        \\                            Prepended to the token value (default: "Bearer ").
+        \\                            Use "" to inject raw non-Bearer auth (e.g. API keys).
+        \\    --gcp-auth              Native gcp_auth integration (no shell-out).
+        \\                            Auto-detects in order: GOOGLE_APPLICATION_CREDENTIALS,
+        \\                            GCE/Cloud Run metadata server, ~/.config/gcloud ADC.
+        \\                            Mutually exclusive with --refresh-auth-header-command.
+        \\    --gcp-auth-scope <url>  OAuth2 scope for --gcp-auth
+        \\                            (default: cloud-platform — covers most GCP APIs)
         \\
         \\INPUT FORMATS (auto-detected from extension or content):
         \\

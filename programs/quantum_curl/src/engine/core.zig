@@ -23,6 +23,8 @@ const http_sentinel = @import("http-sentinel");
 const HttpClient = http_sentinel.HttpClient;
 const manifest = @import("manifest.zig");
 const fail_log = @import("fail_log.zig");
+const auth_refresher_mod = @import("auth_refresher.zig");
+const AuthRefresher = auth_refresher_mod.AuthRefresher;
 
 /// Zig 0.16 compatible Mutex using pthread
 const Mutex = struct {
@@ -63,6 +65,12 @@ pub const EngineConfig = struct {
     /// Dot-path to base64 field in JSON response body (e.g., "predictions.0.bytesBase64Encoded")
     /// When set, extracts the field, decodes base64, and saves raw binary instead of body text.
     base64_field: ?[]const u8 = null,
+
+    /// Name of the header whose value is overridden by the AuthRefresher when
+    /// one is attached. Case-insensitive match on the request's baked-in
+    /// headers — the refresher's value replaces any existing entry. Default
+    /// "Authorization" covers Bearer / OAuth2 / GCP / AWS Signature v4 etc.
+    auth_header_name: []const u8 = "Authorization",
 };
 
 pub fn Engine(comptime WriterType: type) type {
@@ -81,6 +89,11 @@ pub fn Engine(comptime WriterType: type) type {
         /// Optional failure logger — writes failed requests to a replay file
         fail_logger: ?*fail_log.FailLogger = null,
 
+        /// Optional auth refresher — when set, overrides every request's
+        /// Authorization header with a periodically-refreshed Bearer token.
+        /// Essential for multi-hour batches where tokens outlive their TTL.
+        auth_refresher: ?*AuthRefresher = null,
+
         pub fn init(allocator: std.mem.Allocator, config: EngineConfig, output_writer: WriterType) !Self {
             return Self{
                 .allocator = allocator,
@@ -88,12 +101,79 @@ pub fn Engine(comptime WriterType: type) type {
                 .output_writer = output_writer,
                 .output_mutex = .{},
                 .fail_logger = null,
+                .auth_refresher = null,
             };
         }
 
         /// Attach a failure logger. Call this after init() and before processBatch().
         pub fn setFailLogger(self: *Self, logger: *fail_log.FailLogger) void {
             self.fail_logger = logger;
+        }
+
+        /// Attach an auth refresher. Call after init() and before processBatch().
+        pub fn setAuthRefresher(self: *Self, refresher: *AuthRefresher) void {
+            self.auth_refresher = refresher;
+        }
+
+        /// Header list with optional owned auth value for cleanup. Returned by
+        /// buildHeaders — the caller must `deinit()` when done so the freshly
+        /// fetched bearer string is freed with the worker that requested it.
+        const BuiltHeaders = struct {
+            list: std.ArrayList(std.http.Header),
+            owned_auth_value: ?[]u8,
+            allocator: std.mem.Allocator,
+
+            fn deinit(self: *BuiltHeaders) void {
+                self.list.deinit(self.allocator);
+                if (self.owned_auth_value) |v| {
+                    std.crypto.secureZero(u8, v);
+                    self.allocator.free(v);
+                }
+            }
+        };
+
+        /// Build the outgoing header list for a request. When an auth refresher
+        /// is attached, any baked-in header matching config.auth_header_name
+        /// (case-insensitive) is stripped and replaced with the refresher's
+        /// current value — so stale Authorization tokens in a plan JSONL
+        /// never leak through to the wire.
+        fn buildHeaders(self: *Self, request: *manifest.RequestManifest) !BuiltHeaders {
+            var list: std.ArrayList(std.http.Header) = .empty;
+            errdefer list.deinit(self.allocator);
+
+            var owned_auth: ?[]u8 = null;
+            errdefer if (owned_auth) |v| self.allocator.free(v);
+
+            const refresher = self.auth_refresher;
+            const auth_name = self.config.auth_header_name;
+
+            if (request.headers) |*req_headers| {
+                var it = req_headers.map.iterator();
+                while (it.next()) |entry| {
+                    if (refresher != null and std.ascii.eqlIgnoreCase(entry.key_ptr.*, auth_name)) {
+                        continue; // refresher value takes precedence
+                    }
+                    try list.append(self.allocator, .{
+                        .name = entry.key_ptr.*,
+                        .value = entry.value_ptr.*,
+                    });
+                }
+            }
+
+            if (refresher) |r| {
+                const fresh = try r.getAuthHeader(self.allocator);
+                owned_auth = fresh;
+                try list.append(self.allocator, .{
+                    .name = auth_name,
+                    .value = fresh,
+                });
+            }
+
+            return BuiltHeaders{
+                .list = list,
+                .owned_auth_value = owned_auth,
+                .allocator = self.allocator,
+            };
         }
 
         pub fn deinit(_: *Self) void {
@@ -164,6 +244,14 @@ pub fn Engine(comptime WriterType: type) type {
         }
 
 
+        /// Decide whether this worker should stream the response body straight
+        /// to disk instead of buffering it in RAM. Streaming path is only taken
+        /// when an output_dir is configured AND base64_field is unset (base64
+        /// extraction requires a fully-buffered JSON body to walk the dot-path).
+        fn shouldStream(self: *const Self) bool {
+            return self.config.output_dir != null and self.config.base64_field == null;
+        }
+
         /// Process a single request with retry logic
         fn processRequest(self: *Self, request: *manifest.RequestManifest) void {
             const start_time_ns = getMonotonicNs();
@@ -188,11 +276,44 @@ pub fn Engine(comptime WriterType: type) type {
                 return;
             };
 
+            const stream_mode = self.shouldStream();
+
             // Execute request with exponential backoff retry
             const max_retries = request.max_retries orelse self.config.default_max_retries;
             var retry_count: u32 = 0;
 
             while (retry_count <= max_retries) : (retry_count += 1) {
+                if (stream_mode) {
+                    // Streaming path — body pipes directly to {output_dir}/{id}.{ext}.
+                    // No buffered slice ever exists. Safe for 50 MB+ responses × 100 workers.
+                    const streamed = self.executeStreamingRequest(&http_client, request);
+                    if (streamed) |sr| {
+                        response.status = @intFromEnum(sr.response.status);
+                        response.body_path = sr.file_path; // transfers ownership
+                        response.body_bytes = sr.response.bytes_written;
+                        response.retry_count = retry_count;
+                        break;
+                    } else |err| {
+                        if (retry_count < max_retries) {
+                            const backoff_ms = @as(u64, 100) * (@as(u64, 1) << @intCast(retry_count));
+                            var ts: std.c.timespec = .{
+                                .sec = @intCast(backoff_ms / 1000),
+                                .nsec = @intCast((backoff_ms % 1000) * 1_000_000),
+                            };
+                            _ = std.c.nanosleep(&ts, null);
+                            continue;
+                        } else {
+                            response.error_message = std.fmt.allocPrint(
+                                self.allocator,
+                                "{}",
+                                .{err},
+                            ) catch null;
+                            response.retry_count = retry_count;
+                            break;
+                        }
+                    }
+                }
+
                 var result = self.executeHttpRequest(&http_client, request);
 
                 if (result) |*http_response| {
@@ -256,21 +377,118 @@ pub fn Engine(comptime WriterType: type) type {
             response.deinit();
         }
 
+        /// Result of a streaming request — the caller owns `file_path` and
+        /// must free it via the engine allocator. `response` carries the
+        /// status code and on-disk byte count.
+        const StreamResult = struct {
+            response: HttpClient.StreamedResponse,
+            file_path: []u8,
+        };
+
+        /// Execute HTTP request in streaming mode — body pipes directly from
+        /// the TLS socket into {output_dir}/{id}.{ext} via File.Writer. Zero
+        /// intermediate buffering: a Cloud Run container with 100 concurrent
+        /// workers can handle 50 MB+ responses without blowing RAM.
+        fn executeStreamingRequest(
+            self: *Self,
+            http_client: *HttpClient,
+            request: *manifest.RequestManifest,
+        ) !StreamResult {
+            const dir = self.config.output_dir.?; // caller checks shouldStream() first
+
+            // Ensure directory exists (best-effort; mkdir failures are ignored
+            // because concurrent workers may race on the same dir and
+            // createFile below will surface any real error).
+            var dir_z: [4096:0]u8 = undefined;
+            if (dir.len >= 4096) return error.PathTooLong;
+            @memcpy(dir_z[0..dir.len], dir);
+            dir_z[dir.len] = 0;
+            _ = std.c.mkdir(&dir_z, 0o755);
+
+            // Build the output path — caller receives ownership of this slice.
+            const file_path = try std.fmt.allocPrint(
+                self.allocator,
+                "{s}/{s}.{s}",
+                .{ dir, request.id, self.config.output_ext },
+            );
+            errdefer self.allocator.free(file_path);
+
+            // Each worker has its own HttpClient which owns its own Io handle.
+            // Use that same Io for file ops so we stay on a single event loop.
+            const io_handle = http_client.io();
+
+            const file = try std.Io.Dir.cwd().createFile(io_handle, file_path, .{});
+            defer file.close(io_handle);
+
+            // 64 KB buffer is the sweet spot for the TLS record size × typical
+            // filesystem page alignment. Larger wastes stack; smaller thrashes.
+            var write_buf: [65536]u8 = undefined;
+            var file_writer = file.writer(io_handle, &write_buf);
+
+            // Build headers (honors the auth refresher if one is attached)
+            var built = try self.buildHeaders(request);
+            defer built.deinit();
+            const headers = built.list.items;
+
+            const timeout_ms = request.timeout_ms orelse self.config.default_timeout_ms;
+            const opts = HttpClient.RequestOptions{
+                .timeout_ns = if (timeout_ms > 0) timeout_ms * 1_000_000 else 0,
+            };
+
+            const streamed = switch (request.method) {
+                .GET => try http_client.getStreamToWriter(
+                    request.url,
+                    headers,
+                    &file_writer.interface,
+                    opts,
+                ),
+                .POST => try http_client.postStreamToWriter(
+                    request.url,
+                    headers,
+                    request.body orelse "",
+                    &file_writer.interface,
+                    opts,
+                ),
+                .PUT => try http_client.putStreamToWriter(
+                    request.url,
+                    headers,
+                    request.body orelse "",
+                    &file_writer.interface,
+                    opts,
+                ),
+                .PATCH => try http_client.patchStreamToWriter(
+                    request.url,
+                    headers,
+                    request.body orelse "",
+                    &file_writer.interface,
+                    opts,
+                ),
+                .DELETE => try http_client.deleteStreamToWriter(
+                    request.url,
+                    headers,
+                    &file_writer.interface,
+                    opts,
+                ),
+                .HEAD, .OPTIONS => return error.MethodNotSupported,
+            };
+
+            // Flush any buffered bytes to disk before the file closes.
+            // Without this, the tail of large bodies can be lost in the 64 KB
+            // write_buf when the worker returns.
+            try file_writer.interface.flush();
+
+            return StreamResult{
+                .response = streamed,
+                .file_path = file_path,
+            };
+        }
+
         /// Execute HTTP request based on method
         fn executeHttpRequest(self: *Self, http_client: *HttpClient, request: *manifest.RequestManifest) !HttpClient.Response {
-            // Build headers from request manifest
-            var headers: std.ArrayList(std.http.Header) = .empty;
-            defer headers.deinit(self.allocator);
-
-            if (request.headers) |*req_headers| {
-                var it = req_headers.map.iterator();
-                while (it.next()) |entry| {
-                    try headers.append(self.allocator, .{
-                        .name = entry.key_ptr.*,
-                        .value = entry.value_ptr.*,
-                    });
-                }
-            }
+            // Build headers (honors the auth refresher if one is attached)
+            var built = try self.buildHeaders(request);
+            defer built.deinit();
+            const headers = built.list.items;
 
             // Resolve timeout: per-request override > engine default
             const timeout_ms = request.timeout_ms orelse self.config.default_timeout_ms;
@@ -280,18 +498,18 @@ pub fn Engine(comptime WriterType: type) type {
 
             // Execute based on method — use WithOptions variants for timeout support
             return switch (request.method) {
-                .GET => try http_client.getWithOptions(request.url, headers.items, opts),
+                .GET => try http_client.getWithOptions(request.url, headers, opts),
                 .POST, .PUT, .PATCH => blk: {
                     const body = request.body orelse "";
                     if (request.method == .POST) {
-                        break :blk try http_client.postWithOptions(request.url, headers.items, body, opts);
+                        break :blk try http_client.postWithOptions(request.url, headers, body, opts);
                     } else if (request.method == .PUT) {
-                        break :blk try http_client.putWithOptions(request.url, headers.items, body, opts);
+                        break :blk try http_client.putWithOptions(request.url, headers, body, opts);
                     } else {
-                        break :blk try http_client.patchWithOptions(request.url, headers.items, body, opts);
+                        break :blk try http_client.patchWithOptions(request.url, headers, body, opts);
                     }
                 },
-                .DELETE => try http_client.deleteWithOptions(request.url, headers.items, opts),
+                .DELETE => try http_client.deleteWithOptions(request.url, headers, opts),
                 .HEAD, .OPTIONS => error.MethodNotSupported,
             };
         }
@@ -308,10 +526,14 @@ pub fn Engine(comptime WriterType: type) type {
             // Flush immediately for real-time streaming
             std.Io.Writer.flush(&self.output_writer.interface) catch {};
 
-            // Save response body to file if output_dir is set
-            if (self.config.output_dir) |dir| {
-                if (response.body) |body| {
-                    self.saveBodyToFile(dir, response.id, body);
+            // Save response body to file — only on the buffered path. In
+            // streaming mode the body was already piped straight to disk by
+            // executeStreamingRequest, and response.body is null here.
+            if (!self.shouldStream()) {
+                if (self.config.output_dir) |dir| {
+                    if (response.body) |body| {
+                        self.saveBodyToFile(dir, response.id, body);
+                    }
                 }
             }
         }

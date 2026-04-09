@@ -98,6 +98,15 @@ pub const ResponseManifest = struct {
     /// Response body (may be truncated for large responses)
     body: ?[]const u8 = null,
 
+    /// Path to the on-disk file holding the response body (set when the engine
+    /// streams directly to disk instead of buffering). Mutually exclusive with
+    /// `body`. Emitted as "body_path" in the JSONL telemetry stream.
+    body_path: ?[]const u8 = null,
+
+    /// Bytes written to disk when streaming. Emitted as "body_bytes" alongside
+    /// body_path so downstream tools can sanity-check the on-disk payload size.
+    body_bytes: ?u64 = null,
+
     /// Error message if request failed
     error_message: ?[]const u8 = null,
 
@@ -110,6 +119,9 @@ pub const ResponseManifest = struct {
         self.allocator.free(self.id);
         if (self.body) |body| {
             self.allocator.free(body);
+        }
+        if (self.body_path) |p| {
+            self.allocator.free(p);
         }
         if (self.error_message) |msg| {
             self.allocator.free(msg);
@@ -157,6 +169,18 @@ pub const ResponseManifest = struct {
             try writer.writeAll(",\"body\":\"");
             try writeEscapedString(writer, body);
             try writer.writeAll("\"");
+        }
+
+        // Streaming mode — the body lives on disk, not in RAM. Emit a path
+        // pointer instead of inlining the payload so the telemetry stream stays
+        // compact even for 50 MB+ responses × hundreds of concurrent workers.
+        if (self.body_path) |p| {
+            try writer.writeAll(",\"body_path\":\"");
+            try writeEscapedString(writer, p);
+            try writer.writeAll("\"");
+            if (self.body_bytes) |b| {
+                try writer.print(",\"body_bytes\":{}", .{b});
+            }
         }
 
         try writer.writeAll("}\n");

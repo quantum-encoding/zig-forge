@@ -8,6 +8,9 @@
         .http_sentinel = .{
             .path = "../http_sentinel",
         },
+        .gcp_auth = .{
+            .path = "../gcp_auth",
+        },
     },
 
     .paths = .{

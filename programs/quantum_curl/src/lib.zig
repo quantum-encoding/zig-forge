@@ -36,6 +36,7 @@ pub const engine = @import("engine/core.zig");
 pub const manifest = @import("engine/manifest.zig");
 pub const ingest = @import("engine/ingest.zig");
 pub const fail_log = @import("engine/fail_log.zig");
+pub const auth_refresher = @import("engine/auth_refresher.zig");
 
 // Re-export core types for convenient access
 pub const Engine = engine.Engine;
@@ -45,6 +46,7 @@ pub const ResponseManifest = manifest.ResponseManifest;
 pub const Method = manifest.Method;
 pub const parseRequestManifest = manifest.parseRequestManifest;
 pub const FailLogger = fail_log.FailLogger;
+pub const AuthRefresher = auth_refresher.AuthRefresher;
 
 // Import http-sentinel for HttpClient access
 pub const http_sentinel = @import("http-sentinel");

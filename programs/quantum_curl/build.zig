@@ -15,6 +15,15 @@ pub fn build(b: *std.Build) void {
     });
     const http_sentinel_module = http_sentinel_dep.module("http-sentinel");
 
+    // GCP Auth — pure Zig OAuth2 / SA / ADC / metadata token provider.
+    // Used by the --gcp-auth flag for long-running batches that outlast the
+    // default 1h bearer token lifetime (e.g. hours of embedding inference).
+    const gcp_auth_dep = b.dependency("gcp_auth", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const gcp_auth_module = gcp_auth_dep.module("gcp-auth");
+
     // ============================================================
     // QUANTUM CURL LIBRARY MODULE
     // The Command Protocol Engine - exports core routing capabilities
@@ -25,6 +34,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     quantum_curl_module.addImport("http-sentinel", http_sentinel_module);
+    quantum_curl_module.addImport("gcp-auth", gcp_auth_module);
 
     // ============================================================
     // QUANTUM CURL EXECUTABLE
@@ -38,6 +48,7 @@ pub fn build(b: *std.Build) void {
     });
     exe_module.addImport("quantum-curl", quantum_curl_module);
     exe_module.addImport("http-sentinel", http_sentinel_module);
+    exe_module.addImport("gcp-auth", gcp_auth_module);
 
     const exe = b.addExecutable(.{
         .name = "quantum-curl",

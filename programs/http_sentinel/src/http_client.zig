@@ -119,6 +119,15 @@ pub const HttpClient = struct {
         }
     };
 
+    /// Streaming response — body was piped directly to a caller-supplied Writer.
+    /// No buffered body slice. Used by the *StreamToWriter methods for memory-bound
+    /// workloads like the Universal Batch API where 50 MB+ bodies × 100 concurrent
+    /// workers would OOM a Cloud Run container.
+    pub const StreamedResponse = struct {
+        status: http.Status,
+        bytes_written: u64,
+    };
+
     /// Response with an extracted custom header value
     pub const ResponseWithHeader = struct {
         status: http.Status,
@@ -134,7 +143,7 @@ pub const HttpClient = struct {
 
     /// Configuration options for requests
     pub const RequestOptions = struct {
-        max_body_size: usize = 10 * 1024 * 1024,
+        max_body_size: usize = 64 * 1024 * 1024,
         timeout_ns: u64 = 0,
     };
 
@@ -201,7 +210,7 @@ pub const HttpClient = struct {
         body: []const u8,
     ) !*StreamingResponse {
         var http_response = try self.postWithOptions(url, headers, body, .{
-            .max_body_size = 10 * 1024 * 1024,
+            .max_body_size = 64 * 1024 * 1024,
         });
 
         const stream = try self.allocator.create(StreamingResponse);
@@ -288,6 +297,135 @@ pub const HttpClient = struct {
         _ = reader.discardRemaining() catch {};
 
         return status;
+    }
+
+    /// Stream a request's response body directly to a caller-supplied Writer.
+    /// Private helper — use post/get/put/patch/deleteStreamToWriter wrappers.
+    ///
+    /// The Request stays on THIS stack frame (same pattern as postSseStream) so
+    /// the TLS connection's @fieldParentPtr chains remain valid during the stream.
+    /// Gzip content-encoding is handled transparently via inline flate.Decompress.
+    ///
+    /// Caller owns the Writer and must flush it after this function returns.
+    /// Returns status + bytes_written (no allocated body slice — zero buffering).
+    fn streamToWriter(
+        self: *HttpClient,
+        method: http.Method,
+        url: []const u8,
+        headers: []const http.Header,
+        body: ?[]const u8,
+        dest: *std.Io.Writer,
+        options: RequestOptions,
+    ) !StreamedResponse {
+        _ = options; // reserved for future timeout wiring
+        try validateHeaders(headers);
+        const uri = try std.Uri.parse(url);
+
+        var req = try self.client.request(method, uri, .{
+            .extra_headers = headers,
+        });
+        defer req.deinit();
+
+        if (body) |b| {
+            req.transfer_encoding = .{ .content_length = b.len };
+            var body_writer = try req.sendBodyUnflushed(&.{});
+            try body_writer.writer.writeAll(b);
+            try body_writer.end();
+            if (req.connection) |conn| {
+                try conn.flush();
+            } else {
+                return error.ConnectionLost;
+            }
+        } else {
+            try req.sendBodiless();
+        }
+
+        var response = try req.receiveHead(&.{});
+        const status = response.head.status;
+
+        // Even on HTTP error status we still drain the body to the writer so the
+        // caller can inspect error payloads. quantum_curl treats status>=400 as
+        // a failure separately.
+        var transfer_buffer: [16384]u8 = undefined;
+        const response_reader = response.reader(&transfer_buffer);
+
+        const is_gzip = switch (response.head.content_encoding) {
+            .gzip => true,
+            else => false,
+        };
+
+        var bytes: u64 = 0;
+        if (is_gzip) {
+            const flate = std.compress.flate;
+            var decomp_buffer: [flate.max_window_len]u8 = undefined;
+            var decomp = flate.Decompress.init(response_reader, .gzip, &decomp_buffer);
+            bytes = @intCast(try decomp.reader.streamRemaining(dest));
+        } else {
+            bytes = @intCast(try response_reader.streamRemaining(dest));
+        }
+
+        return StreamedResponse{
+            .status = status,
+            .bytes_written = bytes,
+        };
+    }
+
+    /// POST with response body streamed directly to `dest` — no intermediate buffering.
+    pub fn postStreamToWriter(
+        self: *HttpClient,
+        url: []const u8,
+        headers: []const http.Header,
+        body: []const u8,
+        dest: *std.Io.Writer,
+        options: RequestOptions,
+    ) !StreamedResponse {
+        return self.streamToWriter(.POST, url, headers, body, dest, options);
+    }
+
+    /// GET with response body streamed directly to `dest` — no intermediate buffering.
+    pub fn getStreamToWriter(
+        self: *HttpClient,
+        url: []const u8,
+        headers: []const http.Header,
+        dest: *std.Io.Writer,
+        options: RequestOptions,
+    ) !StreamedResponse {
+        return self.streamToWriter(.GET, url, headers, null, dest, options);
+    }
+
+    /// PUT with response body streamed directly to `dest` — no intermediate buffering.
+    pub fn putStreamToWriter(
+        self: *HttpClient,
+        url: []const u8,
+        headers: []const http.Header,
+        body: []const u8,
+        dest: *std.Io.Writer,
+        options: RequestOptions,
+    ) !StreamedResponse {
+        return self.streamToWriter(.PUT, url, headers, body, dest, options);
+    }
+
+    /// PATCH with response body streamed directly to `dest` — no intermediate buffering.
+    pub fn patchStreamToWriter(
+        self: *HttpClient,
+        url: []const u8,
+        headers: []const http.Header,
+        body: []const u8,
+        dest: *std.Io.Writer,
+        options: RequestOptions,
+    ) !StreamedResponse {
+        return self.streamToWriter(.PATCH, url, headers, body, dest, options);
+    }
+
+    /// DELETE with response body streamed directly to `dest` — no intermediate buffering.
+    pub fn deleteStreamToWriter(
+        self: *HttpClient,
+        url: []const u8,
+        headers: []const http.Header,
+        dest: *std.Io.Writer,
+        options: RequestOptions,
+    ) !StreamedResponse {
+        return self.streamToWriter(.DELETE, url, headers, null, dest, options);
     }
 
     /// Perform a POST request
@@ -395,7 +533,7 @@ pub const HttpClient = struct {
 
         const body_data = try response_reader.allocRemaining(
             self.allocator,
-            std.Io.Limit.limited(10 * 1024 * 1024),
+            std.Io.Limit.limited(64 * 1024 * 1024),
         );
         defer self.allocator.free(body_data);
 
@@ -404,7 +542,7 @@ pub const HttpClient = struct {
             .identity => null,
             else => null,
         };
-        const final_body = try self.processBody(body_data, content_encoding_str, 10 * 1024 * 1024);
+        const final_body = try self.processBody(body_data, content_encoding_str, 64 * 1024 * 1024);
 
         return ResponseWithHeader{
             .status = response.head.status,
@@ -472,7 +610,7 @@ pub const HttpClient = struct {
         var transfer_buffer: [8192]u8 = undefined;
         const response_reader = response.reader(&transfer_buffer);
 
-        const body_data = try response_reader.allocRemaining(self.allocator, std.Io.Limit.limited(10 * 1024 * 1024));
+        const body_data = try response_reader.allocRemaining(self.allocator, std.Io.Limit.limited(64 * 1024 * 1024));
         defer self.allocator.free(body_data);
 
         return Response{
