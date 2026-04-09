@@ -167,6 +167,9 @@ fi
 # 4. Deploy to Cloud Run.
 echo ""
 echo "→ Deploying to Cloud Run..."
+# Secrets are stored in GCP Secret Manager and mounted as env vars.
+# Run ./deploy/migrate_secrets.sh once to populate them.
+# To rotate: echo 'new-value' | gcloud secrets versions add <name> --data-file=-
 DEPLOY_OUTPUT=$(gcloud run deploy "$SERVICE" \
   --image "$IMAGE" \
   --region "$REGION" \
@@ -180,12 +183,12 @@ DEPLOY_OUTPUT=$(gcloud run deploy "$SERVICE" \
   --max-instances=10 \
   --concurrency=80 \
   --timeout=300s \
-  --set-env-vars="QAI_BOOTSTRAP_KEY=${QAI_BOOTSTRAP_KEY:-}" \
-  --set-env-vars="ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}" \
-  --set-env-vars="DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}" \
-  --set-env-vars="GEMINI_API_KEY=${GEMINI_API_KEY:-}" \
-  --set-env-vars="XAI_API_KEY=${XAI_API_KEY:-}" \
-  --set-env-vars="OPENAI_API_KEY=${OPENAI_API_KEY:-}" \
+  --set-secrets="QAI_BOOTSTRAP_KEY=qai-bootstrap-key:latest" \
+  --set-secrets="ANTHROPIC_API_KEY=anthropic-api-key:latest" \
+  --set-secrets="DEEPSEEK_API_KEY=deepseek-api-key:latest" \
+  --set-secrets="GEMINI_API_KEY=gemini-api-key:latest" \
+  --set-secrets="XAI_API_KEY=xai-api-key:latest" \
+  --set-secrets="OPENAI_API_KEY=openai-api-key:latest" \
   --quiet 2>&1)
 
 DEPLOY_STATUS=$?
