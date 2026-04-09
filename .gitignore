@@ -97,3 +97,11 @@ service-account.json
 *.gguf
 *.ggml
 *.bin
+
+# ── zig_ai_server runtime state ──────────────────────────────────
+# Ledger / snapshot / WAL files are written at runtime by the server;
+# they are not source and must never be committed. models.csv lives
+# at programs/zig_ai_server/src/models.csv (embedded via @embedFile).
+programs/zig_ai_server/data/*.jsonl
+programs/zig_ai_server/data/*.json
+programs/zig_ai_server/data/wal.log
