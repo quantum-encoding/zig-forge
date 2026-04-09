@@ -440,16 +440,15 @@ fn renderToolResult(
         try md.appendSlice(allocator, "<!-- spilled tool result -->\n\n```\n");
         // Cap inlined spill content at 16KB to keep output manageable
         const inline_cap = 16 * 1024;
-        if (spill_content.len > inline_cap) {
-            try md.appendSlice(allocator, spill_content[0..inline_cap]);
+        const truncated_spill = safeTruncate(spill_content, inline_cap);
+        try md.appendSlice(allocator, truncated_spill);
+        if (truncated_spill.len < spill_content.len) {
             const suffix = try std.fmt.allocPrint(allocator,
                 "\n... ({d} bytes truncated from {d} total)",
-                .{ spill_content.len - inline_cap, spill_content.len },
+                .{ spill_content.len - truncated_spill.len, spill_content.len },
             );
             defer allocator.free(suffix);
             try md.appendSlice(allocator, suffix);
-        } else {
-            try md.appendSlice(allocator, spill_content);
         }
         try md.appendSlice(allocator, "\n```\n\n");
         stats.spilled_results += 1;
@@ -460,13 +459,12 @@ fn renderToolResult(
     // Regular inline tool result
     try md.appendSlice(allocator, "```\n");
     const cap = 4096;
-    if (text.len > cap) {
-        try md.appendSlice(allocator, text[0..cap]);
-        const suffix = try std.fmt.allocPrint(allocator, "\n... ({d} bytes truncated)", .{text.len - cap});
+    const truncated_text = safeTruncate(text, cap);
+    try md.appendSlice(allocator, truncated_text);
+    if (truncated_text.len < text.len) {
+        const suffix = try std.fmt.allocPrint(allocator, "\n... ({d} bytes truncated)", .{text.len - truncated_text.len});
         defer allocator.free(suffix);
         try md.appendSlice(allocator, suffix);
-    } else {
-        try md.appendSlice(allocator, text);
     }
     try md.appendSlice(allocator, "\n```\n\n");
 }
@@ -623,6 +621,16 @@ fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return buf;
 }
 
+/// Truncate a UTF-8 string at `max_len` bytes, backing off to the nearest
+/// character boundary so we never split a multi-byte sequence.
+fn safeTruncate(text: []const u8, max_len: usize) []const u8 {
+    if (text.len <= max_len) return text;
+    var end = max_len;
+    // Walk back if we land on a UTF-8 continuation byte (10xxxxxx)
+    while (end > 0 and (text[end] & 0xC0) == 0x80) : (end -= 1) {}
+    return text[0..end];
+}
+
 /// Simple JSON value renderer. Returns a heap-allocated string up to max_len chars.
 fn stringifyValue(allocator: std.mem.Allocator, val: std.json.Value, max_len: usize) ![]u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -630,9 +638,9 @@ fn stringifyValue(allocator: std.mem.Allocator, val: std.json.Value, max_len: us
 
     switch (val) {
         .string => |s| {
-            const limit = @min(s.len, max_len);
-            try buf.appendSlice(allocator, s[0..limit]);
-            if (s.len > max_len) try buf.appendSlice(allocator, "...");
+            const truncated = safeTruncate(s, max_len);
+            try buf.appendSlice(allocator, truncated);
+            if (truncated.len < s.len) try buf.appendSlice(allocator, "...");
         },
         .integer => |n| {
             const s = try std.fmt.allocPrint(allocator, "{d}", .{n});
