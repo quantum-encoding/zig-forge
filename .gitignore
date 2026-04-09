@@ -105,3 +105,9 @@ service-account.json
 programs/zig_ai_server/data/*.jsonl
 programs/zig_ai_server/data/*.json
 programs/zig_ai_server/data/wal.log
+
+# ── zig_ai_server: Vertex AI deploy scripts staged for firebase ──
+# These deploy*.sh / bench scripts belong in the firebase project that
+# calls the service. Kept locally for convenience while the migration
+# is pending; do not commit them to zig-forge.
+programs/zig_ai_server/scripts/_firebase/
