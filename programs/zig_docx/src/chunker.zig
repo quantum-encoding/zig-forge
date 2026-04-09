@@ -55,27 +55,31 @@ pub const ChunkResult = struct {
         defer buf.deinit(allocator);
 
         try buf.appendSlice(allocator, "# Chunk Index\n\n");
-        const src_line = try std.fmt.allocPrint(allocator, "Source: `{s}`\n", .{self.source});
+        const src_line = try std.fmt.allocPrint(allocator,
+            "**Source:** `{s}`\n**Chunks:** {d} | **Words:** {d}\n\n## Chunks\n\n",
+            .{ self.source, self.chunks.len, self.total_words },
+        );
         defer allocator.free(src_line);
         try buf.appendSlice(allocator, src_line);
-
-        const stats = try std.fmt.allocPrint(allocator, "Total chunks: {d} | Total words: {d}\n\n## Chunks\n\n", .{ self.chunks.len, self.total_words });
-        defer allocator.free(stats);
-        try buf.appendSlice(allocator, stats);
 
         for (self.chunks) |chunk| {
             const fname = chunkFilename(allocator, chunk.index, chunk.title) catch continue;
             defer allocator.free(fname);
             const hex = chunk.hashHex();
 
-            const line = try std.fmt.allocPrint(allocator, "- [{s}](./{s}) — {d} words `#{s}`{s}{s}\n", .{
-                chunk.title,
-                fname,
-                chunk.word_count,
-                hex[0..8],
-                if (chunk.has_code) " [code]" else "",
-                if (chunk.has_tables) " [table]" else "",
-            });
+            // Format: NNNN. [title](./file.md) — N words `#hash` [flags]
+            const line = try std.fmt.allocPrint(allocator,
+                "- `{d:0>4}` [{s}](./{s}) — {d} words `#{s}`{s}{s}\n",
+                .{
+                    chunk.index + 1,
+                    chunk.title,
+                    fname,
+                    chunk.word_count,
+                    hex[0..8],
+                    if (chunk.has_code) " [code]" else "",
+                    if (chunk.has_tables) " [table]" else "",
+                },
+            );
             defer allocator.free(line);
             try buf.appendSlice(allocator, line);
         }
@@ -92,10 +96,10 @@ pub const ChunkResult = struct {
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(allocator);
 
-        // Header comment
+        // Header comment — machine-readable metadata
         const header = try std.fmt.allocPrint(allocator,
-            "<!-- chunk:{d}/{d} hash:{s} words:{d} -->\n\n",
-            .{ chunk.index + 1, self.chunks.len, hex[0..16], chunk.word_count },
+            "<!-- source: {s} -->\n<!-- title: {s} -->\n<!-- chunk: {d}/{d} | hash: {s} | words: {d} -->\n\n",
+            .{ self.source, chunk.title, chunk.index + 1, self.chunks.len, hex[0..16], chunk.word_count },
         );
         defer allocator.free(header);
         try buf.appendSlice(allocator, header);
