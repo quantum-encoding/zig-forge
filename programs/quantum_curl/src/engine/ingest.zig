@@ -41,6 +41,7 @@
 
 const std = @import("std");
 const manifest = @import("manifest.zig");
+const fail_log = @import("fail_log.zig");
 
 pub const InputFormat = enum {
     jsonl,
@@ -75,16 +76,18 @@ pub fn detectFormat(file_path: ?[]const u8, content: []const u8) InputFormat {
 }
 
 /// Parse input content in any supported format into RequestManifests.
+/// If fail_logger is provided, parse errors are logged to it.
 pub fn parseInput(
     allocator: std.mem.Allocator,
     content: []const u8,
     file_path: ?[]const u8,
     requests: *std.ArrayList(manifest.RequestManifest),
+    fail_logger: ?*fail_log.FailLogger,
 ) !void {
     const format = detectFormat(file_path, content);
 
     switch (format) {
-        .jsonl => try parseJsonLines(allocator, content, requests),
+        .jsonl => try parseJsonLines(allocator, content, requests, fail_logger),
         .json_array => try parseJsonArray(allocator, content, requests),
         .csv => try parseDelimited(allocator, content, ',', requests),
         .tsv => try parseDelimited(allocator, content, '\t', requests),
@@ -102,19 +105,29 @@ fn parseJsonLines(
     allocator: std.mem.Allocator,
     content: []const u8,
     requests: *std.ArrayList(manifest.RequestManifest),
+    fail_logger: ?*fail_log.FailLogger,
 ) !void {
     var line_iter = std.mem.splitScalar(u8, content, '\n');
-    var line_num: usize = 0;
+    var line_num: u32 = 0;
 
     while (line_iter.next()) |line| {
         line_num += 1;
         const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
         if (trimmed.len == 0) continue;
 
-        const request = manifest.parseRequestManifest(allocator, trimmed) catch |err| {
+        var request = manifest.parseRequestManifest(allocator, trimmed) catch |err| {
             std.debug.print("[ingest] Error parsing JSONL line {}: {}\n", .{ line_num, err });
+            if (fail_logger) |fl| {
+                fl.logParseError(trimmed, line_num, @errorName(err));
+            }
             continue;
         };
+
+        // Capture the original raw line for failure replay.
+        // We dupe it because the outer `content` buffer is freed after parsing.
+        request.raw_line = allocator.dupe(u8, trimmed) catch null;
+        request.source_line = line_num;
+
         try requests.append(allocator, request);
     }
 }

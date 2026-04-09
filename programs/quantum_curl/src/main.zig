@@ -62,6 +62,7 @@ pub fn main(init: std.process.Init) !void {
     var output_dir: ?[]const u8 = null;
     var output_ext: []const u8 = "md";
     var base64_field: ?[]const u8 = null;
+    var failed_log_path: ?[]const u8 = null;
     var show_help = false;
 
     // Parse command line arguments (skip program name at index 0)
@@ -120,6 +121,13 @@ pub fn main(init: std.process.Init) !void {
                 return error.InvalidArgs;
             }
             base64_field = args[i];
+        } else if (std.mem.eql(u8, arg, "--failed-log") or std.mem.eql(u8, arg, "-l")) {
+            i += 1;
+            if (i >= args.len) {
+                std.debug.print("Error: --failed-log requires a path\n", .{});
+                return error.InvalidArgs;
+            }
+            failed_log_path = args[i];
         } else {
             std.debug.print("Error: Unknown option: {s}\n", .{arg});
             return error.InvalidArgs;
@@ -131,6 +139,11 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    // Initialize the failure logger (if --failed-log provided).
+    // Must be alive for the entire batch so worker threads can write to it.
+    var fail_logger = try quantum_curl.fail_log.FailLogger.init(allocator, failed_log_path);
+    defer fail_logger.deinit();
+
     // Read input - the Battle Plan
     var requests: std.ArrayList(manifest.RequestManifest) = .empty;
     defer {
@@ -140,18 +153,25 @@ pub fn main(init: std.process.Init) !void {
         requests.deinit(allocator);
     }
 
+    // 4 GB cap lets us handle batch-embedding plans where individual rows
+    // can be hundreds of KB each (TEI multi-instance POST bodies). For the
+    // chronos corpus we see ~222 MB plan files; the old 50 MB cap rejected
+    // those with StreamTooLong. 4 GB is high enough to never trip on any
+    // realistic plan while still being a sane upper bound.
+    const max_plan_bytes: usize = 4 * 1024 * 1024 * 1024;
+
     if (input_file) |file_path| {
-        const content = try std.Io.Dir.cwd().readFileAlloc(io, file_path, allocator, .limited(50 * 1024 * 1024));
+        const content = try std.Io.Dir.cwd().readFileAlloc(io, file_path, allocator, .limited(max_plan_bytes));
         defer allocator.free(content);
-        try ingest.parseInput(allocator, content, file_path, &requests);
+        try ingest.parseInput(allocator, content, file_path, &requests, &fail_logger);
     } else {
         // Read stdin
         const stdin = std.Io.File.stdin();
         var buf: [8192]u8 = undefined;
         var stdin_reader = stdin.reader(io, &buf);
-        const content = try stdin_reader.interface.allocRemaining(allocator, .limited(50 * 1024 * 1024));
+        const content = try stdin_reader.interface.allocRemaining(allocator, .limited(max_plan_bytes));
         defer allocator.free(content);
-        try ingest.parseInput(allocator, content, null, &requests);
+        try ingest.parseInput(allocator, content, null, &requests, &fail_logger);
     }
 
     if (requests.items.len == 0) {
@@ -180,11 +200,26 @@ pub fn main(init: std.process.Init) !void {
     );
     defer engine.deinit();
 
+    // Attach the failure logger if enabled
+    if (failed_log_path != null) {
+        engine.setFailLogger(&fail_logger);
+    }
+
     // Execute the Battle Plan
     try engine.processBatch(requests.items);
 
     // Flush any remaining buffered output
     try std.Io.Writer.flush(&writer.interface);
+
+    // Print failure summary if fail logging was enabled
+    if (failed_log_path) |log_path| {
+        std.debug.print(
+            "\n[quantum-curl] Failures: {} / {} requests\n" ++
+                "[quantum-curl] Rerun failed requests:\n" ++
+                "  quantum-curl --file {s}\n",
+            .{ fail_logger.failed_count, requests.items.len, log_path },
+        );
+    }
 }
 
 // Input parsing is handled by the ingest module (CSV, TSV, JSON, JSONL).
@@ -213,6 +248,10 @@ fn printUsage() void {
         \\    -b, --base64-field [p]  Dot-path to base64 data in JSON response body
         \\                            Decodes base64 → binary file (for images, audio, etc.)
         \\                            Example: predictions.0.bytesBase64Encoded
+        \\    -l, --failed-log [path] Write failed requests to {path} (replay-ready JSONL)
+        \\                            Also creates {path}.errors.jsonl with diagnostics
+        \\                            Rerun failures: quantum-curl --file failed.jsonl
+        \\                            Failure criteria: status 0 (transport) or >= 400 (HTTP)
         \\
         \\INPUT FORMATS (auto-detected from extension or content):
         \\
@@ -249,6 +288,10 @@ fn printUsage() void {
         \\
         \\    # Pipeline mode - generate requests on the fly
         \\    ./generate-requests.sh | quantum-curl --concurrency 200
+        \\
+        \\    # Capture failures for retry
+        \\    quantum-curl --file plan.jsonl --failed-log failed.jsonl
+        \\    quantum-curl --file failed.jsonl  # Rerun only failures
         \\
         \\STRATEGIC APPLICATIONS:
         \\    - Service Mesh Router: High-velocity inter-service communication

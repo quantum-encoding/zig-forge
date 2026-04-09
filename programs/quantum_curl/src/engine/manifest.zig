@@ -51,6 +51,14 @@ pub const RequestManifest = struct {
     /// Optional retry configuration (overrides engine default)
     max_retries: ?u32 = null,
 
+    /// Original raw line from input (for failure replay).
+    /// When a request fails, this exact bytes are written to the failed-log
+    /// so the user can rerun only the failures: `quantum-curl --file failed.jsonl`.
+    raw_line: ?[]const u8 = null,
+
+    /// Source line number in the input file (1-based) for error reporting.
+    source_line: u32 = 0,
+
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *RequestManifest) void {
@@ -66,6 +74,9 @@ pub const RequestManifest = struct {
                 self.allocator.free(entry.value_ptr.*);
             }
             headers.deinit(self.allocator);
+        }
+        if (self.raw_line) |line| {
+            self.allocator.free(line);
         }
     }
 };
@@ -138,15 +149,13 @@ pub const ResponseManifest = struct {
             try writer.writeAll("\"");
         }
 
-        // Body if present (truncated for large responses)
+        // Body if present. No truncation — downstream tools often need the full
+        // response (e.g. embedding vectors, model inference outputs). Use
+        // --output-dir for workflows where you want bodies as separate files
+        // instead of inline.
         if (self.body) |body| {
             try writer.writeAll(",\"body\":\"");
-            const max_body_len = 1000; // Truncate large bodies for JSONL output
-            const body_to_write = if (body.len > max_body_len) body[0..max_body_len] else body;
-            try writeEscapedString(writer, body_to_write);
-            if (body.len > max_body_len) {
-                try writer.writeAll("... (truncated)");
-            }
+            try writeEscapedString(writer, body);
             try writer.writeAll("\"");
         }
 

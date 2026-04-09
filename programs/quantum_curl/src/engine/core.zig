@@ -22,6 +22,7 @@ const std = @import("std");
 const http_sentinel = @import("http-sentinel");
 const HttpClient = http_sentinel.HttpClient;
 const manifest = @import("manifest.zig");
+const fail_log = @import("fail_log.zig");
 
 /// Zig 0.16 compatible Mutex using pthread
 const Mutex = struct {
@@ -77,13 +78,22 @@ pub fn Engine(comptime WriterType: type) type {
         /// Mutex for synchronized output
         output_mutex: Mutex,
 
+        /// Optional failure logger — writes failed requests to a replay file
+        fail_logger: ?*fail_log.FailLogger = null,
+
         pub fn init(allocator: std.mem.Allocator, config: EngineConfig, output_writer: WriterType) !Self {
             return Self{
                 .allocator = allocator,
                 .config = config,
                 .output_writer = output_writer,
                 .output_mutex = .{},
+                .fail_logger = null,
             };
+        }
+
+        /// Attach a failure logger. Call this after init() and before processBatch().
+        pub fn setFailLogger(self: *Self, logger: *fail_log.FailLogger) void {
+            self.fail_logger = logger;
         }
 
         pub fn deinit(_: *Self) void {
@@ -223,6 +233,26 @@ pub fn Engine(comptime WriterType: type) type {
             response.latency_ms = @intCast(elapsed_ns / std.time.ns_per_ms);
 
             self.writeResponse(&response);
+
+            // Log to failure replay file if this request failed.
+            // Failure criteria:
+            //   - status == 0 (transport error: DNS, TCP, TLS, timeout)
+            //   - status >= 400 (HTTP error response)
+            if (self.fail_logger) |fl| {
+                const failed = response.status == 0 or response.status >= 400;
+                if (failed) {
+                    const err_msg = response.error_message orelse "http_error";
+                    fl.logFailure(
+                        request.raw_line,
+                        request.id,
+                        request.source_line,
+                        response.status,
+                        response.retry_count,
+                        err_msg,
+                    );
+                }
+            }
+
             response.deinit();
         }
 
