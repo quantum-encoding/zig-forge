@@ -296,10 +296,12 @@ test "SHA-256: different input = different hash" {
 const oidc = @import("oidc.zig");
 const auth_rl = @import("auth_ratelimit.zig");
 const wal_test = @import("store/wal_test.zig");
+const integration_test = @import("integration_test.zig");
 
 test "module tests imported" {
     _ = auth_rl;
     _ = wal_test;
+    _ = integration_test;
 }
 
 test "OIDC: nonce verification integration" {

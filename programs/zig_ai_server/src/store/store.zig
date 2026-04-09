@@ -217,9 +217,17 @@ pub const Store = struct {
     }
 
     pub fn deinit(self: *Store) void {
+        // Free duped account ID strings (the keys of the accounts map)
+        var acct_iter = self.accounts.iterator();
+        while (acct_iter.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
         self.accounts.deinit(self.allocator);
         self.keys.deinit(self.allocator);
         self.reservations.deinit(self.allocator);
+        self.dirty_accounts.deinit(self.allocator);
+        // Free the WAL file path allocated in init()
+        self.allocator.free(self.wal.file_path);
     }
 
     // ── Account Operations ──────────────────────────────────
