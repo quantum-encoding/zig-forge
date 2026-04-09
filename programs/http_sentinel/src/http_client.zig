@@ -242,7 +242,12 @@ pub const HttpClient = struct {
         var body_writer = try req.sendBodyUnflushed(&.{});
         try body_writer.writer.writeAll(body);
         try body_writer.end();
-        try req.connection.?.flush();
+        // Null-safe flush — connection could be null if earlier steps partially failed
+        if (req.connection) |conn| {
+            try conn.flush();
+        } else {
+            return error.ConnectionLost;
+        }
 
         var response = try req.receiveHead(&.{});
         const status = response.head.status;
@@ -315,7 +320,12 @@ pub const HttpClient = struct {
         var body_writer = try req.sendBodyUnflushed(&.{});
         try body_writer.writer.writeAll(body);
         try body_writer.end();
-        try req.connection.?.flush();
+        // Null-safe flush — connection could be null if earlier steps partially failed
+        if (req.connection) |conn| {
+            try conn.flush();
+        } else {
+            return error.ConnectionLost;
+        }
 
         var response = try req.receiveHead(&.{});
 
@@ -362,7 +372,12 @@ pub const HttpClient = struct {
         var body_writer = try req.sendBodyUnflushed(&.{});
         try body_writer.writer.writeAll(body);
         try body_writer.end();
-        try req.connection.?.flush();
+        // Null-safe flush — connection could be null if earlier steps partially failed
+        if (req.connection) |conn| {
+            try conn.flush();
+        } else {
+            return error.ConnectionLost;
+        }
 
         var response = try req.receiveHead(&.{});
 
@@ -483,7 +498,12 @@ pub const HttpClient = struct {
         var body_writer = try req.sendBodyUnflushed(&.{});
         try body_writer.writer.writeAll(body);
         try body_writer.end();
-        try req.connection.?.flush();
+        // Null-safe flush — connection could be null if earlier steps partially failed
+        if (req.connection) |conn| {
+            try conn.flush();
+        } else {
+            return error.ConnectionLost;
+        }
 
         var response = try req.receiveHead(&.{});
 
@@ -517,7 +537,12 @@ pub const HttpClient = struct {
         var body_writer = try req.sendBodyUnflushed(&.{});
         try body_writer.writer.writeAll(body);
         try body_writer.end();
-        try req.connection.?.flush();
+        // Null-safe flush — connection could be null if earlier steps partially failed
+        if (req.connection) |conn| {
+            try conn.flush();
+        } else {
+            return error.ConnectionLost;
+        }
 
         var response = try req.receiveHead(&.{});
 

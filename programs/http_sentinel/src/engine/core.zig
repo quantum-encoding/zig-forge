@@ -127,16 +127,9 @@ pub fn Engine(comptime WriterType: type) type {
             self.processRequest(request);
         }
 
-        /// Process a single request
+        /// Process a single request with per-attempt client isolation
         fn processRequest(self: *Self, request: *manifest.RequestManifest) void {
-            // Create thread-local HTTP client
-            var http_client = HttpClient.init(self.allocator) catch {
-                self.writeError(request.id, "Failed to initialize HTTP client");
-                return;
-            };
-            defer http_client.deinit();
-
-            const io = http_client.io();
+            const io = self.io_threaded.io();
             var timer = Timer.start(io);
 
             var response = manifest.ResponseManifest{
@@ -153,11 +146,25 @@ pub fn Engine(comptime WriterType: type) type {
             };
             defer response.deinit();
 
-            // Execute request with retry
+            // Execute request with retry — fresh HttpClient per attempt
+            // so a bad TLS/connection state doesn't contaminate retries
             const max_retries = request.max_retries orelse self.config.default_max_retries;
             var retry_count: u32 = 0;
+            var last_err: ?anyerror = null;
 
             while (retry_count <= max_retries) : (retry_count += 1) {
+                // Fresh HTTP client per attempt — isolates connection state
+                var http_client = HttpClient.init(self.allocator) catch |err| {
+                    last_err = err;
+                    // Short backoff before trying to init again
+                    if (retry_count < max_retries) {
+                        io.sleep(std.Io.Duration.fromMilliseconds(50), .awake) catch {};
+                        continue;
+                    }
+                    break;
+                };
+                defer http_client.deinit();
+
                 var result = self.executeHttpRequest(&http_client, request);
 
                 if (result) |*http_response| {
@@ -166,30 +173,75 @@ pub fn Engine(comptime WriterType: type) type {
                     response.status = @intFromEnum(http_response.status);
                     response.body = self.allocator.dupe(u8, http_response.body) catch null;
                     response.retry_count = retry_count;
+                    last_err = null;
                     break;
                 } else |err| {
+                    last_err = err;
                     if (retry_count < max_retries) {
-                        // Calculate exponential backoff
                         const backoff_ms = @as(u64, 100) * (@as(u64, 1) << @intCast(retry_count));
                         io.sleep(std.Io.Duration.fromMilliseconds(@intCast(backoff_ms)), .awake) catch {};
                         continue;
-                    } else {
-                        // Final failure
-                        response.error_message = std.fmt.allocPrint(
-                            self.allocator,
-                            "{}",
-                            .{err},
-                        ) catch null;
-                        response.retry_count = retry_count;
-                        break;
                     }
+                    break;
                 }
+            }
+
+            // If we never succeeded, write a categorized error message
+            if (last_err) |err| {
+                const category = categorizeError(err);
+                response.error_message = std.fmt.allocPrint(
+                    self.allocator,
+                    "{s}: {s}",
+                    .{ category, @errorName(err) },
+                ) catch null;
+                response.retry_count = retry_count;
             }
 
             const elapsed_ns = timer.read();
             response.latency_ms = @intCast(elapsed_ns / std.time.ns_per_ms);
 
             self.writeResponse(&response);
+        }
+
+        /// Categorize an error for clearer debugging
+        fn categorizeError(err: anyerror) []const u8 {
+            return switch (err) {
+                error.ConnectionRefused,
+                error.ConnectionResetByPeer,
+                error.ConnectionTimedOut,
+                error.NetworkUnreachable,
+                error.HostUnreachable,
+                error.ConnectionLost,
+                => "connection_failed",
+
+                error.TlsInitializationFailed,
+                error.CertificateBundleLoadFailure,
+                => "tls_failed",
+
+                error.UnknownHostName,
+                error.TemporaryNameServerFailure,
+                error.NameServerFailure,
+                error.UnexpectedHostNameError,
+                => "dns_failed",
+
+                error.OutOfMemory,
+                => "out_of_memory",
+
+                error.HttpHeadersInvalid,
+                error.HttpHeaderContinuationsUnsupported,
+                error.HttpTransferEncodingUnsupported,
+                => "http_protocol_error",
+
+                error.UnsupportedUriScheme,
+                error.InvalidCharacter,
+                error.InvalidFormat,
+                => "invalid_url",
+
+                error.InvalidHeader,
+                => "invalid_header",
+
+                else => "request_failed",
+            };
         }
 
         /// Execute HTTP request
