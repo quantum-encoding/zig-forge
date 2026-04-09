@@ -19,7 +19,6 @@
 //! - **Mutex-Protected Output**: Thread-safe streaming of JSONL results
 
 const std = @import("std");
-const linux = std.os.linux;
 const http_sentinel = @import("http-sentinel");
 const HttpClient = http_sentinel.HttpClient;
 const manifest = @import("manifest.zig");
@@ -196,12 +195,15 @@ pub fn Engine(comptime WriterType: type) type {
                 } else |err| {
                     if (retry_count < max_retries) {
                         // Calculate exponential backoff: 100ms * 2^attempt
+                        // Use std.c.nanosleep — cross-platform via libc (works on Linux + macOS).
+                        // Previously used linux.nanosleep which SIGSYS'd on macOS because
+                        // Linux syscall numbers don't map to Darwin/Mach kernel.
                         const backoff_ms = @as(u64, 100) * (@as(u64, 1) << @intCast(retry_count));
-                        var ts: linux.timespec = .{
+                        var ts: std.c.timespec = .{
                             .sec = @intCast(backoff_ms / 1000),
                             .nsec = @intCast((backoff_ms % 1000) * 1_000_000),
                         };
-                        _ = linux.nanosleep(&ts, null);
+                        _ = std.c.nanosleep(&ts, null);
                         continue;
                     } else {
                         // Final failure - record error
