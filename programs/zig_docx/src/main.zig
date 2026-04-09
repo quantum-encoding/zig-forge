@@ -115,6 +115,82 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    // Detect plain text / markdown files — read directly, chunk or pass through
+    const is_text = std.mem.endsWith(u8, parsed.file_path, ".md") or
+        std.mem.endsWith(u8, parsed.file_path, ".MD") or
+        std.mem.endsWith(u8, parsed.file_path, ".markdown") or
+        std.mem.endsWith(u8, parsed.file_path, ".txt") or
+        std.mem.endsWith(u8, parsed.file_path, ".TXT") or
+        std.mem.endsWith(u8, parsed.file_path, ".mdx") or
+        std.mem.endsWith(u8, parsed.file_path, ".MDX");
+
+    if (is_text) {
+        // Read file content
+        const text = blk: {
+            const path_z = allocator.allocSentinel(u8, parsed.file_path.len, 0) catch {
+                std.debug.print("Error: out of memory\n", .{});
+                return;
+            };
+            defer allocator.free(path_z);
+            @memcpy(path_z, parsed.file_path);
+
+            const fp = fopen(path_z.ptr, "rb") orelse {
+                std.debug.print("Error opening '{s}'\n", .{parsed.file_path});
+                return;
+            };
+            defer _ = fclose(fp);
+
+            _ = fseek(fp, 0, 2);
+            const size = ftell(fp);
+            if (size <= 0) {
+                std.debug.print("Error: file is empty\n", .{});
+                return;
+            }
+            _ = fseek(fp, 0, 0);
+
+            const buf = allocator.alloc(u8, @intCast(size)) catch {
+                std.debug.print("Error: out of memory\n", .{});
+                return;
+            };
+            const n = fread(buf.ptr, 1, @intCast(size), fp);
+            if (n != @as(usize, @intCast(size))) {
+                allocator.free(buf);
+                std.debug.print("Error: read failed\n", .{});
+                return;
+            }
+            break :blk buf;
+        };
+        defer allocator.free(text);
+
+        if (parsed.info_only) {
+            // Just show word/byte count
+            var word_count: u32 = 0;
+            var in_word = false;
+            for (text) |c| {
+                if (c == ' ' or c == '\t' or c == '\n' or c == '\r') {
+                    if (in_word) word_count += 1;
+                    in_word = false;
+                } else {
+                    in_word = true;
+                }
+            }
+            if (in_word) word_count += 1;
+            std.debug.print("Text: {s}\n  Bytes: {d}\n  Words: {d}\n", .{
+                parsed.file_path, text.len, word_count,
+            });
+            return;
+        }
+
+        if (parsed.chunk_mode) {
+            processChunking(allocator, text, parsed);
+        } else if (parsed.output_path) |path| {
+            writeToFile(allocator, path, text);
+        } else {
+            writeToStdout(text);
+        }
+        return;
+    }
+
     // Detect PDF files — extract text, optionally chunk
     const is_pdf = std.mem.endsWith(u8, parsed.file_path, ".pdf") or
         std.mem.endsWith(u8, parsed.file_path, ".PDF");
@@ -655,22 +731,30 @@ fn processSingleFile(allocator: std.mem.Allocator, input_path: []const u8, outpu
 
 fn printHelp() void {
     const help =
-        \\zig-docx - DOCX to MDX converter
+        \\zig-docx - Universal document converter & chunker
+        \\
+        \\Supported formats:
+        \\  DOCX   →  MDX (Markdown with frontmatter)
+        \\  PDF    →  Markdown (via pdftotext/mutool)
+        \\  XLSX   →  CSV or Markdown table
+        \\  JSON   →  Claude conversation markdown (Anthropic export)
+        \\  MD/TXT →  Chunked markdown (for RAG / AI context)
         \\
         \\Usage:
-        \\  zig-docx <file.docx> [options]
-        \\  zig-docx <folder/>              Batch: convert all .docx files in folder
+        \\  zig-docx <file> [options]
+        \\  zig-docx <folder/>              Batch mode (DOCX only)
         \\
         \\Commands:
-        \\  (default)             Convert DOCX to MDX (stdout)
-        \\  --info, -i            Show document structure
-        \\  --list, -l            List files in DOCX ZIP archive
+        \\  (default)             Convert to appropriate output format
+        \\  --info, -i            Show document structure / stats
+        \\  --list, -l            List files in ZIP archive (DOCX/XLSX)
+        \\  --chunk, -c           Chunk markdown output with hash navigation
+        \\  --markdown, --md      XLSX: output markdown table instead of CSV
+        \\  --anthropic           JSON: extract Claude conversations
         \\
         \\Options:
-        \\  -o, --output <path>   Write MDX to file or folder
-        \\                        If images: creates folder with MDX + images/
-        \\                        If no images: writes MDX file directly
-        \\  --title "..."         Set MDX frontmatter title
+        \\  -o, --output <path>   Write output to file or folder
+        \\  --title "..."         Set MDX frontmatter title (DOCX only)
         \\  --description "..."   Set MDX frontmatter description
         \\  --author "..."        Set MDX frontmatter author
         \\  --date "..."          Set MDX frontmatter date
@@ -678,19 +762,26 @@ fn printHelp() void {
         \\  -h, --help            Show this help
         \\
         \\Examples:
-        \\  zig-docx document.docx
-        \\  zig-docx document.docx --info
-        \\  zig-docx document.docx --list
-        \\  zig-docx document.docx -o blog-post.mdx --title "My Post"
-        \\  zig-docx document.docx -o output-folder/ --author "CRG Direct"
-        \\  zig-docx /path/to/folder/          (batch: all .docx → .mdx)
+        \\  # DOCX → MDX
+        \\  zig-docx post.docx -o post.mdx --title "My Post"
         \\
-        \\When images are present with -o, creates:
-        \\  output-folder/
-        \\    post.mdx              (or your-name.mdx)
-        \\    images/
-        \\      1-image1.png        (numbered top-to-bottom)
-        \\      2-image2.jpeg
+        \\  # PDF → Markdown
+        \\  zig-docx manual.pdf -o manual.md
+        \\
+        \\  # PDF → Chunked RAG-ready markdown
+        \\  zig-docx manual.pdf --chunk -o chunks/
+        \\
+        \\  # Markdown file → Chunked with hash-linked navigation
+        \\  zig-docx document.md --chunk -o chunks/
+        \\
+        \\  # XLSX → CSV
+        \\  zig-docx spreadsheet.xlsx -o data.csv
+        \\
+        \\  # XLSX → Markdown table
+        \\  zig-docx spreadsheet.xlsx --markdown -o data.md
+        \\
+        \\  # Claude conversations.json → organized markdown
+        \\  zig-docx conversations.json --anthropic -o chats/
         \\
     ;
     std.debug.print("{s}", .{help});
