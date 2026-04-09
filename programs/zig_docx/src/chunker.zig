@@ -323,6 +323,15 @@ fn splitLargeSection(
             }
         }
 
+        // Walk back to a UTF-8 boundary so we never split mid-character.
+        // UTF-8 continuation bytes have the bit pattern 10xxxxxx (0x80..0xBF).
+        // A safe split is before a single-byte ASCII or a leading multibyte start byte.
+        while (best_split > start and best_split < content.len and
+            (content[best_split] & 0xC0) == 0x80)
+        {
+            best_split -= 1;
+        }
+
         const chunk_content = content[start..best_split];
         const title = if (part == 1)
             section.title
