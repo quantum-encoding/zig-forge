@@ -446,7 +446,14 @@ fn mkdirZ(allocator: std.mem.Allocator, path: []const u8) void {
 
 fn processChunking(allocator: std.mem.Allocator, markdown: []const u8, parsed: Args) void {
     const source = std.fs.path.basename(parsed.file_path);
-    var result = docx.chunker.chunkDocument(allocator, markdown, source, .{}) catch |err| {
+
+    // Build chunker config, overriding defaults with any CLI flags
+    var config = docx.chunker.ChunkConfig{};
+    if (parsed.chunk_target_words) |tw| config.target_words = tw;
+    if (parsed.chunk_min_words) |mw| config.min_words = mw;
+    if (parsed.chunk_max_words) |mw| config.max_words = mw;
+
+    var result = docx.chunker.chunkDocument(allocator, markdown, source, config) catch |err| {
         std.debug.print("Error chunking: {}\n", .{err});
         return;
     };
@@ -545,6 +552,10 @@ const Args = struct {
     markdown_mode: bool = false,
     chunk_mode: bool = false,
     anthropic_mode: bool = false,
+    // Chunker config (only used when --chunk is set)
+    chunk_target_words: ?u32 = null,
+    chunk_min_words: ?u32 = null,
+    chunk_max_words: ?u32 = null,
 };
 
 fn parseArgs(args: []const []const u8) ?Args {
@@ -565,6 +576,36 @@ fn parseArgs(args: []const []const u8) ?Args {
             result.markdown_mode = true;
         } else if (std.mem.eql(u8, arg, "--chunk") or std.mem.eql(u8, arg, "-c")) {
             result.chunk_mode = true;
+        } else if (std.mem.eql(u8, arg, "--chunk-target-words")) {
+            i += 1;
+            if (i >= args.len) {
+                std.debug.print("Error: --chunk-target-words requires a value\n", .{});
+                return null;
+            }
+            result.chunk_target_words = std.fmt.parseInt(u32, args[i], 10) catch {
+                std.debug.print("Error: --chunk-target-words must be a positive integer\n", .{});
+                return null;
+            };
+        } else if (std.mem.eql(u8, arg, "--chunk-min-words")) {
+            i += 1;
+            if (i >= args.len) {
+                std.debug.print("Error: --chunk-min-words requires a value\n", .{});
+                return null;
+            }
+            result.chunk_min_words = std.fmt.parseInt(u32, args[i], 10) catch {
+                std.debug.print("Error: --chunk-min-words must be a positive integer\n", .{});
+                return null;
+            };
+        } else if (std.mem.eql(u8, arg, "--chunk-max-words")) {
+            i += 1;
+            if (i >= args.len) {
+                std.debug.print("Error: --chunk-max-words requires a value\n", .{});
+                return null;
+            }
+            result.chunk_max_words = std.fmt.parseInt(u32, args[i], 10) catch {
+                std.debug.print("Error: --chunk-max-words must be a positive integer\n", .{});
+                return null;
+            };
         } else if (std.mem.eql(u8, arg, "--anthropic") or std.mem.eql(u8, arg, "--claude")) {
             result.anthropic_mode = true;
         } else if (std.mem.eql(u8, arg, "--title")) {
