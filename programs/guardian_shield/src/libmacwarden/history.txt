@@ -1,4 +1,0 @@
-#V2
-SELECT count() FROM cognitive_state GROUP ALL;
-SELECT * FROM cognitive_state ORDER BY timestamp DESC LIMIT 5;
-SELECT * FROM cognitive_state;
