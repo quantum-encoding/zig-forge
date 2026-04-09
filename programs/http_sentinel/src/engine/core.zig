@@ -76,11 +76,17 @@ pub fn Engine(comptime WriterType: type) type {
         /// Mutex for synchronized output
         output_mutex: Mutex,
 
-        /// Io for timing and sleep
-        io_threaded: std.Io.Threaded,
+        /// Io for timing and sleep — MUST be heap-allocated because
+        /// Io.Threaded.io() stores a pointer back to the Threaded instance,
+        /// and std.Io.Threaded itself has self-referential internal state
+        /// (worker_threads atomic, mutex, etc.) that cannot be safely moved.
+        io_threaded: *std.Io.Threaded,
 
         pub fn init(allocator: std.mem.Allocator, config: EngineConfig, output_writer: WriterType) !Self {
-            var io_threaded: std.Io.Threaded = .init(allocator, .{});
+            const io_threaded = try allocator.create(std.Io.Threaded);
+            errdefer allocator.destroy(io_threaded);
+            io_threaded.* = .init(allocator, .{});
+
             return Self{
                 .allocator = allocator,
                 .config = config,
@@ -93,6 +99,7 @@ pub fn Engine(comptime WriterType: type) type {
 
         pub fn deinit(self: *Self) void {
             self.io_threaded.deinit();
+            self.allocator.destroy(self.io_threaded);
         }
 
         /// Process a batch of request manifests
