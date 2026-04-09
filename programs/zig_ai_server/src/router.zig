@@ -19,6 +19,7 @@ const vertex = @import("vertex.zig");
 const gcp_mod = @import("gcp.zig");
 const apple_auth = @import("apple_auth.zig");
 const google_auth = @import("google_auth.zig");
+const auth_rl_mod = @import("auth_ratelimit.zig");
 
 pub const Response = struct {
     status: http.Status = .ok,
@@ -55,6 +56,9 @@ var server_bq: ?*bq_mod.BqAudit = null;
 /// Legacy single-key mode (deprecated — use store-backed auth)
 var legacy_api_key: ?[]const u8 = null;
 
+/// Auth endpoint rate limiter — IP-keyed, prevents sign-in brute force
+var server_auth_rl: ?*auth_rl_mod.AuthRateLimiter = null;
+
 pub fn setStore(store: *store_mod.Store) void {
     server_store = store;
 }
@@ -73,6 +77,10 @@ pub fn setBqAudit(bq: *bq_mod.BqAudit) void {
 
 pub fn setApiKey(key: []const u8) void {
     legacy_api_key = key;
+}
+
+pub fn setAuthRateLimiter(rl: *auth_rl_mod.AuthRateLimiter) void {
+    server_auth_rl = rl;
 }
 
 pub fn dispatch(
@@ -100,14 +108,35 @@ pub fn dispatch(
         return handlers.root(request, allocator);
     }
 
-    // Auth endpoints — NO auth required (they ARE the auth entry point)
-    if (std.mem.eql(u8, path, "/qai/v1/auth/apple")) {
+    // Auth endpoints — NO app auth required (they ARE the auth entry point)
+    // but IP-based rate limiting is applied to prevent brute force attacks.
+    if (std.mem.startsWith(u8, path, "/qai/v1/auth/")) {
         if (method != .POST) return handlers.methodNotAllowed(request, allocator);
-        return apple_auth.handle(request, allocator, io, server_store, server_gcp);
-    }
-    if (std.mem.eql(u8, path, "/qai/v1/auth/google")) {
-        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
-        return google_auth.handle(request, allocator, io, server_store, server_gcp);
+
+        // Rate limit by client IP
+        if (server_auth_rl) |rl| {
+            const client_ip = auth_rl_mod.extractClientIp(request);
+            if (!rl.check(client_ip)) {
+                return .{
+                    .status = .too_many_requests,
+                    .body =
+                    \\{"error":"rate_limited","message":"Too many auth requests. Try again in a minute."}
+                    ,
+                    .headers = &.{
+                        .{ .name = "content-type", .value = "application/json" },
+                        .{ .name = "retry-after", .value = "60" },
+                    },
+                };
+            }
+        }
+
+        if (std.mem.eql(u8, path, "/qai/v1/auth/apple")) {
+            return apple_auth.handle(request, allocator, io, server_store, server_gcp);
+        }
+        if (std.mem.eql(u8, path, "/qai/v1/auth/google")) {
+            return google_auth.handle(request, allocator, io, server_store, server_gcp);
+        }
+        return handlers.notFound(request, allocator);
     }
 
     // All other /qai/v1/* routes require auth

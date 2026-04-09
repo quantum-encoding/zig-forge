@@ -73,23 +73,92 @@ pub const Store = struct {
     }
 
     /// Load snapshot and replay WAL. Call once at startup.
-    pub fn recover(self: *Store, io: Io) void {
+    /// Returns number of WAL entries replayed (0 on fresh start).
+    pub fn recover(self: *Store, io: Io) u64 {
         // Ensure data directory exists
         Dir.cwd().createDirPath(io, self.data_dir) catch {};
 
-        // Load snapshot
+        // Load snapshot (brings store to the last checkpointed state)
         self.loadSnapshot(io);
 
-        // Replay WAL
-        const replayed = self.wal.replay(io, self.allocator, &replayCallback) catch 0;
-        _ = replayed;
-        // Note: replayCallback can't access self directly in this pattern.
-        // For a real implementation, we'd use a different approach.
-        // For now, WAL replay is handled at the integration level.
+        // Replay WAL entries written AFTER the last snapshot
+        const replayed = self.wal.replay(io, self.allocator, self, &replayCallback) catch 0;
+        return replayed;
     }
 
-    fn replayCallback(_: types.WalOp, _: []const u8) void {
-        // Placeholder — real replay handled in recover()
+    /// Called by wal.replay for each valid entry. Applies the op to in-memory state.
+    /// Skips Firestore writes (recovery is local-only; Firestore state loaded via loadFromFirestore).
+    fn replayCallback(ctx: ?*anyopaque, op: types.WalOp, payload: []const u8) void {
+        const self: *Store = @alignCast(@ptrCast(ctx orelse return));
+        switch (op) {
+            .create_account => {
+                // Payload is JSON-serialized account
+                const parsed = std.json.parseFromSlice(AccountJson, self.allocator, payload, .{
+                    .ignore_unknown_fields = true,
+                    .allocate = .alloc_always,
+                }) catch return;
+                defer parsed.deinit();
+                const a = parsed.value;
+                var account = types.Account{};
+                account.id = types.FixedStr64.fromSlice(a.id);
+                account.email = types.FixedStr256.fromSlice(a.email);
+                account.balance_ticks = a.balance_ticks;
+                account.role = std.meta.stringToEnum(types.Role, a.role) orelse .user;
+                account.tier = std.meta.stringToEnum(types.DevTier, a.tier) orelse .free;
+                account.created_at = a.created_at;
+                account.updated_at = a.created_at;
+                const key_copy = self.allocator.dupe(u8, account.id.slice()) catch return;
+                self.accounts.put(self.allocator, key_copy, account) catch return;
+            },
+            .create_key => {
+                const parsed = std.json.parseFromSlice(KeyJson, self.allocator, payload, .{
+                    .ignore_unknown_fields = true,
+                    .allocate = .alloc_always,
+                }) catch return;
+                defer parsed.deinit();
+                const k = parsed.value;
+                var key = types.ApiKey{};
+                if (k.key_hash.len == 64) {
+                    _ = std.fmt.hexToBytes(&key.key_hash, k.key_hash) catch return;
+                } else return;
+                key.account_id = types.FixedStr64.fromSlice(k.account_id);
+                key.name = types.FixedStr128.fromSlice(k.name);
+                key.prefix = types.FixedStr16.fromSlice(k.prefix);
+                key.spent_ticks = k.spent_ticks;
+                key.revoked = k.revoked;
+                key.created_at = k.created_at;
+                key.expires_at = k.expires_at;
+                self.keys.put(self.allocator, key.key_hash, key) catch return;
+            },
+            .update_balance => {
+                // Format: "{account_id}:{delta}"
+                const colon = std.mem.lastIndexOfScalar(u8, payload, ':') orelse return;
+                const account_id = payload[0..colon];
+                const delta = std.fmt.parseInt(i64, payload[colon + 1 ..], 10) catch return;
+                if (self.accounts.getPtr(account_id)) |account| {
+                    account.balance_ticks += delta;
+                }
+            },
+            .revoke_key => {
+                // Payload is hex-encoded key hash
+                if (payload.len != 64) return;
+                var key_hash: [32]u8 = undefined;
+                _ = std.fmt.hexToBytes(&key_hash, payload) catch return;
+                if (self.keys.getPtr(key_hash)) |key| {
+                    key.revoked = true;
+                }
+            },
+            .reserve => {
+                // Reservations are ephemeral — skip on replay (they would have been
+                // committed or rolled back if the server completed the request).
+            },
+            .commit_reservation, .rollback_reservation => {
+                // Balance effects are already captured by update_balance entries.
+            },
+            .update_key_spend, .update_account => {
+                // Not currently written by the store; reserved for future use.
+            },
+        }
     }
 
     pub fn setGcpContext(self: *Store, ctx: *gcp_mod.GcpContext) void {
@@ -156,19 +225,21 @@ pub const Store = struct {
     // ── Account Operations ──────────────────────────────────
 
     pub fn createAccount(self: *Store, io: Io, account: types.Account) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        // Phase 1: WAL + in-memory write under the mutex (fast path)
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
 
-        // WAL write first
-        const payload = try self.serializeAccount(account);
-        defer self.allocator.free(payload);
-        try self.wal.append(io, .create_account, payload);
+            const payload = try self.serializeAccount(account);
+            defer self.allocator.free(payload);
+            try self.wal.append(io, .create_account, payload);
 
-        // Then in-memory — key must be a durable copy since FixedStr is inside the value
-        const key_copy = try self.allocator.dupe(u8, account.id.slice());
-        try self.accounts.put(self.allocator, key_copy, account);
+            const key_copy = try self.allocator.dupe(u8, account.id.slice());
+            try self.accounts.put(self.allocator, key_copy, account);
+        }
 
-        // Write-through to Firestore (rare operation, no contention risk)
+        // Phase 2: Firestore write OUTSIDE the mutex so other requests
+        // aren't blocked during the ~50-100ms network round-trip.
         if (self.gcp_ctx) |ctx| {
             firestore.saveAccount(ctx, account) catch {};
         }
@@ -189,16 +260,19 @@ pub const Store = struct {
     // ── API Key Operations ──────────────────────────────────
 
     pub fn createKey(self: *Store, io: Io, key: types.ApiKey) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        // Phase 1: WAL + in-memory (fast, under mutex)
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
 
-        const payload = try self.serializeKey(key);
-        defer self.allocator.free(payload);
-        try self.wal.append(io, .create_key, payload);
+            const payload = try self.serializeKey(key);
+            defer self.allocator.free(payload);
+            try self.wal.append(io, .create_key, payload);
 
-        try self.keys.put(self.allocator, key.key_hash, key);
+            try self.keys.put(self.allocator, key.key_hash, key);
+        }
 
-        // Write-through to Firestore
+        // Phase 2: Firestore write outside the mutex (slow, network)
         if (self.gcp_ctx) |ctx| {
             firestore.saveKey(ctx, key) catch {};
         }
@@ -326,20 +400,25 @@ pub const Store = struct {
 
     /// Add credit to an account (admin operation)
     pub fn creditAccount(self: *Store, io: Io, account_id: []const u8, amount_ticks: i64) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        // Phase 1: WAL + in-memory update under mutex, capture new balance
+        var new_balance: i64 = 0;
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
 
-        const account = self.accounts.getPtr(account_id) orelse return error.AccountNotFound;
-        account.balance_ticks += amount_ticks;
-        account.updated_at = types.nowMs();
+            const account = self.accounts.getPtr(account_id) orelse return error.AccountNotFound;
+            account.balance_ticks += amount_ticks;
+            account.updated_at = types.nowMs();
+            new_balance = account.balance_ticks;
 
-        const payload = std.fmt.allocPrint(self.allocator, "{s}:{d}", .{ account_id, amount_ticks }) catch return error.OutOfMemory;
-        defer self.allocator.free(payload);
-        try self.wal.append(io, .update_balance, payload);
+            const payload = std.fmt.allocPrint(self.allocator, "{s}:{d}", .{ account_id, amount_ticks }) catch return error.OutOfMemory;
+            defer self.allocator.free(payload);
+            try self.wal.append(io, .update_balance, payload);
+        }
 
-        // Credit is an admin action — write-through immediately (not frequent)
+        // Phase 2: Firestore write outside the mutex
         if (self.gcp_ctx) |ctx| {
-            firestore.updateAccountBalance(ctx, account_id, account.balance_ticks) catch {};
+            firestore.updateAccountBalance(ctx, account_id, new_balance) catch {};
         }
     }
 

@@ -91,7 +91,10 @@ pub fn main(init: std.process.Init) !void {
         store.setGcpContext(ctx);
         store.loadFromFirestore(); // Cold start: load state from Firestore
     }
-    store.recover(boot_io); // Also replay any local WAL (belt + suspenders)
+    const wal_replayed = store.recover(boot_io); // Replay local WAL (crash recovery)
+    if (wal_replayed > 0) {
+        std.debug.print("  WAL: replayed {d} entries\n", .{wal_replayed});
+    }
 
     // Initialize BigQuery audit logger
     var bq_audit = bq_mod.BqAudit.init(
@@ -145,6 +148,12 @@ pub fn main(init: std.process.Init) !void {
     var rate_limiter = ratelimit_mod.RateLimiter.init(allocator);
     auth_pipeline_mod.setRateLimiter(&rate_limiter);
 
+    // Auth endpoint rate limiter (IP-keyed, brute force protection)
+    const auth_rl_mod = @import("auth_ratelimit.zig");
+    var auth_rate_limiter = auth_rl_mod.AuthRateLimiter.init(allocator);
+    defer auth_rate_limiter.deinit();
+    router.setAuthRateLimiter(&auth_rate_limiter);
+
     // Set store + ledger + BQ audit + GCP context in the router
     router.setStore(&store);
     router.setLedger(&ledger);
@@ -165,6 +174,11 @@ pub fn main(init: std.process.Init) !void {
     // Set up graceful shutdown references
     shutdown_store = &store;
     shutdown_bq = &bq_audit;
+
+    // Background flush thread: periodically push dirty account balances to Firestore
+    // so a crash doesn't lose more than ~5 seconds of billing data.
+    const flush_thread = std.Thread.spawn(.{}, backgroundFlushLoop, .{&store}) catch null;
+    if (flush_thread) |t| t.detach();
 
     // Register SIGTERM handler (Cloud Run sends this before SIGKILL)
     if (std.posix.Sigaction != void) {
@@ -380,6 +394,36 @@ fn handleConnection(ctx: *ConnCtx) void {
 
 fn handleSigterm(_: std.posix.SIG) callconv(.c) void {
     shutdown_requested.store(1, .release);
+}
+
+/// Background thread: flush dirty account balances to Firestore every 5 seconds.
+/// Also rotates WAL when it exceeds 10MB (forces snapshot + truncate).
+/// Prevents balance data loss on crashes and caps WAL growth.
+fn backgroundFlushLoop(store: *@import("store/store.zig").Store) void {
+    const WAL_ROTATE_BYTES: usize = 10 * 1024 * 1024; // 10MB
+
+    var io_threaded: std.Io.Threaded = .init(std.heap.c_allocator, .{});
+    const io = io_threaded.io();
+
+    var tick: u32 = 0;
+    while (shutdown_requested.load(.acquire) == 0) {
+        io.sleep(.{ .nanoseconds = 5 * std.time.ns_per_s }, .real) catch break;
+        if (shutdown_requested.load(.acquire) != 0) break;
+
+        store.flushDirtyAccounts();
+        tick += 1;
+
+        // Every 12 ticks (60 seconds), check WAL size and rotate if needed
+        if (tick % 12 == 0) {
+            const wal_bytes = store.wal.sizeBytes(io);
+            if (wal_bytes > WAL_ROTATE_BYTES) {
+                std.debug.print("  WAL rotation: {d} bytes → snapshot + truncate\n", .{wal_bytes});
+                store.snapshot(io) catch |err| {
+                    std.debug.print("  WAL rotation failed: {s}\n", .{@errorName(err)});
+                };
+            }
+        }
+    }
 }
 
 fn sendBadRequest(out: *Io.Writer) void {

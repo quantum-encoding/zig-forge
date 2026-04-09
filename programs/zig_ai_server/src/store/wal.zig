@@ -52,11 +52,13 @@ pub const WalWriter = struct {
     }
 
     /// Replay all WAL entries, calling the callback for each valid entry.
+    /// The callback receives a user-provided context pointer so it can mutate state.
     pub fn replay(
         self: *WalWriter,
         io: Io,
         allocator: std.mem.Allocator,
-        callback: *const fn (op: types.WalOp, payload: []const u8) void,
+        context: ?*anyopaque,
+        callback: *const fn (ctx: ?*anyopaque, op: types.WalOp, payload: []const u8) void,
     ) !u64 {
         const data = Dir.cwd().readFileAlloc(io, self.file_path, allocator, .unlimited) catch {
             return 0; // No WAL file — fresh start
@@ -83,7 +85,7 @@ pub const WalWriter = struct {
             }
 
             const op: types.WalOp = @enumFromInt(op_byte);
-            callback(op, payload);
+            callback(context, op, payload);
             pos += payload_len;
             count += 1;
         }
@@ -99,5 +101,12 @@ pub const WalWriter = struct {
             .data = "",
         }) catch {};
         self.entry_count = 0;
+    }
+
+    /// Current size of the WAL file in bytes. Returns 0 if the file doesn't exist.
+    pub fn sizeBytes(self: *const WalWriter, io: Io) usize {
+        const data = Dir.cwd().readFileAlloc(io, self.file_path, std.heap.c_allocator, .unlimited) catch return 0;
+        defer std.heap.c_allocator.free(data);
+        return data.len;
     }
 };
