@@ -39,6 +39,31 @@ pub fn main(init: std.process.Init) !void {
 
     const parsed = parseArgs(args_list.items) orelse return;
 
+    // Claude Code session export (directory of .jsonl files)
+    // Check before folder mode so --claude-code on a directory doesn't fall into .docx scan
+    if (parsed.claude_code_mode) {
+        const out_dir = parsed.output_path orelse "claude_code_sessions";
+        std.debug.print("Extracting Claude Code sessions to: {s}/\n", .{out_dir});
+
+        const stats = docx.claude_code.extractAll(
+            allocator,
+            parsed.file_path,
+            out_dir,
+            .{ .only_project = parsed.only_project },
+            writeToFile,
+            writeDir,
+        ) catch |err| {
+            std.debug.print("Error extracting Claude Code sessions: {}\n", .{err});
+            return;
+        };
+
+        std.debug.print("\nDone: {d} projects, {d} sessions, {d} messages, {d} tool calls, {d} subagents, {d} spilled results\n", .{
+            stats.projects, stats.sessions, stats.messages, stats.tool_calls, stats.subagents, stats.spilled_results,
+        });
+        std.debug.print("Input: {d} bytes → Output: {s}/\n", .{ stats.total_bytes, out_dir });
+        return;
+    }
+
     // Folder mode: process all .docx files in a directory
     if (parsed.folder_mode) {
         processFolderMode(allocator, parsed);
@@ -552,6 +577,8 @@ const Args = struct {
     markdown_mode: bool = false,
     chunk_mode: bool = false,
     anthropic_mode: bool = false,
+    claude_code_mode: bool = false,
+    only_project: ?[]const u8 = null,
     // Chunker config (only used when --chunk is set)
     chunk_target_words: ?u32 = null,
     chunk_min_words: ?u32 = null,
@@ -608,6 +635,15 @@ fn parseArgs(args: []const []const u8) ?Args {
             };
         } else if (std.mem.eql(u8, arg, "--anthropic") or std.mem.eql(u8, arg, "--claude")) {
             result.anthropic_mode = true;
+        } else if (std.mem.eql(u8, arg, "--claude-code")) {
+            result.claude_code_mode = true;
+        } else if (std.mem.eql(u8, arg, "--only-project")) {
+            i += 1;
+            if (i >= args.len) {
+                std.debug.print("Error: --only-project requires a value\n", .{});
+                return null;
+            }
+            result.only_project = args[i];
         } else if (std.mem.eql(u8, arg, "--title")) {
             i += 1;
             if (i >= args.len) {
