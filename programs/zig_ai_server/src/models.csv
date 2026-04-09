@@ -13,6 +13,11 @@ xAI,Video,grok_video,grok-imagine-video,Imagine Video,—,—,—,—,$0.05,per 
 xAI,Structured,xai_grok_41_fast,grok-4-1-fast-non-reasoning,Grok 4.1 Fast (Structured),—,—,—,—,—,—,—,1.00,direct,Core; used in structured output panel
 xAI,Structured,xai_grok_41_reasoning,grok-4-1-fast-reasoning,Grok 4.1 Reasoning (Structured),—,—,—,—,—,—,—,1.00,direct,Core; used in structured output panel
 xAI,Structured,xai_grok_code,grok-code-fast-1,Grok Code (Structured),—,—,—,—,—,—,—,1.00,direct,Core; used in structured output panel
+# Grok via Vertex AI Model Garden (MaaS — OpenAI-compat endpoint, GCP token auth)
+xAI,Text,—,xai/grok-4.20-non-reasoning,Grok 4.20 (Vertex),2M,$2.00,$6.00,$0.20,—,—,607,1.30,vertex-maas,Vertex Model Garden publishers/xai/models/grok-4.20-non-reasoning; flagship non-reasoning
+xAI,Text,—,xai/grok-4.20-reasoning,Grok 4.20 Reasoning (Vertex),2M,$2.00,$6.00,$0.20,—,—,607,1.30,vertex-maas,Vertex Model Garden publishers/xai/models/grok-4.20-reasoning; flagship reasoning mode
+xAI,Text,—,xai/grok-4.1-fast-non-reasoning,Grok 4.1 Fast (Vertex),2M,$0.20,$0.50,$0.05,—,—,480,1.30,vertex-maas,Vertex Model Garden publishers/xai/models/grok-4.1-fast-non-reasoning; cost-effective; agentic tool calling
+xAI,Text,—,xai/grok-4.1-fast-reasoning,Grok 4.1 Fast Reasoning (Vertex),2M,$0.20,$0.50,$0.05,—,—,480,1.30,vertex-maas,Vertex Model Garden publishers/xai/models/grok-4.1-fast-reasoning; cost-effective reasoning; τ²-bench Telecom
 # ── OpenAI (25% margin; requires openai pack) ─────────────────────────────────
 # Note: All OpenAI text models support Flex/Batch tier (0.5× price) and Priority tier (2× price)
 OpenAI,Text,—,gpt-5.4,GPT-5.4,1M,$2.50,$15.00,$0.25,—,—,500,1.25,cloud-run-egress,Reasoning model; >272K: $5.00/$22.50 input/output; drop-in replacement for gpt-5.2

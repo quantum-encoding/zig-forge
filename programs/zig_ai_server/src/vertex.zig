@@ -237,6 +237,7 @@ fn routeModel(model: []const u8) ModelRoute {
     if (std.mem.startsWith(u8, model, "deepseek-ai/")) return .maas_openai;
     if (std.mem.startsWith(u8, model, "zai-org/")) return .maas_openai;
     if (std.mem.startsWith(u8, model, "qwen/")) return .maas_openai;
+    if (std.mem.startsWith(u8, model, "xai/")) return .maas_openai;
     if (std.mem.startsWith(u8, model, "codestral")) return .maas_mistral;
     if (std.mem.startsWith(u8, model, "mistral-")) return .maas_mistral;
     if (std.mem.startsWith(u8, model, "gemma-")) return .genai;
@@ -257,6 +258,7 @@ fn providerName(model: []const u8) []const u8 {
     if (std.mem.startsWith(u8, model, "deepseek")) return "deepseek";
     if (std.mem.startsWith(u8, model, "zai-org/")) return "zai";
     if (std.mem.startsWith(u8, model, "qwen/")) return "qwen";
+    if (std.mem.startsWith(u8, model, "xai/")) return "xai";
     if (std.mem.startsWith(u8, model, "codestral") or std.mem.startsWith(u8, model, "mistral-")) return "mistral";
     if (std.mem.startsWith(u8, model, "gemma-")) return "google-genai";
     if (std.mem.startsWith(u8, model, "imagen-")) return "google-genai";
