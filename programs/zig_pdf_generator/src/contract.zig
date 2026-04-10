@@ -562,7 +562,9 @@ pub const ContractRenderer = struct {
         }
 
         var content = document.ContentStream.init(self.allocator);
-        defer content.deinit(); // Always cleanup, addPage copies the content
+        // No defer deinit here — ownership transfers to self.pages via append
+        // at line ~600 (or earlier via checkPageBreak). renderer.deinit()
+        // iterates self.pages and deinits each ContentStream.
 
         // Load logo if provided
         var logo_id: ?[]const u8 = null;
