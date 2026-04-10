@@ -159,6 +159,12 @@ pub const ContractRenderer = struct {
         }
         self.pages.deinit(self.allocator);
 
+        // Free all values stored in the variables hashmap — these were
+        // allocated by parseVariables via allocator.dupe.
+        var it = self.variables.valueIterator();
+        while (it.next()) |v| {
+            self.allocator.free(v.*);
+        }
         self.variables.deinit();
         self.doc.deinit();
     }
@@ -673,9 +679,44 @@ const ParsedContract = struct {
     variables_json: ?[]const u8,
 
     pub fn deinit(self: ParsedContract, allocator: std.mem.Allocator) void {
+        // Free all duped strings in top-level data fields
+        allocator.free(self.data.document_type);
+        allocator.free(self.data.title);
+        allocator.free(self.data.subtitle);
+        allocator.free(self.data.date_line);
+        allocator.free(self.data.footer);
+        allocator.free(self.data.header.company_name);
+        if (self.data.header.logo_base64) |b| allocator.free(b);
+        allocator.free(self.data.styling.primary_color);
+        allocator.free(self.data.styling.secondary_color);
+        allocator.free(self.data.styling.font_family);
+
+        // Free duped strings inside each party
+        for (self.parties_buf) |p| {
+            allocator.free(p.role);
+            allocator.free(p.name);
+            allocator.free(p.address);
+            allocator.free(p.identifier);
+        }
         allocator.free(self.parties_buf);
+
+        // Free duped strings inside each section
+        for (self.sections_buf) |s| {
+            allocator.free(s.heading);
+            allocator.free(s.content);
+        }
         allocator.free(self.sections_buf);
+
+        // Free duped strings inside each signature
+        for (self.signatures_buf) |sig| {
+            allocator.free(sig.role);
+            allocator.free(sig.name_line);
+            allocator.free(sig.date_line);
+        }
         allocator.free(self.signatures_buf);
+
+        // Free the extracted variables JSON substring
+        if (self.variables_json) |v| allocator.free(v);
     }
 };
 
