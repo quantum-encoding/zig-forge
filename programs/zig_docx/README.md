@@ -22,6 +22,20 @@ Every output can optionally be **chunked** into RAG-ready markdown files with ha
 
 ## Install
 
+### Just this program (no full repo clone)
+
+```bash
+git clone --depth 1 --filter=blob:none --sparse \
+  https://github.com/quantum-encoding/zig-forge.git
+cd zig-forge
+git sparse-checkout set programs/zig_docx
+cd programs/zig_docx
+zig build
+./zig-out/bin/zig-docx --help
+```
+
+### Full repo
+
 ```bash
 git clone https://github.com/quantum-encoding/zig-forge.git
 cd zig-forge/programs/zig_docx
