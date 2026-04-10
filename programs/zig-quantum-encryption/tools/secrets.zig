@@ -14,6 +14,7 @@
 //! Plaintext format: repeated [2 BE keylen][key][4 BE vallen][value], terminated [0x00 0x00]
 
 const std = @import("std");
+const builtin = @import("builtin");
 const crypto = std.crypto;
 const Aes256Gcm = crypto.aead.aes_gcm.Aes256Gcm;
 const pbkdf2 = crypto.pwhash.pbkdf2;
@@ -30,7 +31,20 @@ const c = @cImport({
     @cInclude("fcntl.h");
 });
 
-extern "c" fn arc4random_buf(buf: [*]u8, len: usize) void;
+/// Cross-platform secure random bytes.
+/// macOS: arc4random_buf (always available, kernel CSPRNG)
+/// Linux: getrandom(2) (kernel 3.17+, no fd needed)
+fn secureRandom(buf: []u8) void {
+    if (comptime builtin.os.tag.isDarwin()) {
+        const arc4random = @extern(*const fn ([*]u8, usize) callconv(.c) void, .{ .name = "arc4random_buf" });
+        arc4random(buf.ptr, buf.len);
+    } else if (comptime builtin.os.tag == .linux) {
+        // Linux: getrandom(2) syscall — blocking, CSPRNG, no fd needed
+        _ = std.os.linux.getrandom(buf.ptr, buf.len, 0);
+    } else {
+        @compileError("secureRandom: unsupported OS");
+    }
+}
 
 // ── Constants ──
 
@@ -226,9 +240,9 @@ fn deriveKey(passphrase: []const u8, salt: *const [SALT_LEN]u8) [KEY_LEN]u8 {
 
 fn encryptVault(plaintext: []const u8, passphrase: []const u8, out: []u8) usize {
     var salt: [SALT_LEN]u8 = undefined;
-    arc4random_buf(@as([*]u8, &salt), SALT_LEN);
+    secureRandom(&salt);
     var nonce: [NONCE_LEN]u8 = undefined;
-    arc4random_buf(@as([*]u8, &nonce), NONCE_LEN);
+    secureRandom(&nonce);
 
     var key = deriveKey(passphrase, &salt);
     defer @memset(&key, 0);
@@ -679,16 +693,17 @@ fn printHelp() void {
 
 // ── Main ──
 
-extern "c" fn _NSGetArgc() *c_int;
-extern "c" fn _NSGetArgv() *[*][*:0]u8;
-
-pub fn main() !void {
-    // Zig 0.16 macOS: _NSGetArgc/_NSGetArgv from crt_externs.h
-    const argc: usize = @intCast(_NSGetArgc().*);
-    const argv = _NSGetArgv().*;
+pub fn main(init: std.process.Init) !void {
+    // Cross-platform arg parsing via Zig 0.16 std.process.Init
+    var args_iter = std.process.Args.Iterator.init(init.minimal.args);
     var args_buf: [128][*:0]const u8 = undefined;
-    for (0..@min(argc, 128)) |i| args_buf[i] = argv[i];
-    const args: [][*:0]const u8 = args_buf[0..@min(argc, 128)];
+    var argc: usize = 0;
+    while (args_iter.next()) |arg| {
+        if (argc >= 128) break;
+        args_buf[argc] = arg;
+        argc += 1;
+    }
+    const args: [][*:0]const u8 = args_buf[0..argc];
 
     if (args.len < 2) {
         printHelp();

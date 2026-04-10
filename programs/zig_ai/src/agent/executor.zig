@@ -100,6 +100,7 @@ pub const AgentExecutor = struct {
     agent_config: config.AgentConfig,
     sandbox: security.Sandbox,
     tool_registry: tools.ToolRegistry,
+    io_threaded: *std.Io.Threaded, // For generateId's io.random()
     on_event: EventCallback = &defaultEventHandler,
 
     /// xAI server-side tools (web_search, x_search, code_interpreter)
@@ -155,15 +156,21 @@ pub const AgentExecutor = struct {
 
         const tool_registry = tools.ToolRegistry.init(allocator, &agent_config);
 
+        const io_t = try allocator.create(std.Io.Threaded);
+        io_t.* = std.Io.Threaded.init(allocator, .{});
+
         return AgentExecutor{
             .allocator = allocator,
             .agent_config = agent_config,
             .sandbox = sandbox,
             .tool_registry = tool_registry,
+            .io_threaded = io_t,
         };
     }
 
     pub fn deinit(self: *AgentExecutor) void {
+        self.io_threaded.deinit();
+        self.allocator.destroy(self.io_threaded);
         self.tool_registry.deinit();
         self.sandbox.deinit();
         self.agent_config.deinit();
@@ -298,7 +305,7 @@ pub const AgentExecutor = struct {
 
         // Add initial user message to context
         const user_msg = ai.AIMessage{
-            .id = try ai.common.generateId(self.allocator),
+            .id = try ai.common.generateId(self.allocator, self.io_threaded.io()),
             .role = .user,
             .content = try self.allocator.dupe(u8, task),
             .timestamp = getRealtimeSeconds(),
@@ -406,7 +413,7 @@ pub const AgentExecutor = struct {
                 }
 
                 const assistant_msg = ai.AIMessage{
-                    .id = try ai.common.generateId(self.allocator),
+                    .id = try ai.common.generateId(self.allocator, self.io_threaded.io()),
                     .role = .assistant,
                     .content = try self.allocator.dupe(u8, response.message.content),
                     .timestamp = getRealtimeSeconds(),
@@ -454,7 +461,7 @@ pub const AgentExecutor = struct {
                     };
 
                     const result_msg = ai.AIMessage{
-                        .id = try ai.common.generateId(self.allocator),
+                        .id = try ai.common.generateId(self.allocator, self.io_threaded.io()),
                         .role = .tool,
                         .content = try self.allocator.dupe(u8, result_text),
                         .timestamp = getRealtimeSeconds(),

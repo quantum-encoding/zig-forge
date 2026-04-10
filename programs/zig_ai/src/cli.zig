@@ -251,11 +251,11 @@ pub const CLI = struct {
         std.debug.print("  /quit     - Exit\n", .{});
         std.debug.print("\n", .{});
 
-        var conversation = try ai.ConversationContext.init(self.allocator);
-        defer conversation.deinit();
-
         var io_threaded = std.Io.Threaded.init_single_threaded;
         const io = io_threaded.io();
+
+        var conversation = try ai.ConversationContext.init(self.allocator, io);
+        defer conversation.deinit();
 
         const stdin_file = std.Io.File.stdin();
         var stdin_buffer: [256]u8 = undefined;
@@ -283,7 +283,7 @@ pub const CLI = struct {
                     break;
                 } else if (std.mem.eql(u8, trimmed, "/clear")) {
                     conversation.deinit();
-                    conversation = try ai.ConversationContext.init(self.allocator);
+                    conversation = try ai.ConversationContext.init(self.allocator, io);
                     std.debug.print("🗑️  Conversation cleared\n", .{});
                     continue;
                 } else if (std.mem.eql(u8, trimmed, "/help")) {
@@ -311,7 +311,7 @@ pub const CLI = struct {
                     if (Provider.fromString(provider_trimmed)) |new_provider| {
                         self.config.provider = new_provider;
                         conversation.deinit();
-                        conversation = try ai.ConversationContext.init(self.allocator);
+                        conversation = try ai.ConversationContext.init(self.allocator, io);
                         std.debug.print("Switched to {s}\n", .{new_provider.displayName()});
                     } else {
                         std.debug.print("Unknown provider\n", .{});
@@ -339,7 +339,7 @@ pub const CLI = struct {
 
             // Add to conversation history
             const user_msg = ai.AIMessage{
-                .id = try ai.common.generateId(self.allocator),
+                .id = try ai.common.generateId(self.allocator, io),
                 .role = .user,
                 .content = try self.allocator.dupe(u8, trimmed),
                 .timestamp = getRealtimeSeconds(),
@@ -377,6 +377,10 @@ pub const CLI = struct {
                 self.allocator.free(loaded_images);
             }
 
+            // Io handle for file reads (loadImageFromFile needs it for Dir ops)
+            var file_io = std.Io.Threaded.init_single_threaded;
+            const fio = file_io.io();
+
             for (paths) |path| {
                 if (ai.common.ImageInput.isHttpUrl(path)) {
                     // Direct HTTPS URL — pass through without downloading
@@ -386,7 +390,7 @@ pub const CLI = struct {
                     );
                 } else {
                     // Local file — load and base64 encode
-                    loaded_images[count] = ai.common.loadImageFromFile(self.allocator, path) catch |err| {
+                    loaded_images[count] = ai.common.loadImageFromFile(self.allocator, fio, path) catch |err| {
                         std.debug.print("Error loading image '{s}': {}\n", .{ path, err });
                         return err;
                     };

@@ -3,6 +3,13 @@ const c = @cImport({
     @cInclude("sqlite3.h");
 });
 
+// SQLITE_TRANSIENT ((sqlite3_destructor_type)-1) can't be expressed in
+// Zig 0.16 due to function pointer alignment safety. Use SQLITE_STATIC
+// (null) instead — safe when the bound data outlives the statement, which
+// it does in all our call sites (search_pattern is defer-freed after
+// sqlite3_finalize).
+const SQLITE_STATIC: c.sqlite3_destructor_type = null;
+
 const DB_PATH = "/var/lib/cognitive-watcher/cognitive-states.db";
 
 pub fn main(init: std.process.Init) !u8 {
@@ -124,7 +131,7 @@ fn searchStates(allocator: std.mem.Allocator, pattern: []const u8) !void {
     // Bind pattern
     const search_pattern = try std.fmt.allocPrint(allocator, "%{s}%", .{pattern});
     defer allocator.free(search_pattern);
-    _ = c.sqlite3_bind_text(stmt, 1, search_pattern.ptr, @intCast(search_pattern.len), c.SQLITE_TRANSIENT);
+    _ = c.sqlite3_bind_text(stmt, 1, search_pattern.ptr, @intCast(search_pattern.len), SQLITE_STATIC);
 
     std.debug.print("\n🔍 Search Results for \"{s}\":\n\n", .{pattern});
 
