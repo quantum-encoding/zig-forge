@@ -81,6 +81,94 @@ pub const Color = struct {
     }
 };
 
+/// Decode one UTF-8 code point from `text` at `*pos` and return the
+/// WinAnsiEncoding byte. Advances `*pos` past the consumed bytes.
+/// Code points outside WinAnsiEncoding (> U+00FF or in the 0x80-0x9F
+/// gap that maps to Windows-1252 specials) are mapped to '?' (0x3F).
+/// The 0x80-0x9F Windows-1252 range (€, curly quotes, em dash, etc.)
+/// is mapped correctly via a lookup table.
+pub fn utf8ToWinAnsi(text: []const u8, pos: *usize) u8 {
+    const i = pos.*;
+    if (i >= text.len) {
+        pos.* = text.len;
+        return '?';
+    }
+    const b0 = text[i];
+
+    // ASCII: 1-byte sequence, pass through directly
+    if (b0 < 0x80) {
+        pos.* = i + 1;
+        return b0;
+    }
+
+    // 2-byte sequence: 110xxxxx 10xxxxxx → U+0080..U+07FF
+    if (b0 >= 0xC0 and b0 < 0xE0 and i + 1 < text.len) {
+        const cp: u16 = (@as(u16, b0 & 0x1F) << 6) | (text[i + 1] & 0x3F);
+        pos.* = i + 2;
+        // U+00A0..U+00FF map 1:1 to WinAnsiEncoding byte values
+        if (cp >= 0x00A0 and cp <= 0x00FF) return @intCast(cp);
+        // U+0080..U+009F: Windows-1252 specials (€, smart quotes, etc.)
+        return win1252FromCodepoint(cp);
+    }
+
+    // 3-byte sequence: 1110xxxx 10xxxxxx 10xxxxxx → U+0800..U+FFFF
+    if (b0 >= 0xE0 and b0 < 0xF0 and i + 2 < text.len) {
+        const cp: u21 = (@as(u21, b0 & 0x0F) << 12) |
+            (@as(u21, text[i + 1] & 0x3F) << 6) |
+            (text[i + 2] & 0x3F);
+        pos.* = i + 3;
+        // Common Windows-1252 code points in the BMP (€, smart quotes, etc.)
+        return win1252FromCodepoint(@intCast(@min(cp, 0xFFFF)));
+    }
+
+    // 4-byte sequence: skip (no WinAnsi mapping for supplementary planes)
+    if (b0 >= 0xF0 and i + 3 < text.len) {
+        pos.* = i + 4;
+        return '?';
+    }
+
+    // Invalid/orphan continuation byte — skip one byte
+    pos.* = i + 1;
+    return '?';
+}
+
+/// Map Unicode code points in the Windows-1252 "hole" (U+0080..U+009F are
+/// control characters in ISO 8859-1 but printable in Windows-1252) plus
+/// common BMP code points (€, smart quotes, em dash, etc.) to their
+/// WinAnsiEncoding byte positions.
+fn win1252FromCodepoint(cp: u16) u8 {
+    return switch (cp) {
+        0x20AC => 0x80, // €
+        0x201A => 0x82, // ‚
+        0x0192 => 0x83, // ƒ
+        0x201E => 0x84, // „
+        0x2026 => 0x85, // …
+        0x2020 => 0x86, // †
+        0x2021 => 0x87, // ‡
+        0x02C6 => 0x88, // ˆ
+        0x2030 => 0x89, // ‰
+        0x0160 => 0x8A, // Š
+        0x2039 => 0x8B, // ‹
+        0x0152 => 0x8C, // Œ
+        0x017D => 0x8E, // Ž
+        0x2018 => 0x91, // '
+        0x2019 => 0x92, // '
+        0x201C => 0x93, // "
+        0x201D => 0x94, // "
+        0x2022 => 0x95, // •
+        0x2013 => 0x96, // –
+        0x2014 => 0x97, // —
+        0x02DC => 0x98, // ˜
+        0x2122 => 0x99, // ™
+        0x0161 => 0x9A, // š
+        0x203A => 0x9B, // ›
+        0x0153 => 0x9C, // œ
+        0x017E => 0x9E, // ž
+        0x0178 => 0x9F, // Ÿ
+        else => '?',
+    };
+}
+
 pub const Font = enum {
     helvetica,
     helvetica_bold,
@@ -123,12 +211,14 @@ pub const Font = enum {
         };
     }
 
-    /// Get character width in thousandths of an em (PDF standard metric)
-    /// Uses Adobe's AFM metrics for the Standard 14 fonts
+    /// Get WinAnsiEncoding character width in thousandths of an em.
+    /// Full 256-entry table from Adobe's AFM metrics for Helvetica.
     pub fn charWidth(self: Font, char: u8) u16 {
-        // Helvetica character widths (most common printable ASCII)
-        // Values from Adobe AFM file, in thousandths of em
-        const helvetica_widths = [_]u16{
+        // Helvetica: full WinAnsiEncoding width table (positions 0-255)
+        const helvetica_widths = [256]u16{
+            // 0-31: control characters (zero width)
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             // 32-47: space ! " # $ % & ' ( ) * + , - . /
             278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278, 278,
             // 48-63: 0-9 : ; < = > ?
@@ -139,46 +229,78 @@ pub const Font = enum {
             667, 778, 722, 667, 611, 722, 667, 944, 667, 667, 611, 278, 278, 278, 469, 556,
             // 96-111: ` a-o
             333, 556, 556, 500, 556, 556, 278, 556, 556, 222, 222, 500, 222, 833, 556, 556,
-            // 112-126: p-z { | } ~
-            556, 556, 333, 500, 278, 556, 500, 722, 500, 500, 500, 334, 260, 334, 584,
+            // 112-127: p-~ DEL
+            556, 556, 333, 500, 278, 556, 500, 722, 500, 500, 500, 334, 260, 334, 584, 278,
+            // 128-143: € . ‚ ƒ „ … † ‡ ˆ ‰ Š ‹ Œ . Ž .
+            556, 278, 222, 556, 333, 1000, 556, 556, 333, 1000, 667, 333, 1000, 278, 611, 278,
+            // 144-159: . ' ' " " • – — ˜ ™ š › œ . ž Ÿ
+            278, 222, 222, 333, 333, 350, 556, 1000, 333, 1000, 500, 333, 944, 278, 500, 667,
+            // 160-175: nbsp ¡ ¢ £ ¤ ¥ ¦ § ¨ © ª « ¬ SHY ® ¯
+            278, 333, 556, 556, 556, 556, 260, 556, 333, 737, 370, 556, 584, 333, 737, 333,
+            // 176-191: ° ± ² ³ ´ µ ¶ · ¸ ¹ º » ¼ ½ ¾ ¿
+            400, 584, 333, 333, 333, 556, 537, 278, 333, 333, 365, 556, 834, 834, 834, 611,
+            // 192-207: À Á Â Ã Ä Å Æ Ç È É Ê Ë Ì Í Î Ï
+            667, 667, 667, 667, 667, 667, 1000, 722, 667, 667, 667, 667, 278, 278, 278, 278,
+            // 208-223: Ð Ñ Ò Ó Ô Õ Ö × Ø Ù Ú Û Ü Ý Þ ß
+            722, 722, 778, 778, 778, 778, 778, 584, 778, 722, 722, 722, 722, 667, 667, 611,
+            // 224-239: à á â ã ä å æ ç è é ê ë ì í î ï
+            556, 556, 556, 556, 556, 556, 889, 500, 556, 556, 556, 556, 278, 278, 278, 278,
+            // 240-255: ð ñ ò ó ô õ ö ÷ ø ù ú û ü ý þ ÿ
+            556, 556, 556, 556, 556, 556, 556, 584, 611, 556, 556, 556, 556, 500, 556, 500,
         };
 
-        const helvetica_bold_widths = [_]u16{
-            // 32-47: space ! " # $ % & ' ( ) * + , - . /
+        const helvetica_bold_widths = [256]u16{
+            // 0-31: control characters
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            // 32-47
             278, 333, 474, 556, 556, 889, 722, 238, 333, 333, 389, 584, 278, 333, 278, 278,
-            // 48-63: 0-9 : ; < = > ?
+            // 48-63
             556, 556, 556, 556, 556, 556, 556, 556, 556, 556, 333, 333, 584, 584, 584, 611,
-            // 64-79: @ A-O
+            // 64-79
             975, 722, 722, 722, 722, 667, 611, 778, 722, 278, 556, 722, 611, 833, 722, 778,
-            // 80-95: P-Z [ \ ] ^ _
+            // 80-95
             667, 778, 722, 667, 611, 722, 667, 944, 667, 667, 611, 333, 278, 333, 584, 556,
-            // 96-111: ` a-o
+            // 96-111
             333, 556, 611, 556, 611, 556, 333, 611, 611, 278, 278, 556, 278, 889, 611, 611,
-            // 112-126: p-z { | } ~
-            611, 611, 389, 556, 333, 611, 556, 778, 556, 556, 500, 389, 280, 389, 584,
+            // 112-127
+            611, 611, 389, 556, 333, 611, 556, 778, 556, 556, 500, 389, 280, 389, 584, 278,
+            // 128-143
+            556, 278, 278, 556, 389, 1000, 556, 556, 333, 1000, 667, 333, 1000, 278, 611, 278,
+            // 144-159
+            278, 278, 278, 389, 389, 350, 556, 1000, 333, 1000, 556, 333, 944, 278, 500, 667,
+            // 160-175
+            278, 333, 556, 556, 556, 556, 280, 556, 333, 737, 370, 556, 584, 333, 737, 333,
+            // 176-191
+            400, 584, 333, 333, 333, 611, 556, 278, 333, 333, 365, 556, 834, 834, 834, 611,
+            // 192-207
+            722, 722, 722, 722, 722, 722, 1000, 722, 667, 667, 667, 667, 278, 278, 278, 278,
+            // 208-223
+            722, 722, 778, 778, 778, 778, 778, 584, 778, 722, 722, 722, 722, 667, 667, 611,
+            // 224-239
+            556, 556, 556, 556, 556, 556, 889, 556, 556, 556, 556, 556, 278, 278, 278, 278,
+            // 240-255
+            611, 611, 611, 611, 611, 611, 611, 584, 611, 611, 611, 611, 611, 556, 611, 556,
         };
 
-        // Courier is monospace - all characters are 600 units wide
         const courier_width: u16 = 600;
 
-        if (char < 32 or char > 126) return 278; // Default for non-printable
-
-        const idx = char - 32;
         return switch (self) {
-            .helvetica, .helvetica_oblique => helvetica_widths[idx],
-            .helvetica_bold, .helvetica_bold_oblique => helvetica_bold_widths[idx],
-            .times_roman, .times_italic => helvetica_widths[idx], // Use Helvetica as approximation
-            .times_bold, .times_bold_italic => helvetica_bold_widths[idx],
+            .helvetica, .helvetica_oblique => helvetica_widths[char],
+            .helvetica_bold, .helvetica_bold_oblique => helvetica_bold_widths[char],
+            .times_roman, .times_italic => helvetica_widths[char],
+            .times_bold, .times_bold_italic => helvetica_bold_widths[char],
             .courier, .courier_bold, .courier_oblique, .courier_bold_oblique => courier_width,
         };
     }
 
-    /// Measure text width in points for a given font size
+    /// Measure text width in points. Decodes UTF-8 → WinAnsiEncoding.
     pub fn measureText(self: Font, text: []const u8, font_size: f32) f32 {
         var total_width: f32 = 0;
-        for (text) |char| {
-            const char_width_em = @as(f32, @floatFromInt(self.charWidth(char)));
-            total_width += char_width_em * font_size / 1000.0;
+        var i: usize = 0;
+        while (i < text.len) {
+            const winansi = utf8ToWinAnsi(text, &i);
+            total_width += @as(f32, @floatFromInt(self.charWidth(winansi))) * font_size / 1000.0;
         }
         return total_width;
     }
@@ -198,8 +320,9 @@ pub const WrappedText = struct {
     }
 };
 
-/// Wrap text to fit within max_width at word boundaries
-/// Returns slices into the original text (no allocation of string data)
+/// Wrap text to fit within max_width at word boundaries.
+/// UTF-8 aware: multi-byte characters are measured as single WinAnsi glyphs.
+/// Returns slices into the original UTF-8 text (no string data allocation).
 pub fn wrapText(allocator: std.mem.Allocator, text: []const u8, font: Font, font_size: f32, max_width: f32) !WrappedText {
     var lines: std.ArrayListUnmanaged([]const u8) = .empty;
     errdefer lines.deinit(allocator);
@@ -213,17 +336,19 @@ pub fn wrapText(allocator: std.mem.Allocator, text: []const u8, font: Font, font
     var current_width: f32 = 0;
 
     var i: usize = 0;
-    while (i < text.len) : (i += 1) {
-        const char = text[i];
-        const char_width = @as(f32, @floatFromInt(font.charWidth(char))) * font_size / 1000.0;
+    while (i < text.len) {
+        const byte_pos = i;
+        const winansi = utf8ToWinAnsi(text, &i);
+        // i now points past the consumed UTF-8 bytes
+        const char_width = @as(f32, @floatFromInt(font.charWidth(winansi))) * font_size / 1000.0;
 
-        // Track word boundaries
-        if (char == ' ') {
-            last_space = i;
+        // Track word boundaries (space is always 1 byte in UTF-8)
+        if (winansi == ' ') {
+            last_space = byte_pos;
         }
 
         // Check if adding this character exceeds max width
-        if (current_width + char_width > max_width and i > line_start) {
+        if (current_width + char_width > max_width and byte_pos > line_start) {
             // Need to wrap
             if (last_space) |space_idx| {
                 if (space_idx > line_start) {
@@ -231,18 +356,15 @@ pub fn wrapText(allocator: std.mem.Allocator, text: []const u8, font: Font, font
                     try lines.append(allocator, text[line_start..space_idx]);
                     line_start = space_idx + 1; // Skip the space
                     last_space = null;
-                    // Recalculate width from new line start to current position
-                    current_width = 0;
-                    var j = line_start;
-                    while (j <= i) : (j += 1) {
-                        current_width += @as(f32, @floatFromInt(font.charWidth(text[j]))) * font_size / 1000.0;
-                    }
+                    // Recalculate width from new line start using measureText
+                    current_width = font.measureText(text[line_start..i], font_size);
                     continue;
                 }
             }
             // No space found - force break at current position (mid-word)
-            try lines.append(allocator, text[line_start..i]);
-            line_start = i;
+            // Force break at current code point boundary
+            try lines.append(allocator, text[line_start..byte_pos]);
+            line_start = byte_pos;
             current_width = char_width;
             last_space = null;
         } else {
@@ -438,8 +560,11 @@ pub const ContentStream = struct {
 
     pub fn showText(self: *ContentStream, text: []const u8) !void {
         try self.buffer.append(self.allocator, '(');
-        // Escape special PDF characters
-        for (text) |c| {
+        // Decode UTF-8 → WinAnsiEncoding, escaping PDF special characters.
+        // Each Unicode code point becomes exactly one WinAnsi byte.
+        var i: usize = 0;
+        while (i < text.len) {
+            const c = utf8ToWinAnsi(text, &i);
             switch (c) {
                 '(' => try self.buffer.appendSlice(self.allocator, "\\("),
                 ')' => try self.buffer.appendSlice(self.allocator, "\\)"),
@@ -985,7 +1110,7 @@ pub const PdfDocument = struct {
         // Write Font objects
         for (0..self.font_count) |i| {
             var buf: [256]u8 = undefined;
-            const len = std.fmt.bufPrint(&buf, "<< /Type /Font /Subtype /Type1 /BaseFont /{s} >>", .{self.font_ids[i].pdfName()}) catch continue;
+            const len = std.fmt.bufPrint(&buf, "<< /Type /Font /Subtype /Type1 /BaseFont /{s} /Encoding /WinAnsiEncoding >>", .{self.font_ids[i].pdfName()}) catch continue;
             try self.writeObject(first_font_obj + @as(u32, @intCast(i)), len);
         }
 
