@@ -58,7 +58,8 @@ printf '%s\n' "${utilities[@]}" | xargs -P "$PARALLEL" -I {} bash -c 'build_util
 
 # Count results
 for util in "${utilities[@]}"; do
-    if [[ -f "${util}/zig-out/bin/${util}" ]]; then
+    # Some utilities produce differently-named binaries (e.g. zclip → zcopy/zpaste)
+    if [[ -f "${util}/zig-out/bin/${util}" ]] || [[ -d "${util}/zig-out/bin" && -n "$(ls -A "${util}/zig-out/bin/" 2>/dev/null)" ]]; then
         ((success++))
     else
         failed+=("$util")
