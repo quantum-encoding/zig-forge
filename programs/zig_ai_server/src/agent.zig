@@ -14,6 +14,10 @@ const models_mod = @import("models.zig");
 const account_mod = @import("account.zig");
 const chat_mod = @import("chat.zig");
 const security = @import("security.zig");
+const store_mod = @import("store/store.zig");
+const types = @import("store/types.zig");
+const billing = @import("billing.zig");
+const ledger_mod = @import("ledger.zig");
 const Response = router.Response;
 
 // ── Request type ────────────────────────────────────────────
@@ -85,7 +89,18 @@ const RAG_SYSTEM_PROMPT =
 
 // ── Handler ─────────────────────────────────────────────────
 
-pub fn handle(request: *http.Server.Request, allocator: std.mem.Allocator, io: Io, environ_map: *const std.process.Environ.Map) Response {
+pub fn handle(
+    request: *http.Server.Request,
+    allocator: std.mem.Allocator,
+    io: Io,
+    environ_map: *const std.process.Environ.Map,
+    store: ?*store_mod.Store,
+    auth: ?*const types.AuthContext,
+    ledger: ?*ledger_mod.Ledger,
+) Response {
+    _ = store; // TODO: billing for agent calls
+    _ = auth;
+    _ = ledger;
     // Parse with 256KB limit for agent requests
     const body = json_util.readBody(request, allocator, security.Limits.max_agent_body) catch |err| {
         return errorResp(err);

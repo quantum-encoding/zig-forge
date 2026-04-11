@@ -449,7 +449,11 @@ pub fn jsonEscape(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
             '\t' => try buf.appendSlice(allocator, "\\t"),
             else => {
                 if (c < 0x20) {
-                    // Skip control chars
+                    // Encode control chars as \u00XX (JSON spec requirement)
+                    const hex = "0123456789abcdef";
+                    try buf.appendSlice(allocator, "\\u00");
+                    try buf.append(allocator, hex[c >> 4]);
+                    try buf.append(allocator, hex[c & 0x0f]);
                 } else {
                     try buf.append(allocator, c);
                 }
