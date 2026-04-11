@@ -158,10 +158,11 @@ pub fn authenticate(
         }
     }
 
-    // Step 12: Success
+    // Step 12: Success — copy values so pointers don't go stale after mutex release.
+    // The HashMap pointers become invalid if another thread inserts (triggers rehash).
     return .{ .ok = .{
-        .account = account,
-        .key = key,
+        .account = account.*,
+        .key = key.*,
         .key_hash = key_hash,
     } };
 }

@@ -180,7 +180,11 @@ pub fn nowMs() i64 {
 // ── Auth Context (returned from auth pipeline) ──────────────
 
 pub const AuthContext = struct {
-    account: *Account,
-    key: *ApiKey,
+    /// Copied from the store HashMap — safe after mutex release.
+    /// Use account.balance_ticks for billing checks, but note it's
+    /// a snapshot at auth time. For the latest balance during billing,
+    /// the store's reserve/commit functions read the live value.
+    account: Account,
+    key: ApiKey,
     key_hash: [32]u8,
 };
