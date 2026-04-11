@@ -714,14 +714,11 @@ fn parseArgs(args: []const []const u8) ?Args {
 }
 
 fn isDirectory(path: []const u8) bool {
-    const cstat = @cImport({ @cInclude("sys/stat.h"); });
-    const path_z = std.heap.c_allocator.allocSentinel(u8, path.len, 0) catch return false;
-    defer std.heap.c_allocator.free(path_z);
-    @memcpy(path_z, path);
-
-    var stat_buf: cstat.struct_stat = undefined;
-    if (cstat.stat(path_z.ptr, &stat_buf) != 0) return false;
-    return (stat_buf.st_mode & 0o170000) == 0o040000; // S_IFDIR
+    // Zig 0.16: use std.Io.Dir.cwd().statFile via a thread-local Io handle
+    var io_t = std.Io.Threaded.init_single_threaded;
+    const io = io_t.io();
+    const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch return false;
+    return stat.kind == .directory;
 }
 
 /// Process all .docx files in a folder, outputting .mdx files alongside them.
@@ -731,25 +728,22 @@ fn processFolderMode(allocator: std.mem.Allocator, parsed: Args) void {
     else
         parsed.file_path;
 
-    // Use C opendir/readdir for directory iteration (Zig 0.16 std.fs has no cwd())
-    const cdir = @cImport({ @cInclude("dirent.h"); });
-    const dir_z = allocator.allocSentinel(u8, dir_path.len, 0) catch return;
-    defer allocator.free(dir_z);
-    @memcpy(dir_z, dir_path);
+    // Zig 0.16: std.Io.Dir replaces std.fs for directory operations
+    var io_t = std.Io.Threaded.init_single_threaded;
+    const io = io_t.io();
 
-    const dir = cdir.opendir(dir_z.ptr) orelse {
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch {
         std.debug.print("Error: cannot open directory '{s}'\n", .{dir_path});
         return;
     };
-    defer _ = cdir.closedir(dir);
+    defer dir.close(io);
 
     var count: u32 = 0;
     var success: u32 = 0;
 
-    while (cdir.readdir(dir)) |entry| {
-        const d_name: [*]const u8 = @ptrCast(&entry.*.d_name);
-        const name_len = std.mem.indexOfScalar(u8, d_name[0..256], 0) orelse 256;
-        const name = d_name[0..name_len];
+    var iter = dir.iterate();
+    while (iter.next(io) catch null) |entry| {
+        const name = entry.name;
         if (!std.mem.endsWith(u8, name, ".docx") and !std.mem.endsWith(u8, name, ".DOCX")) continue;
 
         count += 1;
