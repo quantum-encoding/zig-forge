@@ -255,6 +255,45 @@ test "oidc: verifyNonce rejects uppercase hash" {
 
 // ── 5. Billing Dynamic Capping Integration ─────────────────────
 
+// ── 6. JSON Escaping ───────────────────────────────────────────
+
+test "jsonEscape: control chars encoded as \\u00XX" {
+    const allocator = testing.allocator;
+    const chat = @import("chat.zig");
+
+    // Input with null byte, bell, and form feed
+    const input = "hello\x00world\x07\x0c";
+    const escaped = try chat.jsonEscape(allocator, input);
+    defer allocator.free(escaped);
+
+    // Control chars must be \u00XX, not dropped
+    try testing.expect(std.mem.indexOf(u8, escaped, "\\u0000") != null); // null
+    try testing.expect(std.mem.indexOf(u8, escaped, "\\u0007") != null); // bell
+    try testing.expect(std.mem.indexOf(u8, escaped, "\\u000c") != null); // form feed
+    try testing.expect(std.mem.indexOf(u8, escaped, "hello") != null);
+    try testing.expect(std.mem.indexOf(u8, escaped, "world") != null);
+}
+
+test "jsonEscape: normal text unchanged" {
+    const allocator = testing.allocator;
+    const chat = @import("chat.zig");
+
+    const escaped = try chat.jsonEscape(allocator, "hello world");
+    defer allocator.free(escaped);
+    try testing.expectEqualStrings("hello world", escaped);
+}
+
+test "jsonEscape: quotes and backslashes escaped" {
+    const allocator = testing.allocator;
+    const chat = @import("chat.zig");
+
+    const escaped = try chat.jsonEscape(allocator, "say \"hello\" and \\n");
+    defer allocator.free(escaped);
+    try testing.expectEqualStrings("say \\\"hello\\\" and \\\\n", escaped);
+}
+
+// ── 5. Billing Dynamic Capping Integration ─────────────────────
+
 test "billing: reserveWithCap produces valid reservation" {
     var fx = try integration.TestFixture.init(testing.allocator, "capintegration");
     defer fx.deinit();

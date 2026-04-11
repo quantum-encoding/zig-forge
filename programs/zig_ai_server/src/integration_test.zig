@@ -93,13 +93,11 @@ pub const TestFixture = struct {
     }
 
     /// Build an AuthContext from the fixture's account + key.
-    /// Mirrors what auth_pipeline.authenticate() would produce.
-    /// The returned context borrows pointers into the store's hash maps —
-    /// valid only as long as the store isn't mutated (use carefully).
+    /// Returns copies of the values (same as auth_pipeline does).
     pub fn authContext(self: *TestFixture) types.AuthContext {
         return .{
-            .account = self.store.accounts.getPtr(self.account_id).?,
-            .key = self.store.keys.getPtr(self.key_hash).?,
+            .account = self.store.accounts.getPtr(self.account_id).?.*,
+            .key = self.store.keys.getPtr(self.key_hash).?.*,
             .key_hash = self.key_hash,
         };
     }
