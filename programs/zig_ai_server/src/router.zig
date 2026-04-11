@@ -242,7 +242,7 @@ fn routeApiV1Authed(
     // ── Agent ───────────────────────────────────────────
     if (std.mem.eql(u8, path, "agent")) {
         if (method != .POST) return handlers.methodNotAllowed(request, allocator);
-        return agent.handle(request, allocator, io, environ_map);
+        return agent.handle(request, allocator, io, environ_map, store, auth, server_ledger);
     }
 
     // ── Models ──────────────────────────────────────────
@@ -357,7 +357,7 @@ fn routeApiV1Legacy(
     }
     if (std.mem.eql(u8, path, "agent")) {
         if (method != .POST) return handlers.methodNotAllowed(request, allocator);
-        return agent.handle(request, allocator, io, environ_map);
+        return agent.handle(request, allocator, io, environ_map, null, null, null);
     }
     if (std.mem.eql(u8, path, "models")) return models.handleModels(request, allocator);
     if (std.mem.eql(u8, path, "models/pricing")) return models.handlePricing(request, allocator);
