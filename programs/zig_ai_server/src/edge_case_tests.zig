@@ -89,8 +89,8 @@ test "billing: margin decreases with better tier" {
 // ── 2. Store / Reservation Edge Cases ──────────────────────────
 
 test "store: commitReservation with cost > reserved (overcharge)" {
-    // Bug: if the provider charges more than reserved, the refund is
-    // negative but we skip it. The user keeps the excess balance.
+    // If the provider charges more than reserved (thinking tokens, etc.),
+    // the excess must be deducted from the balance, not ignored.
     var fx = try integration.TestFixture.init(testing.allocator, "overcharge");
     defer fx.deinit();
 
@@ -104,13 +104,12 @@ test "store: commitReservation with cost > reserved (overcharge)" {
     // Commit with cost HIGHER than reserved (provider overshot)
     try fx.store.commitReservation(fx.io(), rid, 5000, 500);
 
-    // The balance should NOT be higher than after_reserve (no excess refund)
+    // Balance should be LOWER than after_reserve (excess deducted)
     const after_commit = fx.store.accounts.getPtr(fx.account_id).?.balance_ticks;
-    // Current code only refunds if refund > 0, so balance stays at after_reserve
-    // This means the user is undercharged by 4500 ticks — a billing leak.
-    // The test documents the current behavior:
-    try testing.expectEqual(after_reserve, after_commit);
-    // TODO: fix commitReservation to deduct the excess instead of ignoring it
+    // delta = reserved(1000) - actual(5500) = -4500 → deducted from balance
+    try testing.expectEqual(after_reserve - 4500, after_commit);
+    // Total charged = initial - after_commit = 1000 + 4500 = 5500 (correct)
+    try testing.expectEqual(initial - 5500, after_commit);
 }
 
 test "store: commitReservation with zero actual cost (free ride)" {

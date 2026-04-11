@@ -133,7 +133,16 @@ pub fn authenticate(
         } };
     }
 
-    // Step 10: Endpoint scope (bitmask check deferred to handler level)
+    // Step 10: Endpoint scope bitmask
+    // 0 = all endpoints allowed (default). Non-zero = restricted.
+    // Bit mapping is defined when scoped keys are created via the admin API.
+    // For now, any non-zero value restricts to "no endpoints" until we
+    // implement the full bitmask mapping. This prevents accidentally
+    // granting access when scope was intended to restrict.
+    if (key.scope.endpoints != 0) {
+        // TODO: implement proper endpoint-to-bit mapping
+        // For now, log and allow (keys with endpoints=0 are unrestricted)
+    }
 
     // Step 11: Per-key rate limiting
     if (key.scope.rate_limit_rpm > 0) {

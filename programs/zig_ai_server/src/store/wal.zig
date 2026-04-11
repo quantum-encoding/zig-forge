@@ -20,6 +20,9 @@ pub const WalWriter = struct {
     /// Append a WAL entry. Writes op + payload_len + CRC32 + payload.
     /// Uses std.Io for file operations.
     pub fn append(self: *WalWriter, io: Io, op: types.WalOp, payload: []const u8) !void {
+        // Guard against payloads > 4GB (u32 length field)
+        if (payload.len > std.math.maxInt(u32)) return error.PayloadTooLarge;
+
         // Build header: [1 op][4 len][4 crc32]
         var header: [9]u8 = undefined;
         header[0] = @intFromEnum(op);

@@ -364,12 +364,13 @@ pub const Store = struct {
 
         const account = self.accounts.getPtr(reservation.account_id.slice()) orelse return error.AccountNotFound;
 
-        // Refund excess hold
+        // Settle: refund excess hold, or deduct undercharge
         const total_cost = actual_ticks + margin_ticks;
-        const refund = reservation.amount_ticks - total_cost;
-        if (refund > 0) {
-            account.balance_ticks += refund;
-        }
+        const delta = reservation.amount_ticks - total_cost;
+        // delta > 0: we reserved too much → refund the excess
+        // delta < 0: provider charged more than reserved → deduct the shortfall
+        // delta = 0: exact match, no adjustment needed
+        account.balance_ticks += delta;
 
         // Update key spend
         if (self.keys.getPtr(reservation.key_hash)) |key| {

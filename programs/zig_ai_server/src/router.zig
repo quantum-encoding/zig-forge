@@ -156,8 +156,12 @@ pub fn dispatch(
             }
             return routeApiV1Legacy(path[8..], method, request, allocator, io, environ_map);
         } else {
-            // No auth configured — open access (dev mode)
-            return routeApiV1Legacy(path[8..], method, request, allocator, io, environ_map);
+            // SECURITY: no auth configured. Reject all requests.
+            // Previously this was "open access dev mode" which is a critical
+            // security bypass if accidentally deployed to production.
+            return .{ .status = .service_unavailable, .body =
+                \\{"error":"no_auth","message":"Server has no auth configured. Set QAI_BOOTSTRAP_KEY."}
+            };
         }
     }
 

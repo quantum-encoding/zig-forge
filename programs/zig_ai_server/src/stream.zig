@@ -233,11 +233,10 @@ fn handleStreamCore(
         .errored = false,
     };
 
-    client.sendMessageStreamingWithContext(prompt, context_messages.items, config, streamCallback, &stream_ctx) catch |err| {
+    client.sendMessageStreamingWithContext(prompt, context_messages.items, config, streamCallback, &stream_ctx) catch {
         if (reservation_id) |rid| if (store) |s| if (io) |io_handle| billing.rollback(s, io_handle, rid);
-        const err_event = std.fmt.allocPrint(allocator,
-            "data: {{\"type\":\"error\",\"message\":\"{s}\"}}\n\n", .{@errorName(err)},
-        ) catch "data: {\"type\":\"error\",\"message\":\"provider_error\"}\n\n";
+        // Don't leak internal error names (e.g. "error.OutOfMemory") to the client
+        const err_event: []const u8 = "data: {\"type\":\"error\",\"message\":\"Provider request failed\"}\n\n";
         body_writer.writer.writeAll(err_event) catch {};
         body_writer.writer.writeAll("data: {\"type\":\"done\"}\n\n") catch {};
         body_writer.end() catch {};
