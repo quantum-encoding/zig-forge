@@ -255,7 +255,103 @@ test "oidc: verifyNonce rejects uppercase hash" {
 
 // ── 5. Billing Dynamic Capping Integration ─────────────────────
 
-// ── 6. JSON Escaping ───────────────────────────────────────────
+// ── 6. Agent Capability Filtering ───────────────────────────────
+
+const agent = @import("agent.zig");
+const ToolDef = @import("http-sentinel").ai.common.ToolDefinition;
+
+test "capabilities: null (absent) returns all tools" {
+    const all_tools = [_]ToolDef{
+        .{ .name = "bash", .description = "run command", .input_schema = "{}" },
+        .{ .name = "read_file", .description = "read", .input_schema = "{}" },
+        .{ .name = "write_file", .description = "write", .input_schema = "{}" },
+    };
+    const result = try agent.filterToolsByCapabilities(testing.allocator, &all_tools, null);
+    // null capabilities → full suite
+    try testing.expect(result != null);
+    try testing.expectEqual(@as(usize, 3), result.?.len);
+}
+
+test "capabilities: empty array returns null (Safe Mode)" {
+    const all_tools = [_]ToolDef{
+        .{ .name = "bash", .description = "run command", .input_schema = "{}" },
+    };
+    const empty: []const []const u8 = &.{};
+    const result = try agent.filterToolsByCapabilities(testing.allocator, &all_tools, empty);
+    // empty capabilities → no tools
+    try testing.expect(result == null);
+}
+
+test "capabilities: file_read only exposes read_file" {
+    const all_tools = [_]ToolDef{
+        .{ .name = "bash", .description = "run command", .input_schema = "{}" },
+        .{ .name = "read_file", .description = "read", .input_schema = "{}" },
+        .{ .name = "write_file", .description = "write", .input_schema = "{}" },
+    };
+    const caps: []const []const u8 = &.{"file_read"};
+    const result = try agent.filterToolsByCapabilities(testing.allocator, &all_tools, caps);
+    defer if (result) |r| testing.allocator.free(r);
+
+    try testing.expect(result != null);
+    try testing.expectEqual(@as(usize, 1), result.?.len);
+    try testing.expectEqualStrings("read_file", result.?[0].name);
+}
+
+test "capabilities: code_execution exposes bash" {
+    const all_tools = [_]ToolDef{
+        .{ .name = "bash", .description = "run command", .input_schema = "{}" },
+        .{ .name = "read_file", .description = "read", .input_schema = "{}" },
+        .{ .name = "write_file", .description = "write", .input_schema = "{}" },
+    };
+    const caps: []const []const u8 = &.{"code_execution"};
+    const result = try agent.filterToolsByCapabilities(testing.allocator, &all_tools, caps);
+    defer if (result) |r| testing.allocator.free(r);
+
+    try testing.expect(result != null);
+    try testing.expectEqual(@as(usize, 1), result.?.len);
+    try testing.expectEqualStrings("bash", result.?[0].name);
+}
+
+test "capabilities: multiple capabilities combine tools" {
+    const all_tools = [_]ToolDef{
+        .{ .name = "bash", .description = "run command", .input_schema = "{}" },
+        .{ .name = "read_file", .description = "read", .input_schema = "{}" },
+        .{ .name = "write_file", .description = "write", .input_schema = "{}" },
+    };
+    const caps: []const []const u8 = &.{ "file_read", "file_write" };
+    const result = try agent.filterToolsByCapabilities(testing.allocator, &all_tools, caps);
+    defer if (result) |r| testing.allocator.free(r);
+
+    try testing.expect(result != null);
+    try testing.expectEqual(@as(usize, 2), result.?.len);
+}
+
+test "capabilities: unknown capability returns null" {
+    const all_tools = [_]ToolDef{
+        .{ .name = "bash", .description = "run command", .input_schema = "{}" },
+    };
+    const caps: []const []const u8 = &.{"nonexistent_capability"};
+    const result = try agent.filterToolsByCapabilities(testing.allocator, &all_tools, caps);
+    // Unknown capability → no matching tools → null
+    try testing.expect(result == null);
+}
+
+test "capabilities: terminal_inject and code_execution both map to bash (deduplicated)" {
+    const all_tools = [_]ToolDef{
+        .{ .name = "bash", .description = "run command", .input_schema = "{}" },
+        .{ .name = "read_file", .description = "read", .input_schema = "{}" },
+    };
+    const caps: []const []const u8 = &.{ "code_execution", "terminal_inject" };
+    const result = try agent.filterToolsByCapabilities(testing.allocator, &all_tools, caps);
+    defer if (result) |r| testing.allocator.free(r);
+
+    try testing.expect(result != null);
+    // Both map to "bash" but should be deduplicated → 1 tool
+    try testing.expectEqual(@as(usize, 1), result.?.len);
+    try testing.expectEqualStrings("bash", result.?[0].name);
+}
+
+// ── 7. JSON Escaping ───────────────────────────────────────────
 
 test "jsonEscape: control chars encoded as \\u00XX" {
     const allocator = testing.allocator;

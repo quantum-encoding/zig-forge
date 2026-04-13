@@ -30,7 +30,93 @@ const AgentRequest = struct {
     enable_rag: ?bool = null,
     system_prompt: ?[]const u8 = null,
     workspace_id: ?[]const u8 = null,
+    /// Tool capability allowlist. Controls which tools the model sees.
+    ///   null/absent → full tool suite (backwards compat)
+    ///   empty []    → no tools (Safe Mode — pure chat, no function calling)
+    ///   non-empty   → only tools whose capability ID is in this list
+    capabilities: ?[]const []const u8 = null,
 };
+
+// ── Capability → Tool Registry ──────────────────────────────
+// Maps canonical capability IDs to tool names. Must match the Go backend.
+// When the client sends capabilities: ["file_read"], only tools in
+// that capability's list are exposed to the model.
+
+const CapabilityMapping = struct {
+    id: []const u8,
+    tools: []const []const u8,
+};
+
+const capability_registry = [_]CapabilityMapping{
+    .{ .id = "file_read", .tools = &.{ "read_file" } },
+    .{ .id = "file_write", .tools = &.{ "write_file" } },
+    .{ .id = "code_execution", .tools = &.{ "bash" } },
+    .{ .id = "terminal_inject", .tools = &.{ "bash" } },
+    // Future tools map here. Same IDs as Go backend:
+    // "image_generation", "image_edit", "video_generation",
+    // "audio_generation", "embeddings", "web_search",
+    // "rag_search", "browser_control"
+};
+
+/// Filter tool definitions by capability allowlist.
+/// Returns a slice of tools that match the allowed capabilities.
+/// - null capabilities → all tools (backwards compat)
+/// - empty capabilities → no tools (Safe Mode)
+/// - non-empty → only matching tools
+pub fn filterToolsByCapabilities(
+    allocator: std.mem.Allocator,
+    all_tools: []const hs.ai.common.ToolDefinition,
+    capabilities: ?[]const []const u8,
+) !?[]const hs.ai.common.ToolDefinition {
+    // null = full suite
+    const caps = capabilities orelse return all_tools;
+
+    // empty = Safe Mode (no tools)
+    if (caps.len == 0) return null;
+
+    // Build set of allowed tool names from capability IDs
+    var allowed: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer allowed.deinit(allocator);
+
+    for (caps) |cap_id| {
+        for (capability_registry) |mapping| {
+            if (std.mem.eql(u8, mapping.id, cap_id)) {
+                for (mapping.tools) |tool_name| {
+                    // Deduplicate
+                    var found = false;
+                    for (allowed.items) |existing| {
+                        if (std.mem.eql(u8, existing, tool_name)) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) try allowed.append(allocator, tool_name);
+                }
+            }
+        }
+    }
+
+    if (allowed.items.len == 0) return null;
+
+    // Filter the tool definitions
+    var filtered: std.ArrayListUnmanaged(hs.ai.common.ToolDefinition) = .empty;
+    for (all_tools) |tool| {
+        for (allowed.items) |name| {
+            if (std.mem.eql(u8, tool.name, name)) {
+                try filtered.append(allocator, tool);
+                break;
+            }
+        }
+    }
+
+    if (filtered.items.len == 0) {
+        filtered.deinit(allocator);
+        return null;
+    }
+
+    const slice = try filtered.toOwnedSlice(allocator);
+    return @as(?[]const hs.ai.common.ToolDefinition, slice);
+}
 
 // ── Tool definitions (3 tools) ──────────────────────────────
 
@@ -176,6 +262,24 @@ pub fn handle(
         25;
     const enable_rag = req.enable_rag orelse false;
 
+    // Filter tools by capabilities allowlist
+    const filtered_tools = filterToolsByCapabilities(allocator, &tool_definitions, req.capabilities) catch {
+        return .{ .status = .internal_server_error, .body =
+            \\{"error":"internal","message":"Failed to filter capabilities"}
+        };
+    };
+    defer if (filtered_tools) |ft| {
+        if (ft.ptr != &tool_definitions) allocator.free(ft);
+    };
+
+    // Log capability filtering
+    if (req.capabilities) |caps| {
+        const tool_count: usize = if (filtered_tools) |ft| ft.len else 0;
+        std.debug.print("  Agent: capabilities={d} filtered={d}/{d} tools\n", .{
+            caps.len, tool_count, tool_definitions.len,
+        });
+    }
+
     const result = runAgentLoop(
         allocator,
         io,
@@ -186,6 +290,7 @@ pub fn handle(
         max_iters,
         enable_rag,
         req.system_prompt,
+        filtered_tools,
     ) catch |err| {
         const msg = std.fmt.allocPrint(allocator,
             \\{{"error":"agent_error","message":"Agent loop failed: {s}"}}
@@ -210,6 +315,7 @@ fn runAgentLoop(
     max_iters: u32,
     enable_rag: bool,
     custom_system: ?[]const u8,
+    tools: ?[]const hs.ai.common.ToolDefinition,
 ) ![]u8 {
     // DeepSeek quirk: system prompts degrade function calling quality.
     // Move system instructions into the first user message instead.
@@ -220,9 +326,9 @@ fn runAgentLoop(
         .model = model,
         .max_tokens = 16384,
         .temperature = 0.7,
-        .tools = &tool_definitions,
-        .tool_choice = .required, // Force tool use on first turn
-        .system_prompt = if (is_deepseek) null else sys_prompt, // DeepSeek: no system with tools
+        .tools = tools orelse null, // null = Safe Mode (no tools sent to provider)
+        .tool_choice = if (tools != null) .required else .none, // Force tool use on first turn (if tools available)
+        .system_prompt = if (is_deepseek) null else sys_prompt,
     };
     _ = &config;
 
@@ -246,7 +352,8 @@ fn runAgentLoop(
         iterations_used = iter + 1;
 
         // First turn: force tool use. Subsequent turns: let model choose.
-        config.tool_choice = if (iter == 0) .required else .auto;
+        // Safe Mode (no tools): always .none
+        config.tool_choice = if (tools == null) .none else if (iter == 0) .required else .auto;
 
         // For DeepSeek: prepend system instructions to the goal (first user message only)
         const prompt = if (iter == 0) blk: {
