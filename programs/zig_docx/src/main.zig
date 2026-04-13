@@ -140,6 +140,47 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    // ── MD → DOCX conversion ──
+    if (parsed.to_docx) {
+        const md_text = readFileContents(allocator, parsed.file_path) orelse return;
+        defer allocator.free(md_text);
+
+        var result = docx.md_parser.parseMarkdown(allocator, md_text) catch |err| {
+            std.debug.print("Error parsing markdown: {}\n", .{err});
+            return;
+        };
+        defer result.deinit();
+
+        const options = docx.docx_writer.DocxWriterOptions{
+            .title = result.frontmatter.title orelse parsed.title orelse "",
+            .author = result.frontmatter.author orelse parsed.author orelse "",
+            .description = result.frontmatter.description orelse parsed.description orelse "",
+            .date = result.frontmatter.date orelse parsed.date orelse "",
+        };
+
+        const docx_bytes = docx.docx_writer.generateDocx(allocator, &result.document, options) catch |err| {
+            std.debug.print("Error generating DOCX: {}\n", .{err});
+            return;
+        };
+        defer allocator.free(docx_bytes);
+
+        // Determine output path: explicit -o, or input.md → input.docx
+        const out_path = parsed.output_path orelse blk: {
+            if (std.mem.endsWith(u8, parsed.file_path, ".md")) {
+                const stem = parsed.file_path[0 .. parsed.file_path.len - 3];
+                break :blk std.fmt.allocPrint(allocator, "{s}.docx", .{stem}) catch {
+                    std.debug.print("Error: out of memory\n", .{});
+                    return;
+                };
+            }
+            break :blk std.fmt.allocPrint(allocator, "{s}.docx", .{parsed.file_path}) catch return;
+        };
+
+        writeToFile(allocator, out_path, docx_bytes);
+        std.debug.print("Generated: {s} ({d} bytes)\n", .{ out_path, docx_bytes.len });
+        return;
+    }
+
     // Detect plain text / markdown files — read directly, chunk or pass through
     const is_text = std.mem.endsWith(u8, parsed.file_path, ".md") or
         std.mem.endsWith(u8, parsed.file_path, ".MD") or
@@ -563,6 +604,35 @@ fn writeToStdout(data: []const u8) void {
     _ = fflush(stdout);
 }
 
+/// Read an entire file into memory using libc (same pattern as existing code).
+fn readFileContents(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {
+    const path_z = allocator.allocSentinel(u8, path.len, 0) catch return null;
+    defer allocator.free(path_z);
+    @memcpy(path_z, path);
+
+    const fp = fopen(path_z.ptr, "rb") orelse {
+        std.debug.print("Error opening '{s}'\n", .{path});
+        return null;
+    };
+    defer _ = fclose(fp);
+
+    _ = fseek(fp, 0, 2); // SEEK_END
+    const size = ftell(fp);
+    if (size <= 0) {
+        std.debug.print("Error: file is empty or unreadable\n", .{});
+        return null;
+    }
+    _ = fseek(fp, 0, 0); // SEEK_SET
+
+    const buf = allocator.alloc(u8, @intCast(size)) catch return null;
+    const n = fread(buf.ptr, 1, @intCast(size), fp);
+    if (n != @as(usize, @intCast(size))) {
+        allocator.free(buf);
+        return null;
+    }
+    return buf;
+}
+
 const Args = struct {
     file_path: []const u8 = "",
     output_path: ?[]const u8 = null,
@@ -578,6 +648,7 @@ const Args = struct {
     chunk_mode: bool = false,
     anthropic_mode: bool = false,
     claude_code_mode: bool = false,
+    to_docx: bool = false, // MD → DOCX conversion
     only_project: ?[]const u8 = null,
     // Chunker config (only used when --chunk is set)
     chunk_target_words: ?u32 = null,
@@ -637,6 +708,8 @@ fn parseArgs(args: []const []const u8) ?Args {
             result.anthropic_mode = true;
         } else if (std.mem.eql(u8, arg, "--claude-code")) {
             result.claude_code_mode = true;
+        } else if (std.mem.eql(u8, arg, "--to-docx")) {
+            result.to_docx = true;
         } else if (std.mem.eql(u8, arg, "--only-project")) {
             i += 1;
             if (i >= args.len) {

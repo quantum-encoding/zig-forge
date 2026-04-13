@@ -18,6 +18,10 @@ pub const StyleType = enum {
     list_paragraph,
     normal,
     toc,
+    // MD → DOCX styles (also recognized on round-trip DOCX → MD → DOCX)
+    code_block,
+    blockquote,
+    horizontal_rule,
     other,
 };
 

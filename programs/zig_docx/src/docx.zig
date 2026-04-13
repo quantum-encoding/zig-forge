@@ -18,6 +18,9 @@ pub const pdf = @import("pdf.zig");
 pub const chunker = @import("chunker.zig");
 pub const anthropic = @import("anthropic.zig");
 pub const claude_code = @import("claude_code.zig");
+pub const md_parser = @import("md_parser.zig");
+pub const docx_writer = @import("docx_writer.zig");
+pub const zip_writer = @import("zip_writer.zig");
 
 // Re-export key types
 pub const StyleType = styles.StyleType;
@@ -31,6 +34,7 @@ pub const Run = struct {
     bold: bool = false,
     italic: bool = false,
     underline: bool = false,
+    is_code: bool = false, // inline `code` — rendered as monospace
     hyperlink_url: ?[]const u8 = null,
     image_rel_id: ?[]const u8 = null,
 };
@@ -39,6 +43,7 @@ pub const Paragraph = struct {
     style: StyleType = .normal,
     runs: []Run = &[_]Run{},
     is_list_item: bool = false,
+    is_ordered: bool = false, // ordered (1. 2. 3.) vs unordered (- * +)
     numbering_level: u8 = 0,
 };
 
