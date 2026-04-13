@@ -257,7 +257,7 @@ test "oidc: verifyNonce rejects uppercase hash" {
 
 // ── 6. Agent Capability Filtering ───────────────────────────────
 
-const agent = @import("agent.zig");
+const agent = @import("cloudrun.zig");
 const ToolDef = @import("http-sentinel").ai.common.ToolDefinition;
 
 test "capabilities: null (absent) returns all tools" {

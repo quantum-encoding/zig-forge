@@ -7,7 +7,7 @@ const http = std.http;
 const handlers = @import("handlers.zig");
 const auth_pipeline = @import("auth_pipeline.zig");
 const chat = @import("chat.zig");
-const agent = @import("agent.zig");
+const cloudrun = @import("cloudrun.zig");
 const models = @import("models.zig");
 const keys = @import("keys.zig");
 const store_mod = @import("store/store.zig");
@@ -239,10 +239,20 @@ fn routeApiV1Authed(
         return .{ .handled = true };
     }
 
-    // ── Agent ───────────────────────────────────────────
+    // ── Agent (client-executed tools, stateless passthrough) ──
+    // Server: filters tools by capabilities, normalizes schemas via forge,
+    // calls provider, returns tool_use events. Client executes tools locally.
     if (std.mem.eql(u8, path, "agent")) {
         if (method != .POST) return handlers.methodNotAllowed(request, allocator);
-        return agent.handle(request, allocator, io, environ_map, store, auth, server_ledger);
+        const agent_mod = @import("agent.zig");
+        return agent_mod.handle(request, allocator, environ_map, io, store, auth, server_ledger);
+    }
+
+    // ── Cloud Run Agent (server-executed tools, sandbox-backed) ──
+    // Legacy: server runs bash/read_file/write_file in a Cloud Run sandbox.
+    if (std.mem.eql(u8, path, "cloudrun")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        return cloudrun.handle(request, allocator, io, environ_map, store, auth, server_ledger);
     }
 
     // ── Models ──────────────────────────────────────────
@@ -355,9 +365,9 @@ fn routeApiV1Legacy(
         if (method != .POST) return handlers.methodNotAllowed(request, allocator);
         return chat.handle(request, allocator, environ_map, null, null, null, null, server_gcp);
     }
-    if (std.mem.eql(u8, path, "agent")) {
+    if (std.mem.eql(u8, path, "cloudrun")) {
         if (method != .POST) return handlers.methodNotAllowed(request, allocator);
-        return agent.handle(request, allocator, io, environ_map, null, null, null);
+        return cloudrun.handle(request, allocator, io, environ_map, null, null, null);
     }
     if (std.mem.eql(u8, path, "models")) return models.handleModels(request, allocator);
     if (std.mem.eql(u8, path, "models/pricing")) return models.handlePricing(request, allocator);

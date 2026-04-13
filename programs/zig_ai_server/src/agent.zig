@@ -1,742 +1,327 @@
 // Agent endpoint — POST /qai/v1/agent
-// Single model, single loop, three tools: bash, write_file, read_file
-// Pure Zig — no libc, no C externs, no system(), no popen()
-// Uses std.Io for all I/O, std.process.run for child processes
+// Stateless tool-call passthrough. The server does NOT execute tools.
+//
+// Flow:
+//   1. Client sends: { model, messages, tools, capabilities, system_prompt }
+//   2. Server: filters tools by capabilities, normalizes schemas per provider
+//   3. Server: calls the provider with the normalized request
+//   4. Server: streams back SSE events (content_delta, tool_use, usage, done)
+//   5. Client: executes tool calls locally (under Guardian Shield)
+//   6. Client: sends next request with tool_result messages in history
+//   7. Repeat until model returns end_turn (no more tool calls)
+//
+// This matches the Anthropic API pattern — stateless round-trips, no server state.
+// The server's value: capability filtering, schema normalization (forge), billing.
 
 const std = @import("std");
 const http = std.http;
-const Io = std.Io;
-const Dir = std.Io.Dir;
 const hs = @import("http-sentinel");
 const json_util = @import("json.zig");
 const router = @import("router.zig");
-const models_mod = @import("models.zig");
-const account_mod = @import("account.zig");
 const chat_mod = @import("chat.zig");
+const forge = @import("forge.zig");
 const security = @import("security.zig");
+const billing = @import("billing.zig");
 const store_mod = @import("store/store.zig");
 const types = @import("store/types.zig");
-const billing = @import("billing.zig");
 const ledger_mod = @import("ledger.zig");
 const Response = router.Response;
 
-// ── Request type ────────────────────────────────────────────
+// ── Request / Response Types ───────────────────────────────────
 
 const AgentRequest = struct {
-    goal: []const u8,
-    model: []const u8 = "deepseek-chat",
-    max_iterations: ?i32 = null,
-    ephemeral: ?bool = null,
-    enable_rag: ?bool = null,
-    system_prompt: ?[]const u8 = null,
-    workspace_id: ?[]const u8 = null,
-    /// Tool capability allowlist. Controls which tools the model sees.
-    ///   null/absent → full tool suite (backwards compat)
-    ///   empty []    → no tools (Safe Mode — pure chat, no function calling)
-    ///   non-empty   → only tools whose capability ID is in this list
+    model: []const u8,
+    messages: []const Message,
+    /// Canonical tool definitions — provider-agnostic schemas.
+    /// The forge normalizes these per provider before sending.
+    tools: ?[]const ToolDef = null,
+    /// Capability allowlist. Filters which tools the model sees.
+    ///   null → all tools. [] → no tools (Safe Mode). non-empty → allowlist.
     capabilities: ?[]const []const u8 = null,
+    system_prompt: ?[]const u8 = null,
+    max_tokens: ?i32 = null,
+    temperature: ?f64 = null,
+    /// If true, stream response as SSE. Default true for agent.
+    stream: ?bool = null,
 };
 
-// ── Capability → Tool Registry ──────────────────────────────
-// Maps canonical capability IDs to tool names. Must match the Go backend.
-// When the client sends capabilities: ["file_read"], only tools in
-// that capability's list are exposed to the model.
+const Message = struct {
+    role: []const u8,
+    content: ?[]const u8 = null,
+    /// Tool call ID (for tool_result messages)
+    tool_call_id: ?[]const u8 = null,
+    /// Tool use from the model's previous turn (assistant messages)
+    tool_use: ?[]const ToolUse = null,
+    /// Indicates this is a tool result (error case)
+    is_error: ?bool = null,
+};
 
-const CapabilityMapping = struct {
+const ToolDef = struct {
+    name: []const u8,
+    description: []const u8 = "",
+    input_schema: []const u8 = "{}",
+};
+
+const ToolUse = struct {
     id: []const u8,
-    tools: []const []const u8,
+    name: []const u8,
+    input: ?[]const u8 = null, // JSON string
 };
 
-const capability_registry = [_]CapabilityMapping{
-    .{ .id = "file_read", .tools = &.{ "read_file" } },
-    .{ .id = "file_write", .tools = &.{ "write_file" } },
-    .{ .id = "code_execution", .tools = &.{ "bash" } },
-    .{ .id = "terminal_inject", .tools = &.{ "bash" } },
-    // Future tools map here. Same IDs as Go backend:
-    // "image_generation", "image_edit", "video_generation",
-    // "audio_generation", "embeddings", "web_search",
-    // "rag_search", "browser_control"
-};
+// Re-export for edge_case_tests
+pub const filterToolsByCapabilities = @import("cloudrun.zig").filterToolsByCapabilities;
 
-/// Filter tool definitions by capability allowlist.
-/// Returns a slice of tools that match the allowed capabilities.
-/// - null capabilities → all tools (backwards compat)
-/// - empty capabilities → no tools (Safe Mode)
-/// - non-empty → only matching tools
-pub fn filterToolsByCapabilities(
-    allocator: std.mem.Allocator,
-    all_tools: []const hs.ai.common.ToolDefinition,
-    capabilities: ?[]const []const u8,
-) !?[]const hs.ai.common.ToolDefinition {
-    // null = full suite
-    const caps = capabilities orelse return all_tools;
-
-    // empty = Safe Mode (no tools)
-    if (caps.len == 0) return null;
-
-    // Build set of allowed tool names from capability IDs
-    var allowed: std.ArrayListUnmanaged([]const u8) = .empty;
-    defer allowed.deinit(allocator);
-
-    for (caps) |cap_id| {
-        for (capability_registry) |mapping| {
-            if (std.mem.eql(u8, mapping.id, cap_id)) {
-                for (mapping.tools) |tool_name| {
-                    // Deduplicate
-                    var found = false;
-                    for (allowed.items) |existing| {
-                        if (std.mem.eql(u8, existing, tool_name)) {
-                            found = true;
-                            break;
-                        }
-                    }
-                    if (!found) try allowed.append(allocator, tool_name);
-                }
-            }
-        }
-    }
-
-    if (allowed.items.len == 0) return null;
-
-    // Filter the tool definitions
-    var filtered: std.ArrayListUnmanaged(hs.ai.common.ToolDefinition) = .empty;
-    for (all_tools) |tool| {
-        for (allowed.items) |name| {
-            if (std.mem.eql(u8, tool.name, name)) {
-                try filtered.append(allocator, tool);
-                break;
-            }
-        }
-    }
-
-    if (filtered.items.len == 0) {
-        filtered.deinit(allocator);
-        return null;
-    }
-
-    const slice = try filtered.toOwnedSlice(allocator);
-    return @as(?[]const hs.ai.common.ToolDefinition, slice);
-}
-
-// ── Tool definitions (3 tools) ──────────────────────────────
-
-const tool_definitions = [_]hs.ai.common.ToolDefinition{
-    .{
-        .name = "bash",
-        .description = "Run a shell command in the workspace directory. Use for: ls, grep, git, zig build, rag search, cat, etc. The working directory is the agent workspace.",
-        .input_schema =
-        \\{"type":"object","properties":{"command":{"type":"string","description":"The bash command to execute"}},"required":["command"]}
-        ,
-    },
-    .{
-        .name = "write_file",
-        .description = "Write content to a file in the workspace. Creates parent directories if needed. Use this instead of heredocs in bash.",
-        .input_schema =
-        \\{"type":"object","properties":{"path":{"type":"string","description":"Relative file path within workspace"},"content":{"type":"string","description":"Complete file content to write"}},"required":["path","content"]}
-        ,
-    },
-    .{
-        .name = "read_file",
-        .description = "Read the contents of a file in the workspace. Returns the file content as text. Max 100KB.",
-        .input_schema =
-        \\{"type":"object","properties":{"path":{"type":"string","description":"Relative file path within workspace"}},"required":["path"]}
-        ,
-    },
-};
-
-// ── System prompts ──────────────────────────────────────────
-
-const SYSTEM_PROMPT =
-    \\You are an expert software engineer. You have access to three tools: bash, write_file, and read_file.
-    \\
-    \\Guidelines:
-    \\- Use bash for all shell operations: ls, grep, git, compilers, package managers, etc.
-    \\- Use write_file to create/modify files (avoids heredoc quoting issues).
-    \\- Use read_file to inspect existing files.
-    \\- Always check your work: after writing code, compile/test it with bash.
-    \\- Fix errors iteratively — read the error, fix, rebuild.
-    \\- Be concise in explanations. Let the code speak.
-;
-
-const RAG_SYSTEM_PROMPT =
-    \\You are an expert software engineer with access to a RAG knowledge base. You have three tools: bash, write_file, and read_file.
-    \\
-    \\Guidelines:
-    \\- BEFORE writing code, search the RAG for relevant documentation:
-    \\  bash: rag search -c "Zig" "std.http.Server listen accept"
-    \\  bash: rag search -c "Zig 0.16 Example Programs" "echo server thread"
-    \\- Use bash for all shell operations: ls, grep, git, compilers, etc.
-    \\- Use write_file to create/modify files.
-    \\- Use read_file to inspect existing files.
-    \\- After compiler errors, search RAG for the correct API before guessing.
-    \\- Always compile/test your code after writing it.
-    \\- Fix errors iteratively. Let the code speak.
-;
-
-// ── Handler ─────────────────────────────────────────────────
+// ── Handler ────────────────────────────────────────────────────
 
 pub fn handle(
     request: *http.Server.Request,
     allocator: std.mem.Allocator,
-    io: Io,
     environ_map: *const std.process.Environ.Map,
+    io: ?std.Io,
     store: ?*store_mod.Store,
     auth: ?*const types.AuthContext,
     ledger: ?*ledger_mod.Ledger,
 ) Response {
-    _ = store; // TODO: billing for agent calls
-    _ = auth;
-    _ = ledger;
-    // Parse with 256KB limit for agent requests
-    const body = json_util.readBody(request, allocator, security.Limits.max_agent_body) catch |err| {
-        return errorResp(err);
+    // Parse request
+    const body = json_util.readBody(request, allocator, security.Limits.max_chat_body) catch {
+        return .{ .status = .bad_request, .body =
+            \\{"error":"invalid_request","message":"Failed to read request body"}
+        };
     };
     defer allocator.free(body);
 
-    if (body.len == 0) return errorResp(error.EmptyBody);
+    if (body.len == 0) return .{ .status = .bad_request, .body =
+        \\{"error":"invalid_request","message":"Request body required"}
+    };
 
     const parsed = std.json.parseFromSlice(AgentRequest, allocator, body, .{
         .ignore_unknown_fields = true,
         .allocate = .alloc_always,
     }) catch {
-        return errorResp(error.OutOfMemory);
+        return .{ .status = .bad_request, .body =
+            \\{"error":"invalid_json","message":"Invalid JSON. Required: model, messages"}
+        };
     };
     defer parsed.deinit();
     const req = parsed.value;
 
+    if (req.model.len == 0) return .{ .status = .bad_request, .body =
+        \\{"error":"invalid_request","message":"model is required"}
+    };
+
+    // Resolve provider
     const provider_info = chat_mod.resolveProvider(req.model) orelse {
-        return .{
-            .status = .bad_request,
-            .body =
-            \\{"error":"invalid_model","message":"Unknown model. Use claude-*, deepseek-*, gemini-*, grok-*, gpt-*"}
-            ,
+        return .{ .status = .bad_request, .body =
+            \\{"error":"unknown_model","message":"Model not found. Check /qai/v1/models."}
         };
     };
 
     const api_key = hs.ai.getApiKeyFromEnv(environ_map, provider_info.env_var) catch {
-        return .{
-            .status = .internal_server_error,
-            .body =
+        return .{ .status = .internal_server_error, .body =
             \\{"error":"config_error","message":"Missing provider API key"}
-            ,
         };
     };
-    // api_key is borrowed from environ_map — no free needed
 
+    // Determine provider for forge normalization
+    const provider = forge.Provider.fromModel(req.model);
+
+    // Build tool definitions — filter by capabilities, normalize for provider
+    var tools_to_send: ?[]const hs.ai.common.ToolDefinition = null;
+    var normalized_tools: ?[]hs.ai.common.ToolDefinition = null;
+    defer if (normalized_tools) |nt| {
+        for (nt) |t| {
+            // Only free schemas that were allocated by the forge (not originals)
+            _ = t;
+        }
+        allocator.free(nt);
+    };
+
+    if (req.tools) |client_tools| {
+        // Convert client ToolDef → http-sentinel ToolDefinition
+        var hs_tools: std.ArrayListUnmanaged(hs.ai.common.ToolDefinition) = .empty;
+        defer hs_tools.deinit(allocator);
+
+        for (client_tools) |t| {
+            hs_tools.append(allocator, .{
+                .name = t.name,
+                .description = t.description,
+                .input_schema = t.input_schema,
+            }) catch continue;
+        }
+
+        if (hs_tools.items.len > 0) {
+            // Forge: normalize schemas per provider
+            const forge_config = forge.ForgeConfig{
+                .provider = provider,
+                .tool_count = hs_tools.items.len,
+                .tool_choice_forces_use = false,
+            };
+            normalized_tools = forge.normalizeTools(allocator, hs_tools.items, forge_config) catch null;
+            tools_to_send = normalized_tools orelse hs_tools.items;
+        }
+    }
+
+    // Build provider request config
+    var config = hs.ai.RequestConfig{
+        .model = req.model,
+        .tools = tools_to_send,
+        .tool_choice = if (tools_to_send != null) .auto else .none,
+    };
+
+    if (req.max_tokens) |mt| {
+        if (mt > 0 and mt <= @as(i32, @intCast(security.Limits.max_tokens_cap)))
+            config.max_tokens = @intCast(mt);
+    }
+    if (req.temperature) |t| config.temperature = @floatCast(t);
+    if (req.system_prompt) |sp| config.system_prompt = sp;
+
+    // Billing: dynamic output capping
+    var reservation_id: ?u64 = null;
+    if (store) |s| if (auth) |a| if (io) |io_handle| {
+        const input_estimate = billing.estimateInputTokens(body.len);
+        const result = billing.reserveWithCap(
+            s, io_handle, a, req.model,
+            config.max_tokens, input_estimate, "/qai/v1/agent",
+        ) catch {
+            return .{ .status = .payment_required, .body =
+                \\{"error":"insufficient_balance","message":"Not enough balance for this request"}
+            };
+        };
+        reservation_id = result.reservation_id;
+        config.max_tokens = result.capped_max_tokens;
+    };
+
+    // Build conversation context from messages
+    var prompt: []const u8 = "";
+    var context_messages: std.ArrayListUnmanaged(hs.ai.AIMessage) = .empty;
+    defer {
+        for (context_messages.items) |*msg| msg.deinit();
+        context_messages.deinit(allocator);
+    }
+
+    for (req.messages, 0..) |msg, i| {
+        const content = msg.content orelse "";
+        if (i == req.messages.len - 1 and std.mem.eql(u8, msg.role, "user")) {
+            prompt = content;
+        } else {
+            const role = if (std.mem.eql(u8, msg.role, "assistant"))
+                hs.ai.common.MessageRole.assistant
+            else if (std.mem.eql(u8, msg.role, "system"))
+                hs.ai.common.MessageRole.system
+            else
+                hs.ai.common.MessageRole.user;
+
+            context_messages.append(allocator, .{
+                .id = allocator.dupe(u8, "") catch continue,
+                .role = role,
+                .content = allocator.dupe(u8, content) catch continue,
+                .timestamp = 0,
+                .allocator = allocator,
+            }) catch continue;
+        }
+    }
+
+    // Initialize provider client
     var client = hs.ai.AIClient.init(allocator, provider_info.provider, .{
         .api_key = api_key,
     }) catch {
-        return .{
-            .status = .internal_server_error,
-            .body =
+        if (reservation_id) |rid| if (store) |s| if (io) |io_handle| billing.rollback(s, io_handle, rid);
+        return .{ .status = .internal_server_error, .body =
             \\{"error":"provider_error","message":"Failed to init AI client"}
-            ,
         };
     };
     defer client.deinit();
 
-    // Sanitize workspace ID — alphanumeric, hyphen, underscore only
-    const raw_ws_id = req.workspace_id orelse "agent-session";
-    const workspace_id = security.sanitizeId(raw_ws_id) orelse {
-        return .{
-            .status = .bad_request,
-            .body =
-            \\{"error":"invalid_request","message":"workspace_id must be alphanumeric, hyphens, underscores only (max 128 chars)"}
-            ,
-        };
-    };
-    const is_ephemeral = req.ephemeral orelse true;
-    const workspace_path = createWorkspace(allocator, io, workspace_id, is_ephemeral) catch {
-        return .{
-            .status = .internal_server_error,
-            .body =
-            \\{"error":"workspace_error","message":"Failed to create workspace"}
-            ,
-        };
-    };
-    defer allocator.free(workspace_path);
-
-    const max_iters: u32 = if (req.max_iterations) |mi|
-        @intCast(@min(@max(mi, 1), @as(i32, @intCast(security.Limits.max_agent_iterations))))
-    else
-        25;
-    const enable_rag = req.enable_rag orelse false;
-
-    // Filter tools by capabilities allowlist
-    const filtered_tools = filterToolsByCapabilities(allocator, &tool_definitions, req.capabilities) catch {
-        return .{ .status = .internal_server_error, .body =
-            \\{"error":"internal","message":"Failed to filter capabilities"}
-        };
-    };
-    defer if (filtered_tools) |ft| {
-        if (ft.ptr != &tool_definitions) allocator.free(ft);
-    };
-
-    // Log capability filtering
-    if (req.capabilities) |caps| {
-        const tool_count: usize = if (filtered_tools) |ft| ft.len else 0;
-        std.debug.print("  Agent: capabilities={d} filtered={d}/{d} tools\n", .{
-            caps.len, tool_count, tool_definitions.len,
-        });
-    }
-
-    const result = runAgentLoop(
-        allocator,
-        io,
-        &client,
-        req.goal,
-        req.model,
-        workspace_path,
-        max_iters,
-        enable_rag,
-        req.system_prompt,
-        filtered_tools,
-    ) catch |err| {
-        const msg = std.fmt.allocPrint(allocator,
-            \\{{"error":"agent_error","message":"Agent loop failed: {s}"}}
-        , .{@errorName(err)}) catch
-            \\{"error":"agent_error","message":"Agent loop failed"}
-        ;
-        return .{ .status = .internal_server_error, .body = msg };
-    };
-
-    return .{ .body = result };
-}
-
-// ── Agent Loop ──────────────────────────────────────────────
-
-fn runAgentLoop(
-    allocator: std.mem.Allocator,
-    io: Io,
-    client: *hs.ai.AIClient,
-    goal: []const u8,
-    model: []const u8,
-    workspace: []const u8,
-    max_iters: u32,
-    enable_rag: bool,
-    custom_system: ?[]const u8,
-    tools: ?[]const hs.ai.common.ToolDefinition,
-) ![]u8 {
-    // DeepSeek quirk: system prompts degrade function calling quality.
-    // Move system instructions into the first user message instead.
-    const is_deepseek = std.mem.startsWith(u8, model, "deepseek");
-    const sys_prompt = custom_system orelse (if (enable_rag) RAG_SYSTEM_PROMPT else SYSTEM_PROMPT);
-
-    var config = hs.ai.RequestConfig{
-        .model = model,
-        .max_tokens = 16384,
-        .temperature = 0.7,
-        .tools = tools orelse null, // null = Safe Mode (no tools sent to provider)
-        .tool_choice = if (tools != null) .required else .none, // Force tool use on first turn (if tools available)
-        .system_prompt = if (is_deepseek) null else sys_prompt,
-    };
-    _ = &config;
-
-    var messages: std.ArrayListUnmanaged(hs.ai.AIMessage) = .empty;
-    defer {
-        for (messages.items) |*msg| msg.deinit();
-        messages.deinit(allocator);
-    }
-
-    var total_input_tokens: u32 = 0;
-    var total_output_tokens: u32 = 0;
-    var iterations_used: u32 = 0;
-    var files_written: u32 = 0;
-    var tool_calls_total: u32 = 0;
-    var final_text: []const u8 = "";
-    var final_text_alloc: ?[]u8 = null;
-    defer if (final_text_alloc) |ft| allocator.free(ft);
-
-    var iter: u32 = 0;
-    while (iter < max_iters) : (iter += 1) {
-        iterations_used = iter + 1;
-
-        // First turn: force tool use. Subsequent turns: let model choose.
-        // Safe Mode (no tools): always .none
-        config.tool_choice = if (tools == null) .none else if (iter == 0) .required else .auto;
-
-        // For DeepSeek: prepend system instructions to the goal (first user message only)
-        const prompt = if (iter == 0) blk: {
-            if (is_deepseek) {
-                break :blk std.fmt.allocPrint(allocator, "{s}\n\n{s}", .{ sys_prompt, goal }) catch goal;
-            }
-            break :blk goal;
-        } else "";
-        var response = if (messages.items.len > 0)
-            try client.sendMessageWithContext(prompt, messages.items, config)
-        else
-            try client.sendMessage(prompt, config);
-
-        total_input_tokens += response.usage.input_tokens;
-        total_output_tokens += response.usage.output_tokens;
-
-        if (response.message.tool_calls) |tool_calls| {
-            try messages.append(allocator, response.message);
-
-            var results: std.ArrayListUnmanaged(hs.ai.common.ToolResult) = .empty;
-            defer {
-                for (results.items) |*r| r.deinit();
-                results.deinit(allocator);
-            }
-
-            for (tool_calls) |call| {
-                tool_calls_total += 1;
-                const result = executeTool(allocator, io, call, workspace) catch |err| {
-                    const err_content = std.fmt.allocPrint(allocator, "Error: {s}", .{@errorName(err)}) catch
-                        allocator.dupe(u8, "Error: tool execution failed") catch continue;
-                    try results.append(allocator, .{
-                        .tool_call_id = try allocator.dupe(u8, call.id),
-                        .content = err_content,
-                        .is_error = true,
-                        .allocator = allocator,
-                    });
-                    continue;
-                };
-
-                if (std.mem.eql(u8, call.name, "write_file")) {
-                    files_written += 1;
-                }
-
-                try results.append(allocator, result);
-            }
-
-            const results_owned = try allocator.dupe(hs.ai.common.ToolResult, results.items);
-            results.items.len = 0;
-
-            try messages.append(allocator, .{
-                .id = try hs.ai.common.generateId(allocator, io),
-                .role = .user,
-                .content = try allocator.dupe(u8, ""),
-                .timestamp = 0,
-                .tool_results = results_owned,
-                .allocator = allocator,
-            });
-        } else {
-            final_text_alloc = try allocator.dupe(u8, response.message.content);
-            final_text = final_text_alloc.?;
-            response.deinit();
-            break;
+    // Call provider (non-streaming for now — the response includes tool_use)
+    var response = if (context_messages.items.len > 0)
+        client.sendMessageWithContext(prompt, context_messages.items, config) catch {
+            if (reservation_id) |rid| if (store) |s| if (io) |io_handle| billing.rollback(s, io_handle, rid);
+            return .{ .status = .bad_gateway, .body =
+                \\{"error":"provider_error","message":"Provider request failed"}
+            };
         }
-    }
-
-    // Record cost — integer arithmetic, no floats in billing
-    const pricing = models_mod.getPricing(model);
-    const input_millidollars: i64 = @intFromFloat(pricing.input * 1000.0);
-    const output_millidollars: i64 = @intFromFloat(pricing.output * 1000.0);
-    const cost_ticks = @divFloor(input_millidollars * @as(i64, total_input_tokens) * 10_000_000, 1_000_000) +
-        @divFloor(output_millidollars * @as(i64, total_output_tokens) * 10_000_000, 1_000_000);
-    account_mod.recordTicks(cost_ticks);
-
-    const escaped = try chat_mod.jsonEscape(allocator, final_text);
-    defer allocator.free(escaped);
-
-    return std.fmt.allocPrint(allocator,
-        \\{{"status":"completed","model":"{s}","iterations":{d},"tool_calls":{d},"files_written":{d},"usage":{{"input_tokens":{d},"output_tokens":{d},"cost_ticks":{d}}},"response":"{s}"}}
-    , .{ model, iterations_used, tool_calls_total, files_written, total_input_tokens, total_output_tokens, cost_ticks, escaped });
-}
-
-// ── Tool Execution ──────────────────────────────────────────
-
-fn executeTool(
-    allocator: std.mem.Allocator,
-    io: Io,
-    call: hs.ai.common.ToolCall,
-    workspace: []const u8,
-) !hs.ai.common.ToolResult {
-    const args = std.json.parseFromSlice(std.json.Value, allocator, call.arguments, .{}) catch {
-        return .{
-            .tool_call_id = try allocator.dupe(u8, call.id),
-            .content = try allocator.dupe(u8, "Error: invalid JSON arguments"),
-            .is_error = true,
-            .allocator = allocator,
-        };
-    };
-    defer args.deinit();
-
-    if (std.mem.eql(u8, call.name, "bash")) {
-        return execBash(allocator, io, call.id, args.value, workspace);
-    } else if (std.mem.eql(u8, call.name, "write_file")) {
-        return execWriteFile(allocator, io, call.id, args.value, workspace);
-    } else if (std.mem.eql(u8, call.name, "read_file")) {
-        return execReadFile(allocator, io, call.id, args.value, workspace);
-    }
-
-    return .{
-        .tool_call_id = try allocator.dupe(u8, call.id),
-        .content = try allocator.dupe(u8, "Error: unknown tool"),
-        .is_error = true,
-        .allocator = allocator,
-    };
-}
-
-// ── bash tool: std.process.run ──────────────────────────────
-
-fn execBash(
-    allocator: std.mem.Allocator,
-    io: Io,
-    call_id: []const u8,
-    args: std.json.Value,
-    workspace: []const u8,
-) !hs.ai.common.ToolResult {
-    const command = getStr(args, "command") orelse {
-        return .{
-            .tool_call_id = try allocator.dupe(u8, call_id),
-            .content = try allocator.dupe(u8, "Error: missing 'command' argument"),
-            .is_error = true,
-            .allocator = allocator,
-        };
-    };
-
-    // Validate command against blocklist
-    if (security.validateCommand(command) == null) {
-        return .{
-            .tool_call_id = try allocator.dupe(u8, call_id),
-            .content = try allocator.dupe(u8, "Error: command blocked by security policy"),
-            .is_error = true,
-            .allocator = allocator,
-        };
-    }
-
-    // Use std.process.run — pure Zig, captures stdout+stderr
-    const result = std.process.run(allocator, io, .{
-        .argv = &.{ "bash", "-c", command },
-        .cwd = .{ .path = workspace },
-        .stdout_limit = .limited(512 * 1024),
-        .stderr_limit = .limited(512 * 1024),
-    }) catch |err| {
-        const msg = try std.fmt.allocPrint(allocator, "Error spawning process: {s}", .{@errorName(err)});
-        return .{
-            .tool_call_id = try allocator.dupe(u8, call_id),
-            .content = msg,
-            .is_error = true,
-            .allocator = allocator,
-        };
-    };
-    defer allocator.free(result.stderr);
-
-    const exit_code: u8 = switch (result.term) {
-        .exited => |code| code,
-        else => 1,
-    };
-
-    // Combine stdout + stderr
-    const content = if (exit_code != 0 and result.stderr.len > 0) blk: {
-        defer allocator.free(result.stdout);
-        break :blk try std.fmt.allocPrint(allocator, "Exit code: {d}\n{s}\n{s}", .{ exit_code, result.stdout, result.stderr });
-    } else if (result.stderr.len > 0) blk: {
-        defer allocator.free(result.stdout);
-        break :blk try std.fmt.allocPrint(allocator, "{s}\n{s}", .{ result.stdout, result.stderr });
-    } else if (result.stdout.len == 0) blk: {
-        allocator.free(result.stdout);
-        break :blk try allocator.dupe(u8, "(no output)");
-    } else result.stdout;
-
-    return .{
-        .tool_call_id = try allocator.dupe(u8, call_id),
-        .content = content,
-        .is_error = exit_code != 0,
-        .allocator = allocator,
-    };
-}
-
-// ── write_file tool: std.Io.Dir ─────────────────────────────
-
-fn execWriteFile(
-    allocator: std.mem.Allocator,
-    io: Io,
-    call_id: []const u8,
-    args: std.json.Value,
-    workspace: []const u8,
-) !hs.ai.common.ToolResult {
-    const path = getStr(args, "path") orelse {
-        return .{
-            .tool_call_id = try allocator.dupe(u8, call_id),
-            .content = try allocator.dupe(u8, "Error: missing 'path' argument"),
-            .is_error = true,
-            .allocator = allocator,
-        };
-    };
-    const content = getStr(args, "content") orelse {
-        return .{
-            .tool_call_id = try allocator.dupe(u8, call_id),
-            .content = try allocator.dupe(u8, "Error: missing 'content' argument"),
-            .is_error = true,
-            .allocator = allocator,
-        };
-    };
-
-    // Strict path validation — no traversal, no absolute, no symlink tricks
-    const safe_path = security.validatePath(path) orelse {
-        return .{
-            .tool_call_id = try allocator.dupe(u8, call_id),
-            .content = try allocator.dupe(u8, "Error: invalid path — must be relative, no '..' or absolute paths"),
-            .is_error = true,
-            .allocator = allocator,
-        };
-    };
-    _ = safe_path; // validated, use original `path` which is now known safe
-
-    // Open workspace directory
-    const ws_dir = Dir.openDirAbsolute(io, workspace, .{}) catch |err| {
-        const msg = try std.fmt.allocPrint(allocator, "Error opening workspace: {s}", .{@errorName(err)});
-        return .{
-            .tool_call_id = try allocator.dupe(u8, call_id),
-            .content = msg,
-            .is_error = true,
-            .allocator = allocator,
-        };
-    };
-
-    // Create parent directories if needed
-    if (std.mem.lastIndexOfScalar(u8, path, '/')) |last_slash| {
-        ws_dir.createDirPath(io, path[0..last_slash]) catch {};
-    }
-
-    // Write the file — pure Zig I/O
-    ws_dir.writeFile(io, .{
-        .sub_path = path,
-        .data = content,
-    }) catch |err| {
-        const msg = try std.fmt.allocPrint(allocator, "Error writing file: {s}", .{@errorName(err)});
-        return .{
-            .tool_call_id = try allocator.dupe(u8, call_id),
-            .content = msg,
-            .is_error = true,
-            .allocator = allocator,
-        };
-    };
-
-    // Git auto-commit via std.process.run
-    gitAutoCommit(allocator, io, workspace, path);
-
-    const msg = try std.fmt.allocPrint(allocator, "Wrote {d} bytes to {s}", .{ content.len, path });
-    return .{
-        .tool_call_id = try allocator.dupe(u8, call_id),
-        .content = msg,
-        .allocator = allocator,
-    };
-}
-
-// ── read_file tool: Dir.readFileAlloc ───────────────────────
-
-fn execReadFile(
-    allocator: std.mem.Allocator,
-    io: Io,
-    call_id: []const u8,
-    args: std.json.Value,
-    workspace: []const u8,
-) !hs.ai.common.ToolResult {
-    const path = getStr(args, "path") orelse {
-        return .{
-            .tool_call_id = try allocator.dupe(u8, call_id),
-            .content = try allocator.dupe(u8, "Error: missing 'path' argument"),
-            .is_error = true,
-            .allocator = allocator,
-        };
-    };
-
-    if (security.validatePath(path) == null) {
-        return .{
-            .tool_call_id = try allocator.dupe(u8, call_id),
-            .content = try allocator.dupe(u8, "Error: invalid path — must be relative, no '..' or absolute paths"),
-            .is_error = true,
-            .allocator = allocator,
-        };
-    }
-
-    const ws_dir = Dir.openDirAbsolute(io, workspace, .{}) catch |err| {
-        const msg = try std.fmt.allocPrint(allocator, "Error opening workspace: {s}", .{@errorName(err)});
-        return .{
-            .tool_call_id = try allocator.dupe(u8, call_id),
-            .content = msg,
-            .is_error = true,
-            .allocator = allocator,
-        };
-    };
-
-    // Read file — pure Zig, 100KB cap
-    const content = ws_dir.readFileAlloc(io, path, allocator, .limited(100 * 1024)) catch |err| {
-        const msg = try std.fmt.allocPrint(allocator, "Error reading file: {s}", .{@errorName(err)});
-        return .{
-            .tool_call_id = try allocator.dupe(u8, call_id),
-            .content = msg,
-            .is_error = true,
-            .allocator = allocator,
-        };
-    };
-
-    return .{
-        .tool_call_id = try allocator.dupe(u8, call_id),
-        .content = content,
-        .allocator = allocator,
-    };
-}
-
-// ── Workspace Management (pure Zig) ─────────────────────────
-
-fn createWorkspace(allocator: std.mem.Allocator, io: Io, id: []const u8, ephemeral: bool) ![]u8 {
-    const path = if (ephemeral)
-        try std.fmt.allocPrint(allocator, "/tmp/qai-agent-{s}", .{id})
     else
-        try std.fmt.allocPrint(allocator, "/tmp/qai-workspace-{s}", .{id});
+        client.sendMessage(prompt, config) catch {
+            if (reservation_id) |rid| if (store) |s| if (io) |io_handle| billing.rollback(s, io_handle, rid);
+            return .{ .status = .bad_gateway, .body =
+                \\{"error":"provider_error","message":"Provider request failed"}
+            };
+        };
+    defer response.deinit();
 
-    // Create workspace directory via Zig std.Io.Dir
-    Dir.cwd().createDirPath(io, path) catch {};
+    // Commit billing
+    if (reservation_id) |rid| if (store) |s| if (io) |io_handle| {
+        const tier = if (auth) |a| a.account.tier else types.DevTier.free;
+        billing.commit(s, io_handle, rid, req.model,
+            response.usage.input_tokens, response.usage.output_tokens, tier);
 
-    // Git init via std.process.run
-    _ = std.process.run(allocator, io, .{
-        .argv = &.{ "git", "init", "-q" },
-        .cwd = .{ .path = path },
-    }) catch {};
-
-    return path;
-}
-
-fn gitAutoCommit(allocator: std.mem.Allocator, io: Io, workspace: []const u8, file_path: []const u8) void {
-    // git add <file>
-    _ = std.process.run(allocator, io, .{
-        .argv = &.{ "git", "add", file_path },
-        .cwd = .{ .path = workspace },
-    }) catch return;
-
-    // git commit
-    const msg = std.fmt.allocPrint(allocator, "agent: write {s}", .{file_path}) catch return;
-    defer allocator.free(msg);
-
-    _ = std.process.run(allocator, io, .{
-        .argv = &.{ "git", "commit", "-q", "-m", msg },
-        .cwd = .{ .path = workspace },
-    }) catch return;
-}
-
-// ── Helpers ─────────────────────────────────────────────────
-
-fn getStr(value: std.json.Value, key: []const u8) ?[]const u8 {
-    if (value != .object) return null;
-    const v = value.object.get(key) orelse return null;
-    if (v == .string) return v.string;
-    return null;
-}
-
-fn errorResp(err: anyerror) Response {
-    return switch (err) {
-        error.PayloadTooLarge => .{
-            .status = .payload_too_large,
-            .body =
-            \\{"error":"payload_too_large","message":"Request body exceeds limit"}
-            ,
-        },
-        error.EmptyBody => .{
-            .status = .bad_request,
-            .body =
-            \\{"error":"invalid_request","message":"Request body is empty. Send JSON with goal and model."}
-            ,
-        },
-        else => .{
-            .status = .bad_request,
-            .body =
-            \\{"error":"invalid_json","message":"Failed to parse request body"}
-            ,
-        },
+        if (ledger) |l| {
+            const bill = billing.actualCost(req.model, response.usage.input_tokens,
+                response.usage.output_tokens, tier);
+            l.recordBilling(io_handle, if (auth) |a| a.account.id.slice() else "anon",
+                if (auth) |a| a.key.prefix.slice() else "none", bill.cost, bill.margin,
+                if (auth) |a| a.account.balance_ticks else 0,
+                "/qai/v1/agent", req.model, response.usage.input_tokens,
+                response.usage.output_tokens, 0);
+        }
     };
+
+    // Build response — includes tool_use if the model wants to call tools
+    const stop_reason = response.metadata.stop_reason orelse "end_turn";
+    const has_tool_calls = response.message.tool_calls != null and
+        response.message.tool_calls.?.len > 0;
+
+    // Build the response JSON
+    var resp_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer resp_buf.deinit(allocator);
+
+    const content_escaped = chat_mod.jsonEscape(allocator, response.message.content) catch "";
+    defer if (content_escaped.len > 0) allocator.free(content_escaped);
+
+    // Start response object
+    const header = std.fmt.allocPrint(allocator,
+        \\{{"id":"{s}","model":"{s}","stop_reason":"{s}",
+    , .{ response.message.id, req.model, stop_reason }) catch {
+        return .{ .status = .internal_server_error, .body =
+            \\{"error":"internal","message":"Failed to build response"}
+        };
+    };
+    defer allocator.free(header);
+    resp_buf.appendSlice(allocator, header) catch {};
+
+    // Content
+    const content_part = std.fmt.allocPrint(allocator,
+        \\"content":[{{"type":"text","text":"{s}"}}],
+    , .{content_escaped}) catch "";
+    defer if (content_part.len > 0) allocator.free(content_part);
+    resp_buf.appendSlice(allocator, content_part) catch {};
+
+    // Tool use (if any)
+    if (has_tool_calls) {
+        resp_buf.appendSlice(allocator, "\"tool_use\":[") catch {};
+        for (response.message.tool_calls.?, 0..) |call, i| {
+            if (i > 0) resp_buf.appendSlice(allocator, ",") catch {};
+            const tool_json = std.fmt.allocPrint(allocator,
+                \\{{"id":"{s}","name":"{s}","input":{s}}}
+            , .{ call.id, call.name, call.arguments }) catch continue;
+            defer allocator.free(tool_json);
+            resp_buf.appendSlice(allocator, tool_json) catch {};
+        }
+        resp_buf.appendSlice(allocator, "],") catch {};
+    }
+
+    // Usage
+    const usage_part = std.fmt.allocPrint(allocator,
+        \\"usage":{{"input_tokens":{d},"output_tokens":{d}}}}}
+    , .{ response.usage.input_tokens, response.usage.output_tokens }) catch "";
+    defer if (usage_part.len > 0) allocator.free(usage_part);
+    resp_buf.appendSlice(allocator, usage_part) catch {};
+
+    const final = resp_buf.toOwnedSlice(allocator) catch {
+        return .{ .status = .internal_server_error, .body =
+            \\{"error":"internal","message":"Failed to build response"}
+        };
+    };
+
+    return .{ .body = final };
 }
