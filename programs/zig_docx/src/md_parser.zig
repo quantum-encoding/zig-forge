@@ -26,12 +26,15 @@ pub const FrontMatter = struct {
     author: ?[]const u8 = null,
     date: ?[]const u8 = null,
     description: ?[]const u8 = null,
+    letterhead: ?[]const u8 = null, // <!-- letterhead: logo.png -->
 };
 
 pub const ParseResult = struct {
     document: docx.Document,
     frontmatter: FrontMatter,
     allocator: std.mem.Allocator,
+    /// Base directory for resolving relative image paths. Null = cwd.
+    base_dir: ?[]const u8 = null,
 
     pub fn deinit(self: *ParseResult) void {
         self.document.deinit();
@@ -39,6 +42,8 @@ pub const ParseResult = struct {
         if (self.frontmatter.author) |a| self.allocator.free(a);
         if (self.frontmatter.date) |d| self.allocator.free(d);
         if (self.frontmatter.description) |d| self.allocator.free(d);
+        if (self.frontmatter.letterhead) |l| self.allocator.free(l);
+        if (self.base_dir) |b| self.allocator.free(b);
     }
 };
 
@@ -129,8 +134,21 @@ pub fn parseMarkdown(allocator: std.mem.Allocator, markdown: []const u8) !ParseR
             continue; // paragraph breaks are implicit between elements
         }
 
-        // ── Horizontal rule ──
+        // ── HTML comment directives ──
         const trimmed = std.mem.trim(u8, line, " \t");
+        if (std.mem.startsWith(u8, trimmed, "<!--") and std.mem.endsWith(u8, trimmed, "-->")) {
+            const comment = std.mem.trim(u8, trimmed[4 .. trimmed.len - 3], " \t");
+            if (std.mem.startsWith(u8, comment, "letterhead:")) {
+                const path = std.mem.trim(u8, comment["letterhead:".len..], " \t");
+                if (path.len > 0) {
+                    if (frontmatter.letterhead) |old| allocator.free(old);
+                    frontmatter.letterhead = try allocator.dupe(u8, path);
+                }
+            }
+            continue; // consume comment, don't emit as paragraph
+        }
+
+        // ── Horizontal rule ──
         if (isHorizontalRule(trimmed)) {
             try elements.append(allocator, .{ .paragraph = .{
                 .style = .horizontal_rule,
@@ -416,6 +434,30 @@ pub fn parseInlineFormatting(allocator: std.mem.Allocator, text: []const u8) ![]
             i = close + 1;
             plain_start = i;
             continue;
+        }
+
+        // ── Image ![alt](path) ──
+        if (text[i] == '!' and i + 1 < text.len and text[i + 1] == '[') {
+            const close_bracket = std.mem.indexOfScalarPos(u8, text, i + 2, ']') orelse {
+                i += 1;
+                continue;
+            };
+            if (close_bracket + 1 < text.len and text[close_bracket + 1] == '(') {
+                const close_paren = std.mem.indexOfScalarPos(u8, text, close_bracket + 2, ')') orelse {
+                    i += 1;
+                    continue;
+                };
+                if (i > plain_start) try appendRun(allocator, &runs, text[plain_start..i], false, false, false);
+                const alt_text = try allocator.dupe(u8, text[i + 2 .. close_bracket]);
+                const img_path = try allocator.dupe(u8, text[close_bracket + 2 .. close_paren]);
+                try runs.append(allocator, .{
+                    .text = alt_text,
+                    .image_rel_id = img_path, // temporarily stores path; main.zig resolves to rel ID
+                });
+                i = close_paren + 1;
+                plain_start = i;
+                continue;
+            }
         }
 
         // ── Link [text](url) ──

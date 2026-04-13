@@ -151,11 +151,46 @@ pub fn main(init: std.process.Init) !void {
         };
         defer result.deinit();
 
+        // Resolve image paths: load files relative to the markdown source
+        const base_dir = extractDirectory(parsed.file_path);
+        resolveImages(allocator, &result.document, base_dir);
+
+        // Load letterhead image if specified
+        var letterhead: ?docx.docx_writer.LetterheadImage = null;
+        var letterhead_data: ?[]u8 = null;
+        defer if (letterhead_data) |ld| allocator.free(ld);
+
+        if (result.frontmatter.letterhead) |lh_path| {
+            // Resolve relative to markdown file's directory
+            const full_lh_path = if (lh_path.len > 0 and lh_path[0] == '/')
+                allocator.dupe(u8, lh_path) catch null
+            else if (base_dir) |dir|
+                std.fmt.allocPrint(allocator, "{s}{s}", .{ dir, lh_path }) catch null
+            else
+                allocator.dupe(u8, lh_path) catch null;
+
+            if (full_lh_path) |flp| {
+                defer allocator.free(flp);
+                if (readFileContents(allocator, flp)) |data| {
+                    letterhead_data = data;
+                    const ext = if (std.mem.lastIndexOfScalar(u8, lh_path, '.')) |dot|
+                        lh_path[dot + 1 ..]
+                    else
+                        "png";
+                    letterhead = .{ .data = data, .extension = ext };
+                    std.debug.print("Letterhead: {s}\n", .{lh_path});
+                } else {
+                    std.debug.print("Warning: could not load letterhead '{s}'\n", .{lh_path});
+                }
+            }
+        }
+
         const options = docx.docx_writer.DocxWriterOptions{
             .title = result.frontmatter.title orelse parsed.title orelse "",
             .author = result.frontmatter.author orelse parsed.author orelse "",
             .description = result.frontmatter.description orelse parsed.description orelse "",
             .date = result.frontmatter.date orelse parsed.date orelse "",
+            .letterhead = letterhead,
         };
 
         const docx_bytes = docx.docx_writer.generateDocx(allocator, &result.document, options) catch |err| {
@@ -631,6 +666,94 @@ fn readFileContents(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {
         return null;
     }
     return buf;
+}
+
+/// Extract the directory portion of a file path (everything before the last /).
+fn extractDirectory(path: []const u8) ?[]const u8 {
+    if (std.mem.lastIndexOfScalar(u8, path, '/')) |pos| {
+        return path[0 .. pos + 1];
+    }
+    return null;
+}
+
+/// Walk the document elements and resolve image paths to actual image data.
+/// Runs with image_rel_id set to a file path get their images loaded and
+/// registered in the document's media array + relationship ID updated.
+fn resolveImages(allocator: std.mem.Allocator, doc: *docx.Document, base_dir: ?[]const u8) void {
+    var media_list: std.ArrayListUnmanaged(docx.MediaFile) = .empty;
+    var img_index: u32 = 0;
+
+    for (doc.elements) |*elem| {
+        switch (elem.*) {
+            .paragraph => |*p| resolveImageRuns(allocator, p.runs, base_dir, &media_list, &img_index),
+            .table => |*t| {
+                for (t.rows) |row| {
+                    for (row.cells) |cell| {
+                        for (cell.paragraphs) |*cp| {
+                            resolveImageRuns(allocator, cp.runs, base_dir, &media_list, &img_index);
+                        }
+                    }
+                }
+            },
+        }
+    }
+
+    if (media_list.items.len > 0) {
+        doc.media = media_list.toOwnedSlice(allocator) catch &[_]docx.MediaFile{};
+    }
+}
+
+fn resolveImageRuns(
+    allocator: std.mem.Allocator,
+    runs: []docx.Run,
+    base_dir: ?[]const u8,
+    media_list: *std.ArrayListUnmanaged(docx.MediaFile),
+    img_index: *u32,
+) void {
+    for (runs) |*run| {
+        const img_path = run.image_rel_id orelse continue;
+
+        // Build full path: use as-is if absolute, otherwise prepend base_dir
+        const full_path = if (img_path.len > 0 and img_path[0] == '/')
+            allocator.dupe(u8, img_path) catch continue
+        else if (base_dir) |dir|
+            std.fmt.allocPrint(allocator, "{s}{s}", .{ dir, img_path }) catch continue
+        else
+            allocator.dupe(u8, img_path) catch continue;
+        defer allocator.free(full_path);
+
+        // Load image data
+        const data = readFileContents(allocator, full_path) orelse {
+            std.debug.print("Warning: could not load image '{s}'\n", .{img_path});
+            // Clear the image_rel_id so writer skips it
+            allocator.free(img_path);
+            run.image_rel_id = null;
+            continue;
+        };
+
+        // Determine extension
+        const ext = if (std.mem.lastIndexOfScalar(u8, img_path, '.')) |dot|
+            img_path[dot + 1 ..]
+        else
+            "png";
+
+        img_index.* += 1;
+        const media_name = std.fmt.allocPrint(allocator, "image{d}.{s}", .{ img_index.*, ext }) catch continue;
+
+        media_list.append(allocator, .{
+            .name = media_name,
+            .data = data,
+        }) catch {
+            allocator.free(media_name);
+            allocator.free(data);
+            continue;
+        };
+
+        // Replace the path with a relationship ID placeholder
+        // The docx_writer.ImageCollector will assign actual rIds
+        allocator.free(img_path);
+        run.image_rel_id = allocator.dupe(u8, media_name) catch null;
+    }
 }
 
 const Args = struct {

@@ -1,20 +1,23 @@
 // Copyright (c) 2025 QUANTUM ENCODING LTD
 // Licensed under the MIT License.
 
-//! ZIP Archive Writer — creates ZIP files in memory using STORE method.
+//! ZIP Archive Writer — creates ZIP files in memory using DEFLATE compression.
 //!
 //! Produces valid ZIP archives that Word, LibreOffice, and all standard
-//! unzip tools can open. Uses STORE (no compression) which is fine for
-//! DOCX files — the XML content is small and modern filesystems handle
-//! it well. DEFLATE can be added later as an optimization.
+//! unzip tools can open. Uses DEFLATE (method 8) for compressible content
+//! and STORE (method 0) for already-compressed data like images.
 //!
 //! ZIP format reference: APPNOTE.TXT §4.3
 
 const std = @import("std");
+const flate = std.compress.flate;
 
 const LOCAL_SIGNATURE: u32 = 0x04034b50;
 const CENTRAL_SIGNATURE: u32 = 0x02014b50;
 const EOCD_SIGNATURE: u32 = 0x06054b50;
+
+const METHOD_STORE: u16 = 0;
+const METHOD_DEFLATE: u16 = 8;
 
 const CentralDirEntry = struct {
     filename: []const u8,
@@ -22,6 +25,7 @@ const CentralDirEntry = struct {
     compressed_size: u32,
     uncompressed_size: u32,
     crc32: u32,
+    method: u16,
 };
 
 pub const ZipWriter = struct {
@@ -45,36 +49,61 @@ pub const ZipWriter = struct {
         self.buffer.deinit(self.allocator);
     }
 
-    /// Add a file entry using STORE method (no compression).
+    /// Add a file entry, using DEFLATE for compressible content or STORE for images.
     pub fn addFile(self: *ZipWriter, filename: []const u8, data: []const u8) !void {
         const crc = std.hash.crc.Crc32.hash(data);
-        const size: u32 = @intCast(data.len);
+        const uncompressed_size: u32 = @intCast(data.len);
         const offset: u32 = @intCast(self.buffer.items.len);
+
+        // Decide method: STORE for small files or binary image data, DEFLATE for text/XML
+        const use_deflate = data.len > 64 and !isImageData(filename);
+
+        var compressed_data: ?[]u8 = null;
+        defer if (compressed_data) |cd| self.allocator.free(cd);
+
+        var method: u16 = METHOD_STORE;
+        var compressed_size: u32 = uncompressed_size;
+
+        if (use_deflate) {
+            if (deflateData(self.allocator, data)) |cd| {
+                // Only use DEFLATE if it actually saves space
+                if (cd.len < data.len) {
+                    compressed_data = cd;
+                    method = METHOD_DEFLATE;
+                    compressed_size = @intCast(cd.len);
+                } else {
+                    self.allocator.free(cd);
+                }
+            }
+        }
+
+        const file_data = compressed_data orelse data;
 
         // Local file header (30 bytes + filename)
         try self.writeU32(LOCAL_SIGNATURE);
         try self.writeU16(20); // version needed to extract
         try self.writeU16(0); // general purpose bit flag
-        try self.writeU16(0); // compression method: STORE
+        try self.writeU16(method);
         try self.writeU16(0); // last mod time
         try self.writeU16(0); // last mod date
         try self.writeU32(crc);
-        try self.writeU32(size); // compressed size
-        try self.writeU32(size); // uncompressed size
+        try self.writeU32(compressed_size);
+        try self.writeU32(uncompressed_size);
         try self.writeU16(@intCast(filename.len));
         try self.writeU16(0); // extra field length
         try self.buffer.appendSlice(self.allocator, filename);
 
-        // File data (uncompressed)
-        try self.buffer.appendSlice(self.allocator, data);
+        // File data
+        try self.buffer.appendSlice(self.allocator, file_data);
 
         // Record for central directory
         try self.entries.append(self.allocator, .{
             .filename = try self.allocator.dupe(u8, filename),
             .local_header_offset = offset,
-            .compressed_size = size,
-            .uncompressed_size = size,
+            .compressed_size = compressed_size,
+            .uncompressed_size = uncompressed_size,
             .crc32 = crc,
+            .method = method,
         });
     }
 
@@ -89,7 +118,7 @@ pub const ZipWriter = struct {
             try self.writeU16(20); // version made by
             try self.writeU16(20); // version needed
             try self.writeU16(0); // flags
-            try self.writeU16(0); // compression: STORE
+            try self.writeU16(entry.method);
             try self.writeU16(0); // last mod time
             try self.writeU16(0); // last mod date
             try self.writeU32(entry.crc32);
@@ -136,3 +165,44 @@ pub const ZipWriter = struct {
         try self.buffer.appendSlice(self.allocator, &buf);
     }
 };
+
+/// Check if filename suggests image/binary data (already compressed, STORE is better).
+fn isImageData(filename: []const u8) bool {
+    const ext_starts = std.mem.lastIndexOfScalar(u8, filename, '.') orelse return false;
+    const ext = filename[ext_starts + 1 ..];
+    return std.mem.eql(u8, ext, "png") or
+        std.mem.eql(u8, ext, "jpg") or
+        std.mem.eql(u8, ext, "jpeg") or
+        std.mem.eql(u8, ext, "gif") or
+        std.mem.eql(u8, ext, "bmp") or
+        std.mem.eql(u8, ext, "webp") or
+        std.mem.eql(u8, ext, "tiff");
+}
+
+/// Compress data using raw DEFLATE. Returns owned compressed bytes, or null on failure.
+fn deflateData(allocator: std.mem.Allocator, data: []const u8) ?[]u8 {
+    // Allocate working buffer for deflate (must be >= max_window_len = 64KB)
+    const work_buf = allocator.alloc(u8, flate.max_window_len) catch return null;
+    defer allocator.free(work_buf);
+
+    // Output writer — pre-allocate to satisfy Compress assertion (buffer.len > 8)
+    var output = std.Io.Writer.Allocating.initCapacity(allocator, @max(data.len, 256)) catch return null;
+    defer output.deinit();
+
+    // Init compressor with raw DEFLATE (no gzip/zlib wrapper)
+    var compressor = flate.Compress.init(
+        &output.writer,
+        work_buf,
+        .raw,
+        flate.Compress.Options.level_6,
+    ) catch return null;
+
+    // Feed all input data through the compressor
+    compressor.writer.writeAll(data) catch return null;
+
+    // Finish the stream
+    compressor.finish() catch return null;
+
+    // Extract the compressed bytes
+    return output.toOwnedSlice() catch return null;
+}
