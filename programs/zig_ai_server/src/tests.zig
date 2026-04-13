@@ -298,12 +298,14 @@ const auth_rl = @import("auth_ratelimit.zig");
 const wal_test = @import("store/wal_test.zig");
 const integration_test = @import("integration_test.zig");
 const edge_case_test = @import("edge_case_tests.zig");
+const forge = @import("forge.zig");
 
 test "module tests imported" {
     _ = auth_rl;
     _ = wal_test;
     _ = integration_test;
     _ = edge_case_test;
+    _ = forge;
 }
 
 test "OIDC: nonce verification integration" {
