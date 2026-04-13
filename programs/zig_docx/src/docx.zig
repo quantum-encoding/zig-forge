@@ -21,6 +21,7 @@ pub const claude_code = @import("claude_code.zig");
 pub const md_parser = @import("md_parser.zig");
 pub const docx_writer = @import("docx_writer.zig");
 pub const zip_writer = @import("zip_writer.zig");
+pub const ffi = @import("ffi.zig");
 
 // Re-export key types
 pub const StyleType = styles.StyleType;

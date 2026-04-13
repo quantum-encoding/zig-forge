@@ -40,6 +40,47 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     // ============================================================
+    // Static Library (libzig_docx.a)
+    // ============================================================
+    const static_module = b.createModule(.{
+        .root_source_file = b.path("src/ffi.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    static_module.link_libc = true;
+
+    const static_lib = b.addLibrary(.{
+        .name = "zig_docx",
+        .root_module = static_module,
+        .linkage = .static,
+    });
+    b.installArtifact(static_lib);
+
+    // ============================================================
+    // Dynamic Library (libzig_docx.dylib / .so)
+    // ============================================================
+    const dylib_module = b.createModule(.{
+        .root_source_file = b.path("src/ffi.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    dylib_module.link_libc = true;
+
+    const dynamic_lib = b.addLibrary(.{
+        .name = "zig_docx",
+        .root_module = dylib_module,
+        .linkage = .dynamic,
+    });
+    b.installArtifact(dynamic_lib);
+
+    // ============================================================
+    // lib step — build both libraries
+    // ============================================================
+    const lib_step = b.step("lib", "Build static and dynamic libraries");
+    lib_step.dependOn(&static_lib.step);
+    lib_step.dependOn(&dynamic_lib.step);
+
+    // ============================================================
     // Tests
     // ============================================================
     const test_module = b.createModule(.{

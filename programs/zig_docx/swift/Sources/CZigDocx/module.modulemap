@@ -1,0 +1,5 @@
+module CZigDocx {
+    header "../../../include/zig_docx.h"
+    link "zig_docx"
+    export *
+}
