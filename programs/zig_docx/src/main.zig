@@ -221,6 +221,7 @@ pub fn main(init: std.process.Init) !void {
             .description = result.frontmatter.description orelse parsed.description orelse "",
             .date = result.frontmatter.date orelse parsed.date orelse "",
             .letterhead = letterhead,
+            .style = parsed.doc_style,
         };
 
         const docx_bytes = docx.docx_writer.generateDocx(allocator, &result.document, options) catch |err| {
@@ -803,6 +804,7 @@ const Args = struct {
     claude_code_mode: bool = false,
     to_docx: bool = false, // MD → DOCX conversion
     fra_mode: bool = false, // JSON → FRA DOCX conversion
+    doc_style: docx.docx_writer.DocumentStyle = .default, // --style minutes|default
     only_project: ?[]const u8 = null,
     // Chunker config (only used when --chunk is set)
     chunk_target_words: ?u32 = null,
@@ -866,6 +868,20 @@ fn parseArgs(args: []const []const u8) ?Args {
             result.to_docx = true;
         } else if (std.mem.eql(u8, arg, "--fra")) {
             result.fra_mode = true;
+        } else if (std.mem.eql(u8, arg, "--style")) {
+            i += 1;
+            if (i >= args.len) {
+                std.debug.print("Error: --style requires a value (minutes, default)\n", .{});
+                return null;
+            }
+            if (std.mem.eql(u8, args[i], "minutes")) {
+                result.doc_style = .minutes;
+            } else if (std.mem.eql(u8, args[i], "default")) {
+                result.doc_style = .default;
+            } else {
+                std.debug.print("Error: unknown style '{s}'. Use: minutes, default\n", .{args[i]});
+                return null;
+            }
         } else if (std.mem.eql(u8, arg, "--only-project")) {
             i += 1;
             if (i >= args.len) {

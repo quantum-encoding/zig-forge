@@ -17,12 +17,18 @@ pub const LetterheadImage = struct {
     extension: []const u8,
 };
 
+pub const DocumentStyle = enum {
+    default, // Calibri, blue headings, left-aligned
+    minutes, // Arial, black bold+underline headings, justified text
+};
+
 pub const DocxWriterOptions = struct {
     title: []const u8 = "",
     author: []const u8 = "",
     description: []const u8 = "",
     date: []const u8 = "",
     letterhead: ?LetterheadImage = null,
+    style: DocumentStyle = .default,
 };
 
 /// Tracks hyperlink URLs and assigns relationship IDs during document generation.
@@ -108,7 +114,10 @@ pub fn generateDocx(
 
     try zip.addFile("word/document.xml", document_xml);
 
-    try zip.addFile("word/styles.xml", styles_xml);
+    try zip.addFile("word/styles.xml", switch (options.style) {
+        .minutes => styles_minutes_xml,
+        .default => styles_xml,
+    });
 
     const doc_rels = try genDocumentRels(allocator, has_lists, &hyperlinks, &images, has_header);
     defer allocator.free(doc_rels);
@@ -287,6 +296,34 @@ const styles_xml =
     \\  <w:style w:type="paragraph" w:styleId="Heading4"><w:name w:val="heading 4"/><w:pPr><w:spacing w:before="160" w:after="40"/></w:pPr><w:rPr><w:b/><w:i/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:style>
     \\  <w:style w:type="paragraph" w:styleId="Heading5"><w:name w:val="heading 5"/><w:pPr><w:spacing w:before="120" w:after="40"/></w:pPr><w:rPr><w:b/><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr></w:style>
     \\  <w:style w:type="paragraph" w:styleId="Heading6"><w:name w:val="heading 6"/><w:pPr><w:spacing w:before="120" w:after="40"/></w:pPr><w:rPr><w:b/><w:i/><w:sz w:val="22"/><w:szCs w:val="22"/><w:color w:val="666666"/></w:rPr></w:style>
+    \\  <w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/><w:pPr><w:ind w:left="720"/></w:pPr></w:style>
+    \\  <w:style w:type="paragraph" w:styleId="CodeBlock"><w:name w:val="Code Block"/><w:pPr><w:spacing w:before="80" w:after="80"/><w:shd w:val="clear" w:color="auto" w:fill="F2F2F2"/></w:pPr><w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New" w:cs="Courier New"/><w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr></w:style>
+    \\  <w:style w:type="paragraph" w:styleId="Quote"><w:name w:val="Quote"/><w:pPr><w:ind w:left="720"/><w:pBdr><w:left w:val="single" w:sz="12" w:space="8" w:color="CCCCCC"/></w:pBdr></w:pPr><w:rPr><w:i/><w:color w:val="555555"/></w:rPr></w:style>
+    \\  <w:style w:type="character" w:styleId="InlineCode"><w:name w:val="Inline Code"/><w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New" w:cs="Courier New"/><w:sz w:val="20"/><w:szCs w:val="20"/><w:shd w:val="clear" w:color="auto" w:fill="F2F2F2"/></w:rPr></w:style>
+    \\</w:styles>
+;
+
+// Minutes style: Arial, justified, bold+underline headings, compact
+const styles_minutes_xml =
+    \\<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    \\<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+    \\  <w:docDefaults>
+    \\    <w:rPrDefault><w:rPr>
+    \\      <w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/>
+    \\      <w:sz w:val="22"/><w:szCs w:val="22"/>
+    \\    </w:rPr></w:rPrDefault>
+    \\    <w:pPrDefault><w:pPr>
+    \\      <w:spacing w:after="120" w:line="276" w:lineRule="auto"/>
+    \\      <w:jc w:val="both"/>
+    \\    </w:pPr></w:pPrDefault>
+    \\  </w:docDefaults>
+    \\  <w:style w:type="paragraph" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+    \\  <w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:pPr><w:spacing w:before="240" w:after="120"/><w:jc w:val="center"/></w:pPr><w:rPr><w:b/><w:sz w:val="28"/><w:szCs w:val="28"/><w:u w:val="single"/></w:rPr></w:style>
+    \\  <w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:pPr><w:spacing w:before="200" w:after="80"/></w:pPr><w:rPr><w:b/><w:sz w:val="24"/><w:szCs w:val="24"/><w:u w:val="single"/></w:rPr></w:style>
+    \\  <w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="heading 3"/><w:pPr><w:spacing w:before="160" w:after="60"/></w:pPr><w:rPr><w:b/><w:sz w:val="22"/><w:szCs w:val="22"/><w:u w:val="single"/></w:rPr></w:style>
+    \\  <w:style w:type="paragraph" w:styleId="Heading4"><w:name w:val="heading 4"/><w:pPr><w:spacing w:before="120" w:after="40"/></w:pPr><w:rPr><w:b/><w:sz w:val="22"/><w:szCs w:val="22"/><w:u w:val="single"/></w:rPr></w:style>
+    \\  <w:style w:type="paragraph" w:styleId="Heading5"><w:name w:val="heading 5"/><w:pPr><w:spacing w:before="120" w:after="40"/></w:pPr><w:rPr><w:b/><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr></w:style>
+    \\  <w:style w:type="paragraph" w:styleId="Heading6"><w:name w:val="heading 6"/><w:pPr><w:spacing w:before="120" w:after="40"/></w:pPr><w:rPr><w:b/><w:i/><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr></w:style>
     \\  <w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/><w:pPr><w:ind w:left="720"/></w:pPr></w:style>
     \\  <w:style w:type="paragraph" w:styleId="CodeBlock"><w:name w:val="Code Block"/><w:pPr><w:spacing w:before="80" w:after="80"/><w:shd w:val="clear" w:color="auto" w:fill="F2F2F2"/></w:pPr><w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New" w:cs="Courier New"/><w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr></w:style>
     \\  <w:style w:type="paragraph" w:styleId="Quote"><w:name w:val="Quote"/><w:pPr><w:ind w:left="720"/><w:pBdr><w:left w:val="single" w:sz="12" w:space="8" w:color="CCCCCC"/></w:pBdr></w:pPr><w:rPr><w:i/><w:color w:val="555555"/></w:rPr></w:style>
