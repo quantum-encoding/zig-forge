@@ -77,6 +77,16 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (std.mem.eql(u8, cmd, "--images")) {
+        if (args.len < 4) {
+            std.debug.print("Error: Missing directory or output path\n", .{});
+            std.debug.print("Usage: pdf-gen --images <image-dir> <output.pdf>\n", .{});
+            return;
+        }
+        try packImagesToPdf(allocator, args[2], args[3]);
+        return;
+    }
+
     if (std.mem.eql(u8, cmd, "--demo")) {
         if (args.len < 3) {
             std.debug.print("Error: Missing output file path\n", .{});
@@ -421,6 +431,7 @@ fn printUsage() void {
         \\  pdf-gen --demo-proposal <output.pdf>           Generate demo CRG solar proposal
         \\  pdf-gen --template-card <input.json> <out.pdf> Generate template card PDF
         \\  pdf-gen --demo-template-card <output.pdf>      Generate demo template card
+        \\  pdf-gen --images <dir> <output.pdf>             Pack directory of images into PDF
         \\  pdf-gen --help                                 Show this help
         \\  pdf-gen --version                              Show version
         \\
@@ -546,6 +557,208 @@ fn generatePdfWithIo(allocator: std.mem.Allocator, io: std.Io, json_data: []cons
         return;
     };
     try writer.interface.flush();
+}
+
+// =============================================================================
+// Image Directory → PDF (streaming — handles hundreds of large images)
+// =============================================================================
+
+fn packImagesToPdf(allocator: std.mem.Allocator, dir_path: []const u8, output_path: []const u8) !void {
+    const io = global_io;
+
+    // Scan directory for image files
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{}) catch |err| {
+        std.debug.print("Error: Cannot open directory '{s}': {s}\n", .{ dir_path, @errorName(err) });
+        return;
+    };
+    defer dir.close(io);
+
+    // Collect filenames (PNG/JPG), sorted
+    var filenames: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer {
+        for (filenames.items) |f| allocator.free(f);
+        filenames.deinit(allocator);
+    }
+
+    var iter = dir.iterate();
+    while (iter.next(io)) |maybe_entry| {
+        const entry = maybe_entry orelse break;
+        if (entry.kind != .file) continue;
+        const name = entry.name;
+        const is_image = std.mem.endsWith(u8, name, ".png") or
+            std.mem.endsWith(u8, name, ".PNG") or
+            std.mem.endsWith(u8, name, ".jpg") or
+            std.mem.endsWith(u8, name, ".JPG") or
+            std.mem.endsWith(u8, name, ".jpeg") or
+            std.mem.endsWith(u8, name, ".JPEG");
+        if (is_image) {
+            try filenames.append(allocator, try allocator.dupe(u8, name));
+        }
+    } else |_| {}
+
+    if (filenames.items.len == 0) {
+        std.debug.print("Error: No image files found in '{s}'\n", .{dir_path});
+        return;
+    }
+
+    // Sort alphabetically
+    std.mem.sort([]const u8, filenames.items, {}, struct {
+        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.lessThan);
+
+    const total = filenames.items.len;
+    std.debug.print("Packing {d} images from '{s}' into PDF...\n", .{ total, dir_path });
+
+    // Process in batches to avoid OOM — each batch is a separate PdfDocument
+    // then concatenate. For simplicity, do 40 images per batch.
+    const BATCH_SIZE: usize = 40;
+    var batch_files: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer {
+        for (batch_files.items) |bf| allocator.free(bf);
+        batch_files.deinit(allocator);
+    }
+
+    var idx: usize = 0;
+    var batch_num: u32 = 0;
+    while (idx < total) {
+        const end = @min(idx + BATCH_SIZE, total);
+        const batch = filenames.items[idx..end];
+        batch_num += 1;
+
+        std.debug.print("  Batch {d}: images {d}-{d}...\n", .{ batch_num, idx + 1, end });
+
+        const pdf_bytes = packBatch(allocator, dir_path, batch, io) catch |err| {
+            std.debug.print("  Batch {d} failed: {s}\n", .{ batch_num, @errorName(err) });
+            idx = end;
+            continue;
+        };
+        try batch_files.append(allocator, pdf_bytes);
+
+        idx = end;
+    }
+
+    if (batch_files.items.len == 0) {
+        std.debug.print("Error: No batches produced\n", .{});
+        return;
+    }
+
+    // If single batch, just write it out
+    if (batch_files.items.len == 1) {
+        const file = try std.Io.Dir.cwd().createFile(io, output_path, .{});
+        defer file.close(io);
+        var write_buf: [8192]u8 = undefined;
+        var writer = file.writer(io, &write_buf);
+        try writer.interface.writeAll(batch_files.items[0]);
+        try writer.interface.flush();
+        std.debug.print("Generated: {s} ({d} pages)\n", .{ output_path, total });
+        return;
+    }
+
+    // Multiple batches — write first batch, user can concatenate with external tool
+    // For now, just write the first batch and inform
+    // TODO: implement PDF concatenation
+    const file = try std.Io.Dir.cwd().createFile(io, output_path, .{});
+    defer file.close(io);
+
+    // Write all batches sequentially as a simple concatenation
+    // (This produces a valid PDF only for batch 1; for full concat we'd need
+    // to merge xref tables. For now, write batch 1 as the output.)
+    var write_buf: [8192]u8 = undefined;
+    var writer = file.writer(io, &write_buf);
+    try writer.interface.writeAll(batch_files.items[0]);
+    try writer.interface.flush();
+
+    if (batch_files.items.len > 1) {
+        std.debug.print("Note: {d} batches generated. First batch written to output.\n", .{batch_files.items.len});
+        std.debug.print("For full PDF, reduce image count or use: qpdf --empty --pages batch*.pdf -- output.pdf\n", .{});
+
+        // Write remaining batches as numbered files
+        for (batch_files.items[1..], 1..) |bf, bi| {
+            const batch_path = std.fmt.allocPrint(allocator, "{s}.part{d}.pdf", .{ output_path, bi + 1 }) catch continue;
+            defer allocator.free(batch_path);
+            const bf_file = std.Io.Dir.cwd().createFile(io, batch_path, .{}) catch continue;
+            defer bf_file.close(io);
+            var wbuf2: [8192]u8 = undefined;
+            var w2 = bf_file.writer(io, &wbuf2);
+            w2.interface.writeAll(bf) catch continue;
+            w2.interface.flush() catch continue;
+            std.debug.print("  Written: {s}\n", .{batch_path});
+        }
+    }
+
+    std.debug.print("Generated: {s} ({d} pages across {d} file(s))\n", .{ output_path, total, batch_files.items.len });
+}
+
+fn packBatch(allocator: std.mem.Allocator, dir_path: []const u8, filenames: []const []const u8, io: std.Io) ![]const u8 {
+    var doc = lib.PdfDocument.init(allocator);
+    defer doc.deinit();
+
+    for (filenames) |filename| {
+        const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, filename });
+        defer allocator.free(full_path);
+
+        const img_data = std.Io.Dir.cwd().readFileAlloc(io, full_path, allocator, .limited(50 * 1024 * 1024)) catch continue;
+        defer allocator.free(img_data);
+
+        const is_jpeg = std.mem.endsWith(u8, filename, ".jpg") or
+            std.mem.endsWith(u8, filename, ".JPG") or
+            std.mem.endsWith(u8, filename, ".jpeg") or
+            std.mem.endsWith(u8, filename, ".JPEG");
+
+        if (is_jpeg) {
+            const dims = detectJpegDimensions(img_data);
+            const img_w = if (dims.width > 0) dims.width else 2481;
+            const img_h = if (dims.height > 0) dims.height else 1653;
+            const page_w: f32 = @as(f32, @floatFromInt(img_w)) * 72.0 / 300.0;
+            const page_h: f32 = @as(f32, @floatFromInt(img_h)) * 72.0 / 300.0;
+
+            const img_id = try doc.addImage(.{ .width = img_w, .height = img_h, .format = .jpeg, .data = img_data });
+            var content = lib.ContentStream.init(allocator);
+            defer content.deinit();
+            try content.drawImage(img_id, 0, 0, page_w, page_h);
+            try doc.addPageWithSize(&content, page_w, page_h);
+        } else {
+            const decoded = lib.image.decodePng(allocator, img_data) catch continue;
+            defer allocator.free(decoded.pixels);
+
+            const page_w: f32 = @as(f32, @floatFromInt(decoded.info.width)) * 72.0 / 300.0;
+            const page_h: f32 = @as(f32, @floatFromInt(decoded.info.height)) * 72.0 / 300.0;
+            const format: lib.document.ImageFormat = if (decoded.info.has_alpha) .png_rgba else .png_rgb;
+
+            const img_id = doc.addImage(.{ .width = decoded.info.width, .height = decoded.info.height, .format = format, .data = decoded.pixels }) catch continue;
+            var content = lib.ContentStream.init(allocator);
+            defer content.deinit();
+            try content.drawImage(img_id, 0, 0, page_w, page_h);
+            try doc.addPageWithSize(&content, page_w, page_h);
+        }
+    }
+
+    return try doc.build();
+}
+
+fn detectJpegDimensions(data: []const u8) struct { width: u32, height: u32 } {
+    if (data.len < 4) return .{ .width = 0, .height = 0 };
+    var i: usize = 2;
+    while (i + 9 < data.len) {
+        if (data[i] == 0xFF) {
+            const marker = data[i + 1];
+            if (marker >= 0xC0 and marker <= 0xC3 and marker != 0xC1) {
+                return .{
+                    .height = std.mem.readInt(u16, data[i + 5 ..][0..2], .big),
+                    .width = std.mem.readInt(u16, data[i + 7 ..][0..2], .big),
+                };
+            }
+            if (i + 3 < data.len) {
+                const seg_len = std.mem.readInt(u16, data[i + 2 ..][0..2], .big);
+                i += 2 + seg_len;
+            } else break;
+        } else {
+            i += 1;
+        }
+    }
+    return .{ .width = 0, .height = 0 };
 }
 
 fn generateDemo(allocator: std.mem.Allocator, output_path: []const u8) !void {

@@ -32,10 +32,10 @@ pub const LETTER_WIDTH: f32 = 612.0;
 pub const LETTER_HEIGHT: f32 = 792.0;
 
 /// Maximum objects in a PDF document
-const MAX_OBJECTS = 1024;
-const MAX_PAGES = 100;
+const MAX_OBJECTS = 4096;
+const MAX_PAGES = 1024;
 const MAX_FONTS = 16;
-const MAX_IMAGES = 64;
+const MAX_IMAGES = 1024;
 
 // =============================================================================
 // PDF Object Types
@@ -863,11 +863,12 @@ pub const PdfDocument = struct {
 
     // Images
     images: [MAX_IMAGES]Image,
-    image_count: u8,
+    image_count: u16,
+    image_id_overflow: [16]u8,
 
     // Pages
     page_content_ids: [MAX_PAGES]u32,
-    page_count: u8,
+    page_count: u16,
 
     // Link annotations (clickable URLs)
     annotations: [MAX_ANNOTATIONS]LinkAnnotation,
@@ -890,6 +891,7 @@ pub const PdfDocument = struct {
             .font_count = 0,
             .images = undefined,
             .image_count = 0,
+            .image_id_overflow = undefined,
             .page_content_ids = undefined,
             .page_count = 0,
             .annotations = undefined,
@@ -957,18 +959,19 @@ pub const PdfDocument = struct {
         const id = self.image_count;
         self.image_count += 1;
 
-        return switch (id) {
-            0 => "Im0",
-            1 => "Im1",
-            2 => "Im2",
-            3 => "Im3",
-            4 => "Im4",
-            5 => "Im5",
-            6 => "Im6",
-            7 => "Im7",
-            else => "Im0",
-        };
+        // Return a stable image ID string
+        if (id < image_id_table.len) return image_id_table[id];
+        // For ids beyond the table, use a formatted buffer stored in image_id_overflow
+        const s = std.fmt.bufPrint(&self.image_id_overflow, "Im{d}", .{id}) catch return "Im0";
+        return s;
     }
+
+    const image_id_table = [_][]const u8{
+        "Im0",  "Im1",  "Im2",  "Im3",  "Im4",  "Im5",  "Im6",  "Im7",
+        "Im8",  "Im9",  "Im10", "Im11", "Im12", "Im13", "Im14", "Im15",
+        "Im16", "Im17", "Im18", "Im19", "Im20", "Im21", "Im22", "Im23",
+        "Im24", "Im25", "Im26", "Im27", "Im28", "Im29", "Im30", "Im31",
+    };
 
     // -------------------------------------------------------------------------
     // Link Annotations (Clickable URLs)
@@ -1100,11 +1103,11 @@ pub const PdfDocument = struct {
             try page_refs.appendSlice(self.allocator, len);
         }
 
-        // Write Pages object
+        // Write Pages object (dynamic buffer for large page counts)
         {
-            var buf: [256]u8 = undefined;
-            const len = std.fmt.bufPrint(&buf, "<< /Type /Pages /Kids [ {s}] /Count {d} >>", .{ page_refs.items, self.page_count }) catch return error.BufferTooSmall;
-            try self.writeObject(pages_id, len);
+            const pages_str = try std.fmt.allocPrint(self.allocator, "<< /Type /Pages /Kids [ {s}] /Count {d} >>", .{ page_refs.items, self.page_count });
+            defer self.allocator.free(pages_str);
+            try self.writeObject(pages_id, pages_str);
         }
 
         // Write Font objects
