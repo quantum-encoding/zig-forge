@@ -70,6 +70,36 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    // ── JSON → FRA DOCX conversion (must come before generic .json detection) ──
+    if (parsed.fra_mode) {
+        const json_text = readFileContents(allocator, parsed.file_path) orelse return;
+        defer allocator.free(json_text);
+
+        var fra_data = docx.fra.parseFraJson(allocator, json_text) catch |err| {
+            std.debug.print("Error parsing FRA JSON: {}\n", .{err});
+            return;
+        };
+        _ = &fra_data;
+
+        const docx_bytes = docx.fra.generateFra(allocator, &fra_data) catch |err| {
+            std.debug.print("Error generating FRA DOCX: {}\n", .{err});
+            return;
+        };
+        defer allocator.free(docx_bytes);
+
+        const out_path = parsed.output_path orelse blk: {
+            if (std.mem.endsWith(u8, parsed.file_path, ".json")) {
+                const stem = parsed.file_path[0 .. parsed.file_path.len - 5];
+                break :blk std.fmt.allocPrint(allocator, "{s}.docx", .{stem}) catch return;
+            }
+            break :blk std.fmt.allocPrint(allocator, "{s}.docx", .{parsed.file_path}) catch return;
+        };
+
+        writeToFile(allocator, out_path, docx_bytes);
+        std.debug.print("Generated FRA: {s} ({d} bytes)\n", .{ out_path, docx_bytes.len });
+        return;
+    }
+
     // Anthropic conversations.json export
     const is_json = std.mem.endsWith(u8, parsed.file_path, ".json") or
         std.mem.endsWith(u8, parsed.file_path, ".JSON") or
@@ -772,6 +802,7 @@ const Args = struct {
     anthropic_mode: bool = false,
     claude_code_mode: bool = false,
     to_docx: bool = false, // MD → DOCX conversion
+    fra_mode: bool = false, // JSON → FRA DOCX conversion
     only_project: ?[]const u8 = null,
     // Chunker config (only used when --chunk is set)
     chunk_target_words: ?u32 = null,
@@ -833,6 +864,8 @@ fn parseArgs(args: []const []const u8) ?Args {
             result.claude_code_mode = true;
         } else if (std.mem.eql(u8, arg, "--to-docx")) {
             result.to_docx = true;
+        } else if (std.mem.eql(u8, arg, "--fra")) {
+            result.fra_mode = true;
         } else if (std.mem.eql(u8, arg, "--only-project")) {
             i += 1;
             if (i >= args.len) {

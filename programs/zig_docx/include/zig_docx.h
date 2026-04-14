@@ -103,6 +103,20 @@ void zig_docx_free_string(char *ptr);
 /// Free all owned strings in a ZigDocxInfo struct.
 void zig_docx_free_info(ZigDocxInfo *info);
 
+// ─── Fire Risk Assessment ─────────────────────────────────────────
+
+/// Generate a Fire Risk Assessment DOCX from JSON input.
+///
+/// JSON schema supports: assessor details, client/premises info,
+/// checklist sections with Yes/No answers, risk ratings, action plan.
+/// All PAS 79 boilerplate is built-in.
+///
+/// @param json_ptr  Pointer to UTF-8 JSON text.
+/// @param json_len  Length of JSON text in bytes.
+/// @return          ZigDocxResult with DOCX bytes or error.
+ZigDocxResult zig_docx_fra_from_json(const uint8_t *json_ptr,
+                                      size_t json_len);
+
 // ─── Utility ──────────────────────────────────────────────────────
 
 /// Returns the library version string (e.g. "1.1.0").

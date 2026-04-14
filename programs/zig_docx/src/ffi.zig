@@ -84,6 +84,7 @@ fn makeError(msg: []const u8) ZigDocxResult {
 comptime {
     @export(&zig_docx_md_to_docx, .{ .name = "zig_docx_md_to_docx" });
     @export(&zig_docx_to_markdown, .{ .name = "zig_docx_to_markdown" });
+    @export(&zig_docx_fra_from_json, .{ .name = "zig_docx_fra_from_json" });
     @export(&zig_docx_info, .{ .name = "zig_docx_info" });
     @export(&zig_docx_free, .{ .name = "zig_docx_free" });
     @export(&zig_docx_free_string, .{ .name = "zig_docx_free_string" });
@@ -154,6 +155,29 @@ fn zig_docx_md_to_docx(
         writer_opts,
     ) catch {
         return makeError("Failed to generate DOCX");
+    };
+
+    return .{
+        .data = docx_bytes.ptr,
+        .len = docx_bytes.len,
+        .error_msg = null,
+    };
+}
+
+/// Generate a Fire Risk Assessment DOCX from JSON input.
+fn zig_docx_fra_from_json(
+    json_ptr: [*]const u8,
+    json_len: usize,
+) callconv(.c) ZigDocxResult {
+    const json_str = json_ptr[0..json_len];
+
+    var fra_data = docx.fra.parseFraJson(allocator, json_str) catch {
+        return makeError("Failed to parse FRA JSON");
+    };
+    _ = &fra_data;
+
+    const docx_bytes = docx.fra.generateFra(allocator, &fra_data) catch {
+        return makeError("Failed to generate FRA document");
     };
 
     return .{
