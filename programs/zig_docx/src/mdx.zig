@@ -177,34 +177,103 @@ fn writeParagraph(
         return;
     }
 
-    // Write runs normally
-    for (p.runs) |run| {
+    // Write runs, merging adjacent runs with same formatting to avoid ****
+    var i: usize = 0;
+    while (i < p.runs.len) {
+        const run = p.runs[i];
         if (run.image_rel_id) |rel_id| {
             try writeImage(allocator, w, rel_id, doc, image_counter, image_refs, image_mode);
+            i += 1;
             continue;
         }
 
-        if (run.text.len == 0) continue;
-
-        const has_link = run.hyperlink_url != null;
-        if (has_link) {
-            try w.print("[", .{});
+        if (run.text.len == 0) {
+            i += 1;
+            continue;
         }
 
+        const has_link = run.hyperlink_url != null;
+
+        // Merge consecutive runs with identical formatting (bold/italic)
+        // This prevents **text1****text2** → **text1 text2**
+        var merged_end = i + 1;
+        while (merged_end < p.runs.len) {
+            const next = p.runs[merged_end];
+            if (next.text.len == 0) {
+                merged_end += 1;
+                continue;
+            }
+            if (next.bold != run.bold or next.italic != run.italic or
+                next.hyperlink_url != null or next.image_rel_id != null) break;
+            merged_end += 1;
+        }
+
+        if (has_link) try w.print("[", .{});
+
+        // Open formatting
         if (run.bold and run.italic) {
-            try w.print("***{s}***", .{run.text});
+            try w.print("***", .{});
         } else if (run.bold) {
-            try w.print("**{s}**", .{run.text});
+            try w.print("**", .{});
         } else if (run.italic) {
-            try w.print("*{s}*", .{run.text});
-        } else {
-            try w.print("{s}", .{run.text});
+            try w.print("*", .{});
+        }
+
+        // Write merged text, inserting spaces between runs where needed
+        var j = i;
+        while (j < merged_end) : (j += 1) {
+            const r = p.runs[j];
+            if (r.text.len == 0) continue;
+            if (r.image_rel_id != null) continue;
+
+            // Check if we need a space between this run and the previous
+            if (j > i) {
+                var prev_text: []const u8 = "";
+                var k = j - 1;
+                while (true) {
+                    if (p.runs[k].text.len > 0 and p.runs[k].image_rel_id == null) {
+                        prev_text = p.runs[k].text;
+                        break;
+                    }
+                    if (k == i) break;
+                    k -= 1;
+                }
+                if (needsSpaceBetween(prev_text, r.text)) {
+                    try w.print(" ", .{});
+                }
+            }
+            try w.print("{s}", .{r.text});
+        }
+
+        // Close formatting
+        if (run.bold and run.italic) {
+            try w.print("***", .{});
+        } else if (run.bold) {
+            try w.print("**", .{});
+        } else if (run.italic) {
+            try w.print("*", .{});
         }
 
         if (has_link) {
             try w.print("]({s})", .{run.hyperlink_url.?});
         }
+
+        i = merged_end;
     }
+}
+
+fn needsSpaceBetween(prev_text: []const u8, next_text: []const u8) bool {
+    if (prev_text.len == 0 or next_text.len == 0) return false;
+    const prev = prev_text[prev_text.len - 1];
+    const next = next_text[0];
+    // If either side is already whitespace, no space needed
+    if (prev == ' ' or prev == '\t' or prev == '\n') return false;
+    if (next == ' ' or next == '\t' or next == '\n') return false;
+    // If both sides are word characters (letter/digit), insert a space.
+    // Word splits text across runs at formatting boundaries, not mid-word.
+    const prev_is_word = (prev >= 'a' and prev <= 'z') or (prev >= 'A' and prev <= 'Z') or (prev >= '0' and prev <= '9');
+    const next_is_word = (next >= 'a' and next <= 'z') or (next >= 'A' and next <= 'Z') or (next >= '0' and next <= '9');
+    return prev_is_word and next_is_word;
 }
 
 /// Handle paragraphs where the author typed • bullet characters manually
@@ -222,30 +291,69 @@ fn writeInlineBulletList(
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
 
-    for (p.runs) |run| {
+    var ri: usize = 0;
+    while (ri < p.runs.len) {
+        const run = p.runs[ri];
         if (run.image_rel_id) |rel_id| {
             try writeImage(allocator, w, rel_id, doc, image_counter, image_refs, image_mode);
+            ri += 1;
             continue;
         }
-        if (run.text.len == 0) continue;
+        if (run.text.len == 0) { ri += 1; continue; }
 
-        const text = run.text;
-        // Apply formatting
+        // Merge consecutive runs with same formatting
+        var merge_end = ri + 1;
+        while (merge_end < p.runs.len) {
+            const nr = p.runs[merge_end];
+            if (nr.text.len == 0) { merge_end += 1; continue; }
+            if (nr.bold != run.bold or nr.italic != run.italic or
+                nr.hyperlink_url != null or nr.image_rel_id != null) break;
+            merge_end += 1;
+        }
+
+        // Open formatting
         if (run.bold and run.italic) {
-            try buf.appendSlice(allocator, "***");
-            try buf.appendSlice(allocator, text);
             try buf.appendSlice(allocator, "***");
         } else if (run.bold) {
             try buf.appendSlice(allocator, "**");
-            try buf.appendSlice(allocator, text);
+        } else if (run.italic) {
+            try buf.appendSlice(allocator, "*");
+        }
+
+        // Write merged runs with space insertion
+        var rj = ri;
+        while (rj < merge_end) : (rj += 1) {
+            const r = p.runs[rj];
+            if (r.text.len == 0 or r.image_rel_id != null) continue;
+            if (rj > ri) {
+                // Find prev text
+                var prev_text: []const u8 = "";
+                var rk = rj - 1;
+                while (true) {
+                    if (p.runs[rk].text.len > 0 and p.runs[rk].image_rel_id == null) {
+                        prev_text = p.runs[rk].text;
+                        break;
+                    }
+                    if (rk == ri) break;
+                    rk -= 1;
+                }
+                if (needsSpaceBetween(prev_text, r.text)) {
+                    try buf.appendSlice(allocator, " ");
+                }
+            }
+            try buf.appendSlice(allocator, r.text);
+        }
+
+        // Close formatting
+        if (run.bold and run.italic) {
+            try buf.appendSlice(allocator, "***");
+        } else if (run.bold) {
             try buf.appendSlice(allocator, "**");
         } else if (run.italic) {
             try buf.appendSlice(allocator, "*");
-            try buf.appendSlice(allocator, text);
-            try buf.appendSlice(allocator, "*");
-        } else {
-            try buf.appendSlice(allocator, text);
         }
+
+        ri = merge_end;
     }
 
     // Strip all markdown formatting markers from the collected text.
@@ -323,21 +431,71 @@ fn writeTable(w: anytype, table: *const docx.Table) !void {
 }
 
 fn writeCellText(w: anytype, cell: *const docx.TableCell) !void {
-    var first = true;
+    var first_para = true;
     for (cell.paragraphs) |para| {
-        if (!first) {
+        if (!first_para) {
             try w.print(" ", .{}); // Join multiple paragraphs in a cell with space
         }
-        first = false;
-        for (para.runs) |run| {
-            if (run.text.len == 0) continue;
-            if (run.bold) {
-                try w.print("**{s}**", .{run.text});
-            } else if (run.italic) {
-                try w.print("*{s}*", .{run.text});
-            } else {
-                try w.print("{s}", .{run.text});
+        first_para = false;
+
+        // Merge adjacent runs with same formatting, insert spaces between word runs
+        var ri: usize = 0;
+        while (ri < para.runs.len) {
+            const run = para.runs[ri];
+            if (run.text.len == 0) { ri += 1; continue; }
+
+            // Merge consecutive runs with same formatting
+            var merge_end = ri + 1;
+            while (merge_end < para.runs.len) {
+                const nr = para.runs[merge_end];
+                if (nr.text.len == 0) { merge_end += 1; continue; }
+                if (nr.bold != run.bold or nr.italic != run.italic or
+                    nr.hyperlink_url != null or nr.image_rel_id != null) break;
+                merge_end += 1;
             }
+
+            // Open formatting
+            if (run.bold and run.italic) {
+                try w.print("***", .{});
+            } else if (run.bold) {
+                try w.print("**", .{});
+            } else if (run.italic) {
+                try w.print("*", .{});
+            }
+
+            // Write merged runs
+            var rj = ri;
+            while (rj < merge_end) : (rj += 1) {
+                const r = para.runs[rj];
+                if (r.text.len == 0 or r.image_rel_id != null) continue;
+                if (rj > ri) {
+                    var prev_text: []const u8 = "";
+                    var rk = rj - 1;
+                    while (true) {
+                        if (para.runs[rk].text.len > 0 and para.runs[rk].image_rel_id == null) {
+                            prev_text = para.runs[rk].text;
+                            break;
+                        }
+                        if (rk == ri) break;
+                        rk -= 1;
+                    }
+                    if (needsSpaceBetween(prev_text, r.text)) {
+                        try w.print(" ", .{});
+                    }
+                }
+                try w.print("{s}", .{r.text});
+            }
+
+            // Close formatting
+            if (run.bold and run.italic) {
+                try w.print("***", .{});
+            } else if (run.bold) {
+                try w.print("**", .{});
+            } else if (run.italic) {
+                try w.print("*", .{});
+            }
+
+            ri = merge_end;
         }
     }
 }
