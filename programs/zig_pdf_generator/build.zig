@@ -34,6 +34,8 @@ pub fn build(b: *std.Build) void {
 
     // Link libc for Android/iOS FFI compatibility
     lib.root_module.link_libc = true;
+    // Bundle compiler-rt so static lib is self-contained (f128 ops for JSON parser)
+    lib.bundle_compiler_rt = true;
 
     b.installArtifact(lib);
 
