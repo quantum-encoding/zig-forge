@@ -54,11 +54,11 @@ pub fn build(b: *std.Build) void {
 
     shared_lib.root_module.link_libc = true;
 
-    const install_shared = b.addInstallArtifact(shared_lib, .{
-        .dest_dir = .{ .override = .{ .custom = "lib" } },
-    });
+    // Always install the shared lib alongside the static lib
+    b.installArtifact(shared_lib);
+
     const shared_step = b.step("shared", "Build shared library (libzigpdf.so) for FFI");
-    shared_step.dependOn(&install_shared.step);
+    shared_step.dependOn(&shared_lib.step);
 
     // ==========================================================================
     // Android ARM64 Cross-Compilation Target (Static Library with FFI)

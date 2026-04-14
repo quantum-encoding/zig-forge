@@ -340,6 +340,61 @@ uint8_t* zigpdf_generate_identicon(const char* address, int scale, size_t* outpu
  */
 
 /* ============================================================================
+ * Corporate Document Functions
+ * ============================================================================
+ *
+ * All corporate document functions follow the same pattern:
+ *   Buffer output: zigpdf_generate_<type>(json, &len) → PDF bytes or NULL
+ *   File output:   zigpdf_generate_<type>_to_file(json, path) → error code
+ *
+ * Free buffer results with zigpdf_free(). On error, call zigpdf_get_error().
+ */
+
+/** @brief Generate a legal contract PDF */
+uint8_t* zigpdf_generate_contract(const char* json_input, size_t* output_len);
+ZigPdfError zigpdf_generate_contract_to_file(const char* json_input, const char* output_path);
+
+/** @brief Generate a share certificate PDF */
+uint8_t* zigpdf_generate_share_certificate(const char* json_input, size_t* output_len);
+ZigPdfError zigpdf_generate_share_certificate_to_file(const char* json_input, const char* output_path);
+
+/** @brief Generate a dividend voucher PDF */
+uint8_t* zigpdf_generate_dividend_voucher(const char* json_input, size_t* output_len);
+ZigPdfError zigpdf_generate_dividend_voucher_to_file(const char* json_input, const char* output_path);
+
+/** @brief Generate a stock transfer document PDF */
+uint8_t* zigpdf_generate_stock_transfer(const char* json_input, size_t* output_len);
+ZigPdfError zigpdf_generate_stock_transfer_to_file(const char* json_input, const char* output_path);
+
+/** @brief Generate a board resolution PDF */
+uint8_t* zigpdf_generate_board_resolution(const char* json_input, size_t* output_len);
+ZigPdfError zigpdf_generate_board_resolution_to_file(const char* json_input, const char* output_path);
+
+/** @brief Generate a director consent form PDF */
+uint8_t* zigpdf_generate_director_consent(const char* json_input, size_t* output_len);
+ZigPdfError zigpdf_generate_director_consent_to_file(const char* json_input, const char* output_path);
+
+/** @brief Generate a director appointment letter PDF */
+uint8_t* zigpdf_generate_director_appointment(const char* json_input, size_t* output_len);
+ZigPdfError zigpdf_generate_director_appointment_to_file(const char* json_input, const char* output_path);
+
+/** @brief Generate a director resignation letter PDF */
+uint8_t* zigpdf_generate_director_resignation(const char* json_input, size_t* output_len);
+ZigPdfError zigpdf_generate_director_resignation_to_file(const char* json_input, const char* output_path);
+
+/** @brief Generate a written resolution PDF */
+uint8_t* zigpdf_generate_written_resolution(const char* json_input, size_t* output_len);
+ZigPdfError zigpdf_generate_written_resolution_to_file(const char* json_input, const char* output_path);
+
+/** @brief Generate a business proposal PDF */
+uint8_t* zigpdf_generate_proposal(const char* json_input, size_t* output_len);
+ZigPdfError zigpdf_generate_proposal_to_file(const char* json_input, const char* output_path);
+
+/** @brief Generate a template card PDF */
+uint8_t* zigpdf_generate_template_card(const char* json_input, size_t* output_len);
+ZigPdfError zigpdf_generate_template_card_to_file(const char* json_input, const char* output_path);
+
+/* ============================================================================
  * QR Code Modes for Invoices
  * ============================================================================ */
 

@@ -1,0 +1,5 @@
+module CZigPdf {
+    header "../../../include/zigpdf.h"
+    link "zigpdf"
+    export *
+}
