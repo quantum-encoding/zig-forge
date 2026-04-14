@@ -60,6 +60,8 @@ pub const TableRow = struct {
 
 pub const Table = struct {
     rows: []TableRow = &[_]TableRow{},
+    /// Column widths in twentieths of a point (dxa). Empty = auto-width.
+    col_widths: []const u16 = &[_]u16{},
 };
 
 pub const Element = union(enum) {

@@ -273,7 +273,7 @@ const styles_xml =
     \\<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
     \\  <w:docDefaults>
     \\    <w:rPrDefault><w:rPr>
-    \\      <w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:cs="Calibri"/>
+    \\      <w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/>
     \\      <w:sz w:val="22"/><w:szCs w:val="22"/>
     \\    </w:rPr></w:rPrDefault>
     \\    <w:pPrDefault><w:pPr>
@@ -281,9 +281,9 @@ const styles_xml =
     \\    </w:pPr></w:pPrDefault>
     \\  </w:docDefaults>
     \\  <w:style w:type="paragraph" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
-    \\  <w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:pPr><w:spacing w:before="360" w:after="80"/></w:pPr><w:rPr><w:b/><w:sz w:val="48"/><w:szCs w:val="48"/><w:color w:val="1F3864"/></w:rPr></w:style>
-    \\  <w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:pPr><w:spacing w:before="240" w:after="80"/></w:pPr><w:rPr><w:b/><w:sz w:val="36"/><w:szCs w:val="36"/><w:color w:val="1F3864"/></w:rPr></w:style>
-    \\  <w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="heading 3"/><w:pPr><w:spacing w:before="200" w:after="60"/></w:pPr><w:rPr><w:b/><w:sz w:val="28"/><w:szCs w:val="28"/><w:color w:val="1F3864"/></w:rPr></w:style>
+    \\  <w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:pPr><w:spacing w:before="240" w:after="120"/></w:pPr><w:rPr><w:b/><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr></w:style>
+    \\  <w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:pPr><w:spacing w:before="200" w:after="80"/></w:pPr><w:rPr><w:b/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:style>
+    \\  <w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="heading 3"/><w:pPr><w:spacing w:before="160" w:after="60"/></w:pPr><w:rPr><w:b/><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr></w:style>
     \\  <w:style w:type="paragraph" w:styleId="Heading4"><w:name w:val="heading 4"/><w:pPr><w:spacing w:before="160" w:after="40"/></w:pPr><w:rPr><w:b/><w:i/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:style>
     \\  <w:style w:type="paragraph" w:styleId="Heading5"><w:name w:val="heading 5"/><w:pPr><w:spacing w:before="120" w:after="40"/></w:pPr><w:rPr><w:b/><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr></w:style>
     \\  <w:style w:type="paragraph" w:styleId="Heading6"><w:name w:val="heading 6"/><w:pPr><w:spacing w:before="120" w:after="40"/></w:pPr><w:rPr><w:b/><w:i/><w:sz w:val="22"/><w:szCs w:val="22"/><w:color w:val="666666"/></w:rPr></w:style>
@@ -608,10 +608,22 @@ fn detectImageDimensions(data: []const u8, ext: []const u8) ImageDimensions {
 }
 
 fn writeTable(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), t: *const docx.Table, hyperlinks: *HyperlinkCollector, images: *ImageCollector) !void {
+    try buf.appendSlice(allocator, "<w:tbl><w:tblPr>\n  <w:tblStyle w:val=\"TableGrid\"/>\n");
+
+    // Set table width: explicit if col_widths provided, auto otherwise
+    if (t.col_widths.len > 0) {
+        var total: u32 = 0;
+        for (t.col_widths) |w| total += w;
+        var tmp: [64]u8 = undefined;
+        const s = std.fmt.bufPrint(&tmp, "  <w:tblW w:w=\"{d}\" w:type=\"dxa\"/>\n", .{total}) catch "";
+        try buf.appendSlice(allocator, s);
+    } else {
+        try buf.appendSlice(allocator, "  <w:tblW w:w=\"0\" w:type=\"auto\"/>\n");
+    }
+
     try buf.appendSlice(allocator,
-        \\<w:tbl><w:tblPr>
-        \\  <w:tblStyle w:val="TableGrid"/>
-        \\  <w:tblW w:w="0" w:type="auto"/>
+        \\  <w:jc w:val="center"/>
+        \\  <w:tblLook w:val="04A0" w:firstRow="1" w:lastRow="0" w:firstColumn="1" w:lastColumn="0" w:noHBand="0" w:noVBand="1"/>
         \\  <w:tblBorders>
         \\    <w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/>
         \\    <w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/>
@@ -624,10 +636,30 @@ fn writeTable(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), t:
         \\
     );
 
+    // Table grid with column widths
+    if (t.col_widths.len > 0) {
+        try buf.appendSlice(allocator, "<w:tblGrid>");
+        for (t.col_widths) |w| {
+            var tmp: [32]u8 = undefined;
+            const s = std.fmt.bufPrint(&tmp, "<w:gridCol w:w=\"{d}\"/>", .{w}) catch "";
+            try buf.appendSlice(allocator, s);
+        }
+        try buf.appendSlice(allocator, "</w:tblGrid>\n");
+    }
+
     for (t.rows) |row| {
         try buf.appendSlice(allocator, "<w:tr>");
-        for (row.cells) |cell| {
-            try buf.appendSlice(allocator, "<w:tc><w:tcPr><w:tcW w:w=\"0\" w:type=\"auto\"/></w:tcPr>");
+        for (row.cells, 0..) |cell, ci| {
+            try buf.appendSlice(allocator, "<w:tc><w:tcPr>");
+            // Use explicit width if available
+            if (ci < t.col_widths.len) {
+                var tmp: [64]u8 = undefined;
+                const s = std.fmt.bufPrint(&tmp, "<w:tcW w:w=\"{d}\" w:type=\"dxa\"/>", .{t.col_widths[ci]}) catch "";
+                try buf.appendSlice(allocator, s);
+            } else {
+                try buf.appendSlice(allocator, "<w:tcW w:w=\"0\" w:type=\"auto\"/>");
+            }
+            try buf.appendSlice(allocator, "</w:tcPr>");
             for (cell.paragraphs) |p| {
                 try writeParagraph(allocator, buf, &p, hyperlinks, images);
             }

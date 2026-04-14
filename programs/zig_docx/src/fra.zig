@@ -450,6 +450,15 @@ fn addPreviousIncidentsTable(allocator: std.mem.Allocator, elements: *std.ArrayL
 
 // ─── Checklist Sections ────────────────────────────────────────────
 
+// Column widths matching the original document (in dxa = twentieths of a point)
+// Total page content width: 8296 dxa (A4 with standard margins)
+const COL_2_LABEL: u16 = 3400; // 2-column: label width
+const COL_2_VALUE: u16 = 4896; // 2-column: value width
+const COL_3_QUESTION: u16 = 5691; // 3-column checklist: question
+const COL_3_ANSWER: u16 = 1233; // 3-column checklist: Yes/No
+const COL_3_ACTION: u16 = 1372; // 3-column checklist: Action Plan
+const COL_1_FULL: u16 = 8296; // Full-width single column
+
 fn addChecklistSection(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged(docx.Element), section: *const ChecklistSection) !void {
     // Section title as heading
     try addHeading(allocator, elements, section.title, .heading2);
@@ -461,7 +470,7 @@ fn addChecklistSection(allocator: std.mem.Allocator, elements: *std.ArrayListUnm
 
         // Header row
         const hdr_cells = try allocator.alloc(docx.TableCell, 3);
-        hdr_cells[0] = try makeCell(allocator, section.title);
+        hdr_cells[0] = try makeBoldCell(allocator, section.title);
         hdr_cells[1] = try makeBoldCell(allocator, "Yes / No");
         hdr_cells[2] = try makeBoldCell(allocator, "Action Plan No.");
         try rows.append(allocator, .{ .cells = hdr_cells });
@@ -475,8 +484,10 @@ fn addChecklistSection(allocator: std.mem.Allocator, elements: *std.ArrayListUnm
             try rows.append(allocator, .{ .cells = item_cells });
         }
 
+        const col3_widths = try allocator.dupe(u16, &[_]u16{ COL_3_QUESTION, COL_3_ANSWER, COL_3_ACTION });
         try elements.append(allocator, .{ .table = .{
             .rows = try rows.toOwnedSlice(allocator),
+            .col_widths = col3_widths,
         } });
     }
 
@@ -493,8 +504,10 @@ fn addChecklistSection(allocator: std.mem.Allocator, elements: *std.ArrayListUnm
         body_cell[0] = try makeCell(allocator, section.additional_info);
         try info_rows.append(allocator, .{ .cells = body_cell });
 
+        const col1_widths = try allocator.dupe(u16, &[_]u16{COL_1_FULL});
         try elements.append(allocator, .{ .table = .{
             .rows = try info_rows.toOwnedSlice(allocator),
+            .col_widths = col1_widths,
         } });
     }
 }
@@ -528,8 +541,10 @@ fn addScoringMatrix(allocator: std.mem.Allocator, elements: *std.ArrayListUnmana
         try rows.append(allocator, .{ .cells = cells });
     }
 
+    const col4_widths = try allocator.dupe(u16, &[_]u16{ 2600, 1900, 1900, 1896 });
     try elements.append(allocator, .{ .table = .{
         .rows = try rows.toOwnedSlice(allocator),
+        .col_widths = col4_widths,
     } });
 
     // Definitions
@@ -588,8 +603,10 @@ fn addRiskRating(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged
         try rows.append(allocator, .{ .cells = cells });
     }
 
+    const risk_col_widths = try allocator.dupe(u16, &[_]u16{ 1800, 6496 });
     try elements.append(allocator, .{ .table = .{
         .rows = try rows.toOwnedSlice(allocator),
+        .col_widths = risk_col_widths,
     } });
 }
 
@@ -613,8 +630,10 @@ fn addActionPlanLegend(allocator: std.mem.Allocator, elements: *std.ArrayListUnm
         try rows.append(allocator, .{ .cells = cells });
     }
 
+    const legend_widths = try allocator.dupe(u16, &[_]u16{ 1400, 6896 });
     try elements.append(allocator, .{ .table = .{
         .rows = try rows.toOwnedSlice(allocator),
+        .col_widths = legend_widths,
     } });
 }
 
@@ -643,8 +662,10 @@ fn addActionPlanTable(allocator: std.mem.Allocator, elements: *std.ArrayListUnma
         try rows.append(allocator, .{ .cells = cells });
     }
 
+    const action_widths = try allocator.dupe(u16, &[_]u16{ 600, 900, 3800, 1500, 700, 796 });
     try elements.append(allocator, .{ .table = .{
         .rows = try rows.toOwnedSlice(allocator),
+        .col_widths = action_widths,
     } });
 }
 
@@ -712,8 +733,10 @@ fn addKeyValueTable(allocator: std.mem.Allocator, elements: *std.ArrayListUnmana
         try rows.append(allocator, .{ .cells = cells });
     }
 
+    const col2_widths = try allocator.dupe(u16, &[_]u16{ COL_2_LABEL, COL_2_VALUE });
     try elements.append(allocator, .{ .table = .{
         .rows = try rows.toOwnedSlice(allocator),
+        .col_widths = col2_widths,
     } });
 }
 
