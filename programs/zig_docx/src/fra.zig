@@ -87,6 +87,9 @@ pub const FraData = struct {
     // Custom introduction override (empty = use default)
     custom_introduction: []const u8 = "",
     custom_declaration: []const u8 = "",
+
+    // Image directory — base path for resolving image filenames
+    image_dir: []const u8 = "",
 };
 
 pub const ChecklistSection = struct {
@@ -94,6 +97,9 @@ pub const ChecklistSection = struct {
     title: []const u8 = "", // e.g. "Electrical & Lightning"
     items: []const ChecklistItem = &[_]ChecklistItem{},
     additional_info: []const u8 = "",
+    /// Image filenames keyed by section code (e.g. "1c-001.jpg", "7a-008.jpg").
+    /// Images are inserted after the checklist table as a photo evidence block.
+    images: []const []const u8 = &[_][]const u8{},
 };
 
 pub const ChecklistItem = struct {
@@ -177,6 +183,10 @@ pub fn generateFra(allocator: std.mem.Allocator, data: *const FraData) ![]u8 {
     try addPreviousIncidentsTable(allocator, &elements, data);
 
     // ── Checklist Sections (dynamic) ──
+    var media_list: std.ArrayListUnmanaged(docx.MediaFile) = .empty;
+    defer media_list.deinit(allocator);
+    var img_index: u32 = 0;
+
     var last_category: []const u8 = "";
     for (data.sections) |section| {
         // Print category heading if changed
@@ -184,7 +194,7 @@ pub fn generateFra(allocator: std.mem.Allocator, data: *const FraData) ![]u8 {
             try addHeading(allocator, &elements, section.category, .heading1);
             last_category = section.category;
         }
-        try addChecklistSection(allocator, &elements, &section);
+        try addChecklistSection(allocator, &elements, &section, data.image_dir, &media_list, &img_index);
     }
 
     // ── Scoring Matrix ──
@@ -203,9 +213,14 @@ pub fn generateFra(allocator: std.mem.Allocator, data: *const FraData) ![]u8 {
     }
 
     // Build document
+    const media = if (media_list.items.len > 0)
+        try media_list.toOwnedSlice(allocator)
+    else
+        @as([]docx.MediaFile, &[_]docx.MediaFile{});
+
     const doc = docx.Document{
         .elements = try elements.toOwnedSlice(allocator),
-        .media = &[_]docx.MediaFile{},
+        .media = media,
         .allocator = allocator,
     };
     // Don't deinit doc — elements ownership transferred, docx_writer reads them
@@ -459,7 +474,7 @@ const COL_3_ANSWER: u16 = 1233; // 3-column checklist: Yes/No
 const COL_3_ACTION: u16 = 1372; // 3-column checklist: Action Plan
 const COL_1_FULL: u16 = 8296; // Full-width single column
 
-fn addChecklistSection(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged(docx.Element), section: *const ChecklistSection) !void {
+fn addChecklistSection(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged(docx.Element), section: *const ChecklistSection, image_dir: []const u8, media_list: *std.ArrayListUnmanaged(docx.MediaFile), img_index: *u32) !void {
     // Section title as heading
     try addHeading(allocator, elements, section.title, .heading2);
 
@@ -489,6 +504,44 @@ fn addChecklistSection(allocator: std.mem.Allocator, elements: *std.ArrayListUnm
             .rows = try rows.toOwnedSlice(allocator),
             .col_widths = col3_widths,
         } });
+    }
+
+    // Photo evidence — insert images for this section
+    for (section.images) |img_name| {
+        // Resolve image path
+        const full_path = if (image_dir.len > 0)
+            std.fmt.allocPrint(allocator, "{s}/{s}", .{ image_dir, img_name }) catch continue
+        else
+            allocator.dupe(u8, img_name) catch continue;
+        defer allocator.free(full_path);
+
+        // Read the image file
+        const img_data = readImageFile(allocator, full_path) orelse continue;
+
+        img_index.* += 1;
+        const ext = if (std.mem.lastIndexOfScalar(u8, img_name, '.')) |dot|
+            img_name[dot + 1 ..]
+        else
+            "jpg";
+        const media_name = std.fmt.allocPrint(allocator, "image{d}.{s}", .{ img_index.*, ext }) catch continue;
+
+        media_list.append(allocator, .{
+            .name = media_name,
+            .data = img_data,
+        }) catch {
+            allocator.free(media_name);
+            allocator.free(img_data);
+            continue;
+        };
+
+        // Create an image paragraph with the media reference
+        const caption_text = std.fmt.allocPrint(allocator, "Photo: {s}", .{img_name}) catch continue;
+        const img_run = try allocator.alloc(docx.Run, 1);
+        img_run[0] = .{
+            .text = caption_text,
+            .image_rel_id = allocator.dupe(u8, media_name) catch null,
+        };
+        try elements.append(allocator, .{ .paragraph = .{ .style = .normal, .runs = img_run } });
     }
 
     // Additional information box
@@ -669,7 +722,112 @@ fn addActionPlanTable(allocator: std.mem.Allocator, elements: *std.ArrayListUnma
     } });
 }
 
-// ─── Element Helpers ───────────────────────────────────────────────
+// ─── Formatting Marker Parser ──────────────────────────────────────
+//
+// Inline markers (combinable):
+//   [w]text   → red bold (warning)
+//   [u]text   → underline
+//   [c]text   → centred (paragraph-level)
+//   [wu]text  → red bold + underline
+//   [i]text   → italic
+//
+// Markers apply from the tag to the next tag or end of string.
+// Text without markers renders normally.
+
+const MarkerFlags = struct {
+    warning: bool = false, // [w] → red + bold
+    underline: bool = false, // [u]
+    italic: bool = false, // [i]
+    centre: bool = false, // [c] → paragraph-level
+};
+
+fn parseMarkerTag(tag: []const u8) MarkerFlags {
+    var flags = MarkerFlags{};
+    for (tag) |c| {
+        switch (c) {
+            'w', 'W' => flags.warning = true,
+            'u', 'U' => flags.underline = true,
+            'i', 'I' => flags.italic = true,
+            'c', 'C' => flags.centre = true,
+            else => {},
+        }
+    }
+    return flags;
+}
+
+/// Parse text with [w] [u] [c] [i] markers into multiple Runs.
+fn parseMarkedText(allocator: std.mem.Allocator, text: []const u8) ![]docx.Run {
+    var runs: std.ArrayListUnmanaged(docx.Run) = .empty;
+    errdefer {
+        for (runs.items) |r| if (r.text.len > 0) allocator.free(r.text);
+        runs.deinit(allocator);
+    }
+
+    var i: usize = 0;
+    var seg_start: usize = 0;
+    var current_flags = MarkerFlags{};
+
+    while (i < text.len) {
+        if (text[i] == '[') {
+            // Look for closing ]
+            const close = std.mem.indexOfScalarPos(u8, text, i + 1, ']') orelse {
+                i += 1;
+                continue;
+            };
+            const tag = text[i + 1 .. close];
+            // Only treat as marker if tag is short and contains valid marker chars
+            if (tag.len > 0 and tag.len <= 4 and isMarkerTag(tag)) {
+                // Flush preceding text with current flags
+                if (i > seg_start) {
+                    try appendMarkedRun(allocator, &runs, text[seg_start..i], current_flags);
+                }
+                current_flags = parseMarkerTag(tag);
+                i = close + 1;
+                seg_start = i;
+                continue;
+            }
+        }
+        i += 1;
+    }
+
+    // Flush remaining
+    if (seg_start < text.len) {
+        try appendMarkedRun(allocator, &runs, text[seg_start..], current_flags);
+    }
+
+    if (runs.items.len == 0) {
+        try runs.append(allocator, .{ .text = try allocator.dupe(u8, "") });
+    }
+
+    return runs.toOwnedSlice(allocator);
+}
+
+fn isMarkerTag(tag: []const u8) bool {
+    for (tag) |c| {
+        switch (c) {
+            'w', 'W', 'u', 'U', 'i', 'I', 'c', 'C' => {},
+            else => return false,
+        }
+    }
+    return true;
+}
+
+fn appendMarkedRun(allocator: std.mem.Allocator, runs: *std.ArrayListUnmanaged(docx.Run), text: []const u8, flags: MarkerFlags) !void {
+    try runs.append(allocator, .{
+        .text = try allocator.dupe(u8, text),
+        .bold = flags.warning,
+        .italic = flags.italic,
+        .underline = flags.underline,
+        .color = if (flags.warning) "FF0000" else null,
+    });
+}
+
+/// Check if text contains any [c] marker (paragraph-level centre).
+fn hasCentreMarker(text: []const u8) bool {
+    return std.mem.indexOf(u8, text, "[c]") != null or std.mem.indexOf(u8, text, "[C]") != null;
+}
+
+// ─── Element Helpers (marker-aware) ────────────────────────────────
 
 fn addHeading(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged(docx.Element), text: []const u8, style: docx.StyleType) !void {
     const runs = try allocator.alloc(docx.Run, 1);
@@ -678,8 +836,7 @@ fn addHeading(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged(do
 }
 
 fn addParagraph(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged(docx.Element), text: []const u8) !void {
-    const runs = try allocator.alloc(docx.Run, 1);
-    runs[0] = .{ .text = try allocator.dupe(u8, text) };
+    const runs = try parseMarkedText(allocator, text);
     try elements.append(allocator, .{ .paragraph = .{ .style = .normal, .runs = runs } });
 }
 
@@ -696,8 +853,7 @@ fn addItalicParagraph(allocator: std.mem.Allocator, elements: *std.ArrayListUnma
 }
 
 fn addListItem(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged(docx.Element), text: []const u8, ordered: bool) !void {
-    const runs = try allocator.alloc(docx.Run, 1);
-    runs[0] = .{ .text = try allocator.dupe(u8, text) };
+    const runs = try parseMarkedText(allocator, text);
     try elements.append(allocator, .{ .paragraph = .{
         .style = .list_paragraph,
         .runs = runs,
@@ -707,8 +863,7 @@ fn addListItem(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged(d
 }
 
 fn makeCell(allocator: std.mem.Allocator, text: []const u8) !docx.TableCell {
-    const runs = try allocator.alloc(docx.Run, 1);
-    runs[0] = .{ .text = try allocator.dupe(u8, text) };
+    const runs = try parseMarkedText(allocator, text);
     const paras = try allocator.alloc(docx.Paragraph, 1);
     paras[0] = .{ .style = .normal, .runs = runs };
     return .{ .paragraphs = paras };
@@ -738,6 +893,36 @@ fn addKeyValueTable(allocator: std.mem.Allocator, elements: *std.ArrayListUnmana
         .rows = try rows.toOwnedSlice(allocator),
         .col_widths = col2_widths,
     } });
+}
+
+// ─── Image File Reader ─────────────────────────────────────────────
+
+extern "c" fn fopen(path: [*:0]const u8, mode: [*:0]const u8) ?*std.c.FILE;
+extern "c" fn fclose(stream: *std.c.FILE) c_int;
+extern "c" fn fread(ptr: [*]u8, size: usize, nmemb: usize, stream: *std.c.FILE) usize;
+extern "c" fn fseek(stream: *std.c.FILE, offset: c_long, whence: c_int) c_int;
+extern "c" fn ftell(stream: *std.c.FILE) c_long;
+
+fn readImageFile(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {
+    const path_z = allocator.allocSentinel(u8, path.len, 0) catch return null;
+    defer allocator.free(path_z);
+    @memcpy(path_z, path);
+
+    const fp = fopen(path_z.ptr, "rb") orelse return null;
+    defer _ = fclose(fp);
+
+    _ = fseek(fp, 0, 2); // SEEK_END
+    const size = ftell(fp);
+    if (size <= 0) return null;
+    _ = fseek(fp, 0, 0); // SEEK_SET
+
+    const buf = allocator.alloc(u8, @intCast(size)) catch return null;
+    const n = fread(buf.ptr, 1, @intCast(size), fp);
+    if (n != @as(usize, @intCast(size))) {
+        allocator.free(buf);
+        return null;
+    }
+    return buf;
 }
 
 // ─── Memory Cleanup ────────────────────────────────────────────────
@@ -826,6 +1011,7 @@ pub fn parseFraJson(allocator: std.mem.Allocator, json_str: []const u8) !FraData
     if (getStr(obj, "risk_overall")) |v| data.risk_overall = try allocator.dupe(u8, v);
     if (getStr(obj, "custom_introduction")) |v| data.custom_introduction = try allocator.dupe(u8, v);
     if (getStr(obj, "custom_declaration")) |v| data.custom_declaration = try allocator.dupe(u8, v);
+    if (getStr(obj, "image_dir")) |v| data.image_dir = try allocator.dupe(u8, v);
 
     // Sections array
     if (obj.get("sections")) |sections_val| {
@@ -856,6 +1042,19 @@ pub fn parseFraJson(allocator: std.mem.Allocator, json_str: []const u8) !FraData
                         section.items = try items.toOwnedSlice(allocator);
                     }
                 }
+                // Images array
+                if (sobj.get("images")) |imgs_val| {
+                    if (imgs_val == .array) {
+                        var imgs: std.ArrayListUnmanaged([]const u8) = .empty;
+                        for (imgs_val.array.items) |img_val| {
+                            if (img_val == .string) {
+                                try imgs.append(allocator, try allocator.dupe(u8, img_val.string));
+                            }
+                        }
+                        section.images = try imgs.toOwnedSlice(allocator);
+                    }
+                }
+
                 try sections.append(allocator, section);
             }
             data.sections = try sections.toOwnedSlice(allocator);

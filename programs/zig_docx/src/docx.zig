@@ -37,6 +37,7 @@ pub const Run = struct {
     italic: bool = false,
     underline: bool = false,
     is_code: bool = false, // inline `code` — rendered as monospace
+    color: ?[]const u8 = null, // hex color e.g. "FF0000" for red
     hyperlink_url: ?[]const u8 = null,
     image_rel_id: ?[]const u8 = null,
 };

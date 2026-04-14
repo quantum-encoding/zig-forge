@@ -510,6 +510,11 @@ fn writeRun(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), run:
     if (run.italic) try buf.appendSlice(allocator, "<w:i/>");
     if (run.underline) try buf.appendSlice(allocator, "<w:u w:val=\"single\"/>");
     if (run.is_code) try buf.appendSlice(allocator, "<w:rStyle w:val=\"InlineCode\"/>");
+    if (run.color) |c| {
+        try buf.appendSlice(allocator, "<w:color w:val=\"");
+        try buf.appendSlice(allocator, c);
+        try buf.appendSlice(allocator, "\"/>");
+    }
     try buf.appendSlice(allocator, "</w:rPr><w:t xml:space=\"preserve\">");
     try appendXmlEscaped(allocator, buf, run.text);
     try buf.appendSlice(allocator, "</w:t></w:r>");
