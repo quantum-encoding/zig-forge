@@ -42,57 +42,6 @@ const ACCENT_RED = document.Color{ .r = 0.863, .g = 0.149, .b = 0.149 }; // #DC2
 const WHITE = document.Color{ .r = 1.0, .g = 1.0, .b = 1.0 };
 
 // =============================================================================
-// UTF-8 → WinAnsiEncoding (shared helper)
-// =============================================================================
-
-fn utf8ToWinAnsi(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
-    var result: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer result.deinit(allocator);
-
-    var i: usize = 0;
-    while (i < text.len) {
-        if (i + 1 < text.len and text[i] == 0xC2) {
-            const b2 = text[i + 1];
-            if (b2 >= 0xA0) {
-                try result.append(allocator, b2);
-                i += 2;
-                continue;
-            }
-        }
-        if (i + 2 < text.len and text[i] == 0xE2) {
-            const b2 = text[i + 1];
-            const b3 = text[i + 2];
-            if (b2 == 0x80) {
-                const mapped: ?u8 = switch (b3) {
-                    0x93 => 0x96, // –
-                    0x94 => 0x97, // —
-                    0x98 => 0x91, // ‘
-                    0x99 => 0x92, // ’
-                    0x9C => 0x93, // “
-                    0x9D => 0x94, // ”
-                    0xA2 => 0x95, // •
-                    0xA6 => 0x85, // …
-                    else => null,
-                };
-                if (mapped) |m| {
-                    try result.append(allocator, m);
-                    i += 3;
-                    continue;
-                }
-            }
-            if (b2 == 0x82 and b3 == 0xAC) {
-                try result.append(allocator, 0x80); // €
-                i += 3;
-                continue;
-            }
-        }
-        try result.append(allocator, text[i]);
-        i += 1;
-    }
-    return result.toOwnedSlice(allocator);
-}
-
-// =============================================================================
 // Document Type Derivation
 // =============================================================================
 
@@ -163,14 +112,12 @@ pub const CleanQuoteRenderer = struct {
 
     // ─── Text helper (auto UTF-8 conversion) ─────────────────────
 
-    fn drawTextConverted(self: *CleanQuoteRenderer, content: *document.ContentStream, text: []const u8, x: f32, y: f32, font_id: []const u8, size: f32, color: document.Color) !void {
-        const converted = try utf8ToWinAnsi(self.allocator, text);
-        defer self.allocator.free(converted);
-        try content.drawText(converted, x, y, font_id, size, color);
+    /// Pass-through wrapper — document.showText already handles UTF-8 → WinAnsi.
+    fn drawTextConverted(_: *CleanQuoteRenderer, content: *document.ContentStream, text: []const u8, x: f32, y: f32, font_id: []const u8, size: f32, color: document.Color) !void {
+        try content.drawText(text, x, y, font_id, size, color);
     }
 
     fn measureText(_: *CleanQuoteRenderer, text: []const u8, font: document.Font, font_size: f32) f32 {
-        // Approximate — for exact measurement use font.measureText directly
         return font.measureText(text, font_size);
     }
 
@@ -531,10 +478,8 @@ pub const CleanQuoteRenderer = struct {
             // Amount right-aligned on first row
             var amt_buf: [32]u8 = undefined;
             const amt_str = try std.fmt.bufPrint(&amt_buf, "\u{00A3}{d:.2}", .{item.total});
-            const amt_conv = try utf8ToWinAnsi(self.allocator, amt_str);
-            defer self.allocator.free(amt_conv);
-            const amt_w = document.Font.helvetica.measureText(amt_conv, 11);
-            try content.drawText(amt_conv, amount_x - amt_w, row_top, self.font_regular, 11, INK_BLACK);
+            const amt_w = document.Font.helvetica.measureText(amt_str, 11);
+            try content.drawText(amt_str, amount_x - amt_w, row_top, self.font_regular, 11, INK_BLACK);
 
             const row_height: f32 = @as(f32, @floatFromInt(wrapped.lines.len)) * 14 + 6;
             self.current_y = row_top - row_height;
@@ -551,10 +496,8 @@ pub const CleanQuoteRenderer = struct {
             try self.drawTextConverted(content, "Subtotal", label_x, self.current_y, self.font_regular, 11, MUTED_GREY);
             var sub_buf: [32]u8 = undefined;
             const sub_str = try std.fmt.bufPrint(&sub_buf, "\u{00A3}{d:.2}", .{section.subtotal});
-            const sub_conv = try utf8ToWinAnsi(self.allocator, sub_str);
-            defer self.allocator.free(sub_conv);
-            const sub_w = document.Font.helvetica.measureText(sub_conv, 11);
-            try content.drawText(sub_conv, amount_x - sub_w, self.current_y, self.font_regular, 11, MUTED_GREY);
+            const sub_w = document.Font.helvetica.measureText(sub_str, 11);
+            try content.drawText(sub_str, amount_x - sub_w, self.current_y, self.font_regular, 11, MUTED_GREY);
             self.current_y -= 16;
 
             if (section.tax_rate > 0) {
@@ -565,10 +508,8 @@ pub const CleanQuoteRenderer = struct {
                 const vat_amount = section.subtotal * section.tax_rate;
                 var vat_buf: [32]u8 = undefined;
                 const vat_str = try std.fmt.bufPrint(&vat_buf, "\u{00A3}{d:.2}", .{vat_amount});
-                const vat_conv = try utf8ToWinAnsi(self.allocator, vat_str);
-                defer self.allocator.free(vat_conv);
-                const vat_w = document.Font.helvetica.measureText(vat_conv, 11);
-                try content.drawText(vat_conv, amount_x - vat_w, self.current_y, self.font_regular, 11, MUTED_GREY);
+                const vat_w = document.Font.helvetica.measureText(vat_str, 11);
+                try content.drawText(vat_str, amount_x - vat_w, self.current_y, self.font_regular, 11, MUTED_GREY);
                 self.current_y -= 16;
             }
 
@@ -581,10 +522,8 @@ pub const CleanQuoteRenderer = struct {
             try self.drawTextConverted(content, "Total", label_x, self.current_y, self.font_bold, 12, INK_BLACK);
             var tot_buf: [32]u8 = undefined;
             const tot_str = try std.fmt.bufPrint(&tot_buf, "\u{00A3}{d:.2}", .{section.total});
-            const tot_conv = try utf8ToWinAnsi(self.allocator, tot_str);
-            defer self.allocator.free(tot_conv);
-            const tot_w = document.Font.helvetica_bold.measureText(tot_conv, 12);
-            try content.drawText(tot_conv, amount_x - tot_w, self.current_y, self.font_bold, 12, INK_BLACK);
+            const tot_w = document.Font.helvetica_bold.measureText(tot_str, 12);
+            try content.drawText(tot_str, amount_x - tot_w, self.current_y, self.font_bold, 12, INK_BLACK);
             self.current_y -= 20;
         }
 
