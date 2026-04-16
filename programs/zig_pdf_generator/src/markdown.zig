@@ -829,12 +829,29 @@ const Renderer = struct {
     }
 
     fn drawCodeBlock(self: *Renderer, content: *document.ContentStream, block: Block) !void {
-        // Split code into lines
-        var lines_iter = std.mem.splitScalar(u8, block.code, '\n');
-        var line_count: usize = 0;
-        while (lines_iter.next()) |_| line_count += 1;
-
         const pad: f32 = 10;
+        const inner_w = self.usable_width - pad * 2;
+
+        // Pre-wrap every source line so nothing runs off the page.
+        var all_visual_lines: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer all_visual_lines.deinit(self.allocator);
+
+        var source_iter = std.mem.splitScalar(u8, block.code, '\n');
+        while (source_iter.next()) |src_line| {
+            if (src_line.len == 0) {
+                try all_visual_lines.append(self.allocator, "");
+                continue;
+            }
+            const wrapped = try document.wrapText(self.allocator, src_line, .courier, CODE_SIZE, inner_w);
+            defer self.allocator.free(wrapped.lines);
+            if (wrapped.lines.len == 0) {
+                try all_visual_lines.append(self.allocator, src_line);
+            } else {
+                for (wrapped.lines) |wl| try all_visual_lines.append(self.allocator, wl);
+            }
+        }
+
+        const line_count = all_visual_lines.items.len;
         const code_height = @as(f32, @floatFromInt(line_count)) * CODE_LINE_HEIGHT + pad * 2;
         try self.checkPageBreak(content, code_height + 6);
 
@@ -843,13 +860,10 @@ const Renderer = struct {
         const top_y = self.current_y + 2;
         const bottom_y = top_y - code_height;
 
-        // Background
         try content.drawRoundedRect(x, bottom_y, w, code_height, 4, CODE_BG);
 
-        // Draw code lines
         var text_y = top_y - pad - CODE_SIZE;
-        lines_iter = std.mem.splitScalar(u8, block.code, '\n');
-        while (lines_iter.next()) |line| {
+        for (all_visual_lines.items) |line| {
             try content.drawText(line, x + pad, text_y, self.font_code, CODE_SIZE, INK_BLACK);
             text_y -= CODE_LINE_HEIGHT;
         }
