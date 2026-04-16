@@ -988,10 +988,14 @@ const Renderer = struct {
         // Data rows — pre-measure each row's height so multi-line cells don't get
         // split across pages mid-cell (which previously left a huge blank gap
         // between the row's top half and its continuation on the next page).
+        // When a page break occurs mid-table the continuation row needs its
+        // own top border (the previous row's bottom border is on the prior page).
         for (tbl.rows) |row| {
             const row_h = try self.measureRowHeight(row, col_w, col_pad, above_text_pad, below_text_pad, table_line_h);
+            const y_before = self.current_y;
             try self.checkPageBreak(content, row_h);
-            try self.drawTableRowWithBorders(content, row, col_w, col_pad, above_text_pad, below_text_pad, table_line_h, false, cell_border, false);
+            const page_broke = self.current_y > y_before; // y jumps upward on break
+            try self.drawTableRowWithBorders(content, row, col_w, col_pad, above_text_pad, below_text_pad, table_line_h, false, cell_border, page_broke);
         }
 
         self.current_y -= PARAGRAPH_GAP;
