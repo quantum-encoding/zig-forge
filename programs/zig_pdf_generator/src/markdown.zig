@@ -752,17 +752,34 @@ const Renderer = struct {
         const gap_before = HEADING_GAPS_BEFORE[level - 1];
         const gap_after = HEADING_GAPS_AFTER[level - 1];
 
-        // Gap before
-        self.current_y -= gap_before - BLOCK_GAP; // BLOCK_GAP already applied outside
-        try self.checkPageBreak(content, size + gap_after + 10);
+        self.current_y -= gap_before - BLOCK_GAP;
 
-        // Render heading text in bold (inline spans get bold-italic etc.)
-        const saved_font_regular = self.font_regular;
-        defer self.font_regular = saved_font_regular;
-        self.font_regular = self.font_bold; // plain text parts of a heading render bold
+        // Reserve room for heading plus at least three body lines so a heading
+        // never appears as the last thing on a page (widow prevention).
+        try self.checkPageBreak(content, size + gap_after + LINE_HEIGHT * 3);
 
-        try self.drawSpans(content, block.spans, self.margin_left, self.usable_width, size, size * 1.25, INK_BLACK);
+        // Promote plain text spans to bold so measurement and drawing both use
+        // helvetica-bold glyph widths. Without this, "Activity log" measured
+        // with helvetica-regular widths but drawn bold overlaps — spaces vanish.
+        const promoted = try self.promoteTextToBold(block.spans);
+        defer self.allocator.free(promoted);
+
+        try self.drawSpans(content, promoted, self.margin_left, self.usable_width, size, size * 1.25, INK_BLACK);
         self.current_y -= gap_after;
+    }
+
+    /// Copy spans, flipping plain-text kind to bold. Used for headings so that
+    /// the bold rendering matches bold measurement.
+    fn promoteTextToBold(self: *Renderer, spans: []const Span) ![]Span {
+        const out = try self.allocator.alloc(Span, spans.len);
+        for (spans, 0..) |s, i| {
+            out[i] = .{
+                .kind = if (s.kind == .text) .bold else if (s.kind == .italic) .bold_italic else s.kind,
+                .text = s.text,
+                .url = s.url,
+            };
+        }
+        return out;
     }
 
     fn drawParagraph(self: *Renderer, content: *document.ContentStream, block: Block) !void {
@@ -898,15 +915,13 @@ const Renderer = struct {
             const col_x = self.margin_left + @as(f32, @floatFromInt(i)) * col_w + col_pad;
             const inner_w = col_w - col_pad * 2;
 
-            // Reset y for each cell so all cells share the same top line
             self.current_y = start_y;
 
-            // Header text: force-bold by swapping the regular font temporarily
-            const saved = self.font_regular;
-            if (is_header) self.font_regular = self.font_bold;
-            defer self.font_regular = saved;
+            // Header text: promote .text spans to .bold so measurement matches rendering.
+            const spans_to_draw = if (is_header) try self.promoteTextToBold(cell.spans) else cell.spans;
+            defer if (is_header) self.allocator.free(spans_to_draw);
 
-            try self.drawSpans(content, cell.spans, col_x, inner_w, BODY_SIZE, LINE_HEIGHT, INK_BLACK);
+            try self.drawSpans(content, spans_to_draw, col_x, inner_w, BODY_SIZE, LINE_HEIGHT, INK_BLACK);
 
             const consumed = start_y - self.current_y;
             if (consumed > max_consumed) max_consumed = consumed;
