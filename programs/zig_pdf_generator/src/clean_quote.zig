@@ -21,6 +21,7 @@
 const std = @import("std");
 const document = @import("document.zig");
 const proposal = @import("proposal.zig");
+const qrcode = @import("qrcode.zig");
 
 // Reuse types from proposal.zig — same JSON contract
 pub const MetricItem = proposal.MetricItem;
@@ -62,6 +63,17 @@ fn deriveDocTypeWord(reference: []const u8) []const u8 {
     return "QUOTE";
 }
 
+/// Default QR caption based on document type. Used when dashboard_text isn't set.
+fn deriveQrCaption(reference: []const u8) []const u8 {
+    if (reference.len >= 3) {
+        const p = reference[0..3];
+        if (std.ascii.eqlIgnoreCase(p, "INV")) return "Scan to pay";
+        if (std.ascii.eqlIgnoreCase(p, "HND")) return "Scan for details";
+        if (std.ascii.eqlIgnoreCase(p, "INS")) return "Scan for report";
+    }
+    return "Scan to view";
+}
+
 // =============================================================================
 // Clean Quote Renderer
 // =============================================================================
@@ -89,6 +101,11 @@ pub const CleanQuoteRenderer = struct {
 
     pages: std.ArrayListUnmanaged(document.ContentStream),
 
+    // QR code state — generated once if footer.dashboard_url is set
+    qr_pixels: ?[]u8 = null,
+    qr_size: u32 = 0,
+    qr_id: ?[]const u8 = null,
+
     pub fn init(allocator: std.mem.Allocator, data: ProposalData) CleanQuoteRenderer {
         var r = CleanQuoteRenderer{
             .allocator = allocator,
@@ -105,6 +122,7 @@ pub const CleanQuoteRenderer = struct {
     }
 
     pub fn deinit(self: *CleanQuoteRenderer) void {
+        if (self.qr_pixels) |px| self.allocator.free(px);
         for (self.pages.items) |*page| page.deinit();
         self.pages.deinit(self.allocator);
         self.doc.deinit();
@@ -232,6 +250,42 @@ pub const CleanQuoteRenderer = struct {
 
     fn drawUppercaseLabel(self: *CleanQuoteRenderer, content: *document.ContentStream, label: []const u8, x: f32, y: f32) !void {
         try self.drawTextConverted(content, label, x, y, self.font_bold, 8.5, SUBTLE_GREY);
+    }
+
+    // ─── QR block (subtle, last-page bottom-right) ──────────────
+
+    /// Draw a small black QR code with a tiny grey caption below it.
+    /// Placed bottom-right of the content area, above the footer line.
+    /// Called once on the final page after sections are rendered.
+    fn drawQrBlock(self: *CleanQuoteRenderer, content: *document.ContentStream) !void {
+        const qr_id = self.qr_id orelse return;
+
+        // QR size in points — keep it small and unobtrusive
+        const qr_size_pt: f32 = 68;
+        const caption_gap: f32 = 6;
+        const caption_h: f32 = 10;
+
+        // Caption text (from dashboard_text, else derive from doc type)
+        const caption_raw = if (self.data.footer.dashboard_text.len > 0)
+            self.data.footer.dashboard_text
+        else
+            deriveQrCaption(self.data.reference);
+
+        // Right-align QR to the content right margin
+        const qr_x = self.page_width - self.margin_right - qr_size_pt;
+        // Sit the QR just above the footer line (margin_bottom is the footer zone)
+        const qr_y = self.margin_bottom + 10;
+
+        try content.drawImage(qr_id, qr_x, qr_y, qr_size_pt, qr_size_pt);
+
+        // Caption centred under the QR, uppercase subtle grey
+        const upper_caption = try std.ascii.allocUpperString(self.allocator, caption_raw);
+        defer self.allocator.free(upper_caption);
+        const caption_font_size: f32 = 8;
+        const caption_width = document.Font.helvetica.measureText(upper_caption, caption_font_size);
+        const caption_x = qr_x + (qr_size_pt - caption_width) / 2;
+        const caption_y = qr_y - caption_gap - caption_h + 2;
+        try content.drawText(upper_caption, caption_x, caption_y, self.font_regular, caption_font_size, SUBTLE_GREY);
     }
 
     // ─── Footer (minimal, single grey line) ─────────────────────
@@ -539,11 +593,40 @@ pub const CleanQuoteRenderer = struct {
     // ─── Render entrypoint ──────────────────────────────────────
 
     pub fn render(self: *CleanQuoteRenderer) ![]const u8 {
+        // Generate QR code if dashboard URL is provided.
+        // Bump bottom margin so QR + caption sit above the footer line without overlap.
+        if (self.data.footer.dashboard_url.len > 0) {
+            var qr_img = qrcode.encodeAndRender(
+                self.allocator,
+                self.data.footer.dashboard_url,
+                4,
+                .{ .ec_level = .M, .quiet_zone = 2 },
+            ) catch null;
+            if (qr_img) |*qi| {
+                self.qr_pixels = qi.pixels;
+                self.qr_size = qi.width;
+                const qr_image = document.Image{
+                    .width = qi.width,
+                    .height = qi.height,
+                    .format = .raw_rgb,
+                    .data = qi.pixels,
+                };
+                self.qr_id = self.doc.addImage(qr_image) catch null;
+                // Reserve space for QR (68pt) + caption (10pt) + gap/footer (~25pt)
+                self.margin_bottom = 110;
+            }
+        }
+
         var content = document.ContentStream.init(self.allocator);
         errdefer content.deinit();
 
         try self.drawHeader(&content);
         try self.drawSections(&content);
+
+        // QR goes on the final page only, bottom-right above footer
+        if (self.qr_id != null) {
+            try self.drawQrBlock(&content);
+        }
 
         // Save final page
         try self.pages.append(self.allocator, content);
