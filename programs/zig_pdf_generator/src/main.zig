@@ -366,6 +366,16 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (std.mem.eql(u8, cmd, "--markdown") or std.mem.eql(u8, cmd, "--md")) {
+        if (args.len < 4) {
+            std.debug.print("Error: Missing input or output file path\n", .{});
+            std.debug.print("Usage: pdf-gen --markdown <input.md> <output.pdf>\n", .{});
+            return;
+        }
+        try generateMarkdownFromFile(allocator, args[2], args[3]);
+        return;
+    }
+
     if (std.mem.eql(u8, cmd, "--template-card")) {
         if (args.len < 4) {
             std.debug.print("Error: Missing input or output file path\n", .{});
@@ -439,6 +449,7 @@ fn printUsage() void {
         \\  pdf-gen --presentation <input.json> <out.pdf>  Generate presentation/canvas PDF
         \\  pdf-gen --proposal <input.json> <out.pdf>      Generate branded proposal PDF
         \\  pdf-gen --clean-quote <input.json> <out.pdf>   Generate minimalist QUOTE/INVOICE/HND/INS PDF
+        \\  pdf-gen --markdown <input.md> <out.pdf>         Render markdown to PDF
         \\  pdf-gen --demo-proposal <output.pdf>           Generate demo CRG solar proposal
         \\  pdf-gen --template-card <input.json> <out.pdf> Generate template card PDF
         \\  pdf-gen --demo-template-card <output.pdf>      Generate demo template card
@@ -1619,6 +1630,38 @@ fn generateProposalFromFile(allocator: std.mem.Allocator, json_path: []const u8,
     try writer.interface.flush();
 
     std.debug.print("Generated proposal: {s}\n", .{output_path});
+}
+
+fn generateMarkdownFromFile(allocator: std.mem.Allocator, md_path: []const u8, output_path: []const u8) !void {
+    const io = global_io;
+
+    const md_data = std.Io.Dir.cwd().readFileAlloc(io, md_path, allocator, .limited(10 * 1024 * 1024)) catch |err| {
+        std.debug.print("Error: Cannot read '{s}': {s}\n", .{ md_path, @errorName(err) });
+        return;
+    };
+    defer allocator.free(md_data);
+
+    const pdf_bytes = lib.generateFromMarkdown(allocator, md_data) catch |err| {
+        std.debug.print("Error: Markdown render failed: {s}\n", .{@errorName(err)});
+        return;
+    };
+    defer allocator.free(pdf_bytes);
+
+    const file = std.Io.Dir.cwd().createFile(io, output_path, .{}) catch |err| {
+        std.debug.print("Error: Cannot create '{s}': {s}\n", .{ output_path, @errorName(err) });
+        return;
+    };
+    defer file.close(io);
+
+    var write_buf: [8192]u8 = undefined;
+    var writer = file.writer(io, &write_buf);
+    writer.interface.writeAll(pdf_bytes) catch |err| {
+        std.debug.print("Error: Cannot write file: {s}\n", .{@errorName(err)});
+        return;
+    };
+    try writer.interface.flush();
+
+    std.debug.print("Generated: {s} ({d} bytes)\n", .{ output_path, pdf_bytes.len });
 }
 
 fn generateCleanQuoteFromFile(allocator: std.mem.Allocator, json_path: []const u8, output_path: []const u8) !void {
