@@ -54,6 +54,7 @@ pub const director_resignation = @import("director_resignation.zig");
 pub const written_resolution = @import("written_resolution.zig");
 pub const presentation = @import("presentation.zig");
 pub const proposal = @import("proposal.zig");
+pub const clean_quote = @import("clean_quote.zig");
 pub const template_card = @import("template_card.zig");
 
 // Re-export key types
@@ -208,6 +209,10 @@ pub const ProposalSection = proposal.ProposalSection;
 pub const generateProposalFromJson = proposal.generateProposalFromJson;
 pub const generateDemoProposal = proposal.generateDemoProposal;
 
+// Clean Quote (minimalist template sharing proposal's JSON schema)
+pub const CleanQuoteRenderer = clean_quote.CleanQuoteRenderer;
+pub const generateCleanQuoteFromJson = clean_quote.generateCleanQuoteFromJson;
+
 // Template Card types
 pub const TemplateCardData = template_card.TemplateCardData;
 pub const TemplateCardRenderer = template_card.TemplateCardRenderer;
@@ -244,6 +249,8 @@ pub const zigpdf_generate_written_resolution = ffi.zigpdf_generate_written_resol
 pub const zigpdf_generate_written_resolution_to_file = ffi.zigpdf_generate_written_resolution_to_file;
 pub const zigpdf_generate_proposal = ffi.zigpdf_generate_proposal;
 pub const zigpdf_generate_proposal_to_file = ffi.zigpdf_generate_proposal_to_file;
+pub const zigpdf_generate_clean_quote = ffi.zigpdf_generate_clean_quote;
+pub const zigpdf_generate_clean_quote_to_file = ffi.zigpdf_generate_clean_quote_to_file;
 pub const zigpdf_generate_template_card = ffi.zigpdf_generate_template_card;
 pub const zigpdf_generate_template_card_to_file = ffi.zigpdf_generate_template_card_to_file;
 pub const zigpdf_free = ffi.zigpdf_free;
@@ -275,6 +282,7 @@ test {
     _ = written_resolution;
     _ = presentation;
     _ = proposal;
+    _ = clean_quote;
     _ = template_card;
 }
 

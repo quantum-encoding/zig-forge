@@ -356,6 +356,16 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (std.mem.eql(u8, cmd, "--clean-quote")) {
+        if (args.len < 4) {
+            std.debug.print("Error: Missing input or output file path\n", .{});
+            std.debug.print("Usage: pdf-gen --clean-quote <input.json> <output.pdf>\n", .{});
+            return;
+        }
+        try generateCleanQuoteFromFile(allocator, args[2], args[3]);
+        return;
+    }
+
     if (std.mem.eql(u8, cmd, "--template-card")) {
         if (args.len < 4) {
             std.debug.print("Error: Missing input or output file path\n", .{});
@@ -428,6 +438,7 @@ fn printUsage() void {
         \\  pdf-gen --demo-special <output.pdf>            Generate demo special resolution
         \\  pdf-gen --presentation <input.json> <out.pdf>  Generate presentation/canvas PDF
         \\  pdf-gen --proposal <input.json> <out.pdf>      Generate branded proposal PDF
+        \\  pdf-gen --clean-quote <input.json> <out.pdf>   Generate minimalist QUOTE/INVOICE/HND/INS PDF
         \\  pdf-gen --demo-proposal <output.pdf>           Generate demo CRG solar proposal
         \\  pdf-gen --template-card <input.json> <out.pdf> Generate template card PDF
         \\  pdf-gen --demo-template-card <output.pdf>      Generate demo template card
@@ -695,12 +706,18 @@ fn packBatch(allocator: std.mem.Allocator, dir_path: []const u8, filenames: []co
     var doc = lib.PdfDocument.init(allocator);
     defer doc.deinit();
 
+    // Track all pixel/image data that must stay alive until build()
+    var owned_data: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer {
+        for (owned_data.items) |d| allocator.free(d);
+        owned_data.deinit(allocator);
+    }
+
     for (filenames) |filename| {
         const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, filename });
         defer allocator.free(full_path);
 
         const img_data = std.Io.Dir.cwd().readFileAlloc(io, full_path, allocator, .limited(50 * 1024 * 1024)) catch continue;
-        defer allocator.free(img_data);
 
         const is_jpeg = std.mem.endsWith(u8, filename, ".jpg") or
             std.mem.endsWith(u8, filename, ".JPG") or
@@ -708,6 +725,9 @@ fn packBatch(allocator: std.mem.Allocator, dir_path: []const u8, filenames: []co
             std.mem.endsWith(u8, filename, ".JPEG");
 
         if (is_jpeg) {
+            // JPEG data stays alive — addImage stores a slice reference
+            try owned_data.append(allocator, img_data);
+
             const dims = detectJpegDimensions(img_data);
             const img_w = if (dims.width > 0) dims.width else 2481;
             const img_h = if (dims.height > 0) dims.height else 1653;
@@ -720,8 +740,12 @@ fn packBatch(allocator: std.mem.Allocator, dir_path: []const u8, filenames: []co
             try content.drawImage(img_id, 0, 0, page_w, page_h);
             try doc.addPageWithSize(&content, page_w, page_h);
         } else {
+            // Done with compressed PNG data
+            defer allocator.free(img_data);
+
             const decoded = lib.image.decodePng(allocator, img_data) catch continue;
-            defer allocator.free(decoded.pixels);
+            // Pixel data must stay alive until build()
+            try owned_data.append(allocator, decoded.pixels);
 
             const page_w: f32 = @as(f32, @floatFromInt(decoded.info.width)) * 72.0 / 300.0;
             const page_h: f32 = @as(f32, @floatFromInt(decoded.info.height)) * 72.0 / 300.0;
@@ -1595,6 +1619,38 @@ fn generateProposalFromFile(allocator: std.mem.Allocator, json_path: []const u8,
     try writer.interface.flush();
 
     std.debug.print("Generated proposal: {s}\n", .{output_path});
+}
+
+fn generateCleanQuoteFromFile(allocator: std.mem.Allocator, json_path: []const u8, output_path: []const u8) !void {
+    const io = global_io;
+
+    const json_data = std.Io.Dir.cwd().readFileAlloc(io, json_path, allocator, .limited(10 * 1024 * 1024)) catch |err| {
+        std.debug.print("Error: Cannot read '{s}': {s}\n", .{ json_path, @errorName(err) });
+        return;
+    };
+    defer allocator.free(json_data);
+
+    const pdf_bytes = lib.generateCleanQuoteFromJson(allocator, json_data) catch |err| {
+        std.debug.print("Error: Clean quote generation failed: {s}\n", .{@errorName(err)});
+        return;
+    };
+    defer allocator.free(pdf_bytes);
+
+    const file = std.Io.Dir.cwd().createFile(io, output_path, .{}) catch |err| {
+        std.debug.print("Error: Cannot create '{s}': {s}\n", .{ output_path, @errorName(err) });
+        return;
+    };
+    defer file.close(io);
+
+    var write_buf: [8192]u8 = undefined;
+    var writer = file.writer(io, &write_buf);
+    writer.interface.writeAll(pdf_bytes) catch |err| {
+        std.debug.print("Error: Cannot write file: {s}\n", .{@errorName(err)});
+        return;
+    };
+    try writer.interface.flush();
+
+    std.debug.print("Generated clean quote: {s} ({d} bytes)\n", .{ output_path, pdf_bytes.len });
 }
 
 fn generateDemoProposal(allocator: std.mem.Allocator, output_path: []const u8) !void {
