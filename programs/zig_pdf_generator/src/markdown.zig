@@ -877,40 +877,57 @@ const Renderer = struct {
         if (ncols == 0) return;
 
         const col_pad: f32 = 8;
+        const cell_pad_v: f32 = 6;
         const col_w = self.usable_width / @as(f32, @floatFromInt(ncols));
-        const row_height_min: f32 = LINE_HEIGHT + 6;
+        const row_height_min: f32 = LINE_HEIGHT + cell_pad_v * 2;
+        const table_left = self.margin_left;
+        const table_right = self.page_width - self.margin_right;
 
-        // Header row
-        try self.checkPageBreak(content, row_height_min * 2);
-        const header_top_y = self.current_y;
+        // Column border color — darker than the hairlines-between-rows grey
+        // so tables read as structured data, not just indented text.
+        const cell_border = document.Color{ .r = 0.804, .g = 0.804, .b = 0.824 }; // #cdcdd2
+
+        // Ensure at least header + one row fits before committing to the table.
+        try self.checkPageBreak(content, row_height_min * 2 + 8);
+
+        const table_top = self.current_y + 2;
+
+        // Top border
+        try content.drawLine(table_left, table_top, table_right, table_top, cell_border, 0.6);
+
+        // Header row with a little top padding
+        self.current_y -= cell_pad_v;
         try self.drawTableRow(content, tbl.header, col_w, col_pad, true);
+        self.current_y -= cell_pad_v;
 
-        // Header underline
-        try content.drawLine(
-            self.margin_left,
-            self.current_y + 4,
-            self.page_width - self.margin_right,
-            self.current_y + 4,
-            BORDER_GREY,
-            0.6,
-        );
-        self.current_y -= 4;
-        _ = header_top_y;
+        // Stronger underline beneath header
+        const header_rule_y = self.current_y;
+        try content.drawLine(table_left, header_rule_y, table_right, header_rule_y, cell_border, 0.9);
 
-        // Data rows
+        // Data rows with per-row hairline separator and vertical column dividers
+        // that span from the top border down to the current y.
+        var row_top_y = header_rule_y;
         for (tbl.rows) |row| {
             try self.checkPageBreak(content, row_height_min);
+            self.current_y -= cell_pad_v;
             try self.drawTableRow(content, row, col_w, col_pad, false);
-            try content.drawLine(
-                self.margin_left,
-                self.current_y + 4,
-                self.page_width - self.margin_right,
-                self.current_y + 4,
-                BORDER_GREY,
-                0.4,
-            );
-            self.current_y -= 4;
+            self.current_y -= cell_pad_v;
+            const rule_y = self.current_y;
+            try content.drawLine(table_left, rule_y, table_right, rule_y, BORDER_GREY, 0.5);
+            row_top_y = rule_y;
         }
+
+        // Vertical column separators span the full table height.
+        const table_bottom = self.current_y;
+        var ci: usize = 1;
+        while (ci < ncols) : (ci += 1) {
+            const vx = table_left + @as(f32, @floatFromInt(ci)) * col_w;
+            try content.drawLine(vx, table_top, vx, table_bottom, cell_border, 0.4);
+        }
+        // Outer vertical borders so columns meet the edge cleanly
+        try content.drawLine(table_left, table_top, table_left, table_bottom, cell_border, 0.6);
+        try content.drawLine(table_right, table_top, table_right, table_bottom, cell_border, 0.6);
+
         self.current_y -= PARAGRAPH_GAP;
     }
 
