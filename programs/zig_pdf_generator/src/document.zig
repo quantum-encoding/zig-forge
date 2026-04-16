@@ -1292,12 +1292,24 @@ pub const PdfDocument = struct {
         const header = std.fmt.bufPrint(&header_buf, "{d} 0 obj\n", .{obj_id}) catch return error.BufferTooSmall;
         try self.output.appendSlice(self.allocator, header);
 
-        var len_buf: [64]u8 = undefined;
-        const len_str = std.fmt.bufPrint(&len_buf, "<< /Length {d} >>\n", .{content.len}) catch return error.BufferTooSmall;
-        try self.output.appendSlice(self.allocator, len_str);
+        // Compress content stream with FlateDecode (zlib)
+        const compressed = deflateCompress(self.allocator, content) catch null;
+        const stream_data = if (compressed) |c| c else content;
+        const is_compressed = compressed != null;
+        defer if (compressed) |c| self.allocator.free(c);
+
+        if (is_compressed) {
+            const dict = std.fmt.allocPrint(self.allocator, "<< /Length {d} /Filter /FlateDecode >>\n", .{stream_data.len}) catch return error.BufferTooSmall;
+            defer self.allocator.free(dict);
+            try self.output.appendSlice(self.allocator, dict);
+        } else {
+            const dict = std.fmt.allocPrint(self.allocator, "<< /Length {d} >>\n", .{stream_data.len}) catch return error.BufferTooSmall;
+            defer self.allocator.free(dict);
+            try self.output.appendSlice(self.allocator, dict);
+        }
 
         try self.output.appendSlice(self.allocator, "stream\n");
-        try self.output.appendSlice(self.allocator, content);
+        try self.output.appendSlice(self.allocator, stream_data);
         try self.output.appendSlice(self.allocator, "\nendstream\nendobj\n");
     }
 
@@ -1319,28 +1331,35 @@ pub const PdfDocument = struct {
             else => "", // Raw data, no filter
         };
 
-        var dict_buf: [256]u8 = undefined;
-        if (filter.len > 0) {
-            const dict = std.fmt.bufPrint(&dict_buf, "<< /Type /XObject /Subtype /Image /Width {d} /Height {d} /ColorSpace {s} /BitsPerComponent 8 /Filter {s} /Length {d} >>", .{
-                image.width,
-                image.height,
-                color_space,
-                filter,
-                image.data.len,
-            }) catch return error.BufferTooSmall;
+        // For non-JPEG images, compress raw pixel data with FlateDecode.
+        // JPEG data is already compressed (DCTDecode) — write as-is.
+        const compressed_img = if (filter.len == 0)
+            deflateCompress(self.allocator, image.data) catch null
+        else
+            null;
+        const stream_data = if (compressed_img) |c| c else image.data;
+        defer if (compressed_img) |c| self.allocator.free(c);
+
+        const actual_filter: []const u8 = if (filter.len > 0) filter else if (compressed_img != null) "/FlateDecode" else "";
+
+        if (actual_filter.len > 0) {
+            const dict = try std.fmt.allocPrint(self.allocator,
+                "<< /Type /XObject /Subtype /Image /Width {d} /Height {d} /ColorSpace {s} /BitsPerComponent 8 /Filter {s} /Length {d} >>",
+                .{ image.width, image.height, color_space, actual_filter, stream_data.len },
+            );
+            defer self.allocator.free(dict);
             try self.output.appendSlice(self.allocator, dict);
         } else {
-            const dict = std.fmt.bufPrint(&dict_buf, "<< /Type /XObject /Subtype /Image /Width {d} /Height {d} /ColorSpace {s} /BitsPerComponent 8 /Length {d} >>", .{
-                image.width,
-                image.height,
-                color_space,
-                image.data.len,
-            }) catch return error.BufferTooSmall;
+            const dict = try std.fmt.allocPrint(self.allocator,
+                "<< /Type /XObject /Subtype /Image /Width {d} /Height {d} /ColorSpace {s} /BitsPerComponent 8 /Length {d} >>",
+                .{ image.width, image.height, color_space, stream_data.len },
+            );
+            defer self.allocator.free(dict);
             try self.output.appendSlice(self.allocator, dict);
         }
 
         try self.output.appendSlice(self.allocator, "\nstream\n");
-        try self.output.appendSlice(self.allocator, image.data);
+        try self.output.appendSlice(self.allocator, stream_data);
         try self.output.appendSlice(self.allocator, "\nendstream\nendobj\n");
     }
 
@@ -1389,6 +1408,56 @@ fn appendPdfString(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocato
 // =============================================================================
 // Tests
 // =============================================================================
+
+// =============================================================================
+// FlateDecode (zlib) Compression
+// =============================================================================
+
+/// Compress data using deflate with a zlib wrapper. PDF's /FlateDecode filter
+/// expects zlib-format data (2-byte header + deflate + adler32 checksum).
+/// Returns owned compressed bytes, or error if compression fails.
+fn deflateCompress(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
+    if (data.len == 0) return error.EmptyInput;
+
+    // Allocate output buffer — compressed size can't exceed input + zlib overhead
+    const max_out = data.len + 256;
+    var out_slice = try allocator.alloc(u8, max_out);
+    errdefer allocator.free(out_slice);
+
+    var fixed_writer: std.Io.Writer = .fixed(out_slice);
+
+    var window_buf: [std.compress.flate.max_window_len]u8 = undefined;
+
+    var compressor = std.compress.flate.Compress.init(
+        &fixed_writer,
+        &window_buf,
+        .zlib,
+        .level_6,
+    ) catch {
+        allocator.free(out_slice);
+        return error.CompressFailed;
+    };
+
+    compressor.writer.writeAll(data) catch {
+        allocator.free(out_slice);
+        return error.CompressFailed;
+    };
+    compressor.finish() catch {
+        allocator.free(out_slice);
+        return error.CompressFailed;
+    };
+
+    const written_len = fixed_writer.end;
+    if (written_len == 0 or written_len >= data.len) {
+        allocator.free(out_slice);
+        return error.NoSizeReduction;
+    }
+
+    // Shrink to actual compressed size
+    const result = try allocator.dupe(u8, out_slice[0..written_len]);
+    allocator.free(out_slice);
+    return result;
+}
 
 test "create simple PDF" {
     const allocator = std.testing.allocator;
