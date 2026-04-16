@@ -871,6 +871,90 @@ const Renderer = struct {
         self.current_y = bottom_y - PARAGRAPH_GAP;
     }
 
+    /// Measure the height a table row will consume once all its cells are
+    /// wrapped to column width. Used to ensure page breaks happen BETWEEN rows
+    /// rather than mid-cell (which produced huge blank gaps).
+    fn measureRowHeight(
+        self: *Renderer,
+        row: TableRow,
+        col_w: f32,
+        col_pad: f32,
+        above_pad: f32,
+        below_pad: f32,
+        line_h: f32,
+    ) !f32 {
+        var max_lines: usize = 1;
+        const inner_w = col_w - col_pad * 2;
+        for (row.cells) |cell| {
+            const lines = try self.countWrappedLines(cell.spans, inner_w, BODY_SIZE);
+            if (lines > max_lines) max_lines = lines;
+        }
+        const text_height = @as(f32, @floatFromInt(max_lines)) * line_h;
+        return above_pad + text_height + below_pad;
+    }
+
+    /// Count the number of visual lines a set of spans will produce when
+    /// wrapped to max_width at the given size. Mirrors the greedy word-packing
+    /// logic in drawSpans so the measurement stays in sync with rendering.
+    fn countWrappedLines(
+        self: *Renderer,
+        spans: []const Span,
+        max_width: f32,
+        size: f32,
+    ) !usize {
+        // Flatten spans into words (same shape drawSpans builds internally)
+        var words: std.ArrayListUnmanaged(struct {
+            text: []const u8,
+            width: f32,
+            is_space: bool,
+        }) = .empty;
+        defer words.deinit(self.allocator);
+
+        for (spans) |span| {
+            const font_enum = fontEnumForSpan(span.kind);
+            const eff_size = if (span.kind == .code) size - 1 else size;
+            var i: usize = 0;
+            while (i < span.text.len) {
+                if (span.text[i] == ' ') {
+                    try words.append(self.allocator, .{
+                        .text = " ",
+                        .width = font_enum.measureText(" ", eff_size),
+                        .is_space = true,
+                    });
+                    i += 1;
+                    continue;
+                }
+                const start = i;
+                while (i < span.text.len and span.text[i] != ' ') i += 1;
+                const word = span.text[start..i];
+                try words.append(self.allocator, .{
+                    .text = word,
+                    .width = font_enum.measureText(word, eff_size),
+                    .is_space = false,
+                });
+            }
+        }
+
+        // Greedy line fill — count line emissions
+        var line_count: usize = 0;
+        var line_width: f32 = 0;
+        var has_words_on_line: bool = false;
+
+        for (words.items) |w| {
+            if (!has_words_on_line and w.is_space) continue;
+            if (line_width + w.width > max_width and has_words_on_line) {
+                line_count += 1;
+                line_width = if (w.is_space) 0 else w.width;
+                has_words_on_line = !w.is_space;
+                continue;
+            }
+            line_width += w.width;
+            if (!w.is_space) has_words_on_line = true;
+        }
+        if (has_words_on_line) line_count += 1;
+        return @max(1, line_count);
+    }
+
     fn drawTable(self: *Renderer, content: *document.ContentStream, block: Block) !void {
         const tbl = block.table orelse return;
         const ncols = tbl.header.cells.len;
@@ -888,16 +972,25 @@ const Renderer = struct {
 
         const cell_border = document.Color{ .r = 0.70, .g = 0.70, .b = 0.72 }; // slightly stronger so cells read clearly
 
-        // Ensure at least header + one row fits before committing to the table.
-        try self.checkPageBreak(content, row_height_min * 2 + 8);
+        // Measure the header row's actual height (it may wrap across multiple lines)
+        const header_h = try self.measureRowHeight(tbl.header, col_w, col_pad, above_text_pad, below_text_pad, table_line_h);
 
-        // Draw the header row (borders + text). Border drawing happens per-row so
-        // a page break mid-table keeps each row's borders on the correct page.
+        // Reserve room for the header + at least one data row (or measured first row)
+        const first_row_h = if (tbl.rows.len > 0)
+            try self.measureRowHeight(tbl.rows[0], col_w, col_pad, above_text_pad, below_text_pad, table_line_h)
+        else
+            row_height_min;
+        try self.checkPageBreak(content, header_h + first_row_h + 8);
+
+        // Draw the header row (borders + text)
         try self.drawTableRowWithBorders(content, tbl.header, col_w, col_pad, above_text_pad, below_text_pad, table_line_h, true, cell_border, true);
 
-        // Data rows
+        // Data rows — pre-measure each row's height so multi-line cells don't get
+        // split across pages mid-cell (which previously left a huge blank gap
+        // between the row's top half and its continuation on the next page).
         for (tbl.rows) |row| {
-            try self.checkPageBreak(content, row_height_min);
+            const row_h = try self.measureRowHeight(row, col_w, col_pad, above_text_pad, below_text_pad, table_line_h);
+            try self.checkPageBreak(content, row_h);
             try self.drawTableRowWithBorders(content, row, col_w, col_pad, above_text_pad, below_text_pad, table_line_h, false, cell_border, false);
         }
 
