@@ -876,59 +876,87 @@ const Renderer = struct {
         const ncols = tbl.header.cells.len;
         if (ncols == 0) return;
 
+        // Tight table layout: top/bottom padding sized to ascender/descender
+        // extents so borders sit cleanly above and below the text without
+        // cutting through glyphs.
         const col_pad: f32 = 8;
-        const cell_pad_v: f32 = 6;
+        const above_text_pad: f32 = 10; // clearance above ascender for top border
+        const below_text_pad: f32 = 2; // clearance below descender for bottom border
+        const table_line_h: f32 = 13;
         const col_w = self.usable_width / @as(f32, @floatFromInt(ncols));
-        const row_height_min: f32 = LINE_HEIGHT + cell_pad_v * 2;
-        const table_left = self.margin_left;
-        const table_right = self.page_width - self.margin_right;
+        const row_height_min: f32 = above_text_pad + table_line_h + below_text_pad;
 
-        // Column border color — darker than the hairlines-between-rows grey
-        // so tables read as structured data, not just indented text.
-        const cell_border = document.Color{ .r = 0.804, .g = 0.804, .b = 0.824 }; // #cdcdd2
+        const cell_border = document.Color{ .r = 0.70, .g = 0.70, .b = 0.72 }; // slightly stronger so cells read clearly
 
         // Ensure at least header + one row fits before committing to the table.
         try self.checkPageBreak(content, row_height_min * 2 + 8);
 
-        const table_top = self.current_y + 2;
+        // Draw the header row (borders + text). Border drawing happens per-row so
+        // a page break mid-table keeps each row's borders on the correct page.
+        try self.drawTableRowWithBorders(content, tbl.header, col_w, col_pad, above_text_pad, below_text_pad, table_line_h, true, cell_border, true);
 
-        // Top border
-        try content.drawLine(table_left, table_top, table_right, table_top, cell_border, 0.6);
-
-        // Header row with a little top padding
-        self.current_y -= cell_pad_v;
-        try self.drawTableRow(content, tbl.header, col_w, col_pad, true);
-        self.current_y -= cell_pad_v;
-
-        // Stronger underline beneath header
-        const header_rule_y = self.current_y;
-        try content.drawLine(table_left, header_rule_y, table_right, header_rule_y, cell_border, 0.9);
-
-        // Data rows with per-row hairline separator and vertical column dividers
-        // that span from the top border down to the current y.
-        var row_top_y = header_rule_y;
+        // Data rows
         for (tbl.rows) |row| {
             try self.checkPageBreak(content, row_height_min);
-            self.current_y -= cell_pad_v;
-            try self.drawTableRow(content, row, col_w, col_pad, false);
-            self.current_y -= cell_pad_v;
-            const rule_y = self.current_y;
-            try content.drawLine(table_left, rule_y, table_right, rule_y, BORDER_GREY, 0.5);
-            row_top_y = rule_y;
+            try self.drawTableRowWithBorders(content, row, col_w, col_pad, above_text_pad, below_text_pad, table_line_h, false, cell_border, false);
         }
 
-        // Vertical column separators span the full table height.
-        const table_bottom = self.current_y;
+        self.current_y -= PARAGRAPH_GAP;
+    }
+
+    /// Draw a table row with full cell borders (top edge, bottom edge, left,
+    /// right, and internal column separators). Call with is_first_row=true for
+    /// the very first row (header) to also draw the top border of the table.
+    fn drawTableRowWithBorders(
+        self: *Renderer,
+        content: *document.ContentStream,
+        row: TableRow,
+        col_w: f32,
+        col_pad: f32,
+        above_pad: f32,
+        below_pad: f32,
+        line_h: f32,
+        is_header: bool,
+        cell_border: document.Color,
+        is_first_row: bool,
+    ) !void {
+        const ncols = row.cells.len;
+        const table_left = self.margin_left;
+        const table_right = self.page_width - self.margin_right;
+
+        // Row top is the current y position. Text baseline will be pushed
+        // `above_pad` points below this — `above_pad` must exceed the font's
+        // ascender height so the top border clears the glyph caps.
+        const row_top = self.current_y;
+
+        if (is_first_row) {
+            try content.drawLine(table_left, row_top, table_right, row_top, cell_border, 0.6);
+        }
+
+        self.current_y -= above_pad;
+        try self.drawTableRow(content, row, col_w, col_pad, line_h, is_header);
+
+        // After drawTableRow, current_y = first_baseline - N*line_h.
+        // The descender of the LAST line sits at current_y + line_h - 2
+        // (where 2pt ≈ helvetica descender depth). Place the bottom border
+        // `below_pad` points beneath that so it doesn't touch the descender.
+        const descender_adj: f32 = 2;
+        self.current_y = self.current_y + line_h - descender_adj - below_pad;
+
+        const row_bottom = self.current_y;
+
+        const bottom_weight: f32 = if (is_header) 0.9 else 0.5;
+        try content.drawLine(table_left, row_bottom, table_right, row_bottom, cell_border, bottom_weight);
+
+        // Vertical borders scoped to this row only (so a page-spanning table
+        // doesn't draw phantom verticals across empty regions).
+        try content.drawLine(table_left, row_top, table_left, row_bottom, cell_border, 0.6);
+        try content.drawLine(table_right, row_top, table_right, row_bottom, cell_border, 0.6);
         var ci: usize = 1;
         while (ci < ncols) : (ci += 1) {
             const vx = table_left + @as(f32, @floatFromInt(ci)) * col_w;
-            try content.drawLine(vx, table_top, vx, table_bottom, cell_border, 0.4);
+            try content.drawLine(vx, row_top, vx, row_bottom, cell_border, 0.4);
         }
-        // Outer vertical borders so columns meet the edge cleanly
-        try content.drawLine(table_left, table_top, table_left, table_bottom, cell_border, 0.6);
-        try content.drawLine(table_right, table_top, table_right, table_bottom, cell_border, 0.6);
-
-        self.current_y -= PARAGRAPH_GAP;
     }
 
     fn drawTableRow(
@@ -937,6 +965,7 @@ const Renderer = struct {
         row: TableRow,
         col_w: f32,
         col_pad: f32,
+        line_h: f32,
         is_header: bool,
     ) !void {
         const start_y = self.current_y;
@@ -948,11 +977,10 @@ const Renderer = struct {
 
             self.current_y = start_y;
 
-            // Header text: promote .text spans to .bold so measurement matches rendering.
             const spans_to_draw = if (is_header) try self.promoteTextToBold(cell.spans) else cell.spans;
             defer if (is_header) self.allocator.free(spans_to_draw);
 
-            try self.drawSpans(content, spans_to_draw, col_x, inner_w, BODY_SIZE, LINE_HEIGHT, INK_BLACK);
+            try self.drawSpans(content, spans_to_draw, col_x, inner_w, BODY_SIZE, line_h, INK_BLACK);
 
             const consumed = start_y - self.current_y;
             if (consumed > max_consumed) max_consumed = consumed;
