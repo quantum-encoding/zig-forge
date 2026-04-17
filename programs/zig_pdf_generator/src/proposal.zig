@@ -163,6 +163,7 @@ pub const ProposalData = struct {
     valid_until: []const u8 = "",
     primary_color: []const u8 = "#16a34a",
     secondary_color: []const u8 = "#1e3a2f",
+    title_color: []const u8 = "",
     sections: []const ProposalSection = &[_]ProposalSection{},
     footer: FooterInfo = .{},
     /// Base64-encoded property image (e.g. from solar API satellite view)

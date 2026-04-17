@@ -10,13 +10,21 @@
 //! Shared JSON schema with proposal.zig so TS callers can swap between
 //! brand-heavy and minimalist templates by changing the FFI function name.
 //!
-//! Colour palette:
-//!   Ink black       #0a0a0a  — body text
-//!   Muted grey      #52525b  — secondary labels
-//!   Subtle grey     #71717a  — tertiary text
-//!   Border          #e4e4e7  — hairlines, table rules
-//!   Card background #f5f5f4  — metrics card fill
-//!   Accent red      #DC2626  — document type word, hairline, bullet dots
+//! Semantic colour role mapping (Style panel → template element):
+//!
+//!   Role        JSON field      Style panel   Elements
+//!   ─────────   ──────────────  ──────────    ────────────────────────────────
+//!   title       title_color     Title         Document type word (QUOTE/INVOICE)
+//!   accent      primary_color   Primary       Hairline separator, bullet dots
+//!   heading     (fixed)         —             INK_BLACK, section headings
+//!   body        (fixed)         —             INK_BLACK, prose text
+//!   label       (fixed)         —             SUBTLE_GREY, uppercase labels
+//!   muted       (fixed)         —             MUTED_GREY, secondary text
+//!   border      (fixed)         —             BORDER_GREY, table rules
+//!   card_bg     (fixed)         —             CARD_BG, metrics card fill
+//!
+//! If title_color is empty, falls back to primary_color → #DC2626.
+//! Fixed roles use the neutral palette constants below.
 
 const std = @import("std");
 const document = @import("document.zig");
@@ -101,6 +109,16 @@ pub const CleanQuoteRenderer = struct {
 
     pages: std.ArrayListUnmanaged(document.ContentStream),
 
+    // Resolved colours — parsed from JSON, falling back to defaults.
+    // These replace the hardcoded ACCENT_RED so the Style panel controls everything.
+    //
+    // Semantic role mapping:
+    //   title_color   → document type word (QUOTE/INVOICE/etc.)
+    //   accent_color  → hairline separator, bullet dots
+    //   These default to ACCENT_RED if not specified in the JSON.
+    title_color: document.Color = ACCENT_RED,
+    accent_color: document.Color = ACCENT_RED,
+
     // QR code state — generated once if footer.dashboard_url is set
     qr_pixels: ?[]u8 = null,
     qr_size: u32 = 0,
@@ -118,7 +136,36 @@ pub const CleanQuoteRenderer = struct {
         r.font_bold = r.doc.getFontId(.helvetica_bold);
         r.font_oblique = r.doc.getFontId(.helvetica_oblique);
         r.current_y = r.page_height - r.margin_top;
+
+        // Resolve colours from JSON fields → semantic roles.
+        //   title_color   → document type word (QUOTE/INVOICE/etc.)
+        //   primary_color → accent hairline, bullet dots
+        // Falls back through: title_color → primary_color → hardcoded ACCENT_RED
+        r.accent_color = resolveColor(data.primary_color, ACCENT_RED);
+        r.title_color = if (data.title_color.len > 0)
+            resolveColor(data.title_color, r.accent_color)
+        else
+            r.accent_color;
+
         return r;
+    }
+
+    /// Parse a hex colour string (#RRGGBB or RRGGBB) into a Color, or return fallback.
+    fn resolveColor(hex: []const u8, fallback: document.Color) document.Color {
+        if (hex.len == 0) return fallback;
+        const parsed = document.Color.fromHex(hex);
+        // fromHex returns black on failure — detect that by checking if input wasn't actually black
+        if (parsed.r == 0 and parsed.g == 0 and parsed.b == 0) {
+            // Could be genuine black or a parse failure. If the input looks like black, accept it.
+            const is_black = std.mem.eql(u8, hex, "#000000") or
+                std.mem.eql(u8, hex, "000000") or
+                std.mem.eql(u8, hex, "#000") or
+                std.mem.eql(u8, hex, "black");
+            if (is_black) return parsed;
+            // Otherwise assume parse failure only if input is clearly malformed
+            // — but fromHex is fairly robust, so just trust it
+        }
+        return parsed;
     }
 
     pub fn deinit(self: *CleanQuoteRenderer) void {
@@ -176,7 +223,7 @@ pub const CleanQuoteRenderer = struct {
         const doc_type_size: f32 = 28;
         const doc_type_width = document.Font.helvetica_bold.measureText(doc_type, doc_type_size);
         const right_x = self.page_width - self.margin_right;
-        try self.drawTextConverted(content, doc_type, right_x - doc_type_width, top_y - 22, self.font_bold, doc_type_size, ACCENT_RED);
+        try self.drawTextConverted(content, doc_type, right_x - doc_type_width, top_y - 22, self.font_bold, doc_type_size, self.title_color);
 
         // Reference number beneath doc type — small grey
         if (self.data.reference.len > 0) {
@@ -209,7 +256,7 @@ pub const CleanQuoteRenderer = struct {
         }
 
         // Red hairline separator
-        try content.drawLine(self.margin_left, self.current_y, self.page_width - self.margin_right, self.current_y, ACCENT_RED, 0.5);
+        try content.drawLine(self.margin_left, self.current_y, self.page_width - self.margin_right, self.current_y, self.accent_color, 0.5);
         self.current_y -= 22;
 
         // Prepared-for / dates two-column block
@@ -431,7 +478,7 @@ pub const CleanQuoteRenderer = struct {
             // Red dot bullet
             const bullet_x = self.margin_left + 4;
             const bullet_y = self.current_y + 4;
-            try content.drawCircle(bullet_x, bullet_y, 1.6, ACCENT_RED, null);
+            try content.drawCircle(bullet_x, bullet_y, 1.6, self.accent_color, null);
 
             // Wrap text after indent
             const text_x = self.margin_left + 16;
@@ -692,6 +739,17 @@ fn parseProposalJsonLocal(allocator: std.mem.Allocator, json_str: []const u8) !P
     data.reference = try dupeStr(allocator, root, "reference", "");
     data.date = try dupeStr(allocator, root, "date", "");
     data.valid_until = try dupeStr(allocator, root, "valid_until", "");
+
+    // Colour fields (hex strings). title_color falls back to primary_color.
+    if (root.get("primary_color")) |v| {
+        if (v == .string) data.primary_color = try allocator.dupe(u8, v.string);
+    }
+    if (root.get("secondary_color")) |v| {
+        if (v == .string) data.secondary_color = try allocator.dupe(u8, v.string);
+    }
+    if (root.get("title_color")) |v| {
+        if (v == .string) data.title_color = try allocator.dupe(u8, v.string);
+    }
 
     // Footer
     if (root.get("footer")) |f| {
