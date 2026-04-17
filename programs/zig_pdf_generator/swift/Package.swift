@@ -5,7 +5,7 @@ let package = Package(
     name: "ZigPdf",
     platforms: [.macOS(.v13), .iOS(.v16)],
     products: [
-        .library(name: "ZigPdf", targets: ["ZigPdf"]),
+        .library(name: "ZigPdf", type: .static, targets: ["ZigPdf"]),
     ],
     targets: [
         .systemLibrary(

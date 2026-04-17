@@ -5,7 +5,7 @@ let package = Package(
     name: "ZigDocx",
     platforms: [.macOS(.v13), .iOS(.v16)],
     products: [
-        .library(name: "ZigDocx", targets: ["ZigDocx"]),
+        .library(name: "ZigDocx", type: .static, targets: ["ZigDocx"]),
     ],
     targets: [
         // C module wrapping the header — allows `import CZigDocx`

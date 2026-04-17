@@ -1,0 +1,37 @@
+diff --git a/src/link/MachO/relocatable.zig b/src/link/MachO/relocatable.zig
+index 954cdfd5..26c01c51 100644
+--- a/src/link/MachO/relocatable.zig
++++ b/src/link/MachO/relocatable.zig
+@@ -180,7 +180,11 @@ pub fn flushStaticLib(macho_file: *MachO, comp: *Compilation, module_obj_path: ?
+             switch (file) {
+                 .zig_object => |zo| {
+                     const state = &zo.output_ar_state;
+-                    pos = mem.alignForward(usize, pos, 2);
++                    // Mach-O archive members must be aligned to the archive's
++                    // pointer width (8 for 64-bit, 4 for 32-bit). Apple's
++                    // `ld-prime` (Xcode 16+) rejects 64-bit Mach-O members
++                    // that aren't 8-byte aligned.
++                    pos = mem.alignForward(usize, pos, ptr_width);
+                     state.file_off = pos;
+                     pos += @sizeOf(Archive.ar_hdr);
+                     pos += mem.alignForward(usize, zo.basename.len + 1, ptr_width);
+@@ -188,7 +192,7 @@ pub fn flushStaticLib(macho_file: *MachO, comp: *Compilation, module_obj_path: ?
+                 },
+                 .object => |o| {
+                     const state = &o.output_ar_state;
+-                    pos = mem.alignForward(usize, pos, 2);
++                    pos = mem.alignForward(usize, pos, ptr_width);
+                     state.file_off = pos;
+                     pos += @sizeOf(Archive.ar_hdr);
+                     pos += mem.alignForward(usize, std.fs.path.basename(o.path).len + 1, ptr_width);
+@@ -218,7 +222,9 @@ pub fn flushStaticLib(macho_file: *MachO, comp: *Compilation, module_obj_path: ?
+ 
+     // Write object files
+     for (files.items) |index| {
+-        const aligned = mem.alignForward(usize, writer.end, 2);
++        // Must match the member alignment computed above (ptr_width).
++        // 64-bit Mach-O archive members need 8-byte alignment for ld-prime.
++        const aligned = mem.alignForward(usize, writer.end, ptr_width);
+         const padding = aligned - writer.end;
+         if (padding > 0) {
+             writer.splatByteAll(0, padding) catch unreachable;

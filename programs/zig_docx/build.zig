@@ -59,6 +59,7 @@ pub fn build(b: *std.Build) void {
 
     // ============================================================
     // Dynamic Library (libzig_docx.dylib / .so)
+    // Build with: zig build dylib
     // ============================================================
     const dylib_module = b.createModule(.{
         .root_source_file = b.path("src/ffi.zig"),
@@ -72,14 +73,9 @@ pub fn build(b: *std.Build) void {
         .root_module = dylib_module,
         .linkage = .dynamic,
     });
-    b.installArtifact(dynamic_lib);
 
-    // ============================================================
-    // lib step — build both libraries
-    // ============================================================
-    const lib_step = b.step("lib", "Build static and dynamic libraries");
-    lib_step.dependOn(&static_lib.step);
-    lib_step.dependOn(&dynamic_lib.step);
+    const dylib_step = b.step("dylib", "Build dynamic library only");
+    dylib_step.dependOn(&b.addInstallArtifact(dynamic_lib, .{}).step);
 
     // ============================================================
     // Tests
