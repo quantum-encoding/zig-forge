@@ -200,63 +200,59 @@ pub const CleanQuoteRenderer = struct {
 
     fn drawHeader(self: *CleanQuoteRenderer, content: *document.ContentStream) !void {
         const top_y = self.current_y;
+        const right_x = self.page_width - self.margin_right;
+        const detail_size: f32 = 9.5;
+        const detail_lh: f32 = 13;
 
-        // Company name — bold black, top-left, 20pt
+        // ── Left block: company details grouped together ──────────
+        var left_y = top_y - 16;
+
+        // Company name — bold black, 18pt
         const company = if (self.data.company_name.len > 0) self.data.company_name else "COMPANY";
-        try self.drawTextConverted(content, company, self.margin_left, top_y - 16, self.font_bold, 20, INK_BLACK);
+        try self.drawTextConverted(content, company, self.margin_left, left_y, self.font_bold, 18, INK_BLACK);
+        left_y -= 16;
 
-        // Company tagline / address line beneath, small uppercase grey
+        // Address (full, not truncated at first comma)
         if (self.data.company_address.len > 0) {
-            // Take just the first line as a tagline if multi-line
-            var tagline_end: usize = self.data.company_address.len;
-            for (self.data.company_address, 0..) |c, i| {
-                if (c == '\n' or c == ',') { tagline_end = i; break; }
-            }
-            const tagline = self.data.company_address[0..tagline_end];
-            const upper = try std.ascii.allocUpperString(self.allocator, tagline);
-            defer self.allocator.free(upper);
-            try self.drawTextConverted(content, upper, self.margin_left, top_y - 30, self.font_regular, 8.5, SUBTLE_GREY);
+            try self.drawTextConverted(content, self.data.company_address, self.margin_left, left_y, self.font_regular, detail_size, MUTED_GREY);
+            left_y -= detail_lh;
         }
 
-        // Document type word — right side, large, accent red
+        // Phone · Email on one line
+        const have_phone = self.data.footer.phone.len > 0;
+        const have_email = self.data.footer.email.len > 0;
+        if (have_phone or have_email) {
+            var contact: std.ArrayListUnmanaged(u8) = .empty;
+            defer contact.deinit(self.allocator);
+            if (have_phone) try contact.appendSlice(self.allocator, self.data.footer.phone);
+            if (have_phone and have_email) try contact.appendSlice(self.allocator, "  \u{00B7}  ");
+            if (have_email) try contact.appendSlice(self.allocator, self.data.footer.email);
+            try self.drawTextConverted(content, contact.items, self.margin_left, left_y, self.font_regular, detail_size, MUTED_GREY);
+            left_y -= detail_lh;
+        }
+
+        // Website
+        if (self.data.footer.website.len > 0) {
+            try self.drawTextConverted(content, self.data.footer.website, self.margin_left, left_y, self.font_regular, detail_size, MUTED_GREY);
+            left_y -= detail_lh;
+        }
+
+        // ── Right block: document type word + reference ──────────
         const doc_type = deriveDocTypeWord(self.data.reference);
         const doc_type_size: f32 = 28;
         const doc_type_width = document.Font.helvetica_bold.measureText(doc_type, doc_type_size);
-        const right_x = self.page_width - self.margin_right;
-        try self.drawTextConverted(content, doc_type, right_x - doc_type_width, top_y - 22, self.font_bold, doc_type_size, self.title_color);
+        try self.drawTextConverted(content, doc_type, right_x - doc_type_width, top_y - 20, self.font_bold, doc_type_size, self.title_color);
 
-        // Reference number beneath doc type — small grey
         if (self.data.reference.len > 0) {
             const ref_width = document.Font.helvetica.measureText(self.data.reference, 10);
-            try self.drawTextConverted(content, self.data.reference, right_x - ref_width, top_y - 38, self.font_regular, 10, MUTED_GREY);
+            try self.drawTextConverted(content, self.data.reference, right_x - ref_width, top_y - 36, self.font_regular, 10, MUTED_GREY);
         }
 
-        self.current_y = top_y - 50;
+        // Bottom of header = whichever side went lower
+        self.current_y = @min(left_y, top_y - 50) - 6;
 
-        // Contact row — grey, single row (phone · email left, website right)
-        const have_contact = self.data.footer.phone.len > 0 or self.data.footer.email.len > 0 or self.data.footer.website.len > 0;
-        if (have_contact) {
-            var contact_left: std.ArrayListUnmanaged(u8) = .empty;
-            defer contact_left.deinit(self.allocator);
-            if (self.data.footer.phone.len > 0) {
-                try contact_left.appendSlice(self.allocator, self.data.footer.phone);
-            }
-            if (self.data.footer.email.len > 0) {
-                if (contact_left.items.len > 0) try contact_left.appendSlice(self.allocator, "  \u{00B7}  ");
-                try contact_left.appendSlice(self.allocator, self.data.footer.email);
-            }
-            if (contact_left.items.len > 0) {
-                try self.drawTextConverted(content, contact_left.items, self.margin_left, self.current_y, self.font_regular, 10, MUTED_GREY);
-            }
-            if (self.data.footer.website.len > 0) {
-                const www_width = document.Font.helvetica.measureText(self.data.footer.website, 10);
-                try self.drawTextConverted(content, self.data.footer.website, right_x - www_width, self.current_y, self.font_regular, 10, MUTED_GREY);
-            }
-            self.current_y -= 18;
-        }
-
-        // Red hairline separator
-        try content.drawLine(self.margin_left, self.current_y, self.page_width - self.margin_right, self.current_y, self.accent_color, 0.5);
+        // Accent hairline separator
+        try content.drawLine(self.margin_left, self.current_y, right_x, self.current_y, self.accent_color, 0.5);
         self.current_y -= 22;
 
         // Prepared-for / dates two-column block
