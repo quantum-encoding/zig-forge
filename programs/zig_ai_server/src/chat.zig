@@ -16,6 +16,8 @@ const ledger_mod = @import("ledger.zig");
 const vertex = @import("vertex.zig");
 const genai = @import("genai.zig");
 const gcp_mod = @import("gcp.zig");
+const forge = @import("forge.zig");
+const cloudrun = @import("cloudrun.zig");
 const Response = router.Response;
 
 /// Inbound chat request (matches quantum-sdk ChatRequest)
@@ -27,6 +29,12 @@ pub const ChatRequest = struct {
     stream: ?bool = null,
     system_prompt: ?[]const u8 = null,
     tools: ?[]const Tool = null,
+    /// Capability allowlist. Filters client-declared tools through the server's
+    /// capability registry before forwarding to the provider.
+    ///   null → pass all tools through (backwards compat).
+    ///   []   → Safe Mode (no tools — pure chat).
+    ///   non-empty → only tools whose names match the allowed capabilities.
+    capabilities: ?[]const []const u8 = null,
     /// Optional explicit provider override: "anthropic", "vertex", "genai", "openai", etc.
     /// When null, the model is looked up in models.csv to determine the default route.
     provider: ?[]const u8 = null,
@@ -245,8 +253,14 @@ fn handleCore(
     }
 
     // Pass tools to provider (convert our Tool → http_sentinel ToolDefinition)
+    // Pipeline: client tools → capability filter → forge normalize per provider.
     var tool_defs: std.ArrayListUnmanaged(hs.ai.common.ToolDefinition) = .empty;
     defer tool_defs.deinit(allocator);
+    var filtered_owned: ?[]const hs.ai.common.ToolDefinition = null;
+    defer if (filtered_owned) |fo| allocator.free(fo);
+    var normalized_tools: ?[]hs.ai.common.ToolDefinition = null;
+    defer if (normalized_tools) |nt| allocator.free(nt);
+
     if (chat_req.tools) |tools| {
         for (tools) |tool| {
             tool_defs.append(allocator, .{
@@ -255,9 +269,40 @@ fn handleCore(
                 .input_schema = tool.input_schema orelse "{}",
             }) catch continue;
         }
-        if (tool_defs.items.len > 0) {
-            config.tools = tool_defs.items;
-            config.tool_choice = .auto;
+
+        // Capability filter (null → passthrough, [] → Safe Mode, non-empty → allowlist).
+        // When capabilities is non-null and non-empty, the returned slice is owned
+        // and must be freed. When null/passthrough, it borrows from tool_defs.
+        var tools_slice: ?[]const hs.ai.common.ToolDefinition = null;
+        if (chat_req.capabilities) |caps| {
+            if (caps.len == 0) {
+                tools_slice = null; // Safe Mode
+            } else {
+                const owned = cloudrun.filterToolsByCapabilities(
+                    allocator,
+                    tool_defs.items,
+                    caps,
+                ) catch null;
+                filtered_owned = owned;
+                tools_slice = owned;
+            }
+        } else {
+            tools_slice = tool_defs.items;
+        }
+
+        if (tools_slice) |ts| {
+            if (ts.len > 0) {
+                // Forge: normalize schemas per provider
+                const fp = forge.Provider.fromModel(chat_req.model);
+                const forge_config = forge.ForgeConfig{
+                    .provider = fp,
+                    .tool_count = ts.len,
+                    .tool_choice_forces_use = false,
+                };
+                normalized_tools = forge.normalizeTools(allocator, ts, forge_config) catch null;
+                config.tools = if (normalized_tools) |nt| nt else ts;
+                config.tool_choice = .auto;
+            }
         }
     }
 

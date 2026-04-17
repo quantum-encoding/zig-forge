@@ -110,7 +110,7 @@ fn walkAndInject(allocator: std.mem.Allocator, value: *std.json.Value, modified:
             if (is_object_schema) {
                 // Inject additionalProperties:false if not already present
                 if (obj.get("additionalProperties") == null) {
-                    obj.put("additionalProperties", .{ .bool = false }) catch {};
+                    obj.put(allocator, "additionalProperties", .{ .bool = false }) catch {};
                     modified.* = true;
                 }
             }
