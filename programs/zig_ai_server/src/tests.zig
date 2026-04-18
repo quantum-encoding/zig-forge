@@ -262,6 +262,80 @@ test "models: claude pricing" {
     try testing.expectEqual(@as(f64, 15.0), pricing.output);
 }
 
+test "models: schema_version is 1" {
+    try testing.expectEqual(@as(u32, 1), models.schema_version);
+}
+
+test "models: parameter registry loads from embedded JSON" {
+    defer models.deinitModelParameters();
+    // Non-zero count means parsing worked and at least one model has params.
+    try testing.expect(models.getParameterModelCount(testing.allocator) > 0);
+}
+
+test "models: populated model has parameters JSON" {
+    defer models.deinitModelParameters();
+    // claude-opus-4-5 has 5 ParameterSpecs in model_parameters.json.
+    const raw = models.getModelParametersJson(testing.allocator, "claude-opus-4-5");
+    try testing.expect(raw != null);
+    // Should be a non-empty JSON array.
+    try testing.expect(raw.?.len >= 2);
+    try testing.expectEqual(@as(u8, '['), raw.?[0]);
+    try testing.expectEqual(@as(u8, ']'), raw.?[raw.?.len - 1]);
+}
+
+test "models: unpopulated model returns null (parameters omitted on wire)" {
+    defer models.deinitModelParameters();
+    // dall-e-3 is not in model_parameters.json — omitted entirely.
+    const raw = models.getModelParametersJson(testing.allocator, "dall-e-3");
+    try testing.expect(raw == null);
+}
+
+test "models: /qai/v1/models JSON envelope has schema_version:1" {
+    defer models.deinitModelParameters();
+    const body = buildModelsBodyForTest(testing.allocator);
+    defer testing.allocator.free(body);
+
+    // Must start with { and contain schema_version:1 near the top.
+    try testing.expect(body.len > 20);
+    try testing.expect(std.mem.indexOf(u8, body, "\"schema_version\":1") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "\"count\":") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "\"models\":[") != null);
+}
+
+test "models: populated model has parameters field in response JSON" {
+    defer models.deinitModelParameters();
+    const body = buildModelsBodyForTest(testing.allocator);
+    defer testing.allocator.free(body);
+
+    // Find claude-opus-4-5 entry and confirm it carries a parameters field.
+    const opus_pos = std.mem.indexOf(u8, body, "\"id\":\"claude-opus-4-5\"") orelse {
+        return error.ModelNotInRegistry;
+    };
+    const end_brace = std.mem.indexOfScalarPos(u8, body, opus_pos, '}') orelse return error.Malformed;
+    const entry = body[opus_pos..end_brace];
+    try testing.expect(std.mem.indexOf(u8, entry, "\"parameters\":[") != null);
+}
+
+test "models: unpopulated model omits parameters field in response JSON" {
+    defer models.deinitModelParameters();
+    const body = buildModelsBodyForTest(testing.allocator);
+    defer testing.allocator.free(body);
+
+    // dall-e-3 has no parameter schema — the parameters key must NOT appear
+    // in its entry. We check by scanning the entry's braces.
+    const pos = std.mem.indexOf(u8, body, "\"id\":\"dall-e-3\"") orelse {
+        // Not every CSV has dall-e-3; skip if absent.
+        return;
+    };
+    const end_brace = std.mem.indexOfScalarPos(u8, body, pos, '}') orelse return error.Malformed;
+    const entry = body[pos..end_brace];
+    try testing.expect(std.mem.indexOf(u8, entry, "\"parameters\"") == null);
+}
+
+fn buildModelsBodyForTest(gpa: std.mem.Allocator) []u8 {
+    return models.buildModelsJson(gpa) catch unreachable;
+}
+
 // ── 5. Security Limits Tests ────────────────────────────────
 
 test "limits: values are reasonable" {
