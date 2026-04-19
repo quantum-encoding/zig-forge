@@ -183,12 +183,11 @@ DEPLOY_OUTPUT=$(gcloud run deploy "$SERVICE" \
   --max-instances=10 \
   --concurrency=80 \
   --timeout=300s \
-  --set-secrets="QAI_BOOTSTRAP_KEY=qai-bootstrap-key:latest" \
-  --set-secrets="ANTHROPIC_API_KEY=anthropic-api-key:latest" \
-  --set-secrets="DEEPSEEK_API_KEY=deepseek-api-key:latest" \
-  --set-secrets="GEMINI_API_KEY=gemini-api-key:latest" \
-  --set-secrets="XAI_API_KEY=xai-api-key:latest" \
-  --set-secrets="OPENAI_API_KEY=openai-api-key:latest" \
+  --set-secrets="ANTHROPIC_API_KEY=qai-anthropic-api-key:latest" \
+  --set-secrets="DEEPSEEK_API_KEY=qai-deepseek-api-key:latest" \
+  --set-secrets="GEMINI_API_KEY=qai-gemini-api-key:latest" \
+  --set-secrets="XAI_API_KEY=qai-xai-api-key:latest" \
+  --set-secrets="OPENAI_API_KEY=qai-openai-api-key:latest" \
   --quiet 2>&1)
 
 DEPLOY_STATUS=$?
