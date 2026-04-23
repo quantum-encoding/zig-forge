@@ -27,15 +27,26 @@ Four templates are in active use as of 2026-04-23, plus one legacy:
 | `presentation`        | `presentation.zig`   | Freeform canvas; positioned elements             |
 | `proposal_legacy`     | `proposal.zig`       | Branded pitch-deck with metrics/charts (legacy)  |
 
-### Critical routing note — "proposal"
+### Routing note — presentation (formerly `"proposal"`)
 
-The Tauri app's UI exposes a template called **"proposal"**. That name
-routes through `generate_pdf_bytes_with_template("proposal")` →
-`zigpdf_generate_presentation()` → `presentation.zig` — **not** the
-legacy `proposal.zig`. The branded pitch-deck is reachable only via the
-`proposal_legacy` template name. If you're working on what the app
-labels "Proposal", you want the `presentation` schema below, not the
-`proposal_legacy` schema.
+The canvas-style renderer lives at `presentation.zig`. In older code it
+was exposed under the template name **`"proposal"`**, which was
+actively misleading because that name suggests it routes to
+`proposal.zig` (legacy branded pitch-deck) when in fact it routes to
+`presentation.zig`. The name was corrected to **`"presentation"`** in
+the `invoiceData.templateData` discriminated-union refactor — look for
+commits around that work if you're bisecting old behaviour.
+
+Callers using the bare string `"proposal"` as a template identifier no
+longer resolve. A one-line SQLite migration rewrites any saved
+`settings.pdf_template = 'proposal'` to `'presentation'` at app
+startup; the Svelte draft-restore path does the same for in-flight
+sessionStorage drafts.
+
+The actual legacy branded pitch-deck (`proposal.zig`) is reachable only
+via the `"proposal_legacy"` template name or the `--proposal` CLI flag.
+If you're working on what the app labels "Presentation", you want the
+`presentation` schema below, not `proposal_legacy`.
 
 ## Conventions
 
