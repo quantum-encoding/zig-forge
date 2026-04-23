@@ -398,8 +398,8 @@ fn handleComplete(allocator: mem.Allocator, args: []const []const u8) !void {
     // Update execution.status field
     if (parsed.value.object.getPtr("execution")) |execution_ptr| {
         if (execution_ptr.* == .object) {
-            try execution_ptr.object.put("status", std.json.Value{ .string = status });
-            try execution_ptr.object.put("completed_at", std.json.Value{ .string = timestamp });
+            try execution_ptr.object.put(allocator, "status", std.json.Value{ .string = status });
+            try execution_ptr.object.put(allocator, "completed_at", std.json.Value{ .string = timestamp });
         }
     }
 
