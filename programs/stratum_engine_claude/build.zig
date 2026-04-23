@@ -4,6 +4,11 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // io_uring-dependent executables (stratum-engine, stratum-engine-dashboard,
+    // stratum-proxy, test-mempool) are Linux-only. On macOS they still appear
+    // in the build graph as no-op steps so `zig build` works everywhere.
+    const is_linux = target.result.os.tag == .linux;
+
     // Main executable
     const exe_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -23,12 +28,10 @@ pub fn build(b: *std.Build) void {
     }
 
     // Link mbedTLS for TLS support (execution engine)
-    exe.root_module.linkSystemLibrary("mbedtls", .{});
-    exe.root_module.linkSystemLibrary("mbedx509", .{});
-    exe.root_module.linkSystemLibrary("mbedcrypto", .{});
+    linkMbedtls3(exe.root_module, target);
     exe.root_module.link_libc = true;
 
-    b.installArtifact(exe);
+    if (is_linux) b.installArtifact(exe);
 
     // Dashboard executable (mining + mempool)
     const dash_module = b.createModule(.{
@@ -49,7 +52,7 @@ pub fn build(b: *std.Build) void {
     // Link libc for DNS resolution (getaddrinfo)
     dash_exe.root_module.link_libc = true;
 
-    b.installArtifact(dash_exe);
+    if (is_linux) b.installArtifact(dash_exe);
 
     // Run commands
     const run_cmd = b.addRunArtifact(exe);
@@ -106,7 +109,7 @@ pub fn build(b: *std.Build) void {
     });
     test_mempool_exe.root_module.link_libc = true;
 
-    b.installArtifact(test_mempool_exe);
+    if (is_linux) b.installArtifact(test_mempool_exe);
 
     const test_mempool_cmd = b.addRunArtifact(test_mempool_exe);
     test_mempool_cmd.step.dependOn(b.getInstallStep());
@@ -130,12 +133,10 @@ pub fn build(b: *std.Build) void {
     });
 
     // Link mbedTLS for TLS support
-    test_exec_exe.root_module.linkSystemLibrary("mbedtls", .{});
-    test_exec_exe.root_module.linkSystemLibrary("mbedx509", .{});
-    test_exec_exe.root_module.linkSystemLibrary("mbedcrypto", .{});
+    linkMbedtls3(test_exec_exe.root_module, target);
     test_exec_exe.root_module.link_libc = true;
 
-    b.installArtifact(test_exec_exe);
+    if (is_linux) b.installArtifact(test_exec_exe);
 
     const test_exec_cmd = b.addRunArtifact(test_exec_exe);
     test_exec_cmd.step.dependOn(b.getInstallStep());
@@ -159,12 +160,10 @@ pub fn build(b: *std.Build) void {
     });
 
     // Link mbedTLS for TLS support
-    test_tls_exe.root_module.linkSystemLibrary("mbedtls", .{});
-    test_tls_exe.root_module.linkSystemLibrary("mbedx509", .{});
-    test_tls_exe.root_module.linkSystemLibrary("mbedcrypto", .{});
+    linkMbedtls3(test_tls_exe.root_module, target);
     test_tls_exe.root_module.link_libc = true;
 
-    b.installArtifact(test_tls_exe);
+    if (is_linux) b.installArtifact(test_tls_exe);
 
     const test_tls_cmd = b.addRunArtifact(test_tls_exe);
     test_tls_cmd.step.dependOn(b.getInstallStep());
@@ -185,12 +184,10 @@ pub fn build(b: *std.Build) void {
     });
 
     // Link mbedTLS for TLS support
-    test_exchange_exe.root_module.linkSystemLibrary("mbedtls", .{});
-    test_exchange_exe.root_module.linkSystemLibrary("mbedx509", .{});
-    test_exchange_exe.root_module.linkSystemLibrary("mbedcrypto", .{});
+    linkMbedtls3(test_exchange_exe.root_module, target);
     test_exchange_exe.root_module.link_libc = true;
 
-    b.installArtifact(test_exchange_exe);
+    if (is_linux) b.installArtifact(test_exchange_exe);
 
     const test_exchange_cmd = b.addRunArtifact(test_exchange_exe);
     test_exchange_cmd.step.dependOn(b.getInstallStep());
@@ -217,12 +214,10 @@ pub fn build(b: *std.Build) void {
     // Link SQLite3 for persistence
     proxy_exe.root_module.linkSystemLibrary("sqlite3", .{});
     // Link mbedTLS for TLS pool connections
-    proxy_exe.root_module.linkSystemLibrary("mbedtls", .{});
-    proxy_exe.root_module.linkSystemLibrary("mbedx509", .{});
-    proxy_exe.root_module.linkSystemLibrary("mbedcrypto", .{});
+    linkMbedtls3(proxy_exe.root_module, target);
     proxy_exe.root_module.link_libc = true;
 
-    b.installArtifact(proxy_exe);
+    if (is_linux) b.installArtifact(proxy_exe);
 
     const proxy_cmd = b.addRunArtifact(proxy_exe);
     proxy_cmd.step.dependOn(b.getInstallStep());
@@ -246,4 +241,22 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
+}
+
+/// Link against mbedtls 3.x. macOS Homebrew `mbedtls` is 4.x which removed
+/// the public entropy/ctr_drbg headers this codebase uses, so pin to
+/// `mbedtls@3` explicitly and bypass pkg-config.
+fn linkMbedtls3(mod: *std.Build.Module, target: std.Build.ResolvedTarget) void {
+    if (target.result.os.tag == .macos) {
+        const prefix = "/opt/homebrew/opt/mbedtls@3";
+        mod.addIncludePath(.{ .cwd_relative = prefix ++ "/include" });
+        mod.addLibraryPath(.{ .cwd_relative = prefix ++ "/lib" });
+        mod.linkSystemLibrary("mbedtls", .{ .use_pkg_config = .no });
+        mod.linkSystemLibrary("mbedx509", .{ .use_pkg_config = .no });
+        mod.linkSystemLibrary("mbedcrypto", .{ .use_pkg_config = .no });
+    } else {
+        mod.linkSystemLibrary("mbedtls", .{});
+        mod.linkSystemLibrary("mbedx509", .{});
+        mod.linkSystemLibrary("mbedcrypto", .{});
+    }
 }
