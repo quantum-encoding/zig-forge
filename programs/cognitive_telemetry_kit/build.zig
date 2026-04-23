@@ -9,7 +9,10 @@ pub fn build(b: *std.Build) void {
 
     // Sub-projects
     buildSubProject(b, "chronos-hook", build_all);
-    buildSubProject(b, "cognitive-state-server", build_all);
+    // cognitive-state-server links dbus-1 (Linux-only)
+    if (!is_macos) {
+        buildSubProject(b, "cognitive-state-server", build_all);
+    }
     buildSubProject(b, "cognitive-tools", build_all);
     // libcognitive-capture is macOS-only (uses DYLD interposition)
     if (is_macos) {
@@ -23,7 +26,9 @@ pub fn build(b: *std.Build) void {
     // Test step
     const test_all = b.step("test", "Run all tests");
     testSubProject(b, "chronos-hook", test_all);
-    testSubProject(b, "cognitive-state-server", test_all);
+    if (!is_macos) {
+        testSubProject(b, "cognitive-state-server", test_all);
+    }
     testSubProject(b, "cognitive-tools", test_all);
 }
 

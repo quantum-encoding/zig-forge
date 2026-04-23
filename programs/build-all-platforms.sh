@@ -97,6 +97,8 @@ LINUX_ONLY_PROGRAMS=(
     "guardian_shield"  # BPF
     "mempool_sniffer"  # io_uring
     "hydra"            # io_uring
+    "claude-shepherd"  # eBPF (vmlinux.h)
+    "stratum_engine_grok" # io_uring (client.zig)
 )
 
 print_header() {

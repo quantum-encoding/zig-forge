@@ -45,13 +45,13 @@
 //   3. Chronos Tick - Absolute sequential tick from Sovereign Clock
 
 const std = @import("std");
-const linux = std.os.linux;
+const c = std.c;
 const chronos = @import("chronos.zig");
 
 /// Get current time as nanoseconds since epoch (replacement for std.time.nanoTimestamp)
 fn nanoTimestamp() i128 {
-    var ts: linux.timespec = undefined;
-    _ = linux.clock_gettime(.REALTIME, &ts);
+    var ts: c.timespec = undefined;
+    if (c.clock_gettime(c.CLOCK.REALTIME, &ts) != 0) return 0;
     return @as(i128, ts.sec) * 1_000_000_000 + @as(i128, ts.nsec);
 }
 
@@ -307,7 +307,7 @@ test "PhiGenerator creates unique timestamps" {
     const test_path = "/tmp/phi-gen-test.dat";
     defer {
         const path_z: [*:0]const u8 = @ptrCast(test_path.ptr);
-        _ = std.os.linux.unlink(path_z);
+        _ = std.c.unlink(path_z);
     }
 
     var clock = try chronos.ChronosClock.init(allocator, test_path);

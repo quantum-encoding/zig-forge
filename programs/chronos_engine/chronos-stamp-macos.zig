@@ -142,10 +142,8 @@ fn getEnv(name: [:0]const u8) ?[]const u8 {
 
 /// Get current UTC time in nanoseconds
 fn getUtcNanoseconds() i128 {
-    const ts = posix.clock_gettime(.REALTIME) catch {
-        // Fallback - shouldn't happen on macOS
-        return 0;
-    };
+    var ts: c.timespec = undefined;
+    if (c.clock_gettime(c.CLOCK.REALTIME, &ts) != 0) return 0;
     return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
 }
 
@@ -187,7 +185,10 @@ pub fn main(init: std.process.Init.Minimal) void {
 
     // Get current working directory
     var pwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const pwd = posix.getcwd(&pwd_buf) catch "UNKNOWN-PWD";
+    const pwd: []const u8 = if (c.getcwd(&pwd_buf, pwd_buf.len)) |ptr|
+        std.mem.sliceTo(ptr, 0)
+    else
+        "UNKNOWN-PWD";
 
     // Output the chronos stamp
     if (description.len > 0) {

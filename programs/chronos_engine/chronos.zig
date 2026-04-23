@@ -236,7 +236,7 @@ test "ChronosClock monotonic guarantee" {
     const test_path = "/tmp/chronos-monotonic-test.dat";
     defer {
         const path_z: [*:0]const u8 = @ptrCast(test_path.ptr);
-        _ = std.os.linux.unlink(path_z);
+        _ = std.c.unlink(path_z);
     }
 
     var clock = try ChronosClock.init(allocator, test_path);
