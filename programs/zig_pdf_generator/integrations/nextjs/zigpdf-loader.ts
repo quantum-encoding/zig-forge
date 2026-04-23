@@ -29,6 +29,7 @@ interface WasmExports {
   memory: WebAssembly.Memory;
   zigpdf_generate_presentation: (jsonPtr: number, jsonLen: number, outLenPtr: number) => number;
   zigpdf_generate_invoice: (jsonPtr: number, outLenPtr: number) => number;
+  zigpdf_generate_letter_quote: (jsonPtr: number, outLenPtr: number) => number;
   zigpdf_free: (ptr: number, len: number) => void;
   zigpdf_get_error: () => number;
   zigpdf_version: () => number;
@@ -145,6 +146,38 @@ function createModule(exports: WasmExports): ZigPdfModule {
             throw new Error(`Invoice generation failed: ${errorMsg}`);
           }
           throw new Error('Invoice generation failed: unknown error');
+        }
+
+        const outLenBytes = new Uint32Array(memory.buffer, outLenPtr, 1);
+        const outLen = outLenBytes[0];
+        const result = readBytes(memory, resultPtr, outLen).slice();
+        exports.zigpdf_free(resultPtr, outLen);
+
+        return result;
+      } finally {
+        exports.free(jsonPtr);
+        exports.free(outLenPtr);
+      }
+    },
+
+    generateLetterQuote(jsonString: string): Uint8Array {
+      const outLenPtr = exports.malloc(4);
+      if (outLenPtr === 0) {
+        throw new Error('Failed to allocate memory for output length');
+      }
+
+      const { ptr: jsonPtr } = writeCString(memory, exports, jsonString);
+
+      try {
+        const resultPtr = exports.zigpdf_generate_letter_quote(jsonPtr, outLenPtr);
+
+        if (resultPtr === 0) {
+          const errorPtr = exports.zigpdf_get_error();
+          if (errorPtr !== 0) {
+            const errorMsg = readCString(memory, errorPtr);
+            throw new Error(`Letter quote generation failed: ${errorMsg}`);
+          }
+          throw new Error('Letter quote generation failed: unknown error');
         }
 
         const outLenBytes = new Uint32Array(memory.buffer, outLenPtr, 1);

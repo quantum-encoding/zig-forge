@@ -226,8 +226,103 @@ export interface PresentationTemplate {
 export interface ZigPdfModule {
   generatePresentation: (jsonString: string) => Uint8Array;
   generateInvoice: (jsonString: string) => Uint8Array;
+  generateLetterQuote: (jsonString: string) => Uint8Array;
   getVersion: () => string;
   getLastError: () => string | null;
+}
+
+// ============================================================================
+// Letter Quote Types (premium Word-document-style template)
+// ============================================================================
+// Mirrors src/letter_quote.zig. Serialise with JSON.stringify and pass to
+// ZigPdfModule.generateLetterQuote. See templates/LETTER_QUOTE_GUIDE.md for
+// the full schema and styling conventions.
+
+export interface LetterQuoteCompany {
+  name: string;
+  phone?: string;
+  email?: string;
+}
+
+export interface LetterQuoteStyle {
+  /** Hex colour for the title, labels, and section headings. Default #1a2a5e. */
+  primary_color?: string;
+  /** Hex colour for the gold hairlines and the TOTAL row. Default #e8a83d. */
+  accent_color?: string;
+  /** "montserrat" (recommended) or "helvetica" (smaller binary). */
+  font_family?: 'montserrat' | 'helvetica';
+  /** Filesystem path OR "data:image/png;base64,..." data URL. Optional. */
+  watermark_image?: string;
+  /** 0.0–1.0. Default 0.08 (very faint). */
+  watermark_opacity?: number;
+  /** Fraction of page width. Default 0.60. */
+  watermark_scale?: number;
+}
+
+export interface LetterQuoteHeadingBlock {
+  type: 'heading';
+  text: string;
+}
+
+export interface LetterQuoteParagraphBlock {
+  type: 'paragraph';
+  /** Supports inline **bold** markers (wrap-safe). */
+  text: string;
+}
+
+export interface LetterQuoteBulletsBlock {
+  type: 'bullets';
+  /** Each item supports inline **bold** markers. */
+  items: string[];
+}
+
+export type LetterQuoteDescriptionBlock =
+  | LetterQuoteHeadingBlock
+  | LetterQuoteParagraphBlock
+  | LetterQuoteBulletsBlock;
+
+export interface LetterQuoteDescriptionPage {
+  type: 'description';
+  blocks: LetterQuoteDescriptionBlock[];
+}
+
+export interface LetterQuoteItemizedSection {
+  heading: string;
+  /**
+   * Line items. Each supports inline **bold** markers — typically used for
+   * parenthetical inclusions like "**(MATERIAL INCLUIDO)**".
+   */
+  items: string[];
+}
+
+export interface LetterQuoteItemizedPage {
+  type: 'itemized';
+  /** Centred tracked banner under the hero rule. */
+  subtitle?: string;
+  /** Left half of the project row. Renderer appends a colon. */
+  project_label?: string;
+  /** Right half of the project row (bold, tracked). */
+  project_description?: string;
+  sections: LetterQuoteItemizedSection[];
+  currency?: string;
+  subtotal?: number;
+  /** Fraction — 0.21 means 21%. */
+  tax_rate?: number;
+  total?: number;
+  /** Preferred for localised currency formatting (e.g. "€20.310"). */
+  subtotal_text?: string;
+  tax_text?: string;
+  total_text?: string;
+}
+
+export type LetterQuotePage = LetterQuoteDescriptionPage | LetterQuoteItemizedPage;
+
+export interface LetterQuoteData {
+  company: LetterQuoteCompany;
+  client: string;
+  date: string;
+  style?: LetterQuoteStyle;
+  pages: LetterQuotePage[];
 }
 
 export interface ZigPdfLoader {
