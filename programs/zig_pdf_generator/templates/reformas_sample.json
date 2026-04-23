@@ -1,0 +1,91 @@
+{
+  "company": {
+    "name":  "REFORMAS COSTA SOL",
+    "phone": "+34 623194238",
+    "email": "info@reformascostasol.com"
+  },
+  "client": "MARI CRUZ",
+  "date":   "17/11/2025",
+  "style": {
+    "primary_color": "#1a2a5e",
+    "accent_color":  "#e8a83d"
+  },
+  "pages": [
+    {
+      "type": "description",
+      "blocks": [
+        { "type": "heading",   "text": "Proyecto reforma integral de vivienda (100 m²)." },
+        { "type": "paragraph", "text": "Realizaremos una reforma integral orientada a transformar por completo la vivienda, mejorando su funcionalidad, estética y durabilidad. Nuestro equipo ejecutará todos los trabajos necesarios desde la preparación inicial hasta los acabados finales, garantizando orden, limpieza y un resultado de alta calidad." },
+        { "type": "paragraph", "text": "El proyecto incluye la renovación completa del cuarto de baño, la actualización de la solería de toda la vivienda, la recuperación y alisado de paredes, la demolición de la cocina existente y la sustitución de puertas y marcos interiores. Cada fase será realizada con materiales profesionales y siguiendo los estándares más altos de instalación, impermeabilización y acabado." },
+        { "type": "paragraph", "text": "Nuestra prioridad es entregar un espacio moderno, cómodo y duradero, cuidando cada detalle para que el cliente disfrute de una vivienda completamente renovada y lista para disfrutar desde el primer día." },
+        { "type": "paragraph", "text": "**NOTA:** Reformas Costa Sol no realiza trabajos de electricidad. Si el cliente lo deseara, podríamos recomendar electricistas para que le ofrezca su presupuesto." },
+        { "type": "heading",   "text": "Duración estimada del trabajo:" },
+        { "type": "paragraph", "text": "8-10 semanas sujetos a variables ajenas a nuestra labor." },
+        { "type": "heading",   "text": "Condiciones de pago:" },
+        { "type": "bullets",   "items": [
+            "40% al inicio del trabajo",
+            "30% semana 5",
+            "30% al finalizar"
+        ]},
+        { "type": "heading",   "text": "Términos y condiciones:" },
+        { "type": "paragraph", "text": "Este presupuesto incluye únicamente los elementos detallados explícitamente en este documento. Cualquier trabajo adicional no contemplado en este presupuesto tendrá un costo adicional, el cual será cotizado por separado y deberá ser aprobado por el cliente antes de su ejecución." },
+        { "type": "paragraph", "text": "Quedamos a su disposición para la confirmación con el fin de coordinar el inicio del trabajo en la fecha más conveniente." },
+        { "type": "paragraph", "text": "Se garantiza mano de obra de alta calidad." }
+      ]
+    },
+    {
+      "type": "itemized",
+      "subtitle":            "PRESUPUESTO ESTIMADO",
+      "project_label":       "DESCRIPCIÓN DE PROYECTO",
+      "project_description": "REFORMA INTEGRAL DE PISO",
+      "sections": [
+        {
+          "heading": "CUARTO DE BAÑO",
+          "items": [
+            "RETIRADA DE ACCESORIOS SANITARIOS ANTIGUOS",
+            "DEMOLICIÓN DE SOLERÍA Y ALICATADO EXISTENTE EN EL CUARTO DE BAÑO **(GESTIÓN DE ESCOMBROS INCLUIDOS)**",
+            "FONTANERÍA DE CUARTO DE BAÑO",
+            "PREPARACIÓN DE SUPERFICIES PARA POSTERIOR ALICATADO",
+            "IMPERMEABILIZACIÓN DE CUARTO DE BAÑO CON LÁMINA GEOTEXTIL",
+            "ALICATADO Y SOLERÍA DE CUARTO DE BAÑO **(AZULEJOS Y MATERIAL DE ADHERENCIA INCLUIDOS)**",
+            "INSTALACIÓN DE NUEVOS ACCESORIOS SANITARIOS **(ACCESORIOS NO INCLUIDOS)**"
+          ]
+        },
+        {
+          "heading": "SOLERÍA DE VIVIENDA",
+          "items": [
+            "DEMOLICIÓN DE RODAPIÉS **(GESTIÓN DE ESCOMBROS INCLUIDOS)**",
+            "APLICACIÓN DE PRIMER PARA GARANTIZAR CORRECTA ADHERENCIA **(PRIMER INCLUIDO)**",
+            "SOLERÍA DEL PISO ENTERO **(AZULEJOS Y MATERIAL DE ADHERENCIA INCLUIDOS)**"
+          ]
+        },
+        {
+          "heading": "PAREDES DE VIVIENDA",
+          "items": [
+            "RETIRADA DE GOTELÉ",
+            "APLICACIÓN DE MASILLA DE RENOVACIÓN **(MATERIAL INCLUIDO)**",
+            "LIJADO Y PREPARACIÓN DE PAREDES EN TODA LA VIVIENDA",
+            "PINTURA **(PINTURA INCLUIDA)**"
+          ]
+        },
+        {
+          "heading": "COCINA",
+          "items": [
+            "DEMOLICIÓN DE COCINA EXISTENTE",
+            "GESTIÓN DE ESCOMBROS",
+            "",
+            "RETIRADA DE PUERTAS Y MARCOS ANTIGUOS",
+            "INSTALACIÓN DE PUERTAS NUEVAS EN TODA LA VIVIENDA **(PUERTAS Y MARCOS INCLUIDOS)**"
+          ]
+        }
+      ],
+      "currency":      "€",
+      "subtotal":      20310.00,
+      "tax_rate":      0.21,
+      "total":         24575.10,
+      "subtotal_text": "€20.310",
+      "tax_text":      "€4.265,10",
+      "total_text":    "€24.575,10"
+    }
+  ]
+}

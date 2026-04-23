@@ -55,6 +55,7 @@ pub const written_resolution = @import("written_resolution.zig");
 pub const presentation = @import("presentation.zig");
 pub const proposal = @import("proposal.zig");
 pub const clean_quote = @import("clean_quote.zig");
+pub const letter_quote = @import("letter_quote.zig");
 pub const markdown = @import("markdown.zig");
 pub const template_card = @import("template_card.zig");
 
@@ -214,6 +215,11 @@ pub const generateDemoProposal = proposal.generateDemoProposal;
 pub const CleanQuoteRenderer = clean_quote.CleanQuoteRenderer;
 pub const generateCleanQuoteFromJson = clean_quote.generateCleanQuoteFromJson;
 
+// Letter Quote (premium Word-document-style quote with letter-spaced headings)
+pub const LetterQuoteRenderer = letter_quote.LetterQuoteRenderer;
+pub const LetterQuoteData = letter_quote.LetterQuoteData;
+pub const generateLetterQuoteFromJson = letter_quote.generateLetterQuoteFromJson;
+
 // Markdown → PDF
 pub const generateFromMarkdown = markdown.generateFromMarkdown;
 
@@ -255,6 +261,8 @@ pub const zigpdf_generate_proposal = ffi.zigpdf_generate_proposal;
 pub const zigpdf_generate_proposal_to_file = ffi.zigpdf_generate_proposal_to_file;
 pub const zigpdf_generate_clean_quote = ffi.zigpdf_generate_clean_quote;
 pub const zigpdf_generate_clean_quote_to_file = ffi.zigpdf_generate_clean_quote_to_file;
+pub const zigpdf_generate_letter_quote = ffi.zigpdf_generate_letter_quote;
+pub const zigpdf_generate_letter_quote_to_file = ffi.zigpdf_generate_letter_quote_to_file;
 pub const zigpdf_generate_markdown = ffi.zigpdf_generate_markdown;
 pub const zigpdf_generate_markdown_to_file = ffi.zigpdf_generate_markdown_to_file;
 pub const zigpdf_generate_template_card = ffi.zigpdf_generate_template_card;
@@ -289,6 +297,7 @@ test {
     _ = presentation;
     _ = proposal;
     _ = clean_quote;
+    _ = letter_quote;
     _ = markdown;
     _ = template_card;
 }

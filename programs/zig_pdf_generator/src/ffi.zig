@@ -43,6 +43,7 @@ const director_resignation = @import("director_resignation.zig");
 const written_resolution = @import("written_resolution.zig");
 const proposal = @import("proposal.zig");
 const clean_quote = @import("clean_quote.zig");
+const letter_quote = @import("letter_quote.zig");
 const markdown = @import("markdown.zig");
 const template_card = @import("template_card.zig");
 
@@ -1157,6 +1158,61 @@ export fn zigpdf_generate_clean_quote_to_file(
 ) ZigPdfError {
     var len: usize = 0;
     const pdf_ptr = zigpdf_generate_clean_quote(json_input, &len);
+    if (pdf_ptr == null) return .invalid_json;
+    defer zigpdf_free(pdf_ptr, len);
+
+    const path_slice = std.mem.span(output_path);
+    const pdf_data = pdf_ptr.?[0..len];
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    const file = std.Io.Dir.createFileAbsolute(io, path_slice, .{}) catch {
+        setLastError("Failed to create output file");
+        return .render_failed;
+    };
+    defer file.close(io);
+
+    var buf: [4096]u8 = undefined;
+    var writer = file.writer(io, &buf);
+    writer.interface.writeAll(pdf_data) catch {
+        setLastError("Failed to write PDF data");
+        return .render_failed;
+    };
+    std.Io.Writer.flush(&writer.interface) catch {
+        setLastError("Failed to flush PDF data");
+        return .render_failed;
+    };
+
+    return .success;
+}
+
+// =============================================================================
+// Letter Quote — premium Word-document-style quote
+// =============================================================================
+
+/// Generate a letter-style PDF (centred hero title, gold hairlines, letter-spaced
+/// labels, optional multi-page description + itemised estimate flow).
+/// See src/letter_quote.zig for the JSON contract.
+export fn zigpdf_generate_letter_quote(json_input: [*:0]const u8, output_len: *usize) ?[*]u8 {
+    const json_slice = std.mem.span(json_input);
+
+    const pdf_bytes = letter_quote.generateLetterQuoteFromJson(ffi_allocator, json_slice) catch |err| {
+        var buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Letter quote error: {s}", .{@errorName(err)}) catch "Letter quote error";
+        setLastError(msg);
+        return null;
+    };
+
+    output_len.* = pdf_bytes.len;
+    return @ptrCast(@constCast(pdf_bytes.ptr));
+}
+
+/// Generate letter quote and write directly to file.
+export fn zigpdf_generate_letter_quote_to_file(
+    json_input: [*:0]const u8,
+    output_path: [*:0]const u8,
+) ZigPdfError {
+    var len: usize = 0;
+    const pdf_ptr = zigpdf_generate_letter_quote(json_input, &len);
     if (pdf_ptr == null) return .invalid_json;
     defer zigpdf_free(pdf_ptr, len);
 

@@ -59,6 +59,7 @@ const presentation = @import("presentation.zig");
 const qrcode = @import("qrcode.zig");
 const proposal = @import("proposal.zig");
 const clean_quote = @import("clean_quote.zig");
+const letter_quote = @import("letter_quote.zig");
 const template_card = @import("template_card.zig");
 
 // =============================================================================
@@ -315,6 +316,24 @@ export fn zigpdf_generate_clean_quote(json_input: [*:0]const u8, output_len: *us
     const pdf_bytes = clean_quote.generateCleanQuoteFromJson(wasm_allocator, json_slice) catch |err| {
         var buf: [128]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "Clean quote error: {s}", .{@errorName(err)}) catch "Clean quote error";
+        setLastError(msg);
+        return null;
+    };
+
+    output_len.* = pdf_bytes.len;
+    return @ptrCast(@constCast(pdf_bytes.ptr));
+}
+
+/// Generate a premium letter-style quote PDF from JSON input.
+/// Centred hero title, gold hairline separators, letter-spaced labels, and a
+/// multi-page flow (description letter + itemised estimate). See
+/// src/letter_quote.zig for the JSON contract.
+export fn zigpdf_generate_letter_quote(json_input: [*:0]const u8, output_len: *usize) ?[*]u8 {
+    const json_slice = std.mem.span(json_input);
+
+    const pdf_bytes = letter_quote.generateLetterQuoteFromJson(wasm_allocator, json_slice) catch |err| {
+        var buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Letter quote error: {s}", .{@errorName(err)}) catch "Letter quote error";
         setLastError(msg);
         return null;
     };

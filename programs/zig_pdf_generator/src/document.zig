@@ -304,6 +304,22 @@ pub const Font = enum {
         }
         return total_width;
     }
+
+    /// Measure text width in points with character tracking added between glyphs.
+    /// Mirrors the PDF `Tc` operator: tracking is added after every glyph
+    /// including the last, matching how showText advances the text matrix.
+    pub fn measureTracked(self: Font, text: []const u8, font_size: f32, tracking: f32) f32 {
+        var total_width: f32 = 0;
+        var i: usize = 0;
+        var glyph_count: usize = 0;
+        while (i < text.len) {
+            const winansi = utf8ToWinAnsi(text, &i);
+            total_width += @as(f32, @floatFromInt(self.charWidth(winansi))) * font_size / 1000.0;
+            glyph_count += 1;
+        }
+        if (glyph_count > 1) total_width += tracking * @as(f32, @floatFromInt(glyph_count - 1));
+        return total_width;
+    }
 };
 
 // =============================================================================
@@ -581,6 +597,23 @@ pub const ContentStream = struct {
         try self.setFillColor(color);
         try self.beginText();
         try self.setFont(font_id, size);
+        try self.setTextPosition(x, y);
+        try self.showText(text);
+        try self.endText();
+        try self.restoreState();
+    }
+
+    /// Draw text with character tracking (PDF Tc operator). `tracking` is in points
+    /// and is added between every pair of consecutive glyphs. Use with
+    /// `Font.measureTracked` to position/centre the result correctly.
+    pub fn drawTrackedText(self: *ContentStream, text: []const u8, x: f32, y: f32, font_id: []const u8, size: f32, tracking: f32, color: Color) !void {
+        try self.saveState();
+        try self.setFillColor(color);
+        try self.beginText();
+        try self.setFont(font_id, size);
+        var buf: [32]u8 = undefined;
+        const len = std.fmt.bufPrint(&buf, "{d:.3} Tc\n", .{tracking}) catch return error.BufferTooSmall;
+        try self.buffer.appendSlice(self.allocator, len);
         try self.setTextPosition(x, y);
         try self.showText(text);
         try self.endText();
