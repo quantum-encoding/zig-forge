@@ -36,6 +36,7 @@ const MAX_OBJECTS = 4096;
 const MAX_PAGES = 1024;
 const MAX_FONTS = 16;
 const MAX_IMAGES = 1024;
+const MAX_EXTGSTATES = 16;
 
 // =============================================================================
 // PDF Object Types
@@ -683,6 +684,38 @@ pub const ContentStream = struct {
         try self.restoreState();
     }
 
+    /// Apply an ExtGState (graphics state) by resource name. Typically used
+    /// to set non-stroke alpha for a watermark: pair with `saveState` /
+    /// `restoreState` to scope the effect.
+    pub fn setExtGState(self: *ContentStream, gs_id: []const u8) !void {
+        var buf: [32]u8 = undefined;
+        const len = std.fmt.bufPrint(&buf, "/{s} gs\n", .{gs_id}) catch return error.BufferTooSmall;
+        try self.buffer.appendSlice(self.allocator, len);
+    }
+
+    /// Draw an image with non-stroke alpha. `gs_id` should have been
+    /// obtained from `PdfDocument.getOpacityExtGStateId`. The state change
+    /// is bracketed by q…Q so later drawing is unaffected.
+    pub fn drawImageWithOpacity(
+        self: *ContentStream,
+        image_id: []const u8,
+        gs_id: []const u8,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) !void {
+        try self.saveState();
+        try self.setExtGState(gs_id);
+        var buf: [128]u8 = undefined;
+        const len = std.fmt.bufPrint(&buf, "{d:.2} 0 0 {d:.2} {d:.2} {d:.2} cm\n", .{ width, height, x, y }) catch return error.BufferTooSmall;
+        try self.buffer.appendSlice(self.allocator, len);
+        var buf2: [32]u8 = undefined;
+        const len2 = std.fmt.bufPrint(&buf2, "/{s} Do\n", .{image_id}) catch return error.BufferTooSmall;
+        try self.buffer.appendSlice(self.allocator, len2);
+        try self.restoreState();
+    }
+
     // -------------------------------------------------------------------------
     // Button Component (for clickable payment links)
     // -------------------------------------------------------------------------
@@ -944,6 +977,12 @@ pub const PdfDocument = struct {
     image_count: u16,
     image_id_overflow: [16]u8,
 
+    // ExtGState entries — currently only /ca (non-stroke alpha) is tracked.
+    // Each unique opacity value gets its own resource so callers can reference
+    // it via "/Gn gs" in a content stream.
+    extgstate_opacities: [MAX_EXTGSTATES]f32,
+    extgstate_count: u8,
+
     // Pages
     page_content_ids: [MAX_PAGES]u32,
     page_count: u16,
@@ -970,6 +1009,8 @@ pub const PdfDocument = struct {
             .images = undefined,
             .image_count = 0,
             .image_id_overflow = undefined,
+            .extgstate_opacities = undefined,
+            .extgstate_count = 0,
             .page_content_ids = undefined,
             .page_count = 0,
             .annotations = undefined,
@@ -1050,6 +1091,32 @@ pub const PdfDocument = struct {
         "Im16", "Im17", "Im18", "Im19", "Im20", "Im21", "Im22", "Im23",
         "Im24", "Im25", "Im26", "Im27", "Im28", "Im29", "Im30", "Im31",
     };
+
+    // -------------------------------------------------------------------------
+    // ExtGState (graphics state — currently just alpha)
+    // -------------------------------------------------------------------------
+
+    const extgstate_id_table = [_][]const u8{
+        "G0", "G1", "G2", "G3", "G4", "G5", "G6", "G7",
+        "G8", "G9", "G10", "G11", "G12", "G13", "G14", "G15",
+    };
+
+    /// Register (or re-use) an ExtGState that sets non-stroke alpha to
+    /// `opacity`. Returns a stable resource name (e.g. "G0") that content
+    /// streams can pass to `setExtGState`. Deduplicates — the same opacity
+    /// value always maps to the same resource so callers don't have to cache.
+    pub fn getOpacityExtGStateId(self: *PdfDocument, opacity: f32) []const u8 {
+        for (0..self.extgstate_count) |i| {
+            if (@abs(self.extgstate_opacities[i] - opacity) < 0.001) {
+                return extgstate_id_table[i];
+            }
+        }
+        if (self.extgstate_count >= MAX_EXTGSTATES) return extgstate_id_table[0];
+        const idx = self.extgstate_count;
+        self.extgstate_opacities[idx] = opacity;
+        self.extgstate_count += 1;
+        return extgstate_id_table[idx];
+    }
 
     // -------------------------------------------------------------------------
     // Link Annotations (Clickable URLs)
@@ -1182,6 +1249,22 @@ pub const PdfDocument = struct {
         // Reserve object IDs for images
         self.next_object_id += self.image_count;
 
+        // Build ExtGState dictionary (if any) + reserve object IDs
+        var extgstate_dict: std.ArrayListUnmanaged(u8) = .empty;
+        defer extgstate_dict.deinit(self.allocator);
+        const first_extgstate_obj = self.next_object_id;
+        if (self.extgstate_count > 0) {
+            try extgstate_dict.appendSlice(self.allocator, "<< ");
+            for (0..self.extgstate_count) |i| {
+                var buf: [64]u8 = undefined;
+                const gs_obj_id = first_extgstate_obj + @as(u32, @intCast(i));
+                const len = std.fmt.bufPrint(&buf, "/G{d} {d} 0 R ", .{ i, gs_obj_id }) catch continue;
+                try extgstate_dict.appendSlice(self.allocator, len);
+            }
+            try extgstate_dict.appendSlice(self.allocator, ">>");
+        }
+        self.next_object_id += self.extgstate_count;
+
         // Build page objects
         var page_refs: std.ArrayListUnmanaged(u8) = .empty;
         defer page_refs.deinit(self.allocator);
@@ -1262,6 +1345,14 @@ pub const PdfDocument = struct {
             try self.writeImageObject(first_image_obj + @as(u32, @intCast(i)), img);
         }
 
+        // Write ExtGState objects — each one sets /ca (non-stroke alpha) so
+        // watermarks and other faint overlays render at reduced opacity.
+        for (0..self.extgstate_count) |i| {
+            var buf: [96]u8 = undefined;
+            const len = std.fmt.bufPrint(&buf, "<< /Type /ExtGState /ca {d:.3} /CA {d:.3} >>", .{ self.extgstate_opacities[i], self.extgstate_opacities[i] }) catch continue;
+            try self.writeObject(first_extgstate_obj + @as(u32, @intCast(i)), len);
+        }
+
         // Calculate annotation object IDs (after pages)
         const first_annot_obj = first_page_obj + @as(u32, @intCast(self.page_count)) * 2;
 
@@ -1278,6 +1369,10 @@ pub const PdfDocument = struct {
             if (self.image_count > 0) {
                 try resources.appendSlice(self.allocator, " /XObject ");
                 try resources.appendSlice(self.allocator, xobject_dict.items);
+            }
+            if (self.extgstate_count > 0) {
+                try resources.appendSlice(self.allocator, " /ExtGState ");
+                try resources.appendSlice(self.allocator, extgstate_dict.items);
             }
             try resources.appendSlice(self.allocator, " >>");
 

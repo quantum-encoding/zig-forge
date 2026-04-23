@@ -51,6 +51,7 @@
 
 const std = @import("std");
 const document = @import("document.zig");
+const image_lib = @import("image.zig");
 
 // =============================================================================
 // Defaults
@@ -117,7 +118,14 @@ pub const LetterQuoteData = struct {
     date: []const u8 = "",
     primary_color: []const u8 = "",
     accent_color: []const u8 = "",
+    /// Watermark image: either a filesystem path (PNG or JPEG) or a
+    /// `data:image/png;base64,...` data URL. Drawn faint behind content on
+    /// every page. Empty = no watermark.
     watermark_image: []const u8 = "",
+    /// 0.0–1.0; default 0.08 (very faint). Non-zero values override default.
+    watermark_opacity: f64 = 0,
+    /// Fraction of page width to scale the watermark to; default 0.60.
+    watermark_scale: f64 = 0,
     /// "helvetica" (default) or "montserrat". Other values fall back to helvetica.
     font_family: []const u8 = "",
     pages: []const PageData = &.{},
@@ -151,6 +159,14 @@ pub const LetterQuoteRenderer = struct {
     primary: document.Color = DEFAULT_PRIMARY,
     accent: document.Color = DEFAULT_ACCENT,
 
+    // Watermark state — resolved once before rendering so every page can
+    // reference the same XObject + ExtGState.
+    watermark_id: ?[]const u8 = null,
+    watermark_gs_id: ?[]const u8 = null,
+    watermark_w: f32 = 0,
+    watermark_h: f32 = 0,
+    watermark_owned_bytes: ?[]u8 = null,
+
     pages: std.ArrayListUnmanaged(document.ContentStream),
 
     pub fn init(allocator: std.mem.Allocator, data: LetterQuoteData) LetterQuoteRenderer {
@@ -178,6 +194,7 @@ pub const LetterQuoteRenderer = struct {
     }
 
     pub fn deinit(self: *LetterQuoteRenderer) void {
+        if (self.watermark_owned_bytes) |b| self.allocator.free(b);
         for (self.pages.items) |*p| p.deinit();
         self.pages.deinit(self.allocator);
         self.doc.deinit();
@@ -211,13 +228,50 @@ pub const LetterQuoteRenderer = struct {
         try content.drawTrackedText(text, x, y, font_id, size, tracking, color);
     }
 
+    /// Load the watermark image (once) from path or data URL, register it
+    /// with the PDF document, and pre-compute the draw size so each page
+    /// renderer can just blit. No-op if `data.watermark_image` is empty.
+    fn resolveWatermark(self: *LetterQuoteRenderer) !void {
+        const src = self.data.watermark_image;
+        if (src.len == 0) return;
+
+        const raw = try loadWatermarkBytes(self.allocator, src);
+        // Keep the bytes alive for the duration of the render — the Image
+        // struct we pass to the doc holds a slice into them for JPEGs.
+        self.watermark_owned_bytes = raw;
+
+        const img = image_lib.loadImage(self.allocator, raw) catch {
+            // If the image can't be decoded, skip silently so the document
+            // still renders. Callers see no watermark but a valid PDF.
+            self.allocator.free(raw);
+            self.watermark_owned_bytes = null;
+            return;
+        };
+
+        self.watermark_id = try self.doc.addImage(img);
+
+        const opacity: f32 = if (self.data.watermark_opacity > 0)
+            @as(f32, @floatCast(self.data.watermark_opacity))
+        else
+            0.08;
+        self.watermark_gs_id = self.doc.getOpacityExtGStateId(opacity);
+
+        const scale: f32 = if (self.data.watermark_scale > 0)
+            @as(f32, @floatCast(self.data.watermark_scale))
+        else
+            0.60;
+        const target_w = self.page_width * scale;
+        const aspect = @as(f32, @floatFromInt(img.height)) / @as(f32, @floatFromInt(img.width));
+        self.watermark_w = target_w;
+        self.watermark_h = target_w * aspect;
+    }
+
     fn drawWatermark(self: *LetterQuoteRenderer, content: *document.ContentStream) !void {
-        // Reserved for a future enhancement — PDF alpha requires a wired-up
-        // ExtGState resource. For now, if the caller wants a watermark they
-        // can pre-render it into a light-grey PNG and we'll draw it here once
-        // image loading from path lands in document.zig.
-        _ = self;
-        _ = content;
+        const img_id = self.watermark_id orelse return;
+        const gs_id = self.watermark_gs_id orelse return;
+        const x = (self.page_width - self.watermark_w) / 2;
+        const y = (self.page_height - self.watermark_h) / 2;
+        try content.drawImageWithOpacity(img_id, gs_id, x, y, self.watermark_w, self.watermark_h);
     }
 
     // ─── Shared header (company title + contact + rule) ─────────
@@ -550,6 +604,7 @@ pub const LetterQuoteRenderer = struct {
     // ─── Render entry ───────────────────────────────────────────
 
     pub fn render(self: *LetterQuoteRenderer) ![]const u8 {
+        try self.resolveWatermark();
         for (self.data.pages) |page| {
             var content = document.ContentStream.init(self.allocator);
             errdefer content.deinit();
@@ -594,6 +649,26 @@ pub fn generateLetterQuoteFromJson(allocator: std.mem.Allocator, json_str: []con
 // =============================================================================
 // JSON parsing
 // =============================================================================
+
+/// Resolve a watermark source (filesystem path OR `data:...;base64,...` URL)
+/// into raw image bytes. Caller owns the returned buffer.
+fn loadWatermarkBytes(a: std.mem.Allocator, src: []const u8) ![]u8 {
+    if (std.mem.startsWith(u8, src, "data:")) {
+        // Data URL: strip header up to and including the comma.
+        const comma = std.mem.indexOfScalar(u8, src, ',') orelse return error.InvalidDataUrl;
+        const header = src[0..comma];
+        const payload = src[comma + 1 ..];
+        if (std.mem.indexOf(u8, header, "base64") == null) {
+            // Plain (URL-escaped) data URL — just dupe it as-is. Uncommon for images.
+            return try a.dupe(u8, payload);
+        }
+        return try image_lib.decodeBase64(a, payload);
+    }
+    // Filesystem path. Use the shared single-threaded IO handle so this
+    // works identically from the CLI and FFI entry points.
+    const io = std.Io.Threaded.global_single_threaded.io();
+    return try std.Io.Dir.cwd().readFileAlloc(io, src, a, .limited(32 * 1024 * 1024));
+}
 
 fn dupeStr(a: std.mem.Allocator, obj: std.json.ObjectMap, key: []const u8, def: []const u8) ![]const u8 {
     if (obj.get(key)) |v| if (v == .string) return try a.dupe(u8, v.string);
@@ -698,10 +773,12 @@ fn parseLetterQuoteJson(a: std.mem.Allocator, json_str: []const u8) !LetterQuote
     data.date   = try dupeStr(a, root, "date", "");
 
     if (root.get("style")) |s| if (s == .object) {
-        data.primary_color   = try dupeStr(a, s.object, "primary_color", "");
-        data.accent_color    = try dupeStr(a, s.object, "accent_color", "");
-        data.watermark_image = try dupeStr(a, s.object, "watermark_image", "");
-        data.font_family     = try dupeStr(a, s.object, "font_family", "");
+        data.primary_color     = try dupeStr(a, s.object, "primary_color", "");
+        data.accent_color      = try dupeStr(a, s.object, "accent_color", "");
+        data.watermark_image   = try dupeStr(a, s.object, "watermark_image", "");
+        data.watermark_opacity = getFloat(s.object, "watermark_opacity");
+        data.watermark_scale   = getFloat(s.object, "watermark_scale");
+        data.font_family       = try dupeStr(a, s.object, "font_family", "");
     };
 
     if (root.get("pages")) |p| if (p == .array) {

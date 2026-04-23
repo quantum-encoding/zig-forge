@@ -7,9 +7,12 @@
   "client": "MARI CRUZ",
   "date":   "17/11/2025",
   "style": {
-    "primary_color": "#1a2a5e",
-    "accent_color":  "#e8a83d",
-    "font_family":   "montserrat"
+    "primary_color":     "#1a2a5e",
+    "accent_color":      "#e8a83d",
+    "font_family":       "montserrat",
+    "watermark_image":   "templates/reformas_watermark.png",
+    "watermark_opacity": 0.08,
+    "watermark_scale":   0.55
   },
   "pages": [
     {

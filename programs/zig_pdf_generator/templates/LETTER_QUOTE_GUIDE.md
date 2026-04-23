@@ -57,10 +57,12 @@ decoration, colour variety, icons, or filler copy.
   "date":   "STRING — free-form, usually DD/MM/YYYY or locale equivalent",
 
   "style": {
-    "primary_color": "#RRGGBB — default #1a2a5e (navy). Used for title, labels, section headings",
-    "accent_color":  "#RRGGBB — default #e8a83d (gold). Used for hairlines and TOTAL row",
-    "font_family":   "\"montserrat\" (recommended, premium architectural sans) or \"helvetica\" (fallback, smaller binary). Default helvetica.",
-    "watermark_image": "RESERVED — leave empty for now"
+    "primary_color":     "#RRGGBB — default #1a2a5e (navy). Used for title, labels, section headings",
+    "accent_color":      "#RRGGBB — default #e8a83d (gold). Used for hairlines and TOTAL row",
+    "font_family":       "\"montserrat\" (recommended, premium architectural sans) or \"helvetica\" (fallback, smaller binary). Default helvetica.",
+    "watermark_image":   "Optional. Filesystem path OR data:image/png;base64,... URL. PNG or JPEG. Empty = no watermark.",
+    "watermark_opacity": "Optional float 0.0–1.0. Default 0.08 (very faint).",
+    "watermark_scale":   "Optional float 0.0–1.0. Fraction of page width the watermark is scaled to. Default 0.60."
   },
 
   "pages": [ /* one or more page objects, see below */ ]
@@ -165,6 +167,35 @@ Two families ship with the renderer:
 
 If you're producing a quote, proposal, or anything a client will judge on
 aesthetics, always pick `"montserrat"`.
+
+## Watermarks
+
+A watermark is an optional image drawn faint behind the body copy on every
+page — a company logo, a monogram, a brand element. It's purely
+decorative; the rest of the document renders exactly the same whether a
+watermark is set or not.
+
+Supply the image in `style.watermark_image` as either:
+
+- **A filesystem path** (PNG or JPEG) resolved relative to the current
+  working directory when the CLI is invoked: `"logos/mybrand.png"`.
+- **A data URL** — `"data:image/png;base64,iVBORw0KG…"` — for use from
+  WASM / FFI callers who have the bytes already.
+
+Tuning knobs:
+
+- `style.watermark_opacity` — 0.0 (invisible) to 1.0 (fully opaque).
+  **Default 0.08**, which is appropriate for a light-grey line-art icon.
+  If your source image is already very faint you can bump this to 0.15–
+  0.25; if you're using a bolder coloured logo, try 0.04–0.06.
+- `style.watermark_scale` — fraction of page width. **Default 0.60**. For
+  a tall-format logo, a value of 0.40 usually reads better; for a
+  banner/wordmark, 0.80.
+
+Recommended source image: a transparent-background PNG drawn in a single
+grey tone (or near-black on white). The renderer composites the image at
+the declared opacity — it does *not* re-tint colour. If you use a full-
+colour image at 0.08 opacity it'll just look muddy.
 
 ## Inline bold rule
 
