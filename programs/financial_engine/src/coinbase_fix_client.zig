@@ -341,7 +341,7 @@ pub const CoinbaseFIXClient = struct {
             }
 
             // Connect to the resolved address
-            const addr_ptr: *const linux.sockaddr = @ptrCast(result.?.ai_addr);
+            const addr_ptr: *const linux.sockaddr = @ptrCast(@alignCast(result.?.ai_addr));
             const addr_len: linux.socklen_t = @intCast(result.?.ai_addrlen);
 
             const conn_rc = linux.connect(sock, addr_ptr, addr_len);

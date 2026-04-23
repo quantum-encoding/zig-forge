@@ -329,10 +329,9 @@ pub fn build(b: *std.Build) void {
     });
 
     coinbase_fix_lib.root_module.link_libc = true;
-    // Link mbedTLS for TLS support
-    coinbase_fix_lib.root_module.linkSystemLibrary("mbedtls", .{});
-    coinbase_fix_lib.root_module.linkSystemLibrary("mbedcrypto", .{});
-    coinbase_fix_lib.root_module.linkSystemLibrary("mbedx509", .{});
+    // Link mbedTLS for TLS support (pin to mbedtls@3 on macOS — mbedtls 4.x
+    // moved entropy/ctr_drbg headers and breaks the 3.x C API used here)
+    linkMbedtls3(coinbase_fix_lib.root_module, target);
     coinbase_fix_lib.installHeader(b.path("include/coinbase_fix.h"), "coinbase_fix.h");
 
     b.installArtifact(coinbase_fix_lib);
@@ -351,10 +350,8 @@ pub fn build(b: *std.Build) void {
     });
 
     coinbase_fix_exe.root_module.link_libc = true;
-    // Link mbedTLS for TLS support
-    coinbase_fix_exe.root_module.linkSystemLibrary("mbedtls", .{});
-    coinbase_fix_exe.root_module.linkSystemLibrary("mbedcrypto", .{});
-    coinbase_fix_exe.root_module.linkSystemLibrary("mbedx509", .{});
+    // Link mbedTLS for TLS support (see linkMbedtls3 note above)
+    linkMbedtls3(coinbase_fix_exe.root_module, target);
 
     b.installArtifact(coinbase_fix_exe);
 
@@ -412,4 +409,24 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(signal_tests).step);
+}
+
+/// Link against mbedtls 3.x. On macOS, Homebrew's `mbedtls` formula is 4.x
+/// which removed the public `mbedtls/entropy.h` and `mbedtls/ctr_drbg.h`
+/// headers; pin to the `mbedtls@3` keg. On Linux, fall back to system paths.
+fn linkMbedtls3(mod: *std.Build.Module, target: std.Build.ResolvedTarget) void {
+    if (target.result.os.tag == .macos) {
+        // Pin explicitly to mbedtls@3; bypass pkg-config (which resolves
+        // to the default keg — currently mbedtls 4.x — and leaks its headers).
+        const prefix = "/opt/homebrew/opt/mbedtls@3";
+        mod.addIncludePath(.{ .cwd_relative = prefix ++ "/include" });
+        mod.addLibraryPath(.{ .cwd_relative = prefix ++ "/lib" });
+        mod.linkSystemLibrary("mbedtls", .{ .use_pkg_config = .no });
+        mod.linkSystemLibrary("mbedcrypto", .{ .use_pkg_config = .no });
+        mod.linkSystemLibrary("mbedx509", .{ .use_pkg_config = .no });
+    } else {
+        mod.linkSystemLibrary("mbedtls", .{});
+        mod.linkSystemLibrary("mbedcrypto", .{});
+        mod.linkSystemLibrary("mbedx509", .{});
+    }
 }
