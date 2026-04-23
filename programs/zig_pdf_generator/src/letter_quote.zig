@@ -118,6 +118,8 @@ pub const LetterQuoteData = struct {
     primary_color: []const u8 = "",
     accent_color: []const u8 = "",
     watermark_image: []const u8 = "",
+    /// "helvetica" (default) or "montserrat". Other values fall back to helvetica.
+    font_family: []const u8 = "",
     pages: []const PageData = &.{},
 };
 
@@ -132,6 +134,10 @@ pub const LetterQuoteRenderer = struct {
 
     font_regular: []const u8 = "F0",
     font_bold: []const u8 = "F1",
+    // Matching Font enums so measurement calls (measureText / measureTracked)
+    // use the same metrics as the PDF viewer will.
+    font_sans: document.Font = .helvetica,
+    font_sans_bold: document.Font = .helvetica_bold,
 
     current_y: f32 = 0,
     page_width: f32 = document.A4_WIDTH,
@@ -155,8 +161,17 @@ pub const LetterQuoteRenderer = struct {
             .pages = .empty,
         };
         r.usable_width = r.page_width - r.margin_left - r.margin_right;
-        r.font_regular = r.doc.getFontId(.helvetica);
-        r.font_bold = r.doc.getFontId(.helvetica_bold);
+
+        // Font selection. Currently "montserrat" is the only non-default —
+        // other values (or empty) fall back to Helvetica so existing callers
+        // keep the old look unchanged.
+        if (std.ascii.eqlIgnoreCase(data.font_family, "montserrat")) {
+            r.font_sans = .montserrat_regular;
+            r.font_sans_bold = .montserrat_bold;
+        }
+        r.font_regular = r.doc.getFontId(r.font_sans);
+        r.font_bold = r.doc.getFontId(r.font_sans_bold);
+
         if (data.primary_color.len > 0) r.primary = document.Color.fromHex(data.primary_color);
         if (data.accent_color.len > 0) r.accent = document.Color.fromHex(data.accent_color);
         return r;
@@ -213,7 +228,7 @@ pub const LetterQuoteRenderer = struct {
         const top = self.page_height - self.margin_top;
 
         if (self.data.company_name.len > 0) {
-            try self.drawCenteredTracked(content, self.data.company_name, .helvetica_bold, self.font_bold, title_size, TITLE_TRACK, self.primary, top - title_size);
+            try self.drawCenteredTracked(content, self.data.company_name, self.font_sans_bold, self.font_bold, title_size, TITLE_TRACK, self.primary, top - title_size);
         }
         self.current_y = top - title_size - 12;
 
@@ -223,7 +238,7 @@ pub const LetterQuoteRenderer = struct {
             if (self.data.company_phone.len > 0) try line.appendSlice(self.allocator, self.data.company_phone);
             if (self.data.company_phone.len > 0 and self.data.company_email.len > 0) try line.appendSlice(self.allocator, "  |  ");
             if (self.data.company_email.len > 0) try line.appendSlice(self.allocator, self.data.company_email);
-            try self.drawCenteredTracked(content, line.items, .helvetica, self.font_regular, sub_size, SUBTITLE_TRACK, self.primary, self.current_y - sub_size);
+            try self.drawCenteredTracked(content, line.items, self.font_sans, self.font_regular, sub_size, SUBTITLE_TRACK, self.primary, self.current_y - sub_size);
             self.current_y -= sub_size + 14;
         }
 
@@ -256,7 +271,7 @@ pub const LetterQuoteRenderer = struct {
     ) !void {
         const tracking = size * LABEL_TRACK;
         try content.drawTrackedText(label, self.margin_left, self.current_y, self.font_regular, size, tracking, self.primary);
-        const label_w = document.Font.helvetica.measureTracked(label, size, tracking);
+        const label_w = self.font_sans.measureTracked(label, size, tracking);
         try content.drawTrackedText(value, self.margin_left + label_w + 8, self.current_y, self.font_bold, size, tracking, self.primary);
     }
 
@@ -290,7 +305,7 @@ pub const LetterQuoteRenderer = struct {
             const run = line[start..i];
             const font_id = if (bold) self.font_bold else self.font_regular;
             try content.drawText(run, cur_x, y, font_id, size, color);
-            const run_font: document.Font = if (bold) .helvetica_bold else .helvetica;
+            const run_font: document.Font = if (bold) self.font_sans_bold else self.font_sans;
             cur_x += run_font.measureText(run, size);
         }
     }
@@ -350,7 +365,7 @@ pub const LetterQuoteRenderer = struct {
         var cur: usize = 0;
         while (cur < src.len) : (cur += 1) {
             if (src[cur] == ' ') last_space = cur;
-            const w = document.Font.helvetica.measureText(src[line_start..cur], size);
+            const w = self.font_sans.measureText(src[line_start..cur], size);
             if (w > measure_width and last_space > line_start) {
                 const orig_end = map[last_space];
                 try lines.append(self.allocator, text[orig_line_start..orig_end]);
@@ -435,7 +450,7 @@ pub const LetterQuoteRenderer = struct {
         // Subtitle ("PRESUPUESTO ESTIMADO"), centred tracked navy bold
         if (page.subtitle.len > 0) {
             const sub_size: f32 = 16;
-            try self.drawCenteredTracked(content, page.subtitle, .helvetica_bold, self.font_bold, sub_size, LABEL_TRACK, self.primary, self.current_y - sub_size);
+            try self.drawCenteredTracked(content, page.subtitle, self.font_sans_bold, self.font_bold, sub_size, LABEL_TRACK, self.primary, self.current_y - sub_size);
             self.current_y -= sub_size + 10;
             try self.drawRule(content);
         }
@@ -452,7 +467,7 @@ pub const LetterQuoteRenderer = struct {
                 const label_with_colon = try std.fmt.allocPrint(self.allocator, "{s}:", .{page.project_label});
                 defer self.allocator.free(label_with_colon);
                 try content.drawTrackedText(label_with_colon, cur_x, self.current_y, self.font_regular, ps, tracking, self.primary);
-                cur_x += document.Font.helvetica.measureTracked(label_with_colon, ps, tracking) + 10;
+                cur_x += self.font_sans.measureTracked(label_with_colon, ps, tracking) + 10;
             }
             if (page.project_description.len > 0) {
                 try content.drawTrackedText(page.project_description, cur_x, self.current_y, self.font_bold, ps, tracking, self.primary);
@@ -521,12 +536,12 @@ pub const LetterQuoteRenderer = struct {
             break :blk s;
         };
 
-        const value_font: document.Font = if (std.mem.eql(u8, value_font_id, self.font_bold)) .helvetica_bold else .helvetica;
+        const value_font: document.Font = if (std.mem.eql(u8, value_font_id, self.font_bold)) self.font_sans_bold else self.font_sans;
         const value_w = value_font.measureTracked(value_str, size, tracking);
         try content.drawTrackedText(value_str, right_x - value_w, self.current_y, value_font_id, size, tracking, value_color);
 
         // Label — sits left of the value with a gap
-        const label_font: document.Font = if (std.mem.eql(u8, label_font_id, self.font_bold)) .helvetica_bold else .helvetica;
+        const label_font: document.Font = if (std.mem.eql(u8, label_font_id, self.font_bold)) self.font_sans_bold else self.font_sans;
         const label_w = label_font.measureTracked(label, size, tracking);
         const label_x = right_x - value_w - 30 - label_w;
         try content.drawTrackedText(label, label_x, self.current_y, label_font_id, size, tracking, label_color);
@@ -686,6 +701,7 @@ fn parseLetterQuoteJson(a: std.mem.Allocator, json_str: []const u8) !LetterQuote
         data.primary_color   = try dupeStr(a, s.object, "primary_color", "");
         data.accent_color    = try dupeStr(a, s.object, "accent_color", "");
         data.watermark_image = try dupeStr(a, s.object, "watermark_image", "");
+        data.font_family     = try dupeStr(a, s.object, "font_family", "");
     };
 
     if (root.get("pages")) |p| if (p == .array) {

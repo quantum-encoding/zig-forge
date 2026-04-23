@@ -59,6 +59,7 @@ decoration, colour variety, icons, or filler copy.
   "style": {
     "primary_color": "#RRGGBB — default #1a2a5e (navy). Used for title, labels, section headings",
     "accent_color":  "#RRGGBB — default #e8a83d (gold). Used for hairlines and TOTAL row",
+    "font_family":   "\"montserrat\" (recommended, premium architectural sans) or \"helvetica\" (fallback, smaller binary). Default helvetica.",
     "watermark_image": "RESERVED — leave empty for now"
   },
 
@@ -152,6 +153,18 @@ Field guide:
   are still useful for downstream systems (accounting, CSV export, etc.).
 
 ---
+
+## Fonts
+
+Two families ship with the renderer:
+
+| `style.font_family` | When to use                                                               |
+|---------------------|---------------------------------------------------------------------------|
+| `"montserrat"`      | **Recommended.** Premium architectural sans, heavy bold, proper tracking. Adds ~380 KB to the PDF (the embedded TrueType fonts) but only once — multi-page docs pay the same fixed cost. |
+| `"helvetica"` / `""` | Fallback. No font embedding, ~4 KB PDFs. Use for low-value receipts or where file size matters more than polish. |
+
+If you're producing a quote, proposal, or anything a client will judge on
+aesthetics, always pick `"montserrat"`.
 
 ## Inline bold rule
 

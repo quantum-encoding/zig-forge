@@ -8,7 +8,8 @@
   "date":   "17/11/2025",
   "style": {
     "primary_color": "#1a2a5e",
-    "accent_color":  "#e8a83d"
+    "accent_color":  "#e8a83d",
+    "font_family":   "montserrat"
   },
   "pages": [
     {
