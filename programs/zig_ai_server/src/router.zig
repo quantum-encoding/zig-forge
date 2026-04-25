@@ -7,6 +7,7 @@ const http = std.http;
 const handlers = @import("handlers.zig");
 const auth_pipeline = @import("auth_pipeline.zig");
 const chat = @import("chat.zig");
+const images = @import("images.zig");
 const cloudrun = @import("cloudrun.zig");
 const models = @import("models.zig");
 const keys = @import("keys.zig");
@@ -336,7 +337,10 @@ fn routeApiV1Authed(
     if (std.mem.eql(u8, path, "search/web")) return handlers.stub(request, allocator, "POST /qai/v1/search/web");
     if (std.mem.eql(u8, path, "search/context")) return handlers.stub(request, allocator, "POST /qai/v1/search/context");
     if (std.mem.eql(u8, path, "search/answer")) return handlers.stub(request, allocator, "POST /qai/v1/search/answer");
-    if (std.mem.eql(u8, path, "images/generate")) return handlers.stub(request, allocator, "POST /qai/v1/images/generate");
+    if (std.mem.eql(u8, path, "images/generate")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        return images.handle(request, allocator, environ_map, io, store, auth, server_ledger);
+    }
     if (std.mem.eql(u8, path, "images/edit")) return handlers.stub(request, allocator, "POST /qai/v1/images/edit");
     if (std.mem.startsWith(u8, path, "audio/")) return handlers.stub(request, allocator, "/qai/v1/audio/*");
     if (std.mem.startsWith(u8, path, "video/")) return handlers.stub(request, allocator, "/qai/v1/video/*");

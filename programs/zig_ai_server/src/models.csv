@@ -41,6 +41,7 @@ OpenAI,Image,openai_dalle3,dall-e-3,DALL-E 3,—,—,—,—,$0.04,per image,50,
 OpenAI,Image,openai_gpt_image1_mini,gpt-image-1-mini,GPT-Image 1 Mini,—,$2.00,$8.00,$0.20,—,—,50,1.25,cloud-run-egress,Token-based; cost-effective option; ~55-78% cheaper than GPT-Image 1
 OpenAI,Image,openai_gpt_image1,gpt-image-1,GPT-Image 1,—,$10.00,$40.00,$2.50,—,—,50,1.25,cloud-run-egress,Token-based; 1024²: low $0.011/med $0.042/high $0.167; 1024×1536: low $0.016/med $0.063/high $0.25
 OpenAI,Image,openai_gpt_image15,gpt-image-1.5,GPT-Image 1.5,—,$8.00,$32.00,$2.00,—,—,50,1.25,cloud-run-egress,Token-based; 1024²: low $0.009/med $0.034/high $0.133; 1024×1536: low $0.013/med $0.05/high $0.20
+OpenAI,Image,openai_gpt_image2,gpt-image-2,GPT-Image 2,—,$8.00,$30.00,$2.00,—,—,50,1.25,cloud-run-egress,Token-based; text input $5.00/1M ($1.25 cached); 1024²: low $0.006/med $0.053/high $0.211; snapshot gpt-image-2-2026-04-21; Tier1 5 IPM
 OpenAI,Image,openai_chatgpt_image,chatgpt-image-latest,ChatGPT Image,—,$8.00,$32.00,$2.00,—,—,50,1.25,cloud-run-egress,Token-based; same pricing as GPT-Image 1.5; alias for gpt-image-1.5
 OpenAI,Image Edit,gpt_image,gpt-image-1,GPT-Image Edit,—,$10.00,$40.00,$2.50,—,—,50,1.25,cloud-run-egress,Image editing in editor view; token-based; same tiers as GPT-Image 1
 OpenAI,Video,sora,sora-2,Sora 2,—,—,—,—,$0.10,per second,10,1.25,cloud-run-egress,720p default
