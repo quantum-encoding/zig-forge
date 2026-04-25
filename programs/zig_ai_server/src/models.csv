@@ -20,6 +20,7 @@ xAI,Text,—,xai/grok-4.1-fast-non-reasoning,Grok 4.1 Fast (Vertex),2M,$0.20,$0.
 xAI,Text,—,xai/grok-4.1-fast-reasoning,Grok 4.1 Fast Reasoning (Vertex),2M,$0.20,$0.50,$0.05,—,—,480,1.30,vertex-maas,Vertex Model Garden publishers/xai/models/grok-4.1-fast-reasoning; cost-effective reasoning; τ²-bench Telecom
 # ── OpenAI (25% margin; requires openai pack) ─────────────────────────────────
 # Note: All OpenAI text models support Flex/Batch tier (0.5× price) and Priority tier (2× price)
+OpenAI,Text,—,gpt-5.5,GPT-5.5,1M,$5.00,$30.00,$0.50,—,—,500,1.25,cloud-run-egress,Frontier reasoning model; effort=none/low/medium/high/xhigh (default medium); 1.05M context; 128K max output; cutoff Dec 1 2025; >272K: $10.00/$45.00 input/output (2× input/1.5× output); regional residency +10%; snapshot gpt-5.5-2026-04-23
 OpenAI,Text,—,gpt-5.4,GPT-5.4,1M,$2.50,$15.00,$0.25,—,—,500,1.25,cloud-run-egress,Reasoning model; >272K: $5.00/$22.50 input/output; drop-in replacement for gpt-5.2
 OpenAI,Text,—,gpt-5.4-pro,GPT-5.4 Pro,1M,$30.00,$180.00,—,—,—,500,1.25,cloud-run-egress,>272K: $60.00/$270.00 input/output
 OpenAI,Text,—,gpt-5.4-mini,GPT-5.4 Mini,400K,$0.75,$4.50,$0.075,—,—,500,1.25,cloud-run-egress,128K max output; cutoff Aug 31 2025
@@ -96,14 +97,17 @@ Google Vertex,Video,veo_vertex_31_fast,veo-3.1-fast-generate-001,Veo 3.1 Fast (V
 # ── Anthropic (25% margin; requires anthropic pack) ──────────────────────────
 Anthropic,Text,claude_opus,claude-opus-4-5,Claude Opus 4.5,200K,$5.00,$25.00,$0.50,—,—,200,1.25,direct,Cache writes: $6.25/M (5m) $10.00/M (1h)
 Anthropic,Text,—,claude-opus-4-6,Claude Opus 4.6,200K,$5.00,$25.00,$0.50,—,—,200,1.25,direct,Cache writes: $6.25/M (5m) $10.00/M (1h)
+Anthropic,Text,—,claude-opus-4-7,Claude Opus 4.7,1M,$5.00,$25.00,$0.50,—,—,200,1.25,vertex-native,1M context standard pricing; adaptive thinking only; no temperature/top_p/top_k; cache writes $6.25/M (5m) $10.00/M (1h)
 Anthropic,Text,claude_sonnet,claude-sonnet-4-5-20250929,Claude Sonnet 4.5,200K,$3.00,$15.00,$0.30,—,—,1000,1.25,direct,Cache writes: $3.75/M (5m) $6.00/M (1h)
 Anthropic,Text,—,claude-sonnet-4-6,Claude Sonnet 4.6,200K,$3.00,$15.00,$0.30,—,—,1000,1.25,direct,Cache writes: $3.75/M (5m) $6.00/M (1h)
 Anthropic,Text,—,claude-haiku-4-5-20251001,Claude Haiku 4.5,200K,$1.00,$5.00,$0.10,—,—,4000,1.25,direct,Cache writes: $1.25/M (5m) $2.00/M (1h)
 # ── Mistral (25% margin; via Vertex Model Garden) ────────────────────────────
 Mistral,Text,—,codestral-2,Codestral 2,256K,$0.30,$0.90,—,—,—,300,1.25,vertex-maas,Code-specialized FIM + chat; Vertex MaaS publishers/mistralai/models/codestral-2; also supports europe-west4
 # ── DeepSeek (30% margin; direct + Vertex MaaS) ────────────────────────────
-DeepSeek,Text,—,deepseek-reasoner,DeepSeek Reasoner,64K,$0.28,$0.42,$0.028,—,—,60,1.30,direct,
-DeepSeek,Text,—,deepseek-chat,DeepSeek Chat,64K,$0.28,$0.42,$0.028,—,—,60,1.30,direct,
+DeepSeek,Text,—,deepseek-v4-flash,DeepSeek V4 Flash,1M,$0.14,$0.28,$0.028,—,—,60,1.30,direct,Thinking + non-thinking modes (default thinking); 384K max output; tool calls + JSON output; FIM in non-thinking mode only
+DeepSeek,Text,—,deepseek-v4-pro,DeepSeek V4 Pro,1M,$1.74,$3.48,$0.145,—,—,60,1.30,direct,Thinking + non-thinking modes (default thinking); 384K max output; tool calls + JSON output; FIM in non-thinking mode only
+DeepSeek,Text,—,deepseek-reasoner,DeepSeek Reasoner,64K,$0.28,$0.42,$0.028,—,—,60,1.30,direct,DEPRECATED — alias for deepseek-v4-flash thinking mode; migrate to deepseek-v4-flash
+DeepSeek,Text,—,deepseek-chat,DeepSeek Chat,64K,$0.28,$0.42,$0.028,—,—,60,1.30,direct,DEPRECATED — alias for deepseek-v4-flash non-thinking mode; migrate to deepseek-v4-flash
 DeepSeek,Text,—,deepseek-ai/deepseek-v3.2-maas,DeepSeek V3.2 (Vertex),64K,$0.28,$0.42,—,—,—,60,1.30,vertex-maas,DeepSeek V3.2 via Vertex MaaS; Chat Completions compatible
 # ── Qwen ──────────────────────────────────────────────────────────────────
 Qwen,Text,—,qwen/qwen3-coder-480b-a35b-instruct-maas,Qwen3 Coder,256K,$0.30,$0.60,—,—,—,60,1.25,vertex-maas,480B MoE (35B active); agentic coding; 256K context (1M extended); Vertex MaaS
