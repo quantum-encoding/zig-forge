@@ -56,7 +56,7 @@ zig build
 
 `zig build` produces the CLI **and** `libzig_docx.a` (static library). For the dynamic library, run `zig build dylib` (outputs `libzig_docx.dylib` on macOS, `.so` on Linux). For WASM, see the [WASM library](#wasm-library) section below.
 
-Requires Zig 0.16.0-dev.3091 or later. For PDF extraction, install `poppler` (`brew install poppler` on macOS, `apt install poppler-utils` on Linux).
+Requires Zig 0.16.0 (stable) or later. For PDF extraction, install `poppler` (`brew install poppler` on macOS, `apt install poppler-utils` on Linux).
 
 ### WASM library
 

@@ -1047,57 +1047,72 @@ fn processSingleFile(allocator: std.mem.Allocator, input_path: []const u8, outpu
 
 fn printHelp() void {
     const help =
-        \\zig-docx - Universal document converter & chunker
+        \\zig-docx - Universal document converter, generator, and chunker
         \\
-        \\Supported formats:
-        \\  DOCX   →  MDX (Markdown with frontmatter)
-        \\  PDF    →  Markdown (via pdftotext/mutool)
-        \\  XLSX   →  CSV or Markdown table
-        \\  JSON   →  Claude conversation markdown (Anthropic export)
-        \\  MD/TXT →  Chunked markdown (for RAG / AI context)
+        \\Conversions:
+        \\  DOCX            →  MDX (Markdown + YAML frontmatter, images extracted)
+        \\  Markdown        →  DOCX (with optional letterhead, two style presets)
+        \\  PDF             →  Markdown (via pdftotext/mutool)
+        \\  XLSX            →  CSV or Markdown table
+        \\  Anthropic JSON  →  Per-conversation markdown + extracted artifacts
+        \\  Claude Code JSONL → Per-session markdown
+        \\  FRA JSON        →  DOCX (Fire Risk Assessment generator)
+        \\  MD / TXT / MDX  →  Chunked markdown (RAG-ready, hash-linked)
         \\
         \\Usage:
         \\  zig-docx <file> [options]
         \\  zig-docx <folder/>              Batch mode (DOCX only)
         \\
-        \\Commands:
-        \\  (default)             Convert to appropriate output format
-        \\  --info, -i            Show document structure / stats
+        \\Mode flags:
+        \\  (default)             Convert to appropriate output format for the input
+        \\  --info, -i            Show document structure / stats only
         \\  --list, -l            List files in ZIP archive (DOCX/XLSX)
-        \\  --chunk, -c           Chunk markdown output with hash navigation
+        \\  --chunk, -c           Chunk markdown output with hash-linked navigation
         \\  --markdown, --md      XLSX: output markdown table instead of CSV
-        \\  --anthropic           JSON: extract Claude conversations
+        \\  --anthropic, --claude JSON: extract Anthropic Claude conversations export
+        \\  --claude-code         JSON: extract Claude Code transcript JSONL
+        \\  --to-docx             Markdown → DOCX (uses frontmatter for metadata)
+        \\  --fra                 JSON → DOCX (Fire Risk Assessment generator)
         \\
-        \\Options:
-        \\  -o, --output <path>   Write output to file or folder
-        \\  --title "..."         Set MDX frontmatter title (DOCX only)
-        \\  --description "..."   Set MDX frontmatter description
-        \\  --author "..."        Set MDX frontmatter author
-        \\  --date "..."          Set MDX frontmatter date
-        \\  --slug "..."          Set MDX frontmatter slug
-        \\  -h, --help            Show this help
+        \\Output options:
+        \\  -o, --output <path>          Write output to file or folder
+        \\  --style <minutes|default>    DOCX style preset for --to-docx
+        \\  --title "..."                MDX/DOCX frontmatter title
+        \\  --description "..."          MDX/DOCX frontmatter description
+        \\  --author "..."               MDX/DOCX frontmatter author
+        \\  --date "..."                 MDX/DOCX frontmatter date
+        \\  --slug "..."                 MDX frontmatter slug
+        \\  --only-project <path>        Claude Code mode: filter to one project dir
+        \\
+        \\Chunker tuning:
+        \\  --chunk-target-words <N>     Target words per chunk          (default 6000)
+        \\  --chunk-min-words <N>        Sections under this merge       (default 500)
+        \\  --chunk-max-words <N>        Sections over this split        (default 8000)
+        \\
+        \\  -h, --help                   Show this help
         \\
         \\Examples:
-        \\  # DOCX → MDX
-        \\  zig-docx post.docx -o post.mdx --title "My Post"
+        \\  # DOCX → MDX (auto-extracts title, dumps images to ./images/)
+        \\  zig-docx post.docx -o post.mdx --author "Jane Doe"
         \\
-        \\  # PDF → Markdown
-        \\  zig-docx manual.pdf -o manual.md
+        \\  # Markdown → DOCX
+        \\  zig-docx quote.md --to-docx -o quote.docx
+        \\  zig-docx minutes.md --to-docx --style minutes -o minutes.docx
         \\
-        \\  # PDF → Chunked RAG-ready markdown
+        \\  # PDF → chunked RAG-ready markdown
         \\  zig-docx manual.pdf --chunk -o chunks/
         \\
-        \\  # Markdown file → Chunked with hash-linked navigation
-        \\  zig-docx document.md --chunk -o chunks/
+        \\  # XLSX → markdown table (good for piping to AI)
+        \\  zig-docx spreadsheet.xlsx --markdown
         \\
-        \\  # XLSX → CSV
-        \\  zig-docx spreadsheet.xlsx -o data.csv
-        \\
-        \\  # XLSX → Markdown table
-        \\  zig-docx spreadsheet.xlsx --markdown -o data.md
-        \\
-        \\  # Claude conversations.json → organized markdown
+        \\  # Anthropic Claude export → per-conversation markdown
         \\  zig-docx conversations.json --anthropic -o chats/
+        \\
+        \\  # Fire Risk Assessment JSON → DOCX
+        \\  zig-docx fra.json --fra -o fire-risk-assessment.docx
+        \\
+        \\Library: same conversions are exported as a C/WASM FFI in src/ffi.zig.
+        \\         Build: zig build (CLI + .a)  |  zig build dylib  |  zig build wasm
         \\
     ;
     std.debug.print("{s}", .{help});
