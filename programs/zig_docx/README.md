@@ -45,6 +45,19 @@ zig build
 
 Requires Zig 0.16.0-dev.3091 or later. For PDF extraction, install `poppler` (`brew install poppler` on macOS, `apt install poppler-utils` on Linux).
 
+### WASM library
+
+For embedding in a web app or serverless runtime, build the WASI reactor module:
+
+```bash
+zig build wasm
+ls zig-out/bin/zig_docx.wasm
+```
+
+The module exports the same C FFI as the native lib (`zig_docx_md_to_docx`, `zig_docx_to_markdown`, `zig_docx_info`, `zig_docx_fra_from_json`, plus matching `_free` calls and `zig_docx_version`). Imports are vanilla `wasi_snapshot_preview1` syscalls — load with Node's `node:wasi`, wasmtime, wasmer, jco, or any WASI-compatible host.
+
+`pdf` and `claude_code` modules are gated out of the WASM build (subprocess and dirent.d_name aren't available under WASI). Everything else — XML, ZIP, DrawingML, FRA, MDX — works unchanged.
+
 ---
 
 ## Usage

@@ -8,16 +8,24 @@
 //!   word/media/*            — embedded images
 
 const std = @import("std");
+const builtin = @import("builtin");
+
+// Re-exports. claude_code uses libc dirent.d_name (which doesn't exist
+// on WASI's struct dirent), and pdf shells out to pdftotext/mutool via
+// std.process.run (no subprocess in a WASI sandbox). Gate both so the
+// WASM build can compile this module without dragging them in. Native
+// builds get the full surface.
+const is_wasi = builtin.target.os.tag == .wasi;
 pub const xml = @import("xml.zig");
 pub const zip = @import("zip.zig");
 pub const rels = @import("rels.zig");
 pub const styles = @import("styles.zig");
 pub const mdx = @import("mdx.zig");
 pub const xlsx = @import("xlsx.zig");
-pub const pdf = @import("pdf.zig");
+pub const pdf = if (is_wasi) struct {} else @import("pdf.zig");
 pub const chunker = @import("chunker.zig");
 pub const anthropic = @import("anthropic.zig");
-pub const claude_code = @import("claude_code.zig");
+pub const claude_code = if (is_wasi) struct {} else @import("claude_code.zig");
 pub const md_parser = @import("md_parser.zig");
 pub const docx_writer = @import("docx_writer.zig");
 pub const zip_writer = @import("zip_writer.zig");

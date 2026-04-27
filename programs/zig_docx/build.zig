@@ -93,4 +93,46 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
+
+    // ============================================================
+    // WASM Library (zig_docx.wasm)
+    //
+    // Build with: zig build wasm
+    //
+    // Targets wasm32-wasi with wasi-libc linked so std.heap.c_allocator
+    // and the zip.zig path-based helpers compile unchanged. The module
+    // exports the same FFI surface as the native lib (zig_docx_md_to_docx,
+    // zig_docx_to_markdown, zig_docx_info, etc.). Path-based file I/O
+    // exists in the binary but the FFI never calls it — bytes flow in
+    // and out via pointer+length parameters, which the host (e.g.
+    // SvelteKit) controls.
+    //
+    // docx.zig gates the claude_code and pdf re-exports for WASI so
+    // nothing in the compile graph references dirent.d_name or
+    // std.process.run. ============================================================
+    const wasm_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .wasi,
+    });
+    const wasm_module = b.createModule(.{
+        .root_source_file = b.path("src/ffi.zig"),
+        .target = wasm_target,
+        .optimize = optimize,
+    });
+    wasm_module.link_libc = true;
+    const wasm_lib = b.addExecutable(.{
+        .name = "zig_docx",
+        .root_module = wasm_module,
+    });
+    // Reactor execution model: emits `_initialize` instead of `_start`,
+    // which is what hosts like Node's WASI.initialize() and wasmtime
+    // --invoke expect for library-style modules. Without this Zig's
+    // std.start auto-generates a _start that calls main(), and reactor-
+    // mode hosts refuse to load the module via initialize().
+    wasm_lib.wasi_exec_model = .reactor;
+    wasm_lib.entry = .disabled;
+    wasm_lib.rdynamic = true;
+
+    const wasm_step = b.step("wasm", "Build WASM library (wasm32-wasi)");
+    wasm_step.dependOn(&b.addInstallArtifact(wasm_lib, .{}).step);
 }
