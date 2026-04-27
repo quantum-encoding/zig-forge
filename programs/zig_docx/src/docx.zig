@@ -394,7 +394,7 @@ pub const classifyStyleId = styles.classifyStyleId;
 // Public API
 // =============================================================================
 
-pub fn parseDocument(allocator: std.mem.Allocator, archive: *const zip.ZipArchive) !Document {
+pub fn parseDocument(allocator: std.mem.Allocator, archive: *zip.ZipArchive) !Document {
     // 1. Parse relationships
     var relationships: []const rels.Relationship = &[_]rels.Relationship{};
     if (archive.findEntry("word/_rels/document.xml.rels")) |entry| {

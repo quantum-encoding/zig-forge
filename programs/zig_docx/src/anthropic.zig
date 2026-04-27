@@ -102,21 +102,28 @@ pub fn extractExport(
 
                         // Save attachment content to artifacts dir
                         if (getStr(att, "extracted_content")) |content| {
-                            // Create per-conversation artifact dir
-                            const conv_art_dir = std.fmt.allocPrint(allocator, "{s}/artifacts/{s}_{s}", .{
-                                output_dir, date_prefix, if (uuid.len >= 8) uuid[0..8] else uuid,
-                            }) catch continue;
-                            defer allocator.free(conv_art_dir);
-                            // Create parent artifacts/ dir first, then sub-dir
-                            const parent = std.fmt.allocPrint(allocator, "{s}/artifacts", .{output_dir}) catch continue;
-                            defer allocator.free(parent);
-                            mkdir_fn(allocator, parent);
-                            mkdir_fn(allocator, conv_art_dir);
+                            // Reject attachment names that escape the artifact
+                            // directory (CWE-22: zip-slip via JSON). Names with
+                            // `/`, `\`, `\0`, or a leading `.` are dropped — the
+                            // attachment is still listed in the markdown for the
+                            // user, but no file is written.
+                            if (isSafeAttachmentName(att_name)) {
+                                // Create per-conversation artifact dir
+                                const conv_art_dir = std.fmt.allocPrint(allocator, "{s}/artifacts/{s}_{s}", .{
+                                    output_dir, date_prefix, if (uuid.len >= 8) uuid[0..8] else uuid,
+                                }) catch continue;
+                                defer allocator.free(conv_art_dir);
+                                // Create parent artifacts/ dir first, then sub-dir
+                                const parent = std.fmt.allocPrint(allocator, "{s}/artifacts", .{output_dir}) catch continue;
+                                defer allocator.free(parent);
+                                mkdir_fn(allocator, parent);
+                                mkdir_fn(allocator, conv_art_dir);
 
-                            const art_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ conv_art_dir, att_name }) catch continue;
-                            defer allocator.free(art_path);
-                            write_fn(allocator, art_path, content);
-                            stats.artifacts += 1;
+                                const art_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ conv_art_dir, att_name }) catch continue;
+                                defer allocator.free(art_path);
+                                write_fn(allocator, art_path, content);
+                                stats.artifacts += 1;
+                            }
                         }
 
                         const att_line = std.fmt.allocPrint(allocator, "- `{s}`\n", .{att_name}) catch continue;
@@ -189,6 +196,18 @@ fn getStr(obj: std.json.Value, key: []const u8) ?[]const u8 {
     const val = obj.object.get(key) orelse return null;
     if (val != .string) return null;
     return val.string;
+}
+
+/// Returns true if `name` is safe to use as a filename inside an artifact
+/// directory — no path separators, no NUL, no leading dot (which would let
+/// the attacker write `..`, `.`, or hidden files), bounded length.
+fn isSafeAttachmentName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 255) return false;
+    if (name[0] == '.') return false;
+    for (name) |c| {
+        if (c == '/' or c == '\\' or c == 0) return false;
+    }
+    return true;
 }
 
 fn sanitizeName(allocator: std.mem.Allocator, name: []const u8) ![]u8 {

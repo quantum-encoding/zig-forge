@@ -38,11 +38,16 @@ pub const ZipArchive = struct {
     data: []const u8,
     allocator: std.mem.Allocator,
     filenames: [][]const u8, // owned copies of filenames
+    bytes_decompressed: usize = 0,
 
     const EOCD_SIGNATURE: u32 = 0x06054b50;
     const CD_SIGNATURE: u32 = 0x02014b50;
     const LOCAL_SIGNATURE: u32 = 0x04034b50;
     const MAX_FILE_SIZE: usize = 256 * 1024 * 1024; // 256 MB
+    // Hard ceilings independent of the central-directory uncompressed_size
+    // field, which is attacker-controlled. Defeats DEFLATE bombs (CWE-409).
+    const MAX_DECOMPRESSED_PER_ENTRY: usize = 256 * 1024 * 1024; // 256 MB
+    const MAX_DECOMPRESSED_TOTAL: usize = 1024 * 1024 * 1024; // 1 GB
 
     pub fn open(allocator: std.mem.Allocator, path: []const u8) ZipError!ZipArchive {
         // Read entire file into memory
@@ -120,7 +125,7 @@ pub const ZipArchive = struct {
         return null;
     }
 
-    pub fn extract(self: *const ZipArchive, entry: *const Entry) ZipError![]u8 {
+    pub fn extract(self: *ZipArchive, entry: *const Entry) ZipError![]u8 {
         // Read local file header to find data start
         const lh_offset: usize = entry.local_header_offset;
         if (lh_offset + 30 > self.data.len) return ZipError.CorruptArchive;
@@ -129,19 +134,37 @@ pub const ZipArchive = struct {
         const local_name_len = readU16(self.data, lh_offset + 26);
         const local_extra_len = readU16(self.data, lh_offset + 28);
         const data_start = lh_offset + 30 + local_name_len + local_extra_len;
-        const data_end = data_start + entry.compressed_size;
+        const data_end = std.math.add(usize, data_start, entry.compressed_size) catch
+            return ZipError.CorruptArchive;
 
         if (data_end > self.data.len) return ZipError.CorruptArchive;
 
         const compressed = self.data[data_start..data_end];
 
+        // Per-entry cap: hard ceiling, ignoring the attacker-controlled
+        // uncompressed_size hint. Cumulative cap protects against
+        // amplification across many small entries.
+        const remaining_total = std.math.sub(
+            usize,
+            MAX_DECOMPRESSED_TOTAL,
+            self.bytes_decompressed,
+        ) catch return ZipError.DecompressionFailed;
+        const cap = @min(MAX_DECOMPRESSED_PER_ENTRY, remaining_total);
+        if (cap == 0) return ZipError.DecompressionFailed;
+
         if (entry.compression_method == 0) {
             // STORED: just copy
+            if (compressed.len > cap) return ZipError.DecompressionFailed;
             const result = self.allocator.dupe(u8, compressed) catch return ZipError.OutOfMemory;
+            self.bytes_decompressed = std.math.add(usize, self.bytes_decompressed, result.len) catch
+                return ZipError.DecompressionFailed;
             return result;
         } else if (entry.compression_method == 8) {
-            // DEFLATED: decompress using std.compress.flate
-            return inflate(self.allocator, compressed, entry.uncompressed_size);
+            // DEFLATED: decompress using std.compress.flate, capped.
+            const result = try inflate(self.allocator, compressed, cap);
+            self.bytes_decompressed = std.math.add(usize, self.bytes_decompressed, result.len) catch
+                return ZipError.DecompressionFailed;
+            return result;
         } else {
             return ZipError.UnsupportedCompression;
         }
@@ -174,7 +197,7 @@ pub const ZipArchive = struct {
         return null;
     }
 
-    fn inflate(allocator: std.mem.Allocator, compressed: []const u8, _: u32) ZipError![]u8 {
+    fn inflate(allocator: std.mem.Allocator, compressed: []const u8, cap: usize) ZipError![]u8 {
         // Create an Io.Reader from compressed data
         var input_reader = std.Io.Reader.fixed(compressed);
 
@@ -184,10 +207,12 @@ pub const ZipArchive = struct {
         // Create raw deflate decompressor
         var decompressor = std.compress.flate.Decompress.init(&input_reader, .raw, &window_buf);
 
-        // Read all decompressed data
-        const output = decompressor.reader.allocRemaining(allocator, .unlimited) catch
+        // Read decompressed data with a hard cap. allocRemaining returns
+        // error.StreamTooLong if the limit would be exceeded — we treat that
+        // as DecompressionFailed (the entry is, by policy, a bomb).
+        const limit: std.Io.Limit = .limited(cap);
+        return decompressor.reader.allocRemaining(allocator, limit) catch
             return ZipError.DecompressionFailed;
-        return output;
     }
 
     fn readFile(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {

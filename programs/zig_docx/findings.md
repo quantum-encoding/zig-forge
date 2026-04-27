@@ -8,7 +8,7 @@ Severity scale: **CRITICAL** = remote code execution / arbitrary write. **HIGH**
 
 ## CRITICAL
 
-### C1. Unbounded DEFLATE — single-archive memory bomb
+### C1. Unbounded DEFLATE — single-archive memory bomb [RESOLVED 2026-04-27]
 **File:** `src/zip.zig:177-191` (`inflate`), reached from `src/zip.zig:144` (`extract`)
 **CWE-409 / CWE-1284** — uncontrolled resource consumption on decompression.
 
@@ -29,7 +29,7 @@ The third parameter — the central-directory `uncompressed_size` — is **silen
 
 ---
 
-### C2. Path-traversal arbitrary-write in Anthropic export extractor
+### C2. Path-traversal arbitrary-write in Anthropic export extractor [RESOLVED 2026-04-27]
 **File:** `src/anthropic.zig:101-118`
 **CWE-22** — improper limitation of pathname to a restricted directory ("zip-slip" via JSON).
 
