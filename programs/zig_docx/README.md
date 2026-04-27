@@ -67,7 +67,7 @@ zig build wasm
 ls zig-out/bin/zig_docx.wasm
 ```
 
-The module exports the same C FFI as the native lib — `zig_docx_md_to_docx`, `zig_docx_to_markdown`, `zig_docx_info`, `zig_docx_fra_from_json`, `zig_docx_alloc`, plus matching `_free` calls and `zig_docx_version`. Imports are vanilla `wasi_snapshot_preview1` syscalls — load with Node's `node:wasi`, wasmtime, wasmer, jco, or any WASI-compatible host.
+The module exports the same C FFI as the native lib — `zig_docx_md_to_docx`, `zig_docx_to_markdown`, `zig_docx_to_markdown_with_images`, `zig_docx_info`, `zig_docx_fra_from_json`, `zig_docx_alloc`, plus matching `_free` calls and `zig_docx_version`. Imports are vanilla `wasi_snapshot_preview1` syscalls — load with Node's `node:wasi`, wasmtime, wasmer, jco, or any WASI-compatible host.
 
 `pdf` and `claude_code` modules are gated out of the WASM build (subprocess and dirent.d_name aren't available under WASI). Everything else — XML, ZIP, DrawingML, FRA, MDX — works unchanged.
 
@@ -113,6 +113,56 @@ e.zig_docx_free(retPtr, 16);
 ```
 
 The same pattern works for `zig_docx_to_markdown` (input = DOCX bytes, output = MDX bytes) and `zig_docx_fra_from_json`. `zig_docx_info` returns a `ZigDocxInfo` struct (24 bytes); free it with `zig_docx_free_info(ptr)`.
+
+#### Surfacing embedded images (DOCX with photos)
+
+`zig_docx_to_markdown` drops embedded images on the floor — the markdown ends up referencing `./images/1-image1.png` filenames that don't exist anywhere. Use `zig_docx_to_markdown_with_images` instead to get the bytes back alongside the MDX:
+
+```js
+// sret slot is 20 bytes (5 × u32 on wasm32):
+//   mdx_data, mdx_len, images, images_count, error_msg
+const retPtr = e.zig_docx_alloc(20);
+const docxPtr = e.zig_docx_alloc(docxBytes.length);
+new Uint8Array(e.memory.buffer).set(docxBytes, docxPtr);
+
+e.zig_docx_to_markdown_with_images(retPtr, docxPtr, docxBytes.length);
+
+const dv = new DataView(e.memory.buffer);
+const mdxPtr     = dv.getUint32(retPtr + 0,  true);
+const mdxLen     = dv.getUint32(retPtr + 4,  true);
+const imagesPtr  = dv.getUint32(retPtr + 8,  true);
+const imagesCnt  = dv.getUint32(retPtr + 12, true);
+// errPtr at retPtr + 16
+
+const mdx = new TextDecoder().decode(
+    new Uint8Array(e.memory.buffer).subarray(mdxPtr, mdxPtr + mdxLen)
+);
+
+// Each ZigDocxImage = {filename: ptr, data: ptr, len: u32} = 12 bytes.
+const mem = () => new Uint8Array(e.memory.buffer);
+for (let i = 0; i < imagesCnt; i++) {
+    const base = imagesPtr + i * 12;
+    const fnPtr = dv.getUint32(base + 0, true);
+    const dPtr  = dv.getUint32(base + 4, true);
+    const dLen  = dv.getUint32(base + 8, true);
+
+    let n = 0; while (mem()[fnPtr + n] !== 0) n++;
+    const filename = new TextDecoder().decode(mem().subarray(fnPtr, fnPtr + n));
+
+    if (dPtr === 0 || dLen === 0) continue;  // image referenced but bytes missing
+    const bytes = mem().slice(dPtr, dPtr + dLen);
+    // filename is e.g. "1-image1.png" — write it under "./images/<filename>"
+    // and the markdown's ![Image 1](./images/1-image1.png) link resolves.
+    writeFileSync(`./images/${filename}`, bytes);
+}
+
+// One call frees mdx bytes, every image filename + data, the array, and any error_msg.
+e.zig_docx_free_markdown_result(retPtr);
+e.zig_docx_free(docxPtr, docxBytes.length);
+e.zig_docx_free(retPtr, 20);
+```
+
+Verified end-to-end: a DOCX with one PNG round-trips through the WASM and the extracted PNG is byte-for-byte identical to the original. If the markdown references an image whose bytes weren't in the archive, that entry has a non-null `filename` but null `data` — the embedder should keep the markdown reference but skip writing the file.
 
 ---
 
@@ -404,13 +454,15 @@ The same conversion functions exposed to the CLI are exported as a stable C ABI 
 | Function | Returns | Notes |
 |---|---|---|
 | `zig_docx_md_to_docx(md_ptr, md_len, opts)` | `ZigDocxResult` | Markdown → DOCX bytes |
-| `zig_docx_to_markdown(docx_ptr, docx_len)` | `ZigDocxResult` | DOCX → MDX bytes |
+| `zig_docx_to_markdown(docx_ptr, docx_len)` | `ZigDocxResult` | DOCX → MDX bytes (drops embedded images) |
+| `zig_docx_to_markdown_with_images(docx_ptr, docx_len)` | `ZigDocxMarkdownResult` | DOCX → MDX bytes **plus** the embedded images keyed by the filenames the markdown references |
 | `zig_docx_fra_from_json(json_ptr, json_len)` | `ZigDocxResult` | FRA JSON → DOCX bytes |
 | `zig_docx_info(docx_ptr, docx_len)` | `ZigDocxInfo` | Title, author, word/paragraph/image counts |
 | `zig_docx_alloc(len)` | `?[*]u8` | Allocate inside library memory (WASM embedders) |
 | `zig_docx_free(ptr, len)` | `void` | Release a buffer or result `data` |
 | `zig_docx_free_string(ptr)` | `void` | Release a sentinel string |
 | `zig_docx_free_info(info_ptr)` | `void` | Release `ZigDocxInfo` owned strings |
+| `zig_docx_free_markdown_result(ptr)` | `void` | Release a `ZigDocxMarkdownResult` (mdx, all images, error_msg) |
 | `zig_docx_version()` | `[*:0]const u8` | Library version string |
 
 `ZigDocxResult` is a 16-byte extern struct: `{ data: ?[*]u8, len: usize, error_msg: ?[*:0]const u8 }`. Each call is independent — no global state, safe to invoke concurrently with separate inputs. The hand-written C header lives at [`include/zig_docx.h`](./include/zig_docx.h); a Swift package wrapper is in [`swift/`](./swift/).

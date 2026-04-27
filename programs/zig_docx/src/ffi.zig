@@ -49,6 +49,29 @@ pub const ZigDocxInfo = extern struct {
     has_tables: bool = false,
 };
 
+/// One embedded image extracted from a DOCX. `filename` matches the
+/// reference written into the markdown (e.g. "1-image1.png" appears in
+/// the MDX as `./images/1-image1.png` — host writes the file under that
+/// name). `data` may be null if the markdown referenced an image whose
+/// bytes weren't present in the archive — in that case the embedder
+/// should skip writing the file but keep the markdown reference.
+pub const ZigDocxImage = extern struct {
+    filename: ?[*:0]u8,
+    data: ?[*]u8,
+    len: usize,
+};
+
+/// Result of zig_docx_to_markdown_with_images: MDX text plus the embedded
+/// images keyed by the filenames the markdown references. Free with
+/// zig_docx_free_markdown_result.
+pub const ZigDocxMarkdownResult = extern struct {
+    mdx_data: ?[*]u8,
+    mdx_len: usize,
+    images: ?[*]ZigDocxImage,
+    images_count: usize,
+    error_msg: ?[*:0]const u8,
+};
+
 // ─── Allocator ─────────────────────────────────────────────────────
 
 const allocator = std.heap.c_allocator;
@@ -84,12 +107,14 @@ fn makeError(msg: []const u8) ZigDocxResult {
 comptime {
     @export(&zig_docx_md_to_docx, .{ .name = "zig_docx_md_to_docx" });
     @export(&zig_docx_to_markdown, .{ .name = "zig_docx_to_markdown" });
+    @export(&zig_docx_to_markdown_with_images, .{ .name = "zig_docx_to_markdown_with_images" });
     @export(&zig_docx_fra_from_json, .{ .name = "zig_docx_fra_from_json" });
     @export(&zig_docx_info, .{ .name = "zig_docx_info" });
     @export(&zig_docx_alloc, .{ .name = "zig_docx_alloc" });
     @export(&zig_docx_free, .{ .name = "zig_docx_free" });
     @export(&zig_docx_free_string, .{ .name = "zig_docx_free_string" });
     @export(&zig_docx_free_info, .{ .name = "zig_docx_free_info" });
+    @export(&zig_docx_free_markdown_result, .{ .name = "zig_docx_free_markdown_result" });
     @export(&zig_docx_version, .{ .name = "zig_docx_version" });
 }
 
@@ -244,6 +269,140 @@ fn zig_docx_to_markdown(
     return .{
         .data = mdx_result.mdx.ptr,
         .len = mdx_result.mdx.len,
+        .error_msg = null,
+    };
+}
+
+/// Convert a DOCX to markdown AND surface the embedded images. Each
+/// image's `filename` matches a `./images/<filename>` reference in the
+/// emitted MDX, so the embedder can write the bytes to that path and
+/// the markdown links resolve. Free with zig_docx_free_markdown_result.
+///
+/// Use this instead of zig_docx_to_markdown when you need the images
+/// (e.g. uploading a Word doc with embedded photos to a static-site
+/// pipeline). zig_docx_to_markdown drops the images on the floor.
+fn zig_docx_to_markdown_with_images(
+    docx_ptr: [*]const u8,
+    docx_len: usize,
+) callconv(.c) ZigDocxMarkdownResult {
+    const make_err = struct {
+        fn f(msg: []const u8) ZigDocxMarkdownResult {
+            return .{
+                .mdx_data = null,
+                .mdx_len = 0,
+                .images = null,
+                .images_count = 0,
+                .error_msg = dupeToSentinel(msg),
+            };
+        }
+    }.f;
+
+    const docx_data = allocator.dupe(u8, docx_ptr[0..docx_len]) catch return make_err("Out of memory");
+
+    var archive = docx.zip.ZipArchive.openFromMemory(allocator, docx_data) catch {
+        allocator.free(docx_data);
+        return make_err("Failed to open DOCX archive");
+    };
+    defer archive.close();
+
+    var document = docx.parseDocument(allocator, &archive) catch return make_err("Failed to parse DOCX content");
+    defer document.deinit();
+
+    const mdx_result = docx.mdx.generateMdx(allocator, &document, .{}) catch return make_err("Failed to generate markdown");
+    // mdx_result holds the mdx bytes + a slice of ImageRef. We transfer
+    // the mdx bytes to the caller and rebuild the image array as owned
+    // {filename: cstring, data: bytes} pairs before document.deinit()
+    // frees document.media bytes.
+    var transferred = false;
+    defer if (!transferred) {
+        allocator.free(mdx_result.mdx);
+        for (mdx_result.images) |img| allocator.free(img.filename);
+        allocator.free(mdx_result.images);
+    };
+
+    const out_images = allocator.alloc(ZigDocxImage, mdx_result.images.len) catch return make_err("Out of memory");
+    var built: usize = 0;
+    errdefer {
+        for (out_images[0..built]) |img| {
+            if (img.filename) |fp| {
+                const s = std.mem.span(fp);
+                allocator.free(s[0 .. s.len + 1]);
+            }
+            if (img.data) |dp| if (img.len > 0) allocator.free(dp[0..img.len]);
+        }
+        allocator.free(out_images);
+    }
+
+    for (mdx_result.images) |img_ref| {
+        // Look up the image bytes in document.media via media_name. The
+        // markdown reference uses img_ref.filename ("1-image1.png"), but
+        // the bytes are keyed by the original DOCX path ("media/image1.png").
+        var bytes: ?[]const u8 = null;
+        for (document.media) |m| {
+            if (std.mem.eql(u8, m.name, img_ref.media_name)) {
+                bytes = m.data;
+                break;
+            }
+        }
+
+        const filename_z = dupeToSentinel(img_ref.filename) orelse return make_err("Out of memory");
+        var data_owned: ?[]u8 = null;
+        if (bytes) |b| {
+            data_owned = allocator.dupe(u8, b) catch {
+                const s = std.mem.span(filename_z);
+                allocator.free(s[0 .. s.len + 1]);
+                return make_err("Out of memory");
+            };
+        }
+
+        out_images[built] = .{
+            .filename = filename_z,
+            .data = if (data_owned) |d| d.ptr else null,
+            .len = if (data_owned) |d| d.len else 0,
+        };
+        built += 1;
+    }
+
+    transferred = true;
+    // Reclaim the mdx_result image refs now that we've extracted what we need.
+    for (mdx_result.images) |img| allocator.free(img.filename);
+    allocator.free(mdx_result.images);
+
+    return .{
+        .mdx_data = mdx_result.mdx.ptr,
+        .mdx_len = mdx_result.mdx.len,
+        .images = out_images.ptr,
+        .images_count = built,
+        .error_msg = null,
+    };
+}
+
+/// Free a ZigDocxMarkdownResult: the MDX bytes, every image's filename
+/// and data, the images array itself, and any error_msg. Resets all
+/// fields to null so a double-call is a no-op.
+fn zig_docx_free_markdown_result(result: *ZigDocxMarkdownResult) callconv(.c) void {
+    if (result.mdx_data) |p| {
+        if (result.mdx_len > 0) allocator.free(p[0..result.mdx_len]);
+    }
+    if (result.images) |imgs_ptr| {
+        const imgs = imgs_ptr[0..result.images_count];
+        for (imgs) |img| {
+            if (img.filename) |fp| {
+                const s = std.mem.span(fp);
+                allocator.free(s[0 .. s.len + 1]);
+            }
+            if (img.data) |dp| {
+                if (img.len > 0) allocator.free(dp[0..img.len]);
+            }
+        }
+        allocator.free(imgs);
+    }
+    if (result.error_msg) |e| zig_docx_free_string(@constCast(e));
+    result.* = .{
+        .mdx_data = null,
+        .mdx_len = 0,
+        .images = null,
+        .images_count = 0,
         .error_msg = null,
     };
 }
