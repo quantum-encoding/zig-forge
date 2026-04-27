@@ -54,9 +54,52 @@ zig build wasm
 ls zig-out/bin/zig_docx.wasm
 ```
 
-The module exports the same C FFI as the native lib (`zig_docx_md_to_docx`, `zig_docx_to_markdown`, `zig_docx_info`, `zig_docx_fra_from_json`, plus matching `_free` calls and `zig_docx_version`). Imports are vanilla `wasi_snapshot_preview1` syscalls — load with Node's `node:wasi`, wasmtime, wasmer, jco, or any WASI-compatible host.
+The module exports the same C FFI as the native lib — `zig_docx_md_to_docx`, `zig_docx_to_markdown`, `zig_docx_info`, `zig_docx_fra_from_json`, `zig_docx_alloc`, plus matching `_free` calls and `zig_docx_version`. Imports are vanilla `wasi_snapshot_preview1` syscalls — load with Node's `node:wasi`, wasmtime, wasmer, jco, or any WASI-compatible host.
 
 `pdf` and `claude_code` modules are gated out of the WASM build (subprocess and dirent.d_name aren't available under WASI). Everything else — XML, ZIP, DrawingML, FRA, MDX — works unchanged.
+
+#### Embedder calling pattern (Node WASI example)
+
+The functions that return `ZigDocxResult` (a 16-byte `{data, len, error_msg}` struct) use the wasm32 sret convention: the first argument is a pointer to a caller-allocated 16-byte slot the wasm fills in. Use `zig_docx_alloc(len)` to reserve memory inside the wasm's linear memory for both the input bytes and the sret slot, then `zig_docx_free(ptr, len)` to release them.
+
+```js
+import { WASI } from 'node:wasi';
+import { readFileSync } from 'node:fs';
+
+const wasi = new WASI({ version: 'preview1', args: [], env: {} });
+const wasm = await WebAssembly.compile(readFileSync('zig_docx.wasm'));
+const instance = await WebAssembly.instantiate(wasm, wasi.getImportObject());
+wasi.initialize(instance);
+const e = instance.exports;
+
+const md = '# Hello\n\nWorld\n';
+const mdBytes = new TextEncoder().encode(md);
+
+// 1. Reserve input + sret in wasm memory.
+const mdPtr = e.zig_docx_alloc(mdBytes.length);
+const retPtr = e.zig_docx_alloc(16);
+new Uint8Array(e.memory.buffer).set(mdBytes, mdPtr);
+
+// 2. Call. opts=0 (null) → frontmatter title/author/etc. used as-is.
+e.zig_docx_md_to_docx(retPtr, mdPtr, mdBytes.length, 0);
+
+// 3. Read result struct.
+const dv = new DataView(e.memory.buffer);
+const dataPtr = dv.getUint32(retPtr + 0, true);
+const dataLen = dv.getUint32(retPtr + 4, true);
+const errPtr  = dv.getUint32(retPtr + 8, true);
+if (errPtr !== 0) throw new Error('conversion failed');
+
+// 4. Copy DOCX bytes out of wasm memory before freeing.
+const docx = new Uint8Array(e.memory.buffer).slice(dataPtr, dataPtr + dataLen);
+
+// 5. Free everything (input, output, sret slot).
+e.zig_docx_free(dataPtr, dataLen);
+e.zig_docx_free(mdPtr, mdBytes.length);
+e.zig_docx_free(retPtr, 16);
+```
+
+The same pattern works for `zig_docx_to_markdown` (input = DOCX bytes, output = MDX bytes) and `zig_docx_fra_from_json`. `zig_docx_info` returns a `ZigDocxInfo` struct (24 bytes); free it with `zig_docx_free_info(ptr)`.
 
 ---
 

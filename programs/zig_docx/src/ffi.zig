@@ -86,10 +86,30 @@ comptime {
     @export(&zig_docx_to_markdown, .{ .name = "zig_docx_to_markdown" });
     @export(&zig_docx_fra_from_json, .{ .name = "zig_docx_fra_from_json" });
     @export(&zig_docx_info, .{ .name = "zig_docx_info" });
+    @export(&zig_docx_alloc, .{ .name = "zig_docx_alloc" });
     @export(&zig_docx_free, .{ .name = "zig_docx_free" });
     @export(&zig_docx_free_string, .{ .name = "zig_docx_free_string" });
     @export(&zig_docx_free_info, .{ .name = "zig_docx_free_info" });
     @export(&zig_docx_version, .{ .name = "zig_docx_version" });
+}
+
+// ─── Memory ────────────────────────────────────────────────────────
+
+/// Allocate `len` bytes inside the library's allocator. Returns the
+/// pointer or null on OOM / zero length.
+///
+/// Intended primarily for WASM hosts: the JS embedder calls this to
+/// reserve space inside the module's linear memory, copies input bytes
+/// into that region, then passes (ptr, len) to one of the conversion
+/// functions. After the call returns, free with zig_docx_free(ptr, len)
+/// passing the SAME length used at allocation.
+///
+/// Native callers can use this too, but typically don't need to —
+/// the conversion functions take any caller-owned buffer.
+fn zig_docx_alloc(len: usize) callconv(.c) ?[*]u8 {
+    if (len == 0) return null;
+    const buf = allocator.alloc(u8, len) catch return null;
+    return buf.ptr;
 }
 
 // ─── Core Functions ────────────────────────────────────────────────
