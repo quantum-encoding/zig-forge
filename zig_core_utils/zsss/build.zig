@@ -127,6 +127,12 @@ pub fn build(b: *std.Build) void {
     for (android_targets, android_names) |t, name| {
         const resolved = b.resolveTargetQuery(t);
 
+        // link_libc = true is required so Zig emits the right TLS
+        // access sequences for x86_64 / armv7 (those ABIs use a TLS
+        // model that depends on __tls_get_addr from Bionic libc).
+        // arm64-v8a uses a libc-free TLS model so it'd link without,
+        // but enabling for all four arches keeps the build flag matrix
+        // consistent.
         const android_static = b.addLibrary(.{
             .linkage = .static,
             .name = b.fmt("zsss-{s}", .{name}),
@@ -134,6 +140,7 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path("src/lib.zig"),
                 .target = resolved,
                 .optimize = .ReleaseFast,
+                .link_libc = true,
                 .pic = true,
             }),
         });
@@ -147,6 +154,7 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path("src/lib.zig"),
                 .target = resolved,
                 .optimize = .ReleaseFast,
+                .link_libc = true,
             }),
         });
         const android_shared_install = b.addInstallArtifact(android_shared, .{});
