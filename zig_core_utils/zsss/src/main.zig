@@ -801,7 +801,7 @@ fn doSplit(allocator: Allocator, config: *const Config) !void {
     }
 
     // Split the secret
-    var shares = try SSS.split(allocator, secret, config.threshold, config.num_shares);
+    const shares = try SSS.split(allocator, secret, config.threshold, config.num_shares);
     defer {
         for (shares) |*share| {
             share.deinit(allocator);
@@ -1521,7 +1521,7 @@ test "SSS split and combine" {
     const secret = "Hello, Shamir Secret Sharing!";
 
     // Split into 5 shares with threshold 3
-    var shares = try SSS.split(allocator, secret, 3, 5);
+    const shares = try SSS.split(allocator, secret, 3, 5);
     defer {
         for (shares) |*share| {
             share.deinit(allocator);
@@ -1543,7 +1543,7 @@ test "SSS different share combinations" {
 
     const secret = "Test secret data 12345";
 
-    var shares = try SSS.split(allocator, secret, 3, 5);
+    const shares = try SSS.split(allocator, secret, 3, 5);
     defer {
         for (shares) |*share| {
             share.deinit(allocator);
