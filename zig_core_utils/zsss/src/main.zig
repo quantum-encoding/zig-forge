@@ -23,37 +23,27 @@ const slip39 = @import("slip39.zig");
 const stego = @import("stego.zig");
 const ticket = @import("ticket.zig");
 
-/// Cross-platform cryptographic random bytes
+/// Cross-platform cryptographic random bytes. Goes direct to the OS
+/// CSPRNG — getrandom syscall on Linux (including Android, all API
+/// levels), arc4random on Darwin/BSD, /dev/urandom anywhere else.
 fn fillRandomBytes(buf: []u8) void {
     switch (builtin.os.tag) {
         .macos, .ios, .tvos, .watchos, .freebsd, .netbsd, .openbsd, .dragonfly => {
-            // Use arc4random_buf on BSD-derived systems
             std.c.arc4random_buf(buf.ptr, buf.len);
         },
         .linux => {
-            // Use getrandom on Linux
+            // SYS_getrandom is unconditional in Linux 3.17+ and Android
+            // 7.0+; using the syscall wrapper instead of std.c.getrandom
+            // avoids the libc-version gate (which excludes Android < API 28).
             var filled: usize = 0;
             while (filled < buf.len) {
-                const rc = std.c.getrandom(buf.ptr + filled, buf.len - filled, 0);
-                if (rc >= 0) {
-                    filled += @intCast(rc);
-                } else {
-                    // Fallback: if getrandom fails, try reading from /dev/urandom
-                    const fd = std.c.open("/dev/urandom", .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
-                    if (fd >= 0) {
-                        defer _ = std.c.close(fd);
-                        while (filled < buf.len) {
-                            const n = std.c.read(fd, buf.ptr + filled, buf.len - filled);
-                            if (n <= 0) break;
-                            filled += @intCast(n);
-                        }
-                    }
-                    break;
-                }
+                const rc = std.os.linux.getrandom(buf.ptr + filled, buf.len - filled, 0);
+                if (rc == 0) break; // unlikely; spin would burn CPU
+                if (@as(isize, @bitCast(rc)) < 0) break;
+                filled += rc;
             }
         },
         else => {
-            // Generic fallback using /dev/urandom
             const fd = std.c.open("/dev/urandom", .{ .ACCMODE = .RDONLY }, 0);
             if (fd >= 0) {
                 defer _ = std.c.close(fd);

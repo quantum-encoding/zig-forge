@@ -17,7 +17,9 @@ const builtin = @import("builtin");
 
 const stego = @import("stego.zig");
 
-/// Cross-platform cryptographic random bytes
+/// Cross-platform cryptographic random bytes. SYS_getrandom on Linux
+/// (works for both gnu/musl and Android-Bionic without an API-level
+/// gate); arc4random on Darwin/BSD; /dev/urandom otherwise.
 fn fillRandomBytes(buf: []u8) void {
     switch (builtin.os.tag) {
         .macos, .ios, .tvos, .watchos, .freebsd, .netbsd, .openbsd, .dragonfly => {
@@ -26,10 +28,10 @@ fn fillRandomBytes(buf: []u8) void {
         .linux => {
             var filled: usize = 0;
             while (filled < buf.len) {
-                const rc = std.c.getrandom(buf.ptr + filled, buf.len - filled, 0);
-                if (rc >= 0) {
-                    filled += @intCast(rc);
-                } else break;
+                const rc = std.os.linux.getrandom(buf.ptr + filled, buf.len - filled, 0);
+                if (rc == 0) break;
+                if (@as(isize, @bitCast(rc)) < 0) break;
+                filled += rc;
             }
         },
         else => {
