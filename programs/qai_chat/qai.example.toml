@@ -1,0 +1,53 @@
+# qai chat config — copy to ~/.config/qai/config.toml or pass with --config
+#
+# By default, qai talks directly to the upstream provider using the matching
+# env var for the API key. Point base_url at your own backend (the Zig AI
+# server or api.quantumencoding.ai) when you want billing + capability gating
+# to live server-side and never expose raw provider keys on this machine.
+
+# Which provider profile to use by default. One of:
+#   anthropic | openai | gemini | grok | deepseek
+provider = "anthropic"
+
+# Model id passed to the provider (or your backend, which forwards it).
+model = "claude-sonnet-4-6"
+
+# Sampling.
+max_tokens = 4096
+temperature = 1.0
+
+# Optional system prompt. Leave empty to omit.
+system_prompt = ""
+
+# ─── Per-provider routing ────────────────────────────────────────────────
+# Each section sets the base_url and the env var that holds the bearer.
+# Defaults below match the upstream providers — override base_url to point
+# at your backend (and switch the env var to your QAI user token).
+
+[anthropic]
+base_url = "https://api.anthropic.com"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[openai]
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+
+[gemini]
+base_url = "https://generativelanguage.googleapis.com/v1beta"
+api_key_env = "GEMINI_API_KEY"
+
+[grok]
+base_url = "https://api.x.ai/v1"
+api_key_env = "XAI_API_KEY"
+
+[deepseek]
+base_url = "https://api.deepseek.com/anthropic"
+api_key_env = "DEEPSEEK_API_KEY"
+
+# Example: route everything through your backend instead.
+# Uncomment to swap. The backend handles billing + key custody; this client
+# only carries a per-user token, so a leak caps damage to one account.
+#
+# [anthropic]
+# base_url = "https://api.quantumencoding.ai/qai/v1/proxy/anthropic"
+# api_key_env = "QAI_TOKEN"

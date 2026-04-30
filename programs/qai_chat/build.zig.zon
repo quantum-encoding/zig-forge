@@ -1,0 +1,17 @@
+.{
+    .name = .qai_chat,
+    .version = "0.1.0",
+    .fingerprint = 0xf97822081a58f320,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "qai.example.toml",
+    },
+    .dependencies = .{
+        .http_sentinel = .{
+            .path = "../http_sentinel",
+        },
+    },
+}
