@@ -203,6 +203,62 @@ check "git log reads zigit commit subject" "first" "$git_log_subject"
 
 unset TZ GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
 
+# ── Section 9: porcelain — add / commit / log ─────────────────────────────────
+echo
+echo "9. porcelain: add → commit → log"
+PR="$WORK/porcelain"
+mkdir -p "$PR"
+
+# Each side gets its own working copy with identical content + identity
+# + dates so the resulting commit OIDs must match bit-for-bit.
+ZW2="$PR/zigit"
+GW2="$PR/git"
+mkdir -p "$ZW2" "$GW2"
+( cd "$ZW2" && "$ZIGIT_BIN" init >/dev/null )
+( cd "$GW2" && git init -q )
+
+export TZ=UTC
+export GIT_AUTHOR_NAME="Porcelain Bot"
+export GIT_AUTHOR_EMAIL="porcelain@example.com"
+export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+
+for n in 1 2 3; do
+    payload="commit number $n contents"
+    echo "$payload" > "$ZW2/file$n.txt"
+    echo "$payload" > "$GW2/file$n.txt"
+
+    # Use a stable timestamp per commit so the chain is reproducible.
+    export GIT_AUTHOR_DATE="$((1700000000 + n * 100))"
+    export GIT_COMMITTER_DATE="$GIT_AUTHOR_DATE"
+
+    ( cd "$ZW2" && "$ZIGIT_BIN" add "file$n.txt" >/dev/null && "$ZIGIT_BIN" commit -m "commit $n" >/dev/null )
+    ( cd "$GW2" && git add "file$n.txt" && git commit -q -m "commit $n" )
+done
+
+# Compare the resulting HEADs (use rev-parse since real git may have
+# packed the ref or chosen a different default branch name).
+zigit_head=$(cd "$ZW2" && git rev-parse HEAD)
+git_head=$(cd "$GW2" && git rev-parse HEAD)
+check "HEAD oid after 3 commits" "$git_head" "$zigit_head"
+
+# Compare the full log via real git running against each repo.
+zigit_log=$(cd "$ZW2" && git log --pretty=oneline)
+git_log_=$(cd "$GW2" && git log --pretty=oneline)
+check "git log against zigit repo" "$git_log_" "$zigit_log"
+
+# zigit's own log should at minimum hit the same oids and subjects.
+zigit_log_self=$(cd "$ZW2" && "$ZIGIT_BIN" log | grep -E '^(commit |    )' | sed 's/^    //')
+expected_self="commit $zigit_head
+commit 3
+commit $(cd "$ZW2" && git rev-parse HEAD~1)
+commit 2
+commit $(cd "$ZW2" && git rev-parse HEAD~2)
+commit 1"
+check "zigit log content" "$expected_self" "$zigit_log_self"
+
+unset TZ GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo
 TOTAL=$((PASS + FAIL))

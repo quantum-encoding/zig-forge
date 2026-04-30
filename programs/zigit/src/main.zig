@@ -16,6 +16,9 @@ const update_index_cmd = @import("cli/update_index.zig");
 const ls_files_cmd = @import("cli/ls_files.zig");
 const write_tree_cmd = @import("cli/write_tree.zig");
 const commit_tree_cmd = @import("cli/commit_tree.zig");
+const add_cmd = @import("cli/add.zig");
+const commit_cmd = @import("cli/commit.zig");
+const log_cmd = @import("cli/log.zig");
 
 const usage =
     \\zigit — git in zig
@@ -30,6 +33,11 @@ const usage =
     \\  ls-files [-s|--stage]                         List indexed paths
     \\  write-tree                                    Persist the index as a tree, print oid
     \\  commit-tree TREE [-p PARENT]... -m MSG        Create a commit object, print oid
+    \\
+    \\Porcelain:
+    \\  add <file>...                                 Stage files (wraps update-index --add)
+    \\  commit -m <message>                           Snapshot index, advance HEAD's branch
+    \\  log [-n N]                                    Walk first-parent chain from HEAD
     \\
 ;
 
@@ -68,6 +76,12 @@ pub fn main(init: std.process.Init) !void {
         try write_tree_cmd.run(allocator, io, rest);
     } else if (std.mem.eql(u8, cmd, "commit-tree")) {
         try commit_tree_cmd.run(allocator, io, environ, rest);
+    } else if (std.mem.eql(u8, cmd, "add")) {
+        try add_cmd.run(allocator, io, rest);
+    } else if (std.mem.eql(u8, cmd, "commit")) {
+        try commit_cmd.run(allocator, io, environ, rest);
+    } else if (std.mem.eql(u8, cmd, "log")) {
+        try log_cmd.run(allocator, io, rest);
     } else if (std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) {
         try writeAll(io, .stdout, usage);
     } else {
