@@ -13,9 +13,33 @@ const std = @import("std");
 const hs = @import("http-sentinel");
 const tools = @import("tools.zig");
 const cfg_mod = @import("config.zig");
+const pricing = @import("pricing.zig");
 
 const MAX_AGENT_TURNS: u32 = 12;
 const MAX_TOOL_BLOCKS: usize = 16;
+
+/// Default system prompt for agent mode. Picked to even out cross-provider
+/// behavior: keeps narration brief, encourages parallel tool calls, points
+/// at the available toolset. The user can override via qai.toml's
+/// `system_prompt = "..."` (or by /provider during a REPL session).
+const DEFAULT_AGENT_SYSTEM_PROMPT =
+    \\You are a precise terminal assistant with access to local tools:
+    \\
+    \\- read_file(path), ls(path), grep(pattern, path, glob): read-only inspection.
+    \\- write_file(path, content), edit_file(path, old, new), bash(command): writable
+    \\  side effects — the user must approve each one before it runs.
+    \\
+    \\Guidelines:
+    \\1. Use tools when they answer the question better than guessing. Don't
+    \\   pre-narrate plans you can just execute.
+    \\2. When you need multiple independent observations, call those tools in
+    \\   parallel in a single turn — don't serialize unnecessarily.
+    \\3. For edits, prefer edit_file over rewriting the whole file. Include
+    \\   enough surrounding context in old_string to make it unique.
+    \\4. Treat tool errors literally; surface them to the user and adapt.
+    \\5. After your last tool call, give a concise final answer — don't repeat
+    \\   tool output verbatim if you can summarise.
+;
 
 /// Sessionwide allowlist for writable tools, optionally persisted to a
 /// per-project file at `.qai/approvals` so the user doesn't re-approve
@@ -196,6 +220,9 @@ pub const RunArgs = struct {
     model: []const u8,
     max_tokens: u32,
     temperature: f32,
+    /// Reasoning effort for OpenAI/Grok (ignored elsewhere). Parsed at the
+    /// call site against hs.ai.common.ReasoningEffort.
+    reasoning_effort: []const u8 = "low",
     system_prompt: ?[]const u8,
     history: *std.ArrayList(hs.ai.common.AIMessage),
     out: *std.Io.Writer,
@@ -253,6 +280,10 @@ const TurnState = struct {
     tools: std.ArrayList(ToolBlock) = .empty,
     /// Stop reason from message_delta or message_stop.
     stop_reason: std.ArrayList(u8) = .empty,
+    /// Token usage reported on message_stop. 0 if the provider didn't
+    /// surface usage on this turn.
+    input_tokens: u32 = 0,
+    output_tokens: u32 = 0,
     /// True once message_stop has fired.
     done: bool = false,
     /// True if any tool_use opened in this turn (cheap shortcut).
@@ -320,6 +351,11 @@ fn streamEventCb(event: hs.ai.common.StreamEvent, ctx_ptr: ?*anyopaque) bool {
             if (m.stop_reason) |sr| {
                 s.stop_reason.appendSlice(s.gpa, sr) catch return false;
             }
+            // Take the larger of the running counter and the new value —
+            // some providers fire message_stop twice (e.g. Anthropic emits
+            // both message_delta with usage and a separate message_stop).
+            if (m.input_tokens > s.input_tokens) s.input_tokens = m.input_tokens;
+            if (m.output_tokens > s.output_tokens) s.output_tokens = m.output_tokens;
             s.done = true;
         },
     }
@@ -361,7 +397,7 @@ fn runAnthropicStream(args: RunArgs) !void {
         .model = args.model,
         .max_tokens = args.max_tokens,
         .temperature = args.temperature,
-        .system_prompt = args.system_prompt,
+        .system_prompt = args.system_prompt orelse DEFAULT_AGENT_SYSTEM_PROMPT,
         .tools = &tool_defs,
         .stream = true,
     };
@@ -380,13 +416,16 @@ fn runAnthropicStream(args: RunArgs) !void {
         };
         defer state.deinit();
 
-        try client.sendMessageStreamingWithEvents(
+        client.sendMessageStreamingWithEvents(
             pending_prompt,
             args.history.items,
             req_cfg,
             streamEventCb,
             &state,
-        );
+        ) catch |e| {
+            try surfaceApiError(args.err, &client.http_client, e);
+            return e;
+        };
 
         // Persist the user turn the moment we have its first stream back —
         // safer than tracking "did any data arrive" ourselves.
@@ -402,6 +441,8 @@ fn runAnthropicStream(args: RunArgs) !void {
             try args.out.writeAll("\n");
             try args.out.flush();
         }
+
+        try printTurnUsage(args, &state, turn);
 
         // Build the assistant history entry. Tool calls (if any) are moved
         // into the entry; text is duplicated since state.text owns it.
@@ -727,6 +768,37 @@ fn jsonString(v: std.json.Value, key: []const u8) ?[]const u8 {
     return child.string;
 }
 
+/// Emit a one-line usage trace after a streaming turn completes. Cost is
+/// included when we can find the model in pricing.csv; otherwise tokens only.
+fn printTurnUsage(args: RunArgs, state: *const TurnState, turn: u32) !void {
+    if (state.input_tokens == 0 and state.output_tokens == 0) return;
+    if (pricing.lookup(args.gpa, args.model)) |p| {
+        const cost = pricing.estimate(p, state.input_tokens, state.output_tokens);
+        try args.err.print(
+            "[turn {d}: {d} in / {d} out · ${d:.4}]\n",
+            .{ turn + 1, state.input_tokens, state.output_tokens, cost },
+        );
+    } else {
+        try args.err.print(
+            "[turn {d}: {d} in / {d} out]\n",
+            .{ turn + 1, state.input_tokens, state.output_tokens },
+        );
+    }
+    try args.err.flush();
+}
+
+/// Print the captured upstream error body (if any) to stderr so the user
+/// sees the real reason behind a failed streaming call. Pure side-effect
+/// helper — does not consume or rethrow the error.
+pub fn surfaceApiError(err_writer: *std.Io.Writer, http_client: *hs.HttpClient, e: anyerror) !void {
+    if (http_client.last_sse_error_body) |body| {
+        try err_writer.print("\n[api error: {s}]\n{s}\n", .{ @errorName(e), body });
+    } else {
+        try err_writer.print("\n[api error: {s}] (no body captured)\n", .{@errorName(e)});
+    }
+    try err_writer.flush();
+}
+
 fn appendUser(
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -752,7 +824,7 @@ fn runGeminiStream(args: RunArgs) !void {
         .model = args.model,
         .max_tokens = args.max_tokens,
         .temperature = args.temperature,
-        .system_prompt = args.system_prompt,
+        .system_prompt = args.system_prompt orelse DEFAULT_AGENT_SYSTEM_PROMPT,
         .tools = &tool_defs,
         .stream = true,
     };
@@ -774,13 +846,16 @@ fn runGeminiStream(args: RunArgs) !void {
             .base_url = args.base_url,
         });
         defer client.deinit();
-        try client.sendMessageStreamingWithEvents(
+        client.sendMessageStreamingWithEvents(
             pending_prompt,
             args.history.items,
             req_cfg,
             streamEventCb,
             &state,
-        );
+        ) catch |e| {
+            try surfaceApiError(args.err, &client.http_client, e);
+            return e;
+        };
 
         if (first_turn) {
             try appendUser(args.gpa, args.io, args.history, args.user_prompt);
@@ -792,6 +867,8 @@ fn runGeminiStream(args: RunArgs) !void {
             try args.out.writeAll("\n");
             try args.out.flush();
         }
+
+        try printTurnUsage(args, &state, turn);
 
         const text_owned = try args.gpa.dupe(u8, state.text.items);
         var assistant_calls: ?[]hs.ai.common.ToolCall = null;
@@ -859,14 +936,15 @@ fn runResponsesApiStream(args: RunArgs, provider: ResponsesApiProvider) !void {
     var tool_defs = buildToolDefs();
 
     // GPT-5.4 and gpt-5-mini reject `effort=none` (only gpt-5.2 accepts it),
-    // and Grok ignores the field. `.low` is fastest valid across the family.
+    // and Grok ignores the field. Caller controls via cfg.reasoning_effort.
+    const effort = std.meta.stringToEnum(hs.ai.common.ReasoningEffort, args.reasoning_effort) orelse .low;
     const req_cfg: hs.ai.common.RequestConfig = .{
         .model = args.model,
         .max_tokens = args.max_tokens,
         .temperature = args.temperature,
-        .system_prompt = args.system_prompt,
+        .system_prompt = args.system_prompt orelse DEFAULT_AGENT_SYSTEM_PROMPT,
         .tools = &tool_defs,
-        .reasoning_effort = .low,
+        .reasoning_effort = effort,
         .stream = true,
     };
 
@@ -889,13 +967,16 @@ fn runResponsesApiStream(args: RunArgs, provider: ResponsesApiProvider) !void {
                     .base_url = args.base_url,
                 });
                 defer client.deinit();
-                try client.sendMessageStreamingWithEvents(
+                client.sendMessageStreamingWithEvents(
                     pending_prompt,
                     args.history.items,
                     req_cfg,
                     streamEventCb,
                     &state,
-                );
+                ) catch |e| {
+                    try surfaceApiError(args.err, &client.http_client, e);
+                    return e;
+                };
             },
             .grok => {
                 var client = try hs.ai.GrokClient.initWithConfig(args.gpa, .{
@@ -903,13 +984,16 @@ fn runResponsesApiStream(args: RunArgs, provider: ResponsesApiProvider) !void {
                     .base_url = args.base_url,
                 });
                 defer client.deinit();
-                try client.sendMessageStreamingWithEvents(
+                client.sendMessageStreamingWithEvents(
                     pending_prompt,
                     args.history.items,
                     req_cfg,
                     streamEventCb,
                     &state,
-                );
+                ) catch |e| {
+                    try surfaceApiError(args.err, &client.http_client, e);
+                    return e;
+                };
             },
         }
 
@@ -923,6 +1007,8 @@ fn runResponsesApiStream(args: RunArgs, provider: ResponsesApiProvider) !void {
             try args.out.writeAll("\n");
             try args.out.flush();
         }
+
+        try printTurnUsage(args, &state, turn);
 
         const text_owned = try args.gpa.dupe(u8, state.text.items);
         var assistant_calls: ?[]hs.ai.common.ToolCall = null;

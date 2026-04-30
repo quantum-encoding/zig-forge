@@ -38,6 +38,8 @@ const Args = struct {
     config_path: ?[]const u8 = null,
     provider_override: ?Provider = null,
     model_override: ?[]const u8 = null,
+    max_tokens_override: ?u32 = null,
+    reasoning_override: ?[]const u8 = null,
     one_shot: ?[]const u8 = null,
     tools_enabled: bool = false,
     auto_approve: bool = false,
@@ -60,6 +62,10 @@ fn parseArgs(args_in: std.process.Args) ParseArgsError!Args {
             out.provider_override = Provider.parse(raw["--provider=".len..]) orelse return error.InvalidProvider;
         } else if (std.mem.startsWith(u8, raw, "--model=")) {
             out.model_override = raw["--model=".len..];
+        } else if (std.mem.startsWith(u8, raw, "--max-tokens=")) {
+            out.max_tokens_override = std.fmt.parseInt(u32, raw["--max-tokens=".len..], 10) catch null;
+        } else if (std.mem.startsWith(u8, raw, "--reasoning=")) {
+            out.reasoning_override = raw["--reasoning=".len..];
         } else if (std.mem.eql(u8, raw, "--tools")) {
             out.tools_enabled = true;
         } else if (std.mem.eql(u8, raw, "--yes") or std.mem.eql(u8, raw, "-y")) {
@@ -88,6 +94,8 @@ const HELP =
     \\  --config=PATH       Path to qai.toml (default: ./qai.toml, then ~/.config/qai/config.toml)
     \\  --provider=NAME     Override provider: anthropic|openai|gemini|grok|deepseek
     \\  --model=ID          Override model id
+    \\  --max-tokens=N      Override max output tokens (default 4096)
+    \\  --reasoning=LEVEL   Override OpenAI/Grok reasoning effort: minimal|low|medium|high|xhigh
     \\  --tools             Enable tool calling. Read-only tools (read_file, ls,
     \\                      grep) run unprompted. Writable tools (write_file,
     \\                      edit_file, bash) prompt y/n before each call.
@@ -176,24 +184,31 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     if (args.model_override) |m| cfg.model = try cfg.arena.allocator().dupe(u8, m);
+    if (args.max_tokens_override) |t| cfg.max_tokens = t;
+    if (args.reasoning_override) |r| cfg.reasoning_effort = try cfg.arena.allocator().dupe(u8, r);
 
-    const settings = cfg.active();
+    // Verify the active provider's key is set right now — failing here is
+    // friendlier than waiting for the first turn. Crucially, we DO NOT cache
+    // the value: the API key is re-resolved every dispatchTurn so /provider
+    // switches mid-session pick up the right key for the new provider.
+    {
+        const settings = cfg.active();
+        if (env.get(settings.api_key_env) == null) {
+            try err.print(
+                "error: env var {s} is not set. (provider={s}, base_url={s})\n" ++
+                    "       set it, or edit qai.toml to point at a different api_key_env.\n",
+                .{ settings.api_key_env, cfg.provider.name(), settings.base_url },
+            );
+            try err.flush();
+            std.process.exit(1);
+        }
 
-    const api_key = env.get(settings.api_key_env) orelse {
         try err.print(
-            "error: env var {s} is not set. (provider={s}, base_url={s})\n" ++
-                "       set it, or edit qai.toml to point at a different api_key_env.\n",
-            .{ settings.api_key_env, cfg.provider.name(), settings.base_url },
+            "qai · provider={s} · model={s} · base_url={s}\n",
+            .{ cfg.provider.name(), cfg.model, settings.base_url },
         );
         try err.flush();
-        std.process.exit(1);
-    };
-
-    try err.print(
-        "qai · provider={s} · model={s} · base_url={s}\n",
-        .{ cfg.provider.name(), cfg.model, settings.base_url },
-    );
-    try err.flush();
+    }
 
     var history: std.ArrayList(hs.ai.common.AIMessage) = .empty;
     defer {
@@ -218,7 +233,7 @@ pub fn main(init: std.process.Init) !void {
     const in = &stdin_reader.interface;
 
     if (args.one_shot) |prompt| {
-        try dispatchTurn(gpa, io, &cfg, api_key, &history, prompt, out, err, in, &approvals, args);
+        try dispatchTurn(gpa, io, &cfg, env, &history, prompt, out, err, in, &approvals, args);
         try out.writeAll("\n");
         try out.flush();
         return;
@@ -248,7 +263,7 @@ pub fn main(init: std.process.Init) !void {
 
         try out.writeAll("\n");
         try out.flush();
-        dispatchTurn(gpa, io, &cfg, api_key, &history, line, out, err, in, &approvals, args) catch |e| {
+        dispatchTurn(gpa, io, &cfg, env, &history, line, out, err, in, &approvals, args) catch |e| {
             try err.print("\n[error: {s}]\n", .{@errorName(e)});
             try err.flush();
         };
@@ -458,7 +473,7 @@ fn dispatchTurn(
     gpa: std.mem.Allocator,
     io: std.Io,
     cfg: *cfg_mod.Config,
-    api_key: []const u8,
+    env: *const std.process.Environ.Map,
     history: *std.ArrayList(hs.ai.common.AIMessage),
     prompt: []const u8,
     out: *std.Io.Writer,
@@ -467,8 +482,19 @@ fn dispatchTurn(
     approvals: *agent.Approvals,
     args: Args,
 ) !void {
+    const settings = cfg.active();
+    // Re-resolve the API key per-turn so /provider switches mid-session pick
+    // up the right key for the new provider.
+    const api_key = env.get(settings.api_key_env) orelse {
+        try err.print(
+            "[error] env var {s} not set for provider={s}.\n",
+            .{ settings.api_key_env, cfg.provider.name() },
+        );
+        try err.flush();
+        return;
+    };
+
     if (args.tools_enabled) {
-        const settings = cfg.active();
         return agent.run(.{
             .gpa = gpa,
             .io = io,
@@ -479,6 +505,7 @@ fn dispatchTurn(
             .model = cfg.model,
             .max_tokens = cfg.max_tokens,
             .temperature = cfg.temperature,
+            .reasoning_effort = cfg.reasoning_effort,
             .system_prompt = cfg.system_prompt,
             .history = history,
             .out = out,
@@ -489,7 +516,7 @@ fn dispatchTurn(
             .user_prompt = prompt,
         });
     }
-    return runTurn(gpa, io, cfg, api_key, history, prompt, out);
+    return runTurn(gpa, io, cfg, api_key, history, prompt, out, err);
 }
 
 fn runTurn(
@@ -500,6 +527,7 @@ fn runTurn(
     history: *std.ArrayList(hs.ai.common.AIMessage),
     prompt: []const u8,
     out: *std.Io.Writer,
+    err_writer: *std.Io.Writer,
 ) !void {
     var reply: std.ArrayList(u8) = .empty;
     defer reply.deinit(gpa);
@@ -523,7 +551,10 @@ fn runTurn(
                 .provider_name = cfg.provider.name(),
             });
             defer client.deinit();
-            try client.sendMessageStreamingWithContext(prompt, history.items, req_cfg, streamCallback, &ctx);
+            client.sendMessageStreamingWithContext(prompt, history.items, req_cfg, streamCallback, &ctx) catch |e| {
+                try agent.surfaceApiError(err_writer, &client.http_client, e);
+                return e;
+            };
         },
         .openai => {
             var client = try hs.ai.OpenAIClient.initWithConfig(gpa, .{
@@ -531,7 +562,10 @@ fn runTurn(
                 .base_url = settings.base_url,
             });
             defer client.deinit();
-            try client.sendMessageStreamingWithContext(prompt, history.items, req_cfg, streamCallback, &ctx);
+            client.sendMessageStreamingWithContext(prompt, history.items, req_cfg, streamCallback, &ctx) catch |e| {
+                try agent.surfaceApiError(err_writer, &client.http_client, e);
+                return e;
+            };
         },
         .grok => {
             var client = try hs.ai.GrokClient.initWithConfig(gpa, .{
@@ -539,7 +573,10 @@ fn runTurn(
                 .base_url = settings.base_url,
             });
             defer client.deinit();
-            try client.sendMessageStreamingWithContext(prompt, history.items, req_cfg, streamCallback, &ctx);
+            client.sendMessageStreamingWithContext(prompt, history.items, req_cfg, streamCallback, &ctx) catch |e| {
+                try agent.surfaceApiError(err_writer, &client.http_client, e);
+                return e;
+            };
         },
         .gemini => {
             var client = try hs.ai.GeminiClient.initWithConfig(gpa, .{
@@ -547,7 +584,10 @@ fn runTurn(
                 .base_url = settings.base_url,
             });
             defer client.deinit();
-            try client.sendMessageStreamingWithContext(prompt, history.items, req_cfg, streamCallback, &ctx);
+            client.sendMessageStreamingWithContext(prompt, history.items, req_cfg, streamCallback, &ctx) catch |e| {
+                try agent.surfaceApiError(err_writer, &client.http_client, e);
+                return e;
+            };
         },
     }
 

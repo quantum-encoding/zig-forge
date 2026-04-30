@@ -16,6 +16,11 @@ model = "claude-sonnet-4-6"
 max_tokens = 4096
 temperature = 1.0
 
+# Reasoning effort for OpenAI / Grok GPT-5-family models.
+# Valid: "minimal" | "low" | "medium" | "high" | "xhigh".
+# "low" is fastest valid across gpt-5-mini and gpt-5.4. Anthropic ignores it.
+reasoning_effort = "low"
+
 # Optional system prompt. Leave empty to omit.
 system_prompt = ""
 

@@ -67,6 +67,10 @@ pub const Config = struct {
     model: []const u8,
     max_tokens: u32,
     temperature: f32,
+    /// Reasoning effort for OpenAI/Grok GPT-5 family (ignored elsewhere).
+    /// Valid values: "minimal", "low", "medium", "high", "xhigh".
+    /// "low" is fastest while still valid across gpt-5-mini and gpt-5.4.
+    reasoning_effort: []const u8,
     system_prompt: ?[]const u8,
     /// One entry per Provider enum variant. Indexed by @intFromEnum(Provider).
     providers: [5]ProviderSettings,
@@ -105,6 +109,7 @@ pub fn defaults(gpa: std.mem.Allocator) !Config {
         .model = try a.dupe(u8, provider.defaultModel()),
         .max_tokens = 4096,
         .temperature = 1.0,
+        .reasoning_effort = try a.dupe(u8, "low"),
         .system_prompt = null,
         .providers = providers,
         .arena = arena,
@@ -154,6 +159,8 @@ pub fn parse(gpa: std.mem.Allocator, text: []const u8) !Config {
                 cfg.max_tokens = parseU32(raw_val) orelse cfg.max_tokens;
             } else if (eql(key, "temperature")) {
                 cfg.temperature = parseF32(raw_val) orelse cfg.temperature;
+            } else if (eql(key, "reasoning_effort")) {
+                cfg.reasoning_effort = try parseString(a, raw_val);
             } else if (eql(key, "system_prompt")) {
                 const v = try parseString(a, raw_val);
                 cfg.system_prompt = if (v.len == 0) null else v;
