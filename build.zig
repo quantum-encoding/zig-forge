@@ -78,6 +78,7 @@ pub fn build(b: *std.Build) void {
     buildProgram(b, "zig-ingest", target, optimize, build_all);
     buildProgram(b, "zdedupe", target, optimize, build_all);
     buildProgram(b, "register_forge", target, optimize, build_all);
+    buildProgram(b, "zigit", target, optimize, build_all);
 
     // ── Hardware and Embedded ────────────────────────────────────────
     buildProgram(b, "zig_hal", target, optimize, build_all);
