@@ -140,6 +140,69 @@ git_prefix=$(cd "$GW" && git cat-file -p "$prefix6" | shasum -a 1 | awk '{print 
 zigit_prefix=$(cd "$GW" && "$ZIGIT_BIN" cat-file -p "$prefix6" | shasum -a 1 | awk '{print $1}')
 check "prefix lookup ($prefix6)" "$git_prefix" "$zigit_prefix"
 
+# ── Section 6: index parity (update-index + ls-files) ─────────────────────────
+echo
+echo "6. update-index → ls-files parity"
+IDX="$WORK/index-test"
+mkdir -p "$IDX"
+( cd "$IDX" && "$ZIGIT_BIN" init >/dev/null )
+echo "alpha" > "$IDX/a.txt"
+echo "beta" > "$IDX/b.txt"
+mkdir -p "$IDX/sub/deep"
+echo "gamma" > "$IDX/sub/c.txt"
+echo "delta" > "$IDX/sub/deep/d.txt"
+
+( cd "$IDX" && "$ZIGIT_BIN" update-index --add a.txt b.txt sub/c.txt sub/deep/d.txt )
+
+# git reads the zigit-written index transparently — both should agree.
+git_paths=$(cd "$IDX" && git ls-files)
+zigit_paths=$(cd "$IDX" && "$ZIGIT_BIN" ls-files)
+check "ls-files paths" "$git_paths" "$zigit_paths"
+
+git_stage=$(cd "$IDX" && git ls-files -s)
+zigit_stage=$(cd "$IDX" && "$ZIGIT_BIN" ls-files -s)
+check "ls-files -s lines" "$git_stage" "$zigit_stage"
+
+# ── Section 7: write-tree parity (across nested dirs) ─────────────────────────
+echo
+echo "7. write-tree parity"
+git_tree=$(cd "$IDX" && git write-tree)
+zigit_tree=$(cd "$IDX" && "$ZIGIT_BIN" write-tree)
+check "root tree oid" "$git_tree" "$zigit_tree"
+
+# Pretty-print a sub-tree both ways.
+sub_oid=$(cd "$IDX" && git ls-tree "$git_tree" sub | awk '{print $3}')
+git_sub_pretty=$(cd "$IDX" && git cat-file -p "$sub_oid")
+zigit_sub_pretty=$(cd "$IDX" && "$ZIGIT_BIN" cat-file -p "$sub_oid")
+check "tree pretty-print (sub)" "$git_sub_pretty" "$zigit_sub_pretty"
+
+# ── Section 8: commit-tree round-trip ─────────────────────────────────────────
+echo
+echo "8. commit-tree round-trip"
+# zigit currently always emits +0000 for the tz offset (computing the
+# local offset takes a libc detour we don't link yet). Force git to do
+# the same by exporting TZ=UTC for both sides — when zigit gains real
+# tz handling in Phase 5 we can drop this.
+export TZ=UTC
+export GIT_AUTHOR_NAME="Parity Bot"
+export GIT_AUTHOR_EMAIL="parity@example.com"
+export GIT_AUTHOR_DATE=1700000000
+export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+export GIT_COMMITTER_DATE=$GIT_AUTHOR_DATE
+
+# Same identity + same date + same tree → same commit oid both ways.
+zigit_commit=$(cd "$IDX" && "$ZIGIT_BIN" commit-tree "$zigit_tree" -m "first")
+git_commit=$(cd "$IDX" && echo "first" | git commit-tree "$git_tree")
+check "commit oid (same identity, date, tree)" "$git_commit" "$zigit_commit"
+
+# git can `log` a zigit-written commit when pointed at it via a ref.
+( cd "$IDX" && git update-ref refs/heads/main "$zigit_commit" )
+git_log_subject=$(cd "$IDX" && git log -1 --format='%s' refs/heads/main)
+check "git log reads zigit commit subject" "first" "$git_log_subject"
+
+unset TZ GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo
 TOTAL=$((PASS + FAIL))
