@@ -84,6 +84,84 @@ fn compareForTree(a: Entry, b: Entry) i32 {
     return @as(i32, a_tail) - @as(i32, b_tail);
 }
 
+/// One leaf produced by `walkRecursive`. `path` is the full
+/// slash-joined path from the root tree (e.g. "sub/deep/d.txt").
+/// Owned by the returned ArrayList.
+pub const Leaf = struct {
+    path: []u8,
+    mode: u32,
+    oid: Oid,
+};
+
+/// Recursively flatten a tree into its blob leaves. Caller owns the
+/// returned slice and each `path` inside it (free both with the
+/// supplied allocator).
+///
+/// `read_object` is a callback rather than a direct LooseStore
+/// reference so callers using a different store (e.g. an in-memory
+/// snapshot in tests) can plug in. The bytes returned by the
+/// callback are borrowed for the duration of the call only — we
+/// re-iterate as we recurse, so the callback must own them long
+/// enough for the iteration to finish (LooseStore.read does this).
+pub fn walkRecursive(
+    allocator: std.mem.Allocator,
+    root_oid: Oid,
+    context: anytype,
+    /// Signature: fn(@TypeOf(context), Oid) ![]const u8
+    /// Returns the raw tree-object payload bytes for `oid`.
+    /// Caller owns the returned slice — walkRecursive frees it.
+    comptime read_tree: anytype,
+) ![]Leaf {
+    var leaves: std.ArrayListUnmanaged(Leaf) = .empty;
+    errdefer {
+        for (leaves.items) |l| allocator.free(l.path);
+        leaves.deinit(allocator);
+    }
+
+    var prefix_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer prefix_buf.deinit(allocator);
+
+    try walkInto(allocator, &leaves, &prefix_buf, root_oid, context, read_tree);
+    return try leaves.toOwnedSlice(allocator);
+}
+
+fn walkInto(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(Leaf),
+    prefix: *std.ArrayListUnmanaged(u8),
+    tree_oid: Oid,
+    context: anytype,
+    comptime read_tree: anytype,
+) !void {
+    const payload = try read_tree(context, tree_oid);
+    defer allocator.free(payload);
+
+    var it: Iterator = .{ .bytes = payload };
+    while (try it.next()) |entry| {
+        const saved_len = prefix.items.len;
+        defer prefix.shrinkRetainingCapacity(saved_len);
+
+        if (saved_len > 0) try prefix.append(allocator, '/');
+        try prefix.appendSlice(allocator, entry.name);
+
+        if (entry.isTree()) {
+            try walkInto(allocator, out, prefix, entry.oid, context, read_tree);
+        } else {
+            const path_copy = try allocator.dupe(u8, prefix.items);
+            try out.append(allocator, .{
+                .path = path_copy,
+                .mode = entry.mode,
+                .oid = entry.oid,
+            });
+        }
+    }
+}
+
+pub fn freeLeaves(allocator: std.mem.Allocator, leaves: []Leaf) void {
+    for (leaves) |l| allocator.free(l.path);
+    allocator.free(leaves);
+}
+
 /// Iterator over a tree object's payload bytes — borrows the slice,
 /// doesn't allocate.
 pub const Iterator = struct {

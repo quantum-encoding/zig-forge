@@ -7,6 +7,8 @@ pub const index = @import("index/mod.zig");
 pub const refs = @import("refs/mod.zig");
 pub const config = @import("config.zig");
 pub const repo = @import("repo.zig");
+pub const workdir = @import("workdir.zig");
+pub const diff = @import("diff/mod.zig");
 
 pub const Oid = object.Oid;
 pub const Kind = object.Kind;
@@ -20,4 +22,6 @@ test {
     _ = refs;
     _ = config;
     _ = repo;
+    _ = workdir;
+    _ = diff;
 }

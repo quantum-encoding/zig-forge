@@ -19,6 +19,8 @@ const commit_tree_cmd = @import("cli/commit_tree.zig");
 const add_cmd = @import("cli/add.zig");
 const commit_cmd = @import("cli/commit.zig");
 const log_cmd = @import("cli/log.zig");
+const status_cmd = @import("cli/status.zig");
+const diff_cmd = @import("cli/diff.zig");
 
 const usage =
     \\zigit — git in zig
@@ -38,6 +40,8 @@ const usage =
     \\  add <file>...                                 Stage files (wraps update-index --add)
     \\  commit -m <message>                           Snapshot index, advance HEAD's branch
     \\  log [-n N]                                    Walk first-parent chain from HEAD
+    \\  status [-s|--porcelain]                       Show staged / unstaged / untracked changes
+    \\  diff [--cached] [pathspec...]                 Unified diff: workdir vs index, or index vs HEAD
     \\
 ;
 
@@ -82,6 +86,10 @@ pub fn main(init: std.process.Init) !void {
         try commit_cmd.run(allocator, io, environ, rest);
     } else if (std.mem.eql(u8, cmd, "log")) {
         try log_cmd.run(allocator, io, rest);
+    } else if (std.mem.eql(u8, cmd, "status")) {
+        try status_cmd.run(allocator, io, rest);
+    } else if (std.mem.eql(u8, cmd, "diff")) {
+        try diff_cmd.run(allocator, io, rest);
     } else if (std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) {
         try writeAll(io, .stdout, usage);
     } else {

@@ -259,6 +259,97 @@ check "zigit log content" "$expected_self" "$zigit_log_self"
 
 unset TZ GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
 
+# ── Section 10: status ────────────────────────────────────────────────────────
+echo
+echo "10. status — staged / unstaged / untracked"
+ST="$WORK/status-test"
+mkdir -p "$ST"
+( cd "$ST" && "$ZIGIT_BIN" init >/dev/null )
+
+export TZ=UTC
+export GIT_AUTHOR_NAME="Status Bot"
+export GIT_AUTHOR_EMAIL="status@example.com"
+export GIT_AUTHOR_DATE=1700000000
+export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+export GIT_COMMITTER_DATE=$GIT_AUTHOR_DATE
+
+# Empty repo, no commits, no files: clean.
+zigit_porc=$(cd "$ST" && "$ZIGIT_BIN" status -s)
+git_porc=$(cd "$ST" && git status --porcelain)
+check "porcelain on empty repo" "$git_porc" "$zigit_porc"
+
+# Single untracked file.
+echo alpha > "$ST/a.txt"
+zigit_porc=$(cd "$ST" && "$ZIGIT_BIN" status -s)
+git_porc=$(cd "$ST" && git status --porcelain)
+check "porcelain with untracked" "$git_porc" "$zigit_porc"
+
+# After staging — new file in index, untracked is gone.
+( cd "$ST" && "$ZIGIT_BIN" add a.txt >/dev/null )
+zigit_porc=$(cd "$ST" && "$ZIGIT_BIN" status -s)
+git_porc=$(cd "$ST" && git status --porcelain)
+check "porcelain with staged new" "$git_porc" "$zigit_porc"
+
+# Commit, then mix: modify a.txt (unstaged), add b.txt (staged), drop c.txt (untracked).
+( cd "$ST" && "$ZIGIT_BIN" commit -m "first" >/dev/null )
+echo "more" >> "$ST/a.txt"
+echo "beta" > "$ST/b.txt"
+( cd "$ST" && "$ZIGIT_BIN" add b.txt >/dev/null )
+echo "gamma" > "$ST/c.txt"
+zigit_porc=$(cd "$ST" && "$ZIGIT_BIN" status -s)
+git_porc=$(cd "$ST" && git status --porcelain)
+check "porcelain with mixed states" "$git_porc" "$zigit_porc"
+
+# After staging the modification too (a.txt now has both staged + further unstaged).
+echo "even more" >> "$ST/a.txt"
+( cd "$ST" && "$ZIGIT_BIN" add a.txt >/dev/null )
+echo "yet more" >> "$ST/a.txt"
+zigit_porc=$(cd "$ST" && "$ZIGIT_BIN" status -s)
+git_porc=$(cd "$ST" && git status --porcelain)
+check "porcelain MM (staged + unstaged on same file)" "$git_porc" "$zigit_porc"
+
+unset TZ GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
+
+# ── Section 11: diff ──────────────────────────────────────────────────────────
+echo
+echo "11. diff — workdir vs index, --cached, multi-hunk"
+DT="$WORK/diff-test"
+mkdir -p "$DT"
+( cd "$DT" && "$ZIGIT_BIN" init >/dev/null )
+
+export TZ=UTC
+export GIT_AUTHOR_NAME="Diff Bot"
+export GIT_AUTHOR_EMAIL="diff@example.com"
+export GIT_AUTHOR_DATE=1700000000
+export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+export GIT_COMMITTER_DATE=$GIT_AUTHOR_DATE
+
+# Multi-line file with replace + insert + delete.
+printf 'one\ntwo\nthree\nfour\nfive\nsix\n' > "$DT/poem.txt"
+( cd "$DT" && "$ZIGIT_BIN" add poem.txt >/dev/null )
+( cd "$DT" && "$ZIGIT_BIN" commit -m "init" >/dev/null )
+
+printf 'ONE\ntwo\nthree\nINSERTED\nfour\nsix\nseven\n' > "$DT/poem.txt"
+zigit_diff=$(cd "$DT" && "$ZIGIT_BIN" diff)
+git_diff=$(cd "$DT" && git diff)
+check "diff workdir vs index (multi-hunk)" "$git_diff" "$zigit_diff"
+
+( cd "$DT" && "$ZIGIT_BIN" add poem.txt >/dev/null )
+zigit_cached=$(cd "$DT" && "$ZIGIT_BIN" diff --cached)
+git_cached=$(cd "$DT" && git diff --cached)
+check "diff --cached" "$git_cached" "$zigit_cached"
+
+# After commit, workdir changes only.
+( cd "$DT" && "$ZIGIT_BIN" commit -m "edit" >/dev/null )
+printf 'ZZZ\ntwo\nthree\nINSERTED\nfour\nsix\nseven\nNEW_LAST\n' > "$DT/poem.txt"
+zigit_diff=$(cd "$DT" && "$ZIGIT_BIN" diff)
+git_diff=$(cd "$DT" && git diff)
+check "diff after commit (workdir vs index)" "$git_diff" "$zigit_diff"
+
+unset TZ GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo
 TOTAL=$((PASS + FAIL))
