@@ -526,6 +526,195 @@ pub const AnthropicClient = struct {
         }
     }
 
+    /// Tool-aware streaming context — emits structured events (text deltas,
+    /// tool_use start/delta/stop, message_stop) so callers can drive an
+    /// agent loop without buffering the whole response.
+    const EventCtx = struct {
+        user_callback: common.StreamEventCallback,
+        user_context: ?*anyopaque,
+        /// Block kind tracked per index so `content_block_stop` can be
+        /// dispatched correctly. `is_tool[i]` is true iff content block `i`
+        /// was started as a `tool_use` block.
+        is_tool: [64]bool = @splat(false),
+    };
+
+    fn eventStreamHandler(event: HttpClient.SseEvent, raw_ctx: ?*anyopaque) bool {
+        const ctx: *EventCtx = @alignCast(@ptrCast(raw_ctx orelse return false));
+        if (event.done) return false;
+
+        // Use a temporary GPA for the per-event JSON parse; nothing here
+        // outlives this function call so we can leak the GPA on early-return
+        // — but we don't, we always deinit.
+        var arena_buf: [16 * 1024]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&arena_buf);
+        const a = fba.allocator();
+
+        const parsed = std.json.parseFromSlice(std.json.Value, a, event.data, .{}) catch return true;
+        defer parsed.deinit();
+
+        const obj = parsed.value.object;
+        const event_type_v = obj.get("type") orelse return true;
+        if (event_type_v != .string) return true;
+        const event_type = event_type_v.string;
+
+        if (std.mem.eql(u8, event_type, "content_block_start")) {
+            const idx = readIndex(obj) orelse return true;
+            const block = obj.get("content_block") orelse return true;
+            if (block != .object) return true;
+            const block_type_v = block.object.get("type") orelse return true;
+            if (block_type_v != .string) return true;
+
+            if (std.mem.eql(u8, block_type_v.string, "tool_use")) {
+                if (idx < ctx.is_tool.len) ctx.is_tool[idx] = true;
+                const id_v = block.object.get("id") orelse return true;
+                const name_v = block.object.get("name") orelse return true;
+                if (id_v != .string or name_v != .string) return true;
+
+                return ctx.user_callback(.{ .tool_use_start = .{
+                    .index = idx,
+                    .id = id_v.string,
+                    .name = name_v.string,
+                } }, ctx.user_context);
+            }
+            // text block — no event needed; deltas will arrive next.
+            return true;
+        }
+
+        if (std.mem.eql(u8, event_type, "content_block_delta")) {
+            const idx = readIndex(obj) orelse return true;
+            const delta = obj.get("delta") orelse return true;
+            if (delta != .object) return true;
+            const dtype_v = delta.object.get("type") orelse return true;
+            if (dtype_v != .string) return true;
+
+            if (std.mem.eql(u8, dtype_v.string, "text_delta")) {
+                const text_v = delta.object.get("text") orelse return true;
+                if (text_v != .string) return true;
+                return ctx.user_callback(.{ .text_delta = .{
+                    .index = idx,
+                    .text = text_v.string,
+                } }, ctx.user_context);
+            } else if (std.mem.eql(u8, dtype_v.string, "input_json_delta")) {
+                const pj_v = delta.object.get("partial_json") orelse return true;
+                if (pj_v != .string) return true;
+                return ctx.user_callback(.{ .tool_input_delta = .{
+                    .index = idx,
+                    .partial_json = pj_v.string,
+                } }, ctx.user_context);
+            }
+            return true;
+        }
+
+        if (std.mem.eql(u8, event_type, "content_block_stop")) {
+            const idx = readIndex(obj) orelse return true;
+            return ctx.user_callback(.{ .block_stop = .{ .index = idx } }, ctx.user_context);
+        }
+
+        if (std.mem.eql(u8, event_type, "message_delta")) {
+            // Carries final stop_reason on the delta object.
+            const delta = obj.get("delta") orelse return true;
+            if (delta != .object) return true;
+            const sr_v = delta.object.get("stop_reason") orelse return true;
+            if (sr_v != .string) return true;
+            return ctx.user_callback(.{ .message_stop = .{ .stop_reason = sr_v.string } }, ctx.user_context);
+        }
+
+        if (std.mem.eql(u8, event_type, "message_stop")) {
+            return ctx.user_callback(.{ .message_stop = .{ .stop_reason = null } }, ctx.user_context);
+        }
+
+        return true;
+    }
+
+    fn readIndex(obj: std.json.ObjectMap) ?u32 {
+        const v = obj.get("index") orelse return null;
+        return switch (v) {
+            .integer => |i| if (i >= 0 and i <= std.math.maxInt(u32)) @intCast(i) else null,
+            else => null,
+        };
+    }
+
+    /// Tool-aware streaming with full conversation history.
+    /// The richer `StreamEventCallback` lets callers drive an agent loop:
+    /// text deltas, tool_use start, tool argument JSON deltas, block stops,
+    /// and message stop arrive as structured events. Slices inside events
+    /// are transient — dupe to keep them.
+    pub fn sendMessageStreamingWithEvents(
+        self: *AnthropicClient,
+        prompt: []const u8,
+        context: []const common.AIMessage,
+        config: common.RequestConfig,
+        callback: common.StreamEventCallback,
+        cb_context: ?*anyopaque,
+    ) !void {
+        var messages: std.ArrayList(std.json.Value) = .empty;
+        defer messages.deinit(self.allocator);
+
+        var parsed_objects: std.ArrayList(std.json.Parsed(std.json.Value)) = .empty;
+        defer {
+            for (parsed_objects.items) |*p| p.deinit();
+            parsed_objects.deinit(self.allocator);
+        }
+
+        for (context) |msg| {
+            const parsed = try self.buildMessageJson(msg);
+            try parsed_objects.append(self.allocator, parsed);
+            try messages.append(self.allocator, parsed.value);
+        }
+
+        if (prompt.len > 0) {
+            const escaped = try common.escapeJsonString(self.allocator, prompt);
+            defer self.allocator.free(escaped);
+            const prompt_json = try std.fmt.allocPrint(self.allocator,
+                \\{{"role":"user","content":"{s}"}}
+            , .{escaped});
+            defer self.allocator.free(prompt_json);
+
+            const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, prompt_json, .{});
+            try parsed_objects.append(self.allocator, parsed);
+            try messages.append(self.allocator, parsed.value);
+        }
+
+        var base_payload = try self.buildRequestPayload(messages.items, config);
+        defer self.allocator.free(base_payload);
+
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(self.allocator);
+        if (base_payload.len > 0 and base_payload[base_payload.len - 1] == '}') {
+            try payload.appendSlice(self.allocator, base_payload[0 .. base_payload.len - 1]);
+            try payload.appendSlice(self.allocator, ",\"stream\":true}");
+        } else {
+            try payload.appendSlice(self.allocator, base_payload);
+        }
+
+        const endpoint = try std.fmt.allocPrint(self.allocator, "{s}/v1/messages", .{self.base_url});
+        defer self.allocator.free(endpoint);
+
+        const headers = [_]std.http.Header{
+            .{ .name = "Content-Type", .value = "application/json" },
+            .{ .name = "x-api-key", .value = self.api_key },
+            .{ .name = "anthropic-version", .value = DEFAULT_ANTHROPIC_VERSION },
+            .{ .name = "User-Agent", .value = "zig-http-sentinel/1.0" },
+        };
+
+        var ctx = EventCtx{
+            .user_callback = callback,
+            .user_context = cb_context,
+        };
+
+        const status = try self.http_client.postSseStream(
+            endpoint,
+            &headers,
+            payload.items,
+            eventStreamHandler,
+            &ctx,
+        );
+
+        if (@intFromEnum(status) >= 400) {
+            return common.AIError.ApiRequestFailed;
+        }
+    }
+
     fn handleErrorResponse(
         self: *AnthropicClient,
         status: std.http.Status,

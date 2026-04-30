@@ -37,10 +37,16 @@ const common = @import("common.zig");
 pub const GeminiClient = struct {
     http_client: HttpClient,
     api_key: []const u8,
+    base_url: []const u8,
     allocator: std.mem.Allocator,
 
-    const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
+    pub const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
     const MAX_TURNS = 100;
+
+    pub const Config = struct {
+        api_key: []const u8,
+        base_url: []const u8 = DEFAULT_BASE_URL,
+    };
 
     /// Available Gemini models
     pub const Models = struct {
@@ -50,9 +56,14 @@ pub const GeminiClient = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator, api_key: []const u8) !GeminiClient {
+        return initWithConfig(allocator, .{ .api_key = api_key });
+    }
+
+    pub fn initWithConfig(allocator: std.mem.Allocator, config: Config) !GeminiClient {
         return .{
             .http_client = try HttpClient.init(allocator),
-            .api_key = api_key,
+            .api_key = config.api_key,
+            .base_url = config.base_url,
             .allocator = allocator,
         };
     }
@@ -112,7 +123,7 @@ pub const GeminiClient = struct {
         // Streaming endpoint: streamGenerateContent with alt=sse
         const endpoint = try std.fmt.allocPrint(self.allocator,
             "{s}/models/{s}:streamGenerateContent?key={s}&alt=sse",
-            .{ GEMINI_API_BASE, config.model, self.api_key },
+            .{ self.base_url, config.model, self.api_key },
         );
         defer self.allocator.free(endpoint);
 
@@ -154,6 +165,291 @@ pub const GeminiClient = struct {
 
                 if (!callback(text.string, context)) return;
             }
+        }
+    }
+
+    /// Send a streaming message with full conversation history.
+    /// Builds a `contents` array (Gemini's canonical multi-turn shape) and points at
+    /// `:streamGenerateContent?alt=sse` so deltas arrive as SSE.
+    pub fn sendMessageStreamingWithContext(
+        self: *GeminiClient,
+        prompt: []const u8,
+        history: []const common.AIMessage,
+        config: common.RequestConfig,
+        callback: common.StreamCallback,
+        cb_context: ?*anyopaque,
+    ) !void {
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(self.allocator);
+
+        try payload.appendSlice(self.allocator, "{\"contents\":[");
+
+        var first = true;
+        for (history) |msg| {
+            if (!first) try payload.appendSlice(self.allocator, ",");
+            first = false;
+            try self.appendMessage(&payload, msg);
+        }
+
+        if (prompt.len > 0) {
+            if (!first) try payload.appendSlice(self.allocator, ",");
+            const escaped = try common.escapeJsonString(self.allocator, prompt);
+            defer self.allocator.free(escaped);
+            const user_part = try std.fmt.allocPrint(self.allocator,
+                \\{{"role":"user","parts":[{{"text":"{s}"}}]}}
+            , .{escaped});
+            defer self.allocator.free(user_part);
+            try payload.appendSlice(self.allocator, user_part);
+        }
+
+        try payload.appendSlice(self.allocator, "]");
+
+        if (config.system_prompt) |system| {
+            const sys_escaped = try common.escapeJsonString(self.allocator, system);
+            defer self.allocator.free(sys_escaped);
+            const sys_part = try std.fmt.allocPrint(self.allocator,
+                \\,"systemInstruction":{{"parts":[{{"text":"{s}"}}]}}
+            , .{sys_escaped});
+            defer self.allocator.free(sys_part);
+            try payload.appendSlice(self.allocator, sys_part);
+        }
+
+        const gen_config = try std.fmt.allocPrint(self.allocator,
+            \\,"generationConfig":{{"temperature":{d},"maxOutputTokens":{}}}
+        , .{ config.temperature, config.max_tokens });
+        defer self.allocator.free(gen_config);
+        try payload.appendSlice(self.allocator, gen_config);
+
+        try payload.appendSlice(self.allocator, "}");
+
+        const endpoint = try std.fmt.allocPrint(self.allocator,
+            "{s}/models/{s}:streamGenerateContent?key={s}&alt=sse",
+            .{ self.base_url, config.model, self.api_key },
+        );
+        defer self.allocator.free(endpoint);
+
+        const headers = [_]std.http.Header{
+            .{ .name = "Content-Type", .value = "application/json" },
+        };
+
+        var stream = try self.http_client.postStreaming(endpoint, &headers, payload.items);
+        defer stream.deinit();
+
+        if (@intFromEnum(stream.status) >= 400) {
+            return common.AIError.ApiRequestFailed;
+        }
+
+        while (stream.next()) |event| {
+            if (event.done) break;
+
+            const parsed = std.json.parseFromSlice(
+                std.json.Value,
+                self.allocator,
+                event.data,
+                .{},
+            ) catch continue;
+            defer parsed.deinit();
+
+            const candidates = parsed.value.object.get("candidates") orelse continue;
+            if (candidates != .array or candidates.array.items.len == 0) continue;
+
+            const candidate = candidates.array.items[0];
+            const content = candidate.object.get("content") orelse continue;
+            const parts = content.object.get("parts") orelse continue;
+            if (parts != .array) continue;
+
+            for (parts.array.items) |part| {
+                const text = part.object.get("text") orelse continue;
+                if (text != .string) continue;
+                if (!callback(text.string, cb_context)) return;
+            }
+        }
+    }
+
+    /// Tool-aware streaming SSE handler for Gemini.
+    /// Each event delivers `candidates[].content.parts[]` plus an optional
+    /// `finishReason`. Text parts emit text_delta (always at index 0). Each
+    /// functionCall part gets a fresh content-block index, with the args
+    /// re-serialized and emitted as one tool_input_delta + block_stop.
+    /// `finishReason` (or last event) → message_stop.
+    const EventCtx = struct {
+        gpa: std.mem.Allocator,
+        user_callback: common.StreamEventCallback,
+        user_context: ?*anyopaque,
+        next_tool_index: u32 = 1,
+    };
+
+    fn eventStreamHandler(event: HttpClient.SseEvent, raw_ctx: ?*anyopaque) bool {
+        const ctx: *EventCtx = @alignCast(@ptrCast(raw_ctx orelse return false));
+        if (event.done) return false;
+
+        var arena_buf: [16 * 1024]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&arena_buf);
+        const a = fba.allocator();
+
+        const parsed = std.json.parseFromSlice(std.json.Value, a, event.data, .{}) catch return true;
+        defer parsed.deinit();
+
+        const candidates = parsed.value.object.get("candidates") orelse return true;
+        if (candidates != .array or candidates.array.items.len == 0) return true;
+
+        const candidate = candidates.array.items[0];
+        if (candidate.object.get("content")) |content| {
+            if (content.object.get("parts")) |parts| {
+                if (parts == .array) {
+                    for (parts.array.items) |part| {
+                        if (part.object.get("text")) |t| {
+                            if (t == .string) {
+                                if (!ctx.user_callback(.{ .text_delta = .{
+                                    .index = 0,
+                                    .text = t.string,
+                                } }, ctx.user_context)) return false;
+                            }
+                        } else if (part.object.get("functionCall")) |fc| {
+                            if (fc != .object) continue;
+                            const name_v = fc.object.get("name") orelse continue;
+                            if (name_v != .string) continue;
+                            const args_v = fc.object.get("args") orelse continue;
+
+                            const idx = ctx.next_tool_index;
+                            ctx.next_tool_index += 1;
+
+                            // Synthesize a stable id — Gemini doesn't return one.
+                            const synth_id = std.fmt.allocPrint(ctx.gpa, "gem-{d}", .{idx}) catch continue;
+                            defer ctx.gpa.free(synth_id);
+
+                            if (!ctx.user_callback(.{ .tool_use_start = .{
+                                .index = idx,
+                                .id = synth_id,
+                                .name = name_v.string,
+                            } }, ctx.user_context)) return false;
+
+                            // Serialize args back to a JSON string for the agent loop.
+                            var args_buf: std.Io.Writer.Allocating = .init(ctx.gpa);
+                            defer args_buf.deinit();
+                            var stringify: std.json.Stringify = .{
+                                .writer = &args_buf.writer,
+                                .options = .{},
+                            };
+                            stringify.write(args_v) catch continue;
+
+                            if (!ctx.user_callback(.{ .tool_input_delta = .{
+                                .index = idx,
+                                .partial_json = args_buf.written(),
+                            } }, ctx.user_context)) return false;
+
+                            if (!ctx.user_callback(.{ .block_stop = .{ .index = idx } }, ctx.user_context)) return false;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (candidate.object.get("finishReason")) |fr| {
+            if (fr == .string) {
+                _ = ctx.user_callback(.{ .message_stop = .{ .stop_reason = fr.string } }, ctx.user_context);
+            }
+        }
+
+        return true;
+    }
+
+    /// Tool-aware streaming with full conversation history.
+    /// Mirrors the Anthropic / OpenAI / Grok paths: emits structured events
+    /// through a `StreamEventCallback` so callers can drive an agent loop.
+    pub fn sendMessageStreamingWithEvents(
+        self: *GeminiClient,
+        prompt: []const u8,
+        history: []const common.AIMessage,
+        config: common.RequestConfig,
+        callback: common.StreamEventCallback,
+        cb_context: ?*anyopaque,
+    ) !void {
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(self.allocator);
+
+        try payload.appendSlice(self.allocator, "{\"contents\":[");
+
+        var first = true;
+        for (history) |msg| {
+            if (!first) try payload.appendSlice(self.allocator, ",");
+            first = false;
+            try self.appendMessage(&payload, msg);
+        }
+
+        if (prompt.len > 0) {
+            if (!first) try payload.appendSlice(self.allocator, ",");
+            const escaped = try common.escapeJsonString(self.allocator, prompt);
+            defer self.allocator.free(escaped);
+            const user_part = try std.fmt.allocPrint(self.allocator,
+                \\{{"role":"user","parts":[{{"text":"{s}"}}]}}
+            , .{escaped});
+            defer self.allocator.free(user_part);
+            try payload.appendSlice(self.allocator, user_part);
+        }
+        try payload.appendSlice(self.allocator, "]");
+
+        if (config.system_prompt) |system| {
+            const sys_escaped = try common.escapeJsonString(self.allocator, system);
+            defer self.allocator.free(sys_escaped);
+            const sys_part = try std.fmt.allocPrint(self.allocator,
+                \\,"systemInstruction":{{"parts":[{{"text":"{s}"}}]}}
+            , .{sys_escaped});
+            defer self.allocator.free(sys_part);
+            try payload.appendSlice(self.allocator, sys_part);
+        }
+
+        if (config.tools) |tool_defs| {
+            try payload.appendSlice(self.allocator, ",\"tools\":[{\"functionDeclarations\":[");
+            for (tool_defs, 0..) |tool, i| {
+                if (i > 0) try payload.appendSlice(self.allocator, ",");
+                const escaped_name = try common.escapeJsonString(self.allocator, tool.name);
+                defer self.allocator.free(escaped_name);
+                const escaped_desc = try common.escapeJsonString(self.allocator, tool.description);
+                defer self.allocator.free(escaped_desc);
+                const tj = try std.fmt.allocPrint(self.allocator,
+                    \\{{"name":"{s}","description":"{s}","parameters":{s}}}
+                , .{ escaped_name, escaped_desc, tool.input_schema });
+                defer self.allocator.free(tj);
+                try payload.appendSlice(self.allocator, tj);
+            }
+            try payload.appendSlice(self.allocator, "]}]");
+        }
+
+        const gen_config = try std.fmt.allocPrint(self.allocator,
+            \\,"generationConfig":{{"temperature":{d},"maxOutputTokens":{}}}
+        , .{ config.temperature, config.max_tokens });
+        defer self.allocator.free(gen_config);
+        try payload.appendSlice(self.allocator, gen_config);
+
+        try payload.appendSlice(self.allocator, "}");
+
+        const endpoint = try std.fmt.allocPrint(self.allocator,
+            "{s}/models/{s}:streamGenerateContent?key={s}&alt=sse",
+            .{ self.base_url, config.model, self.api_key },
+        );
+        defer self.allocator.free(endpoint);
+
+        const headers = [_]std.http.Header{
+            .{ .name = "Content-Type", .value = "application/json" },
+        };
+
+        var ev_ctx = EventCtx{
+            .gpa = self.allocator,
+            .user_callback = callback,
+            .user_context = cb_context,
+        };
+
+        const status = try self.http_client.postSseStream(
+            endpoint,
+            &headers,
+            payload.items,
+            eventStreamHandler,
+            &ev_ctx,
+        );
+
+        if (@intFromEnum(status) >= 400) {
+            return common.AIError.ApiRequestFailed;
         }
     }
 
@@ -511,7 +807,7 @@ pub const GeminiClient = struct {
         const endpoint = try std.fmt.allocPrint(
             self.allocator,
             "{s}/models/{s}:generateContent?key={s}",
-            .{ GEMINI_API_BASE, model, self.api_key },
+            .{ self.base_url, model, self.api_key },
         );
         defer self.allocator.free(endpoint);
 
@@ -738,7 +1034,7 @@ pub const GeminiClient = struct {
     pub fn getFileStatus(self: *GeminiClient, file_name: []const u8) ![]u8 {
         const url = try std.fmt.allocPrint(self.allocator,
             "{s}/{s}?key={s}",
-            .{ GEMINI_API_BASE, file_name, self.api_key },
+            .{ self.base_url, file_name, self.api_key },
         );
         defer self.allocator.free(url);
 
@@ -797,7 +1093,7 @@ pub const GeminiClient = struct {
     pub fn listFiles(self: *GeminiClient) ![]u8 {
         const url = try std.fmt.allocPrint(self.allocator,
             "{s}/files?key={s}",
-            .{ GEMINI_API_BASE, self.api_key },
+            .{ self.base_url, self.api_key },
         );
         defer self.allocator.free(url);
 
@@ -819,7 +1115,7 @@ pub const GeminiClient = struct {
     pub fn deleteFile(self: *GeminiClient, file_name: []const u8) !void {
         const url = try std.fmt.allocPrint(self.allocator,
             "{s}/{s}?key={s}",
-            .{ GEMINI_API_BASE, file_name, self.api_key },
+            .{ self.base_url, file_name, self.api_key },
         );
         defer self.allocator.free(url);
 
@@ -883,7 +1179,7 @@ pub const GeminiClient = struct {
         const endpoint = try std.fmt.allocPrint(
             self.allocator,
             "{s}/models/{s}:embedContent?key={s}",
-            .{ GEMINI_API_BASE, EMBEDDING_MODEL, self.api_key },
+            .{ self.base_url, EMBEDDING_MODEL, self.api_key },
         );
         defer self.allocator.free(endpoint);
 

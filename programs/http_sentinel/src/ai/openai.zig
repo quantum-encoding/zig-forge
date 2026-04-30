@@ -37,10 +37,16 @@ const common = @import("common.zig");
 pub const OpenAIClient = struct {
     http_client: HttpClient,
     api_key: []const u8,
+    base_url: []const u8,
     allocator: std.mem.Allocator,
 
-    const OPENAI_API_BASE = "https://api.openai.com/v1";
+    pub const DEFAULT_BASE_URL = "https://api.openai.com/v1";
     const MAX_TURNS = 100;
+
+    pub const Config = struct {
+        api_key: []const u8,
+        base_url: []const u8 = DEFAULT_BASE_URL,
+    };
 
     /// Available OpenAI models
     pub const Models = struct {
@@ -74,9 +80,14 @@ pub const OpenAIClient = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator, api_key: []const u8) !OpenAIClient {
+        return initWithConfig(allocator, .{ .api_key = api_key });
+    }
+
+    pub fn initWithConfig(allocator: std.mem.Allocator, config: Config) !OpenAIClient {
         return .{
             .http_client = try HttpClient.init(allocator),
-            .api_key = api_key,
+            .api_key = config.api_key,
+            .base_url = config.base_url,
             .allocator = allocator,
         };
     }
@@ -128,7 +139,7 @@ pub const OpenAIClient = struct {
         try payload.appendSlice(self.allocator, "}");
 
         // Make streaming request
-        const endpoint = try std.fmt.allocPrint(self.allocator, "{s}/responses", .{OPENAI_API_BASE});
+        const endpoint = try std.fmt.allocPrint(self.allocator, "{s}/responses", .{self.base_url});
         defer self.allocator.free(endpoint);
 
         const auth_header = try std.fmt.allocPrint(self.allocator, "Bearer {s}", .{self.api_key});
@@ -170,6 +181,292 @@ pub const OpenAIClient = struct {
                 if (delta != .string) continue;
 
                 if (!callback(delta.string, context)) break;
+            } else if (std.mem.eql(u8, event_type.string, "response.completed")) {
+                break;
+            }
+        }
+    }
+
+    /// Tool-aware streaming SSE handler for the OpenAI Responses API.
+    /// Translates output_item.added (function_call) /
+    /// function_call_arguments.delta / function_call_arguments.done /
+    /// output_text.delta / response.completed into common.StreamEvent.
+    const EventCtx = struct {
+        user_callback: common.StreamEventCallback,
+        user_context: ?*anyopaque,
+    };
+
+    fn eventStreamHandler(event: HttpClient.SseEvent, raw_ctx: ?*anyopaque) bool {
+        const ctx: *EventCtx = @alignCast(@ptrCast(raw_ctx orelse return false));
+        if (event.done) return false;
+
+        var arena_buf: [16 * 1024]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&arena_buf);
+        const a = fba.allocator();
+
+        const parsed = std.json.parseFromSlice(std.json.Value, a, event.data, .{}) catch return true;
+        defer parsed.deinit();
+
+        const obj = parsed.value.object;
+        const type_v = obj.get("type") orelse return true;
+        if (type_v != .string) return true;
+        const t = type_v.string;
+
+        if (std.mem.eql(u8, t, "response.output_text.delta")) {
+            const delta_v = obj.get("delta") orelse return true;
+            if (delta_v != .string) return true;
+            const idx = readU32(obj, "output_index") orelse 0;
+            return ctx.user_callback(.{ .text_delta = .{ .index = idx, .text = delta_v.string } }, ctx.user_context);
+        }
+
+        if (std.mem.eql(u8, t, "response.output_item.added")) {
+            const item = obj.get("item") orelse return true;
+            if (item != .object) return true;
+            const item_type = item.object.get("type") orelse return true;
+            if (item_type != .string) return true;
+            if (!std.mem.eql(u8, item_type.string, "function_call")) return true;
+
+            const call_id_v = item.object.get("call_id") orelse return true;
+            const name_v = item.object.get("name") orelse return true;
+            if (call_id_v != .string or name_v != .string) return true;
+            const idx = readU32(obj, "output_index") orelse 0;
+
+            return ctx.user_callback(.{ .tool_use_start = .{
+                .index = idx,
+                .id = call_id_v.string,
+                .name = name_v.string,
+            } }, ctx.user_context);
+        }
+
+        if (std.mem.eql(u8, t, "response.function_call_arguments.delta")) {
+            const delta_v = obj.get("delta") orelse return true;
+            if (delta_v != .string) return true;
+            const idx = readU32(obj, "output_index") orelse 0;
+            return ctx.user_callback(.{ .tool_input_delta = .{ .index = idx, .partial_json = delta_v.string } }, ctx.user_context);
+        }
+
+        if (std.mem.eql(u8, t, "response.function_call_arguments.done")) {
+            const idx = readU32(obj, "output_index") orelse 0;
+            return ctx.user_callback(.{ .block_stop = .{ .index = idx } }, ctx.user_context);
+        }
+
+        if (std.mem.eql(u8, t, "response.completed")) {
+            const sr: ?[]const u8 = blk: {
+                if (obj.get("response")) |r| {
+                    if (r == .object) {
+                        if (r.object.get("status")) |s| if (s == .string) break :blk s.string;
+                    }
+                }
+                break :blk null;
+            };
+            return ctx.user_callback(.{ .message_stop = .{ .stop_reason = sr } }, ctx.user_context);
+        }
+
+        return true;
+    }
+
+    fn readU32(obj: std.json.ObjectMap, key: []const u8) ?u32 {
+        const v = obj.get(key) orelse return null;
+        return switch (v) {
+            .integer => |i| if (i >= 0 and i <= std.math.maxInt(u32)) @intCast(i) else null,
+            else => null,
+        };
+    }
+
+    /// Tool-aware streaming with full conversation history.
+    /// Mirrors AnthropicClient.sendMessageStreamingWithEvents — emits structured
+    /// events through `StreamEventCallback` so callers can drive an agent loop.
+    pub fn sendMessageStreamingWithEvents(
+        self: *OpenAIClient,
+        prompt: []const u8,
+        history: []const common.AIMessage,
+        config: common.RequestConfig,
+        callback: common.StreamEventCallback,
+        cb_context: ?*anyopaque,
+    ) !void {
+        // Build structured input array: history (handles function_call /
+        // function_call_output items) → user prompt.
+        var input_json: std.ArrayList(u8) = .empty;
+        defer input_json.deinit(self.allocator);
+        try input_json.appendSlice(self.allocator, "[");
+        var first = true;
+
+        for (history) |msg| {
+            try self.appendResponsesApiItem(&input_json, msg, &first);
+        }
+
+        if (prompt.len > 0) {
+            if (!first) try input_json.appendSlice(self.allocator, ",");
+            const escaped = try common.escapeJsonString(self.allocator, prompt);
+            defer self.allocator.free(escaped);
+            const um = try std.fmt.allocPrint(self.allocator,
+                \\{{"role":"user","content":"{s}"}}
+            , .{escaped});
+            defer self.allocator.free(um);
+            try input_json.appendSlice(self.allocator, um);
+        }
+        try input_json.appendSlice(self.allocator, "]");
+
+        // Tools array.
+        var tools_json: std.ArrayList(u8) = .empty;
+        defer tools_json.deinit(self.allocator);
+        try tools_json.appendSlice(self.allocator, "[");
+        if (config.tools) |tool_defs| {
+            for (tool_defs, 0..) |tool, i| {
+                if (i > 0) try tools_json.appendSlice(self.allocator, ",");
+                const escaped_name = try common.escapeJsonString(self.allocator, tool.name);
+                defer self.allocator.free(escaped_name);
+                const escaped_desc = try common.escapeJsonString(self.allocator, tool.description);
+                defer self.allocator.free(escaped_desc);
+                const tj = try std.fmt.allocPrint(self.allocator,
+                    \\{{"type":"function","name":"{s}","description":"{s}","parameters":{s}}}
+                , .{ escaped_name, escaped_desc, tool.input_schema });
+                defer self.allocator.free(tj);
+                try tools_json.appendSlice(self.allocator, tj);
+            }
+        }
+        try tools_json.appendSlice(self.allocator, "]");
+
+        var optional_parts: std.ArrayList(u8) = .empty;
+        defer optional_parts.deinit(self.allocator);
+        if (config.system_prompt) |system| {
+            const escaped_sys = try common.escapeJsonString(self.allocator, system);
+            defer self.allocator.free(escaped_sys);
+            const inst = try std.fmt.allocPrint(self.allocator,
+                \\,"instructions":"{s}"
+            , .{escaped_sys});
+            defer self.allocator.free(inst);
+            try optional_parts.appendSlice(self.allocator, inst);
+        }
+
+        const payload = try std.fmt.allocPrint(self.allocator,
+            \\{{"model":"{s}","stream":true,"input":{s},"tools":{s},"reasoning":{{"effort":"{s}"}},"max_output_tokens":{}{s}}}
+        , .{
+            config.model,
+            input_json.items,
+            tools_json.items,
+            config.reasoning_effort.toString(),
+            config.max_tokens,
+            optional_parts.items,
+        });
+        defer self.allocator.free(payload);
+
+        const endpoint = try std.fmt.allocPrint(self.allocator, "{s}/responses", .{self.base_url});
+        defer self.allocator.free(endpoint);
+
+        const auth_header = try std.fmt.allocPrint(self.allocator, "Bearer {s}", .{self.api_key});
+        defer self.allocator.free(auth_header);
+
+        const headers = [_]std.http.Header{
+            .{ .name = "Content-Type", .value = "application/json" },
+            .{ .name = "Authorization", .value = auth_header },
+        };
+
+        var ev_ctx = EventCtx{
+            .user_callback = callback,
+            .user_context = cb_context,
+        };
+
+        const status = try self.http_client.postSseStream(
+            endpoint,
+            &headers,
+            payload,
+            eventStreamHandler,
+            &ev_ctx,
+        );
+
+        if (@intFromEnum(status) >= 400) {
+            return common.AIError.ApiRequestFailed;
+        }
+    }
+
+    /// Send a streaming message with full conversation history.
+    /// Uses Responses API with structured `input` array so role boundaries are preserved.
+    /// Tools are not supported in this path — use sendMessageWithContext for tool flows.
+    pub fn sendMessageStreamingWithContext(
+        self: *OpenAIClient,
+        prompt: []const u8,
+        history: []const common.AIMessage,
+        config: common.RequestConfig,
+        callback: common.StreamCallback,
+        cb_context: ?*anyopaque,
+    ) !void {
+        // Build structured input array: previous turns + current user prompt.
+        var input_json: std.ArrayList(u8) = .empty;
+        defer input_json.deinit(self.allocator);
+
+        try input_json.appendSlice(self.allocator, "[");
+        var first = true;
+        for (history) |msg| {
+            try self.appendResponsesApiItem(&input_json, msg, &first);
+        }
+        if (prompt.len > 0) {
+            if (!first) try input_json.appendSlice(self.allocator, ",");
+            const escaped = try common.escapeJsonString(self.allocator, prompt);
+            defer self.allocator.free(escaped);
+            const user_msg = try std.fmt.allocPrint(self.allocator,
+                \\{{"role":"user","content":"{s}"}}
+            , .{escaped});
+            defer self.allocator.free(user_msg);
+            try input_json.appendSlice(self.allocator, user_msg);
+        }
+        try input_json.appendSlice(self.allocator, "]");
+
+        // Optional system prompt → instructions field.
+        var optional_parts: std.ArrayList(u8) = .empty;
+        defer optional_parts.deinit(self.allocator);
+        if (config.system_prompt) |system| {
+            const escaped_sys = try common.escapeJsonString(self.allocator, system);
+            defer self.allocator.free(escaped_sys);
+            const inst = try std.fmt.allocPrint(self.allocator,
+                \\,"instructions":"{s}"
+            , .{escaped_sys});
+            defer self.allocator.free(inst);
+            try optional_parts.appendSlice(self.allocator, inst);
+        }
+
+        const payload = try std.fmt.allocPrint(self.allocator,
+            \\{{"model":"{s}","stream":true,"input":{s}{s}}}
+        , .{ config.model, input_json.items, optional_parts.items });
+        defer self.allocator.free(payload);
+
+        const endpoint = try std.fmt.allocPrint(self.allocator, "{s}/responses", .{self.base_url});
+        defer self.allocator.free(endpoint);
+
+        const auth_header = try std.fmt.allocPrint(self.allocator, "Bearer {s}", .{self.api_key});
+        defer self.allocator.free(auth_header);
+
+        const headers = [_]std.http.Header{
+            .{ .name = "Content-Type", .value = "application/json" },
+            .{ .name = "Authorization", .value = auth_header },
+        };
+
+        var stream = try self.http_client.postStreaming(endpoint, &headers, payload);
+        defer stream.deinit();
+
+        if (@intFromEnum(stream.status) >= 400) {
+            return common.AIError.ApiRequestFailed;
+        }
+
+        while (stream.next()) |event| {
+            if (event.done) break;
+
+            const parsed = std.json.parseFromSlice(
+                std.json.Value,
+                self.allocator,
+                event.data,
+                .{},
+            ) catch continue;
+            defer parsed.deinit();
+
+            const obj = parsed.value.object;
+            const event_type = obj.get("type") orelse continue;
+            if (event_type != .string) continue;
+
+            if (std.mem.eql(u8, event_type.string, "response.output_text.delta")) {
+                const delta = obj.get("delta") orelse continue;
+                if (delta != .string) continue;
+                if (!callback(delta.string, cb_context)) break;
             } else if (std.mem.eql(u8, event_type.string, "response.completed")) {
                 break;
             }
@@ -613,7 +910,7 @@ pub const OpenAIClient = struct {
         const endpoint = try std.fmt.allocPrint(
             self.allocator,
             "{s}/responses",
-            .{OPENAI_API_BASE},
+            .{self.base_url},
         );
         defer self.allocator.free(endpoint);
 

@@ -265,9 +265,12 @@ pub const HttpClient = struct {
             return status;
         }
 
-        // Reader setup — transfer_buffer is also on this stack frame
+        // Reader setup — transfer + decompress buffers on this stack frame.
+        // readerDecompressing transparently handles gzip/deflate; identity falls through.
         var transfer_buffer: [16384]u8 = undefined;
-        const reader = response.reader(&transfer_buffer);
+        var decompress_buffer: [std.compress.flate.max_window_len]u8 = undefined;
+        var decompress: std.http.Decompress = undefined;
+        const reader = response.readerDecompressing(&transfer_buffer, &decompress, &decompress_buffer);
 
         // Read SSE events line-by-line using takeDelimiter
         // This blocks on the TLS connection waiting for each chunk — true streaming

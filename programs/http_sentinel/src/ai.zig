@@ -33,6 +33,7 @@ pub const ResponseManager = @import("ai/response_manager.zig").ResponseManager;
 
 // Provider clients — text generation
 pub const ClaudeClient = @import("ai/claude.zig").ClaudeClient;
+pub const AnthropicClient = @import("ai/anthropic.zig").AnthropicClient;
 pub const DeepSeekClient = @import("ai/deepseek.zig").DeepSeekClient;
 pub const GeminiClient = @import("ai/gemini.zig").GeminiClient;
 pub const GrokClient = @import("ai/grok.zig").GrokClient;

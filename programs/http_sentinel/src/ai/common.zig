@@ -776,6 +776,54 @@ pub const StreamCallback = *const fn (
     context: ?*anyopaque,
 ) bool;
 
+/// Structured streaming event for tool-aware streaming.
+/// Slices inside the variants point into transient SSE buffers — the callback
+/// must dupe anything it wants to keep past the call.
+pub const StreamEvent = union(enum) {
+    /// A chunk of assistant text. Append to display + history-buffer.
+    text_delta: TextDelta,
+    /// A new tool_use content block has started. id and name are now known;
+    /// arguments will arrive piecewise as `tool_input_delta` events ending in
+    /// a `tool_use_stop` for the same index.
+    tool_use_start: ToolUseStart,
+    /// A chunk of the JSON arguments for the tool_use block at `index`.
+    tool_input_delta: ToolInputDelta,
+    /// The content block at `index` is complete.
+    /// For text blocks this just signals "no more text deltas for this block".
+    /// For tool_use blocks the accumulated input_delta JSON is now complete.
+    block_stop: BlockStop,
+    /// The model has finished its turn. `stop_reason` mirrors the API field
+    /// (`end_turn`, `tool_use`, `max_tokens`, …).
+    message_stop: MessageStop,
+
+    pub const TextDelta = struct {
+        /// Content block index this delta belongs to.
+        index: u32,
+        text: []const u8,
+    };
+    pub const ToolUseStart = struct {
+        index: u32,
+        id: []const u8,
+        name: []const u8,
+    };
+    pub const ToolInputDelta = struct {
+        index: u32,
+        partial_json: []const u8,
+    };
+    pub const BlockStop = struct {
+        index: u32,
+    };
+    pub const MessageStop = struct {
+        stop_reason: ?[]const u8 = null,
+    };
+};
+
+/// Callback for tool-aware streaming. Return false to abort the stream.
+pub const StreamEventCallback = *const fn (
+    event: StreamEvent,
+    context: ?*anyopaque,
+) bool;
+
 /// Utility: Generate a unique ID for messages/conversations (pure Zig — no libc)
 /// Uses io.random() for cryptographically secure randomness
 pub fn generateId(allocator: std.mem.Allocator, io: std.Io) ![]u8 {

@@ -19,7 +19,12 @@ const common = @import("common.zig");
 pub const DeepSeekClient = struct {
     client: anthropic.AnthropicClient,
 
-    const DEEPSEEK_ANTHROPIC_BASE = "https://api.deepseek.com/anthropic";
+    pub const DEFAULT_BASE_URL = "https://api.deepseek.com/anthropic";
+
+    pub const Config = struct {
+        api_key: []const u8,
+        base_url: []const u8 = DEFAULT_BASE_URL,
+    };
 
     /// Available DeepSeek models
     pub const Models = struct {
@@ -29,10 +34,14 @@ pub const DeepSeekClient = struct {
 
     /// Initialize DeepSeek client with API key
     pub fn init(allocator: std.mem.Allocator, api_key: []const u8) !DeepSeekClient {
+        return initWithConfig(allocator, .{ .api_key = api_key });
+    }
+
+    pub fn initWithConfig(allocator: std.mem.Allocator, config: Config) !DeepSeekClient {
         return .{
             .client = try anthropic.AnthropicClient.init(allocator, .{
-                .api_key = api_key,
-                .base_url = DEEPSEEK_ANTHROPIC_BASE,
+                .api_key = config.api_key,
+                .base_url = config.base_url,
                 .provider_name = "deepseek",
             }),
         };
