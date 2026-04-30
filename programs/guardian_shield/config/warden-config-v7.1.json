@@ -1,0 +1,184 @@
+{
+  "_comment": "warden-config.json - Guardian Shield V7.1 Configuration",
+  "_comment_purpose": "libwarden.so V7.1 with Living Citadel + Process-Aware Security",
+  "_comment_location": "Install to /etc/warden/warden-config.json (recommended)",
+  "_comment_v7.1": "Introduces 'Whitelist of the Damned' - surgical restrictions on untrusted AI agents",
+  "_comment_customize": "This is a minimal config protecting only system-critical paths.",
+  "_comment_customize2": "Add your project directories to 'directory_protection.protected_roots'",
+  "_comment_customize3": "Add whitelisted paths as needed for your workflow (build outputs, sandboxes, etc.)",
+
+  "global": {
+    "enabled": true,
+    "log_level": "normal",
+    "log_target": "stderr",
+    "block_emoji": "🛡️",
+    "warning_emoji": "⚠️",
+    "allow_emoji": "✓"
+  },
+
+  "protection": {
+    "protected_paths": [
+      {
+        "path": "/etc/",
+        "description": "System configuration files",
+        "block_operations": ["unlink", "unlinkat", "rmdir", "open_write", "rename"]
+      },
+      {
+        "path": "/boot/",
+        "description": "Boot partition and kernel files",
+        "block_operations": ["unlink", "unlinkat", "rmdir", "open_write", "rename"]
+      },
+      {
+        "path": "/sys/",
+        "description": "Kernel sysfs interface",
+        "block_operations": ["unlink", "unlinkat", "rmdir", "open_write", "rename"]
+      },
+      {
+        "path": "/proc/",
+        "description": "Process filesystem (except /proc/self/*)",
+        "block_operations": ["unlink", "unlinkat", "rmdir", "open_write", "rename"]
+      },
+      {
+        "path": "/dev/sda",
+        "description": "SATA block device",
+        "block_operations": ["open_write"]
+      },
+      {
+        "path": "/dev/nvme",
+        "description": "NVMe block device",
+        "block_operations": ["open_write"]
+      },
+      {
+        "path": "/dev/vd",
+        "description": "Virtual disk device",
+        "block_operations": ["open_write"]
+      },
+      {
+        "path": "/usr/lib/",
+        "description": "System libraries",
+        "block_operations": ["unlink", "unlinkat", "rmdir", "open_write"]
+      },
+      {
+        "path": "/usr/bin/",
+        "description": "System binaries",
+        "block_operations": ["unlink", "unlinkat", "rmdir", "open_write"]
+      }
+    ],
+
+    "whitelisted_paths": [
+      {
+        "path": "/proc/self/",
+        "description": "Process-specific proc entries (required for normal operation)"
+      },
+      {
+        "path": "/tmp/",
+        "description": "System temporary directory (universal, restricted for untrusted processes)"
+      },
+      {
+        "path": "/var/tmp/",
+        "description": "Persistent temporary directory (universal)"
+      }
+    ]
+  },
+
+  "directory_protection": {
+    "enabled": true,
+    "description": "V7.0 Living Citadel: Protect directory structures from deletion/renaming, allow internal file operations",
+    "protected_roots": [],
+    "_note": "Add your project directories here. Example: '/home/username/projects', '/home/username/github_public'",
+    "protected_patterns": [
+      "**/.git"
+    ]
+  },
+
+  "process_restrictions": {
+    "enabled": true,
+    "description": "V7.1 Process-Aware Security: Surgical restrictions on untrusted AI agents ('Whitelist of the Damned')",
+    "restricted_processes": [
+      {
+        "name": "claude-code-agent",
+        "description": "Claude Code AI agent (hypothetical malicious fork)",
+        "restrictions": {
+          "block_tmp_write": true,
+          "block_tmp_execute": true,
+          "block_dotfile_write": true,
+          "monitored_dotfiles": [".bashrc", ".zshrc", ".profile", ".bash_profile", ".gitconfig"]
+        }
+      },
+      {
+        "name": "codex-cli",
+        "description": "OpenAI Codex CLI tool",
+        "restrictions": {
+          "block_tmp_write": true,
+          "block_tmp_execute": true,
+          "block_dotfile_write": true,
+          "monitored_dotfiles": [".bashrc", ".zshrc", ".profile", ".bash_profile", ".gitconfig"]
+        }
+      },
+      {
+        "name": "python",
+        "description": "Python interpreter (when running suspicious scripts)",
+        "restrictions": {
+          "block_tmp_execute": true,
+          "block_dotfile_write": false
+        }
+      },
+      {
+        "name": "harvester",
+        "description": "Known malicious credential harvester",
+        "restrictions": {
+          "block_tmp_write": true,
+          "block_tmp_execute": true,
+          "block_dotfile_write": true,
+          "monitored_dotfiles": [".bashrc", ".zshrc", ".ssh/config", ".ssh/authorized_keys", ".gitconfig"]
+        }
+      },
+      {
+        "name": "node",
+        "description": "Node.js interpreter (untrusted npm packages)",
+        "restrictions": {
+          "block_tmp_execute": true,
+          "block_dotfile_write": false
+        }
+      }
+    ],
+    "whitelist_mode": false,
+    "enforcement_level": "strict",
+    "log_process_name": true
+  },
+
+  "operations": {
+    "unlink": {
+      "enabled": true,
+      "extra_blocked": [],
+      "extra_allowed": []
+    },
+    "rmdir": {
+      "enabled": true,
+      "extra_blocked": [],
+      "extra_allowed": []
+    },
+    "open_write": {
+      "enabled": true,
+      "blocked_flags": ["O_WRONLY", "O_RDWR", "O_TRUNC"],
+      "extra_blocked": [],
+      "extra_allowed": []
+    },
+    "rename": {
+      "enabled": true,
+      "check_both_paths": true,
+      "extra_blocked": [],
+      "extra_allowed": []
+    }
+  },
+
+  "advanced": {
+    "cache_path_checks": true,
+    "max_cache_size": 1000,
+    "allow_symlink_bypass": false,
+    "canonicalize_paths": true,
+    "notify_auditd": true,
+    "auditd_key": "libwarden_block",
+    "allow_env_override": false
+  }
+}

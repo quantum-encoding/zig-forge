@@ -1,0 +1,305 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Guardian Shield Hardware Profiles",
+  "description": "Hardware capability definitions for adaptive pattern loading",
+  "version": "1.0.0",
+
+  "hardware_profiles": {
+    "embedded": {
+      "name": "Embedded/IoT Device",
+      "tier": 0,
+      "cores": {
+        "min": 1,
+        "max": 4
+      },
+      "l3_cache_mb": {
+        "min": 0,
+        "max": 8
+      },
+      "memory_mb": {
+        "min": 512,
+        "max": 2048
+      },
+      "pattern_capacity": {
+        "max_patterns": 5,
+        "estimated_memory_mb": 1
+      },
+      "pattern_strategy": {
+        "severity_filter": ["critical"],
+        "categories": ["reverse_shell", "privilege_escalation"],
+        "enable_multi_dimensional": false,
+        "enable_input_sovereignty": false
+      },
+      "use_cases": [
+        "Raspberry Pi",
+        "IoT gateways",
+        "Edge devices"
+      ]
+    },
+
+    "laptop": {
+      "name": "Developer Laptop",
+      "tier": 1,
+      "cores": {
+        "min": 4,
+        "max": 16
+      },
+      "l3_cache_mb": {
+        "min": 8,
+        "max": 32
+      },
+      "memory_mb": {
+        "min": 8192,
+        "max": 32768
+      },
+      "pattern_capacity": {
+        "max_patterns": 20,
+        "estimated_memory_mb": 30
+      },
+      "pattern_strategy": {
+        "severity_filter": ["critical", "high"],
+        "categories": [
+          "reverse_shell",
+          "privilege_escalation",
+          "fork_bomb",
+          "crypto_mining"
+        ],
+        "enable_multi_dimensional": true,
+        "enable_input_sovereignty": false,
+        "resource_monitoring_interval_sec": 5
+      },
+      "use_cases": [
+        "Development workstation",
+        "Personal security testing",
+        "Local container protection"
+      ]
+    },
+
+    "server": {
+      "name": "Production Server",
+      "tier": 2,
+      "cores": {
+        "min": 16,
+        "max": 128
+      },
+      "l3_cache_mb": {
+        "min": 32,
+        "max": 256
+      },
+      "memory_mb": {
+        "min": 32768,
+        "max": 262144
+      },
+      "pattern_capacity": {
+        "max_patterns": 1000,
+        "estimated_memory_mb": 150
+      },
+      "pattern_strategy": {
+        "severity_filter": ["critical", "high", "medium"],
+        "categories": [
+          "reverse_shell",
+          "privilege_escalation",
+          "fork_bomb",
+          "crypto_mining",
+          "ransomware",
+          "data_exfiltration",
+          "rootkit",
+          "container_escape"
+        ],
+        "enable_multi_dimensional": true,
+        "enable_input_sovereignty": false,
+        "resource_monitoring_interval_sec": 2,
+        "network_monitoring_enabled": true
+      },
+      "use_cases": [
+        "Production web servers",
+        "Database servers",
+        "Application servers",
+        "Container orchestration nodes"
+      ]
+    },
+
+    "c4d_instance": {
+      "name": "Google Cloud C4D Instance",
+      "tier": 3,
+      "cores": {
+        "min": 256,
+        "max": 512
+      },
+      "l3_cache_mb": {
+        "min": 1024,
+        "max": 3072
+      },
+      "memory_mb": {
+        "min": 524288,
+        "max": 1048576
+      },
+      "pattern_capacity": {
+        "max_patterns": 100000,
+        "estimated_memory_mb": 15000,
+        "l3_cache_residency": true,
+        "cache_locality_optimized": true
+      },
+      "pattern_strategy": {
+        "severity_filter": ["all"],
+        "categories": ["all"],
+        "enable_multi_dimensional": true,
+        "enable_input_sovereignty": true,
+        "resource_monitoring_interval_sec": 1,
+        "network_monitoring_enabled": true,
+        "advanced_features": {
+          "xdp_layer": true,
+          "dpdk_layer": true,
+          "full_grimoire": true,
+          "threat_intelligence_feed": true,
+          "ml_behavioral_analysis": true
+        }
+      },
+      "use_cases": [
+        "Industry traffic pre-screening",
+        "Fortune 500 enterprise protection",
+        "Multi-tenant security platform",
+        "100+ Gbps traffic inspection",
+        "Threat intelligence aggregation"
+      ]
+    },
+
+    "gaming_sentinel": {
+      "name": "Gaming Anti-Cheat Sentinel",
+      "tier": 2,
+      "cores": {
+        "min": 8,
+        "max": 32
+      },
+      "l3_cache_mb": {
+        "min": 16,
+        "max": 64
+      },
+      "memory_mb": {
+        "min": 16384,
+        "max": 65536
+      },
+      "pattern_capacity": {
+        "max_patterns": 100,
+        "estimated_memory_mb": 20
+      },
+      "pattern_strategy": {
+        "severity_filter": ["critical", "high"],
+        "categories": [
+          "gaming_cheats"
+        ],
+        "enable_multi_dimensional": false,
+        "enable_input_sovereignty": true,
+        "input_devices": [
+          "controller",
+          "mouse",
+          "keyboard"
+        ],
+        "input_monitoring_rate_hz": 1000
+      },
+      "use_cases": [
+        "Gaming PC with anti-cheat",
+        "E-sports tournament systems",
+        "Game server client-side validation"
+      ]
+    }
+  },
+
+  "auto_detection_rules": {
+    "description": "Rules for automatically selecting the appropriate hardware profile",
+    "priority_order": [
+      "cores",
+      "l3_cache_mb",
+      "memory_mb"
+    ],
+    "selection_algorithm": "best_fit_tiered",
+    "fallback_profile": "laptop"
+  },
+
+  "pattern_categories": {
+    "reverse_shell": {
+      "patterns": [
+        "reverse_shell_classic",
+        "reverse_shell_socat",
+        "reverse_shell_netcat"
+      ],
+      "severity": "critical",
+      "base_cost_kb": 2
+    },
+    "privilege_escalation": {
+      "patterns": [
+        "privesc_suid_abuse",
+        "privesc_sudo_exploit",
+        "privesc_kernel_exploit"
+      ],
+      "severity": "critical",
+      "base_cost_kb": 2
+    },
+    "fork_bomb": {
+      "patterns": [
+        "fork_bomb_rapid",
+        "fork_bomb_exponential"
+      ],
+      "severity": "high",
+      "base_cost_kb": 1
+    },
+    "crypto_mining": {
+      "patterns": [
+        "crypto_miner_gpu",
+        "crypto_miner_cpu",
+        "crypto_miner_injected"
+      ],
+      "severity": "high",
+      "base_cost_kb": 2,
+      "requires_multi_dimensional": true
+    },
+    "ransomware": {
+      "patterns": [
+        "ransomware_file_crypto",
+        "ransomware_mbr_overwrite"
+      ],
+      "severity": "critical",
+      "base_cost_kb": 2,
+      "requires_multi_dimensional": true
+    },
+    "data_exfiltration": {
+      "patterns": [
+        "exfil_credential_dump",
+        "exfil_ssh_key_theft",
+        "exfil_database_dump"
+      ],
+      "severity": "high",
+      "base_cost_kb": 2
+    },
+    "rootkit": {
+      "patterns": [
+        "rootkit_kernel_module",
+        "rootkit_ld_preload",
+        "rootkit_proc_hide"
+      ],
+      "severity": "critical",
+      "base_cost_kb": 3
+    },
+    "container_escape": {
+      "patterns": [
+        "container_escape_namespace",
+        "container_escape_privileged",
+        "container_escape_cgroup"
+      ],
+      "severity": "critical",
+      "base_cost_kb": 2
+    },
+    "gaming_cheats": {
+      "patterns": [
+        "rapid_fire_cronus",
+        "perfect_macro_sequence",
+        "mouse_snap_aimbot",
+        "triggerbot_zero_latency",
+        "recoil_compensation_perfect"
+      ],
+      "severity": "high",
+      "base_cost_kb": 1,
+      "requires_input_sovereignty": true
+    }
+  }
+}

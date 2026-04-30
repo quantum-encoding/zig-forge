@@ -1,0 +1,55 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+ * vmlinux.h - Minimal kernel type definitions for Grimoire BPF programs
+ *
+ * This is a minimal vmlinux.h for compilation in environments without BTF support.
+ * In production, this should be generated from the running kernel's BTF data using:
+ *   bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h
+ */
+
+#ifndef __VMLINUX_H__
+#define __VMLINUX_H__
+
+#ifndef BPF_NO_PRESERVE_ACCESS_INDEX
+#define BPF_NO_PRESERVE_ACCESS_INDEX
+#endif
+
+/* Basic type definitions */
+typedef signed char __s8;
+typedef unsigned char __u8;
+typedef short __s16;
+typedef unsigned short __u16;
+typedef int __s32;
+typedef unsigned int __u32;
+typedef long long __s64;
+typedef unsigned long long __u64;
+
+typedef __u8 u8;
+typedef __u16 u16;
+typedef __u32 u32;
+typedef __u64 u64;
+typedef __s8 s8;
+typedef __s16 s16;
+typedef __s32 s32;
+typedef __s64 s64;
+
+/* Boolean type */
+typedef _Bool bool;
+#define true 1
+#define false 0
+
+/* Tracepoint context for raw_syscalls/sys_enter */
+struct trace_event_raw_sys_enter {
+    __u64 __unused__;
+    long id;
+    unsigned long args[6];
+};
+
+/* Tracepoint context for raw_syscalls/sys_exit */
+struct trace_event_raw_sys_exit {
+    __u64 __unused__;
+    long id;
+    long ret;
+};
+
+#endif /* __VMLINUX_H__ */

@@ -1,0 +1,360 @@
+# Grafana Alert: Trojan Link Detection (Cunning Exfiltration Defense)
+# Purpose: Detect data exfiltration via base64-encoded URL query parameters
+# Threat Model: Rogue agents encoding sensitive data in "harmless" links
+
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: "Cunning Exfiltration - Trojan Link"
+    folder: "Security Alerts"
+    interval: 30s
+    rules:
+      # ============================================================
+      # RULE 1: Suspicious URL Length (Volumetric Detection)
+      # ============================================================
+      - uid: trojan_link_length
+        title: "🚨 Trojan Link: Suspiciously Long URL Parameter"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: loki
+            model:
+              expr: |
+                sum by(host, job, filename) (
+                  count_over_time(
+                    {job=~".+"}
+                    |~ `https?://[^\s]+\?[^\s]{2048,}`
+                    [5m]
+                  )
+                )
+              queryType: range
+              refId: A
+
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: math
+              expression: $A > 0
+              refId: C
+
+        noDataState: NoData
+        execErrState: Alerting
+        for: 1m
+        annotations:
+          description: |
+            **THREAT**: Trojan Link Attack Detected
+
+            A log entry contains a URL with an unusually long query parameter (>2048 characters).
+            This is a common data exfiltration technique where sensitive data is base64-encoded
+            and appended to a URL.
+
+            **Host**: {{ $labels.host }}
+            **Log Source**: {{ $labels.job }}
+            **File**: {{ $labels.filename }}
+
+            **Recommended Actions**:
+            1. Investigate the source process immediately
+            2. Check for sensitive file reads (SSH keys, credentials, tokens)
+            3. Analyze network traffic for outbound connections
+            4. Quarantine the process if confirmed malicious
+
+          summary: "Potential data exfiltration via URL parameter detected on {{ $labels.host }}"
+          runbook_url: "https://github.com/guardian-shield/runbooks/trojan-link-exfiltration.md"
+        labels:
+          severity: critical
+          category: data_exfiltration
+          tactic: cunning_exfiltration
+          technique: trojan_link
+          mitre_attack: T1567.002  # Exfiltration Over Web Service: Exfiltration to Cloud Storage
+
+      # ============================================================
+      # RULE 2: Base64 Pattern in URL (Heuristic Detection)
+      # ============================================================
+      - uid: trojan_link_base64
+        title: "🚨 Trojan Link: Base64-Encoded URL Parameter"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: loki
+            model:
+              expr: |
+                sum by(host, job, filename) (
+                  count_over_time(
+                    {job=~".+"}
+                    |~ `https?://[^\s]+\?[a-zA-Z0-9_-]+=([A-Za-z0-9+/]{200,}={0,2})`
+                    [5m]
+                  )
+                )
+              queryType: range
+              refId: A
+
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: math
+              expression: $A > 0
+              refId: C
+
+        noDataState: NoData
+        execErrState: Alerting
+        for: 1m
+        annotations:
+          description: |
+            **THREAT**: Base64-Encoded URL Parameter Detected
+
+            A log entry contains a URL with what appears to be a long base64-encoded value
+            in a query parameter. This is consistent with data exfiltration techniques.
+
+            **Pattern**: `?param=[Base64String]`
+            **Minimum Length**: 200 characters
+
+            **Host**: {{ $labels.host }}
+            **Log Source**: {{ $labels.job }}
+            **File**: {{ $labels.filename }}
+
+            **Investigation Steps**:
+            1. Extract the full URL from logs
+            2. Decode the base64 parameter
+            3. Check if decoded content matches sensitive files
+            4. Trace back to the originating process
+
+          summary: "Base64-encoded URL parameter detected on {{ $labels.host }}"
+          runbook_url: "https://github.com/guardian-shield/runbooks/trojan-link-exfiltration.md"
+        labels:
+          severity: high
+          category: data_exfiltration
+          tactic: cunning_exfiltration
+          technique: trojan_link_base64
+
+      # ============================================================
+      # RULE 3: SSH Key Exfiltration Pattern (Signature-Based)
+      # ============================================================
+      - uid: trojan_link_ssh_key
+        title: "🔴 CRITICAL: SSH Private Key Exfiltration Attempt"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: loki
+            model:
+              expr: |
+                sum by(host, job, filename) (
+                  count_over_time(
+                    {job=~".+"}
+                    |~ `https?://[^\s]+\?[^\s]*(LS0tLS1CRUdJTiB8 -----BEGIN )`
+                    [5m]
+                  )
+                )
+              queryType: range
+              refId: A
+              # Note: "LS0tLS1CRUdJTiB" is base64 for "-----BEGIN "
+
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: math
+              expression: $A > 0
+              refId: C
+
+        noDataState: NoData
+        execErrState: Alerting
+        for: 0s  # Immediate alert, no grace period
+        annotations:
+          description: |
+            **🔴 CRITICAL SECURITY INCIDENT 🔴**
+
+            An SSH private key exfiltration attempt has been detected!
+
+            A log entry contains a URL with what appears to be an SSH private key
+            (either base64-encoded or plaintext) in the query parameter.
+
+            **Host**: {{ $labels.host }}
+            **Log Source**: {{ $labels.job }}
+            **File**: {{ $labels.filename }}
+
+            **IMMEDIATE ACTIONS REQUIRED**:
+            1. 🚨 ISOLATE the host immediately (disconnect network)
+            2. 🔒 REVOKE all SSH keys for affected accounts
+            3. 🔍 INVESTIGATE process tree and parent processes
+            4. 📋 PRESERVE forensic evidence (logs, memory dumps)
+            5. 🔄 ROTATE all credentials on affected systems
+            6. 🛡️ ACTIVATE incident response protocol
+
+            **This is a confirmed security breach.**
+
+          summary: "🔴 SSH KEY EXFILTRATION DETECTED on {{ $labels.host }} 🔴"
+          runbook_url: "https://github.com/guardian-shield/runbooks/ssh-key-exfiltration-incident.md"
+        labels:
+          severity: critical
+          category: data_exfiltration
+          tactic: cunning_exfiltration
+          technique: ssh_key_theft
+          mitre_attack: T1552.004  # Unsecured Credentials: Private Keys
+          incident_response: required
+
+      # ============================================================
+      # RULE 4: AWS Credentials Exfiltration Pattern
+      # ============================================================
+      - uid: trojan_link_aws_creds
+        title: "🔴 CRITICAL: AWS Credentials Exfiltration Attempt"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: loki
+            model:
+              expr: |
+                sum by(host, job, filename) (
+                  count_over_time(
+                    {job=~".+"}
+                    |~ `https?://[^\s]+\?[^\s]*(AKIA[0-9A-Z]{16}|aws_access_key_id)`
+                    [5m]
+                  )
+                )
+              queryType: range
+              refId: A
+
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: math
+              expression: $A > 0
+              refId: C
+
+        noDataState: NoData
+        execErrState: Alerting
+        for: 0s
+        annotations:
+          description: |
+            **🔴 CRITICAL SECURITY INCIDENT 🔴**
+
+            AWS credentials exfiltration attempt detected!
+
+            A log entry contains a URL with what appears to be an AWS access key
+            (format: AKIA...) in the query parameter.
+
+            **Host**: {{ $labels.host }}
+            **Log Source**: {{ $labels.job }}
+
+            **IMMEDIATE ACTIONS**:
+            1. 🚨 DISABLE the AWS access key via AWS Console
+            2. 🔍 AUDIT CloudTrail for unauthorized API calls
+            3. 🔒 ROTATE all AWS credentials
+            4. 📋 INITIATE incident response
+
+          summary: "🔴 AWS CREDENTIALS EXFILTRATION on {{ $labels.host }} 🔴"
+        labels:
+          severity: critical
+          category: data_exfiltration
+          technique: aws_credential_theft
+          mitre_attack: T1552.001
+
+      # ============================================================
+      # RULE 5: GitHub Token Exfiltration Pattern
+      # ============================================================
+      - uid: trojan_link_github_token
+        title: "🔴 CRITICAL: GitHub Token Exfiltration Attempt"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: loki
+            model:
+              expr: |
+                sum by(host, job, filename) (
+                  count_over_time(
+                    {job=~".+"}
+                    |~ `https?://[^\s]+\?[^\s]*(ghp_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9_]{82})`
+                    [5m]
+                  )
+                )
+              queryType: range
+              refId: A
+
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: math
+              expression: $A > 0
+              refId: C
+
+        noDataState: NoData
+        execErrState: Alerting
+        for: 0s
+        annotations:
+          description: |
+            **🔴 CRITICAL: GitHub Token Exfiltration 🔴**
+
+            A GitHub personal access token has been detected in a URL parameter.
+
+            **Token Patterns**:
+            - Classic: ghp_... (36 chars)
+            - Fine-grained: github_pat_... (82 chars)
+
+            **Host**: {{ $labels.host }}
+
+            **IMMEDIATE ACTIONS**:
+            1. 🚨 REVOKE token at github.com/settings/tokens
+            2. 🔍 AUDIT GitHub audit log for unauthorized access
+            3. 🔒 ROTATE all GitHub tokens
+
+          summary: "🔴 GITHUB TOKEN EXFILTRATION on {{ $labels.host }} 🔴"
+        labels:
+          severity: critical
+          category: data_exfiltration
+          technique: github_token_theft
+
+contactPoints:
+  - orgId: 1
+    name: "Security Incident Response"
+    receivers:
+      - uid: email_security
+        type: email
+        settings:
+          addresses: security@example.com
+          single_email: true
+        disableResolveMessage: false
+
+      - uid: slack_critical
+        type: slack
+        settings:
+          url: ${SLACK_WEBHOOK_URL}
+          title: "{{ .CommonLabels.severity | toUpper }}: {{ .CommonAnnotations.summary }}"
+          text: "{{ .CommonAnnotations.description }}"
+        disableResolveMessage: false
+
+      - uid: pagerduty_oncall
+        type: pagerduty
+        settings:
+          integrationKey: ${PAGERDUTY_KEY}
+          severity: critical
+        disableResolveMessage: false
+
+notificationPolicies:
+  - orgId: 1
+    receiver: "Security Incident Response"
+    group_by: ['alertname', 'severity']
+    group_wait: 10s
+    group_interval: 5m
+    repeat_interval: 12h
+
+    routes:
+      - match:
+          severity: critical
+        receiver: "Security Incident Response"
+        continue: false
+        group_wait: 0s
+        repeat_interval: 1h

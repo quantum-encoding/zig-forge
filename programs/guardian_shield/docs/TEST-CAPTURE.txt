@@ -1,0 +1,16 @@
+Testing Claude Code Output Capture
+===================================
+
+This file is being created to trigger Claude Code's stdout/stderr writes.
+
+The test-claude-capture program should intercept:
+- Tool completion messages
+- Status updates
+- Any other output Claude writes to the terminal
+
+Timestamp: Mon Oct 27 18:35:00 CET 2025
+
+Let's see what Claude actually outputs!
+
+EDIT TEST: This line was added by an Edit tool call.
+This should trigger more stdout writes.

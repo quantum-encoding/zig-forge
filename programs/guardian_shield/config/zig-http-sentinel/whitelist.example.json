@@ -1,0 +1,22 @@
+{
+  "allowed_domains": [
+    "google.com",
+    "*.google.com",
+    "github.com",
+    "*.github.com",
+    "anthropic.com",
+    "*.anthropic.com",
+    "stackoverflow.com",
+    "*.stackoverflow.com",
+    "pypi.org",
+    "*.pypi.org",
+    "npmjs.com",
+    "*.npmjs.com",
+    "crates.io",
+    "docs.rs",
+    "wikipedia.org",
+    "*.wikipedia.org",
+    "arxiv.org",
+    "scholar.google.com"
+  ]
+}

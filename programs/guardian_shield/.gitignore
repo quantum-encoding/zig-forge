@@ -1,0 +1,72 @@
+# Zig build artifacts
+zig-out/
+zig-cache/
+.zig-cache/
+
+# Swift/Xcode build artifacts (network-filter macOS component)
+.build/
+DerivedData/
+ModuleCache/
+*.dSYM/
+*.pcm
+
+# C/C++ artifacts
+*.o
+*.so
+*.a
+*.dylib
+
+# Generated eBPF headers
+src/zig-sentinel/ebpf/vmlinux.h
+
+# NVIDIA / installer payloads
+*.run
+
+# Compiled binaries (chronos-engine staging)
+chronos-ctl
+chronos-ctl-*
+chronosd
+chronosd-*
+chronos-stamp
+src/chronos-engine/chronos-ctl*
+src/chronos-engine/chronosd*
+src/chronos-engine/chronos-stamp
+debug_bytes
+scripts/debug_bytes
+
+# Test artifacts
+test-output/
+test-*
+test_*
+*.test
+scripts/test-*
+scripts/test_*
+!test-*.c
+!test-*.sh
+!test_*.zig
+
+# Logs
+*.log
+
+# Local config (don't commit actual production configs)
+warden-config.json
+!warden-config.example.json
+
+# Temporary / deploy artifacts
+*.tmp
+*.bak
+*.backup
+*~
+deploy-backups/
+deploy.sh.tmp.*
+
+# Editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS junk
+.DS_Store
+*.zig.tmp.*
+*.bpf.tar.xz

@@ -1,0 +1,302 @@
+═══════════════════════════════════════════════════════════════════
+  THE ORACLE PROTOCOL - LSM Hook Reconnaissance Report
+═══════════════════════════════════════════════════════════════════
+Generated: Sun Oct 19 15:43:37 2025
+Kernel: Linux 6.17.1-arch1-1
+Total Hooks Tested: 256
+
+SUMMARY STATISTICS:
+-------------------------------------------------------------------
+  VIABLE (confirmed firing):      0 hooks
+  ATTACHED (no fire detected):  239 hooks
+  ATTACH_FAILED:                  0 hooks
+  LOAD_FAILED:                   17 hooks
+
+═══════════════════════════════════════════════════════════════════
+VIABLE HOOKS (Confirmed Firing)
+═══════════════════════════════════════════════════════════════════
+
+═══════════════════════════════════════════════════════════════════
+ATTACHED HOOKS (No Fire Detected)
+═══════════════════════════════════════════════════════════════════
+These hooks attach successfully but did not fire during testing.
+They may require specific conditions or may be inactive.
+
+  ○ audit_rule_free
+  ○ audit_rule_init
+  ○ audit_rule_known
+  ○ bdev_alloc_security
+  ○ bdev_free_security
+  ○ bdev_setintegrity
+  ○ binder_set_context_mgr
+  ○ binder_transaction
+  ○ binder_transfer_binder
+  ○ binder_transfer_file
+  ○ bpf
+  ○ bpf_map
+  ○ bpf_map_create
+  ○ bpf_map_free
+  ○ bpf_prog
+  ○ bpf_prog_free
+  ○ bpf_prog_load
+  ○ bpf_token_capable
+  ○ bpf_token_cmd
+  ○ bpf_token_create
+  ○ bpf_token_free
+  ○ bprm_check_security
+  ○ bprm_committed_creds
+  ○ bprm_committing_creds
+  ○ bprm_creds_for_exec
+  ○ bprm_creds_from_file
+  ○ capable
+  ○ capget
+  ○ capset
+  ○ cred_alloc_blank
+  ○ cred_free
+  ○ cred_getlsmprop
+  ○ cred_getsecid
+  ○ cred_prepare
+  ○ cred_transfer
+  ○ current_getlsmprop_subj
+  ○ d_instantiate
+  ○ dentry_create_files_as
+  ○ dentry_init_security
+  ○ file_alloc_security
+  ○ file_fcntl
+  ○ file_free_security
+  ○ file_ioctl
+  ○ file_ioctl_compat
+  ○ file_lock
+  ○ file_mprotect
+  ○ file_open
+  ○ file_permission
+  ○ file_post_open
+  ○ file_receive
+  ○ file_release
+  ○ file_send_sigiotask
+  ○ file_set_fowner
+  ○ file_truncate
+  ○ fs_context_dup
+  ○ fs_context_parse_param
+  ○ fs_context_submount
+  ○ ib_alloc_security
+  ○ ib_endport_manage_subnet
+  ○ ib_pkey_access
+  ○ inet_conn_established
+  ○ inet_conn_request
+  ○ inet_csk_clone
+  ○ initramfs_populated
+  ○ inode_alloc_security
+  ○ inode_copy_up
+  ○ inode_create
+  ○ inode_file_getattr
+  ○ inode_file_setattr
+  ○ inode_follow_link
+  ○ inode_free_security
+  ○ inode_free_security_rcu
+  ○ inode_get_acl
+  ○ inode_getattr
+  ○ inode_getlsmprop
+  ○ inode_getsecctx
+  ○ inode_getxattr
+  ○ inode_init_security
+  ○ inode_init_security_anon
+  ○ inode_invalidate_secctx
+  ○ inode_killpriv
+  ○ inode_link
+  ○ inode_listxattr
+  ○ inode_mkdir
+  ○ inode_mknod
+  ○ inode_notifysecctx
+  ○ inode_permission
+  ○ inode_post_create_tmpfile
+  ○ inode_post_remove_acl
+  ○ inode_post_removexattr
+  ○ inode_post_set_acl
+  ○ inode_post_setattr
+  ○ inode_post_setxattr
+  ○ inode_readlink
+  ○ inode_remove_acl
+  ○ inode_removexattr
+  ○ inode_rename
+  ○ inode_rmdir
+  ○ inode_set_acl
+  ○ inode_setattr
+  ○ inode_setintegrity
+  ○ inode_setsecctx
+  ○ inode_setsecurity
+  ○ inode_setxattr
+  ○ inode_symlink
+  ○ inode_unlink
+  ○ inode_xattr_skipcap
+  ○ ipc_getlsmprop
+  ○ ipc_permission
+  ○ kernel_act_as
+  ○ kernel_create_files_as
+  ○ kernel_load_data
+  ○ kernel_module_request
+  ○ kernel_post_load_data
+  ○ kernel_post_read_file
+  ○ kernel_read_file
+  ○ kernfs_init_security
+  ○ key_alloc
+  ○ key_permission
+  ○ key_post_create_or_update
+  ○ locked_down
+  ○ lsmprop_to_secctx
+  ○ mmap_addr
+  ○ mmap_file
+  ○ move_mount
+  ○ mptcp_add_subflow
+  ○ msg_msg_alloc_security
+  ○ msg_msg_free_security
+  ○ msg_queue_alloc_security
+  ○ msg_queue_associate
+  ○ msg_queue_free_security
+  ○ msg_queue_msgctl
+  ○ msg_queue_msgrcv
+  ○ msg_queue_msgsnd
+  ○ netlink_send
+  ○ path_chmod
+  ○ path_chown
+  ○ path_chroot
+  ○ path_link
+  ○ path_mkdir
+  ○ path_mknod
+  ○ path_notify
+  ○ path_post_mknod
+  ○ path_rename
+  ○ path_rmdir
+  ○ path_symlink
+  ○ path_truncate
+  ○ path_unlink
+  ○ perf_event_alloc
+  ○ perf_event_open
+  ○ perf_event_read
+  ○ perf_event_write
+  ○ post_notification
+  ○ ptrace_access_check
+  ○ ptrace_traceme
+  ○ quota_on
+  ○ quotactl
+  ○ release_secctx
+  ○ req_classify_flow
+  ○ sb_alloc_security
+  ○ sb_clone_mnt_opts
+  ○ sb_delete
+  ○ sb_eat_lsm_opts
+  ○ sb_free_mnt_opts
+  ○ sb_free_security
+  ○ sb_kern_mount
+  ○ sb_mnt_opts_compat
+  ○ sb_mount
+  ○ sb_pivotroot
+  ○ sb_remount
+  ○ sb_set_mnt_opts
+  ○ sb_show_options
+  ○ sb_statfs
+  ○ sb_umount
+  ○ sctp_assoc_established
+  ○ sctp_assoc_request
+  ○ sctp_bind_connect
+  ○ sctp_sk_clone
+  ○ secctx_to_secid
+  ○ secid_to_secctx
+  ○ secmark_refcount_dec
+  ○ secmark_refcount_inc
+  ○ secmark_relabel_packet
+  ○ sem_alloc_security
+  ○ sem_associate
+  ○ sem_free_security
+  ○ sem_semctl
+  ○ sem_semop
+  ○ setselfattr
+  ○ settime
+  ○ shm_alloc_security
+  ○ shm_associate
+  ○ shm_free_security
+  ○ shm_shmat
+  ○ shm_shmctl
+  ○ sk_alloc_security
+  ○ sk_clone_security
+  ○ sk_free_security
+  ○ sk_getsecid
+  ○ sock_graft
+  ○ socket_accept
+  ○ socket_bind
+  ○ socket_connect
+  ○ socket_create
+  ○ socket_getpeername
+  ○ socket_getpeersec_dgram
+  ○ socket_getpeersec_stream
+  ○ socket_getsockname
+  ○ socket_getsockopt
+  ○ socket_listen
+  ○ socket_post_create
+  ○ socket_recvmsg
+  ○ socket_sendmsg
+  ○ socket_setsockopt
+  ○ socket_shutdown
+  ○ socket_sock_rcv_skb
+  ○ socket_socketpair
+  ○ syslog
+  ○ task_alloc
+  ○ task_fix_setgid
+  ○ task_fix_setgroups
+  ○ task_fix_setuid
+  ○ task_free
+  ○ task_getioprio
+  ○ task_getlsmprop_obj
+  ○ task_getpgid
+  ○ task_getscheduler
+  ○ task_getsid
+  ○ task_kill
+  ○ task_movememory
+  ○ task_prctl
+  ○ task_prlimit
+  ○ task_setioprio
+  ○ task_setnice
+  ○ task_setpgid
+  ○ task_setrlimit
+  ○ task_setscheduler
+  ○ task_to_inode
+  ○ tun_dev_alloc_security
+
+═══════════════════════════════════════════════════════════════════
+FAILED HOOKS (Load or Attach Failures)
+═══════════════════════════════════════════════════════════════════
+  ✗ audit_rule_match               [errno=22] bpf_object__load failed
+  ✗ find_cgroup_shim               [errno=22] bpf_object__load failed
+  ✗ func_proto                     [errno=22] bpf_object__load failed
+  ✗ get_retval_range               [errno=22] bpf_object__load failed
+  ✗ getprocattr                    [errno=22] bpf_object__load failed
+  ✗ getselfattr                    [errno=22] bpf_object__load failed
+  ✗ has_d_inode_locked             [errno=22] bpf_object__load failed
+  ✗ init                           [errno=22] bpf_object__load failed
+  ✗ inode_copy_up_xattr            [errno=22] bpf_object__load failed
+  ✗ inode_getsecurity              [errno=22] bpf_object__load failed
+  ✗ inode_listsecurity             [errno=22] bpf_object__load failed
+  ✗ inode_need_killpriv            [errno=22] bpf_object__load failed
+  ✗ is_sleepable_hook              [errno=22] bpf_object__load failed
+  ✗ is_trusted                     [errno=22] bpf_object__load failed
+  ✗ ismaclabel                     [errno=22] bpf_object__load failed
+  ✗ key_getsecurity                [errno=22] bpf_object__load failed
+  ✗ setprocattr                    [errno=22] bpf_object__load failed
+
+═══════════════════════════════════════════════════════════════════
+RECOMMENDATIONS FOR PROCESS EXECUTION INTERCEPTION
+═══════════════════════════════════════════════════════════════════
+Based on reconnaissance, the following hooks are recommended:
+
+Process Execution Hooks:
+  ○ ALTERNATIVE: bprm_check_security (status: attached, no fire)
+  ○ ALTERNATIVE: bprm_committed_creds (status: attached, no fire)
+  ○ ALTERNATIVE: bprm_committing_creds (status: attached, no fire)
+  ○ ALTERNATIVE: task_alloc (status: attached, no fire)
+  ○ ALTERNATIVE: task_fix_setuid (status: attached, no fire)
+
+File-based Execution Detection:
+
+═══════════════════════════════════════════════════════════════════
+END OF REPORT
+═══════════════════════════════════════════════════════════════════

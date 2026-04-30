@@ -1,0 +1,285 @@
+# THE WOLF - Guardian Shield Attack Container
+# Purpose: Attempt to bypass Guardian Shield V8.0 protections
+# Base: Arch Linux with security testing tools
+
+FROM archlinux:latest
+
+LABEL crucible.role="attacker"
+LABEL crucible.mission="bypass-guardian-shield"
+LABEL crucible.doctrine="sovereign-crucible"
+
+# Update system and install base tools
+# Note: Arch containers need keyring refresh to avoid signature errors
+RUN pacman-key --init && \
+    pacman-key --populate archlinux && \
+    pacman -Sy --noconfirm archlinux-keyring && \
+    pacman -Syu --noconfirm && \
+    pacman -S --noconfirm \
+    base-devel \
+    git \
+    wget \
+    curl \
+    python \
+    python-pip \
+    openssh \
+    nmap \
+    strace \
+    ltrace \
+    gdb \
+    vim \
+    tmux \
+    jq \
+    expect
+
+# Install Python attack tools
+RUN pip install --break-system-packages \
+    requests \
+    pwntools
+
+# Create wolf workspace
+WORKDIR /wolf
+RUN mkdir -p /wolf/scripts /wolf/results /wolf/logs /wolf/attacks
+
+# Environment variables for target
+ENV LAMB_HOST=lamb
+ENV LAMB_USER=root
+ENV LAMB_PASS=root
+
+# Create attack scripts
+
+# Symlink Hijacking Attack
+RUN cat > /wolf/attacks/symlink-hijack.sh << 'ATTACK'
+#!/bin/bash
+# Symlink Hijacking Attack
+# Attempt to create malicious symlinks in protected paths
+
+echo "=== SYMLINK HIJACKING ATTACK ==="
+echo "Target: $LAMB_HOST"
+
+# Attack 1: Symlink to /usr/bin
+echo "[1] Attempting symlink in /usr/bin..."
+ssh $LAMB_HOST "ln -sf /tmp/evil /usr/bin/fake-python" 2>&1
+RESULT=$?
+echo "Result: $([ $RESULT -eq 0 ] && echo 'VULNERABLE' || echo 'BLOCKED')"
+
+# Attack 2: Symlink pointing TO protected path
+echo "[2] Attempting symlink pointing to /etc/passwd..."
+ssh $LAMB_HOST "ln -sf /etc/passwd /tmp/stolen-passwd" 2>&1
+RESULT=$?
+echo "Result: $([ $RESULT -eq 0 ] && echo 'VULNERABLE' || echo 'BLOCKED')"
+
+# Attack 3: Symlink in protected data
+echo "[3] Attempting symlink in /protected..."
+ssh $LAMB_HOST "ln -sf /tmp/evil /protected/data/evil-link" 2>&1
+RESULT=$?
+echo "Result: $([ $RESULT -eq 0 ] && echo 'VULNERABLE' || echo 'BLOCKED')"
+
+echo "=== ATTACK COMPLETE ==="
+ATTACK
+RUN chmod +x /wolf/attacks/symlink-hijack.sh
+
+# Hardlink Privilege Escalation Attack
+RUN cat > /wolf/attacks/hardlink-escalate.sh << 'ATTACK'
+#!/bin/bash
+# Hardlink Privilege Escalation Attack
+# Attempt to create hardlinks to setuid binaries
+
+echo "=== HARDLINK ESCALATION ATTACK ==="
+
+# Attack 1: Hardlink to /usr/bin/sudo
+echo "[1] Attempting hardlink to /usr/bin/sudo..."
+ssh $LAMB_HOST "ln /usr/bin/sudo /tmp/my-sudo" 2>&1
+RESULT=$?
+echo "Result: $([ $RESULT -eq 0 ] && echo 'VULNERABLE' || echo 'BLOCKED')"
+
+# Attack 2: Hardlink FROM protected file
+echo "[2] Attempting hardlink from /etc/shadow..."
+ssh $LAMB_HOST "ln /etc/shadow /tmp/shadow-copy" 2>&1
+RESULT=$?
+echo "Result: $([ $RESULT -eq 0 ] && echo 'VULNERABLE' || echo 'BLOCKED')"
+
+# Attack 3: Hardlink INTO protected directory
+echo "[3] Attempting hardlink into /protected..."
+ssh $LAMB_HOST "touch /tmp/innocent && ln /tmp/innocent /protected/data/hardlinked" 2>&1
+RESULT=$?
+echo "Result: $([ $RESULT -eq 0 ] && echo 'VULNERABLE' || echo 'BLOCKED')"
+
+echo "=== ATTACK COMPLETE ==="
+ATTACK
+RUN chmod +x /wolf/attacks/hardlink-escalate.sh
+
+# Truncate Data Destruction Attack
+RUN cat > /wolf/attacks/truncate-destroy.sh << 'ATTACK'
+#!/bin/bash
+# Truncate Data Destruction Attack
+# Attempt to zero out protected files without deleting them
+
+echo "=== TRUNCATE DESTRUCTION ATTACK ==="
+
+# Attack 1: Truncate /etc/hosts
+echo "[1] Attempting to truncate /etc/hosts..."
+ssh $LAMB_HOST "truncate -s 0 /etc/hosts" 2>&1
+RESULT=$?
+echo "Result: $([ $RESULT -eq 0 ] && echo 'VULNERABLE' || echo 'BLOCKED')"
+
+# Attack 2: Truncate protected data
+echo "[2] Attempting to truncate /protected/data/important.txt..."
+ssh $LAMB_HOST "truncate -s 0 /protected/data/important.txt" 2>&1
+RESULT=$?
+echo "Result: $([ $RESULT -eq 0 ] && echo 'VULNERABLE' || echo 'BLOCKED')"
+
+# Attack 3: Python-based truncate
+echo "[3] Attempting Python truncate..."
+ssh $LAMB_HOST "python -c \"open('/etc/hostname', 'w').truncate(0)\"" 2>&1
+RESULT=$?
+echo "Result: $([ $RESULT -eq 0 ] && echo 'VULNERABLE' || echo 'BLOCKED')"
+
+echo "=== ATTACK COMPLETE ==="
+ATTACK
+RUN chmod +x /wolf/attacks/truncate-destroy.sh
+
+# Mkdir PATH Injection Attack
+RUN cat > /wolf/attacks/mkdir-inject.sh << 'ATTACK'
+#!/bin/bash
+# Mkdir PATH Injection Attack
+# Attempt to create directories in PATH locations
+
+echo "=== MKDIR INJECTION ATTACK ==="
+
+# Attack 1: Create directory in /usr/bin
+echo "[1] Attempting mkdir in /usr/bin..."
+ssh $LAMB_HOST "mkdir /usr/bin/evil-dir" 2>&1
+RESULT=$?
+echo "Result: $([ $RESULT -eq 0 ] && echo 'VULNERABLE' || echo 'BLOCKED')"
+
+# Attack 2: Create directory in /usr/lib
+echo "[2] Attempting mkdir in /usr/lib..."
+ssh $LAMB_HOST "mkdir /usr/lib/malicious" 2>&1
+RESULT=$?
+echo "Result: $([ $RESULT -eq 0 ] && echo 'VULNERABLE' || echo 'BLOCKED')"
+
+# Attack 3: Create directory in /protected
+echo "[3] Attempting mkdir in /protected..."
+ssh $LAMB_HOST "mkdir /protected/data/evil-subdir" 2>&1
+RESULT=$?
+echo "Result: $([ $RESULT -eq 0 ] && echo 'VULNERABLE' || echo 'BLOCKED')"
+
+echo "=== ATTACK COMPLETE ==="
+ATTACK
+RUN chmod +x /wolf/attacks/mkdir-inject.sh
+
+# Classic Delete Attack
+RUN cat > /wolf/attacks/delete-attack.sh << 'ATTACK'
+#!/bin/bash
+# Classic File Deletion Attack
+# Attempt to delete protected files
+
+echo "=== DELETE ATTACK ==="
+
+# Attack 1: Delete /etc/passwd
+echo "[1] Attempting to delete /etc/passwd..."
+ssh $LAMB_HOST "rm -f /etc/passwd" 2>&1
+RESULT=$?
+echo "Result: $([ $RESULT -eq 0 ] && echo 'VULNERABLE' || echo 'BLOCKED')"
+
+# Attack 2: Delete protected data
+echo "[2] Attempting to delete /protected/data/important.txt..."
+ssh $LAMB_HOST "rm -f /protected/data/important.txt" 2>&1
+RESULT=$?
+echo "Result: $([ $RESULT -eq 0 ] && echo 'VULNERABLE' || echo 'BLOCKED')"
+
+# Attack 3: Remove directory
+echo "[3] Attempting to rmdir /protected/config..."
+ssh $LAMB_HOST "rmdir /protected/config" 2>&1
+RESULT=$?
+echo "Result: $([ $RESULT -eq 0 ] && echo 'VULNERABLE' || echo 'BLOCKED')"
+
+echo "=== ATTACK COMPLETE ==="
+ATTACK
+RUN chmod +x /wolf/attacks/delete-attack.sh
+
+# Full Campaign Script
+RUN cat > /wolf/scripts/full-campaign.sh << 'CAMPAIGN'
+#!/bin/bash
+# Full Attack Campaign
+# Run all attacks and generate report
+
+echo "=========================================="
+echo "GUARDIAN SHIELD V8.0 CRUCIBLE CAMPAIGN"
+echo "=========================================="
+echo "Start Time: $(date)"
+echo ""
+
+REPORT=/wolf/results/campaign-report.md
+echo "# Guardian Shield V8.0 Crucible Report" > $REPORT
+echo "Date: $(date)" >> $REPORT
+echo "" >> $REPORT
+
+# Setup SSH
+mkdir -p ~/.ssh
+ssh-keyscan $LAMB_HOST >> ~/.ssh/known_hosts 2>/dev/null
+export SSHPASS=$LAMB_PASS
+
+# Run all attacks
+echo "## Attack Results" >> $REPORT
+echo "" >> $REPORT
+
+echo "Running symlink attacks..."
+echo "### Symlink Hijacking" >> $REPORT
+echo '```' >> $REPORT
+sshpass -e ssh -o StrictHostKeyChecking=no $LAMB_USER@$LAMB_HOST "/wolf/attacks/symlink-hijack.sh" 2>&1 | tee -a $REPORT
+echo '```' >> $REPORT
+echo "" >> $REPORT
+
+echo "Running hardlink attacks..."
+echo "### Hardlink Escalation" >> $REPORT
+echo '```' >> $REPORT
+/wolf/attacks/hardlink-escalate.sh 2>&1 | tee -a $REPORT
+echo '```' >> $REPORT
+echo "" >> $REPORT
+
+echo "Running truncate attacks..."
+echo "### Truncate Destruction" >> $REPORT
+echo '```' >> $REPORT
+/wolf/attacks/truncate-destroy.sh 2>&1 | tee -a $REPORT
+echo '```' >> $REPORT
+echo "" >> $REPORT
+
+echo "Running mkdir attacks..."
+echo "### Mkdir Injection" >> $REPORT
+echo '```' >> $REPORT
+/wolf/attacks/mkdir-inject.sh 2>&1 | tee -a $REPORT
+echo '```' >> $REPORT
+echo "" >> $REPORT
+
+echo "Running delete attacks..."
+echo "### Classic Delete" >> $REPORT
+echo '```' >> $REPORT
+/wolf/attacks/delete-attack.sh 2>&1 | tee -a $REPORT
+echo '```' >> $REPORT
+echo "" >> $REPORT
+
+# Generate verdict
+echo "## Verdict" >> $REPORT
+if grep -q "VULNERABLE" $REPORT; then
+    echo "**FAILED** - Guardian Shield has vulnerabilities!" >> $REPORT
+    echo "FAILED" > /wolf/results/verdict.txt
+else
+    echo "**PASSED** - Guardian Shield blocked all attacks!" >> $REPORT
+    echo "PASSED" > /wolf/results/verdict.txt
+fi
+
+echo ""
+echo "=========================================="
+echo "CAMPAIGN COMPLETE"
+echo "Report: $REPORT"
+echo "Verdict: $(cat /wolf/results/verdict.txt)"
+echo "=========================================="
+CAMPAIGN
+RUN chmod +x /wolf/scripts/full-campaign.sh
+
+# Install sshpass for automated SSH
+RUN pacman -S --noconfirm sshpass
+
+# Default command: interactive shell
+CMD ["/bin/bash"]

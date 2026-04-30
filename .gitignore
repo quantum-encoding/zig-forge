@@ -111,3 +111,6 @@ programs/zig_ai_server/data/wal.log
 # calls the service. Kept locally for convenience while the migration
 # is pending; do not commit them to zig-forge.
 programs/zig_ai_server/scripts/_firebase/
+
+# auto-installed by chronos-hook git wrapper
+.claude/
