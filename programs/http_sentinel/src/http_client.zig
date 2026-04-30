@@ -58,6 +58,11 @@ pub const HttpClient = struct {
     allocator: std.mem.Allocator,
     io_threaded: *std.Io.Threaded,
     client: http.Client,
+    /// Captured response body when an SSE streaming request returned a 4xx/5xx
+    /// status. Owned by `allocator` and freed by `deinit` (or on the next
+    /// failed call). Lets callers surface the upstream error message to the
+    /// user instead of an opaque ApiRequestFailed.
+    last_sse_error_body: ?[]u8 = null,
 
     /// Initialize a new HTTP client (pure Zig — no libc)
     pub fn init(allocator: std.mem.Allocator) !HttpClient {
@@ -80,8 +85,23 @@ pub const HttpClient = struct {
         return self.io_threaded.io();
     }
 
+    /// Stash a copy of `body` into `last_sse_error_body` so streaming AI
+    /// clients can surface the upstream error reason. Best-effort: on OOM
+    /// the field stays null. Always frees the previous capture.
+    pub fn captureError(self: *HttpClient, body: []const u8) void {
+        if (self.last_sse_error_body) |b| {
+            self.allocator.free(b);
+            self.last_sse_error_body = null;
+        }
+        self.last_sse_error_body = self.allocator.dupe(u8, body) catch null;
+    }
+
     /// Clean up client resources
     pub fn deinit(self: *HttpClient) void {
+        if (self.last_sse_error_body) |b| {
+            self.allocator.free(b);
+            self.last_sse_error_body = null;
+        }
         self.client.deinit();
         self.io_threaded.deinit();
         self.allocator.destroy(self.io_threaded);
@@ -260,16 +280,36 @@ pub const HttpClient = struct {
 
         var response = try req.receiveHead(&.{});
         const status = response.head.status;
+        const is_gzip = response.head.content_encoding == .gzip;
 
-        if (@intFromEnum(status) >= 400) {
-            return status;
-        }
-
-        // Reader setup — transfer + decompress buffers on this stack frame.
-        // readerDecompressing transparently handles gzip/deflate; identity falls through.
+        // Buffers stay on this stack frame for both reader paths.
         var transfer_buffer: [16384]u8 = undefined;
         var decompress_buffer: [std.compress.flate.max_window_len]u8 = undefined;
         var decompress: std.http.Decompress = undefined;
+
+        // readerDecompressing asserts single-call, so we have to commit to
+        // one reader path up front based on status.
+        if (@intFromEnum(status) >= 400) {
+            // Capture the error body so callers can surface the upstream
+            // reason (e.g. "model not found", "invalid API key").
+            if (self.last_sse_error_body) |b| {
+                self.allocator.free(b);
+                self.last_sse_error_body = null;
+            }
+            const err_reader = if (is_gzip)
+                response.readerDecompressing(&transfer_buffer, &decompress, &decompress_buffer)
+            else
+                response.reader(&transfer_buffer);
+            var err_buf: std.Io.Writer.Allocating = .init(self.allocator);
+            errdefer err_buf.deinit();
+            _ = err_reader.streamRemaining(&err_buf.writer) catch {};
+            const owned = err_buf.toOwnedSlice() catch null;
+            self.last_sse_error_body = owned;
+            return status;
+        }
+
+        // Success path — readerDecompressing transparently handles gzip/deflate;
+        // identity falls through.
         const reader = response.readerDecompressing(&transfer_buffer, &decompress, &decompress_buffer);
 
         // Read SSE events line-by-line using takeDelimiter

@@ -135,6 +135,7 @@ pub const GeminiClient = struct {
         defer stream.deinit();
 
         if (@intFromEnum(stream.status) >= 400) {
+            self.http_client.captureError(stream.body);
             return common.AIError.ApiRequestFailed;
         }
 
@@ -236,6 +237,7 @@ pub const GeminiClient = struct {
         defer stream.deinit();
 
         if (@intFromEnum(stream.status) >= 400) {
+            self.http_client.captureError(stream.body);
             return common.AIError.ApiRequestFailed;
         }
 
@@ -347,7 +349,21 @@ pub const GeminiClient = struct {
 
         if (candidate.object.get("finishReason")) |fr| {
             if (fr == .string) {
-                _ = ctx.user_callback(.{ .message_stop = .{ .stop_reason = fr.string } }, ctx.user_context);
+                var in_t: u32 = 0;
+                var out_t: u32 = 0;
+                if (parsed.value.object.get("usageMetadata")) |um| if (um == .object) {
+                    if (um.object.get("promptTokenCount")) |pt| if (pt == .integer and pt.integer >= 0) {
+                        in_t = @intCast(pt.integer);
+                    };
+                    if (um.object.get("candidatesTokenCount")) |ct| if (ct == .integer and ct.integer >= 0) {
+                        out_t = @intCast(ct.integer);
+                    };
+                };
+                _ = ctx.user_callback(.{ .message_stop = .{
+                    .stop_reason = fr.string,
+                    .input_tokens = in_t,
+                    .output_tokens = out_t,
+                } }, ctx.user_context);
             }
         }
 

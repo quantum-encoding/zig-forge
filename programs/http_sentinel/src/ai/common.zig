@@ -815,6 +815,11 @@ pub const StreamEvent = union(enum) {
     };
     pub const MessageStop = struct {
         stop_reason: ?[]const u8 = null,
+        /// Best-effort token counts for the just-completed turn. 0 means
+        /// the provider didn't report it on this event (some providers
+        /// report only on the final SSE event).
+        input_tokens: u32 = 0,
+        output_tokens: u32 = 0,
     };
 };
 

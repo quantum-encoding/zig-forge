@@ -154,6 +154,7 @@ pub const OpenAIClient = struct {
         defer stream.deinit();
 
         if (@intFromEnum(stream.status) >= 400) {
+            self.http_client.captureError(stream.body);
             return common.AIError.ApiRequestFailed;
         }
 
@@ -200,7 +201,10 @@ pub const OpenAIClient = struct {
         const ctx: *EventCtx = @alignCast(@ptrCast(raw_ctx orelse return false));
         if (event.done) return false;
 
-        var arena_buf: [16 * 1024]u8 = undefined;
+        // 128 KB — response.completed events for OpenAI Responses API can
+        // include the full response shell + usage + tools and easily exceed
+        // 16 KB. Using a generous stack buffer keeps the path allocation-free.
+        var arena_buf: [128 * 1024]u8 = undefined;
         var fba = std.heap.FixedBufferAllocator.init(&arena_buf);
         const a = fba.allocator();
 
@@ -251,15 +255,29 @@ pub const OpenAIClient = struct {
         }
 
         if (std.mem.eql(u8, t, "response.completed")) {
-            const sr: ?[]const u8 = blk: {
-                if (obj.get("response")) |r| {
-                    if (r == .object) {
-                        if (r.object.get("status")) |s| if (s == .string) break :blk s.string;
-                    }
+            var sr: ?[]const u8 = null;
+            var in_t: u32 = 0;
+            var out_t: u32 = 0;
+            if (obj.get("response")) |r| {
+                if (r == .object) {
+                    if (r.object.get("status")) |s| if (s == .string) {
+                        sr = s.string;
+                    };
+                    if (r.object.get("usage")) |u| if (u == .object) {
+                        if (u.object.get("input_tokens")) |it| if (it == .integer and it.integer >= 0) {
+                            in_t = @intCast(it.integer);
+                        };
+                        if (u.object.get("output_tokens")) |ot| if (ot == .integer and ot.integer >= 0) {
+                            out_t = @intCast(ot.integer);
+                        };
+                    };
                 }
-                break :blk null;
-            };
-            return ctx.user_callback(.{ .message_stop = .{ .stop_reason = sr } }, ctx.user_context);
+            }
+            return ctx.user_callback(.{ .message_stop = .{
+                .stop_reason = sr,
+                .input_tokens = in_t,
+                .output_tokens = out_t,
+            } }, ctx.user_context);
         }
 
         return true;
@@ -445,6 +463,7 @@ pub const OpenAIClient = struct {
         defer stream.deinit();
 
         if (@intFromEnum(stream.status) >= 400) {
+            self.http_client.captureError(stream.body);
             return common.AIError.ApiRequestFailed;
         }
 

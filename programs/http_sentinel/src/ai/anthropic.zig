@@ -611,12 +611,18 @@ pub const AnthropicClient = struct {
         }
 
         if (std.mem.eql(u8, event_type, "message_delta")) {
-            // Carries final stop_reason on the delta object.
+            // Carries final stop_reason on the delta object + final usage.
             const delta = obj.get("delta") orelse return true;
             if (delta != .object) return true;
             const sr_v = delta.object.get("stop_reason") orelse return true;
             if (sr_v != .string) return true;
-            return ctx.user_callback(.{ .message_stop = .{ .stop_reason = sr_v.string } }, ctx.user_context);
+            const in_t = readU32Field(obj, "usage", "input_tokens") orelse 0;
+            const out_t = readU32Field(obj, "usage", "output_tokens") orelse 0;
+            return ctx.user_callback(.{ .message_stop = .{
+                .stop_reason = sr_v.string,
+                .input_tokens = in_t,
+                .output_tokens = out_t,
+            } }, ctx.user_context);
         }
 
         if (std.mem.eql(u8, event_type, "message_stop")) {
@@ -628,6 +634,16 @@ pub const AnthropicClient = struct {
 
     fn readIndex(obj: std.json.ObjectMap) ?u32 {
         const v = obj.get("index") orelse return null;
+        return switch (v) {
+            .integer => |i| if (i >= 0 and i <= std.math.maxInt(u32)) @intCast(i) else null,
+            else => null,
+        };
+    }
+
+    fn readU32Field(obj: std.json.ObjectMap, parent_key: []const u8, child_key: []const u8) ?u32 {
+        const parent = obj.get(parent_key) orelse return null;
+        if (parent != .object) return null;
+        const v = parent.object.get(child_key) orelse return null;
         return switch (v) {
             .integer => |i| if (i >= 0 and i <= std.math.maxInt(u32)) @intCast(i) else null,
             else => null,
