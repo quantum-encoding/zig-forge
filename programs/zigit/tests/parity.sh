@@ -350,6 +350,87 @@ check "diff after commit (workdir vs index)" "$git_diff" "$zigit_diff"
 
 unset TZ GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
 
+# ── Section 12: branch + switch + checkout ────────────────────────────────────
+echo
+echo "12. branch + switch + checkout"
+BR="$WORK/branch-test"
+mkdir -p "$BR"
+( cd "$BR" && "$ZIGIT_BIN" init >/dev/null )
+
+export TZ=UTC
+export GIT_AUTHOR_NAME="Branch Bot"
+export GIT_AUTHOR_EMAIL="branch@example.com"
+export GIT_AUTHOR_DATE=1700000000
+export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+export GIT_COMMITTER_DATE=$GIT_AUTHOR_DATE
+
+echo "main version" > "$BR/file.txt"
+( cd "$BR" && "$ZIGIT_BIN" add file.txt >/dev/null && "$ZIGIT_BIN" commit -m "main first" >/dev/null )
+
+# branch list — single branch right after first commit.
+zigit_b=$(cd "$BR" && "$ZIGIT_BIN" branch)
+git_b=$(cd "$BR" && git branch)
+check "branch list (single)" "$git_b" "$zigit_b"
+
+# Create + switch into a feature branch, change content, commit.
+GIT_AUTHOR_DATE=1700000100 GIT_COMMITTER_DATE=1700000100 \
+    bash -c "cd '$BR' && '$ZIGIT_BIN' switch -c feature >/dev/null"
+echo "feature version" > "$BR/file.txt"
+echo "extra-only-on-feature" > "$BR/extra.txt"
+( cd "$BR" && "$ZIGIT_BIN" add file.txt extra.txt >/dev/null )
+GIT_AUTHOR_DATE=1700000200 GIT_COMMITTER_DATE=1700000200 \
+    bash -c "cd '$BR' && '$ZIGIT_BIN' commit -m 'feature change' >/dev/null"
+
+zigit_b=$(cd "$BR" && "$ZIGIT_BIN" branch)
+git_b=$(cd "$BR" && git branch)
+check "branch list (two, on feature)" "$git_b" "$zigit_b"
+
+# Switch back to main: file content reverts, extra.txt removed.
+( cd "$BR" && "$ZIGIT_BIN" switch main >/dev/null )
+file_after=$(cat "$BR/file.txt")
+check "file.txt content after switch back to main" "main version" "$file_after"
+extra_exists=$([ -e "$BR/extra.txt" ] && echo "yes" || echo "no")
+check "extra.txt removed after switch back" "no" "$extra_exists"
+
+# Round-trip: switch back to feature, content reappears.
+( cd "$BR" && "$ZIGIT_BIN" switch feature >/dev/null )
+file_after=$(cat "$BR/file.txt")
+check "file.txt restored on feature" "feature version" "$file_after"
+extra_after=$(cat "$BR/extra.txt")
+check "extra.txt restored on feature" "extra-only-on-feature" "$extra_after"
+
+# Safety: a local edit to file.txt should refuse the switch back.
+echo "uncommitted local edit" > "$BR/file.txt"
+if (cd "$BR" && "$ZIGIT_BIN" switch main 2>/dev/null); then
+    check "switch refused when local edits would be lost" "refused" "accepted"
+else
+    rc=$?
+    check "switch refused when local edits would be lost" "refused" "refused"
+    check "switch refusal uses non-zero exit" "1" "$rc"
+fi
+# Cleanup the local edit and verify switch now succeeds.
+( cd "$BR" && "$ZIGIT_BIN" checkout file.txt 2>/dev/null || git checkout -- file.txt )
+( cd "$BR" && "$ZIGIT_BIN" switch main >/dev/null )
+
+# Detached HEAD: checkout a commit by hex — HEAD becomes raw oid.
+feature_oid=$(cd "$BR" && git rev-parse feature)
+( cd "$BR" && "$ZIGIT_BIN" checkout "$feature_oid" >/dev/null )
+head_text=$(cat "$BR/.git/HEAD")
+check "detached HEAD writes raw oid" "$feature_oid" "$head_text"
+
+# git agrees we're detached at the same commit.
+git_status=$(cd "$BR" && git status --porcelain=v2 --branch | grep -E '^# branch.head')
+check "git sees the same detached HEAD" "# branch.head (detached)" "$git_status"
+
+# Branch -d removes a non-current branch.
+( cd "$BR" && "$ZIGIT_BIN" checkout main >/dev/null )
+( cd "$BR" && "$ZIGIT_BIN" branch -d feature >/dev/null )
+zigit_b=$(cd "$BR" && "$ZIGIT_BIN" branch)
+check "branch -d removed feature" "* main" "$zigit_b"
+
+unset TZ GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo
 TOTAL=$((PASS + FAIL))

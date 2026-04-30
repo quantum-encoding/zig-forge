@@ -6,11 +6,13 @@ no libgit2 dependency.
 
 ## Status
 
-**Phases 1–4 complete** — object store + index + tree + commit + refs +
-porcelain + status + Myers diff. A 100%-zigit-built repo (`init` → `add` →
-`commit`) produces byte-identical commit chains to real git given
-the same identity, dates, and TZ=UTC. `status --porcelain` and
-`diff` (workdir / `--cached`) match `git`'s output byte-for-byte.
+**Phases 1–5 complete** — object store + index + tree + commit + refs +
+porcelain + status + Myers diff + branch/switch/checkout. A 100%-zigit-
+built repo produces byte-identical commit chains to real git;
+`status --porcelain` and `diff` match git's output byte-for-byte;
+branches round-trip cleanly across switches with the standard "would
+overwrite local change" safety guard, and `checkout <oid>` produces
+the same detached-HEAD state real git recognises.
 
 ### Plumbing
 
@@ -33,18 +35,21 @@ the same identity, dates, and TZ=UTC. `status --porcelain` and
 | `zigit log [-n N]` | Walk first-parent chain from HEAD |
 | `zigit status [-s\|--porcelain]` | Three-way comparison: HEAD vs index, index vs workdir, untracked. `--porcelain` matches `git status --porcelain` byte-for-byte |
 | `zigit diff [--cached] [pathspec...]` | Myers + unified diff. Default workdir vs index, `--cached` for index vs HEAD. Byte-identical to `git diff` for the cases we cover |
+| `zigit branch [-d\|-D] [NAME [START]]` | List local branches (current marked `*`); create at HEAD or START; delete (refuses current) |
+| `zigit switch [-c] NAME` | Move HEAD to a branch, update workdir + index. Refuses if local edits would be lost |
+| `zigit checkout TARGET` | Branch name → switch; commit oid (full or ≥4-char prefix) → detached HEAD |
 
 ## Build
 
 ```
 zig build              # produces zig-out/bin/zigit
 zig build test         # 38 unit tests
-./tests/parity.sh      # 38 byte-for-byte checks vs real `git`
+./tests/parity.sh      # 49 byte-for-byte checks vs real `git`
 ```
 
 ## Roadmap
 
-Phase 5 — `branch` / `switch` / `checkout` (ref management + work-tree update)
+Phase 6 — pack files (read), `gc`, packed-refs
 Phase 5 — `branch` / `switch` / `checkout`
 Phase 6+ — pack files, smart HTTPS, merge/rebase
 

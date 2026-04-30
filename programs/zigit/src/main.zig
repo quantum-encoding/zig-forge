@@ -21,6 +21,9 @@ const commit_cmd = @import("cli/commit.zig");
 const log_cmd = @import("cli/log.zig");
 const status_cmd = @import("cli/status.zig");
 const diff_cmd = @import("cli/diff.zig");
+const branch_cmd = @import("cli/branch.zig");
+const switch_cmd = @import("cli/switch.zig");
+const checkout_cmd = @import("cli/checkout.zig");
 
 const usage =
     \\zigit — git in zig
@@ -42,6 +45,9 @@ const usage =
     \\  log [-n N]                                    Walk first-parent chain from HEAD
     \\  status [-s|--porcelain]                       Show staged / unstaged / untracked changes
     \\  diff [--cached] [pathspec...]                 Unified diff: workdir vs index, or index vs HEAD
+    \\  branch [-d|-D] [NAME [START]]                 List, create, or delete branches
+    \\  switch [-c] NAME                              Move HEAD to branch, update workdir + index
+    \\  checkout TARGET                               Branch name → switch; commit oid → detached HEAD
     \\
 ;
 
@@ -90,6 +96,21 @@ pub fn main(init: std.process.Init) !void {
         try status_cmd.run(allocator, io, rest);
     } else if (std.mem.eql(u8, cmd, "diff")) {
         try diff_cmd.run(allocator, io, rest);
+    } else if (std.mem.eql(u8, cmd, "branch")) {
+        try branch_cmd.run(allocator, io, rest);
+    } else if (std.mem.eql(u8, cmd, "switch")) {
+        // The conflict-message has already been printed by switch
+        // itself; we just want a clean exit code without Zig's
+        // default error-trace dump.
+        switch_cmd.run(allocator, io, rest) catch |err| switch (err) {
+            error.WouldLoseChanges => std.process.exit(1),
+            else => return err,
+        };
+    } else if (std.mem.eql(u8, cmd, "checkout")) {
+        checkout_cmd.run(allocator, io, rest) catch |err| switch (err) {
+            error.WouldLoseChanges => std.process.exit(1),
+            else => return err,
+        };
     } else if (std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) {
         try writeAll(io, .stdout, usage);
     } else {
