@@ -10,6 +10,12 @@ const time_compat = @import("time_compat.zig");
 // Global state for signal handling
 var running: std.atomic.Value(bool) = .{ .raw = true };
 
+// Stashed at startup so spawn-site Threaded inits can pass the real
+// process environment to children. Without this, child git/chronos-stamp
+// processes inherit empty env → git fails with "empty ident name" because
+// HOME isn't visible (gitconfig can't be located).
+var process_environ: std.process.Environ = .empty;
+
 // Statistics tracking
 const Stats = struct {
     total_commits: u64 = 0,
@@ -66,6 +72,7 @@ fn signalHandler(sig: std.c.SIG) callconv(.c) void {
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.c_allocator;
+    process_environ = init.minimal.environ;
 
     // Handle --help before config load
     // Parse args using Args.Iterator for Zig 0.16.2187+
@@ -261,11 +268,18 @@ fn performGitPush(allocator: mem.Allocator, config: Config) !void {
 }
 
 fn executeChronosStamp(allocator: mem.Allocator, config: Config) ![]u8 {
-    const io = Io.Threaded.global_single_threaded.io();
+    // CAUTION: do NOT use Io.Threaded.global_single_threaded here — that
+    // singleton ships with `.allocator = .failing`, so std.process.spawn's
+    // attempt to dup argv strings via the io allocator returns OutOfMemory
+    // before any clone/execve syscall fires. Instead, init a per-call
+    // Threaded with the real allocator. async_limit=.nothing keeps it
+    // single-threaded; we only need a working allocator for spawn.
+    var threaded = Io.Threaded.init(allocator, .{ .async_limit = .nothing, .environ = process_environ });
+    defer threaded.deinit();
+    const io = threaded.io();
 
     // Call chronos-stamp to get the 4th-dimensional timestamp
     // NOTE: chronos-stamp writes its output to stderr, not stdout
-    // Use std.process.spawn for Zig 0.16.2187+
     var child = std.process.spawn(io, .{
         .argv = &.{ config.chronos_stamp_path, config.agent_id, "git-commit" },
         .stdout = .pipe,
@@ -325,8 +339,10 @@ fn executeChronosStamp(allocator: mem.Allocator, config: Config) ![]u8 {
 }
 
 fn executeCommand(allocator: mem.Allocator, cwd: []const u8, args: []const []const u8) !void {
-    _ = allocator;
-    const io = Io.Threaded.global_single_threaded.io();
+    // global_single_threaded.allocator = .failing — use a real Threaded for spawn.
+    var threaded = Io.Threaded.init(allocator, .{ .async_limit = .nothing, .environ = process_environ });
+    defer threaded.deinit();
+    const io = threaded.io();
     var child = try std.process.spawn(io, .{
         .argv = args,
         .cwd = .{ .path = cwd },
@@ -349,8 +365,10 @@ fn executeCommand(allocator: mem.Allocator, cwd: []const u8, args: []const []con
 }
 
 fn executeCommandWithRetry(allocator: mem.Allocator, cwd: []const u8, args: []const []const u8, retry_config: RetryConfig) !void {
-    _ = allocator;
-    const io = Io.Threaded.global_single_threaded.io();
+    // global_single_threaded.allocator = .failing — use a real Threaded for spawn.
+    var threaded = Io.Threaded.init(allocator, .{ .async_limit = .nothing, .environ = process_environ });
+    defer threaded.deinit();
+    const io = threaded.io();
     var attempt: u32 = 0;
     var delay_ms: u64 = retry_config.base_delay_ms;
 
