@@ -34,6 +34,8 @@ fn streamCallback(text: []const u8, ctx: ?*anyopaque) bool {
     return true;
 }
 
+const Subcommand = enum { usage };
+
 const Args = struct {
     config_path: ?[]const u8 = null,
     provider_override: ?Provider = null,
@@ -43,6 +45,14 @@ const Args = struct {
     one_shot: ?[]const u8 = null,
     tools_enabled: bool = false,
     auto_approve: bool = false,
+    /// Top-level subcommand. When set, qai runs that subcommand and exits
+    /// without entering chat mode.
+    subcommand: ?Subcommand = null,
+    /// `qai usage --project=PATH` filter — accepts either an absolute path
+    /// (sanitized via the same rules as projectKey) or the raw sanitized key.
+    project_filter: ?[]const u8 = null,
+    /// `qai usage --since=YYYYMMDD` — only rows with ts >= this prefix.
+    since_filter: ?[]const u8 = null,
 };
 
 const ParseArgsError = error{
@@ -70,8 +80,14 @@ fn parseArgs(args_in: std.process.Args) ParseArgsError!Args {
             out.tools_enabled = true;
         } else if (std.mem.eql(u8, raw, "--yes") or std.mem.eql(u8, raw, "-y")) {
             out.auto_approve = true;
+        } else if (std.mem.startsWith(u8, raw, "--project=")) {
+            out.project_filter = raw["--project=".len..];
+        } else if (std.mem.startsWith(u8, raw, "--since=")) {
+            out.since_filter = raw["--since=".len..];
         } else if (std.mem.eql(u8, raw, "--help") or std.mem.eql(u8, raw, "-h")) {
             return error.HelpRequested;
+        } else if (out.subcommand == null and std.mem.eql(u8, raw, "usage")) {
+            out.subcommand = .usage;
         } else if (out.one_shot == null) {
             out.one_shot = raw;
         }
@@ -89,6 +105,11 @@ const HELP =
     \\
     \\Usage:
     \\  qai [flags] [prompt]
+    \\
+    \\Subcommands:
+    \\  qai usage [--project=PATH] [--since=YYYYMMDD]
+    \\                      Summarise ~/.qai/usage/*.csv into a per-project
+    \\                      cost table. Skips chat mode entirely.
     \\
     \\Flags:
     \\  --config=PATH       Path to qai.toml (default: ./qai.toml, then ~/.config/qai/config.toml)
@@ -193,7 +214,9 @@ pub fn main(init: std.process.Init) !void {
     // switches mid-session pick up the right key for the new provider.
     {
         const settings = cfg.active();
-        if (env.get(settings.api_key_env) == null) {
+        // Subcommands don't talk to providers; skip the env-var pre-flight
+        // check so `qai usage` works without any keys configured.
+        if (args.subcommand == null and env.get(settings.api_key_env) == null) {
             try err.print(
                 "error: env var {s} is not set. (provider={s}, base_url={s})\n" ++
                     "       set it, or edit qai.toml to point at a different api_key_env.\n",
@@ -203,12 +226,23 @@ pub fn main(init: std.process.Init) !void {
             std.process.exit(1);
         }
 
-        try err.print(
-            "qai · provider={s} · model={s} · base_url={s}\n",
-            .{ cfg.provider.name(), cfg.model, settings.base_url },
-        );
-        try err.flush();
+        // Suppress the banner when we're about to run a subcommand — the
+        // user just wants the summary, not chat-mode chrome.
+        if (args.subcommand == null) {
+            try err.print(
+                "qai · provider={s} · model={s} · base_url={s}\n",
+                .{ cfg.provider.name(), cfg.model, settings.base_url },
+            );
+            try err.flush();
+        }
     }
+
+    if (args.subcommand) |sub| switch (sub) {
+        .usage => {
+            try runUsageSummary(gpa, io, env, out, err, args.project_filter, args.since_filter);
+            return;
+        },
+    };
 
     var history: std.ArrayList(hs.ai.common.AIMessage) = .empty;
     defer {
@@ -219,7 +253,8 @@ pub fn main(init: std.process.Init) !void {
     var approvals = agent.Approvals.init(gpa);
     defer approvals.deinit();
 
-    var usage_total = agent.UsageStats{};
+    var usage_total = agent.UsageStats.init(gpa);
+    defer usage_total.deinit();
     // Per-project approvals file. Loaded silently if it exists; appended
     // to (atomically) every time the user picks "always" at a confirm prompt.
     approvals.attachDisk(io, ".qai/approvals") catch |e| {
@@ -302,14 +337,15 @@ fn autoSaveOnExit(
     };
 
     // Best-effort usage log — don't block on it.
-    appendUsageRow(gpa, io, env, cfg, usage_total) catch |e| {
+    appendUsageRow(gpa, io, env, usage_total) catch |e| {
         try err.print("[autosave] usage log failed: {s}\n", .{@errorName(e)});
         try err.flush();
     };
 
+    const agg = usage_total.aggregate();
     try err.print(
         "[autosave] {s} · {d} turns · {d} in / {d} out · ${d:.4}\n",
-        .{ path, usage_total.turns, usage_total.input_tokens, usage_total.output_tokens, usage_total.cost_usd },
+        .{ path, agg.turns, agg.input_tokens, agg.output_tokens, agg.cost_usd },
     );
     try err.flush();
 }
@@ -399,15 +435,285 @@ fn timestampSlug(gpa: std.mem.Allocator, io: std.Io) ![]u8 {
     );
 }
 
-/// Append a row to `~/.qai/usage/<sanitized-cwd>.csv`, writing the header
-/// on first use. Best-effort — silently no-ops if HOME is missing.
+/// `/sessions` — list past conversations under ~/.qai/projects/<cwd>/.
+/// Filename already encodes timestamp + provider (e.g. 20260501-090508-anthropic.md),
+/// so we don't open each file — the listing is cheap and accurate.
+fn listSessions(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    env: *const std.process.Environ.Map,
+    err: *std.Io.Writer,
+) !void {
+    const dir_path = (try projectDir(gpa, io, env)) orelse {
+        try err.writeAll("[sessions] HOME or cwd unresolved — no project dir.\n");
+        try err.flush();
+        return;
+    };
+    defer gpa.free(dir_path);
+
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch |e| switch (e) {
+        error.FileNotFound => {
+            try err.print("[sessions] no transcripts yet at {s}\n", .{dir_path});
+            try err.flush();
+            return;
+        },
+        else => return e,
+    };
+    defer dir.close(io);
+
+    // Collect names so we can sort newest-first (timestamp prefix sorts as dates).
+    var names: std.ArrayList([]u8) = .empty;
+    defer {
+        for (names.items) |n| gpa.free(n);
+        names.deinit(gpa);
+    }
+    var sizes: std.ArrayList(u64) = .empty;
+    defer sizes.deinit(gpa);
+
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".md")) continue;
+        try names.append(gpa, try gpa.dupe(u8, entry.name));
+        const stat = dir.statFile(io, entry.name, .{}) catch null;
+        try sizes.append(gpa, if (stat) |s| s.size else 0);
+    }
+
+    if (names.items.len == 0) {
+        try err.print("[sessions] no transcripts yet at {s}\n", .{dir_path});
+        try err.flush();
+        return;
+    }
+
+    // Pair-sort names + sizes together, newest first.
+    const Entry = struct { name: []u8, size: u64 };
+    var paired = try gpa.alloc(Entry, names.items.len);
+    defer gpa.free(paired);
+    for (names.items, 0..) |n, i| paired[i] = .{ .name = n, .size = sizes.items[i] };
+    std.mem.sort(Entry, paired, {}, struct {
+        fn lt(_: void, a: Entry, b: Entry) bool {
+            return std.mem.lessThan(u8, b.name, a.name);
+        }
+    }.lt);
+
+    try err.print("[sessions] {s}/  ({d} entries)\n", .{ dir_path, paired.len });
+    for (paired, 0..) |e, idx| {
+        // Filename layout: <YYYYMMDD>-<HHMMSS>-<provider>.md
+        const stem = e.name[0 .. e.name.len - ".md".len];
+        var parts = std.mem.splitScalar(u8, stem, '-');
+        const date = parts.next() orelse stem;
+        const time = parts.next() orelse "";
+        const provider = parts.rest();
+
+        try err.print(
+            "  {d:>2}. {s} {s}  {s:<10}  ({d} B)\n",
+            .{ idx + 1, date, time, provider, e.size },
+        );
+    }
+    try err.flush();
+}
+
+/// `qai usage [--project=PATH] [--since=YYYYMMDD]` — aggregate the per-project
+/// CSVs at ~/.qai/usage/*.csv into a single table. Output goes to stdout so
+/// it can be piped/captured cleanly.
+fn runUsageSummary(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    env: *const std.process.Environ.Map,
+    out: *std.Io.Writer,
+    err: *std.Io.Writer,
+    project_filter: ?[]const u8,
+    since_filter: ?[]const u8,
+) !void {
+    const home = env.get("HOME") orelse {
+        try err.writeAll("[usage] HOME is not set — can't locate ~/.qai/usage/.\n");
+        try err.flush();
+        return;
+    };
+    const usage_dir = try std.fmt.allocPrint(gpa, "{s}/.qai/usage", .{home});
+    defer gpa.free(usage_dir);
+
+    var dir = std.Io.Dir.cwd().openDir(io, usage_dir, .{ .iterate = true }) catch |e| switch (e) {
+        error.FileNotFound => {
+            try out.writeAll("(no usage logs yet — run a session first)\n");
+            try out.flush();
+            return;
+        },
+        else => return e,
+    };
+    defer dir.close(io);
+
+    // Normalize the project filter: if it starts with '/' assume it's a
+    // path and sanitize. Otherwise treat as already-sanitized key.
+    var owned_filter: ?[]u8 = null;
+    defer if (owned_filter) |f| gpa.free(f);
+    const wanted_key: ?[]const u8 = if (project_filter) |p| blk: {
+        if (p.len == 0) break :blk null;
+        if (p[0] == '/') {
+            const buf = try gpa.alloc(u8, p.len);
+            for (p, 0..) |c, i| buf[i] = if (c == '/') '-' else c;
+            owned_filter = buf;
+            break :blk buf;
+        }
+        break :blk p;
+    } else null;
+
+    const Row = struct {
+        project: []const u8,
+        turns: u64,
+        input_tokens: u64,
+        output_tokens: u64,
+        cost: f64,
+    };
+    var rows: std.ArrayList(Row) = .empty;
+    defer {
+        for (rows.items) |r| gpa.free(r.project);
+        rows.deinit(gpa);
+    }
+
+    var grand: Row = .{ .project = "", .turns = 0, .input_tokens = 0, .output_tokens = 0, .cost = 0.0 };
+
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".csv")) continue;
+        const project_name = entry.name[0 .. entry.name.len - ".csv".len];
+
+        if (wanted_key) |k| if (!std.mem.eql(u8, project_name, k)) continue;
+
+        // Read the CSV and accumulate totals across all rows that pass
+        // the optional date filter.
+        const path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ usage_dir, entry.name });
+        defer gpa.free(path);
+        const data = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(16 * 1024 * 1024)) catch continue;
+        defer gpa.free(data);
+
+        var totals: Row = .{
+            .project = try gpa.dupe(u8, project_name),
+            .turns = 0,
+            .input_tokens = 0,
+            .output_tokens = 0,
+            .cost = 0.0,
+        };
+        errdefer gpa.free(totals.project);
+
+        var lines = std.mem.splitScalar(u8, data, '\n');
+        var line_no: usize = 0;
+        while (lines.next()) |raw_line| {
+            line_no += 1;
+            if (line_no == 1) continue; // header
+            const line = std.mem.trim(u8, raw_line, " \t\r");
+            if (line.len == 0) continue;
+
+            var fields = std.mem.splitScalar(u8, line, ',');
+            const ts = fields.next() orelse continue;
+            _ = fields.next() orelse continue; // provider
+            _ = fields.next() orelse continue; // model
+            const turns_s = fields.next() orelse continue;
+            const in_s = fields.next() orelse continue;
+            const out_s = fields.next() orelse continue;
+            const cost_s = fields.next() orelse continue;
+
+            if (since_filter) |since| {
+                if (std.mem.lessThan(u8, ts, since)) continue;
+            }
+
+            const turns = std.fmt.parseInt(u64, turns_s, 10) catch 0;
+            const in_t = std.fmt.parseInt(u64, in_s, 10) catch 0;
+            const out_t = std.fmt.parseInt(u64, out_s, 10) catch 0;
+            const cost = std.fmt.parseFloat(f64, cost_s) catch 0.0;
+
+            totals.turns += turns;
+            totals.input_tokens += in_t;
+            totals.output_tokens += out_t;
+            totals.cost += cost;
+        }
+
+        if (totals.turns == 0) {
+            gpa.free(totals.project);
+            continue;
+        }
+
+        grand.turns += totals.turns;
+        grand.input_tokens += totals.input_tokens;
+        grand.output_tokens += totals.output_tokens;
+        grand.cost += totals.cost;
+
+        try rows.append(gpa, totals);
+    }
+
+    if (rows.items.len == 0) {
+        try out.writeAll("(no rows matched)\n");
+        try out.flush();
+        return;
+    }
+
+    // Sort projects by cost desc — most-expensive first, where the eye lands.
+    std.mem.sort(Row, rows.items, {}, struct {
+        fn lt(_: void, a: Row, b: Row) bool {
+            return a.cost > b.cost;
+        }
+    }.lt);
+
+    // Width-fit the project column.
+    var name_w: usize = "PROJECT".len;
+    for (rows.items) |r| if (r.project.len > name_w) {
+        name_w = r.project.len;
+    };
+
+    // Header.
+    try out.print("{s}", .{padRight("PROJECT", name_w)});
+    try out.writeAll("  TURNS   IN_TOKENS  OUT_TOKENS         COST\n");
+    try writeRule(out, name_w);
+
+    for (rows.items) |r| {
+        try out.print(
+            "{s}  {d:>5}  {d:>10}  {d:>10}   ${d:>9.4}\n",
+            .{ padRight(r.project, name_w), r.turns, r.input_tokens, r.output_tokens, r.cost },
+        );
+    }
+
+    try writeRule(out, name_w);
+    try out.print(
+        "{s}  {d:>5}  {d:>10}  {d:>10}   ${d:>9.4}\n",
+        .{ padRight("TOTAL", name_w), grand.turns, grand.input_tokens, grand.output_tokens, grand.cost },
+    );
+    try out.flush();
+}
+
+/// Right-pad `s` to width `w` using spaces. Returned slice is valid only
+/// until the next call (uses a thread-local buffer).
+fn padRight(s: []const u8, w: usize) []const u8 {
+    const Local = struct {
+        threadlocal var buf: [256]u8 = undefined;
+    };
+    const len = @min(@max(s.len, w), Local.buf.len);
+    @memcpy(Local.buf[0..s.len], s);
+    if (s.len < w) {
+        const pad_to = @min(w, Local.buf.len);
+        for (Local.buf[s.len..pad_to]) |*c| c.* = ' ';
+    }
+    return Local.buf[0..len];
+}
+
+fn writeRule(out: *std.Io.Writer, name_w: usize) !void {
+    var i: usize = 0;
+    while (i < name_w) : (i += 1) try out.writeAll("─");
+    try out.writeAll("  ─────  ──────────  ──────────   ──────────\n");
+}
+
+/// Append one row PER (provider, model) bucket to
+/// `~/.qai/usage/<sanitized-cwd>.csv`, writing the header on first use.
+/// Best-effort — silently no-ops if HOME is missing or the session had no
+/// usage to log.
 fn appendUsageRow(
     gpa: std.mem.Allocator,
     io: std.Io,
     env: *const std.process.Environ.Map,
-    cfg: *cfg_mod.Config,
     usage_total: *agent.UsageStats,
 ) !void {
+    if (usage_total.buckets.items.len == 0) return;
+
     const path = (try usageLogPath(gpa, io, env)) orelse return;
     defer gpa.free(path);
 
@@ -433,15 +739,19 @@ fn appendUsageRow(
     const ts_part = try timestampSlug(gpa, io);
     defer gpa.free(ts_part);
 
-    try buf.print(gpa, "{s},{s},{s},{d},{d},{d},{d:.6}\n", .{
-        ts_part,
-        cfg.provider.name(),
-        cfg.model,
-        usage_total.turns,
-        usage_total.input_tokens,
-        usage_total.output_tokens,
-        usage_total.cost_usd,
-    });
+    // One row per bucket — cleanly attributes spend even when the user
+    // /provider-switched mid-session.
+    for (usage_total.buckets.items) |b| {
+        try buf.print(gpa, "{s},{s},{s},{d},{d},{d},{d:.6}\n", .{
+            ts_part,
+            b.provider,
+            b.model,
+            b.turns,
+            b.input_tokens,
+            b.output_tokens,
+            b.cost_usd,
+        });
+    }
 
     if (need_header) {
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = buf.items });
@@ -500,8 +810,9 @@ fn handleSlashCommand(
             \\  /approvals           List session approvals
             \\  /forget              Clear all approvals (in-memory + on-disk)
             \\  /save [PATH]         Save the conversation as markdown to PATH
-            \\                       (default: .qai/sessions/<timestamp>.md)
+            \\                       (default: ~/.qai/projects/<cwd>/<ts>-<provider>.md)
             \\  /usage               Show running token + cost totals for this session
+            \\  /sessions            List past conversations saved for this project
             \\
         );
         try err.flush();
@@ -511,7 +822,7 @@ fn handleSlashCommand(
     if (std.mem.eql(u8, cmd, "/clear") or std.mem.eql(u8, cmd, "/reset")) {
         for (history.items) |*m| m.deinit();
         history.clearRetainingCapacity();
-        usage_total.* = .{};
+        usage_total.reset();
         try err.writeAll("[clear] history + usage reset (use /forget for approvals)\n");
         try err.flush();
         return true;
@@ -614,16 +925,26 @@ fn handleSlashCommand(
     }
 
     if (std.mem.eql(u8, cmd, "/usage")) {
+        const agg = usage_total.aggregate();
         try err.print(
             "[usage] {d} turns · {d} in / {d} out · ${d:.4}\n",
-            .{
-                usage_total.turns,
-                usage_total.input_tokens,
-                usage_total.output_tokens,
-                usage_total.cost_usd,
-            },
+            .{ agg.turns, agg.input_tokens, agg.output_tokens, agg.cost_usd },
         );
+        // Per-provider breakdown if more than one bucket exists.
+        if (usage_total.buckets.items.len > 1) {
+            for (usage_total.buckets.items) |b| {
+                try err.print(
+                    "         · {s}/{s}: {d} turns, {d} in / {d} out, ${d:.4}\n",
+                    .{ b.provider, b.model, b.turns, b.input_tokens, b.output_tokens, b.cost_usd },
+                );
+            }
+        }
         try err.flush();
+        return true;
+    }
+
+    if (std.mem.eql(u8, cmd, "/sessions")) {
+        try listSessions(gpa, io, env, err);
         return true;
     }
 
@@ -832,7 +1153,7 @@ fn runTurn(
         try out.flush();
     }
 
-    try agent.emitUsage(gpa, err_writer, cfg.model, state.input_tokens, state.output_tokens, 0, usage_total);
+    try agent.emitUsage(gpa, err_writer, cfg.provider.name(), cfg.model, state.input_tokens, state.output_tokens, 0, usage_total);
 
     try appendMsg(gpa, io, history, .user, prompt);
     try appendMsg(gpa, io, history, .assistant, state.text.items);

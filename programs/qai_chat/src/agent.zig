@@ -248,20 +248,81 @@ pub const Error = error{
     ToolsNotSupported,
 } || anyerror;
 
-/// Session-wide token + cost accumulator. Spans the whole REPL session
-/// across providers and turns. Read by /usage; populated by every turn
-/// (agent and plain chat alike).
-pub const UsageStats = struct {
+/// One bucket of usage attributed to a single provider+model. The session
+/// keeps one entry per (provider, model) pair so the CSV log can show
+/// where the bill went even when the user /provider-switched mid-session.
+pub const ProviderUsage = struct {
+    provider: []const u8,
+    model: []const u8,
+    turns: u64 = 0,
     input_tokens: u64 = 0,
     output_tokens: u64 = 0,
     cost_usd: f64 = 0.0,
-    turns: u64 = 0,
+};
 
-    pub fn add(self: *UsageStats, input: u32, output: u32, cost: f64) void {
-        self.input_tokens += input;
-        self.output_tokens += output;
-        self.cost_usd += cost;
-        self.turns += 1;
+/// Session-wide token + cost accumulator, broken down by (provider, model).
+/// Read by /usage (aggregate) and the auto-save CSV writer (per-provider rows).
+pub const UsageStats = struct {
+    gpa: std.mem.Allocator,
+    buckets: std.ArrayList(ProviderUsage) = .empty,
+
+    pub fn init(gpa: std.mem.Allocator) UsageStats {
+        return .{ .gpa = gpa };
+    }
+
+    pub fn deinit(self: *UsageStats) void {
+        for (self.buckets.items) |b| {
+            self.gpa.free(b.provider);
+            self.gpa.free(b.model);
+        }
+        self.buckets.deinit(self.gpa);
+    }
+
+    pub fn reset(self: *UsageStats) void {
+        for (self.buckets.items) |b| {
+            self.gpa.free(b.provider);
+            self.gpa.free(b.model);
+        }
+        self.buckets.clearRetainingCapacity();
+    }
+
+    pub fn add(
+        self: *UsageStats,
+        provider: []const u8,
+        model: []const u8,
+        input: u32,
+        output: u32,
+        cost: f64,
+    ) !void {
+        for (self.buckets.items) |*b| {
+            if (std.mem.eql(u8, b.provider, provider) and std.mem.eql(u8, b.model, model)) {
+                b.turns += 1;
+                b.input_tokens += input;
+                b.output_tokens += output;
+                b.cost_usd += cost;
+                return;
+            }
+        }
+        try self.buckets.append(self.gpa, .{
+            .provider = try self.gpa.dupe(u8, provider),
+            .model = try self.gpa.dupe(u8, model),
+            .turns = 1,
+            .input_tokens = input,
+            .output_tokens = output,
+            .cost_usd = cost,
+        });
+    }
+
+    /// Aggregate across all buckets — used by /usage and the autosave footer.
+    pub fn aggregate(self: *const UsageStats) ProviderUsage {
+        var total: ProviderUsage = .{ .provider = "", .model = "" };
+        for (self.buckets.items) |b| {
+            total.turns += b.turns;
+            total.input_tokens += b.input_tokens;
+            total.output_tokens += b.output_tokens;
+            total.cost_usd += b.cost_usd;
+        }
+        return total;
     }
 };
 
@@ -790,15 +851,25 @@ fn jsonString(v: std.json.Value, key: []const u8) ?[]const u8 {
 }
 
 fn printTurnUsage(args: RunArgs, state: *const TurnState, turn: u32) !void {
-    try emitUsage(args.gpa, args.err, args.model, state.input_tokens, state.output_tokens, turn, args.usage);
+    try emitUsage(
+        args.gpa,
+        args.err,
+        args.provider_name,
+        args.model,
+        state.input_tokens,
+        state.output_tokens,
+        turn,
+        args.usage,
+    );
 }
 
 /// Print "[turn N: in/out · $cost]" to err and accumulate into the session
-/// totals. Caller is anyone that owns a TurnState — both agent.zig and
-/// plain-chat in main.zig.
+/// totals (bucketed by provider+model). Caller is anyone that owns a
+/// TurnState — both agent.zig and plain-chat in main.zig.
 pub fn emitUsage(
     gpa: std.mem.Allocator,
     err_writer: *std.Io.Writer,
+    provider: []const u8,
     model: []const u8,
     input_tokens: u32,
     output_tokens: u32,
@@ -808,13 +879,13 @@ pub fn emitUsage(
     if (input_tokens == 0 and output_tokens == 0) return;
     if (pricing.lookup(gpa, model)) |p| {
         const cost = pricing.estimate(p, input_tokens, output_tokens);
-        usage_total.add(input_tokens, output_tokens, cost);
+        try usage_total.add(provider, model, input_tokens, output_tokens, cost);
         try err_writer.print(
             "[turn {d}: {d} in / {d} out · ${d:.4}]\n",
             .{ turn + 1, input_tokens, output_tokens, cost },
         );
     } else {
-        usage_total.add(input_tokens, output_tokens, 0.0);
+        try usage_total.add(provider, model, input_tokens, output_tokens, 0.0);
         try err_writer.print(
             "[turn {d}: {d} in / {d} out]\n",
             .{ turn + 1, input_tokens, output_tokens },
