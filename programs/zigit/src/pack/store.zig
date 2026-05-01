@@ -47,6 +47,7 @@ pub const ReadError = error{
     OfsDeltaOutOfRange,
     PayloadSizeMismatch,
     RefDeltaBaseMissing,
+    WriteFailed,
 } || std.compress.flate.Decompress.Error || std.Io.Reader.Error;
 
 pub const OpenPack = struct {
@@ -60,6 +61,12 @@ pub const OpenPack = struct {
 pub const PackStore = struct {
     arena: std.heap.ArenaAllocator,
     packs: []OpenPack,
+    /// Optional loose-objects fallback for REF_DELTA bases that
+    /// don't live in any open pack. Real git permits a delta's base
+    /// to be loose (mid-gc, partial transfers, hand-built packs).
+    /// Set after construction by Repository.discover.
+    loose_dir: ?Dir = null,
+    loose_io: ?Io = null,
 
     /// Open every pair of pack-XXX.{pack,idx} under `pack_dir`.
     /// `pack_dir` is `.git/objects/pack`. Returns an empty store if
@@ -107,6 +114,13 @@ pub const PackStore = struct {
         self.* = undefined;
     }
 
+    /// Wire up the loose-objects fallback for REF_DELTA chains.
+    /// Repository calls this once after construction.
+    pub fn attachLooseFallback(self: *PackStore, objects_dir: Dir, io: Io) void {
+        self.loose_dir = objects_dir;
+        self.loose_io = io;
+    }
+
     /// Resolve `oid` to a fully-decoded LoadedObject, following any
     /// delta chain. Returns null if no pack contains the oid. Caller
     /// owns `payload` (allocated with `allocator`).
@@ -141,6 +155,60 @@ pub const PackStore = struct {
             }
         }
         return found;
+    }
+
+    /// Inflate a loose object directly from `loose_dir`, bypassing
+    /// LooseStore to avoid recursing back into us. Returns null if
+    /// no loose fallback is configured or the object isn't there.
+    fn readLooseFallback(
+        self: *PackStore,
+        allocator: std.mem.Allocator,
+        oid: Oid,
+    ) ReadError!?LoadedObject {
+        const ld = self.loose_dir orelse return null;
+        const lio = self.loose_io orelse return null;
+
+        var hex: [40]u8 = undefined;
+        oid.toHex(&hex);
+        var path_buf: [50]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ hex[0..2], hex[2..] }) catch return null;
+
+        // Treat any non-OOM IO failure as "base not in loose either"
+        // — the caller maps that to RefDeltaBaseMissing, which is the
+        // right semantic for a corrupted/inaccessible loose object.
+        const compressed = ld.readFileAlloc(lio, path, allocator, .unlimited) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return null,
+        };
+        defer allocator.free(compressed);
+
+        var src_reader: std.Io.Reader = .fixed(compressed);
+        var inflate_buf: [std.compress.flate.max_window_len]u8 = undefined;
+        var decompress = std.compress.flate.Decompress.init(&src_reader, .zlib, &inflate_buf);
+
+        var inflated: std.Io.Writer.Allocating = .init(allocator);
+        defer inflated.deinit();
+        _ = try decompress.reader.streamRemaining(&inflated.writer);
+
+        const bytes = inflated.written();
+        const nul = std.mem.indexOfScalar(u8, bytes, 0) orelse return error.PayloadSizeMismatch;
+        const header = bytes[0..nul];
+        const space = std.mem.indexOfScalar(u8, header, ' ') orelse return error.PayloadSizeMismatch;
+        const kind_str = header[0..space];
+
+        const kind: Kind = if (std.mem.eql(u8, kind_str, "blob"))
+            .blob
+        else if (std.mem.eql(u8, kind_str, "tree"))
+            .tree
+        else if (std.mem.eql(u8, kind_str, "commit"))
+            .commit
+        else if (std.mem.eql(u8, kind_str, "tag"))
+            .tag
+        else
+            return error.PayloadSizeMismatch;
+
+        const payload = try allocator.dupe(u8, bytes[nul + 1 ..]);
+        return .{ .kind = kind, .payload = payload };
     }
 
     /// Read the object at `offset` in `op.pack`, recursively
@@ -186,7 +254,11 @@ pub const PackStore = struct {
                 defer allocator.free(delta_bytes);
 
                 const base_oid: Oid = .{ .bytes = ref.base };
-                var base = (try self.read(allocator, base_oid)) orelse return error.RefDeltaBaseMissing;
+                var base = blk: {
+                    if (try self.read(allocator, base_oid)) |from_pack| break :blk from_pack;
+                    if (try self.readLooseFallback(allocator, base_oid)) |from_loose| break :blk from_loose;
+                    return error.RefDeltaBaseMissing;
+                };
                 defer base.deinit(allocator);
 
                 const reconstructed = try delta_mod.apply(allocator, base.payload, delta_bytes);

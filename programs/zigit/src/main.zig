@@ -24,6 +24,7 @@ const diff_cmd = @import("cli/diff.zig");
 const branch_cmd = @import("cli/branch.zig");
 const switch_cmd = @import("cli/switch.zig");
 const checkout_cmd = @import("cli/checkout.zig");
+const gc_cmd = @import("cli/gc.zig");
 
 const usage =
     \\zigit — git in zig
@@ -48,6 +49,7 @@ const usage =
     \\  branch [-d|-D] [NAME [START]]                 List, create, or delete branches
     \\  switch [-c] NAME                              Move HEAD to branch, update workdir + index
     \\  checkout TARGET                               Branch name → switch; commit oid → detached HEAD
+    \\  gc                                            Pack loose objects + refs into a single pack
     \\
 ;
 
@@ -111,6 +113,8 @@ pub fn main(init: std.process.Init) !void {
             error.WouldLoseChanges => std.process.exit(1),
             else => return err,
         };
+    } else if (std.mem.eql(u8, cmd, "gc")) {
+        try gc_cmd.run(allocator, io, rest);
     } else if (std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) {
         try writeAll(io, .stdout, usage);
     } else {

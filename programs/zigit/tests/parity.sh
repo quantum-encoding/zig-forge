@@ -503,6 +503,88 @@ check "diff against pack-only repo" "$git_diff" "$zigit_diff"
 
 unset TZ GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
 
+# ── Section 14: gc — write packs + packed-refs that real git accepts ──────────
+echo
+echo "14. gc — write packs + packed-refs"
+GC="$WORK/gc-test"
+mkdir -p "$GC"
+( cd "$GC" && "$ZIGIT_BIN" init >/dev/null )
+
+export TZ=UTC
+export GIT_AUTHOR_NAME="Gc Bot"
+export GIT_AUTHOR_EMAIL="gc@example.com"
+export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+
+for n in 1 2 3 4 5; do
+    payload=$(printf 'line one\nline two\nline three\nrev %d\nline five\n' $n)
+    echo "$payload" > "$GC/file.txt"
+    export GIT_AUTHOR_DATE=$((1700000000 + n * 100))
+    export GIT_COMMITTER_DATE=$GIT_AUTHOR_DATE
+    ( cd "$GC" && "$ZIGIT_BIN" add file.txt >/dev/null && "$ZIGIT_BIN" commit -m "v$n" >/dev/null )
+done
+
+# Snapshot HEAD before gc; it should be unchanged after gc.
+head_before=$(cd "$GC" && git rev-parse HEAD)
+
+# Count loose objects before; we expect ≥ commit_count + tree_count + blob_count.
+loose_before=$(find "$GC/.git/objects" -type f \! -path '*/info/*' \! -path '*/pack/*' | wc -l | tr -d ' ')
+
+( cd "$GC" && "$ZIGIT_BIN" gc >/dev/null )
+
+# After gc: no loose objects, exactly one .pack + one .idx.
+loose_after=$(find "$GC/.git/objects" -type f \! -path '*/info/*' \! -path '*/pack/*' | wc -l | tr -d ' ')
+check "gc cleared loose objects" "0" "$loose_after"
+
+pack_files=$(find "$GC/.git/objects/pack" -type f -name 'pack-*.pack' | wc -l | tr -d ' ')
+idx_files=$(find "$GC/.git/objects/pack" -type f -name 'pack-*.idx' | wc -l | tr -d ' ')
+check "gc wrote one pack file" "1" "$pack_files"
+check "gc wrote one idx file" "1" "$idx_files"
+
+# packed-refs has the branch; loose ref file is gone.
+[ -f "$GC/.git/packed-refs" ] && pr_exists=yes || pr_exists=no
+check "gc wrote packed-refs" "yes" "$pr_exists"
+loose_main_present=$([ -f "$GC/.git/refs/heads/main" ] && echo yes || echo no)
+check "loose refs/heads/main removed" "no" "$loose_main_present"
+
+# git accepts the result: fsck clean, log walks, HEAD matches.
+fsck_output=$(cd "$GC" && git fsck --strict 2>&1)
+check "git fsck --strict on zigit-packed repo" "" "$fsck_output"
+
+head_after=$(cd "$GC" && git rev-parse HEAD)
+check "HEAD oid unchanged by gc" "$head_before" "$head_after"
+
+git_log_count=$(cd "$GC" && git log --oneline | wc -l | tr -d ' ')
+check "git log walks 5 commits from packed repo" "5" "$git_log_count"
+
+# verify-pack: every object well-formed inside the new pack.
+verify_status=$(cd "$GC" && git verify-pack -v "$GC"/.git/objects/pack/pack-*.idx 2>&1 | tail -1)
+case "$verify_status" in
+    *": ok"*) check "git verify-pack ok" "ok" "ok" ;;
+    *)        check "git verify-pack ok" "ok" "$verify_status" ;;
+esac
+
+# zigit can still read everything via its pack reader.
+zigit_log_count=$(cd "$GC" && "$ZIGIT_BIN" log | grep -c '^commit ')
+check "zigit log walks pack-only result" "5" "$zigit_log_count"
+
+# Diff after a workdir edit still matches git (post-gc).
+echo "live edit" >> "$GC/file.txt"
+diff <(cd "$GC" && "$ZIGIT_BIN" diff) <(cd "$GC" && git diff) >/dev/null && diff_match=match || diff_match=mismatch
+check "zigit diff matches git diff after gc" "match" "$diff_match"
+
+# A second gc with no loose objects is a no-op.
+output=$(cd "$GC" && git checkout -- file.txt && "$ZIGIT_BIN" gc 2>&1 | head -1)
+check "second gc reports nothing to repack" "Nothing to repack." "$output"
+
+# Cloning the zigit-packed repo into a fresh dir works.
+CLONE="$WORK/gc-clone"
+git clone -q "$GC" "$CLONE" 2>&1 >/dev/null
+clone_head=$(cd "$CLONE" && git rev-parse HEAD)
+check "git clone of zigit-packed repo resolves HEAD" "$head_before" "$clone_head"
+
+unset TZ GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo
 TOTAL=$((PASS + FAIL))

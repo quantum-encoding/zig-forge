@@ -78,6 +78,10 @@ pub const Repository = struct {
     }
 
     pub fn looseStore(self: *Repository) object.LooseStore {
+        // Wire the loose fallback into PackStore so REF_DELTA bases
+        // that live in loose storage still resolve. Idempotent — safe
+        // to call every time looseStore() is requested.
+        self.packs.attachLooseFallback(self.objects_dir, self.io);
         return object.LooseStore.initWithPacks(self.objects_dir, self.io, &self.packs);
     }
 };

@@ -6,14 +6,14 @@ no libgit2 dependency.
 
 ## Status
 
-**Phases 1–6 complete** — object store + index + tree + commit + refs +
+**Phases 1–7 complete** — object store + index + tree + commit + refs +
 porcelain + status + Myers diff + branch/switch/checkout + pack-file
-read + packed-refs. zigit transparently reads pack files (with full
-delta-chain resolution: OFS_DELTA + REF_DELTA), so `cat-file -p`,
-`log`, `status`, and `diff` all work against repos that have been
-through `git gc`. `status --porcelain` and `diff` match `git`'s
-output byte-for-byte, including diff's function-context hints in
-hunk headers.
+read/write + `gc`. zigit can both **read** and **emit** pack files;
+`zigit gc` collapses loose objects + loose refs into a single pack +
+`packed-refs` file that `git fsck`, `git verify-pack`, `git log`, and
+`git clone` all accept. Commits, blobs, and trees produced by zigit
+are byte-identical to what real git would produce given the same
+inputs.
 
 ### Plumbing
 
@@ -39,18 +39,19 @@ hunk headers.
 | `zigit branch [-d\|-D] [NAME [START]]` | List local branches (current marked `*`); create at HEAD or START; delete (refuses current) |
 | `zigit switch [-c] NAME` | Move HEAD to a branch, update workdir + index. Refuses if local edits would be lost |
 | `zigit checkout TARGET` | Branch name → switch; commit oid (full or ≥4-char prefix) → detached HEAD |
+| `zigit gc` | Pack all loose objects + loose refs into a single pack + `packed-refs`. Output passes `git fsck --strict` and `git verify-pack` |
 
 ## Build
 
 ```
 zig build              # produces zig-out/bin/zigit
-zig build test         # 43 unit tests
-./tests/parity.sh      # 58 byte-for-byte checks vs real `git`
+zig build test         # 48 unit tests
+./tests/parity.sh      # 71 byte-for-byte checks vs real `git`
 ```
 
 ## Roadmap
 
-Phase 7 — pack files (write) + `gc` (repack loose objects, expire packed-refs)
+Phase 8 — smart-HTTPS clone (read-only): `zigit clone https://...`
 Phase 5 — `branch` / `switch` / `checkout`
 Phase 6+ — pack files, smart HTTPS, merge/rebase
 
