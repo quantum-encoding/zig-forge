@@ -898,6 +898,65 @@ check "tag -d removed v2-here" "v3-here" "$remaining"
 
 unset TZ GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
 
+# ── Section 20: diff3-aware merge (disjoint hunks resolve, overlap → markers) ─
+echo
+echo "20. merge with diff3 (disjoint resolve, overlap → markers)"
+D3="$WORK/diff3"
+mkdir -p "$D3"
+
+export TZ=UTC
+export GIT_AUTHOR_NAME="Diff3 Bot"
+export GIT_AUTHOR_EMAIL="diff3@example.com"
+export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+
+# (a) Disjoint hunks: ours touches L1, theirs touches L5 → clean.
+DJ="$D3/disjoint"
+mkdir -p "$DJ" && ( cd "$DJ" && "$ZIGIT_BIN" init >/dev/null )
+GIT_AUTHOR_DATE=1700000000 GIT_COMMITTER_DATE=1700000000 \
+    bash -c "cd '$DJ' && printf 'L1\nL2\nL3\nL4\nL5\n' > poem && '$ZIGIT_BIN' add poem && '$ZIGIT_BIN' commit -m base >/dev/null"
+GIT_AUTHOR_DATE=1700000100 GIT_COMMITTER_DATE=1700000100 \
+    bash -c "cd '$DJ' && '$ZIGIT_BIN' switch -c feature >/dev/null && printf 'L1\nL2\nL3\nL4\nL5-changed\n' > poem && '$ZIGIT_BIN' add poem && '$ZIGIT_BIN' commit -m feat >/dev/null"
+( cd "$DJ" && "$ZIGIT_BIN" switch main >/dev/null )
+GIT_AUTHOR_DATE=1700000200 GIT_COMMITTER_DATE=1700000200 \
+    bash -c "cd '$DJ' && printf 'L1-changed\nL2\nL3\nL4\nL5\n' > poem && '$ZIGIT_BIN' add poem && '$ZIGIT_BIN' commit -m mainc >/dev/null"
+GIT_AUTHOR_DATE=1700000300 GIT_COMMITTER_DATE=1700000300 \
+    bash -c "cd '$DJ' && '$ZIGIT_BIN' merge feature >/dev/null"
+content=$(cat "$DJ/poem")
+expected_dj=$'L1-changed\nL2\nL3\nL4\nL5-changed'
+check "diff3 resolved disjoint hunks cleanly" "$expected_dj" "$content"
+
+# (b) Overlapping changes: same line modified differently → markers.
+OV="$D3/overlap"
+mkdir -p "$OV" && ( cd "$OV" && "$ZIGIT_BIN" init >/dev/null )
+GIT_AUTHOR_DATE=1700000000 GIT_COMMITTER_DATE=1700000000 \
+    bash -c "cd '$OV' && echo shared > shared && '$ZIGIT_BIN' add shared && '$ZIGIT_BIN' commit -m base >/dev/null"
+GIT_AUTHOR_DATE=1700000100 GIT_COMMITTER_DATE=1700000100 \
+    bash -c "cd '$OV' && '$ZIGIT_BIN' switch -c feature >/dev/null && echo from-feature > shared && '$ZIGIT_BIN' add shared && '$ZIGIT_BIN' commit -m fc >/dev/null"
+( cd "$OV" && "$ZIGIT_BIN" switch main >/dev/null )
+GIT_AUTHOR_DATE=1700000200 GIT_COMMITTER_DATE=1700000200 \
+    bash -c "cd '$OV' && echo from-main > shared && '$ZIGIT_BIN' add shared && '$ZIGIT_BIN' commit -m mc >/dev/null"
+if (cd "$OV" && "$ZIGIT_BIN" merge feature 2>/dev/null); then
+    check "overlap merge refused" "refused" "accepted"
+else
+    check "overlap merge refused" "refused" "refused"
+fi
+
+# Conflict markers landed in the file with both contents.
+overlap_content=$(cat "$OV/shared")
+echo "$overlap_content" | grep -q '^<<<<<<< ours' && a=ok || a=missing
+check "marker file has <<<<<<< ours" "ok" "$a"
+echo "$overlap_content" | grep -q '^=======' && b=ok || b=missing
+check "marker file has =======" "ok" "$b"
+echo "$overlap_content" | grep -q '^>>>>>>> theirs' && c=ok || c=missing
+check "marker file has >>>>>>> theirs" "ok" "$c"
+echo "$overlap_content" | grep -q "from-feature" && f=yes || f=no
+check "marker block contains theirs content" "yes" "$f"
+echo "$overlap_content" | grep -q "from-main" && m=yes || m=no
+check "marker block contains ours content" "yes" "$m"
+
+unset TZ GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo
 TOTAL=$((PASS + FAIL))

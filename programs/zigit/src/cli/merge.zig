@@ -124,12 +124,79 @@ fn threeWay(
     var result = try zigit.merge.three_way.merge(allocator, base_map, ours_map, theirs_map);
     defer result.deinit(allocator);
 
-    if (result.conflicts.len > 0) {
+    // For modify/modify conflicts, retry via diff3. If the changes
+    // touch disjoint hunks, diff3 produces clean output and we can
+    // resolve cleanly. Overlapping changes get conflict-marker
+    // content written to the work tree so the user has a starting
+    // point to resolve manually.
+    var resolved_extras: std.ArrayListUnmanaged(zigit.merge.three_way.Resolved) = .empty;
+    defer {
+        for (resolved_extras.items) |r| allocator.free(r.path);
+        resolved_extras.deinit(allocator);
+    }
+    var conflict_marker_paths: std.ArrayListUnmanaged([]u8) = .empty;
+    defer {
+        for (conflict_marker_paths.items) |p| allocator.free(p);
+        conflict_marker_paths.deinit(allocator);
+    }
+    var hard_conflicts: std.ArrayListUnmanaged(zigit.merge.three_way.Conflict) = .empty;
+    defer hard_conflicts.deinit(allocator);
+
+    var work_root = try openWorkRoot(io, repo);
+    defer work_root.close(io);
+
+    for (result.conflicts) |c| {
+        if (c.reason != .modify_modify) {
+            try hard_conflicts.append(allocator, c);
+            continue;
+        }
+        const b_slot = base_map.get(c.path).?;
+        const o_slot = ours_map.get(c.path).?;
+        const t_slot = theirs_map.get(c.path).?;
+
+        var b_obj = try store.read(allocator, b_slot.oid);
+        defer b_obj.deinit(allocator);
+        var o_obj = try store.read(allocator, o_slot.oid);
+        defer o_obj.deinit(allocator);
+        var t_obj = try store.read(allocator, t_slot.oid);
+        defer t_obj.deinit(allocator);
+
+        const b_lines = try zigit.diff.unified.splitLinesKeepingNewline(allocator, b_obj.payload);
+        defer allocator.free(b_lines);
+        const o_lines = try zigit.diff.unified.splitLinesKeepingNewline(allocator, o_obj.payload);
+        defer allocator.free(o_lines);
+        const t_lines = try zigit.diff.unified.splitLinesKeepingNewline(allocator, t_obj.payload);
+        defer allocator.free(t_lines);
+
+        var d3 = try zigit.diff.diff3.merge(allocator, b_lines, o_lines, t_lines, .{});
+        defer d3.deinit(allocator);
+
+        if (!d3.had_conflict) {
+            // Clean line-level merge. Write a new blob and treat as resolved.
+            const oid = zigit.object.computeOid(.blob, d3.bytes);
+            try store.write(allocator, .blob, d3.bytes, oid);
+            try resolved_extras.append(allocator, .{
+                .path = try allocator.dupe(u8, c.path),
+                .mode = o_slot.mode, // mode-only conflicts don't reach here (three_way already routed those)
+                .oid = oid,
+            });
+        } else {
+            // Write the marked-up content to disk so the user can
+            // see the conflict, but still report it as a hard
+            // failure so the merge aborts.
+            if (std.fs.path.dirname(c.path)) |parent| try work_root.createDirPath(io, parent);
+            try work_root.writeFile(io, .{ .sub_path = c.path, .data = d3.bytes });
+            try conflict_marker_paths.append(allocator, try allocator.dupe(u8, c.path));
+            try hard_conflicts.append(allocator, c);
+        }
+    }
+
+    if (hard_conflicts.items.len > 0) {
         var buf: [4096]u8 = undefined;
         try File.stderr().writeStreamingAll(io, "merge: conflicts in:\n");
-        for (result.conflicts) |c| {
+        for (hard_conflicts.items) |c| {
             const reason = switch (c.reason) {
-                .modify_modify => "modify/modify",
+                .modify_modify => "content overlap — markers written",
                 .add_add => "add/add",
                 .modify_delete => "modify/delete",
                 .delete_modify => "delete/modify",
@@ -137,18 +204,26 @@ fn threeWay(
             const line = try std.fmt.bufPrint(&buf, "  {s}  ({s})\n", .{ c.path, reason });
             try File.stderr().writeStreamingAll(io, line);
         }
-        try File.stderr().writeStreamingAll(io, "merge: aborting (no auto-resolution yet)\n");
+        try File.stderr().writeStreamingAll(io, "merge: aborting (resolve conflicts then re-run zigit add + commit)\n");
         return error.MergeConflict;
     }
 
-    // Build the merged tree.
-    const merged_tree_oid = try buildTreeFromResolved(allocator, store, result.merged);
+    // Build the merged tree from the clean entries plus any
+    // diff3-resolved extras.
+    var all_resolved: std.ArrayListUnmanaged(zigit.merge.three_way.Resolved) = .empty;
+    defer all_resolved.deinit(allocator);
+    try all_resolved.appendSlice(allocator, result.merged);
+    try all_resolved.appendSlice(allocator, resolved_extras.items);
+    std.mem.sort(zigit.merge.three_way.Resolved, all_resolved.items, {}, struct {
+        fn lt(_: void, a: zigit.merge.three_way.Resolved, b: zigit.merge.three_way.Resolved) bool {
+            return std.mem.lessThan(u8, a.path, b.path);
+        }
+    }.lt);
+    const merged_tree_oid = try buildTreeFromResolved(allocator, store, all_resolved.items);
 
     // Materialise + remove paths that are gone.
-    var work_root = try openWorkRoot(io, repo);
-    defer work_root.close(io);
     try zigit.worktree.applyTree(allocator, io, work_root, store, merged_tree_oid);
-    try removeStalePaths(allocator, io, work_root, ours_map, result.merged);
+    try removeStalePaths(allocator, io, work_root, ours_map, all_resolved.items);
 
     // Build the merge commit.
     var cfg = try zigit.config.load(allocator, io, repo.git_dir);
@@ -189,7 +264,7 @@ fn threeWay(
     var hex: [40]u8 = undefined;
     commit_oid.toHex(&hex);
     var buf: [256]u8 = undefined;
-    const msg = try std.fmt.bufPrint(&buf, "Merge made {s} ({d} files)\n", .{ hex[0..7], result.merged.len });
+    const msg = try std.fmt.bufPrint(&buf, "Merge made {s} ({d} files)\n", .{ hex[0..7], all_resolved.items.len });
     try File.stdout().writeStreamingAll(io, msg);
 }
 
