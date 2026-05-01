@@ -29,6 +29,9 @@ const clone_cmd = @import("cli/clone.zig");
 const push_cmd = @import("cli/push.zig");
 const merge_cmd = @import("cli/merge.zig");
 const rebase_cmd = @import("cli/rebase.zig");
+const restore_cmd = @import("cli/restore.zig");
+const reset_cmd = @import("cli/reset.zig");
+const tag_cmd = @import("cli/tag.zig");
 
 const usage =
     \\zigit — git in zig
@@ -58,6 +61,9 @@ const usage =
     \\  push URL [BRANCH]                             Push BRANCH (default = current) to URL
     \\  merge BRANCH                                  Fast-forward when possible, otherwise three-way
     \\  rebase ONTO                                   Replay HEAD's commits on top of ONTO
+    \\  restore [--staged] PATH...                    Restore PATH(s) from index (or HEAD if --staged)
+    \\  reset [--soft|--mixed|--hard] [TARGET]        Move HEAD ± rewrite index ± rewrite workdir
+    \\  tag [-d] [NAME [COMMIT]]                      List, create, or delete lightweight tags
     \\
 ;
 
@@ -137,6 +143,15 @@ pub fn main(init: std.process.Init) !void {
             error.MergeConflict => std.process.exit(1),
             else => return err,
         };
+    } else if (std.mem.eql(u8, cmd, "restore")) {
+        restore_cmd.run(allocator, io, rest) catch |err| switch (err) {
+            error.PathspecNotFound => std.process.exit(1),
+            else => return err,
+        };
+    } else if (std.mem.eql(u8, cmd, "reset")) {
+        try reset_cmd.run(allocator, io, rest);
+    } else if (std.mem.eql(u8, cmd, "tag")) {
+        try tag_cmd.run(allocator, io, rest);
     } else if (std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) {
         try writeAll(io, .stdout, usage);
     } else {

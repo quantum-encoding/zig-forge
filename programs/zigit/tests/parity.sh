@@ -821,6 +821,83 @@ check "rebase work tree has all files" "b f1 f2 m " "$files"
 
 unset TZ GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
 
+# ── Section 19: restore + reset + tag ─────────────────────────────────────────
+echo
+echo "19. restore / reset / tag"
+RR="$WORK/restore-reset-tag"
+mkdir -p "$RR" && ( cd "$RR" && "$ZIGIT_BIN" init >/dev/null )
+
+export TZ=UTC
+export GIT_AUTHOR_NAME="Polish Bot"
+export GIT_AUTHOR_EMAIL="polish@example.com"
+export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+
+# Build a 3-commit chain.
+GIT_AUTHOR_DATE=1700000000 GIT_COMMITTER_DATE=1700000000 \
+    bash -c "cd '$RR' && echo v1 > a && '$ZIGIT_BIN' add a && '$ZIGIT_BIN' commit -m v1 >/dev/null"
+GIT_AUTHOR_DATE=1700000100 GIT_COMMITTER_DATE=1700000100 \
+    bash -c "cd '$RR' && echo v2 > a && '$ZIGIT_BIN' add a && '$ZIGIT_BIN' commit -m v2 >/dev/null"
+GIT_AUTHOR_DATE=1700000200 GIT_COMMITTER_DATE=1700000200 \
+    bash -c "cd '$RR' && echo v3 > a && '$ZIGIT_BIN' add a && '$ZIGIT_BIN' commit -m v3 >/dev/null"
+
+# (a) restore PATH undoes unstaged edits.
+echo "edited" > "$RR/a"
+( cd "$RR" && "$ZIGIT_BIN" restore a >/dev/null )
+content=$(cat "$RR/a")
+check "restore restores from index" "v3" "$content"
+
+# (b) restore --staged unstages a staged change.
+echo "staged" > "$RR/a"
+( cd "$RR" && "$ZIGIT_BIN" add a >/dev/null )
+( cd "$RR" && "$ZIGIT_BIN" restore --staged a >/dev/null )
+porcelain=$(cd "$RR" && "$ZIGIT_BIN" status -s)
+check "restore --staged unstages without touching workdir" " M a" "$porcelain"
+( cd "$RR" && "$ZIGIT_BIN" restore a >/dev/null ) # clean up
+
+# (c) reset --soft moves HEAD only.
+v3_oid=$(cd "$RR" && git rev-parse HEAD)
+v2_oid=$(cd "$RR" && git rev-parse HEAD~1)
+( cd "$RR" && "$ZIGIT_BIN" reset --soft "$v2_oid" >/dev/null )
+new_head=$(cd "$RR" && git rev-parse HEAD)
+check "reset --soft moved HEAD to v2" "$v2_oid" "$new_head"
+# Index still reflects v3 → status shows "M a" (staged change vs new HEAD).
+porcelain=$(cd "$RR" && "$ZIGIT_BIN" status -s)
+check "reset --soft leaves index untouched" "M  a" "$porcelain"
+
+# (d) reset --mixed (default) also rewrites the index.
+( cd "$RR" && "$ZIGIT_BIN" reset "$v3_oid" >/dev/null ) # back to clean v3
+( cd "$RR" && "$ZIGIT_BIN" reset "$v2_oid" >/dev/null )
+porcelain=$(cd "$RR" && "$ZIGIT_BIN" status -s)
+check "reset --mixed unstages but keeps workdir" " M a" "$porcelain"
+
+# (e) reset --hard wipes workdir too.
+( cd "$RR" && "$ZIGIT_BIN" reset --hard "$v2_oid" >/dev/null )
+content=$(cat "$RR/a")
+check "reset --hard rewrites workdir from target" "v2" "$content"
+porcelain=$(cd "$RR" && "$ZIGIT_BIN" status -s)
+check "reset --hard leaves clean workdir" "" "$porcelain"
+
+# (f) tag NAME [COMMIT].
+( cd "$RR" && "$ZIGIT_BIN" tag v2-here >/dev/null )
+( cd "$RR" && "$ZIGIT_BIN" tag v3-here "$v3_oid" >/dev/null )
+tag_list=$(cd "$RR" && "$ZIGIT_BIN" tag)
+expected=$'v2-here\nv3-here'
+check "tag listing" "$expected" "$tag_list"
+
+# git agrees on what each tag points at.
+git_v2=$(cd "$RR" && git rev-parse refs/tags/v2-here)
+git_v3=$(cd "$RR" && git rev-parse refs/tags/v3-here)
+check "tag v2-here points at v2 oid" "$v2_oid" "$git_v2"
+check "tag v3-here points at v3 oid" "$v3_oid" "$git_v3"
+
+# tag -d removes.
+( cd "$RR" && "$ZIGIT_BIN" tag -d v2-here >/dev/null )
+remaining=$(cd "$RR" && "$ZIGIT_BIN" tag)
+check "tag -d removed v2-here" "v3-here" "$remaining"
+
+unset TZ GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo
 TOTAL=$((PASS + FAIL))
