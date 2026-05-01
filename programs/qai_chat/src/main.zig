@@ -244,7 +244,7 @@ pub fn main(init: std.process.Init) !void {
     // Auto-save the REPL transcript on clean exit, but only if any turn
     // actually happened. Skip if the user immediately /quit on an empty
     // session.
-    defer autoSaveOnExit(gpa, io, &cfg, &history, &usage_total, err) catch {};
+    defer autoSaveOnExit(gpa, io, env, &cfg, &history, &usage_total, err) catch {};
 
     // REPL.
     while (true) {
@@ -263,7 +263,7 @@ pub fn main(init: std.process.Init) !void {
 
         // Slash commands: handled locally, no LLM round-trip.
         if (line.len > 0 and line[0] == '/') {
-            if (try handleSlashCommand(gpa, io, line, &cfg, &history, &approvals, &usage_total, out, err)) continue;
+            if (try handleSlashCommand(gpa, io, env, line, &cfg, &history, &approvals, &usage_total, out, err)) continue;
             // handleSlashCommand returned false → /quit signal: exit.
             return;
         }
@@ -277,25 +277,36 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-/// On clean REPL exit, dump the conversation to `.qai/sessions/<ts>.md`
-/// using the same renderer /save uses, and print a one-line summary
-/// (path + tokens + cost). No-op if the session was empty.
+/// On clean REPL exit:
+///   - dump the conversation as markdown to `~/.qai/projects/<key>/<ts>-<provider>.md`
+///   - append one CSV row to `~/.qai/usage/<key>.csv` with session totals
+///   - print a one-line summary
+/// All best-effort — failures are reported but don't propagate.
 fn autoSaveOnExit(
     gpa: std.mem.Allocator,
     io: std.Io,
+    env: *const std.process.Environ.Map,
     cfg: *cfg_mod.Config,
     history: *std.ArrayList(hs.ai.common.AIMessage),
     usage_total: *agent.UsageStats,
     err: *std.Io.Writer,
 ) !void {
     if (history.items.len == 0) return;
-    const path = try sessionPath(gpa, io);
+
+    const path = try sessionPath(gpa, io, env, cfg.provider.name());
     defer gpa.free(path);
     saveConversationMarkdown(gpa, io, path, cfg, history) catch |e| {
-        try err.print("[autosave] failed: {s}\n", .{@errorName(e)});
+        try err.print("[autosave] save failed: {s}\n", .{@errorName(e)});
         try err.flush();
         return;
     };
+
+    // Best-effort usage log — don't block on it.
+    appendUsageRow(gpa, io, env, cfg, usage_total) catch |e| {
+        try err.print("[autosave] usage log failed: {s}\n", .{@errorName(e)});
+        try err.flush();
+    };
+
     try err.print(
         "[autosave] {s} · {d} turns · {d} in / {d} out · ${d:.4}\n",
         .{ path, usage_total.turns, usage_total.input_tokens, usage_total.output_tokens, usage_total.cost_usd },
@@ -303,9 +314,71 @@ fn autoSaveOnExit(
     try err.flush();
 }
 
-/// Build a session-named path under `.qai/sessions/`.
-/// Format: YYYYMMDD-HHMMSS.md (UTC). Caller owns.
-fn sessionPath(gpa: std.mem.Allocator, io: std.Io) ![]u8 {
+/// Build a session-named path under `~/.qai/projects/<sanitized-cwd>/`.
+/// Filename format: YYYYMMDD-HHMMSS-<provider>.md (UTC). Caller owns.
+///
+/// Mirrors `~/.claude/projects/` — conversations live in $HOME, grouped by
+/// the cwd they started in. Falls back to a project-local path if HOME is
+/// missing or cwd resolution fails.
+fn sessionPath(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    env: *const std.process.Environ.Map,
+    provider_name: []const u8,
+) ![]u8 {
+    const ts_part = try timestampSlug(gpa, io);
+    defer gpa.free(ts_part);
+
+    if (try projectDir(gpa, io, env)) |dir| {
+        defer gpa.free(dir);
+        return std.fmt.allocPrint(gpa, "{s}/{s}-{s}.md", .{ dir, ts_part, provider_name });
+    }
+    // Fallback: project-local. Better than failing the save outright.
+    return std.fmt.allocPrint(gpa, ".qai/sessions/{s}-{s}.md", .{ ts_part, provider_name });
+}
+
+/// `~/.qai/projects/<sanitized-cwd>` — caller owns. Returns null if HOME or
+/// cwd can't be resolved.
+fn projectDir(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    env: *const std.process.Environ.Map,
+) !?[]u8 {
+    const home = env.get("HOME") orelse return null;
+    const key = try projectKey(gpa, io) orelse return null;
+    defer gpa.free(key);
+    return try std.fmt.allocPrint(gpa, "{s}/.qai/projects/{s}", .{ home, key });
+}
+
+/// `~/.qai/usage/<sanitized-cwd>.csv` — caller owns. Returns null if HOME
+/// or cwd can't be resolved.
+fn usageLogPath(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    env: *const std.process.Environ.Map,
+) !?[]u8 {
+    const home = env.get("HOME") orelse return null;
+    const key = try projectKey(gpa, io) orelse return null;
+    defer gpa.free(key);
+    return try std.fmt.allocPrint(gpa, "{s}/.qai/usage/{s}.csv", .{ home, key });
+}
+
+/// Sanitize the current working directory into a flat directory name.
+/// `/Users/director/work/poly-repo/zig-forge` → `-Users-director-work-poly-repo-zig-forge`.
+/// Matches Claude Code's project-key convention. Caller owns.
+fn projectKey(gpa: std.mem.Allocator, io: std.Io) !?[]u8 {
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const n = std.process.currentPath(io, &buf) catch return null;
+    const cwd = buf[0..n];
+    const out = try gpa.alloc(u8, cwd.len);
+    for (cwd, 0..) |c, i| {
+        out[i] = if (c == '/') '-' else c;
+    }
+    return out;
+}
+
+/// UTC YYYYMMDD-HHMMSS slug. Caller owns.
+fn timestampSlug(gpa: std.mem.Allocator, io: std.Io) ![]u8 {
     const ts = std.Io.Timestamp.now(io, .real).toSeconds();
     const epoch_seconds: std.time.epoch.EpochSeconds = .{ .secs = @intCast(ts) };
     const epoch_day = epoch_seconds.getEpochDay();
@@ -314,7 +387,7 @@ fn sessionPath(gpa: std.mem.Allocator, io: std.Io) ![]u8 {
     const month_day = year_day.calculateMonthDay();
     return std.fmt.allocPrint(
         gpa,
-        ".qai/sessions/{d:0>4}{d:0>2}{d:0>2}-{d:0>2}{d:0>2}{d:0>2}.md",
+        "{d:0>4}{d:0>2}{d:0>2}-{d:0>2}{d:0>2}{d:0>2}",
         .{
             year_day.year,
             month_day.month.numeric(),
@@ -326,11 +399,78 @@ fn sessionPath(gpa: std.mem.Allocator, io: std.Io) ![]u8 {
     );
 }
 
+/// Append a row to `~/.qai/usage/<sanitized-cwd>.csv`, writing the header
+/// on first use. Best-effort — silently no-ops if HOME is missing.
+fn appendUsageRow(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    env: *const std.process.Environ.Map,
+    cfg: *cfg_mod.Config,
+    usage_total: *agent.UsageStats,
+) !void {
+    const path = (try usageLogPath(gpa, io, env)) orelse return;
+    defer gpa.free(path);
+
+    if (std.fs.path.dirname(path)) |dir| {
+        std.Io.Dir.cwd().createDirPath(io, dir) catch |e| switch (e) {
+            error.PathAlreadyExists => {},
+            else => return e,
+        };
+    }
+
+    // Header presence: if the file doesn't exist or is empty, prepend a header.
+    const need_header = blk: {
+        std.Io.Dir.cwd().access(io, path, .{}) catch break :blk true;
+        break :blk false;
+    };
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(gpa);
+    if (need_header) {
+        try buf.appendSlice(gpa, "ts,provider,model,turns,input_tokens,output_tokens,cost_usd\n");
+    }
+
+    const ts_part = try timestampSlug(gpa, io);
+    defer gpa.free(ts_part);
+
+    try buf.print(gpa, "{s},{s},{s},{d},{d},{d},{d:.6}\n", .{
+        ts_part,
+        cfg.provider.name(),
+        cfg.model,
+        usage_total.turns,
+        usage_total.input_tokens,
+        usage_total.output_tokens,
+        usage_total.cost_usd,
+    });
+
+    if (need_header) {
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = buf.items });
+        return;
+    }
+
+    // Append: read existing + concat. Atomic via .tmp + rename so the file
+    // can never be corrupted by a partial write.
+    const existing = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(16 * 1024 * 1024)) catch &[_]u8{};
+    defer if (existing.len > 0) gpa.free(existing);
+
+    var combined: std.ArrayList(u8) = .empty;
+    defer combined.deinit(gpa);
+    try combined.appendSlice(gpa, existing);
+    try combined.appendSlice(gpa, buf.items);
+
+    const tmp = try std.fmt.allocPrint(gpa, "{s}.tmp", .{path});
+    defer gpa.free(tmp);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = tmp, .data = combined.items });
+    const cwd = std.Io.Dir.cwd();
+    try cwd.rename(tmp, cwd, path, io);
+}
+
 /// Handle a /-prefixed command. Returns true to continue the REPL, false to
 /// quit. Unknown commands print a hint and continue.
 fn handleSlashCommand(
     gpa: std.mem.Allocator,
     io: std.Io,
+    env: *const std.process.Environ.Map,
     line: []const u8,
     cfg: *cfg_mod.Config,
     history: *std.ArrayList(hs.ai.common.AIMessage),
@@ -352,7 +492,7 @@ fn handleSlashCommand(
             \\Slash commands:
             \\  /help                Show this help
             \\  /quit, /exit         Exit qai
-            \\  /clear, /reset       Clear conversation history
+            \\  /clear, /reset       Start a new conversation (reset history + usage)
             \\  /history             Show turn count + last few message previews
             \\  /tools               List available tools
             \\  /model [ID]          Show current model, or switch to ID
@@ -371,7 +511,8 @@ fn handleSlashCommand(
     if (std.mem.eql(u8, cmd, "/clear") or std.mem.eql(u8, cmd, "/reset")) {
         for (history.items) |*m| m.deinit();
         history.clearRetainingCapacity();
-        try err.writeAll("[history cleared]\n");
+        usage_total.* = .{};
+        try err.writeAll("[clear] history + usage reset (use /forget for approvals)\n");
         try err.flush();
         return true;
     }
@@ -453,12 +594,13 @@ fn handleSlashCommand(
     }
 
     if (std.mem.eql(u8, cmd, "/save")) {
-        // /save with no path → session-named file under .qai/sessions/.
+        // /save with no path → session-named file under ~/.qai/projects/<cwd>/.
+        // /save PATH → exact path the user typed (relative to cwd or absolute).
         var path: []const u8 = tail;
         var owned_path: ?[]u8 = null;
         defer if (owned_path) |p| gpa.free(p);
         if (path.len == 0) {
-            owned_path = try sessionPath(gpa, io);
+            owned_path = try sessionPath(gpa, io, env, cfg.provider.name());
             path = owned_path.?;
         }
         saveConversationMarkdown(gpa, io, path, cfg, history) catch |e| {
