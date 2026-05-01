@@ -26,7 +26,7 @@ const zigit = @import("zigit");
 
 const heads_dir = "refs/heads";
 
-pub fn run(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !void {
+pub fn run(allocator: std.mem.Allocator, io: Io, environ: std.process.Environ, args: []const []const u8) !void {
     if (args.len > 2) return error.UsagePushOptionalRemoteOptionalBranch;
 
     var repo = try zigit.Repository.discover(allocator, io);
@@ -55,6 +55,18 @@ pub fn run(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !void
     defer zigit.net.auth.deinit(allocator, &auth_split);
     const url = auth_split.clean_url;
 
+    // If the URL didn't carry userinfo, try .git-credentials / askpass.
+    var fallback_creds: ?zigit.net.credentials.Result = null;
+    defer if (fallback_creds) |*c| c.deinit(allocator);
+    const authorization: ?[]const u8 = blk: {
+        if (auth_split.authorization) |a| break :blk a;
+        if (try zigit.net.credentials.resolve(allocator, io, environ, url)) |r| {
+            fallback_creds = r;
+            break :blk r.authorization;
+        }
+        break :blk null;
+    };
+
     // Pick the branch.
     const branch_short: []const u8 = if (args.len == 2) args[1] else blk: {
         const head_target = try zigit.refs.resolveSymbolic(allocator, io, repo.git_dir, zigit.refs.head_path);
@@ -71,7 +83,7 @@ pub fn run(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !void
         return error.LocalBranchNotFound;
 
     // Discover remote.
-    const remote_refs = try zigit.net.smart_http.discoverV1ForReceive(allocator, io, url, auth_split.authorization);
+    const remote_refs = try zigit.net.smart_http.discoverV1ForReceive(allocator, io, url, authorization);
     defer zigit.net.smart_http.freeRefs(allocator, remote_refs);
 
     // Find the remote's current oid for this ref (or zeros for first push).
@@ -142,7 +154,7 @@ pub fn run(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !void
         allocator,
         io,
         url,
-        auth_split.authorization,
+        authorization,
         target_full_ref,
         remote_oid_hex,
         local_hex,

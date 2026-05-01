@@ -30,6 +30,17 @@ const init_cmd = @import("init.zig");
 pub fn run(allocator: std.mem.Allocator, io: Io, environ: std.process.Environ, args: []const []const u8) !void {
     _ = environ;
     if (args.len < 1 or args.len > 2) return error.UsageCloneUrlOptionalPath;
+
+    // Phase 15: only HTTP(S) is implemented end-to-end. Detect ssh
+    // forms early and emit a clear hint instead of trying to parse
+    // them as URLs and failing inside std.http.Client with a cryptic
+    // error.
+    switch (zigit.net.url.classify(args[0])) {
+        .ssh, .scp_like => return error.SshTransportNotYetImplemented,
+        .git => return error.GitTransportNotYetImplemented,
+        .https, .http, .unknown => {},
+    }
+
     const url = std.mem.trimEnd(u8, args[0], "/");
     const target_path = if (args.len == 2) args[1] else try defaultPathFromUrl(allocator, url);
     defer if (args.len == 1) allocator.free(target_path);

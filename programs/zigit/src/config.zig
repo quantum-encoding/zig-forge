@@ -280,7 +280,7 @@ pub fn loadWithGlobal(
 
     var cfg: Config = .{ .arena = arena };
 
-    if (environ.get("HOME")) |home| {
+    if (environ.getPosix("HOME")) |home| {
         const path = try std.fs.path.join(cfg.arena.allocator(), &.{ home, ".gitconfig" });
         if (Dir.cwd().readFileAlloc(io, path, cfg.arena.allocator(), .unlimited)) |bytes| {
             try parseInto(&cfg, bytes);

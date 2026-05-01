@@ -134,9 +134,21 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, cmd, "gc")) {
         try gc_cmd.run(allocator, io, rest);
     } else if (std.mem.eql(u8, cmd, "clone")) {
-        try clone_cmd.run(allocator, io, environ, rest);
+        clone_cmd.run(allocator, io, environ, rest) catch |err| switch (err) {
+            error.SshTransportNotYetImplemented => {
+                try writeAll(io, .stderr,
+                    "zigit clone: ssh:// and git@host:path transports aren't implemented yet — use https:// for now.\n");
+                std.process.exit(1);
+            },
+            error.GitTransportNotYetImplemented => {
+                try writeAll(io, .stderr,
+                    "zigit clone: git:// transport isn't implemented yet — use https:// for now.\n");
+                std.process.exit(1);
+            },
+            else => return err,
+        };
     } else if (std.mem.eql(u8, cmd, "push")) {
-        try push_cmd.run(allocator, io, rest);
+        try push_cmd.run(allocator, io, environ, rest);
     } else if (std.mem.eql(u8, cmd, "merge")) {
         merge_cmd.run(allocator, io, environ, rest) catch |err| switch (err) {
             error.MergeConflict => std.process.exit(1),
