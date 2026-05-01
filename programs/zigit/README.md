@@ -6,14 +6,12 @@ no libgit2 dependency.
 
 ## Status
 
-**Phases 1–7 complete** — object store + index + tree + commit + refs +
-porcelain + status + Myers diff + branch/switch/checkout + pack-file
-read/write + `gc`. zigit can both **read** and **emit** pack files;
-`zigit gc` collapses loose objects + loose refs into a single pack +
-`packed-refs` file that `git fsck`, `git verify-pack`, `git log`, and
-`git clone` all accept. Commits, blobs, and trees produced by zigit
-are byte-identical to what real git would produce given the same
-inputs.
+**Phases 1–8 complete** — full local stack + smart-HTTPS read-only
+clone. zigit can fetch from real GitHub repos over HTTPS using
+protocol v2: `zigit clone https://github.com/...` resolves HEAD to
+the same oid `git clone` does, sets up `refs/heads/<active>` +
+`refs/remotes/origin/*` the same way, materialises the work tree,
+and the resulting `.git` passes `git fsck --strict`.
 
 ### Plumbing
 
@@ -40,18 +38,22 @@ inputs.
 | `zigit switch [-c] NAME` | Move HEAD to a branch, update workdir + index. Refuses if local edits would be lost |
 | `zigit checkout TARGET` | Branch name → switch; commit oid (full or ≥4-char prefix) → detached HEAD |
 | `zigit gc` | Pack all loose objects + loose refs into a single pack + `packed-refs`. Output passes `git fsck --strict` and `git verify-pack` |
+| `zigit clone URL [PATH]` | Read-only smart-HTTPS v2 clone. Active branch lands at `refs/heads/<branch>`, others at `refs/remotes/origin/<branch>` (matching real `git clone`). Work tree is materialised |
 
 ## Build
 
 ```
 zig build              # produces zig-out/bin/zigit
-zig build test         # 48 unit tests
-./tests/parity.sh      # 71 byte-for-byte checks vs real `git`
+zig build test         # 58 unit tests
+./tests/parity.sh      # 75 byte-for-byte checks vs real `git`
 ```
+
+The parity suite includes a network-dependent clone test against
+`https://github.com/octocat/Spoon-Knife`; it self-skips when offline.
 
 ## Roadmap
 
-Phase 8 — smart-HTTPS clone (read-only): `zigit clone https://...`
+Phase 9 — `push` (smart-HTTPS receive-pack), then merge / rebase
 Phase 5 — `branch` / `switch` / `checkout`
 Phase 6+ — pack files, smart HTTPS, merge/rebase
 

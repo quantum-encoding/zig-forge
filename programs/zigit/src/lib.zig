@@ -11,6 +11,7 @@ pub const workdir = @import("workdir.zig");
 pub const worktree = @import("worktree.zig");
 pub const diff = @import("diff/mod.zig");
 pub const pack = @import("pack/mod.zig");
+pub const net = @import("net/mod.zig");
 
 pub const Oid = object.Oid;
 pub const Kind = object.Kind;
@@ -28,4 +29,5 @@ test {
     _ = worktree;
     _ = diff;
     _ = pack;
+    _ = net;
 }

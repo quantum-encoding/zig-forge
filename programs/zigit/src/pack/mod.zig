@@ -6,6 +6,7 @@ pub const PackStore = @import("store.zig").PackStore;
 pub const PackWriter = @import("writer.zig").PackWriter;
 pub const PackEntry = @import("writer.zig").Entry;
 pub const idx_writer = @import("idx_writer.zig");
+pub const index_pack = @import("index_pack.zig");
 pub const delta = @import("delta.zig");
 
 test {
@@ -15,4 +16,5 @@ test {
     _ = @import("store.zig");
     _ = @import("writer.zig");
     _ = @import("idx_writer.zig");
+    _ = @import("index_pack.zig");
 }

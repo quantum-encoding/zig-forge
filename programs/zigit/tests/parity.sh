@@ -585,6 +585,46 @@ check "git clone of zigit-packed repo resolves HEAD" "$head_before" "$clone_head
 
 unset TZ GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
 
+# ── Section 15: clone — smart-HTTPS v2 against a real remote ──────────────────
+# Requires network access. Default test target is the small (~16
+# objects, 3 branches) octocat/Spoon-Knife repo. Skip cleanly when
+# offline so unit-test runs aren't gated on connectivity.
+echo
+echo "15. clone — smart-HTTPS v2"
+CLONE_URL="${ZIGIT_CLONE_TEST_URL:-https://github.com/octocat/Spoon-Knife}"
+if curl -fs -m 5 -o /dev/null "$CLONE_URL/info/refs?service=git-upload-pack" -H 'Git-Protocol: version=2'; then
+    CW="$WORK/clone-test"
+    mkdir -p "$CW"
+
+    # Real git first to get the canonical HEAD.
+    REF="$CW/git-clone"
+    git clone -q "$CLONE_URL" "$REF" 2>/dev/null
+    git_head=$(cd "$REF" && git rev-parse HEAD)
+    git_branches=$(cd "$REF" && git for-each-ref --format='%(refname)' refs/heads | sort)
+
+    # Then zigit clone.
+    ZC="$CW/zigit-clone"
+    "$ZIGIT_BIN" clone "$CLONE_URL" "$ZC" 2>&1 | tail -1 >/dev/null
+    zigit_head=$(cd "$ZC" && git rev-parse HEAD)
+    check "zigit clone HEAD oid matches git clone" "$git_head" "$zigit_head"
+
+    # fsck passes against the zigit-cloned repo.
+    fsck_output=$(cd "$ZC" && git fsck --strict 2>&1)
+    check "git fsck on zigit clone is clean" "" "$fsck_output"
+
+    # Branch list matches (zigit advertises only refs/heads + refs/tags
+    # via ls-refs, so it should agree with git clone's default).
+    zigit_branches=$(cd "$ZC" && git for-each-ref --format='%(refname)' refs/heads | sort)
+    check "zigit clone has same branches as git clone" "$git_branches" "$zigit_branches"
+
+    # Work tree contents materialised; index reflects HEAD's tree.
+    file_count_real=$(find "$REF" \! -path "$REF/.git/*" -type f | wc -l | tr -d ' ')
+    file_count_zigit=$(find "$ZC" \! -path "$ZC/.git/*" -type f | wc -l | tr -d ' ')
+    check "zigit clone work-tree file count" "$file_count_real" "$file_count_zigit"
+else
+    echo -e "  ${DIM}skipping — $CLONE_URL not reachable${NC}"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo
 TOTAL=$((PASS + FAIL))

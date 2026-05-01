@@ -25,6 +25,7 @@ const branch_cmd = @import("cli/branch.zig");
 const switch_cmd = @import("cli/switch.zig");
 const checkout_cmd = @import("cli/checkout.zig");
 const gc_cmd = @import("cli/gc.zig");
+const clone_cmd = @import("cli/clone.zig");
 
 const usage =
     \\zigit — git in zig
@@ -50,6 +51,7 @@ const usage =
     \\  switch [-c] NAME                              Move HEAD to branch, update workdir + index
     \\  checkout TARGET                               Branch name → switch; commit oid → detached HEAD
     \\  gc                                            Pack loose objects + refs into a single pack
+    \\  clone URL [PATH]                              Read-only smart-HTTPS v2 clone
     \\
 ;
 
@@ -115,6 +117,8 @@ pub fn main(init: std.process.Init) !void {
         };
     } else if (std.mem.eql(u8, cmd, "gc")) {
         try gc_cmd.run(allocator, io, rest);
+    } else if (std.mem.eql(u8, cmd, "clone")) {
+        try clone_cmd.run(allocator, io, environ, rest);
     } else if (std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) {
         try writeAll(io, .stdout, usage);
     } else {
