@@ -144,6 +144,12 @@ pub fn parse(gpa: std.mem.Allocator, text: []const u8) !Config {
     errdefer cfg.deinit();
     const a = cfg.arena.allocator();
 
+    // Track whether the user explicitly set `model`. If they only set
+    // `provider`, we'll pick the matching defaultModel() at the end —
+    // otherwise the bootstrap default (anthropic's model) leaks through
+    // and we'd send e.g. `claude-sonnet-4-6` to DeepSeek's API.
+    var model_set = false;
+
     var section: []const u8 = "";
     var it = std.mem.splitScalar(u8, text, '\n');
     while (it.next()) |raw_line| {
@@ -166,6 +172,7 @@ pub fn parse(gpa: std.mem.Allocator, text: []const u8) !Config {
                 if (Provider.parse(v)) |p| cfg.provider = p;
             } else if (eql(key, "model")) {
                 cfg.model = try parseString(a, raw_val);
+                model_set = true;
             } else if (eql(key, "max_tokens")) {
                 cfg.max_tokens = parseU32(raw_val) orelse cfg.max_tokens;
             } else if (eql(key, "temperature")) {
@@ -187,6 +194,13 @@ pub fn parse(gpa: std.mem.Allocator, text: []const u8) !Config {
                 cfg.providers[idx].system_prompt = if (v.len == 0) null else v;
             }
         }
+    }
+
+    // Resolve the model field once we know the final provider. Without this
+    // the bootstrap default (anthropic's model) leaks through when the user
+    // only sets `provider = "deepseek"` etc.
+    if (!model_set) {
+        cfg.model = try a.dupe(u8, cfg.provider.defaultModel());
     }
 
     return cfg;
