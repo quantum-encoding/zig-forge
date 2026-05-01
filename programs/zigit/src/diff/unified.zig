@@ -67,7 +67,35 @@ pub fn renderFile(
     const hunks = try groupHunks(allocator, edits, a_lines.len, b_lines.len, context);
     defer allocator.free(hunks);
 
-    for (hunks) |h| try renderHunk(out, h, edits, a_lines, b_lines);
+    for (hunks) |h| try renderHunk(out, h, edits, a_lines, b_lines, findFunctionHint(a_lines, h.a_start));
+}
+
+/// Walk backward from the hunk's first A line looking for a "function
+/// name" — git's convention for the hint that follows `@@ ... @@`.
+/// Default rule (matches git's built-in xfuncname when no userdiff is
+/// configured): the most recent line whose first byte isn't whitespace
+/// or a tab. Capped at 40 lines back to bound work and avoid pulling
+/// unrelated context.
+fn findFunctionHint(a_lines: []const []const u8, hunk_a_start_1based: usize) ?[]const u8 {
+    if (hunk_a_start_1based <= 1) return null;
+
+    var i: usize = hunk_a_start_1based - 1; // 1-based → 0-based of last line *before* the hunk
+    var seen: usize = 0;
+    while (seen < 40) : (seen += 1) {
+        if (i == 0) break;
+        i -= 1;
+        const line = a_lines[i];
+        if (line.len == 0) continue;
+        const c = line[0];
+        if (c == ' ' or c == '\t') continue;
+        // Drop trailing newline for display.
+        var end = line.len;
+        if (end > 0 and line[end - 1] == '\n') end -= 1;
+        // Cap at 40 chars so the header doesn't grow huge.
+        const cap = @min(end, 40);
+        return line[0..cap];
+    }
+    return null;
 }
 
 const Hunk = struct {
@@ -188,17 +216,24 @@ fn renderHunk(
     edits: []const Edit,
     a_lines: []const []const u8,
     b_lines: []const []const u8,
+    function_hint: ?[]const u8,
 ) !void {
-    // git omits the `,N` if N == 1. Match that for tighter diffs.
+    // git omits the `,N` if N == 1, and appends a " <hint>" after the
+    // closing `@@` when one is available.
     if (h.a_count == 1 and h.b_count == 1) {
-        try out.print("@@ -{d} +{d} @@\n", .{ h.a_start, h.b_start });
+        try out.print("@@ -{d} +{d} @@", .{ h.a_start, h.b_start });
     } else if (h.a_count == 1) {
-        try out.print("@@ -{d} +{d},{d} @@\n", .{ h.a_start, h.b_start, h.b_count });
+        try out.print("@@ -{d} +{d},{d} @@", .{ h.a_start, h.b_start, h.b_count });
     } else if (h.b_count == 1) {
-        try out.print("@@ -{d},{d} +{d} @@\n", .{ h.a_start, h.a_count, h.b_start });
+        try out.print("@@ -{d},{d} +{d} @@", .{ h.a_start, h.a_count, h.b_start });
     } else {
-        try out.print("@@ -{d},{d} +{d},{d} @@\n", .{ h.a_start, h.a_count, h.b_start, h.b_count });
+        try out.print("@@ -{d},{d} +{d},{d} @@", .{ h.a_start, h.a_count, h.b_start, h.b_count });
     }
+    if (function_hint) |hint| {
+        try out.writeByte(' ');
+        try out.writeAll(hint);
+    }
+    try out.writeByte('\n');
 
     for (edits[h.edit_start..h.edit_end]) |e| {
         const prefix: u8 = switch (e.op) {

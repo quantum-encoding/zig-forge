@@ -18,9 +18,11 @@ const Io = std.Io;
 const Dir = Io.Dir;
 const oid_mod = @import("oid.zig");
 const kind_mod = @import("kind.zig");
+const pack_store = @import("../pack/store.zig");
 const Oid = oid_mod.Oid;
 const OidPrefix = oid_mod.OidPrefix;
 const Kind = kind_mod.Kind;
+const PackStore = pack_store.PackStore;
 
 pub const LoadedObject = struct {
     kind: Kind,
@@ -36,9 +38,17 @@ pub const LooseStore = struct {
     /// Owned by the caller (Repository); we just borrow the handle.
     objects_dir: Dir,
     io: Io,
+    /// Optional fallback for read-only lookups when an object isn't
+    /// in the loose store. Owned by the Repository — we just hold a
+    /// pointer. Writes always go to loose; we don't pack-write yet.
+    packs: ?*PackStore = null,
 
     pub fn init(objects_dir: Dir, io: Io) LooseStore {
         return .{ .objects_dir = objects_dir, .io = io };
+    }
+
+    pub fn initWithPacks(objects_dir: Dir, io: Io, packs: *PackStore) LooseStore {
+        return .{ .objects_dir = objects_dir, .io = io, .packs = packs };
     }
 
     pub fn write(self: *LooseStore, allocator: std.mem.Allocator, kind: Kind, payload: []const u8, oid: Oid) !void {
@@ -114,7 +124,13 @@ pub const LooseStore = struct {
             allocator,
             .unlimited,
         ) catch |err| switch (err) {
-            error.FileNotFound => return error.ObjectNotFound,
+            error.FileNotFound => {
+                // Loose miss → consult packs if we have any.
+                if (self.packs) |ps| {
+                    if (try ps.read(allocator, oid)) |loaded| return loaded;
+                }
+                return error.ObjectNotFound;
+            },
             else => return err,
         };
         defer allocator.free(compressed);
@@ -149,36 +165,57 @@ pub const LooseStore = struct {
     }
 
     /// Resolve a 4-40 char hex prefix to a single Oid.
-    /// Errors if zero or more than one object matches.
+    /// Errors if zero or more than one object matches across loose
+    /// objects + packs (when packs are wired in).
     pub fn resolvePrefix(self: *LooseStore, hex: []const u8) !Oid {
         const prefix = try OidPrefix.fromHex(hex);
 
         if (hex.len == 40) return Oid.fromHex(hex);
 
+        var found: ?Oid = null;
+
         var subdir_name: [2]u8 = undefined;
         std.mem.copyForwards(u8, &subdir_name, hex[0..2]);
 
-        var subdir = self.objects_dir.openDir(self.io, &subdir_name, .{ .iterate = true }) catch |err| switch (err) {
-            error.FileNotFound => return error.ObjectNotFound,
+        // Loose lookup — open ab/ if it exists, scan its filenames.
+        if (self.objects_dir.openDir(self.io, &subdir_name, .{ .iterate = true })) |subdir_open| {
+            var subdir = subdir_open;
+            defer subdir.close(self.io);
+
+            var it = subdir.iterate();
+            while (try it.next(self.io)) |entry| {
+                if (entry.kind != .file) continue;
+                if (entry.name.len != 38) continue;
+
+                var full_hex: [40]u8 = undefined;
+                std.mem.copyForwards(u8, full_hex[0..2], &subdir_name);
+                std.mem.copyForwards(u8, full_hex[2..], entry.name);
+
+                const candidate = Oid.fromHex(&full_hex) catch continue;
+                if (!prefix.matches(candidate)) continue;
+
+                if (found) |prev| {
+                    if (!prev.eql(candidate)) return error.AmbiguousOidPrefix;
+                } else {
+                    found = candidate;
+                }
+            }
+        } else |err| switch (err) {
+            error.FileNotFound => {},
             else => return err,
-        };
-        defer subdir.close(self.io);
+        }
 
-        var found: ?Oid = null;
-        var it = subdir.iterate();
-        while (try it.next(self.io)) |entry| {
-            if (entry.kind != .file) continue;
-            if (entry.name.len != 38) continue;
-
-            var full_hex: [40]u8 = undefined;
-            std.mem.copyForwards(u8, full_hex[0..2], &subdir_name);
-            std.mem.copyForwards(u8, full_hex[2..], entry.name);
-
-            const candidate = Oid.fromHex(&full_hex) catch continue;
-            if (!prefix.matches(candidate)) continue;
-
-            if (found != null) return error.AmbiguousOidPrefix;
-            found = candidate;
+        // Pack lookup — every pack contributes its own matches.
+        if (self.packs) |ps| {
+            var ambiguous = false;
+            if (ps.matchPrefix(prefix, &ambiguous)) |hit| {
+                if (ambiguous) return error.AmbiguousOidPrefix;
+                if (found) |prev| {
+                    if (!prev.eql(hit)) return error.AmbiguousOidPrefix;
+                } else {
+                    found = hit;
+                }
+            }
         }
 
         return found orelse error.ObjectNotFound;

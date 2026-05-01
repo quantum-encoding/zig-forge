@@ -431,6 +431,78 @@ check "branch -d removed feature" "* main" "$zigit_b"
 
 unset TZ GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
 
+# ── Section 13: pack files (read) — `git gc` then read with zigit ─────────────
+echo
+echo "13. pack reading after git gc (delta chains, packed-refs)"
+PK="$WORK/pack-test"
+mkdir -p "$PK"
+( cd "$PK" && git init -q )
+
+export TZ=UTC
+export GIT_AUTHOR_NAME="Pack Bot"
+export GIT_AUTHOR_EMAIL="pack@example.com"
+export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+
+# Build up a small history with a file that mutates each commit so
+# git gc has plausible delta candidates to chain.
+for n in 1 2 3 4 5; do
+    payload=$(printf 'line a\nline b\nline c\nrev %d\nline d\nline e\n' $n)
+    echo "$payload" > "$PK/file.txt"
+    export GIT_AUTHOR_DATE=$((1700000000 + n * 100))
+    export GIT_COMMITTER_DATE=$GIT_AUTHOR_DATE
+    ( cd "$PK" && git add file.txt && git commit -q -m "rev $n" )
+done
+
+# Pack everything, then verify there are no loose objects left and
+# the loose ref has been moved into packed-refs.
+( cd "$PK" && git gc --quiet )
+# Exclude objects/info/ — that's git's metadata (commit-graph, packs
+# index), not actual loose objects.
+loose_count=$(find "$PK/.git/objects" -type f \! -path '*/pack/*' \! -path '*/info/*' \! -name 'pack-*' | wc -l | tr -d ' ')
+check "git gc collapses loose objects (none left)" "0" "$loose_count"
+[ -f "$PK/.git/packed-refs" ] && packed_refs_exists=yes || packed_refs_exists=no
+check "git gc emits packed-refs" "yes" "$packed_refs_exists"
+
+# zigit reads everything via the pack/packed-refs fallback.
+head_oid=$(cd "$PK" && git rev-parse HEAD)
+zigit_head=$(cd "$PK" && "$ZIGIT_BIN" log -n 1 | head -1 | awk '{print $2}')
+check "zigit log finds HEAD via packed-refs" "commit-oid: $head_oid" "commit-oid: $zigit_head"
+
+# zigit cat-file -p HEAD → same payload as git cat-file -p HEAD.
+zigit_commit=$(cd "$PK" && "$ZIGIT_BIN" cat-file -p "$head_oid")
+git_commit=$(cd "$PK" && git cat-file -p "$head_oid")
+check "cat-file -p commit (from pack)" "$git_commit" "$zigit_commit"
+
+# Walk to an older commit (almost certainly stored as OFS_DELTA).
+older_oid=$(cd "$PK" && git rev-parse HEAD~3)
+zigit_older=$(cd "$PK" && "$ZIGIT_BIN" cat-file -p "$older_oid")
+git_older=$(cd "$PK" && git cat-file -p "$older_oid")
+check "cat-file -p delta-encoded older commit" "$git_older" "$zigit_older"
+
+# Read a blob via prefix lookup; PackStore.matchPrefix should agree
+# with git's resolution.
+sample_blob=$(cd "$PK" && git rev-parse HEAD:file.txt)
+zigit_blob=$(cd "$PK" && "$ZIGIT_BIN" cat-file -p "${sample_blob:0:7}")
+git_blob=$(cd "$PK" && git cat-file -p "$sample_blob")
+check "cat-file -p blob via 7-char prefix (pack lookup)" "$git_blob" "$zigit_blob"
+
+# zigit log walks the chain (5 commits).
+zigit_log_count=$(cd "$PK" && "$ZIGIT_BIN" log | grep -c '^commit ')
+check "zigit log walks pack-only history" "5" "$zigit_log_count"
+
+# zigit status + diff should agree with git after a workdir edit
+# (exercises pack-backed HEAD-tree map building).
+echo "live edit" >> "$PK/file.txt"
+zigit_porc=$(cd "$PK" && "$ZIGIT_BIN" status -s)
+git_porc=$(cd "$PK" && git status --porcelain)
+check "status against pack-only repo" "$git_porc" "$zigit_porc"
+zigit_diff=$(cd "$PK" && "$ZIGIT_BIN" diff)
+git_diff=$(cd "$PK" && git diff)
+check "diff against pack-only repo" "$git_diff" "$zigit_diff"
+
+unset TZ GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo
 TOTAL=$((PASS + FAIL))

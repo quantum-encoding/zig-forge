@@ -41,14 +41,52 @@ pub fn deinitValue(allocator: std.mem.Allocator, v: Value) void {
 
 /// Read a ref by name (e.g. "HEAD", "refs/heads/main"). Caller owns
 /// the returned `symbolic` bytes — call `deinitValue` to free.
+///
+/// Looks up loose refs first. If the loose file is missing and the
+/// name starts with "refs/", we also consult `.git/packed-refs`
+/// (git's compact storage for refs after `git gc`).
 pub fn read(allocator: std.mem.Allocator, io: Io, git_dir: Dir, name: []const u8) !Value {
-    const raw = git_dir.readFileAlloc(io, name, allocator, .unlimited) catch |err| switch (err) {
-        error.FileNotFound => return error.RefNotFound,
+    if (git_dir.readFileAlloc(io, name, allocator, .unlimited)) |raw| {
+        defer allocator.free(raw);
+        return try parse(allocator, raw);
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    }
+
+    // Loose miss — packed-refs only carries direct refs (no symbolic
+    // entries), so HEAD itself never lives there. Skip the file open
+    // when looking for HEAD.
+    if (std.mem.eql(u8, name, head_path)) return error.RefNotFound;
+
+    if (try lookupInPackedRefs(allocator, io, git_dir, name)) |oid| {
+        return .{ .direct = oid };
+    }
+    return error.RefNotFound;
+}
+
+fn lookupInPackedRefs(allocator: std.mem.Allocator, io: Io, git_dir: Dir, name: []const u8) !?Oid {
+    const bytes = git_dir.readFileAlloc(io, "packed-refs", allocator, .unlimited) catch |err| switch (err) {
+        error.FileNotFound => return null,
         else => return err,
     };
-    defer allocator.free(raw);
+    defer allocator.free(bytes);
 
-    return try parse(allocator, raw);
+    var it = std.mem.splitScalar(u8, bytes, '\n');
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        if (line[0] == '#') continue; // header comment
+        if (line[0] == '^') continue; // peeled annotated-tag oid — we don't use it
+
+        // Expected: "<40-hex> <ref-name>"
+        if (line.len < 42) continue;
+        const space = std.mem.indexOfScalar(u8, line, ' ') orelse continue;
+        if (space != 40) continue;
+        const ref_name = std.mem.trimEnd(u8, line[space + 1 ..], " \r\t");
+        if (!std.mem.eql(u8, ref_name, name)) continue;
+        return try Oid.fromHex(line[0..40]);
+    }
+    return null;
 }
 
 /// Parse the bytes of a ref file (without leading-whitespace tolerance,

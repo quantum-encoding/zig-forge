@@ -6,13 +6,14 @@ no libgit2 dependency.
 
 ## Status
 
-**Phases 1–5 complete** — object store + index + tree + commit + refs +
-porcelain + status + Myers diff + branch/switch/checkout. A 100%-zigit-
-built repo produces byte-identical commit chains to real git;
-`status --porcelain` and `diff` match git's output byte-for-byte;
-branches round-trip cleanly across switches with the standard "would
-overwrite local change" safety guard, and `checkout <oid>` produces
-the same detached-HEAD state real git recognises.
+**Phases 1–6 complete** — object store + index + tree + commit + refs +
+porcelain + status + Myers diff + branch/switch/checkout + pack-file
+read + packed-refs. zigit transparently reads pack files (with full
+delta-chain resolution: OFS_DELTA + REF_DELTA), so `cat-file -p`,
+`log`, `status`, and `diff` all work against repos that have been
+through `git gc`. `status --porcelain` and `diff` match `git`'s
+output byte-for-byte, including diff's function-context hints in
+hunk headers.
 
 ### Plumbing
 
@@ -43,13 +44,13 @@ the same detached-HEAD state real git recognises.
 
 ```
 zig build              # produces zig-out/bin/zigit
-zig build test         # 38 unit tests
-./tests/parity.sh      # 49 byte-for-byte checks vs real `git`
+zig build test         # 43 unit tests
+./tests/parity.sh      # 58 byte-for-byte checks vs real `git`
 ```
 
 ## Roadmap
 
-Phase 6 — pack files (read), `gc`, packed-refs
+Phase 7 — pack files (write) + `gc` (repack loose objects, expire packed-refs)
 Phase 5 — `branch` / `switch` / `checkout`
 Phase 6+ — pack files, smart HTTPS, merge/rebase
 
