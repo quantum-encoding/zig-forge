@@ -1,37 +1,82 @@
-# qai chat config — copy to ~/.config/qai/config.toml or pass with --config
+# ──────────────────────────────────────────────────────────────────────
+# qai chat — example config
 #
-# By default, qai talks directly to the upstream provider using the matching
-# env var for the API key. Point base_url at your own backend (the Zig AI
-# server or api.quantumencoding.ai) when you want billing + capability gating
-# to live server-side and never expose raw provider keys on this machine.
+# Copy to one of:
+#   ./qai.toml                   (per-project, takes precedence)
+#   ~/.config/qai/config.toml    (per-user fallback)
+# Or load explicitly:
+#   qai --config=PATH
+#
+# By default, qai talks directly to upstream providers using each
+# provider's API-key env var. Point a per-provider base_url at your
+# own backend (e.g. api.quantumencoding.ai) when you want billing +
+# capability gating to live server-side and never expose raw provider
+# keys on this machine.
+#
+# Layout qai writes / reads on disk:
+#   .qai/approvals                    per-project tool approvals (in cwd)
+#   ~/.qai/projects/<sanitized-cwd>/  conversation transcripts (.md)
+#   ~/.qai/usage/<sanitized-cwd>.csv  per-(provider,model) cost log
+#
+# Useful commands inside the REPL (type / for any of these):
+#   /help /quit /clear /history /tools /model /provider /approvals
+#   /forget /save [PATH] /load PATH /sessions /usage
+#
+# Top-level subcommand:
+#   qai usage [--project=PATH] [--since=YYYYMMDD] [--by-provider]
+#
+# CLI flags:
+#   --provider=NAME   anthropic | openai | gemini | grok | deepseek
+#   --model=ID
+#   --max-tokens=N
+#   --reasoning=LEVEL minimal | low | medium | high | xhigh
+#   --tools           enable read_file / ls / grep / write_file / edit_file / bash
+#   --yes / -y        auto-approve all writable tool calls (USE CAREFULLY)
+# ──────────────────────────────────────────────────────────────────────
 
-# Which provider profile to use by default. One of:
+
+# ─── Global defaults ─────────────────────────────────────────────────
+
+# Default provider when no --provider is given.
 #   anthropic | openai | gemini | grok | deepseek
 provider = "anthropic"
 
-# Model id passed to the provider (or your backend, which forwards it).
-model = "claude-sonnet-4-6"
+# Default model. Optional — when omitted, qai picks the active provider's
+# built-in default (claude-sonnet-4-6 for anthropic, gpt-5.4 for openai,
+# grok-4-1-fast-non-reasoning for grok, gemini-2.5-flash for gemini,
+# deepseek-chat for deepseek).
+# model = "claude-sonnet-4-6"
 
 # Sampling.
 max_tokens = 4096
 temperature = 1.0
 
-# Reasoning effort for OpenAI / Grok GPT-5-family models.
+# Reasoning effort for the OpenAI / Grok / xAI GPT-5 family.
 # Valid: "minimal" | "low" | "medium" | "high" | "xhigh".
-# "low" is fastest valid across gpt-5-mini and gpt-5.4. Anthropic ignores it.
+# "low" is fastest valid across gpt-5-mini and gpt-5.4. Anthropic
+# and Gemini ignore this field.
 reasoning_effort = "low"
 
-# Optional system prompt. Leave empty to omit.
+# Optional global system prompt. Per-provider overrides below win over
+# this. Leave empty for "no system prompt" (the agent loop will inject
+# its default tool-use guidance when --tools is on).
 system_prompt = ""
 
-# ─── Per-provider routing ────────────────────────────────────────────────
-# Each section sets the base_url and the env var that holds the bearer.
-# Defaults below match the upstream providers — override base_url to point
-# at your backend (and switch the env var to your QAI user token).
+
+# ─── Per-provider routing ────────────────────────────────────────────
+#
+# Each section sets the base_url, the env var that holds the bearer
+# token, and an optional per-provider system_prompt override.
+#
+# To route through your own backend: replace base_url with your server
+# URL and api_key_env with the env var holding a per-user token (so the
+# raw provider key never leaves the server).
 
 [anthropic]
 base_url = "https://api.anthropic.com"
 api_key_env = "ANTHROPIC_API_KEY"
+# Example per-provider override — applies only when provider=anthropic.
+# system_prompt = "You are a senior Zig engineer. Be terse."
 
 [openai]
 base_url = "https://api.openai.com/v1"
@@ -48,15 +93,23 @@ api_key_env = "XAI_API_KEY"
 [deepseek]
 base_url = "https://api.deepseek.com/anthropic"
 api_key_env = "DEEPSEEK_API_KEY"
-# DeepSeek v4 sometimes lapses into Chinese for English prompts.
-# A short per-provider override forces the language without affecting
-# other providers. Per-provider system_prompt wins over the global one.
+# DeepSeek complies with the input language by default — when prompts are
+# in English it answers in English. Set this if you want to force English
+# for non-English prompts as well. Per-provider system_prompt wins over
+# the global one.
 system_prompt = "Always respond in English. Be concise."
 
-# Example: route everything through your backend instead.
-# Uncomment to swap. The backend handles billing + key custody; this client
-# only carries a per-user token, so a leak caps damage to one account.
+
+# ─── Routing through your own backend ────────────────────────────────
 #
-# [anthropic]
-# base_url = "https://api.quantumencoding.ai/qai/v1/proxy/anthropic"
-# api_key_env = "QAI_TOKEN"
+# To consolidate billing + key custody on a server, point a provider's
+# base_url at the server and use a per-user token instead of the
+# upstream key. Example:
+#
+#   [anthropic]
+#   base_url = "https://api.quantumencoding.ai/qai/v1/proxy/anthropic"
+#   api_key_env = "QAI_TOKEN"
+#
+# The wire format must match the upstream provider's (Anthropic v1 here).
+# Backend mode for the unified /qai/v1/agent endpoint with multi-provider
+# tool calling is on the roadmap — track via task #21.
