@@ -957,6 +957,62 @@ check "marker block contains ours content" "yes" "$m"
 
 unset TZ GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
 
+# ── Section 21: stash push / list / pop / drop ────────────────────────────────
+echo
+echo "21. stash — push / list / pop / drop"
+ST="$WORK/stash-test"
+mkdir -p "$ST" && ( cd "$ST" && "$ZIGIT_BIN" init >/dev/null )
+
+export TZ=UTC
+export GIT_AUTHOR_NAME="Stash Bot"
+export GIT_AUTHOR_EMAIL="stash@example.com"
+export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+
+GIT_AUTHOR_DATE=1700000000 GIT_COMMITTER_DATE=1700000000 \
+    bash -c "cd '$ST' && echo v1 > a && '$ZIGIT_BIN' add a && '$ZIGIT_BIN' commit -m v1 >/dev/null"
+
+# (a) Empty repo → "No local changes to save".
+no_changes=$(cd "$ST" && "$ZIGIT_BIN" stash push -m empty 2>&1 | tr -d '\r')
+check "stash push with no changes" "No local changes to save" "$no_changes"
+
+# (b) Push WIP edits → workdir reverts.
+echo "WIP" > "$ST/a"
+GIT_AUTHOR_DATE=1700000100 GIT_COMMITTER_DATE=1700000100 \
+    bash -c "cd '$ST' && '$ZIGIT_BIN' stash push -m wip-1 >/dev/null"
+content=$(cat "$ST/a")
+check "stash push reset workdir to HEAD" "v1" "$content"
+
+# (c) list shows the entry.
+list=$(cd "$ST" && "$ZIGIT_BIN" stash list)
+case "$list" in
+    "stash@{0}: stash on main: wip-1"*)
+        check "stash list shows our entry" "ok" "ok" ;;
+    *) check "stash list shows our entry" "ok" "$list" ;;
+esac
+
+# (d) Push a second stash, list shows both.
+echo "WIP 2" > "$ST/a"
+GIT_AUTHOR_DATE=1700000200 GIT_COMMITTER_DATE=1700000200 \
+    bash -c "cd '$ST' && '$ZIGIT_BIN' stash push -m wip-2 >/dev/null"
+list2_count=$(cd "$ST" && "$ZIGIT_BIN" stash list | wc -l | tr -d ' ')
+check "stash list shows both entries" "2" "$list2_count"
+
+# (e) pop the top: restores WIP-2 content.
+( cd "$ST" && "$ZIGIT_BIN" stash pop >/dev/null )
+content=$(cat "$ST/a")
+check "stash pop restored top (WIP 2)" "WIP 2" "$content"
+list_after_pop=$(cd "$ST" && "$ZIGIT_BIN" stash list | wc -l | tr -d ' ')
+check "stash pop drops the popped entry" "1" "$list_after_pop"
+
+# (f) drop the remaining entry without applying.
+echo "v1" > "$ST/a"   # clean workdir before drop
+( cd "$ST" && "$ZIGIT_BIN" stash drop >/dev/null )
+list_final=$(cd "$ST" && "$ZIGIT_BIN" stash list)
+check "stash drop empties the list" "" "$list_final"
+
+unset TZ GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo
 TOTAL=$((PASS + FAIL))
