@@ -237,12 +237,33 @@ pub const RunArgs = struct {
     /// Sessionwide approvals — populated by the user picking "always" at a
     /// previous prompt. Lifetime: spans the whole REPL session.
     approvals: *Approvals,
+    /// Session-wide running totals. Each completed turn adds its tokens
+    /// and cost so /usage and the auto-saved transcript footer can show
+    /// where the bill went.
+    usage: *UsageStats,
     user_prompt: []const u8,
 };
 
 pub const Error = error{
     ToolsNotSupported,
 } || anyerror;
+
+/// Session-wide token + cost accumulator. Spans the whole REPL session
+/// across providers and turns. Read by /usage; populated by every turn
+/// (agent and plain chat alike).
+pub const UsageStats = struct {
+    input_tokens: u64 = 0,
+    output_tokens: u64 = 0,
+    cost_usd: f64 = 0.0,
+    turns: u64 = 0,
+
+    pub fn add(self: *UsageStats, input: u32, output: u32, cost: f64) void {
+        self.input_tokens += input;
+        self.output_tokens += output;
+        self.cost_usd += cost;
+        self.turns += 1;
+    }
+};
 
 const ToolBlock = struct {
     /// Content-block index from the API.
@@ -269,7 +290,7 @@ const ToolBlock = struct {
     }
 };
 
-const TurnState = struct {
+pub const TurnState = struct {
     gpa: std.mem.Allocator,
     out: *std.Io.Writer,
     err: *std.Io.Writer,
@@ -289,7 +310,7 @@ const TurnState = struct {
     /// True if any tool_use opened in this turn (cheap shortcut).
     saw_tool_use: bool = false,
 
-    fn deinit(self: *TurnState) void {
+    pub fn deinit(self: *TurnState) void {
         self.text.deinit(self.gpa);
         for (self.tools.items) |*t| t.deinit(self.gpa);
         self.tools.deinit(self.gpa);
@@ -304,7 +325,7 @@ const TurnState = struct {
     }
 };
 
-fn streamEventCb(event: hs.ai.common.StreamEvent, ctx_ptr: ?*anyopaque) bool {
+pub fn streamEventCb(event: hs.ai.common.StreamEvent, ctx_ptr: ?*anyopaque) bool {
     const s: *TurnState = @alignCast(@ptrCast(ctx_ptr orelse return false));
 
     switch (event) {
@@ -768,23 +789,38 @@ fn jsonString(v: std.json.Value, key: []const u8) ?[]const u8 {
     return child.string;
 }
 
-/// Emit a one-line usage trace after a streaming turn completes. Cost is
-/// included when we can find the model in pricing.csv; otherwise tokens only.
 fn printTurnUsage(args: RunArgs, state: *const TurnState, turn: u32) !void {
-    if (state.input_tokens == 0 and state.output_tokens == 0) return;
-    if (pricing.lookup(args.gpa, args.model)) |p| {
-        const cost = pricing.estimate(p, state.input_tokens, state.output_tokens);
-        try args.err.print(
+    try emitUsage(args.gpa, args.err, args.model, state.input_tokens, state.output_tokens, turn, args.usage);
+}
+
+/// Print "[turn N: in/out · $cost]" to err and accumulate into the session
+/// totals. Caller is anyone that owns a TurnState — both agent.zig and
+/// plain-chat in main.zig.
+pub fn emitUsage(
+    gpa: std.mem.Allocator,
+    err_writer: *std.Io.Writer,
+    model: []const u8,
+    input_tokens: u32,
+    output_tokens: u32,
+    turn: u32,
+    usage_total: *UsageStats,
+) !void {
+    if (input_tokens == 0 and output_tokens == 0) return;
+    if (pricing.lookup(gpa, model)) |p| {
+        const cost = pricing.estimate(p, input_tokens, output_tokens);
+        usage_total.add(input_tokens, output_tokens, cost);
+        try err_writer.print(
             "[turn {d}: {d} in / {d} out · ${d:.4}]\n",
-            .{ turn + 1, state.input_tokens, state.output_tokens, cost },
+            .{ turn + 1, input_tokens, output_tokens, cost },
         );
     } else {
-        try args.err.print(
+        usage_total.add(input_tokens, output_tokens, 0.0);
+        try err_writer.print(
             "[turn {d}: {d} in / {d} out]\n",
-            .{ turn + 1, state.input_tokens, state.output_tokens },
+            .{ turn + 1, input_tokens, output_tokens },
         );
     }
-    try args.err.flush();
+    try err_writer.flush();
 }
 
 /// Print the captured upstream error body (if any) to stderr so the user

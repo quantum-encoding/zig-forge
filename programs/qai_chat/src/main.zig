@@ -218,6 +218,8 @@ pub fn main(init: std.process.Init) !void {
 
     var approvals = agent.Approvals.init(gpa);
     defer approvals.deinit();
+
+    var usage_total = agent.UsageStats{};
     // Per-project approvals file. Loaded silently if it exists; appended
     // to (atomically) every time the user picks "always" at a confirm prompt.
     approvals.attachDisk(io, ".qai/approvals") catch |e| {
@@ -233,11 +235,16 @@ pub fn main(init: std.process.Init) !void {
     const in = &stdin_reader.interface;
 
     if (args.one_shot) |prompt| {
-        try dispatchTurn(gpa, io, &cfg, env, &history, prompt, out, err, in, &approvals, args);
+        try dispatchTurn(gpa, io, &cfg, env, &history, prompt, out, err, in, &approvals, &usage_total, args);
         try out.writeAll("\n");
         try out.flush();
         return;
     }
+
+    // Auto-save the REPL transcript on clean exit, but only if any turn
+    // actually happened. Skip if the user immediately /quit on an empty
+    // session.
+    defer autoSaveOnExit(gpa, io, &cfg, &history, &usage_total, err) catch {};
 
     // REPL.
     while (true) {
@@ -256,18 +263,67 @@ pub fn main(init: std.process.Init) !void {
 
         // Slash commands: handled locally, no LLM round-trip.
         if (line.len > 0 and line[0] == '/') {
-            if (try handleSlashCommand(gpa, io, line, &cfg, &history, &approvals, out, err)) continue;
+            if (try handleSlashCommand(gpa, io, line, &cfg, &history, &approvals, &usage_total, out, err)) continue;
             // handleSlashCommand returned false → /quit signal: exit.
             return;
         }
 
         try out.writeAll("\n");
         try out.flush();
-        dispatchTurn(gpa, io, &cfg, env, &history, line, out, err, in, &approvals, args) catch |e| {
+        dispatchTurn(gpa, io, &cfg, env, &history, line, out, err, in, &approvals, &usage_total, args) catch |e| {
             try err.print("\n[error: {s}]\n", .{@errorName(e)});
             try err.flush();
         };
     }
+}
+
+/// On clean REPL exit, dump the conversation to `.qai/sessions/<ts>.md`
+/// using the same renderer /save uses, and print a one-line summary
+/// (path + tokens + cost). No-op if the session was empty.
+fn autoSaveOnExit(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    cfg: *cfg_mod.Config,
+    history: *std.ArrayList(hs.ai.common.AIMessage),
+    usage_total: *agent.UsageStats,
+    err: *std.Io.Writer,
+) !void {
+    if (history.items.len == 0) return;
+    const path = try sessionPath(gpa, io);
+    defer gpa.free(path);
+    saveConversationMarkdown(gpa, io, path, cfg, history) catch |e| {
+        try err.print("[autosave] failed: {s}\n", .{@errorName(e)});
+        try err.flush();
+        return;
+    };
+    try err.print(
+        "[autosave] {s} · {d} turns · {d} in / {d} out · ${d:.4}\n",
+        .{ path, usage_total.turns, usage_total.input_tokens, usage_total.output_tokens, usage_total.cost_usd },
+    );
+    try err.flush();
+}
+
+/// Build a session-named path under `.qai/sessions/`.
+/// Format: YYYYMMDD-HHMMSS.md (UTC). Caller owns.
+fn sessionPath(gpa: std.mem.Allocator, io: std.Io) ![]u8 {
+    const ts = std.Io.Timestamp.now(io, .real).toSeconds();
+    const epoch_seconds: std.time.epoch.EpochSeconds = .{ .secs = @intCast(ts) };
+    const epoch_day = epoch_seconds.getEpochDay();
+    const day_seconds = epoch_seconds.getDaySeconds();
+    const year_day = epoch_day.calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    return std.fmt.allocPrint(
+        gpa,
+        ".qai/sessions/{d:0>4}{d:0>2}{d:0>2}-{d:0>2}{d:0>2}{d:0>2}.md",
+        .{
+            year_day.year,
+            month_day.month.numeric(),
+            month_day.day_index + 1,
+            day_seconds.getHoursIntoDay(),
+            day_seconds.getMinutesIntoHour(),
+            day_seconds.getSecondsIntoMinute(),
+        },
+    );
 }
 
 /// Handle a /-prefixed command. Returns true to continue the REPL, false to
@@ -279,6 +335,7 @@ fn handleSlashCommand(
     cfg: *cfg_mod.Config,
     history: *std.ArrayList(hs.ai.common.AIMessage),
     approvals: *agent.Approvals,
+    usage_total: *agent.UsageStats,
     out: *std.Io.Writer,
     err: *std.Io.Writer,
 ) !bool {
@@ -302,7 +359,9 @@ fn handleSlashCommand(
             \\  /provider [NAME]     Show current provider, or switch (anthropic|openai|gemini|grok|deepseek)
             \\  /approvals           List session approvals
             \\  /forget              Clear all approvals (in-memory + on-disk)
-            \\  /save PATH           Save the conversation as markdown to PATH
+            \\  /save [PATH]         Save the conversation as markdown to PATH
+            \\                       (default: .qai/sessions/<timestamp>.md)
+            \\  /usage               Show running token + cost totals for this session
             \\
         );
         try err.flush();
@@ -394,17 +453,34 @@ fn handleSlashCommand(
     }
 
     if (std.mem.eql(u8, cmd, "/save")) {
-        if (tail.len == 0) {
-            try err.writeAll("[save] usage: /save <path>\n");
-            try err.flush();
-            return true;
+        // /save with no path → session-named file under .qai/sessions/.
+        var path: []const u8 = tail;
+        var owned_path: ?[]u8 = null;
+        defer if (owned_path) |p| gpa.free(p);
+        if (path.len == 0) {
+            owned_path = try sessionPath(gpa, io);
+            path = owned_path.?;
         }
-        saveConversationMarkdown(gpa, io, tail, cfg, history) catch |e| {
+        saveConversationMarkdown(gpa, io, path, cfg, history) catch |e| {
             try err.print("[save] failed: {s}\n", .{@errorName(e)});
             try err.flush();
             return true;
         };
-        try err.print("[save] wrote {d} messages to {s}\n", .{ history.items.len, tail });
+        try err.print("[save] wrote {d} messages to {s}\n", .{ history.items.len, path });
+        try err.flush();
+        return true;
+    }
+
+    if (std.mem.eql(u8, cmd, "/usage")) {
+        try err.print(
+            "[usage] {d} turns · {d} in / {d} out · ${d:.4}\n",
+            .{
+                usage_total.turns,
+                usage_total.input_tokens,
+                usage_total.output_tokens,
+                usage_total.cost_usd,
+            },
+        );
         try err.flush();
         return true;
     }
@@ -466,6 +542,14 @@ fn saveConversationMarkdown(
         }
     }
 
+    // Make sure the parent directory exists (mkdir -p) so paths like
+    // `.qai/sessions/<ts>.md` work without manual setup.
+    if (std.fs.path.dirname(path)) |dir| {
+        std.Io.Dir.cwd().createDirPath(io, dir) catch |e| switch (e) {
+            error.PathAlreadyExists => {},
+            else => return e,
+        };
+    }
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = buf.items });
 }
 
@@ -480,6 +564,7 @@ fn dispatchTurn(
     err: *std.Io.Writer,
     stdin: *std.Io.Reader,
     approvals: *agent.Approvals,
+    usage_total: *agent.UsageStats,
     args: Args,
 ) !void {
     const settings = cfg.active();
@@ -506,17 +591,18 @@ fn dispatchTurn(
             .max_tokens = cfg.max_tokens,
             .temperature = cfg.temperature,
             .reasoning_effort = cfg.reasoning_effort,
-            .system_prompt = cfg.system_prompt,
+            .system_prompt = cfg.effectiveSystemPrompt(),
             .history = history,
             .out = out,
             .err = err,
             .stdin = stdin,
             .auto_approve = args.auto_approve,
             .approvals = approvals,
+            .usage = usage_total,
             .user_prompt = prompt,
         });
     }
-    return runTurn(gpa, io, cfg, api_key, history, prompt, out, err);
+    return runTurn(gpa, io, cfg, api_key, history, prompt, out, err, usage_total);
 }
 
 fn runTurn(
@@ -528,17 +614,25 @@ fn runTurn(
     prompt: []const u8,
     out: *std.Io.Writer,
     err_writer: *std.Io.Writer,
+    usage_total: *agent.UsageStats,
 ) !void {
-    var reply: std.ArrayList(u8) = .empty;
-    defer reply.deinit(gpa);
-
-    var ctx = StreamCtx{ .buf = &reply, .allocator = gpa, .out = out };
+    // Plain-chat now uses the same StreamEvent surface as agent mode so
+    // token usage, message_stop, and any future shared signals all flow
+    // through one path. Tools never fire in this configuration (we don't
+    // pass any), so state.tools / state.saw_tool_use stay empty.
+    var state = agent.TurnState{
+        .gpa = gpa,
+        .out = out,
+        .err = err_writer,
+    };
+    defer state.deinit();
 
     const req_cfg: hs.ai.common.RequestConfig = .{
         .model = cfg.model,
         .max_tokens = cfg.max_tokens,
         .temperature = cfg.temperature,
-        .system_prompt = cfg.system_prompt,
+        .system_prompt = cfg.effectiveSystemPrompt(),
+        .stream = true,
     };
 
     const settings = cfg.active();
@@ -551,7 +645,7 @@ fn runTurn(
                 .provider_name = cfg.provider.name(),
             });
             defer client.deinit();
-            client.sendMessageStreamingWithContext(prompt, history.items, req_cfg, streamCallback, &ctx) catch |e| {
+            client.sendMessageStreamingWithEvents(prompt, history.items, req_cfg, agent.streamEventCb, &state) catch |e| {
                 try agent.surfaceApiError(err_writer, &client.http_client, e);
                 return e;
             };
@@ -562,7 +656,7 @@ fn runTurn(
                 .base_url = settings.base_url,
             });
             defer client.deinit();
-            client.sendMessageStreamingWithContext(prompt, history.items, req_cfg, streamCallback, &ctx) catch |e| {
+            client.sendMessageStreamingWithEvents(prompt, history.items, req_cfg, agent.streamEventCb, &state) catch |e| {
                 try agent.surfaceApiError(err_writer, &client.http_client, e);
                 return e;
             };
@@ -573,7 +667,7 @@ fn runTurn(
                 .base_url = settings.base_url,
             });
             defer client.deinit();
-            client.sendMessageStreamingWithContext(prompt, history.items, req_cfg, streamCallback, &ctx) catch |e| {
+            client.sendMessageStreamingWithEvents(prompt, history.items, req_cfg, agent.streamEventCb, &state) catch |e| {
                 try agent.surfaceApiError(err_writer, &client.http_client, e);
                 return e;
             };
@@ -584,15 +678,22 @@ fn runTurn(
                 .base_url = settings.base_url,
             });
             defer client.deinit();
-            client.sendMessageStreamingWithContext(prompt, history.items, req_cfg, streamCallback, &ctx) catch |e| {
+            client.sendMessageStreamingWithEvents(prompt, history.items, req_cfg, agent.streamEventCb, &state) catch |e| {
                 try agent.surfaceApiError(err_writer, &client.http_client, e);
                 return e;
             };
         },
     }
 
+    if (state.text.items.len > 0 and state.text.items[state.text.items.len - 1] != '\n') {
+        try out.writeAll("\n");
+        try out.flush();
+    }
+
+    try agent.emitUsage(gpa, err_writer, cfg.model, state.input_tokens, state.output_tokens, 0, usage_total);
+
     try appendMsg(gpa, io, history, .user, prompt);
-    try appendMsg(gpa, io, history, .assistant, reply.items);
+    try appendMsg(gpa, io, history, .assistant, state.text.items);
 }
 
 fn appendMsg(

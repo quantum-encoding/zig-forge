@@ -48,6 +48,10 @@ api_key_env = "XAI_API_KEY"
 [deepseek]
 base_url = "https://api.deepseek.com/anthropic"
 api_key_env = "DEEPSEEK_API_KEY"
+# DeepSeek v4 sometimes lapses into Chinese for English prompts.
+# A short per-provider override forces the language without affecting
+# other providers. Per-provider system_prompt wins over the global one.
+system_prompt = "Always respond in English. Be concise."
 
 # Example: route everything through your backend instead.
 # Uncomment to swap. The backend handles billing + key custody; this client

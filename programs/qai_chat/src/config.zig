@@ -60,6 +60,10 @@ pub const Provider = enum {
 pub const ProviderSettings = struct {
     base_url: []const u8,
     api_key_env: []const u8,
+    /// Per-provider system prompt override. When set, takes precedence over
+    /// the global Config.system_prompt for that provider. Useful for
+    /// model-specific nudges — e.g. forcing DeepSeek to respond in English.
+    system_prompt: ?[]const u8 = null,
 };
 
 pub const Config = struct {
@@ -84,6 +88,13 @@ pub const Config = struct {
     /// Returns the provider settings for the active provider.
     pub fn active(self: *const Config) ProviderSettings {
         return self.providers[@intFromEnum(self.provider)];
+    }
+
+    /// Resolve the effective system prompt for the active provider.
+    /// Order: per-provider override → global → null.
+    pub fn effectiveSystemPrompt(self: *const Config) ?[]const u8 {
+        if (self.active().system_prompt) |p| return p;
+        return self.system_prompt;
     }
 };
 
@@ -171,6 +182,9 @@ pub fn parse(gpa: std.mem.Allocator, text: []const u8) !Config {
                 cfg.providers[idx].base_url = try parseString(a, raw_val);
             } else if (eql(key, "api_key_env")) {
                 cfg.providers[idx].api_key_env = try parseString(a, raw_val);
+            } else if (eql(key, "system_prompt")) {
+                const v = try parseString(a, raw_val);
+                cfg.providers[idx].system_prompt = if (v.len == 0) null else v;
             }
         }
     }
