@@ -120,6 +120,23 @@ pub fn run(allocator: std.mem.Allocator, io: Io, environ: std.process.Environ, a
     };
     try writePackedRefs(allocator, io, repo.git_dir, refs, head_branch_short);
 
+    // 9b. Auto-add `[remote "origin"]` so `zigit fetch / push` (and
+    //     anyone reading .git/config) can find the source URL.
+    {
+        var cfg = try zigit.config.load(allocator, io, repo.git_dir);
+        defer cfg.deinit();
+        try cfg.set("remote", "origin", "url", url);
+        const fetch_spec = "+refs/heads/*:refs/remotes/origin/*";
+        try cfg.set("remote", "origin", "fetch", fetch_spec);
+        // Also record the upstream for the active branch — that's what
+        // `git clone` does and it's what `push` will look at.
+        try cfg.set("branch", head_branch_short, "remote", "origin");
+        const merge_ref = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{head_branch_short});
+        defer allocator.free(merge_ref);
+        try cfg.set("branch", head_branch_short, "merge", merge_ref);
+        try cfg.save(allocator, io, repo.git_dir);
+    }
+
     // 10. Set HEAD to the symbolic ref the remote suggested (or
     //     fall back to refs/heads/main if HEAD wasn't symbolic).
     const head_target = head_branch orelse "refs/heads/main";

@@ -621,6 +621,13 @@ if curl -fs -m 5 -o /dev/null "$CLONE_URL/info/refs?service=git-upload-pack" -H 
     file_count_real=$(find "$REF" \! -path "$REF/.git/*" -type f | wc -l | tr -d ' ')
     file_count_zigit=$(find "$ZC" \! -path "$ZC/.git/*" -type f | wc -l | tr -d ' ')
     check "zigit clone work-tree file count" "$file_count_real" "$file_count_zigit"
+
+    # Phase 14: clone auto-adds [remote "origin"] with the source URL.
+    origin_url=$(cd "$ZC" && git config --get remote.origin.url)
+    check "zigit clone auto-set remote.origin.url" "$CLONE_URL" "$origin_url"
+    origin_fetch=$(cd "$ZC" && git config --get remote.origin.fetch)
+    check "zigit clone auto-set remote.origin.fetch" \
+        "+refs/heads/*:refs/remotes/origin/*" "$origin_fetch"
 else
     echo -e "  ${DIM}skipping — $CLONE_URL not reachable${NC}"
 fi
@@ -700,6 +707,12 @@ else
         # Push again with no changes: "Everything up-to-date".
         upd=$(cd "$PUSH_DIR/src" && "$ZIGIT_BIN" push "$URL" main 2>&1 | tr -d '\r')
         check "no-op push reports up-to-date" "Everything up-to-date" "$upd"
+
+        # Configure a named remote and push by name (covers Phase 14
+        # wiring of cli/push.zig → config lookup of remote.<name>.url).
+        ( cd "$PUSH_DIR/src" && "$ZIGIT_BIN" remote add upstream "$URL" )
+        named_push=$(cd "$PUSH_DIR/src" && "$ZIGIT_BIN" push upstream main 2>&1 | tr -d '\r')
+        check "push by remote-name no-op" "Everything up-to-date" "$named_push"
 
         # New commit, push again: incremental delta.
         echo "v4" > "$PUSH_DIR/src/file.txt"
@@ -1012,6 +1025,83 @@ list_final=$(cd "$ST" && "$ZIGIT_BIN" stash list)
 check "stash drop empties the list" "" "$list_final"
 
 unset TZ GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
+
+# ── Section 22: config + remote (add / remove / show / list) ──────────────────
+echo
+echo "22. config + remote — manage [remote \"...\"] in .git/config"
+RT="$WORK/remote-test"
+mkdir -p "$RT" && ( cd "$RT" && "$ZIGIT_BIN" init >/dev/null )
+
+# (a) Empty repo → no remotes listed.
+empty=$(cd "$RT" && "$ZIGIT_BIN" remote)
+check "remote (empty repo)" "" "$empty"
+
+# (b) Add origin → list shows it; git agrees on the URL.
+( cd "$RT" && "$ZIGIT_BIN" remote add origin https://example.com/r.git )
+list=$(cd "$RT" && "$ZIGIT_BIN" remote)
+check "remote add origin → listed" "origin" "$list"
+git_url=$(cd "$RT" && git config --get remote.origin.url)
+check "git config sees zigit-written remote.origin.url" \
+    "https://example.com/r.git" "$git_url"
+git_fetch=$(cd "$RT" && git config --get remote.origin.fetch)
+check "git config sees zigit-written remote.origin.fetch" \
+    "+refs/heads/*:refs/remotes/origin/*" "$git_fetch"
+
+# (c) Add a second remote → both listed in insertion order.
+( cd "$RT" && "$ZIGIT_BIN" remote add fork https://example.com/f.git )
+list2=$(cd "$RT" && "$ZIGIT_BIN" remote | tr '\n' ' ' | sed -e 's/ $//')
+check "remote list shows both" "origin fork" "$list2"
+
+# (d) `remote -v` includes URLs.
+verbose_origin=$(cd "$RT" && "$ZIGIT_BIN" remote -v | grep '^origin')
+check "remote -v origin line" \
+    "$(printf 'origin\thttps://example.com/r.git (fetch)')" "$verbose_origin"
+
+# (e) `remote show fork` prints the underlying entries.
+show_url=$(cd "$RT" && "$ZIGIT_BIN" remote show fork | grep '^url')
+check "remote show prints url line" \
+    "url = https://example.com/f.git" "$show_url"
+
+# (f) Adding a duplicate remote fails cleanly.
+dup=$(cd "$RT" && "$ZIGIT_BIN" remote add origin https://other 2>&1; echo "exit=$?")
+case "$dup" in
+    *RemoteAlreadyExists*exit=1*) check "duplicate remote add rejected" "ok" "ok" ;;
+    *) check "duplicate remote add rejected" "ok" "$dup" ;;
+esac
+
+# (g) remote remove drops every entry under [remote "fork"].
+( cd "$RT" && "$ZIGIT_BIN" remote remove fork )
+gone=$(cd "$RT" && git config --get remote.fork.url 2>&1; echo "exit=$?")
+case "$gone" in
+    exit=1*) check "remote remove dropped fork.url" "ok" "ok" ;;
+    *) check "remote remove dropped fork.url" "ok" "$gone" ;;
+esac
+list3=$(cd "$RT" && "$ZIGIT_BIN" remote)
+check "remote list after remove" "origin" "$list3"
+
+# (h) Removing an unknown remote fails cleanly.
+miss=$(cd "$RT" && "$ZIGIT_BIN" remote remove nope 2>&1; echo "exit=$?")
+case "$miss" in
+    *RemoteNotFound*exit=1*) check "remove unknown remote rejected" "ok" "ok" ;;
+    *) check "remove unknown remote rejected" "ok" "$miss" ;;
+esac
+
+# (i) Round-trip with git: git config can write a remote, zigit reads it.
+( cd "$RT" && git remote add upstream https://example.com/u.git )
+zigit_sees=$(cd "$RT" && "$ZIGIT_BIN" remote | sort | tr '\n' ' ' | sed -e 's/ $//')
+check "zigit reads git-written remote" "origin upstream" "$zigit_sees"
+zigit_show=$(cd "$RT" && "$ZIGIT_BIN" remote show upstream | grep '^url')
+check "zigit show on git-written remote" \
+    "url = https://example.com/u.git" "$zigit_show"
+
+# (j) Subsections survive serialise round-trip — git's parser can still
+#     read the whole file after zigit re-wrote it.
+( cd "$RT" && "$ZIGIT_BIN" remote add edge https://example.com/e.git )
+parser_check=$(cd "$RT" && git config --list 2>&1)
+case "$parser_check" in
+    *remote.edge.url=https://example.com/e.git*) check "git parses zigit-written config" "ok" "ok" ;;
+    *) check "git parses zigit-written config" "ok" "$parser_check" ;;
+esac
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo

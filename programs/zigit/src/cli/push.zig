@@ -27,15 +27,33 @@ const zigit = @import("zigit");
 const heads_dir = "refs/heads";
 
 pub fn run(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !void {
-    if (args.len < 1 or args.len > 2) return error.UsagePushUrlOptionalBranch;
-    const url_with_creds = args[0];
+    if (args.len > 2) return error.UsagePushOptionalRemoteOptionalBranch;
+
+    var repo = try zigit.Repository.discover(allocator, io);
+    defer repo.deinit();
+
+    var cfg = try zigit.config.load(allocator, io, repo.git_dir);
+    defer cfg.deinit();
+
+    // First positional is either a URL or a remote name. If neither is
+    // given, default to "origin". The lookup logic: if `remote.<arg>.url`
+    // exists in config, treat the arg as a name and use the configured URL;
+    // otherwise treat the arg as a URL.
+    const remote_arg: []const u8 = if (args.len >= 1) args[0] else "origin";
+    const url_with_creds_owned: ?[]u8 = blk: {
+        const dotted = try std.fmt.allocPrint(allocator, "remote.{s}.url", .{remote_arg});
+        defer allocator.free(dotted);
+        if (cfg.get(dotted)) |configured| {
+            break :blk try allocator.dupe(u8, configured);
+        }
+        break :blk null;
+    };
+    defer if (url_with_creds_owned) |s| allocator.free(s);
+    const url_with_creds: []const u8 = url_with_creds_owned orelse remote_arg;
 
     var auth_split = try zigit.net.auth.split(allocator, url_with_creds);
     defer zigit.net.auth.deinit(allocator, &auth_split);
     const url = auth_split.clean_url;
-
-    var repo = try zigit.Repository.discover(allocator, io);
-    defer repo.deinit();
 
     // Pick the branch.
     const branch_short: []const u8 = if (args.len == 2) args[1] else blk: {

@@ -33,6 +33,7 @@ const restore_cmd = @import("cli/restore.zig");
 const reset_cmd = @import("cli/reset.zig");
 const tag_cmd = @import("cli/tag.zig");
 const stash_cmd = @import("cli/stash.zig");
+const remote_cmd = @import("cli/remote.zig");
 
 const usage =
     \\zigit — git in zig
@@ -66,6 +67,7 @@ const usage =
     \\  reset [--soft|--mixed|--hard] [TARGET]        Move HEAD ± rewrite index ± rewrite workdir
     \\  tag [-d] [NAME [COMMIT]]                      List, create, or delete lightweight tags
     \\  stash <push|list|pop|drop> [args]             Save/restore work-tree state
+    \\  remote [-v|add|remove|show] [args]            Manage [remote "..."] entries
     \\
 ;
 
@@ -157,6 +159,22 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, cmd, "stash")) {
         stash_cmd.run(allocator, io, environ, rest) catch |err| switch (err) {
             error.StashConflict => std.process.exit(1),
+            else => return err,
+        };
+    } else if (std.mem.eql(u8, cmd, "remote")) {
+        remote_cmd.run(allocator, io, rest) catch |err| switch (err) {
+            error.RemoteNotFound,
+            error.RemoteAlreadyExists,
+            error.UsageRemoteAdd,
+            error.UsageRemoteRemove,
+            error.UsageRemoteShow,
+            error.UnknownRemoteSubcommand,
+            => {
+                var buf: [256]u8 = undefined;
+                const msg = try std.fmt.bufPrint(&buf, "zigit remote: {s}\n", .{@errorName(err)});
+                try writeAll(io, .stderr, msg);
+                std.process.exit(1);
+            },
             else => return err,
         };
     } else if (std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) {
