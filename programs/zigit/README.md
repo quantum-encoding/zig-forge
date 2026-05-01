@@ -6,12 +6,14 @@ no libgit2 dependency.
 
 ## Status
 
-**Phases 1–9 complete** — full local stack + smart-HTTPS clone +
-push. zigit can `clone` real public GitHub repos over v2 and `push`
-to any HTTP server running `git http-backend` (including
-authenticated URLs of the form `https://user:token@host/path`).
-Pushed objects pass `git fsck --strict` on the receiver and `git
-log` walks them correctly.
+**Phases 1–10 complete** — every core git workflow is now covered.
+zigit can `init / add / commit / log / status / diff / branch /
+switch / checkout / gc / clone / push / merge / rebase`. Merges
+fast-forward when possible, do a true three-way at file granularity
+otherwise (refusing on real conflicts), and produce merge commits
+with two parents that real git's `log --graph` walks correctly.
+Rebase replays commits onto a new base via cherry-pick, aborting
+cleanly on the first conflict.
 
 ### Plumbing
 
@@ -40,13 +42,15 @@ log` walks them correctly.
 | `zigit gc` | Pack all loose objects + loose refs into a single pack + `packed-refs`. Output passes `git fsck --strict` and `git verify-pack` |
 | `zigit clone URL [PATH]` | Read-only smart-HTTPS v2 clone. Active branch lands at `refs/heads/<branch>`, others at `refs/remotes/origin/<branch>` (matching real `git clone`). Work tree is materialised |
 | `zigit push URL [BRANCH]` | Push BRANCH (default = HEAD's branch) to URL via smart-HTTPS receive-pack (v1). URL may embed credentials: `https://user:token@host/path`. Sends only the new objects (computed via reachability closure exclusion). |
+| `zigit merge BRANCH` | Fast-forward when possible, otherwise true 3-way at file granularity. On real conflicts (modify/modify, add/add, modify/delete) prints the path list + reason and exits non-zero. Merge commit has two parents and is recognised by `git log --graph`. |
+| `zigit rebase ONTO` | Replay HEAD's commits since merge_base(HEAD, ONTO) on top of ONTO, cherry-pick style. Each commit becomes a new commit with the same message + author but a new parent. Aborts cleanly on the first conflict (work tree unchanged). |
 
 ## Build
 
 ```
 zig build              # produces zig-out/bin/zigit
-zig build test         # 64 unit tests
-./tests/parity.sh      # 83 byte-for-byte checks vs real `git`
+zig build test         # 70 unit tests
+./tests/parity.sh      # 93 byte-for-byte checks vs real `git`
 ```
 
 The parity suite includes a network-dependent clone test against
@@ -57,6 +61,12 @@ available).
 
 ## Roadmap
 
-Phase 10 — three-way merge + rebase (the actual content stitching)
+Phases 1–10 cover every core git workflow. Polish items still open:
+
+- Line-level conflict markers in merge (currently file-granularity)
+- `restore` / `reset` / `tag` / `stash`
+- ssh:// transport, credential helpers, `.git/config` `[remote]`
+- Pack writer that deltifies (5–20× smaller packs)
+- `prune`, reflog, multi-pack indexes
 
 See the top-level commit messages for design notes per phase.

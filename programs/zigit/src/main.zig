@@ -27,6 +27,8 @@ const checkout_cmd = @import("cli/checkout.zig");
 const gc_cmd = @import("cli/gc.zig");
 const clone_cmd = @import("cli/clone.zig");
 const push_cmd = @import("cli/push.zig");
+const merge_cmd = @import("cli/merge.zig");
+const rebase_cmd = @import("cli/rebase.zig");
 
 const usage =
     \\zigit — git in zig
@@ -54,6 +56,8 @@ const usage =
     \\  gc                                            Pack loose objects + refs into a single pack
     \\  clone URL [PATH]                              Read-only smart-HTTPS v2 clone
     \\  push URL [BRANCH]                             Push BRANCH (default = current) to URL
+    \\  merge BRANCH                                  Fast-forward when possible, otherwise three-way
+    \\  rebase ONTO                                   Replay HEAD's commits on top of ONTO
     \\
 ;
 
@@ -123,6 +127,16 @@ pub fn main(init: std.process.Init) !void {
         try clone_cmd.run(allocator, io, environ, rest);
     } else if (std.mem.eql(u8, cmd, "push")) {
         try push_cmd.run(allocator, io, rest);
+    } else if (std.mem.eql(u8, cmd, "merge")) {
+        merge_cmd.run(allocator, io, environ, rest) catch |err| switch (err) {
+            error.MergeConflict => std.process.exit(1),
+            else => return err,
+        };
+    } else if (std.mem.eql(u8, cmd, "rebase")) {
+        rebase_cmd.run(allocator, io, environ, rest) catch |err| switch (err) {
+            error.MergeConflict => std.process.exit(1),
+            else => return err,
+        };
     } else if (std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) {
         try writeAll(io, .stdout, usage);
     } else {

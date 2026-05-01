@@ -719,6 +719,108 @@ else
     unset TZ GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
 fi
 
+# ── Section 17: merge — fast-forward + true 3-way + conflict refusal ──────────
+echo
+echo "17. merge — FF + 3-way + conflict"
+MR="$WORK/merge-test"
+mkdir -p "$MR"
+
+export TZ=UTC
+export GIT_AUTHOR_NAME="Merge Bot"
+export GIT_AUTHOR_EMAIL="merge@example.com"
+export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+
+# (a) Fast-forward — feature is ahead, main hasn't moved.
+FF="$MR/ff"
+mkdir -p "$FF" && ( cd "$FF" && "$ZIGIT_BIN" init >/dev/null )
+GIT_AUTHOR_DATE=1700000000 GIT_COMMITTER_DATE=1700000000 \
+    bash -c "cd '$FF' && echo base > b && '$ZIGIT_BIN' add b && '$ZIGIT_BIN' commit -m base >/dev/null"
+GIT_AUTHOR_DATE=1700000100 GIT_COMMITTER_DATE=1700000100 \
+    bash -c "cd '$FF' && '$ZIGIT_BIN' switch -c feature >/dev/null && echo new > n && '$ZIGIT_BIN' add n && '$ZIGIT_BIN' commit -m feature >/dev/null"
+( cd "$FF" && "$ZIGIT_BIN" switch main >/dev/null )
+ff_msg=$(cd "$FF" && "$ZIGIT_BIN" merge feature 2>&1 | head -1)
+case "$ff_msg" in Fast-forward*) check "FF merge prints Fast-forward" "ok" "ok" ;;
+                  *)             check "FF merge prints Fast-forward" "ok" "$ff_msg" ;; esac
+ff_n_count=$(find "$FF" -name n -not -path "*/.git/*" | wc -l | tr -d ' ')
+check "FF merge brings new file into work tree" "1" "$ff_n_count"
+
+# (b) Already up-to-date.
+ut=$(cd "$FF" && "$ZIGIT_BIN" merge feature 2>&1 | tr -d '\r')
+check "no-op merge prints up-to-date" "Already up to date." "$ut"
+
+# (c) True 3-way (no conflict).
+TW="$MR/tw"
+mkdir -p "$TW" && ( cd "$TW" && "$ZIGIT_BIN" init >/dev/null )
+GIT_AUTHOR_DATE=1700000000 GIT_COMMITTER_DATE=1700000000 \
+    bash -c "cd '$TW' && echo base > b && '$ZIGIT_BIN' add b && '$ZIGIT_BIN' commit -m base >/dev/null"
+GIT_AUTHOR_DATE=1700000100 GIT_COMMITTER_DATE=1700000100 \
+    bash -c "cd '$TW' && '$ZIGIT_BIN' switch -c feature >/dev/null && echo only_feature > f && '$ZIGIT_BIN' add f && '$ZIGIT_BIN' commit -m feat >/dev/null"
+( cd "$TW" && "$ZIGIT_BIN" switch main >/dev/null )
+GIT_AUTHOR_DATE=1700000200 GIT_COMMITTER_DATE=1700000200 \
+    bash -c "cd '$TW' && echo only_main > m && '$ZIGIT_BIN' add m && '$ZIGIT_BIN' commit -m maincommit >/dev/null"
+GIT_AUTHOR_DATE=1700000300 GIT_COMMITTER_DATE=1700000300 \
+    bash -c "cd '$TW' && '$ZIGIT_BIN' merge feature >/dev/null"
+
+files_after=$(ls "$TW" | sort | tr '\n' ' ')
+check "3-way merge has both side files" "b f m " "$files_after"
+
+parent_count=$(cd "$TW" && git cat-file -p HEAD | grep -c '^parent ')
+check "merge commit has two parents" "2" "$parent_count"
+
+# Count reachable commits (without --graph; --graph only marks one
+# commit per row with `*` and uses `| *` for the second parent).
+# Diamond = base + main_advance + feat + merge = 4.
+commit_count=$(cd "$TW" && git log --oneline --all 2>&1 | wc -l | tr -d ' ')
+check "git log walks merge diamond (4 commits)" "4" "$commit_count"
+
+# (d) Conflict refusal.
+CF="$MR/conflict"
+mkdir -p "$CF" && ( cd "$CF" && "$ZIGIT_BIN" init >/dev/null )
+GIT_AUTHOR_DATE=1700000000 GIT_COMMITTER_DATE=1700000000 \
+    bash -c "cd '$CF' && echo v1 > shared && '$ZIGIT_BIN' add shared && '$ZIGIT_BIN' commit -m base >/dev/null"
+GIT_AUTHOR_DATE=1700000100 GIT_COMMITTER_DATE=1700000100 \
+    bash -c "cd '$CF' && '$ZIGIT_BIN' switch -c feature >/dev/null && echo from-feature > shared && '$ZIGIT_BIN' add shared && '$ZIGIT_BIN' commit -m fc >/dev/null"
+( cd "$CF" && "$ZIGIT_BIN" switch main >/dev/null )
+GIT_AUTHOR_DATE=1700000200 GIT_COMMITTER_DATE=1700000200 \
+    bash -c "cd '$CF' && echo from-main > shared && '$ZIGIT_BIN' add shared && '$ZIGIT_BIN' commit -m mc >/dev/null"
+if (cd "$CF" && "$ZIGIT_BIN" merge feature 2>/dev/null); then
+    check "conflicting merge refused" "refused" "accepted"
+else
+    rc=$?
+    check "conflicting merge refused" "refused" "refused"
+    check "merge refusal exit code" "1" "$rc"
+fi
+
+# ── Section 18: rebase — replay onto a different base ─────────────────────────
+echo
+echo "18. rebase — replay commits onto a different base"
+RB="$MR/rebase"
+mkdir -p "$RB" && ( cd "$RB" && "$ZIGIT_BIN" init >/dev/null )
+
+GIT_AUTHOR_DATE=1700000000 GIT_COMMITTER_DATE=1700000000 \
+    bash -c "cd '$RB' && echo v1 > b && '$ZIGIT_BIN' add b && '$ZIGIT_BIN' commit -m v1 >/dev/null"
+GIT_AUTHOR_DATE=1700000100 GIT_COMMITTER_DATE=1700000100 \
+    bash -c "cd '$RB' && '$ZIGIT_BIN' switch -c feature >/dev/null && echo f1 > f1 && '$ZIGIT_BIN' add f1 && '$ZIGIT_BIN' commit -m feature1 >/dev/null"
+GIT_AUTHOR_DATE=1700000200 GIT_COMMITTER_DATE=1700000200 \
+    bash -c "cd '$RB' && echo f2 > f2 && '$ZIGIT_BIN' add f2 && '$ZIGIT_BIN' commit -m feature2 >/dev/null"
+( cd "$RB" && "$ZIGIT_BIN" switch main >/dev/null )
+GIT_AUTHOR_DATE=1700000300 GIT_COMMITTER_DATE=1700000300 \
+    bash -c "cd '$RB' && echo m > m && '$ZIGIT_BIN' add m && '$ZIGIT_BIN' commit -m main_advance >/dev/null"
+( cd "$RB" && "$ZIGIT_BIN" switch feature >/dev/null )
+GIT_AUTHOR_DATE=1700000400 GIT_COMMITTER_DATE=1700000400 \
+    bash -c "cd '$RB' && '$ZIGIT_BIN' rebase main >/dev/null"
+
+# Linear history with main_advance reachable from feature's tip.
+chain_subjects=$(cd "$RB" && git log --pretty=format:'%s' feature)
+expected_subjects=$'feature2\nfeature1\nmain_advance\nv1'
+check "rebase produces linear history" "$expected_subjects" "$chain_subjects"
+
+files=$(ls "$RB" | sort | tr '\n' ' ')
+check "rebase work tree has all files" "b f1 f2 m " "$files"
+
+unset TZ GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo
 TOTAL=$((PASS + FAIL))
