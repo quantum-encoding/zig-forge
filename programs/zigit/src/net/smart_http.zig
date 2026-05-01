@@ -44,8 +44,11 @@
 const std = @import("std");
 const Io = std.Io;
 const pkt_line = @import("pkt_line.zig");
+const auth_mod = @import("auth.zig");
 
 pub const agent = "zigit/0.1";
+
+pub const zero_oid_hex: [40]u8 = @splat('0');
 
 pub const Ref = struct {
     /// 40-char hex; owned by caller (we copy at parse time).
@@ -321,6 +324,269 @@ test "parseRefList parses a tiny ls-refs response" {
     try testing.expectEqualStrings("refs/heads/main", refs[0].symref_target);
     try testing.expectEqualStrings("refs/heads/main", refs[1].name);
     try testing.expectEqualStrings("", refs[1].symref_target);
+}
+
+// ── Push side (protocol v1, /git-receive-pack) ─────────────────────────────
+//
+// Push doesn't use protocol v2 — receive-pack is still v0/v1 in
+// every git release as of writing. Discovery is the same shape
+// (`# service=git-receive-pack\n0000` prelude + ref advertisement)
+// but the ref-advertisement format differs from v2's ls-refs:
+//
+//   <40-hex> <ref-name>\0<space-sep capabilities>\n   (first ref only)
+//   <40-hex> <ref-name>\n
+//   ...
+//   0000
+//
+// For an empty repo there are no real refs; the server emits a
+// special line:
+//   0000000000000000000000000000000000000000 capabilities^{}\0<caps>
+//
+// We parse just enough to learn the current oid for the branch we
+// want to push. Caps are recorded as a string slice (caller can
+// scan it for `report-status`, `delete-refs`, …) but we don't use
+// any of them in the push body — we'll just assume report-status is
+// available, since every git ≥ 2.0 honours it.
+
+pub fn discoverV1ForReceive(
+    allocator: std.mem.Allocator,
+    io: Io,
+    base_url: []const u8,
+    extra_authorization: ?[]const u8,
+) ![]Ref {
+    const url = try std.fmt.allocPrint(allocator, "{s}/info/refs?service=git-receive-pack", .{base_url});
+    defer allocator.free(url);
+
+    var client: std.http.Client = .{ .allocator = allocator, .io = io };
+    defer client.deinit();
+
+    var body: std.Io.Writer.Allocating = try .initCapacity(allocator, 8192);
+    defer body.deinit();
+
+    var headers_buf: [3]std.http.Header = undefined;
+    var n: usize = 0;
+    if (extra_authorization) |a| {
+        headers_buf[n] = .{ .name = "Authorization", .value = a };
+        n += 1;
+    }
+
+    const result = try client.fetch(.{
+        .location = .{ .url = url },
+        .extra_headers = headers_buf[0..n],
+        .response_writer = &body.writer,
+    });
+    if (result.status != .ok) return error.HttpError;
+
+    return try parseV1RefAdvert(allocator, body.written());
+}
+
+fn parseV1RefAdvert(allocator: std.mem.Allocator, bytes: []const u8) ![]Ref {
+    var refs: std.ArrayListUnmanaged(Ref) = .empty;
+    errdefer {
+        for (refs.items) |*r| r.deinit(allocator);
+        refs.deinit(allocator);
+    }
+
+    var cursor: usize = 0;
+    var first_real_line = true;
+
+    while (cursor < bytes.len) {
+        const got = try pkt_line.read(bytes, cursor);
+        cursor += got.advance;
+        switch (got.packet) {
+            .flush, .delim, .response_end => continue,
+            .data => |line| {
+                const trimmed = std.mem.trimEnd(u8, line, " \r\n");
+                if (std.mem.startsWith(u8, trimmed, "# service=")) continue;
+
+                if (trimmed.len < 41 or trimmed[40] != ' ') continue;
+
+                // First payload line carries `\0`-separated capabilities
+                // after the ref name; subsequent lines are just `<oid> <ref>`.
+                var ref_section = trimmed[41..];
+                if (first_real_line) {
+                    if (std.mem.indexOfScalar(u8, ref_section, 0)) |nul| {
+                        ref_section = ref_section[0..nul];
+                    }
+                    first_real_line = false;
+                }
+
+                // Skip the special "capabilities^{}" placeholder used
+                // when the server has no real refs (empty repo).
+                if (std.mem.eql(u8, ref_section, "capabilities^{}")) continue;
+
+                var ref: Ref = .{
+                    .oid_hex = undefined,
+                    .name = try allocator.dupe(u8, ref_section),
+                    .symref_target = try allocator.dupe(u8, ""),
+                };
+                @memcpy(&ref.oid_hex, trimmed[0..40]);
+                try refs.append(allocator, ref);
+            },
+        }
+    }
+
+    return try refs.toOwnedSlice(allocator);
+}
+
+pub const PushResult = struct {
+    /// "unpack ok" on success, otherwise the server's complaint.
+    unpack_status: []u8,
+    /// "ok" or "ng <reason>" for the ref we pushed.
+    ref_status: []u8,
+
+    pub fn deinit(self: *PushResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.unpack_status);
+        allocator.free(self.ref_status);
+        self.* = undefined;
+    }
+};
+
+/// Push `pack_bytes` to `base_url`, requesting that `ref_name` move
+/// from `old_oid_hex` to `new_oid_hex`. For a first push (branch
+/// doesn't exist on the remote yet) pass `zero_oid_hex` as old.
+pub fn pushPack(
+    allocator: std.mem.Allocator,
+    io: Io,
+    base_url: []const u8,
+    extra_authorization: ?[]const u8,
+    ref_name: []const u8,
+    old_oid_hex: [40]u8,
+    new_oid_hex: [40]u8,
+    pack_bytes: []const u8,
+) !PushResult {
+    const url = try std.fmt.allocPrint(allocator, "{s}/git-receive-pack", .{base_url});
+    defer allocator.free(url);
+
+    // Build the request body: one command pkt-line + 0000 + the pack.
+    var body_buf: std.Io.Writer.Allocating = try .initCapacity(allocator, pack_bytes.len + 256);
+    defer body_buf.deinit();
+    const w = &body_buf.writer;
+
+    var line_buf: [256]u8 = undefined;
+    const line = try std.fmt.bufPrint(
+        &line_buf,
+        "{s} {s} {s}\x00report-status agent={s}\n",
+        .{ old_oid_hex, new_oid_hex, ref_name, agent },
+    );
+    try pkt_line.writeData(w, line);
+    try pkt_line.writeFlush(w);
+    try w.writeAll(pack_bytes);
+
+    var client: std.http.Client = .{ .allocator = allocator, .io = io };
+    defer client.deinit();
+
+    var resp: std.Io.Writer.Allocating = try .initCapacity(allocator, 4096);
+    defer resp.deinit();
+
+    var headers_buf: [3]std.http.Header = undefined;
+    var n: usize = 0;
+    headers_buf[n] = .{ .name = "Content-Type", .value = "application/x-git-receive-pack-request" };
+    n += 1;
+    headers_buf[n] = .{ .name = "Accept", .value = "application/x-git-receive-pack-result" };
+    n += 1;
+    if (extra_authorization) |a| {
+        headers_buf[n] = .{ .name = "Authorization", .value = a };
+        n += 1;
+    }
+
+    const result = try client.fetch(.{
+        .location = .{ .url = url },
+        .method = .POST,
+        .payload = body_buf.written(),
+        .extra_headers = headers_buf[0..n],
+        .response_writer = &resp.writer,
+    });
+    if (result.status != .ok) {
+        _ = auth_mod;
+        return error.HttpError;
+    }
+
+    return try parsePushResponse(allocator, resp.written());
+}
+
+fn parsePushResponse(allocator: std.mem.Allocator, bytes: []const u8) !PushResult {
+    var unpack_status: []u8 = try allocator.dupe(u8, "");
+    var ref_status: []u8 = try allocator.dupe(u8, "");
+    errdefer {
+        allocator.free(unpack_status);
+        allocator.free(ref_status);
+    }
+
+    var cursor: usize = 0;
+    while (cursor < bytes.len) {
+        const got = try pkt_line.read(bytes, cursor);
+        cursor += got.advance;
+        switch (got.packet) {
+            .flush, .delim, .response_end => continue,
+            .data => |line| {
+                // Strip optional sideband (server may use it even
+                // though we didn't ask).
+                var payload = line;
+                if (payload.len > 0 and (payload[0] == 1 or payload[0] == 2 or payload[0] == 3)) {
+                    if (payload[0] == 3) return error.RemoteFatalError;
+                    payload = payload[1..];
+                }
+                const trimmed = std.mem.trimEnd(u8, payload, " \r\n");
+
+                if (std.mem.startsWith(u8, trimmed, "unpack ")) {
+                    allocator.free(unpack_status);
+                    unpack_status = try allocator.dupe(u8, trimmed[7..]);
+                } else if (std.mem.startsWith(u8, trimmed, "ok ") or std.mem.startsWith(u8, trimmed, "ng ")) {
+                    allocator.free(ref_status);
+                    ref_status = try allocator.dupe(u8, trimmed);
+                }
+            },
+        }
+    }
+
+    return .{ .unpack_status = unpack_status, .ref_status = ref_status };
+}
+
+test "parseV1RefAdvert reads the canonical v1 advertisement" {
+    var buf: std.Io.Writer.Allocating = try .initCapacity(testing.allocator, 256);
+    defer buf.deinit();
+    const w = &buf.writer;
+    try pkt_line.writeData(w, "# service=git-receive-pack\n");
+    try pkt_line.writeFlush(w);
+    try pkt_line.writeData(w, "0123456789abcdef0123456789abcdef01234567 refs/heads/main\x00report-status delete-refs side-band-64k\n");
+    try pkt_line.writeData(w, "abcdef0123456789abcdef0123456789abcdef01 refs/heads/dev\n");
+    try pkt_line.writeFlush(w);
+
+    const refs = try parseV1RefAdvert(testing.allocator, buf.written());
+    defer freeRefs(testing.allocator, refs);
+
+    try testing.expectEqual(@as(usize, 2), refs.len);
+    try testing.expectEqualStrings("refs/heads/main", refs[0].name);
+    try testing.expectEqualStrings("refs/heads/dev", refs[1].name);
+}
+
+test "parseV1RefAdvert handles empty-repo capabilities^{}" {
+    var buf: std.Io.Writer.Allocating = try .initCapacity(testing.allocator, 256);
+    defer buf.deinit();
+    const w = &buf.writer;
+    try pkt_line.writeData(w, "# service=git-receive-pack\n");
+    try pkt_line.writeFlush(w);
+    try pkt_line.writeData(w, "0000000000000000000000000000000000000000 capabilities^{}\x00report-status\n");
+    try pkt_line.writeFlush(w);
+
+    const refs = try parseV1RefAdvert(testing.allocator, buf.written());
+    defer freeRefs(testing.allocator, refs);
+    try testing.expectEqual(@as(usize, 0), refs.len);
+}
+
+test "parsePushResponse reads unpack + ref statuses" {
+    var buf: std.Io.Writer.Allocating = try .initCapacity(testing.allocator, 128);
+    defer buf.deinit();
+    const w = &buf.writer;
+    try pkt_line.writeData(w, "unpack ok\n");
+    try pkt_line.writeData(w, "ok refs/heads/main\n");
+    try pkt_line.writeFlush(w);
+
+    var r = try parsePushResponse(testing.allocator, buf.written());
+    defer r.deinit(testing.allocator);
+    try testing.expectEqualStrings("ok", r.unpack_status);
+    try testing.expectEqualStrings("ok refs/heads/main", r.ref_status);
 }
 
 test "extractPackBytes joins sideband-banded pack data" {

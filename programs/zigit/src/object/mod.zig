@@ -10,6 +10,7 @@ pub const LoadedObject = @import("loose_store.zig").LoadedObject;
 pub const tree = @import("tree.zig");
 pub const TreeEntry = tree.Entry;
 pub const commit = @import("commit.zig");
+pub const walker = @import("walker.zig");
 
 /// Hash framed object content (header + payload) and return its Oid.
 ///
@@ -39,6 +40,7 @@ test {
     _ = @import("loose_store.zig");
     _ = @import("tree.zig");
     _ = @import("commit.zig");
+    _ = @import("walker.zig");
 }
 
 test "computeOid empty blob == e69de29bb2d1d6434b8b29ae775ad8c2e48c5391" {

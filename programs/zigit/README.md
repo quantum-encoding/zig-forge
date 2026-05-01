@@ -6,12 +6,12 @@ no libgit2 dependency.
 
 ## Status
 
-**Phases 1–8 complete** — full local stack + smart-HTTPS read-only
-clone. zigit can fetch from real GitHub repos over HTTPS using
-protocol v2: `zigit clone https://github.com/...` resolves HEAD to
-the same oid `git clone` does, sets up `refs/heads/<active>` +
-`refs/remotes/origin/*` the same way, materialises the work tree,
-and the resulting `.git` passes `git fsck --strict`.
+**Phases 1–9 complete** — full local stack + smart-HTTPS clone +
+push. zigit can `clone` real public GitHub repos over v2 and `push`
+to any HTTP server running `git http-backend` (including
+authenticated URLs of the form `https://user:token@host/path`).
+Pushed objects pass `git fsck --strict` on the receiver and `git
+log` walks them correctly.
 
 ### Plumbing
 
@@ -39,22 +39,24 @@ and the resulting `.git` passes `git fsck --strict`.
 | `zigit checkout TARGET` | Branch name → switch; commit oid (full or ≥4-char prefix) → detached HEAD |
 | `zigit gc` | Pack all loose objects + loose refs into a single pack + `packed-refs`. Output passes `git fsck --strict` and `git verify-pack` |
 | `zigit clone URL [PATH]` | Read-only smart-HTTPS v2 clone. Active branch lands at `refs/heads/<branch>`, others at `refs/remotes/origin/<branch>` (matching real `git clone`). Work tree is materialised |
+| `zigit push URL [BRANCH]` | Push BRANCH (default = HEAD's branch) to URL via smart-HTTPS receive-pack (v1). URL may embed credentials: `https://user:token@host/path`. Sends only the new objects (computed via reachability closure exclusion). |
 
 ## Build
 
 ```
 zig build              # produces zig-out/bin/zigit
-zig build test         # 58 unit tests
-./tests/parity.sh      # 75 byte-for-byte checks vs real `git`
+zig build test         # 64 unit tests
+./tests/parity.sh      # 83 byte-for-byte checks vs real `git`
 ```
 
 The parity suite includes a network-dependent clone test against
-`https://github.com/octocat/Spoon-Knife`; it self-skips when offline.
+`https://github.com/octocat/Spoon-Knife` (skipped if offline) and a
+local push test that spins up a Python wrapper around
+`git-http-backend` (skipped if Python or git-http-backend isn't
+available).
 
 ## Roadmap
 
-Phase 9 — `push` (smart-HTTPS receive-pack), then merge / rebase
-Phase 5 — `branch` / `switch` / `checkout`
-Phase 6+ — pack files, smart HTTPS, merge/rebase
+Phase 10 — three-way merge + rebase (the actual content stitching)
 
 See the top-level commit messages for design notes per phase.

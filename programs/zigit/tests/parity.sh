@@ -625,6 +625,100 @@ else
     echo -e "  ${DIM}skipping — $CLONE_URL not reachable${NC}"
 fi
 
+# ── Section 16: push — to a local git-http-backend ────────────────────────────
+# Spins up a Python wrapper around `git http-backend` against a bare
+# repo, has zigit push to it, and verifies the bare upstream ends up
+# with the expected ref + a clean `git fsck`. Skips if either Python
+# 3 or git-http-backend isn't on the system.
+echo
+echo "16. push — to local git-http-backend"
+
+GIT_BACKEND="$(git --exec-path 2>/dev/null)/git-http-backend"
+SERVER_PY="$(cd "$(dirname "$0")" && pwd)/git_http_server.py"
+if [ ! -x "$GIT_BACKEND" ] || ! command -v python3 >/dev/null 2>&1 || [ ! -x "$SERVER_PY" ]; then
+    echo -e "  ${DIM}skipping — git-http-backend or python3 missing${NC}"
+else
+    PUSH_DIR="$WORK/push-test"
+    mkdir -p "$PUSH_DIR/bare" "$PUSH_DIR/src"
+
+    # Bare upstream needs http.receivepack to allow pushes.
+    ( cd "$PUSH_DIR/bare" && git init -q --bare && git config http.receivepack true )
+
+    # Source repo with three commits.
+    export TZ=UTC
+    export GIT_AUTHOR_NAME="Push Bot"
+    export GIT_AUTHOR_EMAIL="push@example.com"
+    export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+    export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+
+    ( cd "$PUSH_DIR/src" && "$ZIGIT_BIN" init >/dev/null )
+    for n in 1 2 3; do
+        echo "v$n" > "$PUSH_DIR/src/file.txt"
+        export GIT_AUTHOR_DATE=$((1700000000 + n * 100))
+        export GIT_COMMITTER_DATE=$GIT_AUTHOR_DATE
+        ( cd "$PUSH_DIR/src" && "$ZIGIT_BIN" add file.txt >/dev/null && "$ZIGIT_BIN" commit -m "v$n" >/dev/null )
+    done
+    expected_head=$(cd "$PUSH_DIR/src" && cat .git/refs/heads/main)
+
+    # Bring up the local HTTP server.
+    SERVER_LOG="$PUSH_DIR/server.log"
+    GIT_HTTP_BACKEND="$GIT_BACKEND" GIT_PROJECT_ROOT="$PUSH_DIR/bare" \
+        python3 "$SERVER_PY" 0 > "$SERVER_LOG" 2>&1 &
+    SERVER_PID=$!
+
+    # Wait for the "ready <port>" line.
+    for _ in $(seq 1 20); do
+        if grep -q '^ready ' "$SERVER_LOG" 2>/dev/null; then break; fi
+        sleep 0.1
+    done
+    PORT=$(awk '/^ready /{print $2; exit}' "$SERVER_LOG")
+    if [ -z "$PORT" ]; then
+        kill "$SERVER_PID" 2>/dev/null
+        check "git-http-backend started" "ready" "failed-to-start"
+    else
+        URL="http://127.0.0.1:$PORT"
+
+        # First push: empty bare repo → all 3 commits land.
+        push_out=$(cd "$PUSH_DIR/src" && "$ZIGIT_BIN" push "$URL" main 2>&1)
+        unpack_line=$(echo "$push_out" | grep 'remote: unpack:' | tr -d '\r')
+        ref_line=$(echo "$push_out" | grep 'remote: ok refs/heads/main' | tr -d '\r')
+        check "first push: unpack ok" "  remote: unpack: ok" "$unpack_line"
+        check "first push: ref accepted" "  remote: ok refs/heads/main" "$ref_line"
+
+        # Bare upstream now points at the local oid.
+        bare_head=$(cat "$PUSH_DIR/bare/refs/heads/main" 2>/dev/null)
+        check "bare upstream HEAD matches local" "$expected_head" "$bare_head"
+
+        # git fsck on the bare repo is clean.
+        fsck=$(cd "$PUSH_DIR/bare" && git fsck --strict 2>&1 | grep -v "notice:" || true)
+        check "bare upstream passes git fsck" "" "$fsck"
+
+        # git log on bare matches our history.
+        bare_log=$(cd "$PUSH_DIR/bare" && git log refs/heads/main --oneline)
+        check "bare git log walks 3 commits" "3" "$(echo "$bare_log" | wc -l | tr -d ' ')"
+
+        # Push again with no changes: "Everything up-to-date".
+        upd=$(cd "$PUSH_DIR/src" && "$ZIGIT_BIN" push "$URL" main 2>&1 | tr -d '\r')
+        check "no-op push reports up-to-date" "Everything up-to-date" "$upd"
+
+        # New commit, push again: incremental delta.
+        echo "v4" > "$PUSH_DIR/src/file.txt"
+        GIT_AUTHOR_DATE=1700000400 GIT_COMMITTER_DATE=1700000400 \
+            bash -c "cd '$PUSH_DIR/src' && '$ZIGIT_BIN' add file.txt >/dev/null && '$ZIGIT_BIN' commit -m v4 >/dev/null"
+        push2=$(cd "$PUSH_DIR/src" && "$ZIGIT_BIN" push "$URL" main 2>&1)
+        unpack2=$(echo "$push2" | grep 'remote: unpack:' | tr -d '\r')
+        check "incremental push: unpack ok" "  remote: unpack: ok" "$unpack2"
+        local2=$(cat "$PUSH_DIR/src/.git/refs/heads/main")
+        bare2=$(cat "$PUSH_DIR/bare/refs/heads/main")
+        check "bare upstream HEAD matches after second push" "$local2" "$bare2"
+
+        kill "$SERVER_PID" 2>/dev/null
+        wait "$SERVER_PID" 2>/dev/null
+    fi
+
+    unset TZ GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo
 TOTAL=$((PASS + FAIL))
