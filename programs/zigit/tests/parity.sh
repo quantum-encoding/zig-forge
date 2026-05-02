@@ -1103,9 +1103,88 @@ case "$parser_check" in
     *) check "git parses zigit-written config" "ok" "$parser_check" ;;
 esac
 
-# ── Section 23: credentials + URL classification (Phase 15 partial) ───────────
+# ── Section 23: deltify — gc emits OFS_DELTA chains git can verify ────────────
 echo
-echo "23. credentials + URL classification"
+echo "23. deltify — gc emits OFS_DELTA chains"
+DT="$WORK/deltify-test"
+mkdir -p "$DT"
+( cd "$DT" && "$ZIGIT_BIN" init >/dev/null )
+
+export TZ=UTC
+export GIT_AUTHOR_NAME="Delta Bot"
+export GIT_AUTHOR_EMAIL="delta@example.com"
+export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+
+# Create 5 nearly-identical, large blobs so deltification has plenty
+# of common substrings to chew on. Each commit changes only ~1% of
+# the bytes — well under the 70% acceptance threshold the planner uses.
+BIG=""
+for i in $(seq 1 200); do
+    BIG="${BIG}line ${i}: the quick brown fox jumps over the lazy dog 0123456789ABCDEF
+"
+done
+
+for n in 1 2 3 4 5; do
+    {
+        printf '%s' "$BIG"
+        printf 'rev marker for revision %d\n' "$n"
+    } > "$DT/big.txt"
+    export GIT_AUTHOR_DATE=$((1700000000 + n * 100))
+    export GIT_COMMITTER_DATE=$GIT_AUTHOR_DATE
+    ( cd "$DT" && "$ZIGIT_BIN" add big.txt >/dev/null && "$ZIGIT_BIN" commit -m "v$n" >/dev/null )
+done
+
+( cd "$DT" && "$ZIGIT_BIN" gc >/dev/null )
+
+# git verify-pack -v output: delta lines have ≥ 7 whitespace-separated
+# fields (sha-1, type, size, packfile-size, offset, depth, base-sha-1);
+# non-delta lines have 5.
+verify_log=$(cd "$DT" && git verify-pack -v "$DT"/.git/objects/pack/pack-*.idx 2>&1)
+delta_count=$(printf '%s\n' "$verify_log" | awk '$2 == "blob" && NF >= 7 { c++ } END { print c+0 }')
+case "$delta_count" in
+    0) check "gc deltified at least one blob" "≥1" "0 (none deltified)" ;;
+    *) check "gc deltified at least one blob" "≥1" "≥1" ;;
+esac
+
+# verify-pack ends with "<sha>: ok".
+verify_tail=$(printf '%s\n' "$verify_log" | tail -1)
+case "$verify_tail" in
+    *": ok"*) check "git verify-pack ok on deltified pack" "ok" "ok" ;;
+    *)        check "git verify-pack ok on deltified pack" "ok" "$verify_tail" ;;
+esac
+
+# Pack must be smaller than the sum of unpacked blob sizes — sanity
+# check that deltification actually saved bytes.
+pack_size=$(stat -f %z "$DT"/.git/objects/pack/pack-*.pack 2>/dev/null || stat -c %s "$DT"/.git/objects/pack/pack-*.pack)
+big_size=$(wc -c < "$DT/big.txt" | tr -d ' ')
+# 5 commits × ~big_size of blob alone; with deltas the pack should be
+# well under the raw blob × commit_count.
+threshold=$((big_size * 3))   # roughly 3× as a generous ceiling
+case "$pack_size" in
+    *) if [ "$pack_size" -lt "$threshold" ]; then
+           check "deltified pack smaller than 3× single blob" "ok" "ok"
+       else
+           check "deltified pack smaller than 3× single blob" "ok" "$pack_size ≥ $threshold"
+       fi ;;
+esac
+
+# zigit can still read every commit/tree/blob via PackStore (delta resolution).
+zigit_log=$(cd "$DT" && "$ZIGIT_BIN" log | grep -c '^commit ')
+check "zigit reads back deltified pack" "5" "$zigit_log"
+
+# Round-trip via git: clone the deltified pack into a fresh repo and
+# verify HEAD walks all 5 commits.
+DCLONE="$WORK/deltify-clone"
+git clone -q "$DT" "$DCLONE" 2>/dev/null
+clone_log=$(cd "$DCLONE" && git log --oneline | wc -l | tr -d ' ')
+check "git clone of deltified pack walks 5 commits" "5" "$clone_log"
+
+unset TZ GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
+
+# ── Section 24: credentials + URL classification (Phase 15 partial) ───────────
+echo
+echo "24. credentials + URL classification"
 
 # (a) ssh:// URLs are classified at clone time and rejected with a
 #     specific message rather than a cryptic HTTP fetch failure.

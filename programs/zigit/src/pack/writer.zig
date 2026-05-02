@@ -24,6 +24,7 @@
 const std = @import("std");
 const Kind = @import("../object/kind.zig").Kind;
 const Oid = @import("../object/oid.zig").Oid;
+const ObjType = @import("pack.zig").ObjType;
 
 pub const Entry = struct {
     oid: Oid,
@@ -78,7 +79,7 @@ pub const PackWriter = struct {
         // Track CRC32 over header + compressed payload by remembering
         // the start position and hashing the bytes we just appended at
         // the end.
-        try writeObjectHeader(&self.body.writer, kind, payload.len);
+        try writeObjectHeader(&self.body.writer, ObjType.fromKind(kind), payload.len);
 
         // zlib-deflate payload directly into our body buffer.
         var window: [std.compress.flate.max_window_len]u8 = undefined;
@@ -89,6 +90,44 @@ pub const PackWriter = struct {
             .default,
         );
         try compress.writer.writeAll(payload);
+        try compress.finish();
+
+        const end_offset: u64 = self.body.written().len;
+        const compressed_slice = self.body.written()[@intCast(start_offset)..@intCast(end_offset)];
+        const crc = std.hash.crc.Crc32.hash(compressed_slice);
+
+        const entry: Entry = .{ .oid = oid, .offset = start_offset, .crc32 = crc };
+        try self.entries.append(self.allocator, entry);
+        self.object_count += 1;
+        return entry;
+    }
+
+    /// Append an OFS_DELTA object. `base_offset` must be the absolute
+    /// pack offset of an entry that's already been written (the spec
+    /// requires the base to come earlier in the pack so resolution
+    /// can stream linearly). `delta_payload` is the raw, uncompressed
+    /// delta-instruction stream — we zlib-compress it ourselves.
+    pub fn addOfsDelta(
+        self: *PackWriter,
+        oid: Oid,
+        base_offset: u64,
+        delta_payload: []const u8,
+    ) !Entry {
+        if (self.object_count >= self.expected_count) return error.TooManyObjects;
+        const start_offset: u64 = self.body.written().len;
+        if (base_offset >= start_offset) return error.OfsDeltaBaseNotEarlier;
+
+        try writeObjectHeader(&self.body.writer, .ofs_delta, delta_payload.len);
+        try writeOfsBackref(&self.body.writer, start_offset - base_offset);
+
+        var window: [std.compress.flate.max_window_len]u8 = undefined;
+        var compress = try std.compress.flate.Compress.init(
+            &self.body.writer,
+            &window,
+            .zlib,
+            .default,
+        );
+        try compress.writer.writeAll(delta_payload);
         try compress.finish();
 
         const end_offset: u64 = self.body.written().len;
@@ -119,13 +158,8 @@ pub const PackWriter = struct {
     }
 };
 
-fn writeObjectHeader(w: *std.Io.Writer, kind: Kind, size: usize) !void {
-    const type_bits: u8 = switch (kind) {
-        .commit => 1,
-        .tree => 2,
-        .blob => 3,
-        .tag => 4,
-    };
+fn writeObjectHeader(w: *std.Io.Writer, kind: ObjType, size: usize) !void {
+    const type_bits: u8 = @intFromEnum(kind);
 
     const low4: u8 = @intCast(size & 0x0f);
     var remaining: u64 = @as(u64, size) >> 4;
@@ -138,6 +172,33 @@ fn writeObjectHeader(w: *std.Io.Writer, kind: Kind, size: usize) !void {
         remaining >>= 7;
         if (remaining > 0) b |= 0x80;
         try w.writeByte(b);
+    }
+}
+
+/// Encode the OFS_DELTA negative offset. The wire encoding is the
+/// inverse of `Pack.readOfsDelta`: bytes are emitted MSB-first; each
+/// continuation byte (high bit set) implicitly adds 1 << 7N to the
+/// value during decoding, which we compensate for by subtracting 1
+/// after every right-shift here.
+fn writeOfsBackref(w: *std.Io.Writer, distance: u64) !void {
+    if (distance == 0) return error.OfsDeltaZeroDistance;
+    var buf: [10]u8 = undefined;
+    var n: usize = 0;
+    var v = distance;
+    buf[n] = @intCast(v & 0x7f);
+    n += 1;
+    v >>= 7;
+    while (v != 0) {
+        v -= 1;
+        buf[n] = @intCast(0x80 | (v & 0x7f));
+        n += 1;
+        v >>= 7;
+    }
+    // Emit in reverse (high-byte first).
+    var i: usize = n;
+    while (i > 0) {
+        i -= 1;
+        try w.writeByte(buf[i]);
     }
 }
 
@@ -183,4 +244,70 @@ test "writer rejects underfill on finish" {
     @memset(&oid.bytes, 0);
     _ = try w.addObject(oid, .blob, "x");
     try testing.expectError(error.WrongObjectCount, w.finish());
+}
+
+test "writeOfsBackref round-trips via Pack.readOfsDelta" {
+    const Pack = @import("pack.zig").Pack;
+    const cases = [_]u64{ 1, 64, 127, 128, 200, 16_383, 16_384, 1_000_000 };
+    for (cases) |distance| {
+        var bytes: std.Io.Writer.Allocating = try .initCapacity(testing.allocator, 32);
+        defer bytes.deinit();
+        // Fake a pack: dummy header + the back-ref; readOfsDelta only
+        // touches the back-ref bytes anyway.
+        try bytes.writer.writeAll("PACK");
+        try bytes.writer.writeInt(u32, 2, .big);
+        try bytes.writer.writeInt(u32, 0, .big);
+        const backref_start = bytes.written().len;
+        try writeOfsBackref(&bytes.writer, distance);
+
+        // Pack.readOfsDelta needs a 20-byte trailer to satisfy parse(),
+        // but we'll call it on raw bytes via a hand-built Pack instead.
+        const pack: Pack = .{ .bytes = bytes.written(), .object_count = 0 };
+        // entry_start must be ≥ distance to avoid OfsDeltaOutOfRange.
+        const entry_start = distance + 100;
+        const got = try pack.readOfsDelta(backref_start, entry_start);
+        try testing.expectEqual(entry_start - distance, got.base_offset);
+    }
+}
+
+test "addOfsDelta round-trip: writer → index_pack reads back deltified payload" {
+    const allocator = testing.allocator;
+    const index_pack = @import("index_pack.zig");
+
+    const base_payload = "the quick brown fox jumps over the lazy dog 0123456789";
+    const target_payload = "the quick brown fox jumps over the lazy cat 0123456789";
+
+    // Compute oids for the test (use the same hashing the runtime would).
+    const computeOid = struct {
+        fn run(kind_bytes: []const u8, payload: []const u8) Oid {
+            var hasher = std.crypto.hash.Sha1.init(.{});
+            var hdr_buf: [32]u8 = undefined;
+            const hdr = std.fmt.bufPrint(&hdr_buf, "{s} {d}\x00", .{ kind_bytes, payload.len }) catch unreachable;
+            hasher.update(hdr);
+            hasher.update(payload);
+            var bytes: [20]u8 = undefined;
+            hasher.final(&bytes);
+            return .{ .bytes = bytes };
+        }
+    }.run;
+
+    const base_oid = computeOid("blob", base_payload);
+    const target_oid = computeOid("blob", target_payload);
+
+    var w = try PackWriter.init(allocator, 2);
+    defer w.deinit();
+    const base_entry = try w.addObject(base_oid, .blob, base_payload);
+
+    const deltify = @import("deltify.zig");
+    const delta_bytes = try deltify.encode(allocator, base_payload, target_payload);
+    defer allocator.free(delta_bytes);
+    _ = try w.addOfsDelta(target_oid, base_entry.offset, delta_bytes);
+
+    const finished = try w.finish();
+    defer allocator.free(finished.pack_bytes);
+
+    // index_pack must resolve the OFS_DELTA and re-derive the same oids.
+    const result = try index_pack.build(allocator, finished.pack_bytes);
+    defer allocator.free(result.idx_bytes);
+    try testing.expectEqual(@as(u32, 2), result.object_count);
 }

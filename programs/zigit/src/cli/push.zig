@@ -130,14 +130,41 @@ pub fn run(allocator: std.mem.Allocator, io: Io, environ: std.process.Environ, a
         // accept or reject.
     }
 
-    // Build the pack.
-    var pack_w = try zigit.pack.PackWriter.init(allocator, @intCast(to_send.oids.len));
-    defer pack_w.deinit();
-
+    // Load every payload up-front so the deltify planner can compare
+    // bytes between candidates. This costs RAM but is the same shape
+    // of work `git pack-objects` does pre-deltify.
+    var loaded_payloads: std.ArrayListUnmanaged(zigit.object.LoadedObject) = .empty;
+    defer {
+        for (loaded_payloads.items) |*lp| lp.deinit(allocator);
+        loaded_payloads.deinit(allocator);
+    }
+    try loaded_payloads.ensureTotalCapacityPrecise(allocator, to_send.oids.len);
     for (to_send.oids) |o| {
-        var loaded = try store.read(allocator, o);
-        defer loaded.deinit(allocator);
-        _ = try pack_w.addObject(o, loaded.kind, loaded.payload);
+        const loaded = try store.read(allocator, o);
+        loaded_payloads.appendAssumeCapacity(loaded);
+    }
+
+    const planner_objects = try allocator.alloc(zigit.pack.deltify.Object, to_send.oids.len);
+    defer allocator.free(planner_objects);
+    for (to_send.oids, loaded_payloads.items, 0..) |o, lp, i| planner_objects[i] = .{
+        .oid = o,
+        .kind = lp.kind,
+        .payload = lp.payload,
+    };
+    const ops = try zigit.pack.deltify.plan(allocator, planner_objects);
+    defer zigit.pack.deltify.freePlan(allocator, ops);
+
+    // Build the pack.
+    var pack_w = try zigit.pack.PackWriter.init(allocator, @intCast(ops.len));
+    defer pack_w.deinit();
+    const op_offsets = try allocator.alloc(u64, ops.len);
+    defer allocator.free(op_offsets);
+    for (ops, 0..) |op, i| {
+        const e = switch (op) {
+            .raw => |r| try pack_w.addObject(r.oid, r.kind, r.payload),
+            .delta => |d| try pack_w.addOfsDelta(d.oid, op_offsets[d.base_op_index], d.delta_bytes),
+        };
+        op_offsets[i] = e.offset;
     }
     const finished = try pack_w.finish();
     defer allocator.free(finished.pack_bytes);

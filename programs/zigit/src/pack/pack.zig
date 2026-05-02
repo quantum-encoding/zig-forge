@@ -40,6 +40,15 @@ pub const ObjType = enum(u3) {
     pub fn isDelta(self: ObjType) bool {
         return self == .ofs_delta or self == .ref_delta;
     }
+
+    pub fn fromKind(kind: @import("../object/kind.zig").Kind) ObjType {
+        return switch (kind) {
+            .commit => .commit,
+            .tree => .tree,
+            .blob => .blob,
+            .tag => .tag,
+        };
+    }
 };
 
 pub const Pack = struct {

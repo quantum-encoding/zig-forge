@@ -67,28 +67,51 @@ pub fn run(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !void
         return;
     }
 
-    // ── 2. Sort by oid for the pack/idx ───────────────────────────────
-    std.mem.sort(StagedObject, staged.items, {}, struct {
-        fn lt(_: void, a: StagedObject, b: StagedObject) bool {
-            return std.mem.order(u8, &a.oid.bytes, &b.oid.bytes) == .lt;
-        }
-    }.lt);
+    // ── 2. Plan the pack write order — deltify same-kind objects when
+    //     a delta is < 70% of the raw payload size (Phase 16). The
+    //     planner returns ops in pack-write order: each delta's base
+    //     is guaranteed to come earlier in the slice.
+    const planner_objects = try allocator.alloc(zigit.pack.deltify.Object, staged.items.len);
+    defer allocator.free(planner_objects);
+    for (staged.items, 0..) |s, i| planner_objects[i] = .{
+        .oid = s.oid,
+        .kind = s.kind,
+        .payload = s.payload,
+    };
+    const ops = try zigit.pack.deltify.plan(allocator, planner_objects);
+    defer zigit.pack.deltify.freePlan(allocator, ops);
 
     // ── 3. Build the pack ─────────────────────────────────────────────
-    var pack_w = try zigit.pack.PackWriter.init(allocator, @intCast(staged.items.len));
+    var pack_w = try zigit.pack.PackWriter.init(allocator, @intCast(ops.len));
     defer pack_w.deinit();
 
     var entries: std.ArrayListUnmanaged(zigit.pack.PackEntry) = .empty;
     defer entries.deinit(allocator);
-    try entries.ensureTotalCapacityPrecise(allocator, staged.items.len);
-    for (staged.items) |obj| {
-        const e = try pack_w.addObject(obj.oid, obj.kind, obj.payload);
+    try entries.ensureTotalCapacityPrecise(allocator, ops.len);
+
+    // Per-op pack offset, for resolving delta base references later
+    // in the loop.
+    const op_offsets = try allocator.alloc(u64, ops.len);
+    defer allocator.free(op_offsets);
+
+    for (ops, 0..) |op, i| {
+        const e = switch (op) {
+            .raw => |r| try pack_w.addObject(r.oid, r.kind, r.payload),
+            .delta => |d| try pack_w.addOfsDelta(d.oid, op_offsets[d.base_op_index], d.delta_bytes),
+        };
+        op_offsets[i] = e.offset;
         entries.appendAssumeCapacity(e);
     }
     const finished = try pack_w.finish();
     defer allocator.free(finished.pack_bytes);
 
     // ── 4. Build the idx ──────────────────────────────────────────────
+    // The pack carries entries in write order; the idx must be sorted by oid.
+    std.mem.sort(zigit.pack.PackEntry, entries.items, {}, struct {
+        fn lt(_: void, a: zigit.pack.PackEntry, b: zigit.pack.PackEntry) bool {
+            return std.mem.order(u8, &a.oid.bytes, &b.oid.bytes) == .lt;
+        }
+    }.lt);
     const idx_bytes = try zigit.pack.idx_writer.build(allocator, entries.items, finished.pack_oid);
     defer allocator.free(idx_bytes);
 
