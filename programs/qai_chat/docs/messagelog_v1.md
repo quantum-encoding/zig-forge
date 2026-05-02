@@ -47,7 +47,20 @@ pub const MessageLog = struct {
     pub fn currentTurnSeq(self: *const Self) u32;
 };
 
-pub const Address = struct { turn_seq: u32, block_index: u32, char_offset: u32 };
+pub const Address = struct {
+    /// User-typed text (rendered by `beginUserTurn`) and assistant blocks
+    /// share the (turn_seq, block_index) namespace. `kind` keeps them
+    /// distinguishable so selection and hit-test work cleanly across
+    /// the boundary. Provider event indices start at 0; user messages
+    /// don't conflict because `kind` discriminates first.
+    kind: enum { user, assistant },
+    turn_seq: u32,
+    block_index: u32,
+    /// Offset within the addressed text, measured in **codepoints** (not
+    /// bytes, not cells). Bytes break on UTF-8 edits; cells break on
+    /// rewrap. Codepoints are stable across both.
+    char_offset: u32,
+};
 pub const Selection = struct { anchor: Address, head: Address };
 ```
 
@@ -55,6 +68,36 @@ The seam: bridge knows nothing about blocks, heights, or scroll state.
 MessageLog is the only place those concepts exist. This lets us swap
 rendering implementations later (e.g. a `gpu/` variant for `wezterm`'s
 sixel mode) without touching the streaming layer.
+
+### Error semantics
+
+All fallible methods (`!void`) can fail with `OutOfMemory` — allocating
+a new block or growing an internal buffer. The bridge treats any
+`apply()` error as **fatal-to-turn**:
+
+1. Call `cancel(turn_seq)` to mark any in-progress blocks as
+   `cancelled` (not `failed` — that state is reserved for
+   provider-side errors carried in `Done{error}`).
+2. Surface the underlying error to the user via the status bar (e.g.
+   `[err] OutOfMemory in turn 47`).
+3. Stop forwarding events for that turn; subsequent events for the
+   same `turn_seq` are dropped silently.
+
+The next `beginUserTurn` advances normally. The user's session is
+not poisoned; only the failed turn is.
+
+### Idempotency on replay
+
+`apply()` MUST be idempotent. Live streaming never duplicates events,
+but **resume from JSONL** after a crash-mid-fsync may deliver the
+same event twice. Implementation guards every state mutation with a
+per-block sequence position so re-applying a previously-seen
+`(turn_seq, block_index, event_kind, position)` is a no-op.
+
+`cancel()` is also idempotent (declared above). `beginUserTurn` is
+not — duplicate calls advance `turn_seq` and create a new turn. The
+replay path is responsible for not re-issuing `beginUserTurn` for
+already-replayed turns; the JSONL header carries the count.
 
 ## 2. Block lifecycle
 
@@ -69,27 +112,40 @@ const BlockState = enum {
 };
 ```
 
-Visual treatment:
+Visual treatment is delegated to `theme.zig` (a separate module
+created with milestone 1). The contract requires only that each
+non-`complete`, non-`streaming` state has:
 
-| State        | Treatment                                                         |
-|--------------|-------------------------------------------------------------------|
-| `streaming`  | active cursor at tail; no border decoration                       |
-| `complete`   | normal rendering                                                  |
-| `cancelled`  | dim left-edge marker `┊`; trailing `… [cancelled]` row            |
-| `failed`     | red left-edge marker `┊`; trailing `[error: <stop_reason>]` row   |
+- A **distinguishing left-edge marker** visible in the gutter.
+- A **trailing status row** identifying the state (and reason where
+  applicable, e.g. `Done.error.message`).
 
-The `Done{cancelled}` rule from the cancel discussion: the consumer
-stops draining new `text_delta`s the moment cancel is signalled but
-keeps draining structural events so blocks finalize cleanly. Any block
-still in `streaming` when `Done{cancelled}` arrives transitions to
-`cancelled`, NOT `complete`. The user always sees the difference
-between "model finished" and "I cancelled mid-thought."
+The contract makes no commitment on glyph, color, or exact wording —
+those evolve with the theme without revising the API.
+
+### `Done` synthesis attribution
+
+The **bridge** translates `message_stop` into `Done{complete}` and
+forwards both to MessageLog. **Providers never emit `Done` directly.**
+This matters for the FakeProvider fixture format (prereqs PR):
+fixtures author `message_stop` events; the FakeProvider's bridge
+wrapper synthesises the corresponding `Done{complete}` after each
+`message_stop`. Cancel and error fixtures drive `Done{cancelled}` /
+`Done{error}` through their own paths, never through provider data.
+
+### Cancel and error paths
+
+The consumer stops draining new `text_delta`s the moment cancel is
+signalled but keeps draining structural events so blocks finalize
+cleanly. Any block still in `streaming` when `Done{cancelled}` arrives
+transitions to `cancelled`, NOT `complete`. The user always sees the
+difference between "model finished" and "I cancelled mid-thought."
 
 `message_stop` stays sacred — only fires on real provider-side stop.
 The new `Done` variant carries the cancel/error path. Both can arrive
 in the same turn: provider says `message_stop` (token usage banked) and
-then we synthesise `Done{complete}` to formally close the turn for the
-MessageLog. On cancel, no `message_stop` ever arrives — only `Done{cancelled}`.
+then the bridge synthesises `Done{complete}`. On cancel, no
+`message_stop` ever arrives — only `Done{cancelled}`.
 
 ## 3. Height cache invariants
 
@@ -125,6 +181,9 @@ Two modes:
 - **free** — user has scrolled up. Streaming continues but viewport
   stays put.
 
+**Initial mode is `anchored`** — set in MessageLog's constructor;
+preserved across `/clear`.
+
 Transitions:
 
 - **anchored → free**: any upward scroll input (PgUp, Up arrow with
@@ -148,8 +207,13 @@ visible. Cancellation does not change mode.
 - A **cancelled turn keeps its seq.** The next `beginUserTurn` gets
   seq+1. Resume from disk replays seqs in order; gaps would indicate
   a corrupt log, not a deleted turn.
-- Per-block address: `(turn_seq, block_index)`. Used as the key for
-  the height cache, hit-test results, and selection anchors.
+- Full block address: `Address { kind, turn_seq, block_index, char_offset }`
+  (defined in §1). User-typed text (one block per turn, `kind = .user`)
+  shares the `(turn_seq, block_index)` namespace with assistant blocks
+  (`kind = .assistant`); `kind` is the discriminator. Used for the
+  height cache, hit-test results, and selection anchors.
+- User-message blocks always have `block_index = 0`. Multi-block user
+  inputs (e.g. attached files) are out of scope for v1.
 
 ## 6. Selection
 
@@ -173,14 +237,31 @@ can include selection-driven test cases without API churn.
 ## 7. Event log retention
 
 The MessageLog holds an in-memory log of every `StreamEvent` plus user
-inputs as `LogEntry { kind: enum { user, event }, turn_seq: u32, payload }`.
+inputs as:
+
+```zig
+pub const LogEntry = struct {
+    /// Wall-clock time the entry was created (unix milliseconds).
+    /// Bridge stamps this in `apply()` and `beginUserTurn`. Required
+    /// for resume from multi-day sessions, "X minutes ago" hints in
+    /// the UI, and any future analytics. Retrofitting JSONL to add
+    /// a timestamp later is annoying because old logs lack it — pay
+    /// the 8 bytes per entry now.
+    ts: i64,
+    kind: enum { user, event },
+    turn_seq: u32,
+    payload: union(enum) { text: []const u8, event: hs.ai.common.StreamEvent, done: Done },
+};
+```
 
 **v1: unbounded.** Sessions don't run long enough in normal use to hit
 memory pressure, and we want real workload data before optimising.
 
-**Known-issue / metric.** When `LogEntry` count exceeds ~50k or
-total size exceeds ~100 MB (whichever first), we add a ring buffer +
-spillover-to-disk. That's a future PR, not v1.
+The bounded design — ring buffer, spillover-to-disk, on-demand reload
+on scrollback — **lands with the virtualization PR.** Eviction policy
+and on-demand-reload are coupled to the rendering work that decides
+which entries are needed live; deciding either in isolation would
+half-lock a design without the data to validate it.
 
 **Architectural decision (lock now to avoid retrofits later):**
 when session persistence lands — and it will — **disk is the source of
@@ -194,8 +275,6 @@ truth; in-memory log is a cache.** Concretely:
 - The auto-save markdown at `~/.qai/projects/<cwd>/<ts>-<provider>.md`
   remains a human-readable snapshot, generated by walking history at
   exit. It is not the source of truth.
-- The in-memory log is rebuildable from disk; on memory pressure, drop
-  the oldest entries first and reload them from JSONL on scrollback.
 
 The decision we are deliberately NOT making: "in-memory is truth, disk
 is backup." That's a different architecture and it doesn't scale to
@@ -203,9 +282,31 @@ multi-day sessions.
 
 In v1, only the in-memory side exists. The JSONL tee lands in a later
 PR — but the bridge contract permits it without redesign because every
-event passing into `apply()` is exactly what would be teed.
+event passing into `apply()` is exactly what would be teed, with `ts`
+already populated.
 
-## 8. Out of scope (per gradient-deferred-per-PR)
+## 8. Initial state
+
+Before any `beginUserTurn` has been called:
+
+| Query                  | Returns / shows                                      |
+|------------------------|------------------------------------------------------|
+| `currentTurnSeq()`     | `0`                                                  |
+| `isAnchored()`         | `true`                                               |
+| `renderInto()`         | The welcome card (header + subtitle + recent-changes lines), centred or top-anchored per theme. |
+| `hitTest()`            | `null` (welcome card is not addressable).            |
+
+The welcome card is a render-mode entered when the in-memory log is
+empty. It is **not** a `LogEntry` — it has no `Address`, doesn't
+advance `turn_seq`, and isn't teed to JSONL. The first `beginUserTurn`
+exits the mode permanently for that session; subsequent `/clear`
+re-enters it (history reset already drains the log).
+
+Welcome card content lives in `theme.zig` (or a sibling `welcome.zig`
+under `src/tui/`). The contract here only specifies that an empty log
+renders something other than a blank screen.
+
+## 9. Out of scope (per gradient-deferred-per-PR)
 
 The following each get their own scoping doc when the PR is queued:
 
@@ -234,17 +335,33 @@ defined in §1.
    MessageLog. The single `apply()` entry point makes that mechanically
    awkward and review-flaggable.
 2. Cancellation that loses the difference between "model finished" and
-   "user aborted." Explicit `cancelled` block state + dim marker.
+   "user aborted." Explicit `cancelled` block state with theme-defined
+   distinguishing marker.
 3. Surprising auto-scroll back to bottom during streaming bursts.
    Explicit `Ctrl+End` only.
-4. Speculative MPSC plumbing. The keying is `(turn_seq, block_index)`;
-   parallel sources later widen `block_index` to a discriminator
-   without changing the API.
+4. Speculative MPSC plumbing. The keying is `(kind, turn_seq, block_index)`;
+   parallel sources later widen the discriminator without changing the API.
 5. Premature markdown / code / tool-call abstractions. The plain-text
    v1 surface is small enough to be obviously correct.
 6. Architectural drift between "memory is truth" and "disk is truth"
    for sessions. The decision is locked now, even though only memory
    exists in v1.
+7. Bridge-side OOM corrupting MessageLog state across turn boundaries.
+   `apply()`-error contract isolates failures to a single turn via
+   `cancel()`; the next `beginUserTurn` advances cleanly.
+8. Replay-from-JSONL silently double-applying events on crash recovery.
+   `apply()` is required to be idempotent on duplicate
+   `(turn_seq, block_index, event_kind, position)` tuples.
+9. Selection ambiguity across user/assistant boundaries. `Address.kind`
+   discriminates; selection across the boundary is a normal
+   `Selection { anchor.kind=user, head.kind=assistant }`.
+10. UTF-8/cell/codepoint confusion in selection offsets. `char_offset`
+    is codepoints, locked in §1.
+11. Welcome card pollution of the event log. Initial-state render is
+    out-of-band; it has no `Address` and never tees to JSONL.
+12. Theme/visual lock-in via the contract doc. All glyphs and wording
+    delegated to `theme.zig`; the contract speaks only of "marker"
+    and "status row."
 
 ## Open questions
 
