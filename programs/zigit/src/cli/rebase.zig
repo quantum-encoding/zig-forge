@@ -68,6 +68,7 @@ pub fn run(
     if (base_oid.eql(tip)) {
         try File.stdout().writeStreamingAll(io, "Current branch is already an ancestor of onto — fast-forwarding.\n");
         try checkoutAndMove(allocator, io, &repo, &store, current_full, onto);
+        try logRebase(allocator, io, environ, &repo, current_full, tip, onto, onto_branch);
         return;
     }
     if (base_oid.eql(onto)) {
@@ -122,11 +123,30 @@ pub fn run(
 
     // Now atomically move the branch + materialise the new tip.
     try checkoutAndMove(allocator, io, &repo, &store, current_full, new_tip);
+    try logRebase(allocator, io, environ, &repo, current_full, tip, new_tip, onto_branch);
 
     var hex: [40]u8 = undefined;
     new_tip.toHex(&hex);
     const done = try std.fmt.bufPrint(&msg_buf, "Rebased to {s}\n", .{hex[0..7]});
     try File.stdout().writeStreamingAll(io, done);
+}
+
+fn logRebase(
+    allocator: std.mem.Allocator,
+    io: Io,
+    environ: std.process.Environ,
+    repo: *zigit.Repository,
+    current_ref: []const u8,
+    old_tip: zigit.Oid,
+    new_tip: zigit.Oid,
+    onto_branch: []const u8,
+) !void {
+    const id = try zigit.reflog.identityFromEnviron(allocator, io, environ, repo.git_dir);
+    defer zigit.reflog.deinitIdentity(allocator, id);
+    const ts = try zigit.reflog.timestampFromEnviron(io, environ);
+    var buf: [256]u8 = undefined;
+    const msg = try std.fmt.bufPrint(&buf, "rebase finished: returning to {s}", .{onto_branch});
+    try zigit.reflog.logUpdate(allocator, io, repo.git_dir, current_ref, old_tip, new_tip, id, ts, msg);
 }
 
 /// Cherry-pick `commit_oid` (whose original parent's tree is the

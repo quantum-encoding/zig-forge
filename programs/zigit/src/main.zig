@@ -34,6 +34,8 @@ const reset_cmd = @import("cli/reset.zig");
 const tag_cmd = @import("cli/tag.zig");
 const stash_cmd = @import("cli/stash.zig");
 const remote_cmd = @import("cli/remote.zig");
+const reflog_cmd = @import("cli/reflog.zig");
+const prune_cmd = @import("cli/prune.zig");
 
 const usage =
     \\zigit — git in zig
@@ -68,6 +70,8 @@ const usage =
     \\  tag [-d] [NAME [COMMIT]]                      List, create, or delete lightweight tags
     \\  stash <push|list|pop|drop> [args]             Save/restore work-tree state
     \\  remote [-v|add|remove|show] [args]            Manage [remote "..."] entries
+    \\  reflog [show [REF]]                           Show reflog (default HEAD)
+    \\  prune [--dry-run]                             Delete unreferenced loose objects
     \\
 ;
 
@@ -122,7 +126,7 @@ pub fn main(init: std.process.Init) !void {
         // The conflict-message has already been printed by switch
         // itself; we just want a clean exit code without Zig's
         // default error-trace dump.
-        switch_cmd.run(allocator, io, rest) catch |err| switch (err) {
+        switch_cmd.run(allocator, io, environ, rest) catch |err| switch (err) {
             error.WouldLoseChanges => std.process.exit(1),
             else => return err,
         };
@@ -165,12 +169,22 @@ pub fn main(init: std.process.Init) !void {
             else => return err,
         };
     } else if (std.mem.eql(u8, cmd, "reset")) {
-        try reset_cmd.run(allocator, io, rest);
+        try reset_cmd.run(allocator, io, environ, rest);
     } else if (std.mem.eql(u8, cmd, "tag")) {
         try tag_cmd.run(allocator, io, rest);
     } else if (std.mem.eql(u8, cmd, "stash")) {
         stash_cmd.run(allocator, io, environ, rest) catch |err| switch (err) {
             error.StashConflict => std.process.exit(1),
+            else => return err,
+        };
+    } else if (std.mem.eql(u8, cmd, "prune")) {
+        try prune_cmd.run(allocator, io, rest);
+    } else if (std.mem.eql(u8, cmd, "reflog")) {
+        reflog_cmd.run(allocator, io, rest) catch |err| switch (err) {
+            error.NoReflogForRef => {
+                try writeAll(io, .stderr, "zigit reflog: no reflog for that ref\n");
+                std.process.exit(1);
+            },
             else => return err,
         };
     } else if (std.mem.eql(u8, cmd, "remote")) {

@@ -66,7 +66,7 @@ pub fn run(
     }
 
     if (base_oid.eql(ours)) {
-        try fastForward(allocator, io, &repo, &store, current_full, theirs);
+        try fastForward(allocator, io, environ, &repo, &store, current_full, ours, theirs, branch);
         return;
     }
 
@@ -76,10 +76,13 @@ pub fn run(
 fn fastForward(
     allocator: std.mem.Allocator,
     io: Io,
+    environ: std.process.Environ,
     repo: *zigit.Repository,
     store: *zigit.LooseStore,
     current_ref: []const u8,
+    old_tip: zigit.Oid,
     new_tip: zigit.Oid,
+    source_branch: []const u8,
 ) !void {
     // Move the ref + materialise — same path switch uses, but we
     // already know there's nothing to refuse.
@@ -89,6 +92,16 @@ fn fastForward(
     try zigit.worktree.applyTree(allocator, io, work_root, store, target_tree);
 
     try zigit.refs.update(io, repo.git_dir, current_ref, new_tip);
+
+    // Reflog: real git writes "merge SOURCE: Fast-forward".
+    {
+        const id = try zigit.reflog.identityFromEnviron(allocator, io, environ, repo.git_dir);
+        defer zigit.reflog.deinitIdentity(allocator, id);
+        const ts = try zigit.reflog.timestampFromEnviron(io, environ);
+        var rmsg_buf: [256]u8 = undefined;
+        const rmsg = try std.fmt.bufPrint(&rmsg_buf, "merge {s}: Fast-forward", .{source_branch});
+        try zigit.reflog.logUpdate(allocator, io, repo.git_dir, current_ref, old_tip, new_tip, id, ts, rmsg);
+    }
 
     var hex: [40]u8 = undefined;
     new_tip.toHex(&hex);
@@ -260,6 +273,13 @@ fn threeWay(
     const commit_oid = zigit.object.computeOid(.commit, payload);
     try store.write(allocator, .commit, payload, commit_oid);
     try zigit.refs.update(io, repo.git_dir, current_ref, commit_oid);
+
+    {
+        const id: zigit.reflog.Identity = .{ .name = author_name, .email = author_email };
+        var rmsg_buf: [256]u8 = undefined;
+        const rmsg = try std.fmt.bufPrint(&rmsg_buf, "merge {s}: Merge made by the recursive strategy.", .{branch_short});
+        try zigit.reflog.logUpdate(allocator, io, repo.git_dir, current_ref, ours, commit_oid, id, author_when, rmsg);
+    }
 
     var hex: [40]u8 = undefined;
     commit_oid.toHex(&hex);

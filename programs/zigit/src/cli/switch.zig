@@ -34,7 +34,7 @@ const heads_dir = "refs/heads";
 const PathOid = struct { mode: u32, oid: zigit.Oid };
 const PathMap = std.StringHashMapUnmanaged(PathOid);
 
-pub fn run(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !void {
+pub fn run(allocator: std.mem.Allocator, io: Io, environ: std.process.Environ, args: []const []const u8) !void {
     var create = false;
     var name_opt: ?[]const u8 = null;
 
@@ -54,7 +54,7 @@ pub fn run(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !void
 
     if (create) try createBranchAtHead(allocator, io, &repo, name);
 
-    try doSwitch(allocator, io, &repo, name);
+    try doSwitch(allocator, io, environ, &repo, name);
 }
 
 fn createBranchAtHead(
@@ -81,6 +81,7 @@ fn createBranchAtHead(
 fn doSwitch(
     allocator: std.mem.Allocator,
     io: Io,
+    environ: std.process.Environ,
     repo: *zigit.Repository,
     name: []const u8,
 ) !void {
@@ -90,10 +91,37 @@ fn doSwitch(
     const target_commit_opt = try zigit.refs.tryResolve(allocator, io, repo.git_dir, target_ref);
     const target_commit = target_commit_opt orelse return error.BranchNotFound;
 
+    // Snapshot the current HEAD's branch + commit before we move it,
+    // so we can record the reflog "moving from X to Y" entry below.
+    const old_head_target = try zigit.reflog.headSymrefTarget(allocator, io, repo.git_dir);
+    defer if (old_head_target) |t| allocator.free(t);
+    const old_head_oid = try zigit.refs.tryResolve(allocator, io, repo.git_dir, zigit.refs.head_path);
+
     const new_head = try std.fmt.allocPrint(allocator, "ref: {s}\n", .{target_ref});
     defer allocator.free(new_head);
 
     try applyCommit(allocator, io, repo, target_commit, new_head);
+
+    if (old_head_oid) |old_oid| {
+        const from_branch = if (old_head_target) |t|
+            (if (std.mem.startsWith(u8, t, "refs/heads/")) t[11..] else t)
+        else
+            "HEAD";
+        const id = try zigit.reflog.identityFromEnviron(allocator, io, environ, repo.git_dir);
+        defer zigit.reflog.deinitIdentity(allocator, id);
+        const ts = try zigit.reflog.timestampFromEnviron(io, environ);
+        try zigit.reflog.logHeadCheckout(
+            allocator,
+            io,
+            repo.git_dir,
+            old_oid,
+            target_commit,
+            from_branch,
+            name,
+            id,
+            ts,
+        );
+    }
 
     var msg_buf: [256]u8 = undefined;
     const msg = try std.fmt.bufPrint(&msg_buf, "Switched to branch '{s}'\n", .{name});

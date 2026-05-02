@@ -34,7 +34,7 @@ const zigit = @import("zigit");
 
 const Mode = enum { soft, mixed, hard };
 
-pub fn run(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !void {
+pub fn run(allocator: std.mem.Allocator, io: Io, environ: std.process.Environ, args: []const []const u8) !void {
     var mode: Mode = .mixed;
     var target_arg: ?[]const u8 = null;
 
@@ -69,8 +69,25 @@ pub fn run(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !void
     defer allocator.free(branch_ref);
     if (!std.mem.startsWith(u8, branch_ref, "refs/heads/")) return error.HeadIsDetached;
 
+    // Snapshot old tip for the reflog.
+    const old_oid = try zigit.refs.tryResolve(allocator, io, repo.git_dir, branch_ref);
+
     // 1. Always: move the branch ref.
     try zigit.refs.update(io, repo.git_dir, branch_ref, target_oid);
+
+    // Reflog: "reset: moving to <target>".
+    {
+        const id = try zigit.reflog.identityFromEnviron(allocator, io, environ, repo.git_dir);
+        defer zigit.reflog.deinitIdentity(allocator, id);
+        const ts = try zigit.reflog.timestampFromEnviron(io, environ);
+        var rmsg_buf: [256]u8 = undefined;
+        const rmsg = try std.fmt.bufPrint(
+            &rmsg_buf,
+            "reset: moving to {s}",
+            .{target_arg orelse "HEAD"},
+        );
+        try zigit.reflog.logUpdate(allocator, io, repo.git_dir, branch_ref, old_oid, target_oid, id, ts, rmsg);
+    }
 
     if (mode == .soft) {
         try printSummary(io, target_oid, "soft");

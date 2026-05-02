@@ -13,6 +13,7 @@ pub const diff = @import("diff/mod.zig");
 pub const pack = @import("pack/mod.zig");
 pub const net = @import("net/mod.zig");
 pub const merge = @import("merge/mod.zig");
+pub const reflog = @import("reflog.zig");
 
 pub const Oid = object.Oid;
 pub const Kind = object.Kind;
@@ -32,4 +33,5 @@ test {
     _ = pack;
     _ = net;
     _ = merge;
+    _ = reflog;
 }

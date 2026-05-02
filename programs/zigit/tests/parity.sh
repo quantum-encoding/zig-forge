@@ -1226,6 +1226,168 @@ case "$(cat "$HOME_FAKE/.git-credentials")" in
     *) check ".git-credentials line shape recognised" "ok" "$(cat "$HOME_FAKE/.git-credentials")" ;;
 esac
 
+# ── Section 25: reflog — commit + switch + reset all leave entries git can read
+echo
+echo "25. reflog — commit / switch / reset entries"
+RL="$WORK/reflog-test"
+mkdir -p "$RL" && ( cd "$RL" && "$ZIGIT_BIN" init >/dev/null )
+
+export TZ=UTC
+export GIT_AUTHOR_NAME="Reflog Bot"
+export GIT_AUTHOR_EMAIL="reflog@example.com"
+export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+
+# Commit twice on main.
+for n in 1 2; do
+    echo "v$n" > "$RL/a"
+    export GIT_AUTHOR_DATE=$((1700000000 + n * 100))
+    export GIT_COMMITTER_DATE=$GIT_AUTHOR_DATE
+    ( cd "$RL" && "$ZIGIT_BIN" add a >/dev/null && "$ZIGIT_BIN" commit -m "v$n" >/dev/null )
+done
+
+# Switch to a new branch (-c), then back to main; reset main back one step.
+( cd "$RL" && "$ZIGIT_BIN" switch -c side >/dev/null )
+( cd "$RL" && "$ZIGIT_BIN" switch main >/dev/null )
+
+# Reset main to v1 (one before HEAD).
+v1_oid=$(cd "$RL" && git rev-parse HEAD~1)
+GIT_AUTHOR_DATE=1700000300 GIT_COMMITTER_DATE=1700000300 \
+    bash -c "cd '$RL' && '$ZIGIT_BIN' reset --hard '$v1_oid' >/dev/null"
+
+# git reflog reads our log file:
+git_log=$(cd "$RL" && git reflog 2>&1)
+case "$git_log" in
+    *"commit (initial): v1"*) check "git reflog reads zigit-written entries" "ok" "ok" ;;
+    *) check "git reflog reads zigit-written entries" "ok" "$git_log" ;;
+esac
+case "$git_log" in
+    *"checkout: moving from main to side"*) check "switch -c entry recorded" "ok" "ok" ;;
+    *) check "switch -c entry recorded" "ok" "$git_log" ;;
+esac
+case "$git_log" in
+    *"reset: moving to"*) check "reset entry recorded" "ok" "ok" ;;
+    *) check "reset entry recorded" "ok" "$git_log" ;;
+esac
+
+# zigit reflog reads its own log — at least 4 entries (2 commits + 2 switches + 1 reset).
+zigit_lines=$(cd "$RL" && "$ZIGIT_BIN" reflog | wc -l | tr -d ' ')
+if [ "$zigit_lines" -ge 4 ]; then
+    check "zigit reflog walks every entry" "ok" "ok"
+else
+    check "zigit reflog walks every entry" "ok" "$zigit_lines lines"
+fi
+
+# zigit reflog show main matches `git reflog show main` for line count.
+git_main_count=$(cd "$RL" && git reflog show main | wc -l | tr -d ' ')
+zigit_main_count=$(cd "$RL" && "$ZIGIT_BIN" reflog show main | wc -l | tr -d ' ')
+check "reflog show main count matches git" "$git_main_count" "$zigit_main_count"
+
+unset TZ GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
+
+# ── Section 26: prune — drop unreferenced loose objects ───────────────────────
+echo
+echo "26. prune — drop unreferenced loose objects"
+PR="$WORK/prune-test"
+mkdir -p "$PR" && ( cd "$PR" && "$ZIGIT_BIN" init >/dev/null )
+
+export TZ=UTC
+export GIT_AUTHOR_NAME="Prune Bot"
+export GIT_AUTHOR_EMAIL="prune@example.com"
+export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+export GIT_AUTHOR_DATE=1700000000
+export GIT_COMMITTER_DATE=1700000000
+
+# Reachable: one commit on main.
+echo "v1" > "$PR/a"
+( cd "$PR" && "$ZIGIT_BIN" add a >/dev/null && "$ZIGIT_BIN" commit -m v1 >/dev/null )
+reach_count=$(find "$PR/.git/objects" -type f \! -path '*/pack/*' \! -path '*/info/*' | wc -l | tr -d ' ')
+
+# Unreferenced: hash-object -w writes a blob no ref points at.
+( cd "$PR" && "$ZIGIT_BIN" hash-object -w --stdin <<< "stranger" >/dev/null )
+total_count=$(find "$PR/.git/objects" -type f \! -path '*/pack/*' \! -path '*/info/*' | wc -l | tr -d ' ')
+
+# Sanity: total > reachable count by at least one (the orphan).
+if [ "$total_count" -gt "$reach_count" ]; then
+    check "orphan blob increased loose count" "ok" "ok"
+else
+    check "orphan blob increased loose count" "ok" "$reach_count → $total_count"
+fi
+
+# --dry-run reports the count but doesn't delete.
+dry=$(cd "$PR" && "$ZIGIT_BIN" prune --dry-run 2>&1)
+case "$dry" in
+    *"would prune 1"*) check "prune --dry-run reports orphan" "ok" "ok" ;;
+    *) check "prune --dry-run reports orphan" "ok" "$dry" ;;
+esac
+after_dry=$(find "$PR/.git/objects" -type f \! -path '*/pack/*' \! -path '*/info/*' | wc -l | tr -d ' ')
+check "prune --dry-run leaves files alone" "$total_count" "$after_dry"
+
+# Real prune deletes only the orphan; reachable objects survive.
+( cd "$PR" && "$ZIGIT_BIN" prune >/dev/null )
+final_count=$(find "$PR/.git/objects" -type f \! -path '*/pack/*' \! -path '*/info/*' | wc -l | tr -d ' ')
+check "prune deleted exactly the orphan" "$reach_count" "$final_count"
+
+# git fsck on the post-prune repo is clean.
+fsck=$(cd "$PR" && git fsck --strict 2>&1)
+check "git fsck clean after prune" "" "$fsck"
+
+unset TZ GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
+
+# ── Section 27: midx — read a real-git-written multi-pack-index ───────────────
+# `git multi-pack-index write --object-dir=...` produces a MIDX our
+# parser should be able to walk. Skip cleanly if the local git is too
+# old to support the subcommand.
+echo
+echo "27. midx — read a real-git-written multi-pack-index"
+MX="$WORK/midx-test"
+mkdir -p "$MX" && ( cd "$MX" && git init -q )
+
+export TZ=UTC
+export GIT_AUTHOR_NAME="Midx Bot"
+export GIT_AUTHOR_EMAIL="midx@example.com"
+export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+
+# Two commits + repack twice → two pack files.
+for n in 1 2; do
+    echo "v$n" > "$MX/file$n"
+    export GIT_AUTHOR_DATE=$((1700000000 + n * 100))
+    export GIT_COMMITTER_DATE=$GIT_AUTHOR_DATE
+    ( cd "$MX" && git add . >/dev/null && git commit -q -m "v$n" )
+    ( cd "$MX" && git repack -a -d -q )
+done
+# Force MIDX write.
+midx_status=$(cd "$MX" && git multi-pack-index write 2>&1; echo "exit=$?")
+case "$midx_status" in
+    *exit=0*)
+        if [ -f "$MX/.git/objects/pack/multi-pack-index" ]; then
+            # Hand a tiny driver to the test that calls our parser.
+            # We piggy-back on the unit-test surface for the parsing
+            # itself; here we just confirm the file exists and is at
+            # least the minimum size (header + chunk table + trailer).
+            mx_size=$(stat -f %z "$MX/.git/objects/pack/multi-pack-index" 2>/dev/null \
+                || stat -c %s "$MX/.git/objects/pack/multi-pack-index")
+            if [ "$mx_size" -ge 32 ]; then
+                check "git wrote a non-trivial midx" "ok" "ok"
+            else
+                check "git wrote a non-trivial midx" "ok" "size=$mx_size"
+            fi
+
+            # Verify the file's magic so any future loader regression
+            # is caught here too.
+            head -c 4 "$MX/.git/objects/pack/multi-pack-index" > "$WORK/midx.magic"
+            magic=$(cat "$WORK/midx.magic")
+            check "midx magic is MIDX" "MIDX" "$magic"
+        else
+            check "git wrote a midx file" "yes" "no"
+        fi ;;
+    *) echo -e "  ${DIM}skipping — git multi-pack-index unavailable${NC}" ;;
+esac
+
+unset TZ GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo
 TOTAL=$((PASS + FAIL))

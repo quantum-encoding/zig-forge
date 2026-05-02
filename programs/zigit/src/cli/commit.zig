@@ -104,6 +104,30 @@ pub fn run(
     // 5. Move the branch.
     try zigit.refs.update(io, repo.git_dir, branch_ref_name, commit_oid);
 
+    // 5b. Reflog: this is "commit (initial): <subject>" for a root
+    //     commit, otherwise "commit: <subject>". Mirrors what real
+    //     git writes so `git reflog` reads our entries unchanged.
+    const subject_end = std.mem.indexOfScalar(u8, msg, '\n') orelse msg.len;
+    const subject = msg[0..subject_end];
+    {
+        var msg_buf: [1024]u8 = undefined;
+        const reflog_msg = if (is_root)
+            try std.fmt.bufPrint(&msg_buf, "commit (initial): {s}", .{subject})
+        else
+            try std.fmt.bufPrint(&msg_buf, "commit: {s}", .{subject});
+        try zigit.reflog.logUpdate(
+            allocator,
+            io,
+            repo.git_dir,
+            branch_ref_name,
+            parent_oid,
+            commit_oid,
+            .{ .name = committer_name, .email = committer_email },
+            committer_when,
+            reflog_msg,
+        );
+    }
+
     // 6. Summary.
     var commit_hex: [40]u8 = undefined;
     commit_oid.toHex(&commit_hex);
@@ -111,9 +135,6 @@ pub fn run(
         branch_ref_name[11..]
     else
         branch_ref_name;
-
-    const subject_end = std.mem.indexOfScalar(u8, msg, '\n') orelse msg.len;
-    const subject = msg[0..subject_end];
 
     var line_buf: [1024]u8 = undefined;
     const line = if (is_root)
