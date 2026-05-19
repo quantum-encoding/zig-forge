@@ -94,4 +94,56 @@ pub fn build(b: *std.Build) void {
     }
     const quantum_step = b.step("quantum", "Run Quantum Curl HTTP Engine");
     quantum_step.dependOn(&run_quantum.step);
+
+    // ------------------------------------------------------------------
+    // Recon target — Zigix-style build to map the std.os.linux blast radius.
+    //
+    //   os_tag = .linux, abi = .none, link_libc = false
+    //
+    // Cross-compile only — the binary is not meant to run on the host.
+    // We just want the compiler/linker to surface every std.os.linux.*
+    // symbol that std.http.Client + std.crypto.tls + std.Io.Threaded pull
+    // in, so we know what the freestanding Zigix Io vtable must cover.
+    // ------------------------------------------------------------------
+    const recon_arch = b.option(
+        std.Target.Cpu.Arch,
+        "recon-arch",
+        "Recon target architecture (x86_64 or aarch64)",
+    ) orelse .aarch64;
+
+    const recon_target = b.resolveTargetQuery(.{
+        .cpu_arch = recon_arch,
+        .os_tag = .linux,
+        .abi = .none,
+    });
+
+    const recon_optimize = b.option(
+        std.builtin.OptimizeMode,
+        "recon-optimize",
+        "Recon optimize mode (default ReleaseSmall for max dead-code-elim)",
+    ) orelse .ReleaseSmall;
+
+    const recon_module = b.addModule("http-sentinel-recon", .{
+        .root_source_file = b.path("src/lib.zig"),
+        .target = recon_target,
+        .optimize = recon_optimize,
+        .link_libc = false,
+    });
+
+    const recon_exe_module = b.createModule(.{
+        .root_source_file = b.path("tests/recon.zig"),
+        .target = recon_target,
+        .optimize = recon_optimize,
+        .link_libc = false,
+    });
+    recon_exe_module.addImport("http-sentinel", recon_module);
+
+    const recon_exe = b.addExecutable(.{
+        .name = "http-sentinel-recon",
+        .root_module = recon_exe_module,
+    });
+    b.installArtifact(recon_exe);
+
+    const recon_step = b.step("recon", "Build recon target (.linux/.none, no libc) — maps std.os.linux surface");
+    recon_step.dependOn(&recon_exe.step);
 }

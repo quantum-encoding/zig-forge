@@ -86,7 +86,23 @@ pub const VertexClient = struct {
         location: []const u8 = DEFAULT_LOCATION,
     };
 
+    /// Reject any byte that could escape the URL host/path component
+    /// (CWE-918 — protects against `location = "evil.com#"` style host
+    /// injection that would exfiltrate the OAuth bearer token).
+    fn validateUrlComponent(s: []const u8) !void {
+        if (s.len == 0) return error.InvalidConfig;
+        for (s) |c| {
+            const ok = (c >= 'a' and c <= 'z') or
+                (c >= 'A' and c <= 'Z') or
+                (c >= '0' and c <= '9') or
+                c == '-' or c == '_' or c == '.';
+            if (!ok) return error.InvalidConfig;
+        }
+    }
+
     pub fn init(allocator: std.mem.Allocator, config: Config) !VertexClient {
+        try validateUrlComponent(config.project_id);
+        try validateUrlComponent(config.location);
         return .{
             .http_client = try HttpClient.init(allocator),
             .project_id = config.project_id,

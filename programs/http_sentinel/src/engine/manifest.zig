@@ -265,51 +265,88 @@ pub const Method = enum {
     }
 };
 
-/// Parse a request manifest from JSON
+/// Cap retry count to keep `1 << (attempts-1)` shifts well-defined and
+/// to bound worst-case backoff (~17 minutes at 30).
+const MAX_RETRIES_CAP: u32 = 30;
+/// Cap a single request timeout at 24 h so a hostile manifest cannot pin a worker indefinitely.
+const MAX_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1000;
+
+fn jsonStringField(obj: anytype, key: []const u8) !?[]const u8 {
+    const v = obj.get(key) orelse return null;
+    if (v != .string) return error.InvalidJson;
+    return v.string;
+}
+
+fn jsonNonNegativeInteger(comptime T: type, obj: anytype, key: []const u8, max: T) !?T {
+    const v = obj.get(key) orelse return null;
+    if (v != .integer) return error.InvalidJson;
+    if (v.integer < 0) return error.InvalidJson;
+    const u: u64 = @intCast(v.integer);
+    if (u > @as(u64, max)) return @as(T, max);
+    return @intCast(u);
+}
+
+/// Parse a request manifest from JSON.
+///
+/// Rejects malformed input with `error.InvalidJson` rather than panicking
+/// — this parser reads from untrusted stdin (CWE-20).
 pub fn parseRequestManifest(allocator: std.mem.Allocator, json_line: []const u8) !RequestManifest {
-    const parsed = try std.json.parseFromSlice(
+    const parsed = std.json.parseFromSlice(
         std.json.Value,
         allocator,
         json_line,
         .{},
-    );
+    ) catch return error.InvalidJson;
     defer parsed.deinit();
 
+    if (parsed.value != .object) return error.InvalidJson;
     const obj = parsed.value.object;
 
     // Required fields
-    const id = try allocator.dupe(u8, obj.get("id").?.string);
+    const id_str = (try jsonStringField(obj, "id")) orelse return error.InvalidJson;
+    const id = try allocator.dupe(u8, id_str);
     errdefer allocator.free(id);
 
-    const method_str = obj.get("method").?.string;
+    const method_str = (try jsonStringField(obj, "method")) orelse return error.InvalidJson;
     const method = Method.fromString(method_str) orelse return error.InvalidMethod;
 
-    const url = try allocator.dupe(u8, obj.get("url").?.string);
+    const url_str = (try jsonStringField(obj, "url")) orelse return error.InvalidJson;
+    const url = try allocator.dupe(u8, url_str);
     errdefer allocator.free(url);
 
     // Optional fields
     var body: ?[]u8 = null;
     if (obj.get("body")) |body_val| {
-        if (body_val == .string) {
-            body = try allocator.dupe(u8, body_val.string);
-        }
+        if (body_val != .string) return error.InvalidJson;
+        body = try allocator.dupe(u8, body_val.string);
     }
+    errdefer if (body) |b| allocator.free(b);
 
     var headers: ?std.json.ArrayHashMap([]const u8) = null;
+    errdefer if (headers) |*h| {
+        var it = h.map.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            allocator.free(entry.value_ptr.*);
+        }
+        h.deinit(allocator);
+    };
     if (obj.get("headers")) |headers_obj| {
-        if (headers_obj == .object) {
-            headers = std.json.ArrayHashMap([]const u8){};
-            var it = headers_obj.object.iterator();
-            while (it.next()) |entry| {
-                const key = try allocator.dupe(u8, entry.key_ptr.*);
-                const val = try allocator.dupe(u8, entry.value_ptr.*.string);
-                try headers.?.map.put(allocator, key, val);
-            }
+        if (headers_obj != .object) return error.InvalidJson;
+        headers = std.json.ArrayHashMap([]const u8){};
+        var it = headers_obj.object.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.* != .string) return error.InvalidJson;
+            const key = try allocator.dupe(u8, entry.key_ptr.*);
+            errdefer allocator.free(key);
+            const val = try allocator.dupe(u8, entry.value_ptr.*.string);
+            errdefer allocator.free(val);
+            try headers.?.map.put(allocator, key, val);
         }
     }
 
-    const timeout_ms = if (obj.get("timeout_ms")) |t| @as(u64, @intCast(t.integer)) else null;
-    const max_retries = if (obj.get("max_retries")) |r| @as(u32, @intCast(r.integer)) else null;
+    const timeout_ms = try jsonNonNegativeInteger(u64, obj, "timeout_ms", MAX_TIMEOUT_MS);
+    const max_retries = try jsonNonNegativeInteger(u32, obj, "max_retries", MAX_RETRIES_CAP);
 
     return RequestManifest{
         .id = id,

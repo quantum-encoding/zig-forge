@@ -99,15 +99,14 @@ pub const ConnectionPool = struct {
     pub fn deinit(self: *ConnectionPool) void {
         // Signal cleanup thread to stop
         self.should_stop.store(true, .release);
-        
+
         if (self.cleanup_thread) |thread| {
             thread.join();
         }
-        
-        // Clean up all connections
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        
+
+        // Cleanup worker has joined — no other thread can hold a
+        // reference to this pool. Skip the lock so we don't dereference
+        // freed memory after destroy(self) (CWE-416).
         var iterator = self.connections.iterator();
         while (iterator.next()) |entry| {
             for (entry.value_ptr.items) |conn| {
