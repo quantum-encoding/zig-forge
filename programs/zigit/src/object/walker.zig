@@ -56,12 +56,31 @@ pub fn walk(
 
     var queue: std.ArrayListUnmanaged(Oid) = .empty;
     defer queue.deinit(allocator);
-    try queue.append(allocator, start);
+
+    // Enqueue-time dedup: in a deep monorepo every commit's root tree
+    // references many of the same blobs/subtrees as its neighbours.
+    // Pushing them all and deduping on pop blew the queue up O(N×M)
+    // for N commits × M tree entries. Filter at enqueue so the queue
+    // size stays bounded by `unique reachable objects`.
+    const enqueue = struct {
+        fn call(
+            a: std.mem.Allocator,
+            q: *std.ArrayListUnmanaged(Oid),
+            s: *std.AutoHashMapUnmanaged([20]u8, void),
+            h: *const std.AutoHashMapUnmanaged([20]u8, void),
+            oid: Oid,
+        ) !void {
+            if (h.contains(oid.bytes)) return;
+            const gop = try s.getOrPut(a, oid.bytes);
+            if (gop.found_existing) return;
+            try q.append(a, oid);
+        }
+    }.call;
+
+    try enqueue(allocator, &queue, &seen, &haves, start);
 
     while (queue.items.len > 0) {
         const current = queue.pop().?;
-        if (haves.contains(current.bytes)) continue;
-        if ((try seen.getOrPut(allocator, current.bytes)).found_existing) continue;
 
         var obj = try store.read(allocator, current);
         defer obj.deinit(allocator);
@@ -70,12 +89,12 @@ pub fn walk(
             .commit => {
                 var parsed = try commit_mod.parse(allocator, obj.payload);
                 defer parsed.deinit(allocator);
-                try queue.append(allocator, parsed.tree_oid);
-                for (parsed.parent_oids) |p| try queue.append(allocator, p);
+                try enqueue(allocator, &queue, &seen, &haves, parsed.tree_oid);
+                for (parsed.parent_oids) |p| try enqueue(allocator, &queue, &seen, &haves, p);
             },
             .tree => {
                 var it: tree_mod.Iterator = .{ .bytes = obj.payload };
-                while (try it.next()) |entry| try queue.append(allocator, entry.oid);
+                while (try it.next()) |entry| try enqueue(allocator, &queue, &seen, &haves, entry.oid);
             },
             .blob, .tag => {},
         }

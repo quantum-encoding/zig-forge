@@ -46,10 +46,67 @@ const MAX_COPY_LEN: u32 = 0xFFFFFF;
 
 pub const Error = error{OutOfMemory};
 
+/// Prebuilt chunk index over a base buffer. Build once per base and
+/// reuse it across many target encodes — the index is the expensive
+/// part. Call `BaseIndex.deinit(allocator)` to release.
+pub const BaseIndex = struct {
+    map: std.AutoHashMapUnmanaged(u64, std.ArrayListUnmanaged(u32)),
+
+    pub fn deinit(self: *BaseIndex, allocator: std.mem.Allocator) void {
+        var it = self.map.valueIterator();
+        while (it.next()) |v| v.deinit(allocator);
+        self.map.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub fn buildBaseIndex(
+    allocator: std.mem.Allocator,
+    base: []const u8,
+) Error!BaseIndex {
+    var map: std.AutoHashMapUnmanaged(u64, std.ArrayListUnmanaged(u32)) = .empty;
+    errdefer {
+        var it = map.valueIterator();
+        while (it.next()) |v| v.deinit(allocator);
+        map.deinit(allocator);
+    }
+
+    if (base.len < CHUNK) return .{ .map = map };
+
+    // Pre-size the map: there's one window per byte (modulo CHUNK
+    // truncation at the tail). For deduped bases this overshoots but
+    // it's still cheaper than rehashing.
+    const expected_buckets: u32 = @intCast(@min(@as(usize, std.math.maxInt(u32)), base.len -| (CHUNK - 1)));
+    try map.ensureTotalCapacity(allocator, expected_buckets);
+
+    var i: usize = 0;
+    while (i + CHUNK <= base.len) : (i += 1) {
+        const h = hashChunk(base[i .. i + CHUNK]);
+        const gop = map.getOrPutAssumeCapacity(h);
+        if (!gop.found_existing) gop.value_ptr.* = .empty;
+        if (gop.value_ptr.items.len < MAX_CHAIN) {
+            try gop.value_ptr.append(allocator, @intCast(i));
+        }
+    }
+
+    return .{ .map = map };
+}
+
 pub fn encode(
     allocator: std.mem.Allocator,
     base: []const u8,
     target: []const u8,
+) Error![]u8 {
+    var idx = try buildBaseIndex(allocator, base);
+    defer idx.deinit(allocator);
+    return encodeWithIndex(allocator, base, target, &idx);
+}
+
+pub fn encodeWithIndex(
+    allocator: std.mem.Allocator,
+    base: []const u8,
+    target: []const u8,
+    idx: *const BaseIndex,
 ) Error![]u8 {
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(allocator);
@@ -63,26 +120,6 @@ pub fn encode(
         return try out.toOwnedSlice(allocator);
     }
 
-    // Build chunk index for the base.
-    var index: std.AutoHashMapUnmanaged(u64, std.ArrayListUnmanaged(u32)) = .empty;
-    defer {
-        var it = index.valueIterator();
-        while (it.next()) |v| v.deinit(allocator);
-        index.deinit(allocator);
-    }
-
-    {
-        var i: usize = 0;
-        while (i + CHUNK <= base.len) : (i += 1) {
-            const h = hashChunk(base[i .. i + CHUNK]);
-            const gop = try index.getOrPut(allocator, h);
-            if (!gop.found_existing) gop.value_ptr.* = .empty;
-            if (gop.value_ptr.items.len < MAX_CHAIN) {
-                try gop.value_ptr.append(allocator, @intCast(i));
-            }
-        }
-    }
-
     var literal_start: usize = 0;
     var pos: usize = 0;
     while (pos + CHUNK <= target.len) {
@@ -91,7 +128,7 @@ pub fn encode(
         var best_len: usize = 0;
         var best_base_pos: usize = 0;
 
-        if (index.get(h)) |list| {
+        if (idx.map.get(h)) |list| {
             for (list.items) |bp_u32| {
                 const bp: usize = bp_u32;
                 // Forward match length.
@@ -256,6 +293,33 @@ pub const RATIO_NUMERATOR: usize = 7;
 pub const RATIO_DENOMINATOR: usize = 10;
 const WINDOW: usize = 10;
 
+// Cheap pre-filter knobs — picked so the planner can skip the heavy
+// `encodeWithIndex` call on pairs that can't plausibly win.
+//
+// MIN_DELTIFY_SIZE: targets smaller than CHUNK already fall through
+//   the encoder's literal-only path; this just gives the planner a
+//   cheaper exit without entering the encoder.
+// MAX_DELTIFY_BASE: above this base size we refuse to delta. The
+//   chunk-index build is O(base.len) AND keeps a hashmap proportional
+//   to base.len in memory. For monorepos with vendored multi-MB blobs
+//   the index build can dominate wallclock without payoff.
+// MIN_SIZE_RATIO: if target.len < MIN_SIZE_RATIO_NUM/MIN_SIZE_RATIO_DEN
+//   × base.len, the target is so much smaller than the base that a
+//   useful delta is unlikely — skip.
+const MIN_DELTIFY_SIZE: usize = CHUNK;
+const MAX_DELTIFY_BASE: usize = 16 * 1024 * 1024;
+const MIN_SIZE_RATIO_NUM: usize = 1;
+const MIN_SIZE_RATIO_DEN: usize = 8;
+
+fn deltaPlausible(base_len: usize, target_len: usize) bool {
+    if (target_len < MIN_DELTIFY_SIZE) return false;
+    if (base_len < CHUNK) return false;
+    if (base_len > MAX_DELTIFY_BASE) return false;
+    // target shouldn't be wildly smaller than the base.
+    if (target_len * MIN_SIZE_RATIO_DEN < base_len * MIN_SIZE_RATIO_NUM) return false;
+    return true;
+}
+
 pub fn plan(
     allocator: std.mem.Allocator,
     objects: []const Object,
@@ -269,6 +333,13 @@ pub fn plan(
         ops.deinit(allocator);
     }
     try ops.ensureTotalCapacityPrecise(allocator, objects.len);
+
+    // A RecentBase tracks one entry in the deltify window plus the
+    // chunk index over its payload (lazily materialized on first use).
+    const RecentBase = struct {
+        op_idx: usize,
+        index: ?BaseIndex,
+    };
 
     const kinds = [_]Kind{ .blob, .tree, .commit, .tag };
     for (kinds) |k| {
@@ -287,10 +358,12 @@ pub fn plan(
         const first = objects[bucket.items[0]];
         try ops.append(allocator, .{ .raw = .{ .oid = first.oid, .kind = first.kind, .payload = first.payload } });
 
-        // Track recent raw entries of this kind as delta candidates.
-        var recent: std.ArrayListUnmanaged(usize) = .empty; // indices into ops
-        defer recent.deinit(allocator);
-        try recent.append(allocator, ops.items.len - 1);
+        var recent: std.ArrayListUnmanaged(RecentBase) = .empty;
+        defer {
+            for (recent.items) |*rb| if (rb.index) |*idx| idx.deinit(allocator);
+            recent.deinit(allocator);
+        }
+        try recent.append(allocator, .{ .op_idx = ops.items.len - 1, .index = null });
 
         for (bucket.items[1..]) |obj_idx| {
             const obj = objects[obj_idx];
@@ -298,24 +371,31 @@ pub fn plan(
             var best_delta: ?[]u8 = null;
             var best_base_op: usize = 0;
 
-            for (recent.items) |op_idx| {
-                const base_payload = ops.items[op_idx].raw.payload;
-                const candidate = try encode(allocator, base_payload, obj.payload);
-                if (candidate.len * RATIO_DENOMINATOR < obj.payload.len * RATIO_NUMERATOR) {
-                    if (best_delta) |existing| {
-                        if (candidate.len < existing.len) {
-                            allocator.free(existing);
-                            best_delta = candidate;
-                            best_base_op = op_idx;
+            // Tiny targets never go through the encoder at all.
+            if (obj.payload.len >= MIN_DELTIFY_SIZE) {
+                for (recent.items) |*rb| {
+                    const base_payload = ops.items[rb.op_idx].raw.payload;
+                    if (!deltaPlausible(base_payload.len, obj.payload.len)) continue;
+
+                    if (rb.index == null) rb.index = try buildBaseIndex(allocator, base_payload);
+
+                    const candidate = try encodeWithIndex(allocator, base_payload, obj.payload, &rb.index.?);
+                    if (candidate.len * RATIO_DENOMINATOR < obj.payload.len * RATIO_NUMERATOR) {
+                        if (best_delta) |existing| {
+                            if (candidate.len < existing.len) {
+                                allocator.free(existing);
+                                best_delta = candidate;
+                                best_base_op = rb.op_idx;
+                            } else {
+                                allocator.free(candidate);
+                            }
                         } else {
-                            allocator.free(candidate);
+                            best_delta = candidate;
+                            best_base_op = rb.op_idx;
                         }
                     } else {
-                        best_delta = candidate;
-                        best_base_op = op_idx;
+                        allocator.free(candidate);
                     }
-                } else {
-                    allocator.free(candidate);
                 }
             }
 
@@ -328,7 +408,7 @@ pub fn plan(
             } else {
                 try ops.append(allocator, .{ .raw = .{ .oid = obj.oid, .kind = obj.kind, .payload = obj.payload } });
                 if (recent.items.len < WINDOW) {
-                    try recent.append(allocator, ops.items.len - 1);
+                    try recent.append(allocator, .{ .op_idx = ops.items.len - 1, .index = null });
                 }
             }
         }
@@ -509,4 +589,69 @@ test "encode/decode: large repeated payload picks up the shared region" {
     const round = try delta_apply.apply(testing.allocator, &base_buf, delta);
     defer testing.allocator.free(round);
     try testing.expectEqualSlices(u8, &target_buf, round);
+}
+
+test "plan: many similar blobs share one base; deltify wins big" {
+    // Regression guard for the monorepo push hang.
+    //
+    // Before the BaseIndex cache the planner rebuilt the chunk index
+    // of the largest blob once per smaller blob × WINDOW; for N=500
+    // and a ~16 KiB base that's ~5000 full hash-map builds and we
+    // measured tens of seconds. With the cache, it should be ~1 build
+    // per recent-window slot regardless of N — well under a second.
+    const allocator = testing.allocator;
+
+    const N: usize = 500;
+    const BLOB_LEN: usize = 16 * 1024;
+
+    var prng: std.Random.DefaultPrng = .init(0xc0ffee);
+    var blobs = try allocator.alloc([]u8, N);
+    defer {
+        for (blobs) |b| allocator.free(b);
+        allocator.free(blobs);
+    }
+
+    // Base payload + N-1 near-copies (~1% byte mutation each). All of
+    // them get sorted into the same blob bucket; the planner should
+    // pick one as base and emit (N-1) deltas.
+    const base_buf = try allocator.alloc(u8, BLOB_LEN);
+    prng.random().bytes(base_buf);
+    blobs[0] = base_buf;
+
+    var i: usize = 1;
+    while (i < N) : (i += 1) {
+        const buf = try allocator.dupe(u8, base_buf);
+        const mutations = BLOB_LEN / 100; // ~1%
+        var j: usize = 0;
+        while (j < mutations) : (j += 1) {
+            const pos = prng.random().int(usize) % BLOB_LEN;
+            buf[pos] = prng.random().int(u8);
+        }
+        blobs[i] = buf;
+    }
+
+    const objects = try allocator.alloc(Object, N);
+    defer allocator.free(objects);
+    for (blobs, 0..) |b, k| {
+        var oid: Oid = undefined;
+        @memset(&oid.bytes, @intCast(k & 0xff));
+        // Make each oid unique enough.
+        std.mem.writeInt(u32, oid.bytes[0..4], @intCast(k), .little);
+        objects[k] = .{ .oid = oid, .kind = .blob, .payload = b };
+    }
+
+    const ops = try plan(allocator, objects);
+    defer freePlan(allocator, ops);
+
+    try testing.expectEqual(N, ops.len);
+
+    // At least 80% of the non-base entries should successfully deltify
+    // against the shared base. (We can't pin the exact count because
+    // the planner sorts largest-first and exact-tie ordering shuffles
+    // which payload becomes the base.)
+    var delta_count: usize = 0;
+    for (ops) |op| if (op == .delta) {
+        delta_count += 1;
+    };
+    try testing.expect(delta_count >= (N - 1) * 4 / 5);
 }

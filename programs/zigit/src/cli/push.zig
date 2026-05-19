@@ -27,7 +27,62 @@ const zigit = @import("zigit");
 const heads_dir = "refs/heads";
 
 pub fn run(allocator: std.mem.Allocator, io: Io, environ: std.process.Environ, args: []const []const u8) !void {
-    if (args.len > 2) return error.UsagePushOptionalRemoteOptionalBranch;
+    // Strip optional flags from `args` before the usual positional
+    // parse. We only support a tiny set; anything unrecognized that
+    // starts with `--` is an error.
+    var positional_buf: [4][]const u8 = undefined;
+    var positional_len: usize = 0;
+    var no_delta: bool = false;
+    var verbose: bool = false;
+    for (args) |a| {
+        if (std.mem.eql(u8, a, "--no-delta")) {
+            no_delta = true;
+        } else if (std.mem.eql(u8, a, "--verbose") or std.mem.eql(u8, a, "-v")) {
+            verbose = true;
+        } else if (std.mem.startsWith(u8, a, "--")) {
+            return error.UnknownPushFlag;
+        } else {
+            if (positional_len >= positional_buf.len) return error.UsagePushOptionalRemoteOptionalBranch;
+            positional_buf[positional_len] = a;
+            positional_len += 1;
+        }
+    }
+    const pos = positional_buf[0..positional_len];
+    if (pos.len > 2) return error.UsagePushOptionalRemoteOptionalBranch;
+
+    // ZIGIT_PUSH_VERBOSE=1 turns on phase timers without the flag —
+    // handy when invoked from another tool that controls argv shape.
+    if (environ.getPosix("ZIGIT_PUSH_VERBOSE")) |v| {
+        if (v.len > 0 and !std.mem.eql(u8, v, "0")) verbose = true;
+    }
+    if (environ.getPosix("ZIGIT_PUSH_NO_DELTA")) |v| {
+        if (v.len > 0 and !std.mem.eql(u8, v, "0")) no_delta = true;
+    }
+
+    // Monotonic timestamps for phase profiling. We tick `last` at the
+    // start of each phase, then diff against the next tick.
+    var last_ts: ?Io.Clock.Timestamp = if (verbose) Io.Clock.Timestamp.now(io, .awake) else null;
+    const stderr = File.stderr();
+    var phase_buf: [256]u8 = undefined;
+    const logPhase = struct {
+        fn call(
+            io_: Io,
+            stderr_: File,
+            buf_: []u8,
+            last: *?Io.Clock.Timestamp,
+            label: []const u8,
+            extra: []const u8,
+        ) !void {
+            if (last.*) |prev| {
+                const now_ts = Io.Clock.Timestamp.now(io_, .awake);
+                const dur = prev.durationTo(now_ts);
+                const ms_i: i64 = @intCast(@divTrunc(dur.raw.nanoseconds, std.time.ns_per_ms));
+                last.* = now_ts;
+                const msg = std.fmt.bufPrint(buf_, "  [zigit push] {s}: {d} ms{s}\n", .{ label, ms_i, extra }) catch return;
+                try stderr_.writeStreamingAll(io_, msg);
+            }
+        }
+    }.call;
 
     var repo = try zigit.Repository.discover(allocator, io);
     defer repo.deinit();
@@ -39,7 +94,7 @@ pub fn run(allocator: std.mem.Allocator, io: Io, environ: std.process.Environ, a
     // given, default to "origin". The lookup logic: if `remote.<arg>.url`
     // exists in config, treat the arg as a name and use the configured URL;
     // otherwise treat the arg as a URL.
-    const remote_arg: []const u8 = if (args.len >= 1) args[0] else "origin";
+    const remote_arg: []const u8 = if (pos.len >= 1) pos[0] else "origin";
     const url_with_creds_owned: ?[]u8 = blk: {
         const dotted = try std.fmt.allocPrint(allocator, "remote.{s}.url", .{remote_arg});
         defer allocator.free(dotted);
@@ -68,23 +123,26 @@ pub fn run(allocator: std.mem.Allocator, io: Io, environ: std.process.Environ, a
     };
 
     // Pick the branch.
-    const branch_short: []const u8 = if (args.len == 2) args[1] else blk: {
+    const branch_short: []const u8 = if (pos.len == 2) pos[1] else blk: {
         const head_target = try zigit.refs.resolveSymbolic(allocator, io, repo.git_dir, zigit.refs.head_path);
         defer allocator.free(head_target);
         if (!std.mem.startsWith(u8, head_target, "refs/heads/")) return error.HeadIsDetached;
         // resolveSymbolic's return is owned; we need a stable copy.
         break :blk try allocator.dupe(u8, head_target[11..]);
     };
-    defer if (args.len != 2) allocator.free(@constCast(branch_short));
+    defer if (pos.len != 2) allocator.free(@constCast(branch_short));
 
     var ref_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const local_ref_path = try std.fmt.bufPrint(&ref_path_buf, "{s}/{s}", .{ heads_dir, branch_short });
     const local_oid = (try zigit.refs.tryResolve(allocator, io, repo.git_dir, local_ref_path)) orelse
         return error.LocalBranchNotFound;
 
+    try logPhase(io, stderr, &phase_buf, &last_ts, "setup", "");
+
     // Discover remote.
     const remote_refs = try zigit.net.smart_http.discoverV1ForReceive(allocator, io, url, authorization);
     defer zigit.net.smart_http.freeRefs(allocator, remote_refs);
+    try logPhase(io, stderr, &phase_buf, &last_ts, "remote discover", "");
 
     // Find the remote's current oid for this ref (or zeros for first push).
     var remote_oid_hex: [40]u8 = zigit.net.smart_http.zero_oid_hex;
@@ -118,17 +176,17 @@ pub fn run(allocator: std.mem.Allocator, io: Io, environ: std.process.Environ, a
         defer zigit.object.walker.freeReachable(allocator, remote_reach);
         for (remote_reach.oids) |o| try haves.put(allocator, o.bytes, {});
     }
+    var haves_extra_buf: [64]u8 = undefined;
+    const haves_extra = std.fmt.bufPrint(&haves_extra_buf, " (haves={d})", .{haves.count()}) catch "";
+    try logPhase(io, stderr, &phase_buf, &last_ts, "haves walk", haves_extra);
 
     // Walk reachable from local oid, skipping anything in `haves`.
     const to_send = try zigit.object.walker.walk(allocator, &store, local_oid, haves);
     defer zigit.object.walker.freeReachable(allocator, to_send);
 
-    if (to_send.oids.len == 0) {
-        // Server already has everything reachable from our tip but
-        // the ref oid differs — usually means we'd be a non-fast-
-        // forward update. Send an empty pack and let the server
-        // accept or reject.
-    }
+    var send_extra_buf: [64]u8 = undefined;
+    const send_extra = std.fmt.bufPrint(&send_extra_buf, " (objects={d})", .{to_send.oids.len}) catch "";
+    try logPhase(io, stderr, &phase_buf, &last_ts, "reachable walk", send_extra);
 
     // Load every payload up-front so the deltify planner can compare
     // bytes between candidates. This costs RAM but is the same shape
@@ -139,20 +197,41 @@ pub fn run(allocator: std.mem.Allocator, io: Io, environ: std.process.Environ, a
         loaded_payloads.deinit(allocator);
     }
     try loaded_payloads.ensureTotalCapacityPrecise(allocator, to_send.oids.len);
+    var total_payload_bytes: usize = 0;
     for (to_send.oids) |o| {
         const loaded = try store.read(allocator, o);
+        total_payload_bytes += loaded.payload.len;
         loaded_payloads.appendAssumeCapacity(loaded);
     }
+    var load_extra_buf: [64]u8 = undefined;
+    const load_extra = std.fmt.bufPrint(&load_extra_buf, " (payload={d} KiB)", .{total_payload_bytes / 1024}) catch "";
+    try logPhase(io, stderr, &phase_buf, &last_ts, "payload load", load_extra);
 
-    const planner_objects = try allocator.alloc(zigit.pack.deltify.Object, to_send.oids.len);
-    defer allocator.free(planner_objects);
-    for (to_send.oids, loaded_payloads.items, 0..) |o, lp, i| planner_objects[i] = .{
-        .oid = o,
-        .kind = lp.kind,
-        .payload = lp.payload,
+    const ops = if (no_delta) blk: {
+        const raw_ops = try allocator.alloc(zigit.pack.deltify.WriteOp, to_send.oids.len);
+        for (to_send.oids, loaded_payloads.items, 0..) |o, lp, i| raw_ops[i] = .{
+            .raw = .{ .oid = o, .kind = lp.kind, .payload = lp.payload },
+        };
+        break :blk raw_ops;
+    } else blk: {
+        const planner_objects = try allocator.alloc(zigit.pack.deltify.Object, to_send.oids.len);
+        defer allocator.free(planner_objects);
+        for (to_send.oids, loaded_payloads.items, 0..) |o, lp, i| planner_objects[i] = .{
+            .oid = o,
+            .kind = lp.kind,
+            .payload = lp.payload,
+        };
+        break :blk try zigit.pack.deltify.plan(allocator, planner_objects);
     };
-    const ops = try zigit.pack.deltify.plan(allocator, planner_objects);
     defer zigit.pack.deltify.freePlan(allocator, ops);
+
+    var plan_extra_buf: [64]u8 = undefined;
+    var delta_count: usize = 0;
+    for (ops) |op| if (op == .delta) {
+        delta_count += 1;
+    };
+    const plan_extra = std.fmt.bufPrint(&plan_extra_buf, " (deltas={d})", .{delta_count}) catch "";
+    try logPhase(io, stderr, &phase_buf, &last_ts, if (no_delta) "plan (raw-only)" else "deltify plan", plan_extra);
 
     // Build the pack.
     var pack_w = try zigit.pack.PackWriter.init(allocator, @intCast(ops.len));
@@ -168,6 +247,10 @@ pub fn run(allocator: std.mem.Allocator, io: Io, environ: std.process.Environ, a
     }
     const finished = try pack_w.finish();
     defer allocator.free(finished.pack_bytes);
+
+    var pack_extra_buf: [64]u8 = undefined;
+    const pack_extra = std.fmt.bufPrint(&pack_extra_buf, " (bytes={d})", .{finished.pack_bytes.len}) catch "";
+    try logPhase(io, stderr, &phase_buf, &last_ts, "pack write", pack_extra);
 
     var msg_buf: [256]u8 = undefined;
     const start_msg = try std.fmt.bufPrint(
@@ -188,6 +271,8 @@ pub fn run(allocator: std.mem.Allocator, io: Io, environ: std.process.Environ, a
         finished.pack_bytes,
     );
     defer push_result.deinit(allocator);
+
+    try logPhase(io, stderr, &phase_buf, &last_ts, "pushPack", "");
 
     const summary = try std.fmt.bufPrint(
         &msg_buf,
