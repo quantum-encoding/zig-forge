@@ -54,6 +54,12 @@ pub const BlameOptions = struct {
 pub const BlameLine = struct {
     /// 1-based line in the target file.
     line_no: u32,
+    /// 1-based line number in `commit_oid`'s blob — the line's address
+    /// in the source commit. Used by porcelain output. For unchanged
+    /// lines that trace back through many commits, this is the line
+    /// number in the commit where the line was last *touched*, not
+    /// necessarily where it was first introduced.
+    orig_line_no: u32,
     /// Commit that last touched this line.
     commit_oid: Oid,
     author_name: []const u8,
@@ -61,6 +67,19 @@ pub const BlameLine = struct {
     /// Seconds since epoch.
     author_time: i64,
     author_tz_offset_minutes: i16,
+    committer_name: []const u8,
+    committer_email: []const u8,
+    committer_time: i64,
+    committer_tz_offset_minutes: i16,
+    /// First line of the commit message (no trailing newline).
+    summary: []const u8,
+    /// True when `commit_oid` has no parents — i.e. the line traces
+    /// back to a root commit. Porcelain emits a `boundary` marker for
+    /// these.
+    is_boundary: bool,
+    /// First parent of `commit_oid` if any; otherwise null. Porcelain
+    /// emits a `previous <oid> <path>` line when non-null.
+    previous_oid: ?Oid,
     /// Line bytes as they appear in the target blob, INCLUDING the
     /// trailing '\n' if present. Borrows from the arena.
     content: []const u8,
@@ -104,6 +123,9 @@ const ParsedCommit = struct {
     parent_oids: []const Oid,
     tree_oid: Oid,
     author: Author,
+    committer: Author,
+    /// First line of the commit message, no trailing newline.
+    summary: []const u8,
 };
 
 const WorkItem = struct {
@@ -194,22 +216,37 @@ fn loadCommit(ctx: *Ctx, oid: Oid) !*const ParsedCommit {
     defer parsed.deinit(ctx.transient);
 
     const author = try parseAuthorLine(parsed.author_line);
+    const committer = try parseAuthorLine(parsed.committer_line);
+
+    // First line of the message → summary.
+    const msg_end = std.mem.indexOfScalar(u8, parsed.message, '\n') orelse parsed.message.len;
+    const summary_src = parsed.message[0..msg_end];
 
     // Move everything into the arena.
     const parents_arena = try ctx.arena.alloc(Oid, parsed.parent_oids.len);
     @memcpy(parents_arena, parsed.parent_oids);
-    const name_arena = try ctx.arena.dupe(u8, author.name);
-    const email_arena = try ctx.arena.dupe(u8, author.email);
+    const author_name = try ctx.arena.dupe(u8, author.name);
+    const author_email = try ctx.arena.dupe(u8, author.email);
+    const committer_name = try ctx.arena.dupe(u8, committer.name);
+    const committer_email = try ctx.arena.dupe(u8, committer.email);
+    const summary = try ctx.arena.dupe(u8, summary_src);
 
     const entry = ParsedCommit{
         .parent_oids = parents_arena,
         .tree_oid = parsed.tree_oid,
         .author = .{
-            .name = name_arena,
-            .email = email_arena,
+            .name = author_name,
+            .email = author_email,
             .unix_time = author.unix_time,
             .tz_offset_minutes = author.tz_offset_minutes,
         },
+        .committer = .{
+            .name = committer_name,
+            .email = committer_email,
+            .unix_time = committer.unix_time,
+            .tz_offset_minutes = committer.tz_offset_minutes,
+        },
+        .summary = summary,
     };
     try ctx.commits.put(ctx.arena, oid.bytes, entry);
     return ctx.commits.getPtr(oid.bytes).?;
@@ -301,15 +338,21 @@ fn loadBlobLines(ctx: *Ctx, blob_oid: Oid) ![]const []const u8 {
     return slice;
 }
 
-fn attributeRegion(attributions: []?Oid, region: Region, commit_oid: Oid) void {
+fn attributeRegion(attributions: []?Oid, orig_lines: []u32, region: Region, commit_oid: Oid) void {
     var i: u32 = region.target_line_start;
     while (i <= region.target_line_end) : (i += 1) {
-        if (attributions[i - 1] == null) attributions[i - 1] = commit_oid;
+        if (attributions[i - 1] == null) {
+            attributions[i - 1] = commit_oid;
+            // The blob line in `commit_oid`'s frame for target line i
+            // is the region's blob_line_start plus the offset within
+            // the region.
+            orig_lines[i - 1] = region.blob_line_start + (i - region.target_line_start);
+        }
     }
 }
 
-fn attributeAll(attributions: []?Oid, regions: []const Region, commit_oid: Oid) void {
-    for (regions) |r| attributeRegion(attributions, r, commit_oid);
+fn attributeAll(attributions: []?Oid, orig_lines: []u32, regions: []const Region, commit_oid: Oid) void {
+    for (regions) |r| attributeRegion(attributions, orig_lines, r, commit_oid);
 }
 
 /// Single-parent step.
@@ -317,6 +360,7 @@ fn handleSingleParent(
     ctx: *Ctx,
     queue: *WorkQueue,
     attributions: []?Oid,
+    orig_lines: []u32,
     commit_oid: Oid,
     parent_oid: Oid,
     blob_in_commit: Oid,
@@ -327,7 +371,7 @@ fn handleSingleParent(
 
     if (blob_in_parent_opt == null) {
         // File didn't exist in parent → introduced in this commit.
-        attributeAll(attributions, regions_in, commit_oid);
+        attributeAll(attributions, orig_lines, regions_in, commit_oid);
         return;
     }
     const blob_in_parent = blob_in_parent_opt.?;
@@ -365,7 +409,7 @@ fn handleSingleParent(
         var split = try region_mod.splitRegionAgainstDiff(ctx.transient, r, edits, parent_oid);
         defer split.deinit(ctx.transient);
         // Residue → attributed to this commit.
-        for (split.residue_in_commit) |sub| attributeRegion(attributions, sub, commit_oid);
+        for (split.residue_in_commit) |sub| attributeRegion(attributions, orig_lines, sub, commit_oid);
         // Carried → pushed to parent.
         try carry_acc.appendSlice(ctx.transient, split.carry_to_parent);
     }
@@ -385,6 +429,7 @@ fn handleMergeCommit(
     ctx: *Ctx,
     queue: *WorkQueue,
     attributions: []?Oid,
+    orig_lines: []u32,
     commit_oid: Oid,
     parents: []const Oid,
     blob_in_commit: Oid,
@@ -458,7 +503,7 @@ fn handleMergeCommit(
     }
 
     // Whatever's still pending matched no parent → resolution content.
-    for (pending.items) |r| attributeRegion(attributions, r, commit_oid);
+    for (pending.items) |r| attributeRegion(attributions, orig_lines, r, commit_oid);
 
     // Push collected regions per parent.
     for (routed) |*r| {
@@ -524,14 +569,18 @@ pub fn blameFile(
     const total_lines: u32 = @intCast(target_lines.len);
 
     // Determine which lines to attribute (-L range or whole file).
+    // `-L N` from the CLI passes end = maxInt(u32); we clamp it to
+    // the file's last line. `-L N,M` with M past EOF is also clamped
+    // — matches git's behaviour.
     var range_start: u32 = 1;
     var range_end: u32 = total_lines;
     if (opts.line_range) |r| {
-        if (r.start == 0 or r.end == 0 or r.start > r.end or r.end > total_lines) {
-            return error.PathNotFoundAtRef; // close-enough error for invalid range
+        if (r.start == 0 or r.end == 0 or r.start > r.end) {
+            return error.PathNotFoundAtRef;
         }
+        if (r.start > total_lines) return error.PathNotFoundAtRef;
         range_start = r.start;
-        range_end = r.end;
+        range_end = @min(r.end, total_lines);
     }
 
     const requested_count: u32 = if (total_lines == 0) 0 else (range_end - range_start + 1);
@@ -539,9 +588,13 @@ pub fn blameFile(
     // attributions[i] holds the commit oid for target line (i+1), or
     // null if not yet attributed. Only slots in [range_start..range_end]
     // get written; the rest stay null and are filtered when we build
-    // the final BlameLine array.
+    // the final BlameLine array. `orig_lines[i]` holds the 1-based
+    // blob-line number in that attributed commit's blob — needed for
+    // porcelain output.
     var attributions = try arena.alloc(?Oid, total_lines);
     @memset(attributions, null);
+    var orig_lines = try arena.alloc(u32, total_lines);
+    @memset(orig_lines, 0);
 
     if (requested_count == 0) {
         // Empty file or empty range → no lines to attribute.
@@ -580,9 +633,9 @@ pub fn blameFile(
             if (examined >= cap) {
                 metrics.partial = true;
                 // Pin the residue to the target ref's commit.
-                attributeAll(attributions, item.regions, ref_oid);
+                attributeAll(attributions, orig_lines, item.regions, ref_oid);
                 while (queue.pop()) |trailing| {
-                    attributeAll(attributions, trailing.regions, ref_oid);
+                    attributeAll(attributions, orig_lines, trailing.regions, ref_oid);
                 }
                 break;
             }
@@ -599,21 +652,21 @@ pub fn blameFile(
         // defensive.
         const blob_in_commit_opt = try lookupPathInTree(&ctx, tree_oid);
         if (blob_in_commit_opt == null) {
-            attributeAll(attributions, item.regions, commit_oid);
+            attributeAll(attributions, orig_lines, item.regions, commit_oid);
             continue;
         }
         const blob_in_commit = blob_in_commit_opt.?;
 
         if (parents.len == 0) {
             // Root commit.
-            attributeAll(attributions, item.regions, commit_oid);
+            attributeAll(attributions, orig_lines, item.regions, commit_oid);
             continue;
         }
 
         if (parents.len == 1) {
-            try handleSingleParent(&ctx, &queue, attributions, commit_oid, parents[0], blob_in_commit, item.regions);
+            try handleSingleParent(&ctx, &queue, attributions, orig_lines, commit_oid, parents[0], blob_in_commit, item.regions);
         } else {
-            try handleMergeCommit(&ctx, &queue, attributions, commit_oid, parents, blob_in_commit, item.regions);
+            try handleMergeCommit(&ctx, &queue, attributions, orig_lines, commit_oid, parents, blob_in_commit, item.regions);
         }
     }
 
@@ -623,7 +676,11 @@ pub fn blameFile(
     // a connected history) gets pinned to the target ref.
     var i: u32 = range_start;
     while (i <= range_end) : (i += 1) {
-        if (attributions[i - 1] == null) attributions[i - 1] = ref_oid;
+        if (attributions[i - 1] == null) {
+            attributions[i - 1] = ref_oid;
+            // Best-effort orig_line: same as target line in ref's blob.
+            orig_lines[i - 1] = i;
+        }
     }
 
     // Build the BlameLine output.
@@ -633,13 +690,32 @@ pub fn blameFile(
     while (li <= range_end) : (li += 1) {
         const oid = attributions[li - 1].?;
         const cm = try loadCommit(&ctx, oid);
+        // Real `git blame --porcelain` emits `previous <parent> <path>`
+        // ONLY when the file actually existed at `path` in the source
+        // commit's first parent. For a commit that introduces the
+        // file, parent had no such path → no `previous`.
+        const previous_oid: ?Oid = blk: {
+            if (cm.parent_oids.len == 0) break :blk null;
+            const fp = cm.parent_oids[0];
+            const fp_commit = try loadCommit(&ctx, fp);
+            const fp_blob = try lookupPathInTree(&ctx, fp_commit.tree_oid);
+            break :blk if (fp_blob == null) null else fp;
+        };
         out_lines[w_idx] = .{
             .line_no = li,
+            .orig_line_no = orig_lines[li - 1],
             .commit_oid = oid,
             .author_name = cm.author.name,
             .author_email = cm.author.email,
             .author_time = cm.author.unix_time,
             .author_tz_offset_minutes = cm.author.tz_offset_minutes,
+            .committer_name = cm.committer.name,
+            .committer_email = cm.committer.email,
+            .committer_time = cm.committer.unix_time,
+            .committer_tz_offset_minutes = cm.committer.tz_offset_minutes,
+            .summary = cm.summary,
+            .is_boundary = cm.parent_oids.len == 0,
+            .previous_oid = previous_oid,
             .content = target_lines[li - 1],
         };
         w_idx += 1;
@@ -969,6 +1045,47 @@ test "blame: path not found at ref" {
     const c = try writeCommit(allocator, &store, tree, &.{}, "A", "a@a", 1, "x\n");
 
     try testing.expectError(error.PathNotFoundAtRef, blameFile(allocator, &store, c, "missing.txt", .{}));
+}
+
+test "blame: orig_line_no tracks source-commit line numbers across an insert" {
+    // A creates a 3-line file. B inserts a new line between line 1
+    // and line 2. The target file at B is 4 lines. Expected blame:
+    //   target line 1 → A, orig_line 1
+    //   target line 2 → B, orig_line 2 (the inserted line)
+    //   target line 3 → A, orig_line 2 (was line 2 in A)
+    //   target line 4 → A, orig_line 3 (was line 3 in A)
+    const allocator = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store = LooseStore.init(tmp.dir, io);
+
+    const v_a = "alpha\nbeta\ngamma\n";
+    const v_b = "alpha\nINSERTED\nbeta\ngamma\n";
+    const blob_a = try putObject(allocator, &store, .blob, v_a);
+    const blob_b = try putObject(allocator, &store, .blob, v_b);
+    const tree_a = try writeSingleFileTree(allocator, &store, "f.txt", blob_a);
+    const tree_b = try writeSingleFileTree(allocator, &store, "f.txt", blob_b);
+    const a = try writeCommit(allocator, &store, tree_a, &.{}, "A", "a@a", 1, "first\n");
+    const parents = [_]Oid{a};
+    const b = try writeCommit(allocator, &store, tree_b, &parents, "B", "b@b", 2, "insert\n");
+
+    var result = try blameFile(allocator, &store, b, "f.txt", .{});
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 4), result.lines.len);
+
+    try testing.expect(result.lines[0].commit_oid.eql(a));
+    try testing.expectEqual(@as(u32, 1), result.lines[0].orig_line_no);
+
+    try testing.expect(result.lines[1].commit_oid.eql(b));
+    try testing.expectEqual(@as(u32, 2), result.lines[1].orig_line_no);
+
+    try testing.expect(result.lines[2].commit_oid.eql(a));
+    try testing.expectEqual(@as(u32, 2), result.lines[2].orig_line_no);
+
+    try testing.expect(result.lines[3].commit_oid.eql(a));
+    try testing.expectEqual(@as(u32, 3), result.lines[3].orig_line_no);
 }
 
 test "blame: path is a directory" {

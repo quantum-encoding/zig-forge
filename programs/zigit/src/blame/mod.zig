@@ -17,7 +17,12 @@ pub const BlameResult = blame.BlameResult;
 pub const BlameError = blame.BlameError;
 pub const BlameOptions = blame.BlameOptions;
 
+pub const format = @import("format.zig");
+pub const writePorcelain = format.writePorcelain;
+pub const writeHuman = format.writeHuman;
+
 test {
     _ = region;
     _ = blame;
+    _ = format;
 }

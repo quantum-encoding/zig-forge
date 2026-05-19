@@ -1388,6 +1388,176 @@ esac
 
 unset TZ GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
 
+# ── Section 28: blame — line-level attribution against the commit graph ──────
+echo
+echo "28. blame — porcelain byte-parity vs git blame"
+
+# All commits use UTC + the standard test identities so timestamps land
+# at predictable values that match between git and zigit.
+export TZ=UTC
+
+bl_check_parity() {
+    # Compare `git blame --porcelain <args> $1` against `zigit blame
+    # --porcelain <args> $1` inside the supplied repo dir. $2 is the
+    # name to print; remaining args go straight to both blame commands.
+    local repo_dir="$1"; shift
+    local name="$1"; shift
+    local path="$1"; shift
+    local g zi
+    g=$(cd "$repo_dir" && git blame --porcelain "$@" "$path" 2>&1)
+    zi=$(cd "$repo_dir" && "$ZIGIT_BIN" blame --porcelain "$@" "$path" 2>&1)
+    if [[ "$g" == "$zi" ]]; then
+        echo -e "  ${GREEN}✓${NC} $name"
+        PASS=$((PASS + 1))
+    else
+        echo -e "  ${RED}✗${NC} $name"
+        diff <(printf '%s' "$g") <(printf '%s' "$zi") | head -20 | sed 's/^/    /'
+        FAIL=$((FAIL + 1))
+        FAILED_NAMES+=("$name")
+    fi
+}
+
+# § 28.1 — single-author file, 3 commits adding/modifying lines.
+BL1="$WORK/blame-single-author"
+mkdir -p "$BL1"
+(
+    cd "$BL1" && git init -q -b main .
+    export GIT_AUTHOR_NAME=Alice GIT_AUTHOR_EMAIL=a@example.com
+    export GIT_COMMITTER_NAME=Alice GIT_COMMITTER_EMAIL=a@example.com
+    GIT_AUTHOR_DATE="1700000000 +0000" GIT_COMMITTER_DATE="1700000000 +0000" \
+        bash -c "printf 'one\ntwo\nthree\n' > f.txt && git add f.txt && git commit -qm init"
+    GIT_AUTHOR_DATE="1700001000 +0000" GIT_COMMITTER_DATE="1700001000 +0000" \
+        bash -c "printf 'one\nTWO-changed\nthree\n' > f.txt && git add f.txt && git commit -qm 'change line 2'"
+    GIT_AUTHOR_DATE="1700002000 +0000" GIT_COMMITTER_DATE="1700002000 +0000" \
+        bash -c "printf 'one\nTWO-changed\nthree\nfour\n' > f.txt && git add f.txt && git commit -qm 'append line 4'"
+)
+bl_check_parity "$BL1" "28.1 single-author file (3 commits)" "f.txt"
+
+# § 28.2 — multi-author file, three identities take turns.
+BL2="$WORK/blame-multi-author"
+mkdir -p "$BL2"
+(
+    cd "$BL2" && git init -q -b main .
+    GIT_AUTHOR_NAME=Alice GIT_AUTHOR_EMAIL=a@example.com \
+        GIT_COMMITTER_NAME=Alice GIT_COMMITTER_EMAIL=a@example.com \
+        GIT_AUTHOR_DATE="1700100000 +0000" GIT_COMMITTER_DATE="1700100000 +0000" \
+        bash -c "printf 'a-line-1\na-line-2\na-line-3\n' > f.txt && git add f.txt && git commit -qm A"
+    GIT_AUTHOR_NAME=Bob GIT_AUTHOR_EMAIL=b@example.com \
+        GIT_COMMITTER_NAME=Bob GIT_COMMITTER_EMAIL=b@example.com \
+        GIT_AUTHOR_DATE="1700101000 +0000" GIT_COMMITTER_DATE="1700101000 +0000" \
+        bash -c "printf 'a-line-1\nb-replaced-2\na-line-3\n' > f.txt && git add f.txt && git commit -qm B"
+    GIT_AUTHOR_NAME=Carol GIT_AUTHOR_EMAIL=c@example.com \
+        GIT_COMMITTER_NAME=Carol GIT_COMMITTER_EMAIL=c@example.com \
+        GIT_AUTHOR_DATE="1700102000 +0000" GIT_COMMITTER_DATE="1700102000 +0000" \
+        bash -c "printf 'a-line-1\nb-replaced-2\na-line-3\nc-appended-4\n' > f.txt && git add f.txt && git commit -qm C"
+)
+bl_check_parity "$BL2" "28.2 multi-author file (3 identities)" "f.txt"
+
+# § 28.3 — file unchanged across many commits (tree-OID short-circuit
+# should be the algorithm's hot path here). 30 commits in between two
+# that touch f.txt; each intermediate commit edits a *sibling* file so
+# tree OIDs differ but f.txt's blob OID stays the same.
+BL3="$WORK/blame-unchanged-run"
+mkdir -p "$BL3"
+(
+    cd "$BL3" && git init -q -b main .
+    GIT_AUTHOR_NAME=Alice GIT_AUTHOR_EMAIL=a@example.com \
+        GIT_COMMITTER_NAME=Alice GIT_COMMITTER_EMAIL=a@example.com \
+        GIT_AUTHOR_DATE="1700200000 +0000" GIT_COMMITTER_DATE="1700200000 +0000" \
+        bash -c "printf 'alpha\nbeta\ngamma\ndelta\nepsilon\n' > f.txt && git add f.txt && git commit -qm init"
+    for j in $(seq 1 30); do
+        # Add a fixed offset so the timestamps stay well-formed unix
+        # epoch values for both single-digit and two-digit j.
+        ts=$((1700200000 + j * 100))
+        GIT_AUTHOR_NAME=Bob GIT_AUTHOR_EMAIL=b@example.com \
+            GIT_COMMITTER_NAME=Bob GIT_COMMITTER_EMAIL=b@example.com \
+            GIT_AUTHOR_DATE="$ts +0000" GIT_COMMITTER_DATE="$ts +0000" \
+            bash -c "echo bump-$j >> sibling.txt && git add sibling.txt && git commit -qm noop-$j"
+    done
+    GIT_AUTHOR_NAME=Carol GIT_AUTHOR_EMAIL=c@example.com \
+        GIT_COMMITTER_NAME=Carol GIT_COMMITTER_EMAIL=c@example.com \
+        GIT_AUTHOR_DATE="1700299000 +0000" GIT_COMMITTER_DATE="1700299000 +0000" \
+        bash -c "printf 'alpha\nbeta\nGAMMA-CHANGED\ndelta\nepsilon\n' > f.txt && git add f.txt && git commit -qm 'edit line 3'"
+)
+bl_check_parity "$BL3" "28.3 file unchanged across 30 commits" "f.txt"
+
+# § 28.4 — merge commit with non-trivial attribution. Branch B modifies
+# line 3 of f.txt. Branch C modifies line 5. Merge M (first parent = B)
+# takes both. Real git blame must attribute line 5 to C, not to M.
+BL4="$WORK/blame-merge"
+mkdir -p "$BL4"
+(
+    cd "$BL4" && git init -q -b main .
+    GIT_AUTHOR_NAME=Alice GIT_AUTHOR_EMAIL=a@example.com \
+        GIT_COMMITTER_NAME=Alice GIT_COMMITTER_EMAIL=a@example.com \
+        GIT_AUTHOR_DATE="1700300000 +0000" GIT_COMMITTER_DATE="1700300000 +0000" \
+        bash -c "printf 'line1\nline2\nline3\nline4\nline5\n' > f.txt && git add f.txt && git commit -qm base"
+    git checkout -q -b branch-b
+    GIT_AUTHOR_NAME=Bob GIT_AUTHOR_EMAIL=b@example.com \
+        GIT_COMMITTER_NAME=Bob GIT_COMMITTER_EMAIL=b@example.com \
+        GIT_AUTHOR_DATE="1700301000 +0000" GIT_COMMITTER_DATE="1700301000 +0000" \
+        bash -c "printf 'line1\nline2\nline3-B\nline4\nline5\n' > f.txt && git add f.txt && git commit -qm 'b changes line 3'"
+    git checkout -q main
+    git checkout -q -b branch-c
+    GIT_AUTHOR_NAME=Carol GIT_AUTHOR_EMAIL=c@example.com \
+        GIT_COMMITTER_NAME=Carol GIT_COMMITTER_EMAIL=c@example.com \
+        GIT_AUTHOR_DATE="1700302000 +0000" GIT_COMMITTER_DATE="1700302000 +0000" \
+        bash -c "printf 'line1\nline2\nline3\nline4\nline5-C\n' > f.txt && git add f.txt && git commit -qm 'c changes line 5'"
+    git checkout -q main
+    git merge -q --no-ff branch-b -m 'merge B'
+    # Now merge C — git will conflict, but we resolve manually to the
+    # union state so the resulting blob holds both edits.
+    GIT_AUTHOR_NAME=Dave GIT_AUTHOR_EMAIL=d@example.com \
+        GIT_COMMITTER_NAME=Dave GIT_COMMITTER_EMAIL=d@example.com \
+        GIT_AUTHOR_DATE="1700303000 +0000" GIT_COMMITTER_DATE="1700303000 +0000" \
+        bash -c "git merge -q --no-ff -m merge-C --strategy=ours branch-c; printf 'line1\nline2\nline3-B\nline4\nline5-C\n' > f.txt && git add f.txt && git commit -qm 'resolve merge' --amend --no-edit"
+)
+bl_check_parity "$BL4" "28.4 merge commit — line from second parent attributes to its origin" "f.txt"
+
+# § 28.5 — file created mid-history (first commits don't have f.txt).
+BL5="$WORK/blame-created-mid"
+mkdir -p "$BL5"
+(
+    cd "$BL5" && git init -q -b main .
+    for j in 1 2 3; do
+        GIT_AUTHOR_NAME=Alice GIT_AUTHOR_EMAIL=a@example.com \
+            GIT_COMMITTER_NAME=Alice GIT_COMMITTER_EMAIL=a@example.com \
+            GIT_AUTHOR_DATE="170040${j}000 +0000" GIT_COMMITTER_DATE="170040${j}000 +0000" \
+            bash -c "echo pre-$j >> seed.txt && git add seed.txt && git commit -qm seed-$j"
+    done
+    GIT_AUTHOR_NAME=Bob GIT_AUTHOR_EMAIL=b@example.com \
+        GIT_COMMITTER_NAME=Bob GIT_COMMITTER_EMAIL=b@example.com \
+        GIT_AUTHOR_DATE="1700405000 +0000" GIT_COMMITTER_DATE="1700405000 +0000" \
+        bash -c "printf 'new-1\nnew-2\nnew-3\n' > f.txt && git add f.txt && git commit -qm 'create f.txt'"
+)
+bl_check_parity "$BL5" "28.5 file created mid-history" "f.txt"
+
+# § 28.6 — -L range on §28.2's multi-author fixture.
+bl_check_parity "$BL2" "28.6 -L range 2,3 on multi-author file" "f.txt" -L 2,3
+
+# § 28.7 — deleted lines. A creates 5 lines, B deletes the middle one,
+# C appends a line. Blame at C must not surface the deleted line.
+BL7="$WORK/blame-deletions"
+mkdir -p "$BL7"
+(
+    cd "$BL7" && git init -q -b main .
+    GIT_AUTHOR_NAME=Alice GIT_AUTHOR_EMAIL=a@example.com \
+        GIT_COMMITTER_NAME=Alice GIT_COMMITTER_EMAIL=a@example.com \
+        GIT_AUTHOR_DATE="1700500000 +0000" GIT_COMMITTER_DATE="1700500000 +0000" \
+        bash -c "printf 'a1\na2\na3\na4\na5\n' > f.txt && git add f.txt && git commit -qm 'A creates 5 lines'"
+    GIT_AUTHOR_NAME=Bob GIT_AUTHOR_EMAIL=b@example.com \
+        GIT_COMMITTER_NAME=Bob GIT_COMMITTER_EMAIL=b@example.com \
+        GIT_AUTHOR_DATE="1700501000 +0000" GIT_COMMITTER_DATE="1700501000 +0000" \
+        bash -c "printf 'a1\na2\na4\na5\n' > f.txt && git add f.txt && git commit -qm 'B deletes line 3'"
+    GIT_AUTHOR_NAME=Carol GIT_AUTHOR_EMAIL=c@example.com \
+        GIT_COMMITTER_NAME=Carol GIT_COMMITTER_EMAIL=c@example.com \
+        GIT_AUTHOR_DATE="1700502000 +0000" GIT_COMMITTER_DATE="1700502000 +0000" \
+        bash -c "printf 'a1\na2\na4\na5\nc6\n' > f.txt && git add f.txt && git commit -qm 'C appends'"
+)
+bl_check_parity "$BL7" "28.7 deletions — removed line absent from blame output" "f.txt"
+
+unset TZ
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo
 TOTAL=$((PASS + FAIL))

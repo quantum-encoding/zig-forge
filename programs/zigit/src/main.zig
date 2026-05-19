@@ -36,6 +36,7 @@ const stash_cmd = @import("cli/stash.zig");
 const remote_cmd = @import("cli/remote.zig");
 const reflog_cmd = @import("cli/reflog.zig");
 const prune_cmd = @import("cli/prune.zig");
+const blame_cmd = @import("cli/blame.zig");
 
 const usage =
     \\zigit — git in zig
@@ -72,6 +73,7 @@ const usage =
     \\  remote [-v|add|remove|show] [args]            Manage [remote "..."] entries
     \\  reflog [show [REF]]                           Show reflog (default HEAD)
     \\  prune [--dry-run]                             Delete unreferenced loose objects
+    \\  blame [-L N[,M]] [--porcelain] PATH           Line-level attribution against HEAD's history
     \\
 ;
 
@@ -187,6 +189,14 @@ pub fn main(init: std.process.Init) !void {
             },
             else => return err,
         };
+    } else if (std.mem.eql(u8, cmd, "blame")) {
+        const code = blame_cmd.run(allocator, io, rest) catch |err| {
+            var buf: [256]u8 = undefined;
+            const msg = try std.fmt.bufPrint(&buf, "zigit blame: {s}\n", .{@errorName(err)});
+            try writeAll(io, .stderr, msg);
+            std.process.exit(128);
+        };
+        if (code != 0) std.process.exit(code);
     } else if (std.mem.eql(u8, cmd, "remote")) {
         remote_cmd.run(allocator, io, rest) catch |err| switch (err) {
             error.RemoteNotFound,
