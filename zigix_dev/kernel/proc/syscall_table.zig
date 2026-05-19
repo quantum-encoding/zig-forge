@@ -119,6 +119,8 @@ pub fn init() void {
     table[43] = socket_syscalls.sysAccept; // accept
     table[44] = socket_syscalls.sysSendto; // sendto
     table[45] = socket_syscalls.sysRecvfrom; // recvfrom
+    table[46] = socket_syscalls.sysSendmsg; // sendmsg
+    table[47] = socket_syscalls.sysRecvmsg; // recvmsg
     table[48] = socket_syscalls.sysShutdown; // shutdown
     table[49] = socket_syscalls.sysBind; // bind
     table[50] = socket_syscalls.sysListen; // listen

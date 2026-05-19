@@ -566,7 +566,272 @@ pub fn sysShutdown(frame: *idt.InterruptFrame) void {
     frame.rax = 0;
 }
 
-// --- Helper ---
+/// sendmsg(sockfd, msghdr, flags) — nr 46
+/// Walks the iovec array in msg_iov, coalesces into a single send buffer
+/// (capped at 1472 like sendto), and routes through TCP/UDP. Ignores
+/// msg_control (no SCM_RIGHTS / fd-passing yet).
+///
+/// Linux msghdr (LP64, 56 bytes):
+///   0:  msg_name        (u64 ptr)
+///   8:  msg_namelen     (u32) + 4 pad
+///  16:  msg_iov         (u64 ptr)
+///  24:  msg_iovlen      (u64)
+///  32:  msg_control     (u64 ptr)
+///  40:  msg_controllen  (u64)
+///  48:  msg_flags       (u32) + 4 pad
+pub fn sysSendmsg(frame: *idt.InterruptFrame) void {
+    const fd = frame.rdi;
+    const msg_addr = frame.rsi;
+    // flags = frame.rdx — ignored (MSG_NOSIGNAL etc.)
+
+    const current = scheduler.currentProcess() orelse {
+        frame.rax = @bitCast(@as(i64, -errno.ESRCH));
+        return;
+    };
+    const desc = fd_table.fdGet(&current.fds, fd) orelse {
+        frame.rax = @bitCast(@as(i64, -errno.EBADF));
+        return;
+    };
+
+    if (!syscall.validateUserBuffer(msg_addr, 56)) {
+        frame.rax = @bitCast(@as(i64, -errno.EFAULT));
+        return;
+    }
+
+    var msg: [56]u8 = undefined;
+    if (syscall.copyFromUserRaw(current.page_table, msg_addr, &msg, 56) != 56) {
+        frame.rax = @bitCast(@as(i64, -errno.EFAULT));
+        return;
+    }
+    const iov_addr = readU64LE(msg[16..24]);
+    const iovlen = readU64LE(msg[24..32]);
+    if (iovlen == 0 or iovlen > 1024 or iov_addr == 0) {
+        frame.rax = @bitCast(@as(i64, -errno.EINVAL));
+        return;
+    }
+
+    const sock_idx = getSocketFromDesc(desc) orelse {
+        frame.rax = @bitCast(@as(i64, -errno.EBADF));
+        return;
+    };
+    const sock = socket.getSocket(sock_idx) orelse {
+        frame.rax = @bitCast(@as(i64, -errno.EBADF));
+        return;
+    };
+
+    // Optional sockaddr_in via msg_name (DGRAM/RAW).
+    var dst_ip: u32 = sock.remote_ip;
+    var dst_port: u16 = sock.remote_port;
+    const name_ptr = readU64LE(msg[0..8]);
+    const namelen = @as(u32, @truncate(readU64LE(msg[8..16]) & 0xFFFF_FFFF));
+    if (name_ptr != 0 and namelen >= 16) {
+        var sa_buf: [16]u8 = undefined;
+        if (syscall.copyFromUserRaw(current.page_table, name_ptr, &sa_buf, 16) >= 8) {
+            dst_port = ethernet.getU16BE(sa_buf[2..4]);
+            dst_ip = ethernet.getU32BE(sa_buf[4..8]);
+        }
+    }
+
+    // Walk iovec, coalesce up to 1472 bytes (matches sendto cap).
+    var send_buf: [1472]u8 = undefined;
+    var written: usize = 0;
+    var i: u64 = 0;
+    const cnt: usize = @truncate(iovlen);
+    while (i < cnt and written < send_buf.len) : (i += 1) {
+        const iov_entry_addr = iov_addr + i * 16;
+        var iov_entry: [16]u8 = undefined;
+        if (syscall.copyFromUserRaw(current.page_table, iov_entry_addr, &iov_entry, 16) != 16) break;
+        const base = readU64LE(iov_entry[0..8]);
+        const blen = readU64LE(iov_entry[8..16]);
+        if (blen == 0) continue;
+
+        const room = send_buf.len - written;
+        const want: usize = if (blen > room) room else @truncate(blen);
+        const got = syscall.copyFromUserRaw(current.page_table, base, send_buf[written .. written + want], want);
+        written += got;
+        if (got < want) break;
+    }
+
+    if (written == 0) {
+        frame.rax = 0;
+        return;
+    }
+
+    if (sock.sock_type == socket.SOCK_STREAM) {
+        const sent = tcp.sendData(sock.tcp_conn_idx, send_buf[0..written]);
+        if (sent >= 0) {
+            frame.rax = @as(u64, @bitCast(@as(i64, sent)));
+        } else {
+            frame.rax = @bitCast(@as(i64, -errno.EIO));
+        }
+    } else if (sock.sock_type == socket.SOCK_DGRAM) {
+        if (udp.send(sock.bound_port, dst_ip, dst_port, send_buf[0..written])) {
+            frame.rax = written;
+        } else {
+            frame.rax = @bitCast(@as(i64, -errno.EIO));
+        }
+    } else if (sock.sock_type == socket.SOCK_RAW and sock.protocol == socket.IPPROTO_ICMP) {
+        if (ipv4.send(ipv4.PROTO_ICMP, dst_ip, send_buf[0..written])) {
+            frame.rax = written;
+        } else {
+            frame.rax = @bitCast(@as(i64, -errno.EIO));
+        }
+    } else {
+        frame.rax = @bitCast(@as(i64, -errno.EINVAL));
+    }
+}
+
+/// recvmsg(sockfd, msghdr, flags) — nr 47
+/// Walks the iovec array, fills each buffer with bytes received from the
+/// socket. Blocks on EAGAIN like recvfrom. msg_name is left untouched;
+/// msg_controllen + msg_flags are zeroed so libc sees no ancillary data.
+pub fn sysRecvmsg(frame: *idt.InterruptFrame) void {
+    const fd = frame.rdi;
+    const msg_addr = frame.rsi;
+    // flags = frame.rdx — ignored
+
+    const current = scheduler.currentProcess() orelse {
+        frame.rax = @bitCast(@as(i64, -errno.ESRCH));
+        return;
+    };
+    const desc = fd_table.fdGet(&current.fds, fd) orelse {
+        frame.rax = @bitCast(@as(i64, -errno.EBADF));
+        return;
+    };
+
+    if (!syscall.validateUserBuffer(msg_addr, 56)) {
+        frame.rax = @bitCast(@as(i64, -errno.EFAULT));
+        return;
+    }
+
+    var msg: [56]u8 = undefined;
+    if (syscall.copyFromUserRaw(current.page_table, msg_addr, &msg, 56) != 56) {
+        frame.rax = @bitCast(@as(i64, -errno.EFAULT));
+        return;
+    }
+    const iov_addr = readU64LE(msg[16..24]);
+    const iovlen = readU64LE(msg[24..32]);
+    if (iovlen == 0 or iovlen > 1024 or iov_addr == 0) {
+        frame.rax = @bitCast(@as(i64, -errno.EINVAL));
+        return;
+    }
+
+    const sock_idx = getSocketFromDesc(desc) orelse {
+        frame.rax = @bitCast(@as(i64, -errno.EBADF));
+        return;
+    };
+    const sock = socket.getSocket(sock_idx) orelse {
+        frame.rax = @bitCast(@as(i64, -errno.EBADF));
+        return;
+    };
+
+    // Compute total iovec capacity, capped at the kernel staging buffer.
+    var kernel_buf: [4096]u8 = undefined;
+    var capacity: usize = 0;
+    var iov_entries: [1024][2]u64 = undefined;
+    var nentries: usize = 0;
+    {
+        var ii: u64 = 0;
+        const cnt: usize = @truncate(iovlen);
+        while (ii < cnt and capacity < kernel_buf.len) : (ii += 1) {
+            const iov_entry_addr = iov_addr + ii * 16;
+            var iov_entry: [16]u8 = undefined;
+            if (syscall.copyFromUserRaw(current.page_table, iov_entry_addr, &iov_entry, 16) != 16) break;
+            const base = readU64LE(iov_entry[0..8]);
+            const blen = readU64LE(iov_entry[8..16]);
+            const room = kernel_buf.len - capacity;
+            const take: usize = if (blen > room) room else @truncate(blen);
+            iov_entries[nentries] = .{ base, take };
+            nentries += 1;
+            capacity += take;
+        }
+    }
+    if (capacity == 0) {
+        frame.rax = 0;
+        return;
+    }
+
+    var result: isize = 0;
+    if (sock.sock_type == socket.SOCK_STREAM) {
+        result = tcp.recvData(sock.tcp_conn_idx, kernel_buf[0..capacity]);
+    } else if (sock.sock_type == socket.SOCK_DGRAM) {
+        if (sock.udp_rx_count == 0) {
+            sock.blocked_pid = current.pid;
+            result = -11;
+        } else {
+            const to_copy: usize = if (capacity > sock.udp_rx_count) @as(usize, sock.udp_rx_count) else capacity;
+            for (0..to_copy) |k| {
+                kernel_buf[k] = sock.udp_rx_buf[(sock.udp_rx_head +% @as(u16, @truncate(k))) % 2048];
+            }
+            sock.udp_rx_head = (sock.udp_rx_head +% @as(u16, @truncate(to_copy))) % 2048;
+            sock.udp_rx_count -= @truncate(to_copy);
+            result = @intCast(to_copy);
+        }
+    } else if (sock.sock_type == socket.SOCK_RAW and sock.protocol == socket.IPPROTO_ICMP) {
+        if (!sock.icmp_rx_ready) {
+            sock.blocked_pid = current.pid;
+            result = -11;
+        } else {
+            const to_copy: usize = if (capacity > sock.icmp_rx_len) @as(usize, sock.icmp_rx_len) else capacity;
+            for (0..to_copy) |k| kernel_buf[k] = sock.icmp_rx_buf[k];
+            sock.icmp_rx_ready = false;
+            result = @intCast(to_copy);
+        }
+    } else {
+        frame.rax = @bitCast(@as(i64, -errno.EINVAL));
+        return;
+    }
+
+    if (result == -11) {
+        if (sock.sock_type == socket.SOCK_STREAM) {
+            if (tcp.getConnection(sock.tcp_conn_idx)) |conn| {
+                conn.waiting_pid = current.pid;
+            }
+        }
+        frame.rip -= 2; // replay syscall on wake
+        current.state = .blocked_on_net;
+        scheduler.blockAndSchedule(frame);
+        return;
+    }
+
+    if (result < 0) {
+        frame.rax = @bitCast(@as(i64, result));
+        return;
+    }
+
+    // Scatter bytes back across the iovec array.
+    const total: usize = @intCast(result);
+    var copied: usize = 0;
+    var j: usize = 0;
+    while (j < nentries and copied < total) : (j += 1) {
+        const base = iov_entries[j][0];
+        const take = iov_entries[j][1];
+        if (take == 0) continue;
+        const remain = total - copied;
+        const want: usize = if (take > remain) remain else take;
+        if (!syscall.copyToUser(current.page_table, base, kernel_buf[copied .. copied + want])) break;
+        copied += want;
+    }
+
+    // Zero msg_controllen + msg_flags so libc sees no ancillary data.
+    const zero16: [16]u8 = .{0} ** 16;
+    _ = syscall.copyToUser(current.page_table, msg_addr + 40, &zero16);
+
+    frame.rax = copied;
+}
+
+// --- Helpers ---
+
+fn readU64LE(buf: []const u8) u64 {
+    return @as(u64, buf[0]) |
+        (@as(u64, buf[1]) << 8) |
+        (@as(u64, buf[2]) << 16) |
+        (@as(u64, buf[3]) << 24) |
+        (@as(u64, buf[4]) << 32) |
+        (@as(u64, buf[5]) << 40) |
+        (@as(u64, buf[6]) << 48) |
+        (@as(u64, buf[7]) << 56);
+}
 
 fn getSocketFromDesc(desc: *vfs.FileDescription) ?usize {
     return socket.getSocketIndexFromInode(desc.inode);
