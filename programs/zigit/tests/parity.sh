@@ -320,6 +320,74 @@ zigit_porc=$(cd "$ST" && "$ZIGIT_BIN" status -s)
 git_porc=$(cd "$ST" && git status --porcelain)
 check "porcelain MM (staged + unstaged on same file)" "$git_porc" "$zigit_porc"
 
+# ── 10.gitignore — wire-up exercises ─────────────────────────────────────────
+# A fresh repo so the previous scenario's state doesn't bleed in.
+SI="$WORK/status-ignore"
+mkdir -p "$SI"
+( cd "$SI" && "$ZIGIT_BIN" init >/dev/null )
+
+export GIT_AUTHOR_DATE=1700000000 GIT_COMMITTER_DATE=$GIT_AUTHOR_DATE
+
+# Setup: track legacy.log + commit, THEN add `*.log` to .gitignore.
+echo "v1" > "$SI/legacy.log"
+( cd "$SI" && "$ZIGIT_BIN" add legacy.log >/dev/null && "$ZIGIT_BIN" commit -m "add legacy" >/dev/null )
+echo "*.log" > "$SI/.gitignore"
+( cd "$SI" && "$ZIGIT_BIN" add .gitignore >/dev/null && "$ZIGIT_BIN" commit -m "ignore *.log" >/dev/null )
+
+# Clean state: tracked-but-ignored file with no edits should yield
+# empty porcelain. (The regression we're guarding against is the
+# file getting wrongly reported as deleted because the filtered walk
+# excludes it.)
+zigit_porc=$(cd "$SI" && "$ZIGIT_BIN" status -s)
+git_porc=$(cd "$SI" && git status --porcelain)
+check "tracked-but-ignored file with no edits is silent" "$git_porc" "$zigit_porc"
+
+# Modify the tracked-but-ignored file. Must show ` M legacy.log` (not
+# ` D legacy.log` and not absent).
+echo "v2" > "$SI/legacy.log"
+zigit_porc=$(cd "$SI" && "$ZIGIT_BIN" status -s)
+git_porc=$(cd "$SI" && git status --porcelain)
+check "tracked-but-ignored file modified shows ' M', not deleted" "$git_porc" "$zigit_porc"
+
+# Delete the tracked-but-ignored file from disk. Must show ` D`.
+rm "$SI/legacy.log"
+zigit_porc=$(cd "$SI" && "$ZIGIT_BIN" status -s)
+git_porc=$(cd "$SI" && git status --porcelain)
+check "tracked-but-ignored file deleted shows ' D'" "$git_porc" "$zigit_porc"
+
+# Restore + reset for the next checks.
+echo "v1" > "$SI/legacy.log"
+
+# Untracked file matching .gitignore is filtered out.
+echo "x" > "$SI/should_be_hidden.log"
+zigit_porc=$(cd "$SI" && "$ZIGIT_BIN" status -s)
+git_porc=$(cd "$SI" && git status --porcelain)
+check "untracked file matching .gitignore is filtered out" "$git_porc" "$zigit_porc"
+
+# Directory prune: drop a `node_modules/` rule and create a deep
+# subtree that must NOT show up under untracked.
+echo "node_modules/" >> "$SI/.gitignore"
+( cd "$SI" && "$ZIGIT_BIN" add .gitignore >/dev/null && "$ZIGIT_BIN" commit -m "ignore nm" >/dev/null )
+mkdir -p "$SI/node_modules/pkg"
+echo "x" > "$SI/node_modules/lib.js"
+echo "x" > "$SI/node_modules/pkg/index.js"
+zigit_porc=$(cd "$SI" && "$ZIGIT_BIN" status -s)
+git_porc=$(cd "$SI" && git status --porcelain)
+check "excluded directory pruned from untracked listing" "$git_porc" "$zigit_porc"
+
+# Negation: a deeper `!keep.txt` un-ignores a specific file at the
+# same scope as the parent rule (sibling, not nested-inside-excluded
+# — that case is covered by the unit tests).
+echo "" >> "$SI/.gitignore"
+echo "*.tmp" >> "$SI/.gitignore"
+echo "!keep.tmp" >> "$SI/.gitignore"
+( cd "$SI" && "$ZIGIT_BIN" add .gitignore >/dev/null && "$ZIGIT_BIN" commit -m "tmp + keep" >/dev/null )
+echo "x" > "$SI/drop.tmp"
+echo "x" > "$SI/keep.tmp"
+zigit_porc=$(cd "$SI" && "$ZIGIT_BIN" status -s)
+git_porc=$(cd "$SI" && git status --porcelain)
+check "negation re-includes the specific untracked file" "$git_porc" "$zigit_porc"
+
 unset TZ GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
 
 # ── Section 11: diff ──────────────────────────────────────────────────────────

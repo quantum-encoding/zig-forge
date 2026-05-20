@@ -13,7 +13,17 @@
 //
 // Plus one set:
 //
-//   * untracked = Workdir paths not in Index
+//   * untracked = Workdir paths not in Index, after .gitignore filtering.
+//
+// .gitignore handling (v1.1):
+//
+//   We load a Ruleset and let it filter the walk. The CRITICAL
+//   ordering: tracked-file state (modified/deleted) comes from
+//   iterating the INDEX directly and reading each path off disk —
+//   NOT from the walk listing. Otherwise a tracked file that now
+//   matches `.gitignore` would be filtered out of the walk and
+//   misreported as deleted. The walk's job is "what UNTRACKED paths
+//   exist," not "what files exist." See docs/V1_1_SPEC.md.
 //
 // Output formats:
 //
@@ -24,10 +34,9 @@
 //                 HEAD, Y = workdir status vs index. Space = unmodified.
 //                 ?? = untracked.
 //
-// Limitations (deferred to v1.1):
-//   * No .gitignore — every untracked file shows up.
-//   * Symlinks are recorded as untracked rather than hashed-as-targets.
-//   * No stat-cache fast path; we re-hash every workdir file on every
+// Remaining v1.1 work:
+//   * Symlink-target hashing for is_dir/symlink-mode in the index.
+//   * Stat-cache fast path; we re-hash every tracked file on every
 //     `status` invocation. Correct, slow on big trees.
 
 const std = @import("std");
@@ -107,12 +116,19 @@ pub fn run(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !void
     // output stays clean.
     if (!porcelain) try maybeWarnGitmodules(io, work_root);
 
-    // TODO(v1.1): pass a `*const Ruleset` here so .gitignore is
-    // honoured. For this commit, walker now accepts the parameter
-    // but status hasn't wired the ruleset yet — `null` preserves
-    // existing behaviour (every untracked path is listed).
-    const listing = try zigit.workdir.walk(allocator, io, work_root, null);
-    defer zigit.workdir.freeEntries(allocator, listing);
+    // ── Load the .gitignore ruleset ────────────────────────────────────
+    // Read .git/info/exclude bytes (optional). We don't yet resolve
+    // `core.excludesFile` from config — TODO for a follow-up.
+    const info_exclude_bytes_opt = repo.git_dir.readFileAlloc(io, "info/exclude", allocator, .unlimited) catch |err| switch (err) {
+        error.FileNotFound, error.IsDir => null,
+        else => |e| return e,
+    };
+    defer if (info_exclude_bytes_opt) |b| allocator.free(b);
+
+    var rs = try zigit.ignore.load(allocator, io, work_root, .{
+        .info_exclude_bytes = info_exclude_bytes_opt orelse "",
+    });
+    defer rs.deinit();
 
     // ── Compute per-path state ─────────────────────────────────────────
     var state_by_path: std.StringHashMapUnmanaged(PathState) = .empty;
@@ -128,7 +144,9 @@ pub fn run(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !void
     var untracked: std.ArrayListUnmanaged([]const u8) = .empty;
     defer untracked.deinit(allocator);
 
-    // Pass 1: staged comparison (Index vs HEAD).
+    // ── Pass 1: staged comparison (Index vs HEAD). ─────────────────────
+    // Pure index_map vs head_map; the workdir / ignore filter never
+    // touch this.
     var idx_iter = index_map.iterator();
     while (idx_iter.next()) |kv| {
         const path = kv.key_ptr.*;
@@ -148,33 +166,42 @@ pub fn run(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !void
         }
     }
 
-    // Pass 2: unstaged comparison (Workdir vs Index).
-    var workdir_set: std.StringHashMapUnmanaged(void) = .empty;
-    defer workdir_set.deinit(allocator);
-    for (listing) |w_entry| {
-        try workdir_set.put(allocator, w_entry.path, {});
-
-        if (index_map.get(w_entry.path)) |idx_entry| {
-            // Hash the workdir file as a blob and compare. Slow path
-            // until we wire the stat cache (deferred).
-            const content = work_root.readFileAlloc(io, w_entry.path, allocator, .unlimited) catch |err| switch (err) {
-                error.FileNotFound, error.AccessDenied, error.IsDir => continue,
-                else => return err,
-            };
-            defer allocator.free(content);
-            const wd_oid = zigit.object.computeOid(.blob, content);
-            if (!wd_oid.eql(idx_entry.oid)) {
-                try setUnstaged(allocator, &state_by_path, a, w_entry.path, .modified);
-            }
-        } else {
-            try untracked.append(allocator, try a.dupe(u8, w_entry.path));
+    // ── Pass 2: unstaged comparison — tracked side (index-driven). ─────
+    // CRITICAL: we iterate `index_map` and read each path directly off
+    // disk. We do NOT consult the walk listing here. A tracked file
+    // that now matches a .gitignore pattern (e.g. `legacy.log` after
+    // adding `*.log`) would be filtered out of the walk → with the
+    // pre-v1.1 algorithm it would have been misreported as deleted.
+    // Driving from the index means tracked-file state is independent
+    // of any ignore filter, which is what git does.
+    var idx_iter_workdir = index_map.iterator();
+    while (idx_iter_workdir.next()) |kv| {
+        const path = kv.key_ptr.*;
+        const idx_entry = kv.value_ptr.*;
+        const content = work_root.readFileAlloc(io, path, allocator, .unlimited) catch |err| switch (err) {
+            error.FileNotFound => {
+                try setUnstaged(allocator, &state_by_path, a, path, .deleted);
+                continue;
+            },
+            error.AccessDenied, error.IsDir => continue,
+            else => return err,
+        };
+        defer allocator.free(content);
+        const wd_oid = zigit.object.computeOid(.blob, content);
+        if (!wd_oid.eql(idx_entry.oid)) {
+            try setUnstaged(allocator, &state_by_path, a, path, .modified);
         }
     }
-    // Indexed paths missing from workdir → unstaged delete.
-    var idx_iter2 = index_map.iterator();
-    while (idx_iter2.next()) |kv| {
-        if (!workdir_set.contains(kv.key_ptr.*)) {
-            try setUnstaged(allocator, &state_by_path, a, kv.key_ptr.*, .deleted);
+
+    // ── Pass 3: untracked discovery — filtered walk. ───────────────────
+    // The walker prunes excluded directories before descent (the
+    // correctness boundary) and filters individual ignored files at
+    // the leaf. Only paths NOT already in the index become untracked.
+    const listing = try zigit.workdir.walk(allocator, io, work_root, &rs);
+    defer zigit.workdir.freeEntries(allocator, listing);
+    for (listing) |w_entry| {
+        if (!index_map.contains(w_entry.path)) {
+            try untracked.append(allocator, try a.dupe(u8, w_entry.path));
         }
     }
 
