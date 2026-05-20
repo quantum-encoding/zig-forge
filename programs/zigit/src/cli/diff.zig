@@ -34,6 +34,24 @@ pub fn run(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !void
     defer repo.deinit();
     var store = repo.looseStore();
 
+    // Subtle .gitmodules notice — submodules aren't supported in v1.
+    // Same warning is emitted by `zigit status`.
+    {
+        var wr = openWorkRoot(io, &repo) catch null;
+        if (wr) |*w| {
+            defer w.close(io);
+            if (w.access(io, ".gitmodules", .{})) {
+                try File.stderr().writeStreamingAll(
+                    io,
+                    "warning: this repository contains submodules, which zigit currently ignores\n",
+                );
+            } else |err| switch (err) {
+                error.FileNotFound => {},
+                else => return err,
+            }
+        }
+    }
+
     var head_map = try buildHeadMap(allocator, io, repo.git_dir, &store);
     defer freePathOidMap(allocator, &head_map);
 

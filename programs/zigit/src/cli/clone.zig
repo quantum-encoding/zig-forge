@@ -28,7 +28,6 @@ const zigit = @import("zigit");
 const init_cmd = @import("init.zig");
 
 pub fn run(allocator: std.mem.Allocator, io: Io, environ: std.process.Environ, args: []const []const u8) !void {
-    _ = environ;
     if (args.len < 1 or args.len > 2) return error.UsageCloneUrlOptionalPath;
 
     // Phase 15: only HTTP(S) is implemented end-to-end. Detect ssh
@@ -41,7 +40,31 @@ pub fn run(allocator: std.mem.Allocator, io: Io, environ: std.process.Environ, a
         .https, .http, .unknown => {},
     }
 
-    const url = std.mem.trimEnd(u8, args[0], "/");
+    // Strip any embedded user:pass@ and resolve credentials. The
+    // helper / .git-credentials / askpass chain is consulted from
+    // the *invoking* working dir (before we chdir into the new repo).
+    const url_with_creds = std.mem.trimEnd(u8, args[0], "/");
+    var auth_split = try zigit.net.auth.split(allocator, url_with_creds);
+    defer zigit.net.auth.deinit(allocator, &auth_split);
+    const url = auth_split.clean_url;
+
+    // Pre-clone credential resolution. We don't have a .git/config to
+    // read `credential.helper` from yet, so we look only in
+    // ~/.gitconfig (which is the typical place for it anyway).
+    var fallback_creds: ?zigit.net.credentials.Result = null;
+    defer if (fallback_creds) |*c| c.deinit(allocator);
+    const authorization: ?[]const u8 = blk: {
+        if (auth_split.authorization) |a| break :blk a;
+        var pre_cfg = try zigit.config.loadWithGlobal(allocator, io, environ, Dir.cwd());
+        defer pre_cfg.deinit();
+        const helper_name = pre_cfg.get("credential.helper");
+        if (try zigit.net.credentials.resolve(allocator, io, environ, helper_name, url)) |r| {
+            fallback_creds = r;
+            break :blk r.authorization;
+        }
+        break :blk null;
+    };
+
     const target_path = if (args.len == 2) args[1] else try defaultPathFromUrl(allocator, url);
     defer if (args.len == 1) allocator.free(target_path);
 
@@ -55,10 +78,10 @@ pub fn run(allocator: std.mem.Allocator, io: Io, environ: std.process.Environ, a
     try std.process.setCurrentPath(io, target_path);
 
     // 3. Capability check.
-    try zigit.net.smart_http.discoverV2(allocator, io, url);
+    try zigit.net.smart_http.discoverV2(allocator, io, url, authorization);
 
     // 4. ls-refs.
-    const refs = try zigit.net.smart_http.lsRefs(allocator, io, url);
+    const refs = try zigit.net.smart_http.lsRefs(allocator, io, url, authorization);
     defer zigit.net.smart_http.freeRefs(allocator, refs);
     if (refs.len == 0) return error.RemoteHasNoRefs;
 
@@ -94,7 +117,7 @@ pub fn run(allocator: std.mem.Allocator, io: Io, environ: std.process.Environ, a
         // Nothing branch-shaped advertised — fall back to HEAD oid.
         try wants_list.append(allocator, head_oid_hex.?);
     }
-    const pack_bytes = try zigit.net.smart_http.fetch(allocator, io, url, wants_list.items);
+    const pack_bytes = try zigit.net.smart_http.fetch(allocator, io, url, wants_list.items, authorization);
     defer allocator.free(pack_bytes);
 
     // 7. index-pack.

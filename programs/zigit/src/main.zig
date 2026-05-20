@@ -194,7 +194,7 @@ pub fn main(init: std.process.Init) !void {
             else => return err,
         };
     } else if (std.mem.eql(u8, cmd, "fetch")) {
-        try fetch_cmd.run(allocator, io, rest);
+        try fetch_cmd.run(allocator, io, environ, rest);
     } else if (std.mem.eql(u8, cmd, "pull")) {
         // Inherits the merge command's error handling — MergeConflict
         // gets a clean exit 1 (the message has already been printed),

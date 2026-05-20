@@ -102,6 +102,11 @@ pub fn run(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !void
     var work_root = try openWorkRoot(allocator, io, &repo);
     defer work_root.close(io);
 
+    // Subtle .gitmodules notice — submodules aren't supported in v1.
+    // We skip the warning under -s/--porcelain so machine-parseable
+    // output stays clean.
+    if (!porcelain) try maybeWarnGitmodules(io, work_root);
+
     const listing = try zigit.workdir.walk(allocator, io, work_root);
     defer zigit.workdir.freeEntries(allocator, listing);
 
@@ -609,5 +614,21 @@ fn writeTrackingLines(io: Io, buf: []u8, t: Tracking) !void {
 
 fn pluralize(n: u32) []const u8 {
     return if (n == 1) "commit" else "commits";
+}
+
+/// If the work tree carries a .gitmodules file, surface a single-line
+/// notice on stderr. Submodule resolution isn't wired up in v1, so we
+/// flag the discrepancy rather than silently ignore it. Same warning
+/// is emitted by `zigit diff`.
+fn maybeWarnGitmodules(io: Io, work_root: Dir) !void {
+    if (work_root.access(io, ".gitmodules", .{})) {
+        try File.stderr().writeStreamingAll(
+            io,
+            "warning: this repository contains submodules, which zigit currently ignores\n",
+        );
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    }
 }
 

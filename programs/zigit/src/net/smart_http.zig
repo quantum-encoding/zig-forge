@@ -77,6 +77,7 @@ pub fn discoverV2(
     allocator: std.mem.Allocator,
     io: Io,
     base_url: []const u8,
+    authorization: ?[]const u8,
 ) !void {
     const url = try std.fmt.allocPrint(allocator, "{s}/info/refs?service=git-upload-pack", .{base_url});
     defer allocator.free(url);
@@ -87,11 +88,17 @@ pub fn discoverV2(
     var body: std.Io.Writer.Allocating = try .initCapacity(allocator, 4096);
     defer body.deinit();
 
+    var headers_buf: [2]std.http.Header = undefined;
+    headers_buf[0] = .{ .name = "Git-Protocol", .value = "version=2" };
+    var hlen: usize = 1;
+    if (authorization) |a| {
+        headers_buf[hlen] = .{ .name = "Authorization", .value = a };
+        hlen += 1;
+    }
+
     const result = try client.fetch(.{
         .location = .{ .url = url },
-        .extra_headers = &.{
-            .{ .name = "Git-Protocol", .value = "version=2" },
-        },
+        .extra_headers = headers_buf[0..hlen],
         .response_writer = &body.writer,
     });
     if (result.status != .ok) return error.HttpError;
@@ -125,6 +132,7 @@ pub fn lsRefs(
     allocator: std.mem.Allocator,
     io: Io,
     base_url: []const u8,
+    authorization: ?[]const u8,
 ) ![]Ref {
     const url = try std.fmt.allocPrint(allocator, "{s}/git-upload-pack", .{base_url});
     defer allocator.free(url);
@@ -149,15 +157,21 @@ pub fn lsRefs(
     var resp: std.Io.Writer.Allocating = try .initCapacity(allocator, 64 * 1024);
     defer resp.deinit();
 
+    var headers_buf: [4]std.http.Header = undefined;
+    headers_buf[0] = .{ .name = "Content-Type", .value = "application/x-git-upload-pack-request" };
+    headers_buf[1] = .{ .name = "Accept", .value = "application/x-git-upload-pack-result" };
+    headers_buf[2] = .{ .name = "Git-Protocol", .value = "version=2" };
+    var hlen: usize = 3;
+    if (authorization) |a| {
+        headers_buf[hlen] = .{ .name = "Authorization", .value = a };
+        hlen += 1;
+    }
+
     const result = try client.fetch(.{
         .location = .{ .url = url },
         .method = .POST,
         .payload = req_body.written(),
-        .extra_headers = &.{
-            .{ .name = "Content-Type", .value = "application/x-git-upload-pack-request" },
-            .{ .name = "Accept", .value = "application/x-git-upload-pack-result" },
-            .{ .name = "Git-Protocol", .value = "version=2" },
-        },
+        .extra_headers = headers_buf[0..hlen],
         .response_writer = &resp.writer,
     });
     if (result.status != .ok) return error.HttpError;
@@ -221,6 +235,7 @@ pub fn fetch(
     io: Io,
     base_url: []const u8,
     wants: []const [40]u8,
+    authorization: ?[]const u8,
 ) ![]u8 {
     const url = try std.fmt.allocPrint(allocator, "{s}/git-upload-pack", .{base_url});
     defer allocator.free(url);
@@ -249,15 +264,21 @@ pub fn fetch(
     var resp: std.Io.Writer.Allocating = try .initCapacity(allocator, 256 * 1024);
     defer resp.deinit();
 
+    var headers_buf: [4]std.http.Header = undefined;
+    headers_buf[0] = .{ .name = "Content-Type", .value = "application/x-git-upload-pack-request" };
+    headers_buf[1] = .{ .name = "Accept", .value = "application/x-git-upload-pack-result" };
+    headers_buf[2] = .{ .name = "Git-Protocol", .value = "version=2" };
+    var hlen: usize = 3;
+    if (authorization) |a| {
+        headers_buf[hlen] = .{ .name = "Authorization", .value = a };
+        hlen += 1;
+    }
+
     const result = try client.fetch(.{
         .location = .{ .url = url },
         .method = .POST,
         .payload = req_body.written(),
-        .extra_headers = &.{
-            .{ .name = "Content-Type", .value = "application/x-git-upload-pack-request" },
-            .{ .name = "Accept", .value = "application/x-git-upload-pack-result" },
-            .{ .name = "Git-Protocol", .value = "version=2" },
-        },
+        .extra_headers = headers_buf[0..hlen],
         .response_writer = &resp.writer,
     });
     if (result.status != .ok) return error.HttpError;

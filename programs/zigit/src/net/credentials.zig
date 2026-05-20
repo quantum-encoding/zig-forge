@@ -6,14 +6,24 @@
 //   1. Userinfo embedded in the URL ("https://user:pass@host/repo")
 //      — caller already handles this via net/auth.zig before reaching
 //      us, so we only see clean URLs here.
-//   2. `~/.git-credentials` (the format the `store` helper writes:
+//   2. `credential.helper` from config — when set, spawn a git
+//      credential helper (e.g. `git-credential-osxkeychain`,
+//      `git-credential-manager`, `git-credential-cache`) and feed it
+//      the standard helper protocol on stdin. Lets zigit pick up
+//      tokens the user has already stored in their OS keychain.
+//   3. `~/.git-credentials` (the format the `store` helper writes:
 //      one URL per line including the userinfo).
-//   3. `GIT_ASKPASS` env var → spawn that program twice ("Username"
+//   4. `GIT_ASKPASS` env var → spawn that program twice ("Username"
 //      and "Password") and capture stdout. SSH_ASKPASS is honoured as
 //      a fallback for parity with git's own behaviour.
 //
 // We don't (yet):
-//   * Run arbitrary `credential.helper` programs from config.
+//   * Multi-helper chaining (config can list multiple credential.helper
+//     entries — we use the first one).
+//   * `credential.<url>.helper` per-host overrides.
+//   * `!`-prefixed shell helpers (the helper is treated as a shell
+//     command rather than a program name; intentionally skipped to
+//     keep the spawn surface minimal).
 //   * Parse `~/.netrc`.
 //   * Cache credentials in memory across multiple operations.
 //
@@ -38,20 +48,148 @@ pub const Result = struct {
     }
 };
 
-pub const Source = enum { url, git_credentials, askpass };
+pub const Source = enum { url, credential_helper, git_credentials, askpass };
 
 /// Try every source in order, return the first match. Returns null
 /// if no source produced credentials (caller may proceed unauth'd
 /// and let the server respond 401 if it cares).
+///
+/// `helper_name` is the value of `credential.helper` from the merged
+/// .git/config + ~/.gitconfig view. Pass null to skip the helper
+/// path entirely.
 pub fn resolve(
     allocator: std.mem.Allocator,
     io: Io,
     environ: std.process.Environ,
+    helper_name: ?[]const u8,
     clean_url: []const u8,
 ) !?Result {
+    if (helper_name) |h| {
+        if (try fromCredentialHelper(allocator, io, h, clean_url)) |r| return r;
+    }
     if (try fromGitCredentials(allocator, io, environ, clean_url)) |r| return r;
     if (try fromAskpass(allocator, io, environ, clean_url)) |r| return r;
     return null;
+}
+
+/// Spawn `credential.helper` (e.g. "osxkeychain", "manager",
+/// "/usr/local/bin/git-credential-foo") with subcommand `get`, write
+/// the standard credential-helper request on stdin, and parse the
+/// response.
+///
+/// Wire format (git documents this in `gitcredentials(7)`):
+///
+///   →  protocol=https\nhost=example.com\n\n
+///   ←  protocol=https\nhost=example.com\nusername=foo\npassword=bar\n\n
+///
+/// We don't pass `path` or `username` upstream (the helper handles all
+/// users on the host); that matches most osxkeychain / Windows
+/// Credential Manager setups in the wild.
+pub fn fromCredentialHelper(
+    allocator: std.mem.Allocator,
+    io: Io,
+    helper_name: []const u8,
+    clean_url: []const u8,
+) !?Result {
+    if (helper_name.len == 0) return null;
+    // `!`-prefixed helpers are shell commands; intentionally skipped.
+    if (helper_name[0] == '!') return null;
+
+    // Resolve helper_name → argv[0]. A short name like "osxkeychain"
+    // gets the conventional "git-credential-<name>" prefix; an absolute
+    // path is used verbatim.
+    var program_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer program_buf.deinit(allocator);
+    if (helper_name[0] == '/') {
+        try program_buf.appendSlice(allocator, helper_name);
+    } else {
+        try program_buf.appendSlice(allocator, "git-credential-");
+        try program_buf.appendSlice(allocator, helper_name);
+    }
+
+    const u = try splitUrl(clean_url);
+
+    // Build the request payload before spawning so we can fail fast.
+    const stdin_payload = try std.fmt.allocPrint(
+        allocator,
+        "protocol={s}\nhost={s}\n\n",
+        .{ u.scheme, u.host },
+    );
+    defer allocator.free(stdin_payload);
+
+    var child = std.process.spawn(io, .{
+        .argv = &.{ program_buf.items, "get" },
+        .stdin = .pipe,
+        .stdout = .pipe,
+        // Helpers print prompts to stderr on first-time setup; for a
+        // silent retrieval path we discard stderr so blame.zig's
+        // stderr-pristine model isn't disturbed.
+        .stderr = .ignore,
+    }) catch |err| switch (err) {
+        // Helper isn't installed → treat as "no creds available" and
+        // fall through to the next source. We deliberately do NOT
+        // bubble FileNotFound up; that would be a hostile error for
+        // users on systems without the helper installed.
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    errdefer child.kill(io);
+
+    // Send the request, then close stdin so the helper sees EOF.
+    if (child.stdin) |stdin| {
+        try stdin.writeStreamingAll(io, stdin_payload);
+        stdin.close(io);
+        child.stdin = null;
+    }
+
+    // Drain stdout to EOF.
+    var stdout_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer stdout_buf.deinit(allocator);
+    if (child.stdout) |stdout| {
+        var chunk: [4096]u8 = undefined;
+        const bufs = [_][]u8{&chunk};
+        while (true) {
+            const n = stdout.readStreaming(io, &bufs) catch |e| switch (e) {
+                error.EndOfStream => break,
+                else => return e,
+            };
+            if (n == 0) break;
+            try stdout_buf.appendSlice(allocator, chunk[0..n]);
+        }
+    }
+
+    const term = try child.wait(io);
+    // A non-zero exit (or a signal) is the helper saying "I don't have
+    // credentials for this host" — fall through silently.
+    switch (term) {
+        .exited => |code| if (code != 0) return null,
+        else => return null,
+    }
+
+    // Parse "key=value\n" lines until a blank line or EOF.
+    var username: ?[]const u8 = null;
+    var password: ?[]const u8 = null;
+    var it = std.mem.splitScalar(u8, stdout_buf.items, '\n');
+    while (it.next()) |line| {
+        if (line.len == 0) break;
+        const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+        const key = line[0..eq];
+        const value = line[eq + 1 ..];
+        if (std.mem.eql(u8, key, "username")) {
+            username = value;
+        } else if (std.mem.eql(u8, key, "password")) {
+            password = value;
+        }
+        // Other keys (protocol, host, quit) are part of the protocol
+        // but not needed to mint the Basic header.
+    }
+
+    const user = username orelse return null;
+    const pass = password orelse return null;
+
+    const userinfo = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ user, pass });
+    defer allocator.free(userinfo);
+    return try buildBasic(allocator, userinfo, .credential_helper);
 }
 
 /// Read `~/.git-credentials` and find the first line that matches

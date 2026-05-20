@@ -25,23 +25,44 @@ const File = Io.File;
 const Dir = Io.Dir;
 const zigit = @import("zigit");
 
-pub fn run(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !void {
+pub fn run(allocator: std.mem.Allocator, io: Io, environ: std.process.Environ, args: []const []const u8) !void {
     if (args.len > 1) return error.UsageFetchOptionalRemote;
     const remote_name: []const u8 = if (args.len == 1) args[0] else "origin";
 
     var repo = try zigit.Repository.discover(allocator, io);
     defer repo.deinit();
 
-    var cfg = try zigit.config.load(allocator, io, repo.git_dir);
+    // Merged config view so credential.helper set globally still
+    // applies in a per-repo fetch.
+    var cfg = try zigit.config.loadWithGlobal(allocator, io, environ, repo.git_dir);
     defer cfg.deinit();
 
     const url_key = try std.fmt.allocPrint(allocator, "remote.{s}.url", .{remote_name});
     defer allocator.free(url_key);
-    const url = cfg.get(url_key) orelse return error.RemoteNotFound;
+    const url_with_creds = cfg.get(url_key) orelse return error.RemoteNotFound;
+
+    // Strip embedded user:pass@ if present, then resolve credentials
+    // via the standard chain (URL-embedded → credential.helper →
+    // .git-credentials → askpass).
+    var auth_split = try zigit.net.auth.split(allocator, url_with_creds);
+    defer zigit.net.auth.deinit(allocator, &auth_split);
+    const url = auth_split.clean_url;
+
+    var fallback_creds: ?zigit.net.credentials.Result = null;
+    defer if (fallback_creds) |*c| c.deinit(allocator);
+    const authorization: ?[]const u8 = blk: {
+        if (auth_split.authorization) |a| break :blk a;
+        const helper_name = cfg.get("credential.helper");
+        if (try zigit.net.credentials.resolve(allocator, io, environ, helper_name, url)) |r| {
+            fallback_creds = r;
+            break :blk r.authorization;
+        }
+        break :blk null;
+    };
 
     // 1. Capability check + ls-refs.
-    try zigit.net.smart_http.discoverV2(allocator, io, url);
-    const refs = try zigit.net.smart_http.lsRefs(allocator, io, url);
+    try zigit.net.smart_http.discoverV2(allocator, io, url, authorization);
+    const refs = try zigit.net.smart_http.lsRefs(allocator, io, url, authorization);
     defer zigit.net.smart_http.freeRefs(allocator, refs);
 
     // 2. Filter to refs/heads/* (we ignore HEAD and refs/tags/* for now).
@@ -92,7 +113,7 @@ pub fn run(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !void
         );
         try File.stdout().writeStreamingAll(io, fetch_msg);
 
-        const pack_bytes = try zigit.net.smart_http.fetch(allocator, io, url, wants.items);
+        const pack_bytes = try zigit.net.smart_http.fetch(allocator, io, url, wants.items, authorization);
         defer allocator.free(pack_bytes);
 
         const idx_result = try zigit.pack.index_pack.build(allocator, pack_bytes);

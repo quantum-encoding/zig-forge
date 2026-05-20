@@ -87,7 +87,10 @@ pub fn run(allocator: std.mem.Allocator, io: Io, environ: std.process.Environ, a
     var repo = try zigit.Repository.discover(allocator, io);
     defer repo.deinit();
 
-    var cfg = try zigit.config.load(allocator, io, repo.git_dir);
+    // Load the merged config view (~/.gitconfig + .git/config). The
+    // global view matters here so `credential.helper = osxkeychain`
+    // set once at the user level applies to every repo.
+    var cfg = try zigit.config.loadWithGlobal(allocator, io, environ, repo.git_dir);
     defer cfg.deinit();
 
     // First positional is either a URL or a remote name. If neither is
@@ -110,12 +113,14 @@ pub fn run(allocator: std.mem.Allocator, io: Io, environ: std.process.Environ, a
     defer zigit.net.auth.deinit(allocator, &auth_split);
     const url = auth_split.clean_url;
 
-    // If the URL didn't carry userinfo, try .git-credentials / askpass.
+    // If the URL didn't carry userinfo, try credential.helper → then
+    // .git-credentials → then askpass.
     var fallback_creds: ?zigit.net.credentials.Result = null;
     defer if (fallback_creds) |*c| c.deinit(allocator);
+    const helper_name = cfg.get("credential.helper");
     const authorization: ?[]const u8 = blk: {
         if (auth_split.authorization) |a| break :blk a;
-        if (try zigit.net.credentials.resolve(allocator, io, environ, url)) |r| {
+        if (try zigit.net.credentials.resolve(allocator, io, environ, helper_name, url)) |r| {
             fallback_creds = r;
             break :blk r.authorization;
         }

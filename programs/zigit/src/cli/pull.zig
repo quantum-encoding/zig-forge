@@ -62,7 +62,7 @@ pub fn run(
 
     // ── Phase 1: fetch ─────────────────────────────────────────────
     // Delegate. `fetch` prints its own progress to stdout.
-    try fetch_cmd.run(allocator, io, &.{remote_name});
+    try fetch_cmd.run(allocator, io, environ, &.{remote_name});
 
     // ── Phase 2: merge refs/remotes/<remote>/<upstream-branch> ─────
     // We re-construct the tracking-ref path here rather than reading

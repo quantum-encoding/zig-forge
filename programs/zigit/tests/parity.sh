@@ -1807,6 +1807,80 @@ else
     fi
 fi
 
+# ── Section 31: credential helper integration ───────────────────────────────
+# We don't speak to a real OS keychain in tests — instead we write a
+# tiny fake helper script that conforms to the git credential protocol
+# (reads protocol/host from stdin, echoes username/password on stdout)
+# and prove that zigit:
+#   31.1 invokes the helper at all (witness file is written)
+#   31.2 passes the right protocol/host (witness contents)
+#   31.3 resolves short-name helpers via PATH (configures
+#        credential.helper=witness, expects git-credential-witness)
+#   31.4 absolute-path helpers run directly
+echo
+echo "31. credential helper integration"
+
+CH_DIR="$WORK/cred-helper"
+mkdir -p "$CH_DIR/bin"
+
+# Witness-file helper. HELPER_WITNESS env from the parent points at the
+# path we'll inspect after invocation. We give it a fixed identity that
+# the smoke push wouldn't actually use (the server is unauthenticated)
+# — the test just checks that the helper got called.
+cat > "$CH_DIR/bin/git-credential-witness" <<'WITNESS_HELPER'
+#!/usr/bin/env bash
+cat > "${HELPER_WITNESS:-/dev/null}"
+echo "username=testuser"
+echo "password=testpass"
+WITNESS_HELPER
+chmod +x "$CH_DIR/bin/git-credential-witness"
+
+# Make a small test repo with a remote URL pointing at example.com —
+# the push will fail at the network layer, but credential resolution
+# happens BEFORE the network call, so the helper still fires.
+CH_REPO="$CH_DIR/repo"
+mkdir -p "$CH_REPO"
+( cd "$CH_REPO" && "$ZIGIT_BIN" init >/dev/null )
+
+# § 31.1 + 31.2 — absolute-path helper.
+git -C "$CH_REPO" config credential.helper "$CH_DIR/bin/git-credential-witness"
+git -C "$CH_REPO" remote add origin "https://example.invalid/repo.git"
+rm -f "$CH_DIR/witness-abs.txt"
+HELPER_WITNESS="$CH_DIR/witness-abs.txt" \
+    "$ZIGIT_BIN" -C "$CH_REPO" push origin main 2>/dev/null || true
+# Older zigit doesn't support -C; fall back to a subshell-cd if the
+# command didn't exit cleanly with a useful witness.
+if [ ! -s "$CH_DIR/witness-abs.txt" ]; then
+    rm -f "$CH_DIR/witness-abs.txt"
+    HELPER_WITNESS="$CH_DIR/witness-abs.txt" \
+        bash -c "cd '$CH_REPO' && '$ZIGIT_BIN' push origin main 2>/dev/null" || true
+fi
+witness_abs=$(cat "$CH_DIR/witness-abs.txt" 2>/dev/null)
+# Bash $(cat) strips trailing newlines, so the expected value has no
+# trailing newline either. The helper actually receives
+# "protocol=https\nhost=example.invalid\n\n" on stdin.
+expected_witness=$'protocol=https\nhost=example.invalid'
+check "31.1 helper invoked (absolute path)" "$expected_witness" "$witness_abs"
+
+# § 31.3 + 31.4 — short-name helper resolved via PATH.
+git -C "$CH_REPO" config credential.helper witness
+rm -f "$CH_DIR/witness-short.txt"
+PATH="$CH_DIR/bin:$PATH" HELPER_WITNESS="$CH_DIR/witness-short.txt" \
+    bash -c "cd '$CH_REPO' && '$ZIGIT_BIN' push origin main 2>/dev/null" || true
+witness_short=$(cat "$CH_DIR/witness-short.txt" 2>/dev/null)
+check "31.3 short-name helper resolved via PATH" "$expected_witness" "$witness_short"
+
+# § 31.5 — a non-existent helper degrades silently (no creds, but
+# no hard error). Push still fails at the network layer because
+# example.invalid won't resolve, but the underlying credential
+# resolution must not raise FileNotFound.
+git -C "$CH_REPO" config credential.helper nonexistenthelper99
+miss=$(bash -c "cd '$CH_REPO' && '$ZIGIT_BIN' push origin main 2>&1" || true)
+case "$miss" in
+    *FileNotFound*helper*) check "31.5 missing helper bubbled FileNotFound" "no" "yes" ;;
+    *) check "31.5 missing helper degrades silently" "ok" "ok" ;;
+esac
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo
 TOTAL=$((PASS + FAIL))
