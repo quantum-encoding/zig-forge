@@ -12,7 +12,7 @@
 //       message   = "stash on <branch>: <user-msg-or-head-subject>"
 //   * The stack lives in .git/zigit-stash-list, one oid per line,
 //     newest first. (Real git uses the reflog of refs/stash for this;
-//     we'll switch when the reflog ships in Phase 17.)
+//     switching to that storage is a follow-up.)
 //
 // Subcommands:
 //   push [-m MSG]   Capture work-tree, push to stack, reset workdir
@@ -349,7 +349,7 @@ fn shortBranchName(allocator: std.mem.Allocator, io: Io, git_dir: Dir) ![]u8 {
 }
 
 // (Same helpers as merge / rebase — duplicated here to keep the
-// patch surface small. A shared module is the right Phase 17+ move.)
+// patch surface small. A shared module is a clean-up follow-up.)
 
 fn openWorkRoot(io: Io, repo: *zigit.Repository) !Dir {
     const root = std.fs.path.dirname(repo.git_dir_path) orelse return error.NoWorkTree;

@@ -8,8 +8,8 @@
 //     same workdir-update workflow `switch` uses, but write the raw
 //     40-char hex into HEAD instead of a symbolic ref.
 //
-// We don't yet support `checkout <file>` (restore-from-index) — that's
-// a Phase 6 nicety bundled with `restore`.
+// We don't yet support `checkout <file>` (restore-from-index) — use
+// `zigit restore <file>` instead. Bundling them is a follow-up.
 
 const std = @import("std");
 const Io = std.Io;

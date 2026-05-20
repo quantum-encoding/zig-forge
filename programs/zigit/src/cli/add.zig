@@ -1,8 +1,8 @@
 // `zigit add <files...>`
 //
 // Porcelain wrapper around `update-index --add`. We don't yet handle
-// directories or globs ("zigit add ." Phase 4) — pass explicit
-// file paths.
+// directories or globs ("zigit add .") — pass explicit file paths.
+// Recursion + `.gitignore` filtering are deferred to v1.1.
 
 const std = @import("std");
 const Io = std.Io;

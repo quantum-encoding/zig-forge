@@ -24,7 +24,7 @@
 //                 HEAD, Y = workdir status vs index. Space = unmodified.
 //                 ?? = untracked.
 //
-// Limitations (all land in Phase 5):
+// Limitations (deferred to v1.1):
 //   * No .gitignore — every untracked file shows up.
 //   * Symlinks are recorded as untracked rather than hashed-as-targets.
 //   * No stat-cache fast path; we re-hash every workdir file on every
@@ -152,7 +152,7 @@ pub fn run(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !void
 
         if (index_map.get(w_entry.path)) |idx_entry| {
             // Hash the workdir file as a blob and compare. Slow path
-            // until we wire the stat cache in Phase 5.
+            // until we wire the stat cache (deferred).
             const content = work_root.readFileAlloc(io, w_entry.path, allocator, .unlimited) catch |err| switch (err) {
                 error.FileNotFound, error.AccessDenied, error.IsDir => continue,
                 else => return err,

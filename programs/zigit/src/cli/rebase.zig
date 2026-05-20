@@ -219,7 +219,7 @@ fn checkoutAndMove(
 }
 
 // ── Helpers (mirror cli/merge.zig — small enough to duplicate; a
-// shared cherry-pick module is fair game in Phase 11) ────────────────
+// shared cherry-pick module is fair game as a follow-up) ─────────────
 
 fn firstParent(allocator: std.mem.Allocator, store: *zigit.LooseStore, oid: zigit.Oid) !?zigit.Oid {
     var obj = try store.read(allocator, oid);

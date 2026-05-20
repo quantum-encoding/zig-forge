@@ -19,8 +19,8 @@
 // Refuses to commit if the index has no entries — matches real git's
 // "nothing to commit" behaviour for the first commit.
 //
-// We always emit "+0000" tz; correct local-tz handling lands in
-// Phase 5 alongside the libc detour for `strftime`.
+// We always emit "+0000" tz; correct local-tz handling is deferred
+// to whenever we link the libc detour for `strftime`.
 
 const std = @import("std");
 const Io = std.Io;

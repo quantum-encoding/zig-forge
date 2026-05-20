@@ -68,9 +68,9 @@ pub fn run(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !void
     }
 
     // ── 2. Plan the pack write order — deltify same-kind objects when
-    //     a delta is < 70% of the raw payload size (Phase 16). The
-    //     planner returns ops in pack-write order: each delta's base
-    //     is guaranteed to come earlier in the slice.
+    //     a delta is < 70% of the raw payload size. The planner
+    //     returns ops in pack-write order: each delta's base is
+    //     guaranteed to come earlier in the slice.
     const planner_objects = try allocator.alloc(zigit.pack.deltify.Object, staged.items.len);
     defer allocator.free(planner_objects);
     for (staged.items, 0..) |s, i| planner_objects[i] = .{

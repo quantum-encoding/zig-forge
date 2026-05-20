@@ -5,7 +5,7 @@
 //   - the `.git/index.tmp`  rename target should never be visible here,
 //                           but we'd ignore it on principle anyway
 //
-// We don't yet honour `.gitignore` — that lands in Phase 5 along with
+// We don't yet honour `.gitignore` — deferred to v1.1 along with
 // `add` recursion. Symlinks are recorded with their lstat mode.
 
 const std = @import("std");

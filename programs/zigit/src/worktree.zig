@@ -10,9 +10,9 @@
 // disk write succeeds).
 //
 // What we don't do here:
-//   * Symlink writes — Phase 5 cuts: blobs at mode 120000 are
-//     written as plain files. Real link semantics land alongside the
-//     symlink-aware index work.
+//   * Symlink writes — blobs at mode 120000 are written as plain
+//     files. Real link semantics are deferred to v1.1 along with
+//     the symlink-aware index work.
 //   * Empty-directory pruning — when removePaths leaves a directory
 //     empty, we don't remove it. Real git does, and shipping it is
 //     trivial (try deleteDir, swallow ENOTEMPTY); deferred to keep

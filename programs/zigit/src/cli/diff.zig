@@ -9,7 +9,7 @@
 //
 // Pathspec filtering is exact-match only for now — a path argument
 // must equal an entry's path in the index/tree. Globs and prefix
-// match land in Phase 5.
+// match are deferred.
 
 const std = @import("std");
 const Io = std.Io;

@@ -11,7 +11,7 @@
 // tags (which carry a message + tagger + signature) need a separate
 // "tag" object kind that wraps the commit oid; we already model
 // Kind.tag in the reader path but don't have a writer for it yet.
-// That lands as a small Phase 11.5 follow-up when we need it.
+// That's a small follow-up for when we need annotated-tag emission.
 
 const std = @import("std");
 const Io = std.Io;

@@ -10,7 +10,7 @@
 // reverse-chronological order. In a fully linear or simple branchy
 // history this is the right answer; pathological merge-of-merges
 // graphs can have multiple "best" bases that warrant the recursive
-// strategy real git uses, but that's a Phase 11 nicety.
+// strategy real git uses, but that's a follow-up nicety.
 
 const std = @import("std");
 const Oid = @import("../object/oid.zig").Oid;

@@ -270,9 +270,9 @@ fn threeWay(
         allocator,
         "Merge branch '{s}'\n",
         .{
-            // Best effort — we don't carry the source branch name through;
-            // use the target ref's short name as a placeholder. Phase 11
-            // can plumb the actual source.
+            // Best effort — we don't carry the source branch name
+            // through; use the target ref's short name as a
+            // placeholder. Plumbing the actual source is a follow-up.
             branch_short,
         },
     );

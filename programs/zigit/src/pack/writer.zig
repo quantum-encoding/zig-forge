@@ -1,13 +1,14 @@
 // PackWriter — emit a pack file in memory.
 //
-// Layout we produce (all objects stored as their real type — no
-// deltas yet; that's Phase 8):
+// Layout we produce:
 //
 //   header
 //     "PACK" + version=2 (BE u32) + object_count (BE u32)
 //
 //   N × { variable-length size+type header
 //         zlib-deflated payload bytes }
+//     — entries may be either raw objects (commit/tree/blob/tag)
+//       or OFS_DELTA chains; see `addOfsDelta` below.
 //
 //   trailer
 //     20-byte SHA-1 over everything before it

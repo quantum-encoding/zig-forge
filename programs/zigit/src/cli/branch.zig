@@ -7,8 +7,9 @@
 //   -D NAME       Same as -d for now — no merged-check yet, both are
 //                 unconditional deletes once the branch isn't current.
 //
-// We only know about loose refs under .git/refs/heads/. packed-refs
-// support is queued for Phase 6 (pack files).
+// Branch listing walks loose refs under .git/refs/heads/. We don't
+// yet enumerate branches that live only in packed-refs; resolving a
+// known branch by name does consult packed-refs.
 
 const std = @import("std");
 const Io = std.Io;

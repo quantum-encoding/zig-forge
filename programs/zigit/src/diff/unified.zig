@@ -17,7 +17,7 @@
 // non-equal run with up to N lines of context on each side (default 3).
 //
 // We don't implement git's `--no-prefix`, `-U N` for context or
-// rename detection yet — Phase 4 is the bare unified format.
+// rename detection yet — this is the bare unified format.
 //
 // Lines passed in should keep their trailing newlines. We append
 // `\ No newline at end of file` markers when the source line lacks

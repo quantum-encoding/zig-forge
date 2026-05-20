@@ -11,8 +11,9 @@
 // We accept GIT_AUTHOR_DATE only as a unix-ts integer right now;
 // real git's date parser handles many formats. Easy to extend later.
 //
-// We don't yet read user.name / user.email from .git/config — env or
-// default is good enough for Phase 2.
+// We don't read user.name / user.email from .git/config here — env
+// or default is sufficient for this plumbing command. `zigit commit`
+// (the porcelain) does consult config.
 
 const std = @import("std");
 const Io = std.Io;

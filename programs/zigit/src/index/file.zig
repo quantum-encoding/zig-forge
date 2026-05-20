@@ -10,8 +10,9 @@
 //   trailer          20 bytes  SHA-1 over everything before it
 //
 // We only know about v2. v3 added a flag bit, v4 prefix-compresses
-// paths — both can land in Phase 5 once we need them. For our use
-// (round-tripping zigit's own writes) v2 is sufficient.
+// paths — both are deferred until a real use case appears. For our
+// uses (round-tripping zigit's own writes + reading git's) v2 is
+// sufficient.
 
 const std = @import("std");
 const Io = std.Io;

@@ -2,11 +2,19 @@
 
 Spec for `zigit blame`. Self-contained.
 
+> **Status: shipped in v1.0.** Every section below is implemented and
+> covered by `tests/parity.sh §28` (7 byte-for-byte parity checks
+> against `git blame --porcelain`) + unit tests in
+> `src/blame/{region,blame,format}.zig`.
+>
 > Revision history:
 > * 2026-05-19 v1 — original draft (handed off).
 > * 2026-05-19 v2 — corrected merge-commit handling (trace through *all*
 >   parents, not just first parent; attribute to the merge commit only
 >   when content doesn't match any parent's blob).
+> * 2026-05-20 v3 — marked shipped sections. Out-of-scope items (rename
+>   detection, `--reverse`, `--ignore-revs-file`, `-w`, incremental
+>   output) remain deferred per the original spec.
 
 ---
 
@@ -526,23 +534,29 @@ regression detection, not a strict perf gate.
 
 ---
 
-## File inventory
+## File inventory — all shipped
 
-New:
+New (commit `5b39074` — core; `25a6d06` — CLI + formatters + parity):
 
-- `src/blame/blame.zig` — algorithm, types, caches.
+- `src/blame/blame.zig` — algorithm, types, caches. **Shipped.**
 - `src/blame/region.zig` — `Region` struct, coalescing,
   blob-line→parent-line mapping. Pure functions, separately testable.
-- `src/blame/mod.zig` — re-exports.
-- `src/blame/format.zig` — human + porcelain formatters (next pass).
-- `src/cli/blame.zig` — CLI wiring (next pass).
-- `tests/fixtures/blame/` — synthetic histories for parity (next pass).
+  **Shipped.**
+- `src/blame/mod.zig` — re-exports. **Shipped.**
+- `src/blame/format.zig` — human + porcelain formatters. **Shipped.**
+- `src/cli/blame.zig` — CLI wiring (`-L N[,M]`, `--porcelain`,
+  `--verbose`, `--max-commits N`). **Shipped.**
+- Synthetic histories for parity built inline in `tests/parity.sh §28`
+  via real git commits in a temp dir; no static fixtures directory
+  was needed.
 
 Modified:
 
-- `src/main.zig` — register `blame` in CLI dispatch (next pass).
-- `src/lib.zig` — re-export `blame`.
-- `tests/parity.sh` — append §28 (next pass).
+- `src/main.zig` — `blame` registered in CLI dispatch + usage block.
+  **Shipped.**
+- `src/lib.zig` — `blame` re-exported. **Shipped.**
+- `tests/parity.sh` — §28 added, 7 byte-for-byte porcelain checks.
+  **Shipped.**
 
 ---
 
