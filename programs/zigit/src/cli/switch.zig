@@ -158,7 +158,11 @@ pub fn applyCommit(
     // Workdir snapshot.
     var work_root = try openWorkRoot(io, repo);
     defer work_root.close(io);
-    const listing = try zigit.workdir.walk(allocator, io, work_root);
+    // TODO(v1.1): switch passes `null` here. Git's switch makes
+    // ignored files invisible to the would-clobber check (they're
+    // untracked + ignored → it just leaves them alone). When
+    // status gets the ruleset wired, switch should too.
+    const listing = try zigit.workdir.walk(allocator, io, work_root, null);
     defer zigit.workdir.freeEntries(allocator, listing);
 
     // Safety check.

@@ -107,7 +107,11 @@ pub fn run(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !void
     // output stays clean.
     if (!porcelain) try maybeWarnGitmodules(io, work_root);
 
-    const listing = try zigit.workdir.walk(allocator, io, work_root);
+    // TODO(v1.1): pass a `*const Ruleset` here so .gitignore is
+    // honoured. For this commit, walker now accepts the parameter
+    // but status hasn't wired the ruleset yet — `null` preserves
+    // existing behaviour (every untracked path is listed).
+    const listing = try zigit.workdir.walk(allocator, io, work_root, null);
     defer zigit.workdir.freeEntries(allocator, listing);
 
     // ── Compute per-path state ─────────────────────────────────────────
