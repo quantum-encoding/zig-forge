@@ -268,6 +268,117 @@ zigit_oneline_n1=$(cd "$ZW2" && "$ZIGIT_BIN" log --oneline -n 1)
 git_oneline_n1=$(cd "$ZW2" && git log --oneline -n 1)
 check "log --oneline -n 1 byte-parity" "$git_oneline_n1" "$zigit_oneline_n1"
 
+# ── 9.add — `add` directory recursion + .gitignore wiring ────────────────────
+# v1.1 makes `add <dir>` / `add .` walk recursively under the ruleset
+# filter. The bypass is keyed on "explicit file argument": file paths
+# are added even when matching .gitignore (zigit's v1.1 policy —
+# documented divergence from git's "refuse without -f"); directory
+# expansion HONOURS the ruleset, and a fully-ignored directory arg
+# produces no additions plus a warning + exit 1.
+AI="$WORK/add-ignore"
+mkdir -p "$AI"
+( cd "$AI" && "$ZIGIT_BIN" init >/dev/null )
+
+# Seed: a .gitignore, a normal file, an ignored file at root, a
+# non-ignored subdir with one keep + one ignored child, and a fully
+# excluded directory.
+cat > "$AI/.gitignore" <<'IGN'
+*.log
+node_modules/
+IGN
+echo "keep at root" > "$AI/keep.txt"
+echo "ignored at root" > "$AI/drop.log"
+mkdir -p "$AI/sub"
+echo "keep nested" > "$AI/sub/keep.txt"
+echo "drop nested" > "$AI/sub/drop.log"
+mkdir -p "$AI/node_modules/pkg"
+echo "x" > "$AI/node_modules/lib.js"
+echo "x" > "$AI/node_modules/pkg/index.js"
+
+# § 9.add.1 — `add .` stages exactly the non-ignored files (compared
+# against `git add .` byte-for-byte via `ls-files`).
+( cd "$AI" && "$ZIGIT_BIN" add . >/dev/null )
+zigit_ls=$(cd "$AI" && "$ZIGIT_BIN" ls-files | sort)
+# Reset and rerun via git into a sister index to compare.
+AG="$WORK/add-ignore-git"
+mkdir -p "$AG"
+( cd "$AG" && git init -q -b main . )
+cp "$AI/.gitignore" "$AG/.gitignore"
+cp "$AI/keep.txt" "$AG/keep.txt"
+cp "$AI/drop.log" "$AG/drop.log"
+mkdir -p "$AG/sub"
+cp "$AI/sub/keep.txt" "$AG/sub/keep.txt"
+cp "$AI/sub/drop.log" "$AG/sub/drop.log"
+mkdir -p "$AG/node_modules/pkg"
+cp "$AI/node_modules/lib.js" "$AG/node_modules/lib.js"
+cp "$AI/node_modules/pkg/index.js" "$AG/node_modules/pkg/index.js"
+( cd "$AG" && git add . )
+git_ls=$(cd "$AG" && git ls-files | sort)
+check "9.add.1 \`add .\` matches \`git add .\` (filtered recursion)" "$git_ls" "$zigit_ls"
+
+# § 9.add.2 — `add sub/` filters within a non-ignored directory.
+# Reset the index by removing each entry, then re-add via `add sub/`.
+# Easier: use a fresh fixture.
+AI2="$WORK/add-ignore-2"
+mkdir -p "$AI2"
+( cd "$AI2" && "$ZIGIT_BIN" init >/dev/null )
+cp "$AI/.gitignore" "$AI2/.gitignore"
+mkdir -p "$AI2/sub"
+cp "$AI/sub/keep.txt" "$AI2/sub/keep.txt"
+cp "$AI/sub/drop.log" "$AI2/sub/drop.log"
+( cd "$AI2" && "$ZIGIT_BIN" add sub/ >/dev/null )
+zigit_ls2=$(cd "$AI2" && "$ZIGIT_BIN" ls-files | sort)
+expected_ls2="sub/keep.txt"
+check "9.add.2 \`add sub/\` filters via .gitignore inside" "$expected_ls2" "$zigit_ls2"
+
+# § 9.add.3 — `add ignored_dir/` (whole directory ignored) emits
+# nothing and exits non-zero. This is the headline test: it proves
+# the bypass is keyed on "explicit FILE argument," not "explicit
+# argument of any kind."
+AI3="$WORK/add-ignore-3"
+mkdir -p "$AI3"
+( cd "$AI3" && "$ZIGIT_BIN" init >/dev/null )
+echo "node_modules/" > "$AI3/.gitignore"
+mkdir -p "$AI3/node_modules"
+echo "x" > "$AI3/node_modules/lib.js"
+add_out=$(cd "$AI3" && "$ZIGIT_BIN" add node_modules/ 2>&1; echo "exit=$?")
+case "$add_out" in
+    *"paths are ignored"*"hint:"*"exit=1"*) check "9.add.3 ignored-dir arg warns + exit 1" "ok" "ok" ;;
+    *) check "9.add.3 ignored-dir arg warns + exit 1" "ok" "$add_out" ;;
+esac
+# And nothing was staged.
+zigit_ls3=$(cd "$AI3" && "$ZIGIT_BIN" ls-files)
+check "9.add.3 nothing staged after ignored-dir warn" "" "$zigit_ls3"
+
+# § 9.add.4 — explicit file argument bypasses the ruleset (zigit's
+# v1.1 policy). `add drop.log` succeeds even though *.log is in
+# .gitignore.
+AI4="$WORK/add-ignore-4"
+mkdir -p "$AI4"
+( cd "$AI4" && "$ZIGIT_BIN" init >/dev/null )
+echo "*.log" > "$AI4/.gitignore"
+echo "secret" > "$AI4/drop.log"
+add_out4=$(cd "$AI4" && "$ZIGIT_BIN" add drop.log 2>&1; echo "exit=$?")
+case "$add_out4" in
+    *"exit=0"*) check "9.add.4 explicit file arg adds despite ignore (zigit policy)" "ok" "ok" ;;
+    *) check "9.add.4 explicit file arg adds despite ignore (zigit policy)" "ok" "$add_out4" ;;
+esac
+zigit_ls4=$(cd "$AI4" && "$ZIGIT_BIN" ls-files | sort)
+case "$zigit_ls4" in
+    *drop.log*) check "9.add.4 drop.log is in the index after explicit add" "yes" "yes" ;;
+    *) check "9.add.4 drop.log is in the index after explicit add" "yes" "no — got [$zigit_ls4]" ;;
+esac
+
+# § 9.add.5 — pathspec that doesn't match anything errors out.
+AI5="$WORK/add-ignore-5"
+mkdir -p "$AI5"
+( cd "$AI5" && "$ZIGIT_BIN" init >/dev/null )
+miss_out=$(cd "$AI5" && "$ZIGIT_BIN" add nonexistent.txt 2>&1; echo "exit=$?")
+case "$miss_out" in
+    *"did not match"*"exit=1"*) check "9.add.5 nonexistent pathspec exits 1" "ok" "ok" ;;
+    *) check "9.add.5 nonexistent pathspec exits 1" "ok" "$miss_out" ;;
+esac
+
 unset TZ GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
 
 # ── Section 10: status ────────────────────────────────────────────────────────

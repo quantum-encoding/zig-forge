@@ -117,7 +117,11 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, cmd, "commit-tree")) {
         try commit_tree_cmd.run(allocator, io, environ, rest);
     } else if (std.mem.eql(u8, cmd, "add")) {
-        try add_cmd.run(allocator, io, rest);
+        add_cmd.run(allocator, io, rest) catch |err| switch (err) {
+            // Both already printed their own user-facing messages.
+            error.PathsIgnored, error.PathspecNotFound => std.process.exit(1),
+            else => return err,
+        };
     } else if (std.mem.eql(u8, cmd, "commit")) {
         try commit_cmd.run(allocator, io, environ, rest);
     } else if (std.mem.eql(u8, cmd, "log")) {
