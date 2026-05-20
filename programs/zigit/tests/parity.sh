@@ -1556,6 +1556,16 @@ bl_check_parity "$BL5" "28.5 file created mid-history" "f.txt"
 # § 28.6 — -L range on §28.2's multi-author fixture.
 bl_check_parity "$BL2" "28.6 -L range 2,3 on multi-author file" "f.txt" -L 2,3
 
+# Local helper: commit on `dir` with the given (author, time, message)
+# and the file `f` set to the given contents.
+make_commit() {
+    local dir="$1" name="$2" email="$3" ts="$4" content="$5" msg="$6"
+    GIT_AUTHOR_NAME="$name" GIT_AUTHOR_EMAIL="$email" \
+        GIT_COMMITTER_NAME="$name" GIT_COMMITTER_EMAIL="$email" \
+        GIT_AUTHOR_DATE="$ts +0000" GIT_COMMITTER_DATE="$ts +0000" \
+        bash -c "cd '$dir' && printf '$content' > f && git add f && git commit -qm '$msg'"
+}
+
 # § 28.7 — deleted lines. A creates 5 lines, B deletes the middle one,
 # C appends a line. Blame at C must not surface the deleted line.
 BL7="$WORK/blame-deletions"
@@ -1578,6 +1588,140 @@ mkdir -p "$BL7"
 bl_check_parity "$BL7" "28.7 deletions — removed line absent from blame output" "f.txt"
 
 unset TZ
+
+# ── Section 29: fetch + status ahead/behind ───────────────────────────────────
+# Spins up the same git-http-backend wrapper as §16, has zigit clone
+# from a bare upstream, then drives the bare upstream forward / the
+# local clone forward / both forward, and asserts `zigit status`
+# emits the right ahead/behind line for each case.
+echo
+echo "29. fetch + status ahead/behind"
+
+GIT_BACKEND="$(git --exec-path 2>/dev/null)/git-http-backend"
+SERVER_PY="$(cd "$(dirname "$0")" && pwd)/git_http_server.py"
+if [ ! -x "$GIT_BACKEND" ] || ! command -v python3 >/dev/null 2>&1 || [ ! -x "$SERVER_PY" ]; then
+    echo -e "  ${DIM}skipping — git-http-backend or python3 missing${NC}"
+else
+    FT_DIR="$WORK/fetch-test"
+    mkdir -p "$FT_DIR/bare"
+
+    # Build a bare upstream with one commit on main. The HEAD symbolic
+    # ref must be set explicitly — git init --bare leaves it pointing
+    # at refs/heads/master by default, which we don't push to, so
+    # clone would see HEAD=null and bail.
+    ( cd "$FT_DIR/bare" && git init -q --bare && git config http.receivepack true && git symbolic-ref HEAD refs/heads/main )
+
+    # Working tree that pushes the initial commit into the bare.
+    mkdir -p "$FT_DIR/up"
+    ( cd "$FT_DIR/up" && git init -q -b main . )
+    make_commit "$FT_DIR/up" "Up Bot" "up@example.com" 1700100000 "v1\n" "v1"
+    ( cd "$FT_DIR/up" && git remote add origin "$FT_DIR/bare" && git push -q origin main )
+
+    # Bring up the HTTP server pointing at the bare repo.
+    FT_LOG="$FT_DIR/server.log"
+    GIT_HTTP_BACKEND="$GIT_BACKEND" GIT_PROJECT_ROOT="$FT_DIR/bare" \
+        python3 "$SERVER_PY" 0 > "$FT_LOG" 2>&1 &
+    FT_SERVER_PID=$!
+    for _ in $(seq 1 20); do
+        if grep -q '^ready ' "$FT_LOG" 2>/dev/null; then break; fi
+        sleep 0.1
+    done
+    FT_PORT=$(awk '/^ready /{print $2; exit}' "$FT_LOG")
+
+    if [ -z "$FT_PORT" ]; then
+        kill "$FT_SERVER_PID" 2>/dev/null
+        check "git-http-backend started for fetch tests" "ready" "failed-to-start"
+    else
+        URL="http://127.0.0.1:$FT_PORT"
+
+        # zigit clones the bare upstream.
+        mkdir -p "$FT_DIR/down"
+        ( cd "$FT_DIR/down" && "$ZIGIT_BIN" clone "$URL" clone >/dev/null 2>&1 )
+        CL="$FT_DIR/down/clone"
+
+        if [ ! -d "$CL/.git" ]; then
+            check "zigit clone succeeded" "yes" "no — see $FT_LOG"
+        else
+            # ── 29.1 — status with no divergence ────────────────────────
+            up_to_date_line=$(cd "$CL" && "$ZIGIT_BIN" status | grep "Your branch is" | head -1)
+            check "29.1 status: up to date with origin/main" \
+                "Your branch is up to date with 'origin/main'." \
+                "$up_to_date_line"
+
+            # ── 29.2 — local is ahead by 2 commits ─────────────────────
+            make_commit "$CL" "Down Bot" "down@example.com" 1700110000 "v2\n" "v2-local"
+            make_commit "$CL" "Down Bot" "down@example.com" 1700110100 "v3\n" "v3-local"
+            ahead_line=$(cd "$CL" && "$ZIGIT_BIN" status | grep "Your branch is" | head -1)
+            check "29.2 status: ahead of origin/main by 2 commits" \
+                "Your branch is ahead of 'origin/main' by 2 commits." \
+                "$ahead_line"
+
+            # ── 29.3 — upstream gets 3 new commits; zigit fetch sees them;
+            #          status now says we're diverged (2 ahead, 3 behind).
+            make_commit "$FT_DIR/up" "Up Bot" "up@example.com" 1700200000 "u2\n" "u2"
+            make_commit "$FT_DIR/up" "Up Bot" "up@example.com" 1700210000 "u3\n" "u3"
+            make_commit "$FT_DIR/up" "Up Bot" "up@example.com" 1700220000 "u4\n" "u4"
+            ( cd "$FT_DIR/up" && git push -q origin main )
+
+            fetch_out=$(cd "$CL" && "$ZIGIT_BIN" fetch 2>&1)
+            case "$fetch_out" in
+                *"From http://127.0.0.1"*) check "29.3a fetch prints From <url>" "ok" "ok" ;;
+                *) check "29.3a fetch prints From <url>" "ok" "$fetch_out" ;;
+            esac
+
+            diverged_line=$(cd "$CL" && "$ZIGIT_BIN" status | grep "Your branch and" | head -1)
+            check "29.3b status: diverged from origin/main" \
+                "Your branch and 'origin/main' have diverged," \
+                "$diverged_line"
+            counts_line=$(cd "$CL" && "$ZIGIT_BIN" status | grep "different commits each")
+            check "29.3c status: divergence has 2 and 3 different commits" \
+                "and have 2 and 3 different commits each, respectively." \
+                "$counts_line"
+
+            # ── 29.4 — refs/remotes/origin/main on disk matches the bare repo.
+            bare_oid=$(cat "$FT_DIR/bare/refs/heads/main")
+            tracking_oid=$(cat "$CL/.git/refs/remotes/origin/main")
+            check "29.4 refs/remotes/origin/main matches bare upstream" \
+                "$bare_oid" "$tracking_oid"
+
+            # ── 29.5 — second fetch is a no-op when nothing changed.
+            second_fetch=$(cd "$CL" && "$ZIGIT_BIN" fetch 2>&1)
+            case "$second_fetch" in
+                *"Already up to date"*) check "29.5 second fetch is a no-op" "ok" "ok" ;;
+                *) check "29.5 second fetch is a no-op" "ok" "$second_fetch" ;;
+            esac
+
+            # ── 29.6 — `fetch some-nonexistent` errors out.
+            bad=$(cd "$CL" && "$ZIGIT_BIN" fetch nope 2>&1; echo "exit=$?")
+            case "$bad" in
+                *RemoteNotFound*) check "29.6 fetch unknown remote rejected" "ok" "ok" ;;
+                *) check "29.6 fetch unknown remote rejected" "ok" "$bad" ;;
+            esac
+
+            # ── 29.7 — pure "behind" case (the spec's primary example).
+            # Use a fresh second clone so the local side has zero new
+            # commits, then push more commits upstream + zigit fetch.
+            mkdir -p "$FT_DIR/down2"
+            ( cd "$FT_DIR/down2" && "$ZIGIT_BIN" clone "$URL" clone >/dev/null 2>&1 )
+            CL2="$FT_DIR/down2/clone"
+            if [ -d "$CL2/.git" ]; then
+                make_commit "$FT_DIR/up" "Up Bot" "up@example.com" 1700300000 "u5\n" "u5"
+                make_commit "$FT_DIR/up" "Up Bot" "up@example.com" 1700310000 "u6\n" "u6"
+                ( cd "$FT_DIR/up" && git push -q origin main )
+                ( cd "$CL2" && "$ZIGIT_BIN" fetch >/dev/null 2>&1 )
+                behind_line=$(cd "$CL2" && "$ZIGIT_BIN" status | grep "Your branch is behind")
+                check "29.7 status: behind origin/main by 2 commits" \
+                    "Your branch is behind 'origin/main' by 2 commits, and can be fast-forwarded." \
+                    "$behind_line"
+            else
+                check "29.7 second clone for behind case succeeded" "yes" "no"
+            fi
+        fi
+
+        kill "$FT_SERVER_PID" 2>/dev/null
+        wait "$FT_SERVER_PID" 2>/dev/null
+    fi
+fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo

@@ -37,6 +37,7 @@ const remote_cmd = @import("cli/remote.zig");
 const reflog_cmd = @import("cli/reflog.zig");
 const prune_cmd = @import("cli/prune.zig");
 const blame_cmd = @import("cli/blame.zig");
+const fetch_cmd = @import("cli/fetch.zig");
 
 const usage =
     \\zigit — git in zig
@@ -74,6 +75,7 @@ const usage =
     \\  reflog [show [REF]]                           Show reflog (default HEAD)
     \\  prune [--dry-run]                             Delete unreferenced loose objects
     \\  blame [-L N[,M]] [--porcelain] PATH           Line-level attribution against HEAD's history
+    \\  fetch [REMOTE]                                Pull refs (and objects) from REMOTE (default origin) into refs/remotes/REMOTE/*
     \\
 ;
 
@@ -189,6 +191,8 @@ pub fn main(init: std.process.Init) !void {
             },
             else => return err,
         };
+    } else if (std.mem.eql(u8, cmd, "fetch")) {
+        try fetch_cmd.run(allocator, io, rest);
     } else if (std.mem.eql(u8, cmd, "blame")) {
         const code = blame_cmd.run(allocator, io, rest) catch |err| {
             var buf: [256]u8 = undefined;

@@ -43,6 +43,24 @@ const PathState = struct {
     unstaged: Status = .unmodified,
 };
 
+/// Where the current branch sits relative to its configured upstream.
+/// Computed locally from .git/refs/remotes/<remote>/<branch> — no
+/// network. The user must `zigit fetch` to refresh the remote ref.
+const Tracking = struct {
+    /// e.g. "origin/main" — formatted for inclusion in human messages.
+    upstream_label: []const u8,
+    state: union(enum) {
+        up_to_date,
+        ahead: u32,
+        behind: u32,
+        diverged: struct { ahead: u32, behind: u32 },
+        /// Remote ref is present but we can't walk one of the graphs
+        /// (missing objects locally — typical when fetch only updated
+        /// refs but not the pack). Print git's no-count form.
+        unresolvable,
+    },
+};
+
 pub fn run(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !void {
     var porcelain = false;
     for (args) |a| {
@@ -156,7 +174,19 @@ pub fn run(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !void
         try renderPorcelain(allocator, io, &state_by_path, untracked.items);
     } else {
         const head_oid = try zigit.refs.tryResolve(allocator, io, repo.git_dir, branch_ref);
-        try renderLong(allocator, io, branch_short, head_oid != null, &state_by_path, untracked.items);
+
+        // Ahead/behind: meaningful only in the long format. We read the
+        // upstream tip from .git/refs/remotes/<remote>/<branch> — no
+        // network. The user must run `zigit fetch` to refresh it.
+        var cfg = try zigit.config.load(allocator, io, repo.git_dir);
+        defer cfg.deinit();
+        var tracking_opt: ?Tracking = null;
+        if (head_oid) |hoid| {
+            tracking_opt = try resolveTracking(allocator, io, &repo, &store, &cfg, branch_short, hoid);
+        }
+        defer if (tracking_opt) |t| allocator.free(@constCast(t.upstream_label));
+
+        try renderLong(allocator, io, branch_short, head_oid != null, tracking_opt, &state_by_path, untracked.items);
     }
 }
 
@@ -329,6 +359,7 @@ fn renderLong(
     io: Io,
     branch_short: []const u8,
     has_commits: bool,
+    tracking: ?Tracking,
     state_by_path: *const std.StringHashMapUnmanaged(PathState),
     untracked: []const []const u8,
 ) !void {
@@ -337,6 +368,7 @@ fn renderLong(
 
     try out.writeStreamingAll(io, try std.fmt.bufPrint(&buf, "On branch {s}\n", .{branch_short}));
     if (!has_commits) try out.writeStreamingAll(io, "\nNo commits yet\n");
+    if (tracking) |t| try writeTrackingLines(io, &buf, t);
 
     var staged_rows: std.ArrayListUnmanaged(LongRow) = .empty;
     defer staged_rows.deinit(allocator);
@@ -395,5 +427,187 @@ fn renderLong(
             try out.writeStreamingAll(io, "\nnothing to commit (create/copy files and use \"zigit add\" to track)\n");
         }
     }
+}
+
+/// Look up the configured upstream for `branch_short` and produce a
+/// commit-only ahead/behind summary. Returns null when there's no
+/// upstream configured or the remote-tracking ref doesn't exist
+/// locally — matches git's behaviour of silently omitting the line.
+fn resolveTracking(
+    allocator: std.mem.Allocator,
+    io: Io,
+    repo: *zigit.Repository,
+    store: *zigit.LooseStore,
+    cfg: *const zigit.config.Config,
+    branch_short: []const u8,
+    local_oid: zigit.Oid,
+) !?Tracking {
+    // branch.<name>.remote → "origin"
+    // branch.<name>.merge  → "refs/heads/main"
+    const remote_key = try std.fmt.allocPrint(allocator, "branch.{s}.remote", .{branch_short});
+    defer allocator.free(remote_key);
+    const merge_key = try std.fmt.allocPrint(allocator, "branch.{s}.merge", .{branch_short});
+    defer allocator.free(merge_key);
+
+    const remote_name = cfg.get(remote_key) orelse return null;
+    const merge_ref = cfg.get(merge_key) orelse return null;
+    if (!std.mem.startsWith(u8, merge_ref, "refs/heads/")) return null;
+    const upstream_branch = merge_ref["refs/heads/".len..];
+
+    // Build the remote-tracking ref path: refs/remotes/<remote>/<branch>.
+    const tracking_ref = try std.fmt.allocPrint(
+        allocator,
+        "refs/remotes/{s}/{s}",
+        .{ remote_name, upstream_branch },
+    );
+    defer allocator.free(tracking_ref);
+
+    const upstream_oid = (try zigit.refs.tryResolve(allocator, io, repo.git_dir, tracking_ref)) orelse return null;
+
+    const upstream_label = try std.fmt.allocPrint(
+        allocator,
+        "{s}/{s}",
+        .{ remote_name, upstream_branch },
+    );
+    errdefer allocator.free(upstream_label);
+
+    if (upstream_oid.eql(local_oid)) {
+        return .{ .upstream_label = upstream_label, .state = .up_to_date };
+    }
+
+    // Two graph walks: commit-only reachable sets from each side. If
+    // either walk fails (missing objects locally — typical after a
+    // ref-only fetch), degrade to .unresolvable.
+    var maybe_remote_set = try commitsReachable(allocator, store, upstream_oid);
+    defer if (maybe_remote_set) |*s| s.deinit(allocator);
+    var maybe_local_set = try commitsReachable(allocator, store, local_oid);
+    defer if (maybe_local_set) |*s| s.deinit(allocator);
+
+    if (maybe_remote_set == null or maybe_local_set == null) {
+        return .{ .upstream_label = upstream_label, .state = .unresolvable };
+    }
+    const remote_set = maybe_remote_set.?;
+    const local_set = maybe_local_set.?;
+
+    var ahead: u32 = 0;
+    var local_it = local_set.keyIterator();
+    while (local_it.next()) |k| {
+        if (!remote_set.contains(k.*)) ahead += 1;
+    }
+    var behind: u32 = 0;
+    var remote_it = remote_set.keyIterator();
+    while (remote_it.next()) |k| {
+        if (!local_set.contains(k.*)) behind += 1;
+    }
+
+    const state: @TypeOf(@as(Tracking, undefined).state) = if (ahead == 0 and behind == 0)
+        .up_to_date
+    else if (ahead > 0 and behind == 0)
+        .{ .ahead = ahead }
+    else if (ahead == 0 and behind > 0)
+        .{ .behind = behind }
+    else
+        .{ .diverged = .{ .ahead = ahead, .behind = behind } };
+
+    return .{ .upstream_label = upstream_label, .state = state };
+}
+
+/// Commit-only BFS. Returns the set of OIDs reachable from `start`
+/// or null if we hit a missing object / malformed commit. Treats a
+/// non-commit start oid as malformed.
+fn commitsReachable(
+    allocator: std.mem.Allocator,
+    store: *zigit.LooseStore,
+    start: zigit.Oid,
+) !?std.AutoHashMapUnmanaged([20]u8, void) {
+    var visited: std.AutoHashMapUnmanaged([20]u8, void) = .empty;
+    errdefer visited.deinit(allocator);
+
+    var queue: std.ArrayListUnmanaged(zigit.Oid) = .empty;
+    defer queue.deinit(allocator);
+
+    try queue.append(allocator, start);
+    try visited.put(allocator, start.bytes, {});
+
+    while (queue.pop()) |current| {
+        var loaded = store.read(allocator, current) catch |e| switch (e) {
+            error.ObjectNotFound => {
+                visited.deinit(allocator);
+                return null;
+            },
+            else => return e,
+        };
+        defer loaded.deinit(allocator);
+        if (loaded.kind != .commit) {
+            visited.deinit(allocator);
+            return null;
+        }
+
+        var parsed = zigit.object.commit.parse(allocator, loaded.payload) catch {
+            visited.deinit(allocator);
+            return null;
+        };
+        defer parsed.deinit(allocator);
+
+        for (parsed.parent_oids) |p| {
+            const gop = try visited.getOrPut(allocator, p.bytes);
+            if (!gop.found_existing) try queue.append(allocator, p);
+        }
+    }
+
+    return visited;
+}
+
+fn writeTrackingLines(io: Io, buf: []u8, t: Tracking) !void {
+    const out = File.stdout();
+    switch (t.state) {
+        .up_to_date => {
+            const line = try std.fmt.bufPrint(buf, "Your branch is up to date with '{s}'.\n", .{t.upstream_label});
+            try out.writeStreamingAll(io, line);
+        },
+        .ahead => |n| {
+            const noun = pluralize(n);
+            const line = try std.fmt.bufPrint(
+                buf,
+                "Your branch is ahead of '{s}' by {d} {s}.\n  (use \"git push\" to publish your local commits)\n",
+                .{ t.upstream_label, n, noun },
+            );
+            try out.writeStreamingAll(io, line);
+        },
+        .behind => |n| {
+            const noun = pluralize(n);
+            const line = try std.fmt.bufPrint(
+                buf,
+                "Your branch is behind '{s}' by {d} {s}, and can be fast-forwarded.\n  (use \"git pull\" to update your local branch)\n",
+                .{ t.upstream_label, n, noun },
+            );
+            try out.writeStreamingAll(io, line);
+        },
+        .diverged => |d| {
+            const noun = pluralize(@max(d.ahead, d.behind));
+            const line = try std.fmt.bufPrint(
+                buf,
+                "Your branch and '{s}' have diverged,\nand have {d} and {d} different {s} each, respectively.\n  (use \"git pull\" if you want to integrate the remote branch with yours)\n",
+                .{ t.upstream_label, d.ahead, d.behind, noun },
+            );
+            try out.writeStreamingAll(io, line);
+        },
+        .unresolvable => {
+            // Remote ref present but we can't count — likely the user
+            // ran `zigit fetch` against a server without grabbing the
+            // pack. Match git's degraded form ("your branch and X have
+            // diverged" without numbers).
+            const line = try std.fmt.bufPrint(
+                buf,
+                "Your branch and '{s}' refer to different commits, but the divergence is unknown.\n  (run \"zigit fetch\" to update local objects)\n",
+                .{t.upstream_label},
+            );
+            try out.writeStreamingAll(io, line);
+        },
+    }
+}
+
+fn pluralize(n: u32) []const u8 {
+    return if (n == 1) "commit" else "commits";
 }
 

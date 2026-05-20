@@ -225,8 +225,16 @@ fn writePackedRefs(
         if (std.mem.startsWith(u8, r.name, "refs/heads/")) {
             const short = r.name[11..];
             if (std.mem.eql(u8, short, head_branch_short)) {
+                // Active branch: write BOTH refs/heads/<short> (so log/checkout
+                // work) AND refs/remotes/origin/<short> (so `status`'s
+                // ahead/behind has an upstream to compare against — real
+                // git does this too).
                 try rewritten.append(allocator, .{
                     .name = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{short}),
+                    .oid_hex = r.oid_hex,
+                });
+                try rewritten.append(allocator, .{
+                    .name = try std.fmt.allocPrint(allocator, "refs/remotes/origin/{s}", .{short}),
                     .oid_hex = r.oid_hex,
                 });
             } else {
