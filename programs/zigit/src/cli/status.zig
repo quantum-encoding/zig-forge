@@ -174,10 +174,42 @@ pub fn run(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !void
     // pre-v1.1 algorithm it would have been misreported as deleted.
     // Driving from the index means tracked-file state is independent
     // of any ignore filter, which is what git does.
+    //
+    // Symlink branch (mode 120000): the entry's blob payload IS the
+    // link target string. We use `readLink` (lstat semantics) and
+    // compare the returned target bytes against the index oid. DO
+    // NOT fall through to readFileAlloc — that would follow the
+    // link and hash the TARGET's contents, not the link's target,
+    // and would crash on dangling links (legal git state).
+    const symlink_mode: u32 = @intFromEnum(zigit.index.Mode.symlink);
     var idx_iter_workdir = index_map.iterator();
     while (idx_iter_workdir.next()) |kv| {
         const path = kv.key_ptr.*;
         const idx_entry = kv.value_ptr.*;
+
+        if (idx_entry.mode == symlink_mode) {
+            var link_buf: [Dir.max_path_bytes]u8 = undefined;
+            const n = work_root.readLink(io, path, &link_buf) catch |err| switch (err) {
+                error.FileNotFound => {
+                    try setUnstaged(allocator, &state_by_path, a, path, .deleted);
+                    continue;
+                },
+                // Entry exists but isn't a symlink anymore (replaced
+                // by a regular file or directory). That's modified.
+                error.NotLink, error.UnsupportedReparsePointType => {
+                    try setUnstaged(allocator, &state_by_path, a, path, .modified);
+                    continue;
+                },
+                else => return err,
+            };
+            const target = link_buf[0..n];
+            const wd_oid = zigit.object.computeOid(.blob, target);
+            if (!wd_oid.eql(idx_entry.oid)) {
+                try setUnstaged(allocator, &state_by_path, a, path, .modified);
+            }
+            continue;
+        }
+
         const content = work_root.readFileAlloc(io, path, allocator, .unlimited) catch |err| switch (err) {
             error.FileNotFound => {
                 try setUnstaged(allocator, &state_by_path, a, path, .deleted);

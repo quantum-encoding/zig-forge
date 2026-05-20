@@ -238,6 +238,54 @@ the right value for each path:
 
 ## Part 2 — Symlink materialization
 
+### The discipline (read before touching any code)
+
+The whole Part 2 surface is one rule applied at three call sites:
+**a `120000` entry's "content" is the link target string, and every
+operation that touches it uses lstat semantics — never stat, never
+open-through.**
+
+If any of the three call sites uses the regular-file path instead,
+the symlink will be written correctly but show as modified on every
+subsequent `status` (because the materialize-side and the read-side
+disagree about what "content" means), or it'll break on the
+dangling-link case (which is legal git state — a symlink whose
+target doesn't exist yet, common in a fresh checkout where the
+target's directory hasn't been materialized yet).
+
+The three call sites:
+
+1. **`workdir.walk` descent decision.** Already in v1.1 — symlinks
+   come back from `Dir.Iterator` as `.sym_link` (lstat semantics),
+   so the walker emits them as leaves and never enters them. The
+   ruleset's `recursiveLoad` follows the same convention. Phase 1
+   landed this; Phase 2 must not break it.
+
+2. **`worktree.applyTree` materialization.** When an entry has
+   mode `120000`, read the blob payload (= the link target bytes)
+   and call `Dir.symlink(target, dest)`. DO NOT check whether
+   `target` exists. Symlinks are legal whether their target exists
+   or not; git's checkout creates them regardless. If you `stat`
+   or `openFile` the target first, the dangling case breaks.
+
+3. **`status` per-entry comparison.** When an index entry has mode
+   `120000`, status's "is this modified?" check must use
+   `readLink(path)` on the work-tree path and compare the returned
+   target bytes against the index entry's blob payload (which IS
+   the target string, no trailing newline). DO NOT fall through to
+   the regular-file path. Reasons:
+     * `openFile`/`readFile` follows the link and reads the
+       *target's contents*, not the link's target — a different
+       blob entirely.
+     * On a dangling link, `openFile` fails outright; status would
+       crash or misreport.
+
+The rule that ties it together: **a symlink's content is its
+target string, stored as a blob. The walker treats symlinks as
+leaves; applyTree writes them with `symlink`; status reads them
+with `readLink`. None of the three sites uses `stat`, `openFile`,
+or `readFile` on a symlink path.**
+
 ### Scope
 
 When a tree entry has mode `120000`, the blob's payload is the link
@@ -355,15 +403,38 @@ correctness insurance.
 
 **Parity tests** (`tests/parity.sh §33`):
 
-- §33.1 — A test repo where `latest` is a symlink to `v1.2.3/`. After
-  `zigit clone`, `readlink latest` returns `v1.2.3/`.
-- §33.2 — `git status` on the cloned repo is clean (no spurious
-  "modified" line for the symlink).
-- §33.3 — `zigit checkout main` after editing a symlink restores
-  the original target.
-- §33.4 — A repo where a path was a file in commit A and a symlink
-  in commit B. `zigit switch B` correctly replaces the file with a
-  symlink.
+The headline test catches the whole discipline-violation class in
+one shot: materialize → status. If materialize-side and read-side
+disagree about symlink semantics, the just-checked-out symlink
+shows as modified.
+
+- §33.1 — **Materialize + status clean round-trip** (the headline).
+  A repo has a symlink `latest → v1.2.3/`. After `zigit checkout`
+  materializes it, `zigit status` reports clean (NOT
+  modified). This single round-trip exercises `applyTree`'s write
+  and `status`'s read agreeing — if either uses `openFile`-instead-
+  of-`readLink` semantics the symlink reads as modified and the
+  test fails. Also assert `readlink latest` returns `v1.2.3/` to
+  rule out the "wrote the right link, status broke" case.
+
+- §33.2 — **Dangling symlink case** (the discipline-defender).
+  A repo has a symlink whose target doesn't exist (`broken → 
+  /nonexistent/path`). `zigit checkout` must create the symlink
+  anyway (don't `stat` the target). `zigit status` must report
+  clean (don't `openFile` the symlink — that fails on dangling
+  links). This is the case that distinguishes `readLink`-correct
+  from `stat`-which-happens-to-work-on-valid-links.
+
+- §33.3 — Edit the symlink target via `ln -sf`, then
+  `zigit checkout` restores the original target.
+
+- §33.4 — File-to-symlink transition: commit A has `latest` as a
+  regular file, commit B replaces it with a symlink. `zigit
+  switch B` correctly removes the file and creates the symlink.
+
+- §33.5 — Symlink-to-file transition (the reverse). Tests
+  `applyTree`'s "remove the existing entry of wrong kind before
+  writing" logic in the opposite direction.
 
 ---
 

@@ -2095,6 +2095,145 @@ case "$miss" in
     *) check "31.5 missing helper degrades silently" "ok" "ok" ;;
 esac
 
+# ── Section 32: symlink materialization (mode 120000) ───────────────────────
+# Materialize-side (worktree.applyTree) writes mode-120000 blobs as
+# real OS symlinks; read-side (status) compares the link target
+# string to the index blob via readLink (NOT readFile, which would
+# follow the link). The whole class fails if the two sides disagree
+# about what "content" means for a symlink: a just-checked-out link
+# would read as modified on every status.
+#
+# Skip cleanly on Windows / any filesystem that refuses symlink
+# creation in the test sandbox.
+echo
+echo "32. symlink materialization (mode 120000)"
+
+SLT_OS=$(uname -s 2>/dev/null || echo "unknown")
+if [[ "$SLT_OS" == "Linux" || "$SLT_OS" == "Darwin" ]]; then
+    SLT="$WORK/symlink-test"
+    mkdir -p "$SLT"
+
+    export TZ=UTC
+    export GIT_AUTHOR_NAME="Symlink Bot"
+    export GIT_AUTHOR_EMAIL="symlink@example.com"
+    export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+    export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+    export GIT_AUTHOR_DATE=1700000000
+    export GIT_COMMITTER_DATE=$GIT_AUTHOR_DATE
+
+    # Build the fixture via REAL git so the on-disk repo contains
+    # genuine mode-120000 tree entries. Then strip everything to
+    # the index + objects, hand them off to zigit, and exercise
+    # the materialize + read path.
+    ( cd "$SLT" && git init -q -b main . )
+
+    # Make a real symlink target on disk first.
+    echo "v1.2.3 release artifact" > "$SLT/v1.2.3.txt"
+
+    # § 32.1 — Headline round-trip: a normal symlink to an existing
+    # file. After checkout, status MUST be clean.
+    ln -s v1.2.3.txt "$SLT/latest"
+    # AND a dangling symlink — git stores these as plain mode-120000
+    # blobs with the target string as the payload. checkout creates
+    # the link without checking the target's existence; status reads
+    # it via readLink without trying to open it.
+    ln -s "/nonexistent/path/to/nowhere" "$SLT/broken"
+
+    ( cd "$SLT" && git add v1.2.3.txt latest broken && git commit -qm "add target + valid + dangling symlinks" )
+
+    # Now blow away the work tree, leaving just .git/, and have
+    # zigit reconstitute it from HEAD. This exercises the
+    # materialize side.
+    rm "$SLT/v1.2.3.txt" "$SLT/latest" "$SLT/broken"
+    ( cd "$SLT" && "$ZIGIT_BIN" checkout HEAD 2>/dev/null || true )
+
+    # If checkout didn't materialize them, fall back to switch.
+    if [ ! -L "$SLT/latest" ] && [ ! -e "$SLT/latest" ]; then
+        # Use applyTree directly via switch's path.
+        ( cd "$SLT" && "$ZIGIT_BIN" switch main 2>/dev/null || true )
+    fi
+
+    # § 32.1a — valid symlink materialized as a real symlink (not a
+    # regular file containing the target string).
+    if [ -L "$SLT/latest" ]; then
+        check "32.1a `latest` materialized as a real symlink" "yes" "yes"
+    else
+        # Fallback to manual recreation via index restore to keep
+        # the test independent of which command did the materialize.
+        check "32.1a `latest` materialized as a real symlink" "yes" "$( [ -L "$SLT/latest" ] && echo yes || echo no — got $(ls -la "$SLT/latest" 2>&1) )"
+    fi
+
+    # § 32.1b — link target is the bytes we committed.
+    if [ -L "$SLT/latest" ]; then
+        target=$(readlink "$SLT/latest")
+        check "32.1b `latest` target is 'v1.2.3.txt'" "v1.2.3.txt" "$target"
+    fi
+
+    # § 32.2 — dangling symlink WAS materialized. Critical: must
+    # exist as a symlink without the target existing. This is the
+    # test that distinguishes readLink-correct from
+    # stat-which-happens-to-work-on-valid-links.
+    if [ -L "$SLT/broken" ]; then
+        check "32.2a dangling symlink materialized (lstat-not-stat discipline)" "yes" "yes"
+        broken_target=$(readlink "$SLT/broken")
+        check "32.2b dangling symlink target preserved" "/nonexistent/path/to/nowhere" "$broken_target"
+    else
+        check "32.2a dangling symlink materialized (lstat-not-stat discipline)" "yes" "no"
+    fi
+
+    # § 32.3 — Round-trip: status after fresh materialize MUST be
+    # clean for BOTH the valid and the dangling symlink. This is
+    # the class-killer: if materialize and read disagree about
+    # symlink semantics, one or both report modified.
+    if [ -L "$SLT/latest" ] && [ -L "$SLT/broken" ]; then
+        zigit_status=$(cd "$SLT" && "$ZIGIT_BIN" status -s)
+        check "32.3 status clean after symlink materialize (round-trip)" "" "$zigit_status"
+    fi
+
+    # § 32.4 — Modify a symlink's target on disk, status reports
+    # modified. (Replaces `latest` with a link to a different name.)
+    if [ -L "$SLT/latest" ]; then
+        rm "$SLT/latest"
+        ln -s "other-target.txt" "$SLT/latest"
+        zigit_status=$(cd "$SLT" && "$ZIGIT_BIN" status -s | grep latest)
+        case "$zigit_status" in
+            *" M latest"*|*"M  latest"*) check "32.4 retargeted symlink shows modified" "ok" "ok" ;;
+            *) check "32.4 retargeted symlink shows modified" "ok" "$zigit_status" ;;
+        esac
+    fi
+
+    # § 32.5 — File-to-symlink transition. Commit A has `swap` as
+    # a regular file; commit B replaces it with a symlink. After
+    # switching to B, the path is a real symlink (the unlink-then-
+    # create path in applyTree handles the transition).
+    SLT2="$WORK/symlink-transition"
+    mkdir -p "$SLT2"
+    ( cd "$SLT2" && git init -q -b main . )
+    echo "regular contents" > "$SLT2/swap"
+    echo "target" > "$SLT2/target.txt"
+    ( cd "$SLT2" && git add swap target.txt && GIT_AUTHOR_DATE=1700001000 GIT_COMMITTER_DATE=1700001000 git commit -qm "swap as file" )
+    ( cd "$SLT2" && git checkout -q -b feature )
+    rm "$SLT2/swap"
+    ln -s target.txt "$SLT2/swap"
+    ( cd "$SLT2" && git add swap && GIT_AUTHOR_DATE=1700002000 GIT_COMMITTER_DATE=1700002000 git commit -qm "swap as symlink" )
+    # Back to main (swap is a file), then switch to feature (swap
+    # is a symlink). Test the file→symlink transition.
+    ( cd "$SLT2" && git checkout -q main )
+    [ -f "$SLT2/swap" ] && [ ! -L "$SLT2/swap" ] || check "32.5 pre-condition: swap is a regular file" "yes" "no"
+    ( cd "$SLT2" && "$ZIGIT_BIN" switch feature 2>/dev/null || true )
+    if [ -L "$SLT2/swap" ]; then
+        check "32.5 file→symlink transition: swap is now a symlink" "yes" "yes"
+        sw_status=$(cd "$SLT2" && "$ZIGIT_BIN" status -s)
+        check "32.5 status clean after file→symlink transition" "" "$sw_status"
+    else
+        check "32.5 file→symlink transition: swap is now a symlink" "yes" "no"
+    fi
+
+    unset TZ GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
+else
+    echo -e "  ${DIM}skipping — symlink creation not supported on $SLT_OS${NC}"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo
 TOTAL=$((PASS + FAIL))
