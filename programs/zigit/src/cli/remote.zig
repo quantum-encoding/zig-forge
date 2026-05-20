@@ -3,7 +3,11 @@
 // Subcommands:
 //
 //   remote                          List remote names, one per line.
-//   remote -v | --verbose           Same, but with "<name>\t<url> (fetch)".
+//   remote -v | --verbose           Same, but with two lines per remote:
+//                                     <name>\t<url> (fetch)
+//                                     <name>\t<pushurl-or-url> (push)
+//                                   (Matches `git remote -v` byte-for-byte
+//                                   when remote.<name>.pushurl is unset.)
 //   remote add NAME URL             Add `[remote "NAME"]` with `url = URL`
 //                                   and a default `fetch` refspec.
 //   remote remove NAME              Drop every entry under [remote "NAME"].
@@ -60,19 +64,39 @@ pub fn run(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !void
 }
 
 fn listRemotes(allocator: std.mem.Allocator, io: Io, cfg: *const zigit.config.Config, verbose: bool) !void {
-    const subs = try cfg.subsections(allocator, "remote");
-    defer allocator.free(subs);
+    const subs_const = try cfg.subsections(allocator, "remote");
+    defer allocator.free(subs_const);
+
+    // Real `git remote` lists remotes in lexicographic order, not in
+    // .git/config insertion order. Copy into a mutable slice so we can
+    // sort.
+    const sorted = try allocator.dupe([]const u8, subs_const);
+    defer allocator.free(sorted);
+    std.mem.sort([]const u8, sorted, {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.lt);
 
     const out = File.stdout();
     var buf: [1024]u8 = undefined;
 
-    for (subs) |name| {
+    for (sorted) |name| {
         if (verbose) {
-            const dotted = try std.fmt.allocPrint(allocator, "remote.{s}.url", .{name});
-            defer allocator.free(dotted);
-            const url = cfg.get(dotted) orelse "";
-            const line = try std.fmt.bufPrint(&buf, "{s}\t{s} (fetch)\n", .{ name, url });
-            try out.writeStreamingAll(io, line);
+            const url_key = try std.fmt.allocPrint(allocator, "remote.{s}.url", .{name});
+            defer allocator.free(url_key);
+            const pushurl_key = try std.fmt.allocPrint(allocator, "remote.{s}.pushurl", .{name});
+            defer allocator.free(pushurl_key);
+
+            const fetch_url = cfg.get(url_key) orelse "";
+            // Push URL defaults to the fetch URL when remote.<name>.pushurl
+            // isn't explicitly set — matches git's behaviour.
+            const push_url = cfg.get(pushurl_key) orelse fetch_url;
+
+            const fetch_line = try std.fmt.bufPrint(&buf, "{s}\t{s} (fetch)\n", .{ name, fetch_url });
+            try out.writeStreamingAll(io, fetch_line);
+            const push_line = try std.fmt.bufPrint(&buf, "{s}\t{s} (push)\n", .{ name, push_url });
+            try out.writeStreamingAll(io, push_line);
         } else {
             const line = try std.fmt.bufPrint(&buf, "{s}\n", .{name});
             try out.writeStreamingAll(io, line);

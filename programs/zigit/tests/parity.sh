@@ -257,6 +257,17 @@ commit $(cd "$ZW2" && git rev-parse HEAD~2)
 commit 1"
 check "zigit log content" "$expected_self" "$zigit_log_self"
 
+# `log --oneline` byte-parity against real git. Same repo, both backends
+# walking the same DAG; the only variable is the formatter.
+zigit_oneline=$(cd "$ZW2" && "$ZIGIT_BIN" log --oneline)
+git_oneline=$(cd "$ZW2" && git log --oneline)
+check "log --oneline byte-parity vs git" "$git_oneline" "$zigit_oneline"
+
+# `log --oneline -n 1` returns only the most recent commit.
+zigit_oneline_n1=$(cd "$ZW2" && "$ZIGIT_BIN" log --oneline -n 1)
+git_oneline_n1=$(cd "$ZW2" && git log --oneline -n 1)
+check "log --oneline -n 1 byte-parity" "$git_oneline_n1" "$zigit_oneline_n1"
+
 unset TZ GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
 
 # ── Section 10: status ────────────────────────────────────────────────────────
@@ -1047,15 +1058,25 @@ git_fetch=$(cd "$RT" && git config --get remote.origin.fetch)
 check "git config sees zigit-written remote.origin.fetch" \
     "+refs/heads/*:refs/remotes/origin/*" "$git_fetch"
 
-# (c) Add a second remote → both listed in insertion order.
+# (c) Add a second remote → both listed in lexicographic order
+# (matching `git remote`'s sort).
 ( cd "$RT" && "$ZIGIT_BIN" remote add fork https://example.com/f.git )
 list2=$(cd "$RT" && "$ZIGIT_BIN" remote | tr '\n' ' ' | sed -e 's/ $//')
-check "remote list shows both" "origin fork" "$list2"
+check "remote list shows both (sorted)" "fork origin" "$list2"
 
-# (d) `remote -v` includes URLs.
-verbose_origin=$(cd "$RT" && "$ZIGIT_BIN" remote -v | grep '^origin')
-check "remote -v origin line" \
-    "$(printf 'origin\thttps://example.com/r.git (fetch)')" "$verbose_origin"
+# (d) `remote -v` includes URLs. Real git emits BOTH a (fetch) and a
+#     (push) line per remote, and the push line falls back to the fetch
+#     URL when remote.<name>.pushurl is unset. Diff zigit's full output
+#     against git's byte-for-byte.
+diff_v=$(cd "$RT" && diff <(git remote -v) <("$ZIGIT_BIN" remote -v); echo "exit=$?")
+case "$diff_v" in
+    exit=0*) check "remote -v byte-parity vs git" "ok" "ok" ;;
+    *) check "remote -v byte-parity vs git" "ok" "$diff_v" ;;
+esac
+# Spot-check the per-line shape too.
+verbose_lines=$(cd "$RT" && "$ZIGIT_BIN" remote -v | grep '^origin')
+expected_verbose=$(printf 'origin\thttps://example.com/r.git (fetch)\norigin\thttps://example.com/r.git (push)')
+check "remote -v origin emits fetch + push lines" "$expected_verbose" "$verbose_lines"
 
 # (e) `remote show fork` prints the underlying entries.
 show_url=$(cd "$RT" && "$ZIGIT_BIN" remote show fork | grep '^url')

@@ -1,31 +1,34 @@
-// `zigit log [-n N]`
+// `zigit log [-n N] [--oneline]`
 //
-// Walks the first-parent chain from HEAD and prints one entry per
-// commit, matching git's default `log` format closely enough for
-// human reading:
+// Walks the first-parent chain from HEAD. Two output modes:
 //
-//   commit <full-oid>
-//   Author: <name> <<email>>
-//   Date:   <human date>
-//   <blank>
-//       <indented message>
-//   <blank>
+//   default       commit <full-oid>
+//                 Author: <name> <<email>>
+//                 Date:   <unix> <tz>
+//                 <blank>
+//                     <indented message>
+//                 <blank>
+//
+//   --oneline     <7-char-short-oid> <first-line-of-message>
 //
 // We intentionally don't follow merges or do topological ordering —
-// `--first-parent` semantics. Once we ship merge in Phase 10 we can
-// revisit and grow the traversal to be topo-aware.
-//
-// Date formatting is the simplest possible: print the unix timestamp
-// + the author's emitted tz suffix. Pretty `Tue Apr 30 12:34:56 2026`
-// formatting waits for libc strftime in Phase 5.
+// `--first-parent` semantics. Once we ship merge-graph walks we can
+// revisit.
 
 const std = @import("std");
 const Io = std.Io;
 const File = Io.File;
 const zigit = @import("zigit");
 
+/// Git's default abbreviation width. Real git grows this dynamically
+/// when the loose-object population exposes prefix collisions; we
+/// always emit 7. The parity fixtures we ship don't have enough
+/// commits to collide.
+const short_oid_len: usize = 7;
+
 pub fn run(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !void {
     var max_count: ?usize = null;
+    var oneline = false;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -34,6 +37,8 @@ pub fn run(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !void
             i += 1;
             if (i >= args.len) return error.MissingCountArg;
             max_count = try std.fmt.parseInt(usize, args[i], 10);
+        } else if (std.mem.eql(u8, a, "--oneline")) {
+            oneline = true;
         } else {
             return error.UnknownArgument;
         }
@@ -67,24 +72,32 @@ pub fn run(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !void
         current.toHex(&hex);
 
         line_buf.clearRetainingCapacity();
-        try line_buf.writer.print("commit {s}\n", .{hex[0..40]});
 
-        // The author header is "<name> <<email>> <unix> <tz>".
-        // Split it for human-friendly Author/Date lines; if the
-        // header is malformed, fall back to dumping the line raw.
-        if (formatIdentityForHumans(parsed.author_line)) |author| {
-            try line_buf.writer.print("Author: {s}\n", .{author.identity});
-            try line_buf.writer.print("Date:   {d} {s}\n\n", .{ author.unix, author.tz });
-        } else |_| {
-            try line_buf.writer.print("Author: {s}\n\n", .{parsed.author_line});
-        }
+        if (oneline) {
+            // Subject = first line of the message, no trailing '\n'.
+            const subject_end = std.mem.indexOfScalar(u8, parsed.message, '\n') orelse parsed.message.len;
+            const subject = parsed.message[0..subject_end];
+            try line_buf.writer.print("{s} {s}\n", .{ hex[0..short_oid_len], subject });
+        } else {
+            try line_buf.writer.print("commit {s}\n", .{hex[0..40]});
 
-        // Indent the message body with 4 spaces to match git.
-        var msg_iter = std.mem.splitScalar(u8, std.mem.trimEnd(u8, parsed.message, "\n"), '\n');
-        while (msg_iter.next()) |line| {
-            try line_buf.writer.print("    {s}\n", .{line});
+            // The author header is "<name> <<email>> <unix> <tz>".
+            // Split it for human-friendly Author/Date lines; if the
+            // header is malformed, fall back to dumping the line raw.
+            if (formatIdentityForHumans(parsed.author_line)) |author| {
+                try line_buf.writer.print("Author: {s}\n", .{author.identity});
+                try line_buf.writer.print("Date:   {d} {s}\n\n", .{ author.unix, author.tz });
+            } else |_| {
+                try line_buf.writer.print("Author: {s}\n\n", .{parsed.author_line});
+            }
+
+            // Indent the message body with 4 spaces to match git.
+            var msg_iter = std.mem.splitScalar(u8, std.mem.trimEnd(u8, parsed.message, "\n"), '\n');
+            while (msg_iter.next()) |line| {
+                try line_buf.writer.print("    {s}\n", .{line});
+            }
+            try line_buf.writer.writeAll("\n");
         }
-        try line_buf.writer.writeAll("\n");
 
         try out.writeStreamingAll(io, line_buf.written());
 
