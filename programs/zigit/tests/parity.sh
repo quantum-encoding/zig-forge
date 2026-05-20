@@ -379,6 +379,41 @@ case "$miss_out" in
     *) check "9.add.5 nonexistent pathspec exits 1" "ok" "$miss_out" ;;
 esac
 
+# § 9.add.6 — `add .` invoked from a SUBDIRECTORY of the repo.
+# Pre-fix bug: classification used work_root.statFile (work-tree
+# base) while staging used Dir.cwd().openFile (cwd base). The walk
+# yielded work-root-relative paths like `src/foo.zig`, which staging
+# then tried to open at `cwd/src/foo.zig` — FileNotFound.
+#
+# After the fix, both phases agree on work_root as the base; running
+# from a subdir successfully stages work-root-relative paths.
+# (Note: zigit v1.1 deviates from git here — git's `.` is cwd-
+# relative, so `git add .` from src/ stages only src/'s subtree.
+# zigit treats every pathspec as work-tree-relative, so `zigit add .`
+# from src/ stages the WHOLE work tree. Documented in add.zig's
+# file header; matching git's cwd-relative semantics is a follow-up.)
+AI6="$WORK/add-ignore-6"
+mkdir -p "$AI6"
+( cd "$AI6" && "$ZIGIT_BIN" init >/dev/null )
+echo "root file" > "$AI6/root.txt"
+mkdir -p "$AI6/src"
+echo "nested file" > "$AI6/src/nested.txt"
+# Run `add .` from the subdir, NOT from the repo root. With the
+# pre-fix code, the walk emits "src/nested.txt", then staging
+# tries to open "src/nested.txt" relative to cwd=src/ → tries
+# "src/src/nested.txt" → FileNotFound, command bails non-zero.
+sub_out=$(cd "$AI6/src" && "$ZIGIT_BIN" add . 2>&1; echo "exit=$?")
+case "$sub_out" in
+    *"exit=0"*) check "9.add.6 \`add .\` from subdir does not error" "ok" "ok" ;;
+    *) check "9.add.6 \`add .\` from subdir does not error" "ok" "$sub_out" ;;
+esac
+# Both files should be in the index — the v1.1 work-tree-relative
+# pathspec interpretation walks the whole repo from subdir too.
+ls6=$(cd "$AI6" && "$ZIGIT_BIN" ls-files | sort)
+expected6="root.txt
+src/nested.txt"
+check "9.add.6 staged paths are work-tree-relative across subdir invocation" "$expected6" "$ls6"
+
 unset TZ GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
 
 # ── Section 10: status ────────────────────────────────────────────────────────

@@ -22,9 +22,16 @@
 //   * No `-f`/`--force` yet. v1.1 doesn't need it because explicit-
 //     named ignored FILES are already added (it's only ignored
 //     DIRECTORIES that need a future `-f` to escape the warn-exit).
-//   * `zigit add` assumes cwd == work-tree root. Running from a
-//     subdir would write cwd-relative paths into the index — a
-//     pre-existing v1.0 bug, not regressed by this commit.
+//   * `zigit add` interprets every pathspec as work-tree-root-
+//     relative. Both the classification phase (`work_root.statFile`)
+//     and the staging phase (`work_root.openFile` — fixed in this
+//     commit) agree on that base. Running from a subdirectory thus
+//     behaves: `add .` walks the WHOLE repo (not just the subdir,
+//     as git would); `add foo.txt` from `src/` errors with
+//     "pathspec did not match" because `foo.txt` is interpreted at
+//     work-tree root. Matching git's cwd-relative pathspec semantics
+//     is a follow-up — but the command no longer silently fails
+//     mid-staging when the two phases disagreed about the path base.
 
 const std = @import("std");
 const Io = std.Io;
@@ -115,6 +122,20 @@ pub fn run(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !void
 
     // Collect every path to stage. Order: explicit files first (in
     // arg order), then sorted directory expansion.
+    //
+    // `seen` is a dedupe set across both phases. The map's keys come
+    // from TWO different owners on purpose:
+    //   * Explicit-file phase inserts `p` directly, where `p` points
+    //     into the caller-owned `args` slice (via `normalizeArg`).
+    //     That slice outlives the entire command.
+    //   * Walk phase repoints the key at the freshly-appended
+    //     `to_stage` element (a heap copy of the walk's transient
+    //     `w_entry.path`). The walk listing is freed after the loop,
+    //     so the original key would dangle; the repoint moves the
+    //     key into `to_stage`'s lifetime.
+    // Both sources outlive `seen.deinit(allocator)`. If a future
+    // refactor changes when `to_stage` is freed, the walk-phase
+    // keys would dangle — the comment above is the tripwire.
     var to_stage: std.ArrayListUnmanaged([]const u8) = .empty;
     defer {
         for (to_stage.items) |p| allocator.free(p);
@@ -136,8 +157,8 @@ pub fn run(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !void
             const gop = try seen.getOrPut(allocator, w_entry.path);
             if (gop.found_existing) continue;
             try to_stage.append(allocator, try allocator.dupe(u8, w_entry.path));
-            // The key for `seen` must live as long as the entry
-            // does — point it at the (now-owned) staged copy.
+            // Repoint the key at the heap copy we just appended —
+            // see the comment block above for why.
             gop.key_ptr.* = to_stage.items[to_stage.items.len - 1];
         }
     }
@@ -161,7 +182,7 @@ pub fn run(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !void
         defer index.deinit();
         var store = repo.looseStore();
         for (to_stage.items) |p| {
-            try addOne(allocator, io, &store, &index, p);
+            try addOne(allocator, io, work_root, &store, &index, p);
         }
         try index.save(io, repo.git_dir);
     }
@@ -202,20 +223,26 @@ fn openWorkRoot(io: Io, repo: *zigit.Repository) !Dir {
 }
 
 /// Read a file, blob-hash it, write into the loose store, upsert an
-/// index entry. Copy of update_index.zig:addOne so we don't have to
-/// expose its internals.
+/// index entry. Diverges from update_index.zig:addOne in one
+/// load-bearing way: the classification phase resolves arguments via
+/// `work_root.statFile` (work-tree-relative), and the directory walk
+/// emits work-tree-relative paths. The staging phase MUST agree —
+/// resolving via `Dir.cwd()` would silently fail (or, worse, stage
+/// the wrong file) when the user runs from a subdir. This function
+/// takes the same `work_root` handle the rest of the command uses.
 fn addOne(
     allocator: std.mem.Allocator,
     io: Io,
+    work_root: Dir,
     store: *zigit.LooseStore,
     index: *zigit.Index,
     rel_path: []const u8,
 ) !void {
-    var file = try Dir.cwd().openFile(io, rel_path, .{});
+    var file = try work_root.openFile(io, rel_path, .{});
     defer file.close(io);
     const stat = try file.stat(io);
 
-    const content = try Dir.cwd().readFileAlloc(io, rel_path, allocator, .unlimited);
+    const content = try work_root.readFileAlloc(io, rel_path, allocator, .unlimited);
     defer allocator.free(content);
 
     const oid = zigit.object.computeOid(.blob, content);
