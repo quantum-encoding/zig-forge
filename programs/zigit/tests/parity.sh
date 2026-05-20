@@ -1723,6 +1723,90 @@ else
     fi
 fi
 
+# ── Section 30: pull — fetch + merge (fast-forward) ──────────────────────────
+# Reuses the §29 server scaffolding. Drives the bare upstream forward
+# while the local clone has no new commits, then asserts that
+# `zigit pull` fast-forwards local HEAD to match upstream and the
+# working tree carries the new file contents.
+echo
+echo "30. pull — fetch + merge fast-forward"
+
+if [ ! -x "$GIT_BACKEND" ] || ! command -v python3 >/dev/null 2>&1 || [ ! -x "$SERVER_PY" ]; then
+    echo -e "  ${DIM}skipping — git-http-backend or python3 missing${NC}"
+else
+    PL_DIR="$WORK/pull-test"
+    mkdir -p "$PL_DIR/bare"
+    ( cd "$PL_DIR/bare" && git init -q --bare && git config http.receivepack true && git symbolic-ref HEAD refs/heads/main )
+
+    mkdir -p "$PL_DIR/up"
+    ( cd "$PL_DIR/up" && git init -q -b main . )
+    make_commit "$PL_DIR/up" "Up Bot" "up@example.com" 1700400000 "v1\n" "v1"
+    ( cd "$PL_DIR/up" && git remote add origin "$PL_DIR/bare" && git push -q origin main )
+
+    PL_LOG="$PL_DIR/server.log"
+    GIT_HTTP_BACKEND="$GIT_BACKEND" GIT_PROJECT_ROOT="$PL_DIR/bare" \
+        python3 "$SERVER_PY" 0 > "$PL_LOG" 2>&1 &
+    PL_SERVER_PID=$!
+    for _ in $(seq 1 20); do
+        if grep -q '^ready ' "$PL_LOG" 2>/dev/null; then break; fi
+        sleep 0.1
+    done
+    PL_PORT=$(awk '/^ready /{print $2; exit}' "$PL_LOG")
+
+    if [ -z "$PL_PORT" ]; then
+        kill "$PL_SERVER_PID" 2>/dev/null
+        check "git-http-backend started for pull tests" "ready" "failed-to-start"
+    else
+        URL="http://127.0.0.1:$PL_PORT"
+        mkdir -p "$PL_DIR/down"
+        ( cd "$PL_DIR/down" && "$ZIGIT_BIN" clone "$URL" clone >/dev/null 2>&1 )
+        CL="$PL_DIR/down/clone"
+
+        if [ ! -d "$CL/.git" ]; then
+            check "zigit clone for pull succeeded" "yes" "no — see $PL_LOG"
+        else
+            # ── 30.1 — pull when nothing's changed prints "Already up to date".
+            uptodate_pull=$(cd "$CL" && "$ZIGIT_BIN" pull 2>&1 | tail -1)
+            check "30.1 pull on clean clone reports up to date" \
+                "Already up to date." "$uptodate_pull"
+
+            # ── 30.2 — upstream gains two commits; pull fast-forwards.
+            make_commit "$PL_DIR/up" "Up Bot" "up@example.com" 1700401000 "v2\n" "v2"
+            make_commit "$PL_DIR/up" "Up Bot" "up@example.com" 1700402000 "v3\n" "v3"
+            ( cd "$PL_DIR/up" && git push -q origin main )
+
+            pull_out=$(cd "$CL" && "$ZIGIT_BIN" pull 2>&1)
+            case "$pull_out" in
+                *Fast-forward*) check "30.2a pull prints Fast-forward" "ok" "ok" ;;
+                *) check "30.2a pull prints Fast-forward" "ok" "$pull_out" ;;
+            esac
+
+            # Local HEAD now matches the bare upstream.
+            bare_oid=$(cat "$PL_DIR/bare/refs/heads/main")
+            local_oid=$(cat "$CL/.git/refs/heads/main")
+            check "30.2b local HEAD matches bare upstream after pull" \
+                "$bare_oid" "$local_oid"
+
+            # Working tree carries the new content.
+            wd_content=$(cat "$CL/f")
+            check "30.2c working tree shows upstream content" "v3" "$wd_content"
+
+            # Status now reads "up to date" again.
+            uptodate_after=$(cd "$CL" && "$ZIGIT_BIN" status | grep "Your branch is")
+            check "30.2d status after pull is up to date" \
+                "Your branch is up to date with 'origin/main'." \
+                "$uptodate_after"
+
+            # ── 30.3 — a second pull is a clean no-op.
+            second=$(cd "$CL" && "$ZIGIT_BIN" pull 2>&1 | tail -1)
+            check "30.3 second pull is a no-op" "Already up to date." "$second"
+        fi
+
+        kill "$PL_SERVER_PID" 2>/dev/null
+        wait "$PL_SERVER_PID" 2>/dev/null
+    fi
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo
 TOTAL=$((PASS + FAIL))

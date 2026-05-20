@@ -1,6 +1,10 @@
 // `zigit merge BRANCH`
 //
-// Merge BRANCH (anywhere under refs/heads/) into the current branch.
+// Merge BRANCH into the current branch. The argument may be either:
+//   * a short branch name → treated as refs/heads/<name>
+//   * a full ref path starting with "refs/" → used directly. Lets
+//     `zigit pull` invoke merge against refs/remotes/<remote>/<branch>
+//     without an alias shuffle.
 //
 // Three cases, in order of precedence:
 //
@@ -34,7 +38,7 @@ pub fn run(
     args: []const []const u8,
 ) !void {
     if (args.len != 1) return error.UsageMergeOneBranch;
-    const branch = args[0];
+    const arg = args[0];
 
     var repo = try zigit.Repository.discover(allocator, io);
     defer repo.deinit();
@@ -47,9 +51,14 @@ pub fn run(
 
     const ours = (try zigit.refs.tryResolve(allocator, io, repo.git_dir, current_full)) orelse return error.UnbornBranch;
 
-    // Resolve target.
+    // Resolve target. The argument is either a full ref path (starts
+    // with "refs/") or a short branch name that we anchor under
+    // refs/heads/.
     var ref_buf: [Dir.max_path_bytes]u8 = undefined;
-    const theirs_ref = try std.fmt.bufPrint(&ref_buf, "{s}/{s}", .{ heads_dir, branch });
+    const theirs_ref: []const u8 = if (std.mem.startsWith(u8, arg, "refs/"))
+        arg
+    else
+        try std.fmt.bufPrint(&ref_buf, "{s}/{s}", .{ heads_dir, arg });
     const theirs = (try zigit.refs.tryResolve(allocator, io, repo.git_dir, theirs_ref)) orelse return error.BranchNotFound;
 
     if (ours.eql(theirs)) {
@@ -66,7 +75,16 @@ pub fn run(
     }
 
     if (base_oid.eql(ours)) {
-        try fastForward(allocator, io, environ, &repo, &store, current_full, ours, theirs, branch);
+        // For the reflog "Fast-forward" line, prefer the short form of
+        // the source ref when we got a full ref path — e.g. for
+        // "refs/remotes/origin/main" emit "origin/main".
+        const source_label: []const u8 = if (std.mem.startsWith(u8, arg, "refs/heads/"))
+            arg["refs/heads/".len..]
+        else if (std.mem.startsWith(u8, arg, "refs/remotes/"))
+            arg["refs/remotes/".len..]
+        else
+            arg;
+        try fastForward(allocator, io, environ, &repo, &store, current_full, ours, theirs, source_label);
         return;
     }
 
