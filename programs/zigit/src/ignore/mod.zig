@@ -18,6 +18,14 @@ pub const Error = pattern.Error;
 pub const compile = pattern.compile;
 pub const matches = pattern.matches;
 
+pub const ruleset = @import("ruleset.zig");
+pub const Ruleset = ruleset.Ruleset;
+pub const RuleEntry = ruleset.RuleEntry;
+pub const Source = ruleset.Source;
+pub const LoadOptions = ruleset.LoadOptions;
+pub const load = ruleset.load;
+
 test {
     _ = pattern;
+    _ = ruleset;
 }
