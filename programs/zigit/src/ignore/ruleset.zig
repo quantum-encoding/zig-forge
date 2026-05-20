@@ -548,3 +548,84 @@ test "ruleset: info_exclude bytes contribute rules with empty base_dir" {
     try testing.expect(rs.isIgnored("foo.secret", false));
     try testing.expect(rs.isIgnored("a/b/foo.secret", false));
 }
+
+test "ruleset: a directory's own .gitignore cannot save it from a parent exclusion" {
+    // The prune decision for a directory uses the cascade BUILT FROM
+    // ITS PARENTS, before the directory's own .gitignore is read.
+    // A child can never influence its own prune decision — a `!*`
+    // or `!.` inside vendor/.gitignore cannot rescue `vendor/` if
+    // the root .gitignore already excluded it.
+    //
+    // This is a different code path from the file-inside case
+    // (`bar/` + bar/.gitignore `!keep.txt`) covered above — that one
+    // tests "file inside excluded dir stays excluded"; this tests
+    // "directory itself, evaluated by the parent's cascade".
+    const a = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(testing.io, "vendor");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = ".gitignore", .data = "vendor/\n" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "vendor/.gitignore", .data = "!*\n!.\n" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "vendor/lib.js", .data = "x" });
+
+    var rs = try loadFromTmp(a, testing.io, tmp.dir);
+    defer rs.deinit();
+
+    // The directory stays excluded — vendor/.gitignore's negations
+    // cannot reach the parent's decision.
+    try testing.expect(rs.isIgnoredDir("vendor"));
+
+    // Structural proof: vendor/.gitignore was never read because
+    // vendor was pruned during cascade construction. So neither
+    // `!*` nor `!.` ever entered the cascade. Cascade contains
+    // exactly the root rule.
+    try testing.expectEqual(@as(usize, 1), rs.rules.len);
+    try testing.expectEqualStrings("", rs.rules[0].base_dir);
+}
+
+test "ruleset: symlink-to-directory is not descended during cascade construction" {
+    // A freshly-checked-out symlink that points at a directory must
+    // NOT be walked through. Following symlink-dirs causes infinite
+    // loops on cyclic links and lets the cascade leak rules from
+    // outside the repo. We rely on the iterator's lstat semantics
+    // (sym_link kind even when the target is a directory) plus the
+    // `entry.kind != .directory` filter in recursiveLoad.
+    //
+    // Skip on Windows where symlink creation requires the developer
+    // privilege we can't assume in tests.
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+
+    const a = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Real directory with a .gitignore that, if read, would change
+    // the cascade in an observable way.
+    try tmp.dir.createDirPath(testing.io, "real");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "real/.gitignore", .data = "leaked-rule\n" });
+
+    // Symlink at the root pointing at the real directory. If the
+    // loader followed it, real/.gitignore would be read TWICE —
+    // once under "real" and once under "link" — and `leaked-rule`
+    // would appear in the cascade with base_dir = "link".
+    tmp.dir.symLink(testing.io, "real", "link", .{ .is_directory = true }) catch |err| switch (err) {
+        // Some filesystems can't create symlinks; skip cleanly.
+        error.AccessDenied, error.PermissionDenied => return error.SkipZigTest,
+        else => return err,
+    };
+
+    var rs = try loadFromTmp(a, testing.io, tmp.dir);
+    defer rs.deinit();
+
+    // Cascade contains exactly ONE rule, from real/.gitignore — the
+    // symlink wasn't followed.
+    try testing.expectEqual(@as(usize, 1), rs.rules.len);
+    try testing.expectEqualStrings("real", rs.rules[0].base_dir);
+
+    // And the leaked-rule pattern only applies under "real/", not
+    // under "link/" (which it would if the symlink had been
+    // followed during construction).
+    try testing.expect(rs.isIgnored("real/leaked-rule", false));
+    try testing.expect(!rs.isIgnored("link/leaked-rule", false));
+}
