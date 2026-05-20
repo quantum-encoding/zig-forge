@@ -15,6 +15,7 @@ pub const net = @import("net/mod.zig");
 pub const merge = @import("merge/mod.zig");
 pub const reflog = @import("reflog.zig");
 pub const blame = @import("blame/mod.zig");
+pub const ignore = @import("ignore/mod.zig");
 
 pub const Oid = object.Oid;
 pub const Kind = object.Kind;
@@ -36,4 +37,5 @@ test {
     _ = merge;
     _ = reflog;
     _ = blame;
+    _ = ignore;
 }
