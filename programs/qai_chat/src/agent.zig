@@ -14,6 +14,19 @@ const hs = @import("http-sentinel");
 const tools = @import("tools.zig");
 const cfg_mod = @import("config.zig");
 const pricing = @import("pricing.zig");
+const fake_provider = @import("fake_provider.zig");
+
+/// Re-exported for integration tests that need to release the pricing
+/// cache under `std.testing.allocator`. Production callers don't need it.
+/// See `docs/before_threads.md` and `src/pricing.zig`.
+pub const deinitPricingCache = pricing.deinitCache;
+
+/// Re-exported so integration tests can construct fake-provider state
+/// through the `agent` module alone, avoiding Zig 0.16 module-overlap
+/// constraints (a sibling file cannot belong to two named modules). See
+/// `src/fake_provider.zig` for the underlying types.
+pub const FakeConfig = fake_provider.FakeConfig;
+pub const FakeCallRecord = fake_provider.CallRecord;
 
 const MAX_AGENT_TURNS: u32 = 12;
 const MAX_TOOL_BLOCKS: usize = 16;
@@ -242,6 +255,15 @@ pub const RunArgs = struct {
     /// where the bill went.
     usage: *UsageStats,
     user_prompt: []const u8,
+    /// Test-only — required when `provider == .fake`, ignored otherwise.
+    /// Carries the fixture path and an optional CallRecord. Populated by
+    /// the integration test; never set by production code paths.
+    fake: ?*fake_provider.FakeConfig = null,
+    /// Required when `provider == .cloudflare`. The CF account ID lives
+    /// in the URL path (not a header), so the caller must resolve it
+    /// from env (`CF_ACCOUNT_ID`) and pass it through. Caller owns the
+    /// lifetime — typically a borrowed slice from `init.environ_map`.
+    cloudflare_account_id: ?[]const u8 = null,
 };
 
 pub const Error = error{
@@ -450,6 +472,8 @@ pub fn run(args: RunArgs) !void {
         .openai => runResponsesApiStream(args, .openai),
         .grok => runResponsesApiStream(args, .grok),
         .gemini => runGeminiStream(args),
+        .cloudflare => runCloudflareStream(args),
+        .fake => runFakeStream(args),
     };
 }
 
@@ -580,6 +604,247 @@ fn runAnthropicStream(args: RunArgs) !void {
         });
 
         // Loop — model needs the tool results to continue.
+    }
+
+    try args.err.print("[agent] reached MAX_AGENT_TURNS ({d}) — stopping\n", .{MAX_AGENT_TURNS});
+    try args.err.flush();
+}
+
+/// Cloudflare Workers AI agent loop. Speaks OpenAI Chat Completions wire
+/// format through the CloudflareClient. Requires `CF_ACCOUNT_ID` env (the
+/// account ID is part of the URL path, not a header — same shape as the
+/// Go-side reference impl at quantum-ai-backend/cloudflare/cloudflare.go).
+fn runCloudflareStream(args: RunArgs) !void {
+    const account_id = args.cloudflare_account_id orelse {
+        try args.err.writeAll(
+            "[cloudflare] cloudflare_account_id is required on RunArgs " ++
+                "when provider=cloudflare (caller should resolve CF_ACCOUNT_ID from env)\n",
+        );
+        try args.err.flush();
+        return error.CloudflareAccountIdMissing;
+    };
+
+    var client = try hs.ai.CloudflareClient.init(args.gpa, .{
+        .api_key = args.api_key,
+        .account_id = account_id,
+        .base_url = args.base_url,
+    });
+    defer client.deinit();
+
+    var tool_defs = buildToolDefs();
+
+    const req_cfg: hs.ai.common.RequestConfig = .{
+        .model = args.model,
+        .max_tokens = args.max_tokens,
+        .temperature = args.temperature,
+        .system_prompt = args.system_prompt orelse DEFAULT_AGENT_SYSTEM_PROMPT,
+        .tools = &tool_defs,
+        .stream = true,
+    };
+
+    var pending_prompt: []const u8 = args.user_prompt;
+    var first_turn = true;
+
+    var turn: u32 = 0;
+    while (turn < MAX_AGENT_TURNS) : (turn += 1) {
+        var state = TurnState{
+            .gpa = args.gpa,
+            .out = args.out,
+            .err = args.err,
+        };
+        defer state.deinit();
+
+        client.sendMessageStreamingWithEvents(
+            pending_prompt,
+            args.history.items,
+            req_cfg,
+            streamEventCb,
+            &state,
+        ) catch |e| {
+            try surfaceApiError(args.err, &client.http_client, e);
+            return e;
+        };
+
+        if (first_turn) {
+            try appendUser(args.gpa, args.io, args.history, args.user_prompt);
+            first_turn = false;
+        }
+        pending_prompt = "";
+
+        if (state.text.items.len > 0 and state.text.items[state.text.items.len - 1] != '\n') {
+            try args.out.writeAll("\n");
+            try args.out.flush();
+        }
+
+        try printTurnUsage(args, &state, turn);
+
+        const text_owned = try args.gpa.dupe(u8, state.text.items);
+        var assistant_calls: ?[]hs.ai.common.ToolCall = null;
+        if (state.saw_tool_use and state.tools.items.len > 0) {
+            const calls = try args.gpa.alloc(hs.ai.common.ToolCall, state.tools.items.len);
+            errdefer args.gpa.free(calls);
+            for (state.tools.items, 0..) |*tb, i| {
+                const args_json = if (tb.args.items.len == 0) "{}" else tb.args.items;
+                calls[i] = .{
+                    .id = try args.gpa.dupe(u8, tb.id.items),
+                    .name = try args.gpa.dupe(u8, tb.name.items),
+                    .arguments = try args.gpa.dupe(u8, args_json),
+                    .allocator = args.gpa,
+                };
+            }
+            assistant_calls = calls;
+        }
+
+        try args.history.append(args.gpa, .{
+            .id = try std.fmt.allocPrint(args.gpa, "msg-{d}", .{args.history.items.len}),
+            .role = .assistant,
+            .content = text_owned,
+            .timestamp = std.Io.Timestamp.now(args.io, .real).toSeconds(),
+            .tool_calls = assistant_calls,
+            .allocator = args.gpa,
+        });
+
+        if (assistant_calls == null) return;
+
+        const calls = args.history.items[args.history.items.len - 1].tool_calls.?;
+        var results = try args.gpa.alloc(hs.ai.common.ToolResult, calls.len);
+        for (calls, 0..) |call, i| {
+            const out_text = try executeToolWithConfirm(args, call);
+            results[i] = .{
+                .tool_call_id = try args.gpa.dupe(u8, call.id),
+                .content = out_text,
+                .allocator = args.gpa,
+            };
+        }
+
+        try args.history.append(args.gpa, .{
+            .id = try std.fmt.allocPrint(args.gpa, "msg-{d}", .{args.history.items.len}),
+            .role = .user,
+            .content = try args.gpa.dupe(u8, ""),
+            .timestamp = std.Io.Timestamp.now(args.io, .real).toSeconds(),
+            .tool_results = results,
+            .allocator = args.gpa,
+        });
+    }
+
+    try args.err.print("[agent] reached MAX_AGENT_TURNS ({d}) — stopping\n", .{MAX_AGENT_TURNS});
+    try args.err.flush();
+}
+
+/// Test-only agent loop. Drives the same turn-loop machinery as the real
+/// provider arms — `streamEventCb` populating `TurnState`, history append,
+/// tool execution, usage emission — but with a FakeProvider replaying a
+/// JSONL fixture instead of a real streaming HTTP call. Lets integration
+/// tests assert on what the agent loop *does* with provider output,
+/// without HTTP, threads, or live providers in the picture.
+///
+/// Requires `args.fake` to be non-null; that's a programming error if it's
+/// not, because `run()` only dispatches here when `provider == .fake`,
+/// which the test sets together with `fake`.
+fn runFakeStream(args: RunArgs) !void {
+    const fake_cfg = args.fake orelse return error.FakeConfigRequired;
+
+    var provider = fake_provider.FakeProvider.init(args.gpa, .{
+        .io = args.io,
+        .fixture_path = fake_cfg.fixture_path,
+        .recorder = fake_cfg.recorder,
+    });
+    defer provider.deinit();
+
+    var tool_defs = buildToolDefs();
+
+    const req_cfg: hs.ai.common.RequestConfig = .{
+        .model = args.model,
+        .max_tokens = args.max_tokens,
+        .temperature = args.temperature,
+        .system_prompt = args.system_prompt orelse DEFAULT_AGENT_SYSTEM_PROMPT,
+        .tools = &tool_defs,
+        .stream = true,
+    };
+
+    var pending_prompt: []const u8 = args.user_prompt;
+    var first_turn = true;
+
+    var turn: u32 = 0;
+    while (turn < MAX_AGENT_TURNS) : (turn += 1) {
+        var state = TurnState{
+            .gpa = args.gpa,
+            .out = args.out,
+            .err = args.err,
+        };
+        defer state.deinit();
+
+        try provider.sendMessageStreamingWithEvents(
+            pending_prompt,
+            args.history.items,
+            req_cfg,
+            streamEventCb,
+            &state,
+        );
+
+        if (first_turn) {
+            try appendUser(args.gpa, args.io, args.history, args.user_prompt);
+            first_turn = false;
+        }
+        pending_prompt = "";
+
+        if (state.text.items.len > 0 and state.text.items[state.text.items.len - 1] != '\n') {
+            try args.out.writeAll("\n");
+            try args.out.flush();
+        }
+
+        try printTurnUsage(args, &state, turn);
+
+        const text_owned = try args.gpa.dupe(u8, state.text.items);
+        var assistant_calls: ?[]hs.ai.common.ToolCall = null;
+        if (state.saw_tool_use and state.tools.items.len > 0) {
+            const calls = try args.gpa.alloc(hs.ai.common.ToolCall, state.tools.items.len);
+            errdefer args.gpa.free(calls);
+            for (state.tools.items, 0..) |*tb, i| {
+                const args_json = if (tb.args.items.len == 0) "{}" else tb.args.items;
+                calls[i] = .{
+                    .id = try args.gpa.dupe(u8, tb.id.items),
+                    .name = try args.gpa.dupe(u8, tb.name.items),
+                    .arguments = try args.gpa.dupe(u8, args_json),
+                    .allocator = args.gpa,
+                };
+            }
+            assistant_calls = calls;
+        }
+
+        try args.history.append(args.gpa, .{
+            .id = try std.fmt.allocPrint(args.gpa, "msg-{d}", .{args.history.items.len}),
+            .role = .assistant,
+            .content = text_owned,
+            .timestamp = std.Io.Timestamp.now(args.io, .real).toSeconds(),
+            .tool_calls = assistant_calls,
+            .allocator = args.gpa,
+        });
+
+        if (assistant_calls == null) return;
+
+        // Tool execution path is identical to the real arms — fixtures that
+        // include tool_use events exercise it via the same executeToolWithConfirm
+        // call, with auto_approve typically set in tests.
+        const calls = args.history.items[args.history.items.len - 1].tool_calls.?;
+        var results = try args.gpa.alloc(hs.ai.common.ToolResult, calls.len);
+        for (calls, 0..) |call, i| {
+            const out_text = try executeToolWithConfirm(args, call);
+            results[i] = .{
+                .tool_call_id = try args.gpa.dupe(u8, call.id),
+                .content = out_text,
+                .allocator = args.gpa,
+            };
+        }
+
+        try args.history.append(args.gpa, .{
+            .id = try std.fmt.allocPrint(args.gpa, "msg-{d}", .{args.history.items.len}),
+            .role = .user,
+            .content = try args.gpa.dupe(u8, ""),
+            .timestamp = std.Io.Timestamp.now(args.io, .real).toSeconds(),
+            .tool_results = results,
+            .allocator = args.gpa,
+        });
     }
 
     try args.err.print("[agent] reached MAX_AGENT_TURNS ({d}) — stopping\n", .{MAX_AGENT_TURNS});

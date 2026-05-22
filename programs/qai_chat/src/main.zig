@@ -173,6 +173,12 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const env = init.environ_map;
 
+    // Pricing table is lazily cached in a file-scoped arena (pricing.zig).
+    // Without this defer, Debug builds report N pricing entries leaked on
+    // every exit — noisy. Proper fix (comptime table or no-cache) tracked
+    // in docs/before_threads.md.
+    defer agent.deinitPricingCache();
+
     const stdout_file = std.Io.File.stdout();
     var stdout_buf: [1024]u8 = undefined;
     var stdout_writer = stdout_file.writer(io, &stdout_buf);
@@ -1381,6 +1387,22 @@ fn dispatchTurn(
         return;
     };
 
+    // Resolve CF_ACCOUNT_ID up front when targeting cloudflare so the
+    // failure mode is "config error before the request" rather than a
+    // 404 from CF after we've spent tokens building the body. Shared by
+    // both the agent-loop path and the plain-chat runTurn path below.
+    var cloudflare_account_id: ?[]const u8 = null;
+    if (cfg.provider == .cloudflare) {
+        cloudflare_account_id = env.get("CF_ACCOUNT_ID") orelse {
+            try err.writeAll(
+                "[cloudflare] CF_ACCOUNT_ID env var is required " ++
+                    "(find it in the dashboard URL: dash.cloudflare.com/{ACCOUNT_ID}/...)\n",
+            );
+            try err.flush();
+            return;
+        };
+    }
+
     if (args.tools_enabled) {
         return agent.run(.{
             .gpa = gpa,
@@ -1402,9 +1424,10 @@ fn dispatchTurn(
             .approvals = approvals,
             .usage = usage_total,
             .user_prompt = prompt,
+            .cloudflare_account_id = cloudflare_account_id,
         });
     }
-    return runTurn(gpa, io, cfg, api_key, history, prompt, out, err, usage_total);
+    return runTurn(gpa, io, cfg, api_key, history, prompt, out, err, usage_total, cloudflare_account_id);
 }
 
 fn runTurn(
@@ -1417,6 +1440,9 @@ fn runTurn(
     out: *std.Io.Writer,
     err_writer: *std.Io.Writer,
     usage_total: *agent.UsageStats,
+    /// Only meaningful when cfg.provider == .cloudflare. Resolved by the
+    /// caller (which has `env` in scope) from CF_ACCOUNT_ID.
+    cloudflare_account_id: ?[]const u8,
 ) !void {
     // Plain-chat now uses the same StreamEvent surface as agent mode so
     // token usage, message_stop, and any future shared signals all flow
@@ -1484,6 +1510,36 @@ fn runTurn(
                 try agent.surfaceApiError(err_writer, &client.http_client, e);
                 return e;
             };
+        },
+        .cloudflare => {
+            const account_id = cloudflare_account_id orelse {
+                try err_writer.writeAll(
+                    "[cloudflare] CF_ACCOUNT_ID env var is required " ++
+                        "(find it in the dashboard URL: dash.cloudflare.com/{ACCOUNT_ID}/...)\n",
+                );
+                try err_writer.flush();
+                return error.CloudflareAccountIdMissing;
+            };
+
+            var client = try hs.ai.CloudflareClient.init(gpa, .{
+                .api_key = api_key,
+                .account_id = account_id,
+                .base_url = settings.base_url,
+            });
+            defer client.deinit();
+            client.sendMessageStreamingWithEvents(prompt, history.items, req_cfg, agent.streamEventCb, &state) catch |e| {
+                try agent.surfaceApiError(err_writer, &client.http_client, e);
+                return e;
+            };
+        },
+        .fake => {
+            // Test-only provider. Should never be reachable from production
+            // config because Provider.parse() refuses the "fake" string —
+            // but the enum variant exists, so the switch must handle it.
+            // If somehow set programmatically, fail loud rather than silent.
+            try err_writer.writeAll("[qai] provider 'fake' is test-only and not reachable from this code path\n");
+            try err_writer.flush();
+            return error.FakeProviderNotAllowed;
         },
     }
 

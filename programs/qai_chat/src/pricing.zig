@@ -65,6 +65,9 @@ const csv_data =
     \\openai,o3-pro,30,120
     \\openai,o3-mini,1.1,4.4
     \\openai,o4-mini,1.1,4.4
+    \\cloudflare,@cf/google/gemma-4-26b-a4b-it,0.30,0.30
+    \\cloudflare,@cf/nvidia/nemotron-3-120b-a12b,0.40,0.80
+    \\cloudflare,@cf/meta/llama-3.3-70b-instruct-fp8-fast,0.29,0.29
 ;
 
 const Entry = struct {
@@ -76,6 +79,16 @@ const Entry = struct {
 /// embedded CSV; entry slices point into csv_data. Allocated lazily.
 var entries: ?[]Entry = null;
 var entries_arena: ?std.heap.ArenaAllocator = null;
+
+/// Release the cached pricing table. In production this is never
+/// called — the cache lives for the process lifetime, and the arena
+/// is reclaimed at exit. Tests call it under a `defer` so
+/// `std.testing.allocator`'s leak detector sees a clean slate.
+pub fn deinitCache() void {
+    if (entries_arena) |*a| a.deinit();
+    entries_arena = null;
+    entries = null;
+}
 
 /// Look up pricing for a model. Returns null if no entry matches.
 /// Falls back from exact match → longest prefix match.
@@ -153,6 +166,7 @@ fn ensureLoaded(gpa: std.mem.Allocator) ![]Entry {
 }
 
 test "lookup finds exact and prefix matches" {
+    defer deinitCache();
     const exact = lookup(std.testing.allocator, "claude-sonnet-4-5-20250929");
     try std.testing.expect(exact != null);
     try std.testing.expectApproxEqAbs(@as(f64, 3.0), exact.?.input_per_1m, 0.001);

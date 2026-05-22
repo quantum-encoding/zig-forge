@@ -1,0 +1,7 @@
+# Simplest case: text-only response, no tool_use. Agent loop persists
+# the assistant turn and returns. Tokens are illustrative — pricing
+# tests are separate.
+{"kind":"text_delta","index":0,"text":"Hello! "}
+{"kind":"text_delta","index":0,"text":"How can I help?"}
+{"kind":"block_stop","index":0}
+{"kind":"message_stop","stop_reason":"end_turn","input_tokens":8,"output_tokens":6}

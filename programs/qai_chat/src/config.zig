@@ -12,6 +12,16 @@ pub const Provider = enum {
     gemini,
     grok,
     deepseek,
+    /// Cloudflare Workers AI. Hosts open-source frontier models (Gemma 4,
+    /// Nemotron 3, Llama 3.3) via an OpenAI Chat Completions endpoint at
+    /// `/accounts/{CF_ACCOUNT_ID}/ai/v1/chat/completions`. Requires both
+    /// `CF_API_TOKEN` and `CF_ACCOUNT_ID` env vars (the account ID lives
+    /// in the URL path, not as a header).
+    cloudflare,
+    /// Test-only — replays a JSONL fixture instead of hitting a real API.
+    /// Deliberately unparseable from config text so users can't typo their
+    /// way into it; selectable only programmatically by the test harness.
+    fake,
 
     pub fn parse(s: []const u8) ?Provider {
         if (std.mem.eql(u8, s, "anthropic") or std.mem.eql(u8, s, "claude")) return .anthropic;
@@ -19,6 +29,8 @@ pub const Provider = enum {
         if (std.mem.eql(u8, s, "gemini") or std.mem.eql(u8, s, "google")) return .gemini;
         if (std.mem.eql(u8, s, "grok") or std.mem.eql(u8, s, "xai")) return .grok;
         if (std.mem.eql(u8, s, "deepseek")) return .deepseek;
+        if (std.mem.eql(u8, s, "cloudflare") or std.mem.eql(u8, s, "cf")) return .cloudflare;
+        // .fake is intentionally not parseable from user config.
         return null;
     }
 
@@ -33,6 +45,8 @@ pub const Provider = enum {
             .gemini => "https://generativelanguage.googleapis.com/v1beta",
             .grok => "https://api.x.ai/v1",
             .deepseek => "https://api.deepseek.com/anthropic",
+            .cloudflare => "https://api.cloudflare.com/client/v4",
+            .fake => "",
         };
     }
 
@@ -43,6 +57,8 @@ pub const Provider = enum {
             .gemini => "GEMINI_API_KEY",
             .grok => "XAI_API_KEY",
             .deepseek => "DEEPSEEK_API_KEY",
+            .cloudflare => "CF_API_TOKEN",
+            .fake => "QAI_FAKE_API_KEY", // unused; required for symmetry
         };
     }
 
@@ -53,6 +69,8 @@ pub const Provider = enum {
             .gemini => "gemini-2.5-flash",
             .grok => "grok-4-1-fast-non-reasoning",
             .deepseek => "deepseek-chat",
+            .cloudflare => "@cf/google/gemma-4-26b-a4b-it",
+            .fake => "fake-model",
         };
     }
 };
@@ -77,7 +95,7 @@ pub const Config = struct {
     reasoning_effort: []const u8,
     system_prompt: ?[]const u8,
     /// One entry per Provider enum variant. Indexed by @intFromEnum(Provider).
-    providers: [5]ProviderSettings,
+    providers: [7]ProviderSettings,
     /// Owns all the strings above. Free with deinit().
     arena: std.heap.ArenaAllocator,
 
@@ -106,7 +124,7 @@ pub fn defaults(gpa: std.mem.Allocator) !Config {
 
     const provider: Provider = .anthropic;
 
-    var providers: [5]ProviderSettings = undefined;
+    var providers: [7]ProviderSettings = undefined;
     inline for (std.meta.fields(Provider), 0..) |field, i| {
         const p: Provider = @enumFromInt(field.value);
         providers[i] = .{
