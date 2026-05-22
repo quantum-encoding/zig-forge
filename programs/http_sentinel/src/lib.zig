@@ -50,6 +50,7 @@ pub const GeminiClient = ai.GeminiClient;
 pub const GrokClient = ai.GrokClient;
 pub const OpenAIClient = ai.OpenAIClient;
 pub const VertexClient = ai.VertexClient;
+pub const CloudflareClient = ai.CloudflareClient;
 pub const ResponseManager = ai.ResponseManager;
 
 // Audio/TTS/STT exports

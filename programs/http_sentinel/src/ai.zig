@@ -39,6 +39,7 @@ pub const GeminiClient = @import("ai/gemini.zig").GeminiClient;
 pub const GrokClient = @import("ai/grok.zig").GrokClient;
 pub const OpenAIClient = @import("ai/openai.zig").OpenAIClient;
 pub const VertexClient = @import("ai/vertex.zig").VertexClient;
+pub const CloudflareClient = @import("ai/cloudflare.zig").CloudflareClient;
 
 // Specialized media providers
 pub const ElevenLabsClient = @import("ai/elevenlabs.zig").ElevenLabsClient;
