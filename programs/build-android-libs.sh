@@ -120,6 +120,54 @@ build_lib "financial_core" "financial_engine" "src/financial_core.zig" && ((SUCC
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 build_lib "zigpdf" "zig_pdf_generator" "src/ffi.zig" && ((SUCCESS++)) || ((FAILED++))
 
+# =============================================================================
+# Programs with their own `zig build android` step.
+#
+# financial_engine and mempool_sniffer each define an `android` step
+# in their `build.zig` that produces multiple artifacts in
+# `zig-out/lib/android-arm64/`. We invoke those native steps rather
+# than hand-rolling the build flags here, because:
+#
+#   * financial_engine's android step produces THREE libs in one shot:
+#     libfinancial_core.a, libfinancial_engine.a, libcoinbase_fix.a.
+#     `libfinancial_engine` and `libcoinbase_fix` are Android-only
+#     (downstream `src-tauri/build.rs` links them on Android but not
+#     iOS/macOS — they require ZMQ/mbedTLS which the build.zig stubs
+#     out under the android target).
+#
+#   * mempool_sniffer's android step produces libmempool_sniffer_core.a
+#     and uses the poll backend (io_uring isn't available on Android).
+#
+# The native steps overwrite our build_lib's libfinancial_core.a
+# above with their own version; same name, equivalent contents,
+# Android-specific build flags applied.
+# =============================================================================
+
+native_android_step() {
+    local dir=$1
+    local full_dir="$SCRIPT_DIR/$dir"
+
+    if [ ! -d "$full_dir" ]; then
+        echo -e "${YELLOW}  Skipping native android step in $dir — directory not found${NC}"
+        return 1
+    fi
+
+    echo -e "${CYAN}Native zig build android in $dir...${NC}"
+    if (cd "$full_dir" && $ZIG build android) 2>&1; then
+        echo -e "${GREEN}  ✓ $dir android step${NC}"
+        return 0
+    else
+        echo -e "${RED}  ✗ $dir android step failed${NC}"
+        return 1
+    fi
+}
+
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+native_android_step "financial_engine" && ((SUCCESS++)) || ((FAILED++))
+
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+native_android_step "mempool_sniffer" && ((SUCCESS++)) || ((FAILED++))
+
 # zsss lives under zig_core_utils/, not programs/. The iOS build
 # skips it with a "directory not found" warning because of the same
 # path mismatch — Android src-tauri/libs/android-arm64/libzsss.a is
@@ -127,6 +175,10 @@ build_lib "zigpdf" "zig_pdf_generator" "src/ffi.zig" && ((SUCCESS++)) || ((FAILE
 # If/when zsss is rebuilt for Android, copy the resulting .a into
 # `src-tauri/libs/android-arm64/` (the path src-tauri/build.rs uses
 # for zsss specifically, separate from the other Zig FFI libs).
+#
+# signal_broadcast is gated on the `zig-ffi` Cargo feature which
+# isn't in the default feature set — not built here. Enable that
+# feature when ZMQ dependencies are wired up Android-side.
 
 echo ""
 echo -e "${CYAN}=== Build Summary ===${NC}"
