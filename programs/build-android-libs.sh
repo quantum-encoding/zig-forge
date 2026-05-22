@@ -72,6 +72,13 @@ build_lib() {
     # Use ReleaseSmall + strip — same rationale as the iOS build:
     # avoid linking `std.debug` machinery that pulls platform-specific
     # APIs we don't need on Android either.
+    # `-fPIC` is REQUIRED for libs that get linked into Tauri's
+    # Android cdylib output. Without it, ld.lld rejects R_AARCH64_ABS64
+    # and TLS local-exec relocations with "recompile with -fPIC" /
+    # "cannot be used with -shared". The libs in this list don't all
+    # use TLS today, but adding `-fPIC` universally protects against
+    # the next TLS-using lib landing in this list and silently
+    # breaking the Android build.
     if $ZIG build-lib \
         -target $ANDROID_TARGET \
         -OReleaseSmall \
@@ -79,6 +86,7 @@ build_lib() {
         -static \
         -lc \
         -fstrip \
+        -fPIC \
         "$full_dir/$source" \
         -femit-bin="$output_dir/lib${lib_name}.a" \
         2>&1; then

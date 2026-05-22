@@ -224,6 +224,14 @@ pub fn build(b: *std.Build) void {
 
     android_lib.root_module.link_libc = true;
     android_lib.root_module.strip = true;
+    // PIC is REQUIRED for static libs that get linked into Android's
+    // final .so (Tauri Android builds the Rust crate as cdylib).
+    // Without it, ld.lld rejects R_AARCH64_ABS64 and TLS local-exec
+    // relocations on the threaded I/O paths
+    // (Io.Threaded.Thread.current, Thread.signal_stack) with "cannot
+    // be used with -shared". Zig's static-lib default is non-PIC;
+    // the Android-cdylib case is the exception requiring this opt-in.
+    android_lib.root_module.pic = true;
 
     const android_install = b.addInstallArtifact(android_lib, .{
         .dest_dir = .{ .override = .{ .custom = "lib/android-arm64" } },
