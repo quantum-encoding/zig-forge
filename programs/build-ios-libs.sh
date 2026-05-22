@@ -140,6 +140,47 @@ echo -e "${CYAN}=== Build Summary ===${NC}"
 echo -e "${GREEN}Succeeded: $SUCCESS${NC}"
 echo -e "${RED}Failed: $FAILED${NC}"
 echo ""
+
+# =============================================================================
+# Repack archives via libtool for Apple's linker.
+#
+# Zig 0.16's archive writer pads Mach-O archive members to 2-byte alignment.
+# Apple's ld-prime (Xcode 16+) rejects 64-bit Mach-O archive members that
+# aren't 8-byte aligned, with:
+#
+#   ld: 64-bit mach-o member 'libfoo_zcu.o' not 8-byte aligned in 'libfoo.a'
+#
+# `libtool -static` produces correctly-aligned archives. Repacking every
+# emitted .a here means the Tauri/xcodebuild link step never trips on this.
+# Without this step the iOS build will succeed up to the link phase and
+# then fail in a way that looks like "linker is broken" rather than
+# "archive alignment is wrong."
+# =============================================================================
+REPACK_SCRIPT="$SCRIPT_DIR/../scripts/repack-for-xcode.sh"
+if [ -x "$REPACK_SCRIPT" ]; then
+    echo -e "${CYAN}=== Repacking archives for Apple's linker (8-byte alignment) ===${NC}"
+
+    DEVICE_ARCHIVES=("$OUTPUT_DIR/ios-arm64/"*.a)
+    SIM_ARCHIVES=("$OUTPUT_DIR/ios-sim-arm64/"*.a)
+
+    if [ -e "${DEVICE_ARCHIVES[0]}" ]; then
+        echo -e "${CYAN}iOS Device:${NC}"
+        "$REPACK_SCRIPT" "${DEVICE_ARCHIVES[@]}"
+    fi
+    if [ -e "${SIM_ARCHIVES[0]}" ]; then
+        echo -e "${CYAN}iOS Simulator:${NC}"
+        "$REPACK_SCRIPT" "${SIM_ARCHIVES[@]}"
+    fi
+    echo ""
+else
+    echo -e "${YELLOW}WARNING: repack-for-xcode.sh not found at $REPACK_SCRIPT${NC}"
+    echo -e "${YELLOW}         Archives may fail Apple linker's 8-byte alignment check.${NC}"
+    echo -e "${YELLOW}         If the iOS app's link step fails with \"not 8-byte aligned\","
+    echo -e "${YELLOW}         repack manually with:${NC}"
+    echo -e "${YELLOW}           libtool -static -o repacked.a *.o   (per archive)${NC}"
+    echo ""
+fi
+
 echo -e "Libraries output to:"
 echo -e "  iOS Device:    ${CYAN}$OUTPUT_DIR/ios-arm64/${NC}"
 echo -e "  iOS Simulator: ${CYAN}$OUTPUT_DIR/ios-sim-arm64/${NC}"
