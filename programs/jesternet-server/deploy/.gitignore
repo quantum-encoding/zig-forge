@@ -1,0 +1,5 @@
+# Built binaries — produced by build-linux.sh, scp'd to the target,
+# never committed. Add per-arch extensions if cross-compiling for
+# additional targets.
+jesternet-server
+jesternet-server-*

@@ -1,0 +1,92 @@
+[Unit]
+Description=jesternet self-hosted git backend (Zig)
+Documentation=https://github.com/quantum-encoding/jesternet
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jesternet
+Group=jesternet
+WorkingDirectory=/var/lib/jesternet
+
+# Bind to localhost by default — the operator's reverse proxy
+# (cloudflared, nginx, Caddy) terminates TLS and forwards here.
+# To bind a public interface directly, change --host to 0.0.0.0.
+ExecStart=/usr/local/bin/jesternet-server \
+  --host 127.0.0.1 \
+  --port 8080 \
+  --workers 64 \
+  --data-dir /var/lib/jesternet
+
+# Graceful shutdown: jesternet-server installs a SIGTERM handler that
+# drains active connections, fsyncs the WAL, then exits. systemd's
+# default TimeoutStopSec=90s is comfortably more than the server's
+# 5s drain budget; raise this if pushes routinely span longer.
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+
+# Restart policy: only on failure, not on clean shutdown.
+Restart=on-failure
+RestartSec=2s
+
+# Logging goes to journald. View with:
+#   journalctl -u jesternet-server -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=jesternet-server
+
+# ── Security hardening ─────────────────────────────────────────
+# The server is a single Zig binary that needs to:
+#   - bind TCP/8080 on a non-privileged port
+#   - read/write /var/lib/jesternet (data_dir for WAL + repos)
+#   - speak HTTP outbound to nothing (we're the server, not a client)
+# Nothing else. Lock everything else down.
+
+# Filesystem.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/jesternet
+PrivateDevices=true
+
+# Kernel surface.
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+
+# Privilege escalation.
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+
+# Networking. AF_INET + AF_INET6 only — no raw sockets, no netlink,
+# no AF_UNIX (we don't use unix sockets).
+RestrictAddressFamilies=AF_INET AF_INET6
+
+# Namespaces.
+RestrictNamespaces=true
+
+# Memory: Zig doesn't JIT. W^X is safe.
+MemoryDenyWriteExecute=true
+
+# Syscalls. system-service is the standard server profile; deny
+# the privileged + resource-manipulation sets we don't need.
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @debug @mount @cpu-emulation @obsolete
+
+# File creation mask.
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

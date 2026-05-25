@@ -58,7 +58,10 @@ pub const Config = struct {
 };
 
 pub fn main(init: std.process.Init) !void {
-    const allocator = std.heap.c_allocator;
+    // smp_allocator is the 0.16 page-backed, multi-thread-safe general
+    // allocator. Picked over c_allocator so the binary works on any
+    // target without linking libc (the build.zig has `link_libc=false`).
+    const allocator = std.heap.smp_allocator;
     const environ_map = init.environ_map;
     var config = Config{};
 
@@ -377,7 +380,7 @@ fn sendBadRequest(out: *Io.Writer) void {
 const BG_SYNC_INTERVAL_MS: u64 = 2_000;
 
 fn backgroundFlushLoop(store: *store_mod.Store) void {
-    var io_threaded: std.Io.Threaded = .init(std.heap.c_allocator, .{});
+    var io_threaded: std.Io.Threaded = .init(std.heap.smp_allocator, .{});
     const io = io_threaded.io();
 
     while (shutdown_requested.load(.acquire) == 0) {
