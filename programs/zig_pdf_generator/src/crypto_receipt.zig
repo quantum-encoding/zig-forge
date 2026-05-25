@@ -3,7 +3,7 @@
 //! with embedded identicons, QR codes, and clickable hyperlinks.
 //!
 //! Supports multiple document types and all major blockchain networks.
-//! Part of the Quantum Vault ecosystem.
+//! Part of the Quantum Crypto ecosystem.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -538,7 +538,7 @@ pub const CryptoReceiptRenderer = struct {
         var y: f32 = MARGIN + 55;
 
         // ══════════════════════════════════════════════════════════════════
-        // THE SOVEREIGN SEAL - Quantum Vault Branding
+        // THE SOVEREIGN SEAL - Quantum Crypto Branding
         // ══════════════════════════════════════════════════════════════════
 
         // Top separator line
@@ -564,8 +564,8 @@ pub const CryptoReceiptRenderer = struct {
             );
         }
 
-        // Brand name - "Quantum Vault" - centered, bold, purple
-        const brand_name = "Quantum Vault";
+        // Brand name - "Quantum Crypto" - centered, bold, purple
+        const brand_name = "Quantum Crypto";
         const brand_width = estimateTextWidth(brand_name, 14);
         try self.content.drawText(
             brand_name,
