@@ -25,7 +25,7 @@
         },
         {
           "type": "text",
-          "content": "VAULT",
+          "content": "CRYPTO",
           "x": 298,
           "y": 225,
           "font_size": 38,
@@ -85,7 +85,7 @@
         },
         {
           "type": "text",
-          "content": "Effective Date: 1st February 2026",
+          "content": "Effective Date: 25th May 2026",
           "x": 298,
           "y": 428,
           "font_size": 11,
@@ -94,7 +94,7 @@
         },
         {
           "type": "text",
-          "content": "Version 2.0",
+          "content": "Version 3.0",
           "x": 298,
           "y": 450,
           "font_size": 11,
@@ -103,7 +103,7 @@
         },
         {
           "type": "text",
-          "content": "DOCUMENT REFERENCE: QV-LEGAL-2026-02",
+          "content": "DOCUMENT REFERENCE: QC-LEGAL-2026-05",
           "x": 298,
           "y": 466,
           "font_size": 8,
@@ -121,29 +121,29 @@
         },
         {
           "type": "text",
-          "content": "Quantum Encoding Europe Limited",
+          "content": "Quantum Encoding Ltd  ·  Quantum Encoding Europe Limited",
           "x": 298,
           "y": 775,
-          "font_size": 12,
+          "font_size": 11,
           "font_weight": "bold",
           "color": "#06B6D4",
           "align": "center"
         },
         {
           "type": "text",
-          "content": "Republic of Ireland",
+          "content": "United Kingdom (Company No. 16575953)  ·  Republic of Ireland",
           "x": 298,
           "y": 795,
-          "font_size": 10,
+          "font_size": 9,
           "color": "#64748B",
           "align": "center"
         },
         {
           "type": "text",
-          "content": "legal@quantumencoding.eu  |  quantumvaultapp.com",
+          "content": "legal@quantumencoding.io  ·  legal@quantumencoding.eu  ·  quantumencoding.io",
           "x": 298,
           "y": 815,
-          "font_size": 9,
+          "font_size": 8,
           "color": "#475569",
           "align": "center"
         }
@@ -164,7 +164,7 @@
         },
         {
           "type": "text",
-          "content": "QUANTUM VAULT",
+          "content": "QUANTUM CRYPTO",
           "x": 50,
           "y": 28,
           "font_size": 11,
@@ -339,7 +339,7 @@
         },
         {
           "type": "text",
-          "content": "16. No Data Collection",
+          "content": "16. Self-Custody — What Stays On Your Device",
           "x": 65,
           "y": 545,
           "font_size": 10,
@@ -415,7 +415,7 @@
         },
         {
           "type": "text",
-          "content": "Quantum Vault is a self-custodial wallet. We do not have access to your private keys, seed phrases, or funds. If you lose your credentials, we cannot recover them.",
+          "content": "Quantum Crypto is a self-custodial wallet. We do not have access to your private keys, seed phrases, or funds. If you lose your credentials, we cannot recover them.",
           "x": 70,
           "y": 738,
           "font_size": 9,
@@ -435,7 +435,7 @@
         },
         {
           "type": "text",
-          "content": "Page 2  |  QV-LEGAL-2026-02  |  Quantum Encoding Europe Limited",
+          "content": "Page 2  |  QC-LEGAL-2026-05  |  Quantum Encoding Ltd & Europe Limited",
           "x": 298,
           "y": 820,
           "font_size": 8,
@@ -459,7 +459,7 @@
         },
         {
           "type": "text",
-          "content": "QUANTUM VAULT",
+          "content": "QUANTUM CRYPTO",
           "x": 50,
           "y": 28,
           "font_size": 11,
@@ -514,7 +514,7 @@
         },
         {
           "type": "text",
-          "content": "These Terms of Service (\"Terms\") constitute a legally binding agreement between you (\"User\", \"you\", or \"your\") and Quantum Encoding Europe Limited, a company registered in the Republic of Ireland (\"Company\", \"we\", \"us\", or \"our\").",
+          "content": "These Terms form a binding agreement between you and Quantum Encoding Ltd (UK, Company No. 16575953), operator of the App, together with Quantum Encoding Europe Limited (Ireland), the European counterparty for regulated fiat-onramp services. \"We\" means whichever entity is responsible for the feature in question.",
           "x": 50,
           "y": 145,
           "font_size": 10,
@@ -524,7 +524,7 @@
         },
         {
           "type": "text",
-          "content": "By downloading, installing, accessing, or using the Quantum Vault application (\"App\"), you acknowledge that you have read, understood, and agree to be bound by these Terms and our Privacy Policy. If you do not agree to these Terms, you must not use the App or Services.",
+          "content": "By downloading, installing, accessing, or using the Quantum Crypto application (\"App\"), you acknowledge that you have read, understood, and agree to be bound by these Terms and our Privacy Policy. If you do not agree to these Terms, you must not use the App or Services.",
           "x": 50,
           "y": 195,
           "font_size": 10,
@@ -573,7 +573,7 @@
         },
         {
           "type": "text",
-          "content": "Quantum Vault is a self-custodial cryptocurrency wallet application. This means:",
+          "content": "Quantum Crypto is a self-custodial cryptocurrency wallet application. This means:",
           "x": 50,
           "y": 367,
           "font_size": 10,
@@ -600,7 +600,7 @@
         },
         {
           "type": "text",
-          "content": "The App provides features including multi-chain wallet management across 12+ blockchain networks, Lightning Network payments, cross-chain bridges and non-custodial swaps, hardware wallet integration (Trezor, Ledger), multi-signature wallet support, AI-powered market analysis, fiat on/off ramp integration, WalletConnect dApp connectivity, and NFT gallery and management.",
+          "content": "The App provides features including multi-chain wallet management across 12+ blockchain networks, Lightning Network payments (Breez SDK), cross-chain swaps (SideShift), DEX limit orders (1inch), hardware-wallet integration (Trezor, Ledger), multi-signature wallets, gasless transactions via account abstraction (Pimlico paymaster), AI-powered market analysis, fiat on/off ramp (Alchemy Pay), WalletConnect dApp connectivity, and NFT management.",
           "x": 50,
           "y": 520,
           "font_size": 10,
@@ -677,7 +677,7 @@
         },
         {
           "type": "text",
-          "content": "Page 3  |  QV-LEGAL-2026-02  |  Quantum Encoding Europe Limited",
+          "content": "Page 3  |  QC-LEGAL-2026-05  |  Quantum Encoding Ltd & Europe Limited",
           "x": 298,
           "y": 825,
           "font_size": 8,
@@ -701,7 +701,7 @@
         },
         {
           "type": "text",
-          "content": "QUANTUM VAULT",
+          "content": "QUANTUM CRYPTO",
           "x": 50,
           "y": 28,
           "font_size": 11,
@@ -766,7 +766,7 @@
         },
         {
           "type": "text",
-          "content": "Quantum Vault supports the following blockchain networks: Bitcoin (BIP84 SegWit), Ethereum (ERC-20, ERC-721, ERC-1155), Solana (SPL tokens), Polygon, BNB Smart Chain, Tron (TRC-20), Cardano, XRP, Litecoin, Dogecoin, and Layer 2 networks including Base, Arbitrum, and Optimism.",
+          "content": "Quantum Crypto supports the following blockchain networks: Bitcoin (BIP84 SegWit), Ethereum (ERC-20, ERC-721, ERC-1155), Solana (SPL tokens), Polygon, BNB Smart Chain, Tron (TRC-20), Cardano, XRP, Litecoin, Dogecoin, and Layer 2 networks including Base, Arbitrum, and Optimism.",
           "x": 50,
           "y": 170,
           "font_size": 10,
@@ -821,14 +821,14 @@
           "column_widths": [140, 180, 175],
           "rows": [
             ["Blockchain RPCs", "Infura, Alchemy, Electrum, TronGrid, Solana RPC", "Public blockchain queries only"],
-            ["Price Data", "CoinGecko, CoinMarketCap, Etherscan", "No personal data"],
-            ["Fiat On/Off Ramp", "Alchemy Pay", "Per provider KYC policy"],
-            ["Non-Custodial Swaps", "SideShift.ai", "Transaction data only"],
-            ["Cross-Chain Bridges", "Li.Fi Aggregator", "Transaction data only"],
-            ["Lightning Network", "Breez SDK", "Payment channel data"],
+            ["Price Data", "CoinGecko (via our edge cache)", "No personal data"],
+            ["Fiat On/Off Ramp", "Alchemy Pay (via QE Europe Ltd)", "Per provider KYC policy"],
+            ["Cross-Chain Swaps", "SideShift.ai", "End-user IP (geo-block); tx data"],
+            ["DEX / Limit Orders", "1inch", "Transaction data only"],
+            ["Account Abstraction", "Pimlico paymaster", "Smart account addr; UserOp"],
+            ["Lightning Network", "Breez SDK (client-side)", "Payment channel data"],
             ["dApp Connectivity", "WalletConnect V2", "Session and signing data"],
-            ["AI Analysis", "Google Gemini", "Anonymised market queries"],
-            ["Trading", "Alpaca (equities)", "User's API credentials (local)"]
+            ["AI Analysis (opt-in)", "OpenAI, Anthropic, xAI, Gemini, DeepSeek", "Your API key, your queries"]
           ],
           "header_bg_color": "#06B6D4",
           "header_text_color": "#ffffff",
@@ -873,7 +873,7 @@
         },
         {
           "type": "text",
-          "content": "Quantum Vault includes AI-powered market analysis features. These features are provided for informational purposes only and do not constitute financial advice, investment advice, trading advice, or any other form of professional advice. The AI analysis is generated by third-party large language models and may contain errors, inaccuracies, or outdated information. You should always conduct your own research and consult with qualified financial advisors before making investment decisions. Past performance is not indicative of future results.",
+          "content": "Quantum Crypto includes AI-powered market analysis features. These features are provided for informational purposes only and do not constitute financial advice, investment advice, trading advice, or any other form of professional advice. The AI analysis is generated by third-party large language models and may contain errors, inaccuracies, or outdated information. You should always conduct your own research and consult with qualified financial advisors before making investment decisions. Past performance is not indicative of future results.",
           "x": 50,
           "y": 705,
           "font_size": 10,
@@ -893,7 +893,7 @@
         },
         {
           "type": "text",
-          "content": "Page 4  |  QV-LEGAL-2026-02  |  Quantum Encoding Europe Limited",
+          "content": "Page 4  |  QC-LEGAL-2026-05  |  Quantum Encoding Ltd & Europe Limited",
           "x": 298,
           "y": 820,
           "font_size": 8,
@@ -917,7 +917,7 @@
         },
         {
           "type": "text",
-          "content": "QUANTUM VAULT",
+          "content": "QUANTUM CRYPTO",
           "x": 50,
           "y": 28,
           "font_size": 11,
@@ -964,7 +964,7 @@
         },
         {
           "type": "text",
-          "content": "When using fiat services, you may be required to complete Know Your Customer (KYC) verification directly with Alchemy Pay. This process is managed entirely by Alchemy Pay. Quantum Vault does not collect, process, or store any KYC data. Fiat service availability, supported currencies, payment methods, and fees are determined by Alchemy Pay and may vary by jurisdiction. Quantum Encoding Europe Limited is not responsible for the availability, performance, fees, or compliance of fiat services.",
+          "content": "When using fiat services, you may be required to complete Know Your Customer (KYC) verification directly with Alchemy Pay. This process is managed entirely by Alchemy Pay. Quantum Crypto does not collect, process, or store any KYC data. Fiat service availability, supported currencies, payment methods, and fees are determined by Alchemy Pay and may vary by jurisdiction. Quantum Encoding Europe Limited is not responsible for the availability, performance, fees, or compliance of fiat services.",
           "x": 50,
           "y": 205,
           "font_size": 10,
@@ -993,7 +993,7 @@
         },
         {
           "type": "text",
-          "content": "By using Quantum Vault, you acknowledge and accept the following risks:",
+          "content": "By using Quantum Crypto, you acknowledge and accept the following risks:",
           "x": 50,
           "y": 330,
           "font_size": 10,
@@ -1072,7 +1072,7 @@
         },
         {
           "type": "text",
-          "content": "The Quantum Vault application, including its source code, design, documentation, branding, and all related intellectual property, is owned by Quantum Encoding Europe Limited and/or its parent company Quantum Encoding LTD (UK Company No. 16575953). The App is provided under licence for personal use. This licence does not transfer ownership of any intellectual property rights to you. You may not reproduce, distribute, modify, or create derivative works of the App without prior written consent.",
+          "content": "The Quantum Crypto application, including its source code, design, documentation, branding, and all related intellectual property, is owned by Quantum Encoding Ltd (UK Company No. 16575953). The App is provided under licence for personal use. This licence does not transfer ownership of any intellectual property rights to you. You may not reproduce, distribute, modify, or create derivative works of the App without prior written consent.",
           "x": 50,
           "y": 718,
           "font_size": 10,
@@ -1092,7 +1092,7 @@
         },
         {
           "type": "text",
-          "content": "Page 5  |  QV-LEGAL-2026-02  |  Quantum Encoding Europe Limited",
+          "content": "Page 5  |  QC-LEGAL-2026-05  |  Quantum Encoding Ltd & Europe Limited",
           "x": 298,
           "y": 805,
           "font_size": 8,
@@ -1116,7 +1116,7 @@
         },
         {
           "type": "text",
-          "content": "QUANTUM VAULT",
+          "content": "QUANTUM CRYPTO",
           "x": 50,
           "y": 28,
           "font_size": 11,
@@ -1164,7 +1164,7 @@
         },
         {
           "type": "text",
-          "content": "In no event shall Quantum Encoding Europe Limited, its directors, employees, partners, agents, suppliers, or affiliates be liable for any indirect, incidental, special, consequential, or punitive damages, including without limitation: loss of profits, data, or cryptocurrency; loss of goodwill; service interruption; computer damage; system failure; or the cost of substitute services, whether arising from use of or inability to use the App, unauthorised access to or alteration of your transmissions or data, or any other matter relating to the App.",
+          "content": "In no event shall Quantum Encoding Ltd, Quantum Encoding Europe Limited, or their respective directors, employees, partners, agents, suppliers, or affiliates be liable for any indirect, incidental, special, consequential, or punitive damages, including without limitation: loss of profits, data, or cryptocurrency; loss of goodwill; service interruption; computer damage; system failure; or the cost of substitute services, whether arising from use of or inability to use the App, unauthorised access to or alteration of your transmissions or data, or any other matter relating to the App.",
           "x": 50,
           "y": 180,
           "font_size": 10,
@@ -1203,7 +1203,7 @@
         },
         {
           "type": "text",
-          "content": "You agree to defend, indemnify, and hold harmless Quantum Encoding Europe Limited and its officers, directors, employees, and agents from and against any claims, damages, obligations, losses, liabilities, costs, or expenses arising from: your use of the App; your violation of these Terms; your violation of any third-party right, including intellectual property rights; or any claim that your use of the App caused damage to a third party.",
+          "content": "You agree to defend, indemnify, and hold harmless Quantum Encoding Ltd, Quantum Encoding Europe Limited, and their respective officers, directors, employees, and agents from and against any claims, damages, obligations, losses, liabilities, costs, or expenses arising from: your use of the App; your violation of these Terms; your violation of any third-party right, including intellectual property rights; or any claim that your use of the App caused damage to a third party.",
           "x": 50,
           "y": 340,
           "font_size": 10,
@@ -1232,7 +1232,7 @@
         },
         {
           "type": "text",
-          "content": "You may stop using the App at any time. As a self-custodial wallet, your cryptocurrency remains accessible via your seed phrase through any compatible wallet application, regardless of whether you continue to use Quantum Vault.",
+          "content": "You may stop using the App at any time. As a self-custodial wallet, your cryptocurrency remains accessible via your seed phrase through any compatible wallet application, regardless of whether you continue to use Quantum Crypto.",
           "x": 50,
           "y": 450,
           "font_size": 10,
@@ -1271,7 +1271,7 @@
         },
         {
           "type": "text",
-          "content": "These Terms shall be governed by and construed in accordance with the laws of the Republic of Ireland, without regard to conflict of law principles.",
+          "content": "These Terms are governed by the laws of England & Wales in respect of the App and supporting infrastructure operated by Quantum Encoding Ltd, and by the laws of the Republic of Ireland in respect of fiat-onramp services provided through Quantum Encoding Europe Limited. Non-waivable consumer rights in your country of residence are unaffected.",
           "x": 50,
           "y": 605,
           "font_size": 10,
@@ -1281,7 +1281,7 @@
         },
         {
           "type": "text",
-          "content": "Before initiating formal dispute resolution, you agree to contact us at legal@quantumencoding.eu to attempt to resolve any dispute informally. Any disputes that cannot be resolved informally shall be subject to the exclusive jurisdiction of the courts of Ireland.",
+          "content": "Before initiating formal dispute resolution, please contact us at legal@quantumencoding.io (UK / general matters) or legal@quantumencoding.eu (EEA fiat-onramp matters) to attempt informal resolution. Any disputes that cannot be resolved informally shall be subject to the exclusive jurisdiction of the English courts (general matters) or the Irish courts (EEA fiat-onramp matters), as applicable.",
           "x": 50,
           "y": 645,
           "font_size": 10,
@@ -1330,7 +1330,7 @@
         },
         {
           "type": "text",
-          "content": "Page 6  |  QV-LEGAL-2026-02  |  Quantum Encoding Europe Limited",
+          "content": "Page 6  |  QC-LEGAL-2026-05  |  Quantum Encoding Ltd & Europe Limited",
           "x": 298,
           "y": 825,
           "font_size": 8,
@@ -1354,7 +1354,7 @@
         },
         {
           "type": "text",
-          "content": "QUANTUM VAULT",
+          "content": "QUANTUM CRYPTO",
           "x": 50,
           "y": 28,
           "font_size": 11,
@@ -1401,7 +1401,7 @@
         },
         {
           "type": "text",
-          "content": "Your Data Stays With You. Quantum Encoding Europe Limited does not collect, store, or have access to any of your personal data, wallet information, or transaction history.",
+          "content": "Your Keys Stay With You. Wallet keys are encrypted and held only on this device — never on our servers. Some operational metadata (described below) reaches our broker to enable account-abstraction, fiat onramp, swaps, Lightning, and support.",
           "x": 70,
           "y": 125,
           "font_size": 10,
@@ -1412,7 +1412,7 @@
         },
         {
           "type": "text",
-          "content": "16. NO DATA COLLECTION",
+          "content": "16. WHAT STAYS ON YOUR DEVICE",
           "x": 50,
           "y": 185,
           "font_size": 13,
@@ -1431,7 +1431,7 @@
         },
         {
           "type": "text",
-          "content": "Quantum Vault is a self-custodial wallet. We do not collect, transmit, or store any of the following: personal information or identity documents, wallet addresses or public keys, seed phrases or private keys, PIN codes or biometric data, transaction data or history, usage analytics or telemetry, IP addresses or device identifiers, or any other personally identifiable information.",
+          "content": "The following data is generated and held exclusively on your device — never transmitted to us: your seed phrase and derived private keys; your PIN (only an Argon2id-derived encryption key is ever in memory); biometric templates (handled by the OS keystore); local transaction history, address book, and settings; and any AI-provider API keys you choose to enter. We have no copy and no recovery path. Operational metadata that does reach our broker is described in Section 18.",
           "x": 50,
           "y": 215,
           "font_size": 10,
@@ -1460,7 +1460,7 @@
         },
         {
           "type": "text",
-          "content": "All wallet data, including encrypted seed phrases, account information, transaction history, and application settings, is stored exclusively on your local device using the sled embedded database. This data is encrypted with AES-256-GCM using keys derived via Argon2id. This data never leaves your device and is not accessible to Quantum Encoding Europe Limited or any third party. When you uninstall the App, all locally stored data is removed from your device.",
+          "content": "All wallet data — encrypted seed phrases, account information, transaction history, and settings — is stored exclusively on your local device using the sled embedded database. This data is encrypted with AES-256-GCM using keys derived via Argon2id. It never leaves your device and is not accessible to either Quantum Encoding entity or any third party. When you uninstall the App or run the in-app reset, all locally stored data is removed from your device.",
           "x": 50,
           "y": 330,
           "font_size": 10,
@@ -1489,7 +1489,7 @@
         },
         {
           "type": "text",
-          "content": "The only network communications made by Quantum Vault are:",
+          "content": "The only network communications made by Quantum Crypto are:",
           "x": 50,
           "y": 445,
           "font_size": 10,
@@ -1499,26 +1499,31 @@
         {
           "type": "bullet_list",
           "x": 50,
-          "y": 468,
-          "font_size": 10,
+          "y": 465,
+          "font_size": 9,
           "color": "#334155",
           "bullet_color": "#06B6D4",
-          "line_spacing": 18,
+          "line_spacing": 15,
           "indent": 12,
           "items": [
-            "Blockchain RPC queries to fetch balance, transaction, and token data from public nodes",
+            "Blockchain RPC queries to public nodes (balances, transactions, tokens)",
             "Transaction broadcasts to the relevant blockchain network",
-            "Price data requests from public APIs (CoinGecko, CoinMarketCap)",
-            "Lightning Network payment channel operations via Breez SDK",
+            "Price data requests via our edge-cached CoinGecko proxy",
+            "Lightning Network operations via Breez SDK (channels run on your device)",
             "WalletConnect session data when you connect to dApps",
-            "AI market analysis queries (anonymised, no personal data included)"
+            "Device-auth signatures to our broker (Ed25519, anti-replay nonces)",
+            "Account-abstraction sponsorship requests via Pimlico (smart-account address + UserOp)",
+            "Cross-chain swap requests via SideShift (end-user IP forwarded for geo-block enforcement)",
+            "Transient fiat-onramp order references (Alchemy Pay; deleted after settlement)",
+            "Support reports you submit (text only, sanitized server-side before review)",
+            "AI market analysis queries (only when you provide a third-party API key)"
           ]
         },
         {
           "type": "text",
-          "content": "None of these communications include personally identifiable information. No data is sent to Quantum Encoding servers at any time.",
+          "content": "Apart from the above and network transport metadata, no personally identifiable information is sent to our servers. No behavioural analytics, ad SDKs, or telemetry. We do not sell data.",
           "x": 50,
-          "y": 620,
+          "y": 645,
           "font_size": 10,
           "font_weight": "bold",
           "color": "#0891B2",
@@ -1546,7 +1551,7 @@
         },
         {
           "type": "text",
-          "content": "When you use integrated third-party services (exchange trading, fiat on/off ramps, etc.), you are subject to the privacy policies of those providers. Quantum Vault only stores third-party API credentials locally on your device, encrypted at rest. We encourage you to review the privacy policies of any third-party services you choose to use through the App.",
+          "content": "When you use integrated third-party services (exchange trading, fiat on/off ramps, etc.), you are subject to the privacy policies of those providers. Quantum Crypto only stores third-party API credentials locally on your device, encrypted at rest. We encourage you to review the privacy policies of any third-party services you choose to use through the App.",
           "x": 50,
           "y": 715,
           "font_size": 10,
@@ -1566,7 +1571,7 @@
         },
         {
           "type": "text",
-          "content": "Page 7  |  QV-LEGAL-2026-02  |  Quantum Encoding Europe Limited",
+          "content": "Page 7  |  QC-LEGAL-2026-05  |  Quantum Encoding Ltd & Europe Limited",
           "x": 298,
           "y": 820,
           "font_size": 8,
@@ -1590,7 +1595,7 @@
         },
         {
           "type": "text",
-          "content": "QUANTUM VAULT",
+          "content": "QUANTUM CRYPTO",
           "x": 50,
           "y": 28,
           "font_size": 11,
@@ -1627,7 +1632,7 @@
         },
         {
           "type": "text",
-          "content": "Since we do not collect any personal data, there is nothing to delete, export, modify, or request access to. You have complete and sole control over your data at all times. Your wallet data exists only on your device and can be deleted at any time by uninstalling the application or using the in-app wallet reset function.",
+          "content": "You may delete the App at any time to remove all locally-stored wallet data. To request access to, correction of, or deletion of broker-side records associated with your device, contact us at the addresses in Section 22 — please run the in-app reset first so the device identifier on our side is decoupled from your wallet. We respond within statutory time limits applicable to UK GDPR and EU GDPR requests.",
           "x": 50,
           "y": 110,
           "font_size": 10,
@@ -1656,7 +1661,7 @@
         },
         {
           "type": "text",
-          "content": "As Quantum Encoding Europe Limited is established in the Republic of Ireland, we are subject to the General Data Protection Regulation (GDPR). However, as we do not collect, process, or store any personal data, the data subject rights under GDPR (right of access, rectification, erasure, restriction, portability, and objection) do not apply in the traditional sense, as there is no personal data held by us to which these rights could attach. If you believe we hold any personal data about you, or if you have any questions about our data practices, please contact our Data Protection contact at legal@quantumencoding.eu.",
+          "content": "Quantum Encoding Ltd (UK GDPR) is the data controller for the App and broker infrastructure. Quantum Encoding Europe Limited (EU GDPR) is the data controller for the European fiat-onramp flow via Alchemy Pay. Personal-data categories we process: device-bound public key and request signatures (not linked to your real identity), network-level IP (transport and SideShift geo-blocking), transient fiat-order references, and the contents of any support report you submit. Data-subject rights may be exercised via the addresses in Section 22.",
           "x": 50,
           "y": 210,
           "font_size": 10,
@@ -1703,28 +1708,36 @@
         },
         {
           "type": "text",
-          "content": "Quantum Encoding Europe Limited",
+          "content": "Quantum Encoding Ltd  ·  Quantum Encoding Europe Limited",
           "x": 70,
-          "y": 400,
-          "font_size": 12,
+          "y": 398,
+          "font_size": 11,
           "font_weight": "bold",
           "color": "#06B6D4"
         },
         {
           "type": "text",
-          "content": "Republic of Ireland",
+          "content": "United Kingdom (general matters)  ·  Republic of Ireland (EEA fiat-onramp)",
           "x": 70,
-          "y": 420,
-          "font_size": 10,
+          "y": 418,
+          "font_size": 9,
           "color": "#94A3B8"
         },
         {
           "type": "text",
-          "content": "Email: legal@quantumencoding.eu   |   Web: quantumvaultapp.com",
+          "content": "legal@quantumencoding.io  ·  legal@quantumencoding.eu",
           "x": 70,
-          "y": 445,
+          "y": 438,
           "font_size": 10,
           "color": "#CBD5E1"
+        },
+        {
+          "type": "text",
+          "content": "Web: quantumencoding.io",
+          "x": 70,
+          "y": 455,
+          "font_size": 9,
+          "color": "#94A3B8"
         },
         {
           "type": "shape",
@@ -1764,7 +1777,7 @@
           "indent": 12,
           "items": [
             "You have read and understood these Terms of Service and Privacy Policy.",
-            "You understand that Quantum Vault is a self-custodial wallet.",
+            "You understand that Quantum Crypto is a self-custodial wallet.",
             "You are solely responsible for securing your seed phrase and private keys.",
             "Lost credentials cannot be recovered by anyone, including the Company.",
             "Cryptocurrency transactions are irreversible.",
@@ -1786,7 +1799,7 @@
         },
         {
           "type": "text",
-          "content": "Document Reference: QV-LEGAL-2026-02  |  Version 2.0  |  Effective: 1st February 2026",
+          "content": "Document Reference: QC-LEGAL-2026-05  |  Version 3.0  |  Effective: 25th May 2026",
           "x": 298,
           "y": 735,
           "font_size": 9,
@@ -1795,7 +1808,7 @@
         },
         {
           "type": "text",
-          "content": "Approved by: Richard, Director, Quantum Encoding Europe Limited",
+          "content": "Approved by: Richard, Director — Quantum Encoding Ltd & Quantum Encoding Europe Limited",
           "x": 298,
           "y": 752,
           "font_size": 9,
@@ -1814,7 +1827,7 @@
         },
         {
           "type": "text",
-          "content": "Page 8  |  QV-LEGAL-2026-02  |  Quantum Encoding Europe Limited",
+          "content": "Page 8  |  QC-LEGAL-2026-05  |  Quantum Encoding Ltd & Europe Limited",
           "x": 298,
           "y": 820,
           "font_size": 8,
