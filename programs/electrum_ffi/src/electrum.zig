@@ -2,6 +2,7 @@ const std = @import("std");
 const net = std.net;
 const crypto = std.crypto;
 const tls = std.crypto.tls;
+const json_safe = @import("json-util"); // shared escape — see /programs/zig_json_util
 
 // =============================================================================
 // ELECTRUM PROTOCOL CONSTANTS
@@ -67,7 +68,14 @@ pub const TxHistoryEntry = struct {
 // JSON-RPC HELPERS
 // =============================================================================
 
-/// Build a JSON-RPC request
+/// Build a JSON-RPC request.
+///
+/// SECURITY (ELE-1): every string field — method name and any string-typed
+/// params — is escaped via `json_safe.appendQuotedString` before
+/// interpolation. The pre-audit version concatenated raw bytes inside
+/// quotes, which meant a method name or param string containing `"` could
+/// inject additional JSON-RPC keys (changing the id, the method, or
+/// injecting `"params":[malicious]` past a trailing close-quote).
 pub fn buildRequest(
     allocator: std.mem.Allocator,
     method: []const u8,
@@ -77,9 +85,9 @@ pub fn buildRequest(
     var list: std.ArrayListUnmanaged(u8) = .empty;
     errdefer list.deinit(allocator);
 
-    try list.appendSlice(allocator, "{\"jsonrpc\":\"2.0\",\"method\":\"");
-    try list.appendSlice(allocator, method);
-    try list.appendSlice(allocator, "\",\"params\":");
+    try list.appendSlice(allocator, "{\"jsonrpc\":\"2.0\",\"method\":");
+    try json_safe.appendQuotedString(allocator, &list, method);
+    try list.appendSlice(allocator, ",\"params\":");
 
     // Serialize params
     const T = @TypeOf(params);
@@ -109,15 +117,14 @@ fn serializeValue(allocator: std.mem.Allocator, list: *std.ArrayListUnmanaged(u8
     const T = @TypeOf(value);
 
     if (T == []const u8 or T == []u8) {
-        try list.append(allocator, '"');
-        try list.appendSlice(allocator, value);
-        try list.append(allocator, '"');
+        // ELE-1: escape every byte before quoting. A scripthash hex string
+        // wouldn't normally contain `"`, but a future caller could pass a
+        // user-supplied label / address / memo through here.
+        try json_safe.appendQuotedString(allocator, list, value);
     } else if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one) {
         const child = @typeInfo(T).pointer.child;
         if (@typeInfo(child) == .array and @typeInfo(child).array.child == u8) {
-            try list.append(allocator, '"');
-            try list.appendSlice(allocator, value);
-            try list.append(allocator, '"');
+            try json_safe.appendQuotedString(allocator, list, value);
         }
     } else if (@typeInfo(T) == .int or @typeInfo(T) == .comptime_int) {
         var buf: [32]u8 = undefined;
@@ -220,179 +227,129 @@ fn hexCharToNibble(c: u8) ?u4 {
 
 /// Parse balance response: {"confirmed": N, "unconfirmed": M}
 pub fn parseBalanceResponse(json: []const u8) !struct { confirmed: u64, unconfirmed: i64 } {
-    // Simple JSON parsing for balance response
-    var confirmed: u64 = 0;
-    var unconfirmed: i64 = 0;
+    // ELE-2: previously this function searched for `"confirmed":` and
+    // `"unconfirmed":` as substrings across the entire JSON document. That
+    // pattern is brittle in three ways:
+    //   1. Substring inside a string value (e.g. a server-info field
+    //      reading `"version":"\"confirmed\":42 in 2024"`) was indexed
+    //      as a real claim.
+    //   2. JSON escape sequences were not interpreted.
+    //   3. No structural validation — a top-level `null` or a `"result"`
+    //      that's a string instead of an object passed silently.
+    //
+    // Now we parse the document and validate structure: must be an
+    // object, must have an object-typed `result`, that result must have
+    // integer `confirmed` and `unconfirmed` fields.
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
 
-    // Find "confirmed":
-    if (std.mem.indexOf(u8, json, "\"confirmed\":")) |pos| {
-        const start = pos + 12;
-        var end = start;
-        while (end < json.len and (json[end] >= '0' and json[end] <= '9')) : (end += 1) {}
-        if (end > start) {
-            confirmed = std.fmt.parseInt(u64, json[start..end], 10) catch 0;
-        }
-    }
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, json, .{}) catch
+        return error.ParseError;
+    defer parsed.deinit();
 
-    // Find "unconfirmed":
-    if (std.mem.indexOf(u8, json, "\"unconfirmed\":")) |pos| {
-        const start = pos + 14;
-        var end = start;
-        // Handle negative numbers
-        const is_negative = json[start] == '-';
-        if (is_negative) {
-            end += 1;
-        }
-        while (end < json.len and (json[end] >= '0' and json[end] <= '9')) : (end += 1) {}
-        if (end > start) {
-            const abs_val = std.fmt.parseInt(u64, json[start + @as(usize, if (is_negative) 1 else 0) .. end], 10) catch 0;
-            unconfirmed = if (is_negative) -@as(i64, @intCast(abs_val)) else @intCast(abs_val);
-        }
-    }
+    if (parsed.value != .object) return error.ParseError;
+    const result_val = parsed.value.object.get("result") orelse return error.ParseError;
+    if (result_val != .object) return error.ParseError;
+    const result = result_val.object;
 
-    return .{ .confirmed = confirmed, .unconfirmed = unconfirmed };
+    const conf_val = result.get("confirmed") orelse return error.ParseError;
+    if (conf_val != .integer) return error.ParseError;
+    const conf_signed = conf_val.integer;
+    if (conf_signed < 0) return error.ParseError;
+
+    const unconf_val = result.get("unconfirmed") orelse return error.ParseError;
+    if (unconf_val != .integer) return error.ParseError;
+
+    return .{
+        .confirmed = @intCast(conf_signed),
+        .unconfirmed = unconf_val.integer,
+    };
 }
 
-/// Parse listunspent response into UTXO array
+/// Parse a listunspent response into a UTXO array.
+///
+/// ELE-3: the pre-audit implementation found UTXO objects by walking a
+/// brace-depth counter that DID NOT account for `{` / `}` inside JSON
+/// string values — a UTXO whose `tx_hash` contained the literal byte `}`
+/// (e.g. a base64-encoded extension field) would corrupt the depth and
+/// produce truncated or doubled entries. The fix is `std.json` plus
+/// per-field type validation.
+///
+/// Caller owns the returned slice (`allocator.free` after use).
 pub fn parseUtxoResponse(
     allocator: std.mem.Allocator,
     json: []const u8,
 ) ![]Utxo {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, json, .{}) catch
+        return error.ParseError;
+    defer parsed.deinit();
+
+    if (parsed.value != .object) return error.ParseError;
+    const result_val = parsed.value.object.get("result") orelse {
+        // No "result" key — return an empty array, matching the old
+        // forgiving behavior for malformed-but-shaped responses.
+        return try allocator.alloc(Utxo, 0);
+    };
+    if (result_val != .array) return error.ParseError;
+    const items = result_val.array.items;
+
     var utxos: std.ArrayListUnmanaged(Utxo) = .empty;
     errdefer utxos.deinit(allocator);
 
-    // Find result array
-    const result_start = std.mem.indexOf(u8, json, "\"result\":") orelse return utxos.toOwnedSlice(allocator);
-    var pos = result_start + 9;
-
-    // Skip to array start
-    while (pos < json.len and json[pos] != '[') : (pos += 1) {}
-    if (pos >= json.len) return utxos.toOwnedSlice(allocator);
-    pos += 1; // Skip '['
-
-    // Parse each UTXO object
-    while (pos < json.len) {
-        // Skip whitespace
-        while (pos < json.len and (json[pos] == ' ' or json[pos] == '\n' or json[pos] == '\r' or json[pos] == '\t' or json[pos] == ',')) : (pos += 1) {}
-
-        if (pos >= json.len or json[pos] == ']') break;
-
-        if (json[pos] == '{') {
-            // Find object end
-            var depth: usize = 1;
-            const obj_start = pos;
-            pos += 1;
-            while (pos < json.len and depth > 0) : (pos += 1) {
-                if (json[pos] == '{') depth += 1;
-                if (json[pos] == '}') depth -= 1;
-            }
-
-            const obj = json[obj_start..pos];
-            if (parseUtxoObject(obj)) |utxo| {
-                try utxos.append(allocator, utxo);
-            }
-        } else {
-            pos += 1;
+    for (items) |entry_val| {
+        if (entry_val != .object) continue; // skip malformed entry
+        if (utxoFromValue(entry_val.object)) |utxo| {
+            try utxos.append(allocator, utxo);
         }
     }
 
     return utxos.toOwnedSlice(allocator);
 }
 
-/// Parse get_history response into TxHistoryEntry array
+/// Parse a get_history response into a TxHistoryEntry array.
+///
+/// ELE-3: same rationale as parseUtxoResponse.
+/// Caller owns the returned slice.
 pub fn parseHistoryResponse(
     allocator: std.mem.Allocator,
     json: []const u8,
 ) ![]TxHistoryEntry {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, json, .{}) catch
+        return error.ParseError;
+    defer parsed.deinit();
+
+    if (parsed.value != .object) return error.ParseError;
+    const result_val = parsed.value.object.get("result") orelse {
+        return try allocator.alloc(TxHistoryEntry, 0);
+    };
+    if (result_val != .array) return error.ParseError;
+    const items = result_val.array.items;
+
     var entries: std.ArrayListUnmanaged(TxHistoryEntry) = .empty;
     errdefer entries.deinit(allocator);
 
-    // Find result array
-    const result_start = std.mem.indexOf(u8, json, "\"result\":") orelse return entries.toOwnedSlice(allocator);
-    var pos = result_start + 9;
-
-    // Skip to array start
-    while (pos < json.len and json[pos] != '[') : (pos += 1) {}
-    if (pos >= json.len) return entries.toOwnedSlice(allocator);
-    pos += 1; // Skip '['
-
-    // Parse each history entry object
-    while (pos < json.len) {
-        // Skip whitespace and commas
-        while (pos < json.len and (json[pos] == ' ' or json[pos] == '\n' or json[pos] == '\r' or json[pos] == '\t' or json[pos] == ',')) : (pos += 1) {}
-
-        if (pos >= json.len or json[pos] == ']') break;
-
-        if (json[pos] == '{') {
-            // Find object end
-            var depth: usize = 1;
-            const obj_start = pos;
-            pos += 1;
-            while (pos < json.len and depth > 0) : (pos += 1) {
-                if (json[pos] == '{') depth += 1;
-                if (json[pos] == '}') depth -= 1;
-            }
-
-            const obj = json[obj_start..pos];
-            if (parseHistoryObject(obj)) |entry| {
-                try entries.append(allocator, entry);
-            }
-        } else {
-            pos += 1;
+    for (items) |entry_val| {
+        if (entry_val != .object) continue;
+        if (historyEntryFromValue(entry_val.object)) |entry| {
+            try entries.append(allocator, entry);
         }
     }
 
     return entries.toOwnedSlice(allocator);
 }
 
-fn parseHistoryObject(obj: []const u8) ?TxHistoryEntry {
-    var entry = TxHistoryEntry{
-        .txid = undefined,
-        .height = 0,
-        .fee = 0,
-    };
-
-    // Parse tx_hash
-    if (std.mem.indexOf(u8, obj, "\"tx_hash\":\"")) |pos| {
-        const start = pos + 11;
-        if (start + 64 <= obj.len) {
-            const hex = obj[start .. start + 64];
-            // Convert hex to bytes (reversed for internal format)
-            for (0..32) |i| {
-                const high = hexCharToNibble(hex[i * 2]) orelse return null;
-                const low = hexCharToNibble(hex[i * 2 + 1]) orelse return null;
-                entry.txid[31 - i] = (@as(u8, high) << 4) | @as(u8, low);
-            }
-        }
-    } else {
-        return null;
-    }
-
-    // Parse height (can be negative for unconfirmed with unconfirmed parents)
-    if (std.mem.indexOf(u8, obj, "\"height\":")) |pos| {
-        const start = pos + 9;
-        var end = start;
-        const is_negative = obj[start] == '-';
-        if (is_negative) end += 1;
-        while (end < obj.len and obj[end] >= '0' and obj[end] <= '9') : (end += 1) {}
-        if (end > start) {
-            const abs_val = std.fmt.parseInt(u32, obj[start + @as(usize, if (is_negative) 1 else 0) .. end], 10) catch 0;
-            entry.height = if (is_negative) -@as(i32, @intCast(abs_val)) else @intCast(abs_val);
-        }
-    }
-
-    // Parse fee (optional field)
-    if (std.mem.indexOf(u8, obj, "\"fee\":")) |pos| {
-        const start = pos + 6;
-        var end = start;
-        while (end < obj.len and obj[end] >= '0' and obj[end] <= '9') : (end += 1) {}
-        entry.fee = std.fmt.parseInt(u64, obj[start..end], 10) catch 0;
-    }
-
-    return entry;
-}
-
-fn parseUtxoObject(obj: []const u8) ?Utxo {
+/// Build a Utxo from a parsed JSON object. Returns null if required
+/// fields (tx_hash) are missing or malformed.
+fn utxoFromValue(obj: std.json.ObjectMap) ?Utxo {
     var utxo = Utxo{
         .txid = undefined,
         .vout = 0,
@@ -400,47 +357,77 @@ fn parseUtxoObject(obj: []const u8) ?Utxo {
         .height = 0,
     };
 
-    // Parse tx_hash
-    if (std.mem.indexOf(u8, obj, "\"tx_hash\":\"")) |pos| {
-        const start = pos + 11;
-        if (start + 64 <= obj.len) {
-            const hex = obj[start .. start + 64];
-            // Convert hex to bytes (reversed for internal format)
-            for (0..32) |i| {
-                const high = hexCharToNibble(hex[i * 2]) orelse return null;
-                const low = hexCharToNibble(hex[i * 2 + 1]) orelse return null;
-                utxo.txid[31 - i] = (@as(u8, high) << 4) | @as(u8, low);
-            }
+    // tx_hash — required, 64 hex chars, reversed into Bitcoin-internal byte order
+    const tx_hash_val = obj.get("tx_hash") orelse return null;
+    if (tx_hash_val != .string) return null;
+    const hex = tx_hash_val.string;
+    if (hex.len != 64) return null;
+    for (0..32) |i| {
+        const high = hexCharToNibble(hex[i * 2]) orelse return null;
+        const low = hexCharToNibble(hex[i * 2 + 1]) orelse return null;
+        utxo.txid[31 - i] = (@as(u8, high) << 4) | @as(u8, low);
+    }
+
+    // tx_pos (vout) — required, non-negative integer
+    if (obj.get("tx_pos")) |v| {
+        if (v == .integer and v.integer >= 0 and v.integer <= std.math.maxInt(u32)) {
+            utxo.vout = @intCast(v.integer);
         }
-    } else {
-        return null;
     }
 
-    // Parse tx_pos (vout)
-    if (std.mem.indexOf(u8, obj, "\"tx_pos\":")) |pos| {
-        const start = pos + 9;
-        var end = start;
-        while (end < obj.len and obj[end] >= '0' and obj[end] <= '9') : (end += 1) {}
-        utxo.vout = std.fmt.parseInt(u32, obj[start..end], 10) catch 0;
+    // value (satoshis) — required, non-negative integer
+    if (obj.get("value")) |v| {
+        if (v == .integer and v.integer >= 0) {
+            utxo.value = @intCast(v.integer);
+        }
     }
 
-    // Parse value
-    if (std.mem.indexOf(u8, obj, "\"value\":")) |pos| {
-        const start = pos + 8;
-        var end = start;
-        while (end < obj.len and obj[end] >= '0' and obj[end] <= '9') : (end += 1) {}
-        utxo.value = std.fmt.parseInt(u64, obj[start..end], 10) catch 0;
-    }
-
-    // Parse height
-    if (std.mem.indexOf(u8, obj, "\"height\":")) |pos| {
-        const start = pos + 9;
-        var end = start;
-        while (end < obj.len and obj[end] >= '0' and obj[end] <= '9') : (end += 1) {}
-        utxo.height = std.fmt.parseInt(u32, obj[start..end], 10) catch 0;
+    // height — required, non-negative integer (UTXO entries are confirmed)
+    if (obj.get("height")) |v| {
+        if (v == .integer and v.integer >= 0 and v.integer <= std.math.maxInt(u32)) {
+            utxo.height = @intCast(v.integer);
+        }
     }
 
     return utxo;
+}
+
+/// Build a TxHistoryEntry from a parsed JSON object. Returns null if
+/// required fields are missing or malformed.
+fn historyEntryFromValue(obj: std.json.ObjectMap) ?TxHistoryEntry {
+    var entry = TxHistoryEntry{
+        .txid = undefined,
+        .height = 0,
+        .fee = 0,
+    };
+
+    // tx_hash — required, 64 hex chars
+    const tx_hash_val = obj.get("tx_hash") orelse return null;
+    if (tx_hash_val != .string) return null;
+    const hex = tx_hash_val.string;
+    if (hex.len != 64) return null;
+    for (0..32) |i| {
+        const high = hexCharToNibble(hex[i * 2]) orelse return null;
+        const low = hexCharToNibble(hex[i * 2 + 1]) orelse return null;
+        entry.txid[31 - i] = (@as(u8, high) << 4) | @as(u8, low);
+    }
+
+    // height — required, signed integer (can be 0 unconfirmed or negative
+    // for unconfirmed-with-unconfirmed-parents)
+    if (obj.get("height")) |v| {
+        if (v == .integer and v.integer >= std.math.minInt(i32) and v.integer <= std.math.maxInt(i32)) {
+            entry.height = @intCast(v.integer);
+        }
+    }
+
+    // fee — optional, non-negative integer
+    if (obj.get("fee")) |v| {
+        if (v == .integer and v.integer >= 0) {
+            entry.fee = @intCast(v.integer);
+        }
+    }
+
+    return entry;
 }
 
 // =============================================================================
@@ -495,4 +482,204 @@ test "build JSON-RPC request" {
     try std.testing.expect(std.mem.indexOf(u8, request, "\"method\":\"blockchain.scripthash.get_balance\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, request, "\"params\":[\"abc123\"]") != null);
     try std.testing.expect(std.mem.indexOf(u8, request, "\"id\":1") != null);
+}
+
+// ============================================================================
+// Audit-driven tests — ELE-1, ELE-2, ELE-3
+// ============================================================================
+
+// ----- ELE-1: JSON-injection in buildRequest -----
+
+test "ELE-1: malicious method name cannot inject sibling JSON-RPC keys" {
+    const allocator = std.testing.allocator;
+
+    // Pre-audit: a method name containing `"` broke out of the method
+    // string and let the attacker append arbitrary JSON-RPC keys
+    // (potentially changing the id so responses get routed wrong, or
+    // injecting `"params":[...]` to override).
+    const attack_method = "evil\",\"id\":999,\"x\":\"";
+    const request = try buildRequest(allocator, attack_method, .{}, 1);
+    defer allocator.free(request);
+
+    // Parse the constructed request — must round-trip as a single-method
+    // request with id=1, NOT as a multi-key object with id=999.
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, request, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .object);
+    try std.testing.expectEqualSlices(u8, attack_method, parsed.value.object.get("method").?.string);
+    try std.testing.expectEqual(@as(i64, 1), parsed.value.object.get("id").?.integer);
+    // Verify NO injected `x` key.
+    try std.testing.expect(parsed.value.object.get("x") == null);
+}
+
+test "ELE-1: malicious string param cannot break out of the array" {
+    const allocator = std.testing.allocator;
+
+    // Address strings flow into this code path. A user-controlled address
+    // containing `"` previously injected past the closing quote.
+    const attack_param = "\"],\"extra_param\":\"injected";
+    const request = try buildRequest(allocator, "blockchain.scripthash.get_balance", .{attack_param}, 7);
+    defer allocator.free(request);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, request, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    const params = obj.get("params").?;
+    try std.testing.expect(params == .array);
+    try std.testing.expectEqual(@as(usize, 1), params.array.items.len);
+    try std.testing.expectEqualSlices(u8, attack_param, params.array.items[0].string);
+    try std.testing.expect(obj.get("extra_param") == null);
+}
+
+// ----- ELE-2: parseBalanceResponse robustness -----
+
+test "ELE-2: parseBalanceResponse parses canonical response" {
+    const json =
+        \\{"jsonrpc":"2.0","result":{"confirmed":123456,"unconfirmed":-1000},"id":1}
+    ;
+    const balance = try parseBalanceResponse(json);
+    try std.testing.expectEqual(@as(u64, 123456), balance.confirmed);
+    try std.testing.expectEqual(@as(i64, -1000), balance.unconfirmed);
+}
+
+test "ELE-2: substring `\"confirmed\":` inside an unrelated string field doesn't confuse the parser" {
+    // Pre-audit: this entire JSON was scanned for the literal substring
+    // `"confirmed":`. The decoy inside `note` would have matched first
+    // (depending on key order), and `parseBalanceResponse` returned 999
+    // instead of 100.
+    const json =
+        \\{"jsonrpc":"2.0","result":{"note":"contains \"confirmed\":999","confirmed":100,"unconfirmed":0},"id":1}
+    ;
+    const balance = try parseBalanceResponse(json);
+    try std.testing.expectEqual(@as(u64, 100), balance.confirmed);
+    try std.testing.expectEqual(@as(i64, 0), balance.unconfirmed);
+}
+
+test "ELE-2: response with missing `result` errors instead of silently returning zero" {
+    const json =
+        \\{"jsonrpc":"2.0","error":{"code":-1,"message":"oops"},"id":1}
+    ;
+    try std.testing.expectError(error.ParseError, parseBalanceResponse(json));
+}
+
+test "ELE-2: response with non-object `result` errors" {
+    const json =
+        \\{"jsonrpc":"2.0","result":null,"id":1}
+    ;
+    try std.testing.expectError(error.ParseError, parseBalanceResponse(json));
+}
+
+test "ELE-2: response with non-integer `confirmed` errors" {
+    const json =
+        \\{"jsonrpc":"2.0","result":{"confirmed":"123456","unconfirmed":0},"id":1}
+    ;
+    try std.testing.expectError(error.ParseError, parseBalanceResponse(json));
+}
+
+test "ELE-2: negative `confirmed` is rejected" {
+    // Per Electrum spec, confirmed is u64 (non-negative). A negative value
+    // is malformed and must error rather than wrap into a huge unsigned.
+    const json =
+        \\{"jsonrpc":"2.0","result":{"confirmed":-1,"unconfirmed":0},"id":1}
+    ;
+    try std.testing.expectError(error.ParseError, parseBalanceResponse(json));
+}
+
+// ----- ELE-3: parseUtxoResponse / parseHistoryResponse robustness -----
+
+test "ELE-3: parseUtxoResponse parses canonical response" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"jsonrpc":"2.0","result":[
+        \\  {"tx_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","tx_pos":0,"value":50000,"height":800000},
+        \\  {"tx_hash":"fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210","tx_pos":1,"value":25000,"height":800001}
+        \\],"id":2}
+    ;
+    const utxos = try parseUtxoResponse(allocator, json);
+    defer allocator.free(utxos);
+
+    try std.testing.expectEqual(@as(usize, 2), utxos.len);
+    try std.testing.expectEqual(@as(u32, 0), utxos[0].vout);
+    try std.testing.expectEqual(@as(u64, 50000), utxos[0].value);
+    try std.testing.expectEqual(@as(u32, 800000), utxos[0].height);
+    try std.testing.expectEqual(@as(u32, 1), utxos[1].vout);
+    try std.testing.expectEqual(@as(u64, 25000), utxos[1].value);
+}
+
+test "ELE-3: UTXO with `}` inside a string value parses correctly (brace-depth fix)" {
+    // Pre-audit: the parser walked `{` and `}` to find object boundaries
+    // WITHOUT considering quoted strings. A future server-added field
+    // containing `}` (e.g. base64, or a JSON-encoded inner field) would
+    // make depth go to 0 mid-object, splitting it across two iterations.
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"jsonrpc":"2.0","result":[
+        \\  {"tx_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","note":"has } brace","tx_pos":0,"value":42,"height":1}
+        \\],"id":2}
+    ;
+    const utxos = try parseUtxoResponse(allocator, json);
+    defer allocator.free(utxos);
+
+    try std.testing.expectEqual(@as(usize, 1), utxos.len);
+    try std.testing.expectEqual(@as(u64, 42), utxos[0].value);
+    try std.testing.expectEqual(@as(u32, 1), utxos[0].height);
+}
+
+test "ELE-3: parseUtxoResponse missing `result` yields empty slice (back-compat)" {
+    const allocator = std.testing.allocator;
+    const json = "{\"jsonrpc\":\"2.0\",\"id\":1}";
+    const utxos = try parseUtxoResponse(allocator, json);
+    defer allocator.free(utxos);
+    try std.testing.expectEqual(@as(usize, 0), utxos.len);
+}
+
+test "ELE-3: parseUtxoResponse non-array `result` errors" {
+    const allocator = std.testing.allocator;
+    const json = "{\"jsonrpc\":\"2.0\",\"result\":\"oops\",\"id\":1}";
+    try std.testing.expectError(error.ParseError, parseUtxoResponse(allocator, json));
+}
+
+test "ELE-3: UTXO entry with wrong-length tx_hash is skipped, not parsed as garbage" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"jsonrpc":"2.0","result":[
+        \\  {"tx_hash":"too_short","tx_pos":0,"value":42,"height":1},
+        \\  {"tx_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","tx_pos":0,"value":42,"height":1}
+        \\],"id":2}
+    ;
+    const utxos = try parseUtxoResponse(allocator, json);
+    defer allocator.free(utxos);
+
+    // First entry skipped (bad tx_hash); only the second is returned.
+    try std.testing.expectEqual(@as(usize, 1), utxos.len);
+}
+
+test "ELE-3: parseHistoryResponse handles negative height (unconfirmed-with-unconfirmed-parents)" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"jsonrpc":"2.0","result":[
+        \\  {"tx_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","height":-1,"fee":1500}
+        \\],"id":3}
+    ;
+    const entries = try parseHistoryResponse(allocator, json);
+    defer allocator.free(entries);
+
+    try std.testing.expectEqual(@as(usize, 1), entries.len);
+    try std.testing.expectEqual(@as(i32, -1), entries[0].height);
+    try std.testing.expectEqual(@as(u64, 1500), entries[0].fee);
+}
+
+test "ELE-3: parseHistoryResponse handles missing optional fee field" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"jsonrpc":"2.0","result":[
+        \\  {"tx_hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","height":42}
+        \\],"id":3}
+    ;
+    const entries = try parseHistoryResponse(allocator, json);
+    defer allocator.free(entries);
+
+    try std.testing.expectEqual(@as(usize, 1), entries.len);
+    try std.testing.expectEqual(@as(i32, 42), entries[0].height);
+    try std.testing.expectEqual(@as(u64, 0), entries[0].fee);
 }

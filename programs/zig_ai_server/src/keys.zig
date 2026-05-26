@@ -9,6 +9,7 @@ const store_mod = @import("store/store.zig");
 const types = @import("store/types.zig");
 const auth_pipeline = @import("auth_pipeline.zig");
 const json_util = @import("json.zig");
+const json_safe = @import("json-util"); // shared jsonEscape / appendQuotedString — see /programs/zig_json_util
 const ledger_mod = @import("ledger.zig");
 const router = @import("router.zig");
 const Response = router.Response;
@@ -123,23 +124,88 @@ pub fn handleCreateKey(
         };
     };
 
-    // Return the raw key — shown exactly once
-    const response = std.fmt.allocPrint(allocator,
-        \\{{"key":"{s}","prefix":"{s}","name":"{s}","account_id":"{s}","created_at":{d},"expires_at":{d}}}
-    , .{
+    // Return the raw key — shown exactly once.
+    //
+    // SECURITY (AIS-8): every string field is JSON-escaped via json_safe.
+    // `req.name` arrives from the parsed request body and is the primary
+    // injection vector; `raw_key`, `prefix_buf`, and `target_account_id`
+    // are server-derived today but we escape them too — a future change
+    // upstream (e.g. broader account-id charset) must not silently become
+    // an injection vector.
+    const response = buildCreateKeyResponse(
+        allocator,
         raw_key,
         prefix_buf[0..14],
         req.name,
         target_account_id,
         now,
         expires_at,
-    }) catch {
+    ) catch {
         return .{ .status = .internal_server_error, .body =
             \\{"error":"internal","message":"Key created but failed to format response"}
         };
     };
 
     return .{ .body = response };
+}
+
+fn buildCreateKeyResponse(
+    allocator: std.mem.Allocator,
+    raw_key: []const u8,
+    prefix: []const u8,
+    name: []const u8,
+    account_id: []const u8,
+    created_at: i64,
+    expires_at: i64,
+) ![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try buf.appendSlice(allocator, "{\"key\":");
+    try json_safe.appendQuotedString(allocator, &buf, raw_key);
+    try buf.appendSlice(allocator, ",\"prefix\":");
+    try json_safe.appendQuotedString(allocator, &buf, prefix);
+    try buf.appendSlice(allocator, ",\"name\":");
+    try json_safe.appendQuotedString(allocator, &buf, name);
+    try buf.appendSlice(allocator, ",\"account_id\":");
+    try json_safe.appendQuotedString(allocator, &buf, account_id);
+
+    var num_buf: [64]u8 = undefined;
+    const tail = try std.fmt.bufPrint(&num_buf, ",\"created_at\":{d},\"expires_at\":{d}}}", .{ created_at, expires_at });
+    try buf.appendSlice(allocator, tail);
+
+    return buf.toOwnedSlice(allocator);
+}
+
+/// Append a single key entry as a JSON object to `buf`. All string fields
+/// are escaped via json_safe.appendQuotedString so user-supplied names
+/// cannot inject sibling keys / change role flags / etc.
+fn appendKeyJson(
+    allocator: std.mem.Allocator,
+    buf: *std.ArrayListUnmanaged(u8),
+    key: *const types.ApiKey,
+) !void {
+    try buf.appendSlice(allocator, "{\"prefix\":");
+    try json_safe.appendQuotedString(allocator, buf, key.prefix.slice());
+    try buf.appendSlice(allocator, ",\"name\":");
+    try json_safe.appendQuotedString(allocator, buf, key.name.slice());
+    try buf.appendSlice(allocator, ",\"account_id\":");
+    try json_safe.appendQuotedString(allocator, buf, key.account_id.slice());
+
+    var num_buf: [256]u8 = undefined;
+    const tail = try std.fmt.bufPrint(
+        &num_buf,
+        ",\"spent_ticks\":{d},\"revoked\":{s},\"created_at\":{d},\"expires_at\":{d},\"spend_cap_ticks\":{d},\"rate_limit_rpm\":{d}}}",
+        .{
+            key.spent_ticks,
+            if (key.revoked) "true" else "false",
+            key.created_at,
+            key.expires_at,
+            key.scope.spend_cap_ticks,
+            key.scope.rate_limit_rpm,
+        },
+    );
+    try buf.appendSlice(allocator, tail);
 }
 
 // ── GET /qai/v1/keys — List keys ───────────────────────────
@@ -171,21 +237,11 @@ pub fn handleListKeys(
         if (!first) buf.append(allocator, ',') catch continue;
         first = false;
 
-        const json = std.fmt.allocPrint(allocator,
-            \\{{"prefix":"{s}","name":"{s}","account_id":"{s}","spent_ticks":{d},"revoked":{s},"created_at":{d},"expires_at":{d},"spend_cap_ticks":{d},"rate_limit_rpm":{d}}}
-        , .{
-            key.prefix.slice(),
-            key.name.slice(),
-            key.account_id.slice(),
-            key.spent_ticks,
-            if (key.revoked) "true" else "false",
-            key.created_at,
-            key.expires_at,
-            key.scope.spend_cap_ticks,
-            key.scope.rate_limit_rpm,
-        }) catch continue;
-        defer allocator.free(json);
-        buf.appendSlice(allocator, json) catch continue;
+        // SECURITY (AIS-8): key.name was user-controlled at creation time
+        // and is the primary injection vector here. Escape every string
+        // field even when the source looks server-derived — defense in
+        // depth against upstream validation regressions.
+        appendKeyJson(allocator, &buf, key) catch continue;
     }
 
     buf.appendSlice(allocator, "]}") catch {};
@@ -223,11 +279,11 @@ pub fn handleRevokeKey(
 
     if (found_hash) |hash| {
         store.revokeKey(io, hash) catch {};
-        return .{ .body = std.fmt.allocPrint(allocator,
-            \\{{"status":"revoked","prefix":"{s}"}}
-        , .{prefix}) catch
+        // SECURITY (AIS-8): `prefix` comes from the URL path — user-controlled.
+        const response = buildSimpleStatusResponse(allocator, "revoked", "prefix", prefix) catch
             \\{"status":"revoked"}
-        };
+        ;
+        return .{ .body = response };
     }
 
     return .{ .status = .not_found, .body =
@@ -284,11 +340,183 @@ pub fn handleCreateAccount(
         };
     };
 
-    return .{ .body = std.fmt.allocPrint(allocator,
-        \\{{"status":"created","account_id":"{s}","role":"{s}","tier":"{s}","balance_ticks":{d}}}
-    , .{ req.id, role.toString(), tier.toString(), account.balance_ticks }) catch
+    // SECURITY (AIS-8): req.id was user-supplied; role/tier are enum
+    // -derived but escape-cheap. Build via json_safe so a future broadened
+    // account-id charset doesn't silently become an injection vector.
+    const response = buildCreateAccountResponse(
+        allocator,
+        req.id,
+        role.toString(),
+        tier.toString(),
+        account.balance_ticks,
+    ) catch
         \\{"status":"created"}
-    };
+    ;
+    return .{ .body = response };
+}
+
+fn buildCreateAccountResponse(
+    allocator: std.mem.Allocator,
+    account_id: []const u8,
+    role_str: []const u8,
+    tier_str: []const u8,
+    balance_ticks: i64,
+) ![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try buf.appendSlice(allocator, "{\"status\":\"created\",\"account_id\":");
+    try json_safe.appendQuotedString(allocator, &buf, account_id);
+    try buf.appendSlice(allocator, ",\"role\":");
+    try json_safe.appendQuotedString(allocator, &buf, role_str);
+    try buf.appendSlice(allocator, ",\"tier\":");
+    try json_safe.appendQuotedString(allocator, &buf, tier_str);
+
+    var num_buf: [48]u8 = undefined;
+    const tail = try std.fmt.bufPrint(&num_buf, ",\"balance_ticks\":{d}}}", .{balance_ticks});
+    try buf.appendSlice(allocator, tail);
+
+    return buf.toOwnedSlice(allocator);
+}
+
+// ── Shared JSON builders (AIS-8) ───────────────────────────
+//
+// These helpers replace raw `allocPrint("...{s}...", .{user_string})`
+// patterns elsewhere in this file. Every string-field interpolation goes
+// through `json_safe.appendQuotedString` (from /programs/zig_json_util) so
+// a user-controlled value containing `"` cannot inject sibling JSON keys.
+
+/// Build `{"status": <status>, <key>: <value_string>}` with `value_string`
+/// JSON-escaped. Used by revoke / single-string-field success responses.
+fn buildSimpleStatusResponse(
+    allocator: std.mem.Allocator,
+    status: []const u8,
+    key: []const u8,
+    value_string: []const u8,
+) ![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try buf.appendSlice(allocator, "{\"status\":");
+    try json_safe.appendQuotedString(allocator, &buf, status);
+    try buf.append(allocator, ',');
+    try json_safe.appendQuotedString(allocator, &buf, key);
+    try buf.append(allocator, ':');
+    try json_safe.appendQuotedString(allocator, &buf, value_string);
+    try buf.append(allocator, '}');
+
+    return buf.toOwnedSlice(allocator);
+}
+
+/// `{"status":"credited","account_id":<id>,"amount_ticks":N,"balance_after":N}`
+fn buildCreditedResponse(
+    allocator: std.mem.Allocator,
+    account_id: []const u8,
+    amount_ticks: i64,
+    balance_after: i64,
+) ![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try buf.appendSlice(allocator, "{\"status\":\"credited\",\"account_id\":");
+    try json_safe.appendQuotedString(allocator, &buf, account_id);
+
+    var num_buf: [64]u8 = undefined;
+    const tail = try std.fmt.bufPrint(
+        &num_buf,
+        ",\"amount_ticks\":{d},\"balance_after\":{d}}}",
+        .{ amount_ticks, balance_after },
+    );
+    try buf.appendSlice(allocator, tail);
+
+    return buf.toOwnedSlice(allocator);
+}
+
+/// Append an account-record JSON object to `buf`. If `key_count`/`spent`
+/// are non-null, include them at the tail (used by handleGetAccount);
+/// otherwise emit the lighter shape used by handleListAccounts.
+fn appendAccountJson(
+    allocator: std.mem.Allocator,
+    buf: *std.ArrayListUnmanaged(u8),
+    id: []const u8,
+    email: []const u8,
+    balance_ticks: i64,
+    role_str: []const u8,
+    tier_str: []const u8,
+    frozen: bool,
+    created_at: i64,
+    key_count: ?u32,
+    total_spent_ticks: ?i64,
+) !void {
+    try buf.appendSlice(allocator, "{\"id\":");
+    try json_safe.appendQuotedString(allocator, buf, id);
+    try buf.appendSlice(allocator, ",\"email\":");
+    try json_safe.appendQuotedString(allocator, buf, email);
+
+    var num_buf: [128]u8 = undefined;
+    const tail1 = try std.fmt.bufPrint(&num_buf, ",\"balance_ticks\":{d},\"role\":", .{balance_ticks});
+    try buf.appendSlice(allocator, tail1);
+    try json_safe.appendQuotedString(allocator, buf, role_str);
+    try buf.appendSlice(allocator, ",\"tier\":");
+    try json_safe.appendQuotedString(allocator, buf, tier_str);
+
+    const tail2 = try std.fmt.bufPrint(
+        &num_buf,
+        ",\"frozen\":{s},\"created_at\":{d}",
+        .{ if (frozen) "true" else "false", created_at },
+    );
+    try buf.appendSlice(allocator, tail2);
+
+    if (key_count) |kc| {
+        const tail3 = try std.fmt.bufPrint(
+            &num_buf,
+            ",\"key_count\":{d},\"total_spent_ticks\":{d}",
+            .{ kc, total_spent_ticks orelse 0 },
+        );
+        try buf.appendSlice(allocator, tail3);
+    }
+
+    try buf.append(allocator, '}');
+}
+
+/// `{"status":"updated","account_id":<id>,"frozen":<bool>}`
+fn buildFrozenResponse(
+    allocator: std.mem.Allocator,
+    account_id: []const u8,
+    frozen: bool,
+) ![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try buf.appendSlice(allocator, "{\"status\":\"updated\",\"account_id\":");
+    try json_safe.appendQuotedString(allocator, &buf, account_id);
+    try buf.appendSlice(allocator, ",\"frozen\":");
+    try buf.appendSlice(allocator, if (frozen) "true" else "false");
+    try buf.append(allocator, '}');
+
+    return buf.toOwnedSlice(allocator);
+}
+
+/// `{"status":"updated","account_id":<id>,"tier":<tier>,"margin_bps":N}`
+fn buildTierResponse(
+    allocator: std.mem.Allocator,
+    account_id: []const u8,
+    tier_str: []const u8,
+    margin_bps: i64,
+) ![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try buf.appendSlice(allocator, "{\"status\":\"updated\",\"account_id\":");
+    try json_safe.appendQuotedString(allocator, &buf, account_id);
+    try buf.appendSlice(allocator, ",\"tier\":");
+    try json_safe.appendQuotedString(allocator, &buf, tier_str);
+
+    var num_buf: [48]u8 = undefined;
+    const tail = try std.fmt.bufPrint(&num_buf, ",\"margin_bps\":{d}}}", .{margin_bps});
+    try buf.appendSlice(allocator, tail);
+
+    return buf.toOwnedSlice(allocator);
 }
 
 // ── POST /qai/v1/admin/accounts/{id}/credit — Add credit ───
@@ -338,11 +566,11 @@ pub fn handleCreditAccount(
         l.recordCredit(io, account_id, parsed.value.amount_ticks, balance, auth.key.prefix.slice());
     }
 
-    return .{ .body = std.fmt.allocPrint(allocator,
-        \\{{"status":"credited","account_id":"{s}","amount_ticks":{d},"balance_after":{d}}}
-    , .{ account_id, parsed.value.amount_ticks, balance }) catch
+    // SECURITY (AIS-8): account_id comes from the URL path.
+    const response = buildCreditedResponse(allocator, account_id, parsed.value.amount_ticks, balance) catch
         \\{"status":"credited"}
-    };
+    ;
+    return .{ .body = response };
 }
 
 // ── GET /qai/v1/admin/accounts — List all accounts ─────────
@@ -374,15 +602,21 @@ pub fn handleListAccounts(
         if (!first) buf.append(allocator, ',') catch continue;
         first = false;
 
-        const json = std.fmt.allocPrint(allocator,
-            \\{{"id":"{s}","email":"{s}","balance_ticks":{d},"role":"{s}","tier":"{s}","frozen":{s},"created_at":{d}}}
-        , .{
-            acct.id.slice(), acct.email.slice(), acct.balance_ticks,
-            acct.role.toString(), acct.tier.toString(),
-            if (acct.frozen) "true" else "false", acct.created_at,
-        }) catch continue;
-        defer allocator.free(json);
-        buf.appendSlice(allocator, json) catch continue;
+        // SECURITY (AIS-8): id and email were user-supplied at account
+        // creation; escape every string field.
+        appendAccountJson(
+            allocator,
+            &buf,
+            acct.id.slice(),
+            acct.email.slice(),
+            acct.balance_ticks,
+            acct.role.toString(),
+            acct.tier.toString(),
+            acct.frozen,
+            acct.created_at,
+            null, // no key_count in list shape
+            null,
+        ) catch continue;
     }
 
     buf.appendSlice(allocator, "]}") catch {};
@@ -423,14 +657,25 @@ pub fn handleGetAccount(
     }
     store.mutex.unlock();
 
-    return .{ .body = std.fmt.allocPrint(allocator,
-        \\{{"id":"{s}","email":"{s}","balance_ticks":{d},"role":"{s}","tier":"{s}","frozen":{s},"created_at":{d},"key_count":{d},"total_spent_ticks":{d}}}
-    , .{
-        acct.id.slice(), acct.email.slice(), acct.balance_ticks,
-        acct.role.toString(), acct.tier.toString(),
-        if (acct.frozen) "true" else "false", acct.created_at,
-        key_count, total_spent,
-    }) catch
+    // SECURITY (AIS-8): id and email are user-supplied strings.
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    appendAccountJson(
+        allocator,
+        &buf,
+        acct.id.slice(),
+        acct.email.slice(),
+        acct.balance_ticks,
+        acct.role.toString(),
+        acct.tier.toString(),
+        acct.frozen,
+        acct.created_at,
+        key_count,
+        total_spent,
+    ) catch return .{ .status = .internal_server_error, .body =
+        \\{"error":"internal"}
+    };
+    return .{ .body = buf.toOwnedSlice(allocator) catch
         \\{"error":"internal"}
     };
 }
@@ -474,11 +719,11 @@ pub fn handleFreezeAccount(
     store.dirty_accounts.put(store.allocator, account_id, {}) catch {};
     store.mutex.unlock();
 
-    return .{ .body = std.fmt.allocPrint(allocator,
-        \\{{"status":"updated","account_id":"{s}","frozen":{s}}}
-    , .{ account_id, if (parsed.value.frozen) "true" else "false" }) catch
+    // SECURITY (AIS-8): account_id from URL path.
+    const response = buildFrozenResponse(allocator, account_id, parsed.value.frozen) catch
         \\{"status":"updated"}
-    };
+    ;
+    return .{ .body = response };
 }
 
 // ── POST /qai/v1/admin/accounts/{id}/tier — Change tier ────
@@ -525,9 +770,9 @@ pub fn handleSetTier(
     store.dirty_accounts.put(store.allocator, account_id, {}) catch {};
     store.mutex.unlock();
 
-    return .{ .body = std.fmt.allocPrint(allocator,
-        \\{{"status":"updated","account_id":"{s}","tier":"{s}","margin_bps":{d}}}
-    , .{ account_id, new_tier.toString(), new_tier.marginBps() }) catch
+    // SECURITY (AIS-8): account_id from URL path; tier_str is enum-derived.
+    const response = buildTierResponse(allocator, account_id, new_tier.toString(), new_tier.marginBps()) catch
         \\{"status":"updated"}
-    };
+    ;
+    return .{ .body = response };
 }
