@@ -4,6 +4,30 @@ const bitcoin_tx = @import("bitcoin/transaction.zig");
 const spv = @import("bitcoin/spv.zig");
 
 // =============================================================================
+// Side-channel mitigations guard
+// =============================================================================
+//
+// The FFI surface exports ECDSA signing (quantum_ecdsa_sign), public-key
+// derivation (quantum_derive_pubkey), full transaction signing
+// (quantum_tx_sign), and BIP32 HD wallet derivation (quantum_bip32_*). Every
+// one of these performs scalar multiplication over secp256k1 whose timing
+// behavior depends on std.options.side_channels_mitigations.
+//
+// With mitigations disabled, scalar multiplication branches on secret scalar
+// bits — a downstream caller (the Rust wallet) would leak its Bitcoin
+// private keys to any local timing-channel attacker. Mitigations are the
+// default; this guard catches the case where a build flag accidentally
+// disables them. Note: bitcoin/tx_builder.zig has the same guard for
+// defense in depth in case anyone imports it standalone for tests.
+comptime {
+    if (std.options.side_channels_mitigations == .none) {
+        @compileError("simd_crypto_ffi (Bitcoin signing FFI) requires side-channel mitigations enabled. " ++
+            "Do not build with side_channels_mitigations = .none — " ++
+            "scalar multiplication over secp256k1 would leak the private key via timing.");
+    }
+}
+
+// =============================================================================
 // Error Codes
 // =============================================================================
 pub const QuantumCryptoError = enum(c_int) {

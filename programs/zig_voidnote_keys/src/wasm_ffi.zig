@@ -5,6 +5,7 @@
 //!   - generate_api_key() → "vn_" + 64 hex chars (32 random bytes)
 //!   - hmac_sha256(secret, message) → 64-char hex HMAC
 //!   - hmac_sha256_verify(secret, message, expected_hex) → 1 (valid) or 0 (invalid)
+//!   - clear_result_buf() → MUST be called after copying a sensitive result
 //!
 //! No external dependencies — SHA-256 and HMAC implemented inline.
 //! Target: wasm32-freestanding for Cloudflare Workers.
@@ -12,6 +13,31 @@
 //! JS host must provide:
 //!   env.js_get_random_bytes(ptr: i32, len: i32) → void
 //!   (fills memory[ptr..ptr+len] with crypto-secure random bytes)
+//!
+//! ──────────────────────────────────────────────────────────────────────
+//!  LIFECYCLE CONTRACT — read before integrating
+//! ──────────────────────────────────────────────────────────────────────
+//!
+//! The result buffer (g_result_buf) is a GLOBAL inside the WASM instance.
+//! After generate_api_key() / hmac_sha256() returns, the result bytes
+//! remain in g_result_buf until the next call overwrites them OR until
+//! clear_result_buf() is called.
+//!
+//! For SENSITIVE results (a freshly-generated API key, in particular), the
+//! JS host MUST follow this sequence:
+//!
+//!   const len = wasm.generate_api_key();
+//!   const ptr = wasm.get_result_ptr();
+//!   const key = new TextDecoder().decode(
+//!       new Uint8Array(wasm.memory.buffer, ptr, len)
+//!   );
+//!   wasm.clear_result_buf();   // ← required, NOT optional
+//!
+//! Without that final call, the key bytes persist in WASM linear memory
+//! and are recoverable by any subsequent caller using the same WASM
+//! instance (e.g. another route handler in the same Worker request). The
+//! HMAC functions also leak the MAC bytes via the same channel — clear
+//! after reading those too if they're sensitive in your threat model.
 
 const std = @import("std");
 
@@ -186,13 +212,40 @@ fn hmacSha256(key: []const u8, message: []const u8) [32]u8 {
 }
 
 // ==========================================================================
+// Secure wipe helpers
+// ==========================================================================
+//
+// std.crypto.secureZero would normally do this — but we keep this module's
+// dependency surface minimal (per the file header) so we write the volatile
+// loop inline. The `volatile` cast prevents LLVM dead-store elimination
+// from dropping the writes when it can prove the buffer is freed/unused.
+
+fn zeroResultBuf() void {
+    const ptr: [*]volatile u8 = &g_result_buf;
+    var i: usize = 0;
+    while (i < g_result_buf.len) : (i += 1) ptr[i] = 0;
+}
+
+fn secureWipe(buf: []u8) void {
+    const ptr: [*]volatile u8 = buf.ptr;
+    var i: usize = 0;
+    while (i < buf.len) : (i += 1) ptr[i] = 0;
+}
+
+// ==========================================================================
 // Exported API
 // ==========================================================================
 
 /// Generate a VoidNote API key: "vn_" + 64 lowercase hex chars (32 random bytes).
 /// Returns 67 on success, 0 on error.
-/// Read the key with get_result_ptr() / get_result_len().
+/// Read the key with get_result_ptr() / get_result_len(), then call
+/// clear_result_buf() to wipe it. See the file-header LIFECYCLE CONTRACT.
 export fn generate_api_key() u32 {
+    // Wipe any leftover bytes from a previous call. Defense-in-depth: even
+    // if a previous caller forgot to clear_result_buf(), we don't leave a
+    // longer/older result mingled with the new key in g_result_buf.
+    zeroResultBuf();
+
     var raw: [32]u8 = undefined;
     js_get_random_bytes(&raw, 32);
 
@@ -203,6 +256,9 @@ export fn generate_api_key() u32 {
         g_result_buf[3 + i * 2]     = hex_chars[byte >> 4];
         g_result_buf[3 + i * 2 + 1] = hex_chars[byte & 0x0f];
     }
+    // Wipe the local random buffer too — it's stack-allocated and may
+    // outlive this function via stack reuse / core-dump exposure.
+    secureWipe(&raw);
     g_result_len = 67;
     g_error_code = ERR_OK;
     return 67;
@@ -211,7 +267,8 @@ export fn generate_api_key() u32 {
 /// Compute HMAC-SHA256(secret, message).
 /// Writes 64 lowercase hex chars to the result buffer.
 /// Returns 64 on success, 0 on invalid input.
-/// Read result with get_result_ptr() / get_result_len().
+/// Read result with get_result_ptr() / get_result_len(), then call
+/// clear_result_buf() if the MAC is sensitive in your threat model.
 export fn hmac_sha256(
     secret_ptr: [*]const u8,
     secret_len: u32,
@@ -222,11 +279,15 @@ export fn hmac_sha256(
         g_error_code = ERR_INVALID_INPUT;
         return 0;
     }
-    const mac = hmacSha256(secret_ptr[0..secret_len], msg_ptr[0..msg_len]);
+    // Wipe any leftover result bytes before writing the new MAC.
+    zeroResultBuf();
+    var mac = hmacSha256(secret_ptr[0..secret_len], msg_ptr[0..msg_len]);
     for (mac, 0..) |byte, i| {
         g_result_buf[i * 2]     = hex_chars[byte >> 4];
         g_result_buf[i * 2 + 1] = hex_chars[byte & 0x0f];
     }
+    // Local MAC copy is no longer needed; wipe it.
+    secureWipe(&mac);
     g_result_len = 64;
     g_error_code = ERR_OK;
     return 64;
@@ -267,4 +328,22 @@ export fn get_result_len() u32 {
 /// Last error code (0 = ok, -1 = invalid input)
 export fn get_error_code() i32 {
     return g_error_code;
+}
+
+/// Wipe the result buffer.
+///
+/// JS host MUST call this after copying a sensitive result (a freshly-
+/// generated API key from generate_api_key(), or an HMAC of a sensitive
+/// message) out to JS memory. Without it, the buffer retains the bytes
+/// until the next call overwrites them — and a subsequent caller using
+/// the same WASM instance (e.g. a different route handler in the same
+/// Cloudflare Worker request) could recover them via get_result_ptr().
+///
+/// Implemented as a volatile loop so dead-store elimination cannot drop
+/// the writes. Also resets g_result_len = 0 and g_error_code = ERR_OK so a
+/// subsequent caller can't observe stale state.
+export fn clear_result_buf() void {
+    zeroResultBuf();
+    g_result_len = 0;
+    g_error_code = ERR_OK;
 }

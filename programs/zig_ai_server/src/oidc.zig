@@ -13,6 +13,26 @@ const Sha256 = crypto.hash.sha2.Sha256;
 const hs = @import("http-sentinel");
 const HttpClient = hs.HttpClient;
 
+// ── Side-channel mitigations guard ────────────────────────────
+//
+// Refuse to compile if std.options.side_channels_mitigations is .none.
+//
+// crypto.ff.Modulus.powWithEncodedExponent (used in verifyRS256 below) falls
+// back to ct_unprotected when mitigations are disabled — which branches on
+// secret-derived state during modular exponentiation. The RSA verification
+// here is over a PUBLIC key, so the exponent isn't secret; the concern is
+// downstream: this module shares Modulus arithmetic patterns with private-
+// key signing code in other in-tree libraries, and a build flag that
+// disables mitigations would silently weaken every dependent module. We
+// enforce the strong default at compile time. See gcp_auth/src/rsa.zig:25
+// for the same pattern on a signing path where it matters most.
+comptime {
+    if (std.options.side_channels_mitigations == .none) {
+        @compileError("oidc.zig requires side-channel mitigations enabled. " ++
+            "Do not build with side_channels_mitigations = .none");
+    }
+}
+
 // ── RSA Public Key Types ───────────────────────────────────────
 
 const max_modulus_bits = 4096;
@@ -152,35 +172,61 @@ pub fn verifyJwt(
 // ── RS256 Signature Verification ───────────────────────────────
 
 fn verifyRS256(key: *const RsaPublicKey, message: []const u8, signature: []const u8) bool {
+    // Length check is on PUBLIC values (signature length vs. public-key
+    // modulus length). Safe to short-circuit.
     if (signature.len != key.modulus_len) return false;
 
-    // Compute sig^e mod n (RSA public key operation)
+    // Compute sig^e mod n (RSA public key operation). Failures here
+    // (e.g. signature outside [0, n)) leak only that the input was
+    // structurally malformed — not which byte of EM differs — and are OK
+    // to short-circuit.
     const sig_fe = Fe.fromBytes(key.n, signature, .big) catch return false;
     const m_fe = key.n.powWithEncodedExponent(sig_fe, key.e_bytes[0..key.e_len], .big) catch return false;
 
-    // Extract decrypted padded message
+    // Extract decrypted padded message into EM (encoded message).
     var full_buf: [Fe.encoded_bytes]u8 = undefined;
     m_fe.toBytes(&full_buf, .big) catch return false;
     const em = full_buf[Fe.encoded_bytes - key.modulus_len ..];
 
-    // Verify PKCS#1 v1.5 padding (RFC 3447 §8.2.2)
-    // EM = 0x00 || 0x01 || PS (0xFF bytes, ≥8) || 0x00 || T
-    // T  = DigestInfo || SHA-256(message)
+    // Verify PKCS#1 v1.5 padding (RFC 3447 §8.2.2).
+    //   EM = 0x00 || 0x01 || PS (0xFF bytes, ≥8) || 0x00 || T
+    //   T  = DigestInfo || SHA-256(message)
+    //
+    // SECURITY (AIS-2, AIS-3): every byte comparison against EM is
+    // accumulated into a single u8 `mismatch` and only inspected at the
+    // very end. Branching on partial mismatches would expose a
+    // Bleichenbacher-class timing side channel — an attacker submitting
+    // crafted signatures could probe which byte of the padding (or hash)
+    // differs from expected and use that as an oracle to forge signatures
+    // via partial-information attack. All six checks below (EM[0]==0,
+    // EM[1]==1, PS bytes ==0xFF, separator ==0, DigestInfo prefix, hash)
+    // run unconditionally and contribute to the single accumulator.
+    //
+    // The structural length check below is on the PUBLIC key length, not
+    // on EM bytes — safe to short-circuit.
     const t_len = sha256_digest_info.len + Sha256.digest_length;
     if (key.modulus_len < t_len + 11) return false;
     const ps_len = key.modulus_len - 3 - t_len;
 
-    if (em[0] != 0x00 or em[1] != 0x01) return false;
-    for (em[2 .. 2 + ps_len]) |b| {
-        if (b != 0xFF) return false;
-    }
-    if (em[2 + ps_len] != 0x00) return false;
-    if (!std.mem.eql(u8, em[2 + ps_len + 1 ..][0..sha256_digest_info.len], &sha256_digest_info)) return false;
-
-    // Compare hash
+    // Compute expected hash up front (constant work, no secret-dep timing).
     var expected_hash: [Sha256.digest_length]u8 = undefined;
     Sha256.hash(message, &expected_hash, .{});
-    return std.mem.eql(u8, em[key.modulus_len - Sha256.digest_length ..], &expected_hash);
+
+    var mismatch: u8 = 0;
+    mismatch |= em[0] ^ 0x00; // EM[0] must be 0x00
+    mismatch |= em[1] ^ 0x01; // EM[1] must be 0x01
+    for (em[2 .. 2 + ps_len]) |b| {
+        mismatch |= b ^ 0xFF; // every PS byte must be 0xFF
+    }
+    mismatch |= em[2 + ps_len] ^ 0x00; // separator must be 0x00
+    for (em[2 + ps_len + 1 ..][0..sha256_digest_info.len], 0..) |b, i| {
+        mismatch |= b ^ sha256_digest_info[i];
+    }
+    for (em[key.modulus_len - Sha256.digest_length ..], 0..) |b, i| {
+        mismatch |= b ^ expected_hash[i];
+    }
+
+    return mismatch == 0;
 }
 
 // ── JWKS Fetching ──────────────────────────────────────────────
