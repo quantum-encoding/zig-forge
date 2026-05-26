@@ -12,6 +12,13 @@ const Engine = @import("engine/core.zig").Engine;
 const EngineConfig = @import("engine/core.zig").EngineConfig;
 const manifest = @import("engine/manifest.zig");
 
+/// Upper bound on the JSONL manifest read from stdin or `--file`. Each
+/// line is one HTTP request; even 100k requests at 600 bytes each fit
+/// well below this. The cap exists to refuse runaway input — anything
+/// piping multi-gigabyte content into quantum-curl is either a bug or
+/// an attempt to OOM the process.
+const MAX_STDIN_BYTES: usize = 64 * 1024 * 1024;
+
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
 
@@ -108,7 +115,13 @@ fn readRequestsFromFile(
     var dir = try std.Io.Dir.openDirAbsolute(io, dir_path, .{});
     defer dir.close(io);
 
-    const content = try dir.readFileAlloc(io, file_name, allocator, .unlimited);
+    // Same cap as the stdin path — refuse runaway manifest files.
+    const content = try dir.readFileAlloc(
+        io,
+        file_name,
+        allocator,
+        std.Io.Limit.limited(MAX_STDIN_BYTES),
+    );
     defer allocator.free(content);
 
     try parseJsonLines(allocator, content, requests);
@@ -123,9 +136,17 @@ fn readRequestsFromStdin(
     defer io_threaded.deinit();
     const io = io_threaded.io();
 
-    // Read all of stdin into memory using Io.Dir cwd and /dev/stdin
+    // Read all of stdin into memory using Io.Dir cwd and /dev/stdin.
+    // Cap at 64 MiB — generous for a JSONL manifest (each line is a
+    // single HTTP request) and tight enough that an attacker piping
+    // /dev/zero or a multi-gigabyte payload can't OOM the process.
     const cwd = std.Io.Dir.cwd();
-    const content = cwd.readFileAlloc(io, "/dev/stdin", allocator, .unlimited) catch {
+    const content = cwd.readFileAlloc(
+        io,
+        "/dev/stdin",
+        allocator,
+        std.Io.Limit.limited(MAX_STDIN_BYTES),
+    ) catch {
         return; // No stdin available
     };
     defer allocator.free(content);

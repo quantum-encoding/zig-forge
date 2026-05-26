@@ -15,6 +15,13 @@ const deepseek = @import("../ai/deepseek.zig");
 const gemini = @import("../ai/gemini.zig");
 const grok = @import("../ai/grok.zig");
 const vertex = @import("../ai/vertex.zig");
+const retry_mod = @import("../retry/retry.zig");
+
+/// Worst-case backoff between retries. With base=1000 ms this is ~10
+/// doublings before the cap kicks in (1, 2, 4, 8, 16, 32, 64s). Beyond
+/// that we keep waiting `MAX_BACKOFF_MS_BATCH` but the loop terminates
+/// at `retry_count + 1` attempts anyway.
+const MAX_BACKOFF_MS_BATCH: u64 = 60_000;
 
 /// Pure Zig mutex using atomics (no libc)
 const Mutex = struct {
@@ -214,8 +221,11 @@ pub const BatchExecutor = struct {
 
         while (attempts < max_attempts) : (attempts += 1) {
             if (attempts > 0) {
-                // Exponential backoff
-                const delay_ms = @as(u64, 1000) * (@as(u64, 1) << @intCast(attempts - 1));
+                // Exponential backoff via retry.safeBackoffMs — saturates
+                // instead of panicking on u6-shift overflow or wrapping
+                // u64 to zero. `attempts - 1` cannot underflow here
+                // because we're inside `if (attempts > 0)`.
+                const delay_ms = retry_mod.safeBackoffMs(1000, attempts - 1, MAX_BACKOFF_MS_BATCH);
                 io.sleep(std.Io.Duration.fromMilliseconds(@intCast(delay_ms)), .awake) catch {};
             }
 

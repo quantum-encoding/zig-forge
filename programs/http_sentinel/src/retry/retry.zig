@@ -45,6 +45,50 @@ const Instant = struct {
     }
 };
 
+/// Shared upper bound on the exponential-backoff exponent. 30 keeps
+/// `1 << exp` well-defined on u64 (max shift is 63, but the
+/// multiplication by `base_ms` would overflow first), and at base=1000ms
+/// the worst-case sleep is ~17.9 minutes — long enough to absorb any
+/// transient upstream outage without pinning a worker forever.
+///
+/// Anything beyond this is, in practice, an attacker (or a bug) trying
+/// to wedge the executor: --retry on the CLI is parsed without an
+/// explicit upper bound, and `max_retries` in a manifest is parsed from
+/// untrusted stdin. The cap turns "u64 wraps to zero, loop hammers
+/// upstream at line speed" into "we wait 17 minutes, then give up".
+pub const MAX_BACKOFF_EXPONENT: u32 = 30;
+
+/// Compute exponential backoff in milliseconds without overflow or UB.
+///
+/// Returns `min(base_ms * 2^attempt, max_ms)` with saturating semantics
+/// at every step. Replaces the bare
+///   `base_ms * (1 << @intCast(attempt))`
+/// pattern that:
+///   * panicked at attempt >= 64 (u6 shift overflow, since `1 << 64` is
+///     undefined for u64) and
+///   * silently wrapped at attempt >= 53-54 (the `base_ms *` multiplier
+///     overflows u64 to zero, removing the backoff entirely so the
+///     retry loop runs at line speed against the upstream).
+///
+/// Callers should pass `attempt` as the 0-indexed retry number
+/// (attempt 0 → base_ms, attempt 1 → 2*base_ms, ...).
+pub fn safeBackoffMs(base_ms: u64, attempt: u32, max_ms: u64) u64 {
+    if (base_ms == 0 or max_ms == 0) return 0;
+
+    // Clamp the exponent so the shift is well-defined AND the multiply
+    // below can't wrap. If the caller asked for a huge attempt count we
+    // still get bounded sleep (max_ms), never zero or UB.
+    const exponent = @min(attempt, MAX_BACKOFF_EXPONENT);
+
+    // Saturating shift: 1 << exponent for exponent in [0, 30].
+    const shifted: u64 = @as(u64, 1) << @intCast(exponent);
+
+    // Saturating multiply — std.math.mul returns error on overflow, we
+    // map that to max_ms so backoff is monotonically non-decreasing.
+    const product = std.math.mul(u64, base_ms, shifted) catch return max_ms;
+    return @min(product, max_ms);
+}
+
 /// Enterprise-grade retry engine with exponential backoff and jitter
 /// Implements production-level resilience patterns for high-frequency trading
 
@@ -353,3 +397,51 @@ pub const RetryEngine = struct {
         return null;
     }
 };
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test "safeBackoffMs: small attempts produce expected geometric series" {
+    try std.testing.expectEqual(@as(u64, 100), safeBackoffMs(100, 0, 60_000));
+    try std.testing.expectEqual(@as(u64, 200), safeBackoffMs(100, 1, 60_000));
+    try std.testing.expectEqual(@as(u64, 400), safeBackoffMs(100, 2, 60_000));
+    try std.testing.expectEqual(@as(u64, 1600), safeBackoffMs(100, 4, 60_000));
+}
+
+test "safeBackoffMs: capped at max_ms" {
+    // 1000 << 10 = 1_024_000, max_ms = 60_000 — caller's cap wins.
+    try std.testing.expectEqual(@as(u64, 60_000), safeBackoffMs(1000, 10, 60_000));
+    try std.testing.expectEqual(@as(u64, 60_000), safeBackoffMs(1000, 30, 60_000));
+}
+
+test "safeBackoffMs: hostile huge attempt doesn't overflow" {
+    // The previous code panicked here in Debug and silently wrapped to 0
+    // in ReleaseFast — letting the retry loop hammer upstream with no
+    // backoff at all. safeBackoffMs must clamp instead.
+    try std.testing.expectEqual(@as(u64, 60_000), safeBackoffMs(1000, 64, 60_000));
+    try std.testing.expectEqual(@as(u64, 60_000), safeBackoffMs(1000, 100, 60_000));
+    try std.testing.expectEqual(@as(u64, 60_000), safeBackoffMs(1000, std.math.maxInt(u32), 60_000));
+}
+
+test "safeBackoffMs: large base_ms saturates without wrap" {
+    // base=2^40, attempt=30 would overflow u64 if multiplied — must
+    // saturate to max_ms, never wrap to a small value.
+    const huge_base: u64 = 1 << 40;
+    try std.testing.expectEqual(@as(u64, 60_000), safeBackoffMs(huge_base, 30, 60_000));
+}
+
+test "safeBackoffMs: zero base or zero max returns zero" {
+    try std.testing.expectEqual(@as(u64, 0), safeBackoffMs(0, 5, 60_000));
+    try std.testing.expectEqual(@as(u64, 0), safeBackoffMs(1000, 5, 0));
+}
+
+test "safeBackoffMs: monotonic non-decreasing across attempts" {
+    var prev: u64 = 0;
+    var attempt: u32 = 0;
+    while (attempt < 64) : (attempt += 1) {
+        const v = safeBackoffMs(100, attempt, 60_000);
+        try std.testing.expect(v >= prev);
+        prev = v;
+    }
+}

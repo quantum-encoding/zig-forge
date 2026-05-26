@@ -98,9 +98,12 @@ pub const ResponseManifest = struct {
     pub fn toJson(self: *const ResponseManifest, writer: anytype) !void {
         try writer.writeAll("{");
 
-        // ID
+        // ID — escape on the way out. The id originates from caller
+        // input (CSV / JSONL) and an id containing `"` or `\n` would
+        // otherwise corrupt the JSONL output stream that downstream
+        // consumers parse one line at a time.
         try writer.writeAll("\"id\":\"");
-        try writer.writeAll(self.id);
+        try writeEscapedString(writer, self.id);
         try writer.writeAll("\",");
 
         // Status
@@ -162,9 +165,24 @@ pub const ResponseManifest = struct {
 
         try writer.writeAll("{");
 
-        // ID
+        // ID — escape on the way out (same reasoning as toJson above).
         try writer.writeAll("\"id\":\"");
-        try writer.writeAll(self.id);
+        for (self.id) |c| {
+            switch (c) {
+                '"' => try writer.writeAll("\\\""),
+                '\\' => try writer.writeAll("\\\\"),
+                '\n' => try writer.writeAll("\\n"),
+                '\r' => try writer.writeAll("\\r"),
+                '\t' => try writer.writeAll("\\t"),
+                else => {
+                    if (c < 0x20) {
+                        try writer.print("\\u{x:0>4}", .{c});
+                    } else {
+                        try writer.writeByte(c);
+                    }
+                },
+            }
+        }
         try writer.writeAll("\",");
 
         // Status
@@ -378,4 +396,99 @@ fn writeEscapedString(writer: anytype, s: []const u8) !void {
             },
         }
     }
+}
+
+// ============================================================================
+// Tests — hostile manifest inputs
+// ============================================================================
+//
+// Each of these crashed the prior parser via `.?.string` on a missing
+// or wrong-type field. The current parser must return
+// error.InvalidJson / InvalidMethod cleanly.
+
+test "parseRequestManifest: missing id rejected, not panicked" {
+    const allocator = std.testing.allocator;
+    const line = "{\"method\":\"GET\",\"url\":\"https://x\"}";
+    try std.testing.expectError(error.InvalidJson, parseRequestManifest(allocator, line));
+}
+
+test "parseRequestManifest: id with wrong type rejected" {
+    const allocator = std.testing.allocator;
+    const line = "{\"id\":1,\"method\":\"GET\",\"url\":\"https://x\"}";
+    try std.testing.expectError(error.InvalidJson, parseRequestManifest(allocator, line));
+}
+
+test "parseRequestManifest: missing url rejected" {
+    const allocator = std.testing.allocator;
+    const line = "{\"id\":\"a\",\"method\":\"GET\"}";
+    try std.testing.expectError(error.InvalidJson, parseRequestManifest(allocator, line));
+}
+
+test "parseRequestManifest: unknown method rejected with named error" {
+    const allocator = std.testing.allocator;
+    const line = "{\"id\":\"a\",\"method\":\"CONNECT\",\"url\":\"https://x\"}";
+    try std.testing.expectError(error.InvalidMethod, parseRequestManifest(allocator, line));
+}
+
+test "parseRequestManifest: negative timeout_ms rejected (not @intCast UB)" {
+    const allocator = std.testing.allocator;
+    const line = "{\"id\":\"a\",\"method\":\"GET\",\"url\":\"https://x\",\"timeout_ms\":-1}";
+    try std.testing.expectError(error.InvalidJson, parseRequestManifest(allocator, line));
+}
+
+test "parseRequestManifest: huge timeout_ms clamped, not wrapped" {
+    const allocator = std.testing.allocator;
+    const line = "{\"id\":\"a\",\"method\":\"GET\",\"url\":\"https://x\",\"timeout_ms\":99999999999999}";
+    var req = try parseRequestManifest(allocator, line);
+    defer req.deinit();
+    try std.testing.expect(req.timeout_ms != null);
+    try std.testing.expect(req.timeout_ms.? <= MAX_TIMEOUT_MS);
+}
+
+test "parseRequestManifest: huge max_retries clamped, not wrapped" {
+    const allocator = std.testing.allocator;
+    const line = "{\"id\":\"a\",\"method\":\"GET\",\"url\":\"https://x\",\"max_retries\":1000000}";
+    var req = try parseRequestManifest(allocator, line);
+    defer req.deinit();
+    try std.testing.expectEqual(@as(?u32, MAX_RETRIES_CAP), req.max_retries);
+}
+
+test "parseRequestManifest: header with non-string value rejected" {
+    const allocator = std.testing.allocator;
+    const line = "{\"id\":\"a\",\"method\":\"GET\",\"url\":\"https://x\",\"headers\":{\"X\":1}}";
+    try std.testing.expectError(error.InvalidJson, parseRequestManifest(allocator, line));
+}
+
+test "parseRequestManifest: non-object input rejected" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.InvalidJson, parseRequestManifest(allocator, "[]"));
+    try std.testing.expectError(error.InvalidJson, parseRequestManifest(allocator, "\"oops\""));
+    try std.testing.expectError(error.InvalidJson, parseRequestManifest(allocator, "42"));
+}
+
+test "ResponseManifest.toJsonString: hostile id is escaped, output is one line" {
+    const allocator = std.testing.allocator;
+    // An id that, if interpolated raw, would close the string and inject
+    // a forged "status" field into the JSONL output stream.
+    const hostile_id = "x\",\"status\":500,\"oops\":\"";
+    var resp = ResponseManifest{
+        .id = try allocator.dupe(u8, hostile_id),
+        .status = 200,
+        .latency_ms = 1,
+        .retry_count = 0,
+        .allocator = allocator,
+    };
+    defer resp.deinit();
+
+    const out = try resp.toJsonString(allocator);
+    defer allocator.free(out);
+
+    // Re-parse — the output must remain a single well-formed JSON
+    // object with status = 200, not 500.
+    const trimmed = std.mem.trimEnd(u8, out, "\n");
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, trimmed, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(i64, 200), parsed.value.object.get("status").?.integer);
+    try std.testing.expect(parsed.value.object.get("oops") == null);
+    try std.testing.expectEqualStrings(hostile_id, parsed.value.object.get("id").?.string);
 }

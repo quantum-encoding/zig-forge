@@ -9,8 +9,14 @@
 
 const std = @import("std");
 const HttpClient = @import("../http_client.zig").HttpClient;
-const RetryEngine = @import("../retry/retry.zig").RetryEngine;
+const retry_mod = @import("../retry/retry.zig");
+const RetryEngine = retry_mod.RetryEngine;
 const manifest = @import("manifest.zig");
+
+/// Worst-case backoff between manifest-driven retries. Bounded so a
+/// hostile manifest (or a CI runner writing a junk JSON line into
+/// quantum-curl's stdin) can't pin a worker indefinitely.
+const MAX_BACKOFF_MS_ENGINE: u64 = 60_000;
 
 /// Pure Zig mutex using atomics (no libc)
 const Mutex = struct {
@@ -185,7 +191,7 @@ pub fn Engine(comptime WriterType: type) type {
                 } else |err| {
                     last_err = err;
                     if (retry_count < max_retries) {
-                        const backoff_ms = @as(u64, 100) * (@as(u64, 1) << @intCast(retry_count));
+                        const backoff_ms = retry_mod.safeBackoffMs(100, retry_count, MAX_BACKOFF_MS_ENGINE);
                         io.sleep(std.Io.Duration.fromMilliseconds(@intCast(backoff_ms)), .awake) catch {};
                         continue;
                     }

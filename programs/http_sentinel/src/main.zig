@@ -107,6 +107,15 @@ pub fn main(init: std.process.Init) !void {
                 return error.MissingArgument;
             }
             batch_retry = try std.fmt.parseInt(u32, args[i], 10);
+            // Match the exponent ceiling enforced by retry.safeBackoffMs.
+            // Beyond ~30 retries the backoff is already capped at the per-
+            // request max, so additional attempts just hammer the upstream
+            // and pin a CPU. We refuse to start rather than silently
+            // letting the retry count run away.
+            if (batch_retry > 30) {
+                std.debug.print("Error: --retry must be <= 30 (saw {d})\n", .{batch_retry});
+                return error.InvalidArgument;
+            }
         } else if (std.mem.startsWith(u8, arg, "--")) {
             std.debug.print("Error: Unknown option: {s}\n", .{arg});
             cli.printUsage();

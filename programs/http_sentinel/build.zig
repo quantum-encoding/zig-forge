@@ -17,9 +17,25 @@ pub fn build(b: *std.Build) void {
         .root_module = http_sentinel_module,
     });
 
+    // Manifest tests — engine/manifest.zig isn't pulled into lib.zig's
+    // public surface (the engine module is consumed by quantum_curl as
+    // a binary, not re-exported as a library), so its hostile-input
+    // tests need their own test target to participate in `zig build test`.
+    const manifest_test_module = b.createModule(.{
+        .root_source_file = b.path("src/engine/manifest.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = false,
+    });
+    const manifest_unit_tests = b.addTest(.{
+        .root_module = manifest_test_module,
+    });
+
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
+    const run_manifest_unit_tests = b.addRunArtifact(manifest_unit_tests);
     const test_step = b.step("test", "Run library tests");
     test_step.dependOn(&run_lib_unit_tests.step);
+    test_step.dependOn(&run_manifest_unit_tests.step);
 
     // Helper function to create executable with http-sentinel import
     const addExample = struct {
