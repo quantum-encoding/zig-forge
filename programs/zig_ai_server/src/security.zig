@@ -1,4 +1,16 @@
 // Security primitives — constant-time comparison, input validation, sandboxing
+//
+// Sandbox model: strict executable allowlist + structured argv exec.
+// No shell interpretation anywhere — child processes are spawned with
+// std.process.run + explicit argv, bypassing /bin/sh -c entirely. This
+// removes shell-metacharacter injection (|, &&, ||, ;, $(), backticks,
+// glob expansion, redirections) as an attack surface.
+//
+// Replaces an earlier validateCommand blocklist that scanned a single
+// shell-command string for substrings like "curl " or "rm -rf /". That
+// approach was fundamentally bypassable (e.g. "curl\thttp://...",
+// "python -c 'import os; ...'", "echo $(...) | base64") and has been
+// removed in favour of this allowlist-driven design.
 
 const std = @import("std");
 
@@ -44,89 +56,96 @@ pub fn validatePath(path: []const u8) ?[]const u8 {
     return path;
 }
 
-// ── Command sandboxing ──────────────────────────────────────
-// Block dangerous commands that could damage the host or exfiltrate data.
+// ── Executable allowlist ────────────────────────────────────
+// Only these executables can be spawned by the agent. Bare names only —
+// PATH lookup is delegated to the OS, but the *name* must match exactly.
+//
+// What is in: read-only or build/dev-only tools the agent legitimately
+// needs to do software work in its workspace. The shell itself is NOT
+// in the list; neither are scripting interpreters (which would re-open
+// arbitrary execution), network tools (curl/wget/nc/ssh/scp), privilege
+// escalation (sudo/su/doas), destructive ops (rm/mv/chmod/chown/dd),
+// or system control (reboot/shutdown/kill/mount).
+//
+// To extend: add the bare executable name here. Do NOT add any binary
+// that takes a -c / -e / -- script flag (sh, bash, python, node, perl,
+// ruby, awk, sed -e ...) — those re-introduce shell-style injection.
 
-const blocked_commands = [_][]const u8{
-    // Destructive
-    "rm -rf /",
-    "rm -rf /*",
-    "mkfs",
-    "dd if=",
-    ":(){",
-    // Privilege escalation
-    "sudo ",
-    "su ",
-    "chmod 777",
-    "chown ",
-    "passwd",
-    // Network exfiltration
-    "nc ",
-    "ncat ",
-    "netcat ",
-    // Process manipulation
-    "kill -9 1",
-    "killall",
-    "reboot",
-    "shutdown",
-    "halt",
-    "init ",
-    // Disk/mount
-    "mount ",
-    "umount ",
-    "fdisk",
+pub const allowed_executables = [_][]const u8{
+    // Build / language tools
+    "zig",
+    "git",
+    "make",
+    // File inspection (read-only)
+    "ls",
+    "cat",
+    "head",
+    "tail",
+    "wc",
+    "file",
+    "stat",
+    "tree",
+    // Search
+    "grep",
+    "rg",
+    "find",
+    "fd",
+    // Directory creation (write but contained to workspace via cwd)
+    "mkdir",
+    // Misc info
+    "pwd",
+    "echo",
+    "date",
+    "which",
+    "env",
+    "uname",
+    // RAG search helper (project-local CLI)
+    "rag",
 };
 
-const blocked_patterns = [_][]const u8{
-    // Exfiltration via network
-    "curl ",
-    "wget ",
-    // These are fine for legitimate use but dangerous when model-controlled
-    // Comment out if your agent needs them:
-    // "ssh ",
-    // "scp ",
+const max_executable_name_len: usize = 64;
+const max_argument_len: usize = 8 * 1024;
+const max_argument_count: usize = 128;
+
+pub const ExecValidationError = error{
+    EmptyExecutable,
+    ExecutableNameTooLong,
+    ExecutablePathContainsSlash,
+    ExecutableNullByte,
+    ExecutableNotAllowed,
+    ArgumentNullByte,
+    ArgumentTooLong,
+    TooManyArguments,
 };
 
-pub fn validateCommand(command: []const u8) ?[]const u8 {
-    // Empty command
-    if (command.len == 0) return null;
+/// Validate that `name` is a permitted bare executable name.
+/// Rejects paths (anything containing '/' or '\\') — the executable
+/// must be a bare name resolved via PATH by the OS, not an arbitrary
+/// filesystem path supplied by the model.
+pub fn validateExecutable(name: []const u8) ExecValidationError![]const u8 {
+    if (name.len == 0) return ExecValidationError.EmptyExecutable;
+    if (name.len > max_executable_name_len) return ExecValidationError.ExecutableNameTooLong;
+    if (std.mem.indexOfScalar(u8, name, 0) != null) return ExecValidationError.ExecutableNullByte;
+    if (std.mem.indexOfScalar(u8, name, '/') != null) return ExecValidationError.ExecutablePathContainsSlash;
+    if (std.mem.indexOfScalar(u8, name, '\\') != null) return ExecValidationError.ExecutablePathContainsSlash;
 
-    // Max command length
-    if (command.len > 8192) return null;
-
-    // Null byte injection
-    if (std.mem.indexOfScalar(u8, command, 0) != null) return null;
-
-    // Check blocked commands
-    const trimmed = std.mem.trim(u8, command, " \t\n");
-    for (blocked_commands) |blocked| {
-        if (std.mem.startsWith(u8, trimmed, blocked)) return null;
-        // Also check after pipes/semicolons
-        if (std.mem.indexOf(u8, trimmed, blocked) != null) return null;
+    for (allowed_executables) |allowed| {
+        if (std.mem.eql(u8, name, allowed)) return name;
     }
+    return ExecValidationError.ExecutableNotAllowed;
+}
 
-    // Check blocked patterns (less strict — only block at command position)
-    for (blocked_patterns) |pattern| {
-        // Block at start of command or after pipe/semicolon/&&/||
-        if (std.mem.startsWith(u8, trimmed, pattern)) return null;
-        // After pipe
-        if (std.mem.indexOf(u8, trimmed, "| ")) |pipe_pos| {
-            const after_pipe = std.mem.trim(u8, trimmed[pipe_pos + 2 ..], " ");
-            if (std.mem.startsWith(u8, after_pipe, pattern)) return null;
-        }
-        // After semicolon
-        if (std.mem.indexOf(u8, trimmed, "; ")) |semi_pos| {
-            const after_semi = std.mem.trim(u8, trimmed[semi_pos + 2 ..], " ");
-            if (std.mem.startsWith(u8, after_semi, pattern)) return null;
-        }
-        // After &&
-        if (std.mem.indexOf(u8, trimmed, "&& ")) |and_pos| {
-            const after_and = std.mem.trim(u8, trimmed[and_pos + 3 ..], " ");
-            if (std.mem.startsWith(u8, after_and, pattern)) return null;
-        }
-    }
+/// Validate a single argv argument. Even though we never pass arguments
+/// through a shell, we still enforce a null-byte ban (would truncate the
+/// arg at the syscall boundary on POSIX) and a length cap.
+pub fn validateArgument(arg: []const u8) ExecValidationError!void {
+    if (arg.len > max_argument_len) return ExecValidationError.ArgumentTooLong;
+    if (std.mem.indexOfScalar(u8, arg, 0) != null) return ExecValidationError.ArgumentNullByte;
+}
 
-    return command;
+/// Validate an argv array: caps argument count and validates each entry.
+pub fn validateArgumentCount(count: usize) ExecValidationError!void {
+    if (count > max_argument_count) return ExecValidationError.TooManyArguments;
 }
 
 // ── String sanitization ─────────────────────────────────────

@@ -50,8 +50,10 @@ const CapabilityMapping = struct {
 const capability_registry = [_]CapabilityMapping{
     .{ .id = "file_read", .tools = &.{ "read_file" } },
     .{ .id = "file_write", .tools = &.{ "write_file" } },
-    .{ .id = "code_execution", .tools = &.{ "bash" } },
-    .{ .id = "terminal_inject", .tools = &.{ "bash" } },
+    // code_execution exposes a structured run_program tool. The model
+    // chooses an executable name and an argv list — there is no shell.
+    // See security.zig::allowed_executables for what may be invoked.
+    .{ .id = "code_execution", .tools = &.{ "run_program" } },
     // Future tools map here. Same IDs as Go backend:
     // "image_generation", "image_edit", "video_generation",
     // "audio_generation", "embeddings", "web_search",
@@ -122,10 +124,12 @@ pub fn filterToolsByCapabilities(
 
 const tool_definitions = [_]hs.ai.common.ToolDefinition{
     .{
-        .name = "bash",
-        .description = "Run a shell command in the workspace directory. Use for: ls, grep, git, zig build, rag search, cat, etc. The working directory is the agent workspace.",
+        .name = "run_program",
+        .description =
+        \\Run a single program in the workspace directory with an explicit argv list. There is NO shell — pipes, redirects, &&, ||, ;, $(...), backticks, glob expansion and variable substitution are NOT interpreted; pass arguments literally. To chain operations, call this tool multiple times. Allowed executables: zig, git, make, ls, cat, head, tail, wc, file, stat, tree, grep, rg, find, fd, mkdir, pwd, echo, date, which, env, uname, rag.
+        ,
         .input_schema =
-        \\{"type":"object","properties":{"command":{"type":"string","description":"The bash command to execute"}},"required":["command"]}
+        \\{"type":"object","properties":{"executable":{"type":"string","description":"Bare executable name (e.g. 'zig', 'git', 'grep'). Must be on the allowlist. No paths."},"args":{"type":"array","items":{"type":"string"},"description":"Arguments passed literally to the program. Each element is one argv entry — do not embed shell syntax."}},"required":["executable","args"]}
         ,
     },
     .{
@@ -147,25 +151,32 @@ const tool_definitions = [_]hs.ai.common.ToolDefinition{
 // ── System prompts ──────────────────────────────────────────
 
 const SYSTEM_PROMPT =
-    \\You are an expert software engineer. You have access to three tools: bash, write_file, and read_file.
+    \\You are an expert software engineer. You have access to three tools: run_program, write_file, and read_file.
     \\
     \\Guidelines:
-    \\- Use bash for all shell operations: ls, grep, git, compilers, package managers, etc.
+    \\- run_program executes a single allowlisted binary with an explicit argv list. THERE IS NO SHELL — pipes (|), redirects (>, <), &&, ||, ;, $(...), backticks, globs and variable expansion are NOT interpreted. Pass arguments literally as separate array entries.
+    \\  Example — list files:        {"executable":"ls","args":["-la","src"]}
+    \\  Example — run a build:       {"executable":"zig","args":["build","test"]}
+    \\  Example — grep recursively:  {"executable":"grep","args":["-rn","pattern","src/"]}
+    \\  Example — git commit:        {"executable":"git","args":["commit","-m","fix: bug"]}
+    \\- To chain operations (pipe, redirect, conditional), call run_program multiple times instead.
+    \\- Allowed executables: zig, git, make, ls, cat, head, tail, wc, file, stat, tree, grep, rg, find, fd, mkdir, pwd, echo, date, which, env, uname, rag.
     \\- Use write_file to create/modify files (avoids heredoc quoting issues).
     \\- Use read_file to inspect existing files.
-    \\- Always check your work: after writing code, compile/test it with bash.
+    \\- Always check your work: after writing code, compile/test it with run_program.
     \\- Fix errors iteratively — read the error, fix, rebuild.
     \\- Be concise in explanations. Let the code speak.
 ;
 
 const RAG_SYSTEM_PROMPT =
-    \\You are an expert software engineer with access to a RAG knowledge base. You have three tools: bash, write_file, and read_file.
+    \\You are an expert software engineer with access to a RAG knowledge base. You have three tools: run_program, write_file, and read_file.
     \\
     \\Guidelines:
+    \\- run_program executes a single allowlisted binary with an explicit argv list. THERE IS NO SHELL — pipes, redirects, &&, ||, ;, $(...), backticks, globs and variable expansion are NOT interpreted. Pass arguments literally.
     \\- BEFORE writing code, search the RAG for relevant documentation:
-    \\  bash: rag search -c "Zig" "std.http.Server listen accept"
-    \\  bash: rag search -c "Zig 0.16 Example Programs" "echo server thread"
-    \\- Use bash for all shell operations: ls, grep, git, compilers, etc.
+    \\    {"executable":"rag","args":["search","-c","Zig","std.http.Server listen accept"]}
+    \\    {"executable":"rag","args":["search","-c","Zig 0.16 Example Programs","echo server thread"]}
+    \\- Allowed executables: zig, git, make, ls, cat, head, tail, wc, file, stat, tree, grep, rg, find, fd, mkdir, pwd, echo, date, which, env, uname, rag.
     \\- Use write_file to create/modify files.
     \\- Use read_file to inspect existing files.
     \\- After compiler errors, search RAG for the correct API before guessing.
@@ -453,8 +464,8 @@ fn executeTool(
     };
     defer args.deinit();
 
-    if (std.mem.eql(u8, call.name, "bash")) {
-        return execBash(allocator, io, call.id, args.value, workspace);
+    if (std.mem.eql(u8, call.name, "run_program")) {
+        return execRunProgram(allocator, io, call.id, args.value, workspace);
     } else if (std.mem.eql(u8, call.name, "write_file")) {
         return execWriteFile(allocator, io, call.id, args.value, workspace);
     } else if (std.mem.eql(u8, call.name, "read_file")) {
@@ -469,37 +480,72 @@ fn executeTool(
     };
 }
 
-// ── bash tool: std.process.run ──────────────────────────────
+// ── run_program tool: structured argv, no shell ─────────────
+//
+// The agent supplies {executable, args} where `executable` must be on
+// the allowlist (security.allowed_executables) and `args` is an array
+// of literal strings. We invoke std.process.run with argv=[exe, ...args]
+// — never "/bin/sh -c <string>". This makes shell metacharacters inert.
 
-fn execBash(
+fn execRunProgram(
     allocator: std.mem.Allocator,
     io: Io,
     call_id: []const u8,
     args: std.json.Value,
     workspace: []const u8,
 ) !hs.ai.common.ToolResult {
-    const command = getStr(args, "command") orelse {
-        return .{
-            .tool_call_id = try allocator.dupe(u8, call_id),
-            .content = try allocator.dupe(u8, "Error: missing 'command' argument"),
-            .is_error = true,
-            .allocator = allocator,
-        };
+    const exe_name = getStr(args, "executable") orelse {
+        return errorResult(allocator, call_id, "Error: missing 'executable' argument (string)");
     };
 
-    // Validate command against blocklist
-    if (security.validateCommand(command) == null) {
-        return .{
-            .tool_call_id = try allocator.dupe(u8, call_id),
-            .content = try allocator.dupe(u8, "Error: command blocked by security policy"),
-            .is_error = true,
-            .allocator = allocator,
+    _ = security.validateExecutable(exe_name) catch |err| {
+        const msg = switch (err) {
+            error.EmptyExecutable => "Error: 'executable' is empty",
+            error.ExecutableNameTooLong => "Error: 'executable' name exceeds length limit",
+            error.ExecutablePathContainsSlash => "Error: 'executable' must be a bare name (no '/' or '\\\\'). Use the allowlisted name only.",
+            error.ExecutableNullByte => "Error: 'executable' contains a null byte",
+            error.ExecutableNotAllowed => "Error: 'executable' is not on the allowlist. See run_program tool description for the allowed set.",
+            else => "Error: 'executable' failed validation",
         };
+        return errorResult(allocator, call_id, msg);
+    };
+
+    // Extract args: required to be an array of strings.
+    if (args != .object) return errorResult(allocator, call_id, "Error: tool arguments must be a JSON object");
+    const args_field = args.object.get("args") orelse {
+        return errorResult(allocator, call_id, "Error: missing 'args' field (array of strings; use [] for no args)");
+    };
+    if (args_field != .array) {
+        return errorResult(allocator, call_id, "Error: 'args' must be a JSON array of strings");
+    }
+    const json_args = args_field.array.items;
+
+    security.validateArgumentCount(json_args.len) catch {
+        return errorResult(allocator, call_id, "Error: too many arguments");
+    };
+
+    // Build argv = [exe_name, args[0], args[1], ...]
+    var argv: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer argv.deinit(allocator);
+    try argv.append(allocator, exe_name);
+    for (json_args) |arg_val| {
+        if (arg_val != .string) {
+            return errorResult(allocator, call_id, "Error: every entry of 'args' must be a string");
+        }
+        security.validateArgument(arg_val.string) catch |err| {
+            const msg = switch (err) {
+                error.ArgumentNullByte => "Error: argument contains a null byte",
+                error.ArgumentTooLong => "Error: argument exceeds length limit",
+                else => "Error: argument failed validation",
+            };
+            return errorResult(allocator, call_id, msg);
+        };
+        try argv.append(allocator, arg_val.string);
     }
 
-    // Use std.process.run — pure Zig, captures stdout+stderr
+    // No shell. argv is passed directly to execve via std.process.run.
     const result = std.process.run(allocator, io, .{
-        .argv = &.{ "bash", "-c", command },
+        .argv = argv.items,
         .cwd = .{ .path = workspace },
         .stdout_limit = .limited(512 * 1024),
         .stderr_limit = .limited(512 * 1024),
@@ -535,6 +581,19 @@ fn execBash(
         .tool_call_id = try allocator.dupe(u8, call_id),
         .content = content,
         .is_error = exit_code != 0,
+        .allocator = allocator,
+    };
+}
+
+fn errorResult(
+    allocator: std.mem.Allocator,
+    call_id: []const u8,
+    message: []const u8,
+) !hs.ai.common.ToolResult {
+    return .{
+        .tool_call_id = try allocator.dupe(u8, call_id),
+        .content = try allocator.dupe(u8, message),
+        .is_error = true,
         .allocator = allocator,
     };
 }

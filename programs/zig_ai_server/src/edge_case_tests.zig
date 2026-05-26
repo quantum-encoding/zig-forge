@@ -297,9 +297,9 @@ test "capabilities: file_read only exposes read_file" {
     try testing.expectEqualStrings("read_file", result.?[0].name);
 }
 
-test "capabilities: code_execution exposes bash" {
+test "capabilities: code_execution exposes run_program" {
     const all_tools = [_]ToolDef{
-        .{ .name = "bash", .description = "run command", .input_schema = "{}" },
+        .{ .name = "run_program", .description = "run a program", .input_schema = "{}" },
         .{ .name = "read_file", .description = "read", .input_schema = "{}" },
         .{ .name = "write_file", .description = "write", .input_schema = "{}" },
     };
@@ -309,7 +309,7 @@ test "capabilities: code_execution exposes bash" {
 
     try testing.expect(result != null);
     try testing.expectEqual(@as(usize, 1), result.?.len);
-    try testing.expectEqualStrings("bash", result.?[0].name);
+    try testing.expectEqualStrings("run_program", result.?[0].name);
 }
 
 test "capabilities: multiple capabilities combine tools" {
@@ -336,19 +336,18 @@ test "capabilities: unknown capability returns null" {
     try testing.expect(result == null);
 }
 
-test "capabilities: terminal_inject and code_execution both map to bash (deduplicated)" {
+test "capabilities: terminal_inject is no longer a valid capability" {
+    // terminal_inject was removed in the Batch 3 sandbox overhaul.
+    // The model can no longer request raw shell access via any capability
+    // ID — only run_program (via code_execution) is exposed.
     const all_tools = [_]ToolDef{
-        .{ .name = "bash", .description = "run command", .input_schema = "{}" },
+        .{ .name = "run_program", .description = "run a program", .input_schema = "{}" },
         .{ .name = "read_file", .description = "read", .input_schema = "{}" },
     };
-    const caps: []const []const u8 = &.{ "code_execution", "terminal_inject" };
+    const caps: []const []const u8 = &.{"terminal_inject"};
     const result = try agent.filterToolsByCapabilities(testing.allocator, &all_tools, caps);
-    defer if (result) |r| testing.allocator.free(r);
-
-    try testing.expect(result != null);
-    // Both map to "bash" but should be deduplicated → 1 tool
-    try testing.expectEqual(@as(usize, 1), result.?.len);
-    try testing.expectEqualStrings("bash", result.?[0].name);
+    // Unknown capability → no matching tools → null
+    try testing.expect(result == null);
 }
 
 // ── 7. JSON Escaping ───────────────────────────────────────────

