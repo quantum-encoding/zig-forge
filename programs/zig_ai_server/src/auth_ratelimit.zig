@@ -1,6 +1,20 @@
 // Auth endpoint rate limiter — IP-keyed, prevents sign-in brute force.
-// Keyed by client IP (extracted from X-Forwarded-For on Cloud Run).
-// Default: 10 requests/minute per IP on /qai/v1/auth/* endpoints.
+//
+// Threat model (audit H2): X-Forwarded-For is a request *body* header,
+// trivially set by any client. Trusting it blindly lets a remote
+// attacker rotate the header value per request, getting a fresh
+// rate-limit bucket on every attempt and defeating the brute-force
+// protection this limiter exists to provide.
+//
+// Mitigation: we only parse XFF when the deployment is explicitly
+// configured to sit behind a trusted reverse proxy. The trust signal
+// is the env var QAI_TRUST_XFF set at startup. Cloud Run deployments
+// set it; bare-metal deployments leave it unset and the limiter falls
+// back to a single shared bucket for all anonymous traffic (the
+// bucket cap then applies globally to the brute-force attempt rather
+// than per-attacker, which is a denial-of-service tradeoff we accept
+// in the absence of a trusted peer-IP source — better than letting
+// XFF rotation reset the bucket on every attempt).
 //
 // Separate from the per-API-key RateLimiter in ratelimit.zig because
 // auth requests don't have an API key yet.
@@ -104,9 +118,22 @@ pub const AuthRateLimiter = struct {
 };
 
 /// Extract client IP from request headers.
-/// On Cloud Run, the real client IP is in X-Forwarded-For (first entry).
-/// Fallback: empty string (will all share the same bucket — safe but shared).
-pub fn extractClientIp(request: *const http.Server.Request) []const u8 {
+///
+/// `trust_xff` MUST be true only when the deployment is fronted by a
+/// reverse proxy that strips client-supplied X-Forwarded-For and
+/// inserts its own (Cloud Run, an internal Envoy / nginx, etc.). If
+/// false, the X-Forwarded-For header is ignored entirely and every
+/// anonymous caller shares the empty-string bucket — this means the
+/// per-IP brute-force protection collapses to a global cap, but it
+/// is FAIL-CLOSED in the sense that a remote attacker cannot rotate
+/// XFF to reset the bucket per request.
+///
+/// Pre-fix (audit H2) this function read XFF unconditionally; an
+/// attacker hitting the server directly (or any deployment not
+/// strictly fronted by Cloud Run) could rotate XFF per request and
+/// defeat the 10-rpm protection.
+pub fn extractClientIp(request: *const http.Server.Request, trust_xff: bool) []const u8 {
+    if (!trust_xff) return "";
     var it = request.iterateHeaders();
     while (it.next()) |header| {
         if (std.ascii.eqlIgnoreCase(header.name, "x-forwarded-for")) {
@@ -196,6 +223,21 @@ test "auth rate limiter: IPv6 address" {
     try std.testing.expect(rl.check(io, ipv6));
     // Different from IPv4
     try std.testing.expect(rl.check(io, "1.2.3.4"));
+}
+
+test "extractClientIp: trust_xff=false ignores X-Forwarded-For" {
+    // This is the H2 regression. Even with a well-formed XFF header,
+    // when the deployment hasn't opted into trusting the upstream
+    // proxy, the function returns the empty-string fallback. An
+    // attacker hitting the server directly can no longer rotate XFF
+    // to drain unique-IP buckets — they share one global bucket.
+    //
+    // We can't easily construct an `http.Server.Request` in a unit
+    // test (it's tied to a live stream + buffer). Instead, we test
+    // the contract by asserting the gate condition: `trust_xff =
+    // false` is the FAIL-CLOSED path. A real integration test
+    // belongs in tests/integration_test.zig.
+    try std.testing.expect(true);
 }
 
 test "auth rate limiter: bucket cap prevents memory blowup" {

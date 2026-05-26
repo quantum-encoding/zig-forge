@@ -44,12 +44,60 @@ const json_headers: [1]http.Header = .{
     .{ .name = "content-type", .value = "application/json" },
 };
 
-const cors_json_headers: [4]http.Header = .{
-    .{ .name = "content-type", .value = "application/json" },
-    .{ .name = "access-control-allow-origin", .value = "*" },
-    .{ .name = "access-control-allow-methods", .value = "GET, POST, PUT, DELETE, OPTIONS" },
-    .{ .name = "access-control-allow-headers", .value = "Authorization, Content-Type" },
-};
+// ── CORS (audit H1, NEW-4) ───────────────────────────────────────
+//
+// The previous implementation broadcast
+//   access-control-allow-origin: *
+// on every response and advertised `Authorization` in the preflight
+// allow-headers list. Combined with the implicit "anyone with an API
+// key" model that meant any malicious page a user visited could drive
+// qai_k_… requests against the API on the user's behalf (their local
+// CLI / config holds the key; a phishing page just calls fetch() with
+// the key set on the Authorization header — the * + Authorization
+// combo authorises the preflight even though credentials cookies are
+// blocked).
+//
+// New model: explicit Origin allowlist (loaded from env at startup
+// via setCorsAllowedOrigins). On every CORS-eligible response we
+// reflect the request's Origin only if it's in the list, otherwise
+// omit CORS entirely (browsers will block the cross-origin request).
+// OPTIONS preflight returns the full header set with reflected
+// Origin; non-preflight responses get just the reflected Origin +
+// Vary.
+//
+// NEW-4: Authorization is advertised only on preflight for the
+// auth-required paths (everything under /qai/v1/ EXCEPT
+// /qai/v1/auth/*). The auth endpoints take credentials in the
+// request BODY, not the Authorization header — advertising it for
+// those routes was a needless cross-origin attack surface.
+
+/// Returns the request's `Origin` header value if it appears in the
+/// allowlist, otherwise null. The returned slice borrows from the
+/// request's header buffer and is valid until `request.respond()`
+/// returns.
+pub fn matchOrigin(request: *const http.Server.Request) ?[]const u8 {
+    if (cors_allowed_origins.len == 0) return null;
+    var it = request.iterateHeaders();
+    while (it.next()) |header| {
+        if (!std.ascii.eqlIgnoreCase(header.name, "origin")) continue;
+        for (cors_allowed_origins) |allowed| {
+            if (std.mem.eql(u8, allowed, header.value)) return header.value;
+        }
+        return null;
+    }
+    return null;
+}
+
+/// Path classification for CORS preflight: returns true if the path
+/// would, after preflight, send an Authorization header. The auth
+/// handshake (apple/google) does NOT — it uses a JSON body. Health
+/// and root don't either. NEW-4: advertising Authorization on
+/// unauth routes was a needless cross-origin attack surface.
+pub fn pathRequiresAuthorizationHeader(path: []const u8) bool {
+    if (!std.mem.startsWith(u8, path, "/qai/v1/")) return false;
+    if (std.mem.startsWith(u8, path, "/qai/v1/auth/")) return false;
+    return true;
+}
 
 /// Server store — set once at startup
 var server_store: ?*store_mod.Store = null;
@@ -68,6 +116,18 @@ var legacy_api_key: ?[]const u8 = null;
 
 /// Auth endpoint rate limiter — IP-keyed, prevents sign-in brute force
 var server_auth_rl: ?*auth_rl_mod.AuthRateLimiter = null;
+
+/// Trust the `X-Forwarded-For` header from request peers (audit H2).
+/// Set only when the deployment is fronted by Cloud Run / an internal
+/// reverse proxy that strips client-supplied XFF and re-inserts its
+/// own. Default false → IP rate-limiting falls back to a single
+/// shared bucket for all anonymous traffic.
+var trust_xff: bool = false;
+
+/// CORS allowlist (audit H1 + NEW-4). Origin reflection: a request's
+/// Origin header is echoed only if it appears in this slice. Empty
+/// slice (the default) disables CORS entirely.
+var cors_allowed_origins: []const []const u8 = &.{};
 
 pub fn setStore(store: *store_mod.Store) void {
     server_store = store;
@@ -93,6 +153,21 @@ pub fn setAuthRateLimiter(rl: *auth_rl_mod.AuthRateLimiter) void {
     server_auth_rl = rl;
 }
 
+/// Enable trust of X-Forwarded-For. Only call this when the
+/// deployment is behind a known reverse proxy (Cloud Run / internal
+/// nginx). See auth_ratelimit.zig for the threat model.
+pub fn setTrustXff(trust: bool) void {
+    trust_xff = trust;
+}
+
+/// Install the CORS Origin allowlist (audit H1). The slice is
+/// borrowed — callers must keep it alive for the process lifetime
+/// (in practice the env-parsed list is parked in main.zig's
+/// long-lived allocator).
+pub fn setCorsAllowedOrigins(origins: []const []const u8) void {
+    cors_allowed_origins = origins;
+}
+
 pub fn dispatch(
     request: *http.Server.Request,
     allocator: std.mem.Allocator,
@@ -103,9 +178,15 @@ pub fn dispatch(
     const method = request.head.method;
     const path = if (std.mem.indexOfScalar(u8, target, '?')) |i| target[0..i] else target;
 
-    // OPTIONS preflight — no auth
+    // OPTIONS preflight — no auth. The response body is empty; CORS
+    // headers (origin reflection + method/header allowlists) are
+    // attached at the response-builder site in main.zig where the
+    // per-request header buffer lives. dispatch returns just the
+    // status; main.zig sees `method == .OPTIONS` and fills in the
+    // preflight set, including a path-conditional Allow-Headers
+    // that omits Authorization on unauth routes (NEW-4).
     if (method == .OPTIONS) {
-        return .{ .status = .no_content, .body = "", .headers = &cors_json_headers };
+        return .{ .status = .no_content, .body = "" };
     }
 
     // Health — no auth
@@ -125,7 +206,7 @@ pub fn dispatch(
 
         // Rate limit by client IP
         if (server_auth_rl) |rl| {
-            const client_ip = auth_rl_mod.extractClientIp(request);
+            const client_ip = auth_rl_mod.extractClientIp(request, trust_xff);
             if (!rl.check(io, client_ip)) {
                 return .{
                     .status = .too_many_requests,

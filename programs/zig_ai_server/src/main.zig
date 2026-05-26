@@ -162,6 +162,34 @@ pub fn main(init: std.process.Init) !void {
         router.setGcpContext(ctx);
     }
 
+    // ── Network trust boundaries (audit H1, H2, NEW-4) ─────────
+    // QAI_TRUST_XFF=true: deployment is fronted by a reverse proxy
+    // that strips client-supplied X-Forwarded-For. Required for the
+    // per-IP auth rate-limiter to work on Cloud Run.
+    if (environ_map.get("QAI_TRUST_XFF")) |val| {
+        if (std.mem.eql(u8, val, "1") or std.ascii.eqlIgnoreCase(val, "true")) {
+            router.setTrustXff(true);
+            std.debug.print("  Network: trusting X-Forwarded-For (deployment is behind a known reverse proxy)\n", .{});
+        }
+    }
+
+    // QAI_CORS_ORIGINS=comma,separated,list — explicit allowlist for
+    // browser cross-origin requests. Default empty → CORS off, all
+    // browser cross-origin calls blocked.
+    var cors_origins_storage: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer cors_origins_storage.deinit(allocator);
+    if (environ_map.get("QAI_CORS_ORIGINS")) |raw| {
+        var it = std.mem.splitScalar(u8, raw, ',');
+        while (it.next()) |entry| {
+            const trimmed = std.mem.trim(u8, entry, " \t");
+            if (trimmed.len > 0) cors_origins_storage.append(allocator, trimmed) catch break;
+        }
+        if (cors_origins_storage.items.len > 0) {
+            router.setCorsAllowedOrigins(cors_origins_storage.items);
+            std.debug.print("  CORS: {d} origin(s) allowlisted\n", .{cors_origins_storage.items.len});
+        }
+    }
+
     // Init Vertex dedicated endpoint registry
     const vertex_mod = @import("vertex.zig");
     vertex_mod.initRegistry(allocator, if (gcp_ctx) |*ctx| ctx else null);
@@ -356,11 +384,21 @@ fn handleConnection(ctx: *ConnCtx) void {
         else
             request.head.keep_alive;
 
-        // Build response headers: original + request ID + CORS
-        var resp_headers: [8]http.Header = undefined;
+        // Build response headers: original + request ID + (conditional) CORS.
+        // CORS rules (audit H1, NEW-4):
+        //   - No wildcard. The request's Origin is reflected only if
+        //     it appears in router.cors_allowed_origins (populated from
+        //     env at startup).
+        //   - Preflight (OPTIONS) gets the full method/header allowlist;
+        //     Authorization is advertised only on auth-required paths.
+        //   - Non-preflight responses get just the reflected origin +
+        //     Vary: Origin.
+        //   - Unmatched origin → no CORS headers at all; browsers will
+        //     block the cross-origin call.
+        var resp_headers: [10]http.Header = undefined;
         var header_count: usize = 0;
 
-        // Copy original headers
+        // Copy original headers from the handler result.
         for (result.headers) |h| {
             if (header_count < resp_headers.len) {
                 resp_headers[header_count] = h;
@@ -374,10 +412,39 @@ fn handleConnection(ctx: *ConnCtx) void {
             header_count += 1;
         }
 
-        // Add CORS (on all responses, not just OPTIONS)
-        if (header_count < resp_headers.len) {
-            resp_headers[header_count] = .{ .name = "access-control-allow-origin", .value = "*" };
-            header_count += 1;
+        // CORS — only when the request's Origin is allowlisted.
+        if (router.matchOrigin(&request)) |origin| {
+            const is_preflight = request.head.method == .OPTIONS;
+
+            if (header_count < resp_headers.len) {
+                resp_headers[header_count] = .{ .name = "access-control-allow-origin", .value = origin };
+                header_count += 1;
+            }
+            if (header_count < resp_headers.len) {
+                resp_headers[header_count] = .{ .name = "vary", .value = "Origin" };
+                header_count += 1;
+            }
+            if (is_preflight) {
+                if (header_count < resp_headers.len) {
+                    resp_headers[header_count] = .{
+                        .name = "access-control-allow-methods",
+                        .value = "GET, POST, PUT, DELETE, OPTIONS",
+                    };
+                    header_count += 1;
+                }
+                if (header_count < resp_headers.len) {
+                    const target = request.head.target;
+                    const path = if (std.mem.indexOfScalar(u8, target, '?')) |i| target[0..i] else target;
+                    resp_headers[header_count] = .{
+                        .name = "access-control-allow-headers",
+                        .value = if (router.pathRequiresAuthorizationHeader(path))
+                            "Authorization, Content-Type, X-API-Key"
+                        else
+                            "Content-Type",
+                    };
+                    header_count += 1;
+                }
+            }
         }
 
         // Send response
