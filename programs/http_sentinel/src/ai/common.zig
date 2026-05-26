@@ -837,6 +837,114 @@ pub fn generateId(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
     return try std.fmt.allocPrint(allocator, "{x:0>32}", .{std.mem.readInt(u128, &uuid_bytes, .big)});
 }
 
+// ============================================================================
+// URL-component validators (CWE-918 SSRF / token-exfil defense)
+// ============================================================================
+//
+// Background: every provider in this library builds outbound URLs by
+// interpolating caller-controlled strings (model name, GCP project_id,
+// GCP location, etc.) into a fixed format string. If any of these
+// strings contains `/`, `?`, `#`, `@`, `:` or whitespace the resulting
+// URL changes structurally and the request, including its
+// `Authorization: Bearer <token>` header, can be redirected to an
+// attacker-controlled host. These validators are applied at the
+// trust boundary (client init / per-request) so the rest of the code
+// can format URLs without re-checking.
+//
+// Policy: deny-by-default. The allowed set for each kind of component
+// is the smallest one that doesn't break legitimate provider usage.
+
+/// Hardcoded set of known Google Cloud regions where Vertex AI is
+/// available. Used to constrain the `location` field of
+/// VertexClient.Config — even if an attacker reaches `location`, they
+/// can only pick from this list, never inject a hostile hostname.
+///
+/// Source: https://cloud.google.com/vertex-ai/docs/general/locations
+/// Last verified: 2026-05. Add new regions here when GCP launches
+/// them; do not relax the membership check.
+pub const ALLOWED_GCP_REGIONS = [_][]const u8{
+    "global",
+    // Americas
+    "us-central1",       "us-east1",          "us-east4",
+    "us-east5",          "us-south1",         "us-west1",
+    "us-west2",          "us-west3",          "us-west4",
+    "northamerica-northeast1", "northamerica-northeast2",
+    "southamerica-east1", "southamerica-west1",
+    // Europe
+    "europe-west1",      "europe-west2",      "europe-west3",
+    "europe-west4",      "europe-west6",      "europe-west8",
+    "europe-west9",      "europe-west12",     "europe-central2",
+    "europe-north1",     "europe-southwest1",
+    // Asia / Middle East
+    "asia-east1",        "asia-east2",        "asia-northeast1",
+    "asia-northeast2",   "asia-northeast3",   "asia-south1",
+    "asia-south2",       "asia-southeast1",   "asia-southeast2",
+    "me-central1",       "me-central2",       "me-west1",
+    // Australia / Africa
+    "australia-southeast1", "australia-southeast2",
+    "africa-south1",
+};
+
+/// Validate a GCP region against the allowlist above. Rejects anything
+/// not on the list — including any string containing `/`, `?`, `#`, `@`,
+/// `:` or other URL-structural characters, by virtue of those never
+/// appearing in a region name.
+pub fn validateGcpLocation(location: []const u8) AIError!void {
+    for (ALLOWED_GCP_REGIONS) |allowed| {
+        if (std.mem.eql(u8, location, allowed)) return;
+    }
+    return AIError.InvalidRequest;
+}
+
+/// Validate a GCP project ID. Per
+/// https://cloud.google.com/resource-manager/docs/creating-managing-projects:
+///   "must be 6 to 30 lowercase letters, digits, or hyphens. It must
+///    start with a letter."
+/// We accept that exact shape and nothing else; in particular, no `/`,
+/// `?`, `#`, `@`, `:` or `.`.
+pub fn validateGcpProjectId(project_id: []const u8) AIError!void {
+    if (project_id.len < 6 or project_id.len > 30) return AIError.InvalidRequest;
+    if (!std.ascii.isLower(project_id[0])) return AIError.InvalidRequest;
+    for (project_id) |c| {
+        const ok = (c >= 'a' and c <= 'z') or
+            (c >= '0' and c <= '9') or
+            c == '-';
+        if (!ok) return AIError.InvalidRequest;
+    }
+    // Must not end with hyphen.
+    if (project_id[project_id.len - 1] == '-') return AIError.InvalidRequest;
+}
+
+/// Validate a model identifier before interpolating it into a URL path.
+/// Provider model names use:
+///   * lower/upper letters
+///   * digits
+///   * `-`, `_`, `.` (e.g. "claude-sonnet-4-6", "gpt-5.2", "deepseek_v3")
+///   * `/` is permitted for the publisher-prefixed Vertex MaaS form
+///     ("deepseek-ai/deepseek-v3.2-maas") — but only ONE slash, never
+///     adjacent, never leading or trailing. That keeps the model from
+///     being able to inject extra URL path segments.
+/// Rejects `?`, `#`, `@`, `:`, whitespace and any control character.
+pub fn validateModelName(model: []const u8) AIError!void {
+    if (model.len == 0 or model.len > 128) return AIError.InvalidModel;
+    var slash_count: usize = 0;
+    var prev: u8 = 0;
+    for (model, 0..) |c, i| {
+        const is_alnum = (c >= 'a' and c <= 'z') or
+            (c >= 'A' and c <= 'Z') or
+            (c >= '0' and c <= '9');
+        const ok = is_alnum or c == '-' or c == '_' or c == '.' or c == '/';
+        if (!ok) return AIError.InvalidModel;
+        if (c == '/') {
+            slash_count += 1;
+            if (slash_count > 1) return AIError.InvalidModel;
+            if (i == 0 or i == model.len - 1) return AIError.InvalidModel;
+            if (prev == '/') return AIError.InvalidModel;
+        }
+        prev = c;
+    }
+}
+
 /// Utility: Escape JSON string
 pub fn escapeJsonString(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     var result: std.ArrayList(u8) = .empty;
@@ -934,6 +1042,83 @@ test "UsageStats.total" {
     };
 
     try std.testing.expectEqual(@as(u32, 150), stats.total());
+}
+
+test "validateGcpLocation: known regions accepted, hostile strings rejected" {
+    try validateGcpLocation("us-central1");
+    try validateGcpLocation("europe-west4");
+    try validateGcpLocation("global");
+    try std.testing.expectError(error.InvalidRequest, validateGcpLocation(""));
+    // SSRF / URL-injection attempts
+    try std.testing.expectError(error.InvalidRequest, validateGcpLocation("evil.com"));
+    try std.testing.expectError(error.InvalidRequest, validateGcpLocation("evil.com#"));
+    try std.testing.expectError(error.InvalidRequest, validateGcpLocation("us-central1.evil.com"));
+    try std.testing.expectError(error.InvalidRequest, validateGcpLocation("us-central1/path"));
+    try std.testing.expectError(error.InvalidRequest, validateGcpLocation("us-central1?key=x"));
+    try std.testing.expectError(error.InvalidRequest, validateGcpLocation("us-central1@host"));
+    try std.testing.expectError(error.InvalidRequest, validateGcpLocation("us-central1:8080"));
+    try std.testing.expectError(error.InvalidRequest, validateGcpLocation("us-east99"));
+}
+
+test "validateGcpProjectId: legitimate IDs accepted" {
+    try validateGcpProjectId("my-project-123");
+    try validateGcpProjectId("acme12");      // boundary: 6 chars
+    try validateGcpProjectId("project-foo-bar");
+}
+
+test "validateGcpProjectId: rejects short, long, illegal chars" {
+    // Too short / too long
+    try std.testing.expectError(error.InvalidRequest, validateGcpProjectId(""));
+    try std.testing.expectError(error.InvalidRequest, validateGcpProjectId("abc12")); // 5
+    try std.testing.expectError(error.InvalidRequest, validateGcpProjectId("a" ** 31));
+    // Starts with non-letter
+    try std.testing.expectError(error.InvalidRequest, validateGcpProjectId("1abcdef"));
+    try std.testing.expectError(error.InvalidRequest, validateGcpProjectId("-abcdef"));
+    // Uppercase / illegal chars (URL-structural)
+    try std.testing.expectError(error.InvalidRequest, validateGcpProjectId("Acme-1"));
+    try std.testing.expectError(error.InvalidRequest, validateGcpProjectId("acme/evil"));
+    try std.testing.expectError(error.InvalidRequest, validateGcpProjectId("acme.evil"));
+    try std.testing.expectError(error.InvalidRequest, validateGcpProjectId("acme?key"));
+    try std.testing.expectError(error.InvalidRequest, validateGcpProjectId("acme@host"));
+    // Trailing hyphen
+    try std.testing.expectError(error.InvalidRequest, validateGcpProjectId("acme1-"));
+    // Valid: 6-30 lowercase letters, digits, hyphens, starts with letter,
+    // doesn't end with hyphen
+    try validateGcpProjectId("my-proj");        // 7
+    try validateGcpProjectId("abcdef");         // 6
+    try validateGcpProjectId("a" ** 30);        // 30
+}
+
+test "validateModelName: legitimate names accepted" {
+    try validateModelName("claude-sonnet-4-6");
+    try validateModelName("claude-opus-4-7");
+    try validateModelName("gpt-5.2");
+    try validateModelName("gemini-2.5-pro");
+    try validateModelName("gemini-3-pro-preview");
+    try validateModelName("deepseek-chat");
+    try validateModelName("deepseek-ai/deepseek-v3.2-maas"); // publisher/model
+    try validateModelName("zai-org/glm-5-maas");
+    try validateModelName("mistral-medium-3");
+    try validateModelName("a");
+}
+
+test "validateModelName: URL-injection attempts rejected" {
+    try std.testing.expectError(error.InvalidModel, validateModelName(""));
+    try std.testing.expectError(error.InvalidModel, validateModelName("a" ** 129));
+    // URL structural chars
+    try std.testing.expectError(error.InvalidModel, validateModelName("model?key=x"));
+    try std.testing.expectError(error.InvalidModel, validateModelName("model#frag"));
+    try std.testing.expectError(error.InvalidModel, validateModelName("model@host"));
+    try std.testing.expectError(error.InvalidModel, validateModelName("model:1234"));
+    try std.testing.expectError(error.InvalidModel, validateModelName("model with space"));
+    try std.testing.expectError(error.InvalidModel, validateModelName("model\nname"));
+    // Path-segment smuggling
+    try std.testing.expectError(error.InvalidModel, validateModelName("/leading-slash"));
+    try std.testing.expectError(error.InvalidModel, validateModelName("trailing/"));
+    try std.testing.expectError(error.InvalidModel, validateModelName("a//b"));
+    try std.testing.expectError(error.InvalidModel, validateModelName("a/b/c")); // only one slash
+    // Percent-encoded smuggling reads as literal '%' which isn't in the allowed set
+    try std.testing.expectError(error.InvalidModel, validateModelName("model%2F../admin"));
 }
 
 test "UsageStats.estimateCost" {

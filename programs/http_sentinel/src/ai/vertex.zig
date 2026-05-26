@@ -86,23 +86,17 @@ pub const VertexClient = struct {
         location: []const u8 = DEFAULT_LOCATION,
     };
 
-    /// Reject any byte that could escape the URL host/path component
-    /// (CWE-918 — protects against `location = "evil.com#"` style host
-    /// injection that would exfiltrate the OAuth bearer token).
-    fn validateUrlComponent(s: []const u8) !void {
-        if (s.len == 0) return error.InvalidConfig;
-        for (s) |c| {
-            const ok = (c >= 'a' and c <= 'z') or
-                (c >= 'A' and c <= 'Z') or
-                (c >= '0' and c <= '9') or
-                c == '-' or c == '_' or c == '.';
-            if (!ok) return error.InvalidConfig;
-        }
-    }
-
+    /// Defense against CWE-918 host injection. Replaces the prior
+    /// character-class filter (which let `.` through and would have
+    /// allowed `location = "evil.com"` to pass) with a strict
+    /// allowlist of known GCP regions for `location`, and the GCP
+    /// project-id shape (lowercase + digits + hyphen, 6-30 chars,
+    /// must start with a letter) for `project_id`. Both helpers live
+    /// in common.zig so the gemini.zig and audio/google_tts.zig
+    /// clients can apply the same checks.
     pub fn init(allocator: std.mem.Allocator, config: Config) !VertexClient {
-        try validateUrlComponent(config.project_id);
-        try validateUrlComponent(config.location);
+        try common.validateGcpProjectId(config.project_id);
+        try common.validateGcpLocation(config.location);
         return .{
             .http_client = try HttpClient.init(allocator),
             .project_id = config.project_id,
@@ -529,6 +523,10 @@ pub const VertexClient = struct {
         access_token: []const u8,
         payload: []const u8,
     ) ![]u8 {
+        // Model name is caller-controlled and lands in the URL path.
+        // Validate before interpolation — see common.validateModelName.
+        try common.validateModelName(model);
+
         const route = routeModel(model);
         const endpoint = switch (route) {
             .gemini => try std.fmt.allocPrint(

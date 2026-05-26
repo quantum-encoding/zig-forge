@@ -151,15 +151,20 @@ pub const GoogleTTSClient = struct {
     }
 
     fn makeRequest(self: *GoogleTTSClient, model: types.GoogleTTSModel, payload: []const u8) ![]u8 {
+        // Model is an enum so the URL path is compile-time safe.
+        // API key travels in the x-goog-api-key header — never the URL
+        // query string. Query-string keys leak to proxy logs, server
+        // access logs, and any debug print of the endpoint.
         const endpoint = try std.fmt.allocPrint(
             self.allocator,
-            "{s}/{s}:generateContent?key={s}",
-            .{ GOOGLE_API_BASE, model.toString(), self.api_key },
+            "{s}/{s}:generateContent",
+            .{ GOOGLE_API_BASE, model.toString() },
         );
         defer self.allocator.free(endpoint);
 
         const headers = [_]std.http.Header{
             .{ .name = "Content-Type", .value = "application/json" },
+            .{ .name = "x-goog-api-key", .value = self.api_key },
         };
 
         var response = try self.http_client.post(endpoint, &headers, payload);

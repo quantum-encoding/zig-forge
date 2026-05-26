@@ -72,6 +72,22 @@ pub const GeminiClient = struct {
         self.http_client.deinit();
     }
 
+    /// Build the standard `[Content-Type, x-goog-api-key]` header pair
+    /// used by every Gemini REST endpoint. The api_key never enters
+    /// the URL — query-string keys leak to:
+    ///   * any forward / reverse proxy logging request lines
+    ///   * the TLS SNI / Host record on every probe
+    ///   * `std.debug.print` of `endpoint` strings
+    ///   * server-side access logs that don't strip query strings
+    /// `x-goog-api-key` is documented by Google as the supported header
+    /// for the generativelanguage / Vertex public surface.
+    inline fn jsonAuthHeaders(self: *const GeminiClient) [2]std.http.Header {
+        return .{
+            .{ .name = "Content-Type", .value = "application/json" },
+            .{ .name = "x-goog-api-key", .value = self.api_key },
+        };
+    }
+
     /// Send a single message
     pub fn sendMessage(
         self: *GeminiClient,
@@ -120,16 +136,17 @@ pub const GeminiClient = struct {
 
         try payload.appendSlice(self.allocator, "}");
 
-        // Streaming endpoint: streamGenerateContent with alt=sse
+        // Streaming endpoint: streamGenerateContent with alt=sse.
+        // Model is caller-controlled and lands in the URL path — validate
+        // before interpolation (see common.validateModelName).
+        try common.validateModelName(config.model);
         const endpoint = try std.fmt.allocPrint(self.allocator,
-            "{s}/models/{s}:streamGenerateContent?key={s}&alt=sse",
-            .{ self.base_url, config.model, self.api_key },
+            "{s}/models/{s}:streamGenerateContent?alt=sse",
+            .{ self.base_url, config.model },
         );
         defer self.allocator.free(endpoint);
 
-        const headers = [_]std.http.Header{
-            .{ .name = "Content-Type", .value = "application/json" },
-        };
+        const headers = self.jsonAuthHeaders();
 
         var stream = try self.http_client.postStreaming(endpoint, &headers, payload.items);
         defer stream.deinit();
@@ -223,15 +240,14 @@ pub const GeminiClient = struct {
 
         try payload.appendSlice(self.allocator, "}");
 
+        try common.validateModelName(config.model);
         const endpoint = try std.fmt.allocPrint(self.allocator,
-            "{s}/models/{s}:streamGenerateContent?key={s}&alt=sse",
-            .{ self.base_url, config.model, self.api_key },
+            "{s}/models/{s}:streamGenerateContent?alt=sse",
+            .{ self.base_url, config.model },
         );
         defer self.allocator.free(endpoint);
 
-        const headers = [_]std.http.Header{
-            .{ .name = "Content-Type", .value = "application/json" },
-        };
+        const headers = self.jsonAuthHeaders();
 
         var stream = try self.http_client.postStreaming(endpoint, &headers, payload.items);
         defer stream.deinit();
@@ -440,15 +456,14 @@ pub const GeminiClient = struct {
 
         try payload.appendSlice(self.allocator, "}");
 
+        try common.validateModelName(config.model);
         const endpoint = try std.fmt.allocPrint(self.allocator,
-            "{s}/models/{s}:streamGenerateContent?key={s}&alt=sse",
-            .{ self.base_url, config.model, self.api_key },
+            "{s}/models/{s}:streamGenerateContent?alt=sse",
+            .{ self.base_url, config.model },
         );
         defer self.allocator.free(endpoint);
 
-        const headers = [_]std.http.Header{
-            .{ .name = "Content-Type", .value = "application/json" },
-        };
+        const headers = self.jsonAuthHeaders();
 
         var ev_ctx = EventCtx{
             .gpa = self.allocator,
@@ -820,16 +835,15 @@ pub const GeminiClient = struct {
     }
 
     fn makeRequest(self: *GeminiClient, model: []const u8, payload: []const u8) ![]u8 {
+        try common.validateModelName(model);
         const endpoint = try std.fmt.allocPrint(
             self.allocator,
-            "{s}/models/{s}:generateContent?key={s}",
-            .{ self.base_url, model, self.api_key },
+            "{s}/models/{s}:generateContent",
+            .{ self.base_url, model },
         );
         defer self.allocator.free(endpoint);
 
-        const headers = [_]std.http.Header{
-            .{ .name = "Content-Type", .value = "application/json" },
-        };
+        const headers = self.jsonAuthHeaders();
 
         var response = try self.http_client.post(endpoint, &headers, payload);
         defer response.deinit();
@@ -945,13 +959,36 @@ pub const GeminiClient = struct {
 
     const UPLOAD_BASE = "https://generativelanguage.googleapis.com/upload/v1beta/files";
 
+    /// Validate a Files API resource name (e.g. "files/abc123") before
+    /// interpolating it into a URL path. The Gemini Files API uses
+    /// names with exactly one `/`: "files/<id>". We accept that shape
+    /// and reject anything containing `?`, `#`, `@`, `:`, control
+    /// characters, or extra path segments — same URL-injection class
+    /// as `validateModelName` in common.zig.
+    fn validateFileResourceName(name: []const u8) !void {
+        if (name.len == 0 or name.len > 256) return common.AIError.InvalidRequest;
+        var slashes: usize = 0;
+        for (name, 0..) |c, i| {
+            const is_alnum = (c >= 'a' and c <= 'z') or
+                (c >= 'A' and c <= 'Z') or
+                (c >= '0' and c <= '9');
+            const ok = is_alnum or c == '-' or c == '_' or c == '.' or c == '/';
+            if (!ok) return common.AIError.InvalidRequest;
+            if (c == '/') {
+                slashes += 1;
+                if (slashes > 1) return common.AIError.InvalidRequest;
+                if (i == 0 or i == name.len - 1) return common.AIError.InvalidRequest;
+            }
+        }
+    }
+
     /// Upload a file via the Gemini Files API (resumable protocol).
     /// Returns the file_uri on success (caller owns the string).
     /// Supports PDFs, videos, images, audio, text — up to 2GB (free) or 20GB (paid).
     pub fn uploadFile(self: *GeminiClient, file_data: []const u8, filename: []const u8, mime_type: []const u8) ![]u8 {
-        // Step 1: Start resumable upload — get upload URL from response header
-        const start_url = try std.fmt.allocPrint(self.allocator, "{s}?key={s}", .{ UPLOAD_BASE, self.api_key });
-        defer self.allocator.free(start_url);
+        // Step 1: Start resumable upload — get upload URL from response header.
+        // API key travels in the x-goog-api-key header, not the URL.
+        const start_url = UPLOAD_BASE;
 
         const num_bytes_str = try std.fmt.allocPrint(self.allocator, "{d}", .{file_data.len});
         defer self.allocator.free(num_bytes_str);
@@ -970,6 +1007,7 @@ pub const GeminiClient = struct {
             .{ .name = "X-Goog-Upload-Header-Content-Length", .value = num_bytes_str },
             .{ .name = "X-Goog-Upload-Header-Content-Type", .value = mime_type },
             .{ .name = "Content-Type", .value = "application/json" },
+            .{ .name = "x-goog-api-key", .value = self.api_key },
         };
 
         var start_resp = try self.http_client.postExtractHeader(
@@ -986,11 +1024,14 @@ pub const GeminiClient = struct {
 
         const upload_url = start_resp.header_value orelse return common.AIError.ApiRequestFailed;
 
-        // Step 2: Upload the actual bytes
+        // Step 2: Upload the actual bytes. The upload_url is supplied by
+        // Google and may or may not need the api-key header; pass it
+        // along for consistency with the rest of the client.
         const upload_headers = [_]std.http.Header{
             .{ .name = "Content-Length", .value = num_bytes_str },
             .{ .name = "X-Goog-Upload-Offset", .value = "0" },
             .{ .name = "X-Goog-Upload-Command", .value = "upload, finalize" },
+            .{ .name = "x-goog-api-key", .value = self.api_key },
         };
 
         var upload_resp = try self.http_client.postWithOptions(
@@ -1048,15 +1089,14 @@ pub const GeminiClient = struct {
     /// Get file status/metadata. Returns JSON response body (caller owns).
     /// Use to poll for PROCESSING → ACTIVE state after video upload.
     pub fn getFileStatus(self: *GeminiClient, file_name: []const u8) ![]u8 {
+        try validateFileResourceName(file_name);
         const url = try std.fmt.allocPrint(self.allocator,
-            "{s}/{s}?key={s}",
-            .{ self.base_url, file_name, self.api_key },
+            "{s}/{s}",
+            .{ self.base_url, file_name },
         );
         defer self.allocator.free(url);
 
-        const headers = [_]std.http.Header{
-            .{ .name = "Content-Type", .value = "application/json" },
-        };
+        const headers = self.jsonAuthHeaders();
 
         var response = try self.http_client.get(url, &headers);
         defer response.deinit();
@@ -1108,14 +1148,12 @@ pub const GeminiClient = struct {
     /// List all uploaded files. Returns JSON response body (caller owns).
     pub fn listFiles(self: *GeminiClient) ![]u8 {
         const url = try std.fmt.allocPrint(self.allocator,
-            "{s}/files?key={s}",
-            .{ self.base_url, self.api_key },
+            "{s}/files",
+            .{self.base_url},
         );
         defer self.allocator.free(url);
 
-        const headers = [_]std.http.Header{
-            .{ .name = "Content-Type", .value = "application/json" },
-        };
+        const headers = self.jsonAuthHeaders();
 
         var response = try self.http_client.get(url, &headers);
         defer response.deinit();
@@ -1129,15 +1167,14 @@ pub const GeminiClient = struct {
 
     /// Delete an uploaded file by name (e.g., "files/abc123").
     pub fn deleteFile(self: *GeminiClient, file_name: []const u8) !void {
+        try validateFileResourceName(file_name);
         const url = try std.fmt.allocPrint(self.allocator,
-            "{s}/{s}?key={s}",
-            .{ self.base_url, file_name, self.api_key },
+            "{s}/{s}",
+            .{ self.base_url, file_name },
         );
         defer self.allocator.free(url);
 
-        const headers = [_]std.http.Header{
-            .{ .name = "Content-Type", .value = "application/json" },
-        };
+        const headers = self.jsonAuthHeaders();
 
         var response = try self.http_client.delete(url, &headers);
         defer response.deinit();
@@ -1191,17 +1228,16 @@ pub const GeminiClient = struct {
 
         try payload.appendSlice(self.allocator, "}");
 
-        // POST to embedContent endpoint
+        // POST to embedContent endpoint. EMBEDDING_MODEL is a
+        // compile-time constant so no validateModelName needed.
         const endpoint = try std.fmt.allocPrint(
             self.allocator,
-            "{s}/models/{s}:embedContent?key={s}",
-            .{ self.base_url, EMBEDDING_MODEL, self.api_key },
+            "{s}/models/{s}:embedContent",
+            .{ self.base_url, EMBEDDING_MODEL },
         );
         defer self.allocator.free(endpoint);
 
-        const headers = [_]std.http.Header{
-            .{ .name = "Content-Type", .value = "application/json" },
-        };
+        const headers = self.jsonAuthHeaders();
 
         var response = try self.http_client.post(endpoint, &headers, payload.items);
         defer response.deinit();
