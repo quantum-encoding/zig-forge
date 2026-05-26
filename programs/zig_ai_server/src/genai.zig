@@ -105,11 +105,14 @@ pub fn handleParsed(
             billing.commit(s, io_handle, rid, req.model, resp.input_tokens, resp.output_tokens, tier);
 
             if (ledger) |l| {
-                const bill = billing.actualCost(req.model, resp.input_tokens, resp.output_tokens, tier);
-                l.recordBilling(io_handle, if (auth) |a| a.account.id.slice() else "anonymous",
-                    if (auth) |a| a.key.prefix.slice() else "none", bill.cost, bill.margin,
-                    if (auth) |a| a.account.balance_ticks else 0,
-                    "/qai/v1/chat", req.model, resp.input_tokens, resp.output_tokens, 0);
+                // H10: skip the row rather than ledger a guessed
+                // price if the model isn't in the pricing registry.
+                if (billing.actualCost(req.model, resp.input_tokens, resp.output_tokens, tier)) |bill| {
+                    l.recordBilling(io_handle, if (auth) |a| a.account.id.slice() else "anonymous",
+                        if (auth) |a| a.key.prefix.slice() else "none", bill.cost, bill.margin,
+                        if (auth) |a| a.account.balance_ticks else 0,
+                        "/qai/v1/chat", req.model, resp.input_tokens, resp.output_tokens, 0);
+                } else |_| {}
             }
         };
         return .{ .body = resp.json };

@@ -165,22 +165,22 @@ pub const Ledger = struct {
     }
 };
 
-/// Append a line to a JSONL file (read + append + write).
-/// At our scale this is fine. For high volume, use a buffered writer.
+/// Append a line to a JSONL file.
+///
+/// Audit M2: open with `createFile(.truncate=false)` and write the new
+/// line at end-of-file. The previous implementation read the entire
+/// JSONL into memory and rewrote the whole file on every append, which
+/// turned the billing/audit log into an O(N) write per request — the
+/// 10,000th billed call would cost as much disk I/O as the first
+/// 10,000 combined. Both ledger.jsonl and audit.jsonl grow unbounded,
+/// so this is the worst place to do read-modify-write.
 fn appendToFile(allocator: std.mem.Allocator, io: Io, path: []const u8, line: []const u8) void {
-    // Read existing content
-    const existing = Dir.cwd().readFileAlloc(io, path, allocator, .unlimited) catch "";
-    defer if (existing.len > 0) allocator.free(existing);
+    _ = allocator;
+    if (line.len == 0) return;
 
-    // Append line
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer buf.deinit(allocator);
-    buf.appendSlice(allocator, existing) catch return;
-    buf.appendSlice(allocator, line) catch return;
+    var file = Dir.cwd().createFile(io, path, .{ .truncate = false }) catch return;
+    defer file.close(io);
 
-    // Write back
-    Dir.cwd().writeFile(io, .{
-        .sub_path = path,
-        .data = buf.items,
-    }) catch {};
+    const end = file.length(io) catch return;
+    file.writePositionalAll(io, line, end) catch {};
 }

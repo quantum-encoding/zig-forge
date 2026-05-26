@@ -19,6 +19,15 @@ pub const WalWriter = struct {
 
     /// Append a WAL entry. Writes op + payload_len + CRC32 + payload.
     /// Uses std.Io for file operations.
+    ///
+    /// Audit H4: open with `createFile(.truncate=false)` so the file is
+    /// created if absent, otherwise re-opened in write mode without
+    /// dropping its contents. The new entry is written at the current
+    /// end-of-file via `writePositionalAll(len)` — no read of the
+    /// existing WAL into memory. The previous implementation read the
+    /// entire WAL, appended bytes in a heap buffer, and wrote it back
+    /// in full, which is O(file_size) per append and turns a hot
+    /// billing path into a disk-I/O DoS as the WAL grows.
     pub fn append(self: *WalWriter, io: Io, op: types.WalOp, payload: []const u8) !void {
         // Guard against payloads > 4GB (u32 length field)
         if (payload.len > std.math.maxInt(u32)) return error.PayloadTooLarge;
@@ -30,26 +39,18 @@ pub const WalWriter = struct {
         const crc = std.hash.Crc32.hash(payload);
         std.mem.writeInt(u32, header[5..9], crc, .little);
 
-        // Read existing WAL content, append new entry, write back
-        // (At our scale of ~100 accounts this is fine. For larger scale,
-        // use a proper append-mode file handle.)
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
-        defer buf.deinit(self.allocator);
+        var file = try Dir.cwd().createFile(io, self.file_path, .{ .truncate = false });
+        defer file.close(io);
 
-        const existing = Dir.cwd().readFileAlloc(io, self.file_path, self.allocator, .unlimited) catch "";
-        if (existing.len > 0) {
-            defer self.allocator.free(existing);
-            try buf.appendSlice(self.allocator, existing);
+        const end = try file.length(io);
+        // Write header then payload at the file's end. We do two
+        // positional writes (rather than splatting through writer
+        // buffers) so we never allocate a heap copy of the WAL or the
+        // entry. Header + payload are < 4GB by the guard above.
+        try file.writePositionalAll(io, &header, end);
+        if (payload.len > 0) {
+            try file.writePositionalAll(io, payload, end + header.len);
         }
-        try buf.appendSlice(self.allocator, &header);
-        try buf.appendSlice(self.allocator, payload);
-
-        Dir.cwd().writeFile(io, .{
-            .sub_path = self.file_path,
-            .data = buf.items,
-        }) catch |err| {
-            return err;
-        };
 
         self.entry_count += 1;
     }
@@ -107,9 +108,14 @@ pub const WalWriter = struct {
     }
 
     /// Current size of the WAL file in bytes. Returns 0 if the file doesn't exist.
+    /// Audit H4: stat the file via length() instead of reading the full
+    /// contents into a heap buffer — the background flush thread calls
+    /// this every 60s, so the old implementation read the entire WAL
+    /// each minute just to compare against a 10MB rotation threshold.
     pub fn sizeBytes(self: *const WalWriter, io: Io) usize {
-        const data = Dir.cwd().readFileAlloc(io, self.file_path, std.heap.c_allocator, .unlimited) catch return 0;
-        defer std.heap.c_allocator.free(data);
-        return data.len;
+        var file = Dir.cwd().openFile(io, self.file_path, .{ .mode = .read_only }) catch return 0;
+        defer file.close(io);
+        const len = file.length(io) catch return 0;
+        return @intCast(@min(len, std.math.maxInt(usize)));
     }
 };

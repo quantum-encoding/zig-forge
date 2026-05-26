@@ -452,24 +452,23 @@ fn handleCore(
         };
     defer response.deinit();
 
-    // COMMIT billing with actual token usage
-    const bill = billing.actualCost(
-        chat_req.model,
-        response.usage.input_tokens,
-        response.usage.output_tokens,
-        if (auth) |a| a.account.tier else types.DevTier.free,
-    );
-
+    // COMMIT billing with actual token usage. H10: actualCost can
+    // return error.UnknownModel — we treat that as "skip the ledger
+    // row" rather than guess a price for the permanent financial
+    // record. The upstream handler should already have rejected the
+    // request via getPricing; the catch is defense-in-depth.
+    const tier = if (auth) |a| a.account.tier else types.DevTier.free;
     if (reservation_id) |rid| if (store) |s| if (io) |io_handle| {
-        billing.commit(s, io_handle, rid, chat_req.model, response.usage.input_tokens, response.usage.output_tokens, if (auth) |a| a.account.tier else types.DevTier.free);
+        billing.commit(s, io_handle, rid, chat_req.model, response.usage.input_tokens, response.usage.output_tokens, tier);
     };
 
-    // Write ledger entry
     if (ledger) |l| if (io) |io_handle| {
-        const acct_id = if (auth) |a| a.account.id.slice() else "anonymous";
-        const key_pfx = if (auth) |a| a.key.prefix.slice() else "none";
-        const bal = if (auth) |a| a.account.balance_ticks else 0;
-        l.recordBilling(io_handle, acct_id, key_pfx, bill.cost, bill.margin, bal, "/qai/v1/chat", chat_req.model, response.usage.input_tokens, response.usage.output_tokens, 0);
+        if (billing.actualCost(chat_req.model, response.usage.input_tokens, response.usage.output_tokens, tier)) |bill| {
+            const acct_id = if (auth) |a| a.account.id.slice() else "anonymous";
+            const key_pfx = if (auth) |a| a.key.prefix.slice() else "none";
+            const bal = if (auth) |a| a.account.balance_ticks else 0;
+            l.recordBilling(io_handle, acct_id, key_pfx, bill.cost, bill.margin, bal, "/qai/v1/chat", chat_req.model, response.usage.input_tokens, response.usage.output_tokens, 0);
+        } else |_| {}
     };
 
     // Build JSON response (matches quantum-sdk ChatResponse)
@@ -540,7 +539,10 @@ fn buildResponse(
 }
 
 fn costTicks(response: *hs.ai.AIResponse, model: []const u8) i64 {
-    const cost = billing.actualCost(model, response.usage.input_tokens, response.usage.output_tokens, .free);
+    // Display-only path: if the model isn't in the pricing registry,
+    // return 0 rather than guessing $3/$15 (audit H10). The real
+    // billing rejected the request upstream.
+    const cost = billing.actualCost(model, response.usage.input_tokens, response.usage.output_tokens, .free) catch return 0;
     return cost.cost + cost.margin;
 }
 

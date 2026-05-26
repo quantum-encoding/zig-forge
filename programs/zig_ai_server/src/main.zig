@@ -31,6 +31,14 @@ pub const Config = struct {
     write_buf_size: usize = 8192,
 };
 
+// ── Slowloris guard (audit H5) ──────────────────────────────
+// Idle timeout (seconds) applied per-recv/send on accepted client
+// sockets. A connection that goes silent mid-handshake is closed
+// instead of being held open forever. The HTTP request body is
+// expected to arrive within this window after the head; SSE writes
+// cap the time we'll wait for the client to drain its buffer.
+const SOCKET_IDLE_TIMEOUT_SECS: i64 = 30;
+
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.c_allocator;
     const environ_map = init.environ_map;
@@ -69,9 +77,14 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    // Initialize I/O for store operations
-    var boot_io_threaded: std.Io.Threaded = .init(allocator, .{});
-    const boot_io = boot_io_threaded.io();
+    // Single, process-wide I/O subsystem (audit H5). Previously each
+    // accepted connection allocated its own `std.Io.Threaded`,
+    // spawning a fresh worker-thread pool per request and burning
+    // O(connections) kernel resources. We now share one pool across
+    // the accept loop, background flush thread, and every connection
+    // handler. `std.Io.Threaded` is explicitly thread-safe.
+    var io_threaded: std.Io.Threaded = .init(allocator, .{});
+    const boot_io = io_threaded.io();
 
     // Initialize GCP context (Firestore + BigQuery)
     const gcp_mod = @import("gcp.zig");
@@ -223,7 +236,9 @@ pub fn main(init: std.process.Init) !void {
 
     // Background flush thread: periodically push dirty account balances to Firestore
     // so a crash doesn't lose more than ~5 seconds of billing data.
-    const flush_thread = std.Thread.spawn(.{}, backgroundFlushLoop, .{&store}) catch null;
+    // Audit H5: shares the process-wide io subsystem instead of
+    // spinning its own Threaded pool.
+    const flush_thread = std.Thread.spawn(.{}, backgroundFlushLoop, .{ &store, boot_io }) catch null;
     if (flush_thread) |t| t.detach();
 
     // Register SIGTERM handler (Cloud Run sends this before SIGKILL)
@@ -252,7 +267,7 @@ pub fn main(init: std.process.Init) !void {
     , .{ config.host, config.port, config.max_workers, auth_mode, store.keys.count(), store.accounts.count(), gcp_mode });
 
     // Start the server (blocks until shutdown)
-    serve(allocator, &config, environ_map) catch {};
+    serve(allocator, &config, environ_map, boot_io) catch {};
 
     // Graceful shutdown: drain active connections, then flush state
     std.debug.print("\n  Shutting down...\n", .{});
@@ -277,11 +292,12 @@ pub fn main(init: std.process.Init) !void {
     std.process.exit(0);
 }
 
-fn serve(allocator: std.mem.Allocator, config: *const Config, environ_map: *const std.process.Environ.Map) !void {
-    // Initialize the I/O subsystem
-    var io_threaded: std.Io.Threaded = .init(allocator, .{});
-    const io = io_threaded.io();
-
+fn serve(
+    allocator: std.mem.Allocator,
+    config: *const Config,
+    environ_map: *const std.process.Environ.Map,
+    io: std.Io,
+) !void {
     // Parse and listen
     const address: net.IpAddress = net.IpAddress.parseLiteral(config.host) catch
         .{ .ip4 = net.Ip4Address.unspecified(config.port) };
@@ -304,6 +320,16 @@ fn serve(allocator: std.mem.Allocator, config: *const Config, environ_map: *cons
             continue;
         };
 
+        // Audit H5 (Slowloris): apply a hard idle timeout to the
+        // accepted socket before any read. SO_RCVTIMEO/SO_SNDTIMEO
+        // bound how long the kernel will block waiting for the
+        // peer; attackers that open a socket and stop sending data
+        // get reaped at the timeout instead of pinning a worker
+        // thread forever. Best-effort — if setsockopt fails we
+        // still serve the connection, we just lose the Slowloris
+        // mitigation for that socket.
+        applySocketIdleTimeout(stream.socket.handle, SOCKET_IDLE_TIMEOUT_SECS);
+
         const current = active_connections.load(.acquire);
         if (current >= config.max_workers) {
             // At capacity — close connection immediately
@@ -324,6 +350,7 @@ fn serve(allocator: std.mem.Allocator, config: *const Config, environ_map: *cons
             .stream = stream,
             .allocator = allocator,
             .environ_map = environ_map,
+            .io = io,
         };
 
         const thread = std.Thread.spawn(.{}, handleConnection, .{ctx}) catch {
@@ -341,7 +368,22 @@ const ConnCtx = struct {
     stream: net.Stream,
     allocator: std.mem.Allocator,
     environ_map: *const std.process.Environ.Map,
+    /// Shared, process-wide I/O subsystem (audit H5).
+    io: std.Io,
 };
+
+/// Best-effort: set SO_RCVTIMEO + SO_SNDTIMEO on a connected socket
+/// so blocked recv/send calls bail out after `seconds` of inactivity.
+/// Used as the Slowloris guard on every accepted client socket
+/// (audit H5).
+fn applySocketIdleTimeout(fd: std.posix.fd_t, seconds: i64) void {
+    const sec_field: @TypeOf((std.posix.timeval{ .sec = 0, .usec = 0 }).sec) = @intCast(seconds);
+    const usec_field: @TypeOf((std.posix.timeval{ .sec = 0, .usec = 0 }).usec) = 0;
+    const tv: std.posix.timeval = .{ .sec = sec_field, .usec = usec_field };
+    const tv_bytes = std.mem.asBytes(&tv);
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, tv_bytes) catch {};
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, tv_bytes) catch {};
+}
 
 fn handleConnection(ctx: *ConnCtx) void {
     defer {
@@ -349,9 +391,9 @@ fn handleConnection(ctx: *ConnCtx) void {
         ctx.allocator.destroy(ctx);
     }
 
-    // Each connection gets its own I/O subsystem (thread-safe, zero contention)
-    var io_threaded: std.Io.Threaded = .init(ctx.allocator, .{});
-    const io = io_threaded.io();
+    // Audit H5: reuse the process-wide io subsystem instead of
+    // allocating a new thread pool per connection.
+    const io = ctx.io;
     defer {
         var s = ctx.stream;
         s.close(io);
@@ -484,11 +526,9 @@ fn handleSigterm(_: std.posix.SIG) callconv(.c) void {
 /// Background thread: flush dirty account balances to Firestore every 5 seconds.
 /// Also rotates WAL when it exceeds 10MB (forces snapshot + truncate).
 /// Prevents balance data loss on crashes and caps WAL growth.
-fn backgroundFlushLoop(store: *@import("store/store.zig").Store) void {
+/// Audit H5: shares the process-wide io subsystem.
+fn backgroundFlushLoop(store: *@import("store/store.zig").Store, io: std.Io) void {
     const WAL_ROTATE_BYTES: usize = 10 * 1024 * 1024; // 10MB
-
-    var io_threaded: std.Io.Threaded = .init(std.heap.c_allocator, .{});
-    const io = io_threaded.io();
 
     var tick: u32 = 0;
     while (shutdown_requested.load(.acquire) == 0) {
