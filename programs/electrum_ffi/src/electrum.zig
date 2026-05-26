@@ -2,7 +2,10 @@ const std = @import("std");
 const net = std.net;
 const crypto = std.crypto;
 const tls = std.crypto.tls;
-const json_safe = @import("json-util"); // shared escape — see /programs/zig_json_util
+
+// JSON-RPC envelopes go through std.json.Stringify on anonymous structs
+// — never via hand-rolled escape + concatenation. The standard library
+// owns string safety and tuple-to-array serialisation. Batch 9.
 
 // =============================================================================
 // ELECTRUM PROTOCOL CONSTANTS
@@ -68,79 +71,43 @@ pub const TxHistoryEntry = struct {
 // JSON-RPC HELPERS
 // =============================================================================
 
-/// Build a JSON-RPC request.
+/// Build a JSON-RPC request envelope. Method, params, and id all go
+/// through `std.json.Stringify.valueAlloc` on an anonymous struct;
+/// string escaping, tuple-to-array serialization, optional handling
+/// and integer formatting are all delegated to the standard library.
 ///
-/// SECURITY (ELE-1): every string field — method name and any string-typed
-/// params — is escaped via `json_safe.appendQuotedString` before
-/// interpolation. The pre-audit version concatenated raw bytes inside
-/// quotes, which meant a method name or param string containing `"` could
-/// inject additional JSON-RPC keys (changing the id, the method, or
-/// injecting `"params":[malicious]` past a trailing close-quote).
+/// The pre-audit version concatenated raw bytes inside quotes, which
+/// meant a method name or string-typed param containing `"` could
+/// inject sibling JSON-RPC keys. With this implementation the only way
+/// to corrupt the envelope is to corrupt std.json itself.
 pub fn buildRequest(
     allocator: std.mem.Allocator,
     method: []const u8,
     params: anytype,
     id: u32,
 ) ![]u8 {
-    var list: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer list.deinit(allocator);
-
-    try list.appendSlice(allocator, "{\"jsonrpc\":\"2.0\",\"method\":");
-    try json_safe.appendQuotedString(allocator, &list, method);
-    try list.appendSlice(allocator, ",\"params\":");
-
-    // Serialize params
     const T = @TypeOf(params);
-    if (T == void) {
-        try list.appendSlice(allocator, "[]");
-    } else if (@typeInfo(T) == .@"struct" and @typeInfo(T).@"struct".is_tuple) {
-        try list.append(allocator, '[');
-        inline for (params, 0..) |param, i| {
-            if (i > 0) try list.append(allocator, ',');
-            try serializeValue(allocator, &list, param);
-        }
-        try list.append(allocator, ']');
-    } else {
-        try serializeValue(allocator, &list, params);
-    }
+    const body = if (T == void)
+        try std.json.Stringify.valueAlloc(allocator, .{
+            .jsonrpc = "2.0",
+            .method = method,
+            .params = [_]u8{},
+            .id = id,
+        }, .{})
+    else
+        try std.json.Stringify.valueAlloc(allocator, .{
+            .jsonrpc = "2.0",
+            .method = method,
+            .params = params,
+            .id = id,
+        }, .{});
+    defer allocator.free(body);
 
-    try list.appendSlice(allocator, ",\"id\":");
-    var id_buf: [16]u8 = undefined;
-    const id_str = std.fmt.bufPrint(&id_buf, "{d}", .{id}) catch return error.OutOfMemory;
-    try list.appendSlice(allocator, id_str);
-    try list.appendSlice(allocator, "}\n");
-
-    return list.toOwnedSlice(allocator);
-}
-
-fn serializeValue(allocator: std.mem.Allocator, list: *std.ArrayListUnmanaged(u8), value: anytype) !void {
-    const T = @TypeOf(value);
-
-    if (T == []const u8 or T == []u8) {
-        // ELE-1: escape every byte before quoting. A scripthash hex string
-        // wouldn't normally contain `"`, but a future caller could pass a
-        // user-supplied label / address / memo through here.
-        try json_safe.appendQuotedString(allocator, list, value);
-    } else if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one) {
-        const child = @typeInfo(T).pointer.child;
-        if (@typeInfo(child) == .array and @typeInfo(child).array.child == u8) {
-            try json_safe.appendQuotedString(allocator, list, value);
-        }
-    } else if (@typeInfo(T) == .int or @typeInfo(T) == .comptime_int) {
-        var buf: [32]u8 = undefined;
-        const str = std.fmt.bufPrint(&buf, "{d}", .{value}) catch return error.OutOfMemory;
-        try list.appendSlice(allocator, str);
-    } else if (T == bool) {
-        try list.appendSlice(allocator, if (value) "true" else "false");
-    } else if (@typeInfo(T) == .optional) {
-        if (value) |v| {
-            try serializeValue(allocator, list, v);
-        } else {
-            try list.appendSlice(allocator, "null");
-        }
-    } else {
-        @compileError("Unsupported type for JSON serialization: " ++ @typeName(T));
-    }
+    // Electrum servers expect newline-delimited JSON-RPC frames.
+    const out = try allocator.alloc(u8, body.len + 1);
+    @memcpy(out[0..body.len], body);
+    out[body.len] = '\n';
+    return out;
 }
 
 // =============================================================================

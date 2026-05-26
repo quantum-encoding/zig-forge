@@ -4,14 +4,6 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // JSON utilities — shared jsonEscape + appendQuotedString for safely
-    // building Electrum JSON-RPC requests without user-string injection.
-    const json_util_dep = b.dependency("zig_json_util", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    const json_util_module = json_util_dep.module("json-util");
-
     // =============================================================================
     // Static Library (for FFI integration with Rust/C/etc.)
     // =============================================================================
@@ -21,7 +13,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    ffi_module.addImport("json-util", json_util_module);
 
     const lib = b.addLibrary(.{
         .name = "electrum_ffi",
@@ -53,11 +44,6 @@ pub fn build(b: *std.Build) void {
         .target = android_target,
         .optimize = .ReleaseFast,
     });
-    const android_json_util_dep = b.dependency("zig_json_util", .{
-        .target = android_target,
-        .optimize = .ReleaseFast,
-    });
-    android_module.addImport("json-util", android_json_util_dep.module("json-util"));
 
     const android_lib = b.addLibrary(.{
         .name = "electrum_ffi",
@@ -85,7 +71,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    electrum_test_module.addImport("json-util", json_util_module);
 
     const electrum_tests = b.addTest(.{
         .root_module = electrum_test_module,
@@ -100,7 +85,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    ffi_test_module.addImport("json-util", json_util_module);
 
     const ffi_tests = b.addTest(.{
         .root_module = ffi_test_module,

@@ -18,14 +18,6 @@ pub fn build(b: *std.Build) void {
     });
     const gcp_auth_module = gcp_auth_dep.module("gcp-auth");
 
-    // JSON utilities — shared jsonEscape + appendQuotedString for safely
-    // interpolating user-controlled strings into JSON payloads.
-    const json_util_dep = b.dependency("zig_json_util", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    const json_util_module = json_util_dep.module("json-util");
-
     // Server executable
     const exe_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -35,7 +27,6 @@ pub fn build(b: *std.Build) void {
     });
     exe_module.addImport("http-sentinel", http_sentinel_module);
     exe_module.addImport("gcp-auth", gcp_auth_module);
-    exe_module.addImport("json-util", json_util_module);
 
     const exe = b.addExecutable(.{
         .name = "zig-ai-server",
@@ -60,7 +51,6 @@ pub fn build(b: *std.Build) void {
     });
     test_module.addImport("http-sentinel", http_sentinel_module);
     test_module.addImport("gcp-auth", gcp_auth_module);
-    test_module.addImport("json-util", json_util_module);
 
     const tests = b.addTest(.{
         .root_module = test_module,

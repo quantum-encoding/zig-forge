@@ -106,38 +106,33 @@ pub const GrokClient = struct {
         callback: common.StreamCallback,
         context: ?*anyopaque,
     ) !void {
-        // Build simple payload with stream: true
-        const escaped = try common.escapeJsonString(self.allocator, prompt);
-        defer self.allocator.free(escaped);
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+        var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
 
-        var payload: std.ArrayList(u8) = .empty;
-        defer payload.deinit(self.allocator);
-
-        const model_part = try std.fmt.allocPrint(self.allocator,
-            \\{{"model":"{s}","stream":true,"input":[
-        , .{config.model});
-        defer self.allocator.free(model_part);
-        try payload.appendSlice(self.allocator, model_part);
-
-        // System prompt as input item (xAI does NOT support `instructions`)
-        var has_item = false;
+        try jw.beginObject();
+        try jw.objectField("model");
+        try jw.write(config.model);
+        try jw.objectField("stream");
+        try jw.write(true);
+        try jw.objectField("input");
+        try jw.beginArray();
         if (config.system_prompt) |system| {
-            const sys_escaped = try common.escapeJsonString(self.allocator, system);
-            defer self.allocator.free(sys_escaped);
-            const sys_part = try std.fmt.allocPrint(self.allocator,
-                \\{{"role":"system","content":"{s}"}}
-            , .{sys_escaped});
-            defer self.allocator.free(sys_part);
-            try payload.appendSlice(self.allocator, sys_part);
-            has_item = true;
+            try jw.beginObject();
+            try jw.objectField("role");
+            try jw.write("system");
+            try jw.objectField("content");
+            try jw.write(system);
+            try jw.endObject();
         }
-
-        if (has_item) try payload.appendSlice(self.allocator, ",");
-        const msg_part = try std.fmt.allocPrint(self.allocator,
-            \\{{"role":"user","content":"{s}"}}]}}
-        , .{escaped});
-        defer self.allocator.free(msg_part);
-        try payload.appendSlice(self.allocator, msg_part);
+        try jw.beginObject();
+        try jw.objectField("role");
+        try jw.write("user");
+        try jw.objectField("content");
+        try jw.write(prompt);
+        try jw.endObject();
+        try jw.endArray();
+        try jw.endObject();
 
         // Make streaming request
         const endpoint = try std.fmt.allocPrint(self.allocator, "{s}/responses", .{self.base_url});
@@ -151,7 +146,7 @@ pub const GrokClient = struct {
             .{ .name = "Authorization", .value = auth_header },
         };
 
-        var stream = try self.http_client.postStreaming(endpoint, &headers, payload.items);
+        var stream = try self.http_client.postStreaming(endpoint, &headers, aw.written());
         defer stream.deinit();
 
         if (@intFromEnum(stream.status) >= 400) {
@@ -198,56 +193,47 @@ pub const GrokClient = struct {
         callback: common.StreamCallback,
         cb_context: ?*anyopaque,
     ) !void {
-        var payload: std.ArrayList(u8) = .empty;
-        defer payload.deinit(self.allocator);
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+        var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
 
-        const head = try std.fmt.allocPrint(self.allocator,
-            \\{{"model":"{s}","stream":true,"input":[
-        , .{config.model});
-        defer self.allocator.free(head);
-        try payload.appendSlice(self.allocator, head);
+        try jw.beginObject();
+        try jw.objectField("model");
+        try jw.write(config.model);
+        try jw.objectField("stream");
+        try jw.write(true);
+        try jw.objectField("input");
+        try jw.beginArray();
 
-        var first = true;
-
-        // System prompt as the first input item (xAI does NOT support `instructions`).
         if (config.system_prompt) |system| {
-            const sys_escaped = try common.escapeJsonString(self.allocator, system);
-            defer self.allocator.free(sys_escaped);
-            const sys_part = try std.fmt.allocPrint(self.allocator,
-                \\{{"role":"system","content":"{s}"}}
-            , .{sys_escaped});
-            defer self.allocator.free(sys_part);
-            try payload.appendSlice(self.allocator, sys_part);
-            first = false;
+            try jw.beginObject();
+            try jw.objectField("role");
+            try jw.write("system");
+            try jw.objectField("content");
+            try jw.write(system);
+            try jw.endObject();
         }
 
-        // Conversation history.
         for (history) |msg| {
-            if (!first) try payload.appendSlice(self.allocator, ",");
-            first = false;
-            const role = msg.role.toString();
-            const escaped = try common.escapeJsonString(self.allocator, msg.content);
-            defer self.allocator.free(escaped);
-            const item = try std.fmt.allocPrint(self.allocator,
-                \\{{"role":"{s}","content":"{s}"}}
-            , .{ role, escaped });
-            defer self.allocator.free(item);
-            try payload.appendSlice(self.allocator, item);
+            try jw.beginObject();
+            try jw.objectField("role");
+            try jw.write(msg.role.toString());
+            try jw.objectField("content");
+            try jw.write(msg.content);
+            try jw.endObject();
         }
 
-        // Current user turn.
         if (prompt.len > 0) {
-            if (!first) try payload.appendSlice(self.allocator, ",");
-            const escaped = try common.escapeJsonString(self.allocator, prompt);
-            defer self.allocator.free(escaped);
-            const item = try std.fmt.allocPrint(self.allocator,
-                \\{{"role":"user","content":"{s}"}}
-            , .{escaped});
-            defer self.allocator.free(item);
-            try payload.appendSlice(self.allocator, item);
+            try jw.beginObject();
+            try jw.objectField("role");
+            try jw.write("user");
+            try jw.objectField("content");
+            try jw.write(prompt);
+            try jw.endObject();
         }
 
-        try payload.appendSlice(self.allocator, "]}");
+        try jw.endArray();
+        try jw.endObject();
 
         const endpoint = try std.fmt.allocPrint(self.allocator, "{s}/responses", .{self.base_url});
         defer self.allocator.free(endpoint);
@@ -260,7 +246,7 @@ pub const GrokClient = struct {
             .{ .name = "Authorization", .value = auth_header },
         };
 
-        var stream = try self.http_client.postStreaming(endpoint, &headers, payload.items);
+        var stream = try self.http_client.postStreaming(endpoint, &headers, aw.written());
         defer stream.deinit();
 
         if (@intFromEnum(stream.status) >= 400) {
@@ -406,63 +392,62 @@ pub const GrokClient = struct {
         callback: common.StreamEventCallback,
         cb_context: ?*anyopaque,
     ) !void {
-        // Build structured input array: system → history → user prompt.
-        var input_json: std.ArrayList(u8) = .empty;
-        defer input_json.deinit(self.allocator);
-        try input_json.appendSlice(self.allocator, "[");
-        var first = true;
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+        var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
 
+        try jw.beginObject();
+        try jw.objectField("model");
+        try jw.write(config.model);
+        try jw.objectField("stream");
+        try jw.write(true);
+
+        try jw.objectField("input");
+        try jw.beginArray();
         if (config.system_prompt) |system| {
-            const sys_escaped = try common.escapeJsonString(self.allocator, system);
-            defer self.allocator.free(sys_escaped);
-            const sys_msg = try std.fmt.allocPrint(self.allocator,
-                \\{{"role":"system","content":"{s}"}}
-            , .{sys_escaped});
-            defer self.allocator.free(sys_msg);
-            try input_json.appendSlice(self.allocator, sys_msg);
-            first = false;
+            try jw.beginObject();
+            try jw.objectField("role");
+            try jw.write("system");
+            try jw.objectField("content");
+            try jw.write(system);
+            try jw.endObject();
         }
-
-        for (history) |msg| {
-            try self.appendResponsesApiItem(&input_json, msg, &first);
-        }
-
+        for (history) |msg| try self.writeResponsesApiItem(&jw, msg);
         if (prompt.len > 0) {
-            if (!first) try input_json.appendSlice(self.allocator, ",");
-            const escaped = try common.escapeJsonString(self.allocator, prompt);
-            defer self.allocator.free(escaped);
-            const um = try std.fmt.allocPrint(self.allocator,
-                \\{{"role":"user","content":"{s}"}}
-            , .{escaped});
-            defer self.allocator.free(um);
-            try input_json.appendSlice(self.allocator, um);
+            try jw.beginObject();
+            try jw.objectField("role");
+            try jw.write("user");
+            try jw.objectField("content");
+            try jw.write(prompt);
+            try jw.endObject();
         }
-        try input_json.appendSlice(self.allocator, "]");
+        try jw.endArray();
 
-        // Build tools array (Responses API: flat function_call descriptors).
-        var tools_json: std.ArrayList(u8) = .empty;
-        defer tools_json.deinit(self.allocator);
-        try tools_json.appendSlice(self.allocator, "[");
+        try jw.objectField("tools");
+        try jw.beginArray();
         if (config.tools) |tool_defs| {
-            for (tool_defs, 0..) |tool, i| {
-                if (i > 0) try tools_json.appendSlice(self.allocator, ",");
-                const escaped_name = try common.escapeJsonString(self.allocator, tool.name);
-                defer self.allocator.free(escaped_name);
-                const escaped_desc = try common.escapeJsonString(self.allocator, tool.description);
-                defer self.allocator.free(escaped_desc);
-                const tj = try std.fmt.allocPrint(self.allocator,
-                    \\{{"type":"function","name":"{s}","description":"{s}","parameters":{s}}}
-                , .{ escaped_name, escaped_desc, tool.input_schema });
-                defer self.allocator.free(tj);
-                try tools_json.appendSlice(self.allocator, tj);
+            for (tool_defs) |tool| {
+                try jw.beginObject();
+                try jw.objectField("type");
+                try jw.write("function");
+                try jw.objectField("name");
+                try jw.write(tool.name);
+                try jw.objectField("description");
+                try jw.write(tool.description);
+                try jw.objectField("parameters");
+                try jw.beginWriteRaw();
+                try aw.writer.writeAll(tool.input_schema);
+                jw.endWriteRaw();
+                try jw.endObject();
             }
         }
-        try tools_json.appendSlice(self.allocator, "]");
+        try jw.endArray();
 
-        const payload = try std.fmt.allocPrint(self.allocator,
-            \\{{"model":"{s}","stream":true,"input":{s},"tools":{s},"max_output_tokens":{}}}
-        , .{ config.model, input_json.items, tools_json.items, config.max_tokens });
-        defer self.allocator.free(payload);
+        try jw.objectField("max_output_tokens");
+        try jw.write(config.max_tokens);
+        try jw.endObject();
+
+        const payload = aw.written();
 
         const endpoint = try std.fmt.allocPrint(self.allocator, "{s}/responses", .{self.base_url});
         defer self.allocator.free(endpoint);
@@ -508,86 +493,74 @@ pub const GrokClient = struct {
 
         var timer = Timer.start(self.http_client.io());
 
-        // Build input array for Responses API
-        var input: std.ArrayList(u8) = .empty;
-        defer input.deinit(self.allocator);
+        // Build the `input` array (Responses API) via streaming Stringify.
+        var input_aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer input_aw.deinit();
+        var input_jw: std.json.Stringify = .{ .writer = &input_aw.writer, .options = .{} };
 
-        try input.appendSlice(self.allocator, "[");
+        try input_jw.beginArray();
 
-        // System message (xAI does NOT support `instructions` — must be in input array)
         if (config.system_prompt) |system| {
-            const escaped = try common.escapeJsonString(self.allocator, system);
-            defer self.allocator.free(escaped);
-            const sys_msg = try std.fmt.allocPrint(self.allocator,
-                \\{{"role":"system","content":"{s}"}}
-            , .{escaped});
-            defer self.allocator.free(sys_msg);
-            try input.appendSlice(self.allocator, sys_msg);
+            try input_jw.beginObject();
+            try input_jw.objectField("role");
+            try input_jw.write("system");
+            try input_jw.objectField("content");
+            try input_jw.write(system);
+            try input_jw.endObject();
         }
 
-        // Context messages
-        for (context) |msg| {
-            if (input.items.len > 1) try input.appendSlice(self.allocator, ",");
-            try self.appendInputItem(&input, msg);
-        }
-
-        // Current prompt (with images if provided)
-        if (input.items.len > 1) try input.appendSlice(self.allocator, ",");
-        const escaped_prompt = try common.escapeJsonString(self.allocator, prompt);
-        defer self.allocator.free(escaped_prompt);
+        for (context) |msg| try self.writeInputItem(&input_jw, msg);
 
         if (config.images != null or config.file_ids != null) {
-            // Multimodal content array (images and/or file attachments)
-            var content_builder: std.ArrayList(u8) = .empty;
-            defer content_builder.deinit(self.allocator);
-
-            try content_builder.appendSlice(self.allocator, "{\"role\":\"user\",\"content\":[");
-
-            // Add text part
-            const text_part = try std.fmt.allocPrint(self.allocator,
-                \\{{"type":"input_text","text":"{s}"}}
-            , .{escaped_prompt});
-            defer self.allocator.free(text_part);
-            try content_builder.appendSlice(self.allocator, text_part);
-
-            // Add image parts (supports both base64 data URIs and direct HTTPS URLs)
+            try input_jw.beginObject();
+            try input_jw.objectField("role");
+            try input_jw.write("user");
+            try input_jw.objectField("content");
+            try input_jw.beginArray();
+            try input_jw.beginObject();
+            try input_jw.objectField("type");
+            try input_jw.write("input_text");
+            try input_jw.objectField("text");
+            try input_jw.write(prompt);
+            try input_jw.endObject();
             if (config.images) |images| {
                 for (images) |img| {
                     const img_url = try img.toImageUrl(self.allocator);
                     defer self.allocator.free(img_url);
-                    const img_part = try std.fmt.allocPrint(self.allocator,
-                        \\,{{"type":"image_url","image_url":{{"url":"{s}"}}}}
-                    , .{img_url});
-                    defer self.allocator.free(img_part);
-                    try content_builder.appendSlice(self.allocator, img_part);
+                    try input_jw.beginObject();
+                    try input_jw.objectField("type");
+                    try input_jw.write("image_url");
+                    try input_jw.objectField("image_url");
+                    try input_jw.beginObject();
+                    try input_jw.objectField("url");
+                    try input_jw.write(img_url);
+                    try input_jw.endObject();
+                    try input_jw.endObject();
                 }
             }
-
-            // Add file attachment parts (triggers automatic attachment_search)
             if (config.file_ids) |fids| {
                 for (fids) |fid| {
-                    const escaped_fid = try common.escapeJsonString(self.allocator, fid);
-                    defer self.allocator.free(escaped_fid);
-                    const file_part = try std.fmt.allocPrint(self.allocator,
-                        \\,{{"type":"input_file","file_id":"{s}"}}
-                    , .{escaped_fid});
-                    defer self.allocator.free(file_part);
-                    try content_builder.appendSlice(self.allocator, file_part);
+                    try input_jw.beginObject();
+                    try input_jw.objectField("type");
+                    try input_jw.write("input_file");
+                    try input_jw.objectField("file_id");
+                    try input_jw.write(fid);
+                    try input_jw.endObject();
                 }
             }
-
-            try content_builder.appendSlice(self.allocator, "]}");
-            try input.appendSlice(self.allocator, content_builder.items);
+            try input_jw.endArray();
+            try input_jw.endObject();
         } else {
-            // Simple text content
-            const prompt_msg = try std.fmt.allocPrint(self.allocator,
-                \\{{"role":"user","content":"{s}"}}
-            , .{escaped_prompt});
-            defer self.allocator.free(prompt_msg);
-            try input.appendSlice(self.allocator, prompt_msg);
+            try input_jw.beginObject();
+            try input_jw.objectField("role");
+            try input_jw.write("user");
+            try input_jw.objectField("content");
+            try input_jw.write(prompt);
+            try input_jw.endObject();
         }
 
-        try input.appendSlice(self.allocator, "]");
+        try input_jw.endArray();
+        const input_json = input_aw.written();
 
         var turn_count: u32 = 0;
         var total_input_tokens: u32 = 0;
@@ -595,7 +568,7 @@ pub const GrokClient = struct {
 
         // Agentic loop
         while (turn_count < config.max_turns) : (turn_count += 1) {
-            const payload = try self.buildRequestPayload(input.items, config);
+            const payload = try self.buildRequestPayload(input_json, config);
             defer self.allocator.free(payload);
 
             const response = try self.makeRequest(payload);
@@ -705,253 +678,160 @@ pub const GrokClient = struct {
     ) !common.AIResponse {
         var timer = Timer.start(self.http_client.io());
 
-        // Build structured input for Responses API
-        var input_json: std.ArrayList(u8) = .empty;
-        defer input_json.deinit(self.allocator);
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+        var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
 
-        try input_json.appendSlice(self.allocator, "[");
-        var first = true;
+        try jw.beginObject();
+        try jw.objectField("model");
+        try jw.write(config.model);
 
-        // System prompt as first input item (xAI does NOT support `instructions`)
+        // input array
+        try jw.objectField("input");
+        try jw.beginArray();
         if (config.system_prompt) |system| {
-            const escaped_sys = try common.escapeJsonString(self.allocator, system);
-            defer self.allocator.free(escaped_sys);
-            const sys_item = try std.fmt.allocPrint(self.allocator,
-                \\{{"role":"system","content":"{s}"}}
-            , .{escaped_sys});
-            defer self.allocator.free(sys_item);
-            try input_json.appendSlice(self.allocator, sys_item);
-            first = false;
+            try jw.beginObject();
+            try jw.objectField("role");
+            try jw.write("system");
+            try jw.objectField("content");
+            try jw.write(system);
+            try jw.endObject();
         }
-
         if (context.len == 0) {
-            // First turn: add user message (with optional file attachments)
-            if (!first) try input_json.appendSlice(self.allocator, ",");
-            try self.appendUserMessage(&input_json, prompt, config);
+            try self.writeUserMessage(&jw, prompt, config);
         } else {
-            // Multi-turn: structured input array with conversation history
-            for (context) |msg| {
-                try self.appendResponsesApiItem(&input_json, msg, &first);
-            }
-            if (prompt.len > 0) {
-                if (!first) try input_json.appendSlice(self.allocator, ",");
-                try self.appendUserMessage(&input_json, prompt, config);
-            }
+            for (context) |msg| try self.writeResponsesApiItem(&jw, msg);
+            if (prompt.len > 0) try self.writeUserMessage(&jw, prompt, config);
         }
+        try jw.endArray();
 
-        try input_json.appendSlice(self.allocator, "]");
-
-        // Build tools JSON array (Responses API format)
-        // Server-side tools: {"type":"web_search"}, {"type":"x_search"}, {"type":"code_interpreter"}
-        // Client-side tools: {"type":"function","name":"...","description":"...","parameters":{...}}
-        var tools_json: std.ArrayList(u8) = .empty;
-        defer tools_json.deinit(self.allocator);
-        try tools_json.appendSlice(self.allocator, "[");
-        var tool_count: usize = 0;
-
-        // Server-side tools (auto-executed by xAI)
+        // tools array
+        try jw.objectField("tools");
+        try jw.beginArray();
         if (config.server_tools) |server_tools| {
             for (server_tools) |st| {
-                if (tool_count > 0) try tools_json.appendSlice(self.allocator, ",");
-                const st_json = try std.fmt.allocPrint(self.allocator,
-                    \\{{"type":"{s}"}}
-                , .{st.toJsonType()});
-                defer self.allocator.free(st_json);
-                try tools_json.appendSlice(self.allocator, st_json);
-                tool_count += 1;
+                try jw.beginObject();
+                try jw.objectField("type");
+                try jw.write(st.toJsonType());
+                try jw.endObject();
             }
         }
-
-        // Client-side function tools (require local execution)
         if (config.tools) |tool_defs| {
             for (tool_defs) |tool| {
-                if (tool_count > 0) try tools_json.appendSlice(self.allocator, ",");
-                const escaped_name = try common.escapeJsonString(self.allocator, tool.name);
-                defer self.allocator.free(escaped_name);
-                const escaped_desc = try common.escapeJsonString(self.allocator, tool.description);
-                defer self.allocator.free(escaped_desc);
-                const tool_json = try std.fmt.allocPrint(self.allocator,
-                    \\{{"type":"function","name":"{s}","description":"{s}","parameters":{s}}}
-                , .{ escaped_name, escaped_desc, tool.input_schema });
-                defer self.allocator.free(tool_json);
-                try tools_json.appendSlice(self.allocator, tool_json);
-                tool_count += 1;
+                try jw.beginObject();
+                try jw.objectField("type");
+                try jw.write("function");
+                try jw.objectField("name");
+                try jw.write(tool.name);
+                try jw.objectField("description");
+                try jw.write(tool.description);
+                try jw.objectField("parameters");
+                try jw.beginWriteRaw();
+                try aw.writer.writeAll(tool.input_schema);
+                jw.endWriteRaw();
+                try jw.endObject();
             }
         }
-
-        // Remote MCP tools (xAI connects to external MCP servers)
         if (config.mcp_tools) |mcp_tools| {
             for (mcp_tools) |mcp| {
-                if (tool_count > 0) try tools_json.appendSlice(self.allocator, ",");
-
-                // Build MCP tool JSON with required server_url and optional fields
-                var mcp_json: std.ArrayList(u8) = .empty;
-                defer mcp_json.deinit(self.allocator);
-
-                const escaped_url = try common.escapeJsonString(self.allocator, mcp.server_url);
-                defer self.allocator.free(escaped_url);
-                const base = try std.fmt.allocPrint(self.allocator,
-                    \\{{"type":"mcp","server_url":"{s}"
-                , .{escaped_url});
-                defer self.allocator.free(base);
-                try mcp_json.appendSlice(self.allocator, base);
-
+                try jw.beginObject();
+                try jw.objectField("type");
+                try jw.write("mcp");
+                try jw.objectField("server_url");
+                try jw.write(mcp.server_url);
                 if (mcp.server_label) |label| {
-                    const escaped = try common.escapeJsonString(self.allocator, label);
-                    defer self.allocator.free(escaped);
-                    const part = try std.fmt.allocPrint(self.allocator,
-                        \\,"server_label":"{s}"
-                    , .{escaped});
-                    defer self.allocator.free(part);
-                    try mcp_json.appendSlice(self.allocator, part);
+                    try jw.objectField("server_label");
+                    try jw.write(label);
                 }
-
                 if (mcp.server_description) |desc| {
-                    const escaped = try common.escapeJsonString(self.allocator, desc);
-                    defer self.allocator.free(escaped);
-                    const part = try std.fmt.allocPrint(self.allocator,
-                        \\,"server_description":"{s}"
-                    , .{escaped});
-                    defer self.allocator.free(part);
-                    try mcp_json.appendSlice(self.allocator, part);
+                    try jw.objectField("server_description");
+                    try jw.write(desc);
                 }
-
                 if (mcp.authorization) |auth| {
-                    const escaped = try common.escapeJsonString(self.allocator, auth);
-                    defer self.allocator.free(escaped);
-                    const part = try std.fmt.allocPrint(self.allocator,
-                        \\,"authorization":"{s}"
-                    , .{escaped});
-                    defer self.allocator.free(part);
-                    try mcp_json.appendSlice(self.allocator, part);
+                    try jw.objectField("authorization");
+                    try jw.write(auth);
                 }
-
                 if (mcp.allowed_tool_names) |names| {
-                    try mcp_json.appendSlice(self.allocator, ",\"allowed_tool_names\":[");
-                    for (names, 0..) |name, ni| {
-                        if (ni > 0) try mcp_json.appendSlice(self.allocator, ",");
-                        const escaped = try common.escapeJsonString(self.allocator, name);
-                        defer self.allocator.free(escaped);
-                        const part = try std.fmt.allocPrint(self.allocator,
-                            \\"{s}"
-                        , .{escaped});
-                        defer self.allocator.free(part);
-                        try mcp_json.appendSlice(self.allocator, part);
-                    }
-                    try mcp_json.appendSlice(self.allocator, "]");
+                    try jw.objectField("allowed_tool_names");
+                    try jw.beginArray();
+                    for (names) |name| try jw.write(name);
+                    try jw.endArray();
                 }
-
-                try mcp_json.appendSlice(self.allocator, "}");
-                try tools_json.appendSlice(self.allocator, mcp_json.items);
-                tool_count += 1;
+                try jw.endObject();
             }
         }
-
-        // Collections search (file_search) tool
         if (config.collection_ids) |col_ids| {
             if (col_ids.len > 0) {
-                if (tool_count > 0) try tools_json.appendSlice(self.allocator, ",");
-                try tools_json.appendSlice(self.allocator, "{\"type\":\"file_search\",\"vector_store_ids\":[");
-                for (col_ids, 0..) |cid, ci| {
-                    if (ci > 0) try tools_json.appendSlice(self.allocator, ",");
-                    try tools_json.appendSlice(self.allocator, "\"");
-                    const escaped_cid = try common.escapeJsonString(self.allocator, cid);
-                    defer self.allocator.free(escaped_cid);
-                    try tools_json.appendSlice(self.allocator, escaped_cid);
-                    try tools_json.appendSlice(self.allocator, "\"");
-                }
-                try tools_json.appendSlice(self.allocator, "]");
+                try jw.beginObject();
+                try jw.objectField("type");
+                try jw.write("file_search");
+                try jw.objectField("vector_store_ids");
+                try jw.beginArray();
+                for (col_ids) |cid| try jw.write(cid);
+                try jw.endArray();
                 if (config.collection_max_results != 10) {
-                    const mr = try std.fmt.allocPrint(self.allocator, ",\"max_num_results\":{d}", .{config.collection_max_results});
-                    defer self.allocator.free(mr);
-                    try tools_json.appendSlice(self.allocator, mr);
+                    try jw.objectField("max_num_results");
+                    try jw.write(config.collection_max_results);
                 }
-                try tools_json.appendSlice(self.allocator, "}");
-                tool_count += 1;
+                try jw.endObject();
             }
         }
+        try jw.endArray();
 
-        try tools_json.appendSlice(self.allocator, "]");
+        // scalar / structural params
+        try jw.objectField("temperature");
+        try jw.write(config.temperature);
+        try jw.objectField("max_output_tokens");
+        try jw.write(config.max_tokens);
 
-        // Build optional payload parameters
-        var optional_parts: std.ArrayList(u8) = .empty;
-        defer optional_parts.deinit(self.allocator);
-
-        // Conversation chaining via previous_response_id
         if (config.previous_response_id) |prev_id| {
-            const prev_part = try std.fmt.allocPrint(self.allocator,
-                \\,"previous_response_id":"{s}"
-            , .{prev_id});
-            defer self.allocator.free(prev_part);
-            try optional_parts.appendSlice(self.allocator, prev_part);
+            try jw.objectField("previous_response_id");
+            try jw.write(prev_id);
         }
-
-        // Store conversations server-side for multi-turn
         if (config.store) |store| {
-            if (store) {
-                try optional_parts.appendSlice(self.allocator, ",\"store\":true");
-            } else {
-                try optional_parts.appendSlice(self.allocator, ",\"store\":false");
-            }
+            try jw.objectField("store");
+            try jw.write(store);
         }
-
-        // Limit server-side agentic loop turns
         if (config.server_max_turns) |smt| {
-            const smt_part = try std.fmt.allocPrint(self.allocator,
-                \\,"max_turns":{d}
-            , .{smt});
-            defer self.allocator.free(smt_part);
-            try optional_parts.appendSlice(self.allocator, smt_part);
+            try jw.objectField("max_turns");
+            try jw.write(smt);
         }
-
-        // Tool choice control
         if (config.tool_choice) |tc| {
             if (tc == .function) {
                 if (config.tool_choice_function) |func_name| {
-                    const escaped_fn = try common.escapeJsonString(self.allocator, func_name);
-                    defer self.allocator.free(escaped_fn);
-                    const tc_part = try std.fmt.allocPrint(self.allocator,
-                        \\,"tool_choice":{{"type":"function","name":"{s}"}}
-                    , .{escaped_fn});
-                    defer self.allocator.free(tc_part);
-                    try optional_parts.appendSlice(self.allocator, tc_part);
+                    try jw.objectField("tool_choice");
+                    try jw.beginObject();
+                    try jw.objectField("type");
+                    try jw.write("function");
+                    try jw.objectField("name");
+                    try jw.write(func_name);
+                    try jw.endObject();
                 }
             } else {
-                const tc_part = try std.fmt.allocPrint(self.allocator,
-                    \\,"tool_choice":{s}
-                , .{tc.toJsonValue()});
-                defer self.allocator.free(tc_part);
-                try optional_parts.appendSlice(self.allocator, tc_part);
+                // tc.toJsonValue() returns a JSON literal ("auto" / "none"
+                // / "required"); splice raw.
+                try jw.objectField("tool_choice");
+                try jw.beginWriteRaw();
+                try aw.writer.writeAll(tc.toJsonValue());
+                jw.endWriteRaw();
             }
         }
-
-        // Parallel tool calls control
         if (config.parallel_tool_calls) |ptc| {
-            if (ptc) {
-                try optional_parts.appendSlice(self.allocator, ",\"parallel_tool_calls\":true");
-            } else {
-                try optional_parts.appendSlice(self.allocator, ",\"parallel_tool_calls\":false");
+            try jw.objectField("parallel_tool_calls");
+            try jw.write(ptc);
+        }
+        if (config.include) |includes| {
+            if (includes.len > 0) {
+                try jw.objectField("include");
+                try jw.beginArray();
+                for (includes) |inc| try jw.write(inc);
+                try jw.endArray();
             }
         }
 
-        // Include additional response data (e.g., inline_citations, tool outputs)
-        const include_json = try self.buildIncludeParam(config);
-        defer if (include_json) |ij| self.allocator.free(ij);
-        if (include_json) |ij| {
-            try optional_parts.appendSlice(self.allocator, ij);
-        }
+        try jw.endObject();
 
-        const payload = try std.fmt.allocPrint(self.allocator,
-            \\{{"model":"{s}","input":{s},"tools":{s},"temperature":{d},"max_output_tokens":{}{s}}}
-        , .{
-            config.model,
-            input_json.items,
-            tools_json.items,
-            config.temperature,
-            config.max_tokens,
-            optional_parts.items,
-        });
-        defer self.allocator.free(payload);
+        const payload = aw.written();
 
         // Make request to /v1/responses
         const response_body = try self.makeRequest(payload);
@@ -1083,47 +963,46 @@ pub const GrokClient = struct {
         input: []const u8,
         config: common.RequestConfig,
     ) ![]u8 {
-        // Build optional parameters
-        var optional_parts: std.ArrayList(u8) = .empty;
-        defer optional_parts.deinit(self.allocator);
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer aw.deinit();
+        var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
 
-        // Add previous_response_id for conversation chaining
+        try jw.beginObject();
+        try jw.objectField("model");
+        try jw.write(config.model);
+        try jw.objectField("input");
+        // `input` is already a serialised JSON array — splice raw.
+        try jw.beginWriteRaw();
+        try aw.writer.writeAll(input);
+        jw.endWriteRaw();
+        try jw.objectField("temperature");
+        try jw.write(config.temperature);
+        try jw.objectField("max_output_tokens");
+        try jw.write(config.max_tokens);
+
         if (config.previous_response_id) |prev_id| {
-            const prev_part = try std.fmt.allocPrint(self.allocator,
-                \\,"previous_response_id":"{s}"
-            , .{prev_id});
-            defer self.allocator.free(prev_part);
-            try optional_parts.appendSlice(self.allocator, prev_part);
+            try jw.objectField("previous_response_id");
+            try jw.write(prev_id);
         }
-
-        // Store conversations server-side for multi-turn via previous_response_id
         if (config.store) |store| {
-            if (store) {
-                try optional_parts.appendSlice(self.allocator, ",\"store\":true");
-            } else {
-                try optional_parts.appendSlice(self.allocator, ",\"store\":false");
+            try jw.objectField("store");
+            try jw.write(store);
+        }
+        if (config.server_max_turns) |smt| {
+            try jw.objectField("max_turns");
+            try jw.write(smt);
+        }
+        if (config.include) |includes| {
+            if (includes.len > 0) {
+                try jw.objectField("include");
+                try jw.beginArray();
+                for (includes) |inc| try jw.write(inc);
+                try jw.endArray();
             }
         }
 
-        // Limit server-side agentic loop turns
-        if (config.server_max_turns) |smt| {
-            const smt_part = try std.fmt.allocPrint(self.allocator,
-                \\,"max_turns":{d}
-            , .{smt});
-            defer self.allocator.free(smt_part);
-            try optional_parts.appendSlice(self.allocator, smt_part);
-        }
-
-        // Include additional response data (e.g., inline_citations, tool outputs)
-        const include_json = try self.buildIncludeParam(config);
-        defer if (include_json) |ij| self.allocator.free(ij);
-        if (include_json) |ij| {
-            try optional_parts.appendSlice(self.allocator, ij);
-        }
-
-        return std.fmt.allocPrint(self.allocator,
-            \\{{"model":"{s}","input":{s},"temperature":{d},"max_output_tokens":{}{s}}}
-        , .{ config.model, input, config.temperature, config.max_tokens, optional_parts.items });
+        try jw.endObject();
+        return aw.toOwnedSlice();
     }
 
     fn makeRequest(self: *GrokClient, payload: []const u8) ![]u8 {
@@ -1173,56 +1052,55 @@ pub const GrokClient = struct {
 
     /// Build a user message with optional file attachments and images
     /// Uses content array format when file_ids or images are present
-    fn appendUserMessage(self: *GrokClient, writer: *std.ArrayList(u8), prompt: []const u8, config: common.RequestConfig) !void {
-        const escaped = try common.escapeJsonString(self.allocator, prompt);
-        defer self.allocator.free(escaped);
+    /// Write a "user" input item (with optional multimodal content) via the
+    /// supplied Stringify writer. The writer must already be inside an
+    /// array context.
+    fn writeUserMessage(self: *GrokClient, jw: *std.json.Stringify, prompt: []const u8, config: common.RequestConfig) !void {
+        try jw.beginObject();
+        try jw.objectField("role");
+        try jw.write("user");
+        try jw.objectField("content");
 
         if (config.file_ids != null or config.images != null) {
-            // Content array with text + file attachments + images
-            try writer.appendSlice(self.allocator, "{\"role\":\"user\",\"content\":[");
+            try jw.beginArray();
+            try jw.beginObject();
+            try jw.objectField("type");
+            try jw.write("input_text");
+            try jw.objectField("text");
+            try jw.write(prompt);
+            try jw.endObject();
 
-            // Text part
-            const text_part = try std.fmt.allocPrint(self.allocator,
-                \\{{"type":"input_text","text":"{s}"}}
-            , .{escaped});
-            defer self.allocator.free(text_part);
-            try writer.appendSlice(self.allocator, text_part);
-
-            // File attachment parts (triggers automatic attachment_search)
             if (config.file_ids) |fids| {
                 for (fids) |fid| {
-                    const escaped_fid = try common.escapeJsonString(self.allocator, fid);
-                    defer self.allocator.free(escaped_fid);
-                    const file_part = try std.fmt.allocPrint(self.allocator,
-                        \\,{{"type":"input_file","file_id":"{s}"}}
-                    , .{escaped_fid});
-                    defer self.allocator.free(file_part);
-                    try writer.appendSlice(self.allocator, file_part);
+                    try jw.beginObject();
+                    try jw.objectField("type");
+                    try jw.write("input_file");
+                    try jw.objectField("file_id");
+                    try jw.write(fid);
+                    try jw.endObject();
                 }
             }
-
-            // Image parts
             if (config.images) |images| {
                 for (images) |img| {
                     const img_url = try img.toImageUrl(self.allocator);
                     defer self.allocator.free(img_url);
-                    const img_part = try std.fmt.allocPrint(self.allocator,
-                        \\,{{"type":"image_url","image_url":{{"url":"{s}"}}}}
-                    , .{img_url});
-                    defer self.allocator.free(img_part);
-                    try writer.appendSlice(self.allocator, img_part);
+                    try jw.beginObject();
+                    try jw.objectField("type");
+                    try jw.write("image_url");
+                    try jw.objectField("image_url");
+                    try jw.beginObject();
+                    try jw.objectField("url");
+                    try jw.write(img_url);
+                    try jw.endObject();
+                    try jw.endObject();
                 }
             }
-
-            try writer.appendSlice(self.allocator, "]}");
+            try jw.endArray();
         } else {
-            // Simple text content
-            const user_msg = try std.fmt.allocPrint(self.allocator,
-                \\{{"role":"user","content":"{s}"}}
-            , .{escaped});
-            defer self.allocator.free(user_msg);
-            try writer.appendSlice(self.allocator, user_msg);
+            try jw.write(prompt);
         }
+
+        try jw.endObject();
     }
 
     // ========================================
@@ -1337,64 +1215,60 @@ pub const GrokClient = struct {
     }
 
     /// Append a simple input item (user/assistant text) for the text-only path
-    fn appendInputItem(self: *GrokClient, writer: *std.ArrayList(u8), msg: common.AIMessage) !void {
-        const role = msg.role.toString();
-        const escaped = try common.escapeJsonString(self.allocator, msg.content);
-        defer self.allocator.free(escaped);
-
-        const msg_json = try std.fmt.allocPrint(self.allocator,
-            \\{{"role":"{s}","content":"{s}"}}
-        , .{ role, escaped });
-        defer self.allocator.free(msg_json);
-        try writer.appendSlice(self.allocator, msg_json);
+    /// Write a single role+content input item via the supplied Stringify
+    /// writer. The writer must already be inside an array context.
+    fn writeInputItem(self: *GrokClient, jw: *std.json.Stringify, msg: common.AIMessage) !void {
+        _ = self;
+        try jw.beginObject();
+        try jw.objectField("role");
+        try jw.write(msg.role.toString());
+        try jw.objectField("content");
+        try jw.write(msg.content);
+        try jw.endObject();
     }
 
     /// Map an AIMessage to Responses API input item format for tool calling
     /// function_call items for tool calls, function_call_output for results
-    fn appendResponsesApiItem(
+    /// Write one Responses API input item via the supplied
+    /// std.json.Stringify writer. The writer must already be inside an
+    /// array context — Stringify manages array commas itself.
+    fn writeResponsesApiItem(
         self: *GrokClient,
-        writer: *std.ArrayList(u8),
+        jw: *std.json.Stringify,
         msg: common.AIMessage,
-        first: *bool,
     ) !void {
+        _ = self;
         if (msg.tool_calls) |tool_calls| {
-            // Emit function_call items (one per tool call)
             for (tool_calls) |call| {
-                if (!first.*) try writer.appendSlice(self.allocator, ",");
-                first.* = false;
-                const escaped_args = try common.escapeJsonString(self.allocator, call.arguments);
-                defer self.allocator.free(escaped_args);
-                const item = try std.fmt.allocPrint(self.allocator,
-                    \\{{"type":"function_call","call_id":"{s}","name":"{s}","arguments":"{s}"}}
-                , .{ call.id, call.name, escaped_args });
-                defer self.allocator.free(item);
-                try writer.appendSlice(self.allocator, item);
+                try jw.beginObject();
+                try jw.objectField("type");
+                try jw.write("function_call");
+                try jw.objectField("call_id");
+                try jw.write(call.id);
+                try jw.objectField("name");
+                try jw.write(call.name);
+                try jw.objectField("arguments");
+                try jw.write(call.arguments);
+                try jw.endObject();
             }
         } else if (msg.tool_results) |tool_results| {
-            // Emit function_call_output items
             for (tool_results) |result| {
-                if (!first.*) try writer.appendSlice(self.allocator, ",");
-                first.* = false;
-                const escaped = try common.escapeJsonString(self.allocator, result.content);
-                defer self.allocator.free(escaped);
-                const item = try std.fmt.allocPrint(self.allocator,
-                    \\{{"type":"function_call_output","call_id":"{s}","output":"{s}"}}
-                , .{ result.tool_call_id, escaped });
-                defer self.allocator.free(item);
-                try writer.appendSlice(self.allocator, item);
+                try jw.beginObject();
+                try jw.objectField("type");
+                try jw.write("function_call_output");
+                try jw.objectField("call_id");
+                try jw.write(result.tool_call_id);
+                try jw.objectField("output");
+                try jw.write(result.content);
+                try jw.endObject();
             }
         } else {
-            // Regular text message
-            if (!first.*) try writer.appendSlice(self.allocator, ",");
-            first.* = false;
-            const role = msg.role.toString();
-            const escaped = try common.escapeJsonString(self.allocator, msg.content);
-            defer self.allocator.free(escaped);
-            const msg_json = try std.fmt.allocPrint(self.allocator,
-                \\{{"role":"{s}","content":"{s}"}}
-            , .{ role, escaped });
-            defer self.allocator.free(msg_json);
-            try writer.appendSlice(self.allocator, msg_json);
+            try jw.beginObject();
+            try jw.objectField("role");
+            try jw.write(msg.role.toString());
+            try jw.objectField("content");
+            try jw.write(msg.content);
+            try jw.endObject();
         }
     }
 

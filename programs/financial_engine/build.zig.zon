@@ -9,9 +9,5 @@
         "src",
         "include",
     },
-    .dependencies = .{
-        .zig_json_util = .{
-            .path = "../zig_json_util",
-        },
-    },
+    .dependencies = .{},
 }

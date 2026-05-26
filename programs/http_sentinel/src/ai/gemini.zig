@@ -105,36 +105,48 @@ pub const GeminiClient = struct {
         callback: common.StreamCallback,
         context: ?*anyopaque,
     ) !void {
-        // Build generateContent payload (same format, endpoint handles streaming)
-        const escaped = try common.escapeJsonString(self.allocator, prompt);
-        defer self.allocator.free(escaped);
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+        var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
 
-        var payload: std.ArrayList(u8) = .empty;
-        defer payload.deinit(self.allocator);
+        try jw.beginObject();
+        try jw.objectField("contents");
+        try jw.beginArray();
+        try jw.beginObject();
+        try jw.objectField("role");
+        try jw.write("user");
+        try jw.objectField("parts");
+        try jw.beginArray();
+        try jw.beginObject();
+        try jw.objectField("text");
+        try jw.write(prompt);
+        try jw.endObject();
+        try jw.endArray();
+        try jw.endObject();
+        try jw.endArray();
 
-        try payload.appendSlice(self.allocator, "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"");
-        try payload.appendSlice(self.allocator, escaped);
-        try payload.appendSlice(self.allocator, "\"}]}]");
-
-        // System instruction
         if (config.system_prompt) |system| {
-            const sys_escaped = try common.escapeJsonString(self.allocator, system);
-            defer self.allocator.free(sys_escaped);
-            const sys_part = try std.fmt.allocPrint(self.allocator,
-                \\,"systemInstruction":{{"parts":[{{"text":"{s}"}}]}}
-            , .{sys_escaped});
-            defer self.allocator.free(sys_part);
-            try payload.appendSlice(self.allocator, sys_part);
+            try jw.objectField("systemInstruction");
+            try jw.beginObject();
+            try jw.objectField("parts");
+            try jw.beginArray();
+            try jw.beginObject();
+            try jw.objectField("text");
+            try jw.write(system);
+            try jw.endObject();
+            try jw.endArray();
+            try jw.endObject();
         }
 
-        // Generation config
-        const gen_config = try std.fmt.allocPrint(self.allocator,
-            \\,"generationConfig":{{"temperature":{d},"maxOutputTokens":{}}}
-        , .{ config.temperature, config.max_tokens });
-        defer self.allocator.free(gen_config);
-        try payload.appendSlice(self.allocator, gen_config);
+        try jw.objectField("generationConfig");
+        try jw.beginObject();
+        try jw.objectField("temperature");
+        try jw.write(config.temperature);
+        try jw.objectField("maxOutputTokens");
+        try jw.write(config.max_tokens);
+        try jw.endObject();
 
-        try payload.appendSlice(self.allocator, "}");
+        try jw.endObject();
 
         // Streaming endpoint: streamGenerateContent with alt=sse.
         // Model is caller-controlled and lands in the URL path — validate
@@ -148,7 +160,7 @@ pub const GeminiClient = struct {
 
         const headers = self.jsonAuthHeaders();
 
-        var stream = try self.http_client.postStreaming(endpoint, &headers, payload.items);
+        var stream = try self.http_client.postStreaming(endpoint, &headers, aw.written());
         defer stream.deinit();
 
         if (@intFromEnum(stream.status) >= 400) {
@@ -197,48 +209,50 @@ pub const GeminiClient = struct {
         callback: common.StreamCallback,
         cb_context: ?*anyopaque,
     ) !void {
-        var payload: std.ArrayList(u8) = .empty;
-        defer payload.deinit(self.allocator);
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+        var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
 
-        try payload.appendSlice(self.allocator, "{\"contents\":[");
-
-        var first = true;
-        for (history) |msg| {
-            if (!first) try payload.appendSlice(self.allocator, ",");
-            first = false;
-            try self.appendMessage(&payload, msg);
-        }
-
+        try jw.beginObject();
+        try jw.objectField("contents");
+        try jw.beginArray();
+        for (history) |msg| try self.writeMessage(&jw, &aw, msg);
         if (prompt.len > 0) {
-            if (!first) try payload.appendSlice(self.allocator, ",");
-            const escaped = try common.escapeJsonString(self.allocator, prompt);
-            defer self.allocator.free(escaped);
-            const user_part = try std.fmt.allocPrint(self.allocator,
-                \\{{"role":"user","parts":[{{"text":"{s}"}}]}}
-            , .{escaped});
-            defer self.allocator.free(user_part);
-            try payload.appendSlice(self.allocator, user_part);
+            try jw.beginObject();
+            try jw.objectField("role");
+            try jw.write("user");
+            try jw.objectField("parts");
+            try jw.beginArray();
+            try jw.beginObject();
+            try jw.objectField("text");
+            try jw.write(prompt);
+            try jw.endObject();
+            try jw.endArray();
+            try jw.endObject();
         }
-
-        try payload.appendSlice(self.allocator, "]");
+        try jw.endArray();
 
         if (config.system_prompt) |system| {
-            const sys_escaped = try common.escapeJsonString(self.allocator, system);
-            defer self.allocator.free(sys_escaped);
-            const sys_part = try std.fmt.allocPrint(self.allocator,
-                \\,"systemInstruction":{{"parts":[{{"text":"{s}"}}]}}
-            , .{sys_escaped});
-            defer self.allocator.free(sys_part);
-            try payload.appendSlice(self.allocator, sys_part);
+            try jw.objectField("systemInstruction");
+            try jw.beginObject();
+            try jw.objectField("parts");
+            try jw.beginArray();
+            try jw.beginObject();
+            try jw.objectField("text");
+            try jw.write(system);
+            try jw.endObject();
+            try jw.endArray();
+            try jw.endObject();
         }
 
-        const gen_config = try std.fmt.allocPrint(self.allocator,
-            \\,"generationConfig":{{"temperature":{d},"maxOutputTokens":{}}}
-        , .{ config.temperature, config.max_tokens });
-        defer self.allocator.free(gen_config);
-        try payload.appendSlice(self.allocator, gen_config);
-
-        try payload.appendSlice(self.allocator, "}");
+        try jw.objectField("generationConfig");
+        try jw.beginObject();
+        try jw.objectField("temperature");
+        try jw.write(config.temperature);
+        try jw.objectField("maxOutputTokens");
+        try jw.write(config.max_tokens);
+        try jw.endObject();
+        try jw.endObject();
 
         try common.validateModelName(config.model);
         const endpoint = try std.fmt.allocPrint(self.allocator,
@@ -249,7 +263,7 @@ pub const GeminiClient = struct {
 
         const headers = self.jsonAuthHeaders();
 
-        var stream = try self.http_client.postStreaming(endpoint, &headers, payload.items);
+        var stream = try self.http_client.postStreaming(endpoint, &headers, aw.written());
         defer stream.deinit();
 
         if (@intFromEnum(stream.status) >= 400) {
@@ -397,64 +411,73 @@ pub const GeminiClient = struct {
         callback: common.StreamEventCallback,
         cb_context: ?*anyopaque,
     ) !void {
-        var payload: std.ArrayList(u8) = .empty;
-        defer payload.deinit(self.allocator);
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+        var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
 
-        try payload.appendSlice(self.allocator, "{\"contents\":[");
-
-        var first = true;
-        for (history) |msg| {
-            if (!first) try payload.appendSlice(self.allocator, ",");
-            first = false;
-            try self.appendMessage(&payload, msg);
-        }
-
+        try jw.beginObject();
+        try jw.objectField("contents");
+        try jw.beginArray();
+        for (history) |msg| try self.writeMessage(&jw, &aw, msg);
         if (prompt.len > 0) {
-            if (!first) try payload.appendSlice(self.allocator, ",");
-            const escaped = try common.escapeJsonString(self.allocator, prompt);
-            defer self.allocator.free(escaped);
-            const user_part = try std.fmt.allocPrint(self.allocator,
-                \\{{"role":"user","parts":[{{"text":"{s}"}}]}}
-            , .{escaped});
-            defer self.allocator.free(user_part);
-            try payload.appendSlice(self.allocator, user_part);
+            try jw.beginObject();
+            try jw.objectField("role");
+            try jw.write("user");
+            try jw.objectField("parts");
+            try jw.beginArray();
+            try jw.beginObject();
+            try jw.objectField("text");
+            try jw.write(prompt);
+            try jw.endObject();
+            try jw.endArray();
+            try jw.endObject();
         }
-        try payload.appendSlice(self.allocator, "]");
+        try jw.endArray();
 
         if (config.system_prompt) |system| {
-            const sys_escaped = try common.escapeJsonString(self.allocator, system);
-            defer self.allocator.free(sys_escaped);
-            const sys_part = try std.fmt.allocPrint(self.allocator,
-                \\,"systemInstruction":{{"parts":[{{"text":"{s}"}}]}}
-            , .{sys_escaped});
-            defer self.allocator.free(sys_part);
-            try payload.appendSlice(self.allocator, sys_part);
+            try jw.objectField("systemInstruction");
+            try jw.beginObject();
+            try jw.objectField("parts");
+            try jw.beginArray();
+            try jw.beginObject();
+            try jw.objectField("text");
+            try jw.write(system);
+            try jw.endObject();
+            try jw.endArray();
+            try jw.endObject();
         }
 
         if (config.tools) |tool_defs| {
-            try payload.appendSlice(self.allocator, ",\"tools\":[{\"functionDeclarations\":[");
-            for (tool_defs, 0..) |tool, i| {
-                if (i > 0) try payload.appendSlice(self.allocator, ",");
-                const escaped_name = try common.escapeJsonString(self.allocator, tool.name);
-                defer self.allocator.free(escaped_name);
-                const escaped_desc = try common.escapeJsonString(self.allocator, tool.description);
-                defer self.allocator.free(escaped_desc);
-                const tj = try std.fmt.allocPrint(self.allocator,
-                    \\{{"name":"{s}","description":"{s}","parameters":{s}}}
-                , .{ escaped_name, escaped_desc, tool.input_schema });
-                defer self.allocator.free(tj);
-                try payload.appendSlice(self.allocator, tj);
+            try jw.objectField("tools");
+            try jw.beginArray();
+            try jw.beginObject();
+            try jw.objectField("functionDeclarations");
+            try jw.beginArray();
+            for (tool_defs) |tool| {
+                try jw.beginObject();
+                try jw.objectField("name");
+                try jw.write(tool.name);
+                try jw.objectField("description");
+                try jw.write(tool.description);
+                try jw.objectField("parameters");
+                try jw.beginWriteRaw();
+                try aw.writer.writeAll(tool.input_schema);
+                jw.endWriteRaw();
+                try jw.endObject();
             }
-            try payload.appendSlice(self.allocator, "]}]");
+            try jw.endArray();
+            try jw.endObject();
+            try jw.endArray();
         }
 
-        const gen_config = try std.fmt.allocPrint(self.allocator,
-            \\,"generationConfig":{{"temperature":{d},"maxOutputTokens":{}}}
-        , .{ config.temperature, config.max_tokens });
-        defer self.allocator.free(gen_config);
-        try payload.appendSlice(self.allocator, gen_config);
-
-        try payload.appendSlice(self.allocator, "}");
+        try jw.objectField("generationConfig");
+        try jw.beginObject();
+        try jw.objectField("temperature");
+        try jw.write(config.temperature);
+        try jw.objectField("maxOutputTokens");
+        try jw.write(config.max_tokens);
+        try jw.endObject();
+        try jw.endObject();
 
         try common.validateModelName(config.model);
         const endpoint = try std.fmt.allocPrint(self.allocator,
@@ -474,7 +497,7 @@ pub const GeminiClient = struct {
         const status = try self.http_client.postSseStream(
             endpoint,
             &headers,
-            payload.items,
+            aw.written(),
             eventStreamHandler,
             &ev_ctx,
         );
@@ -493,62 +516,58 @@ pub const GeminiClient = struct {
     ) !common.AIResponse {
         var timer = Timer.start(self.http_client.io());
 
-        // Build contents array (Gemini format)
-        var contents: std.ArrayList(u8) = .empty;
-        defer contents.deinit(self.allocator);
+        // Build contents array (Gemini format) via std.json.Stringify.
+        var contents_aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer contents_aw.deinit();
+        var contents_jw: std.json.Stringify = .{ .writer = &contents_aw.writer, .options = .{} };
 
-        try contents.appendSlice(self.allocator, "[");
+        try contents_jw.beginArray();
+        for (context) |msg| try self.writeMessage(&contents_jw, &contents_aw, msg);
 
-        // Add context messages
-        for (context, 0..) |msg, i| {
-            if (i > 0) try contents.appendSlice(self.allocator, ",");
-            try self.appendMessage(&contents, msg);
-        }
-
-        // Add current prompt (with images if provided)
-        if (context.len > 0) try contents.appendSlice(self.allocator, ",");
-
-        const escaped_prompt = try common.escapeJsonString(self.allocator, prompt);
-        defer self.allocator.free(escaped_prompt);
-
-        try contents.appendSlice(self.allocator, "{\"role\":\"user\",\"parts\":[");
-
-        // Add text part
-        const text_part = try std.fmt.allocPrint(self.allocator, "{{\"text\":\"{s}\"}}", .{escaped_prompt});
-        defer self.allocator.free(text_part);
-        try contents.appendSlice(self.allocator, text_part);
-
-        // Add image parts if provided
+        try contents_jw.beginObject();
+        try contents_jw.objectField("role");
+        try contents_jw.write("user");
+        try contents_jw.objectField("parts");
+        try contents_jw.beginArray();
+        try contents_jw.beginObject();
+        try contents_jw.objectField("text");
+        try contents_jw.write(prompt);
+        try contents_jw.endObject();
         if (config.images) |images| {
             for (images) |img| {
+                try contents_jw.beginObject();
                 if (img.isUrl()) {
-                    // URL-based image: use file_data with file_uri
-                    const img_part = try std.fmt.allocPrint(self.allocator,
-                        \\,{{"file_data":{{"file_uri":"{s}","mime_type":"{s}"}}}}
-                    , .{ img.url.?, img.media_type });
-                    defer self.allocator.free(img_part);
-                    try contents.appendSlice(self.allocator, img_part);
+                    try contents_jw.objectField("file_data");
+                    try contents_jw.beginObject();
+                    try contents_jw.objectField("file_uri");
+                    try contents_jw.write(img.url.?);
+                    try contents_jw.objectField("mime_type");
+                    try contents_jw.write(img.media_type);
+                    try contents_jw.endObject();
                 } else {
-                    // Base64-encoded image: use inline_data
-                    const img_part = try std.fmt.allocPrint(self.allocator,
-                        \\,{{"inline_data":{{"mime_type":"{s}","data":"{s}"}}}}
-                    , .{ img.media_type, img.data });
-                    defer self.allocator.free(img_part);
-                    try contents.appendSlice(self.allocator, img_part);
+                    try contents_jw.objectField("inline_data");
+                    try contents_jw.beginObject();
+                    try contents_jw.objectField("mime_type");
+                    try contents_jw.write(img.media_type);
+                    try contents_jw.objectField("data");
+                    try contents_jw.write(img.data);
+                    try contents_jw.endObject();
                 }
+                try contents_jw.endObject();
             }
         }
+        try contents_jw.endArray();
+        try contents_jw.endObject();
+        try contents_jw.endArray();
 
-        try contents.appendSlice(self.allocator, "]}");
-
-        try contents.appendSlice(self.allocator, "]");
+        const contents_json = contents_aw.written();
 
         var turn_count: u32 = 0;
         var total_tokens: u32 = 0;
 
         // Agentic loop
         while (turn_count < config.max_turns) : (turn_count += 1) {
-            const payload = try self.buildRequestPayload(contents.items, config);
+            const payload = try self.buildRequestPayload(contents_json, config);
             defer self.allocator.free(payload);
 
             const response = try self.makeRequest(config.model, payload);
@@ -673,165 +692,134 @@ pub const GeminiClient = struct {
         contents: []const u8,
         config: common.RequestConfig,
     ) ![]u8 {
-        var payload: std.ArrayList(u8) = .empty;
-        defer payload.deinit(self.allocator);
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer aw.deinit();
+        var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
 
-        try payload.appendSlice(self.allocator, "{");
+        try jw.beginObject();
 
-        const contents_part = try std.fmt.allocPrint(self.allocator, "\"contents\":{s},", .{contents});
-        defer self.allocator.free(contents_part);
-        try payload.appendSlice(self.allocator, contents_part);
+        // `contents` is already a serialised JSON array — splice raw.
+        try jw.objectField("contents");
+        try jw.beginWriteRaw();
+        try aw.writer.writeAll(contents);
+        jw.endWriteRaw();
 
-        // System instruction
         if (config.system_prompt) |system| {
-            const escaped = try common.escapeJsonString(self.allocator, system);
-            defer self.allocator.free(escaped);
-            const sys_part = try std.fmt.allocPrint(self.allocator,
-                \\"systemInstruction":{{"parts":[{{"text":"{s}"}}]}},
-            , .{escaped});
-            defer self.allocator.free(sys_part);
-            try payload.appendSlice(self.allocator, sys_part);
+            try jw.objectField("systemInstruction");
+            try jw.beginObject();
+            try jw.objectField("parts");
+            try jw.beginArray();
+            try jw.beginObject();
+            try jw.objectField("text");
+            try jw.write(system);
+            try jw.endObject();
+            try jw.endArray();
+            try jw.endObject();
         }
 
-        // Tools: function declarations + server-side tools (google_search, url_context, googleMaps)
-        {
-            const has_functions = config.tools != null;
-            var has_gemini_tools = false;
+        // tools[]: functionDeclarations container + server-side tool blobs.
+        const has_functions = config.tools != null;
+        var has_gemini_tools = false;
+        if (config.server_tools) |st| {
+            for (st) |tool| {
+                if (tool.isGeminiTool()) {
+                    has_gemini_tools = true;
+                    break;
+                }
+            }
+        }
+        if (has_functions or has_gemini_tools) {
+            try jw.objectField("tools");
+            try jw.beginArray();
+            if (config.tools) |tool_defs| {
+                try jw.beginObject();
+                try jw.objectField("functionDeclarations");
+                try jw.beginArray();
+                for (tool_defs) |tool| {
+                    try jw.beginObject();
+                    try jw.objectField("name");
+                    try jw.write(tool.name);
+                    try jw.objectField("description");
+                    try jw.write(tool.description);
+                    try jw.objectField("parameters");
+                    try jw.beginWriteRaw();
+                    try aw.writer.writeAll(tool.input_schema);
+                    jw.endWriteRaw();
+                    try jw.endObject();
+                }
+                try jw.endArray();
+                try jw.endObject();
+            }
             if (config.server_tools) |st| {
                 for (st) |tool| {
-                    if (tool.isGeminiTool()) {
-                        has_gemini_tools = true;
-                        break;
+                    if (tool.toGeminiToolJson()) |json| {
+                        try jw.beginWriteRaw();
+                        try aw.writer.writeAll(json);
+                        jw.endWriteRaw();
                     }
                 }
             }
-
-            if (has_functions or has_gemini_tools) {
-                try payload.appendSlice(self.allocator, "\"tools\":[");
-                var tool_obj_count: usize = 0;
-
-                // Function declarations as one tool object
-                if (config.tools) |tool_defs| {
-                    try payload.appendSlice(self.allocator, "{\"functionDeclarations\":[");
-                    for (tool_defs, 0..) |tool, i| {
-                        if (i > 0) try payload.appendSlice(self.allocator, ",");
-                        const escaped_name = try common.escapeJsonString(self.allocator, tool.name);
-                        defer self.allocator.free(escaped_name);
-                        const escaped_desc = try common.escapeJsonString(self.allocator, tool.description);
-                        defer self.allocator.free(escaped_desc);
-
-                        const tool_json = try std.fmt.allocPrint(self.allocator,
-                            \\{{"name":"{s}","description":"{s}","parameters":{s}}}
-                        , .{ escaped_name, escaped_desc, tool.input_schema });
-                        defer self.allocator.free(tool_json);
-                        try payload.appendSlice(self.allocator, tool_json);
-                    }
-                    try payload.appendSlice(self.allocator, "]}");
-                    tool_obj_count += 1;
-                }
-
-                // Server-side tools as separate objects
-                if (config.server_tools) |st| {
-                    for (st) |tool| {
-                        if (tool.toGeminiToolJson()) |json| {
-                            if (tool_obj_count > 0) try payload.appendSlice(self.allocator, ",");
-                            try payload.appendSlice(self.allocator, json);
-                            tool_obj_count += 1;
-                        }
-                    }
-                }
-
-                try payload.appendSlice(self.allocator, "],");
-            }
+            try jw.endArray();
         }
 
-        // Tool config: functionCallingConfig + retrievalConfig
-        {
-            const has_fc_config = config.tool_choice != null;
-            const has_retrieval_config = config.maps_latitude != null and config.maps_longitude != null;
+        // toolConfig: functionCallingConfig + retrievalConfig
+        const has_fc_config = config.tool_choice != null;
+        const has_retrieval_config = config.maps_latitude != null and config.maps_longitude != null;
+        if (has_fc_config or has_retrieval_config) {
+            try jw.objectField("toolConfig");
+            try jw.beginObject();
+            if (config.tool_choice) |tc| {
+                try jw.objectField("functionCallingConfig");
+                try jw.beginObject();
+                try jw.objectField("mode");
+                try jw.write(tc.toGeminiMode());
 
-            if (has_fc_config or has_retrieval_config) {
-                try payload.appendSlice(self.allocator, "\"toolConfig\":{");
-                var tc_count: usize = 0;
-
-                // functionCallingConfig (mode + allowedFunctionNames)
-                if (config.tool_choice) |tc| {
-                    try payload.appendSlice(self.allocator, "\"functionCallingConfig\":{");
-
-                    const mode_str = try std.fmt.allocPrint(self.allocator,
-                        "\"mode\":\"{s}\"", .{tc.toGeminiMode()});
-                    defer self.allocator.free(mode_str);
-                    try payload.appendSlice(self.allocator, mode_str);
-
-                    // allowedFunctionNames: from explicit list or single function name
-                    const fn_names = config.allowed_function_names;
-                    const single_fn = if (tc == .function) config.tool_choice_function else null;
-
-                    if (fn_names != null or single_fn != null) {
-                        try payload.appendSlice(self.allocator, ",\"allowedFunctionNames\":[");
-                        var fn_count: usize = 0;
-
-                        if (fn_names) |names| {
-                            for (names) |name| {
-                                if (fn_count > 0) try payload.appendSlice(self.allocator, ",");
-                                const escaped = try common.escapeJsonString(self.allocator, name);
-                                defer self.allocator.free(escaped);
-                                const fn_str = try std.fmt.allocPrint(self.allocator, "\"{s}\"", .{escaped});
-                                defer self.allocator.free(fn_str);
-                                try payload.appendSlice(self.allocator, fn_str);
-                                fn_count += 1;
-                            }
-                        } else if (single_fn) |name| {
-                            const escaped = try common.escapeJsonString(self.allocator, name);
-                            defer self.allocator.free(escaped);
-                            const fn_str = try std.fmt.allocPrint(self.allocator, "\"{s}\"", .{escaped});
-                            defer self.allocator.free(fn_str);
-                            try payload.appendSlice(self.allocator, fn_str);
-                        }
-
-                        try payload.appendSlice(self.allocator, "]");
+                const fn_names = config.allowed_function_names;
+                const single_fn = if (tc == .function) config.tool_choice_function else null;
+                if (fn_names != null or single_fn != null) {
+                    try jw.objectField("allowedFunctionNames");
+                    try jw.beginArray();
+                    if (fn_names) |names| {
+                        for (names) |name| try jw.write(name);
+                    } else if (single_fn) |name| {
+                        try jw.write(name);
                     }
-
-                    try payload.appendSlice(self.allocator, "}");
-                    tc_count += 1;
+                    try jw.endArray();
                 }
-
-                // retrievalConfig (Google Maps location)
-                if (has_retrieval_config) {
-                    if (tc_count > 0) try payload.appendSlice(self.allocator, ",");
-                    const rc = try std.fmt.allocPrint(self.allocator,
-                        \\"retrievalConfig":{{"latLng":{{"latitude":{d},"longitude":{d}}}}}
-                    , .{ config.maps_latitude.?, config.maps_longitude.? });
-                    defer self.allocator.free(rc);
-                    try payload.appendSlice(self.allocator, rc);
-                }
-
-                try payload.appendSlice(self.allocator, "},");
+                try jw.endObject();
             }
+            if (has_retrieval_config) {
+                try jw.objectField("retrievalConfig");
+                try jw.beginObject();
+                try jw.objectField("latLng");
+                try jw.beginObject();
+                try jw.objectField("latitude");
+                try jw.write(config.maps_latitude.?);
+                try jw.objectField("longitude");
+                try jw.write(config.maps_longitude.?);
+                try jw.endObject();
+                try jw.endObject();
+            }
+            try jw.endObject();
         }
 
-        // Generation config
-        {
-            const gen_config = try std.fmt.allocPrint(self.allocator,
-                \\"generationConfig":{{"temperature":{d},"maxOutputTokens":{},"topP":{d}
-            , .{ config.temperature, config.max_tokens, config.top_p });
-            defer self.allocator.free(gen_config);
-            try payload.appendSlice(self.allocator, gen_config);
-
-            if (config.media_resolution) |mr| {
-                const mr_str = try std.fmt.allocPrint(self.allocator,
-                    \\,"mediaResolution":"{s}"
-                , .{mr.toApiString()});
-                defer self.allocator.free(mr_str);
-                try payload.appendSlice(self.allocator, mr_str);
-            }
-
-            try payload.appendSlice(self.allocator, "}");
+        try jw.objectField("generationConfig");
+        try jw.beginObject();
+        try jw.objectField("temperature");
+        try jw.write(config.temperature);
+        try jw.objectField("maxOutputTokens");
+        try jw.write(config.max_tokens);
+        try jw.objectField("topP");
+        try jw.write(config.top_p);
+        if (config.media_resolution) |mr| {
+            try jw.objectField("mediaResolution");
+            try jw.write(mr.toApiString());
         }
+        try jw.endObject();
 
-        try payload.appendSlice(self.allocator, "}");
+        try jw.endObject();
 
-        return payload.toOwnedSlice(self.allocator);
+        return aw.toOwnedSlice();
     }
 
     fn makeRequest(self: *GeminiClient, model: []const u8, payload: []const u8) ![]u8 {
@@ -870,78 +858,98 @@ pub const GeminiClient = struct {
         };
     }
 
-    fn appendMessage(self: *GeminiClient, writer: *std.ArrayList(u8), msg: common.AIMessage) !void {
+    /// Write one Gemini Content object (role + parts[]) via the supplied
+    /// Stringify writer. The writer must already be inside an array
+    /// context. `aw` is exposed so callers can splice raw JSON (the
+    /// pre-encoded function-call `args` object) via beginWriteRaw.
+    fn writeMessage(
+        self: *GeminiClient,
+        jw: *std.json.Stringify,
+        aw: *std.Io.Writer.Allocating,
+        msg: common.AIMessage,
+    ) !void {
+        _ = self;
         if (msg.tool_calls) |tool_calls| {
-            // Model message with function calls
-            try writer.appendSlice(self.allocator, "{\"role\":\"model\",\"parts\":[");
-
-            var has_part = false;
-
-            // Add text part if present
+            try jw.beginObject();
+            try jw.objectField("role");
+            try jw.write("model");
+            try jw.objectField("parts");
+            try jw.beginArray();
             if (msg.content.len > 0) {
-                const escaped = try common.escapeJsonString(self.allocator, msg.content);
-                defer self.allocator.free(escaped);
-                const text_part = try std.fmt.allocPrint(self.allocator,
-                    \\{{"text":"{s}"}}
-                , .{escaped});
-                defer self.allocator.free(text_part);
-                try writer.appendSlice(self.allocator, text_part);
-                has_part = true;
+                try jw.beginObject();
+                try jw.objectField("text");
+                try jw.write(msg.content);
+                try jw.endObject();
             }
-
-            // Add functionCall parts
             for (tool_calls) |call| {
-                if (has_part) try writer.appendSlice(self.allocator, ",");
-                const escaped_name = try common.escapeJsonString(self.allocator, call.name);
-                defer self.allocator.free(escaped_name);
-                // arguments is a JSON string, embed it directly as the args object
-                const call_json = try std.fmt.allocPrint(self.allocator,
-                    \\{{"functionCall":{{"name":"{s}","args":{s}}}}}
-                , .{ escaped_name, call.arguments });
-                defer self.allocator.free(call_json);
-                try writer.appendSlice(self.allocator, call_json);
-                has_part = true;
+                try jw.beginObject();
+                try jw.objectField("functionCall");
+                try jw.beginObject();
+                try jw.objectField("name");
+                try jw.write(call.name);
+                try jw.objectField("args");
+                // args is already a JSON object string from a prior turn;
+                // splice it raw instead of double-encoding as a string.
+                try jw.beginWriteRaw();
+                try aw.writer.writeAll(call.arguments);
+                jw.endWriteRaw();
+                try jw.endObject();
+                try jw.endObject();
             }
-
-            try writer.appendSlice(self.allocator, "]}");
+            try jw.endArray();
+            try jw.endObject();
         } else if (msg.tool_results) |tool_results| {
-            // User message with function responses
-            try writer.appendSlice(self.allocator, "{\"role\":\"user\",\"parts\":[");
-
-            for (tool_results, 0..) |result, i| {
-                if (i > 0) try writer.appendSlice(self.allocator, ",");
-                // Gemini uses function name (not ID) in responses
+            try jw.beginObject();
+            try jw.objectField("role");
+            try jw.write("user");
+            try jw.objectField("parts");
+            try jw.beginArray();
+            for (tool_results) |result| {
                 const name = result.tool_name orelse result.tool_call_id;
-                const escaped_name = try common.escapeJsonString(self.allocator, name);
-                defer self.allocator.free(escaped_name);
-                const escaped_content = try common.escapeJsonString(self.allocator, result.content);
-                defer self.allocator.free(escaped_content);
-
-                const result_json = try std.fmt.allocPrint(self.allocator,
-                    \\{{"functionResponse":{{"name":"{s}","response":{{"content":"{s}"}}}}}}
-                , .{ escaped_name, escaped_content });
-                defer self.allocator.free(result_json);
-                try writer.appendSlice(self.allocator, result_json);
+                try jw.beginObject();
+                try jw.objectField("functionResponse");
+                try jw.beginObject();
+                try jw.objectField("name");
+                try jw.write(name);
+                try jw.objectField("response");
+                try jw.beginObject();
+                try jw.objectField("content");
+                try jw.write(result.content);
+                try jw.endObject();
+                try jw.endObject();
+                try jw.endObject();
             }
-
-            try writer.appendSlice(self.allocator, "]}");
+            try jw.endArray();
+            try jw.endObject();
         } else {
-            // Simple text message
-            const role = switch (msg.role) {
+            const role: []const u8 = switch (msg.role) {
                 .user => "user",
                 .assistant => "model",
                 else => "user",
             };
-
-            const escaped = try common.escapeJsonString(self.allocator, msg.content);
-            defer self.allocator.free(escaped);
-
-            const msg_json = try std.fmt.allocPrint(self.allocator,
-                \\{{"role":"{s}","parts":[{{"text":"{s}"}}]}}
-            , .{ role, escaped });
-            defer self.allocator.free(msg_json);
-            try writer.appendSlice(self.allocator, msg_json);
+            try jw.beginObject();
+            try jw.objectField("role");
+            try jw.write(role);
+            try jw.objectField("parts");
+            try jw.beginArray();
+            try jw.beginObject();
+            try jw.objectField("text");
+            try jw.write(msg.content);
+            try jw.endObject();
+            try jw.endArray();
+            try jw.endObject();
         }
+    }
+
+    /// Old-API entry kept for back-compat with one remaining caller path
+    /// (sendMessageWithContext that builds via temporary ArrayList). Wraps
+    /// the streaming writer onto an in-memory buffer.
+    fn appendMessage(self: *GeminiClient, writer: *std.ArrayList(u8), msg: common.AIMessage) !void {
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+        var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+        try self.writeMessage(&jw, &aw, msg);
+        try writer.appendSlice(self.allocator, aw.written());
     }
 
     /// Helper: Create default config for Gemini Pro
@@ -993,12 +1001,9 @@ pub const GeminiClient = struct {
         const num_bytes_str = try std.fmt.allocPrint(self.allocator, "{d}", .{file_data.len});
         defer self.allocator.free(num_bytes_str);
 
-        const escaped_name = try common.escapeJsonString(self.allocator, filename);
-        defer self.allocator.free(escaped_name);
-
-        const metadata = try std.fmt.allocPrint(self.allocator,
-            \\{{"file":{{"display_name":"{s}"}}}}
-        , .{escaped_name});
+        const metadata = try std.json.Stringify.valueAlloc(self.allocator, .{
+            .file = .{ .display_name = filename },
+        }, .{});
         defer self.allocator.free(metadata);
 
         const start_headers = [_]std.http.Header{
@@ -1198,35 +1203,33 @@ pub const GeminiClient = struct {
         task_type: ?common.EmbeddingTaskType,
         output_dimensionality: ?u32,
     ) ![]common.EmbeddingResult {
-        var payload: std.ArrayList(u8) = .empty;
-        defer payload.deinit(self.allocator);
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+        var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
 
-        try payload.appendSlice(self.allocator, "{\"content\":{\"parts\":[");
-
-        for (texts, 0..) |text, i| {
-            if (i > 0) try payload.appendSlice(self.allocator, ",");
-            const escaped = try common.escapeJsonString(self.allocator, text);
-            defer self.allocator.free(escaped);
-            const part = try std.fmt.allocPrint(self.allocator, "{{\"text\":\"{s}\"}}", .{escaped});
-            defer self.allocator.free(part);
-            try payload.appendSlice(self.allocator, part);
+        try jw.beginObject();
+        try jw.objectField("content");
+        try jw.beginObject();
+        try jw.objectField("parts");
+        try jw.beginArray();
+        for (texts) |text| {
+            try jw.beginObject();
+            try jw.objectField("text");
+            try jw.write(text);
+            try jw.endObject();
         }
-
-        try payload.appendSlice(self.allocator, "]}");
+        try jw.endArray();
+        try jw.endObject();
 
         if (task_type) |tt| {
-            const tt_str = try std.fmt.allocPrint(self.allocator, ",\"taskType\":\"{s}\"", .{tt.toApiString()});
-            defer self.allocator.free(tt_str);
-            try payload.appendSlice(self.allocator, tt_str);
+            try jw.objectField("taskType");
+            try jw.write(tt.toApiString());
         }
-
         if (output_dimensionality) |dim| {
-            const dim_str = try std.fmt.allocPrint(self.allocator, ",\"outputDimensionality\":{d}", .{dim});
-            defer self.allocator.free(dim_str);
-            try payload.appendSlice(self.allocator, dim_str);
+            try jw.objectField("outputDimensionality");
+            try jw.write(dim);
         }
-
-        try payload.appendSlice(self.allocator, "}");
+        try jw.endObject();
 
         // POST to embedContent endpoint. EMBEDDING_MODEL is a
         // compile-time constant so no validateModelName needed.
@@ -1239,7 +1242,7 @@ pub const GeminiClient = struct {
 
         const headers = self.jsonAuthHeaders();
 
-        var response = try self.http_client.post(endpoint, &headers, payload.items);
+        var response = try self.http_client.post(endpoint, &headers, aw.written());
         defer response.deinit();
 
         if (response.status != .ok) {

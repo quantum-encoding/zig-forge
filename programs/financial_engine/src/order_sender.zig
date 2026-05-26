@@ -1,6 +1,9 @@
 const std = @import("std");
-const json_safe = @import("json-util");
 const Decimal = @import("decimal.zig").Decimal;
+
+// JSON envelopes are produced via std.json.Stringify on anonymous
+// structs and a fixed-format Decimal renderer. No hand-rolled escape
+// helpers, no allocPrint+{s} concatenation. Batch 9.
 
 // ZeroMQ C bindings
 const c = @cImport({
@@ -131,45 +134,20 @@ pub const OrderSender = struct {
         const seq = self.next_signal_seq;
         self.next_signal_seq +%= 1;
 
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
-        defer buf.deinit(std.heap.page_allocator);
-        try buf.ensureTotalCapacity(std.heap.page_allocator, order_msg_capacity);
-
-        try buf.appendSlice(std.heap.page_allocator, "{\"action\":\"");
-        try buf.appendSlice(std.heap.page_allocator, side.wireString());
-        try buf.appendSlice(std.heap.page_allocator, "\",\"symbol\":");
-        // Symbol is caller-supplied (potentially from an upstream feed
-        // handler). Escape so a hostile or malformed ticker can't break
-        // out of the JSON string and inject sibling fields.
-        try json_safe.appendQuotedString(std.heap.page_allocator, &buf, symbol);
-        try buf.appendSlice(std.heap.page_allocator, ",\"quantity\":");
-        // Decimal -> "1.234000000" (9 fractional digits). Quoted because
-        // a JSON number is f64 in most decoders and would lose precision.
-        try appendQuotedDecimal(std.heap.page_allocator, &buf, quantity);
-        try buf.appendSlice(std.heap.page_allocator, ",\"type\":\"");
-        try buf.appendSlice(std.heap.page_allocator, switch (order_type) {
-            .market => "MARKET",
-            .limit => "LIMIT",
-        });
-        try buf.appendSlice(std.heap.page_allocator, "\"");
-
-        if (order_type == .limit) {
-            try buf.appendSlice(std.heap.page_allocator, ",\"price\":");
-            try appendQuotedDecimal(std.heap.page_allocator, &buf, price);
-        }
-
-        // timestamp + signal_id round out the envelope. signal_id format
-        // is "hft_<instance_nonce_hex>_<seq_dec>" — readable in logs and
-        // unique across (instance, sequence) pairs.
-        var tail_buf: [128]u8 = undefined;
-        const tail = try std.fmt.bufPrint(
-            &tail_buf,
-            ",\"timestamp\":{d},\"signal_id\":\"hft_{x:0>16}_{d}\"}}",
-            .{ timestamp_sec, self.instance_nonce, seq },
+        const payload_bytes = try buildOrderMessage(
+            std.heap.page_allocator,
+            side,
+            symbol,
+            quantity,
+            order_type,
+            price,
+            timestamp_sec,
+            self.instance_nonce,
+            seq,
         );
-        try buf.appendSlice(std.heap.page_allocator, tail);
+        defer std.heap.page_allocator.free(payload_bytes);
 
-        const result = c.zmq_send(self.socket, buf.items.ptr, buf.items.len, 0);
+        const result = c.zmq_send(self.socket, payload_bytes.ptr, payload_bytes.len, 0);
         if (result < 0) {
             std.debug.print("❌ Failed to send order\n", .{});
             return error.SendFailed;
@@ -237,26 +215,13 @@ fn renderDecimal(buf: []u8, value: Decimal) []u8 {
         std.fmt.bufPrint(buf, "{d}.{s}", .{ integer_part, &dec_digits }) catch unreachable;
 }
 
-/// Append a Decimal as a JSON STRING value: "1.234000000". The rendered
-/// digits never contain a quote or backslash (always [-0-9.]) so no
-/// further escaping is needed beyond the surrounding quotes.
-fn appendQuotedDecimal(
-    allocator: std.mem.Allocator,
-    buf: *std.ArrayListUnmanaged(u8),
-    value: Decimal,
-) !void {
-    try buf.append(allocator, '"');
-    var tmp: [80]u8 = undefined;
-    const rendered = renderDecimal(&tmp, value);
-    try buf.appendSlice(allocator, rendered);
-    try buf.append(allocator, '"');
-}
-
 // ── Tests ──────────────────────────────────────────────────────────
 
-/// Mock-able message builder — same code path as sendOrder uses to
-/// produce its JSON envelope, but with no ZMQ side-effect. This lets
-/// tests exercise the wire format directly.
+/// Build a JSON-encoded order envelope. Produces exactly the bytes
+/// that get pushed onto the ZeroMQ socket. All field serialisation
+/// (string escaping, integer formatting, optional field omission) is
+/// owned by std.json.Stringify; the Decimal-as-quoted-string convention
+/// is encoded via renderDecimal + jw.write (which quotes-and-escapes).
 fn buildOrderMessage(
     allocator: std.mem.Allocator,
     side: Side,
@@ -268,36 +233,46 @@ fn buildOrderMessage(
     instance_nonce: u64,
     seq: u64,
 ) ![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
 
-    try buf.appendSlice(allocator, "{\"action\":\"");
-    try buf.appendSlice(allocator, side.wireString());
-    try buf.appendSlice(allocator, "\",\"symbol\":");
-    try json_safe.appendQuotedString(allocator, &buf, symbol);
-    try buf.appendSlice(allocator, ",\"quantity\":");
-    try appendQuotedDecimal(allocator, &buf, quantity);
-    try buf.appendSlice(allocator, ",\"type\":\"");
-    try buf.appendSlice(allocator, switch (order_type) {
+    var qty_buf: [80]u8 = undefined;
+    const qty_str = renderDecimal(&qty_buf, quantity);
+    var price_buf: [80]u8 = undefined;
+    const price_str = renderDecimal(&price_buf, price);
+
+    var sigid_buf: [48]u8 = undefined;
+    const sigid_str = try std.fmt.bufPrint(
+        &sigid_buf,
+        "hft_{x:0>16}_{d}",
+        .{ instance_nonce, seq },
+    );
+
+    try jw.beginObject();
+    try jw.objectField("action");
+    try jw.write(side.wireString());
+    try jw.objectField("symbol");
+    try jw.write(symbol);
+    try jw.objectField("quantity");
+    // Decimal-as-quoted-string preserves i128 precision across the wire.
+    try jw.write(qty_str);
+    try jw.objectField("type");
+    try jw.write(switch (order_type) {
         .market => "MARKET",
         .limit => "LIMIT",
     });
-    try buf.appendSlice(allocator, "\"");
-
     if (order_type == .limit) {
-        try buf.appendSlice(allocator, ",\"price\":");
-        try appendQuotedDecimal(allocator, &buf, price);
+        try jw.objectField("price");
+        try jw.write(price_str);
     }
+    try jw.objectField("timestamp");
+    try jw.write(timestamp_sec);
+    try jw.objectField("signal_id");
+    try jw.write(sigid_str);
+    try jw.endObject();
 
-    var tail_buf: [128]u8 = undefined;
-    const tail = try std.fmt.bufPrint(
-        &tail_buf,
-        ",\"timestamp\":{d},\"signal_id\":\"hft_{x:0>16}_{d}\"}}",
-        .{ timestamp_sec, instance_nonce, seq },
-    );
-    try buf.appendSlice(allocator, tail);
-
-    return buf.toOwnedSlice(allocator);
+    return aw.toOwnedSlice();
 }
 
 test "order_sender: market order omits price field" {

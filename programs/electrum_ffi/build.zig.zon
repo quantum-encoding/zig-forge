@@ -8,9 +8,5 @@
         "build.zig.zon",
         "src",
     },
-    .dependencies = .{
-        .zig_json_util = .{
-            .path = "../zig_json_util",
-        },
-    },
+    .dependencies = .{},
 }

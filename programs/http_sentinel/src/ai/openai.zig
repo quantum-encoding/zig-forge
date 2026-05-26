@@ -113,30 +113,26 @@ pub const OpenAIClient = struct {
         callback: common.StreamCallback,
         context: ?*anyopaque,
     ) !void {
-        // Build simple payload with stream: true
-        const escaped = try common.escapeJsonString(self.allocator, prompt);
-        defer self.allocator.free(escaped);
+        // Payload goes through std.json.Stringify on a streaming writer —
+        // escaping and UTF-8 handling are owned by the standard library.
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+        var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
 
-        var payload: std.ArrayList(u8) = .empty;
-        defer payload.deinit(self.allocator);
-
-        const model_part = try std.fmt.allocPrint(self.allocator,
-            \\{{"model":"{s}","stream":true,"input":"{s}"
-        , .{ config.model, escaped });
-        defer self.allocator.free(model_part);
-        try payload.appendSlice(self.allocator, model_part);
-
+        try jw.beginObject();
+        try jw.objectField("model");
+        try jw.write(config.model);
+        try jw.objectField("stream");
+        try jw.write(true);
+        try jw.objectField("input");
+        try jw.write(prompt);
         if (config.system_prompt) |system| {
-            const sys_escaped = try common.escapeJsonString(self.allocator, system);
-            defer self.allocator.free(sys_escaped);
-            const sys_part = try std.fmt.allocPrint(self.allocator,
-                \\,"instructions":"{s}"
-            , .{sys_escaped});
-            defer self.allocator.free(sys_part);
-            try payload.appendSlice(self.allocator, sys_part);
+            try jw.objectField("instructions");
+            try jw.write(system);
         }
+        try jw.endObject();
 
-        try payload.appendSlice(self.allocator, "}");
+        const payload_bytes = aw.written();
 
         // Make streaming request
         const endpoint = try std.fmt.allocPrint(self.allocator, "{s}/responses", .{self.base_url});
@@ -150,7 +146,7 @@ pub const OpenAIClient = struct {
             .{ .name = "Authorization", .value = auth_header },
         };
 
-        var stream = try self.http_client.postStreaming(endpoint, &headers, payload.items);
+        var stream = try self.http_client.postStreaming(endpoint, &headers, payload_bytes);
         defer stream.deinit();
 
         if (@intFromEnum(stream.status) >= 400) {
@@ -302,72 +298,65 @@ pub const OpenAIClient = struct {
         callback: common.StreamEventCallback,
         cb_context: ?*anyopaque,
     ) !void {
-        // Build structured input array: history (handles function_call /
-        // function_call_output items) → user prompt.
-        var input_json: std.ArrayList(u8) = .empty;
-        defer input_json.deinit(self.allocator);
-        try input_json.appendSlice(self.allocator, "[");
-        var first = true;
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+        var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
 
-        for (history) |msg| {
-            try self.appendResponsesApiItem(&input_json, msg, &first);
-        }
+        try jw.beginObject();
+        try jw.objectField("model");
+        try jw.write(config.model);
+        try jw.objectField("stream");
+        try jw.write(true);
 
+        try jw.objectField("input");
+        try jw.beginArray();
+        for (history) |msg| try self.writeResponsesApiItem(&jw, msg);
         if (prompt.len > 0) {
-            if (!first) try input_json.appendSlice(self.allocator, ",");
-            const escaped = try common.escapeJsonString(self.allocator, prompt);
-            defer self.allocator.free(escaped);
-            const um = try std.fmt.allocPrint(self.allocator,
-                \\{{"role":"user","content":"{s}"}}
-            , .{escaped});
-            defer self.allocator.free(um);
-            try input_json.appendSlice(self.allocator, um);
+            try jw.beginObject();
+            try jw.objectField("role");
+            try jw.write("user");
+            try jw.objectField("content");
+            try jw.write(prompt);
+            try jw.endObject();
         }
-        try input_json.appendSlice(self.allocator, "]");
+        try jw.endArray();
 
-        // Tools array.
-        var tools_json: std.ArrayList(u8) = .empty;
-        defer tools_json.deinit(self.allocator);
-        try tools_json.appendSlice(self.allocator, "[");
+        try jw.objectField("tools");
+        try jw.beginArray();
         if (config.tools) |tool_defs| {
-            for (tool_defs, 0..) |tool, i| {
-                if (i > 0) try tools_json.appendSlice(self.allocator, ",");
-                const escaped_name = try common.escapeJsonString(self.allocator, tool.name);
-                defer self.allocator.free(escaped_name);
-                const escaped_desc = try common.escapeJsonString(self.allocator, tool.description);
-                defer self.allocator.free(escaped_desc);
-                const tj = try std.fmt.allocPrint(self.allocator,
-                    \\{{"type":"function","name":"{s}","description":"{s}","parameters":{s}}}
-                , .{ escaped_name, escaped_desc, tool.input_schema });
-                defer self.allocator.free(tj);
-                try tools_json.appendSlice(self.allocator, tj);
+            for (tool_defs) |tool| {
+                try jw.beginObject();
+                try jw.objectField("type");
+                try jw.write("function");
+                try jw.objectField("name");
+                try jw.write(tool.name);
+                try jw.objectField("description");
+                try jw.write(tool.description);
+                try jw.objectField("parameters");
+                try jw.beginWriteRaw();
+                try aw.writer.writeAll(tool.input_schema);
+                jw.endWriteRaw();
+                try jw.endObject();
             }
         }
-        try tools_json.appendSlice(self.allocator, "]");
+        try jw.endArray();
 
-        var optional_parts: std.ArrayList(u8) = .empty;
-        defer optional_parts.deinit(self.allocator);
+        try jw.objectField("reasoning");
+        try jw.beginObject();
+        try jw.objectField("effort");
+        try jw.write(config.reasoning_effort.toString());
+        try jw.endObject();
+
+        try jw.objectField("max_output_tokens");
+        try jw.write(config.max_tokens);
+
         if (config.system_prompt) |system| {
-            const escaped_sys = try common.escapeJsonString(self.allocator, system);
-            defer self.allocator.free(escaped_sys);
-            const inst = try std.fmt.allocPrint(self.allocator,
-                \\,"instructions":"{s}"
-            , .{escaped_sys});
-            defer self.allocator.free(inst);
-            try optional_parts.appendSlice(self.allocator, inst);
+            try jw.objectField("instructions");
+            try jw.write(system);
         }
+        try jw.endObject();
 
-        const payload = try std.fmt.allocPrint(self.allocator,
-            \\{{"model":"{s}","stream":true,"input":{s},"tools":{s},"reasoning":{{"effort":"{s}"}},"max_output_tokens":{}{s}}}
-        , .{
-            config.model,
-            input_json.items,
-            tools_json.items,
-            config.reasoning_effort.toString(),
-            config.max_tokens,
-            optional_parts.items,
-        });
-        defer self.allocator.free(payload);
+        const payload = aw.written();
 
         const endpoint = try std.fmt.allocPrint(self.allocator, "{s}/responses", .{self.base_url});
         defer self.allocator.free(endpoint);
@@ -409,44 +398,36 @@ pub const OpenAIClient = struct {
         callback: common.StreamCallback,
         cb_context: ?*anyopaque,
     ) !void {
-        // Build structured input array: previous turns + current user prompt.
-        var input_json: std.ArrayList(u8) = .empty;
-        defer input_json.deinit(self.allocator);
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+        var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
 
-        try input_json.appendSlice(self.allocator, "[");
-        var first = true;
-        for (history) |msg| {
-            try self.appendResponsesApiItem(&input_json, msg, &first);
-        }
+        try jw.beginObject();
+        try jw.objectField("model");
+        try jw.write(config.model);
+        try jw.objectField("stream");
+        try jw.write(true);
+
+        try jw.objectField("input");
+        try jw.beginArray();
+        for (history) |msg| try self.writeResponsesApiItem(&jw, msg);
         if (prompt.len > 0) {
-            if (!first) try input_json.appendSlice(self.allocator, ",");
-            const escaped = try common.escapeJsonString(self.allocator, prompt);
-            defer self.allocator.free(escaped);
-            const user_msg = try std.fmt.allocPrint(self.allocator,
-                \\{{"role":"user","content":"{s}"}}
-            , .{escaped});
-            defer self.allocator.free(user_msg);
-            try input_json.appendSlice(self.allocator, user_msg);
+            try jw.beginObject();
+            try jw.objectField("role");
+            try jw.write("user");
+            try jw.objectField("content");
+            try jw.write(prompt);
+            try jw.endObject();
         }
-        try input_json.appendSlice(self.allocator, "]");
+        try jw.endArray();
 
-        // Optional system prompt → instructions field.
-        var optional_parts: std.ArrayList(u8) = .empty;
-        defer optional_parts.deinit(self.allocator);
         if (config.system_prompt) |system| {
-            const escaped_sys = try common.escapeJsonString(self.allocator, system);
-            defer self.allocator.free(escaped_sys);
-            const inst = try std.fmt.allocPrint(self.allocator,
-                \\,"instructions":"{s}"
-            , .{escaped_sys});
-            defer self.allocator.free(inst);
-            try optional_parts.appendSlice(self.allocator, inst);
+            try jw.objectField("instructions");
+            try jw.write(system);
         }
+        try jw.endObject();
 
-        const payload = try std.fmt.allocPrint(self.allocator,
-            \\{{"model":"{s}","stream":true,"input":{s}{s}}}
-        , .{ config.model, input_json.items, optional_parts.items });
-        defer self.allocator.free(payload);
+        const payload = aw.written();
 
         const endpoint = try std.fmt.allocPrint(self.allocator, "{s}/responses", .{self.base_url});
         defer self.allocator.free(endpoint);
@@ -642,83 +623,69 @@ pub const OpenAIClient = struct {
     ) !common.AIResponse {
         var timer = Timer.start(self.http_client.io());
 
-        // Build structured input for Responses API
-        var input_json: std.ArrayList(u8) = .empty;
-        defer input_json.deinit(self.allocator);
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+        var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
 
+        try jw.beginObject();
+        try jw.objectField("model");
+        try jw.write(config.model);
+
+        try jw.objectField("input");
         if (context.len == 0) {
             // First turn: simple string input
-            const escaped = try common.escapeJsonString(self.allocator, prompt);
-            defer self.allocator.free(escaped);
-            const input_str = try std.fmt.allocPrint(self.allocator, "\"{s}\"", .{escaped});
-            defer self.allocator.free(input_str);
-            try input_json.appendSlice(self.allocator, input_str);
+            try jw.write(prompt);
         } else {
             // Multi-turn: structured input array with conversation history
-            try input_json.appendSlice(self.allocator, "[");
-            var first = true;
-            for (context) |msg| {
-                try self.appendResponsesApiItem(&input_json, msg, &first);
-            }
+            try jw.beginArray();
+            for (context) |msg| try self.writeResponsesApiItem(&jw, msg);
             if (prompt.len > 0) {
-                if (!first) try input_json.appendSlice(self.allocator, ",");
-                const escaped = try common.escapeJsonString(self.allocator, prompt);
-                defer self.allocator.free(escaped);
-                const user_msg = try std.fmt.allocPrint(self.allocator,
-                    \\{{"role":"user","content":"{s}"}}
-                , .{escaped});
-                defer self.allocator.free(user_msg);
-                try input_json.appendSlice(self.allocator, user_msg);
+                try jw.beginObject();
+                try jw.objectField("role");
+                try jw.write("user");
+                try jw.objectField("content");
+                try jw.write(prompt);
+                try jw.endObject();
             }
-            try input_json.appendSlice(self.allocator, "]");
+            try jw.endArray();
         }
 
-        // Build tools JSON array (Responses API format: flat, not nested)
-        var tools_json: std.ArrayList(u8) = .empty;
-        defer tools_json.deinit(self.allocator);
-        try tools_json.appendSlice(self.allocator, "[");
+        try jw.objectField("tools");
+        try jw.beginArray();
         if (config.tools) |tool_defs| {
-            for (tool_defs, 0..) |tool, i| {
-                if (i > 0) try tools_json.appendSlice(self.allocator, ",");
-                const escaped_name = try common.escapeJsonString(self.allocator, tool.name);
-                defer self.allocator.free(escaped_name);
-                const escaped_desc = try common.escapeJsonString(self.allocator, tool.description);
-                defer self.allocator.free(escaped_desc);
-                const tool_json = try std.fmt.allocPrint(self.allocator,
-                    \\{{"type":"function","name":"{s}","description":"{s}","parameters":{s}}}
-                , .{ escaped_name, escaped_desc, tool.input_schema });
-                defer self.allocator.free(tool_json);
-                try tools_json.appendSlice(self.allocator, tool_json);
+            for (tool_defs) |tool| {
+                try jw.beginObject();
+                try jw.objectField("type");
+                try jw.write("function");
+                try jw.objectField("name");
+                try jw.write(tool.name);
+                try jw.objectField("description");
+                try jw.write(tool.description);
+                try jw.objectField("parameters");
+                try jw.beginWriteRaw();
+                try aw.writer.writeAll(tool.input_schema);
+                jw.endWriteRaw();
+                try jw.endObject();
             }
         }
-        try tools_json.appendSlice(self.allocator, "]");
+        try jw.endArray();
 
-        // Build optional parts (instructions, verbosity, etc.)
-        var optional_parts: std.ArrayList(u8) = .empty;
-        defer optional_parts.deinit(self.allocator);
+        try jw.objectField("reasoning");
+        try jw.beginObject();
+        try jw.objectField("effort");
+        try jw.write(config.reasoning_effort.toString());
+        try jw.endObject();
+
+        try jw.objectField("max_output_tokens");
+        try jw.write(config.max_tokens);
 
         if (config.system_prompt) |system| {
-            const escaped_sys = try common.escapeJsonString(self.allocator, system);
-            defer self.allocator.free(escaped_sys);
-            const inst = try std.fmt.allocPrint(self.allocator,
-                \\,"instructions":"{s}"
-            , .{escaped_sys});
-            defer self.allocator.free(inst);
-            try optional_parts.appendSlice(self.allocator, inst);
+            try jw.objectField("instructions");
+            try jw.write(system);
         }
+        try jw.endObject();
 
-        // Build full payload
-        const payload = try std.fmt.allocPrint(self.allocator,
-            \\{{"model":"{s}","input":{s},"tools":{s},"reasoning":{{"effort":"{s}"}},"max_output_tokens":{}{s}}}
-        , .{
-            config.model,
-            input_json.items,
-            tools_json.items,
-            config.reasoning_effort.toString(),
-            config.max_tokens,
-            optional_parts.items,
-        });
-        defer self.allocator.free(payload);
+        const payload = aw.written();
 
         // Make request to /v1/responses
         const response_body = try self.makeRequest(payload);
@@ -831,98 +798,72 @@ pub const OpenAIClient = struct {
         input: []const u8,
         config: common.RequestConfig,
     ) ![]u8 {
-        // GPT-5.2 uses the Responses API with different format
-        const escaped = try common.escapeJsonString(self.allocator, input);
-        defer self.allocator.free(escaped);
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer aw.deinit();
+        var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
 
-        // Build optional parameters
-        var optional_parts: std.ArrayList(u8) = .empty;
-        defer optional_parts.deinit(self.allocator);
+        try jw.beginObject();
+        try jw.objectField("model");
+        try jw.write(config.model);
 
-        // Add verbosity setting (GPT-5.2 feature)
-        const verbosity_part = try std.fmt.allocPrint(self.allocator,
-            \\,"text":{{"verbosity":"{s}"}}
-        , .{config.verbosity.toString()});
-        defer self.allocator.free(verbosity_part);
-        try optional_parts.appendSlice(self.allocator, verbosity_part);
-
-        // Add temperature and top_p only when reasoning effort is none
-        // (These are not supported with reasoning enabled in GPT-5.2)
-        if (config.reasoning_effort == .none) {
-            if (config.temperature != 1.0) {
-                const temp_part = try std.fmt.allocPrint(self.allocator,
-                    \\,"temperature":{d:.2}
-                , .{config.temperature});
-                defer self.allocator.free(temp_part);
-                try optional_parts.appendSlice(self.allocator, temp_part);
-            }
-            if (config.top_p != 1.0) {
-                const top_p_part = try std.fmt.allocPrint(self.allocator,
-                    \\,"top_p":{d:.2}
-                , .{config.top_p});
-                defer self.allocator.free(top_p_part);
-                try optional_parts.appendSlice(self.allocator, top_p_part);
-            }
-        }
-
-        // Add previous_response_id for multi-turn conversations
-        if (config.previous_response_id) |prev_id| {
-            const prev_part = try std.fmt.allocPrint(self.allocator,
-                \\,"previous_response_id":"{s}"
-            , .{prev_id});
-            defer self.allocator.free(prev_part);
-            try optional_parts.appendSlice(self.allocator, prev_part);
-        }
-
-        // Build input - either simple string or multimodal array
+        try jw.objectField("input");
         if (config.images) |images| {
-            // Multimodal input with images
-            var input_builder: std.ArrayList(u8) = .empty;
-            defer input_builder.deinit(self.allocator);
-
-            try input_builder.appendSlice(self.allocator, "[");
-
-            // Add text input
-            const text_input = try std.fmt.allocPrint(self.allocator,
-                \\{{"type":"input_text","text":"{s}"}}
-            , .{escaped});
-            defer self.allocator.free(text_input);
-            try input_builder.appendSlice(self.allocator, text_input);
-
-            // Add image inputs
+            try jw.beginArray();
+            try jw.beginObject();
+            try jw.objectField("type");
+            try jw.write("input_text");
+            try jw.objectField("text");
+            try jw.write(input);
+            try jw.endObject();
             for (images) |img| {
                 const image_url = try img.toImageUrl(self.allocator);
                 defer self.allocator.free(image_url);
-                const img_input = try std.fmt.allocPrint(self.allocator,
-                    \\,{{"type":"input_image","image_url":"{s}"}}
-                , .{image_url});
-                defer self.allocator.free(img_input);
-                try input_builder.appendSlice(self.allocator, img_input);
+                try jw.beginObject();
+                try jw.objectField("type");
+                try jw.write("input_image");
+                try jw.objectField("image_url");
+                try jw.write(image_url);
+                try jw.endObject();
             }
-
-            try input_builder.appendSlice(self.allocator, "]");
-
-            return std.fmt.allocPrint(self.allocator,
-                \\{{"model":"{s}","input":{s},"reasoning":{{"effort":"{s}"}},"max_output_tokens":{}{s}}}
-            , .{
-                config.model,
-                input_builder.items,
-                config.reasoning_effort.toString(),
-                config.max_tokens,
-                optional_parts.items,
-            });
+            try jw.endArray();
         } else {
-            // Simple text-only input
-            return std.fmt.allocPrint(self.allocator,
-                \\{{"model":"{s}","input":"{s}","reasoning":{{"effort":"{s}"}},"max_output_tokens":{}{s}}}
-            , .{
-                config.model,
-                escaped,
-                config.reasoning_effort.toString(),
-                config.max_tokens,
-                optional_parts.items,
-            });
+            try jw.write(input);
         }
+
+        try jw.objectField("reasoning");
+        try jw.beginObject();
+        try jw.objectField("effort");
+        try jw.write(config.reasoning_effort.toString());
+        try jw.endObject();
+
+        try jw.objectField("max_output_tokens");
+        try jw.write(config.max_tokens);
+
+        try jw.objectField("text");
+        try jw.beginObject();
+        try jw.objectField("verbosity");
+        try jw.write(config.verbosity.toString());
+        try jw.endObject();
+
+        if (config.reasoning_effort == .none) {
+            if (config.temperature != 1.0) {
+                try jw.objectField("temperature");
+                try jw.write(config.temperature);
+            }
+            if (config.top_p != 1.0) {
+                try jw.objectField("top_p");
+                try jw.write(config.top_p);
+            }
+        }
+
+        if (config.previous_response_id) |prev_id| {
+            try jw.objectField("previous_response_id");
+            try jw.write(prev_id);
+        }
+
+        try jw.endObject();
+
+        return aw.toOwnedSlice();
     }
 
     fn makeRequest(self: *OpenAIClient, payload: []const u8) ![]u8 {
@@ -970,52 +911,50 @@ pub const OpenAIClient = struct {
         };
     }
 
-    /// Map an AIMessage to Responses API input item format
-    /// function_call items for tool calls, function_call_output for results
-    fn appendResponsesApiItem(
+    /// Emit one or more Responses API input items via the supplied
+    /// std.json.Stringify writer. The writer must already be inside an
+    /// array context (beginArray was called). Array commas are managed
+    /// by Stringify, so no `first` bookkeeping is needed any more.
+    fn writeResponsesApiItem(
         self: *OpenAIClient,
-        writer: *std.ArrayList(u8),
+        jw: *std.json.Stringify,
         msg: common.AIMessage,
-        first: *bool,
     ) !void {
+        _ = self;
         if (msg.tool_calls) |tool_calls| {
-            // Emit function_call items (one per tool call)
             for (tool_calls) |call| {
-                if (!first.*) try writer.appendSlice(self.allocator, ",");
-                first.* = false;
-                const escaped_args = try common.escapeJsonString(self.allocator, call.arguments);
-                defer self.allocator.free(escaped_args);
-                const item = try std.fmt.allocPrint(self.allocator,
-                    \\{{"type":"function_call","call_id":"{s}","name":"{s}","arguments":"{s}"}}
-                , .{ call.id, call.name, escaped_args });
-                defer self.allocator.free(item);
-                try writer.appendSlice(self.allocator, item);
+                try jw.beginObject();
+                try jw.objectField("type");
+                try jw.write("function_call");
+                try jw.objectField("call_id");
+                try jw.write(call.id);
+                try jw.objectField("name");
+                try jw.write(call.name);
+                // Per the Responses API the `arguments` value is a
+                // JSON-encoded string (not an object). Stringify will
+                // escape and quote — correct shape.
+                try jw.objectField("arguments");
+                try jw.write(call.arguments);
+                try jw.endObject();
             }
         } else if (msg.tool_results) |tool_results| {
-            // Emit function_call_output items
             for (tool_results) |result| {
-                if (!first.*) try writer.appendSlice(self.allocator, ",");
-                first.* = false;
-                const escaped = try common.escapeJsonString(self.allocator, result.content);
-                defer self.allocator.free(escaped);
-                const item = try std.fmt.allocPrint(self.allocator,
-                    \\{{"type":"function_call_output","call_id":"{s}","output":"{s}"}}
-                , .{ result.tool_call_id, escaped });
-                defer self.allocator.free(item);
-                try writer.appendSlice(self.allocator, item);
+                try jw.beginObject();
+                try jw.objectField("type");
+                try jw.write("function_call_output");
+                try jw.objectField("call_id");
+                try jw.write(result.tool_call_id);
+                try jw.objectField("output");
+                try jw.write(result.content);
+                try jw.endObject();
             }
         } else {
-            // Regular text message
-            if (!first.*) try writer.appendSlice(self.allocator, ",");
-            first.* = false;
-            const role = msg.role.toString();
-            const escaped = try common.escapeJsonString(self.allocator, msg.content);
-            defer self.allocator.free(escaped);
-            const msg_json = try std.fmt.allocPrint(self.allocator,
-                \\{{"role":"{s}","content":"{s}"}}
-            , .{ role, escaped });
-            defer self.allocator.free(msg_json);
-            try writer.appendSlice(self.allocator, msg_json);
+            try jw.beginObject();
+            try jw.objectField("role");
+            try jw.write(msg.role.toString());
+            try jw.objectField("content");
+            try jw.write(msg.content);
+            try jw.endObject();
         }
     }
 

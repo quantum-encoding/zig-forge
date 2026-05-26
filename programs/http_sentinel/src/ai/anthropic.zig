@@ -105,55 +105,59 @@ pub const AnthropicClient = struct {
             try messages.append(self.allocator, parsed.value);
         }
 
-        // Add current prompt if non-empty (empty means caller manages all messages via context)
+        // Add current prompt if non-empty (empty means caller manages all messages via context).
+        // The prompt JSON is emitted via std.json.Stringify and then re-parsed back into a
+        // std.json.Value so downstream code can keep handling messages as a uniform tree.
         if (prompt.len > 0) {
-            const escaped_prompt = try common.escapeJsonString(self.allocator, prompt);
-            defer self.allocator.free(escaped_prompt);
+            var aw: std.Io.Writer.Allocating = .init(self.allocator);
+            defer aw.deinit();
+            var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
 
-            var prompt_json: []u8 = undefined;
+            try jw.beginObject();
+            try jw.objectField("role");
+            try jw.write("user");
+            try jw.objectField("content");
+
             if (config.images) |images| {
-                // Build multimodal content array
-                var content_builder: std.ArrayList(u8) = .empty;
-                defer content_builder.deinit(self.allocator);
-
-                try content_builder.appendSlice(self.allocator, "{\"role\":\"user\",\"content\":[");
-
-                // Add text part first
-                const text_part = try std.fmt.allocPrint(self.allocator,
-                    \\{{"type":"text","text":"{s}"}}
-                , .{escaped_prompt});
-                defer self.allocator.free(text_part);
-                try content_builder.appendSlice(self.allocator, text_part);
-
-                // Add image parts
+                try jw.beginArray();
+                // Text part
+                try jw.beginObject();
+                try jw.objectField("type");
+                try jw.write("text");
+                try jw.objectField("text");
+                try jw.write(prompt);
+                try jw.endObject();
+                // Image parts
                 for (images) |img| {
+                    try jw.beginObject();
+                    try jw.objectField("type");
+                    try jw.write("image");
+                    try jw.objectField("source");
+                    try jw.beginObject();
                     if (img.isUrl()) {
-                        // URL-based image
-                        const img_part = try std.fmt.allocPrint(self.allocator,
-                            \\,{{"type":"image","source":{{"type":"url","url":"{s}"}}}}
-                        , .{img.url.?});
-                        defer self.allocator.free(img_part);
-                        try content_builder.appendSlice(self.allocator, img_part);
+                        try jw.objectField("type");
+                        try jw.write("url");
+                        try jw.objectField("url");
+                        try jw.write(img.url.?);
                     } else {
-                        // Base64-encoded image
-                        const img_part = try std.fmt.allocPrint(self.allocator,
-                            \\,{{"type":"image","source":{{"type":"base64","media_type":"{s}","data":"{s}"}}}}
-                        , .{ img.media_type, img.data });
-                        defer self.allocator.free(img_part);
-                        try content_builder.appendSlice(self.allocator, img_part);
+                        try jw.objectField("type");
+                        try jw.write("base64");
+                        try jw.objectField("media_type");
+                        try jw.write(img.media_type);
+                        try jw.objectField("data");
+                        try jw.write(img.data);
                     }
+                    try jw.endObject();
+                    try jw.endObject();
                 }
-
-                try content_builder.appendSlice(self.allocator, "]}");
-                prompt_json = try content_builder.toOwnedSlice(self.allocator);
+                try jw.endArray();
             } else {
-                // Simple text-only message
-                prompt_json = try std.fmt.allocPrint(self.allocator,
-                    \\{{"role":"user","content":"{s}"}}
-                , .{escaped_prompt});
+                try jw.write(prompt);
             }
-            defer self.allocator.free(prompt_json);
 
+            try jw.endObject();
+
+            const prompt_json = aw.written();
             const prompt_parsed = try std.json.parseFromSlice(
                 std.json.Value,
                 self.allocator,
@@ -292,77 +296,55 @@ pub const AnthropicClient = struct {
         messages: []const std.json.Value,
         config: common.RequestConfig,
     ) ![]u8 {
-        var payload: std.ArrayList(u8) = .empty;
-        defer payload.deinit(self.allocator);
+        // Every field is written through std.json.Stringify — no
+        // hand-rolled escaping, no allocPrint string interpolation.
+        // The `input_schema` field of each tool is already a JSON value
+        // as supplied by the caller; we emit it via beginWriteRaw so it
+        // lands in the payload as an object, not as a quoted string.
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer aw.deinit();
+        var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
 
-        try payload.appendSlice(self.allocator, "{");
+        try jw.beginObject();
 
-        const model_part = try std.fmt.allocPrint(self.allocator, "\"model\":\"{s}\",", .{config.model});
-        defer self.allocator.free(model_part);
-        try payload.appendSlice(self.allocator, model_part);
+        try jw.objectField("model");
+        try jw.write(config.model);
 
-        const tokens_part = try std.fmt.allocPrint(self.allocator, "\"max_tokens\":{},", .{config.max_tokens});
-        defer self.allocator.free(tokens_part);
-        try payload.appendSlice(self.allocator, tokens_part);
+        try jw.objectField("max_tokens");
+        try jw.write(config.max_tokens);
 
-        // System prompt
         if (config.system_prompt) |system| {
-            const escaped = try common.escapeJsonString(self.allocator, system);
-            defer self.allocator.free(escaped);
-            const sys_part = try std.fmt.allocPrint(self.allocator, "\"system\":\"{s}\",", .{escaped});
-            defer self.allocator.free(sys_part);
-            try payload.appendSlice(self.allocator, sys_part);
+            try jw.objectField("system");
+            try jw.write(system);
         }
 
-        // Temperature
-        const temp_part = try std.fmt.allocPrint(self.allocator, "\"temperature\":{d},", .{config.temperature});
-        defer self.allocator.free(temp_part);
-        try payload.appendSlice(self.allocator, temp_part);
+        try jw.objectField("temperature");
+        try jw.write(config.temperature);
 
-        // Tools (if provided)
         if (config.tools) |tools| {
-            try payload.appendSlice(self.allocator, "\"tools\":[");
-            for (tools, 0..) |tool, i| {
-                if (i > 0) try payload.appendSlice(self.allocator, ",");
-                const escaped_name = try common.escapeJsonString(self.allocator, tool.name);
-                defer self.allocator.free(escaped_name);
-                const escaped_desc = try common.escapeJsonString(self.allocator, tool.description);
-                defer self.allocator.free(escaped_desc);
-
-                const tool_json = try std.fmt.allocPrint(self.allocator,
-                    \\{{"name":"{s}","description":"{s}","input_schema":{s}}}
-                , .{ escaped_name, escaped_desc, tool.input_schema });
-                defer self.allocator.free(tool_json);
-                try payload.appendSlice(self.allocator, tool_json);
+            try jw.objectField("tools");
+            try jw.beginArray();
+            for (tools) |tool| {
+                try jw.beginObject();
+                try jw.objectField("name");
+                try jw.write(tool.name);
+                try jw.objectField("description");
+                try jw.write(tool.description);
+                try jw.objectField("input_schema");
+                try jw.beginWriteRaw();
+                try aw.writer.writeAll(tool.input_schema);
+                jw.endWriteRaw();
+                try jw.endObject();
             }
-            try payload.appendSlice(self.allocator, "],");
+            try jw.endArray();
         }
 
-        // Messages
-        try payload.appendSlice(self.allocator, "\"messages\":[");
-        for (messages, 0..) |msg, i| {
-            if (i > 0) try payload.appendSlice(self.allocator, ",");
+        try jw.objectField("messages");
+        try jw.write(messages);
 
-            // Serialize message using a temporary buffer
-            var msg_buf: std.ArrayList(u8) = .empty;
-            defer msg_buf.deinit(self.allocator);
+        try jw.endObject();
 
-            var msg_writer = std.Io.Writer.Allocating.init(self.allocator);
-            defer msg_writer.deinit();
-
-            var stringify: std.json.Stringify = .{
-                .writer = &msg_writer.writer,
-                .options = .{},
-            };
-            try stringify.write(msg);
-
-            try payload.appendSlice(self.allocator, msg_writer.written());
-        }
-        try payload.appendSlice(self.allocator, "]");
-
-        try payload.appendSlice(self.allocator, "}");
-
-        return payload.toOwnedSlice(self.allocator);
+        return aw.toOwnedSlice();
     }
 
     fn makeRequest(self: *AnthropicClient, payload: []const u8) ![]u8 {
@@ -468,13 +450,14 @@ pub const AnthropicClient = struct {
             try messages.append(self.allocator, parsed.value);
         }
 
-        // Add current prompt
+        // Add current prompt — emitted via std.json.Stringify, then
+        // re-parsed back into std.json.Value so it joins the message
+        // tree shape.
         if (prompt.len > 0) {
-            const escaped = try common.escapeJsonString(self.allocator, prompt);
-            defer self.allocator.free(escaped);
-            const prompt_json = try std.fmt.allocPrint(self.allocator,
-                \\{{"role":"user","content":"{s}"}}
-            , .{escaped});
+            const prompt_json = try std.json.Stringify.valueAlloc(self.allocator, .{
+                .role = "user",
+                .content = prompt,
+            }, .{});
             defer self.allocator.free(prompt_json);
 
             const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, prompt_json, .{});
@@ -679,11 +662,10 @@ pub const AnthropicClient = struct {
         }
 
         if (prompt.len > 0) {
-            const escaped = try common.escapeJsonString(self.allocator, prompt);
-            defer self.allocator.free(escaped);
-            const prompt_json = try std.fmt.allocPrint(self.allocator,
-                \\{{"role":"user","content":"{s}"}}
-            , .{escaped});
+            const prompt_json = try std.json.Stringify.valueAlloc(self.allocator, .{
+                .role = "user",
+                .content = prompt,
+            }, .{});
             defer self.allocator.free(prompt_json);
 
             const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, prompt_json, .{});
@@ -747,78 +729,80 @@ pub const AnthropicClient = struct {
     }
 
     fn buildMessageJson(self: *AnthropicClient, msg: common.AIMessage) !std.json.Parsed(std.json.Value) {
-        var json_buf: std.ArrayList(u8) = .empty;
-        defer json_buf.deinit(self.allocator);
+        // Emit the message via std.json.Stringify, then re-parse so the
+        // caller gets a uniform std.json.Value back. tool_use `input`
+        // is already a JSON object string; we splice it via
+        // beginWriteRaw to avoid double-encoding.
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+        var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
 
-        // Handle different message types
         if (msg.tool_calls) |tool_calls| {
-            // Assistant message with tool use
-            try json_buf.appendSlice(self.allocator, "{\"role\":\"assistant\",\"content\":[");
+            try jw.beginObject();
+            try jw.objectField("role");
+            try jw.write("assistant");
+            try jw.objectField("content");
+            try jw.beginArray();
 
-            var has_content = false;
-
-            // Add text content if present
             if (msg.content.len > 0) {
-                const escaped = try common.escapeJsonString(self.allocator, msg.content);
-                defer self.allocator.free(escaped);
-                const text_part = try std.fmt.allocPrint(self.allocator,
-                    \\{{"type":"text","text":"{s}"}}
-                , .{escaped});
-                defer self.allocator.free(text_part);
-                try json_buf.appendSlice(self.allocator, text_part);
-                has_content = true;
+                try jw.beginObject();
+                try jw.objectField("type");
+                try jw.write("text");
+                try jw.objectField("text");
+                try jw.write(msg.content);
+                try jw.endObject();
             }
 
-            // Add tool use blocks
-            for (tool_calls, 0..) |call, i| {
-                if (i > 0 or has_content) try json_buf.appendSlice(self.allocator, ",");
-
-                const escaped_name = try common.escapeJsonString(self.allocator, call.name);
-                defer self.allocator.free(escaped_name);
-
-                const tool_part = try std.fmt.allocPrint(self.allocator,
-                    \\{{"type":"tool_use","id":"{s}","name":"{s}","input":{s}}}
-                , .{ call.id, escaped_name, call.arguments });
-                defer self.allocator.free(tool_part);
-                try json_buf.appendSlice(self.allocator, tool_part);
+            for (tool_calls) |call| {
+                try jw.beginObject();
+                try jw.objectField("type");
+                try jw.write("tool_use");
+                try jw.objectField("id");
+                try jw.write(call.id);
+                try jw.objectField("name");
+                try jw.write(call.name);
+                try jw.objectField("input");
+                try jw.beginWriteRaw();
+                try aw.writer.writeAll(call.arguments);
+                jw.endWriteRaw();
+                try jw.endObject();
             }
 
-            try json_buf.appendSlice(self.allocator, "]}");
+            try jw.endArray();
+            try jw.endObject();
         } else if (msg.tool_results) |tool_results| {
-            // User message with tool results
-            try json_buf.appendSlice(self.allocator, "{\"role\":\"user\",\"content\":[");
+            try jw.beginObject();
+            try jw.objectField("role");
+            try jw.write("user");
+            try jw.objectField("content");
+            try jw.beginArray();
 
-            for (tool_results, 0..) |result, i| {
-                if (i > 0) try json_buf.appendSlice(self.allocator, ",");
-
-                const escaped = try common.escapeJsonString(self.allocator, result.content);
-                defer self.allocator.free(escaped);
-
-                const result_part = try std.fmt.allocPrint(self.allocator,
-                    \\{{"type":"tool_result","tool_use_id":"{s}","content":"{s}"}}
-                , .{ result.tool_call_id, escaped });
-                defer self.allocator.free(result_part);
-                try json_buf.appendSlice(self.allocator, result_part);
+            for (tool_results) |result| {
+                try jw.beginObject();
+                try jw.objectField("type");
+                try jw.write("tool_result");
+                try jw.objectField("tool_use_id");
+                try jw.write(result.tool_call_id);
+                try jw.objectField("content");
+                try jw.write(result.content);
+                try jw.endObject();
             }
 
-            try json_buf.appendSlice(self.allocator, "]}");
+            try jw.endArray();
+            try jw.endObject();
         } else {
-            // Simple text message
-            const role_str = msg.role.toString();
-            const escaped_content = try common.escapeJsonString(self.allocator, msg.content);
-            defer self.allocator.free(escaped_content);
-
-            const json_str = try std.fmt.allocPrint(self.allocator,
-                \\{{"role":"{s}","content":"{s}"}}
-            , .{ role_str, escaped_content });
-            defer self.allocator.free(json_str);
-            try json_buf.appendSlice(self.allocator, json_str);
+            try jw.beginObject();
+            try jw.objectField("role");
+            try jw.write(msg.role.toString());
+            try jw.objectField("content");
+            try jw.write(msg.content);
+            try jw.endObject();
         }
 
         return try std.json.parseFromSlice(
             std.json.Value,
             self.allocator,
-            json_buf.items,
+            aw.written(),
             .{},
         );
     }

@@ -418,14 +418,6 @@ pub fn build(b: *std.Build) void {
     });
     signal_tests.root_module.link_libc = true;
 
-    // JSON utilities — shared appendQuotedString for safely interpolating
-    // user-controlled strings (symbol, etc.) into the order JSON envelope.
-    const json_util_dep = b.dependency("zig_json_util", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    const json_util_module = json_util_dep.module("json-util");
-
     // order_sender unit tests — exercises the JSON wire format produced
     // by sendOrder without actually hitting ZMQ. Validates Decimal
     // serialization as quoted strings, JSON-injection safety on the
@@ -435,7 +427,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    order_sender_test_module.addImport("json-util", json_util_module);
     order_sender_test_module.link_libc = true;
     order_sender_test_module.linkSystemLibrary("zmq", .{});
 

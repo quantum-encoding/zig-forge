@@ -16,8 +16,5 @@
         .gcp_auth = .{
             .path = "../gcp_auth",
         },
-        .zig_json_util = .{
-            .path = "../zig_json_util",
-        },
     },
 }

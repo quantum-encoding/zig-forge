@@ -204,13 +204,25 @@ pub const VertexClient = struct {
         }
 
         if (context.len > 0) try contents.appendSlice(self.allocator, ",");
-        const escaped_prompt = try common.escapeJsonString(self.allocator, prompt);
-        defer self.allocator.free(escaped_prompt);
-        const prompt_json = try std.fmt.allocPrint(self.allocator,
-            \\{{"role":"user","parts":[{{"text":"{s}"}}]}}
-        , .{escaped_prompt});
-        defer self.allocator.free(prompt_json);
-        try contents.appendSlice(self.allocator, prompt_json);
+        // Append the current user prompt as a Vertex Content object via
+        // std.json.Stringify on a temporary buffer.
+        {
+            var prompt_aw: std.Io.Writer.Allocating = .init(self.allocator);
+            defer prompt_aw.deinit();
+            var prompt_jw: std.json.Stringify = .{ .writer = &prompt_aw.writer, .options = .{} };
+            try prompt_jw.beginObject();
+            try prompt_jw.objectField("role");
+            try prompt_jw.write("user");
+            try prompt_jw.objectField("parts");
+            try prompt_jw.beginArray();
+            try prompt_jw.beginObject();
+            try prompt_jw.objectField("text");
+            try prompt_jw.write(prompt);
+            try prompt_jw.endObject();
+            try prompt_jw.endArray();
+            try prompt_jw.endObject();
+            try contents.appendSlice(self.allocator, prompt_aw.written());
+        }
 
         try contents.appendSlice(self.allocator, "]");
 
@@ -379,60 +391,54 @@ pub const VertexClient = struct {
         var timer = Timer.start(self.http_client.io());
         const token = try self.getAccessToken();
 
-        // Build OpenAI-style messages array
-        var payload: std.ArrayList(u8) = .empty;
-        defer payload.deinit(self.allocator);
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+        var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
 
-        try payload.appendSlice(self.allocator, "{\"model\":\"");
-        try payload.appendSlice(self.allocator, config.model);
-        try payload.appendSlice(self.allocator, "\",\"messages\":[");
+        try jw.beginObject();
+        try jw.objectField("model");
+        try jw.write(config.model);
 
-        // System prompt
+        try jw.objectField("messages");
+        try jw.beginArray();
         if (config.system_prompt) |system| {
-            const escaped = try common.escapeJsonString(self.allocator, system);
-            defer self.allocator.free(escaped);
-            const sys_msg = try std.fmt.allocPrint(self.allocator,
-                \\{{"role":"system","content":"{s}"}},
-            , .{escaped});
-            defer self.allocator.free(sys_msg);
-            try payload.appendSlice(self.allocator, sys_msg);
+            try jw.beginObject();
+            try jw.objectField("role");
+            try jw.write("system");
+            try jw.objectField("content");
+            try jw.write(system);
+            try jw.endObject();
         }
-
-        // Context messages
         for (context) |msg| {
-            const role_str = switch (msg.role) {
+            const role_str: []const u8 = switch (msg.role) {
                 .user => "user",
                 .assistant => "assistant",
                 .system => "system",
                 .tool => "tool",
             };
-            const escaped = try common.escapeJsonString(self.allocator, msg.content);
-            defer self.allocator.free(escaped);
-            const msg_json = try std.fmt.allocPrint(self.allocator,
-                \\{{"role":"{s}","content":"{s}"}},
-            , .{ role_str, escaped });
-            defer self.allocator.free(msg_json);
-            try payload.appendSlice(self.allocator, msg_json);
+            try jw.beginObject();
+            try jw.objectField("role");
+            try jw.write(role_str);
+            try jw.objectField("content");
+            try jw.write(msg.content);
+            try jw.endObject();
         }
+        try jw.beginObject();
+        try jw.objectField("role");
+        try jw.write("user");
+        try jw.objectField("content");
+        try jw.write(prompt);
+        try jw.endObject();
+        try jw.endArray();
 
-        // Current prompt
-        const escaped_prompt = try common.escapeJsonString(self.allocator, prompt);
-        defer self.allocator.free(escaped_prompt);
-        const user_msg = try std.fmt.allocPrint(self.allocator,
-            \\{{"role":"user","content":"{s}"}}
-        , .{escaped_prompt});
-        defer self.allocator.free(user_msg);
-        try payload.appendSlice(self.allocator, user_msg);
-
-        // Close messages, add params
-        const params = try std.fmt.allocPrint(self.allocator,
-            \\],"max_tokens":{},"temperature":{d}}}
-        , .{ config.max_tokens, config.temperature });
-        defer self.allocator.free(params);
-        try payload.appendSlice(self.allocator, params);
+        try jw.objectField("max_tokens");
+        try jw.write(config.max_tokens);
+        try jw.objectField("temperature");
+        try jw.write(config.temperature);
+        try jw.endObject();
 
         _ = route; // Both maas_openai and maas_mistral use this format
-        const response = try self.makeRequest(config.model, token, payload.items);
+        const response = try self.makeRequest(config.model, token, aw.written());
         defer self.allocator.free(response);
 
         // Parse OpenAI-style response
@@ -485,36 +491,43 @@ pub const VertexClient = struct {
         contents: []const u8,
         config: common.RequestConfig,
     ) ![]u8 {
-        var payload: std.ArrayList(u8) = .empty;
-        defer payload.deinit(self.allocator);
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer aw.deinit();
+        var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
 
-        try payload.appendSlice(self.allocator, "{");
+        try jw.beginObject();
 
-        const contents_part = try std.fmt.allocPrint(self.allocator, "\"contents\":{s},", .{contents});
-        defer self.allocator.free(contents_part);
-        try payload.appendSlice(self.allocator, contents_part);
+        // `contents` is already a serialised JSON array — splice raw.
+        try jw.objectField("contents");
+        try jw.beginWriteRaw();
+        try aw.writer.writeAll(contents);
+        jw.endWriteRaw();
 
-        // System instruction
         if (config.system_prompt) |system| {
-            const escaped = try common.escapeJsonString(self.allocator, system);
-            defer self.allocator.free(escaped);
-            const sys_part = try std.fmt.allocPrint(self.allocator,
-                \\"systemInstruction":{{"parts":[{{"text":"{s}"}}]}},
-            , .{escaped});
-            defer self.allocator.free(sys_part);
-            try payload.appendSlice(self.allocator, sys_part);
+            try jw.objectField("systemInstruction");
+            try jw.beginObject();
+            try jw.objectField("parts");
+            try jw.beginArray();
+            try jw.beginObject();
+            try jw.objectField("text");
+            try jw.write(system);
+            try jw.endObject();
+            try jw.endArray();
+            try jw.endObject();
         }
 
-        // Generation config
-        const gen_config = try std.fmt.allocPrint(self.allocator,
-            \\"generationConfig":{{"temperature":{d},"maxOutputTokens":{},"topP":{d}}}
-        , .{ config.temperature, config.max_tokens, config.top_p });
-        defer self.allocator.free(gen_config);
-        try payload.appendSlice(self.allocator, gen_config);
+        try jw.objectField("generationConfig");
+        try jw.beginObject();
+        try jw.objectField("temperature");
+        try jw.write(config.temperature);
+        try jw.objectField("maxOutputTokens");
+        try jw.write(config.max_tokens);
+        try jw.objectField("topP");
+        try jw.write(config.top_p);
+        try jw.endObject();
 
-        try payload.appendSlice(self.allocator, "}");
-
-        return payload.toOwnedSlice(self.allocator);
+        try jw.endObject();
+        return aw.toOwnedSlice();
     }
 
     fn makeRequest(
@@ -584,21 +597,36 @@ pub const VertexClient = struct {
         };
     }
 
-    fn appendMessage(self: *VertexClient, writer: *std.ArrayList(u8), msg: common.AIMessage) !void {
-        const role = switch (msg.role) {
+    /// Write a single Vertex/Gemini Content object (role + parts[]) via
+    /// the supplied std.json.Stringify writer. The writer must already be
+    /// inside an array context.
+    fn writeMessage(self: *VertexClient, jw: *std.json.Stringify, msg: common.AIMessage) !void {
+        _ = self;
+        const role: []const u8 = switch (msg.role) {
             .user => "user",
             .assistant => "model",
             else => "user",
         };
+        try jw.beginObject();
+        try jw.objectField("role");
+        try jw.write(role);
+        try jw.objectField("parts");
+        try jw.beginArray();
+        try jw.beginObject();
+        try jw.objectField("text");
+        try jw.write(msg.content);
+        try jw.endObject();
+        try jw.endArray();
+        try jw.endObject();
+    }
 
-        const escaped = try common.escapeJsonString(self.allocator, msg.content);
-        defer self.allocator.free(escaped);
-
-        const msg_json = try std.fmt.allocPrint(self.allocator,
-            \\{{"role":"{s}","parts":[{{"text":"{s}"}}]}}
-        , .{ role, escaped });
-        defer self.allocator.free(msg_json);
-        try writer.appendSlice(self.allocator, msg_json);
+    /// Old-API wrapper for back-compat — wraps writeMessage onto a buffer.
+    fn appendMessage(self: *VertexClient, writer: *std.ArrayList(u8), msg: common.AIMessage) !void {
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+        var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+        try self.writeMessage(&jw, msg);
+        try writer.appendSlice(self.allocator, aw.written());
     }
 
     /// Helper: Create default config for Gemini Pro on Vertex
