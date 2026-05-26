@@ -1,11 +1,13 @@
 # zig_base58 - Bitcoin-style Base58 Encoding
 
-A fast, pure-Zig implementation of Base58 encoding with SHA256-based Base58Check support for Zig 0.16. This library provides Bitcoin/IPFS-compatible Base58 encoding suitable for cryptocurrency addresses, IPFS hashes, and other binary data serialization.
+A pure-Zig implementation of Base58 and Base58Check encoding for Bitcoin, Tron, Dogecoin, Litecoin, Ripple, and IPFS. Base58Check uses **double SHA-256** as required by Bitcoin / Tron / DOGE / LTC consensus rules.
 
 ## Features
 
-- **Standard Base58 Alphabet**: Uses the Bitcoin/IPFS alphabet (excludes 0, O, I, l to reduce confusion)
-- **Base58Check**: SHA256 checksum support for error detection
+- **Multiple alphabets**: Bitcoin/Tron/IPFS (default), Ripple/XRP, Flickr
+- **Base58Check**: SHA-256d (double SHA-256) checksum, externally validated against published test vectors from Bitcoin Core, Satoshi's genesis address, and Tron's USDT contract address
+- **Versioned helpers**: `encodeCheckVersioned` / `decodeCheckVersioned` make the network version byte explicit and reject cross-network address reuse (BTC address fed to a Tron decoder errors with `WrongVersion`)
+- **OOM-safe**: decoder rejects inputs longer than `MAX_DECODE_INPUT` (1 KiB)
 - **Streaming Encoder**: Process large data without loading everything in memory
 - **Leading Zero Preservation**: Correctly preserves leading zero bytes as '1' characters
 - **Comprehensive Tests**: Full test coverage including edge cases and known vectors
@@ -47,7 +49,7 @@ zbase58 decode "JxF12TrwUP45BMd"
 #### Base58Check (with Checksum)
 
 ```bash
-# Encode with SHA256 checksum
+# Encode with SHA-256d checksum (Bitcoin/Tron-compatible)
 zbase58 check-encode "Payment data"
 # Output: 82iP79GRURMpBqpbNs
 
@@ -177,10 +179,12 @@ Benchmarks measure:
 
 ### Base58Check
 
-1. Compute SHA256 hash of data
-2. Append first 4 bytes of hash to data
-3. Encode result using standard Base58
-4. Verify by decoding and checking hash matches
+1. Compute **double** SHA-256 over the data: `SHA256(SHA256(data))`
+2. Append the first 4 bytes of that hash as a checksum
+3. Encode (data || checksum) using standard Base58
+4. To verify, decode, recompute SHA-256d over (decoded[..len-4]), and compare against decoded[len-4..]
+
+Bitcoin, Tron, Dogecoin, and Litecoin all use this same SHA-256d construction. A single-SHA-256 variant is **not** compatible with any of them — every external wallet and exchange will reject such addresses.
 
 ## Performance
 
@@ -205,10 +209,20 @@ Encode binary data to Base58 string. Caller owns returned memory.
 Decode Base58 string to binary data. Caller owns returned memory.
 
 #### `encodeCheck(allocator, data: []const u8) ![]u8`
-Encode with Base58Check (SHA256 checksum).
+Encode with Base58Check (SHA-256d checksum). The caller is responsible for prepending the network version byte; prefer `encodeCheckVersioned` for wallet code.
 
 #### `decodeCheck(allocator, encoded: []const u8) ![]u8`
-Decode and verify Base58Check checksum.
+Decode and verify Base58Check checksum (SHA-256d). Returns the payload with the checksum stripped, still including the version byte.
+
+#### `encodeCheckVersioned(allocator, version: u8, payload: []const u8) ![]u8`
+Encode `<version><payload><SHA256d(version||payload)[0..4]>`. Preferred for addresses — pass the network version byte (0x00 BTC P2PKH, 0x05 BTC P2SH, 0x1E DOGE, 0x30 LTC, 0x41 Tron) and the raw hash separately.
+
+#### `decodeCheckVersioned(allocator, expected_version: u8, encoded: []const u8) ![]u8`
+Decode, verify the SHA-256d checksum, AND verify the version byte. Returns just the payload bytes. Errors with `WrongVersion` on cross-network address reuse, `InvalidChecksum` on mutation, `PayloadTooShort` if length < 5.
+
+#### `encodeWith(allocator, alphabet: *const Alphabet, data: []const u8) ![]u8`
+#### `decodeWith(allocator, alphabet: *const Alphabet, encoded: []const u8) ![]u8`
+Alphabet-parameterized variants. Use `&Alphabet.ripple` for XRP, `&Alphabet.flickr` for Flickr short URLs, `&Alphabet.bitcoin` for the default.
 
 ### Types
 
@@ -231,12 +245,15 @@ defer allocator.free(encoded);
 - `InvalidCharacter` - Input contains character not in Base58 alphabet
 - `InvalidChecksum` - Base58Check verification failed
 - `EmptyInput` - Input is empty (non-fatal, returns empty encoded string)
+- `InputTooLong` - Decoder input exceeds `MAX_DECODE_INPUT` (DoS guard)
+- `WrongVersion` - `decodeCheckVersioned` got a different version byte than expected (cross-network address reuse)
+- `PayloadTooShort` - `decodeCheckVersioned` got fewer than 5 bytes (no room for version + checksum)
 
 ## Specifications
 
 - **Base58 Standard**: Bitcoin implementation
-- **Checksum Algorithm**: SHA256
-- **Checksum Size**: 4 bytes (first 4 bytes of double hash)
+- **Checksum Algorithm**: SHA-256d (`SHA256(SHA256(data))`)
+- **Checksum Size**: 4 bytes (first 4 bytes of the SHA-256d output)
 - **Zig Version**: 0.16.0-dev
 - **Memory**: Zero-copy where possible, allocator-based
 

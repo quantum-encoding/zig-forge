@@ -12,7 +12,7 @@ This is a complete, optimized implementation of Bitcoin-style Base58 encoding in
 Main implementation containing:
 - **Base58 Encoding**: Binary to Base58 string conversion
 - **Base58 Decoding**: Base58 string to binary conversion
-- **Base58Check**: SHA256-based checksum encoding/decoding
+- **Base58Check**: SHA-256d (double SHA-256) checksum encoding/decoding, Bitcoin/Tron/DOGE/LTC-compatible
 - **Stream Encoder**: For processing large data incrementally
 - **Comprehensive Tests**: 9 test cases covering all functionality
 
@@ -29,7 +29,7 @@ Library root that re-exports public API:
 Command-line interface providing:
 - `encode` - Convert data to Base58
 - `decode` - Convert Base58 string to data
-- `check-encode` - Encode with SHA256 checksum
+- `check-encode` - Encode with SHA-256d checksum
 - `check-decode` - Decode and verify checksum
 - Help, version, and error handling
 
@@ -105,17 +105,19 @@ Base58 cannot distinguish leading zero bytes from the rest of the data. Bitcoin 
 Base58Check adds error detection:
 
 1. **Encoding**:
-   - Compute SHA256 of data
-   - Take first 4 bytes of hash (checksum)
+   - Compute `SHA256(SHA256(data))` — **double** SHA-256
+   - Take first 4 bytes of that digest as the checksum
    - Concatenate data + checksum
    - Encode result using standard Base58
 
 2. **Decoding**:
    - Decode Base58 string
    - Split into data (all but last 4 bytes) and checksum (last 4 bytes)
-   - Compute SHA256 of data
-   - Compare with transmitted checksum
-   - Return error if mismatch
+   - Compute `SHA256(SHA256(data))`
+   - Compare against transmitted checksum (constant-time)
+   - Return `InvalidChecksum` error on mismatch
+
+NOTE: Single SHA-256 (without the second pass) is **not** compatible with Bitcoin, Tron, DOGE, or LTC. Every external wallet/explorer will reject such addresses as having a wrong checksum.
 
 ### Streaming Encoder
 
@@ -137,7 +139,7 @@ const result = try encoder.finish(); // Encodes all chunks
 
 - **Encode**: O(n²) where n = output length (due to repeated multiplication)
 - **Decode**: O(n²) where n = input length (similar algorithm)
-- **Base58Check**: O(n²) + SHA256 overhead
+- **Base58Check**: O(n²) + SHA-256d overhead (two SHA-256 invocations per call)
 
 ### Space Complexity
 
@@ -190,7 +192,7 @@ pub fn main(init: std.process.Init) !void {
 ### Hash Function
 
 ```zig
-// SHA256 from std.crypto
+// SHA-256d (two SHA-256 passes) from std.crypto
 var hash: [32]u8 = undefined;
 std.crypto.hash.sha2.Sha256.hash(data, &hash, .{});
 
@@ -205,7 +207,7 @@ std.crypto.hash.sha2.Sha256.hash(data, &hash, .{});
 ```zig
 pub const Error = error{
     InvalidCharacter,    // Non-Base58 char in input
-    InvalidChecksum,     // SHA256 mismatch in decodeCheck
+    InvalidChecksum,     // SHA-256d mismatch in decodeCheck
     EmptyInput,          // (Non-fatal)
 };
 ```

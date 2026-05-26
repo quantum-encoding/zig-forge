@@ -121,7 +121,7 @@ fn printHelp(writer: anytype) !void {
         \\Commands:
         \\  encode <data>        Encode data to Base58
         \\  decode <data>        Decode Base58 string
-        \\  check-encode <data>  Encode with Base58Check (SHA256 checksum)
+        \\  check-encode <data>  Encode with Base58Check (SHA-256d checksum)
         \\  check-decode <data>  Decode and verify Base58Check
         \\  <data>               Shortcut for encode command
         \\
