@@ -35,15 +35,38 @@ const c = @cImport({
     @cInclude("mbedtls/entropy.h");
     @cInclude("mbedtls/ctr_drbg.h");
     @cInclude("mbedtls/error.h");
+    @cInclude("mbedtls/x509_crt.h");
 });
 
-/// TLS client wrapper for mbedTLS
+// Mirror the system CA bundle probe in tls_mbedtls.zig. Kept inline here
+// because this file uses its own @cImport (Zig 0.16 module-import bug
+// per the file header) and can't share the helper.
+const system_ca_bundle_candidates = [_][]const u8{
+    "/etc/ssl/cert.pem",
+    "/etc/ssl/certs/ca-certificates.crt",
+    "/etc/pki/tls/certs/ca-bundle.crt",
+    "/etc/ssl/certs/ca-bundle.crt",
+};
+
+fn loadSystemCaChain(cacert: *c.mbedtls_x509_crt) ![]const u8 {
+    for (system_ca_bundle_candidates) |path| {
+        const path_z = std.posix.toPosixPath(path) catch continue;
+        const ret = c.mbedtls_x509_crt_parse_file(cacert, &path_z);
+        if (ret == 0) return path;
+        c.mbedtls_x509_crt_free(cacert);
+        c.mbedtls_x509_crt_init(cacert);
+    }
+    return error.NoSystemCaBundle;
+}
+
+/// TLS client wrapper for mbedTLS — VERIFY_REQUIRED, no insecure mode.
 const TlsClient = struct {
     server_fd: c.mbedtls_net_context,
     ssl: c.mbedtls_ssl_context,
     conf: c.mbedtls_ssl_config,
     entropy: c.mbedtls_entropy_context,
     ctr_drbg: c.mbedtls_ctr_drbg_context,
+    cacert: c.mbedtls_x509_crt,
     connected: bool,
     handshake_done: bool,
 
@@ -56,6 +79,7 @@ const TlsClient = struct {
             .conf = undefined,
             .entropy = undefined,
             .ctr_drbg = undefined,
+            .cacert = undefined,
             .connected = false,
             .handshake_done = false,
         };
@@ -65,6 +89,7 @@ const TlsClient = struct {
         c.mbedtls_ssl_config_init(&self.conf);
         c.mbedtls_ctr_drbg_init(&self.ctr_drbg);
         c.mbedtls_entropy_init(&self.entropy);
+        c.mbedtls_x509_crt_init(&self.cacert);
 
         const pers = "hft_ssl_client";
         const ret = c.mbedtls_ctr_drbg_seed(
@@ -75,6 +100,18 @@ const TlsClient = struct {
             pers.len,
         );
         if (ret != 0) return error.RngSeedFailed;
+
+        // Required for VERIFY_REQUIRED — without trust anchors the
+        // handshake would reject every server.
+        _ = loadSystemCaChain(&self.cacert) catch |err| {
+            c.mbedtls_x509_crt_free(&self.cacert);
+            c.mbedtls_entropy_free(&self.entropy);
+            c.mbedtls_ctr_drbg_free(&self.ctr_drbg);
+            c.mbedtls_ssl_config_free(&self.conf);
+            c.mbedtls_ssl_free(&self.ssl);
+            c.mbedtls_net_free(&self.server_fd);
+            return err;
+        };
 
         self.server_fd.fd = sockfd;
         return self;
@@ -89,7 +126,11 @@ const TlsClient = struct {
         );
         if (ret != 0) return error.SslConfigFailed;
 
-        c.mbedtls_ssl_conf_authmode(&self.conf, c.MBEDTLS_SSL_VERIFY_NONE);
+        // Full chain verification. Combined with mbedtls_ssl_set_hostname
+        // below this rejects any cert not signed by a trusted root OR
+        // not issued for the expected hostname.
+        c.mbedtls_ssl_conf_authmode(&self.conf, c.MBEDTLS_SSL_VERIFY_REQUIRED);
+        c.mbedtls_ssl_conf_ca_chain(&self.conf, &self.cacert, null);
         c.mbedtls_ssl_conf_rng(&self.conf, c.mbedtls_ctr_drbg_random, &self.ctr_drbg);
 
         ret = c.mbedtls_ssl_setup(&self.ssl, &self.conf);
@@ -168,6 +209,7 @@ const TlsClient = struct {
             c.mbedtls_net_free(&self.server_fd);
             c.mbedtls_ssl_free(&self.ssl);
             c.mbedtls_ssl_config_free(&self.conf);
+            c.mbedtls_x509_crt_free(&self.cacert);
             c.mbedtls_ctr_drbg_free(&self.ctr_drbg);
             c.mbedtls_entropy_free(&self.entropy);
             self.connected = false;
@@ -217,6 +259,10 @@ pub const LatencyMetrics = struct {
     max_rtt_us: u64,
     avg_rtt_us: u64,
     sample_count: u32,
+    /// Microseconds taken by the most recent executeBuy / executeSell.
+    /// Replaces the prior `std.debug.print("🚀 BUY executed in {}µs", ...)`
+    /// which leaked the order JSON alongside the timing.
+    last_execution_us: u64,
 
     pub fn init() LatencyMetrics {
         return .{
@@ -226,6 +272,7 @@ pub const LatencyMetrics = struct {
             .max_rtt_us = 0,
             .avg_rtt_us = 0,
             .sample_count = 0,
+            .last_execution_us = 0,
         };
     }
 
@@ -537,9 +584,11 @@ pub const ExchangeClient = struct {
 
     /// Authenticate with exchange API
     pub fn authenticate(self: *Self) !void {
-        std.debug.print("Authenticating with {s}...\n", .{@tagName(self.exchange)});
-
-        // Exchange-specific authentication using HMAC-SHA256
+        // Authentication path — no debug prints. The exchange name is
+        // safe to log, but signing material isn't, and historically the
+        // "Authenticating with X..." line drifted into logging the auth
+        // JSON or the HMAC hex. Keep this path silent and require
+        // observability via metrics, not stdout.
         const hmac = @import("../crypto/hmac.zig");
         const timestamp_ms = getRealtimeMs();
 
@@ -585,7 +634,7 @@ pub const ExchangeClient = struct {
         }
 
         self.authenticated.store(true, .release);
-        std.debug.print("Authenticated with {s}!\n", .{@tagName(self.exchange)});
+        // Intentionally silent on success — see comment at top of fn.
     }
 
     /// Send WebSocket frame over TLS
@@ -647,10 +696,12 @@ pub const ExchangeClient = struct {
         try self.sendWebSocketFrame(.text, json);
 
         const end_ns = getMonotonicNs();
-        const execution_us = (end_ns - start_ns) / 1000;
-
-        std.debug.print("🚀 BUY executed in {}µs\n", .{execution_us});
-        std.debug.print("   Payload: {s}\n", .{json});
+        self.metrics.last_execution_us = (end_ns - start_ns) / 1000;
+        // The order JSON and HMAC signature are NEVER written to stdout
+        // or stderr. Order payloads contain account / API-key references
+        // and the signature line was effectively logging the HMAC tag
+        // alongside its plaintext — observe via metrics or a structured
+        // sink, not via std.debug.print.
     }
 
     /// Execute SELL order (< 10µs target)
@@ -676,10 +727,9 @@ pub const ExchangeClient = struct {
         try self.sendWebSocketFrame(.text, json);
 
         const end_ns = getMonotonicNs();
-        const execution_us = (end_ns - start_ns) / 1000;
-
-        std.debug.print("🚀 SELL executed in {}µs\n", .{execution_us});
-        std.debug.print("   Payload: {s}\n", .{json});
+        self.metrics.last_execution_us = (end_ns - start_ns) / 1000;
+        // Same scrubbing rule as executeBuy — no stdout for order JSON
+        // or HMAC. See comment above.
     }
 
     /// Get connection status

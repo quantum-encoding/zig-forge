@@ -18,7 +18,42 @@ const c = @cImport({
     @cInclude("mbedtls/entropy.h");
     @cInclude("mbedtls/ctr_drbg.h");
     @cInclude("mbedtls/error.h");
+    @cInclude("mbedtls/x509_crt.h");
 });
+
+/// Candidate paths for the system CA bundle, probed in order. The first
+/// path that mbedtls can parse a non-empty chain from is used.
+///   - /etc/ssl/cert.pem ......... macOS (Homebrew openssl@3 / LibreSSL), Alpine
+///   - /etc/ssl/certs/ca-certificates.crt ... Debian / Ubuntu
+///   - /etc/pki/tls/certs/ca-bundle.crt ..... RHEL / CentOS / Fedora
+///   - /etc/ssl/certs/ca-bundle.crt ......... older RHEL clones
+const system_ca_bundle_candidates = [_][]const u8{
+    "/etc/ssl/cert.pem",
+    "/etc/ssl/certs/ca-certificates.crt",
+    "/etc/pki/tls/certs/ca-bundle.crt",
+    "/etc/ssl/certs/ca-bundle.crt",
+};
+
+/// Load the system CA bundle into `cacert`. Returns the path that was
+/// loaded so callers can log it. If no candidate path is parseable we
+/// return error.NoSystemCaBundle — the caller MUST fail open here
+/// instead of falling back to VERIFY_NONE; "MitM-resistant" without a
+/// trust anchor is not a thing.
+fn loadSystemCaChain(cacert: *c.mbedtls_x509_crt) ![]const u8 {
+    for (system_ca_bundle_candidates) |path| {
+        const path_z = std.posix.toPosixPath(path) catch continue;
+        const ret = c.mbedtls_x509_crt_parse_file(cacert, &path_z);
+        // mbedtls returns negative on hard failure, 0 on success, and a
+        // positive integer = "number of certificates that failed to
+        // parse" but the rest of the chain is usable. We accept 0 or a
+        // positive result so long as something parsed.
+        if (ret == 0) return path;
+        // Reset state so a partial parse doesn't poison the next attempt.
+        c.mbedtls_x509_crt_free(cacert);
+        c.mbedtls_x509_crt_init(cacert);
+    }
+    return error.NoSystemCaBundle;
+}
 
 /// TLS connection state
 pub const TlsClient = struct {
@@ -37,18 +72,23 @@ pub const TlsClient = struct {
     /// mbedTLS CTR_DRBG context (deterministic RNG)
     ctr_drbg: c.mbedtls_ctr_drbg_context,
 
+    /// Trust anchors loaded from the system CA bundle. Borrowed by `conf`
+    /// via mbedtls_ssl_conf_ca_chain — must outlive any handshake on this
+    /// client.
+    cacert: c.mbedtls_x509_crt,
+
     /// Connection state
     connected: bool,
     handshake_done: bool,
 
     const Self = @This();
 
-    /// Initialize TLS client with system certificate store
-    ///
-    /// For production HFT, we skip certificate verification (VERIFY_NONE)
-    /// since we're connecting to known endpoints. This saves ~5-10ms.
-    ///
-    /// TODO: Add certificate pinning for maximum security
+    /// Initialize TLS client. Loads the system trust store and configures
+    /// the SSL context for MBEDTLS_SSL_VERIFY_REQUIRED. There is no
+    /// "VERIFY_NONE for latency" mode — silently-MitM-able connections are
+    /// not faster, they are just compromised. If you need a custom trust
+    /// store (e.g. a pinned cert for a specific exchange), build a
+    /// separate client.
     pub fn init(allocator: std.mem.Allocator, sockfd: posix.socket_t) !Self {
         _ = allocator; // Reserved for future use
 
@@ -58,6 +98,7 @@ pub const TlsClient = struct {
             .conf = undefined,
             .entropy = undefined,
             .ctr_drbg = undefined,
+            .cacert = undefined,
             .connected = false,
             .handshake_done = false,
         };
@@ -68,6 +109,7 @@ pub const TlsClient = struct {
         c.mbedtls_ssl_config_init(&self.conf);
         c.mbedtls_ctr_drbg_init(&self.ctr_drbg);
         c.mbedtls_entropy_init(&self.entropy);
+        c.mbedtls_x509_crt_init(&self.cacert);
 
         // Seed RNG
         const pers = "hft_ssl_client";
@@ -81,6 +123,18 @@ pub const TlsClient = struct {
         if (ret != 0) {
             return error.RngSeedFailed;
         }
+
+        // Load the system CA bundle. Without this, VERIFY_REQUIRED would
+        // reject every handshake.
+        _ = loadSystemCaChain(&self.cacert) catch |err| {
+            c.mbedtls_x509_crt_free(&self.cacert);
+            c.mbedtls_entropy_free(&self.entropy);
+            c.mbedtls_ctr_drbg_free(&self.ctr_drbg);
+            c.mbedtls_ssl_config_free(&self.conf);
+            c.mbedtls_ssl_free(&self.ssl);
+            c.mbedtls_net_free(&self.server_fd);
+            return err;
+        };
 
         // Set socket FD
         self.server_fd.fd = sockfd;
@@ -105,9 +159,14 @@ pub const TlsClient = struct {
             return error.SslConfigFailed;
         }
 
-        // HFT Mode: Skip certificate verification for minimum latency
-        // In production, you may want MBEDTLS_SSL_VERIFY_REQUIRED with pinning
-        c.mbedtls_ssl_conf_authmode(&self.conf, c.MBEDTLS_SSL_VERIFY_NONE);
+        // Require full certificate chain validation. The mbedtls
+        // handshake will call x509_crt_verify against `cacert` (loaded
+        // from the system bundle in init) and abort if the server's
+        // cert doesn't chain to a trusted root, has expired, or is
+        // signed for a different name (mbedtls_ssl_set_hostname below
+        // pins the expected CN/SAN).
+        c.mbedtls_ssl_conf_authmode(&self.conf, c.MBEDTLS_SSL_VERIFY_REQUIRED);
+        c.mbedtls_ssl_conf_ca_chain(&self.conf, &self.cacert, null);
         c.mbedtls_ssl_conf_rng(&self.conf, c.mbedtls_ctr_drbg_random, &self.ctr_drbg);
 
         ret = c.mbedtls_ssl_setup(&self.ssl, &self.conf);
@@ -217,6 +276,7 @@ pub const TlsClient = struct {
             c.mbedtls_net_free(&self.server_fd);
             c.mbedtls_ssl_free(&self.ssl);
             c.mbedtls_ssl_config_free(&self.conf);
+            c.mbedtls_x509_crt_free(&self.cacert);
             c.mbedtls_ctr_drbg_free(&self.ctr_drbg);
             c.mbedtls_entropy_free(&self.entropy);
             self.connected = false;
@@ -232,16 +292,22 @@ pub const TlsClient = struct {
 };
 
 // Tests
-test "TLS client initialization" {
+test "TLS client initialization loads system CA chain" {
     const allocator = std.testing.allocator;
 
-    // Create dummy socket
-    const sockfd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM, posix.IPPROTO.TCP);
+    // Create dummy socket via libc. std.posix.socket is not exposed on
+    // macOS under Zig 0.16 — the libc path is the portable choice.
+    const sockfd: c_int = std.c.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, std.posix.IPPROTO.TCP);
+    if (sockfd < 0) return error.SocketFailed;
     defer _ = std.c.close(sockfd);
 
     var tls = try TlsClient.init(allocator, sockfd);
     defer tls.close();
 
+    // The init path must have successfully loaded a CA chain from the
+    // system bundle — otherwise loadSystemCaChain would have returned
+    // error.NoSystemCaBundle and init would have propagated it. Reaching
+    // this point is proof the trust store is populated.
     try std.testing.expect(!tls.handshake_done);
     try std.testing.expect(!tls.connected);
 }
