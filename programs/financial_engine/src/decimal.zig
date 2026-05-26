@@ -23,7 +23,7 @@ pub const Decimal = struct {
     
     /// Create from string representation
     pub fn fromString(str: []const u8) !Self {
-        var parts = std.mem.split(u8, str, ".");
+        var parts = std.mem.splitScalar(u8, str, '.');
         const integer_part = parts.next() orelse return error.InvalidFormat;
         const decimal_part = parts.next();
         
@@ -38,7 +38,7 @@ pub const Decimal = struct {
             if (dec.len > 9) return error.TooManyDecimalPlaces;
             
             const dec_value = try std.fmt.parseInt(i64, dec, 10);
-            var multiplier = scale_factor;
+            var multiplier: i128 = scale_factor;
             for (0..dec.len) |_| {
                 multiplier = @divTrunc(multiplier, 10);
             }
@@ -58,21 +58,21 @@ pub const Decimal = struct {
         return @as(f64, @floatFromInt(self.value)) / @as(f64, @floatFromInt(scale_factor));
     }
     
-    /// Format for display
-    pub fn format(self: Self, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-        _ = fmt;
-        _ = options;
-        
+    /// Format for display. Zig 0.16 calls `format(self, writer)` for the
+    /// default `{}` specifier — the prior signature
+    /// `format(self, fmt, options, writer)` was the Zig 0.14/0.15 shape and
+    /// silently fell through to the anonymous-struct debug printer.
+    pub fn format(self: Self, writer: *std.Io.Writer) !void {
         const is_negative = self.value < 0;
         const abs_value = if (is_negative) -self.value else self.value;
-        
+
         const integer = @divTrunc(abs_value, scale_factor);
         const decimal = @mod(abs_value, scale_factor);
-        
+
         if (is_negative) {
             try writer.writeByte('-');
         }
-        
+
         try writer.print("{d}.{d:0>9}", .{ integer, decimal });
     }
     

@@ -1,0 +1,17 @@
+.{
+    .name = .financial_engine,
+    .version = "0.1.0",
+    .fingerprint = 0x4308463eb62185c4,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "include",
+    },
+    .dependencies = .{
+        .zig_json_util = .{
+            .path = "../zig_json_util",
+        },
+    },
+}

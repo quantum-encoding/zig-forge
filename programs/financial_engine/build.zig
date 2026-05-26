@@ -418,8 +418,40 @@ pub fn build(b: *std.Build) void {
     });
     signal_tests.root_module.link_libc = true;
 
+    // JSON utilities — shared appendQuotedString for safely interpolating
+    // user-controlled strings (symbol, etc.) into the order JSON envelope.
+    const json_util_dep = b.dependency("zig_json_util", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const json_util_module = json_util_dep.module("json-util");
+
+    // order_sender unit tests — exercises the JSON wire format produced
+    // by sendOrder without actually hitting ZMQ. Validates Decimal
+    // serialization as quoted strings, JSON-injection safety on the
+    // symbol field, and monotonic signal_id behavior.
+    const order_sender_test_module = b.createModule(.{
+        .root_source_file = b.path("src/order_sender.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    order_sender_test_module.addImport("json-util", json_util_module);
+    order_sender_test_module.link_libc = true;
+    order_sender_test_module.linkSystemLibrary("zmq", .{});
+
+    const order_sender_tests = b.addTest(.{
+        .root_module = order_sender_test_module,
+    });
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(signal_tests).step);
+    test_step.dependOn(&b.addRunArtifact(order_sender_tests).step);
+
+    // Standalone step for order_sender — signal_broadcast tests have
+    // pre-existing compile failures unrelated to the order_sender Batch 4
+    // refactor; this step lets that work be verified in isolation.
+    const order_sender_test_step = b.step("test-order-sender", "Run order_sender unit tests only");
+    order_sender_test_step.dependOn(&b.addRunArtifact(order_sender_tests).step);
 }
 
 /// Link against mbedtls 3.x. On macOS, Homebrew's `mbedtls` formula is 4.x
