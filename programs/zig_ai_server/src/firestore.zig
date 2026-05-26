@@ -124,13 +124,64 @@ pub fn updateAccountBalance(ctx: *gcp.GcpContext, io: std.Io, account_id: []cons
     const url = try std.fmt.allocPrint(ctx.allocator, "{s}?updateMask.fieldPaths=balance_ticks&updateMask.fieldPaths=updated_at", .{url_base});
     defer ctx.allocator.free(url);
 
-    const body = try std.fmt.allocPrint(ctx.allocator,
-        \\{{"fields":{{"balance_ticks":{{"integerValue":"{d}"}},"updated_at":{{"integerValue":"{d}"}}}}}}
-    , .{ balance_ticks, types.nowMs(io) });
-    defer ctx.allocator.free(body);
+    var aw: std.Io.Writer.Allocating = .init(ctx.allocator);
+    defer aw.deinit();
+    var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    try jw.beginObject();
+    try jw.objectField("fields");
+    try jw.beginObject();
+    try writeIntField(&jw, "balance_ticks", balance_ticks);
+    try writeIntField(&jw, "updated_at", types.nowMs(io));
+    try jw.endObject();
+    try jw.endObject();
 
-    var resp = try ctx.patchFresh(url, body);
+    var resp = try ctx.patchFresh(url, aw.written());
     defer resp.deinit();
+}
+
+// ── Firestore typed-value helpers ───────────────────────────
+//
+// Firestore's REST wire format wraps every field value in a typed
+// envelope: `{"stringValue":"…"}`, `{"integerValue":"123"}`,
+// `{"booleanValue":true}`. Integers are sent as STRINGS because the
+// JSON spec stores numbers as f64 and Firestore int64 doesn't
+// round-trip cleanly through that.
+//
+// These helpers stream that envelope via std.json.Stringify so every
+// user-supplied value (email, name, account_id) is escaped by the
+// standard library rather than concatenated with hand-rolled
+// allocPrint. The prior code (audit C5) interpolated raw `{s}` for
+// every string field, letting a hostile email like
+//   `","balance_ticks":99999999999,"role":"admin","x":"`
+// inject a forged role into the Firestore document at the document
+// boundary.
+
+fn writeStringField(jw: *std.json.Stringify, name: []const u8, value: []const u8) !void {
+    try jw.objectField(name);
+    try jw.beginObject();
+    try jw.objectField("stringValue");
+    try jw.write(value);
+    try jw.endObject();
+}
+
+fn writeIntField(jw: *std.json.Stringify, name: []const u8, value: anytype) !void {
+    try jw.objectField(name);
+    try jw.beginObject();
+    try jw.objectField("integerValue");
+    // Firestore wants int64 as a JSON string — render the decimal
+    // representation directly into the writer.
+    var buf: [32]u8 = undefined;
+    const s = try std.fmt.bufPrint(&buf, "{d}", .{value});
+    try jw.write(s);
+    try jw.endObject();
+}
+
+fn writeBoolField(jw: *std.json.Stringify, name: []const u8, value: bool) !void {
+    try jw.objectField(name);
+    try jw.beginObject();
+    try jw.objectField("booleanValue");
+    try jw.write(value);
+    try jw.endObject();
 }
 
 pub fn updateKeyRevoked(ctx: *gcp.GcpContext, key: types.ApiKey) !void {
@@ -153,33 +204,43 @@ pub fn updateKeyRevoked(ctx: *gcp.GcpContext, key: types.ApiKey) !void {
 // ── Firestore Document Builders ─────────────────────────────
 
 fn buildAccountDocument(allocator: std.mem.Allocator, account: types.Account) ![]u8 {
-    return std.fmt.allocPrint(allocator,
-        \\{{"fields":{{"email":{{"stringValue":"{s}"}},"balance_ticks":{{"integerValue":"{d}"}},"role":{{"stringValue":"{s}"}},"tier":{{"stringValue":"{s}"}},"created_at":{{"integerValue":"{d}"}},"updated_at":{{"integerValue":"{d}"}}}}}}
-    , .{
-        account.email.slice(),
-        account.balance_ticks,
-        account.role.toString(),
-        account.tier.toString(),
-        account.created_at,
-        account.updated_at,
-    });
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    try jw.beginObject();
+    try jw.objectField("fields");
+    try jw.beginObject();
+    try writeStringField(&jw, "email", account.email.slice());
+    try writeIntField(&jw, "balance_ticks", account.balance_ticks);
+    try writeStringField(&jw, "role", account.role.toString());
+    try writeStringField(&jw, "tier", account.tier.toString());
+    try writeIntField(&jw, "created_at", account.created_at);
+    try writeIntField(&jw, "updated_at", account.updated_at);
+    try jw.endObject();
+    try jw.endObject();
+    return aw.toOwnedSlice();
 }
 
 fn buildKeyDocument(allocator: std.mem.Allocator, key: types.ApiKey) ![]u8 {
-    return std.fmt.allocPrint(allocator,
-        \\{{"fields":{{"account_id":{{"stringValue":"{s}"}},"name":{{"stringValue":"{s}"}},"prefix":{{"stringValue":"{s}"}},"spent_ticks":{{"integerValue":"{d}"}},"revoked":{{"booleanValue":{s}}},"created_at":{{"integerValue":"{d}"}},"expires_at":{{"integerValue":"{d}"}},"spend_cap_ticks":{{"integerValue":"{d}"}},"rate_limit_rpm":{{"integerValue":"{d}"}},"endpoints":{{"integerValue":"{d}"}}}}}}
-    , .{
-        key.account_id.slice(),
-        key.name.slice(),
-        key.prefix.slice(),
-        key.spent_ticks,
-        if (key.revoked) "true" else "false",
-        key.created_at,
-        key.expires_at,
-        key.scope.spend_cap_ticks,
-        key.scope.rate_limit_rpm,
-        key.scope.endpoints,
-    });
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    try jw.beginObject();
+    try jw.objectField("fields");
+    try jw.beginObject();
+    try writeStringField(&jw, "account_id", key.account_id.slice());
+    try writeStringField(&jw, "name", key.name.slice());
+    try writeStringField(&jw, "prefix", key.prefix.slice());
+    try writeIntField(&jw, "spent_ticks", key.spent_ticks);
+    try writeBoolField(&jw, "revoked", key.revoked);
+    try writeIntField(&jw, "created_at", key.created_at);
+    try writeIntField(&jw, "expires_at", key.expires_at);
+    try writeIntField(&jw, "spend_cap_ticks", key.scope.spend_cap_ticks);
+    try writeIntField(&jw, "rate_limit_rpm", key.scope.rate_limit_rpm);
+    try writeIntField(&jw, "endpoints", key.scope.endpoints);
+    try jw.endObject();
+    try jw.endObject();
+    return aw.toOwnedSlice();
 }
 
 // ── Firestore Document Parsers ──────────────────────────────

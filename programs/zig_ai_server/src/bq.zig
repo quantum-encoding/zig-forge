@@ -64,24 +64,66 @@ pub const BqAudit = struct {
         defer self.mutex.unlock();
 
         self.seq += 1;
-        const json = std.fmt.allocPrint(self.allocator,
-            \\{{"json":{{"request_id":"req_{d}","account_id":"{s}","key_prefix":"{s}","endpoint":"{s}","provider":"{s}","model":"{s}","input_tokens":{d},"output_tokens":{d},"cost_ticks":{d},"margin_ticks":{d},"latency_ms":{d},"status_code":{d},"tier":"{s}","created_at":"{d}"}}}}
-        , .{
-            self.seq,
-            row.account_id,
-            row.key_prefix,
-            row.endpoint,
-            row.provider,
-            row.model,
-            row.input_tokens,
-            row.output_tokens,
-            row.cost_ticks,
-            row.margin_ticks,
-            row.latency_ms,
-            row.status_code,
-            row.tier,
-            types.nowMs(io),
-        }) catch return;
+        // BigQuery insertAll row shape: {"json": {...field map...}}.
+        // The previous implementation interpolated row.account_id /
+        // row.key_prefix / row.endpoint / row.model / row.tier raw with
+        // "{s}" (audit C5) — a per-request model or endpoint string
+        // could forge sibling fields in the analytics audit trail
+        // (M12 noted that BQ rejects silently, so the only check on
+        // shape integrity was the JSON well-formedness — which the
+        // injection broke). Now everything goes through
+        // std.json.Stringify on a streaming writer.
+        //
+        // BigQuery's `created_at` column is TIMESTAMP and expects a
+        // JSON STRING form ("YYYY-MM-DD HH:MM:SS.SSSSSS" or epoch ms
+        // as a quoted number); we preserve the prior behaviour of
+        // sending it as a quoted decimal int so the BQ schema is
+        // unchanged.
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer aw.deinit();
+        var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+
+        var req_id_buf: [32]u8 = undefined;
+        const request_id = std.fmt.bufPrint(&req_id_buf, "req_{d}", .{self.seq}) catch return;
+
+        var created_at_buf: [32]u8 = undefined;
+        const created_at_str = std.fmt.bufPrint(&created_at_buf, "{d}", .{types.nowMs(io)}) catch return;
+
+        jw.beginObject() catch return;
+        jw.objectField("json") catch return;
+        jw.beginObject() catch return;
+        jw.objectField("request_id") catch return;
+        jw.write(request_id) catch return;
+        jw.objectField("account_id") catch return;
+        jw.write(row.account_id) catch return;
+        jw.objectField("key_prefix") catch return;
+        jw.write(row.key_prefix) catch return;
+        jw.objectField("endpoint") catch return;
+        jw.write(row.endpoint) catch return;
+        jw.objectField("provider") catch return;
+        jw.write(row.provider) catch return;
+        jw.objectField("model") catch return;
+        jw.write(row.model) catch return;
+        jw.objectField("input_tokens") catch return;
+        jw.write(row.input_tokens) catch return;
+        jw.objectField("output_tokens") catch return;
+        jw.write(row.output_tokens) catch return;
+        jw.objectField("cost_ticks") catch return;
+        jw.write(row.cost_ticks) catch return;
+        jw.objectField("margin_ticks") catch return;
+        jw.write(row.margin_ticks) catch return;
+        jw.objectField("latency_ms") catch return;
+        jw.write(row.latency_ms) catch return;
+        jw.objectField("status_code") catch return;
+        jw.write(row.status_code) catch return;
+        jw.objectField("tier") catch return;
+        jw.write(row.tier) catch return;
+        jw.objectField("created_at") catch return;
+        jw.write(created_at_str) catch return;
+        jw.endObject() catch return;
+        jw.endObject() catch return;
+
+        const json = aw.toOwnedSlice() catch return;
 
         self.buffer.append(self.allocator, json) catch {
             self.allocator.free(json);

@@ -529,45 +529,59 @@ pub const Store = struct {
     }
 
     // ── Serialization Helpers ───────────────────────────────
+    //
+    // Every serializer below produces a JSON object via
+    // std.json.Stringify.valueAlloc on an anonymous struct. The prior
+    // implementation used std.fmt.allocPrint with raw "{s}"
+    // interpolation, which the audit flagged as a WAL-replay role-
+    // escalation vector (C5): an `email` of
+    //     `","role":"admin","x":"`
+    // got concatenated into the WAL as literal JSON, and Zig's
+    // std.json parser (used during replay) accepts duplicate keys and
+    // keeps the last value — letting an admin who knows the field
+    // ordering corrupt the WAL into a privilege escalation.
+    //
+    // std.json.Stringify owns string escaping, UTF-8 correctness, and
+    // integer formatting. There is no path from a hostile email /
+    // account_id / model string into a forged JSON sibling field.
 
     fn serializeAccount(self: *Store, account: types.Account) ![]u8 {
-        return std.fmt.allocPrint(self.allocator,
-            \\{{"id":"{s}","email":"{s}","balance_ticks":{d},"role":"{s}","tier":"{s}","created_at":{d}}}
-        , .{
-            account.id.slice(),
-            account.email.slice(),
-            account.balance_ticks,
-            account.role.toString(),
-            account.tier.toString(),
-            account.created_at,
-        });
+        return std.json.Stringify.valueAlloc(self.allocator, .{
+            .id = account.id.slice(),
+            .email = account.email.slice(),
+            .balance_ticks = account.balance_ticks,
+            .role = account.role.toString(),
+            .tier = account.tier.toString(),
+            .created_at = account.created_at,
+        }, .{});
     }
 
     fn serializeKey(self: *Store, key: types.ApiKey) ![]u8 {
         var hash_hex: [64]u8 = undefined;
         types.hexEncode(&key.key_hash, &hash_hex);
 
-        return std.fmt.allocPrint(self.allocator,
-            \\{{"key_hash":"{s}","account_id":"{s}","name":"{s}","prefix":"{s}","spent_ticks":{d},"revoked":{s},"created_at":{d},"expires_at":{d},"spend_cap_ticks":{d},"rate_limit_rpm":{d},"endpoints":{d}}}
-        , .{
-            &hash_hex,
-            key.account_id.slice(),
-            key.name.slice(),
-            key.prefix.slice(),
-            key.spent_ticks,
-            if (key.revoked) "true" else "false",
-            key.created_at,
-            key.expires_at,
-            key.scope.spend_cap_ticks,
-            key.scope.rate_limit_rpm,
-            key.scope.endpoints,
-        });
+        return std.json.Stringify.valueAlloc(self.allocator, .{
+            .key_hash = @as([]const u8, &hash_hex),
+            .account_id = key.account_id.slice(),
+            .name = key.name.slice(),
+            .prefix = key.prefix.slice(),
+            .spent_ticks = key.spent_ticks,
+            .revoked = key.revoked,
+            .created_at = key.created_at,
+            .expires_at = key.expires_at,
+            .spend_cap_ticks = key.scope.spend_cap_ticks,
+            .rate_limit_rpm = key.scope.rate_limit_rpm,
+            .endpoints = key.scope.endpoints,
+        }, .{});
     }
 
     fn serializeReservation(self: *Store, res: types.Reservation) ![]u8 {
-        return std.fmt.allocPrint(self.allocator,
-            \\{{"id":{d},"account_id":"{s}","amount_ticks":{d},"created_at":{d}}}
-        , .{ res.id, res.account_id.slice(), res.amount_ticks, res.created_at });
+        return std.json.Stringify.valueAlloc(self.allocator, .{
+            .id = res.id,
+            .account_id = res.account_id.slice(),
+            .amount_ticks = res.amount_ticks,
+            .created_at = res.created_at,
+        }, .{});
     }
 };
 

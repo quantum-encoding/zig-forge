@@ -8,6 +8,21 @@ const Io = std.Io;
 const Dir = std.Io.Dir;
 const types = @import("store/types.zig");
 
+/// Serialise `record` to a JSON line (object + trailing `\n`) suitable
+/// for appending to a JSONL file. Wraps std.json.Stringify so every
+/// string field is correctly escaped — no hand-rolled "{s}"
+/// interpolation, which previously let a hostile field (e.g. an LLM
+/// model name containing `","cost_ticks":-100000000,"x":"`) forge
+/// sibling JSON fields and corrupt the permanent financial record.
+fn jsonLine(allocator: std.mem.Allocator, record: anytype) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    try jw.write(record);
+    try aw.writer.writeByte('\n');
+    return aw.toOwnedSlice();
+}
+
 /// Atomic spinlock for file writes (independent of store lock)
 const SpinLock = struct {
     state: std.atomic.Value(u32) = .init(0),
@@ -57,22 +72,26 @@ pub const Ledger = struct {
         defer self.mutex.unlock();
 
         self.seq += 1;
-        const line = std.fmt.allocPrint(self.allocator,
-            \\{{"seq":{d},"account_id":"{s}","key_prefix":"{s}","cost_ticks":{d},"margin_ticks":{d},"total_ticks":{d},"balance_after":{d},"endpoint":"{s}","model":"{s}","input_tokens":{d},"output_tokens":{d},"latency_ms":{d},"ts":{d}}}
-        ++ "\n", .{
-            self.seq,
-            account_id,
-            key_prefix,
-            cost_ticks,
-            margin_ticks,
-            cost_ticks + margin_ticks,
-            balance_after,
-            endpoint,
-            model,
-            input_tokens,
-            output_tokens,
-            latency_ms,
-            types.nowMs(io),
+        // JSON via std.json.Stringify — audit-finding C5: the previous
+        // implementation interpolated `model` / `endpoint` / `account_id` /
+        // `key_prefix` straight into a format string, letting a hostile
+        // caller (e.g. POST /qai/v1/chat with model='","cost_ticks":-1,"x":"')
+        // forge sibling fields in the "permanent financial record" the
+        // ledger is supposed to be.
+        const line = jsonLine(self.allocator, .{
+            .seq = self.seq,
+            .account_id = account_id,
+            .key_prefix = key_prefix,
+            .cost_ticks = cost_ticks,
+            .margin_ticks = margin_ticks,
+            .total_ticks = cost_ticks + margin_ticks,
+            .balance_after = balance_after,
+            .endpoint = endpoint,
+            .model = model,
+            .input_tokens = input_tokens,
+            .output_tokens = output_tokens,
+            .latency_ms = latency_ms,
+            .ts = types.nowMs(io),
         }) catch return;
         defer self.allocator.free(line);
 
@@ -92,15 +111,14 @@ pub const Ledger = struct {
         defer self.mutex.unlock();
 
         self.seq += 1;
-        const line = std.fmt.allocPrint(self.allocator,
-            \\{{"seq":{d},"type":"credit","account_id":"{s}","amount_ticks":{d},"balance_after":{d},"admin_key":"{s}","ts":{d}}}
-        ++ "\n", .{
-            self.seq,
-            account_id,
-            amount_ticks,
-            balance_after,
-            admin_key_prefix,
-            types.nowMs(io),
+        const line = jsonLine(self.allocator, .{
+            .seq = self.seq,
+            .type = "credit",
+            .account_id = account_id,
+            .amount_ticks = amount_ticks,
+            .balance_after = balance_after,
+            .admin_key = admin_key_prefix,
+            .ts = types.nowMs(io),
         }) catch return;
         defer self.allocator.free(line);
 
@@ -128,20 +146,18 @@ pub const Ledger = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const line = std.fmt.allocPrint(self.allocator,
-            \\{{"key":"{s}","account":"{s}","endpoint":"{s}","method":"{s}","status":{d},"model":"{s}","in":{d},"out":{d},"cost":{d},"ms":{d},"ts":{d}}}
-        ++ "\n", .{
-            key_prefix,
-            account_id,
-            endpoint,
-            method,
-            status_code,
-            model,
-            input_tokens,
-            output_tokens,
-            cost_ticks,
-            latency_ms,
-            types.nowMs(io),
+        const line = jsonLine(self.allocator, .{
+            .key = key_prefix,
+            .account = account_id,
+            .endpoint = endpoint,
+            .method = method,
+            .status = status_code,
+            .model = model,
+            .in = input_tokens,
+            .out = output_tokens,
+            .cost = cost_ticks,
+            .ms = latency_ms,
+            .ts = types.nowMs(io),
         }) catch return;
         defer self.allocator.free(line);
 
