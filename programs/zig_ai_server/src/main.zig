@@ -111,7 +111,7 @@ pub fn main(init: std.process.Init) !void {
         if (bootstrap_key orelse legacy_key) |raw_key| {
             // Create admin account
             const types = @import("store/types.zig");
-            const now = types.nowMs();
+            const now = types.nowMs(boot_io);
             store.createAccount(boot_io, .{
                 .id = types.FixedStr64.fromSlice("admin"),
                 .email = types.FixedStr256.fromSlice("admin@localhost"),
@@ -220,7 +220,7 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("  Warning: {d} connections still active after drain timeout\n", .{active_connections.load(.acquire)});
     }
 
-    store.flushDirtyAccounts();
+    store.flushDirtyAccounts(boot_io);
     bq_audit.waitPending();
     store.snapshot(boot_io) catch {};
     std.debug.print("  Shutdown complete.\n", .{});
@@ -410,7 +410,7 @@ fn backgroundFlushLoop(store: *@import("store/store.zig").Store) void {
         io.sleep(.{ .nanoseconds = 5 * std.time.ns_per_s }, .real) catch break;
         if (shutdown_requested.load(.acquire) != 0) break;
 
-        store.flushDirtyAccounts();
+        store.flushDirtyAccounts(io);
         tick += 1;
 
         // Every 12 ticks (60 seconds), check WAL size and rotate if needed

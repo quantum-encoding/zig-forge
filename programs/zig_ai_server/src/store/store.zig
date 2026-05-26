@@ -190,7 +190,7 @@ pub const Store = struct {
     }
 
     /// Flush all dirty account balances to Firestore. Call periodically + on shutdown.
-    pub fn flushDirtyAccounts(self: *Store) void {
+    pub fn flushDirtyAccounts(self: *Store, io: Io) void {
         const ctx = self.gcp_ctx orelse return;
 
         self.mutex.lock();
@@ -212,7 +212,7 @@ pub const Store = struct {
 
         // Write outside the lock (no contention with request handling)
         for (to_flush.items) |item| {
-            firestore.updateAccountBalance(ctx, item.id, item.balance) catch {};
+            firestore.updateAccountBalance(ctx, io, item.id, item.balance) catch {};
         }
     }
 
@@ -334,7 +334,7 @@ pub const Store = struct {
             .amount_ticks = amount_ticks,
             .endpoint = types.FixedStr64.fromSlice(endpoint),
             .model = types.FixedStr128.fromSlice(model),
-            .created_at = types.nowMs(),
+            .created_at = types.nowMs(io),
         };
 
         // WAL write — if this fails, we need to refund
@@ -375,7 +375,7 @@ pub const Store = struct {
         // Update key spend
         if (self.keys.getPtr(reservation.key_hash)) |key| {
             key.spent_ticks += total_cost;
-            key.last_used_at = types.nowMs();
+            key.last_used_at = types.nowMs(io);
         }
 
         // WAL write (best-effort on commit — reservation already holds are conservative)
@@ -417,7 +417,7 @@ pub const Store = struct {
 
             const account = self.accounts.getPtr(account_id) orelse return error.AccountNotFound;
             account.balance_ticks += amount_ticks;
-            account.updated_at = types.nowMs();
+            account.updated_at = types.nowMs(io);
             new_balance = account.balance_ticks;
 
             const payload = std.fmt.allocPrint(self.allocator, "{s}:{d}", .{ account_id, amount_ticks }) catch return error.OutOfMemory;
@@ -427,7 +427,7 @@ pub const Store = struct {
 
         // Phase 2: Firestore write outside the mutex
         if (self.gcp_ctx) |ctx| {
-            firestore.updateAccountBalance(ctx, account_id, new_balance) catch {};
+            firestore.updateAccountBalance(ctx, io, account_id, new_balance) catch {};
         }
     }
 

@@ -117,7 +117,7 @@ pub fn saveKey(ctx: *gcp.GcpContext, key: types.ApiKey) !void {
     }
 }
 
-pub fn updateAccountBalance(ctx: *gcp.GcpContext, account_id: []const u8, balance_ticks: i64) !void {
+pub fn updateAccountBalance(ctx: *gcp.GcpContext, io: std.Io, account_id: []const u8, balance_ticks: i64) !void {
     const url_base = try accountUrl(ctx.allocator, ctx.project_id, account_id);
     defer ctx.allocator.free(url_base);
     // Use updateMask to only update balance_ticks field
@@ -126,7 +126,7 @@ pub fn updateAccountBalance(ctx: *gcp.GcpContext, account_id: []const u8, balanc
 
     const body = try std.fmt.allocPrint(ctx.allocator,
         \\{{"fields":{{"balance_ticks":{{"integerValue":"{d}"}},"updated_at":{{"integerValue":"{d}"}}}}}}
-    , .{ balance_ticks, types.nowMs() });
+    , .{ balance_ticks, types.nowMs(io) });
     defer ctx.allocator.free(body);
 
     var resp = try ctx.patchFresh(url, body);

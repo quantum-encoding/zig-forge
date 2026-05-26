@@ -117,7 +117,7 @@ pub fn dispatch(
         // Rate limit by client IP
         if (server_auth_rl) |rl| {
             const client_ip = auth_rl_mod.extractClientIp(request);
-            if (!rl.check(client_ip)) {
+            if (!rl.check(io, client_ip)) {
                 return .{
                     .status = .too_many_requests,
                     .body =
@@ -144,7 +144,7 @@ pub fn dispatch(
     if (std.mem.startsWith(u8, path, "/qai/v1/")) {
         // Authenticate via store or legacy mode
         if (server_store) |store| {
-            const auth_result = auth_pipeline.authenticate(request, store);
+            const auth_result = auth_pipeline.authenticate(request, io, store);
             switch (auth_result) {
                 .ok => |auth| return routeApiV1Authed(path[8..], method, request, allocator, io, environ_map, store, &auth),
                 .err => |auth_err| return .{ .status = auth_err.status, .body = auth_err.body },
@@ -303,10 +303,10 @@ fn routeApiV1Authed(
                 return keys.handleCreditAccount(request, allocator, io, store, auth, account_id, server_ledger);
             }
             if (std.mem.eql(u8, action, "freeze")) {
-                return keys.handleFreezeAccount(request, allocator, store, auth, account_id);
+                return keys.handleFreezeAccount(request, allocator, io, store, auth, account_id);
             }
             if (std.mem.eql(u8, action, "tier")) {
-                return keys.handleSetTier(request, allocator, store, auth, account_id);
+                return keys.handleSetTier(request, allocator, io, store, auth, account_id);
             }
             return handlers.notFound(request, allocator);
         }

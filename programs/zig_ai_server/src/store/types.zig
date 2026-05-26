@@ -168,13 +168,31 @@ pub fn hexEncode(bytes: []const u8, out: []u8) void {
     }
 }
 
-/// Get current timestamp in milliseconds.
-/// Uses a simple monotonic counter as fallback when Io is not available.
-var timestamp_counter: std.atomic.Value(i64) = .init(0);
-
-pub fn nowMs() i64 {
-    // Increment counter to ensure uniqueness even without real clock
-    return timestamp_counter.fetchAdd(1, .monotonic) + 1;
+/// Wall-clock milliseconds since the Unix epoch, read from `io`.
+///
+/// The prior implementation was a global atomic *counter* that
+/// incremented by 1 per call and was treated as if it were epoch
+/// milliseconds (audit-finding C3). That broke every time-dependent
+/// feature: API-key `expires_at` checks never fired (reaching a
+/// "1 hour" key required ~3.6M nowMs() calls — effectively never),
+/// per-key + per-IP rate-limiter token-bucket refill math collapsed
+/// to zero (`rpm * elapsed_ms / 60_000` where `elapsed_ms` was the
+/// gap between two counter ticks), and WAL / Firestore timestamps
+/// were meaningless.
+///
+/// Implementation: routes through the std.Io vtable's `now(.real)`
+/// — the same primitive `oidc.epochSeconds` uses for JWT `exp`
+/// verification. The library has `link_libc = false`, so the raw
+/// libc syscall paths (std.c.clock_gettime / std.posix.clock_gettime)
+/// are not available; Io.vtable.now is the supported portable path.
+///
+/// .real (not .monotonic) is correct: these values are persisted to
+/// disk, replayed across restarts, and compared against JWT `exp`
+/// (Unix epoch seconds). A monotonic clock would reset every boot
+/// and break the persistence contract.
+pub fn nowMs(io: std.Io) i64 {
+    const ts = io.vtable.now(io.userdata, .real);
+    return @intCast(@divFloor(ts.nanoseconds, std.time.ns_per_ms));
 }
 
 // ── Auth Context (returned from auth pipeline) ──────────────

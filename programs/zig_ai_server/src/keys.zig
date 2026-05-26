@@ -101,7 +101,7 @@ pub fn handleCreateKey(
     @memcpy(prefix_buf[0..6], "qai_k_");
     @memcpy(prefix_buf[6..14], hex_buf[0..8]);
 
-    const now = types.nowMs();
+    const now = types.nowMs(io);
     const expires_at: i64 = if (req.expires_in_hours) |hours|
         now + hours * 3600 * 1000
     else
@@ -304,7 +304,7 @@ pub fn handleCreateAccount(
 
     const role = std.meta.stringToEnum(types.Role, req.role) orelse .user;
     const tier = std.meta.stringToEnum(types.DevTier, req.tier) orelse .free;
-    const now = types.nowMs();
+    const now = types.nowMs(io);
 
     const account = types.Account{
         .id = types.FixedStr64.fromSlice(req.id),
@@ -619,6 +619,7 @@ const FreezeRequest = struct {
 pub fn handleFreezeAccount(
     request: *http.Server.Request,
     allocator: std.mem.Allocator,
+    io: Io,
     store: *store_mod.Store,
     auth: *const types.AuthContext,
     account_id: []const u8,
@@ -644,7 +645,7 @@ pub fn handleFreezeAccount(
         };
     };
     acct.frozen = parsed.value.frozen;
-    acct.updated_at = types.nowMs();
+    acct.updated_at = types.nowMs(io);
     store.dirty_accounts.put(store.allocator, account_id, {}) catch {};
     store.mutex.unlock();
 
@@ -664,6 +665,7 @@ const TierRequest = struct {
 pub fn handleSetTier(
     request: *http.Server.Request,
     allocator: std.mem.Allocator,
+    io: Io,
     store: *store_mod.Store,
     auth: *const types.AuthContext,
     account_id: []const u8,
@@ -695,7 +697,7 @@ pub fn handleSetTier(
         };
     };
     acct.tier = new_tier;
-    acct.updated_at = types.nowMs();
+    acct.updated_at = types.nowMs(io);
     store.dirty_accounts.put(store.allocator, account_id, {}) catch {};
     store.mutex.unlock();
 

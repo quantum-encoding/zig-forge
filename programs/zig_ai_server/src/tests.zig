@@ -481,6 +481,7 @@ test "OIDC: nonce verification integration" {
 test "OIDC: claims deinit with all fields" {
     var claims = oidc.VerifiedClaims{
         .sub = try testing.allocator.dupe(u8, "apple_001234"),
+        .iss = try testing.allocator.dupe(u8, "https://appleid.apple.com"),
         .email = try testing.allocator.dupe(u8, "user@icloud.com"),
         .email_verified = true,
         .exp = 1712521781,

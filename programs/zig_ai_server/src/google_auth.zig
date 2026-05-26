@@ -150,21 +150,36 @@ fn processVerifiedClaims(
 ) Response {
     defer claims.deinit(allocator);
 
-    // Validate audience — must match one of our client IDs
-    if (claims.aud) |aud| {
-        var aud_ok = false;
-        for (ALLOWED_CLIENT_IDS) |id| {
-            if (std.mem.eql(u8, aud, id)) {
-                aud_ok = true;
-                break;
-            }
+    // Validate issuer (C1). VerifiedClaims.iss is now mandatory at
+    // parse time. Google rotates between two legacy issuer strings;
+    // both are in GOOGLE_ISSUERS.
+    var iss_ok = false;
+    for (GOOGLE_ISSUERS) |allowed_iss| {
+        if (std.mem.eql(u8, claims.iss, allowed_iss)) {
+            iss_ok = true;
+            break;
         }
-        if (!aud_ok) {
-            std.debug.print("  Google auth: bad audience: {s}\n", .{aud});
-            return .{ .status = .unauthorized, .body =
-                \\{"error":"authentication_error","message":"Token audience not allowed"}
-            };
+    }
+    if (!iss_ok) {
+        return .{ .status = .unauthorized, .body =
+            \\{"error":"authentication_error","message":"Token issuer is not Google"}
+        };
+    }
+
+    // Validate audience (C1). aud is now mandatory at parse time —
+    // the "if (claims.aud) |aud| { ... }" bypass that previously let
+    // an aud-stripped token through is removed.
+    var aud_ok = false;
+    for (ALLOWED_CLIENT_IDS) |id| {
+        if (std.mem.eql(u8, claims.aud, id)) {
+            aud_ok = true;
+            break;
         }
+    }
+    if (!aud_ok) {
+        return .{ .status = .unauthorized, .body =
+            \\{"error":"authentication_error","message":"Token audience not allowed"}
+        };
     }
 
     // Validate expiration
@@ -233,7 +248,7 @@ fn findOrCreateAccount(
     if (store.getAccountLocked(account_id) != null) return false;
 
     // Create new account
-    const now_ms = types.nowMs();
+    const now_ms = types.nowMs(io);
     const email = claims.email orelse "";
     store.createAccount(io, .{
         .id = types.FixedStr64.fromSlice(account_id),
@@ -271,7 +286,7 @@ fn mintApiKey(
     @memcpy(prefix_buf[0..6], "qai_k_");
     @memcpy(prefix_buf[6..14], hex_buf[0..8]);
 
-    const now_ms = types.nowMs();
+    const now_ms = types.nowMs(io);
 
     store.createKey(io, .{
         .key_hash = key_hash,

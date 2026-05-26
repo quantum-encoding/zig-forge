@@ -60,7 +60,7 @@ pub const AuthRateLimiter = struct {
 
     /// Check if a request is allowed for the given IP.
     /// Returns true if allowed, false if rate limited.
-    pub fn check(self: *AuthRateLimiter, ip: []const u8) bool {
+    pub fn check(self: *AuthRateLimiter, io: std.Io, ip: []const u8) bool {
         var key: IpKey = .{0} ** 64;
         const copy_len = @min(ip.len, key.len);
         @memcpy(key[0..copy_len], ip[0..copy_len]);
@@ -68,7 +68,7 @@ pub const AuthRateLimiter = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = types.nowMs();
+        const now = types.nowMs(io);
 
         if (self.buckets.getPtr(key)) |bucket| {
             // Refill: rate_rpm tokens per 60 counter ticks
@@ -123,70 +123,94 @@ pub fn extractClientIp(request: *const http.Server.Request) []const u8 {
 
 // ── Tests ──────────────────────────────────────────────────────
 
+// Helper for tests: spin up a fresh Io handle. Each test owns its own
+// to keep the body short and self-contained.
+fn testIo() std.Io.Threaded {
+    return std.Io.Threaded.init(std.testing.allocator, .{});
+}
+
 test "auth rate limiter: allows first N requests" {
     var rl = AuthRateLimiter.init(std.testing.allocator);
     defer rl.deinit();
+    var iot = testIo();
+    defer iot.deinit();
+    const io = iot.io();
 
     // First 10 requests from 1.2.3.4 should succeed
     var i: u32 = 0;
     while (i < 10) : (i += 1) {
-        try std.testing.expect(rl.check("1.2.3.4"));
+        try std.testing.expect(rl.check(io, "1.2.3.4"));
     }
 }
 
 test "auth rate limiter: blocks 11th request" {
     var rl = AuthRateLimiter.init(std.testing.allocator);
     defer rl.deinit();
+    var iot = testIo();
+    defer iot.deinit();
+    const io = iot.io();
 
     var i: u32 = 0;
     while (i < 10) : (i += 1) {
-        _ = rl.check("1.2.3.4");
+        _ = rl.check(io, "1.2.3.4");
     }
     // 11th should be blocked
-    try std.testing.expect(!rl.check("1.2.3.4"));
+    try std.testing.expect(!rl.check(io, "1.2.3.4"));
 }
 
 test "auth rate limiter: separate buckets per IP" {
     var rl = AuthRateLimiter.init(std.testing.allocator);
     defer rl.deinit();
+    var iot = testIo();
+    defer iot.deinit();
+    const io = iot.io();
 
     // Drain IP 1
     var i: u32 = 0;
-    while (i < 10) : (i += 1) _ = rl.check("1.1.1.1");
-    try std.testing.expect(!rl.check("1.1.1.1"));
+    while (i < 10) : (i += 1) _ = rl.check(io, "1.1.1.1");
+    try std.testing.expect(!rl.check(io, "1.1.1.1"));
 
     // IP 2 should be unaffected
-    try std.testing.expect(rl.check("2.2.2.2"));
+    try std.testing.expect(rl.check(io, "2.2.2.2"));
 }
 
 test "auth rate limiter: empty IP shares bucket (fail-safe)" {
     var rl = AuthRateLimiter.init(std.testing.allocator);
     defer rl.deinit();
+    var iot = testIo();
+    defer iot.deinit();
+    const io = iot.io();
 
     // Empty IP is allowed but shares one bucket with all other empty IPs
-    try std.testing.expect(rl.check(""));
+    try std.testing.expect(rl.check(io, ""));
 }
 
 test "auth rate limiter: IPv6 address" {
     var rl = AuthRateLimiter.init(std.testing.allocator);
     defer rl.deinit();
+    var iot = testIo();
+    defer iot.deinit();
+    const io = iot.io();
 
     const ipv6 = "2001:db8::1";
-    try std.testing.expect(rl.check(ipv6));
+    try std.testing.expect(rl.check(io, ipv6));
     // Different from IPv4
-    try std.testing.expect(rl.check("1.2.3.4"));
+    try std.testing.expect(rl.check(io, "1.2.3.4"));
 }
 
 test "auth rate limiter: bucket cap prevents memory blowup" {
     var rl = AuthRateLimiter.init(std.testing.allocator);
     defer rl.deinit();
+    var iot = testIo();
+    defer iot.deinit();
+    const io = iot.io();
 
     // Fill past the cap
     var buf: [32]u8 = undefined;
     var i: u32 = 0;
     while (i < MAX_IP_BUCKETS + 100) : (i += 1) {
         const ip = try std.fmt.bufPrint(&buf, "10.0.{d}.{d}", .{ i / 256, i % 256 });
-        _ = rl.check(ip);
+        _ = rl.check(io, ip);
     }
     // Bucket count should be capped
     try std.testing.expect(rl.buckets.count() <= MAX_IP_BUCKETS);

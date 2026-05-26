@@ -136,21 +136,29 @@ fn handleVerifiedClaims(
 ) Response {
     defer claims.deinit(allocator);
 
-    // Validate issuer
-    if (claims.aud) |aud| {
-        var aud_ok = false;
-        for (ALLOWED_AUDIENCES) |allowed| {
-            if (std.mem.eql(u8, aud, allowed)) {
-                aud_ok = true;
-                break;
-            }
+    // Validate issuer (C1). VerifiedClaims.iss is now mandatory at
+    // parse time, so this is a value check, not a presence check.
+    // Apple-signed tokens always carry "https://appleid.apple.com".
+    if (!std.mem.eql(u8, claims.iss, APPLE_ISSUER)) {
+        return .{ .status = .unauthorized, .body =
+            \\{"error":"authentication_error","message":"Token issuer is not Apple"}
+        };
+    }
+
+    // Validate audience (C1). aud is now also mandatory at parse time;
+    // the bypass-by-omission ("if (claims.aud) |aud| { ... }") no
+    // longer exists — a missing aud is rejected upstream in verifyJwt.
+    var aud_ok = false;
+    for (ALLOWED_AUDIENCES) |allowed| {
+        if (std.mem.eql(u8, claims.aud, allowed)) {
+            aud_ok = true;
+            break;
         }
-        if (!aud_ok) {
-            std.debug.print("  Apple auth: bad audience: {s}\n", .{aud});
-            return .{ .status = .unauthorized, .body =
-                \\{"error":"authentication_error","message":"Token audience not allowed"}
-            };
-        }
+    }
+    if (!aud_ok) {
+        return .{ .status = .unauthorized, .body =
+            \\{"error":"authentication_error","message":"Token audience not allowed"}
+        };
     }
 
     // Validate expiration
@@ -227,7 +235,7 @@ fn findOrCreateAccount(
     if (store.getAccountLocked(account_id) != null) return false;
 
     // Create new account
-    const now_ms = types.nowMs();
+    const now_ms = types.nowMs(io);
     const email = claims.email orelse "";
     store.createAccount(io, .{
         .id = types.FixedStr64.fromSlice(account_id),
@@ -268,7 +276,7 @@ fn mintApiKey(
     @memcpy(prefix_buf[0..6], "qai_k_");
     @memcpy(prefix_buf[6..14], hex_buf[0..8]);
 
-    const now_ms = types.nowMs();
+    const now_ms = types.nowMs(io);
 
     store.createKey(io, .{
         .key_hash = key_hash,

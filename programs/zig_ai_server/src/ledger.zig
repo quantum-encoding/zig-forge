@@ -72,7 +72,7 @@ pub const Ledger = struct {
             input_tokens,
             output_tokens,
             latency_ms,
-            types.nowMs(),
+            types.nowMs(io),
         }) catch return;
         defer self.allocator.free(line);
 
@@ -100,7 +100,7 @@ pub const Ledger = struct {
             amount_ticks,
             balance_after,
             admin_key_prefix,
-            types.nowMs(),
+            types.nowMs(io),
         }) catch return;
         defer self.allocator.free(line);
 
@@ -141,7 +141,7 @@ pub const Ledger = struct {
             output_tokens,
             cost_ticks,
             latency_ms,
-            types.nowMs(),
+            types.nowMs(io),
         }) catch return;
         defer self.allocator.free(line);
 

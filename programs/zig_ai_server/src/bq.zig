@@ -59,7 +59,7 @@ pub const BqAudit = struct {
     }
 
     /// Queue an audit row. Non-blocking. Flushes when buffer is full.
-    pub fn log(self: *BqAudit, row: AuditRow) void {
+    pub fn log(self: *BqAudit, io: std.Io, row: AuditRow) void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -80,7 +80,7 @@ pub const BqAudit = struct {
             row.latency_ms,
             row.status_code,
             row.tier,
-            types.nowMs(),
+            types.nowMs(io),
         }) catch return;
 
         self.buffer.append(self.allocator, json) catch {

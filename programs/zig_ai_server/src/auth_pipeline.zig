@@ -30,6 +30,7 @@ pub fn setRateLimiter(rl: *ratelimit.RateLimiter) void {
 
 pub fn authenticate(
     request: *const http.Server.Request,
+    io: std.Io,
     store: *store_mod.Store,
 ) AuthResult {
     // Step 1: Extract Authorization header
@@ -82,7 +83,7 @@ pub fn authenticate(
 
     // Step 6: Check expiration
     if (key.expires_at > 0) {
-        const now = @import("store/types.zig").nowMs();
+        const now = @import("store/types.zig").nowMs(io);
         if (now > key.expires_at) {
             return .{ .err = .{
                 .status = .forbidden,
@@ -147,7 +148,7 @@ pub fn authenticate(
     // Step 11: Per-key rate limiting
     if (key.scope.rate_limit_rpm > 0) {
         if (rate_limiter) |rl| {
-            if (!rl.check(key_hash, key.scope.rate_limit_rpm)) {
+            if (!rl.check(io, key_hash, key.scope.rate_limit_rpm)) {
                 return .{ .err = .{
                     .status = .too_many_requests,
                     .body =

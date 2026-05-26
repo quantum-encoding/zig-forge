@@ -47,13 +47,13 @@ pub const RateLimiter = struct {
     /// Check if a request is allowed for the given key.
     /// Returns true if allowed, false if rate limited.
     /// `rate_rpm` is the configured rate limit (requests per minute). 0 = no limit.
-    pub fn check(self: *RateLimiter, key_hash: [32]u8, rate_rpm: u32) bool {
+    pub fn check(self: *RateLimiter, io: std.Io, key_hash: [32]u8, rate_rpm: u32) bool {
         if (rate_rpm == 0) return true; // No limit configured
 
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = types.nowMs();
+        const now = types.nowMs(io);
 
         const entry = self.buckets.getPtr(key_hash);
         if (entry) |bucket| {
