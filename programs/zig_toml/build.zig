@@ -62,19 +62,36 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("bench", "Run TOML parser benchmarks");
     bench_step.dependOn(&run_bench.step);
 
-    // Tests module
+    // ============================================================
+    // Tests
+    //
+    // Two test entry points, both gated by `zig build test`:
+    //   1. lib.zig         — Tier 2 (failure modes) + Tier 3 (roundtrips)
+    //                        discovered via the refAllDecls trampoline in
+    //                        lib.zig.
+    //   2. tier1_anchors   — externally-anchored toml-test/spec vectors.
+    //
+    // Per /CLAUDE.md rule #1, removing or weakening tier1_anchors.zig
+    // requires a re-audit, not a refactor. The lib.zig tests are gravy.
+    // ============================================================
     const test_module = b.addModule("zig_toml_test_module", .{
         .root_source_file = b.path("src/lib.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
+    const lib_unit_tests = b.addTest(.{ .root_module = test_module });
 
-    const lib_unit_tests = b.addTest(.{
-        .root_module = test_module,
+    const anchors_test_module = b.addModule("zig_toml_anchors_test_module", .{
+        .root_source_file = b.path("src/tier1_anchors.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
     });
+    anchors_test_module.addImport("zig_toml", lib_module);
+    const anchor_tests = b.addTest(.{ .root_module = anchors_test_module });
 
-    const run_lib_test = b.addRunArtifact(lib_unit_tests);
-    const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_lib_test.step);
+    const test_step = b.step("test", "Run unit tests, tier-2 failure modes, and tier-1 spec anchors");
+    test_step.dependOn(&b.addRunArtifact(lib_unit_tests).step);
+    test_step.dependOn(&b.addRunArtifact(anchor_tests).step);
 }

@@ -60,14 +60,7 @@ pub fn main(init: std.process.Init) !void {
     };
     const elapsed = timer.read();
 
-    defer {
-        var iter = result.iterator();
-        while (iter.next()) |entry| {
-            allocator.free(entry.key_ptr.*);
-            entry.value_ptr.*.deinit(allocator);
-        }
-        result.deinit();
-    }
+    defer result.deinit(allocator);
 
     try stdout.print("Parse completed in {} ns\n", .{elapsed});
     try stdout.print("Parsed {} top-level entries\n\n", .{result.count()});
@@ -98,8 +91,8 @@ fn printValue(writer: anytype, value: zig_toml.Value, indent: usize) !void {
         .boolean => |v| try writer.print("{s}Boolean: {}\n", .{ indent_buf[0..total_indent], v }),
         .datetime => |v| try writer.print("{s}DateTime: {s}\n", .{ indent_buf[0..total_indent], v }),
         .array => |arr| {
-            try writer.print("{s}Array with {} items:\n", .{ indent_buf[0..total_indent], arr.len });
-            for (arr) |item| {
+            try writer.print("{s}Array with {} items:\n", .{ indent_buf[0..total_indent], arr.items.items.len });
+            for (arr.items.items) |item| {
                 try printValue(writer, item, indent + 1);
             }
         },

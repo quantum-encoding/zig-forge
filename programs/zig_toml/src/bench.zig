@@ -131,14 +131,7 @@ fn benchmarkParse(allocator: Allocator, name: []const u8, input: []const u8, ite
 
         const elapsed = timer.read();
 
-        defer {
-            var iter = result.iterator();
-            while (iter.next()) |entry| {
-                allocator.free(entry.key_ptr.*);
-                entry.value_ptr.*.deinit(allocator);
-            }
-            result.deinit();
-        }
+        defer result.deinit(allocator);
 
         if (i < 1000) {
             times[i] = elapsed;
