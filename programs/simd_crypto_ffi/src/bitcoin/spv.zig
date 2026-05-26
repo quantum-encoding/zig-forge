@@ -119,40 +119,90 @@ pub const BlockHeader = struct {
 };
 
 /// Merkle Proof for SPV verification
+///
+/// `tx_count` is REQUIRED to defeat CVE-2012-2459 (and related variants):
+/// without binding the proof to the block's actual transaction count, an
+/// attacker can craft a proof whose depth/index happen to validate under an
+/// alternate tree interpretation (e.g. by presenting an internal merkle node
+/// as a "transaction" in a block whose leaf-duplication structure makes the
+/// proof shape ambiguous). With `tx_count` we enforce
+///   index < tx_count  AND  hashes.len == ceil(log2(tx_count))
+/// which pins the proof to a single, well-defined tree position.
 pub const MerkleProof = struct {
-    /// The hashes forming the path from leaf to root
+    /// The sibling hashes forming the path from the leaf to the root.
+    /// `hashes[0]` is the sibling at the leaf level; `hashes[len-1]` is the
+    /// sibling at the level just below the root.
     hashes: []const Hash,
-    /// The index of the transaction in the block
-    /// Used to determine left/right ordering at each level
+    /// Zero-based index of the transaction within the block.
     index: u32,
+    /// Total number of transactions in the block. MUST be non-zero. The proof
+    /// is rejected unless `index < tx_count` and the proof length matches the
+    /// depth implied by `tx_count`.
+    tx_count: u32,
 };
+
+/// Compute the merkle-tree depth required for a block of `tx_count` txs.
+/// For a single-tx block the depth is 0 (root == leaf). Otherwise it is
+/// `ceil(log2(tx_count))`.
+pub fn requiredMerkleDepth(tx_count: u32) u32 {
+    if (tx_count <= 1) return 0;
+    return std.math.log2_int_ceil(u32, tx_count);
+}
 
 // =============================================================================
 // PROOF OF WORK VERIFICATION
 // =============================================================================
 
 /// Decode compact "bits" format to 256-bit target
-/// Format: 0xAABBBBBB where AA is exponent, BBBBBB is mantissa
-/// Target = mantissa * 2^(8*(exponent-3))
+/// Format: 0xEEMMMMMM where EE is exponent, MMMMMM is mantissa.
+/// Numerically: target = mantissa * 256^(exponent - 3).
+///
+/// The result is stored little-endian (target[0] is the least-significant byte,
+/// matching compareHash's iteration order). For bits=0x1b0404cb (real Bitcoin
+/// block 32256) the target bytes are target[24]=0xcb, target[25]=0x04,
+/// target[26]=0x04 — i.e. the mantissa's LSB sits at the lowest byte index of
+/// the mantissa block, not the highest.
+///
+/// Returns the zero target (which will reject every block in PoW comparison)
+/// for invalid encodings: the "negative" bit set, exponent out of range, or a
+/// zero mantissa.
 pub fn decodeCompactTarget(bits: u32) Hash {
     var target: Hash = [_]u8{0} ** 32;
 
     const exponent = @as(u8, @truncate(bits >> 24));
     const mantissa = bits & 0x007fffff;
+    const negative = (bits & 0x00800000) != 0;
 
-    // Handle edge cases
-    if (exponent == 0) return target;
-    if (exponent > 32) return target; // Invalid
+    // Reject negative-bit, zero-mantissa, and overflow per Bitcoin Core's
+    // arith_uint256::SetCompact rules: a target that does not fit in 256 bits
+    // is invalid.
+    if (negative) return target;
+    if (mantissa == 0) return target;
+    if (exponent > 34) return target;
+    if (exponent > 33 and mantissa > 0xff) return target;
+    if (exponent > 32 and mantissa > 0xffff) return target;
 
-    // Calculate position - mantissa goes at position (exponent - 3)
-    // But stored in little-endian, so we need to reverse thinking
-    const byte_pos: usize = if (exponent >= 3) exponent - 3 else 0;
-
-    if (byte_pos < 32) {
-        // Write mantissa bytes (big-endian within the mantissa)
-        if (byte_pos + 2 < 32) target[byte_pos + 2] = @truncate(mantissa & 0xff);
-        if (byte_pos + 1 < 32) target[byte_pos + 1] = @truncate((mantissa >> 8) & 0xff);
-        if (byte_pos < 32) target[byte_pos] = @truncate((mantissa >> 16) & 0xff);
+    if (exponent <= 3) {
+        // Mantissa is shifted right by (3 - exponent) bytes, placing the result
+        // at the low end of target.
+        const shift_bytes: u5 = @intCast(3 - exponent);
+        const shifted: u32 = mantissa >> (8 * @as(u5, shift_bytes));
+        target[0] = @truncate(shifted & 0xff);
+        if (shift_bytes < 3) target[1] = @truncate((shifted >> 8) & 0xff);
+        if (shift_bytes < 2) target[2] = @truncate((shifted >> 16) & 0xff);
+    } else {
+        // Mantissa occupies bytes [byte_pos, byte_pos+2] with byte_pos holding
+        // the mantissa's least-significant byte (little-endian byte order).
+        const byte_pos: usize = exponent - 3;
+        if (byte_pos < 32) {
+            target[byte_pos] = @truncate(mantissa & 0xff);
+        }
+        if (byte_pos + 1 < 32) {
+            target[byte_pos + 1] = @truncate((mantissa >> 8) & 0xff);
+        }
+        if (byte_pos + 2 < 32) {
+            target[byte_pos + 2] = @truncate((mantissa >> 16) & 0xff);
+        }
     }
 
     return target;
@@ -245,11 +295,31 @@ pub const SpvError = error{
     InvalidTimestamp,
 };
 
-/// Verify that a transaction hash is part of the Merkle tree
-/// This proves the transaction was included in the block
+/// Verify that a transaction hash is part of the Merkle tree.
+///
+/// The proof is rejected unless it is pinned to the claimed block's transaction
+/// count: `proof.index` must be in range, and `proof.hashes.len` must equal the
+/// depth implied by `proof.tx_count`. This prevents the CVE-2012-2459 family of
+/// attacks where a crafted proof presents an internal merkle node as a leaf.
+///
+/// Edge case: when `tx_count == 1`, the root IS the transaction's hash and the
+/// proof must contain zero sibling hashes.
 pub fn verifyMerkleProof(tx_hash: Hash, root: Hash, proof: MerkleProof) bool {
-    // Sanity check on proof depth
-    if (proof.hashes.len > MAX_MERKLE_DEPTH) return false;
+    // (1) tx_count must be set and the index must address a real leaf.
+    if (proof.tx_count == 0) return false;
+    if (proof.index >= proof.tx_count) return false;
+
+    // (2) The proof length must exactly equal the merkle depth for this block.
+    //     Allowing any shorter or longer path lets an attacker re-interpret an
+    //     internal node as a leaf.
+    const expected_depth = requiredMerkleDepth(proof.tx_count);
+    if (expected_depth > MAX_MERKLE_DEPTH) return false;
+    if (proof.hashes.len != expected_depth) return false;
+
+    // (3) Single-tx block: the root is the tx itself.
+    if (expected_depth == 0) {
+        return std.mem.eql(u8, &tx_hash, &root);
+    }
 
     var current_hash = tx_hash;
     var current_index = proof.index;
@@ -389,7 +459,7 @@ test "Block Header Serialization Roundtrip" {
 }
 
 test "Merkle Proof Verification - Valid" {
-    // Build a simple Merkle tree:
+    // Build a simple Merkle tree of 4 transactions where our TX is at index 0:
     //       Root
     //      /    \
     //     H1    H2
@@ -407,6 +477,7 @@ test "Merkle Proof Verification - Valid" {
     const proof = MerkleProof{
         .hashes = &proof_hashes,
         .index = 0, // TX is at index 0 (leftmost)
+        .tx_count = 4, // depth 2
     };
 
     try std.testing.expect(verifyMerkleProof(tx_hash, root, proof));
@@ -420,13 +491,14 @@ test "Merkle Proof Verification - Invalid" {
     const proof = MerkleProof{
         .hashes = &fake_hashes,
         .index = 0,
+        .tx_count = 2,
     };
 
     try std.testing.expect(!verifyMerkleProof(tx_hash, root, proof));
 }
 
 test "Merkle Proof - Right Child" {
-    // TX at index 1 (right child)
+    // TX at index 1 (right child) of a 2-tx block.
     const tx_hash = hashDoubleSha256("Right Transaction");
     const sibling = hashDoubleSha256("Left Sibling");
 
@@ -437,9 +509,109 @@ test "Merkle Proof - Right Child" {
     const proof = MerkleProof{
         .hashes = &proof_hashes,
         .index = 1, // TX is right child
+        .tx_count = 2, // depth 1
     };
 
     try std.testing.expect(verifyMerkleProof(tx_hash, root, proof));
+}
+
+test "Merkle Proof - single-tx block" {
+    // For a block with one transaction, the merkle root is the tx hash itself
+    // and the proof carries zero sibling hashes.
+    const tx_hash = hashDoubleSha256("Lone Transaction");
+
+    const proof_hashes = [_]Hash{};
+    const proof = MerkleProof{
+        .hashes = &proof_hashes,
+        .index = 0,
+        .tx_count = 1,
+    };
+
+    try std.testing.expect(verifyMerkleProof(tx_hash, tx_hash, proof));
+
+    // A non-empty proof for a single-tx block must be rejected.
+    const stray = [_]Hash{[_]u8{0xff} ** 32};
+    const bogus = MerkleProof{
+        .hashes = &stray,
+        .index = 0,
+        .tx_count = 1,
+    };
+    try std.testing.expect(!verifyMerkleProof(tx_hash, tx_hash, bogus));
+}
+
+test "Merkle Proof - reject index >= tx_count" {
+    // CVE-2012-2459 mitigation: an out-of-range index must be rejected even
+    // when the proof's hash path would otherwise produce the right root.
+    const tx_hash = hashDoubleSha256("anything");
+    const sibling = hashDoubleSha256("sibling");
+    const root = hashPair(sibling, tx_hash);
+
+    const proof_hashes = [_]Hash{sibling};
+    const proof = MerkleProof{
+        .hashes = &proof_hashes,
+        .index = 1,
+        .tx_count = 1, // index 1 is outside a 1-tx block
+    };
+    try std.testing.expect(!verifyMerkleProof(tx_hash, root, proof));
+}
+
+test "Merkle Proof - reject zero tx_count" {
+    const tx_hash = [_]u8{0x42} ** 32;
+    const proof_hashes = [_]Hash{};
+    const proof = MerkleProof{
+        .hashes = &proof_hashes,
+        .index = 0,
+        .tx_count = 0,
+    };
+    try std.testing.expect(!verifyMerkleProof(tx_hash, tx_hash, proof));
+}
+
+test "Merkle Proof - reject mismatched proof depth (CVE-2012-2459)" {
+    // Construct a tree of 4 leaves, then try to validate the leaf as if it
+    // belonged to a 2-tx block (depth 1 instead of 2). A depth-1 proof that
+    // happens to produce a 32-byte digest matching some root would otherwise
+    // slip through; enforcing exact depth pins the proof to one block shape.
+    const tx_hash = hashDoubleSha256("tx0");
+    const sibling_a = hashDoubleSha256("sibling A");
+    const sibling_b = hashDoubleSha256("sibling B");
+
+    const h1 = hashPair(tx_hash, sibling_a);
+    const root = hashPair(h1, sibling_b);
+
+    // A correct depth-2 proof verifies for a 4-tx block.
+    {
+        const full = [_]Hash{ sibling_a, sibling_b };
+        const proof = MerkleProof{ .hashes = &full, .index = 0, .tx_count = 4 };
+        try std.testing.expect(verifyMerkleProof(tx_hash, root, proof));
+    }
+
+    // The same proof must NOT validate if the attacker claims tx_count = 2
+    // (depth 1) — the depth check rejects it.
+    {
+        const truncated = [_]Hash{sibling_a};
+        const proof = MerkleProof{ .hashes = &truncated, .index = 0, .tx_count = 2 };
+        try std.testing.expect(!verifyMerkleProof(tx_hash, root, proof));
+    }
+
+    // And claiming a deeper tree than the proof supports is also rejected.
+    {
+        const full = [_]Hash{ sibling_a, sibling_b };
+        const proof = MerkleProof{ .hashes = &full, .index = 0, .tx_count = 5 }; // depth 3
+        try std.testing.expect(!verifyMerkleProof(tx_hash, root, proof));
+    }
+}
+
+test "requiredMerkleDepth" {
+    try std.testing.expectEqual(@as(u32, 0), requiredMerkleDepth(0));
+    try std.testing.expectEqual(@as(u32, 0), requiredMerkleDepth(1));
+    try std.testing.expectEqual(@as(u32, 1), requiredMerkleDepth(2));
+    try std.testing.expectEqual(@as(u32, 2), requiredMerkleDepth(3));
+    try std.testing.expectEqual(@as(u32, 2), requiredMerkleDepth(4));
+    try std.testing.expectEqual(@as(u32, 3), requiredMerkleDepth(5));
+    try std.testing.expectEqual(@as(u32, 3), requiredMerkleDepth(8));
+    try std.testing.expectEqual(@as(u32, 4), requiredMerkleDepth(9));
+    try std.testing.expectEqual(@as(u32, 4), requiredMerkleDepth(16));
+    try std.testing.expectEqual(@as(u32, 5), requiredMerkleDepth(17));
 }
 
 test "Header Linkage - Valid" {
@@ -486,6 +658,79 @@ test "Compact Target Decode" {
     try std.testing.expect(has_nonzero);
 }
 
+test "Compact Target Decode - 0x1b0404cb mantissa byte order" {
+    // Regression test for the H-1 audit finding: the mantissa bytes used to be
+    // written in reversed order, putting the LSB at the highest mantissa-block
+    // position. For bits = 0x1b0404cb the correct target has the top mantissa
+    // byte (0x04) at target[26], NOT 0xcb.
+    //
+    // Numerically: target = 0x0404cb * 256^24
+    //   = 0x04 * 256^26 + 0x04 * 256^25 + 0xcb * 256^24
+    // In little-endian byte order (target[0] = LSB):
+    //   target[24] = 0xcb, target[25] = 0x04, target[26] = 0x04.
+    const target = decodeCompactTarget(0x1b0404cb);
+
+    try std.testing.expectEqual(@as(u8, 0xcb), target[24]);
+    try std.testing.expectEqual(@as(u8, 0x04), target[25]);
+    try std.testing.expectEqual(@as(u8, 0x04), target[26]);
+
+    // All other positions must be zero.
+    for (target, 0..) |b, i| {
+        if (i != 24 and i != 25 and i != 26) {
+            try std.testing.expectEqual(@as(u8, 0), b);
+        }
+    }
+}
+
+test "Compact Target Decode - 0x1d00ffff exact bytes" {
+    // Difficulty-1 target. Mantissa = 0x00ffff, exponent = 29, byte_pos = 26.
+    // Correct little-endian layout:
+    //   target[26] = 0xff (mantissa LSB), target[27] = 0xff, target[28] = 0x00.
+    // (The old buggy code happened to produce the same bytes here because the
+    //  top mantissa byte is 0x00 — which is why the original test passed.)
+    const target = decodeCompactTarget(0x1d00ffff);
+
+    try std.testing.expectEqual(@as(u8, 0xff), target[26]);
+    try std.testing.expectEqual(@as(u8, 0xff), target[27]);
+    try std.testing.expectEqual(@as(u8, 0x00), target[28]);
+}
+
+test "Compact Target Decode - negative bit rejected" {
+    // 0x1d80ffff sets the "negative" bit (0x00800000). Bitcoin Core rejects
+    // negative targets; we return zero so the PoW check rejects every header.
+    const target = decodeCompactTarget(0x1d80ffff);
+    for (target) |b| {
+        try std.testing.expectEqual(@as(u8, 0), b);
+    }
+}
+
+test "Compact Target Decode - zero mantissa rejected" {
+    const target = decodeCompactTarget(0x1d000000);
+    for (target) |b| {
+        try std.testing.expectEqual(@as(u8, 0), b);
+    }
+}
+
+test "Compact Target Decode - overflow rejected" {
+    // Exponent 34 with mantissa > 0xff overflows 256 bits.
+    const target = decodeCompactTarget(0x22000100);
+    for (target) |b| {
+        try std.testing.expectEqual(@as(u8, 0), b);
+    }
+}
+
+test "Compact Target Decode - small exponent" {
+    // Exponent = 3: mantissa sits in the low 3 bytes.
+    // 0x03012345 → mantissa = 0x012345, exponent = 3.
+    const target = decodeCompactTarget(0x03012345);
+    try std.testing.expectEqual(@as(u8, 0x45), target[0]);
+    try std.testing.expectEqual(@as(u8, 0x23), target[1]);
+    try std.testing.expectEqual(@as(u8, 0x01), target[2]);
+    for (target, 0..) |b, i| {
+        if (i > 2) try std.testing.expectEqual(@as(u8, 0), b);
+    }
+}
+
 test "SPV Full Verification" {
     // Build test data
     const tx_hash = hashDoubleSha256("Payment: 1 BTC");
@@ -506,6 +751,7 @@ test "SPV Full Verification" {
     const proof = MerkleProof{
         .hashes = &proof_hashes,
         .index = 0,
+        .tx_count = 2,
     };
 
     // Verify without PoW check (our test header won't have valid PoW)
