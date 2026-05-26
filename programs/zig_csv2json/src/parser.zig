@@ -155,46 +155,54 @@ pub fn parseKv(allocator: std.mem.Allocator, lines: []const []const u8) !KvList 
     };
 }
 
-/// Check if a value looks like a number
+/// Check if `s` is a valid JSON number per RFC 8259 §6.
+///
+/// This is the gate that decides whether `--numbers` mode emits a value as a
+/// bare JSON number or as a quoted string. Anything that returns false here
+/// must be quoted; otherwise we would produce invalid JSON downstream.
+///
+/// Grammar (kept in lockstep with json_writer.isValidJsonNumber):
+///   number = [ "-" ] int [ frac ] [ exp ]
+///   int    = "0" | digit1-9 *DIGIT   (NO LEADING ZEROS — "007" rejected)
+///   frac   = "." 1*DIGIT             (at least one digit — "1." rejected)
+///   exp    = (e|E) [+|-] 1*DIGIT     (at least one digit — "1e" rejected)
+///
+/// Rejected: "", "-", "+1", ".5", "5.", "01", "007", "1e", "1e+",
+///           "NaN", "Infinity", "0x10", " 1", "1 ", "1_000".
 pub fn isNumeric(s: []const u8) bool {
     if (s.len == 0) return false;
 
     var i: usize = 0;
-    // Optional leading minus
+
+    // Optional minus
     if (s[i] == '-') {
         i += 1;
         if (i >= s.len) return false;
     }
 
-    // Must have at least one digit
-    var has_digit = false;
-    while (i < s.len and s[i] >= '0' and s[i] <= '9') {
-        has_digit = true;
+    // int: "0" alone, or 1-9 followed by zero+ digits. Leading zeros forbidden.
+    if (s[i] == '0') {
         i += 1;
+    } else if (s[i] >= '1' and s[i] <= '9') {
+        i += 1;
+        while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) {}
+    } else {
+        return false;
     }
-    if (!has_digit) return false;
 
-    // Optional decimal part
+    // Optional frac: "." followed by at least one digit
     if (i < s.len and s[i] == '.') {
         i += 1;
-        var has_decimal_digit = false;
-        while (i < s.len and s[i] >= '0' and s[i] <= '9') {
-            has_decimal_digit = true;
-            i += 1;
-        }
-        if (!has_decimal_digit) return false;
+        if (i >= s.len or s[i] < '0' or s[i] > '9') return false;
+        while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) {}
     }
 
-    // Optional exponent
+    // Optional exp: (e|E) [+|-] DIGIT+
     if (i < s.len and (s[i] == 'e' or s[i] == 'E')) {
         i += 1;
         if (i < s.len and (s[i] == '+' or s[i] == '-')) i += 1;
-        var has_exp_digit = false;
-        while (i < s.len and s[i] >= '0' and s[i] <= '9') {
-            has_exp_digit = true;
-            i += 1;
-        }
-        if (!has_exp_digit) return false;
+        if (i >= s.len or s[i] < '0' or s[i] > '9') return false;
+        while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) {}
     }
 
     return i == s.len;
@@ -278,7 +286,27 @@ fn splitKv(line: []const u8) ?KvPair {
     return null;
 }
 
-fn splitCsvLine(allocator: std.mem.Allocator, line: []const u8, delimiter: u8) ![]const []const u8 {
+/// Errors specific to CSV/TSV parsing. Distinct from allocator errors so
+/// callers can surface a meaningful diagnostic instead of swallowing
+/// malformed input.
+///
+/// Embedded newlines inside a quoted field are NOT supported. This parser
+/// splits the input on `\n` BEFORE row parsing, so any quoted field that
+/// spans multiple lines will be reported as `UnclosedQuote` on the first
+/// line and (likely) malformed rows after — see RFC 4180 §2.6 limitation
+/// in the README. Round-tripping multi-line spreadsheet cells through this
+/// tool requires preprocessing.
+pub const CsvError = error{
+    /// A quoted field opened with `"` did not have a matching closing `"`
+    /// before end-of-line.
+    UnclosedQuote,
+};
+
+fn splitCsvLine(
+    allocator: std.mem.Allocator,
+    line: []const u8,
+    delimiter: u8,
+) (CsvError || std.mem.Allocator.Error)![]const []const u8 {
     var fields: std.ArrayListUnmanaged([]const u8) = .empty;
 
     var i: usize = 0;
@@ -289,21 +317,28 @@ fn splitCsvLine(allocator: std.mem.Allocator, line: []const u8, delimiter: u8) !
             // Quoted field
             i += 1; // skip opening quote
             const start = i;
+            var closed = false;
             while (i < line.len) {
                 if (line[i] == '"') {
                     if (i + 1 < line.len and line[i + 1] == '"') {
-                        // Escaped quote
+                        // Escaped quote ("")
                         i += 2;
                     } else {
+                        closed = true;
                         break;
                     }
                 } else {
                     i += 1;
                 }
             }
+            if (!closed) {
+                // Free whatever we've allocated so far and surface the error.
+                fields.deinit(allocator);
+                return CsvError.UnclosedQuote;
+            }
             const field = line[start..i];
             try fields.append(allocator, std.mem.trim(u8, field, " "));
-            if (i < line.len) i += 1; // skip closing quote
+            i += 1; // skip closing quote
             if (i < line.len and line[i] == delimiter) i += 1; // skip delimiter
         } else {
             // Unquoted field
@@ -411,18 +446,37 @@ test "detect lines" {
     try std.testing.expectEqual(Format.lines, detect(lines));
 }
 
-test "isNumeric" {
+test "isNumeric: RFC 8259 grammar — accepts valid numbers" {
+    try std.testing.expect(isNumeric("0"));
+    try std.testing.expect(isNumeric("-0"));
     try std.testing.expect(isNumeric("42"));
     try std.testing.expect(isNumeric("-7"));
     try std.testing.expect(isNumeric("3.14"));
     try std.testing.expect(isNumeric("-0.5"));
     try std.testing.expect(isNumeric("1e10"));
     try std.testing.expect(isNumeric("2.5E-3"));
-    try std.testing.expect(!isNumeric(""));
-    try std.testing.expect(!isNumeric("abc"));
-    try std.testing.expect(!isNumeric("-"));
-    try std.testing.expect(!isNumeric("1."));
-    try std.testing.expect(!isNumeric(".5"));
+    try std.testing.expect(isNumeric("1e+10"));
+    try std.testing.expect(isNumeric("0.0"));
+}
+
+test "isNumeric: RFC 8259 grammar — rejects leading zeros (audit H-1)" {
+    // The pre-audit version accepted these and the CLI emitted invalid JSON.
+    try std.testing.expect(!isNumeric("01"));
+    try std.testing.expect(!isNumeric("00"));
+    try std.testing.expect(!isNumeric("007"));
+    try std.testing.expect(!isNumeric("-01"));
+    try std.testing.expect(!isNumeric("0123"));
+}
+
+test "isNumeric: RFC 8259 grammar — rejects other malformed inputs" {
+    const bad = [_][]const u8{
+        "",      "-",       "+",     "+1",     ".5",      "5.",
+        "1.",    "1.e3",    "1e",    "1e+",    "1e-",     "1.0e",
+        "1.2.3", "1,5",     "NaN",   "Infinity", "-Infinity", "inf",
+        "0x10",  "0b10",    " 1",    "1 ",     "1 0",     "1_000",
+        "abc",
+    };
+    for (bad) |s| try std.testing.expect(!isNumeric(s));
 }
 
 test "splitCsvLine basic" {
@@ -603,7 +657,59 @@ test "CSV escaped quotes in quoted field" {
     try std.testing.expectEqual(@as(usize, 2), fields.len);
 }
 
-test "Boolean value detection" {
+test "Boolean value detection — booleans are NOT numeric" {
     try std.testing.expect(isNumeric("true") == false);
     try std.testing.expect(isNumeric("false") == false);
+}
+
+// ============================================================================
+// CSV grammar tests (audit M-3 + RFC 4180 anchors)
+// ============================================================================
+
+test "splitCsvLine: RFC 4180 simple row" {
+    // RFC 4180 §2.3 example.
+    const fields = try splitCsvLine(std.testing.allocator, "aaa,bbb,ccc", ',');
+    defer std.testing.allocator.free(fields);
+    try std.testing.expectEqual(@as(usize, 3), fields.len);
+    try std.testing.expectEqualStrings("aaa", fields[0]);
+    try std.testing.expectEqualStrings("bbb", fields[1]);
+    try std.testing.expectEqualStrings("ccc", fields[2]);
+}
+
+test "splitCsvLine: RFC 4180 quoted field with embedded comma" {
+    // RFC 4180 §2.6.
+    const fields = try splitCsvLine(std.testing.allocator, "\"aaa,bbb\",ccc", ',');
+    defer std.testing.allocator.free(fields);
+    try std.testing.expectEqual(@as(usize, 2), fields.len);
+    try std.testing.expectEqualStrings("aaa,bbb", fields[0]);
+    try std.testing.expectEqualStrings("ccc", fields[1]);
+}
+
+test "splitCsvLine: RFC 4180 escaped quote inside quoted field" {
+    // RFC 4180 §2.7: double-quote inside quoted field is escaped as "".
+    const fields = try splitCsvLine(std.testing.allocator, "\"a\"\"b\",c", ',');
+    defer std.testing.allocator.free(fields);
+    try std.testing.expectEqual(@as(usize, 2), fields.len);
+    // Note: the raw bytes of the field still contain the escaped "" sequence;
+    // un-escaping is a downstream concern. The contract here is just "the
+    // closing quote was correctly recognised and the comma between fields
+    // was respected."
+    try std.testing.expectEqualStrings("a\"\"b", fields[0]);
+    try std.testing.expectEqualStrings("c", fields[1]);
+}
+
+test "splitCsvLine: unclosed quote returns UnclosedQuote error (audit M-3)" {
+    // Pre-audit behavior: silently swallowed the rest of the line as one
+    // field. Post-audit: explicit error so callers can surface it.
+    const result = splitCsvLine(std.testing.allocator, "\"unclosed,42,hello", ',');
+    try std.testing.expectError(CsvError.UnclosedQuote, result);
+}
+
+test "splitCsvLine: empty fields preserved" {
+    const fields = try splitCsvLine(std.testing.allocator, "a,,b", ',');
+    defer std.testing.allocator.free(fields);
+    try std.testing.expectEqual(@as(usize, 3), fields.len);
+    try std.testing.expectEqualStrings("a", fields[0]);
+    try std.testing.expectEqualStrings("", fields[1]);
+    try std.testing.expectEqualStrings("b", fields[2]);
 }

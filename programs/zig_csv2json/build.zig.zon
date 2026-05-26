@@ -1,7 +1,7 @@
 .{
-    .name = .zig_json,
+    .name = .zig_csv2json,
     .version = "0.1.0",
-    .fingerprint = 0xa36dc6a6a8f3b9ab,
+    .fingerprint = 0xcfdc046458c8aecc,
     .minimum_zig_version = "0.14.0",
     .paths = .{
         "build.zig",

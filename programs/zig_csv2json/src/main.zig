@@ -1,175 +1,204 @@
 // Copyright (c) 2025 QUANTUM ENCODING LTD
 // Licensed under the MIT License.
 
-//! zig-json: Text-to-JSON structured formatter
+//! zig-csv2json: CSV / TSV / key-value → JSON CLI formatter.
 //!
-//! Reads unstructured text from file or stdin and outputs structured JSON.
-//! Auto-detects format: CSV/TSV → array of objects, key-value → object,
-//! plain lines → array of strings.
+//! Reads structured text (CSV, TSV, `key: value` lines, or one-string-per-
+//! line) from a file or stdin, auto-detects the format, and writes a JSON
+//! document to stdout or a chosen file.
+//!
+//! This tool ONLY writes JSON. It does NOT read JSON — see CLAUDE.md at the
+//! repo root for the rule that named this `zig_csv2json` rather than the
+//! original misleading `zig_json`.
 
 const std = @import("std");
+const Io = std.Io;
 const parser = @import("parser.zig");
-const JsonWriter = @import("json_writer.zig").JsonWriter;
+const json_writer = @import("json_writer.zig");
+const JsonWriter = json_writer.JsonWriter;
 
-extern "c" fn fdopen(fd: c_int, mode: [*:0]const u8) ?*std.c.FILE;
-extern "c" fn fseek(stream: *std.c.FILE, offset: c_long, whence: c_int) c_int;
-extern "c" fn ftell(stream: *std.c.FILE) c_long;
+pub fn main(init: std.process.Init) !u8 {
+    const io = init.io;
+    const allocator = init.arena.allocator();
 
-pub fn main(init: std.process.Init) !void {
-    const allocator = std.heap.c_allocator;
+    var stdout_buffer: [4096]u8 = undefined;
+    var stdout_writer = Io.File.stdout().writer(io, &stdout_buffer);
+    const stdout = &stdout_writer.interface;
 
-    // Parse command line args
-    var args_list: std.ArrayListUnmanaged([]const u8) = .empty;
-    defer args_list.deinit(allocator);
-    var args_iter = std.process.Args.Iterator.init(init.minimal.args);
-    while (args_iter.next()) |arg| {
-        try args_list.append(allocator, arg);
-    }
+    var stderr_buffer: [1024]u8 = undefined;
+    var stderr_writer = Io.File.stderr().writer(io, &stderr_buffer);
+    const stderr = &stderr_writer.interface;
 
-    const opts = parseArgs(args_list.items) orelse return;
+    // ------------------------------------------------------------------
+    // Args
+    // ------------------------------------------------------------------
+    const args = try init.minimal.args.toSlice(allocator);
+    const opts = parseArgs(args, stderr, stdout) catch |err| switch (err) {
+        error.ShowedHelp => {
+            try stdout.flush();
+            return 0;
+        },
+        error.BadArgs => {
+            try stderr.flush();
+            return 2;
+        },
+        else => return err,
+    };
 
+    // ------------------------------------------------------------------
     // Read input
-    const input_data = if (opts.file_path) |path|
-        readFile(allocator, path)
+    // ------------------------------------------------------------------
+    const data = if (opts.file_path) |path|
+        Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited) catch |err| {
+            try stderr.print("Error: failed to read '{s}': {s}\n", .{ path, @errorName(err) });
+            try stderr.flush();
+            return 1;
+        }
     else
-        readStdin(allocator);
-
-    if (input_data == null) {
-        std.debug.print("Error: Failed to read input\n", .{});
-        return;
-    }
-    const data = input_data.?;
-    defer allocator.free(data);
+        try readStdin(io, allocator);
 
     if (data.len == 0) {
-        std.debug.print("Error: Empty input\n", .{});
-        return;
+        try stderr.writeAll("Error: empty input\n");
+        try stderr.flush();
+        return 1;
     }
 
-    // Split into lines
-    const lines = parser.splitIntoLines(allocator, data) catch {
-        std.debug.print("Error: Failed to parse input\n", .{});
-        return;
-    };
-    defer allocator.free(lines);
-
+    const lines = try parser.splitIntoLines(allocator, data);
     if (lines.len == 0) {
-        std.debug.print("Error: No non-empty lines in input\n", .{});
-        return;
+        try stderr.writeAll("Error: no non-empty lines in input\n");
+        try stderr.flush();
+        return 1;
     }
 
-    // Detect or use forced format
     const format = opts.format orelse parser.detect(lines);
 
-    // Get output destination
-    const out_file: ?*std.c.FILE = if (opts.output_path) |path| blk: {
-        const path_z = allocator.allocSentinel(u8, path.len, 0) catch return;
-        defer allocator.free(path_z);
-        @memcpy(path_z, path);
-        break :blk std.c.fopen(path_z.ptr, "wb");
-    } else null;
-    defer if (out_file) |f| {
-        _ = std.c.fclose(f);
-    };
+    // ------------------------------------------------------------------
+    // Choose output sink
+    // ------------------------------------------------------------------
+    // We write through a JsonWriter wrapping either stdout or a file Writer.
+    // If --output is given, the file writer is created here and closed at
+    // function exit; otherwise stdout is reused.
+    var out_file: ?Io.File = null;
+    defer if (out_file) |f| f.close(io);
 
-    const output: *std.c.FILE = out_file orelse (fdopen(1, "wb") orelse {
-        std.debug.print("Error: cannot open stdout\n", .{});
-        return;
-    });
+    var out_buffer: [4096]u8 = undefined;
+    var file_writer: Io.File.Writer = undefined;
+    const out: *Io.Writer = if (opts.output_path) |path| blk: {
+        const f = try Io.Dir.cwd().createFile(io, path, .{});
+        out_file = f;
+        file_writer = f.writer(io, &out_buffer);
+        break :blk &file_writer.interface;
+    } else stdout;
 
-    var writer = JsonWriter.init(output, opts.pretty);
-
-    // Show detected format on stderr if auto-detected
+    // Show detected format on stderr if auto-detected (after sink is ready
+    // so the user sees the format hint before any JSON output).
     if (opts.format == null) {
-        std.debug.print("[auto-detected: {s}]\n", .{format.name()});
+        try stderr.print("[auto-detected: {s}]\n", .{format.name()});
+        try stderr.flush();
     }
 
-    // Parse and output
+    var jw = JsonWriter.init(allocator, out, opts.pretty);
+    defer jw.deinit();
+
+    emit(&jw, format, lines, opts) catch |err| switch (err) {
+        error.UnclosedQuote => {
+            try stderr.writeAll("Error: malformed CSV — unclosed quoted field\n");
+            try stderr.flush();
+            return 1;
+        },
+        error.InvalidNumber => {
+            // Should be impossible: --numbers gates writes by isNumeric.
+            // If it ever fires it's a parser/writer grammar disagreement —
+            // surface it loudly rather than silently truncating output.
+            try stderr.writeAll("Error: internal grammar mismatch — please file a bug\n");
+            try stderr.flush();
+            return 1;
+        },
+        else => return err,
+    };
+    try jw.newline();
+
+    if (!jw.isBalanced()) {
+        // Programming error in the emit functions, not user-visible. Should
+        // never happen; failing loudly here beats producing half-valid JSON.
+        try stderr.writeAll("Error: internal — JSON document closed with unbalanced containers\n");
+        try stderr.flush();
+        return 1;
+    }
+
+    try out.flush();
+    return 0;
+}
+
+fn emit(
+    jw: *JsonWriter,
+    format: parser.Format,
+    lines: []const []const u8,
+    opts: Opts,
+) !void {
+    const allocator = jw.allocator;
     switch (format) {
         .lines => {
-            const items = parser.parseLines(allocator, lines) catch {
-                std.debug.print("Error: Failed to parse lines\n", .{});
-                return;
-            };
-            defer allocator.free(items);
-
-            writer.beginArray();
+            const items = try parser.parseLines(allocator, lines);
+            try jw.beginArray();
             for (items) |item| {
                 if (opts.numbers and parser.isNumeric(item)) {
-                    writer.number(item);
+                    try jw.number(item);
                 } else {
-                    writer.string(item);
+                    try jw.string(item);
                 }
             }
-            writer.endArray();
+            try jw.endArray();
         },
         .csv, .tsv => {
             const delimiter: u8 = if (format == .tsv) '\t' else ',';
-            const table = parser.parseCsv(allocator, lines, delimiter, !opts.no_headers) catch {
-                std.debug.print("Error: Failed to parse CSV/TSV\n", .{});
-                return;
-            };
-            defer {
-                if (opts.no_headers) {
-                    for (table.headers) |h| allocator.free(h);
-                }
-                // Free each row's field array (allocated by splitCsvLine)
-                for (table.rows) |row| allocator.free(row);
-                if (table._backing) |backing| {
-                    // headers fields array is owned[0], also from splitCsvLine
-                    allocator.free(table.headers);
-                    // Free the outer backing array
-                    allocator.free(backing);
-                } else {
-                    allocator.free(table.headers);
-                    allocator.free(table.rows);
-                }
-            }
+            const table = try parser.parseCsv(allocator, lines, delimiter, !opts.no_headers);
 
-            writer.beginArray();
+            try jw.beginArray();
             for (table.rows) |row| {
-                writer.beginObject();
+                try jw.beginObject();
                 for (row, 0..) |value, col| {
-                    const col_name = if (col < table.headers.len)
-                        table.headers[col]
-                    else
-                        "?";
-                    writer.key(col_name);
+                    const col_name = if (col < table.headers.len) table.headers[col] else "?";
+                    try jw.key(col_name);
                     if (opts.numbers and parser.isNumeric(value)) {
-                        writer.number(value);
+                        try jw.number(value);
                     } else {
-                        writer.string(value);
+                        try jw.string(value);
                     }
                 }
-                writer.endObject();
+                try jw.endObject();
             }
-            writer.endArray();
+            try jw.endArray();
         },
         .kv => {
-            const kv = parser.parseKv(allocator, lines) catch {
-                std.debug.print("Error: Failed to parse key-value pairs\n", .{});
-                return;
-            };
-            defer {
-                allocator.free(kv.keys);
-                allocator.free(kv.values);
-            }
-
-            writer.beginObject();
+            const kv = try parser.parseKv(allocator, lines);
+            try jw.beginObject();
             for (kv.keys, kv.values) |k, v| {
-                writer.key(k);
+                try jw.key(k);
                 if (opts.numbers and parser.isNumeric(v)) {
-                    writer.number(v);
+                    try jw.number(v);
                 } else {
-                    writer.string(v);
+                    try jw.string(v);
                 }
             }
-            writer.endObject();
+            try jw.endObject();
         },
     }
-
-    writer.newline();
 }
+
+fn readStdin(io: Io, allocator: std.mem.Allocator) ![]u8 {
+    var read_buf: [4096]u8 = undefined;
+    const stdin = Io.File.stdin();
+    var reader = stdin.readerStreaming(io, &read_buf);
+    var sink: Io.Writer.Allocating = .init(allocator);
+    defer sink.deinit();
+    _ = try reader.interface.streamRemaining(&sink.writer);
+    return try sink.toOwnedSlice();
+}
+
+// ------------------------------------------------------------------------
+// Argument parsing
+// ------------------------------------------------------------------------
 
 const Opts = struct {
     file_path: ?[]const u8 = null,
@@ -180,15 +209,21 @@ const Opts = struct {
     numbers: bool = false,
 };
 
-fn parseArgs(args: []const []const u8) ?Opts {
+const ArgError = error{ ShowedHelp, BadArgs } || std.Io.Writer.Error;
+
+fn parseArgs(
+    args: []const []const u8,
+    stderr: *Io.Writer,
+    stdout: *Io.Writer,
+) ArgError!Opts {
     var result = Opts{};
 
     var i: usize = 1; // skip program name
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            printHelp();
-            return null;
+            try printHelp(stdout);
+            return ArgError.ShowedHelp;
         } else if (std.mem.eql(u8, arg, "--pretty") or std.mem.eql(u8, arg, "-p")) {
             result.pretty = true;
         } else if (std.mem.eql(u8, arg, "--numbers") or std.mem.eql(u8, arg, "-n")) {
@@ -198,87 +233,48 @@ fn parseArgs(args: []const []const u8) ?Opts {
         } else if (std.mem.eql(u8, arg, "--format") or std.mem.eql(u8, arg, "-f")) {
             i += 1;
             if (i >= args.len) {
-                std.debug.print("Error: --format requires a value (csv/tsv/kv/lines)\n", .{});
-                return null;
+                try stderr.writeAll("Error: --format requires a value (csv/tsv/kv/lines)\n");
+                return ArgError.BadArgs;
             }
             result.format = parser.parseFormat(args[i]) orelse {
-                std.debug.print("Error: Unknown format '{s}'. Use: csv, tsv, kv, lines\n", .{args[i]});
-                return null;
+                try stderr.print("Error: unknown format '{s}'. Use: csv, tsv, kv, lines\n", .{args[i]});
+                return ArgError.BadArgs;
             };
         } else if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
             i += 1;
             if (i >= args.len) {
-                std.debug.print("Error: -o requires a file path\n", .{});
-                return null;
+                try stderr.writeAll("Error: -o/--output requires a file path\n");
+                return ArgError.BadArgs;
             }
             result.output_path = args[i];
         } else if (std.mem.eql(u8, arg, "-")) {
-            // Explicit stdin
-            result.file_path = null;
+            result.file_path = null; // explicit stdin
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             result.file_path = arg;
         } else {
-            std.debug.print("Unknown option: {s}\n", .{arg});
-            return null;
+            try stderr.print("Unknown option: {s}\n", .{arg});
+            return ArgError.BadArgs;
         }
     }
 
     return result;
 }
 
-fn readFile(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {
-    const path_z = allocator.allocSentinel(u8, path.len, 0) catch return null;
-    defer allocator.free(path_z);
-    @memcpy(path_z, path);
-
-    const file = std.c.fopen(path_z.ptr, "rb") orelse return null;
-    defer _ = std.c.fclose(file);
-
-    _ = fseek(file, 0, 2); // SEEK_END
-    const size_long = ftell(file);
-    if (size_long <= 0) return null;
-    const size: usize = @intCast(size_long);
-    _ = fseek(file, 0, 0); // SEEK_SET
-
-    const buf = allocator.alloc(u8, size) catch return null;
-    const read = std.c.fread(buf.ptr, 1, size, file);
-    if (read != size) {
-        allocator.free(buf);
-        return null;
-    }
-    return buf;
-}
-
-fn readStdin(allocator: std.mem.Allocator) ?[]u8 {
-    const stdin_file = fdopen(0, "rb") orelse return null;
-
-    // Read in chunks
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    var chunk: [8192]u8 = undefined;
-    while (true) {
-        const n = std.c.fread(&chunk, 1, chunk.len, stdin_file);
-        if (n == 0) break;
-        buf.appendSlice(allocator, chunk[0..n]) catch return null;
-    }
-
-    if (buf.items.len == 0) return null;
-    return buf.toOwnedSlice(allocator) catch null;
-}
-
-fn printHelp() void {
-    const help =
-        \\zig-json - Text to JSON structured formatter
+fn printHelp(writer: *Io.Writer) !void {
+    try writer.writeAll(
+        \\zig-csv2json - CSV/TSV/key-value -> JSON formatter
         \\
         \\Usage:
-        \\  zig-json [file] [options]
-        \\  cat data.txt | zig-json [options]
+        \\  zig-csv2json [file] [options]
+        \\  cat data.csv | zig-csv2json [options]
         \\
         \\Options:
         \\  -f, --format <fmt>    Force format: csv, tsv, kv, lines
         \\  -o, --output <path>   Write JSON to file (default: stdout)
         \\  -p, --pretty          Pretty-print JSON output
-        \\  -n, --numbers         Detect numeric values (output as JSON numbers)
-        \\  --no-headers          CSV/TSV: treat first row as data, not headers
+        \\  -n, --numbers         Detect numeric values (output as JSON numbers,
+        \\                        with RFC 8259 grammar — "007" stays a string)
+        \\      --no-headers      CSV/TSV: treat first row as data, not headers
         \\  -h, --help            Show this help
         \\
         \\Auto-detection priority:
@@ -287,12 +283,13 @@ fn printHelp() void {
         \\  3. KV   - lines matching "key: value" or "key = value"
         \\  4. Lines - each line becomes a string in a JSON array
         \\
-        \\Examples:
-        \\  zig-json names.txt                       # Auto-detect
-        \\  zig-json data.csv --pretty --numbers     # CSV with numbers
-        \\  echo -e "name: Alice\nage: 30" | zig-json
-        \\  cat items.txt | zig-json -f lines -p
+        \\This tool ONLY writes JSON. It does NOT parse JSON. See CLAUDE.md.
         \\
-    ;
-    std.debug.print("{s}", .{help});
+        \\Examples:
+        \\  zig-csv2json names.txt                       # Auto-detect
+        \\  zig-csv2json data.csv --pretty --numbers     # CSV with numbers
+        \\  echo -e "name: Alice\nage: 30" | zig-csv2json
+        \\  cat items.txt | zig-csv2json -f lines -p
+        \\
+    );
 }
