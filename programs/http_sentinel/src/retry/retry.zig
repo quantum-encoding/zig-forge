@@ -128,7 +128,18 @@ pub const CircuitBreaker = struct {
     pub fn canExecute(self: *CircuitBreaker) bool {
         self.mutex.lock();
         defer self.mutex.unlock();
+        return self.canExecuteLocked();
+    }
 
+    /// Same as `canExecute` but assumes `self.mutex` is already held by
+    /// the caller. Required because the project's Mutex (a hand-rolled
+    /// spin-yield primitive — see top of file) is NOT recursive: a
+    /// second `lock()` from the same thread spin-yields forever and
+    /// burns a CPU, never deadlocking but never progressing either.
+    /// Callers in observability paths (`getCircuitBreakerStatus`) need
+    /// to read both the structured state AND the derived `can_execute`
+    /// while holding the lock for a single coherent snapshot.
+    fn canExecuteLocked(self: *CircuitBreaker) bool {
         switch (self.state) {
             .closed => return true,
             .open => {
@@ -387,11 +398,14 @@ pub const RetryEngine = struct {
             cb.mutex.lock();
             defer cb.mutex.unlock();
 
+            // Use the *Locked variant — the public canExecute() would
+            // try to re-acquire `cb.mutex` and spin-yield forever (the
+            // hand-rolled Mutex is non-recursive).
             return .{
                 .state = cb.state,
                 .failure_count = cb.failure_count,
                 .success_count = cb.success_count,
-                .can_execute = cb.canExecute(),
+                .can_execute = cb.canExecuteLocked(),
             };
         }
         return null;
@@ -444,4 +458,23 @@ test "safeBackoffMs: monotonic non-decreasing across attempts" {
         try std.testing.expect(v >= prev);
         prev = v;
     }
+}
+
+test "RetryEngine.getCircuitBreakerStatus: does not livelock on lock re-acquire" {
+    // Pre-fix, this call sequence drove the hand-rolled non-recursive
+    // Mutex into a spin-yield livelock:
+    //   getCircuitBreakerStatus  → cb.mutex.lock()
+    //     → cb.canExecute()      → cb.mutex.lock()   ← deadlock
+    // canExecuteLocked is now called instead. The test merely has to
+    // *complete* — Stalling here would burn a test runner core.
+    var io_threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer io_threaded.deinit();
+    const io = io_threaded.io();
+
+    var engine = RetryEngine.init(std.testing.allocator, .{}, io);
+
+    const status = engine.getCircuitBreakerStatus().?;
+    try std.testing.expectEqual(CircuitState.closed, status.state);
+    try std.testing.expectEqual(@as(u32, 0), status.failure_count);
+    try std.testing.expect(status.can_execute);
 }

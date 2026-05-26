@@ -7,6 +7,17 @@
 const std = @import("std");
 const http = std.http;
 
+/// Monotonic milliseconds since an arbitrary epoch. Replaces the
+/// removed `std.time.milliTimestamp()` (gone in Zig 0.16). MONOTONIC
+/// is the correct choice for the timeout comparisons in this file —
+/// REALTIME can jump (NTP, manual clock set) and would cause
+/// connections to either expire prematurely or never expire.
+fn nowMs() i64 {
+    const ts = std.posix.clock_gettime(.MONOTONIC) catch return 0;
+    return @as(i64, @intCast(ts.sec)) * 1000 +
+        @as(i64, @intCast(@divTrunc(ts.nsec, std.time.ns_per_ms)));
+}
+
 /// Enterprise-grade connection pool for high-performance HTTP operations
 /// Implements connection reuse, keep-alive, and load balancing for maximum throughput
 
@@ -43,7 +54,7 @@ const PooledConnection = struct {
     is_idle: bool,
     
     pub fn isExpired(self: *const PooledConnection, config: PoolConfig) bool {
-        const now = std.time.milliTimestamp();
+        const now = nowMs();
         
         // Check idle timeout
         if (self.is_idle and (now - self.last_used) > config.idle_timeout_ms) {
@@ -97,16 +108,24 @@ pub const ConnectionPool = struct {
     }
     
     pub fn deinit(self: *ConnectionPool) void {
-        // Signal cleanup thread to stop
-        self.should_stop.store(true, .release);
+        // CWE-416 protection: destruction order matters here. The prior
+        // shape was
+        //     self.mutex.lock();
+        //     defer self.mutex.unlock();
+        //     ...
+        //     self.allocator.destroy(self);
+        // — which freed `self` and *then* ran the deferred unlock,
+        // touching `self.mutex` after free. Fix: signal the cleanup
+        // worker to exit, join it (so no other thread holds a
+        // reference), then walk + free without taking the lock at all.
+        // The mutex itself is part of `self` and is implicitly torn
+        // down at `destroy(self)` — the very last statement.
 
+        self.should_stop.store(true, .release);
         if (self.cleanup_thread) |thread| {
             thread.join();
         }
 
-        // Cleanup worker has joined — no other thread can hold a
-        // reference to this pool. Skip the lock so we don't dereference
-        // freed memory after destroy(self) (CWE-416).
         var iterator = self.connections.iterator();
         while (iterator.next()) |entry| {
             for (entry.value_ptr.items) |conn| {
@@ -139,7 +158,7 @@ pub const ConnectionPool = struct {
                 if (conn.is_idle and !conn.isExpired(self.config)) {
                     // Reuse existing connection
                     conn.is_idle = false;
-                    conn.last_used = std.time.milliTimestamp();
+                    conn.last_used = nowMs();
                     self.stats.connections_reused += 1;
                     self.stats.active_connections += 1;
                     self.stats.idle_connections -= 1;
@@ -178,7 +197,7 @@ pub const ConnectionPool = struct {
         defer self.mutex.unlock();
         
         connection.is_idle = true;
-        connection.last_used = std.time.milliTimestamp();
+        connection.last_used = nowMs();
         self.stats.requests_served += 1;
         self.stats.active_connections -= 1;
         self.stats.idle_connections += 1;
@@ -189,21 +208,30 @@ pub const ConnectionPool = struct {
         }
     }
     
-    /// Remove and destroy a connection from the pool
+    /// Remove and destroy a connection from the pool. Acquires the
+    /// pool mutex; callers that already hold it (e.g. cleanup paths
+    /// invoked from inside `releaseConnection`) must use
+    /// `removeConnectionLocked` instead — `std.Thread.RwLock` is not
+    /// recursive, and a second lock from the same thread deadlocks.
     pub fn removeConnection(self: *ConnectionPool, connection: *PooledConnection) void {
-        const host_key = self.createHostKey(connection.host, connection.port, connection.is_secure) catch return;
-        defer self.allocator.free(host_key);
-        
         self.mutex.lock();
         defer self.mutex.unlock();
-        
+        self.removeConnectionLocked(connection);
+    }
+
+    /// Same as `removeConnection` but assumes `self.mutex` is already
+    /// held in write mode by the caller.
+    fn removeConnectionLocked(self: *ConnectionPool, connection: *PooledConnection) void {
+        const host_key = self.createHostKey(connection.host, connection.port, connection.is_secure) catch return;
+        defer self.allocator.free(host_key);
+
         if (self.connections.getPtr(host_key)) |conn_list| {
             for (conn_list.items, 0..) |conn, i| {
                 if (conn == connection) {
                     _ = conn_list.swapRemove(i);
                     conn.deinit(self.allocator);
                     self.allocator.destroy(conn);
-                    
+
                     if (connection.is_idle) {
                         self.stats.idle_connections -= 1;
                     } else {
@@ -266,8 +294,8 @@ pub const ConnectionPool = struct {
             .host = try self.allocator.dupe(u8, host),
             .port = port,
             .is_secure = is_secure,
-            .created_at = std.time.milliTimestamp(),
-            .last_used = std.time.milliTimestamp(),
+            .created_at = nowMs(),
+            .last_used = nowMs(),
             .requests_served = 0,
             .is_idle = false,
         };
@@ -283,10 +311,16 @@ pub const ConnectionPool = struct {
         });
     }
     
+    /// Find and evict the oldest idle connection. The caller MUST
+    /// already hold `self.mutex` in write mode (the only caller is
+    /// `releaseConnection`, which has locked it). Using the *Locked
+    /// removal helper avoids a self-deadlock that
+    /// std.Thread.RwLock's non-recursive contract would otherwise
+    /// cause.
     fn cleanupOldestIdleConnection(self: *ConnectionPool) void {
         var oldest_time: i64 = std.math.maxInt(i64);
         var oldest_conn: ?*PooledConnection = null;
-        
+
         var iterator = self.connections.iterator();
         while (iterator.next()) |entry| {
             for (entry.value_ptr.items) |conn| {
@@ -296,9 +330,9 @@ pub const ConnectionPool = struct {
                 }
             }
         }
-        
+
         if (oldest_conn) |conn| {
-            self.removeConnection(conn);
+            self.removeConnectionLocked(conn);
         }
     }
     
