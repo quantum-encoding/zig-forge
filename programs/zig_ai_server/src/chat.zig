@@ -17,8 +17,71 @@ const vertex = @import("vertex.zig");
 const genai = @import("genai.zig");
 const gcp_mod = @import("gcp.zig");
 const forge = @import("forge.zig");
-const cloudrun = @import("cloudrun.zig");
 const Response = router.Response;
+
+// Tool capability → server-tool-name mapping. Used by the `/qai/v1/chat`
+// `capabilities` field: clients pass an allowlist of capability IDs
+// and the server returns only the tool definitions whose name appears
+// in the union of all enabled capabilities. Previously lived in the
+// now-deleted `cloudrun.zig` — inlined here because chat is the only
+// remaining consumer.
+const CapabilityMapping = struct {
+    id: []const u8,
+    tools: []const []const u8,
+};
+
+const capability_registry = [_]CapabilityMapping{
+    .{ .id = "file_read", .tools = &.{"read_file"} },
+    .{ .id = "file_write", .tools = &.{"write_file"} },
+    .{ .id = "code_execution", .tools = &.{"run_program"} },
+};
+
+/// Filter `all_tools` down to only those whose name appears in some
+/// allowlisted capability. `caps` MUST be non-null and non-empty
+/// (the Safe-Mode and passthrough cases are handled by the caller
+/// before invoking this helper). Returns an owned slice or null if
+/// no tool matches.
+fn filterToolsByCapabilities(
+    allocator: std.mem.Allocator,
+    all_tools: []const hs.ai.common.ToolDefinition,
+    caps: []const []const u8,
+) !?[]const hs.ai.common.ToolDefinition {
+    var allowed: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer allowed.deinit(allocator);
+
+    for (caps) |cap_id| {
+        for (capability_registry) |mapping| {
+            if (std.mem.eql(u8, mapping.id, cap_id)) {
+                for (mapping.tools) |tool_name| {
+                    var found = false;
+                    for (allowed.items) |existing| {
+                        if (std.mem.eql(u8, existing, tool_name)) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) try allowed.append(allocator, tool_name);
+                }
+            }
+        }
+    }
+    if (allowed.items.len == 0) return null;
+
+    var filtered: std.ArrayListUnmanaged(hs.ai.common.ToolDefinition) = .empty;
+    for (all_tools) |tool| {
+        for (allowed.items) |name| {
+            if (std.mem.eql(u8, tool.name, name)) {
+                try filtered.append(allocator, tool);
+                break;
+            }
+        }
+    }
+    if (filtered.items.len == 0) {
+        filtered.deinit(allocator);
+        return null;
+    }
+    return try filtered.toOwnedSlice(allocator);
+}
 
 /// Inbound chat request (matches quantum-sdk ChatRequest)
 pub const ChatRequest = struct {
@@ -278,7 +341,7 @@ fn handleCore(
             if (caps.len == 0) {
                 tools_slice = null; // Safe Mode
             } else {
-                const owned = cloudrun.filterToolsByCapabilities(
+                const owned = filterToolsByCapabilities(
                     allocator,
                     tool_defs.items,
                     caps,

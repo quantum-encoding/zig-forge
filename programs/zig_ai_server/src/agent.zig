@@ -68,18 +68,28 @@ const ToolUse = struct {
     input: ?[]const u8 = null, // JSON string
 };
 
-// Re-export for edge_case_tests
-pub const filterToolsByCapabilities = @import("cloudrun.zig").filterToolsByCapabilities;
-
 // ── Handler ────────────────────────────────────────────────────
 
+/// `/qai/v1/agent` is reachable only through the authenticated
+/// dispatch in router.zig — auth is therefore *required*. The
+/// previous signature accepted optional `auth`/`store`/`ledger` to
+/// support a legacy unauthenticated path that no longer exists
+/// (audit-finding C2 / NEW-1: the legacy path was the
+/// near-byte-duplicate cloudrun.zig, deleted in Batch 12).
+///
+/// NEW-3: with the optional-auth contract gone, the
+/// `if (auth) |a| ... else "anon"` fallback in the ledger write
+/// is also gone — its else-branch was dead code under the prior
+/// caller invariant but invited a future regression. Account id /
+/// key prefix in the ledger row are now derived directly from
+/// `auth.account.id` / `auth.key.prefix`.
 pub fn handle(
     request: *http.Server.Request,
     allocator: std.mem.Allocator,
     environ_map: *const std.process.Environ.Map,
-    io: ?std.Io,
-    store: ?*store_mod.Store,
-    auth: ?*const types.AuthContext,
+    io: std.Io,
+    store: *store_mod.Store,
+    auth: *const types.AuthContext,
     ledger: ?*ledger_mod.Ledger,
 ) Response {
     // Parse request
@@ -175,12 +185,13 @@ pub fn handle(
     if (req.temperature) |t| config.temperature = @floatCast(t);
     if (req.system_prompt) |sp| config.system_prompt = sp;
 
-    // Billing: dynamic output capping
+    // Billing: dynamic output capping. Auth + store are guaranteed
+    // non-null by the route contract (see fn-level doc).
     var reservation_id: ?u64 = null;
-    if (store) |s| if (auth) |a| if (io) |io_handle| {
+    {
         const input_estimate = billing.estimateInputTokens(body.len);
         const result = billing.reserveWithCap(
-            s, io_handle, a, req.model,
+            store, io, auth, req.model,
             config.max_tokens, input_estimate, "/qai/v1/agent",
         ) catch {
             return .{ .status = .payment_required, .body =
@@ -189,7 +200,7 @@ pub fn handle(
         };
         reservation_id = result.reservation_id;
         config.max_tokens = result.capped_max_tokens;
-    };
+    }
 
     // Build conversation context from messages
     var prompt: []const u8 = "";
@@ -225,7 +236,7 @@ pub fn handle(
     var client = hs.ai.AIClient.init(allocator, provider_info.provider, .{
         .api_key = api_key,
     }) catch {
-        if (reservation_id) |rid| if (store) |s| if (io) |io_handle| billing.rollback(s, io_handle, rid);
+        if (reservation_id) |rid| billing.rollback(store, io, rid);
         return .{ .status = .internal_server_error, .body =
             \\{"error":"provider_error","message":"Failed to init AI client"}
         };
@@ -235,36 +246,42 @@ pub fn handle(
     // Call provider (non-streaming for now — the response includes tool_use)
     var response = if (context_messages.items.len > 0)
         client.sendMessageWithContext(prompt, context_messages.items, config) catch {
-            if (reservation_id) |rid| if (store) |s| if (io) |io_handle| billing.rollback(s, io_handle, rid);
+            if (reservation_id) |rid| billing.rollback(store, io, rid);
             return .{ .status = .bad_gateway, .body =
                 \\{"error":"provider_error","message":"Provider request failed"}
             };
         }
     else
         client.sendMessage(prompt, config) catch {
-            if (reservation_id) |rid| if (store) |s| if (io) |io_handle| billing.rollback(s, io_handle, rid);
+            if (reservation_id) |rid| billing.rollback(store, io, rid);
             return .{ .status = .bad_gateway, .body =
                 \\{"error":"provider_error","message":"Provider request failed"}
             };
         };
     defer response.deinit();
 
-    // Commit billing
-    if (reservation_id) |rid| if (store) |s| if (io) |io_handle| {
-        const tier = if (auth) |a| a.account.tier else types.DevTier.free;
-        billing.commit(s, io_handle, rid, req.model,
+    // Commit billing. auth is guaranteed non-null at this point — the
+    // anon/none fallback (NEW-3) was dead code under the route contract
+    // and has been removed so a future regression that drops the
+    // auth-required dispatch surfaces as a type error instead of an
+    // anonymous ledger row.
+    if (reservation_id) |rid| {
+        const tier = auth.account.tier;
+        billing.commit(store, io, rid, req.model,
             response.usage.input_tokens, response.usage.output_tokens, tier);
 
         if (ledger) |l| {
             const bill = billing.actualCost(req.model, response.usage.input_tokens,
                 response.usage.output_tokens, tier);
-            l.recordBilling(io_handle, if (auth) |a| a.account.id.slice() else "anon",
-                if (auth) |a| a.key.prefix.slice() else "none", bill.cost, bill.margin,
-                if (auth) |a| a.account.balance_ticks else 0,
+            l.recordBilling(io,
+                auth.account.id.slice(),
+                auth.key.prefix.slice(),
+                bill.cost, bill.margin,
+                auth.account.balance_ticks,
                 "/qai/v1/agent", req.model, response.usage.input_tokens,
                 response.usage.output_tokens, 0);
         }
-    };
+    }
 
     // Build response — includes tool_use if the model wants to call tools
     const stop_reason = response.metadata.stop_reason orelse "end_turn";

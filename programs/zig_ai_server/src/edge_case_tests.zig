@@ -255,100 +255,13 @@ test "oidc: verifyNonce rejects uppercase hash" {
 
 // ── 5. Billing Dynamic Capping Integration ─────────────────────
 
-// ── 6. Agent Capability Filtering ───────────────────────────────
-
-const agent = @import("cloudrun.zig");
-const ToolDef = @import("http-sentinel").ai.common.ToolDefinition;
-
-test "capabilities: null (absent) returns all tools" {
-    const all_tools = [_]ToolDef{
-        .{ .name = "bash", .description = "run command", .input_schema = "{}" },
-        .{ .name = "read_file", .description = "read", .input_schema = "{}" },
-        .{ .name = "write_file", .description = "write", .input_schema = "{}" },
-    };
-    const result = try agent.filterToolsByCapabilities(testing.allocator, &all_tools, null);
-    // null capabilities → full suite
-    try testing.expect(result != null);
-    try testing.expectEqual(@as(usize, 3), result.?.len);
-}
-
-test "capabilities: empty array returns null (Safe Mode)" {
-    const all_tools = [_]ToolDef{
-        .{ .name = "bash", .description = "run command", .input_schema = "{}" },
-    };
-    const empty: []const []const u8 = &.{};
-    const result = try agent.filterToolsByCapabilities(testing.allocator, &all_tools, empty);
-    // empty capabilities → no tools
-    try testing.expect(result == null);
-}
-
-test "capabilities: file_read only exposes read_file" {
-    const all_tools = [_]ToolDef{
-        .{ .name = "bash", .description = "run command", .input_schema = "{}" },
-        .{ .name = "read_file", .description = "read", .input_schema = "{}" },
-        .{ .name = "write_file", .description = "write", .input_schema = "{}" },
-    };
-    const caps: []const []const u8 = &.{"file_read"};
-    const result = try agent.filterToolsByCapabilities(testing.allocator, &all_tools, caps);
-    defer if (result) |r| testing.allocator.free(r);
-
-    try testing.expect(result != null);
-    try testing.expectEqual(@as(usize, 1), result.?.len);
-    try testing.expectEqualStrings("read_file", result.?[0].name);
-}
-
-test "capabilities: code_execution exposes run_program" {
-    const all_tools = [_]ToolDef{
-        .{ .name = "run_program", .description = "run a program", .input_schema = "{}" },
-        .{ .name = "read_file", .description = "read", .input_schema = "{}" },
-        .{ .name = "write_file", .description = "write", .input_schema = "{}" },
-    };
-    const caps: []const []const u8 = &.{"code_execution"};
-    const result = try agent.filterToolsByCapabilities(testing.allocator, &all_tools, caps);
-    defer if (result) |r| testing.allocator.free(r);
-
-    try testing.expect(result != null);
-    try testing.expectEqual(@as(usize, 1), result.?.len);
-    try testing.expectEqualStrings("run_program", result.?[0].name);
-}
-
-test "capabilities: multiple capabilities combine tools" {
-    const all_tools = [_]ToolDef{
-        .{ .name = "bash", .description = "run command", .input_schema = "{}" },
-        .{ .name = "read_file", .description = "read", .input_schema = "{}" },
-        .{ .name = "write_file", .description = "write", .input_schema = "{}" },
-    };
-    const caps: []const []const u8 = &.{ "file_read", "file_write" };
-    const result = try agent.filterToolsByCapabilities(testing.allocator, &all_tools, caps);
-    defer if (result) |r| testing.allocator.free(r);
-
-    try testing.expect(result != null);
-    try testing.expectEqual(@as(usize, 2), result.?.len);
-}
-
-test "capabilities: unknown capability returns null" {
-    const all_tools = [_]ToolDef{
-        .{ .name = "bash", .description = "run command", .input_schema = "{}" },
-    };
-    const caps: []const []const u8 = &.{"nonexistent_capability"};
-    const result = try agent.filterToolsByCapabilities(testing.allocator, &all_tools, caps);
-    // Unknown capability → no matching tools → null
-    try testing.expect(result == null);
-}
-
-test "capabilities: terminal_inject is no longer a valid capability" {
-    // terminal_inject was removed in the Batch 3 sandbox overhaul.
-    // The model can no longer request raw shell access via any capability
-    // ID — only run_program (via code_execution) is exposed.
-    const all_tools = [_]ToolDef{
-        .{ .name = "run_program", .description = "run a program", .input_schema = "{}" },
-        .{ .name = "read_file", .description = "read", .input_schema = "{}" },
-    };
-    const caps: []const []const u8 = &.{"terminal_inject"};
-    const result = try agent.filterToolsByCapabilities(testing.allocator, &all_tools, caps);
-    // Unknown capability → no matching tools → null
-    try testing.expect(result == null);
-}
+// ── 6. Agent Capability Filtering — removed in Batch 12 ─────────
+// The `filterToolsByCapabilities` helper lived inside `cloudrun.zig`,
+// which has been deleted (audit C2 / NEW-1 / NEW-2). The surviving
+// `/qai/v1/agent` handler (agent.zig) forwards client-supplied tools
+// verbatim — there is no server-side capability filter to test.
+// If a future server-side capability allowlist is reintroduced, its
+// tests belong here.
 
 // ── 7. JSON Escaping ───────────────────────────────────────────
 

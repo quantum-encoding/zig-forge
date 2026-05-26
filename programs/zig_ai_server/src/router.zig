@@ -8,7 +8,16 @@ const handlers = @import("handlers.zig");
 const auth_pipeline = @import("auth_pipeline.zig");
 const chat = @import("chat.zig");
 const images = @import("images.zig");
-const cloudrun = @import("cloudrun.zig");
+// `cloudrun.zig` was deleted in Batch 12 (audit-finding C2 / NEW-1):
+//   - It was a near-byte-duplicate of `agent.zig` that retained the
+//     `_ = store; _ = auth;` bypass long after `agent.zig` had been
+//     wired through the billing + auth pipeline.
+//   - The router exposed it on BOTH an auth-required and an
+//     auth-bypassed path (`/qai/v1/cloudrun` on the unauthenticated
+//     dispatch), making it an anonymous-RCE endpoint as the server
+//     UID.
+// The endpoint is gone; `/qai/v1/agent` (auth-required) is the only
+// agent surface.
 const models = @import("models.zig");
 const keys = @import("keys.zig");
 const store_mod = @import("store/store.zig");
@@ -249,12 +258,8 @@ fn routeApiV1Authed(
         return agent_mod.handle(request, allocator, environ_map, io, store, auth, server_ledger);
     }
 
-    // ── Cloud Run Agent (server-executed tools, sandbox-backed) ──
-    // Legacy: server runs bash/read_file/write_file in a Cloud Run sandbox.
-    if (std.mem.eql(u8, path, "cloudrun")) {
-        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
-        return cloudrun.handle(request, allocator, io, environ_map, store, auth, server_ledger);
-    }
+    // `/qai/v1/cloudrun` route deleted in Batch 12 (audit C2 / NEW-1).
+    // See the comment on the `cloudrun` import at the top of this file.
 
     // ── Models ──────────────────────────────────────────
     if (std.mem.eql(u8, path, "models")) {
@@ -356,23 +361,25 @@ fn routeApiV1Authed(
     return handlers.notFound(request, allocator);
 }
 
-/// Legacy routes (no store, no per-user auth)
+/// Legacy routes (no store, no per-user auth). `io` previously flowed
+/// into the deleted `/cloudrun` dispatch; no remaining legacy route
+/// needs it, so the parameter is unused.
 fn routeApiV1Legacy(
     path: []const u8,
     method: http.Method,
     request: *http.Server.Request,
     allocator: std.mem.Allocator,
-    io: std.Io,
+    _: std.Io,
     environ_map: *const std.process.Environ.Map,
 ) Response {
     if (std.mem.eql(u8, path, "chat")) {
         if (method != .POST) return handlers.methodNotAllowed(request, allocator);
         return chat.handle(request, allocator, environ_map, null, null, null, null, server_gcp);
     }
-    if (std.mem.eql(u8, path, "cloudrun")) {
-        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
-        return cloudrun.handle(request, allocator, io, environ_map, null, null, null);
-    }
+    // `/cloudrun` on the unauthenticated dispatch was an anonymous-RCE
+    // endpoint (cloudrun.handle was called with `null, null, null` for
+    // store/auth/ledger and proceeded to spawn child processes against
+    // a shared workspace). Removed in Batch 12.
     if (std.mem.eql(u8, path, "models")) return models.handleModels(request, allocator);
     if (std.mem.eql(u8, path, "models/pricing")) return models.handlePricing(request, allocator);
     return handlers.stub(request, allocator, path);
