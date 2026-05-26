@@ -51,8 +51,12 @@ pub fn calculateCap(
     estimated_input_tokens: u32,
     balance_ticks: i64,
     tier: types.DevTier,
-) ?BillingCap {
-    const pricing = models_mod.getPricing(model);
+) !?BillingCap {
+    // H10: unknown models no longer fall back to a default rate.
+    // The caller (chat/agent handler) is responsible for returning a
+    // 400 to the client when this errors — we must NEVER bill against
+    // a guessed price for a model we can't price.
+    const pricing = try models_mod.getPricing(model);
     const input_tpt = ticksPerToken(pricing.input);
     const output_tpt = ticksPerToken(pricing.output);
 
@@ -107,13 +111,13 @@ pub fn reserveWithCap(
     estimated_input_tokens: u32,
     endpoint: []const u8,
 ) !struct { reservation_id: u64, capped_max_tokens: u32 } {
-    const cap = calculateCap(
+    const cap = (try calculateCap(
         model,
         requested_max_tokens,
         estimated_input_tokens,
         auth.account.balance_ticks,
         auth.account.tier,
-    ) orelse return error.InsufficientBalance;
+    )) orelse return error.InsufficientBalance;
 
     const rid = try store.reserve(
         io,
@@ -130,9 +134,13 @@ pub fn reserveWithCap(
     };
 }
 
-/// Legacy estimate (kept for tests and estimation display).
+/// Legacy estimate (kept for tests and estimation display). Returns
+/// 0 for unknown models — the caller should have already rejected
+/// unknown models via getPricing or getModel before reaching here.
+/// Returning 0 instead of guessing keeps callers' "min reservation"
+/// floor in effect rather than silently overcharging.
 pub fn estimateCost(model: []const u8, max_tokens: u32) i64 {
-    const pricing = models_mod.getPricing(model);
+    const pricing = models_mod.getPricing(model) catch return 0;
     const output_millidollars: i64 = @intFromFloat(pricing.output * 1000.0);
     const input_millidollars: i64 = @intFromFloat(pricing.input * 1000.0);
     const estimated_output_ticks = @divFloor(output_millidollars * @as(i64, max_tokens) * 10_000_000, 1_000_000);
@@ -141,8 +149,12 @@ pub fn estimateCost(model: []const u8, max_tokens: u32) i64 {
 }
 
 /// Calculate actual cost from real token usage.
-pub fn actualCost(model: []const u8, input_tokens: u32, output_tokens: u32, tier: types.DevTier) struct { cost: i64, margin: i64 } {
-    const pricing = models_mod.getPricing(model);
+pub fn actualCost(model: []const u8, input_tokens: u32, output_tokens: u32, tier: types.DevTier) !struct { cost: i64, margin: i64 } {
+    // H10: unknown model → error. Callers must reject the request
+    // before invoking actualCost; if we end up here for an unknown
+    // model the upstream handler skipped its validation, which is a
+    // bug we want to surface rather than paper over with a default.
+    const pricing = try models_mod.getPricing(model);
     const input_ticks = ticksPerToken(pricing.input) * @as(i64, input_tokens);
     const output_ticks = ticksPerToken(pricing.output) * @as(i64, output_tokens);
     const cost = input_ticks + output_ticks;
@@ -150,7 +162,10 @@ pub fn actualCost(model: []const u8, input_tokens: u32, output_tokens: u32, tier
     return .{ .cost = cost, .margin = margin };
 }
 
-/// Commit billing after successful provider response.
+/// Commit billing after successful provider response. If the model
+/// is no longer in the registry (e.g. it was removed between
+/// reserve and commit) we roll back the reservation instead of
+/// committing — never guess a price for the actual charge.
 pub fn commit(
     store: *store_mod.Store,
     io: Io,
@@ -160,7 +175,12 @@ pub fn commit(
     output_tokens: u32,
     tier: types.DevTier,
 ) void {
-    const cost = actualCost(model, input_tokens, output_tokens, tier);
+    const cost = actualCost(model, input_tokens, output_tokens, tier) catch {
+        // H10: unknown model at commit time — refund the reservation
+        // rather than committing against a guessed rate.
+        store.rollbackReservation(io, reservation_id);
+        return;
+    };
     store.commitReservation(io, reservation_id, cost.cost, cost.margin) catch {};
 }
 

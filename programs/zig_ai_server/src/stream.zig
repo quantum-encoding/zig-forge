@@ -251,11 +251,16 @@ fn handleStreamCore(
         const tier = if (auth) |a| a.account.tier else types.DevTier.free;
         billing.commit(s, io_handle, rid, chat_req.model, input_estimate, output_tokens, tier);
         if (ledger) |l| {
-            const bill = billing.actualCost(chat_req.model, input_estimate, output_tokens, tier);
-            l.recordBilling(io_handle, if (auth) |a| a.account.id.slice() else "anonymous",
-                if (auth) |a| a.key.prefix.slice() else "none", bill.cost, bill.margin,
-                if (auth) |a| a.account.balance_ticks else 0,
-                "/qai/v1/chat/stream", chat_req.model, input_estimate, output_tokens, 0);
+            // H10: actualCost can fail for unknown models. We skip
+            // the ledger row rather than guessing a price — the
+            // upstream handler should have rejected the request, but
+            // this branch is defense-in-depth.
+            if (billing.actualCost(chat_req.model, input_estimate, output_tokens, tier)) |bill| {
+                l.recordBilling(io_handle, if (auth) |a| a.account.id.slice() else "anonymous",
+                    if (auth) |a| a.key.prefix.slice() else "none", bill.cost, bill.margin,
+                    if (auth) |a| a.account.balance_ticks else 0,
+                    "/qai/v1/chat/stream", chat_req.model, input_estimate, output_tokens, 0);
+            } else |_| {}
         }
     };
 

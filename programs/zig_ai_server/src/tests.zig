@@ -294,7 +294,7 @@ test "billing: cost estimation is positive" {
 test "billing: actual cost integer arithmetic" {
     // DeepSeek: $0.28 input, $0.42 output per 1M tokens
     // 1000 input + 1000 output
-    const cost = billing.actualCost("deepseek-chat", 1000, 1000, .free);
+    const cost = try billing.actualCost("deepseek-chat", 1000, 1000, .free);
     try testing.expect(cost.cost > 0);
     try testing.expect(cost.margin > 0);
     // Free tier: 30% margin
@@ -304,8 +304,8 @@ test "billing: actual cost integer arithmetic" {
 }
 
 test "billing: enterprise margin is lower than free" {
-    const free_cost = billing.actualCost("deepseek-chat", 10000, 10000, .free);
-    const ent_cost = billing.actualCost("deepseek-chat", 10000, 10000, .enterprise);
+    const free_cost = try billing.actualCost("deepseek-chat", 10000, 10000, .free);
+    const ent_cost = try billing.actualCost("deepseek-chat", 10000, 10000, .enterprise);
     // Same base cost
     try testing.expectEqual(free_cost.cost, ent_cost.cost);
     // Enterprise margin should be lower
@@ -313,15 +313,23 @@ test "billing: enterprise margin is lower than free" {
 }
 
 test "billing: zero tokens = zero cost" {
-    const cost = billing.actualCost("deepseek-chat", 0, 0, .free);
+    const cost = try billing.actualCost("deepseek-chat", 0, 0, .free);
     try testing.expectEqual(@as(i64, 0), cost.cost);
     try testing.expectEqual(@as(i64, 0), cost.margin);
 }
 
 test "billing: expensive model costs more" {
-    const cheap = billing.actualCost("deepseek-chat", 1000, 1000, .free);
-    const expensive = billing.actualCost("claude-opus-4-6", 1000, 1000, .free);
+    const cheap = try billing.actualCost("deepseek-chat", 1000, 1000, .free);
+    const expensive = try billing.actualCost("claude-opus-4-6", 1000, 1000, .free);
     try testing.expect(expensive.cost > cheap.cost);
+}
+
+test "billing: actualCost rejects unknown models (H10)" {
+    // Pre-fix, this silently returned the Claude-Opus default rate
+    // ($3 / $15 per million), wildly mispricing every cheap-provider
+    // call against the same model name. Now it must error.
+    try testing.expectError(error.UnknownModel,
+        billing.actualCost("nonexistent-model-xyz", 1000, 1000, .free));
 }
 
 // ── 4. Models Tests ─────────────────────────────────────────
@@ -333,22 +341,32 @@ test "models: count is reasonable" {
 }
 
 test "models: pricing lookup for known model" {
-    const pricing = models.getPricing("deepseek-chat");
+    const pricing = try models.getPricing("deepseek-chat");
     try testing.expect(pricing.input > 0);
     try testing.expect(pricing.output > 0);
 }
 
-test "models: pricing lookup for unknown model returns default" {
-    const pricing = models.getPricing("nonexistent-model-xyz");
-    // Should return default (3.0, 15.0)
+test "models: pricing lookup for unknown model returns UnknownModel (H10)" {
+    // Pre-fix this returned the Claude-Opus default rate. The
+    // bug had two failure modes: undercharging callers for unknown
+    // *expensive* models, and overcharging callers for unknown
+    // *cheap* models. Now the API contract is exact-match-or-error.
+    try testing.expectError(error.UnknownModel, models.getPricing("nonexistent-model-xyz"));
+}
+
+test "models: claude pricing" {
+    const pricing = try models.getPricing("claude-sonnet-4-6");
     try testing.expectEqual(@as(f64, 3.0), pricing.input);
     try testing.expectEqual(@as(f64, 15.0), pricing.output);
 }
 
-test "models: claude pricing" {
-    const pricing = models.getPricing("claude-sonnet-4-6");
-    try testing.expectEqual(@as(f64, 3.0), pricing.input);
-    try testing.expectEqual(@as(f64, 15.0), pricing.output);
+test "models: prefix-match no longer falls through (H7)" {
+    // Pre-fix, a request for "gpt-4o-2024-11-20-…" matched a "gpt-4"
+    // prefix entry and got billed at the cheap rate while the
+    // upstream call hit the expensive model (the string is
+    // forwarded verbatim). Now the lookup is exact-only.
+    try testing.expectError(error.UnknownModel,
+        models.getPricing("claude-sonnet-4-6-some-future-date-suffix"));
 }
 
 test "models: schema_version is 1" {
@@ -501,7 +519,7 @@ test "OIDC: JwksCache empty is stale" {
 
 test "billing: large token counts don't overflow" {
     // 1M tokens — should produce a valid positive result without overflow
-    const cost = billing.actualCost("claude-opus-4-6", 1_000_000, 1_000_000, .free);
+    const cost = try billing.actualCost("claude-opus-4-6", 1_000_000, 1_000_000, .free);
     try testing.expect(cost.cost > 0);
     try testing.expect(cost.margin > 0);
     try testing.expect(cost.margin < cost.cost); // margin < base cost
@@ -511,7 +529,7 @@ test "billing: estimation is always >= actual for same model" {
     // Estimate with max_tokens should be >= actual cost at max_tokens
     const max_tokens: u32 = 4096;
     const est = billing.estimateCost("deepseek-chat", max_tokens);
-    const actual = billing.actualCost("deepseek-chat", max_tokens / 2, max_tokens, .free);
+    const actual = try billing.actualCost("deepseek-chat", max_tokens / 2, max_tokens, .free);
     // Estimation includes margin-like buffer, should be >= raw cost
     try testing.expect(est >= actual.cost);
 }
@@ -520,7 +538,7 @@ test "billing: all tiers produce valid margins" {
     const tiers = [_]types.DevTier{ .free, .hobby, .pro, .enterprise };
     var prev_margin: i64 = std.math.maxInt(i64);
     for (tiers) |tier| {
-        const cost = billing.actualCost("deepseek-chat", 10000, 10000, tier);
+        const cost = try billing.actualCost("deepseek-chat", 10000, 10000, tier);
         try testing.expect(cost.cost > 0);
         try testing.expect(cost.margin >= 0);
         try testing.expect(cost.margin <= prev_margin); // higher tier = lower margin
@@ -528,10 +546,13 @@ test "billing: all tiers produce valid margins" {
     }
 }
 
-test "billing: unknown model uses default pricing" {
-    const cost = billing.actualCost("nonexistent-model", 1000, 1000, .free);
-    // Default pricing is claude-sonnet level (3.0/15.0)
-    try testing.expect(cost.cost > 0);
+test "billing: unknown model returns error (H10 regression)" {
+    // Pre-fix, the assertion was `cost.cost > 0` because actualCost
+    // silently returned Claude-Opus rates for unknown models —
+    // wildly overcharging some callers and undercharging others.
+    // The contract is now exact-match-or-error.
+    try testing.expectError(error.UnknownModel,
+        billing.actualCost("nonexistent-model", 1000, 1000, .free));
 }
 
 test "billing: minimum reservation is 1000 ticks" {

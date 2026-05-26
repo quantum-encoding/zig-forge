@@ -20,47 +20,53 @@ const integration = @import("integration_test.zig");
 
 // ── 1. Billing Arithmetic ──────────────────────────────────────
 
+// Note: gpt-5.4-pro / gpt-5.x are example model IDs the tests below
+// use to exercise the *expensive-model arithmetic*. After H7 / H10
+// the model registry is exact-match-only — if these IDs aren't in
+// the CSV the tests would have to be skipped. We default to
+// "claude-opus-4-6" (known-present) for the overflow / single-token
+// cases and only keep gpt-5 references where the test specifically
+// asserts an UnknownModel error.
+
 test "billing: overflow safety — expensive model at max tokens" {
-    // GPT-5.4 Pro: $180/M output. 1M max tokens.
-    // output_ticks = ticksPerToken(180.0) * 1_000_000
-    // = (180 * 10B / 1M) * 1M = 180 * 10B = 1.8T
-    // i64 max = 9.2e18, so 1.8T is fine. But test it anyway.
-    const cost = billing.actualCost("gpt-5.4-pro", 1_000_000, 1_000_000, .free);
+    // Claude Opus 4.6 is in the registry. The arithmetic chain
+    // we're guarding against is independent of which expensive
+    // model we pick.
+    const cost = try billing.actualCost("claude-opus-4-6", 1_000_000, 1_000_000, .free);
     try testing.expect(cost.cost > 0); // Must not overflow to negative
     try testing.expect(cost.margin > 0);
     try testing.expect(cost.margin < cost.cost); // Margin < base cost
 }
 
 test "billing: estimateCost doesn't overflow at max_tokens_cap" {
-    // security.Limits.max_tokens_cap = 1_000_000
-    const est = billing.estimateCost("gpt-5.4-pro", 1_000_000);
+    const est = billing.estimateCost("claude-opus-4-6", 1_000_000);
     try testing.expect(est > 0);
 }
 
 test "billing: zero tokens produces zero cost" {
-    const cost = billing.actualCost("claude-sonnet-4-6", 0, 0, .free);
+    const cost = try billing.actualCost("claude-sonnet-4-6", 0, 0, .free);
     try testing.expectEqual(@as(i64, 0), cost.cost);
     try testing.expectEqual(@as(i64, 0), cost.margin);
 }
 
 test "billing: single token produces non-zero cost for expensive models" {
-    const cost = billing.actualCost("claude-opus-4-6", 1, 1, .free);
+    const cost = try billing.actualCost("claude-opus-4-6", 1, 1, .free);
     try testing.expect(cost.cost > 0);
 }
 
 test "billing: calculateCap with zero balance returns null" {
-    const cap = billing.calculateCap("deepseek-chat", 4096, 10, 0, .free);
+    const cap = try billing.calculateCap("deepseek-chat", 4096, 10, 0, .free);
     try testing.expect(cap == null);
 }
 
 test "billing: calculateCap with negative balance returns null" {
-    const cap = billing.calculateCap("deepseek-chat", 4096, 10, -1000, .free);
+    const cap = try billing.calculateCap("deepseek-chat", 4096, 10, -1000, .free);
     try testing.expect(cap == null);
 }
 
 test "billing: calculateCap with tiny balance caps max_tokens low" {
     // $0.001 balance = 10_000_000 ticks
-    const cap = billing.calculateCap("claude-opus-4-6", 100_000, 10, 10_000_000, .free);
+    const cap = try billing.calculateCap("claude-opus-4-6", 100_000, 10, 10_000_000, .free);
     if (cap) |c| {
         try testing.expect(c.capped_max_tokens < 100_000); // Must cap below requested
         try testing.expect(c.capped_max_tokens > 0); // But must allow something
@@ -71,15 +77,23 @@ test "billing: calculateCap with tiny balance caps max_tokens low" {
 
 test "billing: calculateCap input cost exceeds balance returns null" {
     // 1M input tokens on an expensive model with $0.001 balance
-    const cap = billing.calculateCap("gpt-5.4-pro", 100, 1_000_000, 10_000_000, .free);
+    const cap = try billing.calculateCap("claude-opus-4-6", 100, 1_000_000, 10_000_000, .free);
     try testing.expect(cap == null); // Can't even afford the input
+}
+
+test "billing: calculateCap rejects unknown model (H10)" {
+    // Pre-fix this would have succeeded with the default $3/$15 rate.
+    // The cap path is on the *hot* request path — billing must
+    // refuse to guess.
+    try testing.expectError(error.UnknownModel,
+        billing.calculateCap("nonexistent-model-xyz", 4096, 10, 1_000_000_000, .free));
 }
 
 test "billing: margin decreases with better tier" {
     const tiers = [_]types.DevTier{ .free, .hobby, .pro, .enterprise };
     var prev_total: i64 = std.math.maxInt(i64);
     for (tiers) |tier| {
-        const cost = billing.actualCost("deepseek-chat", 10000, 10000, tier);
+        const cost = try billing.actualCost("deepseek-chat", 10000, 10000, tier);
         const total = cost.cost + cost.margin;
         try testing.expect(total <= prev_total); // Better tier = lower total
         prev_total = total;

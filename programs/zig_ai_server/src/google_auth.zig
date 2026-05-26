@@ -270,6 +270,11 @@ fn mintApiKey(
     store: *store_mod.Store,
     account_id: []const u8,
 ) ![]u8 {
+    // Audit H3: revoke any prior `app-auth` key for this account
+    // before minting. See apple_auth.zig::mintApiKey for the same
+    // pattern and the rationale.
+    store.revokeKeysByAccountAndName(io, account_id, "app-auth");
+
     var random_bytes: [32]u8 = undefined;
     io.random(&random_bytes);
 

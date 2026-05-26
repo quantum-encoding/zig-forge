@@ -257,6 +257,13 @@ fn mintApiKey(
     store: *store_mod.Store,
     account_id: []const u8,
 ) ![]u8 {
+    // Audit H3: revoke any prior `app-auth` key for this account
+    // before minting a new one. Logging in invalidates the previous
+    // session's key — the standard "logged in elsewhere, this device
+    // is signed out" semantics — and bounds key growth at one
+    // active app-auth key per account, instead of one per login.
+    store.revokeKeysByAccountAndName(io, account_id, "app-auth");
+
     // Generate raw key
     var random_bytes: [32]u8 = undefined;
     io.random(&random_bytes);

@@ -271,15 +271,22 @@ pub fn handle(
             response.usage.input_tokens, response.usage.output_tokens, tier);
 
         if (ledger) |l| {
-            const bill = billing.actualCost(req.model, response.usage.input_tokens,
-                response.usage.output_tokens, tier);
-            l.recordBilling(io,
-                auth.account.id.slice(),
-                auth.key.prefix.slice(),
-                bill.cost, bill.margin,
-                auth.account.balance_ticks,
-                "/qai/v1/agent", req.model, response.usage.input_tokens,
-                response.usage.output_tokens, 0);
+            // H10: skip the ledger row when actualCost can't price the
+            // model. The reserveWithCap upstream already failed for
+            // unknown models, so reaching this branch with an unknown
+            // model implies an upstream regression — we'd rather miss
+            // a ledger row than write one with a guessed price.
+            if (billing.actualCost(req.model, response.usage.input_tokens,
+                response.usage.output_tokens, tier)) |bill|
+            {
+                l.recordBilling(io,
+                    auth.account.id.slice(),
+                    auth.key.prefix.slice(),
+                    bill.cost, bill.margin,
+                    auth.account.balance_ticks,
+                    "/qai/v1/agent", req.model, response.usage.input_tokens,
+                    response.usage.output_tokens, 0);
+            } else |_| {}
         }
     }
 

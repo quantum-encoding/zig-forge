@@ -335,39 +335,39 @@ fn buildPricingJson(allocator: std.mem.Allocator) ![]u8 {
     return buf.toOwnedSlice(allocator);
 }
 
-/// Lookup pricing for a model by API ID. Returns (input_per_million, output_per_million).
-pub fn getPricing(model_id: []const u8) struct { input: f64, output: f64 } {
-    // Exact match first
+pub const PricingError = error{UnknownModel};
+
+/// Lookup pricing for a model by API ID. Returns
+/// `error.UnknownModel` if the model isn't in the registry.
+///
+/// Audit H7 + H10. The previous implementation:
+///   * Fell back to prefix-match (`startsWith`) when the exact match
+///     failed. CSV order determined which prefix won — a caller
+///     asking for `gpt-4o-2024-…` against a registry that includes a
+///     cheap `gpt-4` could be billed at the cheap rate while the
+///     actual upstream call hit the expensive model (the string
+///     forwards verbatim).
+///   * Silently fell back to `(input=3.0, output=15.0)` (Claude-Opus
+///     rates) for unknown models — wildly wrong in both directions
+///     depending on the actual upstream model.
+/// Both paths are removed. Exact match only; unknown → error so the
+/// chat handler can return 400 BEFORE the provider call.
+pub fn getPricing(model_id: []const u8) PricingError!struct { input: f64, output: f64 } {
     for (models) |m| {
         if (std.mem.eql(u8, m.api_model_id, model_id)) {
             return .{ .input = m.input_per_million, .output = m.output_per_million };
         }
     }
-    // Prefix match (e.g. "claude-sonnet-4-6" matches "claude-sonnet-4-6-20250929")
-    for (models) |m| {
-        if (model_id.len >= m.api_model_id.len and
-            std.mem.startsWith(u8, model_id, m.api_model_id))
-        {
-            return .{ .input = m.input_per_million, .output = m.output_per_million };
-        }
-    }
-    // Default
-    return .{ .input = 3.0, .output = 15.0 };
+    return PricingError.UnknownModel;
 }
 
-/// Lookup a model by API ID. Returns the full Model (provider, route, pricing, etc.)
+/// Lookup a model by API ID. Returns the full Model
+/// (provider, route, pricing, etc.). Same exact-match-only contract
+/// as `getPricing`. Unknown returns null; callers must surface a
+/// 400-class error rather than silently dispatching.
 pub fn getModel(model_id: []const u8) ?Model {
-    // Exact match first
     for (models) |m| {
         if (std.mem.eql(u8, m.api_model_id, model_id)) return m;
-    }
-    // Prefix match (e.g. "claude-sonnet-4-6" matches "claude-sonnet-4-6-20250929")
-    for (models) |m| {
-        if (model_id.len >= m.api_model_id.len and
-            std.mem.startsWith(u8, model_id, m.api_model_id))
-        {
-            return m;
-        }
     }
     return null;
 }

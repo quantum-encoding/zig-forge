@@ -308,6 +308,54 @@ pub const Store = struct {
         }
     }
 
+    /// Revoke every non-revoked key belonging to `account_id` whose
+    /// `name` equals `key_name`. Used by the Apple/Google login path
+    /// to bound key growth at one active "app-auth" key per account
+    /// (audit H3): the prior shape minted a new key on every login,
+    /// growing the keys map linearly with login count and making
+    /// "revoke the user's key" meaningless (an attacker who learned
+    /// one of N keys had effectively unrevokable access).
+    pub fn revokeKeysByAccountAndName(
+        self: *Store,
+        io: Io,
+        account_id: []const u8,
+        key_name: []const u8,
+    ) void {
+        self.mutex.lock();
+
+        // Snapshot the matching hashes under the lock so we can
+        // perform the WAL/Firestore writes (which use IO) outside it.
+        var to_revoke: std.ArrayListUnmanaged([32]u8) = .empty;
+        defer to_revoke.deinit(self.allocator);
+
+        var iter = self.keys.iterator();
+        while (iter.next()) |entry| {
+            const key = entry.value_ptr;
+            if (key.revoked) continue;
+            if (!key.account_id.eql(account_id)) continue;
+            if (!key.name.eql(key_name)) continue;
+            to_revoke.append(self.allocator, entry.key_ptr.*) catch continue;
+            key.revoked = true;
+        }
+        self.mutex.unlock();
+
+        // WAL + Firestore writes happen outside the mutex.
+        for (to_revoke.items) |hash| {
+            var hash_hex: [64]u8 = undefined;
+            types.hexEncode(&hash, &hash_hex);
+            self.wal.append(io, .revoke_key, &hash_hex) catch {};
+
+            if (self.gcp_ctx) |ctx| {
+                // Re-lookup under the lock to get a stable snapshot
+                // for the Firestore write.
+                self.mutex.lock();
+                const key_copy = if (self.keys.get(hash)) |k| k else null;
+                self.mutex.unlock();
+                if (key_copy) |k| firestore.updateKeyRevoked(ctx, k) catch {};
+            }
+        }
+    }
+
     // ── Billing Operations ──────────────────────────────────
 
     /// Reserve balance before calling a provider. Returns reservation ID.

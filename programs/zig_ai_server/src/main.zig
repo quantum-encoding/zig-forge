@@ -109,6 +109,24 @@ pub fn main(init: std.process.Init) !void {
 
     if (store.keys.count() == 0) {
         if (bootstrap_key orelse legacy_key) |raw_key| {
+            // Audit H6: refuse weak bootstrap keys. The bootstrap admin
+            // has unlimited spend cap + admin role; an operator who
+            // sets a 16-char password as the bootstrap key effectively
+            // hands the keys to anyone who guesses it. We require at
+            // least 32 bytes (256 bits of entropy if hex-random) and
+            // fail-closed if the env value is shorter — the server
+            // refuses to boot rather than silently bootstrap with a
+            // guessable key.
+            const MIN_BOOTSTRAP_KEY_LEN: usize = 32;
+            if (raw_key.len < MIN_BOOTSTRAP_KEY_LEN) {
+                std.debug.print(
+                    "FATAL: QAI_BOOTSTRAP_KEY / QAI_API_KEY must be at least {d} characters (got {d}). " ++
+                        "Generate one with `openssl rand -hex 32` or equivalent.\n",
+                    .{ MIN_BOOTSTRAP_KEY_LEN, raw_key.len },
+                );
+                std.process.exit(1);
+            }
+
             // Create admin account
             const types = @import("store/types.zig");
             const now = types.nowMs(boot_io);
