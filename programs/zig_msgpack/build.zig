@@ -63,17 +63,39 @@ pub fn build(b: *std.Build) void {
     bench_step.dependOn(&run_bench.step);
 
     // Tests
-    const test_module = b.createModule(.{
+    //
+    // Three test entry points, all gated by `zig build test`:
+    //   1. lib.zig            — encoder + decoder unit tests (via refAllDecls)
+    //   2. comprehensive_test — end-to-end encode→decode coverage for every type
+    //   3. tier1_anchors      — externally-anchored spec byte vectors
+    //
+    // Each test module imports `msgpack` so the `@import("lib.zig")` /
+    // `@import("msgpack")` paths used inside test files both work.
+    const lib_test_module = b.createModule(.{
         .root_source_file = b.path("src/lib.zig"),
         .target = target,
         .optimize = optimize,
     });
+    const lib_tests = b.addTest(.{ .root_module = lib_test_module });
 
-    const lib_tests = b.addTest(.{
-        .root_module = test_module,
+    const comprehensive_test_module = b.createModule(.{
+        .root_source_file = b.path("src/comprehensive_test.zig"),
+        .target = target,
+        .optimize = optimize,
     });
+    comprehensive_test_module.addImport("msgpack", lib_module);
+    const comprehensive_tests = b.addTest(.{ .root_module = comprehensive_test_module });
 
-    const run_tests = b.addRunArtifact(lib_tests);
-    const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_tests.step);
+    const anchors_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tier1_anchors.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    anchors_test_module.addImport("msgpack", lib_module);
+    const anchor_tests = b.addTest(.{ .root_module = anchors_test_module });
+
+    const test_step = b.step("test", "Run unit tests, end-to-end tests, and spec anchors");
+    test_step.dependOn(&b.addRunArtifact(lib_tests).step);
+    test_step.dependOn(&b.addRunArtifact(comprehensive_tests).step);
+    test_step.dependOn(&b.addRunArtifact(anchor_tests).step);
 }

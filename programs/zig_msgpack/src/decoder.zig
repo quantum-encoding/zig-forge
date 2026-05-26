@@ -2,21 +2,53 @@
 //!
 //! Decodes MessagePack binary format into Zig values.
 //!
-//! Example:
-//! ```zig
-//! const data = // ... msgpack bytes ...
-//! var decoder = Decoder.init(data);
+//! ## Threat model
 //!
-//! const value = try decoder.read();
-//! switch (value) {
-//!     .string => |s| std.debug.print("String: {s}\n", .{s}),
-//!     .uint => |n| std.debug.print("Number: {}\n", .{n}),
-//!     // ...
-//! }
-//! ```
+//! This decoder is designed to consume **untrusted input** safely. The
+//! following defenses are enforced:
+//!
+//!   * **Depth limit** (`max_depth`, default 512): the internal `skip()`
+//!     traversal uses an explicit iterative work-stack capped at this many
+//!     levels and errors with `MaxDepthExceeded` past it. External callers
+//!     who walk the tree recursively MUST bound their own recursion using
+//!     `max_depth` as the recommended cap — see README for examples.
+//!   * **Overflow-safe length math**: every `pos + len` computation goes
+//!     through `std.math.add(usize, ...)` so a hostile 32-bit-overflow does
+//!     not bypass the bounds check.
+//!   * **Eager bounds check**: if a `str` / `bin` / `ext` length header
+//!     claims more bytes than remain in the buffer, the decoder errors
+//!     immediately at the header, not after partial allocation.
+//!   * **Iterator poisoning**: when an iterator's element read fails, the
+//!     iterator is marked exhausted so subsequent `next()` calls return
+//!     `null` cleanly rather than reading at corrupt byte offsets.
+//!
+//! ## Lifetime contract
+//!
+//! Returned `string`, `binary`, and `ext.data` slices are **zero-copy
+//! borrows** into the original input buffer. The caller MUST keep that input
+//! alive for as long as any `Value` they retain. See README.md for examples.
+//!
+//! ## Why depth tracking lives in `skip()` and not in the iterators
+//!
+//! The lazy `ArrayIterator` / `MapIterator` design returns iterator handles
+//! from `read()` and relies on the caller to drain them. There is no
+//! observable "all done with this iterator" hook (Zig has no destructors for
+//! non-allocated structs), which means iterators cannot reliably decrement a
+//! depth counter when their container ends — every attempt to do so either
+//! over-counts (depth oscillates and the cap never fires) or under-counts
+//! (sibling containers exhaust the budget).
+//!
+//! Instead, `skip()` — the only library-internal recursive consumer — is
+//! implemented iteratively with an explicit stack capped at `max_depth`.
+//! External callers that recursively walk Values are responsible for their
+//! own depth budget; the recommended pattern (see README) bounds their
+//! recursion by the same `max_depth` value.
 
 const std = @import("std");
 const Format = @import("encoder.zig").Format;
+
+/// Default container-nesting limit. msgpack-c uses 512; we match.
+pub const DEFAULT_MAX_DEPTH: u32 = 512;
 
 /// Decoded MessagePack value
 pub const Value = union(enum) {
@@ -39,15 +71,26 @@ pub const Extension = struct {
     data: []const u8,
 };
 
-/// Array iterator for lazy decoding
+/// Array iterator for lazy decoding.
+///
+/// On any error from an element read, the iterator is **poisoned** —
+/// `remaining` is forced to 0 so a subsequent `next()` returns `null`
+/// cleanly. This prevents the decoder from reading at corrupt byte offsets
+/// after a partial element failure.
 pub const ArrayIterator = struct {
     decoder: *Decoder,
     remaining: usize,
 
     pub fn next(self: *ArrayIterator) !?Value {
         if (self.remaining == 0) return null;
+        const value = self.decoder.read() catch |err| {
+            // Poison the iterator so the caller can't accidentally drive
+            // further reads at a corrupted position.
+            self.remaining = 0;
+            return err;
+        };
         self.remaining -= 1;
-        return try self.decoder.read();
+        return value;
     }
 
     pub fn len(self: *const ArrayIterator) usize {
@@ -55,16 +98,29 @@ pub const ArrayIterator = struct {
     }
 };
 
-/// Map iterator for lazy decoding
+/// Map iterator for lazy decoding.
+///
+/// `next()` consumes a key+value pair **atomically**: the `remaining`
+/// counter only decrements after both the key read AND the value read
+/// succeed. If either read errors, the iterator is poisoned (`remaining`
+/// set to 0) so further calls return `null` cleanly rather than reading at
+/// corrupt offsets.
 pub const MapIterator = struct {
     decoder: *Decoder,
     remaining: usize,
 
     pub fn next(self: *MapIterator) !?struct { key: Value, value: Value } {
         if (self.remaining == 0) return null;
+
+        const key = self.decoder.read() catch |err| {
+            self.remaining = 0;
+            return err;
+        };
+        const value = self.decoder.read() catch |err| {
+            self.remaining = 0;
+            return err;
+        };
         self.remaining -= 1;
-        const key = try self.decoder.read();
-        const value = try self.decoder.read();
         return .{ .key = key, .value = value };
     }
 
@@ -78,6 +134,11 @@ pub const Decoder = struct {
     data: []const u8,
     pos: usize,
 
+    /// Maximum allowed container nesting depth used by `skip()` and
+    /// recommended as the cap for any external recursive walker. Default
+    /// `DEFAULT_MAX_DEPTH` (512). Callers can override before parsing.
+    max_depth: u32,
+
     const Self = @This();
 
     /// Initialize decoder with data
@@ -85,6 +146,7 @@ pub const Decoder = struct {
         return Self{
             .data = data,
             .pos = 0,
+            .max_depth = DEFAULT_MAX_DEPTH,
         };
     }
 
@@ -106,12 +168,25 @@ pub const Decoder = struct {
         return byte;
     }
 
-    /// Read multiple bytes
+    /// Read multiple bytes.
+    ///
+    /// Uses `std.math.add` so a hostile length value cannot overflow the
+    /// bounds check on 32-bit platforms (where `usize` is u32 and a u32
+    /// length prefix plus `pos` can wrap).
     fn readBytes(self: *Self, len: usize) ![]const u8 {
-        if (self.pos + len > self.data.len) return error.UnexpectedEndOfData;
-        const bytes = self.data[self.pos..][0..len];
-        self.pos += len;
+        const end = std.math.add(usize, self.pos, len) catch return error.UnexpectedEndOfData;
+        if (end > self.data.len) return error.UnexpectedEndOfData;
+        const bytes = self.data[self.pos..end];
+        self.pos = end;
         return bytes;
+    }
+
+    /// Eagerly reject a header that claims more bytes than physically remain
+    /// in the input. Called immediately after reading a `str` / `bin` / `ext`
+    /// length prefix so the failure surfaces at the header, not after a
+    /// partial allocation.
+    fn ensureCanRead(self: *const Self, len: usize) !void {
+        if (len > self.remaining()) return error.UnexpectedEndOfData;
     }
 
     /// Read big-endian u16
@@ -150,7 +225,12 @@ pub const Decoder = struct {
         return std.mem.readInt(i64, bytes[0..8], .big);
     }
 
-    /// Read the next value
+    /// Read the next value.
+    ///
+    /// Returns array/map iterators without any per-read depth check — depth
+    /// bounding lives in `skip()` for internal use, and external recursive
+    /// walkers are responsible for their own depth budget (see the module
+    /// docstring for why).
     pub fn read(self: *Self) !Value {
         const format = try self.readByte();
 
@@ -174,6 +254,7 @@ pub const Decoder = struct {
         // Fixstr (0xa0 - 0xbf)
         if (format >= 0xa0 and format <= 0xbf) {
             const len = format & 0x1f;
+            try self.ensureCanRead(len);
             return Value{ .string = try self.readBytes(len) };
         }
 
@@ -190,14 +271,17 @@ pub const Decoder = struct {
 
             Format.bin8 => blk: {
                 const len = try self.readByte();
+                try self.ensureCanRead(len);
                 break :blk Value{ .binary = try self.readBytes(len) };
             },
             Format.bin16 => blk: {
                 const len = try self.readU16BE();
+                try self.ensureCanRead(len);
                 break :blk Value{ .binary = try self.readBytes(len) };
             },
             Format.bin32 => blk: {
                 const len = try self.readU32BE();
+                try self.ensureCanRead(len);
                 break :blk Value{ .binary = try self.readBytes(len) };
             },
 
@@ -222,34 +306,37 @@ pub const Decoder = struct {
 
             Format.str8 => blk: {
                 const len = try self.readByte();
+                try self.ensureCanRead(len);
                 break :blk Value{ .string = try self.readBytes(len) };
             },
             Format.str16 => blk: {
                 const len = try self.readU16BE();
+                try self.ensureCanRead(len);
                 break :blk Value{ .string = try self.readBytes(len) };
             },
             Format.str32 => blk: {
                 const len = try self.readU32BE();
+                try self.ensureCanRead(len);
                 break :blk Value{ .string = try self.readBytes(len) };
             },
 
-            Format.array16 => Value{ .array = ArrayIterator{
-                .decoder = self,
-                .remaining = try self.readU16BE(),
-            } },
-            Format.array32 => Value{ .array = ArrayIterator{
-                .decoder = self,
-                .remaining = try self.readU32BE(),
-            } },
+            Format.array16 => blk: {
+                const len = try self.readU16BE();
+                break :blk Value{ .array = ArrayIterator{ .decoder = self, .remaining = len } };
+            },
+            Format.array32 => blk: {
+                const len = try self.readU32BE();
+                break :blk Value{ .array = ArrayIterator{ .decoder = self, .remaining = len } };
+            },
 
-            Format.map16 => Value{ .map = MapIterator{
-                .decoder = self,
-                .remaining = try self.readU16BE(),
-            } },
-            Format.map32 => Value{ .map = MapIterator{
-                .decoder = self,
-                .remaining = try self.readU32BE(),
-            } },
+            Format.map16 => blk: {
+                const len = try self.readU16BE();
+                break :blk Value{ .map = MapIterator{ .decoder = self, .remaining = len } };
+            },
+            Format.map32 => blk: {
+                const len = try self.readU32BE();
+                break :blk Value{ .map = MapIterator{ .decoder = self, .remaining = len } };
+            },
 
             Format.fixext1 => blk: {
                 const type_id: i8 = @bitCast(try self.readByte());
@@ -274,16 +361,19 @@ pub const Decoder = struct {
             Format.ext8 => blk: {
                 const len = try self.readByte();
                 const type_id: i8 = @bitCast(try self.readByte());
+                try self.ensureCanRead(len);
                 break :blk Value{ .ext = .{ .type_id = type_id, .data = try self.readBytes(len) } };
             },
             Format.ext16 => blk: {
                 const len = try self.readU16BE();
                 const type_id: i8 = @bitCast(try self.readByte());
+                try self.ensureCanRead(len);
                 break :blk Value{ .ext = .{ .type_id = type_id, .data = try self.readBytes(len) } };
             },
             Format.ext32 => blk: {
                 const len = try self.readU32BE();
                 const type_id: i8 = @bitCast(try self.readByte());
+                try self.ensureCanRead(len);
                 break :blk Value{ .ext = .{ .type_id = type_id, .data = try self.readBytes(len) } };
             },
 
@@ -291,29 +381,82 @@ pub const Decoder = struct {
         };
     }
 
-    /// Skip the next value (useful for skipping unwanted values)
+    /// Skip the next value, fully consuming any nested arrays or maps.
+    ///
+    /// Implemented iteratively with an explicit work stack capped at
+    /// `max_depth` levels. A deeply-nested payload returns
+    /// `error.MaxDepthExceeded` immediately rather than overflowing the
+    /// stack — the previous recursive implementation could be crashed by
+    /// a ~50KB hostile payload.
+    ///
+    /// Pre-audit bonus bug: the old `skip()` only drained the top level
+    /// of containers — it called `iter.next()` and discarded values without
+    /// recursing into them — so nested element bytes were left unread and
+    /// the decoder position was wrong after skipping a nested structure.
+    /// This version correctly drains every level.
     pub fn skip(self: *Self) !void {
-        const value = try self.read();
-        switch (value) {
-            .array => |arr| {
-                var iter = arr;
-                while (try iter.next()) |_| {}
-            },
-            .map => |m| {
-                var iter = m;
-                while (try iter.next()) |_| {}
-            },
-            else => {},
+        // Stack tracks "values still pending at this nesting level."
+        // Each stack frame is one level deep, so size = max_depth.
+        var stack_buf: [DEFAULT_MAX_DEPTH]usize = undefined;
+        var stack_len: usize = 0;
+
+        // Start with one value to consume: the root.
+        var pending: usize = 1;
+
+        while (pending > 0 or stack_len > 0) {
+            if (pending == 0) {
+                // Pop back to parent level.
+                stack_len -= 1;
+                pending = stack_buf[stack_len];
+                continue;
+            }
+
+            pending -= 1;
+            const value = try self.read();
+
+            switch (value) {
+                .array => |arr| {
+                    if (arr.remaining == 0) continue; // empty container, nothing to drain
+                    if (stack_len >= self.max_depth) return error.MaxDepthExceeded;
+                    stack_buf[stack_len] = pending;
+                    stack_len += 1;
+                    pending = arr.remaining;
+                },
+                .map => |m| {
+                    if (m.remaining == 0) continue;
+                    if (stack_len >= self.max_depth) return error.MaxDepthExceeded;
+                    stack_buf[stack_len] = pending;
+                    stack_len += 1;
+                    // A map of N entries has 2N values still to skip.
+                    pending = m.remaining * 2;
+                },
+                else => {},
+            }
         }
     }
 
-    /// Read and expect a specific type
+    /// Read and expect a string. Returns the zero-copy slice into the input.
+    /// Does **not** validate UTF-8 — use `readStringValidated` for that.
     pub fn readString(self: *Self) ![]const u8 {
         const value = try self.read();
         return switch (value) {
             .string => |s| s,
             else => error.TypeMismatch,
         };
+    }
+
+    /// Read and expect a string, additionally validating that it is
+    /// well-formed UTF-8 per RFC 3629 (which the MessagePack spec mandates
+    /// for the `str` family). Returns the slice unchanged on success; errors
+    /// with `InvalidUtf8` if the bytes aren't valid UTF-8.
+    ///
+    /// Use this on any string that flows into UTF-8-aware downstream code
+    /// (logging, display, hashing intended to match a UTF-8 implementation,
+    /// etc.). Skip it only for strings you treat as opaque bytes.
+    pub fn readStringValidated(self: *Self) ![]const u8 {
+        const s = try self.readString();
+        if (!std.unicode.utf8ValidateSlice(s)) return error.InvalidUtf8;
+        return s;
     }
 
     pub fn readUint(self: *Self) !u64 {
@@ -390,4 +533,125 @@ test "decode fixmap" {
     const entry = (try m.next()).?;
     try std.testing.expectEqualSlices(u8, "key", entry.key.string);
     try std.testing.expectEqualSlices(u8, "val", entry.value.string);
+}
+
+// ============================================================================
+// Audit-driven hardening tests (DoS, overflow, length-sanity)
+// ============================================================================
+
+test "decoder: skip rejects deeply-nested arrays (DoS guard)" {
+    // 50,000 levels of nested fixarrays-of-1 terminating in nil. The old
+    // recursive skipValue would consume 50,000 Zig stack frames and crash
+    // the process. The new iterative skip caps at max_depth = 512 and
+    // returns MaxDepthExceeded.
+    var buf: [60_000]u8 = undefined;
+    const depth_attempt: usize = 50_000;
+    for (0..depth_attempt) |i| buf[i] = 0x91;
+    buf[depth_attempt] = 0xc0;
+
+    var dec = Decoder.init(buf[0 .. depth_attempt + 1]);
+    try std.testing.expectError(error.MaxDepthExceeded, dec.skip());
+}
+
+test "decoder: skip respects a tighter max_depth override" {
+    // 6-deep nested array, max_depth=5 → error.
+    var buf: [7]u8 = .{ 0x91, 0x91, 0x91, 0x91, 0x91, 0x91, 0xc0 };
+    var dec = Decoder.init(&buf);
+    dec.max_depth = 5;
+    try std.testing.expectError(error.MaxDepthExceeded, dec.skip());
+}
+
+test "decoder: skip handles sibling containers at the same level fine" {
+    // Outer array of 3 separate single-element arrays. Nesting depth is 2,
+    // so a max_depth of 2 must allow this through (no decrement bookkeeping
+    // bugs — the iterative stack pops between siblings).
+    var buf: [7]u8 = .{ 0x93, 0x91, 0xc0, 0x91, 0xc0, 0x91, 0xc0 };
+    var dec = Decoder.init(&buf);
+    dec.max_depth = 2;
+    try dec.skip();
+    try std.testing.expectEqual(@as(usize, buf.len), dec.pos);
+}
+
+test "decoder: str8 with length exceeding remaining input fails fast" {
+    // 0xd9 = str8; 0xff = claims 255 bytes; only 2 bytes follow.
+    var buf: [4]u8 = .{ 0xd9, 0xff, 'a', 'b' };
+    var dec = Decoder.init(&buf);
+    try std.testing.expectError(error.UnexpectedEndOfData, dec.read());
+}
+
+test "decoder: bin32 with absurd length fails immediately at header" {
+    // 0xc6 = bin32; length = 0xFFFFFFFF (4 GiB); buffer is 5 bytes total.
+    var buf: [5]u8 = .{ 0xc6, 0xff, 0xff, 0xff, 0xff };
+    var dec = Decoder.init(&buf);
+    try std.testing.expectError(error.UnexpectedEndOfData, dec.read());
+}
+
+test "decoder: ext32 with absurd length fails immediately at header" {
+    // 0xc9 = ext32; length = 0xFFFFFFFF; type byte = 0x42.
+    var buf: [6]u8 = .{ 0xc9, 0xff, 0xff, 0xff, 0xff, 0x42 };
+    var dec = Decoder.init(&buf);
+    try std.testing.expectError(error.UnexpectedEndOfData, dec.read());
+}
+
+test "decoder: reserved opcode 0xc1 rejected" {
+    var dec = Decoder.init(&[_]u8{0xc1});
+    try std.testing.expectError(error.InvalidFormat, dec.read());
+}
+
+test "decoder: ArrayIterator poisons on element-read error" {
+    // 0x92 = fixarray of 2 elements; first element is 0xc1 (invalid).
+    var buf: [2]u8 = .{ 0x92, 0xc1 };
+    var dec = Decoder.init(&buf);
+    const v = try dec.read();
+    var arr = v.array;
+
+    // First next() should surface InvalidFormat AND poison the iterator.
+    try std.testing.expectError(error.InvalidFormat, arr.next());
+    // Iterator is now exhausted — further next() returns null, not another
+    // error, and definitely doesn't read at a corrupted offset.
+    try std.testing.expect((try arr.next()) == null);
+    try std.testing.expectEqual(@as(usize, 0), arr.remaining);
+}
+
+test "decoder: MapIterator consumes key+value atomically" {
+    // 0x82 = fixmap of 2 entries; first key reads OK ("k"), but then 0xc1
+    // (reserved) appears where the value should be.
+    var buf: [4]u8 = .{ 0x82, 0xa1, 'k', 0xc1 };
+    var dec = Decoder.init(&buf);
+    const v = try dec.read();
+    var m = v.map;
+
+    // The first call should surface InvalidFormat from the bad value read,
+    // not silently consume an entry.
+    try std.testing.expectError(error.InvalidFormat, m.next());
+    // And the iterator must be poisoned afterwards.
+    try std.testing.expect((try m.next()) == null);
+    try std.testing.expectEqual(@as(usize, 0), m.remaining);
+}
+
+test "decoder: readStringValidated accepts valid UTF-8" {
+    // "café" in UTF-8 = 63 61 66 c3 a9 — fixstr of 5 bytes.
+    var buf: [6]u8 = .{ 0xa5, 0x63, 0x61, 0x66, 0xc3, 0xa9 };
+    var dec = Decoder.init(&buf);
+    const s = try dec.readStringValidated();
+    try std.testing.expectEqualSlices(u8, "caf\xc3\xa9", s);
+}
+
+test "decoder: readStringValidated rejects invalid UTF-8" {
+    // 0xa3 = fixstr of 3 bytes; 0xff 0xfe 0xfd are invalid UTF-8 bytes.
+    var buf: [4]u8 = .{ 0xa3, 0xff, 0xfe, 0xfd };
+    var dec = Decoder.init(&buf);
+    try std.testing.expectError(error.InvalidUtf8, dec.readStringValidated());
+}
+
+test "decoder: skip fully drains nested containers (not just top level)" {
+    // 0x91 0x91 0xc0 = array-of-1[ array-of-1[ nil ] ].
+    // After skip(), the decoder position must be at end-of-buffer.
+    // The pre-audit version only drained the outermost iterator, leaving
+    // bytes unread.
+    var buf: [3]u8 = .{ 0x91, 0x91, 0xc0 };
+    var dec = Decoder.init(&buf);
+    try dec.skip();
+    try std.testing.expectEqual(@as(usize, 3), dec.pos);
+    try std.testing.expect(!dec.hasMore());
 }

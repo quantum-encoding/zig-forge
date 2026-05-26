@@ -107,11 +107,15 @@ pub const Encoder = struct {
         self.pos += 1;
     }
 
-    /// Write multiple bytes
+    /// Write multiple bytes.
+    ///
+    /// Uses `std.math.add` so the bounds check can't be bypassed by a
+    /// `usize` overflow on 32-bit platforms.
     fn writeBytes(self: *Self, bytes: []const u8) !void {
-        if (self.pos + bytes.len > self.buffer.len) return error.BufferOverflow;
-        @memcpy(self.buffer[self.pos..][0..bytes.len], bytes);
-        self.pos += bytes.len;
+        const end = std.math.add(usize, self.pos, bytes.len) catch return error.BufferOverflow;
+        if (end > self.buffer.len) return error.BufferOverflow;
+        @memcpy(self.buffer[self.pos..end], bytes);
+        self.pos = end;
     }
 
     /// Write big-endian u16
@@ -187,30 +191,33 @@ pub const Encoder = struct {
         }
     }
 
-    /// Write 32-bit float
+    /// Write a 32-bit IEEE-754 float as msgpack `float 32` (5 bytes total).
+    ///
+    /// Deterministic: the same input always produces the same 5 bytes. This
+    /// is the API to use for any protocol that hashes or signs the encoded
+    /// form (e.g. msgpack-RPC over a wallet IPC boundary).
     pub fn writeFloat32(self: *Self, value: f32) !void {
         try self.writeByte(Format.float32);
         const bits = @as(u32, @bitCast(value));
         try self.writeU32BE(bits);
     }
 
-    /// Write 64-bit float
+    /// Write a 64-bit IEEE-754 float as msgpack `float 64` (9 bytes total).
+    ///
+    /// Deterministic: the same input always produces the same 9 bytes.
     pub fn writeFloat64(self: *Self, value: f64) !void {
         try self.writeByte(Format.float64);
         const bits = @as(u64, @bitCast(value));
         try self.writeU64BE(bits);
     }
 
-    /// Write a float (automatically chooses precision)
-    pub fn writeFloat(self: *Self, value: f64) !void {
-        // Try f32 if it fits without loss
-        const f32_val: f32 = @floatCast(value);
-        if (@as(f64, f32_val) == value) {
-            try self.writeFloat32(f32_val);
-        } else {
-            try self.writeFloat64(value);
-        }
-    }
+    // NOTE: A `writeFloat` "auto-precision" helper used to live here that
+    // chose between writeFloat32 and writeFloat64 based on whether the value
+    // round-tripped through f32. It was removed as part of the 2025 audit:
+    // it made encoding **non-canonical** — the same logical value would
+    // produce different byte sequences depending on its representation —
+    // which is a footgun for any caller that hashes or signs the wire form.
+    // Callers must now choose `writeFloat32` or `writeFloat64` explicitly.
 
     /// Write string
     pub fn writeString(self: *Self, str: []const u8) !void {
@@ -326,21 +333,32 @@ pub const Encoder = struct {
         try self.writeBytes(data);
     }
 
-    /// Write a timestamp extension (type -1)
+    /// Write a timestamp extension (msgpack ext type -1).
+    ///
+    /// Per the MessagePack timestamp spec the `nanoseconds` field is a
+    /// nanosecond fraction of a second, so it MUST be in the half-open range
+    /// `[0, 1_000_000_000)`. Values >= 10^9 are rejected with
+    /// `error.InvalidNanoseconds`. Without this check, a value >= 2^30
+    /// would silently overflow into the seconds field of the packed
+    /// timestamp-64 representation, producing a corrupted on-wire value.
     pub fn writeTimestamp(self: *Self, seconds: i64, nanoseconds: u32) !void {
+        if (nanoseconds >= 1_000_000_000) return error.InvalidNanoseconds;
+
         if (seconds >= 0 and seconds <= 0xffffffff and nanoseconds == 0) {
-            // Timestamp 32
+            // Timestamp 32: 4-byte u32 seconds-since-epoch.
             var data: [4]u8 = undefined;
             std.mem.writeInt(u32, &data, @intCast(seconds), .big);
             try self.writeExt(-1, &data);
         } else if (seconds >= 0 and seconds <= 0x3ffffffff) {
-            // Timestamp 64
+            // Timestamp 64: 30-bit nanoseconds || 34-bit seconds packed
+            // into 8 bytes. Nanoseconds capped at 1e9 above, well within
+            // the 30-bit (≈1.07e9) field width.
             var data: [8]u8 = undefined;
             const val = (@as(u64, nanoseconds) << 34) | @as(u64, @intCast(seconds));
             std.mem.writeInt(u64, &data, val, .big);
             try self.writeExt(-1, &data);
         } else {
-            // Timestamp 96
+            // Timestamp 96: 32-bit nanoseconds || 64-bit signed seconds.
             var data: [12]u8 = undefined;
             std.mem.writeInt(u32, data[0..4], nanoseconds, .big);
             std.mem.writeInt(i64, data[4..12], seconds, .big);
@@ -415,4 +433,64 @@ test "encode fixmap" {
     try enc.writeString("key");
     try enc.writeString("val");
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x81, 0xa3, 'k', 'e', 'y', 0xa3, 'v', 'a', 'l' }, enc.getWritten());
+}
+
+// ============================================================================
+// Audit-driven hardening tests
+// ============================================================================
+
+test "encoder: writeTimestamp rejects out-of-range nanoseconds" {
+    var buffer: [32]u8 = undefined;
+    var enc = Encoder.init(&buffer);
+
+    // 1e9 is the smallest invalid value (the spec range is [0, 1e9)).
+    try std.testing.expectError(error.InvalidNanoseconds, enc.writeTimestamp(0, 1_000_000_000));
+    // And any larger value — including ones that would overflow into the
+    // 34-bit seconds field of the packed timestamp-64 if accepted.
+    try std.testing.expectError(error.InvalidNanoseconds, enc.writeTimestamp(0, 4_000_000_000));
+}
+
+test "encoder: writeTimestamp accepts the maximum valid nanoseconds" {
+    var buffer: [32]u8 = undefined;
+    var enc = Encoder.init(&buffer);
+
+    // 999_999_999 is the largest valid nanosecond fraction.
+    try enc.writeTimestamp(0, 999_999_999);
+    try std.testing.expect(enc.getWritten().len > 0);
+}
+
+test "encoder: writeFloat32 and writeFloat64 are byte-deterministic" {
+    // Same logical value, encoded via the two explicit paths, must produce
+    // distinct byte sequences (5 vs 9 bytes) — proving the API forces the
+    // caller to pick a width. (The deleted writeFloat helper used to make
+    // this non-deterministic.)
+    var buf32: [16]u8 = undefined;
+    var buf64: [16]u8 = undefined;
+    var enc32 = Encoder.init(&buf32);
+    var enc64 = Encoder.init(&buf64);
+
+    try enc32.writeFloat32(1.0);
+    try enc64.writeFloat64(1.0);
+
+    try std.testing.expectEqual(@as(usize, 5), enc32.getWritten().len);
+    try std.testing.expectEqual(@as(usize, 9), enc64.getWritten().len);
+    try std.testing.expectEqual(@as(u8, 0xca), enc32.getWritten()[0]);
+    try std.testing.expectEqual(@as(u8, 0xcb), enc64.getWritten()[0]);
+}
+
+test "encoder: writeBytes overflow guard against tiny-buffer huge-input" {
+    // Buffer is 4 bytes. Caller tries to write 100 bytes after writing 3.
+    // The overflow-safe check rejects this with BufferOverflow, never
+    // wrapping the pos+len arithmetic.
+    var buffer: [4]u8 = undefined;
+    var enc = Encoder.init(&buffer);
+
+    try enc.writeNil();
+    try enc.writeNil();
+    try enc.writeNil();
+    // 3 bytes written. Now ask writeString to put 32 bytes — header + body
+    // is 33 bytes, far exceeds remaining 1 byte.
+    var giant: [32]u8 = undefined;
+    @memset(&giant, 'x');
+    try std.testing.expectError(error.BufferOverflow, enc.writeString(&giant));
 }
