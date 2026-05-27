@@ -169,3 +169,104 @@ and \"-c\" appear on different source lines (the engine looks
 only at the same line for this rule). Shell invocations
 via the (a) form above (covered separately).
 """
+
+# ---------------------------------------------------------------------
+# CATCH-UNREACHABLE — `catch unreachable` converts a recoverable
+# error into an immediate process abort. Forbidden on any code path
+# that handles hostile input (parsers, network clients, crypto, FFI
+# surfaces) — the error MUST propagate via !T so the caller decides.
+# ---------------------------------------------------------------------
+[[rule]]
+id              = "CATCH-UNREACHABLE"
+summary         = "catch unreachable converts a recoverable error into a process crash"
+severity        = "critical"
+confidence      = "high"
+gate            = true
+kind            = "line_match"
+message         = "catch unreachable aborts the host process on any non-panic error path — propagate via !T instead"
+contains_any    = ["catch unreachable"]
+covers          = """
+Any line containing the literal token pair `catch unreachable`.
+In parsers, network clients, crypto, FFI surfaces, or anywhere a
+hostile input can reach: an unexpected error MUST be propagated
+via `!T` so the caller decides how to handle it. catch
+unreachable turns that into a UB-flavored abort that kills the
+whole host process — including any unrelated requests being
+served concurrently.
+"""
+does_not_cover  = """
+`catch return null`, `catch return defaultValue`, `catch |err| ...`
+with an explicit error handler — those are intentional. Inside a
+comptime block, `catch unreachable` is sometimes provably safe
+(the call cannot fail at comptime by construction); this rule
+still flags those and they need an inline zig-lens-ignore with
+reason text. Equivalent patterns via std.debug.panic / @panic /
+std.process.exit on an error path are NOT scanned and need
+human review.
+"""
+
+# ---------------------------------------------------------------------
+# ASSUME-CAPACITY — ArrayList's *AssumeCapacity family bypasses
+# bounds checks. Safe usage requires a preceding ensureTotalCapacity
+# AND an auditable invariant that the buffer cannot be filled past
+# that capacity before the AssumeCapacity write. We've shipped
+# silent buffer overflows from violating exactly that.
+# ---------------------------------------------------------------------
+[[rule]]
+id              = "ASSUME-CAPACITY"
+summary         = "ArrayList *AssumeCapacity methods bypass bounds checking"
+severity        = "high"
+confidence      = "high"
+gate            = true
+kind            = "line_match"
+message         = "AssumeCapacity methods write past end-of-buffer when the invariant doesn't hold — prefer .append(allocator, …) or pair ensureTotalCapacity with an audited invariant"
+contains_ident_any = ["appendAssumeCapacity", "appendSliceAssumeCapacity", "addOneAssumeCapacity", "insertAssumeCapacity", "writeAssumeCapacity"]
+covers          = """
+Any call to an *AssumeCapacity* ArrayList method. These methods
+do NOT re-allocate on overflow — they write past the buffer end
+and trigger undefined behavior. Safe usage requires a preceding
+ensureTotalCapacity (or ensureUnusedCapacity) call AND an
+auditable invariant that the buffer cannot be filled past that
+capacity between the ensure call and the AssumeCapacity write.
+"""
+does_not_cover  = """
+Manual byte-array writes that perform the same bypass without
+going through ArrayList (raw pointer arithmetic, @memcpy past
+end-of-buffer). Cross-function flow where the ensureTotalCapacity
+is in caller A and the AssumeCapacity is in callee B (the
+scanner sees only the call site, not the data flow). Stack-
+buffer writes via std.fmt.bufPrint when the buffer is too small
+(those return NoSpaceLeft, but only if checked).
+"""
+
+# ---------------------------------------------------------------------
+# NAKED-POINTER-CAST — @ptrCast / @ptrFromInt / @intToPtr in
+# application code. Sometimes unavoidable in FFI / drivers / MMIO
+# but each occurrence in application logic hides type-confusion and
+# alignment bugs. Advisory only — the rule fires as WARN, never
+# blocks --strict, because the cast is sometimes legitimate.
+# ---------------------------------------------------------------------
+[[rule]]
+id              = "NAKED-POINTER-CAST"
+summary         = "Pointer cast / int-to-pointer conversion in application code"
+severity        = "medium"
+confidence      = "medium"
+gate            = false
+kind            = "line_match"
+message         = "advisory: @ptrCast / @ptrFromInt / @intToPtr hides type-confusion and alignment bugs — confirm this is genuinely FFI / driver / MMIO and not application logic"
+contains_any    = ["@ptrCast", "@ptrFromInt", "@intToPtr"]
+covers          = """
+Any source line containing one of the pointer-cast builtins
+@ptrCast, @ptrFromInt, or the legacy @intToPtr (which Zig 0.11+
+replaced with @ptrFromInt — still flagged for any pre-0.11
+files that may have escaped a migration).
+"""
+does_not_cover  = """
+@bitCast on pointer values (a different builtin with the same
+risk profile, currently un-scanned). @alignCast — also pointer-
+related but expresses a narrowing alignment guarantee.
+Cross-function flow where the cast is in a helper and the
+unsafe call lives elsewhere. Pointer arithmetic via raw integer
+math without a dedicated builtin (extremely rare in idiomatic
+Zig).
+"""

@@ -296,7 +296,7 @@ fn lineIgnoresRule(line: []const u8, rule_id: []const u8) bool {
 
 // ── Tests ────────────────────────────────────────────────────────
 
-test "loadDefault: parses embedded ruleset, 5 entries, 4 unique ids" {
+test "loadDefault: parses embedded ruleset, 8 entries, 7 unique ids" {
     try loadDefault(std.testing.allocator);
     defer {
         if (active_set) |*s| s.deinit();
@@ -309,8 +309,10 @@ test "loadDefault: parses embedded ruleset, 5 entries, 4 unique ids" {
         active_arena = null;
         active_coverage = &[_]RuleCoverage{};
     }
-    try std.testing.expectEqual(@as(usize, 5), active_set.?.rules.len);
-    try std.testing.expectEqual(@as(usize, 4), active_coverage.len);
+    // 8 rule entries (SHELL-CHILD is split into two complementary
+    // shapes); 7 unique IDs surfaced in the coverage panel.
+    try std.testing.expectEqual(@as(usize, 8), active_set.?.rules.len);
+    try std.testing.expectEqual(@as(usize, 7), active_coverage.len);
 }
 
 test "analyze: default rules still flag JSON-IN-FMT" {
