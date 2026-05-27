@@ -180,8 +180,20 @@ pub const Builder = struct {
         self.claims.custom = try self.allocator.dupe(u8, json);
     }
 
-    /// Sign and create the JWT token string
+    /// Sign and create the JWT token string.
+    ///
+    /// Audit H-2: `Algorithm.none` is refused at the sign side. The
+    /// verifier already rejects `.none`, but a library that can mint
+    /// an unauthenticated `header.payload.` triple is a footgun —
+    /// downstream callers can pass that token to a less-strict
+    /// verifier (theirs, or a different library, or a misconfigured
+    /// instance of ours) and bypass authentication. The fix is
+    /// symmetric: this library does not produce `.none` tokens, full
+    /// stop. Tests that exercise the `.none` enum value still
+    /// compile, they just have to demonstrate the rejection.
     pub fn sign(self: *Self, algorithm: Algorithm, secret: []const u8) ![]u8 {
+        if (algorithm == .none) return Error.InvalidAlgorithm;
+
         // Build header
         const header = try std.fmt.allocPrint(self.allocator, "{{\"alg\":\"{s}\",\"typ\":\"JWT\"}}", .{algorithm.name()});
         defer self.allocator.free(header);
@@ -389,20 +401,28 @@ pub const Verifier = struct {
         const header_json = try base64UrlDecode(self.allocator, header_b64);
         defer self.allocator.free(header_json);
 
-        // Extract algorithm from header and validate it matches
-        const header_algorithm = try extractAlgorithmFromHeader(self.allocator, header_json);
-        if (header_algorithm == null or !std.mem.eql(u8, header_algorithm.?, algorithm.name())) {
+        // Extract algorithm from header and validate it matches.
+        // After H-3 the helper returns an `Algorithm` enum value
+        // parsed via std.json, so the comparison is on the enum and
+        // not on string content — there is no way for a hostile
+        // header to pass an unsupported algorithm that happens to
+        // string-equal one we recognise.
+        const header_algorithm = (try extractAlgorithmFromHeader(self.allocator, header_json)) orelse
             return Error.InvalidAlgorithm;
-        }
+        if (header_algorithm != algorithm) return Error.InvalidAlgorithm;
 
-        // Verify signature
+        // Verify signature. Audit H-1: the comparison runs on the
+        // raw HMAC bytes through `std.crypto.timing_safe.eql`, not
+        // the base64 strings through `std.mem.eql`. `std.mem.eql`
+        // short-circuits on the first mismatched byte, leaking the
+        // length of the matching prefix as a timing side channel —
+        // the textbook MAC-forgery oracle. `timing_safe.eql` runs in
+        // time proportional to the array length regardless of where
+        // the mismatch is.
         const signing_input = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ header_b64, payload_b64 });
         defer self.allocator.free(signing_input);
 
-        const expected_sig = try signData(self.allocator, algorithm, secret, signing_input);
-        defer self.allocator.free(expected_sig);
-
-        if (!std.mem.eql(u8, expected_sig, signature_b64)) {
+        if (!try verifyHmacSignature(self.allocator, algorithm, secret, signing_input, signature_b64)) {
             return Error.InvalidSignature;
         }
 
@@ -489,11 +509,20 @@ pub fn base64UrlEncode(allocator: Allocator, data: []const u8) ![]u8 {
     return result;
 }
 
-/// Base64URL decode
+/// Base64URL decode.
+///
+/// `errdefer` releases `result` if `Decoder.decode` rejects the
+/// input (e.g. tampered signature characters that pass length
+/// validation but fail charset validation). The previous
+/// implementation allocated the buffer and then returned the
+/// decoder error unconditionally, leaving the buffer leaked —
+/// a slow drain that any caller decoding adversarial base64
+/// could trigger.
 pub fn base64UrlDecode(allocator: Allocator, encoded: []const u8) ![]u8 {
     const codecs = base64.url_safe_no_pad;
     const len = try codecs.Decoder.calcSizeForSlice(encoded);
     const result = try allocator.alloc(u8, len);
+    errdefer allocator.free(result);
     try codecs.Decoder.decode(result, encoded);
     return result;
 }
@@ -514,71 +543,137 @@ fn hmacSign(allocator: Allocator, comptime Hmac: type, secret: []const u8, data:
     return try base64UrlEncode(allocator, &mac);
 }
 
-/// Parse JWT payload JSON into Claims
+/// Constant-time HMAC signature verification.
+///
+/// Audit H-1: `std.crypto.timing_safe.eql` is the only constant-time
+/// primitive in std and it requires fixed-length arrays. We decode
+/// the caller-supplied base64 signature to raw bytes, refuse any
+/// length other than the algorithm's `mac_length`, compute the
+/// expected MAC into a fixed array, and compare both arrays in
+/// constant time. No early exit, no byte-by-byte short circuit.
+fn verifyHmacSignature(
+    allocator: Allocator,
+    algorithm: Algorithm,
+    secret: []const u8,
+    signing_input: []const u8,
+    signature_b64: []const u8,
+) !bool {
+    // Length sanity check before decoding — refuses obviously-
+    // malformed signatures cheaply, and bounds the work the
+    // verifier does on hostile input.
+    if (signature_b64.len > 256) return false;
+
+    const provided = base64UrlDecode(allocator, signature_b64) catch return false;
+    defer allocator.free(provided);
+
+    // Use an explicit local to make the defer ordering obvious to
+    // both the reader and the compiler: the switch result is bound
+    // to `ok`, the function then exits the scope, and only then
+    // does `defer allocator.free(provided)` fire.
+    const ok = switch (algorithm) {
+        .HS256 => verifyHmacFixed(std.crypto.auth.hmac.sha2.HmacSha256, secret, signing_input, provided),
+        .HS384 => verifyHmacFixed(std.crypto.auth.hmac.sha2.HmacSha384, secret, signing_input, provided),
+        .HS512 => verifyHmacFixed(std.crypto.auth.hmac.sha2.HmacSha512, secret, signing_input, provided),
+        // .none is rejected at the top of Verifier.verify; reaching
+        // here would be a contract violation. Treat as a failed
+        // verification rather than a panic so a programming error
+        // can never accept a token.
+        .none => false,
+    };
+    return ok;
+}
+
+fn verifyHmacFixed(
+    comptime Hmac: type,
+    secret: []const u8,
+    data: []const u8,
+    provided: []const u8,
+) bool {
+    if (provided.len != Hmac.mac_length) return false;
+    var expected: [Hmac.mac_length]u8 = undefined;
+    Hmac.create(&expected, data, secret);
+    const provided_arr: *const [Hmac.mac_length]u8 = provided[0..Hmac.mac_length];
+    return std.crypto.timing_safe.eql([Hmac.mac_length]u8, expected, provided_arr.*);
+}
+
+// Audit H-3: header + payload parsing goes through std.json.
+//
+// The previous implementation used `std.mem.indexOf` substring
+// searches with hand-rolled key patterns (`"\"alg\":\""`,
+// `"\"iss\":\""`, …). That's structurally unsound for two reasons:
+//
+//   1. A custom claim whose VALUE happens to contain the bytes
+//      `"sub":"victim"` would forge a `sub` claim on parse. The
+//      pattern `"\"sub\":\""` matches inside another string just
+//      as well as it matches an actual JSON key.
+//
+//   2. Order-of-keys, whitespace, escape sequences, Unicode escapes,
+//      and duplicate keys all defeat naive substring matching in
+//      different ways — std.json handles all of them correctly per
+//      RFC 8259.
+//
+// The structured-parse path below uses std.json with
+// `ignore_unknown_fields = true` so custom claims survive (we still
+// keep the full payload bytes in `claims.custom` for callers that
+// want them). String values are duped into the Claims allocator
+// before the parser's arena is freed.
+
+const HeaderJson = struct {
+    alg: ?[]const u8 = null,
+    typ: ?[]const u8 = null,
+};
+
+const PayloadJson = struct {
+    iss: ?[]const u8 = null,
+    sub: ?[]const u8 = null,
+    aud: ?[]const u8 = null,
+    exp: ?i64 = null,
+    nbf: ?i64 = null,
+    iat: ?i64 = null,
+    jti: ?[]const u8 = null,
+};
+
+/// Parse JWT payload JSON into Claims using std.json.
 fn parsePayload(allocator: Allocator, json: []const u8) !Claims {
     var claims = Claims.init(allocator);
     errdefer claims.deinit();
 
-    // Simple JSON parsing for standard claims
-    claims.iss = try extractStringClaim(allocator, json, "iss");
-    claims.sub = try extractStringClaim(allocator, json, "sub");
-    claims.aud = try extractStringClaim(allocator, json, "aud");
-    claims.jti = try extractStringClaim(allocator, json, "jti");
-    claims.exp = extractIntClaim(json, "exp");
-    claims.nbf = extractIntClaim(json, "nbf");
-    claims.iat = extractIntClaim(json, "iat");
+    const parsed = std.json.parseFromSlice(PayloadJson, allocator, json, .{
+        .ignore_unknown_fields = true,
+    }) catch {
+        return Error.InvalidPayload;
+    };
+    defer parsed.deinit();
 
-    // Store full payload for custom claims access
+    if (parsed.value.iss) |s| claims.iss = try allocator.dupe(u8, s);
+    if (parsed.value.sub) |s| claims.sub = try allocator.dupe(u8, s);
+    if (parsed.value.aud) |s| claims.aud = try allocator.dupe(u8, s);
+    if (parsed.value.jti) |s| claims.jti = try allocator.dupe(u8, s);
+    claims.exp = parsed.value.exp;
+    claims.nbf = parsed.value.nbf;
+    claims.iat = parsed.value.iat;
+
+    // Keep the original payload bytes so callers can read custom
+    // claims (everything outside the registered set above) without
+    // re-parsing. Storing the *original* bytes — not a serialized
+    // version of the registered subset — preserves order, whitespace,
+    // and any non-string custom values.
     claims.custom = try allocator.dupe(u8, json);
 
     return claims;
 }
 
-fn extractStringClaim(allocator: Allocator, json: []const u8, key: []const u8) !?[]u8 {
-    const search_key = try std.fmt.allocPrint(allocator, "\"{s}\":\"", .{key});
-    defer allocator.free(search_key);
+/// Parse a JWT header and return the algorithm enum it declares.
+/// Returns null if the header is malformed JSON, missing `alg`, or
+/// declares an unsupported algorithm name.
+fn extractAlgorithmFromHeader(allocator: Allocator, json: []const u8) !?Algorithm {
+    const parsed = std.json.parseFromSlice(HeaderJson, allocator, json, .{
+        .ignore_unknown_fields = true,
+    }) catch return null;
+    defer parsed.deinit();
 
-    if (std.mem.indexOf(u8, json, search_key)) |start| {
-        const value_start = start + search_key.len;
-        if (std.mem.indexOfScalarPos(u8, json, value_start, '"')) |end| {
-            return try allocator.dupe(u8, json[value_start..end]);
-        }
-    }
-    return null;
-}
-
-fn extractAlgorithmFromHeader(_: Allocator, json: []const u8) !?[]const u8 {
-    const search_key = "\"alg\":\"";
-    if (std.mem.indexOf(u8, json, search_key)) |start| {
-        const value_start = start + search_key.len;
-        if (std.mem.indexOfScalarPos(u8, json, value_start, '"')) |end| {
-            const alg_str = json[value_start..end];
-            // Return one of the standard algorithm names
-            if (std.mem.eql(u8, alg_str, "HS256")) return "HS256";
-            if (std.mem.eql(u8, alg_str, "HS384")) return "HS384";
-            if (std.mem.eql(u8, alg_str, "HS512")) return "HS512";
-            if (std.mem.eql(u8, alg_str, "none")) return "none";
-            return alg_str; // Unknown algorithm
-        }
-    }
-    return null;
-}
-
-fn extractIntClaim(json: []const u8, key: []const u8) ?i64 {
-    var buf: [64]u8 = undefined;
-    const search_key = std.fmt.bufPrint(&buf, "\"{s}\":", .{key}) catch return null;
-
-    if (std.mem.indexOf(u8, json, search_key)) |start| {
-        const value_start = start + search_key.len;
-        var end = value_start;
-        while (end < json.len and (json[end] == '-' or std.ascii.isDigit(json[end]))) {
-            end += 1;
-        }
-        if (end > value_start) {
-            return std.fmt.parseInt(i64, json[value_start..end], 10) catch null;
-        }
-    }
-    return null;
+    const alg_str = parsed.value.alg orelse return null;
+    return Algorithm.fromString(alg_str);
 }
 
 // ============================================================================
@@ -1007,6 +1102,191 @@ test "JWT ID presence in token" {
     defer claims.deinit();
 
     try std.testing.expectEqualStrings("jwt-id-12345", claims.jti.?);
+}
+
+// ── Audit regression tests ──────────────────────────────────────
+
+test "H-2: Builder.sign refuses Algorithm.none" {
+    const allocator = std.testing.allocator;
+
+    var builder = Builder.init(allocator);
+    defer builder.deinit();
+
+    try builder.setSubject("user123");
+    builder.setExpiration(getUnixTimestamp() + 3600);
+
+    // The library must NOT produce an unauthenticated `header.payload.`
+    // triple even when the caller asks for it — sign-side rejection
+    // closes the alg-none footgun symmetrically with the verify side.
+    const result = builder.sign(.none, "ignored");
+    try std.testing.expectError(Error.InvalidAlgorithm, result);
+}
+
+test "H-1: signature comparison runs in constant time on raw HMAC bytes" {
+    const allocator = std.testing.allocator;
+
+    var builder = Builder.init(allocator);
+    defer builder.deinit();
+
+    try builder.setSubject("user123");
+    builder.setExpiration(getUnixTimestamp() + 3600);
+
+    const token = try builder.sign(.HS256, "secret-key");
+    defer allocator.free(token);
+
+    // Tamper the very FIRST byte of the signature. With a
+    // short-circuiting `mem.eql`, this would still reject (and
+    // would do so faster than a tamper at the last byte — that's
+    // the original timing oracle). With `timing_safe.eql` it just
+    // rejects. We can't observe wall-clock equivalence in a unit
+    // test, but we can at least confirm that early-mismatched
+    // signatures are still rejected (i.e. the new path is
+    // functionally correct).
+    var tampered = try allocator.alloc(u8, token.len);
+    defer allocator.free(tampered);
+    @memcpy(tampered, token);
+    const last_dot = std.mem.lastIndexOfScalar(u8, tampered, '.').?;
+    // Flip a bit in the first signature character.
+    tampered[last_dot + 1] ^= 0x01;
+
+    var verifier = Verifier.init(allocator);
+    defer verifier.deinit();
+    try std.testing.expectError(
+        Error.InvalidSignature,
+        verifier.verify(tampered, .HS256, "secret-key"),
+    );
+
+    // Tamper the LAST byte of the signature too. With the old
+    // short-circuit compare, this mismatch was found at a different
+    // index — the timing oracle's distinguishing observable. We
+    // assert correctness only here; the constant-time property is
+    // a structural guarantee of `std.crypto.timing_safe.eql`.
+    @memcpy(tampered, token);
+    tampered[tampered.len - 1] ^= 0x01;
+    try std.testing.expectError(
+        Error.InvalidSignature,
+        verifier.verify(tampered, .HS256, "secret-key"),
+    );
+}
+
+test "H-1: signatures of the wrong length are rejected without decoding" {
+    const allocator = std.testing.allocator;
+
+    var builder = Builder.init(allocator);
+    defer builder.deinit();
+
+    try builder.setSubject("user123");
+    builder.setExpiration(getUnixTimestamp() + 3600);
+
+    const token = try builder.sign(.HS256, "secret-key");
+    defer allocator.free(token);
+
+    // Replace the signature with one byte of base64 noise — too
+    // short to be a real HMAC-SHA256 output (32 bytes raw = 43
+    // base64 chars).
+    const last_dot = std.mem.lastIndexOfScalar(u8, token, '.').?;
+    const short = try std.fmt.allocPrint(allocator, "{s}.A", .{token[0..last_dot]});
+    defer allocator.free(short);
+
+    var verifier = Verifier.init(allocator);
+    defer verifier.deinit();
+    try std.testing.expectError(
+        Error.InvalidSignature,
+        verifier.verify(short, .HS256, "secret-key"),
+    );
+}
+
+test "H-3: custom claim whose value embeds \"sub\":\"victim\" does not spoof sub" {
+    const allocator = std.testing.allocator;
+
+    var builder = Builder.init(allocator);
+    defer builder.deinit();
+
+    // The actual subject is "real". The custom claim carries a
+    // string whose VALUE contains bytes that look like a `sub`
+    // field — the old substring extractor would have found it.
+    try builder.setSubject("real");
+    builder.setExpiration(getUnixTimestamp() + 3600);
+
+    // Inject a custom claim that, on substring-search, looks like
+    // a `sub` field. The std.json parser must ignore it as
+    // structural data — it's the value of `note`, not a separate
+    // top-level key.
+    try builder.setCustomClaims("\"note\":\"\\\"sub\\\":\\\"victim\\\"\"");
+
+    const token = try builder.sign(.HS256, "secret-key");
+    defer allocator.free(token);
+
+    var verifier = Verifier.init(allocator);
+    defer verifier.deinit();
+
+    var claims = try verifier.verify(token, .HS256, "secret-key");
+    defer claims.deinit();
+
+    // The structurally-correct parse keeps `sub` as "real".
+    try std.testing.expectEqualStrings("real", claims.sub.?);
+}
+
+test "H-3: malformed payload JSON is rejected (Error.InvalidPayload)" {
+    const allocator = std.testing.allocator;
+
+    // Hand-build a token whose payload is invalid JSON. We compute
+    // the correct HMAC over it so that signature verification
+    // wouldn't be what catches it — the parse step must.
+    const header = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
+    const malformed_payload = "{not json at all";
+
+    const header_b64 = try base64UrlEncode(allocator, header);
+    defer allocator.free(header_b64);
+    const payload_b64 = try base64UrlEncode(allocator, malformed_payload);
+    defer allocator.free(payload_b64);
+
+    const signing_input = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ header_b64, payload_b64 });
+    defer allocator.free(signing_input);
+    const sig = try signData(allocator, .HS256, "secret-key", signing_input);
+    defer allocator.free(sig);
+    const token = try std.fmt.allocPrint(allocator, "{s}.{s}.{s}", .{ header_b64, payload_b64, sig });
+    defer allocator.free(token);
+
+    var verifier = Verifier.init(allocator);
+    defer verifier.deinit();
+    try std.testing.expectError(
+        Error.InvalidPayload,
+        verifier.verify(token, .HS256, "secret-key"),
+    );
+}
+
+test "H-3: malformed header JSON is rejected (Error.InvalidAlgorithm)" {
+    const allocator = std.testing.allocator;
+
+    // The header isn't even JSON. With the old substring matcher,
+    // a header missing the literal `"alg":"` would return null and
+    // we'd return InvalidAlgorithm — same end-state. The point of
+    // this test is to lock in the std.json path: malformed header
+    // ⇒ parseFromSlice fails ⇒ extractAlgorithmFromHeader returns
+    // null ⇒ verify returns InvalidAlgorithm. Same outcome, but
+    // now driven by a real parser instead of a string search.
+    const garbage_header = "not a header";
+    const payload = "{\"sub\":\"x\"}";
+
+    const header_b64 = try base64UrlEncode(allocator, garbage_header);
+    defer allocator.free(header_b64);
+    const payload_b64 = try base64UrlEncode(allocator, payload);
+    defer allocator.free(payload_b64);
+
+    const signing_input = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ header_b64, payload_b64 });
+    defer allocator.free(signing_input);
+    const sig = try signData(allocator, .HS256, "secret-key", signing_input);
+    defer allocator.free(sig);
+    const token = try std.fmt.allocPrint(allocator, "{s}.{s}.{s}", .{ header_b64, payload_b64, sig });
+    defer allocator.free(token);
+
+    var verifier = Verifier.init(allocator);
+    defer verifier.deinit();
+    try std.testing.expectError(
+        Error.InvalidAlgorithm,
+        verifier.verify(token, .HS256, "secret-key"),
+    );
 }
 
 test "decode without verification returns correct parts" {
