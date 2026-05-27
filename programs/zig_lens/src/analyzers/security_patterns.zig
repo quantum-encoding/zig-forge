@@ -17,6 +17,18 @@
 // strings outside process.Child — every sibling needs its own rule
 // or its own review. Treat a clean scan as "the rules we have
 // passed," not "no injection vulnerabilities."
+//
+// Inline suppression: when human review has confirmed a finding is
+// a false positive, the line (or the line above) can carry the
+// directive
+//
+//   // zig-lens-ignore: <RULE-ID> <reason text>
+//
+// The reason is REQUIRED — undocumented suppressions are silent
+// bug nests. CI can grep `zig-lens-ignore:` to enumerate every
+// active waiver and periodically reconfirm. The suppression is
+// rule-id-specific, so a future-added rule that catches a real
+// bug on the same line still surfaces.
 
 const std = @import("std");
 const models = @import("../models.zig");
@@ -182,12 +194,21 @@ fn snippetOf(allocator: std.mem.Allocator, line: []const u8) ![]const u8 {
 fn appendFinding(
     allocator: std.mem.Allocator,
     report: *models.FileReport,
+    full_source: []const u8,
+    line_offset: usize,
     rule_id: []const u8,
     severity: models.RiskLevel,
     message: []const u8,
     line: []const u8,
     line_number: u32,
 ) !void {
+    // Inline suppression: respect `// zig-lens-ignore: <RULE-ID> <reason>`
+    // on the same line OR the line immediately above. See
+    // hasIgnoreDirective for the exact contract — every suppression
+    // requires a non-empty reason so CI / audit can grep
+    // `zig-lens-ignore:` to find them all and re-review periodically.
+    if (hasIgnoreDirective(full_source, line_offset, line, rule_id)) return;
+
     const snip = try snippetOf(allocator, line);
     try report.security_findings.append(allocator, .{
         .rule_id = rule_id,
@@ -196,6 +217,73 @@ fn appendFinding(
         .message = try allocator.dupe(u8, message),
         .snippet = snip,
     });
+}
+
+// ── Inline suppression directive ─────────────────────────────────
+//
+// Syntax:
+//   // zig-lens-ignore: <RULE-ID> <reason text>
+//
+// Placement: either on the same source line as the finding (trailing
+// comment) OR on the line immediately above. The `<reason text>`
+// MUST be present (at least 4 non-whitespace chars after the rule
+// id) — undocumented suppressions are silent bug nests; CI can
+// grep `zig-lens-ignore:` to enumerate every active waiver and
+// periodically reconfirm the reasons still hold.
+//
+// Rule-id-specific: a suppression for EQL-FOR-SECRETS does NOT
+// suppress, say, a SHELL-CHILD finding on the same line. So a
+// future-added rule that catches a real bug still surfaces.
+
+const ignore_tag: []const u8 = "zig-lens-ignore:";
+
+fn hasIgnoreDirective(
+    full_source: []const u8,
+    line_offset: usize,
+    line: []const u8,
+    rule_id: []const u8,
+) bool {
+    if (lineIgnoresRule(line, rule_id)) return true;
+
+    // Walk back one line.
+    if (line_offset == 0) return false;
+    var prev_end = line_offset;
+    if (full_source[prev_end - 1] == '\n') prev_end -= 1;
+    if (prev_end == 0) return false;
+    var prev_start = prev_end;
+    while (prev_start > 0 and full_source[prev_start - 1] != '\n') prev_start -= 1;
+    return lineIgnoresRule(full_source[prev_start..prev_end], rule_id);
+}
+
+fn lineIgnoresRule(line: []const u8, rule_id: []const u8) bool {
+    const at = std.mem.indexOf(u8, line, ignore_tag) orelse return false;
+    var rest = std.mem.trimStart(u8, line[at + ignore_tag.len ..], " \t");
+    if (!std.mem.startsWith(u8, rest, rule_id)) return false;
+    rest = rest[rule_id.len..];
+    // Require a separator (space, tab, dash, em-dash byte sequence).
+    // A bare `zig-lens-ignore: EQL-FOR-SECRETS` with nothing after
+    // is rejected — the reason is mandatory.
+    if (rest.len == 0) return false;
+    const first = rest[0];
+    if (first != ' ' and first != '\t' and first != '-' and first != ':') return false;
+    // Trim leading whitespace + separator characters and any UTF-8
+    // em-dash bytes (— = 0xE2 0x80 0x94). Then require at least 4
+    // non-whitespace characters of explanation.
+    var reason_start: usize = 0;
+    while (reason_start < rest.len) {
+        const c = rest[reason_start];
+        if (c == ' ' or c == '\t' or c == '-' or c == ':') {
+            reason_start += 1;
+            continue;
+        }
+        if (reason_start + 2 < rest.len and c == 0xE2 and rest[reason_start + 1] == 0x80 and rest[reason_start + 2] == 0x94) {
+            reason_start += 3;
+            continue;
+        }
+        break;
+    }
+    const reason = std.mem.trimEnd(u8, rest[reason_start..], " \t\r\n");
+    return reason.len >= 4;
 }
 
 fn scanLine(
@@ -215,12 +303,16 @@ fn scanLine(
     if (std.mem.startsWith(u8, t, "\\\\")) return;
 
     // ── Rule: MBEDTLS-VERIFY-NONE ─────────────────────────────────
+    // zig-lens-ignore: MBEDTLS-VERIFY-NONE scanner pattern definition, not a real mbedTLS call site
     if (std.mem.indexOf(u8, line, "MBEDTLS_SSL_VERIFY_NONE") != null) {
         try appendFinding(
             allocator,
             report,
+            full_source,
+            line_offset,
             "MBEDTLS-VERIFY-NONE",
             .critical,
+            // zig-lens-ignore: MBEDTLS-VERIFY-NONE this string is the finding message text, not an mbedTLS call
             "MBEDTLS_SSL_VERIFY_NONE disables certificate validation — never use in production",
             line,
             line_number,
@@ -237,6 +329,8 @@ fn scanLine(
             try appendFinding(
                 allocator,
                 report,
+                full_source,
+                line_offset,
                 "JSON-IN-FMT",
                 .high,
                 "allocPrint/bufPrint used to build JSON — hand-formatted JSON does not escape interpolated values (use std.json.Stringify)",
@@ -275,6 +369,8 @@ fn scanLine(
                 try appendFinding(
                     allocator,
                     report,
+                    full_source,
+                    line_offset,
                     "EQL-FOR-SECRETS",
                     .high,
                     "non-constant-time comparison in a function whose name or parameters identify a secret — use std.crypto.timing_safe.eql or security.constantTimeEql",
@@ -299,6 +395,8 @@ fn scanLine(
                 try appendFinding(
                     allocator,
                     report,
+                    full_source,
+                    line_offset,
                     "SHELL-CHILD",
                     .critical,
                     "process.Child / process.run / execve invoked via /bin/sh — argv-mode exec exists specifically to avoid shell metacharacter injection",
@@ -321,6 +419,8 @@ fn scanLine(
         try appendFinding(
             allocator,
             report,
+            full_source,
+            line_offset,
             "SHELL-CHILD",
             .critical,
             "shell -c pattern in argv — re-introduces metacharacter injection that argv-mode exec was designed to prevent",
@@ -857,4 +957,139 @@ test "coverageFor: every rule has coverage notes" {
     try std.testing.expect(coverageFor("EQL-FOR-SECRETS") != null);
     try std.testing.expect(coverageFor("SHELL-CHILD") != null);
     try std.testing.expect(coverageFor("BOGUS-RULE") == null);
+}
+
+// ── Suppression directive tests ─────────────────────────────────
+
+test "lineIgnoresRule: same-line trailing directive with reason" {
+    try std.testing.expect(lineIgnoresRule(
+        "    if (std.mem.eql(u8, a, b)) return; // zig-lens-ignore: EQL-FOR-SECRETS public status string, not a secret",
+        "EQL-FOR-SECRETS",
+    ));
+}
+
+test "lineIgnoresRule: rule-id-specific (mismatched id is NOT suppressed)" {
+    try std.testing.expect(!lineIgnoresRule(
+        "// zig-lens-ignore: JSON-IN-FMT we built JSON by hand here for performance",
+        "EQL-FOR-SECRETS",
+    ));
+}
+
+test "lineIgnoresRule: empty reason is REJECTED (silent suppression is a bug nest)" {
+    try std.testing.expect(!lineIgnoresRule(
+        "// zig-lens-ignore: EQL-FOR-SECRETS",
+        "EQL-FOR-SECRETS",
+    ));
+    try std.testing.expect(!lineIgnoresRule(
+        "// zig-lens-ignore: EQL-FOR-SECRETS    ",
+        "EQL-FOR-SECRETS",
+    ));
+    // Just a separator (dash) with no reason text
+    try std.testing.expect(!lineIgnoresRule(
+        "// zig-lens-ignore: EQL-FOR-SECRETS —",
+        "EQL-FOR-SECRETS",
+    ));
+}
+
+test "lineIgnoresRule: em-dash separator after rule id" {
+    try std.testing.expect(lineIgnoresRule(
+        "// zig-lens-ignore: EQL-FOR-SECRETS — JWT iss is a public URL, not a secret",
+        "EQL-FOR-SECRETS",
+    ));
+}
+
+test "lineIgnoresRule: colon separator after rule id" {
+    try std.testing.expect(lineIgnoresRule(
+        "// zig-lens-ignore: EQL-FOR-SECRETS: chat-role string, API metadata not secret",
+        "EQL-FOR-SECRETS",
+    ));
+}
+
+test "EQL-FOR-SECRETS: suppression on same line skips the finding" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\fn verifySignature(expected: []const u8, computed: []const u8) bool {
+        \\    return std.mem.eql(u8, expected, computed); // zig-lens-ignore: EQL-FOR-SECRETS reviewed: prefix-check not a timing-side-channel
+        \\}
+        \\
+    ;
+    var r = try runOnWithFns(allocator, source, &.{
+        .{
+            .name = "verifySignature",
+            .line = 1,
+            .end_line = 3,
+            .body_lines = 2,
+            .params = "expected: []const u8,computed: []const u8",
+            .return_type = "bool",
+            .is_pub = false,
+            .is_extern = false,
+            .is_export = false,
+            .doc_comment = "",
+        },
+    });
+    defer freeReport(allocator, &r);
+    for (r.security_findings.items) |f| {
+        if (std.mem.eql(u8, f.rule_id, "EQL-FOR-SECRETS")) return error.SuppressedFindingStillFired;
+    }
+}
+
+test "EQL-FOR-SECRETS: suppression on the line ABOVE skips the finding" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\fn verifySignature(expected: []const u8, computed: []const u8) bool {
+        \\    // zig-lens-ignore: EQL-FOR-SECRETS reviewed: caller wraps this in timing_safe.eql at boundary
+        \\    return std.mem.eql(u8, expected, computed);
+        \\}
+        \\
+    ;
+    var r = try runOnWithFns(allocator, source, &.{
+        .{
+            .name = "verifySignature",
+            .line = 1,
+            .end_line = 4,
+            .body_lines = 3,
+            .params = "expected: []const u8,computed: []const u8",
+            .return_type = "bool",
+            .is_pub = false,
+            .is_extern = false,
+            .is_export = false,
+            .doc_comment = "",
+        },
+    });
+    defer freeReport(allocator, &r);
+    for (r.security_findings.items) |f| {
+        if (std.mem.eql(u8, f.rule_id, "EQL-FOR-SECRETS")) return error.SuppressedFindingStillFired;
+    }
+}
+
+test "EQL-FOR-SECRETS: suppression for wrong rule ID does NOT silence the finding" {
+    const allocator = std.testing.allocator;
+    // Author tried to silence EQL-FOR-SECRETS with a JSON-IN-FMT
+    // suppression — the rule should still fire (rule-id specific).
+    const source =
+        \\fn verifySignature(expected: []const u8, computed: []const u8) bool {
+        \\    return std.mem.eql(u8, expected, computed); // zig-lens-ignore: JSON-IN-FMT wrong-rule, should still fire
+        \\}
+        \\
+    ;
+    var r = try runOnWithFns(allocator, source, &.{
+        .{
+            .name = "verifySignature",
+            .line = 1,
+            .end_line = 3,
+            .body_lines = 2,
+            .params = "expected: []const u8,computed: []const u8",
+            .return_type = "bool",
+            .is_pub = false,
+            .is_extern = false,
+            .is_export = false,
+            .doc_comment = "",
+        },
+    });
+    defer freeReport(allocator, &r);
+    var found = false;
+    for (r.security_findings.items) |f| {
+        if (std.mem.eql(u8, f.rule_id, "EQL-FOR-SECRETS")) found = true;
+    }
+    try std.testing.expect(found);
 }

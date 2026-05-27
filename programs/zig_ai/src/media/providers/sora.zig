@@ -148,9 +148,11 @@ fn pollForCompletion(allocator: Allocator, api_key: []const u8, video_id: []cons
         const root = parsed.value.object;
         const status = root.get("status") orelse return error.InvalidResponse;
 
+        // zig-lens-ignore: EQL-FOR-SECRETS Sora API render-status enum ("queued"|"in_progress"|"completed"|"failed") — public state string, not a credential
         if (std.mem.eql(u8, status.string, "completed")) {
             std.debug.print("\n  Render complete! Downloading video...\n", .{});
             return downloadVideo(allocator, api_key, video_id);
+            // zig-lens-ignore: EQL-FOR-SECRETS same status enum compare as above; rule fires because enclosing fn carries api_key param, not because of this string
         } else if (std.mem.eql(u8, status.string, "failed")) {
             const err_obj = root.get("error");
             if (err_obj) |e| {

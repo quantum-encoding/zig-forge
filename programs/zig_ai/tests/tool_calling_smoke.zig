@@ -119,6 +119,7 @@ fn testProviderToolCalling(
     // Verify: tool name matches
     if (response.message.tool_calls) |tc| {
         for (tc) |call| {
+            // zig-lens-ignore: EQL-FOR-SECRETS test fixture asserting tool name matches the expected literal "get_current_time", not a credential compare
             if (!std.mem.eql(u8, call.name, "get_current_time")) {
                 all_good = false;
             }

@@ -526,6 +526,7 @@ pub const StockTransferRenderer = struct {
         // Fill in signatures if provided
         if (self.data.signatures.len > 0) {
             for (self.data.signatures) |sig| {
+                // zig-lens-ignore: EQL-FOR-SECRETS party-role label ("Transferor"/"Transferee") — document layout dispatch, fn `drawSignatureSection` triggers because of the camelCase split
                 const sig_x = if (std.mem.eql(u8, sig.party, "Transferor")) left_x else mid_x;
                 const sig_y = self.page_height - self.margin - 500;
 

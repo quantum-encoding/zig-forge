@@ -197,9 +197,11 @@ pub fn pollOnce(
     // Check status field
     if (root.object.get("status")) |status_val| {
         if (status_val == .string) {
+            // zig-lens-ignore: EQL-FOR-SECRETS Gemini deep-research interaction state ("PROCESSING") — API state enum, not a credential
             if (std.mem.eql(u8, status_val.string, "PROCESSING")) {
                 return PollResult{ .processing = {} };
             }
+            // zig-lens-ignore: EQL-FOR-SECRETS Gemini deep-research interaction state ("FAILED") — API state enum, not a credential
             if (std.mem.eql(u8, status_val.string, "FAILED")) {
                 return PollResult{ .failed = {} };
             }

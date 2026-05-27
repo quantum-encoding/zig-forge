@@ -143,10 +143,12 @@ fn callGenai(allocator: std.mem.Allocator, api_key: []const u8, req: GenaiReques
     var first = true;
     for (req.messages) |msg| {
         const content = msg.content orelse continue;
+        // zig-lens-ignore: EQL-FOR-SECRETS chat message role enum ("system"/"user"/"assistant") — API metadata literal, not a credential
         if (std.mem.eql(u8, msg.role, "system")) continue;
         if (!first) try payload.append(allocator, ',');
         first = false;
 
+        // zig-lens-ignore: EQL-FOR-SECRETS chat message role enum dispatch ("assistant" → "model") — API metadata literal, not a credential
         const role = if (std.mem.eql(u8, msg.role, "assistant")) "model" else "user";
         const escaped = try chat_mod.jsonEscape(allocator, content);
         defer allocator.free(escaped);

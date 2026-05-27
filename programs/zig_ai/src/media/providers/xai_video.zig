@@ -250,6 +250,7 @@ fn pollForCompletion(allocator: Allocator, api_key: []const u8, request_id: []co
         // Check explicit status field (pending or failed)
         if (root.get("status")) |status| {
             if (status == .string) {
+                // zig-lens-ignore: EQL-FOR-SECRETS xAI render-status enum ("pending"|"failed"|"error") — public state string, fn just happens to carry api_key
                 if (std.mem.eql(u8, status.string, "failed") or std.mem.eql(u8, status.string, "error")) {
                     const err_msg = root.get("error");
                     if (err_msg) |e| {

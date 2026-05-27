@@ -685,6 +685,7 @@ pub const ShareCertificateRenderer = struct {
                         if (decoded) |img_data| {
                             defer self.allocator.free(img_data);
 
+                            // zig-lens-ignore: EQL-FOR-SECRETS MIME-type dispatch ("image/png" vs jpeg) — public format label; enclosing fn `drawSignatures` triggers the rule because the camelCase split includes `Signatures`
                             const is_png = std.mem.eql(u8, b64.mime_type, "image/png");
                             const img = document.Image{
                                 .width = @intFromFloat(sig_w),

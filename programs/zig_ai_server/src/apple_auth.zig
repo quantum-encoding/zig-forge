@@ -140,6 +140,7 @@ fn handleVerifiedClaims(
     // Validate issuer (C1). VerifiedClaims.iss is now mandatory at
     // parse time, so this is a value check, not a presence check.
     // Apple-signed tokens always carry "https://appleid.apple.com".
+    // zig-lens-ignore: EQL-FOR-SECRETS JWT issuer is a published public URL ("https://appleid.apple.com"), not secret material
     if (!std.mem.eql(u8, claims.iss, APPLE_ISSUER)) {
         return .{ .status = .unauthorized, .body =
             \\{"error":"authentication_error","message":"Token issuer is not Apple"}
@@ -151,6 +152,7 @@ fn handleVerifiedClaims(
     // longer exists — a missing aud is rejected upstream in verifyJwt.
     var aud_ok = false;
     for (ALLOWED_AUDIENCES) |allowed| {
+        // zig-lens-ignore: EQL-FOR-SECRETS JWT audience is a public app bundle ID checked against an allowlist; both sides are public identifiers, not secrets
         if (std.mem.eql(u8, claims.aud, allowed)) {
             aud_ok = true;
             break;

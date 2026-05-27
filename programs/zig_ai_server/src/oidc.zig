@@ -358,14 +358,24 @@ fn parseJwks(allocator: std.mem.Allocator, body: []const u8, now_epoch: i64) !Jw
 
 /// Verify Apple-style nonce: SHA-256(rawNonce) hex == JWT nonce claim.
 /// Returns true if valid or if nonce verification is not required (empty raw nonce).
+///
+/// Audit (EQL-FOR-SECRETS): the comparison runs on a 64-char hex
+/// SHA-256 of the original nonce — material that an attacker
+/// controlling the JWT claim would love to brute-force one byte at
+/// a time via a timing-side-channel on `std.mem.eql`. The fix is
+/// `std.crypto.timing_safe.eql` on a fixed-size array. We:
+///   1. Length-check the claim is exactly 64 hex chars (SHA-256 hex
+///      output width). A wrong-length claim is an immediate reject.
+///   2. Coerce the claim slice to a `*const [64]u8` for the
+///      constant-time compare.
 pub fn verifyNonce(raw_nonce: ?[]const u8, token_nonce: ?[]const u8) bool {
     const nonce = raw_nonce orelse return true; // no nonce provided — skip (backward compat)
     if (nonce.len == 0) return true;
 
     const claim = token_nonce orelse return false; // nonce required but not in token
-    if (claim.len == 0) return false;
+    if (claim.len != 64) return false; // SHA-256 hex is exactly 64 chars; reject anything else.
 
-    // SHA-256(rawNonce) → hex → compare with token claim
+    // SHA-256(rawNonce) → hex → compare with token claim in constant time.
     var hash: [Sha256.digest_length]u8 = undefined;
     Sha256.hash(nonce, &hash, .{});
 
@@ -376,7 +386,8 @@ pub fn verifyNonce(raw_nonce: ?[]const u8, token_nonce: ?[]const u8) bool {
         expected[i * 2 + 1] = hex_chars[b & 0x0f];
     }
 
-    return std.mem.eql(u8, claim, &expected);
+    const claim_arr: *const [64]u8 = claim[0..64];
+    return std.crypto.timing_safe.eql([64]u8, expected, claim_arr.*);
 }
 
 // ── Time ───────────────────────────────────────────────────────
