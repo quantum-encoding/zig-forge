@@ -323,70 +323,48 @@ fn buildOpenAIBody(
     count: u32,
     is_dalle: bool,
 ) ![]u8 {
-    // Build incrementally with appendSlice + allocPrint — matches the
-    // models.zig idiom for this codebase. ArrayListUnmanaged in this Zig
-    // version doesn't expose a writer helper.
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer buf.deinit(allocator);
-
-    try buf.append(allocator, '{');
-    try buf.appendSlice(allocator, "\"model\":\"");
-    try buf.appendSlice(allocator, req.model);
-    try buf.append(allocator, '"');
-
-    try buf.appendSlice(allocator, ",\"prompt\":\"");
-    const escaped = try jsonEscape(allocator, req.prompt);
-    defer allocator.free(escaped);
-    try buf.appendSlice(allocator, escaped);
-    try buf.append(allocator, '"');
-
+    // Audit (JSON-IN-FMT): every field used to be interpolated via
+    // `std.fmt.allocPrint` into a JSON-shaped format string —
+    // `,\"size\":\"{s}\"` etc. The model field, prompt, size,
+    // quality, style, and output_format are all CALLER-CONTROLLED;
+    // a single unescaped `"` in any of them would have closed the
+    // string mid-field and let the rest of the value land as
+    // sibling JSON, which OpenAI would then have honoured as part
+    // of the request body. This is the same C5-class injection
+    // Batch 13 closed elsewhere in zig_ai_server — images.zig was
+    // the blind spot.
+    //
+    // The whole-payload path now goes through
+    // `std.json.Stringify.valueAlloc` on an anonymous struct.
+    // String fields are escaped by the standard library, optional
+    // fields with `null` are omitted via
+    // `emit_null_optional_fields = false`, and there is no
+    // hand-rolled concatenation in this function.
     if (is_dalle) {
-        // DALL-E 3: API enforces n=1, response_format required to get b64.
-        try buf.appendSlice(allocator, ",\"n\":1,\"response_format\":\"b64_json\"");
-        if (req.size) |s| {
-            const part = try std.fmt.allocPrint(allocator, ",\"size\":\"{s}\"", .{s});
-            defer allocator.free(part);
-            try buf.appendSlice(allocator, part);
-        } else {
-            try buf.appendSlice(allocator, ",\"size\":\"1024x1024\"");
-        }
-        if (req.quality) |q| {
-            const part = try std.fmt.allocPrint(allocator, ",\"quality\":\"{s}\"", .{q});
-            defer allocator.free(part);
-            try buf.appendSlice(allocator, part);
-        }
-        if (req.style) |st| {
-            const part = try std.fmt.allocPrint(allocator, ",\"style\":\"{s}\"", .{st});
-            defer allocator.free(part);
-            try buf.appendSlice(allocator, part);
-        }
-    } else {
-        // gpt-image-* family. Output is base64 by default. Forward the
-        // caller's size/quality/output_format if set; otherwise let the
-        // API pick "auto" for everything.
-        const n_part = try std.fmt.allocPrint(allocator, ",\"n\":{d}", .{count});
-        defer allocator.free(n_part);
-        try buf.appendSlice(allocator, n_part);
-
-        if (req.size) |s| {
-            const part = try std.fmt.allocPrint(allocator, ",\"size\":\"{s}\"", .{s});
-            defer allocator.free(part);
-            try buf.appendSlice(allocator, part);
-        }
-        if (req.quality) |q| {
-            const part = try std.fmt.allocPrint(allocator, ",\"quality\":\"{s}\"", .{q});
-            defer allocator.free(part);
-            try buf.appendSlice(allocator, part);
-        }
-        if (req.output_format) |of| {
-            const part = try std.fmt.allocPrint(allocator, ",\"output_format\":\"{s}\"", .{of});
-            defer allocator.free(part);
-            try buf.appendSlice(allocator, part);
-        }
+        // DALL-E 3 wire contract: n=1, response_format required
+        // for b64 output, size defaults to 1024x1024.
+        return std.json.Stringify.valueAlloc(allocator, .{
+            .model = req.model,
+            .prompt = req.prompt,
+            .n = @as(u32, 1),
+            .response_format = "b64_json",
+            .size = req.size orelse "1024x1024",
+            .quality = req.quality,
+            .style = req.style,
+        }, .{ .emit_null_optional_fields = false });
     }
 
-    try buf.append(allocator, '}');
-    return buf.toOwnedSlice(allocator);
+    // gpt-image-* family. Output is base64 by default; forward
+    // size/quality/output_format only when the caller set them so
+    // OpenAI's "auto" defaults apply for the rest.
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .model = req.model,
+        .prompt = req.prompt,
+        .n = count,
+        .size = req.size,
+        .quality = req.quality,
+        .output_format = req.output_format,
+    }, .{ .emit_null_optional_fields = false });
 }
 
 const DecodedImageResponse = struct {
@@ -452,51 +430,26 @@ fn buildResponseJson(
     cost_ticks: i64,
     balance_after: i64,
 ) ![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer buf.deinit(allocator);
-
-    try buf.appendSlice(allocator, "{\"images\":[");
-    for (images, 0..) |img, i| {
-        if (i > 0) try buf.append(allocator, ',');
-        const entry = try std.fmt.allocPrint(allocator,
-            "{{\"base64\":\"{s}\",\"format\":\"{s}\",\"index\":{d}}}",
-            .{ img.base64, img.format, img.index });
-        defer allocator.free(entry);
-        try buf.appendSlice(allocator, entry);
-    }
-    try buf.appendSlice(allocator, "]");
-
-    const tail = try std.fmt.allocPrint(allocator,
-        ",\"model\":\"{s}\",\"usage\":{{\"input_tokens\":{d},\"output_tokens\":{d}}},\"cost_ticks\":{d},\"balance_after\":{d}}}",
-        .{ model, input_tokens, output_tokens, cost_ticks, balance_after });
-    defer allocator.free(tail);
-    try buf.appendSlice(allocator, tail);
-    return buf.toOwnedSlice(allocator);
-}
-
-fn jsonEscape(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer buf.deinit(allocator);
-    for (input) |c| {
-        switch (c) {
-            '"' => try buf.appendSlice(allocator, "\\\""),
-            '\\' => try buf.appendSlice(allocator, "\\\\"),
-            '\n' => try buf.appendSlice(allocator, "\\n"),
-            '\r' => try buf.appendSlice(allocator, "\\r"),
-            '\t' => try buf.appendSlice(allocator, "\\t"),
-            else => {
-                if (c < 0x20) {
-                    const hex = "0123456789abcdef";
-                    try buf.appendSlice(allocator, "\\u00");
-                    try buf.append(allocator, hex[c >> 4]);
-                    try buf.append(allocator, hex[c & 0x0f]);
-                } else {
-                    try buf.append(allocator, c);
-                }
-            },
-        }
-    }
-    return buf.toOwnedSlice(allocator);
+    // Audit (JSON-IN-FMT): the per-image entry and the tail were
+    // hand-formatted with `std.fmt.allocPrint` into
+    // `"{{\"base64\":\"{s}\",\"format\":\"{s}\",\"index\":{d}}}"` and
+    // `",\"model\":\"{s}\",\"usage\":{...},\"cost_ticks\":{d},..."`.
+    // The model name is caller-controlled; image base64 is provider-
+    // controlled. Hand-formatting either was the same C5 class.
+    // Routing the whole shape through `std.json.Stringify.valueAlloc`
+    // on a nested anonymous struct gets us escape-correctness for
+    // every string field for free, and the ImageResult field names
+    // already match the wire format.
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .images = images,
+        .model = model,
+        .usage = .{
+            .input_tokens = input_tokens,
+            .output_tokens = output_tokens,
+        },
+        .cost_ticks = cost_ticks,
+        .balance_after = balance_after,
+    }, .{});
 }
 
 fn errResp(status: http.Status, code: []const u8, message: []const u8) Response {
