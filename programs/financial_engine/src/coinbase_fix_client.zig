@@ -17,6 +17,7 @@ const posix = std.posix;
 const linux = std.os.linux;
 const builtin = @import("builtin");
 const fix = @import("fix_protocol_v5.zig");
+const Decimal = @import("decimal.zig").Decimal;
 
 // Use real TLS on desktop, stub on Android (unless mbedTLS is cross-compiled)
 const TlsClient = if (builtin.abi == .android)
@@ -110,7 +111,10 @@ pub const ConnectionError = error{
 // Execution Report
 // =============================================================================
 
-/// Parsed execution report from Coinbase
+/// Parsed execution report from Coinbase. Quantity / price fields are
+/// Decimal because downstream code does arithmetic on them (fill
+/// accumulation, P&L). Parsing straight from the FIX string into
+/// Decimal closes the f64-round-trip window (Batch 32 FLOAT-OBSESSION).
 pub const ExecutionReport = struct {
     order_id: []const u8,
     cl_ord_id: []const u8,
@@ -119,11 +123,11 @@ pub const ExecutionReport = struct {
     ord_status: fix.OrdStatus,
     symbol: []const u8,
     side: fix.Side,
-    leaves_qty: f64,
-    cum_qty: f64,
-    avg_px: f64,
-    last_qty: ?f64,
-    last_px: ?f64,
+    leaves_qty: Decimal,
+    cum_qty: Decimal,
+    avg_px: Decimal,
+    last_qty: ?Decimal,
+    last_px: ?Decimal,
     text: ?[]const u8,
 
     pub fn fromMessage(allocator: std.mem.Allocator, msg: fix.ParsedMessage) !ExecutionReport {
@@ -149,11 +153,11 @@ pub const ExecutionReport = struct {
             .ord_status = ord_status,
             .symbol = try allocator.dupe(u8, symbol),
             .side = side,
-            .leaves_qty = msg.getFloatField(fix.Tag.LeavesQty) orelse 0,
-            .cum_qty = msg.getFloatField(fix.Tag.CumQty) orelse 0,
-            .avg_px = msg.getFloatField(fix.Tag.AvgPx) orelse 0,
-            .last_qty = msg.getFloatField(fix.Tag.LastQty),
-            .last_px = msg.getFloatField(fix.Tag.LastPx),
+            .leaves_qty = msg.getDecimalField(fix.Tag.LeavesQty) orelse Decimal.zero(),
+            .cum_qty = msg.getDecimalField(fix.Tag.CumQty) orelse Decimal.zero(),
+            .avg_px = msg.getDecimalField(fix.Tag.AvgPx) orelse Decimal.zero(),
+            .last_qty = msg.getDecimalField(fix.Tag.LastQty),
+            .last_px = msg.getDecimalField(fix.Tag.LastPx),
             .text = if (msg.getField(fix.Tag.Text)) |t| try allocator.dupe(u8, t) else null,
         };
     }
@@ -426,15 +430,16 @@ pub const CoinbaseFIXClient = struct {
         std.debug.print("FIX Client: Disconnected\n", .{});
     }
 
-    /// Send a new order
+    /// Send a new order. Quantity and limit price are Decimal — see
+    /// `fix_protocol_v5.addDecimalField` for the integer-wire rationale.
     pub fn sendOrder(
         self: *Self,
         cl_ord_id: []const u8,
         symbol: []const u8,
         side: fix.Side,
         order_type: fix.OrdType,
-        quantity: f64,
-        price: ?f64,
+        quantity: Decimal,
+        price: ?Decimal,
         time_in_force: fix.TimeInForce,
     ) !void {
         if (self.state != .LoggedIn) {

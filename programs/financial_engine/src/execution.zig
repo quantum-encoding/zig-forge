@@ -25,6 +25,16 @@ fn getCurrentMillis() u64 {
     return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(@divTrunc(ts.nsec, 1_000_000)));
 }
 
+/// Render a Decimal as ASCII into `buf` using Decimal.format. Returns the
+/// written slice. Skips the f64 round-trip the previous code did for
+/// debug-log and JSON serialization — see ZmqExecutor.sendOrderImpl for
+/// the wire-precision rationale (Batch 32 FLOAT-OBSESSION).
+fn formatDecimal(buf: []u8, d: Decimal) []const u8 {
+    var w = std.Io.Writer.fixed(buf);
+    d.format(&w) catch return buf[0..0];
+    return w.buffered();
+}
+
 /// Order structure for execution
 pub const Order = struct {
     symbol: []const u8,
@@ -168,12 +178,14 @@ pub const PaperTradingExecutor = struct {
         const type_str = if (order.order_type == .market) "MARKET" else "LIMIT";
 
         if (self.verbose) {
-            std.debug.print("[PAPER] {s} {s} {s} qty={d} @ {d}\n", .{
+            var qty_buf: [32]u8 = undefined;
+            var price_buf: [32]u8 = undefined;
+            std.debug.print("[PAPER] {s} {s} {s} qty={s} @ {s}\n", .{
                 side_str,
                 type_str,
                 order.symbol,
-                @as(f64, @floatFromInt(order.quantity.value)) / 1_000_000_000.0,
-                @as(f64, @floatFromInt(order.price.value)) / 1_000_000_000.0,
+                formatDecimal(&qty_buf, order.quantity),
+                formatDecimal(&price_buf, order.price),
             });
         }
 
@@ -325,17 +337,27 @@ pub const ZmqExecutor = struct {
         var buffer: [512]u8 = undefined;
         const side_str = if (order.side == .buy) "BUY" else "SELL";
         const type_str = if (order.order_type == .market) "MARKET" else "LIMIT";
-        const qty_f64 = @as(f64, @floatFromInt(order.quantity.value)) / 1_000_000_000.0;
-        const price_f64 = @as(f64, @floatFromInt(order.price.value)) / 1_000_000_000.0;
+
+        // Render Decimal directly to ASCII via Decimal.format — no f64
+        // round-trip. Going through f64 reintroduced the 0.1-is-not-
+        // representable bug at the wire boundary: a Decimal carrying
+        // 0.1 exactly would be serialised as 0.100000000 by Decimal.format
+        // but as 0.099999999 by `f64 → {d}` rounding, and the downstream
+        // executor would parse the latter as one tick below the intended
+        // limit price. Batch 32 FLOAT-OBSESSION.
+        var qty_buf: [32]u8 = undefined;
+        const qty_str = formatDecimal(&qty_buf, order.quantity);
+        var price_buf: [32]u8 = undefined;
+        const price_str = formatDecimal(&price_buf, order.price);
 
         const msg = std.fmt.bufPrint(&buffer,
-            \\{{"action":"{s}","symbol":"{s}","quantity":{d},"type":"{s}","price":{d},"timestamp":{d},"signal_id":"hft_{d}"}}
+            \\{{"action":"{s}","symbol":"{s}","quantity":{s},"type":"{s}","price":{s},"timestamp":{d},"signal_id":"hft_{d}"}}
         , .{
             side_str,
             order.symbol,
-            qty_f64,
+            qty_str,
             type_str,
-            price_f64,
+            price_str,
             order.timestamp,
             order.signal_id,
         }) catch return TradeExecutor.ExecutorError.InvalidOrder;
@@ -348,8 +370,8 @@ pub const ZmqExecutor = struct {
 
         self.orders_sent += 1;
 
-        std.debug.print("[ZMQ] {s} {s} {s} qty={d:.2} @ {d:.2}\n", .{
-            side_str, type_str, order.symbol, qty_f64, price_f64,
+        std.debug.print("[ZMQ] {s} {s} {s} qty={s} @ {s}\n", .{
+            side_str, type_str, order.symbol, qty_str, price_str,
         });
 
         return ExecutionResult{

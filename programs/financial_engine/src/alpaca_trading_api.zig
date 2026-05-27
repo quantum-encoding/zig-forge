@@ -3,6 +3,19 @@ const Decimal = @import("decimal.zig").Decimal;
 const HttpClient = @import("http_client.zig").HttpClient;
 const http = std.http;
 
+/// Render Decimal as `X.YY` for Alpaca's order JSON. Integer math —
+/// see OrderRequest.limit_price's doc comment for the precision
+/// rationale (Batch 32 FLOAT-OBSESSION).
+fn formatDecimal2dp(buf: []u8, value: Decimal) []const u8 {
+    const internal_scale: i128 = 1_000_000_000;
+    const integer_part = @divTrunc(value.value, internal_scale);
+    const raw_frac = @mod(value.value, internal_scale);
+    const abs_frac = if (raw_frac < 0) -raw_frac else raw_frac;
+    // 9 stored digits → 2 displayed digits: divide by 10^7.
+    const frac_2dp = @divTrunc(abs_frac, 10_000_000);
+    return std.fmt.bufPrint(buf, "{d}.{d:0>2}", .{ integer_part, frac_2dp }) catch buf[0..0];
+}
+
 /// Alpaca Trading API for real order placement
 pub const AlpacaTradingAPI = struct {
     const Self = @This();
@@ -78,8 +91,13 @@ pub const AlpacaTradingAPI = struct {
         side: OrderSide,
         type: OrderType,
         time_in_force: TimeInForce = .day,
-        limit_price: ?f64 = null,
-        stop_price: ?f64 = null,
+        /// Limit price as Decimal. Serialised with 2 fractional digits
+        /// via integer math, never an f64 `{d:.2}` round-trip. The
+        /// previous code's `0.10` could ship as `0.09` to the Alpaca
+        /// API on certain CPU rounding modes — Batch 32 FLOAT-OBSESSION
+        /// closes that window.
+        limit_price: ?Decimal = null,
+        stop_price: ?Decimal = null,
         client_order_id: ?[]const u8 = null,
         extended_hours: bool = false,
     };
@@ -235,13 +253,13 @@ pub const AlpacaTradingAPI = struct {
 
         if (order.limit_price) |price| {
             var px_buf: [32]u8 = undefined;
-            const px_str = try std.fmt.bufPrint(&px_buf, "{d:.2}", .{price});
+            const px_str = formatDecimal2dp(&px_buf, price);
             try jw.objectField("limit_price");
             try jw.write(px_str);
         }
         if (order.stop_price) |price| {
             var px_buf: [32]u8 = undefined;
-            const px_str = try std.fmt.bufPrint(&px_buf, "{d:.2}", .{price});
+            const px_str = formatDecimal2dp(&px_buf, price);
             try jw.objectField("stop_price");
             try jw.write(px_str);
         }
@@ -573,7 +591,7 @@ pub fn main() !void {
         .qty = 10,
         .side = .buy,
         .type = .limit,
-        .limit_price = 150.00,
+        .limit_price = Decimal.fromInt(150),
         .time_in_force = .day,
     };
     

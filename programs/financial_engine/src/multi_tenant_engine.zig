@@ -394,14 +394,19 @@ pub const TenantEngine = struct {
         );
         defer self.allocator.free(unique_order_id);
         
-        // Create Alpaca order request
+        // Convert internal f64 order.price to Decimal at the API boundary
+        // — see executeOrder above for the rationale (Batch 32
+        // FLOAT-OBSESSION). Single audited f64 → Decimal site rather than
+        // sprinkling the conversion through Alpaca request construction.
+        const DecimalT2 = @import("decimal.zig").Decimal;
+        const limit_decimal: ?DecimalT2 = if (order.price) |p| DecimalT2.fromFloat(p) else null;
         const order_request = api.AlpacaTradingAPI.OrderRequest{
             .symbol = symbol_str,
             .qty = order.quantity,
             .side = if (order.side == .buy) .buy else .sell,
             .type = if (order.order_type == .market) .market else .limit,
             .time_in_force = .day,
-            .limit_price = order.price,
+            .limit_price = limit_decimal,
             .client_order_id = unique_order_id,
             .extended_hours = false,
         };

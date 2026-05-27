@@ -165,17 +165,19 @@ export fn coinbase_fix_send_order(
     const executor = handle orelse return .Unknown;
     const symbol_slice = std.mem.span(symbol);
 
-    // Convert fixed-point to Decimal (Decimal uses internal scale of 10^9)
-    const qty_float = @as(f64, @floatFromInt(quantity_value)) / std.math.pow(f64, 10, @as(f64, @floatFromInt(quantity_scale)));
-    const price_float = @as(f64, @floatFromInt(price_value)) / std.math.pow(f64, 10, @as(f64, @floatFromInt(price_scale)));
-
+    // Direct fixed-point → Decimal (Batch 32 FLOAT-OBSESSION). The
+    // previous path went `i64 → f64 → Decimal` and lost the exact
+    // representation of any price not representable in f64 (e.g. 0.1).
+    // `fromFixedPoint` widens i64 → i128 and rescales by integer math,
+    // so a `(12345, 8)` input gives bit-identical Decimal regardless of
+    // CPU rounding mode.
     const order = execution.Order{
         .signal_id = signal_id,
         .symbol = symbol_slice,
         .side = if (side == .Buy) .buy else .sell,
         .order_type = if (order_type == .Market) .market else .limit,
-        .quantity = Decimal.fromFloat(qty_float),
-        .price = Decimal.fromFloat(price_float),
+        .quantity = Decimal.fromFixedPoint(quantity_value, quantity_scale),
+        .price = Decimal.fromFixedPoint(price_value, price_scale),
         .timestamp = getCurrentTimestamp(),
     };
 
@@ -279,16 +281,14 @@ export fn coinbase_fix_send_batch(
         const batch_order = orders[i];
         const symbol_slice = std.mem.span(batch_order.symbol);
 
-        const qty_float = @as(f64, @floatFromInt(batch_order.quantity_value)) / std.math.pow(f64, 10, @as(f64, @floatFromInt(batch_order.quantity_scale)));
-        const price_float = @as(f64, @floatFromInt(batch_order.price_value)) / std.math.pow(f64, 10, @as(f64, @floatFromInt(batch_order.price_scale)));
-
+        // Direct fixed-point → Decimal — see send_order above for rationale.
         const order = execution.Order{
             .signal_id = batch_order.signal_id,
             .symbol = symbol_slice,
             .side = if (batch_order.side == .Buy) .buy else .sell,
             .order_type = if (batch_order.order_type == .Market) .market else .limit,
-            .quantity = Decimal.fromFloat(qty_float),
-            .price = Decimal.fromFloat(price_float),
+            .quantity = Decimal.fromFixedPoint(batch_order.quantity_value, batch_order.quantity_scale),
+            .price = Decimal.fromFixedPoint(batch_order.price_value, batch_order.price_scale),
             .timestamp = getCurrentTimestamp(),
         };
 

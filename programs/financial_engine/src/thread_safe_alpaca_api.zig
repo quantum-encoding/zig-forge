@@ -2,7 +2,20 @@
 // Each instance gets its own HTTP client - safe for concurrent use
 
 const std = @import("std");
+const Decimal = @import("decimal.zig").Decimal;
 const ThreadSafeHttpClient = @import("thread_safe_http_client.zig").ThreadSafeHttpClient;
+
+/// Render Decimal as `X.YY` for Alpaca's order JSON via integer math
+/// — mirrors `alpaca_trading_api.formatDecimal2dp`. Batch 32
+/// FLOAT-OBSESSION.
+fn formatDecimal2dp(buf: []u8, value: Decimal) []const u8 {
+    const internal_scale: i128 = 1_000_000_000;
+    const integer_part = @divTrunc(value.value, internal_scale);
+    const raw_frac = @mod(value.value, internal_scale);
+    const abs_frac = if (raw_frac < 0) -raw_frac else raw_frac;
+    const frac_2dp = @divTrunc(abs_frac, 10_000_000);
+    return std.fmt.bufPrint(buf, "{d}.{d:0>2}", .{ integer_part, frac_2dp }) catch buf[0..0];
+}
 
 pub const ThreadSafeAlpacaAPI = struct {
     const Self = @This();
@@ -76,8 +89,11 @@ pub const ThreadSafeAlpacaAPI = struct {
         side: OrderSide,
         type: OrderType,
         time_in_force: TimeInForce = .day,
-        limit_price: ?f64 = null,
-        stop_price: ?f64 = null,
+        /// Limit / stop prices as Decimal — see alpaca_trading_api's
+        /// OrderRequest for the integer-wire rationale (Batch 32
+        /// FLOAT-OBSESSION).
+        limit_price: ?Decimal = null,
+        stop_price: ?Decimal = null,
         client_order_id: ?[]const u8 = null,
         extended_hours: bool = false,
     };
@@ -158,11 +174,13 @@ pub const ThreadSafeAlpacaAPI = struct {
         try jw.write(order.time_in_force.toString());
         if (order.limit_price) |price| {
             try jw.objectField("limit_price");
-            try jw.print("{d:.2}", .{price});
+            var px_buf: [32]u8 = undefined;
+            try jw.print("{s}", .{formatDecimal2dp(&px_buf, price)});
         }
         if (order.stop_price) |price| {
             try jw.objectField("stop_price");
-            try jw.print("{d:.2}", .{price});
+            var px_buf: [32]u8 = undefined;
+            try jw.print("{s}", .{formatDecimal2dp(&px_buf, price)});
         }
         if (order.client_order_id) |id| {
             try jw.objectField("client_order_id");

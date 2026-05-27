@@ -288,10 +288,14 @@ pub const AlpacaToQuantumBridge = struct {
     }
     
     fn executeOrder(self: *Self, order: *const Order) !void {
-        // Convert internal order to Alpaca order
+        // Convert internal order to Alpaca order.
+        // Internal `order.price` is u64 micro-USD (1e-6 scale); convert
+        // directly to Decimal via integer math — no f64 hop. Batch 32
+        // FLOAT-OBSESSION.
         const symbol = self.getSymbolById(order.symbol_id) orelse "SPY";
-        const price = @as(f64, @floatFromInt(order.price)) / 1_000_000.0;
-        
+        const DecimalT = @import("decimal.zig").Decimal;
+        const price = DecimalT.fromFixedPoint(@intCast(order.price), 6);
+
         // Create order request
         const order_request = api.AlpacaTradingAPI.OrderRequest{
             .symbol = symbol,

@@ -20,6 +20,29 @@ pub const Decimal = struct {
     pub fn fromFloat(f: f64) Self {
         return Self{ .value = @as(i128, @intFromFloat(f * @as(f64, @floatFromInt(scale_factor)))) };
     }
+
+    /// Create from a fixed-point pair (`value × 10^-scale`). The canonical
+    /// FFI boundary form — every Decimal-aware C client passes prices as
+    /// `(i64 value, u8 scale)` so the wire can carry an exact decimal
+    /// without going through an f64 round-trip. e.g. `(12345, 8)` ⇒
+    /// `0.00012345`. Internal scale is 10^9; we rescale by integer multiply
+    /// or @divTrunc so no rounding happens for representable inputs.
+    /// Mantissa overflow is impossible for `scale ≤ 9` (one ratio multiply
+    /// of an i64 widened to i128); `scale > 9` truncates excess precision
+    /// the same way std.fmt.parseFloat would past f64's mantissa.
+    pub fn fromFixedPoint(value: i64, scale: u8) Self {
+        const widened: i128 = @as(i128, value);
+        if (scale <= 9) {
+            var multiplier: i128 = 1;
+            var k: u8 = 0;
+            while (k < (9 - scale)) : (k += 1) multiplier *= 10;
+            return Self{ .value = widened * multiplier };
+        }
+        var divisor: i128 = 1;
+        var k: u8 = 0;
+        while (k < (scale - 9)) : (k += 1) divisor *= 10;
+        return Self{ .value = @divTrunc(widened, divisor) };
+    }
     
     /// Create from string representation
     pub fn fromString(str: []const u8) !Self {
@@ -195,6 +218,25 @@ test "Decimal from string" {
     try std.testing.expect(d1.toFloat() == 123.456);
     try std.testing.expect(d2.toFloat() == -99.99);
     try std.testing.expect(d3.toFloat() == 0.001);
+}
+
+test "Decimal fromFixedPoint" {
+    // scale = 8 (satoshi scale): 12_345 → 0.00012345
+    const d1 = Decimal.fromFixedPoint(12_345, 8);
+    try std.testing.expectEqual(@as(i128, 12_345 * 10), d1.value); // 9-8=1 multiplier
+
+    // scale = 9 (matches internal): 123_000_000 → 0.123000000
+    const d2 = Decimal.fromFixedPoint(123_000_000, 9);
+    try std.testing.expectEqual(@as(i128, 123_000_000), d2.value);
+
+    // scale = 2 (cents): 1_999 → 19.99
+    const d3 = Decimal.fromFixedPoint(1_999, 2);
+    try std.testing.expectEqual(@as(i128, 19_990_000_000), d3.value);
+
+    // scale = 12 (deeper than internal): excess precision truncates
+    // 1_000_000_000_000 at scale=12 ⇒ 1.0 ⇒ internal value 1_000_000_000
+    const d4 = Decimal.fromFixedPoint(1_000_000_000_000, 12);
+    try std.testing.expectEqual(@as(i128, 1_000_000_000), d4.value);
 }
 
 test "Decimal rounding" {

@@ -162,12 +162,11 @@ pub const CoinbaseExecutor = struct {
             .limit => .Limit,
         };
 
-        const quantity = order.quantity.toFloat();
-
-        const price: ?f64 = if (order.order_type == .limit)
-            order.price.toFloat()
-        else
-            null;
+        // Decimal end-to-end into the FIX layer — no toFloat() round-trip.
+        // The previous f64 hop dropped precision on tick-aligned prices
+        // (e.g. 0.1 not representable in f64), which the matcher would
+        // then see one tick off the trader's intent. Batch 32 FLOAT-OBSESSION.
+        const price_decimal: ?Decimal = if (order.order_type == .limit) order.price else null;
 
         // Send to Coinbase
         self.client.sendOrder(
@@ -175,8 +174,8 @@ pub const CoinbaseExecutor = struct {
             order.symbol,
             side,
             order_type,
-            quantity,
-            price,
+            order.quantity,
+            price_decimal,
             .GoodTillCancel,
         ) catch {
             self.orders_rejected += 1;

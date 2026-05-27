@@ -48,18 +48,21 @@ pub fn main() !void {
         const elapsed = std.time.timestamp() - start_time;
         if (elapsed >= runtime_seconds) break;
         
-        // Simulate receiving a market tick (in production, this would come from WebSocket)
-        const bid_price = 440.0 + @as(f64, @floatFromInt(@mod(elapsed, 10))) * 0.1;
-        const ask_price = bid_price + 0.05;
-        
-        std.log.info("📊 Market Tick: SPY bid=${d:.2} ask=${d:.2}", .{ bid_price, ask_price });
-        
-        // SPY Hunter logic: Buy when spread is tight
-        const spread = ask_price - bid_price;
-        if (spread <= 0.10) {
+        // Simulate receiving a market tick (in production, this would come from WebSocket).
+        // Prices in cents (1e-2 ticks): $440.00 base + 0..9 cents offset; ask is bid+5¢.
+        const bid_cents: i64 = 44_000 + @as(i64, @intCast(@mod(elapsed, 10))) * 10;
+        const ask_cents: i64 = bid_cents + 5;
+        const bid_price = Decimal.fromFixedPoint(bid_cents, 2);
+        const ask_price = Decimal.fromFixedPoint(ask_cents, 2);
+
+        std.log.info("📊 Market Tick: SPY bid={f} ask={f}", .{ bid_price, ask_price });
+
+        // SPY Hunter logic: Buy when spread is tight (≤ $0.10 = 10 cents).
+        const spread_cents: i64 = ask_cents - bid_cents;
+        if (spread_cents <= 10) {
             spy_hunts += 1;
-            std.log.info("🎯 SPY HUNT #{} TRIGGERED! Spread=${d:.3}", .{ spy_hunts, spread });
-            
+            std.log.info("🎯 SPY HUNT #{} TRIGGERED! Spread={d} cents", .{ spy_hunts, spread_cents });
+
             const order_request = api.AlpacaTradingAPI.OrderRequest{
                 .symbol = "SPY",
                 .qty = 1,
@@ -70,8 +73,8 @@ pub fn main() !void {
                 .client_order_id = null,
                 .extended_hours = false,
             };
-            
-            std.log.info("📤 Placing order: buy 1 SPY @ ${d:.2}", .{bid_price});
+
+            std.log.info("📤 Placing order: buy 1 SPY @ {f}", .{bid_price});
             
             const response = client.placeOrder(order_request) catch |err| {
                 std.log.err("❌ Order failed: {}", .{err});

@@ -25,6 +25,41 @@ fn getNanoTimestamp() i128 {
     return @as(i128, ts.sec) * 1_000_000_000 + ts.nsec;
 }
 
+/// Render `value` into `buf` as `X.YYY…Y` with exactly `precision`
+/// fractional digits via integer math. Decimal's internal scale is 10^9;
+/// for `precision <= 9` we truncate the trailing digits, for higher
+/// precision we pad with zeros after the 9 stored digits. Pure integer
+/// — no f64 round-trip — so a Decimal carrying 0.1 exactly serialises
+/// as "0.10" / "0.10000000" rather than "0.09999999" (Batch 32
+/// FLOAT-OBSESSION).
+fn formatDecimalPrecision(buf: []u8, value: Decimal, precision: u8) []const u8 {
+    const internal_scale: i128 = 1_000_000_000;
+    const integer_part = @divTrunc(value.value, internal_scale);
+    const raw_frac = @mod(value.value, internal_scale);
+    const abs_frac = if (raw_frac < 0) -raw_frac else raw_frac;
+
+    if (precision <= 9) {
+        var scale: i128 = 1;
+        var k: u8 = 0;
+        while (k < (9 - precision)) : (k += 1) scale *= 10;
+        const frac_part = @divTrunc(abs_frac, scale);
+        return switch (precision) {
+            0 => std.fmt.bufPrint(buf, "{d}", .{integer_part}),
+            1 => std.fmt.bufPrint(buf, "{d}.{d:0>1}", .{ integer_part, frac_part }),
+            2 => std.fmt.bufPrint(buf, "{d}.{d:0>2}", .{ integer_part, frac_part }),
+            3 => std.fmt.bufPrint(buf, "{d}.{d:0>3}", .{ integer_part, frac_part }),
+            4 => std.fmt.bufPrint(buf, "{d}.{d:0>4}", .{ integer_part, frac_part }),
+            5 => std.fmt.bufPrint(buf, "{d}.{d:0>5}", .{ integer_part, frac_part }),
+            6 => std.fmt.bufPrint(buf, "{d}.{d:0>6}", .{ integer_part, frac_part }),
+            7 => std.fmt.bufPrint(buf, "{d}.{d:0>7}", .{ integer_part, frac_part }),
+            8 => std.fmt.bufPrint(buf, "{d}.{d:0>8}", .{ integer_part, frac_part }),
+            9 => std.fmt.bufPrint(buf, "{d}.{d:0>9}", .{ integer_part, frac_part }),
+            else => unreachable,
+        } catch buf[0..0];
+    }
+    return std.fmt.bufPrint(buf, "{d}.{d:0>9}", .{ integer_part, abs_frac }) catch buf[0..0];
+}
+
 // =============================================================================
 // FIX 5.0 SP2 Constants
 // =============================================================================
@@ -373,16 +408,17 @@ pub const MessageBuilder = struct {
         try self.addField(tag, &char_slice);
     }
 
-    /// Add a field with tag and decimal value (formatted)
-    pub fn addDecimalField(self: *Self, tag: u16, value: f64, precision: u8) !void {
+    /// Add a field with tag and Decimal value, formatted with exactly
+    /// `precision` fractional digits. Pure integer math — never goes
+    /// through f64 — so the FIX message carries a bit-stable wire
+    /// representation that Coinbase's matching engine sees identically
+    /// across rebuilds. Reading 0.1 from JSON and shipping `0.099999999`
+    /// over FIX was the historical bug shape (the matcher then placed
+    /// the order one tick below the trader's intended limit, opening an
+    /// arbitrage window). Batch 32 FLOAT-OBSESSION.
+    pub fn addDecimalField(self: *Self, tag: u16, value: Decimal, precision: u8) !void {
         var buf: [64]u8 = undefined;
-        const val_str = switch (precision) {
-            2 => try std.fmt.bufPrint(&buf, "{d:.2}", .{value}),
-            4 => try std.fmt.bufPrint(&buf, "{d:.4}", .{value}),
-            6 => try std.fmt.bufPrint(&buf, "{d:.6}", .{value}),
-            8 => try std.fmt.bufPrint(&buf, "{d:.8}", .{value}),
-            else => try std.fmt.bufPrint(&buf, "{d}", .{value}),
-        };
+        const val_str = formatDecimalPrecision(&buf, value, precision);
         try self.addField(tag, val_str);
     }
 
@@ -505,6 +541,16 @@ pub const ParsedMessage = struct {
     pub fn getFloatField(self: ParsedMessage, tag: u16) ?f64 {
         const value = self.getField(tag) orelse return null;
         return std.fmt.parseFloat(f64, value) catch null;
+    }
+
+    /// Parse a FIX decimal field directly into a Decimal — the safe path
+    /// for any quantity/price field where downstream code does
+    /// arithmetic (risk checks, fill accumulation, P&L). `getFloatField`
+    /// remains for callers that just need a display value. Batch 32
+    /// FLOAT-OBSESSION.
+    pub fn getDecimalField(self: ParsedMessage, tag: u16) ?Decimal {
+        const value = self.getField(tag) orelse return null;
+        return Decimal.fromString(value) catch null;
     }
 };
 
@@ -697,15 +743,16 @@ pub const CoinbaseSession = struct {
         return msg;
     }
 
-    /// Create a NewOrderSingle message
+    /// Create a NewOrderSingle message. Quantity and limit price are
+    /// Decimal — see `addDecimalField` for why the f64 path is closed.
     pub fn createNewOrder(
         self: *Self,
         cl_ord_id: []const u8,  // Must be UUIDv4
         symbol: []const u8,     // e.g., "BTC-USD"
         side: Side,
         order_type: OrdType,
-        quantity: f64,
-        price: ?f64,
+        quantity: Decimal,
+        price: ?Decimal,
         time_in_force: TimeInForce,
     ) ![]u8 {
         var builder = MessageBuilder.init(self.allocator);
