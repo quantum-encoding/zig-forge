@@ -123,6 +123,11 @@ pub const FileReport = struct {
     imports: std.ArrayListUnmanaged(ImportInfo),
     unsafe_ops: std.ArrayListUnmanaged(UnsafeOp),
     parse_error: bool,
+    /// True if the structural walk hit `parser.max_ast_depth` and
+    /// truncated the remaining nested declarations. Defense against
+    /// stack-overflow on adversarial inputs like deeply-nested
+    /// `const a = struct { const b = struct { … } }` chains.
+    truncated_depth: bool,
 
     pub fn init() FileReport {
         return .{
@@ -142,6 +147,7 @@ pub const FileReport = struct {
             .imports = .empty,
             .unsafe_ops = .empty,
             .parse_error = false,
+            .truncated_depth = false,
         };
     }
 

@@ -4,9 +4,16 @@ const models = @import("../models.zig");
 const parser = @import("../parser.zig");
 
 /// Analyze a parsed AST and populate a FileReport with structural information.
+///
+/// Recursion safety: `analyzeDecl` and `analyzeContainer` form a
+/// mutually-recursive walk over nested `const X = struct { const Y =
+/// struct { … } }` chains. A hostile input could nest those arbitrarily
+/// deep and exhaust the worker's stack; the `depth` parameter caps the
+/// walk at `parser.max_ast_depth`. Real Zig source rarely exceeds depth
+/// 30, so the cap never fires in legitimate code.
 pub fn analyze(allocator: std.mem.Allocator, ast: *const Ast, report: *models.FileReport) !void {
     for (ast.rootDecls()) |decl_idx| {
-        try analyzeDecl(allocator, ast, decl_idx, report, false);
+        try analyzeDecl(allocator, ast, decl_idx, report, false, 0);
     }
 }
 
@@ -18,7 +25,16 @@ fn analyzeDecl(
     node_idx: Ast.Node.Index,
     report: *models.FileReport,
     parent_is_pub: bool,
+    depth: u16,
 ) AnalyzeError!void {
+    // Depth guard — see fn-level comment on `analyze`. We bail without
+    // raising an error so a pathological input only truncates the
+    // report instead of failing the whole scan.
+    if (depth >= parser.max_ast_depth) {
+        report.truncated_depth = true;
+        return;
+    }
+
     const idx = @intFromEnum(node_idx);
     if (idx == 0) return;
 
@@ -39,7 +55,7 @@ fn analyzeDecl(
             try analyzeFnProto(allocator, ast, node_idx, report);
         },
         .simple_var_decl => {
-            try analyzeVarDecl(allocator, ast, node_idx, report);
+            try analyzeVarDecl(allocator, ast, node_idx, report, depth);
         },
         .test_decl => {
             const token_tags = ast.tokens.items(.tag);
@@ -142,6 +158,7 @@ fn analyzeVarDecl(
     ast: *const Ast,
     node_idx: Ast.Node.Index,
     report: *models.FileReport,
+    depth: u16,
 ) AnalyzeError!void {
     const name = parser.getDeclName(ast, node_idx) orelse return;
     const idx = @intFromEnum(node_idx);
@@ -195,7 +212,7 @@ fn analyzeVarDecl(
         .container_decl_arg,
         .container_decl_arg_trailing,
         => {
-            try analyzeContainer(allocator, ast, init_node, name, line, is_pub, doc, report);
+            try analyzeContainer(allocator, ast, init_node, name, line, is_pub, doc, report, depth);
         },
         else => {
             // Regular constant
@@ -220,6 +237,7 @@ fn analyzeContainer(
     is_pub: bool,
     doc: []const u8,
     report: *models.FileReport,
+    depth: u16,
 ) AnalyzeError!void {
     var buf: [2]Ast.Node.Index = undefined;
     const container = ast.fullContainerDecl(&buf, container_node) orelse return;
@@ -302,7 +320,7 @@ fn analyzeContainer(
             .fn_decl,
             .simple_var_decl,
             .test_decl,
-            => try analyzeDecl(allocator, ast, member_idx, report, is_pub),
+            => try analyzeDecl(allocator, ast, member_idx, report, is_pub, depth + 1),
             else => {},
         }
     }
@@ -390,3 +408,11 @@ fn extractTypeName(ast: *const Ast, decl: Ast.full.VarDecl) ?[]const u8 {
     }
     return null;
 }
+
+// Recursion-safety regression tests for the depth-bomb defense
+// (parser.max_ast_depth + parser.maxBracketDepth) live in parser.zig.
+// Testing the in-analyzer guard directly requires feeding the
+// analyzer an AST that std.zig.Ast.parse refuses to build (it
+// crashes from its own internal recursion on the same input), so
+// the primary regression test is the lexical pre-check in
+// parseFile — the analyzer-side cap is belt-and-suspenders.

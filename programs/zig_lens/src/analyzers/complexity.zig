@@ -24,7 +24,7 @@ pub fn analyzeFunction(
     const body_node = data.node_and_node[1];
 
     var complexity: u32 = 1; // Base complexity
-    countComplexity(ast, body_node, &complexity);
+    countComplexity(ast, body_node, &complexity, 0);
 
     return .{
         .name = fn_info.name,
@@ -37,7 +37,19 @@ pub fn analyzeFunction(
     };
 }
 
-fn countComplexity(ast: *const Ast, node_idx: Ast.Node.Index, complexity: *u32) void {
+/// Walk a function body counting branching constructs.
+///
+/// Recursion safety: this function walks the AST recursively into
+/// every child node, including the generic fallback that follows
+/// arbitrary `data.node_and_node` children. A hostile source like
+/// `return ((((((((…))))))));` produces a tree that nests arbitrarily
+/// deep and would blow the worker's stack without a guard. We cap the
+/// walk at `parser.max_ast_depth`; the remaining subtree is treated
+/// as having no further branching constructs, which is the safe
+/// under-count direction for a complexity metric — preferable to
+/// crashing the scan.
+fn countComplexity(ast: *const Ast, node_idx: Ast.Node.Index, complexity: *u32, depth: u16) void {
+    if (depth >= parser.max_ast_depth) return;
     const idx = @intFromEnum(node_idx);
     if (idx == 0) return;
 
@@ -87,8 +99,8 @@ fn countComplexity(ast: *const Ast, node_idx: Ast.Node.Index, complexity: *u32) 
         .block_two_semicolon,
         => {
             const children = data.opt_node_and_opt_node;
-            if (children[0].unwrap()) |c| countComplexity(ast, c, complexity);
-            if (children[1].unwrap()) |c| countComplexity(ast, c, complexity);
+            if (children[0].unwrap()) |c| countComplexity(ast, c, complexity, depth + 1);
+            if (children[1].unwrap()) |c| countComplexity(ast, c, complexity, depth + 1);
         },
         .block,
         .block_semicolon,
@@ -96,7 +108,7 @@ fn countComplexity(ast: *const Ast, node_idx: Ast.Node.Index, complexity: *u32) 
             var buf: [2]Ast.Node.Index = undefined;
             if (ast.blockStatements(&buf, node_idx)) |stmts| {
                 for (stmts) |stmt| {
-                    countComplexity(ast, stmt, complexity);
+                    countComplexity(ast, stmt, complexity, depth + 1);
                 }
             }
         },
@@ -104,10 +116,10 @@ fn countComplexity(ast: *const Ast, node_idx: Ast.Node.Index, complexity: *u32) 
         .if_simple,
         => {
             if (ast.fullIf(node_idx)) |full_if| {
-                countComplexity(ast, full_if.ast.cond_expr, complexity);
-                countComplexity(ast, full_if.ast.then_expr, complexity);
+                countComplexity(ast, full_if.ast.cond_expr, complexity, depth + 1);
+                countComplexity(ast, full_if.ast.then_expr, complexity, depth + 1);
                 if (full_if.ast.else_expr.unwrap()) |else_expr| {
-                    countComplexity(ast, else_expr, complexity);
+                    countComplexity(ast, else_expr, complexity, depth + 1);
                 }
             }
         },
@@ -116,10 +128,10 @@ fn countComplexity(ast: *const Ast, node_idx: Ast.Node.Index, complexity: *u32) 
         .while_cont,
         => {
             if (ast.fullWhile(node_idx)) |full_while| {
-                countComplexity(ast, full_while.ast.cond_expr, complexity);
-                countComplexity(ast, full_while.ast.then_expr, complexity);
+                countComplexity(ast, full_while.ast.cond_expr, complexity, depth + 1);
+                countComplexity(ast, full_while.ast.then_expr, complexity, depth + 1);
                 if (full_while.ast.else_expr.unwrap()) |else_expr| {
-                    countComplexity(ast, else_expr, complexity);
+                    countComplexity(ast, else_expr, complexity, depth + 1);
                 }
             }
         },
@@ -128,9 +140,9 @@ fn countComplexity(ast: *const Ast, node_idx: Ast.Node.Index, complexity: *u32) 
         .for_range,
         => {
             if (ast.fullFor(node_idx)) |full_for| {
-                countComplexity(ast, full_for.ast.then_expr, complexity);
+                countComplexity(ast, full_for.ast.then_expr, complexity, depth + 1);
                 if (full_for.ast.else_expr.unwrap()) |else_expr| {
-                    countComplexity(ast, else_expr, complexity);
+                    countComplexity(ast, else_expr, complexity, depth + 1);
                 }
             }
         },
@@ -139,8 +151,8 @@ fn countComplexity(ast: *const Ast, node_idx: Ast.Node.Index, complexity: *u32) 
             const children = data.node_and_node;
             const c0 = @intFromEnum(children[0]);
             const c1 = @intFromEnum(children[1]);
-            if (c0 != 0 and c0 < tags.len) countComplexity(ast, children[0], complexity);
-            if (c1 != 0 and c1 < tags.len) countComplexity(ast, children[1], complexity);
+            if (c0 != 0 and c0 < tags.len) countComplexity(ast, children[0], complexity, depth + 1);
+            if (c1 != 0 and c1 < tags.len) countComplexity(ast, children[1], complexity, depth + 1);
         },
     }
 }
