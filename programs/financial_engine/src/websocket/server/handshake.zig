@@ -607,9 +607,9 @@ test "pool: acquire and release" {
     var p = try Pool.init(t.allocator, 2, 10, 3, 1);
     defer p.deinit();
 
-    var hs1a = p.acquire() catch unreachable;
-    var hs2a = p.acquire() catch unreachable;
-    var hs3a = p.acquire() catch unreachable; // this should be dynamically generated
+    var hs1a = try p.acquire();
+    var hs2a = try p.acquire();
+    var hs3a = try p.acquire(); // this should be dynamically generated
 
     try t.expectEqual(false, &hs1a.buf[0] == &hs2a.buf[0]);
     try t.expectEqual(false, &hs2a.buf[0] == &hs3a.buf[0]);
@@ -625,7 +625,7 @@ test "pool: acquire and release" {
 
     p.release(hs1a);
 
-    var hs1b = p.acquire() catch unreachable;
+    var hs1b = try p.acquire();
     try t.expectEqual(true, &hs1a.buf[0] == &hs1b.buf[0]);
 
     p.release(hs3a);
@@ -652,12 +652,12 @@ test "Handshake.Pool: threadsafety" {
     t4.join();
 }
 
-fn testPool(p: *Pool) void {
-    var r = t.getRandom();
+fn testPool(p: *Pool) !void {
+    var r = try t.getRandom();
     const random = r.random();
 
     for (0..5000) |_| {
-        var hs = p.acquire() catch unreachable;
+        var hs = try p.acquire();
         std.debug.assert(hs.buf[0] == 0);
         hs.buf[0] = 255;
         std.Thread.sleep(random.uintAtMost(u32, 100000));

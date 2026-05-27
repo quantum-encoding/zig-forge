@@ -489,12 +489,12 @@ pub const MultiTenantOrchestrator = struct {
     
     const Self = @This();
     
-    pub fn init(allocator: std.mem.Allocator) Self {
+    pub fn init(allocator: std.mem.Allocator) !Self {
         var tenants = std.ArrayList(TenantEngine).empty;
-        tenants.ensureTotalCapacity(allocator, 10) catch unreachable;
+        try tenants.ensureTotalCapacity(allocator, 10);
 
         var algorithms = std.ArrayList(TenantAlgorithm).empty;
-        algorithms.ensureTotalCapacity(allocator, 10) catch unreachable;
+        try algorithms.ensureTotalCapacity(allocator, 10);
 
         return .{
             .allocator = allocator,
@@ -803,7 +803,7 @@ pub fn main() !void {
     });
     
     // Create orchestrator with configuration
-    var orchestrator = MultiTenantOrchestrator.init(allocator);
+    var orchestrator = try MultiTenantOrchestrator.init(allocator);
     defer orchestrator.deinit();
     
     // Initialize the API factory FIRST (creates isolated clients)

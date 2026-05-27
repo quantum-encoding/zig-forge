@@ -16,9 +16,9 @@ pub const expectError = std.testing.expectError;
 pub const expectString = std.testing.expectEqualStrings;
 pub const expectSlice = std.testing.expectEqualSlices;
 
-pub fn getRandom() std.Random.DefaultPrng {
+pub fn getRandom() !std.Random.DefaultPrng {
     var seed: u64 = undefined;
-    std.posix.getrandom(std.mem.asBytes(&seed)) catch unreachable;
+    try std.posix.getrandom(std.mem.asBytes(&seed));
     return std.Random.DefaultPrng.init(seed);
 }
 
@@ -32,11 +32,11 @@ pub const Writer = struct {
     buf: std.ArrayList(u8),
     random: std.Random.DefaultPrng,
 
-    pub fn init() Writer {
+    pub fn init() !Writer {
         return .{
             .pos = 0,
             .buf = .empty,
-            .random = getRandom(),
+            .random = try getRandom(),
         };
     }
 
@@ -154,38 +154,38 @@ pub const SocketPair = struct {
         port: ?u16 = null,
     };
 
-    pub fn init(opts: Opts) SocketPair {
-        var address = std.net.Address.parseIp("127.0.0.1", opts.port orelse 0) catch unreachable;
+    pub fn init(opts: Opts) !SocketPair {
+        var address = try std.net.Address.parseIp("127.0.0.1", opts.port orelse 0);
         var address_len = address.getOsSockLen();
 
-        const listener = posix.socket(address.any.family, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, posix.IPPROTO.TCP) catch unreachable;
+        const listener = try posix.socket(address.any.family, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, posix.IPPROTO.TCP);
         defer _ = std.c.close(listener);
 
         {
             // setup our listener
-            posix.bind(listener, &address.any, address_len) catch unreachable;
-            posix.listen(listener, 1) catch unreachable;
-            posix.getsockname(listener, &address.any, &address_len) catch unreachable;
+            try posix.bind(listener, &address.any, address_len);
+            try posix.listen(listener, 1);
+            try posix.getsockname(listener, &address.any, &address_len);
         }
 
-        const client = posix.socket(address.any.family, posix.SOCK.STREAM, posix.IPPROTO.TCP) catch unreachable;
+        const client = try posix.socket(address.any.family, posix.SOCK.STREAM, posix.IPPROTO.TCP);
         {
             // connect the client
-            const flags = posix.fcntl(client, posix.F.GETFL, 0) catch unreachable;
-            _ = posix.fcntl(client, posix.F.SETFL, flags | posix.SOCK.NONBLOCK) catch unreachable;
+            const flags = try posix.fcntl(client, posix.F.GETFL, 0);
+            _ = try posix.fcntl(client, posix.F.SETFL, flags | posix.SOCK.NONBLOCK);
             posix.connect(client, &address.any, address_len) catch |err| switch (err) {
                 error.WouldBlock => {},
-                else => unreachable,
+                else => return err,
             };
-            _ = posix.fcntl(client, posix.F.SETFL, flags) catch unreachable;
+            _ = try posix.fcntl(client, posix.F.SETFL, flags);
         }
 
-        const server = posix.accept(listener, &address.any, &address_len, posix.SOCK.CLOEXEC) catch unreachable;
+        const server = try posix.accept(listener, &address.any, &address_len, posix.SOCK.CLOEXEC);
 
         return .{
             .client = .{ .handle = client },
             .server = .{ .handle = server },
-            .writer = Writer.init(),
+            .writer = try Writer.init(),
         };
     }
 
@@ -207,8 +207,8 @@ pub const SocketPair = struct {
         try self.writer.cont(fin, payload);
     }
 
-    pub fn sendBuf(self: *SocketPair) void {
-        self.client.writeAll(self.writer.bytes()) catch unreachable;
+    pub fn sendBuf(self: *SocketPair) !void {
+        try self.client.writeAll(self.writer.bytes());
         self.writer.clear();
     }
 };

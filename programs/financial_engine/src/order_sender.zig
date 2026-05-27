@@ -157,8 +157,8 @@ pub const OrderSender = struct {
         // the wire so log output and the JSON envelope agree byte-for-byte.
         var qty_buf: [80]u8 = undefined;
         var price_buf: [80]u8 = undefined;
-        const qty_str = renderDecimal(&qty_buf, quantity);
-        const price_str = renderDecimal(&price_buf, price);
+        const qty_str = try renderDecimal(&qty_buf, quantity);
+        const price_str = try renderDecimal(&price_buf, price);
         std.debug.print("📤 Order sent: {s} {s} {s} @ {s}\n", .{
             side.wireString(), symbol, qty_str, price_str,
         });
@@ -194,7 +194,7 @@ const decimal_scale_factor: i128 = 1_000_000_000;
 /// std.fmt zero-pad specifier — `{d:0>9}` has churned across Zig
 /// versions (0.16 emits a leading '+' under some interpretations), and
 /// the wire format here must be byte-stable.
-fn renderDecimal(buf: []u8, value: Decimal) []u8 {
+fn renderDecimal(buf: []u8, value: Decimal) error{NoSpaceLeft}![]u8 {
     const is_negative = value.value < 0;
     const abs_value: i128 = if (is_negative) -value.value else value.value;
     const integer_part = @divTrunc(abs_value, decimal_scale_factor);
@@ -210,9 +210,9 @@ fn renderDecimal(buf: []u8, value: Decimal) []u8 {
     }
 
     return if (is_negative)
-        std.fmt.bufPrint(buf, "-{d}.{s}", .{ integer_part, &dec_digits }) catch unreachable
+        std.fmt.bufPrint(buf, "-{d}.{s}", .{ integer_part, &dec_digits })
     else
-        std.fmt.bufPrint(buf, "{d}.{s}", .{ integer_part, &dec_digits }) catch unreachable;
+        std.fmt.bufPrint(buf, "{d}.{s}", .{ integer_part, &dec_digits });
 }
 
 // ── Tests ──────────────────────────────────────────────────────────
@@ -238,9 +238,9 @@ fn buildOrderMessage(
     var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
 
     var qty_buf: [80]u8 = undefined;
-    const qty_str = renderDecimal(&qty_buf, quantity);
+    const qty_str = try renderDecimal(&qty_buf, quantity);
     var price_buf: [80]u8 = undefined;
-    const price_str = renderDecimal(&price_buf, price);
+    const price_str = try renderDecimal(&price_buf, price);
 
     var sigid_buf: [48]u8 = undefined;
     const sigid_str = try std.fmt.bufPrint(

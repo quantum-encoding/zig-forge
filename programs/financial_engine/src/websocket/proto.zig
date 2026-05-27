@@ -568,7 +568,7 @@ pub fn calculateFrameLen(comptime msg: []const u8) usize {
 
 const t = @import("t.zig");
 test "mask" {
-    var r = t.getRandom();
+    var r = try t.getRandom();
     const random = r.random();
     const m = [4]u8{ 10, 20, 55, 200 };
 
@@ -595,12 +595,12 @@ test "mask" {
 test "Reader: read too large" {
     defer t.reset();
 
-    var pair = t.SocketPair.init(.{});
+    var pair = try t.SocketPair.init(.{});
     defer pair.deinit();
     try pair.textFrame(true, "hello world");
-    pair.sendBuf();
+    try pair.sendBuf();
 
-    var reader = testReader(.{ .max = 16, .static = 16 });
+    var reader = try testReader(.{ .max = 16, .static = 16 });
     defer reader.deinit();
     try t.expectError(error.TooLarge, testRead(&reader, pair));
 }
@@ -608,14 +608,14 @@ test "Reader: read too large" {
 test "Reader: read too large over multiple fragments" {
     defer t.reset();
 
-    var pair = t.SocketPair.init(.{});
+    var pair = try t.SocketPair.init(.{});
     defer pair.deinit();
     try pair.textFrame(false, "hello world");
     try pair.cont(false, " !!!_!!! ");
     try pair.cont(true, "how are you doing?");
-    pair.sendBuf();
+    try pair.sendBuf();
 
-    var reader = testReader(.{ .max = 32, .static = 32 });
+    var reader = try testReader(.{ .max = 32, .static = 32 });
     defer reader.deinit();
     try t.expectError(error.TooLarge, testRead(&reader, pair));
 }
@@ -623,19 +623,19 @@ test "Reader: read too large over multiple fragments" {
 test "Reader: exact read into static with no overflow" {
     defer t.reset();
 
-    var pair = t.SocketPair.init(.{});
+    var pair = try t.SocketPair.init(.{});
     defer pair.deinit();
     try pair.textFrame(true, "hello!");
-    pair.sendBuf();
+    try pair.sendBuf();
 
-    var reader = testReader(.{ .max = 12, .static = 12 });
+    var reader = try testReader(.{ .max = 12, .static = 12 });
     defer reader.deinit();
     try t.expectString("hello!", (try testRead(&reader, pair)).data);
 }
 
 test "Reader: fuzz" {
     defer t.reset();
-    var r = t.getRandom();
+    var r = try t.getRandom();
     const random = r.random();
 
     for (0..250) |_| {
@@ -648,7 +648,7 @@ test "Reader: fuzz" {
         const MAX_MESSAGE_SIZE = MAX_PAYLOAD_SIZE + 14;
         var scrap = try arena.alloc(u8, MAX_PAYLOAD_SIZE);
 
-        var writer = t.Writer.init();
+        var writer = try t.Writer.init();
         defer writer.deinit();
 
         var expected = try arena.alloc(Message, MESSAGE_TO_SEND);
@@ -726,7 +726,7 @@ test "Reader: fuzz" {
         const large_buffer_size = random.intRangeAtMost(u32, static_size, MAX_MESSAGE_SIZE * 2);
 
         // fragmentation could make messages very large
-        var reader = testReader(.{ .max = MAX_MESSAGE_SIZE * (MAX_FRAGMENTS + 1), .static = static_size, .count = large_buffer_count, .size = large_buffer_size });
+        var reader = try testReader(.{ .max = MAX_MESSAGE_SIZE * (MAX_FRAGMENTS + 1), .static = static_size, .count = large_buffer_count, .size = large_buffer_size });
         defer reader.large_buffer_provider.deinit();
         defer reader.deinit();
 
@@ -813,20 +813,20 @@ test "Fragmented" {
     }
 }
 
-fn testReader(opts: anytype) Reader {
+fn testReader(opts: anytype) !Reader {
     const T = @TypeOf(opts);
 
     const aa = t.arena.allocator();
 
-    const bp = aa.create(buffer.Provider) catch unreachable;
-    bp.* = buffer.Provider.init(t.allocator, .{
+    const bp = try aa.create(buffer.Provider);
+    bp.* = try buffer.Provider.init(t.allocator, .{
         .max = if (@hasField(T, "max")) opts.max else 20,
         .size = if (@hasField(T, "size")) opts.size else 0,
         .count = if (@hasField(T, "count")) opts.count else 0,
-    }) catch unreachable;
+    });
 
     const static_size = if (@hasField(T, "static")) opts.static else 16;
-    const reader_buf = aa.alloc(u8, static_size) catch unreachable;
+    const reader_buf = try aa.alloc(u8, static_size);
     return Reader.init(reader_buf, bp, null);
 }
 

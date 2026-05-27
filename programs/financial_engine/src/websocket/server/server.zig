@@ -1777,7 +1777,12 @@ fn timestamp() u32 {
     if (comptime @hasDecl(posix, "CLOCK") == false or posix.CLOCK == void) {
         return @intCast(std.time.timestamp());
     }
-    const ts = posix.clock_gettime(posix.CLOCK.REALTIME) catch unreachable;
+    // If REALTIME is unavailable (extremely rare — would indicate a
+    // broken kernel build), fall back to the std.time path rather than
+    // SIGILL-ing the whole websocket server.
+    const ts = posix.clock_gettime(posix.CLOCK.REALTIME) catch {
+        return @intCast(std.time.timestamp());
+    };
     return @intCast(ts.sec);
 }
 
