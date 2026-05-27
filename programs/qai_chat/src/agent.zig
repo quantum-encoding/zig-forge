@@ -39,8 +39,12 @@ const DEFAULT_AGENT_SYSTEM_PROMPT =
     \\You are a precise terminal assistant with access to local tools:
     \\
     \\- read_file(path), ls(path), grep(pattern, path, glob): read-only inspection.
-    \\- write_file(path, content), edit_file(path, old, new), bash(command): writable
+    \\- write_file(path, content), edit_file(path, old, new), exec(argv): writable
     \\  side effects — the user must approve each one before it runs.
+    \\- exec(argv) takes an explicit string array — argv[0] is the program,
+    \\  the rest are passed straight to execve. No shell: pipes, redirects,
+    \\  $VARS, && / ||, and globs do NOT work. Issue multiple exec calls if
+    \\  you need to chain or pipeline.
     \\
     \\Guidelines:
     \\1. Use tools when they answer the question better than guessing. Don't
@@ -61,15 +65,27 @@ const DEFAULT_AGENT_SYSTEM_PROMPT =
 /// Wire-format is one record per line:
 ///   write_path <path>
 ///   edit_path  <path>
-///   bash       <command>
-///   bash_rule  <prefix>     # whole-token prefix; e.g. "git" matches "git status"
+///   exec       <argv-joined>   # full argv, space-joined (was: bash <command>)
+///   exec_rule  <prog>          # argv[0] only; e.g. "git" matches any `git …` call
+///                              # (was: bash_rule <prefix>)
 /// Comments begin with `#`. Blank lines ignored.
+///
+/// Audit (SHELL-CHILD): the on-disk format used to record `bash`
+/// invocations as the verbatim shell-string. After the exec-mode
+/// migration, entries are written as `exec <argv-joined>` and rules
+/// are `exec_rule <argv[0]>`. The loader still accepts the legacy
+/// `bash` / `bash_rule` keys so existing `.qai/approvals` files
+/// keep working — the file is rewritten with the new keys on next
+/// save.
 pub const Approvals = struct {
     gpa: std.mem.Allocator,
     paths: std.ArrayList([]const u8) = .empty,
     commands: std.ArrayList([]const u8) = .empty,
-    /// Whole-token prefix rules for bash commands. A rule "git" matches
-    /// any command equal to "git" or starting with "git " (note the space).
+    /// argv[0] rules for `exec` calls. A rule "git" matches any exec
+    /// whose argv[0] equals "git" (no prefix-of-prefix matching — the
+    /// previous bash-string version compared "git" against the raw
+    /// shell string and had to do whole-token-prefix logic; argv[0]
+    /// is already a single token so exact match suffices).
     bash_rules: std.ArrayList([]const u8) = .empty,
     /// File the in-memory state mirrors. null → in-memory only.
     disk_path: ?[]const u8 = null,
@@ -108,8 +124,10 @@ pub const Approvals = struct {
 
     pub fn hasCommand(self: *const Approvals, cmd: []const u8) bool {
         for (self.commands.items) |c| if (std.mem.eql(u8, c, cmd)) return true;
-        // Whole-token prefix match: rule "git" matches "git" or "git status",
-        // but NOT "github" or "gitlab".
+        // argv[0] rule match: `cmd` is the joined argv (argv[0] sp argv[1] sp …).
+        // The rule is a single program name (argv[0]); it matches when
+        // `cmd` either equals the rule (single-arg call) or starts
+        // with `rule + ' '` (rule is the first whole token).
         for (self.bash_rules.items) |rule| {
             if (cmd.len < rule.len) continue;
             if (!std.mem.startsWith(u8, cmd, rule)) continue;
@@ -169,11 +187,15 @@ pub const Approvals = struct {
             if (value.len == 0) continue;
 
             // Use direct list append (no save-back) — we're loading.
+            // Audit (SHELL-CHILD) migration: `bash`/`bash_rule` are the
+            // legacy keys from the shell-exec era. We still load them
+            // so existing approval files keep working; the next save
+            // re-writes them under the new `exec`/`exec_rule` keys.
             if (std.mem.eql(u8, kind, "write_path") or std.mem.eql(u8, kind, "edit_path")) {
                 if (!self.hasPath(value)) try self.paths.append(self.gpa, try self.gpa.dupe(u8, value));
-            } else if (std.mem.eql(u8, kind, "bash")) {
+            } else if (std.mem.eql(u8, kind, "exec") or std.mem.eql(u8, kind, "bash")) {
                 if (!self.hasCommand(value)) try self.commands.append(self.gpa, try self.gpa.dupe(u8, value));
-            } else if (std.mem.eql(u8, kind, "bash_rule")) {
+            } else if (std.mem.eql(u8, kind, "exec_rule") or std.mem.eql(u8, kind, "bash_rule")) {
                 if (!self.hasBashRule(value)) try self.bash_rules.append(self.gpa, try self.gpa.dupe(u8, value));
             }
         }
@@ -199,7 +221,8 @@ pub const Approvals = struct {
 
         try buf.appendSlice(self.gpa,
             \\# qai approvals — auto-generated, edit at your own risk.
-            \\# Format: <kind> <value>; kind is write_path | edit_path | bash.
+            \\# Format: <kind> <value>; kind is write_path | edit_path | exec | exec_rule.
+            \\# (legacy: bash / bash_rule are still read on load for backward compat)
             \\
         );
 
@@ -207,10 +230,10 @@ pub const Approvals = struct {
             try buf.print(self.gpa, "write_path {s}\n", .{p});
         }
         for (self.commands.items) |c| {
-            try buf.print(self.gpa, "bash {s}\n", .{c});
+            try buf.print(self.gpa, "exec {s}\n", .{c});
         }
         for (self.bash_rules.items) |r| {
-            try buf.print(self.gpa, "bash_rule {s}\n", .{r});
+            try buf.print(self.gpa, "exec_rule {s}\n", .{r});
         }
 
         const tmp = try std.fmt.allocPrint(self.gpa, "{s}.tmp", .{path});
@@ -893,9 +916,13 @@ fn preApproved(approvals: *Approvals, call: hs.ai.common.ToolCall) bool {
     if (std.mem.eql(u8, call.name, "write_file") or std.mem.eql(u8, call.name, "edit_file")) {
         const path = extractStringArg(call.arguments, "path") orelse return false;
         return approvals.hasPath(path);
-    } else if (std.mem.eql(u8, call.name, "bash")) {
-        const cmd = extractStringArg(call.arguments, "command") orelse return false;
-        return approvals.hasCommand(cmd);
+    } else if (std.mem.eql(u8, call.name, "exec")) {
+        // Render the argv as `argv[0] sp argv[1] sp …` and use that as the
+        // approval key. The same rendering is used everywhere
+        // (recordApproval, preview, rule extraction).
+        var buf: [4096]u8 = undefined;
+        const key = renderExecKey(&buf, call.arguments) catch return false;
+        return approvals.hasCommand(key);
     }
     return false;
 }
@@ -903,26 +930,69 @@ fn preApproved(approvals: *Approvals, call: hs.ai.common.ToolCall) bool {
 fn recordApproval(approvals: *Approvals, call: hs.ai.common.ToolCall) !void {
     if (std.mem.eql(u8, call.name, "write_file") or std.mem.eql(u8, call.name, "edit_file")) {
         if (extractStringArg(call.arguments, "path")) |p| try approvals.rememberPath(p);
-    } else if (std.mem.eql(u8, call.name, "bash")) {
-        if (extractStringArg(call.arguments, "command")) |c| try approvals.rememberCommand(c);
+    } else if (std.mem.eql(u8, call.name, "exec")) {
+        var buf: [4096]u8 = undefined;
+        if (renderExecKey(&buf, call.arguments)) |key| {
+            try approvals.rememberCommand(key);
+        } else |_| {}
     }
 }
 
-/// Record a coarser approval — only meaningful for bash. Adds the first
-/// whole token of the command as a rule, e.g. "git status -s" → rule "git".
+/// Record a coarser approval — only meaningful for exec. Adds argv[0] as
+/// a rule, e.g. argv=`["git","status","-s"]` → rule `"git"`.
 fn recordRuleApproval(approvals: *Approvals, call: hs.ai.common.ToolCall) !void {
-    if (!std.mem.eql(u8, call.name, "bash")) return; // only bash has rules
-    const cmd = extractStringArg(call.arguments, "command") orelse return;
-    const rule = firstToken(cmd);
-    if (rule.len == 0) return;
-    try approvals.rememberBashRule(rule);
+    if (!std.mem.eql(u8, call.name, "exec")) return; // only exec has rules
+    var buf: [512]u8 = undefined;
+    const prog = extractArgv0(&buf, call.arguments) catch return;
+    if (prog.len == 0) return;
+    try approvals.rememberBashRule(prog);
 }
 
-/// First whitespace-separated token. "git status -s" → "git".
-fn firstToken(s: []const u8) []const u8 {
-    const trimmed = std.mem.trimStart(u8, s, " \t");
-    const sp = std.mem.indexOfAny(u8, trimmed, " \t") orelse return trimmed;
-    return trimmed[0..sp];
+/// Render an exec tool call's argv as a single key string — argv items
+/// joined with a single space. Caller owns no allocation; the result
+/// borrows from `buf`. Returns error.NoSpaceLeft if the joined form
+/// exceeds the buffer (in which case the call falls back to "not
+/// pre-approved" / "not memorable" — failing closed).
+fn renderExecKey(buf: []u8, arguments: []const u8) ![]const u8 {
+    var arena_buf: [16 * 1024]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&arena_buf);
+    const parsed = std.json.parseFromSlice(std.json.Value, fba.allocator(), arguments, .{}) catch return error.InvalidJson;
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidJson;
+    const argv_v = parsed.value.object.get("argv") orelse return error.InvalidJson;
+    if (argv_v != .array or argv_v.array.items.len == 0) return error.InvalidJson;
+
+    var w: usize = 0;
+    for (argv_v.array.items, 0..) |item, i| {
+        if (item != .string) return error.InvalidJson;
+        if (i > 0) {
+            if (w + 1 > buf.len) return error.NoSpaceLeft;
+            buf[w] = ' ';
+            w += 1;
+        }
+        if (w + item.string.len > buf.len) return error.NoSpaceLeft;
+        @memcpy(buf[w..][0..item.string.len], item.string);
+        w += item.string.len;
+    }
+    return buf[0..w];
+}
+
+/// Pull argv[0] out of an exec tool call's arguments JSON. Returns
+/// the program name (not a path). Used by recordRuleApproval +
+/// promptConfirm to show / record the per-program rule.
+fn extractArgv0(buf: []u8, arguments: []const u8) ![]const u8 {
+    var arena_buf: [16 * 1024]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&arena_buf);
+    const parsed = std.json.parseFromSlice(std.json.Value, fba.allocator(), arguments, .{}) catch return error.InvalidJson;
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidJson;
+    const argv_v = parsed.value.object.get("argv") orelse return error.InvalidJson;
+    if (argv_v != .array or argv_v.array.items.len == 0) return error.InvalidJson;
+    const first = argv_v.array.items[0];
+    if (first != .string) return error.InvalidJson;
+    if (first.string.len > buf.len) return error.NoSpaceLeft;
+    @memcpy(buf[0..first.string.len], first.string);
+    return buf[0..first.string.len];
 }
 
 /// Cheap one-shot extraction from a JSON object. The parsed tree is freed
@@ -957,10 +1027,12 @@ fn promptConfirm(args: RunArgs, call: hs.ai.common.ToolCall) !Decision {
     }
     const stdin = args.stdin.?;
 
-    const is_bash = std.mem.eql(u8, call.name, "bash");
-    if (is_bash) {
-        // Show the rule that 'r' would install so the user can pick consciously.
-        const rule = if (extractStringArg(call.arguments, "command")) |cmd| firstToken(cmd) else "";
+    const is_exec = std.mem.eql(u8, call.name, "exec");
+    if (is_exec) {
+        // Show the rule that 'r' would install so the user can pick
+        // consciously. argv[0] is the program name (rule key).
+        var rule_buf: [256]u8 = undefined;
+        const rule = extractArgv0(&rule_buf, call.arguments) catch "";
         try args.err.print(
             "Proceed? [y]es / [a]lways exact / [r]ule \"{s} *\" / [N]o: ",
             .{if (rule.len > 0) rule else "?"},
@@ -974,7 +1046,7 @@ fn promptConfirm(args: RunArgs, call: hs.ai.common.ToolCall) !Decision {
         error.ReadFailed, error.StreamTooLong => return .deny,
     } orelse return .deny;
     const ans = std.mem.trim(u8, raw, " \t\r\n");
-    if (is_bash and (std.ascii.eqlIgnoreCase(ans, "r") or std.ascii.eqlIgnoreCase(ans, "rule"))) return .always_rule;
+    if (is_exec and (std.ascii.eqlIgnoreCase(ans, "r") or std.ascii.eqlIgnoreCase(ans, "rule"))) return .always_rule;
     if (std.ascii.eqlIgnoreCase(ans, "a") or std.ascii.eqlIgnoreCase(ans, "always")) return .always;
     if (std.ascii.eqlIgnoreCase(ans, "y") or std.ascii.eqlIgnoreCase(ans, "yes")) return .once;
     return .deny;
@@ -987,8 +1059,8 @@ fn printToolPreview(args: RunArgs, call: hs.ai.common.ToolCall) !void {
         try previewWriteFile(args, call.arguments);
     } else if (std.mem.eql(u8, call.name, "edit_file")) {
         try previewEditFile(args, call.arguments);
-    } else if (std.mem.eql(u8, call.name, "bash")) {
-        try previewBash(args, call.arguments);
+    } else if (std.mem.eql(u8, call.name, "exec")) {
+        try previewExec(args, call.arguments);
     } else {
         try args.err.print("[tool] {s} {s}\n", .{ call.name, call.arguments });
     }
@@ -1030,75 +1102,156 @@ fn previewEditFile(args: RunArgs, arguments: []const u8) !void {
     try args.err.writeAll("---\n");
 }
 
-fn previewBash(args: RunArgs, arguments: []const u8) !void {
+fn previewExec(args: RunArgs, arguments: []const u8) !void {
     const parsed = std.json.parseFromSlice(std.json.Value, args.gpa, arguments, .{}) catch {
-        try args.err.print("[bash] (unparseable args) {s}\n", .{arguments});
+        try args.err.print("[exec] (unparseable args) {s}\n", .{arguments});
         return;
     };
     defer parsed.deinit();
-    const cmd = jsonString(parsed.value, "command") orelse "";
+    if (parsed.value != .object) {
+        try args.err.print("[exec] (args not an object) {s}\n", .{arguments});
+        return;
+    }
+    const argv_v = parsed.value.object.get("argv") orelse {
+        try args.err.print("[exec] (missing argv) {s}\n", .{arguments});
+        return;
+    };
+    if (argv_v != .array) {
+        try args.err.print("[exec] (argv not an array) {s}\n", .{arguments});
+        return;
+    }
 
-    // Resolve cwd via Io and surface it so the user knows where the side
-    // effect will happen — especially relevant when running qai across repos.
+    // Render argv with shell-style quoting for the preview, so the
+    // user can see at a glance that this is exactly the program +
+    // arguments that will be passed to execve. Quoting is for HUMAN
+    // readability only — execve never re-parses these.
+    var rendered: std.ArrayList(u8) = .empty;
+    defer rendered.deinit(args.gpa);
+    for (argv_v.array.items, 0..) |item, i| {
+        if (item != .string) continue;
+        if (i > 0) try rendered.append(args.gpa, ' ');
+        try renderArgQuoted(args.gpa, &rendered, item.string);
+    }
+
     var cwd_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cwd_n = std.process.currentPath(args.io, &cwd_buf) catch null;
     if (cwd_n) |n| {
-        try args.err.print("[bash] $ {s}    (cwd: {s})\n", .{ cmd, cwd_buf[0..n] });
+        try args.err.print("[exec] $ {s}    (cwd: {s})\n", .{ rendered.items, cwd_buf[0..n] });
     } else {
-        try args.err.print("[bash] $ {s}\n", .{cmd});
+        try args.err.print("[exec] $ {s}\n", .{rendered.items});
     }
 
-    if (dangerReason(cmd)) |reason| {
+    if (dangerReason(argv_v.array.items)) |reason| {
         try args.err.print("[!DANGER] {s}\n", .{reason});
     }
 }
 
-/// Pattern-match common foot-guns. Returns a short reason string the user
-/// can read before approving. Substring-based — false positives are fine
-/// (they make the user pause), false negatives are not — so when in doubt,
-/// flag.
-fn dangerReason(cmd: []const u8) ?[]const u8 {
-    if (containsAnyOf(cmd, &.{ "rm -rf", "rm -fr", "rm --recursive --force", "rm --force --recursive" })) return "recursive force-delete";
-    if (std.mem.startsWith(u8, std.mem.trimStart(u8, cmd, " \t"), "sudo ")) return "sudo escalation";
-    if (containsAnyOf(cmd, &.{ "| sh", "| bash", "|sh", "|bash" })) return "pipe-to-shell — script execution from another command";
-    if (containsAnyOf(cmd, &.{ "git push --force", "git push -f", "git push --force-with-lease" })) return "force-push — overwrites remote history";
-    if (containsAnyOf(cmd, &.{ "git reset --hard", "git clean -fd", "git clean -fx" })) return "destructive git operation";
-    if (containsAnyOf(cmd, &.{ "chmod -R", "chmod 777", "chown -R" })) return "broad permission change";
-    if (containsAnyOf(cmd, &.{ "dd if=", "mkfs", "/dev/sda", "/dev/disk", "/dev/nvme" })) return "raw block-device operation";
-    if (containsAnyOf(cmd, &.{ "kill -9 ", "killall ", "pkill " })) return "killing processes";
-    if (containsAnyOf(cmd, &.{ ":(){:|:&};:", "fork bomb" })) return "fork bomb";
+/// Render one argv element with shell-style quoting if it contains
+/// whitespace or special characters. Display-only; no security
+/// property is derived from this rendering.
+fn renderArgQuoted(gpa: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
+    var needs_quote = s.len == 0;
+    for (s) |c| {
+        if (c == ' ' or c == '\t' or c == '"' or c == '\'' or c == '\\' or c == '$' or c == '`' or c == '(' or c == ')') {
+            needs_quote = true;
+            break;
+        }
+    }
+    if (!needs_quote) {
+        try out.appendSlice(gpa, s);
+        return;
+    }
+    try out.append(gpa, '"');
+    for (s) |c| {
+        if (c == '"' or c == '\\' or c == '$' or c == '`') try out.append(gpa, '\\');
+        try out.append(gpa, c);
+    }
+    try out.append(gpa, '"');
+}
+
+/// Pattern-match common foot-guns on the exec argv. Returns a short
+/// reason string the user can read before approving. Operates on the
+/// structured argv array — checks argv[0] for the program name and
+/// scans every element for danger markers.
+fn dangerReason(argv: []const std.json.Value) ?[]const u8 {
+    if (argv.len == 0) return null;
+
+    const prog = if (argv[0] == .string) argv[0].string else return null;
+    const prog_base = std.fs.path.basename(prog);
+
+    if (std.mem.eql(u8, prog_base, "sudo") or std.mem.eql(u8, prog_base, "su") or std.mem.eql(u8, prog_base, "doas")) return "privilege escalation";
+
+    if (std.mem.eql(u8, prog_base, "rm")) {
+        // Look for -rf, -fr, or any --force --recursive combination
+        // anywhere in argv.
+        var saw_force = false;
+        var saw_recursive = false;
+        for (argv[1..]) |a| {
+            if (a != .string) continue;
+            const arg = a.string;
+            if (std.mem.eql(u8, arg, "--force")) saw_force = true;
+            if (std.mem.eql(u8, arg, "--recursive") or std.mem.eql(u8, arg, "-r") or std.mem.eql(u8, arg, "-R")) saw_recursive = true;
+            // Combined short flags like -rf / -fr / -Rf.
+            if (arg.len >= 2 and arg[0] == '-' and arg[1] != '-') {
+                const flags = arg[1..];
+                if (std.mem.indexOfScalar(u8, flags, 'r') != null) saw_recursive = true;
+                if (std.mem.indexOfScalar(u8, flags, 'R') != null) saw_recursive = true;
+                if (std.mem.indexOfScalar(u8, flags, 'f') != null) saw_force = true;
+            }
+        }
+        if (saw_force and saw_recursive) return "recursive force-delete";
+    }
+
+    if (std.mem.eql(u8, prog_base, "dd") or std.mem.eql(u8, prog_base, "mkfs")) return "raw block-device operation";
+    if (std.mem.eql(u8, prog_base, "kill") or std.mem.eql(u8, prog_base, "killall") or std.mem.eql(u8, prog_base, "pkill")) return "killing processes";
+
+    if (std.mem.eql(u8, prog_base, "git")) {
+        for (argv[1..]) |a| {
+            if (a != .string) continue;
+            const arg = a.string;
+            if (std.mem.eql(u8, arg, "--force") or std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--force-with-lease")) return "git force op — may overwrite history";
+            if (std.mem.eql(u8, arg, "--hard")) return "destructive git reset";
+        }
+    }
+
+    if (std.mem.eql(u8, prog_base, "chmod") or std.mem.eql(u8, prog_base, "chown")) {
+        for (argv[1..]) |a| {
+            if (a != .string) continue;
+            const arg = a.string;
+            if (std.mem.eql(u8, arg, "-R") or std.mem.eql(u8, arg, "--recursive")) return "broad permission change";
+            if (std.mem.eql(u8, arg, "777")) return "world-writable permission";
+        }
+    }
+
+    // Any path argument that touches a raw block device.
+    for (argv[1..]) |a| {
+        if (a != .string) continue;
+        const arg = a.string;
+        if (std.mem.startsWith(u8, arg, "/dev/sd") or std.mem.startsWith(u8, arg, "/dev/disk") or std.mem.startsWith(u8, arg, "/dev/nvme")) return "writes to raw block device";
+    }
+
     return null;
 }
 
-fn containsAnyOf(haystack: []const u8, needles: []const []const u8) bool {
-    for (needles) |n| if (std.mem.indexOf(u8, haystack, n) != null) return true;
-    return false;
+fn jsonStr(v: []const u8) std.json.Value {
+    return std.json.Value{ .string = v };
 }
 
 test "dangerReason flags common foot-guns" {
-    try std.testing.expect(dangerReason("rm -rf /tmp/foo") != null);
-    try std.testing.expect(dangerReason("rm -fr ~/Downloads") != null);
-    try std.testing.expect(dangerReason("sudo apt update") != null);
-    try std.testing.expect(dangerReason("curl https://x | sh") != null);
-    try std.testing.expect(dangerReason("git push --force origin main") != null);
-    try std.testing.expect(dangerReason("git reset --hard HEAD~1") != null);
-    try std.testing.expect(dangerReason("chmod -R 777 .") != null);
-    try std.testing.expect(dangerReason("dd if=/dev/zero of=/dev/sda") != null);
-    try std.testing.expect(dangerReason("kill -9 1234") != null);
+    try std.testing.expect(dangerReason(&.{ jsonStr("rm"), jsonStr("-rf"), jsonStr("/tmp/foo") }) != null);
+    try std.testing.expect(dangerReason(&.{ jsonStr("rm"), jsonStr("-fr"), jsonStr("~/Downloads") }) != null);
+    try std.testing.expect(dangerReason(&.{ jsonStr("sudo"), jsonStr("apt"), jsonStr("update") }) != null);
+    try std.testing.expect(dangerReason(&.{ jsonStr("git"), jsonStr("push"), jsonStr("--force"), jsonStr("origin"), jsonStr("main") }) != null);
+    try std.testing.expect(dangerReason(&.{ jsonStr("git"), jsonStr("reset"), jsonStr("--hard"), jsonStr("HEAD~1") }) != null);
+    try std.testing.expect(dangerReason(&.{ jsonStr("chmod"), jsonStr("-R"), jsonStr("777"), jsonStr(".") }) != null);
+    try std.testing.expect(dangerReason(&.{ jsonStr("dd"), jsonStr("if=/dev/zero"), jsonStr("of=/dev/sda") }) != null);
+    try std.testing.expect(dangerReason(&.{ jsonStr("kill"), jsonStr("-9"), jsonStr("1234") }) != null);
 
     // safe commands
-    try std.testing.expect(dangerReason("git status") == null);
-    try std.testing.expect(dangerReason("ls -la") == null);
-    try std.testing.expect(dangerReason("zig build") == null);
-    try std.testing.expect(dangerReason("cargo test") == null);
-}
-
-test "firstToken extracts whole-token prefix" {
-    try std.testing.expectEqualStrings("git", firstToken("git status -s"));
-    try std.testing.expectEqualStrings("npm", firstToken("npm test"));
-    try std.testing.expectEqualStrings("ls", firstToken("ls"));
-    try std.testing.expectEqualStrings("cargo", firstToken("  cargo build --release"));
-    try std.testing.expectEqualStrings("", firstToken(""));
+    try std.testing.expect(dangerReason(&.{ jsonStr("git"), jsonStr("status") }) == null);
+    try std.testing.expect(dangerReason(&.{ jsonStr("ls"), jsonStr("-la") }) == null);
+    try std.testing.expect(dangerReason(&.{ jsonStr("zig"), jsonStr("build") }) == null);
+    try std.testing.expect(dangerReason(&.{ jsonStr("cargo"), jsonStr("test") }) == null);
 }
 
 fn previewSnippet(args: RunArgs, s: []const u8) !void {

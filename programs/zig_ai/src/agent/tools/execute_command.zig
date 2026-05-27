@@ -18,6 +18,12 @@ fn getMonotonicNs() i128 {
     return @as(i128, ts.sec) * 1_000_000_000 + ts.nsec;
 }
 
+// std.c in Zig 0.16 only exposes `execve` (absolute-path exec). We
+// want PATH resolution so the agent can call `git`, `make`, etc.
+// without spelling out `/usr/bin/git`. Declaring execvp directly is
+// portable across macOS/Linux (POSIX).
+extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
+
 pub const ExecuteCommandArgs = struct {
     command: []const u8,
     working_dir: []const u8 = ".",
@@ -62,7 +68,22 @@ pub fn execute(
     return result;
 }
 
-/// Run command using fork/exec with process group management
+/// Run command using fork/exec with process group management.
+///
+/// Audit (SHELL-CHILD): the child previously did `execve("/bin/sh",
+/// ["sh", "-c", command, null])`, which is an RCE primitive — an
+/// agent-controlled `command` containing `;`, `$()`, backticks,
+/// pipes, or redirects would run those AS SHELL CODE. The fork now
+/// runs the program directly via execvp: argv[0] resolves through
+/// PATH, every subsequent argv element is opaque bytes to the
+/// program. Shell metacharacters in argv items are inert.
+///
+/// Tokenization happens in the PARENT (before fork) so any
+/// allocation failure surfaces as a clean tool error rather than
+/// dying in the child after fork (when allocator state is fragile).
+/// The argv arrays live in the parent's address space until execvp;
+/// fork copies the whole address space so the pointers are valid in
+/// the child without further allocation.
 fn runCommand(
     allocator: std.mem.Allocator,
     command: []const u8,
@@ -70,6 +91,37 @@ fn runCommand(
     exec_config: config.ExecuteCommandConfig,
     proc_table: ?*process_table.ProcessTable,
 ) !types.ToolOutput {
+    // Tokenize the command into argv in the parent. The model
+    // emits a single string for backward compat with the existing
+    // tool schema — we split on whitespace into argv. Shell
+    // features (pipes/redirects/expansion) do not work; the agent
+    // must issue multiple tool calls instead.
+    var argv_storage: std.ArrayListUnmanaged([:0]u8) = .empty;
+    defer {
+        for (argv_storage.items) |s| allocator.free(s);
+        argv_storage.deinit(allocator);
+    }
+    var argv_ptrs: std.ArrayListUnmanaged(?[*:0]const u8) = .empty;
+    defer argv_ptrs.deinit(allocator);
+
+    var it = std.mem.tokenizeAny(u8, command, " \t");
+    while (it.next()) |tok| {
+        const z = try allocator.allocSentinel(u8, tok.len, 0);
+        @memcpy(z, tok);
+        try argv_storage.append(allocator, z);
+        try argv_ptrs.append(allocator, z.ptr);
+    }
+    try argv_ptrs.append(allocator, null);
+
+    if (argv_storage.items.len == 0) return error.ForkFailed;
+
+    // Null-terminate work_dir for chdir(2). Allocating in the
+    // parent (not the child) keeps the post-fork window free of
+    // allocator calls — async-signal-safety best-effort.
+    const work_dir_z = try allocator.allocSentinel(u8, work_dir.len, 0);
+    defer allocator.free(work_dir_z);
+    @memcpy(work_dir_z, work_dir);
+
     // Create pipes for stdout/stderr
     var stdout_pipe: [2]c_int = undefined;
     var stderr_pipe: [2]c_int = undefined;
@@ -99,19 +151,19 @@ fn runCommand(
         _ = std.c.close(stderr_pipe[1]);
 
         // Change to working directory
-        const work_dir_z = allocator.allocSentinel(u8, work_dir.len, 0) catch std.c.exit(1);
-        @memcpy(work_dir_z, work_dir);
         if (std.c.chdir(work_dir_z.ptr) != 0) {
             std.c.exit(1);
         }
 
-        // Execute command via shell
-        const cmd_z = allocator.allocSentinel(u8, command.len, 0) catch std.c.exit(1);
-        @memcpy(cmd_z, command);
-
-        const shell = std.c.getenv("SHELL") orelse "/bin/sh";
-        const argv = [_:null]?[*:0]const u8{ shell, "-c", cmd_z.ptr, null };
-        _ = std.c.execve(shell, &argv, std.c.environ);
+        // execvp: PATH-resolved exec of argv[0]. The argv array is
+        // built from the model-supplied command tokenized on
+        // whitespace; no shell is invoked, so shell metacharacters
+        // in argv items are inert.
+        const prog: [*:0]const u8 = argv_storage.items[0].ptr;
+        // execvp takes a non-const argv per POSIX signature, but
+        // it does not modify the elements. The cast is required
+        // to satisfy the type.
+        _ = execvp(prog, @ptrCast(argv_ptrs.items.ptr));
         std.c.exit(127);
     }
 

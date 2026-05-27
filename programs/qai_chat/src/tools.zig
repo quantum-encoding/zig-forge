@@ -63,10 +63,18 @@ pub const all_tools: [6]Spec = .{
         .is_writable = true,
     },
     .{
-        .name = "bash",
-        .description = "Run a shell command via /bin/sh -c. Returns combined stdout+stderr (capped at 16 KB) and the exit code. The user will be prompted to approve each command. Use for builds, tests, git, or other side-effecting operations.",
+        // Audit (SHELL-CHILD): renamed from `bash` and rewired to
+        // argv-mode exec. The previous spec ran `/bin/sh -c
+        // <command>` on caller-supplied bytes, which is an RCE
+        // primitive (a model that emits `; rm -rf $HOME` runs that
+        // verbatim under the user's UID). Argv-mode exec passes
+        // each argument straight to `execve` — shell
+        // metacharacters are inert string content. The schema
+        // forces the model to think in argv from the start.
+        .name = "exec",
+        .description = "Run a program via execve with an explicit argv array — NO SHELL, so pipes, redirects, &&, $VAR, globs, and quoting do not work. To chain commands, issue multiple exec calls; to capture pipelines, ask for read_file / grep instead. Returns combined stdout+stderr (capped at 16 KB) and the exit code. The user will be prompted to approve each command.",
         .input_schema =
-        \\{"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute."}},"required":["command"]}
+        \\{"type":"object","properties":{"argv":{"type":"array","description":"Program and arguments. argv[0] is the program name (resolved via PATH). Subsequent items are passed verbatim — no shell interpretation. Example: [\"git\",\"status\"], [\"make\",\"-j\",\"4\",\"test\"].","items":{"type":"string"},"minItems":1}},"required":["argv"]}
         ,
         .is_writable = true,
     },
@@ -138,9 +146,26 @@ pub fn execute(
         const old_str = try requireString(gpa, args, "old_string");
         const new_str = try requireString(gpa, args, "new_string");
         return editFile(io, gpa, path, old_str, new_str);
-    } else if (std.mem.eql(u8, name, "bash")) {
-        const command = try requireString(gpa, args, "command");
-        return bash(io, gpa, command);
+    } else if (std.mem.eql(u8, name, "exec")) {
+        // Pull argv out as a string array. Reject anything else
+        // (model emitted a bare string or wrong shape) loudly so
+        // the model can correct on its next turn.
+        const argv_value = switch (args) {
+            .object => |obj| obj.get("argv") orelse return std.fmt.allocPrint(gpa, "error: exec requires 'argv' field", .{}),
+            else => return std.fmt.allocPrint(gpa, "error: exec args must be a JSON object", .{}),
+        };
+        if (argv_value != .array or argv_value.array.items.len == 0) {
+            return std.fmt.allocPrint(gpa, "error: exec 'argv' must be a non-empty array of strings", .{});
+        }
+        var argv_list: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer argv_list.deinit(gpa);
+        for (argv_value.array.items) |item| {
+            if (item != .string) {
+                return std.fmt.allocPrint(gpa, "error: exec 'argv' entries must all be strings", .{});
+            }
+            try argv_list.append(gpa, item.string);
+        }
+        return exec(io, gpa, argv_list.items);
     }
 
     return std.fmt.allocPrint(gpa, "error: unknown tool '{s}'", .{name});
@@ -460,20 +485,36 @@ fn countLinesBefore(data: []const u8, byte_offset: usize) usize {
     return n;
 }
 
-// ─── bash ───────────────────────────────────────────────────────────────
+// ─── exec ───────────────────────────────────────────────────────────────
+//
+// Audit (SHELL-CHILD): previously this tool ran `/bin/sh -c <command>`
+// — an RCE primitive whenever the model emits shell metacharacters
+// (`;`, `$()`, backticks, `|`, `&&`, redirects). It now takes an
+// explicit argv array from the model's tool call and passes it
+// straight to `std.process.run`. argv[0] resolves via PATH; every
+// subsequent element is opaque bytes to the program, not to a
+// shell. To compose pipelines / chains the agent must issue
+// multiple exec calls or use built-in tools like read_file/grep.
 
-fn bash(io: std.Io, gpa: std.mem.Allocator, command: []const u8) ![]u8 {
-    if (command.len == 0) return try gpa.dupe(u8, "error: empty command");
-
-    const argv = [_][]const u8{ "/bin/sh", "-c", command };
+fn exec(io: std.Io, gpa: std.mem.Allocator, argv: []const []const u8) ![]u8 {
+    if (argv.len == 0) return try gpa.dupe(u8, "error: empty argv");
+    for (argv) |arg| {
+        // Defense in depth: null bytes truncate the argument at the
+        // syscall boundary on POSIX. Block them explicitly so a
+        // model that smuggles a `\x00` into argv[i] can't sneak
+        // hidden chars past our approval prompt.
+        if (std.mem.indexOfScalar(u8, arg, 0) != null) {
+            return try gpa.dupe(u8, "error: argv contains null byte — refused");
+        }
+    }
 
     const result = std.process.run(gpa, io, .{
-        .argv = &argv,
+        .argv = argv,
         .stdout_limit = .limited(MAX_BASH_OUTPUT),
         .stderr_limit = .limited(MAX_BASH_OUTPUT),
     }) catch |err| switch (err) {
         error.StreamTooLong => return std.fmt.allocPrint(gpa, "error: command output exceeded {d} bytes — refused", .{MAX_BASH_OUTPUT}),
-        else => return std.fmt.allocPrint(gpa, "error: failed to spawn shell ({s})", .{@errorName(err)}),
+        else => return std.fmt.allocPrint(gpa, "error: failed to exec ({s})", .{@errorName(err)}),
     };
     defer gpa.free(result.stdout);
     defer gpa.free(result.stderr);

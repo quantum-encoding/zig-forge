@@ -88,18 +88,37 @@ fn moveToTrash(allocator: std.mem.Allocator, path: []const u8, path_z: [*:0]cons
     }
 }
 
-/// macOS: Use 'trash' command if available, otherwise mv to ~/.Trash
+// PATH-resolved exec. std.c in Zig 0.16 only exposes execve; declare
+// execvp directly so we can spawn `trash` without spelling the full
+// `/usr/local/bin/trash` (or wherever Homebrew installs it).
+extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
+
+/// macOS: Use 'trash' command if available, otherwise mv to ~/.Trash.
+///
+/// Audit (SHELL-CHILD): the previous implementation built
+/// `trash "<path>" 2>/dev/null` as a shell string with the path
+/// interpolated via allocPrint, then ran `/bin/sh -c <string>`.
+/// That's an RCE primitive: a path containing `"` breaks out of the
+/// quoted segment (`trash "a"; rm -rf $HOME #" 2>/dev/null`). The
+/// agent never controls the path argument directly — it goes
+/// through trash_file's sandbox validation — but defense in depth
+/// means we don't TRUST that property; we eliminate the shell.
+///
+/// The new version execs `trash` directly with argv = `["trash",
+/// path]`. The `2>/dev/null` is replaced by an in-Zig dup2 of
+/// `/dev/null` onto fd 2 in the child, after fork but before exec.
+/// Both operations (open + dup2) are async-signal-safe and need no
+/// allocator state.
 fn moveToTrashMacOS(allocator: std.mem.Allocator, path: []const u8, path_z: [*:0]const u8) TrashError![]const u8 {
-    // Try using the 'trash' command first (from Homebrew trash-cli)
-    // This properly integrates with Finder's trash
-    const trash_cmd = std.fmt.allocPrint(allocator, "trash \"{s}\" 2>/dev/null", .{path}) catch return error.OutOfMemory;
-    defer allocator.free(trash_cmd);
+    // Null-terminated argv strings allocated in the parent so the
+    // post-fork window does not touch the allocator. The program
+    // name is a literal so it doesn't need dup'ing.
+    const path_arg_z = allocator.allocSentinel(u8, path.len, 0) catch return error.OutOfMemory;
+    defer allocator.free(path_arg_z);
+    @memcpy(path_arg_z, path);
 
-    const trash_cmd_z = allocator.allocSentinel(u8, trash_cmd.len, 0) catch return error.OutOfMemory;
-    defer allocator.free(trash_cmd_z);
-    @memcpy(trash_cmd_z, trash_cmd);
+    const argv = [_:null]?[*:0]const u8{ "trash", path_arg_z.ptr, null };
 
-    // Try trash command
     const pid = std.c.fork();
     if (pid < 0) {
         // Fork failed, fall back to manual move
@@ -107,10 +126,16 @@ fn moveToTrashMacOS(allocator: std.mem.Allocator, path: []const u8, path_z: [*:0
     }
 
     if (pid == 0) {
-        // Child process
-        const shell = "/bin/sh";
-        const argv = [_:null]?[*:0]const u8{ shell, "-c", trash_cmd_z.ptr, null };
-        _ = std.c.execve(shell, &argv, std.c.environ);
+        // Child process. Replicate the `2>/dev/null` shell redirect
+        // by opening /dev/null and dup2'ing it onto fd 2. If the
+        // open fails we let stderr stay on the inherited fd — the
+        // exit code still drives the parent's decision.
+        const devnull_fd = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY }, @as(std.c.mode_t, 0));
+        if (devnull_fd >= 0) {
+            _ = std.c.dup2(devnull_fd, 2);
+            _ = std.c.close(devnull_fd);
+        }
+        _ = execvp("trash", &argv);
         std.c.exit(127);
     }
 

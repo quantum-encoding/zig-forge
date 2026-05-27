@@ -38,11 +38,26 @@ const Mutex = struct {
     }
 };
 
-/// A command-based token source. The command is run via `sh -c <cmd>` so the
-/// user can pass a full shell expression (e.g. `gcloud auth
-/// print-access-token`). Stdout is trimmed of trailing whitespace.
+/// A command-based token source.
+///
+/// Audit (SHELL-CHILD): the command USED to be run via `/bin/sh -c
+/// <cmd>` so the operator could pass any shell expression. That was
+/// an RCE primitive — any path that could write to `command`
+/// (config file with operator-controlled bytes, env-var
+/// interpolation, future API endpoint, etc.) could break out of the
+/// intended program with `;`, `$()`, backticks, or `|`.
+///
+/// The command is now whitespace-tokenized into argv and executed
+/// directly via `std.process.run`. Shell features (pipes,
+/// redirects, globs, variable expansion) deliberately do NOT work
+/// — but the documented example (`gcloud auth print-access-token`)
+/// is a plain program-with-args invocation, which is exactly what
+/// argv-mode handles. Quoted arguments containing spaces are also
+/// not supported; if you need them, prefer a different
+/// `TokenSource` (file, env var, in-process provider) rather than
+/// re-introducing a shell.
 pub const CommandSource = struct {
-    command: []const u8, // owned copy of the user-supplied shell string
+    command: []const u8, // owned copy of the operator-supplied argv-as-string
 
     pub fn init(allocator: std.mem.Allocator, command: []const u8) !CommandSource {
         return .{ .command = try allocator.dupe(u8, command) };
@@ -59,13 +74,19 @@ pub const CommandSource = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
     ) ![]u8 {
-        const argv = [_][]const u8{ "/bin/sh", "-c", self.command };
+        // Tokenize the operator-supplied command on whitespace. The
+        // resulting argv is executed directly — no shell.
+        var argv_list: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer argv_list.deinit(allocator);
+        var it = std.mem.tokenizeAny(u8, self.command, " \t");
+        while (it.next()) |tok| try argv_list.append(allocator, tok);
+        if (argv_list.items.len == 0) return error.AuthCommandFailed;
 
         // Zig 0.16: std.process.run is top-level and Io-aware. 64 KB stdout
         // cap — tokens are a few KB at most; any more means the command is
         // misconfigured (spitting logs / error pages into stdout).
         const result = std.process.run(allocator, io, .{
-            .argv = &argv,
+            .argv = argv_list.items,
             .stdout_limit = .limited(64 * 1024),
             .stderr_limit = .limited(64 * 1024),
         }) catch |err| {

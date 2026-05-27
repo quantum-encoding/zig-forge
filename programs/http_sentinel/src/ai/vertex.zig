@@ -145,15 +145,39 @@ pub const VertexClient = struct {
         return common.AIError.AuthenticationFailed;
     }
 
-    /// Run a shell command and capture stdout as the token (trimmed).
-    /// Pure Zig — uses std.process.run instead of popen.
+    /// Run a token-fetch program and capture stdout (trimmed) as the
+    /// access token.
+    ///
+    /// Audit (SHELL-CHILD): previously this ran `/bin/sh -c <cmd>`,
+    /// which is an RCE primitive — any caller that can influence
+    /// `cmd` (env-var leakage, future config field, etc.) can break
+    /// out of the intended program via shell metacharacters
+    /// (`;`, `$()`, backticks, `|`). The two existing callers pass
+    /// hard-coded literals (`"gcp-token-refresh"` and
+    /// `"gcloud auth print-access-token"`) — neither needs a shell,
+    /// only argv-mode exec.
+    ///
+    /// We now whitespace-tokenize `cmd` into an argv array and run
+    /// it directly via `std.process.run`. Shell features (pipes,
+    /// redirects, globs, expansion) deliberately do not work; the
+    /// callers don't use them. This closes the RCE class entirely
+    /// for this code path.
     fn runTokenCommand(self: *VertexClient, cmd: []const u8) ?[]u8 {
+        var argv_list: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer argv_list.deinit(self.allocator);
+
+        var it = std.mem.tokenizeAny(u8, cmd, " \t");
+        while (it.next()) |tok| {
+            argv_list.append(self.allocator, tok) catch return null;
+        }
+        if (argv_list.items.len == 0) return null;
+
         var io_threaded: std.Io.Threaded = .init(self.allocator, .{});
         defer io_threaded.deinit();
         const io = io_threaded.io();
 
         const result = std.process.run(self.allocator, io, .{
-            .argv = &.{ "/bin/sh", "-c", cmd },
+            .argv = argv_list.items,
         }) catch return null;
         defer self.allocator.free(result.stdout);
         defer self.allocator.free(result.stderr);
