@@ -31,7 +31,7 @@ pub fn generateSora(
     config: MediaConfig,
 ) !VideoResponse {
     const api_key = config.openai_api_key orelse return error.MissingApiKey;
-    var timer = Timer.start() catch unreachable;
+    var timer = try Timer.start();
 
     const model = request.model orelse "sora-2-2025-12-08";
     const size = request.size orelse "1280x720";
@@ -258,7 +258,7 @@ fn escapeJson(allocator: Allocator, s: []const u8) ![]u8 {
             },
             else => {
                 if (c < 0x20) {
-                    _ = std.fmt.bufPrint(result[i .. i + 6], "\\u{x:0>4}", .{c}) catch unreachable;
+                    _ = try std.fmt.bufPrint(result[i .. i + 6], "\\u{x:0>4}", .{c});
                     i += 6;
                 } else {
                     result[i] = c;

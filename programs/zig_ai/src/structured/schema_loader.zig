@@ -225,12 +225,12 @@ fn stringifyJsonValue(allocator: std.mem.Allocator, list: *std.ArrayListUnmanage
         .bool => |b| try list.appendSlice(allocator, if (b) "true" else "false"),
         .integer => |i| {
             var buf: [32]u8 = undefined;
-            const str = std.fmt.bufPrint(&buf, "{d}", .{i}) catch unreachable;
+            const str = try std.fmt.bufPrint(&buf, "{d}", .{i});
             try list.appendSlice(allocator, str);
         },
         .float => |f| {
             var buf: [64]u8 = undefined;
-            const str = std.fmt.bufPrint(&buf, "{d}", .{f}) catch unreachable;
+            const str = try std.fmt.bufPrint(&buf, "{d}", .{f});
             try list.appendSlice(allocator, str);
         },
         .number_string => |s| try list.appendSlice(allocator, s),
@@ -246,7 +246,7 @@ fn stringifyJsonValue(allocator: std.mem.Allocator, list: *std.ArrayListUnmanage
                     else => {
                         if (c < 0x20) {
                             var buf: [6]u8 = undefined;
-                            const hex = std.fmt.bufPrint(&buf, "\\u{x:0>4}", .{c}) catch unreachable;
+                            const hex = try std.fmt.bufPrint(&buf, "\\u{x:0>4}", .{c});
                             try list.appendSlice(allocator, hex);
                         } else {
                             try list.append(allocator, c);

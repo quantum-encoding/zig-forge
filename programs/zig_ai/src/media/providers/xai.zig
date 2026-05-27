@@ -40,7 +40,7 @@ pub fn generateGrokImage(
     config: MediaConfig,
 ) !ImageResponse {
     const api_key = config.xai_api_key orelse return error.MissingApiKey;
-    var timer = Timer.start() catch unreachable;
+    var timer = try Timer.start();
 
     // Build JSON payload
     const escaped_prompt = try escapeJson(allocator, request.prompt);
@@ -146,7 +146,7 @@ pub fn editGrokImage(
     config: MediaConfig,
 ) !ImageResponse {
     const api_key = config.xai_api_key orelse return error.MissingApiKey;
-    var timer = Timer.start() catch unreachable;
+    var timer = try Timer.start();
 
     // Read the first input image and encode as base64 data URI
     if (request.image_paths.len == 0) return error.InvalidResponse;
@@ -367,7 +367,7 @@ fn escapeJson(allocator: Allocator, s: []const u8) ![]u8 {
             },
             else => {
                 if (c < 0x20) {
-                    _ = std.fmt.bufPrint(result[i .. i + 6], "\\u{x:0>4}", .{c}) catch unreachable;
+                    _ = try std.fmt.bufPrint(result[i .. i + 6], "\\u{x:0>4}", .{c});
                     i += 6;
                 } else {
                     result[i] = c;

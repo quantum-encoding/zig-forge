@@ -123,7 +123,13 @@ pub const BatchExecutor = struct {
 
     /// Execute a single request (called by worker thread)
     fn executeRequest(self: *BatchExecutor, request: *const types.BatchRequest) void {
-        var timer = Timer.start() catch unreachable;
+        // Timer init can fail only if the monotonic clock is unavailable —
+        // in that case mark the request failed and bail rather than aborting
+        // the whole worker thread.
+        var timer = Timer.start() catch {
+            _ = self.failed.fetchAdd(1, .release);
+            return;
+        };
 
         var result = types.BatchResult{
             .id = request.id,
@@ -138,15 +144,13 @@ pub const BatchExecutor = struct {
             .allocator = self.allocator,
         };
 
-        // Duplicate prompt for result
-        result.prompt = self.allocator.dupe(u8, request.prompt) catch |err| {
-            result.prompt = self.allocator.dupe(u8, "[error copying prompt]") catch unreachable;
-            result.error_message = std.fmt.allocPrint(
-                self.allocator,
-                "Failed to allocate prompt: {any}",
-                .{err},
-            ) catch null;
-            self.storeResult(result);
+        // Duplicate prompt for result.
+        // If the prompt dupe fails the worker bails out without storing a
+        // half-initialized result. The previous code attempted a second
+        // (smaller) dupe as a fallback prompt — under genuine OOM that
+        // second dupe is just as likely to fail, and a `catch unreachable`
+        // would have SIGILL'd the whole batch worker.
+        result.prompt = self.allocator.dupe(u8, request.prompt) catch {
             _ = self.failed.fetchAdd(1, .release);
             return;
         };

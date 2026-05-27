@@ -244,7 +244,7 @@ pub fn buildBatchPayload(
             if (max_tokens != 64000) {
                 var num_buf: [32]u8 = undefined;
                 try payload.appendSlice(allocator, "\"maxOutputTokens\":");
-                try payload.appendSlice(allocator, std.fmt.bufPrint(&num_buf, "{d}", .{max_tokens}) catch unreachable);
+                try payload.appendSlice(allocator, try std.fmt.bufPrint(&num_buf, "{d}", .{max_tokens}));
                 has_field = true;
             }
 
@@ -252,7 +252,7 @@ pub fn buildBatchPayload(
                 if (has_field) try payload.append(allocator, ',');
                 try payload.appendSlice(allocator, "\"temperature\":");
                 var temp_buf: [32]u8 = undefined;
-                const temp_str = std.fmt.bufPrint(&temp_buf, "{d:.2}", .{t}) catch unreachable;
+                const temp_str = try std.fmt.bufPrint(&temp_buf, "{d:.2}", .{t});
                 try payload.appendSlice(allocator, temp_str);
             }
 

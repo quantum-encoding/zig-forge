@@ -33,7 +33,7 @@ pub fn generateGrokVideo(
     config: MediaConfig,
 ) !VideoResponse {
     const api_key = config.xai_api_key orelse return error.MissingApiKey;
-    var timer = Timer.start() catch unreachable;
+    var timer = try Timer.start();
 
     const model = request.model orelse "grok-imagine-video";
     const duration: u8 = request.duration orelse 6;
@@ -118,7 +118,7 @@ pub fn editGrokVideo(
     config: MediaConfig,
 ) !VideoResponse {
     const api_key = config.xai_api_key orelse return error.MissingApiKey;
-    var timer = Timer.start() catch unreachable;
+    var timer = try Timer.start();
 
     // Build JSON payload
     const escaped_prompt = try escapeJson(allocator, prompt);
@@ -359,7 +359,7 @@ fn escapeJson(allocator: Allocator, s: []const u8) ![]u8 {
             },
             else => {
                 if (c < 0x20) {
-                    _ = std.fmt.bufPrint(result[i .. i + 6], "\\u{x:0>4}", .{c}) catch unreachable;
+                    _ = try std.fmt.bufPrint(result[i .. i + 6], "\\u{x:0>4}", .{c});
                     i += 6;
                 } else {
                     result[i] = c;

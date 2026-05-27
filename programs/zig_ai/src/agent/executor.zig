@@ -428,7 +428,7 @@ pub const AgentExecutor = struct {
                         emit(.{ .tool_start = .{ .name = call.name, .reason = null } });
                     }
 
-                    var tool_timer = Timer.start() catch unreachable;
+                    var tool_timer = try Timer.start();
                     tool_calls_made += 1;
 
                     // Execute tool

@@ -35,7 +35,7 @@ pub fn generateImagenGenAI(
     config: MediaConfig,
 ) !ImageResponse {
     const api_key = config.genai_api_key orelse return error.MissingApiKey;
-    var timer = Timer.start() catch unreachable;
+    var timer = try Timer.start();
 
     // Build URL with API key
     const url = try std.fmt.allocPrint(allocator, "{s}?key={s}", .{ IMAGEN_GENAI_URL, api_key });
@@ -144,7 +144,7 @@ pub fn generateImagenVertex(
 ) !ImageResponse {
     const project_id = config.vertex_project_id orelse return error.MissingApiKey;
     const location = config.vertex_location;
-    var timer = Timer.start() catch unreachable;
+    var timer = try Timer.start();
 
     // Build Vertex AI URL
     const url = try std.fmt.allocPrint(
@@ -284,7 +284,7 @@ fn generateGeminiInternal(
     provider: types.ImageProvider,
 ) !ImageResponse {
     const api_key = config.genai_api_key orelse return error.MissingApiKey;
-    var timer = Timer.start() catch unreachable;
+    var timer = try Timer.start();
 
     const url = try std.fmt.allocPrint(allocator, "{s}?key={s}", .{ base_url, api_key });
     defer allocator.free(url);

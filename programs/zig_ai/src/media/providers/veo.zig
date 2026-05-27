@@ -36,7 +36,7 @@ pub fn generateVeo(
     config: MediaConfig,
 ) !VideoResponse {
     const api_key = config.genai_api_key orelse return error.MissingApiKey;
-    var timer = Timer.start() catch unreachable;
+    var timer = try Timer.start();
 
     const aspect_ratio = request.aspect_ratio orelse "16:9";
     const duration = request.duration orelse 8;
@@ -252,7 +252,7 @@ fn downloadWithCurl(allocator: Allocator, url: []const u8) ![]u8 {
 
     // Clean up URL file
     var rm_url: [256]u8 = undefined;
-    const rm_url_cmd = std.fmt.bufPrintZ(&rm_url, "rm -f {s}", .{url_file}) catch unreachable;
+    const rm_url_cmd = std.fmt.bufPrintZ(&rm_url, "rm -f {s}", .{url_file}) catch return error.CommandTooLong;
     _ = system(rm_url_cmd);
 
     if (result != 0) {
@@ -268,7 +268,7 @@ fn downloadWithCurl(allocator: Allocator, url: []const u8) ![]u8 {
 
     // Clean up temp file
     var rm_cmd: [256]u8 = undefined;
-    const rm_cmd_z = std.fmt.bufPrintZ(&rm_cmd, "rm -f {s}", .{tmp_path}) catch unreachable;
+    const rm_cmd_z = std.fmt.bufPrintZ(&rm_cmd, "rm -f {s}", .{tmp_path}) catch return error.CommandTooLong;
     _ = system(rm_cmd_z);
 
     const size_mb = @as(f64, @floatFromInt(video_data.len)) / (1024.0 * 1024.0);
@@ -335,7 +335,7 @@ fn escapeJson(allocator: Allocator, s: []const u8) ![]u8 {
             },
             else => {
                 if (c < 0x20) {
-                    _ = std.fmt.bufPrint(result[i .. i + 6], "\\u{x:0>4}", .{c}) catch unreachable;
+                    _ = try std.fmt.bufPrint(result[i .. i + 6], "\\u{x:0>4}", .{c});
                     i += 6;
                 } else {
                     result[i] = c;

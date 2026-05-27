@@ -374,7 +374,7 @@ pub const Orchestrator = struct {
                 .provider = task.provider,
             } });
 
-            var timer = Timer.start() catch unreachable;
+            var timer = try Timer.start();
             task.status = .running;
 
             self.runWorker(graph, task) catch {

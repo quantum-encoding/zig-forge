@@ -251,7 +251,7 @@ pub fn buildJsonlPayload(
         const effective_model = row.model orelse model;
 
         var id_buf: [32]u8 = undefined;
-        const default_id = std.fmt.bufPrint(&id_buf, "req-{d}", .{idx + 1}) catch unreachable;
+        const default_id = try std.fmt.bufPrint(&id_buf, "req-{d}", .{idx + 1});
         const custom_id = row.custom_id orelse default_id;
 
         var jw: std.json.Stringify = .{ .writer = &payload.writer, .options = .{} };

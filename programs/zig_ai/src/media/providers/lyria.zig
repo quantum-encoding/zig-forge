@@ -59,7 +59,7 @@ pub fn generateLyria(
     };
     defer if (config.vertex_project_id == null) allocator.free(project_id);
 
-    var timer = Timer.start() catch unreachable;
+    var timer = try Timer.start();
 
     // Get access token from gcloud
     std.debug.print("  Getting gcloud access token...\n", .{});
@@ -273,7 +273,7 @@ pub fn generateLyriaRealtime(
         return generateLyria(allocator, request, config);
     };
 
-    var timer = Timer.start() catch unreachable;
+    var timer = try Timer.start();
 
     std.debug.print("  Connecting to Lyria RealTime WebSocket...\n", .{});
 
@@ -329,7 +329,7 @@ pub fn generateLyriaRealtime(
     defer audio_data.deinit(allocator);
 
     const duration_secs: u64 = if (request.duration_seconds > 0) request.duration_seconds else 10;
-    var stream_timer = Timer.start() catch unreachable;
+    var stream_timer = try Timer.start();
     const max_time_ns: u64 = (duration_secs + 5) * std.time.ns_per_s; // duration + 5s buffer
 
     // Receive audio chunks

@@ -900,10 +900,10 @@ fn formatResultJsonl(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(
         var num_buf: [32]u8 = undefined;
         try out.appendSlice(allocator, ",\"input_tokens\":");
         // zig-lens-ignore: JSON-IN-FMT Numeric-only `{d}` format string; JSON tokens are in the appendSlice calls above/below, not in this bufPrint. Scanner triggered by 4-line lookahead.
-        try out.appendSlice(allocator, std.fmt.bufPrint(&num_buf, "{d}", .{r.input_tokens}) catch unreachable);
+        try out.appendSlice(allocator, try std.fmt.bufPrint(&num_buf, "{d}", .{r.input_tokens}));
         try out.appendSlice(allocator, ",\"output_tokens\":");
         // zig-lens-ignore: JSON-IN-FMT Numeric-only `{d}` format string; JSON tokens are in the surrounding appendSlice calls.
-        try out.appendSlice(allocator, std.fmt.bufPrint(&num_buf, "{d}", .{r.output_tokens}) catch unreachable);
+        try out.appendSlice(allocator, try std.fmt.bufPrint(&num_buf, "{d}", .{r.output_tokens}));
     }
     if (r.error_type) |et| {
         try out.appendSlice(allocator, ",\"error_type\":\"");
@@ -940,11 +940,11 @@ fn formatResultCsv(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8
     try out.append(allocator, ',');
     // input_tokens
     var buf: [16]u8 = undefined;
-    var s = std.fmt.bufPrint(&buf, "{d}", .{r.input_tokens}) catch unreachable;
+    var s = try std.fmt.bufPrint(&buf, "{d}", .{r.input_tokens});
     try out.appendSlice(allocator, s);
     try out.append(allocator, ',');
     // output_tokens
-    s = std.fmt.bufPrint(&buf, "{d}", .{r.output_tokens}) catch unreachable;
+    s = try std.fmt.bufPrint(&buf, "{d}", .{r.output_tokens});
     try out.appendSlice(allocator, s);
     try out.append(allocator, ',');
     // error

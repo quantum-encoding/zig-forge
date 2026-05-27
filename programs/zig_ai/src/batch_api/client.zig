@@ -197,7 +197,7 @@ pub fn buildBatchPayload(
         try payload.appendSlice(allocator, "\",\"max_tokens\":");
 
         var tok_buf: [16]u8 = undefined;
-        const tok_str = std.fmt.bufPrint(&tok_buf, "{}", .{max_tokens}) catch unreachable;
+        const tok_str = try std.fmt.bufPrint(&tok_buf, "{}", .{max_tokens});
         try payload.appendSlice(allocator, tok_str);
 
         // Temperature (optional)
@@ -205,7 +205,7 @@ pub fn buildBatchPayload(
         if (temp) |t| {
             try payload.appendSlice(allocator, ",\"temperature\":");
             var temp_buf: [32]u8 = undefined;
-            const temp_str = std.fmt.bufPrint(&temp_buf, "{d:.2}", .{t}) catch unreachable;
+            const temp_str = try std.fmt.bufPrint(&temp_buf, "{d:.2}", .{t});
             try payload.appendSlice(allocator, temp_str);
         }
 
@@ -527,7 +527,7 @@ pub fn escapeJsonString(allocator: std.mem.Allocator, list: *std.ArrayListUnmana
             else => {
                 if (c < 0x20) {
                     var buf: [6]u8 = undefined;
-                    const hex = std.fmt.bufPrint(&buf, "\\u{x:0>4}", .{c}) catch unreachable;
+                    const hex = try std.fmt.bufPrint(&buf, "\\u{x:0>4}", .{c});
                     try list.appendSlice(allocator, hex);
                 } else {
                     try list.append(allocator, c);

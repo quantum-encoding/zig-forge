@@ -69,7 +69,19 @@ fn testProviderToolCalling(
     model: []const u8,
     provider_name: []const u8,
 ) ProviderResult {
-    var timer = Timer.start() catch unreachable;
+    var timer = Timer.start() catch {
+        return .{
+            .provider = provider_name,
+            .model = model,
+            .success = false,
+            .tool_calls_received = 0,
+            .text_content_len = 0,
+            .input_tokens = 0,
+            .output_tokens = 0,
+            .latency_ms = 0,
+            .error_msg = "Timer.start failed (clock unavailable)",
+        };
+    };
 
     var client = ClientType.init(allocator, api_key) catch {
         return .{

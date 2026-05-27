@@ -436,7 +436,7 @@ fn saveMetadata(allocator: Allocator, response: *ImageResponse, store_dir: []con
     }
 
     // Get current timestamp using Timer
-    var timer = Timer.start() catch unreachable;
+    var timer = try Timer.start();
     const timestamp: i64 = @intCast(timer.read() / std.time.ns_per_s);
 
     const metadata = MediaMetadata{
@@ -549,7 +549,7 @@ fn getTimestampString(buf: *[20]u8) []const u8 {
 pub fn generateJobId(allocator: Allocator) ![]const u8 {
     var uuid_bytes: [16]u8 = undefined;
     // Use time + address space entropy for randomness
-    var timer = Timer.start() catch unreachable;
+    var timer = try Timer.start();
     const now = timer.read();
     const addr: u64 = @intFromPtr(&uuid_bytes);
     const seed: u64 = now ^ addr;

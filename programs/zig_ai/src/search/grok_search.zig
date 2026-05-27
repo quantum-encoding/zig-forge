@@ -166,12 +166,12 @@ fn buildPayload(allocator: std.mem.Allocator, request: types.SearchRequest) ![]u
     var num_buf: [32]u8 = undefined;
     try buf.appendSlice(allocator, ",\"max_output_tokens\":");
     // zig-lens-ignore: JSON-IN-FMT Numeric-only `{d}` format. JSON tokens live in appendSlice.
-    try buf.appendSlice(allocator, std.fmt.bufPrint(&num_buf, "{d}", .{request.max_output_tokens}) catch unreachable);
+    try buf.appendSlice(allocator, try std.fmt.bufPrint(&num_buf, "{d}", .{request.max_output_tokens}));
 
     if (request.max_turns) |mt| {
         try buf.appendSlice(allocator, ",\"max_turns\":");
         // zig-lens-ignore: JSON-IN-FMT Numeric-only `{d}` format.
-        try buf.appendSlice(allocator, std.fmt.bufPrint(&num_buf, "{d}", .{mt}) catch unreachable);
+        try buf.appendSlice(allocator, try std.fmt.bufPrint(&num_buf, "{d}", .{mt}));
     }
 
     try buf.append(allocator, '}'); // close root object
@@ -363,7 +363,7 @@ fn escapeJsonString(allocator: std.mem.Allocator, list: *std.ArrayListUnmanaged(
             else => {
                 if (c < 0x20) {
                     var hex_buf: [6]u8 = undefined;
-                    const hex = std.fmt.bufPrint(&hex_buf, "\\u{x:0>4}", .{c}) catch unreachable;
+                    const hex = try std.fmt.bufPrint(&hex_buf, "\\u{x:0>4}", .{c});
                     try list.appendSlice(allocator, hex);
                 } else {
                     try list.append(allocator, c);
