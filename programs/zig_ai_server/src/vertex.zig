@@ -1037,13 +1037,17 @@ fn handleStreamCore(
                         defer allocator.free(delta);
                         if (delta.len > 0) {
                             chunk_count += 1;
-                            const escaped = chat_mod.jsonEscape(allocator, delta) catch continue;
-                            defer allocator.free(escaped);
-                            const sse_event = std.fmt.allocPrint(allocator,
-                                "data: {{\"delta\":\"{s}\",\"index\":{d}}}\n\n", .{ escaped, chunk_count },
-                            ) catch continue;
-                            defer allocator.free(sse_event);
-                            body_writer.writer.writeAll(sse_event) catch break;
+                            // Audit (JSON-IN-FMT): the previous path
+                            // called `chat_mod.jsonEscape` then
+                            // interpolated into a JSON-shaped
+                            // allocPrint. Now: stream the SSE frame
+                            // directly through std.json.Stringify
+                            // (escape owned by the standard library,
+                            // zero intermediate allocation).
+                            writeSseDataEvent(&body_writer.writer, .{
+                                .delta = delta,
+                                .index = chunk_count,
+                            }) catch break;
                             body_writer.flush() catch break;
                         }
                     }
@@ -1321,10 +1325,24 @@ fn sendSseError(request: *http.Server.Request, message: []const u8) void {
             .{ .name = "access-control-allow-origin", .value = "*" },
         }, .keep_alive = false },
     }) catch return;
-    var eb: [256]u8 = undefined;
-    const ev = std.fmt.bufPrint(&eb, "data: {{\"error\":\"{s}\"}}\n\ndata: [DONE]\n\n", .{message}) catch "data: {\"error\":\"unknown\"}\n\ndata: [DONE]\n\n";
-    bw.writer.writeAll(ev) catch {};
+    // Audit (JSON-IN-FMT): the error frame is built through
+    // std.json.Stringify — see writeSseDataEvent for the helper.
+    // The bufPrint+format-string pattern would have honoured a
+    // `"` in `message`.
+    writeSseDataEvent(&bw.writer, .{ .@"error" = message }) catch {};
+    bw.writer.writeAll("data: [DONE]\n\n") catch {};
     bw.end() catch {};
+}
+
+/// Emit one SSE `data: <json>\n\n` event into `writer`. Mirrors the
+/// helper in stream.zig — Stringify owns the escape, no
+/// intermediate allocation. The outer `data: …\n\n` framing is
+/// SSE wire format, not part of the JSON payload.
+fn writeSseDataEvent(writer: *std.Io.Writer, value: anytype) !void {
+    try writer.writeAll("data: ");
+    var jw: std.json.Stringify = .{ .writer = writer, .options = .{} };
+    try jw.write(value);
+    try writer.writeAll("\n\n");
 }
 
 // ── Admin: Endpoint Management API ───────────────────────────

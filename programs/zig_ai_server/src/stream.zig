@@ -72,22 +72,18 @@ fn streamEventCallback(event: hs.ai.common.StreamEvent, context: ?*anyopaque) bo
         .text_delta => |td| {
             ctx.total_text_bytes += td.text.len;
 
-            const escaped = chat_mod.jsonEscape(ctx.allocator, td.text) catch {
-                ctx.errored = true;
-                return false;
-            };
-            defer ctx.allocator.free(escaped);
-
-            const sse_event = std.fmt.allocPrint(ctx.allocator,
-                "data: {{\"type\":\"content_delta\",\"delta\":{{\"text\":\"{s}\"}}}}\n\n",
-                .{escaped},
-            ) catch {
-                ctx.errored = true;
-                return false;
-            };
-            defer ctx.allocator.free(sse_event);
-
-            ctx.writer.writer.writeAll(sse_event) catch {
+            // Audit (JSON-IN-FMT): previously this path called
+            // `chat_mod.jsonEscape` then interpolated the result
+            // into a JSON-shaped `allocPrint` format string. Two
+            // allocations, two failure modes, escape-correctness
+            // by-convention. The new path streams the SSE frame
+            // directly into the body writer through
+            // std.json.Stringify — one writer, zero intermediate
+            // allocations, escape owned by the standard library.
+            writeSseDataEvent(&ctx.writer.writer, .{
+                .type = "content_delta",
+                .delta = .{ .text = td.text },
+            }) catch {
                 ctx.errored = true;
                 return false;
             };
@@ -354,15 +350,14 @@ fn handleStreamCore(
         }
     };
 
-    // Emit usage event
-    const usage_event = std.fmt.allocPrint(allocator,
-        "data: {{\"type\":\"usage\",\"input_tokens\":{d},\"output_tokens\":{d}}}\n\n",
-        .{ final_input_tokens, final_output_tokens },
-    ) catch "";
-    if (usage_event.len > 0) {
-        defer allocator.free(usage_event);
-        body_writer.writer.writeAll(usage_event) catch {};
-    }
+    // Emit usage event. Stream directly through Stringify — both
+    // interpolated values are u32 (safe by construction) but the
+    // hand-formatted JSON pattern is the one we're clearing.
+    writeSseDataEvent(&body_writer.writer, .{
+        .type = "usage",
+        .input_tokens = final_input_tokens,
+        .output_tokens = final_output_tokens,
+    }) catch {};
 
     // Done
     body_writer.writer.writeAll("data: {\"type\":\"done\"}\n\n") catch {};
@@ -405,13 +400,29 @@ fn sendSseError(request: *http.Server.Request, message: []const u8) void {
         },
     }) catch return;
 
-    var msg_buf: [512]u8 = undefined;
-    const event = std.fmt.bufPrint(
-        &msg_buf,
-        "data: {{\"type\":\"error\",\"message\":\"{s}\"}}\n\n",
-        .{message},
-    ) catch "data: {\"type\":\"error\",\"message\":\"internal error\"}\n\n";
-    body_writer.writer.writeAll(event) catch {};
+    // Stream the error event through std.json.Stringify — same
+    // pattern as the success path. Stringify owns the escape, so a
+    // message containing `"` or `\` round-trips cleanly. We write
+    // straight to the body_writer; no intermediate buffer needed
+    // (the SSE writer is itself buffered via stream_buf above).
+    writeSseDataEvent(&body_writer.writer, .{
+        .type = "error",
+        .message = message,
+    }) catch {};
     body_writer.writer.writeAll("data: {\"type\":\"done\"}\n\n") catch {};
     body_writer.end() catch {};
+}
+
+/// Emit one SSE `data: <json>\n\n` event into `writer`. Routes the
+/// JSON construction through `std.json.Stringify` so every string
+/// field is escaped by the standard library, removing the need for
+/// a hand-rolled `jsonEscape` step. `value` is any anonymous struct
+/// or named struct/array Stringify knows how to serialize; the
+/// outer `data: …\n\n` framing is wire-format SSE, not part of the
+/// JSON payload.
+fn writeSseDataEvent(writer: *std.Io.Writer, value: anytype) !void {
+    try writer.writeAll("data: ");
+    var jw: std.json.Stringify = .{ .writer = writer, .options = .{} };
+    try jw.write(value);
+    try writer.writeAll("\n\n");
 }
