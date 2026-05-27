@@ -522,7 +522,7 @@ test "models: unpopulated model returns null (parameters omitted on wire)" {
 
 test "models: /qai/v1/models JSON envelope has schema_version:1" {
     defer models.deinitModelParameters();
-    const body = buildModelsBodyForTest(testing.allocator);
+    const body = try buildModelsBodyForTest(testing.allocator);
     defer testing.allocator.free(body);
 
     // Must start with { and contain schema_version:1 near the top.
@@ -534,7 +534,7 @@ test "models: /qai/v1/models JSON envelope has schema_version:1" {
 
 test "models: populated model has parameters field in response JSON" {
     defer models.deinitModelParameters();
-    const body = buildModelsBodyForTest(testing.allocator);
+    const body = try buildModelsBodyForTest(testing.allocator);
     defer testing.allocator.free(body);
 
     // Find claude-opus-4-5 entry and confirm it carries a parameters field.
@@ -548,7 +548,7 @@ test "models: populated model has parameters field in response JSON" {
 
 test "models: unpopulated model omits parameters field in response JSON" {
     defer models.deinitModelParameters();
-    const body = buildModelsBodyForTest(testing.allocator);
+    const body = try buildModelsBodyForTest(testing.allocator);
     defer testing.allocator.free(body);
 
     // dall-e-3 has no parameter schema — the parameters key must NOT appear
@@ -562,8 +562,8 @@ test "models: unpopulated model omits parameters field in response JSON" {
     try testing.expect(std.mem.indexOf(u8, entry, "\"parameters\"") == null);
 }
 
-fn buildModelsBodyForTest(gpa: std.mem.Allocator) []u8 {
-    return models.buildModelsJson(gpa) catch unreachable;
+fn buildModelsBodyForTest(gpa: std.mem.Allocator) ![]u8 {
+    return models.buildModelsJson(gpa);
 }
 
 // ── 5. Security Limits Tests ────────────────────────────────

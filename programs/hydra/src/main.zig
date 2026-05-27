@@ -197,9 +197,9 @@ fn runBenchmark(allocator: std.mem.Allocator) !void {
     var q = try queen.Queen.init(allocator, 0, 10_000_000, .numeric_hash, &target);
     defer q.deinit();
 
-    const start_time = Instant.now() catch unreachable;
+    const start_time = try Instant.now();
     q.run() catch {};
-    const end_time = Instant.now() catch unreachable;
+    const end_time = try Instant.now();
 
     const elapsed_ms = @as(f64, @floatFromInt(end_time.since(start_time))) / 1e6;
     const stats = q.getStats();

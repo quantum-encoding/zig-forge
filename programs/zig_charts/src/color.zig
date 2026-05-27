@@ -45,6 +45,9 @@ pub const Color = struct {
 
     /// Convert to hex string (without #)
     pub fn toHex(self: Color, buf: *[6]u8) []const u8 {
+        // Output is always exactly 6 bytes (3 × {x:0>2}) into a 6-byte
+        // buffer — bufPrint cannot return NoSpaceLeft here.
+        // zig-lens-ignore: CATCH-UNREACHABLE Output is fixed 6 bytes into a 6-byte buffer; bufPrint cannot fail.
         _ = std.fmt.bufPrint(buf, "{x:0>2}{x:0>2}{x:0>2}", .{ self.r, self.g, self.b }) catch unreachable;
         return buf[0..6];
     }

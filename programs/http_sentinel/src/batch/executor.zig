@@ -202,15 +202,12 @@ pub const BatchExecutor = struct {
             .allocator = self.allocator,
         };
 
-        // Duplicate prompt for result
-        result.prompt = self.allocator.dupe(u8, request.prompt) catch |err| {
-            result.prompt = self.allocator.dupe(u8, "[error copying prompt]") catch unreachable;
-            result.error_message = std.fmt.allocPrint(
-                self.allocator,
-                "Failed to allocate prompt: {any}",
-                .{err},
-            ) catch null;
-            self.storeResult(result);
+        // Duplicate prompt for result. The previous code attempted a
+        // shorter fallback dupe under OOM and `catch unreachable`'d if
+        // even that failed — under genuine OOM the second allocation
+        // is just as likely to fail, so the worker now bails out cleanly
+        // without storing a half-initialized result.
+        result.prompt = self.allocator.dupe(u8, request.prompt) catch {
             _ = self.failed.fetchAdd(1, .release);
             return;
         };

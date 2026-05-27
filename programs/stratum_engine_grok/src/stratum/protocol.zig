@@ -47,7 +47,7 @@ pub const Parser = struct {
     pub fn init(allocator: std.mem.Allocator) Parser {
         return .{
             .allocator = allocator,
-            .buffer = std.ArrayList(u8).initCapacity(allocator, 0) catch unreachable,
+            .buffer = .empty,
         };
     }
 

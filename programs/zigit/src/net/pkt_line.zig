@@ -53,7 +53,7 @@ pub fn writeData(w: *std.Io.Writer, payload: []const u8) !void {
     if (payload.len > max_payload) return error.PktLinePayloadTooLong;
     const total: u16 = @intCast(payload.len + 4);
     var prefix_buf: [4]u8 = undefined;
-    _ = std.fmt.bufPrint(&prefix_buf, "{x:0>4}", .{total}) catch unreachable;
+    _ = try std.fmt.bufPrint(&prefix_buf, "{x:0>4}", .{total});
     try w.writeAll(&prefix_buf);
     try w.writeAll(payload);
 }

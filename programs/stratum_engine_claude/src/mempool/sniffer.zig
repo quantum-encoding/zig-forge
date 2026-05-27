@@ -17,8 +17,9 @@ const RESET = "\x1b[0m";
 fn buildVersionMessage() ![125]u8 {
     var message: [125]u8 = undefined;
 
-    // Get current timestamp for payload
-    const now = @as(i64, @intCast((posix.clock_gettime(posix.CLOCK.REALTIME) catch unreachable).sec));
+    // Get current timestamp for payload.
+    const ts = try posix.clock_gettime(posix.CLOCK.REALTIME);
+    const now: i64 = @intCast(ts.sec);
 
     // --- Build Payload First (101 bytes) at offset 24 ---
     var offset: usize = 24;

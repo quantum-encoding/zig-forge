@@ -7,7 +7,7 @@ pub const FlateDecode = struct {
     /// Decompress FlateDecode data
     /// Returns decompressed data (caller owns memory)
     pub fn decode(allocator: std.mem.Allocator, compressed: []const u8) ![]u8 {
-        if (compressed.len == 0) return allocator.alloc(u8, 0) catch unreachable;
+        if (compressed.len == 0) return try allocator.alloc(u8, 0);
 
         // Try zlib format first (with header), then raw deflate
         return decodeZlib(allocator, compressed) catch {

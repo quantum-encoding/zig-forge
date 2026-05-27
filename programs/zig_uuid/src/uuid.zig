@@ -378,10 +378,12 @@ pub fn v5(namespace: UUID, name: []const u8) UUID {
 // Namespace UUIDs (for v3/v5)
 // ============================================================================
 
-pub const namespace_dns = parse("6ba7b810-9dad-11d1-80b4-00c04fd430c8") catch unreachable;
-pub const namespace_url = parse("6ba7b811-9dad-11d1-80b4-00c04fd430c8") catch unreachable;
-pub const namespace_oid = parse("6ba7b812-9dad-11d1-80b4-00c04fd430c8") catch unreachable;
-pub const namespace_x500 = parse("6ba7b814-9dad-11d1-80b4-00c04fd430c8") catch unreachable;
+// RFC 4122 §4.3 namespace UUIDs. Module-level const is already comptime;
+// a malformed string here is a build-time error rather than a runtime panic.
+pub const namespace_dns: UUID = parse("6ba7b810-9dad-11d1-80b4-00c04fd430c8") catch @compileError("invalid namespace_dns literal");
+pub const namespace_url: UUID = parse("6ba7b811-9dad-11d1-80b4-00c04fd430c8") catch @compileError("invalid namespace_url literal");
+pub const namespace_oid: UUID = parse("6ba7b812-9dad-11d1-80b4-00c04fd430c8") catch @compileError("invalid namespace_oid literal");
+pub const namespace_x500: UUID = parse("6ba7b814-9dad-11d1-80b4-00c04fd430c8") catch @compileError("invalid namespace_x500 literal");
 
 // ============================================================================
 // Tests

@@ -134,6 +134,11 @@ fn formatTz(tz_offset_minutes: i16, buf: *[8]u8) []const u8 {
     const abs: u16 = @intCast(@abs(tz_offset_minutes));
     const hh: u16 = abs / 60;
     const mm: u16 = abs % 60;
+    // The output is always exactly 5 bytes (e.g. "+0530") into an
+    // 8-byte buffer — bufPrint cannot return NoSpaceLeft here. The
+    // public signature stays infallible so the [_]u8 buffer pattern
+    // in format-string interpolation doesn't have to thread an error.
+    // zig-lens-ignore: CATCH-UNREACHABLE Output is fixed 5 bytes into an 8-byte buffer; bufPrint cannot fail.
     return std.fmt.bufPrint(buf, "{c}{d:0>2}{d:0>2}", .{ sign, hh, mm }) catch unreachable;
 }
 

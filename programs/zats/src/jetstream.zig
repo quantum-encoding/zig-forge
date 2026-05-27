@@ -642,18 +642,14 @@ test "jetstream store_dir propagation" {
     });
     try std.testing.expect(stream.file_store_ptr != null);
 
-    // Clean up
+    // Clean up. Each path is a comptime string literal; their `*const [N:0]u8`
+    // form coerces directly to `[*:0]const u8` for the libc unlink/rmdir
+    // calls, so the previous catch-unreachable dupeZ dance is unnecessary.
     defer {
         const dir = "/tmp/zats-test-js-sd/FSTREAM";
-        const wal = allocator.dupeZ(u8, dir ++ "/stream.wal") catch unreachable;
-        defer allocator.free(wal);
-        _ = std.c.unlink(wal.ptr);
-        const sdZ = allocator.dupeZ(u8, dir) catch unreachable;
-        defer allocator.free(sdZ);
-        _ = std.c.rmdir(sdZ.ptr);
-        const pZ = allocator.dupeZ(u8, "/tmp/zats-test-js-sd") catch unreachable;
-        defer allocator.free(pZ);
-        _ = std.c.rmdir(pZ.ptr);
+        _ = std.c.unlink(dir ++ "/stream.wal");
+        _ = std.c.rmdir(dir);
+        _ = std.c.rmdir("/tmp/zats-test-js-sd");
     }
 }
 
@@ -681,15 +677,9 @@ test "jetstream account info with storage" {
 
     defer {
         const dir = "/tmp/zats-test-js-acct/FILE";
-        const wal = allocator.dupeZ(u8, dir ++ "/stream.wal") catch unreachable;
-        defer allocator.free(wal);
-        _ = std.c.unlink(wal.ptr);
-        const sdZ = allocator.dupeZ(u8, dir) catch unreachable;
-        defer allocator.free(sdZ);
-        _ = std.c.rmdir(sdZ.ptr);
-        const pZ = allocator.dupeZ(u8, "/tmp/zats-test-js-acct") catch unreachable;
-        defer allocator.free(pZ);
-        _ = std.c.rmdir(pZ.ptr);
+        _ = std.c.unlink(dir ++ "/stream.wal");
+        _ = std.c.rmdir(dir);
+        _ = std.c.rmdir("/tmp/zats-test-js-acct");
     }
 
     const info = js.accountInfo();

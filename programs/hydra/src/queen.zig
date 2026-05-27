@@ -171,7 +171,7 @@ pub const Queen = struct {
                 .matches_found = 0,
                 .gpu_time_ns = 0,
                 .cpu_time_ns = 0,
-                .start_instant = Instant.now() catch unreachable,
+                .start_instant = try Instant.now(),
             },
             .max_batch_size = max_batch_size,
         };
@@ -199,7 +199,7 @@ pub const Queen = struct {
         std.debug.print("  Candidates per batch: {}\n", .{work_unit.Config.candidates_per_batch});
         std.debug.print("\n", .{});
 
-        var timer = Timer.start() catch unreachable;
+        var timer = try Timer.start();
         var last_report_time: u64 = 0;
         const report_interval_ns: u64 = 500_000_000; // 500ms
 

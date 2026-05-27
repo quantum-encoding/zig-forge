@@ -92,7 +92,7 @@ pub const OpenAITTSClient = struct {
                 else => {
                     if (c < 0x20) {
                         var buf: [6]u8 = undefined;
-                        const hex = std.fmt.bufPrint(&buf, "\\u{x:0>4}", .{c}) catch unreachable;
+                        const hex = try std.fmt.bufPrint(&buf, "\\u{x:0>4}", .{c});
                         try escaped_text.appendSlice(self.allocator, hex);
                     } else {
                         try escaped_text.append(self.allocator, c);

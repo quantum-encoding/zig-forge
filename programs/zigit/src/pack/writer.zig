@@ -280,10 +280,10 @@ test "addOfsDelta round-trip: writer → index_pack reads back deltified payload
 
     // Compute oids for the test (use the same hashing the runtime would).
     const computeOid = struct {
-        fn run(kind_bytes: []const u8, payload: []const u8) Oid {
+        fn run(kind_bytes: []const u8, payload: []const u8) !Oid {
             var hasher = std.crypto.hash.Sha1.init(.{});
             var hdr_buf: [32]u8 = undefined;
-            const hdr = std.fmt.bufPrint(&hdr_buf, "{s} {d}\x00", .{ kind_bytes, payload.len }) catch unreachable;
+            const hdr = try std.fmt.bufPrint(&hdr_buf, "{s} {d}\x00", .{ kind_bytes, payload.len });
             hasher.update(hdr);
             hasher.update(payload);
             var bytes: [20]u8 = undefined;
@@ -292,8 +292,8 @@ test "addOfsDelta round-trip: writer → index_pack reads back deltified payload
         }
     }.run;
 
-    const base_oid = computeOid("blob", base_payload);
-    const target_oid = computeOid("blob", target_payload);
+    const base_oid = try computeOid("blob", base_payload);
+    const target_oid = try computeOid("blob", target_payload);
 
     var w = try PackWriter.init(allocator, 2);
     defer w.deinit();

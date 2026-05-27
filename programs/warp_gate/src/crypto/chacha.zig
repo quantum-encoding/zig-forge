@@ -174,11 +174,11 @@ pub const KeyExchange = struct {
     secret_key: [32]u8,
     public_key: [32]u8,
 
-    pub fn generate() KeyExchange {
+    pub fn generate() !KeyExchange {
         var secret_key: [32]u8 = undefined;
         std.c.arc4random_buf(&secret_key, secret_key.len);
 
-        const public_key = std.crypto.dh.X25519.recoverPublicKey(secret_key) catch unreachable;
+        const public_key = try std.crypto.dh.X25519.recoverPublicKey(secret_key);
 
         return KeyExchange{
             .secret_key = secret_key,
@@ -238,10 +238,10 @@ test "sequence-based encryption" {
 }
 
 test "key exchange produces shared secret" {
-    var alice = KeyExchange.generate();
+    var alice = try KeyExchange.generate();
     defer alice.deinit();
 
-    var bob = KeyExchange.generate();
+    var bob = try KeyExchange.generate();
     defer bob.deinit();
 
     const alice_shared = try alice.computeShared(bob.public_key);

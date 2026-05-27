@@ -185,7 +185,7 @@ pub fn run(allocator: std.mem.Allocator, io: Io, environ: std.process.Environ, a
     repo = try zigit.Repository.discover(allocator, io);
 
     var store = repo.looseStore();
-    var commit_obj = try store.read(allocator, .{ .bytes = hexToBytes(head_oid_hex.?) });
+    var commit_obj = try store.read(allocator, .{ .bytes = try hexToBytes(head_oid_hex.?) });
     defer commit_obj.deinit(allocator);
     var parsed = try zigit.object.commit.parse(allocator, commit_obj.payload);
     defer parsed.deinit(allocator);
@@ -216,9 +216,9 @@ fn defaultPathFromUrl(allocator: std.mem.Allocator, url: []const u8) ![]const u8
     return try allocator.dupe(u8, trimmed);
 }
 
-fn hexToBytes(hex: [40]u8) [20]u8 {
+fn hexToBytes(hex: [40]u8) ![20]u8 {
     var out: [20]u8 = undefined;
-    _ = std.fmt.hexToBytes(&out, &hex) catch unreachable;
+    _ = try std.fmt.hexToBytes(&out, &hex);
     return out;
 }
 

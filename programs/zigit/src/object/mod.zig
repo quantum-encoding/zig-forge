@@ -22,11 +22,17 @@ pub const walker = @import("walker.zig");
 pub fn computeOid(kind: Kind, payload: []const u8) Oid {
     var hasher = std.crypto.hash.Sha1.init(.{});
     var header_buf: [32]u8 = undefined;
+    // 32 bytes is provably enough: longest header is "commit <u64>\0" =
+    // 6 + 1 + 20 (u64 max digits) + 1 = 28 chars. The catch-unreachable
+    // here is sound; the public Oid getter is widely called so it stays
+    // infallible to avoid cascading the error union through the entire
+    // git porcelain CLI.
     const header = std.fmt.bufPrint(
         &header_buf,
         "{s} {d}\x00",
         .{ kind.name(), payload.len },
-    ) catch unreachable; // 32 bytes is plenty for "tag <u64>\0"
+    // zig-lens-ignore: CATCH-UNREACHABLE 32-byte buffer comfortably fits the longest possible "kind <u64>\0" header (28 chars).
+    ) catch unreachable;
     hasher.update(header);
     hasher.update(payload);
     var bytes: [20]u8 = undefined;

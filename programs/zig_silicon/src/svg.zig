@@ -11,6 +11,9 @@ pub const Color = struct {
 
     pub fn toHex(self: Color) [7]u8 {
         var buf: [7]u8 = undefined;
+        // Output is always exactly 7 bytes ("#" + 6 hex) into a 7-byte
+        // buffer — bufPrint cannot return NoSpaceLeft here.
+        // zig-lens-ignore: CATCH-UNREACHABLE Output is fixed 7 bytes into a 7-byte buffer; bufPrint cannot fail.
         _ = std.fmt.bufPrint(&buf, "#{x:0>2}{x:0>2}{x:0>2}", .{ self.r, self.g, self.b }) catch unreachable;
         return buf;
     }

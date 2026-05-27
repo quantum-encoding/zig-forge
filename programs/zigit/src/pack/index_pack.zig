@@ -168,7 +168,7 @@ pub fn build(
     for (raws.items) |raw| {
         const resolved = try resolveAt(allocator, pack_bytes, raws.items, &offset_to_index, &resolved_cache, raw.start_offset);
         defer allocator.free(resolved.payload);
-        const oid = computeOid(resolved.kind, resolved.payload);
+        const oid = try computeOid(resolved.kind, resolved.payload);
         const crc = std.hash.crc.Crc32.hash(pack_bytes[@intCast(raw.start_offset)..@intCast(raw.end_offset)]);
         try entries.append(allocator, .{ .oid = oid, .offset = raw.start_offset, .crc32 = crc });
     }
@@ -291,21 +291,21 @@ fn findRefDeltaBase(
     // REF_DELTA proves common, build a side-map first.
     for (raws) |raw| {
         const r = try resolveAt(allocator, pack_bytes, raws, offset_to_index, cache, raw.start_offset);
-        const oid = computeOid(r.kind, r.payload);
+        const oid = try computeOid(r.kind, r.payload);
         if (oid.eql(base_oid)) return r;
         allocator.free(r.payload);
     }
     return null;
 }
 
-fn computeOid(kind: Kind, payload: []const u8) Oid {
+fn computeOid(kind: Kind, payload: []const u8) !Oid {
     var hasher = std.crypto.hash.Sha1.init(.{});
     var header_buf: [32]u8 = undefined;
-    const header = std.fmt.bufPrint(
+    const header = try std.fmt.bufPrint(
         &header_buf,
         "{s} {d}\x00",
         .{ kind.name(), payload.len },
-    ) catch unreachable;
+    );
     hasher.update(header);
     hasher.update(payload);
     var bytes: [20]u8 = undefined;
@@ -321,8 +321,8 @@ test "build idx for a fresh pack containing two blobs" {
 
     var oid_a: Oid = undefined;
     @memset(&oid_a.bytes, 0); // computed for real by addObject path; we need the oid for the assertion only
-    const oid_a_real = computeOid(.blob, "hello");
-    const oid_b_real = computeOid(.blob, "world");
+    const oid_a_real = try computeOid(.blob, "hello");
+    const oid_b_real = try computeOid(.blob, "world");
 
     var w = try PackWriter.init(allocator, 2);
     defer w.deinit();

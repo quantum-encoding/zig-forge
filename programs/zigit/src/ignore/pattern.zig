@@ -329,7 +329,11 @@ fn matchAt(segs: []const Segment, s_idx: usize, path: []const u8, p_idx: usize) 
 const testing = std.testing;
 
 fn compileOrPanic(line: []const u8) Pattern {
-    return (compile(testing.allocator, line) catch unreachable) orelse @panic("expected pattern");
+    const p = compile(testing.allocator, line) catch |err| std.debug.panic(
+        "compileOrPanic: compile failed for '{s}': {s}",
+        .{ line, @errorName(err) },
+    );
+    return p orelse @panic("expected pattern");
 }
 
 test "literal: matches exact name" {

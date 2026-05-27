@@ -654,16 +654,11 @@ test "stream with file store" {
     // Clean up test dir (stream will create subdirectory)
     const stream_dir = "/tmp/zats-test-stream-fs/TEST";
     defer {
-        // Clean up WAL + dirs
-        const wal = allocator.dupeZ(u8, stream_dir ++ "/stream.wal") catch unreachable;
-        defer allocator.free(wal);
-        _ = std.c.unlink(wal.ptr);
-        const sdZ = allocator.dupeZ(u8, stream_dir) catch unreachable;
-        defer allocator.free(sdZ);
-        _ = std.c.rmdir(sdZ.ptr);
-        const dZ = allocator.dupeZ(u8, dir) catch unreachable;
-        defer allocator.free(dZ);
-        _ = std.c.rmdir(dZ.ptr);
+        // Clean up WAL + dirs. Each path is a comptime literal; their
+        // `*const [N:0]u8` coerces to `[*:0]const u8` for libc directly.
+        _ = std.c.unlink(stream_dir ++ "/stream.wal");
+        _ = std.c.rmdir(stream_dir);
+        _ = std.c.rmdir(dir);
     }
 
     var s = try Stream.initWithStoreDir(allocator, .{

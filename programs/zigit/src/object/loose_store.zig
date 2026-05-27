@@ -234,7 +234,7 @@ test "round-trip a blob via tmp loose store" {
     var store = LooseStore.init(tmp.dir, io);
 
     const payload = "hello, zigit\n";
-    const oid = computeOid(.blob, payload);
+    const oid = try computeOid(.blob, payload);
     try store.write(allocator, .blob, payload, oid);
 
     var loaded = try store.read(allocator, oid);
@@ -253,7 +253,7 @@ test "write is a no-op on duplicate oid" {
 
     var store = LooseStore.init(tmp.dir, io);
     const payload = "double tap\n";
-    const oid = computeOid(.blob, payload);
+    const oid = try computeOid(.blob, payload);
 
     try store.write(allocator, .blob, payload, oid);
     try store.write(allocator, .blob, payload, oid);
@@ -271,7 +271,7 @@ test "resolvePrefix unique hit" {
     defer tmp.cleanup();
 
     var store = LooseStore.init(tmp.dir, io);
-    const oid = computeOid(.blob, "abc");
+    const oid = try computeOid(.blob, "abc");
     try store.write(allocator, .blob, "abc", oid);
 
     var hex: [40]u8 = undefined;
@@ -292,14 +292,14 @@ test "resolvePrefix miss returns ObjectNotFound" {
 }
 
 // Re-defined locally to avoid a circular import with object/mod.zig.
-fn computeOid(kind: Kind, payload: []const u8) Oid {
+fn computeOid(kind: Kind, payload: []const u8) !Oid {
     var hasher = std.crypto.hash.Sha1.init(.{});
     var header_buf: [32]u8 = undefined;
-    const header = std.fmt.bufPrint(
+    const header = try std.fmt.bufPrint(
         &header_buf,
         "{s} {d}\x00",
         .{ kind.name(), payload.len },
-    ) catch unreachable;
+    );
     hasher.update(header);
     hasher.update(payload);
     var bytes: [20]u8 = undefined;

@@ -85,7 +85,7 @@ pub const Tokenizer = struct {
                 // Byte fallback: encode each byte as <0xXX>
                 for (char_str) |byte| {
                     var byte_token: [6]u8 = undefined;
-                    _ = std.fmt.bufPrint(&byte_token, "<0x{X:0>2}>", .{byte}) catch unreachable;
+                    _ = try std.fmt.bufPrint(&byte_token, "<0x{X:0>2}>", .{byte});
                     if (self.vocab_map.get(&byte_token)) |id| {
                         try tokens.append(allocator, id);
                     }

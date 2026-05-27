@@ -87,9 +87,13 @@ pub const RsaPrivateKey = struct {
         const result = try self.allocator.alloc(u8, self.modulus_len);
         errdefer self.allocator.free(result);
 
-        // Fe.toBytes needs the full Fe-width buffer, then we copy out
+        // Fe.toBytes needs the full Fe-width buffer, then we copy out.
         var full_buf: [Fe.encoded_bytes]u8 = undefined;
-        sig_fe.toBytes(&full_buf, .big) catch unreachable;
+        // Buffer is sized exactly to Fe.encoded_bytes — toBytes cannot
+        // return a buffer-too-small error against this allocation. The
+        // enclosing sign() method returns an error union (the alloc at
+        // L87 already uses try); we propagate consistently here.
+        try sig_fe.toBytes(&full_buf, .big);
         // The signature is in the last modulus_len bytes (big-endian, leading zeros)
         @memcpy(result, full_buf[Fe.encoded_bytes - self.modulus_len ..][0..self.modulus_len]);
 

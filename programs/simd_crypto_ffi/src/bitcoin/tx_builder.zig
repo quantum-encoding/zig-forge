@@ -1040,33 +1040,33 @@ const TEST_PRIVKEY: [32]u8 = blk: {
     break :blk k;
 };
 
-fn buildVariantBuilder() TxBuilder {
+fn buildVariantBuilder() !TxBuilder {
     var builder = TxBuilder.init();
     builder.locktime = 0;
 
     // Two inputs, two outputs, distinct sequences so the prevouts/sequence
     // commitments differ between variants in observable ways.
-    builder.addInput(.{
+    try builder.addInput(.{
         .txid = [_]u8{0xa1} ** 32,
         .vout = 0,
         .value = 100000,
         .pubkey_hash = [_]u8{0xaa} ** 20,
         .derivation_index = 0,
         .sequence = 0xfffffffe, // RBF-disabled
-    }) catch unreachable;
-    builder.addInput(.{
+    });
+    try builder.addInput(.{
         .txid = [_]u8{0xb2} ** 32,
         .vout = 1,
         .value = 50000,
         .pubkey_hash = [_]u8{0xbb} ** 20,
         .derivation_index = 1,
         .sequence = DEFAULT_SEQUENCE,
-    }) catch unreachable;
+    });
 
     const dest_a = [_]u8{0xc3} ** 20;
     const dest_b = [_]u8{0xd4} ** 20;
-    builder.addP2wpkhOutput(80000, &dest_a) catch unreachable;
-    builder.addP2wpkhOutput(60000, &dest_b) catch unreachable;
+    try builder.addP2wpkhOutput(80000, &dest_a);
+    try builder.addP2wpkhOutput(60000, &dest_b);
 
     return builder;
 }
@@ -1077,7 +1077,7 @@ test "BIP143 sighash variants - hashes diverge per sighash type" {
     // variant commits to a different subset of the transaction. If the helpers
     // were still hardcoded to SIGHASH_ALL semantics (the pre-fix behavior),
     // these would collide.
-    const builder = buildVariantBuilder();
+    const builder = try buildVariantBuilder();
 
     const h_all = try computeSighashBip143(&builder, 0, &TEST_PRIVKEY, SIGHASH_ALL);
     const h_none = try computeSighashBip143(&builder, 0, &TEST_PRIVKEY, SIGHASH_NONE);
@@ -1096,7 +1096,7 @@ test "BIP143 sighash variants - hashes diverge per sighash type" {
 }
 
 test "BIP143 sighash ANYONECANPAY zeros hashPrevouts" {
-    const builder = buildVariantBuilder();
+    const builder = try buildVariantBuilder();
 
     // With ANYONECANPAY set, hashPrevouts must be 32 zero bytes regardless of
     // how many inputs the builder has.
@@ -1112,7 +1112,7 @@ test "BIP143 sighash ANYONECANPAY zeros hashPrevouts" {
 }
 
 test "BIP143 sighash SINGLE and NONE zero hashSequence" {
-    const builder = buildVariantBuilder();
+    const builder = try buildVariantBuilder();
 
     // ALL → real sequence commitment (non-zero for a builder with inputs).
     const seq_all = computeHashSequence(&builder, SIGHASH_ALL);
@@ -1127,7 +1127,7 @@ test "BIP143 sighash SINGLE and NONE zero hashSequence" {
 }
 
 test "BIP143 sighash hashOutputs - ALL vs SINGLE vs NONE" {
-    const builder = buildVariantBuilder();
+    const builder = try buildVariantBuilder();
 
     // SIGHASH_NONE → all zeros.
     try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 32), &computeHashOutputs(&builder, SIGHASH_NONE, 0));
@@ -1152,8 +1152,8 @@ test "BIP143 sighash uses per-input sequence" {
     // Two builders identical except for input[0].sequence. The sighash MUST
     // differ — proving step 7 (nSequence) reads input.sequence and not a
     // hardcoded DEFAULT_SEQUENCE.
-    var a = buildVariantBuilder();
-    var b = buildVariantBuilder();
+    var a = try buildVariantBuilder();
+    var b = try buildVariantBuilder();
     b.inputs[0].sequence = 0x00000001; // any value != a.inputs[0].sequence
 
     const h_a = try computeSighashBip143(&a, 0, &TEST_PRIVKEY, SIGHASH_ALL);

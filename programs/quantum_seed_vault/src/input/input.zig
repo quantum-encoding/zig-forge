@@ -352,7 +352,7 @@ fn exportGpioInput(pin: u8) !std.posix.fd_t {
 
     // Set direction to input
     var dir_path_buf: [64]u8 = undefined;
-    const dir_path_len = (std.fmt.bufPrint(&dir_path_buf, "/sys/class/gpio/gpio{d}/direction", .{pin}) catch unreachable).len;
+    const dir_path_len = (try std.fmt.bufPrint(&dir_path_buf, "/sys/class/gpio/gpio{d}/direction", .{pin})).len;
     dir_path_buf[dir_path_len] = 0;
 
     const dir_fd = try std.posix.openatZ(std.c.AT.FDCWD, dir_path_buf[0..dir_path_len :0], .{ .ACCMODE = .WRONLY }, 0);
@@ -363,7 +363,7 @@ fn exportGpioInput(pin: u8) !std.posix.fd_t {
 
     // Open value file for reading
     var val_path_buf: [64]u8 = undefined;
-    const val_path_len = (std.fmt.bufPrint(&val_path_buf, "/sys/class/gpio/gpio{d}/value", .{pin}) catch unreachable).len;
+    const val_path_len = (try std.fmt.bufPrint(&val_path_buf, "/sys/class/gpio/gpio{d}/value", .{pin})).len;
     val_path_buf[val_path_len] = 0;
 
     return try std.posix.openatZ(std.c.AT.FDCWD, val_path_buf[0..val_path_len :0], .{ .ACCMODE = .RDONLY }, 0);

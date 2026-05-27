@@ -113,7 +113,7 @@ pub fn main(init: std.process.Init) !void {
     {
         var timer = try Timer.start();
         for (0..iterations) |_| {
-            _ = uuid.parse("550e8400-e29b-41d4-a716-446655440000") catch unreachable;
+            _ = try uuid.parse("550e8400-e29b-41d4-a716-446655440000");
         }
         const elapsed = timer.read();
         const ns_per_op = @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(iterations));
