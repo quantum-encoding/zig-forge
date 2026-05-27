@@ -450,8 +450,12 @@ const Fragmented = struct {
 
     pub fn init(bp: *buffer.Provider, compressed: bool, message_type: Message.Type, value: []const u8) !Fragmented {
         var buf: std.ArrayList(u8) = .empty;
+        // Pre-allocate 2× expected size to avoid mid-stream re-allocation
+        // when add() calls extend the buffer. The appendSlice below is
+        // bounds-checked regardless — the ensure is a perf hint, not a
+        // safety precondition.
         try buf.ensureTotalCapacity(bp.allocator, value.len * 2);
-        buf.appendSliceAssumeCapacity(value);
+        try buf.appendSlice(bp.allocator, value);
 
         return .{
             .buf = buf,
@@ -479,8 +483,11 @@ const Fragmented = struct {
         if (total_len > self.max) {
             return error.TooLarge;
         }
+        // Size the buffer exactly. The bounds-checked appendSlice below
+        // performs the actual write; the precise-ensure avoids any
+        // growth overshoot on the final frame.
         try self.buf.ensureTotalCapacityPrecise(self.allocator, total_len);
-        self.buf.appendSliceAssumeCapacity(value);
+        try self.buf.appendSlice(self.allocator, value);
         return self.buf.items;
     }
 };
@@ -590,7 +597,7 @@ test "Reader: read too large" {
 
     var pair = t.SocketPair.init(.{});
     defer pair.deinit();
-    pair.textFrame(true, "hello world");
+    try pair.textFrame(true, "hello world");
     pair.sendBuf();
 
     var reader = testReader(.{ .max = 16, .static = 16 });
@@ -603,9 +610,9 @@ test "Reader: read too large over multiple fragments" {
 
     var pair = t.SocketPair.init(.{});
     defer pair.deinit();
-    pair.textFrame(false, "hello world");
-    pair.cont(false, " !!!_!!! ");
-    pair.cont(true, "how are you doing?");
+    try pair.textFrame(false, "hello world");
+    try pair.cont(false, " !!!_!!! ");
+    try pair.cont(true, "how are you doing?");
     pair.sendBuf();
 
     var reader = testReader(.{ .max = 32, .static = 32 });
@@ -618,7 +625,7 @@ test "Reader: exact read into static with no overflow" {
 
     var pair = t.SocketPair.init(.{});
     defer pair.deinit();
-    pair.textFrame(true, "hello!");
+    try pair.textFrame(true, "hello!");
     pair.sendBuf();
 
     var reader = testReader(.{ .max = 12, .static = 12 });
@@ -666,15 +673,15 @@ test "Reader: fuzz" {
                     const buf = scrap[0..random.intRangeAtMost(u32, 0, MAX_PAYLOAD_SIZE)];
                     random.bytes(buf);
                     if (is_fragmented == false) {
-                        writer.textFrame(true, buf);
+                        try writer.textFrame(true, buf);
                         expected[i] = .{ .type = .text, .data = try arena.dupe(u8, buf) };
                         i += 1;
                     } else {
                         if (fragment_count == 0) {
                             // the first part of our fragmented message
-                            writer.textFrame(is_fin, buf);
+                            try writer.textFrame(is_fin, buf);
                         } else {
-                            writer.cont(is_fin, buf);
+                            try writer.cont(is_fin, buf);
                         }
                         fragment_count += 1;
 
@@ -692,7 +699,7 @@ test "Reader: fuzz" {
                 },
                 9 => {
                     // empty ping
-                    writer.ping();
+                    try writer.ping();
                     expected[i] = .{ .type = .ping, .data = "" };
                     i += 1;
                 },
@@ -700,12 +707,12 @@ test "Reader: fuzz" {
                     // ping with data
                     const buf = scrap[0..random.intRangeAtMost(u32, 1, 125)];
                     random.bytes(buf);
-                    writer.pingPayload(buf);
+                    try writer.pingPayload(buf);
                     expected[i] = .{ .type = .ping, .data = try arena.dupe(u8, buf) };
                     i += 1;
                 },
                 11 => {
-                    writer.pong();
+                    try writer.pong();
                     expected[i] = .{ .type = .pong, .data = "" };
                     i += 1;
                 },

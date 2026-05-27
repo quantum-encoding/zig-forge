@@ -352,7 +352,7 @@ pub const MessageBuilder = struct {
     /// Add a field with tag and string value
     pub fn addField(self: *Self, tag: u16, value: []const u8) !void {
         var tag_buf: [16]u8 = undefined;
-        const tag_str = std.fmt.bufPrint(&tag_buf, "{d}=", .{tag}) catch unreachable;
+        const tag_str = try std.fmt.bufPrint(&tag_buf, "{d}=", .{tag});
         try self.buffer.appendSlice(self.allocator, tag_str);
         try self.buffer.appendSlice(self.allocator, value);
         try self.buffer.append(self.allocator, SOH);
@@ -360,8 +360,10 @@ pub const MessageBuilder = struct {
 
     /// Add a field with tag and integer value
     pub fn addIntField(self: *Self, tag: u16, value: anytype) !void {
+        // 32 bytes is enough for any decimal int up to u128; bufPrint
+        // returns error.NoSpaceLeft if the value exceeds it.
         var buf: [32]u8 = undefined;
-        const val_str = std.fmt.bufPrint(&buf, "{d}", .{value}) catch unreachable;
+        const val_str = try std.fmt.bufPrint(&buf, "{d}", .{value});
         try self.addField(tag, val_str);
     }
 
@@ -373,13 +375,13 @@ pub const MessageBuilder = struct {
 
     /// Add a field with tag and decimal value (formatted)
     pub fn addDecimalField(self: *Self, tag: u16, value: f64, precision: u8) !void {
-        var buf: [32]u8 = undefined;
+        var buf: [64]u8 = undefined;
         const val_str = switch (precision) {
-            2 => std.fmt.bufPrint(&buf, "{d:.2}", .{value}) catch unreachable,
-            4 => std.fmt.bufPrint(&buf, "{d:.4}", .{value}) catch unreachable,
-            6 => std.fmt.bufPrint(&buf, "{d:.6}", .{value}) catch unreachable,
-            8 => std.fmt.bufPrint(&buf, "{d:.8}", .{value}) catch unreachable,
-            else => std.fmt.bufPrint(&buf, "{d}", .{value}) catch unreachable,
+            2 => try std.fmt.bufPrint(&buf, "{d:.2}", .{value}),
+            4 => try std.fmt.bufPrint(&buf, "{d:.4}", .{value}),
+            6 => try std.fmt.bufPrint(&buf, "{d:.6}", .{value}),
+            8 => try std.fmt.bufPrint(&buf, "{d:.8}", .{value}),
+            else => try std.fmt.bufPrint(&buf, "{d}", .{value}),
         };
         try self.addField(tag, val_str);
     }
@@ -414,8 +416,9 @@ pub const MessageBuilder = struct {
         try addFieldTo(&body, self.allocator, Tag.SenderCompID, sender_comp_id);
         try addFieldTo(&body, self.allocator, Tag.TargetCompID, target_comp_id);
 
+        // u32 sequence — max 10 digits — comfortably fits in 16 bytes.
         var seq_buf: [16]u8 = undefined;
-        const seq_str = std.fmt.bufPrint(&seq_buf, "{d}", .{msg_seq_num}) catch unreachable;
+        const seq_str = try std.fmt.bufPrint(&seq_buf, "{d}", .{msg_seq_num});
         try addFieldTo(&body, self.allocator, Tag.MsgSeqNum, seq_str);
 
         try addFieldTo(&body, self.allocator, Tag.SendingTime, sending_time);
@@ -433,9 +436,10 @@ pub const MessageBuilder = struct {
         // BeginString (8)
         try addFieldTo(&msg, self.allocator, Tag.BeginString, FIX_SESSION_VERSION);
 
-        // BodyLength (9)
-        var len_buf: [16]u8 = undefined;
-        const len_str = std.fmt.bufPrint(&len_buf, "{d}", .{body_len}) catch unreachable;
+        // BodyLength (9) — usize on 64-bit needs up to 20 digits, so size
+        // generously and bubble the error if it ever overflows.
+        var len_buf: [24]u8 = undefined;
+        const len_str = try std.fmt.bufPrint(&len_buf, "{d}", .{body_len});
         try addFieldTo(&msg, self.allocator, Tag.BodyLength, len_str);
 
         // Append body
@@ -450,7 +454,7 @@ pub const MessageBuilder = struct {
 
         // CheckSum (10) - always 3 digits with leading zeros
         var cs_buf: [8]u8 = undefined;
-        const cs_str = std.fmt.bufPrint(&cs_buf, "{d:0>3}", .{checksum}) catch unreachable;
+        const cs_str = try std.fmt.bufPrint(&cs_buf, "{d:0>3}", .{checksum});
         try addFieldTo(&msg, self.allocator, Tag.CheckSum, cs_str);
 
         return try msg.toOwnedSlice(self.allocator);
@@ -458,7 +462,7 @@ pub const MessageBuilder = struct {
 
     fn addFieldTo(list: *Buffer, allocator: std.mem.Allocator, tag: u16, value: []const u8) !void {
         var tag_buf: [16]u8 = undefined;
-        const tag_str = std.fmt.bufPrint(&tag_buf, "{d}=", .{tag}) catch unreachable;
+        const tag_str = try std.fmt.bufPrint(&tag_buf, "{d}=", .{tag});
         try list.appendSlice(allocator, tag_str);
         try list.appendSlice(allocator, value);
         try list.append(allocator, SOH);
@@ -646,7 +650,7 @@ pub const CoinbaseSession = struct {
         try prehash.append(self.allocator, SOH);
 
         var seq_buf: [16]u8 = undefined;
-        const seq_str = std.fmt.bufPrint(&seq_buf, "{d}", .{self.outgoing_seq_num}) catch unreachable;
+        const seq_str = try std.fmt.bufPrint(&seq_buf, "{d}", .{self.outgoing_seq_num});
         try prehash.appendSlice(self.allocator, seq_str);
         try prehash.append(self.allocator, SOH);
 
@@ -669,8 +673,8 @@ pub const CoinbaseSession = struct {
         try builder.addField(Tag.Password, self.credentials.passphrase);
 
         // Signature
-        var sig_len_buf: [16]u8 = undefined;
-        const sig_len_str = std.fmt.bufPrint(&sig_len_buf, "{d}", .{signature.len}) catch unreachable;
+        var sig_len_buf: [24]u8 = undefined;
+        const sig_len_str = try std.fmt.bufPrint(&sig_len_buf, "{d}", .{signature.len});
         try builder.addField(Tag.RawDataLength, sig_len_str);
         try builder.addField(Tag.RawData, signature);
 

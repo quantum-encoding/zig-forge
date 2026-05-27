@@ -1325,7 +1325,11 @@ fn createProxyFromEnvVar(arena: Allocator, env_var_names: []const []const u8) !?
 
     const authorization: ?[]const u8 = if (uri.user != null or uri.password != null) a: {
         const authorization = try arena.alloc(u8, basic_authorization.valueLengthFromUri(uri));
-        assert(basic_authorization.value(uri, authorization).len == authorization.len);
+        // valueLengthFromUri sized the buffer exactly, so write() can only
+        // fail under genuinely-unreachable conditions; still propagate
+        // rather than crash if it ever does.
+        const written = try basic_authorization.value(uri, authorization);
+        assert(written.len == authorization.len);
         break :a authorization;
     } else null;
 
@@ -1354,20 +1358,22 @@ pub const basic_authorization = struct {
         const password: Uri.Component = uri.password orelse .empty;
 
         var dw: Writer.Discarding = .init(&.{});
-        user.formatUser(&dw.writer) catch unreachable; // discarding
+        // zig-lens-ignore: CATCH-UNREACHABLE Writer.Discarding has no underlying I/O — its drain is a no-op, so formatUser/formatPassword cannot return WriteFailed against this sink.
+        user.formatUser(&dw.writer) catch unreachable;
         const user_len = dw.count + dw.writer.end;
 
         dw.count = 0;
         dw.writer.end = 0;
-        password.formatPassword(&dw.writer) catch unreachable; // discarding
+        // zig-lens-ignore: CATCH-UNREACHABLE Same as above — Writer.Discarding is provably infallible.
+        password.formatPassword(&dw.writer) catch unreachable;
         const password_len = dw.count + dw.writer.end;
 
         return valueLength(@intCast(user_len), @intCast(password_len));
     }
 
-    pub fn value(uri: Uri, out: []u8) []u8 {
+    pub fn value(uri: Uri, out: []u8) Writer.Error![]u8 {
         var bw: Writer = .fixed(out);
-        write(uri, &bw) catch unreachable;
+        try write(uri, &bw);
         return bw.buffered();
     }
 
@@ -1376,9 +1382,12 @@ pub const basic_authorization = struct {
         var w: Writer = .fixed(&buf);
         const user: Uri.Component = uri.user orelse .empty;
         const password: Uri.Component = uri.user orelse .empty;
-        user.formatUser(&w) catch unreachable;
-        w.writeByte(':') catch unreachable;
-        password.formatPassword(&w) catch unreachable;
+        // A URI handed to us by a parser may carry over-long user/password
+        // components. Propagate WriteFailed so the caller can return an
+        // HTTP error rather than aborting the whole process.
+        try user.formatUser(&w);
+        try w.writeByte(':');
+        try password.formatPassword(&w);
         try out.print("Basic {b64}", .{w.buffered()});
     }
 };

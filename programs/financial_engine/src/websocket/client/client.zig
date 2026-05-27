@@ -159,7 +159,10 @@ pub const Client = struct {
         try sendHandshake(path, key, buf, &opts, self._compression_opts != null, stream);
 
         const res = try HandShakeReply.read(buf, key, &opts, self._compression_opts != null, stream);
-        errdefer self.close(.{ .code = 1001 }) catch unreachable;
+        // Best-effort close on handshake-post-read failure. We're already
+        // unwinding via errdefer, so a secondary write failure can only
+        // be swallowed — the original error propagates to the caller.
+        errdefer self.close(.{ .code = 1001 }) catch {};
 
         // Set up compression with agreed-on parameters
         if (res.compression) {
@@ -225,7 +228,11 @@ pub const Client = struct {
                     if (comptime std.meta.hasFn(Handler, "serverClose")) {
                         try handler.serverClose(message.data);
                     } else {
-                        self.close(.{}) catch unreachable;
+                        // Peer initiated CLOSE; we acknowledge and return.
+                        // The close-frame write is best-effort — if the
+                        // peer already tore down the TCP socket we still
+                        // need to exit the read loop cleanly.
+                        self.close(.{}) catch {};
                     }
                     return;
                 },
@@ -244,7 +251,11 @@ pub const Client = struct {
             // try to read a message from our buffer first, before trying to
             // get more data from the socket.
             const has_more, const message = reader.read() catch |err| {
-                self.close(.{ .code = 1002 }) catch unreachable;
+                // Best-effort protocol-error close (1002). We're about to
+                // propagate the original parse error and let the caller
+                // unwind; a failed close frame on top of that gets
+                // swallowed.
+                self.close(.{ .code = 1002 }) catch {};
                 return err;
             } orelse {
                 reader.fill(stream) catch |err| switch (err) {
@@ -254,7 +265,8 @@ pub const Client = struct {
                         return error.Closed;
                     },
                     else => {
-                        self.close(.{ .code = 1002 }) catch unreachable;
+                        // Same best-effort close path as the parse error branch above.
+                        self.close(.{ .code = 1002 }) catch {};
                         return err;
                     },
                 };
@@ -613,13 +625,23 @@ fn sendHandshake(path: []const u8, key: []const u8, buf: []u8, opts: *const Clie
     try stream.writeTimeout(0);
 }
 
+/// Wallclock milliseconds since the Unix epoch. Returns an error
+/// instead of crashing if REALTIME is unsupported — historically this
+/// site was a `catch unreachable` inside an inline blk: expression,
+/// which would SIGILL the entire trading process on the (rare) clock
+/// failure rather than time the handshake out.
+fn nowMs() !i64 {
+    const ts = try std.posix.clock_gettime(std.posix.CLOCK.REALTIME);
+    return @as(i64, @intCast(ts.sec)) * 1000 + @divTrunc(ts.nsec, 1_000_000);
+}
+
 const HandShakeReply = struct {
     compression: bool,
     over_read: usize,
 
     fn read(buf: []u8, key: []const u8, opts: *const Client.HandshakeOpts, compression: bool, stream: anytype) !HandShakeReply {
         const timeout_ms = opts.timeout_ms;
-        const deadline = blk: {const ts = std.posix.clock_gettime(std.posix.CLOCK.REALTIME) catch unreachable; break :blk @as(i64, @intCast(ts.sec)) * 1000 + @divTrunc(ts.nsec, 1_000_000);} + timeout_ms;
+        const deadline = (try nowMs()) + @as(i64, @intCast(timeout_ms));
         try stream.readTimeout(timeout_ms);
 
         var pos: usize = 0;
@@ -727,7 +749,7 @@ const HandShakeReply = struct {
                 }
             }
 
-            if (blk: {const ts = std.posix.clock_gettime(std.posix.CLOCK.REALTIME) catch unreachable; break :blk @as(i64, @intCast(ts.sec)) * 1000 + @divTrunc(ts.nsec, 1_000_000);} > deadline) {
+            if ((try nowMs()) > deadline) {
                 return error.Timeout;
             }
 
@@ -789,7 +811,7 @@ test "Client: handshake" {
         defer pair.deinit();
         try pair.client.writeAll("\r\n\r\n");
 
-        var client = testClient(pair.server);
+        var client = try testClient(pair.server);
         defer client.deinit();
         try t.expectError(error.InvalidHandshakeResponse, client.handshake("/", .{}));
     }
@@ -800,7 +822,7 @@ test "Client: handshake" {
         defer pair.deinit();
         try pair.client.writeAll("HTTP/1.1 200 OK\r\n\r\n");
 
-        var client = testClient(pair.server);
+        var client = try testClient(pair.server);
         defer client.deinit();
         try t.expectError(error.InvalidHandshakeResponse, client.handshake("/", .{}));
     }
@@ -811,7 +833,7 @@ test "Client: handshake" {
         defer pair.deinit();
         try pair.client.writeAll("HTTP/1.1 101 Switching Protocol\r\n\r\n");
 
-        var client = testClient(pair.server);
+        var client = try testClient(pair.server);
         defer client.deinit();
         try t.expectError(error.InvalidHandshakeResponse, client.handshake("/", .{}));
     }
@@ -822,7 +844,7 @@ test "Client: handshake" {
         defer pair.deinit();
         try pair.client.writeAll("HTTP/1.1 101 Switching Protocol\r\nUpgrade: nope\r\n\r\n");
 
-        var client = testClient(pair.server);
+        var client = try testClient(pair.server);
         defer client.deinit();
         try t.expectError(error.InvalidUpgradeHeader, client.handshake("/", .{}));
     }
@@ -833,7 +855,7 @@ test "Client: handshake" {
         defer pair.deinit();
         try pair.client.writeAll("HTTP/1.1 101 Switching Protocol\r\nUpgrade: websocket\r\n\r\n");
 
-        var client = testClient(pair.server);
+        var client = try testClient(pair.server);
         defer client.deinit();
         try t.expectError(error.InvalidHandshakeResponse, client.handshake("/", .{}));
     }
@@ -844,7 +866,7 @@ test "Client: handshake" {
         defer pair.deinit();
         try pair.client.writeAll("HTTP/1.1 101 Switching Protocol\r\nupgrade: WebSocket\r\nConnection: something\r\n\r\n");
 
-        var client = testClient(pair.server);
+        var client = try testClient(pair.server);
         defer client.deinit();
         try t.expectError(error.InvalidConnectionHeader, client.handshake("/", .{}));
     }
@@ -855,7 +877,7 @@ test "Client: handshake" {
         defer pair.deinit();
         try pair.client.writeAll("HTTP/1.1 101 Switching Protocol\r\nUpgrade: websocket\r\nConnection: upgrade\r\n\r\n");
 
-        var client = testClient(pair.server);
+        var client = try testClient(pair.server);
         defer client.deinit();
         try t.expectError(error.InvalidHandshakeResponse, client.handshake("/", .{}));
     }
@@ -866,7 +888,7 @@ test "Client: handshake" {
         defer pair.deinit();
         try pair.client.writeAll("HTTP/1.1 101 Switching Protocol\r\nupgrade: WebSocket\r\nConnection: UPGRADE\r\nSec-Websocket-Accept: INVALID_ACCEPT_HEADER_VALUE\r\n\r\n");
 
-        var client = testClient(pair.server);
+        var client = try testClient(pair.server);
         defer client.deinit();
         try t.expectError(error.InvalidWebsocketAcceptHeader, client.handshake("/", .{}));
     }
@@ -877,7 +899,7 @@ test "Client: handshake" {
         defer pair.deinit();
         try pair.client.writeAll("HTTP/1.1 101 Switching Protocol\r\nupgrade: WebSocket\r\nConnection: UPGRADE\r\nSec-Websocket-Accept: C/0nmHhBztSRGR1CwL6Tf4ZjwpY=\r\n\r\n");
 
-        var client = testClient(pair.server);
+        var client = try testClient(pair.server);
         defer client.deinit();
         try client.handshake("/", .{});
         try t.expectEqual(0, client._reader.pos);
@@ -889,7 +911,7 @@ test "Client: handshake" {
         defer pair.deinit();
         try pair.client.writeAll("HTTP/1.1 101 Switching Protocol\r\nupgrade: WebSocket\r\nConnection: UPGRADE\r\nSec-Websocket-Accept: C/0nmHhBztSRGR1CwL6Tf4ZjwpY=\r\n\r\nSome Random Data Which is Part Of the Next Message");
 
-        var client = testClient(pair.server);
+        var client = try testClient(pair.server);
         defer client.deinit();
         try client.handshake("/", .{});
         try t.expectEqual(50, client._reader.pos);
@@ -915,7 +937,7 @@ test "Client: write/read" {
     try t.expectEqual(.text, message.type);
     try t.expectString("9000", message.data);
 
-    client.close(.{}) catch unreachable;
+    try client.close(.{});
 }
 
 test "Client: close with code" {
@@ -929,7 +951,7 @@ test "Client: close with code" {
         .timeout_ms = 1000,
     });
 
-    client.close(.{ .code = 4002 }) catch unreachable;
+    try client.close(.{ .code = 4002 });
 }
 
 test "Client: with code and reason" {
@@ -943,7 +965,7 @@ test "Client: with code and reason" {
         .timeout_ms = 1000,
     });
 
-    client.close(.{ .code = 4002, .reason = "goodbye" }) catch unreachable;
+    try client.close(.{ .code = 4002, .reason = "goodbye" });
 }
 
 test "Client: Handler" {
@@ -979,11 +1001,11 @@ test "Client: Handler" {
     try t.expectEqual(true, h.closed);
 }
 
-fn testClient(stream: net.Stream) Client {
-    const bp = t.allocator.create(buffer.Provider) catch unreachable;
-    bp.* = buffer.Provider.init(t.allocator, .{ .count = 0, .size = 0, .max = 4096 }) catch unreachable;
+fn testClient(stream: net.Stream) !Client {
+    const bp = try t.allocator.create(buffer.Provider);
+    bp.* = try buffer.Provider.init(t.allocator, .{ .count = 0, .size = 0, .max = 4096 });
 
-    const reader_buf = bp.allocator.alloc(u8, 1024) catch unreachable;
+    const reader_buf = try bp.allocator.alloc(u8, 1024);
 
     return .{
         ._closed = false,
@@ -1041,7 +1063,11 @@ const ClientHandler = struct {
     }
 
     pub fn close(self: *ClientHandler) void {
-        self.client.close(.{}) catch unreachable;
+        // The readLoop Handler.close() protocol returns void, so any
+        // write failure during the courtesy close-ack is swallowed —
+        // we still mark the handler as closed so the test assertions
+        // about state transition fire correctly.
+        self.client.close(.{}) catch {};
         self.closed = true;
     }
 };

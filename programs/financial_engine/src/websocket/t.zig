@@ -44,27 +44,27 @@ pub const Writer = struct {
         self.buf.deinit(allocator);
     }
 
-    pub fn ping(self: *Writer) void {
+    pub fn ping(self: *Writer) !void {
         return self.pingPayload("");
     }
 
-    pub fn pong(self: *Writer) void {
+    pub fn pong(self: *Writer) !void {
         return self.frame(true, 10, "", 0);
     }
 
-    pub fn pingPayload(self: *Writer, payload: []const u8) void {
+    pub fn pingPayload(self: *Writer, payload: []const u8) !void {
         return self.frame(true, 9, payload, 0);
     }
 
-    pub fn textFrame(self: *Writer, fin: bool, payload: []const u8) void {
+    pub fn textFrame(self: *Writer, fin: bool, payload: []const u8) !void {
         return self.frame(fin, 1, payload, 0);
     }
 
-    pub fn cont(self: *Writer, fin: bool, payload: []const u8) void {
+    pub fn cont(self: *Writer, fin: bool, payload: []const u8) !void {
         return self.frame(fin, 0, payload, 0);
     }
 
-    pub fn frame(self: *Writer, fin: bool, op_code: u8, payload: []const u8, reserved: u8) void {
+    pub fn frame(self: *Writer, fin: bool, op_code: u8, payload: []const u8, reserved: u8) !void {
         var buf = &self.buf;
 
         const l = payload.len;
@@ -78,41 +78,43 @@ pub const Writer = struct {
             }
         }
 
-        // 2 byte header + length_of_length + mask + payload_length
+        // Pre-allocate the full frame in one shot (2 byte header +
+        // length_of_length + mask + payload). The safe append calls
+        // below check capacity each time — the ensureUnusedCapacity
+        // up front just avoids gradual reallocations.
         const needed = 2 + length_of_length + 4 + l;
-        buf.ensureUnusedCapacity(allocator, needed) catch unreachable;
+        try buf.ensureUnusedCapacity(allocator, needed);
 
         if (fin) {
-            buf.appendAssumeCapacity(128 | op_code | reserved);
+            try buf.append(allocator, 128 | op_code | reserved);
         } else {
-            buf.appendAssumeCapacity(op_code | reserved);
+            try buf.append(allocator, op_code | reserved);
         }
 
         if (length_of_length == 0) {
-            buf.appendAssumeCapacity(128 | @as(u8, @intCast(l)));
+            try buf.append(allocator, 128 | @as(u8, @intCast(l)));
         } else if (length_of_length == 2) {
-            buf.appendAssumeCapacity(128 | 126);
-            buf.appendAssumeCapacity(@intCast((l >> 8) & 0xFF));
-            buf.appendAssumeCapacity(@intCast(l & 0xFF));
+            try buf.append(allocator, 128 | 126);
+            try buf.append(allocator, @intCast((l >> 8) & 0xFF));
+            try buf.append(allocator, @intCast(l & 0xFF));
         } else {
-            buf.appendAssumeCapacity(128 | 127);
-            buf.appendAssumeCapacity(@intCast((l >> 56) & 0xFF));
-            buf.appendAssumeCapacity(@intCast((l >> 48) & 0xFF));
-            buf.appendAssumeCapacity(@intCast((l >> 40) & 0xFF));
-            buf.appendAssumeCapacity(@intCast((l >> 32) & 0xFF));
-            buf.appendAssumeCapacity(@intCast((l >> 24) & 0xFF));
-            buf.appendAssumeCapacity(@intCast((l >> 16) & 0xFF));
-            buf.appendAssumeCapacity(@intCast((l >> 8) & 0xFF));
-            buf.appendAssumeCapacity(@intCast(l & 0xFF));
+            try buf.append(allocator, 128 | 127);
+            try buf.append(allocator, @intCast((l >> 56) & 0xFF));
+            try buf.append(allocator, @intCast((l >> 48) & 0xFF));
+            try buf.append(allocator, @intCast((l >> 40) & 0xFF));
+            try buf.append(allocator, @intCast((l >> 32) & 0xFF));
+            try buf.append(allocator, @intCast((l >> 24) & 0xFF));
+            try buf.append(allocator, @intCast((l >> 16) & 0xFF));
+            try buf.append(allocator, @intCast((l >> 8) & 0xFF));
+            try buf.append(allocator, @intCast(l & 0xFF));
         }
 
         var mask: [4]u8 = undefined;
         self.random.random().bytes(&mask);
-        // var mask = [_]u8{1, 1, 1, 1};
 
-        buf.appendSliceAssumeCapacity(&mask);
+        try buf.appendSlice(allocator, &mask);
         for (payload, 0..) |b, i| {
-            buf.appendAssumeCapacity(b ^ mask[i & 3]);
+            try buf.append(allocator, b ^ mask[i & 3]);
         }
     }
 
@@ -193,16 +195,16 @@ pub const SocketPair = struct {
         self.client.close();
     }
 
-    pub fn pingPayload(self: *SocketPair, payload: []const u8) void {
-        self.writer.pingPayload(payload);
+    pub fn pingPayload(self: *SocketPair, payload: []const u8) !void {
+        try self.writer.pingPayload(payload);
     }
 
-    pub fn textFrame(self: *SocketPair, fin: bool, payload: []const u8) void {
-        self.writer.textFrame(fin, payload);
+    pub fn textFrame(self: *SocketPair, fin: bool, payload: []const u8) !void {
+        try self.writer.textFrame(fin, payload);
     }
 
-    pub fn cont(self: *SocketPair, fin: bool, payload: []const u8) void {
-        self.writer.cont(fin, payload);
+    pub fn cont(self: *SocketPair, fin: bool, payload: []const u8) !void {
+        try self.writer.cont(fin, payload);
     }
 
     pub fn sendBuf(self: *SocketPair) void {
