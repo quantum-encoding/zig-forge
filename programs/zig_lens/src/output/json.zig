@@ -1,5 +1,6 @@
 const std = @import("std");
 const models = @import("../models.zig");
+const security_patterns = @import("../analyzers/security_patterns.zig");
 
 pub const JsonWriter = struct {
     buf: *std.ArrayListUnmanaged(u8),
@@ -159,6 +160,28 @@ pub fn writeProjectReport(allocator: std.mem.Allocator, report: *const models.Pr
         }
     }
     try w.endObject();
+
+    // Scanner-coverage manifest — emitted in BOTH compact and full
+    // mode. Operators consuming the JSON (CI gates, dashboards)
+    // must see what each security rule does and does not catch, so
+    // a clean scan never reads as "this class is handled."
+    try w.key("scanner_coverage", false);
+    try w.beginArray();
+    for (security_patterns.rule_coverage, 0..) |rc, ri| {
+        if (ri > 0) try w.comma();
+        try w.newline();
+        try w.beginObject();
+        try w.key("rule_id", true);
+        try w.writeString(rc.id);
+        try w.key("summary", false);
+        try w.writeString(rc.summary);
+        try w.key("covers", false);
+        try w.writeString(rc.covers);
+        try w.key("does_not_cover", false);
+        try w.writeString(rc.does_not_cover);
+        try w.endObject();
+    }
+    try w.endArray();
 
     if (!compact) {
         // Full mode: include per-file details
@@ -346,6 +369,28 @@ fn writeFileReport(w: *JsonWriter, file: *const models.FileReport) !void {
             try w.writeInt(op.line);
             try w.key("risk", false);
             try w.writeString(@tagName(op.risk_level));
+            try w.endObject();
+        }
+        try w.endArray();
+    }
+
+    if (file.security_findings.items.len > 0) {
+        try w.key("security_findings", false);
+        try w.beginArray();
+        for (file.security_findings.items, 0..) |*sf, si| {
+            if (si > 0) try w.comma();
+            try w.newline();
+            try w.beginObject();
+            try w.key("rule_id", true);
+            try w.writeString(sf.rule_id);
+            try w.key("severity", false);
+            try w.writeString(@tagName(sf.severity));
+            try w.key("line", false);
+            try w.writeInt(sf.line);
+            try w.key("message", false);
+            try w.writeString(sf.message);
+            try w.key("snippet", false);
+            try w.writeString(sf.snippet);
             try w.endObject();
         }
         try w.endArray();

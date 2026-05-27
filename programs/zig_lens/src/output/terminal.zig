@@ -1,5 +1,6 @@
 const std = @import("std");
 const models = @import("../models.zig");
+const security_patterns = @import("../analyzers/security_patterns.zig");
 
 pub fn writeReport(allocator: std.mem.Allocator, report: *const models.ProjectReport) ![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -88,9 +89,8 @@ pub fn writeReport(allocator: std.mem.Allocator, report: *const models.ProjectRe
     // Security anti-patterns. Surfacing these at the end of the
     // terminal output puts them in the operator's line of sight at
     // the moment the scan completes — the rules are designed to be
-    // ship-blockers (matched against the C5/H/M findings from the
-    // zig_ai_server audit), so they shouldn't get buried behind a
-    // page of summary data.
+    // ship-blockers, so they shouldn't get buried behind a page of
+    // summary data.
     {
         var total: u32 = 0;
         for (report.files.items) |*f| total += @intCast(f.security_findings.items.len);
@@ -115,10 +115,38 @@ pub fn writeReport(allocator: std.mem.Allocator, report: *const models.ProjectRe
                 }
             }
         }
+
+        // Coverage panel — ALWAYS printed, even when the scan is
+        // clean. The whole point: a scanner that's read as a
+        // trusted gate must declare its gaps in-band, so "no
+        // findings" is never confused with "this class is
+        // handled." Each rule states what it catches and what it
+        // does NOT catch.
+        try appendFmt(allocator, &buf,
+            "\n\x1b[1mSecurity scanner coverage:\x1b[0m \x1b[2m(a clean scan \xe2\x89\xa0 \"no vulnerabilities\" \xe2\x80\x94 each rule has gaps)\x1b[0m\n",
+            .{},
+        );
+        for (security_patterns.rule_coverage) |rc| {
+            try appendFmt(allocator, &buf, "\n  \x1b[1m[{s}]\x1b[0m {s}\n", .{ rc.id, rc.summary });
+            try appendFmt(allocator, &buf, "    \x1b[32mCovers:\x1b[0m\n", .{});
+            try indentedBlock(allocator, &buf, rc.covers, "      ");
+            try appendFmt(allocator, &buf, "    \x1b[33mDoes NOT cover:\x1b[0m\n", .{});
+            try indentedBlock(allocator, &buf, rc.does_not_cover, "      ");
+        }
     }
 
     try buf.append(allocator, '\n');
     return buf.items;
+}
+
+fn indentedBlock(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), text: []const u8, indent: []const u8) !void {
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        try buf.appendSlice(allocator, indent);
+        try buf.appendSlice(allocator, line);
+        try buf.append(allocator, '\n');
+    }
 }
 
 fn appendFmt(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), comptime fmt: []const u8, args: anytype) !void {

@@ -7,6 +7,22 @@ const structure = @import("analyzers/structure.zig");
 const imports_analyzer = @import("analyzers/imports.zig");
 const unsafe_ops = @import("analyzers/unsafe_ops.zig");
 const security_patterns = @import("analyzers/security_patterns.zig");
+
+// Pull submodule test blocks into the `zig build test` discovery
+// graph. Without these references, the test runner only sees tests
+// declared in main.zig itself ("All 0 tests passed") even when the
+// analyzers have substantial test suites. Each referenced import is
+// otherwise unused at runtime — the compiler still walks it for
+// `test "…"` declarations.
+comptime {
+    _ = parser;
+    _ = structure;
+    _ = imports_analyzer;
+    _ = unsafe_ops;
+    _ = security_patterns;
+    _ = scanner;
+    _ = models;
+}
 const rust_analyzer = @import("analyzers/rust.zig");
 const c_analyzer = @import("analyzers/c_lang.zig");
 const python_analyzer = @import("analyzers/python.zig");
