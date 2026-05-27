@@ -194,8 +194,18 @@ pub const Builder = struct {
     pub fn sign(self: *Self, algorithm: Algorithm, secret: []const u8) ![]u8 {
         if (algorithm == .none) return Error.InvalidAlgorithm;
 
-        // Build header
-        const header = try std.fmt.allocPrint(self.allocator, "{{\"alg\":\"{s}\",\"typ\":\"JWT\"}}", .{algorithm.name()});
+        // Build header via std.json.Stringify. The values interpolated
+        // here are both library-controlled (algorithm.name() returns
+        // one of "HS256"/"HS384"/"HS512" after the .none rejection
+        // above; "JWT" is a static literal), so the previous
+        // allocPrint(\"{{\\\"alg\\\":\\\"{s}\\\"\")  pattern was
+        // safe-by-construction — but it kept the file on the
+        // JSON-IN-FMT scanner's hit list, and a trusted CI gate
+        // that ignores warnings normalizes ignoring real ones.
+        const header = try std.json.Stringify.valueAlloc(self.allocator, .{
+            .alg = algorithm.name(),
+            .typ = "JWT",
+        }, .{});
         defer self.allocator.free(header);
 
         // Build payload
@@ -221,114 +231,91 @@ pub const Builder = struct {
         return try std.fmt.allocPrint(self.allocator, "{s}.{s}.{s}", .{ header_b64, payload_b64, signature });
     }
 
-    /// Helper function to escape JSON strings
-    fn escapeJsonString(_: *Self, allocator: Allocator, input: []const u8) ![]u8 {
-        var escaped = std.array_list.AlignedManaged(u8, null).init(allocator);
-        defer escaped.deinit();
+    /// Build the JWT payload object via std.json.Stringify (streaming
+    /// writer). The previous implementation hand-built the JSON with
+    /// a mix of ArrayList.appendSlice for keys, a local
+    /// `escapeJsonString` for string values, and allocPrint for the
+    /// numeric `exp/nbf/iat` claims — every escape rule maintained
+    /// by hand, every claim wrapped in `\"key\":\"...\"` literals.
+    /// Routing the whole construction through Stringify gets us
+    /// escape correctness from the standard library and drops the
+    /// scanner's JSON-IN-FMT hits on this file to zero.
+    ///
+    /// Custom claims: legacy contract is `"key":val,...` (no
+    /// surrounding braces — the caller passes "object body" text
+    /// that the builder splices into the registered-claims object).
+    /// We preserve that contract by wrapping the bytes in `{...}`,
+    /// parsing them as a `std.json.Value` object, and emitting each
+    /// field through Stringify on the outer object. That gets us:
+    ///
+    ///   1. Defense in depth — custom bytes are validated as JSON
+    ///      before going on the wire; previously a caller could
+    ///      stuff invalid JSON in and only find out at verify time.
+    ///   2. Re-escape — even if a custom value contains a `"`, std.
+    ///      json.Stringify owns the output escape, so the token
+    ///      remains parseable.
+    fn buildPayload(self: *Self) ![]u8 {
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer aw.deinit();
+        var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
 
-        for (input) |byte| {
-            switch (byte) {
-                '"' => try escaped.appendSlice("\\\""),
-                '\\' => try escaped.appendSlice("\\\\"),
-                8 => try escaped.appendSlice("\\b"), // backspace
-                9 => try escaped.appendSlice("\\t"), // tab
-                10 => try escaped.appendSlice("\\n"), // newline
-                12 => try escaped.appendSlice("\\f"), // form feed
-                13 => try escaped.appendSlice("\\r"), // carriage return
-                0...7, 11, 14...31 => {
-                    // Other control characters - escape as \uXXXX
-                    var buf: [6]u8 = undefined;
-                    const hex = try std.fmt.bufPrint(&buf, "\\u{X:0>4}", .{byte});
-                    try escaped.appendSlice(hex);
-                },
-                else => try escaped.append(byte),
+        try jw.beginObject();
+
+        if (self.claims.iss) |v| {
+            try jw.objectField("iss");
+            try jw.write(v);
+        }
+        if (self.claims.sub) |v| {
+            try jw.objectField("sub");
+            try jw.write(v);
+        }
+        if (self.claims.aud) |v| {
+            try jw.objectField("aud");
+            try jw.write(v);
+        }
+        if (self.claims.exp) |v| {
+            try jw.objectField("exp");
+            try jw.write(v);
+        }
+        if (self.claims.nbf) |v| {
+            try jw.objectField("nbf");
+            try jw.write(v);
+        }
+        if (self.claims.iat) |v| {
+            try jw.objectField("iat");
+            try jw.write(v);
+        }
+        if (self.claims.jti) |v| {
+            try jw.objectField("jti");
+            try jw.write(v);
+        }
+
+        // Custom claims: parse the legacy `"key":val,...` body and
+        // re-emit each field through Stringify. Malformed custom
+        // JSON now errors loudly (Error.InvalidPayload) rather than
+        // silently producing a malformed token.
+        if (self.claims.custom) |custom| {
+            if (custom.len > 0) {
+                const wrapped = try self.allocator.alloc(u8, custom.len + 2);
+                defer self.allocator.free(wrapped);
+                wrapped[0] = '{';
+                @memcpy(wrapped[1 .. 1 + custom.len], custom);
+                wrapped[wrapped.len - 1] = '}';
+
+                const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, wrapped, .{}) catch return Error.InvalidPayload;
+                defer parsed.deinit();
+                if (parsed.value != .object) return Error.InvalidPayload;
+
+                var it = parsed.value.object.iterator();
+                while (it.next()) |entry| {
+                    try jw.objectField(entry.key_ptr.*);
+                    try jw.write(entry.value_ptr.*);
+                }
             }
         }
 
-        return try escaped.toOwnedSlice();
-    }
-
-    fn buildPayload(self: *Self) ![]u8 {
-        // Use managed array list for Zig 0.16 compatibility
-        var list = std.array_list.AlignedManaged(u8, null).init(self.allocator);
-        defer list.deinit();
-
-        try list.append('{');
-        var first = true;
-
-        if (self.claims.iss) |iss| {
-            if (!first) try list.append(',');
-            const escaped = try self.escapeJsonString(self.allocator, iss);
-            defer self.allocator.free(escaped);
-            try list.appendSlice("\"iss\":\"");
-            try list.appendSlice(escaped);
-            try list.append('"');
-            first = false;
-        }
-
-        if (self.claims.sub) |sub| {
-            if (!first) try list.append(',');
-            const escaped = try self.escapeJsonString(self.allocator, sub);
-            defer self.allocator.free(escaped);
-            try list.appendSlice("\"sub\":\"");
-            try list.appendSlice(escaped);
-            try list.append('"');
-            first = false;
-        }
-
-        if (self.claims.aud) |aud| {
-            if (!first) try list.append(',');
-            const escaped = try self.escapeJsonString(self.allocator, aud);
-            defer self.allocator.free(escaped);
-            try list.appendSlice("\"aud\":\"");
-            try list.appendSlice(escaped);
-            try list.append('"');
-            first = false;
-        }
-
-        if (self.claims.exp) |exp| {
-            if (!first) try list.append(',');
-            const exp_str = try std.fmt.allocPrint(self.allocator, "\"exp\":{d}", .{exp});
-            defer self.allocator.free(exp_str);
-            try list.appendSlice(exp_str);
-            first = false;
-        }
-
-        if (self.claims.nbf) |nbf| {
-            if (!first) try list.append(',');
-            const nbf_str = try std.fmt.allocPrint(self.allocator, "\"nbf\":{d}", .{nbf});
-            defer self.allocator.free(nbf_str);
-            try list.appendSlice(nbf_str);
-            first = false;
-        }
-
-        if (self.claims.iat) |iat| {
-            if (!first) try list.append(',');
-            const iat_str = try std.fmt.allocPrint(self.allocator, "\"iat\":{d}", .{iat});
-            defer self.allocator.free(iat_str);
-            try list.appendSlice(iat_str);
-            first = false;
-        }
-
-        if (self.claims.jti) |jti| {
-            if (!first) try list.append(',');
-            const escaped = try self.escapeJsonString(self.allocator, jti);
-            defer self.allocator.free(escaped);
-            try list.appendSlice("\"jti\":\"");
-            try list.appendSlice(escaped);
-            try list.append('"');
-            first = false;
-        }
-
-        // Append custom claims (should be valid JSON object content)
-        if (self.claims.custom) |custom| {
-            if (!first) try list.append(',');
-            try list.appendSlice(custom);
-        }
-
-        try list.append('}');
-
-        return try list.toOwnedSlice();
+        try jw.endObject();
+        return aw.toOwnedSlice();
     }
 };
 
