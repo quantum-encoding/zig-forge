@@ -42,10 +42,10 @@ pub fn create(
     // Step 1: Create empty batch with a generated name
     var ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.REALTIME, &ts);
-    const batch_name = try std.fmt.allocPrint(allocator, "zig-ai-batch-{d}", .{ts.sec});
-    defer allocator.free(batch_name);
+    var name_buf: [64]u8 = undefined;
+    const batch_name = try std.fmt.bufPrint(&name_buf, "zig-ai-batch-{d}", .{ts.sec});
 
-    const create_body = try std.fmt.allocPrint(allocator, "{{\"name\":\"{s}\"}}", .{batch_name});
+    const create_body = try std.json.Stringify.valueAlloc(allocator, .{ .name = batch_name }, .{});
     defer allocator.free(create_body);
 
     var http_client = try http_sentinel.HttpClient.init(allocator);
@@ -106,10 +106,10 @@ pub fn createFromPayload(
     // Step 1: Create empty batch
     var ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.REALTIME, &ts);
-    const batch_name = try std.fmt.allocPrint(allocator, "zig-ai-batch-{d}", .{ts.sec});
-    defer allocator.free(batch_name);
+    var name_buf: [64]u8 = undefined;
+    const batch_name = try std.fmt.bufPrint(&name_buf, "zig-ai-batch-{d}", .{ts.sec});
 
-    const create_body = try std.fmt.allocPrint(allocator, "{{\"name\":\"{s}\"}}", .{batch_name});
+    const create_body = try std.json.Stringify.valueAlloc(allocator, .{ .name = batch_name }, .{});
     defer allocator.free(create_body);
 
     var http_client = try http_sentinel.HttpClient.init(allocator);
@@ -311,76 +311,56 @@ fn buildBatchRequests(
     config: types.BatchCreateConfig,
     model: []const u8,
 ) ![]u8 {
-    var payload: std.ArrayListUnmanaged(u8) = .empty;
-    defer payload.deinit(allocator);
-
-    try payload.appendSlice(allocator, "{\"batch_requests\":[");
+    var payload: std.Io.Writer.Allocating = .init(allocator);
+    defer payload.deinit();
+    var jw: std.json.Stringify = .{ .writer = &payload.writer, .options = .{} };
+    try jw.beginObject();
+    try jw.objectField("batch_requests");
+    try jw.beginArray();
 
     for (rows, 0..) |row, idx| {
-        if (idx > 0) try payload.append(allocator, ',');
-
         const effective_model = row.model orelse model;
+        var id_buf: [32]u8 = undefined;
+        const default_id = std.fmt.bufPrint(&id_buf, "req-{d}", .{idx + 1}) catch unreachable;
+        const custom_id = row.custom_id orelse default_id;
 
-        // batch_request_id
-        const custom_id = row.custom_id orelse blk: {
-            break :blk try std.fmt.allocPrint(allocator, "req-{}", .{idx + 1});
-        };
-        const free_custom_id = row.custom_id == null;
-        defer if (free_custom_id) allocator.free(custom_id);
+        try jw.beginObject();
+        try jw.objectField("batch_request_id");
+        try jw.write(custom_id);
+        try jw.objectField("batch_request");
+        try jw.beginObject();
+        try jw.objectField("chat_get_completion");
+        try jw.beginObject();
+        try jw.objectField("model");
+        try jw.write(effective_model);
 
-        // Escape strings
-        var escaped_prompt: std.ArrayListUnmanaged(u8) = .empty;
-        defer escaped_prompt.deinit(allocator);
-        try client.escapeJsonString(allocator, &escaped_prompt, row.prompt);
-
-        var escaped_id: std.ArrayListUnmanaged(u8) = .empty;
-        defer escaped_id.deinit(allocator);
-        try client.escapeJsonString(allocator, &escaped_id, custom_id);
-
-        // Build request object
-        try payload.appendSlice(allocator, "{\"batch_request_id\":\"");
-        try payload.appendSlice(allocator, escaped_id.items);
-        try payload.appendSlice(allocator, "\",\"batch_request\":{\"chat_get_completion\":{\"model\":\"");
-        try payload.appendSlice(allocator, effective_model);
-        try payload.appendSlice(allocator, "\",\"messages\":[");
-
-        // System prompt (optional)
-        const sys = row.system_prompt orelse config.system_prompt;
-        if (sys) |sp| {
-            var escaped_sys: std.ArrayListUnmanaged(u8) = .empty;
-            defer escaped_sys.deinit(allocator);
-            try client.escapeJsonString(allocator, &escaped_sys, sp);
-            try payload.appendSlice(allocator, "{\"role\":\"system\",\"content\":\"");
-            try payload.appendSlice(allocator, escaped_sys.items);
-            try payload.appendSlice(allocator, "\"},");
+        try jw.objectField("messages");
+        try jw.beginArray();
+        if (row.system_prompt orelse config.system_prompt) |sp| {
+            try jw.write(.{ .role = "system", .content = sp });
         }
+        try jw.write(.{ .role = "user", .content = row.prompt });
+        try jw.endArray();
 
-        try payload.appendSlice(allocator, "{\"role\":\"user\",\"content\":\"");
-        try payload.appendSlice(allocator, escaped_prompt.items);
-        try payload.appendSlice(allocator, "\"}]");
-
-        // max_tokens (optional in xAI — only add if specified)
         const max_tokens = row.max_tokens orelse config.max_tokens;
-        if (max_tokens != 64000) { // Only add if non-default
-            var tok_buf: [32]u8 = undefined;
-            const tok_str = std.fmt.bufPrint(&tok_buf, ",\"max_tokens\":{}", .{max_tokens}) catch unreachable;
-            try payload.appendSlice(allocator, tok_str);
+        if (max_tokens != 64000) {
+            try jw.objectField("max_tokens");
+            try jw.write(max_tokens);
         }
 
-        // temperature (optional)
-        const temp = row.temperature orelse config.temperature;
-        if (temp) |t| {
-            try payload.appendSlice(allocator, ",\"temperature\":");
-            var temp_buf: [32]u8 = undefined;
-            const temp_str = std.fmt.bufPrint(&temp_buf, "{d:.2}", .{t}) catch unreachable;
-            try payload.appendSlice(allocator, temp_str);
+        if (row.temperature orelse config.temperature) |t| {
+            try jw.objectField("temperature");
+            try jw.print("{d:.2}", .{t});
         }
 
-        try payload.appendSlice(allocator, "}}}"); // close chat_get_completion, batch_request, item
+        try jw.endObject();
+        try jw.endObject();
+        try jw.endObject();
     }
 
-    try payload.appendSlice(allocator, "]}"); // close batch_requests array and root
-    return try allocator.dupe(u8, payload.items);
+    try jw.endArray();
+    try jw.endObject();
+    return try allocator.dupe(u8, payload.written());
 }
 
 // ---------------------------------------------------------------------------

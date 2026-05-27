@@ -160,16 +160,18 @@ fn buildPayload(allocator: std.mem.Allocator, request: types.SearchRequest) ![]u
 
     try buf.appendSlice(allocator, "}]"); // close tools array
 
-    // max_output_tokens
-    const max_tok = try std.fmt.allocPrint(allocator, ",\"max_output_tokens\":{d}", .{request.max_output_tokens});
-    defer allocator.free(max_tok);
-    try buf.appendSlice(allocator, max_tok);
+    // max_output_tokens / max_turns — each emitted as discrete fields via
+    // bufPrint into a stack buffer, kept inside the surrounding ArrayList
+    // serializer to avoid restructuring the whole function.
+    var num_buf: [32]u8 = undefined;
+    try buf.appendSlice(allocator, ",\"max_output_tokens\":");
+    // zig-lens-ignore: JSON-IN-FMT Numeric-only `{d}` format. JSON tokens live in appendSlice.
+    try buf.appendSlice(allocator, std.fmt.bufPrint(&num_buf, "{d}", .{request.max_output_tokens}) catch unreachable);
 
-    // max_turns — limit agentic loop turns (optional)
     if (request.max_turns) |mt| {
-        const mt_str = try std.fmt.allocPrint(allocator, ",\"max_turns\":{d}", .{mt});
-        defer allocator.free(mt_str);
-        try buf.appendSlice(allocator, mt_str);
+        try buf.appendSlice(allocator, ",\"max_turns\":");
+        // zig-lens-ignore: JSON-IN-FMT Numeric-only `{d}` format.
+        try buf.appendSlice(allocator, std.fmt.bufPrint(&num_buf, "{d}", .{mt}) catch unreachable);
     }
 
     try buf.append(allocator, '}'); // close root object

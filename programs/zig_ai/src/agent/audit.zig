@@ -51,16 +51,17 @@ pub const AuditLog = struct {
         success: bool,
         duration_ms: u64,
     ) void {
-        const ts = getTimestamp();
-        const ok_str: []const u8 = if (success) "true" else "false";
-        // Truncate args preview
         const preview = if (args_preview.len > 200) args_preview[0..200] else args_preview;
-
-        const line = std.fmt.allocPrint(self.allocator, "{{\"ts\":{d},\"agent\":\"{s}\",\"event\":\"tool\",\"tool\":\"{s}\",\"args\":\"{s}\",\"ok\":{s},\"ms\":{d}}}\n", .{
-            ts, agent_id, tool_name, preview, ok_str, duration_ms,
-        }) catch return;
+        const line = std.json.Stringify.valueAlloc(self.allocator, .{
+            .ts = getTimestamp(),
+            .agent = agent_id,
+            .event = "tool",
+            .tool = tool_name,
+            .args = preview,
+            .ok = success,
+            .ms = duration_ms,
+        }, .{}) catch return;
         defer self.allocator.free(line);
-
         self.writeLine(line);
     }
 
@@ -71,13 +72,13 @@ pub const AuditLog = struct {
         event_type: []const u8,
         details: []const u8,
     ) void {
-        const ts = getTimestamp();
-
-        const line = std.fmt.allocPrint(self.allocator, "{{\"ts\":{d},\"agent\":\"{s}\",\"event\":\"{s}\",\"details\":\"{s}\"}}\n", .{
-            ts, agent_id, event_type, details,
-        }) catch return;
+        const line = std.json.Stringify.valueAlloc(self.allocator, .{
+            .ts = getTimestamp(),
+            .agent = agent_id,
+            .event = event_type,
+            .details = details,
+        }, .{}) catch return;
         defer self.allocator.free(line);
-
         self.writeLine(line);
     }
 
@@ -87,13 +88,14 @@ pub const AuditLog = struct {
         phase: []const u8,
         details: []const u8,
     ) void {
-        const ts = getTimestamp();
-
-        const line = std.fmt.allocPrint(self.allocator, "{{\"ts\":{d},\"agent\":\"orchestrator\",\"event\":\"phase\",\"phase\":\"{s}\",\"details\":\"{s}\"}}\n", .{
-            ts, phase, details,
-        }) catch return;
+        const line = std.json.Stringify.valueAlloc(self.allocator, .{
+            .ts = getTimestamp(),
+            .agent = "orchestrator",
+            .event = "phase",
+            .phase = phase,
+            .details = details,
+        }, .{}) catch return;
         defer self.allocator.free(line);
-
         self.writeLine(line);
     }
 
@@ -106,19 +108,26 @@ pub const AuditLog = struct {
         output_tokens: u32,
         duration_ms: u64,
     ) void {
-        const ts = getTimestamp();
-
-        const line = std.fmt.allocPrint(self.allocator, "{{\"ts\":{d},\"agent\":\"orchestrator\",\"event\":\"task_status\",\"task\":\"{s}\",\"status\":\"{s}\",\"input_tokens\":{d},\"output_tokens\":{d},\"ms\":{d}}}\n", .{
-            ts, task_id, status, input_tokens, output_tokens, duration_ms,
-        }) catch return;
+        const line = std.json.Stringify.valueAlloc(self.allocator, .{
+            .ts = getTimestamp(),
+            .agent = "orchestrator",
+            .event = "task_status",
+            .task = task_id,
+            .status = status,
+            .input_tokens = input_tokens,
+            .output_tokens = output_tokens,
+            .ms = duration_ms,
+        }, .{}) catch return;
         defer self.allocator.free(line);
-
         self.writeLine(line);
     }
 
     fn writeLine(self: *AuditLog, line: []const u8) void {
         if (self.file) |f| {
             _ = std.c.fwrite(line.ptr, 1, line.len, f);
+            // Append newline for JSONL line framing.
+            const nl: [1]u8 = .{'\n'};
+            _ = std.c.fwrite(&nl, 1, 1, f);
             _ = fflush(f);
         }
     }

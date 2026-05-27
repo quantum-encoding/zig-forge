@@ -71,50 +71,35 @@ pub fn generateLyria(
     };
     defer allocator.free(access_token);
 
-    // Build JSON payload
-    const escaped_prompt = try escapeJson(allocator, request.prompt);
-    defer allocator.free(escaped_prompt);
-
-    // Build instance object
-    var instance_parts: std.ArrayListUnmanaged(u8) = .empty;
-    defer instance_parts.deinit(allocator);
-
-    try instance_parts.appendSlice(allocator, "{\"prompt\":\"");
-    try instance_parts.appendSlice(allocator, escaped_prompt);
-    try instance_parts.appendSlice(allocator, "\"");
-
-    // Add negative prompt if present
+    // Build JSON payload via structured Stringify.
+    var payload_buf: std.Io.Writer.Allocating = .init(allocator);
+    defer payload_buf.deinit();
+    var jw: std.json.Stringify = .{ .writer = &payload_buf.writer, .options = .{} };
+    try jw.beginObject();
+    try jw.objectField("instances");
+    try jw.beginArray();
+    try jw.beginObject();
+    try jw.objectField("prompt");
+    try jw.write(request.prompt);
     if (request.negative_prompt) |neg| {
-        const escaped_neg = try escapeJson(allocator, neg);
-        defer allocator.free(escaped_neg);
-        try instance_parts.appendSlice(allocator, ",\"negative_prompt\":\"");
-        try instance_parts.appendSlice(allocator, escaped_neg);
-        try instance_parts.appendSlice(allocator, "\"");
+        try jw.objectField("negative_prompt");
+        try jw.write(neg);
     }
-
-    // Add seed if present
     if (request.seed) |seed| {
-        var seed_buf: [32]u8 = undefined;
-        const seed_str = std.fmt.bufPrint(&seed_buf, ",\"seed\":{d}", .{seed}) catch unreachable;
-        try instance_parts.appendSlice(allocator, seed_str);
+        try jw.objectField("seed");
+        try jw.write(seed);
     }
-
-    try instance_parts.appendSlice(allocator, "}");
-
-    // Build parameters if no seed (sample_count only works without seed)
-    var params_json: []const u8 = "";
-    var params_owned = false;
+    try jw.endObject();
+    try jw.endArray();
     if (request.seed == null and request.count > 1) {
-        params_json = try std.fmt.allocPrint(allocator, ",\"parameters\":{{\"sample_count\":{d}}}", .{request.count});
-        params_owned = true;
+        try jw.objectField("parameters");
+        try jw.beginObject();
+        try jw.objectField("sample_count");
+        try jw.write(request.count);
+        try jw.endObject();
     }
-    defer if (params_owned) allocator.free(params_json);
-
-    const payload = try std.fmt.allocPrint(allocator,
-        "{{\"instances\":[{s}]{s}}}",
-        .{ instance_parts.items, params_json },
-    );
-    defer allocator.free(payload);
+    try jw.endObject();
+    const payload = payload_buf.written();
 
     // Build Vertex AI URL
     const url = try std.fmt.allocPrint(allocator,
@@ -473,58 +458,3 @@ fn createWavFile(allocator: Allocator, pcm_data: []const u8) ![]u8 {
     return wav_data;
 }
 
-fn escapeJson(allocator: Allocator, s: []const u8) ![]u8 {
-    var extra: usize = 0;
-    for (s) |c| {
-        switch (c) {
-            '"', '\\', '\n', '\r', '\t' => extra += 1,
-            else => if (c < 0x20) {
-                extra += 5;
-            },
-        }
-    }
-
-    const result = try allocator.alloc(u8, s.len + extra);
-    var i: usize = 0;
-
-    for (s) |c| {
-        switch (c) {
-            '"' => {
-                result[i] = '\\';
-                result[i + 1] = '"';
-                i += 2;
-            },
-            '\\' => {
-                result[i] = '\\';
-                result[i + 1] = '\\';
-                i += 2;
-            },
-            '\n' => {
-                result[i] = '\\';
-                result[i + 1] = 'n';
-                i += 2;
-            },
-            '\r' => {
-                result[i] = '\\';
-                result[i + 1] = 'r';
-                i += 2;
-            },
-            '\t' => {
-                result[i] = '\\';
-                result[i + 1] = 't';
-                i += 2;
-            },
-            else => {
-                if (c < 0x20) {
-                    _ = std.fmt.bufPrint(result[i .. i + 6], "\\u{x:0>4}", .{c}) catch unreachable;
-                    i += 6;
-                } else {
-                    result[i] = c;
-                    i += 1;
-                }
-            },
-        }
-    }
-
-    return result[0..i];
-}

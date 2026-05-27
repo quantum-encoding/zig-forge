@@ -56,10 +56,11 @@ pub fn create(
 
     // Step 3: Create batch
     const endpoint_url = detectEndpoint(effective_model);
-    const batch_payload = try std.fmt.allocPrint(allocator,
-        "{{\"input_file_id\":\"{s}\",\"endpoint\":\"{s}\",\"completion_window\":\"24h\"}}",
-        .{ file_id, endpoint_url },
-    );
+    const batch_payload = try std.json.Stringify.valueAlloc(allocator, .{
+        .input_file_id = file_id,
+        .endpoint = endpoint_url,
+        .completion_window = "24h",
+    }, .{});
     defer allocator.free(batch_payload);
 
     var http_client = try http_sentinel.HttpClient.init(allocator);
@@ -93,10 +94,11 @@ pub fn createFromPayload(
 
     // Create batch
     const endpoint_url = detectEndpoint(effective_model);
-    const batch_payload = try std.fmt.allocPrint(allocator,
-        "{{\"input_file_id\":\"{s}\",\"endpoint\":\"{s}\",\"completion_window\":\"24h\"}}",
-        .{ file_id, endpoint_url },
-    );
+    const batch_payload = try std.json.Stringify.valueAlloc(allocator, .{
+        .input_file_id = file_id,
+        .endpoint = endpoint_url,
+        .completion_window = "24h",
+    }, .{});
     defer allocator.free(batch_payload);
 
     var http_client = try http_sentinel.HttpClient.init(allocator);
@@ -240,130 +242,84 @@ pub fn buildJsonlPayload(
     const is_image = isImageEndpoint(endpoint_url);
     const is_responses = isResponsesEndpoint(endpoint_url);
 
-    var payload: std.ArrayListUnmanaged(u8) = .empty;
-    defer payload.deinit(allocator);
+    var payload: std.Io.Writer.Allocating = .init(allocator);
+    defer payload.deinit();
 
     for (rows, 0..) |row, idx| {
-        if (idx > 0) try payload.append(allocator, '\n');
+        if (idx > 0) try payload.writer.writeByte('\n');
 
         const effective_model = row.model orelse model;
 
-        // custom_id
-        const custom_id = row.custom_id orelse blk: {
-            const generated = try std.fmt.allocPrint(allocator, "req-{}", .{idx + 1});
-            break :blk generated;
-        };
-        const free_custom_id = row.custom_id == null;
-        defer if (free_custom_id) allocator.free(custom_id);
+        var id_buf: [32]u8 = undefined;
+        const default_id = std.fmt.bufPrint(&id_buf, "req-{d}", .{idx + 1}) catch unreachable;
+        const custom_id = row.custom_id orelse default_id;
 
-        // Escape strings
-        var escaped_prompt: std.ArrayListUnmanaged(u8) = .empty;
-        defer escaped_prompt.deinit(allocator);
-        try client.escapeJsonString(allocator, &escaped_prompt, row.prompt);
-
-        var escaped_id: std.ArrayListUnmanaged(u8) = .empty;
-        defer escaped_id.deinit(allocator);
-        try client.escapeJsonString(allocator, &escaped_id, custom_id);
-
-        // Line header: {"custom_id":"...","method":"POST","url":"...","body":
-        try payload.appendSlice(allocator, "{\"custom_id\":\"");
-        try payload.appendSlice(allocator, escaped_id.items);
-        try payload.appendSlice(allocator, "\",\"method\":\"POST\",\"url\":\"");
-        try payload.appendSlice(allocator, endpoint_url);
-        try payload.appendSlice(allocator, "\",\"body\":{\"model\":\"");
-        try payload.appendSlice(allocator, effective_model);
-        try payload.appendSlice(allocator, "\"");
+        var jw: std.json.Stringify = .{ .writer = &payload.writer, .options = .{} };
+        try jw.beginObject();
+        try jw.objectField("custom_id");
+        try jw.write(custom_id);
+        try jw.objectField("method");
+        try jw.write("POST");
+        try jw.objectField("url");
+        try jw.write(endpoint_url);
+        try jw.objectField("body");
+        try jw.beginObject();
+        try jw.objectField("model");
+        try jw.write(effective_model);
 
         if (is_image) {
-            // Image generation body: prompt, n, size, quality, response_format
-            try payload.appendSlice(allocator, ",\"prompt\":\"");
-            try payload.appendSlice(allocator, escaped_prompt.items);
-            try payload.appendSlice(allocator, "\",\"response_format\":\"b64_json\"");
+            try jw.objectField("prompt");
+            try jw.write(row.prompt);
+            try jw.objectField("response_format");
+            try jw.write("b64_json");
 
-            // n (number of images)
             const n = row.n orelse config.image_count;
             if (n != 1) {
-                var n_buf: [8]u8 = undefined;
-                const n_str = std.fmt.bufPrint(&n_buf, ",\"n\":{}", .{n}) catch unreachable;
-                try payload.appendSlice(allocator, n_str);
+                try jw.objectField("n");
+                try jw.write(n);
             }
-
-            // size
-            const size = row.size orelse config.image_size;
-            if (size) |sz| {
-                try payload.appendSlice(allocator, ",\"size\":\"");
-                try payload.appendSlice(allocator, sz);
-                try payload.appendSlice(allocator, "\"");
+            if (row.size orelse config.image_size) |sz| {
+                try jw.objectField("size");
+                try jw.write(sz);
             }
-
-            // quality
-            const quality = row.quality orelse config.image_quality;
-            if (quality) |q| {
-                try payload.appendSlice(allocator, ",\"quality\":\"");
-                try payload.appendSlice(allocator, q);
-                try payload.appendSlice(allocator, "\"");
+            if (row.quality orelse config.image_quality) |q| {
+                try jw.objectField("quality");
+                try jw.write(q);
             }
         } else if (is_responses) {
-            // Responses API body (GPT-5.2+): input, instructions, max_output_tokens
-            try payload.appendSlice(allocator, ",\"input\":\"");
-            try payload.appendSlice(allocator, escaped_prompt.items);
-            try payload.appendSlice(allocator, "\"");
+            try jw.objectField("input");
+            try jw.write(row.prompt);
 
-            // System prompt as instructions
-            const sys = row.system_prompt orelse config.system_prompt;
-            if (sys) |sp| {
-                var escaped_sys: std.ArrayListUnmanaged(u8) = .empty;
-                defer escaped_sys.deinit(allocator);
-                try client.escapeJsonString(allocator, &escaped_sys, sp);
-                try payload.appendSlice(allocator, ",\"instructions\":\"");
-                try payload.appendSlice(allocator, escaped_sys.items);
-                try payload.appendSlice(allocator, "\"");
+            if (row.system_prompt orelse config.system_prompt) |sp| {
+                try jw.objectField("instructions");
+                try jw.write(sp);
             }
 
-            // max_output_tokens (Responses API uses this, not max_tokens)
-            const max_tokens = row.max_tokens orelse config.max_tokens;
-            var tok_buf: [32]u8 = undefined;
-            const tok_str = std.fmt.bufPrint(&tok_buf, ",\"max_output_tokens\":{}", .{max_tokens}) catch unreachable;
-            try payload.appendSlice(allocator, tok_str);
+            try jw.objectField("max_output_tokens");
+            try jw.write(row.max_tokens orelse config.max_tokens);
         } else {
-            // Chat Completions body: messages, max_tokens, temperature
-            try payload.appendSlice(allocator, ",\"messages\":[");
-
-            // System prompt (optional)
-            const sys = row.system_prompt orelse config.system_prompt;
-            if (sys) |sp| {
-                var escaped_sys: std.ArrayListUnmanaged(u8) = .empty;
-                defer escaped_sys.deinit(allocator);
-                try client.escapeJsonString(allocator, &escaped_sys, sp);
-                try payload.appendSlice(allocator, "{\"role\":\"system\",\"content\":\"");
-                try payload.appendSlice(allocator, escaped_sys.items);
-                try payload.appendSlice(allocator, "\"},");
+            try jw.objectField("messages");
+            try jw.beginArray();
+            if (row.system_prompt orelse config.system_prompt) |sp| {
+                try jw.write(.{ .role = "system", .content = sp });
             }
+            try jw.write(.{ .role = "user", .content = row.prompt });
+            try jw.endArray();
 
-            try payload.appendSlice(allocator, "{\"role\":\"user\",\"content\":\"");
-            try payload.appendSlice(allocator, escaped_prompt.items);
-            try payload.appendSlice(allocator, "\"}]");
+            try jw.objectField("max_tokens");
+            try jw.write(row.max_tokens orelse config.max_tokens);
 
-            // max_tokens
-            const max_tokens = row.max_tokens orelse config.max_tokens;
-            var tok_buf: [32]u8 = undefined;
-            const tok_str = std.fmt.bufPrint(&tok_buf, ",\"max_tokens\":{}", .{max_tokens}) catch unreachable;
-            try payload.appendSlice(allocator, tok_str);
-
-            // temperature (optional)
-            const temp = row.temperature orelse config.temperature;
-            if (temp) |t| {
-                try payload.appendSlice(allocator, ",\"temperature\":");
-                var temp_buf: [32]u8 = undefined;
-                const temp_str = std.fmt.bufPrint(&temp_buf, "{d:.2}", .{t}) catch unreachable;
-                try payload.appendSlice(allocator, temp_str);
+            if (row.temperature orelse config.temperature) |t| {
+                try jw.objectField("temperature");
+                try jw.print("{d:.2}", .{t});
             }
         }
 
-        try payload.appendSlice(allocator, "}}"); // close body and line
+        try jw.endObject();
+        try jw.endObject();
     }
 
-    return try allocator.dupe(u8, payload.items);
+    return try allocator.dupe(u8, payload.written());
 }
 
 // ---------------------------------------------------------------------------

@@ -41,21 +41,27 @@ pub fn generateImagenGenAI(
     const url = try std.fmt.allocPrint(allocator, "{s}?key={s}", .{ IMAGEN_GENAI_URL, api_key });
     defer allocator.free(url);
 
-    // Build JSON payload
-    const escaped_prompt = try escapeJson(allocator, request.prompt);
-    defer allocator.free(escaped_prompt);
-
+    // Build JSON payload via structured Stringify.
     const count = @min(request.count, 4);
-    const aspect_part = if (request.aspect_ratio) |ar|
-        try std.fmt.allocPrint(allocator, ",\"aspectRatio\":\"{s}\"", .{ar})
-    else
-        try allocator.dupe(u8, "");
-    defer allocator.free(aspect_part);
-
-    const payload = try std.fmt.allocPrint(allocator,
-        \\{{"instances":[{{"prompt":"{s}"}}],"parameters":{{"sampleCount":{d}{s}}}}}
-    , .{ escaped_prompt, count, aspect_part });
-    defer allocator.free(payload);
+    var payload_buf: std.Io.Writer.Allocating = .init(allocator);
+    defer payload_buf.deinit();
+    var jw: std.json.Stringify = .{ .writer = &payload_buf.writer, .options = .{} };
+    try jw.beginObject();
+    try jw.objectField("instances");
+    try jw.beginArray();
+    try jw.write(.{ .prompt = request.prompt });
+    try jw.endArray();
+    try jw.objectField("parameters");
+    try jw.beginObject();
+    try jw.objectField("sampleCount");
+    try jw.write(count);
+    if (request.aspect_ratio) |ar| {
+        try jw.objectField("aspectRatio");
+        try jw.write(ar);
+    }
+    try jw.endObject();
+    try jw.endObject();
+    const payload = payload_buf.written();
 
     // Make HTTP request
     var client = try HttpClient.init(allocator);
@@ -152,21 +158,27 @@ pub fn generateImagenVertex(
     const access_token = try getGcloudAccessToken(allocator);
     defer allocator.free(access_token);
 
-    // Build JSON payload
-    const escaped_prompt = try escapeJson(allocator, request.prompt);
-    defer allocator.free(escaped_prompt);
-
+    // Build JSON payload via structured Stringify.
     const count = @min(request.count, 4);
-    const aspect_part = if (request.aspect_ratio) |ar|
-        try std.fmt.allocPrint(allocator, ",\"aspectRatio\":\"{s}\"", .{ar})
-    else
-        try allocator.dupe(u8, "");
-    defer allocator.free(aspect_part);
-
-    const payload = try std.fmt.allocPrint(allocator,
-        \\{{"instances":[{{"prompt":"{s}"}}],"parameters":{{"sampleCount":{d}{s}}}}}
-    , .{ escaped_prompt, count, aspect_part });
-    defer allocator.free(payload);
+    var payload_buf: std.Io.Writer.Allocating = .init(allocator);
+    defer payload_buf.deinit();
+    var jw: std.json.Stringify = .{ .writer = &payload_buf.writer, .options = .{} };
+    try jw.beginObject();
+    try jw.objectField("instances");
+    try jw.beginArray();
+    try jw.write(.{ .prompt = request.prompt });
+    try jw.endArray();
+    try jw.objectField("parameters");
+    try jw.beginObject();
+    try jw.objectField("sampleCount");
+    try jw.write(count);
+    if (request.aspect_ratio) |ar| {
+        try jw.objectField("aspectRatio");
+        try jw.write(ar);
+    }
+    try jw.endObject();
+    try jw.endObject();
+    const payload = payload_buf.written();
 
     // Make HTTP request
     var client = try HttpClient.init(allocator);
@@ -277,20 +289,39 @@ fn generateGeminiInternal(
     const url = try std.fmt.allocPrint(allocator, "{s}?key={s}", .{ base_url, api_key });
     defer allocator.free(url);
 
-    // Build JSON payload
-    const escaped_prompt = try escapeJson(allocator, request.prompt);
-    defer allocator.free(escaped_prompt);
+    // Build JSON payload via structured Stringify.
+    var prompt_buf: std.Io.Writer.Allocating = .init(allocator);
+    defer prompt_buf.deinit();
+    try prompt_buf.writer.writeAll("Generate an image: ");
+    try prompt_buf.writer.writeAll(request.prompt);
 
-    const aspect_part = if (request.aspect_ratio) |ar|
-        try std.fmt.allocPrint(allocator, ",\"aspectRatio\":\"{s}\"", .{ar})
-    else
-        try allocator.dupe(u8, "");
-    defer allocator.free(aspect_part);
-
-    const payload = try std.fmt.allocPrint(allocator,
-        \\{{"contents":[{{"parts":[{{"text":"Generate an image: {s}"}}]}}],"generationConfig":{{"responseModalities":["IMAGE","TEXT"]{s}}}}}
-    , .{ escaped_prompt, aspect_part });
-    defer allocator.free(payload);
+    var payload_buf: std.Io.Writer.Allocating = .init(allocator);
+    defer payload_buf.deinit();
+    var jw: std.json.Stringify = .{ .writer = &payload_buf.writer, .options = .{} };
+    try jw.beginObject();
+    try jw.objectField("contents");
+    try jw.beginArray();
+    try jw.beginObject();
+    try jw.objectField("parts");
+    try jw.beginArray();
+    try jw.write(.{ .text = prompt_buf.written() });
+    try jw.endArray();
+    try jw.endObject();
+    try jw.endArray();
+    try jw.objectField("generationConfig");
+    try jw.beginObject();
+    try jw.objectField("responseModalities");
+    try jw.beginArray();
+    try jw.write("IMAGE");
+    try jw.write("TEXT");
+    try jw.endArray();
+    if (request.aspect_ratio) |ar| {
+        try jw.objectField("aspectRatio");
+        try jw.write(ar);
+    }
+    try jw.endObject();
+    try jw.endObject();
+    const payload = payload_buf.written();
 
     // Make HTTP request
     var client = try HttpClient.init(allocator);
@@ -390,60 +421,3 @@ fn getEnv(name: [*:0]const u8) ?[*:0]const u8 {
     return null;
 }
 
-/// Escape a string for JSON (allocates new string)
-fn escapeJson(allocator: Allocator, s: []const u8) ![]u8 {
-    // Count how much space we need
-    var extra: usize = 0;
-    for (s) |c| {
-        switch (c) {
-            '"', '\\', '\n', '\r', '\t' => extra += 1,
-            else => if (c < 0x20) {
-                extra += 5; // \u00XX
-            },
-        }
-    }
-
-    const result = try allocator.alloc(u8, s.len + extra);
-    var i: usize = 0;
-
-    for (s) |c| {
-        switch (c) {
-            '"' => {
-                result[i] = '\\';
-                result[i + 1] = '"';
-                i += 2;
-            },
-            '\\' => {
-                result[i] = '\\';
-                result[i + 1] = '\\';
-                i += 2;
-            },
-            '\n' => {
-                result[i] = '\\';
-                result[i + 1] = 'n';
-                i += 2;
-            },
-            '\r' => {
-                result[i] = '\\';
-                result[i + 1] = 'r';
-                i += 2;
-            },
-            '\t' => {
-                result[i] = '\\';
-                result[i + 1] = 't';
-                i += 2;
-            },
-            else => {
-                if (c < 0x20) {
-                    _ = std.fmt.bufPrint(result[i .. i + 6], "\\u{x:0>4}", .{c}) catch unreachable;
-                    i += 6;
-                } else {
-                    result[i] = c;
-                    i += 1;
-                }
-            },
-        }
-    }
-
-    return result[0..i];
-}

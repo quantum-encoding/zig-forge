@@ -897,9 +897,13 @@ fn formatResultJsonl(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(
         try out.append(allocator, '"');
     }
     if (r.input_tokens > 0 or r.output_tokens > 0) {
-        var buf: [64]u8 = undefined;
-        const s = std.fmt.bufPrint(&buf, ",\"input_tokens\":{d},\"output_tokens\":{d}", .{ r.input_tokens, r.output_tokens }) catch unreachable;
-        try out.appendSlice(allocator, s);
+        var num_buf: [32]u8 = undefined;
+        try out.appendSlice(allocator, ",\"input_tokens\":");
+        // zig-lens-ignore: JSON-IN-FMT Numeric-only `{d}` format string; JSON tokens are in the appendSlice calls above/below, not in this bufPrint. Scanner triggered by 4-line lookahead.
+        try out.appendSlice(allocator, std.fmt.bufPrint(&num_buf, "{d}", .{r.input_tokens}) catch unreachable);
+        try out.appendSlice(allocator, ",\"output_tokens\":");
+        // zig-lens-ignore: JSON-IN-FMT Numeric-only `{d}` format string; JSON tokens are in the surrounding appendSlice calls.
+        try out.appendSlice(allocator, std.fmt.bufPrint(&num_buf, "{d}", .{r.output_tokens}) catch unreachable);
     }
     if (r.error_type) |et| {
         try out.appendSlice(allocator, ",\"error_type\":\"");

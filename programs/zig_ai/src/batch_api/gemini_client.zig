@@ -242,9 +242,9 @@ pub fn buildBatchPayload(
             var has_field = false;
 
             if (max_tokens != 64000) {
-                var tok_buf: [16]u8 = undefined;
-                const tok_str = std.fmt.bufPrint(&tok_buf, "\"maxOutputTokens\":{}", .{max_tokens}) catch unreachable;
-                try payload.appendSlice(allocator, tok_str);
+                var num_buf: [32]u8 = undefined;
+                try payload.appendSlice(allocator, "\"maxOutputTokens\":");
+                try payload.appendSlice(allocator, std.fmt.bufPrint(&num_buf, "{d}", .{max_tokens}) catch unreachable);
                 has_field = true;
             }
 

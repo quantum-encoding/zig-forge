@@ -85,6 +85,7 @@ pub const BatchResult = struct {
         defer allocator.free(escaped_error);
 
         const provider_name = @tagName(self.provider);
+        // zig-lens-ignore: JSON-IN-FMT CSV row construction — fields pre-escaped via escapeCsvField; the `,"` markers are CSV not JSON.
         return try std.fmt.allocPrint(allocator,
             "{},{s},\"{s}\",\"{s}\",{},{},{d:.6},{},\"{s}\"\n",
             .{

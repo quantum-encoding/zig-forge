@@ -249,6 +249,7 @@ pub const GrokVoiceSession = struct {
         try json.appendSlice(self.allocator, self.config.output_format.encoding.toApiString());
         try json.appendSlice(self.allocator, "\",\"rate\":");
         var rate_buf: [16]u8 = undefined;
+        // zig-lens-ignore: JSON-IN-FMT Decimal-only format string (no JSON markers); surrounding ArrayList writes are the JSON. Triggered by scanner's 4-line context window, not by this bufPrint.
         const rate_str = std.fmt.bufPrint(&rate_buf, "{d}", .{self.config.output_format.sample_rate}) catch "24000";
         try json.appendSlice(self.allocator, rate_str);
         try json.appendSlice(self.allocator, "}},\"output\":{\"format\":{\"type\":\"");
@@ -382,6 +383,7 @@ pub fn writeWav(allocator: Allocator, pcm_data: []const u8, sample_rate: u32, bi
 fn extractJsonField(json: []const u8, field: []const u8) ?[]const u8 {
     // Search for "field":"value"
     var search_buf: [128]u8 = undefined;
+    // zig-lens-ignore: JSON-IN-FMT This builds a SEARCH NEEDLE for indexOf, not a JSON payload. The `"<field>":"` format is the literal JSON token we're scanning for in the response body.
     const needle = std.fmt.bufPrint(&search_buf, "\"{s}\":\"", .{field}) catch return null;
 
     const start = (std.mem.indexOf(u8, json, needle) orelse return null) + needle.len;

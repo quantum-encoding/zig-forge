@@ -217,26 +217,27 @@ pub const LyriaStream = struct {
             });
         }
 
-        // Build and send JSON message
-        var json: std.ArrayListUnmanaged(u8) = .empty;
-        defer json.deinit(self.allocator);
-
-        try json.appendSlice(self.allocator, "{\"client_content\":{\"weighted_prompts\":[");
-
-        for (prompts, 0..) |p, i| {
-            if (i > 0) try json.append(self.allocator, ',');
-            const escaped = try escapeJson(self.allocator, p.text);
-            defer self.allocator.free(escaped);
-            const prompt_json = try std.fmt.allocPrint(self.allocator,
-                "{{\"text\":\"{s}\",\"weight\":{d}}}",
-                .{ escaped, p.weight },
-            );
-            defer self.allocator.free(prompt_json);
-            try json.appendSlice(self.allocator, prompt_json);
+        // Build and send JSON message via structured Stringify.
+        var json: std.Io.Writer.Allocating = .init(self.allocator);
+        defer json.deinit();
+        var jw: std.json.Stringify = .{ .writer = &json.writer, .options = .{} };
+        try jw.beginObject();
+        try jw.objectField("client_content");
+        try jw.beginObject();
+        try jw.objectField("weighted_prompts");
+        try jw.beginArray();
+        for (prompts) |p| {
+            try jw.beginObject();
+            try jw.objectField("text");
+            try jw.write(p.text);
+            try jw.objectField("weight");
+            try jw.print("{d}", .{p.weight});
+            try jw.endObject();
         }
-
-        try json.appendSlice(self.allocator, "]}}");
-        try self.sendText(json.items);
+        try jw.endArray();
+        try jw.endObject();
+        try jw.endObject();
+        try self.sendText(json.written());
     }
 
     /// Update music generation config
@@ -245,58 +246,45 @@ pub const LyriaStream = struct {
             return error.NotConnected;
         }
 
-        var json: std.ArrayListUnmanaged(u8) = .empty;
-        defer json.deinit(self.allocator);
-
-        try json.appendSlice(self.allocator, "{\"music_generation_config\":{");
-
-        var first = true;
-
-        // Temperature
-        try json.appendSlice(self.allocator, "\"temperature\":");
-        try appendFloatUnmanaged(&json, self.allocator, config.temperature);
-        first = false;
-
-        // Guidance
-        if (!first) try json.append(self.allocator, ',');
-        try json.appendSlice(self.allocator, "\"guidance\":");
-        try appendFloatUnmanaged(&json, self.allocator, config.guidance);
-
-        // BPM
+        var json: std.Io.Writer.Allocating = .init(self.allocator);
+        defer json.deinit();
+        var jw: std.json.Stringify = .{ .writer = &json.writer, .options = .{} };
+        try jw.beginObject();
+        try jw.objectField("music_generation_config");
+        try jw.beginObject();
+        try jw.objectField("temperature");
+        try jw.print("{d}", .{config.temperature});
+        try jw.objectField("guidance");
+        try jw.print("{d}", .{config.guidance});
         if (config.bpm) |bpm| {
-            try json.append(self.allocator, ',');
-            const bpm_str = try std.fmt.allocPrint(self.allocator, "\"bpm\":{d}", .{bpm});
-            defer self.allocator.free(bpm_str);
-            try json.appendSlice(self.allocator, bpm_str);
+            try jw.objectField("bpm");
+            try jw.write(bpm);
         }
-
-        // Density
         if (config.density) |d| {
-            try json.append(self.allocator, ',');
-            try json.appendSlice(self.allocator, "\"density\":");
-            try appendFloatUnmanaged(&json, self.allocator, d);
+            try jw.objectField("density");
+            try jw.print("{d}", .{d});
         }
-
-        // Brightness
         if (config.brightness) |b| {
-            try json.append(self.allocator, ',');
-            try json.appendSlice(self.allocator, "\"brightness\":");
-            try appendFloatUnmanaged(&json, self.allocator, b);
+            try jw.objectField("brightness");
+            try jw.print("{d}", .{b});
         }
-
-        // Mute options
         if (config.mute_bass) {
-            try json.appendSlice(self.allocator, ",\"muteBass\":true");
+            try jw.objectField("muteBass");
+            try jw.write(true);
         }
         if (config.mute_drums) {
-            try json.appendSlice(self.allocator, ",\"muteDrums\":true");
+            try jw.objectField("muteDrums");
+            try jw.write(true);
         }
         if (config.only_bass_and_drums) {
-            try json.appendSlice(self.allocator, ",\"onlyBassAndDrums\":true");
+            try jw.objectField("onlyBassAndDrums");
+            try jw.write(true);
         }
-
-        try json.appendSlice(self.allocator, ",\"musicGenerationMode\":\"QUALITY\"}}");
-        try self.sendText(json.items);
+        try jw.objectField("musicGenerationMode");
+        try jw.write("QUALITY");
+        try jw.endObject();
+        try jw.endObject();
+        try self.sendText(json.written());
     }
 
     /// Start or resume playback
@@ -688,45 +676,6 @@ fn decodeBase64(allocator: Allocator, encoded: []const u8) ![]u8 {
     return buffer;
 }
 
-fn escapeJson(allocator: Allocator, s: []const u8) ![]u8 {
-    var extra: usize = 0;
-    for (s) |c| {
-        switch (c) {
-            '"', '\\', '\n', '\r', '\t' => extra += 1,
-            else => if (c < 0x20) { extra += 5; },
-        }
-    }
-
-    const result = try allocator.alloc(u8, s.len + extra);
-    var i: usize = 0;
-
-    for (s) |c| {
-        switch (c) {
-            '"' => { result[i] = '\\'; result[i + 1] = '"'; i += 2; },
-            '\\' => { result[i] = '\\'; result[i + 1] = '\\'; i += 2; },
-            '\n' => { result[i] = '\\'; result[i + 1] = 'n'; i += 2; },
-            '\r' => { result[i] = '\\'; result[i + 1] = 'r'; i += 2; },
-            '\t' => { result[i] = '\\'; result[i + 1] = 't'; i += 2; },
-            else => {
-                if (c < 0x20) {
-                    _ = std.fmt.bufPrint(result[i..][0..6], "\\u{x:0>4}", .{c}) catch unreachable;
-                    i += 6;
-                } else {
-                    result[i] = c;
-                    i += 1;
-                }
-            },
-        }
-    }
-
-    return result[0..i];
-}
-
-fn appendFloatUnmanaged(list: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, value: f32) !void {
-    var buf: [32]u8 = undefined;
-    const str = std.fmt.bufPrint(&buf, "{d:.2}", .{value}) catch "0";
-    try list.appendSlice(alloc, str);
-}
 
 // ============================================================================
 // Tests

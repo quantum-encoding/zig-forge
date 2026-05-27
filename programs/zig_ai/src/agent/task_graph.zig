@@ -344,86 +344,62 @@ pub const TaskGraph = struct {
 
     /// Serialize the graph to JSON
     pub fn toJson(self: *const TaskGraph, allocator: Allocator) ![]const u8 {
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
-        errdefer buf.deinit(allocator);
+        var buf: std.Io.Writer.Allocating = .init(allocator);
+        defer buf.deinit();
+        var jw: std.json.Stringify = .{ .writer = &buf.writer, .options = .{} };
+        try jw.beginObject();
+        try jw.objectField("tasks");
+        try jw.beginArray();
 
-        try buf.appendSlice(allocator, "{\"tasks\":[");
+        for (self.tasks.items) |task| {
+            try jw.beginObject();
+            try jw.objectField("id");
+            try jw.write(task.id);
+            try jw.objectField("description");
+            try jw.write(task.description);
+            try jw.objectField("prompt");
+            try jw.write(task.prompt);
+            try jw.objectField("provider");
+            try jw.write(task.provider);
 
-        for (self.tasks.items, 0..) |task, i| {
-            if (i > 0) try buf.append(allocator, ',');
-            try buf.appendSlice(allocator, "{\"id\":\"");
-            try appendJsonEscaped(&buf, allocator, task.id);
-            try buf.appendSlice(allocator, "\",\"description\":\"");
-            try appendJsonEscaped(&buf, allocator, task.description);
-            try buf.appendSlice(allocator, "\",\"prompt\":\"");
-            try appendJsonEscaped(&buf, allocator, task.prompt);
-            try buf.appendSlice(allocator, "\",\"provider\":\"");
-            try appendJsonEscaped(&buf, allocator, task.provider);
-            try buf.appendSlice(allocator, "\"");
+            try jw.objectField("model");
+            if (task.model) |m| try jw.write(m) else try jw.write(null);
 
-            if (task.model) |m| {
-                try buf.appendSlice(allocator, ",\"model\":\"");
-                try appendJsonEscaped(&buf, allocator, m);
-                try buf.appendSlice(allocator, "\"");
-            } else {
-                try buf.appendSlice(allocator, ",\"model\":null");
-            }
+            try jw.objectField("tools");
+            try jw.beginArray();
+            for (task.tools) |t| try jw.write(t);
+            try jw.endArray();
 
-            // tools array
-            try buf.appendSlice(allocator, ",\"tools\":[");
-            for (task.tools, 0..) |t, j| {
-                if (j > 0) try buf.append(allocator, ',');
-                try buf.appendSlice(allocator, "\"");
-                try appendJsonEscaped(&buf, allocator, t);
-                try buf.appendSlice(allocator, "\"");
-            }
-            try buf.appendSlice(allocator, "]");
+            try jw.objectField("dependencies");
+            try jw.beginArray();
+            for (task.dependencies) |d| try jw.write(d);
+            try jw.endArray();
 
-            // dependencies array
-            try buf.appendSlice(allocator, ",\"dependencies\":[");
-            for (task.dependencies, 0..) |d, j| {
-                if (j > 0) try buf.append(allocator, ',');
-                try buf.appendSlice(allocator, "\"");
-                try appendJsonEscaped(&buf, allocator, d);
-                try buf.appendSlice(allocator, "\"");
-            }
-            try buf.appendSlice(allocator, "]");
+            try jw.objectField("max_turns");
+            try jw.write(task.max_turns);
 
-            // max_turns
-            const mt = try std.fmt.allocPrint(allocator, ",\"max_turns\":{d}", .{task.max_turns});
-            defer allocator.free(mt);
-            try buf.appendSlice(allocator, mt);
+            try jw.objectField("status");
+            try jw.write(task.status.toString());
 
-            // runtime state
-            try buf.appendSlice(allocator, ",\"status\":\"");
-            try buf.appendSlice(allocator, task.status.toString());
-            try buf.appendSlice(allocator, "\"");
+            try jw.objectField("result");
+            if (task.result) |r| try jw.write(r) else try jw.write(null);
 
-            if (task.result) |r| {
-                try buf.appendSlice(allocator, ",\"result\":\"");
-                try appendJsonEscaped(&buf, allocator, r);
-                try buf.appendSlice(allocator, "\"");
-            } else {
-                try buf.appendSlice(allocator, ",\"result\":null");
-            }
+            try jw.objectField("error_msg");
+            if (task.error_msg) |e| try jw.write(e) else try jw.write(null);
 
-            if (task.error_msg) |e| {
-                try buf.appendSlice(allocator, ",\"error_msg\":\"");
-                try appendJsonEscaped(&buf, allocator, e);
-                try buf.appendSlice(allocator, "\"");
-            } else {
-                try buf.appendSlice(allocator, ",\"error_msg\":null");
-            }
+            try jw.objectField("input_tokens");
+            try jw.write(task.input_tokens);
+            try jw.objectField("output_tokens");
+            try jw.write(task.output_tokens);
+            try jw.objectField("duration_ns");
+            try jw.write(task.duration_ns);
 
-            const stats = try std.fmt.allocPrint(allocator, ",\"input_tokens\":{d},\"output_tokens\":{d},\"duration_ns\":{d}", .{ task.input_tokens, task.output_tokens, task.duration_ns });
-            defer allocator.free(stats);
-            try buf.appendSlice(allocator, stats);
-
-            try buf.append(allocator, '}');
+            try jw.endObject();
         }
 
-        try buf.appendSlice(allocator, "]}");
-        return buf.toOwnedSlice(allocator);
+        try jw.endArray();
+        try jw.endObject();
+        return allocator.dupe(u8, buf.written());
     }
 
     /// Get a task by ID (mutable)
@@ -485,22 +461,3 @@ pub const TaskGraph = struct {
     }
 };
 
-/// Append a JSON-escaped string to the buffer
-fn appendJsonEscaped(buf: *std.ArrayListUnmanaged(u8), allocator: Allocator, s: []const u8) !void {
-    for (s) |c| {
-        switch (c) {
-            '"' => try buf.appendSlice(allocator, "\\\""),
-            '\\' => try buf.appendSlice(allocator, "\\\\"),
-            '\n' => try buf.appendSlice(allocator, "\\n"),
-            '\r' => try buf.appendSlice(allocator, "\\r"),
-            '\t' => try buf.appendSlice(allocator, "\\t"),
-            else => {
-                if (c < 0x20) {
-                    // Control character - skip
-                } else {
-                    try buf.append(allocator, c);
-                }
-            },
-        }
-    }
-}

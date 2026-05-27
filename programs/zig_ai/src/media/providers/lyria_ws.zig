@@ -508,41 +508,49 @@ pub const LyriaSession = struct {
 
     /// Set weighted prompts
     pub fn setPrompts(self: *LyriaSession, prompts: []const WeightedPrompt) !void {
-        var json: std.ArrayListUnmanaged(u8) = .empty;
-        defer json.deinit(self.allocator);
-
-        try json.appendSlice(self.allocator, "{\"client_content\":{\"weighted_prompts\":[");
-
-        for (prompts, 0..) |p, i| {
-            if (i > 0) try json.append(self.allocator, ',');
-            const prompt_json = try std.fmt.allocPrint(self.allocator,
-                "{{\"text\":\"{s}\",\"weight\":{d}}}",
-                .{ p.text, p.weight },
-            );
-            defer self.allocator.free(prompt_json);
-            try json.appendSlice(self.allocator, prompt_json);
+        var json: std.Io.Writer.Allocating = .init(self.allocator);
+        defer json.deinit();
+        var jw: std.json.Stringify = .{ .writer = &json.writer, .options = .{} };
+        try jw.beginObject();
+        try jw.objectField("client_content");
+        try jw.beginObject();
+        try jw.objectField("weighted_prompts");
+        try jw.beginArray();
+        for (prompts) |p| {
+            try jw.beginObject();
+            try jw.objectField("text");
+            try jw.write(p.text);
+            try jw.objectField("weight");
+            try jw.print("{d}", .{p.weight});
+            try jw.endObject();
         }
-
-        try json.appendSlice(self.allocator, "]}}");
-        try self.ws.sendText(json.items);
+        try jw.endArray();
+        try jw.endObject();
+        try jw.endObject();
+        try self.ws.sendText(json.written());
     }
 
     /// Set music generation config
     pub fn setConfig(self: *LyriaSession, config: MusicConfig) !void {
-        var json: std.ArrayListUnmanaged(u8) = .empty;
-        defer json.deinit(self.allocator);
-
-        try json.appendSlice(self.allocator, "{\"music_generation_config\":{");
-        try json.appendSlice(self.allocator, "\"temperature\":1.1,\"guidance\":4.0");
-
+        var json: std.Io.Writer.Allocating = .init(self.allocator);
+        defer json.deinit();
+        var jw: std.json.Stringify = .{ .writer = &json.writer, .options = .{} };
+        try jw.beginObject();
+        try jw.objectField("music_generation_config");
+        try jw.beginObject();
+        try jw.objectField("temperature");
+        try jw.print("{d}", .{1.1});
+        try jw.objectField("guidance");
+        try jw.print("{d}", .{4.0});
         if (config.bpm) |bpm| {
-            const bpm_str = try std.fmt.allocPrint(self.allocator, ",\"bpm\":{d}", .{bpm});
-            defer self.allocator.free(bpm_str);
-            try json.appendSlice(self.allocator, bpm_str);
+            try jw.objectField("bpm");
+            try jw.write(bpm);
         }
-
-        try json.appendSlice(self.allocator, ",\"musicGenerationMode\":\"QUALITY\"}}");
-        try self.ws.sendText(json.items);
+        try jw.objectField("musicGenerationMode");
+        try jw.write("QUALITY");
+        try jw.endObject();
+        try jw.endObject();
+        try self.ws.sendText(json.written());
     }
 
     /// Start playback

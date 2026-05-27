@@ -93,7 +93,7 @@ pub fn listModelsForProvider(provider: CTextProvider) CStringResult {
 
         if (std.mem.eql(u8, main_m, small_m)) {
             // Only one unique model
-            const json = std.fmt.allocPrint(allocator, "[\"{s}\"]", .{main_m}) catch {
+            const json = std.json.Stringify.valueAlloc(allocator, [_][]const u8{main_m}, .{}) catch {
                 return CStringResult{ .success = false, .error_code = types.ErrorCode.OUT_OF_MEMORY, .error_message = CString.fromSlice("out of memory"), .value = .{ .ptr = null, .len = 0 } };
             };
             const json_z = allocator.allocSentinel(u8, json.len, 0) catch {
@@ -104,7 +104,7 @@ pub fn listModelsForProvider(provider: CTextProvider) CStringResult {
             allocator.free(json);
             return CStringResult{ .success = true, .error_code = 0, .error_message = .{ .ptr = null, .len = 0 }, .value = .{ .ptr = json_z.ptr, .len = json_z.len } };
         } else {
-            const json = std.fmt.allocPrint(allocator, "[\"{s}\",\"{s}\"]", .{ main_m, small_m }) catch {
+            const json = std.json.Stringify.valueAlloc(allocator, [_][]const u8{ main_m, small_m }, .{}) catch {
                 return CStringResult{ .success = false, .error_code = types.ErrorCode.OUT_OF_MEMORY, .error_message = CString.fromSlice("out of memory"), .value = .{ .ptr = null, .len = 0 } };
             };
             const json_z = allocator.allocSentinel(u8, json.len, 0) catch {

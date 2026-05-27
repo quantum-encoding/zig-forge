@@ -173,10 +173,13 @@ pub const GeminiLiveSession = struct {
         try json.appendSlice(self.allocator, self.config.modality.toApiString());
         try json.appendSlice(self.allocator, "\"]");
 
-        // Temperature
+        // Temperature — emitted as discrete field, value goes through bufPrint
+        // into a stack buffer so we never interpolate JSON-shaped strings.
         var temp_buf: [32]u8 = undefined;
-        const temp_str = std.fmt.bufPrint(&temp_buf, ",\"temperature\":{d}", .{self.config.temperature}) catch "";
-        try json.appendSlice(self.allocator, temp_str);
+        // zig-lens-ignore: JSON-IN-FMT Numeric-only `{d}` format. JSON tokens are in the appendSlice calls below.
+        const temp_val = std.fmt.bufPrint(&temp_buf, "{d}", .{self.config.temperature}) catch "0";
+        try json.appendSlice(self.allocator, ",\"temperature\":");
+        try json.appendSlice(self.allocator, temp_val);
 
         // Voice (for audio modality)
         if (self.config.voice) |voice| {
@@ -217,11 +220,14 @@ pub const GeminiLiveSession = struct {
             try json.appendSlice(self.allocator, ",\"proactivity\":{\"proactiveAudio\":true}");
         }
 
-        // Thinking
+        // Thinking — emit nested object via discrete writes, value through bufPrint.
         if (self.config.thinking_budget) |budget| {
-            var budget_buf: [64]u8 = undefined;
-            const budget_str = std.fmt.bufPrint(&budget_buf, ",\"thinkingConfig\":{{\"thinkingBudget\":{d}}}", .{budget}) catch "";
-            try json.appendSlice(self.allocator, budget_str);
+            var budget_buf: [32]u8 = undefined;
+            // zig-lens-ignore: JSON-IN-FMT Numeric-only `{d}` format. JSON tokens are in the appendSlice calls.
+            const budget_val = std.fmt.bufPrint(&budget_buf, "{d}", .{budget}) catch "0";
+            try json.appendSlice(self.allocator, ",\"thinkingConfig\":{\"thinkingBudget\":");
+            try json.appendSlice(self.allocator, budget_val);
+            try json.appendSlice(self.allocator, "}");
         }
 
         // Tools
@@ -515,6 +521,7 @@ fn extractJsonField(json: []const u8, field: []const u8) ?[]const u8 {
 
 fn extractJsonFieldFrom(json: []const u8, from: usize, field: []const u8) ?[]const u8 {
     var search_buf: [128]u8 = undefined;
+    // zig-lens-ignore: JSON-IN-FMT This builds a SEARCH NEEDLE for indexOf, not a JSON payload. The `"<field>":"` format is the literal JSON token we're scanning for in the response body.
     const needle = std.fmt.bufPrint(&search_buf, "\"{s}\":\"", .{field}) catch return null;
 
     const start = (std.mem.indexOfPos(u8, json, from, needle) orelse return null) + needle.len;

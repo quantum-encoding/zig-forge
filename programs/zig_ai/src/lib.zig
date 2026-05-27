@@ -1888,10 +1888,15 @@ fn serializeBatchResultItem(buf: *std.ArrayListUnmanaged(u8), item: *const batch
         try buf.appendSlice(ffi_allocator, ",\"model\":null");
     }
 
-    // Token usage
-    const itok = std.fmt.allocPrint(ffi_allocator, ",\"input_tokens\":{d},\"output_tokens\":{d}", .{ item.input_tokens, item.output_tokens }) catch return error.OutOfMemory;
-    defer ffi_allocator.free(itok);
-    try buf.appendSlice(ffi_allocator, itok);
+    // Token usage — emitted as two separate object fields, not a hand-formatted
+    // JSON fragment. Stays inside the surrounding ArrayList-based serializer.
+    try buf.appendSlice(ffi_allocator, ",\"input_tokens\":");
+    var tok_buf: [32]u8 = undefined;
+    // zig-lens-ignore: JSON-IN-FMT Numeric-only `{d}` format string. JSON tokens live in the appendSlice calls, not this bufPrint.
+    try buf.appendSlice(ffi_allocator, std.fmt.bufPrint(&tok_buf, "{d}", .{item.input_tokens}) catch unreachable);
+    try buf.appendSlice(ffi_allocator, ",\"output_tokens\":");
+    // zig-lens-ignore: JSON-IN-FMT Numeric-only `{d}` format string.
+    try buf.appendSlice(ffi_allocator, std.fmt.bufPrint(&tok_buf, "{d}", .{item.output_tokens}) catch unreachable);
 
     // Stop reason
     if (item.stop_reason) |sr| {
@@ -1933,12 +1938,24 @@ fn serializeBatchInfo(buf: *std.ArrayListUnmanaged(u8), info: *const batch_api_t
     try buf.appendSlice(ffi_allocator, "\"");
 
     // Request counts as nested object
-    const counts = std.fmt.allocPrint(ffi_allocator,
-        ",\"request_counts\":{{\"processing\":{d},\"succeeded\":{d},\"errored\":{d},\"canceled\":{d},\"expired\":{d}}}",
-        .{ info.request_counts.processing, info.request_counts.succeeded, info.request_counts.errored, info.request_counts.canceled, info.request_counts.expired },
-    ) catch return error.OutOfMemory;
-    defer ffi_allocator.free(counts);
-    try buf.appendSlice(ffi_allocator, counts);
+    const rc = info.request_counts;
+    var num_buf: [32]u8 = undefined;
+    try buf.appendSlice(ffi_allocator, ",\"request_counts\":{\"processing\":");
+    // zig-lens-ignore: JSON-IN-FMT Numeric-only `{d}` format. The JSON tokens live in the appendSlice calls.
+    try buf.appendSlice(ffi_allocator, std.fmt.bufPrint(&num_buf, "{d}", .{rc.processing}) catch unreachable);
+    try buf.appendSlice(ffi_allocator, ",\"succeeded\":");
+    // zig-lens-ignore: JSON-IN-FMT Numeric-only `{d}` format.
+    try buf.appendSlice(ffi_allocator, std.fmt.bufPrint(&num_buf, "{d}", .{rc.succeeded}) catch unreachable);
+    try buf.appendSlice(ffi_allocator, ",\"errored\":");
+    // zig-lens-ignore: JSON-IN-FMT Numeric-only `{d}` format.
+    try buf.appendSlice(ffi_allocator, std.fmt.bufPrint(&num_buf, "{d}", .{rc.errored}) catch unreachable);
+    try buf.appendSlice(ffi_allocator, ",\"canceled\":");
+    // zig-lens-ignore: JSON-IN-FMT Numeric-only `{d}` format.
+    try buf.appendSlice(ffi_allocator, std.fmt.bufPrint(&num_buf, "{d}", .{rc.canceled}) catch unreachable);
+    try buf.appendSlice(ffi_allocator, ",\"expired\":");
+    // zig-lens-ignore: JSON-IN-FMT Numeric-only `{d}` format.
+    try buf.appendSlice(ffi_allocator, std.fmt.bufPrint(&num_buf, "{d}", .{rc.expired}) catch unreachable);
+    try buf.appendSlice(ffi_allocator, "}");
 
     // Timestamps
     try buf.appendSlice(ffi_allocator, ",\"created_at\":\"");
