@@ -85,6 +85,38 @@ pub fn writeReport(allocator: std.mem.Allocator, report: *const models.ProjectRe
         }
     }
 
+    // Security anti-patterns. Surfacing these at the end of the
+    // terminal output puts them in the operator's line of sight at
+    // the moment the scan completes — the rules are designed to be
+    // ship-blockers (matched against the C5/H/M findings from the
+    // zig_ai_server audit), so they shouldn't get buried behind a
+    // page of summary data.
+    {
+        var total: u32 = 0;
+        for (report.files.items) |*f| total += @intCast(f.security_findings.items.len);
+        if (total > 0) {
+            try appendFmt(allocator, &buf, "\n\x1b[1;31mSecurity findings ({d}):\x1b[0m\n", .{total});
+            for (report.files.items) |*file| {
+                for (file.security_findings.items) |sf| {
+                    const tag = switch (sf.severity) {
+                        .critical => "\x1b[1;31mCRITICAL\x1b[0m",
+                        .high => "\x1b[1;33mHIGH\x1b[0m    ",
+                        .medium => "\x1b[1;33mMEDIUM\x1b[0m  ",
+                        .low => "\x1b[1;34mLOW\x1b[0m     ",
+                    };
+                    try appendFmt(allocator, &buf, "  {s} [{s:<18}] {s}:{d}\n    {s}\n    \x1b[2m{s}\x1b[0m\n", .{
+                        tag,
+                        sf.rule_id,
+                        file.relative_path,
+                        sf.line,
+                        sf.message,
+                        sf.snippet,
+                    });
+                }
+            }
+        }
+    }
+
     try buf.append(allocator, '\n');
     return buf.items;
 }

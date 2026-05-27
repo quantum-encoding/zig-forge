@@ -106,6 +106,18 @@ pub const RiskLevel = enum {
     critical,
 };
 
+/// Concrete security anti-pattern caught by `analyzers/security_patterns.zig`.
+/// Each finding carries a stable rule id (so CI can grep for "JSON-IN-FMT"
+/// the same way operators grep for compiler warnings), the source line,
+/// a severity, a one-sentence message, and the trimmed line of code.
+pub const SecurityFinding = struct {
+    rule_id: []const u8,
+    line: u32,
+    severity: RiskLevel,
+    message: []const u8,
+    snippet: []const u8,
+};
+
 pub const FileReport = struct {
     path: []const u8,
     relative_path: []const u8,
@@ -122,6 +134,7 @@ pub const FileReport = struct {
     tests: std.ArrayListUnmanaged(TestInfo),
     imports: std.ArrayListUnmanaged(ImportInfo),
     unsafe_ops: std.ArrayListUnmanaged(UnsafeOp),
+    security_findings: std.ArrayListUnmanaged(SecurityFinding),
     parse_error: bool,
     /// True if the structural walk hit `parser.max_ast_depth` and
     /// truncated the remaining nested declarations. Defense against
@@ -146,6 +159,7 @@ pub const FileReport = struct {
             .tests = .empty,
             .imports = .empty,
             .unsafe_ops = .empty,
+            .security_findings = .empty,
             .parse_error = false,
             .truncated_depth = false,
         };

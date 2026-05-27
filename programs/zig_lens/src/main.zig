@@ -6,6 +6,7 @@ const parser = @import("parser.zig");
 const structure = @import("analyzers/structure.zig");
 const imports_analyzer = @import("analyzers/imports.zig");
 const unsafe_ops = @import("analyzers/unsafe_ops.zig");
+const security_patterns = @import("analyzers/security_patterns.zig");
 const rust_analyzer = @import("analyzers/rust.zig");
 const c_analyzer = @import("analyzers/c_lang.zig");
 const python_analyzer = @import("analyzers/python.zig");
@@ -36,6 +37,13 @@ const Config = struct {
     imports_only: bool = false,
     unsafe_only: bool = false,
     compile: bool = false,
+    /// When true, exit with a non-zero status if any
+    /// `SecurityFinding` is emitted. Designed for CI / pre-commit
+    /// pipelines: failing the build on detection of an
+    /// anti-pattern (JSON-in-fmt, MBEDTLS-VERIFY-NONE,
+    /// EQL-FOR-SECRETS, SHELL-CHILD) is the whole point of those
+    /// rules.
+    strict: bool = false,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -86,6 +94,8 @@ pub fn main(init: std.process.Init) !void {
             config.unsafe_only = true;
         } else if (std.mem.eql(u8, arg, "--compile")) {
             config.compile = true;
+        } else if (std.mem.eql(u8, arg, "--strict")) {
+            config.strict = true;
         } else if (std.mem.eql(u8, arg, "--report") and i + 1 < args.len) {
             i += 1;
             config.report_dir = args[i];
@@ -179,6 +189,13 @@ pub fn main(init: std.process.Init) !void {
 
                 // Unsafe operations analysis
                 unsafe_ops.analyze(allocator, &ast, &file_report) catch {};
+
+                // Security anti-pattern scan (text-based — see
+                // analyzers/security_patterns.zig). Failures here
+                // are swallowed: a security-scanner pass that
+                // OOM'd shouldn't fail the whole report; the
+                // missing findings will simply be absent.
+                security_patterns.analyze(allocator, source, &file_report) catch {};
             },
             .rust, .c, .python, .javascript, .go => {
                 // Read source file for line-based analysis
@@ -215,6 +232,13 @@ pub fn main(init: std.process.Init) !void {
                     },
                     else => {},
                 }
+
+                // Language-agnostic security anti-pattern scan
+                // (MBEDTLS-VERIFY-NONE matters for C, JSON-IN-FMT
+                // shows up wherever printf-style formatting builds
+                // JSON, /bin/sh-as-argv applies anywhere that
+                // exec's a shell).
+                security_patterns.analyze(allocator, source, &file_report) catch {};
             },
         }
 
@@ -245,6 +269,18 @@ pub fn main(init: std.process.Init) !void {
         writeOutputFile(io, config.output_file, output);
     } else {
         std.debug.print("{s}", .{output});
+    }
+
+    // --strict: fail the process when any anti-pattern fired. CI
+    // gates on the exit code; the findings themselves were already
+    // printed (or emitted to the JSON file) above.
+    if (config.strict) {
+        var total: u32 = 0;
+        for (report.files.items) |f| total += @intCast(f.security_findings.items.len);
+        if (total > 0) {
+            std.debug.print("\nzig-lens --strict: {d} security finding(s); failing.\n", .{total});
+            std.process.exit(2);
+        }
     }
 }
 
@@ -287,6 +323,7 @@ fn printUsage() void {
         \\  --format <fmt>        Output format: terminal (default), json, markdown, dot
         \\  --compact             Compact JSON optimized for AI context windows
         \\  --compile             Compile entire codebase into single MD file for AI
+        \\  --strict              Exit non-zero (status 2) if any security anti-pattern is found
         \\  --report <dir>        Generate all reports into directory
         \\  --imports             Import/dependency analysis only
         \\  --unsafe              Unsafe operations audit
