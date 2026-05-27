@@ -19,49 +19,97 @@ const types = @import("store/types.zig");
 const security = @import("security.zig");
 const ledger_mod = @import("ledger.zig");
 
-/// Context passed to the streaming callback
+/// Context passed to the streaming callback.
+///
+/// Audit H8: previously this struct used `token_count: u32` incremented
+/// in the per-chunk callback and treated as the output-token total at
+/// commit time. That is architecturally wrong — providers split text
+/// into chunks for transport reasons unrelated to tokenization, so one
+/// chunk is not one token. The ledger therefore systematically
+/// over-billed bursty streams and under-billed long-block streams.
+///
+/// The streaming pipeline now uses the provider's structured event
+/// stream (`StreamEvent`). The terminal `message_stop` event carries
+/// the provider's authoritative `input_tokens` / `output_tokens`; we
+/// record those once at conclusion. If the provider doesn't report on
+/// `message_stop` (some report on a later event we don't see), we fall
+/// back to a byte-count estimate (4 chars/token) derived from
+/// `total_text_bytes`, which is at least proportional to actual
+/// content rather than to TCP framing.
 const StreamCtx = struct {
     writer: *http.BodyWriter,
     allocator: std.mem.Allocator,
-    token_count: u32,
-    errored: bool,
+    /// Sum of all `text_delta.text.len` bytes observed during the
+    /// stream. Used to estimate output tokens when the provider
+    /// doesn't supply usage in the `message_stop` event.
+    total_text_bytes: usize = 0,
+    /// Token counts reported by the provider on the `message_stop`
+    /// event. Zero if the provider didn't report.
+    reported_input_tokens: u32 = 0,
+    reported_output_tokens: u32 = 0,
+    errored: bool = false,
 };
 
-/// Streaming callback — called per token chunk from the provider.
-/// Emits each chunk as a content_delta SSE event immediately.
-fn streamCallback(text: []const u8, context: ?*anyopaque) bool {
+/// Streaming event callback — invoked once per structured event from
+/// the provider (text deltas, tool_use, message_stop, …).
+///
+/// We forward text deltas to the client as the existing
+/// `content_delta` SSE events for protocol compatibility. tool_use
+/// variants are dropped on this endpoint — `/qai/v1/chat/stream` is
+/// the legacy text-only streaming surface; the agent endpoint owns
+/// the tool-aware contract.
+///
+/// `message_stop` carries provider-reported token usage which we
+/// stash on the context for the post-stream billing commit (audit
+/// H8). We deliberately don't ledger here — the single billing
+/// record is emitted by `handleStreamCore` after the streaming call
+/// returns, whether successfully or via error.
+fn streamEventCallback(event: hs.ai.common.StreamEvent, context: ?*anyopaque) bool {
     const ctx: *StreamCtx = @alignCast(@ptrCast(context orelse return false));
     if (ctx.errored) return false;
 
-    ctx.token_count += 1;
+    switch (event) {
+        .text_delta => |td| {
+            ctx.total_text_bytes += td.text.len;
 
-    // Escape the text for JSON embedding
-    const escaped = chat_mod.jsonEscape(ctx.allocator, text) catch {
-        ctx.errored = true;
-        return false;
-    };
-    defer ctx.allocator.free(escaped);
+            const escaped = chat_mod.jsonEscape(ctx.allocator, td.text) catch {
+                ctx.errored = true;
+                return false;
+            };
+            defer ctx.allocator.free(escaped);
 
-    // Emit: data: {"type":"content_delta","delta":{"text":"<token>"}}\n\n
-    const event = std.fmt.allocPrint(ctx.allocator,
-        "data: {{\"type\":\"content_delta\",\"delta\":{{\"text\":\"{s}\"}}}}\n\n",
-        .{escaped},
-    ) catch {
-        ctx.errored = true;
-        return false;
-    };
-    defer ctx.allocator.free(event);
+            const sse_event = std.fmt.allocPrint(ctx.allocator,
+                "data: {{\"type\":\"content_delta\",\"delta\":{{\"text\":\"{s}\"}}}}\n\n",
+                .{escaped},
+            ) catch {
+                ctx.errored = true;
+                return false;
+            };
+            defer ctx.allocator.free(sse_event);
 
-    ctx.writer.writer.writeAll(event) catch {
-        ctx.errored = true;
-        return false;
-    };
-    ctx.writer.flush() catch {
-        ctx.errored = true;
-        return false;
-    };
+            ctx.writer.writer.writeAll(sse_event) catch {
+                ctx.errored = true;
+                return false;
+            };
+            ctx.writer.flush() catch {
+                ctx.errored = true;
+                return false;
+            };
+        },
+        .message_stop => |ms| {
+            // Capture authoritative token counts for the post-stream
+            // billing commit. Zero means the provider didn't report
+            // on this event; we'll fall back to byte estimation.
+            if (ms.input_tokens > 0) ctx.reported_input_tokens = ms.input_tokens;
+            if (ms.output_tokens > 0) ctx.reported_output_tokens = ms.output_tokens;
+        },
+        // Tool-call events are not surfaced on the legacy
+        // `/qai/v1/chat/stream` contract; the agent endpoint owns
+        // those. Silently drop here.
+        .tool_use_start, .tool_input_delta, .block_stop => {},
+    }
 
-    return true; // Continue streaming
+    return true;
 }
 
 /// Handle streaming with a pre-read body (called from router when "stream":true detected).
@@ -225,41 +273,68 @@ fn handleStreamCore(
         return;
     };
 
-    // Stream tokens from provider → SSE content_delta events
+    // Stream events from provider → SSE content_delta events. Audit
+    // H8: structured events let us read provider-reported token
+    // counts from the `message_stop` event instead of approximating
+    // from chunk arrivals.
     var stream_ctx = StreamCtx{
         .writer = &body_writer,
         .allocator = allocator,
-        .token_count = 0,
-        .errored = false,
     };
 
-    client.sendMessageStreamingWithContext(prompt, context_messages.items, config, streamCallback, &stream_ctx) catch {
+    const stream_failed = blk: {
+        client.sendMessageStreamingWithEventsAndContext(
+            prompt,
+            context_messages.items,
+            config,
+            streamEventCallback,
+            &stream_ctx,
+        ) catch break :blk true;
+        break :blk false;
+    };
+
+    // Reconcile the final token counts. Prefer provider-reported,
+    // fall back to byte-count estimation. The input estimate from
+    // the request body is used only if the provider didn't report
+    // one (some providers only emit usage on the very last SSE
+    // event which our event-stream parser may miss).
+    const body_input_estimate = billing.estimateInputTokens(body.len);
+    const final_input_tokens: u32 = if (stream_ctx.reported_input_tokens > 0)
+        stream_ctx.reported_input_tokens
+    else
+        body_input_estimate;
+    const final_output_tokens: u32 = if (stream_ctx.reported_output_tokens > 0)
+        stream_ctx.reported_output_tokens
+    else
+        @intCast(@max(stream_ctx.total_text_bytes / 4, 1));
+
+    if (stream_failed) {
+        // Provider call errored out — refund the reservation and
+        // tell the client the stream is over. Single billing
+        // contract still holds: we record nothing in the ledger on
+        // a failed stream (H8).
         if (reservation_id) |rid| if (store) |s| if (io) |io_handle| billing.rollback(s, io_handle, rid);
-        // Don't leak internal error names (e.g. "error.OutOfMemory") to the client
         const err_event: []const u8 = "data: {\"type\":\"error\",\"message\":\"Provider request failed\"}\n\n";
         body_writer.writer.writeAll(err_event) catch {};
         body_writer.writer.writeAll("data: {\"type\":\"done\"}\n\n") catch {};
         body_writer.end() catch {};
         return;
-    };
+    }
 
-    // Commit billing — use token_count as approximate output tokens
-    // (sendMessageStreaming doesn't return usage metadata, so we estimate)
-    const output_tokens = stream_ctx.token_count;
-    const input_estimate = billing.estimateInputTokens(body.len);
+    // Commit billing exactly once for the whole stream lifecycle.
     if (reservation_id) |rid| if (store) |s| if (io) |io_handle| {
         const tier = if (auth) |a| a.account.tier else types.DevTier.free;
-        billing.commit(s, io_handle, rid, chat_req.model, input_estimate, output_tokens, tier);
+        billing.commit(s, io_handle, rid, chat_req.model, final_input_tokens, final_output_tokens, tier);
         if (ledger) |l| {
             // H10: actualCost can fail for unknown models. We skip
             // the ledger row rather than guessing a price — the
             // upstream handler should have rejected the request, but
             // this branch is defense-in-depth.
-            if (billing.actualCost(chat_req.model, input_estimate, output_tokens, tier)) |bill| {
+            if (billing.actualCost(chat_req.model, final_input_tokens, final_output_tokens, tier)) |bill| {
                 l.recordBilling(io_handle, if (auth) |a| a.account.id.slice() else "anonymous",
                     if (auth) |a| a.key.prefix.slice() else "none", bill.cost, bill.margin,
                     if (auth) |a| a.account.balance_ticks else 0,
-                    "/qai/v1/chat/stream", chat_req.model, input_estimate, output_tokens, 0);
+                    "/qai/v1/chat/stream", chat_req.model, final_input_tokens, final_output_tokens, 0);
             } else |_| {}
         }
     };
@@ -267,7 +342,7 @@ fn handleStreamCore(
     // Emit usage event
     const usage_event = std.fmt.allocPrint(allocator,
         "data: {{\"type\":\"usage\",\"input_tokens\":{d},\"output_tokens\":{d}}}\n\n",
-        .{ input_estimate, output_tokens },
+        .{ final_input_tokens, final_output_tokens },
     ) catch "";
     if (usage_event.len > 0) {
         defer allocator.free(usage_event);

@@ -185,6 +185,36 @@ pub const AIClient = struct {
         };
     }
 
+    /// Tool-aware streaming with full conversation history. Dispatches the
+    /// richer `StreamEventCallback` (text deltas, tool_use, message_stop
+    /// with token counts) to the underlying provider client.
+    ///
+    /// The `message_stop` event carries the provider's reported
+    /// `output_tokens` and `input_tokens` — callers that need accurate
+    /// per-stream billing should use this method instead of
+    /// `sendMessageStreamingWithContext`, which only exposes text chunks
+    /// and forces the caller to estimate token counts from chunk arrivals
+    /// (architecturally wrong: one chunk is not one token).
+    ///
+    /// Returns `error.ProviderUnavailable` for providers without an
+    /// event-based streaming path (deepseek, vertex).
+    pub fn sendMessageStreamingWithEventsAndContext(
+        self: *AIClient,
+        prompt: []const u8,
+        chat_context: []const AIMessage,
+        config: RequestConfig,
+        callback: common.StreamEventCallback,
+        cb_context: ?*anyopaque,
+    ) !void {
+        return switch (self.provider) {
+            .claude => self.claude.?.client.sendMessageStreamingWithEvents(prompt, chat_context, config, callback, cb_context),
+            .openai => self.openai.?.sendMessageStreamingWithEvents(prompt, chat_context, config, callback, cb_context),
+            .grok => self.grok.?.sendMessageStreamingWithEvents(prompt, chat_context, config, callback, cb_context),
+            .gemini => self.gemini.?.sendMessageStreamingWithEvents(prompt, chat_context, config, callback, cb_context),
+            .deepseek, .vertex => return error.ProviderUnavailable,
+        };
+    }
+
     /// Send a message with conversation context
     pub fn sendMessageWithContext(
         self: *AIClient,

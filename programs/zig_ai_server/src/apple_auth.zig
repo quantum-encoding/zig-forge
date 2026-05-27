@@ -19,6 +19,7 @@ const store_mod = @import("store/store.zig");
 const types = @import("store/types.zig");
 const firestore = @import("firestore.zig");
 const gcp = @import("gcp.zig");
+const security = @import("security.zig");
 const Response = router.Response;
 
 const APPLE_JWKS_URL = "https://appleid.apple.com/auth/keys";
@@ -175,13 +176,25 @@ fn handleVerifiedClaims(
         };
     }
 
-    // Find or create account
+    // Find or create account. Audit M14: validate the *full*
+    // account_id (prefix + sub) so a hostile or malformed `sub` claim
+    // cannot inject `:` or any other delimiter into WAL payloads or
+    // Firestore doc paths. Apple's `sub` is supposed to be a stable
+    // numeric user identifier; if a token reaches us with a sub
+    // containing odd characters we fail the request rather than
+    // serialize it.
     const account_id_str = std.fmt.allocPrint(allocator, "apple_{s}", .{claims.sub}) catch {
         return .{ .status = .internal_server_error, .body =
             \\{"error":"internal","message":"Failed to generate account ID"}
         };
     };
     defer allocator.free(account_id_str);
+
+    if (security.validateAccountId(account_id_str) == null) {
+        return .{ .status = .bad_request, .body =
+            \\{"error":"invalid_token","message":"Apple sub claim contains characters not allowed in an account ID"}
+        };
+    }
 
     const is_new = findOrCreateAccount(io, store, account_id_str, claims);
 

@@ -19,6 +19,7 @@ const store_mod = @import("store/store.zig");
 const types = @import("store/types.zig");
 const firestore = @import("firestore.zig");
 const gcp = @import("gcp.zig");
+const security = @import("security.zig");
 const Response = router.Response;
 
 const GOOGLE_JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs";
@@ -189,13 +190,24 @@ fn processVerifiedClaims(
         };
     }
 
-    // Find or create account
+    // Find or create account. Audit M14: validate the *full*
+    // account_id (prefix + sub) so a hostile or malformed `sub`
+    // claim cannot inject `:` or any other delimiter into WAL
+    // payloads or Firestore doc paths. Google's `sub` is a stable
+    // 21-char numeric identifier; if a token arrives with a sub
+    // outside [A-Za-z0-9_-] we reject the request.
     const account_id_str = std.fmt.allocPrint(allocator, "google_{s}", .{claims.sub}) catch {
         return .{ .status = .internal_server_error, .body =
             \\{"error":"internal","message":"Failed to generate account ID"}
         };
     };
     defer allocator.free(account_id_str);
+
+    if (security.validateAccountId(account_id_str) == null) {
+        return .{ .status = .bad_request, .body =
+            \\{"error":"invalid_token","message":"Google sub claim contains characters not allowed in an account ID"}
+        };
+    }
 
     const is_new = findOrCreateAccount(io, store, account_id_str, claims);
 

@@ -296,9 +296,14 @@ pub fn handleCreateAccount(
     defer parsed.deinit();
     const req = parsed.value;
 
-    if (req.id.len == 0 or req.id.len > 32) {
+    // Audit M14: account_id must be charset-safe before it touches
+    // the WAL or the Firestore path. Reject anything outside
+    // [A-Za-z0-9_-] up to 32 chars — colon in particular is a WAL /
+    // doc-path delimiter and would forge sibling fields if allowed
+    // through.
+    if (@import("security.zig").validateAccountId(req.id) == null) {
         return .{ .status = .bad_request, .body =
-            \\{"error":"invalid_request","message":"Account ID must be 1-32 characters"}
+            \\{"error":"invalid_request","message":"Account ID must be 1-32 chars from [A-Za-z0-9_-]"}
         };
     }
 

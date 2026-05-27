@@ -28,8 +28,28 @@ pub fn constantTimeEql(a: []const u8, b: []const u8) bool {
 }
 
 // ── Path validation ─────────────────────────────────────────
-// Ensures paths are strictly relative, within workspace, no escapes.
+//
+// Audit H9: lexical path checks are NOT a TOCTOU-safe sandbox.
+//
+// `validatePath` rejects obviously bad shapes (absolute, traversal,
+// null byte, tilde, backslash). That is the *fast-fail layer*, not
+// the safety property. An attacker who controls the workspace
+// contents can pass a clean string like "config.json" and swap the
+// inode for a symlink to /etc/passwd between the check and the
+// `openFile` syscall — the lexical filter cannot close that race.
+//
+// File I/O on user-supplied paths MUST go through
+// `openFileInWorkspace` / `createFileInWorkspace` below. Those
+// helpers set `follow_symlinks=false` and `resolve_beneath=true` so
+// the OS, not a pre-flight string check, enforces the sandbox at
+// the moment the inode is resolved.
 
+/// Lexical-only path filter. Returns the cleaned slice (with any
+/// leading "./" stripped) when the path looks safe by shape, or
+/// `null` for any rejected form. This is a defense-in-depth layer:
+/// it does not bless the path as safe to open, only that it is not
+/// obviously malformed. See the file-level note for the actual
+/// TOCTOU-safe open path.
 pub fn validatePath(path: []const u8) ?[]const u8 {
     // Empty path
     if (path.len == 0) return null;
@@ -54,6 +74,53 @@ pub fn validatePath(path: []const u8) ?[]const u8 {
     if (std.mem.startsWith(u8, path, "./")) return path[2..];
 
     return path;
+}
+
+pub const WorkspaceOpenError = std.Io.File.OpenError || error{PathRejected};
+
+/// Open a regular file by name relative to an open workspace
+/// directory. The lexical layer (`validatePath`) is applied first
+/// to catch obviously malformed input. The `openFile` call then
+/// disables symlink-follow (`follow_symlinks = false`) and asks the
+/// kernel to refuse any resolution that escapes the workspace
+/// (`resolve_beneath = true`). The OS — not a pre-flight string
+/// check — is what enforces the sandbox at the moment the inode
+/// is resolved, which is the only way to close the TOCTOU window
+/// described in audit H9.
+///
+/// Use this helper instead of `Dir.openFile` for any file path
+/// that originates outside the trust boundary (request bodies,
+/// JWT claims, agent tool arguments, …).
+pub fn openFileInWorkspace(
+    workspace: std.Io.Dir,
+    io: std.Io,
+    sub_path: []const u8,
+    options: std.Io.Dir.OpenFileOptions,
+) WorkspaceOpenError!std.Io.File {
+    const clean = validatePath(sub_path) orelse return error.PathRejected;
+    var opts = options;
+    opts.follow_symlinks = false;
+    opts.resolve_beneath = true;
+    return workspace.openFile(io, clean, opts);
+}
+
+/// Create-or-open a file by name relative to an open workspace
+/// directory. The lexical layer rejects obvious bad input; the
+/// `createFile` call sets `resolve_beneath = true` so the OS
+/// blocks any path that escapes the workspace. `createFile` does
+/// not follow an existing symlink in the final component — it
+/// either creates a new inode at the name or (with `.truncate`)
+/// truncates a regular file already there.
+pub fn createFileInWorkspace(
+    workspace: std.Io.Dir,
+    io: std.Io,
+    sub_path: []const u8,
+    flags: std.Io.Dir.CreateFileOptions,
+) WorkspaceOpenError!std.Io.File {
+    const clean = validatePath(sub_path) orelse return error.PathRejected;
+    var f = flags;
+    f.resolve_beneath = true;
+    return workspace.createFile(io, clean, f);
 }
 
 // ── Executable allowlist ────────────────────────────────────
@@ -158,6 +225,34 @@ pub fn sanitizeId(input: []const u8) ?[]const u8 {
         if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_') return null;
     }
     return input;
+}
+
+/// Maximum length an account_id may have. Matches the
+/// `types.FixedStr64` storage width used by `Account.id`.
+pub const max_account_id_len: usize = 32;
+
+/// Validate an account_id at the trust boundary. Returns the input
+/// when accepted, `null` when rejected.
+///
+/// Audit M14: account_id strings flow into WAL payloads and the
+/// Firestore key-document path. Both formats use ':' as a field /
+/// path delimiter, so allowing ':' anywhere in the id is an
+/// injection vector — a malicious id like
+/// `victim:role=admin:balance_ticks=1000000000` would forge
+/// payload fields when the WAL is read back. We avoid the entire
+/// class by restricting account_id to `[A-Za-z0-9_-]` and capping
+/// the length at 32 chars (matching FixedStr64). Length 0 is
+/// rejected so we never serialize empty-id rows.
+///
+/// Apply at every entry point that mints an account_id from
+/// user-controlled data: admin POST /accounts, Apple Sign In sub,
+/// Google Sign In sub.
+pub fn validateAccountId(id: []const u8) ?[]const u8 {
+    if (id.len == 0 or id.len > max_account_id_len) return null;
+    for (id) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_') return null;
+    }
+    return id;
 }
 
 // ── Request limits ──────────────────────────────────────────

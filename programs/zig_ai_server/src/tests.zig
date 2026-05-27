@@ -76,6 +76,123 @@ test "path validation: strips leading ./" {
     try testing.expectEqualStrings("src/main.zig", result.?);
 }
 
+// ── Workspace-relative open (audit H9) ──────────────────────
+// Lexical path validation is a trap on its own: an attacker can
+// pass a clean-looking name and then swap the inode for a symlink
+// to /etc/passwd before the read. The TOCTOU-safe primitives below
+// open files via `Dir.openFile` with `follow_symlinks=false`
+// (and `resolve_beneath=true` as defense in depth), so the OS
+// blocks the swap at resolve time.
+
+test "openFileInWorkspace: real file inside workspace opens" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "inside.txt", .data = "hello" });
+
+    var f = try security.openFileInWorkspace(tmp.dir, testing.io, "inside.txt", .{});
+    defer f.close(testing.io);
+
+    var buf: [16]u8 = undefined;
+    const n = try f.readPositionalAll(testing.io, &buf, 0);
+    try testing.expectEqualStrings("hello", buf[0..n]);
+}
+
+test "openFileInWorkspace: symlink target outside workspace is rejected by OS" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Plant a symlink pointing at a system file. With
+    // follow_symlinks=true this would happily open /etc/hosts; the
+    // helper sets follow_symlinks=false so the kernel refuses.
+    tmp.dir.symLink(testing.io, "/etc/hosts", "outside", .{}) catch return; // skip if symlinks unsupported
+
+    if (security.openFileInWorkspace(tmp.dir, testing.io, "outside", .{})) |f| {
+        var x = f;
+        x.close(testing.io);
+        return error.SymlinkFollowedDespiteNoFollow;
+    } else |_| {} // any error is fine; the contract is "does not open the target"
+}
+
+test "openFileInWorkspace: lexical traversal rejected before syscall" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try testing.expectError(
+        error.PathRejected,
+        security.openFileInWorkspace(tmp.dir, testing.io, "../escape", .{}),
+    );
+}
+
+test "openFileInWorkspace: absolute path rejected before syscall" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try testing.expectError(
+        error.PathRejected,
+        security.openFileInWorkspace(tmp.dir, testing.io, "/etc/passwd", .{}),
+    );
+}
+
+test "createFileInWorkspace: creates regular file under workspace" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var f = try security.createFileInWorkspace(tmp.dir, testing.io, "out.txt", .{});
+    defer f.close(testing.io);
+    try f.writePositionalAll(testing.io, "ok", 0);
+}
+
+test "createFileInWorkspace: rejects parent-dir escape" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try testing.expectError(
+        error.PathRejected,
+        security.createFileInWorkspace(tmp.dir, testing.io, "../poke", .{}),
+    );
+}
+
+// ── Account-ID charset enforcement (audit M14) ──────────────
+// The WAL serializer and Firestore doc-path use ':' (and other
+// punctuation) as field/path delimiters. validateAccountId restricts
+// the id to [A-Za-z0-9_-] up to 32 chars so a hostile id can never
+// forge sibling fields when the record round-trips through the WAL
+// or hits the doc path.
+
+test "account_id: well-formed admin/google/apple ids accepted" {
+    try testing.expect(security.validateAccountId("admin") != null);
+    try testing.expect(security.validateAccountId("google_1234567890") != null);
+    try testing.expect(security.validateAccountId("apple_001234.abcd_efgh") == null); // dot disallowed
+    try testing.expect(security.validateAccountId("apple_1234567890") != null);
+    try testing.expect(security.validateAccountId("a-b_c-d_1") != null);
+}
+
+test "account_id: colon is rejected (WAL delimiter injection)" {
+    try testing.expect(security.validateAccountId("admin:role=admin") == null);
+    try testing.expect(security.validateAccountId("google_abc:def") == null);
+}
+
+test "account_id: other delimiters rejected" {
+    try testing.expect(security.validateAccountId("a/b") == null);
+    try testing.expect(security.validateAccountId("a b") == null);
+    try testing.expect(security.validateAccountId("a\tb") == null);
+    try testing.expect(security.validateAccountId("a\"b") == null);
+    try testing.expect(security.validateAccountId("a\\b") == null);
+    try testing.expect(security.validateAccountId("a.b") == null);
+}
+
+test "account_id: length boundaries" {
+    try testing.expect(security.validateAccountId("") == null);
+    // 32 chars max
+    const ok = "abcdefghijklmnopqrstuvwxyz012345"; // 32 chars
+    try testing.expect(security.validateAccountId(ok) != null);
+    // 33 chars rejected
+    const too_long = "abcdefghijklmnopqrstuvwxyz0123456"; // 33 chars
+    try testing.expect(security.validateAccountId(too_long) == null);
+}
+
+test "account_id: null byte rejected" {
+    try testing.expect(security.validateAccountId("admin\x00") == null);
+}
+
 // ── Executable allowlist tests ──────────────────────────────────
 // The bash blocklist is gone. The sandbox now spawns child processes
 // with std.process.run + explicit argv, and only permits executables
