@@ -159,37 +159,42 @@ pub const NatsClient = struct {
         // Read INFO from server
         try self.readAndProcessUntilReady();
 
-        // Send CONNECT
+        // Send CONNECT. The NATS protocol line is `CONNECT <json>\r\n` —
+        // the prefix is plain text and the body is built via Stringify so
+        // every interpolated value (auth_token, pass, name, …) is escaped.
         var buf: [512]u8 = undefined;
-        var pos: usize = 0;
-
-        const header = std.fmt.bufPrint(buf[pos..], "CONNECT {{\"verbose\":{s},\"pedantic\":{s},\"lang\":\"zig\",\"version\":\"1.0.0\"", .{
-            if (self.config.verbose) "true" else "false",
-            if (self.config.pedantic) "true" else "false",
-        }) catch return error.BufferTooSmall;
-        pos += header.len;
-
+        var bw = std.Io.Writer.fixed(&buf);
+        try bw.writeAll("CONNECT ");
+        var jw: std.json.Stringify = .{ .writer = &bw, .options = .{} };
+        try jw.beginObject();
+        try jw.objectField("verbose");
+        try jw.write(self.config.verbose);
+        try jw.objectField("pedantic");
+        try jw.write(self.config.pedantic);
+        try jw.objectField("lang");
+        try jw.write("zig");
+        try jw.objectField("version");
+        try jw.write("1.0.0");
         if (self.config.name) |name| {
-            const n = std.fmt.bufPrint(buf[pos..], ",\"name\":\"{s}\"", .{name}) catch return error.BufferTooSmall;
-            pos += n.len;
+            try jw.objectField("name");
+            try jw.write(name);
         }
         if (self.config.auth_token) |token| {
-            const n = std.fmt.bufPrint(buf[pos..], ",\"auth_token\":\"{s}\"", .{token}) catch return error.BufferTooSmall;
-            pos += n.len;
+            try jw.objectField("auth_token");
+            try jw.write(token);
         }
         if (self.config.user) |user| {
-            const n = std.fmt.bufPrint(buf[pos..], ",\"user\":\"{s}\"", .{user}) catch return error.BufferTooSmall;
-            pos += n.len;
+            try jw.objectField("user");
+            try jw.write(user);
         }
         if (self.config.pass) |pass| {
-            const n = std.fmt.bufPrint(buf[pos..], ",\"pass\":\"{s}\"", .{pass}) catch return error.BufferTooSmall;
-            pos += n.len;
+            try jw.objectField("pass");
+            try jw.write(pass);
         }
+        try jw.endObject();
+        try bw.writeAll("\r\n");
 
-        @memcpy(buf[pos..][0..4], "}\r\n\x00");
-        pos += 3;
-
-        try self.sendAll(buf[0..pos]);
+        try self.sendAll(bw.buffered());
         self.connected = true;
     }
 

@@ -199,16 +199,22 @@ pub const JetStream = struct {
         const stream = matches.items[0];
         const ack = stream.storeMessage(subject, hdrs, data, msg_id) catch return null;
 
-        // Format PubAck as JSON
+        // Format PubAck as JSON via Stringify.
         var buf: [256]u8 = undefined;
-        const json = std.fmt.bufPrint(&buf, "{{\"stream\":\"{s}\",\"seq\":{d}{s}}}", .{
-            ack.stream,
-            ack.seq,
-            if (ack.duplicate) ",\"duplicate\":true" else "",
-        }) catch return null;
+        var bw = std.Io.Writer.fixed(&buf);
+        var jw: std.json.Stringify = .{ .writer = &bw, .options = .{} };
+        jw.beginObject() catch return null;
+        jw.objectField("stream") catch return null;
+        jw.write(ack.stream) catch return null;
+        jw.objectField("seq") catch return null;
+        jw.write(ack.seq) catch return null;
+        if (ack.duplicate) {
+            jw.objectField("duplicate") catch return null;
+            jw.write(true) catch return null;
+        }
+        jw.endObject() catch return null;
 
-        // Return owned copy
-        return self.allocator.dupe(u8, json) catch null;
+        return self.allocator.dupe(u8, bw.buffered()) catch null;
     }
 
     /// Intercept an ack publish ($JS.ACK.*) and route to the appropriate consumer.

@@ -249,14 +249,22 @@ pub const NatsServer = struct {
 
     fn sendInfo(self: *NatsServer, conn: *connection_mod.ClientConnection) !void {
         var buf: [1024]u8 = undefined;
-        const auth_str: []const u8 = if (self.config.auth_token != null or self.config.auth_user != null) "true" else "false";
-        const js_str: []const u8 = if (self.jetstream != null) "true" else "false";
-        const info = std.fmt.bufPrint(&buf,
-            "INFO {{\"server_id\":\"zats_0\",\"server_name\":\"{s}\",\"version\":\"1.0.0\",\"proto\":1,\"max_payload\":{d},\"auth_required\":{s},\"headers\":true,\"jetstream\":{s}}}\r\n",
-            .{ self.config.server_name, self.config.max_payload, auth_str, js_str },
-        ) catch return error.BufferTooSmall;
+        var bw = std.Io.Writer.fixed(&buf);
+        try bw.writeAll("INFO ");
+        var jw: std.json.Stringify = .{ .writer = &bw, .options = .{} };
+        try jw.write(.{
+            .server_id = "zats_0",
+            .server_name = self.config.server_name,
+            .version = "1.0.0",
+            .proto = 1,
+            .max_payload = self.config.max_payload,
+            .auth_required = self.config.auth_token != null or self.config.auth_user != null,
+            .headers = true,
+            .jetstream = self.jetstream != null,
+        });
+        try bw.writeAll("\r\n");
 
-        try conn.sendDirect(info);
+        try conn.sendDirect(bw.buffered());
     }
 
     fn handleRead(self: *NatsServer, conn: *connection_mod.ClientConnection) !void {

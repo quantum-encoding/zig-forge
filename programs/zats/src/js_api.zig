@@ -108,10 +108,14 @@ pub const JsApiHandler = struct {
 
     fn handleAccountInfo(self: *JsApiHandler) ![]u8 {
         const info = self.js.accountInfo();
-        return std.fmt.allocPrint(self.allocator,
-            "{{\"type\":\"io.nats.jetstream.api.v1.account_info_response\",\"memory\":{d},\"storage\":{d},\"streams\":{d},\"consumers\":{d},\"api\":{{\"total\":{d},\"errors\":{d}}}}}",
-            .{ info.memory, info.storage, info.streams, info.consumers, info.api_total, info.api_errors },
-        );
+        return std.json.Stringify.valueAlloc(self.allocator, .{
+            .type = "io.nats.jetstream.api.v1.account_info_response",
+            .memory = info.memory,
+            .storage = info.storage,
+            .streams = info.streams,
+            .consumers = info.consumers,
+            .api = .{ .total = info.api_total, .errors = info.api_errors },
+        }, .{});
     }
 
     fn handleStreamCreate(self: *JsApiHandler, name: []const u8, data: []const u8) ![]u8 {
@@ -136,7 +140,7 @@ pub const JsApiHandler = struct {
         if (!self.js.deleteStream(name)) {
             return self.errorResponse(10_059, "stream not found") orelse return error.EncodeFailed;
         }
-        return std.fmt.allocPrint(self.allocator, "{{\"success\":true}}", .{});
+        return std.json.Stringify.valueAlloc(self.allocator, .{ .success = true }, .{});
     }
 
     fn handleStreamInfo(self: *JsApiHandler, name: []const u8) ![]u8 {
@@ -157,7 +161,7 @@ pub const JsApiHandler = struct {
         }
 
         const purged = stream.purge(filter);
-        return std.fmt.allocPrint(self.allocator, "{{\"success\":true,\"purged\":{d}}}", .{purged});
+        return std.json.Stringify.valueAlloc(self.allocator, .{ .success = true, .purged = purged }, .{});
     }
 
     fn handleStreamMsgGet(self: *JsApiHandler, name: []const u8, data: []const u8) ![]u8 {
@@ -199,51 +203,43 @@ pub const JsApiHandler = struct {
             return self.errorResponse(10_037, "no message found") orelse return error.EncodeFailed;
         }
 
-        return std.fmt.allocPrint(self.allocator, "{{\"success\":true}}", .{});
+        return std.json.Stringify.valueAlloc(self.allocator, .{ .success = true }, .{});
     }
 
     fn handleStreamList(self: *JsApiHandler) ![]u8 {
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
-        defer buf.deinit(self.allocator);
-
-        try appendStr(&buf, self.allocator, "{\"total\":");
-        try appendInt(&buf, self.allocator, self.js.streams.count());
-        try appendStr(&buf, self.allocator, ",\"streams\":[");
-
-        var first = true;
+        var buf: std.Io.Writer.Allocating = .init(self.allocator);
+        defer buf.deinit();
+        var jw: std.json.Stringify = .{ .writer = &buf.writer, .options = .{} };
+        try jw.beginObject();
+        try jw.objectField("total");
+        try jw.write(self.js.streams.count());
+        try jw.objectField("streams");
+        try jw.beginArray();
         var it = self.js.streams.iterator();
         while (it.next()) |entry| {
-            if (!first) try appendStr(&buf, self.allocator, ",");
-            first = false;
-            const si_json = try self.streamInfoResponse(entry.value_ptr.*);
-            defer self.allocator.free(si_json);
-            try buf.appendSlice(self.allocator, si_json);
+            try writeStreamInfo(&jw, entry.value_ptr.*);
         }
-
-        try appendStr(&buf, self.allocator, "]}");
-        return self.allocator.dupe(u8, buf.items);
+        try jw.endArray();
+        try jw.endObject();
+        return self.allocator.dupe(u8, buf.written());
     }
 
     fn handleStreamNames(self: *JsApiHandler) ![]u8 {
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
-        defer buf.deinit(self.allocator);
-
-        try appendStr(&buf, self.allocator, "{\"total\":");
-        try appendInt(&buf, self.allocator, self.js.streams.count());
-        try appendStr(&buf, self.allocator, ",\"streams\":[");
-
-        var first = true;
+        var buf: std.Io.Writer.Allocating = .init(self.allocator);
+        defer buf.deinit();
+        var jw: std.json.Stringify = .{ .writer = &buf.writer, .options = .{} };
+        try jw.beginObject();
+        try jw.objectField("total");
+        try jw.write(self.js.streams.count());
+        try jw.objectField("streams");
+        try jw.beginArray();
         var it = self.js.streams.iterator();
         while (it.next()) |entry| {
-            if (!first) try appendStr(&buf, self.allocator, ",");
-            first = false;
-            try appendStr(&buf, self.allocator, "\"");
-            try buf.appendSlice(self.allocator, entry.key_ptr.*);
-            try appendStr(&buf, self.allocator, "\"");
+            try jw.write(entry.key_ptr.*);
         }
-
-        try appendStr(&buf, self.allocator, "]}");
-        return self.allocator.dupe(u8, buf.items);
+        try jw.endArray();
+        try jw.endObject();
+        return self.allocator.dupe(u8, buf.written());
     }
 
     // --- Consumer handlers ---
@@ -268,7 +264,7 @@ pub const JsApiHandler = struct {
         if (!self.js.deleteConsumer(stream_name, consumer_name)) {
             return self.errorResponse(10_014, "consumer not found") orelse return error.EncodeFailed;
         }
-        return std.fmt.allocPrint(self.allocator, "{{\"success\":true}}", .{});
+        return std.json.Stringify.valueAlloc(self.allocator, .{ .success = true }, .{});
     }
 
     fn handleConsumerInfo(self: *JsApiHandler, stream_name: []const u8, consumer_name: []const u8) ![]u8 {
@@ -287,10 +283,6 @@ pub const JsApiHandler = struct {
         const prefix = std.fmt.bufPrint(&prefix_buf, "{s}.", .{stream_name}) catch
             return self.errorResponse(10_000, "internal error") orelse return error.EncodeFailed;
 
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
-        defer buf.deinit(self.allocator);
-
-        // Count consumers for this stream
         var count: u32 = 0;
         var count_it = self.js.consumers.iterator();
         while (count_it.next()) |entry| {
@@ -299,24 +291,23 @@ pub const JsApiHandler = struct {
             }
         }
 
-        try appendStr(&buf, self.allocator, "{\"total\":");
-        try appendInt(&buf, self.allocator, count);
-        try appendStr(&buf, self.allocator, ",\"consumers\":[");
-
-        var first = true;
+        var buf: std.Io.Writer.Allocating = .init(self.allocator);
+        defer buf.deinit();
+        var jw: std.json.Stringify = .{ .writer = &buf.writer, .options = .{} };
+        try jw.beginObject();
+        try jw.objectField("total");
+        try jw.write(count);
+        try jw.objectField("consumers");
+        try jw.beginArray();
         var it = self.js.consumers.iterator();
         while (it.next()) |entry| {
             if (entry.key_ptr.*.len >= prefix.len and std.mem.eql(u8, entry.key_ptr.*[0..prefix.len], prefix)) {
-                if (!first) try appendStr(&buf, self.allocator, ",");
-                first = false;
-                const ci_json = try self.consumerInfoResponse(entry.value_ptr.*);
-                defer self.allocator.free(ci_json);
-                try buf.appendSlice(self.allocator, ci_json);
+                try writeConsumerInfo(&jw, entry.value_ptr.*);
             }
         }
-
-        try appendStr(&buf, self.allocator, "]}");
-        return self.allocator.dupe(u8, buf.items);
+        try jw.endArray();
+        try jw.endObject();
+        return self.allocator.dupe(u8, buf.written());
     }
 
     fn handleConsumerNames(self: *JsApiHandler, stream_name: []const u8) ![]u8 {
@@ -328,9 +319,6 @@ pub const JsApiHandler = struct {
         const prefix = std.fmt.bufPrint(&prefix_buf, "{s}.", .{stream_name}) catch
             return self.errorResponse(10_000, "internal error") orelse return error.EncodeFailed;
 
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
-        defer buf.deinit(self.allocator);
-
         var count: u32 = 0;
         var count_it = self.js.consumers.iterator();
         while (count_it.next()) |entry| {
@@ -339,122 +327,59 @@ pub const JsApiHandler = struct {
             }
         }
 
-        try appendStr(&buf, self.allocator, "{\"total\":");
-        try appendInt(&buf, self.allocator, count);
-        try appendStr(&buf, self.allocator, ",\"consumers\":[");
-
-        var first = true;
+        var buf: std.Io.Writer.Allocating = .init(self.allocator);
+        defer buf.deinit();
+        var jw: std.json.Stringify = .{ .writer = &buf.writer, .options = .{} };
+        try jw.beginObject();
+        try jw.objectField("total");
+        try jw.write(count);
+        try jw.objectField("consumers");
+        try jw.beginArray();
         var it = self.js.consumers.iterator();
         while (it.next()) |entry| {
             if (entry.key_ptr.*.len >= prefix.len and std.mem.eql(u8, entry.key_ptr.*[0..prefix.len], prefix)) {
-                if (!first) try appendStr(&buf, self.allocator, ",");
-                first = false;
-                try appendStr(&buf, self.allocator, "\"");
-                try buf.appendSlice(self.allocator, entry.value_ptr.*.name);
-                try appendStr(&buf, self.allocator, "\"");
+                try jw.write(entry.value_ptr.*.name);
             }
         }
-
-        try appendStr(&buf, self.allocator, "]}");
-        return self.allocator.dupe(u8, buf.items);
+        try jw.endArray();
+        try jw.endObject();
+        return self.allocator.dupe(u8, buf.written());
     }
 
     // --- Response formatters ---
 
     fn streamInfoResponse(self: *JsApiHandler, stream: *stream_mod.Stream) ![]u8 {
-        const si = stream.info();
-
-        var subj_buf: std.ArrayListUnmanaged(u8) = .empty;
-        defer subj_buf.deinit(self.allocator);
-        try appendStr(&subj_buf, self.allocator, "[");
-        for (si.config.subjects, 0..) |s, i| {
-            if (i > 0) try appendStr(&subj_buf, self.allocator, ",");
-            try appendStr(&subj_buf, self.allocator, "\"");
-            try subj_buf.appendSlice(self.allocator, s);
-            try appendStr(&subj_buf, self.allocator, "\"");
-        }
-        try appendStr(&subj_buf, self.allocator, "]");
-
-        return std.fmt.allocPrint(self.allocator,
-            "{{\"config\":{{\"name\":\"{s}\",\"subjects\":{s},\"retention\":\"{s}\",\"max_msgs\":{d},\"max_bytes\":{d},\"max_age\":{d},\"storage\":\"{s}\",\"discard\":\"{s}\",\"duplicate_window\":{d},\"no_ack\":{s}}},\"state\":{{\"messages\":{d},\"bytes\":{d},\"first_seq\":{d},\"last_seq\":{d},\"consumer_count\":{d}}},\"created\":\"{d}\"}}",
-            .{
-                si.config.name,
-                subj_buf.items,
-                retentionStr(si.config.retention),
-                si.config.max_msgs,
-                si.config.max_bytes,
-                si.config.max_age_ns,
-                storageStr(si.config.storage),
-                discardStr(si.config.discard),
-                si.config.duplicate_window_ns,
-                if (si.config.no_ack) "true" else "false",
-                si.state.messages,
-                si.state.bytes,
-                si.state.first_seq,
-                si.state.last_seq,
-                si.state.consumer_count,
-                si.created_ns,
-            },
-        );
+        var buf: std.Io.Writer.Allocating = .init(self.allocator);
+        defer buf.deinit();
+        var jw: std.json.Stringify = .{ .writer = &buf.writer, .options = .{} };
+        try writeStreamInfo(&jw, stream);
+        return self.allocator.dupe(u8, buf.written());
     }
 
     fn consumerInfoResponse(self: *JsApiHandler, consumer: *consumer_mod.Consumer) ![]u8 {
-        const ci = consumer.info();
-        const ds_field = if (ci.config.deliver_subject) |ds|
-            std.fmt.allocPrint(self.allocator, ",\"deliver_subject\":\"{s}\"", .{ds}) catch ""
-        else
-            "";
-        defer if (ci.config.deliver_subject != null and ds_field.len > 0) self.allocator.free(ds_field);
-
-        const dg_field = if (ci.config.deliver_group) |dg|
-            std.fmt.allocPrint(self.allocator, ",\"deliver_group\":\"{s}\"", .{dg}) catch ""
-        else
-            "";
-        defer if (ci.config.deliver_group != null and dg_field.len > 0) self.allocator.free(dg_field);
-
-        return std.fmt.allocPrint(self.allocator,
-            "{{\"stream_name\":\"{s}\",\"name\":\"{s}\",\"config\":{{\"deliver_policy\":\"{s}\",\"ack_policy\":\"{s}\",\"ack_wait\":{d},\"max_deliver\":{d},\"max_ack_pending\":{d},\"filter_subject\":\"{s}\"{s}{s}}},\"state\":{{\"delivered\":{{\"stream_seq\":{d},\"consumer_seq\":{d}}},\"ack_floor\":{{\"stream_seq\":{d},\"consumer_seq\":{d}}},\"num_ack_pending\":{d},\"num_redelivered\":{d},\"num_pending\":{d}}},\"created\":\"{d}\"}}",
-            .{
-                ci.stream_name,
-                ci.name,
-                deliverPolicyStr(ci.config.deliver_policy),
-                ackPolicyStr(ci.config.ack_policy),
-                ci.config.ack_wait_ns,
-                ci.config.max_deliver,
-                ci.config.max_ack_pending,
-                if (ci.config.filter_subject) |fs| fs else "",
-                ds_field,
-                dg_field,
-                ci.state.delivered.stream_seq,
-                ci.state.delivered.consumer_seq,
-                ci.state.ack_floor.stream_seq,
-                ci.state.ack_floor.consumer_seq,
-                ci.state.num_ack_pending,
-                ci.state.num_redelivered,
-                ci.state.num_pending,
-                ci.created_ns,
-            },
-        );
+        var buf: std.Io.Writer.Allocating = .init(self.allocator);
+        defer buf.deinit();
+        var jw: std.json.Stringify = .{ .writer = &buf.writer, .options = .{} };
+        try writeConsumerInfo(&jw, consumer);
+        return self.allocator.dupe(u8, buf.written());
     }
 
     fn storedMessageResponse(self: *JsApiHandler, msg: anytype) ![]u8 {
-        const hdrs_str = if (msg.headers) |h|
-            std.base64.standard.Encoder.calcSize(h.len)
-        else
-            0;
-        _ = hdrs_str;
-
-        return std.fmt.allocPrint(self.allocator,
-            "{{\"message\":{{\"subject\":\"{s}\",\"seq\":{d},\"time\":\"{d}\"}}}}",
-            .{ msg.subject, msg.sequence, msg.timestamp_ns },
-        );
+        var ts_buf: [24]u8 = undefined;
+        const ts_str = try std.fmt.bufPrint(&ts_buf, "{d}", .{msg.timestamp_ns});
+        return std.json.Stringify.valueAlloc(self.allocator, .{
+            .message = .{
+                .subject = msg.subject,
+                .seq = msg.sequence,
+                .time = ts_str,
+            },
+        }, .{});
     }
 
     fn errorResponse(self: *JsApiHandler, code: u32, description: []const u8) ?[]u8 {
-        return std.fmt.allocPrint(self.allocator,
-            "{{\"error\":{{\"code\":{d},\"description\":\"{s}\"}}}}",
-            .{ code, description },
-        ) catch null;
+        return std.json.Stringify.valueAlloc(self.allocator, .{
+            .@"error" = .{ .code = code, .description = description },
+        }, .{}) catch null;
     }
 
     fn errCode(err: anyerror) u32 {
@@ -479,6 +404,122 @@ pub const JsApiHandler = struct {
         };
     }
 };
+
+// --- Stream/consumer JSON writers (shared by single + list response handlers) ---
+
+fn writeStreamInfo(jw: *std.json.Stringify, stream: *stream_mod.Stream) !void {
+    const si = stream.info();
+    try jw.beginObject();
+    try jw.objectField("config");
+    try jw.beginObject();
+    try jw.objectField("name");
+    try jw.write(si.config.name);
+    try jw.objectField("subjects");
+    try jw.beginArray();
+    for (si.config.subjects) |s| try jw.write(s);
+    try jw.endArray();
+    try jw.objectField("retention");
+    try jw.write(retentionStr(si.config.retention));
+    try jw.objectField("max_msgs");
+    try jw.write(si.config.max_msgs);
+    try jw.objectField("max_bytes");
+    try jw.write(si.config.max_bytes);
+    try jw.objectField("max_age");
+    try jw.write(si.config.max_age_ns);
+    try jw.objectField("storage");
+    try jw.write(storageStr(si.config.storage));
+    try jw.objectField("discard");
+    try jw.write(discardStr(si.config.discard));
+    try jw.objectField("duplicate_window");
+    try jw.write(si.config.duplicate_window_ns);
+    try jw.objectField("no_ack");
+    try jw.write(si.config.no_ack);
+    try jw.endObject();
+
+    try jw.objectField("state");
+    try jw.beginObject();
+    try jw.objectField("messages");
+    try jw.write(si.state.messages);
+    try jw.objectField("bytes");
+    try jw.write(si.state.bytes);
+    try jw.objectField("first_seq");
+    try jw.write(si.state.first_seq);
+    try jw.objectField("last_seq");
+    try jw.write(si.state.last_seq);
+    try jw.objectField("consumer_count");
+    try jw.write(si.state.consumer_count);
+    try jw.endObject();
+
+    // created emitted as a string ("{d}") to match prior wire shape.
+    var created_buf: [24]u8 = undefined;
+    const created_str = try std.fmt.bufPrint(&created_buf, "{d}", .{si.created_ns});
+    try jw.objectField("created");
+    try jw.write(created_str);
+    try jw.endObject();
+}
+
+fn writeConsumerInfo(jw: *std.json.Stringify, consumer: *consumer_mod.Consumer) !void {
+    const ci = consumer.info();
+    try jw.beginObject();
+    try jw.objectField("stream_name");
+    try jw.write(ci.stream_name);
+    try jw.objectField("name");
+    try jw.write(ci.name);
+
+    try jw.objectField("config");
+    try jw.beginObject();
+    try jw.objectField("deliver_policy");
+    try jw.write(deliverPolicyStr(ci.config.deliver_policy));
+    try jw.objectField("ack_policy");
+    try jw.write(ackPolicyStr(ci.config.ack_policy));
+    try jw.objectField("ack_wait");
+    try jw.write(ci.config.ack_wait_ns);
+    try jw.objectField("max_deliver");
+    try jw.write(ci.config.max_deliver);
+    try jw.objectField("max_ack_pending");
+    try jw.write(ci.config.max_ack_pending);
+    try jw.objectField("filter_subject");
+    try jw.write(if (ci.config.filter_subject) |fs| fs else "");
+    if (ci.config.deliver_subject) |ds| {
+        try jw.objectField("deliver_subject");
+        try jw.write(ds);
+    }
+    if (ci.config.deliver_group) |dg| {
+        try jw.objectField("deliver_group");
+        try jw.write(dg);
+    }
+    try jw.endObject();
+
+    try jw.objectField("state");
+    try jw.beginObject();
+    try jw.objectField("delivered");
+    try jw.beginObject();
+    try jw.objectField("stream_seq");
+    try jw.write(ci.state.delivered.stream_seq);
+    try jw.objectField("consumer_seq");
+    try jw.write(ci.state.delivered.consumer_seq);
+    try jw.endObject();
+    try jw.objectField("ack_floor");
+    try jw.beginObject();
+    try jw.objectField("stream_seq");
+    try jw.write(ci.state.ack_floor.stream_seq);
+    try jw.objectField("consumer_seq");
+    try jw.write(ci.state.ack_floor.consumer_seq);
+    try jw.endObject();
+    try jw.objectField("num_ack_pending");
+    try jw.write(ci.state.num_ack_pending);
+    try jw.objectField("num_redelivered");
+    try jw.write(ci.state.num_redelivered);
+    try jw.objectField("num_pending");
+    try jw.write(ci.state.num_pending);
+    try jw.endObject();
+
+    var created_buf: [24]u8 = undefined;
+    const created_str = try std.fmt.bufPrint(&created_buf, "{d}", .{ci.created_ns});
+    try jw.objectField("created");
+    try jw.write(created_str);
+    try jw.endObject();
+}
 
 // --- JSON helpers (pub for use by server.zig) ---
 
