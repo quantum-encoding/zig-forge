@@ -106,14 +106,36 @@ pub const RiskLevel = enum {
     critical,
 };
 
+pub const FindingConfidence = enum {
+    high,
+    medium,
+    low,
+
+    pub fn toString(self: FindingConfidence) []const u8 {
+        return switch (self) {
+            .high => "high",
+            .medium => "medium",
+            .low => "low",
+        };
+    }
+};
+
 /// Concrete security anti-pattern caught by `analyzers/security_patterns.zig`.
 /// Each finding carries a stable rule id (so CI can grep for "JSON-IN-FMT"
 /// the same way operators grep for compiler warnings), the source line,
-/// a severity, a one-sentence message, and the trimmed line of code.
+/// a severity, a one-sentence message, the trimmed line of code, and the
+/// confidence / gating policy attached to the rule that fired.
+///
+/// Gating policy (consumed by --strict in main.zig):
+///   confidence = .high  + gate = true   → fatal exit 2 on match
+///   confidence = .high  + gate = false  → printed as WARN, advisory
+///   confidence = .medium / .low         → advisory regardless of gate
 pub const SecurityFinding = struct {
     rule_id: []const u8,
     line: u32,
     severity: RiskLevel,
+    confidence: FindingConfidence,
+    gate: bool,
     message: []const u8,
     snippet: []const u8,
 };

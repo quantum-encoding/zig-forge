@@ -7,6 +7,7 @@ const structure = @import("analyzers/structure.zig");
 const imports_analyzer = @import("analyzers/imports.zig");
 const unsafe_ops = @import("analyzers/unsafe_ops.zig");
 const security_patterns = @import("analyzers/security_patterns.zig");
+const rule_engine = @import("analyzers/rule_engine.zig");
 
 // Pull submodule test blocks into the `zig build test` discovery
 // graph. Without these references, the test runner only sees tests
@@ -20,6 +21,7 @@ comptime {
     _ = imports_analyzer;
     _ = unsafe_ops;
     _ = security_patterns;
+    _ = rule_engine;
     _ = scanner;
     _ = models;
 }
@@ -53,13 +55,19 @@ const Config = struct {
     imports_only: bool = false,
     unsafe_only: bool = false,
     compile: bool = false,
-    /// When true, exit with a non-zero status if any
-    /// `SecurityFinding` is emitted. Designed for CI / pre-commit
-    /// pipelines: failing the build on detection of an
-    /// anti-pattern (JSON-in-fmt, MBEDTLS-VERIFY-NONE,
-    /// EQL-FOR-SECRETS, SHELL-CHILD) is the whole point of those
-    /// rules.
+    /// When true, exit with a non-zero status if any GATING finding
+    /// is emitted (confidence=high AND gate=true). Advisory findings
+    /// (medium/low confidence, OR gate=false) print as WARNs but do
+    /// NOT cause exit 2 — that's the "fuzzy mode" the data-driven
+    /// ruleset enables: candidate rules ship at medium confidence,
+    /// surface in scan output, and prove themselves before being
+    /// promoted to gate=true.
     strict: bool = false,
+    /// Optional TOML rules file. When set, replaces the embedded
+    /// default ruleset for this run. Useful when an organization
+    /// ships its own additional rules without recompiling the
+    /// scanner.
+    rules_file: []const u8 = "",
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -112,6 +120,9 @@ pub fn main(init: std.process.Init) !void {
             config.compile = true;
         } else if (std.mem.eql(u8, arg, "--strict")) {
             config.strict = true;
+        } else if (std.mem.eql(u8, arg, "--rules") and i + 1 < args.len) {
+            i += 1;
+            config.rules_file = args[i];
         } else if (std.mem.eql(u8, arg, "--report") and i + 1 < args.len) {
             i += 1;
             config.report_dir = args[i];
@@ -132,6 +143,24 @@ pub fn main(init: std.process.Init) !void {
     var io_threaded = std.Io.Threaded.init(allocator, .{ .environ = init.minimal.environ });
     defer io_threaded.deinit();
     const io = io_threaded.io();
+
+    // Load the security ruleset before scanning. The embedded default
+    // covers the four established anti-pattern classes; --rules
+    // overrides with a caller-supplied TOML document. Failure here is
+    // fatal: a scanner without rules is not the same product.
+    if (config.rules_file.len > 0) {
+        const rules_source = readSourceFile(io, allocator, config.rules_file) catch |err| {
+            std.debug.print("zig-lens: failed to read --rules file '{s}': {s}\n", .{ config.rules_file, @errorName(err) });
+            std.process.exit(2);
+        };
+        defer allocator.free(rules_source);
+        security_patterns.loadCustom(allocator, rules_source) catch |err| {
+            std.debug.print("zig-lens: failed to parse --rules file '{s}': {s}\n", .{ config.rules_file, @errorName(err) });
+            std.process.exit(2);
+        };
+    } else {
+        try security_patterns.loadDefault(allocator);
+    }
 
     // Compile mode: produce single-file codebase compilation
     if (config.compile) {
@@ -287,14 +316,23 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("{s}", .{output});
     }
 
-    // --strict: fail the process when any anti-pattern fired. CI
-    // gates on the exit code; the findings themselves were already
-    // printed (or emitted to the JSON file) above.
+    // --strict: fail the process when any GATING anti-pattern fired.
+    // Advisory findings (medium/low confidence, OR gate=false) are
+    // already printed as WARNs in the output above but do NOT
+    // contribute to the strict exit code — that's the whole point of
+    // the data-driven ruleset's confidence + gate fields.
     if (config.strict) {
-        var total: u32 = 0;
-        for (report.files.items) |f| total += @intCast(f.security_findings.items.len);
-        if (total > 0) {
-            std.debug.print("\nzig-lens --strict: {d} security finding(s); failing.\n", .{total});
+        var gating: u32 = 0;
+        var advisory: u32 = 0;
+        for (report.files.items) |f| {
+            for (f.security_findings.items) |sf| {
+                if (sf.gate and sf.confidence == .high) gating += 1 else advisory += 1;
+            }
+        }
+        if (gating > 0) {
+            std.debug.print("\nzig-lens --strict: {d} gating finding(s)", .{gating});
+            if (advisory > 0) std.debug.print(" ({d} advisory)", .{advisory});
+            std.debug.print("; failing.\n", .{});
             std.process.exit(2);
         }
     }
@@ -339,7 +377,8 @@ fn printUsage() void {
         \\  --format <fmt>        Output format: terminal (default), json, markdown, dot
         \\  --compact             Compact JSON optimized for AI context windows
         \\  --compile             Compile entire codebase into single MD file for AI
-        \\  --strict              Exit non-zero (status 2) if any security anti-pattern is found
+        \\  --strict              Exit non-zero (status 2) if any GATING (high+gate) finding is emitted
+        \\  --rules <file>        Replace the embedded default rules TOML with a caller-supplied file
         \\  --report <dir>        Generate all reports into directory
         \\  --imports             Import/dependency analysis only
         \\  --unsafe              Unsafe operations audit

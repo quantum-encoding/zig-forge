@@ -167,7 +167,7 @@ pub fn writeProjectReport(allocator: std.mem.Allocator, report: *const models.Pr
     // a clean scan never reads as "this class is handled."
     try w.key("scanner_coverage", false);
     try w.beginArray();
-    for (security_patterns.rule_coverage, 0..) |rc, ri| {
+    for (security_patterns.ruleCoverage(), 0..) |rc, ri| {
         if (ri > 0) try w.comma();
         try w.newline();
         try w.beginObject();
@@ -175,6 +175,10 @@ pub fn writeProjectReport(allocator: std.mem.Allocator, report: *const models.Pr
         try w.writeString(rc.id);
         try w.key("summary", false);
         try w.writeString(rc.summary);
+        try w.key("confidence", false);
+        try w.writeString(rc.confidence);
+        try w.key("gate", false);
+        try w.writeBool(rc.gate);
         try w.key("covers", false);
         try w.writeString(rc.covers);
         try w.key("does_not_cover", false);
@@ -385,6 +389,12 @@ fn writeFileReport(w: *JsonWriter, file: *const models.FileReport) !void {
             try w.writeString(sf.rule_id);
             try w.key("severity", false);
             try w.writeString(@tagName(sf.severity));
+            try w.key("confidence", false);
+            try w.writeString(sf.confidence.toString());
+            try w.key("gate", false);
+            try w.writeBool(sf.gate);
+            try w.key("advisory", false);
+            try w.writeBool(!(sf.gate and sf.confidence == .high));
             try w.key("line", false);
             try w.writeInt(sf.line);
             try w.key("message", false);

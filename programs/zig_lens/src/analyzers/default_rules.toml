@@ -1,0 +1,171 @@
+# zig_lens scanner — default ruleset.
+#
+# Each [[rule]] table is one detection. The fields below are documented
+# in `analyzers/rule_engine.zig` (RuleKind / Confidence / Rule struct).
+#
+# Confidence + gate combine to determine CI behavior:
+#   confidence = "high"   + gate = true    → counted toward --strict
+#                                            (fatal exit 2 if matched)
+#   confidence = "high"   + gate = false   → printed as WARN, advisory
+#   confidence = "medium" or "low"         → printed as WARN, never fatal
+#                                            (advisory regardless of gate)
+#
+# The 4 anti-patterns established by the JSON-IN-FMT / SHELL-CHILD /
+# EQL-FOR-SECRETS / MBEDTLS-VERIFY-NONE purge are encoded as 5 rule
+# entries below (SHELL-CHILD has two complementary shapes — the
+# enclosing-fn /bin/sh form and the same-line sh+ -c argv pair).
+#
+# Patterns using `[ ... ]` arrays are TOML literal strings (single
+# quotes): bytes are taken as-is, no escape processing. That keeps the
+# JSON-shape markers ({{\", \":\", etc.) readable.
+
+# ---------------------------------------------------------------------
+# JSON-IN-FMT — Hand-formatted JSON in printf-style format strings.
+# ---------------------------------------------------------------------
+[[rule]]
+id              = "JSON-IN-FMT"
+summary         = "Hand-formatted JSON in printf-style format strings"
+severity        = "high"
+confidence      = "high"
+gate            = true
+kind            = "line_match"
+message         = "allocPrint/bufPrint used to build JSON — hand-formatted JSON does not escape interpolated values (use std.json.Stringify)"
+contains_ident_any    = ["allocPrint", "bufPrint"]
+window_lines          = 4
+window_contains_any   = ['{{\"', '\":\"', '\":{', ',\"']
+covers          = """
+allocPrint / bufPrint where the format string contains JSON
+shape markers ({{\"…\":\"…\"}}, \":[, etc.).
+"""
+does_not_cover  = """
+Hand-built SQL (\"WHERE id={s}\"), XML, YAML, URL path segments,
+HTML, shell-command strings outside std.process.Child, JSON
+construction through std.ArrayList.appendSlice + literals
+(\"\\\"name\\\":\\\"\" then escape-less write), or any other
+structured format. Each is a sibling injection class that
+needs its own rule. A green JSON-IN-FMT scan does NOT mean
+injection-safe.
+"""
+
+# ---------------------------------------------------------------------
+# MBEDTLS-VERIFY-NONE — mbedTLS cert validation disabled by literal flag.
+# ---------------------------------------------------------------------
+[[rule]]
+id              = "MBEDTLS-VERIFY-NONE"
+summary         = "mbedTLS certificate validation disabled by literal flag"
+severity        = "critical"
+confidence      = "high"
+gate            = true
+kind            = "line_match"
+message         = "MBEDTLS_SSL_VERIFY_NONE disables certificate validation — never use in production"
+contains_any    = ["MBEDTLS_SSL_VERIFY_NONE"]
+covers          = """
+Any source line referencing the MBEDTLS_SSL_VERIFY_NONE token
+(outside of comments and multi-line string fixtures).
+"""
+does_not_cover  = """
+Equivalent disablements via numeric literal 0 passed to
+mbedtls_ssl_conf_authmode, custom verify callbacks that
+always return 0, or runtime config that selects VERIFY_NONE
+indirectly (e.g. through an env-var-driven int). Also
+language-specific equivalents in OpenSSL / LibreSSL / Rust
+rustls / Go crypto/tls (InsecureSkipVerify) — none scanned.
+"""
+
+# ---------------------------------------------------------------------
+# EQL-FOR-SECRETS — Non-constant-time comparison in auth-context functions.
+# ---------------------------------------------------------------------
+[[rule]]
+id              = "EQL-FOR-SECRETS"
+summary         = "Non-constant-time comparison in auth-context functions"
+severity        = "high"
+confidence      = "high"
+gate            = true
+kind            = "enclosing_fn"
+message         = "non-constant-time comparison in a function whose name or parameters identify a secret — use std.crypto.timing_safe.eql or security.constantTimeEql"
+contains_any    = ["std.mem.eql"]
+contains_ident_any        = ["memcmp"]
+not_contains_ident_any    = ["constantTimeEql", "timing_safe"]
+require_secret_function   = true
+covers          = """
+std.mem.eql / memcmp called within a function whose NAME or
+PARAMETER list contains a recognized secret. Token matching
+splits identifiers on camelCase and snake_case boundaries:
+
+  Single sub-tokens (case-insensitive equality):
+    signature, hmac, password, passwd, secret, nonce, apikey
+
+  Adjacent sub-token pairs:
+    api/key, session/token, auth/token, bearer/token, csrf/token,
+    access/token, refresh/token, verify/token, id/token
+"""
+does_not_cover  = """
+Auth-context functions whose identifiers don't contain a
+keyword (e.g. `compare`, `validate`, `checkBearer` — Bearer
+alone is not in the set). Comparisons through indirection
+(function A calls helper B which does the eql). Hand-rolled
+loops over byte arrays. Comparisons via the `!=` operator
+on slices. Cross-file flow (the eql is in a different file
+than the function whose name signals the secret context).
+For these the gate cannot replace human review.
+"""
+
+# ---------------------------------------------------------------------
+# SHELL-CHILD (a) — /bin/sh literal in an enclosing function that
+# also calls a process-spawn primitive.
+# ---------------------------------------------------------------------
+[[rule]]
+id              = "SHELL-CHILD"
+summary         = "Shell invocation in argv-mode process spawn"
+severity        = "critical"
+confidence      = "high"
+gate            = true
+kind            = "enclosing_fn_with_body"
+message         = "process.Child / process.run / execve invoked via /bin/sh — argv-mode exec exists specifically to avoid shell metacharacter injection"
+contains_any    = ['"/bin/sh"', '"/bin/bash"', '"/usr/bin/env"']
+require_spawn_in_function = true
+covers          = """
+Literal \"/bin/sh\" or \"/bin/bash\" string appearing in the body
+of a function that also references std.process.Child /
+process.run / Child.init / execve / execvp / system. Plus
+the \"sh\"+\"-c\" or \"bash\"+\"-c\" literal pair on the same argv
+line (independent of enclosing function).
+"""
+does_not_cover  = """
+Shell invocations via $SHELL / getenv(\"SHELL\") indirection
+(the literal \"/bin/sh\" never appears in source). argv[0]
+bound to a runtime-discovered binary that happens to be a
+shell. popen / posix_spawn / system() / Rust
+Command::new(\"sh\") if not preceded by \"/bin/sh\" literal.
+Cross-function flow where the argv is built in one fn and
+spawned in another.
+"""
+
+# ---------------------------------------------------------------------
+# SHELL-CHILD (b) — "sh" / "bash" + "-c" both present on the same
+# argv-array line. Independent of enclosing-function scope because
+# the pair itself is a strong signal.
+# ---------------------------------------------------------------------
+[[rule]]
+id              = "SHELL-CHILD"
+summary         = "Shell -c pair on argv line"
+severity        = "critical"
+confidence      = "high"
+gate            = true
+kind            = "line_groups"
+message         = "shell -c pattern in argv — re-introduces metacharacter injection that argv-mode exec was designed to prevent"
+line_groups     = [
+  ['"sh"', '"bash"', '"zsh"'],
+  ['"-c"'],
+]
+covers          = """
+Same-line argv literal where one element is a shell binary
+(\"sh\" / \"bash\" / \"zsh\") and another is \"-c\". This is the
+shape that pipes the next argument to a shell parser.
+"""
+does_not_cover  = """
+Multi-line argv-array construction where the shell binary
+and \"-c\" appear on different source lines (the engine looks
+only at the same line for this rule). Shell invocations
+via the (a) form above (covered separately).
+"""

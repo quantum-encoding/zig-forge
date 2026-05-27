@@ -4,17 +4,31 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // In-tree dependency: zig_toml provides the parser the rule
+    // engine uses to load `analyzers/default_rules.toml` (embedded via
+    // @embedFile) and any caller-supplied ruleset passed with
+    // `--rules <path>`.
+    const zig_toml_module = b.createModule(.{
+        .root_source_file = b.path("../zig_toml/src/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
     // =============================================================================
     // CLI Executable
     // =============================================================================
 
+    const exe_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    exe_module.addImport("zig_toml", zig_toml_module);
+
     const exe = b.addExecutable(.{
         .name = "zig-lens",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+        .root_module = exe_module,
     });
 
     b.installArtifact(exe);
@@ -38,6 +52,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    ffi_module.addImport("zig_toml", zig_toml_module);
 
     const lib = b.addLibrary(.{
         .name = "zig_lens",
@@ -63,11 +78,19 @@ pub fn build(b: *std.Build) void {
         .abi = .android,
     });
 
+    const android_toml_module = b.createModule(.{
+        .root_source_file = b.path("../zig_toml/src/lib.zig"),
+        .target = android_target,
+        .optimize = .ReleaseFast,
+        .link_libc = true,
+    });
+
     const android_module = b.createModule(.{
         .root_source_file = b.path("src/ffi.zig"),
         .target = android_target,
         .optimize = .ReleaseFast,
     });
+    android_module.addImport("zig_toml", android_toml_module);
 
     const android_lib = b.addLibrary(.{
         .name = "zig_lens",
@@ -89,13 +112,15 @@ pub fn build(b: *std.Build) void {
     // Tests
     // =============================================================================
 
-    // Core module tests (via main.zig)
+    const unit_test_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    unit_test_module.addImport("zig_toml", zig_toml_module);
+
     const unit_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+        .root_module = unit_test_module,
     });
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
@@ -108,6 +133,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    ffi_test_module.addImport("zig_toml", zig_toml_module);
 
     const ffi_tests = b.addTest(.{
         .root_module = ffi_test_module,

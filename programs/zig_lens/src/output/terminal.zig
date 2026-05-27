@@ -88,30 +88,46 @@ pub fn writeReport(allocator: std.mem.Allocator, report: *const models.ProjectRe
 
     // Security anti-patterns. Surfacing these at the end of the
     // terminal output puts them in the operator's line of sight at
-    // the moment the scan completes — the rules are designed to be
-    // ship-blockers, so they shouldn't get buried behind a page of
-    // summary data.
+    // the moment the scan completes. Gating findings (high
+    // confidence + gate=true) print with severity tags;
+    // advisory findings (everything else) print with a WARN tag so
+    // operators can tell which ones contribute to --strict and which
+    // are informational.
     {
-        var total: u32 = 0;
-        for (report.files.items) |*f| total += @intCast(f.security_findings.items.len);
-        if (total > 0) {
-            try appendFmt(allocator, &buf, "\n\x1b[1;31mSecurity findings ({d}):\x1b[0m\n", .{total});
+        var gating: u32 = 0;
+        var advisory: u32 = 0;
+        for (report.files.items) |*f| {
+            for (f.security_findings.items) |sf| {
+                if (sf.gate and sf.confidence == .high) gating += 1 else advisory += 1;
+            }
+        }
+        if (gating + advisory > 0) {
+            try appendFmt(allocator, &buf,
+                "\n\x1b[1;31mSecurity findings ({d} gating, {d} advisory):\x1b[0m\n",
+                .{ gating, advisory },
+            );
             for (report.files.items) |*file| {
                 for (file.security_findings.items) |sf| {
-                    const tag = switch (sf.severity) {
+                    const is_gating = sf.gate and sf.confidence == .high;
+                    const tag = if (is_gating) switch (sf.severity) {
                         .critical => "\x1b[1;31mCRITICAL\x1b[0m",
                         .high => "\x1b[1;33mHIGH\x1b[0m    ",
                         .medium => "\x1b[1;33mMEDIUM\x1b[0m  ",
                         .low => "\x1b[1;34mLOW\x1b[0m     ",
-                    };
-                    try appendFmt(allocator, &buf, "  {s} [{s:<18}] {s}:{d}\n    {s}\n    \x1b[2m{s}\x1b[0m\n", .{
-                        tag,
-                        sf.rule_id,
-                        file.relative_path,
-                        sf.line,
-                        sf.message,
-                        sf.snippet,
-                    });
+                    } else "\x1b[1;36mWARN\x1b[0m    ";
+                    try appendFmt(allocator, &buf,
+                        "  {s} [{s:<18}] conf={s:<6} gate={s} {s}:{d}\n    {s}\n    \x1b[2m{s}\x1b[0m\n",
+                        .{
+                            tag,
+                            sf.rule_id,
+                            sf.confidence.toString(),
+                            if (sf.gate) "yes" else "no ",
+                            file.relative_path,
+                            sf.line,
+                            sf.message,
+                            sf.snippet,
+                        },
+                    );
                 }
             }
         }
@@ -126,8 +142,11 @@ pub fn writeReport(allocator: std.mem.Allocator, report: *const models.ProjectRe
             "\n\x1b[1mSecurity scanner coverage:\x1b[0m \x1b[2m(a clean scan \xe2\x89\xa0 \"no vulnerabilities\" \xe2\x80\x94 each rule has gaps)\x1b[0m\n",
             .{},
         );
-        for (security_patterns.rule_coverage) |rc| {
-            try appendFmt(allocator, &buf, "\n  \x1b[1m[{s}]\x1b[0m {s}\n", .{ rc.id, rc.summary });
+        for (security_patterns.ruleCoverage()) |rc| {
+            try appendFmt(allocator, &buf,
+                "\n  \x1b[1m[{s}]\x1b[0m {s} \x1b[2m(conf={s}, gate={s})\x1b[0m\n",
+                .{ rc.id, rc.summary, rc.confidence, if (rc.gate) "yes" else "no" },
+            );
             try appendFmt(allocator, &buf, "    \x1b[32mCovers:\x1b[0m\n", .{});
             try indentedBlock(allocator, &buf, rc.covers, "      ");
             try appendFmt(allocator, &buf, "    \x1b[33mDoes NOT cover:\x1b[0m\n", .{});
