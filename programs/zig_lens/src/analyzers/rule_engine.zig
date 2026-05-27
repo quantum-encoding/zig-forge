@@ -95,6 +95,11 @@ pub const Rule = struct {
     contains_any: [][]const u8 = &.{},
     contains_ident_any: [][]const u8 = &.{},
     not_contains_ident_any: [][]const u8 = &.{},
+    /// Substring negative match on the current line. If ANY of these
+    /// substrings appear on the matched line, the rule does NOT
+    /// fire — used to express "fire on @intCast UNLESS the line also
+    /// contains std.math.cast or .len bounds-check logic."
+    not_contains_any: [][]const u8 = &.{},
 
     // Window lookahead for line_match (and the variants).
     window_lines: u8 = 0,
@@ -221,6 +226,7 @@ fn parseOneRule(arena: std.mem.Allocator, t: *toml.Table) LoadError!Rule {
     r.contains_any = try optionalStringArray(arena, t, "contains_any");
     r.contains_ident_any = try optionalStringArray(arena, t, "contains_ident_any");
     r.not_contains_ident_any = try optionalStringArray(arena, t, "not_contains_ident_any");
+    r.not_contains_any = try optionalStringArray(arena, t, "not_contains_any");
     r.window_contains_any = try optionalStringArray(arena, t, "window_contains_any");
     r.line_groups = try optionalGroupArray(arena, t, "line_groups");
 
@@ -329,6 +335,12 @@ fn lineFilterFires(rule: *const Rule, full_source: []const u8, line: []const u8,
     // shows up, the rule does not fire.
     for (rule.not_contains_ident_any) |excl| {
         if (containsIdent(line, excl)) return false;
+    }
+    // Substring negative match. Used for cases where the excluded
+    // pattern is not a single identifier (e.g. "std.math.cast" or
+    // ".len").
+    for (rule.not_contains_any) |excl| {
+        if (std.mem.indexOf(u8, line, excl) != null) return false;
     }
 
     // OR across contains_any (substring) + contains_ident_any (token).

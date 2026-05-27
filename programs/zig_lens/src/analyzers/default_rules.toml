@@ -270,3 +270,91 @@ unsafe call lives elsewhere. Pointer arithmetic via raw integer
 math without a dedicated builtin (extremely rare in idiomatic
 Zig).
 """
+
+# ---------------------------------------------------------------------
+# FLOAT-OBSESSION — Raw f32/f64 used for a quantity that should be a
+# typed Quantity(UnitTag) (Mars Climate Orbiter) or an integer tick
+# counter / base-unit integer (Patriot missile). Advisory; flags
+# proximity of a float type to identifier names that look financial,
+# temporal, or quantity-bearing. See RESILIENCE_PATTERNS.md (the MCO
+# Rule + the Patriot Rule) for the structural fix.
+# ---------------------------------------------------------------------
+[[rule]]
+id                  = "FLOAT-OBSESSION"
+summary             = "Raw f32/f64 near a temporal or quantity identifier"
+severity            = "medium"
+confidence          = "medium"
+gate                = false
+kind                = "line_match"
+message             = "advisory: raw f32/f64 near a time/balance/quantity identifier — consider Quantity(UnitTag) (MCO Rule) or u64 ticks / base-unit integer (Patriot Rule). See RESILIENCE_PATTERNS.md."
+contains_ident_any  = ["f32", "f64"]
+window_lines        = 0
+window_contains_any = [
+  "time", "Time",
+  "clock", "Clock",
+  "tick", "Tick",
+  "balance", "Balance",
+  "amount", "Amount",
+  "price", "Price",
+  "qty", "Qty",
+  "quantity", "Quantity",
+]
+covers              = """
+Any line declaring or accepting an f32/f64 whose surrounding
+identifier text (same line) suggests a physical / financial /
+temporal quantity. Catches the most common shape of the MCO bug
+(unit-bearing value in a raw float) and the Patriot bug (clock
+or balance accumulator in a float that drifts).
+"""
+does_not_cover      = """
+Quantities whose identifier name is not a tell (e.g. `bias`,
+`offset`, `delta`, `error_term`, `loss`, `nav_state`). Anywhere
+a calculation produces a temporary f64 with no obvious name.
+Storage in fields whose type is a typedef hiding f64. The
+control-loop bug shape where the float lives in a struct field
+declared in another file. See RESILIENCE_PATTERNS.md for the
+broader rule.
+"""
+
+# ---------------------------------------------------------------------
+# BLIND-CAST — Bare @intCast / @floatCast / @intFromFloat /
+# @ptrFromInt on the same line, without any visible bounds check or
+# .len logic. Advisory. The structurally safer pattern is
+# std.math.cast(T, v) which returns ?T and forces the caller to
+# handle overflow. See RESILIENCE_PATTERNS.md — the Ariane Rule.
+# ---------------------------------------------------------------------
+[[rule]]
+id              = "BLIND-CAST"
+summary         = "Narrowing cast without an obvious bounds check (Ariane 5 shape)"
+severity        = "medium"
+confidence      = "medium"
+gate            = false
+kind            = "line_match"
+message         = "advisory: @intCast / @floatCast / @intFromFloat without a visible bounds check — prefer std.math.cast(T, x) (returns ?T) or guard with an explicit range check (Ariane Rule)."
+contains_any    = ["@intCast", "@floatCast", "@intFromFloat"]
+# Suppress when the same line already shows a checked cast or
+# bounds-style logic. These substrings are NOT identifiers, so we
+# use not_contains_any (substring), not not_contains_ident_any.
+not_contains_any = [
+  "std.math.cast",
+  "std.math.maxInt",
+  "std.math.minInt",
+  ".len",
+  "@min",
+  "@max",
+]
+covers          = """
+@intCast / @floatCast / @intFromFloat on a line that does not
+also reference std.math.cast, std.math.maxInt/minInt, .len, or
+@min/@max. This is the Ariane 5 shape: a narrowing conversion
+with no observable range check.
+"""
+does_not_cover  = """
+Casts whose bounds check is in the caller (cross-function flow),
+in a helper above (cross-line flow), or expressed through a
+hand-written `if (x > MAX) ...` whose pattern doesn't match the
+trigger set. @ptrFromInt / @intToPtr — covered separately by
+NAKED-POINTER-CAST. @as(...) coercions that the compiler can
+prove safe at comptime. Inside a comptime block where the input
+is a literal.
+"""
