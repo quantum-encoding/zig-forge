@@ -223,12 +223,16 @@ const TestServer = struct {
                 // Send 5 content events with 10ms delay between each
                 var i: u32 = 0;
                 while (i < 5) : (i += 1) {
-                    const event = std.fmt.allocPrint(ctx.server.allocator,
-                        "event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"delta\":{{\"type\":\"text_delta\",\"text\":\"chunk{d}\"}}}}\n\n",
-                        .{i},
-                    ) catch break;
-                    defer ctx.server.allocator.free(event);
-                    body_w.writer.writeAll(event) catch break;
+                    var text_buf: [32]u8 = undefined;
+                    const text_val = std.fmt.bufPrint(&text_buf, "chunk{d}", .{i}) catch break;
+                    const payload_json = std.json.Stringify.valueAlloc(ctx.server.allocator, .{
+                        .type = "content_block_delta",
+                        .delta = .{ .type = "text_delta", .text = text_val },
+                    }, .{}) catch break;
+                    defer ctx.server.allocator.free(payload_json);
+                    body_w.writer.writeAll("event: content_block_delta\ndata: ") catch break;
+                    body_w.writer.writeAll(payload_json) catch break;
+                    body_w.writer.writeAll("\n\n") catch break;
                     body_w.writer.flush() catch break;
                     io.sleep(std.Io.Duration.fromMilliseconds(10), .awake) catch {};
                 }

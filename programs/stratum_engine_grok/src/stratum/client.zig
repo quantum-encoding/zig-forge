@@ -159,14 +159,28 @@ pub const Client = struct {
     }
 
     pub fn authorize(self: *Client, username: []const u8, password: []const u8) !void {
-        const auth_msg = try std.fmt.allocPrint(self.allocator, "{{\"id\": 2, \"method\": \"mining.authorize\", \"params\": [\"{s}\", \"{s}\"]}}\n", .{username, password});
-        defer self.allocator.free(auth_msg);
-        try self.sendMessage(auth_msg);
+        var buf: std.Io.Writer.Allocating = .init(self.allocator);
+        defer buf.deinit();
+        var jw: std.json.Stringify = .{ .writer = &buf.writer, .options = .{} };
+        try jw.write(.{
+            .id = 2,
+            .method = "mining.authorize",
+            .params = .{ username, password },
+        });
+        try buf.writer.writeByte('\n');
+        try self.sendMessage(buf.written());
     }
 
     pub fn submitShare(self: *Client, job_id: []const u8, extranonce2: []const u8, ntime: []const u8, nonce: []const u8) !void {
-        const submit_msg = try std.fmt.allocPrint(self.allocator, "{{\"id\": 3, \"method\": \"mining.submit\", \"params\": [\"user\", \"{s}\", \"{s}\", \"{s}\", \"{s}\"]}}\n", .{job_id, extranonce2, ntime, nonce});
-        defer self.allocator.free(submit_msg);
-        try self.sendMessage(submit_msg);
+        var buf: std.Io.Writer.Allocating = .init(self.allocator);
+        defer buf.deinit();
+        var jw: std.json.Stringify = .{ .writer = &buf.writer, .options = .{} };
+        try jw.write(.{
+            .id = 3,
+            .method = "mining.submit",
+            .params = .{ "user", job_id, extranonce2, ntime, nonce },
+        });
+        try buf.writer.writeByte('\n');
+        try self.sendMessage(buf.written());
     }
 };

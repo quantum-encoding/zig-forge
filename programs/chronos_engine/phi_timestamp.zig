@@ -182,17 +182,18 @@ pub const PhiLogEntry = struct {
         defer allocator.free(timestamp_str);
 
         if (self.details) |details| {
-            return std.fmt.allocPrint(
-                allocator,
-                "{{\"timestamp\":\"{s}\",\"action\":\"{s}\",\"status\":\"{s}\",\"details\":\"{s}\"}}",
-                .{ timestamp_str, self.action, self.status, details },
-            );
+            return std.json.Stringify.valueAlloc(allocator, .{
+                .timestamp = timestamp_str,
+                .action = self.action,
+                .status = self.status,
+                .details = details,
+            }, .{});
         } else {
-            return std.fmt.allocPrint(
-                allocator,
-                "{{\"timestamp\":\"{s}\",\"action\":\"{s}\",\"status\":\"{s}\"}}",
-                .{ timestamp_str, self.action, self.status },
-            );
+            return std.json.Stringify.valueAlloc(allocator, .{
+                .timestamp = timestamp_str,
+                .action = self.action,
+                .status = self.status,
+            }, .{});
         }
     }
 };

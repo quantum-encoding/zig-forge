@@ -238,8 +238,10 @@ fn handleChatApi(fd: c_int, request: []const u8) void {
 
     const result = callClaudeApi(allocator, body) catch |err| {
         var err_buf: [256]u8 = undefined;
-        const err_msg = std.fmt.bufPrint(&err_buf, "{{\"error\":\"{s}\"}}", .{@errorName(err)}) catch return;
-        sendResponse(fd, "502 Bad Gateway", "application/json", err_msg);
+        var ebw = std.Io.Writer.fixed(&err_buf);
+        var ejw: std.json.Stringify = .{ .writer = &ebw, .options = .{} };
+        ejw.write(.{ .@"error" = @errorName(err) }) catch return;
+        sendResponse(fd, "502 Bad Gateway", "application/json", ebw.buffered());
         // Report error metric
         reportMetric(t_start, getMonotonicMs() - start_ms, 0, 0, false);
         return;
@@ -257,17 +259,26 @@ fn handleChatApi(fd: c_int, request: []const u8) void {
 fn callClaudeApi(allocator: std.mem.Allocator, chat_body: []const u8) ![]u8 {
     const key = api_key_storage[0..api_key_len];
 
-    // The chat body is: {"messages":[...]}
-    // Extract the messages array substring directly
-    const msgs_key = "\"messages\":";
-    const msgs_start = std.mem.indexOf(u8, chat_body, msgs_key) orelse return error.InvalidInput;
-    const msgs_json = chat_body[msgs_start + msgs_key.len ..];
-    const msgs_end = std.mem.lastIndexOf(u8, msgs_json, "]") orelse return error.InvalidInput;
-    const messages_slice = msgs_json[0 .. msgs_end + 1];
+    // Parse incoming chat body { "messages": [...] } structurally.
+    // Substring extraction would mishandle quotes/brackets inside string literals.
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, chat_body, .{}) catch return error.InvalidInput;
+    defer parsed.deinit();
+    const messages_value = parsed.value.object.get("messages") orelse return error.InvalidInput;
+    if (messages_value != .array) return error.InvalidInput;
 
-    // Build Claude API request body
+    // Build Claude API request body via structured serialization.
     var body_buf: [MAX_REQUEST]u8 = undefined;
-    const body = std.fmt.bufPrint(&body_buf, "{{\"model\":\"{s}\",\"max_tokens\":2048,\"messages\":{s}}}", .{ CLAUDE_MODEL, messages_slice }) catch return error.InvalidInput;
+    var bw = std.Io.Writer.fixed(&body_buf);
+    var jw: std.json.Stringify = .{ .writer = &bw, .options = .{} };
+    jw.beginObject() catch return error.InvalidInput;
+    jw.objectField("model") catch return error.InvalidInput;
+    jw.write(CLAUDE_MODEL) catch return error.InvalidInput;
+    jw.objectField("max_tokens") catch return error.InvalidInput;
+    jw.write(2048) catch return error.InvalidInput;
+    jw.objectField("messages") catch return error.InvalidInput;
+    jw.write(messages_value) catch return error.InvalidInput;
+    jw.endObject() catch return error.InvalidInput;
+    const body = bw.buffered();
 
     // Call Claude API directly over TLS (no relay needed)
     const resp_body = tls_client.callClaudeDirectTls(allocator, key, body) catch |err| {
@@ -284,45 +295,19 @@ fn callClaudeApi(allocator: std.mem.Allocator, chat_body: []const u8) ![]u8 {
 
     if (resp.value.object.get("error")) |err_obj| {
         if (err_obj.object.get("message")) |msg| {
-            return std.fmt.allocPrint(allocator, "{{\"error\":\"{s}\"}}", .{msg.string});
+            return std.json.Stringify.valueAlloc(allocator, .{ .@"error" = msg.string }, .{});
         }
     }
 
     if (resp.value.object.get("content")) |content| {
         if (content.array.items.len > 0) {
             if (content.array.items[0].object.get("text")) |text| {
-                // Escape the text for JSON output
-                return escapeJsonResponse(allocator, text.string);
+                return std.json.Stringify.valueAlloc(allocator, .{ .content = text.string }, .{});
             }
         }
     }
 
-    return std.fmt.allocPrint(allocator, "{{\"error\":\"Could not parse response\"}}", .{});
-}
-
-fn escapeJsonResponse(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
-    // Simple JSON string escaping: wrap text in {"content":"..."}
-    var out = try allocator.alloc(u8, text.len * 2 + 32);
-    var i: usize = 0;
-    const prefix = "{\"content\":\"";
-    @memcpy(out[0..prefix.len], prefix);
-    i = prefix.len;
-
-    for (text) |ch| {
-        switch (ch) {
-            '"' => { out[i] = '\\'; out[i+1] = '"'; i += 2; },
-            '\\' => { out[i] = '\\'; out[i+1] = '\\'; i += 2; },
-            '\n' => { out[i] = '\\'; out[i+1] = 'n'; i += 2; },
-            '\r' => { out[i] = '\\'; out[i+1] = 'r'; i += 2; },
-            '\t' => { out[i] = '\\'; out[i+1] = 't'; i += 2; },
-            else => { out[i] = ch; i += 1; },
-        }
-    }
-    const suffix = "\"}";
-    @memcpy(out[i..i+suffix.len], suffix);
-    i += suffix.len;
-
-    return allocator.realloc(out, i) catch out[0..i];
+    return std.json.Stringify.valueAlloc(allocator, .{ .@"error" = "Could not parse response" }, .{});
 }
 
 fn sendResponse(fd: c_int, status: []const u8, content_type: []const u8, body: []const u8) void {

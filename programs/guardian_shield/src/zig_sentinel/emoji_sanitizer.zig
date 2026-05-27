@@ -366,6 +366,7 @@ pub fn logAnomaly(writer: anytype, info: EmojiInfo, source: []const u8) !void {
 
 /// Forensic logging: Write all anomalies to file
 pub fn logAnomalies(allocator: std.mem.Allocator, anomalies: []const EmojiInfo, log_path: []const u8, source: []const u8) !void {
+    _ = allocator;
     // Create null-terminated path
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     if (log_path.len >= path_buf.len) return error.NameTooLong;
@@ -379,21 +380,26 @@ pub fn logAnomalies(allocator: std.mem.Allocator, anomalies: []const EmojiInfo, 
 
     // Format and write each anomaly directly
     for (anomalies) |anomaly| {
-        const json_line = try std.fmt.allocPrint(allocator,
-            "{{\"event\":\"emoji_anomaly\",\"timestamp\":{d},\"codepoint\":\"U+{X:0>4}\",\"expected_bytes\":{d},\"actual_bytes\":{d},\"result\":\"{s}\",\"offset\":{d},\"source\":\"{s}\"}}\n",
-            .{
-                anomaly.timestamp,
-                anomaly.codepoint,
-                anomaly.expected_bytes,
-                anomaly.actual_bytes,
-                @tagName(anomaly.result),
-                anomaly.offset,
-                source,
-            }
-        );
-        defer allocator.free(json_line);
+        var codepoint_buf: [16]u8 = undefined;
+        const codepoint_str = try std.fmt.bufPrint(&codepoint_buf, "U+{X:0>4}", .{anomaly.codepoint});
 
-        const write_result = c.write(fd, json_line.ptr, json_line.len);
+        var line_buf: [512]u8 = undefined;
+        var fbs = std.Io.Writer.fixed(&line_buf);
+        var jw: std.json.Stringify = .{ .writer = &fbs, .options = .{} };
+        try jw.write(.{
+            .event = "emoji_anomaly",
+            .timestamp = anomaly.timestamp,
+            .codepoint = codepoint_str,
+            .expected_bytes = anomaly.expected_bytes,
+            .actual_bytes = anomaly.actual_bytes,
+            .result = @tagName(anomaly.result),
+            .offset = anomaly.offset,
+            .source = source,
+        });
+        try fbs.writeByte('\n');
+        const written = fbs.buffered();
+
+        const write_result = c.write(fd, written.ptr, written.len);
         if (write_result < 0) return error.WriteError;
     }
 }

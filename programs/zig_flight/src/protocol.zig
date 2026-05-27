@@ -41,39 +41,66 @@ pub const DatarefInfo = struct {
 /// Build a dataref_subscribe_values JSON message.
 /// Format: {"req_id":N,"type":"dataref_subscribe_values","params":{"datarefs":[{"id":1},{"id":2}]}}
 pub fn buildSubscribeMessage(buf: []u8, req_id: u64, ids: []const u64) ![]const u8 {
-    var pos: usize = 0;
-
-    const prefix = std.fmt.bufPrint(buf[pos..], "{{\"req_id\":{d},\"type\":\"dataref_subscribe_values\",\"params\":{{\"datarefs\":[", .{req_id}) catch return error.NoSpaceLeft;
-    pos += prefix.len;
-
-    for (ids, 0..) |id, i| {
-        if (i > 0) {
-            if (pos >= buf.len) return error.NoSpaceLeft;
-            buf[pos] = ',';
-            pos += 1;
-        }
-        const entry = std.fmt.bufPrint(buf[pos..], "{{\"id\":{d}}}", .{id}) catch return error.NoSpaceLeft;
-        pos += entry.len;
+    var bw = std.Io.Writer.fixed(buf);
+    var jw: std.json.Stringify = .{ .writer = &bw, .options = .{} };
+    try jw.beginObject();
+    try jw.objectField("req_id");
+    try jw.write(req_id);
+    try jw.objectField("type");
+    try jw.write("dataref_subscribe_values");
+    try jw.objectField("params");
+    try jw.beginObject();
+    try jw.objectField("datarefs");
+    try jw.beginArray();
+    for (ids) |id| {
+        try jw.beginObject();
+        try jw.objectField("id");
+        try jw.write(id);
+        try jw.endObject();
     }
-
-    const suffix = "]}}";
-    if (pos + suffix.len > buf.len) return error.NoSpaceLeft;
-    @memcpy(buf[pos..][0..suffix.len], suffix);
-    pos += suffix.len;
-
-    return buf[0..pos];
+    try jw.endArray();
+    try jw.endObject();
+    try jw.endObject();
+    return bw.buffered();
 }
 
 /// Build an unsubscribe-all message.
 /// Format: {"req_id":N,"type":"dataref_unsubscribe_values","params":{"datarefs":"all"}}
 pub fn buildUnsubscribeAllMessage(buf: []u8, req_id: u64) ![]const u8 {
-    return std.fmt.bufPrint(buf, "{{\"req_id\":{d},\"type\":\"dataref_unsubscribe_values\",\"params\":{{\"datarefs\":\"all\"}}}}", .{req_id}) catch return error.NoSpaceLeft;
+    var bw = std.Io.Writer.fixed(buf);
+    var jw: std.json.Stringify = .{ .writer = &bw, .options = .{} };
+    try jw.write(.{
+        .req_id = req_id,
+        .type = "dataref_unsubscribe_values",
+        .params = .{ .datarefs = "all" },
+    });
+    return bw.buffered();
 }
 
 /// Build a dataref_set_values message.
 /// Format: {"req_id":N,"type":"dataref_set_values","params":{"datarefs":[{"id":1,"value":42}]}}
 pub fn buildSetValueMessage(buf: []u8, req_id: u64, id: u64, value: f64) ![]const u8 {
-    return std.fmt.bufPrint(buf, "{{\"req_id\":{d},\"type\":\"dataref_set_values\",\"params\":{{\"datarefs\":[{{\"id\":{d},\"value\":{d}}}]}}}}", .{ req_id, id, value }) catch return error.NoSpaceLeft;
+    var bw = std.Io.Writer.fixed(buf);
+    var jw: std.json.Stringify = .{ .writer = &bw, .options = .{} };
+    try jw.beginObject();
+    try jw.objectField("req_id");
+    try jw.write(req_id);
+    try jw.objectField("type");
+    try jw.write("dataref_set_values");
+    try jw.objectField("params");
+    try jw.beginObject();
+    try jw.objectField("datarefs");
+    try jw.beginArray();
+    try jw.beginObject();
+    try jw.objectField("id");
+    try jw.write(id);
+    try jw.objectField("value");
+    try jw.write(value);
+    try jw.endObject();
+    try jw.endArray();
+    try jw.endObject();
+    try jw.endObject();
+    return bw.buffered();
 }
 
 // ============================================================================

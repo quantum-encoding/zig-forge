@@ -155,32 +155,21 @@ pub const DBusServer = struct {
         var reply_iter: c.DBusMessageIter = undefined;
         c.dbus_message_iter_init_append(reply, &reply_iter);
 
-        // Build JSON array string
-        var json_buf = std.ArrayList(u8).empty;
-        defer json_buf.deinit(self.allocator);
-
-        try json_buf.appendSlice(self.allocator, "[");
-        for (recent, 0..) |state, i| {
-            if (i > 0) try json_buf.appendSlice(self.allocator, ",");
-
-            try json_buf.appendSlice(self.allocator, "{\"pid\":");
-            var num_buf: [20]u8 = undefined;
-            const num_str = try std.fmt.bufPrint(&num_buf, "{d}", .{state.pid});
-            try json_buf.appendSlice(self.allocator, num_str);
-
-            try json_buf.appendSlice(self.allocator, ",\"state\":\"");
-            // Escape quotes and backslashes in the state string
-            for (state.state_type) |char| {
-                if (char == '"' or char == '\\') {
-                    try json_buf.append(self.allocator, '\\');
-                }
-                try json_buf.append(self.allocator, char);
-            }
-            try json_buf.appendSlice(self.allocator, "\"}");
+        var json_buf: std.Io.Writer.Allocating = .init(self.allocator);
+        defer json_buf.deinit();
+        var jw: std.json.Stringify = .{ .writer = &json_buf.writer, .options = .{} };
+        try jw.beginArray();
+        for (recent) |state| {
+            try jw.beginObject();
+            try jw.objectField("pid");
+            try jw.write(state.pid);
+            try jw.objectField("state");
+            try jw.write(state.state_type);
+            try jw.endObject();
         }
-        try json_buf.appendSlice(self.allocator, "]");
+        try jw.endArray();
 
-        const json_cstr = try self.allocator.dupeZ(u8, json_buf.items);
+        const json_cstr = try self.allocator.dupeZ(u8, json_buf.written());
         defer self.allocator.free(json_cstr);
 
         const ptr: [*c]const u8 = json_cstr.ptr;

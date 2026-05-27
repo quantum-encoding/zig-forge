@@ -221,9 +221,18 @@ fn runBenchmark(allocator: std.mem.Allocator, io: std.Io, config: BenchmarkConfi
     defer requests_jsonl.deinit(allocator);
 
     for (0..config.request_count) |req_id| {
+        var id_buf: [32]u8 = undefined;
+        const id_str = try std.fmt.bufPrint(&id_buf, "req-{d}", .{req_id});
         var buf: [256]u8 = undefined;
-        const line = try std.fmt.bufPrint(&buf, "{{\"id\":\"req-{d}\",\"method\":\"GET\",\"url\":\"{s}\"}}\n", .{ req_id, config.target_url });
-        try requests_jsonl.appendSlice(allocator, line);
+        var bw = std.Io.Writer.fixed(&buf);
+        var jw: std.json.Stringify = .{ .writer = &bw, .options = .{} };
+        try jw.write(.{
+            .id = id_str,
+            .method = "GET",
+            .url = config.target_url,
+        });
+        try bw.writeByte('\n');
+        try requests_jsonl.appendSlice(allocator, bw.buffered());
     }
 
     // Use unique temp files per benchmark to avoid race conditions

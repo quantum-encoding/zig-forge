@@ -313,14 +313,15 @@ pub fn Engine(comptime WriterType: type) type {
             self.output_mutex.lock();
             defer self.output_mutex.unlock();
 
-            const json = std.fmt.allocPrint(
-                self.allocator,
-                "{{\"id\":\"{s}\",\"status\":0,\"error\":\"{s}\"}}\n",
-                .{ id, error_message },
-            ) catch return;
+            const json = std.json.Stringify.valueAlloc(self.allocator, .{
+                .id = id,
+                .status = 0,
+                .@"error" = error_message,
+            }, .{}) catch return;
             defer self.allocator.free(json);
 
             _ = self.output_writer.write(json) catch {};
+            _ = self.output_writer.write("\n") catch {};
         }
     };
 }

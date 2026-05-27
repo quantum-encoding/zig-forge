@@ -124,14 +124,17 @@ pub const FailLogger = struct {
         // Write structured error record
         if (self.errors_file) |errf| {
             var buf: [4096]u8 = undefined;
-            // Escape error_message for JSON (basic escaping)
-            var escaped: [1024]u8 = undefined;
-            const esc_len = escapeJson(error_message, &escaped);
-
-            const record = std.fmt.bufPrint(&buf,
-                "{{\"id\":\"{s}\",\"source_line\":{d},\"status\":{d},\"retry_count\":{d},\"error\":\"{s}\"}}\n",
-                .{ id, source_line, status, retry_count, escaped[0..esc_len] },
-            ) catch return;
+            var bw = std.Io.Writer.fixed(&buf);
+            var jw: std.json.Stringify = .{ .writer = &bw, .options = .{} };
+            jw.write(.{
+                .id = id,
+                .source_line = source_line,
+                .status = status,
+                .retry_count = retry_count,
+                .@"error" = error_message,
+            }) catch return;
+            bw.writeByte('\n') catch return;
+            const record = bw.buffered();
             _ = std.c.fwrite(record.ptr, 1, record.len, errf);
             _ = fflush(errf);
         }
@@ -158,56 +161,17 @@ pub const FailLogger = struct {
 
         if (self.errors_file) |errf| {
             var buf: [4096]u8 = undefined;
-            var escaped: [1024]u8 = undefined;
-            const esc_len = escapeJson(error_message, &escaped);
-
-            const record = std.fmt.bufPrint(&buf,
-                "{{\"source_line\":{d},\"stage\":\"parse\",\"error\":\"{s}\"}}\n",
-                .{ source_line, escaped[0..esc_len] },
-            ) catch return;
+            var bw = std.Io.Writer.fixed(&buf);
+            var jw: std.json.Stringify = .{ .writer = &bw, .options = .{} };
+            jw.write(.{
+                .source_line = source_line,
+                .stage = "parse",
+                .@"error" = error_message,
+            }) catch return;
+            bw.writeByte('\n') catch return;
+            const record = bw.buffered();
             _ = std.c.fwrite(record.ptr, 1, record.len, errf);
             _ = fflush(errf);
         }
-    }
-
-    /// Minimal JSON string escaper — handles quotes, backslashes, control chars.
-    fn escapeJson(input: []const u8, out: []u8) usize {
-        var i: usize = 0;
-        for (input) |c| {
-            if (i + 6 >= out.len) break;
-            switch (c) {
-                '"' => {
-                    out[i] = '\\';
-                    out[i + 1] = '"';
-                    i += 2;
-                },
-                '\\' => {
-                    out[i] = '\\';
-                    out[i + 1] = '\\';
-                    i += 2;
-                },
-                '\n' => {
-                    out[i] = '\\';
-                    out[i + 1] = 'n';
-                    i += 2;
-                },
-                '\r' => {
-                    out[i] = '\\';
-                    out[i + 1] = 'r';
-                    i += 2;
-                },
-                '\t' => {
-                    out[i] = '\\';
-                    out[i + 1] = 't';
-                    i += 2;
-                },
-                else => {
-                    if (c < 0x20) continue; // Skip other control chars
-                    out[i] = c;
-                    i += 1;
-                },
-            }
-        }
-        return i;
     }
 };
