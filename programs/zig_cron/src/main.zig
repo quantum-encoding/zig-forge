@@ -12,7 +12,6 @@ const std = @import("std");
 
 extern "c" fn time(t: ?*c_long) c_long;
 extern "c" fn nanosleep(req: *const std.c.timespec, rem: ?*std.c.timespec) c_int;
-extern "c" fn system(cmd: [*:0]const u8) c_int;
 extern "c" fn fseek(stream: *std.c.FILE, offset: c_long, whence: c_int) c_int;
 extern "c" fn ftell(stream: *std.c.FILE) c_long;
 extern "c" fn signal(sig: c_int, handler: ?*const fn (c_int) callconv(.c) void) ?*const fn (c_int) callconv(.c) void;
@@ -23,7 +22,6 @@ const SIGINT = 2;
 const Task = struct {
     interval_secs: u64,
     command: []const u8,
-    command_z: [:0]const u8,
     last_run: c_long,
     failure_count: u32,
     last_exit_code: c_int,
@@ -39,6 +37,7 @@ fn signalHandler(sig: c_int) callconv(.c) void {
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.c_allocator;
+    const io = init.io;
 
     // Setup signal handlers for graceful shutdown
     _ = signal(SIGTERM, signalHandler);
@@ -69,12 +68,7 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(file_data);
 
     var tasks: std.ArrayListUnmanaged(Task) = .empty;
-    defer {
-        for (tasks.items) |t| {
-            allocator.free(t.command_z);
-        }
-        tasks.deinit(allocator);
-    }
+    defer tasks.deinit(allocator);
 
     // Parse config lines
     var line_start: usize = 0;
@@ -108,14 +102,9 @@ pub fn main(init: std.process.Init) !void {
                 continue;
             };
 
-            // Create null-terminated command for system()
-            const cmd_z = allocator.allocSentinel(u8, command.len, 0) catch continue;
-            @memcpy(cmd_z, command);
-
             try tasks.append(allocator, .{
                 .interval_secs = interval,
                 .command = command,
-                .command_z = cmd_z,
                 .last_run = 0,
                 .failure_count = 0,
                 .last_exit_code = 0,
@@ -150,11 +139,44 @@ pub fn main(init: std.process.Init) !void {
                 const seconds = day_secs % 60;
                 std.debug.print("[{d:0>2}:{d:0>2}:{d:0>2}] running: {s}\n", .{ hours, minutes, seconds, t.command });
 
-                const ret = system(t.command_z.ptr);
-                if (ret != 0) {
-                    std.debug.print("[{d:0>2}:{d:0>2}:{d:0>2}] exit code: {d}\n", .{ hours, minutes, seconds, ret });
+                // zig-cron's contract is "evaluate user-supplied shell commands
+                // on a schedule." Shell semantics (pipes, redirects, env
+                // expansion) are the feature, not the bug — so we still
+                // invoke /bin/sh, but EXPLICITLY via argv-mode spawn. The
+                // libc system(3) backdoor (which laundered the shell
+                // invocation through a hidden /bin/sh -c without showing up
+                // at the call site) is gone; the SHELL-CHILD scanner now
+                // sees the /bin/sh literal and we acknowledge it.
+                // zig-lens-ignore: SHELL-CHILD zig-cron's contract is to run user-supplied shell commands; the operator owns the command string by configuration.
+                const argv = [_][]const u8{ "/bin/sh", "-c", t.command };
+                var child = std.process.spawn(io, .{
+                    .argv = &argv,
+                    .stdin = .ignore,
+                    .stdout = .inherit,
+                    .stderr = .inherit,
+                }) catch |err| {
+                    std.debug.print("[{d:0>2}:{d:0>2}:{d:0>2}] spawn failed: {s}\n", .{ hours, minutes, seconds, @errorName(err) });
                     t.failure_count += 1;
-                    t.last_exit_code = ret;
+                    t.last_failure_time = now;
+                    t.last_run = now;
+                    continue;
+                };
+                const term = child.wait(io) catch |err| {
+                    std.debug.print("[{d:0>2}:{d:0>2}:{d:0>2}] wait failed: {s}\n", .{ hours, minutes, seconds, @errorName(err) });
+                    t.failure_count += 1;
+                    t.last_failure_time = now;
+                    t.last_run = now;
+                    continue;
+                };
+                const exit_code: c_int = switch (term) {
+                    .exited => |code| @intCast(code),
+                    else => -1,
+                };
+
+                if (exit_code != 0) {
+                    std.debug.print("[{d:0>2}:{d:0>2}:{d:0>2}] exit code: {d}\n", .{ hours, minutes, seconds, exit_code });
+                    t.failure_count += 1;
+                    t.last_exit_code = exit_code;
                     t.last_failure_time = now;
                     std.debug.print("[{d:0>2}:{d:0>2}:{d:0>2}] task failure #{d}: {s}\n", .{ hours, minutes, seconds, t.failure_count, t.command });
                 } else {
@@ -418,12 +440,7 @@ test "config file parsing" {
 
     // Test parsing (simplified version)
     var tasks: std.ArrayListUnmanaged(Task) = .empty;
-    defer {
-        for (tasks.items) |t| {
-            allocator.free(t.command_z);
-        }
-        tasks.deinit(allocator);
-    }
+    defer tasks.deinit(allocator);
 
     // Read and parse
     const file_data = readFile(allocator, temp_path) orelse return error.CannotReadFile;

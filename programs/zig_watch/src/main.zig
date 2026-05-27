@@ -14,7 +14,6 @@ const Watcher = @import("watcher.zig").Watcher;
 
 extern "c" fn time(t: ?*c_long) c_long;
 extern "c" fn nanosleep(req: *const std.c.timespec, rem: ?*std.c.timespec) c_int;
-extern "c" fn system(cmd: [*:0]const u8) c_int;
 
 const Opts = struct {
     watch_path: []const u8,
@@ -22,11 +21,12 @@ const Opts = struct {
     ignore_patterns: ?[]const []const u8,
     interval_secs: u64,
     debounce_ms: u64,
-    command: [:0]const u8,
+    command: []const u8,
 };
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.c_allocator;
+    const io = init.io;
 
     // Parse command line args
     var args_list: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -98,10 +98,33 @@ pub fn main(init: std.process.Init) !void {
             }
             std.debug.print("]\n", .{});
 
-            // Run command
-            const ret = system(opts.command.ptr);
-            if (ret != 0) {
-                std.debug.print("[exit code: {d}]\n", .{ret});
+            // zig-watch's contract is "evaluate a user-supplied shell command
+            // when the watched path changes." Shell semantics (pipes,
+            // redirects, env expansion) are the feature, so we invoke
+            // /bin/sh EXPLICITLY via argv-mode spawn — no libc system(3)
+            // backdoor. The operator owns the command string by
+            // construction (it's the trailing argv after `--`).
+            // zig-lens-ignore: SHELL-CHILD zig-watch's contract is to run user-supplied shell commands; the operator owns the command string via the trailing `-- <cmd>` argv.
+            const argv = [_][]const u8{ "/bin/sh", "-c", opts.command };
+            var child = std.process.spawn(io, .{
+                .argv = &argv,
+                .stdin = .ignore,
+                .stdout = .inherit,
+                .stderr = .inherit,
+            }) catch |err| {
+                std.debug.print("[spawn failed: {s}]\n", .{@errorName(err)});
+                continue;
+            };
+            const term = child.wait(io) catch |err| {
+                std.debug.print("[wait failed: {s}]\n", .{@errorName(err)});
+                continue;
+            };
+            const exit_code: c_int = switch (term) {
+                .exited => |code| @intCast(code),
+                else => -1,
+            };
+            if (exit_code != 0) {
+                std.debug.print("[exit code: {d}]\n", .{exit_code});
             }
         }
     }
@@ -209,7 +232,7 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) ?Opts {
     };
 }
 
-fn buildCommand(allocator: std.mem.Allocator, parts: []const []const u8) ?[:0]const u8 {
+fn buildCommand(allocator: std.mem.Allocator, parts: []const []const u8) ?[]const u8 {
     if (parts.len == 0) return null;
 
     // Calculate total length
@@ -219,7 +242,7 @@ fn buildCommand(allocator: std.mem.Allocator, parts: []const []const u8) ?[:0]co
         if (idx < parts.len - 1) total += 1; // space
     }
 
-    const buf = allocator.allocSentinel(u8, total, 0) catch return null;
+    const buf = allocator.alloc(u8, total) catch return null;
     var pos: usize = 0;
     for (parts, 0..) |part, idx| {
         @memcpy(buf[pos .. pos + part.len], part);

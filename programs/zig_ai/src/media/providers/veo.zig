@@ -5,10 +5,6 @@ const std = @import("std");
 const http = std.http;
 const Allocator = std.mem.Allocator;
 
-// Extern C functions for running shell commands and file operations
-extern "c" fn system(command: [*:0]const u8) c_int;
-extern "c" fn remove(path: [*:0]const u8) c_int;
-
 const types = @import("../types.zig");
 const storage = @import("../storage.zig");
 const Timer = @import("../../timer.zig").Timer;
@@ -234,42 +230,67 @@ fn downloadFromUri(allocator: Allocator, api_key: []const u8, uri: []const u8) !
 }
 
 fn downloadWithCurl(allocator: Allocator, url: []const u8) ![]u8 {
-    // Create a temporary file path for curl output
+    // Long-URL fallback for downloadFromUri. The previous implementation
+    // routed everything through libc `system(...)` — printf '...' > tmpfile,
+    // curl "$(cat tmpfile)", rm -f tmpfile — which is a shell-out RCE
+    // vector (the URL flows through /bin/sh -c) and was the Batch 30
+    // target. The replacement:
+    //
+    //   1. spawn curl in argv-mode (no shell parser between us and curl;
+    //      the URL goes straight into argv with no metacharacter parsing
+    //      and argv lengths comfortably hold multi-KB redirect URLs);
+    //   2. use std.fs.cwd().deleteFile for cleanup (no shell);
+    //   3. read the downloaded file via storage.readFile (already std.fs).
     const tmp_path = "/tmp/veo_video_download.mp4";
-    const url_file = "/tmp/veo_download_url.txt";
 
-    // Write URL to file using shell echo
-    var echo_cmd_buf: [8192]u8 = undefined;
-    // Escape single quotes in URL for shell
-    const echo_cmd = std.fmt.bufPrintZ(&echo_cmd_buf, "printf '%s' '{s}' > {s}", .{ url, url_file }) catch return error.CommandTooLong;
-    _ = system(echo_cmd);
+    // Best-effort delete of any stale temp file from a prior run.
+    std.fs.cwd().deleteFile(tmp_path) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => {},
+    };
 
-    // Build curl command that reads URL from file
-    var cmd_buf: [512]u8 = undefined;
-    const cmd = std.fmt.bufPrintZ(&cmd_buf, "curl -s -L -o {s} \"$(cat {s})\"", .{ tmp_path, url_file }) catch return error.CommandTooLong;
+    // argv-mode curl invocation. The URL is argv[5] — no shell,
+    // no metacharacter parsing, no command injection surface.
+    // generateVeo doesn't currently thread an `io` parameter; build a
+    // local Io.Threaded for the spawn lifecycle.
+    var io_threaded = std.Io.Threaded.init(allocator, .{});
+    defer io_threaded.deinit();
+    const io = io_threaded.io();
 
-    const result = system(cmd);
-
-    // Clean up URL file
-    var rm_url: [256]u8 = undefined;
-    const rm_url_cmd = std.fmt.bufPrintZ(&rm_url, "rm -f {s}", .{url_file}) catch return error.CommandTooLong;
-    _ = system(rm_url_cmd);
-
-    if (result != 0) {
-        std.debug.print("  curl download failed with status: {d}\n", .{result});
+    const argv = [_][]const u8{ "curl", "-s", "-L", "-o", tmp_path, url };
+    var child = std.process.spawn(io, .{
+        .argv = &argv,
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }) catch |err| {
+        std.debug.print("  curl spawn failed: {any}\n", .{err});
         return error.CurlFailed;
+    };
+    const term = child.wait(io) catch |err| {
+        std.debug.print("  curl wait failed: {any}\n", .{err});
+        return error.CurlFailed;
+    };
+    switch (term) {
+        .exited => |code| if (code != 0) {
+            std.debug.print("  curl download failed with status: {d}\n", .{code});
+            return error.CurlFailed;
+        },
+        else => {
+            std.debug.print("  curl terminated abnormally: {any}\n", .{term});
+            return error.CurlFailed;
+        },
     }
 
-    // Read the downloaded file using storage module's readFile
+    // Read the downloaded file (std.fs under the hood).
     const video_data = storage.readFile(allocator, tmp_path) catch |err| {
         std.debug.print("  Failed to read video file: {any}\n", .{err});
         return error.ReadError;
     };
 
-    // Clean up temp file
-    var rm_cmd: [256]u8 = undefined;
-    const rm_cmd_z = std.fmt.bufPrintZ(&rm_cmd, "rm -f {s}", .{tmp_path}) catch return error.CommandTooLong;
-    _ = system(rm_cmd_z);
+    // Best-effort cleanup. We already have the bytes; a failed unlink
+    // just leaves a stale temp file for the next run to overwrite.
+    std.fs.cwd().deleteFile(tmp_path) catch {};
 
     const size_mb = @as(f64, @floatFromInt(video_data.len)) / (1024.0 * 1024.0);
     std.debug.print("  Downloaded: {d:.2} MB\n", .{size_mb});

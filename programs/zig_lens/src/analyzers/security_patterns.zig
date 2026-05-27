@@ -296,7 +296,7 @@ fn lineIgnoresRule(line: []const u8, rule_id: []const u8) bool {
 
 // ── Tests ────────────────────────────────────────────────────────
 
-test "loadDefault: parses embedded ruleset, 10 entries, 9 unique ids" {
+test "loadDefault: parses embedded ruleset, 11 entries, 9 unique ids" {
     try loadDefault(std.testing.allocator);
     defer {
         if (active_set) |*s| s.deinit();
@@ -309,9 +309,11 @@ test "loadDefault: parses embedded ruleset, 10 entries, 9 unique ids" {
         active_arena = null;
         active_coverage = &[_]RuleCoverage{};
     }
-    // 10 rule entries (SHELL-CHILD is split into two complementary
-    // shapes); 9 unique IDs surfaced in the coverage panel.
-    try std.testing.expectEqual(@as(usize, 10), active_set.?.rules.len);
+    // 11 rule entries: SHELL-CHILD has three complementary shapes
+    // (/bin/sh in enclosing fn + spawn primitive; sh/-c pair on
+    // argv line; std.c.system / extern "c" fn system / popen). 9
+    // unique IDs surface in the coverage panel.
+    try std.testing.expectEqual(@as(usize, 11), active_set.?.rules.len);
     try std.testing.expectEqual(@as(usize, 9), active_coverage.len);
 }
 

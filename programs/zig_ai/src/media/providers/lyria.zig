@@ -22,8 +22,12 @@ const LyriaSession = lyria_ws.LyriaSession;
 const WeightedPrompt = lyria_ws.WeightedPrompt;
 const MusicConfig = lyria_ws.MusicConfig;
 
-// Extern C functions
-extern "c" fn system(command: [*:0]const u8) c_int;
+// Extern C functions. `system` was previously declared here but never
+// invoked from this file (Batch 30 audit); dropped to close the
+// SHELL-CHILD opt-in. `popen` remains because the two getGcloudAccessToken
+// / getGcpProjectId helpers below still shell out through it; that's a
+// separate cleanup target (popen→argv-mode Child.init, queued).
+// zig-lens-ignore: SHELL-CHILD popen helpers are the next batch's target; this declaration is the opt-in.
 extern "c" fn popen(command: [*:0]const u8, mode: [*:0]const u8) ?*std.c.FILE;
 extern "c" fn pclose(stream: *std.c.FILE) c_int;
 extern "c" fn fgets(buf: [*]u8, size: c_int, stream: *std.c.FILE) ?[*]u8;

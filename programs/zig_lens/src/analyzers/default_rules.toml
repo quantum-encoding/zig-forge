@@ -171,6 +171,53 @@ via the (a) form above (covered separately).
 """
 
 # ---------------------------------------------------------------------
+# SHELL-CHILD (c) — libc `system()` / `popen()` calls.
+#
+# libc's `system(cmd)` and `popen(cmd, mode)` route their argument
+# string through `/bin/sh -c` — same metacharacter-injection vector
+# as the (a) and (b) forms but with the shell invocation completely
+# hidden from the call site. The (a) rule won't see them because
+# the `/bin/sh` literal never appears in the source.
+#
+# Triggers on the source-level signals that opt a caller into the
+# libc backdoor:
+#   - `std.c.system(` / `std.c.popen(`
+#   - bare `system(` / `popen(` call after the file's own
+#     `extern "c" fn system(...)` / `extern "c" fn popen(...)`
+#     declaration. The declaration itself is also flagged — once
+#     it's in the file, the caller has already opted in.
+# ---------------------------------------------------------------------
+[[rule]]
+id              = "SHELL-CHILD"
+summary         = "libc system() / popen() — opaque shell-out via /bin/sh -c"
+severity        = "critical"
+confidence      = "high"
+gate            = true
+kind            = "line_match"
+message         = "libc system() / popen() routes its argument through /bin/sh -c — identical RCE class as /bin/sh literal in argv. Use std.process.Child.init with a tokenized argv, OR if shell semantics are required by contract (cron, file-watcher), make the /bin/sh -c invocation explicit and document with a zig-lens-ignore directive."
+contains_any    = [
+  "std.c.system(",
+  "std.c.popen(",
+  "extern \"c\" fn system(",
+  "extern \"c\" fn popen(",
+]
+covers          = """
+Source-tree occurrences of `std.c.system(` / `std.c.popen(`
+(direct calls), or `extern \"c\" fn system(...)` /
+`extern \"c\" fn popen(...)` declarations (which opt the file
+into the backdoor). After Batch 30 these are the canonical
+forms used to invoke a shell from Zig.
+"""
+does_not_cover  = """
+The C-side equivalents reached through an indirect FFI shim
+(e.g. a vendored library that wraps `system` under a different
+name). `posix_spawn` or `execve` with argv built from
+attacker-controlled data — the cmdline is structured but the
+program path itself is the injection surface. `std.os.linux.syscall`
+direct invocations.
+"""
+
+# ---------------------------------------------------------------------
 # CATCH-UNREACHABLE — `catch unreachable` converts a recoverable
 # error into an immediate process abort. Forbidden on any code path
 # that handles hostile input (parsers, network clients, crypto, FFI
