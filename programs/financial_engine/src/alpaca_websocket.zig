@@ -147,11 +147,11 @@ pub const AlpacaWebSocketClient = struct {
         self.status.store(.authenticating, .release);
         
         // Create authentication message
-        const auth_msg = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"action\":\"auth\",\"key\":\"{s}\",\"secret\":\"{s}\"}}",
-            .{ self.api_key, self.api_secret }
-        );
+        const auth_msg = try std.json.Stringify.valueAlloc(self.allocator, .{
+            .action = "auth",
+            .key = self.api_key,
+            .secret = self.api_secret,
+        }, .{});
         defer self.allocator.free(auth_msg);
         
         std.debug.print("📤 Sending auth message: {s}\n", .{auth_msg});
@@ -174,24 +174,13 @@ pub const AlpacaWebSocketClient = struct {
         std.debug.print("📊 Subscribing to {d} symbols...\n", .{symbols.len});
         self.status.store(.subscribing, .release);
         
-        // Create subscription message for quotes and trades
-        var symbol_list = std.ArrayList(u8).empty;
-        defer symbol_list.deinit(self.allocator);
-        
-        try symbol_list.appendSlice(self.allocator, "[");
-        for (symbols, 0..) |symbol, i| {
-            if (i > 0) try symbol_list.appendSlice(self.allocator, ",");
-            try symbol_list.appendSlice(self.allocator, "\"");
-            try symbol_list.appendSlice(self.allocator, symbol);
-            try symbol_list.appendSlice(self.allocator, "\"");
-        }
-        try symbol_list.appendSlice(self.allocator, "]");
-        
-        const sub_msg = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"action\":\"subscribe\",\"quotes\":{s},\"trades\":{s},\"trade_updates\":true}}",
-            .{ symbol_list.items, symbol_list.items }
-        );
+        // Create subscription message for quotes and trades via structured JSON.
+        const sub_msg = try std.json.Stringify.valueAlloc(self.allocator, .{
+            .action = "subscribe",
+            .quotes = symbols,
+            .trades = symbols,
+            .trade_updates = true,
+        }, .{});
         defer self.allocator.free(sub_msg);
         
         std.debug.print("📤 Sending subscription: {s}\n", .{sub_msg});

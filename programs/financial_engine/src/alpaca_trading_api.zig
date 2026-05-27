@@ -213,50 +213,46 @@ pub const AlpacaTradingAPI = struct {
         };
         defer if (order.client_order_id == null) self.allocator.free(client_id);
         
-        // Build JSON request body
-        var json_body: std.ArrayListUnmanaged(u8) = .empty;
-        defer json_body.deinit(self.allocator);
-        
-        try json_body.appendSlice(self.allocator, "{");
-        try json_body.appendSlice(self.allocator, "\"symbol\":\"");
-        try json_body.appendSlice(self.allocator, order.symbol);
-        try json_body.appendSlice(self.allocator, "\",\"qty\":");
-        try json_body.appendSlice(self.allocator, try std.fmt.allocPrint(self.allocator, "{d}", .{order.qty}));
-        try json_body.appendSlice(self.allocator, ",\"side\":\"");
-        try json_body.appendSlice(self.allocator, order.side.toString());
-        try json_body.appendSlice(self.allocator, "\",\"type\":\"");
-        try json_body.appendSlice(self.allocator, order.type.toString());
-        try json_body.appendSlice(self.allocator, "\",\"time_in_force\":\"");
-        try json_body.appendSlice(self.allocator, order.time_in_force.toString());
-        try json_body.appendSlice(self.allocator, "\",\"client_order_id\":\"");
-        try json_body.appendSlice(self.allocator, client_id);
-        try json_body.appendSlice(self.allocator, "\"");
-        
-        // Add limit price if applicable
+        // Build JSON request body via structured serialization.
+        // Alpaca expects limit_price/stop_price as decimal strings to avoid
+        // float-rounding surprises on the wire, so format them as strings.
+        var body_alloc: std.Io.Writer.Allocating = .init(self.allocator);
+        defer body_alloc.deinit();
+        var jw: std.json.Stringify = .{ .writer = &body_alloc.writer, .options = .{} };
+        try jw.beginObject();
+        try jw.objectField("symbol");
+        try jw.write(order.symbol);
+        try jw.objectField("qty");
+        try jw.write(order.qty);
+        try jw.objectField("side");
+        try jw.write(order.side.toString());
+        try jw.objectField("type");
+        try jw.write(order.type.toString());
+        try jw.objectField("time_in_force");
+        try jw.write(order.time_in_force.toString());
+        try jw.objectField("client_order_id");
+        try jw.write(client_id);
+
         if (order.limit_price) |price| {
-            try json_body.appendSlice(self.allocator, ",\"limit_price\":\"");
-            const price_str = try std.fmt.allocPrint(self.allocator, "{d:.2}", .{price});
-            defer self.allocator.free(price_str);
-            try json_body.appendSlice(self.allocator, price_str);
-            try json_body.appendSlice(self.allocator, "\"");
+            var px_buf: [32]u8 = undefined;
+            const px_str = try std.fmt.bufPrint(&px_buf, "{d:.2}", .{price});
+            try jw.objectField("limit_price");
+            try jw.write(px_str);
         }
-        
-        // Add stop price if applicable
         if (order.stop_price) |price| {
-            try json_body.appendSlice(self.allocator, ",\"stop_price\":\"");
-            const price_str = try std.fmt.allocPrint(self.allocator, "{d:.2}", .{price});
-            defer self.allocator.free(price_str);
-            try json_body.appendSlice(self.allocator, price_str);
-            try json_body.appendSlice(self.allocator, "\"");
+            var px_buf: [32]u8 = undefined;
+            const px_str = try std.fmt.bufPrint(&px_buf, "{d:.2}", .{price});
+            try jw.objectField("stop_price");
+            try jw.write(px_str);
         }
-        
-        // Add extended hours
         if (order.extended_hours) {
-            try json_body.appendSlice(self.allocator, ",\"extended_hours\":true");
+            try jw.objectField("extended_hours");
+            try jw.write(true);
         }
-        
-        try json_body.appendSlice(self.allocator, "}");
-        
+        try jw.endObject();
+
+        const json_body_slice = body_alloc.written();
+
         // Create request
         const url = try std.fmt.allocPrint(self.allocator, "{s}/v2/orders", .{self.base_url});
         defer self.allocator.free(url);
@@ -268,7 +264,7 @@ pub const AlpacaTradingAPI = struct {
             .{ .name = "Content-Type", .value = "application/json" },
         };
 
-        var response = try self.http_client.post(url, &headers, json_body.items);
+        var response = try self.http_client.post(url, &headers, json_body_slice);
         defer response.deinit();
         
         if (response.status == .created or response.status == .ok) {

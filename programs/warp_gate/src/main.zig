@@ -397,59 +397,42 @@ fn printError(comptime fmt: []const u8, args: anytype) void {
     std.debug.print("\x1b[31mError:\x1b[0m " ++ fmt ++ "\n", args);
 }
 
-/// Emit a JSON event to stdout (for Tauri sidecar integration)
-/// Uses a simple buffer-based approach for Zig 0.16 compatibility
+/// Emit a JSON event to stdout (for Tauri sidecar integration).
 fn jsonEvent(event_type: []const u8, data: anytype) void {
     var buffer: [4096]u8 = undefined;
-    var pos: usize = 0;
+    var bw = std.Io.Writer.fixed(&buffer);
+    var jw: std.json.Stringify = .{ .writer = &bw, .options = .{} };
+    jw.beginObject() catch return;
+    jw.objectField("event") catch return;
+    jw.write(event_type) catch return;
+    jw.objectField("data") catch return;
+    jw.beginObject() catch return;
 
-    // Write opening
-    const opening = std.fmt.bufPrint(buffer[pos..], "{{\"event\":\"{s}\",\"data\":{{", .{event_type}) catch return;
-    pos += opening.len;
-
-    const DataType = @TypeOf(data);
-    const fields = std.meta.fields(DataType);
-    var first = true;
-
-    inline for (fields) |field| {
-        if (!first) {
-            if (pos < buffer.len) {
-                buffer[pos] = ',';
-                pos += 1;
-            }
-        }
-        first = false;
-
+    inline for (std.meta.fields(@TypeOf(data))) |field| {
         const value = @field(data, field.name);
         const FieldType = @TypeOf(value);
 
+        jw.objectField(field.name) catch return;
         if (FieldType == []const u8) {
-            const part = std.fmt.bufPrint(buffer[pos..], "\"{s}\":\"{s}\"", .{ field.name, value }) catch return;
-            pos += part.len;
+            jw.write(value) catch return;
         } else if (FieldType == *const [15]u8) {
-            // WarpCode string buffer - trim trailing spaces
-            const str = std.mem.trimEnd(u8, value, " ");
-            const part = std.fmt.bufPrint(buffer[pos..], "\"{s}\":\"{s}\"", .{ field.name, str }) catch return;
-            pos += part.len;
+            // WarpCode string buffer — trim trailing spaces before emitting
+            jw.write(std.mem.trimEnd(u8, value, " ")) catch return;
         } else if (@typeInfo(FieldType) == .pointer) {
-            // Generic pointer to array - print as string
-            const part = std.fmt.bufPrint(buffer[pos..], "\"{s}\":\"{s}\"", .{ field.name, value }) catch return;
-            pos += part.len;
+            jw.write(@as([]const u8, value)) catch return;
         } else if (@typeInfo(FieldType) == .int) {
-            const part = std.fmt.bufPrint(buffer[pos..], "\"{s}\":{d}", .{ field.name, value }) catch return;
-            pos += part.len;
+            jw.write(value) catch return;
         } else {
-            const part = std.fmt.bufPrint(buffer[pos..], "\"{s}\":null", .{field.name}) catch return;
-            pos += part.len;
+            jw.write(null) catch return;
         }
     }
 
-    // Write closing and newline
-    const closing = std.fmt.bufPrint(buffer[pos..], "}}}}\n", .{}) catch return;
-    pos += closing.len;
+    jw.endObject() catch return;
+    jw.endObject() catch return;
+    bw.writeByte('\n') catch return;
 
-    // Write to stdout using C write
-    _ = std.c.write(std.posix.STDOUT_FILENO, buffer[0..pos].ptr, pos);
+    const out = bw.buffered();
+    _ = std.c.write(std.posix.STDOUT_FILENO, out.ptr, out.len);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

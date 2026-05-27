@@ -141,50 +141,38 @@ pub const ThreadSafeAlpacaAPI = struct {
         );
         defer self.allocator.free(url);
 
-        // Build JSON body - simplified approach
-        var json_parts = std.ArrayList(u8).empty;
-        defer json_parts.deinit(self.allocator);
-
-        try json_parts.appendSlice(self.allocator, "{");
-        try json_parts.appendSlice(self.allocator, "\"symbol\":\"");
-        try json_parts.appendSlice(self.allocator, order.symbol);
-        try json_parts.appendSlice(self.allocator, "\",\"qty\":");
-        const qty_str = try std.fmt.allocPrint(self.allocator, "{d}", .{order.qty});
-        defer self.allocator.free(qty_str);
-        try json_parts.appendSlice(self.allocator, qty_str);
-        try json_parts.appendSlice(self.allocator, ",\"side\":\"");
-        try json_parts.appendSlice(self.allocator, order.side.toString());
-        try json_parts.appendSlice(self.allocator, "\",\"type\":\"");
-        try json_parts.appendSlice(self.allocator, order.type.toString());
-        try json_parts.appendSlice(self.allocator, "\",\"time_in_force\":\"");
-        try json_parts.appendSlice(self.allocator, order.time_in_force.toString());
-        try json_parts.appendSlice(self.allocator, "\"");
-
+        // Build JSON body via structured serialization.
+        var body_alloc: std.Io.Writer.Allocating = .init(self.allocator);
+        defer body_alloc.deinit();
+        var jw: std.json.Stringify = .{ .writer = &body_alloc.writer, .options = .{} };
+        try jw.beginObject();
+        try jw.objectField("symbol");
+        try jw.write(order.symbol);
+        try jw.objectField("qty");
+        try jw.write(order.qty);
+        try jw.objectField("side");
+        try jw.write(order.side.toString());
+        try jw.objectField("type");
+        try jw.write(order.type.toString());
+        try jw.objectField("time_in_force");
+        try jw.write(order.time_in_force.toString());
         if (order.limit_price) |price| {
-            const price_str = try std.fmt.allocPrint(self.allocator, ",\"limit_price\":{d:.2}", .{price});
-            defer self.allocator.free(price_str);
-            try json_parts.appendSlice(self.allocator, price_str);
+            try jw.objectField("limit_price");
+            try jw.print("{d:.2}", .{price});
         }
-
         if (order.stop_price) |price| {
-            const price_str = try std.fmt.allocPrint(self.allocator, ",\"stop_price\":{d:.2}", .{price});
-            defer self.allocator.free(price_str);
-            try json_parts.appendSlice(self.allocator, price_str);
+            try jw.objectField("stop_price");
+            try jw.print("{d:.2}", .{price});
         }
-
         if (order.client_order_id) |id| {
-            try json_parts.appendSlice(self.allocator, ",\"client_order_id\":\"");
-            try json_parts.appendSlice(self.allocator, id);
-            try json_parts.appendSlice(self.allocator, "\"");
+            try jw.objectField("client_order_id");
+            try jw.write(id);
         }
+        try jw.objectField("extended_hours");
+        try jw.write(order.extended_hours);
+        try jw.endObject();
 
-        const ext_str = try std.fmt.allocPrint(self.allocator, ",\"extended_hours\":{}", .{order.extended_hours});
-        defer self.allocator.free(ext_str);
-        try json_parts.appendSlice(self.allocator, ext_str);
-        try json_parts.appendSlice(self.allocator, "}");
-
-        const json_body = try json_parts.toOwnedSlice(self.allocator);
-        defer self.allocator.free(json_body);
+        const json_body = body_alloc.written();
 
         // Prepare headers
         const headers = [_]std.http.Header{
