@@ -91,3 +91,74 @@ This file was created after two consecutive audits found ship-blocking bugs that
 - `zig_json` was treated as an in-tree JSON parser by a standardization plan; the actual library only wrote JSON, had no `addModule`, and had unrelated grammar bugs (leading zeros emitting invalid JSON).
 
 The pattern in both cases: internal self-consistency masked external incompatibility. The four-point rule above is the cheapest possible enforcement against that pattern.
+
+## High-signal anti-patterns to grep for proactively
+
+The campaign that ran from `4f3e4fe` through `db9b685` (zig_ai_server C1-C5, http_sentinel, stratum_engine_claude, financial_engine/order_sender, mempool_sniffer, simd_crypto_ffi, plus the four canonical library audits, plus the zig_lens scanner build-out and the JSON-IN-FMT / SHELL-CHILD / EQL-FOR-SECRETS / MBEDTLS-VERIFY-NONE purges across 30+ files in batches 19-26) repeatedly hit the same six structural classes. When auditing a new module, search for these *before* reading the code in detail — each one paid out multiple times.
+
+Each class names the symptom, the root cause, and the corrective shape that the codebase has now standardized on. The scanner (`programs/zig_lens`) currently catches the first four classes; the last two are human-review-only.
+
+### 1. JSON injection via printf-style format strings — JSON-IN-FMT
+
+Symptom: `std.fmt.allocPrint` / `bufPrint` with a format string containing `{{"key":"{s}"}}` shape. Caller-controlled string substituted unescaped — the moment the value contains `"` or `\`, the JSON breaks (denial of service) or claims a new field (privilege escalation, billing fraud).
+
+Where it bit us: C5 in zig_ai_server (WAL / ledger / Firestore / BigQuery), `images.zig`, `oidc.zig`, `stratum_engine_claude` proxy/server share-accept/reject and exchange OrderTemplate.buildJson, `zig_jwt` Builder.sign header + payload (paired with a real timing attack), `zigix_chat` chat-body forwarding (substring-extracted `messages` array re-interpolated into Claude API request), `financial_engine` Alpaca order placement, `stratum_engine_grok` authorize/submitShare.
+
+Corrective shape: `std.json.Stringify.valueAlloc(allocator, anonymous_struct, .{})` for small payloads; `std.json.Stringify` against `std.Io.Writer.fixed(buf)` (stack buffer) or `std.Io.Writer.Allocating` (heap) for streaming / conditional / heterogeneous shapes. Heterogeneous JSON arrays (e.g. Stratum `params: ["user", "job_id", "ntime", ...]`) require streaming (`beginArray` / `write` / `endArray`) — anonymous tuples are tuples, not arrays, when passed to `write`. Append the trailing `\n` after `Stringify.write` finishes if the wire format requires JSONL or SSE `data: <json>\n\n` framing.
+
+Pre-existing escape helpers (`escapeJsonString`, `escapeJsonResponse`, `escapeJson`, hand-rolled `escapeJson` per file) should be deleted — Stringify handles all the cases (`"`, `\`, control chars, UTF-8) and is already audited.
+
+### 2. Shell-out RCE — SHELL-CHILD
+
+Symptom: `std.process.Child` invoked with `argv = .{"/bin/sh", "-c", cmd}` or `bash -c`, where `cmd` is built via `allocPrint("…{s}…")` from any caller-influenced input.
+
+Where it bit us: `vertex.zig` runTokenCommand, `quantum_curl/engine/auth_refresher.zig` CommandSource, `qai_chat` bash tool (renamed to `exec` with `argv: string[]`), `zig_ai/execute_command.zig` (now declares `extern "c" fn execvp` since `std.c` only exposes execve), `zig_ai/trash_file.zig` macOS trash invocation.
+
+Corrective shape: argv-mode `std.process.Child.init(argv, allocator)` with the argv pre-split by whitespace (or, better, structured as a `[]const []const u8`). For tools surfaced to LLMs, accept `argv: string[]` from the model — not a string. Never pass a shell. If the command genuinely needs pipes / redirects, write the orchestration in native Zig (e.g. dup2 onto fd 2 for `2>/dev/null`). The previous attempt at a "bash blocklist" (denylist) was already replaced with a structured exec allowlist (`9d3ebb2`).
+
+### 3. Non-constant-time comparison on auth-context values — EQL-FOR-SECRETS
+
+Symptom: `std.mem.eql(u8, expected, claim)` where one side is a signature, HMAC, OAuth nonce, session token, password, or any value an attacker can iterate one byte at a time. Byte-by-byte short-circuit comparison leaks length and byte-position via timing.
+
+Where it bit us: `zig_jwt` Builder.sign signature compare (paired with H-1 in batch 22), `zig_ai_server/oidc.zig` nonce SHA-256 verification.
+
+Corrective shape: `std.crypto.timing_safe.eql([N]u8, expected_arr.*, claim_arr.*)` where both sides are fixed-size arrays. Length-check first; refuse on mismatch (the length check is fine to short-circuit — it's the byte-level compare that leaks). For HMAC / signature buffers, allocate `[Hmac.mac_length]u8` arrays on the stack and `@memcpy` into them. For SHA-256 hex digests, length-check `== 64` then coerce to `*const [64]u8`.
+
+Distinguish from harmless string-equality on enum-like values (algorithm names, role strings, MIME types). The scanner can't always tell — it relies on the enclosing function's name/params tokenizing into one of: signature, hmac, password, secret, nonce, apikey, or a recognized two-token pair (api/key, session/token, auth/token, bearer/token, csrf/token, access/token, refresh/token, verify/token, id/token). False positives are suppressed with `// zig-lens-ignore: EQL-FOR-SECRETS <reason>` and a documented reason.
+
+### 4. TLS verification disabled — MBEDTLS-VERIFY-NONE (and equivalents)
+
+Symptom: any source line referencing `MBEDTLS_SSL_VERIFY_NONE`. Also: OpenSSL `SSL_VERIFY_NONE`, Go `tls.Config{InsecureSkipVerify: true}`, Rust rustls `dangerous().set_certificate_verifier`, custom callbacks that always return success.
+
+The scanner only catches the literal mbedTLS form — the other equivalents are not scanned and must be human-reviewed. Listed here so an audit knows to grep for the full class, not just the one form CI catches.
+
+Corrective shape: cert verification on by default; certs pinned where possible; production never reads from an env-var that flips verification off. The `stratum_engine_claude` TLS cert verification fix (`4cf6cc2`) is the reference implementation.
+
+### 5. Hand-rolled binary parsers in money-touching code
+
+Symptom: parseTransaction / parseBlock / parseRLP / parseBase58 with bespoke byte arithmetic. The defects look like off-by-one but cascade into wrong addresses, wrong txids, wrong amounts.
+
+Where it bit us: `mempool_sniffer/bitcoin_protocol` parseTransaction (H-1..H-4 in `777cf85`), `simd_crypto_ffi/spv` compact-target endianness + CVE-2012-2459 binding (`ffb069c`), `zig_base58` SHA-256d checksum bug that shipped for two months because every test was a roundtrip.
+
+Corrective shape: external test vectors before promotion (golden rule §1 above). For now, only the four libraries listed in the canonical list are cleared for money-touching consumers; everything else either uses a vetted external dependency on the Rust side or carries a `// TODO(audit): migrate to <canonical>` and is treated as quarantined.
+
+### 6. Wall-clock time in security checks
+
+Symptom: `std.time.timestamp()` or `std.time.nanoTimestamp()` used to validate token expiry, issue timestamps, replay windows, or anything an attacker can move by adjusting the system clock (NTP poisoning, container clock drift, intentional time-travel).
+
+Where it bit us: `zig_ai_server` C3 fake-clock (`1c78542`), `http_sentinel` HSEN-A livelock + deprecated time API (`c97c957`).
+
+Corrective shape: a single injected `Clock` interface that test code can override; production uses `std.time.Instant.now()` (monotonic) for elapsed-time math and `std.time.timestamp()` only for emitting wire timestamps to consumers who already trust the server clock. Never compare a wall-clock value against an attacker-controlled "issued_at" field without a server-side allowed-skew bound.
+
+### How to use this list
+
+When opening an unfamiliar file:
+
+1. `grep -nE 'allocPrint|bufPrint' <file>` and inspect every format string for `{{"`, `\":`, `,\"` — JSON-IN-FMT.
+2. `grep -nE 'process\.Child|Child\.init|"/bin/sh|"sh".*"-c"' <file>` — SHELL-CHILD.
+3. `grep -n 'std\.mem\.eql.*u8' <file>` then check whether the enclosing function name or its params name a secret — EQL-FOR-SECRETS.
+4. `grep -nE 'VERIFY_NONE|InsecureSkipVerify|dangerous\(\)\.set_certificate_verifier' <file>` — disabled TLS.
+5. `grep -nE 'std\.time\.(timestamp|nanoTimestamp)' <file>` and audit every callsite for "is this a security check?" — wall-clock-in-security.
+6. For binary parsers: check for external test vectors before reading the code in depth.
+
+`zig-lens --strict programs/<dir>/` catches classes 1-4 by default. The whole repo currently exits 0 under `--strict` — keep it that way.
