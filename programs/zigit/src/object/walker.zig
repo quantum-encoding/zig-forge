@@ -104,7 +104,7 @@ pub fn walk(
     errdefer oids.deinit(allocator);
     try oids.ensureTotalCapacityPrecise(allocator, seen.count());
     var it = seen.keyIterator();
-    while (it.next()) |k| oids.appendAssumeCapacity(.{ .bytes = k.* });
+    while (it.next()) |k| try oids.append(allocator, .{ .bytes = k.* });
 
     std.mem.sort(Oid, oids.items, {}, struct {
         fn lt(_: void, a: Oid, b: Oid) bool {

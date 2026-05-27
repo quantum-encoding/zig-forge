@@ -48,12 +48,12 @@ pub fn main() !void {
         var q = try queen.Queen.init(allocator, 0, size, .numeric_hash, &target);
         defer q.deinit();
 
-        const start = Instant.now() catch unreachable;
+        const start = try Instant.now();
         q.run() catch |err| {
             std.debug.print("  Error: {}\n", .{err});
             continue;
         };
-        const end = Instant.now() catch unreachable;
+        const end = try Instant.now();
 
         const elapsed_ms = @as(f64, @floatFromInt(end.since(start))) / 1e6;
         const stats = q.getStats();

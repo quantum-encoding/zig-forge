@@ -100,7 +100,7 @@ pub fn run(allocator: std.mem.Allocator, io: Io, args: []const []const u8) !void
             .delta => |d| try pack_w.addOfsDelta(d.oid, op_offsets[d.base_op_index], d.delta_bytes),
         };
         op_offsets[i] = e.offset;
-        entries.appendAssumeCapacity(e);
+        try entries.append(allocator, e);
     }
     const finished = try pack_w.finish();
     defer allocator.free(finished.pack_bytes);

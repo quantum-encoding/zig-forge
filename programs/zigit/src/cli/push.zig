@@ -206,7 +206,7 @@ pub fn run(allocator: std.mem.Allocator, io: Io, environ: std.process.Environ, a
     for (to_send.oids) |o| {
         const loaded = try store.read(allocator, o);
         total_payload_bytes += loaded.payload.len;
-        loaded_payloads.appendAssumeCapacity(loaded);
+        try loaded_payloads.append(allocator, loaded);
     }
     var load_extra_buf: [64]u8 = undefined;
     const load_extra = std.fmt.bufPrint(&load_extra_buf, " (payload={d} KiB)", .{total_payload_bytes / 1024}) catch "";

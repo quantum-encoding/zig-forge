@@ -42,7 +42,7 @@ pub fn main(init: std.process.Init) !void {
         var timer = try Timer.start();
         for (0..iterations) |i| {
             var enc = msgpack.Encoder.init(&buffer);
-            enc.writeInt(@intCast(i % 128)) catch unreachable;
+            try enc.writeInt(@intCast(i % 128));
         }
         const elapsed = timer.read();
         const ns_per_op = @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(iterations));
@@ -56,7 +56,7 @@ pub fn main(init: std.process.Init) !void {
         var timer = try Timer.start();
         for (0..iterations) |i| {
             var enc = msgpack.Encoder.init(&buffer);
-            enc.writeInt(@intCast(i + 1000000)) catch unreachable;
+            try enc.writeInt(@intCast(i + 1000000));
         }
         const elapsed = timer.read();
         const ns_per_op = @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(iterations));
@@ -71,7 +71,7 @@ pub fn main(init: std.process.Init) !void {
         var timer = try Timer.start();
         for (0..iterations) |_| {
             var enc = msgpack.Encoder.init(&buffer);
-            enc.writeString(test_str) catch unreachable;
+            try enc.writeString(test_str);
         }
         const elapsed = timer.read();
         const ns_per_op = @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(iterations));
@@ -85,7 +85,7 @@ pub fn main(init: std.process.Init) !void {
         var timer = try Timer.start();
         for (0..iterations) |i| {
             var enc = msgpack.Encoder.init(&buffer);
-            enc.writeFloat64(@as(f64, @floatFromInt(i)) * 0.001) catch unreachable;
+            try enc.writeFloat64(@as(f64, @floatFromInt(i)) * 0.001);
         }
         const elapsed = timer.read();
         const ns_per_op = @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(iterations));
@@ -99,13 +99,13 @@ pub fn main(init: std.process.Init) !void {
         var timer = try Timer.start();
         for (0..iterations) |_| {
             var enc = msgpack.Encoder.init(&buffer);
-            enc.writeMapHeader(3) catch unreachable;
-            enc.writeString("name") catch unreachable;
-            enc.writeString("Alice") catch unreachable;
-            enc.writeString("age") catch unreachable;
-            enc.writeInt(30) catch unreachable;
-            enc.writeString("active") catch unreachable;
-            enc.writeBool(true) catch unreachable;
+            try enc.writeMapHeader(3);
+            try enc.writeString("name");
+            try enc.writeString("Alice");
+            try enc.writeString("age");
+            try enc.writeInt(30);
+            try enc.writeString("active");
+            try enc.writeBool(true);
         }
         const elapsed = timer.read();
         const ns_per_op = @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(iterations));
@@ -122,7 +122,7 @@ pub fn main(init: std.process.Init) !void {
         var timer = try Timer.start();
         for (0..iterations) |_| {
             var dec = msgpack.Decoder.init(&data);
-            _ = dec.read() catch unreachable;
+            _ = try dec.read();
         }
         const elapsed = timer.read();
         const ns_per_op = @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(iterations));
@@ -140,7 +140,7 @@ pub fn main(init: std.process.Init) !void {
         var timer = try Timer.start();
         for (0..iterations) |_| {
             var dec = msgpack.Decoder.init(data);
-            _ = dec.read() catch unreachable;
+            _ = try dec.read();
         }
         const elapsed = timer.read();
         const ns_per_op = @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(iterations));
@@ -164,9 +164,9 @@ pub fn main(init: std.process.Init) !void {
         var timer = try Timer.start();
         for (0..iterations) |_| {
             var dec = msgpack.Decoder.init(data);
-            const value = dec.read() catch unreachable;
+            const value = try dec.read();
             var m = value.map;
-            while (m.next() catch unreachable) |_| {}
+            while (try m.next()) |_| {}
         }
         const elapsed = timer.read();
         const ns_per_op = @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(iterations));
@@ -182,18 +182,18 @@ pub fn main(init: std.process.Init) !void {
         for (0..iterations) |i| {
             // Encode
             var enc = msgpack.Encoder.init(&buffer);
-            enc.writeMapHeader(2) catch unreachable;
-            enc.writeString("id") catch unreachable;
-            enc.writeInt(@intCast(i)) catch unreachable;
-            enc.writeString("val") catch unreachable;
-            enc.writeFloat64(@as(f64, @floatFromInt(i)) * 0.1) catch unreachable;
+            try enc.writeMapHeader(2);
+            try enc.writeString("id");
+            try enc.writeInt(@intCast(i));
+            try enc.writeString("val");
+            try enc.writeFloat64(@as(f64, @floatFromInt(i)) * 0.1);
             const data = enc.getWritten();
 
             // Decode
             var dec = msgpack.Decoder.init(data);
-            const value = dec.read() catch unreachable;
+            const value = try dec.read();
             var m = value.map;
-            while (m.next() catch unreachable) |_| {}
+            while (try m.next()) |_| {}
         }
         const elapsed = timer.read();
         const ns_per_op = @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(iterations));

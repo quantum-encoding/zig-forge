@@ -65,7 +65,7 @@ fn benchWarpCode() !void {
     const iterations: u64 = 100_000;
 
     // Benchmark generation
-    var timer = Timer.start() catch unreachable;
+    var timer = try Timer.start();
     var i: u64 = 0;
     while (i < iterations) : (i += 1) {
         const code = WarpCode.generate();
@@ -83,7 +83,7 @@ fn benchWarpCode() !void {
     timer.reset();
     i = 0;
     while (i < iterations) : (i += 1) {
-        const code = WarpCode.parse("warp-729-alpha") catch unreachable;
+        const code = try WarpCode.parse("warp-729-alpha");
         std.mem.doNotOptimizeAway(&code);
     }
     const parse_ns = timer.read();
@@ -129,7 +129,7 @@ fn benchCrypto(allocator: std.mem.Allocator) !void {
         const iterations: u64 = if (size < 1024) 100_000 else if (size < 16384) 10_000 else 1000;
 
         // Encrypt benchmark
-        var timer = Timer.start() catch unreachable;
+        var timer = try Timer.start();
         var i: u64 = 0;
         while (i < iterations) : (i += 1) {
             const encrypted = try crypto.encrypt(&key, data);
@@ -159,7 +159,7 @@ fn benchProtocol() !void {
         .length = 65536,
     };
 
-    var timer = Timer.start() catch unreachable;
+    var timer = try Timer.start();
     var i: u64 = 0;
     while (i < iterations) : (i += 1) {
         const buf = header.serialize();
@@ -175,7 +175,7 @@ fn benchProtocol() !void {
     timer.reset();
     i = 0;
     while (i < iterations) : (i += 1) {
-        const decoded = protocol.Header.deserialize(&buf) catch unreachable;
+        const decoded = try protocol.Header.deserialize(&buf);
         std.mem.doNotOptimizeAway(&decoded);
     }
     const deser_ns = timer.read();

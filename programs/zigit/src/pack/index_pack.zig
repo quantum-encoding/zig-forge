@@ -150,7 +150,7 @@ pub fn build(
         raw.end_offset = cursor;
 
         try offset_to_index.put(allocator, raw.start_offset, i);
-        raws.appendAssumeCapacity(raw);
+        try raws.append(allocator, raw);
     }
 
     // Pass 2: resolve every object and accumulate idx entries.
@@ -170,7 +170,7 @@ pub fn build(
         defer allocator.free(resolved.payload);
         const oid = computeOid(resolved.kind, resolved.payload);
         const crc = std.hash.crc.Crc32.hash(pack_bytes[@intCast(raw.start_offset)..@intCast(raw.end_offset)]);
-        entries.appendAssumeCapacity(.{ .oid = oid, .offset = raw.start_offset, .crc32 = crc });
+        try entries.append(allocator, .{ .oid = oid, .offset = raw.start_offset, .crc32 = crc });
     }
 
     // Sort by oid for the idx.

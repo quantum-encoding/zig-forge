@@ -555,7 +555,7 @@ pub const FastWalker = struct {
 
         for (self.files.items) |fast_entry| {
             const path_copy = try allocator.dupe(u8, fast_entry.path);
-            entries.appendAssumeCapacity(.{
+            try entries.append(allocator, .{
                 .path = path_copy,
                 .size = fast_entry.size,
                 .inode = fast_entry.ino,

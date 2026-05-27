@@ -151,7 +151,7 @@ pub fn main(init: std.process.Init) !void {
         for (0..export_iterations) |_| {
             var writer: std.Io.Writer.Allocating = std.Io.Writer.Allocating.init(allocator);
             defer writer.deinit();
-            counter.write(&writer.writer) catch unreachable;
+            try counter.write(&writer.writer);
         }
         const elapsed = timer.read();
         const ns_per_op = @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(export_iterations));
@@ -172,7 +172,7 @@ pub fn main(init: std.process.Init) !void {
         for (0..export_iterations) |_| {
             var writer: std.Io.Writer.Allocating = std.Io.Writer.Allocating.init(allocator);
             defer writer.deinit();
-            hist.write(&writer.writer) catch unreachable;
+            try hist.write(&writer.writer);
         }
         const elapsed = timer.read();
         const ns_per_op = @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(export_iterations));
