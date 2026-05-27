@@ -349,28 +349,50 @@ pub const OrderTemplate = struct {
         return template;
     }
 
-    /// Build JSON payload (optimized for minimal allocations)
+    /// Build JSON payload (optimized for minimal allocations).
+    ///
+    /// Audit (JSON-IN-FMT): the previous implementation
+    /// hand-formatted the body via std.fmt.bufPrint with a
+    /// JSON-shaped format string. `symbol` is operator-set
+    /// (config) and the toString() enums are library-controlled —
+    /// safe in practice — but a `,"x":1` smuggled into any of
+    /// them would have forged sibling fields in the order body
+    /// (the exchange would honour them as part of the request).
+    ///
+    /// The hot-path contract is preserved: we write into the
+    /// pre-allocated `json_buffer` via `std.Io.Writer.fixed` and
+    /// emit through std.json.Stringify — zero heap allocations.
+    /// The float precision (`{d:.8}` quantity, `{d:.2}` price)
+    /// goes through `Stringify.print` so the exchange API still
+    /// sees the precision it expects (Stringify's default float
+    /// formatter uses round-trip-shortest, which crypto exchanges
+    /// reject).
     pub fn buildJson(self: *OrderTemplate, timestamp: u64) ![]const u8 {
-        // Extract symbol as string (up to null terminator)
         var symbol_len: usize = 0;
         while (symbol_len < 16 and self.symbol[symbol_len] != 0) : (symbol_len += 1) {}
         const symbol_str = self.symbol[0..symbol_len];
 
-        // Build JSON using std.fmt.bufPrint for better performance
-        if (self.price) |price| {
-            self.json_len = (try std.fmt.bufPrint(
-                &self.json_buffer,
-                "{{\"symbol\":\"{s}\",\"side\":\"{s}\",\"type\":\"{s}\",\"quantity\":{d:.8},\"price\":{d:.2},\"timestamp\":{}}}",
-                .{ symbol_str, self.side.toString(), self.order_type.toString(), self.quantity, price, timestamp },
-            )).len;
-        } else {
-            self.json_len = (try std.fmt.bufPrint(
-                &self.json_buffer,
-                "{{\"symbol\":\"{s}\",\"side\":\"{s}\",\"type\":\"{s}\",\"quantity\":{d:.8},\"timestamp\":{}}}",
-                .{ symbol_str, self.side.toString(), self.order_type.toString(), self.quantity, timestamp },
-            )).len;
-        }
+        var w = std.Io.Writer.fixed(&self.json_buffer);
+        var jw: std.json.Stringify = .{ .writer = &w, .options = .{} };
 
+        try jw.beginObject();
+        try jw.objectField("symbol");
+        try jw.write(symbol_str);
+        try jw.objectField("side");
+        try jw.write(self.side.toString());
+        try jw.objectField("type");
+        try jw.write(self.order_type.toString());
+        try jw.objectField("quantity");
+        try jw.print("{d:.8}", .{self.quantity});
+        if (self.price) |price| {
+            try jw.objectField("price");
+            try jw.print("{d:.2}", .{price});
+        }
+        try jw.objectField("timestamp");
+        try jw.write(timestamp);
+        try jw.endObject();
+
+        self.json_len = w.buffered().len;
         return self.json_buffer[0..self.json_len];
     }
 };
@@ -592,6 +614,22 @@ pub const ExchangeClient = struct {
         const hmac = @import("../crypto/hmac.zig");
         const timestamp_ms = getRealtimeMs();
 
+        // Audit (JSON-IN-FMT): every auth payload used to be
+        // built via std.fmt.bufPrint with a JSON-shaped format
+        // string interpolating `api_key`, `sig_hex`, and
+        // `passphrase` — every one of which is
+        // operator/secret-controlled. A `"` smuggled into any
+        // would have closed the string mid-field and let the rest
+        // of the credential bytes land as sibling JSON, which the
+        // exchange would have honoured. The auth path is also
+        // zero-alloc by design (we never want a per-session
+        // GC-pause-equivalent at signing time), so we keep the
+        // stack-buffer pattern and route through
+        // std.Io.Writer.fixed + std.json.Stringify.
+        var auth_json: [512]u8 = undefined;
+        var w = std.Io.Writer.fixed(&auth_json);
+        var jw: std.json.Stringify = .{ .writer = &w, .options = .{} };
+
         switch (self.exchange) {
             .binance => {
                 // Binance: HMAC-SHA256(secret, "timestamp=<ms>")
@@ -601,10 +639,27 @@ pub const ExchangeClient = struct {
                 hmac.signBinance(self.credentials.api_secret, auth_msg, &signature);
                 const sig_hex = std.fmt.bytesToHex(signature, .lower);
 
-                // Send auth via WebSocket
-                var auth_json: [512]u8 = undefined;
-                const auth_payload = std.fmt.bufPrint(&auth_json, "{{\"method\":\"SUBSCRIBE\",\"params\":[\"{s}@account\"],\"id\":1,\"apiKey\":\"{s}\",\"signature\":\"{s}\",\"timestamp\":{d}}}", .{ self.credentials.api_key, self.credentials.api_key, sig_hex, timestamp_ms }) catch return error.AuthFailed;
-                try self.sendWebSocketFrame(.text, auth_payload);
+                // {"method":"SUBSCRIBE","params":["<api_key>@account"],"id":1,
+                //  "apiKey":"<api_key>","signature":"<sig>","timestamp":<ms>}
+                var params_buf: [256]u8 = undefined;
+                const params_str = std.fmt.bufPrint(&params_buf, "{s}@account", .{self.credentials.api_key}) catch return error.AuthFailed;
+                jw.beginObject() catch return error.AuthFailed;
+                jw.objectField("method") catch return error.AuthFailed;
+                jw.write("SUBSCRIBE") catch return error.AuthFailed;
+                jw.objectField("params") catch return error.AuthFailed;
+                jw.beginArray() catch return error.AuthFailed;
+                jw.write(params_str) catch return error.AuthFailed;
+                jw.endArray() catch return error.AuthFailed;
+                jw.objectField("id") catch return error.AuthFailed;
+                jw.write(@as(u32, 1)) catch return error.AuthFailed;
+                jw.objectField("apiKey") catch return error.AuthFailed;
+                jw.write(self.credentials.api_key) catch return error.AuthFailed;
+                jw.objectField("signature") catch return error.AuthFailed;
+                jw.write(@as([]const u8, &sig_hex)) catch return error.AuthFailed;
+                jw.objectField("timestamp") catch return error.AuthFailed;
+                jw.write(timestamp_ms) catch return error.AuthFailed;
+                jw.endObject() catch return error.AuthFailed;
+                try self.sendWebSocketFrame(.text, w.buffered());
             },
             .coinbase => {
                 // Coinbase: HMAC-SHA256(secret, timestamp + "GET" + "/users/self/verify")
@@ -614,10 +669,24 @@ pub const ExchangeClient = struct {
                 hmac.signCoinbase(self.credentials.api_secret, ts_str, "GET", "/users/self/verify", "", &signature);
                 const sig_hex = std.fmt.bytesToHex(signature, .lower);
 
-                var auth_json: [512]u8 = undefined;
                 const passphrase = self.credentials.passphrase orelse "";
-                const auth_payload = std.fmt.bufPrint(&auth_json, "{{\"type\":\"subscribe\",\"channels\":[\"user\"],\"key\":\"{s}\",\"signature\":\"{s}\",\"timestamp\":\"{s}\",\"passphrase\":\"{s}\"}}", .{ self.credentials.api_key, sig_hex, ts_str, passphrase }) catch return error.AuthFailed;
-                try self.sendWebSocketFrame(.text, auth_payload);
+                jw.beginObject() catch return error.AuthFailed;
+                jw.objectField("type") catch return error.AuthFailed;
+                jw.write("subscribe") catch return error.AuthFailed;
+                jw.objectField("channels") catch return error.AuthFailed;
+                jw.beginArray() catch return error.AuthFailed;
+                jw.write("user") catch return error.AuthFailed;
+                jw.endArray() catch return error.AuthFailed;
+                jw.objectField("key") catch return error.AuthFailed;
+                jw.write(self.credentials.api_key) catch return error.AuthFailed;
+                jw.objectField("signature") catch return error.AuthFailed;
+                jw.write(@as([]const u8, &sig_hex)) catch return error.AuthFailed;
+                jw.objectField("timestamp") catch return error.AuthFailed;
+                jw.write(ts_str) catch return error.AuthFailed;
+                jw.objectField("passphrase") catch return error.AuthFailed;
+                jw.write(passphrase) catch return error.AuthFailed;
+                jw.endObject() catch return error.AuthFailed;
+                try self.sendWebSocketFrame(.text, w.buffered());
             },
             .kraken, .bybit => {
                 // Kraken/Bybit: HMAC-SHA256(secret, timestamp)
@@ -627,9 +696,18 @@ pub const ExchangeClient = struct {
                 hmac.hmacSha256(self.credentials.api_secret, ts_str, &signature);
                 const sig_hex = std.fmt.bytesToHex(signature, .lower);
 
-                var auth_json: [512]u8 = undefined;
-                const auth_payload = std.fmt.bufPrint(&auth_json, "{{\"op\":\"auth\",\"args\":[\"{s}\",{d},\"{s}\"]}}", .{ self.credentials.api_key, timestamp_ms, sig_hex }) catch return error.AuthFailed;
-                try self.sendWebSocketFrame(.text, auth_payload);
+                // {"op":"auth","args":["<api_key>",<ts_ms>,"<sig>"]}
+                jw.beginObject() catch return error.AuthFailed;
+                jw.objectField("op") catch return error.AuthFailed;
+                jw.write("auth") catch return error.AuthFailed;
+                jw.objectField("args") catch return error.AuthFailed;
+                jw.beginArray() catch return error.AuthFailed;
+                jw.write(self.credentials.api_key) catch return error.AuthFailed;
+                jw.write(timestamp_ms) catch return error.AuthFailed;
+                jw.write(@as([]const u8, &sig_hex)) catch return error.AuthFailed;
+                jw.endArray() catch return error.AuthFailed;
+                jw.endObject() catch return error.AuthFailed;
+                try self.sendWebSocketFrame(.text, w.buffered());
             },
         }
 

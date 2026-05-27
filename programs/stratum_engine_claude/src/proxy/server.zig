@@ -455,17 +455,48 @@ pub const StratumServer = struct {
     fn handleSubscribe(self: *Self, miner: *MinerConnection, id: i64) !void {
         miner.state = .subscribed;
 
-        // Send subscribe response with extranonce1 and extranonce2_size
-        const response = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"id\":{},\"result\":[[[\"mining.notify\",\"{x:0>16}\"],[\"mining.set_difficulty\",\"{x:0>16}\"]],\"{x:0>16}\",4],\"error\":null}}\n",
-            .{
-                id,
-                @as(u64, @bitCast(miner.extranonce1)),
-                @as(u64, @bitCast(miner.extranonce1)),
-                @as(u64, @bitCast(miner.extranonce1)),
-            },
-        );
+        // Send subscribe response with extranonce1 and extranonce2_size.
+        // The Stratum mining.subscribe response shape is a
+        // heterogeneous array:
+        //   "result": [
+        //     [["mining.notify", "<en1>"], ["mining.set_difficulty", "<en1>"]],
+        //     "<en1>",
+        //     <en2_size>
+        //   ]
+        // Streaming std.json.Stringify is cleaner here than
+        // valueAlloc on a struct — there's no clean Zig type for
+        // an array-of-mixed-types.
+        var en1_hex: [16]u8 = undefined;
+        _ = try std.fmt.bufPrint(&en1_hex, "{x:0>16}", .{@as(u64, @bitCast(miner.extranonce1))});
+
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+        var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+        try jw.beginObject();
+        try jw.objectField("id");
+        try jw.write(id);
+        try jw.objectField("result");
+        try jw.beginArray();
+        try jw.beginArray(); // subscriptions
+        try jw.beginArray();
+        try jw.write("mining.notify");
+        try jw.write(@as([]const u8, &en1_hex));
+        try jw.endArray();
+        try jw.beginArray();
+        try jw.write("mining.set_difficulty");
+        try jw.write(@as([]const u8, &en1_hex));
+        try jw.endArray();
+        try jw.endArray();
+        try jw.write(@as([]const u8, &en1_hex)); // extranonce1
+        try jw.write(@as(u32, 4)); // extranonce2_size
+        try jw.endArray();
+        try jw.objectField("error");
+        try jw.write(null);
+        try jw.endObject();
+        // Stratum is line-delimited.
+        try aw.writer.writeByte('\n');
+
+        const response = try aw.toOwnedSlice();
         defer self.allocator.free(response);
 
         try self.sendToMiner(miner, response);
@@ -484,12 +515,17 @@ pub const StratumServer = struct {
 
         miner.state = .authorized;
 
-        // Send authorize success
-        const response = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"id\":{},\"result\":true,\"error\":null}}\n",
-            .{id},
-        );
+        // Send authorize success. Audit (JSON-IN-FMT): straight
+        // shape `{"id":N,"result":true,"error":null}` — through
+        // std.json.Stringify on an anonymous struct, then append
+        // the Stratum line terminator.
+        const body = try std.json.Stringify.valueAlloc(self.allocator, .{
+            .id = id,
+            .result = true,
+            .@"error" = null,
+        }, .{});
+        defer self.allocator.free(body);
+        const response = try std.fmt.allocPrint(self.allocator, "{s}\n", .{body});
         defer self.allocator.free(response);
 
         try self.sendToMiner(miner, response);
@@ -561,12 +597,14 @@ pub const StratumServer = struct {
         if (accepted) {
             miner.shares_accepted += 1;
 
-            // Send accept response
-            const response = try std.fmt.allocPrint(
-                self.allocator,
-                "{{\"id\":{},\"result\":true,\"error\":null}}\n",
-                .{id},
-            );
+            // Send accept response.
+            const body = try std.json.Stringify.valueAlloc(self.allocator, .{
+                .id = id,
+                .result = true,
+                .@"error" = null,
+            }, .{});
+            defer self.allocator.free(body);
+            const response = try std.fmt.allocPrint(self.allocator, "{s}\n", .{body});
             defer self.allocator.free(response);
             try self.sendToMiner(miner, response);
 
@@ -586,11 +624,15 @@ pub const StratumServer = struct {
         } else {
             miner.shares_rejected += 1;
 
-            const response = try std.fmt.allocPrint(
-                self.allocator,
-                "{{\"id\":{},\"result\":null,\"error\":[21,\"Job not found\",null]}}\n",
-                .{id},
-            );
+            // Stratum protocol reject — error tuple is
+            // [code, message, data]; we emit [21, "Job not found", null].
+            const body = try std.json.Stringify.valueAlloc(self.allocator, .{
+                .id = id,
+                .result = null,
+                .@"error" = .{ @as(u32, 21), "Job not found", null },
+            }, .{});
+            defer self.allocator.free(body);
+            const response = try std.fmt.allocPrint(self.allocator, "{s}\n", .{body});
             defer self.allocator.free(response);
             try self.sendToMiner(miner, response);
         }
@@ -605,45 +647,73 @@ pub const StratumServer = struct {
     fn sendDifficulty(self: *Self, miner: *MinerConnection, difficulty: f64) !void {
         miner.difficulty = difficulty;
 
-        const msg = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"id\":null,\"method\":\"mining.set_difficulty\",\"params\":[{d}]}}\n",
-            .{difficulty},
-        );
+        // {"id":null,"method":"mining.set_difficulty","params":[<difficulty>]}
+        const body = try std.json.Stringify.valueAlloc(self.allocator, .{
+            .id = null,
+            .method = "mining.set_difficulty",
+            .params = .{difficulty},
+        }, .{});
+        defer self.allocator.free(body);
+        const msg = try std.fmt.allocPrint(self.allocator, "{s}\n", .{body});
         defer self.allocator.free(msg);
 
         try self.sendToMiner(miner, msg);
     }
 
     fn sendJob(self: *Self, miner: *MinerConnection, job: types.Job) !void {
-        // Build merkle branch array string
-        var merkle_str = try std.ArrayList(u8).initCapacity(self.allocator, 256);
-        defer merkle_str.deinit(self.allocator);
+        // Stratum mining.notify body shape:
+        //   "params": [
+        //     "<job_id>", "<prevhash hex>", "<coinb1>", "<coinb2>",
+        //     ["<merkle1>", "<merkle2>", ...],
+        //     "<version hex>", "<nbits hex>", "<ntime hex>",
+        //     <clean_jobs bool>
+        //   ]
+        //
+        // Audit (JSON-IN-FMT): the previous implementation built
+        // the merkle sub-array by hand (string-append "[", quoted
+        // branches, "]") then interpolated it AS A STRING into the
+        // outer params allocPrint. Pool-provided strings (coinb1,
+        // coinb2, merkle branches) ended up unescaped in the wire
+        // bytes. We now stream the full structure through
+        // std.json.Stringify, with prevhash / version / nbits /
+        // ntime pre-formatted into stack-allocated hex buffers
+        // (the wire contract requires the specific hex widths;
+        // Stringify's number formatter won't emit those).
+        var prevhash_hex: [64]u8 = undefined;
+        _ = try std.fmt.bufPrint(&prevhash_hex, "{x:0>64}", .{@as(u256, @bitCast(job.prevhash))});
+        var version_hex: [8]u8 = undefined;
+        _ = try std.fmt.bufPrint(&version_hex, "{x:0>8}", .{job.version});
+        var nbits_hex: [8]u8 = undefined;
+        _ = try std.fmt.bufPrint(&nbits_hex, "{x:0>8}", .{job.nbits});
+        var ntime_hex: [8]u8 = undefined;
+        _ = try std.fmt.bufPrint(&ntime_hex, "{x:0>8}", .{job.ntime});
 
-        try merkle_str.appendSlice(self.allocator, "[");
-        for (job.merkle_branch, 0..) |branch, i| {
-            if (i > 0) try merkle_str.appendSlice(self.allocator, ",");
-            try merkle_str.appendSlice(self.allocator, "\"");
-            try merkle_str.appendSlice(self.allocator, branch);
-            try merkle_str.appendSlice(self.allocator, "\"");
-        }
-        try merkle_str.appendSlice(self.allocator, "]");
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+        var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+        try jw.beginObject();
+        try jw.objectField("id");
+        try jw.write(null);
+        try jw.objectField("method");
+        try jw.write("mining.notify");
+        try jw.objectField("params");
+        try jw.beginArray();
+        try jw.write(job.job_id);
+        try jw.write(@as([]const u8, &prevhash_hex));
+        try jw.write(job.coinb1);
+        try jw.write(job.coinb2);
+        try jw.beginArray();
+        for (job.merkle_branch) |branch| try jw.write(branch);
+        try jw.endArray();
+        try jw.write(@as([]const u8, &version_hex));
+        try jw.write(@as([]const u8, &nbits_hex));
+        try jw.write(@as([]const u8, &ntime_hex));
+        try jw.write(job.clean_jobs);
+        try jw.endArray();
+        try jw.endObject();
+        try aw.writer.writeByte('\n');
 
-        const msg = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"id\":null,\"method\":\"mining.notify\",\"params\":[\"{s}\",\"{x:0>64}\",\"{s}\",\"{s}\",{s},{x:0>8},{x:0>8},{x:0>8},{s}]}}\n",
-            .{
-                job.job_id,
-                @as(u256, @bitCast(job.prevhash)),
-                job.coinb1,
-                job.coinb2,
-                merkle_str.items,
-                job.version,
-                job.nbits,
-                job.ntime,
-                if (job.clean_jobs) "true" else "false",
-            },
-        );
+        const msg = try aw.toOwnedSlice();
         defer self.allocator.free(msg);
 
         try self.sendToMiner(miner, msg);

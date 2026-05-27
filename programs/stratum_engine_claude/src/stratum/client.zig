@@ -199,11 +199,14 @@ pub const StratumClient = struct {
         if (self.state != .subscribing) return ClientError.ProtocolError;
 
         const id = self.getNextId();
-        const msg = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"id\":{},\"method\":\"mining.subscribe\",\"params\":[\"zig-stratum-engine/0.1.0\"]}}\n",
-            .{id},
-        );
+        // {"id":N,"method":"mining.subscribe","params":["zig-stratum-engine/0.1.0"]}\n
+        const body = try std.json.Stringify.valueAlloc(self.allocator, .{
+            .id = id,
+            .method = "mining.subscribe",
+            .params = .{"zig-stratum-engine/0.1.0"},
+        }, .{});
+        defer self.allocator.free(body);
+        const msg = try std.fmt.allocPrint(self.allocator, "{s}\n", .{body});
         defer self.allocator.free(msg);
 
         try self.sendRaw(msg);
@@ -274,11 +277,18 @@ pub const StratumClient = struct {
         if (self.state != .authorizing) return ClientError.ProtocolError;
 
         const id = self.getNextId();
-        const msg = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"id\":{},\"method\":\"mining.authorize\",\"params\":[\"{s}\",\"{s}\"]}}\n",
-            .{ id, self.credentials.username, self.credentials.password },
-        );
+        // {"id":N,"method":"mining.authorize","params":["<user>","<pass>"]}\n
+        // Audit (JSON-IN-FMT): pool credentials — operator-set
+        // strings that could plausibly contain `"` or `\`. The
+        // previous allocPrint with `\"{s}\",\"{s}\"` interpolated
+        // them raw. Stringify owns the escape for both fields.
+        const body = try std.json.Stringify.valueAlloc(self.allocator, .{
+            .id = id,
+            .method = "mining.authorize",
+            .params = .{ self.credentials.username, self.credentials.password },
+        }, .{});
+        defer self.allocator.free(body);
+        const msg = try std.fmt.allocPrint(self.allocator, "{s}\n", .{body});
         defer self.allocator.free(msg);
 
         try self.sendRaw(msg);
@@ -308,18 +318,28 @@ pub const StratumClient = struct {
         if (self.state != .ready) return ClientError.ProtocolError;
 
         const id = self.getNextId();
-        const msg = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"id\":{},\"method\":\"mining.submit\",\"params\":[\"{s}\",\"{s}\",\"{s}\",\"{x:0>8}\",\"{x:0>8}\"]}}\n",
-            .{
-                id,
+        // {"id":N,"method":"mining.submit","params":["<worker>","<job_id>","<en2>","<ntime hex>","<nonce hex>"]}\n
+        // ntime/nonce hex widths are wire-defined; pre-format them
+        // into stack hex buffers so Stringify emits them as JSON
+        // strings rather than numbers.
+        var ntime_hex: [8]u8 = undefined;
+        _ = try std.fmt.bufPrint(&ntime_hex, "{x:0>8}", .{share.ntime});
+        var nonce_hex: [8]u8 = undefined;
+        _ = try std.fmt.bufPrint(&nonce_hex, "{x:0>8}", .{share.nonce});
+
+        const body = try std.json.Stringify.valueAlloc(self.allocator, .{
+            .id = id,
+            .method = "mining.submit",
+            .params = .{
                 share.worker_name,
                 share.job_id,
                 share.extranonce2,
-                share.ntime,
-                share.nonce,
+                @as([]const u8, &ntime_hex),
+                @as([]const u8, &nonce_hex),
             },
-        );
+        }, .{});
+        defer self.allocator.free(body);
+        const msg = try std.fmt.allocPrint(self.allocator, "{s}\n", .{body});
         defer self.allocator.free(msg);
 
         try self.sendRaw(msg);
