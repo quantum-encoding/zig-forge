@@ -347,12 +347,16 @@ pub const TenantEngine = struct {
         // === PRAETORIAN GUARD VALIDATION ===
         if (self.praetorian_guard) |guard| {
             const side = if (order.side == .buy) api.AlpacaTradingAPI.OrderSide.buy else api.AlpacaTradingAPI.OrderSide.sell;
+            // Push f64 → Decimal conversion to the boundary so the guard's
+            // internal math stays in integers (Batch 31 FLOAT-OBSESSION).
+            const Decimal = @import("decimal.zig").Decimal;
+            const price_decimal: ?Decimal = if (order.price) |p| Decimal.fromFloat(p) else null;
             const validation = try guard.validateOrder(
                 self.tenant.tenant_id,
                 symbol_str,
                 side,
                 order.quantity,
-                order.price,
+                price_decimal,
             );
             
             if (!validation.approved) {
@@ -572,24 +576,27 @@ pub const MultiTenantOrchestrator = struct {
         
         // Register tenant with Praetorian Guard
         if (self.praetorian_guard) |*guard| {
-            // Define risk limits based on tier
+            // Define risk limits based on tier. Decimal literals — never
+            // f64 — so the guard's overflow-checked integer math operates
+            // on bit-identical values across every tenant tier.
+            const DecimalT = @import("decimal.zig").Decimal;
             const limits = switch (algo_type) {
                 .spy_hunter => praetorian.RiskLimits{
-                    .max_position_size_usd = 5000.0,
+                    .max_position_size_usd = DecimalT.fromInt(5_000),
                     .max_orders_per_minute = 10,
-                    .max_total_exposure_usd = 20000.0,
+                    .max_total_exposure_usd = DecimalT.fromInt(20_000),
                     .max_positions = 5,
                 },
                 .momentum_scanner => praetorian.RiskLimits{
-                    .max_position_size_usd = 10000.0,
+                    .max_position_size_usd = DecimalT.fromInt(10_000),
                     .max_orders_per_minute = 20,
-                    .max_total_exposure_usd = 40000.0,
+                    .max_total_exposure_usd = DecimalT.fromInt(40_000),
                     .max_positions = 8,
                 },
                 .mean_reversion => praetorian.RiskLimits{
-                    .max_position_size_usd = 3000.0,
+                    .max_position_size_usd = DecimalT.fromInt(3_000),
                     .max_orders_per_minute = 30,
-                    .max_total_exposure_usd = 15000.0,
+                    .max_total_exposure_usd = DecimalT.fromInt(15_000),
                     .max_positions = 10,
                 },
             };

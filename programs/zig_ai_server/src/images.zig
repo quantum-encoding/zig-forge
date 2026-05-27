@@ -146,10 +146,8 @@ fn generateOpenAI(
     // CSV per_unit_price — err high so broke users get rejected before
     // we burn provider quota. Numbers sized to the HQ 1024² tier per
     // OpenAI's image generation guide; settled to exact post-call.
-    const estimate_usd_per_image = preflightUsd(model);
-    const estimate_ticks: i64 = @intFromFloat(estimate_usd_per_image *
-        @as(f64, @floatFromInt(TICKS_PER_USD)) *
-        @as(f64, @floatFromInt(count)));
+    const ticks_per_image = preflightTicks(model);
+    const estimate_ticks: i64 = ticks_per_image * @as(i64, count);
 
     // Reserve against account balance. Skip when no auth/store wired
     // (test harness, local dev).
@@ -273,46 +271,46 @@ fn generateOpenAI(
     return .{ .status = .ok, .body = json_resp };
 }
 
-/// preflightUsd returns the conservative dollar estimate per image used
+/// preflightTicks returns the conservative tick estimate per image used
 /// for the balance reservation. Token-based image models have no CSV
 /// per-unit price, so we err high — the migration guide for gpt-image-*
 /// pegs HQ 1024² at ~$0.21; we use $0.25 to fail-close on broke users.
-/// For per-unit models we use the CSV rate verbatim.
-fn preflightUsd(model: models_mod.Model) f64 {
-    if (model.per_unit_price > 0) return model.per_unit_price;
+/// For per-unit models we use the CSV rate verbatim. Pure integer math
+/// (Batch 31 FLOAT-OBSESSION) — the previous f64 path could under-bill
+/// fractional-cent prices via `@intFromFloat` truncation.
+fn preflightTicks(model: models_mod.Model) i64 {
+    if (model.per_unit_ticks > 0) return model.per_unit_ticks;
     // Token-based defaults sized to HQ tier so preflight catches under-funded
-    // requests reliably; exact cost is settled post-call.
-    if (std.mem.eql(u8, model.api_model_id, "gpt-image-1-mini")) return 0.10;
-    if (std.mem.eql(u8, model.api_model_id, "gpt-image-1")) return 0.17;
-    return 0.25; // gpt-image-1.5, gpt-image-2, chatgpt-image-latest
+    // requests reliably; exact cost is settled post-call. Values are dollars
+    // × TICKS_PER_USD: $0.10 → 10^9, $0.17 → 1.7×10^9, $0.25 → 2.5×10^9.
+    if (std.mem.eql(u8, model.api_model_id, "gpt-image-1-mini")) return 1_000_000_000;
+    if (std.mem.eql(u8, model.api_model_id, "gpt-image-1")) return 1_700_000_000;
+    return 2_500_000_000; // gpt-image-1.5, gpt-image-2, chatgpt-image-latest
 }
 
 /// Token-aware exact-cost calculation. Mirrors the imageCostUSD helper in
 /// the Go gateway: when usage is reported (token-based image models)
 /// we bill exactly; otherwise we bill flat-per-image from the CSV.
+/// All integer math (Batch 31 FLOAT-OBSESSION).
 fn exactCostTicks(
     model: models_mod.Model,
     input_tokens: u32,
     output_tokens: u32,
     image_count: usize,
 ) struct { cost: i64, margin: i64 } {
-    const margin_bps: i64 = @intFromFloat((model.margin - 1.0) * 10000.0);
+    const margin_bps: i64 = model.margin_bps;
 
-    // Token-based path: use input/output × per_million when usage reported.
+    // Token-based path: use input/output × ticks_per_million when usage reported.
     if (input_tokens > 0 or output_tokens > 0) {
-        const in_ticks: i64 = @intFromFloat(@as(f64, @floatFromInt(input_tokens)) *
-            model.input_per_million * @as(f64, @floatFromInt(TICKS_PER_USD)) / 1_000_000.0);
-        const out_ticks: i64 = @intFromFloat(@as(f64, @floatFromInt(output_tokens)) *
-            model.output_per_million * @as(f64, @floatFromInt(TICKS_PER_USD)) / 1_000_000.0);
+        const in_ticks = @divTrunc(model.input_ticks_per_million * @as(i64, input_tokens), 1_000_000);
+        const out_ticks = @divTrunc(model.output_ticks_per_million * @as(i64, output_tokens), 1_000_000);
         const cost = in_ticks + out_ticks;
         const margin = @divFloor(cost * margin_bps, 10000);
         return .{ .cost = cost, .margin = margin };
     }
 
-    // Per-unit path (DALL-E 3, grok-imagine, etc.): per_unit_price × count.
-    const per_image_ticks: i64 = @intFromFloat(model.per_unit_price *
-        @as(f64, @floatFromInt(TICKS_PER_USD)));
-    const cost = per_image_ticks * @as(i64, @intCast(image_count));
+    // Per-unit path (DALL-E 3, grok-imagine, etc.): per_unit_ticks × count.
+    const cost = model.per_unit_ticks * @as(i64, @intCast(image_count));
     const margin = @divFloor(cost * margin_bps, 10000);
     return .{ .cost = cost, .margin = margin };
 }

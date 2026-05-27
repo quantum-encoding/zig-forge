@@ -40,7 +40,8 @@ pub fn main() !void {
 
     // Test 2: Order Template Pre-loading
     std.debug.print("\n═══ Test 2: Order Template Pre-loading ═══\n", .{});
-    try client.preloadOrders("BTCUSDT", 0.001, 0.001);
+    // 0.001 BTC in satoshi-ticks (8 decimal places) = 100_000.
+    try client.preloadOrders("BTCUSDT", 100_000, 100_000);
 
     // Test 3: Execution Timing (Dry Run)
     std.debug.print("\n═══ Test 3: Execution Timing Test ═══\n", .{});

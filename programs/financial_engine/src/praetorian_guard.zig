@@ -4,42 +4,56 @@
 
 const std = @import("std");
 const api = @import("alpaca_trading_api.zig");
+const Decimal = @import("decimal.zig").Decimal;
 
 // ============================================================================
 // RISK CONFIGURATION
 // ============================================================================
 
+/// Per-tenant risk limits. The size/value limits are Decimal (i128 fixed
+/// point) — never f64 — so the comparison inside `validateOrder` is
+/// overflow-checked and immune to the NaN-bypass case where a corrupted
+/// `quote.bid` smuggling NaN through the pipeline would compare false
+/// against every limit (NaN `<` anything is false) and slip through the
+/// guard. Cures the Mars Climate Orbiter shape of FLOAT-OBSESSION for
+/// the order-validation gate.
 pub const RiskLimits = struct {
     // Per-tenant limits
-    max_position_size_usd: f64 = 10000.0,      // Maximum USD per position
+    /// Maximum USD per position.
+    max_position_size_usd: Decimal = Decimal.fromInt(10_000),
     max_orders_per_minute: u32 = 20,           // Rate limiting
     max_drawdown_percent: f64 = 5.0,           // Maximum drawdown before halt
-    max_total_exposure_usd: f64 = 50000.0,     // Total portfolio exposure
-    
+    /// Total portfolio exposure cap.
+    max_total_exposure_usd: Decimal = Decimal.fromInt(50_000),
+
     // Position limits
     max_positions: u32 = 10,                   // Maximum concurrent positions
     max_concentration_percent: f64 = 20.0,      // Max % in single symbol
-    
-    // Order validation
-    min_order_value_usd: f64 = 100.0,          // Minimum order size
-    max_order_value_usd: f64 = 25000.0,        // Maximum order size
+
+    /// Minimum order size — orders below this are rejected.
+    min_order_value_usd: Decimal = Decimal.fromInt(100),
+    /// Maximum order size — orders above this are rejected.
+    max_order_value_usd: Decimal = Decimal.fromInt(25_000),
 };
 
 pub const TenantRiskProfile = struct {
     tenant_id: []const u8,
     limits: RiskLimits,
-    
+
     // Runtime tracking
     current_positions: u32 = 0,
-    current_exposure_usd: f64 = 0.0,
+    /// Sum of open-position values. Decimal so the running total never
+    /// drifts (the canonical f64 accumulator bug that historically lets
+    /// 1000 small orders sneak above a single big limit).
+    current_exposure_usd: Decimal = Decimal.zero(),
     orders_this_minute: u32 = 0,
     last_minute_reset: i64 = 0,
-    
+
     // Performance tracking
     starting_equity: f64 = 0.0,
     current_equity: f64 = 0.0,
     max_equity: f64 = 0.0,
-    
+
     // Mutex for thread safety
     mutex: std.Thread.Mutex = .{},
 };
@@ -155,16 +169,23 @@ pub const PraetorianGuard = struct {
     }
     
     // Core validation function - THE GUARDIAN
+    //
+    // `price` is `?Decimal`. Callers that hold an f64 must convert at the
+    // boundary via `Decimal.fromFloat` — push the lossy conversion to a
+    // single, audited site rather than have it scattered through the
+    // guard's comparison logic. A `null` price is a market order; we bill
+    // it against a $200/share conservative estimate (the legacy behaviour),
+    // now expressed in Decimal so it composes with the other limits.
     pub fn validateOrder(
         self: *Self,
         tenant_id: []const u8,
         symbol: []const u8,
         side: api.AlpacaTradingAPI.OrderSide,
         quantity: u32,
-        price: ?f64,
+        price: ?Decimal,
     ) !ValidationResult {
         self.total_orders_validated += 1;
-        
+
         // Get tenant profile
         const profile_entry = self.tenant_profiles.getPtr(tenant_id) orelse {
             return ValidationResult{
@@ -173,21 +194,40 @@ pub const PraetorianGuard = struct {
                 .allocated_capital = 0,
             };
         };
-        
+
         profile_entry.mutex.lock();
         defer profile_entry.mutex.unlock();
-        
-        // Calculate order value
-        const order_value = if (price) |p|
-            p * @as(f64, @floatFromInt(quantity))
-        else
-            // For market orders, estimate with a buffer
-            @as(f64, @floatFromInt(quantity)) * 200.0; // Conservative estimate
-        
+
+        // Calculate order value as a Decimal. Multiplication can overflow
+        // on absurd quantity/price inputs; in that case fail-closed by
+        // rejecting the order rather than papering over with an `unreachable`.
+        const qty_decimal = Decimal.fromInt(@as(i64, quantity));
+        const order_value: Decimal = blk: {
+            if (price) |p| {
+                break :blk p.mul(qty_decimal) catch {
+                    try self.incrementRejection("exceeds_maximum_order");
+                    return ValidationResult{
+                        .approved = false,
+                        .reason = "Order value overflow",
+                        .allocated_capital = 0,
+                    };
+                };
+            }
+            // Market-order estimate: quantity × $200/share conservative buffer.
+            break :blk qty_decimal.mul(Decimal.fromInt(200)) catch {
+                try self.incrementRejection("exceeds_maximum_order");
+                return ValidationResult{
+                    .approved = false,
+                    .reason = "Order value overflow",
+                    .allocated_capital = 0,
+                };
+            };
+        };
+
         // === VALIDATION CHECKS ===
-        
+
         // 1. Check minimum order value
-        if (order_value < profile_entry.limits.min_order_value_usd) {
+        if (order_value.lessThan(profile_entry.limits.min_order_value_usd)) {
             try self.incrementRejection("below_minimum_order");
             return ValidationResult{
                 .approved = false,
@@ -195,9 +235,9 @@ pub const PraetorianGuard = struct {
                 .allocated_capital = 0,
             };
         }
-        
+
         // 2. Check maximum order value
-        if (order_value > profile_entry.limits.max_order_value_usd) {
+        if (order_value.greaterThan(profile_entry.limits.max_order_value_usd)) {
             try self.incrementRejection("exceeds_maximum_order");
             return ValidationResult{
                 .approved = false,
@@ -234,8 +274,15 @@ pub const PraetorianGuard = struct {
         
         // 5. Check total exposure
         if (side == .buy) {
-            const new_exposure = profile_entry.current_exposure_usd + order_value;
-            if (new_exposure > profile_entry.limits.max_total_exposure_usd) {
+            const new_exposure = profile_entry.current_exposure_usd.add(order_value) catch {
+                try self.incrementRejection("exceeds_position_limit");
+                return ValidationResult{
+                    .approved = false,
+                    .reason = "Exposure accumulator overflow",
+                    .allocated_capital = 0,
+                };
+            };
+            if (new_exposure.greaterThan(profile_entry.limits.max_total_exposure_usd)) {
                 try self.incrementRejection("exceeds_position_limit");
                 return ValidationResult{
                     .approved = false,
@@ -244,12 +291,12 @@ pub const PraetorianGuard = struct {
                 };
             }
         }
-        
+
         // 6. Check capital allocation
         const allocation_percent = self.capital_allocations.get(tenant_id) orelse 33.33;
         const allocated_capital = (self.total_buying_power * allocation_percent) / 100.0;
-        
-        if (side == .buy and order_value > allocated_capital) {
+
+        if (side == .buy and order_value.toFloat() > allocated_capital) {
             try self.incrementRejection("insufficient_buying_power");
             return ValidationResult{
                 .approved = false,
@@ -277,11 +324,16 @@ pub const PraetorianGuard = struct {
         profile_entry.orders_this_minute += 1;
         if (side == .buy) {
             profile_entry.current_positions += 1;
-            profile_entry.current_exposure_usd += order_value;
+            // Overflow on the accumulator is impossible here because we
+            // already passed the exposure cap check above against the
+            // same `new_exposure` value, but re-do the add to keep the
+            // mutation local. Discard the error: by construction the
+            // value fits.
+            profile_entry.current_exposure_usd = profile_entry.current_exposure_usd.add(order_value) catch profile_entry.current_exposure_usd;
         }
-        
-        std.log.info("[PRAETORIAN] ✅ Order approved for {s}: {s} {d} {s} @ ${?d:.2}", .{
-            tenant_id, @tagName(side), quantity, symbol, price
+
+        std.log.info("[PRAETORIAN] ✅ Order approved for {s}: {s} {d} {s} @ ${d:.2}", .{
+            tenant_id, @tagName(side), quantity, symbol, if (price) |p| p.toFloat() else 0.0
         });
         
         return ValidationResult{
@@ -381,7 +433,7 @@ test "Praetorian Guard initialization" {
         "AAPL",
         .buy,
         10,
-        150.0,
+        Decimal.fromInt(150),
     );
     
     try std.testing.expect(!result.approved); // Should fail without account state

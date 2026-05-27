@@ -465,8 +465,8 @@ test "models: count is reasonable" {
 
 test "models: pricing lookup for known model" {
     const pricing = try models.getPricing("deepseek-chat");
-    try testing.expect(pricing.input > 0);
-    try testing.expect(pricing.output > 0);
+    try testing.expect(pricing.input_ticks_per_million > 0);
+    try testing.expect(pricing.output_ticks_per_million > 0);
 }
 
 test "models: pricing lookup for unknown model returns UnknownModel (H10)" {
@@ -478,9 +478,10 @@ test "models: pricing lookup for unknown model returns UnknownModel (H10)" {
 }
 
 test "models: claude pricing" {
+    // $3.00/M input, $15.00/M output → ticks at TICKS_PER_USD scale (10^10).
     const pricing = try models.getPricing("claude-sonnet-4-6");
-    try testing.expectEqual(@as(f64, 3.0), pricing.input);
-    try testing.expectEqual(@as(f64, 15.0), pricing.output);
+    try testing.expectEqual(@as(i64, 30_000_000_000), pricing.input_ticks_per_million);
+    try testing.expectEqual(@as(i64, 150_000_000_000), pricing.output_ticks_per_million);
 }
 
 test "models: prefix-match no longer falls through (H7)" {

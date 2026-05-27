@@ -7,6 +7,16 @@ const http = std.http;
 const router = @import("router.zig");
 const Response = router.Response;
 
+/// Tick scale: 1 USD = 10^10 ticks. Mirrors `billing.TICKS_PER_USD` and
+/// `account.TICKS_PER_USD`; redefining here keeps `Model` self-contained
+/// when callers use it without the billing module.
+pub const TICKS_PER_USD: i64 = 10_000_000_000;
+
+/// Pricing is stored as fixed-point integer ticks. The CSV is the source
+/// of truth (dollars-per-million-tokens), but every value is parsed into
+/// integer ticks at comptime so the billing math never crosses an f64
+/// boundary. Cures FLOAT-OBSESSION on the most security-sensitive path
+/// in the server: cents the user pays.
 pub const Model = struct {
     provider: []const u8,
     category: []const u8,
@@ -14,12 +24,19 @@ pub const Model = struct {
     api_model_id: []const u8,
     display_name: []const u8,
     context_window: []const u8,
-    input_per_million: f64,
-    output_per_million: f64,
-    cached_per_million: f64,
-    per_unit_price: f64,
+    /// Ticks per million input tokens. $1/M → TICKS_PER_USD ticks/M.
+    input_ticks_per_million: i64,
+    /// Ticks per million output tokens.
+    output_ticks_per_million: i64,
+    /// Ticks per million cached-input tokens (Anthropic, OpenAI).
+    cached_ticks_per_million: i64,
+    /// Ticks per single unit (per-image, per-audio-second, etc.). 0 if N/A.
+    per_unit_ticks: i64,
     price_unit: []const u8,
-    margin: f64,
+    /// Margin above provider cost, in basis points. e.g. 30% → 3000 bps.
+    /// CSV stores a multiplier (1.30); we subtract 1.0 and scale by 10^4
+    /// at parse time so all downstream math is integer.
+    margin_bps: i32,
     route: []const u8,
     notes: []const u8,
 };
@@ -97,30 +114,70 @@ fn parseLine(line: []const u8) ?Model {
         .api_model_id = fields[3],
         .display_name = fields[4],
         .context_window = fields[5],
-        .input_per_million = parseDollar(fields[6]),
-        .output_per_million = parseDollar(fields[7]),
-        .cached_per_million = parseDollar(fields[8]),
-        .per_unit_price = parseDollar(fields[9]),
+        .input_ticks_per_million = parseDollarTicks(fields[6]),
+        .output_ticks_per_million = parseDollarTicks(fields[7]),
+        .cached_ticks_per_million = parseDollarTicks(fields[8]),
+        .per_unit_ticks = parseDollarTicks(fields[9]),
         .price_unit = fields[10],
-        .margin = parseFloat(fields[12]),
+        .margin_bps = parseMarginBps(fields[12]),
         .route = fields[13],
         .notes = if (field_idx >= 14) fields[14] else "",
     };
 }
 
-fn parseDollar(s: []const u8) f64 {
-    if (s.len == 0 or std.mem.eql(u8, s, "—") or std.mem.eql(u8, s, "-")) return 0;
-    // Strip leading $
-    const clean = if (s.len > 0 and s[0] == '$') s[1..] else s;
-    return parseFloat(clean);
+/// Parse a CSV cell as a fixed-point integer with the given `scale` (10^k).
+/// "1.30" with scale=10000 → 13000. Optional leading `$` is stripped.
+/// Empty cell, em-dash placeholder (`—` / `-`), or any non-digit prefix
+/// returns 0 so the upstream billing path treats it as "no price set".
+///
+/// Critical: this never goes through f64. Floating-point parsing would
+/// reintroduce the precision drift this batch is curing — a "$0.0001"
+/// rate that rounded to 0 ticks would mean free billing on cached input.
+fn parseFixedPoint(s: []const u8, comptime scale: i64) i64 {
+    if (s.len == 0) return 0;
+    // "—" is UTF-8 em-dash (0xE2 0x80 0x94); the CSV uses it for "N/A".
+    if (s[0] == 0xE2) return 0;
+    if (s.len == 1 and s[0] == '-') return 0;
+
+    var i: usize = if (s[0] == '$') 1 else 0;
+    // Negative prices are not a thing — treat as 0 to fail closed.
+    if (i < s.len and s[i] == '-') return 0;
+
+    var int_part: i64 = 0;
+    while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) {
+        int_part = int_part * 10 + @as(i64, s[i] - '0');
+    }
+
+    var frac_part: i64 = 0;
+    var frac_mult: i64 = scale;
+    if (i < s.len and s[i] == '.') {
+        i += 1;
+        while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) {
+            frac_mult = @divTrunc(frac_mult, 10);
+            // If we've run out of fractional precision (frac_mult == 0)
+            // truncate silently rather than overflow. Same behaviour
+            // std.fmt.parseFloat would have had on excess digits.
+            if (frac_mult == 0) break;
+            frac_part = frac_part * 10 + @as(i64, s[i] - '0');
+        }
+    }
+
+    return int_part * scale + frac_part * frac_mult;
 }
 
-fn parseFloat(s: []const u8) f64 {
-    if (s.len == 0) return 0;
-    // "—" is UTF-8 em-dash (0xE2 0x80 0x94)
-    if (s[0] == 0xE2 or s[0] == '-') return 0;
-    @setEvalBranchQuota(10000);
-    return std.fmt.parseFloat(f64, s) catch 0;
+/// "$3.00" / "3.00" → 30_000_000_000 ticks. Em-dash / empty → 0.
+fn parseDollarTicks(s: []const u8) i64 {
+    return parseFixedPoint(s, TICKS_PER_USD);
+}
+
+/// "1.30" → 3000 bps (30% margin). Empty / em-dash → 0 bps.
+/// CSV margin is a multiplier; we subtract 1.0 at the integer scale so
+/// downstream code can write `cost + (cost * margin_bps / 10_000)` and
+/// stay in integers end-to-end.
+fn parseMarginBps(s: []const u8) i32 {
+    const scaled = parseFixedPoint(s, 10_000);
+    if (scaled == 0) return 0;
+    return @intCast(scaled - 10_000);
 }
 
 // ── Parameter registry ──────────────────────────────────────────────
@@ -266,25 +323,34 @@ pub fn buildModelsJson(allocator: std.mem.Allocator) ![]u8 {
         first = false;
 
         // Build entry with all fields
-        const has_token_pricing = m.input_per_million > 0 or m.output_per_million > 0;
-        const has_unit_pricing = m.per_unit_price > 0;
+        const has_token_pricing = m.input_ticks_per_million > 0 or m.output_ticks_per_million > 0;
+        const has_unit_pricing = m.per_unit_ticks > 0;
+
+        var in_buf: [32]u8 = undefined;
+        var out_buf: [32]u8 = undefined;
+        var cached_buf: [32]u8 = undefined;
+        var unit_buf: [32]u8 = undefined;
+        const in_str = formatDollarsPerMillion(&in_buf, m.input_ticks_per_million);
+        const out_str = formatDollarsPerMillion(&out_buf, m.output_ticks_per_million);
+        const cached_str = formatDollarsPerMillion(&cached_buf, m.cached_ticks_per_million);
+        const unit_str = formatDollars(&unit_buf, m.per_unit_ticks);
 
         if (has_token_pricing and has_unit_pricing) {
             const entry = try std.fmt.allocPrint(allocator,
-                \\{{"id":"{s}","provider":"{s}","display_name":"{s}","category":"{s}","context_window":"{s}","input_per_million":{d:.4},"output_per_million":{d:.4},"cached_per_million":{d:.4},"per_unit_price":{d:.4},"price_unit":"{s}","route":"{s}"
-            , .{ m.api_model_id, m.provider, m.display_name, m.category, m.context_window, m.input_per_million, m.output_per_million, m.cached_per_million, m.per_unit_price, m.price_unit, m.route });
+                \\{{"id":"{s}","provider":"{s}","display_name":"{s}","category":"{s}","context_window":"{s}","input_per_million":{s},"output_per_million":{s},"cached_per_million":{s},"per_unit_price":{s},"price_unit":"{s}","route":"{s}"
+            , .{ m.api_model_id, m.provider, m.display_name, m.category, m.context_window, in_str, out_str, cached_str, unit_str, m.price_unit, m.route });
             defer allocator.free(entry);
             try buf.appendSlice(allocator, entry);
         } else if (has_token_pricing) {
             const entry = try std.fmt.allocPrint(allocator,
-                \\{{"id":"{s}","provider":"{s}","display_name":"{s}","category":"{s}","context_window":"{s}","input_per_million":{d:.4},"output_per_million":{d:.4},"cached_per_million":{d:.4},"route":"{s}"
-            , .{ m.api_model_id, m.provider, m.display_name, m.category, m.context_window, m.input_per_million, m.output_per_million, m.cached_per_million, m.route });
+                \\{{"id":"{s}","provider":"{s}","display_name":"{s}","category":"{s}","context_window":"{s}","input_per_million":{s},"output_per_million":{s},"cached_per_million":{s},"route":"{s}"
+            , .{ m.api_model_id, m.provider, m.display_name, m.category, m.context_window, in_str, out_str, cached_str, m.route });
             defer allocator.free(entry);
             try buf.appendSlice(allocator, entry);
         } else if (has_unit_pricing) {
             const entry = try std.fmt.allocPrint(allocator,
-                \\{{"id":"{s}","provider":"{s}","display_name":"{s}","category":"{s}","per_unit_price":{d:.4},"price_unit":"{s}","route":"{s}"
-            , .{ m.api_model_id, m.provider, m.display_name, m.category, m.per_unit_price, m.price_unit, m.route });
+                \\{{"id":"{s}","provider":"{s}","display_name":"{s}","category":"{s}","per_unit_price":{s},"price_unit":"{s}","route":"{s}"
+            , .{ m.api_model_id, m.provider, m.display_name, m.category, unit_str, m.price_unit, m.route });
             defer allocator.free(entry);
             try buf.appendSlice(allocator, entry);
         } else {
@@ -319,20 +385,50 @@ fn buildPricingJson(allocator: std.mem.Allocator) ![]u8 {
     var first = true;
     for (models) |m| {
         // Only include models with pricing
-        if (m.input_per_million == 0 and m.output_per_million == 0 and m.per_unit_price == 0) continue;
+        if (m.input_ticks_per_million == 0 and m.output_ticks_per_million == 0 and m.per_unit_ticks == 0) continue;
 
         if (!first) try buf.append(allocator, ',');
         first = false;
 
+        var in_buf: [32]u8 = undefined;
+        var out_buf: [32]u8 = undefined;
+        var unit_buf: [32]u8 = undefined;
+        const in_str = formatDollarsPerMillion(&in_buf, m.input_ticks_per_million);
+        const out_str = formatDollarsPerMillion(&out_buf, m.output_ticks_per_million);
+        const unit_str = formatDollars(&unit_buf, m.per_unit_ticks);
+
         const entry = try std.fmt.allocPrint(allocator,
-            \\{{"id":"{s}","provider":"{s}","display_name":"{s}","input_per_million":{d:.4},"output_per_million":{d:.4},"per_unit_price":{d:.4},"price_unit":"{s}"}}
-        , .{ m.api_model_id, m.provider, m.display_name, m.input_per_million, m.output_per_million, m.per_unit_price, m.price_unit });
+            \\{{"id":"{s}","provider":"{s}","display_name":"{s}","input_per_million":{s},"output_per_million":{s},"per_unit_price":{s},"price_unit":"{s}"}}
+        , .{ m.api_model_id, m.provider, m.display_name, in_str, out_str, unit_str, m.price_unit });
         defer allocator.free(entry);
         try buf.appendSlice(allocator, entry);
     }
 
     try buf.appendSlice(allocator, "]}");
     return buf.toOwnedSlice(allocator);
+}
+
+/// Render an integer tick value as a decimal dollar string with 4
+/// fractional digits — the precision the previous f64 `{d:.4}` formatter
+/// emitted. e.g. `30_000_000_000 → "3.0000"`, `1_000_000 → "0.0001"`.
+/// Integer truncation only (no rounding); matches the precision the CSV
+/// holds. Buffer needs ~24 bytes (i64 dollars + '.' + 4 digits).
+fn formatTicksDecimal4dp(buf: []u8, ticks: i64) []const u8 {
+    // 10^10 ticks per USD; we want 4 fractional digits, so collapse the
+    // trailing 10^(10-4) = 10^6 ticks via @divTrunc, then split into the
+    // integer dollar part and the 4-digit fractional part.
+    const dollars_scaled_4dp = @divTrunc(ticks, 1_000_000);
+    const integer_part = @divTrunc(dollars_scaled_4dp, 10_000);
+    const frac_part = @mod(dollars_scaled_4dp, 10_000);
+    return std.fmt.bufPrint(buf, "{d}.{d:0>4}", .{ integer_part, frac_part }) catch buf[0..0];
+}
+
+fn formatDollarsPerMillion(buf: []u8, ticks_per_million: i64) []const u8 {
+    return formatTicksDecimal4dp(buf, ticks_per_million);
+}
+
+fn formatDollars(buf: []u8, ticks: i64) []const u8 {
+    return formatTicksDecimal4dp(buf, ticks);
 }
 
 pub const PricingError = error{UnknownModel};
@@ -352,10 +448,16 @@ pub const PricingError = error{UnknownModel};
 ///     depending on the actual upstream model.
 /// Both paths are removed. Exact match only; unknown → error so the
 /// chat handler can return 400 BEFORE the provider call.
-pub fn getPricing(model_id: []const u8) PricingError!struct { input: f64, output: f64 } {
+pub fn getPricing(model_id: []const u8) PricingError!struct {
+    input_ticks_per_million: i64,
+    output_ticks_per_million: i64,
+} {
     for (models) |m| {
         if (std.mem.eql(u8, m.api_model_id, model_id)) {
-            return .{ .input = m.input_per_million, .output = m.output_per_million };
+            return .{
+                .input_ticks_per_million = m.input_ticks_per_million,
+                .output_ticks_per_million = m.output_ticks_per_million,
+            };
         }
     }
     return PricingError.UnknownModel;

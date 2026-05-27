@@ -320,20 +320,39 @@ pub const OrderType = enum {
     }
 };
 
-/// Pre-built order template (for optimistic signing)
+/// Quantity tick: 1e-8 of the base asset (the satoshi convention every
+/// major crypto exchange uses for BTC/ETH/etc.). 1 BTC = 100_000_000.
+pub const QUANTITY_TICKS_PER_UNIT: i64 = 100_000_000;
+/// Price tick: 1e-2 of the quote asset (cents for USD-denominated pairs).
+/// Mirrors Binance's `{d:.2}` wire-format precision for spot prices.
+pub const PRICE_TICKS_PER_UNIT: i64 = 100;
+
+/// Pre-built order template (for optimistic signing).
+///
+/// Quantity and price are integer ticks — never f64 — because crypto
+/// exchanges reject prices with f64's round-trip-shortest formatting
+/// (Binance specifically wants `0.00012345`, not `0.000123450000001`)
+/// and because 0.1 is not exactly representable in f64. The historical
+/// shape of this bug is the matching engine seeing `0.000099999…` where
+/// the trader meant `0.0001`, which moves the order outside its limit
+/// price by a tick and creates an arbitrage window against the engine.
+/// Cures FLOAT-OBSESSION on this exchange's order path.
 pub const OrderTemplate = struct {
     symbol: [16]u8, // "BTCUSDT" padded
     side: Side,
     order_type: OrderType,
-    quantity: f64,
-    price: ?f64 = null, // For limit orders
+    /// Order quantity in 1e-8 base-asset ticks (satoshis for BTC).
+    quantity_ticks: i64,
+    /// Limit price in 1e-2 quote-asset ticks (cents for USD pairs).
+    /// Null for market orders.
+    price_ticks: ?i64 = null,
 
     // Pre-allocated buffers
     json_buffer: [512]u8,
     signature_buffer: [64]u8,
     json_len: usize,
 
-    pub fn init(symbol: []const u8, side: Side, order_type: OrderType, quantity: f64) !OrderTemplate {
+    pub fn init(symbol: []const u8, side: Side, order_type: OrderType, quantity_ticks: i64) !OrderTemplate {
         var template: OrderTemplate = undefined;
 
         // Pad symbol
@@ -342,8 +361,8 @@ pub const OrderTemplate = struct {
 
         template.side = side;
         template.order_type = order_type;
-        template.quantity = quantity;
-        template.price = null;
+        template.quantity_ticks = quantity_ticks;
+        template.price_ticks = null;
         template.json_len = 0;
 
         return template;
@@ -382,11 +401,21 @@ pub const OrderTemplate = struct {
         try jw.write(self.side.toString());
         try jw.objectField("type");
         try jw.write(self.order_type.toString());
+
+        // Quantity: integer satoshi-ticks → "X.YYYYYYYY" ASCII. Pure
+        // digit math — no float round-trip. The exchange's matcher
+        // parses this as a base-10 decimal, identical to what `{d:.8}`
+        // would have emitted for the integer-equivalent value.
         try jw.objectField("quantity");
-        try jw.print("{d:.8}", .{self.quantity});
-        if (self.price) |price| {
+        var qty_buf: [32]u8 = undefined;
+        const qty_str = formatTicks(&qty_buf, self.quantity_ticks, 8, QUANTITY_TICKS_PER_UNIT);
+        try jw.print("{s}", .{qty_str});
+
+        if (self.price_ticks) |price_ticks| {
             try jw.objectField("price");
-            try jw.print("{d:.2}", .{price});
+            var price_buf: [32]u8 = undefined;
+            const price_str = formatTicks(&price_buf, price_ticks, 2, PRICE_TICKS_PER_UNIT);
+            try jw.print("{s}", .{price_str});
         }
         try jw.objectField("timestamp");
         try jw.write(timestamp);
@@ -396,6 +425,21 @@ pub const OrderTemplate = struct {
         return self.json_buffer[0..self.json_len];
     }
 };
+
+/// Format integer `ticks` (scaled by `scale` = 10^decimals) into a
+/// `X.YYY…Y` decimal string with exactly `decimals` fractional digits.
+/// Pure integer math — never goes through f64 — so the exchange wire
+/// shape is bit-stable across rebuilds and immune to "0.1 is not
+/// representable" precision drift.
+fn formatTicks(buf: []u8, ticks: i64, comptime decimals: u8, scale: i64) []const u8 {
+    const integer_part = @divTrunc(ticks, scale);
+    const frac_part = @mod(ticks, scale);
+    return switch (decimals) {
+        2 => std.fmt.bufPrint(buf, "{d}.{d:0>2}", .{ integer_part, frac_part }),
+        8 => std.fmt.bufPrint(buf, "{d}.{d:0>8}", .{ integer_part, frac_part }),
+        else => std.fmt.bufPrint(buf, "{d}", .{integer_part}),
+    } catch buf[0..0];
+}
 
 /// Exchange WebSocket client
 pub const ExchangeClient = struct {
@@ -456,21 +500,25 @@ pub const ExchangeClient = struct {
         self.ring.deinit();
     }
 
-    /// Pre-load order templates for instant execution
+    /// Pre-load order templates for instant execution.
+    /// Quantities are in 1e-8 base-asset ticks (satoshis for BTC) — see
+    /// `QUANTITY_TICKS_PER_UNIT`. Pass `0.001 BTC` as `100_000`.
     pub fn preloadOrders(
         self: *Self,
         symbol: []const u8,
-        buy_quantity: f64,
-        sell_quantity: f64,
+        buy_quantity_ticks: i64,
+        sell_quantity_ticks: i64,
     ) !void {
         std.debug.print("📝 Pre-loading order templates for {s}\n", .{symbol});
 
-        self.buy_template = try OrderTemplate.init(symbol, .buy, .market, buy_quantity);
-        self.sell_template = try OrderTemplate.init(symbol, .sell, .market, sell_quantity);
+        self.buy_template = try OrderTemplate.init(symbol, .buy, .market, buy_quantity_ticks);
+        self.sell_template = try OrderTemplate.init(symbol, .sell, .market, sell_quantity_ticks);
 
+        var buy_buf: [32]u8 = undefined;
+        var sell_buf: [32]u8 = undefined;
         std.debug.print("✅ Order templates ready:\n", .{});
-        std.debug.print("   BUY:  {d:.8} {s}\n", .{buy_quantity, symbol});
-        std.debug.print("   SELL: {d:.8} {s}\n", .{sell_quantity, symbol});
+        std.debug.print("   BUY:  {s} {s}\n", .{ formatTicks(&buy_buf, buy_quantity_ticks, 8, QUANTITY_TICKS_PER_UNIT), symbol });
+        std.debug.print("   SELL: {s} {s}\n", .{ formatTicks(&sell_buf, sell_quantity_ticks, 8, QUANTITY_TICKS_PER_UNIT), symbol });
     }
 
     /// Parse WebSocket URL (wss://host:port/path)
@@ -822,14 +870,16 @@ pub const ExchangeClient = struct {
 };
 
 test "order template creation" {
-    const template = try OrderTemplate.init("BTCUSDT", .buy, .market, 0.001);
+    // 0.001 BTC = 100_000 satoshi-ticks at QUANTITY_TICKS_PER_UNIT = 1e8.
+    const template = try OrderTemplate.init("BTCUSDT", .buy, .market, 100_000);
     try std.testing.expect(template.side == .buy);
     try std.testing.expect(template.order_type == .market);
-    try std.testing.expectApproxEqAbs(template.quantity, 0.001, 0.0001);
+    try std.testing.expectEqual(@as(i64, 100_000), template.quantity_ticks);
 }
 
 test "order JSON generation" {
-    var template = try OrderTemplate.init("BTCUSDT", .sell, .market, 0.5);
+    // 0.5 BTC = 50_000_000 satoshi-ticks.
+    var template = try OrderTemplate.init("BTCUSDT", .sell, .market, 50_000_000);
     const json = try template.buildJson(1700000000000);
 
     // Verify JSON contains key fields

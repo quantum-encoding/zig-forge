@@ -18,10 +18,14 @@ const TICKS_PER_USD: i64 = 10_000_000_000;
 
 // ── Pricing Helpers ────────────────────────────────────────────
 
-/// Convert $/million-tokens price to ticks per token.
-fn ticksPerToken(price_per_million: f64) i64 {
-    // price_per_million USD * TICKS_PER_USD / 1_000_000
-    return @intFromFloat(price_per_million * @as(f64, @floatFromInt(TICKS_PER_USD)) / 1_000_000.0);
+/// Convert ticks-per-million-tokens (the storage form in models.zig)
+/// to ticks-per-token. Pure integer division — no f64 anywhere in the
+/// billing pipeline. Tick storage was switched from f64 dollars to i64
+/// ticks in Batch 31 (FLOAT-OBSESSION) so a `$0.0001/M` rate that
+/// previously rounded to 0 ticks per token through float math now
+/// preserves its 1-tick precision via direct integer truncation.
+fn ticksPerToken(ticks_per_million: i64) i64 {
+    return @divTrunc(ticks_per_million, 1_000_000);
 }
 
 /// Estimate input tokens from message payload size (~4 chars/token for English).
@@ -57,8 +61,8 @@ pub fn calculateCap(
     // 400 to the client when this errors — we must NEVER bill against
     // a guessed price for a model we can't price.
     const pricing = try models_mod.getPricing(model);
-    const input_tpt = ticksPerToken(pricing.input);
-    const output_tpt = ticksPerToken(pricing.output);
+    const input_tpt = ticksPerToken(pricing.input_ticks_per_million);
+    const output_tpt = ticksPerToken(pricing.output_ticks_per_million);
 
     // Margin multiplier: (10000 + marginBps) / 10000
     const margin_bps: i64 = @intCast(tier.marginBps());
@@ -141,10 +145,10 @@ pub fn reserveWithCap(
 /// floor in effect rather than silently overcharging.
 pub fn estimateCost(model: []const u8, max_tokens: u32) i64 {
     const pricing = models_mod.getPricing(model) catch return 0;
-    const output_millidollars: i64 = @intFromFloat(pricing.output * 1000.0);
-    const input_millidollars: i64 = @intFromFloat(pricing.input * 1000.0);
-    const estimated_output_ticks = @divFloor(output_millidollars * @as(i64, max_tokens) * 10_000_000, 1_000_000);
-    const estimated_input_ticks = @divFloor(input_millidollars * @as(i64, @divFloor(max_tokens, 2)) * 10_000_000, 1_000_000);
+    const output_tpt = ticksPerToken(pricing.output_ticks_per_million);
+    const input_tpt = ticksPerToken(pricing.input_ticks_per_million);
+    const estimated_output_ticks = output_tpt * @as(i64, max_tokens);
+    const estimated_input_ticks = input_tpt * @as(i64, @divFloor(max_tokens, 2));
     return estimated_output_ticks + estimated_input_ticks;
 }
 
@@ -155,8 +159,8 @@ pub fn actualCost(model: []const u8, input_tokens: u32, output_tokens: u32, tier
     // model the upstream handler skipped its validation, which is a
     // bug we want to surface rather than paper over with a default.
     const pricing = try models_mod.getPricing(model);
-    const input_ticks = ticksPerToken(pricing.input) * @as(i64, input_tokens);
-    const output_ticks = ticksPerToken(pricing.output) * @as(i64, output_tokens);
+    const input_ticks = ticksPerToken(pricing.input_ticks_per_million) * @as(i64, input_tokens);
+    const output_ticks = ticksPerToken(pricing.output_ticks_per_million) * @as(i64, output_tokens);
     const cost = input_ticks + output_ticks;
     const margin = @divFloor(cost * @as(i64, tier.marginBps()), 10000);
     return .{ .cost = cost, .margin = margin };
