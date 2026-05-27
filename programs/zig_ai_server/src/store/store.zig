@@ -189,6 +189,47 @@ pub const Store = struct {
         });
     }
 
+    /// Audit M3: on-demand single-account hydration for login paths.
+    ///
+    /// Previously `apple_auth.findOrCreateAccount` and
+    /// `google_auth.findOrCreateAccount` invoked
+    /// `loadFromFirestore()` on every cache miss, which is a *full*
+    /// collection scan over `zig_accounts` and `zig_keys`. That
+    /// turned each new-user login into an O(N) Firestore-read
+    /// amplifier (and a latency cliff as the directory grows), plus
+    /// a free way for an attacker to drain Firestore quota by
+    /// submitting fresh JWT subjects.
+    ///
+    /// This helper does a single `GET /accounts/{id}` document
+    /// fetch instead. If the doc exists it is inserted into the
+    /// in-memory map and the call returns true; otherwise false.
+    ///
+    /// We do not preload the account's API keys here — Batch 16's
+    /// revoke-on-mint relies on the keys map being populated, but
+    /// the cold-start `loadFromFirestore()` (called once from
+    /// `main`) already loads every key, so the in-process cache
+    /// covers it. The only edge case is "container restarted +
+    /// user immediately re-logs in" which skips the prior-key
+    /// revocation; acceptable since the new mint still works and
+    /// the old keys remain valid until next revoke-list-and-purge.
+    pub fn loadSingleAccountFromFirestore(self: *Store, account_id: []const u8) bool {
+        const ctx = self.gcp_ctx orelse return false;
+        const maybe_account = firestore.loadAccount(ctx, account_id) catch return false;
+        const account = maybe_account orelse return false;
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        // Don't clobber if a concurrent path inserted between the
+        // caller's cache miss and this insert.
+        if (self.accounts.contains(account_id)) return true;
+
+        const key_copy = self.allocator.dupe(u8, account.id.slice()) catch return false;
+        errdefer self.allocator.free(key_copy);
+        self.accounts.put(self.allocator, key_copy, account) catch return false;
+        return true;
+    }
+
     /// Flush all dirty account balances to Firestore. Call periodically + on shutdown.
     pub fn flushDirtyAccounts(self: *Store, io: Io) void {
         const ctx = self.gcp_ctx orelse return;

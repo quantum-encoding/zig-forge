@@ -243,9 +243,14 @@ fn findOrCreateAccount(
     // Check if account exists in memory
     if (store.getAccountLocked(account_id) != null) return false;
 
-    // Try loading from Firestore (might exist from a previous container)
-    store.loadFromFirestore();
-    if (store.getAccountLocked(account_id) != null) return false;
+    // Audit M3: single-doc fetch instead of a full collection scan.
+    // The previous call here was store.loadFromFirestore() which
+    // re-listed every `zig_accounts` and `zig_keys` row on every
+    // cache miss — an O(N) Firestore amplifier triggerable by any
+    // new Apple JWT subject.
+    if (store.loadSingleAccountFromFirestore(account_id)) {
+        if (store.getAccountLocked(account_id) != null) return false;
+    }
 
     // Create new account
     const now_ms = types.nowMs(io);

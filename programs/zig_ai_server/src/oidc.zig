@@ -207,7 +207,19 @@ pub fn verifyJwt(
 
 // ── RS256 Signature Verification ───────────────────────────────
 
+/// Minimum RSA modulus length, in bytes (audit M9). Apple and Google
+/// both publish 2048-bit (256-byte) keys; a 1024-bit (128-byte) key
+/// would still verify under the math but is no longer considered safe
+/// in 2026. If a JWKS endpoint ever advertises a sub-2048-bit key
+/// (rotation glitch, test/staging confusion, MITM at the TLS layer)
+/// we refuse the signature rather than honour it.
+const min_rsa_modulus_bytes: usize = 256; // 2048 bits
+
 fn verifyRS256(key: *const RsaPublicKey, message: []const u8, signature: []const u8) bool {
+    // Audit M9: defence-in-depth modulus floor. Both compared values
+    // are public (key.modulus_len from JWKS) so the early return
+    // does not leak secret-dependent timing.
+    if (key.modulus_len < min_rsa_modulus_bytes) return false;
     // Length check is on PUBLIC values (signature length vs. public-key
     // modulus length). Safe to short-circuit.
     if (signature.len != key.modulus_len) return false;
@@ -738,6 +750,20 @@ test "RS256: wrong signature length rejected" {
 
     // Empty signature
     try std.testing.expect(!verifyRS256(&key, "test message", ""));
+}
+
+test "RS256: modulus below 2048-bit floor rejected (M9)" {
+    // 1024-bit key (128-byte modulus) should be refused outright.
+    // Even with a matching-length signature, the floor check must
+    // short-circuit before any RSA math runs.
+    const weak_key = RsaPublicKey{
+        .n = undefined,
+        .modulus_len = 128, // 1024 bits — below the floor
+        .e_bytes = .{ 1, 0, 1, 0 },
+        .e_len = 3,
+    };
+    const sig = [_]u8{0} ** 128;
+    try std.testing.expect(!verifyRS256(&weak_key, "test message", &sig));
 }
 
 test "VerifiedClaims: deinit frees all fields" {

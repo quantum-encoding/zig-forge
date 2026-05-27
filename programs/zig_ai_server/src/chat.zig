@@ -471,8 +471,13 @@ fn handleCore(
         } else |_| {}
     };
 
-    // Build JSON response (matches quantum-sdk ChatResponse)
-    const response_json = buildResponse(allocator, &response, chat_req.model) catch {
+    // Build JSON response (matches quantum-sdk ChatResponse). Audit
+    // M5: the response advertises `cost_ticks` to the client and the
+    // previous implementation always computed it at the .free tier
+    // margin, which disagreed with the actual amount we billed for
+    // any paying caller. Pass the caller's tier so the dashboard
+    // number matches the ledger row.
+    const response_json = buildResponse(allocator, &response, chat_req.model, tier) catch {
         return .{
             .status = .internal_server_error,
             .body =
@@ -491,12 +496,13 @@ fn buildResponse(
     allocator: std.mem.Allocator,
     response: *hs.ai.AIResponse,
     model: []const u8,
+    tier: types.DevTier,
 ) ![]u8 {
     const escaped_content = try jsonEscape(allocator, response.message.content);
     defer allocator.free(escaped_content);
 
     const stop_reason = response.metadata.stop_reason orelse "end_turn";
-    const ticks = costTicks(response, model);
+    const ticks = costTicks(response, model, tier);
 
     // Build tool_calls array if present
     var tool_calls_json: []u8 = "";
@@ -538,11 +544,17 @@ fn buildResponse(
     });
 }
 
-fn costTicks(response: *hs.ai.AIResponse, model: []const u8) i64 {
-    // Display-only path: if the model isn't in the pricing registry,
-    // return 0 rather than guessing $3/$15 (audit H10). The real
-    // billing rejected the request upstream.
-    const cost = billing.actualCost(model, response.usage.input_tokens, response.usage.output_tokens, .free) catch return 0;
+fn costTicks(response: *hs.ai.AIResponse, model: []const u8, tier: types.DevTier) i64 {
+    // Audit M5: the response echoes cost_ticks back to the client.
+    // The internal billing path uses the caller's tier; the previous
+    // implementation hard-coded `.free` here so the response advertised
+    // the wrong margin for any paying tier. Now takes the same tier as
+    // the billing.commit / ledger row above so the numbers agree.
+    //
+    // H10 display-only fallback: if the model isn't in the pricing
+    // registry (which should be impossible — getPricing already
+    // rejected the request upstream) return 0 instead of guessing.
+    const cost = billing.actualCost(model, response.usage.input_tokens, response.usage.output_tokens, tier) catch return 0;
     return cost.cost + cost.margin;
 }
 

@@ -202,11 +202,41 @@ pub const BqAudit = struct {
         const url = std.fmt.allocPrint(ctx.audit.allocator,
             "https://bigquery.googleapis.com/bigquery/v2/projects/{s}/datasets/{s}/tables/{s}/insertAll",
             .{ ctx.audit.project_id, ctx.audit.dataset, ctx.audit.table },
-        ) catch return;
+        ) catch |err| {
+            std.debug.print("  bq.flushThread: URL build failed ({s}); {d} audit rows dropped\n", .{ @errorName(err), ctx.rows.len });
+            return;
+        };
         defer ctx.audit.allocator.free(url);
 
-        var resp = gcp_ctx.post(url, ctx.body) catch return;
-        resp.deinit();
+        // Audit M12: previously every error here was swallowed —
+        // network failures, 4xx (malformed row), 401 (token rotation),
+        // 5xx (BigQuery outage) all returned silently and the rows
+        // were dropped without trace. Combined with C5 (now fixed)
+        // this meant the analytics audit trail could be erased by a
+        // hostile payload with no operator-visible signal. We now
+        // log the error class and the row count so the operator at
+        // least sees that the audit pipeline lost data. We do not
+        // retry: the buffered-flush model has no place to put a
+        // retry queue, and reinjecting on a transient 5xx would
+        // silently double-insert rows on success.
+        var resp = gcp_ctx.post(url, ctx.body) catch |err| {
+            std.debug.print(
+                "  bq.flushThread: HTTP error {s}; {d} audit rows dropped\n",
+                .{ @errorName(err), ctx.rows.len },
+            );
+            return;
+        };
+        defer resp.deinit();
+
+        if (@intFromEnum(resp.status) >= 300) {
+            // Truncate the response body in the log line so a malicious
+            // upstream can't dump megabytes through std.debug.
+            const body_preview = if (resp.body.len > 200) resp.body[0..200] else resp.body;
+            std.debug.print(
+                "  bq.flushThread: BigQuery rejected insertAll (status={d}); {d} rows dropped. body: {s}\n",
+                .{ @intFromEnum(resp.status), ctx.rows.len, body_preview },
+            );
+        }
     }
 
     /// Wait for all pending BQ writes to complete. Call from SIGTERM handler.

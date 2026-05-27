@@ -160,32 +160,38 @@ test "createFileInWorkspace: rejects parent-dir escape" {
 test "account_id: well-formed admin/google/apple ids accepted" {
     try testing.expect(security.validateAccountId("admin") != null);
     try testing.expect(security.validateAccountId("google_1234567890") != null);
-    try testing.expect(security.validateAccountId("apple_001234.abcd_efgh") == null); // dot disallowed
+    // Audit M4: Apple subjects are documented to contain a dot;
+    // the prior validator rejected them and forced silent
+    // FixedStr64 truncation. Dot is now accepted.
+    try testing.expect(security.validateAccountId("apple_001234.abcdef.0987") != null);
     try testing.expect(security.validateAccountId("apple_1234567890") != null);
     try testing.expect(security.validateAccountId("a-b_c-d_1") != null);
 }
 
 test "account_id: colon is rejected (WAL delimiter injection)" {
+    // Colon is the WAL update_balance delimiter — every other
+    // accepted character must NOT include it.
     try testing.expect(security.validateAccountId("admin:role=admin") == null);
     try testing.expect(security.validateAccountId("google_abc:def") == null);
 }
 
-test "account_id: other delimiters rejected" {
+test "account_id: path/whitespace/quote delimiters rejected" {
     try testing.expect(security.validateAccountId("a/b") == null);
     try testing.expect(security.validateAccountId("a b") == null);
     try testing.expect(security.validateAccountId("a\tb") == null);
     try testing.expect(security.validateAccountId("a\"b") == null);
     try testing.expect(security.validateAccountId("a\\b") == null);
-    try testing.expect(security.validateAccountId("a.b") == null);
 }
 
-test "account_id: length boundaries" {
+test "account_id: length boundaries (64 max to match FixedStr64)" {
     try testing.expect(security.validateAccountId("") == null);
-    // 32 chars max
-    const ok = "abcdefghijklmnopqrstuvwxyz012345"; // 32 chars
+    // 64 chars max — matches FixedStr64 storage width
+    const ok = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"; // 64 chars
+    try testing.expect(ok.len == 64);
     try testing.expect(security.validateAccountId(ok) != null);
-    // 33 chars rejected
-    const too_long = "abcdefghijklmnopqrstuvwxyz0123456"; // 33 chars
+    // 65 chars rejected
+    const too_long = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abc"; // 65 chars
+    try testing.expect(too_long.len == 65);
     try testing.expect(security.validateAccountId(too_long) == null);
 }
 

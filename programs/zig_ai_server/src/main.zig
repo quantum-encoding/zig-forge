@@ -408,10 +408,30 @@ fn handleConnection(ctx: *ConnCtx) void {
     var http_server = http.Server.init(&stream_reader.interface, &stream_writer.interface);
 
     const security = @import("security.zig");
+    const types_mod = @import("store/types.zig");
+
+    // Audit M13: per-connection request-id buffer outlives every
+    // single request iteration but is owned exclusively by this
+    // worker thread, so reusing it across iterations is safe (we
+    // serialize requests on a keep-alive connection). Moving it out
+    // of the loop also makes the lifetime self-evident — the slice
+    // built here is borrowed into `resp_headers[i].value` and the
+    // borrow is released the moment `request.respond(...)` returns.
+    var req_id_buf: [24]u8 = undefined;
+
+    // Audit M15: total-lifetime cap. The Slowloris idle timeout
+    // from H5 bounds per-recv time, but a bot can keep issuing
+    // legitimate-looking keep-alive requests at ~29s intervals to
+    // pin a worker for hours. We close the connection once it has
+    // been open longer than `max_conn_lifetime_ms` regardless of
+    // request count or keep-alive status.
+    const conn_start_ms = types_mod.nowMs(io);
 
     // Handle multiple requests on the same connection (keep-alive)
     var request_count: u32 = 0;
     while (request_count < security.Limits.max_requests_per_conn) : (request_count += 1) {
+        if (types_mod.nowMs(io) - conn_start_ms > security.Limits.max_conn_lifetime_ms) return;
+
         var request = http_server.receiveHead() catch |err| {
             switch (err) {
                 error.HttpHeadersInvalid => sendBadRequest(&stream_writer.interface),
@@ -420,9 +440,9 @@ fn handleConnection(ctx: *ConnCtx) void {
             return;
         };
 
-        // Generate request ID
+        // Generate request ID. The slice borrows from `req_id_buf`
+        // declared above; its lifetime covers the response below.
         const req_id = request_id_counter.fetchAdd(1, .monotonic) + 1;
-        var req_id_buf: [24]u8 = undefined;
         const req_id_str = std.fmt.bufPrint(&req_id_buf, "req-{d}", .{req_id}) catch "req-0";
 
         // Route and handle
@@ -455,56 +475,70 @@ fn handleConnection(ctx: *ConnCtx) void {
         //     Vary: Origin.
         //   - Unmatched origin → no CORS headers at all; browsers will
         //     block the cross-origin call.
-        var resp_headers: [10]http.Header = undefined;
+        // Audit M1: response-header assembly now treats overflow as
+        // an error rather than silently dropping headers past the
+        // buffer end. `pushHeader` returns false on overflow; we
+        // bail to 500 in that case. The cap is centralized in
+        // security.Limits.max_response_headers and chosen to
+        // comfortably cover the worst case (handler headers +
+        // req-id + reflected origin + Vary + ACAM + ACAH).
+        var resp_headers: [security.Limits.max_response_headers]http.Header = undefined;
         var header_count: usize = 0;
+        var header_overflow: bool = false;
+        const pushHeader = struct {
+            fn run(
+                slot: *[security.Limits.max_response_headers]http.Header,
+                cnt: *usize,
+                overflow: *bool,
+                name: []const u8,
+                value: []const u8,
+            ) void {
+                if (cnt.* >= slot.len) {
+                    overflow.* = true;
+                    return;
+                }
+                slot[cnt.*] = .{ .name = name, .value = value };
+                cnt.* += 1;
+            }
+        }.run;
 
         // Copy original headers from the handler result.
-        for (result.headers) |h| {
-            if (header_count < resp_headers.len) {
-                resp_headers[header_count] = h;
-                header_count += 1;
-            }
-        }
+        for (result.headers) |h| pushHeader(&resp_headers, &header_count, &header_overflow, h.name, h.value);
 
         // Add request ID
-        if (header_count < resp_headers.len) {
-            resp_headers[header_count] = .{ .name = "x-request-id", .value = req_id_str };
-            header_count += 1;
-        }
+        pushHeader(&resp_headers, &header_count, &header_overflow, "x-request-id", req_id_str);
 
         // CORS — only when the request's Origin is allowlisted.
         if (router.matchOrigin(&request)) |origin| {
             const is_preflight = request.head.method == .OPTIONS;
 
-            if (header_count < resp_headers.len) {
-                resp_headers[header_count] = .{ .name = "access-control-allow-origin", .value = origin };
-                header_count += 1;
-            }
-            if (header_count < resp_headers.len) {
-                resp_headers[header_count] = .{ .name = "vary", .value = "Origin" };
-                header_count += 1;
-            }
+            pushHeader(&resp_headers, &header_count, &header_overflow, "access-control-allow-origin", origin);
+            pushHeader(&resp_headers, &header_count, &header_overflow, "vary", "Origin");
             if (is_preflight) {
-                if (header_count < resp_headers.len) {
-                    resp_headers[header_count] = .{
-                        .name = "access-control-allow-methods",
-                        .value = "GET, POST, PUT, DELETE, OPTIONS",
-                    };
-                    header_count += 1;
-                }
-                if (header_count < resp_headers.len) {
-                    const target = request.head.target;
-                    const path = if (std.mem.indexOfScalar(u8, target, '?')) |i| target[0..i] else target;
-                    resp_headers[header_count] = .{
-                        .name = "access-control-allow-headers",
-                        .value = if (router.pathRequiresAuthorizationHeader(path))
-                            "Authorization, Content-Type, X-API-Key"
-                        else
-                            "Content-Type",
-                    };
-                    header_count += 1;
-                }
+                pushHeader(&resp_headers, &header_count, &header_overflow, "access-control-allow-methods", "GET, POST, PUT, DELETE, OPTIONS");
+                const target = request.head.target;
+                const path = if (std.mem.indexOfScalar(u8, target, '?')) |i| target[0..i] else target;
+                pushHeader(&resp_headers, &header_count, &header_overflow, "access-control-allow-headers", if (router.pathRequiresAuthorizationHeader(path))
+                    "Authorization, Content-Type, X-API-Key"
+                else
+                    "Content-Type");
             }
+        }
+
+        // Fail-loud: if we ran out of slots, drop the assembled
+        // response and emit a 500. Better a visible error than a
+        // mystery missing `Set-Cookie` / `Content-Security-Policy`.
+        if (header_overflow) {
+            std.debug.print(
+                "  response-header overflow on {s} {s}: handler emitted {d} headers but only {d} fit\n",
+                .{ @tagName(request.head.method), request.head.target, result.headers.len, security.Limits.max_response_headers },
+            );
+            const minimal: [1]http.Header = .{.{ .name = "x-request-id", .value = req_id_str }};
+            request.respond(
+                "{\"error\":\"internal\",\"message\":\"response header overflow\"}",
+                .{ .status = .internal_server_error, .extra_headers = &minimal, .keep_alive = false },
+            ) catch return;
+            return;
         }
 
         // Send response

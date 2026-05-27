@@ -256,16 +256,31 @@ fn handleStreamCore(
         config.max_tokens = result.capped_max_tokens;
     };
 
-    // Start SSE response — chunked transfer encoding
+    // Start SSE response — chunked transfer encoding. Audit H1
+    // follow-up: SSE responses previously broadcast a wildcard
+    // `access-control-allow-origin: *`, which silently re-opened the
+    // CORS hole Batch 14 closed for non-streaming responses. The
+    // streaming endpoints now reflect the request's `Origin` only
+    // when it is on the env-driven allowlist; mismatched/absent
+    // Origin → no CORS header → browsers block the cross-origin call.
     var stream_buf: [4096]u8 = undefined;
+    var sse_headers: [4]http.Header = undefined;
+    var sse_header_count: usize = 0;
+    sse_headers[sse_header_count] = .{ .name = "content-type", .value = "text/event-stream" };
+    sse_header_count += 1;
+    sse_headers[sse_header_count] = .{ .name = "cache-control", .value = "no-cache" };
+    sse_header_count += 1;
+    const router_mod = @import("router.zig");
+    if (router_mod.matchOrigin(request)) |origin| {
+        sse_headers[sse_header_count] = .{ .name = "access-control-allow-origin", .value = origin };
+        sse_header_count += 1;
+        sse_headers[sse_header_count] = .{ .name = "vary", .value = "Origin" };
+        sse_header_count += 1;
+    }
     var body_writer = request.respondStreaming(&stream_buf, .{
         .respond_options = .{
             .status = .ok,
-            .extra_headers = &.{
-                .{ .name = "content-type", .value = "text/event-stream" },
-                .{ .name = "cache-control", .value = "no-cache" },
-                .{ .name = "access-control-allow-origin", .value = "*" },
-            },
+            .extra_headers = sse_headers[0..sse_header_count],
             .keep_alive = false,
         },
     }) catch {
@@ -354,21 +369,47 @@ fn handleStreamCore(
     body_writer.end() catch {};
 }
 
+/// Send a single SSE error frame + done marker on the error path.
+///
+/// Audit M10: the previous implementation built the error frame via
+/// `std.fmt.allocPrint(std.heap.c_allocator, …)` and *never freed*
+/// the result. Failure paths see this function the most, so the
+/// drop was a per-error leak primitive — small but unbounded over
+/// the life of the process. Error messages are static literals
+/// passed from the surrounding handler (cap ~64 bytes); we now
+/// format into a fixed stack buffer with `bufPrint` and write
+/// nothing to the heap at all. The literal fallback covers the
+/// (essentially-impossible) case that the message somehow exceeds
+/// the buffer.
+///
+/// Same CORS-tightening as the success path: reflect Origin only
+/// when it matches the env allowlist (audit H1 follow-up).
 fn sendSseError(request: *http.Server.Request, message: []const u8) void {
     var stream_buf: [1024]u8 = undefined;
+    var sse_headers: [3]http.Header = undefined;
+    var sse_header_count: usize = 0;
+    sse_headers[sse_header_count] = .{ .name = "content-type", .value = "text/event-stream" };
+    sse_header_count += 1;
+    const router_mod = @import("router.zig");
+    if (router_mod.matchOrigin(request)) |origin| {
+        sse_headers[sse_header_count] = .{ .name = "access-control-allow-origin", .value = origin };
+        sse_header_count += 1;
+        sse_headers[sse_header_count] = .{ .name = "vary", .value = "Origin" };
+        sse_header_count += 1;
+    }
     var body_writer = request.respondStreaming(&stream_buf, .{
         .respond_options = .{
             .status = .bad_request,
-            .extra_headers = &.{
-                .{ .name = "content-type", .value = "text/event-stream" },
-                .{ .name = "access-control-allow-origin", .value = "*" },
-            },
+            .extra_headers = sse_headers[0..sse_header_count],
             .keep_alive = false,
         },
     }) catch return;
 
-    const event = std.fmt.allocPrint(std.heap.c_allocator,
-        "data: {{\"type\":\"error\",\"message\":\"{s}\"}}\n\n", .{message},
+    var msg_buf: [512]u8 = undefined;
+    const event = std.fmt.bufPrint(
+        &msg_buf,
+        "data: {{\"type\":\"error\",\"message\":\"{s}\"}}\n\n",
+        .{message},
     ) catch "data: {\"type\":\"error\",\"message\":\"internal error\"}\n\n";
     body_writer.writer.writeAll(event) catch {};
     body_writer.writer.writeAll("data: {\"type\":\"done\"}\n\n") catch {};

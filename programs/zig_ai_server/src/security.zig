@@ -229,28 +229,45 @@ pub fn sanitizeId(input: []const u8) ?[]const u8 {
 
 /// Maximum length an account_id may have. Matches the
 /// `types.FixedStr64` storage width used by `Account.id`.
-pub const max_account_id_len: usize = 32;
+///
+/// Audit M4: previously 32 chars, which is below the lower bound
+/// of an Apple Sign In subject identifier (`apple_<sub>` runs
+/// 25–44 chars in the wild). 64 matches the underlying storage so
+/// `FixedStr64.fromSlice` is never asked to silently truncate.
+pub const max_account_id_len: usize = 64;
 
 /// Validate an account_id at the trust boundary. Returns the input
 /// when accepted, `null` when rejected.
 ///
-/// Audit M14: account_id strings flow into WAL payloads and the
-/// Firestore key-document path. Both formats use ':' as a field /
-/// path delimiter, so allowing ':' anywhere in the id is an
-/// injection vector — a malicious id like
-/// `victim:role=admin:balance_ticks=1000000000` would forge
-/// payload fields when the WAL is read back. We avoid the entire
-/// class by restricting account_id to `[A-Za-z0-9_-]` and capping
-/// the length at 32 chars (matching FixedStr64). Length 0 is
-/// rejected so we never serialize empty-id rows.
+/// Audit M14 + M4: account_id strings flow into the WAL
+/// `update_balance` payload (`{account_id}:{delta}`, parsed via
+/// `lastIndexOfScalar(':')`) and into the Firestore document path.
+/// The accepted set is `[A-Za-z0-9_.\-]`:
 ///
-/// Apply at every entry point that mints an account_id from
-/// user-controlled data: admin POST /accounts, Apple Sign In sub,
-/// Google Sign In sub.
+///   - `:` is **banned** — it's the WAL delimiter for update_balance;
+///     a malicious id like `victim:delta=999999999` would forge
+///     sibling fields when the WAL is read back.
+///   - `/` and `\` are **banned** — both are path separators in
+///     Firestore / filesystem contexts.
+///   - whitespace, quote, and control characters are banned for
+///     defense-in-depth against any future serializer that doesn't
+///     escape (the JSON path is already safe via std.json.Stringify
+///     after Batch 13, but a third format could land later).
+///   - `.` is **allowed** — Apple Sign In subjects are documented as
+///     containing a dot (e.g. `001234.abcdef.0987`). The WAL parser
+///     uses `lastIndexOfScalar(':')` so dots in the prefix do not
+///     break delimiter recovery.
+///
+/// Length is bounded at 64 (max_account_id_len) so
+/// `FixedStr64.fromSlice` never has to truncate. Apply at every
+/// entry point that mints an account_id from user-controlled data:
+/// admin POST /accounts, Apple Sign In sub, Google Sign In sub.
 pub fn validateAccountId(id: []const u8) ?[]const u8 {
     if (id.len == 0 or id.len > max_account_id_len) return null;
     for (id) |c| {
-        if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_') return null;
+        if (std.ascii.isAlphanumeric(c)) continue;
+        if (c == '-' or c == '_' or c == '.') continue;
+        return null;
     }
     return id;
 }
@@ -264,6 +281,29 @@ pub const Limits = struct {
     pub const max_messages: usize = 200; // Max messages in chat context
     pub const max_agent_iterations: u32 = 50; // Agent loop cap
     pub const max_model_name: usize = 128; // Model name length
-    pub const max_requests_per_conn: u32 = 1000; // Keep-alive request limit
+    /// Per-connection keep-alive request cap. Audit M15: previously
+    /// 1000, which combined with the 30s Slowloris idle timeout from
+    /// H5 let a single bot hold a worker for ≤30000s (~8 hours) by
+    /// drip-feeding bodyless requests. Lowered to 100 (typical web
+    /// server default) so the upper bound on a single connection is
+    /// ~100 × 30s = ~50 minutes — also bounded by the connection
+    /// lifetime cap below, whichever fires first.
+    pub const max_requests_per_conn: u32 = 100;
+    /// Per-connection total lifetime cap in milliseconds. Audit M15:
+    /// SO_RCVTIMEO bounds *idle* time per recv; this bounds *total*
+    /// connection time so a bot that keeps issuing 1-byte recv
+    /// activity every 29s can't pin a worker for hours. After this
+    /// elapses we close the connection regardless of keep-alive.
+    pub const max_conn_lifetime_ms: i64 = 5 * 60 * 1000;
     pub const max_tokens_cap: u32 = 128_000; // Max tokens any request can ask for
+    /// Maximum response headers emitted by the per-request handler.
+    /// Audit M1: previously a fixed `[8]http.Header` with silent
+    /// truncation on overflow; if a new endpoint or CORS path pushes
+    /// the count past the cap, the missing headers (Set-Cookie, etc.)
+    /// would never reach the client. The handler now treats overflow
+    /// as a 500 instead of silently dropping. 16 is chosen so the
+    /// preflight assembly (handler headers + req-id + CORS reflected
+    /// origin + Vary + ACAM + ACAH) fits with room for future
+    /// additions.
+    pub const max_response_headers: usize = 16;
 };

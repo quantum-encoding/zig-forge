@@ -255,9 +255,13 @@ fn findOrCreateAccount(
 ) bool {
     if (store.getAccountLocked(account_id) != null) return false;
 
-    // Try loading from Firestore (might exist from a previous container)
-    store.loadFromFirestore();
-    if (store.getAccountLocked(account_id) != null) return false;
+    // Audit M3: single-doc fetch instead of full collection scan.
+    // See apple_auth.findOrCreateAccount for the rationale; the
+    // previous full-scan was an O(N) Firestore amplifier and a
+    // free quota-drain primitive triggered by any new sub.
+    if (store.loadSingleAccountFromFirestore(account_id)) {
+        if (store.getAccountLocked(account_id) != null) return false;
+    }
 
     // Create new account
     const now_ms = types.nowMs(io);
