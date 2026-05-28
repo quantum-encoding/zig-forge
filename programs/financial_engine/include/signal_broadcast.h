@@ -77,9 +77,9 @@ typedef struct __attribute__((packed)) {
     uint8_t  time_horizon;    // TimeHorizon enum
     uint8_t  confidence;      // 0-100 percentage
     uint8_t  _pad2[4];        // Padding
-    double   current_price;   // Current price
-    double   target_price;    // Target price (0 if not set)
-    double   stop_loss;       // Stop loss (0 if not set)
+    int64_t  current_price;   // Current price (nano-USD ticks, 1e9 scale)
+    int64_t  target_price;    // Target price (nano-USD ticks, 1e9 scale, 0 if not set)
+    int64_t  stop_loss;       // Stop loss (nano-USD ticks, 1e9 scale, 0 if not set)
 
     // Risk parameters (16 bytes)
     float    suggested_size_pct;  // Position size % (0.0-1.0)

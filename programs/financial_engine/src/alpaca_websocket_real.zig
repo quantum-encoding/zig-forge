@@ -40,8 +40,8 @@ pub const AlpacaWebSocketReal = struct {
 
     pub const QuoteMessage = struct {
         symbol: [16]u8,
-        bid_price: f64,
-        ask_price: f64,
+        bid_price: Decimal,
+        ask_price: Decimal,
         bid_size: u32,
         ask_size: u32,
         bid_exchange: [4]u8,
@@ -52,7 +52,7 @@ pub const AlpacaWebSocketReal = struct {
 
     pub const TradeMessage = struct {
         symbol: [16]u8,
-        price: f64,
+        price: Decimal,
         size: u32,
         timestamp: i64,
         exchange: [4]u8,
@@ -62,14 +62,14 @@ pub const AlpacaWebSocketReal = struct {
 
     pub const BarMessage = struct {
         symbol: [16]u8,
-        open: f64,
-        high: f64,
-        low: f64,
-        close: f64,
+        open: Decimal,
+        high: Decimal,
+        low: Decimal,
+        close: Decimal,
         volume: u64,
         timestamp: i64,
         trade_count: u32,
-        vwap: f64,
+        vwap: Decimal,
     };
 
     pub fn init(
@@ -311,8 +311,8 @@ pub const AlpacaWebSocketReal = struct {
     fn processQuote(self: *Self, obj: json.ObjectMap) !void {
         var quote = QuoteMessage{
             .symbol = std.mem.zeroes([16]u8),
-            .bid_price = 0,
-            .ask_price = 0,
+            .bid_price = Decimal.zero(),
+            .ask_price = Decimal.zero(),
             .bid_size = 0,
             .ask_size = 0,
             .bid_exchange = std.mem.zeroes([4]u8),
@@ -327,8 +327,8 @@ pub const AlpacaWebSocketReal = struct {
             @memcpy(quote.symbol[0..copy_len], sym[0..copy_len]);
         }
 
-        if (obj.get("bp")) |bp| quote.bid_price = bp.float;
-        if (obj.get("ap")) |ap| quote.ask_price = ap.float;
+        if (obj.get("bp")) |bp| quote.bid_price = Decimal.fromFloat(bp.float);
+        if (obj.get("ap")) |ap| quote.ask_price = Decimal.fromFloat(ap.float);
         if (obj.get("bs")) |bs| quote.bid_size = @intFromFloat(bs.float);
         if (obj.get("as")) |as| quote.ask_size = @intFromFloat(as.float);
         if (obj.get("t")) |t| {
@@ -345,7 +345,7 @@ pub const AlpacaWebSocketReal = struct {
     fn processTrade(self: *Self, obj: json.ObjectMap) !void {
         var trade = TradeMessage{
             .symbol = std.mem.zeroes([16]u8),
-            .price = 0,
+            .price = Decimal.zero(),
             .size = 0,
             .timestamp = 0,
             .exchange = std.mem.zeroes([4]u8),
@@ -359,7 +359,7 @@ pub const AlpacaWebSocketReal = struct {
             @memcpy(trade.symbol[0..copy_len], sym[0..copy_len]);
         }
 
-        if (obj.get("p")) |p| trade.price = p.float;
+        if (obj.get("p")) |p| trade.price = Decimal.fromFloat(p.float);
         if (obj.get("s")) |s| trade.size = @intFromFloat(s.float);
         if (obj.get("t")) |t| {
             const ts_str = t.string;
@@ -374,14 +374,14 @@ pub const AlpacaWebSocketReal = struct {
     fn processBar(self: *Self, obj: json.ObjectMap) !void {
         var bar = BarMessage{
             .symbol = std.mem.zeroes([16]u8),
-            .open = 0,
-            .high = 0,
-            .low = 0,
-            .close = 0,
+            .open = Decimal.zero(),
+            .high = Decimal.zero(),
+            .low = Decimal.zero(),
+            .close = Decimal.zero(),
             .volume = 0,
             .timestamp = 0,
             .trade_count = 0,
-            .vwap = 0,
+            .vwap = Decimal.zero(),
         };
 
         if (obj.get("S")) |symbol| {
@@ -390,13 +390,13 @@ pub const AlpacaWebSocketReal = struct {
             @memcpy(bar.symbol[0..copy_len], sym[0..copy_len]);
         }
 
-        if (obj.get("o")) |o| bar.open = o.float;
-        if (obj.get("h")) |h| bar.high = h.float;
-        if (obj.get("l")) |l| bar.low = l.float;
-        if (obj.get("c")) |c| bar.close = c.float;
+        if (obj.get("o")) |o| bar.open = Decimal.fromFloat(o.float);
+        if (obj.get("h")) |h| bar.high = Decimal.fromFloat(h.float);
+        if (obj.get("l")) |l| bar.low = Decimal.fromFloat(l.float);
+        if (obj.get("c")) |c| bar.close = Decimal.fromFloat(c.float);
         if (obj.get("v")) |v| bar.volume = @intFromFloat(v.float);
         if (obj.get("n")) |n| bar.trade_count = @intFromFloat(n.float);
-        if (obj.get("vw")) |vw| bar.vwap = vw.float;
+        if (obj.get("vw")) |vw| bar.vwap = Decimal.fromFloat(vw.float);
 
         if (self.bar_queue.push(bar)) {
             _ = self.bars_received.fetchAdd(1, .monotonic);
@@ -451,8 +451,8 @@ pub const AlpacaWebSocketReal = struct {
         const symbol_slice = std.mem.sliceTo(&quote.symbol, 0);
         return hft_system.MarketTick{
             .symbol = symbol_slice,
-            .bid = Decimal.fromFloat(quote.bid_price),
-            .ask = Decimal.fromFloat(quote.ask_price),
+            .bid = quote.bid_price,
+            .ask = quote.ask_price,
             .bid_size = Decimal.fromInt(quote.bid_size),
             .ask_size = Decimal.fromInt(quote.ask_size),
             .timestamp = quote.timestamp,

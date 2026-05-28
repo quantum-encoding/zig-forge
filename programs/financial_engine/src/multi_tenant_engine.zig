@@ -9,6 +9,7 @@ const alpaca_real = @import("alpaca_websocket_real.zig");
 const api = @import("alpaca_trading_api.zig");
 const praetorian = @import("praetorian_guard.zig");
 const config = @import("config.zig");
+const Decimal = @import("decimal.zig").Decimal;
 
 // ============================================================================
 // TENANT ALGORITHM DEFINITIONS
@@ -150,8 +151,8 @@ pub const TenantEngine = struct {
     
     const Quote = struct {
         symbol: [16]u8,
-        bid: f64,
-        ask: f64,
+        bid: Decimal,
+        ask: Decimal,
         volume: u32,
         timestamp: i64,
     };
@@ -161,7 +162,7 @@ pub const TenantEngine = struct {
         side: enum { buy, sell },
         quantity: u32,
         order_type: enum { market, limit },
-        price: ?f64,
+        price: ?Decimal,
     };
     
     // Simple lock-free queue for tenant isolation
@@ -269,11 +270,15 @@ pub const TenantEngine = struct {
         
         if (std.mem.eql(u8, symbol_str, "SPY")) {
             // SPY DETECTED - IMMEDIATE ACTION
-            const spread = quote.ask - quote.bid;
+            const spread = quote.ask.sub(quote.bid) catch Decimal.zero();
             
-            if (spread < 0.10) { // Tight spread, good for execution
-                std.log.info("[{s}] 🎯 SPY HUNT TRIGGERED: bid=${d:.2} ask=${d:.2}", 
-                    .{ self.tenant.tenant_id, quote.bid, quote.ask });
+            if (spread.lessThan(Decimal{ .value = 100_000_000 })) { // Tight spread, good for execution ($0.10 = 100M n_ticks)
+                const bid_major = @divTrunc(quote.bid.value, 1_000_000_000);
+                const bid_minor = @divTrunc(@mod(quote.bid.value, 1_000_000_000), 10_000_000);
+                const ask_major = @divTrunc(quote.ask.value, 1_000_000_000);
+                const ask_minor = @divTrunc(@mod(quote.ask.value, 1_000_000_000), 10_000_000);
+                std.log.info("[{s}] 🎯 SPY HUNT TRIGGERED: bid=${d}.{d:0>2} ask=${d}.{d:0>2}", 
+                    .{ self.tenant.tenant_id, bid_major, bid_minor, ask_major, ask_minor });
                 
                 const order = Order{
                     .symbol = quote.symbol,
@@ -295,19 +300,21 @@ pub const TenantEngine = struct {
         
         // Simple momentum detection: large volume with price movement
         if (quote.volume > 100000) {
-            const mid_price = (quote.bid + quote.ask) / 2.0;
+            const mid_price = Decimal{ .value = @divTrunc(quote.bid.value + quote.ask.value, 2) };
             
             // Simplified momentum signal (in production would track price history)
-            if (mid_price > 0) {
-                std.log.info("[{s}] 📈 Momentum detected in {s}: price=${d:.2} volume={}", 
-                    .{ self.tenant.tenant_id, symbol_str, mid_price, quote.volume });
+            if (mid_price.value > 0) {
+                const mid_major = @divTrunc(mid_price.value, 1_000_000_000);
+                const mid_minor = @divTrunc(@mod(mid_price.value, 1_000_000_000), 10_000_000);
+                std.log.info("[{s}] 📈 Momentum detected in {s}: price=${d}.{d:0>2} volume={}", 
+                    .{ self.tenant.tenant_id, symbol_str, mid_major, mid_minor, quote.volume });
                 
                 const order = Order{
                     .symbol = quote.symbol,
                     .side = .buy,
                     .quantity = 10,
                     .order_type = .limit,
-                    .price = quote.bid + 0.01,
+                    .price = quote.bid.add(Decimal{ .value = 10_000_000 }) catch quote.bid, // bid + 0.01
                 };
                 
                 _ = self.order_queue.push(order);
@@ -317,16 +324,18 @@ pub const TenantEngine = struct {
     
     fn executeMeanReversion(self: *Self, quote: Quote) void {
         const symbol_str = std.mem.sliceTo(&quote.symbol, 0);
-        const mid_price = (quote.bid + quote.ask) / 2.0;
+        const mid_price = Decimal{ .value = @divTrunc(quote.bid.value + quote.ask.value, 2) };
         
         // Simplified mean reversion (in production would calculate Bollinger Bands)
         // Execute trade when spread threshold is met
-        const spread = quote.ask - quote.bid;
-        const spread_percentage = spread / mid_price;
+        const spread = quote.ask.sub(quote.bid) catch Decimal.zero();
         
-        if (spread_percentage > 0.002) { // 0.2% spread
-            std.log.info("[{s}] 📊 Mean reversion opportunity in {s}: spread={d:.2}%", 
-                .{ self.tenant.tenant_id, symbol_str, spread_percentage * 100 });
+        if (mid_price.value > 0 and spread.value * 1000 > mid_price.value * 2) { // 0.2% spread
+            const spread_pct_val = @divTrunc(spread.value * 10000, mid_price.value);
+            const pct_major = @divTrunc(spread_pct_val, 100);
+            const pct_minor = @mod(spread_pct_val, 100);
+            std.log.info("[{s}] 📊 Mean reversion opportunity in {s}: spread={d}.{d:0>2}%", 
+                .{ self.tenant.tenant_id, symbol_str, pct_major, pct_minor });
             
             // Buy at bid, sell at ask for mean reversion
             const order = Order{
@@ -347,16 +356,12 @@ pub const TenantEngine = struct {
         // === PRAETORIAN GUARD VALIDATION ===
         if (self.praetorian_guard) |guard| {
             const side = if (order.side == .buy) api.AlpacaTradingAPI.OrderSide.buy else api.AlpacaTradingAPI.OrderSide.sell;
-            // Push f64 → Decimal conversion to the boundary so the guard's
-            // internal math stays in integers (Batch 31 FLOAT-OBSESSION).
-            const Decimal = @import("decimal.zig").Decimal;
-            const price_decimal: ?Decimal = if (order.price) |p| Decimal.fromFloat(p) else null;
             const validation = try guard.validateOrder(
                 self.tenant.tenant_id,
                 symbol_str,
                 side,
                 order.quantity,
-                price_decimal,
+                order.price,
             );
             
             if (!validation.approved) {
@@ -394,19 +399,13 @@ pub const TenantEngine = struct {
         );
         defer self.allocator.free(unique_order_id);
         
-        // Convert internal f64 order.price to Decimal at the API boundary
-        // — see executeOrder above for the rationale (Batch 32
-        // FLOAT-OBSESSION). Single audited f64 → Decimal site rather than
-        // sprinkling the conversion through Alpaca request construction.
-        const DecimalT2 = @import("decimal.zig").Decimal;
-        const limit_decimal: ?DecimalT2 = if (order.price) |p| DecimalT2.fromFloat(p) else null;
         const order_request = api.AlpacaTradingAPI.OrderRequest{
             .symbol = symbol_str,
             .qty = order.quantity,
             .side = if (order.side == .buy) .buy else .sell,
             .type = if (order.order_type == .market) .market else .limit,
             .time_in_force = .day,
-            .limit_price = limit_decimal,
+            .limit_price = order.price,
             .client_order_id = unique_order_id,
             .extended_hours = false,
         };
@@ -425,7 +424,7 @@ pub const TenantEngine = struct {
         _ = self.tenant.api_calls.fetchAdd(1, .monotonic);
     }
     
-    pub fn injectQuote(self: *Self, symbol: []const u8, bid: f64, ask: f64, volume: u32) void {
+    pub fn injectQuote(self: *Self, symbol: []const u8, bid: Decimal, ask: Decimal, volume: u32) void {
         var quote = Quote{
             .symbol = std.mem.zeroes([16]u8),
             .bid = bid,
@@ -464,13 +463,20 @@ pub const TenantEngine = struct {
         std.log.info("  CPU Time: {}ms", .{cpu_ns / std.time.ns_per_ms});
         std.log.info("  API Calls: {}", .{api_calls});
         
-        // Calculate billing
-        const packet_cost = @as(f64, @floatFromInt(packets)) / 1000.0 * 0.001; // Rate varies by tier
-        const order_cost = @as(f64, @floatFromInt(orders)) * 0.002;
-        const total_cost = packet_cost + order_cost;
+        // Calculate billing using exact fixed-point Decimal
+        const packet_cost_dec = Decimal{ .value = @as(i128, packets) * 1000 };
+        const order_cost_dec = Decimal{ .value = @as(i128, orders) * 2_000_000 };
+        const total_cost_dec = packet_cost_dec.add(order_cost_dec) catch packet_cost_dec;
         
-        std.log.info("  💰 Billing: ${d:.4} (packets: ${d:.4}, orders: ${d:.4})", 
-            .{ total_cost, packet_cost, order_cost });
+        const tc_major = @divTrunc(total_cost_dec.value, 1_000_000_000);
+        const tc_minor = @divTrunc(@mod(total_cost_dec.value, 1_000_000_000), 100_000); // 4 decimal places
+        const pc_major = @divTrunc(packet_cost_dec.value, 1_000_000_000);
+        const pc_minor = @divTrunc(@mod(packet_cost_dec.value, 1_000_000_000), 100_000); // 4 decimal places
+        const oc_major = @divTrunc(order_cost_dec.value, 1_000_000_000);
+        const oc_minor = @divTrunc(@mod(order_cost_dec.value, 1_000_000_000), 100_000); // 4 decimal places
+        
+        std.log.info("  💰 Billing: ${d}.{d:0>4} (packets: ${d}.{d:0>4}, orders: ${d}.{d:0>4})", 
+            .{ tc_major, tc_minor, pc_major, pc_minor, oc_major, oc_minor });
     }
     
     pub fn deinit(self: *Self) void {
@@ -722,11 +728,12 @@ pub const MultiTenantOrchestrator = struct {
                 const random = std.crypto.random;
                 
                 for (symbols) |symbol| {
-                    const base_price = 100.0 + @as(f64, @floatFromInt(random.int(u8))) / 10.0;
-                    const spread = 0.01 + @as(f64, @floatFromInt(random.int(u8))) / 1000.0;
+                    const base_price = Decimal{ .value = 100_000_000_000 + @as(i128, random.int(u8)) * 100_000_000 };
+                    const spread = Decimal{ .value = 10_000_000 + @as(i128, random.int(u8)) * 1_000_000 };
+                    const ask_price = base_price.add(spread) catch base_price;
                     
                     for (self.tenants.items) |*tenant| {
-                        tenant.injectQuote(symbol, base_price, base_price + spread, random.int(u32) % 1000000);
+                        tenant.injectQuote(symbol, base_price, ask_price, random.int(u32) % 1000000);
                     }
                 }
                 

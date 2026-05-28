@@ -221,7 +221,10 @@ fn processVerifiedClaims(
 
     // Get balance
     const balance = if (store.getAccountLocked(account_id_str)) |acct| acct.balance_ticks else WELCOME_BONUS;
-    const credit_usd = @as(f64, @floatFromInt(balance)) / 10_000_000_000.0;
+    const is_negative = balance < 0;
+    const abs_balance = @abs(balance);
+    const usd_major = abs_balance / 10_000_000_000;
+    const usd_minor = (abs_balance % 10_000_000_000) / 1_000_000;
 
     // Build response (matches Go backend format)
     const email = claims.email orelse "";
@@ -231,9 +234,10 @@ fn processVerifiedClaims(
     } else "";
 
     const resp = std.fmt.allocPrint(allocator,
-        \\{{"token":"{s}","session_token":"{s}","api_key":"{s}","email":"{s}","credit_usd":{d:.4},"is_new":{s},"user":{{"id":"{s}","email":"{s}","display_name":"{s}","photo_url":"","credit_ticks":{d},"role":"user"}}}}
+        \\{{"token":"{s}","session_token":"{s}","api_key":"{s}","email":"{s}","credit_usd":{s}{d}.{d:0>4},"is_new":{s},"user":{{"id":"{s}","email":"{s}","display_name":"{s}","photo_url":"","credit_ticks":{d},"role":"user"}}}}
     , .{
-        raw_key, raw_key, raw_key, email, credit_usd,
+        raw_key, raw_key, raw_key, email,
+        if (is_negative) "-" else "", usd_major, usd_minor,
         if (is_new) "true" else "false",
         account_id_str, email, display_name, balance,
     }) catch {

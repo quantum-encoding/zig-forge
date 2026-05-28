@@ -75,9 +75,9 @@ pub const TradingSignal = extern struct {
     asset_class: AssetClass,
     time_horizon: TimeHorizon,
     confidence: u8,           // 0-100 percentage
-    current_price: f64,       // Current price
-    target_price: f64,        // Target price (0 if not set)
-    stop_loss: f64,           // Stop loss (0 if not set)
+    current_price: i64,       // Current price (nano-USD ticks, 1e9 scale)
+    target_price: i64,        // Target price (nano-USD ticks, 1e9 scale, 0 if not set)
+    stop_loss: i64,           // Stop loss (nano-USD ticks, 1e9 scale, 0 if not set)
 
     // Risk parameters (16 bytes)
     suggested_size_pct: f32,  // Position size as % (0.0-1.0)
@@ -523,8 +523,8 @@ fn runServer(endpoint: [:0]const u8) !void {
             else
                 .stocks;
             signal.confidence = 85;
-            signal.current_price = 95000.0;
-            signal.target_price = 100000.0;
+            signal.current_price = 95000 * 1_000_000_000;
+            signal.target_price = 100000 * 1_000_000_000;
             signal.suggested_size_pct = 0.05;
             signal.max_leverage = 1.0;
 
@@ -584,7 +584,7 @@ test "TradingSignal size" {
 }
 
 test "TradingSignal symbol" {
-    const signal = TradingSignal.init();
+    var signal = TradingSignal.init();
     signal.setSymbol("BTCUSD");
     try std.testing.expectEqualStrings("BTCUSD", signal.getSymbol());
 }

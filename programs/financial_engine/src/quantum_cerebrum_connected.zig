@@ -89,16 +89,17 @@ pub const QuantumCerebrumConnected = struct {
                         else => "???",
                     };
                     
-                    const price_float = @as(f64, @floatFromInt(packet.price_field)) / 1_000_000.0;
+                    const price_major = packet.price_field / 1_000_000;
+                    const price_minor = packet.price_field % 1_000_000;
                     
                     if (packet.packet_type == 0) { // Quote
                         const side_str = if (packet.side_field == 0) "BID" else "ASK";
-                        std.log.info("🧠 THOUGHT #{}: {s} {s} ${d:.2} x {} [{}ns] FROM GO!", .{
-                            count, symbol_name, side_str, price_float, packet.qty_field, latency
+                        std.log.info("🧠 THOUGHT #{}: {s} {s} ${d}.{d:0>6} x {} [{}ns] FROM GO!", .{
+                            count, symbol_name, side_str, price_major, price_minor, packet.qty_field, latency
                         });
                     } else { // Trade
-                        std.log.info("🧠 THOUGHT #{}: {s} TRADE ${d:.2} x {} [{}ns] FROM GO!", .{
-                            count, symbol_name, price_float, packet.qty_field, latency
+                        std.log.info("🧠 THOUGHT #{}: {s} TRADE ${d}.{d:0>6} x {} [{}ns] FROM GO!", .{
+                            count, symbol_name, price_major, price_minor, packet.qty_field, latency
                         });
                     }
                     

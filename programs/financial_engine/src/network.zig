@@ -49,27 +49,27 @@ pub const MarketMessage = struct {
 };
 
 pub const QuoteData = struct {
-    bid: f64,
-    ask: f64,
+    bid: Decimal,
+    ask: Decimal,
     bid_size: u32,
     ask_size: u32,
     exchange: []const u8,
 };
 
 pub const TradeData = struct {
-    price: f64,
+    price: Decimal,
     size: u32,
     exchange: []const u8,
     conditions: []const u8,
 };
 
 pub const BarData = struct {
-    open: f64,
-    high: f64,
-    low: f64,
-    close: f64,
+    open: Decimal,
+    high: Decimal,
+    low: Decimal,
+    close: Decimal,
     volume: u64,
-    vwap: f64,
+    vwap: Decimal,
 };
 
 /// Lock-free ring buffer for market data
@@ -196,8 +196,8 @@ pub const MarketDataFeed = struct {
         if (std.mem.indexOf(u8, msg, "\"T\":\"q\"")) |_| {
             // Quote message
             const quote = QuoteData{
-                .bid = 150.00,
-                .ask = 150.05,
+                .bid = Decimal.fromInt(150),
+                .ask = Decimal{ .value = 150_050_000_000 },
                 .bid_size = 100,
                 .ask_size = 100,
                 .exchange = "NASDAQ",
@@ -206,7 +206,7 @@ pub const MarketDataFeed = struct {
         } else if (std.mem.indexOf(u8, msg, "\"T\":\"t\"")) |_| {
             // Trade message
             const trade = TradeData{
-                .price = 150.02,
+                .price = Decimal{ .value = 150_020_000_000 },
                 .size = 50,
                 .exchange = "NASDAQ",
                 .conditions = "",
@@ -269,8 +269,8 @@ pub const AlpacaFeed = struct {
         while (self.feed.getNextQuote()) |quote| {
             const tick = hft.MarketTick{
                 .symbol = "AAPL", // Would parse from message
-                .bid = Decimal.fromFloat(quote.bid),
-                .ask = Decimal.fromFloat(quote.ask),
+                .bid = quote.bid,
+                .ask = quote.ask,
                 .bid_size = Decimal.fromInt(quote.bid_size),
                 .ask_size = Decimal.fromInt(quote.ask_size),
                 .timestamp = getCurrentTimestamp(),

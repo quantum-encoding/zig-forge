@@ -28,7 +28,7 @@ const Order = extern struct {
 pub const AlpacaToQuantumBridge = struct {
     engine: *qse.QuantumSynapseEngine,
     ws_client: *alpaca.AlpacaWebSocketClient,
-    real_ws_client: ?*alpaca_real.AlpacaRealWebSocket,
+    real_ws_client: ?*alpaca_real.AlpacaWebSocketReal,
     api_client: *api.AlpacaTradingAPI,
     use_real_data: bool,
     
@@ -62,10 +62,10 @@ pub const AlpacaToQuantumBridge = struct {
         api_client.* = api.AlpacaTradingAPI.init(allocator, api_key, api_secret, true);
         
         // Initialize real WebSocket client if requested
-        var real_ws_client: ?*alpaca_real.AlpacaRealWebSocket = null;
+        var real_ws_client: ?*alpaca_real.AlpacaWebSocketReal = null;
         if (use_real_data) {
-            real_ws_client = try allocator.create(alpaca_real.AlpacaRealWebSocket);
-            real_ws_client.?.* = try alpaca_real.AlpacaRealWebSocket.init(allocator, api_key, api_secret, true);
+            real_ws_client = try allocator.create(alpaca_real.AlpacaWebSocketReal);
+            real_ws_client.?.* = try alpaca_real.AlpacaWebSocketReal.init(allocator, api_key, api_secret, true);
         }
         
         return .{
@@ -150,8 +150,8 @@ pub const AlpacaToQuantumBridge = struct {
                     if (real_client.quote_queue.pop()) |real_quote| {
                         quote_opt = alpaca.AlpacaWebSocketClient.QuoteMessage{
                             .symbol = real_quote.symbol,
-                            .bid = real_quote.bid,
-                            .ask = real_quote.ask,
+                            .bid = real_quote.bid_price,
+                            .ask = real_quote.ask_price,
                             .bid_size = real_quote.bid_size,
                             .ask_size = real_quote.ask_size,
                             .timestamp = real_quote.timestamp,
@@ -169,7 +169,7 @@ pub const AlpacaToQuantumBridge = struct {
                 const symbol_slice = std.mem.sliceTo(&quote.symbol, 0);
                 if (std.mem.eql(u8, symbol_slice, "SPY")) {
                     // SPY DETECTED - IMMEDIATE MARKET ORDER
-                    std.log.info("🎯 SPY QUOTE RECEIVED: bid=${d:.2} ask=${d:.2}", .{quote.bid, quote.ask});
+                    std.log.info("🎯 SPY QUOTE RECEIVED: bid=${} ask=${}", .{quote.bid, quote.ask});
                     
                     // Create immediate market order for 1 share
                     const spy_order = api.AlpacaTradingAPI.OrderRequest{
@@ -225,7 +225,7 @@ pub const AlpacaToQuantumBridge = struct {
             .symbol_id = symbol_id,
             .packet_type = 0, // Quote type
             .flags = 0,
-            .price = @intCast(@as(u64, @intFromFloat(quote.bid * 1_000_000))), // Convert to fixed-point
+            .price = @intCast(@divTrunc(quote.bid.value, 1000)), // Convert 10^-9 internal Decimal value to 10^-6 micro-USD fixed-point
             .quantity = @intCast(quote.bid_size),
             .order_id = 0,
             .side = 0, // Bid

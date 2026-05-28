@@ -364,14 +364,14 @@ pub const HFTSystem = struct {
 pub const MarketSimulator = struct {
     const Self = @This();
     
-    base_price: f64,
-    volatility: f64,
-    spread: f64,
+    base_price: Decimal,
+    volatility: Decimal,
+    spread: Decimal,
     time: i64,
     sequence: u64,
     rng: std.Random.DefaultPrng,
     
-    pub fn init(base_price: f64, volatility: f64, spread: f64) Self {
+    pub fn init(base_price: Decimal, volatility: Decimal, spread: Decimal) Self {
         return .{
             .base_price = base_price,
             .volatility = volatility,
@@ -385,14 +385,16 @@ pub const MarketSimulator = struct {
     pub fn generateTick(self: *Self, symbol: []const u8) MarketTick {
         const random = self.rng.random();
         
-        // Random walk for price
-        const change = (random.float(f64) - 0.5) * self.volatility;
-        self.base_price += change;
+        // Random walk for price using volatility (purely float-free)
+        const rand_factor = random.intRangeAtMost(i64, -500, 500);
+        const change_val = @divTrunc(self.volatility.value * rand_factor, 1000);
+        const change = Decimal{ .value = change_val };
+        self.base_price = self.base_price.add(change) catch self.base_price;
         
         // Calculate bid/ask
-        const half_spread = self.spread / 2.0;
-        const bid = self.base_price - half_spread;
-        const ask = self.base_price + half_spread;
+        const half_spread = Decimal{ .value = @divTrunc(self.spread.value, 2) };
+        const bid = self.base_price.sub(half_spread) catch self.base_price;
+        const ask = self.base_price.add(half_spread) catch self.base_price;
         
         // Random size
         const bid_size = 100 + random.intRangeAtMost(u32, 0, 900);
@@ -403,8 +405,8 @@ pub const MarketSimulator = struct {
         
         return MarketTick{
             .symbol = symbol,
-            .bid = Decimal.fromFloat(bid),
-            .ask = Decimal.fromFloat(ask),
+            .bid = bid,
+            .ask = ask,
             .bid_size = Decimal.fromInt(bid_size),
             .ask_size = Decimal.fromInt(ask_size),
             .timestamp = self.time,
@@ -448,7 +450,11 @@ pub fn main() !void {
     try hft.addStrategy(Strategy.init("MarketMaker", mm_params));
     
     // Initialize market simulator
-    var simulator = MarketSimulator.init(150.0, 0.1, 0.20);
+    var simulator = MarketSimulator.init(
+        Decimal.fromInt(150),
+        Decimal{ .value = 100_000_000 },
+        Decimal{ .value = 200_000_000 },
+    );
     
     // Simulate trading session
     std.debug.print("Starting trading simulation...\n", .{});
@@ -462,16 +468,16 @@ pub fn main() !void {
         // Progress update
         if (i % 100 == 0 and i > 0) {
             const elapsed = blk: {const ts = getClockTime(); break :blk @as(i64, @intCast(ts.sec)) * 1000 + @divTrunc(ts.nsec, 1_000_000);} - start;
-            const rate = @as(f64, @floatFromInt(i * 1000)) / @as(f64, @floatFromInt(elapsed));
-            std.debug.print("Processed {d} ticks - Rate: {d:.0} ticks/sec\n", .{ i, rate });
+            const rate = if (elapsed > 0) @divTrunc(@as(i64, @intCast(i * 1000)), elapsed) else 0;
+            std.debug.print("Processed {d} ticks - Rate: {d} ticks/sec\n", .{ i, rate });
         }
     }
     
     const total_elapsed = blk: {const ts = getClockTime(); break :blk @as(i64, @intCast(ts.sec)) * 1000 + @divTrunc(ts.nsec, 1_000_000);} - start;
-    const overall_rate = @as(f64, @floatFromInt(num_ticks * 1000)) / @as(f64, @floatFromInt(total_elapsed));
+    const overall_rate = if (total_elapsed > 0) @divTrunc(@as(i64, @intCast(num_ticks * 1000)), total_elapsed) else 0;
     
     std.debug.print("\nSimulation complete in {d} ms\n", .{total_elapsed});
-    std.debug.print("Overall rate: {d:.0} ticks/sec\n", .{overall_rate});
+    std.debug.print("Overall rate: {d} ticks/sec\n", .{overall_rate});
     
     // Show performance report
     hft.getPerformanceReport();

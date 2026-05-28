@@ -417,6 +417,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     signal_tests.root_module.link_libc = true;
+    signal_tests.root_module.linkSystemLibrary("zmq", .{});
 
     // order_sender unit tests — exercises the JSON wire format produced
     // by sendOrder without actually hitting ZMQ. Validates Decimal

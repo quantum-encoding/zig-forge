@@ -29,7 +29,8 @@ pub const MiningStats = struct {
 
     /// Get current hashrate (hashes/second)
     pub fn getHashrate(self: *const Self) f64 {
-        const ts = std.posix.clock_gettime(.REALTIME) catch return 0.0;
+        var ts: std.c.timespec = undefined;
+        _ = std.c.clock_gettime(.REALTIME, &ts);
         const elapsed = @as(f64, @floatFromInt(ts.sec - self.start_time));
 
         if (elapsed <= 0) return 0.0;
@@ -40,7 +41,8 @@ pub const MiningStats = struct {
 
     /// Get uptime in seconds
     pub fn getUptime(self: *const Self) i64 {
-        const ts = std.posix.clock_gettime(.REALTIME) catch return 0;
+        var ts: std.c.timespec = undefined;
+        _ = std.c.clock_gettime(.REALTIME, &ts);
         return ts.sec - self.start_time;
     }
 

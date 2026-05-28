@@ -775,7 +775,8 @@ pub const ExchangeClient = struct {
 
     /// Send ping to measure RTT
     pub fn ping(self: *Self) !void {
-        const ts = try std.posix.clock_gettime(.MONOTONIC);
+        var ts: std.c.timespec = undefined;
+        _ = std.c.clock_gettime(.MONOTONIC, &ts);
         self.metrics.ping_sent_ns = @as(u64, @intCast(ts.sec)) * 1_000_000_000 +
                                     @as(u64, @intCast(ts.nsec));
 
@@ -785,7 +786,8 @@ pub const ExchangeClient = struct {
 
     /// Handle pong response
     pub fn handlePong(self: *Self) !void {
-        const ts = try std.posix.clock_gettime(.MONOTONIC);
+        var ts: std.c.timespec = undefined;
+        _ = std.c.clock_gettime(.MONOTONIC, &ts);
         self.metrics.pong_received_ns = @as(u64, @intCast(ts.sec)) * 1_000_000_000 +
                                         @as(u64, @intCast(ts.nsec));
 

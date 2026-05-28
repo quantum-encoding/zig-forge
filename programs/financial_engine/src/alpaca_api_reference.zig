@@ -4,15 +4,17 @@
 
 const std = @import("std");
 
+const Decimal = @import("decimal.zig").Decimal;
+
 // Alpaca Bar structure matching Go implementation
 pub const AlpacaBar = struct {
     t: []const u8,  // timestamp
-    o: f64,         // open
-    h: f64,         // high
-    l: f64,         // low
-    c: f64,         // close
+    o: Decimal,     // open
+    h: Decimal,     // high
+    l: Decimal,     // low
+    c: Decimal,     // close
     v: i64,         // volume
-    vw: f64,        // volume weighted average price
+    vw: Decimal,    // volume weighted average price
 };
 
 // Alpaca API Response structure
@@ -131,12 +133,12 @@ pub const AlpacaAPIClient = struct {
             const obj = item.object;
             bars[i] = .{
                 .t = obj.get("t").?.string,
-                .o = obj.get("o").?.float,
-                .h = obj.get("h").?.float,
-                .l = obj.get("l").?.float,
-                .c = obj.get("c").?.float,
+                .o = Decimal.fromFloat(obj.get("o").?.float),
+                .h = Decimal.fromFloat(obj.get("h").?.float),
+                .l = Decimal.fromFloat(obj.get("l").?.float),
+                .c = Decimal.fromFloat(obj.get("c").?.float),
                 .v = @intCast(obj.get("v").?.integer),
-                .vw = obj.get("vw").?.float,
+                .vw = Decimal.fromFloat(obj.get("vw").?.float),
             };
         }
         
@@ -175,7 +177,7 @@ pub fn testAlpacaIntegration(allocator: std.mem.Allocator) !void {
     
     // Display first few bars (matching Go output)
     for (bars[0..@min(5, bars.len)], 0..) |bar, i| {
-        std.log.info("Bar {}: C={d:.2f} H={d:.2f} L={d:.2f} V={}", .{
+        std.log.info("Bar {}: C={} H={} L={} V={}", .{
             i, bar.c, bar.h, bar.l, bar.v
         });
     }
@@ -183,8 +185,9 @@ pub fn testAlpacaIntegration(allocator: std.mem.Allocator) !void {
     // Calculate simple features (matching Go's calculateFeatures)
     if (bars.len > 0) {
         const base_price = bars[0].c;
-        const return_pct = (bars[bars.len - 1].c - base_price) / base_price * 100;
-        std.log.info("📈 Price change over period: {d:.2f}%", .{return_pct});
+        const return_pct = try (try bars[bars.len - 1].c.sub(base_price)).div(base_price);
+        const return_pct_100 = try return_pct.mul(Decimal.fromInt(100));
+        std.log.info("📈 Price change over period: {}%", .{return_pct_100});
     }
     
     std.log.info("✅ ALPACA API INTEGRATION VALIDATED", .{});

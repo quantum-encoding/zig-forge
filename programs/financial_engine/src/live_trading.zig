@@ -132,8 +132,8 @@ pub const LiveTradingSystem = struct {
                 // Convert network quote to HFT tick
                 const tick = hft_system.MarketTick{
                     .symbol = "AAPL",
-                    .bid = Decimal.fromFloat(quote.bid),
-                    .ask = Decimal.fromFloat(quote.ask),
+                    .bid = quote.bid,
+                    .ask = quote.ask,
                     .bid_size = Decimal.fromInt(quote.bid_size),
                     .ask_size = Decimal.fromInt(quote.ask_size),
                     .timestamp = getCurrentTimestamp(),
@@ -182,9 +182,9 @@ pub const LiveTradingSystem = struct {
             // Print stats every 1000 ticks
             if (tick_count % 1000 == 0 and tick_count > 0) {
                 const elapsed = getCurrentMillis() - start_time;
-                const rate = @as(f64, @floatFromInt(tick_count * 1000)) / @as(f64, @floatFromInt(elapsed));
+                const rate = if (elapsed > 0) @divTrunc(tick_count * 1000, elapsed) else 0;
                 
-                std.debug.print("📊 Live Stats: {d} ticks @ {d:.0} ticks/sec | ", .{ tick_count, rate });
+                std.debug.print("📊 Live Stats: {d} ticks @ {d} ticks/sec | ", .{ tick_count, rate });
                 std.debug.print("Network: {d}μs | Routing: {d}μs | Orders: {d}\n", .{
                     self.network_latency_us.load(.acquire),
                     self.routing_latency_us.load(.acquire),

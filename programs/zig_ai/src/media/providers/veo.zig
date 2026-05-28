@@ -200,7 +200,7 @@ fn downloadFromUri(allocator: Allocator, api_key: []const u8, uri: []const u8) !
     const download_url = try std.fmt.allocPrint(allocator, "{s}{s}key={s}", .{ uri, separator, api_key });
     defer allocator.free(download_url);
 
-    // Try using HTTP client first
+    // Use pure native HTTP client
     var client = try HttpClient.init(allocator);
     defer client.deinit();
 
@@ -208,94 +208,43 @@ fn downloadFromUri(allocator: Allocator, api_key: []const u8, uri: []const u8) !
         .{ .name = "Accept-Encoding", .value = "identity" },
     };
 
-    // Try HTTP client download with redirect handling
-    var response = client.downloadLargeFile(download_url, &headers, .{
-        .max_body_size = 100 * 1024 * 1024, // 100MB max for video
-    }) catch {
-        // Fall back to curl for downloads with very long redirect URLs
-        std.debug.print("  Using curl for download (long redirect URL)...\n", .{});
-        return downloadWithCurl(allocator, download_url);
-    };
+    // Use pure native HTTP client download with redirect handling (up to 100MB)
+    var response = try client.downloadLargeFile(download_url, &headers, .{
+        .max_body_size = 100 * 1024 * 1024,
+    });
     defer response.deinit();
 
     if (response.status != .ok) {
-        // If we get a non-OK status, try curl as fallback
-        return downloadWithCurl(allocator, download_url);
+        std.debug.print("  HTTP download failed with status: {any}\n", .{response.status});
+        return error.DownloadFailed;
     }
 
     const size_mb = @as(f64, @floatFromInt(response.body.len)) / (1024.0 * 1024.0);
     std.debug.print("  Downloaded: {d:.2} MB\n", .{size_mb});
 
-    return allocator.dupe(u8, response.body);
-}
-
-fn downloadWithCurl(allocator: Allocator, url: []const u8) ![]u8 {
-    // Long-URL fallback for downloadFromUri. The previous implementation
-    // routed everything through libc `system(...)` — printf '...' > tmpfile,
-    // curl "$(cat tmpfile)", rm -f tmpfile — which is a shell-out RCE
-    // vector (the URL flows through /bin/sh -c) and was the Batch 30
-    // target. The replacement:
-    //
-    //   1. spawn curl in argv-mode (no shell parser between us and curl;
-    //      the URL goes straight into argv with no metacharacter parsing
-    //      and argv lengths comfortably hold multi-KB redirect URLs);
-    //   2. use std.fs.cwd().deleteFile for cleanup (no shell);
-    //   3. read the downloaded file via storage.readFile (already std.fs).
+    const io = client.io();
     const tmp_path = "/tmp/veo_video_download.mp4";
 
     // Best-effort delete of any stale temp file from a prior run.
-    std.fs.cwd().deleteFile(tmp_path) catch |err| switch (err) {
-        error.FileNotFound => {},
-        else => {},
+    std.Io.Dir.cwd().deleteFile(io, tmp_path) catch {};
+
+    // Natively write the downloaded bytes to the temp file
+    std.Io.Dir.cwd().writeFile(io, .{ .sub_path = tmp_path, .data = response.body }) catch |err| {
+        std.debug.print("  Native writeFile to {s} failed: {any}\n", .{ tmp_path, err });
+        return error.WriteError;
     };
 
-    // argv-mode curl invocation. The URL is argv[5] — no shell,
-    // no metacharacter parsing, no command injection surface.
-    // generateVeo doesn't currently thread an `io` parameter; build a
-    // local Io.Threaded for the spawn lifecycle.
-    var io_threaded = std.Io.Threaded.init(allocator, .{});
-    defer io_threaded.deinit();
-    const io = io_threaded.io();
-
-    const argv = [_][]const u8{ "curl", "-s", "-L", "-o", tmp_path, url };
-    var child = std.process.spawn(io, .{
-        .argv = &argv,
-        .stdin = .ignore,
-        .stdout = .ignore,
-        .stderr = .ignore,
-    }) catch |err| {
-        std.debug.print("  curl spawn failed: {any}\n", .{err});
-        return error.CurlFailed;
-    };
-    const term = child.wait(io) catch |err| {
-        std.debug.print("  curl wait failed: {any}\n", .{err});
-        return error.CurlFailed;
-    };
-    switch (term) {
-        .exited => |code| if (code != 0) {
-            std.debug.print("  curl download failed with status: {d}\n", .{code});
-            return error.CurlFailed;
-        },
-        else => {
-            std.debug.print("  curl terminated abnormally: {any}\n", .{term});
-            return error.CurlFailed;
-        },
-    }
-
-    // Read the downloaded file (std.fs under the hood).
-    const video_data = storage.readFile(allocator, tmp_path) catch |err| {
-        std.debug.print("  Failed to read video file: {any}\n", .{err});
+    // Read back to verify
+    const verified_data = std.Io.Dir.cwd().readFileAlloc(io, tmp_path, allocator, std.Io.Limit.limited(100 * 1024 * 1024)) catch |err| {
+        std.debug.print("  Native read verification failed: {any}\n", .{err});
         return error.ReadError;
     };
+    errdefer allocator.free(verified_data);
 
-    // Best-effort cleanup. We already have the bytes; a failed unlink
-    // just leaves a stale temp file for the next run to overwrite.
-    std.fs.cwd().deleteFile(tmp_path) catch {};
+    // Clean up temporary file
+    std.Io.Dir.cwd().deleteFile(io, tmp_path) catch {};
 
-    const size_mb = @as(f64, @floatFromInt(video_data.len)) / (1024.0 * 1024.0);
-    std.debug.print("  Downloaded: {d:.2} MB\n", .{size_mb});
-
-    return video_data;
+    return verified_data;
 }
 
 fn printProgress(poll_count: u32) void {

@@ -10,7 +10,8 @@ pub fn parseJob(allocator: std.mem.Allocator, json_str: []const u8) !types.Job {
     // For now, just allocate and return empty job
     _ = json_str;
 
-    const ts = std.posix.clock_gettime(.REALTIME) catch return error.TimeError;
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.REALTIME, &ts);
 
     return types.Job{
         .job_id = try allocator.dupe(u8, "test_job"),

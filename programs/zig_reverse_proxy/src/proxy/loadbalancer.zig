@@ -259,7 +259,8 @@ fn hashIp(ip: [4]u8) usize {
 }
 
 fn getSeed() u64 {
-    const ts = std.posix.clock_gettime(std.posix.CLOCK.MONOTONIC) catch return 12345;
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.nsec));
 }
 

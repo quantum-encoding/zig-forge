@@ -465,8 +465,9 @@ fn handleTransaction(payload: []const u8) !void {
         const reversed_hash_bytes: [32]u8 = reversed;
 
         // Print whale alert in red
-        const btc_amount = @as(f64, @floatFromInt(total_value)) / 100_000_000.0;
-        std.debug.print("{s}🚨 WHALE ALERT: {d:.8} BTC - ", .{RED, btc_amount});
+        const btc_major = total_value / 100_000_000;
+        const btc_minor = total_value % 100_000_000;
+        std.debug.print("{s}🚨 WHALE ALERT: {d}.{d:0>8} BTC - ", .{RED, btc_major, btc_minor});
         for (reversed_hash_bytes) |byte| {
             std.debug.print("{x:0>2}", .{byte});
         }

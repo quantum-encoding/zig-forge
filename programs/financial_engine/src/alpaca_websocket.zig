@@ -55,8 +55,8 @@ pub const AlpacaWebSocketClient = struct {
     
     pub const QuoteMessage = struct {
         symbol: [16]u8,  // Fixed size for performance
-        bid: f64,
-        ask: f64,
+        bid: Decimal,
+        ask: Decimal,
         bid_size: u32,
         ask_size: u32,
         timestamp: i64,
@@ -64,7 +64,7 @@ pub const AlpacaWebSocketClient = struct {
     
     pub const TradeMessage = struct {
         symbol: [16]u8,
-        price: f64,
+        price: Decimal,
         size: u32,
         timestamp: i64,
         exchange: [8]u8,
@@ -76,7 +76,7 @@ pub const AlpacaWebSocketClient = struct {
         side: enum { buy, sell },
         status: enum { new, filled, partial_fill, canceled, rejected },
         filled_qty: u32,
-        filled_price: f64,
+        filled_price: Decimal,
         timestamp: i64,
     };
     
@@ -245,8 +245,8 @@ pub const AlpacaWebSocketClient = struct {
         const symbol_slice = std.mem.sliceTo(&quote.symbol, 0);
         return hft_system.MarketTick{
             .symbol = symbol_slice,
-            .bid = Decimal.fromFloat(quote.bid),
-            .ask = Decimal.fromFloat(quote.ask),
+            .bid = quote.bid,
+            .ask = quote.ask,
             .bid_size = Decimal.fromInt(quote.bid_size),
             .ask_size = Decimal.fromInt(quote.ask_size),
             .timestamp = quote.timestamp,
