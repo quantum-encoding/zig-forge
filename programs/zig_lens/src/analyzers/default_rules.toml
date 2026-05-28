@@ -197,6 +197,8 @@ kind            = "line_match"
 message         = "libc system() / popen() routes its argument through /bin/sh -c — identical RCE class as /bin/sh literal in argv. Use std.process.Child.init with a tokenized argv, OR if shell semantics are required by contract (cron, file-watcher), make the /bin/sh -c invocation explicit and document with a zig-lens-ignore directive."
 contains_any    = [
   "std.c.system(",
+  "std.c.system",
+  "libc.system",
   "std.c.popen(",
   "extern \"c\" fn system(",
   "extern \"c\" fn popen(",

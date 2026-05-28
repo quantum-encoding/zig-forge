@@ -728,3 +728,12 @@ test "Utility functions" {
     try std.testing.expect(qv_constant_time_eq(&a, &b, 3));
     try std.testing.expect(!qv_constant_time_eq(&a, &c, 3));
 }
+
+pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
+    @branchHint(.cold);
+    _ = error_return_trace;
+    _ = ret_addr;
+    std.debug.print("FATAL ZIG FFI PANIC: {s}\n", .{msg});
+    std.process.abort(); // Instantly kill the process, preventing ABI unwind UB
+}
+

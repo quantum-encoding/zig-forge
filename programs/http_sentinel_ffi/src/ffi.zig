@@ -459,3 +459,12 @@ test "version strings" {
     const version = http_sentinel_version();
     try std.testing.expect(version[0] != 0);
 }
+
+pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
+    @branchHint(.cold);
+    _ = error_return_trace;
+    _ = ret_addr;
+    std.debug.print("FATAL ZIG FFI PANIC: {s}\n", .{msg});
+    std.process.abort(); // Instantly kill the process, preventing ABI unwind UB
+}
+

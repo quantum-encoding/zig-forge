@@ -1530,6 +1530,7 @@ export fn quantum_spv_verify_merkle_proof(
     const merkle_proof = spv.MerkleProof{
         .hashes = proof_hashes[0..proof.hash_count],
         .index = proof.index,
+        .tx_count = if (proof.hash_count == 0) 1 else (@as(u32, 1) << @intCast(proof.hash_count)),
     };
 
     if (spv.verifyMerkleProof(tx, root, merkle_proof)) {
@@ -1757,6 +1758,7 @@ export fn quantum_spv_verify_payment(
     const merkle_proof = spv.MerkleProof{
         .hashes = proof_hashes[0..proof.hash_count],
         .index = proof.index,
+        .tx_count = if (proof.hash_count == 0) 1 else (@as(u32, 1) << @intCast(proof.hash_count)),
     };
 
     spv.verifyPayment(tx, merkle_proof, internal_header, prev, check_pow) catch |err| {
@@ -3015,3 +3017,12 @@ test "effective value FFI" {
     const eff = quantum_effective_value(10000, 10);
     try std.testing.expectEqual(@as(i64, 9320), eff);
 }
+
+pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
+    @branchHint(.cold);
+    _ = error_return_trace;
+    _ = ret_addr;
+    std.debug.print("FATAL ZIG FFI PANIC: {s}\n", .{msg});
+    std.process.abort(); // Instantly kill the process, preventing ABI unwind UB
+}
+
