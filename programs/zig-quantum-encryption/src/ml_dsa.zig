@@ -926,12 +926,14 @@ pub fn sign(sk: *const SecretKey, msg: []const u8, randomized: bool) ?Signature 
         var c_tilde: [CTILDE_BYTES]u8 = undefined;
         var h3 = crypto.hash.sha3.Shake256.init(.{});
         h3.update(&mu);
-        // Encode w1
-        var sign_w1_bytes_all: [K * 192]u8 = undefined;
+        // Encode w1: FIPS 204 w1Encode = SimpleBitPack(w1, (q-1)/(2γ2) - 1).
+        // For ML-DSA-65, w1 ∈ [0,15] → 4 bits/coeff (256*4/8 = 128 bytes/poly).
+        // (Was 6 bits — the ML-DSA-44 width — which corrupted c̃.)
+        var sign_w1_bytes_all: [K * 128]u8 = undefined;
         for (0..K) |i| {
-            var w1_bytes: [192]u8 = undefined;
-            polyPackBits(&w1.polys[i], 6, &w1_bytes);
-            @memcpy(sign_w1_bytes_all[i * 192 .. (i + 1) * 192], &w1_bytes);
+            var w1_bytes: [128]u8 = undefined;
+            polyPackBits(&w1.polys[i], 4, &w1_bytes);
+            @memcpy(sign_w1_bytes_all[i * 128 .. (i + 1) * 128], &w1_bytes);
             h3.update(&w1_bytes);
         }
         h3.squeeze(&c_tilde);
@@ -1203,8 +1205,9 @@ pub fn verify(pk: *const PublicKey, msg: []const u8, sig: *const Signature) bool
     var h3 = crypto.hash.sha3.Shake256.init(.{});
     h3.update(&mu);
     for (0..K) |i| {
-        var w1_bytes: [192]u8 = undefined;
-        polyPackBits(&w1_prime.polys[i], 6, &w1_bytes);
+        // w1Encode at 4 bits for ML-DSA-65 (must match sign's c̃ computation).
+        var w1_bytes: [128]u8 = undefined;
+        polyPackBits(&w1_prime.polys[i], 4, &w1_bytes);
         h3.update(&w1_bytes);
     }
     h3.squeeze(&c_tilde_prime);
