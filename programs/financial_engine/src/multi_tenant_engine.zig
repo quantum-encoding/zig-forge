@@ -10,6 +10,7 @@ const api = @import("alpaca_trading_api.zig");
 const praetorian = @import("praetorian_guard.zig");
 const config = @import("config.zig");
 const Decimal = @import("decimal.zig").Decimal;
+const sync = @import("sync.zig");
 
 // ============================================================================
 // TENANT ALGORITHM DEFINITIONS
@@ -88,7 +89,7 @@ pub const ApiClientFactory = struct {
 
 pub const TenantApiClient = struct {
     client: *api.AlpacaTradingAPI,
-    mutex: std.Thread.Mutex,
+    mutex: sync.SpinLock,
     allocator: std.mem.Allocator,
     tenant_id: []const u8,
     
@@ -99,7 +100,7 @@ pub const TenantApiClient = struct {
         
         return .{
             .client = client,
-            .mutex = std.Thread.Mutex{},
+            .mutex = .{},
             .allocator = allocator,
             .tenant_id = tenant_id,
         };
@@ -227,14 +228,14 @@ pub const TenantEngine = struct {
     }
     
     fn executionLoop(self: *Self) !void {
-        const start_time = std.time.nanoTimestamp();
+        const start_time = sync.nowNanos();
         
         std.log.info("[{s}] Algorithm execution started", .{self.tenant.tenant_id});
         
         while (!self.should_stop.load(.acquire)) {
             // Process incoming quotes
             if (self.quote_queue.pop()) |quote| {
-                const process_start = std.time.nanoTimestamp();
+                const process_start = sync.nowNanos();
                 
                 // Execute tenant-specific algorithm
                 switch (self.tenant.algorithm_type) {
@@ -243,7 +244,7 @@ pub const TenantEngine = struct {
                     .mean_reversion => self.executeMeanReversion(quote),
                 }
                 
-                const process_end = std.time.nanoTimestamp();
+                const process_end = sync.nowNanos();
                 _ = self.tenant.cpu_time_ns.fetchAdd(@intCast(process_end - process_start), .monotonic);
                 _ = self.tenant.packets_processed.fetchAdd(1, .monotonic);
             }
@@ -255,10 +256,10 @@ pub const TenantEngine = struct {
                 };
             }
             
-            std.Thread.sleep(1 * std.time.ns_per_ms);
+            sync.sleepNs(1 * std.time.ns_per_ms);
         }
         
-        const total_runtime = std.time.nanoTimestamp() - start_time;
+        const total_runtime = sync.nowNanos() - start_time;
         std.log.info("[{s}] Algorithm stopped. Runtime: {}ms", .{ 
             self.tenant.tenant_id, 
             @divTrunc(total_runtime, std.time.ns_per_ms)
@@ -380,8 +381,8 @@ pub const TenantEngine = struct {
         }
         
         // Add a small random delay to reduce simultaneous API calls
-        const delay = std.crypto.random.int(u32) % 100;
-        std.Thread.sleep(delay * std.time.ns_per_ms);
+        const delay = sync.nonce32() % 100;
+        sync.sleepNs(delay * std.time.ns_per_ms);
         
         std.log.info("[{s}] 📤 Placing order: {} {} {s} @ {s}", .{
             self.tenant.tenant_id,
@@ -395,7 +396,7 @@ pub const TenantEngine = struct {
         const unique_order_id = try std.fmt.allocPrint(
             self.allocator,
             "{s}_{d}_{d}",
-            .{ self.tenant.tenant_id, std.time.timestamp(), std.crypto.random.int(u32) }
+            .{ self.tenant.tenant_id, sync.nowSeconds(), sync.nonce32() }
         );
         defer self.allocator.free(unique_order_id);
         
@@ -430,7 +431,7 @@ pub const TenantEngine = struct {
             .bid = bid,
             .ask = ask,
             .volume = volume,
-            .timestamp = std.time.timestamp(),
+            .timestamp = sync.nowSeconds(),
         };
         
         const copy_len = @min(symbol.len, quote.symbol.len - 1);
@@ -686,7 +687,7 @@ pub const MultiTenantOrchestrator = struct {
             // 1 second delay between tenant launches for stability
             if (idx < self.tenants.items.len - 1) {
                 std.log.info("⏳ Waiting 1 second before next tenant...", .{});
-                std.Thread.sleep(1 * std.time.ns_per_s);
+                sync.sleepNs(1 * std.time.ns_per_s);
             }
         }
         
@@ -726,9 +727,11 @@ pub const MultiTenantOrchestrator = struct {
                     std.log.info("Distributor: No quotes available in queue", .{});
                 }
             } else {
-                // Generate simulated market data
+                // Generate simulated market data (non-crypto PRNG — fake data,
+                // not security-sensitive; std.crypto.random was removed in 0.16).
                 const symbols = [_][]const u8{ "SPY", "AAPL", "MSFT", "QQQ", "NVDA" };
-                const random = std.crypto.random;
+                var prng = std.Random.DefaultPrng.init(@truncate(@as(u128, @bitCast(sync.nowNanos()))));
+                const random = prng.random();
                 
                 for (symbols) |symbol| {
                     const base_price = Decimal{ .value = 100_000_000_000 + @as(i128, random.int(u8)) * 100_000_000 };
@@ -740,10 +743,10 @@ pub const MultiTenantOrchestrator = struct {
                     }
                 }
                 
-                std.Thread.sleep(100 * std.time.ns_per_ms);
+                sync.sleepNs(100 * std.time.ns_per_ms);
             }
             
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            sync.sleepNs(10 * std.time.ns_per_ms);
         }
     }
     
@@ -870,7 +873,7 @@ pub fn main() !void {
     
     var elapsed: u64 = 0;
     while (elapsed < runtime_seconds) {
-        std.Thread.sleep(10 * std.time.ns_per_s);
+        sync.sleepNs(10 * std.time.ns_per_s);
         elapsed += 10;
         
         // Report metrics every 10 seconds with structured logging

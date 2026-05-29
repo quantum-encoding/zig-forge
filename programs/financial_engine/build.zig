@@ -435,15 +435,36 @@ pub fn build(b: *std.Build) void {
         .root_module = order_sender_test_module,
     });
 
+    // Multi-tenant / Praetorian Guard tests — exercises the BPS capital-
+    // allocation gate (exact integer/Decimal math) and the 0.16 concurrency
+    // migration (atomic SpinLock, libc nanosleep). Rooted at praetorian_guard
+    // (which transitively pulls in multi_tenant_engine); needs libc for the
+    // clock_gettime / nanosleep helpers in sync.zig.
+    const hft_tenant_test_module = b.createModule(.{
+        .root_source_file = b.path("src/praetorian_guard.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    hft_tenant_test_module.link_libc = true;
+    const hft_tenant_tests = b.addTest(.{
+        .root_module = hft_tenant_test_module,
+    });
+    const run_hft_tenant_tests = b.addRunArtifact(hft_tenant_tests);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(signal_tests).step);
     test_step.dependOn(&b.addRunArtifact(order_sender_tests).step);
+    test_step.dependOn(&run_hft_tenant_tests.step);
 
     // Standalone step for order_sender — signal_broadcast tests have
     // pre-existing compile failures unrelated to the order_sender Batch 4
     // refactor; this step lets that work be verified in isolation.
     const order_sender_test_step = b.step("test-order-sender", "Run order_sender unit tests only");
     order_sender_test_step.dependOn(&b.addRunArtifact(order_sender_tests).step);
+
+    // Dedicated step for the multi-tenant / capital-allocation gate tests.
+    const hft_tenant_test_step = b.step("test-hft-tenant", "Run multi-tenant Praetorian Guard tests only");
+    hft_tenant_test_step.dependOn(&run_hft_tenant_tests.step);
 }
 
 /// Link against mbedtls 3.x. On macOS, Homebrew's `mbedtls` formula is 4.x

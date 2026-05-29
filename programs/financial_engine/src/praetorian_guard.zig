@@ -5,6 +5,7 @@
 const std = @import("std");
 const api = @import("alpaca_trading_api.zig");
 const Decimal = @import("decimal.zig").Decimal;
+const sync = @import("sync.zig");
 
 // ============================================================================
 // RISK CONFIGURATION
@@ -55,7 +56,7 @@ pub const TenantRiskProfile = struct {
     max_equity: f64 = 0.0,
 
     // Mutex for thread safety
-    mutex: std.Thread.Mutex = .{},
+    mutex: sync.SpinLock = .{},
 };
 
 // ============================================================================
@@ -72,7 +73,7 @@ pub const PraetorianGuard = struct {
     total_cash: f64 = 0.0,
     total_positions_value: f64 = 0.0,
     last_account_update: i64 = 0,
-    account_mutex: std.Thread.Mutex = .{},
+    account_mutex: sync.SpinLock = .{},
     
     // Tenant risk profiles
     tenant_profiles: std.StringHashMap(TenantRiskProfile),
@@ -113,6 +114,12 @@ pub const PraetorianGuard = struct {
     }
     
     pub fn deinit(self: *Self) void {
+        // registerTenant dupes the tenant id and uses the SAME slice as the key
+        // in both tenant_profiles and capital_allocations; free it once here
+        // (previously leaked on every registration). rejection_reasons keys are
+        // string literals — not owned, not freed.
+        var it = self.tenant_profiles.keyIterator();
+        while (it.next()) |k| self.allocator.free(k.*);
         self.tenant_profiles.deinit();
         self.capital_allocations.deinit();
         self.rejection_reasons.deinit();
@@ -162,7 +169,7 @@ pub const PraetorianGuard = struct {
         const portfolio_value = try std.fmt.parseFloat(f64, account.portfolio_value);
         self.total_positions_value = portfolio_value - self.total_cash;
             
-        self.last_account_update = std.time.timestamp();
+        self.last_account_update = sync.nowSeconds();
         
         std.log.info("[PRAETORIAN] Account updated - Buying Power: ${d:.2}, Cash: ${d:.2}, Positions: ${d:.2}", .{
             self.total_buying_power.toFloat(),
@@ -250,7 +257,7 @@ pub const PraetorianGuard = struct {
         }
         
         // 3. Check rate limiting
-        const now = std.time.timestamp();
+        const now = sync.nowSeconds();
         if (now > profile_entry.last_minute_reset + 60) {
             profile_entry.orders_this_minute = 0;
             profile_entry.last_minute_reset = now;
@@ -419,29 +426,46 @@ pub const ValidationResult = struct {
 
 test "Praetorian Guard initialization" {
     const allocator = std.testing.allocator;
-    
-    // Mock factory
+
     var factory = try @import("multi_tenant_engine.zig").ApiClientFactory.init(
         allocator,
         "test_key",
-        "test_secret"
+        "test_secret",
     );
     defer factory.deinit();
-    
+
     var guard = try PraetorianGuard.init(allocator, &factory);
     defer guard.deinit();
-    
-    // Register test tenant — 3333 bps = 33.33% capital allocation.
+
     try guard.registerTenant("TEST_001", .{}, 3333);
-    
-    // Validate test order
-    const result = try guard.validateOrder(
-        "TEST_001",
-        "AAPL",
-        .buy,
-        10,
-        Decimal.fromInt(150),
-    );
-    
-    try std.testing.expect(!result.approved); // Should fail without account state
+    try std.testing.expect(guard.capital_allocations.get("TEST_001").? == 3333);
+}
+
+// Verifies the BPS capital-allocation gate is exact integer/Decimal math:
+// allocated_capital = buying_power * bps / 10000, with NO f64 anywhere.
+test "BPS capital-allocation gate: exact Decimal, rejects breach" {
+    const allocator = std.testing.allocator;
+
+    var factory = try @import("multi_tenant_engine.zig").ApiClientFactory.init(allocator, "k", "s");
+    defer factory.deinit();
+    var guard = try PraetorianGuard.init(allocator, &factory);
+    defer guard.deinit();
+
+    // 33.33% allocation, $10,000 buying power (mocked — bypasses the network).
+    try guard.registerTenant("T", .{}, 3333);
+    guard.total_buying_power = Decimal.fromInt(10_000);
+    // Expected allocated capital = 10000 * 3333 / 10000 = exactly 3333.
+    const expected_alloc = Decimal.fromInt(3333);
+
+    // Breaching buy: 100 @ $50 = $5,000 > $3,333 → rejected at the BPS gate.
+    const breach = try guard.validateOrder("T", "AAPL", .buy, 100, Decimal.fromInt(50));
+    try std.testing.expect(!breach.approved);
+    try std.testing.expectEqualStrings("Exceeds allocated capital", breach.reason);
+    // Exact Decimal precision — the gate computed 3333 with zero float drift.
+    try std.testing.expect(breach.allocated_capital.equals(expected_alloc));
+
+    // Within allocation: 50 @ $50 = $2,500 < $3,333 → passes the BPS gate.
+    const ok = try guard.validateOrder("T", "AAPL", .buy, 50, Decimal.fromInt(50));
+    try std.testing.expect(ok.approved);
+    try std.testing.expect(ok.allocated_capital.equals(expected_alloc));
 }
