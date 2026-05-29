@@ -12,9 +12,6 @@ const crypto = std.crypto;
 const ntt = @import("ml_kem.zig");
 const rng = @import("rng.zig");
 
-// Cross-platform secure RNG
-const getRandomBytes = rng.fillSecureRandom;
-
 const Poly = ntt.Poly;
 const Params = ntt.Params;
 const ML_KEM_768 = ntt.ML_KEM_768;
@@ -109,8 +106,8 @@ pub fn keyGen768() MlKemError!KeyPair768 {
     var d: [32]u8 = undefined;
     var z: [32]u8 = undefined;
 
-    getRandomBytes(&d);
-    getRandomBytes(&z);
+    rng.fillSecureRandomSafe(&d) catch return MlKemError.RandomnessFailure;
+    rng.fillSecureRandomSafe(&z) catch return MlKemError.RandomnessFailure;
 
     // Call internal key generation
     return keyGenInternal768(&d, &z);
@@ -238,7 +235,7 @@ pub fn encaps768(ek: *const EncapsulationKey768) MlKemError!EncapsResult768 {
 
     // Step 2: Generate random message m
     var m: [32]u8 = undefined;
-    getRandomBytes(&m);
+    rng.fillSecureRandomSafe(&m) catch return MlKemError.RandomnessFailure;
 
     // Call internal encapsulation
     return encapsInternal768(ek, &m);

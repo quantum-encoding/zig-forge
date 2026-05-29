@@ -39,7 +39,7 @@ test "NIST FIPS 204 KAT: ML-DSA-65 keyGen (seed -> pk, sk)" {
     var seed: [32]u8 = undefined;
     _ = try std.fmt.hexToBytes(&seed, kg_seed_hex);
 
-    const kp = ml_dsa.keyGen(&seed);
+    const kp = try ml_dsa.keyGen(&seed);
 
     var exp_pk: [ml_dsa.PUBLIC_KEY_SIZE]u8 = undefined;
     var exp_sk: [ml_dsa.SECRET_KEY_SIZE]u8 = undefined;
@@ -59,7 +59,7 @@ test "NIST FIPS 204 KAT: ML-DSA-65 sigGen (sk, msg -> sig, deterministic)" {
     const msg = try hexAlloc(a, sg_msg_hex);
     defer a.free(msg);
 
-    const sig = ml_dsa.sign(&sk, msg, false) orelse return error.SigningFailed;
+    const sig = try ml_dsa.sign(&sk, msg, false);
 
     var exp_sig: [ml_dsa.SIGNATURE_SIZE]u8 = undefined;
     _ = try std.fmt.hexToBytes(&exp_sig, sg_sig_hex);

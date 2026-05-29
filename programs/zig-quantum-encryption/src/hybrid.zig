@@ -61,7 +61,6 @@ pub const HybridError = error{
 
 // Cross-platform secure RNG
 const rng = @import("rng.zig");
-const getRandomBytes = rng.fillSecureRandom;
 
 /// Generate a hybrid key pair
 /// Combines ML-KEM-768 and X25519 key generation
@@ -73,7 +72,7 @@ pub fn keyGen() HybridError!HybridKeyPair {
 
     // Generate X25519 key pair
     var x25519_sk: [X25519_KEY_SIZE]u8 = undefined;
-    getRandomBytes(&x25519_sk);
+    rng.fillSecureRandomSafe(&x25519_sk) catch return HybridError.KeyGenFailed;
     const x25519_pk = X25519.recoverPublicKey(x25519_sk) catch return HybridError.KeyGenFailed;
 
     // Combine into hybrid keys
@@ -105,7 +104,7 @@ pub fn encaps(ek: *const HybridEncapsulationKey) HybridError!HybridEncapsResult 
 
     // X25519 key exchange (ephemeral)
     var x25519_eph_sk: [X25519_KEY_SIZE]u8 = undefined;
-    getRandomBytes(&x25519_eph_sk);
+    rng.fillSecureRandomSafe(&x25519_eph_sk) catch return HybridError.EncapsFailed;
     const x25519_eph_pk = X25519.recoverPublicKey(x25519_eph_sk) catch return HybridError.EncapsFailed;
     const x25519_ss = X25519.scalarmult(x25519_eph_sk, x25519_pk.*) catch return HybridError.InvalidPublicKey;
 
@@ -164,62 +163,15 @@ fn combineSecrets(mlkem_ss: *const [32]u8, x25519_ss: *const [32]u8) SharedSecre
 }
 
 // ============================================================================
-// C API for FFI
+// C-ABI boundary
 // ============================================================================
-
-/// C-compatible key pair structure
-pub const CHybridKeyPair = extern struct {
-    ek: [HYBRID_EK_SIZE]u8,
-    dk: [HYBRID_DK_SIZE]u8,
-};
-
-/// C-compatible encapsulation result
-pub const CHybridEncapsResult = extern struct {
-    K: [SHARED_SECRET_SIZE]u8,
-    ct: [HYBRID_CT_SIZE]u8,
-};
-
-/// Generate hybrid key pair (C API)
-export fn hybrid_keygen(out: *CHybridKeyPair) c_int {
-    const kp = keyGen() catch return -1;
-    out.ek = kp.ek;
-    out.dk = kp.dk;
-    return 0;
-}
-
-/// Encapsulate (C API)
-export fn hybrid_encaps(ek: *const [HYBRID_EK_SIZE]u8, out: *CHybridEncapsResult) c_int {
-    const result = encaps(ek) catch return -1;
-    out.K = result.K;
-    out.ct = result.ct;
-    return 0;
-}
-
-/// Decapsulate (C API)
-export fn hybrid_decaps(
-    dk: *const [HYBRID_DK_SIZE]u8,
-    ct: *const [HYBRID_CT_SIZE]u8,
-    out: *[SHARED_SECRET_SIZE]u8,
-) void {
-    out.* = decaps(dk, ct);
-}
-
-/// Get key sizes (C API)
-export fn hybrid_ek_size() usize {
-    return HYBRID_EK_SIZE;
-}
-
-export fn hybrid_dk_size() usize {
-    return HYBRID_DK_SIZE;
-}
-
-export fn hybrid_ct_size() usize {
-    return HYBRID_CT_SIZE;
-}
-
-export fn hybrid_ss_size() usize {
-    return SHARED_SECRET_SIZE;
-}
+//
+// This module deliberately exposes NO `export fn`. `quantum_vault_ffi.zig` is
+// the single source of truth for the C-ABI surface — it wraps the `pub fn`
+// hybrid primitives above (keyGen/encaps/decaps) as `qv_hybrid_*` with the
+// unified `QvError` codes, panic seal, and comptime layout guards. A second,
+// undocumented `hybrid_*` export set used to live here; it was removed in
+// Batch 49 to avoid two divergent boundaries to the same primitive.
 
 // ============================================================================
 // Tests

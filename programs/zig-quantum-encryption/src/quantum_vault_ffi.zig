@@ -118,6 +118,22 @@ pub const QvMlDsaKeyPair = extern struct {
     sk: QvMlDsaSecretKey,
 };
 
+// ML-DSA FFI @ptrCast soundness guards.
+//
+// qv_mldsa65_sign / qv_mldsa65_verify @ptrCast between these extern wire structs
+// and the internal (non-extern) ml_dsa key/sig structs. That reinterpret is only
+// sound while both sides are a single `[N]u8` of identical length. Turn any
+// future field-addition or size drift into a COMPILE error here, rather than a
+// silent out-of-bounds reinterpret at the C boundary.
+comptime {
+    if (@sizeOf(QvMlDsaSecretKey) != @sizeOf(ml_dsa.SecretKey))
+        @compileError("QvMlDsaSecretKey vs ml_dsa.SecretKey size mismatch — @ptrCast in qv_mldsa65_sign is unsound");
+    if (@sizeOf(QvMlDsaPublicKey) != @sizeOf(ml_dsa.PublicKey))
+        @compileError("QvMlDsaPublicKey vs ml_dsa.PublicKey size mismatch — @ptrCast in qv_mldsa65_verify is unsound");
+    if (@sizeOf(QvMlDsaSignature) != @sizeOf(ml_dsa.Signature))
+        @compileError("QvMlDsaSignature vs ml_dsa.Signature size mismatch — @ptrCast in qv_mldsa65_verify is unsound");
+}
+
 // ============================================================================
 // Hybrid ML-KEM+X25519 Types
 // ============================================================================
@@ -150,7 +166,10 @@ pub const QvHybridEncapsResult = extern struct {
 
 /// Generate ML-KEM-768 key pair for key encapsulation
 export fn qv_mlkem768_keygen(keypair: *QvMlKemKeyPair) QvError {
-    const result = ml_kem.keyGen768() catch return .mlkem_keygen_failed;
+    const result = ml_kem.keyGen768() catch |err| return switch (err) {
+        error.RandomnessFailure => .rng_failure,
+        else => .mlkem_keygen_failed,
+    };
     @memcpy(&keypair.ek.data, &result.ek.data);
     @memcpy(&keypair.dk.data, &result.dk.data);
     return .success;
@@ -164,7 +183,11 @@ export fn qv_mlkem768_encaps(
     var mlkem_ek: ml_kem.EncapsulationKey768 = undefined;
     @memcpy(&mlkem_ek.data, &ek.data);
 
-    const encaps_result = ml_kem.encaps768(&mlkem_ek) catch return .mlkem_encaps_failed;
+    const encaps_result = ml_kem.encaps768(&mlkem_ek) catch |err| return switch (err) {
+        error.RandomnessFailure => .rng_failure,
+        error.InvalidEncapsulationKey => .mlkem_invalid_ek,
+        else => .mlkem_encaps_failed,
+    };
     @memcpy(&result.shared_secret, &encaps_result.K);
     @memcpy(&result.ciphertext.data, &encaps_result.c.data);
     return .success;
@@ -196,7 +219,10 @@ export fn qv_mldsa65_keygen(
     keypair: *QvMlDsaKeyPair,
     seed: ?*const [MLDSA65_SEED_SIZE]u8,
 ) QvError {
-    const result = ml_dsa.keyGen(seed);
+    const result = ml_dsa.keyGen(seed) catch |err| return switch (err) {
+        error.RandomnessFailure => .rng_failure,
+        error.SigningFailed => .mldsa_keygen_failed,
+    };
     @memcpy(&keypair.pk.data, &result.pk.data);
     @memcpy(&keypair.sk.data, &result.sk.data);
     return .success;
@@ -216,11 +242,12 @@ export fn qv_mldsa65_sign(
     randomized: bool,
 ) QvError {
     const secret_key: *const ml_dsa.SecretKey = @ptrCast(sk);
-    if (ml_dsa.sign(secret_key, message[0..message_len], randomized)) |sig| {
-        @memcpy(&signature.data, &sig.data);
-        return .success;
-    }
-    return .mldsa_signing_failed;
+    const sig = ml_dsa.sign(secret_key, message[0..message_len], randomized) catch |err| return switch (err) {
+        error.RandomnessFailure => .rng_failure,
+        error.SigningFailed => .mldsa_signing_failed,
+    };
+    @memcpy(&signature.data, &sig.data);
+    return .success;
 }
 
 /// Sign message with randomized ML-DSA-65
@@ -729,11 +756,22 @@ test "Utility functions" {
     try std.testing.expect(!qv_constant_time_eq(&a, &c, 3));
 }
 
-pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
+/// FFI panic seal. Any panic that reaches here — a safety-check trip in a
+/// ReleaseSafe build, an `@compileError`-guarded invariant, etc. — is converted
+/// into an immediate `abort()` so it can never unwind across the C ABI into the
+/// Rust host (which would be undefined behaviour).
+fn ffiPanic(msg: []const u8, ret_addr: ?usize) noreturn {
     @branchHint(.cold);
-    _ = error_return_trace;
     _ = ret_addr;
     std.debug.print("FATAL ZIG FFI PANIC: {s}\n", .{msg});
-    std.process.abort(); // Instantly kill the process, preventing ABI unwind UB
+    std.process.abort();
 }
+
+/// Zig 0.16 panic interface: the root module must expose `pub const panic` as a
+/// namespace. `std.debug.FullPanic` wraps `ffiPanic` and supplies all the safety
+/// entry points (outOfBounds, unwrapNull, integerOverflow, …), each of which
+/// funnels into `ffiPanic`. The previous `pub fn panic(msg, *StackTrace, usize)`
+/// form only worked via a deprecated 0.16 compat shim and would silently revert
+/// to the default handler in a future toolchain.
+pub const panic = std.debug.FullPanic(ffiPanic);
 

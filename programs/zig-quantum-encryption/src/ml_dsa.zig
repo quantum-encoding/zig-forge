@@ -27,8 +27,15 @@ const crypto = std.crypto;
 const mem = std.mem;
 const rng = @import("rng.zig");
 
-// Cross-platform secure RNG
-const getRandomBytes = rng.fillSecureRandom;
+/// ML-DSA error set. Surfaced across the FFI boundary as C error codes rather
+/// than panicking the host process — entropy starvation must be recoverable.
+pub const DsaError = error{
+    /// The system RNG failed while drawing the keygen seed or signing nonce.
+    RandomnessFailure,
+    /// The rejection-sampling loop exhausted its iteration budget without a
+    /// valid signature (astronomically unlikely with correct randomness).
+    SigningFailed,
+};
 
 // ============================================================================
 // ML-DSA-65 Parameters (FIPS 204 Table 1)
@@ -699,14 +706,16 @@ pub const KeyPair = struct {
     sk: SecretKey,
 };
 
-/// Generate ML-DSA-65 key pair
-pub fn keyGen(seed: ?*const [32]u8) KeyPair {
+/// Generate ML-DSA-65 key pair.
+/// Returns `error.RandomnessFailure` if the system RNG fails when no seed is
+/// supplied (rather than aborting the process).
+pub fn keyGen(seed: ?*const [32]u8) DsaError!KeyPair {
     var xi: [32]u8 = undefined;
 
     if (seed) |s| {
         xi = s.*;
     } else {
-        getRandomBytes(&xi);
+        rng.fillSecureRandomSafe(&xi) catch return error.RandomnessFailure;
     }
 
     // Expand seed per FIPS 204 (Aug 2024), Algorithm 6 / KeyGen_internal line 1:
@@ -823,9 +832,10 @@ pub fn keyGen(seed: ?*const [32]u8) KeyPair {
 // Signing (Algorithm 2 from FIPS 204)
 // ============================================================================
 
-/// Sign a message using ML-DSA-65
-/// Returns signature or null if signing fails (should retry with different randomness)
-pub fn sign(sk: *const SecretKey, msg: []const u8, randomized: bool) ?Signature {
+/// Sign a message using ML-DSA-65.
+/// Returns `error.RandomnessFailure` if randomized signing is requested and the
+/// system RNG fails, or `error.SigningFailed` if the rejection loop is exhausted.
+pub fn sign(sk: *const SecretKey, msg: []const u8, randomized: bool) DsaError!Signature {
     // Extract components from secret key
     const rho = sk.getRho();
     const k_bytes = sk.getK();
@@ -883,7 +893,7 @@ pub fn sign(sk: *const SecretKey, msg: []const u8, randomized: bool) ?Signature 
     // Get randomness for signing
     var rnd: [32]u8 = undefined;
     if (randomized) {
-        getRandomBytes(&rnd);
+        rng.fillSecureRandomSafe(&rnd) catch return error.RandomnessFailure;
     } else {
         @memset(&rnd, 0);
     }
@@ -1053,7 +1063,7 @@ pub fn sign(sk: *const SecretKey, msg: []const u8, randomized: bool) ?Signature 
         return sig;
     }
 
-    return null; // Should never happen with proper randomness
+    return error.SigningFailed; // Should never happen with proper randomness
 }
 
 fn packGamma1Poly(p: *const Poly, output: *[640]u8) void {
@@ -1292,28 +1302,25 @@ fn unpackHints(hints: *[K][N]u1, count: *usize, input: []const u8) bool {
 
 test "ML-DSA-65 key generation" {
     const seed = [_]u8{0x42} ** 32;
-    const keypair = keyGen(&seed);
+    const keypair = try keyGen(&seed);
     _ = keypair;
 }
 
 test "ML-DSA-65 sign and verify" {
     // Use deterministic seed for reproducible testing
     const seed = [_]u8{0x42} ** 32;
-    const keypair = keyGen(&seed);
+    const keypair = try keyGen(&seed);
 
     const msg = "Test message for ML-DSA-65 signature";
 
-    // Use deterministic signing (randomized=false)
-    if (sign(&keypair.sk, msg, false)) |sig| {
-        const valid = verify(&keypair.pk, msg, &sig);
-        try std.testing.expect(valid);
+    // Use deterministic signing (randomized=false) — must succeed
+    const sig = try sign(&keypair.sk, msg, false);
+    const valid = verify(&keypair.pk, msg, &sig);
+    try std.testing.expect(valid);
 
-        // Verify with wrong message should fail
-        const valid2 = verify(&keypair.pk, "Wrong message", &sig);
-        try std.testing.expect(!valid2);
-    } else {
-        try std.testing.expect(false); // Sign should not fail
-    }
+    // Verify with wrong message should fail
+    const valid2 = verify(&keypair.pk, "Wrong message", &sig);
+    try std.testing.expect(!valid2);
 }
 
 test "ML-DSA-65 NTT round trip" {
