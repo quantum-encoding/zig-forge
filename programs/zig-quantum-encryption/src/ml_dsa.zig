@@ -420,32 +420,31 @@ pub fn expandA(a: *PolyMatrix, rho: *const [32]u8) void {
     }
 }
 
-/// Sample polynomial with coefficients in [0, q-1] using rejection sampling
+/// RejNTTPoly: sample a polynomial in the NTT domain with coefficients in
+/// [0, q-1] (FIPS 204 Algorithm 30), using CoefFromThreeBytes (Algorithm 14).
+///
+/// ML-DSA's q = 8380417 ≈ 2^23, so each coefficient is built from THREE bytes
+/// as z = b0 + 2^8·b1 + 2^16·(b2 mod 128) — the top bit of b2 is masked — and
+/// accepted iff z < q, else rejected. (The previous code used Kyber's 12-bit,
+/// two-per-3-bytes extraction, which confined A to [0,4095] and never rejected
+/// — wrong scheme entirely.)
 fn rejNttPoly(p: *Poly, rho: *const [32]u8, j: u8, i: u8) void {
     var xof = crypto.hash.sha3.Shake128.init(.{});
     xof.update(rho);
-    xof.update(&[_]u8{j, i});
+    xof.update(&[_]u8{ j, i });
 
     var ctr: usize = 0;
     while (ctr < N) {
         var buf: [3]u8 = undefined;
         xof.squeeze(&buf);
 
-        // Extract two potential coefficients from 3 bytes
-        const b0: u32 = buf[0];
-        const b1: u32 = buf[1];
-        const b2: u32 = buf[2];
+        // CoefFromThreeBytes: one 23-bit candidate, top bit of b2 cleared.
+        const z: u32 = @as(u32, buf[0]) |
+            (@as(u32, buf[1]) << 8) |
+            ((@as(u32, buf[2]) & 0x7F) << 16);
 
-        const d1: u32 = b0 | ((b1 & 0x0F) << 8);
-        const d2: u32 = (b1 >> 4) | (b2 << 4);
-
-        // Rejection sampling: accept if < q
-        if (d1 < Q and ctr < N) {
-            p.coeffs[ctr] = @intCast(d1);
-            ctr += 1;
-        }
-        if (d2 < Q and ctr < N) {
-            p.coeffs[ctr] = @intCast(d2);
+        if (z < Q) {
+            p.coeffs[ctr] = @intCast(z);
             ctr += 1;
         }
     }
