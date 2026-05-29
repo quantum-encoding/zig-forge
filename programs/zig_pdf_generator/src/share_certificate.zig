@@ -21,6 +21,7 @@
 
 const std = @import("std");
 const document = @import("document.zig");
+const image_mod = @import("image.zig");
 
 // =============================================================================
 // Data Structures
@@ -382,6 +383,11 @@ pub const ShareCertificateRenderer = struct {
     doc: document.PdfDocument,
     data: ShareCertificateData,
 
+    // Decoded image byte buffers (logo + signatures). addImage() stores image
+    // data by reference and only emits it at doc.build() time, so these must
+    // stay alive until rendering finishes — freed in deinit(), never per-draw.
+    image_bufs: std.ArrayListUnmanaged([]u8) = .empty,
+
     // Page dimensions (A4 landscape)
     page_width: f32 = 842, // A4 landscape width in points
     page_height: f32 = 595, // A4 landscape height in points
@@ -410,17 +416,45 @@ pub const ShareCertificateRenderer = struct {
     }
 
     pub fn deinit(self: *ShareCertificateRenderer) void {
+        for (self.image_bufs.items) |buf| self.allocator.free(buf);
+        self.image_bufs.deinit(self.allocator);
         self.doc.deinit();
     }
 
-    /// Load image from file path
-    /// Note: This requires an absolute path or implementation would need global IO context
-    fn loadImageFromFile(self: *ShareCertificateRenderer, file_path: []const u8) ![]u8 {
-        // File I/O requires absolute paths and global IO context
-        // For now, we try to read the file directly from the heap-allocated path
-        _ = file_path; // Suppress unused warning
-        _ = self;
-        return error.FilePathNotSupported;
+    /// Resolve an Image (base64 data URL or file path), decode it into the
+    /// raw-pixel form the PDF writer expects, register it with the document,
+    /// and return its XObject id. The decoded bytes are tracked in image_bufs
+    /// and freed in deinit(). Returns null (logs nothing) on any failure so a
+    /// bad image degrades to "no image" rather than failing the whole document.
+    fn addImageSource(self: *ShareCertificateRenderer, img: Image) !?[]const u8 {
+        switch (img.source) {
+            .base64 => |b64| {
+                // loadImageFromBase64 decodes PNG -> raw RGB pixels (or keeps
+                // JPEG bytes) and hands back the buffer to keep alive.
+                const result = image_mod.loadImageFromBase64(self.allocator, b64.data) catch return null;
+                try self.image_bufs.append(self.allocator, result.decoded_bytes);
+                return self.doc.addImage(result.image) catch null;
+            },
+            .path => |path| {
+                // Read the file via the shared single-threaded IO handle (works
+                // identically from CLI and FFI), then decode like base64.
+                const io = std.Io.Threaded.global_single_threaded.io();
+                const raw = std.Io.Dir.cwd().readFileAlloc(io, path, self.allocator, .limited(32 * 1024 * 1024)) catch return null;
+                const doc_img = image_mod.loadImage(self.allocator, raw) catch {
+                    self.allocator.free(raw);
+                    return null;
+                };
+                if (doc_img.data.ptr == raw.ptr) {
+                    // JPEG: image references the raw bytes — keep them.
+                    try self.image_bufs.append(self.allocator, raw);
+                } else {
+                    // PNG: loadImage allocated fresh pixels; raw is no longer needed.
+                    self.allocator.free(raw);
+                    try self.image_bufs.append(self.allocator, @constCast(doc_img.data));
+                }
+                return self.doc.addImage(doc_img) catch null;
+            },
+        }
     }
 
     /// Draw the outer decorative border
@@ -492,32 +526,13 @@ pub const ShareCertificateRenderer = struct {
             const center_x = self.page_width / 2;
             const logo_y = self.page_height - self.margin - 140;
 
-            // Default logo size
+            // Display size (the source image is scaled to fit this box).
             const logo_w: f32 = if (logo.width_mm) |w| w * 2.83465 else 100; // mm to points
             const logo_h: f32 = if (logo.height_mm) |h| h * 2.83465 else 80;
 
-            switch (logo.source) {
-                .base64 => |b64| {
-                    // Decode base64 and add image
-                    const decoded = try decodeBase64(self.allocator, b64.data);
-                    defer self.allocator.free(decoded);
-
-                    const is_png = std.mem.eql(u8, b64.mime_type, "image/png");
-                    const img = document.Image{
-                        .width = @intFromFloat(logo_w),
-                        .height = @intFromFloat(logo_h),
-                        .format = if (is_png) .png_rgba else .jpeg,
-                        .data = decoded,
-                    };
-                    const img_id = try self.doc.addImage(img);
-                    try content.drawImage(img_id, center_x - logo_w / 2, logo_y - logo_h, logo_w, logo_h);
-                    return img_id;
-                },
-                .path => {
-                    // File path handling would require file I/O
-                    // For now, skip logo if path-based
-                    return null;
-                },
+            if (try self.addImageSource(logo)) |img_id| {
+                try content.drawImage(img_id, center_x - logo_w / 2, logo_y - logo_h, logo_w, logo_h);
+                return img_id;
             }
         }
         return null;
@@ -675,45 +690,14 @@ pub const ShareCertificateRenderer = struct {
             // Draw signature image if provided
             const line_width: f32 = 120;
             if (sig.signature) |sig_img| {
-                // Default signature image size (can be overridden by width_mm/height_mm)
+                // Display size (the source image is scaled to fit this box).
                 const sig_w: f32 = if (sig_img.width_mm) |w| w * 2.83465 else 80; // mm to points
                 const sig_h: f32 = if (sig_img.height_mm) |h| h * 2.83465 else 30;
 
-                switch (sig_img.source) {
-                    .base64 => |b64| {
-                        const decoded = decodeBase64(self.allocator, b64.data) catch null;
-                        if (decoded) |img_data| {
-                            defer self.allocator.free(img_data);
-
-                            // zig-lens-ignore: EQL-FOR-SECRETS MIME-type dispatch ("image/png" vs jpeg) — public format label; enclosing fn `drawSignatures` triggers the rule because the camelCase split includes `Signatures`
-                            const is_png = std.mem.eql(u8, b64.mime_type, "image/png");
-                            const img = document.Image{
-                                .width = @intFromFloat(sig_w),
-                                .height = @intFromFloat(sig_h),
-                                .format = if (is_png) .png_rgba else .jpeg,
-                                .data = img_data,
-                            };
-                            if (self.doc.addImage(img)) |img_id| {
-                                // Position signature image above the line, centered
-                                try content.drawImage(img_id, col_x - sig_w / 2, y - sig_h + 5, sig_w, sig_h);
-                            } else |_| {}
-                        }
-                    },
-                    .path => |file_path| {
-                        // Load signature image from file
-                        if (self.loadImageFromFile(file_path)) |img_data| {
-                            defer self.allocator.free(img_data);
-                            const img = document.Image{
-                                .width = @intFromFloat(sig_w),
-                                .height = @intFromFloat(sig_h),
-                                .format = .png_rgba, // Default to PNG, could be extended
-                                .data = img_data,
-                            };
-                            if (self.doc.addImage(img)) |img_id| {
-                                try content.drawImage(img_id, col_x - sig_w / 2, y - sig_h + 5, sig_w, sig_h);
-                            } else |_| {}
-                        } else |_| {}
-                    },
+                // Both base64 and file-path signatures go through one decode path.
+                if (self.addImageSource(sig_img) catch null) |img_id| {
+                    // Position signature image above the line, centered.
+                    content.drawImage(img_id, col_x - sig_w / 2, y - sig_h + 5, sig_w, sig_h) catch {};
                 }
             }
 
@@ -792,22 +776,6 @@ pub const ShareCertificateRenderer = struct {
 // Helper Functions
 // =============================================================================
 
-/// Decode base64 string
-fn decodeBase64(allocator: std.mem.Allocator, encoded: []const u8) ![]u8 {
-    // Strip data URI prefix if present
-    var data = encoded;
-    if (std.mem.indexOf(u8, encoded, ",")) |comma_pos| {
-        data = encoded[comma_pos + 1 ..];
-    }
-
-    const decoder = std.base64.standard;
-    const decoded_len = try decoder.Decoder.calcSizeForSlice(data);
-    const decoded = try allocator.alloc(u8, decoded_len);
-    errdefer allocator.free(decoded);
-
-    _ = try decoder.Decoder.decode(decoded, data);
-    return decoded;
-}
 
 // =============================================================================
 // Public API
@@ -951,8 +919,10 @@ fn parseShareCertificateJson(allocator: std.mem.Allocator, json_str: []const u8)
             .name = if (c.object.get("name")) |v| try allocator.dupe(u8, v.string) else "",
             .registration_number = if (c.object.get("registration_number")) |v| try allocator.dupe(u8, v.string) else "",
             .registered_address = try parseAddress(allocator, c.object.get("registered_address")),
+            // Optional company logo, as { "data": "<base64>", "mime_type": ... }
+            // or { "path": "logo.png" }, with optional width_mm / height_mm.
+            .logo = try parseImage(allocator, c.object.get("logo")),
         };
-        // Logo parsing would go here
     }
 
     // Parse holder
@@ -1119,4 +1089,38 @@ test "share certificate from json (leak-checked)" {
     const pdf = try generateShareCertificateFromJson(allocator, json);
     defer allocator.free(pdf);
     try std.testing.expect(std.mem.startsWith(u8, pdf, "%PDF"));
+}
+
+// Guards the image pipeline: a base64 PNG logo + signature must decode into a
+// real image XObject (not be dropped or rendered as corrupt raw bytes), with
+// no leak of the decoded pixel buffers. 2x2 PNG embedded below.
+test "share certificate embeds base64 images (leak-checked)" {
+    const allocator = std.testing.allocator;
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR42mOQ0ooDIgYIBQAQtgKJFajLsgAAAABJRU5ErkJggg==";
+    const json =
+        \\{
+        \\  "certificate": { "number": "CERT-IMG-1", "issue_date": "29 May 2026" },
+        \\  "company": { "name": "Quantum Holdings Ltd", "registration_number": "12345678",
+        \\    "registered_address": { "line1": "Unit 7", "city": "Fareham", "postcode": "PO15 7FH", "country": "UK" },
+        \\    "logo": { "data": "
+    ++ png_b64 ++
+        \\", "mime_type": "image/png", "width_mm": 40, "height_mm": 20 } },
+        \\  "holder": { "name": "John Demo", "address": { "line1": "18 Maple Drive", "city": "Portsmouth", "postcode": "PO6 2TN", "country": "UK" } },
+        \\  "shares": { "quantity": 100, "class": "Ordinary", "nominal_value": 1.0, "currency": "GBP", "paid_status": "fully_paid" },
+        \\  "signatories": [ { "role": "Director", "name": "Jane Hartley", "date": "29 May 2026",
+        \\    "signature": { "data": "
+    ++ png_b64 ++
+        \\", "mime_type": "image/png" } } ]
+        \\}
+    ;
+    const pdf = try generateShareCertificateFromJson(allocator, json);
+    defer allocator.free(pdf);
+    try std.testing.expect(std.mem.startsWith(u8, pdf, "%PDF"));
+    // Two image XObjects (logo + signature) must be embedded.
+    var count: usize = 0;
+    var it = std.mem.window(u8, pdf, "/Subtype /Image".len, 1);
+    while (it.next()) |w| {
+        if (std.mem.eql(u8, w, "/Subtype /Image")) count += 1;
+    }
+    try std.testing.expect(count >= 2);
 }

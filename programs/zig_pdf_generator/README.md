@@ -486,7 +486,45 @@ An unknown or missing `<type>` prints the valid list to `stderr` and exits `1`. 
 >
 > **`contract`** — `document_type`, `title`, `subtitle`, `parties[]` (`role`/`name`/`address`/`identifier`), `date_line`, `sections[]` (`heading`/`content`), `signatures[]`, plus an optional `variables{}` map whose keys replace `{{placeholder}}` tokens anywhere in the document.
 >
-> **`share-certificate`** — `certificate{number,issue_date}`, `company{name,registration_number,registered_address{line1,city,county,postcode,country}}`, `holder{name,address{…}}`, `shares{quantity,quantity_words,class,nominal_value,currency,paid_status}`, `signatories[]{role,name,date}`, optional `template.style{border_color,accent_color,font_family}` and `custom{…}`.
+> **`share-certificate`** — `certificate{number,issue_date}`, `company{name,registration_number,registered_address{line1,city,county,postcode,country}}`, `holder{name,address{…}}`, `shares{quantity,quantity_words,class,nominal_value,currency,paid_status}`, `signatories[]{role,name,date}`, optional `template.style{border_color,accent_color,font_family}`, `company.logo`, per-signatory `signatures[].signature`, and `custom{…}`.
+
+---
+
+### Passing images (logos, signatures, watermarks)
+
+Images are passed **inside the JSON** — there is no separate `--image` flag. Each template exposes one or more **named image slots**, and the field name *is* "which image goes where". An image value is given in one of two interchangeable forms:
+
+```jsonc
+// (a) Embedded base64 — self-contained, ideal for FFI / web / piping
+{ "data": "<base64-png-or-jpeg>", "mime_type": "image/png", "width_mm": 45, "height_mm": 22 }
+
+// (b) File path — ideal for the backend/CLI (resolved relative to the current working directory)
+{ "path": "templates/legal/assets/logo.png", "width_mm": 45, "height_mm": 22 }
+```
+
+`width_mm` / `height_mm` are optional display dimensions (the source image is scaled to fit; omit for sensible defaults). PNG (incl. alpha) and JPEG are supported; PNGs are decoded to RGB and embedded losslessly, JPEGs are embedded as-is.
+
+**Named image slots per template:**
+
+| Template (flag) | Slot field | Form | Renders as |
+|---|---|---|---|
+| `--certificate share-certificate` | `company.logo` | `{data\|path}` object | Centred logo above the title |
+| `--certificate share-certificate` | `signatories[i].signature` | `{data\|path}` object | Signature image above signatory *i*'s line |
+| `--letter` | `style.watermark_image` | path or `data:` URL string | Page watermark |
+| `--basic` (invoice) | `company_logo_base64`, `qr_base64` | base64 string | Header logo / payment QR |
+| `--proposal` | `company_logo_base64`, `property_image_base64` | base64 string | Header logo / hero image |
+| `--presentation` | `elements[]` of `type:"image"` with `base64` | base64 string | Positioned on the canvas |
+
+> [!NOTE]
+> The `--certificate` family takes images as an **object** (`{data,mime_type}` or `{path}`), so you can supply a file path directly — the backend reads it. The older invoice/proposal/presentation slots take a **base64 string** field (no file-path form yet). `templates/legal/share-certificate.json` ships with a working `company.logo` example pointing at `templates/legal/assets/logo.png`.
+
+Example — a share certificate with a logo and a scanned signature, straight from the backend:
+```bash
+pdf-gen --certificate share-certificate cert.json out.pdf
+# where cert.json contains:
+#   "company":      { ..., "logo":      { "path": "/srv/assets/acme-crest.png", "width_mm": 45 } }
+#   "signatories": [ { ..., "signature": { "path": "/srv/sigs/jane.png",       "width_mm": 30 } } ]
+```
 
 ---
 

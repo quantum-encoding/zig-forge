@@ -14,7 +14,8 @@
       "county": "Hampshire",
       "postcode": "PO15 7FH",
       "country": "United Kingdom"
-    }
+    },
+    "logo": { "path": "templates/legal/assets/logo.png", "width_mm": 45, "height_mm": 22 }
   },
   "holder": {
     "name": "John Michael Demo",

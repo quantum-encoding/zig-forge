@@ -299,6 +299,10 @@ pub fn build(b: *std.Build) void {
     lib_unit_tests.root_module.link_libc = true;
 
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
+    // Pin cwd to the package root so tests that read checked-in fixtures
+    // (templates/legal/*.json in sample_tests.zig) resolve regardless of where
+    // `zig build test` is invoked from.
+    run_lib_unit_tests.setCwd(b.path("."));
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_unit_tests.step);

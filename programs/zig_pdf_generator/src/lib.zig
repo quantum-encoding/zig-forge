@@ -343,3 +343,8 @@ test "library integration" {
     try std.testing.expect(std.mem.indexOf(u8, pdf_bytes, "Quantum Zig Labs") != null);
     try std.testing.expect(std.mem.indexOf(u8, pdf_bytes, "QZL-2025-001") != null);
 }
+
+// Pull the canonical-sample regression tests into the `zig build test` graph.
+test {
+    _ = @import("sample_tests.zig");
+}
