@@ -44,7 +44,10 @@ pub fn build(b: *std.Build) void {
 
     const ffi_static_lib = b.addLibrary(.{
         .linkage = .static,
-        .name = "quantum_vault",
+        // NOTE: artifact name MUST match quantum_crypto-sys/build.rs expectations
+        // (`quantum_crypto` native + `quantum_crypto_<platform>` cross). Renamed
+        // from `quantum_vault` to align with the quantum_vault→quantum_crypto rename.
+        .name = "quantum_crypto",
         .root_module = ffi_lib_mod,
     });
     b.installArtifact(ffi_static_lib);
@@ -64,7 +67,7 @@ pub fn build(b: *std.Build) void {
 
     const ffi_shared_lib = b.addLibrary(.{
         .linkage = .dynamic,
-        .name = "quantum_vault_shared",
+        .name = "quantum_crypto_shared",
         .root_module = ffi_shared_mod,
     });
     b.installArtifact(ffi_shared_lib);
@@ -82,7 +85,7 @@ pub fn build(b: *std.Build) void {
 
     const lib = b.addLibrary(.{
         .linkage = .static,
-        .name = "quantum-vault-pqc",
+        .name = "quantum-crypto-pqc",
         .root_module = lib_mod,
     });
     b.installArtifact(lib);
@@ -121,7 +124,7 @@ pub fn build(b: *std.Build) void {
 
         const cross_lib = b.addLibrary(.{
             .linkage = .static,
-            .name = "quantum_vault_" ++ ct.name,
+            .name = "quantum_crypto_" ++ ct.name,
             .root_module = cross_mod,
         });
 
