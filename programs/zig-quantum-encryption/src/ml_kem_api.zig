@@ -117,8 +117,9 @@ pub fn keyGen768() MlKemError!KeyPair768 {
 }
 
 /// ML-KEM.KeyGen_internal (Algorithm 16)
-/// Deterministic key generation from seeds d and z
-fn keyGenInternal768(d: *const [32]u8, z: *const [32]u8) MlKemError!KeyPair768 {
+/// Deterministic key generation from seeds d and z. Public so NIST KAT
+/// anchors can drive it deterministically (FIPS 203 keyGen vectors give d, z).
+pub fn keyGenInternal768(d: *const [32]u8, z: *const [32]u8) MlKemError!KeyPair768 {
     var ek: EncapsulationKey768 = undefined;
     var dk: DecapsulationKey768 = undefined;
 
@@ -237,8 +238,9 @@ pub fn encaps768(ek: *const EncapsulationKey768) MlKemError!EncapsResult768 {
 }
 
 /// ML-KEM.Encaps_internal (Algorithm 17)
-/// Deterministic encapsulation from message m
-fn encapsInternal768(ek: *const EncapsulationKey768, m: *const [32]u8) MlKemError!EncapsResult768 {
+/// Deterministic encapsulation from message m. Public so NIST KAT anchors can
+/// drive it deterministically (FIPS 203 encaps vectors give ek, m -> c, K).
+pub fn encapsInternal768(ek: *const EncapsulationKey768, m: *const [32]u8) MlKemError!EncapsResult768 {
     // Step 1: (K, r) ← G(m || H(ek))
     var g_input: [64]u8 = undefined;
     @memcpy(g_input[0..32], m);

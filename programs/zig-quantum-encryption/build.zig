@@ -291,6 +291,18 @@ pub fn build(b: *std.Build) void {
     });
     const run_dsa_kat_tests = b.addRunArtifact(dsa_kat_tests);
 
+    // NIST FIPS 203 ML-KEM-768 KAT anchors (external validation harness)
+    const kem_kat_mod = b.createModule(.{
+        .root_source_file = b.path("src/ml_kem_tier1_anchors.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const kem_kat_tests = b.addTest(.{
+        .root_module = kem_kat_mod,
+    });
+    const run_kem_kat_tests = b.addRunArtifact(kem_kat_tests);
+
     // Test step
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_ffi_tests.step);
@@ -300,6 +312,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_nist_tests.step);
     test_step.dependOn(&run_dsa_tests.step);
     test_step.dependOn(&run_dsa_kat_tests.step);
+    test_step.dependOn(&run_kem_kat_tests.step);
 
     // ========================================================================
     // Benchmarks
