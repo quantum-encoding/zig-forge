@@ -126,8 +126,15 @@ The standard professional invoice/receipt template. Ideal for traditional invoic
 ### 2. Minimalist Template (`--minimalist`)
 A clean, white-paper layout utilizing a single accent color. The document type (QUOTE, INVOICE, HANDOVER, or INSPECTION) is automatically derived from the prefix of the `reference` field (e.g. `QTE-`, `INV-`, `HND-`, `INS-`).
 
+> [!IMPORTANT]
+> **Required root fields (validated — missing → `error` + exit 1):**
+> * **`company_name`** (`string`, **required**, non-empty): Missing → `Missing required field 'company_name' (string) for --minimalist template.`
+> * **`sections`** (`array`, **required**, non-empty): Missing/empty → `Missing required field 'sections' (non-empty array) for --minimalist template.`
+>
+> `--minimalist` shares the `ProposalData` shape with `--proposal` (same required fields); the two differ only in visual style — see the comparison table in [§5](#5-proposal-template---proposal).
+
 #### Key Zig Struct Mapping (`ProposalData`)
-* **`company_name`** (`string`, optional)
+* **`company_name`** (`string`, **required**)
 * **`company_address`** (`string`, optional)
 * **`client_name`** (`string`, optional)
 * **`client_address`** (`string`, optional)

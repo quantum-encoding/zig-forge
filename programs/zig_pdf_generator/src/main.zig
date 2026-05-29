@@ -233,26 +233,35 @@ fn generatePdfBytes(allocator: std.mem.Allocator, mode: TemplateMode, json_data:
 /// so a caller (human or LLM) can fix the payload without guessing; all other
 /// errors fall through to a generic message. Always writes to stderr.
 fn reportGenerationError(stderr: *std.Io.Writer, mode: TemplateMode, err: anyerror) void {
+    // The schema-validation errors below are each thrown by exactly one
+    // template's parser, so @tagName(mode) always names the offending template
+    // (company/pages -> --letter; company_name/sections -> --minimalist or
+    // --proposal, which share the ProposalData shape).
+    const t = @tagName(mode);
     switch (err) {
-        error.MissingCompany => stderr.writeAll(
-            "Error: Schema mismatch. Missing required field 'company' (object) for --letter template.\n" ++
-            "       A --letter payload requires a top-level \"company\" object and a non-empty \"pages\" array.\n",
+        error.MissingCompany => stderr.print(
+            "Error: Schema mismatch. Missing required field 'company' (object) for --{s} template.\n" ++
+            "       A --{s} payload requires a top-level \"company\" object and a non-empty \"pages\" array.\n",
+            .{ t, t },
         ) catch {},
-        error.MissingPages => stderr.writeAll(
-            "Error: Schema mismatch. Missing required field 'pages' (non-empty array) for --letter template.\n" ++
-            "       A --letter payload requires a top-level \"company\" object and a non-empty \"pages\" array.\n",
+        error.MissingPages => stderr.print(
+            "Error: Schema mismatch. Missing required field 'pages' (non-empty array) for --{s} template.\n" ++
+            "       A --{s} payload requires a top-level \"company\" object and a non-empty \"pages\" array.\n",
+            .{ t, t },
         ) catch {},
-        error.MissingCompanyName => stderr.writeAll(
-            "Error: Schema mismatch. Missing required field 'company_name' (string) for --proposal template.\n" ++
-            "       A --proposal payload requires top-level \"company_name\" and a non-empty \"sections\" array.\n",
+        error.MissingCompanyName => stderr.print(
+            "Error: Schema mismatch. Missing required field 'company_name' (string) for --{s} template.\n" ++
+            "       A --{s} payload requires top-level \"company_name\" and a non-empty \"sections\" array.\n",
+            .{ t, t },
         ) catch {},
-        error.MissingSections => stderr.writeAll(
-            "Error: Schema mismatch. Missing required field 'sections' (non-empty array) for --proposal template.\n" ++
-            "       A --proposal payload requires top-level \"company_name\" and a non-empty \"sections\" array.\n",
+        error.MissingSections => stderr.print(
+            "Error: Schema mismatch. Missing required field 'sections' (non-empty array) for --{s} template.\n" ++
+            "       A --{s} payload requires top-level \"company_name\" and a non-empty \"sections\" array.\n",
+            .{ t, t },
         ) catch {},
         else => stderr.print(
             "Error: PDF generation failed for mode --{s}: {s}\n",
-            .{ @tagName(mode), @errorName(err) },
+            .{ t, @errorName(err) },
         ) catch {},
     }
     stderr.flush() catch {};

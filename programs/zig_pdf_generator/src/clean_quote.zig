@@ -726,6 +726,17 @@ fn parseProposalJsonLocal(allocator: std.mem.Allocator, json_str: []const u8) !P
     if (parsed.value != .object) return error.InvalidJson;
     const root = parsed.value.object;
 
+    // Strict schema validation — fail fast with a specific error instead of
+    // rendering a blank page. A clean quote shares the proposal data shape and
+    // is meaningless without the sender identity (`company_name`) and at least
+    // one content section (`sections`).
+    {
+        const cn = root.get("company_name") orelse return error.MissingCompanyName;
+        if (cn != .string or cn.string.len == 0) return error.MissingCompanyName;
+        const secs = root.get("sections") orelse return error.MissingSections;
+        if (secs != .array or secs.array.items.len == 0) return error.MissingSections;
+    }
+
     var data = ProposalData{};
 
     data.company_name = try dupeStr(allocator, root, "company_name", "");
