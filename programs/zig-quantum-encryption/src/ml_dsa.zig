@@ -69,6 +69,16 @@ pub const D: u5 = 13;
 /// Challenge seed bytes (λ/4 for ML-DSA-65 where λ = 192)
 pub const CTILDE_BYTES: usize = 48;
 
+/// w1Encode parameters, DERIVED from the active parameter set rather than
+/// hardcoded. FIPS 204 w1Encode = SimpleBitPack(w1, (q-1)/(2·γ2) - 1), so each
+/// coefficient occupies bitlen((q-1)/(2·γ2) - 1) bits. For ML-DSA-65/87
+/// (γ2 = (q-1)/32) this is 4 bits; for ML-DSA-44 (γ2 = (q-1)/88) it is 6.
+/// Sourcing from GAMMA2 keeps sign/verify correct for whatever γ2 is set,
+/// eliminating the magic 4 / 128 that were specific to this parameter set.
+pub const W1_RANGE: usize = @intCast(@divExact(Q - 1, 2 * GAMMA2)); // 16 for ML-DSA-65
+pub const W1_BITS: u5 = @intCast(std.math.log2_int_ceil(usize, W1_RANGE)); // 4
+pub const W1_BYTES_PER_POLY: usize = N * @as(usize, W1_BITS) / 8; // 128
+
 /// Primitive 256th root of unity mod q
 /// ζ = 1753 satisfies ζ^256 ≡ -1 (mod q)
 pub const ZETA: i32 = 1753;
@@ -926,14 +936,12 @@ pub fn sign(sk: *const SecretKey, msg: []const u8, randomized: bool) ?Signature 
         var c_tilde: [CTILDE_BYTES]u8 = undefined;
         var h3 = crypto.hash.sha3.Shake256.init(.{});
         h3.update(&mu);
-        // Encode w1: FIPS 204 w1Encode = SimpleBitPack(w1, (q-1)/(2γ2) - 1).
-        // For ML-DSA-65, w1 ∈ [0,15] → 4 bits/coeff (256*4/8 = 128 bytes/poly).
-        // (Was 6 bits — the ML-DSA-44 width — which corrupted c̃.)
-        var sign_w1_bytes_all: [K * 128]u8 = undefined;
+        // Encode w1 at the parameter-derived width (W1_BITS / W1_BYTES_PER_POLY).
+        var sign_w1_bytes_all: [K * W1_BYTES_PER_POLY]u8 = undefined;
         for (0..K) |i| {
-            var w1_bytes: [128]u8 = undefined;
-            polyPackBits(&w1.polys[i], 4, &w1_bytes);
-            @memcpy(sign_w1_bytes_all[i * 128 .. (i + 1) * 128], &w1_bytes);
+            var w1_bytes: [W1_BYTES_PER_POLY]u8 = undefined;
+            polyPackBits(&w1.polys[i], W1_BITS, &w1_bytes);
+            @memcpy(sign_w1_bytes_all[i * W1_BYTES_PER_POLY .. (i + 1) * W1_BYTES_PER_POLY], &w1_bytes);
             h3.update(&w1_bytes);
         }
         h3.squeeze(&c_tilde);
@@ -1205,9 +1213,9 @@ pub fn verify(pk: *const PublicKey, msg: []const u8, sig: *const Signature) bool
     var h3 = crypto.hash.sha3.Shake256.init(.{});
     h3.update(&mu);
     for (0..K) |i| {
-        // w1Encode at 4 bits for ML-DSA-65 (must match sign's c̃ computation).
-        var w1_bytes: [128]u8 = undefined;
-        polyPackBits(&w1_prime.polys[i], 4, &w1_bytes);
+        // w1Encode at the parameter-derived width (must match sign's c̃).
+        var w1_bytes: [W1_BYTES_PER_POLY]u8 = undefined;
+        polyPackBits(&w1_prime.polys[i], W1_BITS, &w1_bytes);
         h3.update(&w1_bytes);
     }
     h3.squeeze(&c_tilde_prime);
