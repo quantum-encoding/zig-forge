@@ -793,11 +793,14 @@ pub fn keyGen(seed: ?*const [32]u8) KeyPair {
         }
     }
 
-    // Pack t0 (13-bit coefficients, centered around 0)
-    // Map [-2^12, 2^12-1] to [0, 2^13-1] by adding 2^12
+    // Pack t0 via FIPS 204 skEncode BitPack(t0, 2^(d-1)-1, 2^(d-1)):
+    // each coefficient is stored as (2^(d-1) - t0) in 13 bits. This maps
+    // t0 ∈ [-2^(d-1)+1, 2^(d-1)] -> [0, 2^d - 1] (the +2^(d-1) boundary maps
+    // to 0). The previous (t0 + 2^(d-1)) convention was sign-flipped vs NIST
+    // and overflowed 13 bits at t0 = +2^(d-1).
     for (0..K) |i| {
         for (0..N) |j| {
-            t0.polys[i].coeffs[j] = t0.polys[i].coeffs[j] + (1 << 12);
+            t0.polys[i].coeffs[j] = (1 << (D - 1)) - t0.polys[i].coeffs[j];
         }
         polyPackBits(&t0.polys[i], 13, sk.data[offset .. offset + 416]);
         offset += 416;
@@ -845,12 +848,13 @@ pub fn sign(sk: *const SecretKey, msg: []const u8, randomized: bool) ?Signature 
         }
     }
 
-    // Unpack t0 (was stored as [0, 2^13-1], need to convert back to centered)
+    // Unpack t0 — inverse of FIPS 204 skEncode BitPack(t0, 2^(d-1)-1, 2^(d-1)):
+    // the stored 13-bit value is (2^(d-1) - t0), so t0 = 2^(d-1) - stored.
+    // Must match the keyGen packing AND correctly interpret NIST-formatted sks.
     for (0..K) |i| {
         polyUnpackBits(&t0.polys[i], 13, sk.data[offset .. offset + 416]);
-        // Convert from [0, 2^13-1] back to [-2^12, 2^12-1] by subtracting 2^12
         for (0..N) |j| {
-            t0.polys[i].coeffs[j] = t0.polys[i].coeffs[j] - (1 << 12);
+            t0.polys[i].coeffs[j] = (1 << (D - 1)) - t0.polys[i].coeffs[j];
         }
         offset += 416;
     }
