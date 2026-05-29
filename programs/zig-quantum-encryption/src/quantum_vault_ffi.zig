@@ -11,7 +11,7 @@
 
 const std = @import("std");
 const ml_kem = @import("ml_kem_api.zig");
-const ml_dsa = @import("ml_dsa_v2.zig");
+const ml_dsa = @import("ml_dsa.zig");
 const hybrid = @import("hybrid.zig");
 
 // ============================================================================

@@ -267,7 +267,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_nist_tests = b.addRunArtifact(nist_tests);
 
-    // ML-DSA-65 signatures
+    // ML-DSA-65 signatures (single unified FIPS 204 implementation)
     const dsa_test_mod = b.createModule(.{
         .root_source_file = b.path("src/ml_dsa.zig"),
         .target = target,
@@ -279,17 +279,17 @@ pub fn build(b: *std.Build) void {
     });
     const run_dsa_tests = b.addRunArtifact(dsa_tests);
 
-    // ML-DSA-65 v2 (complete FIPS 204)
-    const dsa_v2_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/ml_dsa_v2.zig"),
+    // NIST FIPS 204 ML-DSA-65 KAT anchors (external validation harness)
+    const dsa_kat_mod = b.createModule(.{
+        .root_source_file = b.path("src/ml_dsa_tier1_anchors.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    const dsa_v2_tests = b.addTest(.{
-        .root_module = dsa_v2_test_mod,
+    const dsa_kat_tests = b.addTest(.{
+        .root_module = dsa_kat_mod,
     });
-    const run_dsa_v2_tests = b.addRunArtifact(dsa_v2_tests);
+    const run_dsa_kat_tests = b.addRunArtifact(dsa_kat_tests);
 
     // Test step
     const test_step = b.step("test", "Run unit tests");
@@ -299,7 +299,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_hybrid_tests.step);
     test_step.dependOn(&run_nist_tests.step);
     test_step.dependOn(&run_dsa_tests.step);
-    test_step.dependOn(&run_dsa_v2_tests.step);
+    test_step.dependOn(&run_dsa_kat_tests.step);
 
     // ========================================================================
     // Benchmarks
