@@ -11,7 +11,7 @@
 //! Usage:
 //!   const rng = @import("rng.zig");
 //!   var buf: [32]u8 = undefined;
-//!   rng.fillSecureRandom(&buf);
+//!   try rng.fillSecureRandomSafe(&buf);
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -26,27 +26,20 @@ pub const RngError = error{
     UnsupportedPlatform,
 };
 
-/// Fill buffer with cryptographically secure random bytes.
-/// This is the primary interface - use this function.
+/// Fill buffer with cryptographically secure random bytes — the PRIMARY,
+/// safe interface for this library. Returns `RngError` on failure instead of
+/// panicking, so callers (and especially FFI boundaries) can surface entropy
+/// starvation as a recoverable error rather than aborting the host process.
 ///
 /// Platform implementations:
 /// - macOS/iOS/BSD: arc4random_buf (always succeeds, no seeding needed)
 /// - Linux/Android: getrandom(2) syscall with GRND_RANDOM flag
 /// - Windows: BCryptGenRandom with BCRYPT_USE_SYSTEM_PREFERRED_RNG
 ///
-/// Panics if the system RNG is unavailable (should never happen on modern systems).
-pub fn fillSecureRandom(buf: []u8) void {
-    fillSecureRandomSafe(buf) catch |err| {
-        @panic(switch (err) {
-            RngError.SystemRngFailed => "System RNG failed - this should never happen",
-            RngError.InsufficientEntropy => "Insufficient entropy - system not ready",
-            RngError.UnsupportedPlatform => "Platform RNG not implemented",
-        });
-    };
-}
-
-/// Safe version that returns errors instead of panicking.
-/// Use this if you need to handle RNG failures gracefully.
+/// (A panicking `fillSecureRandom` convenience wrapper used to live here; it was
+/// removed in Batch 51 because an unhandled @panic crossing the C ABI is
+/// undefined behaviour. If a caller genuinely wants abort-on-failure, write the
+/// explicit `fillSecureRandomSafe(buf) catch @panic(...)` at the call site.)
 pub fn fillSecureRandomSafe(buf: []u8) RngError!void {
     if (buf.len == 0) return;
 
@@ -216,12 +209,12 @@ fn fillDevUrandom(buf: []u8) RngError!void {
 // Tests
 // ============================================================================
 
-test "fillSecureRandom produces non-zero output" {
+test "fillSecureRandomSafe produces non-zero output" {
     var buf1: [32]u8 = undefined;
     var buf2: [32]u8 = undefined;
 
-    fillSecureRandom(&buf1);
-    fillSecureRandom(&buf2);
+    try fillSecureRandomSafe(&buf1);
+    try fillSecureRandomSafe(&buf2);
 
     // Should not be all zeros
     var all_zero = true;
@@ -237,14 +230,14 @@ test "fillSecureRandom produces non-zero output" {
     try std.testing.expect(!std.mem.eql(u8, &buf1, &buf2));
 }
 
-test "fillSecureRandom handles empty buffer" {
+test "fillSecureRandomSafe handles empty buffer" {
     var buf: [0]u8 = undefined;
-    fillSecureRandom(&buf); // Should not crash
+    try fillSecureRandomSafe(&buf); // Should not crash
 }
 
-test "fillSecureRandom handles large buffer" {
+test "fillSecureRandomSafe handles large buffer" {
     var buf: [4096]u8 = undefined;
-    fillSecureRandom(&buf);
+    try fillSecureRandomSafe(&buf);
 
     // Should have reasonable entropy (not all same value)
     var histogram: [256]usize = [_]usize{0} ** 256;
