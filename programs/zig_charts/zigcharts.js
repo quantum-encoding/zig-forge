@@ -35,31 +35,43 @@ class ZigCharts {
     const decoder = new TextDecoder();
     const jsonBytes = encoder.encode(json);
 
-    // Reset allocator between renders
+    // Reset allocator / status between renders
     this.wasm.zigcharts_reset();
 
     // Allocate + copy JSON into WASM memory
     const jsonPtr = this.wasm.wasm_alloc(jsonBytes.length);
     if (!jsonPtr) throw new Error('WASM alloc failed');
 
-    const mem = new Uint8Array(this.memory.buffer);
-    mem.set(jsonBytes, jsonPtr);
+    let svgPtr = 0;
+    let svgLen = 0;
+    try {
+      const mem = new Uint8Array(this.memory.buffer);
+      mem.set(jsonBytes, jsonPtr);
 
-    // Render
-    const svgLen = this.wasm.zigcharts_render(jsonPtr, jsonBytes.length);
+      // Render
+      svgLen = this.wasm.zigcharts_render(jsonPtr, jsonBytes.length);
 
-    if (svgLen === 0) {
-      // Get error
-      const errPtr = this.wasm.zigcharts_get_error();
-      const errLen = this.wasm.zigcharts_get_error_len();
-      const errBytes = new Uint8Array(this.memory.buffer, errPtr, errLen);
-      throw new Error('Chart render failed: ' + decoder.decode(errBytes));
+      if (svgLen === 0) {
+        // Get error
+        const errPtr = this.wasm.zigcharts_get_error();
+        const errLen = this.wasm.zigcharts_get_error_len();
+        const errBytes = new Uint8Array(this.memory.buffer, errPtr, errLen);
+        throw new Error('Chart render failed: ' + decoder.decode(errBytes));
+      }
+
+      // Read SVG output
+      svgPtr = this.wasm.zigcharts_get_output();
+      const svgBytes = new Uint8Array(this.memory.buffer, svgPtr, svgLen);
+      const svgString = decoder.decode(svgBytes);
+      return svgString;
+    } finally {
+      // Free JSON input memory
+      this.wasm.wasm_free(jsonPtr, jsonBytes.length);
+      // Free SVG output memory
+      if (svgPtr && svgLen > 0) {
+        this.wasm.wasm_free(svgPtr, svgLen);
+      }
     }
-
-    // Read SVG output
-    const svgPtr = this.wasm.zigcharts_get_output();
-    const svgBytes = new Uint8Array(this.memory.buffer, svgPtr, svgLen);
-    return decoder.decode(svgBytes);
   }
 
   /** Get the WASM module version. */

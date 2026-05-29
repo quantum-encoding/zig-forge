@@ -468,13 +468,13 @@ pub fn main() !void {
         // Progress update
         if (i % 100 == 0 and i > 0) {
             const elapsed = blk: {const ts = getClockTime(); break :blk @as(i64, @intCast(ts.sec)) * 1000 + @divTrunc(ts.nsec, 1_000_000);} - start;
-            const rate = if (elapsed > 0) @divTrunc(@as(i64, @intCast(i * 1000)), elapsed) else 0;
+            const rate = if (elapsed > 0) @divTrunc(std.math.cast(i64, i * 1000) orelse std.math.maxInt(i64), elapsed) else 0;
             std.debug.print("Processed {d} ticks - Rate: {d} ticks/sec\n", .{ i, rate });
         }
     }
     
     const total_elapsed = blk: {const ts = getClockTime(); break :blk @as(i64, @intCast(ts.sec)) * 1000 + @divTrunc(ts.nsec, 1_000_000);} - start;
-    const overall_rate = if (total_elapsed > 0) @divTrunc(@as(i64, @intCast(num_ticks * 1000)), total_elapsed) else 0;
+    const overall_rate = if (total_elapsed > 0) @divTrunc(std.math.cast(i64, num_ticks * 1000) orelse std.math.maxInt(i64), total_elapsed) else 0;
     
     std.debug.print("\nSimulation complete in {d} ms\n", .{total_elapsed});
     std.debug.print("Overall rate: {d} ticks/sec\n", .{overall_rate});

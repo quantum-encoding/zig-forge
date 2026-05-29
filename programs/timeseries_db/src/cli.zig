@@ -33,6 +33,7 @@ const Timer = struct {
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.c_allocator;
+    const io = init.io;
 
     // Parse args using new iterator pattern
     var args_list: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -55,7 +56,7 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("Usage: tsdb write <symbol> <csv_file>\n", .{});
             return error.InvalidArgs;
         }
-        try cmdWrite(allocator, args[2], args[3]);
+        try cmdWrite(allocator, io, args[2], args[3]);
     } else if (std.mem.eql(u8, command, "query")) {
         if (args.len < 5) {
             std.debug.print("Usage: tsdb query <symbol> <start_timestamp> <end_timestamp>\n", .{});
@@ -63,13 +64,13 @@ pub fn main(init: std.process.Init) !void {
         }
         const start = try std.fmt.parseInt(i64, args[3], 10);
         const end = try std.fmt.parseInt(i64, args[4], 10);
-        try cmdQuery(allocator, args[2], start, end);
+        try cmdQuery(allocator, io, args[2], start, end);
     } else if (std.mem.eql(u8, command, "info")) {
         if (args.len < 3) {
             std.debug.print("Usage: tsdb info <symbol>\n", .{});
             return error.InvalidArgs;
         }
-        try cmdInfo(allocator, args[2]);
+        try cmdInfo(allocator, io, args[2]);
     } else if (std.mem.eql(u8, command, "benchmark")) {
         try cmdBenchmark(allocator);
     } else {
@@ -93,11 +94,10 @@ fn printUsage() void {
     std.debug.print("Example:    1700000000,50000.00,50100.00,49900.00,50050.00,100.5\n\n", .{});
 }
 
-fn cmdWrite(allocator: std.mem.Allocator, symbol: []const u8, csv_file: []const u8) !void {
+fn cmdWrite(allocator: std.mem.Allocator, io: std.Io, symbol: []const u8, csv_file: []const u8) !void {
     std.debug.print("Importing {s} from {s}...\n", .{ symbol, csv_file });
 
     // Read CSV file using Zig 0.16.1859 API
-    const io = std.Io.Threaded.global_single_threaded.io();
     const contents = try std.Io.Dir.cwd().readFileAlloc(io, csv_file, allocator, std.Io.Limit.limited(100 * 1024 * 1024));
     defer allocator.free(contents);
 
@@ -150,7 +150,7 @@ fn cmdWrite(allocator: std.mem.Allocator, symbol: []const u8, csv_file: []const 
     defer allocator.free(db_filename);
 
     const initial_size = 1024 * 1024; // 1MB initial
-    var store = try storage.FileStorage.create(db_filename, initial_size);
+    var store = try storage.FileStorage.create(io, db_filename, initial_size);
     defer store.deinit();
 
     // Update header
@@ -163,11 +163,11 @@ fn cmdWrite(allocator: std.mem.Allocator, symbol: []const u8, csv_file: []const 
     std.debug.print("   File size: {} bytes\n", .{store.mmap_len});
 }
 
-fn cmdQuery(allocator: std.mem.Allocator, symbol: []const u8, start: i64, end: i64) !void {
+fn cmdQuery(allocator: std.mem.Allocator, io: std.Io, symbol: []const u8, start: i64, end: i64) !void {
     const db_filename = try std.fmt.allocPrint(allocator, "{s}.tsdb", .{symbol});
     defer allocator.free(db_filename);
 
-    var store = storage.FileStorage.open(db_filename, false) catch |err| {
+    var store = storage.FileStorage.open(io, db_filename, false) catch |err| {
         std.debug.print("Error: Could not open database {s}: {}\n", .{ db_filename, err });
         return err;
     };
@@ -184,11 +184,11 @@ fn cmdQuery(allocator: std.mem.Allocator, symbol: []const u8, start: i64, end: i
     std.debug.print("(Full query implementation requires integrated compression + index)\n", .{});
 }
 
-fn cmdInfo(allocator: std.mem.Allocator, symbol: []const u8) !void {
+fn cmdInfo(allocator: std.mem.Allocator, io: std.Io, symbol: []const u8) !void {
     const db_filename = try std.fmt.allocPrint(allocator, "{s}.tsdb", .{symbol});
     defer allocator.free(db_filename);
 
-    var store = storage.FileStorage.open(db_filename, false) catch |err| {
+    var store = storage.FileStorage.open(io, db_filename, false) catch |err| {
         std.debug.print("Error: Could not open database {s}: {}\n", .{ db_filename, err });
         return err;
     };

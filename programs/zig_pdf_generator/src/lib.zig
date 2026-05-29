@@ -58,6 +58,8 @@ pub const clean_quote = @import("clean_quote.zig");
 pub const letter_quote = @import("letter_quote.zig");
 pub const markdown = @import("markdown.zig");
 pub const template_card = @import("template_card.zig");
+pub const types = @import("types.zig");
+pub const CryptoPaymentBlock = types.CryptoPaymentBlock;
 
 // Re-export key types
 pub const PdfDocument = document.PdfDocument;

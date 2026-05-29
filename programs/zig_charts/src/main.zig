@@ -115,29 +115,31 @@ fn renderFromJson(
         }
     }
 
-    // Write to stdout (via stderr for now as stdout API changed in Zig 0.16)
-    // For file output, use -o flag
-    std.debug.print("{s}\n", .{svg});
+    // Write to stdout strictly via standard I/O writer
+    var stdout_buffer: [8192]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
+    const stdout = &stdout_writer.interface;
+
+    try stdout.writeAll(svg);
+    try stdout.writeByte('\n');
+    try stdout_writer.interface.flush();
 }
 
 fn readStdin(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
-    // Open stdin using the IO context
-    const stdin = try std.Io.Dir.cwd().openFile(io, "/dev/stdin", .{});
-    defer stdin.close(io);
-
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer buf.deinit(allocator);
-
+    // Read from stdin (max 10MB) using streaming reader into an Allocating writer
     var read_buf: [4096]u8 = undefined;
-    var pos: u64 = 0;
-    while (true) {
-        const n = stdin.readPositionalAll(io, &read_buf, pos) catch break;
-        if (n == 0) break;
-        try buf.appendSlice(allocator, read_buf[0..n]);
-        pos += n;
+    const stdin = std.Io.File.stdin();
+    var reader = stdin.readerStreaming(io, &read_buf);
+    var sink: std.Io.Writer.Allocating = .init(allocator);
+    defer sink.deinit();
+    
+    _ = try reader.interface.streamRemaining(&sink.writer);
+    const input_bytes = try sink.toOwnedSlice();
+    if (input_bytes.len > 10 * 1024 * 1024) {
+        allocator.free(input_bytes);
+        return error.InputTooLarge;
     }
-
-    return try buf.toOwnedSlice(allocator);
+    return input_bytes;
 }
 
 fn readFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {

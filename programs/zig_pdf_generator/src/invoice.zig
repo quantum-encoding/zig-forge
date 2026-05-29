@@ -16,6 +16,7 @@ const image = @import("image.zig");
 const qrcode = @import("qrcode.zig");
 const identicon = @import("identicon.zig");
 const crypto_receipt = @import("crypto_receipt.zig");
+const types = @import("types.zig");
 
 // =============================================================================
 // Invoice Data Model
@@ -95,6 +96,7 @@ pub const InvoiceData = struct {
     verifactu_timestamp: ?[]const u8 = null, // Timestamp of hash chain registration
 
     // Crypto payment fields
+    crypto_payment: ?types.CryptoPaymentBlock = null, // Nested crypto payment block
     crypto_wallet: ?[]const u8 = null, // Recipient wallet address for payment
     crypto_network: crypto_receipt.Network = .bitcoin, // Blockchain network
     crypto_amount: ?f64 = null, // Optional: exact crypto amount to request
@@ -203,6 +205,14 @@ pub const InvoiceRenderer = struct {
 
     /// Generate the complete invoice PDF
     pub fn render(self: *InvoiceRenderer) ![]const u8 {
+        // Resolve crypto payment block or legacy fields
+        const crypto_block = self.data.crypto_payment;
+        const wallet_val = if (crypto_block) |cb| (if (cb.to_address.len > 0) cb.to_address else null) else self.data.crypto_wallet;
+        const network_val = if (crypto_block) |cb| cb.getNetwork() else self.data.crypto_network;
+        const sender_val = if (crypto_block) |cb| (if (cb.from_address.len > 0) cb.from_address else null) else self.data.crypto_sender_wallet;
+        const symbol_val = if (crypto_block) |cb| (if (cb.currency.len > 0) cb.currency else cb.getNetwork().symbol()) else (self.data.crypto_custom_symbol orelse self.data.crypto_network.symbol());
+        const amount_str = if (crypto_block) |cb| (if (cb.amount.len > 0) cb.amount else null) else null;
+
         var content = document.ContentStream.init(self.allocator);
         defer content.deinit();
 
@@ -249,18 +259,18 @@ pub const InvoiceRenderer = struct {
             }
         }
 
-        // Native crypto QR generation (when crypto_wallet is set and mode is crypto)
+        // Native crypto QR generation (when crypto_wallet/crypto_payment is set and mode is crypto)
         var crypto_qr_id: ?[]const u8 = null;
         var recipient_identicon_id: ?[]const u8 = null;
         var sender_identicon_id: ?[]const u8 = null;
 
-        if (self.data.crypto_wallet) |wallet| {
+        if (wallet_val) |wallet| {
             if (wallet.len > 0 and (effective_qr_mode == .crypto or self.data.qr_mode == .crypto)) {
                 // Set effective mode to crypto if not already
                 effective_qr_mode = .crypto;
 
                 // Build crypto payment URI
-                const uri = try self.buildCryptoUri(wallet);
+                const uri = try self.buildCryptoUri(wallet, network_val, symbol_val, amount_str);
                 defer self.allocator.free(uri);
 
                 // Generate native QR code
@@ -302,7 +312,7 @@ pub const InvoiceRenderer = struct {
         }
 
         // Generate sender identicon if address provided and identicons enabled
-        if (self.data.crypto_sender_wallet) |sender| {
+        if (sender_val) |sender| {
             if (sender.len > 0 and self.data.show_crypto_identicons) {
                 if (identicon.generate(self.allocator, sender, .{ .size = 8, .scale = 8 })) |icon| {
                     self.sender_identicon_pixels = icon.pixels;
@@ -595,17 +605,16 @@ pub const InvoiceRenderer = struct {
         // =====================================================================
         // Crypto Payment Section (with optional identicons)
         // =====================================================================
-        if (self.data.crypto_wallet) |wallet| {
+        if (wallet_val) |wallet| {
             if (wallet.len > 0) {
                 self.current_y -= 10;
 
                 // Section header with network color
-                const network_color = document.Color.fromHex(self.data.crypto_network.color());
-                const network_name = self.data.crypto_network.displayName();
-                const symbol = self.data.crypto_custom_symbol orelse self.data.crypto_network.symbol();
+                const network_color = document.Color.fromHex(network_val.color());
+                const network_name = network_val.displayName();
 
                 var header_buf: [64]u8 = undefined;
-                const header_text = std.fmt.bufPrint(&header_buf, "Pay with {s} ({s})", .{ network_name, symbol }) catch "Crypto Payment";
+                const header_text = std.fmt.bufPrint(&header_buf, "Pay with {s} ({s})", .{ network_name, symbol_val }) catch "Crypto Payment";
                 try content.drawText(header_text, self.margin_left, self.current_y, self.font_bold, 11, network_color);
                 self.current_y -= 18;
 
@@ -630,7 +639,7 @@ pub const InvoiceRenderer = struct {
                 self.current_y -= 16;
 
                 // Sender wallet (if provided) with optional identicon
-                if (self.data.crypto_sender_wallet) |sender| {
+                if (sender_val) |sender| {
                     if (sender.len > 0) {
                         const sender_x = if (sender_identicon_id != null) self.margin_left + identicon_size + 8 else self.margin_left;
 
@@ -648,9 +657,16 @@ pub const InvoiceRenderer = struct {
                 }
 
                 // Crypto amount if specified
-                if (self.data.crypto_amount) |amount| {
+                if (amount_str) |amt_s| {
+                    if (amt_s.len > 0) {
+                        var amount_buf: [128]u8 = undefined;
+                        const amount_text = std.fmt.bufPrint(&amount_buf, "Amount: {s} {s}", .{ amt_s, symbol_val }) catch "Amount: [error]";
+                        try content.drawText(amount_text, self.margin_left, self.current_y, self.font_bold, 10, network_color);
+                        self.current_y -= 20;
+                    }
+                } else if (self.data.crypto_amount) |amount| {
                     var amount_buf: [64]u8 = undefined;
-                    const amount_text = std.fmt.bufPrint(&amount_buf, "Amount: {d:.8} {s}", .{ amount, symbol }) catch "Amount: [error]";
+                    const amount_text = std.fmt.bufPrint(&amount_buf, "Amount: {d:.8} {s}", .{ amount, symbol_val }) catch "Amount: [error]";
                     try content.drawText(amount_text, self.margin_left, self.current_y, self.font_bold, 10, network_color);
                     self.current_y -= 20;
                 }
@@ -848,10 +864,7 @@ pub const InvoiceRenderer = struct {
 
     /// Build cryptocurrency payment URI for QR code
     /// Supports BIP21 (Bitcoin), EIP681 (Ethereum/ERC20), and other chain-specific formats
-    fn buildCryptoUri(self: *InvoiceRenderer, wallet: []const u8) ![]u8 {
-        const network = self.data.crypto_network;
-        const symbol = self.data.crypto_custom_symbol orelse network.symbol();
-
+    fn buildCryptoUri(self: *InvoiceRenderer, wallet: []const u8, network: crypto_receipt.Network, symbol: []const u8, amount_str: ?[]const u8) ![]u8 {
         // Buffer for URI construction
         var uri_buf: [512]u8 = undefined;
 
@@ -859,11 +872,13 @@ pub const InvoiceRenderer = struct {
         const uri_str: []const u8 = switch (network) {
             .bitcoin => blk: {
                 // BIP21: bitcoin:<address>?amount=<amount>&label=<label>
+                if (amount_str) |amt| {
+                    if (amt.len > 0) break :blk std.fmt.bufPrint(&uri_buf, "bitcoin:{s}?amount={s}", .{ wallet, amt }) catch "bitcoin:error";
+                }
                 if (self.data.crypto_amount) |amount| {
                     break :blk std.fmt.bufPrint(&uri_buf, "bitcoin:{s}?amount={d:.8}", .{ wallet, amount }) catch "bitcoin:error";
-                } else {
-                    break :blk std.fmt.bufPrint(&uri_buf, "bitcoin:{s}", .{wallet}) catch "bitcoin:error";
                 }
+                break :blk std.fmt.bufPrint(&uri_buf, "bitcoin:{s}", .{wallet}) catch "bitcoin:error";
             },
             .ethereum, .polygon, .bnb => blk: {
                 // EIP681: ethereum:<address>[@chainId]?value=<wei>
@@ -873,7 +888,13 @@ pub const InvoiceRenderer = struct {
                     .bnb => 56,
                     else => 1,
                 };
-                if (self.data.crypto_amount) |amount| {
+                var opt_amount: ?f64 = null;
+                if (amount_str) |amt| {
+                    if (amt.len > 0) opt_amount = std.fmt.parseFloat(f64, amt) catch 0.0;
+                } else if (self.data.crypto_amount) |amt| {
+                    opt_amount = amt;
+                }
+                if (opt_amount) |amount| {
                     // Convert to wei (1 ETH = 10^18 wei)
                     const wei: u64 = @intFromFloat(amount * 1e18);
                     break :blk std.fmt.bufPrint(&uri_buf, "ethereum:{s}@{d}?value={d}", .{ wallet, chain_id, wei }) catch "ethereum:error";
@@ -882,76 +903,82 @@ pub const InvoiceRenderer = struct {
                 }
             },
             .litecoin => blk: {
-                // Similar to BIP21
+                if (amount_str) |amt| {
+                    if (amt.len > 0) break :blk std.fmt.bufPrint(&uri_buf, "litecoin:{s}?amount={s}", .{ wallet, amt }) catch "litecoin:error";
+                }
                 if (self.data.crypto_amount) |amount| {
                     break :blk std.fmt.bufPrint(&uri_buf, "litecoin:{s}?amount={d:.8}", .{ wallet, amount }) catch "litecoin:error";
-                } else {
-                    break :blk std.fmt.bufPrint(&uri_buf, "litecoin:{s}", .{wallet}) catch "litecoin:error";
                 }
+                break :blk std.fmt.bufPrint(&uri_buf, "litecoin:{s}", .{wallet}) catch "litecoin:error";
             },
             .dogecoin => blk: {
+                if (amount_str) |amt| {
+                    if (amt.len > 0) break :blk std.fmt.bufPrint(&uri_buf, "dogecoin:{s}?amount={s}", .{ wallet, amt }) catch "dogecoin:error";
+                }
                 if (self.data.crypto_amount) |amount| {
                     break :blk std.fmt.bufPrint(&uri_buf, "dogecoin:{s}?amount={d:.8}", .{ wallet, amount }) catch "dogecoin:error";
-                } else {
-                    break :blk std.fmt.bufPrint(&uri_buf, "dogecoin:{s}", .{wallet}) catch "dogecoin:error";
                 }
+                break :blk std.fmt.bufPrint(&uri_buf, "dogecoin:{s}", .{wallet}) catch "dogecoin:error";
             },
             .bitcoin_cash => blk: {
+                if (amount_str) |amt| {
+                    if (amt.len > 0) break :blk std.fmt.bufPrint(&uri_buf, "bitcoincash:{s}?amount={s}", .{ wallet, amt }) catch "bitcoincash:error";
+                }
                 if (self.data.crypto_amount) |amount| {
                     break :blk std.fmt.bufPrint(&uri_buf, "bitcoincash:{s}?amount={d:.8}", .{ wallet, amount }) catch "bitcoincash:error";
-                } else {
-                    break :blk std.fmt.bufPrint(&uri_buf, "bitcoincash:{s}", .{wallet}) catch "bitcoincash:error";
                 }
+                break :blk std.fmt.bufPrint(&uri_buf, "bitcoincash:{s}", .{wallet}) catch "bitcoincash:error";
             },
             .solana => blk: {
-                // Solana Pay URL format
+                if (amount_str) |amt| {
+                    if (amt.len > 0) break :blk std.fmt.bufPrint(&uri_buf, "solana:{s}?amount={s}", .{ wallet, amt }) catch "solana:error";
+                }
                 if (self.data.crypto_amount) |amount| {
                     break :blk std.fmt.bufPrint(&uri_buf, "solana:{s}?amount={d:.9}", .{ wallet, amount }) catch "solana:error";
-                } else {
-                    break :blk std.fmt.bufPrint(&uri_buf, "solana:{s}", .{wallet}) catch "solana:error";
                 }
+                break :blk std.fmt.bufPrint(&uri_buf, "solana:{s}", .{wallet}) catch "solana:error";
             },
             .tron => blk: {
-                // TRON uses tron: scheme
+                if (amount_str) |amt| {
+                    if (amt.len > 0) break :blk std.fmt.bufPrint(&uri_buf, "tron:{s}?amount={s}", .{ wallet, amt }) catch "tron:error";
+                }
                 if (self.data.crypto_amount) |amount| {
                     break :blk std.fmt.bufPrint(&uri_buf, "tron:{s}?amount={d:.6}", .{ wallet, amount }) catch "tron:error";
-                } else {
-                    break :blk std.fmt.bufPrint(&uri_buf, "tron:{s}", .{wallet}) catch "tron:error";
                 }
+                break :blk std.fmt.bufPrint(&uri_buf, "tron:{s}", .{wallet}) catch "tron:error";
             },
             .xrp => blk: {
-                // XRP Ledger payment format
+                if (amount_str) |amt| {
+                    if (amt.len > 0) break :blk std.fmt.bufPrint(&uri_buf, "xrpl:{s}?amount={s}", .{ wallet, amt }) catch "xrpl:error";
+                }
                 if (self.data.crypto_amount) |amount| {
                     break :blk std.fmt.bufPrint(&uri_buf, "xrpl:{s}?amount={d:.6}", .{ wallet, amount }) catch "xrpl:error";
-                } else {
-                    break :blk std.fmt.bufPrint(&uri_buf, "xrpl:{s}", .{wallet}) catch "xrpl:error";
                 }
+                break :blk std.fmt.bufPrint(&uri_buf, "xrpl:{s}", .{wallet}) catch "xrpl:error";
             },
             .cardano => blk: {
-                // Cardano uses web+cardano: scheme
-                if (self.data.crypto_amount) |amount| {
-                    // Cardano amounts in ADA (6 decimal places = lovelace)
-                    break :blk std.fmt.bufPrint(&uri_buf, "web+cardano:{s}?amount={d:.6}", .{ wallet, amount }) catch "cardano:error";
-                } else {
-                    break :blk std.fmt.bufPrint(&uri_buf, "web+cardano:{s}", .{wallet}) catch "cardano:error";
+                if (amount_str) |amt| {
+                    if (amt.len > 0) break :blk std.fmt.bufPrint(&uri_buf, "web+cardano:{s}?amount={s}", .{ wallet, amt }) catch "cardano:error";
                 }
+                if (self.data.crypto_amount) |amount| {
+                    break :blk std.fmt.bufPrint(&uri_buf, "web+cardano:{s}?amount={d:.6}", .{ wallet, amount }) catch "cardano:error";
+                }
+                break :blk std.fmt.bufPrint(&uri_buf, "web+cardano:{s}", .{wallet}) catch "cardano:error";
             },
             .usdt, .usdc => blk: {
-                // Stablecoins typically on Ethereum/Tron - use ethereum scheme with token
-                // For simplicity, encode as ethereum address (user can specify network via crypto_network)
                 break :blk std.fmt.bufPrint(&uri_buf, "ethereum:{s}?token={s}", .{ wallet, symbol }) catch "ethereum:error";
             },
             .lightning => blk: {
-                // Lightning Network BOLT11 invoice or LNURL
                 break :blk std.fmt.bufPrint(&uri_buf, "lightning:{s}", .{wallet}) catch "lightning:error";
             },
             .custom => blk: {
-                // Generic format with custom symbol
+                if (amount_str) |amt| {
+                    if (amt.len > 0) break :blk std.fmt.bufPrint(&uri_buf, "{s}:{s}?amount={s}", .{ symbol, wallet, amt }) catch "custom:error";
+                }
                 if (self.data.crypto_amount) |amount| {
                     break :blk std.fmt.bufPrint(&uri_buf, "{s}:{s}?amount={d:.8}", .{ symbol, wallet, amount }) catch "custom:error";
-                } else {
-                    break :blk std.fmt.bufPrint(&uri_buf, "{s}:{s}", .{ symbol, wallet }) catch "custom:error";
                 }
+                break :blk std.fmt.bufPrint(&uri_buf, "{s}:{s}", .{ symbol, wallet }) catch "custom:error";
             },
         };
 

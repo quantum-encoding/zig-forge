@@ -14,20 +14,21 @@ const TextAnchor = canvas.TextAnchor;
 
 /// Color scale for heatmap
 pub const ColorScale = struct {
-    colors: []const Color,
+    colors: [8]Color = undefined,
+    colors_len: usize = 0,
     min: f64,
     max: f64,
 
     /// Get color for a value
     pub fn getColor(self: ColorScale, value: f64) Color {
-        if (self.colors.len == 0) return Color.gray_400;
-        if (self.colors.len == 1) return self.colors[0];
+        if (self.colors_len == 0) return Color.gray_400;
+        if (self.colors_len == 1) return self.colors[0];
 
         const normalized = std.math.clamp((value - self.min) / (self.max - self.min), 0, 1);
-        const segment_count: f64 = @floatFromInt(self.colors.len - 1);
+        const segment_count: f64 = @floatFromInt(self.colors_len - 1);
         const segment = normalized * segment_count;
         const lower_idx: usize = @intFromFloat(@floor(segment));
-        const upper_idx: usize = @min(lower_idx + 1, self.colors.len - 1);
+        const upper_idx: usize = @min(lower_idx + 1, self.colors_len - 1);
         const t = segment - @as(f64, @floatFromInt(lower_idx));
 
         return self.colors[lower_idx].interpolate(self.colors[upper_idx], @floatCast(t));
@@ -35,45 +36,45 @@ pub const ColorScale = struct {
 
     /// Create a default blue-red color scale
     pub fn blueToRed(min: f64, max: f64) ColorScale {
-        return .{
-            .colors = &[_]Color{
-                Color.fromHex("3B82F6").?, // blue
-                Color.fromHex("10B981").?, // green
-                Color.fromHex("F59E0B").?, // yellow
-                Color.fromHex("EF4444").?, // red
-            },
+        var self = ColorScale{
             .min = min,
             .max = max,
+            .colors_len = 4,
         };
+        self.colors[0] = Color.fromHex("3B82F6").?; // blue
+        self.colors[1] = Color.fromHex("10B981").?; // green
+        self.colors[2] = Color.fromHex("F59E0B").?; // yellow
+        self.colors[3] = Color.fromHex("EF4444").?; // red
+        return self;
     }
 
     /// Create a sequential single-hue scale
     pub fn sequential(base_color: Color, min: f64, max: f64) ColorScale {
-        return .{
-            .colors = &[_]Color{
-                base_color.lighten(0.8),
-                base_color.lighten(0.5),
-                base_color,
-                base_color.darken(0.3),
-            },
+        var self = ColorScale{
             .min = min,
             .max = max,
+            .colors_len = 4,
         };
+        self.colors[0] = base_color.lighten(0.8);
+        self.colors[1] = base_color.lighten(0.5);
+        self.colors[2] = base_color;
+        self.colors[3] = base_color.darken(0.3);
+        return self;
     }
 
     /// Create a diverging scale (for data with meaningful center)
     pub fn diverging(min: f64, max: f64) ColorScale {
-        return .{
-            .colors = &[_]Color{
-                Color.fromHex("2563EB").?, // blue
-                Color.fromHex("93C5FD").?, // light blue
-                Color.fromHex("F3F4F6").?, // white-ish
-                Color.fromHex("FCA5A5").?, // light red
-                Color.fromHex("DC2626").?, // red
-            },
+        var self = ColorScale{
             .min = min,
             .max = max,
+            .colors_len = 5,
         };
+        self.colors[0] = Color.fromHex("2563EB").?; // blue
+        self.colors[1] = Color.fromHex("93C5FD").?; // light blue
+        self.colors[2] = Color.fromHex("F3F4F6").?; // white-ish
+        self.colors[3] = Color.fromHex("FCA5A5").?; // light red
+        self.colors[4] = Color.fromHex("DC2626").?; // red
+        return self;
     }
 };
 

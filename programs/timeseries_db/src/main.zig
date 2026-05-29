@@ -40,16 +40,21 @@ pub const Candle = struct {
 
 /// Time series database handle
 pub const TSDB = struct {
+    io: std.Io,
     allocator: std.mem.Allocator,
     data_dir: []const u8,
     file_handle: ?std.Io.File,
     indexes: std.StringHashMap(index.BTree),
 
-    pub fn init(allocator: std.mem.Allocator, data_dir: []const u8) !TSDB {
+    pub fn init(io: std.Io, allocator: std.mem.Allocator, data_dir: []const u8) !TSDB {
         // Create data directory if it doesn't exist
-        _ = std.c.mkdir(data_dir, 0o755);
+        std.Io.Dir.cwd().createDirPath(io, data_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
 
         return .{
+            .io = io,
             .allocator = allocator,
             .data_dir = data_dir,
             .file_handle = null,
@@ -59,8 +64,7 @@ pub const TSDB = struct {
 
     pub fn deinit(self: *TSDB) void {
         if (self.file_handle) |file| {
-            const io = std.Io.Threaded.global_single_threaded.io();
-            file.close(io);
+            file.close(self.io);
         }
 
         // Deinit all B-tree indexes
@@ -80,7 +84,7 @@ pub const TSDB = struct {
         defer self.allocator.free(file_path);
 
         // Open or create storage
-        const store = try storage.FileStorage.create(file_path, 1024 * 1024);
+        const store = try storage.FileStorage.create(self.io, file_path, 1024 * 1024);
         var file_store = store;
         defer file_store.deinit();
 
@@ -238,7 +242,7 @@ pub const TSDB = struct {
         const file_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}.tsdb", .{ self.data_dir, symbol });
         defer self.allocator.free(file_path);
 
-        var file_store = try storage.FileStorage.open(file_path, false);
+        var file_store = try storage.FileStorage.open(self.io, file_path, false);
         defer file_store.deinit();
 
         const header = file_store.getHeaderConst();
@@ -311,6 +315,6 @@ pub const TSDB = struct {
     }
 };
 
-test "library imports" {
-    try std.testing.expect(true);
+test "library tests" {
+    std.testing.refAllDecls(@This());
 }

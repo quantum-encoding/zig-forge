@@ -28,13 +28,13 @@ let loadPromise: Promise<ZigPdfModule> | null = null;
 interface WasmExports {
   memory: WebAssembly.Memory;
   zigpdf_generate_presentation: (jsonPtr: number, jsonLen: number, outLenPtr: number) => number;
-  zigpdf_generate_invoice: (jsonPtr: number, outLenPtr: number) => number;
-  zigpdf_generate_letter_quote: (jsonPtr: number, outLenPtr: number) => number;
+  zigpdf_generate_invoice: (jsonPtr: number, jsonLen: number, outLenPtr: number) => number;
+  zigpdf_generate_letter_quote: (jsonPtr: number, jsonLen: number, outLenPtr: number) => number;
   zigpdf_free: (ptr: number, len: number) => void;
   zigpdf_get_error: () => number;
   zigpdf_version: () => number;
-  malloc: (size: number) => number;
-  free: (ptr: number) => void;
+  wasm_alloc: (size: number) => number;
+  wasm_free: (ptr: number, size: number) => void;
 }
 
 /**
@@ -49,21 +49,20 @@ function readCString(memory: WebAssembly.Memory, ptr: number): string {
 }
 
 /**
- * Write a string to WASM memory, returns pointer
+ * Write a string to WASM memory, returns pointer and length
  */
-function writeCString(
+function writeString(
   memory: WebAssembly.Memory,
   exports: WasmExports,
   str: string
 ): { ptr: number; len: number } {
   const encoded = new TextEncoder().encode(str);
-  const ptr = exports.malloc(encoded.length + 1);
+  const ptr = exports.wasm_alloc(encoded.length);
   if (ptr === 0) {
     throw new Error('Failed to allocate WASM memory for string');
   }
   const bytes = new Uint8Array(memory.buffer);
   bytes.set(encoded, ptr);
-  bytes[ptr + encoded.length] = 0; // null terminator
   return { ptr, len: encoded.length };
 }
 
@@ -88,13 +87,13 @@ function createModule(exports: WasmExports): ZigPdfModule {
   return {
     generatePresentation(jsonString: string): Uint8Array {
       // Allocate space for output length (4 bytes for u32)
-      const outLenPtr = exports.malloc(4);
+      const outLenPtr = exports.wasm_alloc(4);
       if (outLenPtr === 0) {
         throw new Error('Failed to allocate memory for output length');
       }
 
       // Write JSON string to WASM memory
-      const { ptr: jsonPtr, len: jsonLen } = writeCString(memory, exports, jsonString);
+      const { ptr: jsonPtr, len: jsonLen } = writeString(memory, exports, jsonString);
 
       try {
         // Call the WASM function
@@ -123,21 +122,21 @@ function createModule(exports: WasmExports): ZigPdfModule {
         return result;
       } finally {
         // Clean up input memory
-        exports.free(jsonPtr);
-        exports.free(outLenPtr);
+        exports.wasm_free(jsonPtr, jsonLen);
+        exports.wasm_free(outLenPtr, 4);
       }
     },
 
     generateInvoice(jsonString: string): Uint8Array {
-      const outLenPtr = exports.malloc(4);
+      const outLenPtr = exports.wasm_alloc(4);
       if (outLenPtr === 0) {
         throw new Error('Failed to allocate memory for output length');
       }
 
-      const { ptr: jsonPtr } = writeCString(memory, exports, jsonString);
+      const { ptr: jsonPtr, len: jsonLen } = writeString(memory, exports, jsonString);
 
       try {
-        const resultPtr = exports.zigpdf_generate_invoice(jsonPtr, outLenPtr);
+        const resultPtr = exports.zigpdf_generate_invoice(jsonPtr, jsonLen, outLenPtr);
 
         if (resultPtr === 0) {
           const errorPtr = exports.zigpdf_get_error();
@@ -155,21 +154,21 @@ function createModule(exports: WasmExports): ZigPdfModule {
 
         return result;
       } finally {
-        exports.free(jsonPtr);
-        exports.free(outLenPtr);
+        exports.wasm_free(jsonPtr, jsonLen);
+        exports.wasm_free(outLenPtr, 4);
       }
     },
 
     generateLetterQuote(jsonString: string): Uint8Array {
-      const outLenPtr = exports.malloc(4);
+      const outLenPtr = exports.wasm_alloc(4);
       if (outLenPtr === 0) {
         throw new Error('Failed to allocate memory for output length');
       }
 
-      const { ptr: jsonPtr } = writeCString(memory, exports, jsonString);
+      const { ptr: jsonPtr, len: jsonLen } = writeString(memory, exports, jsonString);
 
       try {
-        const resultPtr = exports.zigpdf_generate_letter_quote(jsonPtr, outLenPtr);
+        const resultPtr = exports.zigpdf_generate_letter_quote(jsonPtr, jsonLen, outLenPtr);
 
         if (resultPtr === 0) {
           const errorPtr = exports.zigpdf_get_error();
@@ -187,8 +186,8 @@ function createModule(exports: WasmExports): ZigPdfModule {
 
         return result;
       } finally {
-        exports.free(jsonPtr);
-        exports.free(outLenPtr);
+        exports.wasm_free(jsonPtr, jsonLen);
+        exports.wasm_free(outLenPtr, 4);
       }
     },
 

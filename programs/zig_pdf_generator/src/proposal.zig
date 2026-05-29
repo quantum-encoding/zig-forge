@@ -17,6 +17,8 @@ const std = @import("std");
 const document = @import("document.zig");
 const image = @import("image.zig");
 const qrcode = @import("qrcode.zig");
+const types = @import("types.zig");
+const crypto_receipt = @import("crypto_receipt.zig");
 
 // =============================================================================
 // UTF-8 to WinAnsiEncoding
@@ -168,6 +170,7 @@ pub const ProposalData = struct {
     footer: FooterInfo = .{},
     /// Base64-encoded property image (e.g. from solar API satellite view)
     property_image_base64: ?[]const u8 = null,
+    crypto_payment: ?types.CryptoPaymentBlock = null,
 };
 
 // =============================================================================
@@ -208,6 +211,7 @@ pub const ProposalRenderer = struct {
     qr_pixels: ?[]u8 = null,
     qr_id: ?[]const u8 = null,
     qr_size: u32 = 0,
+    crypto_qr_pixels: ?[]u8 = null,
 
     // Content pages
     pages: std.ArrayListUnmanaged(document.ContentStream),
@@ -235,6 +239,7 @@ pub const ProposalRenderer = struct {
         if (self.logo_decoded) |d| self.allocator.free(d);
         if (self.property_decoded) |d| self.allocator.free(d);
         if (self.qr_pixels) |d| self.allocator.free(d);
+        if (self.crypto_qr_pixels) |d| self.allocator.free(d);
 
         for (self.pages.items) |*page| {
             page.deinit();
@@ -1042,6 +1047,10 @@ pub const ProposalRenderer = struct {
             }
         }
 
+        if (self.data.crypto_payment != null) {
+            try self.drawCryptoPaymentSection(&content);
+        }
+
         // Save final page — ownership transfers to pages array
         try self.pages.append(self.allocator, content);
         content.buffer = .empty;
@@ -1057,6 +1066,171 @@ pub const ProposalRenderer = struct {
         }
 
         return self.doc.build();
+    }
+
+    fn buildCryptoUri(self: *ProposalRenderer, wallet: []const u8, network: crypto_receipt.Network, symbol: []const u8, amount_str: ?[]const u8) ![]u8 {
+        var uri_buf: [512]u8 = undefined;
+
+        const uri_str: []const u8 = switch (network) {
+            .bitcoin => blk: {
+                if (amount_str) |amt| {
+                    if (amt.len > 0) break :blk std.fmt.bufPrint(&uri_buf, "bitcoin:{s}?amount={s}", .{ wallet, amt }) catch "bitcoin:error";
+                }
+                break :blk std.fmt.bufPrint(&uri_buf, "bitcoin:{s}", .{wallet}) catch "bitcoin:error";
+            },
+            .ethereum, .polygon, .bnb => blk: {
+                const chain_id: u32 = switch (network) {
+                    .ethereum => 1,
+                    .polygon => 137,
+                    .bnb => 56,
+                    else => 1,
+                };
+                if (amount_str) |amt| {
+                    if (amt.len > 0) {
+                        const amount = std.fmt.parseFloat(f64, amt) catch 0.0;
+                        const wei: u64 = @intFromFloat(amount * 1e18);
+                        break :blk std.fmt.bufPrint(&uri_buf, "ethereum:{s}@{d}?value={d}", .{ wallet, chain_id, wei }) catch "ethereum:error";
+                    }
+                }
+                break :blk std.fmt.bufPrint(&uri_buf, "ethereum:{s}@{d}", .{ wallet, chain_id }) catch "ethereum:error";
+            },
+            .litecoin => blk: {
+                if (amount_str) |amt| {
+                    if (amt.len > 0) break :blk std.fmt.bufPrint(&uri_buf, "litecoin:{s}?amount={s}", .{ wallet, amt }) catch "litecoin:error";
+                }
+                break :blk std.fmt.bufPrint(&uri_buf, "litecoin:{s}", .{wallet}) catch "litecoin:error";
+            },
+            .dogecoin => blk: {
+                if (amount_str) |amt| {
+                    if (amt.len > 0) break :blk std.fmt.bufPrint(&uri_buf, "dogecoin:{s}?amount={s}", .{ wallet, amt }) catch "dogecoin:error";
+                }
+                break :blk std.fmt.bufPrint(&uri_buf, "dogecoin:{s}", .{wallet}) catch "dogecoin:error";
+            },
+            .bitcoin_cash => blk: {
+                if (amount_str) |amt| {
+                    if (amt.len > 0) break :blk std.fmt.bufPrint(&uri_buf, "bitcoincash:{s}?amount={s}", .{ wallet, amt }) catch "bitcoincash:error";
+                }
+                break :blk std.fmt.bufPrint(&uri_buf, "bitcoincash:{s}", .{wallet}) catch "bitcoincash:error";
+            },
+            .solana => blk: {
+                if (amount_str) |amt| {
+                    if (amt.len > 0) break :blk std.fmt.bufPrint(&uri_buf, "solana:{s}?amount={s}", .{ wallet, amt }) catch "solana:error";
+                }
+                break :blk std.fmt.bufPrint(&uri_buf, "solana:{s}", .{wallet}) catch "solana:error";
+            },
+            .tron => blk: {
+                if (amount_str) |amt| {
+                    if (amt.len > 0) break :blk std.fmt.bufPrint(&uri_buf, "tron:{s}?amount={s}", .{ wallet, amt }) catch "tron:error";
+                }
+                break :blk std.fmt.bufPrint(&uri_buf, "tron:{s}", .{wallet}) catch "tron:error";
+            },
+            .xrp => blk: {
+                if (amount_str) |amt| {
+                    if (amt.len > 0) break :blk std.fmt.bufPrint(&uri_buf, "xrpl:{s}?amount={s}", .{ wallet, amt }) catch "xrpl:error";
+                }
+                break :blk std.fmt.bufPrint(&uri_buf, "xrpl:{s}", .{wallet}) catch "xrpl:error";
+            },
+            .cardano => blk: {
+                if (amount_str) |amt| {
+                    if (amt.len > 0) break :blk std.fmt.bufPrint(&uri_buf, "web+cardano:{s}?amount={s}", .{ wallet, amt }) catch "cardano:error";
+                }
+                break :blk std.fmt.bufPrint(&uri_buf, "web+cardano:{s}", .{wallet}) catch "cardano:error";
+            },
+            .usdt, .usdc => blk: {
+                break :blk std.fmt.bufPrint(&uri_buf, "ethereum:{s}?token={s}", .{ wallet, symbol }) catch "ethereum:error";
+            },
+            .lightning => blk: {
+                break :blk std.fmt.bufPrint(&uri_buf, "lightning:{s}", .{wallet}) catch "lightning:error";
+            },
+            .custom => blk: {
+                if (amount_str) |amt| {
+                    if (amt.len > 0) break :blk std.fmt.bufPrint(&uri_buf, "{s}:{s}?amount={s}", .{ symbol, wallet, amt }) catch "custom:error";
+                }
+                break :blk std.fmt.bufPrint(&uri_buf, "{s}:{s}", .{ symbol, wallet }) catch "custom:error";
+            },
+        };
+
+        return try self.allocator.dupe(u8, uri_str);
+    }
+
+    fn drawCryptoPaymentSection(self: *ProposalRenderer, content: *document.ContentStream) !void {
+        const cp = self.data.crypto_payment orelse return;
+
+        const network = cp.getNetwork();
+        const network_color = document.Color.fromHex(network.color());
+        const network_name = network.displayName();
+        const symbol = if (cp.currency.len > 0) cp.currency else network.symbol();
+        const wallet = cp.to_address;
+        if (wallet.len == 0) return;
+
+        const amount_str = if (cp.amount.len > 0) cp.amount else null;
+
+        // Visual layout checks
+        try self.checkPageBreak(content, 140);
+        self.current_y -= 15;
+
+        // Draw a light background border box for premium feel
+        const box_height: f32 = 100;
+        const box_width = self.usable_width;
+        try content.drawRect(self.margin_left, self.current_y - box_height, box_width, box_height, document.Color.fromHex("#f8fafc"), document.Color.fromHex("#e2e8f0"));
+
+        // Left section: Text info
+        const text_x = self.margin_left + 15;
+        var text_y = self.current_y - 20;
+
+        try content.drawText("Payment Details (Cryptocurrency)", text_x, text_y, self.font_bold, 11, document.Color.fromHex("#1e293b"));
+        text_y -= 15;
+
+        var details_buf: [128]u8 = undefined;
+        const details_text = if (amount_str) |amt|
+            std.fmt.bufPrint(&details_buf, "Pay {s} {s} on {s} network", .{ amt, symbol, network_name }) catch "Crypto Payment"
+        else
+            std.fmt.bufPrint(&details_buf, "Pay {s} on {s} network", .{ symbol, network_name }) catch "Crypto Payment";
+
+        try content.drawText(details_text, text_x, text_y, self.font_regular, 9.5, document.Color.fromHex("#475569"));
+        text_y -= 18;
+
+        // To Address
+        try content.drawText("To Address:", text_x, text_y, self.font_bold, 8.5, document.Color.fromHex("#64748b"));
+        text_y -= 12;
+
+        try content.drawText(wallet, text_x, text_y, self.font_regular, 8, network_color);
+        text_y -= 15;
+
+        if (cp.from_address.len > 0) {
+            try content.drawText("From Address:", text_x, text_y, self.font_bold, 8.5, document.Color.fromHex("#64748b"));
+            text_y -= 12;
+            try content.drawText(cp.from_address, text_x, text_y, self.font_regular, 8, document.Color.fromHex("#475569"));
+        }
+
+        // Right section: QR code
+        const uri = try self.buildCryptoUri(wallet, network, symbol, amount_str);
+        defer self.allocator.free(uri);
+
+        // Generate native QR code
+        const qr_config = qrcode.QrConfig{
+            .ec_level = .M,
+            .min_version = 1,
+            .max_version = 10,
+        };
+
+        if (qrcode.encodeAndRender(self.allocator, uri, 4, qr_config)) |qr_img| {
+            self.crypto_qr_pixels = qr_img.pixels;
+            const img = document.Image{
+                .width = qr_img.width,
+                .height = qr_img.height,
+                .data = qr_img.pixels,
+                .format = .raw_rgb,
+            };
+            if (self.doc.addImage(img)) |qr_id| {
+                const qr_draw_size: f32 = 70;
+                const qr_x = self.margin_left + box_width - qr_draw_size - 15;
+                const qr_y = self.current_y - box_height + 15;
+                try content.drawImage(qr_id, qr_x, qr_y, qr_draw_size, qr_draw_size);
+            } else |_| {}
+        } else |_| {}
+
+        self.current_y -= box_height + 15;
     }
 };
 
@@ -1148,6 +1322,39 @@ fn parseProposalJson(allocator: std.mem.Allocator, json_str: []const u8) !Parsed
     data.valid_until = try dupeJsonStringDefault(allocator, root, "valid_until", "");
     data.primary_color = try dupeJsonStringDefault(allocator, root, "primary_color", "#16a34a");
     data.secondary_color = try dupeJsonStringDefault(allocator, root, "secondary_color", "#1e3a2f");
+
+    // Parse nested crypto payment block
+    if (root.get("crypto_payment")) |cp_val| {
+        if (cp_val == .object) {
+            const cp_obj = cp_val.object;
+            var block = types.CryptoPaymentBlock{};
+            block.network = try dupeJsonStringDefault(allocator, cp_obj, "network", "");
+            block.to_address = try dupeJsonStringDefault(allocator, cp_obj, "to_address", "");
+            block.from_address = try dupeJsonStringDefault(allocator, cp_obj, "from_address", "");
+            
+            if (cp_obj.get("amount")) |amt_val| {
+                switch (amt_val) {
+                    .string => {
+                        block.amount = try allocator.dupe(u8, amt_val.string);
+                    },
+                    .integer => {
+                        var buf: [64]u8 = undefined;
+                        const formatted = std.fmt.bufPrint(&buf, "{d}", .{amt_val.integer}) catch "";
+                        block.amount = try allocator.dupe(u8, formatted);
+                    },
+                    .float => {
+                        var buf: [64]u8 = undefined;
+                        const formatted = std.fmt.bufPrint(&buf, "{d:.8}", .{amt_val.float}) catch "";
+                        block.amount = try allocator.dupe(u8, formatted);
+                    },
+                    else => {},
+                }
+            }
+            
+            block.currency = try dupeJsonStringDefault(allocator, cp_obj, "currency", "");
+            data.crypto_payment = block;
+        }
+    }
 
     // Footer
     if (root.get("footer")) |f| {

@@ -323,7 +323,12 @@ fn renderScatterFromJson(
     const data_obj = data.object;
 
     var series_list: std.ArrayListUnmanaged(scatter.ScatterSeries) = .empty;
-    defer series_list.deinit(allocator);
+    defer {
+        for (series_list.items) |item| {
+            allocator.free(item.points);
+        }
+        series_list.deinit(allocator);
+    }
 
     // Support both "points" (single series) and "series" (multi-series)
     if (data_obj.get("points")) |points_val| {
@@ -408,7 +413,12 @@ fn renderAreaFromJson(
     const data_obj = data.object;
 
     var series_list: std.ArrayListUnmanaged(area.AreaSeries) = .empty;
-    defer series_list.deinit(allocator);
+    defer {
+        for (series_list.items) |item| {
+            allocator.free(item.data);
+        }
+        series_list.deinit(allocator);
+    }
 
     const series_val = data_obj.get("series") orelse return JsonChartError.InvalidData;
     if (series_val != .array) return JsonChartError.InvalidData;
@@ -488,7 +498,12 @@ fn renderHeatmapFromJson(
     if (matrix_val != .array) return JsonChartError.InvalidData;
 
     var matrix: std.ArrayListUnmanaged([]const f64) = .empty;
-    defer matrix.deinit(allocator);
+    defer {
+        for (matrix.items) |row| {
+            allocator.free(row);
+        }
+        matrix.deinit(allocator);
+    }
 
     for (matrix_val.array.items) |row_val| {
         if (row_val != .array) continue;
@@ -532,7 +547,12 @@ fn renderLineFromJson(
     const data_obj = data.object;
 
     var series_list: std.ArrayListUnmanaged(line.Series) = .empty;
-    defer series_list.deinit(allocator);
+    defer {
+        for (series_list.items) |item| {
+            allocator.free(item.data);
+        }
+        series_list.deinit(allocator);
+    }
 
     const series_val = data_obj.get("series") orelse return JsonChartError.InvalidData;
     if (series_val != .array) return JsonChartError.InvalidData;
@@ -622,7 +642,12 @@ fn renderBarFromJson(
 
     // Parse series
     var series_list: std.ArrayListUnmanaged(bar.BarSeries) = .empty;
-    defer series_list.deinit(allocator);
+    defer {
+        for (series_list.items) |item| {
+            allocator.free(item.values);
+        }
+        series_list.deinit(allocator);
+    }
 
     const series_val = data_obj.get("series") orelse return JsonChartError.InvalidData;
     if (series_val != .array) return JsonChartError.InvalidData;

@@ -219,22 +219,22 @@ pub const BTree = struct {
 
     /// Range query: find all entries between start and end (inclusive)
     pub fn rangeQuery(self: *const BTree, start: i64, end: i64, allocator: std.mem.Allocator) ![]Entry {
-        var results = std.ArrayList(Entry).init(allocator);
-        errdefer results.deinit();
+        var results: std.ArrayList(Entry) = .empty;
+        errdefer results.deinit(allocator);
 
         if (self.root) |root| {
-            try self.rangeQueryNode(root, start, end, &results);
+            try self.rangeQueryNode(root, start, end, &results, allocator);
         }
 
-        return results.toOwnedSlice();
+        return results.toOwnedSlice(allocator);
     }
 
-    fn rangeQueryNode(self: *const BTree, node: *Node, start: i64, end: i64, results: *std.ArrayList(Entry)) !void {
+    fn rangeQueryNode(self: *const BTree, node: *Node, start: i64, end: i64, results: *std.ArrayList(Entry), allocator: std.mem.Allocator) !void {
         if (node.is_leaf) {
             // Leaf node - check all keys in range
             for (0..node.num_keys) |i| {
                 if (node.keys[i] >= start and node.keys[i] <= end) {
-                    try results.append(.{
+                    try results.append(allocator, .{
                         .key = node.keys[i],
                         .value = node.values[i],
                     });
@@ -246,7 +246,7 @@ pub const BTree = struct {
                 // Check left subtree
                 if (node.keys[i] >= start) {
                     if (node.children[i]) |child| {
-                        try self.rangeQueryNode(child, start, end, results);
+                        try self.rangeQueryNode(child, start, end, results, allocator);
                     }
                 }
 
@@ -269,7 +269,7 @@ pub const BTree = struct {
             // Check rightmost child if needed
             if (node.num_keys > 0 and node.keys[node.num_keys - 1] <= end) {
                 if (node.children[node.num_keys]) |child| {
-                    try self.rangeQueryNode(child, start, end, results);
+                    try self.rangeQueryNode(child, start, end, results, allocator);
                 }
             }
         }

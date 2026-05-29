@@ -37,6 +37,7 @@
 const std = @import("std");
 const invoice = @import("invoice.zig");
 const crypto_receipt = @import("crypto_receipt.zig");
+const types = @import("types.zig");
 
 pub const JsonError = error{
     InvalidJson,
@@ -154,6 +155,39 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
     data.crypto_custom_symbol = try dupeJsonString(allocator, obj, "crypto_custom_symbol");
     data.crypto_amount = getJsonFloat(obj, "crypto_amount");
 
+    // Parse nested crypto payment block
+    if (obj.get("crypto_payment")) |cp_val| {
+        if (cp_val == .object) {
+            const cp_obj = cp_val.object;
+            var block = types.CryptoPaymentBlock{};
+            block.network = try dupeJsonString(allocator, cp_obj, "network") orelse "";
+            block.to_address = try dupeJsonString(allocator, cp_obj, "to_address") orelse "";
+            block.from_address = try dupeJsonString(allocator, cp_obj, "from_address") orelse "";
+            
+            if (cp_obj.get("amount")) |amt_val| {
+                switch (amt_val) {
+                    .string => {
+                        block.amount = try allocator.dupe(u8, amt_val.string);
+                    },
+                    .integer => {
+                        var buf: [64]u8 = undefined;
+                        const formatted = std.fmt.bufPrint(&buf, "{d}", .{amt_val.integer}) catch "";
+                        block.amount = try allocator.dupe(u8, formatted);
+                    },
+                    .float => {
+                        var buf: [64]u8 = undefined;
+                        const formatted = std.fmt.bufPrint(&buf, "{d:.8}", .{amt_val.float}) catch "";
+                        block.amount = try allocator.dupe(u8, formatted);
+                    },
+                    else => {},
+                }
+            }
+            
+            block.currency = try dupeJsonString(allocator, cp_obj, "currency") orelse "";
+            data.crypto_payment = block;
+        }
+    }
+
     // Parse crypto network
     if (getJsonString(obj, "crypto_network")) |network_str| {
         data.crypto_network = crypto_receipt.Network.fromString(network_str);
@@ -266,6 +300,10 @@ pub fn freeInvoiceData(allocator: std.mem.Allocator, data: *const invoice.Invoic
     if (data.crypto_wallet) |s| allocator.free(s);
     if (data.crypto_sender_wallet) |s| allocator.free(s);
     if (data.crypto_custom_symbol) |s| allocator.free(s);
+    if (data.crypto_payment) |cp| {
+        var mutable_cp = cp;
+        mutable_cp.deinit(allocator);
+    }
 
     // Free payment button fields
     if (data.payment_button_url) |s| allocator.free(s);

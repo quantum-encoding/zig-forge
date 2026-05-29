@@ -174,6 +174,7 @@ fn addResult(config: *ScanConfig, port: u16, status: PortStatus) !void {
 
 fn scanThread(data: *ThreadData) !void {
     var threaded = Io.Threaded.init_single_threaded;
+    defer threaded.deinit();
     const io = threaded.io();
 
     var idx = data.port_start_idx;
@@ -344,8 +345,7 @@ pub fn parsePortSpec(spec: []const u8, ports: *std.ArrayList(u16), allocator: st
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.c_allocator;
 
-    var threaded = Io.Threaded.init_single_threaded;
-    const main_io = threaded.io();
+    const main_io = init.io;
 
     // Collect args into array for indexed access
     var args_list: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -392,8 +392,16 @@ pub fn main(init: std.process.Init) !void {
     try parsePortSpec(port_spec, &config.ports, allocator);
     if (config.ports.items.len == 0) return ScannerError.InvalidPortRange;
 
+    const total_ports = config.ports.items.len;
+    const cpu_count = std.Thread.getCpuCount() catch 4;
+    const max_worker_threads = @min(@as(usize, MAX_THREADS), @as(usize, cpu_count) * 4);
+    var thread_count: usize = @min(parsed_config.thread_count, max_worker_threads);
+    if (thread_count > total_ports) {
+        thread_count = @max(@as(usize, 1), total_ports);
+    }
+
     config.timeout_ms = parsed_config.timeout_ms;
-    config.thread_count = @min(parsed_config.thread_count, MAX_THREADS);
+    config.thread_count = thread_count;
     config.verbose = parsed_config.verbose;
     config.show_closed = parsed_config.show_closed;
 
@@ -414,7 +422,6 @@ pub fn main(init: std.process.Init) !void {
     posix.sigaction(posix.SIG.INT, &act, null);
 
     // Threading Setup
-    const total_ports = config.ports.items.len;
     const ports_per_thread = total_ports / config.thread_count;
     var threads = try allocator.alloc(std.Thread, config.thread_count);
     defer allocator.free(threads);

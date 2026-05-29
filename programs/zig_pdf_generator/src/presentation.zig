@@ -30,6 +30,7 @@
 const std = @import("std");
 const document = @import("document.zig");
 const image_mod = @import("image.zig");
+const types = @import("types.zig");
 
 // =============================================================================
 // Data Structures
@@ -175,6 +176,7 @@ pub const PresentationData = struct {
     default_font_size: f32 = 24,
     default_text_color: []const u8 = "#000000",
     default_background: []const u8 = "#ffffff",
+    crypto_payment: ?types.CryptoPaymentBlock = null,
 };
 
 // =============================================================================
@@ -189,6 +191,7 @@ pub const PresentationRenderer = struct {
 
     // Coordinate system: y=0 is top of page (we convert to PDF coordinates internally)
     page_height: f32 = 1080,
+    crypto_qr_pixels: ?[]u8 = null,
 
     pub fn init(allocator: std.mem.Allocator, data: PresentationData) PresentationRenderer {
         const doc = document.PdfDocument.init(allocator);
@@ -240,7 +243,159 @@ pub const PresentationRenderer = struct {
             self.allocator.free(@constCast(self.data.pages));
         }
 
+        if (self.crypto_qr_pixels) |p| {
+            self.allocator.free(p);
+        }
+
         self.doc.deinit();
+    }
+
+    fn renderCryptoPaymentPage(self: *PresentationRenderer) !void {
+        const cp = self.data.crypto_payment orelse return;
+
+        const network = cp.getNetwork();
+        const network_color = document.Color.fromHex(network.color());
+        const network_name = network.displayName();
+        const symbol = if (cp.currency.len > 0) cp.currency else network.symbol();
+        const wallet = cp.to_address;
+        if (wallet.len == 0) return;
+
+        const amount_str = if (cp.amount.len > 0) cp.amount else null;
+
+        var content = document.ContentStream.init(self.allocator);
+        defer content.deinit();
+
+        // Dark background for a gorgeous pitch deck / presentation feel
+        const bg_color = document.Color.fromHex("#0f172a"); // slate-900
+        try content.drawRect(0, 0, self.data.page_size.width, self.data.page_size.height, bg_color, null);
+
+        // Center card configuration
+        const card_width: f32 = 800;
+        const card_height: f32 = 500;
+        const card_x = (self.data.page_size.width - card_width) / 2;
+        const card_y = (self.data.page_size.height - card_height) / 2;
+
+        // Draw card background (slate-800) with thin border (slate-700)
+        try content.drawRect(card_x, card_y, card_width, card_height, document.Color.fromHex("#1e293b"), document.Color.fromHex("#334155"));
+
+        // Content layout within the card
+        const content_center_x = self.data.page_size.width / 2;
+        var current_text_y = card_y + card_height - 60;
+
+        // Title
+        try self.drawTextCentred(&content, "Payment Details (Cryptocurrency)", content_center_x, current_text_y, .helvetica_bold, 28, document.Color.fromHex("#ffffff"));
+        current_text_y -= 45;
+
+        // Subtitle details
+        var details_buf: [128]u8 = undefined;
+        const details_text = if (amount_str) |amt|
+            std.fmt.bufPrint(&details_buf, "Please scan or send exactly {s} {s} on {s} network", .{ amt, symbol, network_name }) catch "Crypto Payment"
+        else
+            std.fmt.bufPrint(&details_buf, "Please scan or send {s} on {s} network", .{ symbol, network_name }) catch "Crypto Payment";
+
+        try self.drawTextCentred(&content, details_text, content_center_x, current_text_y, .helvetica, 18, document.Color.fromHex("#94a3b8"));
+        current_text_y -= 50;
+
+        // To Address label
+        try self.drawTextCentred(&content, "To Address:", content_center_x, current_text_y, .helvetica_bold, 14, document.Color.fromHex("#64748b"));
+        current_text_y -= 25;
+
+        // To Address value
+        try self.drawTextCentred(&content, wallet, content_center_x, current_text_y, .helvetica, 15, network_color);
+        current_text_y -= 40;
+
+        if (cp.from_address.len > 0) {
+            try self.drawTextCentred(&content, "From Address:", content_center_x, current_text_y, .helvetica_bold, 14, document.Color.fromHex("#64748b"));
+            current_text_y -= 25;
+            try self.drawTextCentred(&content, cp.from_address, content_center_x, current_text_y, .helvetica, 13, document.Color.fromHex("#cbd5e1"));
+            current_text_y -= 40;
+        }
+
+        // QR code centered at the bottom of the card
+        var uri_buf: [512]u8 = undefined;
+        const uri = blk: {
+            switch (network) {
+                .bitcoin => {
+                    if (amount_str) |amt| {
+                        if (amt.len > 0) break :blk std.fmt.bufPrint(&uri_buf, "bitcoin:{s}?amount={s}", .{ wallet, amt }) catch "bitcoin:error";
+                    }
+                    break :blk std.fmt.bufPrint(&uri_buf, "bitcoin:{s}", .{wallet}) catch "bitcoin:error";
+                },
+                .ethereum, .polygon, .bnb => {
+                    const chain_id: u32 = switch (network) {
+                        .ethereum => 1,
+                        .polygon => 137,
+                        .bnb => 56,
+                        else => 1,
+                    };
+                    if (amount_str) |amt| {
+                        if (amt.len > 0) {
+                            const amount = std.fmt.parseFloat(f64, amt) catch 0.0;
+                            const wei: u64 = @intFromFloat(amount * 1e18);
+                            break :blk std.fmt.bufPrint(&uri_buf, "ethereum:{s}@{d}?value={d}", .{ wallet, chain_id, wei }) catch "ethereum:error";
+                        }
+                    }
+                    break :blk std.fmt.bufPrint(&uri_buf, "ethereum:{s}@{d}", .{ wallet, chain_id }) catch "ethereum:error";
+                },
+                .litecoin => {
+                    if (amount_str) |amt| {
+                        if (amt.len > 0) break :blk std.fmt.bufPrint(&uri_buf, "litecoin:{s}?amount={s}", .{ wallet, amt }) catch "litecoin:error";
+                    }
+                    break :blk std.fmt.bufPrint(&uri_buf, "litecoin:{s}", .{wallet}) catch "litecoin:error";
+                },
+                .dogecoin => {
+                    if (amount_str) |amt| {
+                        if (amt.len > 0) break :blk std.fmt.bufPrint(&uri_buf, "dogecoin:{s}?amount={s}", .{ wallet, amt }) catch "dogecoin:error";
+                    }
+                    break :blk std.fmt.bufPrint(&uri_buf, "dogecoin:{s}", .{wallet}) catch "dogecoin:error";
+                },
+                else => {
+                    break :blk wallet;
+                },
+            }
+        };
+
+        // Generate native QR code
+        const qrcode = @import("qrcode.zig");
+        const qr_config = qrcode.QrConfig{
+            .ec_level = .M,
+            .min_version = 1,
+            .max_version = 10,
+        };
+
+        if (qrcode.encodeAndRender(self.allocator, uri, 4, qr_config)) |qr_img| {
+            self.crypto_qr_pixels = qr_img.pixels;
+            const img = document.Image{
+                .width = qr_img.width,
+                .height = qr_img.height,
+                .data = qr_img.pixels,
+                .format = .raw_rgb,
+            };
+            if (self.doc.addImage(img)) |qr_id| {
+                const qr_size: f32 = 180;
+                const qr_x = content_center_x - (qr_size / 2);
+                const qr_y = card_y + 30;
+                try content.drawImage(qr_id, qr_x, qr_y, qr_size, qr_size);
+            } else |_| {}
+        } else |_| {}
+
+        try self.doc.addPage(&content);
+    }
+
+    fn drawTextCentred(
+        self: *PresentationRenderer,
+        content: *document.ContentStream,
+        text: []const u8,
+        center_x: f32,
+        y: f32,
+        font: document.Font,
+        font_size: f32,
+        color: document.Color,
+    ) !void {
+        const font_id = self.doc.getFontId(font);
+        const width = self.measureTextWidth(text, font, font_size);
+        const x = center_x - (width / 2.0);
+        try content.drawText(text, x, y, font_id, font_size, color);
     }
 
     /// Convert from top-down Y coordinate to PDF bottom-up coordinate
@@ -257,6 +412,10 @@ pub const PresentationRenderer = struct {
 
         for (self.data.pages) |page| {
             try self.renderPage(page);
+        }
+
+        if (self.data.crypto_payment != null) {
+            try self.renderCryptoPaymentPage();
         }
 
         return try self.doc.build();
@@ -654,9 +813,44 @@ pub fn generatePresentationFromJson(allocator: std.mem.Allocator, json_str: []co
         }
     }
 
+    // Parse nested crypto payment block
+    var crypto_payment: ?types.CryptoPaymentBlock = null;
+    if (obj.get("crypto_payment")) |cp_val| {
+        if (cp_val == .object) {
+            const cp_obj = cp_val.object;
+            var block = types.CryptoPaymentBlock{};
+            block.network = if (cp_obj.get("network")) |net| try allocator.dupe(u8, net.string) else "";
+            block.to_address = if (cp_obj.get("to_address")) |to| try allocator.dupe(u8, to.string) else "";
+            block.from_address = if (cp_obj.get("from_address")) |from| try allocator.dupe(u8, from.string) else "";
+            
+            if (cp_obj.get("amount")) |amt_val| {
+                switch (amt_val) {
+                    .string => {
+                        block.amount = try allocator.dupe(u8, amt_val.string);
+                    },
+                    .integer => {
+                        var buf: [64]u8 = undefined;
+                        const formatted = std.fmt.bufPrint(&buf, "{d}", .{amt_val.integer}) catch "";
+                        block.amount = try allocator.dupe(u8, formatted);
+                    },
+                    .float => {
+                        var buf: [64]u8 = undefined;
+                        const formatted = std.fmt.bufPrint(&buf, "{d:.8}", .{amt_val.float}) catch "";
+                        block.amount = try allocator.dupe(u8, formatted);
+                    },
+                    else => {},
+                }
+            }
+            
+            block.currency = if (cp_obj.get("currency")) |cur| try allocator.dupe(u8, cur.string) else "";
+            crypto_payment = block;
+        }
+    }
+
     const data = PresentationData{
         .page_size = page_size,
         .pages = try pages.toOwnedSlice(allocator),
+        .crypto_payment = crypto_payment,
     };
 
     var renderer = PresentationRenderer.init(allocator, data);

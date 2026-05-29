@@ -114,7 +114,10 @@ pub const LogScale = struct {
         const log_max = @log10(self.domain_max);
         const log_val = @log10(v);
 
-        const t = (log_val - log_min) / (log_max - log_min);
+        const span = log_max - log_min;
+        if (span == 0) return self.range_min;
+
+        const t = (log_val - log_min) / span;
         const clamped_t = if (self.clamp) @min(1.0, @max(0.0, t)) else t;
         return self.range_min + clamped_t * (self.range_max - self.range_min);
     }

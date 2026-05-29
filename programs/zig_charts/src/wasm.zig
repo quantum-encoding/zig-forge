@@ -18,9 +18,7 @@
 const std = @import("std");
 const json_mod = @import("json.zig");
 
-// Use a fixed buffer allocator for WASM (no libc malloc)
-var wasm_heap: [4 * 1024 * 1024]u8 = undefined; // 4 MB heap
-var fba = std.heap.FixedBufferAllocator.init(&wasm_heap);
+var gpa = std.heap.DebugAllocator(.{}){};
 
 // Output buffer — pointer + length from last render
 var output_ptr: [*]u8 = undefined;
@@ -32,13 +30,15 @@ var last_error_len: usize = 0;
 
 /// Allocate bytes in WASM linear memory. Returns pointer for JS to write into.
 export fn wasm_alloc(size: usize) ?[*]u8 {
-    const slice = fba.allocator().alloc(u8, size) catch return null;
+    const allocator = gpa.allocator();
+    const slice = allocator.alloc(u8, size) catch return null;
     return slice.ptr;
 }
 
 /// Free previously allocated memory.
 export fn wasm_free(ptr: [*]u8, size: usize) void {
-    fba.allocator().free(ptr[0..size]);
+    const allocator = gpa.allocator();
+    allocator.free(ptr[0..size]);
 }
 
 // ── Chart rendering ──────────────────────────────────────────────────────────
@@ -46,7 +46,7 @@ export fn wasm_free(ptr: [*]u8, size: usize) void {
 /// Render a chart from JSON. Returns SVG length (0 on error).
 /// Call zigcharts_get_output() to get the SVG pointer.
 export fn zigcharts_render(json_ptr: [*]const u8, json_len: usize) usize {
-    const allocator = fba.allocator();
+    const allocator = gpa.allocator();
     const json_str = json_ptr[0..json_len];
 
     const svg = json_mod.chartFromJson(allocator, json_str) catch |err| {
@@ -74,10 +74,9 @@ export fn zigcharts_get_error_len() usize {
     return last_error_len;
 }
 
-/// Reset the allocator (free all memory, start fresh).
-/// Call between renders to prevent heap exhaustion.
+/// Reset the allocator (no-op compatibility export, resetting only error/output pointers).
 export fn zigcharts_reset() void {
-    fba.reset();
+    output_ptr = undefined;
     output_len = 0;
     last_error_len = 0;
 }

@@ -63,6 +63,10 @@ pub const SvgCanvas = struct {
         self.buffer.append(self.allocator, byte) catch {};
     }
 
+    fn sanitizeFloat(f: f64) bool {
+        return !std.math.isNan(f) and !std.math.isInf(f);
+    }
+
     fn writeHeader(self: *Self) void {
         var buf: [512]u8 = undefined;
         const header = std.fmt.bufPrint(&buf,
@@ -157,6 +161,7 @@ pub const SvgCanvas = struct {
 
     fn drawLine(ptr: *anyopaque, x1: f64, y1: f64, x2: f64, y2: f64, style: StrokeStyle) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
+        if (!sanitizeFloat(x1) or !sanitizeFloat(y1) or !sanitizeFloat(x2) or !sanitizeFloat(y2)) return;
         self.writeIndent();
 
         var buf: [128]u8 = undefined;
@@ -168,6 +173,7 @@ pub const SvgCanvas = struct {
 
     fn drawRect(ptr: *anyopaque, rect: Rect, stroke: ?StrokeStyle, fill: ?FillStyle) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
+        if (!sanitizeFloat(rect.x) or !sanitizeFloat(rect.y) or !sanitizeFloat(rect.width) or !sanitizeFloat(rect.height)) return;
         self.writeIndent();
 
         var buf: [128]u8 = undefined;
@@ -194,6 +200,7 @@ pub const SvgCanvas = struct {
 
     fn drawCircle(ptr: *anyopaque, cx: f64, cy: f64, r: f64, stroke: ?StrokeStyle, fill: ?FillStyle) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
+        if (!sanitizeFloat(cx) or !sanitizeFloat(cy) or !sanitizeFloat(r)) return;
         self.writeIndent();
 
         var buf: [96]u8 = undefined;
@@ -216,6 +223,28 @@ pub const SvgCanvas = struct {
     fn drawPath(ptr: *anyopaque, path: *const Path, stroke: ?StrokeStyle, fill: ?FillStyle) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
         if (path.commands.items.len == 0) return;
+
+        // Secure Check: if any coordinate is NaN or Inf, skip rendering entirely
+        for (path.commands.items) |cmd| {
+            switch (cmd) {
+                .move_to => |p| {
+                    if (!sanitizeFloat(p.x) or !sanitizeFloat(p.y)) return;
+                },
+                .line_to => |p| {
+                    if (!sanitizeFloat(p.x) or !sanitizeFloat(p.y)) return;
+                },
+                .quad_to => |q| {
+                    if (!sanitizeFloat(q.control.x) or !sanitizeFloat(q.control.y) or !sanitizeFloat(q.end.x) or !sanitizeFloat(q.end.y)) return;
+                },
+                .cubic_to => |c| {
+                    if (!sanitizeFloat(c.control1.x) or !sanitizeFloat(c.control1.y) or !sanitizeFloat(c.control2.x) or !sanitizeFloat(c.control2.y) or !sanitizeFloat(c.end.x) or !sanitizeFloat(c.end.y)) return;
+                },
+                .arc_to => |a| {
+                    if (!sanitizeFloat(a.rx) or !sanitizeFloat(a.ry) or !sanitizeFloat(a.rotation) or !sanitizeFloat(a.end.x) or !sanitizeFloat(a.end.y)) return;
+                },
+                .close => {},
+            }
+        }
 
         self.writeIndent();
         self.write("<path d=\"");
@@ -284,6 +313,7 @@ pub const SvgCanvas = struct {
 
     fn drawText(ptr: *anyopaque, text: []const u8, x: f64, y: f64, style: TextStyle) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
+        if (!sanitizeFloat(x) or !sanitizeFloat(y)) return;
         self.writeIndent();
 
         var buf: [256]u8 = undefined;
@@ -367,6 +397,7 @@ pub const SvgCanvas = struct {
     fn setClipRect(ptr: *anyopaque, rect: ?Rect) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
         if (rect) |r| {
+            if (!sanitizeFloat(r.x) or !sanitizeFloat(r.y) or !sanitizeFloat(r.width) or !sanitizeFloat(r.height)) return;
             self.clip_counter += 1;
             self.writeIndent();
 
@@ -394,10 +425,12 @@ pub const SvgCanvas = struct {
 
     fn translate(ptr: *anyopaque, x: f64, y: f64) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
+        const tx = if (sanitizeFloat(x)) x else 0.0;
+        const ty = if (sanitizeFloat(y)) y else 0.0;
         self.writeIndent();
 
         var buf: [96]u8 = undefined;
-        const s = std.fmt.bufPrint(&buf, "<g transform=\"translate({d:.2},{d:.2})\">\n", .{ x, y }) catch return;
+        const s = std.fmt.bufPrint(&buf, "<g transform=\"translate({d:.2},{d:.2})\">\n", .{ tx, ty }) catch return;
         self.write(s);
         self.indent_level += 1;
         self.transform_depth += 1;
@@ -405,10 +438,11 @@ pub const SvgCanvas = struct {
 
     fn rotate(ptr: *anyopaque, angle: f64) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
+        const ta = if (sanitizeFloat(angle)) angle else 0.0;
         self.writeIndent();
 
         var buf: [64]u8 = undefined;
-        const s = std.fmt.bufPrint(&buf, "<g transform=\"rotate({d:.2})\">\n", .{angle}) catch return;
+        const s = std.fmt.bufPrint(&buf, "<g transform=\"rotate({d:.2})\">\n", .{ta}) catch return;
         self.write(s);
         self.indent_level += 1;
         self.transform_depth += 1;
@@ -416,10 +450,12 @@ pub const SvgCanvas = struct {
 
     fn svgScale(ptr: *anyopaque, sx: f64, sy: f64) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
+        const tsx = if (sanitizeFloat(sx)) sx else 1.0;
+        const tsy = if (sanitizeFloat(sy)) sy else 1.0;
         self.writeIndent();
 
         var buf: [64]u8 = undefined;
-        const s = std.fmt.bufPrint(&buf, "<g transform=\"scale({d:.2},{d:.2})\">\n", .{ sx, sy }) catch return;
+        const s = std.fmt.bufPrint(&buf, "<g transform=\"scale({d:.2},{d:.2})\">\n", .{ tsx, tsy }) catch return;
         self.write(s);
         self.indent_level += 1;
         self.transform_depth += 1;
@@ -520,4 +556,51 @@ test "svg path" {
     const output = try c.finish();
     try std.testing.expect(std.mem.indexOf(u8, output, "<path") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "M10") != null);
+}
+
+test "svg coordinate security nan/inf" {
+    const allocator = std.testing.allocator;
+    var svg = SvgCanvas.init(allocator, 400, 300);
+    defer svg.deinit();
+
+    const c = svg.canvas();
+    const nan = std.math.nan(f64);
+    const inf = std.math.inf(f64);
+
+    // Drawing with invalid coordinates should skip completely (no element output)
+    c.drawLine(nan, 0, 100, 100, .{ .color = Color.black });
+    c.drawRect(canvas.Rect.init(50, inf, 100, 80), null, null);
+    c.drawCircle(200, 150, nan, null, null);
+    c.drawText("Skipped", nan, 50, .{});
+
+    // Path with any nan should skip completely
+    var path = canvas.Path.init(allocator);
+    defer path.deinit();
+    try path.moveTo(10, 10);
+    try path.lineTo(nan, 20);
+    c.drawPath(&path, .{ .color = Color.black }, null);
+
+    // Transforms with nan/inf should fall back to 0.0 or 1.0 gracefully without crashing
+    c.translate(nan, 50);
+    c.rotate(inf);
+    c.scale(nan, nan);
+    c.resetTransform();
+
+    const output = try c.finish();
+
+    // Verify raw "nan" or "inf" never leaks into any attributes or the document
+    try std.testing.expect(std.mem.indexOf(u8, output, "nan") == null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "inf") == null);
+
+    // Verify elements were skipped and not rendered
+    try std.testing.expect(std.mem.indexOf(u8, output, "<line") == null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "<rect") == null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "<circle") == null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "Skipped") == null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "<path") == null);
+
+    // Verify transform groups still balanced out and transformed safely with 0.0/1.0 fallbacks
+    try std.testing.expect(std.mem.indexOf(u8, output, "translate(0.00,50.00)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "rotate(0.00)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "scale(1.00,1.00)") != null);
 }

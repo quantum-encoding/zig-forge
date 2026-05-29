@@ -121,10 +121,10 @@ pub const Color = struct {
         const t_clamped = @min(1.0, @max(0.0, t));
         const one_minus_t = 1.0 - t_clamped;
         return Color{
-            .r = @intFromFloat(@as(f32, @floatFromInt(self.r)) * one_minus_t + @as(f32, @floatFromInt(other.r)) * t_clamped),
-            .g = @intFromFloat(@as(f32, @floatFromInt(self.g)) * one_minus_t + @as(f32, @floatFromInt(other.g)) * t_clamped),
-            .b = @intFromFloat(@as(f32, @floatFromInt(self.b)) * one_minus_t + @as(f32, @floatFromInt(other.b)) * t_clamped),
-            .a = @intFromFloat(@as(f32, @floatFromInt(self.a)) * one_minus_t + @as(f32, @floatFromInt(other.a)) * t_clamped),
+            .r = @intFromFloat(@round(@as(f32, @floatFromInt(self.r)) * one_minus_t + @as(f32, @floatFromInt(other.r)) * t_clamped)),
+            .g = @intFromFloat(@round(@as(f32, @floatFromInt(self.g)) * one_minus_t + @as(f32, @floatFromInt(other.g)) * t_clamped)),
+            .b = @intFromFloat(@round(@as(f32, @floatFromInt(self.b)) * one_minus_t + @as(f32, @floatFromInt(other.b)) * t_clamped)),
+            .a = @intFromFloat(@round(@as(f32, @floatFromInt(self.a)) * one_minus_t + @as(f32, @floatFromInt(other.a)) * t_clamped)),
         };
     }
 

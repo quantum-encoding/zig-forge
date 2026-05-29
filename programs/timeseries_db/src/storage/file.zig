@@ -72,14 +72,13 @@ pub const ColumnHeader = extern struct {
 
 /// Memory-mapped file storage
 pub const FileStorage = struct {
+    io: std.Io,
     file: std.Io.File,
     mmap_ptr: [*]align(std.heap.page_size_min) u8,
     mmap_len: usize,
     writable: bool,
 
-    pub fn create(path: []const u8, initial_size: usize) !FileStorage {
-        const io = Io.Threaded.global_single_threaded.io();
-
+    pub fn create(io: std.Io, path: []const u8, initial_size: usize) !FileStorage {
         // Create new file
         const file = try Io.Dir.cwd().createFile(io, path, .{
             .read = true,
@@ -106,6 +105,7 @@ pub const FileStorage = struct {
         @memcpy(mmap_ptr[0..@sizeOf(FileHeader)], std.mem.asBytes(&header));
 
         return FileStorage{
+            .io = io,
             .file = file,
             .mmap_ptr = mmap_ptr.ptr,
             .mmap_len = min_size,
@@ -113,9 +113,7 @@ pub const FileStorage = struct {
         };
     }
 
-    pub fn open(path: []const u8, writable: bool) !FileStorage {
-        const io = Io.Threaded.global_single_threaded.io();
-
+    pub fn open(io: std.Io, path: []const u8, writable: bool) !FileStorage {
         const file = if (writable)
             try Io.Dir.cwd().openFile(io, path, .{ .mode = .read_write })
         else
@@ -147,6 +145,7 @@ pub const FileStorage = struct {
         try header.validate();
 
         return FileStorage{
+            .io = io,
             .file = file,
             .mmap_ptr = mmap_ptr.ptr,
             .mmap_len = file_size,
@@ -168,7 +167,7 @@ pub const FileStorage = struct {
             @as([*]align(std.heap.page_size_min) u8, self.mmap_ptr)[0..self.mmap_len],
         );
 
-        self.file.close(Io.Threaded.global_single_threaded.io());
+        self.file.close(self.io);
     }
 
     /// Get file header
@@ -217,7 +216,7 @@ pub const FileStorage = struct {
         );
 
         // Expand file
-        try self.file.setEndPos(aligned_size);
+        try self.file.setLength(self.io, aligned_size);
 
         // Remap
         const mmap_ptr = try posix.mmap(
@@ -250,31 +249,31 @@ pub const FileStorage = struct {
 
 test "file storage - create and open" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
 
     // Create temp file
     const temp_path = "/tmp/test_tsdb_file.bin";
-    defer std.Io.Dir.cwd().deleteFile(temp_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, temp_path) catch {};
 
     // Create file
-    var storage = try FileStorage.create(temp_path, 64 * 1024);
-    defer storage.deinit();
+    {
+        var storage = try FileStorage.create(io, temp_path, 64 * 1024);
+        defer storage.deinit();
 
-    // Verify header
-    const header = storage.getHeaderConst();
-    try std.testing.expectEqual(FileHeader.MAGIC, header.magic);
-    try std.testing.expectEqual(FileHeader.VERSION, header.version);
+        // Verify header
+        const header = storage.getHeaderConst();
+        try std.testing.expectEqual(FileHeader.MAGIC, header.magic);
+        try std.testing.expectEqual(FileHeader.VERSION, header.version);
 
-    // Write some data
-    const mut_header = storage.getHeader();
-    mut_header.row_count = 100;
+        // Write some data
+        const mut_header = storage.getHeader();
+        mut_header.row_count = 100;
 
-    // Flush
-    try storage.flush();
+        // Flush
+        try storage.flush();
+    }
 
-    // Close and reopen
-    storage.deinit();
-
-    var storage2 = try FileStorage.open(temp_path, false);
+    var storage2 = try FileStorage.open(io, temp_path, false);
     defer storage2.deinit();
 
     const header2 = storage2.getHeaderConst();
@@ -284,10 +283,11 @@ test "file storage - create and open" {
 }
 
 test "file storage - expand" {
+    const io = std.testing.io;
     const temp_path = "/tmp/test_tsdb_expand.bin";
-    defer std.Io.Dir.cwd().deleteFile(temp_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, temp_path) catch {};
 
-    var storage = try FileStorage.create(temp_path, 4096);
+    var storage = try FileStorage.create(io, temp_path, 4096);
     defer storage.deinit();
 
     const initial_len = storage.mmap_len;
@@ -300,10 +300,11 @@ test "file storage - expand" {
 }
 
 test "file storage - header validation" {
+    const io = std.testing.io;
     const temp_path = "/tmp/test_tsdb_invalid.bin";
-    defer std.Io.Dir.cwd().deleteFile(temp_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, temp_path) catch {};
 
-    var storage = try FileStorage.create(temp_path, 4096);
+    var storage = try FileStorage.create(io, temp_path, 4096);
 
     // Corrupt header
     const header = storage.getHeader();
@@ -313,6 +314,6 @@ test "file storage - header validation" {
     storage.deinit();
 
     // Should fail to open
-    const result = FileStorage.open(temp_path, false);
+    const result = FileStorage.open(io, temp_path, false);
     try std.testing.expectError(error.InvalidMagic, result);
 }
