@@ -7,7 +7,7 @@
 //!   "company_name": "Acme Corp",
 //!   "company_address": "123 Business St",
 //!   "company_vat": "ESB12345678",
-//!   "company_logo_base64": "data:image/png;base64,...",
+//!   "company_logo_base64": "data:image/png;base64,...",  // also accepts raw base64 OR a file path
 //!   "client_name": "Client LLC",
 //!   "client_address": "456 Client Ave",
 //!   "client_vat": "ESB87654321",

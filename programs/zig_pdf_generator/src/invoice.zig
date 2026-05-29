@@ -222,7 +222,7 @@ pub const InvoiceRenderer = struct {
 
         if (self.data.company_logo_base64) |logo_b64| {
             if (logo_b64.len > 0) {
-                const result = image.loadImageFromBase64(self.allocator, logo_b64) catch null;
+                const result = image.loadImageFlexible(self.allocator, logo_b64) catch null;
                 if (result) |r| {
                     self.logo_decoded = r.decoded_bytes;
                     if (r.image.format != .jpeg) {
@@ -248,7 +248,7 @@ pub const InvoiceRenderer = struct {
 
         if (qr_b64_data) |qr_b64| {
             if (qr_b64.len > 0 and effective_qr_mode != .none) {
-                const result = image.loadImageFromBase64(self.allocator, qr_b64) catch null;
+                const result = image.loadImageFlexible(self.allocator, qr_b64) catch null;
                 if (result) |r| {
                     self.qr_decoded = r.decoded_bytes;
                     if (r.image.format != .jpeg) {

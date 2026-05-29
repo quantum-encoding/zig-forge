@@ -986,7 +986,7 @@ pub const ProposalRenderer = struct {
         // Load logo if provided
         if (self.data.company_logo_base64) |logo_b64| {
             if (logo_b64.len > 0) {
-                const result = image.loadImageFromBase64(self.allocator, logo_b64) catch null;
+                const result = image.loadImageFlexible(self.allocator, logo_b64) catch null;
                 if (result) |r| {
                     self.logo_decoded = r.decoded_bytes;
                     if (r.image.format != .jpeg) {
@@ -1000,7 +1000,7 @@ pub const ProposalRenderer = struct {
         // Load property image if provided
         if (self.data.property_image_base64) |prop_b64| {
             if (prop_b64.len > 0) {
-                const result = image.loadImageFromBase64(self.allocator, prop_b64) catch null;
+                const result = image.loadImageFlexible(self.allocator, prop_b64) catch null;
                 if (result) |r| {
                     self.property_decoded = r.decoded_bytes;
                     if (r.image.format != .jpeg) {

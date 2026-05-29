@@ -406,7 +406,15 @@ pub fn loadImage(allocator: std.mem.Allocator, data: []const u8) !document.Image
 }
 
 /// Load image from base64 data URL
-pub fn loadImageFromBase64(allocator: std.mem.Allocator, base64_data: []const u8) !struct { image: document.Image, decoded_bytes: []u8 } {
+/// A decoded image plus the heap buffer backing its pixel/JPEG data. The
+/// caller must keep `decoded_bytes` alive until the document is built, then
+/// free it. Named (not anonymous) so multiple loaders share one return type.
+pub const LoadedImage = struct {
+    image: document.Image,
+    decoded_bytes: []u8,
+};
+
+pub fn loadImageFromBase64(allocator: std.mem.Allocator, base64_data: []const u8) !LoadedImage {
     const decoded = try decodeBase64(allocator, base64_data);
     errdefer allocator.free(decoded);
 
@@ -422,6 +430,46 @@ pub fn loadImageFromBase64(allocator: std.mem.Allocator, base64_data: []const u8
         // Note: caller must free img.data when done
         return .{ .image = img, .decoded_bytes = @constCast(img.data) };
     }
+}
+
+/// Resolve an image reference that may be raw base64, a `data:` URL, OR a
+/// filesystem path, into a decoded `document.Image` plus the byte buffer that
+/// must be kept alive (free it when the document is built). Drop-in replacement
+/// for `loadImageFromBase64` — same return shape — so a slot can accept either
+/// an inline image or a file path with no schema change.
+///
+/// Disambiguation is content-free: a `data:` URL is decoded as base64;
+/// otherwise the string is *tried as a file path*, and only if that open fails
+/// (NotFound, or NameTooLong for a long base64 blob) does it fall back to raw
+/// base64. A real path opens; a base64 string never names a real file.
+pub fn loadImageFlexible(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+) !LoadedImage {
+    // data: URLs are base64 payloads, never file paths.
+    if (std.mem.startsWith(u8, src, "data:")) {
+        return loadImageFromBase64(allocator, src);
+    }
+
+    // Try the string as a filesystem path (relative to cwd). Uses the shared
+    // single-threaded IO handle so it behaves identically from CLI and FFI.
+    const io = std.Io.Threaded.global_single_threaded.io();
+    if (std.Io.Dir.cwd().readFileAlloc(io, src, allocator, .limited(32 * 1024 * 1024))) |raw| {
+        const img = loadImage(allocator, raw) catch |err| {
+            allocator.free(raw);
+            return err;
+        };
+        if (img.format == .jpeg) {
+            // JPEG image references the raw file bytes — keep them.
+            return .{ .image = img, .decoded_bytes = raw };
+        }
+        // PNG decoded to a fresh pixel buffer; the raw file bytes are done.
+        allocator.free(raw);
+        return .{ .image = img, .decoded_bytes = @constCast(img.data) };
+    } else |_| {}
+
+    // Not a file — treat as raw base64.
+    return loadImageFromBase64(allocator, src);
 }
 
 // =============================================================================

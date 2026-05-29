@@ -511,12 +511,16 @@ Images are passed **inside the JSON** — there is no separate `--image` flag. E
 | `--certificate share-certificate` | `company.logo` | `{data\|path}` object | Centred logo above the title |
 | `--certificate share-certificate` | `signatories[i].signature` | `{data\|path}` object | Signature image above signatory *i*'s line |
 | `--letter` | `style.watermark_image` | path or `data:` URL string | Page watermark |
-| `--basic` (invoice) | `company_logo_base64`, `qr_base64` | base64 string | Header logo / payment QR |
-| `--proposal` | `company_logo_base64`, `property_image_base64` | base64 string | Header logo / hero image |
+| `--basic` (invoice) | `company_logo_base64`, `qr_base64` | base64 / `data:` URL / **file path** | Header logo / payment QR |
+| `--proposal` | `company_logo_base64`, `property_image_base64` | base64 / `data:` URL / **file path** | Header logo / hero image |
 | `--presentation` | `elements[]` of `type:"image"` with `base64` | base64 string | Positioned on the canvas |
 
 > [!NOTE]
-> The `--certificate` family takes images as an **object** (`{data,mime_type}` or `{path}`), so you can supply a file path directly — the backend reads it. The older invoice/proposal/presentation slots take a **base64 string** field (no file-path form yet). `templates/legal/share-certificate.json` ships with a working `company.logo` example pointing at `templates/legal/assets/logo.png`.
+> Two ways images reach a slot, both supporting a file path:
+> - The `--certificate` family takes an **object** — `{ "data": "<base64>", "mime_type": ... }` or `{ "path": "logo.png" }`.
+> - The invoice/proposal string slots (`*_base64`) accept raw base64, a `data:` URL, **or a file path** — resolved automatically (a `data:` prefix is base64; otherwise the value is tried as a file, falling back to base64). So `"company_logo_base64": "assets/logo.png"` just works, despite the field name.
+>
+> (`--presentation` image elements remain base64-string only for now.) `templates/legal/share-certificate.json` ships with a working `company.logo` example pointing at `templates/legal/assets/logo.png`.
 
 Example — a share certificate with a logo and a scanned signature, straight from the backend:
 ```bash
