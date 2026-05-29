@@ -1,8 +1,8 @@
 # Quantum Vault Post-Quantum Cryptography Library
 
-> **NIST FIPS 203 ML-KEM Implementation in Zig**
+> **NIST FIPS 203 ML-KEM-768 + FIPS 204 ML-DSA-65 in Zig**
 
-A pure Zig implementation of the Module-Lattice-Based Key-Encapsulation Mechanism (ML-KEM) for Quantum Vault's post-quantum cryptographic protection.
+A pure Zig implementation of the Module-Lattice-Based Key-Encapsulation Mechanism (ML-KEM-768, FIPS 203) and the Module-Lattice-Based Digital Signature Algorithm (ML-DSA-65, FIPS 204) for Quantum Vault's post-quantum cryptographic protection. Both primitives are validated byte-for-byte against the NIST CAVP / ACVP known-answer-test vectors (`src/ml_kem_tier1_anchors.zig`, `src/ml_dsa_tier1_anchors.zig`).
 
 ## Overview
 

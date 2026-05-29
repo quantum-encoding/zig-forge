@@ -70,6 +70,10 @@ This rule would have caught `zig_json`'s naming gap in 30 seconds, before any au
 | `programs/zig_csv2json` | One-way text-to-JSON CLI (CSV/TSV/KV/lines → JSON) | 2025-05 | RFC 8259 §6 number grammar + RFC 4180 examples + roundtrip via `std.json` |
 | `programs/zig_msgpack` | MessagePack encoder + decoder, hardened against deep-nesting DoS, length-overflow attacks, and non-canonical float encoding | 2025-05 | MessagePack spec opcode byte vectors (`tier1_anchors.zig`) + iterative-skip DoS guard verified against 50k-deep payload |
 | `programs/zig_toml` | Full TOML 1.0.0 parser (dotted keys, array-of-tables, datetimes, hex/oct/bin/inf/nan, all escapes incl. `\UXXXXXXXX`), hardened against duplicate keys, nesting DoS, inline-table extension, reserved escapes; read-only (no emitter) | 2025-05 | toml-test corpus + TOML spec worked examples + Cargo.toml-shaped end-to-end smoke (`tier1_anchors.zig`) |
+| `programs/zig-quantum-encryption/src/ml_dsa.zig` | **ML-DSA-65 ONLY** (FIPS 204 post-quantum signatures): keyGen + sign + verify, deterministic. Single-parameter-set — NOT polymorphic over ML-DSA-44/87. | 2026-05 | NIST CAVP / ACVP FIPS 204 ML-DSA-65 KATs (`src/ml_dsa_tier1_anchors.zig`): keyGen (seed→pk,sk), sigGen (sk,msg→sig, deterministic/internal), verify — all byte-exact |
+| `programs/zig-quantum-encryption/src/ml_kem_api.zig` | **ML-KEM-768 ONLY** (FIPS 203 post-quantum KEM): keyGen + encaps + decaps, deterministic internals. Single-parameter-set — NOT polymorphic over ML-KEM-512/1024. | 2026-05 | NIST CAVP / ACVP FIPS 203 ML-KEM-768 KATs (`src/ml_kem_tier1_anchors.zig`): keyGen (d,z→ek,dk), encaps (ek,m→c,K), decaps (dk,c→K) — all byte-exact |
+
+> **Scope note:** the two post-quantum entries above are promoted **only** for their stated parameter sets (ML-DSA-65, ML-KEM-768) — the exact sets the FFI / `quantum_vault` consumers use. The implementations are monolithic single-set (parameters are module constants; vector types are comptime-sized). They are **not** generic over the other security levels (44/87, 512/1024), which remain unimplemented and unvalidated. Do not assume they cover other parameter sets.
 
 ## Pending audits
 
