@@ -123,8 +123,15 @@ pub fn keyGenInternal768(d: *const [32]u8, z: *const [32]u8) MlKemError!KeyPair7
     var ek: EncapsulationKey768 = undefined;
     var dk: DecapsulationKey768 = undefined;
 
-    // Step 1: (ρ, σ) ← G(d)
-    const g_result = ntt.hashG(d);
+    // Step 1: FIPS 203 K-PKE.KeyGen (Algorithm 13):
+    //   (ρ, σ) ← G(d ‖ IntegerToBytes(k, 1))
+    // The k (module rank) domain-separation byte was added in the final
+    // standard; the IPD used G(d). Sourced from the parameter set, not
+    // hardcoded. hashG takes []const u8, so the 33-byte array is consumed whole.
+    var g_input: [33]u8 = undefined;
+    @memcpy(g_input[0..32], d);
+    g_input[32] = ML_KEM_768.k;
+    const g_result = ntt.hashG(&g_input);
     const rho = g_result.a; // public seed for A
     const sigma = g_result.b; // secret seed for s, e
 
