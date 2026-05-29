@@ -15,22 +15,19 @@ fn getTimeNs() i128 {
     return @as(i128, ts.tv_sec) * 1_000_000_000 + @as(i128, ts.tv_nsec);
 }
 
-fn formatTime(ns: u64) void {
-    const writer = std.io.getStdOut().writer();
+fn formatTime(stdout: *std.Io.Writer, ns: u64) void {
     if (ns >= 1_000_000_000) {
-        writer.print("{d:.2} s", .{@as(f64, @floatFromInt(ns)) / 1_000_000_000.0}) catch {};
+        stdout.print("{d:.2} s", .{@as(f64, @floatFromInt(ns)) / 1_000_000_000.0}) catch {};
     } else if (ns >= 1_000_000) {
-        writer.print("{d:.2} ms", .{@as(f64, @floatFromInt(ns)) / 1_000_000.0}) catch {};
+        stdout.print("{d:.2} ms", .{@as(f64, @floatFromInt(ns)) / 1_000_000.0}) catch {};
     } else if (ns >= 1_000) {
-        writer.print("{d:.2} µs", .{@as(f64, @floatFromInt(ns)) / 1_000.0}) catch {};
+        stdout.print("{d:.2} µs", .{@as(f64, @floatFromInt(ns)) / 1_000.0}) catch {};
     } else {
-        writer.print("{d} ns", .{ns}) catch {};
+        stdout.print("{d} ns", .{ns}) catch {};
     }
 }
 
-fn benchmarkKeyGen(iterations: usize) !void {
-    const stdout = std.io.getStdOut().writer();
-
+fn benchmarkKeyGen(stdout: *std.Io.Writer, iterations: usize) !void {
     var total_ns: u64 = 0;
     var min_ns: u64 = std.math.maxInt(u64);
     var max_ns: u64 = 0;
@@ -49,17 +46,15 @@ fn benchmarkKeyGen(iterations: usize) !void {
 
     try stdout.print("  KeyGen:\n", .{});
     try stdout.print("    Average: ", .{});
-    formatTime(avg_ns);
+    formatTime(stdout, avg_ns);
     try stdout.print("\n    Min:     ", .{});
-    formatTime(min_ns);
+    formatTime(stdout, min_ns);
     try stdout.print("\n    Max:     ", .{});
-    formatTime(max_ns);
+    formatTime(stdout, max_ns);
     try stdout.print("\n    Ops/sec: {d:.0}\n", .{1_000_000_000.0 / @as(f64, @floatFromInt(avg_ns))});
 }
 
-fn benchmarkSign(iterations: usize) !void {
-    const stdout = std.io.getStdOut().writer();
-
+fn benchmarkSign(stdout: *std.Io.Writer, iterations: usize) !void {
     const keypair = ml_dsa.keyGen(null);
     const msg = "Benchmark message for ML-DSA-65 signing operation";
 
@@ -85,11 +80,11 @@ fn benchmarkSign(iterations: usize) !void {
 
     try stdout.print("  Sign (randomized):\n", .{});
     try stdout.print("    Average: ", .{});
-    formatTime(avg_ns);
+    formatTime(stdout, avg_ns);
     try stdout.print("\n    Min:     ", .{});
-    formatTime(min_ns);
+    formatTime(stdout, min_ns);
     try stdout.print("\n    Max:     ", .{});
-    formatTime(max_ns);
+    formatTime(stdout, max_ns);
     try stdout.print("\n    Ops/sec: {d:.0}\n", .{1_000_000_000.0 / @as(f64, @floatFromInt(avg_ns))});
 
     if (reject_count > 0) {
@@ -100,9 +95,7 @@ fn benchmarkSign(iterations: usize) !void {
     }
 }
 
-fn benchmarkVerify(iterations: usize) !void {
-    const stdout = std.io.getStdOut().writer();
-
+fn benchmarkVerify(stdout: *std.Io.Writer, iterations: usize) !void {
     const keypair = ml_dsa.keyGen(null);
     const msg = "Benchmark message for ML-DSA-65 verification";
     const sig = ml_dsa.sign(&keypair.sk, msg, false) orelse return error.SigningFailed;
@@ -130,24 +123,23 @@ fn benchmarkVerify(iterations: usize) !void {
 
     try stdout.print("  Verify:\n", .{});
     try stdout.print("    Average: ", .{});
-    formatTime(avg_ns);
+    formatTime(stdout, avg_ns);
     try stdout.print("\n    Min:     ", .{});
-    formatTime(min_ns);
+    formatTime(stdout, min_ns);
     try stdout.print("\n    Max:     ", .{});
-    formatTime(max_ns);
+    formatTime(stdout, max_ns);
     try stdout.print("\n    Ops/sec: {d:.0}\n", .{1_000_000_000.0 / @as(f64, @floatFromInt(avg_ns))});
 }
 
-fn benchmarkRoundTrip(iterations: usize) !void {
-    const stdout = std.io.getStdOut().writer();
-
+fn benchmarkRoundTrip(stdout: *std.Io.Writer, iterations: usize) !void {
     var total_ns: u64 = 0;
 
     for (0..iterations) |i| {
-        // Unique message per iteration
+        // Unique message per iteration. bufPrint returns the formatted slice
+        // (the old `catch 32` was a latent []u8-vs-int type error never caught
+        // because this file did not compile on 0.16).
         var msg_buf: [64]u8 = undefined;
-        const msg_len = std.fmt.bufPrint(&msg_buf, "Message {d} for round-trip benchmark", .{i}) catch 32;
-        const msg = msg_buf[0..msg_len];
+        const msg = std.fmt.bufPrint(&msg_buf, "Message {d} for round-trip benchmark", .{i}) catch "roundtrip";
 
         const start = getTimeNs();
 
@@ -169,12 +161,17 @@ fn benchmarkRoundTrip(iterations: usize) !void {
 
     try stdout.print("  Full Round-Trip (KeyGen + Sign + Verify):\n", .{});
     try stdout.print("    Average: ", .{});
-    formatTime(avg_ns);
+    formatTime(stdout, avg_ns);
     try stdout.print("\n    Ops/sec: {d:.0}\n", .{1_000_000_000.0 / @as(f64, @floatFromInt(avg_ns))});
 }
 
-pub fn main() !void {
-    const stdout = std.io.getStdOut().writer();
+pub fn main(init: std.process.Init) !void {
+    // Zig 0.16 std.Io: one buffered stdout writer threaded through the
+    // benchmark helpers, flushed once at the end.
+    const io = init.io;
+    var stdout_buffer: [8192]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
+    const stdout = &stdout_writer.interface;
 
     try stdout.print("\n", .{});
     try stdout.print("╔══════════════════════════════════════════════════════════════╗\n", .{});
@@ -214,16 +211,16 @@ pub fn main() !void {
 
     try stdout.print("\nBenchmarking ({d} iterations each):\n\n", .{iterations});
 
-    try benchmarkKeyGen(iterations);
+    try benchmarkKeyGen(stdout, iterations);
     try stdout.print("\n", .{});
 
-    try benchmarkSign(iterations);
+    try benchmarkSign(stdout, iterations);
     try stdout.print("\n", .{});
 
-    try benchmarkVerify(iterations);
+    try benchmarkVerify(stdout, iterations);
     try stdout.print("\n", .{});
 
-    try benchmarkRoundTrip(iterations);
+    try benchmarkRoundTrip(stdout, iterations);
     try stdout.print("\n", .{});
 
     try stdout.print("═══════════════════════════════════════════════════════════════\n", .{});
@@ -232,4 +229,6 @@ pub fn main() !void {
     try stdout.print("  • ML-DSA-65 provides 192-bit post-quantum security\n", .{});
     try stdout.print("  • Signature 3309 bytes vs Ed25519 64 bytes (~52x larger)\n", .{});
     try stdout.print("═══════════════════════════════════════════════════════════════\n", .{});
+
+    try stdout.flush();
 }

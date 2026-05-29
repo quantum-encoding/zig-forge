@@ -23,8 +23,37 @@
 //!   ω = 55 (max hint weight)
 
 const std = @import("std");
+const builtin = @import("builtin");
 const crypto = std.crypto;
 const mem = std.mem;
+
+/// Cryptographically secure random bytes from the OS CSPRNG.
+///
+/// Replaces `std.crypto.random` (removed in Zig 0.16). The Io-threaded
+/// `std.Io.random` cannot be used here because keyGen/sign are reached through
+/// C-ABI `export fn` FFI entry points that have no `Io` handle — so we go to
+/// the OS entropy source directly, matching this project's other RNG code.
+fn secureRandomBytes(buf: []u8) void {
+    switch (builtin.os.tag) {
+        .linux => {
+            // getrandom(2): blocking CSPRNG, no fd/libc required.
+            var off: usize = 0;
+            while (off < buf.len) {
+                const rc = std.os.linux.getrandom(buf.ptr + off, buf.len - off, 0);
+                switch (std.os.linux.E.init(rc)) {
+                    .SUCCESS => off += rc,
+                    .INTR => continue,
+                    else => @panic("getrandom failed"),
+                }
+            }
+        },
+        .macos, .ios, .tvos, .watchos, .visionos, .freebsd, .openbsd, .netbsd, .dragonfly => {
+            // arc4random_buf never fails and is a CSPRNG on these platforms.
+            std.c.arc4random_buf(buf.ptr, buf.len);
+        },
+        else => @panic("no secure RNG available for this OS"),
+    }
+}
 
 // ============================================================================
 // ML-DSA-65 Parameters (FIPS 204 Table 1)
@@ -268,7 +297,6 @@ const ZETAS: [256]i32 = computeZetas();
 fn computeZetas() [256]i32 {
     @setEvalBranchQuota(100000);
     var result: [256]i32 = undefined;
-    var zeta_pow: i64 = 1;
 
     for (0..256) |i| {
         const br = bitReverse8(@intCast(i));
@@ -284,7 +312,6 @@ fn computeZetas() [256]i32 {
             exp >>= 1;
         }
         result[i] = @intCast(val);
-        _ = zeta_pow;
     }
     return result;
 }
@@ -315,7 +342,10 @@ pub fn reduce32(a: i32) i32 {
 /// Montgomery reduction: given a*R, compute a mod q
 /// where R = 2^32
 pub fn montgomeryReduce(a: i64) i32 {
-    const t: i32 = @truncate(a * Q_INV);
+    // Only the low 32 bits of a*Q_INV are needed (the @truncate discards the
+    // rest). Use wrapping multiplication so the full i64 product can't overflow
+    // — this matches the reference's `(uint64_t)a * QINV` mod 2^64 then truncate.
+    const t: i32 = @truncate(a *% Q_INV);
     const result = @as(i32, @truncate((a - @as(i64, t) * Q) >> 32));
     return result;
 }
@@ -597,7 +627,6 @@ pub fn lowBits(r: i32) i32 {
 /// MakeHint: compute hint bit for recovering high bits
 /// Returns 1 if highBits(r) ≠ highBits(r + z), else 0
 pub fn makeHint(z: i32, r: i32) u1 {
-    const r0 = lowBits(r);
     const r1 = highBits(r);
     const r1_new = highBits(r + z);
     return if (r1 != r1_new) 1 else 0;
@@ -672,7 +701,7 @@ pub fn keyGen(seed: ?*const [32]u8) KeyPair {
     if (seed) |s| {
         xi = s.*;
     } else {
-        crypto.random.bytes(&xi) catch @panic("RNG failure");
+        secureRandomBytes(&xi);
     }
 
     // Expand seed: (ρ, ρ', K) = H(ξ)
@@ -838,7 +867,7 @@ pub fn sign(sk: *const SecretKey, msg: []const u8, randomized: bool) ?Signature 
     // Get randomness for signing
     var rnd: [32]u8 = undefined;
     if (randomized) {
-        crypto.random.bytes(&rnd) catch @panic("RNG failure");
+        secureRandomBytes(&rnd);
     } else {
         @memset(&rnd, 0);
     }
@@ -867,7 +896,9 @@ pub fn sign(sk: *const SecretKey, msg: []const u8, randomized: bool) ?Signature 
         // Sample y
         var y: PolyVecL = undefined;
         for (0..L) |i| {
-            sampleGamma1(&y.polys[i], &rhoprime, kappa * L + @as(u16, @intCast(i)));
+            // nonce = kappa*L + i, computed wide then narrowed (kappa < 1000,
+            // L small, so it always fits u16). Zig 0.16 requires the explicit cast.
+            sampleGamma1(&y.polys[i], &rhoprime, @intCast(@as(usize, kappa) * L + i));
         }
 
         // w = A*y
@@ -989,7 +1020,7 @@ pub fn sign(sk: *const SecretKey, msg: []const u8, randomized: bool) ?Signature 
         }
 
         // Pack hints (ω + K bytes)
-        packHints(&sig.data[offset..], &hints, hint_count);
+        packHints(sig.data[offset..], &hints, hint_count);
 
         return sig;
     }

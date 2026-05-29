@@ -180,9 +180,10 @@ export fn ml_dsa_65_security_bits() c_int {
 
 /// Securely zero memory (prevents compiler optimization)
 export fn ml_dsa_secure_zero(ptr: [*]u8, len: usize) void {
-    @memset(ptr[0..len], 0);
-    // Compiler barrier to prevent optimization
-    asm volatile ("" : : "r" (ptr) : "memory");
+    // std.crypto.secureZero zeroes volatile memory so the write cannot be
+    // optimized away — the audited replacement for the hand-rolled memset +
+    // inline-asm barrier (whose 0.16 clobber syntax also changed).
+    std.crypto.secureZero(u8, ptr[0..len]);
 }
 
 /// Compare two signatures in constant time
