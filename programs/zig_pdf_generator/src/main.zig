@@ -1,8 +1,8 @@
 //! Zig PDF Generator CLI
 //!
 //! Command-line interface for generating PDFs from JSON input.
-//! Supports four explicit, mutually exclusive template modes:
-//!   --basic, --minimalist, --letter, --presentation
+//! Supports five explicit, mutually exclusive template modes:
+//!   --basic, --minimalist, --letter, --presentation, --proposal
 //!
 //! Supports UNIX pipe composition:
 //!   If input file is omitted, JSON is read from stdin.
@@ -22,6 +22,7 @@ const TemplateMode = enum {
     minimalist,
     letter,
     presentation,
+    proposal,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -55,6 +56,7 @@ pub fn main(init: std.process.Init) !void {
     var opt_minimalist = false;
     var opt_letter = false;
     var opt_presentation = false;
+    var opt_proposal = false;
 
     var input_path: ?[]const u8 = null;
     var output_path: ?[]const u8 = null;
@@ -79,6 +81,8 @@ pub fn main(init: std.process.Init) !void {
             opt_letter = true;
         } else if (std.mem.eql(u8, arg, "--presentation")) {
             opt_presentation = true;
+        } else if (std.mem.eql(u8, arg, "--proposal")) {
+            opt_proposal = true;
         } else if (std.mem.startsWith(u8, arg, "-")) {
             try stderr.print("Error: Unrecognized flag '{s}'\n\n", .{arg});
             printUsage(stderr);
@@ -104,10 +108,11 @@ pub fn main(init: std.process.Init) !void {
     const minimalist_val: usize = if (opt_minimalist) 1 else 0;
     const letter_val: usize = if (opt_letter) 1 else 0;
     const presentation_val: usize = if (opt_presentation) 1 else 0;
+    const proposal_val: usize = if (opt_proposal) 1 else 0;
 
-    const total_flags = basic_val + minimalist_val + letter_val + presentation_val;
+    const total_flags = basic_val + minimalist_val + letter_val + presentation_val + proposal_val;
     if (total_flags > 1) {
-        try stderr.writeAll("Error: Multiple template flags specified. Template flags (--basic, --minimalist, --letter, --presentation) are mutually exclusive.\n");
+        try stderr.writeAll("Error: Multiple template flags specified. Template flags (--basic, --minimalist, --letter, --presentation, --proposal) are mutually exclusive.\n");
         try stderr.flush();
         std.process.exit(1);
     }
@@ -119,6 +124,8 @@ pub fn main(init: std.process.Init) !void {
         .letter
     else if (opt_presentation)
         .presentation
+    else if (opt_proposal)
+        .proposal
     else
         .basic;
 
@@ -130,10 +137,11 @@ pub fn main(init: std.process.Init) !void {
     };
     defer allocator.free(json_data);
 
-    // Generate PDF bytes
+    // Generate PDF bytes. Schema-validation failures (missing required root
+    // fields) surface as a specific, human-readable diagnostic and a non-zero
+    // exit — never a silently-blank PDF.
     const pdf_bytes = generatePdfBytes(allocator, mode, json_data) catch |err| {
-        try stderr.print("Error: PDF generation failed for mode --{s}: {s}\n", .{ @tagName(mode), @errorName(err) });
-        try stderr.flush();
+        reportGenerationError(stderr, mode, err);
         std.process.exit(1);
     };
     defer allocator.free(pdf_bytes);
@@ -161,6 +169,7 @@ fn printUsage(stderr: *std.Io.Writer) void {
         \\  --minimalist      Minimalist clean quote/invoice/handover template
         \\  --letter          Premium letter-style quote template with itemized estimation
         \\  --presentation    Freeform presentation/canvas-style template
+        \\  --proposal        Structured proposal template (charts, metrics, sections)
         \\
         \\Other Flags:
         \\  -h, --help        Show this help message and exit
@@ -213,7 +222,40 @@ fn generatePdfBytes(allocator: std.mem.Allocator, mode: TemplateMode, json_data:
         .presentation => {
             return try lib.generatePresentationFromJson(allocator, json_data);
         },
+        .proposal => {
+            return try lib.generateProposalFromJson(allocator, json_data);
+        },
     }
+}
+
+/// Translate a generation error into a precise, human-readable diagnostic.
+/// Strict schema-validation errors name the exact missing field and template
+/// so a caller (human or LLM) can fix the payload without guessing; all other
+/// errors fall through to a generic message. Always writes to stderr.
+fn reportGenerationError(stderr: *std.Io.Writer, mode: TemplateMode, err: anyerror) void {
+    switch (err) {
+        error.MissingCompany => stderr.writeAll(
+            "Error: Schema mismatch. Missing required field 'company' (object) for --letter template.\n" ++
+            "       A --letter payload requires a top-level \"company\" object and a non-empty \"pages\" array.\n",
+        ) catch {},
+        error.MissingPages => stderr.writeAll(
+            "Error: Schema mismatch. Missing required field 'pages' (non-empty array) for --letter template.\n" ++
+            "       A --letter payload requires a top-level \"company\" object and a non-empty \"pages\" array.\n",
+        ) catch {},
+        error.MissingCompanyName => stderr.writeAll(
+            "Error: Schema mismatch. Missing required field 'company_name' (string) for --proposal template.\n" ++
+            "       A --proposal payload requires top-level \"company_name\" and a non-empty \"sections\" array.\n",
+        ) catch {},
+        error.MissingSections => stderr.writeAll(
+            "Error: Schema mismatch. Missing required field 'sections' (non-empty array) for --proposal template.\n" ++
+            "       A --proposal payload requires top-level \"company_name\" and a non-empty \"sections\" array.\n",
+        ) catch {},
+        else => stderr.print(
+            "Error: PDF generation failed for mode --{s}: {s}\n",
+            .{ @tagName(mode), @errorName(err) },
+        ) catch {},
+    }
+    stderr.flush() catch {};
 }
 
 fn writeOutputData(output_path: ?[]const u8, pdf_bytes: []const u8, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {

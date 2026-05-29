@@ -11,7 +11,8 @@ The `pdf-gen` CLI tool is built to integrate seamlessly with standard UNIX pipel
 1. **Unbounded Stdin Parsing**: If no input file is specified, the CLI streams the input JSON from standard input (`stdin`) up to a **50MB safety threshold**, accommodating extremely large embedded base64 images or watermarks.
 2. **Binary-Clean Stdout Isolation**: If no output file is specified, the generated raw PDF bytes are written directly to standard output (`stdout`). Standard output is guaranteed to be completely binary-clean.
 3. **Stderr Routing for Diagnostics**: All diagnostic messages, informational headers, generator warnings, and parsing errors are written strictly to standard error (`stderr`) to prevent stream pollution.
-4. **Flag Exclusivity Validation**: The four core template flags are strictly mutually exclusive. If multiple template flags are passed, the CLI immediately prints a validation error to `stderr` and exits with code `1`.
+4. **Flag Exclusivity Validation**: The five core template flags are strictly mutually exclusive. If multiple template flags are passed, the CLI immediately prints a validation error to `stderr` and exits with code `1`.
+5. **Strict Schema Validation (fail-fast)**: Each template enforces presence checks on its required root fields. A payload that is valid JSON but is missing a critical field (or is shaped for a *different* template) is rejected with a specific `stderr` diagnostic naming the missing field and template, and a non-zero exit. The CLI **never** emits a blank/partial PDF on a schema mismatch.
 
 ### CLI Command Reference
 
@@ -33,10 +34,20 @@ cat input.json | ./zig-out/bin/pdf-gen --letter > output.pdf
 ```
 
 > [!IMPORTANT]
-> The template selection flags (`--basic`, `--minimalist`, `--letter`, `--presentation`) are mutually exclusive. Passing more than one flag will result in an error:
+> The template selection flags (`--basic`, `--minimalist`, `--letter`, `--presentation`, `--proposal`) are mutually exclusive. Passing more than one flag will result in an error:
 > ```bash
 > $ ./zig-out/bin/pdf-gen --basic --letter input.json
-> Error: Multiple template flags specified. Template flags (--basic, --minimalist, --letter, --presentation) are mutually exclusive.
+> Error: Multiple template flags specified. Template flags (--basic, --minimalist, --letter, --presentation, --proposal) are mutually exclusive.
+> ```
+
+> [!WARNING]
+> **Schema mismatches fail fast — they do not produce a blank PDF.** Feeding a payload shaped for one template into another flag is rejected with a specific diagnostic and exit code `1`:
+> ```bash
+> $ ./zig-out/bin/pdf-gen --letter crg_solar_proposal.json out.pdf
+> Error: Schema mismatch. Missing required field 'company' (object) for --letter template.
+>        A --letter payload requires a top-level "company" object and a non-empty "pages" array.
+> $ echo $?
+> 1
 > ```
 
 ---
@@ -52,6 +63,7 @@ graph TD
     CLI -->|--minimalist| T2[Clean Consultant Quote]
     CLI -->|--letter| T3[Premium Letter Quote]
     CLI -->|--presentation| T4[Canvas Presentation]
+    CLI -->|--proposal| T5[Structured Proposal]
 ```
 
 ---
@@ -186,6 +198,13 @@ A clean, white-paper layout utilizing a single accent color. The document type (
 
 ### 3. Premium Letter Template (`--letter`)
 A premium, multi-page layout utilizing embedded Montserrat typography, elegant gold hairline separators, an optional watermark, and a formal letter structure. Best suited for high-value contractor quotes.
+
+> [!IMPORTANT]
+> **Required root fields (validated — missing → `error` + exit 1):**
+> * **`company`** (`object`, **required**): Missing → `Missing required field 'company' (object) for --letter template.`
+> * **`pages`** (`array`, **required**, non-empty): Missing/empty → `Missing required field 'pages' (non-empty array) for --letter template.`
+>
+> Note: the `--letter` schema is **distinct** from `--proposal`/`--minimalist`. It uses a top-level `company` *object* and a `pages` array of `{type:"description"|"itemized"}` — not the flat `company_name` + `sections` shape. Feeding a proposal-shaped payload here fails fast.
 
 #### Key Zig Struct Mapping (`LetterQuoteData`)
 * **`company`** (`object`): Centered title and subtitle block:
@@ -329,9 +348,101 @@ A freeform multi-page canvas-style engine where elements (text, bulleted lists, 
 
 ---
 
+### 5. Proposal Template (`--proposal`)
+A structured, multi-section A4 proposal/quote document with first-class support for **metric grids**, **itemized cost tables**, and **embedded charts** (pie / donut / bar / progress). Best suited for sales proposals, solar/construction quotes, and reports where the body is a sequence of typed content sections rather than a freeform canvas.
+
+> [!IMPORTANT]
+> **`--proposal` vs `--minimalist` — they consume similar (`ProposalData`-shaped) JSON but render very differently. Do not confuse them:**
+> | | `--minimalist` (`clean_quote`) | `--proposal` (`proposal`) |
+> |---|---|---|
+> | Layout | Single-accent clean white quote sheet | Multi-section proposal w/ charts & metric grids |
+> | Document type | Derived from `reference` prefix (`QTE-`/`INV-`/`HND-`/`INS-`) | Always a proposal |
+> | Section `type`s | text / table | `text` / `metrics` / `table` / `chart` |
+> | Charts | ✗ | ✓ (pie, donut, bar, progress) |
+>
+> A given payload (e.g. `templates/crg_solar_proposal.json`) is accepted by **both** flags — pick the flag for the *visual style* you want.
+
+#### Required root fields (validated — missing → `error` + exit 1)
+* **`company_name`** (`string`, **required**, non-empty): Sender identity. Missing → `Missing required field 'company_name' (string) for --proposal template.`
+* **`sections`** (`array`, **required**, non-empty): The document body. Missing/empty → `Missing required field 'sections' (non-empty array) for --proposal template.`
+
+#### Key Zig Struct Mapping (`ProposalData`)
+* **`company_name`** (`string`, required) / **`company_address`** (`string`)
+* **`company_logo_base64`** (`string`, optional): Embedded logo image.
+* **`client_name`** / **`client_address`** (`string`)
+* **`reference`** / **`date`** / **`valid_until`** (`string`)
+* **`primary_color`** (`string`, default `"#16a34a"`) / **`secondary_color`** (`string`, default `"#1e3a2f"`) / **`title_color`** (`string`, optional)
+* **`property_image_base64`** (`string`, optional): e.g. a satellite property view.
+* **`footer`** (`object`, optional): `phone`, `email`, `website`, `dashboard_text`, `dashboard_url`.
+* **`crypto_payment`** (`object`, optional): see the shared Cryptocurrency Payment Block below.
+* **`sections`** (`array`, required): Each section is an object with a `type`:
+  * `type: "text"` — `heading` (`string`), `content` (`string`).
+  * `type: "metrics"` — `heading` plus `metric_items` (`array` of `{ "label": string, "value": string }`), rendered as a metric grid.
+  * `type: "table"` — `heading` plus `table_items` (`array` of `{ "description": string, "quantity": number, "unit_price": number, "total": number }`), plus optional `subtotal` / `tax_rate` / `total` (`number`) and `notes` (`string`).
+  * `type: "chart"` — `heading` plus `chart_spec` (`object`): `chart_type` (`"pie"|"donut"|"bar"|"progress"`), `segments` (`[{ "label", "value", "color?" }]` for pie/donut/progress), `categories` (`[string]`) + `series` (`[{ "name", "values": [number] }]`) for bar, plus optional `width` / `height` (`number`).
+
+#### Canonical Payload Example
+```json
+{
+  "company_name": "CRG Direct",
+  "company_address": "Unit 7 Solent Business Park, Fareham, Hampshire PO15 7FH",
+  "client_name": "Mr & Mrs Thompson",
+  "reference": "CRG-2026-00456",
+  "date": "29/05/2026",
+  "valid_until": "28/06/2026",
+  "primary_color": "#16a34a",
+  "secondary_color": "#1e3a2f",
+  "sections": [
+    { "type": "text", "heading": "Executive Summary", "content": "A fully integrated 6.4 kWp solar PV and battery system..." },
+    {
+      "type": "metrics",
+      "heading": "System Performance",
+      "metric_items": [
+        { "label": "Annual Generation", "value": "5,920 kWh" },
+        { "label": "Estimated Savings", "value": "£1,240 / yr" },
+        { "label": "Payback Period",    "value": "7.2 years" }
+      ]
+    },
+    {
+      "type": "table",
+      "heading": "System Components & Pricing",
+      "table_items": [
+        { "description": "16 x 400W Monocrystalline Panels", "quantity": 16, "unit_price": 185.00, "total": 2960.00 },
+        { "description": "Hybrid Inverter 6kW",              "quantity": 1,  "unit_price": 1450.00, "total": 1450.00 }
+      ],
+      "subtotal": 4410.00,
+      "tax_rate": 0.0,
+      "total": 4410.00,
+      "notes": "Includes full installation and MCS certification."
+    },
+    {
+      "type": "chart",
+      "heading": "Energy Mix After Install",
+      "chart_spec": {
+        "chart_type": "donut",
+        "segments": [
+          { "label": "Solar",  "value": 62, "color": "#16a34a" },
+          { "label": "Grid",   "value": 38, "color": "#94a3b8" }
+        ]
+      }
+    }
+  ],
+  "footer": {
+    "phone": "01329 800 123",
+    "email": "info@crgdirect.co.uk",
+    "website": "www.crgdirect.co.uk"
+  }
+}
+```
+
+> [!TIP]
+> Verified working inputs: `templates/crg_solar_proposal.json` and `pdf-chart-tests/crg-proposal-test.json`.
+
+---
+
 ### Modular Cryptocurrency Payment Block
 
-All four templates (`--basic`, `--minimalist`, `--letter`, `--presentation`) universally support an optional, premium cryptocurrency payment block (`crypto_payment`). This generates a beautiful, themed summary page (or canvas card) featuring transaction details, custom network colors, and a clean, native QR code.
+All five templates (`--basic`, `--minimalist`, `--letter`, `--presentation`, `--proposal`) universally support an optional, premium cryptocurrency payment block (`crypto_payment`). This generates a beautiful, themed summary page (or canvas card) featuring transaction details, custom network colors, and a clean, native QR code.
 
 To protect against transport-level floating point precision loss, the `amount` field is strictly defined and processed as a string slice.
 

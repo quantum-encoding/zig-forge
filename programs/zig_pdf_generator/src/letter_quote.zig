@@ -893,6 +893,16 @@ fn parseLetterQuoteJson(a: std.mem.Allocator, json_str: []const u8) !LetterQuote
     if (parsed.value != .object) return error.InvalidJson;
     const root = parsed.value.object;
 
+    // Strict schema validation — fail fast with a specific error instead of
+    // rendering a blank page. A letter quote is meaningless without the sender
+    // identity (`company`) and at least one content page (`pages`).
+    {
+        const company = root.get("company") orelse return error.MissingCompany;
+        if (company != .object) return error.MissingCompany;
+        const pages = root.get("pages") orelse return error.MissingPages;
+        if (pages != .array or pages.array.items.len == 0) return error.MissingPages;
+    }
+
     var data = LetterQuoteData{};
 
     if (root.get("company")) |c| if (c == .object) {
