@@ -410,26 +410,16 @@ fn checkRegression(
     current_results: *const std.ArrayList(BenchmarkResult),
     threshold: f64,
 ) !bool {
-    // Read baseline JSON file using C-level I/O (std.fs.cwd removed in Zig 0.16)
-    // Need null-terminated path for C open()
-    var path_buf: [4096]u8 = undefined;
-    if (baseline_path.len >= path_buf.len) return false;
-    @memcpy(path_buf[0..baseline_path.len], baseline_path);
-    path_buf[baseline_path.len] = 0;
-    const path_z: [*:0]const u8 = path_buf[0..baseline_path.len :0];
-
-    const fd = std.c.open(path_z, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
-    if (fd < 0) {
+    // Read baseline JSON file via the Zig 0.16 std.Io API. readFile opens,
+    // reads up to the buffer size, and closes — replacing the previous raw
+    // std.c.open/read/close workaround and its manual null-terminated path.
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var buf: [65536]u8 = undefined;
+    const baseline_json = std.Io.Dir.cwd().readFile(io, baseline_path, &buf) catch {
         std.debug.print("Cannot open baseline file: {s}\n", .{baseline_path});
         return false;
-    }
-    defer _ = std.c.close(fd);
-
-    var buf: [65536]u8 = undefined;
-    const n_read = std.c.read(fd, &buf, buf.len);
-    if (n_read <= 0) return false;
-    const n: usize = @intCast(n_read);
-    const baseline_json = buf[0..n];
+    };
+    if (baseline_json.len == 0) return false;
 
     // Compare each current result against baseline
     // Look for "total_time_ms" values in baseline JSON
