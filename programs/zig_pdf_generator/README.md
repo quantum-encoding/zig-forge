@@ -11,7 +11,7 @@ The `pdf-gen` CLI tool is built to integrate seamlessly with standard UNIX pipel
 1. **Unbounded Stdin Parsing**: If no input file is specified, the CLI streams the input JSON from standard input (`stdin`) up to a **50MB safety threshold**, accommodating extremely large embedded base64 images or watermarks.
 2. **Binary-Clean Stdout Isolation**: If no output file is specified, the generated raw PDF bytes are written directly to standard output (`stdout`). Standard output is guaranteed to be completely binary-clean.
 3. **Stderr Routing for Diagnostics**: All diagnostic messages, informational headers, generator warnings, and parsing errors are written strictly to standard error (`stderr`) to prevent stream pollution.
-4. **Flag Exclusivity Validation**: The five core template flags are strictly mutually exclusive. If multiple template flags are passed, the CLI immediately prints a validation error to `stderr` and exits with code `1`.
+4. **Flag Exclusivity Validation**: The five core template flags plus `--certificate` are strictly mutually exclusive. If multiple template flags are passed, the CLI immediately prints a validation error to `stderr` and exits with code `1`.
 5. **Strict Schema Validation (fail-fast)**: Each template enforces presence checks on its required root fields. A payload that is valid JSON but is missing a critical field (or is shaped for a *different* template) is rejected with a specific `stderr` diagnostic naming the missing field and template, and a non-zero exit. The CLI **never** emits a blank/partial PDF on a schema mismatch.
 
 ### CLI Command Reference
@@ -64,6 +64,7 @@ graph TD
     CLI -->|--letter| T3[Premium Letter Quote]
     CLI -->|--presentation| T4[Canvas Presentation]
     CLI -->|--proposal| T5[Structured Proposal]
+    CLI -->|--certificate type| T6[Company / Legal Document]
 ```
 
 ---
@@ -444,6 +445,39 @@ A structured, multi-section A4 proposal/quote document with first-class support 
 
 > [!TIP]
 > Verified working inputs: `templates/crg_solar_proposal.json` and `pdf-chart-tests/crg-proposal-test.json`.
+
+---
+
+### 6. Company / Legal Documents (`--certificate <type>`)
+A family of UK/IE company-secretarial document renderers, grouped under a single `--certificate` flag with a required `<type>` selector. Grouping them keeps `--help` to one line instead of nine separate flags.
+
+```bash
+pdf-gen --certificate share-certificate input.json output.pdf
+cat input.json | pdf-gen --certificate dividend-voucher > out.pdf
+```
+
+**Valid `<type>` values** (each dispatches to its own renderer / `*FromJson` parser in `src/`):
+
+| `<type>` | Renderer | Document |
+|---|---|---|
+| `contract` | `contract.zig` | Service/contract agreement (parties, dated sections, signatures) |
+| `share-certificate` | `share_certificate.zig` | Share certificate (company, holder, shares, signatories) |
+| `dividend-voucher` | `dividend_voucher.zig` | Dividend voucher (UK + Irish DWT variants) |
+| `stock-transfer` | `stock_transfer.zig` | Stock transfer form (J30-style) |
+| `board-resolution` | `board_resolution.zig` | Board meeting resolution |
+| `director-consent` | `director_consent.zig` | Director consent to act |
+| `director-appointment` | `director_appointment.zig` | Director appointment |
+| `director-resignation` | `director_resignation.zig` | Director resignation |
+| `written-resolution` | `written_resolution.zig` | Written (ordinary/special) resolution |
+
+An unknown or missing `<type>` prints the valid list to `stderr` and exits `1`. `--certificate` is mutually exclusive with the five template flags.
+
+> [!NOTE]
+> Each `<type>` has its own JSON schema, defined by the corresponding `*FromJson` parser in `src/`. The exact, authoritative field set lives in those parsers; the matching `generateDemo*` function in each module shows a fully-populated example. Two verified end-to-end examples:
+>
+> **`contract`** — `document_type`, `title`, `subtitle`, `parties[]` (`role`/`name`/`address`/`identifier`), `date_line`, `sections[]` (`heading`/`content`), `signatures[]`.
+>
+> **`share-certificate`** — `certificate{number,issue_date}`, `company{name,registration_number,registered_address{line1,city,county,postcode,country}}`, `holder{name,address{…}}`, `shares{quantity,quantity_words,class,nominal_value,currency,paid_status}`, `signatories[]{role,name,date}`, optional `template.style{border_color,accent_color,font_family}` and `custom{…}`.
 
 ---
 

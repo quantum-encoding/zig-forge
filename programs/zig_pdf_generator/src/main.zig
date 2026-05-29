@@ -23,7 +23,47 @@ const TemplateMode = enum {
     letter,
     presentation,
     proposal,
+    certificate,
 };
+
+/// Company / legal document sub-types selected via `--certificate <type>`.
+/// Grouping these under one flag keeps `--help` clean (one line instead of
+/// nine), while still dispatching to a dedicated renderer per document.
+const CertType = enum {
+    contract,
+    share_certificate,
+    dividend_voucher,
+    stock_transfer,
+    board_resolution,
+    director_consent,
+    director_appointment,
+    director_resignation,
+    written_resolution,
+};
+
+/// Maps the CLI `<type>` token to a CertType. Tokens are hyphenated and match
+/// the document name exactly so `--help` and the JSON schema docs line up.
+const cert_type_map = std.StaticStringMap(CertType).initComptime(.{
+    .{ "contract", .contract },
+    .{ "share-certificate", .share_certificate },
+    .{ "dividend-voucher", .dividend_voucher },
+    .{ "stock-transfer", .stock_transfer },
+    .{ "board-resolution", .board_resolution },
+    .{ "director-consent", .director_consent },
+    .{ "director-appointment", .director_appointment },
+    .{ "director-resignation", .director_resignation },
+    .{ "written-resolution", .written_resolution },
+});
+
+/// Human-readable list of valid `--certificate` tokens, reused by both the
+/// usage text and the "unknown type" error path.
+const cert_types_help =
+    \\Valid <type> values for --certificate:
+    \\  contract               share-certificate      dividend-voucher
+    \\  stock-transfer         board-resolution       director-consent
+    \\  director-appointment   director-resignation   written-resolution
+    \\
+;
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
@@ -57,6 +97,8 @@ pub fn main(init: std.process.Init) !void {
     var opt_letter = false;
     var opt_presentation = false;
     var opt_proposal = false;
+    var opt_certificate = false;
+    var cert_type: ?CertType = null;
 
     var input_path: ?[]const u8 = null;
     var output_path: ?[]const u8 = null;
@@ -83,6 +125,24 @@ pub fn main(init: std.process.Init) !void {
             opt_presentation = true;
         } else if (std.mem.eql(u8, arg, "--proposal")) {
             opt_proposal = true;
+        } else if (std.mem.eql(u8, arg, "--certificate")) {
+            opt_certificate = true;
+            // Consume the next token as the document <type>. The loop's
+            // continuation (i += 1) then skips past it so it is not mistaken
+            // for the input path.
+            i += 1;
+            if (i >= args.len) {
+                try stderr.writeAll("Error: --certificate requires a <type> argument.\n\n");
+                try stderr.writeAll(cert_types_help);
+                try stderr.flush();
+                std.process.exit(1);
+            }
+            cert_type = cert_type_map.get(args[i]) orelse {
+                try stderr.print("Error: Unknown certificate type '{s}'.\n\n", .{args[i]});
+                try stderr.writeAll(cert_types_help);
+                try stderr.flush();
+                std.process.exit(1);
+            };
         } else if (std.mem.startsWith(u8, arg, "-")) {
             try stderr.print("Error: Unrecognized flag '{s}'\n\n", .{arg});
             printUsage(stderr);
@@ -109,10 +169,11 @@ pub fn main(init: std.process.Init) !void {
     const letter_val: usize = if (opt_letter) 1 else 0;
     const presentation_val: usize = if (opt_presentation) 1 else 0;
     const proposal_val: usize = if (opt_proposal) 1 else 0;
+    const certificate_val: usize = if (opt_certificate) 1 else 0;
 
-    const total_flags = basic_val + minimalist_val + letter_val + presentation_val + proposal_val;
+    const total_flags = basic_val + minimalist_val + letter_val + presentation_val + proposal_val + certificate_val;
     if (total_flags > 1) {
-        try stderr.writeAll("Error: Multiple template flags specified. Template flags (--basic, --minimalist, --letter, --presentation, --proposal) are mutually exclusive.\n");
+        try stderr.writeAll("Error: Multiple template flags specified. Template flags (--basic, --minimalist, --letter, --presentation, --proposal, --certificate) are mutually exclusive.\n");
         try stderr.flush();
         std.process.exit(1);
     }
@@ -126,6 +187,8 @@ pub fn main(init: std.process.Init) !void {
         .presentation
     else if (opt_proposal)
         .proposal
+    else if (opt_certificate)
+        .certificate
     else
         .basic;
 
@@ -140,7 +203,7 @@ pub fn main(init: std.process.Init) !void {
     // Generate PDF bytes. Schema-validation failures (missing required root
     // fields) surface as a specific, human-readable diagnostic and a non-zero
     // exit — never a silently-blank PDF.
-    const pdf_bytes = generatePdfBytes(allocator, mode, json_data) catch |err| {
+    const pdf_bytes = generatePdfBytes(allocator, mode, cert_type, json_data) catch |err| {
         reportGenerationError(stderr, mode, err);
         std.process.exit(1);
     };
@@ -165,11 +228,17 @@ fn printUsage(stderr: *std.Io.Writer) void {
         \\If output_file is omitted, compiled PDF bytes are written directly to stdout.
         \\
         \\Template Flags (Mutually Exclusive):
-        \\  --basic           Standard invoice/receipt template (default)
-        \\  --minimalist      Minimalist clean quote/invoice/handover template
-        \\  --letter          Premium letter-style quote template with itemized estimation
-        \\  --presentation    Freeform presentation/canvas-style template
-        \\  --proposal        Structured proposal template (charts, metrics, sections)
+        \\  --basic              Standard invoice/receipt template (default)
+        \\  --minimalist         Minimalist clean quote/invoice/handover template
+        \\  --letter             Premium letter-style quote template with itemized estimation
+        \\  --presentation       Freeform presentation/canvas-style template
+        \\  --proposal           Structured proposal template (charts, metrics, sections)
+        \\  --certificate <type> Company/legal document (see <type> list below)
+        \\
+        \\Certificate Types (used as: --certificate <type>):
+        \\  contract               share-certificate      dividend-voucher
+        \\  stock-transfer         board-resolution       director-consent
+        \\  director-appointment   director-resignation   written-resolution
         \\
         \\Other Flags:
         \\  -h, --help        Show this help message and exit
@@ -206,7 +275,7 @@ fn readInputData(allocator: std.mem.Allocator, input_path: ?[]const u8, stderr: 
     }
 }
 
-fn generatePdfBytes(allocator: std.mem.Allocator, mode: TemplateMode, json_data: []const u8) ![]const u8 {
+fn generatePdfBytes(allocator: std.mem.Allocator, mode: TemplateMode, cert_type: ?CertType, json_data: []const u8) ![]const u8 {
     switch (mode) {
         .basic => {
             const data = try lib.json.parseInvoiceJson(allocator, json_data);
@@ -224,6 +293,21 @@ fn generatePdfBytes(allocator: std.mem.Allocator, mode: TemplateMode, json_data:
         },
         .proposal => {
             return try lib.generateProposalFromJson(allocator, json_data);
+        },
+        .certificate => {
+            // cert_type is always set when mode == .certificate (the arg parser
+            // resolves it before selecting this mode), but assert defensively.
+            return switch (cert_type orelse return error.MissingCertificateType) {
+                .contract => try lib.generateContractFromJson(allocator, json_data),
+                .share_certificate => try lib.generateShareCertificateFromJson(allocator, json_data),
+                .dividend_voucher => try lib.generateDividendVoucherFromJson(allocator, json_data),
+                .stock_transfer => try lib.generateStockTransferFromJson(allocator, json_data),
+                .board_resolution => try lib.generateBoardResolutionFromJson(allocator, json_data),
+                .director_consent => try lib.generateDirectorConsentFromJson(allocator, json_data),
+                .director_appointment => try lib.generateDirectorAppointmentFromJson(allocator, json_data),
+                .director_resignation => try lib.generateDirectorResignationFromJson(allocator, json_data),
+                .written_resolution => try lib.generateWrittenResolutionFromJson(allocator, json_data),
+            };
         },
     }
 }
