@@ -631,11 +631,18 @@ test "parse balance response" {
     try std.testing.expectEqual(@as(i64, -1000), balance.unconfirmed);
 }
 
-pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
+/// FFI panic seal: convert any panic into an immediate abort() so it can never
+/// unwind across the C ABI into the Rust host (which would be undefined behaviour).
+fn ffiPanic(msg: []const u8, ret_addr: ?usize) noreturn {
     @branchHint(.cold);
-    _ = error_return_trace;
     _ = ret_addr;
     std.debug.print("FATAL ZIG FFI PANIC: {s}\n", .{msg});
-    std.process.abort(); // Instantly kill the process, preventing ABI unwind UB
+    std.process.abort();
 }
+
+/// Zig 0.16 panic interface: the root module must expose `pub const panic` as a
+/// namespace. `std.debug.FullPanic` wraps `ffiPanic` and routes every safety
+/// check (outOfBounds, unwrapNull, integerOverflow, …) into it. The previous
+/// 3-arg `pub fn panic` form only worked via a deprecated 0.16 compat shim.
+pub const panic = std.debug.FullPanic(ffiPanic);
 

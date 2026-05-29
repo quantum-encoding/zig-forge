@@ -51,12 +51,14 @@ fn delay() void {
     }
 }
 
-// Minimal panic handler for bare-metal
-pub fn panic(msg: []const u8, stack_trace: ?*@import("std").builtin.StackTrace, ret_addr: ?usize) noreturn {
+// Minimal panic handler for bare-metal. Behaviour-preserving rewrap of the
+// previous 3-arg `pub fn panic` into the Zig 0.16 `FullPanic` interface.
+fn blinkPanic(msg: []const u8, ret_addr: ?usize) noreturn {
     _ = msg;
-    _ = stack_trace;
     _ = ret_addr;
     while (true) {
         asm volatile ("bkpt #0");
     }
 }
+
+pub const panic = @import("std").debug.FullPanic(blinkPanic);

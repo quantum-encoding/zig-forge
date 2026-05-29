@@ -81,10 +81,11 @@ pub const vector_table: VectorTable linksection(".vector_table") = .{
     .reset = _reset,
 };
 
-/// Minimal panic handler for bare-metal
-pub fn panic(msg: []const u8, stack_trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
+/// Minimal panic handler for bare-metal. No OS, so no abort()/print — disable
+/// interrupts and trap into the debugger. Behaviour-preserving rewrap of the
+/// previous 3-arg `pub fn panic` into the Zig 0.16 `FullPanic` interface.
+fn halPanic(msg: []const u8, ret_addr: ?usize) noreturn {
     _ = msg;
-    _ = stack_trace;
     _ = ret_addr;
 
     // Disable interrupts
@@ -95,6 +96,8 @@ pub fn panic(msg: []const u8, stack_trace: ?*std.builtin.StackTrace, ret_addr: ?
         asm volatile ("bkpt #0");
     }
 }
+
+pub const panic = std.debug.FullPanic(halPanic);
 
 test "startup module compiles" {
     _ = VectorTable;
