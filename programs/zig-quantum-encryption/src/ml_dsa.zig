@@ -571,9 +571,13 @@ pub fn sampleInBall(c: *Poly, seed: *const [CTILDE_BYTES]u8) void {
 /// r0 is in [-2^(d-1), 2^(d-1)) per FIPS 204 Algorithm 35
 pub fn power2Round(r: i32) struct { r1: i32, r0: i32 } {
     const r_plus = reduce32(r);
-    // Centered modulo: r0 = r+ mod± 2^d, result in [-2^(d-1), 2^(d-1))
+    // Centered modulo: r0 = r+ mod± 2^d. FIPS 204 mod± has range (−2^(d-1),
+    // 2^(d-1)] for even modulus — the upper bound +2^(d-1) is INCLUSIVE, so it
+    // must stay positive (strict '>' , not '>='). Using '>=' wrongly wrapped
+    // r0 = +4096 to −4096, bumping t1 up by one on the rare coefficient whose
+    // t mod 2^13 is exactly 2^12 (KAT: poly 3 / coeff 85).
     var r0 = @mod(r_plus, (1 << D));
-    if (r0 >= (1 << (D - 1))) {
+    if (r0 > (1 << (D - 1))) {
         r0 = r0 - (1 << D);
     }
     const r1 = @divTrunc(r_plus - r0, (1 << D));
