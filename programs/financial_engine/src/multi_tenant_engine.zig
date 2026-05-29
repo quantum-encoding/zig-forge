@@ -369,10 +369,10 @@ pub const TenantEngine = struct {
                     self.tenant.tenant_id,
                     validation.reason,
                 });
-                if (validation.allocated_capital > 0) {
+                if (validation.allocated_capital.greaterThan(Decimal.zero())) {
                     std.log.info("[{s}]    Allocated capital: ${d:.2}", .{
                         self.tenant.tenant_id,
-                        validation.allocated_capital,
+                        validation.allocated_capital.toFloat(),
                     });
                 }
                 return;
@@ -612,10 +612,13 @@ pub const MultiTenantOrchestrator = struct {
                 },
             };
             
-            // Equal capital allocation across all tenants
-            const capital_percent = 100.0 / @as(f64, @floatFromInt(self.tenants.items.len));
-            
-            try guard.registerTenant(tenant_id, limits, capital_percent);
+            // Equal capital allocation across all tenants, in basis points
+            // (10000 = 100.00%). Strict integer division — no f64 in routing.
+            // Guard div-by-zero (the enclosing loop implies len >= 1).
+            const tenant_count = self.tenants.items.len;
+            const capital_bps: u32 = if (tenant_count == 0) 10000 else @intCast(10000 / tenant_count);
+
+            try guard.registerTenant(tenant_id, limits, capital_bps);
         }
     }
     

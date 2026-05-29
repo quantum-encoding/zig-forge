@@ -66,8 +66,9 @@ pub const PraetorianGuard = struct {
     allocator: std.mem.Allocator,
     api_client_factory: *@import("multi_tenant_engine.zig").ApiClientFactory,
     
-    // Global account state
-    total_buying_power: f64 = 0.0,
+    // Global account state. Buying power is Decimal (fixed-point) — it gates
+    // capital allocation / order admission, so it must never be f64.
+    total_buying_power: Decimal = Decimal.zero(),
     total_cash: f64 = 0.0,
     total_positions_value: f64 = 0.0,
     last_account_update: i64 = 0,
@@ -76,8 +77,9 @@ pub const PraetorianGuard = struct {
     // Tenant risk profiles
     tenant_profiles: std.StringHashMap(TenantRiskProfile),
     
-    // Capital allocation percentages (tenant_id -> percentage)
-    capital_allocations: std.StringHashMap(f64),
+    // Capital allocation in basis points (tenant_id -> BPS, 10000 = 100.00%).
+    // Integer BPS — never f64 — so allocation math is exact integer division.
+    capital_allocations: std.StringHashMap(u32),
     
     // Telemetry
     total_orders_validated: u64 = 0,
@@ -94,7 +96,7 @@ pub const PraetorianGuard = struct {
             .allocator = allocator,
             .api_client_factory = api_client_factory,
             .tenant_profiles = std.StringHashMap(TenantRiskProfile).init(allocator),
-            .capital_allocations = std.StringHashMap(f64).init(allocator),
+            .capital_allocations = std.StringHashMap(u32).init(allocator),
             .rejection_reasons = std.StringHashMap(u64).init(allocator),
         };
         
@@ -121,20 +123,20 @@ pub const PraetorianGuard = struct {
         self: *Self,
         tenant_id: []const u8,
         limits: RiskLimits,
-        capital_allocation_percent: f64,
+        capital_allocation_bps: u32, // basis points, 10000 = 100.00%
     ) !void {
         const id_copy = try self.allocator.dupe(u8, tenant_id);
-        
+
         const profile = TenantRiskProfile{
             .tenant_id = id_copy,
             .limits = limits,
         };
-        
+
         try self.tenant_profiles.put(id_copy, profile);
-        try self.capital_allocations.put(id_copy, capital_allocation_percent);
-        
-        std.log.info("[PRAETORIAN] Registered tenant {s} with {d:.1}% capital allocation", .{
-            tenant_id, capital_allocation_percent
+        try self.capital_allocations.put(id_copy, capital_allocation_bps);
+
+        std.log.info("[PRAETORIAN] Registered tenant {s} with {d} bps ({d}.{d:0>2}%) capital allocation", .{
+            tenant_id, capital_allocation_bps, capital_allocation_bps / 100, capital_allocation_bps % 100,
         });
     }
     
@@ -152,8 +154,9 @@ pub const PraetorianGuard = struct {
         
         const account = try client.getAccount();
         
-        // Account is already parsed
-        self.total_buying_power = try std.fmt.parseFloat(f64, account.buying_power);
+        // Buying power: parse the Alpaca string DIRECTLY to Decimal (no f64
+        // round-trip) so the capital-allocation gate stays exact.
+        self.total_buying_power = Decimal.fromString(account.buying_power) catch Decimal.zero();
         self.total_cash = try std.fmt.parseFloat(f64, account.cash);
         
         const portfolio_value = try std.fmt.parseFloat(f64, account.portfolio_value);
@@ -162,7 +165,7 @@ pub const PraetorianGuard = struct {
         self.last_account_update = std.time.timestamp();
         
         std.log.info("[PRAETORIAN] Account updated - Buying Power: ${d:.2}, Cash: ${d:.2}, Positions: ${d:.2}", .{
-            self.total_buying_power,
+            self.total_buying_power.toFloat(),
             self.total_cash,
             self.total_positions_value,
         });
@@ -191,7 +194,7 @@ pub const PraetorianGuard = struct {
             return ValidationResult{
                 .approved = false,
                 .reason = "Tenant not registered",
-                .allocated_capital = 0,
+                .allocated_capital = Decimal.zero(),
             };
         };
 
@@ -209,7 +212,7 @@ pub const PraetorianGuard = struct {
                     return ValidationResult{
                         .approved = false,
                         .reason = "Order value overflow",
-                        .allocated_capital = 0,
+                        .allocated_capital = Decimal.zero(),
                     };
                 };
             }
@@ -219,7 +222,7 @@ pub const PraetorianGuard = struct {
                 return ValidationResult{
                     .approved = false,
                     .reason = "Order value overflow",
-                    .allocated_capital = 0,
+                    .allocated_capital = Decimal.zero(),
                 };
             };
         };
@@ -232,7 +235,7 @@ pub const PraetorianGuard = struct {
             return ValidationResult{
                 .approved = false,
                 .reason = "Order below minimum value",
-                .allocated_capital = 0,
+                .allocated_capital = Decimal.zero(),
             };
         }
 
@@ -242,7 +245,7 @@ pub const PraetorianGuard = struct {
             return ValidationResult{
                 .approved = false,
                 .reason = "Order exceeds maximum value",
-                .allocated_capital = 0,
+                .allocated_capital = Decimal.zero(),
             };
         }
         
@@ -258,7 +261,7 @@ pub const PraetorianGuard = struct {
             return ValidationResult{
                 .approved = false,
                 .reason = "Rate limit exceeded",
-                .allocated_capital = 0,
+                .allocated_capital = Decimal.zero(),
             };
         }
         
@@ -268,7 +271,7 @@ pub const PraetorianGuard = struct {
             return ValidationResult{
                 .approved = false,
                 .reason = "Maximum positions reached",
-                .allocated_capital = 0,
+                .allocated_capital = Decimal.zero(),
             };
         }
         
@@ -279,7 +282,7 @@ pub const PraetorianGuard = struct {
                 return ValidationResult{
                     .approved = false,
                     .reason = "Exposure accumulator overflow",
-                    .allocated_capital = 0,
+                    .allocated_capital = Decimal.zero(),
                 };
             };
             if (new_exposure.greaterThan(profile_entry.limits.max_total_exposure_usd)) {
@@ -287,16 +290,18 @@ pub const PraetorianGuard = struct {
                 return ValidationResult{
                     .approved = false,
                     .reason = "Would exceed total exposure limit",
-                    .allocated_capital = 0,
+                    .allocated_capital = Decimal.zero(),
                 };
             }
         }
 
-        // 6. Check capital allocation
-        const allocation_percent = self.capital_allocations.get(tenant_id) orelse 33.33;
-        const allocated_capital = (self.total_buying_power * allocation_percent) / 100.0;
+        // 6. Check capital allocation — strict integer BPS math, no f64.
+        //    allocated_capital = buying_power * bps / 10000  (Decimal i128 ops)
+        const allocation_bps: u32 = self.capital_allocations.get(tenant_id) orelse 3333; // 33.33%
+        const gross_alloc = try self.total_buying_power.mul(Decimal.fromInt(allocation_bps));
+        const allocated_capital = try gross_alloc.div(Decimal.fromInt(10000));
 
-        if (side == .buy and order_value.toFloat() > allocated_capital) {
+        if (side == .buy and order_value.greaterThan(allocated_capital)) {
             try self.incrementRejection("insufficient_buying_power");
             return ValidationResult{
                 .approved = false,
@@ -393,7 +398,7 @@ pub const PraetorianGuard = struct {
             \\   Positions:    ${d:.2}
             \\
         , .{
-            self.total_buying_power,
+            self.total_buying_power.toFloat(),
             self.total_cash,
             self.total_positions_value,
         });
@@ -403,7 +408,9 @@ pub const PraetorianGuard = struct {
 pub const ValidationResult = struct {
     approved: bool,
     reason: []const u8,
-    allocated_capital: f64,
+    /// Capital allocated to the tenant, as a Decimal (fixed-point) — never f64.
+    /// Computed via strict integer BPS math so no float touches order sizing.
+    allocated_capital: Decimal,
 };
 
 // ============================================================================
@@ -424,8 +431,8 @@ test "Praetorian Guard initialization" {
     var guard = try PraetorianGuard.init(allocator, &factory);
     defer guard.deinit();
     
-    // Register test tenant
-    try guard.registerTenant("TEST_001", .{}, 33.33);
+    // Register test tenant — 3333 bps = 33.33% capital allocation.
+    try guard.registerTenant("TEST_001", .{}, 3333);
     
     // Validate test order
     const result = try guard.validateOrder(

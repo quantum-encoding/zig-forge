@@ -163,6 +163,12 @@ pub const OrderBook = struct {
     
     /// Add a new order to the book
     pub fn addOrder(self: *Self, side: Side, order_type: OrderType, price: Decimal, quantity: Decimal, client_id: u32) !*Order {
+        // Front-door validation: reject degenerate quantities (qty <= 0) before
+        // they ever enter the book. A 0-qty order was previously accepted and
+        // silently marked `.filled` (a no-op "trade"); a negative qty corrupts
+        // fill accounting. Require 0 < quantity.
+        if (!Decimal.zero().lessThan(quantity)) return error.InvalidQuantity;
+
         const order = try self.allocator.create(Order);
         order.* = .{
             .id = self.next_order_id,
@@ -199,23 +205,33 @@ pub const OrderBook = struct {
     fn executeMarketOrder(self: *Self, order: *Order) !void {
         const opposite_book = if (order.side == .buy) &self.asks else &self.bids;
         
-        while (!order.isFilled() and opposite_book.items.len > 0) {
+        matching: while (!order.isFilled() and opposite_book.items.len > 0) {
             var level = &opposite_book.items[0];
-            
+
             for (level.orders.items) |counter_order| {
                 if (order.isFilled()) break;
-                
+
                 const match_qty = blk: {
                     const remaining = order.remainingQuantity();
                     const counter_remaining = counter_order.remainingQuantity();
-                    
+
                     if (remaining.lessThan(counter_remaining)) {
                         break :blk remaining;
                     } else {
                         break :blk counter_remaining;
                     }
                 };
-                
+
+                // State monotonicity: every pass MUST advance (fill the taker or
+                // a resting order). match_qty == 0 means neither side progresses —
+                // a would-be non-terminating spin. Front-door validation makes
+                // this unreachable; if it ever fires, the book is in a corrupt
+                // state, so abort the match loudly rather than spin.
+                if (match_qty.isZero()) {
+                    std.log.err("[ORDERBOOK] INVARIANT VIOLATION: match_qty==0 during market match (order {d}, counter {d}); aborting to preserve state monotonicity", .{ order.id, counter_order.id });
+                    break :matching;
+                }
+
                 // Execute trade
                 try self.executeTrade(order, counter_order, level.price, match_qty);
             }
@@ -250,31 +266,39 @@ pub const OrderBook = struct {
         const same_book = if (order.side == .buy) &self.bids else &self.asks;
         
         // Try to match with opposite side
-        while (!order.isFilled() and opposite_book.items.len > 0) {
+        matching: while (!order.isFilled() and opposite_book.items.len > 0) {
             const best_level = &opposite_book.items[0];
-            
+
             // Check if price crosses
             const crosses = if (order.side == .buy)
                 !order.price.lessThan(best_level.price)
             else
                 !best_level.price.lessThan(order.price);
-            
+
             if (!crosses) break;
-            
+
             for (best_level.orders.items) |counter_order| {
                 if (order.isFilled()) break;
-                
+
                 const match_qty = blk: {
                     const remaining = order.remainingQuantity();
                     const counter_remaining = counter_order.remainingQuantity();
-                    
+
                     if (remaining.lessThan(counter_remaining)) {
                         break :blk remaining;
                     } else {
                         break :blk counter_remaining;
                     }
                 };
-                
+
+                // State monotonicity guard (see executeMarketOrder): a zero-size
+                // match advances nothing and would spin the loop. Unreachable
+                // given front-door validation; abort loudly if the book corrupts.
+                if (match_qty.isZero()) {
+                    std.log.err("[ORDERBOOK] INVARIANT VIOLATION: match_qty==0 during limit match (order {d}, counter {d}); aborting to preserve state monotonicity", .{ order.id, counter_order.id });
+                    break :matching;
+                }
+
                 // Execute trade at passive order price
                 try self.executeTrade(order, counter_order, counter_order.price, match_qty);
             }
@@ -441,3 +465,19 @@ pub const OrderBook = struct {
         };
     }
 };
+test "front-door validation: degenerate quantities are rejected (no silent no-op fill, no spin)" {
+    const testing = std.testing;
+    var book = OrderBook.init(testing.allocator, "TEST");
+    defer book.deinit();
+
+    // qty == 0: previously accepted and silently marked `.filled`; now rejected.
+    try testing.expectError(error.InvalidQuantity, book.addOrder(.buy, .market, Decimal.fromInt(100), Decimal.zero(), 1));
+    // qty < 0: corrupts fill accounting; rejected.
+    try testing.expectError(error.InvalidQuantity, book.addOrder(.sell, .limit, Decimal.fromInt(100), Decimal.fromInt(-5), 2));
+
+    // A valid resting order is unaffected and a crossing taker matches cleanly
+    // (and terminates — the monotonicity guard is never hit on valid input).
+    _ = try book.addOrder(.sell, .limit, Decimal.fromInt(100), Decimal.fromInt(10), 3);
+    const taker = try book.addOrder(.buy, .market, Decimal.fromInt(100), Decimal.fromInt(4), 4);
+    try testing.expect(taker.isFilled());
+}
