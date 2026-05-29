@@ -1,0 +1,30 @@
+{
+  "company": {
+    "name": "Quantum Holdings Ltd",
+    "registration_number": "12345678"
+  },
+  "document_title": "Written Resolution of the Members",
+  "circulation_date": "29 May 2026",
+  "deadline_date": "26 June 2026",
+  "proposed_by": "The Board of Directors",
+  "resolutions": [
+    {
+      "number": 1,
+      "title": "Adoption of New Articles of Association",
+      "text": "THAT the regulations contained in the document attached and signed for identification by the Chairman be adopted as the Articles of Association of the Company in substitution for, and to the exclusion of, the existing Articles.",
+      "resolution_type": "Special"
+    },
+    {
+      "number": 2,
+      "title": "Authority to Allot Shares",
+      "text": "THAT the directors be generally and unconditionally authorised to allot shares in the Company up to an aggregate nominal amount of £50,000 for a period expiring five years from the date of this resolution.",
+      "resolution_type": "Ordinary"
+    }
+  ],
+  "members": [
+    { "name": "John Michael Demo", "shares": 1000, "signed": true, "date_signed": "30 May 2026" },
+    { "name": "Alice Margaret Chen", "shares": 500, "signed": true, "date_signed": "31 May 2026" }
+  ],
+  "notes": "This resolution is circulated under Part 13, Chapter 2 of the Companies Act 2006.",
+  "template": { "style": { "primary_color": "#1a365d", "accent_color": "#2b6cb0" } }
+}

@@ -1,0 +1,39 @@
+{
+  "template": { "style": { "primary_color": "#1a2a5e", "accent_color": "#c8a24b" } },
+  "transfer": { "date": "29 May 2026", "reference": "STT-2026-001" },
+  "company": {
+    "name": "Quantum Holdings Ltd",
+    "registration_number": "12345678"
+  },
+  "transferor": {
+    "name": "John Michael Demo",
+    "address": {
+      "line1": "18 Maple Drive",
+      "city": "Portsmouth",
+      "county": "Hampshire",
+      "postcode": "PO6 2TN",
+      "country": "United Kingdom"
+    }
+  },
+  "transferee": {
+    "name": "Alice Margaret Chen",
+    "address": {
+      "line1": "5 Oak Lane",
+      "city": "Leeds",
+      "county": "West Yorkshire",
+      "postcode": "LS1 1AA",
+      "country": "United Kingdom"
+    }
+  },
+  "shares": {
+    "class": "Ordinary",
+    "quantity": 250,
+    "nominal_value": 1.00,
+    "description": "Ordinary shares of £1.00 each"
+  },
+  "consideration": {
+    "amount": 2500.00,
+    "currency": "GBP",
+    "exempt": false
+  }
+}

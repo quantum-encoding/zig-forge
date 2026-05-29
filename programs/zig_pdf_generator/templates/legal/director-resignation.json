@@ -1,0 +1,35 @@
+{
+  "company": {
+    "name": "Quantum Holdings Ltd",
+    "registration_number": "12345678",
+    "registered_office": {
+      "line1": "Unit 7 Solent Business Park",
+      "city": "Fareham",
+      "county": "Hampshire",
+      "postcode": "PO15 7FH",
+      "country": "United Kingdom"
+    }
+  },
+  "director": {
+    "title": "Mr",
+    "forenames": "Robert James",
+    "surname": "Okafor",
+    "address": {
+      "line1": "29 Kingsway",
+      "city": "Winchester",
+      "county": "Hampshire",
+      "postcode": "SO23 8RF",
+      "country": "United Kingdom"
+    }
+  },
+  "effective_date": "30 June 2026",
+  "letter_date": "29 May 2026",
+  "reason": "Retirement",
+  "notice_period_waived": false,
+  "return_company_property": true,
+  "confidentiality_acknowledged": true,
+  "outstanding_matters": "Handover of the company secretarial records to be completed by the effective date.",
+  "recipient_name": "Jane Elizabeth Hartley",
+  "recipient_title": "Chairman",
+  "template": { "style": { "primary_color": "#1a365d", "accent_color": "#2b6cb0" } }
+}

@@ -1,0 +1,41 @@
+{
+  "template": {
+    "id": "standard",
+    "version": "1",
+    "style": { "border_color": "#1a2a5e", "accent_color": "#c8a24b", "font_family": "helvetica" }
+  },
+  "certificate": { "number": "CERT-2026-001", "issue_date": "29 May 2026" },
+  "company": {
+    "name": "Quantum Holdings Ltd",
+    "registration_number": "12345678",
+    "registered_address": {
+      "line1": "Unit 7 Solent Business Park",
+      "city": "Fareham",
+      "county": "Hampshire",
+      "postcode": "PO15 7FH",
+      "country": "United Kingdom"
+    }
+  },
+  "holder": {
+    "name": "John Michael Demo",
+    "address": {
+      "line1": "18 Maple Drive",
+      "city": "Portsmouth",
+      "county": "Hampshire",
+      "postcode": "PO6 2TN",
+      "country": "United Kingdom"
+    }
+  },
+  "shares": {
+    "quantity": 1000,
+    "quantity_words": "One Thousand",
+    "class": "Ordinary",
+    "nominal_value": 1.00,
+    "currency": "GBP",
+    "paid_status": "fully_paid"
+  },
+  "signatories": [
+    { "role": "Director", "name": "Jane Elizabeth Hartley", "date": "29 May 2026" },
+    { "role": "Secretary", "name": "Robert James Okafor", "date": "29 May 2026" }
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "company": {
+    "name": "Quantum Holdings Ltd",
+    "registration_number": "12345678",
+    "registered_office": {
+      "line1": "Unit 7 Solent Business Park",
+      "city": "Fareham",
+      "county": "Hampshire",
+      "postcode": "PO15 7FH",
+      "country": "United Kingdom"
+    }
+  },
+  "director": {
+    "title": "Ms",
+    "forenames": "Alice Margaret",
+    "surname": "Chen",
+    "address": {
+      "line1": "5 Oak Lane",
+      "city": "Leeds",
+      "county": "West Yorkshire",
+      "postcode": "LS1 1AA",
+      "country": "United Kingdom"
+    }
+  },
+  "role": "NonExecutive",
+  "appointment_date": "01 June 2026",
+  "term_years": 3,
+  "time_commitment": "Approximately 2 days per month",
+  "remuneration": {
+    "fee_amount": 25000.00,
+    "fee_period": "per annum",
+    "expenses_reimbursed": true,
+    "share_options": false,
+    "additional_terms": "Fees reviewed annually by the Remuneration Committee."
+  },
+  "committee_memberships": ["Audit Committee", "Risk Committee"],
+  "signatory_name": "Jane Elizabeth Hartley",
+  "signatory_title": "Chairman",
+  "letter_date": "29 May 2026",
+  "template": { "style": { "primary_color": "#1a365d", "accent_color": "#2b6cb0" } }
+}

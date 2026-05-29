@@ -1,0 +1,36 @@
+{
+  "company": {
+    "name": "Quantum Holdings Ltd",
+    "registration_number": "12345678",
+    "registered_office": {
+      "line1": "Unit 7 Solent Business Park",
+      "city": "Fareham",
+      "county": "Hampshire",
+      "postcode": "PO15 7FH",
+      "country": "United Kingdom"
+    }
+  },
+  "director": {
+    "title": "Ms",
+    "forenames": "Alice Margaret",
+    "surname": "Chen",
+    "date_of_birth": "14/02/1985",
+    "nationality": "British",
+    "occupation": "Chartered Accountant",
+    "residential_address": {
+      "line1": "5 Oak Lane",
+      "city": "Leeds",
+      "county": "West Yorkshire",
+      "postcode": "LS1 1AA",
+      "country": "United Kingdom"
+    }
+  },
+  "consent_type": "NewAppointment",
+  "appointment_date": "01 June 2026",
+  "witness": {
+    "name": "Robert James Okafor",
+    "address": "Unit 7 Solent Business Park, Fareham, Hampshire, PO15 7FH",
+    "occupation": "Company Secretary"
+  },
+  "template": { "style": { "primary_color": "#1a365d", "accent_color": "#2b6cb0" } }
+}

@@ -1,0 +1,41 @@
+{
+  "template": { "style": { "primary_color": "#1a2a5e", "accent_color": "#c8a24b" } },
+  "company": {
+    "name": "Quantum Holdings Ltd",
+    "registration_number": "12345678"
+  },
+  "meeting": {
+    "date": "29 May 2026",
+    "time": "10:00",
+    "location": "Unit 7 Solent Business Park, Fareham, Hampshire, PO15 7FH",
+    "type": "board"
+  },
+  "directors": [
+    { "name": "Jane Elizabeth Hartley", "present": true, "role": "Chairman" },
+    { "name": "Robert James Okafor", "present": true, "role": "Director" },
+    { "name": "Alice Margaret Chen", "present": false, "role": "Director" }
+  ],
+  "resolutions": [
+    {
+      "number": 1,
+      "title": "Approval of Annual Accounts",
+      "text": "IT WAS RESOLVED that the audited financial statements for the year ended 31 March 2026 be and are hereby approved for signature by the Chairman.",
+      "proposer": "Jane Elizabeth Hartley",
+      "seconder": "Robert James Okafor",
+      "status": "passed"
+    },
+    {
+      "number": 2,
+      "title": "Declaration of Dividend",
+      "text": "IT WAS RESOLVED that an interim dividend of £0.50 per Ordinary share be declared and paid to the members on the register as at 1 May 2026.",
+      "proposer": "Robert James Okafor",
+      "seconder": "Jane Elizabeth Hartley",
+      "status": "passed"
+    }
+  ],
+  "signatories": [
+    { "name": "Jane Elizabeth Hartley", "role": "Chairman" }
+  ],
+  "reference": "BR-2026-004",
+  "notes": "There being no further business, the Chairman declared the meeting closed at 10:45."
+}

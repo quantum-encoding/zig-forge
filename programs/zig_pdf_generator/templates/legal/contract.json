@@ -1,0 +1,87 @@
+{
+  "document_type": "document",
+  "title": "Consultancy Services Agreement",
+  "subtitle": "Master Services Contract",
+  "parties": [
+    {
+      "role": "Service Provider",
+      "name": "{{provider_name}}",
+      "address": "{{provider_address}}",
+      "identifier": "Company No: {{provider_company_no}}"
+    },
+    {
+      "role": "Client",
+      "name": "{{client_name}}",
+      "address": "{{client_address}}",
+      "identifier": "Company No: {{client_company_no}}"
+    }
+  ],
+  "date_line": "Dated: {{contract_date}}",
+  "sections": [
+    {
+      "heading": "1. Scope of Services",
+      "content": "The Service Provider agrees to provide the following services to the Client:\n\n- Software architecture and technical advisory\n- Implementation of the agreed deliverables\n- Code review and quality assurance\n- Knowledge transfer and documentation\n- Ongoing support during the engagement term"
+    },
+    {
+      "heading": "2. Fees and Payment Terms",
+      "content": "Total engagement fee: £{{total_fee}}\n\n- Mobilisation payment: £{{deposit_amount}} due on signing this agreement\n- Milestone payment: £{{progress_amount}} due on delivery of phase one\n- Final balance: £{{balance_amount}} due on satisfactory completion\n\nAll invoices are payable within 30 days of receipt."
+    },
+    {
+      "heading": "3. Term",
+      "content": "Commencement date: {{start_date}}\nEstimated completion: {{end_date}}\n\nThis agreement continues until the services are completed unless terminated earlier in accordance with its terms."
+    },
+    {
+      "heading": "4. Confidentiality",
+      "content": "Each party shall keep confidential all information disclosed by the other party that is marked confidential or would reasonably be understood to be confidential, and shall not use it other than for the purpose of performing this agreement."
+    },
+    {
+      "heading": "5. Intellectual Property",
+      "content": "All intellectual property created by the Service Provider specifically for the Client under this agreement shall, on full payment of all sums due, vest in the Client. The Service Provider retains ownership of its pre-existing materials and tools."
+    },
+    {
+      "heading": "6. Liability and Insurance",
+      "content": "- All work to be carried out with reasonable skill and care\n- The Service Provider maintains professional indemnity insurance of £2,000,000\n- Neither party shall be liable for indirect or consequential loss\n- Any variation to the scope must be agreed in writing"
+    }
+  ],
+  "signatures": [
+    {
+      "role": "For and on behalf of the Service Provider",
+      "name_line": "{{provider_name}}",
+      "date_line": "Date: _____________"
+    },
+    {
+      "role": "For and on behalf of the Client",
+      "name_line": "{{client_name}}",
+      "date_line": "Date: _____________"
+    }
+  ],
+  "footer": "Page {{page_number}} of {{total_pages}}",
+  "variables": {
+    "provider_name": "Quantum Encoding Ltd",
+    "provider_address": "12 Innovation Way\nSouthampton\nSO14 3PB",
+    "provider_company_no": "87654321",
+    "client_name": "Quantum Holdings Ltd",
+    "client_address": "Unit 7 Solent Business Park\nFareham, Hampshire\nPO15 7FH",
+    "client_company_no": "12345678",
+    "contract_date": "29th May 2026",
+    "total_fee": "48,000.00",
+    "deposit_amount": "12,000.00",
+    "progress_amount": "18,000.00",
+    "balance_amount": "18,000.00",
+    "start_date": "1st June 2026",
+    "end_date": "30th September 2026"
+  },
+  "styling": {
+    "primary_color": "#1a365d",
+    "secondary_color": "#2c5282",
+    "font_family": "Helvetica",
+    "heading_size": 13,
+    "body_size": 10,
+    "line_height": 1.4,
+    "page_margins": { "top": 60, "right": 50, "bottom": 60, "left": 50 }
+  },
+  "header": {
+    "company_name": "{{provider_name}}",
+    "show_on_all_pages": true
+  }
+}

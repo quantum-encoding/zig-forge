@@ -458,24 +458,33 @@ cat input.json | pdf-gen --certificate dividend-voucher > out.pdf
 
 **Valid `<type>` values** (each dispatches to its own renderer / `*FromJson` parser in `src/`):
 
-| `<type>` | Renderer | Document |
-|---|---|---|
-| `contract` | `contract.zig` | Service/contract agreement (parties, dated sections, signatures) |
-| `share-certificate` | `share_certificate.zig` | Share certificate (company, holder, shares, signatories) |
-| `dividend-voucher` | `dividend_voucher.zig` | Dividend voucher (UK + Irish DWT variants) |
-| `stock-transfer` | `stock_transfer.zig` | Stock transfer form (J30-style) |
-| `board-resolution` | `board_resolution.zig` | Board meeting resolution |
-| `director-consent` | `director_consent.zig` | Director consent to act |
-| `director-appointment` | `director_appointment.zig` | Director appointment |
-| `director-resignation` | `director_resignation.zig` | Director resignation |
-| `written-resolution` | `written_resolution.zig` | Written (ordinary/special) resolution |
+| `<type>` | Renderer | Canonical sample | Document |
+|---|---|---|---|
+| `contract` | `contract.zig` | `templates/legal/contract.json` | Service/contract agreement (parties, dated sections, signatures, `variables` substitution) |
+| `share-certificate` | `share_certificate.zig` | `templates/legal/share-certificate.json` | Share certificate (company, holder, shares, signatories) |
+| `dividend-voucher` | `dividend_voucher.zig` | `templates/legal/dividend-voucher.json` | Dividend voucher (UK + Irish DWT variants) |
+| `stock-transfer` | `stock_transfer.zig` | `templates/legal/stock-transfer.json` | Stock transfer form (J30-style) |
+| `board-resolution` | `board_resolution.zig` | `templates/legal/board-resolution.json` | Board meeting resolution |
+| `director-consent` | `director_consent.zig` | `templates/legal/director-consent.json` | Director consent to act |
+| `director-appointment` | `director_appointment.zig` | `templates/legal/director-appointment.json` | Director appointment |
+| `director-resignation` | `director_resignation.zig` | `templates/legal/director-resignation.json` | Director resignation |
+| `written-resolution` | `written_resolution.zig` | `templates/legal/written-resolution.json` | Written (ordinary/special) resolution |
 
 An unknown or missing `<type>` prints the valid list to `stderr` and exits `1`. `--certificate` is mutually exclusive with the five template flags.
 
+> [!TIP]
+> A complete, ready-to-run **canonical sample** for every `<type>` lives in [`templates/legal/`](templates/legal), one file per token, all using a single coherent fictional company (Quantum Holdings Ltd, No. 12345678). They are verified to generate valid PDFs end-to-end:
+> ```bash
+> for t in contract share-certificate dividend-voucher stock-transfer board-resolution \
+>          director-consent director-appointment director-resignation written-resolution; do
+>   ./zig-out/bin/pdf-gen --certificate "$t" "templates/legal/$t.json" "out-$t.pdf"
+> done
+> ```
+
 > [!NOTE]
-> Each `<type>` has its own JSON schema, defined by the corresponding `*FromJson` parser in `src/`. The exact, authoritative field set lives in those parsers; the matching `generateDemo*` function in each module shows a fully-populated example. Two verified end-to-end examples:
+> Each `<type>` has its own JSON schema. The `templates/legal/<type>.json` sample above is the easiest starting point; the exact, authoritative field set lives in the corresponding `*FromJson` parser in `src/` (and the `generateDemo*` function shows a fully-populated struct). Two representative shapes:
 >
-> **`contract`** — `document_type`, `title`, `subtitle`, `parties[]` (`role`/`name`/`address`/`identifier`), `date_line`, `sections[]` (`heading`/`content`), `signatures[]`.
+> **`contract`** — `document_type`, `title`, `subtitle`, `parties[]` (`role`/`name`/`address`/`identifier`), `date_line`, `sections[]` (`heading`/`content`), `signatures[]`, plus an optional `variables{}` map whose keys replace `{{placeholder}}` tokens anywhere in the document.
 >
 > **`share-certificate`** — `certificate{number,issue_date}`, `company{name,registration_number,registered_address{line1,city,county,postcode,country}}`, `holder{name,address{…}}`, `shares{quantity,quantity_words,class,nominal_value,currency,paid_status}`, `signatories[]{role,name,date}`, optional `template.style{border_color,accent_color,font_family}` and `custom{…}`.
 

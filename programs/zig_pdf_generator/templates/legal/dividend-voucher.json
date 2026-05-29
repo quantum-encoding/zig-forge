@@ -1,0 +1,38 @@
+{
+  "jurisdiction": "uk",
+  "currency": "GBP",
+  "template": { "style": { "primary_color": "#1a2a5e", "accent_color": "#c8a24b" } },
+  "voucher": { "number": "DIV-2026-001", "date": "29 May 2026", "tax_year": "2025/26" },
+  "company": {
+    "name": "Quantum Holdings Ltd",
+    "registration_number": "12345678",
+    "registered_address": {
+      "line1": "Unit 7 Solent Business Park",
+      "city": "Fareham",
+      "county": "Hampshire",
+      "postcode": "PO15 7FH",
+      "country": "United Kingdom"
+    }
+  },
+  "shareholder": {
+    "name": "John Michael Demo",
+    "address": {
+      "line1": "18 Maple Drive",
+      "city": "Portsmouth",
+      "county": "Hampshire",
+      "postcode": "PO6 2TN",
+      "country": "United Kingdom"
+    }
+  },
+  "dividend": {
+    "shares_held": 1000,
+    "share_class": "Ordinary",
+    "rate_per_share": 0.50,
+    "gross_amount": 500.00,
+    "tax_credit": 0.00,
+    "net_payable": 500.00
+  },
+  "payment": { "method": "BACS", "date": "29 May 2026", "reference": "PAY-2026-001" },
+  "declaration": { "resolution_date": "01 May 2026", "payment_date": "29 May 2026" },
+  "signatory": { "name": "Jane Elizabeth Hartley", "date": "29 May 2026" }
+}
