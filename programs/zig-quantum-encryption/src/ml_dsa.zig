@@ -696,10 +696,15 @@ pub fn keyGen(seed: ?*const [32]u8) KeyPair {
         getRandomBytes(&xi);
     }
 
-    // Expand seed: (ρ, ρ', K) = H(ξ)
+    // Expand seed per FIPS 204 (Aug 2024), Algorithm 6 / KeyGen_internal line 1:
+    //   (ρ, ρ', K) ← H( ξ ‖ IntegerToBytes(k,1) ‖ IntegerToBytes(ℓ,1) )  (1024 bits)
+    // The k and ℓ domain-separation bytes were added in the final standard;
+    // the prior code hashed H(ξ) only (the IPD form), which produced a ρ — and
+    // therefore an entire keypair — that does not match the FIPS 204 KATs.
     var expanded: [128]u8 = undefined;
     var h = crypto.hash.sha3.Shake256.init(.{});
     h.update(&xi);
+    h.update(&[_]u8{ @as(u8, @intCast(K)), @as(u8, @intCast(L)) });
     h.squeeze(&expanded);
 
     const rho = expanded[0..32];
