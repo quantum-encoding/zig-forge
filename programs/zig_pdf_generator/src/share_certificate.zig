@@ -824,11 +824,17 @@ pub fn generateShareCertificate(allocator: std.mem.Allocator, data: ShareCertifi
 
 /// Generate share certificate from JSON string
 pub fn generateShareCertificateFromJson(allocator: std.mem.Allocator, json_str: []const u8) ![]u8 {
-    const parsed = try parseShareCertificateJson(allocator, json_str);
-    // Note: parsed data contains allocated strings that should be freed
-    // For simplicity, we'll let them leak in this version (they're small)
+    // Parse + render inside an arena so every small string the parser dupes is
+    // reclaimed in one shot; only the final PDF is copied out to the caller's
+    // allocator. Matches the contract/proposal/letter ownership pattern and
+    // replaces the previous "let them leak" shortcut.
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
 
-    return generateShareCertificate(allocator, parsed);
+    const parsed = try parseShareCertificateJson(aa, json_str);
+    const pdf = try generateShareCertificate(aa, parsed);
+    return allocator.dupe(u8, pdf);
 }
 
 /// Generate a demo share certificate
@@ -1093,5 +1099,24 @@ test "generate demo certificate" {
     defer allocator.free(pdf);
 
     try std.testing.expect(pdf.len > 0);
+    try std.testing.expect(std.mem.startsWith(u8, pdf, "%PDF"));
+}
+
+// Regression guard for the parser arena fix: std.testing.allocator fails the
+// test if generateShareCertificateFromJson leaks any of the strings the parser
+// dupes (the bug this test was added alongside).
+test "share certificate from json (leak-checked)" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "certificate": { "number": "CERT-2026-001", "issue_date": "29 May 2026" },
+        \\  "company": { "name": "Quantum Holdings Ltd", "registration_number": "12345678", "registered_address": { "line1": "Unit 7 Solent Business Park", "city": "Fareham", "county": "Hampshire", "postcode": "PO15 7FH", "country": "United Kingdom" } },
+        \\  "holder": { "name": "John Demo", "address": { "line1": "18 Maple Drive", "city": "Portsmouth", "postcode": "PO6 2TN", "country": "United Kingdom" } },
+        \\  "shares": { "quantity": 100, "quantity_words": "One Hundred", "class": "Ordinary", "nominal_value": 1.00, "currency": "GBP", "paid_status": "fully_paid" },
+        \\  "signatories": [ { "role": "Director", "name": "Jane Director", "date": "29 May 2026" } ]
+        \\}
+    ;
+    const pdf = try generateShareCertificateFromJson(allocator, json);
+    defer allocator.free(pdf);
     try std.testing.expect(std.mem.startsWith(u8, pdf, "%PDF"));
 }

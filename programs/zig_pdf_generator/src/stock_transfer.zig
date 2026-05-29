@@ -940,3 +940,22 @@ test "stock transfer form generation" {
     defer allocator.free(pdf);
     try std.testing.expect(pdf.len > 1000);
 }
+
+// Leak guard for the parse -> freeStockTransferData tracking path.
+test "stock transfer from json (leak-checked)" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "template": { "style": { "primary_color": "#1a2a5e", "accent_color": "#e8a83d" } },
+        \\  "transfer": { "date": "29 May 2026", "reference": "ST-001" },
+        \\  "company": { "name": "Quantum Holdings Ltd", "registration_number": "12345678" },
+        \\  "transferor": { "name": "John Demo", "address": { "line1": "18 Maple Drive", "city": "Portsmouth", "postcode": "PO6 2TN", "country": "UK" } },
+        \\  "transferee": { "name": "Alice Buyer", "address": { "line1": "5 Oak Lane", "city": "Leeds", "postcode": "LS1 1AA", "country": "UK" } },
+        \\  "shares": { "class": "Ordinary", "quantity": 50, "nominal_value": 1.0, "description": "Ordinary shares" },
+        \\  "consideration": { "amount": 500, "currency": "GBP" }
+        \\}
+    ;
+    const pdf = try generateStockTransferFromJson(allocator, json);
+    defer allocator.free(pdf);
+    try std.testing.expect(std.mem.startsWith(u8, pdf, "%PDF"));
+}

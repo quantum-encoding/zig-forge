@@ -1205,3 +1205,25 @@ test "dividend voucher generation" {
     defer allocator.free(pdf);
     try std.testing.expect(pdf.len > 1000);
 }
+
+// Leak guard for the parse -> freeDividendVoucherData tracking path:
+// std.testing.allocator fails if any tracked string is not freed.
+test "dividend voucher from json (leak-checked)" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "jurisdiction": "uk", "currency": "GBP",
+        \\  "template": { "style": { "primary_color": "#1a2a5e", "accent_color": "#e8a83d" } },
+        \\  "voucher": { "number": "DIV-001", "date": "29 May 2026", "tax_year": "2025/26" },
+        \\  "company": { "name": "Quantum Holdings Ltd", "registration_number": "12345678", "registered_address": { "line1": "Unit 7", "city": "Fareham", "county": "Hampshire", "postcode": "PO15 7FH", "country": "UK" } },
+        \\  "shareholder": { "name": "John Demo", "address": { "line1": "18 Maple Drive", "city": "Portsmouth", "postcode": "PO6 2TN", "country": "UK" } },
+        \\  "dividend": { "shares_held": 100, "rate_per_share": 0.5, "gross_amount": 50, "net_payable": 50, "share_class": "Ordinary" },
+        \\  "payment": { "method": "BACS", "date": "29 May 2026", "reference": "PAY-001" },
+        \\  "declaration": { "resolution_date": "01 May 2026", "payment_date": "29 May 2026" },
+        \\  "signatory": { "name": "Jane Director", "date": "29 May 2026" }
+        \\}
+    ;
+    const pdf = try generateDividendVoucherFromJson(allocator, json);
+    defer allocator.free(pdf);
+    try std.testing.expect(std.mem.startsWith(u8, pdf, "%PDF"));
+}

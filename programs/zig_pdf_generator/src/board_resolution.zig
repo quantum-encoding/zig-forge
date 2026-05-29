@@ -764,3 +764,22 @@ test "board resolution generation" {
     defer allocator.free(pdf);
     try std.testing.expect(pdf.len > 1000);
 }
+
+// Leak guard for the parse -> freeBoardResolutionData tracking path.
+test "board resolution from json (leak-checked)" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "template": { "style": { "primary_color": "#1a2a5e", "accent_color": "#e8a83d" } },
+        \\  "company": { "name": "Quantum Holdings Ltd", "registration_number": "12345678" },
+        \\  "meeting": { "date": "29 May 2026", "time": "10:00", "location": "Registered Office" },
+        \\  "directors": [ { "name": "Jane Director", "present": true, "role": "Chairman" }, { "name": "Bob Director", "present": true } ],
+        \\  "resolutions": [ { "number": 1, "title": "Approve Accounts", "text": "IT WAS RESOLVED that the accounts be approved.", "proposer": "Jane Director", "seconder": "Bob Director" } ],
+        \\  "signatories": [ { "name": "Jane Director", "role": "Director" } ],
+        \\  "reference": "BR-001"
+        \\}
+    ;
+    const pdf = try generateBoardResolutionFromJson(allocator, json);
+    defer allocator.free(pdf);
+    try std.testing.expect(std.mem.startsWith(u8, pdf, "%PDF"));
+}
