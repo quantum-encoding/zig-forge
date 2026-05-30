@@ -23,7 +23,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
-        .link_libc = false,
+        .link_libc = true,
     });
     exe_module.addImport("http-sentinel", http_sentinel_module);
     exe_module.addImport("gcp-auth", gcp_auth_module);
@@ -47,7 +47,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
-        .link_libc = false,
+        .link_libc = true,
     });
     test_module.addImport("http-sentinel", http_sentinel_module);
     test_module.addImport("gcp-auth", gcp_auth_module);
