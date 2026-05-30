@@ -68,19 +68,32 @@ get_state_from_db() {
         fi
     fi
 
-    # Query database for most recent status line
-    # Status lines contain "(esc to interrupt" and don't have tool patterns
-    if [ -n "$claude_pid" ]; then
-        # Get entries containing status line pattern, excluding tool execution
-        local raw_content=$(sqlite3 "$DB_PATH" "SELECT raw_content FROM cognitive_states WHERE pid=$claude_pid AND raw_content LIKE '%(esc to interrupt%' AND raw_content NOT LIKE '%Bash(%' AND raw_content NOT LIKE '%Read(%' AND raw_content NOT LIKE '%Write(%' AND raw_content NOT LIKE '%Edit(%' AND raw_content NOT LIKE '%Grep(%' ORDER BY id DESC LIMIT 1;" 2>/dev/null)
-    else
-        # No PID found, search recent entries
-        local raw_content=$(sqlite3 "$DB_PATH" "SELECT raw_content FROM cognitive_states WHERE raw_content LIKE '%(esc to interrupt%' AND raw_content NOT LIKE '%Bash(%' AND raw_content NOT LIKE '%Read(%' AND raw_content NOT LIKE '%Write(%' AND raw_content NOT LIKE '%Edit(%' AND raw_content NOT LIKE '%Grep(%' ORDER BY id DESC LIMIT 1;" 2>/dev/null)
-    fi
+    # Query database for the most recent status-spinner line. Claude Code's
+    # spinner format changed over time, so we accept either shape:
+    #   OLD (pre-2026): " Elucidating (esc to interrupt  1m 32s   2.1k tokens)"
+    #   NEW (current):  "✶ Skedaddling…30"  (glyph + gerund + … + elapsed seconds)
+    # The "(esc to interrupt" suffix was dropped from the new UI; matching only
+    # that marker is why stamps started falling through to NOT-DETECTED.
+    local pid_filter=""
+    [ -n "$claude_pid" ] && pid_filter="pid=$claude_pid AND"
+    local raw_content=$(sqlite3 "$DB_PATH" "
+        SELECT raw_content FROM cognitive_states
+        WHERE $pid_filter (raw_content GLOB '*[A-Za-z]…*'
+                           OR raw_content LIKE '%(esc to interrupt%')
+          AND raw_content NOT LIKE '%Bash(%'
+          AND raw_content NOT LIKE '%Read(%'
+          AND raw_content NOT LIKE '%Write(%'
+          AND raw_content NOT LIKE '%Edit(%'
+          AND raw_content NOT LIKE '%Grep(%'
+        ORDER BY id DESC LIMIT 1;" 2>/dev/null)
 
     if [ -n "$raw_content" ]; then
-        # Extract text before "(esc to interrupt" - that's the cognitive state
-        local cognitive_state=$(echo "$raw_content" | grep -o '.*(' | sed 's/[[:space:]]*([[:space:]]*$//' | tail -1 | sed 's/^[[:space:]>*]*//')
+        # Take the spinner line, drop everything from "…"/"(esc to interrupt"
+        # onward, then strip the leading glyph/whitespace and trailing whitespace.
+        local cognitive_state=$(printf '%s' "$raw_content" \
+            | grep -m1 -E '…|esc to interrupt' \
+            | sed -E 's/….*$//; s/[[:space:]]*\(esc to interrupt.*$//' \
+            | sed 's/^[^[:alpha:]]*//; s/[[:space:]]*$//')
         if [ -n "$cognitive_state" ]; then
             echo "$cognitive_state"
         fi
