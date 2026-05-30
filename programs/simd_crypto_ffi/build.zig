@@ -4,6 +4,12 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // -Dfuzz enables libFuzzer-compatible SanitizerCoverage instrumentation
+    // (inline 8-bit counters + PC table) on the static FFI library so a Rust
+    // libFuzzer harness gets coverage feedback into this Zig code. Off by
+    // default — production/app builds stay uninstrumented.
+    const want_fuzz = b.option(bool, "fuzz", "Enable libFuzzer coverage instrumentation") orelse false;
+
     // =============================================================================
     // Static Library (for FFI integration with Rust/C/etc.)
     // =============================================================================
