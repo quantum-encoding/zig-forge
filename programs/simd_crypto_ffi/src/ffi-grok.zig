@@ -1195,7 +1195,17 @@ export fn quantum_bitcoin_parse_tx(
         }
 
         parsed.outputs[i] = c_output;
-        total_value += output.value;
+
+        // Output values are attacker-controlled; a malformed transaction can
+        // declare values that sum past u64. A valid Bitcoin transaction never
+        // approaches this (total money supply is ~2.1e15 sats), so treat an
+        // overflow as a malformed transaction rather than wrapping silently.
+        const sum = @addWithOverflow(total_value, output.value);
+        if (sum[1] != 0) {
+            setLastError("Bitcoin parse: total output value overflows u64");
+            return @intFromEnum(QuantumCryptoError.parse_error);
+        }
+        total_value = sum[0];
     }
 
     parsed.total_output_value = total_value;

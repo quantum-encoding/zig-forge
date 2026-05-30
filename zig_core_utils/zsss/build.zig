@@ -41,6 +41,10 @@ pub fn build(b: *std.Build) void {
             .pic = true,
         }),
     });
+    // Bundle compiler_rt so the archive is self-contained when linked by a
+    // non-Zig consumer (Rust/C) — avoids undefined __zig_probe_stack and
+    // friends in ReleaseSafe/Debug builds.
+    static_lib.bundle_compiler_rt = true;
     b.installArtifact(static_lib);
 
     // Shared library

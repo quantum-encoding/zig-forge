@@ -20,6 +20,11 @@ pub fn build(b: *std.Build) void {
         .linkage = .static,
     });
 
+    // Bundle compiler_rt into the archive so it is self-contained when linked
+    // by a non-Zig consumer (Rust/C). Without this, ReleaseSafe/Debug builds
+    // leave __zig_probe_stack and other compiler_rt symbols undefined.
+    lib.bundle_compiler_rt = true;
+
     // Link with libc for C compatibility
     lib.root_module.link_libc = true;
 
