@@ -21,8 +21,15 @@ get_claude_pid() {
         local comm=$(cat /proc/$pid/comm 2>/dev/null)
         local cmdline=$(cat /proc/$pid/cmdline 2>/dev/null | tr '\0' ' ')
 
-        # Check if this is a Claude process
-        if [[ "$comm" == "claude" ]] || [[ "$cmdline" =~ "claude-code" ]] || [[ "$cmdline" =~ "@anthropic/claude-code" ]]; then
+        # Match the real Claude Code process: comm=="claude" (native binary) or
+        # a cmdline that names the Claude Code CLI by path. We deliberately do
+        # NOT match a bare "claude-code" substring, because helper processes in
+        # our own call chain (e.g. `chronos-stamp claude-code tool-completion`)
+        # carry that token as an argument and would otherwise be mis-detected as
+        # the Claude process — resolving to a PID with no cognitive state.
+        if [[ "$comm" == "claude" ]] \
+           || [[ "$cmdline" == *"@anthropic/claude-code"* ]] \
+           || [[ "$cmdline" == *"/claude-code/"* ]]; then
             echo $pid
             return 0
         fi
