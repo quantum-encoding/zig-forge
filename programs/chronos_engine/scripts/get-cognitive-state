@@ -45,7 +45,13 @@ get_claude_pid() {
 }
 
 # Get cognitive state from database using universal extraction pattern
-# Pattern: extract text between "* " and " (" from raw_content
+#
+# Claude Code's status-spinner line has changed format over time. We support both:
+#   OLD (pre-2026): " Elucidating (esc to interrupt  1m 32s   2.1k tokens)"
+#   NEW (current):  "✶ Skedaddling…30"   (spinner glyph + gerund + … + elapsed seconds)
+# The "(esc to interrupt … tokens)" suffix was dropped from the new UI, which is
+# why the old "(esc to interrupt" filter stopped matching and every stamp fell
+# through to NOT-DETECTED. We now match EITHER shape and take the newest row.
 get_state_from_db() {
     local claude_pid=${1:-$(get_claude_pid)}
 
@@ -54,21 +60,28 @@ get_state_from_db() {
         return
     fi
 
-    # Extract cognitive state from raw_content
-    # raw_content is multiline and contains the status line with format:
-    #   " Befuddling (esc to interrupt  7s   69 tokens)"
-    # or with asterisk:
-    #   "* Finagling (esc to interrupt  66s   2.3k tokens)"
-    # Strategy: Find the line with "(esc to interrupt", extract text before it, trim whitespace and "*"
-
-    # Get the raw_content, extract lines with "(esc to interrupt", take text before it
-    local cognitive_state=$(sqlite3 "$DB_PATH" "
+    # Newest row that is a real spinner frame:
+    #   - NEW: a letter immediately precedes the "…" ellipsis (GLOB excludes
+    #          bare "…42" counter-only frames and pure-glyph noise)
+    #   - OLD: the "(esc to interrupt" marker is present
+    local raw_content=$(sqlite3 "$DB_PATH" "
         SELECT raw_content
         FROM cognitive_states
         WHERE pid=$claude_pid
-            AND raw_content LIKE '%(esc to interrupt%'
+          AND (raw_content GLOB '*[A-Za-z]…*'
+               OR raw_content LIKE '%(esc to interrupt%')
         ORDER BY id DESC
-        LIMIT 1;" 2>/dev/null | grep -oE ".*\(esc to interrupt" | head -1 | sed 's/(esc to interrupt.*$//' | sed 's/^[[:space:]]*\*[[:space:]]*//' | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')
+        LIMIT 1;" 2>/dev/null)
+
+    # Extract the cognitive word:
+    #   - first line carrying the spinner marker (… or "esc to interrupt")
+    #   - drop everything from "…" / "(esc to interrupt" onward
+    #   - strip leading spinner glyph + whitespace and any trailing whitespace
+    # The leading-glyph strip is byte-oriented so it works in C and UTF-8 locales.
+    local cognitive_state=$(printf '%s' "$raw_content" \
+        | grep -m1 -E '…|esc to interrupt' \
+        | sed -E 's/….*$//; s/[[:space:]]*\(esc to interrupt.*$//' \
+        | sed 's/^[^[:alpha:]]*//; s/[[:space:]]*$//')
 
     if [ -n "$cognitive_state" ]; then
         echo "$cognitive_state"
