@@ -77,8 +77,20 @@ get_state_from_db() {
         fi
     fi
 
-    # Query database for the most recent status-spinner line. Claude Code's
-    # spinner format changed over time, so we accept either shape:
+    # Primary source (cognitive-watcher V2): the watcher already detects and
+    # parses the spinner state into one row per state segment in the
+    # cognitive_sessions table. Newest row for this PID == current state.
+    local v2_state=$(sqlite3 "$DB_PATH" "
+        SELECT cognitive_state FROM cognitive_sessions
+        WHERE pid=$claude_pid
+        ORDER BY id DESC LIMIT 1;" 2>/dev/null)
+    if [ -n "$v2_state" ]; then
+        echo "$v2_state"
+        return
+    fi
+
+    # Legacy fallback — query for the most recent status-spinner line. Claude
+    # Code's spinner format changed over time, so we accept either shape:
     #   OLD (pre-2026): " Elucidating (esc to interrupt  1m 32s   2.1k tokens)"
     #   NEW (current):  "✶ Skedaddling…30"  (glyph + gerund + … + elapsed seconds)
     # The "(esc to interrupt" suffix was dropped from the new UI; matching only
