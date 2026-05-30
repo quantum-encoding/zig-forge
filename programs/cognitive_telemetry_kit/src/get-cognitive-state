@@ -43,8 +43,10 @@ get_claude_pid() {
         depth=$((depth + 1))
     done
 
-    # Method 2: Find most recent active PID from database
-    local recent_pid=$(sqlite3 "$DB_PATH" "SELECT pid FROM cognitive_states ORDER BY id DESC LIMIT 1;" 2>/dev/null)
+    # Method 2: Fall back to the most recently active PID known to the watcher.
+    # Uses cognitive_sessions (the live V2 table); the legacy cognitive_states
+    # table is no longer written for active sessions.
+    local recent_pid=$(sqlite3 "$DB_PATH" "SELECT pid FROM cognitive_sessions ORDER BY id DESC LIMIT 1;" 2>/dev/null)
     if [ -n "$recent_pid" ]; then
         echo "$recent_pid"
         return 0
