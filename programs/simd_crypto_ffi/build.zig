@@ -19,6 +19,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    ffi_module.fuzz = want_fuzz;
 
     const lib = b.addLibrary(.{
         .name = "quantum_crypto",

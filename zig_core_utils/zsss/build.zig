@@ -4,6 +4,11 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // -Dfuzz enables libFuzzer-compatible SanitizerCoverage instrumentation on
+    // the static library so a Rust libFuzzer harness gets coverage feedback
+    // into this Zig code. Off by default.
+    const want_fuzz = b.option(bool, "fuzz", "Enable libFuzzer coverage instrumentation") orelse false;
+
     // ==========================================================================
     // CLI Executable
     // ==========================================================================
@@ -45,6 +50,7 @@ pub fn build(b: *std.Build) void {
     // non-Zig consumer (Rust/C) — avoids undefined __zig_probe_stack and
     // friends in ReleaseSafe/Debug builds.
     static_lib.bundle_compiler_rt = true;
+    static_lib.root_module.fuzz = want_fuzz;
     b.installArtifact(static_lib);
 
     // Shared library
