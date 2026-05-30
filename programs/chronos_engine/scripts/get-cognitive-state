@@ -1,10 +1,13 @@
 #!/bin/bash
 # Get Real-Time Cognitive State for Chronos Git Stamps
-# Extracts cognitive state from raw_content using the universal pattern
+#
+# Reads the live cognitive state recorded by the cognitive-watcher daemon and
+# prints the bare gerund (e.g. "Pollinating", "Spelunking") used in chronos
+# commit stamps. Prints "NOT-DETECTED" when no state can be resolved.
 #
 # Usage: get-cognitive-state [PID]
 #   If PID is provided, use it directly
-#   Otherwise, walk up process tree to find Claude
+#   Otherwise, walk up the process tree to find Claude
 
 DB_PATH="/var/lib/cognitive-watcher/cognitive-states.db"
 
@@ -34,8 +37,10 @@ get_claude_pid() {
         depth=$((depth + 1))
     done
 
-    # Method 2: Find most recent active PID from database
-    local recent_pid=$(sqlite3 "$DB_PATH" "SELECT pid FROM cognitive_states ORDER BY id DESC LIMIT 1;" 2>/dev/null)
+    # Method 2: Fall back to the most recently active PID known to the watcher.
+    # Uses cognitive_sessions (the live V2 table); the legacy cognitive_states
+    # table is no longer written for active sessions.
+    local recent_pid=$(sqlite3 "$DB_PATH" "SELECT pid FROM cognitive_sessions ORDER BY id DESC LIMIT 1;" 2>/dev/null)
     if [ -n "$recent_pid" ]; then
         echo "$recent_pid"
         return 0
@@ -44,14 +49,7 @@ get_claude_pid() {
     echo ""
 }
 
-# Get cognitive state from database using universal extraction pattern
-#
-# Claude Code's status-spinner line has changed format over time. We support both:
-#   OLD (pre-2026): " Elucidating (esc to interrupt  1m 32s   2.1k tokens)"
-#   NEW (current):  "✶ Skedaddling…30"   (spinner glyph + gerund + … + elapsed seconds)
-# The "(esc to interrupt … tokens)" suffix was dropped from the new UI, which is
-# why the old "(esc to interrupt" filter stopped matching and every stamp fell
-# through to NOT-DETECTED. We now match EITHER shape and take the newest row.
+# Resolve the current cognitive state for a Claude PID.
 get_state_from_db() {
     local claude_pid=${1:-$(get_claude_pid)}
 
@@ -60,10 +58,28 @@ get_state_from_db() {
         return
     fi
 
-    # Newest row that is a real spinner frame:
-    #   - NEW: a letter immediately precedes the "…" ellipsis (GLOB excludes
-    #          bare "…42" counter-only frames and pure-glyph noise)
-    #   - OLD: the "(esc to interrupt" marker is present
+    # Primary source (cognitive-watcher V2): the watcher already detects and
+    # parses the spinner state and records one row per state segment in the
+    # cognitive_sessions table. The newest row for this PID is the current
+    # state, pre-parsed to a clean gerund ("Pollinating", "Synthesizing", ...).
+    # This is authoritative and replaces the fragile raw-TTY parsing below.
+    local v2_state=$(sqlite3 "$DB_PATH" "
+        SELECT cognitive_state
+        FROM cognitive_sessions
+        WHERE pid=$claude_pid
+        ORDER BY id DESC
+        LIMIT 1;" 2>/dev/null)
+    if [ -n "$v2_state" ]; then
+        echo "$v2_state"
+        return
+    fi
+
+    # Legacy fallback: parse raw TTY spinner frames from cognitive_states.
+    # Claude Code's spinner has used two formats over time:
+    #   OLD (pre-2026): " Elucidating (esc to interrupt  1m 32s   2.1k tokens)"
+    #   NEW (current):  "✶ Skedaddling…30"  (glyph + gerund + … + elapsed secs)
+    # Match either: a letter immediately before "…" (GLOB excludes bare counter
+    # frames like "…42"), or the legacy "(esc to interrupt" marker.
     local raw_content=$(sqlite3 "$DB_PATH" "
         SELECT raw_content
         FROM cognitive_states
@@ -73,10 +89,8 @@ get_state_from_db() {
         ORDER BY id DESC
         LIMIT 1;" 2>/dev/null)
 
-    # Extract the cognitive word:
-    #   - first line carrying the spinner marker (… or "esc to interrupt")
-    #   - drop everything from "…" / "(esc to interrupt" onward
-    #   - strip leading spinner glyph + whitespace and any trailing whitespace
+    # Take the spinner line, drop everything from "…"/"(esc to interrupt" on,
+    # then strip the leading glyph/whitespace and any trailing whitespace.
     # The leading-glyph strip is byte-oriented so it works in C and UTF-8 locales.
     local cognitive_state=$(printf '%s' "$raw_content" \
         | grep -m1 -E '…|esc to interrupt' \
