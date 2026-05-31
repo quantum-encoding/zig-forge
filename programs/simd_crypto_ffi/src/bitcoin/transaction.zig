@@ -344,6 +344,14 @@ pub fn parseTransaction(allocator: std.mem.Allocator, data: []const u8) ParseErr
         };
     }
 
+    // Free any per-input witness arrays allocated below if parsing fails after
+    // this point. Each input starts with an empty witness (len 0), so inputs
+    // whose witness array was never allocated are skipped. Registered before the
+    // outputs `errdefer` so it runs first (LIFO) on the error path.
+    errdefer for (inputs) |inp| {
+        if (inp.witness.len > 0) allocator.free(inp.witness);
+    };
+
     // Output count
     const output_count = try readVarint(data, &offset);
     if (output_count > MAX_OUTPUTS) return ParseError.TooManyOutputs;
@@ -380,14 +388,15 @@ pub fn parseTransaction(allocator: std.mem.Allocator, data: []const u8) ParseErr
             if (witness_count > MAX_WITNESS_ITEMS) return ParseError.TooManyWitnessItems;
 
             const witness_items = allocator.alloc([]const u8, @intCast(witness_count)) catch return ParseError.OutOfMemory;
+            // Assign immediately so the errdefer above frees this array even if
+            // an item-length read below fails part-way through the loop.
+            input.witness = witness_items;
 
             for (witness_items) |*item| {
                 const item_len = try readVarint(data, &offset);
                 if (item_len > MAX_SCRIPT_SIZE) return ParseError.ScriptTooLarge;
                 item.* = try readBytes(data, &offset, @intCast(item_len));
             }
-
-            input.witness = witness_items;
         }
     }
     const witness_end = offset;
