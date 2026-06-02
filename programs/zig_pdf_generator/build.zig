@@ -85,6 +85,7 @@ pub fn build(b: *std.Build) void {
 
     android_lib.root_module.link_libc = true;
     android_lib.root_module.strip = true;
+    android_lib.root_module.pic = true; // linked into a shared .so (JNI) — must be PIC
 
     const android_install = b.addInstallArtifact(android_lib, .{
         .dest_dir = .{ .override = .{ .custom = "lib/android-arm64" } },

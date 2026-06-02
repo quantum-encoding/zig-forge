@@ -172,6 +172,60 @@ pub fn build(b: *std.Build) void {
     web_wasm_step.dependOn(&b.addInstallArtifact(web_wasm, .{}).step);
 
     // ============================================================
+    // iOS ARM64 (aarch64-ios, static library)
+    // Build with: zig build ios
+    // Output: zig-out/lib/ios-arm64/libzig_docx.a
+    // ============================================================
+    const ios_target = b.resolveTargetQuery(.{
+        .cpu_arch = .aarch64,
+        .os_tag = .ios,
+        .abi = .none,
+    });
+    const ios_module = b.createModule(.{
+        .root_source_file = b.path("src/ffi.zig"),
+        .target = ios_target,
+        .optimize = .ReleaseFast,
+    });
+    ios_module.link_libc = true;
+    ios_module.strip = true;
+    const ios_lib = b.addLibrary(.{
+        .linkage = .static,
+        .name = "zig_docx",
+        .root_module = ios_module,
+    });
+    ios_lib.bundle_compiler_rt = true;
+    const ios_install = b.addInstallArtifact(ios_lib, .{
+        .dest_dir = .{ .override = .{ .custom = "lib/ios-arm64" } },
+    });
+    const ios_step = b.step("ios", "Build static libzig_docx.a for iOS ARM64 (aarch64-ios)");
+    ios_step.dependOn(&ios_install.step);
+
+    // iOS Simulator ARM64
+    const ios_sim_target = b.resolveTargetQuery(.{
+        .cpu_arch = .aarch64,
+        .os_tag = .ios,
+        .abi = .simulator,
+    });
+    const ios_sim_module = b.createModule(.{
+        .root_source_file = b.path("src/ffi.zig"),
+        .target = ios_sim_target,
+        .optimize = .ReleaseFast,
+    });
+    ios_sim_module.link_libc = true;
+    ios_sim_module.strip = true;
+    const ios_sim_lib = b.addLibrary(.{
+        .linkage = .static,
+        .name = "zig_docx",
+        .root_module = ios_sim_module,
+    });
+    ios_sim_lib.bundle_compiler_rt = true;
+    const ios_sim_install = b.addInstallArtifact(ios_sim_lib, .{
+        .dest_dir = .{ .override = .{ .custom = "lib/ios-sim-arm64" } },
+    });
+    const ios_sim_step = b.step("ios-sim", "Build static libzig_docx.a for iOS Simulator ARM64");
+    ios_sim_step.dependOn(&ios_sim_install.step);
+
+    // ============================================================
     // Android cross-compilation (NDK / JNI)
     //
     // Build with: zig build android        (static .a for all ABIs below)
@@ -233,6 +287,7 @@ pub fn build(b: *std.Build) void {
         });
         a_module.link_libc = true;
         a_module.strip = true;
+        a_module.pic = true; // archive is linked into a shared .so (JNI) — must be PIC
         const a_lib = b.addLibrary(.{
             .linkage = .static,
             .name = "zig_docx",
@@ -253,6 +308,7 @@ pub fn build(b: *std.Build) void {
         });
         so_module.link_libc = true; // links Bionic libc (malloc/fopen used by the FFI)
         so_module.strip = true;
+        so_module.pic = true;
         const so_lib = b.addLibrary(.{
             .linkage = .dynamic,
             .name = "zig_docx",
