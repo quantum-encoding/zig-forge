@@ -29,6 +29,9 @@ pub const FraData = struct {
     assessor_email: []const u8 = "",
     assessor_name: []const u8 = "",
     assessor_qualifications: []const u8 = "",
+    /// Letterhead logo — base64 image data URL ("data:image/png;base64,…").
+    /// Rendered at the top of the cover page. Empty = no logo.
+    logo: []const u8 = "",
 
     // Client / premises
     client_name: []const u8 = "",
@@ -127,8 +130,13 @@ pub fn generateFra(allocator: std.mem.Allocator, data: *const FraData) ![]u8 {
         elements.deinit(allocator);
     }
 
+    // Media (images) accumulator — shared by the cover logo and section photos.
+    var media_list: std.ArrayListUnmanaged(docx.MediaFile) = .empty;
+    defer media_list.deinit(allocator);
+    var img_index: u32 = 0;
+
     // ── Cover page ──
-    try addCoverPage(allocator, &elements, data);
+    try addCoverPage(allocator, &elements, data, &media_list, &img_index);
 
     // ── Introduction ──
     try addHeading(allocator, &elements, "INTRODUCTION", .heading1);
@@ -183,10 +191,6 @@ pub fn generateFra(allocator: std.mem.Allocator, data: *const FraData) ![]u8 {
     try addPreviousIncidentsTable(allocator, &elements, data);
 
     // ── Checklist Sections (dynamic) ──
-    var media_list: std.ArrayListUnmanaged(docx.MediaFile) = .empty;
-    defer media_list.deinit(allocator);
-    var img_index: u32 = 0;
-
     var last_category: []const u8 = "";
     for (data.sections) |section| {
         // Print category heading if changed
@@ -236,7 +240,24 @@ pub fn generateFra(allocator: std.mem.Allocator, data: *const FraData) ![]u8 {
 
 // ─── Cover Page ────────────────────────────────────────────────────
 
-fn addCoverPage(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged(docx.Element), data: *const FraData) !void {
+fn addCoverPage(allocator: std.mem.Allocator, elements: *std.ArrayListUnmanaged(docx.Element), data: *const FraData, media_list: *std.ArrayListUnmanaged(docx.MediaFile), img_index: *u32) !void {
+    // Letterhead logo (base64 data URL) at the very top of the cover.
+    if (decodeImageDataUrl(allocator, data.logo)) |decoded| {
+        img_index.* += 1;
+        if (std.fmt.allocPrint(allocator, "image{d}.{s}", .{ img_index.*, decoded.ext })) |media_name| {
+            media_list.append(allocator, .{ .name = media_name, .data = decoded.data }) catch {
+                allocator.free(media_name);
+                allocator.free(decoded.data);
+                return;
+            };
+            const logo_run = try allocator.alloc(docx.Run, 1);
+            logo_run[0] = .{ .text = "", .image_rel_id = allocator.dupe(u8, media_name) catch null };
+            try elements.append(allocator, .{ .paragraph = .{ .style = .normal, .runs = logo_run } });
+        } else |_| {
+            allocator.free(decoded.data);
+        }
+    }
+
     // Assessor company details
     if (data.assessor_address.len > 0)
         try addParagraph(allocator, elements, data.assessor_address);
@@ -1053,6 +1074,7 @@ pub fn parseFraJson(allocator: std.mem.Allocator, json_str: []const u8) !FraData
     if (getStr(obj, "assessor_email")) |v| data.assessor_email = try allocator.dupe(u8, v);
     if (getStr(obj, "assessor_name")) |v| data.assessor_name = try allocator.dupe(u8, v);
     if (getStr(obj, "assessor_qualifications")) |v| data.assessor_qualifications = try allocator.dupe(u8, v);
+    if (getStr(obj, "logo")) |v| data.logo = try allocator.dupe(u8, v);
     if (getStr(obj, "client_name")) |v| data.client_name = try allocator.dupe(u8, v);
     if (getStr(obj, "client_address")) |v| data.client_address = try allocator.dupe(u8, v);
     if (getStr(obj, "client_postcode")) |v| data.client_postcode = try allocator.dupe(u8, v);
