@@ -64,6 +64,30 @@ zig build
 
 Requires Zig 0.16.0 (stable) or later. For PDF extraction, install `poppler` (`brew install poppler` on macOS, `apt install poppler-utils` on Linux).
 
+### Native mobile (Android / iOS / Swift)
+
+The same C FFI (`include/zig_docx.h`) drives native apps. A SwiftPM package lives in [`swift/`](swift/) — `import ZigDocx` then `ZigDocx.fireRiskAssessment(json:) -> Data`.
+
+**Android (NDK / JNI).** Build a static `libzig_docx.a` for every common ABI — no NDK required at build time:
+
+```bash
+zig build android          # arm64-v8a, armeabi-v7a, x86_64 → zig-out/lib/android/<abi>/
+zig build android-arm64    # one ABI
+```
+
+Link each `.a` into your JNI shim from CMake (Bionic libc resolves at link time):
+
+```cmake
+add_library(zig_docx STATIC IMPORTED)
+set_target_properties(zig_docx PROPERTIES IMPORTED_LOCATION
+    ${CMAKE_SOURCE_DIR}/libs/${ANDROID_ABI}/libzig_docx.a)
+target_link_libraries(your_jni zig_docx)
+```
+
+`zig build android-so` instead emits ready-to-ship shared `libzig_docx.so` per ABI for `System.loadLibrary`, but linking Bionic at build time needs the Android NDK available to Zig — so it is kept out of the default `android` step.
+
+> **macOS/iOS note:** Zig 0.16 emits 2-byte-aligned Mach-O archive members; Apple's linker needs 8-byte. After building the `.a` for an Xcode/Swift target, realign it with `zig-forge/scripts/repack-for-xcode.sh libzig_docx.a` or you'll hit "not 8-byte aligned" link errors.
+
 ### WASM library
 
 For embedding in a web app or serverless runtime, build the WASI reactor module:
