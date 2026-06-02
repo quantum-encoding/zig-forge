@@ -39,6 +39,7 @@
 
 const std = @import("std");
 const fra = @import("fra.zig");
+const docx = @import("docx.zig");
 
 const wasm_allocator = std.heap.wasm_allocator;
 
@@ -129,6 +130,92 @@ export fn zigdocx_generate_fra(json_ptr: [*]const u8, json_len: usize, output_le
     };
     @memcpy(out, docx_bytes);
 
+    output_len.* = out.len;
+    return out.ptr;
+}
+
+// ─── Markdown → DOCX ───────────────────────────────────────────────
+
+/// Render a structured DOCX from Markdown (with optional YAML frontmatter for
+/// title/author/date). Same ownership contract as zigdocx_generate_fra.
+/// Disk-backed images / letterhead in the frontmatter are skipped (no fs).
+export fn zigdocx_md_to_docx(md_ptr: [*]const u8, md_len: usize, output_len: *usize) ?[*]u8 {
+    output_len.* = 0;
+    const md_slice = md_ptr[0..md_len];
+
+    if (!std.unicode.utf8ValidateSlice(md_slice)) {
+        setLastError("Invalid UTF-8 input");
+        return null;
+    }
+
+    var arena = std.heap.ArenaAllocator.init(wasm_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const result = docx.md_parser.parseMarkdown(a, md_slice) catch |err| {
+        var buf: [128]u8 = undefined;
+        setLastError(std.fmt.bufPrint(&buf, "Markdown parse error: {s}", .{@errorName(err)}) catch "Markdown parse error");
+        return null;
+    };
+
+    const options = docx.docx_writer.DocxWriterOptions{
+        .title = result.frontmatter.title orelse "",
+        .author = result.frontmatter.author orelse "",
+        .description = result.frontmatter.description orelse "",
+        .date = result.frontmatter.date orelse "",
+    };
+
+    const docx_bytes = docx.docx_writer.generateDocx(a, &result.document, options) catch |err| {
+        var buf: [128]u8 = undefined;
+        setLastError(std.fmt.bufPrint(&buf, "DOCX generation error: {s}", .{@errorName(err)}) catch "DOCX generation error");
+        return null;
+    };
+
+    const out = wasm_allocator.alloc(u8, docx_bytes.len) catch {
+        setLastError("Out of memory copying DOCX output");
+        return null;
+    };
+    @memcpy(out, docx_bytes);
+    output_len.* = out.len;
+    return out.ptr;
+}
+
+// ─── DOCX → Markdown ───────────────────────────────────────────────
+
+/// Convert a .docx (zip bytes) to Markdown. Returns Markdown text bytes
+/// (same ownership contract). Images are referenced by name but not extracted
+/// (no filesystem in the browser build).
+export fn zigdocx_docx_to_md(docx_ptr: [*]const u8, docx_len: usize, output_len: *usize) ?[*]u8 {
+    output_len.* = 0;
+    const data = docx_ptr[0..docx_len];
+
+    var arena = std.heap.ArenaAllocator.init(wasm_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var archive = docx.zip.ZipArchive.openFromMemory(a, data) catch |err| {
+        var buf: [128]u8 = undefined;
+        setLastError(std.fmt.bufPrint(&buf, "Not a valid .docx file: {s}", .{@errorName(err)}) catch "Invalid .docx");
+        return null;
+    };
+
+    const doc = docx.parseDocument(a, &archive) catch |err| {
+        var buf: [128]u8 = undefined;
+        setLastError(std.fmt.bufPrint(&buf, "DOCX parse error: {s}", .{@errorName(err)}) catch "DOCX parse error");
+        return null;
+    };
+
+    const result = docx.mdx.generateMdx(a, &doc, .{}) catch |err| {
+        var buf: [128]u8 = undefined;
+        setLastError(std.fmt.bufPrint(&buf, "Markdown conversion error: {s}", .{@errorName(err)}) catch "conversion error");
+        return null;
+    };
+
+    const out = wasm_allocator.alloc(u8, result.mdx.len) catch {
+        setLastError("Out of memory copying Markdown output");
+        return null;
+    };
+    @memcpy(out, result.mdx);
     output_len.* = out.len;
     return out.ptr;
 }
