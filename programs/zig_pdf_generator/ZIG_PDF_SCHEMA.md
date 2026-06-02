@@ -78,7 +78,7 @@ Supports VeriFactu/CIS/crypto-receipt modes via optional fields.
 
 | Field                          | Type                             | Required? | Fallback                          | Notes                                                                        |
 |--------------------------------|----------------------------------|-----------|-----------------------------------|------------------------------------------------------------------------------|
-| `document_type`                | `enum("invoice"\|"quote")`       | No        | `"invoice"`                       | Semantic only; affects the label word, not the layout                         |
+| `document_type`                | `enum("invoice"\|"quote"\|"receipt")` | No   | `"invoice"`                       | Sets the title word (INVOICE / QUOTE / RECEIPT) and the number label. `"receipt"` also defaults `show_tax` to `false` |
 | `company_name`                 | string                           | No        | `""`                              | Header + footer                                                              |
 | `company_address`              | string                           | No        | `""`                              | Single line; no `\n` splitting in this template                              |
 | `company_vat`                  | string                           | No        | `""`                              | Tax/VAT ID; informational                                                    |
@@ -96,11 +96,12 @@ Supports VeriFactu/CIS/crypto-receipt modes via optional fields.
 | `tax_rate`                     | number                           | No        | `0.21`                            | Fraction (`0.0`–`1.0`); 21% default                                          |
 | `tax_amount`                   | number                           | No        | derived                           | `subtotal * tax_rate` if absent                                              |
 | `total`                        | number                           | No        | derived                           | `subtotal + tax_amount` if absent                                            |
+| `show_tax`                     | bool                             | No        | `true` (but `false` for `document_type:"receipt"`) | VAT/tax toggle. When `false`, the **Subtotal** and **Tax** rows are suppressed and only the **TOTAL** bar is drawn — use for a business that is not VAT-registered. Alias: `show_vat` |
 | `notes`                        | string                           | No        | `""`                              | Free-form text block below items                                             |
 | `payment_terms`                | string                           | No        | `""`                              | Separate from notes — specifically payment terms                             |
 | `primary_color`                | hex_color                        | No        | `#b39a7d`                         | Accents, hairlines, headers                                                  |
 | `secondary_color`              | hex_color                        | No        | `#2c3e50`                         | Secondary accent; rarely visible in invoice                                  |
-| `title_color`                  | hex_color                        | No        | inherits `primary_color`          | Document-type word (INVOICE / QUOTE)                                         |
+| `title_color`                  | hex_color                        | No        | inherits `primary_color`          | Document-type word (INVOICE / QUOTE / RECEIPT)                              |
 | `company_name_color`           | hex_color                        | No        | `#1a1a1a`                         | Company-name text                                                            |
 | `font_family`                  | `enum("Helvetica"\|"Times-Roman"\|"Courier")` | No | `"Helvetica"`                 | Values not in the enum fall back to Helvetica                                |
 | `template_style`               | `enum("professional"\|"modern"\|"classic"\|"creative")` | No | `"professional"` | Cosmetic variation; `professional` is the only one rendered today            |

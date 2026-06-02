@@ -159,6 +159,42 @@ function createModule(exports: WasmExports): ZigPdfModule {
       }
     },
 
+    // A receipt uses the exact same WASM export and wire format as an invoice.
+    // Pass JSON with `document_type: "receipt"` (defaults show_tax to false) for
+    // a non-VAT-registered business. This alias exists for call-site clarity;
+    // it closes over `exports`/`memory` so it survives destructuring.
+    generateReceipt(jsonString: string): Uint8Array {
+      const outLenPtr = exports.wasm_alloc(4);
+      if (outLenPtr === 0) {
+        throw new Error('Failed to allocate memory for output length');
+      }
+
+      const { ptr: jsonPtr, len: jsonLen } = writeString(memory, exports, jsonString);
+
+      try {
+        const resultPtr = exports.zigpdf_generate_invoice(jsonPtr, jsonLen, outLenPtr);
+
+        if (resultPtr === 0) {
+          const errorPtr = exports.zigpdf_get_error();
+          if (errorPtr !== 0) {
+            const errorMsg = readCString(memory, errorPtr);
+            throw new Error(`Receipt generation failed: ${errorMsg}`);
+          }
+          throw new Error('Receipt generation failed: unknown error');
+        }
+
+        const outLenBytes = new Uint32Array(memory.buffer, outLenPtr, 1);
+        const outLen = outLenBytes[0];
+        const result = readBytes(memory, resultPtr, outLen).slice();
+        exports.zigpdf_free(resultPtr, outLen);
+
+        return result;
+      } finally {
+        exports.wasm_free(jsonPtr, jsonLen);
+        exports.wasm_free(outLenPtr, 4);
+      }
+    },
+
     generateLetterQuote(jsonString: string): Uint8Array {
       const outLenPtr = exports.wasm_alloc(4);
       if (outLenPtr === 0) {

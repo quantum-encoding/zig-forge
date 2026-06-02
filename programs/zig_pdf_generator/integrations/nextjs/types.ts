@@ -226,9 +226,78 @@ export interface PresentationTemplate {
 export interface ZigPdfModule {
   generatePresentation: (jsonString: string) => Uint8Array;
   generateInvoice: (jsonString: string) => Uint8Array;
+  /**
+   * Generate a receipt PDF. Identical wire format and WASM export as
+   * generateInvoice — this is a semantic alias. Pass JSON with
+   * `document_type: "receipt"` (which defaults `show_tax` to false, omitting
+   * the Subtotal/Tax rows) for a non-VAT-registered business.
+   */
+  generateReceipt: (jsonString: string) => Uint8Array;
   generateLetterQuote: (jsonString: string) => Uint8Array;
   getVersion: () => string;
   getLastError: () => string | null;
+}
+
+// ============================================================================
+// Invoice / Receipt Types
+// ============================================================================
+// Mirrors src/invoice.zig (parsed by src/json.zig). Serialise with
+// JSON.stringify and pass to ZigPdfModule.generateInvoice / generateReceipt.
+
+export interface InvoiceLineItem {
+  description: string;
+  quantity: number;
+  unit_price: number;
+  total: number;
+}
+
+export interface InvoiceData {
+  /** "invoice" (default), "quote", or "receipt". Drives the title, the
+   *  number label, and the default for `show_tax`. */
+  document_type?: 'invoice' | 'quote' | 'receipt';
+
+  company_name?: string;
+  company_address?: string;
+  /** Company VAT number. Only rendered when non-empty — omit it entirely for a
+   *  business that is not VAT-registered. */
+  company_vat?: string;
+  company_logo_base64?: string;
+
+  client_name?: string;
+  client_address?: string;
+  client_vat?: string;
+
+  /** Document reference, e.g. "RCT-2026-0001". */
+  invoice_number?: string;
+  invoice_date?: string;
+  due_date?: string;
+
+  items?: InvoiceLineItem[];
+
+  subtotal?: number;
+  tax_rate?: number;
+  tax_amount?: number;
+  total?: number;
+
+  /**
+   * VAT/tax toggle. When false, the Subtotal and Tax rows are suppressed and
+   * only the TOTAL is shown. When omitted, defaults to `false` for
+   * `document_type: "receipt"` and `true` otherwise. Alias: `show_vat`.
+   */
+  show_tax?: boolean;
+  /** Alias for `show_tax`. */
+  show_vat?: boolean;
+
+  notes?: string;
+  payment_terms?: string;
+
+  primary_color?: string;
+  secondary_color?: string;
+  title_color?: string;
+  company_name_color?: string;
+  font_family?: string;
+
+  show_branding?: boolean;
 }
 
 // ============================================================================

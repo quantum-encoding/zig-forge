@@ -96,6 +96,13 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
     data.tax_rate = getJsonFloat(obj, "tax_rate") orelse 0.21;
     data.tax_amount = getJsonFloat(obj, "tax_amount") orelse 0;
     data.total = getJsonFloat(obj, "total") orelse 0;
+
+    // VAT/tax toggle. Explicit "show_tax" (alias "show_vat") always wins.
+    // When omitted, default by document type: receipts suppress tax (a new,
+    // non-VAT-registered business), everything else keeps the tax breakdown.
+    const tax_default = !std.mem.eql(u8, data.document_type, "receipt");
+    data.show_tax = getJsonBool(obj, "show_tax") orelse
+        getJsonBool(obj, "show_vat") orelse tax_default;
     data.logo_x = @floatCast(getJsonFloat(obj, "logo_x") orelse 40);
     data.logo_y = @floatCast(getJsonFloat(obj, "logo_y") orelse 750);
     data.logo_width = @floatCast(getJsonFloat(obj, "logo_width") orelse 80);
@@ -523,6 +530,42 @@ test "parse simple invoice JSON" {
     try std.testing.expectEqualStrings("Service A", data.items[0].description);
     try std.testing.expectApproxEqAbs(@as(f64, 500), data.subtotal, 0.01);
     try std.testing.expectApproxEqAbs(@as(f64, 605), data.total, 0.01);
+}
+
+test "show_tax defaults true for invoice, false for receipt" {
+    const allocator = std.testing.allocator;
+
+    // Invoice with no show_tax → defaults to true
+    const inv = try parseInvoiceJson(allocator,
+        \\{"document_type": "invoice", "company_name": "Co"}
+    );
+    defer freeInvoiceData(allocator, &inv);
+    try std.testing.expect(inv.show_tax);
+
+    // Receipt with no show_tax → defaults to false
+    const rct = try parseInvoiceJson(allocator,
+        \\{"document_type": "receipt", "company_name": "Lutuno Ltd"}
+    );
+    defer freeInvoiceData(allocator, &rct);
+    try std.testing.expect(!rct.show_tax);
+}
+
+test "show_tax explicit value and show_vat alias override the default" {
+    const allocator = std.testing.allocator;
+
+    // Explicit false on an invoice overrides the true default
+    const inv = try parseInvoiceJson(allocator,
+        \\{"document_type": "invoice", "show_tax": false}
+    );
+    defer freeInvoiceData(allocator, &inv);
+    try std.testing.expect(!inv.show_tax);
+
+    // show_vat alias re-enables tax on a receipt
+    const rct = try parseInvoiceJson(allocator,
+        \\{"document_type": "receipt", "show_vat": true}
+    );
+    defer freeInvoiceData(allocator, &rct);
+    try std.testing.expect(rct.show_tax);
 }
 
 test "parse invoice with colors" {

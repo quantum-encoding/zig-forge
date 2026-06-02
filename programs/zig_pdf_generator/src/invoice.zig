@@ -81,6 +81,12 @@ pub const InvoiceData = struct {
     tax_amount: f64 = 0,
     total: f64 = 0,
 
+    // VAT/tax toggle. When false, the Subtotal and Tax rows are suppressed and
+    // only the TOTAL is shown — used for receipts from businesses that are not
+    // (yet) VAT-registered, where breaking out a "Tax (0%)" line is misleading.
+    // Defaults true so every existing invoice consumer is unchanged.
+    show_tax: bool = true,
+
     // Optional
     qr_base64: ?[]const u8 = null, // QR code image (base64 PNG)
     qr_mode: QrCodeMode = .none, // QR code purpose/label
@@ -344,8 +350,10 @@ pub const InvoiceRenderer = struct {
             try content.drawImage(lid, self.data.logo_x, self.data.logo_y, self.data.logo_width, self.data.logo_height);
         }
 
-        // Document title (INVOICE / QUOTE)
-        const doc_title = if (std.mem.eql(u8, self.data.document_type, "quote")) "QUOTE" else "INVOICE";
+        // Document title (INVOICE / QUOTE / RECEIPT)
+        const is_quote = std.mem.eql(u8, self.data.document_type, "quote");
+        const is_receipt = std.mem.eql(u8, self.data.document_type, "receipt");
+        const doc_title = if (is_quote) "QUOTE" else if (is_receipt) "RECEIPT" else "INVOICE";
         try content.drawText(doc_title, self.page_width - self.margin_right - 120, self.page_height - self.margin_top, self.font_bold, 28, title_color);
 
         self.current_y = self.page_height - self.margin_top - 50;
@@ -378,8 +386,9 @@ pub const InvoiceRenderer = struct {
         const details_x = self.page_width - self.margin_right - 180;
         var details_y = self.page_height - self.margin_top - 50;
 
-        // Invoice number
-        try content.drawText("Invoice #:", details_x, details_y, self.font_bold, 10, document.Color.black);
+        // Document number (label tracks the document type)
+        const num_label = if (is_quote) "Quote #:" else if (is_receipt) "Receipt #:" else "Invoice #:";
+        try content.drawText(num_label, details_x, details_y, self.font_bold, 10, document.Color.black);
         try content.drawText(self.data.invoice_number, details_x + 70, details_y, self.font_regular, 10, document.Color.black);
         details_y -= 15;
 
@@ -535,22 +544,29 @@ pub const InvoiceRenderer = struct {
         // Separator line
         try content.drawLine(col_price - 20, self.current_y + 15, self.page_width - self.margin_right, self.current_y + 15, secondary, 0.5);
 
-        // Subtotal
-        try content.drawText("Subtotal:", col_price, self.current_y, self.font_regular, 10, document.Color.black);
-        var subtotal_buf: [24]u8 = undefined;
-        const subtotal_str = std.fmt.bufPrint(&subtotal_buf, "{d:.2}", .{self.data.subtotal}) catch "0.00";
-        try content.drawText(subtotal_str, col_total, self.current_y, self.font_regular, 10, document.Color.black);
-        self.current_y -= 16;
+        // Subtotal + Tax — only when VAT/tax is being shown. For a non-tax
+        // receipt these rows are suppressed entirely (subtotal == total, and a
+        // "Tax (0%)" line would be misleading); only the TOTAL bar is rendered.
+        if (self.data.show_tax) {
+            // Subtotal
+            try content.drawText("Subtotal:", col_price, self.current_y, self.font_regular, 10, document.Color.black);
+            var subtotal_buf: [24]u8 = undefined;
+            const subtotal_str = std.fmt.bufPrint(&subtotal_buf, "{d:.2}", .{self.data.subtotal}) catch "0.00";
+            try content.drawText(subtotal_str, col_total, self.current_y, self.font_regular, 10, document.Color.black);
+            self.current_y -= 16;
 
-        // Tax
-        var tax_label_buf: [32]u8 = undefined;
-        const tax_pct = self.data.tax_rate * 100;
-        const tax_label = std.fmt.bufPrint(&tax_label_buf, "Tax ({d:.0}%):", .{tax_pct}) catch "Tax:";
-        try content.drawText(tax_label, col_price, self.current_y, self.font_regular, 10, document.Color.black);
-        var tax_buf: [24]u8 = undefined;
-        const tax_str = std.fmt.bufPrint(&tax_buf, "{d:.2}", .{self.data.tax_amount}) catch "0.00";
-        try content.drawText(tax_str, col_total, self.current_y, self.font_regular, 10, document.Color.black);
-        self.current_y -= 28; // Extra spacing before TOTAL row
+            // Tax
+            var tax_label_buf: [32]u8 = undefined;
+            const tax_pct = self.data.tax_rate * 100;
+            const tax_label = std.fmt.bufPrint(&tax_label_buf, "Tax ({d:.0}%):", .{tax_pct}) catch "Tax:";
+            try content.drawText(tax_label, col_price, self.current_y, self.font_regular, 10, document.Color.black);
+            var tax_buf: [24]u8 = undefined;
+            const tax_str = std.fmt.bufPrint(&tax_buf, "{d:.2}", .{self.data.tax_amount}) catch "0.00";
+            try content.drawText(tax_str, col_total, self.current_y, self.font_regular, 10, document.Color.black);
+            self.current_y -= 28; // Extra spacing before TOTAL row
+        } else {
+            self.current_y -= 12; // Modest gap between separator and TOTAL bar
+        }
 
         // Total (highlighted) - width calculated to align with table right edge
         const total_bar_x = col_price - 10;
@@ -1057,6 +1073,67 @@ test "generate simple invoice" {
 
     try std.testing.expect(pdf_bytes.len > 500);
     try std.testing.expect(std.mem.startsWith(u8, pdf_bytes, "%PDF-1.4"));
+}
+
+test "receipt with tax disabled omits tax rows" {
+    const allocator = std.testing.allocator;
+
+    const items = [_]LineItem{
+        .{ .description = "Hot tub hire", .quantity = 1, .unit_price = 250, .total = 250 },
+    };
+
+    const data = InvoiceData{
+        .document_type = "receipt",
+        .company_name = "Lutuno Ltd",
+        .client_name = "A. Customer",
+        .invoice_number = "RCT-2026-001",
+        .invoice_date = "2026-06-02",
+        .items = &items,
+        .subtotal = 250,
+        .total = 250,
+        .show_tax = false, // non-VAT-registered business
+    };
+
+    const pdf_bytes = try generateInvoice(allocator, data);
+    defer allocator.free(pdf_bytes);
+
+    try std.testing.expect(std.mem.startsWith(u8, pdf_bytes, "%PDF-1.4"));
+    // Title reflects the document type
+    try std.testing.expect(std.mem.indexOf(u8, pdf_bytes, "RECEIPT") != null);
+    // No Subtotal / Tax breakdown is drawn when show_tax is false
+    try std.testing.expect(std.mem.indexOf(u8, pdf_bytes, "Subtotal") == null);
+    try std.testing.expect(std.mem.indexOf(u8, pdf_bytes, "Tax (") == null);
+    // The TOTAL bar is still present
+    try std.testing.expect(std.mem.indexOf(u8, pdf_bytes, "TOTAL") != null);
+}
+
+test "invoice with tax enabled still renders tax rows" {
+    const allocator = std.testing.allocator;
+
+    const items = [_]LineItem{
+        .{ .description = "Consulting", .quantity = 1, .unit_price = 1000, .total = 1000 },
+    };
+
+    const data = InvoiceData{
+        .document_type = "invoice",
+        .company_name = "VAT Co",
+        .invoice_number = "INV-1",
+        .invoice_date = "2026-06-02",
+        .items = &items,
+        .subtotal = 1000,
+        .tax_rate = 0.20,
+        .tax_amount = 200,
+        .total = 1200,
+        // show_tax defaults to true
+    };
+
+    const pdf_bytes = try generateInvoice(allocator, data);
+    defer allocator.free(pdf_bytes);
+
+    // Note: PDF escapes literal parens in text strings ("(" -> "\("), so the
+    // rate label appears as "Tax \(20%\)" in the byte stream — match the prefix.
+    try std.testing.expect(std.mem.indexOf(u8, pdf_bytes, "Subtotal") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pdf_bytes, "Tax ") != null);
 }
 
 test "generate crypto payment invoice with identicons" {
