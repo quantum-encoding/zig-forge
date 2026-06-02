@@ -2,15 +2,21 @@
 
 **Universal document converter, generator, and chunker** written in pure Zig. Converts in both directions between DOCX, Markdown, PDF, XLSX, and Anthropic Claude JSON exports, generates DOCX files from Markdown or structured JSON (Fire Risk Assessments), and ships a section-aware chunker that produces hash-linked markdown ready for RAG pipelines.
 
-Three artifacts from one source tree:
+Four artifacts from one source tree:
 
 | Artifact | Size | Use |
 |---|---|---|
 | `zig-out/bin/zig-docx` | 3.6 MB | CLI binary, single static executable |
 | `zig-out/lib/libzig_docx.a` | 5.8 MB | C-callable static library (Swift, Rust, Go, Python via cffi) |
-| `zig-out/bin/zig_docx.wasm` | 3.1 MB | WASI reactor module for Node, browsers, edge runtimes |
+| `zig-out/bin/zig_docx.wasm` | 3.1 MB | WASI reactor module for Node, edge runtimes (`zig build wasm`) |
+| `zig-out/bin/zig_docx_web.wasm` | ~160 KB | Freestanding browser module — Fire Risk Assessment only, zero host imports, instantiate with `{}` (no WASI shim). `zig build wasm-web`. See `integrations/nextjs/`. |
 
 No runtime dependencies for DOCX, MDX, XLSX, JSON, and chunking flows. PDF extraction shells out to `pdftotext` or `mutool`.
+
+> The freestanding `zig_docx_web.wasm` is the build the website embeds: call
+> `zigdocx_generate_fra(jsonPtr, jsonLen, outLenPtr)` (JSON → FRA `.docx` bytes).
+> Section photo evidence is passed as base64 data URLs
+> (`"data:image/png;base64,…"`) since the module has no filesystem.
 
 ---
 
