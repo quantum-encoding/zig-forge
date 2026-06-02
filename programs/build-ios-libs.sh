@@ -1,8 +1,25 @@
 #!/bin/bash
-# Build all Zig libraries for iOS (aarch64-apple-ios)
-# Usage: ./build-ios-libs.sh
+# Build Zig libraries for iOS (device + simulator, arm64).
+#
+# Usage:
+#   ./build-ios-libs.sh                  # build every library below
+#   ./build-ios-libs.sh zig_docx zigpdf  # build only the named libraries
+#
+# The optional name filter lets an Xcode "Run Script" build phase provision
+# just the libs an app needs (fast) instead of the whole set.
 
 set -e
+
+# Optional allow-list of library names passed on the command line.
+WANTED=("$@")
+should_build() {
+    [ ${#WANTED[@]} -eq 0 ] && return 0
+    local candidate="$1" w
+    for w in "${WANTED[@]}"; do
+        [ "$w" = "$candidate" ] && return 0
+    done
+    return 1
+}
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ZIG="${ZIG:-zig}"
@@ -68,6 +85,7 @@ build_lib() {
         -static \
         -lc \
         -fstrip \
+        -fcompiler-rt \
         --sysroot "$IOS_SDK" \
         -I"$IOS_SDK/usr/include" \
         "$full_dir/$source" \
@@ -88,6 +106,7 @@ build_lib() {
         -static \
         -lc \
         -fstrip \
+        -fcompiler-rt \
         --sysroot "$IOS_SIM_SDK" \
         -I"$IOS_SIM_SDK/usr/include" \
         "$full_dir/$source" \
@@ -102,38 +121,32 @@ build_lib() {
     return 0
 }
 
-# Build each library
-# Format: build_lib "lib_name" "directory" "source_file"
+# Build each library.
+# Format: "lib_name|directory|source_file"
+LIBS=(
+    "quantum_crypto|simd_crypto_ffi|src/ffi-grok.zig"
+    "http_sentinel|http_sentinel_ffi|src/ffi.zig"
+    "electrum_ffi|electrum_ffi|src/ffi.zig"
+    "market_data_core|market_data_parser|src/market_data_core.zig"
+    "lockfree_core|lockfree_queue|src/lockfree_core.zig"
+    "async_core|async_scheduler|src/async_core.zig"
+    "memory_pool_core|memory_pool|src/memory_pool_core.zig"
+    "financial_core|financial_engine|src/financial_core.zig"
+    "zsss|zig_core_utils/zsss|src/lib.zig"
+    "zigpdf|zig_pdf_generator|src/ffi.zig"
+    "zig_docx|zig_docx|src/ffi.zig"
+)
 
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-build_lib "quantum_crypto" "simd_crypto_ffi" "src/ffi-grok.zig" && ((SUCCESS++)) || ((FAILED++))
-
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-build_lib "http_sentinel" "http_sentinel_ffi" "src/ffi.zig" && ((SUCCESS++)) || ((FAILED++))
-
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-build_lib "electrum_ffi" "electrum_ffi" "src/ffi.zig" && ((SUCCESS++)) || ((FAILED++))
-
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-build_lib "market_data_core" "market_data_parser" "src/market_data_core.zig" && ((SUCCESS++)) || ((FAILED++))
-
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-build_lib "lockfree_core" "lockfree_queue" "src/lockfree_core.zig" && ((SUCCESS++)) || ((FAILED++))
-
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-build_lib "async_core" "async_scheduler" "src/async_core.zig" && ((SUCCESS++)) || ((FAILED++))
-
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-build_lib "memory_pool_core" "memory_pool" "src/memory_pool_core.zig" && ((SUCCESS++)) || ((FAILED++))
-
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-build_lib "financial_core" "financial_engine" "src/financial_core.zig" && ((SUCCESS++)) || ((FAILED++))
-
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-build_lib "zsss" "zig_core_utils/zsss" "src/lib.zig" && ((SUCCESS++)) || ((FAILED++))
-
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-build_lib "zigpdf" "zig_pdf_generator" "src/ffi.zig" && ((SUCCESS++)) || ((FAILED++))
+SKIPPED=0
+for entry in "${LIBS[@]}"; do
+    IFS='|' read -r name dir source <<< "$entry"
+    if ! should_build "$name"; then
+        ((SKIPPED++))
+        continue
+    fi
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    if build_lib "$name" "$dir" "$source"; then ((SUCCESS++)); else ((FAILED++)); fi
+done
 
 echo ""
 echo -e "${CYAN}=== Build Summary ===${NC}"
