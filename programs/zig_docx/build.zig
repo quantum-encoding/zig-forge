@@ -135,4 +135,39 @@ pub fn build(b: *std.Build) void {
 
     const wasm_step = b.step("wasm", "Build WASM library (wasm32-wasi)");
     wasm_step.dependOn(&b.addInstallArtifact(wasm_lib, .{}).step);
+
+    // ============================================================
+    // Freestanding WASM module for the browser / edge (zig_docx_web.wasm)
+    //
+    // Build with: zig build wasm-web
+    //
+    // Targets wasm32-freestanding with NO libc and NO WASI. The module
+    // imports nothing from the host, so the website instantiates it with
+    // an empty import object (no WASI shim) — same pattern as
+    // zig_pdf_generator. Root is src/wasm.zig, which exposes the Fire Risk
+    // Assessment generator via a wasm_alloc + (ptr,len)->ptr ABI. Disk-
+    // backed photo evidence is skipped (no filesystem); everything else in
+    // the FRA renders identically to the native generator.
+    // ============================================================
+    const web_wasm_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .freestanding,
+    });
+    const web_wasm_module = b.createModule(.{
+        .root_source_file = b.path("src/wasm.zig"),
+        .target = web_wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+    const web_wasm = b.addExecutable(.{
+        .name = "zig_docx_web",
+        .root_module = web_wasm_module,
+    });
+    // Library-style reactor: no _start, export the marked symbols, and
+    // surface linear memory to the host so JS can read/write the buffers.
+    web_wasm.entry = .disabled;
+    web_wasm.rdynamic = true;
+    web_wasm.export_memory = true;
+
+    const web_wasm_step = b.step("wasm-web", "Build freestanding WASM module for the browser (FRA)");
+    web_wasm_step.dependOn(&b.addInstallArtifact(web_wasm, .{}).step);
 }

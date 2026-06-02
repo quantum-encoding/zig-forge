@@ -506,24 +506,39 @@ fn addChecklistSection(allocator: std.mem.Allocator, elements: *std.ArrayListUnm
         } });
     }
 
-    // Photo evidence — insert images for this section
-    for (section.images) |img_name| {
-        // Resolve image path
-        const full_path = if (image_dir.len > 0)
-            std.fmt.allocPrint(allocator, "{s}/{s}", .{ image_dir, img_name }) catch continue
-        else
-            allocator.dupe(u8, img_name) catch continue;
-        defer allocator.free(full_path);
+    // Photo evidence — insert images for this section. Each entry is one of:
+    //   • a base64 image data URL ("data:image/png;base64,…") decoded inline —
+    //     the only form the freestanding web build can use (it has no fs); or
+    //   • a filename resolved against image_dir and read from disk (native/CLI).
+    for (section.images) |img_entry| {
+        var ext: []const u8 = "jpg";
+        var img_data: []u8 = undefined;
+        var is_data_url = false;
 
-        // Read the image file
-        const img_data = readImageFile(allocator, full_path) orelse continue;
+        if (decodeImageDataUrl(allocator, img_entry)) |decoded| {
+            img_data = decoded.data;
+            ext = decoded.ext;
+            is_data_url = true;
+        } else {
+            // Filename path: resolve against image_dir and read from disk.
+            const full_path = if (image_dir.len > 0)
+                std.fmt.allocPrint(allocator, "{s}/{s}", .{ image_dir, img_entry }) catch continue
+            else
+                allocator.dupe(u8, img_entry) catch continue;
+            defer allocator.free(full_path);
+
+            img_data = readImageFile(allocator, full_path) orelse continue;
+            ext = if (std.mem.lastIndexOfScalar(u8, img_entry, '.')) |dot|
+                img_entry[dot + 1 ..]
+            else
+                "jpg";
+        }
 
         img_index.* += 1;
-        const ext = if (std.mem.lastIndexOfScalar(u8, img_name, '.')) |dot|
-            img_name[dot + 1 ..]
-        else
-            "jpg";
-        const media_name = std.fmt.allocPrint(allocator, "image{d}.{s}", .{ img_index.*, ext }) catch continue;
+        const media_name = std.fmt.allocPrint(allocator, "image{d}.{s}", .{ img_index.*, ext }) catch {
+            allocator.free(img_data);
+            continue;
+        };
 
         media_list.append(allocator, .{
             .name = media_name,
@@ -534,8 +549,12 @@ fn addChecklistSection(allocator: std.mem.Allocator, elements: *std.ArrayListUnm
             continue;
         };
 
-        // Create an image paragraph with the media reference
-        const caption_text = std.fmt.allocPrint(allocator, "Photo: {s}", .{img_name}) catch continue;
+        // Create an image paragraph with the media reference. A data URL has no
+        // meaningful name, so caption it generically.
+        const caption_text = if (is_data_url)
+            (std.fmt.allocPrint(allocator, "Photo evidence {d}", .{img_index.*}) catch continue)
+        else
+            (std.fmt.allocPrint(allocator, "Photo: {s}", .{img_entry}) catch continue);
         const img_run = try allocator.alloc(docx.Run, 1);
         img_run[0] = .{
             .text = caption_text,
@@ -896,33 +915,88 @@ fn addKeyValueTable(allocator: std.mem.Allocator, elements: *std.ArrayListUnmana
 }
 
 // ─── Image File Reader ─────────────────────────────────────────────
+//
+// Photo-evidence images are loaded from disk via libc fopen/fread. The
+// freestanding wasm32 module (src/wasm.zig, embedded by the website) has
+// no libc and no filesystem, so the extern decls and the reader are gated
+// out for that target — section `images` filenames are simply skipped and
+// the rest of the FRA renders normally. Native + WASI builds are unchanged.
+const can_read_image_files = @import("builtin").target.os.tag != .freestanding;
 
-extern "c" fn fopen(path: [*:0]const u8, mode: [*:0]const u8) ?*std.c.FILE;
-extern "c" fn fclose(stream: *std.c.FILE) c_int;
-extern "c" fn fread(ptr: [*]u8, size: usize, nmemb: usize, stream: *std.c.FILE) usize;
-extern "c" fn fseek(stream: *std.c.FILE, offset: c_long, whence: c_int) c_int;
-extern "c" fn ftell(stream: *std.c.FILE) c_long;
+const image_reader = if (can_read_image_files) struct {
+    extern "c" fn fopen(path: [*:0]const u8, mode: [*:0]const u8) ?*std.c.FILE;
+    extern "c" fn fclose(stream: *std.c.FILE) c_int;
+    extern "c" fn fread(ptr: [*]u8, size: usize, nmemb: usize, stream: *std.c.FILE) usize;
+    extern "c" fn fseek(stream: *std.c.FILE, offset: c_long, whence: c_int) c_int;
+    extern "c" fn ftell(stream: *std.c.FILE) c_long;
+
+    fn read(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {
+        const path_z = allocator.allocSentinel(u8, path.len, 0) catch return null;
+        defer allocator.free(path_z);
+        @memcpy(path_z, path);
+
+        const fp = fopen(path_z.ptr, "rb") orelse return null;
+        defer _ = fclose(fp);
+
+        _ = fseek(fp, 0, 2); // SEEK_END
+        const size = ftell(fp);
+        if (size <= 0) return null;
+        _ = fseek(fp, 0, 0); // SEEK_SET
+
+        const buf = allocator.alloc(u8, @intCast(size)) catch return null;
+        const n = fread(buf.ptr, 1, @intCast(size), fp);
+        if (n != @as(usize, @intCast(size))) {
+            allocator.free(buf);
+            return null;
+        }
+        return buf;
+    }
+} else struct {
+    fn read(_: std.mem.Allocator, _: []const u8) ?[]u8 {
+        return null; // no filesystem on freestanding wasm
+    }
+};
 
 fn readImageFile(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {
-    const path_z = allocator.allocSentinel(u8, path.len, 0) catch return null;
-    defer allocator.free(path_z);
-    @memcpy(path_z, path);
+    return image_reader.read(allocator, path);
+}
 
-    const fp = fopen(path_z.ptr, "rb") orelse return null;
-    defer _ = fclose(fp);
+/// Decode a base64 image data URL of the form
+/// "data:image/<subtype>;base64,<payload>". Returns the decoded bytes
+/// (allocator-owned) plus a canonical file extension, or null if `s` is not a
+/// supported base64 image data URL. Pure compute — no libc, no filesystem — so
+/// this is the image path the freestanding web wasm uses.
+fn decodeImageDataUrl(allocator: std.mem.Allocator, s: []const u8) ?struct { data: []u8, ext: []const u8 } {
+    const prefix = "data:image/";
+    if (!std.mem.startsWith(u8, s, prefix)) return null;
 
-    _ = fseek(fp, 0, 2); // SEEK_END
-    const size = ftell(fp);
-    if (size <= 0) return null;
-    _ = fseek(fp, 0, 0); // SEEK_SET
+    const comma = std.mem.indexOfScalar(u8, s, ',') orelse return null;
+    const header = s[0..comma]; // "data:image/png;base64"
+    if (std.mem.indexOf(u8, header, ";base64") == null) return null; // base64 only
 
-    const buf = allocator.alloc(u8, @intCast(size)) catch return null;
-    const n = fread(buf.ptr, 1, @intCast(size), fp);
-    if (n != @as(usize, @intCast(size))) {
+    const subtype_region = header[prefix.len..]; // "png;base64"
+    const semi = std.mem.indexOfScalar(u8, subtype_region, ';') orelse return null;
+    const subtype = subtype_region[0..semi];
+
+    // Restrict to formats the DOCX writer can size and assign a content type to.
+    const ext: []const u8 = if (std.mem.eql(u8, subtype, "png"))
+        "png"
+    else if (std.mem.eql(u8, subtype, "jpeg") or std.mem.eql(u8, subtype, "jpg"))
+        "jpg"
+    else if (std.mem.eql(u8, subtype, "gif"))
+        "gif"
+    else
+        return null;
+
+    const payload = std.mem.trim(u8, s[comma + 1 ..], " \r\n\t");
+    const decoder = std.base64.standard.Decoder;
+    const decoded_len = decoder.calcSizeForSlice(payload) catch return null;
+    const buf = allocator.alloc(u8, decoded_len) catch return null;
+    decoder.decode(buf, payload) catch {
         allocator.free(buf);
         return null;
-    }
-    return buf;
+    };
+    return .{ .data = buf, .ext = ext };
 }
 
 // ─── Memory Cleanup ────────────────────────────────────────────────
@@ -1089,4 +1163,54 @@ fn getStr(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
         if (val == .string) return val.string;
     }
     return null;
+}
+
+// ─── Tests ─────────────────────────────────────────────────────────
+
+test "decodeImageDataUrl decodes supported types and rejects the rest" {
+    const allocator = std.testing.allocator;
+
+    // PNG data URL → decoded bytes + canonical "png" extension.
+    const png = decodeImageDataUrl(allocator, "data:image/png;base64,SGVsbG8=") orelse
+        return error.TestUnexpectedNull;
+    defer allocator.free(png.data);
+    try std.testing.expectEqualStrings("png", png.ext);
+    try std.testing.expectEqualStrings("Hello", png.data);
+
+    // jpeg subtype normalises to "jpg".
+    const jpg = decodeImageDataUrl(allocator, "data:image/jpeg;base64,SGk=") orelse
+        return error.TestUnexpectedNull;
+    defer allocator.free(jpg.data);
+    try std.testing.expectEqualStrings("jpg", jpg.ext);
+
+    // A plain filename is not a data URL.
+    try std.testing.expect(decodeImageDataUrl(allocator, "7a-008.jpg") == null);
+    // Unsupported subtype is rejected (writer can't size/register it).
+    try std.testing.expect(decodeImageDataUrl(allocator, "data:image/webp;base64,SGk=") == null);
+    // Non-base64 data URLs are rejected (we only embed base64 payloads).
+    try std.testing.expect(decodeImageDataUrl(allocator, "data:image/png,rawtext") == null);
+}
+
+test "generateFra embeds a base64 section image" {
+    const allocator = std.testing.allocator;
+
+    const items = [_]ChecklistItem{.{ .question = "EICR current?", .answer = "Yes" }};
+    // 8x8 PNG as a data URL.
+    const png_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAAFElEQVR42mNk+M9Qz0BkYBxVSF+FAP+FAQWZ7nUgAAAAAElFTkSuQmCC";
+    const images = [_][]const u8{png_url};
+    const sections = [_]ChecklistSection{.{
+        .category = "Sources of Ignition",
+        .title = "Electrical Safety",
+        .items = &items,
+        .images = &images,
+    }};
+
+    const data = FraData{ .client_name = "Image Test Ltd", .sections = &sections };
+    const docx_bytes = try generateFra(allocator, &data);
+    defer allocator.free(docx_bytes);
+
+    // Valid zip (PK) and the media part name appears in the central directory.
+    try std.testing.expect(docx_bytes.len > 1000);
+    try std.testing.expect(docx_bytes[0] == 'P' and docx_bytes[1] == 'K');
+    try std.testing.expect(std.mem.indexOf(u8, docx_bytes, "media/image1.png") != null);
 }
