@@ -75,6 +75,15 @@ public enum ZigPdf {
         }
     }
 
+    /// Render Markdown text as a PDF document.
+    public static func markdown(md: String) throws -> Data {
+        try withPointer { lenPtr in
+            md.withCString { ptr in
+                zigpdf_generate_markdown(ptr, lenPtr)
+            }
+        }
+    }
+
     /// Generate a QR code as raw RGB pixels.
     public static func qrCode(_ data: String, moduleSize: Int32 = 4) throws -> QrImage {
         var len: size_t = 0

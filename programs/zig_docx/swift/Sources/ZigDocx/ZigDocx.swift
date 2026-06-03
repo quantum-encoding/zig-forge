@@ -90,7 +90,8 @@ public enum ZigDocx {
 
             if let opts = options {
                 return withCOptions(opts) { cOpts in
-                    zig_docx_md_to_docx(mdPtr, mdBuf.count, &cOpts)
+                    var mutableOpts = cOpts
+                    return zig_docx_md_to_docx(mdPtr, mdBuf.count, &mutableOpts)
                 }
             } else {
                 return zig_docx_md_to_docx(mdPtr, mdBuf.count, nil)
@@ -128,7 +129,6 @@ public enum ZigDocx {
         let title = cInfo.title.map { String(cString: $0) }
         let author = cInfo.author.map { String(cString: $0) }
 
-        // Free C strings after copying
         var mutableInfo = cInfo
         zig_docx_free_info(&mutableInfo)
 
@@ -145,10 +145,6 @@ public enum ZigDocx {
     // MARK: - Fire Risk Assessment
 
     /// Generate a Fire Risk Assessment DOCX from JSON.
-    ///
-    /// The JSON defines assessor details, client/premises info, checklist
-    /// sections with Yes/No answers, risk ratings, and action plan items.
-    /// All PAS 79 boilerplate text is built-in.
     public static func fireRiskAssessment(json: String) throws -> Data {
         let jsonData = Array(json.utf8)
         let result: ZigDocxResult = jsonData.withUnsafeBufferPointer { buf in

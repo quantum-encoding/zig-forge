@@ -121,6 +121,17 @@ uint8_t* zigpdf_generate_invoice(const char* json_input, size_t* output_len);
 uint8_t* zigpdf_generate_simple(const char* title, const char* body, size_t* output_len);
 
 /**
+ * @brief Render Markdown text as a PDF document
+ *
+ * @param md_input Null-terminated Markdown string
+ * @param output_len Pointer to receive output length
+ * @return Pointer to PDF bytes on success, NULL on error
+ *
+ * @note Caller must free the returned buffer with zigpdf_free()
+ */
+uint8_t* zigpdf_generate_markdown(const char* md_input, size_t* output_len);
+
+/**
  * @brief Free memory allocated by zigpdf functions
  *
  * Must be called for every non-NULL return from zigpdf_generate_* functions.
