@@ -151,11 +151,34 @@ pub const Pane = struct {
         self.pty = pty;
     }
 
-    /// Process input data from the PTY
+    /// Process input data from the PTY.
+    ///
+    /// Fast path: while the parser is in ground state, sweep the input in
+    /// 16-byte SIMD chunks. A chunk that is entirely printable ASCII
+    /// (0x20..0x7E — no control bytes, no DEL, no UTF-8 lead/continuation)
+    /// bypasses the state machine entirely and is bulk-written to the grid.
+    /// Any control/non-ASCII byte (or a non-ground parser state) drops to the
+    /// scalar state machine for that byte, then the sweep resumes.
     pub fn processOutput(self: *Self, data: []const u8) void {
-        for (data) |byte| {
-            const action = self.parser.feed(byte);
+        const V = @Vector(16, u8);
+        const lo: V = @splat(0x20); // first printable
+        const hi: V = @splat(0x7F); // DEL — exclusive upper bound
+
+        var i: usize = 0;
+        while (i < data.len) {
+            if (self.parser.state == .ground and i + 16 <= data.len) {
+                const chunk: V = data[i..][0..16].*;
+                // All bytes in [0x20, 0x7F) ⇒ printable, width-1 ASCII.
+                if (@reduce(.And, chunk >= lo) and @reduce(.And, chunk < hi)) {
+                    self.terminal.putPrintableRun(data[i .. i + 16]);
+                    i += 16;
+                    continue;
+                }
+            }
+
+            const action = self.parser.feed(data[i]);
             parser_mod.applyAction(&self.terminal, action);
+            i += 1;
         }
     }
 

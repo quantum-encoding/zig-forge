@@ -343,12 +343,14 @@ pub export fn tmux_read_cells(handle: ?*TmuxSession, out: ?[*]CCell, max_cells: 
     const h = handle orelse return 0;
     const buf = out orelse return 0;
     const grid = &activePane(h).terminal.grid;
-    const total = @as(usize, grid.rows) * @as(usize, grid.cols);
+    const cols: usize = grid.cols;
+    const total = @as(usize, grid.rows) * cols;
     const n = @min(total, max_cells);
 
     var i: usize = 0;
     while (i < n) : (i += 1) {
-        const cell = grid.cells[i];
+        // Map flat index → logical (row,col) so the ring offset is honored.
+        const cell = grid.getCellConst(@intCast(i / cols), @intCast(i % cols)).*;
         var cc: CCell = undefined;
         cc.ch = cell.char;
         fillColor(cell.fg, &cc.fg_kind, &cc.fg_idx, &cc.fg_r, &cc.fg_g, &cc.fg_b);

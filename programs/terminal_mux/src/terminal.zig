@@ -201,12 +201,21 @@ pub fn RingBuffer(comptime T: type) type {
     };
 }
 
-/// Terminal grid
+/// Terminal grid.
+///
+/// Rows are stored in a circular buffer: logical row `r` lives at physical row
+/// `(row_offset + r) mod rows`. Full-screen scrolling is then an O(1) offset
+/// bump (rotate) instead of an O(rows*cols) memcpy. `cells` is still a single
+/// flat allocation of `rows*cols`; each *physical* row is contiguous, so writes
+/// within one logical row remain a contiguous span (the SIMD bulk path relies
+/// on this).
 pub const Grid = struct {
     allocator: std.mem.Allocator,
     cells: []Cell,
     rows: u16,
     cols: u16,
+    /// Physical index of logical row 0. Advanced on scroll; never memcpy.
+    row_offset: usize = 0,
 
     const Self = @This();
 
@@ -220,6 +229,7 @@ pub const Grid = struct {
             .cells = cells,
             .rows = rows,
             .cols = cols,
+            .row_offset = 0,
         };
     }
 
@@ -227,13 +237,27 @@ pub const Grid = struct {
         self.allocator.free(self.cells);
     }
 
+    /// Map a logical row to its physical row. Single conditional subtract (both
+    /// operands are < rows), so no division in the hot path.
+    pub inline fn physRow(self: *const Self, row: u16) usize {
+        var p = self.row_offset + @as(usize, row);
+        if (p >= self.rows) p -= self.rows;
+        return p;
+    }
+
+    /// Contiguous slice of one logical row (length == cols).
+    pub inline fn rowSlice(self: *Self, row: u16) []Cell {
+        const start = self.physRow(row) * @as(usize, self.cols);
+        return self.cells[start .. start + self.cols];
+    }
+
     pub fn getCell(self: *Self, row: u16, col: u16) *Cell {
-        const idx = @as(usize, row) * @as(usize, self.cols) + @as(usize, col);
+        const idx = self.physRow(row) * @as(usize, self.cols) + @as(usize, col);
         return &self.cells[idx];
     }
 
     pub fn getCellConst(self: *const Self, row: u16, col: u16) *const Cell {
-        const idx = @as(usize, row) * @as(usize, self.cols) + @as(usize, col);
+        const idx = self.physRow(row) * @as(usize, self.cols) + @as(usize, col);
         return &self.cells[idx];
     }
 
@@ -249,51 +273,61 @@ pub const Grid = struct {
 
     pub fn scrollUp(self: *Self, top: u16, bottom: u16, count: u16, template: Cell) void {
         if (count == 0 or top >= bottom) return;
+        const region = bottom - top + 1;
+        const n = @min(count, region);
 
-        const lines_to_move = bottom - top + 1 - count;
+        // Full-screen scroll: O(1) ring rotation. Logical row 0 advances; the
+        // rows that scrolled off the top become the (now-cleared) bottom rows.
+        if (top == 0 and bottom == self.rows - 1) {
+            self.row_offset += n;
+            while (self.row_offset >= self.rows) self.row_offset -= self.rows;
+            self.clearRegion(self.rows - n, 0, self.rows - 1, self.cols - 1, template);
+            return;
+        }
+
+        // Sub-region scroll: shift logical rows up via contiguous per-row copies
+        // (rowSlice maps through the ring, so this stays correct).
+        const lines_to_move = region - n;
         if (lines_to_move > 0) {
             var dst_row = top;
-            var src_row = top + count;
+            var src_row = top + n;
             while (src_row <= bottom) : ({
                 dst_row += 1;
                 src_row += 1;
             }) {
-                const dst_start = @as(usize, dst_row) * @as(usize, self.cols);
-                const src_start = @as(usize, src_row) * @as(usize, self.cols);
-                @memcpy(
-                    self.cells[dst_start .. dst_start + self.cols],
-                    self.cells[src_start .. src_start + self.cols],
-                );
+                @memcpy(self.rowSlice(dst_row), self.rowSlice(src_row));
             }
         }
-
-        // Clear the bottom lines
-        const clear_start = if (lines_to_move > 0) bottom - count + 1 else top;
+        const clear_start = if (lines_to_move > 0) bottom - n + 1 else top;
         self.clearRegion(clear_start, 0, bottom, self.cols - 1, template);
     }
 
     pub fn scrollDown(self: *Self, top: u16, bottom: u16, count: u16, template: Cell) void {
         if (count == 0 or top >= bottom) return;
+        const region = bottom - top + 1;
+        const n = @min(count, region);
 
-        const lines_to_move = bottom - top + 1 - count;
+        // Full-screen scroll: rotate the ring backwards; the top rows become the
+        // (now-cleared) new content.
+        if (top == 0 and bottom == self.rows - 1) {
+            self.row_offset += self.rows - (@as(usize, n) % self.rows);
+            while (self.row_offset >= self.rows) self.row_offset -= self.rows;
+            self.clearRegion(0, 0, n - 1, self.cols - 1, template);
+            return;
+        }
+
+        const lines_to_move = region - n;
         if (lines_to_move > 0) {
             var dst_row = bottom;
-            var src_row = bottom - count;
-            while (dst_row >= top + count and src_row >= top) {
-                const dst_start = @as(usize, dst_row) * @as(usize, self.cols);
-                const src_start = @as(usize, src_row) * @as(usize, self.cols);
-                @memcpy(
-                    self.cells[dst_start .. dst_start + self.cols],
-                    self.cells[src_start .. src_start + self.cols],
-                );
-                if (dst_row == 0 or src_row == 0) break;
+            var src_row = bottom - n;
+            while (true) {
+                @memcpy(self.rowSlice(dst_row), self.rowSlice(src_row));
+                if (src_row == top) break;
                 dst_row -= 1;
                 src_row -= 1;
             }
         }
-
-        // Clear the top lines
-        const clear_end = if (lines_to_move > 0) top + count - 1 else bottom;
+        const clear_end = if (lines_to_move > 0) top + n - 1 else bottom;
         self.clearRegion(top, 0, clear_end, self.cols - 1, template);
     }
 
@@ -302,13 +336,14 @@ pub const Grid = struct {
         const new_cells = try self.allocator.alloc(Cell, new_size);
         @memset(new_cells, Cell.default);
 
-        // Copy existing content
+        // Copy existing content in LOGICAL order, normalizing the ring back to
+        // offset 0 (the new buffer is laid out logically).
         const copy_rows = @min(self.rows, new_rows);
         const copy_cols = @min(self.cols, new_cols);
 
         var r: u16 = 0;
         while (r < copy_rows) : (r += 1) {
-            const old_start = @as(usize, r) * @as(usize, self.cols);
+            const old_start = self.physRow(r) * @as(usize, self.cols);
             const new_start = @as(usize, r) * @as(usize, new_cols);
             @memcpy(
                 new_cells[new_start .. new_start + copy_cols],
@@ -320,15 +355,68 @@ pub const Grid = struct {
         self.cells = new_cells;
         self.rows = new_rows;
         self.cols = new_cols;
+        self.row_offset = 0;
     }
 };
 
-/// Scrollback line (stored when scrolling off top)
-pub const ScrollbackLine = struct {
+/// Scrollback history, stored as a single preallocated flat ring of rows
+/// (`capacity_lines * cols` cells). `push` copies a scrolled-off row into the
+/// next slot with no heap allocation — so the PTY-ingest hot path never calls
+/// the allocator. The buffer is sized once at init / resize.
+pub const Scrollback = struct {
+    allocator: std.mem.Allocator,
     cells: []Cell,
+    cols: u16,
+    capacity_lines: usize,
+    head: usize, // index of the oldest retained line
+    len: usize, // number of retained lines
 
-    pub fn deinit(self: *ScrollbackLine, allocator: std.mem.Allocator) void {
-        allocator.free(self.cells);
+    pub fn init(allocator: std.mem.Allocator, capacity_lines: usize, cols: u16) !Scrollback {
+        const cells = try allocator.alloc(Cell, capacity_lines * @as(usize, cols));
+        return .{
+            .allocator = allocator,
+            .cells = cells,
+            .cols = cols,
+            .capacity_lines = capacity_lines,
+            .head = 0,
+            .len = 0,
+        };
+    }
+
+    pub fn deinit(self: *Scrollback) void {
+        self.allocator.free(self.cells);
+    }
+
+    /// Copy a row into the ring. Allocation-free; oldest line is evicted when
+    /// full. `row` is the visible-width slice; only up to `cols` cells are kept.
+    pub fn push(self: *Scrollback, row: []const Cell) void {
+        if (self.capacity_lines == 0) return;
+        const slot = (self.head + self.len) % self.capacity_lines;
+        const start = slot * @as(usize, self.cols);
+        const n = @min(row.len, @as(usize, self.cols));
+        @memcpy(self.cells[start .. start + n], row[0..n]);
+        if (self.len < self.capacity_lines) {
+            self.len += 1;
+        } else {
+            self.head = (self.head + 1) % self.capacity_lines;
+        }
+    }
+
+    pub fn clear(self: *Scrollback) void {
+        self.head = 0;
+        self.len = 0;
+    }
+
+    /// Reallocate for a new column width (rare; resize path only). Clears
+    /// history — reflow across widths is out of scope.
+    pub fn resizeCols(self: *Scrollback, new_cols: u16) !void {
+        if (new_cols == self.cols) return;
+        const new_cells = try self.allocator.alloc(Cell, self.capacity_lines * @as(usize, new_cols));
+        self.allocator.free(self.cells);
+        self.cells = new_cells;
+        self.cols = new_cols;
+        self.head = 0;
+        self.len = 0;
     }
 };
 
@@ -362,7 +450,7 @@ pub const Terminal = struct {
     gr: CharsetSlot, // G0-G3 in GR
 
     // Scrollback
-    scrollback: RingBuffer(ScrollbackLine),
+    scrollback: Scrollback,
     scrollback_offset: usize, // View offset into scrollback
 
     // Dirty tracking for efficient rendering
@@ -381,8 +469,8 @@ pub const Terminal = struct {
         var grid = try Grid.init(allocator, rows, cols);
         errdefer grid.deinit();
 
-        var scrollback = try RingBuffer(ScrollbackLine).init(allocator, scrollback_lines);
-        errdefer scrollback.deinit(allocator);
+        var scrollback = try Scrollback.init(allocator, scrollback_lines, cols);
+        errdefer scrollback.deinit();
 
         var dirty_rows = try std.DynamicBitSet.initEmpty(allocator, rows);
         errdefer dirty_rows.deinit();
@@ -426,15 +514,7 @@ pub const Terminal = struct {
             g.deinit();
         }
 
-        // Free scrollback lines
-        var i: usize = 0;
-        while (i < self.scrollback.len) : (i += 1) {
-            if (self.scrollback.get(i)) |line| {
-                var line_mut = @constCast(line);
-                line_mut.deinit(self.allocator);
-            }
-        }
-        self.scrollback.deinit(self.allocator);
+        self.scrollback.deinit();
 
         self.dirty_rows.deinit();
         self.tab_stops.deinit();
@@ -494,6 +574,47 @@ pub const Terminal = struct {
         self.cursor.col += width;
     }
 
+    /// Bulk-write a run of printable, width-1 ASCII bytes at the cursor,
+    /// honoring autowrap and scrolling. Semantically equivalent to calling
+    /// putChar for each byte, but writes whole same-row spans at once and marks
+    /// each touched row dirty only once. The SIMD fast path in processOutput
+    /// calls this; `bytes` must contain only printable ASCII (0x20..0x7E).
+    pub fn putPrintableRun(self: *Self, bytes: []const u8) void {
+        const cols: usize = self.grid.cols;
+        var idx: usize = 0;
+        while (idx < bytes.len) {
+            // Resolve a pending wrap exactly as putChar does.
+            if (self.cursor.col >= self.grid.cols) {
+                if (self.modes.autowrap) {
+                    self.newline();
+                    self.cursor.col = 0;
+                } else {
+                    // Overwrite mode: every further byte lands on the last cell.
+                    self.cursor.col = self.grid.cols - 1;
+                }
+            }
+
+            const room: usize = cols - self.cursor.col; // always >= 1
+            const n: usize = @min(bytes.len - idx, room);
+
+            const base = self.grid.physRow(self.cursor.row) * cols + self.cursor.col;
+            var k: usize = 0;
+            while (k < n) : (k += 1) {
+                self.grid.cells[base + k] = .{
+                    .char = bytes[idx + k],
+                    .fg = self.current_fg,
+                    .bg = self.current_bg,
+                    .attrs = self.current_attrs,
+                    .width = 1,
+                };
+            }
+            self.markDirty(self.cursor.row);
+
+            self.cursor.col += @intCast(n);
+            idx += n;
+        }
+    }
+
     /// Handle newline
     pub fn newline(self: *Self) void {
         if (self.cursor.row == self.scroll_region.bottom) {
@@ -530,15 +651,13 @@ pub const Terminal = struct {
 
     /// Scroll up by n lines
     pub fn scrollUp(self: *Self, n: u16) void {
-        // Save lines to scrollback if in main buffer
+        // Save scrolled-off lines to scrollback (main buffer only). Allocation-
+        // free: push copies the row into the preallocated ring. Capture must
+        // happen BEFORE grid.scrollUp rotates/clears these rows.
         if (!self.modes.alt_screen) {
             var i: u16 = 0;
             while (i < n and self.scroll_region.top + i <= self.scroll_region.bottom) : (i += 1) {
-                const row = self.scroll_region.top + i;
-                const line_cells = self.allocator.alloc(Cell, self.grid.cols) catch continue;
-                const start = @as(usize, row) * @as(usize, self.grid.cols);
-                @memcpy(line_cells, self.grid.cells[start .. start + self.grid.cols]);
-                self.scrollback.push(.{ .cells = line_cells });
+                self.scrollback.push(self.grid.rowSlice(self.scroll_region.top + i));
             }
         }
 
@@ -781,6 +900,7 @@ pub const Terminal = struct {
         if (self.alt_grid) |*g| {
             try g.resize(rows, cols);
         }
+        try self.scrollback.resizeCols(cols);
 
         self.scroll_region = .{ .top = 0, .bottom = rows - 1 };
 
@@ -899,6 +1019,58 @@ test "terminal putChar" {
     try std.testing.expectEqual(@as(u21, 'H'), term.grid.getCellConst(0, 0).char);
     try std.testing.expectEqual(@as(u21, 'i'), term.grid.getCellConst(0, 1).char);
     try std.testing.expectEqual(@as(u16, 2), term.cursor.col);
+}
+
+test "full-screen scroll rotates the ring and preserves logical order" {
+    const allocator = std.testing.allocator;
+
+    var term = try Terminal.init(allocator, 4, 8, 100);
+    defer term.deinit();
+
+    // One distinct char per row at column 0: '0' '1' '2' '3'.
+    var r: u16 = 0;
+    while (r < 4) : (r += 1) {
+        term.setCursorPos(r, 0);
+        term.putChar('0' + @as(u21, r));
+    }
+
+    term.scrollUp(1); // O(1) ring rotation on the full screen
+
+    try std.testing.expectEqual(@as(u21, '1'), term.grid.getCellConst(0, 0).char);
+    try std.testing.expectEqual(@as(u21, '2'), term.grid.getCellConst(1, 0).char);
+    try std.testing.expectEqual(@as(u21, '3'), term.grid.getCellConst(2, 0).char);
+    try std.testing.expectEqual(@as(u21, ' '), term.grid.getCellConst(3, 0).char); // new blank
+    try std.testing.expect(term.grid.row_offset != 0); // rotated, not memcpy'd
+    try std.testing.expectEqual(@as(usize, 1), term.scrollback.len); // '0' captured
+
+    // scrollDown brings it back and re-blanks the top.
+    term.scrollDown(1);
+    try std.testing.expectEqual(@as(u21, ' '), term.grid.getCellConst(0, 0).char);
+    try std.testing.expectEqual(@as(u21, '1'), term.grid.getCellConst(1, 0).char);
+    try std.testing.expectEqual(@as(u21, '2'), term.grid.getCellConst(2, 0).char);
+}
+
+test "putPrintableRun matches byte-by-byte putChar (incl. autowrap)" {
+    const allocator = std.testing.allocator;
+
+    var a = try Terminal.init(allocator, 4, 10, 50);
+    defer a.deinit();
+    var b = try Terminal.init(allocator, 4, 10, 50);
+    defer b.deinit();
+
+    const text = "Hello, World! 123"; // 17 chars over 10 cols => wraps once
+
+    for (text) |ch| a.putChar(ch);
+    b.putPrintableRun(text);
+
+    var i: u16 = 0;
+    while (i < 4 * 10) : (i += 1) {
+        const rr = i / 10;
+        const cc = i % 10;
+        try std.testing.expectEqual(a.grid.getCellConst(rr, cc).char, b.grid.getCellConst(rr, cc).char);
+    }
+    try std.testing.expectEqual(a.cursor.row, b.cursor.row);
+    try std.testing.expectEqual(a.cursor.col, b.cursor.col);
 }
 
 test "ring buffer" {

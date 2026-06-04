@@ -55,19 +55,26 @@ fn buildSample(buf: []u8) usize {
     return i;
 }
 
-fn benchEmulatorFeed() !void {
-    const id_rows: u16 = 40;
-    const id_cols: u16 = 120;
+/// Plain printable text (long lines + LF), the case the SIMD fast path is built
+/// for — representative of `cat`, logs, and source code.
+fn buildPlain(buf: []u8) usize {
+    const line = "the quick brown fox jumps over the lazy dog 0123456789 ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnop\n";
+    var i: usize = 0;
+    while (i + line.len <= buf.len) : (i += line.len) {
+        @memcpy(buf[i .. i + line.len], line);
+    }
+    return i;
+}
 
-    const h = capi.tmux_create(id_rows, id_cols, null, null) orelse {
-        std.debug.print("  [emulator] FAILED to create session\n", .{});
+fn benchFeed(label: []const u8, comptime build: fn ([]u8) usize) !void {
+    const h = capi.tmux_create(40, 120, null, null) orelse {
+        std.debug.print("  [{s}] FAILED to create session\n", .{label});
         return;
     };
     defer capi.tmux_destroy(h);
 
-    // ~1 MiB synthetic chunk, fed repeatedly to reach the target volume.
     var chunk: [1 << 20]u8 = undefined;
-    const chunk_len = buildSample(&chunk);
+    const chunk_len = build(&chunk);
 
     const target: usize = 512 * 1024 * 1024; // 512 MiB
     const iters = target / chunk_len;
@@ -81,7 +88,8 @@ fn benchEmulatorFeed() !void {
     }
     const elapsed = timer.read();
 
-    std.debug.print("  [emulator feed]  {d:>6.1} MiB in {d:>6.1} ms  =>  {d:>8.1} MiB/s\n", .{
+    std.debug.print("  [{s}]  {d:>6.1} MiB in {d:>7.1} ms  =>  {d:>8.1} MiB/s\n", .{
+        label,
         @as(f64, @floatFromInt(fed)) / (1024.0 * 1024.0),
         @as(f64, @floatFromInt(elapsed)) / 1_000_000.0,
         mibPerSec(fed, elapsed),
@@ -176,7 +184,8 @@ pub fn main(init: std.process.Init) !void {
     _ = init;
     std.debug.print("terminal_mux C ABI benchmark (v{s})\n", .{std.mem.sliceTo(capi.tmux_version(), 0)});
     std.debug.print("----------------------------------------------------------------\n", .{});
-    try benchEmulatorFeed();
+    try benchFeed("emulator mixed (SGR-heavy)", buildSample);
+    try benchFeed("emulator plain (SIMD path) ", buildPlain);
     try benchPtyThroughput();
     try benchLifecycle();
     std.debug.print("----------------------------------------------------------------\n", .{});

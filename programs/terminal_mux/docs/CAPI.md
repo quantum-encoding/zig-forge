@@ -161,27 +161,45 @@ let n = tmux_read_cells(s, &cells, cells.count)   // upload to renderer
 zig build bench -Doptimize=ReleaseFast
 ```
 
-Reports three things, all on a monotonic clock:
+Reports throughput on a monotonic clock:
 
-1. **emulator feed** — bytes/sec pushed straight through the VT parser into the
-   grid (`tmux_feed`), the pure core hot path.
-2. **pty ingest** — a shell emits 64 MiB (`yes | head -c`); throughput through
+1. **emulator mixed** — SGR-heavy synthetic stream (lots of `ESC[...m`); most
+   bytes go through the scalar CSI state machine. The pessimistic case.
+2. **emulator plain** — long printable lines (`cat`/logs/code shape); exercises
+   the SIMD fast path. The optimistic case.
+3. **pty ingest** — a shell emits 64 MiB (`yes | head -c`); end-to-end through
    the PTY + parser via `tmux_pump`.
-3. **lifecycle** — `create`+`destroy` and `attach`+`detach` latency.
+4. **lifecycle** — `create`+`destroy` and `attach`+`detach` latency.
 
 Indicative numbers (Apple Silicon, ReleaseFast):
 
 ```
-[emulator feed]   ~40 MiB/s        (per-byte parser dispatch — the bottleneck)
-[pty ingest]      ~20 MiB/s
-[create+destroy]  ~80 ms/op        (forks + execs a real zsh, which sources rc files)
-[attach+detach]   ~0.02 µs/op      (registry hash lookup)
+[emulator mixed]  ~127 MiB/s
+[emulator plain]  ~196 MiB/s
+[pty ingest]      ~64 MiB/s
+[attach+detach]   ~0.02 µs/op   (registry hash lookup)
 ```
 
-> **Note on the emulator number.** ~40 MiB/s is the *existing* VT parser's
-> ceiling — it dispatches one byte at a time (`parser.feed(byte)` +
-> `applyAction` per byte). A production Apple-native terminal will want a
-> SIMD/batched parser (Ghostty-class implementations hit GB/s). The C ABI and
-> PTY plumbing are not the bottleneck; the benchmark exists precisely to make
-> that visible. Treat the emulator-feed figure as the headline target to beat.
+### Parser/terminal optimizations (vs. the original ~42 MiB/s)
+
+The hot path was lifted ~3× (mixed) / ~4.7× (plain text):
+
+- **SIMD ASCII fast path** (`Pane.processOutput`): while the parser is in ground
+  state, input is swept in 16-byte `@Vector(16, u8)` chunks. A chunk that is
+  entirely printable ASCII (`0x20..0x7E`) bypasses the state machine and is
+  bulk-written to the grid via `Terminal.putPrintableRun` (autowrap-aware). Any
+  control/non-ASCII byte drops to the scalar parser for that byte, then the
+  sweep resumes.
+- **O(1) circular scroll** (`Grid`): rows live in a ring indexed by `row_offset`
+  (`physRow` = one conditional subtract, no division). A full-screen scroll is a
+  pointer bump + clearing the newly exposed rows — no row memcpy. Sub-region
+  scrolls still shift via contiguous per-row copies.
+- **Zero heap allocations on the PTY path**: CSI params are a fixed `[16]u16`;
+  scrollback is a single preallocated flat ring (`Scrollback`) whose `push`
+  copies a scrolled-off row into the next slot with no allocator call. The old
+  per-scroll `alloc` is gone.
+
+The remaining ceiling is memory bandwidth on 16-byte `Cell` writes (plain feed
+moves ~3 GB/s of cells), not dispatch — so the next lever, if needed, is a
+narrower `Cell` or a vectorized template splat, not parser restructuring.
 ```
