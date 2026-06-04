@@ -1,26 +1,43 @@
 //! PTY (Pseudo-Terminal) Management
 //!
-//! Handles creation and management of pseudo-terminals on Linux.
-//! Uses the Unix98 PTY interface (/dev/ptmx).
+//! Handles creation and management of pseudo-terminals.
+//! Linux uses the Unix98 PTY interface (/dev/ptmx); Darwin (macOS) uses
+//! openpty(3) from libSystem. The rest of the lifecycle (fork/exec, raw mode,
+//! winsize ioctls) is shared across both platforms via libc.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const posix = std.posix;
 const c = std.c;
 
-/// Linux-specific ioctl constants for PTY operations
-pub const pty_ioctl = struct {
-    /// Get the PTY slave number
-    pub const TIOCGPTN: u32 = 0x80045430; // _IOR('T', 0x30, unsigned int)
-    /// Unlock the PTY slave
-    pub const TIOCSPTLCK: u32 = 0x40045431; // _IOW('T', 0x31, int)
-    /// Set controlling terminal
-    pub const TIOCSCTTY: u32 = 0x540E;
-    /// Give up controlling terminal
-    pub const TIOCNOTTY: u32 = 0x5422;
-    /// Get window size
-    pub const TIOCGWINSZ: u32 = 0x5413;
-    /// Set window size
-    pub const TIOCSWINSZ: u32 = 0x5414;
+const is_darwin = builtin.os.tag.isDarwin();
+
+/// libc ioctl — used for the portable winsize / controlling-terminal requests.
+extern "c" fn ioctl(fd: c_int, request: c_ulong, ...) c_int;
+/// openpty(3) — Darwin (libSystem) and the BSDs. On Linux we use /dev/ptmx
+/// instead to avoid the -lutil link dependency.
+extern "c" fn openpty(
+    amaster: *c_int,
+    aslave: *c_int,
+    name: ?[*]u8,
+    termp: ?*const anyopaque,
+    winp: ?*const Winsize,
+) c_int;
+
+/// Platform-dependent ioctl request numbers. The winsize + controlling-terminal
+/// requests have different encodings on Linux vs Darwin.
+const tioc = struct {
+    pub const GWINSZ: c_ulong = if (is_darwin) 0x40087468 else 0x5413;
+    pub const SWINSZ: c_ulong = if (is_darwin) 0x80087467 else 0x5414;
+    pub const SCTTY: c_ulong = if (is_darwin) 0x20007461 else 0x540E;
+};
+
+/// Linux-only /dev/ptmx ioctl constants (Unix98 PTY allocation).
+const linux_pty_ioctl = struct {
+    /// Get the PTY slave number — _IOR('T', 0x30, unsigned int)
+    pub const TIOCGPTN: c_ulong = 0x80045430;
+    /// Unlock the PTY slave — _IOW('T', 0x31, int)
+    pub const TIOCSPTLCK: c_ulong = 0x40045431;
 };
 
 /// Window size structure
@@ -44,8 +61,37 @@ pub const Pty = struct {
 
     const Self = @This();
 
-    /// Create a new PTY pair
+    /// Create a new PTY pair (master + slave), dispatching to the platform path.
     pub fn create() !Self {
+        return if (is_darwin) createDarwin() else createLinux();
+    }
+
+    /// Darwin: allocate the pair with openpty(3) from libSystem.
+    fn createDarwin() !Self {
+        var master_fd: c_int = -1;
+        var slave_fd: c_int = -1;
+        var ws = Winsize{ .ws_row = 24, .ws_col = 80, .ws_xpixel = 0, .ws_ypixel = 0 };
+        if (openpty(&master_fd, &slave_fd, null, null, &ws) != 0) {
+            return error.OpenptyFailed;
+        }
+
+        // openpty hands back the slave fd directly; we don't track a path.
+        var slave_path: [32]u8 = undefined;
+        @memset(&slave_path, 0);
+
+        return Self{
+            .master_fd = master_fd,
+            .slave_fd = slave_fd,
+            .slave_path = slave_path,
+            .slave_path_len = 0,
+            .child_pid = null,
+            .rows = 24,
+            .cols = 80,
+        };
+    }
+
+    /// Linux: allocate the pair via the Unix98 /dev/ptmx interface.
+    fn createLinux() !Self {
         // Open the PTY master device
         const master_fd = try posix.openatZ(c.AT.FDCWD, "/dev/ptmx", .{
             .ACCMODE = .RDWR,
@@ -55,13 +101,13 @@ pub const Pty = struct {
 
         // Unlock the slave
         var unlock: c_int = 0;
-        _ = ioctl(master_fd, pty_ioctl.TIOCSPTLCK, &unlock) catch {
+        doIoctl(master_fd, linux_pty_ioctl.TIOCSPTLCK, &unlock) catch {
             return error.PtyUnlockFailed;
         };
 
         // Get the slave number
         var pts_num: c_uint = 0;
-        _ = ioctl(master_fd, pty_ioctl.TIOCGPTN, &pts_num) catch {
+        doIoctl(master_fd, linux_pty_ioctl.TIOCGPTN, &pts_num) catch {
             return error.PtyGetSlaveNumFailed;
         };
 
@@ -108,8 +154,11 @@ pub const Pty = struct {
         return self.slave_path[0..self.slave_path_len];
     }
 
-    /// Spawn a child process in the PTY
-    pub fn spawn(self: *Self, argv: []const [*:0]const u8, envp: [*:null]const ?[*:0]const u8) !void {
+    /// Spawn a child process in the PTY. `argv` must be NUL-terminated (the
+    /// terminator is mandatory — execve reads it to find the end of the vector;
+    /// passing a non-terminated array makes execve dereference stack garbage as
+    /// argv[1], which fails with EFAULT on Darwin).
+    pub fn spawn(self: *Self, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) !void {
         const pid = c.fork();
 
         if (pid < 0) {
@@ -120,8 +169,8 @@ pub const Pty = struct {
                 std.c._exit(1);
             };
 
-            // Execute the command - shell path is already absolute
-            _ = c.execve(argv[0], @ptrCast(argv.ptr), envp);
+            // Execute the command - shell path (argv[0]) is already absolute.
+            _ = c.execve(argv[0].?, argv, envp);
             // If we reach here, exec failed
             std.c._exit(127);
         } else {
@@ -143,7 +192,8 @@ pub const Pty = struct {
         if (c.setsid() < 0) return error.SetsidFailed;
 
         // Set the slave as the controlling terminal
-        _ = ioctl(self.slave_fd, pty_ioctl.TIOCSCTTY, @as(*const c_int, &0)) catch {
+        const zero: c_int = 0;
+        doIoctl(self.slave_fd, tioc.SCTTY, &zero) catch {
             return error.SetControllingTerminalFailed;
         };
 
@@ -167,7 +217,7 @@ pub const Pty = struct {
             .ws_ypixel = 0,
         };
 
-        _ = try ioctl(self.master_fd, pty_ioctl.TIOCSWINSZ, &ws);
+        try doIoctl(self.master_fd, tioc.SWINSZ, &ws);
 
         self.rows = rows;
         self.cols = cols;
@@ -181,7 +231,7 @@ pub const Pty = struct {
     /// Get the current window size
     pub fn getSize(self: *const Self) !Winsize {
         var ws: Winsize = undefined;
-        _ = try ioctl(self.master_fd, pty_ioctl.TIOCGWINSZ, &ws);
+        try doIoctl(self.master_fd, tioc.GWINSZ, &ws);
         return ws;
     }
 
@@ -219,27 +269,13 @@ pub const Pty = struct {
     }
 };
 
-/// Generic ioctl wrapper
-fn ioctl(fd: posix.fd_t, request: u32, arg: anytype) !usize {
-    const ArgType = @TypeOf(arg);
-    const arg_ptr = switch (@typeInfo(ArgType)) {
-        .pointer => @intFromPtr(arg),
+/// Generic libc ioctl wrapper. `arg` must be a pointer to the request payload.
+fn doIoctl(fd: posix.fd_t, request: c_ulong, arg: anytype) !void {
+    switch (@typeInfo(@TypeOf(arg))) {
+        .pointer => {},
         else => @compileError("ioctl arg must be a pointer"),
-    };
-
-    const rc = std.os.linux.syscall3(
-        .ioctl,
-        @as(usize, @bitCast(@as(isize, fd))),
-        request,
-        arg_ptr,
-    );
-
-    if (rc > std.math.maxInt(isize)) {
-        const err: posix.E = @enumFromInt(@as(u16, @truncate(0 -% rc)));
-        return posix.unexpectedErrno(err);
     }
-
-    return rc;
+    if (ioctl(@intCast(fd), request, arg) == -1) return error.IoctlFailed;
 }
 
 /// Raw terminal mode utilities
@@ -297,7 +333,7 @@ pub const RawMode = struct {
 /// Get the current terminal size
 pub fn getTerminalSize(fd: posix.fd_t) !Winsize {
     var ws: Winsize = undefined;
-    _ = try ioctl(fd, pty_ioctl.TIOCGWINSZ, &ws);
+    try doIoctl(fd, tioc.GWINSZ, &ws);
     return ws;
 }
 
@@ -320,7 +356,11 @@ test "pty create and close" {
 
     try std.testing.expect(pty_var.master_fd >= 0);
     try std.testing.expect(pty_var.slave_fd >= 0);
-    try std.testing.expect(std.mem.startsWith(u8, pty_var.getSlavePath(), "/dev/pts/"));
+    if (!is_darwin) {
+        // Linux exposes the slave node as /dev/pts/N. openpty(3) on Darwin
+        // hands back the fd directly, so we don't track a path there.
+        try std.testing.expect(std.mem.startsWith(u8, pty_var.getSlavePath(), "/dev/pts/"));
+    }
 }
 
 test "winsize struct size" {

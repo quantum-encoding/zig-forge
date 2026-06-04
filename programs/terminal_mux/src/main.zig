@@ -17,7 +17,6 @@
 const std = @import("std");
 const posix = std.posix;
 const c = std.c;
-const linux = std.os.linux;
 const lib = @import("lib.zig");
 
 const VERSION = "0.1.0";
@@ -113,32 +112,16 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn attachOrCreate(allocator: std.mem.Allocator, session_name: []const u8) !void {
-    const socket_path = try lib.ipc.getDefaultSocketPath(allocator);
-    defer allocator.free(socket_path);
-
-    // Try to connect to existing server
-    var client = lib.IpcClient.connect(allocator, socket_path) catch {
-        // No server running, start one
-        try runServer(allocator, session_name);
-        return;
-    };
-    defer client.deinit();
-
-    // Server exists, attach to it
-    try runClient(allocator, &client, session_name);
+    // This binary runs a self-contained, single-process session (the multiplexer
+    // core driving a PTY + VT emulator). Cross-process attach/detach is provided
+    // by the in-process C ABI (libterminal_mux, src/capi.zig) for embedding into
+    // host apps such as the Swift/SwiftUI front-end — see docs/CAPI.md.
+    try runServer(allocator, session_name);
 }
 
 fn attachToSession(allocator: std.mem.Allocator, session_name: []const u8) !void {
-    const socket_path = try lib.ipc.getDefaultSocketPath(allocator);
-    defer allocator.free(socket_path);
-
-    var client = lib.IpcClient.connect(allocator, socket_path) catch {
-        std.debug.print("No server running. Use 'tmux new' to start a session.\n", .{});
-        return;
-    };
-    defer client.deinit();
-
-    try runClient(allocator, &client, session_name);
+    // No standalone socket daemon in this build; run the session directly.
+    try runServer(allocator, session_name);
 }
 
 fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
@@ -192,28 +175,6 @@ fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
     try renderer.clearScreen();
     _ = c.write(posix.STDOUT_FILENO, renderer.getOutput().ptr, renderer.getOutput().len);
 
-    // Main event loop
-    const epoll_ret = linux.epoll_create1(0);
-    if (epoll_ret > std.math.maxInt(isize)) return error.EpollCreateFailed;
-    const epoll_fd: i32 = @intCast(epoll_ret);
-    defer _ = std.c.close(epoll_fd);
-
-    // Add stdin to epoll
-    var stdin_event = linux.epoll_event{
-        .events = linux.EPOLL.IN,
-        .data = .{ .fd = posix.STDIN_FILENO },
-    };
-    _ = linux.epoll_ctl(epoll_fd, linux.EPOLL.CTL_ADD, posix.STDIN_FILENO, &stdin_event);
-
-    // Add PTY master to epoll
-    if (pane.getFd()) |pty_fd| {
-        var pty_event = linux.epoll_event{
-            .events = linux.EPOLL.IN,
-            .data = .{ .fd = pty_fd },
-        };
-        _ = linux.epoll_ctl(epoll_fd, linux.EPOLL.CTL_ADD, pty_fd, &pty_event);
-    }
-
     // Input state
     var prefix_active = false;
     const cfg = lib.Config{};
@@ -221,92 +182,90 @@ fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
     var running = true;
     var input_buf: [4096]u8 = undefined;
     var pty_buf: [65536]u8 = undefined;
-    var events: [16]std.os.linux.epoll_event = undefined;
 
+    // Main event loop — poll() is portable across Linux (epoll equivalent) and
+    // Darwin (kqueue equivalent) without per-platform code.
     while (running) {
-        const wait_ret = linux.epoll_wait(epoll_fd, &events, 16, 100); // 100ms timeout
-        if (wait_ret > std.math.maxInt(isize)) continue; // Error, retry
-        const n_events: usize = wait_ret;
+        const active_pane_io = initial_session.getActiveWindow().getActivePane();
+        const pty_fd: posix.fd_t = active_pane_io.getFd() orelse -1;
 
-        for (events[0..n_events]) |event| {
-            const fd = event.data.fd;
+        var poll_fds = [_]posix.pollfd{
+            .{ .fd = posix.STDIN_FILENO, .events = posix.POLL.IN, .revents = 0 },
+            .{ .fd = pty_fd, .events = posix.POLL.IN, .revents = 0 },
+        };
 
-            if (fd == posix.STDIN_FILENO) {
-                // Handle user input
+        const n_ready = posix.poll(&poll_fds, 100) catch 0; // 100ms timeout
+
+        if (n_ready > 0) {
+            // Handle user input from stdin
+            if (poll_fds[0].revents & posix.POLL.IN != 0) {
                 const n = posix.read(posix.STDIN_FILENO, &input_buf) catch 0;
                 if (n == 0) {
                     running = false;
-                    continue;
-                }
+                } else {
+                    for (input_buf[0..n]) |byte| {
+                        if (prefix_active) {
+                            // Handle prefix commands
+                            prefix_active = false;
 
-                const input = input_buf[0..n];
-
-                // Process input
-                for (input) |byte| {
-                    if (prefix_active) {
-                        // Handle prefix commands
-                        prefix_active = false;
-
-                        switch (byte) {
-                            'd' => {
-                                // Detach
-                                running = false;
-                            },
-                            'c' => {
-                                // New window
-                                _ = initial_session.createWindow() catch {};
-                                initial_session.nextWindow();
-                            },
-                            'n' => {
-                                // Next window
-                                initial_session.nextWindow();
-                            },
-                            'p' => {
-                                // Previous window
-                                initial_session.prevWindow();
-                            },
-                            '%' => {
-                                // Split horizontal
-                                const active_window = initial_session.getActiveWindow();
-                                _ = active_window.split(.horizontal, 10000) catch {};
-                            },
-                            '"' => {
-                                // Split vertical
-                                const active_window = initial_session.getActiveWindow();
-                                _ = active_window.split(.vertical, 10000) catch {};
-                            },
-                            'o' => {
-                                // Next pane
-                                initial_session.getActiveWindow().focusNext();
-                            },
-                            else => {
-                                // Unknown command, send raw
-                                const active_pane = initial_session.getActiveWindow().getActivePane();
-                                active_pane.sendInput(&[_]u8{byte}) catch {};
-                            },
-                        }
-                    } else if (byte == cfg.prefix_key.char - 'a' + 1 and cfg.prefix_key.mods.ctrl) {
-                        // Prefix key pressed (Ctrl-b = 0x02)
-                        prefix_active = true;
-                    } else if (byte == 0x02) {
-                        // Ctrl-b
-                        prefix_active = true;
-                    } else {
-                        // Send to active pane
-                        const active_pane = initial_session.getActiveWindow().getActivePane();
-                        active_pane.sendInput(&[_]u8{byte}) catch {};
-                    }
-                }
-            } else {
-                // Handle PTY output
-                const active_pane = initial_session.getActiveWindow().getActivePane();
-                if (active_pane.getFd()) |pty_fd| {
-                    if (fd == pty_fd) {
-                        const n = active_pane.readOutput(&pty_buf) catch 0;
-                        if (n > 0) {
-                            active_pane.processOutput(pty_buf[0..n]);
+                            switch (byte) {
+                                'd' => {
+                                    // Detach
+                                    running = false;
+                                },
+                                'c' => {
+                                    // New window
+                                    _ = initial_session.createWindow() catch {};
+                                    initial_session.nextWindow();
+                                },
+                                'n' => {
+                                    // Next window
+                                    initial_session.nextWindow();
+                                },
+                                'p' => {
+                                    // Previous window
+                                    initial_session.prevWindow();
+                                },
+                                '%' => {
+                                    // Split horizontal
+                                    const active_window = initial_session.getActiveWindow();
+                                    _ = active_window.split(.horizontal, 10000) catch {};
+                                },
+                                '"' => {
+                                    // Split vertical
+                                    const active_window = initial_session.getActiveWindow();
+                                    _ = active_window.split(.vertical, 10000) catch {};
+                                },
+                                'o' => {
+                                    // Next pane
+                                    initial_session.getActiveWindow().focusNext();
+                                },
+                                else => {
+                                    // Unknown command, send raw
+                                    const active_pane = initial_session.getActiveWindow().getActivePane();
+                                    active_pane.sendInput(&[_]u8{byte}) catch {};
+                                },
+                            }
+                        } else if (byte == cfg.prefix_key.char - 'a' + 1 and cfg.prefix_key.mods.ctrl) {
+                            // Prefix key pressed (Ctrl-b = 0x02)
+                            prefix_active = true;
+                        } else if (byte == 0x02) {
+                            // Ctrl-b
+                            prefix_active = true;
+                        } else {
+                            // Send to active pane
+                            const active_pane = initial_session.getActiveWindow().getActivePane();
+                            active_pane.sendInput(&[_]u8{byte}) catch {};
                         }
                     }
+                }
+            }
+
+            // Handle PTY output from the active pane
+            if (pty_fd >= 0 and poll_fds[1].revents & posix.POLL.IN != 0) {
+                const n = active_pane_io.readOutput(&pty_buf) catch 0;
+                if (n > 0) {
+                    active_pane_io.processOutput(pty_buf[0..n]);
                 }
             }
         }
@@ -355,29 +314,17 @@ fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
     _ = c.write(posix.STDOUT_FILENO, renderer.getOutput().ptr, renderer.getOutput().len);
 }
 
-fn runClient(allocator: std.mem.Allocator, client: *lib.IpcClient, session_name: []const u8) !void {
-    _ = allocator;
-    _ = client;
-    _ = session_name;
-    std.debug.print("Client mode not fully implemented yet. Running server directly.\n", .{});
-}
-
 fn listSessions(allocator: std.mem.Allocator) !void {
-    const socket_path = try lib.ipc.getDefaultSocketPath(allocator);
-    defer allocator.free(socket_path);
-
-    _ = lib.IpcClient.connect(allocator, socket_path) catch {
-        std.debug.print("No sessions.\n", .{});
-        return;
-    };
-
-    std.debug.print("Session listing not fully implemented yet.\n", .{});
+    _ = allocator;
+    // The standalone binary is single-session; multi-session enumeration lives
+    // in the embedding C ABI (tmux_list, src/capi.zig).
+    std.debug.print("This build runs one session per process. For multi-session\n", .{});
+    std.debug.print("attach/detach, embed libterminal_mux (see docs/CAPI.md).\n", .{});
 }
 
 fn killSession(allocator: std.mem.Allocator, session_name: []const u8) !void {
     _ = allocator;
-    _ = session_name;
-    std.debug.print("Kill session not implemented yet.\n", .{});
+    std.debug.print("kill-session '{s}': not applicable to the standalone binary.\n", .{session_name});
 }
 
 fn printHelp() void {

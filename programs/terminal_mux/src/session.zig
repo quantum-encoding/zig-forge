@@ -145,7 +145,7 @@ pub const Pane = struct {
         @memcpy(shell_buf[0..shell.len], shell);
         shell_buf[shell.len] = 0;
 
-        const argv = [_][*:0]const u8{&shell_buf};
+        const argv = [_:null]?[*:0]const u8{&shell_buf};
         try pty.spawn(&argv, env);
 
         self.pty = pty;

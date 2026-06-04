@@ -5,7 +5,7 @@
 | Program | LOC | Files | Status | Notes |
 |---------|-----|-------|--------|-------|
 | **audio_forge** | 3,588 | 13 | ✅ Complete | Professional audio DSP, real-time effects |
-| **terminal_mux** | 4,666 | 9 | ✅ Complete | Terminal multiplexer (tmux-like) |
+| **terminal_mux** | 5,300 | 11 | ✅ Complete | Terminal multiplexer (tmux-like); cross-platform PTY (Linux /dev/ptmx + macOS openpty); in-process C ABI `libterminal_mux` for Swift/host embedding (docs/CAPI.md) |
 | **distributed_kv** | 4,430 | 8 | ✅ Complete | Distributed key-value store, Raft consensus |
 | **async_scheduler** | 957 | 7 | ✅ Complete | Async task scheduler, work-stealing |
 | **market_data_parser** | ~2,000 | 12 | ✅ Core Complete | 7.19M msg/sec CSV parser |
