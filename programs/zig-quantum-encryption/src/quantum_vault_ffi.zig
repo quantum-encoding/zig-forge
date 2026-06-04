@@ -324,12 +324,15 @@ export fn qv_hybrid_decaps(
 // Utility Functions
 // ============================================================================
 
-/// Securely zero memory (prevents compiler optimization)
+/// Securely zero memory, robustly defeating compiler Dead-Store Elimination.
+///
+/// The previous implementation did `@memset` followed by a single volatile read
+/// of byte 0. That does NOT prevent DSE: the writes have no observed effect
+/// (only one byte is read back), so an optimizer is free to drop the whole
+/// `@memset`. `std.crypto.secureZero` writes through a `volatile` slice, so every
+/// store is an observable side effect the compiler must emit.
 export fn qv_secure_zero(ptr: [*]u8, len: usize) void {
-    @memset(ptr[0..len], 0);
-    // Use volatile pointer access to prevent optimization
-    const volatile_ptr: *volatile u8 = @ptrCast(ptr);
-    _ = volatile_ptr.*;
+    std.crypto.secureZero(u8, ptr[0..len]);
 }
 
 /// Constant-time comparison (prevents timing attacks)

@@ -290,6 +290,15 @@ fn validateEncapsulationKey768(ek: *const EncapsulationKey768) bool {
 /// implicit rejection returns a pseudorandom value derived from z.
 ///
 /// Returns: K (shared secret)
+/// Best-effort zeroization of a stack value's backing bytes, robust against
+/// compiler Dead-Store Elimination (writes through a volatile slice via
+/// `std.crypto.secureZero`). Used with `defer` to scrub intermediate secrets in
+/// the decapsulation path. It is content-independent and runs unconditionally at
+/// scope exit, so it does not perturb the FO-transform's constant-time behaviour.
+inline fn scrubValue(ptr: anytype) void {
+    std.crypto.secureZero(u8, std.mem.asBytes(ptr));
+}
+
 pub fn decaps768(dk: *const DecapsulationKey768, c: *const Ciphertext768) SharedSecret {
     // Step 1: Extract components from decapsulation key
     const s_hat_bytes = dk.getSecretVector();
@@ -297,23 +306,30 @@ pub fn decaps768(dk: *const DecapsulationKey768, c: *const Ciphertext768) Shared
     const h_ek = dk.getHashEk();
     const z = dk.getZ();
 
-    // Step 2: Decrypt to get m'
-    const m_prime = kpkeDecrypt768(s_hat_bytes, c);
+    // Step 2: Decrypt to get m' (the recovered message — a secret).
+    var m_prime = kpkeDecrypt768(s_hat_bytes, c);
+    defer scrubValue(&m_prime);
 
     // Step 3: (K', r') ← G(m' || H(ek))
     var g_input: [64]u8 = undefined;
     @memcpy(g_input[0..32], &m_prime);
     @memcpy(g_input[32..64], h_ek);
+    defer scrubValue(&g_input); // contains m'
 
-    const g_result = ntt.hashG(&g_input);
-    const k_prime = g_result.a;
-    const r_prime = g_result.b;
+    var g_result = ntt.hashG(&g_input);
+    var k_prime = g_result.a;
+    var r_prime = g_result.b;
+    defer scrubValue(&g_result);
+    defer scrubValue(&k_prime); // candidate shared secret
+    defer scrubValue(&r_prime); // re-encryption randomness
 
     // Step 4: K_bar ← J(z || c)
     var j_input: [32 + 1088]u8 = undefined;
     @memcpy(j_input[0..32], z);
     @memcpy(j_input[32..], &c.data);
-    const k_bar = ntt.hashJ(&j_input);
+    var k_bar = ntt.hashJ(&j_input);
+    defer scrubValue(&j_input); // contains the implicit-rejection secret z
+    defer scrubValue(&k_bar); // implicit-rejection shared secret
 
     // Step 5: Re-encrypt with r' to get c'
     const c_prime = kpkeEncrypt768(ek, &m_prime, &r_prime);
@@ -430,8 +446,11 @@ fn kpkeEncrypt768(ek: *const EncapsulationKey768, m: *const [32]u8, r: *const [3
 
 /// K-PKE.Decrypt (Algorithm 15)
 fn kpkeDecrypt768(s_hat_bytes: []const u8, c: *const Ciphertext768) [32]u8 {
-    // Decode s_hat
+    // Decode s_hat — this is the secret key vector materialised on the stack in
+    // NTT form. Scrub it (and the secret inner product / message polynomial `w`)
+    // on every exit path so private-key material does not linger.
     var s_hat: [3]Poly = undefined;
+    defer scrubValue(&s_hat);
     for (0..3) |i| {
         ntt.byteDecode(12, s_hat_bytes[i * 384 ..][0..384], &s_hat[i].coeffs);
     }
@@ -455,7 +474,9 @@ fn kpkeDecrypt768(s_hat_bytes: []const u8, c: *const Ciphertext768) [32]u8 {
 
     // w = v - NTT^-1(s_hat^T ∘ u_hat)
     var w: Poly = v;
+    defer scrubValue(&w);
     var inner_product: Poly = Poly.init();
+    defer scrubValue(&inner_product);
     for (0..3) |i| {
         var product: Poly = undefined;
         ntt.multiplyNTTs(&s_hat[i], &u_hat[i], &product);

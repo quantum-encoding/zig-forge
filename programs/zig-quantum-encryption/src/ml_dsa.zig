@@ -835,6 +835,15 @@ pub fn keyGen(seed: ?*const [32]u8) DsaError!KeyPair {
 /// Sign a message using ML-DSA-65.
 /// Returns `error.RandomnessFailure` if randomized signing is requested and the
 /// system RNG fails, or `error.SigningFailed` if the rejection loop is exhausted.
+/// Best-effort zeroization of a stack value's backing bytes, robust against
+/// compiler Dead-Store Elimination (writes through a volatile slice via
+/// `std.crypto.secureZero`). Used with `defer` to scrub intermediate secrets on
+/// every exit path — including early `return error.*` and rejection-loop
+/// iterations — so private-key material does not linger on the stack.
+inline fn scrubValue(ptr: anytype) void {
+    std.crypto.secureZero(u8, std.mem.asBytes(ptr));
+}
+
 pub fn sign(sk: *const SecretKey, msg: []const u8, randomized: bool) DsaError!Signature {
     // Extract components from secret key
     const rho = sk.getRho();
@@ -879,6 +888,12 @@ pub fn sign(sk: *const SecretKey, msg: []const u8, randomized: bool) DsaError!Si
         offset += 416;
     }
 
+    // Defense-in-depth: scrub the unpacked secret-key polynomials (and, below,
+    // their NTT forms and the signing seeds) on every exit path.
+    defer scrubValue(&s1);
+    defer scrubValue(&s2);
+    defer scrubValue(&t0);
+
     // Generate matrix A
     var a: PolyMatrix = undefined;
     expandA(&a, rho);
@@ -906,7 +921,12 @@ pub fn sign(sk: *const SecretKey, msg: []const u8, randomized: bool) DsaError!Si
     h2.update(&mu);
     h2.squeeze(&rhoprime);
 
-    // Pre-compute NTT forms
+    // rnd is the per-signature randomness; rhoprime (= H(K || rnd || μ)) seeds the
+    // masking vector y and is as sensitive as the key — scrub both on exit.
+    defer scrubValue(&rnd);
+    defer scrubValue(&rhoprime);
+
+    // Pre-compute NTT forms (scratchpad copies of the secret vectors).
     var s1_hat = s1;
     s1_hat.ntt();
 
@@ -915,6 +935,10 @@ pub fn sign(sk: *const SecretKey, msg: []const u8, randomized: bool) DsaError!Si
 
     var t0_hat = t0;
     t0_hat.ntt();
+
+    defer scrubValue(&s1_hat);
+    defer scrubValue(&s2_hat);
+    defer scrubValue(&t0_hat);
 
     // Rejection sampling loop
     var kappa: u16 = 0;
@@ -929,6 +953,13 @@ pub fn sign(sk: *const SecretKey, msg: []const u8, randomized: bool) DsaError!Si
         // w = A*y
         var y_hat = y;
         y_hat.ntt();
+
+        // The masking vector y is the crown jewel: z = y + c·s1, so recovering y
+        // recovers the secret key. Scrub it (and its NTT scratchpad) at the end of
+        // every loop iteration — both the reject (`continue`) and success
+        // (`return sig`) paths exit this scope.
+        defer scrubValue(&y);
+        defer scrubValue(&y_hat);
 
         var w: PolyVecK = undefined;
         matrixVecMul(&w, &a, &y_hat);
