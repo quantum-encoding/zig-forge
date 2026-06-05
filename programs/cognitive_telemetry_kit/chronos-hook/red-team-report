@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# red-team-report — review the red-team audit collection for the current repo.
+#
+#   red-team-report                 summary table of every audit (newest first)
+#   red-team-report <short-sha>     print that commit's full audit report
+#   red-team-report --findings      only audits that produced FINDINGS/REVIEW/ERROR
+#   red-team-report --open <sha>    open that audit.md in $PAGER/less
+set -euo pipefail
+
+GITDIR=$(git rev-parse --absolute-git-dir 2>/dev/null) || { echo "not inside a git repo" >&2; exit 1; }
+COL="$GITDIR/red-team-audits"
+[ -d "$COL" ] || { echo "no red-team audits recorded yet ($COL)"; exit 0; }
+
+mode="summary"; arg=""
+case "${1:-}" in
+  --findings) mode="findings" ;;
+  --open) mode="open"; arg="${2:-}" ;;
+  "" ) mode="summary" ;;
+  * ) mode="one"; arg="$1" ;;
+esac
+
+if [ "$mode" = "one" ]; then
+  f="$COL/$arg/audit.md"
+  [ -f "$f" ] || { echo "no audit for '$arg' (try: red-team-report)"; exit 1; }
+  echo "# Audit $arg — verdict: $(cat "$COL/$arg/verdict.txt" 2>/dev/null || echo '?')"
+  echo; cat "$f"; exit 0
+fi
+if [ "$mode" = "open" ]; then
+  f="$COL/$arg/audit.md"
+  [ -f "$f" ] || { echo "no audit for '$arg'"; exit 1; }
+  "${PAGER:-less}" "$f"; exit 0
+fi
+
+ONLY_FINDINGS=0; [ "$mode" = "findings" ] && ONLY_FINDINGS=1
+ONLY_FINDINGS="$ONLY_FINDINGS" python3 - "$COL/index.jsonl" <<'PY'
+import json, os, sys
+p = sys.argv[1]
+if not os.path.exists(p):
+    print("no audits recorded yet"); sys.exit(0)
+rows = [json.loads(l) for l in open(p) if l.strip()]
+only = os.environ.get("ONLY_FINDINGS") == "1"
+from collections import Counter
+c = Counter(r.get("verdict", "?") for r in rows)
+print(f"Red-Team Audit Collection — {len(rows)} audit(s):  " +
+      "  ".join(f"{k}={v}" for k, v in sorted(c.items())))
+print()
+shown = [r for r in rows if (not only or r.get("verdict") not in ("CLEAN",))]
+if not shown:
+    print("(no non-clean audits)"); sys.exit(0)
+print(f"{'TIME':19}  {'COMMIT':9}  {'VERDICT':8}  {'PATCH':5}  SUBJECT")
+print("-" * 78)
+for r in reversed(shown):
+    print(f"{(r.get('ts') or '')[:19]:19}  {r.get('commit',''):9}  "
+          f"{r.get('verdict',''):8}  {r.get('patched',''):5}  {(r.get('subject') or '')[:55]}")
+print()
+print("Full report:  red-team-report <commit>")
+PY

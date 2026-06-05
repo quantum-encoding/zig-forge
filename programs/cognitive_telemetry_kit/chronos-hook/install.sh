@@ -29,6 +29,12 @@ sudo install -m 0755 "$engine/scripts/get-cognitive-state"        /usr/local/bin
 sudo install -m 0755 "$here/chronos-post-commit"                  /usr/local/bin/chronos-post-commit
 sudo install -m 0755 "$here/chronos-enable-repo"                  /usr/local/bin/chronos-enable-repo
 sudo install -m 0755 "$here/chronos-disable-repo"                 /usr/local/bin/chronos-disable-repo
+sudo install -m 0755 "$here/red-team-report"                     /usr/local/bin/red-team-report
+
+# Optional: the red-team auditor hook. Deploy it into a repo's post-commit (or,
+# under chronos, as post-commit.pre-chronos so it runs on the squashed commit):
+#   install -m 0755 "$here/red-team-audit-hook.sh" "$(git -C <repo> rev-parse --git-path hooks)/post-commit.pre-chronos"
+# Results land in <repo>/.git/red-team-audits/ — review with: red-team-report
 
 echo "✅ chronos stack installed."
 echo
