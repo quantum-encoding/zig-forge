@@ -157,7 +157,7 @@ fn pump(master: c_int, child_pid: c_int) void {
     var scanbuf: [8192]u8 = undefined;
     var clean: [8192]u8 = undefined; // ANSI-stripped scratch for the scanner
     var scanlen: usize = 0;
-    var last_state: [48]u8 = undefined;
+    var last_state: [96]u8 = undefined; // fits a capped thinking-summary phrase
     var last_len: usize = 0;
 
     while (true) {
@@ -226,6 +226,19 @@ fn isAlpha(ch: u8) bool {
     return (ch >= 'A' and ch <= 'Z') or (ch >= 'a' and ch <= 'z');
 }
 
+/// Chars allowed inside a multi-word thinking-summary phrase.
+fn isPhraseChar(ch: u8) bool {
+    return isAlpha(ch) or (ch >= '0' and ch <= '9') or ch == ' ' or ch == '-' or ch == '\'';
+}
+
+fn trimSpaces(s: []const u8) []const u8 {
+    var a: usize = 0;
+    var b: usize = s.len;
+    while (a < b and s[a] == ' ') a += 1;
+    while (b > a and s[b - 1] == ' ') b -= 1;
+    return s[a..b];
+}
+
 /// Strip ANSI escape sequences + CR/NUL from `src` into `dst`, returning the
 /// cleaned length. Claude's TUI is dense ANSI (truecolor + cursor positioning
 /// like `\x1b[60G`), so we MUST clean before scanning. UTF-8 (glyphs, "…", "·",
@@ -269,34 +282,49 @@ fn stripAnsi(src: []const u8, dst: []u8) usize {
     return di;
 }
 
-/// Find the current spinner gerund, or null. The version-proof signature is
-/// "<Capitalised word>… (" — e.g. "✢ Sprouting… (5m 10s · ↑ 17.7k tokens)" or
-/// the older "Pondering… (esc to interrupt)". The trailing "(" is what
-/// distinguishes the spinner from UI chrome (the input placeholder "…create a…"
-/// is followed by a cursor move, not "("). `clean` is a caller-owned scratch
-/// buffer; the returned slice points into it and is valid until the next call.
+/// Find the current cognitive state, or null. Two shapes, both ending in "… (":
+///   1. canonical gerund      "✢ Sprouting… (5m 10s · ↑ 17.7k tokens)"  -> "Sprouting"
+///   2. thinking-summary line "✳ Building Lutuno support… (thinking)"   -> the phrase
+/// The trailing "(" distinguishes both from UI chrome (the input placeholder
+/// "…create a…" is followed by a cursor move, not "("). The "(thinking" marker
+/// picks shape 2 (multi-word) vs shape 1 (single word). The newest match wins —
+/// the line redraws, so the last one in the buffer is current. `clean` is a
+/// caller-owned scratch buffer; the returned slice points into it (valid until
+/// the next call).
 fn scanSpinner(raw: []const u8, clean: []u8) ?[]const u8 {
     const n = stripAnsi(raw, clean);
     const buf = clean[0..n];
     if (buf.len < 4) return null;
 
-    // Newest "…(" wins — the spinner redraws, so the last match is current.
-    var ell: ?usize = null;
+    var best: ?[]const u8 = null; // last valid candidate scanned == most recent
     var i: usize = 0;
     while (i + 3 <= buf.len) : (i += 1) {
-        if (buf[i] == 0xE2 and buf[i + 1] == 0x80 and buf[i + 2] == 0xA6) {
-            var j = i + 3;
-            while (j < buf.len and buf[j] == ' ') j += 1;
-            if (j < buf.len and buf[j] == '(') ell = i;
+        if (!(buf[i] == 0xE2 and buf[i + 1] == 0x80 and buf[i + 2] == 0xA6)) continue;
+        var j = i + 3;
+        while (j < buf.len and buf[j] == ' ') j += 1;
+        if (j >= buf.len or buf[j] != '(') continue;
+
+        if (std.mem.startsWith(u8, buf[j..], "(thinking")) {
+            // Shape 2: multi-word phrase. Walk back over phrase chars (bounded),
+            // stop at the spinner glyph (UTF-8 >= 0x80), newline, or control.
+            var s = i;
+            const limit = if (i > 80) i - 80 else 0;
+            while (s > limit and isPhraseChar(buf[s - 1])) s -= 1;
+            const phrase = trimSpaces(buf[s..i]);
+            if (phrase.len >= 3 and phrase[0] >= 'A' and phrase[0] <= 'Z') {
+                best = phrase[0..@min(phrase.len, 64)];
+            }
+        } else {
+            // Shape 1: single capitalised gerund.
+            var s = i;
+            while (s > 0 and isAlpha(buf[s - 1])) s -= 1;
+            const word = buf[s..i];
+            if (word.len >= 3 and word.len <= 32 and word[0] >= 'A' and word[0] <= 'Z') {
+                best = word;
+            }
         }
     }
-    if (ell) |e| {
-        var s = e;
-        while (s > 0 and isAlpha(buf[s - 1])) s -= 1;
-        const word = buf[s..e];
-        if (word.len >= 3 and word.len <= 32 and word[0] >= 'A' and word[0] <= 'Z') return word;
-    }
-    return null;
+    return best;
 }
 
 fn eql(a: []const u8, b: []const u8) bool {
