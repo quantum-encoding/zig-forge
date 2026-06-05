@@ -155,6 +155,7 @@ fn pump(master: c_int, child_pid: c_int) void {
 
     var rbuf: [8192]u8 = undefined;
     var scanbuf: [8192]u8 = undefined;
+    var clean: [8192]u8 = undefined; // ANSI-stripped scratch for the scanner
     var scanlen: usize = 0;
     var last_state: [48]u8 = undefined;
     var last_len: usize = 0;
@@ -177,7 +178,7 @@ fn pump(master: c_int, child_pid: c_int) void {
             _ = write(STDOUT, &rbuf, ng);
 
             scanlen = appendScan(&scanbuf, scanlen, rbuf[0..ng]);
-            if (scanSpinner(scanbuf[0..scanlen])) |state| {
+            if (scanSpinner(scanbuf[0..scanlen], &clean)) |state| {
                 if (!eql(state, last_state[0..last_len])) {
                     writeStateFile(child_pid, state);
                     const keep = @min(state.len, last_state.len);
@@ -225,33 +226,74 @@ fn isAlpha(ch: u8) bool {
     return (ch >= 'A' and ch <= 'Z') or (ch >= 'a' and ch <= 'z');
 }
 
-/// Find the current spinner gerund in the buffer, or null. Looks for the last
-/// "…" (U+2026 = E2 80 A6) preceded by a capitalised word; falls back to the
-/// legacy " (esc to interrupt" marker.
-fn scanSpinner(buf: []const u8) ?[]const u8 {
-    // Newest "…" wins (the spinner redraws, so the last one is current).
+/// Strip ANSI escape sequences + CR/NUL from `src` into `dst`, returning the
+/// cleaned length. Claude's TUI is dense ANSI (truecolor + cursor positioning
+/// like `\x1b[60G`), so we MUST clean before scanning. UTF-8 (glyphs, "…", "·",
+/// "↑") is preserved.
+fn stripAnsi(src: []const u8, dst: []u8) usize {
+    var di: usize = 0;
+    var i: usize = 0;
+    while (i < src.len) {
+        const ch = src[i];
+        if (ch == 0x1b) { // ESC
+            i += 1;
+            if (i < src.len and src[i] == '[') { // CSI: ESC [ params final
+                i += 1;
+                while (i < src.len and !(src[i] >= 0x40 and src[i] <= 0x7e)) i += 1;
+                if (i < src.len) i += 1; // final byte
+            } else if (i < src.len and src[i] == ']') { // OSC: ESC ] ... BEL/ST
+                i += 1;
+                while (i < src.len and src[i] != 0x07) {
+                    if (src[i] == 0x1b and i + 1 < src.len and src[i + 1] == '\\') {
+                        i += 2;
+                        break;
+                    }
+                    i += 1;
+                }
+                if (i < src.len and src[i] == 0x07) i += 1;
+            } else if (i < src.len) {
+                i += 1; // other two-byte escape
+            }
+            continue;
+        }
+        if (ch == '\r' or ch == 0x00) {
+            i += 1;
+            continue;
+        }
+        if (di < dst.len) {
+            dst[di] = ch;
+            di += 1;
+        }
+        i += 1;
+    }
+    return di;
+}
+
+/// Find the current spinner gerund, or null. The version-proof signature is
+/// "<Capitalised word>… (" — e.g. "✢ Sprouting… (5m 10s · ↑ 17.7k tokens)" or
+/// the older "Pondering… (esc to interrupt)". The trailing "(" is what
+/// distinguishes the spinner from UI chrome (the input placeholder "…create a…"
+/// is followed by a cursor move, not "("). `clean` is a caller-owned scratch
+/// buffer; the returned slice points into it and is valid until the next call.
+fn scanSpinner(raw: []const u8, clean: []u8) ?[]const u8 {
+    const n = stripAnsi(raw, clean);
+    const buf = clean[0..n];
+    if (buf.len < 4) return null;
+
+    // Newest "…(" wins — the spinner redraws, so the last match is current.
     var ell: ?usize = null;
-    if (buf.len >= 3) {
-        var i: usize = 0;
-        while (i + 3 <= buf.len) : (i += 1) {
-            if (buf[i] == 0xE2 and buf[i + 1] == 0x80 and buf[i + 2] == 0xA6) ell = i;
+    var i: usize = 0;
+    while (i + 3 <= buf.len) : (i += 1) {
+        if (buf[i] == 0xE2 and buf[i + 1] == 0x80 and buf[i + 2] == 0xA6) {
+            var j = i + 3;
+            while (j < buf.len and buf[j] == ' ') j += 1;
+            if (j < buf.len and buf[j] == '(') ell = i;
         }
     }
     if (ell) |e| {
         var s = e;
         while (s > 0 and isAlpha(buf[s - 1])) s -= 1;
         const word = buf[s..e];
-        if (word.len >= 3 and word.len <= 32 and word[0] >= 'A' and word[0] <= 'Z') return word;
-    }
-
-    // Legacy: "<Word> (esc to interrupt".
-    const marker = " (esc to interrupt";
-    if (std.mem.lastIndexOf(u8, buf, marker)) |p| {
-        var j = p;
-        var s = j;
-        while (s > 0 and isAlpha(buf[s - 1])) s -= 1;
-        const word = buf[s..j];
-        _ = &j;
         if (word.len >= 3 and word.len <= 32 and word[0] >= 'A' and word[0] <= 'Z') return word;
     }
     return null;
