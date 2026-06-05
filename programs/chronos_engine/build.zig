@@ -67,6 +67,20 @@ pub fn build(b: *std.Build) void {
             .root_module = stamp_macos_mod,
         });
         b.installArtifact(stamp_macos);
+
+        // chronos-run — PTY pump that captures Claude's live spinner gerund and
+        // writes /tmp/cognitive-state-<pid>. Alias: claude='chronos-run claude'.
+        const chronos_run_mod = b.createModule(.{
+            .root_source_file = b.path("chronos-run.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        const chronos_run = b.addExecutable(.{
+            .name = "chronos-run",
+            .root_module = chronos_run_mod,
+        });
+        b.installArtifact(chronos_run);
     }
 
     // Create run step

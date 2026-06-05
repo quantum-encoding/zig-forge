@@ -51,29 +51,27 @@ pub fn main() !u8 {
     // repo has the post-commit shim before we start laying down ticks.
     ensureSquashShim(allocator) catch {};
 
-    // Get environment variables
-    const tool_input = if (c.getenv("CLAUDE_TOOL_INPUT")) |ptr| std.mem.sliceTo(ptr, 0) else null;
-    const claude_pid_str = if (c.getenv("CLAUDE_PID")) |ptr| std.mem.sliceTo(ptr, 0) else null;
+    // The PostToolUse payload arrives as JSON on STDIN. Current Claude Code does
+    // NOT set CLAUDE_TOOL_INPUT / CLAUDE_PID / CLAUDE_TOOL_NAME env vars — the old
+    // env-based reads silently produced empty descriptions. Read stdin and pull
+    // tool_name + tool_input.description. (STDIN is always closed -> no hang.)
+    const hook_json = readAllStdin(allocator) catch try allocator.dupe(u8, "");
+    defer allocator.free(hook_json);
 
-    // Extract tool description from JSON if available
-    var tool_description: ?[]const u8 = null;
-    if (tool_input) |input| {
-        tool_description = try extractToolDescription(allocator, input);
+    const tool_name = try extractJsonString(allocator, hook_json, "\"tool_name\"");
+    defer if (tool_name) |t| allocator.free(t);
+
+    // Tick description: prefer the tool's own description, else the tool name.
+    var tool_description = try extractJsonString(allocator, hook_json, "\"description\"");
+    if (tool_description == null) {
+        if (tool_name) |t| tool_description = try allocator.dupe(u8, t);
     }
     defer if (tool_description) |desc| allocator.free(desc);
 
-    // Get Claude PID
-    var pid: ?u32 = null;
-    if (claude_pid_str) |pid_str| {
-        pid = std.fmt.parseInt(u32, pid_str, 10) catch null;
-    }
-    if (pid == null) {
-        // Fallback: try to find Claude process
-        pid = try findClaudePid(allocator);
-    }
-
-    // Get cognitive state
-    const cognitive_state = try getCognitiveState(allocator, pid);
+    // Cognitive state: the live gerund from a PTY tap (get-cognitive-state reads
+    // /tmp/cognitive-state-<pid>), else fall back to the just-fired tool's activity
+    // (Editing / Executing / Reading / ...) instead of NOT-DETECTED.
+    const cognitive_state = try getCognitiveState(allocator, tool_name);
     defer allocator.free(cognitive_state);
 
     // Generate CHRONOS timestamp
@@ -183,59 +181,81 @@ fn chronosEnabled(allocator: std.mem.Allocator) !bool {
     return std.mem.eql(u8, val, "true");
 }
 
-fn extractToolDescription(allocator: std.mem.Allocator, json_input: []const u8) !?[]const u8 {
-    // Simple JSON parsing - look for "description":"..."
-    const needle = "\"description\":\"";
-    const start_pos = std.mem.indexOf(u8, json_input, needle) orelse return null;
-    const value_start = start_pos + needle.len;
-
-    // Find closing quote
-    const end_pos = std.mem.indexOfPos(u8, json_input, value_start, "\"") orelse return null;
-
-    const description = json_input[value_start..end_pos];
-    return try allocator.dupe(u8, description);
+/// Read all of stdin to EOF (the hook JSON). Capped at 1 MiB. Returns owned bytes.
+fn readAllStdin(allocator: std.mem.Allocator) ![]const u8 {
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    errdefer buf.deinit(allocator);
+    var tmp: [4096]u8 = undefined;
+    while (true) {
+        const n = c.read(0, &tmp, tmp.len);
+        if (n <= 0) break;
+        try buf.appendSlice(allocator, tmp[0..@intCast(n)]);
+        if (buf.items.len > (1 << 20)) break;
+    }
+    return buf.toOwnedSlice(allocator);
 }
 
-fn findClaudePid(allocator: std.mem.Allocator) !?u32 {
-    var result = try runCommand(allocator, &[_][]const u8{ "pgrep", "-f", "claude" });
-    defer result.deinit();
-
-    if (result.exit_code != 0 or result.stdout.len == 0) {
-        return null;
+/// Extract a JSON string value for `key` (key includes its quotes, e.g.
+/// "\"tool_name\""). Finds the first occurrence, then the next "..." after the
+/// colon, honouring backslash escapes. Returns owned bytes or null.
+fn extractJsonString(allocator: std.mem.Allocator, json: []const u8, key: []const u8) !?[]const u8 {
+    const kpos = std.mem.indexOf(u8, json, key) orelse return null;
+    var i = kpos + key.len;
+    while (i < json.len and (json[i] == ' ' or json[i] == '\t' or json[i] == ':')) i += 1;
+    if (i >= json.len or json[i] != '"') return null;
+    i += 1;
+    const start = i;
+    while (i < json.len) : (i += 1) {
+        if (json[i] == '\\') {
+            i += 1; // skip the escaped char
+            continue;
+        }
+        if (json[i] == '"') break;
     }
-
-    // Get first line
-    const newline_pos = std.mem.indexOf(u8, result.stdout, "\n") orelse result.stdout.len;
-    const pid_str = std.mem.trim(u8, result.stdout[0..newline_pos], " \t\n\r");
-
-    return std.fmt.parseInt(u32, pid_str, 10) catch null;
+    if (i > json.len) return null;
+    return try allocator.dupe(u8, json[start..i]);
 }
 
-fn getCognitiveState(allocator: std.mem.Allocator, pid: ?u32) ![]const u8 {
-    var args = std.ArrayList([]const u8).empty;
-    defer args.deinit(allocator);
-
-    try args.append(allocator, GET_COGNITIVE_STATE_PATH);
-
-    if (pid) |p| {
-        const pid_str = try std.fmt.allocPrint(allocator, "{d}", .{p});
-        defer allocator.free(pid_str);
-        try args.append(allocator, pid_str);
+/// Map a Claude Code tool name to a gerund activity, used as the cognitive-state
+/// fallback when no live spinner gerund is available from the PTY tap.
+fn toolActivity(tool_name: ?[]const u8) []const u8 {
+    const t = tool_name orelse return "Working";
+    const map = [_]struct { []const u8, []const u8 }{
+        .{ "Bash", "Executing" },
+        .{ "Edit", "Editing" },
+        .{ "MultiEdit", "Editing" },
+        .{ "Write", "Writing" },
+        .{ "NotebookEdit", "Editing" },
+        .{ "Read", "Reading" },
+        .{ "Glob", "Searching" },
+        .{ "Grep", "Searching" },
+        .{ "TodoWrite", "Planning" },
+        .{ "Task", "Delegating" },
+        .{ "Agent", "Delegating" },
+        .{ "WebFetch", "Researching" },
+        .{ "WebSearch", "Researching" },
+        .{ "ExitPlanMode", "Planning" },
+    };
+    for (map) |kv| {
+        if (std.mem.eql(u8, t, kv[0])) return kv[1];
     }
+    return "Working"; // MCP tools (mcp__*) and anything unmapped
+}
 
-    var result = try runCommand(allocator, args.items);
+/// Resolve the cognitive state for the stamp. Prefers the live gerund that a PTY
+/// tap wrote to /tmp/cognitive-state-<pid> (get-cognitive-state resolves the
+/// firing claude's PID itself); on NOT-DETECTED, falls back to the tool activity.
+fn getCognitiveState(allocator: std.mem.Allocator, tool_name: ?[]const u8) ![]const u8 {
+    var result = try runCommand(allocator, &[_][]const u8{GET_COGNITIVE_STATE_PATH});
     defer result.deinit();
 
-    if (result.exit_code == 0 and result.stdout.len > 0) {
-        // Trim whitespace
+    if (result.exit_code == 0) {
         const state = std.mem.trim(u8, result.stdout, " \t\n\r");
-        if (state.len > 0) {
+        if (state.len > 0 and !std.mem.eql(u8, state, "NOT-DETECTED")) {
             return try allocator.dupe(u8, state);
         }
     }
-
-    // Fallback
-    return try allocator.dupe(u8, "Active");
+    return try allocator.dupe(u8, toolActivity(tool_name));
 }
 
 fn generateChronosTimestamp(allocator: std.mem.Allocator) ![]const u8 {
