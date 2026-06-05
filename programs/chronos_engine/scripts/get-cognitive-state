@@ -1,23 +1,200 @@
 #!/bin/bash
 # Get Real-Time Cognitive State for Chronos Git Stamps
 #
-# Reads the live cognitive state recorded by the cognitive-watcher daemon and
+# Reads the live cognitive state recorded by the platform's telemetry source and
 # prints the bare gerund (e.g. "Pollinating", "Spelunking") used in chronos
 # commit stamps. Prints "NOT-DETECTED" when no state can be resolved.
 #
-# Cross-platform: Linux walks /proc, macOS (Darwin) walks the process tree via
-# `ps`. The cognitive-watcher DB only exists where the watcher daemon runs
-# (currently Linux); on a host without it, PID detection still works and the
-# state simply resolves to NOT-DETECTED (the chronos-hook then substitutes its
-# own fallback).
+# Two telemetry backends, selected by OS — this matters, because the reader and
+# the writer MUST agree on where the data lives:
 #
-# Usage: get-cognitive-state [PID]
-#   If PID is provided, use it directly
-#   Otherwise, walk up the process tree to find Claude
+#   Linux  : the cognitive-watcher daemon parses the spinner over D-Bus and
+#            records rows in an sqlite DB (cognitive_sessions / cognitive_states).
+#            DB default: /var/lib/cognitive-watcher/cognitive-states.db
+#
+#   macOS  : there is NO sqlite daemon. The DYLD write() interposer
+#            (libcognitive-capture.dylib) intercepts Claude Code's TTY writes and
+#            dumps the current state to a per-PID cache file:
+#                /tmp/cognitive-state-<pid>   (format: "<unix_ts>:<state>")
+#            Reading the Linux sqlite DB on macOS is the historical bug behind
+#            every NOT-DETECTED stamp: nothing on macOS writes to that DB, so the
+#            query always came back empty. This script reads the cache files the
+#            interposer actually produces.
+#
+# Subcommands:
+#   get-cognitive-state            resolve + print current state (default)
+#   get-cognitive-state <PID>      resolve for an explicit Claude PID
+#   get-cognitive-state --check    pre-flight: verify (Linux: + initialize) the
+#   get-cognitive-state --init     telemetry source; exit 0 if healthy/ready.
 
 DB_PATH="${COGNITIVE_DB_PATH:-/var/lib/cognitive-watcher/cognitive-states.db}"
+CACHE_DIR="${COGNITIVE_CACHE_DIR:-/tmp}"
+CAPTURE_DYLIB="${COGNITIVE_CAPTURE_DYLIB:-/usr/local/lib/libcognitive-capture.dylib}"
+STATE_TIMEOUT_SECS="${COGNITIVE_STATE_TIMEOUT_SECS:-30}"
 
 UNAME_S="$(uname -s 2>/dev/null)"
+
+now_epoch() { date +%s; }
+
+# mtime of a file as a unix timestamp, BSD (macOS) or GNU (Linux) stat.
+file_mtime() {
+    stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# Linux sqlite backend
+# ---------------------------------------------------------------------------
+
+# Create the telemetry DB + schema if absent. The reader must never bail to
+# NOT-DETECTED merely because the schema is missing — an empty-but-initialized DB
+# is the correct resting state before the watcher writes its first row. Schema is
+# kept byte-for-byte in step with cognitive-watcher.zig (cognitive_sessions, the
+# authoritative V2 table) and src/cognitive-states-schema.sql (legacy
+# cognitive_states, still read by the fallback query below). Idempotent.
+ensure_db_schema() {
+    command -v sqlite3 >/dev/null 2>&1 || return 1
+    local dir
+    dir="$(dirname "$DB_PATH")"
+    [ -d "$dir" ] || mkdir -p "$dir" 2>/dev/null || return 1
+    sqlite3 "$DB_PATH" 2>/dev/null <<'SQL'
+PRAGMA journal_mode=WAL;
+CREATE TABLE IF NOT EXISTS cognitive_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pid INTEGER NOT NULL,
+    cognitive_state TEXT NOT NULL,
+    tools_called TEXT,
+    tool_count INTEGER DEFAULT 0,
+    start_time INTEGER NOT NULL,
+    end_time INTEGER NOT NULL,
+    duration_seconds INTEGER,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_pid ON cognitive_sessions(pid);
+CREATE INDEX IF NOT EXISTS idx_sessions_state ON cognitive_sessions(cognitive_state);
+CREATE INDEX IF NOT EXISTS idx_sessions_time ON cognitive_sessions(start_time);
+CREATE TABLE IF NOT EXISTS cognitive_states (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp_ns INTEGER NOT NULL,
+    timestamp_human TEXT NOT NULL,
+    pid INTEGER NOT NULL,
+    process_name TEXT NOT NULL,
+    state_type TEXT NOT NULL,
+    tool_name TEXT,
+    tool_args TEXT,
+    status TEXT,
+    raw_content TEXT NOT NULL,
+    content_hash TEXT NOT NULL UNIQUE,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_states_pid ON cognitive_states(pid);
+CREATE INDEX IF NOT EXISTS idx_states_ts ON cognitive_states(timestamp_ns);
+SQL
+}
+
+# Resolve the state for a PID from the sqlite DB (Linux). Echoes the state, or
+# nothing if none is found.
+state_from_sqlite() {
+    local claude_pid="$1"
+
+    # Primary source (cognitive-watcher V2): the watcher already detects and
+    # parses the spinner state and records one row per state segment in the
+    # cognitive_sessions table. The newest row for this PID is the current
+    # state, pre-parsed to a clean gerund ("Pollinating", "Synthesizing", ...).
+    local v2_state
+    v2_state=$(sqlite3 "$DB_PATH" "
+        SELECT cognitive_state
+        FROM cognitive_sessions
+        WHERE pid=$claude_pid
+        ORDER BY id DESC
+        LIMIT 1;" 2>/dev/null)
+    if [ -n "$v2_state" ]; then
+        echo "$v2_state"
+        return 0
+    fi
+
+    # Legacy fallback: parse raw TTY spinner frames from cognitive_states.
+    # Claude Code's spinner has used two formats over time:
+    #   OLD (pre-2026): " Elucidating (esc to interrupt  1m 32s   2.1k tokens)"
+    #   NEW (current):  "✶ Skedaddling…30"  (glyph + gerund + … + elapsed secs)
+    # Match either: a letter immediately before "…" (GLOB excludes bare counter
+    # frames like "…42"), or the legacy "(esc to interrupt" marker.
+    local raw_content
+    raw_content=$(sqlite3 "$DB_PATH" "
+        SELECT raw_content
+        FROM cognitive_states
+        WHERE pid=$claude_pid
+          AND (raw_content GLOB '*[A-Za-z]…*'
+               OR raw_content LIKE '%(esc to interrupt%')
+        ORDER BY id DESC
+        LIMIT 1;" 2>/dev/null)
+
+    # Take the spinner line, drop everything from "…"/"(esc to interrupt" on,
+    # then strip the leading glyph/whitespace and any trailing whitespace.
+    local cognitive_state
+    cognitive_state=$(printf '%s' "$raw_content" \
+        | grep -m1 -E '…|esc to interrupt' \
+        | sed -E 's/….*$//; s/[[:space:]]*\(esc to interrupt.*$//' \
+        | sed 's/^[^[:alpha:]]*//; s/[[:space:]]*$//')
+
+    [ -n "$cognitive_state" ] && echo "$cognitive_state"
+}
+
+# ---------------------------------------------------------------------------
+# macOS cache-file backend (libcognitive-capture.dylib)
+# ---------------------------------------------------------------------------
+
+# Resolve the state for a PID from /tmp/cognitive-state-<pid>. The interposer
+# writes "<unix_ts>:<state>" with no trailing newline. Honour the same staleness
+# window the macOS-native reader uses, so a state left behind by an exited Claude
+# doesn't get stamped onto an unrelated commit minutes later. Echoes the state,
+# or nothing (missing/stale/malformed).
+state_from_cache() {
+    local pid="$1"
+    local f="$CACHE_DIR/cognitive-state-$pid"
+    [ -f "$f" ] || return 1
+
+    local content ts state now
+    content="$(tr -d '\r\n' < "$f" 2>/dev/null)"
+    [ -n "$content" ] || return 1
+
+    ts="${content%%:*}"
+    state="${content#*:}"
+    # Reject malformed lines (no colon, empty timestamp, non-numeric timestamp,
+    # empty state).
+    [ "$state" != "$content" ] || return 1
+    case "$ts" in ''|*[!0-9]*) return 1 ;; esac
+    state="$(printf '%s' "$state" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    [ -n "$state" ] || return 1
+
+    now="$(now_epoch)"
+    if [ $(( now - ts )) -gt "$STATE_TIMEOUT_SECS" ]; then
+        return 1   # stale
+    fi
+
+    echo "$state"
+}
+
+# Fallback PID for macOS: the PID of the freshest non-stale cache file. Mirrors
+# the Linux "most recently active PID known to the watcher" fallback.
+cache_fallback_pid() {
+    local f base mt newest="" newest_mt=0
+    for f in "$CACHE_DIR"/cognitive-state-*; do
+        [ -f "$f" ] || continue
+        base="${f##*/cognitive-state-}"
+        case "$base" in ''|*[!0-9]*) continue ;; esac   # skip '-capture' & non-PID names
+        mt="$(file_mtime "$f")"
+        [ -n "$mt" ] || continue
+        if [ "$mt" -gt "$newest_mt" ]; then
+            newest_mt="$mt"
+            newest="$base"
+        fi
+    done
+    [ -n "$newest" ] && echo "$newest"
+}
+
+# ---------------------------------------------------------------------------
+# Process-tree walk (cross-platform)
+# ---------------------------------------------------------------------------
 
 # True when $1 looks like the real Claude Code process, given its comm (process
 # name) and full command line. We deliberately do NOT match a bare "claude-code"
@@ -68,13 +245,23 @@ get_claude_pid() {
         depth=$((depth + 1))
     done
 
-    # Fall back to the most recently active PID known to the watcher.
-    # Uses cognitive_sessions (the live V2 table); the legacy cognitive_states
-    # table is no longer written for active sessions.
-    local recent_pid=$(sqlite3 "$DB_PATH" "SELECT pid FROM cognitive_sessions ORDER BY id DESC LIMIT 1;" 2>/dev/null)
-    if [ -n "$recent_pid" ]; then
-        echo "$recent_pid"
-        return 0
+    # Fall back to the most recently active PID known to the telemetry source.
+    if [ "$UNAME_S" = "Darwin" ]; then
+        local cpid
+        cpid="$(cache_fallback_pid)"
+        if [ -n "$cpid" ]; then
+            echo "$cpid"
+            return 0
+        fi
+    else
+        # Uses cognitive_sessions (the live V2 table); the legacy cognitive_states
+        # table is no longer written for active sessions.
+        local recent_pid
+        recent_pid=$(sqlite3 "$DB_PATH" "SELECT pid FROM cognitive_sessions ORDER BY id DESC LIMIT 1;" 2>/dev/null)
+        if [ -n "$recent_pid" ]; then
+            echo "$recent_pid"
+            return 0
+        fi
     fi
 
     echo ""
@@ -89,59 +276,82 @@ get_state_from_db() {
         return
     fi
 
-    # If there's no watcher DB on this host (e.g. macOS without the daemon),
-    # there is nothing to query — resolve to NOT-DETECTED immediately.
+    if [ "$UNAME_S" = "Darwin" ]; then
+        # macOS telemetry = per-PID cache files written by the DYLD interposer.
+        local state
+        if state="$(state_from_cache "$claude_pid")"; then
+            echo "$state"
+        else
+            echo "NOT-DETECTED"
+        fi
+        return
+    fi
+
+    # Linux: sqlite. Auto-initialize the schema if the DB/table is missing rather
+    # than bailing — a fresh host should come up with a ready (if empty) DB.
+    ensure_db_schema
     if [ ! -f "$DB_PATH" ]; then
         echo "NOT-DETECTED"
         return
     fi
 
-    # Primary source (cognitive-watcher V2): the watcher already detects and
-    # parses the spinner state and records one row per state segment in the
-    # cognitive_sessions table. The newest row for this PID is the current
-    # state, pre-parsed to a clean gerund ("Pollinating", "Synthesizing", ...).
-    # This is authoritative and replaces the fragile raw-TTY parsing below.
-    local v2_state=$(sqlite3 "$DB_PATH" "
-        SELECT cognitive_state
-        FROM cognitive_sessions
-        WHERE pid=$claude_pid
-        ORDER BY id DESC
-        LIMIT 1;" 2>/dev/null)
-    if [ -n "$v2_state" ]; then
-        echo "$v2_state"
-        return
-    fi
-
-    # Legacy fallback: parse raw TTY spinner frames from cognitive_states.
-    # Claude Code's spinner has used two formats over time:
-    #   OLD (pre-2026): " Elucidating (esc to interrupt  1m 32s   2.1k tokens)"
-    #   NEW (current):  "✶ Skedaddling…30"  (glyph + gerund + … + elapsed secs)
-    # Match either: a letter immediately before "…" (GLOB excludes bare counter
-    # frames like "…42"), or the legacy "(esc to interrupt" marker.
-    local raw_content=$(sqlite3 "$DB_PATH" "
-        SELECT raw_content
-        FROM cognitive_states
-        WHERE pid=$claude_pid
-          AND (raw_content GLOB '*[A-Za-z]…*'
-               OR raw_content LIKE '%(esc to interrupt%')
-        ORDER BY id DESC
-        LIMIT 1;" 2>/dev/null)
-
-    # Take the spinner line, drop everything from "…"/"(esc to interrupt" on,
-    # then strip the leading glyph/whitespace and any trailing whitespace.
-    # The leading-glyph strip is byte-oriented so it works in C and UTF-8 locales.
-    local cognitive_state=$(printf '%s' "$raw_content" \
-        | grep -m1 -E '…|esc to interrupt' \
-        | sed -E 's/….*$//; s/[[:space:]]*\(esc to interrupt.*$//' \
-        | sed 's/^[^[:alpha:]]*//; s/[[:space:]]*$//')
-
-    if [ -n "$cognitive_state" ]; then
-        echo "$cognitive_state"
+    local state
+    state="$(state_from_sqlite "$claude_pid")"
+    if [ -n "$state" ]; then
+        echo "$state"
     else
         echo "NOT-DETECTED"
     fi
 }
 
+# ---------------------------------------------------------------------------
+# Pre-flight: verify (and on Linux, initialize) the telemetry source.
+# Exit 0 when the source is healthy/ready, non-zero otherwise. Intended for
+# install.sh / chronos-enable-repo so a misconfigured host is caught at setup
+# time rather than silently producing NOT-DETECTED stamps forever.
+# ---------------------------------------------------------------------------
+preflight() {
+    if [ "$UNAME_S" = "Darwin" ]; then
+        if [ ! -f "$CAPTURE_DYLIB" ]; then
+            echo "chronos preflight: capture dylib MISSING -> $CAPTURE_DYLIB" >&2
+            echo "  Build + install libcognitive-capture, else every stamp reads NOT-DETECTED." >&2
+            return 1
+        fi
+        if ls "$CACHE_DIR"/cognitive-state-* >/dev/null 2>&1; then
+            echo "chronos preflight: macOS telemetry OK — dylib present, cache active ($CACHE_DIR/cognitive-state-*)"
+        else
+            echo "chronos preflight: dylib present but no $CACHE_DIR/cognitive-state-* files yet." >&2
+            echo "  Claude Code must be launched with the interposer for states to appear:" >&2
+            echo "    DYLD_INSERT_LIBRARIES=$CAPTURE_DYLIB" >&2
+            echo "  (preflight OK — capture lib is installed; verify the launch env above.)"
+        fi
+        return 0
+    fi
+
+    # Linux: ensure the DB and schema exist.
+    if ! command -v sqlite3 >/dev/null 2>&1; then
+        echo "chronos preflight: sqlite3 not found; cannot initialize $DB_PATH" >&2
+        return 1
+    fi
+    if ensure_db_schema && [ -f "$DB_PATH" ]; then
+        echo "chronos preflight: telemetry DB ready ($DB_PATH)"
+        return 0
+    fi
+    echo "chronos preflight: failed to initialize $DB_PATH (permissions? run with sudo)" >&2
+    return 1
+}
+
 # Main execution
+case "${1:-}" in
+    --check|--init|--preflight)
+        preflight
+        exit $?
+        ;;
+    -h|--help)
+        sed -n '2,30p' "$0"
+        exit 0
+        ;;
+esac
+
 STATE=$(get_state_from_db "$1")
 echo "$STATE"

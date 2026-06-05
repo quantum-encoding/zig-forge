@@ -38,6 +38,19 @@ sudo install -m 0755 "$here/red-team-report"                     /usr/local/bin/
 # Results land in <repo>/.git/red-team-audits/ — review with: red-team-report
 
 echo "✅ chronos stack installed."
+
+# Pre-flight the cognitive telemetry source so a misconfigured host is caught
+# here, not after weeks of NOT-DETECTED stamps. On Linux this also creates the
+# watcher DB + schema; on macOS it verifies libcognitive-capture.dylib is present.
+echo "🩺 Pre-flight: verifying cognitive telemetry source..."
+if ! /usr/local/bin/get-cognitive-state --init; then
+  echo "⚠️  telemetry preflight reported an issue (see above) — stamps may read NOT-DETECTED."
+  if [ "$(uname -s 2>/dev/null)" = "Darwin" ]; then
+    echo "    macOS capture lib lives in cognitive_telemetry_kit/libcognitive-capture;"
+    echo "    build it and: sudo install -m0755 zig-out/lib/libcognitive-capture.dylib /usr/local/lib/"
+  fi
+fi
+
 echo
 echo "Next:"
 echo "  1) Ensure ~/.claude/settings.json has a PostToolUse '*' hook -> /usr/local/bin/chronos-hook"

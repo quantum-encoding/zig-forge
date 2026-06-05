@@ -62,3 +62,18 @@ chmod +x "$target"
 echo "chronos: enabled in $repo (autopush=$autopush)"
 echo "  ticking:  git config chronos.enabled  -> $(git config --get chronos.enabled)"
 echo "  squash:   $target -> /usr/local/bin/chronos-post-commit"
+
+# Pre-flight the cognitive telemetry source. Without it, every tick stamp in this
+# repo silently reads NOT-DETECTED (macOS: the capture dylib must be installed and
+# Claude launched under it; Linux: the watcher DB must exist + be schema'd, which
+# --init creates). Non-fatal: ticking still works, the gerund is just absent.
+gcs="$(command -v get-cognitive-state || echo /usr/local/bin/get-cognitive-state)"
+if [ -x "$gcs" ]; then
+  if "$gcs" --init; then
+    echo "  telemetry: $("$gcs")"
+  else
+    echo "  telemetry: NOT ready — stamps will read NOT-DETECTED (see warnings above)" >&2
+  fi
+else
+  echo "  telemetry: get-cognitive-state not installed — stamps will read NOT-DETECTED" >&2
+fi
