@@ -30,6 +30,27 @@ pub fn main() !u8 {
         return 0;
     }
 
+    // .gitignore-first safety rule. If a repo's root has no .gitignore, refuse to
+    // auto-stage: the very first `git add .` would otherwise sweep build bloat
+    // (zig-cache/, .DS_Store, DerivedData, node_modules/, …) permanently into the
+    // packfiles. Warn loudly so the agent writes a .gitignore before proceeding.
+    const repo_root = try gitOutput(allocator, &[_][]const u8{ "git", "rev-parse", "--show-toplevel" });
+    defer if (repo_root) |r| allocator.free(r);
+    if (repo_root) |root| {
+        if (!gitignoreExists(root)) {
+            const msg = "[CHRONOS ERROR] Missing .gitignore file in repository root! " ++
+                "Please create a .gitignore before executing further tools to prevent tracking bloat.\n";
+            _ = c.write(2, msg.ptr, msg.len);
+            return 2;
+        }
+    }
+
+    // Self-bootstrap the squash. Global ticking (git config --global
+    // chronos.enabled true) must come WITH global squashing, or non-enabled
+    // repos would silently accumulate un-squashed [CHRONOS] commits. Ensure this
+    // repo has the post-commit shim before we start laying down ticks.
+    ensureSquashShim(allocator) catch {};
+
     // Get environment variables
     const tool_input = if (c.getenv("CLAUDE_TOOL_INPUT")) |ptr| std.mem.sliceTo(ptr, 0) else null;
     const claude_pid_str = if (c.getenv("CLAUDE_PID")) |ptr| std.mem.sliceTo(ptr, 0) else null;
@@ -104,6 +125,47 @@ pub fn main() !u8 {
 fn isGitRepository(allocator: std.mem.Allocator) !bool {
     const result = try runCommand(allocator, &[_][]const u8{ "git", "rev-parse", "--git-dir" });
     return result.exit_code == 0;
+}
+
+/// Run a git command and return its trimmed stdout (owned), or null on failure /
+/// empty output. Caller frees on success.
+fn gitOutput(allocator: std.mem.Allocator, argv: []const []const u8) !?[]const u8 {
+    var r = try runCommand(allocator, argv);
+    defer r.deinit();
+    if (r.exit_code != 0) return null;
+    const t = std.mem.trim(u8, r.stdout, " \t\r\n");
+    if (t.len == 0) return null;
+    return try allocator.dupe(u8, t);
+}
+
+/// Whether <root>/.gitignore exists.
+fn gitignoreExists(root: []const u8) bool {
+    var buf: [4096]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&buf, "{s}/.gitignore", .{root}) catch return false;
+    return c.access(path.ptr, c.F_OK) == 0;
+}
+
+/// Ensure the current repo has the chronos post-commit squash shim installed.
+/// Idempotent and cheap: if the shim is already present we return immediately;
+/// otherwise we delegate to the tested chronos-enable-repo installer, which sets
+/// local config and chains any pre-existing post-commit hook. This pairs global
+/// ticking with global squashing so no repo accumulates un-squashed ticks.
+fn ensureSquashShim(allocator: std.mem.Allocator) !void {
+    const hooks = (try gitOutput(allocator, &[_][]const u8{ "git", "rev-parse", "--git-path", "hooks" })) orelse return;
+    defer allocator.free(hooks);
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const post_commit = std.fmt.bufPrint(&buf, "{s}/post-commit", .{hooks}) catch return;
+
+    // Already installed? grep is cheap and avoids std.fs read-API churn.
+    var grep = try runCommand(allocator, &[_][]const u8{ "grep", "-q", "chronos post-commit shim", post_commit });
+    grep.deinit();
+    if (grep.exit_code == 0) return;
+
+    const root = (try gitOutput(allocator, &[_][]const u8{ "git", "rev-parse", "--show-toplevel" })) orelse return;
+    defer allocator.free(root);
+    var install = try runCommand(allocator, &[_][]const u8{ "/usr/local/bin/chronos-enable-repo", root });
+    install.deinit();
 }
 
 /// Whether this repo has opted in to chronos ticking. True when either the
