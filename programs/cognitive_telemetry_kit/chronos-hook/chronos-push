@@ -1,17 +1,25 @@
 #!/bin/bash
 # chronos-push [-m "message"] [remote] [branch] — the explicit "ship it" command.
 #
-# Replaces commit-time auto-squash/auto-push. As you work, every tool action
-# leaves a [CHRONOS] tick commit. When you're ready to publish, run this: it
-# folds the accumulated ticks into ONE summary commit, then pushes.
+# As you work, every tool action leaves a [CHRONOS] tick commit. When you're
+# ready to publish, run this: it removes ALL ticks from the unpushed range and
+# pushes a tick-free history.
 #
-#   chronos-push                       # auto summary message, push origin/<branch>
-#   chronos-push -m "feat: add X"      # your subject; tick actions kept in the body
+# How the fold works: git trees are cumulative snapshots, so a real commit's tree
+# already contains the changes of the ticks committed below it. We therefore
+# replay the real commits onto a tick-free chain (re-using their existing trees)
+# and drop the ticks — each real commit absorbs the ticks beneath it, with no
+# diff replay and no conflicts. This also folds ticks STRANDED below a manual
+# commit. Ticks trailing above the last real commit collapse into one summary
+# commit (message: your -m, or an auto summary of the ticks' actions).
+#
+#   chronos-push                       # auto summary, push origin/<branch>
+#   chronos-push -m "feat: add X"      # your subject for the trailing summary
 #   chronos-push -m "fix: y" origin dev
 #
 # Why a command and not a git hook: a pre-push hook cannot rewrite what gets
-# pushed (git locks the push SHA before the hook runs — verified: ticks leak and
-# local diverges). So WE do the reset+recommit, then call git push.
+# pushed (git locks the push SHA before the hook runs — verified). So WE rewrite,
+# then call git push.
 set -euo pipefail
 
 msg_override=""
@@ -22,55 +30,103 @@ remote="${1:-origin}"
 branch="${2:-$(git symbolic-ref --short -q HEAD || true)}"
 [ -n "$branch" ] || { echo "chronos-push: detached HEAD — specify a branch" >&2; exit 1; }
 
-# Squash base = nearest ancestor of HEAD that is NOT a [CHRONOS] tick.
-h=$(git rev-parse HEAD)
-base=""
-while [ -n "$h" ]; do
-  case "$(git log -1 --format=%s "$h" 2>/dev/null)" in
-    "[CHRONOS]"*) h=$(git rev-parse "$h^" 2>/dev/null || echo "") ;;
-    "")           break ;;
-    *)            base="$h"; break ;;
-  esac
-done
-
-if [ -n "$base" ] && [ "$base" != "$(git rev-parse HEAD)" ]; then
-  n=$(git rev-list --count "$base..HEAD")
-  # Body: each tick's recorded action ("→ tool-completion - <desc>").
-  actions=$(git log --reverse --format=%s "$base..HEAD" \
-            | sed -n 's/.* → tool-completion - \(.*\)$/- \1/p')
-  [ -n "$actions" ] || actions="- (no recorded tool descriptions)"
-  short=$(git rev-parse --short "$base")
-
-  if [ -n "$msg_override" ]; then
-    msg="${msg_override}
-
-${actions}
-
-[chronos] squashed ${n} tick(s) above ${short}."
-  else
-    msg="chronos: session summary — ${n} action(s), $(date '+%Y-%m-%d %H:%M')
-
-${actions}
-
-Squashed ${n} chronos tick(s) above ${short}."
-  fi
-
-  git reset --soft "$base"
-  git commit --no-verify -m "$msg" >/dev/null
-  echo "chronos-push: folded ${n} tick(s) into one commit on ${short}"
-else
-  echo "chronos-push: no ticks to fold (nothing accumulated since the last real commit)"
+# Protect uncommitted work: the rewrite ends in `git reset --soft`, but refuse if
+# the tree is dirty so nothing can be lost by surprise.
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "chronos-push: working tree has uncommitted changes — commit or stash first" >&2
+  exit 1
 fi
 
-# Leak guard: never push if any [CHRONOS] tick would still reach the remote
-# (e.g. ticks stranded below a manual commit). Refuse rather than pollute origin.
+# Rewrite base = furthest-back point we may safely rewrite. Prefer the pushed tip
+# (rewrite only unpushed history); fall back to the nearest non-tick ancestor.
 upstream="${remote}/${branch}"
+if git rev-parse --verify -q "$upstream" >/dev/null 2>&1; then
+  base=$(git rev-parse "$upstream")
+else
+  h=$(git rev-parse HEAD); base=""
+  while [ -n "$h" ]; do
+    case "$(git log -1 --format=%s "$h" 2>/dev/null)" in
+      "[CHRONOS]"*) h=$(git rev-parse "$h^" 2>/dev/null || echo "") ;;
+      "")           break ;;
+      *)            base="$h"; break ;;
+    esac
+  done
+  [ -n "$base" ] || base=$(git rev-list --max-parents=0 HEAD | tail -1)
+fi
+
+ticks_total=$(git log --format=%s "${base}..HEAD" 2>/dev/null | grep -c '^\[CHRONOS\]' || true)
+
+if [ "${ticks_total:-0}" -eq 0 ]; then
+  echo "chronos-push: no ticks to fold"
+else
+  # No merges in the range — the cumulative-tree reasoning assumes linear history.
+  if [ -n "$(git rev-list --merges "${base}..HEAD" 2>/dev/null)" ]; then
+    echo "chronos-push: ERROR — merge commits in ${base}..HEAD; refusing to rewrite. Squash manually." >&2
+    exit 1
+  fi
+
+  new_head="$base"
+  pending=0          # unfolded ticks waiting for a real commit to absorb them
+  tip_tree=""        # tree of the most recent tick (for the trailing summary)
+  descs=()           # trailing ticks' action descriptions
+  while read -r sha; do
+    subj=$(git log -1 --format=%s "$sha")
+    tree=$(git rev-parse "${sha}^{tree}")
+    case "$subj" in
+      "[CHRONOS]"*)
+        pending=1; tip_tree="$tree"
+        d=$(printf '%s' "$subj" | sed -n 's/.* → tool-completion - \(.*\)$/\1/p')
+        [ -n "$d" ] && descs+=("$d")
+        ;;
+      *)
+        # Real commit: recreate with its own tree (already includes pending ticks),
+        # re-parented onto the tick-free chain. Message preserved verbatim.
+        new_head=$(git commit-tree "$tree" -p "$new_head" -m "$(git log -1 --format=%B "$sha")")
+        pending=0; descs=(); tip_tree="$tree"
+        ;;
+    esac
+  done < <(git rev-list --reverse "${base}..HEAD")
+
+  if [ "$pending" = 1 ]; then
+    # Trailing ticks -> one summary commit carrying the tip tree (== HEAD tree).
+    if [ "${#descs[@]}" -gt 0 ]; then
+      body=$(printf -- '- %s\n' "${descs[@]}")
+    else
+      body="- (no recorded tool descriptions)"
+    fi
+    if [ -n "$msg_override" ]; then
+      smsg="${msg_override}
+
+${body}
+
+[chronos] squashed trailing ticks."
+    else
+      smsg="chronos: session summary — $(date '+%Y-%m-%d %H:%M')
+
+${body}
+
+[chronos] squashed trailing ticks."
+    fi
+    new_head=$(git commit-tree "$tip_tree" -p "$new_head" -m "$smsg")
+  elif [ -n "$msg_override" ]; then
+    echo "chronos-push: note: -m ignored — all ticks folded into existing commits" >&2
+  fi
+
+  # Safety: the rewritten tip MUST have the exact same tree as HEAD (content
+  # preserved). If not, abort before touching the branch ref.
+  if [ "$(git rev-parse "${new_head}^{tree}")" != "$(git rev-parse 'HEAD^{tree}')" ]; then
+    echo "chronos-push: ERROR — rewrite changed the working tree; aborting, no changes made" >&2
+    exit 1
+  fi
+  git reset --soft "$new_head"
+  echo "chronos-push: folded ${ticks_total} tick(s) -> $(git rev-list --count "${base}..HEAD") commit(s) above $(git rev-parse --short "$base")"
+fi
+
+# Leak guard: never push if any [CHRONOS] tick would still reach the remote.
 if git rev-parse --verify -q "$upstream" >/dev/null 2>&1; then
   remaining=$(git log --format=%s "${upstream}..HEAD" 2>/dev/null | grep -c '^\[CHRONOS\]' || true)
   if [ "${remaining:-0}" -gt 0 ]; then
-    echo "chronos-push: ERROR — ${remaining} [CHRONOS] tick(s) remain below a non-tick commit in" >&2
-    echo "  the unpushed range (${upstream}..HEAD). Refusing to push to avoid leaking them." >&2
-    echo "  Squash them first (or avoid manual commits stacked on top of ticks)." >&2
+    echo "chronos-push: ERROR — ${remaining} [CHRONOS] tick(s) still present after fold; refusing to push." >&2
     exit 1
   fi
 fi
