@@ -27,21 +27,35 @@ mkdir -p "$hookdir"
 target="$hookdir/post-commit"
 
 shim_marker="# >>> chronos post-commit shim >>>"
+# First-time install over a foreign post-commit hook: back it up once. (Idempotent
+# — on re-runs the marker is already present, so we don't clobber the backup.)
 if [ -e "$target" ] && ! grep -qF "$shim_marker" "$target" 2>/dev/null; then
-  # Preserve an existing unrelated post-commit hook and chain to it.
   cp "$target" "$target.pre-chronos"
-  {
-    echo "#!/bin/bash"
-    echo "$shim_marker"
-    echo '"$(git rev-parse --git-path hooks)/post-commit.pre-chronos" "$@" || true'
-    echo 'exec /usr/local/bin/chronos-post-commit "$@"'
-  } > "$target"
+fi
+
+if [ -e "$target.pre-chronos" ]; then
+  # Chained: squash first, THEN run the repo's own post-commit hook — but only on
+  # the final, real (non-[CHRONOS]) commit. This ensures a chained auditor (e.g.
+  # the red-team hook) sees the squashed commit and NEVER fires on a transient
+  # tick or during the squash recommit (which would spawn a storm of auditors).
+  cat > "$target" <<'SHIM'
+#!/bin/bash
+# >>> chronos post-commit shim >>>
+[ -n "${CHRONOS_SQUASHING:-}" ] && exit 0          # squash recommit: do nothing
+/usr/local/bin/chronos-post-commit "$@"            # fold ticks into HEAD (+push)
+__subj=$(git log -1 --format=%s HEAD 2>/dev/null)  # then chain — real commits only
+case "$__subj" in
+  "[CHRONOS]"*) : ;;
+  *) "$(git rev-parse --git-path hooks)/post-commit.pre-chronos" "$@" || true ;;
+esac
+exit 0
+SHIM
 else
-  {
-    echo "#!/bin/bash"
-    echo "$shim_marker"
-    echo 'exec /usr/local/bin/chronos-post-commit "$@"'
-  } > "$target"
+  cat > "$target" <<'SHIM'
+#!/bin/bash
+# >>> chronos post-commit shim >>>
+exec /usr/local/bin/chronos-post-commit "$@"
+SHIM
 fi
 chmod +x "$target"
 
