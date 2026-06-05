@@ -27,6 +27,7 @@ sudo install -m 0755 "$here/zig-out/bin/chronos-hook"             /usr/local/bin
 sudo install -m 0755 "$engine/zig-out/bin/chronos-stamp-macos"    /usr/local/bin/chronos-stamp
 sudo install -m 0755 "$engine/scripts/get-cognitive-state"        /usr/local/bin/get-cognitive-state
 sudo install -m 0755 "$here/chronos-post-commit"                  /usr/local/bin/chronos-post-commit
+sudo install -m 0755 "$here/chronos-push"                        /usr/local/bin/chronos-push
 sudo install -m 0755 "$here/chronos-enable-repo"                  /usr/local/bin/chronos-enable-repo
 sudo install -m 0755 "$here/chronos-disable-repo"                 /usr/local/bin/chronos-disable-repo
 sudo install -m 0755 "$here/red-team-report"                     /usr/local/bin/red-team-report
@@ -40,6 +41,9 @@ echo "✅ chronos stack installed."
 echo
 echo "Next:"
 echo "  1) Ensure ~/.claude/settings.json has a PostToolUse '*' hook -> /usr/local/bin/chronos-hook"
-echo "  2) Enable a repo:   chronos-enable-repo /path/to/repo"
-echo "     (sets git config chronos.enabled true + chronos.autopush true, installs post-commit shim)"
-echo "  3) Disable a repo:  chronos-disable-repo /path/to/repo"
+echo "  2) Enable a repo:   chronos-enable-repo /path/to/repo   (sets chronos.enabled, installs shim)"
+echo "  3) Work — each tool action leaves a [CHRONOS] tick commit."
+echo "  4) Ship:            chronos-push [-m \"message\"]          (squash ticks into one commit + push)"
+echo "  5) Disable a repo:  chronos-disable-repo /path/to/repo"
+echo
+echo "Note: there is no auto-push. The squash+push is the explicit 'chronos-push' step."

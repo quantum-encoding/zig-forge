@@ -1,0 +1,79 @@
+#!/bin/bash
+# chronos-push [-m "message"] [remote] [branch] — the explicit "ship it" command.
+#
+# Replaces commit-time auto-squash/auto-push. As you work, every tool action
+# leaves a [CHRONOS] tick commit. When you're ready to publish, run this: it
+# folds the accumulated ticks into ONE summary commit, then pushes.
+#
+#   chronos-push                       # auto summary message, push origin/<branch>
+#   chronos-push -m "feat: add X"      # your subject; tick actions kept in the body
+#   chronos-push -m "fix: y" origin dev
+#
+# Why a command and not a git hook: a pre-push hook cannot rewrite what gets
+# pushed (git locks the push SHA before the hook runs — verified: ticks leak and
+# local diverges). So WE do the reset+recommit, then call git push.
+set -euo pipefail
+
+msg_override=""
+if [ "${1:-}" = "-m" ]; then msg_override="${2:-}"; shift 2; fi
+
+git rev-parse --git-dir >/dev/null 2>&1 || { echo "chronos-push: not a git repo" >&2; exit 1; }
+remote="${1:-origin}"
+branch="${2:-$(git symbolic-ref --short -q HEAD || true)}"
+[ -n "$branch" ] || { echo "chronos-push: detached HEAD — specify a branch" >&2; exit 1; }
+
+# Squash base = nearest ancestor of HEAD that is NOT a [CHRONOS] tick.
+h=$(git rev-parse HEAD)
+base=""
+while [ -n "$h" ]; do
+  case "$(git log -1 --format=%s "$h" 2>/dev/null)" in
+    "[CHRONOS]"*) h=$(git rev-parse "$h^" 2>/dev/null || echo "") ;;
+    "")           break ;;
+    *)            base="$h"; break ;;
+  esac
+done
+
+if [ -n "$base" ] && [ "$base" != "$(git rev-parse HEAD)" ]; then
+  n=$(git rev-list --count "$base..HEAD")
+  # Body: each tick's recorded action ("→ tool-completion - <desc>").
+  actions=$(git log --reverse --format=%s "$base..HEAD" \
+            | sed -n 's/.* → tool-completion - \(.*\)$/- \1/p')
+  [ -n "$actions" ] || actions="- (no recorded tool descriptions)"
+  short=$(git rev-parse --short "$base")
+
+  if [ -n "$msg_override" ]; then
+    msg="${msg_override}
+
+${actions}
+
+[chronos] squashed ${n} tick(s) above ${short}."
+  else
+    msg="chronos: session summary — ${n} action(s), $(date '+%Y-%m-%d %H:%M')
+
+${actions}
+
+Squashed ${n} chronos tick(s) above ${short}."
+  fi
+
+  git reset --soft "$base"
+  git commit --no-verify -m "$msg" >/dev/null
+  echo "chronos-push: folded ${n} tick(s) into one commit on ${short}"
+else
+  echo "chronos-push: no ticks to fold (nothing accumulated since the last real commit)"
+fi
+
+# Leak guard: never push if any [CHRONOS] tick would still reach the remote
+# (e.g. ticks stranded below a manual commit). Refuse rather than pollute origin.
+upstream="${remote}/${branch}"
+if git rev-parse --verify -q "$upstream" >/dev/null 2>&1; then
+  remaining=$(git log --format=%s "${upstream}..HEAD" 2>/dev/null | grep -c '^\[CHRONOS\]' || true)
+  if [ "${remaining:-0}" -gt 0 ]; then
+    echo "chronos-push: ERROR — ${remaining} [CHRONOS] tick(s) remain below a non-tick commit in" >&2
+    echo "  the unpushed range (${upstream}..HEAD). Refusing to push to avoid leaking them." >&2
+    echo "  Squash them first (or avoid manual commits stacked on top of ticks)." >&2
+    exit 1
+  fi
+fi
+
+echo "chronos-push: pushing ${branch} -> ${remote} ..."
+git push "$remote" "$branch"
