@@ -1,34 +1,66 @@
 #!/bin/bash
 # Get Real-Time Cognitive State for Chronos Git Stamps
-# Replaces the old Python "Pondering" snapshot with live database query
+#
+# Reads the live cognitive state recorded by the cognitive-watcher daemon and
+# prints the bare gerund (e.g. "Pollinating", "Spelunking") used in chronos
+# commit stamps. Prints "NOT-DETECTED" when no state can be resolved.
+#
+# Cross-platform: Linux walks /proc, macOS (Darwin) walks the process tree via
+# `ps`. The cognitive-watcher DB only exists where the watcher daemon runs
+# (currently Linux); on a host without it, PID detection still works and the
+# state simply resolves to NOT-DETECTED (the chronos-hook then substitutes its
+# own fallback).
 #
 # Usage: get-cognitive-state [PID]
 #   If PID is provided, use it directly
-#   Otherwise, walk up process tree to find Claude
+#   Otherwise, walk up the process tree to find Claude
 
-DB_PATH="/var/lib/cognitive-watcher/cognitive-states.db"
+DB_PATH="${COGNITIVE_DB_PATH:-/var/lib/cognitive-watcher/cognitive-states.db}"
 
-# Get parent Claude Code PID (this script is called from Claude's bash)
+UNAME_S="$(uname -s 2>/dev/null)"
+
+# True when $1 looks like the real Claude Code process, given its comm (process
+# name) and full command line. We deliberately do NOT match a bare "claude-code"
+# substring, because helper processes in our own call chain (e.g.
+# `chronos-stamp claude-code tool-completion`) carry that token as an argument
+# and would otherwise be mis-detected as the Claude process — resolving to a PID
+# with no cognitive state.
+is_claude_process() {
+    local comm="$1" cmdline="$2"
+    local base="${comm##*/}"   # basename of comm (macOS comm can be a full path)
+    if [[ "$base" == "claude" ]] \
+       || [[ "$cmdline" == *"@anthropic/claude-code"* ]] \
+       || [[ "$cmdline" == *"/claude-code/"* ]]; then
+        return 0
+    fi
+    return 1
+}
+
+# Get parent Claude Code PID by walking up the process tree.
 get_claude_pid() {
-    # Try multiple methods to find Claude PID
-
-    # Method 1: Walk up process tree looking for "claude" or "node" (Claude runs in Node.js)
     local pid=$$
     local max_depth=20
     local depth=0
+    local comm cmdline ppid
 
-    while [ $pid -ne 1 ] && [ $depth -lt $max_depth ]; do
-        local comm=$(cat /proc/$pid/comm 2>/dev/null)
-        local cmdline=$(cat /proc/$pid/cmdline 2>/dev/null | tr '\0' ' ')
+    while [ "$pid" -ne 1 ] && [ $depth -lt $max_depth ]; do
+        if [ "$UNAME_S" = "Darwin" ]; then
+            # macOS: no /proc. Use ps. `comm` = executable, `command` = full argv.
+            comm=$(ps -p "$pid" -o comm= 2>/dev/null)
+            cmdline=$(ps -p "$pid" -o command= 2>/dev/null)
+            ppid=$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d ' ')
+        else
+            # Linux: read /proc directly (cheaper, no subprocess per hop).
+            comm=$(cat /proc/$pid/comm 2>/dev/null)
+            cmdline=$(cat /proc/$pid/cmdline 2>/dev/null | tr '\0' ' ')
+            ppid=$(awk '{print $4}' /proc/$pid/stat 2>/dev/null)
+        fi
 
-        # Check if this is a Claude process
-        if [[ "$comm" == "claude" ]] || [[ "$cmdline" =~ "claude-code" ]] || [[ "$cmdline" =~ "@anthropic/claude-code" ]]; then
-            echo $pid
+        if is_claude_process "$comm" "$cmdline"; then
+            echo "$pid"
             return 0
         fi
 
-        # Get parent PID
-        local ppid=$(awk '{print $4}' /proc/$pid/stat 2>/dev/null)
         if [ -z "$ppid" ] || [ "$ppid" = "0" ]; then
             break
         fi
@@ -36,8 +68,10 @@ get_claude_pid() {
         depth=$((depth + 1))
     done
 
-    # Method 2: Find most recent active PID from database
-    local recent_pid=$(sqlite3 "$DB_PATH" "SELECT pid FROM cognitive_states ORDER BY id DESC LIMIT 1;" 2>/dev/null)
+    # Fall back to the most recently active PID known to the watcher.
+    # Uses cognitive_sessions (the live V2 table); the legacy cognitive_states
+    # table is no longer written for active sessions.
+    local recent_pid=$(sqlite3 "$DB_PATH" "SELECT pid FROM cognitive_sessions ORDER BY id DESC LIMIT 1;" 2>/dev/null)
     if [ -n "$recent_pid" ]; then
         echo "$recent_pid"
         return 0
@@ -46,48 +80,68 @@ get_claude_pid() {
     echo ""
 }
 
-# Get cognitive state from cache file or database
+# Resolve the current cognitive state for a Claude PID.
 get_state_from_db() {
-    # Use PID from argument if provided, otherwise auto-detect
     local claude_pid=${1:-$(get_claude_pid)}
 
     if [ -z "$claude_pid" ]; then
-        echo "Active"
+        echo "NOT-DETECTED"
         return
     fi
 
-    # Try cache file first (instant, written by watcher on every event)
-    local cache_file="/tmp/cognitive-state-cache-${claude_pid}"
-    if [ -f "$cache_file" ]; then
-        local cached_state=$(cat "$cache_file" 2>/dev/null)
-        if [ -n "$cached_state" ]; then
-            # Clean up: remove leading/trailing whitespace and newlines, collapse multiple spaces
-            cached_state=$(echo "$cached_state" | tr '\n' ' ' | tr -s ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-            echo "$cached_state"
-            return
-        fi
+    # If there's no watcher DB on this host (e.g. macOS without the daemon),
+    # there is nothing to query — resolve to NOT-DETECTED immediately.
+    if [ ! -f "$DB_PATH" ]; then
+        echo "NOT-DETECTED"
+        return
     fi
 
-    # Query database for most recent status line
-    # Status lines contain "(esc to interrupt" and don't have tool patterns
-    if [ -n "$claude_pid" ]; then
-        # Get entries containing status line pattern, excluding tool execution
-        local raw_content=$(sqlite3 "$DB_PATH" "SELECT raw_content FROM cognitive_states WHERE pid=$claude_pid AND raw_content LIKE '%(esc to interrupt%' AND raw_content NOT LIKE '%Bash(%' AND raw_content NOT LIKE '%Read(%' AND raw_content NOT LIKE '%Write(%' AND raw_content NOT LIKE '%Edit(%' AND raw_content NOT LIKE '%Grep(%' ORDER BY id DESC LIMIT 1;" 2>/dev/null)
+    # Primary source (cognitive-watcher V2): the watcher already detects and
+    # parses the spinner state and records one row per state segment in the
+    # cognitive_sessions table. The newest row for this PID is the current
+    # state, pre-parsed to a clean gerund ("Pollinating", "Synthesizing", ...).
+    # This is authoritative and replaces the fragile raw-TTY parsing below.
+    local v2_state=$(sqlite3 "$DB_PATH" "
+        SELECT cognitive_state
+        FROM cognitive_sessions
+        WHERE pid=$claude_pid
+        ORDER BY id DESC
+        LIMIT 1;" 2>/dev/null)
+    if [ -n "$v2_state" ]; then
+        echo "$v2_state"
+        return
+    fi
+
+    # Legacy fallback: parse raw TTY spinner frames from cognitive_states.
+    # Claude Code's spinner has used two formats over time:
+    #   OLD (pre-2026): " Elucidating (esc to interrupt  1m 32s   2.1k tokens)"
+    #   NEW (current):  "✶ Skedaddling…30"  (glyph + gerund + … + elapsed secs)
+    # Match either: a letter immediately before "…" (GLOB excludes bare counter
+    # frames like "…42"), or the legacy "(esc to interrupt" marker.
+    local raw_content=$(sqlite3 "$DB_PATH" "
+        SELECT raw_content
+        FROM cognitive_states
+        WHERE pid=$claude_pid
+          AND (raw_content GLOB '*[A-Za-z]…*'
+               OR raw_content LIKE '%(esc to interrupt%')
+        ORDER BY id DESC
+        LIMIT 1;" 2>/dev/null)
+
+    # Take the spinner line, drop everything from "…"/"(esc to interrupt" on,
+    # then strip the leading glyph/whitespace and any trailing whitespace.
+    # The leading-glyph strip is byte-oriented so it works in C and UTF-8 locales.
+    local cognitive_state=$(printf '%s' "$raw_content" \
+        | grep -m1 -E '…|esc to interrupt' \
+        | sed -E 's/….*$//; s/[[:space:]]*\(esc to interrupt.*$//' \
+        | sed 's/^[^[:alpha:]]*//; s/[[:space:]]*$//')
+
+    if [ -n "$cognitive_state" ]; then
+        echo "$cognitive_state"
     else
-        # No PID found, search recent entries
-        local raw_content=$(sqlite3 "$DB_PATH" "SELECT raw_content FROM cognitive_states WHERE raw_content LIKE '%(esc to interrupt%' AND raw_content NOT LIKE '%Bash(%' AND raw_content NOT LIKE '%Read(%' AND raw_content NOT LIKE '%Write(%' AND raw_content NOT LIKE '%Edit(%' AND raw_content NOT LIKE '%Grep(%' ORDER BY id DESC LIMIT 1;" 2>/dev/null)
-    fi
-
-    if [ -n "$raw_content" ]; then
-        # Extract text before "(esc to interrupt" - that's the cognitive state
-        local cognitive_state=$(echo "$raw_content" | grep -o '.*(' | sed 's/[[:space:]]*([[:space:]]*$//' | tail -1 | sed 's/^[[:space:]>*]*//')
-        if [ -n "$cognitive_state" ]; then
-            echo "$cognitive_state"
-        fi
+        echo "NOT-DETECTED"
     fi
 }
 
 # Main execution
-# Accept PID as first argument
 STATE=$(get_state_from_db "$1")
 echo "$STATE"

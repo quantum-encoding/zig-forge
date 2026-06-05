@@ -1,0 +1,23 @@
+#!/bin/bash
+# chronos-disable-repo [REPO_DIR] — opt a repo back out of chronos ticking/squash.
+# Stops new ticks, removes the post-commit shim (restoring any chained hook).
+# Does NOT rewrite existing history.
+set -euo pipefail
+
+repo="${1:-$(pwd)}"
+cd "$repo"
+git rev-parse --git-dir >/dev/null 2>&1 || { echo "error: not a git repo: $repo" >&2; exit 1; }
+
+git config chronos.enabled false
+hookdir="$(git rev-parse --git-path hooks)"
+target="$hookdir/post-commit"
+
+if [ -e "$target.pre-chronos" ]; then
+  mv "$target.pre-chronos" "$target"
+  echo "chronos: restored pre-existing post-commit hook"
+elif [ -e "$target" ] && grep -qF "chronos post-commit shim" "$target" 2>/dev/null; then
+  rm -f "$target"
+  echo "chronos: removed post-commit shim"
+fi
+
+echo "chronos: disabled in $repo"

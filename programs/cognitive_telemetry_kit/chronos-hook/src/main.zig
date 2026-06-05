@@ -7,11 +7,26 @@ const CHRONOS_STAMP_PATH = "/usr/local/bin/chronos-stamp";
 const GET_COGNITIVE_STATE_PATH = "/usr/local/bin/get-cognitive-state";
 const AGENT_ID = "claude-code";
 
+// std.c exposes neither fork nor execvp in this Zig build — declare them.
+// (execvp does PATH resolution, which execve would not.)
+extern "c" fn fork() std.c.pid_t;
+extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
+
 pub fn main() !u8 {
     const allocator = std.heap.c_allocator;
 
     // Check if we're in a git repository
     if (!try isGitRepository(allocator)) {
+        return 0;
+    }
+
+    // Per-repo opt-in gate. We do NOT auto-commit a tick in every git repo on
+    // the machine — that would turn normal work in unrelated repos into a flood
+    // of [CHRONOS] commits. A repo opts in with:
+    //     git config chronos.enabled true
+    // (the chronos-enable-repo installer does this and also drops the
+    // post-commit squash hook). An env override is honored for one-offs.
+    if (!try chronosEnabled(allocator)) {
         return 0;
     }
 
@@ -76,8 +91,12 @@ pub fn main() !u8 {
         return 0;
     }
 
-    // Commit with message
-    const commit_result = try runCommand(allocator, &[_][]const u8{ "git", "commit", "-m", commit_msg.items });
+    // Commit with message. --no-verify keeps ticks fast and unobtrusive: a tick
+    // fires after every tool call, so it must not run the repo's own pre-commit
+    // hooks (linters, formatters) on each one. The post-commit squash hook still
+    // runs on ticks, but it identifies them by their "[CHRONOS]" message prefix
+    // and skips them — only a real (non-CHRONOS) commit triggers the squash.
+    const commit_result = try runCommand(allocator, &[_][]const u8{ "git", "commit", "--no-verify", "-m", commit_msg.items });
 
     return if (commit_result.exit_code == 0) 0 else 1;
 }
@@ -85,6 +104,21 @@ pub fn main() !u8 {
 fn isGitRepository(allocator: std.mem.Allocator) !bool {
     const result = try runCommand(allocator, &[_][]const u8{ "git", "rev-parse", "--git-dir" });
     return result.exit_code == 0;
+}
+
+/// Whether this repo has opted in to chronos ticking. True when either the
+/// CHRONOS_ENABLED env var is set to a truthy value, or `git config
+/// chronos.enabled` resolves to "true" in the current repo.
+fn chronosEnabled(allocator: std.mem.Allocator) !bool {
+    if (c.getenv("CHRONOS_ENABLED")) |ptr| {
+        const v = std.mem.sliceTo(ptr, 0);
+        if (std.mem.eql(u8, v, "1") or std.mem.eql(u8, v, "true")) return true;
+    }
+    var result = try runCommand(allocator, &[_][]const u8{ "git", "config", "--get", "chronos.enabled" });
+    defer result.deinit();
+    if (result.exit_code != 0) return false;
+    const val = std.mem.trim(u8, result.stdout, " \t\r\n");
+    return std.mem.eql(u8, val, "true");
 }
 
 fn extractToolDescription(allocator: std.mem.Allocator, json_input: []const u8) !?[]const u8 {
@@ -176,64 +210,74 @@ const CommandResult = struct {
 };
 
 fn runCommand(allocator: std.mem.Allocator, argv: []const []const u8) !CommandResult {
-    const io = Io.Threaded.global_single_threaded.io();
+    // Build a null-terminated argv of null-terminated strings for execvp.
+    // Allocated before fork so the child inherits it without touching the heap.
+    var argv_z = try allocator.alloc(?[*:0]const u8, argv.len + 1);
+    defer allocator.free(argv_z);
+    var built: usize = 0;
+    // Single defer frees exactly the strings built so far — correct whether the
+    // loop completes or a dupeZ fails partway. (In the child we _exit before
+    // returning, so these never run there and there's no cross-fork double free.)
+    defer for (0..built) |i| allocator.free(std.mem.sliceTo(argv_z[i].?, 0));
+    for (argv, 0..) |arg, i| {
+        const z = try allocator.dupeZ(u8, arg);
+        argv_z[i] = z.ptr;
+        built = i + 1;
+    }
+    argv_z[argv.len] = null;
 
-    // Spawn child process
-    var child = std.process.spawn(io, .{
-        .argv = argv,
-        .stdout = .pipe,
-        .stderr = .ignore,
-    }) catch |err| {
-        std.debug.print("Command spawn failed: {s}\n", .{@errorName(err)});
-        return CommandResult{
-            .exit_code = 1,
-            .stdout = try allocator.dupe(u8, ""),
-            .allocator = allocator,
-        };
-    };
+    var fds: [2]std.c.fd_t = undefined; // fds[0]=read, fds[1]=write
+    if (c.pipe(&fds) != 0) return emptyResult(allocator);
 
-    // Manually read stdout using libc.read (collectOutput no longer exists in Zig 0.16)
-    var stdout_buf = std.ArrayListUnmanaged(u8).empty;
-    errdefer stdout_buf.deinit(allocator);
-
-    if (child.stdout) |stdout_file| {
-        var buf: [4096]u8 = undefined;
-        while (true) {
-            const n_signed = c.read(stdout_file.handle, &buf, buf.len);
-            if (n_signed <= 0) break;
-            const n: usize = @intCast(n_signed);
-            try stdout_buf.appendSlice(allocator, buf[0..n]);
-        }
-        _ = c.close(stdout_file.handle);
-        child.stdout = null;
+    const pid = fork();
+    if (pid < 0) {
+        _ = c.close(fds[0]);
+        _ = c.close(fds[1]);
+        return emptyResult(allocator);
     }
 
-    // Wait for termination
-    const term = child.wait(io) catch {
-        stdout_buf.deinit(allocator);
-        return CommandResult{
-            .exit_code = 1,
-            .stdout = try allocator.dupe(u8, ""),
-            .allocator = allocator,
-        };
-    };
+    if (pid == 0) {
+        // Child: stdout -> pipe, stderr -> /dev/null, then exec.
+        _ = c.close(fds[0]);
+        if (c.dup2(fds[1], 1) < 0) c._exit(127);
+        const devnull = c.open("/dev/null", .{ .ACCMODE = .WRONLY });
+        if (devnull >= 0) _ = c.dup2(devnull, 2);
+        _ = c.close(fds[1]);
+        _ = execvp(argv_z[0].?, @ptrCast(argv_z.ptr));
+        c._exit(127); // only reached if execvp failed
+    }
 
-    const exit_code: u8 = switch (term) {
-        .exited => |code| @intCast(code),
-        else => 1,
-    };
+    // Parent: read child's stdout to EOF, then reap it.
+    _ = c.close(fds[1]);
+    var stdout_buf = std.ArrayListUnmanaged(u8).empty;
+    errdefer stdout_buf.deinit(allocator);
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const n_signed = c.read(fds[0], &buf, buf.len);
+        if (n_signed <= 0) break;
+        try stdout_buf.appendSlice(allocator, buf[0..@intCast(n_signed)]);
+    }
+    _ = c.close(fds[0]);
 
-    const stdout_owned = stdout_buf.toOwnedSlice(allocator) catch {
-        return CommandResult{
-            .exit_code = exit_code,
-            .stdout = try allocator.dupe(u8, ""),
-            .allocator = allocator,
-        };
-    };
+    var status: c_int = 0;
+    _ = c.waitpid(pid, &status, 0);
+    // Decode exit status portably (macOS/Linux): WIFEXITED / WEXITSTATUS.
+    const ust: u32 = @bitCast(status);
+    const exit_code: u8 = if ((ust & 0x7f) == 0) @intCast((ust >> 8) & 0xff) else 1;
+
+    const stdout_owned = stdout_buf.toOwnedSlice(allocator) catch return emptyResult(allocator);
 
     return CommandResult{
         .exit_code = exit_code,
         .stdout = stdout_owned,
+        .allocator = allocator,
+    };
+}
+
+fn emptyResult(allocator: std.mem.Allocator) !CommandResult {
+    return CommandResult{
+        .exit_code = 1,
+        .stdout = try allocator.dupe(u8, ""),
         .allocator = allocator,
     };
 }

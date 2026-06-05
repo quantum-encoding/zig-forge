@@ -116,9 +116,14 @@ const PhiTimestamp = struct {
         const year_day = epoch_day.calculateYearDay();
         const month_day = year_day.calculateMonthDay();
 
+        // Note the empty "::::" field between the agent id and TICK: that is the
+        // cognitive-state placeholder. chronos-hook finds "::::TICK" and rewrites
+        // it to "::<state>::TICK", matching the Linux stamp shape
+        //   ...Z::claude-code::Sketching::TICK-NNNN...
+        // When no hook injects a state, the slot stays empty (state unknown).
         return std.fmt.bufPrint(
             buf,
-            "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.+{d:0>9}Z::{s}::TICK-{d:0>10}",
+            "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.+{d:0>9}Z::{s}::::TICK-{d:0>10}",
             .{
                 year_day.year,
                 month_day.month.numeric(),
@@ -190,29 +195,19 @@ pub fn main(init: std.process.Init.Minimal) void {
     else
         "UNKNOWN-PWD";
 
-    // Output the chronos stamp
-    if (description.len > 0) {
-        std.debug.print("[CHRONOS] {s}::[{s}]::[{s}] → {s} - {s}\n", .{
-            timestamp,
-            session,
-            pwd,
-            action,
-            description,
-        });
-    } else if (action.len > 0) {
-        std.debug.print("[CHRONOS] {s}::[{s}]::[{s}] → {s}\n", .{
-            timestamp,
-            session,
-            pwd,
-            action,
-        });
-    } else {
-        std.debug.print("[CHRONOS] {s}::[{s}]::[{s}]\n", .{
-            timestamp,
-            session,
-            pwd,
-        });
-    }
+    // Output the chronos stamp on STDOUT (fd 1). This MUST go to stdout, not
+    // stderr: chronos-hook captures the child's stdout to read the [CHRONOS]
+    // line and ignores stderr. std.debug.print writes to stderr, so we format
+    // into a buffer and write(2) it to fd 1 ourselves.
+    var out_buf: [8192]u8 = undefined;
+    const line: []const u8 = if (description.len > 0)
+        std.fmt.bufPrint(&out_buf, "[CHRONOS] {s}::[{s}]::[{s}] → {s} - {s}\n", .{ timestamp, session, pwd, action, description }) catch return
+    else if (action.len > 0)
+        std.fmt.bufPrint(&out_buf, "[CHRONOS] {s}::[{s}]::[{s}] → {s}\n", .{ timestamp, session, pwd, action }) catch return
+    else
+        std.fmt.bufPrint(&out_buf, "[CHRONOS] {s}::[{s}]::[{s}]\n", .{ timestamp, session, pwd }) catch return;
+
+    _ = c.write(1, line.ptr, line.len);
 }
 
 // Tests

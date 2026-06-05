@@ -1,0 +1,84 @@
+#!/bin/bash
+# chronos-post-commit — fold accumulated [CHRONOS] tick commits into the real
+# commit that was just made, then optionally push.
+#
+# Installed globally at /usr/local/bin/chronos-post-commit and invoked from each
+# enabled repo's .git/hooks/post-commit shim.
+#
+# Model:
+#   - Each agent tool-completion auto-commits a "[CHRONOS] ..." tick (chronos-hook).
+#   - When YOU make a normal commit, this fires, walks back over the run of tick
+#     commits to the nearest real (non-[CHRONOS]) ancestor, and rebuilds your
+#     commit directly on top of it — collapsing all the ticks into your single
+#     final commit (their cumulative tree is preserved; only the micro-history
+#     is dropped).
+#
+# Why post-commit and not pre-commit: a pre-commit hook cannot move HEAD (git
+# has already locked the old HEAD for the in-progress commit and aborts with
+# "cannot lock ref 'HEAD'"). Post-commit runs after the commit is finalized, so
+# `git reset --soft` + recommit is safe.
+#
+# Re-entrancy: the inner recommit re-triggers this hook; CHRONOS_SQUASHING short
+# -circuits that nested invocation so the squash and push run exactly once.
+
+[ -n "${CHRONOS_SQUASHING:-}" ] && exit 0
+
+# Only act on a real commit. A tick commit must never squash or push.
+subj=$(git log -1 --format=%s HEAD 2>/dev/null) || exit 0
+case "$subj" in
+  "[CHRONOS]"*) exit 0 ;;
+esac
+
+parent=$(git rev-parse --verify HEAD^ 2>/dev/null || true)
+if [ -z "$parent" ]; then
+  # Root commit (no parent): nothing to squash. Fall through to push.
+  last_real=""
+else
+  # Walk back from the parent to the nearest non-[CHRONOS] commit.
+  h="$parent"
+  last_real=""
+  while [ -n "$h" ]; do
+    s=$(git log -1 --format=%s "$h" 2>/dev/null || true)
+    case "$s" in
+      "[CHRONOS]"*) h=$(git rev-parse --verify "$h^" 2>/dev/null || true) ;;
+      "") break ;;
+      *) last_real="$h"; break ;;
+    esac
+  done
+
+  if [ -n "$last_real" ] && [ "$last_real" != "$parent" ]; then
+    # Tick commits sit between last_real and HEAD — fold them in.
+    msg=$(git log -1 --format=%B HEAD)
+    n=$(git rev-list --count "$last_real"..HEAD 2>/dev/null || echo "?")
+    export CHRONOS_SQUASHING=1
+    if git reset --soft "$last_real" 2>/dev/null \
+       && git commit --no-verify -m "$msg" >/dev/null 2>&1; then
+      echo "[chronos] folded $((n-1)) tick(s) into 1 commit on ${last_real:0:9}" >&2
+    else
+      echo "[chronos] squash failed — history left as-is" >&2
+    fi
+    unset CHRONOS_SQUASHING
+  fi
+fi
+
+# Auto-push (per-repo, controlled by chronos.autopush; default off if unset).
+#
+# Deliberately a PLAIN fast-forward push — never --force / --force-with-lease.
+# By design tick commits stay local and only the squashed real commit is pushed,
+# so the local branch is always a fast-forward over origin and a normal push
+# succeeds. If a push is ever rejected (someone else advanced the branch), we do
+# NOT force it — we report and leave it for you to reconcile by hand. Auto
+# force-pushing shared history is exactly the footgun this hook must not be.
+autopush=$(git config --get chronos.autopush 2>/dev/null || echo "false")
+if [ "$autopush" = "true" ]; then
+  branch=$(git symbolic-ref --short -q HEAD 2>/dev/null || true)
+  if [ -n "$branch" ] && git remote get-url origin >/dev/null 2>&1; then
+    if git push origin "$branch" >/dev/null 2>&1; then
+      echo "[chronos] pushed $branch -> origin (fast-forward)" >&2
+    else
+      echo "[chronos] push of $branch rejected — NOT forcing; reconcile manually" >&2
+    fi
+  fi
+fi
+
+exit 0
