@@ -90,6 +90,7 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
     data.title_color = try dupeJsonString(allocator, obj, "title_color") orelse try allocator.dupe(u8, "#b39a7d");
     data.company_name_color = try dupeJsonString(allocator, obj, "company_name_color") orelse try allocator.dupe(u8, "#1a1a1a");
     data.font_family = try dupeJsonString(allocator, obj, "font_family") orelse try allocator.dupe(u8, "Helvetica");
+    data.currency_symbol = try dupeJsonString(allocator, obj, "currency_symbol") orelse try allocator.dupe(u8, "");
 
     // Parse numeric fields
     data.subtotal = getJsonFloat(obj, "subtotal") orelse 0;
@@ -107,6 +108,7 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
     data.logo_y = @floatCast(getJsonFloat(obj, "logo_y") orelse 750);
     data.logo_width = @floatCast(getJsonFloat(obj, "logo_width") orelse 80);
     data.logo_height = @floatCast(getJsonFloat(obj, "logo_height") orelse 50);
+    data.logo_inline = getJsonBool(obj, "logo_inline") orelse false;
 
     // Parse display mode
     if (getJsonString(obj, "display_mode")) |mode| {
@@ -325,6 +327,7 @@ pub fn freeInvoiceData(allocator: std.mem.Allocator, data: *const invoice.Invoic
     if (data.title_color.len > 0) allocator.free(data.title_color);
     if (data.company_name_color.len > 0) allocator.free(data.company_name_color);
     if (data.font_family.len > 0) allocator.free(data.font_family);
+    if (data.currency_symbol.len > 0) allocator.free(data.currency_symbol);
 
     // Free items
     if (data.items.len > 0) {
