@@ -51,7 +51,7 @@ pub const Reactor = struct {
     }
 
     pub fn deinit(self: *Reactor) void {
-        posix.close(self.kq);
+        _ = c.close(self.kq);
     }
 
     fn change(self: *Reactor, ident: i32, filter: i16, flags: u16, udata: usize) !void {
