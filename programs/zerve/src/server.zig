@@ -222,15 +222,20 @@ const FlushResult = enum { done, blocked, closed };
 
 fn flush(conn: *Conn, reactor: *Reactor) FlushResult {
     while (conn.wsent < conn.wlen) {
-        const n = posix.write(conn.fd, conn.wbuf[conn.wsent..conn.wlen]) catch |e| switch (e) {
-            error.WouldBlock => {
-                reactor.enableWrite(conn.fd, @intFromPtr(conn)) catch return .closed;
-                return .blocked;
-            },
-            else => return .closed,
-        };
-        if (n == 0) return .closed;
-        conn.wsent += n;
+        const want = conn.wlen - conn.wsent;
+        const w = c.write(conn.fd, conn.wbuf[conn.wsent..conn.wlen].ptr, want);
+        if (w < 0) {
+            switch (lastErrno()) {
+                .AGAIN => {
+                    reactor.enableWrite(conn.fd, @intFromPtr(conn)) catch return .closed;
+                    return .blocked;
+                },
+                .INTR => continue, // interrupted — retry the write
+                else => return .closed,
+            }
+        }
+        if (w == 0) return .closed;
+        conn.wsent += @intCast(w);
     }
     return .done;
 }
