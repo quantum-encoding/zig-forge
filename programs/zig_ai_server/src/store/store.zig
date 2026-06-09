@@ -496,6 +496,15 @@ pub const Store = struct {
         _ = self.reservations.remove(reservation_id);
     }
 
+    /// Read a copy of a reservation (for the spend-hold API's ownership +
+    /// amount checks). Returns null if the id is unknown. Reservation is a
+    /// value type, so the copy is safe after the lock releases.
+    pub fn getReservation(self: *Store, reservation_id: u64) ?types.Reservation {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.reservations.get(reservation_id);
+    }
+
     /// Add credit to an account (admin operation)
     pub fn creditAccount(self: *Store, io: Io, account_id: []const u8, amount_ticks: i64) !void {
         // Phase 1: WAL + in-memory update under mutex, capture new balance

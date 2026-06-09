@@ -219,59 +219,54 @@ pub const PlaneState = struct {
     }
 
     fn renderPlaneSpans(self: *PlaneState, vp: *const Visplane, flat_data: []const u8, colormap: []const u8, screen: [*]u8, plane_height: Fixed, viewx: Fixed, viewy: Fixed, viewangle: Angle) void {
-        // Convert visplane columns to horizontal spans using makeSpans technique
-        // For each x, column goes from top[x] to bottom[x]
-        // We process columns left to right, tracking span starts
+        _ = self;
+        // Proper R_MapPlane: for each screen row, the floor/ceiling distance is
+        // constant, so a horizontal span maps to a straight line across the flat.
+        // We sweep rows, find covered column runs, and draw a perspective-correct
+        // textured span per run. (The old version sampled one texel for the whole
+        // plane via viewangle only — hence the flat navy/dark "weird pixels".)
+        const centery: i32 = SCREENHEIGHT / 2;
+        const centerx: i32 = SCREENWIDTH / 2;
 
-        // Reset span tracking
-        @memset(&self.spanstart, 0);
+        var y: i32 = 0;
+        while (y < SCREENHEIGHT) : (y += 1) {
+            const ady: i32 = if (y >= centery) y - centery else centery - y;
+            if (ady == 0) continue; // horizon row maps to infinity
 
-        // Process from left to right, building spans row by row
-        var x = vp.minx;
-        while (x <= vp.maxx + 1) : (x += 1) {
-            var t1: i32 = undefined;
-            var b1: i32 = undefined;
+            // distance to the plane along the ground for this row
+            const yslope = Fixed.div(Fixed.fromInt(centerx), Fixed.fromInt(ady));
+            const distance = Fixed.mul(plane_height, yslope);
 
-            if (x <= vp.maxx and x >= 0 and x < SCREENWIDTH) {
-                const ux: usize = @intCast(x);
-                if (vp.top[ux] == MAXOPENHEIGHT) {
-                    t1 = SCREENHEIGHT;
-                    b1 = -1;
-                } else {
-                    t1 = @intCast(vp.top[ux]);
-                    b1 = @intCast(vp.bottom[ux]);
+            var x = vp.minx;
+            while (x <= vp.maxx) {
+                if (!covers(vp, x, y)) {
+                    x += 1;
+                    continue;
                 }
-            } else {
-                // Past the end — close all open spans
-                t1 = SCREENHEIGHT;
-                b1 = -1;
-            }
+                const xs = x;
+                while (x <= vp.maxx and covers(vp, x, y)) : (x += 1) {}
+                const xe = x - 1;
 
-            // For simplicity, draw each column as individual spans
-            var y = t1;
-            while (y <= b1) : (y += 1) {
-                if (y < 0 or y >= SCREENHEIGHT) continue;
-
-                // Calculate span texture coordinates for this y
-                const dy = if (y < SCREENHEIGHT / 2) SCREENHEIGHT / 2 - y else y - SCREENHEIGHT / 2;
-                if (dy == 0) continue;
-
-                const distance = Fixed.div(plane_height, Fixed.fromInt(dy));
-
-                const angle_frac = viewangle >> tables.ANGLETOFINESHIFT;
-                const xfrac = Fixed.add(viewx, Fixed.mul(distance, tables.finecosine[angle_frac & tables.FINEMASK]));
-                const yfrac = Fixed.sub(viewy, Fixed.mul(distance, tables.finesine[angle_frac & tables.FINEMASK]));
+                const ws = worldPoint(xs, distance, viewx, viewy, viewangle);
+                const we = worldPoint(xe, distance, viewx, viewy, viewangle);
+                const span_cols = xe - xs;
+                var xstep = Fixed.ZERO;
+                var ystep = Fixed.ZERO;
+                if (span_cols > 0) {
+                    xstep = Fixed.fromRaw(@divTrunc(we[0].raw() - ws[0].raw(), span_cols));
+                    ystep = Fixed.fromRaw(@divTrunc(we[1].raw() - ws[1].raw(), span_cols));
+                }
 
                 const ds = draw.DrawSpanContext{
                     .source = flat_data,
                     .colormap = colormap,
                     .y = y,
-                    .x1 = x,
-                    .x2 = x, // single pixel wide for now
-                    .xfrac = xfrac,
-                    .yfrac = yfrac,
-                    .xstep = Fixed.ONE,
-                    .ystep = Fixed.ZERO,
+                    .x1 = xs,
+                    .x2 = xe,
+                    .xfrac = ws[0],
+                    .yfrac = ws[1],
+                    .xstep = xstep,
+                    .ystep = ystep,
                     .screen = screen,
                 };
                 draw.drawSpan(&ds);
@@ -279,6 +274,45 @@ pub const PlaneState = struct {
         }
     }
 };
+
+/// Does this visplane cover screen pixel (x, y)?
+fn covers(vp: *const Visplane, x: i32, y: i32) bool {
+    if (x < 0 or x >= SCREENWIDTH) return false;
+    const ux: usize = @intCast(x);
+    if (vp.top[ux] == MAXOPENHEIGHT) return false;
+    const t: i32 = @intCast(vp.top[ux]);
+    const b: i32 = @intCast(vp.bottom[ux]);
+    return y >= t and y <= b;
+}
+
+/// World (x, y) of the flat point seen at screen column `x` for the given
+/// ground distance — the texture coordinate fed to the span renderer.
+fn worldPoint(x: i32, distance: Fixed, viewx: Fixed, viewy: Fixed, viewangle: Angle) [2]Fixed {
+    const xva = xToViewAngle(x);
+    // length = distance / cos(column angle)  (distscale)
+    var cosx = tables.cosAngle(xva);
+    if (cosx.raw() < 0) cosx = Fixed.fromRaw(-cosx.raw());
+    const length = if (cosx.raw() != 0) Fixed.div(distance, cosx) else distance;
+
+    const fine: usize = @intCast((((viewangle +% xva) >> tables.ANGLETOFINESHIFT)) & tables.FINEMASK);
+    const xfrac = Fixed.add(viewx, Fixed.mul(tables.finecosine[fine], length));
+    const yfrac = Fixed.sub(Fixed.fromRaw(-viewy.raw()), Fixed.mul(tables.finesine[fine], length));
+    return .{ xfrac, yfrac };
+}
+
+const plane_centerx: i32 = SCREENWIDTH / 2;
+
+/// View angle of screen column x relative to center (left positive). Mirrors
+/// the helper in segs.zig.
+fn xToViewAngle(x: i32) Angle {
+    const dx = plane_centerx - x;
+    if (dx == 0) return 0;
+    const adx: u32 = @intCast(if (dx < 0) -dx else dx);
+    const den: u32 = @intCast(plane_centerx);
+    const idx = @min((adx << 11) / den, 2048);
+    const a = tables.tantoangle[idx];
+    return if (dx > 0) a else 0 -% a;
+}
 
 test "visplane init" {
     const vp = Visplane.init();

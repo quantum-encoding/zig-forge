@@ -259,17 +259,23 @@ pub fn scaleFromGlobalAngle(rstate: *const RenderState, visangle: Angle, rw_dist
     const sinea = tables.sinAngle(anglea);
     const sineb = tables.sinAngle(angleb);
 
-    if (sineb.raw() == 0) return Fixed.fromRaw(0x7fff_ffff);
+    // Maximum scale (matches the upper clamp below). Used for degenerate,
+    // near-edge-on segs instead of 0x7fffffff — the latter makes iscale (1/scale)
+    // collapse to zero, repeating a single texel down the whole column (the
+    // garbage vertical bar through screen center).
+    const max_scale: i64 = @as(i64, 64) * @as(i64, 1 << fixed.FRAC_BITS);
+
+    if (sineb.raw() == 0) return Fixed.fromRaw(@intCast(max_scale));
 
     // num = projection * sinb
     const num: i64 = @as(i64, rstate.projection.raw()) * @as(i64, sineb.raw());
     // den = distance * sina
     const den: i64 = @as(i64, rw_distance.raw()) * @as(i64, sinea.raw());
 
-    if (den == 0) return Fixed.fromRaw(0x7fff_ffff);
+    if (den == 0) return Fixed.fromRaw(@intCast(max_scale));
 
     const result = @divTrunc(num << 16, den);
-    const clamped = std.math.clamp(result, 256, @as(i64, 64) * @as(i64, 1 << fixed.FRAC_BITS));
+    const clamped = std.math.clamp(result, 256, max_scale);
     return Fixed.fromRaw(@intCast(clamped));
 }
 

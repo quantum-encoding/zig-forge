@@ -242,48 +242,57 @@ fn isRangeOccluded(rstate: *const RenderState, first: i32, last: i32) bool {
 
 /// Add a range to the solid segments list
 fn clipSolidSegRange(rstate: *RenderState, first: i32, last: i32) void {
-    // Find the solid seg to merge with or insert before
-    var i: usize = 0;
-    while (i < rstate.num_solidsegs) : (i += 1) {
-        if (rstate.solidsegs[i].last >= first - 1) break;
-    }
+    // Faithful port of linuxdoom-1.10 R_ClipSolidWallSegment's occlusion merge.
+    // (The previous version used a fixed `j = i+1` and compared against a stale
+    // `last`, so it merged ranges incorrectly — over-occluding geometry and
+    // leaving black holes where culled walls had no visplane behind them.)
+    //
+    // The two sentinels in solidsegs ([-inf,-1] and [SCREENWIDTH,+inf]) make the
+    // scans below terminate without explicit bounds checks.
 
-    if (i >= rstate.num_solidsegs) return;
+    // Find the first range that ends at or after our left edge.
+    var start: usize = 0;
+    while (rstate.solidsegs[start].last < first - 1) start += 1;
 
-    // Merge with existing ranges
-    if (first < rstate.solidsegs[i].first) {
-        if (last < rstate.solidsegs[i].first - 1) {
-            // Insert new range before i
+    if (first < rstate.solidsegs[start].first) {
+        if (last < rstate.solidsegs[start].first - 1) {
+            // Wholly before `start`: insert a new range there.
             if (rstate.num_solidsegs >= rstate.solidsegs.len) return;
             var j = rstate.num_solidsegs;
-            while (j > i) : (j -= 1) {
-                rstate.solidsegs[j] = rstate.solidsegs[j - 1];
-            }
-            rstate.solidsegs[i] = .{ .first = first, .last = last };
+            while (j > start) : (j -= 1) rstate.solidsegs[j] = rstate.solidsegs[j - 1];
+            rstate.solidsegs[start] = .{ .first = first, .last = last };
             rstate.num_solidsegs += 1;
             return;
         }
-        rstate.solidsegs[i].first = first;
+        // Extend the range leftward to include us.
+        rstate.solidsegs[start].first = first;
     }
 
-    if (last <= rstate.solidsegs[i].last) return;
+    // Already fully contained?
+    if (last <= rstate.solidsegs[start].last) return;
 
-    // Extend and merge with subsequent ranges
-    rstate.solidsegs[i].last = last;
-
-    // Remove any ranges that are now covered
-    const j = i + 1;
-    while (j < rstate.num_solidsegs and rstate.solidsegs[j].first <= last + 1) {
-        if (rstate.solidsegs[j].last > last) {
-            rstate.solidsegs[i].last = rstate.solidsegs[j].last;
+    // Absorb every following range that we now overlap/touch.
+    var next = start;
+    while (next + 1 < rstate.num_solidsegs and last >= rstate.solidsegs[next + 1].first - 1) {
+        next += 1;
+        if (last <= rstate.solidsegs[next].last) {
+            rstate.solidsegs[start].last = rstate.solidsegs[next].last;
+            break;
         }
-        // Remove range j by shifting
-        var k = j;
-        while (k + 1 < rstate.num_solidsegs) : (k += 1) {
-            rstate.solidsegs[k] = rstate.solidsegs[k + 1];
-        }
-        rstate.num_solidsegs -= 1;
+    } else {
+        rstate.solidsegs[start].last = last;
     }
+
+    // Crunch: drop the ranges between `start` and `next` (now merged into start).
+    if (next == start) return;
+    const removed = next - start;
+    var src = next + 1;
+    var dst = start + 1;
+    while (src < rstate.num_solidsegs) : (src += 1) {
+        rstate.solidsegs[dst] = rstate.solidsegs[src];
+        dst += 1;
+    }
+    rstate.num_solidsegs -= removed;
 }
 
 test "viewAngleToX" {

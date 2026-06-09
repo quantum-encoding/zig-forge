@@ -232,7 +232,7 @@ fn readU32(data: []const u8, off: usize) u32 {
 }
 
 test "video state init" {
-    var video = VideoState.init();
+    const video = VideoState.init();
     try std.testing.expectEqual(@as(u8, 0), video.screens[0][0]);
     try std.testing.expectEqual(@as(u8, 0), video.gamma);
 }

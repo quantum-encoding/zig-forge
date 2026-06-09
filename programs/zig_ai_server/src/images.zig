@@ -71,7 +71,7 @@ pub fn handle(
     return handleCore(allocator, environ_map, io, store, auth, ledger, body);
 }
 
-fn handleCore(
+pub fn handleCore(
     allocator: std.mem.Allocator,
     environ_map: *const std.process.Environ.Map,
     io: ?std.Io,
@@ -269,6 +269,199 @@ fn generateOpenAI(
         return errResp(.internal_server_error, "serialization_error", "Failed to build response JSON");
     };
     return .{ .status = .ok, .body = json_resp };
+}
+
+// ── Image edit (POST /qai/v1/images/edit) ───────────────────────────
+
+/// Inbound image-edit request — wire-compatible with the Go handler.
+pub const ImageEditRequest = struct {
+    model: []const u8,
+    prompt: []const u8,
+    /// One or more base64-encoded source images.
+    input_images: []const []const u8,
+    count: ?u32 = null,
+    size: ?[]const u8 = null,
+};
+
+const MAX_EDIT_BODY: usize = 32 * 1024 * 1024; // base64 images run large
+
+pub fn handleEdit(
+    request: *http.Server.Request,
+    allocator: std.mem.Allocator,
+    environ_map: *const std.process.Environ.Map,
+    io: ?std.Io,
+    store: ?*store_mod.Store,
+    auth: ?*const types.AuthContext,
+    ledger: ?*ledger_mod.Ledger,
+) Response {
+    const body = json_util.readBody(request, allocator, MAX_EDIT_BODY) catch {
+        return errResp(.bad_request, "invalid_request", "Failed to read request body");
+    };
+    defer allocator.free(body);
+    return editCore(allocator, environ_map, io, store, auth, ledger, body);
+}
+
+pub fn editCore(
+    allocator: std.mem.Allocator,
+    environ_map: *const std.process.Environ.Map,
+    io: ?std.Io,
+    store: ?*store_mod.Store,
+    auth: ?*const types.AuthContext,
+    ledger: ?*ledger_mod.Ledger,
+    body: []const u8,
+) Response {
+    const io_handle = io orelse return errResp(.internal_server_error, "io", "io unavailable");
+    if (body.len == 0) return errResp(.bad_request, "invalid_request", "Empty request body");
+
+    const parsed = std.json.parseFromSlice(ImageEditRequest, allocator, body, .{
+        .ignore_unknown_fields = true,
+        .allocate = .alloc_always,
+    }) catch {
+        return errResp(.bad_request, "invalid_request", "Malformed JSON body");
+    };
+    defer parsed.deinit();
+    const req = parsed.value;
+
+    if (req.model.len == 0 or req.model.len > security.Limits.max_model_name) {
+        return errResp(.bad_request, "invalid_request", "model is required");
+    }
+    if (req.prompt.len == 0) return errResp(.bad_request, "invalid_request", "prompt is required");
+    if (req.input_images.len == 0) return errResp(.bad_request, "invalid_request", "input_images is required");
+    if (req.input_images.len > 16) return errResp(.bad_request, "invalid_request", "too many input images (max 16)");
+    const count = req.count orelse 1;
+    if (count == 0 or count > 10) return errResp(.bad_request, "invalid_request", "count must be between 1 and 10");
+
+    const model = models_mod.getModel(req.model) orelse {
+        return errResp(.bad_request, "unknown_model", "Model not found in registry; check /qai/v1/models");
+    };
+    if (!std.mem.eql(u8, model.provider, "OpenAI")) {
+        return errResp(.not_implemented, "provider_not_implemented", "Image editing for this provider isn't wired up yet on the Zig server. Currently live: OpenAI gpt-image-* / dall-e-2.");
+    }
+
+    return editOpenAI(allocator, environ_map, io_handle, store, auth, ledger, req, model, count);
+}
+
+fn editOpenAI(
+    allocator: std.mem.Allocator,
+    environ_map: *const std.process.Environ.Map,
+    io: std.Io,
+    store: ?*store_mod.Store,
+    auth: ?*const types.AuthContext,
+    ledger: ?*ledger_mod.Ledger,
+    req: ImageEditRequest,
+    model: models_mod.Model,
+    count: u32,
+) Response {
+    const api_key = hs.ai.getApiKeyFromEnv(environ_map, "OPENAI_API_KEY") catch {
+        return errResp(.internal_server_error, "config_error", "Server missing OPENAI_API_KEY");
+    };
+
+    const estimate_ticks: i64 = preflightTicks(model) * @as(i64, count);
+    var reservation_id: ?u64 = null;
+    if (store) |s| if (auth) |a| {
+        if (a.account.role != .admin) {
+            reservation_id = s.reserve(io, a.account.id.slice(), a.key_hash, estimate_ticks, "/qai/v1/images/edit", req.model) catch |err| switch (err) {
+                error.InsufficientBalance => return errResp(.payment_required, "insufficient_balance", "Account balance is too low for this image edit"),
+                else => return errResp(.internal_server_error, "billing_error", "Failed to reserve credits"),
+            };
+        }
+    };
+
+    // Build the multipart body. Each input image is decoded from base64 and
+    // attached as an `image[]` file part (gpt-image-1 accepts multiple).
+    var mp = @import("multipart.zig").Builder.init(allocator, io);
+    defer mp.deinit();
+
+    const decoder = std.base64.standard.Decoder;
+    var decoded_images: std.ArrayListUnmanaged([]u8) = .empty;
+    defer {
+        for (decoded_images.items) |img| allocator.free(img);
+        decoded_images.deinit(allocator);
+    }
+
+    mp.addField("model", req.model) catch return editFail(store, io, reservation_id);
+    mp.addField("prompt", req.prompt) catch return editFail(store, io, reservation_id);
+    var nbuf: [10]u8 = undefined;
+    const nstr = std.fmt.bufPrint(&nbuf, "{d}", .{count}) catch return editFail(store, io, reservation_id);
+    mp.addField("n", nstr) catch return editFail(store, io, reservation_id);
+    if (req.size) |sz| mp.addField("size", sz) catch return editFail(store, io, reservation_id);
+
+    for (req.input_images, 0..) |b64, idx| {
+        const dlen = decoder.calcSizeForSlice(b64) catch return errRollback(store, io, reservation_id, .bad_request, "invalid base64 image");
+        const buf = allocator.alloc(u8, dlen) catch return editFail(store, io, reservation_id);
+        decoded_images.append(allocator, buf) catch {
+            allocator.free(buf);
+            return editFail(store, io, reservation_id);
+        };
+        decoder.decode(buf, b64) catch return errRollback(store, io, reservation_id, .bad_request, "invalid base64 image");
+        var fnbuf: [32]u8 = undefined;
+        const fname = std.fmt.bufPrint(&fnbuf, "image_{d}.png", .{idx}) catch "image.png";
+        mp.addFile("image[]", fname, "image/png", buf) catch return editFail(store, io, reservation_id);
+    }
+
+    const request_body = mp.finish() catch return editFail(store, io, reservation_id);
+    defer allocator.free(request_body);
+    const content_type = mp.contentType(allocator) catch return editFail(store, io, reservation_id);
+    defer allocator.free(content_type);
+
+    var http_client = hs.HttpClient.init(allocator) catch return editFail(store, io, reservation_id);
+    defer http_client.deinit();
+
+    const auth_header = std.fmt.allocPrint(allocator, "Bearer {s}", .{api_key}) catch return editFail(store, io, reservation_id);
+    defer allocator.free(auth_header);
+
+    const headers = [_]http.Header{
+        .{ .name = "Content-Type", .value = content_type },
+        .{ .name = "Authorization", .value = auth_header },
+    };
+
+    var resp = http_client.post("https://api.openai.com/v1/images/edits", &headers, request_body) catch {
+        if (reservation_id) |rid| if (store) |s| s.rollbackReservation(io, rid);
+        return errResp(.bad_gateway, "provider_error", "OpenAI image edit request failed");
+    };
+    defer resp.deinit();
+
+    if (resp.status != .ok) {
+        if (reservation_id) |rid| if (store) |s| s.rollbackReservation(io, rid);
+        return errResp(resp.status, "provider_error", "OpenAI rejected the image edit request");
+    }
+
+    const decoded = decodeOpenAIResponse(allocator, resp.body) catch {
+        if (reservation_id) |rid| if (store) |s| s.rollbackReservation(io, rid);
+        return errResp(.bad_gateway, "decode_error", "Could not parse OpenAI image edit response");
+    };
+    defer freeDecoded(allocator, decoded);
+
+    const cost = exactCostTicks(model, decoded.input_tokens, decoded.output_tokens, decoded.images.len);
+
+    var balance_after: i64 = 0;
+    if (reservation_id) |rid| if (store) |s| {
+        s.commitReservation(io, rid, cost.cost, cost.margin) catch {};
+    };
+    if (auth) |a| if (store) |s| {
+        if (s.getAccount(a.account.id.slice())) |acct| balance_after = acct.balance_ticks;
+    };
+
+    if (ledger) |l| {
+        const acct_id = if (auth) |a| a.account.id.slice() else "anonymous";
+        const key_pfx = if (auth) |a| a.key.prefix.slice() else "none";
+        l.recordBilling(io, acct_id, key_pfx, cost.cost, cost.margin, balance_after, "/qai/v1/images/edit", req.model, decoded.input_tokens, decoded.output_tokens, 0);
+    }
+
+    const json_resp = buildResponseJson(allocator, decoded.images, req.model, decoded.input_tokens, decoded.output_tokens, cost.cost + cost.margin, balance_after) catch {
+        return errResp(.internal_server_error, "serialization_error", "Failed to build response JSON");
+    };
+    return .{ .status = .ok, .body = json_resp };
+}
+
+fn editFail(store: ?*store_mod.Store, io: std.Io, reservation_id: ?u64) Response {
+    if (reservation_id) |rid| if (store) |s| s.rollbackReservation(io, rid);
+    return errResp(.internal_server_error, "build_error", "Failed to build image edit request");
+}
+
+fn errRollback(store: ?*store_mod.Store, io: std.Io, reservation_id: ?u64, status: http.Status, msg: []const u8) Response {
+    if (reservation_id) |rid| if (store) |s| s.rollbackReservation(io, rid);
+    return errResp(status, "invalid_request", msg);
 }
 
 /// preflightTicks returns the conservative tick estimate per image used

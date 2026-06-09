@@ -74,9 +74,20 @@ const TuiState = struct {
     esc_buf: [8]u8 = undefined,
     esc_len: u8 = 0,
 
+    // Synthetic key-hold tracking. A terminal only delivers key *presses*
+    // (auto-repeated bytes while held), never releases. We treat a key as held
+    // while its bytes keep arriving and release it after KEY_HOLD_MS of silence.
+    key_down: [256]bool = [_]bool{false} ** 256,
+    key_seen_ms: [256]i64 = [_]i64{0} ** 256,
+
     // Video initialized flag
     video_init: bool = false,
 };
+
+/// How long (ms) a key stays "held" after its last byte. Must exceed the
+/// terminal's auto-repeat interval so a held key doesn't flicker, but be short
+/// enough that a release stops movement promptly.
+const KEY_HOLD_MS: i64 = 140;
 
 // Global pointer for signal handler
 var g_tui_state: ?*TuiState = null;
@@ -171,6 +182,46 @@ fn buildPaletteCache(cache: *PaletteCache, palette: *const [768]u8) void {
     }
 }
 
+/// Average the RGB of a rectangular block of the 320x200 framebuffer and map
+/// the mean color to the nearest xterm-256 index.
+///
+/// This is an area (box) filter. Point-sampling (picking one pixel per cell)
+/// aliases badly when downscaling 320x200 to ~106x66 terminal sub-pixels: a
+/// fixed stride keeps landing on the same phase, so thin features collapse —
+/// the wood-grain pillar turns into a solid black bar, status-bar digits drop
+/// out. Averaging every source pixel the cell covers keeps those features.
+fn avgBlockXterm(
+    screen: *const [SCREENSIZE]u8,
+    palette: *const [768]u8,
+    x0: usize,
+    x1: usize,
+    y0: usize,
+    y1: usize,
+) u8 {
+    var rs: u32 = 0;
+    var gs: u32 = 0;
+    var bs: u32 = 0;
+    var n: u32 = 0;
+    var y = y0;
+    while (y < y1) : (y += 1) {
+        const rowbase = y * SCREENWIDTH;
+        var x = x0;
+        while (x < x1) : (x += 1) {
+            const idx: usize = screen[rowbase + x];
+            rs += palette[idx * 3 + 0];
+            gs += palette[idx * 3 + 1];
+            bs += palette[idx * 3 + 2];
+            n += 1;
+        }
+    }
+    if (n == 0) return 16; // black
+    return rgbToXterm256(
+        @intCast(rs / n),
+        @intCast(gs / n),
+        @intCast(bs / n),
+    );
+}
+
 /// Write a decimal number into a buffer, return number of bytes written
 fn writeDecimal(buf: []u8, val: u32) usize {
     if (val == 0) {
@@ -211,17 +262,38 @@ fn tuiInitVideo(ctx: *anyopaque, _: u32, _: u32) bool {
         state.term_rows = ws.ws_row;
     }
 
-    // Calculate render dimensions to fit terminal
-    // Each cell = 1 char wide, 2 pixels tall (half-block)
-    const scale_x = if (state.term_cols >= SCREENWIDTH) 1 else (SCREENWIDTH + state.term_cols - 1) / state.term_cols;
-    const scale_y = scale_x; // Keep aspect ratio square-ish
+    // Calculate render dimensions, aspect-corrected.
+    //
+    // The 320x200 framebuffer was designed to fill a 4:3 display, so its pixels
+    // are NOT square — they're stretched 1.2x vertically (200 logical rows shown
+    // as if 240). We render with the upper-half-block glyph, so each terminal
+    // cell stacks 2 sub-pixels vertically; a monospace cell is ~2x taller than
+    // wide, which makes those sub-pixels roughly square.
+    //
+    // For the picture to look like real DOOM (4:3) with square sub-pixels:
+    //     render_cols : (render_rows * 2)  ==  4 : 3
+    // i.e. render_rows = render_cols * 3 / 8.
+    //
+    // The previous code used render_rows = render_cols * 100/320 = *0.3125,
+    // which drops the 1.2x correction and squashes everything vertically.
+    const max_rows = state.term_rows -| 2; // leave a margin to avoid scrolling
 
-    state.render_cols = SCREENWIDTH / scale_x;
-    state.render_rows = (SCREENHEIGHT / 2) / scale_y;
+    var cols: u32 = state.term_cols;
+    if (cols > SCREENWIDTH) cols = SCREENWIDTH; // no benefit oversampling width
+    var rows: u32 = (cols * 3) / 8;
 
-    // Clamp to terminal size (leave 2 rows margin to prevent scrolling)
-    if (state.render_cols > state.term_cols) state.render_cols = state.term_cols;
-    if (state.render_rows > state.term_rows -| 2) state.render_rows = state.term_rows -| 2;
+    // If height-limited, cap rows and re-derive width to preserve 4:3.
+    if (rows > max_rows) {
+        rows = max_rows;
+        cols = (rows * 8) / 3;
+        if (cols > state.term_cols) cols = state.term_cols;
+        if (cols > SCREENWIDTH) cols = SCREENWIDTH;
+    }
+    if (cols == 0) cols = 1;
+    if (rows == 0) rows = 1;
+
+    state.render_cols = cols;
+    state.render_rows = rows;
 
     // Debug: report dimensions to stderr
     {
@@ -263,10 +335,20 @@ fn tuiInitVideo(ctx: *anyopaque, _: u32, _: u32) bool {
     _ = c.tcsetattr(0, c.TCSAFLUSH, &raw);
     state.raw_mode_active = true;
 
-    // Set stdin to non-blocking
+    // NOTE: We deliberately do NOT set O_NONBLOCK on stdin here.
+    //
+    // On a real terminal, stdin/stdout/stderr (fds 0/1/2) all refer to the
+    // *same* open file description for the tty. Setting O_NONBLOCK on fd 0
+    // therefore also makes fd 1 (stdout) non-blocking. A full frame can be
+    // ~100KB+ of ANSI; when it doesn't fit the tty output buffer in one go,
+    // write() returns EAGAIN and the frame-write loop below would abandon the
+    // rest of the frame — leaving only the top one or two rows on screen.
+    //
+    // Non-blocking *input* is already provided by the raw-mode termios above
+    // (VMIN=0, VTIME=0): read() returns immediately with 0 bytes when there is
+    // no pending input. So O_NONBLOCK on stdin is both redundant and harmful.
     state.orig_stdin_flags = c.fcntl(0, c.F_GETFL, @as(c_int, 0));
-    _ = c.fcntl(0, c.F_SETFL, state.orig_stdin_flags | c.O_NONBLOCK);
-    state.stdin_nonblock = true;
+    state.stdin_nonblock = false;
 
     // Install signal handler for cleanup
     g_tui_state = state;
@@ -315,10 +397,6 @@ fn tuiFinishUpdate(ctx: *anyopaque, screen: *const [SCREENSIZE]u8, palette: *con
 
     const cols = state.render_cols;
     const rows = state.render_rows;
-
-    // Scale factors (integer, >= 1)
-    const sx = SCREENWIDTH / cols;
-    const sy = SCREENHEIGHT / (rows * 2);
 
     // Debug: write frame stats to /tmp/doom_debug.txt (first 3 frames)
     if (state.frame_count < 3) {
@@ -397,27 +475,27 @@ fn tuiFinishUpdate(ctx: *anyopaque, screen: *const [SCREENSIZE]u8, palette: *con
         buf[pos] = 'H';
         pos += 1;
 
-        const top_y = row * 2 * sy;
-        const bot_y = top_y + sy;
+        // Vertical extent of this cell's two stacked sub-pixels. Each terminal
+        // row is 2 sub-pixels tall; there are rows*2 sub-pixels over 200 source
+        // rows. Compute exact boundaries so the whole framebuffer is covered.
+        const total_sub = rows * 2;
+        const yt0 = (row * 2) * SCREENHEIGHT / total_sub;
+        const yt1 = (row * 2 + 1) * SCREENHEIGHT / total_sub;
+        const yb1 = (row * 2 + 2) * SCREENHEIGHT / total_sub;
 
         var prev_fg: u16 = 999;
         var prev_bg: u16 = 999;
 
         for (0..cols) |col| {
-            const src_x = col * sx;
+            // Horizontal extent of this cell over the 320-wide framebuffer.
+            const x0 = col * SCREENWIDTH / cols;
+            var x1 = (col + 1) * SCREENWIDTH / cols;
+            if (x1 <= x0) x1 = x0 + 1;
 
-            // Sample top and bottom pixels (center of each scaled cell)
-            const top_idx: usize = if (top_y < SCREENHEIGHT and src_x < SCREENWIDTH)
-                screen[top_y * SCREENWIDTH + src_x]
-            else
-                0;
-            const bot_idx: usize = if (bot_y < SCREENHEIGHT and src_x < SCREENWIDTH)
-                screen[bot_y * SCREENWIDTH + src_x]
-            else
-                0;
-
-            const fg_color: u16 = state.palette_cache[top_idx];
-            const bg_color: u16 = state.palette_cache[bot_idx];
+            // Upper half-block: foreground = top sub-pixel, background = bottom.
+            // Each is the area-average of the source pixels it covers.
+            const fg_color: u16 = avgBlockXterm(screen, palette, x0, x1, yt0, yt1);
+            const bg_color: u16 = avgBlockXterm(screen, palette, x0, x1, yt1, yb1);
 
             // Emit color escape sequences (only when colors change)
             if (fg_color != prev_fg or bg_color != prev_bg) {
@@ -489,12 +567,20 @@ fn tuiFinishUpdate(ctx: *anyopaque, screen: *const [SCREENSIZE]u8, palette: *con
         if (pos + 64 >= buf.len) break;
     }
 
-    // Write the entire frame — loop to handle partial writes
+    // Write the entire frame — loop to handle partial writes.
+    // Retry on EINTR/EAGAIN rather than dropping the rest of the frame; a
+    // half-written frame leaves stale rows on screen (the original "only the
+    // top two rows render" bug). errno 0 means a clean partial write.
     var written: usize = 0;
     while (written < pos) {
         const n = c.write(1, buf.ptr + written, pos - written);
-        if (n <= 0) break;
-        written += @intCast(n);
+        if (n > 0) {
+            written += @intCast(n);
+            continue;
+        }
+        const err = std.posix.errno(@as(isize, n));
+        if (err == .INTR or err == .AGAIN) continue;
+        break;
     }
 }
 
@@ -504,51 +590,64 @@ fn tuiSetPalette(ctx: *anyopaque, _: *const [768]u8) void {
     state.palette_valid = false;
 }
 
+/// Monotonic milliseconds since video init.
+fn nowMs(state: *const TuiState) i64 {
+    var ts: c.timespec = undefined;
+    _ = c.clock_gettime(c.CLOCK_MONOTONIC, &ts);
+    const s: i64 = @as(i64, ts.tv_sec) - state.start_time_s;
+    const ns: i64 = @as(i64, ts.tv_nsec) - state.start_time_ns;
+    return s * 1000 + @divTrunc(ns, 1_000_000);
+}
+
 fn tuiGetEvents(ctx: *anyopaque, buffer: []Event) []Event {
     const state: *TuiState = @ptrCast(@alignCast(ctx));
     var count: usize = 0;
     const max = buffer.len;
+    const now = nowMs(state);
 
-    // Read bytes from stdin (non-blocking)
+    // Mark a key as pressed this poll. Emits a key_down only on the rising edge
+    // (first byte after release); subsequent auto-repeat bytes just refresh the
+    // "last seen" time so the key stays held.
+    const Mark = struct {
+        fn press(st: *TuiState, buf: []Event, cnt: *usize, key: i32, t: i64) void {
+            if (key <= 0 or key > 255) return;
+            const k: usize = @intCast(key);
+            st.key_seen_ms[k] = t;
+            if (!st.key_down[k]) {
+                st.key_down[k] = true;
+                if (cnt.* < buf.len) {
+                    buf[cnt.*] = .{ .event_type = .key_down, .data1 = key, .data2 = 0, .data3 = 0 };
+                    cnt.* += 1;
+                }
+            }
+        }
+    };
+
+    // Read available bytes (raw-mode VMIN=0/VTIME=0 makes this return at once).
     var input_buf: [64]u8 = undefined;
     const n = c.read(0, &input_buf, input_buf.len);
-    if (n <= 0) return buffer[0..0];
+    const bytes: usize = if (n > 0) @intCast(n) else 0;
 
-    const bytes: usize = @intCast(n);
     var i: usize = 0;
-
-    while (i < bytes and count < max) {
+    while (i < bytes) {
         const byte = input_buf[i];
 
         if (byte == 0x1b) {
-            // Escape sequence
+            // Arrow-key escape sequence: ESC [ A/B/C/D
             if (i + 2 < bytes and input_buf[i + 1] == '[') {
-                const code = input_buf[i + 2];
-                const key: i32 = switch (code) {
+                const key: i32 = switch (input_buf[i + 2]) {
                     'A' => event_mod.KEY_UPARROW,
                     'B' => event_mod.KEY_DOWNARROW,
                     'C' => event_mod.KEY_RIGHTARROW,
                     'D' => event_mod.KEY_LEFTARROW,
                     else => 0,
                 };
-                if (key != 0) {
-                    buffer[count] = .{ .event_type = .key_down, .data1 = key, .data2 = 0, .data3 = 0 };
-                    count += 1;
-                    if (count < max) {
-                        buffer[count] = .{ .event_type = .key_up, .data1 = key, .data2 = 0, .data3 = 0 };
-                        count += 1;
-                    }
-                }
+                if (key != 0) Mark.press(state, buffer, &count, key, now);
                 i += 3;
                 continue;
             }
-            // Bare escape = ESC key
-            buffer[count] = .{ .event_type = .key_down, .data1 = event_mod.KEY_ESCAPE, .data2 = 0, .data3 = 0 };
-            count += 1;
-            if (count < max) {
-                buffer[count] = .{ .event_type = .key_up, .data1 = event_mod.KEY_ESCAPE, .data2 = 0, .data3 = 0 };
-                count += 1;
-            }
+            // Bare ESC
+            Mark.press(state, buffer, &count, event_mod.KEY_ESCAPE, now);
             i += 1;
             continue;
         }
@@ -560,7 +659,6 @@ fn tuiGetEvents(ctx: *anyopaque, buffer: []Event) []Event {
             continue;
         }
 
-        // Map ASCII to DOOM keys
         const key: i32 = switch (byte) {
             '\r', '\n' => event_mod.KEY_ENTER,
             '\t' => event_mod.KEY_TAB,
@@ -579,17 +677,20 @@ fn tuiGetEvents(ctx: *anyopaque, buffer: []Event) []Event {
             '1', '2', '3', '4', '5', '6', '7', '8', '9' => byte,
             else => if (byte >= 32 and byte < 127) byte else 0,
         };
+        if (key != 0) Mark.press(state, buffer, &count, key, now);
+        i += 1;
+    }
 
-        if (key != 0) {
-            buffer[count] = .{ .event_type = .key_down, .data1 = key, .data2 = 0, .data3 = 0 };
-            count += 1;
+    // Release keys that haven't been seen within the hold window.
+    var k: usize = 0;
+    while (k < 256) : (k += 1) {
+        if (state.key_down[k] and (now - state.key_seen_ms[k]) > KEY_HOLD_MS) {
+            state.key_down[k] = false;
             if (count < max) {
-                buffer[count] = .{ .event_type = .key_up, .data1 = key, .data2 = 0, .data3 = 0 };
+                buffer[count] = .{ .event_type = .key_up, .data1 = @intCast(k), .data2 = 0, .data3 = 0 };
                 count += 1;
             }
         }
-
-        i += 1;
     }
 
     return buffer[0..count];

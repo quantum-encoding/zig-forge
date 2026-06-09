@@ -230,6 +230,15 @@ pub fn main(init: std.process.Init) !void {
         router.setApiKey(key);
     }
 
+    // Async job subsystem: in-process queue + a single background worker that
+    // processes queued jobs by dispatching to the same body-core handlers the
+    // sync routes use (billing happens once, at processing time).
+    const jobs_mod = @import("jobs.zig");
+    var job_store = jobs_mod.JobStore.init(allocator, boot_io, &store, &ledger, environ_map, &shutdown_requested);
+    router.setJobStore(&job_store);
+    const worker_thread = std.Thread.spawn(.{}, jobs_mod.workerLoop, .{&job_store}) catch null;
+    if (worker_thread) |t| t.detach();
+
     // Set up graceful shutdown references
     shutdown_store = &store;
     shutdown_bq = &bq_audit;

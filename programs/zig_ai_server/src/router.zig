@@ -111,6 +111,9 @@ var server_gcp: ?*gcp_mod.GcpContext = null;
 /// BigQuery audit logger
 var server_bq: ?*bq_mod.BqAudit = null;
 
+/// Async job store (in-process queue + background worker)
+var server_jobs: ?*@import("jobs.zig").JobStore = null;
+
 /// Legacy single-key mode (deprecated — use store-backed auth)
 var legacy_api_key: ?[]const u8 = null;
 
@@ -143,6 +146,10 @@ pub fn setGcpContext(ctx: *gcp_mod.GcpContext) void {
 
 pub fn setBqAudit(bq: *bq_mod.BqAudit) void {
     server_bq = bq;
+}
+
+pub fn setJobStore(js: *@import("jobs.zig").JobStore) void {
+    server_jobs = js;
 }
 
 pub fn setApiKey(key: []const u8) void {
@@ -228,6 +235,16 @@ pub fn dispatch(
             return google_auth.handle(request, allocator, io, server_store, server_gcp);
         }
         return handlers.notFound(request, allocator);
+    }
+
+    // Stripe webhook — public, but self-authenticating via the
+    // Stripe-Signature HMAC (verified inside the handler). Must bypass the
+    // qai_k_ bearer auth below because Stripe can't present an API key.
+    if (std.mem.eql(u8, path, "/qai/v1/webhooks/stripe")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        const stripe = @import("stripe.zig");
+        const store = server_store orelse return .{ .status = .service_unavailable, .body = "{\"error\":\"unavailable\",\"message\":\"store not available\"}" };
+        return stripe.handleWebhook(request, allocator, io, store, server_ledger, environ_map);
     }
 
     // All other /qai/v1/* routes require auth
@@ -355,6 +372,54 @@ fn routeApiV1Authed(
         return handleAccountBalance(allocator, auth);
     }
 
+    // ── Account usage + stats (read from local ledger.jsonl) ──
+    if (std.mem.eql(u8, path, "account/usage") or std.mem.eql(u8, path, "account/usage/summary") or
+        std.mem.startsWith(u8, path, "stats/"))
+    {
+        if (method != .GET) return handlers.methodNotAllowed(request, allocator);
+        const lq = @import("ledger_query.zig");
+        const l = server_ledger orelse return .{ .status = .service_unavailable, .body = "{\"error\":\"unavailable\",\"message\":\"ledger not available\"}" };
+        if (std.mem.eql(u8, path, "account/usage")) return lq.handleAccountUsage(request, allocator, io, l, auth);
+        if (std.mem.eql(u8, path, "account/usage/summary")) return lq.handleAccountSummary(allocator, io, l, auth);
+        if (std.mem.eql(u8, path, "stats/overview")) return lq.handleStatsOverview(allocator, io, l, auth);
+        if (std.mem.eql(u8, path, "stats/models")) return lq.handleStatsModels(allocator, io, l, auth);
+        if (std.mem.eql(u8, path, "stats/timeline")) return lq.handleStatsTimeline(allocator, io, l, auth);
+        return handlers.notFound(request, allocator);
+    }
+
+    // ── Credits (balance + static catalogs) ─────────────
+    if (std.mem.startsWith(u8, path, "credits/")) {
+        const account_stats = @import("account_stats.zig");
+        if (std.mem.eql(u8, path, "credits/balance")) {
+            if (method != .GET) return handlers.methodNotAllowed(request, allocator);
+            return account_stats.handleCreditsBalance(allocator, store, auth);
+        }
+        if (std.mem.eql(u8, path, "credits/packs")) {
+            if (method != .GET) return handlers.methodNotAllowed(request, allocator);
+            return account_stats.handleCreditsPacks(allocator);
+        }
+        if (std.mem.eql(u8, path, "credits/tiers")) {
+            if (method != .GET) return handlers.methodNotAllowed(request, allocator);
+            return account_stats.handleDevTiers(allocator);
+        }
+        if (std.mem.eql(u8, path, "credits/purchase")) {
+            if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+            const stripe = @import("stripe.zig");
+            return stripe.handlePurchase(request, allocator, environ_map, auth);
+        }
+        // Spend-hold API (reserve / commit / rollback) over the store's
+        // reservation primitives.
+        if (std.mem.eql(u8, path, "credits/reserve") or std.mem.eql(u8, path, "credits/commit") or std.mem.eql(u8, path, "credits/rollback")) {
+            if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+            const reservations = @import("reservations.zig");
+            if (std.mem.eql(u8, path, "credits/reserve")) return reservations.handleReserve(request, allocator, io, store, auth);
+            if (std.mem.eql(u8, path, "credits/commit")) return reservations.handleCommit(request, allocator, io, store, auth);
+            return reservations.handleRollback(request, allocator, io, store, auth);
+        }
+        // credits/lifetime, /dev-program remain stubs.
+        return handlers.stub(request, allocator, "/qai/v1/credits/* (lifetime/dev-program not wired)");
+    }
+
     // ── Key Management (admin) ──────────────────────────
     if (std.mem.eql(u8, path, "keys")) {
         if (method == .POST) return keys.handleCreateKey(request, allocator, io, store, auth);
@@ -404,6 +469,31 @@ fn routeApiV1Authed(
         return handlers.methodNotAllowed(request, allocator);
     }
 
+    // ── Admin: users list + system health ───────────────
+    // /admin/users is the same store-backed account list as /admin/accounts.
+    if (std.mem.eql(u8, path, "admin/users")) {
+        if (method != .GET) return handlers.methodNotAllowed(request, allocator);
+        return keys.handleListAccounts(request, allocator, store, auth);
+    }
+    if (std.mem.eql(u8, path, "admin/system/health")) {
+        if (method != .GET) return handlers.methodNotAllowed(request, allocator);
+        const account_stats = @import("account_stats.zig");
+        return account_stats.handleAdminSystemHealth(allocator, store, auth, server_gcp);
+    }
+    // Admin global stats (read from local ledger.jsonl).
+    if (std.mem.startsWith(u8, path, "admin/stats/")) {
+        if (method != .GET) return handlers.methodNotAllowed(request, allocator);
+        const lq = @import("ledger_query.zig");
+        const l = server_ledger orelse return .{ .status = .service_unavailable, .body = "{\"error\":\"unavailable\",\"message\":\"ledger not available\"}" };
+        if (std.mem.eql(u8, path, "admin/stats/overview")) return lq.handleAdminStatsOverview(allocator, io, l, auth);
+        if (std.mem.eql(u8, path, "admin/stats/usage/models")) return lq.handleAdminStatsModels(allocator, io, l, auth);
+        if (std.mem.eql(u8, path, "admin/stats/usage/endpoints")) return lq.handleAdminStatsEndpoints(allocator, io, l, auth);
+        if (std.mem.eql(u8, path, "admin/stats/usage/providers")) return lq.handleAdminStatsProviders(allocator, io, l, auth);
+        if (std.mem.eql(u8, path, "admin/stats/usage/top-users")) return lq.handleAdminStatsTopUsers(allocator, io, l, auth);
+        if (std.mem.eql(u8, path, "admin/stats/usage/daily")) return lq.handleAdminStatsDaily(allocator, io, l, auth);
+        return handlers.notFound(request, allocator);
+    }
+
     // ── Admin: Dedicated Endpoints ─────────────────────
     if (std.mem.eql(u8, path, "admin/endpoints")) {
         if (method == .POST) return vertex.handleRegisterEndpoint(request, allocator, auth);
@@ -419,24 +509,311 @@ fn routeApiV1Authed(
     }
 
     // ── Stubs for unimplemented endpoints ───────────────
-    if (std.mem.eql(u8, path, "chat/session")) return handlers.stub(request, allocator, "POST /qai/v1/chat/session");
-    if (std.mem.eql(u8, path, "search/web")) return handlers.stub(request, allocator, "POST /qai/v1/search/web");
-    if (std.mem.eql(u8, path, "search/context")) return handlers.stub(request, allocator, "POST /qai/v1/search/context");
-    if (std.mem.eql(u8, path, "search/answer")) return handlers.stub(request, allocator, "POST /qai/v1/search/answer");
+    if (std.mem.eql(u8, path, "chat/estimate")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        const estimate = @import("estimate.zig");
+        return estimate.handle(request, allocator, auth);
+    }
+    // ── CRUD verticals (Firestore-backed, owner-scoped) ────────
+    // chat sessions
+    if (std.mem.eql(u8, path, "chat/session") or std.mem.eql(u8, path, "chat/sessions") or std.mem.startsWith(u8, path, "chat/sessions/")) {
+        const crud = @import("crud.zig");
+        const spec = crud.Spec{ .collection = "chat_sessions", .order_field = "created_at_ms" };
+        if (std.mem.eql(u8, path, "chat/session")) {
+            if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+            return crud.create(request, allocator, io, server_gcp, auth, spec);
+        }
+        if (std.mem.eql(u8, path, "chat/sessions")) {
+            if (method != .GET) return handlers.methodNotAllowed(request, allocator);
+            return crud.list(request, allocator, server_gcp, auth, spec);
+        }
+        const id = path["chat/sessions/".len..];
+        if (method == .GET) return crud.get(allocator, server_gcp, auth, spec, id);
+        if (method == .DELETE) return crud.remove(allocator, server_gcp, auth, spec, id);
+        return handlers.methodNotAllowed(request, allocator);
+    }
+    // observations (survey/telemetry capture)
+    if (std.mem.eql(u8, path, "observations")) {
+        const crud = @import("crud.zig");
+        const spec = crud.Spec{ .collection = "observations", .order_field = "created_at_ms" };
+        if (method == .POST) return crud.create(request, allocator, io, server_gcp, auth, spec);
+        if (method == .GET) return crud.list(request, allocator, server_gcp, auth, spec);
+        return handlers.methodNotAllowed(request, allocator);
+    }
+    if (std.mem.startsWith(u8, path, "observations/")) {
+        const crud = @import("crud.zig");
+        const spec = crud.Spec{ .collection = "observations" };
+        const id = path["observations/".len..];
+        if (std.mem.eql(u8, id, "batch")) return handlers.stub(request, allocator, "POST /qai/v1/observations/batch (use single create per observation)");
+        if (method == .GET) return crud.get(allocator, server_gcp, auth, spec, id);
+        if (method == .DELETE) return crud.remove(allocator, server_gcp, auth, spec, id);
+        return handlers.methodNotAllowed(request, allocator);
+    }
+    // media sessions (CRUD; /{id}/chat sub-action not wired)
+    if (std.mem.eql(u8, path, "media-sessions")) {
+        const crud = @import("crud.zig");
+        const spec = crud.Spec{ .collection = "media_sessions", .order_field = "created_at_ms" };
+        if (method == .POST) return crud.create(request, allocator, io, server_gcp, auth, spec);
+        if (method == .GET) return crud.list(request, allocator, server_gcp, auth, spec);
+        return handlers.methodNotAllowed(request, allocator);
+    }
+    if (std.mem.startsWith(u8, path, "media-sessions/")) {
+        const crud = @import("crud.zig");
+        const spec = crud.Spec{ .collection = "media_sessions" };
+        const rest = path["media-sessions/".len..];
+        if (std.mem.indexOfScalar(u8, rest, '/') != null) return handlers.stub(request, allocator, "/qai/v1/media-sessions/{id}/chat (sub-action not wired)");
+        if (method == .GET) return crud.get(allocator, server_gcp, auth, spec, rest);
+        if (method == .DELETE) return crud.remove(allocator, server_gcp, auth, spec, rest);
+        return handlers.methodNotAllowed(request, allocator);
+    }
+    // push-notification device registry
+    if (std.mem.eql(u8, path, "notifications/devices")) {
+        const crud = @import("crud.zig");
+        const spec = crud.Spec{ .collection = "notification_devices", .order_field = "created_at_ms" };
+        if (method == .POST) return crud.create(request, allocator, io, server_gcp, auth, spec);
+        if (method == .GET) return crud.list(request, allocator, server_gcp, auth, spec);
+        return handlers.methodNotAllowed(request, allocator);
+    }
+    if (std.mem.startsWith(u8, path, "search/")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        const search = @import("search.zig");
+        if (std.mem.eql(u8, path, "search/web")) return search.handleWeb(request, allocator, environ_map, io, store, auth, server_ledger);
+        if (std.mem.eql(u8, path, "search/context")) return search.handleContext(request, allocator, environ_map, io, store, auth, server_ledger);
+        if (std.mem.eql(u8, path, "search/answer")) return search.handleAnswer(request, allocator, environ_map, io, store, auth, server_ledger);
+        if (std.mem.eql(u8, path, "search/google")) {
+            const grounded = @import("grounded.zig");
+            return grounded.handle(request, allocator, environ_map, io, store, auth, server_ledger);
+        }
+        return handlers.notFound(request, allocator);
+    }
     if (std.mem.eql(u8, path, "images/generate")) {
         if (method != .POST) return handlers.methodNotAllowed(request, allocator);
         return images.handle(request, allocator, environ_map, io, store, auth, server_ledger);
     }
-    if (std.mem.eql(u8, path, "images/edit")) return handlers.stub(request, allocator, "POST /qai/v1/images/edit");
-    if (std.mem.startsWith(u8, path, "audio/")) return handlers.stub(request, allocator, "/qai/v1/audio/*");
+    if (std.mem.eql(u8, path, "images/edit")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        return images.handleEdit(request, allocator, environ_map, io, store, auth, server_ledger);
+    }
+    if (std.mem.eql(u8, path, "audio/tts")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        const audio = @import("audio.zig");
+        return audio.handleTts(request, allocator, environ_map, io, store, auth, server_ledger);
+    }
+    if (std.mem.eql(u8, path, "audio/stt")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        const audio = @import("audio.zig");
+        return audio.handleStt(request, allocator, environ_map, io, store, auth, server_ledger);
+    }
+    if (std.mem.eql(u8, path, "audio/sound-effects")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        const audio = @import("audio.zig");
+        return audio.handleSoundEffects(request, allocator, environ_map, io, store, auth, server_ledger);
+    }
+    if (std.mem.eql(u8, path, "audio/music")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        const audio = @import("audio.zig");
+        return audio.handleMusic(request, allocator, environ_map, io, store, auth, server_ledger);
+    }
+    if (std.mem.eql(u8, path, "audio/isolate")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        const audio = @import("audio.zig");
+        return audio.handleIsolate(request, allocator, environ_map, io, store, auth, server_ledger);
+    }
+    if (std.mem.eql(u8, path, "audio/speech-to-speech")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        const audio = @import("audio.zig");
+        return audio.handleSpeechToSpeech(request, allocator, environ_map, io, store, auth, server_ledger);
+    }
+    if (std.mem.eql(u8, path, "audio/voice-design")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        const audio = @import("audio.zig");
+        return audio.handleVoiceDesign(request, allocator, environ_map, io, store, auth, server_ledger);
+    }
+    if (std.mem.eql(u8, path, "audio/dialogue")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        const audio = @import("audio.zig");
+        return audio.handleDialogue(request, allocator, environ_map, io, store, auth, server_ledger);
+    }
+    if (std.mem.eql(u8, path, "audio/align")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        const audio = @import("audio.zig");
+        return audio.handleAlign(request, allocator, environ_map, io, store, auth, server_ledger);
+    }
+    if (std.mem.eql(u8, path, "audio/remix")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        const audio = @import("audio.zig");
+        return audio.handleRemix(request, allocator, environ_map, io, store, auth, server_ledger);
+    }
+    if (std.mem.eql(u8, path, "audio/starfish-tts")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        const heygen = @import("heygen.zig");
+        return heygen.handleStarfishTts(request, allocator, environ_map, io, store, auth, server_ledger);
+    }
+    if (std.mem.startsWith(u8, path, "audio/")) return handlers.stub(request, allocator, "/qai/v1/audio/* (dub/dialogue/remix/align/finetunes not wired)");
     if (std.mem.startsWith(u8, path, "video/")) return handlers.stub(request, allocator, "/qai/v1/video/*");
-    if (std.mem.eql(u8, path, "embeddings")) return handlers.stub(request, allocator, "POST /qai/v1/embeddings");
-    if (std.mem.startsWith(u8, path, "rag/")) return handlers.stub(request, allocator, "/qai/v1/rag/*");
-    if (std.mem.eql(u8, path, "missions")) return handlers.stub(request, allocator, "POST /qai/v1/missions");
+    if (std.mem.eql(u8, path, "embeddings")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        const embeddings = @import("embeddings.zig");
+        return embeddings.handle(request, allocator, environ_map, io, store, auth, server_ledger);
+    }
+    if (std.mem.eql(u8, path, "moderate")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        const moderate = @import("moderate.zig");
+        return moderate.handle(request, allocator, io, auth, server_gcp);
+    }
+    // contact form → Firestore (not owner-scoped read, but stamped with sender)
+    if (std.mem.eql(u8, path, "contact")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        const crud = @import("crud.zig");
+        return crud.create(request, allocator, io, server_gcp, auth, .{ .collection = "contact_messages" });
+    }
+    // conductor telemetry log → Firestore append
+    if (std.mem.eql(u8, path, "conductor/log")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        const crud = @import("crud.zig");
+        return crud.create(request, allocator, io, server_gcp, auth, .{ .collection = "conductor_logs" });
+    }
+    if (std.mem.startsWith(u8, path, "vision/")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        const vision = @import("vision.zig");
+        if (std.mem.eql(u8, path, "vision/analyze")) return vision.handleAnalyze(request, allocator, environ_map, io, store, auth, server_ledger);
+        if (std.mem.eql(u8, path, "vision/describe")) return vision.handleDescribe(request, allocator, environ_map, io, store, auth, server_ledger);
+        if (std.mem.eql(u8, path, "vision/detect")) return vision.handleDetect(request, allocator, environ_map, io, store, auth, server_ledger);
+        if (std.mem.eql(u8, path, "vision/ocr")) return vision.handleOCR(request, allocator, environ_map, io, store, auth, server_ledger);
+        if (std.mem.eql(u8, path, "vision/quality")) return vision.handleQuality(request, allocator, environ_map, io, store, auth, server_ledger);
+        return handlers.notFound(request, allocator);
+    }
+    if (std.mem.startsWith(u8, path, "rag/")) {
+        const rag = @import("rag.zig");
+        // Vertex-backed (uses the server's GCP credentials).
+        if (std.mem.eql(u8, path, "rag/corpora")) {
+            if (method != .GET) return handlers.methodNotAllowed(request, allocator);
+            return rag.handleCorpora(allocator, environ_map, server_gcp);
+        }
+        if (std.mem.eql(u8, path, "rag/search")) {
+            if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+            return rag.handleSearch(request, allocator, environ_map, io, store, auth, server_ledger, server_gcp);
+        }
+        // rag/surreal/* → external SurrealDB RAG service (reverse proxy).
+        const proxy = @import("proxy.zig");
+        if (std.mem.eql(u8, path, "rag/surreal/search")) {
+            if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+            return proxy.post(request, allocator, environ_map, "QAI_SURREAL_RAG_URL", "QAI_SURREAL_RAG_KEY", "/search");
+        }
+        if (std.mem.eql(u8, path, "rag/surreal/providers")) {
+            if (method != .GET) return handlers.methodNotAllowed(request, allocator);
+            return proxy.get(allocator, environ_map, "QAI_SURREAL_RAG_URL", "QAI_SURREAL_RAG_KEY", "/providers");
+        }
+        // rag/collections/* (managed collections) remains a stub.
+        return handlers.stub(request, allocator, "/qai/v1/rag/collections/* (managed collections not wired)");
+    }
+    // documents/* → external Axiom document service (reverse proxy).
+    if (std.mem.startsWith(u8, path, "documents/")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        const proxy = @import("proxy.zig");
+        const sub = path["documents/".len..];
+        if (std.mem.eql(u8, sub, "chunk")) return proxy.post(request, allocator, environ_map, "QAI_AXIOM_URL", "QAI_AXIOM_KEY", "/chunk");
+        if (std.mem.eql(u8, sub, "extract")) return proxy.post(request, allocator, environ_map, "QAI_AXIOM_URL", "QAI_AXIOM_KEY", "/extract");
+        if (std.mem.eql(u8, sub, "process")) return proxy.post(request, allocator, environ_map, "QAI_AXIOM_URL", "QAI_AXIOM_KEY", "/process");
+        return handlers.notFound(request, allocator);
+    }
+    // scraper/* → external scraper service (reverse proxy).
+    if (std.mem.startsWith(u8, path, "scraper/")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        const proxy = @import("proxy.zig");
+        const sub = path["scraper/".len..];
+        if (std.mem.eql(u8, sub, "scrape")) return proxy.post(request, allocator, environ_map, "QAI_SCRAPER_URL", "QAI_SCRAPER_KEY", "/scrape");
+        if (std.mem.eql(u8, sub, "screenshot")) return proxy.post(request, allocator, environ_map, "QAI_SCRAPER_URL", "QAI_SCRAPER_KEY", "/screenshot");
+        return handlers.notFound(request, allocator);
+    }
+    // workflows (CRUD parts; execute/approve actions are state machines → stub)
+    if (std.mem.eql(u8, path, "workflows")) {
+        const crud = @import("crud.zig");
+        const spec = crud.Spec{ .collection = "workflows", .order_field = "created_at_ms" };
+        if (method == .POST) return crud.create(request, allocator, io, server_gcp, auth, spec);
+        if (method == .GET) return crud.list(request, allocator, server_gcp, auth, spec);
+        return handlers.methodNotAllowed(request, allocator);
+    }
+    if (std.mem.startsWith(u8, path, "workflows/")) {
+        const crud = @import("crud.zig");
+        const spec = crud.Spec{ .collection = "workflows" };
+        const rest = path["workflows/".len..];
+        if (std.mem.indexOfScalar(u8, rest, '/') != null) return handlers.stub(request, allocator, "/qai/v1/workflows/{id}/* (execute/approve state machine not wired)");
+        if (method == .GET) return crud.get(allocator, server_gcp, auth, spec, rest);
+        if (method == .DELETE) return crud.remove(allocator, server_gcp, auth, spec, rest);
+        return handlers.methodNotAllowed(request, allocator);
+    }
+    // missions (CRUD parts; list/create/get/delete — multi-step actions → stub)
+    if (std.mem.eql(u8, path, "missions") or std.mem.eql(u8, path, "missions/create") or std.mem.eql(u8, path, "missions/list")) {
+        const crud = @import("crud.zig");
+        const spec = crud.Spec{ .collection = "missions", .order_field = "created_at_ms" };
+        if (std.mem.eql(u8, path, "missions/list")) {
+            if (method != .GET) return handlers.methodNotAllowed(request, allocator);
+            return crud.list(request, allocator, server_gcp, auth, spec);
+        }
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        return crud.create(request, allocator, io, server_gcp, auth, spec);
+    }
+    if (std.mem.startsWith(u8, path, "missions/")) {
+        const crud = @import("crud.zig");
+        const spec = crud.Spec{ .collection = "missions" };
+        const rest = path["missions/".len..];
+        if (std.mem.indexOfScalar(u8, rest, '/') != null) return handlers.stub(request, allocator, "/qai/v1/missions/{id}/* (approve/pause/resume/chat actions not wired)");
+        if (method == .GET) return crud.get(allocator, server_gcp, auth, spec, rest);
+        if (method == .DELETE) return crud.remove(allocator, server_gcp, auth, spec, rest);
+        return handlers.methodNotAllowed(request, allocator);
+    }
     if (std.mem.startsWith(u8, path, "3d/")) return handlers.stub(request, allocator, "/qai/v1/3d/*");
     if (std.mem.startsWith(u8, path, "compute/")) return handlers.stub(request, allocator, "/qai/v1/compute/*");
-    if (std.mem.eql(u8, path, "voices") or std.mem.eql(u8, path, "voices/library")) return handlers.stub(request, allocator, "GET /qai/v1/voices");
-    if (std.mem.eql(u8, path, "jobs") or std.mem.startsWith(u8, path, "jobs/")) return handlers.stub(request, allocator, "/qai/v1/jobs");
+    if (std.mem.eql(u8, path, "voices") or std.mem.eql(u8, path, "voices/library")) {
+        if (method != .GET) return handlers.methodNotAllowed(request, allocator);
+        const audio = @import("audio.zig");
+        return audio.handleListVoices(allocator, environ_map);
+    }
+    if (std.mem.eql(u8, path, "voices/clone")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        const audio = @import("audio.zig");
+        return audio.handleVoiceClone(request, allocator, environ_map, io, store, auth, server_ledger);
+    }
+    // ── HeyGen video translate (async — enqueue a job, return job_id) ──
+    if (std.mem.eql(u8, path, "video/translate")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        const js = server_jobs orelse return .{ .status = .service_unavailable, .body = "{\"error\":\"unavailable\",\"message\":\"job subsystem not available\"}" };
+        const jobs = @import("jobs.zig");
+        const json_util = @import("json.zig");
+        const security = @import("security.zig");
+        const tbody = json_util.readBody(request, allocator, security.Limits.max_chat_body) catch
+            return .{ .status = .bad_request, .body = "{\"error\":\"invalid_request\",\"message\":\"read body\"}" };
+        defer allocator.free(tbody);
+        const jid = jobs.enqueueJob(js, "video/translate", tbody, auth) orelse
+            return .{ .status = .service_unavailable, .body = "{\"error\":\"unavailable\",\"message\":\"could not enqueue job\"}" };
+        const out = std.json.Stringify.valueAlloc(allocator, .{ .job_id = jid, .status = "pending" }, .{}) catch
+            return .{ .status = .internal_server_error, .body = "{\"error\":\"internal\"}" };
+        return .{ .status = .ok, .body = out };
+    }
+    // ── HeyGen video catalog (read-only proxies) ────────
+    if (std.mem.eql(u8, path, "video/avatars") or std.mem.eql(u8, path, "video/templates") or std.mem.eql(u8, path, "video/heygen-voices")) {
+        if (method != .GET) return handlers.methodNotAllowed(request, allocator);
+        const heygen = @import("heygen.zig");
+        if (std.mem.eql(u8, path, "video/avatars")) return heygen.handleAvatars(allocator, environ_map);
+        if (std.mem.eql(u8, path, "video/templates")) return heygen.handleTemplates(allocator, environ_map);
+        return heygen.handleVoices(allocator, environ_map);
+    }
+    if (std.mem.eql(u8, path, "jobs") or std.mem.startsWith(u8, path, "jobs/")) {
+        const jobs = @import("jobs.zig");
+        const js = server_jobs orelse return .{ .status = .service_unavailable, .body = "{\"error\":\"unavailable\",\"message\":\"job subsystem not available\"}" };
+        if (std.mem.eql(u8, path, "jobs")) {
+            if (method == .POST) return jobs.handleCreate(request, allocator, js, auth);
+            if (method == .GET) return jobs.handleList(allocator, js, auth);
+            return handlers.methodNotAllowed(request, allocator);
+        }
+        // jobs/{id}  (jobs/{id}/stream not supported — no SSE for jobs yet)
+        const rest = path[5..]; // after "jobs/"
+        if (method != .GET or std.mem.indexOfScalar(u8, rest, '/') != null) {
+            return handlers.notFound(request, allocator);
+        }
+        return jobs.handleStatus(allocator, js, auth, rest);
+    }
     if (std.mem.eql(u8, path, "batch")) return handlers.stub(request, allocator, "POST /qai/v1/batch");
 
     return handlers.notFound(request, allocator);

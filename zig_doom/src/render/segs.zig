@@ -24,6 +24,36 @@ const RenderData = @import("data.zig").RenderData;
 pub const SCREENWIDTH = defs.SCREENWIDTH;
 pub const SCREENHEIGHT = defs.SCREENHEIGHT;
 
+const centerx_i: i32 = SCREENWIDTH / 2;
+
+/// atan(num/den) as a binary angle, for 0 <= num <= den (result in 0..ANG45).
+fn atanSlope(num: u32, den: u32) Angle {
+    if (den == 0) return fixed.ANG90;
+    if (num >= den) return fixed.ANG45;
+    const idx = @min((num << 11) / den, 2048);
+    return tables.tantoangle[idx];
+}
+
+/// View angle of screen column x relative to view center (DOOM xtoviewangle[x]).
+/// Columns left of center yield a positive angle, right of center negative.
+fn xToViewAngle(x: i32) Angle {
+    const dx = centerx_i - x;
+    if (dx == 0) return 0;
+    const adx: u32 = @intCast(if (dx < 0) -dx else dx);
+    const a = atanSlope(adx, @intCast(centerx_i));
+    return if (dx > 0) a else 0 -% a;
+}
+
+/// tan(angle) using this codebase's finetangent convention:
+/// finetangent[i] = tan((2048.5 - i)*pi/4096), so i = 2048 - (signed_angle >> 19).
+fn fineTan(angle: Angle) Fixed {
+    const s: i32 = @bitCast(angle);
+    var i: i32 = 2048 - (s >> tables.ANGLETOFINESHIFT);
+    if (i < 0) i = 0;
+    if (i > 4095) i = 4095;
+    return tables.finetangent[@intCast(i)];
+}
+
 /// Render a wall segment from screen column x1 to x2
 pub fn renderSeg(
     seg_idx: u16,
@@ -54,16 +84,37 @@ pub fn renderSeg(
         }
     }
 
-    // Calculate the distance to the seg
+    // Perpendicular distance from the viewpoint to the seg's line.
+    // (linuxdoom-1.10 r_segs.c R_StoreWallRange)
+    //
+    //   offsetangle = abs(rw_normalangle - rw_angle1), clamped to ANG90
+    //   distangle   = ANG90 - offsetangle
+    //   rw_distance = hyp * sin(distangle)   ==  hyp * cos(offsetangle)
+    //
+    // The previous code used sin(offsetangle) directly (sin where it needed
+    // cos), which over-estimates the distance for any wall not at exactly 45°
+    // off-normal — collapsing walls into a thin band at the horizon.
     const rw_normalangle = seg.angle +% fixed.ANG90;
-    const offset_angle = rw_normalangle -% rw_angle1;
+    const dnorm = rw_normalangle -% rw_angle1; // signed (wrapping) normal-to-vertex angle
+    var offsetangle = dnorm;
+    if (offsetangle > fixed.ANG180) offsetangle = 0 -% offsetangle; // abs() in angle space
+    if (offsetangle > fixed.ANG90) offsetangle = fixed.ANG90; // clamp
+    const distangle = fixed.ANG90 -% offsetangle;
 
-    // Distance from viewpoint to the seg line
     const v1 = &level.vertices[seg.v1];
     const hyp = distToPoint(rstate.viewx, rstate.viewy, v1.x, v1.y);
-    const sineval = tables.sinAngle(offset_angle);
+    const sineval = tables.sinAngle(distangle);
     const rw_distance = Fixed.mul(hyp, sineval);
     const rw_distance_abs = if (rw_distance.raw() > 0) rw_distance else Fixed.fromRaw(1);
+
+    // Perpendicular texture offset along the wall: hyp * sin(offsetangle),
+    // signed by which side of the normal the first vertex lies on. (r_segs.c)
+    var rw_offset_perp = Fixed.mul(hyp, tables.sinAngle(offsetangle));
+    if (dnorm < fixed.ANG180) rw_offset_perp = Fixed.fromRaw(-rw_offset_perp.raw());
+
+    // Angle from the wall normal to screen-center; per column we add
+    // xtoviewangle[x] to get that column's angle off the wall normal.
+    const rw_centerangle = fixed.ANG90 +% rstate.viewangle -% rw_normalangle;
 
     // Calculate scale at x1 and x2
     const rw_scale = state_mod.scaleFromGlobalAngle(rstate, rw_angle1, rw_distance_abs, rw_normalangle);
@@ -71,13 +122,16 @@ pub fn renderSeg(
     var rw_scalestep = Fixed.ZERO;
     var scale2 = rw_scale;
     if (x2 > x1) {
-        const end_angle = rstate.viewangle -% state_mod.pointToAngle2(
+        // visangle for the seg's far edge is the global angle to vertex 2.
+        // (Previously this passed end_angle + viewangle == 2*viewangle - angle_v2,
+        // which is not a real view angle and skewed the per-column scale ramp.)
+        const angle_v2 = state_mod.pointToAngle2(
             rstate.viewx,
             rstate.viewy,
             level.vertices[seg.v2].x,
             level.vertices[seg.v2].y,
         );
-        scale2 = state_mod.scaleFromGlobalAngle(rstate, end_angle +% rstate.viewangle, rw_distance_abs, rw_normalangle);
+        scale2 = state_mod.scaleFromGlobalAngle(rstate, angle_v2, rw_distance_abs, rw_normalangle);
         rw_scalestep = Fixed.fromRaw(@divTrunc(scale2.raw() - rw_scale.raw(), x2 - x1));
     }
 
@@ -99,9 +153,10 @@ pub fn renderSeg(
         if (worldlow.gt(worldbottom)) has_bottom = true;
     }
 
-    // Texture offset calculations
-    var rw_offset = seg.offset;
+    // Texture horizontal offset: perpendicular term + sidedef + seg offsets.
+    var rw_offset = rw_offset_perp;
     rw_offset = Fixed.add(rw_offset, side.textureoffset);
+    rw_offset = Fixed.add(rw_offset, seg.offset);
 
     const texturemid = Fixed.add(worldtop, side.rowoffset);
 
@@ -139,6 +194,11 @@ pub fn renderSeg(
             curscale = Fixed.add(curscale, rw_scalestep);
             continue;
         }
+
+        // Perspective-correct texture column for this screen column:
+        //   texcol = (rw_offset - tan(centerangle + xtoviewangle[x]) * rw_distance) >> FRACBITS
+        const colangle = rw_centerangle +% xToViewAngle(x);
+        const tex_col = Fixed.sub(rw_offset, Fixed.mul(fineTan(colangle), rw_distance_abs)).toInt();
 
         // Top of wall (ceiling line on screen)
         const ceilingline = rstate.centery - Fixed.mul(worldtop, scale_val).toInt();
@@ -185,7 +245,7 @@ pub fn renderSeg(
                 const high_line = rstate.centery - Fixed.mul(worldhigh, scale_val).toInt();
                 const top_yh = @min(high_line - 1, yh);
                 if (yl <= top_yh) {
-                    drawWallColumn(rdata, screen, @intCast(top_tex), x, yl, top_yh, scale_val, texturemid, rw_offset, seg, rstate, lightlevel);
+                    drawWallColumn(rdata, screen, @intCast(top_tex), x, yl, top_yh, scale_val, texturemid, tex_col, seg, rstate, lightlevel);
                 }
                 // Update clip
                 if (high_line > rstate.ceilingclip[ux]) {
@@ -199,7 +259,7 @@ pub fn renderSeg(
                 const bot_yl = @max(low_line, yl);
                 if (bot_yl <= yh) {
                     const bottexmid = Fixed.add(worldlow, side.rowoffset);
-                    drawWallColumn(rdata, screen, @intCast(bot_tex), x, bot_yl, yh, scale_val, bottexmid, rw_offset, seg, rstate, lightlevel);
+                    drawWallColumn(rdata, screen, @intCast(bot_tex), x, bot_yl, yh, scale_val, bottexmid, tex_col, seg, rstate, lightlevel);
                 }
                 // Update clip
                 if (low_line < rstate.floorclip[ux]) {
@@ -212,7 +272,7 @@ pub fn renderSeg(
         } else {
             // One-sided line — draw mid texture, close off column
             if (has_mid and mid_tex > 0 and yl <= yh) {
-                drawWallColumn(rdata, screen, @intCast(mid_tex), x, yl, yh, scale_val, texturemid, rw_offset, seg, rstate, lightlevel);
+                drawWallColumn(rdata, screen, @intCast(mid_tex), x, yl, yh, scale_val, texturemid, tex_col, seg, rstate, lightlevel);
             }
 
             // One-sided line fully occludes
@@ -234,27 +294,19 @@ fn drawWallColumn(
     yh: i32,
     scale: Fixed,
     texturemid: Fixed,
-    rw_offset: Fixed,
+    tex_col: i32,
     seg: *const setup.Seg,
     rstate: *const RenderState,
     lightlevel: i16,
 ) void {
+    _ = seg;
+    _ = rstate;
     if (yl > yh) return;
     if (yl >= SCREENHEIGHT or yh < 0) return;
 
-    // Calculate texture column number
-    const angle = rstate.viewangle -% state_mod.pointToAngle2(
-        rstate.viewx,
-        rstate.viewy,
-        Fixed.fromRaw(0), // simplified — use seg angle
-        Fixed.fromRaw(0),
-    );
-    _ = angle;
-
-    // Use seg offset + view-relative offset for texture column
-    const tex_col: i32 = @divTrunc(rw_offset.raw() +% seg.offset.raw(), @as(i32, 1 << fixed.FRAC_BITS));
-
-    // Get texture column data
+    // Get texture column data (tex_col is the perspective-correct column
+    // computed per screen column by the caller; getTextureColumn masks it
+    // to the texture width).
     const col_data = rdata.getTextureColumn(tex_num, tex_col);
     if (col_data.len == 0) return;
 

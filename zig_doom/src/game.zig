@@ -308,10 +308,16 @@ pub const Game = struct {
                         self.automap.drawer(lvl, &self.players[self.displayplayer], vid);
                     }
                 } else {
-                    // Render 3D view
+                    // Render 3D view from the player's CURRENT viewpoint so
+                    // movement and turning are reflected on screen.
                     if (self.level) |*lvl| {
                         if (self.rdata) |*rdata| {
-                            _ = render_main.renderFrame(self.wad, lvl, rdata, vid, self.allocator);
+                            const player = &self.players[self.displayplayer];
+                            if (player.mobj) |mo| {
+                                _ = render_main.renderView(self.wad, lvl, rdata, vid, mo.x, mo.y, player.viewz, mo.angle);
+                            } else {
+                                _ = render_main.renderFrame(self.wad, lvl, rdata, vid, self.allocator);
+                            }
                         } else {
                             vid.clearScreen(0, 0);
                         }

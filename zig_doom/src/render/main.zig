@@ -34,21 +34,32 @@ pub fn renderFrame(
 ) bool {
     _ = alloc;
 
-    // Find player 1 start
+    // Static one-shot render: derive the viewpoint from the player-1 start.
     const p1 = level.findPlayer1Start() orelse return false;
-
-    // Convert player position to fixed-point
     const player_x = Fixed.fromInt(@as(i32, p1.x));
     const player_y = Fixed.fromInt(@as(i32, p1.y));
-    // Player viewheight is 41 units above floor
-    // Find the sector at the player's position to get floor height
     const player_z = getPlayerViewZ(level, player_x, player_y);
-    // Player angle: DOOM thing angle is in degrees (0=east, 90=north)
     const player_angle = degreesToAngle(p1.angle);
+    return renderView(w, level, rdata, vid, player_x, player_y, player_z, player_angle);
+}
 
+/// Render one frame from an explicit viewpoint. The live game calls this every
+/// tic with the player mobj's current position/angle, so moving and turning
+/// actually change the view. (Previously the live path re-derived a fixed
+/// player-1-start viewpoint every frame, freezing the camera at spawn.)
+pub fn renderView(
+    w: *const Wad,
+    level: *const setup.Level,
+    rdata: *RenderData,
+    vid: *video.VideoState,
+    viewx: Fixed,
+    viewy: Fixed,
+    viewz: Fixed,
+    viewangle: Angle,
+) bool {
     // Initialize render state
     var rstate = RenderState.init();
-    rstate.setupFrame(player_x, player_y, player_z, player_angle);
+    rstate.setupFrame(viewx, viewy, viewz, viewangle);
 
     // Initialize plane state
     var pstate = planes.PlaneState.init();
