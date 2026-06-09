@@ -58,7 +58,7 @@ const ConnPool = struct {
         }
         return self.allocator.create(Conn);
     }
-    fn release(self: *ConnPool, conn: *Conn) {
+    fn release(self: *ConnPool, conn: *Conn) void {
         conn.next_free = self.free;
         self.free = conn;
     }
