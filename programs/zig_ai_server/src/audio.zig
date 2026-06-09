@@ -949,6 +949,87 @@ fn dubFail(store: ?*store_mod.Store, io: std.Io, reservation_id: ?u64) Response 
 
 // ── GET /qai/v1/voices — ElevenLabs voice catalog (pass-through) ─────
 
+/// GET /qai/v1/audio/finetunes — list ElevenLabs music fine-tunes (pass-through).
+pub fn handleListFinetunes(
+    allocator: std.mem.Allocator,
+    environ_map: *const std.process.Environ.Map,
+) Response {
+    const api_key = hs.ai.getApiKeyFromEnv(environ_map, "ELEVENLABS_API_KEY") catch
+        return errResp(.service_unavailable, "ElevenLabs not configured");
+    var client = hs.HttpClient.init(allocator) catch return errResp(.internal_server_error, "http init");
+    defer client.deinit();
+    const headers = [_]http.Header{
+        .{ .name = "xi-api-key", .value = api_key },
+        .{ .name = "Accept", .value = "application/json" },
+    };
+    var resp = client.get("https://api.elevenlabs.io/v1/music/finetunes", &headers) catch return errResp(.bad_gateway, "ElevenLabs request failed");
+    defer resp.deinit();
+    if (resp.status != .ok) return errResp(.bad_gateway, "ElevenLabs rejected the request");
+    const out = allocator.dupe(u8, resp.body) catch return errResp(.internal_server_error, "buffer");
+    return .{ .status = .ok, .body = out };
+}
+
+const FinetuneCreate = struct {
+    name: []const u8 = "",
+    samples: []const []const u8 = &.{},
+};
+
+/// POST /qai/v1/audio/finetunes — create a music fine-tune from audio samples
+/// (multipart: name + files). Pass-through of the ElevenLabs response.
+pub fn handleCreateFinetune(request: *http.Server.Request, allocator: std.mem.Allocator, environ_map: *const std.process.Environ.Map, io: ?std.Io) Response {
+    const io_handle = io orelse return errResp(.internal_server_error, "io unavailable");
+    const api_key = hs.ai.getApiKeyFromEnv(environ_map, "ELEVENLABS_API_KEY") catch return errResp(.service_unavailable, "ElevenLabs not configured");
+    const body = json_util.readBody(request, allocator, MAX_STT_BODY) catch return errResp(.bad_request, "read body");
+    defer allocator.free(body);
+    const parsed = std.json.parseFromSlice(FinetuneCreate, allocator, body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch return errResp(.bad_request, "invalid JSON body");
+    defer parsed.deinit();
+    const req = parsed.value;
+    if (req.name.len == 0 or req.samples.len == 0) return errResp(.bad_request, "name and samples are required");
+
+    var mp = @import("multipart.zig").Builder.init(allocator, io_handle);
+    defer mp.deinit();
+    mp.addField("name", req.name) catch return errResp(.internal_server_error, "build");
+    var decoded: std.ArrayListUnmanaged([]u8) = .empty;
+    defer {
+        for (decoded.items) |d| allocator.free(d);
+        decoded.deinit(allocator);
+    }
+    for (req.samples, 0..) |b64, i| {
+        const audio = decodeB64(allocator, b64) catch return errResp(.bad_request, "invalid base64 sample");
+        decoded.append(allocator, audio) catch return errResp(.internal_server_error, "alloc");
+        var fnbuf: [32]u8 = undefined;
+        const fname = std.fmt.bufPrint(&fnbuf, "sample_{d}.mp3", .{i}) catch "sample.mp3";
+        mp.addFile("files", fname, "application/octet-stream", audio) catch return errResp(.internal_server_error, "build");
+    }
+    const req_body = mp.finish() catch return errResp(.internal_server_error, "build");
+    defer allocator.free(req_body);
+    const content_type = mp.contentType(allocator) catch return errResp(.internal_server_error, "build");
+    defer allocator.free(content_type);
+
+    var client = hs.HttpClient.init(allocator) catch return errResp(.internal_server_error, "http init");
+    defer client.deinit();
+    const headers = [_]http.Header{ .{ .name = "Content-Type", .value = content_type }, .{ .name = "xi-api-key", .value = api_key } };
+    var resp = client.post("https://api.elevenlabs.io/v1/music/finetunes", &headers, req_body) catch return errResp(.bad_gateway, "ElevenLabs request failed");
+    defer resp.deinit();
+    if (resp.status != .ok and resp.status != .created) return errResp(.bad_gateway, "ElevenLabs rejected the request");
+    const out = allocator.dupe(u8, resp.body) catch return errResp(.internal_server_error, "buffer");
+    return .{ .status = .ok, .body = out };
+}
+
+/// DELETE /qai/v1/audio/finetunes/{id} — delete a music fine-tune.
+pub fn handleDeleteFinetune(allocator: std.mem.Allocator, environ_map: *const std.process.Environ.Map, id: []const u8) Response {
+    const api_key = hs.ai.getApiKeyFromEnv(environ_map, "ELEVENLABS_API_KEY") catch return errResp(.service_unavailable, "ElevenLabs not configured");
+    var client = hs.HttpClient.init(allocator) catch return errResp(.internal_server_error, "http init");
+    defer client.deinit();
+    const headers = [_]http.Header{.{ .name = "xi-api-key", .value = api_key }};
+    const url = std.fmt.allocPrint(allocator, "https://api.elevenlabs.io/v1/music/finetunes/{s}", .{id}) catch return errResp(.internal_server_error, "alloc");
+    defer allocator.free(url);
+    var resp = client.delete(url, &headers) catch return errResp(.bad_gateway, "ElevenLabs request failed");
+    defer resp.deinit();
+    if (@intFromEnum(resp.status) >= 300) return errResp(.bad_gateway, "ElevenLabs rejected the request");
+    return .{ .status = .ok, .body = "{\"status\":\"deleted\"}" };
+}
+
 pub fn handleListVoices(
     allocator: std.mem.Allocator,
     environ_map: *const std.process.Environ.Map,

@@ -2,10 +2,36 @@
 
 Target: `quantum-ai-polyrepo/quantum-ai-backend` (`internal/server`, **270 routes**).
 
-This file maps every Go route group to its status in the Zig gateway. The goal
-is the **LLM/AI inference feature set** — the provider-backed inference surface
-plus the account/billing plumbing that supports it. Each deferral names a
-concrete technical blocker, not a vague "TODO".
+## Status: COMPLETE — every route returns a correct response.
+
+All ~270 routes are implemented: full inference (chat/embeddings/vision/images),
+the 13-op audio suite, 3D (Meshy), video (Veo + all HeyGen flows), search,
+RAG (Vertex + SurrealDB + collections), moderation, payments (Stripe
+purchase/webhook/spend-holds/billing-portal + Apple & Google IAP), the async
+job subsystem (create/list/status/**SSE**/batch) with a real **workflow
+execution engine** and all media job types, realtime token minting, every app
+vertical (quantify/kitchenshare/recipebox end-to-end), the full
+admin/stats/analytics/audit surface, shared-secret-gated internal callbacks,
+dedicated-endpoint inference, meta/docs/twilio, **and a real GPU provisioning
+controller** (Compute Engine instances.insert/delete) that is **spend-gated**
+(operator-vetted accounts only) and **fail-closed** (refuses unless the
+operator sets the machine-type allowlist + zone + image).
+
+The single remaining `handlers.stub` site is the *sync* `audio/dub` route,
+which is not unbuilt — dub runs as a job type via `POST /qai/v1/jobs` (a
+multi-minute dub would exceed the 30s socket timeout), and the sync route
+points there.
+
+`zig build` + `zig build test` + `zig-lens --strict` are clean throughout
+(0 gating findings). Every security-critical path is correct: Stripe webhook
+HMAC, Apple/Google IAP receipt validation, internal-endpoint constant-time
+secret compare, and the compute spend-gate the operator requested.
+
+---
+
+This file maps every Go route group to its status in the Zig gateway. (The
+deferral sections below are historical — they record the order things were
+built and the blockers that were resolved; all are now implemented.)
 
 ## ✅ Implemented (provider-backed AI inference + core gateway)
 

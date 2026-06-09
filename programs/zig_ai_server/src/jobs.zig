@@ -550,6 +550,7 @@ fn dispatch(js: *JobStore, a: std.mem.Allocator, job: *Job) Response {
     if (std.mem.eql(u8, t, "video/studio")) return heygen.studioCore(a, env, io, st, au, lg, p);
     if (std.mem.eql(u8, t, "video/digital-twin")) return heygen.digitalTwinCore(a, env, io, st, au, lg, p);
     if (std.mem.eql(u8, t, "video/photo-avatar")) return heygen.photoAvatarCore(a, env, io, st, au, lg, p);
+    if (std.mem.eql(u8, t, "workflow/execute")) return @import("workflow.zig").executeCore(a, env, io, st, au, lg, p);
     return err(.bad_request, "unsupported job type");
 }
 
@@ -561,7 +562,7 @@ fn isSupported(t: []const u8) bool {
         "3d/generate",     "3d/remesh",    "3d/retexture",
         "3d/rig",          "3d/animate",   "video/generate",
         "audio/dub",       "video/translate", "video/studio",
-        "video/digital-twin", "video/photo-avatar",
+        "video/digital-twin", "video/photo-avatar", "workflow/execute",
     };
     for (supported) |s| if (std.mem.eql(u8, t, s)) return true;
     return false;

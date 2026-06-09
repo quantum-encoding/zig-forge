@@ -493,6 +493,11 @@ pub const Game = struct {
         // Process player input
         for (0..MAXPLAYERS) |i| {
             if (self.player_in_game[i] and self.players[i].player_state != .dead) {
+                // Keep the player's floor/ceiling heights synced to the sector
+                // they're standing in BEFORE thinking — calcHeight clamps the
+                // eye view to [floorz+1, ceilingz-4], and a stale ceilingz of 0
+                // would drag the view below the floor (black floors).
+                if (self.players[i].mobj) |mo| self.updateMobjSectorZ(mo);
                 user.playerThink(&self.players[i]);
             }
         }
@@ -514,11 +519,66 @@ pub const Game = struct {
 
         const mo = mobj_mod.spawnMobj(x, y, mobj_mod.ONFLOORZ, .MT_PLAYER, self.allocator) catch return;
 
+        // spawnMobj leaves floorz/ceilingz at 0; set them from the actual sector
+        // and seat the player on the real floor.
+        self.updateMobjSectorZ(mo);
+        mo.z = mo.floorz;
+
         mo.angle = @as(Angle, @intCast(thing.angle)) *% (0x100000000 / 360);
         mo.player = @ptrCast(&self.players[player_num]);
 
         self.players[player_num].mobj = mo;
         self.players[player_num].player_state = .alive;
+    }
+
+    /// Set a mobj's floorz/ceilingz from the sector it currently occupies
+    /// (BSP point-location). Without this, mobjs keep floorz=ceilingz=0.
+    fn updateMobjSectorZ(self: *Game, mo: *mobj_mod.MapObject) void {
+        const lvl = if (self.level) |*l| l else return;
+        if (lvl.num_nodes == 0) {
+            if (lvl.subsectors.len > 0) {
+                if (lvl.subsectors[0].sector) |si| {
+                    if (si < lvl.sectors.len) {
+                        mo.floorz = lvl.sectors[si].floorheight;
+                        mo.ceilingz = lvl.sectors[si].ceilingheight;
+                    }
+                }
+            }
+            return;
+        }
+        var node_id: u16 = @intCast(lvl.num_nodes - 1);
+        while (node_id & defs.NF_SUBSECTOR == 0) {
+            if (node_id >= lvl.nodes.len) return;
+            const node = &lvl.nodes[node_id];
+            node_id = node.children[pointOnSideNode(mo.x, mo.y, node)];
+        }
+        const ssi = node_id & ~@as(u16, defs.NF_SUBSECTOR);
+        if (ssi < lvl.subsectors.len) {
+            if (lvl.subsectors[ssi].sector) |si| {
+                if (si < lvl.sectors.len) {
+                    mo.floorz = lvl.sectors[si].floorheight;
+                    mo.ceilingz = lvl.sectors[si].ceilingheight;
+                }
+            }
+        }
+    }
+
+    /// Which child of a BSP node a point falls on (0 = front/right, 1 = back/left).
+    fn pointOnSideNode(x: Fixed, y: Fixed, node: *const setup.Node) usize {
+        if (node.dx.raw() == 0) {
+            if (x.raw() <= node.x.raw()) return if (node.dy.raw() > 0) 1 else 0;
+            return if (node.dy.raw() > 0) 0 else 1;
+        }
+        if (node.dy.raw() == 0) {
+            if (y.raw() <= node.y.raw()) return if (node.dx.raw() < 0) 1 else 0;
+            return if (node.dx.raw() < 0) 0 else 1;
+        }
+        const dx: i64 = @as(i64, x.raw()) - @as(i64, node.x.raw());
+        const dy: i64 = @as(i64, y.raw()) - @as(i64, node.y.raw());
+        const left: i64 = @as(i64, node.dy.raw()) * dx;
+        const right: i64 = dy * @as(i64, node.dx.raw());
+        if (right < left) return 0;
+        return 1;
     }
 
     /// Draw title/demo screen page

@@ -189,16 +189,17 @@ pub const StatusBar = struct {
             self.drawBigNumber(vid, w, player.ammo[ammo_type], ST_AMMOX, ST_AMMOY, 3);
         }
 
-        // Draw health with percent sign
+        // Draw health with percent sign (number right-justified to ST_HEALTHX,
+        // '%' sits at the anchor).
         self.drawBigNumber(vid, w, player.health, ST_HEALTHX, ST_HEALTHY, 3);
         if (self.percent_patch) |lump| {
-            video.drawPatch(vid, 0, ST_HEALTHX + 42, ST_HEALTHY, w.lumpData(lump));
+            video.drawPatch(vid, 0, ST_HEALTHX, ST_HEALTHY, w.lumpData(lump));
         }
 
         // Draw armor with percent sign
         self.drawBigNumber(vid, w, player.armor_points, ST_ARMORX, ST_ARMORY, 3);
         if (self.percent_patch) |lump| {
-            video.drawPatch(vid, 0, ST_ARMORX + 42, ST_ARMORY, w.lumpData(lump));
+            video.drawPatch(vid, 0, ST_ARMORX, ST_ARMORY, w.lumpData(lump));
         }
 
         // Draw arms indicators (weapons 2-7)
@@ -255,24 +256,26 @@ pub const StatusBar = struct {
         // Clamp to max displayable
         if (num > 999) num = 999;
 
-        // Draw right to left
-        var draw_x = x + (max_digits - 1) * 14;
-        var digits_drawn: i32 = 0;
+        // Right-justified to `x`: the rightmost digit's right edge sits at x, and
+        // digits march leftward (matches DOOM st_lib.c STlib_drawNum, where the
+        // position constants like ST_HEALTHX are the right anchor, and the '%'
+        // patch is drawn at x). The old code anchored left and pushed the number
+        // ~42px right, crowding the face.
+        const digit_w: i32 = 14;
+        var draw_x = x - digit_w;
         if (num == 0) {
             if (self.big_nums[0]) |lump| {
                 video.drawPatch(vid, 0, draw_x, y, w.lumpData(lump));
             }
             return;
         }
-
-        while (num > 0 and digits_drawn < max_digits) {
+        while (num > 0) {
             const digit: usize = @intCast(@mod(num, 10));
             if (self.big_nums[digit]) |lump| {
                 video.drawPatch(vid, 0, draw_x, y, w.lumpData(lump));
             }
             num = @divTrunc(num, 10);
-            draw_x -= 14;
-            digits_drawn += 1;
+            draw_x -= digit_w;
         }
     }
 
