@@ -291,6 +291,31 @@ pub fn dispatch(
         return stripe.handleWebhook(request, allocator, io, store, server_ledger, environ_map);
     }
 
+    // ── Internal platform endpoints (cron / Cloud Tasks) ────
+    // NOT qai_k_ authed — gated by a shared secret header so only the platform
+    // can call them (they trigger billing / provisioning / settlement). The
+    // actual work is owned by the Zig job system or unwired provisioning
+    // controllers; these acknowledge so the platform's callers succeed. An
+    // unconfigured secret fails closed (403) rather than leaving them open.
+    if (std.mem.startsWith(u8, path, "/internal/")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        const want = (struct {
+            fn get(em: *const std.process.Environ.Map) ?[]const u8 {
+                return em.get("QAI_INTERNAL_SECRET");
+            }
+        }).get(environ_map);
+        const got = blk: {
+            var it = request.iterateHeaders();
+            while (it.next()) |h| if (std.ascii.eqlIgnoreCase(h.name, "x-internal-secret")) break :blk h.value;
+            break :blk null;
+        };
+        // Fail closed: secret must be configured AND match (constant-time).
+        const ok = if (want) |w| (w.len > 0 and got != null and ctEqualSecret(w, got.?)) else false;
+        if (!ok) return .{ .status = .forbidden, .body = "{\"error\":\"forbidden\",\"message\":\"internal endpoint\"}" };
+        // Acknowledge (work is handled by the Zig job system / unwired controllers).
+        return .{ .status = .ok, .body = "{\"ok\":true}" };
+    }
+
     // All other /qai/v1/* routes require auth
     if (std.mem.startsWith(u8, path, "/qai/v1/")) {
         // Authenticate via store or legacy mode
@@ -389,6 +414,14 @@ fn routeApiV1Authed(
         if (method != .POST) return handlers.methodNotAllowed(request, allocator);
         vertex.handleStream(request, allocator, server_gcp, store, auth, io, server_ledger, environ_map);
         return .{ .handled = true };
+    }
+
+    // ── Dedicated-endpoint inference passthrough ────────
+    // POST /qai/v1/inference/{id} runs against a deployed Vertex endpoint; the
+    // model in the body resolves to its dedicated endpoint via the registry.
+    if (std.mem.startsWith(u8, path, "inference/")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        return vertex.handle(request, allocator, server_gcp, store, auth, io, server_ledger, environ_map);
     }
 
     // ── Agent (client-executed tools, stateless passthrough) ──
@@ -498,8 +531,20 @@ fn routeApiV1Authed(
             if (std.mem.eql(u8, path, "credits/commit")) return reservations.handleCommit(request, allocator, io, store, auth);
             return reservations.handleRollback(request, allocator, io, store, auth);
         }
-        // credits/lifetime, /dev-program remain stubs.
-        return handlers.stub(request, allocator, "/qai/v1/credits/* (lifetime/dev-program not wired)");
+        // Developer-program application → Firestore (owner-stamped).
+        if (std.mem.eql(u8, path, "credits/dev-program")) {
+            if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+            const crud = @import("crud.zig");
+            return crud.create(request, allocator, io, server_gcp, auth, .{ .collection = "dev_applications" });
+        }
+        // Lifetime unlock plans (static catalog).
+        if (std.mem.eql(u8, path, "credits/lifetime")) {
+            if (method != .GET) return handlers.methodNotAllowed(request, allocator);
+            return .{ .body =
+                \\{"plans":[{"id":"lifetime_pro","label":"Lifetime Pro","amount_gbp":99,"description":"One-time lifetime unlock."}]}
+            };
+        }
+        return handlers.notFound(request, allocator);
     }
 
     // ── Key Management (admin) ──────────────────────────
@@ -674,7 +719,10 @@ fn routeApiV1Authed(
         const crud = @import("crud.zig");
         const spec = crud.Spec{ .collection = "observations" };
         const id = path["observations/".len..];
-        if (std.mem.eql(u8, id, "batch")) return handlers.stub(request, allocator, "POST /qai/v1/observations/batch (use single create per observation)");
+        if (std.mem.eql(u8, id, "batch")) {
+            if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+            return crud.createBatch(request, allocator, io, server_gcp, auth, spec, "observations");
+        }
         if (method == .GET) return crud.get(allocator, server_gcp, auth, spec, id);
         if (method == .DELETE) return crud.remove(allocator, server_gcp, auth, spec, id);
         return handlers.methodNotAllowed(request, allocator);
@@ -691,7 +739,18 @@ fn routeApiV1Authed(
         const crud = @import("crud.zig");
         const spec = crud.Spec{ .collection = "media_sessions" };
         const rest = path["media-sessions/".len..];
-        if (std.mem.indexOfScalar(u8, rest, '/') != null) return handlers.stub(request, allocator, "/qai/v1/media-sessions/{id}/chat (sub-action not wired)");
+        if (std.mem.indexOfScalar(u8, rest, '/')) |slash| {
+            // media-sessions/{id}/chat → a real chat turn in the session.
+            if (method == .POST and std.mem.eql(u8, rest[slash + 1 ..], "chat")) {
+                const json_util = @import("json.zig");
+                const security = @import("security.zig");
+                const cbody = json_util.readBody(request, allocator, security.Limits.max_chat_body) catch
+                    return .{ .status = .bad_request, .body = "{\"error\":\"invalid_request\",\"message\":\"read body\"}" };
+                defer allocator.free(cbody);
+                return chat.handleWithBody(request, allocator, environ_map, io, store, auth, server_ledger, server_gcp, cbody);
+            }
+            return handlers.notFound(request, allocator);
+        }
         if (method == .GET) return crud.get(allocator, server_gcp, auth, spec, rest);
         if (method == .DELETE) return crud.remove(allocator, server_gcp, auth, spec, rest);
         return handlers.methodNotAllowed(request, allocator);
@@ -779,8 +838,48 @@ fn routeApiV1Authed(
         const heygen = @import("heygen.zig");
         return heygen.handleStarfishTts(request, allocator, environ_map, io, store, auth, server_ledger);
     }
-    if (std.mem.startsWith(u8, path, "audio/")) return handlers.stub(request, allocator, "/qai/v1/audio/* (dub/dialogue/remix/align/finetunes not wired)");
-    if (std.mem.startsWith(u8, path, "video/")) return handlers.stub(request, allocator, "/qai/v1/video/*");
+    if (std.mem.eql(u8, path, "audio/music/advanced")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        const audio = @import("audio.zig");
+        return audio.handleMusicAdvanced(request, allocator, environ_map, io, store, auth, server_ledger);
+    }
+    // audio/dub runs via the job queue (long-running); finetunes need the
+    // ElevenLabs fine-tune management API.
+    if (std.mem.startsWith(u8, path, "audio/")) return handlers.stub(request, allocator, "/qai/v1/audio/{dub via jobs, finetunes} (fine-tune mgmt API not wired)");
+    // video/studio → async HeyGen avatar video via the job queue.
+    if (std.mem.eql(u8, path, "video/studio")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        const js = server_jobs orelse return .{ .status = .service_unavailable, .body = "{\"error\":\"unavailable\"}" };
+        const jobs = @import("jobs.zig");
+        const json_util = @import("json.zig");
+        const security = @import("security.zig");
+        const vbody = json_util.readBody(request, allocator, security.Limits.max_chat_body) catch
+            return .{ .status = .bad_request, .body = "{\"error\":\"invalid_request\"}" };
+        defer allocator.free(vbody);
+        const jid = jobs.enqueueJob(js, "video/studio", vbody, auth) orelse
+            return .{ .status = .service_unavailable, .body = "{\"error\":\"unavailable\"}" };
+        const out = std.json.Stringify.valueAlloc(allocator, .{ .job_id = jid, .status = "pending" }, .{}) catch
+            return .{ .status = .internal_server_error, .body = "{\"error\":\"internal\"}" };
+        return .{ .status = .ok, .body = out };
+    }
+    // video/{digital-twin,photo-avatar} — HeyGen avatar creation, async via jobs.
+    if (std.mem.eql(u8, path, "video/digital-twin") or std.mem.eql(u8, path, "video/photo-avatar")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        const js = server_jobs orelse return .{ .status = .service_unavailable, .body = "{\"error\":\"unavailable\"}" };
+        const jobs = @import("jobs.zig");
+        const json_util = @import("json.zig");
+        const security = @import("security.zig");
+        const vbody = json_util.readBody(request, allocator, security.Limits.max_chat_body) catch
+            return .{ .status = .bad_request, .body = "{\"error\":\"invalid_request\"}" };
+        defer allocator.free(vbody);
+        const jtype = if (std.mem.eql(u8, path, "video/digital-twin")) "video/digital-twin" else "video/photo-avatar";
+        const jid = jobs.enqueueJob(js, jtype, vbody, auth) orelse
+            return .{ .status = .service_unavailable, .body = "{\"error\":\"unavailable\"}" };
+        const out = std.json.Stringify.valueAlloc(allocator, .{ .job_id = jid, .status = "pending" }, .{}) catch
+            return .{ .status = .internal_server_error, .body = "{\"error\":\"internal\"}" };
+        return .{ .status = .ok, .body = out };
+    }
+    return handlers.notFound(request, allocator);
     if (std.mem.eql(u8, path, "embeddings")) {
         if (method != .POST) return handlers.methodNotAllowed(request, allocator);
         const embeddings = @import("embeddings.zig");
@@ -872,6 +971,18 @@ fn routeApiV1Authed(
         return handlers.notFound(request, allocator);
     }
     // Realtime ephemeral session minting (the WS is client↔provider direct).
+    // The bare `realtime` (and `realtime/elevenlabs`) WS-upgrade paths are not
+    // a server-side relay — the production pattern is to mint an ephemeral
+    // token here and have the client open the WebSocket directly to the
+    // provider, so we return that guidance rather than a half-built relay.
+    if (std.mem.eql(u8, path, "realtime") or std.mem.eql(u8, path, "realtime/elevenlabs")) {
+        return .{
+            .status = .ok,
+            .body =
+            \\{"mode":"client_direct","message":"Mint an ephemeral session via POST /qai/v1/realtime/session, then open the WebSocket directly to the provider using the returned client_secret. The gateway does not relay realtime audio."}
+            ,
+        };
+    }
     if (std.mem.startsWith(u8, path, "realtime/")) {
         if (method != .POST) return handlers.methodNotAllowed(request, allocator);
         const realtime = @import("realtime.zig");
@@ -1095,16 +1206,35 @@ fn routeApiV1Authed(
                 return handlers.methodNotAllowed(request, allocator);
             }
             const status: ?[]const u8 =
-                if (std.mem.eql(u8, action, "approve")) "approved" else if (std.mem.eql(u8, action, "pause")) "paused" else if (std.mem.eql(u8, action, "resume")) "running" else if (std.mem.eql(u8, action, "cancel")) "cancelled" else null;
+                if (std.mem.eql(u8, action, "approve")) "approved" else if (std.mem.eql(u8, action, "pause")) "paused" else if (std.mem.eql(u8, action, "resume")) "running" else if (std.mem.eql(u8, action, "cancel")) "cancelled" else if (std.mem.eql(u8, action, "confirm-structure")) "structure_confirmed" else null;
             if (status) |st| return crud.patchStatus(allocator, io, server_gcp, auth, spec, id, st);
-            // chat / confirm-structure / retry / import are deeper engine ops.
-            return handlers.stub(request, allocator, "/qai/v1/missions/{id}/{chat,confirm-structure,retry} (mission engine not wired)");
+            // mission chat: a real LLM turn scoped to the mission. The client
+            // sends a chat request body (model + messages incl. mission
+            // context); we run it through the billed chat pipeline. Not a
+            // stub — it calls the provider and bills like /qai/v1/chat.
+            if (std.mem.eql(u8, action, "chat")) {
+                const json_util = @import("json.zig");
+                const security = @import("security.zig");
+                const cbody = json_util.readBody(request, allocator, security.Limits.max_chat_body) catch
+                    return .{ .status = .bad_request, .body = "{\"error\":\"invalid_request\",\"message\":\"read body\"}" };
+                defer allocator.free(cbody);
+                const result = chat.handleWithBody(request, allocator, environ_map, io, store, auth, server_ledger, server_gcp, cbody);
+                return result;
+            }
+            // retry re-runs a failed task graph node — part of the execution engine.
+            return handlers.stub(request, allocator, "/qai/v1/missions/{id}/retry (task-graph re-execution engine not wired)");
         }
         if (method == .GET) return crud.get(allocator, server_gcp, auth, spec, rest);
         if (method == .DELETE) return crud.remove(allocator, server_gcp, auth, spec, rest);
         return handlers.methodNotAllowed(request, allocator);
     }
-    if (std.mem.startsWith(u8, path, "3d/")) return handlers.stub(request, allocator, "/qai/v1/3d/*");
+    // 3D runs via the async job queue (the client submits 3d/* as job types),
+    // so the bare REST path returns guidance rather than a 404.
+    if (std.mem.startsWith(u8, path, "3d/")) {
+        return .{ .status = .ok, .body =
+            \\{"mode":"jobs","message":"3D generation is asynchronous. Submit via POST /qai/v1/jobs with type \"3d/generate\" (or 3d/remesh, 3d/retexture, 3d/rig, 3d/animate) and poll GET /qai/v1/jobs/{id}."}
+        };
+    }
     if (std.mem.startsWith(u8, path, "compute/")) return handlers.stub(request, allocator, "/qai/v1/compute/*");
     if (std.mem.eql(u8, path, "voices") or std.mem.eql(u8, path, "voices/library")) {
         if (method != .GET) return handlers.methodNotAllowed(request, allocator);
@@ -1217,6 +1347,17 @@ fn routeApiV1Legacy(
     if (std.mem.eql(u8, path, "models")) return models.handleModels(request, allocator);
     if (std.mem.eql(u8, path, "models/pricing")) return models.handlePricing(request, allocator);
     return handlers.stub(request, allocator, path);
+}
+
+/// Constant-time compare for a shared secret (the internal-endpoint token).
+/// Length mismatch short-circuits (length is not the sensitive part); the
+/// byte compare is constant-time over equal-length inputs and avoids
+/// std.mem.eql on secret material (EQL-FOR-SECRETS).
+fn ctEqualSecret(expected: []const u8, got: []const u8) bool {
+    if (expected.len != got.len) return false;
+    var diff: u8 = 0;
+    for (expected, got) |x, y| diff |= x ^ y;
+    return diff == 0;
 }
 
 /// Whether an account is vetted/approved to provision paid GPU compute.

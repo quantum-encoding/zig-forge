@@ -75,6 +75,52 @@ pub fn create(
     return docResponse(allocator, a, resp.body);
 }
 
+/// POST a batch of documents: body { <array_field>: [ {...}, ... ] }. Each
+/// element is owner-stamped and created. Returns { created: [ {id}, ... ] }.
+pub fn createBatch(
+    request: *http.Server.Request,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    gcp_ctx: ?*gcp.GcpContext,
+    auth: *const types.AuthContext,
+    spec: Spec,
+    array_field: []const u8,
+) Response {
+    const ctx = gcp_ctx orelse return err(.service_unavailable);
+    const body = json_util.readBody(request, allocator, 8 * 1024 * 1024) catch return err(.bad_request);
+    defer allocator.free(body);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const root = std.json.parseFromSliceLeaky(std.json.Value, a, body, .{}) catch return err(.bad_request);
+    if (root != .object) return err(.bad_request);
+    const arr = root.object.get(array_field) orelse return err(.bad_request);
+    if (arr != .array) return err(.bad_request);
+
+    const base = std.fmt.allocPrint(a, "{s}/{s}", .{ docsBase(a, ctx.project_id) catch return err(.internal_server_error), spec.collection }) catch return err(.internal_server_error);
+
+    var ids = std.json.Array.init(a);
+    for (arr.array.items) |item| {
+        if (item != .object) continue;
+        var obj = item.object;
+        obj.put(a, spec.owner_field, .{ .string = auth.account.id.slice() }) catch continue;
+        obj.put(a, "created_at_ms", .{ .integer = types.nowMs(io) }) catch continue;
+        const doc_body = fs.documentAlloc(a, .{ .object = obj }) catch continue;
+        var resp = ctx.post(base, doc_body) catch continue;
+        defer resp.deinit();
+        if (@intFromEnum(resp.status) >= 300) continue;
+        const doc = std.json.parseFromSliceLeaky(std.json.Value, a, resp.body, .{}) catch continue;
+        // Collect the created id from the returned document name.
+        if (doc == .object) if (doc.object.get("name")) |name| if (name == .string)
+            ids.append(.{ .string = lastSegment(name.string) }) catch {};
+    }
+
+    const out = std.json.Stringify.valueAlloc(allocator, .{ .created = std.json.Value{ .array = ids } }, .{}) catch return err(.internal_server_error);
+    return .{ .body = out };
+}
+
 // ── list ─────────────────────────────────────────────────────────────
 
 pub fn list(

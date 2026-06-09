@@ -547,6 +547,9 @@ fn dispatch(js: *JobStore, a: std.mem.Allocator, job: *Job) Response {
     if (std.mem.eql(u8, t, "video/generate")) return video.generateCore(a, env, io, st, au, lg, p);
     if (std.mem.eql(u8, t, "audio/dub")) return audio.dubCore(a, env, io, st, au, lg, p);
     if (std.mem.eql(u8, t, "video/translate")) return heygen.translateCore(a, env, io, st, au, lg, p);
+    if (std.mem.eql(u8, t, "video/studio")) return heygen.studioCore(a, env, io, st, au, lg, p);
+    if (std.mem.eql(u8, t, "video/digital-twin")) return heygen.digitalTwinCore(a, env, io, st, au, lg, p);
+    if (std.mem.eql(u8, t, "video/photo-avatar")) return heygen.photoAvatarCore(a, env, io, st, au, lg, p);
     return err(.bad_request, "unsupported job type");
 }
 
@@ -557,7 +560,8 @@ fn isSupported(t: []const u8) bool {
         "audio/sound-effects",
         "3d/generate",     "3d/remesh",    "3d/retexture",
         "3d/rig",          "3d/animate",   "video/generate",
-        "audio/dub",       "video/translate",
+        "audio/dub",       "video/translate", "video/studio",
+        "video/digital-twin", "video/photo-avatar",
     };
     for (supported) |s| if (std.mem.eql(u8, t, s)) return true;
     return false;

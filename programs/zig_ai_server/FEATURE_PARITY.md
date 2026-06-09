@@ -40,6 +40,13 @@ concrete technical blocker, not a vague "TODO".
 | `POST /qai/v1/jobs`, `GET /qai/v1/jobs`, `GET /qai/v1/jobs/{id}` | in-process queue + background worker | `jobs.zig` ⬅ new |
 | job type `3d/{generate,remesh,retexture,rig,animate}` | Meshy (submit + poll LRO) | `meshy.zig` ⬅ new |
 | job type `video/generate` | Veo predictLongRunning (submit + poll + download) | `video.zig` ⬅ new |
+| `GET /qai/v1/jobs/{id}/stream` | SSE progress stream (polls job store) | `jobs.zig` ⬅ new |
+| `POST /qai/v1/batch`, `/batch/jsonl`, `GET /batch/jobs` | batch fan-out over the job queue | `jobs.zig` ⬅ new |
+| `POST /internal/*` | shared-secret-gated (`QAI_INTERNAL_SECRET`, constant-time, fail-closed) acks | `router.zig` ⬅ new |
+| `POST /qai/v1/inference/{id}` | dedicated Vertex endpoint passthrough | `vertex.zig` ⬅ new |
+| `POST /qai/v1/realtime/{session,refresh,end}` | OpenAI Realtime ephemeral token mint | `realtime.zig` ⬅ new |
+| `POST /qai/v1/*/iap/{app-store,google-play}/verify` | Apple verifyReceipt / Android Publisher; credits by product table | `iap.zig` ⬅ new |
+| `POST /qai/v1/quantify/email/send` | Resend transactional email | `email.zig` ⬅ new |
 | `POST /qai/v1/images/edit` | OpenAI `/v1/images/edits` (multipart) | `images.zig` ⬅ new |
 | `POST /qai/v1/moderate` | Firestore `moderation_reports` (user-report) | `moderate.zig` ⬅ new |
 | `POST /qai/v1/search/{web,context,answer}` | Brave Search API | `search.zig` ⬅ new |

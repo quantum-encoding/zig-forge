@@ -1047,6 +1047,76 @@ pub fn musicCore(allocator: std.mem.Allocator, environ_map: *const std.process.E
     });
 }
 
+/// POST /qai/v1/audio/music/advanced — composition-plan music. The client
+/// body (prompt + sections/lyrics/style/finetune_id/…) is forwarded verbatim
+/// to ElevenLabs /v1/music; billed flat per generation like basic music.
+pub fn handleMusicAdvanced(request: *http.Server.Request, allocator: std.mem.Allocator, environ_map: *const std.process.Environ.Map, io: ?std.Io, store: ?*store_mod.Store, auth: ?*const types.AuthContext, ledger: ?*ledger_mod.Ledger) Response {
+    const body = json_util.readBody(request, allocator, security.Limits.max_chat_body) catch return errResp(.bad_request, "read body");
+    defer allocator.free(body);
+    if (body.len == 0) return errResp(.bad_request, "Empty request body");
+
+    const api_key = hs.ai.getApiKeyFromEnv(environ_map, "ELEVENLABS_API_KEY") catch return errResp(.service_unavailable, "ElevenLabs not configured");
+    const model = models_mod.getModel("eleven_music_v1") orelse return errResp(.internal_server_error, "pricing missing");
+    const cost = model.per_unit_ticks;
+    const margin = @divFloor(cost * model.margin_bps, 10000);
+
+    var reservation_id: ?u64 = null;
+    if (store) |s| if (auth) |a| if (io) |ioh| {
+        if (a.account.role != .admin) {
+            reservation_id = s.reserve(ioh, a.account.id.slice(), a.key_hash, @max(cost + margin, 1000), "/qai/v1/audio/music/advanced", "eleven_music_v1") catch |e| switch (e) {
+                error.InsufficientBalance => return errResp(.payment_required, "balance too low"),
+                else => return errResp(.internal_server_error, "reserve failed"),
+            };
+        }
+    };
+
+    var client = hs.HttpClient.init(allocator) catch {
+        rollback(store, io, reservation_id);
+        return errResp(.internal_server_error, "http init");
+    };
+    defer client.deinit();
+    const headers = [_]http.Header{ .{ .name = "Content-Type", .value = "application/json" }, .{ .name = "xi-api-key", .value = api_key } };
+    // Forward the client's composition body verbatim (it's already valid JSON).
+    var resp = client.post("https://api.elevenlabs.io/v1/music", &headers, body) catch {
+        rollback(store, io, reservation_id);
+        return errResp(.bad_gateway, "ElevenLabs request failed");
+    };
+    defer resp.deinit();
+    if (resp.status != .ok) {
+        rollback(store, io, reservation_id);
+        return errResp(.bad_gateway, "ElevenLabs rejected the request");
+    }
+
+    const b64_len = std.base64.standard.Encoder.calcSize(resp.body.len);
+    const audio_b64 = allocator.alloc(u8, b64_len) catch {
+        rollback(store, io, reservation_id);
+        return errResp(.internal_server_error, "encode");
+    };
+    defer allocator.free(audio_b64);
+    _ = std.base64.standard.Encoder.encode(audio_b64, resp.body);
+
+    var balance_after: i64 = 0;
+    if (reservation_id) |rid| if (store) |s| if (io) |ioh| s.commitReservation(ioh, rid, cost, margin) catch {};
+    if (auth) |a| if (store) |s| {
+        if (s.getAccount(a.account.id.slice())) |acct| balance_after = acct.balance_ticks;
+    };
+    if (ledger) |l| if (io) |ioh| {
+        const acct_id = if (auth) |a| a.account.id.slice() else "anonymous";
+        const key_pfx = if (auth) |a| a.key.prefix.slice() else "none";
+        l.recordBilling(ioh, acct_id, key_pfx, cost, margin, balance_after, "/qai/v1/audio/music/advanced", "eleven_music_v1", 0, 0, 0);
+    };
+
+    const out = std.json.Stringify.valueAlloc(allocator, .{
+        .audio_base64 = audio_b64,
+        .format = "mp3",
+        .size_bytes = resp.body.len,
+        .model = "eleven_music_v1",
+        .cost_ticks = cost + margin,
+        .balance_after = balance_after,
+    }, .{}) catch return errResp(.internal_server_error, "serialize");
+    return .{ .status = .ok, .body = out };
+}
+
 const ElevenSpec = struct {
     el_url: []const u8,
     prompt_field: []const u8,

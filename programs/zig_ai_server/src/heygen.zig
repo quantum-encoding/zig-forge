@@ -250,6 +250,84 @@ fn rbErr(st: ?*store_mod.Store, io: std.Io, reservation_id: ?u64) Response {
     return err(.bad_gateway);
 }
 
+// ── video/studio — HeyGen avatar video (async; job worker) ───────────
+//
+// Submit POST /v2/video/generate (the client's payload — avatar/voice/script/
+// background — is forwarded verbatim), then poll GET /v1/video_status.get?
+// video_id=... until status "completed", returning the video_url. Billed flat.
+
+const STUDIO_COST: i64 = 5_000_000_000; // $0.50 flat
+const ST_POLL_INTERVAL_NS: u64 = 8 * std.time.ns_per_s;
+const ST_MAX_POLLS: u32 = 75;
+
+pub fn studioCore(a: std.mem.Allocator, env: *const std.process.Environ.Map, io_opt: ?std.Io, st: ?*store_mod.Store, au: ?*const types.AuthContext, lg: ?*ledger_mod.Ledger, body: []const u8) Response {
+    const io = io_opt orelse return err(.internal_server_error);
+    if (body.len == 0) return errMsg(.bad_request);
+    const api_key = hs.ai.getApiKeyFromEnv(env, "HEYGEN_API_KEY") catch return err(.service_unavailable);
+
+    const cost = STUDIO_COST;
+    const margin = @divFloor(cost * HEYGEN_MARGIN_BPS, 10000);
+    var reservation_id: ?u64 = null;
+    if (st) |s| if (au) |auth| {
+        if (auth.account.role != .admin) {
+            reservation_id = s.reserve(io, auth.account.id.slice(), auth.key_hash, @max(cost + margin, 1000), "video/studio", "heygen_studio") catch |e| switch (e) {
+                error.InsufficientBalance => return errMsg(.payment_required),
+                else => return err(.internal_server_error),
+            };
+        }
+    };
+
+    var client = hs.HttpClient.init(a) catch return rbErr(st, io, reservation_id);
+    defer client.deinit();
+    const headers = [_]http.Header{ .{ .name = "Content-Type", .value = "application/json" }, .{ .name = "x-api-key", .value = api_key } };
+
+    // Forward the client's generate payload verbatim.
+    var sresp = client.post(BASE ++ "/v2/video/generate", &headers, body) catch return rbErr(st, io, reservation_id);
+    const video_id = blk: {
+        defer sresp.deinit();
+        if (sresp.status != .ok) return rbErr(st, io, reservation_id);
+        const S = struct { data: struct { video_id: []const u8 = "" } = .{} };
+        const sp = std.json.parseFromSlice(S, a, sresp.body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch return rbErr(st, io, reservation_id);
+        defer sp.deinit();
+        if (sp.value.data.video_id.len == 0) return rbErr(st, io, reservation_id);
+        break :blk a.dupe(u8, sp.value.data.video_id) catch return rbErr(st, io, reservation_id);
+    };
+
+    const poll_url = std.fmt.allocPrint(a, "{s}/v1/video_status.get?video_id={s}", .{ BASE, video_id }) catch return rbErr(st, io, reservation_id);
+    const poll_headers = [_]http.Header{.{ .name = "x-api-key", .value = api_key }};
+    var attempt: u32 = 0;
+    while (attempt < ST_MAX_POLLS) : (attempt += 1) {
+        io.sleep(.{ .nanoseconds = ST_POLL_INTERVAL_NS }, .real) catch {};
+        var presp = client.get(poll_url, &poll_headers) catch continue;
+        const P = struct { data: struct { status: []const u8 = "", video_url: []const u8 = "" } = .{} };
+        const pp = std.json.parseFromSlice(P, a, presp.body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
+            presp.deinit();
+            continue;
+        };
+        const status = pp.value.data.status;
+        const url_owned = a.dupe(u8, pp.value.data.video_url) catch "";
+        const done = std.mem.eql(u8, status, "completed");
+        const failed = std.mem.eql(u8, status, "failed");
+        presp.deinit();
+        if (done) {
+            var balance_after: i64 = 0;
+            if (reservation_id) |rid| if (st) |s| s.commitReservation(io, rid, cost, margin) catch {};
+            if (au) |auth| if (st) |s| {
+                if (s.getAccount(auth.account.id.slice())) |acct| balance_after = acct.balance_ticks;
+            };
+            if (lg) |l| {
+                const acct_id = if (au) |auth| auth.account.id.slice() else "anonymous";
+                const key_pfx = if (au) |auth| auth.key.prefix.slice() else "none";
+                l.recordBilling(io, acct_id, key_pfx, cost, margin, balance_after, "video/studio", "heygen_studio", 0, 0, 0);
+            }
+            const out = std.json.Stringify.valueAlloc(a, .{ .video_id = video_id, .status = "completed", .video_url = url_owned, .cost_ticks = cost + margin, .balance_after = balance_after }, .{}) catch return err(.internal_server_error);
+            return .{ .status = .ok, .body = out };
+        }
+        if (failed) return rbErr(st, io, reservation_id);
+    }
+    return rbErr(st, io, reservation_id);
+}
+
 fn proxy(allocator: std.mem.Allocator, environ_map: *const std.process.Environ.Map, url: []const u8) Response {
     const api_key = hs.ai.getApiKeyFromEnv(environ_map, "HEYGEN_API_KEY") catch
         return err(.service_unavailable);
@@ -268,6 +346,97 @@ fn proxy(allocator: std.mem.Allocator, environ_map: *const std.process.Environ.M
 
     const out = allocator.dupe(u8, resp.body) catch return err(.internal_server_error);
     return .{ .status = .ok, .body = out };
+}
+
+// ── video/digital-twin + photo-avatar (async; job worker) ────────────
+//
+// HeyGen avatar-creation endpoints: submit the client payload, then poll a
+// path-style status resource until terminal. digital-twin → /v2/video_avatar,
+// poll /v2/video_avatar/{id}; photo-avatar → /v2/photo_avatar/photo/generate,
+// poll /v2/photo_avatar/generation/{id}. Billed flat.
+
+const AVATAR_COST: i64 = 3_000_000_000; // $0.30 flat
+
+pub fn digitalTwinCore(a: std.mem.Allocator, env: *const std.process.Environ.Map, io: ?std.Io, st: ?*store_mod.Store, au: ?*const types.AuthContext, lg: ?*ledger_mod.Ledger, body: []const u8) Response {
+    return pathPollCreate(a, env, io, st, au, lg, body, "/v2/video_avatar", "/v2/video_avatar/", "video/digital-twin");
+}
+
+pub fn photoAvatarCore(a: std.mem.Allocator, env: *const std.process.Environ.Map, io: ?std.Io, st: ?*store_mod.Store, au: ?*const types.AuthContext, lg: ?*ledger_mod.Ledger, body: []const u8) Response {
+    return pathPollCreate(a, env, io, st, au, lg, body, "/v2/photo_avatar/photo/generate", "/v2/photo_avatar/generation/", "video/photo-avatar");
+}
+
+fn pathPollCreate(a: std.mem.Allocator, env: *const std.process.Environ.Map, io_opt: ?std.Io, st: ?*store_mod.Store, au: ?*const types.AuthContext, lg: ?*ledger_mod.Ledger, body: []const u8, submit_path: []const u8, poll_prefix: []const u8, label: []const u8) Response {
+    const io = io_opt orelse return err(.internal_server_error);
+    if (body.len == 0) return errMsg(.bad_request);
+    const api_key = hs.ai.getApiKeyFromEnv(env, "HEYGEN_API_KEY") catch return err(.service_unavailable);
+
+    const cost = AVATAR_COST;
+    const margin = @divFloor(cost * HEYGEN_MARGIN_BPS, 10000);
+    var reservation_id: ?u64 = null;
+    if (st) |s| if (au) |auth| {
+        if (auth.account.role != .admin) {
+            reservation_id = s.reserve(io, auth.account.id.slice(), auth.key_hash, @max(cost + margin, 1000), label, "heygen_avatar") catch |e| switch (e) {
+                error.InsufficientBalance => return errMsg(.payment_required),
+                else => return err(.internal_server_error),
+            };
+        }
+    };
+
+    var client = hs.HttpClient.init(a) catch return rbErr(st, io, reservation_id);
+    defer client.deinit();
+    const headers = [_]http.Header{ .{ .name = "Content-Type", .value = "application/json" }, .{ .name = "x-api-key", .value = api_key } };
+
+    const submit_url = std.fmt.allocPrint(a, "{s}{s}", .{ BASE, submit_path }) catch return rbErr(st, io, reservation_id);
+    var sresp = client.post(submit_url, &headers, body) catch return rbErr(st, io, reservation_id);
+    const id = blk: {
+        defer sresp.deinit();
+        if (sresp.status != .ok) return rbErr(st, io, reservation_id);
+        // id appears under data as video_id / generation_id / id depending on endpoint.
+        const S = struct { data: struct {
+            video_id: []const u8 = "",
+            generation_id: []const u8 = "",
+            id: []const u8 = "",
+        } = .{} };
+        const sp = std.json.parseFromSlice(S, a, sresp.body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch return rbErr(st, io, reservation_id);
+        defer sp.deinit();
+        const found = if (sp.value.data.video_id.len > 0) sp.value.data.video_id else if (sp.value.data.generation_id.len > 0) sp.value.data.generation_id else sp.value.data.id;
+        if (found.len == 0) return rbErr(st, io, reservation_id);
+        break :blk a.dupe(u8, found) catch return rbErr(st, io, reservation_id);
+    };
+
+    const poll_url = std.fmt.allocPrint(a, "{s}{s}{s}", .{ BASE, poll_prefix, id }) catch return rbErr(st, io, reservation_id);
+    const poll_headers = [_]http.Header{.{ .name = "x-api-key", .value = api_key }};
+    var attempt: u32 = 0;
+    while (attempt < 75) : (attempt += 1) {
+        io.sleep(.{ .nanoseconds = 8 * std.time.ns_per_s }, .real) catch {};
+        var presp = client.get(poll_url, &poll_headers) catch continue;
+        const P = struct { data: struct { status: []const u8 = "" } = .{} };
+        const pp = std.json.parseFromSlice(P, a, presp.body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
+            presp.deinit();
+            continue;
+        };
+        const status = pp.value.data.status;
+        const done = std.mem.eql(u8, status, "completed") or std.mem.eql(u8, status, "success") or std.mem.eql(u8, status, "ready");
+        const failed = std.mem.eql(u8, status, "failed");
+        const result_body = a.dupe(u8, presp.body) catch "";
+        presp.deinit();
+        if (done) {
+            var balance_after: i64 = 0;
+            if (reservation_id) |rid| if (st) |s| s.commitReservation(io, rid, cost, margin) catch {};
+            if (au) |auth| if (st) |s| {
+                if (s.getAccount(auth.account.id.slice())) |acct| balance_after = acct.balance_ticks;
+            };
+            if (lg) |l| {
+                const acct_id = if (au) |auth| auth.account.id.slice() else "anonymous";
+                const key_pfx = if (au) |auth| auth.key.prefix.slice() else "none";
+                l.recordBilling(io, acct_id, key_pfx, cost, margin, balance_after, label, "heygen_avatar", 0, 0, 0);
+            }
+            const merged = mergeCost(a, result_body, cost + margin, balance_after) catch return err(.internal_server_error);
+            return .{ .status = .ok, .body = merged };
+        }
+        if (failed) return rbErr(st, io, reservation_id);
+    }
+    return rbErr(st, io, reservation_id);
 }
 
 fn err(status: http.Status) Response {

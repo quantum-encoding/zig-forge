@@ -28,8 +28,9 @@ const c = @cImport({
 });
 
 /// Maximum output buffer size for one frame.
-/// Each cell: ~30 bytes for color escapes + 3 bytes for UTF-8 char. 320*100*33 ~ 1MB.
-const MAX_FRAME_BUF = 1200 * 1024;
+/// Truecolor cells cost ~38 bytes (two `\x1b[38;2;r;g;bm`-style escapes) + the
+/// 3-byte half-block glyph. A full-detail frame (~320x200 cells) needs headroom.
+const MAX_FRAME_BUF = 4 * 1024 * 1024;
 
 /// xterm-256 palette cache: maps DOOM palette index -> xterm-256 color index
 const PaletteCache = [256]u8;
@@ -56,6 +57,9 @@ const TuiState = struct {
     // Palette mapping
     palette_cache: PaletteCache = [_]u8{0} ** 256,
     palette_valid: bool = false,
+
+    // 24-bit truecolor output (exact DOOM palette) vs xterm-256 quantization.
+    truecolor: bool = false,
 
     // Frame output buffer
     frame_buf: []u8 = &[_]u8{},
@@ -190,14 +194,14 @@ fn buildPaletteCache(cache: *PaletteCache, palette: *const [768]u8) void {
 /// fixed stride keeps landing on the same phase, so thin features collapse —
 /// the wood-grain pillar turns into a solid black bar, status-bar digits drop
 /// out. Averaging every source pixel the cell covers keeps those features.
-fn avgBlockXterm(
+fn avgBlockRgb(
     screen: *const [SCREENSIZE]u8,
     palette: *const [768]u8,
     x0: usize,
     x1: usize,
     y0: usize,
     y1: usize,
-) u8 {
+) [3]u8 {
     var rs: u32 = 0;
     var gs: u32 = 0;
     var bs: u32 = 0;
@@ -214,12 +218,77 @@ fn avgBlockXterm(
             n += 1;
         }
     }
-    if (n == 0) return 16; // black
-    return rgbToXterm256(
-        @intCast(rs / n),
-        @intCast(gs / n),
-        @intCast(bs / n),
-    );
+    if (n == 0) return .{ 0, 0, 0 };
+    return .{ @intCast(rs / n), @intCast(gs / n), @intCast(bs / n) };
+}
+
+fn avgBlockXterm(
+    screen: *const [SCREENSIZE]u8,
+    palette: *const [768]u8,
+    x0: usize,
+    x1: usize,
+    y0: usize,
+    y1: usize,
+) u8 {
+    const rgb = avgBlockRgb(screen, palette, x0, x1, y0, y1);
+    return rgbToXterm256(rgb[0], rgb[1], rgb[2]);
+}
+
+/// Write a `\x1b[38;2;R;G;Bm` (fg) or `\x1b[48;2;R;G;Bm` (bg) truecolor escape.
+fn writeSetColorTrue(buf: []u8, is_bg: bool, rgb: [3]u8) usize {
+    var p: usize = 0;
+    buf[p] = 0x1b;
+    p += 1;
+    buf[p] = '[';
+    p += 1;
+    buf[p] = if (is_bg) '4' else '3';
+    p += 1;
+    buf[p] = '8';
+    p += 1;
+    buf[p] = ';';
+    p += 1;
+    buf[p] = '2';
+    p += 1;
+    buf[p] = ';';
+    p += 1;
+    p += writeDecimal(buf[p..], rgb[0]);
+    buf[p] = ';';
+    p += 1;
+    p += writeDecimal(buf[p..], rgb[1]);
+    buf[p] = ';';
+    p += 1;
+    p += writeDecimal(buf[p..], rgb[2]);
+    buf[p] = 'm';
+    p += 1;
+    return p;
+}
+
+/// Write a `\x1b[38;5;Nm` (fg) or `\x1b[48;5;Nm` (bg) 256-color escape.
+fn writeSetColor256(buf: []u8, is_bg: bool, idx: u8) usize {
+    var p: usize = 0;
+    buf[p] = 0x1b;
+    p += 1;
+    buf[p] = '[';
+    p += 1;
+    buf[p] = if (is_bg) '4' else '3';
+    p += 1;
+    buf[p] = '8';
+    p += 1;
+    buf[p] = ';';
+    p += 1;
+    buf[p] = '5';
+    p += 1;
+    buf[p] = ';';
+    p += 1;
+    p += writeDecimal(buf[p..], idx);
+    buf[p] = 'm';
+    p += 1;
+    return p;
+}
+
+/// Pack an RGB triple into a u32 for cheap change-detection.
+fn packRgb(rgb: [3]u8) u32 {
+    return (@as(u32, rgb[0]) << 16) | (@as(u32, rgb[1]) << 8) | rgb[2];
 }
 
 /// Write a decimal number into a buffer, return number of bytes written
@@ -294,6 +363,18 @@ fn tuiInitVideo(ctx: *anyopaque, _: u32, _: u32) bool {
 
     state.render_cols = cols;
     state.render_rows = rows;
+
+    // Detect 24-bit truecolor support. Terminals that support it set COLORTERM
+    // to "truecolor" or "24bit"; if so we emit exact DOOM palette RGB instead of
+    // quantizing to the xterm-256 cube (which washes dark/desaturated DOOM
+    // browns to gray).
+    state.truecolor = false;
+    if (std.c.getenv("COLORTERM")) |ct| {
+        const s = std.mem.span(ct);
+        if (std.mem.eql(u8, s, "truecolor") or std.mem.eql(u8, s, "24bit")) {
+            state.truecolor = true;
+        }
+    }
 
     // Debug: report dimensions to stderr
     {
@@ -483,8 +564,9 @@ fn tuiFinishUpdate(ctx: *anyopaque, screen: *const [SCREENSIZE]u8, palette: *con
         const yt1 = (row * 2 + 1) * SCREENHEIGHT / total_sub;
         const yb1 = (row * 2 + 2) * SCREENHEIGHT / total_sub;
 
-        var prev_fg: u16 = 999;
-        var prev_bg: u16 = 999;
+        // Sentinel that never equals a real packed color (0xRRGGBB <= 0xFFFFFF).
+        var prev_fg: u32 = 0xFFFF_FFFF;
+        var prev_bg: u32 = 0xFFFF_FFFF;
 
         for (0..cols) |col| {
             // Horizontal extent of this cell over the 320-wide framebuffer.
@@ -494,49 +576,29 @@ fn tuiFinishUpdate(ctx: *anyopaque, screen: *const [SCREENSIZE]u8, palette: *con
 
             // Upper half-block: foreground = top sub-pixel, background = bottom.
             // Each is the area-average of the source pixels it covers.
-            const fg_color: u16 = avgBlockXterm(screen, palette, x0, x1, yt0, yt1);
-            const bg_color: u16 = avgBlockXterm(screen, palette, x0, x1, yt1, yb1);
+            const fg_rgb = avgBlockRgb(screen, palette, x0, x1, yt0, yt1);
+            const bg_rgb = avgBlockRgb(screen, palette, x0, x1, yt1, yb1);
 
-            // Emit color escape sequences (only when colors change)
-            if (fg_color != prev_fg or bg_color != prev_bg) {
-                // \x1b[38;5;FGm\x1b[48;5;BGm
-                buf[pos] = 0x1b;
-                pos += 1;
-                buf[pos] = '[';
-                pos += 1;
-                buf[pos] = '3';
-                pos += 1;
-                buf[pos] = '8';
-                pos += 1;
-                buf[pos] = ';';
-                pos += 1;
-                buf[pos] = '5';
-                pos += 1;
-                buf[pos] = ';';
-                pos += 1;
-                pos += writeDecimal(buf[pos..], fg_color);
-                buf[pos] = 'm';
-                pos += 1;
-                buf[pos] = 0x1b;
-                pos += 1;
-                buf[pos] = '[';
-                pos += 1;
-                buf[pos] = '4';
-                pos += 1;
-                buf[pos] = '8';
-                pos += 1;
-                buf[pos] = ';';
-                pos += 1;
-                buf[pos] = '5';
-                pos += 1;
-                buf[pos] = ';';
-                pos += 1;
-                pos += writeDecimal(buf[pos..], bg_color);
-                buf[pos] = 'm';
-                pos += 1;
-
-                prev_fg = fg_color;
-                prev_bg = bg_color;
+            // Emit color escapes only when the cell colors change from the
+            // previous cell (run-length compression of identical spans).
+            if (state.truecolor) {
+                const fk = packRgb(fg_rgb);
+                const bk = packRgb(bg_rgb);
+                if (fk != prev_fg or bk != prev_bg) {
+                    pos += writeSetColorTrue(buf[pos..], false, fg_rgb);
+                    pos += writeSetColorTrue(buf[pos..], true, bg_rgb);
+                    prev_fg = fk;
+                    prev_bg = bk;
+                }
+            } else {
+                const fk: u32 = rgbToXterm256(fg_rgb[0], fg_rgb[1], fg_rgb[2]);
+                const bk: u32 = rgbToXterm256(bg_rgb[0], bg_rgb[1], bg_rgb[2]);
+                if (fk != prev_fg or bk != prev_bg) {
+                    pos += writeSetColor256(buf[pos..], false, @intCast(fk));
+                    pos += writeSetColor256(buf[pos..], true, @intCast(bk));
+                    prev_fg = fk;
+                    prev_bg = bk;
+                }
             }
 
             // Upper half block: foreground = top pixel, background = bottom pixel
