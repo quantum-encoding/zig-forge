@@ -163,12 +163,17 @@ fn onReadable(conn: *Conn, reactor: *Reactor, pool: *ConnPool, handler: Handler)
     // Drain the socket into the read buffer.
     while (true) {
         if (conn.rlen == conn.rbuf.len) break; // buffer full — process what we have
-        const n = posix.read(conn.fd, conn.rbuf[conn.rlen..]) catch |e| switch (e) {
-            error.WouldBlock => break,
-            else => return closeConn(conn, reactor, pool),
-        };
-        if (n == 0) return closeConn(conn, reactor, pool); // peer closed
-        conn.rlen += n;
+        const want = conn.rbuf.len - conn.rlen;
+        const r = c.read(conn.fd, conn.rbuf[conn.rlen..].ptr, want);
+        if (r < 0) {
+            switch (lastErrno()) {
+                .AGAIN => break, // drained — process what we have
+                .INTR => continue, // interrupted — retry
+                else => return closeConn(conn, reactor, pool),
+            }
+        }
+        if (r == 0) return closeConn(conn, reactor, pool); // peer closed
+        conn.rlen += @intCast(r);
     }
     processAndRespond(conn, reactor, pool, handler);
 }
