@@ -152,7 +152,7 @@ fn acceptAll(lfd: posix.socket_t, reactor: *Reactor, pool: *ConnPool) void {
         conn.keep_alive = true;
         conn.next_free = null;
         reactor.addRead(cfd, @intFromPtr(conn)) catch {
-            posix.close(cfd);
+            _ = c.close(cfd);
             pool.release(conn);
             continue;
         };
