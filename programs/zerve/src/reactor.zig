@@ -97,7 +97,8 @@ pub const Reactor = struct {
             };
             break :blk &ts;
         };
-        const n = c.kevent(self.kq, null, 0, out.ptr, @intCast(out.len), tsp);
+        // changelist must be a valid pointer even with nchanges=0 — reuse out.
+        const n = c.kevent(self.kq, out.ptr, 0, out.ptr, @intCast(out.len), tsp);
         if (n < 0) return 0; // EINTR or transient — caller loops again
         return @intCast(n);
     }
