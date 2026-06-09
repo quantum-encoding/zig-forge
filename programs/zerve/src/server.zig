@@ -101,7 +101,7 @@ fn workerMain(server: *Server) void {
         std.debug.print("zerve worker: listen failed: {s}\n", .{@errorName(e)});
         return;
     };
-    defer posix.close(lfd);
+    defer _ = c.close(lfd);
 
     var reactor = Reactor.init() catch return;
     defer reactor.deinit();
