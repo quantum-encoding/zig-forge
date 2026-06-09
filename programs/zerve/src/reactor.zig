@@ -55,7 +55,7 @@ pub const Reactor = struct {
     }
 
     fn change(self: *Reactor, ident: i32, filter: i16, flags: u16, udata: usize) !void {
-        var ev = c.Kevent{
+        const ev = c.Kevent{
             .ident = @intCast(ident),
             .filter = filter,
             .flags = flags,
