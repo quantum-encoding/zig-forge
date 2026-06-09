@@ -131,14 +131,18 @@ fn workerMain(server: *Server) void {
 
 fn acceptAll(lfd: posix.socket_t, reactor: *Reactor, pool: *ConnPool) void {
     while (true) {
-        const cfd = posix.accept(lfd, null, null, 0) catch |e| switch (e) {
-            error.WouldBlock => return,
-            else => return, // transient accept error — stop this drain, try next wakeup
-        };
+        const cfd_raw = c.accept(lfd, null, null);
+        if (cfd_raw < 0) {
+            switch (lastErrno()) {
+                .INTR => continue, // interrupted — retry the accept
+                else => return, // EAGAIN (drained) or transient — wait for next wakeup
+            }
+        }
+        const cfd: posix.socket_t = @intCast(cfd_raw);
         setNonblock(cfd);
         setNoDelay(cfd);
         const conn = pool.acquire() catch {
-            posix.close(cfd);
+            _ = c.close(cfd);
             continue;
         };
         conn.fd = cfd;
