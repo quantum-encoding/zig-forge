@@ -63,8 +63,9 @@ pub const Reactor = struct {
             .data = 0,
             .udata = udata,
         };
-        const ev_arr: [1]c.Kevent = .{ev};
-        const r = c.kevent(self.kq, &ev_arr, 1, null, 0, null);
+        var ev_arr: [1]c.Kevent = .{ev};
+        // eventlist must be a valid pointer even with nevents=0 — reuse ev_arr.
+        const r = c.kevent(self.kq, &ev_arr, 1, &ev_arr, 0, null);
         if (r < 0) return error.KeventFailed;
     }
 
