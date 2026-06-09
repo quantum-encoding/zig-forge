@@ -23,6 +23,7 @@ const router = @import("router.zig");
 const store_mod = @import("store/store.zig");
 const types = @import("store/types.zig");
 const ledger_mod = @import("ledger.zig");
+const gcp = @import("gcp.zig");
 const Response = router.Response;
 
 const APPLE_PROD = "https://buy.itunes.apple.com/verifyReceipt";
@@ -145,12 +146,81 @@ pub fn handleAppStoreVerify(
     return .{ .status = .ok, .body = out };
 }
 
-/// Google Play verification needs the Android Publisher API (service-account
-/// OAuth) — not yet wired.
-pub fn handleGooglePlayVerify(request: *http.Server.Request, allocator: std.mem.Allocator) Response {
-    _ = request;
-    _ = allocator;
-    return .{ .status = .not_implemented, .body = "{\"error\":\"not_implemented\",\"message\":\"Google Play receipt verification needs the Android Publisher service-account flow (not yet wired).\"}" };
+const PlayRequest = struct {
+    package_name: []const u8 = "",
+    product_id: []const u8 = "",
+    purchase_token: []const u8 = "",
+};
+
+/// Google Play verification via the Android Publisher API, authenticated with
+/// the server's GCP credentials (the service account must have Android
+/// Publisher access). Validates the purchase token, then credits by the same
+/// product→ticks table. Idempotent on the purchase token.
+pub fn handleGooglePlayVerify(
+    request: *http.Server.Request,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    store: ?*store_mod.Store,
+    ledger: ?*ledger_mod.Ledger,
+    auth: *const types.AuthContext,
+    gcp_ctx: ?*gcp.GcpContext,
+) Response {
+    const ctx = gcp_ctx orelse return err(.service_unavailable, "Play verification needs GCP credentials");
+    const body = json_util.readBody(request, allocator, 256 * 1024) catch return err(.bad_request, "read body");
+    defer allocator.free(body);
+    const parsed = std.json.parseFromSlice(PlayRequest, allocator, body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch
+        return err(.bad_request, "invalid JSON body");
+    defer parsed.deinit();
+    const req = parsed.value;
+    if (req.package_name.len == 0 or req.product_id.len == 0 or req.purchase_token.len == 0)
+        return err(.bad_request, "package_name, product_id, purchase_token required");
+
+    // GET androidpublisher/v3/applications/{pkg}/purchases/products/{sku}/tokens/{token}
+    // ctx.get attaches the GCP bearer token; the SA must have Publisher access.
+    const url = std.fmt.allocPrint(allocator, "https://androidpublisher.googleapis.com/androidpublisher/v3/applications/{s}/purchases/products/{s}/tokens/{s}", .{ req.package_name, req.product_id, req.purchase_token }) catch
+        return err(.internal_server_error, "alloc");
+    defer allocator.free(url);
+
+    var resp = ctx.get(url) catch return err(.bad_gateway, "play verify failed");
+    defer resp.deinit();
+    if (resp.status != .ok) return err(.bad_request, "invalid purchase token");
+
+    // purchaseState: 0 = purchased, 1 = cancelled, 2 = pending.
+    const Purchase = struct { purchaseState: i64 = -1 };
+    const p = std.json.parseFromSlice(Purchase, allocator, resp.body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch
+        return err(.bad_gateway, "parse play response");
+    defer p.deinit();
+    if (p.value.purchaseState != 0) return err(.bad_request, "purchase not in purchased state");
+
+    const ticks = productTicks(req.product_id);
+    if (ticks <= 0) {
+        // Valid purchase of a non-credit product (entitlement) — acknowledge.
+        return .{ .status = .ok, .body = "{\"status\":\"valid\",\"credited_ticks\":0}" };
+    }
+
+    var credited: i64 = 0;
+    if (markProcessed(req.purchase_token)) {
+        if (store) |s| {
+            s.creditAccount(io, auth.account.id.slice(), ticks) catch {
+                unmarkProcessed(req.purchase_token);
+                return err(.internal_server_error, "credit failed");
+            };
+            credited = ticks;
+        }
+    }
+
+    var balance_after: i64 = 0;
+    if (store) |s| if (s.getAccountLocked(auth.account.id.slice())) |acct| {
+        balance_after = acct.balance_ticks;
+    };
+    if (credited > 0) if (ledger) |l| l.recordCredit(io, auth.account.id.slice(), credited, balance_after, "google_play_iap");
+
+    const out = std.json.Stringify.valueAlloc(allocator, .{
+        .status = "valid",
+        .credited_ticks = credited,
+        .balance_after = balance_after,
+    }, .{}) catch return err(.internal_server_error, "serialize");
+    return .{ .status = .ok, .body = out };
 }
 
 fn statusOf(allocator: std.mem.Allocator, body: []const u8) i64 {

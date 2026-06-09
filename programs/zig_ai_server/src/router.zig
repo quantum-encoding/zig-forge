@@ -829,7 +829,7 @@ fn routeApiV1Authed(
         }
         if (std.mem.eql(u8, path, "kitchenshare/iap/google-play/verify")) {
             const iap = @import("iap.zig");
-            return iap.handleGooglePlayVerify(request, allocator);
+            return iap.handleGooglePlayVerify(request, allocator, io, store, server_ledger, auth, server_gcp);
         }
         return handlers.notFound(request, allocator);
     }
@@ -860,15 +860,55 @@ fn routeApiV1Authed(
         }
         if (std.mem.eql(u8, path, "quantify/iap/google-play/verify")) {
             const iap = @import("iap.zig");
-            return iap.handleGooglePlayVerify(request, allocator);
+            return iap.handleGooglePlayVerify(request, allocator, io, store, server_ledger, auth, server_gcp);
         }
         if (std.mem.eql(u8, path, "quantify/email/send")) {
             if (method != .POST) return handlers.methodNotAllowed(request, allocator);
             const email = @import("email.zig");
             return email.handleSend(request, allocator, environ_map);
         }
-        // email/webhook/* (Resend delivery webhooks) remain stubs.
-        return handlers.stub(request, allocator, "/qai/v1/quantify/email/webhook/* (delivery webhooks not wired)");
+        // Resend delivery webhooks — acknowledge (delivery-status tracking not stored).
+        if (std.mem.startsWith(u8, path, "quantify/email/webhook")) return .{ .body = "{\"received\":true}" };
+        return handlers.notFound(request, allocator);
+    }
+    // Realtime ephemeral session minting (the WS is client↔provider direct).
+    if (std.mem.startsWith(u8, path, "realtime/")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        const realtime = @import("realtime.zig");
+        if (std.mem.eql(u8, path, "realtime/session") or std.mem.eql(u8, path, "realtime/refresh"))
+            return realtime.handleSession(request, allocator, environ_map);
+        if (std.mem.eql(u8, path, "realtime/end")) return realtime.handleEnd(allocator);
+        return handlers.notFound(request, allocator);
+    }
+    // Compute. Read-only catalog/templates/lists are open to any authed
+    // account. PROVISIONING (anything that can spin up paid GPU instances)
+    // is gated behind operator approval — an authenticated API key alone must
+    // never be able to launch compute and drain the account's spend. Approval
+    // is the account being vetted to `.admin` (or `.enterprise` tier); an
+    // unapproved caller gets 403 with a clear "request access" message rather
+    // than a silent provisioning path.
+    if (std.mem.startsWith(u8, path, "compute/")) {
+        // Read-only, no-spend surfaces — safe for any authenticated account.
+        if (method == .GET and (std.mem.eql(u8, path, "compute/catalog") or std.mem.eql(u8, path, "compute/templates")))
+            return .{ .body = "{\"items\":[],\"note\":\"GPU compute catalog is served by the provisioning controller (not wired in the gateway)\"}" };
+        if (method == .GET and (std.mem.eql(u8, path, "compute/instances") or std.mem.eql(u8, path, "compute/deployments")))
+            return .{ .body = "{\"items\":[]}" };
+
+        // Everything else under compute/ can cost money (provision,
+        // deploy-model, instance keepalive/ssh-key/extend, teardown). Require
+        // a vetted/approved principal.
+        if (!computeApproved(auth)) {
+            return .{
+                .status = .forbidden,
+                .body =
+                \\{"error":"compute_not_approved","message":"GPU compute access requires operator approval. Your account is not vetted to provision paid compute. Contact the operator to request access."}
+                ,
+            };
+        }
+        // Approved — but the provisioning controller itself isn't wired into
+        // the gateway yet (it drives Compute Engine). Fail closed with 501
+        // rather than pretend to provision.
+        return handlers.stub(request, allocator, "/qai/v1/compute/* (approved; GPU provisioning controller not wired)");
     }
     // contact form → Firestore (not owner-scoped read, but stamped with sender)
     if (std.mem.eql(u8, path, "contact")) {
@@ -959,16 +999,26 @@ fn routeApiV1Authed(
             const crud = @import("crud.zig");
             const spec = crud.Spec{ .collection = "rag_collections", .order_field = "created_at_ms" };
             if (std.mem.eql(u8, path, "rag/collections")) {
-                if (method == .POST) return crud.create(request, allocator, io, store, auth, spec) catch_gcp: {
-                    break :catch_gcp crud.create(request, allocator, io, server_gcp, auth, spec);
-                };
+                if (method == .POST) return crud.create(request, allocator, io, server_gcp, auth, spec);
                 if (method == .GET) return crud.list(request, allocator, server_gcp, auth, spec);
                 return handlers.methodNotAllowed(request, allocator);
             }
             // rag/collections/{id}, /{id}/upload, /search — id-scoped.
             const rest = path["rag/collections/".len..];
-            if (std.mem.eql(u8, rest, "search")) return handlers.stub(request, allocator, "POST /qai/v1/rag/collections/search (vector search service not wired)");
-            if (std.mem.indexOfScalar(u8, rest, '/') != null) return handlers.stub(request, allocator, "/qai/v1/rag/collections/{id}/upload (ingest service not wired)");
+            if (std.mem.eql(u8, rest, "search")) {
+                if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+                return proxy.post(request, allocator, environ_map, "QAI_RAG_COLLECTIONS_URL", "QAI_RAG_COLLECTIONS_KEY", "/search");
+            }
+            if (std.mem.indexOfScalar(u8, rest, '/')) |slash| {
+                // {id}/upload → ingest service
+                if (std.mem.eql(u8, rest[slash + 1 ..], "upload")) {
+                    if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+                    const up = std.fmt.allocPrint(allocator, "/collections/{s}/upload", .{rest[0..slash]}) catch return handlers.notFound(request, allocator);
+                    defer allocator.free(up);
+                    return proxy.post(request, allocator, environ_map, "QAI_RAG_COLLECTIONS_URL", "QAI_RAG_COLLECTIONS_KEY", up);
+                }
+                return handlers.notFound(request, allocator);
+            }
             if (method == .GET) return crud.get(allocator, server_gcp, auth, spec, rest);
             if (method == .DELETE) return crud.remove(allocator, server_gcp, auth, spec, rest);
             return handlers.methodNotAllowed(request, allocator);
@@ -1098,14 +1148,49 @@ fn routeApiV1Authed(
             if (method == .GET) return jobs.handleList(allocator, js, auth);
             return handlers.methodNotAllowed(request, allocator);
         }
-        // jobs/{id}  (jobs/{id}/stream not supported — no SSE for jobs yet)
         const rest = path[5..]; // after "jobs/"
-        if (method != .GET or std.mem.indexOfScalar(u8, rest, '/') != null) {
+        if (method != .GET) return handlers.notFound(request, allocator);
+        // jobs/{id}/stream → SSE progress stream (writes directly to the conn).
+        if (std.mem.indexOfScalar(u8, rest, '/')) |slash| {
+            if (std.mem.eql(u8, rest[slash + 1 ..], "stream")) {
+                jobs.handleStream(request, allocator, io, js, auth, rest[0..slash]);
+                return .{ .handled = true };
+            }
             return handlers.notFound(request, allocator);
         }
         return jobs.handleStatus(allocator, js, auth, rest);
     }
-    if (std.mem.eql(u8, path, "batch")) return handlers.stub(request, allocator, "POST /qai/v1/batch");
+    // Batch fan-out over the job queue.
+    if (std.mem.eql(u8, path, "batch") or std.mem.eql(u8, path, "batch/jsonl")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        const jobs = @import("jobs.zig");
+        const js = server_jobs orelse return .{ .status = .service_unavailable, .body = "{\"error\":\"unavailable\"}" };
+        return jobs.handleBatch(request, allocator, js, auth);
+    }
+    if (std.mem.eql(u8, path, "batch/jobs")) {
+        if (method != .GET) return handlers.methodNotAllowed(request, allocator);
+        const jobs = @import("jobs.zig");
+        const js = server_jobs orelse return .{ .status = .service_unavailable, .body = "{\"error\":\"unavailable\"}" };
+        return jobs.handleList(allocator, js, auth);
+    }
+    if (std.mem.startsWith(u8, path, "batch/jobs/")) {
+        if (method != .GET) return handlers.methodNotAllowed(request, allocator);
+        const jobs = @import("jobs.zig");
+        const js = server_jobs orelse return .{ .status = .service_unavailable, .body = "{\"error\":\"unavailable\"}" };
+        return jobs.handleStatus(allocator, js, auth, path["batch/jobs/".len..]);
+    }
+    // Worker protocol — the in-process worker handles jobs, so external
+    // workers get no work; heartbeat/result are acknowledged.
+    if (std.mem.eql(u8, path, "workers/pull")) return .{ .body = "{\"job\":null}" };
+    if (std.mem.eql(u8, path, "workers/heartbeat")) return .{ .body = "{\"ok\":true}" };
+    if (std.mem.startsWith(u8, path, "workers/jobs/")) return .{ .body = "{\"received\":true}" };
+    // Conductor.
+    if (std.mem.eql(u8, path, "conductor/status")) return .{ .body = "{\"status\":\"ok\"}" };
+    if (std.mem.eql(u8, path, "conductor/log/batch")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        const crud = @import("crud.zig");
+        return crud.create(request, allocator, io, server_gcp, auth, .{ .collection = "conductor_logs" });
+    }
 
     return handlers.notFound(request, allocator);
 }
@@ -1132,6 +1217,23 @@ fn routeApiV1Legacy(
     if (std.mem.eql(u8, path, "models")) return models.handleModels(request, allocator);
     if (std.mem.eql(u8, path, "models/pricing")) return models.handlePricing(request, allocator);
     return handlers.stub(request, allocator, path);
+}
+
+/// Whether an account is vetted/approved to provision paid GPU compute.
+///
+/// SECURITY: provisioning compute spends real money (GPU-hours). An ordinary
+/// authenticated API key must NOT be able to launch instances — that would
+/// let any key-holder drain the operator's cloud spend. Approval is an
+/// explicit operator action: the account is promoted to `.admin` (operator
+/// principal) or assigned the `.enterprise` tier (an operator-set tier granted
+/// only after vetting). Everyone else is refused with a 403 until approved.
+///
+/// Follow-up: a dedicated per-account `compute_approved` flag would let the
+/// operator grant compute to a non-admin/non-enterprise account without
+/// handing over full admin; until that field exists, admin/enterprise is the
+/// vetting gate.
+fn computeApproved(auth: *const types.AuthContext) bool {
+    return auth.account.role == .admin or auth.account.tier == .enterprise;
 }
 
 /// Per-account balance using store data

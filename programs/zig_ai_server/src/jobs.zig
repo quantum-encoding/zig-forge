@@ -216,6 +216,56 @@ pub fn enqueueJob(js: *JobStore, jtype: []const u8, params: []const u8, auth: *c
     return job.id;
 }
 
+/// POST /qai/v1/batch — fan out N requests as queued jobs.
+/// Body: { requests: [ { type, params }, ... ] } → { jobs: [ { job_id, type } ] }.
+pub fn handleBatch(
+    request: *http.Server.Request,
+    allocator: std.mem.Allocator,
+    js: *JobStore,
+    auth: *const types.AuthContext,
+) Response {
+    const json_util = @import("json.zig");
+    const body = json_util.readBody(request, allocator, MAX_PARAMS) catch return err(.bad_request, "read body");
+    defer allocator.free(body);
+
+    const Batch = struct {
+        requests: []const struct {
+            type: []const u8 = "",
+            params: std.json.Value = .null,
+        } = &.{},
+    };
+    const parsed = std.json.parseFromSlice(Batch, allocator, body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch
+        return err(.bad_request, "invalid JSON body");
+    defer parsed.deinit();
+    if (parsed.value.requests.len == 0) return err(.bad_request, "requests is required");
+    if (parsed.value.requests.len > 1000) return err(.bad_request, "batch too large (max 1000)");
+
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    jw.beginObject() catch return err(.internal_server_error, "serialize");
+    jw.objectField("jobs") catch {};
+    jw.beginArray() catch {};
+    for (parsed.value.requests) |r| {
+        if (r.type.len == 0 or !isSupported(r.type)) continue;
+        const params_bytes = std.json.Stringify.valueAlloc(allocator, r.params, .{}) catch continue;
+        defer allocator.free(params_bytes);
+        const jid = enqueueJob(js, r.type, params_bytes, auth) orelse continue;
+        jw.beginObject() catch {};
+        jw.objectField("job_id") catch {};
+        jw.write(jid) catch {};
+        jw.objectField("type") catch {};
+        jw.write(r.type) catch {};
+        jw.endObject() catch {};
+    }
+    jw.endArray() catch {};
+    jw.objectField("status") catch {};
+    jw.write("queued") catch {};
+    jw.endObject() catch return err(.internal_server_error, "serialize");
+    const out = aw.toOwnedSlice() catch return err(.internal_server_error, "serialize");
+    return .{ .body = out };
+}
+
 /// GET /qai/v1/jobs/{id}
 pub fn handleStatus(
     allocator: std.mem.Allocator,
@@ -332,6 +382,93 @@ pub fn handleList(
     const out = std.json.Stringify.valueAlloc(allocator, .{ .jobs = list.items }, .{}) catch
         return err(.internal_server_error, "serialize failed");
     return .{ .body = out };
+}
+
+/// GET /qai/v1/jobs/{id}/stream — SSE progress stream. Writes directly to the
+/// connection (the caller marks the response handled). Polls the job store
+/// once a second, emitting `progress` events, then a terminal `complete` /
+/// `error` event with the result. Caller-supplied id; ownership enforced.
+pub fn handleStream(
+    request: *http.Server.Request,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    js: *JobStore,
+    auth: *const types.AuthContext,
+    id_str: []const u8,
+) void {
+    const id = std.fmt.parseInt(u64, id_str, 10) catch return;
+
+    var stream_buf: [4096]u8 = undefined;
+    var hdrs = [_]http.Header{
+        .{ .name = "content-type", .value = "text/event-stream" },
+        .{ .name = "cache-control", .value = "no-cache" },
+    };
+    var bw = request.respondStreaming(&stream_buf, .{
+        .respond_options = .{ .status = .ok, .extra_headers = &hdrs, .keep_alive = false },
+    }) catch return;
+
+    var attempt: u32 = 0;
+    while (attempt < 600) : (attempt += 1) { // ~10 min cap at 1s
+        // Snapshot the job under lock.
+        js.mutex.lock();
+        const maybe = js.map.get(id);
+        var owned = false;
+        var status: Status = .queued;
+        var result_ptr: []const u8 = "";
+        var err_ptr: []const u8 = "";
+        if (maybe) |job| {
+            if (auth.account.role == .admin or std.mem.eql(u8, job.accountId(), auth.account.id.slice())) {
+                owned = true;
+                status = job.status;
+                result_ptr = job.result;
+                err_ptr = job.err;
+            }
+        }
+        js.mutex.unlock();
+
+        if (maybe == null or !owned) {
+            bw.writer.writeAll("data: {\"type\":\"error\",\"error\":\"job not found\"}\n\n") catch {};
+            break;
+        }
+        if (status == .completed) {
+            emitComplete(allocator, &bw, result_ptr);
+            break;
+        }
+        if (status == .failed) {
+            bw.writer.writeAll("data: {\"type\":\"error\",\"status\":\"failed\"}\n\n") catch {};
+            bw.writer.flush() catch {};
+            break;
+        }
+        // queued / processing → progress tick.
+        bw.writer.writeAll("data: {\"type\":\"progress\",\"status\":\"processing\"}\n\n") catch break;
+        bw.writer.flush() catch break;
+        io.sleep(.{ .nanoseconds = std.time.ns_per_s }, .real) catch break;
+    }
+
+    bw.writer.writeAll("data: {\"type\":\"done\"}\n\n") catch {};
+    bw.end() catch {};
+}
+
+/// Emit the terminal `complete` SSE event, embedding the job's result JSON.
+fn emitComplete(allocator: std.mem.Allocator, bw: anytype, result_json: []const u8) void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Parse the result so it embeds as structured JSON (not a quoted string).
+    const rv: std.json.Value = std.json.parseFromSliceLeaky(std.json.Value, a, result_json, .{}) catch
+        .{ .string = result_json };
+    const frame = std.json.Stringify.valueAlloc(a, .{
+        .type = "complete",
+        .status = "completed",
+        .result = rv,
+    }, .{}) catch {
+        bw.writer.writeAll("data: {\"type\":\"complete\",\"status\":\"completed\"}\n\n") catch {};
+        return;
+    };
+    bw.writer.writeAll("data: ") catch return;
+    bw.writer.writeAll(frame) catch return;
+    bw.writer.writeAll("\n\n") catch return;
+    bw.writer.flush() catch {};
 }
 
 // ── Background worker ────────────────────────────────────────────────

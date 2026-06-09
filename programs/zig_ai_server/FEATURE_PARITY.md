@@ -91,6 +91,14 @@ extra infra the worker doesn't yet do):
 - `POST /qai/v1/batch`, `/batch/jsonl` (batch fan-out over the job queue — tractable next step on top of `jobs.zig`).
 - `/qai/v1/missions*`, `/qai/v1/workflows*`, `/qai/v1/workers/*`, `/qai/v1/conductor/*` (multi-step orchestration + external worker protocol).
 - `/internal/deployments/*`, `/qai/v1/compute/*` (GPU instance lifecycle — cloud provisioning).
+  **SECURITY GATE (live):** read-only `compute/{catalog,templates,instances,deployments}`
+  are open to any authed account, but every spend-capable compute route
+  (provision/deploy-model/keepalive/ssh-key/extend/teardown) returns 403
+  `compute_not_approved` unless the account is operator-vetted (`role == .admin`
+  or `tier == .enterprise`) — an ordinary API key can't launch GPU instances
+  and drain spend (`router.zig:computeApproved`). The provisioning controller
+  behind the gate is unwired (501 for approved callers). Follow-up: a dedicated
+  per-account `compute_approved` flag.
 - `GET /qai/v1/jobs/{id}/stream` (SSE job progress — the queue is in place; needs the SSE writer hookup).
 - **Note:** the in-process queue is non-durable (jobs are lost on restart). A
   WAL-backed job store would make it crash-safe — natural follow-up.

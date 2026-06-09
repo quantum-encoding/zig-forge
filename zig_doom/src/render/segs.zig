@@ -116,19 +116,12 @@ pub fn renderSeg(
     // xtoviewangle[x] to get that column's angle off the wall normal.
     const rw_centerangle = fixed.ANG90 +% rstate.viewangle -% rw_normalangle;
 
-    // Scale at the seg's first/last visible columns. The visangle for a column
-    // is viewangle + xtoviewangle[x]; using the actual (possibly FOV-clipped)
-    // columns keeps the scale correct when a seg is clipped at a screen edge.
-    const vis1 = rstate.viewangle +% xToViewAngle(x1);
-    const rw_scale = state_mod.scaleFromGlobalAngle(rstate, vis1, rw_distance_abs, rw_normalangle);
-
-    var rw_scalestep = Fixed.ZERO;
-    var scale2 = rw_scale;
-    if (x2 > x1) {
-        const vis2 = rstate.viewangle +% xToViewAngle(x2);
-        scale2 = state_mod.scaleFromGlobalAngle(rstate, vis2, rw_distance_abs, rw_normalangle);
-        rw_scalestep = Fixed.fromRaw(@divTrunc(scale2.raw() - rw_scale.raw(), x2 - x1));
-    }
+    // NOTE: scale is computed exactly per-column in the loop below via
+    // scaleFromGlobalAngle(viewangle + xtoviewangle[x]). DOOM approximates this
+    // with a linear rw_scalestep ramp, which is fine for ordinary walls but
+    // diverges badly for grazing walls (scale falls off hyperbolically, not
+    // linearly) — producing the over-magnified "venetian blind" smear. Exact
+    // per-column scale removes that.
 
     // Calculate texture boundaries
     const worldtop = Fixed.sub(frontsector.ceilingheight, rstate.viewz);
@@ -174,21 +167,16 @@ pub fn renderSeg(
     const lightlevel = frontsector.lightlevel;
 
     // Render each column
-    var curscale = rw_scale;
     var x = x1;
     while (x <= x2) : (x += 1) {
-        if (x < 0 or x >= SCREENWIDTH) {
-            curscale = Fixed.add(curscale, rw_scalestep);
-            continue;
-        }
+        if (x < 0 or x >= SCREENWIDTH) continue;
         const ux: usize = @intCast(x);
 
-        // Calculate ceiling and floor for this column
-        const scale_val = curscale;
-        if (scale_val.raw() <= 0) {
-            curscale = Fixed.add(curscale, rw_scalestep);
-            continue;
-        }
+        // Exact per-column scale (not a linear ramp). visangle for column x is
+        // viewangle + xtoviewangle[x]; scaleFromGlobalAngle gives the true
+        // hyperbolic falloff, so grazing walls shrink correctly with distance.
+        const scale_val = state_mod.scaleFromGlobalAngle(rstate, rstate.viewangle +% xToViewAngle(x), rw_distance_abs, rw_normalangle);
+        if (scale_val.raw() <= 0) continue;
 
         // Perspective-correct texture column for this screen column:
         //   texcol = (rw_offset - tan(centerangle + xtoviewangle[x]) * rw_distance) >> FRACBITS
@@ -274,8 +262,6 @@ pub fn renderSeg(
             rstate.ceilingclip[ux] = @intCast(SCREENHEIGHT);
             rstate.floorclip[ux] = -1;
         }
-
-        curscale = Fixed.add(curscale, rw_scalestep);
     }
 }
 
