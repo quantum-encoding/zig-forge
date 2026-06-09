@@ -266,9 +266,10 @@ fn lastErrno() c.E {
 // ── socket setup ─────────────────────────────────────────────────────
 
 fn createListener(config: Config) !posix.socket_t {
-    const addr = try std.net.Address.parseIp(config.host, config.port);
-    const fd = try posix.socket(addr.any.family, posix.SOCK.STREAM, posix.IPPROTO.TCP);
-    errdefer posix.close(fd);
+    const fd_raw = c.socket(c.AF.INET, c.SOCK.STREAM, 0);
+    if (fd_raw < 0) return error.SocketFailed;
+    const fd: posix.socket_t = @intCast(fd_raw);
+    errdefer _ = c.close(fd);
 
     const one = std.mem.toBytes(@as(c_int, 1));
     try posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, &one);
@@ -278,9 +279,30 @@ fn createListener(config: Config) !posix.socket_t {
     posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEPORT, &one) catch {};
 
     setNonblock(fd);
-    try posix.bind(fd, &addr.any, addr.getOsSockLen());
-    try posix.listen(fd, config.backlog);
+
+    var addr = c.sockaddr.in{
+        .port = std.mem.nativeToBig(u16, config.port),
+        .addr = parseIpv4(config.host),
+    };
+    if (c.bind(fd, @ptrCast(&addr), @sizeOf(c.sockaddr.in)) < 0) return error.BindFailed;
+    if (c.listen(fd, config.backlog) < 0) return error.ListenFailed;
     return fd;
+}
+
+/// Parse a dotted-quad IPv4 host into a network-byte-order address word.
+/// Anything that isn't a clean a.b.c.d falls back to INADDR_ANY (0.0.0.0).
+fn parseIpv4(host: []const u8) u32 {
+    var octets: [4]u8 = .{ 0, 0, 0, 0 };
+    var it = std.mem.splitScalar(u8, host, '.');
+    var i: usize = 0;
+    while (it.next()) |part| : (i += 1) {
+        if (i >= 4) return 0;
+        octets[i] = std.fmt.parseInt(u8, part, 10) catch return 0;
+    }
+    if (i != 4) return 0;
+    // Bytes are already in wire order (octets[0] is the high byte on the wire);
+    // bitcast preserves that memory layout into the sockaddr's addr field.
+    return @bitCast(octets);
 }
 
 fn setNonblock(fd: posix.socket_t) void {
