@@ -30,9 +30,9 @@ fn handle(req: *const zerve.Request, res: *zerve.Response) void {
     }
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var port: u16 = 8080;
-    var args = std.process.args();
+    var args = std.process.Args.Iterator.init(init.minimal.args);
     _ = args.next(); // exe name
     if (args.next()) |arg| {
         port = std.fmt.parseInt(u16, arg, 10) catch 8080;
