@@ -253,9 +253,14 @@ fn onWritable(conn: *Conn, reactor: *Reactor, pool: *ConnPool, handler: Handler)
 
 fn closeConn(conn: *Conn, reactor: *Reactor, pool: *ConnPool) void {
     reactor.del(conn.fd);
-    posix.close(conn.fd);
+    _ = c.close(conn.fd);
     conn.fd = -1;
     pool.release(conn);
+}
+
+/// Read the C library errno for the most recent failed syscall.
+fn lastErrno() c.E {
+    return @enumFromInt(c._errno().*);
 }
 
 // ── socket setup ─────────────────────────────────────────────────────
