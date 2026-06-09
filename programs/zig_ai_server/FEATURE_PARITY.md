@@ -115,19 +115,49 @@ same way once their env names are confirmed:
 `credits/purchase` (Checkout Session) + `webhooks/stripe` (HMAC-verified,
 credits the account) are implemented against the Stripe REST API directly —
 no SDK needed (Stripe is form-encoded + Bearer-auth). Confirmed against the
-working dropship/Lutuno Stripe setup. Still to wire:
-- `POST /qai/v1/account/billing-portal` (Stripe billing-portal session — same REST pattern, a few lines).
-- `/credits/{commit,reserve,rollback}` (per-request spend holds — needs account-level reservation aggregation).
-- `/qai/v1/kitchenshare/iap/*`, `/qai/v1/quantify/iap/*` (App Store / Play **receipt verification** — distinct verification APIs).
-- `/qai/v1/licenses/*` (signed-license minting — needs the signing key tooling).
+working dropship/Lutuno Stripe setup. Done since: `credits/{reserve,commit,rollback}` (spend-holds), all three app
+checkouts on the shared `stripe.checkout`, and **App Store IAP verification**
+(`{quantify,kitchenshare}/iap/app-store/verify` — validated against Apple's
+verifyReceipt with `APP_STORE_SHARED_SECRET`, product→ticks table from Go,
+per-transaction idempotency).
+Still to wire:
+- `POST /qai/v1/account/billing-portal` (Stripe billing-portal session).
+- `*/iap/google-play/verify` (Android Publisher service-account OAuth — stubbed 501).
+- `/qai/v1/licenses/*` (signed-license minting — the in-repo ML-DSA/Ed25519 lib can provide the key).
 - **Note:** the webhook idempotency set is in-memory (non-durable across
   restart). Persisting processed session ids to the store/WAL is the
   follow-up to make double-credit impossible across a restart.
 
-### 6. App-specific SaaS verticals (not LLM-gateway features)
-- `/qai/v1/kitchenshare/*`, `/qai/v1/quantify/*`, `/qai/v1/recipebox/*`, `/qai/v1/reservations/*`
-- `/qai/v1/contact`, `/qai/v1/twilio/*`, `/qai/v1/notifications/*`, `/qai/v1/onboarding/*`, `/qai/v1/media-sessions/*`, `/qai/v1/observations/*`, `/qai/v1/sessions/*`
-- These are tenant application features layered on the gateway, out of scope for the inference gateway itself.
+### 6. App-specific SaaS verticals — partially done; rest hit a DATA-OWNERSHIP boundary
+Done via the generic CRUD layer (new owner-scoped collections, no coupling):
+`observations`, `chat/sessions`, `media-sessions`, `notifications/devices`,
+`workflows`, `missions` (CRUD parts), `contact`, `conductor/log`,
+`quantify/{packs,settings,payment-success,payment-cancelled,checkout}`,
+`kitchenshare/{packs,payment-success,payment-cancelled,access-state,checkout}`.
+All three app checkouts (cosmic-duck credits, Quantify, Kitchen Share) share
+the generic `stripe.checkout` + the one HMAC-verified webhook (credits the
+account by the session's `ticks` metadata on `checkout.session.completed`).
+
+**Identity model resolved (option C):** stateful vertical state (e.g. the
+Kitchen Share 10-day trial) is now computed over **Zig-owned collections keyed
+by the qai account id** (e.g. `kitchenshare_state/{account_id}`), so the
+replacement server owns its own state in its own identity space — no
+dual-writing the Go backend's `users` collection. Remaining vertical routes
+(checkout, iap-verify, purchase-history, reviewer gates, email) port onto this
+same pattern.
+
+**Hard boundary — operator decision, not a mechanical port:** the remaining
+Kitchen Share / Quantify routes (`kitchenshare/*`, most of `quantify/*`:
+checkout, settings, iap-verify, reviewer-trial, email) read **and write the Go
+backend's own `users` collection** + app subcollections (e.g.
+`recipebox_trial_started_at`, per-user `ledger`). The Zig gateway owns a
+*separate* account model (`zig_accounts`/`zig_keys`, prefixed specifically to
+avoid colliding with the Go backend — see firestore.zig). Wiring these makes
+the Zig server a **second writer to another service's primary datastore** — a
+data-integrity hazard, not parity. They are tenant app backends co-hosted in
+the Go monorepo and belong with that service unless the operator explicitly
+decides to share the `users` collection.
+- `/qai/v1/recipebox/*`, `/qai/v1/reservations/*`, `/qai/v1/twilio/*`, `/qai/v1/onboarding/*` — same shape (per-app logic + shared user model).
 
 ### 7. History/analytics reads — mostly DONE via local ledger aggregation
 `ledger_query.zig` now reads the local `ledger.jsonl` and serves

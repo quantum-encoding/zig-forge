@@ -116,22 +116,17 @@ pub fn renderSeg(
     // xtoviewangle[x] to get that column's angle off the wall normal.
     const rw_centerangle = fixed.ANG90 +% rstate.viewangle -% rw_normalangle;
 
-    // Calculate scale at x1 and x2
-    const rw_scale = state_mod.scaleFromGlobalAngle(rstate, rw_angle1, rw_distance_abs, rw_normalangle);
+    // Scale at the seg's first/last visible columns. The visangle for a column
+    // is viewangle + xtoviewangle[x]; using the actual (possibly FOV-clipped)
+    // columns keeps the scale correct when a seg is clipped at a screen edge.
+    const vis1 = rstate.viewangle +% xToViewAngle(x1);
+    const rw_scale = state_mod.scaleFromGlobalAngle(rstate, vis1, rw_distance_abs, rw_normalangle);
 
     var rw_scalestep = Fixed.ZERO;
     var scale2 = rw_scale;
     if (x2 > x1) {
-        // visangle for the seg's far edge is the global angle to vertex 2.
-        // (Previously this passed end_angle + viewangle == 2*viewangle - angle_v2,
-        // which is not a real view angle and skewed the per-column scale ramp.)
-        const angle_v2 = state_mod.pointToAngle2(
-            rstate.viewx,
-            rstate.viewy,
-            level.vertices[seg.v2].x,
-            level.vertices[seg.v2].y,
-        );
-        scale2 = state_mod.scaleFromGlobalAngle(rstate, angle_v2, rw_distance_abs, rw_normalangle);
+        const vis2 = rstate.viewangle +% xToViewAngle(x2);
+        scale2 = state_mod.scaleFromGlobalAngle(rstate, vis2, rw_distance_abs, rw_normalangle);
         rw_scalestep = Fixed.fromRaw(@divTrunc(scale2.raw() - rw_scale.raw(), x2 - x1));
     }
 

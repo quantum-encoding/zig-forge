@@ -177,6 +177,130 @@ pub fn remove(
     return .{ .body = "{\"status\":\"deleted\"}" };
 }
 
+// ── single-doc-per-owner (settings-style) ───────────────────────────
+// The document id IS the account id, so there's exactly one doc per user.
+
+/// GET {collection}/{account_id}. Returns {} (empty object) when unset, so a
+/// settings read on a fresh account succeeds with defaults rather than 404.
+pub fn getByOwner(
+    allocator: std.mem.Allocator,
+    gcp_ctx: ?*gcp.GcpContext,
+    auth: *const types.AuthContext,
+    spec: Spec,
+) Response {
+    const ctx = gcp_ctx orelse return err(.service_unavailable);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const url = std.fmt.allocPrint(a, "{s}/{s}/{s}", .{ docsBase(a, ctx.project_id) catch return err(.internal_server_error), spec.collection, auth.account.id.slice() }) catch return err(.internal_server_error);
+    var resp = ctx.get(url) catch return err(.bad_gateway);
+    defer resp.deinit();
+    if (resp.status != .ok) return .{ .body = "{}" }; // unset → defaults
+
+    const doc = std.json.parseFromSliceLeaky(std.json.Value, a, resp.body, .{}) catch return err(.bad_gateway);
+    const plain = docToPlain(a, doc) catch return err(.bad_gateway);
+    const out = std.json.Stringify.valueAlloc(allocator, plain, .{}) catch return err(.internal_server_error);
+    return .{ .body = out };
+}
+
+/// PATCH {collection}/{account_id} with the request body (upsert). Stamps the
+/// owner + updated_at_ms.
+pub fn putByOwner(
+    request: *http.Server.Request,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    gcp_ctx: ?*gcp.GcpContext,
+    auth: *const types.AuthContext,
+    spec: Spec,
+) Response {
+    const ctx = gcp_ctx orelse return err(.service_unavailable);
+    const body = json_util.readBody(request, allocator, security.Limits.max_chat_body) catch return err(.bad_request);
+    defer allocator.free(body);
+    if (body.len == 0) return err(.bad_request);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, a, body, .{}) catch return err(.bad_request);
+    if (parsed != .object) return err(.bad_request);
+    var obj = parsed.object;
+    obj.put(a, spec.owner_field, .{ .string = auth.account.id.slice() }) catch return err(.internal_server_error);
+    obj.put(a, "updated_at_ms", .{ .integer = types.nowMs(io) }) catch return err(.internal_server_error);
+
+    const doc_body = fs.documentAlloc(a, .{ .object = obj }) catch return err(.internal_server_error);
+    const url = std.fmt.allocPrint(a, "{s}/{s}/{s}", .{ docsBase(a, ctx.project_id) catch return err(.internal_server_error), spec.collection, auth.account.id.slice() }) catch return err(.internal_server_error);
+
+    var resp = ctx.patchFresh(url, doc_body) catch return err(.bad_gateway);
+    defer resp.deinit();
+    if (@intFromEnum(resp.status) >= 300) return err(.bad_gateway);
+
+    return docResponse(allocator, a, resp.body);
+}
+
+// ── status transition (field-level patch, ownership-checked) ─────────
+
+/// PATCH only the `status` (+ updated_at_ms) field on collection/{id} after an
+/// ownership check. Uses updateMask so other fields are preserved (a bare
+/// Firestore PATCH would overwrite the whole document).
+pub fn patchStatus(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    gcp_ctx: ?*gcp.GcpContext,
+    auth: *const types.AuthContext,
+    spec: Spec,
+    id: []const u8,
+    status: []const u8,
+) Response {
+    const ctx = gcp_ctx orelse return err(.service_unavailable);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const base = std.fmt.allocPrint(a, "{s}/{s}/{s}", .{ docsBase(a, ctx.project_id) catch return err(.internal_server_error), spec.collection, id }) catch return err(.internal_server_error);
+
+    // Ownership check.
+    {
+        var gresp = ctx.get(base) catch return err(.bad_gateway);
+        defer gresp.deinit();
+        if (gresp.status != .ok) return err(.not_found);
+        const doc = std.json.parseFromSliceLeaky(std.json.Value, a, gresp.body, .{}) catch return err(.bad_gateway);
+        const plain = docToPlain(a, doc) catch return err(.bad_gateway);
+        if (!owns(plain, spec, auth)) return err(.not_found);
+    }
+
+    const url = std.fmt.allocPrint(a, "{s}?updateMask.fieldPaths=status&updateMask.fieldPaths=updated_at_ms", .{base}) catch return err(.internal_server_error);
+
+    // Build the partial document {fields:{status, updated_at_ms}}.
+    var aw: std.Io.Writer.Allocating = .init(a);
+    var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    jw.beginObject() catch return err(.internal_server_error);
+    jw.objectField("fields") catch {};
+    jw.beginObject() catch {};
+    jw.objectField("status") catch {};
+    jw.beginObject() catch {};
+    jw.objectField("stringValue") catch {};
+    jw.write(status) catch {};
+    jw.endObject() catch {};
+    jw.objectField("updated_at_ms") catch {};
+    jw.beginObject() catch {};
+    jw.objectField("integerValue") catch {};
+    var nb: [24]u8 = undefined;
+    jw.write(std.fmt.bufPrint(&nb, "{d}", .{types.nowMs(io)}) catch "0") catch {};
+    jw.endObject() catch {};
+    jw.endObject() catch {};
+    jw.endObject() catch {};
+    const doc_body = aw.toOwnedSlice() catch return err(.internal_server_error);
+
+    var resp = ctx.patchFresh(url, doc_body) catch return err(.bad_gateway);
+    defer resp.deinit();
+    if (@intFromEnum(resp.status) >= 300) return err(.bad_gateway);
+
+    const out = std.json.Stringify.valueAlloc(allocator, .{ .id = id, .status = status }, .{}) catch return err(.internal_server_error);
+    return .{ .body = out };
+}
+
 // ── helpers ──────────────────────────────────────────────────────────
 
 /// Build a structuredQuery body filtering by owner, optional order, limit.

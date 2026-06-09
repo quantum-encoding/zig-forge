@@ -149,34 +149,36 @@ fn addLine(
     const angle1 = rstate.pointToAngle(v1.x, v1.y);
     const angle2 = rstate.pointToAngle(v2.x, v2.y);
 
-    // Back face cull
+    // Back-face cull: the front of a seg spans angle1 -> angle2 going clockwise.
     const span = angle1 -% angle2;
-    if (span >= fixed.ANG180) return; // facing away
+    if (span >= fixed.ANG180) return;
 
-    // Clip to field of view
-    var rw_angle1 = angle1;
-    const offset_angle = angle1 -% rstate.viewangle;
+    // Keep the ORIGINAL angle to v1 for texture math (matches r_segs.c rw_angle1).
+    const rw_angle1 = angle1;
 
-    // Normalize to clip against screen edges
-    var tspan = offset_angle +% fixed.ANG90;
-    if (tspan > 2 * fixed.ANG90) {
-        // Partially or fully off left edge
-        tspan -%= 2 * fixed.ANG90;
-        if (tspan >= span) return; // Completely off screen
-        rw_angle1 = rstate.viewangle +% fixed.ANG90;
+    // Clip both edges to the 90-degree field of view (±ANG45). Signed relative
+    // angles: + is left of view-center, - is right. (linuxdoom-1.10 R_AddLine.)
+    const clipangle = fixed.ANG45;
+    const twoclip = clipangle +% clipangle; // ANG90
+    var a1 = angle1 -% rstate.viewangle;
+    var a2 = angle2 -% rstate.viewangle;
+
+    var tspan = a1 +% clipangle;
+    if (tspan > twoclip) {
+        tspan -%= twoclip;
+        if (tspan >= span) return; // wholly off the left edge
+        a1 = clipangle; // clamp to left edge
+    }
+    tspan = clipangle -% a2;
+    if (tspan > twoclip) {
+        tspan -%= twoclip;
+        if (tspan >= span) return; // wholly off the right edge
+        a2 = 0 -% clipangle; // clamp to right edge
     }
 
-    const offset_angle2 = rstate.viewangle -% angle2;
-    tspan = offset_angle2 +% fixed.ANG90;
-    if (tspan > 2 * fixed.ANG90) {
-        tspan -%= 2 * fixed.ANG90;
-        if (tspan >= span) return;
-    }
-
-    // Project to screen columns
-    const x1 = viewAngleToX(rw_angle1 -% rstate.viewangle);
-    const x2 = viewAngleToX((rstate.viewangle -% angle2));
-
+    // Project the clipped edge angles to screen columns.
+    const x1 = angleToX(a1);
+    const x2 = angleToX(a2);
     if (x1 >= x2) return; // zero width
 
     // Check against solid segs for occlusion
@@ -206,30 +208,23 @@ fn addLine(
     }
 }
 
-/// Convert a view-relative angle to a screen X coordinate
-fn viewAngleToX(angle: Angle) i32 {
-    // Angle is relative to center of view
-    // ANG90 maps to x=0, -ANG90 maps to x=SCREENWIDTH
-    if (angle > fixed.ANG180) {
-        // Negative angle (right side of screen)
-        const neg_angle = 0 -% angle;
-        const fine = neg_angle >> tables.ANGLETOFINESHIFT;
-        if (fine < 4096) {
-            const t = tables.finetangent[fine];
-            const x = SCREENWIDTH / 2 + Fixed.mul(t, Fixed.fromInt(SCREENWIDTH / 2)).toInt();
-            return std.math.clamp(x, 0, SCREENWIDTH);
-        }
-        return SCREENWIDTH;
-    } else {
-        // Positive angle (left side of screen)
-        const fine = angle >> tables.ANGLETOFINESHIFT;
-        if (fine < 4096) {
-            const t = tables.finetangent[fine];
-            const x = SCREENWIDTH / 2 - Fixed.mul(t, Fixed.fromInt(SCREENWIDTH / 2)).toInt();
-            return std.math.clamp(x, 0, SCREENWIDTH);
-        }
-        return 0;
-    }
+/// tan(angle) for a signed view-relative binary angle, using this codebase's
+/// finetangent convention: finetangent[i] = tan((2048.5 - i)*pi/4096), so
+/// i = 2048 - (signed_angle >> 19).
+fn fineTan(angle: Angle) Fixed {
+    const s: i32 = @bitCast(angle);
+    var i: i32 = 2048 - (s >> tables.ANGLETOFINESHIFT);
+    if (i < 0) i = 0;
+    if (i > 4095) i = 4095;
+    return tables.finetangent[@intCast(i)];
+}
+
+/// Project a signed view-relative angle (+ = left of center) to a screen column.
+/// theta=0 -> centre, +ANG45 -> x=0 (left edge), -ANG45 -> x=SCREENWIDTH (right).
+fn angleToX(theta: Angle) i32 {
+    const half = SCREENWIDTH / 2;
+    const x = half - Fixed.mul(fineTan(theta), Fixed.fromInt(half)).toInt();
+    return std.math.clamp(x, 0, SCREENWIDTH);
 }
 
 /// Check if a screen column range is fully occluded
@@ -295,11 +290,12 @@ fn clipSolidSegRange(rstate: *RenderState, first: i32, last: i32) void {
     rstate.num_solidsegs -= removed;
 }
 
-test "viewAngleToX" {
-    // Angle 0 (looking straight ahead) should map to center of screen
-    const center = viewAngleToX(0);
-    // viewAngleToX maps view-relative angles, 0 = center
-    try std.testing.expect(center >= 0 and center <= SCREENWIDTH);
+test "angleToX" {
+    // Straight ahead maps to screen centre.
+    try std.testing.expectEqual(@as(i32, SCREENWIDTH / 2), angleToX(0));
+    // ±ANG45 map to the screen edges (90° FOV).
+    try std.testing.expectEqual(@as(i32, 0), angleToX(fixed.ANG45));
+    try std.testing.expectEqual(@as(i32, SCREENWIDTH), angleToX(0 -% fixed.ANG45));
 }
 
 test "pointOnSide axis-aligned" {

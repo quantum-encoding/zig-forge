@@ -75,28 +75,62 @@ pub fn handlePurchase(
         return errStatus(.bad_request, "unknown pack");
     };
 
-    const success_url = req.success_url orelse "https://cosmicduck.dev/dashboard?purchase=success";
-    const cancel_url = req.cancel_url orelse "https://cosmicduck.dev/dashboard?purchase=cancelled";
+    _ = secret; // checkout re-reads it
+    return checkout(allocator, environ_map, .{
+        .currency = "usd",
+        .amount_cents = pack.amount_usd * 100,
+        .product_label = pack.label,
+        .product_prefix = "Quantum Encoding Credits — ",
+        .success_url = req.success_url orelse "https://cosmicduck.dev/dashboard?purchase=success",
+        .cancel_url = req.cancel_url orelse "https://cosmicduck.dev/dashboard?purchase=cancelled",
+        .account_id = auth.account.id.slice(),
+        .account_email = auth.account.email.slice(),
+        .ticks = pack.ticks,
+        .pack_id = pack.id,
+    });
+}
 
-    // Build the form body for POST /v1/checkout/sessions (inline price_data).
+// ── Generic Checkout Session creation (reused by all app checkouts) ──
+
+pub const CheckoutParams = struct {
+    currency: []const u8,
+    amount_cents: i64,
+    product_label: []const u8,
+    product_prefix: []const u8 = "",
+    success_url: []const u8,
+    cancel_url: []const u8,
+    account_id: []const u8,
+    account_email: []const u8,
+    ticks: i64,
+    pack_id: []const u8,
+};
+
+/// Create a Stripe Checkout Session (mode=payment, inline price_data) and
+/// return { checkout_url, session_id, pack_id }. The session metadata carries
+/// {user_id, pack_id, ticks} so the webhook credits the right account.
+pub fn checkout(allocator: std.mem.Allocator, environ_map: *const std.process.Environ.Map, p: CheckoutParams) Response {
+    const secret = hs.ai.getApiKeyFromEnv(environ_map, "STRIPE_SECRET_KEY") catch
+        return errStatus(.service_unavailable, "payments not configured");
+
     var form = FormBuilder.init(allocator);
     defer form.deinit();
     form.add("mode", "payment") catch return errStatus(.internal_server_error, "build");
-    form.add("success_url", success_url) catch return errStatus(.internal_server_error, "build");
-    form.add("cancel_url", cancel_url) catch return errStatus(.internal_server_error, "build");
+    form.add("success_url", p.success_url) catch return errStatus(.internal_server_error, "build");
+    form.add("cancel_url", p.cancel_url) catch return errStatus(.internal_server_error, "build");
     form.add("line_items[0][quantity]", "1") catch return errStatus(.internal_server_error, "build");
-    form.add("line_items[0][price_data][currency]", "usd") catch return errStatus(.internal_server_error, "build");
+    form.add("line_items[0][price_data][currency]", p.currency) catch return errStatus(.internal_server_error, "build");
     var cents_buf: [24]u8 = undefined;
-    const cents = std.fmt.bufPrint(&cents_buf, "{d}", .{pack.amount_usd * 100}) catch return errStatus(.internal_server_error, "build");
+    const cents = std.fmt.bufPrint(&cents_buf, "{d}", .{p.amount_cents}) catch return errStatus(.internal_server_error, "build");
     form.add("line_items[0][price_data][unit_amount]", cents) catch return errStatus(.internal_server_error, "build");
-    var name_buf: [128]u8 = undefined;
-    const prod_name = std.fmt.bufPrint(&name_buf, "Quantum Encoding Credits — {s}", .{pack.label}) catch "Quantum Encoding Credits";
+    var name_buf: [160]u8 = undefined;
+    const prod_name = std.fmt.bufPrint(&name_buf, "{s}{s}", .{ p.product_prefix, p.product_label }) catch p.product_label;
     form.add("line_items[0][price_data][product_data][name]", prod_name) catch return errStatus(.internal_server_error, "build");
-    form.add("customer_email", auth.account.email.slice()) catch return errStatus(.internal_server_error, "build");
-    form.add("metadata[user_id]", auth.account.id.slice()) catch return errStatus(.internal_server_error, "build");
-    form.add("metadata[pack_id]", pack.id) catch return errStatus(.internal_server_error, "build");
+    if (p.account_email.len > 0) form.add("customer_email", p.account_email) catch return errStatus(.internal_server_error, "build");
+    form.add("client_reference_id", p.account_id) catch return errStatus(.internal_server_error, "build");
+    form.add("metadata[user_id]", p.account_id) catch return errStatus(.internal_server_error, "build");
+    form.add("metadata[pack_id]", p.pack_id) catch return errStatus(.internal_server_error, "build");
     var ticks_buf: [24]u8 = undefined;
-    const ticks_str = std.fmt.bufPrint(&ticks_buf, "{d}", .{pack.ticks}) catch return errStatus(.internal_server_error, "build");
+    const ticks_str = std.fmt.bufPrint(&ticks_buf, "{d}", .{p.ticks}) catch return errStatus(.internal_server_error, "build");
     form.add("metadata[ticks]", ticks_str) catch return errStatus(.internal_server_error, "build");
     const form_body = form.finish() catch return errStatus(.internal_server_error, "build");
     defer allocator.free(form_body);
@@ -124,8 +158,78 @@ pub fn handlePurchase(
     const out = std.json.Stringify.valueAlloc(allocator, .{
         .checkout_url = sp.value.url,
         .session_id = sp.value.id,
-        .pack_id = pack.id,
+        .pack_id = p.pack_id,
     }, .{}) catch return errStatus(.internal_server_error, "serialize");
+    return .{ .body = out };
+}
+
+// ── POST /qai/v1/account/billing-portal ──────────────────────────────
+
+const PortalRequest = struct { return_url: ?[]const u8 = null };
+
+/// Create a Stripe Billing Portal session. Resolves (creates) a customer for
+/// the account's email, then opens a portal session.
+pub fn handleBillingPortal(
+    request: *http.Server.Request,
+    allocator: std.mem.Allocator,
+    environ_map: *const std.process.Environ.Map,
+    auth: *const types.AuthContext,
+) Response {
+    const secret = hs.ai.getApiKeyFromEnv(environ_map, "STRIPE_SECRET_KEY") catch
+        return errStatus(.service_unavailable, "payments not configured");
+    const body = json_util.readBody(request, allocator, 16 * 1024) catch return errStatus(.bad_request, "read body");
+    defer allocator.free(body);
+    const parsed = std.json.parseFromSlice(PortalRequest, allocator, body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch
+        return errStatus(.bad_request, "invalid JSON body");
+    defer parsed.deinit();
+    const return_url = parsed.value.return_url orelse "https://cosmicduck.dev/dashboard";
+
+    var client = hs.HttpClient.init(allocator) catch return errStatus(.internal_server_error, "http init");
+    defer client.deinit();
+    const auth_header = std.fmt.allocPrint(allocator, "Bearer {s}", .{secret}) catch return errStatus(.internal_server_error, "alloc");
+    defer allocator.free(auth_header);
+    const headers = [_]http.Header{
+        .{ .name = "Authorization", .value = auth_header },
+        .{ .name = "Content-Type", .value = "application/x-www-form-urlencoded" },
+    };
+
+    // Create (or reuse — Stripe dedups loosely by email at the dashboard) a
+    // customer for this account, then open a portal session for it.
+    var cust_form = FormBuilder.init(allocator);
+    defer cust_form.deinit();
+    cust_form.add("email", auth.account.email.slice()) catch return errStatus(.internal_server_error, "build");
+    cust_form.add("metadata[user_id]", auth.account.id.slice()) catch return errStatus(.internal_server_error, "build");
+    const cust_body = cust_form.finish() catch return errStatus(.internal_server_error, "build");
+    defer allocator.free(cust_body);
+
+    var cresp = client.post("https://api.stripe.com/v1/customers", &headers, cust_body) catch return errStatus(.bad_gateway, "stripe customer failed");
+    const customer_id = blk: {
+        defer cresp.deinit();
+        if (cresp.status != .ok) return errStatus(.bad_gateway, "stripe rejected customer create");
+        const C = struct { id: []const u8 = "" };
+        const cp = std.json.parseFromSlice(C, allocator, cresp.body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch return errStatus(.bad_gateway, "parse customer");
+        defer cp.deinit();
+        if (cp.value.id.len == 0) return errStatus(.bad_gateway, "no customer id");
+        break :blk allocator.dupe(u8, cp.value.id) catch return errStatus(.internal_server_error, "alloc");
+    };
+    defer allocator.free(customer_id);
+
+    var portal_form = FormBuilder.init(allocator);
+    defer portal_form.deinit();
+    portal_form.add("customer", customer_id) catch return errStatus(.internal_server_error, "build");
+    portal_form.add("return_url", return_url) catch return errStatus(.internal_server_error, "build");
+    const portal_body = portal_form.finish() catch return errStatus(.internal_server_error, "build");
+    defer allocator.free(portal_body);
+
+    var presp = client.post("https://api.stripe.com/v1/billing_portal/sessions", &headers, portal_body) catch return errStatus(.bad_gateway, "stripe portal failed");
+    defer presp.deinit();
+    if (presp.status != .ok) return errStatus(.bad_gateway, "stripe rejected portal session");
+    const P = struct { url: []const u8 = "" };
+    const pp = std.json.parseFromSlice(P, allocator, presp.body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch return errStatus(.bad_gateway, "parse portal");
+    defer pp.deinit();
+    if (pp.value.url.len == 0) return errStatus(.bad_gateway, "no portal url");
+
+    const out = std.json.Stringify.valueAlloc(allocator, .{ .portal_url = pp.value.url }, .{}) catch return errStatus(.internal_server_error, "serialize");
     return .{ .body = out };
 }
 

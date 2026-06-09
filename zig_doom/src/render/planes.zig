@@ -98,43 +98,56 @@ pub const PlaneState = struct {
         return idx;
     }
 
-    /// Check if a visplane needs to be split (different column range conflict)
+    /// Reserve columns [start, stop] on a visplane, splitting into a fresh plane
+    /// if any of them are already occupied. Faithful port of r_plane.c R_CheckPlane.
+    ///
+    /// The previous version mutated minx/maxx *before* the conflict test, so a
+    /// split corrupted the original plane's range and dropped columns — leaving
+    /// black gaps in floors/ceilings seen in separate patches (e.g. around a
+    /// nearer pillar).
     pub fn checkPlane(self: *PlaneState, plane_idx: usize, start: i32, stop: i32) usize {
         const vp = &self.visplanes[plane_idx];
 
-        // If the new range doesn't overlap with existing, just extend
+        // Intersection (intrl..intrh) and union (unionl..unionh) of the existing
+        // range with the requested one.
+        var intrl: i32 = undefined;
+        var unionl: i32 = undefined;
+        var intrh: i32 = undefined;
+        var unionh: i32 = undefined;
         if (start < vp.minx) {
-            // Check if there's a gap where columns are already used
-            var x = start;
-            while (x < @min(vp.minx, stop + 1)) : (x += 1) {
-                // New columns are free
-            }
-            vp.minx = start;
+            intrl = vp.minx;
+            unionl = start;
+        } else {
+            unionl = vp.minx;
+            intrl = start;
         }
         if (stop > vp.maxx) {
-            vp.maxx = stop;
+            intrh = vp.maxx;
+            unionh = stop;
+        } else {
+            unionh = vp.maxx;
+            intrh = stop;
         }
 
-        // Check for conflicts in the overlapping range
-        const overlap_start = @max(start, vp.minx);
-        const overlap_end = @min(stop, vp.maxx);
-
-        var x = overlap_start;
-        while (x <= overlap_end) : (x += 1) {
-            if (x >= 0 and x < SCREENWIDTH) {
-                const ux: usize = @intCast(x);
-                if (vp.top[ux] != MAXOPENHEIGHT) {
-                    // Column already used — need new plane
-                    const new_idx = self.createPlane(vp.height, vp.picnum, vp.lightlevel) orelse return plane_idx;
-                    const new_vp = &self.visplanes[new_idx];
-                    new_vp.minx = start;
-                    new_vp.maxx = stop;
-                    return new_idx;
-                }
-            }
+        // Does any already-used column fall in the intersection?
+        var x = intrl;
+        while (x <= intrh) : (x += 1) {
+            if (x >= 0 and x < SCREENWIDTH and vp.top[@intCast(x)] != MAXOPENHEIGHT) break;
         }
 
-        return plane_idx;
+        if (x > intrh) {
+            // No conflict — extend this plane to the union.
+            vp.minx = unionl;
+            vp.maxx = unionh;
+            return plane_idx;
+        }
+
+        // Conflict — allocate a fresh plane with the same surface for [start, stop].
+        const new_idx = self.createPlane(vp.height, vp.picnum, vp.lightlevel) orelse return plane_idx;
+        const new_vp = &self.visplanes[new_idx];
+        new_vp.minx = start;
+        new_vp.maxx = stop;
+        return new_idx;
     }
 
     /// Render all accumulated visplanes

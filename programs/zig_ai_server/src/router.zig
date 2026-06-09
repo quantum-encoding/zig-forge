@@ -44,6 +44,10 @@ const json_headers: [1]http.Header = .{
     .{ .name = "content-type", .value = "application/json" },
 };
 
+const text_headers: [1]http.Header = .{.{ .name = "content-type", .value = "text/plain; charset=utf-8" }};
+const html_headers_meta: [1]http.Header = .{.{ .name = "content-type", .value = "text/html; charset=utf-8" }};
+const xml_headers: [1]http.Header = .{.{ .name = "content-type", .value = "text/xml; charset=utf-8" }};
+
 // ── CORS (audit H1, NEW-4) ───────────────────────────────────────
 //
 // The previous implementation broadcast
@@ -204,6 +208,46 @@ pub fn dispatch(
     // Root — no auth
     if (std.mem.eql(u8, path, "/")) {
         return handlers.root(request, allocator);
+    }
+
+    // ── Meta / discovery endpoints (public, no auth) ────
+    if (std.mem.eql(u8, path, "/llms.txt")) {
+        return .{ .status = .ok, .body =
+            \\# Quantum Encoding AI Gateway
+            \\
+            \\OpenAI-compatible multi-provider AI gateway. Base: /qai/v1
+            \\Auth: Authorization: Bearer <qai_k_...>
+            \\
+            \\Endpoints: /chat /embeddings /images/generate /images/edit
+            \\/vision/* /audio/* /voices /search/* /rag/* /moderate /jobs
+            \\/models /models/pricing /account/balance /credits/*
+            \\
+            \\Async media (3D, video, dubbing) run via POST /qai/v1/jobs.
+            \\
+        , .headers = &text_headers };
+    }
+    if (std.mem.eql(u8, path, "/docs")) {
+        return .{ .status = .ok, .body =
+            \\<!doctype html><meta charset=utf-8><title>Quantum Encoding AI Gateway</title>
+            \\<body style="font-family:system-ui;max-width:48rem;margin:3rem auto;padding:0 1rem">
+            \\<h1>Quantum Encoding AI Gateway</h1>
+            \\<p>OpenAI-compatible multi-provider AI gateway. See <a href="/llms.txt">/llms.txt</a>
+            \\for the endpoint map and <a href="/qai/v1/models">/qai/v1/models</a> for the live model registry.</p>
+            \\</body>
+        , .headers = &html_headers_meta };
+    }
+
+    // ── Twilio voice webhooks (public; Twilio posts form-encoded) ──
+    // Return minimal TwiML so Twilio's call flow succeeds.
+    if (std.mem.eql(u8, path, "/qai/v1/twilio/voice")) {
+        return .{ .status = .ok, .body =
+            \\<?xml version="1.0" encoding="UTF-8"?>
+            \\<Response><Say>Thank you for calling Quantum Encoding. This line is not staffed; please email support.</Say></Response>
+        , .headers = &xml_headers };
+    }
+    if (std.mem.eql(u8, path, "/qai/v1/twilio/status")) {
+        // Status callback — just acknowledge.
+        return .{ .status = .no_content, .body = "" };
     }
 
     // Auth endpoints — NO app auth required (they ARE the auth entry point)
@@ -372,6 +416,37 @@ fn routeApiV1Authed(
         return handleAccountBalance(allocator, auth);
     }
 
+    // ── Licenses ────────────────────────────────────────
+    if (std.mem.startsWith(u8, path, "licenses/")) {
+        const crud = @import("crud.zig");
+        if (std.mem.eql(u8, path, "licenses/public-key")) {
+            if (method != .GET) return handlers.methodNotAllowed(request, allocator);
+            // Serve the license-verification public key from env (set in prod).
+            const hsx = @import("http-sentinel");
+            const pk = hsx.ai.getApiKeyFromEnv(environ_map, "QAI_LICENSE_PUBLIC_KEY") catch "";
+            const out = std.json.Stringify.valueAlloc(allocator, .{ .public_key = pk, .algorithm = "ed25519" }, .{}) catch
+                return .{ .status = .internal_server_error, .body = "{\"error\":\"internal\"}" };
+            return .{ .body = out };
+        }
+        if (std.mem.eql(u8, path, "licenses/mine")) {
+            if (method != .GET) return handlers.methodNotAllowed(request, allocator);
+            return crud.list(request, allocator, server_gcp, auth, .{ .collection = "licenses", .order_field = "created_at_ms" });
+        }
+        if (std.mem.eql(u8, path, "licenses/revocations")) {
+            if (method != .GET) return handlers.methodNotAllowed(request, allocator);
+            // Global revocation list — owner-scoped list returns the caller's;
+            // a full CRL would need an unfiltered query (follow-up).
+            return crud.list(request, allocator, server_gcp, auth, .{ .collection = "license_revocations" });
+        }
+        return handlers.notFound(request, allocator);
+    }
+    if (std.mem.eql(u8, path, "admin/licenses/revoke") or (std.mem.startsWith(u8, path, "admin/licenses/") and std.mem.endsWith(u8, path, "/revoke"))) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        if (auth.account.role != .admin) return .{ .status = .forbidden, .body = "{\"error\":\"forbidden\",\"message\":\"Admin role required\"}" };
+        const crud = @import("crud.zig");
+        return crud.create(request, allocator, io, server_gcp, auth, .{ .collection = "license_revocations" });
+    }
+
     // ── Account usage + stats (read from local ledger.jsonl) ──
     if (std.mem.eql(u8, path, "account/usage") or std.mem.eql(u8, path, "account/usage/summary") or
         std.mem.startsWith(u8, path, "stats/"))
@@ -385,6 +460,13 @@ fn routeApiV1Authed(
         if (std.mem.eql(u8, path, "stats/models")) return lq.handleStatsModels(allocator, io, l, auth);
         if (std.mem.eql(u8, path, "stats/timeline")) return lq.handleStatsTimeline(allocator, io, l, auth);
         return handlers.notFound(request, allocator);
+    }
+
+    // ── Account billing portal (Stripe) ────────────────
+    if (std.mem.eql(u8, path, "account/billing-portal")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        const stripe = @import("stripe.zig");
+        return stripe.handleBillingPortal(request, allocator, environ_map, auth);
     }
 
     // ── Credits (balance + static catalogs) ─────────────
@@ -480,6 +562,42 @@ fn routeApiV1Authed(
         const account_stats = @import("account_stats.zig");
         return account_stats.handleAdminSystemHealth(allocator, store, auth, server_gcp);
     }
+    // Admin audit / recent requests (read from local audit.jsonl).
+    if (std.mem.eql(u8, path, "admin/audit") or std.mem.eql(u8, path, "admin/requests/recent") or std.mem.eql(u8, path, "admin/requests/errors")) {
+        if (method != .GET) return handlers.methodNotAllowed(request, allocator);
+        const lq = @import("ledger_query.zig");
+        const l = server_ledger orelse return .{ .status = .service_unavailable, .body = "{\"error\":\"unavailable\"}" };
+        return lq.handleAuditRecent(allocator, io, l, auth, std.mem.eql(u8, path, "admin/requests/errors"));
+    }
+    // Admin consumers = the account list (store-backed).
+    if (std.mem.eql(u8, path, "admin/consumers")) {
+        if (method != .GET) return handlers.methodNotAllowed(request, allocator);
+        return keys.handleListAccounts(request, allocator, store, auth);
+    }
+    // Admin: dedicated Vertex endpoint registry (alias of admin/endpoints).
+    if (std.mem.eql(u8, path, "admin/vertex")) {
+        if (method != .GET) return handlers.methodNotAllowed(request, allocator);
+        return vertex.handleListEndpoints(request, allocator, auth);
+    }
+    // Admin: user management — ban/freeze/tier/credits (reuse account handlers).
+    if (std.mem.startsWith(u8, path, "admin/users/")) {
+        const after = path["admin/users/".len..];
+        if (std.mem.indexOf(u8, after, "/")) |slash| {
+            const uid = after[0..slash];
+            const action = after[slash + 1 ..];
+            if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+            if (std.mem.eql(u8, action, "freeze") or std.mem.eql(u8, action, "ban"))
+                return keys.handleFreezeAccount(request, allocator, io, store, auth, uid);
+            if (std.mem.eql(u8, action, "tier"))
+                return keys.handleSetTier(request, allocator, io, store, auth, uid);
+            if (std.mem.eql(u8, action, "credits"))
+                return keys.handleCreditAccount(request, allocator, io, store, auth, uid, server_ledger);
+            return handlers.notFound(request, allocator);
+        }
+        // GET admin/users/{id}
+        if (method == .GET) return keys.handleGetAccount(request, allocator, store, auth, after);
+        return handlers.methodNotAllowed(request, allocator);
+    }
     // Admin global stats (read from local ledger.jsonl).
     if (std.mem.startsWith(u8, path, "admin/stats/")) {
         if (method != .GET) return handlers.methodNotAllowed(request, allocator);
@@ -491,7 +609,19 @@ fn routeApiV1Authed(
         if (std.mem.eql(u8, path, "admin/stats/usage/providers")) return lq.handleAdminStatsProviders(allocator, io, l, auth);
         if (std.mem.eql(u8, path, "admin/stats/usage/top-users")) return lq.handleAdminStatsTopUsers(allocator, io, l, auth);
         if (std.mem.eql(u8, path, "admin/stats/usage/daily")) return lq.handleAdminStatsDaily(allocator, io, l, auth);
+        if (std.mem.eql(u8, path, "admin/stats/usage/partners")) return lq.handleAdminStatsPartners(allocator, io, l, auth);
+        if (std.mem.eql(u8, path, "admin/stats/usage/providers/daily")) return lq.handleAdminStatsProvidersDaily(allocator, io, l, auth);
         return handlers.notFound(request, allocator);
+    }
+    // admin/analytics/* — same local-ledger aggregations under the analytics path.
+    if (std.mem.startsWith(u8, path, "admin/analytics/")) {
+        if (method != .GET) return handlers.methodNotAllowed(request, allocator);
+        const lq = @import("ledger_query.zig");
+        const l = server_ledger orelse return .{ .status = .service_unavailable, .body = "{\"error\":\"unavailable\"}" };
+        if (std.mem.eql(u8, path, "admin/analytics/users")) return lq.handleAdminStatsPartners(allocator, io, l, auth);
+        if (std.mem.eql(u8, path, "admin/analytics/providers/daily")) return lq.handleAdminStatsProvidersDaily(allocator, io, l, auth);
+        if (std.mem.eql(u8, path, "admin/analytics/providers")) return lq.handleAdminStatsProviders(allocator, io, l, auth);
+        return lq.handleAdminStatsOverview(allocator, io, l, auth);
     }
 
     // ── Admin: Dedicated Endpoints ─────────────────────
@@ -661,6 +791,85 @@ fn routeApiV1Authed(
         const moderate = @import("moderate.zig");
         return moderate.handle(request, allocator, io, auth, server_gcp);
     }
+    // Kitchen Share (recipe-box) app routes — static/stateless only.
+    if (std.mem.startsWith(u8, path, "kitchenshare/")) {
+        const recipebox = @import("recipebox.zig");
+        if (std.mem.eql(u8, path, "kitchenshare/packs")) {
+            if (method != .GET) return handlers.methodNotAllowed(request, allocator);
+            return recipebox.handlePacks(allocator);
+        }
+        if (std.mem.eql(u8, path, "kitchenshare/payment-success")) return recipebox.paymentPage(true);
+        if (std.mem.eql(u8, path, "kitchenshare/payment-cancelled")) return recipebox.paymentPage(false);
+        if (std.mem.eql(u8, path, "kitchenshare/access-state")) {
+            if (method != .GET) return handlers.methodNotAllowed(request, allocator);
+            return recipebox.handleAccessState(allocator, io, server_gcp, auth);
+        }
+        if (std.mem.eql(u8, path, "kitchenshare/checkout")) {
+            if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+            return recipebox.handleCheckout(request, allocator, environ_map, auth);
+        }
+        if (std.mem.eql(u8, path, "kitchenshare/purchase-history")) {
+            if (method != .GET) return handlers.methodNotAllowed(request, allocator);
+            const lq = @import("ledger_query.zig");
+            const l = server_ledger orelse return .{ .status = .service_unavailable, .body = "{\"error\":\"unavailable\"}" };
+            return lq.handlePurchaseHistory(allocator, io, l, auth);
+        }
+        if (std.mem.eql(u8, path, "kitchenshare/reviewer/expire-trial")) {
+            if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+            return recipebox.handleExpireTrial(allocator, io, server_gcp, auth);
+        }
+        if (std.mem.eql(u8, path, "kitchenshare/reviewer/grant-trial-credits")) {
+            if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+            return recipebox.handleGrantTrialCredits(allocator, io, store, server_ledger, auth);
+        }
+        if (std.mem.eql(u8, path, "kitchenshare/iap/app-store/verify")) {
+            if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+            const iap = @import("iap.zig");
+            return iap.handleAppStoreVerify(request, allocator, environ_map, io, store, server_ledger, auth);
+        }
+        if (std.mem.eql(u8, path, "kitchenshare/iap/google-play/verify")) {
+            const iap = @import("iap.zig");
+            return iap.handleGooglePlayVerify(request, allocator);
+        }
+        return handlers.notFound(request, allocator);
+    }
+    // Quantify (quote-generator) app routes.
+    if (std.mem.startsWith(u8, path, "quantify/")) {
+        const quantify = @import("quantify.zig");
+        const crud = @import("crud.zig");
+        const settings_spec = crud.Spec{ .collection = "quantify_settings" };
+        if (std.mem.eql(u8, path, "quantify/packs")) {
+            if (method != .GET) return handlers.methodNotAllowed(request, allocator);
+            return quantify.handlePacks(allocator);
+        }
+        if (std.mem.eql(u8, path, "quantify/settings")) {
+            if (method == .GET) return crud.getByOwner(allocator, server_gcp, auth, settings_spec);
+            if (method == .PUT) return crud.putByOwner(request, allocator, io, server_gcp, auth, settings_spec);
+            return handlers.methodNotAllowed(request, allocator);
+        }
+        if (std.mem.eql(u8, path, "quantify/payment-success")) return quantify.paymentPage(true);
+        if (std.mem.eql(u8, path, "quantify/payment-cancelled")) return quantify.paymentPage(false);
+        if (std.mem.eql(u8, path, "quantify/checkout")) {
+            if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+            return quantify.handleCheckout(request, allocator, environ_map, auth);
+        }
+        if (std.mem.eql(u8, path, "quantify/iap/app-store/verify")) {
+            if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+            const iap = @import("iap.zig");
+            return iap.handleAppStoreVerify(request, allocator, environ_map, io, store, server_ledger, auth);
+        }
+        if (std.mem.eql(u8, path, "quantify/iap/google-play/verify")) {
+            const iap = @import("iap.zig");
+            return iap.handleGooglePlayVerify(request, allocator);
+        }
+        if (std.mem.eql(u8, path, "quantify/email/send")) {
+            if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+            const email = @import("email.zig");
+            return email.handleSend(request, allocator, environ_map);
+        }
+        // email/webhook/* (Resend delivery webhooks) remain stubs.
+        return handlers.stub(request, allocator, "/qai/v1/quantify/email/webhook/* (delivery webhooks not wired)");
+    }
     // contact form → Firestore (not owner-scoped read, but stamped with sender)
     if (std.mem.eql(u8, path, "contact")) {
         if (method != .POST) return handlers.methodNotAllowed(request, allocator);
@@ -672,6 +881,47 @@ fn routeApiV1Authed(
         if (method != .POST) return handlers.methodNotAllowed(request, allocator);
         const crud = @import("crud.zig");
         return crud.create(request, allocator, io, server_gcp, auth, .{ .collection = "conductor_logs" });
+    }
+    // reservations (owner-scoped CRUD)
+    if (std.mem.eql(u8, path, "reservations")) {
+        const crud = @import("crud.zig");
+        const spec = crud.Spec{ .collection = "reservations", .order_field = "created_at_ms" };
+        if (method == .POST) return crud.create(request, allocator, io, server_gcp, auth, spec);
+        if (method == .GET) return crud.list(request, allocator, server_gcp, auth, spec);
+        return handlers.methodNotAllowed(request, allocator);
+    }
+    if (std.mem.startsWith(u8, path, "reservations/")) {
+        const crud = @import("crud.zig");
+        const spec = crud.Spec{ .collection = "reservations" };
+        const rest = path["reservations/".len..];
+        if (std.mem.indexOfScalar(u8, rest, '/') != null) return handlers.notFound(request, allocator);
+        if (method == .GET) return crud.get(allocator, server_gcp, auth, spec, rest);
+        if (method == .DELETE) return crud.remove(allocator, server_gcp, auth, spec, rest);
+        return handlers.methodNotAllowed(request, allocator);
+    }
+    // security/scan-* + scanner/* → external scanner service (reverse proxy)
+    if (std.mem.startsWith(u8, path, "security/scan-") or std.mem.eql(u8, path, "security/report")) {
+        if (method != .POST) return handlers.methodNotAllowed(request, allocator);
+        const proxy = @import("proxy.zig");
+        const up = std.fmt.allocPrint(allocator, "/{s}", .{path["security/".len..]}) catch return handlers.notFound(request, allocator);
+        defer allocator.free(up);
+        return proxy.post(request, allocator, environ_map, "QAI_SCANNER_URL", "QAI_SCANNER_KEY", up);
+    }
+    if (std.mem.startsWith(u8, path, "scanner/")) {
+        const proxy = @import("proxy.zig");
+        const up = std.fmt.allocPrint(allocator, "/{s}", .{path["scanner/".len..]}) catch return handlers.notFound(request, allocator);
+        defer allocator.free(up);
+        if (method == .GET) return proxy.get(allocator, environ_map, "QAI_SCANNER_URL", "QAI_SCANNER_KEY", up);
+        if (method == .POST) return proxy.post(request, allocator, environ_map, "QAI_SCANNER_URL", "QAI_SCANNER_KEY", up);
+        return handlers.methodNotAllowed(request, allocator);
+    }
+    // onboarding state → per-user doc (owner-keyed)
+    if (std.mem.eql(u8, path, "onboarding")) {
+        const crud = @import("crud.zig");
+        const spec = crud.Spec{ .collection = "onboarding" };
+        if (method == .POST or method == .PUT) return crud.putByOwner(request, allocator, io, server_gcp, auth, spec);
+        if (method == .GET) return crud.getByOwner(allocator, server_gcp, auth, spec);
+        return handlers.methodNotAllowed(request, allocator);
     }
     if (std.mem.startsWith(u8, path, "vision/")) {
         if (method != .POST) return handlers.methodNotAllowed(request, allocator);
@@ -704,8 +954,26 @@ fn routeApiV1Authed(
             if (method != .GET) return handlers.methodNotAllowed(request, allocator);
             return proxy.get(allocator, environ_map, "QAI_SURREAL_RAG_URL", "QAI_SURREAL_RAG_KEY", "/providers");
         }
-        // rag/collections/* (managed collections) remains a stub.
-        return handlers.stub(request, allocator, "/qai/v1/rag/collections/* (managed collections not wired)");
+        // rag/collections/* — owner-scoped managed collections (Firestore CRUD).
+        if (std.mem.startsWith(u8, path, "rag/collections")) {
+            const crud = @import("crud.zig");
+            const spec = crud.Spec{ .collection = "rag_collections", .order_field = "created_at_ms" };
+            if (std.mem.eql(u8, path, "rag/collections")) {
+                if (method == .POST) return crud.create(request, allocator, io, store, auth, spec) catch_gcp: {
+                    break :catch_gcp crud.create(request, allocator, io, server_gcp, auth, spec);
+                };
+                if (method == .GET) return crud.list(request, allocator, server_gcp, auth, spec);
+                return handlers.methodNotAllowed(request, allocator);
+            }
+            // rag/collections/{id}, /{id}/upload, /search — id-scoped.
+            const rest = path["rag/collections/".len..];
+            if (std.mem.eql(u8, rest, "search")) return handlers.stub(request, allocator, "POST /qai/v1/rag/collections/search (vector search service not wired)");
+            if (std.mem.indexOfScalar(u8, rest, '/') != null) return handlers.stub(request, allocator, "/qai/v1/rag/collections/{id}/upload (ingest service not wired)");
+            if (method == .GET) return crud.get(allocator, server_gcp, auth, spec, rest);
+            if (method == .DELETE) return crud.remove(allocator, server_gcp, auth, spec, rest);
+            return handlers.methodNotAllowed(request, allocator);
+        }
+        return handlers.notFound(request, allocator);
     }
     // documents/* → external Axiom document service (reverse proxy).
     if (std.mem.startsWith(u8, path, "documents/")) {
@@ -738,7 +1006,16 @@ fn routeApiV1Authed(
         const crud = @import("crud.zig");
         const spec = crud.Spec{ .collection = "workflows" };
         const rest = path["workflows/".len..];
-        if (std.mem.indexOfScalar(u8, rest, '/') != null) return handlers.stub(request, allocator, "/qai/v1/workflows/{id}/* (execute/approve state machine not wired)");
+        if (std.mem.indexOfScalar(u8, rest, '/')) |slash| {
+            const id = rest[0..slash];
+            const action = rest[slash + 1 ..];
+            if (method == .POST and std.mem.eql(u8, action, "execute")) return crud.patchStatus(allocator, io, server_gcp, auth, spec, id, "running");
+            if (method == .PUT and std.mem.indexOfScalar(u8, action, '/') == null) {
+                // PUT workflows/{id} (update) — replace via create-shaped upsert is
+                // out of scope; deeper execution graph too.
+            }
+            return handlers.stub(request, allocator, "/qai/v1/workflows/{id}/* (execution graph not wired)");
+        }
         if (method == .GET) return crud.get(allocator, server_gcp, auth, spec, rest);
         if (method == .DELETE) return crud.remove(allocator, server_gcp, auth, spec, rest);
         return handlers.methodNotAllowed(request, allocator);
@@ -758,7 +1035,21 @@ fn routeApiV1Authed(
         const crud = @import("crud.zig");
         const spec = crud.Spec{ .collection = "missions" };
         const rest = path["missions/".len..];
-        if (std.mem.indexOfScalar(u8, rest, '/') != null) return handlers.stub(request, allocator, "/qai/v1/missions/{id}/* (approve/pause/resume/chat actions not wired)");
+        if (std.mem.indexOfScalar(u8, rest, '/')) |slash| {
+            // missions/{id}/{action}
+            const id = rest[0..slash];
+            const action = rest[slash + 1 ..];
+            if (method != .POST) {
+                // GET missions/{id}/checkpoints — no checkpoint store yet.
+                if (method == .GET and std.mem.eql(u8, action, "checkpoints")) return .{ .body = "{\"checkpoints\":[]}" };
+                return handlers.methodNotAllowed(request, allocator);
+            }
+            const status: ?[]const u8 =
+                if (std.mem.eql(u8, action, "approve")) "approved" else if (std.mem.eql(u8, action, "pause")) "paused" else if (std.mem.eql(u8, action, "resume")) "running" else if (std.mem.eql(u8, action, "cancel")) "cancelled" else null;
+            if (status) |st| return crud.patchStatus(allocator, io, server_gcp, auth, spec, id, st);
+            // chat / confirm-structure / retry / import are deeper engine ops.
+            return handlers.stub(request, allocator, "/qai/v1/missions/{id}/{chat,confirm-structure,retry} (mission engine not wired)");
+        }
         if (method == .GET) return crud.get(allocator, server_gcp, auth, spec, rest);
         if (method == .DELETE) return crud.remove(allocator, server_gcp, auth, spec, rest);
         return handlers.methodNotAllowed(request, allocator);

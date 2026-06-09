@@ -47,6 +47,9 @@ const Entry = struct {
     latency_ms: u32 = 0,
     ts: i64 = 0,
     type: []const u8 = "",
+    // credit-line fields (type == "credit")
+    amount_ticks: i64 = 0,
+    admin_key: []const u8 = "",
 };
 
 /// Read + parse ledger.jsonl into the arena. Returns billing entries only
@@ -67,6 +70,107 @@ fn loadEntries(arena: std.mem.Allocator, io: std.Io, path: []const u8) []Entry {
         list.append(arena, parsed) catch break;
     }
     return list.toOwnedSlice(arena) catch &.{};
+}
+
+// ── admin: recent requests / errors (from the local audit log) ───────
+
+/// GET /admin/audit, /admin/requests/recent, /admin/requests/errors — reads
+/// audit.jsonl (every request is logged there by ledger.recordAudit). Admin
+/// only. `errors_only` keeps status >= 400.
+pub fn handleAuditRecent(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    ledger: *ledger_mod.Ledger,
+    auth: *const types.AuthContext,
+    errors_only: bool,
+) Response {
+    if (auth.account.role != .admin) return forbidden();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const data = Dir.cwd().readFileAlloc(io, ledger.audit_path, a, .limited(MAX_LEDGER_READ)) catch "";
+
+    const AuditLine = struct {
+        key: []const u8 = "",
+        account: []const u8 = "",
+        endpoint: []const u8 = "",
+        method: []const u8 = "",
+        status: u16 = 0,
+        model: []const u8 = "",
+        in: u32 = 0,
+        out: u32 = 0,
+        cost: i64 = 0,
+        ms: u32 = 0,
+        ts: i64 = 0,
+    };
+    var rows: std.ArrayListUnmanaged(AuditLine) = .empty;
+    var it = std.mem.splitScalar(u8, data, '\n');
+    while (it.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0 or trimmed[0] != '{') continue;
+        const e = std.json.parseFromSliceLeaky(AuditLine, a, trimmed, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch continue;
+        if (errors_only and e.status < 400) continue;
+        rows.append(a, e) catch break;
+    }
+    // newest first, cap 200
+    std.mem.sort(AuditLine, rows.items, {}, struct {
+        fn f(_: void, l: AuditLine, r: AuditLine) bool {
+            return l.ts > r.ts;
+        }
+    }.f);
+    const shown = if (rows.items.len > 200) rows.items[0..200] else rows.items;
+
+    const out = std.json.Stringify.valueAlloc(allocator, .{ .requests = shown }, .{}) catch return errResp(.internal_server_error);
+    return .{ .body = out };
+}
+
+// ── purchase history (credit top-ups from the ledger) ────────────────
+//
+// Stripe/IAP credits are recorded to the ledger via ledger.recordCredit
+// (type == "credit"). Purchase-history lists those for the account — no
+// separate purchases store needed.
+
+pub fn handlePurchaseHistory(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    ledger: *ledger_mod.Ledger,
+    auth: *const types.AuthContext,
+) Response {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const data = Dir.cwd().readFileAlloc(io, ledger.ledger_path, a, .limited(MAX_LEDGER_READ)) catch "";
+    const account_id = auth.account.id.slice();
+
+    const Purchase = struct {
+        amount_ticks: i64,
+        balance_after: i64,
+        source: []const u8,
+        ts: i64,
+    };
+    var purchases: std.ArrayListUnmanaged(Purchase) = .empty;
+
+    var it = std.mem.splitScalar(u8, data, '\n');
+    while (it.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0 or trimmed[0] != '{') continue;
+        const e = std.json.parseFromSliceLeaky(Entry, a, trimmed, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch continue;
+        if (!std.mem.eql(u8, e.type, "credit")) continue;
+        if (!std.mem.eql(u8, e.account_id, account_id)) continue;
+        purchases.append(a, .{ .amount_ticks = e.amount_ticks, .balance_after = e.balance_after, .source = e.admin_key, .ts = e.ts }) catch break;
+    }
+    std.mem.sort(Purchase, purchases.items, {}, struct {
+        fn f(_: void, l: Purchase, r: Purchase) bool {
+            return l.ts > r.ts;
+        }
+    }.f);
+
+    const out = std.json.Stringify.valueAlloc(allocator, .{ .purchases = purchases.items }, .{}) catch
+        return errResp(.internal_server_error);
+    return .{ .body = out };
 }
 
 // ── GET /qai/v1/account/usage ────────────────────────────────────────
@@ -317,6 +421,43 @@ fn groupByString(allocator: std.mem.Allocator, io: std.Io, ledger: *ledger_mod.L
     jw.write("global") catch return errResp(.internal_server_error);
     jw.endObject() catch return errResp(.internal_server_error);
     const out = aw.toOwnedSlice() catch return errResp(.internal_server_error);
+    return .{ .body = out };
+}
+
+/// GET /admin/stats/usage/partners + /admin/analytics/users — group spend by
+/// account (partner). Admin only.
+pub fn handleAdminStatsPartners(allocator: std.mem.Allocator, io: std.Io, ledger: *ledger_mod.Ledger, auth: *const types.AuthContext) Response {
+    if (auth.account.role != .admin) return forbidden();
+    return groupByString(allocator, io, ledger, .account, 0, "partners");
+}
+
+/// GET /admin/stats/usage/providers/daily — provider × day cross-tab. Admin.
+pub fn handleAdminStatsProvidersDaily(allocator: std.mem.Allocator, io: std.Io, ledger: *ledger_mod.Ledger, auth: *const types.AuthContext) Response {
+    if (auth.account.role != .admin) return forbidden();
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const entries = loadEntries(a, io, ledger.ledger_path);
+    const models_mod = @import("models.zig");
+
+    const Cell = struct { provider: []const u8, day: i64, request_count: u64 = 0, total_ticks: i64 = 0 };
+    // Key = "provider|day"; small N so a flat list + linear find is fine.
+    var cells: std.ArrayListUnmanaged(Cell) = .empty;
+    for (entries) |e| {
+        const provider = if (models_mod.getModel(e.model)) |m| m.provider else "unknown";
+        const day = @divTrunc(e.ts, 86_400_000);
+        var found = false;
+        for (cells.items) |*c| {
+            if (c.day == day and std.mem.eql(u8, c.provider, provider)) {
+                c.request_count += 1;
+                c.total_ticks += e.total_ticks;
+                found = true;
+                break;
+            }
+        }
+        if (!found) cells.append(a, .{ .provider = provider, .day = day, .request_count = 1, .total_ticks = e.total_ticks }) catch break;
+    }
+    const out = std.json.Stringify.valueAlloc(allocator, .{ .cells = cells.items, .scope = "global" }, .{}) catch return errResp(.internal_server_error);
     return .{ .body = out };
 }
 
