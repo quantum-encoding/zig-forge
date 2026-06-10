@@ -114,7 +114,14 @@ pub fn renderSeg(
 
     // Angle from the wall normal to screen-center; per column we add
     // xtoviewangle[x] to get that column's angle off the wall normal.
-    const rw_centerangle = fixed.ANG90 +% rstate.viewangle -% rw_normalangle;
+    //
+    // NOTE: vanilla writes ANG90 + viewangle - rw_normalangle and indexes
+    // finetangent[] directly, but vanilla's finetangent[a>>19] equals
+    // tan(a - 90°) — the table bakes in a -90° offset. Our fineTan(θ) is a
+    // plain tan(θ), so the ANG90 must NOT be added here: with it, every
+    // column sampled tan(θ+90°) = -cot(θ), which is singular at screen
+    // center and scrambled texture columns across all walls.
+    const rw_centerangle = rstate.viewangle -% rw_normalangle;
 
     // NOTE: scale is computed exactly per-column in the loop below via
     // scaleFromGlobalAngle(viewangle + xtoviewangle[x]). DOOM approximates this
@@ -137,6 +144,12 @@ pub fn renderSeg(
         worldhigh = Fixed.sub(back.ceilingheight, rstate.viewz);
         worldlow = Fixed.sub(back.floorheight, rstate.viewz);
 
+        // Sky hack: if both ceilings are sky, never draw or step the top —
+        // the sky is drawn by the ceiling visplanes on both sides.
+        if (frontsector.ceilingpic == pstate.skyflatnum and back.ceilingpic == pstate.skyflatnum) {
+            worldhigh = worldtop;
+        }
+
         if (worldhigh.lt(worldtop)) has_top = true;
         if (worldlow.gt(worldbottom)) has_bottom = true;
     }
@@ -146,7 +159,57 @@ pub fn renderSeg(
     rw_offset = Fixed.add(rw_offset, side.textureoffset);
     rw_offset = Fixed.add(rw_offset, seg.offset);
 
-    const texturemid = Fixed.add(worldtop, side.rowoffset);
+    // Texture pegging (linuxdoom-1.10 r_segs.c R_StoreWallRange):
+    // mid (one-sided): pegged to ceiling, or with ML_DONTPEGBOTTOM the bottom
+    //   of the texture sits on the floor.
+    // upper: pegged to the back ceiling (texture hangs below it), or with
+    //   ML_DONTPEGTOP pegged to the front ceiling.
+    // lower: pegged to the back floor, or with ML_DONTPEGBOTTOM pegged to the
+    //   front ceiling (so door tracks don't move with the door).
+    const texturemid = blk: {
+        if (line.flags & defs.ML_DONTPEGBOTTOM != 0 and side.midtexture > 0) {
+            const texh = rdata.textureHeightFixed(@intCast(side.midtexture));
+            break :blk Fixed.add(Fixed.add(worldbottom, texh), side.rowoffset);
+        }
+        break :blk Fixed.add(worldtop, side.rowoffset);
+    };
+    const toptexturemid = blk: {
+        if (line.flags & defs.ML_DONTPEGTOP != 0) {
+            break :blk Fixed.add(worldtop, side.rowoffset);
+        }
+        if (side.toptexture > 0) {
+            const texh = rdata.textureHeightFixed(@intCast(side.toptexture));
+            break :blk Fixed.add(Fixed.add(worldhigh, texh), side.rowoffset);
+        }
+        break :blk Fixed.add(worldtop, side.rowoffset);
+    };
+    const bottomtexturemid = blk: {
+        if (line.flags & defs.ML_DONTPEGBOTTOM != 0) {
+            break :blk Fixed.add(worldtop, side.rowoffset);
+        }
+        break :blk Fixed.add(worldlow, side.rowoffset);
+    };
+
+    // markfloor/markceiling — whether this seg terminates the front sector's
+    // floor/ceiling at its columns (used for clip-array updates so farther
+    // geometry and sprites get clipped correctly).
+    var markfloor = true;
+    var markceiling = true;
+    if (backsector) |back| {
+        const closed = back.ceilingheight.le(frontsector.floorheight) or
+            back.floorheight.ge(frontsector.ceilingheight);
+        if (!closed) {
+            markfloor = worldlow.raw() != worldbottom.raw() or
+                back.floorpic != frontsector.floorpic or
+                back.lightlevel != frontsector.lightlevel;
+            markceiling = worldhigh.raw() != worldtop.raw() or
+                back.ceilingpic != frontsector.ceilingpic or
+                back.lightlevel != frontsector.lightlevel;
+        }
+    }
+    // Planes that don't exist (floor above eye / ceiling below eye) can't be marked.
+    if (pstate.floorplane == null) markfloor = false;
+    if (pstate.ceilingplane == null) markceiling = false;
 
     // Check for visplane updates
     if (pstate.floorplane) |fp| {
@@ -165,6 +228,75 @@ pub fn renderSeg(
 
     // Light level
     const lightlevel = frontsector.lightlevel;
+
+    // ------------------------------------------------------------------
+    // Drawseg setup (for sprite clipping + masked mid textures)
+    // ------------------------------------------------------------------
+    const cx1 = std.math.clamp(x1, 0, SCREENWIDTH - 1);
+    const cx2 = std.math.clamp(x2, 0, SCREENWIDTH - 1);
+    const range_w: usize = @intCast(cx2 - cx1 + 1);
+
+    const masked = backsector != null and mid_tex > 0;
+
+    var ds: ?*state_mod.DrawSeg = null;
+    if (rstate.num_drawsegs < state_mod.MAXDRAWSEGS) {
+        const d = &rstate.drawsegs[rstate.num_drawsegs];
+        rstate.num_drawsegs += 1;
+        d.* = .{
+            .curline = seg_idx,
+            .x1 = cx1,
+            .x2 = cx2,
+            .scale1 = state_mod.scaleFromGlobalAngle(rstate, rstate.viewangle +% xToViewAngle(cx1), rw_distance_abs, rw_normalangle),
+            .scale2 = state_mod.scaleFromGlobalAngle(rstate, rstate.viewangle +% xToViewAngle(cx2), rw_distance_abs, rw_normalangle),
+            .rw_distance = rw_distance_abs,
+            .rw_normalangle = rw_normalangle,
+        };
+
+        if (backsector) |back| {
+            // Silhouette flags (which sprite edges this seg can clip)
+            if (frontsector.floorheight.gt(back.floorheight)) {
+                d.silhouette |= state_mod.SIL_BOTTOM;
+                d.bsilheight = frontsector.floorheight;
+            } else if (back.floorheight.gt(rstate.viewz)) {
+                d.silhouette |= state_mod.SIL_BOTTOM;
+                d.bsilheight = Fixed.MAX;
+            }
+            if (frontsector.ceilingheight.lt(back.ceilingheight)) {
+                d.silhouette |= state_mod.SIL_TOP;
+                d.tsilheight = frontsector.ceilingheight;
+            } else if (back.ceilingheight.lt(rstate.viewz)) {
+                d.silhouette |= state_mod.SIL_TOP;
+                d.tsilheight = Fixed.MIN;
+            }
+            if (back.ceilingheight.le(frontsector.floorheight)) {
+                d.sprbottomclip = state_mod.OPENING_NEG1_BASE;
+                d.bsilheight = Fixed.MAX;
+                d.silhouette |= state_mod.SIL_BOTTOM;
+            }
+            if (back.floorheight.ge(frontsector.ceilingheight)) {
+                d.sprtopclip = state_mod.OPENING_SHA_BASE;
+                d.tsilheight = Fixed.MIN;
+                d.silhouette |= state_mod.SIL_TOP;
+            }
+
+            // Masked mid texture: reserve a texture-column array in openings
+            if (masked and rstate.lastopening + range_w <= state_mod.MAXOPENINGS) {
+                d.maskedtexturecol = rstate.lastopening;
+                for (rstate.openings[rstate.lastopening .. rstate.lastopening + range_w]) |*o| {
+                    o.* = state_mod.MASKED_NONE;
+                }
+                rstate.lastopening += range_w;
+            }
+        } else {
+            // One-sided wall: fully occludes sprites behind it
+            d.silhouette = state_mod.SIL_BOTH;
+            d.sprtopclip = state_mod.OPENING_SHA_BASE;
+            d.sprbottomclip = state_mod.OPENING_NEG1_BASE;
+            d.bsilheight = Fixed.MAX;
+            d.tsilheight = Fixed.MIN;
+        }
+        ds = d;
+    }
 
     // Render each column
     var x = x1;
@@ -220,7 +352,7 @@ pub fn renderSeg(
             }
         }
 
-        if (backsector) |back| {
+        if (backsector != null) {
             // Two-sided line
 
             // Upper texture (ceiling step down)
@@ -228,12 +360,13 @@ pub fn renderSeg(
                 const high_line = rstate.centery - Fixed.mul(worldhigh, scale_val).toInt();
                 const top_yh = @min(high_line - 1, yh);
                 if (yl <= top_yh) {
-                    drawWallColumn(rdata, screen, @intCast(top_tex), x, yl, top_yh, scale_val, texturemid, tex_col, seg, rstate, lightlevel);
+                    drawWallColumn(rdata, screen, @intCast(top_tex), x, yl, top_yh, scale_val, toptexturemid, tex_col, seg, rstate, lightlevel);
+                    rstate.ceilingclip[ux] = @intCast(std.math.clamp(top_yh, -1, SCREENHEIGHT));
+                } else {
+                    rstate.ceilingclip[ux] = @intCast(std.math.clamp(yl - 1, -1, SCREENHEIGHT));
                 }
-                // Update clip
-                if (high_line > rstate.ceilingclip[ux]) {
-                    rstate.ceilingclip[ux] = @intCast(std.math.clamp(high_line, 0, SCREENHEIGHT));
-                }
+            } else if (markceiling) {
+                rstate.ceilingclip[ux] = @intCast(std.math.clamp(yl - 1, -1, SCREENHEIGHT));
             }
 
             // Lower texture (floor step up)
@@ -241,17 +374,24 @@ pub fn renderSeg(
                 const low_line = rstate.centery - Fixed.mul(worldlow, scale_val).toInt();
                 const bot_yl = @max(low_line, yl);
                 if (bot_yl <= yh) {
-                    const bottexmid = Fixed.add(worldlow, side.rowoffset);
-                    drawWallColumn(rdata, screen, @intCast(bot_tex), x, bot_yl, yh, scale_val, bottexmid, tex_col, seg, rstate, lightlevel);
+                    drawWallColumn(rdata, screen, @intCast(bot_tex), x, bot_yl, yh, scale_val, bottomtexturemid, tex_col, seg, rstate, lightlevel);
+                    rstate.floorclip[ux] = @intCast(std.math.clamp(bot_yl, -1, SCREENHEIGHT));
+                } else {
+                    rstate.floorclip[ux] = @intCast(std.math.clamp(yh + 1, -1, SCREENHEIGHT));
                 }
-                // Update clip
-                if (low_line < rstate.floorclip[ux]) {
-                    rstate.floorclip[ux] = @intCast(std.math.clamp(low_line, 0, SCREENHEIGHT));
-                }
+            } else if (markfloor) {
+                rstate.floorclip[ux] = @intCast(std.math.clamp(yh + 1, -1, SCREENHEIGHT));
             }
 
-            // If the line has no top or bottom gap, close off the clips
-            _ = back;
+            // Record the texture column for the masked mid texture pass
+            if (ds) |d| {
+                if (d.maskedtexturecol) |base| {
+                    if (x >= d.x1 and x <= d.x2) {
+                        const mi = base + @as(usize, @intCast(x - d.x1));
+                        rstate.openings[mi] = @intCast(std.math.clamp(tex_col, -32768, 32766));
+                    }
+                }
+            }
         } else {
             // One-sided line — draw mid texture, close off column
             if (has_mid and mid_tex > 0 and yl <= yh) {
@@ -263,6 +403,126 @@ pub fn renderSeg(
             rstate.floorclip[ux] = -1;
         }
     }
+
+    // ------------------------------------------------------------------
+    // Save post-render clip arrays into the drawseg for sprite clipping
+    // ------------------------------------------------------------------
+    if (ds) |d| {
+        if ((d.silhouette & state_mod.SIL_TOP != 0 or d.maskedtexturecol != null) and d.sprtopclip == null) {
+            if (rstate.lastopening + range_w <= state_mod.MAXOPENINGS) {
+                const base = rstate.lastopening;
+                for (0..range_w) |i| {
+                    rstate.openings[base + i] = rstate.ceilingclip[@intCast(cx1 + @as(i32, @intCast(i)))];
+                }
+                d.sprtopclip = base;
+                rstate.lastopening += range_w;
+            }
+        }
+        if ((d.silhouette & state_mod.SIL_BOTTOM != 0 or d.maskedtexturecol != null) and d.sprbottomclip == null) {
+            if (rstate.lastopening + range_w <= state_mod.MAXOPENINGS) {
+                const base = rstate.lastopening;
+                for (0..range_w) |i| {
+                    rstate.openings[base + i] = rstate.floorclip[@intCast(cx1 + @as(i32, @intCast(i)))];
+                }
+                d.sprbottomclip = base;
+                rstate.lastopening += range_w;
+            }
+        }
+        // A masked mid texture acts as a full silhouette for sprites behind it
+        if (d.maskedtexturecol != null) {
+            if (d.silhouette & state_mod.SIL_TOP == 0) {
+                d.silhouette |= state_mod.SIL_TOP;
+                d.tsilheight = Fixed.MIN;
+            }
+            if (d.silhouette & state_mod.SIL_BOTTOM == 0) {
+                d.silhouette |= state_mod.SIL_BOTTOM;
+                d.bsilheight = Fixed.MAX;
+            }
+        }
+    }
+}
+
+/// Render the masked (transparent) mid texture of a two-sided seg for screen
+/// columns x1..x2. Called from the sprite pass, back to front.
+/// Port of linuxdoom-1.10 r_segs.c R_RenderMaskedSegRange.
+pub fn renderMaskedSegRange(
+    d: *state_mod.DrawSeg,
+    x1: i32,
+    x2: i32,
+    level: *const setup.Level,
+    rstate: *RenderState,
+    rdata: *RenderData,
+    screen: [*]u8,
+) void {
+    const base = d.maskedtexturecol orelse return;
+    if (d.curline >= level.segs.len) return;
+    const seg = &level.segs[d.curline];
+    const side = &level.sides[seg.sidedef];
+    const line = &level.lines[seg.linedef];
+    if (side.midtexture <= 0) return;
+    const tex_num: usize = @intCast(side.midtexture);
+
+    const front_idx = seg.frontsector orelse return;
+    const back_idx = seg.backsector orelse return;
+    if (front_idx >= level.sectors.len or back_idx >= level.sectors.len) return;
+    const frontsector = &level.sectors[front_idx];
+    const backsector = &level.sectors[back_idx];
+
+    const lightlevel = frontsector.lightlevel;
+    const texh = rdata.textureHeightFixed(tex_num);
+
+    // Vertical pegging: bottom-pegged mid textures rise from the higher floor;
+    // otherwise they hang from the lower ceiling.
+    var texturemid: Fixed = undefined;
+    if (line.flags & defs.ML_DONTPEGBOTTOM != 0) {
+        const f = if (frontsector.floorheight.gt(backsector.floorheight))
+            frontsector.floorheight
+        else
+            backsector.floorheight;
+        texturemid = Fixed.add(Fixed.sub(f, rstate.viewz), texh);
+    } else {
+        const c = if (frontsector.ceilingheight.lt(backsector.ceilingheight))
+            frontsector.ceilingheight
+        else
+            backsector.ceilingheight;
+        texturemid = Fixed.sub(c, rstate.viewz);
+    }
+    texturemid = Fixed.add(texturemid, side.rowoffset);
+
+    var x = @max(x1, d.x1);
+    const xe = @min(x2, d.x2);
+    while (x <= xe) : (x += 1) {
+        if (x < 0 or x >= SCREENWIDTH) continue;
+        const mi = base + @as(usize, @intCast(x - d.x1));
+        const tcol = rstate.openings[mi];
+        if (tcol == state_mod.MASKED_NONE) continue;
+
+        const spryscale = state_mod.scaleFromGlobalAngle(rstate, rstate.viewangle +% xToViewAngle(x), d.rw_distance, d.rw_normalangle);
+        if (spryscale.raw() <= 0) continue;
+
+        const light_idx = RenderData.lightIndex(lightlevel, spryscale);
+        const colormap = rdata.getColormap(light_idx);
+        const iscale = Fixed.div(Fixed.ONE, spryscale);
+        const sprtopscreen = Fixed.sub(rstate.centeryfrac, Fixed.mul(texturemid, spryscale));
+
+        const ceilclip = drawSegClipValue(rstate, d, d.sprtopclip, x, -1);
+        const florclip = drawSegClipValue(rstate, d, d.sprbottomclip, x, SCREENHEIGHT);
+
+        if (rdata.getMaskedTextureColumnPosts(tex_num, tcol)) |posts| {
+            draw.drawMaskedColumn(screen, x, posts, colormap, spryscale, sprtopscreen, texturemid, iscale, ceilclip, florclip, rstate.centery);
+        }
+
+        rstate.openings[mi] = state_mod.MASKED_NONE; // drawn — don't draw again
+    }
+}
+
+/// Resolve a drawseg clip array value for screen column x (default when the
+/// drawseg recorded no clip on that edge).
+pub fn drawSegClipValue(rstate: *const RenderState, d: *const state_mod.DrawSeg, clip: ?usize, x: i32, default: i32) i32 {
+    const base = clip orelse return default;
+    const idx = base + @as(usize, @intCast(std.math.clamp(x - d.x1, 0, SCREENWIDTH - 1)));
+    if (idx >= state_mod.MAXOPENINGS) return default;
+    return rstate.openings[idx];
 }
 
 /// Draw a single wall texture column

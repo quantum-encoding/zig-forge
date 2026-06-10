@@ -9,6 +9,7 @@ const Wad = @import("../wad.zig").Wad;
 const defs = @import("../defs.zig");
 const fixed = @import("../fixed.zig");
 const Fixed = fixed.Fixed;
+const info = @import("../info.zig");
 
 // ============================================================================
 // Texture structures
@@ -38,14 +39,22 @@ pub const Flat = struct {
 };
 
 pub const SpriteFrame = struct {
-    rotate: bool,
-    lump: [8]usize, // Lump number for each rotation (0-7), or just [0] for non-rotating
-    flip: [8]bool, // Flip horizontally?
+    rotate: bool = false,
+    lump: [8]usize = [_]usize{0} ** 8, // Lump number for each rotation (0-7); 0 = missing
+    flip: [8]bool = [_]bool{false} ** 8, // Flip horizontally?
 };
 
 pub const SpriteDef = struct {
-    name: [4]u8,
-    frames: []SpriteFrame,
+    name: [4]u8 = .{ 0, 0, 0, 0 },
+    frames: []SpriteFrame = &[_]SpriteFrame{},
+};
+
+/// Patch header info (width/height in pixels, draw origin offsets)
+pub const PatchInfo = struct {
+    width: i32 = 0,
+    height: i32 = 0,
+    leftoffset: i32 = 0,
+    topoffset: i32 = 0,
 };
 
 // ============================================================================
@@ -61,6 +70,7 @@ pub const RenderData = struct {
     flat_end: usize, // last flat lump + 1
     sprite_start: usize,
     sprite_end: usize,
+    spritedefs: []SpriteDef,
     colormaps: []const u8, // 34 * 256 bytes
     patchnames: []usize, // lump numbers for PNAMES
     allocator: std.mem.Allocator,
@@ -78,6 +88,7 @@ pub const RenderData = struct {
             .flat_end = 0,
             .sprite_start = 0,
             .sprite_end = 0,
+            .spritedefs = &[_]SpriteDef{},
             .colormaps = &[_]u8{},
             .patchnames = &[_]usize{},
             .allocator = alloc,
@@ -89,6 +100,7 @@ pub const RenderData = struct {
         try self.loadTextures();
         try self.loadFlats();
         self.loadSpriteMarkers();
+        try self.initSpriteDefs();
 
         return self;
     }
@@ -102,6 +114,10 @@ pub const RenderData = struct {
         if (self.num_textures > 0) self.allocator.free(self.textures);
         if (self.num_flats > 0) self.allocator.free(self.flats);
         if (self.patchnames.len > 0) self.allocator.free(self.patchnames);
+        for (self.spritedefs) |*sd| {
+            if (sd.frames.len > 0) self.allocator.free(sd.frames);
+        }
+        if (self.spritedefs.len > 0) self.allocator.free(self.spritedefs);
     }
 
     // ========================================================================
@@ -122,18 +138,28 @@ pub const RenderData = struct {
         return self.colormaps[start .. start + 256];
     }
 
-    /// Get colormap index for a given sector light + distance scale
+    /// Colormap index for a wall/sprite column: sector light + projection
+    /// scale (bigger scale = closer = brighter). Vanilla scalelight[][]:
+    ///   startmap = (15 - (light>>4)) * 4
+    ///   j = scale >> LIGHTSCALESHIFT(12), capped at MAXLIGHTSCALE-1 (47)
+    ///   index = startmap - j/2   (DISTMAP=2, full-width view)
     pub fn lightIndex(light_level: i32, scale: Fixed) i32 {
-        // DOOM's light diminishing:
-        // startmap = ((light_level >> 4) - 24) * 256 / NUMCOLORMAPS
-        // The farther away, the darker.
-        const level = @as(i32, @intCast(std.math.clamp(light_level, 0, 255)));
-        const startmap = (level >> 4) -% 24;
-        // Scale factor: bigger scale = closer = more light
-        const scale_int: i32 = scale.raw() >> fixed.FRAC_BITS;
-        var idx = startmap -% @divTrunc(scale_int, 2);
-        idx = std.math.clamp(idx, 0, 31);
-        return idx;
+        const lightnum = std.math.clamp(light_level >> 4, 0, 15);
+        const startmap = (15 - lightnum) * 4;
+        const j: i32 = @intCast(@min(@max(scale.raw(), 0) >> 12, 47));
+        return std.math.clamp(startmap - @divTrunc(j, 2), 0, 31);
+    }
+
+    /// Colormap index for a floor/ceiling span: sector light + world distance.
+    /// Vanilla zlight[][]:
+    ///   startmap = (15 - (light>>4)) * 4
+    ///   j = distance >> LIGHTZSHIFT(20), capped at MAXLIGHTZ-1 (127)
+    ///   index = startmap - (160/(j+1))/DISTMAP(2)
+    pub fn zlightIndex(light_level: i32, distance: Fixed) i32 {
+        const lightnum = std.math.clamp(light_level >> 4, 0, 15);
+        const startmap = (15 - lightnum) * 4;
+        const j: i32 = @intCast(std.math.clamp(distance.raw() >> 20, 0, 127));
+        return std.math.clamp(startmap - @divTrunc(80, j + 1), 0, 31);
     }
 
     // ========================================================================
@@ -275,6 +301,119 @@ pub const RenderData = struct {
     }
 
     // ========================================================================
+    // Sprite definitions (R_InitSpriteDefs)
+    // ========================================================================
+
+    /// Build sprite frame/rotation tables from the S_START..S_END lumps,
+    /// matched against info.sprnames. Lump naming: NNNNFR[FR] where NNNN is
+    /// the 4-char sprite name, F the frame letter ('A'+), R the rotation
+    /// ('0' = same image all 8 rotations, '1'-'8' = specific rotation). The
+    /// optional second FR pair reuses the same lump horizontally flipped.
+    fn initSpriteDefs(self: *RenderData) !void {
+        const num_sprites = info.sprnames.len;
+        self.spritedefs = try self.allocator.alloc(SpriteDef, num_sprites);
+        for (self.spritedefs) |*sd| sd.* = .{};
+
+        if (self.sprite_end <= self.sprite_start) return;
+
+        const MAXFRAMES = 29;
+        var frames: [MAXFRAMES]SpriteFrame = undefined;
+
+        for (info.sprnames, 0..) |sname, snum| {
+            for (&frames) |*f| f.* = .{};
+            var maxframe: i32 = -1;
+
+            var l = self.sprite_start;
+            while (l < self.sprite_end) : (l += 1) {
+                const lname = self.wad.lumps[l].name;
+                if (!(upper(lname[0]) == sname[0] and upper(lname[1]) == sname[1] and
+                    upper(lname[2]) == sname[2] and upper(lname[3]) == sname[3])) continue;
+                if (lname[4] == 0) continue;
+
+                installSpriteLump(&frames, &maxframe, l, lname[4], lname[5], false);
+                if (lname[6] != 0) {
+                    installSpriteLump(&frames, &maxframe, l, lname[6], lname[7], true);
+                }
+            }
+
+            if (maxframe < 0) continue;
+            const count: usize = @intCast(maxframe + 1);
+            const sd = &self.spritedefs[snum];
+            sd.name = sname;
+            sd.frames = try self.allocator.alloc(SpriteFrame, count);
+            @memcpy(sd.frames, frames[0..count]);
+        }
+    }
+
+    fn installSpriteLump(frames: *[29]SpriteFrame, maxframe: *i32, lump: usize, frame_ch: u8, rot_ch: u8, flipped: bool) void {
+        const fr: i32 = @as(i32, upper(frame_ch)) - 'A';
+        const rot: i32 = @as(i32, rot_ch) - '0';
+        if (fr < 0 or fr >= 29 or rot < 0 or rot > 8) return;
+        if (fr > maxframe.*) maxframe.* = fr;
+        const f = &frames[@intCast(fr)];
+
+        if (rot == 0) {
+            // One image for all 8 rotations
+            f.rotate = false;
+            for (0..8) |r| {
+                f.lump[r] = lump;
+                f.flip[r] = flipped;
+            }
+        } else {
+            f.rotate = true;
+            const r: usize = @intCast(rot - 1);
+            f.lump[r] = lump;
+            f.flip[r] = flipped;
+        }
+    }
+
+    /// Read a patch lump's header (width, height, left/top draw offsets)
+    pub fn getPatchInfo(self: *const RenderData, lump: usize) PatchInfo {
+        if (lump == 0 or lump >= self.wad.lumps.len) return .{};
+        const data = self.wad.lumpData(lump);
+        if (data.len < 8) return .{};
+        return .{
+            .width = @as(i32, readU16(data, 0)),
+            .height = @as(i32, readU16(data, 2)),
+            .leftoffset = @as(i32, readI16(data, 4)),
+            .topoffset = @as(i32, readI16(data, 6)),
+        };
+    }
+
+    /// Raw post data for one column of a patch lump: returns a slice starting
+    /// at the column's first post; the caller walks posts until 0xFF.
+    pub fn getPatchColumnPosts(self: *const RenderData, lump: usize, col: i32) []const u8 {
+        if (lump == 0 or lump >= self.wad.lumps.len) return &[_]u8{};
+        const data = self.wad.lumpData(lump);
+        if (data.len < 8) return &[_]u8{};
+        const w: i32 = @intCast(readU16(data, 0));
+        if (w <= 0) return &[_]u8{};
+        const c: usize = @intCast(std.math.clamp(col, 0, w - 1));
+        const off_pos = 8 + c * 4;
+        if (off_pos + 4 > data.len) return &[_]u8{};
+        const col_off: usize = @intCast(readU32(data, off_pos));
+        if (col_off >= data.len) return &[_]u8{};
+        return data[col_off..];
+    }
+
+    /// Post data for one column of a masked (transparent) wall texture.
+    /// Vanilla DOOM only supports transparency for single-patch textures —
+    /// multi-patch masked textures were undefined behavior in the original.
+    /// Returns null if the texture can't provide post data (caller may fall
+    /// back to the solid composite column).
+    pub fn getMaskedTextureColumnPosts(self: *const RenderData, tex_num: usize, col: i32) ?[]const u8 {
+        if (tex_num >= self.num_textures) return null;
+        const tex = &self.textures[tex_num];
+        if (tex.patches.len != 1) return null;
+        const tp = tex.patches[0];
+        if (tp.patch_lump == 0) return null;
+        const w: i32 = @intCast(@max(@as(u16, 1), tex.width));
+        const wrapped = @mod(col, w);
+        const pcol = wrapped - @as(i32, tp.originx);
+        return self.getPatchColumnPosts(tp.patch_lump, pcol);
+    }
+
+    // ========================================================================
     // Lookup by name
     // ========================================================================
 
@@ -307,6 +446,12 @@ pub const RenderData = struct {
         const data = self.wad.lumpData(lump);
         if (data.len >= 4096) return data[0..4096];
         return data;
+    }
+
+    /// Texture height as a fixed-point value (for pegging math)
+    pub fn textureHeightFixed(self: *const RenderData, tex_num: usize) Fixed {
+        if (tex_num >= self.num_textures) return Fixed.fromInt(128);
+        return Fixed.fromInt(@as(i32, self.textures[tex_num].height));
     }
 
     /// Generate (or return cached) composite texture column data
@@ -404,6 +549,10 @@ pub const RenderData = struct {
 // ============================================================================
 // Helpers
 // ============================================================================
+
+fn upper(c: u8) u8 {
+    return if (c >= 'a' and c <= 'z') c - 32 else c;
+}
 
 fn computeWidthMask(width: u16) u16 {
     // Find largest power-of-2 <= width, then mask = pow2 - 1

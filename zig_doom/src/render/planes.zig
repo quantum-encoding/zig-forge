@@ -164,14 +164,13 @@ pub const PlaneState = struct {
 
             // Get flat data
             const flat_data = rdata.getFlatData(vp.picnum);
-            const colormap = rdata.getColormap(vp.lightlevel >> 4);
 
             // Calculate plane height above/below viewpoint
             const plane_height = Fixed.abs(Fixed.sub(vp.height, viewz));
 
             // Render each column as spans
             // Convert column tops/bottoms to horizontal spans
-            self.renderPlaneSpans(vp, flat_data, colormap, screen, plane_height, viewx, viewy, viewangle);
+            self.renderPlaneSpans(vp, flat_data, rdata, screen, plane_height, viewx, viewy, viewangle);
         }
     }
 
@@ -231,7 +230,7 @@ pub const PlaneState = struct {
         }
     }
 
-    fn renderPlaneSpans(self: *PlaneState, vp: *const Visplane, flat_data: []const u8, colormap: []const u8, screen: [*]u8, plane_height: Fixed, viewx: Fixed, viewy: Fixed, viewangle: Angle) void {
+    fn renderPlaneSpans(self: *PlaneState, vp: *const Visplane, flat_data: []const u8, rdata: *const RenderData, screen: [*]u8, plane_height: Fixed, viewx: Fixed, viewy: Fixed, viewangle: Angle) void {
         _ = self;
         // Proper R_MapPlane: for each screen row, the floor/ceiling distance is
         // constant, so a horizontal span maps to a straight line across the flat.
@@ -249,6 +248,9 @@ pub const PlaneState = struct {
             // distance to the plane along the ground for this row
             const yslope = Fixed.div(Fixed.fromInt(centerx), Fixed.fromInt(ady));
             const distance = Fixed.mul(plane_height, yslope);
+
+            // Per-row light diminishing (vanilla zlight): farther rows darker
+            const colormap = rdata.getColormap(RenderData.zlightIndex(vp.lightlevel, distance));
 
             var x = vp.minx;
             while (x <= vp.maxx) {

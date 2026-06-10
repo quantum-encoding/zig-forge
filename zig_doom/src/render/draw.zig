@@ -58,6 +58,109 @@ pub fn drawColumn(dc: *const DrawColumnContext) void {
     }
 }
 
+pub const MaskedStyle = enum { normal, fuzz };
+
+/// Fuzz offset table (from original DOOM r_draw.c)
+const FUZZOFFSET = [_]i32{
+    1, -1, 1,  -1, 1,  1,  -1, 1, 1, -1, 1,  1,  1,  -1, 1,  1, 1, -1, -1, -1,
+    1, -1, -1, -1, 1,  1,  1,  1, -1, 1, -1, 1,  1,  1,  -1, 1, 1, -1, 1,  1,
+    -1, -1, 1, 1,  -1, -1, -1, 1, 1, -1,
+};
+
+/// Draw a masked (post-based) column — used by sprites and transparent
+/// mid textures. `posts` is a raw DOOM patch column: a sequence of
+/// (topdelta, length, pad, pixels..., pad) posts terminated by topdelta=0xFF.
+/// Port of r_things.c R_DrawMaskedColumn.
+pub fn drawMaskedColumn(
+    screen: [*]u8,
+    x: i32,
+    posts: []const u8,
+    colormap: []const u8,
+    spryscale: Fixed,
+    sprtopscreen: Fixed,
+    basetexturemid: Fixed,
+    iscale: Fixed,
+    ceilclip: i32,
+    floorclip: i32,
+    centery: i32,
+) void {
+    drawMaskedColumnStyle(screen, x, posts, colormap, spryscale, sprtopscreen, basetexturemid, iscale, ceilclip, floorclip, centery, .normal);
+}
+
+/// Masked column with draw style. `.fuzz` ignores the texture pixels and
+/// instead remaps nearby screen pixels through the (dark) colormap — the
+/// spectre / partial-invisibility effect.
+pub fn drawMaskedColumnStyle(
+    screen: [*]u8,
+    x: i32,
+    posts: []const u8,
+    colormap: []const u8,
+    spryscale: Fixed,
+    sprtopscreen: Fixed,
+    basetexturemid: Fixed,
+    iscale: Fixed,
+    ceilclip: i32, // may only draw BELOW this row
+    floorclip: i32, // may only draw ABOVE this row
+    centery: i32,
+    style: MaskedStyle,
+) void {
+    if (x < 0 or x >= SCREENWIDTH) return;
+    const ux: usize = @intCast(x);
+
+    var fuzz_idx: usize = @intCast(@mod(x, 50));
+
+    var off: usize = 0;
+    while (off + 2 < posts.len) {
+        const topdelta: i64 = posts[off];
+        if (topdelta == 0xFF) break;
+        const length: usize = posts[off + 1];
+        if (off + 3 + length > posts.len) break;
+        const pixels = posts[off + 3 .. off + 3 + length];
+
+        // Screen extent of this post (fixed-point, then pixel rows)
+        const topscreen: i64 = @as(i64, sprtopscreen.raw()) + @as(i64, spryscale.raw()) * topdelta;
+        const bottomscreen: i64 = topscreen + @as(i64, spryscale.raw()) * @as(i64, @intCast(length));
+
+        var yl: i32 = @intCast(std.math.clamp((topscreen + 0xFFFF) >> 16, -1_000_000, 1_000_000));
+        var yh: i32 = @intCast(std.math.clamp((bottomscreen - 1) >> 16, -1_000_000, 1_000_000));
+
+        if (yh >= floorclip) yh = floorclip - 1;
+        if (yl <= ceilclip) yl = ceilclip + 1;
+        if (yl < 0) yl = 0;
+        if (yh >= SCREENHEIGHT) yh = SCREENHEIGHT - 1;
+
+        if (yl <= yh) {
+            // Texture coordinate stepping within this post
+            const texmid: i64 = @as(i64, basetexturemid.raw()) - (topdelta << 16);
+            var frac: i64 = texmid + @as(i64, yl - centery) * @as(i64, iscale.raw());
+            var dest: usize = @as(usize, @intCast(yl)) * SCREENWIDTH + ux;
+            var y = yl;
+            while (y <= yh) : (y += 1) {
+                switch (style) {
+                    .normal => {
+                        const ti: i64 = frac >> 16;
+                        const src_idx: usize = @intCast(std.math.clamp(ti, 0, @as(i64, @intCast(length - 1))));
+                        const pixel = pixels[src_idx];
+                        screen[dest] = if (colormap.len > pixel) colormap[pixel] else pixel;
+                    },
+                    .fuzz => {
+                        const fo = FUZZOFFSET[fuzz_idx % FUZZOFFSET.len];
+                        const src_pos = @as(i64, @intCast(dest)) + @as(i64, fo) * SCREENWIDTH;
+                        const clamped: usize = @intCast(std.math.clamp(src_pos, 0, SCREENWIDTH * SCREENHEIGHT - 1));
+                        const pixel = screen[clamped];
+                        screen[dest] = if (colormap.len > pixel) colormap[pixel] else pixel;
+                        fuzz_idx += 1;
+                    },
+                }
+                dest += SCREENWIDTH;
+                frac += iscale.raw();
+            }
+        }
+
+        off += 4 + length;
+    }
+}
+
 /// Draw a column with the fuzz (spectre/invisibility) effect
 pub fn drawFuzzColumn(dc: *const DrawColumnContext) void {
     var count = dc.yh - dc.yl;
@@ -66,13 +169,6 @@ pub fn drawFuzzColumn(dc: *const DrawColumnContext) void {
 
     const x: usize = @intCast(dc.x);
     var dest: usize = @as(usize, @intCast(std.math.clamp(dc.yl, 0, SCREENHEIGHT - 1))) * SCREENWIDTH + x;
-
-    // Fuzz offset table (from original DOOM)
-    const FUZZOFFSET = [_]i32{
-        1, -1, 1, -1, 1,  1,  -1, 1, 1,  -1, 1,  1,  1,  -1, 1,  1,  1, -1, -1, -1,
-        1, -1, -1, -1, 1,  1,  1,  1, -1, 1,  -1, 1,  1,  1,  -1, 1,  1, -1, 1,  1,
-        -1, -1, 1, 1, -1, -1, -1, 1, 1,  -1,
-    };
 
     var fuzz_idx: usize = 0;
 

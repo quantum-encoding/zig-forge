@@ -19,6 +19,10 @@ const planes = @import("planes.zig");
 const things = @import("things.zig");
 const sky = @import("sky.zig");
 const RenderData = @import("data.zig").RenderData;
+const tick = @import("../play/tick.zig");
+const mobj_mod = @import("../play/mobj.zig");
+const user = @import("../play/user.zig");
+const info = @import("../info.zig");
 
 pub const SCREENWIDTH = defs.SCREENWIDTH;
 pub const SCREENHEIGHT = defs.SCREENHEIGHT;
@@ -40,7 +44,7 @@ pub fn renderFrame(
     const player_y = Fixed.fromInt(@as(i32, p1.y));
     const player_z = getPlayerViewZ(level, player_x, player_y);
     const player_angle = degreesToAngle(p1.angle);
-    return renderView(w, level, rdata, vid, player_x, player_y, player_z, player_angle);
+    return renderView(w, level, rdata, vid, player_x, player_y, player_z, player_angle, null);
 }
 
 /// Render one frame from an explicit viewpoint. The live game calls this every
@@ -56,6 +60,7 @@ pub fn renderView(
     viewy: Fixed,
     viewz: Fixed,
     viewangle: Angle,
+    player: ?*const user.Player, // for the weapon sprite; null in static renders
 ) bool {
     // Initialize render state
     var rstate = RenderState.init();
@@ -98,10 +103,63 @@ pub fn renderView(
     // Draw accumulated floor/ceiling visplanes
     pstate.drawPlanes(rdata, screen, rstate.viewx, rstate.viewy, rstate.viewangle, rstate.viewz);
 
-    // Sprites are not rendered in this minimal version (no mobj_t)
-    // but the infrastructure is in place via things.zig
+    // ------------------------------------------------------------------
+    // Masked pass: things (sprites), masked mid textures, weapon sprite
+    // ------------------------------------------------------------------
+    var tstate = things.ThingState.init();
+
+    // Project every live mobj (walk the global thinker list)
+    const cap = tick.getThinkerCap();
+    var current = cap.next;
+    while (current != null and current != cap) {
+        const thinker = current.?;
+        current = thinker.next;
+        if (thinker.function) |func| {
+            if (func == @as(tick.ThinkFn, @ptrCast(&mobj_mod.mobjThinker))) {
+                const mo: *const mobj_mod.MapObject = @fieldParentPtr("thinker", thinker);
+                if (mo.flags & info.MF_NOSECTOR != 0) continue; // not rendered
+                const light = sectorLightAt(level, mo.x, mo.y);
+                tstate.projectSprite(mo.x, mo.y, mo.z, mo.angle, mo.sprite, mo.frame, mo.flags, light, &rstate, rdata);
+            }
+        }
+    }
+
+    // Draw sprites (clipped against the recorded drawsegs) + masked walls
+    tstate.drawMasked(level, &rstate, rdata, screen);
+
+    // Player weapon sprite on top
+    if (player) |p| {
+        const light = sectorLightAt(level, rstate.viewx, rstate.viewy);
+        things.drawPlayerSprites(p, light, &rstate, rdata, screen);
+    }
 
     return true;
+}
+
+/// Light level of the sector containing a point (BSP point-location).
+fn sectorLightAt(level: *const setup.Level, x: Fixed, y: Fixed) i16 {
+    if (level.num_nodes == 0) {
+        if (level.subsectors.len > 0) {
+            if (level.subsectors[0].sector) |si| {
+                if (si < level.sectors.len) return level.sectors[si].lightlevel;
+            }
+        }
+        return 255;
+    }
+    var node_id: u16 = level.num_nodes - 1;
+    while (node_id & defs.NF_SUBSECTOR == 0) {
+        if (node_id >= level.nodes.len) return 255;
+        const node = &level.nodes[node_id];
+        const side = pointOnSide(x, y, node);
+        node_id = node.children[side];
+    }
+    const ssec_idx = node_id & ~defs.NF_SUBSECTOR;
+    if (ssec_idx < level.subsectors.len) {
+        if (level.subsectors[ssec_idx].sector) |si| {
+            if (si < level.sectors.len) return level.sectors[si].lightlevel;
+        }
+    }
+    return 255;
 }
 
 /// Get player view Z from the subsector's sector floor height + viewheight

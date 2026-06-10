@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const fixed = @import("fixed.zig");
+const pspr = @import("play/pspr.zig");
 const Fixed = fixed.Fixed;
 
 // ============================================================================
@@ -597,29 +598,29 @@ fn buildStateTable() [@intFromEnum(StateNum.NUMSTATES)]State {
     tbl[@intFromEnum(StateNum.S_LIGHTDONE)] = S(.SPR_SHTG, 4, 0, null, .S_NULL); // A_Light0 placeholder
 
     // ---- Fist weapon ----
-    tbl[@intFromEnum(StateNum.S_PUNCH)] = S(.SPR_PUNG, 0, 1, null, .S_PUNCHDOWN);
-    tbl[@intFromEnum(StateNum.S_PUNCHDOWN)] = S(.SPR_PUNG, 0, 1, null, .S_PUNCHDOWN); // A_Lower
-    tbl[@intFromEnum(StateNum.S_PUNCHUP)] = S(.SPR_PUNG, 0, 1, null, .S_PUNCHUP); // A_Raise
+    tbl[@intFromEnum(StateNum.S_PUNCH)] = S(.SPR_PUNG, 0, 1, &pspr.A_WeaponReady, .S_PUNCH);
+    tbl[@intFromEnum(StateNum.S_PUNCHDOWN)] = S(.SPR_PUNG, 0, 1, &pspr.A_Lower, .S_PUNCHDOWN); // A_Lower
+    tbl[@intFromEnum(StateNum.S_PUNCHUP)] = S(.SPR_PUNG, 0, 1, &pspr.A_Raise, .S_PUNCHUP); // A_Raise
     tbl[@intFromEnum(StateNum.S_PUNCH1)] = S(.SPR_PUNG, 1, 4, null, .S_PUNCH2);
     tbl[@intFromEnum(StateNum.S_PUNCH2)] = S(.SPR_PUNG, 2, 4, null, .S_PUNCH3); // A_Punch
     tbl[@intFromEnum(StateNum.S_PUNCH3)] = S(.SPR_PUNG, 3, 5, null, .S_PUNCH4);
     tbl[@intFromEnum(StateNum.S_PUNCH4)] = S(.SPR_PUNG, 2, 4, null, .S_PUNCH5);
-    tbl[@intFromEnum(StateNum.S_PUNCH5)] = S(.SPR_PUNG, 1, 5, null, .S_PUNCH); // A_ReFire
+    tbl[@intFromEnum(StateNum.S_PUNCH5)] = S(.SPR_PUNG, 1, 5, &pspr.A_ReFire, .S_PUNCH); // A_ReFire
 
     // ---- Pistol weapon ----
-    tbl[@intFromEnum(StateNum.S_PISTOL)] = S(.SPR_PISG, 0, 1, null, .S_PISTOL); // A_WeaponReady
-    tbl[@intFromEnum(StateNum.S_PISTOLDOWN)] = S(.SPR_PISG, 0, 1, null, .S_PISTOLDOWN); // A_Lower
-    tbl[@intFromEnum(StateNum.S_PISTOLUP)] = S(.SPR_PISG, 0, 1, null, .S_PISTOLUP); // A_Raise
+    tbl[@intFromEnum(StateNum.S_PISTOL)] = S(.SPR_PISG, 0, 1, &pspr.A_WeaponReady, .S_PISTOL); // A_WeaponReady
+    tbl[@intFromEnum(StateNum.S_PISTOLDOWN)] = S(.SPR_PISG, 0, 1, &pspr.A_Lower, .S_PISTOLDOWN); // A_Lower
+    tbl[@intFromEnum(StateNum.S_PISTOLUP)] = S(.SPR_PISG, 0, 1, &pspr.A_Raise, .S_PISTOLUP); // A_Raise
     tbl[@intFromEnum(StateNum.S_PISTOL1)] = S(.SPR_PISG, 0, 4, null, .S_PISTOL2);
     tbl[@intFromEnum(StateNum.S_PISTOL2)] = S(.SPR_PISG, 1, 6, null, .S_PISTOL3); // A_FirePistol
     tbl[@intFromEnum(StateNum.S_PISTOL3)] = S(.SPR_PISG, 2, 4, null, .S_PISTOL4);
-    tbl[@intFromEnum(StateNum.S_PISTOL4)] = S(.SPR_PISG, 1, 5, null, .S_PISTOL); // A_ReFire
+    tbl[@intFromEnum(StateNum.S_PISTOL4)] = S(.SPR_PISG, 1, 5, &pspr.A_ReFire, .S_PISTOL); // A_ReFire
     tbl[@intFromEnum(StateNum.S_PISTOLFLASH)] = S(.SPR_PISF, 0 | FF_FULLBRIGHT, 7, null, .S_LIGHTDONE); // A_Light1
 
     // ---- Shotgun weapon ----
-    tbl[@intFromEnum(StateNum.S_SGUN)] = S(.SPR_SHTG, 0, 1, null, .S_SGUN);
-    tbl[@intFromEnum(StateNum.S_SGUNDOWN)] = S(.SPR_SHTG, 0, 1, null, .S_SGUNDOWN);
-    tbl[@intFromEnum(StateNum.S_SGUNUP)] = S(.SPR_SHTG, 0, 1, null, .S_SGUNUP);
+    tbl[@intFromEnum(StateNum.S_SGUN)] = S(.SPR_SHTG, 0, 1, &pspr.A_WeaponReady, .S_SGUN); // A_WeaponReady
+    tbl[@intFromEnum(StateNum.S_SGUNDOWN)] = S(.SPR_SHTG, 0, 1, &pspr.A_Lower, .S_SGUNDOWN); // A_Lower
+    tbl[@intFromEnum(StateNum.S_SGUNUP)] = S(.SPR_SHTG, 0, 1, &pspr.A_Raise, .S_SGUNUP); // A_Raise
     tbl[@intFromEnum(StateNum.S_SGUN1)] = S(.SPR_SHTG, 0, 3, null, .S_SGUN2);
     tbl[@intFromEnum(StateNum.S_SGUN2)] = S(.SPR_SHTG, 0, 7, null, .S_SGUN3); // A_FireShotgun
     tbl[@intFromEnum(StateNum.S_SGUN3)] = S(.SPR_SHTG, 1, 5, null, .S_SGUN4);
@@ -628,58 +629,58 @@ fn buildStateTable() [@intFromEnum(StateNum.NUMSTATES)]State {
     tbl[@intFromEnum(StateNum.S_SGUN6)] = S(.SPR_SHTG, 2, 5, null, .S_SGUN7);
     tbl[@intFromEnum(StateNum.S_SGUN7)] = S(.SPR_SHTG, 1, 5, null, .S_SGUN8);
     tbl[@intFromEnum(StateNum.S_SGUN8)] = S(.SPR_SHTG, 0, 3, null, .S_SGUN9);
-    tbl[@intFromEnum(StateNum.S_SGUN9)] = S(.SPR_SHTG, 0, 7, null, .S_SGUN); // A_ReFire
+    tbl[@intFromEnum(StateNum.S_SGUN9)] = S(.SPR_SHTG, 0, 7, &pspr.A_ReFire, .S_SGUN); // A_ReFire
     tbl[@intFromEnum(StateNum.S_SGUNFLASH1)] = S(.SPR_SHTF, 0 | FF_FULLBRIGHT, 4, null, .S_SGUNFLASH2);
     tbl[@intFromEnum(StateNum.S_SGUNFLASH2)] = S(.SPR_SHTF, 1 | FF_FULLBRIGHT, 3, null, .S_LIGHTDONE);
 
     // ---- Chaingun weapon ----
-    tbl[@intFromEnum(StateNum.S_CHAIN)] = S(.SPR_CHGG, 0, 1, null, .S_CHAIN);
-    tbl[@intFromEnum(StateNum.S_CHAINDOWN)] = S(.SPR_CHGG, 0, 1, null, .S_CHAINDOWN);
-    tbl[@intFromEnum(StateNum.S_CHAINUP)] = S(.SPR_CHGG, 0, 1, null, .S_CHAINUP);
+    tbl[@intFromEnum(StateNum.S_CHAIN)] = S(.SPR_CHGG, 0, 1, &pspr.A_WeaponReady, .S_CHAIN); // A_WeaponReady
+    tbl[@intFromEnum(StateNum.S_CHAINDOWN)] = S(.SPR_CHGG, 0, 1, &pspr.A_Lower, .S_CHAINDOWN); // A_Lower
+    tbl[@intFromEnum(StateNum.S_CHAINUP)] = S(.SPR_CHGG, 0, 1, &pspr.A_Raise, .S_CHAINUP); // A_Raise
     tbl[@intFromEnum(StateNum.S_CHAIN1)] = S(.SPR_CHGG, 0, 4, null, .S_CHAIN2); // A_FireCGun
     tbl[@intFromEnum(StateNum.S_CHAIN2)] = S(.SPR_CHGG, 1, 4, null, .S_CHAIN3); // A_FireCGun
-    tbl[@intFromEnum(StateNum.S_CHAIN3)] = S(.SPR_CHGG, 1, 0, null, .S_CHAIN); // A_ReFire
+    tbl[@intFromEnum(StateNum.S_CHAIN3)] = S(.SPR_CHGG, 1, 0, &pspr.A_ReFire, .S_CHAIN); // A_ReFire
     tbl[@intFromEnum(StateNum.S_CHAINFLASH1)] = S(.SPR_CHGF, 0 | FF_FULLBRIGHT, 5, null, .S_LIGHTDONE);
     tbl[@intFromEnum(StateNum.S_CHAINFLASH2)] = S(.SPR_CHGF, 1 | FF_FULLBRIGHT, 5, null, .S_LIGHTDONE);
 
     // ---- Rocket launcher weapon ----
-    tbl[@intFromEnum(StateNum.S_MISSILE)] = S(.SPR_MISG, 0, 1, null, .S_MISSILE);
-    tbl[@intFromEnum(StateNum.S_MISSILEDOWN)] = S(.SPR_MISG, 0, 1, null, .S_MISSILEDOWN);
-    tbl[@intFromEnum(StateNum.S_MISSILEUP)] = S(.SPR_MISG, 0, 1, null, .S_MISSILEUP);
+    tbl[@intFromEnum(StateNum.S_MISSILE)] = S(.SPR_MISG, 0, 1, &pspr.A_WeaponReady, .S_MISSILE); // A_WeaponReady
+    tbl[@intFromEnum(StateNum.S_MISSILEDOWN)] = S(.SPR_MISG, 0, 1, &pspr.A_Lower, .S_MISSILEDOWN); // A_Lower
+    tbl[@intFromEnum(StateNum.S_MISSILEUP)] = S(.SPR_MISG, 0, 1, &pspr.A_Raise, .S_MISSILEUP); // A_Raise
     tbl[@intFromEnum(StateNum.S_MISSILE1)] = S(.SPR_MISG, 1, 8, null, .S_MISSILE2); // A_GunFlash
     tbl[@intFromEnum(StateNum.S_MISSILE2)] = S(.SPR_MISG, 1, 12, null, .S_MISSILE3); // A_FireMissile
-    tbl[@intFromEnum(StateNum.S_MISSILE3)] = S(.SPR_MISG, 1, 0, null, .S_MISSILE); // A_ReFire
+    tbl[@intFromEnum(StateNum.S_MISSILE3)] = S(.SPR_MISG, 1, 0, &pspr.A_ReFire, .S_MISSILE); // A_ReFire
     tbl[@intFromEnum(StateNum.S_MISSILEFLASH1)] = S(.SPR_MISF, 0 | FF_FULLBRIGHT, 3, null, .S_MISSILEFLASH2);
     tbl[@intFromEnum(StateNum.S_MISSILEFLASH2)] = S(.SPR_MISF, 1 | FF_FULLBRIGHT, 4, null, .S_MISSILEFLASH3);
     tbl[@intFromEnum(StateNum.S_MISSILEFLASH3)] = S(.SPR_MISF, 2 | FF_FULLBRIGHT, 4, null, .S_MISSILEFLASH4);
     tbl[@intFromEnum(StateNum.S_MISSILEFLASH4)] = S(.SPR_MISF, 3 | FF_FULLBRIGHT, 4, null, .S_LIGHTDONE);
 
     // ---- Chainsaw weapon ----
-    tbl[@intFromEnum(StateNum.S_SAW)] = S(.SPR_SAWG, 2, 4, null, .S_SAWB); // A_WeaponReady
-    tbl[@intFromEnum(StateNum.S_SAWB)] = S(.SPR_SAWG, 3, 4, null, .S_SAW); // A_WeaponReady
-    tbl[@intFromEnum(StateNum.S_SAWDOWN)] = S(.SPR_SAWG, 2, 1, null, .S_SAWDOWN);
-    tbl[@intFromEnum(StateNum.S_SAWUP)] = S(.SPR_SAWG, 2, 1, null, .S_SAWUP);
+    tbl[@intFromEnum(StateNum.S_SAW)] = S(.SPR_SAWG, 2, 4, &pspr.A_WeaponReady, .S_SAWB); // A_WeaponReady
+    tbl[@intFromEnum(StateNum.S_SAWB)] = S(.SPR_SAWG, 3, 4, &pspr.A_WeaponReady, .S_SAW); // A_WeaponReady
+    tbl[@intFromEnum(StateNum.S_SAWDOWN)] = S(.SPR_SAWG, 2, 1, &pspr.A_Lower, .S_SAWDOWN); // A_Lower
+    tbl[@intFromEnum(StateNum.S_SAWUP)] = S(.SPR_SAWG, 2, 1, &pspr.A_Raise, .S_SAWUP); // A_Raise
     tbl[@intFromEnum(StateNum.S_SAW1)] = S(.SPR_SAWG, 0, 4, null, .S_SAW2); // A_Saw
     tbl[@intFromEnum(StateNum.S_SAW2)] = S(.SPR_SAWG, 1, 4, null, .S_SAW3); // A_Saw
-    tbl[@intFromEnum(StateNum.S_SAW3)] = S(.SPR_SAWG, 1, 0, null, .S_SAW); // A_ReFire
+    tbl[@intFromEnum(StateNum.S_SAW3)] = S(.SPR_SAWG, 1, 0, &pspr.A_ReFire, .S_SAW); // A_ReFire
 
     // ---- Plasma weapon ----
-    tbl[@intFromEnum(StateNum.S_PLASMA)] = S(.SPR_PLSG, 0, 1, null, .S_PLASMA);
-    tbl[@intFromEnum(StateNum.S_PLASMADOWN)] = S(.SPR_PLSG, 0, 1, null, .S_PLASMADOWN);
-    tbl[@intFromEnum(StateNum.S_PLASMAUP)] = S(.SPR_PLSG, 0, 1, null, .S_PLASMAUP);
+    tbl[@intFromEnum(StateNum.S_PLASMA)] = S(.SPR_PLSG, 0, 1, &pspr.A_WeaponReady, .S_PLASMA); // A_WeaponReady
+    tbl[@intFromEnum(StateNum.S_PLASMADOWN)] = S(.SPR_PLSG, 0, 1, &pspr.A_Lower, .S_PLASMADOWN); // A_Lower
+    tbl[@intFromEnum(StateNum.S_PLASMAUP)] = S(.SPR_PLSG, 0, 1, &pspr.A_Raise, .S_PLASMAUP); // A_Raise
     tbl[@intFromEnum(StateNum.S_PLASMA1)] = S(.SPR_PLSG, 0, 3, null, .S_PLASMA2); // A_FirePlasma
-    tbl[@intFromEnum(StateNum.S_PLASMA2)] = S(.SPR_PLSG, 1, 20, null, .S_PLASMA); // A_ReFire
+    tbl[@intFromEnum(StateNum.S_PLASMA2)] = S(.SPR_PLSG, 1, 20, &pspr.A_ReFire, .S_PLASMA); // A_ReFire
     tbl[@intFromEnum(StateNum.S_PLASMAFLASH1)] = S(.SPR_PLSF, 0 | FF_FULLBRIGHT, 4, null, .S_LIGHTDONE);
     tbl[@intFromEnum(StateNum.S_PLASMAFLASH2)] = S(.SPR_PLSF, 1 | FF_FULLBRIGHT, 4, null, .S_LIGHTDONE);
 
     // ---- BFG weapon ----
-    tbl[@intFromEnum(StateNum.S_BFG)] = S(.SPR_BFGG, 0, 1, null, .S_BFG);
-    tbl[@intFromEnum(StateNum.S_BFGDOWN)] = S(.SPR_BFGG, 0, 1, null, .S_BFGDOWN);
-    tbl[@intFromEnum(StateNum.S_BFGUP)] = S(.SPR_BFGG, 0, 1, null, .S_BFGUP);
+    tbl[@intFromEnum(StateNum.S_BFG)] = S(.SPR_BFGG, 0, 1, &pspr.A_WeaponReady, .S_BFG); // A_WeaponReady
+    tbl[@intFromEnum(StateNum.S_BFGDOWN)] = S(.SPR_BFGG, 0, 1, &pspr.A_Lower, .S_BFGDOWN); // A_Lower
+    tbl[@intFromEnum(StateNum.S_BFGUP)] = S(.SPR_BFGG, 0, 1, &pspr.A_Raise, .S_BFGUP); // A_Raise
     tbl[@intFromEnum(StateNum.S_BFG1)] = S(.SPR_BFGG, 0, 20, null, .S_BFG2); // A_BFGsound
     tbl[@intFromEnum(StateNum.S_BFG2)] = S(.SPR_BFGG, 1, 10, null, .S_BFG3); // A_GunFlash
     tbl[@intFromEnum(StateNum.S_BFG3)] = S(.SPR_BFGG, 1, 10, null, .S_BFG4); // A_FireBFG
-    tbl[@intFromEnum(StateNum.S_BFG4)] = S(.SPR_BFGG, 1, 20, null, .S_BFG); // A_ReFire
+    tbl[@intFromEnum(StateNum.S_BFG4)] = S(.SPR_BFGG, 1, 20, &pspr.A_ReFire, .S_BFG); // A_ReFire
     tbl[@intFromEnum(StateNum.S_BFGFLASH1)] = S(.SPR_BFGF, 0 | FF_FULLBRIGHT, 11, null, .S_BFGFLASH2);
     tbl[@intFromEnum(StateNum.S_BFGFLASH2)] = S(.SPR_BFGF, 1 | FF_FULLBRIGHT, 6, null, .S_LIGHTDONE);
 

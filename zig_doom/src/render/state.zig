@@ -86,7 +86,14 @@ pub const RenderState = struct {
         self.num_drawsegs = 0;
         self.num_visplanes = 0;
         self.num_vissprites = 0;
-        self.lastopening = 0;
+
+        // Reserve the two constant clip arrays at the bottom of openings:
+        // [0..W) = SCREENHEIGHT (screenheightarray), [W..2W) = -1 (negonearray).
+        for (0..SCREENWIDTH) |i| {
+            self.openings[i] = @intCast(SCREENHEIGHT);
+            self.openings[SCREENWIDTH + i] = -1;
+        }
+        self.lastopening = 2 * SCREENWIDTH;
 
         // Reset clip arrays
         for (0..SCREENWIDTH) |i| {
@@ -182,15 +189,31 @@ pub const DrawSeg = struct {
     silhouette: u32 = 0, // SIL_NONE, SIL_BOTTOM, SIL_TOP, SIL_BOTH
     bsilheight: Fixed = Fixed.ZERO,
     tsilheight: Fixed = Fixed.ZERO,
-    sprtopclip: ?usize = null, // index into openings
+    // Base index into openings; clip value for screen column x is
+    // openings[base + (x - x1)] except for the two per-frame constant arrays
+    // (SHA/NEG1 bases) which are indexed openings[base + x].
+    sprtopclip: ?usize = null,
     sprbottomclip: ?usize = null,
     maskedtexturecol: ?usize = null,
+    // For recomputing exact per-column scale in the masked pass
+    rw_distance: Fixed = Fixed.ZERO,
+    rw_normalangle: Angle = 0,
 };
 
 pub const SIL_NONE = 0;
 pub const SIL_BOTTOM = 1;
 pub const SIL_TOP = 2;
 pub const SIL_BOTH = 3;
+
+/// Sentinel for maskedtexturecol entries that are absent / already drawn
+pub const MASKED_NONE: i16 = 0x7fff;
+
+/// openings[] base of the per-frame constant array filled with SCREENHEIGHT
+/// (DOOM's screenheightarray); indexed by absolute screen column.
+pub const OPENING_SHA_BASE: usize = 0;
+/// openings[] base of the per-frame constant array filled with -1
+/// (DOOM's negonearray); indexed by absolute screen column.
+pub const OPENING_NEG1_BASE: usize = SCREENWIDTH;
 
 /// Point-to-angle lookup (R_PointToAngle2 from r_main.c)
 pub fn pointToAngle2(x1: Fixed, y1: Fixed, x2: Fixed, y2: Fixed) Angle {

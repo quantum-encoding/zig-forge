@@ -129,7 +129,7 @@ pub const DemoState = struct {
 
     /// Start recording a demo. Writes the header bytes.
     pub fn startRecording(self: *DemoState, allocator: std.mem.Allocator, skill: u8, episode: u8, map: u8, player_in_game: [MAXPLAYERS]bool) void {
-        var buf = std.ArrayList(u8){};
+        var buf: std.ArrayList(u8) = .empty;
 
         // Write header
         buf.append(allocator, DEMO_VERSION) catch return;

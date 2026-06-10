@@ -19,6 +19,10 @@ const event_mod = @import("event.zig");
 const net_mod = @import("net.zig");
 const demo_mod = @import("play/demo.zig");
 const user = @import("play/user.zig");
+const fixed = @import("fixed.zig");
+const tick = @import("play/tick.zig");
+const mobj_mod = @import("play/mobj.zig");
+const info = @import("info.zig");
 
 // Pull in test declarations from all modules
 comptime {
@@ -146,6 +150,8 @@ pub fn main(init: std.process.Init) !void {
     var opt_episode: ?u8 = null;
     var opt_warp: ?[]const u8 = null;
     var demo_name: ?[]const u8 = null;
+    var dump_every: u32 = 0; // --dump-frames N: write frame_NNNNN.ppm every N tics during --playdemo
+    var view_override: ?ViewOverride = null; // --view x,y,deg for --render-frame
 
     var args = std.process.Args.Iterator.init(init.minimal.args);
     _ = args.next(); // skip program name
@@ -199,6 +205,23 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--playdemo")) {
             command = .playdemo;
             demo_name = args.next();
+        } else if (std.mem.eql(u8, arg, "--dump-frames")) {
+            if (args.next()) |s| {
+                dump_every = std.fmt.parseInt(u32, s, 10) catch 0;
+            }
+        } else if (std.mem.eql(u8, arg, "--view")) {
+            if (args.next()) |s| {
+                var it = std.mem.splitScalar(u8, s, ',');
+                const xs = it.next() orelse "";
+                const ys = it.next() orelse "";
+                const as = it.next() orelse "";
+                const vx = std.fmt.parseInt(i32, xs, 10) catch null;
+                const vy = std.fmt.parseInt(i32, ys, 10) catch null;
+                const va = std.fmt.parseInt(i32, as, 10) catch null;
+                if (vx != null and vy != null and va != null) {
+                    view_override = .{ .x = vx.?, .y = vy.?, .angle = va.? };
+                }
+            }
         } else if (std.mem.eql(u8, arg, "--timedemo")) {
             command = .timedemo;
             demo_name = args.next();
@@ -257,11 +280,11 @@ pub fn main(init: std.process.Init) !void {
     switch (command) {
         .dump_lumps => try dumpLumps(&w, &buf),
         .dump_map => try dumpMap(&w, map_name orelse "E1M1", alloc, &buf),
-        .render_frame => try renderFrameCmd(&w, map_name orelse "E1M1", output_path, alloc),
+        .render_frame => try renderFrameCmd(&w, map_name orelse "E1M1", output_path, view_override, alloc),
         .play => try playCmd(&w, output_path, alloc),
         .run => try runCmd(&w, platform_name, alloc, opt_skill, opt_episode, opt_warp),
-        .playdemo => try playDemoCmd(&w, demo_name orelse "DEMO1", output_path, alloc),
-        .timedemo => try playDemoCmd(&w, demo_name orelse "DEMO1", output_path, alloc),
+        .playdemo => try playDemoCmd(&w, demo_name orelse "DEMO1", output_path, dump_every, alloc),
+        .timedemo => try playDemoCmd(&w, demo_name orelse "DEMO1", output_path, dump_every, alloc),
         .none => try writeStr("DOOM initialized. Use --dump-lumps, --dump-map, --render-frame, --play, or --run.\n"),
         .help => {},
     }
@@ -382,7 +405,7 @@ fn runCmd(w: *wad.Wad, platform_name: []const u8, alloc: std.mem.Allocator, opt_
 }
 
 /// Play a demo lump from the WAD
-fn playDemoCmd(w: *wad.Wad, demo_name: []const u8, output_path: []const u8, alloc: std.mem.Allocator) !void {
+fn playDemoCmd(w: *wad.Wad, demo_name: []const u8, output_path: []const u8, dump_every: u32, alloc: std.mem.Allocator) !void {
     try writeStr("Playing demo: ");
     try writeStr(demo_name);
     try writeStr("\n");
@@ -438,6 +461,14 @@ fn playDemoCmd(w: *wad.Wad, demo_name: []const u8, output_path: []const u8, allo
         game.players[game.consoleplayer].cmd = cmd;
         game.ticker();
         tic_count += 1;
+
+        // Periodic frame dumps for headless render QA
+        if (dump_every > 0 and tic_count % dump_every == 0) {
+            game.drawer(&vid);
+            var name_buf: [64]u8 = undefined;
+            const fname = std.fmt.bufPrint(&name_buf, "frame_{d:0>5}.ppm", .{tic_count}) catch continue;
+            _ = vid.writePPM(0, fname, alloc);
+        }
     }
 
     // Draw final frame
@@ -513,7 +544,63 @@ fn playCmd(w: *wad.Wad, output_path: []const u8, alloc: std.mem.Allocator) !void
     try writeStr("Game loop test complete.\n");
 }
 
-fn renderFrameCmd(w: *const wad.Wad, map_name_arg: []const u8, output_path: []const u8, alloc: std.mem.Allocator) !void {
+const ViewOverride = struct { x: i32, y: i32, angle: i32 };
+
+/// Seat a freshly spawned mobj on its sector's floor (or ceiling for
+/// MF_SPAWNCEILING things) — spawnMobj runs before sector heights are known.
+fn seatMobjOnFloor(mo: *mobj_mod.MapObject, level: *const setup.Level) void {
+    const sec = sectorAtPoint(level, mo.x, mo.y) orelse return;
+    mo.floorz = sec.floorheight;
+    mo.ceilingz = sec.ceilingheight;
+    if (mo.flags & info.MF_SPAWNCEILING != 0) {
+        mo.z = fixed.Fixed.sub(mo.ceilingz, mo.height);
+    } else {
+        mo.z = mo.floorz;
+    }
+}
+
+/// Eye-level view z for a map point (floor + 41, DOOM's VIEWHEIGHT)
+fn getViewZ(level: *const setup.Level, x: i32, y: i32) fixed.Fixed {
+    const sec = sectorAtPoint(level, fixed.Fixed.fromInt(x), fixed.Fixed.fromInt(y)) orelse return fixed.Fixed.fromInt(41);
+    return fixed.Fixed.add(sec.floorheight, fixed.Fixed.fromInt(41));
+}
+
+fn degreesToAngleU32(degrees: i32) u32 {
+    const deg: u32 = @intCast(@mod(degrees, 360));
+    return deg *% (0xFFFFFFFF / 360);
+}
+
+/// BSP point-location: sector containing (x, y)
+fn sectorAtPoint(level: *const setup.Level, x: fixed.Fixed, y: fixed.Fixed) ?*const setup.Sector {
+    if (level.num_nodes == 0) {
+        if (level.subsectors.len > 0) {
+            if (level.subsectors[0].sector) |si| {
+                if (si < level.sectors.len) return &level.sectors[si];
+            }
+        }
+        return null;
+    }
+    var node_id: u16 = level.num_nodes - 1;
+    while (node_id & defs.NF_SUBSECTOR == 0) {
+        if (node_id >= level.nodes.len) return null;
+        const node = &level.nodes[node_id];
+        const dx: i64 = x.raw() -% node.x.raw();
+        const dy: i64 = y.raw() -% node.y.raw();
+        const left: i64 = @as(i64, node.dy.raw()) * dx;
+        const right: i64 = dy * @as(i64, node.dx.raw());
+        const side: usize = if (right < left) 0 else 1;
+        node_id = node.children[side];
+    }
+    const ssi = node_id & ~defs.NF_SUBSECTOR;
+    if (ssi < level.subsectors.len) {
+        if (level.subsectors[ssi].sector) |si| {
+            if (si < level.sectors.len) return &level.sectors[si];
+        }
+    }
+    return null;
+}
+
+fn renderFrameCmd(w: *const wad.Wad, map_name_arg: []const u8, output_path: []const u8, view_override: ?ViewOverride, alloc: std.mem.Allocator) !void {
     try writeStr("Loading map: ");
     try writeStr(map_name_arg);
     try writeStr("\n");
@@ -576,12 +663,27 @@ fn renderFrameCmd(w: *const wad.Wad, map_name_arg: []const u8, output_path: []co
     };
     defer rdata.deinit();
 
+    // Spawn map things so the static render exercises the sprite pipeline
+    // (skill: hurt-me-plenty filtering, single-player)
+    tick.initThinkers();
+    for (level.things) |thing| {
+        if (thing.thing_type >= 1 and thing.thing_type <= 4) continue;
+        if (thing.thing_type == 11) continue;
+        if (thing.options & 16 != 0) continue;
+        if (thing.options & defs.MTF_NORMAL == 0) continue;
+        const mo = mobj_mod.spawnMapThing(&thing, alloc) catch null orelse continue;
+        seatMobjOnFloor(mo, &level);
+    }
+
     // Initialize video state
     var vid = video.VideoState.init();
 
     // Render the frame
     try writeStr("Rendering frame...\n");
-    const ok = render_main.renderFrame(w, &level, &rdata, &vid, alloc);
+    const ok = if (view_override) |v|
+        render_main.renderView(w, &level, &rdata, &vid, fixed.Fixed.fromInt(v.x), fixed.Fixed.fromInt(v.y), getViewZ(&level, v.x, v.y), degreesToAngleU32(v.angle), null)
+    else
+        render_main.renderFrame(w, &level, &rdata, &vid, alloc);
     if (!ok) {
         try writeStr("Error: Rendering failed\n");
         return;

@@ -253,9 +253,11 @@ test "setup psprites" {
 
     setupPSprites(&player);
 
-    // Weapon should be in raise state
+    // Weapon should be in raise state. Entering the up-state runs A_Raise
+    // once (actions fire on state entry), so sy is one raise step above
+    // WEAPONBOTTOM.
     try std.testing.expect(player.psprites[ps_weapon].state != null);
-    try std.testing.expectEqual(WEAPONBOTTOM, player.psprites[ps_weapon].sy);
+    try std.testing.expectEqual(Fixed.sub(WEAPONBOTTOM, RAISESPEED), player.psprites[ps_weapon].sy);
 }
 
 test "set psprite to null" {

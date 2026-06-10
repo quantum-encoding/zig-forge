@@ -25,6 +25,8 @@ const user = @import("play/user.zig");
 const Player = user.Player;
 const TicCmd = user.TicCmd;
 const mobj_mod = @import("play/mobj.zig");
+const info = @import("info.zig");
+const pspr = @import("play/pspr.zig");
 const render_main = @import("render/main.zig");
 const render_data = @import("render/data.zig");
 const RenderData = render_data.RenderData;
@@ -314,7 +316,7 @@ pub const Game = struct {
                         if (self.rdata) |*rdata| {
                             const player = &self.players[self.displayplayer];
                             if (player.mobj) |mo| {
-                                _ = render_main.renderView(self.wad, lvl, rdata, vid, mo.x, mo.y, player.viewz, mo.angle);
+                                _ = render_main.renderView(self.wad, lvl, rdata, vid, mo.x, mo.y, player.viewz, mo.angle, player);
                             } else {
                                 _ = render_main.renderFrame(self.wad, lvl, rdata, vid, self.allocator);
                             }
@@ -408,14 +410,43 @@ pub const Game = struct {
         self.total_items = 0;
         self.total_secrets = 0;
 
-        // Find player start positions and spawn player mobj
+        // Spawn player and all map things
         if (self.level) |lvl| {
+            // Skill bit for thing filtering (baby/easy share MTF_EASY,
+            // hard/nightmare share MTF_HARD — vanilla behavior)
+            const skill_bit: i16 = switch (self.skill) {
+                .baby, .easy => defs.MTF_EASY,
+                .medium => defs.MTF_NORMAL,
+                .hard, .nightmare => defs.MTF_HARD,
+            };
+
             for (lvl.things) |thing| {
                 // Player 1 start (type 1)
                 if (thing.thing_type == 1) {
                     self.spawnPlayer(0, thing);
+                    continue;
                 }
-                // Count totals from thing flags (simplified)
+                // Player 2-4 starts and deathmatch starts: not used in single player
+                if (thing.thing_type >= 2 and thing.thing_type <= 4) continue;
+                if (thing.thing_type == 11) continue;
+                // Multiplayer-only things (bit 16)
+                if (thing.options & 16 != 0) continue;
+                // Skill filter
+                if (thing.options & skill_bit == 0) continue;
+
+                const mo = mobj_mod.spawnMapThing(&thing, self.allocator) catch null orelse continue;
+
+                // spawnMobj computed z from floorz/ceilingz before they were
+                // known (both 0 at spawn) — fix them up from the real sector.
+                self.updateMobjSectorZ(mo);
+                if (mo.flags & info.MF_SPAWNCEILING != 0) {
+                    mo.z = Fixed.sub(mo.ceilingz, mo.height);
+                } else {
+                    mo.z = mo.floorz;
+                }
+
+                if (mo.flags & info.MF_COUNTKILL != 0) self.total_kills += 1;
+                if (mo.flags & info.MF_COUNTITEM != 0) self.total_items += 1;
             }
         }
 
@@ -499,6 +530,7 @@ pub const Game = struct {
                 // would drag the view below the floor (black floors).
                 if (self.players[i].mobj) |mo| self.updateMobjSectorZ(mo);
                 user.playerThink(&self.players[i]);
+                pspr.movePSprites(&self.players[i]);
             }
         }
 
@@ -529,6 +561,9 @@ pub const Game = struct {
 
         self.players[player_num].mobj = mo;
         self.players[player_num].player_state = .alive;
+
+        // Bring up the ready weapon (psprite state machine)
+        pspr.setupPSprites(&self.players[player_num]);
     }
 
     /// Set a mobj's floorz/ceilingz from the sector it currently occupies
