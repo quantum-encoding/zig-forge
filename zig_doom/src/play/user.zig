@@ -331,6 +331,9 @@ fn deathThink(player: *Player) void {
     if (player.viewheight.raw() > Fixed.fromRaw(6 * 0x10000).raw()) {
         player.viewheight = Fixed.sub(player.viewheight, Fixed.ONE);
     }
+    if (player.viewheight.raw() < 6 * 0x10000) {
+        player.viewheight = Fixed.fromRaw(6 * 0x10000);
+    }
 
     // Calculate final viewz
     player.viewz = Fixed.add(mo.z, player.viewheight);
@@ -338,19 +341,20 @@ fn deathThink(player: *Player) void {
         player.viewz = Fixed.add(mo.floorz, Fixed.ONE);
     }
 
-    // Look at killer
+    // Look at killer — vanilla turns in ANG5 (= ANG90/18) increments
+    const ANG5: u32 = fixed.ANG90 / 18;
     if (player.attacker) |attacker| {
         if (attacker != mo) {
             const angle = maputl_pointToAngle(mo.x, mo.y, attacker.x, attacker.y);
             const delta = angle -% mo.angle;
 
-            if (delta < fixed.ANG45 / 2 or delta > 0 -% fixed.ANG45 / 2) {
+            if (delta < ANG5 or delta > 0 -% ANG5) {
                 // Face killer
                 mo.angle = angle;
             } else if (delta < fixed.ANG180) {
-                mo.angle +%= fixed.ANG45 / 4;
+                mo.angle +%= ANG5;
             } else {
-                mo.angle -%= fixed.ANG45 / 4;
+                mo.angle -%= ANG5;
             }
         }
     }

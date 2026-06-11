@@ -19,6 +19,7 @@ const mobj_mod = @import("mobj.zig");
 const MapObject = mobj_mod.MapObject;
 const user = @import("user.zig");
 const Player = user.Player;
+const map_mod = @import("map.zig");
 
 // ============================================================================
 // Constants
@@ -98,18 +99,16 @@ pub fn T_VerticalDoor(thinker_ptr: *Thinker) void {
         },
         -1 => {
             // Door closing
-            const result = moveCeiling(sector, door.speed.negate(), sector.floorheight, false);
+            const result = map_mod.movePlane(level, door.sector_idx, door.speed, sector.floorheight, false, 1, -1);
             switch (result) {
                 .pastdest => {
                     // Reached bottom
                     switch (door.door_type) {
                         .blaze_raise, .blaze_close => {
-                            sector.ceilingheight = sector.floorheight;
                             sector.ceilingdata = null;
                             tick.removeThinker(&door.thinker);
                         },
                         .normal, .door_close => {
-                            sector.ceilingheight = sector.floorheight;
                             sector.ceilingdata = null;
                             tick.removeThinker(&door.thinker);
                         },
@@ -134,18 +133,16 @@ pub fn T_VerticalDoor(thinker_ptr: *Thinker) void {
         },
         1 => {
             // Door opening
-            const result = moveCeiling(sector, door.speed, door.top_height, false);
+            const result = map_mod.movePlane(level, door.sector_idx, door.speed, door.top_height, false, 1, 1);
             switch (result) {
                 .pastdest => {
                     // Reached top
                     switch (door.door_type) {
                         .blaze_raise, .normal => {
-                            sector.ceilingheight = door.top_height;
                             door.direction = 0;
                             door.top_count_down = door.top_wait;
                         },
                         .close_30_open, .blaze_open, .door_open => {
-                            sector.ceilingheight = door.top_height;
                             sector.ceilingdata = null;
                             tick.removeThinker(&door.thinker);
                         },
@@ -158,48 +155,6 @@ pub fn T_VerticalDoor(thinker_ptr: *Thinker) void {
         },
         else => {},
     }
-}
-
-// ============================================================================
-// Ceiling movement result
-// ============================================================================
-
-const MoveResult = enum {
-    ok,
-    crushed,
-    pastdest,
-};
-
-/// Move a sector's ceiling. Returns movement result.
-fn moveCeiling(sector: *Sector, speed: Fixed, dest: Fixed, crush: bool) MoveResult {
-    _ = crush;
-    const old_height = sector.ceilingheight;
-
-    if (speed.raw() < 0) {
-        // Moving down
-        const new_height = Fixed.add(sector.ceilingheight, speed);
-        if (new_height.raw() <= dest.raw()) {
-            sector.ceilingheight = dest;
-            return .pastdest;
-        }
-        sector.ceilingheight = new_height;
-
-        // Check crush (ceiling <= floor means crushed)
-        if (sector.ceilingheight.raw() <= sector.floorheight.raw()) {
-            sector.ceilingheight = old_height;
-            return .crushed;
-        }
-    } else {
-        // Moving up
-        const new_height = Fixed.add(sector.ceilingheight, speed);
-        if (new_height.raw() >= dest.raw()) {
-            sector.ceilingheight = dest;
-            return .pastdest;
-        }
-        sector.ceilingheight = new_height;
-    }
-
-    return .ok;
 }
 
 // ============================================================================
@@ -316,36 +271,33 @@ pub fn EV_VerticalDoor(line: *const Line, thing: *MapObject, level: *Level, allo
 
     switch (line.special) {
         26, 32 => {
-            // Blue door
-            if (player_ptr) |player| {
-                if (!player.cards[@intFromEnum(defs.Card.blue_card)] and
-                    !player.cards[@intFromEnum(defs.Card.blue_skull)])
-                {
-                    // Need blue key message
-                    return;
-                }
+            // Blue door — vanilla: non-players can never use locked doors
+            const player = player_ptr orelse return;
+            if (!player.cards[@intFromEnum(defs.Card.blue_card)] and
+                !player.cards[@intFromEnum(defs.Card.blue_skull)])
+            {
+                // Need blue key message
+                return;
             }
         },
         27, 34 => {
             // Yellow door
-            if (player_ptr) |player| {
-                if (!player.cards[@intFromEnum(defs.Card.yellow_card)] and
-                    !player.cards[@intFromEnum(defs.Card.yellow_skull)])
-                {
-                    // Need yellow key message
-                    return;
-                }
+            const player = player_ptr orelse return;
+            if (!player.cards[@intFromEnum(defs.Card.yellow_card)] and
+                !player.cards[@intFromEnum(defs.Card.yellow_skull)])
+            {
+                // Need yellow key message
+                return;
             }
         },
         28, 33 => {
             // Red door
-            if (player_ptr) |player| {
-                if (!player.cards[@intFromEnum(defs.Card.red_card)] and
-                    !player.cards[@intFromEnum(defs.Card.red_skull)])
-                {
-                    // Need red key message
-                    return;
-                }
+            const player = player_ptr orelse return;
+            if (!player.cards[@intFromEnum(defs.Card.red_card)] and
+                !player.cards[@intFromEnum(defs.Card.red_skull)])
+            {
+                // Need red key message
+                return;
             }
         },
         else => {},
@@ -384,38 +336,37 @@ pub fn EV_VerticalDoor(line: *const Line, thing: *MapObject, level: *Level, allo
     }
     tick.addThinker(&door.thinker);
 
-    // Determine door type from line special
+    // Determine door type from line special (vanilla EV_VerticalDoor)
+    door.direction = 1;
     switch (line.special) {
-        1, 31, 26, 27, 28 => {
-            // Normal open-wait-close
+        1, 26, 27, 28 => {
+            // Normal open-wait-close (re-pressable)
             door.door_type = .normal;
-            door.direction = 1;
-            door.top_height = findLowestCeilingSurrounding(back_sector_idx, level);
-            door.top_height = Fixed.sub(door.top_height, Fixed.fromRaw(4 * fixed.FRAC_UNIT.raw()));
+        },
+        31, 32, 33, 34 => {
+            // Open and STAY open; one-shot — clear the special
+            door.door_type = .door_open;
+            @constCast(line).special = 0;
         },
         117 => {
             // Blazing open-wait-close
             door.door_type = .blaze_raise;
-            door.direction = 1;
             door.speed = Fixed.fromRaw(VDOORSPEED.raw() * 4);
-            door.top_height = findLowestCeilingSurrounding(back_sector_idx, level);
-            door.top_height = Fixed.sub(door.top_height, Fixed.fromRaw(4 * fixed.FRAC_UNIT.raw()));
         },
-        32, 33, 34 => {
-            // Locked blazing door
+        118 => {
+            // Blazing open and stay; one-shot
             door.door_type = .blaze_open;
-            door.direction = 1;
             door.speed = Fixed.fromRaw(VDOORSPEED.raw() * 4);
-            door.top_height = findLowestCeilingSurrounding(back_sector_idx, level);
-            door.top_height = Fixed.sub(door.top_height, Fixed.fromRaw(4 * fixed.FRAC_UNIT.raw()));
+            @constCast(line).special = 0;
         },
         else => {
             door.door_type = .normal;
-            door.direction = 1;
-            door.top_height = findLowestCeilingSurrounding(back_sector_idx, level);
-            door.top_height = Fixed.sub(door.top_height, Fixed.fromRaw(4 * fixed.FRAC_UNIT.raw()));
         },
     }
+
+    // find the top of the movement range
+    door.top_height = findLowestCeilingSurrounding(back_sector_idx, level);
+    door.top_height = Fixed.sub(door.top_height, Fixed.fromRaw(4 * fixed.FRAC_UNIT.raw()));
 
     door.thinker.function = @ptrCast(&T_VerticalDoor);
 }
@@ -436,8 +387,25 @@ test "door constants" {
     try std.testing.expectEqual(@as(i32, 150), VDOORWAIT);
 }
 
-test "moveCeiling down" {
-    var sector = Sector{
+fn testLevelOneSector(sector: []Sector) Level {
+    return Level{
+        .vertices = &[_]setup.Vertex{},
+        .sectors = sector,
+        .sides = &[_]setup.Side{},
+        .lines = &[_]Line{},
+        .segs = &[_]setup.Seg{},
+        .subsectors = &[_]setup.Subsector{},
+        .nodes = &[_]setup.Node{},
+        .things = &[_]defs.MapThing{},
+        .blockmap_data = &[_]u8{},
+        .reject_data = &[_]u8{},
+        .num_nodes = 0,
+        .allocator = std.testing.allocator,
+    };
+}
+
+test "movePlane ceiling down" {
+    var sectors = [_]Sector{.{
         .floorheight = Fixed.ZERO,
         .ceilingheight = Fixed.fromInt(128),
         .floorpic = 0,
@@ -447,16 +415,17 @@ test "moveCeiling down" {
         .tag = 0,
         .floor_name = [_]u8{0} ** 8,
         .ceiling_name = [_]u8{0} ** 8,
-    };
+    }};
+    var lvl = testLevelOneSector(&sectors);
 
     // Move down toward floor
-    const result = moveCeiling(&sector, Fixed.fromInt(-10), Fixed.ZERO, false);
-    try std.testing.expectEqual(MoveResult.ok, result);
-    try std.testing.expectEqual(@as(i32, 118), sector.ceilingheight.toInt());
+    const result = map_mod.movePlane(&lvl, 0, Fixed.fromInt(10), Fixed.ZERO, false, 1, -1);
+    try std.testing.expectEqual(map_mod.PlaneResult.ok, result);
+    try std.testing.expectEqual(@as(i32, 118), sectors[0].ceilingheight.toInt());
 }
 
-test "moveCeiling pastdest" {
-    var sector = Sector{
+test "movePlane ceiling pastdest" {
+    var sectors = [_]Sector{.{
         .floorheight = Fixed.ZERO,
         .ceilingheight = Fixed.fromInt(5),
         .floorpic = 0,
@@ -466,10 +435,11 @@ test "moveCeiling pastdest" {
         .tag = 0,
         .floor_name = [_]u8{0} ** 8,
         .ceiling_name = [_]u8{0} ** 8,
-    };
+    }};
+    var lvl = testLevelOneSector(&sectors);
 
     // Move down past destination
-    const result = moveCeiling(&sector, Fixed.fromInt(-10), Fixed.ZERO, false);
-    try std.testing.expectEqual(MoveResult.pastdest, result);
-    try std.testing.expectEqual(@as(i32, 0), sector.ceilingheight.toInt());
+    const result = map_mod.movePlane(&lvl, 0, Fixed.fromInt(10), Fixed.ZERO, false, 1, -1);
+    try std.testing.expectEqual(map_mod.PlaneResult.pastdest, result);
+    try std.testing.expectEqual(@as(i32, 0), sectors[0].ceilingheight.toInt());
 }

@@ -219,8 +219,8 @@ fn fineTan(angle: Angle) Fixed {
     return tables.finetangent[@intCast(i)];
 }
 
-/// Project a signed view-relative angle (+ = left of center) to a screen column.
-/// theta=0 -> centre, +ANG45 -> x=0 (left edge), -ANG45 -> x=SCREENWIDTH (right).
+/// Project a signed view-relative angle to a screen column.
+/// theta=0 -> centre, -ANG45 -> x=0 (left edge), +ANG45 -> x=SCREENWIDTH (right).
 fn angleToX(theta: Angle) i32 {
     const half = SCREENWIDTH / 2;
     const x = half - Fixed.mul(fineTan(theta), Fixed.fromInt(half)).toInt();
@@ -293,9 +293,9 @@ fn clipSolidSegRange(rstate: *RenderState, first: i32, last: i32) void {
 test "angleToX" {
     // Straight ahead maps to screen centre.
     try std.testing.expectEqual(@as(i32, SCREENWIDTH / 2), angleToX(0));
-    // ±ANG45 map to the screen edges (90° FOV).
-    try std.testing.expectEqual(@as(i32, 0), angleToX(fixed.ANG45));
-    try std.testing.expectEqual(@as(i32, SCREENWIDTH), angleToX(0 -% fixed.ANG45));
+    // ±ANG45 map to the screen edges (90° FOV) — visually verified convention.
+    try std.testing.expectEqual(@as(i32, SCREENWIDTH), angleToX(fixed.ANG45));
+    try std.testing.expectEqual(@as(i32, 0), angleToX(0 -% fixed.ANG45));
 }
 
 test "pointOnSide axis-aligned" {

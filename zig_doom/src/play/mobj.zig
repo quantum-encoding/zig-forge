@@ -165,8 +165,14 @@ pub fn spawnMobj(x: Fixed, y: Fixed, z: Fixed, mobj_type: MobjType, allocator: s
     // Vanilla consumes one P_Random per spawn for the player-search start
     mobj.last_look = @as(i32, random.pRandom() % 4);
 
-    // Set initial state
-    _ = mobj.setState(mobj_info.spawn_state);
+    // Set initial state DIRECTLY — vanilla P_SpawnMobj does not go through
+    // P_SetMobjState: S_NULL spawn states (MT_TELEPORTMAN) stay alive as
+    // inert thinkers, no action fn runs, and 0-tic chains don't advance.
+    const spawn_st = &info.states[@intFromEnum(mobj_info.spawn_state)];
+    mobj.state_num = mobj_info.spawn_state;
+    mobj.tics = spawn_st.tics;
+    mobj.sprite = spawn_st.sprite;
+    mobj.frame = spawn_st.frame;
 
     // Seat in the world: floor/ceiling from the spawn sector (when a level
     // is loaded — unit tests spawn into the void and keep zeros).
@@ -187,6 +193,9 @@ pub fn spawnMobj(x: Fixed, y: Fixed, z: Fixed, mobj_type: MobjType, allocator: s
         mobj.z = z;
     }
 
+    // Link into the blockmap (P_SetThingPosition)
+    map_mod.setThingPosition(mobj);
+
     // Add to thinker list
     mobj.thinker.function = mobjThinker;
     tick.addThinker(&mobj.thinker);
@@ -200,8 +209,8 @@ pub const ONCEILINGZ = Fixed.MAX;
 
 /// Remove a map object from the game
 pub fn removeMobj(mobj: *MapObject) void {
-    // Clear sector/blockmap links would go here in full implementation
-    // For now, just remove from thinker list
+    // Unlink from the blockmap (P_UnsetThingPosition)
+    map_mod.unsetThingPosition(mobj);
 
     // Mark for deferred removal from thinker list
     tick.removeThinker(&mobj.thinker);
@@ -544,6 +553,7 @@ pub fn spawnPlayerMissile(source: *MapObject, missile_type: MobjType, allocator:
     mobj.momy = Fixed.mul(speed, tables_mod.finesine[fine & tables_mod.FINEMASK]);
     mobj.momz = Fixed.mul(speed, slope);
 
+    checkMissileSpawn(mobj);
     return mobj;
 }
 
@@ -574,8 +584,8 @@ pub fn spawnMapThing(mthing: *const MapThing, allocator: std.mem.Allocator) !?*M
         mobj.tics = @mod(@as(i32, random.pRandom()), mobj.tics) + 1;
     }
 
-    // Set angle from thing data
-    mobj.angle = @as(Angle, @intCast(mthing.angle)) *% (0x100000000 / 360);
+    // Set angle from thing data (vanilla: ANG45 * (angle/45) — exact axis angles)
+    mobj.angle = fixed.ANG45 *% @as(u32, @intCast(@divTrunc(@as(i32, mthing.angle), 45)));
 
     // Set ambush flag
     if (mthing.options & defs.MTF_AMBUSH != 0) {
@@ -586,6 +596,21 @@ pub fn spawnMapThing(mthing: *const MapThing, allocator: std.mem.Allocator) !?*M
     mobj.spawn_point = mthing.*;
 
     return mobj;
+}
+
+/// P_CheckMissileSpawn — randomize the missile's first tic, nudge it half
+/// a step forward, and explode it immediately if it spawned inside a wall.
+fn checkMissileSpawn(th: *MapObject) void {
+    th.tics -%= @as(i32, @intCast(random.pRandom() & 3));
+    if (th.tics < 1) th.tics = 1;
+
+    th.x = Fixed.add(th.x, Fixed.fromRaw(th.momx.raw() >> 1));
+    th.y = Fixed.add(th.y, Fixed.fromRaw(th.momy.raw() >> 1));
+    th.z = Fixed.add(th.z, Fixed.fromRaw(th.momz.raw() >> 1));
+
+    if (!map_mod.tryMove(th, th.x, th.y)) {
+        explodeMissile(th);
+    }
 }
 
 /// Spawn a missile aimed at a target
@@ -620,6 +645,7 @@ pub fn spawnMissile(source: *MapObject, dest: *MapObject, missile_type: MobjType
         mobj.momz = Fixed.div(dz, Fixed.div(dist, speed));
     }
 
+    checkMissileSpawn(mobj);
     return mobj;
 }
 

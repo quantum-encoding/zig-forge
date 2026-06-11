@@ -71,10 +71,7 @@ pub fn T_MoveFloor(thinker_ptr: *Thinker) void {
     if (floor_mover.sector_idx >= level.sectors.len) return;
     const sector = &level.sectors[floor_mover.sector_idx];
 
-    const result = moveFloor(sector, floor_mover.speed, floor_mover.floor_dest_height, floor_mover.crush, floor_mover.direction);
-
-    // Refit/carry things standing in the moving sector
-    map_mod.changeSector(level, floor_mover.sector_idx);
+    const result = map_mod.movePlane(level, floor_mover.sector_idx, floor_mover.speed, floor_mover.floor_dest_height, floor_mover.crush, 0, floor_mover.direction);
 
     switch (result) {
         .pastdest => {
@@ -106,48 +103,6 @@ pub fn T_MoveFloor(thinker_ptr: *Thinker) void {
         },
         .ok => {},
     }
-}
-
-// ============================================================================
-// Floor movement result
-// ============================================================================
-
-const MoveResult = enum {
-    ok,
-    crushed,
-    pastdest,
-};
-
-/// Move a sector's floor toward dest
-fn moveFloor(sector: *Sector, speed: Fixed, dest: Fixed, crush: bool, direction: i32) MoveResult {
-    _ = crush;
-
-    if (direction == -1) {
-        // Moving down
-        const new_height = Fixed.sub(sector.floorheight, speed);
-        if (new_height.raw() <= dest.raw()) {
-            sector.floorheight = dest;
-            return .pastdest;
-        }
-        sector.floorheight = new_height;
-    } else if (direction == 1) {
-        // Moving up
-        const new_height = Fixed.add(sector.floorheight, speed);
-
-        // Check if hitting ceiling
-        if (new_height.raw() >= sector.ceilingheight.raw()) {
-            sector.floorheight = sector.ceilingheight;
-            return .crushed;
-        }
-
-        if (new_height.raw() >= dest.raw()) {
-            sector.floorheight = dest;
-            return .pastdest;
-        }
-        sector.floorheight = new_height;
-    }
-
-    return .ok;
 }
 
 // ============================================================================
@@ -291,6 +246,9 @@ pub fn EV_DoFloor(line: *const Line, floor_type: FloorType, level: *Level, alloc
     for (level.sectors, 0..) |_, i| {
         if (level.sectors[i].tag != line.tag) continue;
 
+        // ALREADY MOVING? IF SO, KEEP GOING... (vanilla specialdata check)
+        if (level.sectors[i].floordata_busy) continue;
+
         const floor_mover = allocator.create(FloorMover) catch continue;
         floor_mover.* = .{
             .floor_type = floor_type,
@@ -298,6 +256,7 @@ pub fn EV_DoFloor(line: *const Line, floor_type: FloorType, level: *Level, alloc
             .crush = false,
         };
 
+        level.sectors[i].floordata_busy = true;
         tick.addThinker(&floor_mover.thinker);
         rtn = true;
 
@@ -313,13 +272,13 @@ pub fn EV_DoFloor(line: *const Line, floor_type: FloorType, level: *Level, alloc
             .turbo_lower => {
                 floor_mover.direction = -1;
                 floor_mover.speed = Fixed.fromRaw(FLOORSPEED.raw() * 4);
-                floor_mover.floor_dest_height = Fixed.add(
-                    findHighestFloorSurrounding(@intCast(i), level),
-                    Fixed.fromRaw(8 * fixed.FRAC_UNIT.raw()),
-                );
-                // Don't go below current floor
-                if (floor_mover.floor_dest_height.raw() > level.sectors[i].floorheight.raw()) {
-                    floor_mover.floor_dest_height = level.sectors[i].floorheight;
+                floor_mover.floor_dest_height = findHighestFloorSurrounding(@intCast(i), level);
+                // vanilla: stop 8 above the target UNLESS already there
+                if (floor_mover.floor_dest_height.raw() != level.sectors[i].floorheight.raw()) {
+                    floor_mover.floor_dest_height = Fixed.add(
+                        floor_mover.floor_dest_height,
+                        Fixed.fromRaw(8 * fixed.FRAC_UNIT.raw()),
+                    );
                 }
             },
             .raise_floor => {
@@ -359,12 +318,21 @@ pub fn EV_DoFloor(line: *const Line, floor_type: FloorType, level: *Level, alloc
                     level.sectors[i].floorheight,
                     Fixed.fromRaw(24 * fixed.FRAC_UNIT.raw()),
                 );
+                // vanilla copies floorpic + special from the trigger line's front sector
+                if (line.frontsector) |fsi| {
+                    level.sectors[i].floorpic = level.sectors[fsi].floorpic;
+                    level.sectors[i].special = level.sectors[fsi].special;
+                }
             },
             .raise_floor_crush => {
                 floor_mover.direction = 1;
                 floor_mover.crush = true;
+                floor_mover.floor_dest_height = findLowestCeilingSurrounding(@intCast(i), level);
+                if (floor_mover.floor_dest_height.raw() > level.sectors[i].ceilingheight.raw()) {
+                    floor_mover.floor_dest_height = level.sectors[i].ceilingheight;
+                }
                 floor_mover.floor_dest_height = Fixed.sub(
-                    level.sectors[i].ceilingheight,
+                    floor_mover.floor_dest_height,
                     Fixed.fromRaw(8 * fixed.FRAC_UNIT.raw()),
                 );
             },
@@ -549,8 +517,25 @@ test "floor mover fieldParentPtr" {
     try std.testing.expectEqual(&mover, recovered);
 }
 
-test "moveFloor down" {
-    var sector = Sector{
+fn testLevelOneSector(sector: []Sector) Level {
+    return Level{
+        .vertices = &[_]setup.Vertex{},
+        .sectors = sector,
+        .sides = &[_]setup.Side{},
+        .lines = &[_]Line{},
+        .segs = &[_]setup.Seg{},
+        .subsectors = &[_]setup.Subsector{},
+        .nodes = &[_]setup.Node{},
+        .things = &[_]@import("../defs.zig").MapThing{},
+        .blockmap_data = &[_]u8{},
+        .reject_data = &[_]u8{},
+        .num_nodes = 0,
+        .allocator = std.testing.allocator,
+    };
+}
+
+test "movePlane floor down" {
+    var sectors = [_]Sector{.{
         .floorheight = Fixed.fromInt(64),
         .ceilingheight = Fixed.fromInt(128),
         .floorpic = 0,
@@ -560,15 +545,16 @@ test "moveFloor down" {
         .tag = 0,
         .floor_name = [_]u8{0} ** 8,
         .ceiling_name = [_]u8{0} ** 8,
-    };
+    }};
+    var lvl = testLevelOneSector(&sectors);
 
-    const result = moveFloor(&sector, Fixed.fromInt(1), Fixed.fromInt(32), false, -1);
-    try std.testing.expectEqual(MoveResult.ok, result);
-    try std.testing.expectEqual(@as(i32, 63), sector.floorheight.toInt());
+    const result = map_mod.movePlane(&lvl, 0, Fixed.fromInt(1), Fixed.fromInt(32), false, 0, -1);
+    try std.testing.expectEqual(map_mod.PlaneResult.ok, result);
+    try std.testing.expectEqual(@as(i32, 63), sectors[0].floorheight.toInt());
 }
 
-test "moveFloor up pastdest" {
-    var sector = Sector{
+test "movePlane floor up pastdest" {
+    var sectors = [_]Sector{.{
         .floorheight = Fixed.fromInt(60),
         .ceilingheight = Fixed.fromInt(128),
         .floorpic = 0,
@@ -578,11 +564,12 @@ test "moveFloor up pastdest" {
         .tag = 0,
         .floor_name = [_]u8{0} ** 8,
         .ceiling_name = [_]u8{0} ** 8,
-    };
+    }};
+    var lvl = testLevelOneSector(&sectors);
 
-    const result = moveFloor(&sector, Fixed.fromInt(10), Fixed.fromInt(64), false, 1);
-    try std.testing.expectEqual(MoveResult.pastdest, result);
-    try std.testing.expectEqual(@as(i32, 64), sector.floorheight.toInt());
+    const result = map_mod.movePlane(&lvl, 0, Fixed.fromInt(10), Fixed.fromInt(64), false, 0, 1);
+    try std.testing.expectEqual(map_mod.PlaneResult.pastdest, result);
+    try std.testing.expectEqual(@as(i32, 64), sectors[0].floorheight.toInt());
 }
 
 test "floor speed constant" {

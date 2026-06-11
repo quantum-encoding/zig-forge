@@ -14,6 +14,7 @@ const Sector = setup.Sector;
 const Line = setup.Line;
 const Level = setup.Level;
 const floor_mod = @import("floor.zig");
+const map_mod = @import("map.zig");
 
 // ============================================================================
 // Constants
@@ -77,7 +78,6 @@ pub fn T_MoveCeiling(thinker_ptr: *Thinker) void {
     const ceiling: *CeilingMover = @fieldParentPtr("thinker", thinker_ptr);
     const level = level_ptr orelse return;
     if (ceiling.sector_idx >= level.sectors.len) return;
-    const sector = &level.sectors[ceiling.sector_idx];
 
     switch (ceiling.direction) {
         0 => {
@@ -85,7 +85,7 @@ pub fn T_MoveCeiling(thinker_ptr: *Thinker) void {
         },
         1 => {
             // Moving up
-            const result = moveCeiling(sector, ceiling.speed, ceiling.top_height);
+            const result = map_mod.movePlane(level, ceiling.sector_idx, ceiling.speed, ceiling.top_height, false, 1, 1);
             switch (result) {
                 .pastdest => {
                     switch (ceiling.ceiling_type) {
@@ -104,7 +104,7 @@ pub fn T_MoveCeiling(thinker_ptr: *Thinker) void {
         },
         -1 => {
             // Moving down
-            const result = moveCeiling(sector, ceiling.speed.negate(), ceiling.bottom_height);
+            const result = map_mod.movePlane(level, ceiling.sector_idx, ceiling.speed, ceiling.bottom_height, ceiling.crush, 1, -1);
             switch (result) {
                 .pastdest => {
                     switch (ceiling.ceiling_type) {
@@ -135,44 +135,6 @@ pub fn T_MoveCeiling(thinker_ptr: *Thinker) void {
         },
         else => {},
     }
-}
-
-// ============================================================================
-// Ceiling movement helper
-// ============================================================================
-
-const MoveResult = enum {
-    ok,
-    crushed,
-    pastdest,
-};
-
-fn moveCeiling(sector: *Sector, speed: Fixed, dest: Fixed) MoveResult {
-    if (speed.raw() < 0) {
-        // Moving down
-        const new_height = Fixed.add(sector.ceilingheight, speed);
-        if (new_height.raw() <= dest.raw()) {
-            sector.ceilingheight = dest;
-            return .pastdest;
-        }
-        sector.ceilingheight = new_height;
-
-        // Check crush
-        if (sector.ceilingheight.raw() <= sector.floorheight.raw()) {
-            sector.ceilingheight = Fixed.add(sector.floorheight, Fixed.fromRaw(fixed.FRAC_UNIT.raw()));
-            return .crushed;
-        }
-    } else {
-        // Moving up
-        const new_height = Fixed.add(sector.ceilingheight, speed);
-        if (new_height.raw() >= dest.raw()) {
-            sector.ceilingheight = dest;
-            return .pastdest;
-        }
-        sector.ceilingheight = new_height;
-    }
-
-    return .ok;
 }
 
 // ============================================================================
@@ -318,24 +280,6 @@ test "active ceilings add/remove" {
     try std.testing.expectEqual(&c2, active_ceilings[1].?);
 
     clearActiveCeilings();
-}
-
-test "moveCeiling down" {
-    var sector = setup.Sector{
-        .floorheight = Fixed.ZERO,
-        .ceilingheight = Fixed.fromInt(128),
-        .floorpic = 0,
-        .ceilingpic = 0,
-        .lightlevel = 200,
-        .special = 0,
-        .tag = 0,
-        .floor_name = [_]u8{0} ** 8,
-        .ceiling_name = [_]u8{0} ** 8,
-    };
-
-    const result = moveCeiling(&sector, Fixed.fromInt(-10), Fixed.fromInt(64));
-    try std.testing.expectEqual(MoveResult.ok, result);
-    try std.testing.expectEqual(@as(i32, 118), sector.ceilingheight.toInt());
 }
 
 test "ceiling speed constant" {

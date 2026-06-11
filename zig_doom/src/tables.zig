@@ -6,11 +6,19 @@
 //!
 //! DOOM uses 8192 "fine angles" for a full circle (2*PI).
 //! All trig values are in 16.16 fixed-point.
-//! Tables generated at comptime to match DOOM's original values.
+//!
+//! The values are the LITERAL vanilla tables (tables_data.zig) — demo sync
+//! requires byte-exact values; id generated them with an (i+0.5) phase
+//! offset whose rounding a recomputed table cannot reproduce.
+//!
+//! NOTE finetangent uses VANILLA indexing: finetangent[i] = tan((i-2048+0.5)
+//! * pi/4096), i.e. index 0 is just past -90° and 4095 just before +90°.
+//! For a signed view-relative angle θ: tan(θ) = finetangent[2048 + (θ>>19)].
 
 const std = @import("std");
 const fixed = @import("fixed.zig");
 const Fixed = fixed.Fixed;
+const data = @import("tables_data.zig");
 
 pub const FINEANGLES = 8192;
 pub const FINEMASK = FINEANGLES - 1;
@@ -18,53 +26,20 @@ pub const ANGLETOFINESHIFT = 19; // ANG(2^32) >> 19 = 8192
 
 // Sine table: 10240 entries = FINEANGLES + FINEANGLES/4
 // Extra quarter allows cosine lookup as finesine[angle + FINEANGLES/4]
-pub const finesine: [10240]Fixed = generateSineTable();
+pub const finesine: [10240]Fixed = fixedFromData(10240, data.finesine_data);
 pub const finecosine: *const [FINEANGLES]Fixed = @ptrCast(&finesine[FINEANGLES / 4]);
 
-// Tangent table: 4096 entries covering -90° to +90°
-pub const finetangent: [4096]Fixed = generateTangentTable();
+// Tangent table: 4096 entries covering -90° to +90° (vanilla indexing)
+pub const finetangent: [4096]Fixed = fixedFromData(4096, data.finetangent_data);
 
 // Inverse tangent: maps slope (0..2048) back to angle
-pub const tantoangle: [2049]u32 = generateTanToAngleTable();
+pub const tantoangle: [2049]u32 = data.tantoangle_data;
 
-fn generateSineTable() [10240]Fixed {
-    @setEvalBranchQuota(20000);
-    var table: [10240]Fixed = undefined;
-    for (0..10240) |i| {
-        const angle: f64 = @as(f64, @floatFromInt(i)) * 2.0 * std.math.pi / @as(f64, FINEANGLES);
-        const value: f64 = @sin(angle) * 65536.0;
-        const rounded: i32 = @intFromFloat(@round(value));
-        table[i] = @enumFromInt(rounded);
-    }
-    return table;
-}
-
-fn generateTangentTable() [4096]Fixed {
-    @setEvalBranchQuota(200000);
-    var table: [4096]Fixed = undefined;
-    for (0..4096) |i| {
-        // Map index to angle: i=0 is just past +90°, i=2047 is ~0°, i=4095 is just before -90°
-        // Original DOOM formula: tan((2048.5 - i) * PI / 4096)
-        const angle: f64 = (2048.5 - @as(f64, @floatFromInt(i))) * std.math.pi / 4096.0;
-        const value: f64 = @tan(angle) * 65536.0;
-        // Clamp to i32 range
-        const clamped = std.math.clamp(value, @as(f64, @floatFromInt(std.math.minInt(i32))), @as(f64, @floatFromInt(std.math.maxInt(i32))));
-        const rounded: i32 = @intFromFloat(@round(clamped));
-        table[i] = @enumFromInt(rounded);
-    }
-    return table;
-}
-
-fn generateTanToAngleTable() [2049]u32 {
-    @setEvalBranchQuota(200000);
-    var table: [2049]u32 = undefined;
-    for (0..2049) |i| {
-        // Maps slope i/2048 to binary angle
-        const slope: f64 = @as(f64, @floatFromInt(i)) / 2048.0;
-        const radians: f64 = std.math.atan(slope);
-        // Convert radians to binary angle: full circle = 2^32
-        const bam: f64 = radians * (4294967296.0 / (2.0 * std.math.pi));
-        table[i] = @intFromFloat(@round(bam));
+fn fixedFromData(comptime n: usize, comptime src: [n]i32) [n]Fixed {
+    @setEvalBranchQuota(60000);
+    var table: [n]Fixed = undefined;
+    for (0..n) |i| {
+        table[i] = @enumFromInt(src[i]);
     }
     return table;
 }
@@ -80,28 +55,26 @@ pub fn cosAngle(angle: u32) Fixed {
 }
 
 test "sine table sanity" {
-    // sin(0) = 0
-    try std.testing.expectEqual(@as(i32, 0), finesine[0].raw());
+    // VANILLA literals: the table is generated with an (i + 0.5) angle
+    // offset, so sin(0) is 25, not 0, and the peak is 65535, not 65536.
+    try std.testing.expectEqual(@as(i32, 25), finesine[0].raw());
+    try std.testing.expectEqual(@as(i32, 65535), finesine[FINEANGLES / 4].raw());
 
-    // sin(90°) = 1.0 = 65536 in fixed point
-    // 90° = FINEANGLES/4 = 2048
-    try std.testing.expectEqual(@as(i32, 65536), finesine[FINEANGLES / 4].raw());
-
-    // sin(180°) = 0
+    // sin(180°) ~= 0 (off by the half-step)
     const sin180 = finesine[FINEANGLES / 2].raw();
-    try std.testing.expect(sin180 >= -1 and sin180 <= 1); // may be ±1 from rounding
+    try std.testing.expect(sin180 >= -26 and sin180 <= 26);
 
-    // sin(270°) = -1.0 = -65536
-    try std.testing.expectEqual(@as(i32, -65536), finesine[3 * FINEANGLES / 4].raw());
+    // sin(270°) = -65535 (vanilla literal)
+    try std.testing.expectEqual(@as(i32, -65535), finesine[3 * FINEANGLES / 4].raw());
 }
 
 test "cosine table sanity" {
-    // cos(0) = 1.0 = 65536
-    try std.testing.expectEqual(@as(i32, 65536), finecosine[0].raw());
+    // cos(0) = vanilla 65535 (half-step offset)
+    try std.testing.expectEqual(@as(i32, 65535), finecosine[0].raw());
 
     // cos(90°) ~= 0
     const cos90 = finecosine[FINEANGLES / 4].raw();
-    try std.testing.expect(cos90 >= -1 and cos90 <= 1);
+    try std.testing.expect(cos90 >= -26 and cos90 <= 26);
 }
 
 test "tangent table sanity" {

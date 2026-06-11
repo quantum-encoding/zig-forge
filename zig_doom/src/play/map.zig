@@ -40,9 +40,9 @@ var tm_thing: ?*MapObject = null;
 var tm_x: Fixed = Fixed.ZERO;
 var tm_y: Fixed = Fixed.ZERO;
 var tm_bbox: BBox = .{ Fixed.ZERO, Fixed.ZERO, Fixed.ZERO, Fixed.ZERO };
-var tm_floorz: Fixed = Fixed.ZERO;
-var tm_ceilingz: Fixed = Fixed.ZERO;
-var tm_dropoffz: Fixed = Fixed.ZERO;
+pub var tm_floorz: Fixed = Fixed.ZERO;
+pub var tm_ceilingz: Fixed = Fixed.ZERO;
+pub var tm_dropoffz: Fixed = Fixed.ZERO;
 var tm_flags: u32 = 0;
 
 /// Last blocking/lowering line (for missile sky checks)
@@ -89,6 +89,76 @@ fn forEachMobj(ctx: anytype, comptime cb: fn (@TypeOf(ctx), *MapObject) bool) bo
     return true;
 }
 
+pub const MAPBLOCKSHIFT = 16 + 7; // fixed-point 128-unit cells
+
+/// Blockmap cell of a raw fixed coordinate
+fn blockCell(lvl: *const setup.Level, x: Fixed, y: Fixed) ?struct { cx: i32, cy: i32 } {
+    if (lvl.bmap_cols == 0) return null;
+    const cx: i32 = @intCast((@as(i64, x.raw()) - lvl.bmap_orgx.raw()) >> MAPBLOCKSHIFT);
+    const cy: i32 = @intCast((@as(i64, y.raw()) - lvl.bmap_orgy.raw()) >> MAPBLOCKSHIFT);
+    return .{ .cx = cx, .cy = cy };
+}
+
+/// Link a mobj into the blockmap chain for its current position
+/// (P_SetThingPosition — blockmap half; sector links unused).
+pub fn setThingPosition(mo: *MapObject) void {
+    if (mo.flags & info.MF_NOBLOCKMAP != 0) return;
+    const lvl = world.level orelse return;
+    if (lvl.blocklinks.len == 0) return;
+    const c = blockCell(lvl, mo.x, mo.y) orelse return;
+    if (c.cx < 0 or c.cy < 0 or c.cx >= lvl.bmap_cols or c.cy >= lvl.bmap_rows) {
+        mo.bnext = null;
+        mo.bprev = null;
+        return;
+    }
+    const idx: usize = @intCast(c.cy * lvl.bmap_cols + c.cx);
+    const head = lvl.blocklinks[idx];
+    mo.bprev = null;
+    mo.bnext = if (head) |h| @ptrCast(@alignCast(h)) else null;
+    if (mo.bnext) |n| n.bprev = mo;
+    lvl.blocklinks[idx] = @ptrCast(mo);
+}
+
+/// Unlink a mobj from its blockmap chain (must be called BEFORE moving).
+pub fn unsetThingPosition(mo: *MapObject) void {
+    if (mo.flags & info.MF_NOBLOCKMAP != 0) return;
+    const lvl = world.level orelse return;
+    if (lvl.blocklinks.len == 0) return;
+
+    if (mo.bprev) |p| {
+        p.bnext = mo.bnext;
+    } else {
+        // Head of its chain
+        const c = blockCell(lvl, mo.x, mo.y) orelse return;
+        if (c.cx >= 0 and c.cy >= 0 and c.cx < lvl.bmap_cols and c.cy < lvl.bmap_rows) {
+            const idx: usize = @intCast(c.cy * lvl.bmap_cols + c.cx);
+            if (lvl.blocklinks[idx]) |h| {
+                const head: *MapObject = @ptrCast(@alignCast(h));
+                if (head == mo) {
+                    lvl.blocklinks[idx] = if (mo.bnext) |n| @ptrCast(n) else null;
+                }
+            }
+        }
+    }
+    if (mo.bnext) |n| n.bprev = mo.bprev;
+    mo.bnext = null;
+    mo.bprev = null;
+}
+
+/// Walk the mobj chain of one blockmap cell. cb returns false to stop.
+fn blockThings(lvl: *const setup.Level, cx: i32, cy: i32, ctx: anytype, comptime cb: fn (@TypeOf(ctx), *MapObject) bool) bool {
+    if (cx < 0 or cy < 0 or cx >= lvl.bmap_cols or cy >= lvl.bmap_rows) return true;
+    if (lvl.blocklinks.len == 0) return true;
+    const idx: usize = @intCast(cy * lvl.bmap_cols + cx);
+    var cur: ?*MapObject = if (lvl.blocklinks[idx]) |h| @ptrCast(@alignCast(h)) else null;
+    while (cur) |mo| {
+        const next = mo.bnext; // chain may mutate under us (pickups)
+        if (!cb(ctx, mo)) return false;
+        cur = next;
+    }
+    return true;
+}
+
 /// Sector containing a map point (BSP point-location)
 pub fn sectorAtPoint(lvl: *const setup.Level, x: Fixed, y: Fixed) ?*setup.Sector {
     if (lvl.num_nodes == 0) {
@@ -103,11 +173,7 @@ pub fn sectorAtPoint(lvl: *const setup.Level, x: Fixed, y: Fixed) ?*setup.Sector
     while (node_id & defs.NF_SUBSECTOR == 0) {
         if (node_id >= lvl.nodes.len) return null;
         const node = &lvl.nodes[node_id];
-        const dx: i64 = x.raw() -% node.x.raw();
-        const dy: i64 = y.raw() -% node.y.raw();
-        const left: i64 = @as(i64, node.dy.raw()) * dx;
-        const right: i64 = dy * @as(i64, node.dx.raw());
-        const side: usize = if (right < left) 0 else 1;
+        const side = maputl.rPointOnSide(x, y, node.x, node.y, node.dx, node.dy);
         node_id = node.children[side];
     }
     const ssi = node_id & ~@as(u16, defs.NF_SUBSECTOR);
@@ -273,16 +339,63 @@ pub fn checkPosition(thing: *MapObject, x: Fixed, y: Fixed) bool {
 
     if (tm_flags & info.MF_NOCLIP != 0) return true;
 
-    // Things first (vanilla order): pickups happen even if a later line blocks
-    if (!forEachMobj({}, pitCheckThing)) return false;
+    // Things first (vanilla order), via blockmap cells of the move bbox
+    // expanded by MAXRADIUS
+    {
+        const orgx = lvl.bmap_orgx.raw();
+        const orgy = lvl.bmap_orgy.raw();
+        const maxr = level_mod.MAXRADIUS.raw();
+        const xl: i32 = @intCast((@as(i64, tm_bbox[bbox_mod.BOXLEFT].raw()) - orgx - maxr) >> MAPBLOCKSHIFT);
+        const xh: i32 = @intCast((@as(i64, tm_bbox[bbox_mod.BOXRIGHT].raw()) - orgx + maxr) >> MAPBLOCKSHIFT);
+        const yl: i32 = @intCast((@as(i64, tm_bbox[bbox_mod.BOXBOTTOM].raw()) - orgy - maxr) >> MAPBLOCKSHIFT);
+        const yh: i32 = @intCast((@as(i64, tm_bbox[bbox_mod.BOXTOP].raw()) - orgy + maxr) >> MAPBLOCKSHIFT);
 
-    // Lines
-    for (0..lvl.lines.len) |i| {
-        if (!pitCheckLine(i, lvl)) return false;
+        var bx = xl;
+        while (bx <= xh) : (bx += 1) {
+            var by = yl;
+            while (by <= yh) : (by += 1) {
+                if (!blockThings(lvl, bx, by, {}, pitCheckThing)) return false;
+            }
+        }
+    }
+
+    // Lines via the blockmap's per-cell lists (each line checked once)
+    {
+        if (line_guard.len < lvl.lines.len) line_guard = &line_guard_buf;
+        @memset(line_guard_buf[0..lvl.lines.len], false);
+
+        const orgx = lvl.bmap_orgx.raw();
+        const orgy = lvl.bmap_orgy.raw();
+        const xl: i32 = @intCast((@as(i64, tm_bbox[bbox_mod.BOXLEFT].raw()) - orgx) >> MAPBLOCKSHIFT);
+        const xh: i32 = @intCast((@as(i64, tm_bbox[bbox_mod.BOXRIGHT].raw()) - orgx) >> MAPBLOCKSHIFT);
+        const yl: i32 = @intCast((@as(i64, tm_bbox[bbox_mod.BOXBOTTOM].raw()) - orgy) >> MAPBLOCKSHIFT);
+        const yh: i32 = @intCast((@as(i64, tm_bbox[bbox_mod.BOXTOP].raw()) - orgy) >> MAPBLOCKSHIFT);
+
+        const Ctx = struct { lvl: *setup.Level };
+        const ctx = Ctx{ .lvl = lvl };
+        var bx = xl;
+        while (bx <= xh) : (bx += 1) {
+            var by = yl;
+            while (by <= yh) : (by += 1) {
+                const ok = lvl.blockLines(bx, by, ctx, struct {
+                    fn cb(c: Ctx, li: u16) bool {
+                        if (li >= c.lvl.lines.len) return true;
+                        if (line_guard_buf[li]) return true;
+                        line_guard_buf[li] = true;
+                        return pitCheckLine(li, c.lvl);
+                    }
+                }.cb);
+                if (!ok) return false;
+            }
+        }
     }
 
     return true;
 }
+
+/// Per-call line-visited guard (vanilla validcount)
+var line_guard_buf: [8192]bool = undefined;
+var line_guard: []bool = &[_]bool{};
 
 /// Attempt to move a mobj to a new position, sliding floor/ceiling values
 /// and crossing special lines. Returns true if the move succeeded.
@@ -316,13 +429,15 @@ pub fn tryMove(thing: *MapObject, x: Fixed, y: Fixed) bool {
         }
     }
 
-    // The move is OK — commit it
+    // The move is OK — commit it (relinking the blockmap chain)
     const oldx = thing.x;
     const oldy = thing.y;
+    unsetThingPosition(thing);
     thing.floorz = tm_floorz;
     thing.ceilingz = tm_ceilingz;
     thing.x = x;
     thing.y = y;
+    setThingPosition(thing);
 
     // Cross any special lines
     if (thing.flags & (info.MF_TELEPORT | info.MF_NOCLIP) == 0) {
@@ -523,11 +638,23 @@ const MAXINTERCEPTS = 128;
 var intercepts: [MAXINTERCEPTS]Intercept = undefined;
 var num_intercepts: usize = 0;
 
-/// Gather sorted line + thing intercepts along the trace from (x1,y1) toward
-/// (x2,y2). Things are approximated by their crossing diagonal (vanilla
-/// PIT_AddThingIntercepts).
-fn gatherIntercepts(lvl: *setup.Level, x1: Fixed, y1: Fixed, x2: Fixed, y2: Fixed, include_things: bool) void {
+/// Gather sorted line + thing intercepts along the trace from (x1,y1)
+/// toward (x2,y2), using the vanilla P_PathTraverse blockmap cell walk —
+/// demo sync depends on its exact locality (things/lines in unvisited
+/// cells are invisible to the trace, quirks and all).
+fn gatherIntercepts(lvl: *setup.Level, x1_in: Fixed, y1_in: Fixed, x2_in: Fixed, y2_in: Fixed, include_things: bool) void {
     num_intercepts = 0;
+
+    var x1 = x1_in;
+    var y1 = y1_in;
+    const x2 = x2_in;
+    const y2 = y2_in;
+
+    const MAPBLOCKSIZE: i32 = 128 << 16;
+
+    // Don't side exactly on a cell boundary (vanilla nudge)
+    if ((x1.raw() -% lvl.bmap_orgx.raw()) & (MAPBLOCKSIZE - 1) == 0) x1 = Fixed.add(x1, Fixed.ONE);
+    if ((y1.raw() -% lvl.bmap_orgy.raw()) & (MAPBLOCKSIZE - 1) == 0) y1 = Fixed.add(y1, Fixed.ONE);
 
     const trace = maputl.DivLine{
         .x = x1,
@@ -536,74 +663,156 @@ fn gatherIntercepts(lvl: *setup.Level, x1: Fixed, y1: Fixed, x2: Fixed, y2: Fixe
         .dy = Fixed.sub(y2, y1),
     };
 
-    // Lines
-    for (lvl.lines, 0..) |*line, i| {
-        const v1 = &lvl.vertices[line.v1];
-        const dl = maputl.DivLine{ .x = v1.x, .y = v1.y, .dx = line.dx, .dy = line.dy };
+    if (line_guard.len < lvl.lines.len) line_guard = &line_guard_buf;
+    @memset(line_guard_buf[0..lvl.lines.len], false);
 
-        // Line endpoints on the same side of the trace → no crossing
-        const s1 = maputl.pointOnDivlineSide(v1.x, v1.y, &trace);
-        const v2 = &lvl.vertices[line.v2];
-        const s2 = maputl.pointOnDivlineSide(v2.x, v2.y, &trace);
-        if (s1 == s2) continue;
+    // Cell walk state (vanilla DDA, MAPBTOFRAC = 7)
+    const lx1 = x1.raw() -% lvl.bmap_orgx.raw();
+    const ly1 = y1.raw() -% lvl.bmap_orgy.raw();
+    const lx2 = x2.raw() -% lvl.bmap_orgx.raw();
+    const ly2 = y2.raw() -% lvl.bmap_orgy.raw();
 
-        // Trace endpoints on the same side of the line → no crossing
-        const t1 = maputl.pointOnDivlineSide(x1, y1, &dl);
-        const t2 = maputl.pointOnDivlineSide(x2, y2, &dl);
-        if (t1 == t2) continue;
+    const xt1: i32 = @intCast(@as(i64, lx1) >> MAPBLOCKSHIFT);
+    const yt1: i32 = @intCast(@as(i64, ly1) >> MAPBLOCKSHIFT);
+    const xt2: i32 = @intCast(@as(i64, lx2) >> MAPBLOCKSHIFT);
+    const yt2: i32 = @intCast(@as(i64, ly2) >> MAPBLOCKSHIFT);
 
-        const frac = maputl.interceptVector(trace.x, trace.y, trace.dx, trace.dy, dl.x, dl.y, dl.dx, dl.dy);
-        if (frac.raw() < 0) continue;
+    var mapxstep: i32 = 0;
+    var mapystep: i32 = 0;
+    var partial: Fixed = Fixed.ONE;
+    var xstep: Fixed = Fixed.ONE;
+    var ystep: Fixed = Fixed.ONE;
 
-        if (num_intercepts < MAXINTERCEPTS) {
-            intercepts[num_intercepts] = .{ .frac = frac, .line = i };
-            num_intercepts += 1;
-        }
+    if (xt2 > xt1) {
+        mapxstep = 1;
+        partial = Fixed.fromRaw(0x10000 - ((lx1 >> 7) & 0xFFFF));
+        ystep = Fixed.div(Fixed.fromRaw(ly2 -% ly1), Fixed.fromRaw(@intCast(@abs(lx2 -% lx1))));
+    } else if (xt2 < xt1) {
+        mapxstep = -1;
+        partial = Fixed.fromRaw((lx1 >> 7) & 0xFFFF);
+        ystep = Fixed.div(Fixed.fromRaw(ly2 -% ly1), Fixed.fromRaw(@intCast(@abs(lx2 -% lx1))));
+    } else {
+        mapxstep = 0;
+        partial = Fixed.ONE;
+        ystep = Fixed.fromRaw(256 * 0x10000);
     }
+    var yintercept = Fixed.fromRaw((ly1 >> 7) +% Fixed.mul(partial, ystep).raw());
 
-    if (include_things) {
-        const Ctx = struct { trace: maputl.DivLine, x1: Fixed, y1: Fixed, x2: Fixed, y2: Fixed };
-        const ctx = Ctx{ .trace = trace, .x1 = x1, .y1 = y1, .x2 = x2, .y2 = y2 };
-        _ = forEachMobj(ctx, struct {
-            fn cb(c: Ctx, mo: *MapObject) bool {
-                if (mo.flags & info.MF_SHOOTABLE == 0) return true;
+    if (yt2 > yt1) {
+        mapystep = 1;
+        partial = Fixed.fromRaw(0x10000 - ((ly1 >> 7) & 0xFFFF));
+        xstep = Fixed.div(Fixed.fromRaw(lx2 -% lx1), Fixed.fromRaw(@intCast(@abs(ly2 -% ly1))));
+    } else if (yt2 < yt1) {
+        mapystep = -1;
+        partial = Fixed.fromRaw((ly1 >> 7) & 0xFFFF);
+        xstep = Fixed.div(Fixed.fromRaw(lx2 -% lx1), Fixed.fromRaw(@intCast(@abs(ly2 -% ly1))));
+    } else {
+        mapystep = 0;
+        partial = Fixed.ONE;
+        xstep = Fixed.fromRaw(256 * 0x10000);
+    }
+    var xintercept = Fixed.fromRaw((lx1 >> 7) +% Fixed.mul(partial, xstep).raw());
 
-                // The thing's crossing diagonal, oriented against the trace
-                const tracepositive = (c.trace.dx.raw() ^ c.trace.dy.raw()) > 0;
-                var dl: maputl.DivLine = undefined;
-                if (tracepositive) {
-                    dl = .{
-                        .x = Fixed.sub(mo.x, mo.radius),
-                        .y = Fixed.add(mo.y, mo.radius),
-                        .dx = Fixed.add(mo.radius, mo.radius),
-                        .dy = Fixed.fromRaw(-(Fixed.add(mo.radius, mo.radius).raw())),
-                    };
+    const LineCtx = struct { lvl: *setup.Level, trace: *const maputl.DivLine };
+    const lctx = LineCtx{ .lvl = lvl, .trace = &trace };
+    const ThingCtx = struct { trace: *const maputl.DivLine };
+    const tctx = ThingCtx{ .trace = &trace };
+
+    var mapx = xt1;
+    var mapy = yt1;
+    var count: u32 = 0;
+    while (count < 64) : (count += 1) {
+        // Lines in this cell
+        _ = lvl.blockLines(mapx, mapy, lctx, struct {
+            fn cb(c: LineCtx, li: u16) bool {
+                if (li >= c.lvl.lines.len) return true;
+                if (line_guard_buf[li]) return true;
+                line_guard_buf[li] = true;
+
+                const line = &c.lvl.lines[li];
+                const v1 = &c.lvl.vertices[line.v1];
+                const v2 = &c.lvl.vertices[line.v2];
+
+                // Vanilla dual-mode crossing test: long traces test the line
+                // endpoints against the trace; SHORT traces (slides!) test
+                // the trace endpoints against the line.
+                var s1: i32 = undefined;
+                var s2: i32 = undefined;
+                const lim: i32 = 16 * 0x10000;
+                if (c.trace.dx.raw() > lim or c.trace.dy.raw() > lim or
+                    c.trace.dx.raw() < -lim or c.trace.dy.raw() < -lim)
+                {
+                    s1 = maputl.pointOnDivlineSide(v1.x, v1.y, c.trace);
+                    s2 = maputl.pointOnDivlineSide(v2.x, v2.y, c.trace);
                 } else {
-                    dl = .{
-                        .x = Fixed.sub(mo.x, mo.radius),
-                        .y = Fixed.sub(mo.y, mo.radius),
-                        .dx = Fixed.add(mo.radius, mo.radius),
-                        .dy = Fixed.add(mo.radius, mo.radius),
-                    };
+                    s1 = maputl.pointOnLineSide(c.trace.x, c.trace.y, line, c.lvl.vertices);
+                    s2 = maputl.pointOnLineSide(Fixed.add(c.trace.x, c.trace.dx), Fixed.add(c.trace.y, c.trace.dy), line, c.lvl.vertices);
                 }
+                if (s1 == s2) return true; // Line isn't crossed
 
-                const s1 = maputl.pointOnDivlineSide(c.x1, c.y1, &dl);
-                const s2 = maputl.pointOnDivlineSide(c.x2, c.y2, &dl);
-                if (s1 == s2) return true;
-
+                const dl = maputl.DivLine{ .x = v1.x, .y = v1.y, .dx = line.dx, .dy = line.dy };
                 const frac = maputl.interceptVector(c.trace.x, c.trace.y, c.trace.dx, c.trace.dy, dl.x, dl.y, dl.dx, dl.dy);
-                if (frac.raw() < 0) return true;
+                if (frac.raw() < 0) return true; // Behind source
 
                 if (num_intercepts < MAXINTERCEPTS) {
-                    intercepts[num_intercepts] = .{ .frac = frac, .thing = mo };
+                    intercepts[num_intercepts] = .{ .frac = frac, .line = li };
                     num_intercepts += 1;
                 }
                 return true;
             }
         }.cb);
+
+        // Things in this cell
+        if (include_things) {
+            _ = blockThings(lvl, mapx, mapy, tctx, struct {
+                fn cb(c: ThingCtx, mo: *MapObject) bool {
+                    // The thing's crossing diagonal, oriented against the trace
+                    const tracepositive = (c.trace.dx.raw() ^ c.trace.dy.raw()) > 0;
+                    var dl: maputl.DivLine = undefined;
+                    if (tracepositive) {
+                        dl = .{
+                            .x = Fixed.sub(mo.x, mo.radius),
+                            .y = Fixed.add(mo.y, mo.radius),
+                            .dx = Fixed.add(mo.radius, mo.radius),
+                            .dy = Fixed.fromRaw(-(Fixed.add(mo.radius, mo.radius).raw())),
+                        };
+                    } else {
+                        dl = .{
+                            .x = Fixed.sub(mo.x, mo.radius),
+                            .y = Fixed.sub(mo.y, mo.radius),
+                            .dx = Fixed.add(mo.radius, mo.radius),
+                            .dy = Fixed.add(mo.radius, mo.radius),
+                        };
+                    }
+
+                    const s1 = maputl.pointOnDivlineSide(dl.x, dl.y, c.trace);
+                    const s2 = maputl.pointOnDivlineSide(Fixed.add(dl.x, dl.dx), Fixed.add(dl.y, dl.dy), c.trace);
+                    if (s1 == s2) return true; // Diagonal isn't crossed
+
+                    const frac = maputl.interceptVector(c.trace.x, c.trace.y, c.trace.dx, c.trace.dy, dl.x, dl.y, dl.dx, dl.dy);
+                    if (frac.raw() < 0) return true; // Behind source
+
+                    if (num_intercepts < MAXINTERCEPTS) {
+                        intercepts[num_intercepts] = .{ .frac = frac, .thing = mo };
+                        num_intercepts += 1;
+                    }
+                    return true;
+                }
+            }.cb);
+        }
+
+        if (mapx == xt2 and mapy == yt2) break;
+
+        if ((yintercept.raw() >> 16) == mapy) {
+            yintercept = Fixed.add(yintercept, ystep);
+            mapx += mapxstep;
+        } else if ((xintercept.raw() >> 16) == mapx) {
+            xintercept = Fixed.add(xintercept, xstep);
+            mapy += mapystep;
+        }
     }
 
-    // Sort by fraction, nearest first (insertion sort, N is small)
+    // Sort by fraction, nearest first (stable insertion sort)
     var i: usize = 1;
     while (i < num_intercepts) : (i += 1) {
         const key = intercepts[i];
@@ -638,6 +847,7 @@ pub fn aimLineAttack(source: *MapObject, angle: Angle, distance: Fixed) Fixed {
     gatherIntercepts(lvl, source.x, source.y, x2, y2, true);
 
     for (intercepts[0..num_intercepts]) |*in| {
+        if (in.frac.raw() > 0x10000) break; // beyond trace range
         if (in.line) |li| {
             // Two-sided lines narrow the vertical aim window
             const line = &lvl.lines[li];
@@ -666,7 +876,7 @@ pub fn aimLineAttack(source: *MapObject, angle: Angle, distance: Fixed) Fixed {
 
         const mo = in.thing.?;
         if (mo == source) continue;
-        if (mo.health <= 0) continue;
+        if (mo.flags & info.MF_SHOOTABLE == 0) continue; // corpse or something
 
         const dist = Fixed.mul(distance, in.frac);
         if (dist.raw() <= 0) continue;
@@ -716,6 +926,7 @@ pub fn lineAttack(
     gatherIntercepts(lvl, source.x, source.y, x2, y2, true);
 
     for (intercepts[0..num_intercepts]) |*in| {
+        if (in.frac.raw() > 0x10000) break; // beyond trace range
         if (in.line) |li| {
             const line = &lvl.lines[li];
 
@@ -753,11 +964,16 @@ pub fn lineAttack(
             const py = Fixed.add(source.y, Fixed.mul(Fixed.mul(range, frac_back), tables.finesine[fine & tables.FINEMASK]));
             const pz = Fixed.add(shootz, Fixed.mul(aim_slope, Fixed.mul(range, frac_back)));
 
-            // No puff on sky walls/ceilings
+            // No puff on sky walls/ceilings (vanilla PTR_ShootTraverse)
             if (line.frontsector) |fi| {
                 const front = &lvl.sectors[fi];
-                if (front.ceilingpic == world.sky_flatnum and pz.raw() > front.ceilingheight.raw()) {
-                    return;
+                if (front.ceilingpic == world.sky_flatnum) {
+                    // don't shoot the sky!
+                    if (pz.raw() > front.ceilingheight.raw()) return;
+                    // it's a sky hack wall
+                    if (line.backsector) |bi| {
+                        if (lvl.sectors[bi].ceilingpic == world.sky_flatnum) return;
+                    }
                 }
             }
 
@@ -813,6 +1029,7 @@ pub fn useLines(player_mo: *MapObject) void {
     gatherIntercepts(lvl, player_mo.x, player_mo.y, x2, y2, false);
 
     for (intercepts[0..num_intercepts]) |*in| {
+        if (in.frac.raw() > 0x10000) break; // beyond trace range
         const li = in.line orelse continue;
         const line = &lvl.lines[li];
 
@@ -836,63 +1053,255 @@ pub fn useLines(player_mo: *MapObject) void {
 // Radius Attack (P_RadiusAttack — explosion)
 // ============================================================================
 
-/// Apply explosion damage to all shootable things within range.
+/// Apply explosion damage to all shootable things within range
+/// (vanilla P_RadiusAttack: blockmap cells around the blast).
 pub fn radiusAttack(spot: *MapObject, source: ?*MapObject, damage: i32) void {
+    const lvl = world.level orelse return;
+
+    const dist_f: i64 = (@as(i64, damage) << 16) + level_mod.MAXRADIUS.raw();
+    const orgx = lvl.bmap_orgx.raw();
+    const orgy = lvl.bmap_orgy.raw();
+    const xl: i32 = @intCast((@as(i64, spot.x.raw()) - dist_f - orgx) >> MAPBLOCKSHIFT);
+    const xh: i32 = @intCast((@as(i64, spot.x.raw()) + dist_f - orgx) >> MAPBLOCKSHIFT);
+    const yl: i32 = @intCast((@as(i64, spot.y.raw()) - dist_f - orgy) >> MAPBLOCKSHIFT);
+    const yh: i32 = @intCast((@as(i64, spot.y.raw()) + dist_f - orgy) >> MAPBLOCKSHIFT);
+
     const Ctx = struct { spot: *MapObject, source: ?*MapObject, damage: i32 };
     const ctx = Ctx{ .spot = spot, .source = source, .damage = damage };
-    _ = forEachMobj(ctx, struct {
-        fn cb(c: Ctx, mo: *MapObject) bool {
-            if (mo.flags & info.MF_SHOOTABLE == 0) return true;
-            if (mo == c.spot) return true;
 
-            const dx = Fixed.sub(mo.x, c.spot.x).abs();
-            const dy = Fixed.sub(mo.y, c.spot.y).abs();
-            var dist = (if (dx.raw() > dy.raw()) dx else dy).toInt() - mo.radius.toInt();
-            if (dist < 0) dist = 0;
-            if (dist >= c.damage) return true; // Out of range
+    // Vanilla iterates y outer, x inner — the order things take splash
+    // damage (and roll pain chances) must match for demo sync.
+    var by = yl;
+    while (by <= yh) : (by += 1) {
+        var bx = xl;
+        while (bx <= xh) : (bx += 1) {
+            _ = blockThings(lvl, bx, by, ctx, struct {
+                fn cb(c: Ctx, mo: *MapObject) bool {
+                    if (mo.flags & info.MF_SHOOTABLE == 0) return true;
 
-            // Must have line of sight to take blast damage
-            if (world.level) |lvl| {
-                if (!sight.checkSight(mo, c.spot, lvl)) return true;
-            }
+                    // Boss spider and cyborg take no concussion damage
+                    if (mo.mobj_type == .MT_CYBORG or mo.mobj_type == .MT_SPIDER) return true;
 
-            inter.damageMobj(mo, c.spot, c.source, c.damage - dist);
-            return true;
+                    const dx = Fixed.sub(mo.x, c.spot.x).abs();
+                    const dy = Fixed.sub(mo.y, c.spot.y).abs();
+                    // Chebyshev distance minus radius, in FIXED, then >>16
+                    const dist_fx = (if (dx.raw() > dy.raw()) dx else dy).raw() - mo.radius.raw();
+                    var dist: i32 = dist_fx >> 16;
+                    if (dist < 0) dist = 0;
+                    if (dist >= c.damage) return true; // Out of range
+
+                    // Must have line of sight to take blast damage
+                    if (world.level) |l2| {
+                        if (!sight.checkSight(mo, c.spot, l2)) return true;
+                    }
+
+                    inter.damageMobj(mo, c.spot, c.source, c.damage - dist);
+                    return true;
+                }
+            }.cb);
         }
-    }.cb);
+    }
 }
 
 // ============================================================================
-// Sector height changes (P_ChangeSector lite)
+// Sector height changes (vanilla P_ChangeSector / P_ThingHeightClip)
 // ============================================================================
 
-/// After a sector's floor/ceiling moves, refit every mobj standing in it:
-/// update floorz/ceilingz and carry grounded things with a rising floor.
-pub fn changeSector(lvl: *setup.Level, sector_idx: usize) void {
-    const sec = &lvl.sectors[sector_idx];
-    const Ctx = struct { lvl: *setup.Level, sec: *setup.Sector, idx: usize };
-    const ctx = Ctx{ .lvl = lvl, .sec = sec, .idx = sector_idx };
-    _ = forEachMobj(ctx, struct {
-        fn cb(c: Ctx, mo: *MapObject) bool {
-            const mosec = sectorAtPoint(c.lvl, mo.x, mo.y) orelse return true;
-            if (mosec != c.sec) return true;
+/// P_ThingHeightClip — after a sector height change, re-derive the thing's
+/// floorz/ceilingz from its current position and snap grounded things to the
+/// (possibly moved) floor. Returns false if the thing no longer fits.
+fn thingHeightClip(thing: *MapObject) bool {
+    const onfloor = thing.z.raw() == thing.floorz.raw();
 
-            const was_grounded = mo.z.raw() <= mo.floorz.raw();
-            mo.floorz = c.sec.floorheight;
-            mo.ceilingz = c.sec.ceilingheight;
+    _ = checkPosition(thing, thing.x, thing.y);
+    thing.floorz = tm_floorz;
+    thing.ceilingz = tm_ceilingz;
 
-            if (was_grounded or mo.z.raw() < mo.floorz.raw()) {
-                // Ride the floor (or get pushed up by it)
-                mo.z = mo.floorz;
-            }
-            // Squeezed against the ceiling?
-            if (Fixed.add(mo.z, mo.height).raw() > mo.ceilingz.raw()) {
-                mo.z = Fixed.sub(mo.ceilingz, mo.height);
-                if (mo.z.raw() < mo.floorz.raw()) mo.z = mo.floorz;
-            }
-            return true;
+    if (onfloor) {
+        // walking monsters rise and fall with the floor
+        thing.z = thing.floorz;
+    } else {
+        // don't adjust a floating monster unless forced to
+        if (Fixed.add(thing.z, thing.height).raw() > thing.ceilingz.raw())
+            thing.z = Fixed.sub(thing.ceilingz, thing.height);
+    }
+
+    return Fixed.sub(thing.ceilingz, thing.floorz).raw() >= thing.height.raw();
+}
+
+var cs_nofit: bool = false;
+var cs_crushchange: bool = false;
+
+/// PIT_ChangeSector — refit one thing; gib corpses, destroy dropped items,
+/// flag nofit and apply crush damage every 4th tic.
+fn pitChangeSector(_: u8, thing: *MapObject) bool {
+    if (thingHeightClip(thing)) return true; // keep checking
+
+    // crunch bodies to giblets
+    if (thing.health <= 0) {
+        _ = thing.setState(.S_GIBS);
+        thing.flags &= ~info.MF_SOLID;
+        thing.height = Fixed.ZERO;
+        thing.radius = Fixed.ZERO;
+        return true;
+    }
+
+    // crunch dropped items
+    if (thing.flags & info.MF_DROPPED != 0) {
+        mobj_mod.removeMobj(thing);
+        return true;
+    }
+
+    if (thing.flags & info.MF_SHOOTABLE == 0) {
+        // assume it is bloody gibs or something
+        return true;
+    }
+
+    cs_nofit = true;
+
+    if (cs_crushchange and (world.leveltime & 3) == 0) {
+        inter.damageMobj(thing, null, null, 10);
+
+        // spray blood in a random direction
+        if (world.allocator) |alloc| {
+            const bz = Fixed.add(thing.z, Fixed.fromRaw(thing.height.raw() >> 1));
+            if (mobj_mod.spawnMobj(thing.x, thing.y, bz, .MT_BLOOD, alloc)) |mo| {
+                mo.momx = Fixed.fromRaw(random.pSubRandom() << 12);
+                mo.momy = Fixed.fromRaw(random.pSubRandom() << 12);
+            } else |_| {}
         }
-    }.cb);
+    }
+
+    // keep checking (crush other things)
+    return true;
+}
+
+/// P_ChangeSector — after modifying a sector's floor or ceiling height,
+/// re-check every thing in the sector's blockmap box. Returns true if
+/// anything no longer fits.
+pub fn changeSector(lvl: *setup.Level, sector_idx: usize, crunch: bool) bool {
+    cs_nofit = false;
+    cs_crushchange = crunch;
+
+    const bb = lvl.sectors[sector_idx].blockbox; // [top, bottom, left, right]
+    var x = bb[2];
+    while (x <= bb[3]) : (x += 1) {
+        var y = bb[1];
+        while (y <= bb[0]) : (y += 1) {
+            _ = blockThings(lvl, x, y, @as(u8, 0), pitChangeSector);
+        }
+    }
+
+    return cs_nofit;
+}
+
+// ============================================================================
+// T_MovePlane (vanilla p_floor.c) — the single sector plane mover
+// ============================================================================
+
+pub const PlaneResult = enum { ok, crushed, pastdest };
+
+/// Move a sector's floor (floor_or_ceiling=0) or ceiling (=1) by speed
+/// toward dest. Faithful port: strict overshoot compares (landing exactly
+/// on dest returns ok; pastdest fires the NEXT tic) and P_ChangeSector
+/// crush handling with height restore.
+pub fn movePlane(
+    lvl: *setup.Level,
+    sector_idx: usize,
+    speed: Fixed,
+    dest: Fixed,
+    crush: bool,
+    floor_or_ceiling: i32,
+    direction: i32,
+) PlaneResult {
+    const sector = &lvl.sectors[sector_idx];
+
+    switch (floor_or_ceiling) {
+        0 => switch (direction) {
+            -1 => { // floor DOWN
+                if (Fixed.sub(sector.floorheight, speed).raw() < dest.raw()) {
+                    const lastpos = sector.floorheight;
+                    sector.floorheight = dest;
+                    if (changeSector(lvl, sector_idx, crush)) {
+                        sector.floorheight = lastpos;
+                        _ = changeSector(lvl, sector_idx, crush);
+                    }
+                    return .pastdest;
+                } else {
+                    const lastpos = sector.floorheight;
+                    sector.floorheight = Fixed.sub(sector.floorheight, speed);
+                    if (changeSector(lvl, sector_idx, crush)) {
+                        sector.floorheight = lastpos;
+                        _ = changeSector(lvl, sector_idx, crush);
+                        return .crushed;
+                    }
+                }
+            },
+            1 => { // floor UP
+                if (Fixed.add(sector.floorheight, speed).raw() > dest.raw()) {
+                    const lastpos = sector.floorheight;
+                    sector.floorheight = dest;
+                    if (changeSector(lvl, sector_idx, crush)) {
+                        sector.floorheight = lastpos;
+                        _ = changeSector(lvl, sector_idx, crush);
+                    }
+                    return .pastdest;
+                } else {
+                    // COULD GET CRUSHED
+                    const lastpos = sector.floorheight;
+                    sector.floorheight = Fixed.add(sector.floorheight, speed);
+                    if (changeSector(lvl, sector_idx, crush)) {
+                        if (crush) return .crushed;
+                        sector.floorheight = lastpos;
+                        _ = changeSector(lvl, sector_idx, crush);
+                        return .crushed;
+                    }
+                }
+            },
+            else => {},
+        },
+        1 => switch (direction) {
+            -1 => { // ceiling DOWN
+                if (Fixed.sub(sector.ceilingheight, speed).raw() < dest.raw()) {
+                    const lastpos = sector.ceilingheight;
+                    sector.ceilingheight = dest;
+                    if (changeSector(lvl, sector_idx, crush)) {
+                        sector.ceilingheight = lastpos;
+                        _ = changeSector(lvl, sector_idx, crush);
+                    }
+                    return .pastdest;
+                } else {
+                    // COULD GET CRUSHED
+                    const lastpos = sector.ceilingheight;
+                    sector.ceilingheight = Fixed.sub(sector.ceilingheight, speed);
+                    if (changeSector(lvl, sector_idx, crush)) {
+                        if (crush) return .crushed;
+                        sector.ceilingheight = lastpos;
+                        _ = changeSector(lvl, sector_idx, crush);
+                        return .crushed;
+                    }
+                }
+            },
+            1 => { // ceiling UP
+                if (Fixed.add(sector.ceilingheight, speed).raw() > dest.raw()) {
+                    const lastpos = sector.ceilingheight;
+                    sector.ceilingheight = dest;
+                    if (changeSector(lvl, sector_idx, crush)) {
+                        sector.ceilingheight = lastpos;
+                        _ = changeSector(lvl, sector_idx, crush);
+                    }
+                    return .pastdest;
+                } else {
+                    sector.ceilingheight = Fixed.add(sector.ceilingheight, speed);
+                    _ = changeSector(lvl, sector_idx, crush);
+                }
+            },
+            else => {},
+        },
+        else => {},
+    }
+
+    return .ok;
 }
 
 // ============================================================================

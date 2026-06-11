@@ -84,6 +84,7 @@ fn recursiveSound(lvl: *setup.Level, sec_idx: usize, soundblocks: i32, emitter: 
 /// P_NoiseAlert — wake monsters when the player fires, by flooding the
 /// sector graph with a sound target that A_Look picks up.
 pub fn noiseAlert(emitter: *MapObject) void {
+
     const lvl = world.level orelse return;
     const sec = map_mod.sectorAtPoint(lvl, emitter.x, emitter.y) orelse return;
     const sec_idx = (@intFromPtr(sec) - @intFromPtr(lvl.sectors.ptr)) / @sizeOf(setup.Sector);
@@ -255,8 +256,8 @@ pub fn A_Chase(actor_ptr: *anyopaque) void {
         newChaseDir(actor);
     }
 
-    // Occasionally grunt
-    if (random.pRandom() < 3 and mobj_info.active_sound != 0) {
+    // Occasionally grunt (vanilla checks activesound BEFORE rolling)
+    if (mobj_info.active_sound != 0 and random.pRandom() < 3) {
         world.playSound(@ptrCast(actor), mobj_info.active_sound);
     }
 }

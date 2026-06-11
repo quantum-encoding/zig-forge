@@ -44,11 +44,11 @@ fn xToViewAngle(x: i32) Angle {
     return if (dx > 0) a else 0 -% a;
 }
 
-/// tan(angle) using this codebase's finetangent convention:
-/// finetangent[i] = tan((2048.5 - i)*pi/4096), so i = 2048 - (signed_angle >> 19).
+/// tan(angle) for a signed view-relative angle using the VANILLA table:
+/// finetangent[i] = tan((i - 2048 + 0.5)*pi/4096), so i = 2048 + (angle >> 19).
 fn fineTan(angle: Angle) Fixed {
     const s: i32 = @bitCast(angle);
-    var i: i32 = 2048 - (s >> tables.ANGLETOFINESHIFT);
+    var i: i32 = 2048 + (s >> tables.ANGLETOFINESHIFT);
     if (i < 0) i = 0;
     if (i > 4095) i = 4095;
     return tables.finetangent[@intCast(i)];

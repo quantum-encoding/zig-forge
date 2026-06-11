@@ -311,27 +311,27 @@ pub fn touchSpecialThing(special: *MapObject, toucher: *MapObject) bool {
         // Weapons
         .MT_MISC29 => blk: {
             pickup_sfx = .wpnup;
-            break :blk giveWeapon(player_ptr, .shotgun);
+            break :blk giveWeapon(player_ptr, .shotgun, dropped);
         },
         .MT_CHAINGUN => blk: {
             pickup_sfx = .wpnup;
-            break :blk giveWeapon(player_ptr, .chaingun);
+            break :blk giveWeapon(player_ptr, .chaingun, dropped);
         },
         .MT_MISC25 => blk: {
             pickup_sfx = .wpnup;
-            break :blk giveWeapon(player_ptr, .bfg);
+            break :blk giveWeapon(player_ptr, .bfg, dropped);
         },
         .MT_MISC26 => blk: {
             pickup_sfx = .wpnup;
-            break :blk giveWeapon(player_ptr, .chainsaw);
+            break :blk giveWeapon(player_ptr, .chainsaw, dropped);
         },
         .MT_MISC27 => blk: {
             pickup_sfx = .wpnup;
-            break :blk giveWeapon(player_ptr, .missile);
+            break :blk giveWeapon(player_ptr, .missile, dropped);
         },
         .MT_MISC28 => blk: {
             pickup_sfx = .wpnup;
-            break :blk giveWeapon(player_ptr, .plasma);
+            break :blk giveWeapon(player_ptr, .plasma, dropped);
         },
 
         else => false,
@@ -420,19 +420,55 @@ fn giveAmmo(player: *Player, ammo_type: defs.AmmoType, count: i32, dropped: bool
     if (dropped) amount = @divTrunc(amount, 2);
     if (amount < 1) amount = 1;
 
+    const oldammo = player.ammo[idx];
     player.ammo[idx] += amount;
     if (player.ammo[idx] > player.max_ammo[idx]) {
         player.ammo[idx] = player.max_ammo[idx];
     }
 
     player.bonus_count += 6;
+
+    if (oldammo > 0) return true;
+
+    // We were down to zero: auto-select a better weapon (vanilla P_GiveAmmo)
+    switch (ammo_type) {
+        .clip => {
+            if (player.ready_weapon == .fist) {
+                player.pending_weapon = if (player.weapon_owned[@intFromEnum(defs.WeaponType.chaingun)])
+                    .chaingun
+                else
+                    .pistol;
+            }
+        },
+        .shell => {
+            if (player.ready_weapon == .fist or player.ready_weapon == .pistol) {
+                if (player.weapon_owned[@intFromEnum(defs.WeaponType.shotgun)]) {
+                    player.pending_weapon = .shotgun;
+                }
+            }
+        },
+        .cell => {
+            if (player.ready_weapon == .fist or player.ready_weapon == .pistol) {
+                if (player.weapon_owned[@intFromEnum(defs.WeaponType.plasma)]) {
+                    player.pending_weapon = .plasma;
+                }
+            }
+        },
+        .missile => {
+            if (player.ready_weapon == .fist) {
+                if (player.weapon_owned[@intFromEnum(defs.WeaponType.missile)]) {
+                    player.pending_weapon = .missile;
+                }
+            }
+        },
+        else => {},
+    }
     return true;
 }
 
-fn giveWeapon(player: *Player, weapon: defs.WeaponType) bool {
+fn giveWeapon(player: *Player, weapon: defs.WeaponType, dropped: bool) bool {
     const idx = @intFromEnum(weapon);
     const already_had = player.weapon_owned[idx];
-    player.weapon_owned[idx] = true;
 
     // Give ammo for the weapon
     const ammo_for_weapon = [_]defs.AmmoType{
@@ -447,19 +483,21 @@ fn giveWeapon(player: *Player, weapon: defs.WeaponType) bool {
         .shell, // super shotgun
     };
 
+    // Vanilla: dropped weapons carry 1 clip, placed weapons 2 (no halving)
+    var gave_ammo = false;
     const ammo_type = ammo_for_weapon[idx];
     if (ammo_type != .no_ammo) {
-        // Weapons come with 2 clips' worth (vanilla single-player)
-        _ = giveAmmo(player, ammo_type, 2, false);
+        gave_ammo = giveAmmo(player, ammo_type, if (dropped) 1 else 2, false);
     }
 
-    // Switch to new weapon if better
-    if (!already_had) {
+    const gave_weapon = !already_had;
+    player.weapon_owned[idx] = true;
+    if (gave_weapon) {
         player.pending_weapon = weapon;
     }
 
-    player.bonus_count += 6;
-    return true;
+    if (gave_weapon or gave_ammo) player.bonus_count += 6;
+    return gave_weapon or gave_ammo;
 }
 
 // ============================================================================
@@ -584,7 +622,7 @@ test "give card" {
 test "give weapon" {
     var player = Player{};
 
-    try std.testing.expect(giveWeapon(&player, .shotgun));
+    try std.testing.expect(giveWeapon(&player, .shotgun, false));
     try std.testing.expect(player.weapon_owned[@intFromEnum(defs.WeaponType.shotgun)]);
     try std.testing.expectEqual(defs.WeaponType.shotgun, player.pending_weapon);
     try std.testing.expect(player.ammo[@intFromEnum(defs.AmmoType.shell)] > 0);

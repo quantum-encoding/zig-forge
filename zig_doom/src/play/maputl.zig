@@ -48,16 +48,16 @@ pub fn pointOnLineSide(x: Fixed, y: Fixed, line: *const Line, vertices: []const 
         return if (dx.raw() > 0) @as(i32, 1) else @as(i32, 0);
     }
 
-    // General case: cross product
+    // General case (vanilla P_PointOnLineSide): products go through
+    // FixedMul's 32-bit truncation; equality lands on the BACK side.
     const pdx = Fixed.sub(x, v1.x);
     const pdy = Fixed.sub(y, v1.y);
 
-    // left = (dy>>FRACBITS) * pdx - (dx>>FRACBITS) * pdy
-    const left: i64 = @as(i64, dy.raw() >> 16) * @as(i64, pdx.raw());
-    const right: i64 = @as(i64, dx.raw() >> 16) * @as(i64, pdy.raw());
+    const left = Fixed.mul(Fixed.fromRaw(dy.raw() >> 16), pdx).raw();
+    const right = Fixed.mul(pdy, Fixed.fromRaw(dx.raw() >> 16)).raw();
 
-    if (left < right) return 1; // back side
-    return 0; // front side
+    if (right < left) return 0; // front side
+    return 1; // back side
 }
 
 /// Returns 0 if box is on front side, 1 if on back side, -1 if box crosses the line.
@@ -103,65 +103,66 @@ pub fn boxOnLineSide(box: *const BBox, line: *const Line, vertices: []const Vert
 /// Calculate the angle from (x1,y1) to (x2,y2).
 /// Returns a binary angle (0 = east, ANG90 = north).
 pub fn pointToAngle2(x1: Fixed, y1: Fixed, x2: Fixed, y2: Fixed) Angle {
-    const dx = Fixed.sub(x2, x1);
-    const dy = Fixed.sub(y2, y1);
+    // Vanilla R_PointToAngle2 — octant decomposition with SlopeDiv/tantoangle
+    const x = x2.raw() -% x1.raw();
+    const y = y2.raw() -% y1.raw();
 
-    if (dx.raw() == 0 and dy.raw() == 0) return 0;
+    if (x == 0 and y == 0) return 0;
 
-    if (dx.raw() >= 0) {
-        if (dy.raw() >= 0) {
-            // First quadrant
-            if (dx.raw() == 0) return ANG90;
-            if (dy.raw() == 0) return 0;
-            return slopeToAngle(dy, dx);
+    if (x >= 0) {
+        if (y >= 0) {
+            if (x > y) {
+                return tables.tantoangle[slopeDiv(@intCast(y), @intCast(x))]; // octant 0
+            } else {
+                return ANG90 -% 1 -% tables.tantoangle[slopeDiv(@intCast(x), @intCast(y))]; // octant 1
+            }
         } else {
-            // Fourth quadrant
-            if (dx.raw() == 0) return ANG270;
-            return 0 -% slopeToAngle(dy.negate(), dx);
+            const ay: u32 = @intCast(-y);
+            if (x > ay) {
+                return 0 -% tables.tantoangle[slopeDiv(ay, @intCast(x))]; // octant 8
+            } else {
+                return ANG270 +% tables.tantoangle[slopeDiv(@intCast(x), ay)]; // octant 7
+            }
         }
     } else {
-        if (dy.raw() >= 0) {
-            // Second quadrant
-            if (dy.raw() == 0) return ANG180;
-            return ANG180 -% slopeToAngle(dy, dx.negate());
+        const ax: u32 = @intCast(-x);
+        if (y >= 0) {
+            if (ax > y) {
+                return ANG180 -% 1 -% tables.tantoangle[slopeDiv(@intCast(y), ax)]; // octant 3
+            } else {
+                return ANG90 +% tables.tantoangle[slopeDiv(ax, @intCast(y))]; // octant 2
+            }
         } else {
-            // Third quadrant
-            return ANG180 +% slopeToAngle(dy.negate(), dx.negate());
+            const ay: u32 = @intCast(-y);
+            if (ax > ay) {
+                return ANG180 +% tables.tantoangle[slopeDiv(ay, ax)]; // octant 4
+            } else {
+                return ANG270 -% 1 -% tables.tantoangle[slopeDiv(ax, ay)]; // octant 5
+            }
         }
     }
 }
 
-fn slopeToAngle(num: Fixed, den: Fixed) Angle {
-    if (den.raw() == 0) return ANG90;
-
-    // Use tantoangle table: slope = num/den, index = slope * 2048
-    if (num.abs().raw() <= den.abs().raw()) {
-        const slope = Fixed.div(num, den);
-        var idx: u32 = @intCast(@min(2048, @as(u32, @intCast(@max(0, slope.raw()))) >> 5));
-        if (idx > 2048) idx = 2048;
-        return tables.tantoangle[idx];
-    } else {
-        const slope = Fixed.div(den, num);
-        var idx: u32 = @intCast(@min(2048, @as(u32, @intCast(@max(0, slope.raw()))) >> 5));
-        if (idx > 2048) idx = 2048;
-        return ANG90 -% tables.tantoangle[idx];
-    }
+/// Vanilla SlopeDiv
+fn slopeDiv(num: u32, den: u32) u32 {
+    if (den < 512) return 2048;
+    const ans = (num << 3) / (den >> 8);
+    return if (ans <= 2048) ans else 2048;
 }
+
 
 /// Approximate distance between two points.
 /// Uses DOOM's approximation: max(|dx|, |dy|) + min(|dx|, |dy|) / 2
-pub fn aproxDistance(dx: Fixed, dy: Fixed) Fixed {
-    var adx = dx.abs();
-    var ady = dy.abs();
-
-    if (ady.raw() > adx.raw()) {
-        const tmp = adx;
-        adx = ady;
-        ady = tmp;
+pub fn aproxDistance(dx_in: Fixed, dy_in: Fixed) Fixed {
+    // Vanilla P_AproxDistance: dx + dy - (min >> 1)
+    const dx = dx_in.abs().raw();
+    const dy = dy_in.abs().raw();
+    if (dx < dy) {
+        return Fixed.fromRaw(dx +% dy -% (dx >> 1));
     }
-
-    return Fixed.fromRaw(adx.raw() +% @divTrunc(ady.raw(), 2));
+    return Fixed.fromRaw(dx +% dy -% (dy >> 1));
 }
+
 
 /// Calculate the opening (gap) between floor and ceiling at a line.
 /// Returns opening height, top/bottom of opening, and lowest floor.
@@ -219,17 +220,18 @@ pub fn interceptVector(
     v1dx: Fixed,
     v1dy: Fixed,
 ) Fixed {
-    const den_wide: i64 = @as(i64, v1dy.raw() >> 8) * @as(i64, v2dx.raw()) -
-        @as(i64, v1dx.raw() >> 8) * @as(i64, v2dy.raw());
+    // Vanilla P_InterceptVector: every product goes through FixedMul
+    // (truncated to 32 bits) BEFORE combining — the rounding (and wrapping)
+    // is part of demo-sync behavior.
+    const den = Fixed.mul(Fixed.fromRaw(v1dy.raw() >> 8), v2dx).raw() -%
+        Fixed.mul(Fixed.fromRaw(v1dx.raw() >> 8), v2dy).raw();
 
-    if (den_wide == 0) return Fixed.ZERO;
+    if (den == 0) return Fixed.ZERO;
 
-    const num_wide: i64 = @as(i64, (v1x.raw() - v2x.raw()) >> 8) * @as(i64, v1dy.raw()) +
-        @as(i64, (v2y.raw() - v1y.raw()) >> 8) * @as(i64, v1dx.raw());
+    const num = Fixed.mul(Fixed.fromRaw((v1x.raw() -% v2x.raw()) >> 8), v1dy).raw() +%
+        Fixed.mul(Fixed.fromRaw((v2y.raw() -% v1y.raw()) >> 8), v1dx).raw();
 
-    const frac: i64 = @divTrunc(num_wide << 16, den_wide);
-
-    return Fixed.fromRaw(@as(i32, @truncate(frac)));
+    return Fixed.div(Fixed.fromRaw(num), Fixed.fromRaw(den));
 }
 
 // ============================================================================
@@ -263,11 +265,53 @@ pub fn pointOnDivlineSide(x: Fixed, y: Fixed, line: *const DivLine) i32 {
     const pdx = Fixed.sub(x, line.x);
     const pdy = Fixed.sub(y, line.y);
 
-    const left: i64 = @as(i64, line.dy.raw() >> 16) * @as(i64, pdx.raw());
-    const right: i64 = @as(i64, line.dx.raw() >> 16) * @as(i64, pdy.raw());
+    // Vanilla sign-bit shortcut
+    const sx: u32 = @bitCast(line.dy.raw() ^ line.dx.raw() ^ pdx.raw() ^ pdy.raw());
+    if (sx & 0x80000000 != 0) {
+        const sb: u32 = @bitCast(line.dy.raw() ^ pdx.raw());
+        if (sb & 0x80000000 != 0) return 1;
+        return 0;
+    }
 
-    if (left < right) return 1;
-    return 0;
+    const left = Fixed.mul(Fixed.fromRaw(line.dy.raw() >> 8), Fixed.fromRaw(pdx.raw() >> 8)).raw();
+    const right = Fixed.mul(Fixed.fromRaw(pdy.raw() >> 8), Fixed.fromRaw(line.dx.raw() >> 8)).raw();
+
+    if (right < left) return 0;
+    return 1;
+}
+
+/// R_PointOnSide — BSP node side test (r_main.c, coarse FixedMul rounding).
+/// Used by ALL simulation point-in-sector lookups for demo-sync exactness.
+pub fn rPointOnSide(x: Fixed, y: Fixed, nx: Fixed, ny: Fixed, ndx: Fixed, ndy: Fixed) usize {
+    if (ndx.raw() == 0) {
+        if (x.raw() <= nx.raw()) {
+            return if (ndy.raw() > 0) 1 else 0;
+        }
+        return if (ndy.raw() < 0) 1 else 0;
+    }
+    if (ndy.raw() == 0) {
+        if (y.raw() <= ny.raw()) {
+            return if (ndx.raw() < 0) 1 else 0;
+        }
+        return if (ndx.raw() < 0) 0 else 1;
+    }
+
+    const dx = Fixed.sub(x, nx);
+    const dy = Fixed.sub(y, ny);
+
+    // Try to quickly decide by looking at sign bits
+    const sx: u32 = @bitCast(ndy.raw() ^ ndx.raw() ^ dx.raw() ^ dy.raw());
+    if (sx & 0x80000000 != 0) {
+        const sb: u32 = @bitCast(ndy.raw() ^ dx.raw());
+        if (sb & 0x80000000 != 0) return 1;
+        return 0;
+    }
+
+    const left = Fixed.mul(Fixed.fromRaw(ndy.raw() >> 16), dx).raw();
+    const right = Fixed.mul(dy, Fixed.fromRaw(ndx.raw() >> 16)).raw();
+
+    if (right < left) return 0;
+    return 1;
 }
 
 // ============================================================================

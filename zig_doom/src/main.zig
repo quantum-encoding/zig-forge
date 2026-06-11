@@ -153,6 +153,8 @@ pub fn main(init: std.process.Init) !void {
     var demo_name: ?[]const u8 = null;
     var dump_every: u32 = 0; // --dump-frames N: write frame_NNNNN.ppm every N tics during --playdemo
     var view_override: ?ViewOverride = null; // --view x,y,deg for --render-frame
+    var trace_path: ?[]const u8 = null; // --trace <path>: per-tic sync trace during --playdemo
+    var debug_rng_tic_arg: u32 = 0; // --rng-tic N: stack-trace pRandom calls during tic N
 
     var args = std.process.Args.Iterator.init(init.minimal.args);
     _ = args.next(); // skip program name
@@ -206,6 +208,10 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--playdemo")) {
             command = .playdemo;
             demo_name = args.next();
+        } else if (std.mem.eql(u8, arg, "--trace")) {
+            trace_path = args.next();
+        } else if (std.mem.eql(u8, arg, "--rng-tic")) {
+            if (args.next()) |v| debug_rng_tic_arg = std.fmt.parseInt(u32, v, 10) catch 0;
         } else if (std.mem.eql(u8, arg, "--dump-frames")) {
             if (args.next()) |s| {
                 dump_every = std.fmt.parseInt(u32, s, 10) catch 0;
@@ -284,8 +290,8 @@ pub fn main(init: std.process.Init) !void {
         .render_frame => try renderFrameCmd(&w, map_name orelse "E1M1", output_path, view_override, alloc),
         .play => try playCmd(&w, output_path, alloc),
         .run => try runCmd(&w, platform_name, alloc, opt_skill, opt_episode, opt_warp),
-        .playdemo => try playDemoCmd(&w, demo_name orelse "DEMO1", output_path, dump_every, alloc),
-        .timedemo => try playDemoCmd(&w, demo_name orelse "DEMO1", output_path, dump_every, alloc),
+        .playdemo => try playDemoCmd(&w, demo_name orelse "DEMO1", output_path, dump_every, trace_path, debug_rng_tic_arg, alloc),
+        .timedemo => try playDemoCmd(&w, demo_name orelse "DEMO1", output_path, dump_every, trace_path, debug_rng_tic_arg, alloc),
         .none => try writeStr("DOOM initialized. Use --dump-lumps, --dump-map, --render-frame, --play, or --run.\n"),
         .help => {},
     }
@@ -406,7 +412,7 @@ fn runCmd(w: *wad.Wad, platform_name: []const u8, alloc: std.mem.Allocator, opt_
 }
 
 /// Play a demo lump from the WAD
-fn playDemoCmd(w: *wad.Wad, demo_name: []const u8, output_path: []const u8, dump_every: u32, alloc: std.mem.Allocator) !void {
+fn playDemoCmd(w: *wad.Wad, demo_name: []const u8, output_path: []const u8, dump_every: u32, trace_path: ?[]const u8, debug_rng_tic: u32, alloc: std.mem.Allocator) !void {
     try writeStr("Playing demo: ");
     try writeStr(demo_name);
     try writeStr("\n");
@@ -438,6 +444,7 @@ fn playDemoCmd(w: *wad.Wad, demo_name: []const u8, output_path: []const u8, dump
     try writeStr("\n");
 
     // Initialize game and load the demo's level
+    game_mod.spawn_debug = debug_rng_tic == 9999;
     var game = game_mod.Game.init(w, alloc);
     game.demo_playback = true;
 
@@ -454,6 +461,22 @@ fn playDemoCmd(w: *wad.Wad, demo_name: []const u8, output_path: []const u8, dump
     // Run demo tics
     var tic_count: u32 = 0;
     const max_tics: u32 = 35 * 60 * 10; // Max 10 minutes
+
+    // Optional per-tic sync trace (C stdio — same as writePPM)
+    const cio = @cImport({
+        @cInclude("stdio.h");
+    });
+    var trace_file: ?*cio.FILE = null;
+    if (trace_path) |tp| {
+        const tpz = alloc.dupeZ(u8, tp) catch null;
+        if (tpz) |z| {
+            trace_file = cio.fopen(z.ptr, "w");
+            alloc.free(z);
+        }
+    }
+    defer if (trace_file) |tf| {
+        _ = cio.fclose(tf);
+    };
 
     // Per-second movement trace (sync QA: a desynced player gets stuck)
     var move_per_sec: [600]u32 = [_]u32{0} ** 600;
@@ -473,8 +496,71 @@ fn playDemoCmd(w: *wad.Wad, demo_name: []const u8, output_path: []const u8, dump
         if (!demo_state.readTicCmd(&cmd)) break;
 
         game.players[game.consoleplayer].cmd = cmd;
+        @import("random.zig").debug_trace = (tic_count + 1 == debug_rng_tic);
         game.ticker();
+        @import("random.zig").debug_trace = false;
         tic_count += 1;
+
+        // Sync trace (diffed against the instrumented chocolate-doom)
+        if (trace_file) |tf| {
+            if (game.players[game.consoleplayer].mobj) |mo| {
+                var tbuf: [192]u8 = undefined;
+                const wrld = @import("play/world.zig");
+                var tmx: i32 = 0;
+                var tmy: i32 = 0;
+                var tmd: i32 = 0;
+                if (wrld.trace_mobj) |tm| {
+                    const tmo: *mobj_mod.MapObject = @ptrCast(@alignCast(tm));
+                    tmx = tmo.x.raw();
+                    tmy = tmo.y.raw();
+                    tmd = tmo.movedir;
+                }
+                var chk: u32 = 0;
+                {
+                    const cap = tick.getThinkerCap();
+                    var cur = cap.next;
+                    while (cur != null and cur != cap) {
+                        const th = cur.?;
+                        cur = th.next;
+                        if (th.function) |func| {
+                            if (func == @as(tick.ThinkFn, @ptrCast(&mobj_mod.mobjThinker))) {
+                                const tmo: *mobj_mod.MapObject = @fieldParentPtr("thinker", th);
+                                chk +%= @as(u32, @bitCast(tmo.x.raw())) ^ (@as(u32, @bitCast(tmo.y.raw())) << 1);
+                            }
+                        }
+                    }
+                }
+                const pl = &game.players[game.consoleplayer];
+                var psp_state: i32 = if (pl.psprites[0].state) |st| @intCast((@intFromPtr(st) - @intFromPtr(&@import("info.zig").states[0])) / @sizeOf(@import("info.zig").State)) else -1;
+                if (psp_state >= 32) psp_state += 17; // vanilla numbering has 17 SSG states after S_SGUNFLASH2
+                var schk: u32 = 0;
+                if (@import("play/world.zig").level) |lvl| {
+                    for (lvl.sectors) |*sec| {
+                        schk +%= @as(u32, @bitCast(sec.floorheight.raw())) ^ (@as(u32, @bitCast(sec.ceilingheight.raw())) << 1);
+                    }
+                }
+                const line = std.fmt.bufPrintZ(&tbuf, "S{d} C{d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d}\n", .{
+                    schk,
+                    chk,
+                    game.level_time,
+                    mo.x.raw(),
+                    mo.y.raw(),
+                    mo.angle,
+                    @import("random.zig").getPrndIndex(),
+                    mo.z.raw(),
+                    mo.floorz.raw(),
+                    mo.momx.raw(),
+                    mo.momy.raw(),
+                    tmx,
+                    tmy,
+                    tmd,
+                    @intFromEnum(pl.ready_weapon),
+                    psp_state,
+                    pl.cmd.buttons,
+                }) catch unreachable;
+                _ = cio.fwrite(line.ptr, 1, line.len, tf);
+            }
+        }
 
         if (tic_count % 35 == 0) {
             if (game.players[game.consoleplayer].mobj) |mo| {

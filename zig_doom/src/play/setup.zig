@@ -39,6 +39,9 @@ pub const Sector = struct {
     // Active door/ceiling thinker on this sector (vanilla specialdata) —
     // points at a doors.VerticalDoor so a re-press can reverse it
     ceilingdata: ?*anyopaque = null,
+    // Blockmap cell range touched by this sector's lines ±MAXRADIUS
+    // (vanilla P_GroupLines): [top, bottom, left, right]
+    blockbox: [4]i32 = .{ 0, 0, 0, 0 },
 };
 
 pub const Side = struct {
@@ -115,6 +118,13 @@ pub const Level = struct {
     blockmap_data: []const u8,
     reject_data: []const u8,
     num_nodes: u16,
+    // Parsed blockmap (vanilla locality semantics for traces + collision)
+    bmap_orgx: Fixed = Fixed.ZERO,
+    bmap_orgy: Fixed = Fixed.ZERO,
+    bmap_cols: i32 = 0,
+    bmap_rows: i32 = 0,
+    // Per-cell mobj chain heads (vanilla blocklinks); *MapObject as anyopaque
+    blocklinks: []?*anyopaque = &[_]?*anyopaque{},
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *Level) void {
@@ -126,9 +136,36 @@ pub const Level = struct {
         self.allocator.free(self.subsectors);
         self.allocator.free(self.nodes);
         self.allocator.free(self.things);
+        if (self.blocklinks.len > 0) self.allocator.free(self.blocklinks);
     }
 
     /// Find player 1 start thing
+    /// Read a u16 from the raw blockmap lump (little-endian word index)
+    pub fn bmapWord(self: *const Level, word_idx: usize) u16 {
+        const off = word_idx * 2;
+        if (off + 2 > self.blockmap_data.len) return 0xFFFF;
+        return @as(u16, self.blockmap_data[off]) | (@as(u16, self.blockmap_data[off + 1]) << 8);
+    }
+
+    /// Iterate the linedef indices stored for blockmap cell (cx, cy).
+    /// Calls cb for each line index; cb returns false to stop.
+    pub fn blockLines(self: *const Level, cx: i32, cy: i32, ctx: anytype, comptime cb: fn (@TypeOf(ctx), u16) bool) bool {
+        if (cx < 0 or cy < 0 or cx >= self.bmap_cols or cy >= self.bmap_rows) return true;
+        const cell: usize = @intCast(cy * self.bmap_cols + cx);
+        var w: usize = self.bmapWord(4 + cell);
+        // VANILLA QUIRK: the list's leading 0 marker is NOT skipped — vanilla
+        // reads it as linedef 0, so line 0 participates in every cell's
+        // checks. Demos depend on it (the player can slide along line 0
+        // from anywhere on the map).
+        while (true) {
+            const v = self.bmapWord(w);
+            if (v == 0xFFFF) break;
+            if (!cb(ctx, v)) return false;
+            w += 1;
+        }
+        return true;
+    }
+
     pub fn findPlayer1Start(self: *const Level) ?defs.MapThing {
         for (self.things) |t| {
             if (t.thing_type == 1) return t; // Type 1 = Player 1 start
@@ -338,7 +375,7 @@ pub fn loadMap(w: *const Wad, map_name: []const u8, alloc: std.mem.Allocator) Se
     const reject_lump = w.findLumpAfter("REJECT", map_lump + 1);
     const blockmap_lump = w.findLumpAfter("BLOCKMAP", map_lump + 1);
 
-    return Level{
+    var lvl = Level{
         .vertices = vertices,
         .sectors = sectors,
         .sides = sides,
@@ -349,9 +386,83 @@ pub fn loadMap(w: *const Wad, map_name: []const u8, alloc: std.mem.Allocator) Se
         .things = things,
         .blockmap_data = if (blockmap_lump) |bl| w.lumpData(bl) else &[_]u8{},
         .reject_data = if (reject_lump) |rl| w.lumpData(rl) else &[_]u8{},
+        .bmap_orgx = blk: {
+            const bd = if (blockmap_lump) |bl| w.lumpData(bl) else &[_]u8{};
+            if (bd.len < 8) break :blk Fixed.ZERO;
+            const v: i16 = @bitCast(@as(u16, bd[0]) | (@as(u16, bd[1]) << 8));
+            break :blk Fixed.fromInt(v);
+        },
+        .bmap_orgy = blk: {
+            const bd = if (blockmap_lump) |bl| w.lumpData(bl) else &[_]u8{};
+            if (bd.len < 8) break :blk Fixed.ZERO;
+            const v: i16 = @bitCast(@as(u16, bd[2]) | (@as(u16, bd[3]) << 8));
+            break :blk Fixed.fromInt(v);
+        },
+        .bmap_cols = blk: {
+            const bd = if (blockmap_lump) |bl| w.lumpData(bl) else &[_]u8{};
+            if (bd.len < 8) break :blk 0;
+            break :blk @as(i32, @as(u16, bd[4]) | (@as(u16, bd[5]) << 8));
+        },
+        .bmap_rows = blk: {
+            const bd = if (blockmap_lump) |bl| w.lumpData(bl) else &[_]u8{};
+            if (bd.len < 8) break :blk 0;
+            break :blk @as(i32, @as(u16, bd[6]) | (@as(u16, bd[7]) << 8));
+        },
         .num_nodes = @intCast(nodes.len),
         .allocator = alloc,
+        .blocklinks = blk: {
+            const bd = if (blockmap_lump) |bl| w.lumpData(bl) else &[_]u8{};
+            if (bd.len < 8) break :blk &[_]?*anyopaque{};
+            const cols: usize = @as(u16, bd[4]) | (@as(u16, bd[5]) << 8);
+            const rows: usize = @as(u16, bd[6]) | (@as(u16, bd[7]) << 8);
+            const links = alloc.alloc(?*anyopaque, cols * rows) catch break :blk &[_]?*anyopaque{};
+            @memset(links, null);
+            break :blk links;
+        },
     };
+
+    // Per-sector blockmap bounding boxes (vanilla P_GroupLines): bbox over
+    // every line touching the sector, expanded by MAXRADIUS, in block coords.
+    // blockbox indices: [top, bottom, left, right] (m_bbox.h order).
+    if (lvl.bmap_cols > 0 and lvl.bmap_rows > 0) {
+        const MAXRADIUS: i32 = 32 * 0x10000;
+        const MAPBLOCKSHIFT: u5 = 23;
+        for (lvl.sectors, 0..) |*sec, si| {
+            var left: i32 = std.math.maxInt(i32);
+            var bottom: i32 = std.math.maxInt(i32);
+            var right: i32 = std.math.minInt(i32);
+            var top: i32 = std.math.minInt(i32);
+            for (lvl.lines) |*li| {
+                const fs = li.frontsector;
+                const bs = li.backsector;
+                const touches = (fs != null and fs.? == si) or
+                    (bs != null and bs.? == si and (fs == null or fs.? != bs.?));
+                if (!touches) continue;
+                for ([2]u16{ li.v1, li.v2 }) |vi| {
+                    const vx = lvl.vertices[vi].x.raw();
+                    const vy = lvl.vertices[vi].y.raw();
+                    if (vx < left) left = vx;
+                    if (vx > right) right = vx;
+                    if (vy < bottom) bottom = vy;
+                    if (vy > top) top = vy;
+                }
+            }
+            if (right < left) { // sector with no lines
+                sec.blockbox = .{ 0, 0, 0, 0 };
+                continue;
+            }
+            var block: i32 = (top - lvl.bmap_orgy.raw() + MAXRADIUS) >> MAPBLOCKSHIFT;
+            sec.blockbox[0] = if (block >= lvl.bmap_rows) lvl.bmap_rows - 1 else block;
+            block = (bottom - lvl.bmap_orgy.raw() - MAXRADIUS) >> MAPBLOCKSHIFT;
+            sec.blockbox[1] = if (block < 0) 0 else block;
+            block = (right - lvl.bmap_orgx.raw() + MAXRADIUS) >> MAPBLOCKSHIFT;
+            sec.blockbox[3] = if (block >= lvl.bmap_cols) lvl.bmap_cols - 1 else block;
+            block = (left - lvl.bmap_orgx.raw() - MAXRADIUS) >> MAPBLOCKSHIFT;
+            sec.blockbox[2] = if (block < 0) 0 else block;
+        }
+    }
+
+    return lvl;
 }
 
 test "level struct sizes" {

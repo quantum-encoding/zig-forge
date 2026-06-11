@@ -60,6 +60,9 @@ const SCREENWIDTH = defs.SCREENWIDTH;
 const SCREENHEIGHT = defs.SCREENHEIGHT;
 const TICRATE = 35;
 
+/// Set true to dump per-thing spawn RNG (demo-sync debugging)
+pub var spawn_debug: bool = false;
+
 pub const Game = struct {
     // Game state machine
     state: defs.GameState = .demoscreen,
@@ -425,9 +428,10 @@ pub const Game = struct {
         world.game_skill = @intFromEnum(self.skill);
         world.sky_flatnum = if (self.rdata) |*rd| rd.flatNumForName("F_SKY1\x00\x00".*) else -1;
 
-        // Spawn sector specials (door/floor/light thinkers, animations)
-        if (self.level) |*lvl| {
-            spec.spawnSpecials(lvl, self.allocator);
+        // Resolve flat/texture names to numbers in the playsim sectors —
+        // hitscan sky checks and floorpic changes compare these numerically
+        if (self.rdata) |*rd| {
+            if (self.level) |*l| rd.resolveNames(l.sides, l.sectors);
         }
 
         // Spawn player and all map things
@@ -467,7 +471,25 @@ pub const Game = struct {
 
                 if (mo.flags & info.MF_COUNTKILL != 0) self.total_kills += 1;
                 if (mo.flags & info.MF_COUNTITEM != 0) self.total_items += 1;
+
+                if (thing.x == -96 and thing.y == -32) {
+                    @import("play/world.zig").trace_mobj = @ptrCast(mo);
+                }
+
+                if (spawn_debug) {
+                    std.debug.print("SPAWN t={d} xy=({d},{d}) prnd={d}\n", .{
+                        thing.thing_type, thing.x, thing.y,
+                        @import("random.zig").getPrndIndex(),
+                    });
+                }
             }
+        }
+
+        // Spawn sector specials AFTER things (vanilla P_SetupLevel order —
+        // the RNG consumed by light-flash spawns must come after the
+        // per-thing spawn randoms or every animation phase shifts).
+        if (self.level) |*lvl| {
+            spec.spawnSpecials(lvl, self.allocator);
         }
 
         self.state = .level;
@@ -554,15 +576,26 @@ pub const Game = struct {
             return;
         }
 
+        // Vanilla leveltime semantics: during the whole tic, leveltime holds
+        // the PRE-increment value (P_Ticker increments it at the end).
+        world.leveltime = self.level_time;
+
         // Process player input (dead players still think — death camera/respawn)
         for (0..MAXPLAYERS) |i| {
             if (self.player_in_game[i]) {
-                // Keep the player's floor/ceiling heights synced to the sector
-                // they're standing in BEFORE thinking — calcHeight clamps the
-                // eye view to [floorz+1, ceilingz-4], and a stale ceilingz of 0
-                // would drag the view below the floor (black floors).
-                if (self.players[i].mobj) |mo| self.updateMobjSectorZ(mo);
+                // floorz/ceilingz are maintained by tryMove + changeSector
+                // (vanilla semantics: refreshing them here would change the
+                // onground decision a tic early and desync demos).
                 user.playerThink(&self.players[i]);
+
+                // Damage floors run inside the player think, BEFORE the mobj
+                // thinker moves/lands this tic (vanilla P_PlayerThink).
+                if (self.players[i].mobj) |mo| {
+                    if (self.sectorAt(mo.x, mo.y)) |sec| {
+                        if (sec.special != 0) spec.playerInSpecialSector(&self.players[i], sec);
+                    }
+                }
+
                 pspr.movePSprites(&self.players[i]);
             }
         }
@@ -571,23 +604,10 @@ pub const Game = struct {
         tick.runThinkers();
 
         // Sector specials: moving floors/ceilings/lights, texture animations,
-        // switch button timeouts, damage floors.
-        world.leveltime = self.level_time;
+        // switch button timeouts.
         if (self.level) |*lvl| {
             spec.updateSpecials(lvl);
             switch_mod.checkButtons(lvl);
-
-            for (0..MAXPLAYERS) |i| {
-                if (!self.player_in_game[i]) continue;
-                const player = &self.players[i];
-                const mo = player.mobj orelse continue;
-                // Damage floors only hurt players standing on the ground
-                if (mo.z.raw() == mo.floorz.raw()) {
-                    if (self.sectorAt(mo.x, mo.y)) |sec| {
-                        if (sec.special != 0) spec.playerInSpecialSector(player, sec);
-                    }
-                }
-            }
         }
 
         // Exit triggers raised by line specials this tic
@@ -616,7 +636,7 @@ pub const Game = struct {
         self.updateMobjSectorZ(mo);
         mo.z = mo.floorz;
 
-        mo.angle = @as(Angle, @intCast(thing.angle)) *% (0x100000000 / 360);
+        mo.angle = fixed.ANG45 *% @as(u32, @intCast(@divTrunc(@as(i32, thing.angle), 45)));
         mo.player = @ptrCast(&self.players[player_num]);
 
         self.players[player_num].mobj = mo;

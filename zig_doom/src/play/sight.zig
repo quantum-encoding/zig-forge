@@ -83,14 +83,8 @@ pub fn checkSight(t1: *const MapObject, t2: *const MapObject, level: ?*const Lev
 fn rejectCheck(t1: *const MapObject, t2: *const MapObject, level: *const Level) bool {
     if (level.reject_data.len == 0) return false;
 
-    // Need sector indices — use subsector_id
-    const s1 = t1.subsector_id orelse return false;
-    const s2 = t2.subsector_id orelse return false;
-
-    if (s1 >= level.subsectors.len or s2 >= level.subsectors.len) return false;
-
-    const sec1 = level.subsectors[s1].sector orelse return false;
-    const sec2 = level.subsectors[s2].sector orelse return false;
+    const sec1 = sectorIndexAt(level, t1.x, t1.y) orelse return false;
+    const sec2 = sectorIndexAt(level, t2.x, t2.y) orelse return false;
 
     const num_sectors = level.sectors.len;
     if (sec1 >= num_sectors or sec2 >= num_sectors) return false;
@@ -105,6 +99,25 @@ fn rejectCheck(t1: *const MapObject, t2: *const MapObject, level: *const Level) 
     return (level.reject_data[byte_idx] >> bit_idx) & 1 != 0;
 }
 
+/// Sector index containing a point (BSP walk)
+fn sectorIndexAt(level: *const Level, x: Fixed, y: Fixed) ?usize {
+    if (level.num_nodes == 0) {
+        if (level.subsectors.len > 0) { if (level.subsectors[0].sector) |si| return si; }
+        return null;
+    }
+    var node_id: u16 = @intCast(level.num_nodes - 1);
+    while (node_id & defs.NF_SUBSECTOR == 0) {
+        if (node_id >= level.nodes.len) return null;
+        const node = &level.nodes[node_id];
+        const side = maputl.rPointOnSide(x, y, node.x, node.y, node.dx, node.dy);
+        node_id = node.children[side];
+    }
+    const ssi = node_id & ~@as(u16, defs.NF_SUBSECTOR);
+    if (ssi >= level.subsectors.len) return null;
+    if (level.subsectors[ssi].sector) |si| return si;
+    return null;
+}
+
 /// Recursively traverse BSP tree to check sight.
 /// Returns true if sight is not blocked.
 fn crossBSPNode(bsp_num: u16, level: *const Level) bool {
@@ -117,38 +130,52 @@ fn crossBSPNode(bsp_num: u16, level: *const Level) bool {
     if (bsp_num >= level.nodes.len) return true;
 
     const node = &level.nodes[bsp_num];
+    const dl = maputl.DivLine{ .x = node.x, .y = node.y, .dx = node.dx, .dy = node.dy };
 
-    // Which side is the source on?
-    const side = maputl.pointOnDivlineSide(
-        sight_strace.x,
-        sight_strace.y,
-        &maputl.DivLine{
-            .x = node.x,
-            .y = node.y,
-            .dx = node.dx,
-            .dy = node.dy,
-        },
-    );
+    // Which side is the source on? (on-line counts as front)
+    var side = divlineSide(sight_strace.x, sight_strace.y, &dl);
+    if (side == 2) side = 0;
 
     // Check the side that the source is on
     if (!crossBSPNode(node.children[@intCast(side)], level)) return false;
 
-    // Check if the sight line crosses to the other side
-    const other_side = maputl.pointOnDivlineSide(
-        sight_t2x,
-        sight_t2y,
-        &maputl.DivLine{
-            .x = node.x,
-            .y = node.y,
-            .dx = node.dx,
-            .dy = node.dy,
-        },
-    );
+    // The partition plane is crossed here?
+    if (divlineSide(sight_t2x, sight_t2y, &dl) == side) {
+        return true; // The line doesn't touch the other side
+    }
 
-    if (side == other_side) return true; // Both on same side — no crossing
+    // Cross the ending side
+    return crossBSPNode(node.children[@intCast(side ^ 1)], level);
+}
 
-    // Check the other side too
-    return crossBSPNode(node.children[@intCast(other_side)], level);
+/// Vanilla p_sight.c P_DivlineSide — coarse (FRACBITS-shifted) side test.
+/// Returns 0 (front), 1 (back), or 2 (on the line). Faithfully includes the
+/// vanilla `x == node->y` typo in the horizontal-line branch.
+fn divlineSide(x: Fixed, y: Fixed, node: *const maputl.DivLine) i32 {
+    if (node.dx.raw() == 0) {
+        if (x.raw() == node.x.raw()) return 2;
+        if (x.raw() <= node.x.raw()) {
+            return if (node.dy.raw() > 0) 1 else 0;
+        }
+        return if (node.dy.raw() < 0) 1 else 0;
+    }
+
+    if (node.dy.raw() == 0) {
+        if (x.raw() == node.y.raw()) return 2; // vanilla typo: x vs y — kept!
+        if (y.raw() <= node.y.raw()) {
+            return if (node.dx.raw() < 0) 1 else 0;
+        }
+        return if (node.dx.raw() > 0) 1 else 0;
+    }
+
+    const dx = x.raw() -% node.x.raw();
+    const dy = y.raw() -% node.y.raw();
+    const left: i32 = (node.dy.raw() >> 16) *% (dx >> 16);
+    const right: i32 = (dy >> 16) *% (node.dx.raw() >> 16);
+
+    if (right < left) return 0; // front side
+    if (left == right) return 2;
+    return 1; // back side
 }
 
 /// Per-call line-visited guard (vanilla uses line->validcount)
@@ -188,21 +215,23 @@ fn crossSubsector(sub_num: u16, level: *const Level) bool {
         const v2 = &level.vertices[line.v2];
 
         // Line endpoints on the same side of the trace? Not crossed.
-        const s1 = maputl.pointOnDivlineSide(v1.x, v1.y, &sight_strace);
-        const s2 = maputl.pointOnDivlineSide(v2.x, v2.y, &sight_strace);
+        const s1 = divlineSide(v1.x, v1.y, &sight_strace);
+        const s2 = divlineSide(v2.x, v2.y, &sight_strace);
         if (s1 == s2) continue;
 
         // Trace endpoints on the same side of the line? Not crossed.
         const dl = maputl.DivLine{ .x = v1.x, .y = v1.y, .dx = line.dx, .dy = line.dy };
-        const t1s = maputl.pointOnDivlineSide(sight_strace.x, sight_strace.y, &dl);
-        const t2s = maputl.pointOnDivlineSide(sight_t2x, sight_t2y, &dl);
+        const t1s = divlineSide(sight_strace.x, sight_strace.y, &dl);
+        const t2s = divlineSide(sight_t2x, sight_t2y, &dl);
         if (t1s == t2s) continue;
 
         // One-sided lines always block sight
+        if (line.backsector == null) return false;
         if (line.flags & defs.ML_TWOSIDED == 0) return false;
 
-        const front_idx = line.frontsector orelse return false;
-        const back_idx = line.backsector orelse return false;
+        // Heights come from the SEG's sectors (vanilla), not the line's
+        const front_idx = seg.frontsector orelse return false;
+        const back_idx = seg.backsector orelse return false;
         const front = &level.sectors[front_idx];
         const back = &level.sectors[back_idx];
 
@@ -235,18 +264,14 @@ fn crossSubsector(sub_num: u16, level: *const Level) bool {
             dl.dx,
             dl.dy,
         );
-        if (frac.raw() <= 0) continue;
-
-        // Narrow the vertical window through this opening
+        // Narrow the vertical window through this opening (FixedDiv exact)
         if (front.floorheight.raw() != back.floorheight.raw()) {
-            const slope_raw: i64 = @divTrunc((@as(i64, openbottom.raw()) - sight_zstart.raw()) << 16, frac.raw());
-            const slope: i32 = @intCast(std.math.clamp(slope_raw, std.math.minInt(i32), std.math.maxInt(i32)));
-            if (slope > sight_zbottomslope.raw()) sight_zbottomslope = Fixed.fromRaw(slope);
+            const slope = Fixed.div(Fixed.sub(openbottom, sight_zstart), frac);
+            if (slope.raw() > sight_zbottomslope.raw()) sight_zbottomslope = slope;
         }
         if (front.ceilingheight.raw() != back.ceilingheight.raw()) {
-            const slope_raw: i64 = @divTrunc((@as(i64, opentop.raw()) - sight_zstart.raw()) << 16, frac.raw());
-            const slope: i32 = @intCast(std.math.clamp(slope_raw, std.math.minInt(i32), std.math.maxInt(i32)));
-            if (slope < sight_ztopslope.raw()) sight_ztopslope = Fixed.fromRaw(slope);
+            const slope = Fixed.div(Fixed.sub(opentop, sight_zstart), frac);
+            if (slope.raw() < sight_ztopslope.raw()) sight_ztopslope = slope;
         }
 
         if (sight_ztopslope.raw() <= sight_zbottomslope.raw()) return false; // Window closed

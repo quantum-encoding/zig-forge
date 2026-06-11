@@ -151,6 +151,9 @@ pub const SpriteNum = enum(u16) {
     SPR_TBLU,
     SPR_TGRN,
     SPR_TRED,
+    SPR_CAND,
+    SPR_CBRA,
+    SPR_ELEC,
     NUMSPRITES,
     _,
 };
@@ -173,7 +176,7 @@ pub const sprnames = [_][4]u8{
     "GOR3".*, "GOR4".*, "GOR5".*, "SMIT".*, "COL1".*, "COL2".*, "COL3".*, "COL4".*,
     "COL5".*, "COL6".*, "DETH".*, "CEYE".*, "FSKU".*, "SMBT".*, "SMGT".*, "SMRT".*,
     "HDB1".*, "HDB2".*, "HDB3".*, "HDB4".*, "HDB5".*, "HDB6".*, "TBLU".*, "TGRN".*,
-    "TRED".*,
+    "TRED".*, "CAND".*, "CBRA".*, "ELEC".*,
 };
 
 // ============================================================================
@@ -371,6 +374,12 @@ pub const StateNum = enum(u16) {
     S_SPID_DIE6, S_SPID_DIE7, S_SPID_DIE8, S_SPID_DIE9, S_SPID_DIE10, S_SPID_DIE11,
     // Teleport destination
     S_TELEPORT,
+    // Decorations used by the shareware maps
+    S_GIBS,
+    S_CANDLESTIK,
+    S_CANDELABRA,
+    S_TECHPILLAR,
+    S_REDTORCH, S_REDTORCH2, S_REDTORCH3, S_REDTORCH4,
     NUMSTATES,
     _,
 };
@@ -1132,6 +1141,14 @@ fn buildStateTable() [@intFromEnum(StateNum.NUMSTATES)]State {
 
     // ---- Decorations ----
     tbl[@intFromEnum(StateNum.S_COLU)] = S(.SPR_COLU, 0 | FF_FULLBRIGHT, -1, null, .S_NULL);
+    tbl[@intFromEnum(StateNum.S_GIBS)] = S(.SPR_PLAY, 22, -1, null, .S_NULL);
+    tbl[@intFromEnum(StateNum.S_CANDLESTIK)] = S(.SPR_CAND, 0 | FF_FULLBRIGHT, -1, null, .S_NULL);
+    tbl[@intFromEnum(StateNum.S_CANDELABRA)] = S(.SPR_CBRA, 0 | FF_FULLBRIGHT, -1, null, .S_NULL);
+    tbl[@intFromEnum(StateNum.S_TECHPILLAR)] = S(.SPR_ELEC, 0, -1, null, .S_NULL);
+    tbl[@intFromEnum(StateNum.S_REDTORCH)] = S(.SPR_TRED, 0 | FF_FULLBRIGHT, 4, null, .S_REDTORCH2);
+    tbl[@intFromEnum(StateNum.S_REDTORCH2)] = S(.SPR_TRED, 1 | FF_FULLBRIGHT, 4, null, .S_REDTORCH3);
+    tbl[@intFromEnum(StateNum.S_REDTORCH3)] = S(.SPR_TRED, 2 | FF_FULLBRIGHT, 4, null, .S_REDTORCH4);
+    tbl[@intFromEnum(StateNum.S_REDTORCH4)] = S(.SPR_TRED, 3 | FF_FULLBRIGHT, 4, null, .S_REDTORCH);
     tbl[@intFromEnum(StateNum.S_SMT2)] = S(.SPR_SMT2, 0, -1, null, .S_NULL);
     tbl[@intFromEnum(StateNum.S_POL2)] = S(.SPR_POL2, 0, -1, null, .S_NULL);
     tbl[@intFromEnum(StateNum.S_POL5)] = S(.SPR_POL5, 0, -1, null, .S_NULL);
@@ -1400,23 +1417,23 @@ fn buildMobjInfoTable() [@intFromEnum(MobjType.NUMMOBJTYPES)]MobjInfo {
         .spawn_state = .S_SARG_STND,
         .spawn_health = 150,
         .see_state = .S_SARG_RUN1,
-        .see_sound = 0,
+        .see_sound = sfxnum(.sgtsit), // sfx_sgtsit
         .reaction_time = 8,
-        .attack_sound = 0,
+        .attack_sound = sfxnum(.sgtatk), // sfx_sgtatk
         .pain_state = .S_SARG_PAIN,
         .pain_chance = 180,
-        .pain_sound = 0,
+        .pain_sound = sfxnum(.dmpain), // sfx_dmpain
         .melee_state = .S_SARG_ATK1,
         .missile_state = .S_NULL,
         .death_state = .S_SARG_DIE1,
         .xdeath_state = .S_SARG_DIE1,
-        .death_sound = 0,
+        .death_sound = sfxnum(.sgtdth), // sfx_sgtdth
         .speed = 10,
         .radius = FX(30),
         .height = FX(56),
         .mass = 400,
         .damage = 0,
-        .active_sound = 0,
+        .active_sound = sfxnum(.dmact), // sfx_dmact
         .flags = MF_SOLID | MF_SHOOTABLE | MF_SHADOW | MF_COUNTKILL,
         .raise_state = .S_SARG_RAISE1,
     };
@@ -1508,23 +1525,23 @@ fn buildMobjInfoTable() [@intFromEnum(MobjType.NUMMOBJTYPES)]MobjInfo {
         .spawn_state = .S_BOS2_STND,
         .spawn_health = 500,
         .see_state = .S_BOS2_RUN1,
-        .see_sound = 0,
+        .see_sound = sfxnum(.kntsit), // sfx_kntsit
         .reaction_time = 8,
         .attack_sound = 0,
         .pain_state = .S_BOS2_PAIN,
         .pain_chance = 50,
-        .pain_sound = 0,
+        .pain_sound = sfxnum(.dmpain), // sfx_dmpain
         .melee_state = .S_BOS2_ATK1,
         .missile_state = .S_BOS2_ATK1,
         .death_state = .S_BOS2_DIE1,
         .xdeath_state = .S_BOS2_DIE1,
-        .death_sound = 0,
+        .death_sound = sfxnum(.kntdth), // sfx_kntdth
         .speed = 8,
         .radius = FX(24),
         .height = FX(64),
         .mass = 1000,
         .damage = 0,
-        .active_sound = 0,
+        .active_sound = sfxnum(.dmact), // sfx_dmact
         .flags = MF_SOLID | MF_SHOOTABLE | MF_COUNTKILL,
         .raise_state = .S_BOS2_RAISE1,
     };
@@ -1562,23 +1579,23 @@ fn buildMobjInfoTable() [@intFromEnum(MobjType.NUMMOBJTYPES)]MobjInfo {
         .spawn_state = .S_SPID_STND,
         .spawn_health = 3000,
         .see_state = .S_SPID_RUN1,
-        .see_sound = 0,
+        .see_sound = sfxnum(.spisit), // sfx_spisit
         .reaction_time = 8,
-        .attack_sound = 0,
+        .attack_sound = sfxnum(.shotgn), // sfx_shotgn
         .pain_state = .S_SPID_PAIN,
         .pain_chance = 40,
-        .pain_sound = 0,
+        .pain_sound = sfxnum(.dmpain), // sfx_dmpain
         .melee_state = .S_NULL,
         .missile_state = .S_SPID_ATK1,
         .death_state = .S_SPID_DIE1,
         .xdeath_state = .S_SPID_DIE1,
-        .death_sound = 0,
+        .death_sound = sfxnum(.spidth), // sfx_spidth
         .speed = 12,
         .radius = FX(128),
         .height = FX(100),
         .mass = 1000,
         .damage = 0,
-        .active_sound = 0,
+        .active_sound = sfxnum(.dmact), // sfx_dmact
         .flags = MF_SOLID | MF_SHOOTABLE | MF_COUNTKILL,
         .raise_state = .S_NULL,
     };
@@ -1589,23 +1606,23 @@ fn buildMobjInfoTable() [@intFromEnum(MobjType.NUMMOBJTYPES)]MobjInfo {
         .spawn_state = .S_CYBER_STND,
         .spawn_health = 4000,
         .see_state = .S_CYBER_RUN1,
-        .see_sound = 0,
+        .see_sound = sfxnum(.cybsit), // sfx_cybsit
         .reaction_time = 8,
         .attack_sound = 0,
         .pain_state = .S_CYBER_PAIN,
         .pain_chance = 20,
-        .pain_sound = 0,
+        .pain_sound = sfxnum(.dmpain), // sfx_dmpain
         .melee_state = .S_NULL,
         .missile_state = .S_CYBER_ATK1,
         .death_state = .S_CYBER_DIE1,
         .xdeath_state = .S_CYBER_DIE1,
-        .death_sound = 0,
+        .death_sound = sfxnum(.cybdth), // sfx_cybdth
         .speed = 16,
         .radius = FX(40),
         .height = FX(110),
         .mass = 1000,
         .damage = 0,
-        .active_sound = 0,
+        .active_sound = sfxnum(.dmact), // sfx_dmact
         .flags = MF_SOLID | MF_SHOOTABLE | MF_COUNTKILL,
         .raise_state = .S_NULL,
     };
@@ -1956,7 +1973,17 @@ fn buildMobjInfoTable() [@intFromEnum(MobjType.NUMMOBJTYPES)]MobjInfo {
     tbl[@intFromEnum(MobjType.MT_MISC28)] = .{ .doomednum = 2004, .spawn_state = .S_PLAS, .spawn_health = 1000, .see_state = .S_NULL, .see_sound = 0, .reaction_time = 8, .attack_sound = 0, .pain_state = .S_NULL, .pain_chance = 0, .pain_sound = 0, .melee_state = .S_NULL, .missile_state = .S_NULL, .death_state = .S_NULL, .xdeath_state = .S_NULL, .death_sound = 0, .speed = 0, .radius = FX(20), .height = FX(16), .mass = 100, .damage = 0, .active_sound = 0, .flags = MF_SPECIAL, .raise_state = .S_NULL };
 
     // Decorations — column (doomednum 2028)
-    tbl[@intFromEnum(MobjType.MT_MISC31)] = .{ .doomednum = 30, .spawn_state = .S_COLU, .spawn_health = 1000, .see_state = .S_NULL, .see_sound = 0, .reaction_time = 8, .attack_sound = 0, .pain_state = .S_NULL, .pain_chance = 0, .pain_sound = 0, .melee_state = .S_NULL, .missile_state = .S_NULL, .death_state = .S_NULL, .xdeath_state = .S_NULL, .death_sound = 0, .speed = 0, .radius = FX(16), .height = FX(16), .mass = 100, .damage = 0, .active_sound = 0, .flags = MF_SOLID, .raise_state = .S_NULL };
+    tbl[@intFromEnum(MobjType.MT_MISC31)] = .{ .doomednum = 2028, .spawn_state = .S_COLU, .spawn_health = 1000, .see_state = .S_NULL, .see_sound = 0, .reaction_time = 8, .attack_sound = 0, .pain_state = .S_NULL, .pain_chance = 0, .pain_sound = 0, .melee_state = .S_NULL, .missile_state = .S_NULL, .death_state = .S_NULL, .xdeath_state = .S_NULL, .death_sound = 0, .speed = 0, .radius = FX(16), .height = FX(16), .mass = 100, .damage = 0, .active_sound = 0, .flags = MF_SOLID, .raise_state = .S_NULL };
+
+    // ---- E1 decorations (vanilla doomednums; spawn RNG parity) ----
+    tbl[@intFromEnum(MobjType.MT_MISC70)] = .{ .doomednum = 15, .spawn_state = .S_PLAY_DIE7, .spawn_health = 1000, .see_state = .S_NULL, .see_sound = 0, .reaction_time = 8, .attack_sound = 0, .pain_state = .S_NULL, .pain_chance = 0, .pain_sound = 0, .melee_state = .S_NULL, .missile_state = .S_NULL, .death_state = .S_NULL, .xdeath_state = .S_NULL, .death_sound = 0, .speed = 0, .radius = FX(20), .height = FX(16), .mass = 100, .damage = 0, .active_sound = 0, .flags = 0, .raise_state = .S_NULL };
+    tbl[@intFromEnum(MobjType.MT_MISC76)] = .{ .doomednum = 10, .spawn_state = .S_GIBS, .spawn_health = 1000, .see_state = .S_NULL, .see_sound = 0, .reaction_time = 8, .attack_sound = 0, .pain_state = .S_NULL, .pain_chance = 0, .pain_sound = 0, .melee_state = .S_NULL, .missile_state = .S_NULL, .death_state = .S_NULL, .xdeath_state = .S_NULL, .death_sound = 0, .speed = 0, .radius = FX(20), .height = FX(16), .mass = 100, .damage = 0, .active_sound = 0, .flags = 0, .raise_state = .S_NULL };
+    tbl[@intFromEnum(MobjType.MT_MISC77)] = .{ .doomednum = 12, .spawn_state = .S_GIBS, .spawn_health = 1000, .see_state = .S_NULL, .see_sound = 0, .reaction_time = 8, .attack_sound = 0, .pain_state = .S_NULL, .pain_chance = 0, .pain_sound = 0, .melee_state = .S_NULL, .missile_state = .S_NULL, .death_state = .S_NULL, .xdeath_state = .S_NULL, .death_sound = 0, .speed = 0, .radius = FX(20), .height = FX(16), .mass = 100, .damage = 0, .active_sound = 0, .flags = 0, .raise_state = .S_NULL };
+    tbl[@intFromEnum(MobjType.MT_MISC78)] = .{ .doomednum = 24, .spawn_state = .S_GIBS, .spawn_health = 1000, .see_state = .S_NULL, .see_sound = 0, .reaction_time = 8, .attack_sound = 0, .pain_state = .S_NULL, .pain_chance = 0, .pain_sound = 0, .melee_state = .S_NULL, .missile_state = .S_NULL, .death_state = .S_NULL, .xdeath_state = .S_NULL, .death_sound = 0, .speed = 0, .radius = FX(20), .height = FX(16), .mass = 100, .damage = 0, .active_sound = 0, .flags = 0, .raise_state = .S_NULL };
+    tbl[@intFromEnum(MobjType.MT_MISC52)] = .{ .doomednum = 34, .spawn_state = .S_CANDLESTIK, .spawn_health = 1000, .see_state = .S_NULL, .see_sound = 0, .reaction_time = 8, .attack_sound = 0, .pain_state = .S_NULL, .pain_chance = 0, .pain_sound = 0, .melee_state = .S_NULL, .missile_state = .S_NULL, .death_state = .S_NULL, .xdeath_state = .S_NULL, .death_sound = 0, .speed = 0, .radius = FX(16), .height = FX(16), .mass = 100, .damage = 0, .active_sound = 0, .flags = 0, .raise_state = .S_NULL };
+    tbl[@intFromEnum(MobjType.MT_MISC53)] = .{ .doomednum = 35, .spawn_state = .S_CANDELABRA, .spawn_health = 1000, .see_state = .S_NULL, .see_sound = 0, .reaction_time = 8, .attack_sound = 0, .pain_state = .S_NULL, .pain_chance = 0, .pain_sound = 0, .melee_state = .S_NULL, .missile_state = .S_NULL, .death_state = .S_NULL, .xdeath_state = .S_NULL, .death_sound = 0, .speed = 0, .radius = FX(16), .height = FX(16), .mass = 100, .damage = 0, .active_sound = 0, .flags = MF_SOLID, .raise_state = .S_NULL };
+    tbl[@intFromEnum(MobjType.MT_MISC46)] = .{ .doomednum = 46, .spawn_state = .S_REDTORCH, .spawn_health = 1000, .see_state = .S_NULL, .see_sound = 0, .reaction_time = 8, .attack_sound = 0, .pain_state = .S_NULL, .pain_chance = 0, .pain_sound = 0, .melee_state = .S_NULL, .missile_state = .S_NULL, .death_state = .S_NULL, .xdeath_state = .S_NULL, .death_sound = 0, .speed = 0, .radius = FX(16), .height = FX(16), .mass = 100, .damage = 0, .active_sound = 0, .flags = MF_SOLID, .raise_state = .S_NULL };
+    tbl[@intFromEnum(MobjType.MT_MISC51)] = .{ .doomednum = 48, .spawn_state = .S_TECHPILLAR, .spawn_health = 1000, .see_state = .S_NULL, .see_sound = 0, .reaction_time = 8, .attack_sound = 0, .pain_state = .S_NULL, .pain_chance = 0, .pain_sound = 0, .melee_state = .S_NULL, .missile_state = .S_NULL, .death_state = .S_NULL, .xdeath_state = .S_NULL, .death_sound = 0, .speed = 0, .radius = FX(16), .height = FX(16), .mass = 100, .damage = 0, .active_sound = 0, .flags = MF_SOLID, .raise_state = .S_NULL };
 
     return tbl;
 }

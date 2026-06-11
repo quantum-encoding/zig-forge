@@ -59,15 +59,21 @@ pub fn runThinkers() void {
     var current = thinker_cap.next;
     while (current != null and current != &thinker_cap) {
         const thinker = current.?;
-        const next = thinker.next; // Save next before potential removal
+        var next: ?*Thinker = undefined;
 
         if (thinker.function) |func| {
             if (func == @as(ThinkFn, @ptrCast(&removal_sentinel))) {
-                // Unlink from list
+                next = thinker.next; // Save before unlink nulls the pointers
                 unlinkThinker(thinker);
             } else {
                 func(thinker);
+                // VANILLA ORDER: read next AFTER the think call, so a thinker
+                // spawned mid-iteration (monster opens a door in A_Chase) is
+                // appended at the tail and runs THIS tic, not next tic.
+                next = thinker.next;
             }
+        } else {
+            next = thinker.next;
         }
 
         current = next;

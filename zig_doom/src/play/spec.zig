@@ -55,6 +55,11 @@ pub fn crossSpecialLine(line_idx: usize, side: i32, thing: *MapObject, level: *L
 
     // Monsters can only trigger certain specials
     if (!is_player) {
+        // Missiles never trigger walk specials (vanilla P_CrossSpecialLine)
+        switch (thing.mobj_type) {
+            .MT_ROCKET, .MT_PLASMA, .MT_BFG, .MT_TROOPSHOT, .MT_HEADSHOT, .MT_BRUISERSHOT => return,
+            else => {},
+        }
         // Monsters can trigger: teleporters and a few walk triggers
         switch (line.special) {
             39, 97, 125, 126 => {}, // Teleporters — monsters OK
@@ -154,8 +159,8 @@ pub fn crossSpecialLine(line_idx: usize, side: i32, thing: *MapObject, level: *L
             line.special = 0;
         },
         22 => {
-            // W1 Raise floor to nearest + change texture
-            _ = floor_mod.EV_DoFloor(line, .raise_floor_to_nearest, level, allocator);
+            // W1 Raise floor to nearest + change texture (vanilla: plat at half speed)
+            _ = plat_mod.EV_DoPlat(line, .raise_to_nearest_and_change, 0, level, allocator);
             line.special = 0;
         },
         23 => {
@@ -301,33 +306,33 @@ pub fn crossSpecialLine(line_idx: usize, side: i32, thing: *MapObject, level: *L
         // ---- Lifts / Platforms ----
         10 => {
             // W1 Lift (lower-wait-raise)
-            _ = plat_mod.EV_DoPlat(line, .down_wait_up_stay, level, allocator);
+            _ = plat_mod.EV_DoPlat(line, .down_wait_up_stay, 0, level, allocator);
             line.special = 0;
         },
         21 => {
             // S1 Lift
-            _ = plat_mod.EV_DoPlat(line, .down_wait_up_stay, level, allocator);
+            _ = plat_mod.EV_DoPlat(line, .down_wait_up_stay, 0, level, allocator);
             line.special = 0;
         },
         62 => {
             // SR Lift
-            _ = plat_mod.EV_DoPlat(line, .down_wait_up_stay, level, allocator);
+            _ = plat_mod.EV_DoPlat(line, .down_wait_up_stay, 0, level, allocator);
         },
         88 => {
             // WR Lift
-            _ = plat_mod.EV_DoPlat(line, .down_wait_up_stay, level, allocator);
+            _ = plat_mod.EV_DoPlat(line, .down_wait_up_stay, 0, level, allocator);
         },
         120 => {
             // WR Turbo lift
-            _ = plat_mod.EV_DoPlat(line, .blaze_dwus, level, allocator);
+            _ = plat_mod.EV_DoPlat(line, .blaze_dwus, 0, level, allocator);
         },
         121 => {
             // WR Turbo lift
-            _ = plat_mod.EV_DoPlat(line, .blaze_dwus, level, allocator);
+            _ = plat_mod.EV_DoPlat(line, .blaze_dwus, 0, level, allocator);
         },
         122 => {
             // S1 Turbo lift
-            _ = plat_mod.EV_DoPlat(line, .blaze_dwus, level, allocator);
+            _ = plat_mod.EV_DoPlat(line, .blaze_dwus, 0, level, allocator);
             line.special = 0;
         },
         123 => {
@@ -452,6 +457,16 @@ pub fn useSpecialLine(thing: *MapObject, line_idx: usize, side: i32, level: *Lev
 
     _ = side;
 
+    // Monsters may only open plain manual doors (vanilla P_UseSpecialLine):
+    // never secret doors, never locked/stay-open/blazing types.
+    if (thing.player == null) {
+        if (line.flags & defs.ML_SECRET != 0) return false;
+        switch (line.special) {
+            1, 32, 33, 34 => {},
+            else => return false,
+        }
+    }
+
     switch (line.special) {
         // ---- Manual doors (no tag — affect back sector directly) ----
         1, 26, 27, 28, 31, 32, 33, 34, 117, 118 => {
@@ -518,16 +533,16 @@ pub fn useSpecialLine(thing: *MapObject, line_idx: usize, side: i32, level: *Lev
 
         // ---- Switch floors (S1) ----
         14 => {
-            // S1 Raise floor 32 + change
-            _ = floor_mod.EV_DoFloor(line, .raise_floor_by_value, level, allocator);
+            // S1 Raise floor 32 + change (vanilla: plat at half speed)
+            _ = plat_mod.EV_DoPlat(line, .raise_and_change, 32, level, allocator);
         },
         15 => {
-            // S1 Raise floor 24 + change
-            _ = floor_mod.EV_DoFloor(line, .raise_floor_24_and_change, level, allocator);
+            // S1 Raise floor 24 + change (vanilla: plat at half speed)
+            _ = plat_mod.EV_DoPlat(line, .raise_and_change, 24, level, allocator);
         },
         20 => {
-            // S1 Raise floor to next + change
-            _ = floor_mod.EV_DoFloor(line, .raise_floor_to_nearest, level, allocator);
+            // S1 Raise floor to next + change (vanilla: plat at half speed)
+            _ = plat_mod.EV_DoPlat(line, .raise_to_nearest_and_change, 0, level, allocator);
         },
         45 => {
             // SR Lower floor to highest
@@ -554,18 +569,18 @@ pub fn useSpecialLine(thing: *MapObject, line_idx: usize, side: i32, level: *Lev
             use_again = true;
         },
         66 => {
-            // SR Raise floor 24 + change
-            _ = floor_mod.EV_DoFloor(line, .raise_floor_24_and_change, level, allocator);
+            // SR Raise floor 24 + change (vanilla: plat at half speed)
+            _ = plat_mod.EV_DoPlat(line, .raise_and_change, 24, level, allocator);
             use_again = true;
         },
         67 => {
-            // SR Raise floor 32 + change
-            _ = floor_mod.EV_DoFloor(line, .raise_floor_by_value, level, allocator);
+            // SR Raise floor 32 + change (vanilla: plat at half speed)
+            _ = plat_mod.EV_DoPlat(line, .raise_and_change, 32, level, allocator);
             use_again = true;
         },
         68 => {
-            // SR Raise floor to next + change
-            _ = floor_mod.EV_DoFloor(line, .raise_floor_to_nearest, level, allocator);
+            // SR Raise floor to next + change (vanilla: plat at half speed)
+            _ = plat_mod.EV_DoPlat(line, .raise_to_nearest_and_change, 0, level, allocator);
             use_again = true;
         },
         69 => {
@@ -611,20 +626,20 @@ pub fn useSpecialLine(thing: *MapObject, line_idx: usize, side: i32, level: *Lev
         // ---- Lifts ----
         21 => {
             // S1 Lift
-            _ = plat_mod.EV_DoPlat(line, .down_wait_up_stay, level, allocator);
+            _ = plat_mod.EV_DoPlat(line, .down_wait_up_stay, 0, level, allocator);
         },
         62 => {
             // SR Lift
-            _ = plat_mod.EV_DoPlat(line, .down_wait_up_stay, level, allocator);
+            _ = plat_mod.EV_DoPlat(line, .down_wait_up_stay, 0, level, allocator);
             use_again = true;
         },
         122 => {
             // S1 Turbo lift
-            _ = plat_mod.EV_DoPlat(line, .blaze_dwus, level, allocator);
+            _ = plat_mod.EV_DoPlat(line, .blaze_dwus, 0, level, allocator);
         },
         123 => {
             // SR Turbo lift
-            _ = plat_mod.EV_DoPlat(line, .blaze_dwus, level, allocator);
+            _ = plat_mod.EV_DoPlat(line, .blaze_dwus, 0, level, allocator);
             use_again = true;
         },
 
@@ -660,9 +675,10 @@ pub fn useSpecialLine(thing: *MapObject, line_idx: usize, side: i32, level: *Lev
 // ============================================================================
 
 pub fn playerInSpecialSector(player: *Player, sector: *Sector) void {
-    // Check if player is on the floor
+    // Vanilla: the player must be exactly on THIS sector's floor (standing
+    // on a ledge that overhangs a damage sector doesn't hurt)
     const mo = player.mobj orelse return;
-    if (mo.z.raw() != mo.floorz.raw()) return;
+    if (mo.z.raw() != sector.floorheight.raw()) return;
 
     // Damage floors hurt on 32-tic boundaries (vanilla: !(leveltime & 0x1f))
     const hurt_tic = (world.leveltime & 0x1f) == 0;

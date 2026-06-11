@@ -39,7 +39,7 @@ pub fn T_LightFlash(thinker_ptr: *Thinker) void {
             flash.count = @as(i32, random.pRandom() & 7) + 1;
         } else {
             sector.lightlevel = flash.max_light;
-            flash.count = @as(i32, random.pRandom() & 63) + 1;
+            flash.count = @as(i32, random.pRandom() & 64) + 1;
         }
     }
 }
@@ -167,7 +167,7 @@ pub fn spawnLightFlash(sector_idx: u16, level: *Level, allocator: std.mem.Alloca
         .sector_idx = sector_idx,
         .max_light = level.sectors[sector_idx].lightlevel,
         .min_light = findMinSurroundingLight(sector_idx, level, level.sectors[sector_idx].lightlevel),
-        .count = @as(i32, random.pRandom() & 63) + 1,
+        .count = @as(i32, random.pRandom() & 64) + 1,
     };
 
     flash.thinker.function = @ptrCast(&T_LightFlash);
