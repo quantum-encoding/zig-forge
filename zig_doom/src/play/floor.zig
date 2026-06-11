@@ -509,7 +509,7 @@ pub fn EV_DoDonut(line: *const Line, level: *Level, allocator: std.mem.Allocator
             .direction = 1,
             .floor_dest_height = level.sectors[ring].floorheight,
             .speed = Fixed.fromRaw(@divTrunc(FLOORSPEED.raw(), 2)),
-            .texture = level.sectors[ring].floorpic,
+            .texture = @intCast(level.sectors[ring].floorpic),
             .new_special = 0,
         };
         pool_mover.thinker.function = @ptrCast(&T_MoveFloor);
@@ -523,7 +523,7 @@ pub fn EV_DoDonut(line: *const Line, level: *Level, allocator: std.mem.Allocator
             .direction = -1,
             .floor_dest_height = level.sectors[outer].floorheight,
             .speed = Fixed.fromRaw(@divTrunc(FLOORSPEED.raw(), 2)),
-            .texture = level.sectors[outer].floorpic,
+            .texture = @intCast(level.sectors[outer].floorpic),
             .new_special = level.sectors[outer].special,
         };
         ring_mover.thinker.function = @ptrCast(&T_MoveFloor);

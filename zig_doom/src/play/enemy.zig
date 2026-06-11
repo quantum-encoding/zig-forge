@@ -24,11 +24,88 @@ const level_mod = @import("level.zig");
 const maputl = @import("maputl.zig");
 const map_mod = @import("map.zig");
 const tables = @import("../tables.zig");
+const world = @import("world.zig");
+const inter = @import("inter.zig");
+const sight = @import("sight.zig");
+const spec = @import("spec.zig");
+const user = @import("user.zig");
+const floor_mod = @import("floor.zig");
+const setup = @import("setup.zig");
+const SfxId = @import("../sound/defs.zig").SfxId;
+
+fn sfx(comptime id: SfxId) i32 {
+    return @intFromEnum(id);
+}
 
 // ============================================================================
 // Action Functions — called from state table via function pointers
 // All take *anyopaque and cast to *MapObject internally.
 // ============================================================================
+
+/// P_NoiseAlert — wake monsters when the player fires. Vanilla flood-fills
+/// sound through connected sectors; this approximation wakes idle monsters
+/// within earshot (ambush monsters still require line of sight).
+pub fn noiseAlert(emitter: *MapObject) void {
+    const ALERT_RANGE: i32 = 1600; // map units
+    const cap = tick.getThinkerCap();
+    var current = cap.next;
+    while (current != null and current != cap) {
+        const thinker = current.?;
+        current = thinker.next;
+        const func = thinker.function orelse continue;
+        if (func != @as(tick.ThinkFn, @ptrCast(&mobj_mod.mobjThinker))) continue;
+
+        const mo: *MapObject = @fieldParentPtr("thinker", thinker);
+        if (mo.flags & info.MF_COUNTKILL == 0) continue; // Only monsters
+        if (mo.health <= 0) continue;
+        if (mo.target != null) continue; // Already awake
+
+        const dist = maputl.aproxDistance(Fixed.sub(mo.x, emitter.x), Fixed.sub(mo.y, emitter.y));
+        if (dist.toInt() > ALERT_RANGE) continue;
+
+        if (mo.flags & info.MF_AMBUSH != 0) {
+            // Deaf monsters only react if they can see the shooter
+            if (world.level) |lvl| {
+                if (!sight.checkSight(mo, emitter, lvl)) continue;
+            }
+        }
+
+        mo.target = emitter;
+    }
+}
+
+/// P_LookForPlayers — acquire a living, visible player as the target.
+/// If allaround is false, only players inside the monster's forward 180°
+/// (or within melee range behind it) are noticed.
+fn lookForPlayers(actor: *MapObject, allaround: bool) bool {
+    const players_ptr = world.players orelse return false;
+    const players: *[4]user.Player = @ptrCast(@alignCast(players_ptr));
+    const in_game = world.player_in_game orelse return false;
+
+    for (0..4) |i| {
+        if (!in_game[i]) continue;
+        const player = &players[i];
+        if (player.health <= 0) continue; // Dead — don't chase corpses
+        const mo = player.mobj orelse continue;
+
+        if (world.level) |lvl| {
+            if (!sight.checkSight(actor, mo, lvl)) continue; // Out of sight
+        }
+
+        if (!allaround) {
+            const an = maputl.pointToAngle2(actor.x, actor.y, mo.x, mo.y) -% actor.angle;
+            if (an > fixed.ANG90 and an < fixed.ANG270) {
+                // Behind the monster — only noticed if really close
+                const dist = maputl.aproxDistance(Fixed.sub(mo.x, actor.x), Fixed.sub(mo.y, actor.y));
+                if (dist.raw() > level_mod.MELEERANGE.raw()) continue;
+            }
+        }
+
+        actor.target = mo;
+        return true;
+    }
+    return false;
+}
 
 /// A_Look — Monster idle state: scan for players.
 /// If a player is found in line of sight, switch to see_state.
@@ -38,18 +115,40 @@ pub fn A_Look(actor_ptr: *anyopaque) void {
     // Reset threshold (infighting timer)
     actor.threshold = 0;
 
-    // In full DOOM, this checks sound targets and performs LOS checks.
-    // Phase 3: check if we have a target assigned and switch to see state.
-    if (actor.target) |_| {
-        const mobj_info = actor.getInfo();
-        if (mobj_info.see_state != .S_NULL) {
-            _ = actor.setState(mobj_info.see_state);
+    // Keep an already-acquired live target (e.g. assigned by damage)
+    var has_target = false;
+    if (actor.target) |t| {
+        if (t.health > 0 and t.flags & info.MF_SHOOTABLE != 0 and
+            actor.flags & info.MF_AMBUSH == 0)
+        {
+            has_target = true;
         }
+    }
+
+    if (!has_target) {
+        if (!lookForPlayers(actor, false)) return;
+    }
+
+    // Spotted — sight sound, then chase
+    const mobj_info = actor.getInfo();
+    if (mobj_info.see_sound != 0) {
+        var snd = mobj_info.see_sound;
+        // Randomized variants (vanilla: posit1-3, bgsit1-2)
+        if (snd == sfx(.posit1) or snd == sfx(.posit2) or snd == sfx(.posit3)) {
+            snd = sfx(.posit1) + @as(i32, random.pRandom() % 3);
+        } else if (snd == sfx(.bgsit1) or snd == sfx(.bgsit2)) {
+            snd = sfx(.bgsit1) + @as(i32, random.pRandom() % 2);
+        }
+        world.playSound(@ptrCast(actor), snd);
+    }
+
+    if (mobj_info.see_state != .S_NULL) {
+        _ = actor.setState(mobj_info.see_state);
     }
 }
 
 /// A_Chase — Monster chase state: move toward target, attempt attacks.
-/// This is the core AI loop for active monsters.
+/// This is the core AI loop for active monsters. (Faithful port.)
 pub fn A_Chase(actor_ptr: *anyopaque) void {
     const actor: *MapObject = @ptrCast(@alignCast(actor_ptr));
     const mobj_info = actor.getInfo();
@@ -59,67 +158,71 @@ pub fn A_Chase(actor_ptr: *anyopaque) void {
         actor.reaction_time -= 1;
     }
 
-    // Decrease threshold
+    // Decrease threshold (infighting target lock)
     if (actor.threshold > 0) {
-        // If target is dead/gone, reset threshold
-        if (actor.target == null or
-            (actor.target != null and actor.target.?.health <= 0))
-        {
+        if (actor.target == null or actor.target.?.health <= 0) {
             actor.threshold = 0;
         } else {
             actor.threshold -= 1;
         }
     }
 
-    // Floating monsters: adjust z toward target
-    if (actor.flags & info.MF_FLOAT != 0) {
-        if (actor.target) |target| {
-            if (actor.z.raw() < target.z.raw()) {
-                actor.z = Fixed.add(actor.z, level_mod.FLOATSPEED);
-            } else if (actor.z.raw() > target.z.raw()) {
-                actor.z = Fixed.sub(actor.z, level_mod.FLOATSPEED);
-            }
+    // Turn towards movement direction (45° steps)
+    if (actor.movedir < 8) {
+        actor.angle &= @as(u32, 7) << 29;
+        const delta: i32 = @bitCast(actor.angle -% (@as(u32, @intCast(actor.movedir)) << 29));
+        if (delta > 0) {
+            actor.angle -%= fixed.ANG90 / 2;
+        } else if (delta < 0) {
+            actor.angle +%= fixed.ANG90 / 2;
         }
     }
 
-    // Check for melee attack
+    // No live target? Look for one, else return to idle
+    const target_ok = if (actor.target) |t|
+        t.flags & info.MF_SHOOTABLE != 0 and t.health > 0
+    else
+        false;
+    if (!target_ok) {
+        if (lookForPlayers(actor, true)) return; // Got a new target
+        _ = actor.setState(mobj_info.spawn_state);
+        return;
+    }
+
+    // Don't attack twice in a row
+    if (actor.flags & info.MF_JUSTATTACKED != 0) {
+        actor.flags &= ~info.MF_JUSTATTACKED;
+        newChaseDir(actor);
+        return;
+    }
+
+    // Melee attack
     if (mobj_info.melee_state != .S_NULL and checkMeleeRange(actor)) {
-        // A_FaceTarget before attacking
-        faceTarget(actor);
+        if (mobj_info.attack_sound != 0) {
+            world.playSound(@ptrCast(actor), mobj_info.attack_sound);
+        }
         _ = actor.setState(mobj_info.melee_state);
         return;
     }
 
-    // Check for missile attack
+    // Missile attack
     if (mobj_info.missile_state != .S_NULL) {
-        if (actor.movecount == 0 or actor.reaction_time <= 0) {
-            if (checkMissileRange(actor)) {
-                faceTarget(actor);
-                _ = actor.setState(mobj_info.missile_state);
-                actor.flags |= info.MF_JUSTATTACKED;
-                return;
-            }
+        if (actor.movecount == 0 and checkMissileRange(actor)) {
+            _ = actor.setState(mobj_info.missile_state);
+            actor.flags |= info.MF_JUSTATTACKED;
+            return;
         }
     }
 
-    // Just attacked — take at least one step before attacking again
-    if (actor.flags & info.MF_JUSTATTACKED != 0) {
-        actor.flags &= ~info.MF_JUSTATTACKED;
-        // Don't attack again immediately
-    }
-
-    // Chase target
-    if (actor.movecount > 0) {
-        actor.movecount -= 1;
-    }
-
-    if (actor.movecount <= 0) {
+    // Chase toward player
+    actor.movecount -= 1;
+    if (actor.movecount < 0 or !doMove(actor)) {
         newChaseDir(actor);
     }
 
-    // Try to move in current direction
-    if (actor.movedir < 8) {
-        _ = doMove(actor);
+    // Occasionally grunt
+    if (random.pRandom() < 3 and mobj_info.active_sound != 0) {
+        world.playSound(@ptrCast(actor), mobj_info.active_sound);
     }
 }
 
@@ -179,17 +282,15 @@ pub fn A_TroopAttack(actor_ptr: *anyopaque) void {
 
     // Melee range check
     if (checkMeleeRange(actor)) {
-        // Melee damage: 1d8 * 3 (3-24)
+        world.playSound(@ptrCast(actor), sfx(.claw));
         const damage: i32 = (@as(i32, random.pRandom() % 8) + 1) * 3;
-        // In full DOOM: damageMobj(target, actor, actor, damage)
-        _ = damage;
-        _ = target;
+        inter.damageMobj(target, actor, actor, damage);
         return;
     }
 
     // Fire imp fireball
-    // In full DOOM: P_SpawnMissile(actor, target, MT_TROOPSHOT)
-    // Phase 3: no-op without full spawn infrastructure
+    const alloc = world.allocator orelse return;
+    _ = mobj_mod.spawnMissile(actor, target, .MT_TROOPSHOT, alloc) catch return;
 }
 
 /// A_SargAttack — Demon bite attack (melee only)
@@ -197,14 +298,89 @@ pub fn A_SargAttack(actor_ptr: *anyopaque) void {
     const actor: *MapObject = @ptrCast(@alignCast(actor_ptr));
 
     if (actor.target == null) return;
+    const target = actor.target.?;
 
     faceTarget(actor);
 
     if (checkMeleeRange(actor)) {
         const damage: i32 = (@as(i32, random.pRandom() % 10) + 1) * 4;
-        _ = damage;
-        // damageMobj(target, actor, actor, damage)
+        inter.damageMobj(target, actor, actor, damage);
     }
+}
+
+/// A_HeadAttack — Cacodemon: melee bite or fireball
+pub fn A_HeadAttack(actor_ptr: *anyopaque) void {
+    const actor: *MapObject = @ptrCast(@alignCast(actor_ptr));
+
+    if (actor.target == null) return;
+    const target = actor.target.?;
+
+    faceTarget(actor);
+
+    if (checkMeleeRange(actor)) {
+        const damage: i32 = (@as(i32, random.pRandom() % 6) + 1) * 10;
+        inter.damageMobj(target, actor, actor, damage);
+        return;
+    }
+
+    const alloc = world.allocator orelse return;
+    _ = mobj_mod.spawnMissile(actor, target, .MT_HEADSHOT, alloc) catch return;
+}
+
+/// A_BruisAttack — Baron of Hell: melee claw or green fireball
+pub fn A_BruisAttack(actor_ptr: *anyopaque) void {
+    const actor: *MapObject = @ptrCast(@alignCast(actor_ptr));
+
+    if (actor.target == null) return;
+    const target = actor.target.?;
+
+    if (checkMeleeRange(actor)) {
+        world.playSound(@ptrCast(actor), sfx(.claw));
+        const damage: i32 = (@as(i32, random.pRandom() % 8) + 1) * 10;
+        inter.damageMobj(target, actor, actor, damage);
+        return;
+    }
+
+    const alloc = world.allocator orelse return;
+    _ = mobj_mod.spawnMissile(actor, target, .MT_BRUISERSHOT, alloc) catch return;
+}
+
+/// A_PlayerScream — player death sound
+pub fn A_PlayerScream(actor_ptr: *anyopaque) void {
+    const actor: *MapObject = @ptrCast(@alignCast(actor_ptr));
+    world.playSound(@ptrCast(actor), sfx(.pldeth));
+}
+
+/// A_BossDeath — E1M8 special: when the last Baron dies, lower the
+/// tag-666 floor to open the way out.
+pub fn A_BossDeath(actor_ptr: *anyopaque) void {
+    const actor: *MapObject = @ptrCast(@alignCast(actor_ptr));
+
+    if (world.episode != 1 or world.map != 8) return;
+    if (actor.mobj_type != .MT_BRUISER) return;
+
+    // Any other Baron still alive?
+    const cap = tick.getThinkerCap();
+    var current = cap.next;
+    while (current != null and current != cap) {
+        const thinker = current.?;
+        current = thinker.next;
+        if (thinker.function) |func| {
+            if (func == @as(tick.ThinkFn, @ptrCast(&mobj_mod.mobjThinker))) {
+                const mo: *MapObject = @fieldParentPtr("thinker", thinker);
+                if (mo != actor and mo.mobj_type == actor.mobj_type and mo.health > 0) {
+                    return; // Not the last one
+                }
+            }
+        }
+    }
+
+    // Lower all tag-666 floors (the dummy line carries the tag)
+    const lvl = world.level orelse return;
+    const alloc = world.allocator orelse return;
+    var junk = std.mem.zeroes(setup.Line);
+    junk.tag = 666;
+    _ = floor_mod.EV_DoFloor(&junk, .lower_floor_to_lowest, lvl, alloc);
 }
 
 /// A_SkullAttack — Lost Soul charge attack
@@ -234,19 +410,31 @@ pub fn A_SkullAttack(actor_ptr: *anyopaque) void {
     }
 }
 
-/// A_Scream — Death scream (sound — no-op for Phase 3)
-pub fn A_Scream(_: *anyopaque) void {
-    // Sound system not yet implemented
+/// A_Scream — Death scream
+pub fn A_Scream(actor_ptr: *anyopaque) void {
+    const actor: *MapObject = @ptrCast(@alignCast(actor_ptr));
+    var snd = actor.getInfo().death_sound;
+    if (snd == 0) return;
+
+    // Randomized variants (vanilla: podth1-3, bgdth1-2)
+    if (snd == sfx(.podth1) or snd == sfx(.podth2) or snd == sfx(.podth3)) {
+        snd = sfx(.podth1) + @as(i32, random.pRandom() % 3);
+    } else if (snd == sfx(.bgdth1) or snd == sfx(.bgdth2)) {
+        snd = sfx(.bgdth1) + @as(i32, random.pRandom() % 2);
+    }
+    world.playSound(@ptrCast(actor), snd);
 }
 
 /// A_XScream — Gib death scream
-pub fn A_XScream(_: *anyopaque) void {
-    // Sound system not yet implemented
+pub fn A_XScream(actor_ptr: *anyopaque) void {
+    world.playSound(actor_ptr, sfx(.slop));
 }
 
 /// A_Pain — Pain sound
-pub fn A_Pain(_: *anyopaque) void {
-    // Sound system not yet implemented
+pub fn A_Pain(actor_ptr: *anyopaque) void {
+    const actor: *MapObject = @ptrCast(@alignCast(actor_ptr));
+    const snd = actor.getInfo().pain_sound;
+    if (snd != 0) world.playSound(@ptrCast(actor), snd);
 }
 
 /// A_Fall — Remove MF_SOLID flag on death (things can walk over corpse)
@@ -278,7 +466,7 @@ fn faceTarget(actor: *MapObject) void {
     }
 }
 
-/// Check if actor is within melee range of target
+/// Check if actor is within melee range of target (and can see it)
 fn checkMeleeRange(actor: *MapObject) bool {
     const target = actor.target orelse return false;
 
@@ -288,15 +476,22 @@ fn checkMeleeRange(actor: *MapObject) bool {
     );
 
     // Melee range = 64 + 20 (target radius fudge)
-    return dist.raw() < level_mod.MELEERANGE.raw() + 20 * 0x10000;
+    if (dist.raw() >= level_mod.MELEERANGE.raw() + 20 * 0x10000) return false;
+
+    if (world.level) |lvl| {
+        if (!sight.checkSight(actor, target, lvl)) return false;
+    }
+    return true;
 }
 
 /// Check if actor should fire a missile
 fn checkMissileRange(actor: *MapObject) bool {
     const target = actor.target orelse return false;
 
-    // Can't see target? Don't fire
-    // (Full DOOM does LOS check here)
+    // Can't see the target? Don't fire.
+    if (world.level) |lvl| {
+        if (!sight.checkSight(actor, target, lvl)) return false;
+    }
 
     if (actor.flags & info.MF_JUSTHIT != 0) {
         // Just been hit — retaliate
@@ -415,8 +610,11 @@ fn tryDir(actor: *MapObject) bool {
     return false;
 }
 
-/// Attempt one step in the actor's current movedir
+/// Attempt one step in the actor's current movedir (P_Move). Floating
+/// monsters drift vertically through blocked-but-fitting gaps; walkers
+/// try to open any door they bumped into.
 fn doMove(actor: *MapObject) bool {
+    if (actor.movedir == level_mod.DI_NODIR) return false;
     const dir: usize = @intCast(actor.movedir);
     if (dir >= 8) return false;
 
@@ -424,7 +622,38 @@ fn doMove(actor: *MapObject) bool {
     const tryx = Fixed.add(actor.x, Fixed.mul(speed, level_mod.xspeed[dir]));
     const tryy = Fixed.add(actor.y, Fixed.mul(speed, level_mod.yspeed[dir]));
 
-    return map_mod.tryMove(actor, tryx, tryy);
+    if (!map_mod.tryMove(actor, tryx, tryy)) {
+        // Floating monsters can go up/down to clear the blocker
+        if (actor.flags & info.MF_FLOAT != 0 and map_mod.floatok) {
+            if (actor.z.raw() < actor.floorz.raw()) {
+                actor.z = Fixed.add(actor.z, level_mod.FLOATSPEED);
+            } else {
+                actor.z = Fixed.sub(actor.z, level_mod.FLOATSPEED);
+            }
+            actor.flags |= info.MF_INFLOAT;
+            return true;
+        }
+
+        // Try to open a door we walked into
+        if (map_mod.numspechit == 0) return false;
+        actor.movedir = level_mod.DI_NODIR;
+        var good = false;
+        const lvl = world.level orelse return false;
+        const alloc = world.allocator orelse return false;
+        while (map_mod.numspechit > 0) {
+            map_mod.numspechit -= 1;
+            const li = map_mod.spechit[map_mod.numspechit];
+            spec.useSpecialLine(actor, li, 0, lvl, alloc);
+            good = true;
+        }
+        return good;
+    }
+
+    actor.flags &= ~info.MF_INFLOAT;
+    if (actor.flags & info.MF_FLOAT == 0) {
+        actor.z = actor.floorz;
+    }
+    return true;
 }
 
 // ============================================================================

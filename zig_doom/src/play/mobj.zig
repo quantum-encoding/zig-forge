@@ -23,6 +23,9 @@ const tick = @import("tick.zig");
 const Thinker = tick.Thinker;
 const level_mod = @import("level.zig");
 const random = @import("../random.zig");
+const world = @import("world.zig");
+const map_mod = @import("map.zig");
+const tables_mod = @import("../tables.zig");
 
 // ============================================================================
 // MapObject — DOOM's central game entity
@@ -162,6 +165,15 @@ pub fn spawnMobj(x: Fixed, y: Fixed, z: Fixed, mobj_type: MobjType, allocator: s
     // Set initial state
     _ = mobj.setState(mobj_info.spawn_state);
 
+    // Seat in the world: floor/ceiling from the spawn sector (when a level
+    // is loaded — unit tests spawn into the void and keep zeros).
+    if (world.level) |lvl| {
+        if (map_mod.sectorAtPoint(lvl, x, y)) |sec| {
+            mobj.floorz = sec.floorheight;
+            mobj.ceilingz = sec.ceilingheight;
+        }
+    }
+
     // Set z position
     // ONFLOORZ = minInt, ONCEILINGZ = maxInt, otherwise use provided z
     if (z.raw() == std.math.minInt(i32)) {
@@ -272,31 +284,63 @@ fn xyMovement(mobj: *MapObject) void {
         mobj.momy = level_mod.MAXMOVE.negate();
     }
 
-    // Try to move (simplified without full collision detection for Phase 3)
-    // In full DOOM, this calls P_TryMove which does blockmap collision
+    // Move with collision, halving the step for large moves (P_XYMovement)
     var xmove = mobj.momx;
     var ymove = mobj.momy;
 
-    // Move in steps for large moves (DOOM splits into 32-unit steps)
-    while (xmove.raw() > Fixed.fromRaw(30 * 0x10000).raw() or
-        ymove.raw() > Fixed.fromRaw(30 * 0x10000).raw() or
-        xmove.raw() < -Fixed.fromRaw(30 * 0x10000).raw() or
-        ymove.raw() < -Fixed.fromRaw(30 * 0x10000).raw())
-    {
-        // Half the movement
-        const ptrx_raw = @divTrunc(xmove.raw(), 2);
-        const ptry_raw = @divTrunc(ymove.raw(), 2);
-        xmove = Fixed.fromRaw(ptrx_raw);
-        ymove = Fixed.fromRaw(ptry_raw);
+    while (true) {
+        var ptryx: Fixed = undefined;
+        var ptryy: Fixed = undefined;
+        var done = false;
 
-        // Simple move (no collision in Phase 3 stub)
-        mobj.x = Fixed.add(mobj.x, xmove);
-        mobj.y = Fixed.add(mobj.y, ymove);
+        const half_max = @divTrunc(level_mod.MAXMOVE.raw(), 2);
+        if (xmove.raw() > half_max or ymove.raw() > half_max or
+            xmove.raw() < -half_max or ymove.raw() < -half_max)
+        {
+            ptryx = Fixed.add(mobj.x, Fixed.fromRaw(@divTrunc(xmove.raw(), 2)));
+            ptryy = Fixed.add(mobj.y, Fixed.fromRaw(@divTrunc(ymove.raw(), 2)));
+            xmove = Fixed.fromRaw(@divTrunc(xmove.raw(), 2));
+            ymove = Fixed.fromRaw(@divTrunc(ymove.raw(), 2));
+        } else {
+            ptryx = Fixed.add(mobj.x, xmove);
+            ptryy = Fixed.add(mobj.y, ymove);
+            done = true;
+        }
+
+        if (!map_mod.tryMove(mobj, ptryx, ptryy)) {
+            // Blocked
+            if (mobj.player != null) {
+                // Players slide along walls
+                map_mod.slideMove(mobj);
+            } else if (mobj.flags & info.MF_MISSILE != 0) {
+                // Missiles explode against walls — unless the wall's far side
+                // shows sky, in which case the missile just vanishes.
+                if (map_mod.ceilingline) |li| {
+                    if (world.level) |lvl| {
+                        if (li < lvl.lines.len) {
+                            if (lvl.lines[li].backsector) |bi| {
+                                if (bi < lvl.sectors.len and
+                                    lvl.sectors[bi].ceilingpic == world.sky_flatnum)
+                                {
+                                    removeMobj(mobj);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+                explodeMissile(mobj);
+                return;
+            } else {
+                mobj.momx = Fixed.ZERO;
+                mobj.momy = Fixed.ZERO;
+            }
+            break;
+        }
+
+        if (done) break;
+        if (mobj.thinker.function == null) return; // Removed mid-move (pickup chain)
     }
-
-    // Apply remaining movement
-    mobj.x = Fixed.add(mobj.x, xmove);
-    mobj.y = Fixed.add(mobj.y, ymove);
 
     // Apply friction (only for non-flying, non-missile objects on the floor)
     if (mobj.flags & (info.MF_MISSILE | info.MF_SKULLFLY) == 0) {
@@ -318,6 +362,21 @@ fn xyMovement(mobj: *MapObject) void {
 
 /// Vertical movement and gravity
 fn zMovement(mobj: *MapObject) void {
+    // Floating monsters drift toward their target's height
+    if (mobj.flags & info.MF_FLOAT != 0) {
+        if (mobj.target) |target| {
+            const dx = Fixed.sub(mobj.x, target.x).abs();
+            const dy = Fixed.sub(mobj.y, target.y).abs();
+            const dist = if (dx.raw() > dy.raw()) dx else dy;
+            const delta = Fixed.sub(Fixed.add(target.z, Fixed.fromRaw(target.height.raw() >> 1)), mobj.z);
+            if (delta.raw() < 0 and dist.raw() < -delta.raw() * 3) {
+                mobj.z = Fixed.sub(mobj.z, level_mod.FLOATSPEED);
+            } else if (delta.raw() > 0 and dist.raw() < delta.raw() * 3) {
+                mobj.z = Fixed.add(mobj.z, level_mod.FLOATSPEED);
+            }
+        }
+    }
+
     // Apply gravity
     if (mobj.flags & info.MF_NOGRAVITY == 0) {
         if (mobj.z.raw() > mobj.floorz.raw()) {
@@ -383,6 +442,80 @@ fn explodeMissile(mobj: *MapObject) void {
     if (mobj.tics < 1) mobj.tics = 1;
 
     mobj.flags &= ~info.MF_MISSILE;
+
+    if (mobj_info.death_sound != 0) {
+        world.playSound(@ptrCast(mobj), mobj_info.death_sound);
+    }
+}
+
+/// Spawn a bullet impact puff (P_SpawnPuff). Melee-range puffs skip the
+/// first two (fullbright flash) frames.
+pub fn spawnPuff(x: Fixed, y: Fixed, z: Fixed, range: Fixed) void {
+    const alloc = world.allocator orelse return;
+    const zr = Fixed.add(z, Fixed.fromRaw(random.pSubRandom() << 10));
+    const puff = spawnMobj(x, y, zr, .MT_PUFF, alloc) catch return;
+    puff.momz = Fixed.ONE;
+    puff.tics -%= @as(i32, @intCast(random.pRandom() & 3));
+    if (puff.tics < 1) puff.tics = 1;
+
+    // Don't make punches spark on the wall
+    if (range.raw() == level_mod.MELEERANGE.raw()) {
+        _ = puff.setState(.S_PUFF3);
+    }
+}
+
+/// Spawn a blood splat (P_SpawnBlood). Light damage uses later frames.
+pub fn spawnBlood(x: Fixed, y: Fixed, z: Fixed, damage: i32) void {
+    const alloc = world.allocator orelse return;
+    const zr = Fixed.add(z, Fixed.fromRaw(random.pSubRandom() << 10));
+    const blood = spawnMobj(x, y, zr, .MT_BLOOD, alloc) catch return;
+    blood.momz = Fixed.fromInt(2);
+    blood.tics -%= @as(i32, @intCast(random.pRandom() & 3));
+    if (blood.tics < 1) blood.tics = 1;
+
+    if (damage <= 12 and damage >= 9) {
+        _ = blood.setState(.S_BLOOD2);
+    } else if (damage < 9) {
+        _ = blood.setState(.S_BLOOD3);
+    }
+}
+
+/// Spawn a missile from a player, aimed by autoaim (P_SpawnPlayerMissile).
+pub fn spawnPlayerMissile(source: *MapObject, missile_type: MobjType, allocator: std.mem.Allocator) !*MapObject {
+    // Autoaim: straight ahead first, then scan slightly left/right
+    var an = source.angle;
+    var slope = map_mod.aimLineAttack(source, an, Fixed.fromInt(16 * 64));
+    if (map_mod.linetarget == null) {
+        an +%= @as(u32, 1) << 26;
+        slope = map_mod.aimLineAttack(source, an, Fixed.fromInt(16 * 64));
+        if (map_mod.linetarget == null) {
+            an -%= @as(u32, 2) << 26;
+            slope = map_mod.aimLineAttack(source, an, Fixed.fromInt(16 * 64));
+            if (map_mod.linetarget == null) {
+                an = source.angle;
+                slope = Fixed.ZERO;
+            }
+        }
+    }
+
+    const z = Fixed.add(source.z, Fixed.fromInt(32));
+    const mobj = try spawnMobj(source.x, source.y, z, missile_type, allocator);
+
+    const mobj_info = &info.mobjinfo[@intFromEnum(missile_type)];
+    if (mobj_info.see_sound != 0) {
+        world.playSound(@ptrCast(mobj), mobj_info.see_sound);
+    }
+
+    mobj.target = source;
+    mobj.angle = an;
+
+    const speed = Fixed.fromRaw(mobj_info.speed);
+    const fine = an >> tables_mod.ANGLETOFINESHIFT;
+    mobj.momx = Fixed.mul(speed, tables_mod.finecosine[fine & tables_mod.FINEMASK]);
+    mobj.momy = Fixed.mul(speed, tables_mod.finesine[fine & tables_mod.FINEMASK]);
+    mobj.momz = Fixed.mul(speed, slope);
+
+    return mobj;
 }
 
 /// Spawn a map thing (from WAD data) as a map object
@@ -630,6 +763,7 @@ test "mobj friction" {
     defer alloc.destroy(mobj);
 
     mobj.floorz = Fixed.ZERO;
+    mobj.ceilingz = Fixed.fromInt(128); // room to exist (collision is real now)
     mobj.z = Fixed.ZERO;
     mobj.momx = Fixed.fromInt(10);
     mobj.momy = Fixed.ZERO;

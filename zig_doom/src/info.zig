@@ -10,6 +10,11 @@
 const std = @import("std");
 const fixed = @import("fixed.zig");
 const pspr = @import("play/pspr.zig");
+const enemy = @import("play/enemy.zig");
+const sfxdefs = @import("sound/defs.zig");
+fn sfxnum(comptime id: sfxdefs.SfxId) i32 {
+    return @intFromEnum(id);
+}
 const Fixed = fixed.Fixed;
 
 // ============================================================================
@@ -595,14 +600,14 @@ fn buildStateTable() [@intFromEnum(StateNum.NUMSTATES)]State {
 
     // S_NULL — the void
     tbl[@intFromEnum(StateNum.S_NULL)] = S(.SPR_TROO, 0, -1, null, .S_NULL);
-    tbl[@intFromEnum(StateNum.S_LIGHTDONE)] = S(.SPR_SHTG, 4, 0, null, .S_NULL); // A_Light0 placeholder
+    tbl[@intFromEnum(StateNum.S_LIGHTDONE)] = S(.SPR_SHTG, 4, 0, &pspr.A_Light0, .S_NULL); // A_Light0 placeholder
 
     // ---- Fist weapon ----
     tbl[@intFromEnum(StateNum.S_PUNCH)] = S(.SPR_PUNG, 0, 1, &pspr.A_WeaponReady, .S_PUNCH);
     tbl[@intFromEnum(StateNum.S_PUNCHDOWN)] = S(.SPR_PUNG, 0, 1, &pspr.A_Lower, .S_PUNCHDOWN); // A_Lower
     tbl[@intFromEnum(StateNum.S_PUNCHUP)] = S(.SPR_PUNG, 0, 1, &pspr.A_Raise, .S_PUNCHUP); // A_Raise
     tbl[@intFromEnum(StateNum.S_PUNCH1)] = S(.SPR_PUNG, 1, 4, null, .S_PUNCH2);
-    tbl[@intFromEnum(StateNum.S_PUNCH2)] = S(.SPR_PUNG, 2, 4, null, .S_PUNCH3); // A_Punch
+    tbl[@intFromEnum(StateNum.S_PUNCH2)] = S(.SPR_PUNG, 2, 4, &pspr.A_Punch, .S_PUNCH3); // A_Punch
     tbl[@intFromEnum(StateNum.S_PUNCH3)] = S(.SPR_PUNG, 3, 5, null, .S_PUNCH4);
     tbl[@intFromEnum(StateNum.S_PUNCH4)] = S(.SPR_PUNG, 2, 4, null, .S_PUNCH5);
     tbl[@intFromEnum(StateNum.S_PUNCH5)] = S(.SPR_PUNG, 1, 5, &pspr.A_ReFire, .S_PUNCH); // A_ReFire
@@ -612,17 +617,17 @@ fn buildStateTable() [@intFromEnum(StateNum.NUMSTATES)]State {
     tbl[@intFromEnum(StateNum.S_PISTOLDOWN)] = S(.SPR_PISG, 0, 1, &pspr.A_Lower, .S_PISTOLDOWN); // A_Lower
     tbl[@intFromEnum(StateNum.S_PISTOLUP)] = S(.SPR_PISG, 0, 1, &pspr.A_Raise, .S_PISTOLUP); // A_Raise
     tbl[@intFromEnum(StateNum.S_PISTOL1)] = S(.SPR_PISG, 0, 4, null, .S_PISTOL2);
-    tbl[@intFromEnum(StateNum.S_PISTOL2)] = S(.SPR_PISG, 1, 6, null, .S_PISTOL3); // A_FirePistol
+    tbl[@intFromEnum(StateNum.S_PISTOL2)] = S(.SPR_PISG, 1, 6, &pspr.A_FirePistol, .S_PISTOL3); // A_FirePistol
     tbl[@intFromEnum(StateNum.S_PISTOL3)] = S(.SPR_PISG, 2, 4, null, .S_PISTOL4);
     tbl[@intFromEnum(StateNum.S_PISTOL4)] = S(.SPR_PISG, 1, 5, &pspr.A_ReFire, .S_PISTOL); // A_ReFire
-    tbl[@intFromEnum(StateNum.S_PISTOLFLASH)] = S(.SPR_PISF, 0 | FF_FULLBRIGHT, 7, null, .S_LIGHTDONE); // A_Light1
+    tbl[@intFromEnum(StateNum.S_PISTOLFLASH)] = S(.SPR_PISF, 0 | FF_FULLBRIGHT, 7, &pspr.A_Light1, .S_LIGHTDONE); // A_Light1
 
     // ---- Shotgun weapon ----
     tbl[@intFromEnum(StateNum.S_SGUN)] = S(.SPR_SHTG, 0, 1, &pspr.A_WeaponReady, .S_SGUN); // A_WeaponReady
     tbl[@intFromEnum(StateNum.S_SGUNDOWN)] = S(.SPR_SHTG, 0, 1, &pspr.A_Lower, .S_SGUNDOWN); // A_Lower
     tbl[@intFromEnum(StateNum.S_SGUNUP)] = S(.SPR_SHTG, 0, 1, &pspr.A_Raise, .S_SGUNUP); // A_Raise
     tbl[@intFromEnum(StateNum.S_SGUN1)] = S(.SPR_SHTG, 0, 3, null, .S_SGUN2);
-    tbl[@intFromEnum(StateNum.S_SGUN2)] = S(.SPR_SHTG, 0, 7, null, .S_SGUN3); // A_FireShotgun
+    tbl[@intFromEnum(StateNum.S_SGUN2)] = S(.SPR_SHTG, 0, 7, &pspr.A_FireShotgun, .S_SGUN3); // A_FireShotgun
     tbl[@intFromEnum(StateNum.S_SGUN3)] = S(.SPR_SHTG, 1, 5, null, .S_SGUN4);
     tbl[@intFromEnum(StateNum.S_SGUN4)] = S(.SPR_SHTG, 2, 5, null, .S_SGUN5);
     tbl[@intFromEnum(StateNum.S_SGUN5)] = S(.SPR_SHTG, 3, 4, null, .S_SGUN6);
@@ -630,59 +635,59 @@ fn buildStateTable() [@intFromEnum(StateNum.NUMSTATES)]State {
     tbl[@intFromEnum(StateNum.S_SGUN7)] = S(.SPR_SHTG, 1, 5, null, .S_SGUN8);
     tbl[@intFromEnum(StateNum.S_SGUN8)] = S(.SPR_SHTG, 0, 3, null, .S_SGUN9);
     tbl[@intFromEnum(StateNum.S_SGUN9)] = S(.SPR_SHTG, 0, 7, &pspr.A_ReFire, .S_SGUN); // A_ReFire
-    tbl[@intFromEnum(StateNum.S_SGUNFLASH1)] = S(.SPR_SHTF, 0 | FF_FULLBRIGHT, 4, null, .S_SGUNFLASH2);
-    tbl[@intFromEnum(StateNum.S_SGUNFLASH2)] = S(.SPR_SHTF, 1 | FF_FULLBRIGHT, 3, null, .S_LIGHTDONE);
+    tbl[@intFromEnum(StateNum.S_SGUNFLASH1)] = S(.SPR_SHTF, 0 | FF_FULLBRIGHT, 4, &pspr.A_Light1, .S_SGUNFLASH2);
+    tbl[@intFromEnum(StateNum.S_SGUNFLASH2)] = S(.SPR_SHTF, 1 | FF_FULLBRIGHT, 3, &pspr.A_Light2, .S_LIGHTDONE);
 
     // ---- Chaingun weapon ----
     tbl[@intFromEnum(StateNum.S_CHAIN)] = S(.SPR_CHGG, 0, 1, &pspr.A_WeaponReady, .S_CHAIN); // A_WeaponReady
     tbl[@intFromEnum(StateNum.S_CHAINDOWN)] = S(.SPR_CHGG, 0, 1, &pspr.A_Lower, .S_CHAINDOWN); // A_Lower
     tbl[@intFromEnum(StateNum.S_CHAINUP)] = S(.SPR_CHGG, 0, 1, &pspr.A_Raise, .S_CHAINUP); // A_Raise
-    tbl[@intFromEnum(StateNum.S_CHAIN1)] = S(.SPR_CHGG, 0, 4, null, .S_CHAIN2); // A_FireCGun
-    tbl[@intFromEnum(StateNum.S_CHAIN2)] = S(.SPR_CHGG, 1, 4, null, .S_CHAIN3); // A_FireCGun
+    tbl[@intFromEnum(StateNum.S_CHAIN1)] = S(.SPR_CHGG, 0, 4, &pspr.A_FireCGun, .S_CHAIN2); // A_FireCGun
+    tbl[@intFromEnum(StateNum.S_CHAIN2)] = S(.SPR_CHGG, 1, 4, &pspr.A_FireCGun, .S_CHAIN3); // A_FireCGun
     tbl[@intFromEnum(StateNum.S_CHAIN3)] = S(.SPR_CHGG, 1, 0, &pspr.A_ReFire, .S_CHAIN); // A_ReFire
-    tbl[@intFromEnum(StateNum.S_CHAINFLASH1)] = S(.SPR_CHGF, 0 | FF_FULLBRIGHT, 5, null, .S_LIGHTDONE);
-    tbl[@intFromEnum(StateNum.S_CHAINFLASH2)] = S(.SPR_CHGF, 1 | FF_FULLBRIGHT, 5, null, .S_LIGHTDONE);
+    tbl[@intFromEnum(StateNum.S_CHAINFLASH1)] = S(.SPR_CHGF, 0 | FF_FULLBRIGHT, 5, &pspr.A_Light1, .S_LIGHTDONE);
+    tbl[@intFromEnum(StateNum.S_CHAINFLASH2)] = S(.SPR_CHGF, 1 | FF_FULLBRIGHT, 5, &pspr.A_Light2, .S_LIGHTDONE);
 
     // ---- Rocket launcher weapon ----
     tbl[@intFromEnum(StateNum.S_MISSILE)] = S(.SPR_MISG, 0, 1, &pspr.A_WeaponReady, .S_MISSILE); // A_WeaponReady
     tbl[@intFromEnum(StateNum.S_MISSILEDOWN)] = S(.SPR_MISG, 0, 1, &pspr.A_Lower, .S_MISSILEDOWN); // A_Lower
     tbl[@intFromEnum(StateNum.S_MISSILEUP)] = S(.SPR_MISG, 0, 1, &pspr.A_Raise, .S_MISSILEUP); // A_Raise
-    tbl[@intFromEnum(StateNum.S_MISSILE1)] = S(.SPR_MISG, 1, 8, null, .S_MISSILE2); // A_GunFlash
-    tbl[@intFromEnum(StateNum.S_MISSILE2)] = S(.SPR_MISG, 1, 12, null, .S_MISSILE3); // A_FireMissile
+    tbl[@intFromEnum(StateNum.S_MISSILE1)] = S(.SPR_MISG, 1, 8, &pspr.A_GunFlash, .S_MISSILE2); // A_GunFlash
+    tbl[@intFromEnum(StateNum.S_MISSILE2)] = S(.SPR_MISG, 1, 12, &pspr.A_FireMissile, .S_MISSILE3); // A_FireMissile
     tbl[@intFromEnum(StateNum.S_MISSILE3)] = S(.SPR_MISG, 1, 0, &pspr.A_ReFire, .S_MISSILE); // A_ReFire
-    tbl[@intFromEnum(StateNum.S_MISSILEFLASH1)] = S(.SPR_MISF, 0 | FF_FULLBRIGHT, 3, null, .S_MISSILEFLASH2);
+    tbl[@intFromEnum(StateNum.S_MISSILEFLASH1)] = S(.SPR_MISF, 0 | FF_FULLBRIGHT, 3, &pspr.A_Light1, .S_MISSILEFLASH2);
     tbl[@intFromEnum(StateNum.S_MISSILEFLASH2)] = S(.SPR_MISF, 1 | FF_FULLBRIGHT, 4, null, .S_MISSILEFLASH3);
-    tbl[@intFromEnum(StateNum.S_MISSILEFLASH3)] = S(.SPR_MISF, 2 | FF_FULLBRIGHT, 4, null, .S_MISSILEFLASH4);
-    tbl[@intFromEnum(StateNum.S_MISSILEFLASH4)] = S(.SPR_MISF, 3 | FF_FULLBRIGHT, 4, null, .S_LIGHTDONE);
+    tbl[@intFromEnum(StateNum.S_MISSILEFLASH3)] = S(.SPR_MISF, 2 | FF_FULLBRIGHT, 4, &pspr.A_Light2, .S_MISSILEFLASH4);
+    tbl[@intFromEnum(StateNum.S_MISSILEFLASH4)] = S(.SPR_MISF, 3 | FF_FULLBRIGHT, 4, &pspr.A_Light2, .S_LIGHTDONE);
 
     // ---- Chainsaw weapon ----
     tbl[@intFromEnum(StateNum.S_SAW)] = S(.SPR_SAWG, 2, 4, &pspr.A_WeaponReady, .S_SAWB); // A_WeaponReady
     tbl[@intFromEnum(StateNum.S_SAWB)] = S(.SPR_SAWG, 3, 4, &pspr.A_WeaponReady, .S_SAW); // A_WeaponReady
     tbl[@intFromEnum(StateNum.S_SAWDOWN)] = S(.SPR_SAWG, 2, 1, &pspr.A_Lower, .S_SAWDOWN); // A_Lower
     tbl[@intFromEnum(StateNum.S_SAWUP)] = S(.SPR_SAWG, 2, 1, &pspr.A_Raise, .S_SAWUP); // A_Raise
-    tbl[@intFromEnum(StateNum.S_SAW1)] = S(.SPR_SAWG, 0, 4, null, .S_SAW2); // A_Saw
-    tbl[@intFromEnum(StateNum.S_SAW2)] = S(.SPR_SAWG, 1, 4, null, .S_SAW3); // A_Saw
+    tbl[@intFromEnum(StateNum.S_SAW1)] = S(.SPR_SAWG, 0, 4, &pspr.A_Saw, .S_SAW2); // A_Saw
+    tbl[@intFromEnum(StateNum.S_SAW2)] = S(.SPR_SAWG, 1, 4, &pspr.A_Saw, .S_SAW3); // A_Saw
     tbl[@intFromEnum(StateNum.S_SAW3)] = S(.SPR_SAWG, 1, 0, &pspr.A_ReFire, .S_SAW); // A_ReFire
 
     // ---- Plasma weapon ----
     tbl[@intFromEnum(StateNum.S_PLASMA)] = S(.SPR_PLSG, 0, 1, &pspr.A_WeaponReady, .S_PLASMA); // A_WeaponReady
     tbl[@intFromEnum(StateNum.S_PLASMADOWN)] = S(.SPR_PLSG, 0, 1, &pspr.A_Lower, .S_PLASMADOWN); // A_Lower
     tbl[@intFromEnum(StateNum.S_PLASMAUP)] = S(.SPR_PLSG, 0, 1, &pspr.A_Raise, .S_PLASMAUP); // A_Raise
-    tbl[@intFromEnum(StateNum.S_PLASMA1)] = S(.SPR_PLSG, 0, 3, null, .S_PLASMA2); // A_FirePlasma
+    tbl[@intFromEnum(StateNum.S_PLASMA1)] = S(.SPR_PLSG, 0, 3, &pspr.A_FirePlasma, .S_PLASMA2); // A_FirePlasma
     tbl[@intFromEnum(StateNum.S_PLASMA2)] = S(.SPR_PLSG, 1, 20, &pspr.A_ReFire, .S_PLASMA); // A_ReFire
-    tbl[@intFromEnum(StateNum.S_PLASMAFLASH1)] = S(.SPR_PLSF, 0 | FF_FULLBRIGHT, 4, null, .S_LIGHTDONE);
-    tbl[@intFromEnum(StateNum.S_PLASMAFLASH2)] = S(.SPR_PLSF, 1 | FF_FULLBRIGHT, 4, null, .S_LIGHTDONE);
+    tbl[@intFromEnum(StateNum.S_PLASMAFLASH1)] = S(.SPR_PLSF, 0 | FF_FULLBRIGHT, 4, &pspr.A_Light1, .S_LIGHTDONE);
+    tbl[@intFromEnum(StateNum.S_PLASMAFLASH2)] = S(.SPR_PLSF, 1 | FF_FULLBRIGHT, 4, &pspr.A_Light1, .S_LIGHTDONE);
 
     // ---- BFG weapon ----
     tbl[@intFromEnum(StateNum.S_BFG)] = S(.SPR_BFGG, 0, 1, &pspr.A_WeaponReady, .S_BFG); // A_WeaponReady
     tbl[@intFromEnum(StateNum.S_BFGDOWN)] = S(.SPR_BFGG, 0, 1, &pspr.A_Lower, .S_BFGDOWN); // A_Lower
     tbl[@intFromEnum(StateNum.S_BFGUP)] = S(.SPR_BFGG, 0, 1, &pspr.A_Raise, .S_BFGUP); // A_Raise
-    tbl[@intFromEnum(StateNum.S_BFG1)] = S(.SPR_BFGG, 0, 20, null, .S_BFG2); // A_BFGsound
-    tbl[@intFromEnum(StateNum.S_BFG2)] = S(.SPR_BFGG, 1, 10, null, .S_BFG3); // A_GunFlash
-    tbl[@intFromEnum(StateNum.S_BFG3)] = S(.SPR_BFGG, 1, 10, null, .S_BFG4); // A_FireBFG
+    tbl[@intFromEnum(StateNum.S_BFG1)] = S(.SPR_BFGG, 0, 20, &pspr.A_BFGsound, .S_BFG2); // A_BFGsound
+    tbl[@intFromEnum(StateNum.S_BFG2)] = S(.SPR_BFGG, 1, 10, &pspr.A_GunFlash, .S_BFG3); // A_GunFlash
+    tbl[@intFromEnum(StateNum.S_BFG3)] = S(.SPR_BFGG, 1, 10, &pspr.A_FireBFG, .S_BFG4); // A_FireBFG
     tbl[@intFromEnum(StateNum.S_BFG4)] = S(.SPR_BFGG, 1, 20, &pspr.A_ReFire, .S_BFG); // A_ReFire
-    tbl[@intFromEnum(StateNum.S_BFGFLASH1)] = S(.SPR_BFGF, 0 | FF_FULLBRIGHT, 11, null, .S_BFGFLASH2);
-    tbl[@intFromEnum(StateNum.S_BFGFLASH2)] = S(.SPR_BFGF, 1 | FF_FULLBRIGHT, 6, null, .S_LIGHTDONE);
+    tbl[@intFromEnum(StateNum.S_BFGFLASH1)] = S(.SPR_BFGF, 0 | FF_FULLBRIGHT, 11, &pspr.A_Light1, .S_BFGFLASH2);
+    tbl[@intFromEnum(StateNum.S_BFGFLASH2)] = S(.SPR_BFGF, 1 | FF_FULLBRIGHT, 6, &pspr.A_Light2, .S_LIGHTDONE);
 
     // ---- Blood ----
     tbl[@intFromEnum(StateNum.S_BLOOD1)] = S(.SPR_BLUD, 2, 8, null, .S_BLOOD2);
@@ -726,13 +731,13 @@ fn buildStateTable() [@intFromEnum(StateNum.NUMSTATES)]State {
     // ---- BFG explosion ----
     tbl[@intFromEnum(StateNum.S_BFGLAND)] = S(.SPR_BFE1, 0 | FF_FULLBRIGHT, 8, null, .S_BFGLAND2);
     tbl[@intFromEnum(StateNum.S_BFGLAND2)] = S(.SPR_BFE1, 1 | FF_FULLBRIGHT, 8, null, .S_BFGLAND3);
-    tbl[@intFromEnum(StateNum.S_BFGLAND3)] = S(.SPR_BFE1, 2 | FF_FULLBRIGHT, 8, null, .S_BFGLAND4); // A_BFGSpray
+    tbl[@intFromEnum(StateNum.S_BFGLAND3)] = S(.SPR_BFE1, 2 | FF_FULLBRIGHT, 8, &pspr.A_BFGSpray, .S_BFGLAND4); // A_BFGSpray
     tbl[@intFromEnum(StateNum.S_BFGLAND4)] = S(.SPR_BFE1, 3 | FF_FULLBRIGHT, 8, null, .S_BFGLAND5);
     tbl[@intFromEnum(StateNum.S_BFGLAND5)] = S(.SPR_BFE1, 4 | FF_FULLBRIGHT, 8, null, .S_BFGLAND6);
     tbl[@intFromEnum(StateNum.S_BFGLAND6)] = S(.SPR_BFE1, 5 | FF_FULLBRIGHT, 8, null, .S_NULL);
 
     // ---- Rocket explosion ----
-    tbl[@intFromEnum(StateNum.S_EXPLODE1)] = S(.SPR_MISL, 1 | FF_FULLBRIGHT, 8, null, .S_EXPLODE2);
+    tbl[@intFromEnum(StateNum.S_EXPLODE1)] = S(.SPR_MISL, 1 | FF_FULLBRIGHT, 8, &enemy.A_Explode, .S_EXPLODE2);
     tbl[@intFromEnum(StateNum.S_EXPLODE2)] = S(.SPR_MISL, 2 | FF_FULLBRIGHT, 6, null, .S_EXPLODE3);
     tbl[@intFromEnum(StateNum.S_EXPLODE3)] = S(.SPR_MISL, 3 | FF_FULLBRIGHT, 4, null, .S_NULL);
 
@@ -768,17 +773,17 @@ fn buildStateTable() [@intFromEnum(StateNum.NUMSTATES)]State {
     tbl[@intFromEnum(StateNum.S_PLAY_ATK1)] = S(.SPR_PLAY, 4, 12, null, .S_PLAY);
     tbl[@intFromEnum(StateNum.S_PLAY_ATK2)] = S(.SPR_PLAY, 5 | FF_FULLBRIGHT, 6, null, .S_PLAY_ATK1);
     tbl[@intFromEnum(StateNum.S_PLAY_PAIN)] = S(.SPR_PLAY, 6, 4, null, .S_PLAY_PAIN2);
-    tbl[@intFromEnum(StateNum.S_PLAY_PAIN2)] = S(.SPR_PLAY, 6, 4, null, .S_PLAY); // A_Pain
+    tbl[@intFromEnum(StateNum.S_PLAY_PAIN2)] = S(.SPR_PLAY, 6, 4, &enemy.A_Pain, .S_PLAY); // A_Pain
     tbl[@intFromEnum(StateNum.S_PLAY_DIE1)] = S(.SPR_PLAY, 7, 10, null, .S_PLAY_DIE2);
-    tbl[@intFromEnum(StateNum.S_PLAY_DIE2)] = S(.SPR_PLAY, 8, 10, null, .S_PLAY_DIE3); // A_PlayerScream
-    tbl[@intFromEnum(StateNum.S_PLAY_DIE3)] = S(.SPR_PLAY, 9, 10, null, .S_PLAY_DIE4); // A_Fall
+    tbl[@intFromEnum(StateNum.S_PLAY_DIE2)] = S(.SPR_PLAY, 8, 10, &enemy.A_PlayerScream, .S_PLAY_DIE3); // A_PlayerScream
+    tbl[@intFromEnum(StateNum.S_PLAY_DIE3)] = S(.SPR_PLAY, 9, 10, &enemy.A_Fall, .S_PLAY_DIE4); // A_Fall
     tbl[@intFromEnum(StateNum.S_PLAY_DIE4)] = S(.SPR_PLAY, 10, 10, null, .S_PLAY_DIE5);
     tbl[@intFromEnum(StateNum.S_PLAY_DIE5)] = S(.SPR_PLAY, 11, 10, null, .S_PLAY_DIE6);
     tbl[@intFromEnum(StateNum.S_PLAY_DIE6)] = S(.SPR_PLAY, 12, 10, null, .S_PLAY_DIE7);
     tbl[@intFromEnum(StateNum.S_PLAY_DIE7)] = S(.SPR_PLAY, 13, -1, null, .S_NULL);
     tbl[@intFromEnum(StateNum.S_PLAY_XDIE1)] = S(.SPR_PLAY, 14, 5, null, .S_PLAY_XDIE2);
-    tbl[@intFromEnum(StateNum.S_PLAY_XDIE2)] = S(.SPR_PLAY, 15, 5, null, .S_PLAY_XDIE3); // A_XScream
-    tbl[@intFromEnum(StateNum.S_PLAY_XDIE3)] = S(.SPR_PLAY, 16, 5, null, .S_PLAY_XDIE4); // A_Fall
+    tbl[@intFromEnum(StateNum.S_PLAY_XDIE2)] = S(.SPR_PLAY, 15, 5, &enemy.A_XScream, .S_PLAY_XDIE3); // A_XScream
+    tbl[@intFromEnum(StateNum.S_PLAY_XDIE3)] = S(.SPR_PLAY, 16, 5, &enemy.A_Fall, .S_PLAY_XDIE4); // A_Fall
     tbl[@intFromEnum(StateNum.S_PLAY_XDIE4)] = S(.SPR_PLAY, 17, 5, null, .S_PLAY_XDIE5);
     tbl[@intFromEnum(StateNum.S_PLAY_XDIE5)] = S(.SPR_PLAY, 18, 5, null, .S_PLAY_XDIE6);
     tbl[@intFromEnum(StateNum.S_PLAY_XDIE6)] = S(.SPR_PLAY, 19, 5, null, .S_PLAY_XDIE7);
@@ -787,29 +792,29 @@ fn buildStateTable() [@intFromEnum(StateNum.NUMSTATES)]State {
     tbl[@intFromEnum(StateNum.S_PLAY_XDIE9)] = S(.SPR_PLAY, 22, -1, null, .S_NULL);
 
     // ---- Zombieman (POSS) ----
-    tbl[@intFromEnum(StateNum.S_POSS_STND)] = S(.SPR_POSS, 0, 10, null, .S_POSS_STND2); // A_Look
-    tbl[@intFromEnum(StateNum.S_POSS_STND2)] = S(.SPR_POSS, 1, 10, null, .S_POSS_STND); // A_Look
-    tbl[@intFromEnum(StateNum.S_POSS_RUN1)] = S(.SPR_POSS, 0, 4, null, .S_POSS_RUN2); // A_Chase
-    tbl[@intFromEnum(StateNum.S_POSS_RUN2)] = S(.SPR_POSS, 0, 4, null, .S_POSS_RUN3); // A_Chase
-    tbl[@intFromEnum(StateNum.S_POSS_RUN3)] = S(.SPR_POSS, 1, 4, null, .S_POSS_RUN4); // A_Chase
-    tbl[@intFromEnum(StateNum.S_POSS_RUN4)] = S(.SPR_POSS, 1, 4, null, .S_POSS_RUN5); // A_Chase
-    tbl[@intFromEnum(StateNum.S_POSS_RUN5)] = S(.SPR_POSS, 2, 4, null, .S_POSS_RUN6); // A_Chase
-    tbl[@intFromEnum(StateNum.S_POSS_RUN6)] = S(.SPR_POSS, 2, 4, null, .S_POSS_RUN7); // A_Chase
-    tbl[@intFromEnum(StateNum.S_POSS_RUN7)] = S(.SPR_POSS, 3, 4, null, .S_POSS_RUN8); // A_Chase
-    tbl[@intFromEnum(StateNum.S_POSS_RUN8)] = S(.SPR_POSS, 3, 4, null, .S_POSS_RUN1); // A_Chase
-    tbl[@intFromEnum(StateNum.S_POSS_ATK1)] = S(.SPR_POSS, 4, 10, null, .S_POSS_ATK2); // A_FaceTarget
-    tbl[@intFromEnum(StateNum.S_POSS_ATK2)] = S(.SPR_POSS, 5, 8, null, .S_POSS_ATK3); // A_PosAttack
+    tbl[@intFromEnum(StateNum.S_POSS_STND)] = S(.SPR_POSS, 0, 10, &enemy.A_Look, .S_POSS_STND2); // A_Look
+    tbl[@intFromEnum(StateNum.S_POSS_STND2)] = S(.SPR_POSS, 1, 10, &enemy.A_Look, .S_POSS_STND); // A_Look
+    tbl[@intFromEnum(StateNum.S_POSS_RUN1)] = S(.SPR_POSS, 0, 4, &enemy.A_Chase, .S_POSS_RUN2); // A_Chase
+    tbl[@intFromEnum(StateNum.S_POSS_RUN2)] = S(.SPR_POSS, 0, 4, &enemy.A_Chase, .S_POSS_RUN3); // A_Chase
+    tbl[@intFromEnum(StateNum.S_POSS_RUN3)] = S(.SPR_POSS, 1, 4, &enemy.A_Chase, .S_POSS_RUN4); // A_Chase
+    tbl[@intFromEnum(StateNum.S_POSS_RUN4)] = S(.SPR_POSS, 1, 4, &enemy.A_Chase, .S_POSS_RUN5); // A_Chase
+    tbl[@intFromEnum(StateNum.S_POSS_RUN5)] = S(.SPR_POSS, 2, 4, &enemy.A_Chase, .S_POSS_RUN6); // A_Chase
+    tbl[@intFromEnum(StateNum.S_POSS_RUN6)] = S(.SPR_POSS, 2, 4, &enemy.A_Chase, .S_POSS_RUN7); // A_Chase
+    tbl[@intFromEnum(StateNum.S_POSS_RUN7)] = S(.SPR_POSS, 3, 4, &enemy.A_Chase, .S_POSS_RUN8); // A_Chase
+    tbl[@intFromEnum(StateNum.S_POSS_RUN8)] = S(.SPR_POSS, 3, 4, &enemy.A_Chase, .S_POSS_RUN1); // A_Chase
+    tbl[@intFromEnum(StateNum.S_POSS_ATK1)] = S(.SPR_POSS, 4, 10, &enemy.A_FaceTarget, .S_POSS_ATK2); // A_FaceTarget
+    tbl[@intFromEnum(StateNum.S_POSS_ATK2)] = S(.SPR_POSS, 5, 8, &enemy.A_PosAttack, .S_POSS_ATK3); // A_PosAttack
     tbl[@intFromEnum(StateNum.S_POSS_ATK3)] = S(.SPR_POSS, 4, 8, null, .S_POSS_RUN1);
     tbl[@intFromEnum(StateNum.S_POSS_PAIN)] = S(.SPR_POSS, 6, 3, null, .S_POSS_PAIN2);
-    tbl[@intFromEnum(StateNum.S_POSS_PAIN2)] = S(.SPR_POSS, 6, 3, null, .S_POSS_RUN1); // A_Pain
+    tbl[@intFromEnum(StateNum.S_POSS_PAIN2)] = S(.SPR_POSS, 6, 3, &enemy.A_Pain, .S_POSS_RUN1); // A_Pain
     tbl[@intFromEnum(StateNum.S_POSS_DIE1)] = S(.SPR_POSS, 7, 5, null, .S_POSS_DIE2);
-    tbl[@intFromEnum(StateNum.S_POSS_DIE2)] = S(.SPR_POSS, 8, 5, null, .S_POSS_DIE3); // A_Scream
-    tbl[@intFromEnum(StateNum.S_POSS_DIE3)] = S(.SPR_POSS, 9, 5, null, .S_POSS_DIE4); // A_Fall
+    tbl[@intFromEnum(StateNum.S_POSS_DIE2)] = S(.SPR_POSS, 8, 5, &enemy.A_Scream, .S_POSS_DIE3); // A_Scream
+    tbl[@intFromEnum(StateNum.S_POSS_DIE3)] = S(.SPR_POSS, 9, 5, &enemy.A_Fall, .S_POSS_DIE4); // A_Fall
     tbl[@intFromEnum(StateNum.S_POSS_DIE4)] = S(.SPR_POSS, 10, 5, null, .S_POSS_DIE5);
     tbl[@intFromEnum(StateNum.S_POSS_DIE5)] = S(.SPR_POSS, 11, -1, null, .S_NULL);
     tbl[@intFromEnum(StateNum.S_POSS_XDIE1)] = S(.SPR_POSS, 12, 5, null, .S_POSS_XDIE2);
-    tbl[@intFromEnum(StateNum.S_POSS_XDIE2)] = S(.SPR_POSS, 13, 5, null, .S_POSS_XDIE3); // A_XScream
-    tbl[@intFromEnum(StateNum.S_POSS_XDIE3)] = S(.SPR_POSS, 14, 5, null, .S_POSS_XDIE4); // A_Fall
+    tbl[@intFromEnum(StateNum.S_POSS_XDIE2)] = S(.SPR_POSS, 13, 5, &enemy.A_XScream, .S_POSS_XDIE3); // A_XScream
+    tbl[@intFromEnum(StateNum.S_POSS_XDIE3)] = S(.SPR_POSS, 14, 5, &enemy.A_Fall, .S_POSS_XDIE4); // A_Fall
     tbl[@intFromEnum(StateNum.S_POSS_XDIE4)] = S(.SPR_POSS, 15, 5, null, .S_POSS_XDIE5);
     tbl[@intFromEnum(StateNum.S_POSS_XDIE5)] = S(.SPR_POSS, 16, 5, null, .S_POSS_XDIE6);
     tbl[@intFromEnum(StateNum.S_POSS_XDIE6)] = S(.SPR_POSS, 17, 5, null, .S_POSS_XDIE7);
@@ -822,29 +827,29 @@ fn buildStateTable() [@intFromEnum(StateNum.NUMSTATES)]State {
     tbl[@intFromEnum(StateNum.S_POSS_RAISE4)] = S(.SPR_POSS, 7, 5, null, .S_POSS_RUN1);
 
     // ---- Shotgun Guy (SPOS) ----
-    tbl[@intFromEnum(StateNum.S_SPOS_STND)] = S(.SPR_SPOS, 0, 10, null, .S_SPOS_STND2);
-    tbl[@intFromEnum(StateNum.S_SPOS_STND2)] = S(.SPR_SPOS, 1, 10, null, .S_SPOS_STND);
-    tbl[@intFromEnum(StateNum.S_SPOS_RUN1)] = S(.SPR_SPOS, 0, 3, null, .S_SPOS_RUN2);
-    tbl[@intFromEnum(StateNum.S_SPOS_RUN2)] = S(.SPR_SPOS, 0, 3, null, .S_SPOS_RUN3);
-    tbl[@intFromEnum(StateNum.S_SPOS_RUN3)] = S(.SPR_SPOS, 1, 3, null, .S_SPOS_RUN4);
-    tbl[@intFromEnum(StateNum.S_SPOS_RUN4)] = S(.SPR_SPOS, 1, 3, null, .S_SPOS_RUN5);
-    tbl[@intFromEnum(StateNum.S_SPOS_RUN5)] = S(.SPR_SPOS, 2, 3, null, .S_SPOS_RUN6);
-    tbl[@intFromEnum(StateNum.S_SPOS_RUN6)] = S(.SPR_SPOS, 2, 3, null, .S_SPOS_RUN7);
-    tbl[@intFromEnum(StateNum.S_SPOS_RUN7)] = S(.SPR_SPOS, 3, 3, null, .S_SPOS_RUN8);
-    tbl[@intFromEnum(StateNum.S_SPOS_RUN8)] = S(.SPR_SPOS, 3, 3, null, .S_SPOS_RUN1);
-    tbl[@intFromEnum(StateNum.S_SPOS_ATK1)] = S(.SPR_SPOS, 4, 10, null, .S_SPOS_ATK2);
-    tbl[@intFromEnum(StateNum.S_SPOS_ATK2)] = S(.SPR_SPOS, 5 | FF_FULLBRIGHT, 10, null, .S_SPOS_ATK3); // A_SPosAttack
+    tbl[@intFromEnum(StateNum.S_SPOS_STND)] = S(.SPR_SPOS, 0, 10, &enemy.A_Look, .S_SPOS_STND2);
+    tbl[@intFromEnum(StateNum.S_SPOS_STND2)] = S(.SPR_SPOS, 1, 10, &enemy.A_Look, .S_SPOS_STND);
+    tbl[@intFromEnum(StateNum.S_SPOS_RUN1)] = S(.SPR_SPOS, 0, 3, &enemy.A_Chase, .S_SPOS_RUN2);
+    tbl[@intFromEnum(StateNum.S_SPOS_RUN2)] = S(.SPR_SPOS, 0, 3, &enemy.A_Chase, .S_SPOS_RUN3);
+    tbl[@intFromEnum(StateNum.S_SPOS_RUN3)] = S(.SPR_SPOS, 1, 3, &enemy.A_Chase, .S_SPOS_RUN4);
+    tbl[@intFromEnum(StateNum.S_SPOS_RUN4)] = S(.SPR_SPOS, 1, 3, &enemy.A_Chase, .S_SPOS_RUN5);
+    tbl[@intFromEnum(StateNum.S_SPOS_RUN5)] = S(.SPR_SPOS, 2, 3, &enemy.A_Chase, .S_SPOS_RUN6);
+    tbl[@intFromEnum(StateNum.S_SPOS_RUN6)] = S(.SPR_SPOS, 2, 3, &enemy.A_Chase, .S_SPOS_RUN7);
+    tbl[@intFromEnum(StateNum.S_SPOS_RUN7)] = S(.SPR_SPOS, 3, 3, &enemy.A_Chase, .S_SPOS_RUN8);
+    tbl[@intFromEnum(StateNum.S_SPOS_RUN8)] = S(.SPR_SPOS, 3, 3, &enemy.A_Chase, .S_SPOS_RUN1);
+    tbl[@intFromEnum(StateNum.S_SPOS_ATK1)] = S(.SPR_SPOS, 4, 10, &enemy.A_FaceTarget, .S_SPOS_ATK2);
+    tbl[@intFromEnum(StateNum.S_SPOS_ATK2)] = S(.SPR_SPOS, 5 | FF_FULLBRIGHT, 10, &enemy.A_SPosAttack, .S_SPOS_ATK3); // A_SPosAttack
     tbl[@intFromEnum(StateNum.S_SPOS_ATK3)] = S(.SPR_SPOS, 4, 10, null, .S_SPOS_RUN1);
     tbl[@intFromEnum(StateNum.S_SPOS_PAIN)] = S(.SPR_SPOS, 6, 3, null, .S_SPOS_PAIN2);
-    tbl[@intFromEnum(StateNum.S_SPOS_PAIN2)] = S(.SPR_SPOS, 6, 3, null, .S_SPOS_RUN1);
+    tbl[@intFromEnum(StateNum.S_SPOS_PAIN2)] = S(.SPR_SPOS, 6, 3, &enemy.A_Pain, .S_SPOS_RUN1);
     tbl[@intFromEnum(StateNum.S_SPOS_DIE1)] = S(.SPR_SPOS, 7, 5, null, .S_SPOS_DIE2);
-    tbl[@intFromEnum(StateNum.S_SPOS_DIE2)] = S(.SPR_SPOS, 8, 5, null, .S_SPOS_DIE3); // A_Scream
-    tbl[@intFromEnum(StateNum.S_SPOS_DIE3)] = S(.SPR_SPOS, 9, 5, null, .S_SPOS_DIE4); // A_Fall
+    tbl[@intFromEnum(StateNum.S_SPOS_DIE2)] = S(.SPR_SPOS, 8, 5, &enemy.A_Scream, .S_SPOS_DIE3); // A_Scream
+    tbl[@intFromEnum(StateNum.S_SPOS_DIE3)] = S(.SPR_SPOS, 9, 5, &enemy.A_Fall, .S_SPOS_DIE4); // A_Fall
     tbl[@intFromEnum(StateNum.S_SPOS_DIE4)] = S(.SPR_SPOS, 10, 5, null, .S_SPOS_DIE5);
     tbl[@intFromEnum(StateNum.S_SPOS_DIE5)] = S(.SPR_SPOS, 11, -1, null, .S_NULL);
     tbl[@intFromEnum(StateNum.S_SPOS_XDIE1)] = S(.SPR_SPOS, 12, 5, null, .S_SPOS_XDIE2);
-    tbl[@intFromEnum(StateNum.S_SPOS_XDIE2)] = S(.SPR_SPOS, 13, 5, null, .S_SPOS_XDIE3);
-    tbl[@intFromEnum(StateNum.S_SPOS_XDIE3)] = S(.SPR_SPOS, 14, 5, null, .S_SPOS_XDIE4);
+    tbl[@intFromEnum(StateNum.S_SPOS_XDIE2)] = S(.SPR_SPOS, 13, 5, &enemy.A_XScream, .S_SPOS_XDIE3);
+    tbl[@intFromEnum(StateNum.S_SPOS_XDIE3)] = S(.SPR_SPOS, 14, 5, &enemy.A_Fall, .S_SPOS_XDIE4);
     tbl[@intFromEnum(StateNum.S_SPOS_XDIE4)] = S(.SPR_SPOS, 15, 5, null, .S_SPOS_XDIE5);
     tbl[@intFromEnum(StateNum.S_SPOS_XDIE5)] = S(.SPR_SPOS, 16, 5, null, .S_SPOS_XDIE6);
     tbl[@intFromEnum(StateNum.S_SPOS_XDIE6)] = S(.SPR_SPOS, 17, 5, null, .S_SPOS_XDIE7);
@@ -858,31 +863,31 @@ fn buildStateTable() [@intFromEnum(StateNum.NUMSTATES)]State {
     tbl[@intFromEnum(StateNum.S_SPOS_RAISE5)] = S(.SPR_SPOS, 7, 5, null, .S_SPOS_RUN1);
 
     // ---- Imp (TROO) ----
-    tbl[@intFromEnum(StateNum.S_TROO_STND)] = S(.SPR_TROO, 0, 10, null, .S_TROO_STND2);
-    tbl[@intFromEnum(StateNum.S_TROO_STND2)] = S(.SPR_TROO, 1, 10, null, .S_TROO_STND);
-    tbl[@intFromEnum(StateNum.S_TROO_RUN1)] = S(.SPR_TROO, 0, 3, null, .S_TROO_RUN2);
-    tbl[@intFromEnum(StateNum.S_TROO_RUN2)] = S(.SPR_TROO, 0, 3, null, .S_TROO_RUN3);
-    tbl[@intFromEnum(StateNum.S_TROO_RUN3)] = S(.SPR_TROO, 1, 3, null, .S_TROO_RUN4);
-    tbl[@intFromEnum(StateNum.S_TROO_RUN4)] = S(.SPR_TROO, 1, 3, null, .S_TROO_RUN5);
-    tbl[@intFromEnum(StateNum.S_TROO_RUN5)] = S(.SPR_TROO, 2, 3, null, .S_TROO_RUN6);
-    tbl[@intFromEnum(StateNum.S_TROO_RUN6)] = S(.SPR_TROO, 2, 3, null, .S_TROO_RUN7);
-    tbl[@intFromEnum(StateNum.S_TROO_RUN7)] = S(.SPR_TROO, 3, 3, null, .S_TROO_RUN8);
-    tbl[@intFromEnum(StateNum.S_TROO_RUN8)] = S(.SPR_TROO, 3, 3, null, .S_TROO_RUN1);
-    tbl[@intFromEnum(StateNum.S_TROO_ATK1)] = S(.SPR_TROO, 4, 8, null, .S_TROO_ATK2); // A_FaceTarget
-    tbl[@intFromEnum(StateNum.S_TROO_ATK2)] = S(.SPR_TROO, 5, 8, null, .S_TROO_ATK3); // A_FaceTarget
-    tbl[@intFromEnum(StateNum.S_TROO_ATK3)] = S(.SPR_TROO, 6, 6, null, .S_TROO_RUN1); // A_TroopAttack
+    tbl[@intFromEnum(StateNum.S_TROO_STND)] = S(.SPR_TROO, 0, 10, &enemy.A_Look, .S_TROO_STND2);
+    tbl[@intFromEnum(StateNum.S_TROO_STND2)] = S(.SPR_TROO, 1, 10, &enemy.A_Look, .S_TROO_STND);
+    tbl[@intFromEnum(StateNum.S_TROO_RUN1)] = S(.SPR_TROO, 0, 3, &enemy.A_Chase, .S_TROO_RUN2);
+    tbl[@intFromEnum(StateNum.S_TROO_RUN2)] = S(.SPR_TROO, 0, 3, &enemy.A_Chase, .S_TROO_RUN3);
+    tbl[@intFromEnum(StateNum.S_TROO_RUN3)] = S(.SPR_TROO, 1, 3, &enemy.A_Chase, .S_TROO_RUN4);
+    tbl[@intFromEnum(StateNum.S_TROO_RUN4)] = S(.SPR_TROO, 1, 3, &enemy.A_Chase, .S_TROO_RUN5);
+    tbl[@intFromEnum(StateNum.S_TROO_RUN5)] = S(.SPR_TROO, 2, 3, &enemy.A_Chase, .S_TROO_RUN6);
+    tbl[@intFromEnum(StateNum.S_TROO_RUN6)] = S(.SPR_TROO, 2, 3, &enemy.A_Chase, .S_TROO_RUN7);
+    tbl[@intFromEnum(StateNum.S_TROO_RUN7)] = S(.SPR_TROO, 3, 3, &enemy.A_Chase, .S_TROO_RUN8);
+    tbl[@intFromEnum(StateNum.S_TROO_RUN8)] = S(.SPR_TROO, 3, 3, &enemy.A_Chase, .S_TROO_RUN1);
+    tbl[@intFromEnum(StateNum.S_TROO_ATK1)] = S(.SPR_TROO, 4, 8, &enemy.A_FaceTarget, .S_TROO_ATK2); // A_FaceTarget
+    tbl[@intFromEnum(StateNum.S_TROO_ATK2)] = S(.SPR_TROO, 5, 8, &enemy.A_FaceTarget, .S_TROO_ATK3); // A_FaceTarget
+    tbl[@intFromEnum(StateNum.S_TROO_ATK3)] = S(.SPR_TROO, 6, 6, &enemy.A_TroopAttack, .S_TROO_RUN1); // A_TroopAttack
     tbl[@intFromEnum(StateNum.S_TROO_PAIN)] = S(.SPR_TROO, 7, 2, null, .S_TROO_PAIN2);
-    tbl[@intFromEnum(StateNum.S_TROO_PAIN2)] = S(.SPR_TROO, 7, 2, null, .S_TROO_RUN1);
+    tbl[@intFromEnum(StateNum.S_TROO_PAIN2)] = S(.SPR_TROO, 7, 2, &enemy.A_Pain, .S_TROO_RUN1);
     tbl[@intFromEnum(StateNum.S_TROO_DIE1)] = S(.SPR_TROO, 8, 8, null, .S_TROO_DIE2);
-    tbl[@intFromEnum(StateNum.S_TROO_DIE2)] = S(.SPR_TROO, 9, 8, null, .S_TROO_DIE3); // A_Scream
+    tbl[@intFromEnum(StateNum.S_TROO_DIE2)] = S(.SPR_TROO, 9, 8, &enemy.A_Scream, .S_TROO_DIE3); // A_Scream
     tbl[@intFromEnum(StateNum.S_TROO_DIE3)] = S(.SPR_TROO, 10, 6, null, .S_TROO_DIE4);
-    tbl[@intFromEnum(StateNum.S_TROO_DIE4)] = S(.SPR_TROO, 11, 6, null, .S_TROO_DIE5); // A_Fall
+    tbl[@intFromEnum(StateNum.S_TROO_DIE4)] = S(.SPR_TROO, 11, 6, &enemy.A_Fall, .S_TROO_DIE5); // A_Fall
     tbl[@intFromEnum(StateNum.S_TROO_DIE5)] = S(.SPR_TROO, 12, -1, null, .S_NULL);
     tbl[@intFromEnum(StateNum.S_TROO_XDIE1)] = S(.SPR_TROO, 13, 5, null, .S_TROO_XDIE2);
-    tbl[@intFromEnum(StateNum.S_TROO_XDIE2)] = S(.SPR_TROO, 14, 5, null, .S_TROO_XDIE3);
+    tbl[@intFromEnum(StateNum.S_TROO_XDIE2)] = S(.SPR_TROO, 14, 5, &enemy.A_XScream, .S_TROO_XDIE3);
     tbl[@intFromEnum(StateNum.S_TROO_XDIE3)] = S(.SPR_TROO, 15, 5, null, .S_TROO_XDIE4);
     tbl[@intFromEnum(StateNum.S_TROO_XDIE4)] = S(.SPR_TROO, 16, 5, null, .S_TROO_XDIE5);
-    tbl[@intFromEnum(StateNum.S_TROO_XDIE5)] = S(.SPR_TROO, 17, 5, null, .S_TROO_XDIE6);
+    tbl[@intFromEnum(StateNum.S_TROO_XDIE5)] = S(.SPR_TROO, 17, 5, &enemy.A_Fall, .S_TROO_XDIE6);
     tbl[@intFromEnum(StateNum.S_TROO_XDIE6)] = S(.SPR_TROO, 18, 5, null, .S_TROO_XDIE7);
     tbl[@intFromEnum(StateNum.S_TROO_XDIE7)] = S(.SPR_TROO, 19, 5, null, .S_TROO_XDIE8);
     tbl[@intFromEnum(StateNum.S_TROO_XDIE8)] = S(.SPR_TROO, 20, -1, null, .S_NULL);
@@ -893,25 +898,25 @@ fn buildStateTable() [@intFromEnum(StateNum.NUMSTATES)]State {
     tbl[@intFromEnum(StateNum.S_TROO_RAISE5)] = S(.SPR_TROO, 8, 6, null, .S_TROO_RUN1);
 
     // ---- Demon (SARG) ----
-    tbl[@intFromEnum(StateNum.S_SARG_STND)] = S(.SPR_SARG, 0, 10, null, .S_SARG_STND2);
-    tbl[@intFromEnum(StateNum.S_SARG_STND2)] = S(.SPR_SARG, 1, 10, null, .S_SARG_STND);
-    tbl[@intFromEnum(StateNum.S_SARG_RUN1)] = S(.SPR_SARG, 0, 2, null, .S_SARG_RUN2);
-    tbl[@intFromEnum(StateNum.S_SARG_RUN2)] = S(.SPR_SARG, 0, 2, null, .S_SARG_RUN3);
-    tbl[@intFromEnum(StateNum.S_SARG_RUN3)] = S(.SPR_SARG, 1, 2, null, .S_SARG_RUN4);
-    tbl[@intFromEnum(StateNum.S_SARG_RUN4)] = S(.SPR_SARG, 1, 2, null, .S_SARG_RUN5);
-    tbl[@intFromEnum(StateNum.S_SARG_RUN5)] = S(.SPR_SARG, 2, 2, null, .S_SARG_RUN6);
-    tbl[@intFromEnum(StateNum.S_SARG_RUN6)] = S(.SPR_SARG, 2, 2, null, .S_SARG_RUN7);
-    tbl[@intFromEnum(StateNum.S_SARG_RUN7)] = S(.SPR_SARG, 3, 2, null, .S_SARG_RUN8);
-    tbl[@intFromEnum(StateNum.S_SARG_RUN8)] = S(.SPR_SARG, 3, 2, null, .S_SARG_RUN1);
-    tbl[@intFromEnum(StateNum.S_SARG_ATK1)] = S(.SPR_SARG, 4, 8, null, .S_SARG_ATK2);
-    tbl[@intFromEnum(StateNum.S_SARG_ATK2)] = S(.SPR_SARG, 5, 8, null, .S_SARG_ATK3);
-    tbl[@intFromEnum(StateNum.S_SARG_ATK3)] = S(.SPR_SARG, 6, 8, null, .S_SARG_RUN1); // A_SargAttack
+    tbl[@intFromEnum(StateNum.S_SARG_STND)] = S(.SPR_SARG, 0, 10, &enemy.A_Look, .S_SARG_STND2);
+    tbl[@intFromEnum(StateNum.S_SARG_STND2)] = S(.SPR_SARG, 1, 10, &enemy.A_Look, .S_SARG_STND);
+    tbl[@intFromEnum(StateNum.S_SARG_RUN1)] = S(.SPR_SARG, 0, 2, &enemy.A_Chase, .S_SARG_RUN2);
+    tbl[@intFromEnum(StateNum.S_SARG_RUN2)] = S(.SPR_SARG, 0, 2, &enemy.A_Chase, .S_SARG_RUN3);
+    tbl[@intFromEnum(StateNum.S_SARG_RUN3)] = S(.SPR_SARG, 1, 2, &enemy.A_Chase, .S_SARG_RUN4);
+    tbl[@intFromEnum(StateNum.S_SARG_RUN4)] = S(.SPR_SARG, 1, 2, &enemy.A_Chase, .S_SARG_RUN5);
+    tbl[@intFromEnum(StateNum.S_SARG_RUN5)] = S(.SPR_SARG, 2, 2, &enemy.A_Chase, .S_SARG_RUN6);
+    tbl[@intFromEnum(StateNum.S_SARG_RUN6)] = S(.SPR_SARG, 2, 2, &enemy.A_Chase, .S_SARG_RUN7);
+    tbl[@intFromEnum(StateNum.S_SARG_RUN7)] = S(.SPR_SARG, 3, 2, &enemy.A_Chase, .S_SARG_RUN8);
+    tbl[@intFromEnum(StateNum.S_SARG_RUN8)] = S(.SPR_SARG, 3, 2, &enemy.A_Chase, .S_SARG_RUN1);
+    tbl[@intFromEnum(StateNum.S_SARG_ATK1)] = S(.SPR_SARG, 4, 8, &enemy.A_FaceTarget, .S_SARG_ATK2);
+    tbl[@intFromEnum(StateNum.S_SARG_ATK2)] = S(.SPR_SARG, 5, 8, &enemy.A_FaceTarget, .S_SARG_ATK3);
+    tbl[@intFromEnum(StateNum.S_SARG_ATK3)] = S(.SPR_SARG, 6, 8, &enemy.A_SargAttack, .S_SARG_RUN1); // A_SargAttack
     tbl[@intFromEnum(StateNum.S_SARG_PAIN)] = S(.SPR_SARG, 7, 2, null, .S_SARG_PAIN2);
-    tbl[@intFromEnum(StateNum.S_SARG_PAIN2)] = S(.SPR_SARG, 7, 2, null, .S_SARG_RUN1);
+    tbl[@intFromEnum(StateNum.S_SARG_PAIN2)] = S(.SPR_SARG, 7, 2, &enemy.A_Pain, .S_SARG_RUN1);
     tbl[@intFromEnum(StateNum.S_SARG_DIE1)] = S(.SPR_SARG, 8, 8, null, .S_SARG_DIE2);
-    tbl[@intFromEnum(StateNum.S_SARG_DIE2)] = S(.SPR_SARG, 9, 8, null, .S_SARG_DIE3);
+    tbl[@intFromEnum(StateNum.S_SARG_DIE2)] = S(.SPR_SARG, 9, 8, &enemy.A_Scream, .S_SARG_DIE3);
     tbl[@intFromEnum(StateNum.S_SARG_DIE3)] = S(.SPR_SARG, 10, 4, null, .S_SARG_DIE4);
-    tbl[@intFromEnum(StateNum.S_SARG_DIE4)] = S(.SPR_SARG, 11, 4, null, .S_SARG_DIE5);
+    tbl[@intFromEnum(StateNum.S_SARG_DIE4)] = S(.SPR_SARG, 11, 4, &enemy.A_Fall, .S_SARG_DIE5);
     tbl[@intFromEnum(StateNum.S_SARG_DIE5)] = S(.SPR_SARG, 12, 4, null, .S_SARG_DIE6);
     tbl[@intFromEnum(StateNum.S_SARG_DIE6)] = S(.SPR_SARG, 13, -1, null, .S_NULL);
     tbl[@intFromEnum(StateNum.S_SARG_RAISE1)] = S(.SPR_SARG, 13, 5, null, .S_SARG_RAISE2);
@@ -922,18 +927,18 @@ fn buildStateTable() [@intFromEnum(StateNum.NUMSTATES)]State {
     tbl[@intFromEnum(StateNum.S_SARG_RAISE6)] = S(.SPR_SARG, 8, 5, null, .S_SARG_RUN1);
 
     // ---- Cacodemon (HEAD) ----
-    tbl[@intFromEnum(StateNum.S_HEAD_STND)] = S(.SPR_HEAD, 0, 10, null, .S_HEAD_STND);
-    tbl[@intFromEnum(StateNum.S_HEAD_RUN1)] = S(.SPR_HEAD, 0, 3, null, .S_HEAD_RUN1);
-    tbl[@intFromEnum(StateNum.S_HEAD_ATK1)] = S(.SPR_HEAD, 1, 5, null, .S_HEAD_ATK2);
-    tbl[@intFromEnum(StateNum.S_HEAD_ATK2)] = S(.SPR_HEAD, 2, 5, null, .S_HEAD_ATK3);
-    tbl[@intFromEnum(StateNum.S_HEAD_ATK3)] = S(.SPR_HEAD, 3 | FF_FULLBRIGHT, 5, null, .S_HEAD_RUN1); // A_HeadAttack
+    tbl[@intFromEnum(StateNum.S_HEAD_STND)] = S(.SPR_HEAD, 0, 10, &enemy.A_Look, .S_HEAD_STND);
+    tbl[@intFromEnum(StateNum.S_HEAD_RUN1)] = S(.SPR_HEAD, 0, 3, &enemy.A_Chase, .S_HEAD_RUN1);
+    tbl[@intFromEnum(StateNum.S_HEAD_ATK1)] = S(.SPR_HEAD, 1, 5, &enemy.A_FaceTarget, .S_HEAD_ATK2);
+    tbl[@intFromEnum(StateNum.S_HEAD_ATK2)] = S(.SPR_HEAD, 2, 5, &enemy.A_FaceTarget, .S_HEAD_ATK3);
+    tbl[@intFromEnum(StateNum.S_HEAD_ATK3)] = S(.SPR_HEAD, 3 | FF_FULLBRIGHT, 5, &enemy.A_HeadAttack, .S_HEAD_RUN1); // A_HeadAttack
     tbl[@intFromEnum(StateNum.S_HEAD_PAIN)] = S(.SPR_HEAD, 4, 3, null, .S_HEAD_PAIN2);
-    tbl[@intFromEnum(StateNum.S_HEAD_PAIN2)] = S(.SPR_HEAD, 4, 3, null, .S_HEAD_PAIN3);
+    tbl[@intFromEnum(StateNum.S_HEAD_PAIN2)] = S(.SPR_HEAD, 4, 3, &enemy.A_Pain, .S_HEAD_PAIN3);
     tbl[@intFromEnum(StateNum.S_HEAD_PAIN3)] = S(.SPR_HEAD, 4, 6, null, .S_HEAD_RUN1);
     tbl[@intFromEnum(StateNum.S_HEAD_DIE1)] = S(.SPR_HEAD, 5, 8, null, .S_HEAD_DIE2);
-    tbl[@intFromEnum(StateNum.S_HEAD_DIE2)] = S(.SPR_HEAD, 6, 8, null, .S_HEAD_DIE3);
+    tbl[@intFromEnum(StateNum.S_HEAD_DIE2)] = S(.SPR_HEAD, 6, 8, &enemy.A_Scream, .S_HEAD_DIE3);
     tbl[@intFromEnum(StateNum.S_HEAD_DIE3)] = S(.SPR_HEAD, 7, 8, null, .S_HEAD_DIE4);
-    tbl[@intFromEnum(StateNum.S_HEAD_DIE4)] = S(.SPR_HEAD, 8, 8, null, .S_HEAD_DIE5);
+    tbl[@intFromEnum(StateNum.S_HEAD_DIE4)] = S(.SPR_HEAD, 8, 8, &enemy.A_Fall, .S_HEAD_DIE5);
     tbl[@intFromEnum(StateNum.S_HEAD_DIE5)] = S(.SPR_HEAD, 9, 8, null, .S_HEAD_DIE6);
     tbl[@intFromEnum(StateNum.S_HEAD_DIE6)] = S(.SPR_HEAD, 10, -1, null, .S_NULL);
     tbl[@intFromEnum(StateNum.S_HEAD_RAISE1)] = S(.SPR_HEAD, 10, 8, null, .S_HEAD_RAISE2);
@@ -944,28 +949,28 @@ fn buildStateTable() [@intFromEnum(StateNum.NUMSTATES)]State {
     tbl[@intFromEnum(StateNum.S_HEAD_RAISE6)] = S(.SPR_HEAD, 5, 8, null, .S_HEAD_RUN1);
 
     // ---- Baron of Hell (BOSS) ----
-    tbl[@intFromEnum(StateNum.S_BOSS_STND)] = S(.SPR_BOSS, 0, 10, null, .S_BOSS_STND2);
-    tbl[@intFromEnum(StateNum.S_BOSS_STND2)] = S(.SPR_BOSS, 1, 10, null, .S_BOSS_STND);
-    tbl[@intFromEnum(StateNum.S_BOSS_RUN1)] = S(.SPR_BOSS, 0, 3, null, .S_BOSS_RUN2);
-    tbl[@intFromEnum(StateNum.S_BOSS_RUN2)] = S(.SPR_BOSS, 0, 3, null, .S_BOSS_RUN3);
-    tbl[@intFromEnum(StateNum.S_BOSS_RUN3)] = S(.SPR_BOSS, 1, 3, null, .S_BOSS_RUN4);
-    tbl[@intFromEnum(StateNum.S_BOSS_RUN4)] = S(.SPR_BOSS, 1, 3, null, .S_BOSS_RUN5);
-    tbl[@intFromEnum(StateNum.S_BOSS_RUN5)] = S(.SPR_BOSS, 2, 3, null, .S_BOSS_RUN6);
-    tbl[@intFromEnum(StateNum.S_BOSS_RUN6)] = S(.SPR_BOSS, 2, 3, null, .S_BOSS_RUN7);
-    tbl[@intFromEnum(StateNum.S_BOSS_RUN7)] = S(.SPR_BOSS, 3, 3, null, .S_BOSS_RUN8);
-    tbl[@intFromEnum(StateNum.S_BOSS_RUN8)] = S(.SPR_BOSS, 3, 3, null, .S_BOSS_RUN1);
-    tbl[@intFromEnum(StateNum.S_BOSS_ATK1)] = S(.SPR_BOSS, 4, 8, null, .S_BOSS_ATK2);
-    tbl[@intFromEnum(StateNum.S_BOSS_ATK2)] = S(.SPR_BOSS, 5, 8, null, .S_BOSS_ATK3);
-    tbl[@intFromEnum(StateNum.S_BOSS_ATK3)] = S(.SPR_BOSS, 6 | FF_FULLBRIGHT, 8, null, .S_BOSS_RUN1); // A_BruisAttack
+    tbl[@intFromEnum(StateNum.S_BOSS_STND)] = S(.SPR_BOSS, 0, 10, &enemy.A_Look, .S_BOSS_STND2);
+    tbl[@intFromEnum(StateNum.S_BOSS_STND2)] = S(.SPR_BOSS, 1, 10, &enemy.A_Look, .S_BOSS_STND);
+    tbl[@intFromEnum(StateNum.S_BOSS_RUN1)] = S(.SPR_BOSS, 0, 3, &enemy.A_Chase, .S_BOSS_RUN2);
+    tbl[@intFromEnum(StateNum.S_BOSS_RUN2)] = S(.SPR_BOSS, 0, 3, &enemy.A_Chase, .S_BOSS_RUN3);
+    tbl[@intFromEnum(StateNum.S_BOSS_RUN3)] = S(.SPR_BOSS, 1, 3, &enemy.A_Chase, .S_BOSS_RUN4);
+    tbl[@intFromEnum(StateNum.S_BOSS_RUN4)] = S(.SPR_BOSS, 1, 3, &enemy.A_Chase, .S_BOSS_RUN5);
+    tbl[@intFromEnum(StateNum.S_BOSS_RUN5)] = S(.SPR_BOSS, 2, 3, &enemy.A_Chase, .S_BOSS_RUN6);
+    tbl[@intFromEnum(StateNum.S_BOSS_RUN6)] = S(.SPR_BOSS, 2, 3, &enemy.A_Chase, .S_BOSS_RUN7);
+    tbl[@intFromEnum(StateNum.S_BOSS_RUN7)] = S(.SPR_BOSS, 3, 3, &enemy.A_Chase, .S_BOSS_RUN8);
+    tbl[@intFromEnum(StateNum.S_BOSS_RUN8)] = S(.SPR_BOSS, 3, 3, &enemy.A_Chase, .S_BOSS_RUN1);
+    tbl[@intFromEnum(StateNum.S_BOSS_ATK1)] = S(.SPR_BOSS, 4, 8, &enemy.A_FaceTarget, .S_BOSS_ATK2);
+    tbl[@intFromEnum(StateNum.S_BOSS_ATK2)] = S(.SPR_BOSS, 5, 8, &enemy.A_FaceTarget, .S_BOSS_ATK3);
+    tbl[@intFromEnum(StateNum.S_BOSS_ATK3)] = S(.SPR_BOSS, 6 | FF_FULLBRIGHT, 8, &enemy.A_BruisAttack, .S_BOSS_RUN1); // A_BruisAttack
     tbl[@intFromEnum(StateNum.S_BOSS_PAIN)] = S(.SPR_BOSS, 7, 2, null, .S_BOSS_PAIN2);
-    tbl[@intFromEnum(StateNum.S_BOSS_PAIN2)] = S(.SPR_BOSS, 7, 2, null, .S_BOSS_RUN1);
+    tbl[@intFromEnum(StateNum.S_BOSS_PAIN2)] = S(.SPR_BOSS, 7, 2, &enemy.A_Pain, .S_BOSS_RUN1);
     tbl[@intFromEnum(StateNum.S_BOSS_DIE1)] = S(.SPR_BOSS, 8, 8, null, .S_BOSS_DIE2);
-    tbl[@intFromEnum(StateNum.S_BOSS_DIE2)] = S(.SPR_BOSS, 9, 8, null, .S_BOSS_DIE3);
+    tbl[@intFromEnum(StateNum.S_BOSS_DIE2)] = S(.SPR_BOSS, 9, 8, &enemy.A_Scream, .S_BOSS_DIE3);
     tbl[@intFromEnum(StateNum.S_BOSS_DIE3)] = S(.SPR_BOSS, 10, 8, null, .S_BOSS_DIE4);
-    tbl[@intFromEnum(StateNum.S_BOSS_DIE4)] = S(.SPR_BOSS, 11, 8, null, .S_BOSS_DIE5);
+    tbl[@intFromEnum(StateNum.S_BOSS_DIE4)] = S(.SPR_BOSS, 11, 8, &enemy.A_Fall, .S_BOSS_DIE5);
     tbl[@intFromEnum(StateNum.S_BOSS_DIE5)] = S(.SPR_BOSS, 12, 8, null, .S_BOSS_DIE6);
     tbl[@intFromEnum(StateNum.S_BOSS_DIE6)] = S(.SPR_BOSS, 13, 8, null, .S_BOSS_DIE7);
-    tbl[@intFromEnum(StateNum.S_BOSS_DIE7)] = S(.SPR_BOSS, 14, -1, null, .S_NULL);
+    tbl[@intFromEnum(StateNum.S_BOSS_DIE7)] = S(.SPR_BOSS, 14, -1, &enemy.A_BossDeath, .S_NULL);
     tbl[@intFromEnum(StateNum.S_BOSS_RAISE1)] = S(.SPR_BOSS, 14, 8, null, .S_BOSS_RAISE2);
     tbl[@intFromEnum(StateNum.S_BOSS_RAISE2)] = S(.SPR_BOSS, 13, 8, null, .S_BOSS_RAISE3);
     tbl[@intFromEnum(StateNum.S_BOSS_RAISE3)] = S(.SPR_BOSS, 12, 8, null, .S_BOSS_RAISE4);
@@ -1006,20 +1011,20 @@ fn buildStateTable() [@intFromEnum(StateNum.NUMSTATES)]State {
     tbl[@intFromEnum(StateNum.S_BOS2_RAISE7)] = S(.SPR_BOS2, 8, 8, null, .S_BOS2_RUN1);
 
     // ---- Lost Soul (SKUL) ----
-    tbl[@intFromEnum(StateNum.S_SKULL_STND)] = S(.SPR_SKUL, 0 | FF_FULLBRIGHT, 10, null, .S_SKULL_STND2);
-    tbl[@intFromEnum(StateNum.S_SKULL_STND2)] = S(.SPR_SKUL, 1 | FF_FULLBRIGHT, 10, null, .S_SKULL_STND);
-    tbl[@intFromEnum(StateNum.S_SKULL_RUN1)] = S(.SPR_SKUL, 0 | FF_FULLBRIGHT, 6, null, .S_SKULL_RUN2);
-    tbl[@intFromEnum(StateNum.S_SKULL_RUN2)] = S(.SPR_SKUL, 1 | FF_FULLBRIGHT, 6, null, .S_SKULL_RUN1);
-    tbl[@intFromEnum(StateNum.S_SKULL_ATK1)] = S(.SPR_SKUL, 2 | FF_FULLBRIGHT, 10, null, .S_SKULL_ATK2);
-    tbl[@intFromEnum(StateNum.S_SKULL_ATK2)] = S(.SPR_SKUL, 3 | FF_FULLBRIGHT, 4, null, .S_SKULL_ATK3); // A_SkullAttack
+    tbl[@intFromEnum(StateNum.S_SKULL_STND)] = S(.SPR_SKUL, 0 | FF_FULLBRIGHT, 10, &enemy.A_Look, .S_SKULL_STND2);
+    tbl[@intFromEnum(StateNum.S_SKULL_STND2)] = S(.SPR_SKUL, 1 | FF_FULLBRIGHT, 10, &enemy.A_Look, .S_SKULL_STND);
+    tbl[@intFromEnum(StateNum.S_SKULL_RUN1)] = S(.SPR_SKUL, 0 | FF_FULLBRIGHT, 6, &enemy.A_Chase, .S_SKULL_RUN2);
+    tbl[@intFromEnum(StateNum.S_SKULL_RUN2)] = S(.SPR_SKUL, 1 | FF_FULLBRIGHT, 6, &enemy.A_Chase, .S_SKULL_RUN1);
+    tbl[@intFromEnum(StateNum.S_SKULL_ATK1)] = S(.SPR_SKUL, 2 | FF_FULLBRIGHT, 10, &enemy.A_FaceTarget, .S_SKULL_ATK2);
+    tbl[@intFromEnum(StateNum.S_SKULL_ATK2)] = S(.SPR_SKUL, 3 | FF_FULLBRIGHT, 4, &enemy.A_SkullAttack, .S_SKULL_ATK3); // A_SkullAttack
     tbl[@intFromEnum(StateNum.S_SKULL_ATK3)] = S(.SPR_SKUL, 2 | FF_FULLBRIGHT, 4, null, .S_SKULL_ATK4);
     tbl[@intFromEnum(StateNum.S_SKULL_ATK4)] = S(.SPR_SKUL, 3 | FF_FULLBRIGHT, 4, null, .S_SKULL_ATK3);
     tbl[@intFromEnum(StateNum.S_SKULL_PAIN)] = S(.SPR_SKUL, 4 | FF_FULLBRIGHT, 3, null, .S_SKULL_PAIN2);
-    tbl[@intFromEnum(StateNum.S_SKULL_PAIN2)] = S(.SPR_SKUL, 4 | FF_FULLBRIGHT, 3, null, .S_SKULL_RUN1);
+    tbl[@intFromEnum(StateNum.S_SKULL_PAIN2)] = S(.SPR_SKUL, 4 | FF_FULLBRIGHT, 3, &enemy.A_Pain, .S_SKULL_RUN1);
     tbl[@intFromEnum(StateNum.S_SKULL_DIE1)] = S(.SPR_SKUL, 5 | FF_FULLBRIGHT, 6, null, .S_SKULL_DIE2);
-    tbl[@intFromEnum(StateNum.S_SKULL_DIE2)] = S(.SPR_SKUL, 6 | FF_FULLBRIGHT, 6, null, .S_SKULL_DIE3);
+    tbl[@intFromEnum(StateNum.S_SKULL_DIE2)] = S(.SPR_SKUL, 6 | FF_FULLBRIGHT, 6, &enemy.A_Scream, .S_SKULL_DIE3);
     tbl[@intFromEnum(StateNum.S_SKULL_DIE3)] = S(.SPR_SKUL, 7 | FF_FULLBRIGHT, 6, null, .S_SKULL_DIE4);
-    tbl[@intFromEnum(StateNum.S_SKULL_DIE4)] = S(.SPR_SKUL, 8 | FF_FULLBRIGHT, 6, null, .S_SKULL_DIE5);
+    tbl[@intFromEnum(StateNum.S_SKULL_DIE4)] = S(.SPR_SKUL, 8 | FF_FULLBRIGHT, 6, &enemy.A_Fall, .S_SKULL_DIE5);
     tbl[@intFromEnum(StateNum.S_SKULL_DIE5)] = S(.SPR_SKUL, 9, 6, null, .S_SKULL_DIE6);
     tbl[@intFromEnum(StateNum.S_SKULL_DIE6)] = S(.SPR_SKUL, 10, 6, null, .S_NULL);
 
@@ -1034,9 +1039,9 @@ fn buildStateTable() [@intFromEnum(StateNum.NUMSTATES)]State {
     tbl[@intFromEnum(StateNum.S_BAR1)] = S(.SPR_BAR1, 0, 6, null, .S_BAR2);
     tbl[@intFromEnum(StateNum.S_BAR2)] = S(.SPR_BAR1, 1, 6, null, .S_BAR1);
     tbl[@intFromEnum(StateNum.S_BEXP)] = S(.SPR_BEXP, 0 | FF_FULLBRIGHT, 5, null, .S_BEXP2);
-    tbl[@intFromEnum(StateNum.S_BEXP2)] = S(.SPR_BEXP, 1 | FF_FULLBRIGHT, 5, null, .S_BEXP3);
+    tbl[@intFromEnum(StateNum.S_BEXP2)] = S(.SPR_BEXP, 1 | FF_FULLBRIGHT, 5, &enemy.A_Scream, .S_BEXP3);
     tbl[@intFromEnum(StateNum.S_BEXP3)] = S(.SPR_BEXP, 2 | FF_FULLBRIGHT, 5, null, .S_BEXP4);
-    tbl[@intFromEnum(StateNum.S_BEXP4)] = S(.SPR_BEXP, 3 | FF_FULLBRIGHT, 10, null, .S_BEXP5); // A_Explode
+    tbl[@intFromEnum(StateNum.S_BEXP4)] = S(.SPR_BEXP, 3 | FF_FULLBRIGHT, 10, &enemy.A_Explode, .S_BEXP5); // A_Explode
     tbl[@intFromEnum(StateNum.S_BEXP5)] = S(.SPR_BEXP, 4 | FF_FULLBRIGHT, 10, null, .S_NULL);
 
     // ---- Pickup Items ----
@@ -1265,12 +1270,12 @@ fn buildMobjInfoTable() [@intFromEnum(MobjType.NUMMOBJTYPES)]MobjInfo {
         .attack_sound = 0,
         .pain_state = .S_PLAY_PAIN,
         .pain_chance = 255,
-        .pain_sound = 0, // sfx_plpain
+        .pain_sound = sfxnum(.plpain), // sfx_plpain
         .melee_state = .S_NULL,
         .missile_state = .S_PLAY_ATK1,
         .death_state = .S_PLAY_DIE1,
         .xdeath_state = .S_PLAY_XDIE1,
-        .death_sound = 0, // sfx_pldeth
+        .death_sound = sfxnum(.pldeth), // sfx_pldeth
         .speed = 0,
         .radius = FX(16),
         .height = FX(56),
@@ -1287,23 +1292,23 @@ fn buildMobjInfoTable() [@intFromEnum(MobjType.NUMMOBJTYPES)]MobjInfo {
         .spawn_state = .S_POSS_STND,
         .spawn_health = 20,
         .see_state = .S_POSS_RUN1,
-        .see_sound = 0, // sfx_posit1
+        .see_sound = sfxnum(.posit1), // sfx_posit1
         .reaction_time = 8,
-        .attack_sound = 0, // sfx_pistol
+        .attack_sound = sfxnum(.pistol), // sfx_pistol
         .pain_state = .S_POSS_PAIN,
         .pain_chance = 200,
-        .pain_sound = 0, // sfx_popain
+        .pain_sound = sfxnum(.popain), // sfx_popain
         .melee_state = .S_NULL,
         .missile_state = .S_POSS_ATK1,
         .death_state = .S_POSS_DIE1,
         .xdeath_state = .S_POSS_XDIE1,
-        .death_sound = 0, // sfx_podth1
+        .death_sound = sfxnum(.podth1), // sfx_podth1
         .speed = 8,
         .radius = FX(20),
         .height = FX(56),
         .mass = 100,
         .damage = 0,
-        .active_sound = 0, // sfx_posact
+        .active_sound = sfxnum(.posact), // sfx_posact
         .flags = MF_SOLID | MF_SHOOTABLE | MF_COUNTKILL,
         .raise_state = .S_POSS_RAISE1,
     };
@@ -1314,23 +1319,23 @@ fn buildMobjInfoTable() [@intFromEnum(MobjType.NUMMOBJTYPES)]MobjInfo {
         .spawn_state = .S_SPOS_STND,
         .spawn_health = 30,
         .see_state = .S_SPOS_RUN1,
-        .see_sound = 0, // sfx_posit2
+        .see_sound = sfxnum(.posit2), // sfx_posit2
         .reaction_time = 8,
         .attack_sound = 0,
         .pain_state = .S_SPOS_PAIN,
         .pain_chance = 170,
-        .pain_sound = 0, // sfx_popain
+        .pain_sound = sfxnum(.popain), // sfx_popain
         .melee_state = .S_NULL,
         .missile_state = .S_SPOS_ATK1,
         .death_state = .S_SPOS_DIE1,
         .xdeath_state = .S_SPOS_XDIE1,
-        .death_sound = 0, // sfx_podth2
+        .death_sound = sfxnum(.podth2), // sfx_podth2
         .speed = 8,
         .radius = FX(20),
         .height = FX(56),
         .mass = 100,
         .damage = 0,
-        .active_sound = 0, // sfx_posact
+        .active_sound = sfxnum(.posact), // sfx_posact
         .flags = MF_SOLID | MF_SHOOTABLE | MF_COUNTKILL,
         .raise_state = .S_SPOS_RAISE1,
     };
@@ -1341,23 +1346,23 @@ fn buildMobjInfoTable() [@intFromEnum(MobjType.NUMMOBJTYPES)]MobjInfo {
         .spawn_state = .S_TROO_STND,
         .spawn_health = 60,
         .see_state = .S_TROO_RUN1,
-        .see_sound = 0, // sfx_bgsit1
+        .see_sound = sfxnum(.bgsit1), // sfx_bgsit1
         .reaction_time = 8,
         .attack_sound = 0,
         .pain_state = .S_TROO_PAIN,
         .pain_chance = 200,
-        .pain_sound = 0, // sfx_popain
+        .pain_sound = sfxnum(.popain), // sfx_popain
         .melee_state = .S_TROO_ATK1,
         .missile_state = .S_TROO_ATK1,
         .death_state = .S_TROO_DIE1,
         .xdeath_state = .S_TROO_XDIE1,
-        .death_sound = 0, // sfx_bgdth1
+        .death_sound = sfxnum(.bgdth1), // sfx_bgdth1
         .speed = 8,
         .radius = FX(20),
         .height = FX(56),
         .mass = 100,
         .damage = 0,
-        .active_sound = 0, // sfx_bgact
+        .active_sound = sfxnum(.bgact), // sfx_bgact
         .flags = MF_SOLID | MF_SHOOTABLE | MF_COUNTKILL,
         .raise_state = .S_TROO_RAISE1,
     };
@@ -1368,23 +1373,23 @@ fn buildMobjInfoTable() [@intFromEnum(MobjType.NUMMOBJTYPES)]MobjInfo {
         .spawn_state = .S_SARG_STND,
         .spawn_health = 150,
         .see_state = .S_SARG_RUN1,
-        .see_sound = 0, // sfx_sgtsit
+        .see_sound = sfxnum(.sgtsit), // sfx_sgtsit
         .reaction_time = 8,
-        .attack_sound = 0, // sfx_sgtatk
+        .attack_sound = sfxnum(.sgtatk), // sfx_sgtatk
         .pain_state = .S_SARG_PAIN,
         .pain_chance = 180,
-        .pain_sound = 0, // sfx_dmpain
+        .pain_sound = sfxnum(.dmpain), // sfx_dmpain
         .melee_state = .S_SARG_ATK1,
         .missile_state = .S_NULL,
         .death_state = .S_SARG_DIE1,
         .xdeath_state = .S_SARG_DIE1,
-        .death_sound = 0, // sfx_sgtdth
+        .death_sound = sfxnum(.sgtdth), // sfx_sgtdth
         .speed = 10,
         .radius = FX(30),
         .height = FX(56),
         .mass = 400,
         .damage = 0,
-        .active_sound = 0, // sfx_dmact
+        .active_sound = sfxnum(.dmact), // sfx_dmact
         .flags = MF_SOLID | MF_SHOOTABLE | MF_COUNTKILL,
         .raise_state = .S_SARG_RAISE1,
     };
@@ -1422,23 +1427,23 @@ fn buildMobjInfoTable() [@intFromEnum(MobjType.NUMMOBJTYPES)]MobjInfo {
         .spawn_state = .S_HEAD_STND,
         .spawn_health = 400,
         .see_state = .S_HEAD_RUN1,
-        .see_sound = 0,
+        .see_sound = sfxnum(.cacsit),
         .reaction_time = 8,
         .attack_sound = 0,
         .pain_state = .S_HEAD_PAIN,
         .pain_chance = 128,
-        .pain_sound = 0,
+        .pain_sound = sfxnum(.dmpain),
         .melee_state = .S_NULL,
         .missile_state = .S_HEAD_ATK1,
         .death_state = .S_HEAD_DIE1,
         .xdeath_state = .S_HEAD_DIE1,
-        .death_sound = 0,
+        .death_sound = sfxnum(.cacdth),
         .speed = 8,
         .radius = FX(31),
         .height = FX(56),
         .mass = 400,
         .damage = 0,
-        .active_sound = 0,
+        .active_sound = sfxnum(.dmact),
         .flags = MF_SOLID | MF_SHOOTABLE | MF_FLOAT | MF_NOGRAVITY | MF_COUNTKILL,
         .raise_state = .S_HEAD_RAISE1,
     };
@@ -1449,23 +1454,23 @@ fn buildMobjInfoTable() [@intFromEnum(MobjType.NUMMOBJTYPES)]MobjInfo {
         .spawn_state = .S_BOSS_STND,
         .spawn_health = 1000,
         .see_state = .S_BOSS_RUN1,
-        .see_sound = 0,
+        .see_sound = sfxnum(.brssit),
         .reaction_time = 8,
         .attack_sound = 0,
         .pain_state = .S_BOSS_PAIN,
         .pain_chance = 50,
-        .pain_sound = 0,
+        .pain_sound = sfxnum(.dmpain),
         .melee_state = .S_BOSS_ATK1,
         .missile_state = .S_BOSS_ATK1,
         .death_state = .S_BOSS_DIE1,
         .xdeath_state = .S_BOSS_DIE1,
-        .death_sound = 0,
+        .death_sound = sfxnum(.brsdth),
         .speed = 8,
         .radius = FX(24),
         .height = FX(64),
         .mass = 1000,
         .damage = 0,
-        .active_sound = 0,
+        .active_sound = sfxnum(.dmact),
         .flags = MF_SOLID | MF_SHOOTABLE | MF_COUNTKILL,
         .raise_state = .S_BOSS_RAISE1,
     };
@@ -1476,7 +1481,7 @@ fn buildMobjInfoTable() [@intFromEnum(MobjType.NUMMOBJTYPES)]MobjInfo {
         .spawn_state = .S_BRBALL1,
         .spawn_health = 1000,
         .see_state = .S_NULL,
-        .see_sound = 0,
+        .see_sound = sfxnum(.firsht),
         .reaction_time = 8,
         .attack_sound = 0,
         .pain_state = .S_NULL,
@@ -1486,7 +1491,7 @@ fn buildMobjInfoTable() [@intFromEnum(MobjType.NUMMOBJTYPES)]MobjInfo {
         .missile_state = .S_NULL,
         .death_state = .S_BRBALLX1,
         .xdeath_state = .S_NULL,
-        .death_sound = 0,
+        .death_sound = sfxnum(.firxpl),
         .speed = 15 * 65536,
         .radius = FX(6),
         .height = FX(8),
@@ -1532,21 +1537,21 @@ fn buildMobjInfoTable() [@intFromEnum(MobjType.NUMMOBJTYPES)]MobjInfo {
         .see_state = .S_SKULL_RUN1,
         .see_sound = 0,
         .reaction_time = 8,
-        .attack_sound = 0,
+        .attack_sound = sfxnum(.sklatk),
         .pain_state = .S_SKULL_PAIN,
         .pain_chance = 256,
-        .pain_sound = 0,
+        .pain_sound = sfxnum(.dmpain),
         .melee_state = .S_NULL,
         .missile_state = .S_SKULL_ATK1,
         .death_state = .S_SKULL_DIE1,
         .xdeath_state = .S_SKULL_DIE1,
-        .death_sound = 0,
+        .death_sound = sfxnum(.firxpl),
         .speed = 8,
         .radius = FX(16),
         .height = FX(56),
         .mass = 50,
         .damage = 3,
-        .active_sound = 0,
+        .active_sound = sfxnum(.dmact),
         .flags = MF_SOLID | MF_SHOOTABLE | MF_FLOAT | MF_NOGRAVITY,
         .raise_state = .S_NULL,
     };
@@ -1611,7 +1616,7 @@ fn buildMobjInfoTable() [@intFromEnum(MobjType.NUMMOBJTYPES)]MobjInfo {
         .spawn_state = .S_TBALL1,
         .spawn_health = 1000,
         .see_state = .S_NULL,
-        .see_sound = 0,
+        .see_sound = sfxnum(.firsht),
         .reaction_time = 8,
         .attack_sound = 0,
         .pain_state = .S_NULL,
@@ -1621,7 +1626,7 @@ fn buildMobjInfoTable() [@intFromEnum(MobjType.NUMMOBJTYPES)]MobjInfo {
         .missile_state = .S_NULL,
         .death_state = .S_TBALLX1,
         .xdeath_state = .S_NULL,
-        .death_sound = 0,
+        .death_sound = sfxnum(.firxpl),
         .speed = 10 * 65536,
         .radius = FX(6),
         .height = FX(8),
@@ -1638,7 +1643,7 @@ fn buildMobjInfoTable() [@intFromEnum(MobjType.NUMMOBJTYPES)]MobjInfo {
         .spawn_state = .S_RBALL1,
         .spawn_health = 1000,
         .see_state = .S_NULL,
-        .see_sound = 0,
+        .see_sound = sfxnum(.firsht),
         .reaction_time = 8,
         .attack_sound = 0,
         .pain_state = .S_NULL,
@@ -1648,7 +1653,7 @@ fn buildMobjInfoTable() [@intFromEnum(MobjType.NUMMOBJTYPES)]MobjInfo {
         .missile_state = .S_NULL,
         .death_state = .S_RBALLX1,
         .xdeath_state = .S_NULL,
-        .death_sound = 0,
+        .death_sound = sfxnum(.firxpl),
         .speed = 10 * 65536,
         .radius = FX(6),
         .height = FX(8),
@@ -1665,7 +1670,7 @@ fn buildMobjInfoTable() [@intFromEnum(MobjType.NUMMOBJTYPES)]MobjInfo {
         .spawn_state = .S_ROCKET,
         .spawn_health = 1000,
         .see_state = .S_NULL,
-        .see_sound = 0, // sfx_rlaunc
+        .see_sound = sfxnum(.rlaunc), // sfx_rlaunc
         .reaction_time = 8,
         .attack_sound = 0,
         .pain_state = .S_NULL,
@@ -1675,7 +1680,7 @@ fn buildMobjInfoTable() [@intFromEnum(MobjType.NUMMOBJTYPES)]MobjInfo {
         .missile_state = .S_NULL,
         .death_state = .S_EXPLODE1,
         .xdeath_state = .S_NULL,
-        .death_sound = 0, // sfx_barexp
+        .death_sound = sfxnum(.barexp), // sfx_barexp
         .speed = 20 * 65536,
         .radius = FX(11),
         .height = FX(8),
@@ -1692,7 +1697,7 @@ fn buildMobjInfoTable() [@intFromEnum(MobjType.NUMMOBJTYPES)]MobjInfo {
         .spawn_state = .S_PLASBALL,
         .spawn_health = 1000,
         .see_state = .S_NULL,
-        .see_sound = 0, // sfx_plasma
+        .see_sound = sfxnum(.plasma), // sfx_plasma
         .reaction_time = 8,
         .attack_sound = 0,
         .pain_state = .S_NULL,
@@ -1702,7 +1707,7 @@ fn buildMobjInfoTable() [@intFromEnum(MobjType.NUMMOBJTYPES)]MobjInfo {
         .missile_state = .S_NULL,
         .death_state = .S_PLASEXP,
         .xdeath_state = .S_NULL,
-        .death_sound = 0,
+        .death_sound = sfxnum(.firxpl),
         .speed = 25 * 65536,
         .radius = FX(13),
         .height = FX(8),
@@ -1729,7 +1734,7 @@ fn buildMobjInfoTable() [@intFromEnum(MobjType.NUMMOBJTYPES)]MobjInfo {
         .missile_state = .S_NULL,
         .death_state = .S_BFGLAND,
         .xdeath_state = .S_NULL,
-        .death_sound = 0, // sfx_rxplod
+        .death_sound = sfxnum(.rxplod), // sfx_rxplod
         .speed = 25 * 65536,
         .radius = FX(13),
         .height = FX(8),
@@ -1891,7 +1896,7 @@ fn buildMobjInfoTable() [@intFromEnum(MobjType.NUMMOBJTYPES)]MobjInfo {
         .missile_state = .S_NULL,
         .death_state = .S_BEXP,
         .xdeath_state = .S_NULL,
-        .death_sound = 0, // sfx_barexp
+        .death_sound = sfxnum(.barexp), // sfx_barexp
         .speed = 0,
         .radius = FX(10),
         .height = FX(42),
@@ -1929,6 +1934,26 @@ fn buildMobjInfoTable() [@intFromEnum(MobjType.NUMMOBJTYPES)]MobjInfo {
     tbl[@intFromEnum(MobjType.MT_MISC29)] = .{ .doomednum = 2001, .spawn_state = .S_SHOT, .spawn_health = 1000, .see_state = .S_NULL, .see_sound = 0, .reaction_time = 8, .attack_sound = 0, .pain_state = .S_NULL, .pain_chance = 0, .pain_sound = 0, .melee_state = .S_NULL, .missile_state = .S_NULL, .death_state = .S_NULL, .xdeath_state = .S_NULL, .death_sound = 0, .speed = 0, .radius = FX(20), .height = FX(16), .mass = 100, .damage = 0, .active_sound = 0, .flags = MF_SPECIAL, .raise_state = .S_NULL };
     // MT_CHAINGUN — Chaingun pickup (doomednum 2002)
     tbl[@intFromEnum(MobjType.MT_CHAINGUN)] = .{ .doomednum = 2002, .spawn_state = .S_MGUN, .spawn_health = 1000, .see_state = .S_NULL, .see_sound = 0, .reaction_time = 8, .attack_sound = 0, .pain_state = .S_NULL, .pain_chance = 0, .pain_sound = 0, .melee_state = .S_NULL, .missile_state = .S_NULL, .death_state = .S_NULL, .xdeath_state = .S_NULL, .death_sound = 0, .speed = 0, .radius = FX(20), .height = FX(16), .mass = 100, .damage = 0, .active_sound = 0, .flags = MF_SPECIAL, .raise_state = .S_NULL };
+
+    // ---- Powerups and remaining pickups (vanilla doomednums) ----
+    tbl[@intFromEnum(MobjType.MT_MISC12)] = .{ .doomednum = 2013, .spawn_state = .S_SOUL, .spawn_health = 1000, .see_state = .S_NULL, .see_sound = 0, .reaction_time = 8, .attack_sound = 0, .pain_state = .S_NULL, .pain_chance = 0, .pain_sound = 0, .melee_state = .S_NULL, .missile_state = .S_NULL, .death_state = .S_NULL, .xdeath_state = .S_NULL, .death_sound = 0, .speed = 0, .radius = FX(20), .height = FX(16), .mass = 100, .damage = 0, .active_sound = 0, .flags = MF_SPECIAL | MF_COUNTITEM, .raise_state = .S_NULL };
+    tbl[@intFromEnum(MobjType.MT_INV)] = .{ .doomednum = 2022, .spawn_state = .S_PINV, .spawn_health = 1000, .see_state = .S_NULL, .see_sound = 0, .reaction_time = 8, .attack_sound = 0, .pain_state = .S_NULL, .pain_chance = 0, .pain_sound = 0, .melee_state = .S_NULL, .missile_state = .S_NULL, .death_state = .S_NULL, .xdeath_state = .S_NULL, .death_sound = 0, .speed = 0, .radius = FX(20), .height = FX(16), .mass = 100, .damage = 0, .active_sound = 0, .flags = MF_SPECIAL | MF_COUNTITEM, .raise_state = .S_NULL };
+    tbl[@intFromEnum(MobjType.MT_MISC13)] = .{ .doomednum = 2023, .spawn_state = .S_PSTR, .spawn_health = 1000, .see_state = .S_NULL, .see_sound = 0, .reaction_time = 8, .attack_sound = 0, .pain_state = .S_NULL, .pain_chance = 0, .pain_sound = 0, .melee_state = .S_NULL, .missile_state = .S_NULL, .death_state = .S_NULL, .xdeath_state = .S_NULL, .death_sound = 0, .speed = 0, .radius = FX(20), .height = FX(16), .mass = 100, .damage = 0, .active_sound = 0, .flags = MF_SPECIAL | MF_COUNTITEM, .raise_state = .S_NULL };
+    tbl[@intFromEnum(MobjType.MT_INS)] = .{ .doomednum = 2024, .spawn_state = .S_PINS, .spawn_health = 1000, .see_state = .S_NULL, .see_sound = 0, .reaction_time = 8, .attack_sound = 0, .pain_state = .S_NULL, .pain_chance = 0, .pain_sound = 0, .melee_state = .S_NULL, .missile_state = .S_NULL, .death_state = .S_NULL, .xdeath_state = .S_NULL, .death_sound = 0, .speed = 0, .radius = FX(20), .height = FX(16), .mass = 100, .damage = 0, .active_sound = 0, .flags = MF_SPECIAL | MF_COUNTITEM, .raise_state = .S_NULL };
+    tbl[@intFromEnum(MobjType.MT_MISC14)] = .{ .doomednum = 2025, .spawn_state = .S_SUIT, .spawn_health = 1000, .see_state = .S_NULL, .see_sound = 0, .reaction_time = 8, .attack_sound = 0, .pain_state = .S_NULL, .pain_chance = 0, .pain_sound = 0, .melee_state = .S_NULL, .missile_state = .S_NULL, .death_state = .S_NULL, .xdeath_state = .S_NULL, .death_sound = 0, .speed = 0, .radius = FX(20), .height = FX(16), .mass = 100, .damage = 0, .active_sound = 0, .flags = MF_SPECIAL, .raise_state = .S_NULL };
+    tbl[@intFromEnum(MobjType.MT_MISC15)] = .{ .doomednum = 2026, .spawn_state = .S_PMAP, .spawn_health = 1000, .see_state = .S_NULL, .see_sound = 0, .reaction_time = 8, .attack_sound = 0, .pain_state = .S_NULL, .pain_chance = 0, .pain_sound = 0, .melee_state = .S_NULL, .missile_state = .S_NULL, .death_state = .S_NULL, .xdeath_state = .S_NULL, .death_sound = 0, .speed = 0, .radius = FX(20), .height = FX(16), .mass = 100, .damage = 0, .active_sound = 0, .flags = MF_SPECIAL | MF_COUNTITEM, .raise_state = .S_NULL };
+    tbl[@intFromEnum(MobjType.MT_MISC16)] = .{ .doomednum = 2045, .spawn_state = .S_PVIS, .spawn_health = 1000, .see_state = .S_NULL, .see_sound = 0, .reaction_time = 8, .attack_sound = 0, .pain_state = .S_NULL, .pain_chance = 0, .pain_sound = 0, .melee_state = .S_NULL, .missile_state = .S_NULL, .death_state = .S_NULL, .xdeath_state = .S_NULL, .death_sound = 0, .speed = 0, .radius = FX(20), .height = FX(16), .mass = 100, .damage = 0, .active_sound = 0, .flags = MF_SPECIAL | MF_COUNTITEM, .raise_state = .S_NULL };
+    tbl[@intFromEnum(MobjType.MT_MISC17)] = .{ .doomednum = 2048, .spawn_state = .S_AMMO, .spawn_health = 1000, .see_state = .S_NULL, .see_sound = 0, .reaction_time = 8, .attack_sound = 0, .pain_state = .S_NULL, .pain_chance = 0, .pain_sound = 0, .melee_state = .S_NULL, .missile_state = .S_NULL, .death_state = .S_NULL, .xdeath_state = .S_NULL, .death_sound = 0, .speed = 0, .radius = FX(20), .height = FX(16), .mass = 100, .damage = 0, .active_sound = 0, .flags = MF_SPECIAL, .raise_state = .S_NULL };
+    tbl[@intFromEnum(MobjType.MT_MISC18)] = .{ .doomednum = 2010, .spawn_state = .S_ROCK, .spawn_health = 1000, .see_state = .S_NULL, .see_sound = 0, .reaction_time = 8, .attack_sound = 0, .pain_state = .S_NULL, .pain_chance = 0, .pain_sound = 0, .melee_state = .S_NULL, .missile_state = .S_NULL, .death_state = .S_NULL, .xdeath_state = .S_NULL, .death_sound = 0, .speed = 0, .radius = FX(20), .height = FX(16), .mass = 100, .damage = 0, .active_sound = 0, .flags = MF_SPECIAL, .raise_state = .S_NULL };
+    tbl[@intFromEnum(MobjType.MT_MISC19)] = .{ .doomednum = 2046, .spawn_state = .S_BROK, .spawn_health = 1000, .see_state = .S_NULL, .see_sound = 0, .reaction_time = 8, .attack_sound = 0, .pain_state = .S_NULL, .pain_chance = 0, .pain_sound = 0, .melee_state = .S_NULL, .missile_state = .S_NULL, .death_state = .S_NULL, .xdeath_state = .S_NULL, .death_sound = 0, .speed = 0, .radius = FX(20), .height = FX(16), .mass = 100, .damage = 0, .active_sound = 0, .flags = MF_SPECIAL, .raise_state = .S_NULL };
+    tbl[@intFromEnum(MobjType.MT_MISC20)] = .{ .doomednum = 2047, .spawn_state = .S_CELL, .spawn_health = 1000, .see_state = .S_NULL, .see_sound = 0, .reaction_time = 8, .attack_sound = 0, .pain_state = .S_NULL, .pain_chance = 0, .pain_sound = 0, .melee_state = .S_NULL, .missile_state = .S_NULL, .death_state = .S_NULL, .xdeath_state = .S_NULL, .death_sound = 0, .speed = 0, .radius = FX(20), .height = FX(16), .mass = 100, .damage = 0, .active_sound = 0, .flags = MF_SPECIAL, .raise_state = .S_NULL };
+    tbl[@intFromEnum(MobjType.MT_MISC21)] = .{ .doomednum = 17, .spawn_state = .S_CELP, .spawn_health = 1000, .see_state = .S_NULL, .see_sound = 0, .reaction_time = 8, .attack_sound = 0, .pain_state = .S_NULL, .pain_chance = 0, .pain_sound = 0, .melee_state = .S_NULL, .missile_state = .S_NULL, .death_state = .S_NULL, .xdeath_state = .S_NULL, .death_sound = 0, .speed = 0, .radius = FX(20), .height = FX(16), .mass = 100, .damage = 0, .active_sound = 0, .flags = MF_SPECIAL, .raise_state = .S_NULL };
+    tbl[@intFromEnum(MobjType.MT_MISC23)] = .{ .doomednum = 2049, .spawn_state = .S_SBOX, .spawn_health = 1000, .see_state = .S_NULL, .see_sound = 0, .reaction_time = 8, .attack_sound = 0, .pain_state = .S_NULL, .pain_chance = 0, .pain_sound = 0, .melee_state = .S_NULL, .missile_state = .S_NULL, .death_state = .S_NULL, .xdeath_state = .S_NULL, .death_sound = 0, .speed = 0, .radius = FX(20), .height = FX(16), .mass = 100, .damage = 0, .active_sound = 0, .flags = MF_SPECIAL, .raise_state = .S_NULL };
+    tbl[@intFromEnum(MobjType.MT_MISC24)] = .{ .doomednum = 8, .spawn_state = .S_BPAK, .spawn_health = 1000, .see_state = .S_NULL, .see_sound = 0, .reaction_time = 8, .attack_sound = 0, .pain_state = .S_NULL, .pain_chance = 0, .pain_sound = 0, .melee_state = .S_NULL, .missile_state = .S_NULL, .death_state = .S_NULL, .xdeath_state = .S_NULL, .death_sound = 0, .speed = 0, .radius = FX(20), .height = FX(16), .mass = 100, .damage = 0, .active_sound = 0, .flags = MF_SPECIAL, .raise_state = .S_NULL };
+    tbl[@intFromEnum(MobjType.MT_MISC25)] = .{ .doomednum = 2006, .spawn_state = .S_BFUG, .spawn_health = 1000, .see_state = .S_NULL, .see_sound = 0, .reaction_time = 8, .attack_sound = 0, .pain_state = .S_NULL, .pain_chance = 0, .pain_sound = 0, .melee_state = .S_NULL, .missile_state = .S_NULL, .death_state = .S_NULL, .xdeath_state = .S_NULL, .death_sound = 0, .speed = 0, .radius = FX(20), .height = FX(16), .mass = 100, .damage = 0, .active_sound = 0, .flags = MF_SPECIAL, .raise_state = .S_NULL };
+    tbl[@intFromEnum(MobjType.MT_MISC26)] = .{ .doomednum = 2005, .spawn_state = .S_CSAW, .spawn_health = 1000, .see_state = .S_NULL, .see_sound = 0, .reaction_time = 8, .attack_sound = 0, .pain_state = .S_NULL, .pain_chance = 0, .pain_sound = 0, .melee_state = .S_NULL, .missile_state = .S_NULL, .death_state = .S_NULL, .xdeath_state = .S_NULL, .death_sound = 0, .speed = 0, .radius = FX(20), .height = FX(16), .mass = 100, .damage = 0, .active_sound = 0, .flags = MF_SPECIAL, .raise_state = .S_NULL };
+    tbl[@intFromEnum(MobjType.MT_MISC27)] = .{ .doomednum = 2003, .spawn_state = .S_LAUN, .spawn_health = 1000, .see_state = .S_NULL, .see_sound = 0, .reaction_time = 8, .attack_sound = 0, .pain_state = .S_NULL, .pain_chance = 0, .pain_sound = 0, .melee_state = .S_NULL, .missile_state = .S_NULL, .death_state = .S_NULL, .xdeath_state = .S_NULL, .death_sound = 0, .speed = 0, .radius = FX(20), .height = FX(16), .mass = 100, .damage = 0, .active_sound = 0, .flags = MF_SPECIAL, .raise_state = .S_NULL };
+    tbl[@intFromEnum(MobjType.MT_MISC28)] = .{ .doomednum = 2004, .spawn_state = .S_PLAS, .spawn_health = 1000, .see_state = .S_NULL, .see_sound = 0, .reaction_time = 8, .attack_sound = 0, .pain_state = .S_NULL, .pain_chance = 0, .pain_sound = 0, .melee_state = .S_NULL, .missile_state = .S_NULL, .death_state = .S_NULL, .xdeath_state = .S_NULL, .death_sound = 0, .speed = 0, .radius = FX(20), .height = FX(16), .mass = 100, .damage = 0, .active_sound = 0, .flags = MF_SPECIAL, .raise_state = .S_NULL };
 
     // Decorations — column (doomednum 2028)
     tbl[@intFromEnum(MobjType.MT_MISC31)] = .{ .doomednum = 30, .spawn_state = .S_COLU, .spawn_health = 1000, .see_state = .S_NULL, .see_sound = 0, .reaction_time = 8, .attack_sound = 0, .pain_state = .S_NULL, .pain_chance = 0, .pain_sound = 0, .melee_state = .S_NULL, .missile_state = .S_NULL, .death_state = .S_NULL, .xdeath_state = .S_NULL, .death_sound = 0, .speed = 0, .radius = FX(16), .height = FX(16), .mass = 100, .damage = 0, .active_sound = 0, .flags = MF_SOLID, .raise_state = .S_NULL };

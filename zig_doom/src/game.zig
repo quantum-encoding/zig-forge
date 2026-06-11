@@ -27,6 +27,9 @@ const TicCmd = user.TicCmd;
 const mobj_mod = @import("play/mobj.zig");
 const info = @import("info.zig");
 const pspr = @import("play/pspr.zig");
+const world = @import("play/world.zig");
+const spec = @import("play/spec.zig");
+const switch_mod = @import("play/switch.zig");
 const render_main = @import("render/main.zig");
 const render_data = @import("render/data.zig");
 const RenderData = render_data.RenderData;
@@ -410,6 +413,22 @@ pub const Game = struct {
         self.total_items = 0;
         self.total_secrets = 0;
 
+        // Publish the playsim world context (used by AI, collision, attacks)
+        world.reset();
+        world.level = if (self.level) |*l| l else null;
+        world.players = @ptrCast(&self.players);
+        world.player_in_game = &self.player_in_game;
+        world.sound = &self.sound;
+        world.allocator = self.allocator;
+        world.episode = self.episode;
+        world.map = self.map;
+        world.sky_flatnum = if (self.rdata) |*rd| rd.flatNumForName("F_SKY1\x00\x00".*) else -1;
+
+        // Spawn sector specials (door/floor/light thinkers, animations)
+        if (self.level) |*lvl| {
+            spec.spawnSpecials(lvl, self.allocator);
+        }
+
         // Spawn player and all map things
         if (self.level) |lvl| {
             // Skill bit for thing filtering (baby/easy share MTF_EASY,
@@ -521,9 +540,18 @@ pub const Game = struct {
 
     /// Run one game tic (thinkers, player movement, etc.)
     fn doTick(self: *Game) void {
-        // Process player input
+        // Respawn requested (death + use): single player restarts the level
+        if (self.players[self.consoleplayer].player_state == .reborn) {
+            const pn = self.players[self.consoleplayer].player_num;
+            self.players[self.consoleplayer] = Player{};
+            self.players[self.consoleplayer].player_num = pn;
+            self.action = .load_level;
+            return;
+        }
+
+        // Process player input (dead players still think — death camera/respawn)
         for (0..MAXPLAYERS) |i| {
-            if (self.player_in_game[i] and self.players[i].player_state != .dead) {
+            if (self.player_in_game[i]) {
                 // Keep the player's floor/ceiling heights synced to the sector
                 // they're standing in BEFORE thinking — calcHeight clamps the
                 // eye view to [floorz+1, ceilingz-4], and a stale ceilingz of 0
@@ -536,6 +564,33 @@ pub const Game = struct {
 
         // Run all thinkers (monsters, projectiles, etc.)
         tick.runThinkers();
+
+        // Sector specials: moving floors/ceilings/lights, texture animations,
+        // switch button timeouts, damage floors.
+        world.leveltime = self.level_time;
+        if (self.level) |*lvl| {
+            spec.updateSpecials(lvl);
+            switch_mod.checkButtons(lvl);
+
+            for (0..MAXPLAYERS) |i| {
+                if (!self.player_in_game[i]) continue;
+                const player = &self.players[i];
+                const mo = player.mobj orelse continue;
+                // Damage floors only hurt players standing on the ground
+                if (mo.z.raw() == mo.floorz.raw()) {
+                    if (self.sectorAt(mo.x, mo.y)) |sec| {
+                        if (sec.special != 0) spec.playerInSpecialSector(player, sec);
+                    }
+                }
+            }
+        }
+
+        // Exit triggers raised by line specials this tic
+        if (world.exit_level or world.exit_secret) {
+            world.exit_level = false;
+            world.exit_secret = false;
+            self.action = .completed;
+        }
 
         // Update sound positions
         if (self.players[self.consoleplayer].mobj) |mo| {
@@ -564,6 +619,32 @@ pub const Game = struct {
 
         // Bring up the ready weapon (psprite state machine)
         pspr.setupPSprites(&self.players[player_num]);
+    }
+
+    /// Sector containing a map point (BSP point-location), or null.
+    fn sectorAt(self: *Game, x: Fixed, y: Fixed) ?*setup.Sector {
+        const lvl = if (self.level) |*l| l else return null;
+        if (lvl.num_nodes == 0) {
+            if (lvl.subsectors.len > 0) {
+                if (lvl.subsectors[0].sector) |si| {
+                    if (si < lvl.sectors.len) return &lvl.sectors[si];
+                }
+            }
+            return null;
+        }
+        var node_id: u16 = @intCast(lvl.num_nodes - 1);
+        while (node_id & defs.NF_SUBSECTOR == 0) {
+            if (node_id >= lvl.nodes.len) return null;
+            const node = &lvl.nodes[node_id];
+            node_id = node.children[pointOnSideNode(x, y, node)];
+        }
+        const ssi = node_id & ~@as(u16, defs.NF_SUBSECTOR);
+        if (ssi < lvl.subsectors.len) {
+            if (lvl.subsectors[ssi].sector) |si| {
+                if (si < lvl.sectors.len) return &lvl.sectors[si];
+            }
+        }
+        return null;
     }
 
     /// Set a mobj's floorz/ceilingz from the sector it currently occupies

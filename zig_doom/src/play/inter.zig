@@ -15,6 +15,9 @@ const MobjType = info.MobjType;
 const StateNum = info.StateNum;
 const defs = @import("../defs.zig");
 const random = @import("../random.zig");
+const world = @import("world.zig");
+const pspr = @import("pspr.zig");
+const SfxId = @import("../sound/defs.zig").SfxId;
 const mobj_mod = @import("mobj.zig");
 const MapObject = mobj_mod.MapObject;
 const maputl = @import("maputl.zig");
@@ -85,6 +88,10 @@ pub fn damageMobj(
             damage -= saved;
         }
 
+        // Mirror the damage onto the player struct (HUD health)
+        player_ptr.health -= damage;
+        if (player_ptr.health < 0) player_ptr.health = 0;
+
         // Set attacker for death camera
         player_ptr.attacker = source;
         player_ptr.damage_count += damage; // Screen flash
@@ -154,9 +161,7 @@ pub fn killMobj(source: ?*MapObject, target: *MapObject) void {
     if (target.player != null) {
         const player_ptr: *Player = @ptrCast(@alignCast(target.player.?));
         player_ptr.player_state = .dead;
-
-        // Lower weapon
-        // dropWeapon(player_ptr); // Phase 3 stub
+        pspr.dropWeapon(player_ptr);
     }
 
     // Choose death state (xdeath for extreme damage)
@@ -172,6 +177,20 @@ pub fn killMobj(source: ?*MapObject, target: *MapObject) void {
     // Randomize death tics slightly
     target.tics -%= @as(i32, @intCast(random.pRandom() & 3));
     if (target.tics < 1) target.tics = 1;
+
+    // Zombies drop their weapon (half ammo via MF_DROPPED)
+    const drop_type: ?info.MobjType = switch (target.mobj_type) {
+        .MT_POSSESSED => .MT_CLIP,
+        .MT_SHOTGUY => .MT_MISC29,
+        else => null,
+    };
+    if (drop_type) |dt| {
+        if (world.allocator) |alloc| {
+            if (mobj_mod.spawnMobj(target.x, target.y, mobj_mod.ONFLOORZ, dt, alloc)) |item| {
+                item.flags |= info.MF_DROPPED;
+            } else |_| {}
+        }
+    }
 }
 
 // ============================================================================
@@ -186,13 +205,20 @@ pub fn touchSpecialThing(special: *MapObject, toucher: *MapObject) bool {
     if (toucher.health <= 0) return false;
 
     const player_ptr: *Player = @ptrCast(@alignCast(toucher.player.?));
+    const dropped = special.flags & info.MF_DROPPED != 0;
+
+    var pickup_sfx: SfxId = .itemup;
 
     // Determine item type and apply effect
-    return switch (special.mobj_type) {
+    const picked = switch (special.mobj_type) {
         // Health
         .MT_MISC2 => giveHealth(player_ptr, 1, true), // Health bonus (+1, over 100)
         .MT_MISC10 => giveHealth(player_ptr, 10, false), // Stimpack
         .MT_MISC11 => giveHealth(player_ptr, 25, false), // Medikit
+        .MT_MISC12 => blk: { // Soulsphere
+            pickup_sfx = .getpow;
+            break :blk giveHealth(player_ptr, 100, true);
+        },
 
         // Armor
         .MT_MISC0 => giveArmor(player_ptr, 1), // Green armor
@@ -204,16 +230,104 @@ pub fn touchSpecialThing(special: *MapObject, toucher: *MapObject) bool {
         .MT_MISC5 => giveCard(player_ptr, .red_card),
         .MT_MISC6 => giveCard(player_ptr, .yellow_card),
 
+        // Powerups
+        .MT_INV => blk: {
+            pickup_sfx = .getpow;
+            break :blk givePower(player_ptr, .invulnerability, 30 * 35);
+        },
+        .MT_MISC13 => blk: { // Berserk: strength + full heal + fists out
+            pickup_sfx = .getpow;
+            const got = givePower(player_ptr, .strength, 1);
+            if (got) {
+                _ = giveHealth(player_ptr, 100, false);
+                player_ptr.pending_weapon = .fist;
+            }
+            break :blk got;
+        },
+        .MT_INS => blk: {
+            pickup_sfx = .getpow;
+            break :blk givePower(player_ptr, .invisibility, 60 * 35);
+        },
+        .MT_MISC14 => blk: {
+            pickup_sfx = .getpow;
+            break :blk givePower(player_ptr, .iron_feet, 60 * 35);
+        },
+        .MT_MISC15 => blk: {
+            pickup_sfx = .getpow;
+            break :blk givePower(player_ptr, .all_map, 1);
+        },
+        .MT_MISC16 => blk: {
+            pickup_sfx = .getpow;
+            break :blk givePower(player_ptr, .infrared, 120 * 35);
+        },
+
         // Ammo
-        .MT_CLIP => giveAmmo(player_ptr, .clip, false),
-        .MT_MISC22 => giveAmmo(player_ptr, .shell, false),
+        .MT_CLIP => giveAmmo(player_ptr, .clip, 1, dropped),
+        .MT_MISC17 => giveAmmo(player_ptr, .clip, 5, false), // Box of bullets
+        .MT_MISC22 => giveAmmo(player_ptr, .shell, 1, dropped),
+        .MT_MISC23 => giveAmmo(player_ptr, .shell, 5, false), // Box of shells
+        .MT_MISC18 => giveAmmo(player_ptr, .missile, 1, false), // Rocket
+        .MT_MISC19 => giveAmmo(player_ptr, .missile, 5, false), // Box of rockets
+        .MT_MISC20 => giveAmmo(player_ptr, .cell, 1, false), // Cell
+        .MT_MISC21 => giveAmmo(player_ptr, .cell, 5, false), // Cell pack
+        .MT_MISC24 => giveBackpack(player_ptr), // Backpack
 
         // Weapons
-        .MT_MISC29 => giveWeapon(player_ptr, .shotgun), // Shotgun
-        .MT_CHAINGUN => giveWeapon(player_ptr, .chaingun),
+        .MT_MISC29 => blk: {
+            pickup_sfx = .wpnup;
+            break :blk giveWeapon(player_ptr, .shotgun);
+        },
+        .MT_CHAINGUN => blk: {
+            pickup_sfx = .wpnup;
+            break :blk giveWeapon(player_ptr, .chaingun);
+        },
+        .MT_MISC25 => blk: {
+            pickup_sfx = .wpnup;
+            break :blk giveWeapon(player_ptr, .bfg);
+        },
+        .MT_MISC26 => blk: {
+            pickup_sfx = .wpnup;
+            break :blk giveWeapon(player_ptr, .chainsaw);
+        },
+        .MT_MISC27 => blk: {
+            pickup_sfx = .wpnup;
+            break :blk giveWeapon(player_ptr, .missile);
+        },
+        .MT_MISC28 => blk: {
+            pickup_sfx = .wpnup;
+            break :blk giveWeapon(player_ptr, .plasma);
+        },
 
         else => false,
     };
+
+    if (picked) {
+        if (special.flags & info.MF_COUNTITEM != 0) {
+            player_ptr.item_count += 1;
+        }
+        world.playSfx(@ptrCast(toucher), pickup_sfx);
+    }
+    return picked;
+}
+
+fn givePower(player: *Player, power: defs.PowerType, tics: i32) bool {
+    const idx = @intFromEnum(power);
+    // Always refresh duration (vanilla refuses if active; refreshing is kinder)
+    player.powers[idx] = tics;
+    player.bonus_count += 6;
+    return true;
+}
+
+fn giveBackpack(player: *Player) bool {
+    // Double ammo capacity once, then top up one unit of each type
+    if (player.max_ammo[0] == 200) {
+        for (&player.max_ammo) |*m| m.* *= 2;
+    }
+    for (0..defs.NUMAMMO) |i| {
+        _ = giveAmmo(player, @enumFromInt(i), 1, false);
+    }
+    player.bonus_count += 6;
+    return true;
 }
 
 // ============================================================================
@@ -260,12 +374,13 @@ fn giveCard(player: *Player, card: defs.Card) bool {
     return true;
 }
 
-fn giveAmmo(player: *Player, ammo_type: defs.AmmoType, dropped: bool) bool {
+fn giveAmmo(player: *Player, ammo_type: defs.AmmoType, count: i32, dropped: bool) bool {
+    if (ammo_type == .no_ammo) return false;
     const idx = @intFromEnum(ammo_type);
     if (player.ammo[idx] >= player.max_ammo[idx]) return false;
 
     const amounts = [4]i32{ 10, 4, 20, 1 }; // clip, shell, cell, missile
-    var amount = amounts[idx];
+    var amount = amounts[idx] * count;
     if (dropped) amount = @divTrunc(amount, 2);
     if (amount < 1) amount = 1;
 
@@ -298,7 +413,8 @@ fn giveWeapon(player: *Player, weapon: defs.WeaponType) bool {
 
     const ammo_type = ammo_for_weapon[idx];
     if (ammo_type != .no_ammo) {
-        _ = giveAmmo(player, ammo_type, false);
+        // Weapons come with 2 clips' worth (vanilla single-player)
+        _ = giveAmmo(player, ammo_type, 2, false);
     }
 
     // Switch to new weapon if better

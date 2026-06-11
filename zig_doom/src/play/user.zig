@@ -130,6 +130,10 @@ pub const Player = struct {
     attacker: ?*MapObject = null,
     extra_light: i32 = 0,
 
+    // Firing state
+    refire: i32 = 0, // Consecutive-shot counter (accuracy penalty)
+    attackdown: bool = false, // Fire held (missile/BFG don't auto-repeat)
+
     // Weapon sprites
     psprites: [NUMPSPRITES]PSpriteDef = [_]PSpriteDef{.{}} ** NUMPSPRITES,
 

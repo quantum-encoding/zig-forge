@@ -25,6 +25,8 @@ const doors = @import("doors.zig");
 const floor_mod = @import("floor.zig");
 const ceiling = @import("ceiling.zig");
 const lights = @import("lights.zig");
+const world = @import("world.zig");
+const inter = @import("inter.zig");
 const switch_mod = @import("switch.zig");
 const telept = @import("telept.zig");
 
@@ -65,19 +67,19 @@ pub fn crossSpecialLine(line_idx: usize, side: i32, thing: *MapObject, level: *L
         // ---- Exits ----
         11 => {
             // S1 Exit level (handled as walk in some maps)
-            // Full implementation: G_ExitLevel()
+            world.exit_level = true;
         },
         51 => {
             // S1 Secret exit
-            // Full implementation: G_SecretExitLevel()
+            world.exit_secret = true;
         },
         52 => {
             // W1 Exit level
-            // Full implementation: G_ExitLevel()
+            world.exit_level = true;
         },
         124 => {
             // W1 Secret exit
-            // Full implementation: G_SecretExitLevel()
+            world.exit_secret = true;
         },
 
         // ---- Doors (Walk triggers) ----
@@ -609,13 +611,13 @@ pub fn useSpecialLine(thing: *MapObject, line_idx: usize, side: i32, level: *Lev
         11 => {
             // S1 Exit level
             switch_mod.changeSwitchTexture(line_idx, false, level);
-            // Full implementation: G_ExitLevel()
+            world.exit_level = true;
             return;
         },
         51 => {
             // S1 Secret exit
             switch_mod.changeSwitchTexture(line_idx, false, level);
-            // Full implementation: G_SecretExitLevel()
+            world.exit_secret = true;
             return;
         },
 
@@ -640,46 +642,30 @@ pub fn playerInSpecialSector(player: *Player, sector: *Sector) void {
     const mo = player.mobj orelse return;
     if (mo.z.raw() != mo.floorz.raw()) return;
 
+    // Damage floors hurt on 32-tic boundaries (vanilla: !(leveltime & 0x1f))
+    const hurt_tic = (world.leveltime & 0x1f) == 0;
+    const has_suit = player.powers[@intFromEnum(defs.PowerType.iron_feet)] != 0;
+
     switch (sector.special) {
         5 => {
-            // -10% health (no flash)
-            if (player.powers[@intFromEnum(defs.PowerType.iron_feet)] == 0) {
-                // Damage every 32 tics
-                if (player.health > 10) {
-                    player.health -= 5;
-                    mo.health = player.health;
-                }
-            }
+            // Hellslime: -10% every 32 tics
+            if (!has_suit and hurt_tic) inter.damageMobj(mo, null, null, 10);
         },
         7 => {
-            // -5% health (no flash)
-            if (player.powers[@intFromEnum(defs.PowerType.iron_feet)] == 0) {
-                if (player.health > 5) {
-                    player.health -= 2;
-                    mo.health = player.health;
-                }
-            }
+            // Nukage: -5% every 32 tics
+            if (!has_suit and hurt_tic) inter.damageMobj(mo, null, null, 5);
         },
         16, 4 => {
-            // -20% health + light blink
-            if (player.powers[@intFromEnum(defs.PowerType.iron_feet)] == 0) {
-                if (player.health > 20) {
-                    player.health -= 10;
-                    mo.health = player.health;
-                }
+            // Super hellslime: -20%; even a radsuit fails 5/256 of the time
+            if (hurt_tic and (!has_suit or random.pRandom() < 5)) {
+                inter.damageMobj(mo, null, null, 20);
             }
         },
         11 => {
-            // -20% health + end level on death
-            if (player.powers[@intFromEnum(defs.PowerType.iron_feet)] == 0) {
-                if (player.health > 20) {
-                    player.health -= 10;
-                    mo.health = player.health;
-                }
-            }
-            if (player.health <= 10) {
-                // Full implementation: G_ExitLevel()
-            }
+            // E1M8 end-of-game sector: -20%, god mode off, exit at <= 10%
+            player.cheats &= ~@as(u32, 1); // CF_GODMODE
+            if (hurt_tic) inter.damageMobj(mo, null, null, 20);
+            if (player.health <= 10) world.exit_level = true;
         },
         9 => {
             // Secret sector — count and clear
@@ -824,10 +810,12 @@ test "playerInSpecialSector damage" {
     mo.z = Fixed.ZERO;
     mo.floorz = Fixed.ZERO;
     mo.health = 100;
+    mo.flags = @import("../info.zig").MF_SHOOTABLE;
 
     var player = Player{};
     player.mobj = &mo;
     player.health = 100;
+    mo.player = @ptrCast(&player);
 
     var sector = Sector{
         .floorheight = Fixed.ZERO,
@@ -841,8 +829,10 @@ test "playerInSpecialSector damage" {
         .ceiling_name = [_]u8{0} ** 8,
     };
 
+    @import("world.zig").leveltime = 0; // hurt tic (leveltime & 0x1f == 0)
     playerInSpecialSector(&player, &sector);
-    try std.testing.expectEqual(@as(i32, 95), player.health);
+    // Special 5 is the -10% hellslime floor (vanilla damage values)
+    try std.testing.expectEqual(@as(i32, 90), player.health);
 }
 
 test "makeDummyLine" {

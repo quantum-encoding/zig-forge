@@ -480,6 +480,25 @@ fn playDemoCmd(w: *wad.Wad, demo_name: []const u8, output_path: []const u8, dump
     try writeStr(buf[0..len]);
     try writeStr(" tics\n");
 
+    // Gameplay stats (QA: verifies combat/pickup simulation ran)
+    const pl = &game.players[game.consoleplayer];
+    try writeStr("Stats: kills=");
+    len = formatSignedInt(&buf, @intCast(pl.kill_count));
+    try writeStr(buf[0..len]);
+    try writeStr(" items=");
+    len = formatSignedInt(&buf, @intCast(pl.item_count));
+    try writeStr(buf[0..len]);
+    try writeStr(" secrets=");
+    len = formatSignedInt(&buf, @intCast(pl.secret_count));
+    try writeStr(buf[0..len]);
+    try writeStr(" health=");
+    len = formatSignedInt(&buf, @intCast(pl.health));
+    try writeStr(buf[0..len]);
+    try writeStr(" bullets=");
+    len = formatSignedInt(&buf, @intCast(pl.ammo[0]));
+    try writeStr(buf[0..len]);
+    try writeStr("\n");
+
     try writeStr("Writing frame to: ");
     try writeStr(output_path);
     try writeStr("\n");
