@@ -33,6 +33,9 @@ pub var leveltime: i32 = 0;
 pub var episode: u8 = 1;
 pub var map: u8 = 1;
 
+/// Game skill (baby halves player damage taken / doubles ammo)
+pub var game_skill: u8 = 2;
+
 /// Resolved flat number of F_SKY1 (missiles vanish into sky walls)
 pub var sky_flatnum: i32 = -1;
 

@@ -62,6 +62,8 @@ pub fn checkSight(t1: *const MapObject, t2: *const MapObject, level: ?*const Lev
         .dy = Fixed.sub(t2.y, t1.y),
     };
 
+    if (level) |lvl| resetLineChecked(lvl.lines.len);
+
     sight_t2x = t2.x;
     sight_t2y = t2.y;
 
@@ -149,7 +151,18 @@ fn crossBSPNode(bsp_num: u16, level: *const Level) bool {
     return crossBSPNode(node.children[@intCast(other_side)], level);
 }
 
-/// Check sight through a subsector's segs.
+/// Per-call line-visited guard (vanilla uses line->validcount)
+var line_checked: [8192]bool = undefined;
+var line_checked_len: usize = 0;
+
+pub fn resetLineChecked(count: usize) void {
+    line_checked_len = @min(count, line_checked.len);
+    @memset(line_checked[0..line_checked_len], false);
+}
+
+/// Check sight through a subsector's segs (PS_CrossSubsector, faithful).
+/// Narrows the vertical sight window through two-sided openings; one-sided
+/// lines and closed openings block.
 fn crossSubsector(sub_num: u16, level: *const Level) bool {
     if (sub_num >= level.subsectors.len) return true;
 
@@ -164,32 +177,82 @@ fn crossSubsector(sub_num: u16, level: *const Level) bool {
         const line_idx: usize = seg.linedef;
         if (line_idx >= level.lines.len) continue;
 
-        const line = &level.lines[line_idx];
-
-        // Skip two-sided lines with full opening
-        if (line.sidenum[1] < 0) {
-            // One-sided — blocks sight
-            // Check if the sight line crosses this seg
-            if (segCrossesDivline(seg, level)) return false;
+        // Each line only needs checking once per sight trace
+        if (line_idx < line_checked_len) {
+            if (line_checked[line_idx]) continue;
+            line_checked[line_idx] = true;
         }
-        // For two-sided lines, check floor/ceiling heights
-        // (simplified in Phase 3)
+
+        const line = &level.lines[line_idx];
+        const v1 = &level.vertices[line.v1];
+        const v2 = &level.vertices[line.v2];
+
+        // Line endpoints on the same side of the trace? Not crossed.
+        const s1 = maputl.pointOnDivlineSide(v1.x, v1.y, &sight_strace);
+        const s2 = maputl.pointOnDivlineSide(v2.x, v2.y, &sight_strace);
+        if (s1 == s2) continue;
+
+        // Trace endpoints on the same side of the line? Not crossed.
+        const dl = maputl.DivLine{ .x = v1.x, .y = v1.y, .dx = line.dx, .dy = line.dy };
+        const t1s = maputl.pointOnDivlineSide(sight_strace.x, sight_strace.y, &dl);
+        const t2s = maputl.pointOnDivlineSide(sight_t2x, sight_t2y, &dl);
+        if (t1s == t2s) continue;
+
+        // One-sided lines always block sight
+        if (line.flags & defs.ML_TWOSIDED == 0) return false;
+
+        const front_idx = line.frontsector orelse return false;
+        const back_idx = line.backsector orelse return false;
+        const front = &level.sectors[front_idx];
+        const back = &level.sectors[back_idx];
+
+        // No height change — nothing to block with
+        if (front.floorheight.raw() == back.floorheight.raw() and
+            front.ceilingheight.raw() == back.ceilingheight.raw())
+        {
+            continue;
+        }
+
+        const opentop = if (front.ceilingheight.raw() < back.ceilingheight.raw())
+            front.ceilingheight
+        else
+            back.ceilingheight;
+        const openbottom = if (front.floorheight.raw() > back.floorheight.raw())
+            front.floorheight
+        else
+            back.floorheight;
+
+        // Totally closed (door)?
+        if (openbottom.raw() >= opentop.raw()) return false;
+
+        const frac = maputl.interceptVector(
+            sight_strace.x,
+            sight_strace.y,
+            sight_strace.dx,
+            sight_strace.dy,
+            dl.x,
+            dl.y,
+            dl.dx,
+            dl.dy,
+        );
+        if (frac.raw() <= 0) continue;
+
+        // Narrow the vertical window through this opening
+        if (front.floorheight.raw() != back.floorheight.raw()) {
+            const slope_raw: i64 = @divTrunc((@as(i64, openbottom.raw()) - sight_zstart.raw()) << 16, frac.raw());
+            const slope: i32 = @intCast(std.math.clamp(slope_raw, std.math.minInt(i32), std.math.maxInt(i32)));
+            if (slope > sight_zbottomslope.raw()) sight_zbottomslope = Fixed.fromRaw(slope);
+        }
+        if (front.ceilingheight.raw() != back.ceilingheight.raw()) {
+            const slope_raw: i64 = @divTrunc((@as(i64, opentop.raw()) - sight_zstart.raw()) << 16, frac.raw());
+            const slope: i32 = @intCast(std.math.clamp(slope_raw, std.math.minInt(i32), std.math.maxInt(i32)));
+            if (slope < sight_ztopslope.raw()) sight_ztopslope = Fixed.fromRaw(slope);
+        }
+
+        if (sight_ztopslope.raw() <= sight_zbottomslope.raw()) return false; // Window closed
     }
 
     return true;
-}
-
-/// Check if a seg crosses the sight divline
-fn segCrossesDivline(seg: *const setup.Seg, level: *const Level) bool {
-    if (seg.v1 >= level.vertices.len or seg.v2 >= level.vertices.len) return false;
-
-    const v1 = &level.vertices[seg.v1];
-    const v2 = &level.vertices[seg.v2];
-
-    const s1 = maputl.pointOnDivlineSide(v1.x, v1.y, &sight_strace);
-    const s2 = maputl.pointOnDivlineSide(v2.x, v2.y, &sight_strace);
-
-    return s1 != s2; // Seg endpoints on different sides = crossing
 }
 
 // ============================================================================

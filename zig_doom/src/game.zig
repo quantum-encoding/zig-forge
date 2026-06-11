@@ -422,6 +422,7 @@ pub const Game = struct {
         world.allocator = self.allocator;
         world.episode = self.episode;
         world.map = self.map;
+        world.game_skill = @intFromEnum(self.skill);
         world.sky_flatnum = if (self.rdata) |*rd| rd.flatNumForName("F_SKY1\x00\x00".*) else -1;
 
         // Spawn sector specials (door/floor/light thinkers, animations)
@@ -540,11 +541,15 @@ pub const Game = struct {
 
     /// Run one game tic (thinkers, player movement, etc.)
     fn doTick(self: *Game) void {
-        // Respawn requested (death + use): single player restarts the level
+        // Respawn requested (death + use): single player restarts the level.
+        // Vanilla G_PlayerReborn preserves kill/item/secret counts.
         if (self.players[self.consoleplayer].player_state == .reborn) {
-            const pn = self.players[self.consoleplayer].player_num;
+            const old = self.players[self.consoleplayer];
             self.players[self.consoleplayer] = Player{};
-            self.players[self.consoleplayer].player_num = pn;
+            self.players[self.consoleplayer].player_num = old.player_num;
+            self.players[self.consoleplayer].kill_count = old.kill_count;
+            self.players[self.consoleplayer].item_count = old.item_count;
+            self.players[self.consoleplayer].secret_count = old.secret_count;
             self.action = .load_level;
             return;
         }

@@ -43,13 +43,17 @@ pub const Fixed = enum(i32) {
     }
 
     pub fn div(a: Fixed, b: Fixed) Fixed {
+        const av = @intFromEnum(a);
         const bv = @intFromEnum(b);
-        if (bv == 0) {
-            const av = @intFromEnum(a);
-            return if (av >= 0) @enumFromInt(@as(i32, std.math.maxInt(i32))) else @enumFromInt(@as(i32, std.math.minInt(i32)));
+        // Vanilla FixedDiv overflow guard: quotient wouldn't fit — saturate
+        if ((@abs(av) >> 14) >= @abs(bv)) {
+            return if ((av ^ bv) < 0)
+                @enumFromInt(@as(i32, std.math.minInt(i32)))
+            else
+                @enumFromInt(@as(i32, std.math.maxInt(i32)));
         }
-        const wide: i64 = @as(i64, @intFromEnum(a)) << FRAC_BITS;
-        return @enumFromInt(@as(i32, @truncate(@divTrunc(wide, @as(i64, bv)))));
+        const wide: i64 = @as(i64, av) << FRAC_BITS;
+        return @enumFromInt(@as(i32, @intCast(@divTrunc(wide, @as(i64, bv)))));
     }
 
     pub fn negate(self: Fixed) Fixed {

@@ -346,32 +346,167 @@ pub fn tryMove(thing: *MapObject, x: Fixed, y: Fixed) bool {
     return true;
 }
 
-/// Slide movement: after a failed tryMove, attempt to slide along walls.
-/// Simplified stairstep version of P_SlideMove.
+// Slide movement state (P_SlideMove globals)
+var bestslidefrac: Fixed = Fixed.ZERO;
+var bestslideline: ?usize = null;
+var slide_tmxmove: Fixed = Fixed.ZERO;
+var slide_tmymove: Fixed = Fixed.ZERO;
+
+/// One slide trace from a leading corner (PTR_SlideTraverse over lines).
+/// Updates bestslidefrac/bestslideline with the nearest blocking line.
+fn slideTraverse(mo: *MapObject, lvl: *setup.Level, x1: Fixed, y1: Fixed, x2: Fixed, y2: Fixed) void {
+    gatherIntercepts(lvl, x1, y1, x2, y2, false);
+
+    for (intercepts[0..num_intercepts]) |*in| {
+        if (in.frac.raw() >= 0x10000) break; // beyond the move
+        const li = in.line orelse continue;
+        const line = &lvl.lines[li];
+
+        blocking: {
+            if (line.flags & defs.ML_TWOSIDED == 0) {
+                if (maputl.pointOnLineSide(mo.x, mo.y, line, lvl.vertices) != 0) {
+                    continue; // don't hit the back side
+                }
+                break :blocking;
+            }
+            const op = maputl.lineOpening(line, lvl.sectors) orelse break :blocking;
+            if (op.range.raw() < mo.height.raw()) break :blocking;
+            if (Fixed.sub(op.top, mo.z).raw() < mo.height.raw()) break :blocking;
+            if (Fixed.sub(op.bottom, mo.z).raw() > 24 * 0x10000) break :blocking;
+            continue; // this line doesn't block movement
+        }
+
+        if (in.frac.raw() < bestslidefrac.raw()) {
+            bestslidefrac = in.frac;
+            bestslideline = li;
+        }
+        return; // stop this trace at the first blocker
+    }
+}
+
+/// Clip the slide move along the blocking wall (P_HitSlideLine).
+fn hitSlideLine(mo: *MapObject, lvl: *setup.Level, line_idx: usize) void {
+    const line = &lvl.lines[line_idx];
+
+    if (line.slopetype == .horizontal) {
+        slide_tmymove = Fixed.ZERO;
+        return;
+    }
+    if (line.slopetype == .vertical) {
+        slide_tmxmove = Fixed.ZERO;
+        return;
+    }
+
+    const side = maputl.pointOnLineSide(mo.x, mo.y, line, lvl.vertices);
+    var lineangle = state_pointToAngle2(Fixed.ZERO, Fixed.ZERO, line.dx, line.dy);
+    if (side == 1) lineangle +%= fixed.ANG180;
+
+    const moveangle = state_pointToAngle2(Fixed.ZERO, Fixed.ZERO, slide_tmxmove, slide_tmymove);
+    var deltaangle = moveangle -% lineangle;
+    if (deltaangle > fixed.ANG180) deltaangle +%= fixed.ANG180; // vanilla quirk, kept
+
+    const lf = lineangle >> tables.ANGLETOFINESHIFT;
+    const df = deltaangle >> tables.ANGLETOFINESHIFT;
+
+    const movelen = maputl.aproxDistance(slide_tmxmove, slide_tmymove);
+    const newlen = Fixed.mul(movelen, tables.finecosine[df & tables.FINEMASK]);
+
+    slide_tmxmove = Fixed.mul(newlen, tables.finecosine[lf & tables.FINEMASK]);
+    slide_tmymove = Fixed.mul(newlen, tables.finesine[lf & tables.FINEMASK]);
+}
+
+fn state_pointToAngle2(x1: Fixed, y1: Fixed, x2: Fixed, y2: Fixed) Angle {
+    return maputl.pointToAngle2(x1, y1, x2, y2);
+}
+
+/// Slide a player along the wall that blocked the move (P_SlideMove).
 pub fn slideMove(mo: *MapObject) void {
-    const orig_x = mo.x;
-    const orig_y = mo.y;
+    const lvl = world.level orelse {
+        // No level (tests): just try the full move
+        _ = tryMove(mo, Fixed.add(mo.x, mo.momx), Fixed.add(mo.y, mo.momy));
+        return;
+    };
 
-    // Try the full move first
-    if (tryMove(mo, Fixed.add(mo.x, mo.momx), Fixed.add(mo.y, mo.momy))) {
-        return; // Full move succeeded
-    }
+    var hitcount: u32 = 0;
+    retry: while (true) {
+        hitcount += 1;
+        if (hitcount == 3) {
+            // Don't loop forever: stairstep
+            if (!tryMove(mo, mo.x, Fixed.add(mo.y, mo.momy))) {
+                _ = tryMove(mo, Fixed.add(mo.x, mo.momx), mo.y);
+            }
+            return;
+        }
 
-    // Try X-only move (stairstep)
-    if (tryMove(mo, Fixed.add(orig_x, mo.momx), orig_y)) {
-        mo.momy = Fixed.ZERO; // Cancel Y momentum
+        // Trace along the three leading corners
+        var leadx: Fixed = undefined;
+        var trailx: Fixed = undefined;
+        var leady: Fixed = undefined;
+        var traily: Fixed = undefined;
+        if (mo.momx.raw() > 0) {
+            leadx = Fixed.add(mo.x, mo.radius);
+            trailx = Fixed.sub(mo.x, mo.radius);
+        } else {
+            leadx = Fixed.sub(mo.x, mo.radius);
+            trailx = Fixed.add(mo.x, mo.radius);
+        }
+        if (mo.momy.raw() > 0) {
+            leady = Fixed.add(mo.y, mo.radius);
+            traily = Fixed.sub(mo.y, mo.radius);
+        } else {
+            leady = Fixed.sub(mo.y, mo.radius);
+            traily = Fixed.add(mo.y, mo.radius);
+        }
+
+        bestslidefrac = Fixed.fromRaw(0x10000 + 1);
+        bestslideline = null;
+
+        slideTraverse(mo, lvl, leadx, leady, Fixed.add(leadx, mo.momx), Fixed.add(leady, mo.momy));
+        slideTraverse(mo, lvl, trailx, leady, Fixed.add(trailx, mo.momx), Fixed.add(leady, mo.momy));
+        slideTraverse(mo, lvl, leadx, traily, Fixed.add(leadx, mo.momx), Fixed.add(traily, mo.momy));
+
+        // Move up to the wall
+        if (bestslidefrac.raw() == 0x10000 + 1) {
+            // The move must have hit the middle: stairstep
+            if (!tryMove(mo, mo.x, Fixed.add(mo.y, mo.momy))) {
+                _ = tryMove(mo, Fixed.add(mo.x, mo.momx), mo.y);
+            }
+            return;
+        }
+
+        // Fudge a bit so it doesn't hit
+        bestslidefrac = Fixed.fromRaw(bestslidefrac.raw() - 0x800);
+        if (bestslidefrac.raw() > 0) {
+            const newx = Fixed.mul(mo.momx, bestslidefrac);
+            const newy = Fixed.mul(mo.momy, bestslidefrac);
+            if (!tryMove(mo, Fixed.add(mo.x, newx), Fixed.add(mo.y, newy))) {
+                if (!tryMove(mo, mo.x, Fixed.add(mo.y, mo.momy))) {
+                    _ = tryMove(mo, Fixed.add(mo.x, mo.momx), mo.y);
+                }
+                return;
+            }
+        }
+
+        // Now continue along the wall with the remaining momentum
+        var remain = 0x10000 - (bestslidefrac.raw() + 0x800);
+        if (remain > 0x10000) remain = 0x10000;
+        if (remain <= 0) return;
+
+        slide_tmxmove = Fixed.mul(mo.momx, Fixed.fromRaw(remain));
+        slide_tmymove = Fixed.mul(mo.momy, Fixed.fromRaw(remain));
+
+        if (bestslideline) |bli| {
+            hitSlideLine(mo, lvl, bli);
+        }
+
+        mo.momx = slide_tmxmove;
+        mo.momy = slide_tmymove;
+
+        if (!tryMove(mo, Fixed.add(mo.x, slide_tmxmove), Fixed.add(mo.y, slide_tmymove))) {
+            continue :retry;
+        }
         return;
     }
-
-    // Try Y-only move
-    if (tryMove(mo, orig_x, Fixed.add(orig_y, mo.momy))) {
-        mo.momx = Fixed.ZERO; // Cancel X momentum
-        return;
-    }
-
-    // Both failed — stop
-    mo.momx = Fixed.ZERO;
-    mo.momy = Fixed.ZERO;
 }
 
 // ============================================================================
@@ -588,15 +723,28 @@ pub fn lineAttack(
                 spec.shootSpecialLine(source, li, lvl, alloc);
             }
 
-            // Position along the trace where the line is hit
-            const dist = Fixed.mul(range, in.frac);
-            const z_at = Fixed.add(shootz, Fixed.mul(aim_slope, dist));
-
+            // Two-sided lines pass the shot when the slope clears the
+            // opening; equal-height planes never block (vanilla).
             blocked: {
+                if (line.flags & defs.ML_TWOSIDED == 0) break :blocked;
                 const op = maputl.lineOpening(line, lvl.sectors) orelse break :blocked;
-                // Shot passes through the opening?
-                if (z_at.raw() > op.bottom.raw() and z_at.raw() < op.top.raw()) continue;
-                break :blocked;
+                const dist = Fixed.mul(range, in.frac);
+                if (dist.raw() <= 0) continue;
+
+                const fi = line.frontsector orelse break :blocked;
+                const bi = line.backsector orelse break :blocked;
+                const front = &lvl.sectors[fi];
+                const back = &lvl.sectors[bi];
+
+                if (front.floorheight.raw() != back.floorheight.raw()) {
+                    const bot_slope = Fixed.div(Fixed.sub(op.bottom, shootz), dist);
+                    if (bot_slope.raw() > aim_slope.raw()) break :blocked; // hits the lower wall
+                }
+                if (front.ceilingheight.raw() != back.ceilingheight.raw()) {
+                    const top_slope = Fixed.div(Fixed.sub(op.top, shootz), dist);
+                    if (top_slope.raw() < aim_slope.raw()) break :blocked; // hits the upper wall
+                }
+                continue; // Shot continues past this line
             }
 
             // Impact on the wall: spawn a puff slightly in front of it
@@ -679,7 +827,7 @@ pub fn useLines(player_mo: *MapObject) void {
         }
 
         const side = maputl.pointOnLineSide(player_mo.x, player_mo.y, line, lvl.vertices);
-        spec.useSpecialLine(player_mo, li, side, lvl, alloc);
+        _ = spec.useSpecialLine(player_mo, li, side, lvl, alloc);
         return;
     }
 }
@@ -709,6 +857,39 @@ pub fn radiusAttack(spot: *MapObject, source: ?*MapObject, damage: i32) void {
             }
 
             inter.damageMobj(mo, c.spot, c.source, c.damage - dist);
+            return true;
+        }
+    }.cb);
+}
+
+// ============================================================================
+// Sector height changes (P_ChangeSector lite)
+// ============================================================================
+
+/// After a sector's floor/ceiling moves, refit every mobj standing in it:
+/// update floorz/ceilingz and carry grounded things with a rising floor.
+pub fn changeSector(lvl: *setup.Level, sector_idx: usize) void {
+    const sec = &lvl.sectors[sector_idx];
+    const Ctx = struct { lvl: *setup.Level, sec: *setup.Sector, idx: usize };
+    const ctx = Ctx{ .lvl = lvl, .sec = sec, .idx = sector_idx };
+    _ = forEachMobj(ctx, struct {
+        fn cb(c: Ctx, mo: *MapObject) bool {
+            const mosec = sectorAtPoint(c.lvl, mo.x, mo.y) orelse return true;
+            if (mosec != c.sec) return true;
+
+            const was_grounded = mo.z.raw() <= mo.floorz.raw();
+            mo.floorz = c.sec.floorheight;
+            mo.ceilingz = c.sec.ceilingheight;
+
+            if (was_grounded or mo.z.raw() < mo.floorz.raw()) {
+                // Ride the floor (or get pushed up by it)
+                mo.z = mo.floorz;
+            }
+            // Squeezed against the ceiling?
+            if (Fixed.add(mo.z, mo.height).raw() > mo.ceilingz.raw()) {
+                mo.z = Fixed.sub(mo.ceilingz, mo.height);
+                if (mo.z.raw() < mo.floorz.raw()) mo.z = mo.floorz;
+            }
             return true;
         }
     }.cb);

@@ -54,13 +54,38 @@ pub fn damageMobj(
 
     var damage = damage_in;
 
-    // Thrust from damage (knockback)
-    if (inflictor != null and target.flags & info.MF_NOCLIP == 0) {
+    // Half damage on I'm Too Young To Die
+    if (target.player != null and world.game_skill == 0) {
+        damage >>= 1;
+    }
+
+    // Thrust from damage (knockback) — except point-blank chainsaw
+    const chainsaw_src = blk: {
+        const src = source orelse break :blk false;
+        const pl = src.player orelse break :blk false;
+        const p: *Player = @ptrCast(@alignCast(pl));
+        break :blk p.ready_weapon == .chainsaw;
+    };
+    if (inflictor != null and target.flags & info.MF_NOCLIP == 0 and !chainsaw_src) {
         const inf = inflictor.?;
-        const thrust_angle = maputl.pointToAngle2(inf.x, inf.y, target.x, target.y);
+        var thrust_angle = maputl.pointToAngle2(inf.x, inf.y, target.x, target.y);
         const tables = @import("../tables.zig");
+
+        // thrust = damage * (FRACUNIT>>3) * 100 / mass
+        const mass: i64 = @max(1, target.getInfo().mass);
+        var thrust_raw: i64 = @divTrunc(@as(i64, damage) * (0x10000 >> 3) * 100, mass);
+
+        // Fall forward sometimes when hit hard from behind and above
+        if (damage < 40 and damage > target.health and
+            Fixed.sub(target.z, inf.z).raw() > 64 * 0x10000 and
+            random.pRandom() & 1 != 0)
+        {
+            thrust_angle +%= fixed.ANG180;
+            thrust_raw *= 4;
+        }
+
         const fine = thrust_angle >> tables.ANGLETOFINESHIFT;
-        const thrust = Fixed.fromRaw(@divTrunc(damage * 0x2000, target.getInfo().mass));
+        const thrust = Fixed.fromRaw(@intCast(@min(thrust_raw, std.math.maxInt(i32))));
         target.momx = Fixed.add(target.momx, Fixed.mul(thrust, tables.finecosine[fine & tables.FINEMASK]));
         target.momy = Fixed.add(target.momy, Fixed.mul(thrust, tables.finesine[fine & tables.FINEMASK]));
     }
@@ -68,6 +93,13 @@ pub fn damageMobj(
     // Player-specific damage reduction
     if (target.player != null) {
         const player_ptr: *Player = @ptrCast(@alignCast(target.player.?));
+
+        // God mode / invulnerability: no damage
+        if (player_ptr.cheats & 1 != 0 or
+            player_ptr.powers[@intFromEnum(defs.PowerType.invulnerability)] != 0)
+        {
+            return;
+        }
 
         // Reduce damage by armor
         if (player_ptr.armor_type > 0 and damage > 0) {
@@ -106,30 +138,30 @@ pub fn damageMobj(
         return;
     }
 
-    // Pain state check
-    if (damage > 0) {
-        // Set reaction time (retaliate faster)
-        target.reaction_time = 0;
-
-        // Random pain chance
-        const pain_chance = target.getInfo().pain_chance;
-        if (pain_chance > 0 and random.pRandom() < @as(u8, @intCast(@min(255, pain_chance)))) {
-            target.flags |= info.MF_JUSTHIT; // Fight back!
-            const pain_state = target.getInfo().pain_state;
-            if (pain_state != .S_NULL) {
-                _ = target.setState(pain_state);
-            }
+    // Pain state (vanilla order: pain roll first, then reaction reset,
+    // then retarget only when threshold expired; waking monsters go to
+    // their see state immediately)
+    const pain_chance = target.getInfo().pain_chance;
+    if (random.pRandom() < @as(u8, @intCast(std.math.clamp(pain_chance, 0, 255))) and
+        target.flags & info.MF_SKULLFLY == 0)
+    {
+        target.flags |= info.MF_JUSTHIT; // Fight back!
+        const pain_state = target.getInfo().pain_state;
+        if (pain_state != .S_NULL) {
+            _ = target.setState(pain_state);
         }
+    }
 
-        // Set threshold (don't switch targets for a while)
-        target.threshold = 0;
+    target.reaction_time = 0; // We're awake now
 
-        // Switch target to attacker (infighting)
-        if (source != null and source != target and
-            target.flags & info.MF_COUNTKILL != 0)
+    if (target.threshold == 0 and source != null and source != target) {
+        // Target the attacker for a while
+        target.target = source;
+        target.threshold = 100; // BASETHRESHOLD
+        if (target.state_num == target.getInfo().spawn_state and
+            target.getInfo().see_state != .S_NULL)
         {
-            target.target = source;
-            target.threshold = 40; // BASETHRESHOLD
+            _ = target.setState(target.getInfo().see_state);
         }
     }
 }
@@ -203,6 +235,10 @@ pub fn touchSpecialThing(special: *MapObject, toucher: *MapObject) bool {
     // Only players can pick up items
     if (toucher.player == null) return false;
     if (toucher.health <= 0) return false;
+
+    // Out of reach vertically?
+    const delta = Fixed.sub(special.z, toucher.z);
+    if (delta.raw() > toucher.height.raw() or delta.raw() < -8 * 0x10000) return false;
 
     const player_ptr: *Player = @ptrCast(@alignCast(toucher.player.?));
     const dropped = special.flags & info.MF_DROPPED != 0;

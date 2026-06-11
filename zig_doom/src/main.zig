@@ -63,6 +63,7 @@ comptime {
     _ = @import("play/lights.zig");
     _ = @import("play/switch.zig");
     _ = @import("play/telept.zig");
+    _ = @import("play/plat.zig");
     // Phase 5: Game Loop + UI
     _ = @import("event.zig");
     _ = @import("game.zig");
@@ -454,6 +455,19 @@ fn playDemoCmd(w: *wad.Wad, demo_name: []const u8, output_path: []const u8, dump
     var tic_count: u32 = 0;
     const max_tics: u32 = 35 * 60 * 10; // Max 10 minutes
 
+    // Per-second movement trace (sync QA: a desynced player gets stuck)
+    var move_per_sec: [600]u32 = [_]u32{0} ** 600;
+    var prev_x: i32 = 0;
+    var prev_y: i32 = 0;
+    var blk_px: i32 = 0;
+    var blk_py: i32 = 0;
+    var intent_tics: u32 = 0;
+    var blocked_tics: u32 = 0;
+    if (game.players[game.consoleplayer].mobj) |mo| {
+        prev_x = mo.x.toInt();
+        prev_y = mo.y.toInt();
+    }
+
     while (demo_state.playing and tic_count < max_tics) {
         var cmd = user.TicCmd{};
         if (!demo_state.readTicCmd(&cmd)) break;
@@ -462,6 +476,34 @@ fn playDemoCmd(w: *wad.Wad, demo_name: []const u8, output_path: []const u8, dump
         game.ticker();
         tic_count += 1;
 
+        if (tic_count % 35 == 0) {
+            if (game.players[game.consoleplayer].mobj) |mo| {
+                const sec = (tic_count / 35) - 1;
+                if (sec < move_per_sec.len) {
+                    const dx = mo.x.toInt() - prev_x;
+                    const dy = mo.y.toInt() - prev_y;
+                    move_per_sec[sec] = @abs(dx) + @abs(dy);
+                }
+                prev_x = mo.x.toInt();
+                prev_y = mo.y.toInt();
+            }
+        }
+
+        // Blocked-movement metric: input wants to move but we barely did
+        if (cmd.forwardmove != 0 or cmd.sidemove != 0) {
+            intent_tics += 1;
+            if (game.players[game.consoleplayer].mobj) |mo| {
+                const moved: i32 = @intCast(@abs(mo.x.toInt() - blk_px) + @abs(mo.y.toInt() - blk_py));
+                const want: i32 = @intCast((@abs(@as(i32, cmd.forwardmove)) + @abs(@as(i32, cmd.sidemove))) >> 5);
+                if (moved < @max(1, want)) blocked_tics += 1;
+                blk_px = mo.x.toInt();
+                blk_py = mo.y.toInt();
+            }
+        } else if (game.players[game.consoleplayer].mobj) |mo| {
+            blk_px = mo.x.toInt();
+            blk_py = mo.y.toInt();
+        }
+
         // Periodic frame dumps for headless render QA
         if (dump_every > 0 and tic_count % dump_every == 0) {
             game.drawer(&vid);
@@ -469,6 +511,35 @@ fn playDemoCmd(w: *wad.Wad, demo_name: []const u8, output_path: []const u8, dump
             const fname = std.fmt.bufPrint(&name_buf, "frame_{d:0>5}.ppm", .{tic_count}) catch continue;
             _ = vid.writePPM(0, fname, alloc);
         }
+    }
+
+    // Sync metric: first second after which the player stalls for 4+ seconds
+    {
+        const total_secs = tic_count / 35;
+        var stuck_at: i32 = -1;
+        var sec: usize = 0;
+        while (sec + 4 <= total_secs and sec + 4 <= move_per_sec.len) : (sec += 1) {
+            var all_stuck = true;
+            for (move_per_sec[sec .. sec + 4]) |m| {
+                if (m >= 8) all_stuck = false;
+            }
+            if (all_stuck) {
+                stuck_at = @intCast(sec);
+                break;
+            }
+        }
+        var sbuf: [256]u8 = undefined;
+        try writeStr("Sync: blocked=");
+        const blocked_pct: i32 = if (intent_tics > 0) @intCast(blocked_tics * 100 / intent_tics) else 0;
+        const blen = formatSignedInt(&sbuf, @intCast(blocked_pct));
+        try writeStr(sbuf[0..blen]);
+        try writeStr("% first-stall-sec=");
+        var slen = formatSignedInt(&sbuf, @intCast(stuck_at));
+        try writeStr(sbuf[0..slen]);
+        try writeStr(" of ");
+        slen = formatSignedInt(&sbuf, @intCast(@min(total_secs, 32767)));
+        try writeStr(sbuf[0..slen]);
+        try writeStr(" secs\n");
     }
 
     // Draw final frame

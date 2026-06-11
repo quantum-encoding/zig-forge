@@ -105,10 +105,12 @@ pub fn T_VerticalDoor(thinker_ptr: *Thinker) void {
                     switch (door.door_type) {
                         .blaze_raise, .blaze_close => {
                             sector.ceilingheight = sector.floorheight;
+                            sector.ceilingdata = null;
                             tick.removeThinker(&door.thinker);
                         },
                         .normal, .door_close => {
                             sector.ceilingheight = sector.floorheight;
+                            sector.ceilingdata = null;
                             tick.removeThinker(&door.thinker);
                         },
                         .close_30_open => {
@@ -144,6 +146,7 @@ pub fn T_VerticalDoor(thinker_ptr: *Thinker) void {
                         },
                         .close_30_open, .blaze_open, .door_open => {
                             sector.ceilingheight = door.top_height;
+                            sector.ceilingdata = null;
                             tick.removeThinker(&door.thinker);
                         },
                         else => {},
@@ -250,12 +253,15 @@ pub fn EV_DoDoor(line: *const Line, door_type: DoorType, level: *Level, allocato
     for (level.sectors, 0..) |_, i| {
         if (level.sectors[i].tag != line.tag) continue;
 
+        if (level.sectors[i].ceilingdata != null) continue; // Already moving
+
         const door = allocator.create(VerticalDoor) catch continue;
         door.* = .{
             .door_type = door_type,
             .sector_idx = @intCast(i),
         };
 
+        level.sectors[i].ceilingdata = @ptrCast(door);
         tick.addThinker(&door.thinker);
         rtn = true;
 
@@ -348,11 +354,34 @@ pub fn EV_VerticalDoor(line: *const Line, thing: *MapObject, level: *Level, allo
     // Get the sector on the back side of the line
     const back_sector_idx = line.backsector orelse return;
 
+    // If a door thinker is already active on this sector, re-pressing
+    // reverses it instead of spawning a second mover (vanilla specialdata).
+    if (back_sector_idx < level.sectors.len) {
+        if (level.sectors[back_sector_idx].ceilingdata) |cd| {
+            const active: *VerticalDoor = @ptrCast(@alignCast(cd));
+            switch (line.special) {
+                1, 26, 27, 28, 117 => {
+                    if (active.direction == -1) {
+                        active.direction = 1; // Going down? Go back up
+                    } else {
+                        if (thing.player == null) return; // Monsters never close
+                        active.direction = -1; // Start going down
+                    }
+                    return;
+                },
+                else => return,
+            }
+        }
+    }
+
     const door = allocator.create(VerticalDoor) catch return;
     door.* = .{
         .sector_idx = back_sector_idx,
     };
 
+    if (back_sector_idx < level.sectors.len) {
+        level.sectors[back_sector_idx].ceilingdata = @ptrCast(door);
+    }
     tick.addThinker(&door.thinker);
 
     // Determine door type from line special

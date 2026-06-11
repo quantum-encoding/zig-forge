@@ -9,6 +9,7 @@ const fixed = @import("../fixed.zig");
 const Fixed = fixed.Fixed;
 const random = @import("../random.zig");
 const tick = @import("tick.zig");
+const map_mod = @import("map.zig");
 const Thinker = tick.Thinker;
 const setup = @import("setup.zig");
 const Sector = setup.Sector;
@@ -72,6 +73,9 @@ pub fn T_MoveFloor(thinker_ptr: *Thinker) void {
 
     const result = moveFloor(sector, floor_mover.speed, floor_mover.floor_dest_height, floor_mover.crush, floor_mover.direction);
 
+    // Refit/carry things standing in the moving sector
+    map_mod.changeSector(level, floor_mover.sector_idx);
+
     switch (result) {
         .pastdest => {
             if (floor_mover.direction == 1) {
@@ -91,6 +95,7 @@ pub fn T_MoveFloor(thinker_ptr: *Thinker) void {
                     else => {},
                 }
             }
+            sector.floordata_busy = false;
             tick.removeThinker(&floor_mover.thinker);
         },
         .crushed => {

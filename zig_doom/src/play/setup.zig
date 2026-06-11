@@ -30,6 +30,15 @@ pub const Sector = struct {
     // Rendering state
     floor_name: [8]u8,
     ceiling_name: [8]u8,
+    // Sound propagation (P_NoiseAlert / P_RecursiveSound)
+    soundtarget: ?*anyopaque = null, // *MapObject that made noise here
+    soundtraversed: i32 = 0, // 0 = untraversed, 1,2 = sndlines crossed
+    validcount: i32 = 0, // flood-fill visit marker
+    // A floor mover (plat/floor) is active on this sector (vanilla specialdata)
+    floordata_busy: bool = false,
+    // Active door/ceiling thinker on this sector (vanilla specialdata) —
+    // points at a doors.VerticalDoor so a re-press can reverse it
+    ceilingdata: ?*anyopaque = null,
 };
 
 pub const Side = struct {

@@ -27,6 +27,7 @@ const ceiling = @import("ceiling.zig");
 const lights = @import("lights.zig");
 const world = @import("world.zig");
 const inter = @import("inter.zig");
+const plat_mod = @import("plat.zig");
 const switch_mod = @import("switch.zig");
 const telept = @import("telept.zig");
 
@@ -300,33 +301,33 @@ pub fn crossSpecialLine(line_idx: usize, side: i32, thing: *MapObject, level: *L
         // ---- Lifts / Platforms ----
         10 => {
             // W1 Lift (lower-wait-raise)
-            _ = floor_mod.EV_DoFloor(line, .lower_floor_to_lowest, level, allocator);
+            _ = plat_mod.EV_DoPlat(line, .down_wait_up_stay, level, allocator);
             line.special = 0;
         },
         21 => {
             // S1 Lift
-            _ = floor_mod.EV_DoFloor(line, .lower_floor_to_lowest, level, allocator);
+            _ = plat_mod.EV_DoPlat(line, .down_wait_up_stay, level, allocator);
             line.special = 0;
         },
         62 => {
             // SR Lift
-            _ = floor_mod.EV_DoFloor(line, .lower_floor_to_lowest, level, allocator);
+            _ = plat_mod.EV_DoPlat(line, .down_wait_up_stay, level, allocator);
         },
         88 => {
             // WR Lift
-            _ = floor_mod.EV_DoFloor(line, .lower_floor_to_lowest, level, allocator);
+            _ = plat_mod.EV_DoPlat(line, .down_wait_up_stay, level, allocator);
         },
         120 => {
             // WR Turbo lift
-            _ = floor_mod.EV_DoFloor(line, .turbo_lower, level, allocator);
+            _ = plat_mod.EV_DoPlat(line, .blaze_dwus, level, allocator);
         },
         121 => {
             // WR Turbo lift
-            _ = floor_mod.EV_DoFloor(line, .turbo_lower, level, allocator);
+            _ = plat_mod.EV_DoPlat(line, .blaze_dwus, level, allocator);
         },
         122 => {
             // S1 Turbo lift
-            _ = floor_mod.EV_DoFloor(line, .turbo_lower, level, allocator);
+            _ = plat_mod.EV_DoPlat(line, .blaze_dwus, level, allocator);
             line.special = 0;
         },
         123 => {
@@ -445,8 +446,8 @@ pub fn shootSpecialLine(thing: *MapObject, line_idx: usize, level: *Level, alloc
 // useSpecialLine — player uses (activates) a linedef
 // ============================================================================
 
-pub fn useSpecialLine(thing: *MapObject, line_idx: usize, side: i32, level: *Level, allocator: std.mem.Allocator) void {
-    if (line_idx >= level.lines.len) return;
+pub fn useSpecialLine(thing: *MapObject, line_idx: usize, side: i32, level: *Level, allocator: std.mem.Allocator) bool {
+    if (line_idx >= level.lines.len) return false;
     const line = &level.lines[line_idx];
 
     _ = side;
@@ -455,13 +456,13 @@ pub fn useSpecialLine(thing: *MapObject, line_idx: usize, side: i32, level: *Lev
         // ---- Manual doors (no tag — affect back sector directly) ----
         1, 26, 27, 28, 31, 32, 33, 34, 117, 118 => {
             doors.EV_VerticalDoor(line, thing, level, allocator);
-            return;
+            return true;
         },
         else => {},
     }
 
     // Only players can trigger switch specials
-    if (thing.player == null) return;
+    if (thing.player == null) return false;
 
     var use_again = false;
 
@@ -607,21 +608,41 @@ pub fn useSpecialLine(thing: *MapObject, line_idx: usize, side: i32, level: *Lev
             // Scrolling wall (handled in updateSpecials)
         },
 
+        // ---- Lifts ----
+        21 => {
+            // S1 Lift
+            _ = plat_mod.EV_DoPlat(line, .down_wait_up_stay, level, allocator);
+        },
+        62 => {
+            // SR Lift
+            _ = plat_mod.EV_DoPlat(line, .down_wait_up_stay, level, allocator);
+            use_again = true;
+        },
+        122 => {
+            // S1 Turbo lift
+            _ = plat_mod.EV_DoPlat(line, .blaze_dwus, level, allocator);
+        },
+        123 => {
+            // SR Turbo lift
+            _ = plat_mod.EV_DoPlat(line, .blaze_dwus, level, allocator);
+            use_again = true;
+        },
+
         // ---- Exit switches ----
         11 => {
             // S1 Exit level
             switch_mod.changeSwitchTexture(line_idx, false, level);
             world.exit_level = true;
-            return;
+            return true;
         },
         51 => {
             // S1 Secret exit
             switch_mod.changeSwitchTexture(line_idx, false, level);
             world.exit_secret = true;
-            return;
+            return true;
         },
 
-        else => return, // Unknown special — do nothing, don't swap texture
+        else => return false, // Unknown special — do nothing, don't swap texture
     }
 
     // Swap switch texture
@@ -631,6 +652,7 @@ pub fn useSpecialLine(thing: *MapObject, line_idx: usize, side: i32, level: *Lev
     if (!use_again) {
         line.special = 0;
     }
+    return true;
 }
 
 // ============================================================================

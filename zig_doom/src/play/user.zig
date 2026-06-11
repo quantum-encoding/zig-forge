@@ -133,6 +133,7 @@ pub const Player = struct {
     // Firing state
     refire: i32 = 0, // Consecutive-shot counter (accuracy penalty)
     attackdown: bool = false, // Fire held (missile/BFG don't auto-repeat)
+    usedown: bool = false, // Use held (don't re-trigger every tic)
 
     // Weapon sprites
     psprites: [NUMPSPRITES]PSpriteDef = [_]PSpriteDef{.{}} ** NUMPSPRITES,
@@ -148,14 +149,17 @@ pub const Player = struct {
 // Player Think — main per-tic update
 // ============================================================================
 
-/// Main player think function — process movement and actions
+/// Main player think function — faithful port of P_PlayerThink.
 pub fn playerThink(player: *Player) void {
     const mo = player.mobj orelse return;
     const cmd = &player.cmd;
 
-    // Turn
-    if (cmd.angleturn != 0) {
-        mo.angle +%= @as(u32, @bitCast(@as(i32, cmd.angleturn))) << 16;
+    // Chainsaw lunge: A_Saw sets MF_JUSTATTACKED to run the player forward
+    if (mo.flags & info.MF_JUSTATTACKED != 0) {
+        cmd.angleturn = 0;
+        cmd.forwardmove = 0xc8 / 2; // 100
+        cmd.sidemove = 0;
+        mo.flags &= ~info.MF_JUSTATTACKED;
     }
 
     // Handle death
@@ -164,118 +168,159 @@ pub fn playerThink(player: *Player) void {
         return;
     }
 
-    // Movement
-    movePlayer(player);
+    // Move around. Reactiontime prevents movement right after a teleport.
+    if (mo.reaction_time > 0) {
+        mo.reaction_time -= 1;
+    } else {
+        movePlayer(player);
+    }
 
     // View bobbing
     calcHeight(player);
 
-    // Decrement damage/bonus display counters
+    // Weapon change from the ticcmd (demos carry these)
+    if (cmd.buttons & BT_SPECIAL != 0) cmd.buttons = 0;
+    if (cmd.buttons & BT_CHANGE != 0) {
+        var newweapon: u8 = (cmd.buttons & BT_WEAPONMASK) >> BT_WEAPONSHIFT;
+
+        // Fist slot toggles to chainsaw when owned (unless berserk-fisting)
+        if (newweapon == @intFromEnum(defs.WeaponType.fist) and
+            player.weapon_owned[@intFromEnum(defs.WeaponType.chainsaw)] and
+            !(player.ready_weapon == .chainsaw and
+                player.powers[@intFromEnum(defs.PowerType.strength)] != 0))
+        {
+            newweapon = @intFromEnum(defs.WeaponType.chainsaw);
+        }
+
+        if (newweapon < defs.NUMWEAPONS and
+            player.weapon_owned[newweapon] and
+            newweapon != @intFromEnum(player.ready_weapon))
+        {
+            player.pending_weapon = @enumFromInt(newweapon);
+        }
+    }
+
+    // Use button (edge-triggered)
+    if (cmd.buttons & BT_USE != 0) {
+        if (!player.usedown) {
+            map_mod.useLines(mo);
+            player.usedown = true;
+        }
+    } else {
+        player.usedown = false;
+    }
+
+    // Counters, time-dependent powerups (vanilla semantics: strength counts
+    // UP and never expires; invisibility clears MF_SHADOW when it runs out)
+    if (player.powers[@intFromEnum(defs.PowerType.strength)] != 0) {
+        player.powers[@intFromEnum(defs.PowerType.strength)] += 1;
+    }
+    if (player.powers[@intFromEnum(defs.PowerType.invulnerability)] > 0) {
+        player.powers[@intFromEnum(defs.PowerType.invulnerability)] -= 1;
+    }
+    if (player.powers[@intFromEnum(defs.PowerType.invisibility)] > 0) {
+        player.powers[@intFromEnum(defs.PowerType.invisibility)] -= 1;
+        if (player.powers[@intFromEnum(defs.PowerType.invisibility)] == 0) {
+            mo.flags &= ~info.MF_SHADOW;
+        }
+    }
+    if (player.powers[@intFromEnum(defs.PowerType.infrared)] > 0) {
+        player.powers[@intFromEnum(defs.PowerType.infrared)] -= 1;
+    }
+    if (player.powers[@intFromEnum(defs.PowerType.iron_feet)] > 0) {
+        player.powers[@intFromEnum(defs.PowerType.iron_feet)] -= 1;
+    }
+    if (player.powers[@intFromEnum(defs.PowerType.all_map)] > 0) {
+        // All-map is permanent once picked up (vanilla never decrements it)
+    }
+
     if (player.damage_count > 0) player.damage_count -= 1;
     if (player.bonus_count > 0) player.bonus_count -= 1;
-
-    // Power timers
-    for (&player.powers) |*power| {
-        if (power.* > 0) power.* -= 1;
-    }
-
-    // Use button
-    if (cmd.buttons & BT_USE != 0) {
-        map_mod.useLines(mo);
-    }
 }
 
-/// Apply forward/side movement from ticcmd
+/// Apply turn + forward/side movement from ticcmd (P_MovePlayer).
 fn movePlayer(player: *Player) void {
     const mo = player.mobj orelse return;
     const cmd = &player.cmd;
 
     mo.angle +%= @as(u32, @bitCast(@as(i32, cmd.angleturn))) << 16;
 
-    // Forward/backward movement
-    if (cmd.forwardmove != 0) {
-        const thrust = Fixed.fromRaw(@as(i32, cmd.forwardmove) * 2048);
-        const fine = mo.angle >> tables.ANGLETOFINESHIFT;
-        mo.momx = Fixed.add(mo.momx, Fixed.mul(thrust, tables.finecosine[fine & tables.FINEMASK]));
-        mo.momy = Fixed.add(mo.momy, Fixed.mul(thrust, tables.finesine[fine & tables.FINEMASK]));
+    // No air control: thrust only when on the ground
+    const onground = mo.z.raw() <= mo.floorz.raw();
+
+    if (cmd.forwardmove != 0 and onground) {
+        thrust(mo, mo.angle, @as(i32, cmd.forwardmove) * 2048);
+    }
+    if (cmd.sidemove != 0 and onground) {
+        thrust(mo, mo.angle -% fixed.ANG90, @as(i32, cmd.sidemove) * 2048);
     }
 
-    // Strafe movement
-    if (cmd.sidemove != 0) {
-        const thrust = Fixed.fromRaw(@as(i32, cmd.sidemove) * 2048);
-        const fine = (mo.angle -% fixed.ANG90) >> tables.ANGLETOFINESHIFT;
-        mo.momx = Fixed.add(mo.momx, Fixed.mul(thrust, tables.finecosine[fine & tables.FINEMASK]));
-        mo.momy = Fixed.add(mo.momy, Fixed.mul(thrust, tables.finesine[fine & tables.FINEMASK]));
-    }
-
-    // Check for running (if forward or side exceeds walk threshold)
-    if (cmd.forwardmove > FORWARDMOVE[0] or cmd.forwardmove < -FORWARDMOVE[0] or
-        cmd.sidemove > SIDEMOVE[0] or cmd.sidemove < -SIDEMOVE[0])
+    // Start the walk animation only from the standing frame
+    if ((cmd.forwardmove != 0 or cmd.sidemove != 0) and
+        mo.state_num == .S_PLAY)
     {
         _ = mo.setState(info.StateNum.S_PLAY_RUN1);
     }
 }
 
-/// Calculate view height with bobbing
+/// P_Thrust — push along an angle
+fn thrust(mo: *MapObject, angle: Angle, move: i32) void {
+    const fine = angle >> tables.ANGLETOFINESHIFT;
+    const m = Fixed.fromRaw(move);
+    mo.momx = Fixed.add(mo.momx, Fixed.mul(m, tables.finecosine[fine & tables.FINEMASK]));
+    mo.momy = Fixed.add(mo.momy, Fixed.mul(m, tables.finesine[fine & tables.FINEMASK]));
+}
+
+/// Calculate view height with bobbing (P_CalcHeight).
 fn calcHeight(player: *Player) void {
     const mo = player.mobj orelse return;
 
-    // Calculate view bob based on speed
-    var bob_raw: i64 = 0;
-    if (mo.momx.raw() != 0) {
-        bob_raw += @as(i64, mo.momx.raw()) * @as(i64, mo.momx.raw());
-    }
-    if (mo.momy.raw() != 0) {
-        bob_raw += @as(i64, mo.momy.raw()) * @as(i64, mo.momy.raw());
-    }
-    bob_raw >>= 18; // Scale down
+    // Bob amount from momentum: (momx² + momy²) >> 2 in fixed-mul terms
+    var bob_raw: i64 = (@as(i64, mo.momx.raw()) * @as(i64, mo.momx.raw())) >> 16;
+    bob_raw += (@as(i64, mo.momy.raw()) * @as(i64, mo.momy.raw())) >> 16;
+    bob_raw >>= 2;
+    if (bob_raw > MAXBOB.raw()) bob_raw = MAXBOB.raw();
+    player.bob = Fixed.fromRaw(@intCast(bob_raw));
 
-    // Clamp bob
-    const bob_clamped: i32 = @intCast(@min(@as(i64, MAXBOB.raw()), bob_raw));
-    player.bob = Fixed.fromRaw(bob_clamped);
+    const onground = mo.z.raw() <= mo.floorz.raw();
+    if (!onground) {
+        player.viewz = Fixed.add(mo.z, player.viewheight);
+        const ceil_lim = Fixed.sub(mo.ceilingz, Fixed.fromRaw(4 * 0x10000));
+        if (player.viewz.raw() > ceil_lim.raw()) player.viewz = ceil_lim;
+        return;
+    }
 
-    // Deltaviewheight: smoothly adjust toward standard VIEWHEIGHT
-    if (player.deltaviewheight.raw() != 0) {
+    // Bob phase from leveltime (FINEANGLES/20 per tic)
+    const world_mod = @import("world.zig");
+    const phase: usize = @intCast((@as(i64, tables.FINEANGLES / 20) * @as(i64, @max(0, world_mod.leveltime))) & tables.FINEMASK);
+    const bob = Fixed.mul(Fixed.fromRaw(@divTrunc(player.bob.raw(), 2)), tables.finesine[phase]);
+
+    // Move viewheight (squat recovery is upward-only, FRACUNIT/4 per tic)
+    if (player.player_state == .alive) {
         player.viewheight = Fixed.add(player.viewheight, player.deltaviewheight);
 
         if (player.viewheight.raw() > VIEWHEIGHT.raw()) {
             player.viewheight = VIEWHEIGHT;
             player.deltaviewheight = Fixed.ZERO;
-        } else if (player.viewheight.raw() < @divTrunc(VIEWHEIGHT.raw(), 2)) {
+        }
+        if (player.viewheight.raw() < @divTrunc(VIEWHEIGHT.raw(), 2)) {
             player.viewheight = Fixed.fromRaw(@divTrunc(VIEWHEIGHT.raw(), 2));
             if (player.deltaviewheight.raw() <= 0) {
                 player.deltaviewheight = Fixed.fromRaw(1);
             }
         }
-
-        if (player.deltaviewheight.raw() > 0) {
-            player.deltaviewheight = Fixed.sub(player.deltaviewheight, Fixed.fromRaw(0x4000)); // Decrease
-            if (player.deltaviewheight.raw() < 0) player.deltaviewheight = Fixed.ZERO;
-        } else if (player.deltaviewheight.raw() < 0) {
+        if (player.deltaviewheight.raw() != 0) {
             player.deltaviewheight = Fixed.add(player.deltaviewheight, Fixed.fromRaw(0x4000));
-            if (player.deltaviewheight.raw() > 0) player.deltaviewheight = Fixed.ZERO;
+            if (player.deltaviewheight.raw() == 0) {
+                player.deltaviewheight = Fixed.fromRaw(1);
+            }
         }
     }
 
-    // Calculate final viewz
-    player.viewz = Fixed.add(mo.z, player.viewheight);
+    player.viewz = Fixed.add(Fixed.add(mo.z, player.viewheight), bob);
 
-    // Add bob (using fine angle based on game tic count)
-    // Simplified: bob oscillates
-    const bob_angle: usize = 0; // Would use leveltime * FINEANGLES/20 in full DOOM
-    _ = bob_angle;
-    player.viewz = Fixed.add(player.viewz, Fixed.fromRaw(@divTrunc(player.bob.raw(), 2)));
-
-    // Clamp viewz to floor+1 .. ceiling-4
-    const floor_limit = Fixed.add(mo.floorz, Fixed.ONE);
-    const ceiling_limit = Fixed.sub(mo.ceilingz, Fixed.fromRaw(4 * 0x10000));
-
-    if (player.viewz.raw() < floor_limit.raw()) {
-        player.viewz = floor_limit;
-    }
-    if (player.viewz.raw() > ceiling_limit.raw()) {
-        player.viewz = ceiling_limit;
-    }
+    const ceil_lim = Fixed.sub(mo.ceilingz, Fixed.fromRaw(4 * 0x10000));
+    if (player.viewz.raw() > ceil_lim.raw()) player.viewz = ceil_lim;
 }
 
 /// Player death camera — slowly lower view to ground

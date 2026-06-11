@@ -26,6 +26,7 @@ const random = @import("../random.zig");
 const world = @import("world.zig");
 const map_mod = @import("map.zig");
 const tables_mod = @import("../tables.zig");
+const user_mod = @import("user.zig");
 
 // ============================================================================
 // MapObject — DOOM's central game entity
@@ -161,6 +162,8 @@ pub fn spawnMobj(x: Fixed, y: Fixed, z: Fixed, mobj_type: MobjType, allocator: s
     mobj.health = mobj_info.spawn_health;
     mobj.reaction_time = mobj_info.reaction_time;
     mobj.allocator = allocator;
+    // Vanilla consumes one P_Random per spawn for the player-search start
+    mobj.last_look = @as(i32, random.pRandom() % 4);
 
     // Set initial state
     _ = mobj.setState(mobj_info.spawn_state);
@@ -264,9 +267,9 @@ fn xyMovement(mobj: *MapObject) void {
             mobj.momy = Fixed.ZERO;
             mobj.momz = Fixed.ZERO;
 
-            // Return to spawn state
+            // Return to spawn state (vanilla uses spawnstate here)
             const mobj_info = mobj.getInfo();
-            _ = mobj.setState(mobj_info.see_state);
+            _ = mobj.setState(mobj_info.spawn_state);
         }
         return;
     }
@@ -291,20 +294,18 @@ fn xyMovement(mobj: *MapObject) void {
     while (true) {
         var ptryx: Fixed = undefined;
         var ptryy: Fixed = undefined;
-        var done = false;
 
         const half_max = @divTrunc(level_mod.MAXMOVE.raw(), 2);
-        if (xmove.raw() > half_max or ymove.raw() > half_max or
-            xmove.raw() < -half_max or ymove.raw() < -half_max)
-        {
+        if (xmove.raw() > half_max or ymove.raw() > half_max) {
             ptryx = Fixed.add(mobj.x, Fixed.fromRaw(@divTrunc(xmove.raw(), 2)));
             ptryy = Fixed.add(mobj.y, Fixed.fromRaw(@divTrunc(ymove.raw(), 2)));
-            xmove = Fixed.fromRaw(@divTrunc(xmove.raw(), 2));
-            ymove = Fixed.fromRaw(@divTrunc(ymove.raw(), 2));
+            xmove = Fixed.fromRaw(xmove.raw() >> 1);
+            ymove = Fixed.fromRaw(ymove.raw() >> 1);
         } else {
             ptryx = Fixed.add(mobj.x, xmove);
             ptryy = Fixed.add(mobj.y, ymove);
-            done = true;
+            xmove = Fixed.ZERO;
+            ymove = Fixed.ZERO;
         }
 
         if (!map_mod.tryMove(mobj, ptryx, ptryy)) {
@@ -335,41 +336,78 @@ fn xyMovement(mobj: *MapObject) void {
                 mobj.momx = Fixed.ZERO;
                 mobj.momy = Fixed.ZERO;
             }
-            break;
         }
 
-        if (done) break;
-        if (mobj.thinker.function == null) return; // Removed mid-move (pickup chain)
+        if (mobj.thinker.function == null) return; // Removed mid-move
+        if (xmove.raw() == 0 and ymove.raw() == 0) break;
     }
 
-    // Apply friction (only for non-flying, non-missile objects on the floor)
-    if (mobj.flags & (info.MF_MISSILE | info.MF_SKULLFLY) == 0) {
-        if (mobj.z.raw() <= mobj.floorz.raw()) {
-            // Apply DOOM's friction (0xE800/0x10000 = ~0.90625)
-            mobj.momx = Fixed.mul(mobj.momx, level_mod.FRICTION);
-            mobj.momy = Fixed.mul(mobj.momy, level_mod.FRICTION);
+    // Slow down (vanilla friction rules)
+    if (mobj.flags & (info.MF_MISSILE | info.MF_SKULLFLY) != 0) return; // No friction for missiles
+    if (mobj.z.raw() > mobj.floorz.raw()) return; // No friction when airborne
 
-            // Stop tiny movements
-            if (mobj.momx.raw() > -0x800 and mobj.momx.raw() < 0x800) {
-                mobj.momx = Fixed.ZERO;
-            }
-            if (mobj.momy.raw() > -0x800 and mobj.momy.raw() < 0x800) {
-                mobj.momy = Fixed.ZERO;
+    if (mobj.flags & info.MF_CORPSE != 0) {
+        // Don't stop sliding if halfway off a step with some momentum
+        const quarter = 0x10000 / 4;
+        if (mobj.momx.raw() > quarter or mobj.momx.raw() < -quarter or
+            mobj.momy.raw() > quarter or mobj.momy.raw() < -quarter)
+        {
+            if (world.level) |lvl| {
+                if (map_mod.sectorAtPoint(lvl, mobj.x, mobj.y)) |sec| {
+                    if (mobj.floorz.raw() != sec.floorheight.raw()) return;
+                }
             }
         }
+    }
+
+    const STOPSPEED: i32 = 0x1000;
+    var no_input = true;
+    if (mobj.player) |pl_ptr| {
+        const pl: *user_mod.Player = @ptrCast(@alignCast(pl_ptr));
+        no_input = pl.cmd.forwardmove == 0 and pl.cmd.sidemove == 0;
+    }
+
+    if (mobj.momx.raw() > -STOPSPEED and mobj.momx.raw() < STOPSPEED and
+        mobj.momy.raw() > -STOPSPEED and mobj.momy.raw() < STOPSPEED and
+        (mobj.player == null or no_input))
+    {
+        // If in a walking frame, return to standing
+        if (mobj.player != null) {
+            const run0 = @intFromEnum(info.StateNum.S_PLAY_RUN1);
+            const sn = @intFromEnum(mobj.state_num);
+            if (sn >= run0 and sn < run0 + 4) {
+                _ = mobj.setState(.S_PLAY);
+            }
+        }
+        mobj.momx = Fixed.ZERO;
+        mobj.momy = Fixed.ZERO;
+    } else {
+        mobj.momx = Fixed.mul(mobj.momx, level_mod.FRICTION);
+        mobj.momy = Fixed.mul(mobj.momy, level_mod.FRICTION);
     }
 }
 
-/// Vertical movement and gravity
+/// Vertical movement and gravity (P_ZMovement, faithful port)
 fn zMovement(mobj: *MapObject) void {
+    // Smooth step up: players walking up steps sink the view momentarily
+    if (mobj.player != null and mobj.z.raw() < mobj.floorz.raw()) {
+        const pl: *user_mod.Player = @ptrCast(@alignCast(mobj.player.?));
+        pl.viewheight = Fixed.sub(pl.viewheight, Fixed.sub(mobj.floorz, mobj.z));
+        pl.deltaviewheight = Fixed.fromRaw((level_mod.VIEWHEIGHT.raw() - pl.viewheight.raw()) >> 3);
+    }
+
+    // Adjust height
+    mobj.z = Fixed.add(mobj.z, mobj.momz);
+
     // Floating monsters drift toward their target's height
-    if (mobj.flags & info.MF_FLOAT != 0) {
-        if (mobj.target) |target| {
+    if (mobj.flags & info.MF_FLOAT != 0 and mobj.target != null) {
+        if (mobj.flags & info.MF_SKULLFLY == 0 and mobj.flags & info.MF_INFLOAT == 0) {
+            const target = mobj.target.?;
             const dx = Fixed.sub(mobj.x, target.x).abs();
             const dy = Fixed.sub(mobj.y, target.y).abs();
             const dist = if (dx.raw() > dy.raw()) dx else dy;
-            const delta = Fixed.sub(Fixed.add(target.z, Fixed.fromRaw(target.height.raw() >> 1)), mobj.z);
-            if (delta.raw() < 0 and dist.raw() < -delta.raw() * 3) {
+            const delta = Fixed.sub(Fixed.add(target.z, Fixed.fromRaw(mobj.height.raw() >> 1)), mobj.z);
+            if (delta.raw() < 0 and dist.raw() < -(delta.raw() * 3)) {
                 mobj.z = Fixed.sub(mobj.z, level_mod.FLOATSPEED);
             } else if (delta.raw() > 0 and dist.raw() < delta.raw() * 3) {
                 mobj.z = Fixed.add(mobj.z, level_mod.FLOATSPEED);
@@ -377,54 +415,45 @@ fn zMovement(mobj: *MapObject) void {
         }
     }
 
-    // Apply gravity
-    if (mobj.flags & info.MF_NOGRAVITY == 0) {
-        if (mobj.z.raw() > mobj.floorz.raw()) {
-            // Falling — apply gravity
+    // Clip movement: hit the floor
+    if (mobj.z.raw() <= mobj.floorz.raw()) {
+        if (mobj.flags & info.MF_SKULLFLY != 0) {
+            // The skull slammed into the floor — bounce
+            mobj.momz = Fixed.fromRaw(-mobj.momz.raw());
+        }
+        if (mobj.momz.raw() < 0) {
+            if (mobj.player != null and mobj.momz.raw() < -level_mod.GRAVITY.raw() * 8) {
+                // Squat down after a hard landing
+                const pl: *user_mod.Player = @ptrCast(@alignCast(mobj.player.?));
+                pl.deltaviewheight = Fixed.fromRaw(mobj.momz.raw() >> 3);
+                world.playSfx(@ptrCast(mobj), .oof);
+            }
+            mobj.momz = Fixed.ZERO;
+        }
+        mobj.z = mobj.floorz;
+        if (mobj.flags & info.MF_MISSILE != 0 and mobj.flags & info.MF_NOCLIP == 0) {
+            explodeMissile(mobj);
+            return;
+        }
+    } else if (mobj.flags & info.MF_NOGRAVITY == 0) {
+        // Gravity doubles on the first falling tic
+        if (mobj.momz.raw() == 0) {
+            mobj.momz = Fixed.fromRaw(-level_mod.GRAVITY.raw() * 2);
+        } else {
             mobj.momz = Fixed.sub(mobj.momz, level_mod.GRAVITY);
         }
     }
 
-    // Apply vertical momentum
-    mobj.z = Fixed.add(mobj.z, mobj.momz);
-
-    // Hit the floor
-    if (mobj.z.raw() <= mobj.floorz.raw()) {
-        // Missile hit floor — explode
-        if (mobj.flags & info.MF_MISSILE != 0) {
-            mobj.z = mobj.floorz;
-            // Explode
-            explodeMissile(mobj);
-            return;
-        }
-
-        mobj.z = mobj.floorz;
-
-        if (mobj.momz.raw() < 0) {
-            // Landing impact
-            mobj.momz = Fixed.ZERO;
-        }
-
-        // Skull fly stops on landing
-        if (mobj.flags & info.MF_SKULLFLY != 0) {
-            mobj.momz = Fixed.ZERO;
-        }
-    } else if (mobj.flags & info.MF_NOGRAVITY == 0) {
-        // Still in the air — gravity already applied above
-    }
-
     // Hit the ceiling
-    if (mobj.z.raw() +% mobj.height.raw() > mobj.ceilingz.raw()) {
-        // Missile hit ceiling — explode
-        if (mobj.flags & info.MF_MISSILE != 0) {
+    if (Fixed.add(mobj.z, mobj.height).raw() > mobj.ceilingz.raw()) {
+        if (mobj.momz.raw() > 0) mobj.momz = Fixed.ZERO;
+        mobj.z = Fixed.sub(mobj.ceilingz, mobj.height);
+        if (mobj.flags & info.MF_SKULLFLY != 0) {
+            mobj.momz = Fixed.fromRaw(-mobj.momz.raw());
+        }
+        if (mobj.flags & info.MF_MISSILE != 0 and mobj.flags & info.MF_NOCLIP == 0) {
             explodeMissile(mobj);
             return;
-        }
-
-        mobj.z = Fixed.sub(mobj.ceilingz, mobj.height);
-
-        if (mobj.momz.raw() > 0) {
-            mobj.momz = Fixed.ZERO;
         }
     }
 }
@@ -539,6 +568,12 @@ pub fn spawnMapThing(mthing: *const MapThing, allocator: std.mem.Allocator) !?*M
 
     const mobj = try spawnMobj(x, y, z, mobj_type, allocator);
 
+    // Randomize the initial animation phase (vanilla P_SpawnMapThing) so
+    // monsters don't think in lockstep — consumes one P_Random per thing
+    if (mobj.tics > 0) {
+        mobj.tics = @mod(@as(i32, random.pRandom()), mobj.tics) + 1;
+    }
+
     // Set angle from thing data
     mobj.angle = @as(Angle, @intCast(mthing.angle)) *% (0x100000000 / 360);
 
@@ -557,11 +592,18 @@ pub fn spawnMapThing(mthing: *const MapThing, allocator: std.mem.Allocator) !?*M
 pub fn spawnMissile(source: *MapObject, dest: *MapObject, missile_type: MobjType, allocator: std.mem.Allocator) !*MapObject {
     const mobj = try spawnMobj(source.x, source.y, Fixed.add(source.z, Fixed.fromRaw(32 * 0x10000)), missile_type, allocator);
 
+    if (mobj.getInfo().see_sound != 0) {
+        world.playSound(@ptrCast(mobj), mobj.getInfo().see_sound);
+    }
+
     // Set target to source (for kill credit)
     mobj.target = source;
 
-    // Calculate angle to target
-    const an = pointToAngle(source.x, source.y, dest.x, dest.y);
+    // Calculate angle to target — spectres fuzz the shooter's aim
+    var an = pointToAngle(source.x, source.y, dest.x, dest.y);
+    if (dest.flags & info.MF_SHADOW != 0) {
+        an +%= @as(u32, @bitCast(random.pSubRandom() << 20));
+    }
     mobj.angle = an;
 
     // Calculate speed components
@@ -745,11 +787,10 @@ test "mobj gravity" {
     mobj.floorz = Fixed.ZERO;
     mobj.ceilingz = Fixed.fromInt(256);
 
-    // Apply gravity by calling zMovement
+    // Vanilla order: first tic builds momentum (double gravity), second moves
     zMovement(mobj);
-
-    // Should have gained downward momentum and moved down
     try std.testing.expect(mobj.momz.raw() < 0);
+    zMovement(mobj);
     try std.testing.expect(mobj.z.raw() < Fixed.fromInt(100).raw());
 
     tick.initThinkers();

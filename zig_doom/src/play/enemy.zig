@@ -32,6 +32,7 @@ const user = @import("user.zig");
 const floor_mod = @import("floor.zig");
 const setup = @import("setup.zig");
 const SfxId = @import("../sound/defs.zig").SfxId;
+const defs = @import("../defs.zig");
 
 fn sfx(comptime id: SfxId) i32 {
     return @intFromEnum(id);
@@ -42,49 +43,75 @@ fn sfx(comptime id: SfxId) i32 {
 // All take *anyopaque and cast to *MapObject internally.
 // ============================================================================
 
-/// P_NoiseAlert — wake monsters when the player fires. Vanilla flood-fills
-/// sound through connected sectors; this approximation wakes idle monsters
-/// within earshot (ambush monsters still require line of sight).
-pub fn noiseAlert(emitter: *MapObject) void {
-    const ALERT_RANGE: i32 = 1600; // map units
-    const cap = tick.getThinkerCap();
-    var current = cap.next;
-    while (current != null and current != cap) {
-        const thinker = current.?;
-        current = thinker.next;
-        const func = thinker.function orelse continue;
-        if (func != @as(tick.ThinkFn, @ptrCast(&mobj_mod.mobjThinker))) continue;
+var noise_validcount: i32 = 0;
 
-        const mo: *MapObject = @fieldParentPtr("thinker", thinker);
-        if (mo.flags & info.MF_COUNTKILL == 0) continue; // Only monsters
-        if (mo.health <= 0) continue;
-        if (mo.target != null) continue; // Already awake
+/// P_RecursiveSound — flood sound from a sector through two-sided line
+/// openings. ML_SOUNDBLOCK lines eat one "hop": sound crosses one blocking
+/// line but not two.
+fn recursiveSound(lvl: *setup.Level, sec_idx: usize, soundblocks: i32, emitter: *MapObject) void {
+    const sec = &lvl.sectors[sec_idx];
 
-        const dist = maputl.aproxDistance(Fixed.sub(mo.x, emitter.x), Fixed.sub(mo.y, emitter.y));
-        if (dist.toInt() > ALERT_RANGE) continue;
+    // Wavefront check
+    if (sec.validcount == noise_validcount and sec.soundtraversed <= soundblocks + 1) {
+        return; // Already flooded at least this well
+    }
+    sec.validcount = noise_validcount;
+    sec.soundtraversed = soundblocks + 1;
+    sec.soundtarget = @ptrCast(emitter);
 
-        if (mo.flags & info.MF_AMBUSH != 0) {
-            // Deaf monsters only react if they can see the shooter
-            if (world.level) |lvl| {
-                if (!sight.checkSight(mo, emitter, lvl)) continue;
+    // Spread through every two-sided line bordering this sector
+    for (lvl.lines) |*line| {
+        if (line.flags & defs.ML_TWOSIDED == 0) continue;
+        const fi = line.frontsector orelse continue;
+        const bi = line.backsector orelse continue;
+        if (fi != sec_idx and bi != sec_idx) continue;
+
+        const op = maputl.lineOpening(line, lvl.sectors) orelse continue;
+        if (op.range.raw() <= 0) continue; // Closed door
+
+        const other: usize = if (fi == sec_idx) bi else fi;
+
+        if (line.flags & defs.ML_SOUNDBLOCK != 0) {
+            if (soundblocks == 0) {
+                recursiveSound(lvl, other, 1, emitter);
             }
+        } else {
+            recursiveSound(lvl, other, soundblocks, emitter);
         }
-
-        mo.target = emitter;
     }
 }
 
+/// P_NoiseAlert — wake monsters when the player fires, by flooding the
+/// sector graph with a sound target that A_Look picks up.
+pub fn noiseAlert(emitter: *MapObject) void {
+    const lvl = world.level orelse return;
+    const sec = map_mod.sectorAtPoint(lvl, emitter.x, emitter.y) orelse return;
+    const sec_idx = (@intFromPtr(sec) - @intFromPtr(lvl.sectors.ptr)) / @sizeOf(setup.Sector);
+    noise_validcount +%= 1;
+    recursiveSound(lvl, sec_idx, 0, emitter);
+}
+
 /// P_LookForPlayers — acquire a living, visible player as the target.
-/// If allaround is false, only players inside the monster's forward 180°
-/// (or within melee range behind it) are noticed.
+/// Faithful port including the lastlook round-robin (which is why
+/// P_SpawnMobj seeds lastlook from P_Random — affects demo sync).
 fn lookForPlayers(actor: *MapObject, allaround: bool) bool {
     const players_ptr = world.players orelse return false;
     const players: *[4]user.Player = @ptrCast(@alignCast(players_ptr));
     const in_game = world.player_in_game orelse return false;
 
-    for (0..4) |i| {
-        if (!in_game[i]) continue;
-        const player = &players[i];
+    var c: i32 = 0;
+    const stop: i32 = (actor.last_look - 1) & 3;
+
+    while (true) : (actor.last_look = (actor.last_look + 1) & 3) {
+        const idx: usize = @intCast(actor.last_look & 3);
+        if (!in_game[idx]) continue;
+
+        if (c == 2 or actor.last_look == stop) {
+            return false; // Done looking
+        }
+        c += 1;
+
+        const player = &players[idx];
         if (player.health <= 0) continue; // Dead — don't chase corpses
         const mo = player.mobj orelse continue;
 
@@ -104,7 +131,6 @@ fn lookForPlayers(actor: *MapObject, allaround: bool) bool {
         actor.target = mo;
         return true;
     }
-    return false;
 }
 
 /// A_Look — Monster idle state: scan for players.
@@ -115,13 +141,22 @@ pub fn A_Look(actor_ptr: *anyopaque) void {
     // Reset threshold (infighting timer)
     actor.threshold = 0;
 
-    // Keep an already-acquired live target (e.g. assigned by damage)
+    // Any noise in this sector? (set by P_NoiseAlert flood)
     var has_target = false;
-    if (actor.target) |t| {
-        if (t.health > 0 and t.flags & info.MF_SHOOTABLE != 0 and
-            actor.flags & info.MF_AMBUSH == 0)
-        {
-            has_target = true;
+    if (world.level) |lvl| {
+        if (map_mod.sectorAtPoint(lvl, actor.x, actor.y)) |sec| {
+            if (sec.soundtarget) |st| {
+                const targ: *MapObject = @ptrCast(@alignCast(st));
+                if (targ.flags & info.MF_SHOOTABLE != 0) {
+                    actor.target = targ;
+                    if (actor.flags & info.MF_AMBUSH != 0) {
+                        // Deaf monsters need to see the noisemaker
+                        if (sight.checkSight(actor, targ, lvl)) has_target = true;
+                    } else {
+                        has_target = true;
+                    }
+                }
+            }
         }
     }
 
@@ -240,16 +275,19 @@ pub fn A_PosAttack(actor_ptr: *anyopaque) void {
 
     faceTarget(actor);
 
-    // Angle spread
     var angle = actor.angle;
+    const slope = map_mod.aimLineAttack(actor, angle, level_mod.MISSILERANGE);
+
+    world.playSound(@ptrCast(actor), sfx(.pistol));
+
+    // Angle spread
     const spread: i32 = random.pSubRandom();
     angle +%= @as(u32, @bitCast(spread << 20));
 
     // Damage: 1d5 * 3 (3-15)
     const damage: i32 = (@as(i32, random.pRandom() % 5) + 1) * 3;
 
-    // Fire hitscan
-    map_mod.lineAttack(actor, angle, level_mod.MISSILERANGE, Fixed.ZERO, damage);
+    map_mod.lineAttack(actor, angle, level_mod.MISSILERANGE, slope, damage);
 }
 
 /// A_SPosAttack — Shotgun Guy attack: 3 bullets
@@ -258,16 +296,20 @@ pub fn A_SPosAttack(actor_ptr: *anyopaque) void {
 
     if (actor.target == null) return;
 
+    world.playSound(@ptrCast(actor), sfx(.shotgn));
     faceTarget(actor);
+
+    const bangle = actor.angle;
+    const slope = map_mod.aimLineAttack(actor, bangle, level_mod.MISSILERANGE);
 
     // Fire 3 bullets
     for (0..3) |_| {
-        var angle = actor.angle;
+        var angle = bangle;
         const spread: i32 = random.pSubRandom();
         angle +%= @as(u32, @bitCast(spread << 20));
 
         const damage: i32 = (@as(i32, random.pRandom() % 5) + 1) * 3;
-        map_mod.lineAttack(actor, angle, level_mod.MISSILERANGE, Fixed.ZERO, damage);
+        map_mod.lineAttack(actor, angle, level_mod.MISSILERANGE, slope, damage);
     }
 }
 
@@ -392,6 +434,8 @@ pub fn A_SkullAttack(actor_ptr: *anyopaque) void {
 
     // Set skull fly mode
     actor.flags |= info.MF_SKULLFLY;
+    world.playSound(@ptrCast(actor), actor.getInfo().attack_sound);
+    faceTarget(actor);
 
     // Calculate angle and speed toward target
     const an = maputl.pointToAngle2(actor.x, actor.y, target.x, target.y);
@@ -455,6 +499,7 @@ pub fn A_Explode(actor_ptr: *anyopaque) void {
 
 /// Turn actor to face its target
 fn faceTarget(actor: *MapObject) void {
+    actor.flags &= ~info.MF_AMBUSH;
     if (actor.target) |target| {
         actor.angle = maputl.pointToAngle2(actor.x, actor.y, target.x, target.y);
 
@@ -475,8 +520,8 @@ fn checkMeleeRange(actor: *MapObject) bool {
         Fixed.sub(target.y, actor.y),
     );
 
-    // Melee range = 64 + 20 (target radius fudge)
-    if (dist.raw() >= level_mod.MELEERANGE.raw() + 20 * 0x10000) return false;
+    // Vanilla: MELEERANGE - 20 + target radius
+    if (dist.raw() >= level_mod.MELEERANGE.raw() - 20 * 0x10000 + target.getInfo().radius.raw()) return false;
 
     if (world.level) |lvl| {
         if (!sight.checkSight(actor, target, lvl)) return false;
@@ -501,12 +546,12 @@ fn checkMissileRange(actor: *MapObject) bool {
 
     if (actor.reaction_time > 0) return false;
 
-    var dist = maputl.aproxDistance(
+    var dist = Fixed.sub(maputl.aproxDistance(
         Fixed.sub(target.x, actor.x),
         Fixed.sub(target.y, actor.y),
-    );
+    ), Fixed.fromRaw(64 * 0x10000));
 
-    // No melee attack? Use longer range
+    // No melee attack? Fire from farther away
     if (actor.getInfo().melee_state == .S_NULL) {
         dist = Fixed.sub(dist, Fixed.fromRaw(128 * 0x10000));
     }
@@ -526,79 +571,88 @@ fn checkMissileRange(actor: *MapObject) bool {
     return random.pRandom() >= @as(u8, @intCast(@min(255, chance)));
 }
 
-/// Choose a new chase direction toward target
+/// Choose a new chase direction toward target (P_NewChaseDir, faithful).
 fn newChaseDir(actor: *MapObject) void {
     const target = actor.target orelse return;
+
+    const olddir: u8 = @intCast(@min(actor.movedir, 8));
+    const turnaround: u8 = level_mod.opposite[olddir];
 
     const deltax = Fixed.sub(target.x, actor.x);
     const deltay = Fixed.sub(target.y, actor.y);
 
-    // Determine preferred X and Y directions
-    const d1: u8 = if (deltax.raw() > 10 * 0x10000)
+    var d1: u8 = if (deltax.raw() > 10 * 0x10000)
         level_mod.DI_EAST
     else if (deltax.raw() < -10 * 0x10000)
         level_mod.DI_WEST
     else
         level_mod.DI_NODIR;
 
-    const d2: u8 = if (deltay.raw() > 10 * 0x10000)
-        level_mod.DI_NORTH
-    else if (deltay.raw() < -10 * 0x10000)
+    var d2: u8 = if (deltay.raw() < -10 * 0x10000)
         level_mod.DI_SOUTH
+    else if (deltay.raw() > 10 * 0x10000)
+        level_mod.DI_NORTH
     else
         level_mod.DI_NODIR;
 
-    // Try diagonal first
+    // Try direct (diagonal) route
     if (d1 != level_mod.DI_NODIR and d2 != level_mod.DI_NODIR) {
-        const diag_idx: usize = switch (d2) {
-            level_mod.DI_NORTH => if (d1 == level_mod.DI_EAST) @as(usize, 1) else @as(usize, 0),
-            level_mod.DI_SOUTH => if (d1 == level_mod.DI_EAST) @as(usize, 3) else @as(usize, 2),
-            else => 0,
-        };
+        const diag_idx: usize = (@as(usize, if (deltay.raw() < 0) 1 else 0) << 1) +
+            @as(usize, if (deltax.raw() > 0) 1 else 0);
         actor.movedir = level_mod.diags[diag_idx];
-        if (tryDir(actor)) return;
-    }
-
-    // Try direct directions (randomly choose which axis to try first)
-    if (random.pRandom() > 200 or deltay.abs().raw() > deltax.abs().raw()) {
-        // Try Y first, then X
-        if (d2 != level_mod.DI_NODIR) {
-            actor.movedir = d2;
-            if (tryDir(actor)) return;
-        }
-        if (d1 != level_mod.DI_NODIR) {
-            actor.movedir = d1;
-            if (tryDir(actor)) return;
-        }
-    } else {
-        // Try X first, then Y
-        if (d1 != level_mod.DI_NODIR) {
-            actor.movedir = d1;
-            if (tryDir(actor)) return;
-        }
-        if (d2 != level_mod.DI_NODIR) {
-            actor.movedir = d2;
-            if (tryDir(actor)) return;
-        }
+        if (actor.movedir != turnaround and tryDir(actor)) return;
     }
 
     // Try other directions
-    const old_dir = actor.movedir;
-    if (old_dir != level_mod.DI_NODIR) {
-        actor.movedir = level_mod.opposite[@intCast(old_dir)];
+    if (random.pRandom() > 200 or deltay.abs().raw() > deltax.abs().raw()) {
+        const tmp = d1;
+        d1 = d2;
+        d2 = tmp;
+    }
+    if (d1 == turnaround) d1 = level_mod.DI_NODIR;
+    if (d2 == turnaround) d2 = level_mod.DI_NODIR;
+
+    if (d1 != level_mod.DI_NODIR) {
+        actor.movedir = d1;
+        if (tryDir(actor)) return; // Either moved forward or attacked
+    }
+    if (d2 != level_mod.DI_NODIR) {
+        actor.movedir = d2;
         if (tryDir(actor)) return;
     }
 
-    // Random direction
-    var tdir: u8 = 0;
-    while (tdir < 8) : (tdir += 1) {
-        actor.movedir = tdir;
+    // There is no direct path to the player: try the old direction
+    if (olddir != level_mod.DI_NODIR) {
+        actor.movedir = olddir;
         if (tryDir(actor)) return;
     }
 
-    // Can't move at all
-    actor.movedir = level_mod.DI_NODIR;
-    actor.movecount = 0;
+    // Pick another direction to try, sweep order randomized
+    if (random.pRandom() & 1 != 0) {
+        var tdir: u8 = level_mod.DI_EAST;
+        while (tdir <= level_mod.DI_SOUTHEAST) : (tdir += 1) {
+            if (tdir != turnaround) {
+                actor.movedir = tdir;
+                if (tryDir(actor)) return;
+            }
+        }
+    } else {
+        var tdir: i32 = level_mod.DI_SOUTHEAST;
+        while (tdir >= level_mod.DI_EAST) : (tdir -= 1) {
+            if (tdir != turnaround) {
+                actor.movedir = @intCast(tdir);
+                if (tryDir(actor)) return;
+            }
+        }
+    }
+
+    // Last resort: turn around
+    if (turnaround != level_mod.DI_NODIR) {
+        actor.movedir = turnaround;
+        if (tryDir(actor)) return;
+    }
+
+    actor.movedir = level_mod.DI_NODIR; // Cannot move
 }
 
 /// Try to move in the current direction. Returns true if successful.
@@ -643,8 +697,7 @@ fn doMove(actor: *MapObject) bool {
         while (map_mod.numspechit > 0) {
             map_mod.numspechit -= 1;
             const li = map_mod.spechit[map_mod.numspechit];
-            spec.useSpecialLine(actor, li, 0, lvl, alloc);
-            good = true;
+            if (spec.useSpecialLine(actor, li, 0, lvl, alloc)) good = true;
         }
         return good;
     }
