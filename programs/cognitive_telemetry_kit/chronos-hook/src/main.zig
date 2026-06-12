@@ -61,10 +61,25 @@ pub fn main() !u8 {
     const tool_name = try extractJsonString(allocator, hook_json, "\"tool_name\"");
     defer if (tool_name) |t| allocator.free(t);
 
-    // Tick description: prefer the tool's own description, else the tool name.
-    var tool_description = try extractJsonString(allocator, hook_json, "\"description\"");
-    if (tool_description == null) {
-        if (tool_name) |t| tool_description = try allocator.dupe(u8, t);
+    // Tick description: a VERBOSE action so the squash log preserves intent —
+    // "<tool> <file_path>" for file tools (Edit/Write/Read/NotebookEdit/...),
+    // "<tool> <description>" for Bash etc., else just the tool name. file_path
+    // takes priority over description (an Edit has no description; a Bash has no
+    // file_path), so each captures its most informative detail.
+    const file_path = try extractJsonString(allocator, hook_json, "\"file_path\"");
+    defer if (file_path) |f| allocator.free(f);
+    const desc_field = try extractJsonString(allocator, hook_json, "\"description\"");
+    defer if (desc_field) |d| allocator.free(d);
+
+    var tool_description: ?[]const u8 = null;
+    if (tool_name) |verb| {
+        if (file_path orelse desc_field) |detail| {
+            tool_description = try std.fmt.allocPrint(allocator, "{s} {s}", .{ verb, detail });
+        } else {
+            tool_description = try allocator.dupe(u8, verb);
+        }
+    } else if (desc_field) |d| {
+        tool_description = try allocator.dupe(u8, d);
     }
     defer if (tool_description) |desc| allocator.free(desc);
 

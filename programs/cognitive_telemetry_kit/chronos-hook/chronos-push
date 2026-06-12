@@ -75,8 +75,14 @@ else
     case "$subj" in
       "[CHRONOS]"*)
         pending=1; tip_tree="$tree"
+        # Verbose action ("Edit /path/to/file") and the cognitive state captured
+        # at that tick (gerund / thinking-summary / activity), so the squash log
+        # records WHAT was done and the INTENT behind it — nothing is lost.
         d=$(printf '%s' "$subj" | sed -n 's/.* → tool-completion - \(.*\)$/\1/p')
-        [ -n "$d" ] && descs+=("$d")
+        st=$(printf '%s' "$subj" | sed -n 's/.*::claude-code::\([^:]*\)::TICK.*/\1/p')
+        if [ -n "$d" ]; then
+          if [ -n "$st" ]; then descs+=("[$st] $d"); else descs+=("$d"); fi
+        fi
         ;;
       *)
         # Real commit: recreate with its own tree (already includes pending ticks),
