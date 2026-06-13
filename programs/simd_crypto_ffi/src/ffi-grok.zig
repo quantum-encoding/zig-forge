@@ -748,6 +748,147 @@ test "BIP39 PBKDF2-SHA512 Test Vector 2" {
 }
 
 // =============================================================================
+// Official known-answer tests (NIST / RFC 4231 / BLAKE3 team)
+// =============================================================================
+
+test "SHA-256 NIST KATs: empty, abc, two-block message" {
+    // NIST FIPS 180-4 test vectors, as published at
+    // https://www.di-mgt.com.au/sha_testvectors.html
+    const Case = struct { input: []const u8, expected_hex: *const [64]u8 };
+    const cases = [_]Case{
+        .{ .input = "", .expected_hex = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" },
+        .{ .input = "abc", .expected_hex = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" },
+        .{ .input = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq", .expected_hex = "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1" },
+    };
+    for (cases) |case| {
+        var output: [32]u8 = undefined;
+        const rc = quantum_sha256(case.input.ptr, case.input.len, &output);
+        try std.testing.expectEqual(@as(c_int, 0), rc);
+        var expected: [32]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&expected, case.expected_hex);
+        try std.testing.expectEqualSlices(u8, &expected, &output);
+    }
+}
+
+test "SHA-512 NIST KATs: empty, abc" {
+    // NIST FIPS 180-4 test vectors, as published at
+    // https://www.di-mgt.com.au/sha_testvectors.html
+    const Case = struct { input: []const u8, expected_hex: *const [128]u8 };
+    const cases = [_]Case{
+        .{ .input = "", .expected_hex = "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e" },
+        .{ .input = "abc", .expected_hex = "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f" },
+    };
+    for (cases) |case| {
+        var output: [64]u8 = undefined;
+        const rc = quantum_sha512(case.input.ptr, case.input.len, &output);
+        try std.testing.expectEqual(@as(c_int, 0), rc);
+        var expected: [64]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&expected, case.expected_hex);
+        try std.testing.expectEqualSlices(u8, &expected, &output);
+    }
+}
+
+test "SHA-256d known answer: abc" {
+    // SHA-256d("abc") = SHA-256(SHA-256("abc")). The inner digest is the
+    // NIST FIPS 180-4 KAT ba7816bf...; applying SHA-256 once more yields:
+    const input = "abc";
+    var output: [32]u8 = undefined;
+    const rc = quantum_sha256d(input.ptr, input.len, &output);
+    try std.testing.expectEqual(@as(c_int, 0), rc);
+    var expected: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&expected, "4f8b42c22dd3729b519ba6f68d2da7cc5b2d606d05daed5ad5128cc03e6c6358");
+    try std.testing.expectEqualSlices(u8, &expected, &output);
+
+    // Cross-check: SHA-256d must equal quantum_sha256 applied twice.
+    var first: [32]u8 = undefined;
+    var second: [32]u8 = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), quantum_sha256(input.ptr, input.len, &first));
+    try std.testing.expectEqual(@as(c_int, 0), quantum_sha256(&first, first.len, &second));
+    try std.testing.expectEqualSlices(u8, &second, &output);
+}
+
+test "HMAC-SHA256 RFC 4231 test cases 1-4" {
+    // https://www.rfc-editor.org/rfc/rfc4231.txt sections 4.2 - 4.5
+    const key1 = [_]u8{0x0b} ** 20;
+    const key3 = [_]u8{0xaa} ** 20;
+    const key4 = [_]u8{
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
+        0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14,
+        0x15, 0x16, 0x17, 0x18, 0x19,
+    };
+    const data3 = [_]u8{0xdd} ** 50;
+    const data4 = [_]u8{0xcd} ** 50;
+
+    const Case = struct { key: []const u8, data: []const u8, expected_hex: *const [64]u8 };
+    const cases = [_]Case{
+        .{ .key = &key1, .data = "Hi There", .expected_hex = "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7" },
+        .{ .key = "Jefe", .data = "what do ya want for nothing?", .expected_hex = "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843" },
+        .{ .key = &key3, .data = &data3, .expected_hex = "773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe" },
+        .{ .key = &key4, .data = &data4, .expected_hex = "82558a389a443c0ea4cc819899f2083a85f0faa3e578f8077a2e3ff46729665b" },
+    };
+    for (cases) |case| {
+        var output: [32]u8 = undefined;
+        const rc = quantum_hmac_sha256(case.key.ptr, case.key.len, case.data.ptr, case.data.len, &output);
+        try std.testing.expectEqual(@as(c_int, 0), rc);
+        var expected: [32]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&expected, case.expected_hex);
+        try std.testing.expectEqualSlices(u8, &expected, &output);
+    }
+}
+
+test "HMAC-SHA512 RFC 4231 test cases 1-4" {
+    // https://www.rfc-editor.org/rfc/rfc4231.txt sections 4.2 - 4.5
+    const key1 = [_]u8{0x0b} ** 20;
+    const key3 = [_]u8{0xaa} ** 20;
+    const key4 = [_]u8{
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
+        0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14,
+        0x15, 0x16, 0x17, 0x18, 0x19,
+    };
+    const data3 = [_]u8{0xdd} ** 50;
+    const data4 = [_]u8{0xcd} ** 50;
+
+    const Case = struct { key: []const u8, data: []const u8, expected_hex: *const [128]u8 };
+    const cases = [_]Case{
+        .{ .key = &key1, .data = "Hi There", .expected_hex = "87aa7cdea5ef619d4ff0b4241a1d6cb02379f4e2ce4ec2787ad0b30545e17cdedaa833b7d6b8a702038b274eaea3f4e4be9d914eeb61f1702e696c203a126854" },
+        .{ .key = "Jefe", .data = "what do ya want for nothing?", .expected_hex = "164b7a7bfcf819e2e395fbe73b56e0a387bd64222e831fd610270cd7ea2505549758bf75c05a994a6d034f65f8f0e6fdcaeab1a34d4a6b4b636e070a38bce737" },
+        .{ .key = &key3, .data = &data3, .expected_hex = "fa73b0089d56a284efb0f0756c890be9b1b5dbdd8ee81a3655f83e33b2279d39bf3e848279a722c806b485a47e67c807b946a337bee8942674278859e13292fb" },
+        .{ .key = &key4, .data = &data4, .expected_hex = "b0ba465637458c6990e5a8c5f61d4af7e576d97ff94b872de76f8050361ee3dba91ca5c11aa25eb4d679275cc5788063a5f19741120c4f2de2adebeb10a298dd" },
+    };
+    for (cases) |case| {
+        var output: [64]u8 = undefined;
+        const rc = quantum_hmac_sha512(case.key.ptr, case.key.len, case.data.ptr, case.data.len, &output);
+        try std.testing.expectEqual(@as(c_int, 0), rc);
+        var expected: [64]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&expected, case.expected_hex);
+        try std.testing.expectEqualSlices(u8, &expected, &output);
+    }
+}
+
+test "BLAKE3 official test vectors: lengths 0, 1, 1024" {
+    // From the BLAKE3 team's published vectors:
+    // https://raw.githubusercontent.com/BLAKE3-team/BLAKE3/master/test_vectors/test_vectors.json
+    // Input byte at position i is (i % 251); expected value is the first
+    // 32 bytes of the extended hash output.
+    const Case = struct { len: usize, expected_hex: *const [64]u8 };
+    const cases = [_]Case{
+        .{ .len = 0, .expected_hex = "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262" },
+        .{ .len = 1, .expected_hex = "2d3adedff11b61f14c886e35afa036736dcd87a74d27b5c1510225d0f592e213" },
+        .{ .len = 1024, .expected_hex = "42214739f095a406f3fc83deb889744ac00df831c10daa55189b5d121c855af7" },
+    };
+    var input: [1024]u8 = undefined;
+    for (&input, 0..) |*b, i| b.* = @intCast(i % 251);
+    for (cases) |case| {
+        var output: [32]u8 = undefined;
+        const rc = quantum_blake3(&input, case.len, &output);
+        try std.testing.expectEqual(@as(c_int, 0), rc);
+        var expected: [32]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&expected, case.expected_hex);
+        try std.testing.expectEqualSlices(u8, &expected, &output);
+    }
+}
+
+// =============================================================================
 // Batch SHA-256d: High-Performance Bitcoin Mining Hashing
 // =============================================================================
 // These functions provide batch processing for SHA-256d (double SHA-256),

@@ -890,3 +890,148 @@ test "ExtendedKey serialization" {
     // Check depth is 0
     try std.testing.expectEqual(@as(u8, 0), serialized[4]);
 }
+
+// ============================================================================
+// SPEC KNOWN-ANSWER TESTS — BIP-32 official vectors, BIP-84 official vectors
+// ============================================================================
+//
+// The expected_* hex constants below are the exact xprv/xpub strings from
+// https://raw.githubusercontent.com/bitcoin/bips/master/bip-0032.mediawiki
+// base58-decoded to their raw 82 bytes (78-byte payload + 4-byte
+// base58check checksum). Each decode was verified against the double-SHA256
+// checksum and the mainnet version prefixes 0x0488ADE4 (xprv) /
+// 0x0488B21E (xpub) before being embedded here. Layout per BIP-32:
+//   version(4) | depth(1) | parent_fingerprint(4) | child_index(4)
+//   | chain_code(32) | key_data(33) | checksum(4)
+// Asserting all 82 bytes therefore pins version, depth, fingerprint,
+// child index, chain code, key material AND the checksum to the spec.
+
+test "BIP32 Test Vector 1: exact serialized keys for full derivation chain" {
+    const Case = struct {
+        path: []const u8,
+        xprv_hex: *const [164]u8,
+        xpub_hex: *const [164]u8,
+    };
+    const cases = [_]Case{
+        .{
+            .path = "m",
+            // xprv9s21ZrQH143K3QTDL4LXw2F7HEK3wJUD2nW2nRk4stbPy6cq3jPPqjiChkVvvNKmPGJxWUtg6LnF5kejMRNNU3TGtRBeJgk33yuGBxrMPHi
+            .xprv_hex = "0488ade4000000000000000000873dff81c02f525623fd1fe5167eac3a55a049de3d314bb42ee227ffed37d50800e8f32e723decf4051aefac8e2c93c9c5b214313817cdb01a1494b917c8436b35e77e9d71",
+            // xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8
+            .xpub_hex = "0488b21e000000000000000000873dff81c02f525623fd1fe5167eac3a55a049de3d314bb42ee227ffed37d5080339a36013301597daef41fbe593a02cc513d0b55527ec2df1050e2e8ff49c85c2ab473b21",
+        },
+        .{
+            .path = "m/0'",
+            // xprv9uHRZZhk6KAJC1avXpDAp4MDc3sQKNxDiPvvkX8Br5ngLNv1TxvUxt4cV1rGL5hj6KCesnDYUhd7oWgT11eZG7XnxHrnYeSvkzY7d2bhkJ7
+            .xprv_hex = "0488ade4013442193e8000000047fdacbd0f1097043b78c63c20c34ef4ed9a111d980047ad16282c7ae623614100edb2e14f9ee77d26dd93b4ecede8d16ed408ce149b6cd80b0715a2d911a0afea0a794dec",
+            // xpub68Gmy5EdvgibQVfPdqkBBCHxA5htiqg55crXYuXoQRKfDBFA1WEjWgP6LHhwBZeNK1VTsfTFUHCdrfp1bgwQ9xv5ski8PX9rL2dZXvgGDnw
+            .xpub_hex = "0488b21e013442193e8000000047fdacbd0f1097043b78c63c20c34ef4ed9a111d980047ad16282c7ae6236141035a784662a4a20a65bf6aab9ae98a6c068a81c52e4b032c0fb5400c706cfccc56b8b9c580",
+        },
+        .{
+            .path = "m/0'/1",
+            // xprv9wTYmMFdV23N2TdNG573QoEsfRrWKQgWeibmLntzniatZvR9BmLnvSxqu53Kw1UmYPxLgboyZQaXwTCg8MSY3H2EU4pWcQDnRnrVA1xe8fs
+            .xprv_hex = "0488ade4025c1bd648000000012a7857631386ba23dacac34180dd1983734e444fdbf774041578e9b6adb37c19003c6cb8d0f6a264c91ea8b5030fadaa8e538b020f0a387421a12de9319dc93368b34bc442",
+            // xpub6ASuArnXKPbfEwhqN6e3mwBcDTgzisQN1wXN9BJcM47sSikHjJf3UFHKkNAWbWMiGj7Wf5uMash7SyYq527Hqck2AxYysAA7xmALppuCkwQ
+            .xpub_hex = "0488b21e025c1bd648000000012a7857631386ba23dacac34180dd1983734e444fdbf774041578e9b6adb37c1903501e454bf00751f24b1b489aa925215d66af2234e3891c3b21a52bedb3cd711c6f6e2af7",
+        },
+        .{
+            .path = "m/0'/1/2'",
+            // xprv9z4pot5VBttmtdRTWfWQmoH1taj2axGVzFqSb8C9xaxKymcFzXBDptWmT7FwuEzG3ryjH4ktypQSAewRiNMjANTtpgP4mLTj34bhnZX7UiM
+            .xprv_hex = "0488ade403bef5a2f98000000204466b9cc8e161e966409ca52986c584f07e9dc81f735db683c3ff6ec7b1503f00cbce0d719ecf7431d88e6a89fa1483e02e35092af60c042b1df2ff59fa424dca25814a3a",
+            // xpub6D4BDPcP2GT577Vvch3R8wDkScZWzQzMMUm3PWbmWvVJrZwQY4VUNgqFJPMM3No2dFDFGTsxxpG5uJh7n7epu4trkrX7x7DogT5Uv6fcLW5
+            .xpub_hex = "0488b21e03bef5a2f98000000204466b9cc8e161e966409ca52986c584f07e9dc81f735db683c3ff6ec7b1503f0357bfe1e341d01c69fe5654309956cbea516822fba8a601743a012a7896ee8dc2a5162afa",
+        },
+        .{
+            .path = "m/0'/1/2'/2",
+            // xprvA2JDeKCSNNZky6uBCviVfJSKyQ1mDYahRjijr5idH2WwLsEd4Hsb2Tyh8RfQMuPh7f7RtyzTtdrbdqqsunu5Mm3wDvUAKRHSC34sJ7in334
+            .xprv_hex = "0488ade404ee7ab90c00000002cfb71883f01676f587d023cc53a35bc7f88f724b1f8c2892ac1275ac822a3edd000f479245fb19a38a1954c5c7c0ebab2f9bdfd96a17563ef28a6a4b1a2a764ef4a6b6af57",
+            // xpub6FHa3pjLCk84BayeJxFW2SP4XRrFd1JYnxeLeU8EqN3vDfZmbqBqaGJAyiLjTAwm6ZLRQUMv1ZACTj37sR62cfN7fe5JnJ7dh8zL4fiyLHV
+            .xpub_hex = "0488b21e04ee7ab90c00000002cfb71883f01676f587d023cc53a35bc7f88f724b1f8c2892ac1275ac822a3edd02e8445082a72f29b75ca48748a914df60622a609cacfce8ed0e35804560741d2942d0acb8",
+        },
+        .{
+            .path = "m/0'/1/2'/2/1000000000",
+            // xprvA41z7zogVVwxVSgdKUHDy1SKmdb533PjDz7J6N6mV6uS3ze1ai8FHa8kmHScGpWmj4WggLyQjgPie1rFSruoUihUZREPSL39UNdE3BBDu76
+            .xprv_hex = "0488ade405d880d7d83b9aca00c783e67b921d2beb8f6b389cc646d7263b4145701dadd2161548a8b078e65e9e00471b76e389e528d6de6d816857e012c5455051cad6660850e58372a6c3e6e7c81e57a871",
+            // xpub6H1LXWLaKsWFhvm6RVpEL9P4KfRZSW7abD2ttkWP3SSQvnyA8FSVqNTEcYFgJS2UaFcxupHiYkro49S8yGasTvXEYBVPamhGW6cFJodrTHy
+            .xpub_hex = "0488b21e05d880d7d83b9aca00c783e67b921d2beb8f6b389cc646d7263b4145701dadd2161548a8b078e65e9e022a471424da5e657499d1ff51cb43c47481a03b1e77f951fe64cec9f5a48f701118d3a268",
+        },
+    };
+
+    const seed = [_]u8{
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+    };
+    const master = try ExtendedKey.fromSeed(&seed);
+
+    for (cases) |case| {
+        const key = try master.derivePath(case.path);
+
+        var expected_xprv: [82]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&expected_xprv, case.xprv_hex);
+        const got_xprv = key.serialize(true);
+        try std.testing.expectEqualSlices(u8, &expected_xprv, &got_xprv);
+
+        var expected_xpub: [82]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&expected_xpub, case.xpub_hex);
+        const got_xpub = key.neuter().serialize(true);
+        try std.testing.expectEqualSlices(u8, &expected_xpub, &got_xpub);
+    }
+}
+
+test "BIP32 Test Vector 3: leading-zero retention in private keys" {
+    // This vector specifically guards against implementations that drop
+    // leading zero bytes when serializing private keys (a classic
+    // funds-loss bug). Seed and expected keys from the BIP-32 spec.
+    var seed: [64]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&seed, "4b381541583be4423346c643850da4b320e46a87ae3d2a4e6da11eba819cd4acba45d239319ac14f863b8d5ab5a0d0c64d2e8a1e7d1457df2e5a3c51c73235be");
+
+    const master = try ExtendedKey.fromSeed(&seed);
+
+    // m: xprv9s21ZrQH143K25QhxbucbDDuQ4naNntJRi4KUfWT7xo4EKsHt2QJDu7KXp1A3u7Bi1j8ph3EGsZ9Xvz9dGuVrtHHs7pXeTzjuxBrCmmhgC6
+    var expected_m: [82]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&expected_m, "0488ade400000000000000000001d28a3e53cffa419ec122c968b3259e16b65076495494d97cae10bbfec3c36f0000ddb80b067e0d4993197fe10f2657a844a384589847602d56f0c629c81aae3233c0c6bf");
+    const got_m = master.serialize(true);
+    try std.testing.expectEqualSlices(u8, &expected_m, &got_m);
+
+    // m/0': xprv9uPDJpEQgRQfDcW7BkF7eTya6RPxXeJCqCJGHuCJ4GiRVLzkTXBAJMu2qaMWPrS7AANYqdq6vcBcBUdJCVVFceUvJFjaPdGZ2y9WACViL4L
+    const child = try master.derivePath("m/0'");
+    var expected_child: [82]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&expected_child, "0488ade40141d63b5080000000e5fea12a97b927fc9dc3d2cb0d1ea1cf50aa5a1fdc1f933e8906bb38df3377bd00491f7a2eebc7b57028e0d3faa0acda02e75c33b03c48fb288c41e2ea44e1daef7332bb35");
+    const got_child = child.serialize(true);
+    try std.testing.expectEqualSlices(u8, &expected_child, &got_child);
+}
+
+test "BIP84 official vectors: first receive/change addresses" {
+    // https://raw.githubusercontent.com/bitcoin/bips/master/bip-0084.mediawiki
+    // Mnemonic: "abandon abandon abandon abandon abandon abandon abandon
+    // abandon abandon abandon abandon about", empty passphrase.
+    // The BIP-39 seed below is the published seed for that mnemonic and is
+    // independently proven by the "BIP39 PBKDF2-SHA512 Test Vector 1" test
+    // in ffi-grok.zig, which derives this exact value via PBKDF2-HMAC-SHA512.
+    var seed: [64]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&seed, "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4");
+
+    const master = try ExtendedKey.fromSeed(&seed);
+
+    // First receiving address: m/84'/0'/0'/0/0
+    const key0 = try master.derivePath("m/84'/0'/0'/0/0");
+    var expected_pubkey: [33]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&expected_pubkey, "0330d54fd0dd420a6e5f8d3624f5f3482cae350f79d5f0753bf5beef9c2d91af3c");
+    try std.testing.expectEqualSlices(u8, &expected_pubkey, &key0.public_key);
+
+    var addr0: [90]u8 = undefined;
+    const len0 = generateP2wpkhAddress(&key0.public_key, true, &addr0);
+    try std.testing.expectEqualSlices(u8, "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu", addr0[0..len0]);
+
+    // Second receiving address: m/84'/0'/0'/0/1
+    const key1 = try master.derivePath("m/84'/0'/0'/0/1");
+    var addr1: [90]u8 = undefined;
+    const len1 = generateP2wpkhAddress(&key1.public_key, true, &addr1);
+    try std.testing.expectEqualSlices(u8, "bc1qnjg0jd8228aq7egyzacy8cys3knf9xvrerkf9g", addr1[0..len1]);
+
+    // First change address: m/84'/0'/0'/1/0
+    const key_change = try master.derivePath("m/84'/0'/0'/1/0");
+    var addr_change: [90]u8 = undefined;
+    const len_change = generateP2wpkhAddress(&key_change.public_key, true, &addr_change);
+    try std.testing.expectEqualSlices(u8, "bc1q8c6fshw2dlwun7ekn9qwf37cu2rn755upcp6el", addr_change[0..len_change]);
+}

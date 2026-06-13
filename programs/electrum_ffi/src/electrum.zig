@@ -416,6 +416,65 @@ test "scripthash computation P2WPKH" {
     try std.testing.expect(hex.len == 64);
 }
 
+test "scripthash P2WPKH known answer (BIP-173 canonical hash160)" {
+    // Electrum protocol: scripthash = hex(reverse(sha256(scriptPubKey)))
+    // (https://electrumx.readthedocs.io/en/latest/protocol-basics.html#script-hashes)
+    // scriptPubKey = 0014751e76e8199196d454941c45d1b3a323f1433bd6 (P2WPKH,
+    // OP_0 PUSH20 <hash160>), using the canonical BIP-173 example program.
+    // Expected value derived from the spec'd construction with:
+    //   python3 -c "import hashlib;s=bytes.fromhex('0014751e76e8199196d454941c45d1b3a323f1433bd6');print(hashlib.sha256(s).digest()[::-1].hex())"
+    const pubkey_hash = [_]u8{
+        0x75, 0x1e, 0x76, 0xe8, 0x19, 0x91, 0x96, 0xd4,
+        0x54, 0x94, 0x1c, 0x45, 0xd1, 0xb3, 0xa3, 0x23,
+        0xf1, 0x43, 0x3b, 0xd6,
+    };
+
+    const scripthash = computeP2wpkhScripthash(&pubkey_hash);
+    const hex = scripthashToHex(&scripthash);
+    try std.testing.expectEqualSlices(
+        u8,
+        "9623df75239b5daa7f5f03042d325b51498c4bb7059c7748b17049bf96f73888",
+        &hex,
+    );
+}
+
+test "scripthash P2PKH known answer (same hash160)" {
+    // scriptPubKey = 76a914751e76e8199196d454941c45d1b3a323f1433bd688ac
+    // (P2PKH: OP_DUP OP_HASH160 PUSH20 <hash160> OP_EQUALVERIFY OP_CHECKSIG).
+    // Expected value derived from the spec'd construction with:
+    //   python3 -c "import hashlib;s=bytes.fromhex('76a914751e76e8199196d454941c45d1b3a323f1433bd688ac');print(hashlib.sha256(s).digest()[::-1].hex())"
+    const pubkey_hash = [_]u8{
+        0x75, 0x1e, 0x76, 0xe8, 0x19, 0x91, 0x96, 0xd4,
+        0x54, 0x94, 0x1c, 0x45, 0xd1, 0xb3, 0xa3, 0x23,
+        0xf1, 0x43, 0x3b, 0xd6,
+    };
+
+    const scripthash = computeP2pkhScripthash(&pubkey_hash);
+    const hex = scripthashToHex(&scripthash);
+    try std.testing.expectEqualSlices(
+        u8,
+        "8bd2c4f79944cd6a3cb1730cf92c513ae259eb271d81918457f3753eebe14a3f",
+        &hex,
+    );
+}
+
+test "computeScripthash SHA-256 core matches NIST KAT (byte-reversed)" {
+    // computeScripthash(x) = reverse(SHA-256(x)). For x = "abc" the inner
+    // digest is the NIST FIPS 180-4 KAT
+    //   ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+    // so the scripthash must be its byte reversal. This pins the SHA-256
+    // core AND the Electrum reversal step to authoritative values.
+    const scripthash = computeScripthash("abc");
+
+    var nist_kat: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&nist_kat, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    var expected: [32]u8 = undefined;
+    for (0..32) |i| {
+        expected[i] = nist_kat[31 - i];
+    }
+    try std.testing.expectEqual(expected, scripthash);
+}
+
 test "scripthash hex conversion" {
     const original = [_]u8{
         0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
