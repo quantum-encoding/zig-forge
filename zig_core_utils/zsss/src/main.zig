@@ -356,13 +356,31 @@ pub const SSS = struct {
         const secret_id = shares[0].secret_id;
         const data_len = shares[0].data.len;
 
+        // A threshold below 2 is never produced by `split` (it rejects k < 2)
+        // and would make the scheme degenerate; reject it so a corrupt or
+        // crafted share set can never drive the interpolation with a
+        // nonsensical k.
+        if (threshold < 2) return error.InsufficientShares;
+
+        // A non-empty payload is required; a zero-length data field would make
+        // the reconstruction loop a no-op and slip a bogus share set through.
+        if (data_len == 0) return error.DataLengthMismatch;
+
+        // The x-coordinate (share index) must be a valid evaluation point.
+        // `split` assigns indices 1..n; index 0 is the secret position itself
+        // and never a real share. A zero index here means corrupt/foreign data.
+        if (shares[0].index == 0) return error.DuplicateShareIndex;
+
         for (shares[1..]) |share| {
             if (share.threshold != threshold) return error.ThresholdMismatch;
             if (!mem.eql(u8, &share.secret_id, &secret_id)) return error.SecretIdMismatch;
             if (share.data.len != data_len) return error.DataLengthMismatch;
+            if (share.index == 0) return error.DuplicateShareIndex;
         }
 
-        // Check for duplicate x-coordinates
+        // Check for duplicate x-coordinates. Two shares with the same index
+        // make a Lagrange denominator factor (x_i - x_j) zero, which would
+        // hit GF256.divide's division-by-zero @panic. Reject before any math.
         for (shares, 0..) |share_i, i| {
             for (shares[i + 1 ..]) |share_j| {
                 if (share_i.index == share_j.index) return error.DuplicateShareIndex;
@@ -381,13 +399,17 @@ pub const SSS = struct {
             secret[byte_idx] = interpolate(shares[0..k], byte_idx);
         }
 
-        // Verify secret ID matches
+        // Verify secret ID matches. On mismatch we return an error; the
+        // `errdefer` registered above owns the deallocation of `secret`, so
+        // we MUST NOT free it here as well. Freeing it manually and then
+        // returning an error causes the errdefer to fire on the same buffer,
+        // a double-free that SIGSEGVs under the page allocator. We only zero
+        // the buffer for security and let the errdefer reclaim it.
         var hash: [32]u8 = undefined;
         crypto.hash.sha2.Sha256.hash(secret, &hash, .{});
         if (!mem.eql(u8, hash[0..4], &secret_id)) {
-            // Zero out and free on verification failure
+            // Zero out on verification failure (errdefer frees it).
             @memset(secret, 0);
-            allocator.free(secret);
             return error.SecretVerificationFailed;
         }
 
@@ -1585,4 +1607,91 @@ test "Share serialization roundtrip" {
     try std.testing.expectEqual(shares[0].index, deserialized.index);
     try std.testing.expectEqualSlices(u8, &shares[0].secret_id, &deserialized.secret_id);
     try std.testing.expectEqualSlices(u8, shares[0].data, deserialized.data);
+}
+
+// Regression: combining shares that come from two INDEPENDENT splits of the
+// SAME secret (same n,k -> same secret_id, same threshold, distinct indices)
+// used to reach the secret-verification branch and double-free `secret`,
+// SIGSEGV'ing under the page allocator. It must now fail verification and
+// return a clean error WITHOUT crashing or leaking. (Audit finding X-3.)
+test "SSS combine mismatched shares from two splits returns error, no crash" {
+    const allocator = std.testing.allocator;
+    GF256.init();
+
+    const secret = "SAME-SECRET-VALUE-32-BYTES-LONG!";
+
+    // Two independent splits of the same secret. Same params, so they share a
+    // secret_id and threshold; only the random polynomials differ.
+    const split_a = try SSS.split(allocator, secret, 3, 5);
+    defer {
+        for (split_a) |*s| s.deinit(allocator);
+        allocator.free(split_a);
+    }
+    const split_b = try SSS.split(allocator, secret, 3, 5);
+    defer {
+        for (split_b) |*s| s.deinit(allocator);
+        allocator.free(split_b);
+    }
+
+    // Mix shares with DISTINCT indices (1 from A, 2 and 3 from B): passes the
+    // structural checks (same threshold/secret_id/len, no duplicate index) and
+    // exercises the interpolation + verification path that used to crash.
+    var subset = [_]Share{ split_a[0], split_b[1], split_b[2] };
+    const result = SSS.combine(allocator, &subset);
+    if (result) |recovered| {
+        // Reaching here is acceptable only if recovery happened to be exact
+        // (vanishingly unlikely); free it so the leak detector stays quiet.
+        defer allocator.free(recovered);
+        // It must never silently match the real secret from foreign shares.
+        try std.testing.expect(!mem.eql(u8, recovered, secret));
+    } else |err| {
+        // Expected path: verification fails on mismatched shares.
+        try std.testing.expectEqual(error.SecretVerificationFailed, err);
+    }
+}
+
+// Structural rejection: a share carrying an out-of-range x-coordinate (index 0)
+// must be refused before any GF(256) interpolation runs, so it can never reach
+// the division-by-zero @panic in GF256.divide.
+test "SSS combine rejects index-zero share without crashing" {
+    const allocator = std.testing.allocator;
+    GF256.init();
+
+    const secret = "0123456789ABCDEF";
+    const shares = try SSS.split(allocator, secret, 3, 5);
+    defer {
+        for (shares) |*s| s.deinit(allocator);
+        allocator.free(shares);
+    }
+
+    // Copy the metadata of three shares but force one index to 0. We point the
+    // data at the originals (no extra allocations) and never free through the
+    // copies, so the original `shares` deinit remains the sole owner.
+    const s_a = shares[0];
+    var s_b = shares[1];
+    const s_c = shares[2];
+    s_b.index = 0;
+    var subset = [_]Share{ s_a, s_b, s_c };
+
+    try std.testing.expectError(error.DuplicateShareIndex, SSS.combine(allocator, &subset));
+}
+
+// Positive control: a correct k-of-n subset still recombines to the exact
+// secret. Proves the double-free fix and the added structural guards did not
+// regress the recovery path.
+test "SSS combine round-trip still recovers exact secret" {
+    const allocator = std.testing.allocator;
+    GF256.init();
+
+    const secret = "Round-trip integrity check 0xDEADBEEF";
+    const shares = try SSS.split(allocator, secret, 3, 5);
+    defer {
+        for (shares) |*s| s.deinit(allocator);
+        allocator.free(shares);
+    }
+
+    var subset = [_]Share{ shares[1], shares[3], shares[4] };
+    const recovered = try SSS.combine(allocator, &subset);
+    defer allocator.free(recovered);
+    try std.testing.expectEqualStrings(secret, recovered);
 }

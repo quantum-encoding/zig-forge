@@ -610,3 +610,86 @@ test "FFI split and combine" {
     try std.testing.expect(combined.error_code == ZSSS_OK);
     try std.testing.expectEqualStrings(secret, combined.data.?[0..combined.len]);
 }
+
+/// Extract the Nth length-prefixed share frame (including its 4-byte length
+/// prefix) from a `zsss_split` output buffer. Returns an empty slice if absent.
+fn nthShareFrame(buf: []const u8, n: usize) []const u8 {
+    var pos: usize = 0;
+    var idx: usize = 0;
+    while (pos + 4 <= buf.len) {
+        const len: u32 = @as(u32, buf[pos]) |
+            (@as(u32, buf[pos + 1]) << 8) |
+            (@as(u32, buf[pos + 2]) << 16) |
+            (@as(u32, buf[pos + 3]) << 24);
+        const start = pos;
+        pos += 4;
+        if (pos + len > buf.len) break;
+        pos += len;
+        if (idx == n) return buf[start..pos];
+        idx += 1;
+    }
+    return buf[0..0];
+}
+
+// Regression for audit finding X-3: feeding `zsss_combine` shares drawn from
+// two INDEPENDENT splits of the SAME secret (same n,k, distinct indices) used
+// to SIGSEGV via a double-free on the secret-verification failure path. It must
+// now return a clean negative error code and never crash. This is the exact
+// shape reproduced from the Rust seed-recovery path.
+test "FFI combine mismatched same-secret shares returns error, no crash" {
+    zsss_init();
+
+    const secret = "SAME-SECRET-FOR-FFI-MIX-TEST!!!!";
+    const split_a = zsss_split(secret.ptr, secret.len, 3, 5);
+    defer zsss_free(split_a);
+    const split_b = zsss_split(secret.ptr, secret.len, 3, 5);
+    defer zsss_free(split_b);
+
+    try std.testing.expectEqual(ZSSS_OK, split_a.error_code);
+    try std.testing.expectEqual(ZSSS_OK, split_b.error_code);
+
+    const buf_a = split_a.data.?[0..split_a.len];
+    const buf_b = split_b.data.?[0..split_b.len];
+
+    // Distinct indices (A#1, B#2, B#3): passes structural checks, fails
+    // reconstruction verification -> must surface as an error code, not a crash.
+    const a = std.testing.allocator;
+    var combo: std.ArrayList(u8) = .empty;
+    defer combo.deinit(a);
+    try combo.appendSlice(a, nthShareFrame(buf_a, 0));
+    try combo.appendSlice(a, nthShareFrame(buf_b, 1));
+    try combo.appendSlice(a, nthShareFrame(buf_b, 2));
+
+    const result = zsss_combine(combo.items.ptr, combo.items.len);
+    defer zsss_free(result);
+
+    // No SIGSEGV reaching here is the primary assertion. The set is
+    // structurally valid, so it is rejected at reconstruction verification,
+    // mapped by the FFI layer to ZSSS_ERR_INSUFFICIENT_SHARES.
+    try std.testing.expect(result.error_code != ZSSS_OK);
+    try std.testing.expectEqual(ZSSS_ERR_INSUFFICIENT_SHARES, result.error_code);
+}
+
+// Mixing shares of two DIFFERENT secrets with overlapping indices must also be
+// rejected cleanly (duplicate-index / secret-id mismatch), never crash.
+test "FFI combine cross-secret shares with colliding indices returns error" {
+    zsss_init();
+
+    const secret_a = "AAAAAAAAAAAAAAAA";
+    const secret_b = "BBBBBBBBBBBBBBBB";
+    const split_a = zsss_split(secret_a.ptr, secret_a.len, 3, 5);
+    defer zsss_free(split_a);
+    const split_b = zsss_split(secret_b.ptr, secret_b.len, 3, 5);
+    defer zsss_free(split_b);
+
+    const a = std.testing.allocator;
+    var combo: std.ArrayList(u8) = .empty;
+    defer combo.deinit(a);
+    // Full concatenation -> indices 1..5 appear twice -> duplicate index.
+    try combo.appendSlice(a, split_a.data.?[0..split_a.len]);
+    try combo.appendSlice(a, split_b.data.?[0..split_b.len]);
+
+    const result = zsss_combine(combo.items.ptr, combo.items.len);
+    defer zsss_free(result);
+    try std.testing.expect(result.error_code != ZSSS_OK);
+}
