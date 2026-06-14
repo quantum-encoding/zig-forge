@@ -102,10 +102,85 @@ fn makeError(msg: []const u8) ZigDocxResult {
     };
 }
 
+/// Convert one sheet (0-based `sheet_index`) of an XLSX file to CSV text.
+///
+/// Reuses the library's tested XLSX parser + CSV renderer (shared strings
+/// and formula results resolved). Hosts parse the CSV with their own reader.
+/// Free the result with zig_docx_free().
+fn zig_docx_xlsx_to_csv(
+    xlsx_ptr: [*]const u8,
+    xlsx_len: usize,
+    sheet_index: u32,
+) callconv(.c) ZigDocxResult {
+    // Dupe input — ZipArchive.close() frees the data buffer.
+    const data = allocator.dupe(u8, xlsx_ptr[0..xlsx_len]) catch {
+        return makeError("Out of memory");
+    };
+
+    var archive = docx.zip.ZipArchive.openFromMemory(allocator, data) catch {
+        allocator.free(data);
+        return makeError("Failed to open XLSX archive");
+    };
+    defer archive.close();
+
+    var workbook = docx.xlsx.parseXlsx(allocator, &archive) catch {
+        return makeError("Failed to parse XLSX");
+    };
+    defer workbook.deinit();
+
+    if (sheet_index >= workbook.sheets.len) {
+        return makeError("Sheet index out of range");
+    }
+
+    const csv = docx.xlsx.sheetToCsv(allocator, &workbook.sheets[sheet_index]) catch {
+        return makeError("Failed to render sheet to CSV");
+    };
+
+    return .{ .data = csv.ptr, .len = csv.len, .error_msg = null };
+}
+
+/// List the sheet names of an XLSX file (in memory), newline-separated, in
+/// workbook order. Free the result with zig_docx_free().
+fn zig_docx_xlsx_sheet_names(
+    xlsx_ptr: [*]const u8,
+    xlsx_len: usize,
+) callconv(.c) ZigDocxResult {
+    const data = allocator.dupe(u8, xlsx_ptr[0..xlsx_len]) catch {
+        return makeError("Out of memory");
+    };
+
+    var archive = docx.zip.ZipArchive.openFromMemory(allocator, data) catch {
+        allocator.free(data);
+        return makeError("Failed to open XLSX archive");
+    };
+    defer archive.close();
+
+    var workbook = docx.xlsx.parseXlsx(allocator, &archive) catch {
+        return makeError("Failed to parse XLSX");
+    };
+    defer workbook.deinit();
+
+    if (workbook.sheets.len == 0) {
+        return makeError("XLSX has no sheets");
+    }
+
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    for (workbook.sheets, 0..) |sheet, i| {
+        if (i > 0) buf.append(allocator, '\n') catch return makeError("Out of memory");
+        buf.appendSlice(allocator, sheet.name) catch return makeError("Out of memory");
+    }
+    const out = buf.toOwnedSlice(allocator) catch return makeError("Out of memory");
+
+    return .{ .data = out.ptr, .len = out.len, .error_msg = null };
+}
+
 // ─── Symbol Exports ────────────────────────────────────────────────
 
 comptime {
     @export(&zig_docx_md_to_docx, .{ .name = "zig_docx_md_to_docx" });
+    @export(&zig_docx_xlsx_to_csv, .{ .name = "zig_docx_xlsx_to_csv" });
+    @export(&zig_docx_xlsx_sheet_names, .{ .name = "zig_docx_xlsx_sheet_names" });
     @export(&zig_docx_to_markdown, .{ .name = "zig_docx_to_markdown" });
     @export(&zig_docx_to_markdown_with_images, .{ .name = "zig_docx_to_markdown_with_images" });
     @export(&zig_docx_fra_from_json, .{ .name = "zig_docx_fra_from_json" });

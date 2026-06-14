@@ -103,6 +103,31 @@ void zig_docx_free_string(char *ptr);
 /// Free all owned strings in a ZigDocxInfo struct.
 void zig_docx_free_info(ZigDocxInfo *info);
 
+// ─── Spreadsheets ──────────────────────────────────────────────────
+
+/// Convert one sheet (0-based) of an XLSX file (in memory) to CSV text.
+///
+/// Shared strings and formula results are resolved. Parse the returned CSV
+/// with any reader. Free result.data with zig_docx_free(result.data, result.len).
+///
+/// @param xlsx_ptr     Pointer to XLSX file bytes.
+/// @param xlsx_len     Length of XLSX data in bytes.
+/// @param sheet_index  0-based sheet index (see zig_docx_xlsx_sheet_names).
+/// @return             ZigDocxResult with UTF-8 CSV bytes or error.
+ZigDocxResult zig_docx_xlsx_to_csv(const uint8_t *xlsx_ptr,
+                                    size_t xlsx_len,
+                                    uint32_t sheet_index);
+
+/// List an XLSX file's sheet names, newline-separated, in workbook order.
+///
+/// Free result.data with zig_docx_free(result.data, result.len).
+///
+/// @param xlsx_ptr  Pointer to XLSX file bytes.
+/// @param xlsx_len  Length of XLSX data in bytes.
+/// @return          ZigDocxResult with newline-separated UTF-8 names or error.
+ZigDocxResult zig_docx_xlsx_sheet_names(const uint8_t *xlsx_ptr,
+                                         size_t xlsx_len);
+
 // ─── Fire Risk Assessment ─────────────────────────────────────────
 
 /// Generate a Fire Risk Assessment DOCX from JSON input.
