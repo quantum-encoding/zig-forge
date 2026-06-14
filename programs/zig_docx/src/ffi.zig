@@ -164,13 +164,24 @@ fn zig_docx_xlsx_sheet_names(
         return makeError("XLSX has no sheets");
     }
 
+    // NOTE: errdefer does NOT run here — these catch blocks return a C-ABI
+    // struct (makeError), not a Zig error, so cleanup must be manual or `buf`
+    // leaks on allocation failure.
     var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(allocator);
     for (workbook.sheets, 0..) |sheet, i| {
-        if (i > 0) buf.append(allocator, '\n') catch return makeError("Out of memory");
-        buf.appendSlice(allocator, sheet.name) catch return makeError("Out of memory");
+        if (i > 0) buf.append(allocator, '\n') catch {
+            buf.deinit(allocator);
+            return makeError("Out of memory");
+        };
+        buf.appendSlice(allocator, sheet.name) catch {
+            buf.deinit(allocator);
+            return makeError("Out of memory");
+        };
     }
-    const out = buf.toOwnedSlice(allocator) catch return makeError("Out of memory");
+    const out = buf.toOwnedSlice(allocator) catch {
+        buf.deinit(allocator);
+        return makeError("Out of memory");
+    };
 
     return .{ .data = out.ptr, .len = out.len, .error_msg = null };
 }
