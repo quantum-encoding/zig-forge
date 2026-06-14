@@ -6,6 +6,11 @@
 pub const canonical = @import("canonical.zig");
 pub const ledger = @import("ledger.zig");
 pub const emit = @import("emit_client.zig");
+pub const detect = @import("detect.zig");
+
+pub const Detector = detect.Detector;
+pub const Finding = detect.Finding;
+pub const Severity = detect.Severity;
 
 // Re-exports for ergonomic `chronos_ledger.X` access.
 pub const Chain = ledger.Chain;
@@ -26,4 +31,5 @@ test {
     _ = canonical;
     _ = ledger;
     _ = emit;
+    _ = detect;
 }

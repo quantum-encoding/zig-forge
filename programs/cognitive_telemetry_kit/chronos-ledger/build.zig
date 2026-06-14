@@ -40,7 +40,7 @@ pub fn build(b: *std.Build) void {
 
     // ── Tests: `zig build test` runs canonical + ledger + c_api suites ──────
     const test_step = b.step("test", "Run chronos-ledger tests");
-    for ([_][]const u8{ "src/canonical.zig", "src/ledger.zig", "src/c_api.zig" }) |src| {
+    for ([_][]const u8{ "src/canonical.zig", "src/ledger.zig", "src/c_api.zig", "src/detect.zig" }) |src| {
         const t_mod = b.createModule(.{
             .root_source_file = b.path(src),
             .target = target,
