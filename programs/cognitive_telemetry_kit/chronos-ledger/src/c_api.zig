@@ -90,20 +90,8 @@ export fn cl_append(
 
     var arena = std.heap.ArenaAllocator.init(ca);
     defer arena.deinit();
-    const a = arena.allocator();
-
-    var parsed = std.json.parseFromSlice(std.json.Value, a, content_json[0..content_len], .{}) catch return CL_ERR_PARSE;
-    defer parsed.deinit();
-    if (parsed.value != .object) return CL_ERR_PARSE;
-
-    var members: std.ArrayList(canonical.Member) = .empty;
-    var it = parsed.value.object.iterator();
-    while (it.next()) |entry| {
-        const val = ledger.toCanonical(a, entry.value_ptr.*) catch |e| return mapErr(e);
-        members.append(a, .{ .key = entry.key_ptr.*, .value = val }) catch return CL_ERR_ALLOC;
-    }
-
-    const res = chain.append(members.items, milestone != 0) catch |e| return mapErr(e);
+    const members = ledger.membersFromJson(arena.allocator(), content_json[0..content_len]) catch |e| return mapErr(e);
+    const res = chain.append(members, milestone != 0) catch |e| return mapErr(e);
     // res.json was allocated with the chain's allocator (ca) → caller owns it.
     out_json.* = res.json.ptr;
     out_len.* = res.json.len;
@@ -149,6 +137,7 @@ fn mapErr(e: ledger.Error) c_int {
         error.ReservedKey => CL_ERR_RESERVED,
         error.SigningKeyMissing => CL_ERR_NO_KEY,
         error.SignFailed => CL_ERR_SIGN,
+        error.ParseFailed => CL_ERR_PARSE,
         error.OutOfMemory => CL_ERR_ALLOC,
     };
 }

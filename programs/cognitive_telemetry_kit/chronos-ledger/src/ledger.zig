@@ -35,6 +35,7 @@ pub const Error = error{
     ReservedKey, // caller supplied a key the chain owns (v/seq/prev/this/sig)
     SigningKeyMissing,
     SignFailed,
+    ParseFailed, // malformed JSON / top-level value is not an object
 } || std.mem.Allocator.Error;
 
 const reserved_keys = [_][]const u8{ "v", "seq", "prev", "this", "sig" };
@@ -149,7 +150,34 @@ pub const Chain = struct {
         self.seq += 1;
         return .{ .seq = used_seq, .head = this, .signed = signed, .json = json };
     }
+
+    /// Convenience: append an event whose body is supplied as a JSON object
+    /// string (any key order). Used by the C-ABI and the sink daemon. Floats and
+    /// >i64 integers are rejected (see `toCanonical`).
+    pub fn appendJson(self: *Chain, content_json: []const u8, milestone: bool) Error!Appended {
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const members = try membersFromJson(arena.allocator(), content_json);
+        return self.append(members, milestone);
+    }
 };
+
+/// Parse a JSON object into canonical members (rejecting floats / >i64 numbers).
+/// The members borrow string storage from `arena`, so keep `arena` alive until
+/// they have been canonicalised/appended. Single source of the parse→convert
+/// path shared by `appendJson`, the C-ABI, and the sink daemon.
+pub fn membersFromJson(arena: std.mem.Allocator, content_json: []const u8) Error![]canonical.Member {
+    const value = std.json.parseFromSliceLeaky(std.json.Value, arena, content_json, .{}) catch return error.ParseFailed;
+    if (value != .object) return error.ParseFailed;
+    const obj = value.object;
+    const members = try arena.alloc(canonical.Member, obj.count());
+    var it = obj.iterator();
+    var i: usize = 0;
+    while (it.next()) |entry| : (i += 1) {
+        members[i] = .{ .key = entry.key_ptr.*, .value = try toCanonical(arena, entry.value_ptr.*) };
+    }
+    return members;
+}
 
 fn mapEnc(e: anytype) Error {
     return switch (e) {

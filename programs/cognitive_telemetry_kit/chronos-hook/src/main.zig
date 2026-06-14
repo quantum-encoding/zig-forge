@@ -2,10 +2,13 @@ const std = @import("std");
 const Io = std.Io;
 const builtin = @import("builtin");
 const c = std.c;
+const canonical = @import("canonical"); // RFC 8785 encoder (chronos-ledger)
+const emit_client = @import("chronos_emit"); // non-blocking UDS writer (chronos-ledger)
 
 const CHRONOS_STAMP_PATH = "/usr/local/bin/chronos-stamp";
 const GET_COGNITIVE_STATE_PATH = "/usr/local/bin/get-cognitive-state";
 const AGENT_ID = "claude-code";
+const LEDGER_SOCKET_DEFAULT = "/tmp/chronos-ledger.sock";
 
 // std.c exposes neither fork nor execvp in this Zig build — declare them.
 // (execvp does PATH resolution, which execve would not.)
@@ -115,6 +118,15 @@ pub fn main() !u8 {
         try commit_msg.appendSlice(allocator, desc);
     }
 
+    // Plane 2 (accountability ledger): emit a structured event for EVERY tool
+    // call — including reads/searches that change no files and so create no git
+    // tick — to the privileged sink (ledger-daemon / Guardian Shield). This is
+    // exactly the data that catches an exfil chain (read → search → send), most
+    // of which leaves no git diff. Best-effort and non-blocking: any failure is
+    // swallowed so it can never affect ticking. The hook holds NO signing key;
+    // the sink chains and signs (see ../chronos-ledger/DESIGN.md, Addition 1).
+    emitLedgerEvent(allocator, hook_json, repo_root, tool_name, file_path, desc_field, cognitive_state) catch {};
+
     // Stage all changes
     _ = try runCommand(allocator, &[_][]const u8{ "git", "add", "." });
 
@@ -133,6 +145,82 @@ pub fn main() !u8 {
     const commit_result = try runCommand(allocator, &[_][]const u8{ "git", "commit", "--no-verify", "-m", commit_msg.items });
 
     return if (commit_result.exit_code == 0) 0 else 1;
+}
+
+/// Map a Claude Code tool name to a ledger event `kind`.
+fn ledgerKind(tool: []const u8) []const u8 {
+    const eql = std.mem.eql;
+    if (eql(u8, tool, "Read") or eql(u8, tool, "NotebookRead")) return "read";
+    if (eql(u8, tool, "Edit") or eql(u8, tool, "Write") or eql(u8, tool, "MultiEdit") or eql(u8, tool, "NotebookEdit")) return "write";
+    if (eql(u8, tool, "Bash") or eql(u8, tool, "BashOutput") or eql(u8, tool, "KillShell")) return "exec";
+    if (eql(u8, tool, "WebFetch")) return "net";
+    if (eql(u8, tool, "WebSearch") or eql(u8, tool, "Grep") or eql(u8, tool, "Glob")) return "search";
+    return "other";
+}
+
+/// Build a v1 ledger event body (no seq/prev/this/sig — the sink owns those) and
+/// fire it at the sink, non-blocking. The body is assembled via the RFC 8785
+/// encoder, NOT a format string, so caller-controlled values (paths, URLs, the
+/// cognitive-state line) are escaped — no JSON-injection (JSON-IN-FMT).
+fn emitLedgerEvent(
+    allocator: std.mem.Allocator,
+    hook_json: []const u8,
+    repo_root: ?[]const u8,
+    tool_name: ?[]const u8,
+    file_path: ?[]const u8,
+    desc_field: ?[]const u8,
+    state: []const u8,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const name = tool_name orelse "unknown";
+    const kind = ledgerKind(name);
+    const is_web = std.mem.eql(u8, name, "WebFetch") or std.mem.eql(u8, name, "WebSearch");
+
+    const url = try extractJsonString(a, hook_json, "\"url\"");
+    const detail: ?[]const u8 = file_path orelse url orelse desc_field;
+
+    const source_trust: []const u8 = if (is_web)
+        "web"
+    else if (file_path) |fp|
+        (if (repo_root) |rr| (if (std.mem.startsWith(u8, fp, rr)) "repo" else "external") else "external")
+    else
+        "unknown";
+
+    // act { tool, [detail], source_trust }
+    var actm: [3]canonical.Member = undefined;
+    var an: usize = 0;
+    actm[an] = .{ .key = "tool", .value = .{ .string = name } };
+    an += 1;
+    if (detail) |d| {
+        actm[an] = .{ .key = "detail", .value = .{ .string = d } };
+        an += 1;
+    }
+    actm[an] = .{ .key = "source_trust", .value = .{ .string = source_trust } };
+    an += 1;
+
+    // Wall-clock ms for display only (t_wall_ms) — std.time.milliTimestamp is
+    // absent in this stripped std; order is the sink's seq, not this value.
+    var tspec: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.REALTIME, &tspec);
+    const ms: i64 = @as(i64, @intCast(tspec.sec)) * 1000 + @divTrunc(@as(i64, @intCast(tspec.nsec)), 1_000_000);
+    var ts_buf: [24]u8 = undefined;
+    const ts = std.fmt.bufPrint(&ts_buf, "{d}", .{ms}) catch "0";
+
+    const agent_members = [_]canonical.Member{.{ .key = "id", .value = .{ .string = AGENT_ID } }};
+    const ev = canonical.Value{ .object = &[_]canonical.Member{
+        .{ .key = "agent", .value = .{ .object = &agent_members } },
+        .{ .key = "kind", .value = .{ .string = kind } },
+        .{ .key = "act", .value = .{ .object = actm[0..an] } },
+        .{ .key = "state", .value = .{ .string = state } },
+        .{ .key = "t_wall_ms", .value = .{ .string = ts } },
+    } };
+
+    const json = try canonical.encodeAlloc(a, ev);
+    const socket_path = if (c.getenv("CHRONOS_LEDGER_SOCKET")) |p| std.mem.span(p) else LEDGER_SOCKET_DEFAULT;
+    emit_client.emit(socket_path, json) catch {}; // best-effort; sink may be down
 }
 
 fn isGitRepository(allocator: std.mem.Allocator) !bool {
