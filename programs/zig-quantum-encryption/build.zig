@@ -113,6 +113,12 @@ pub fn build(b: *std.Build) void {
             .target = cross_target,
             .optimize = opt_mode,
             .link_libc = true,
+            // Position-independent code is REQUIRED for the static lib to link
+            // into the Android `-shared` cdylib: without it, ld.lld rejects the
+            // TLS local-exec relocations (R_AARCH64_TLSLE_*) that Zig std's
+            // `Io.Threaded` random path now emits. PIC is also correct/required
+            // on the Apple targets, so enable it for every cross target.
+            .pic = true,
             // Disable stack traces for iOS (avoids dyld symbols)
             .strip = if (ct.query.os_tag == .ios) true else false,
         });
