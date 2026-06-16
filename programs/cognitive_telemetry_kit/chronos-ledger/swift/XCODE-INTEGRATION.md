@@ -78,7 +78,30 @@ chronos.ledgerInfo { ledgerPath, pubKeyHex in /* show / verify */ }
 `emit` is fire-and-forget over XPC — never blocks the main thread; if the helper
 isn't up yet, macOS spins it up on demand.
 
-## 5. Verify
+## 5. "View Audit Log" UI (drop-in)
+
+The package ships `AuditLogView` — reads the signed NDJSON from the App Group
+container and shows a verification banner (✓ chain intact / ⚠️ tampering at seq N)
+plus the per-action history. Verification is delegated to the sink service (only
+it has the key + the C-ABI verifier):
+
+```swift
+import ChronosLedger
+
+// the shared group container path the sink writes to:
+let ledgerURL = FileManager.default
+    .containerURL(forSecurityApplicationGroupIdentifier: "group.io.quantumencoding.cosmicduck")!
+    .appendingPathComponent("ChronosLedger/ledger.ndjson")
+
+AuditLogView(ledgerURL: ledgerURL) { await chronos.verifyLedger() }
+```
+
+`chronos.verifyLedger()` (on `XPCChronos`) round-trips to the service, which
+re-walks the ledger with `cl_verify` and returns a `LedgerVerdict`
+(`chainOk`/`sigsOk`/`firstBadSeq`). Validated: a one-byte body edit flips
+`chainOk` to false and pins `firstBadSeq`.
+
+## 6. Verify from the CLI too
 
 Point the bundled `ledger-verify` (or the Zig one) at the group container's
 `ChronosLedger/ledger.ndjson` — expect a clean chain, or `EXFIL_CHAIN` on an

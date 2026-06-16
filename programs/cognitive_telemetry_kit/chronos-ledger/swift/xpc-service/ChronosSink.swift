@@ -86,6 +86,46 @@ public final class ChronosSink {
     public var ledgerPath: String { ledgerURL.path }
     public var publicKeyHex: String { pk.map { String(format: "%02x", $0) }.joined() }
 
+    /// Plain result of `verify()` — kept package-free so this file links with just
+    /// Foundation + the C-ABI. `main.swift` maps it to the package's `LedgerVerdict`.
+    public struct VerifyResult {
+        public let events: Int
+        public let signed: Int
+        public let chainOk: Bool
+        public let sigsOk: Bool
+        public let firstBadSeq: Int?
+    }
+
+    /// Re-walk the persisted ledger and verify every event (chain + signature)
+    /// against our public key via the C-ABI `cl_verify`.
+    public func verify() -> VerifyResult {
+        var pkCopy = pk
+        var events = 0, signed = 0, firstBad: Int? = nil
+        var chainOk = true, sigsOk = true
+        guard let data = try? Data(contentsOf: ledgerURL) else {
+            return VerifyResult(events: 0, signed: 0, chainOk: true, sigsOk: true, firstBadSeq: nil)
+        }
+        for line in String(decoding: data, as: UTF8.self).split(separator: "\n") {
+            let bytes = Array(line.utf8)
+            if bytes.isEmpty { continue }
+            events += 1
+            var cOk: Int32 = 0, sPresent: Int32 = 0, sOk: Int32 = 0
+            _ = cl_verify(&pkCopy, bytes, bytes.count, &cOk, &sPresent, &sOk)
+            if sPresent == 1 { signed += 1 }
+            let ok = cOk == 1 && (sPresent == 0 || sOk == 1)
+            if !ok {
+                if cOk != 1 { chainOk = false }
+                if sPresent == 1 && sOk != 1 { sigsOk = false }
+                if firstBad == nil {
+                    let obj = try? JSONSerialization.jsonObject(with: Data(bytes)) as? [String: Any]
+                    firstBad = (obj?["seq"] as? String).flatMap { Int($0) } ?? (events - 1)
+                }
+            }
+        }
+        return VerifyResult(
+            events: events, signed: signed, chainOk: chainOk, sigsOk: sigsOk, firstBadSeq: firstBad)
+    }
+
     static func isMilestone(_ body: Data) -> Bool {
         guard
             let obj = try? JSONSerialization.jsonObject(with: body) as? [String: Any],

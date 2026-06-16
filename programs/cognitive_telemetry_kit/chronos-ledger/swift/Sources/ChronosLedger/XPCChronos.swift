@@ -33,24 +33,19 @@ public final class XPCChronos: ChronosEmitting, @unchecked Sendable {
         self.user = user
     }
 
-    private func proxy() -> ChronosSinkProtocol? {
+    private func connection() -> NSXPCConnection {
         lock.lock()
         defer { lock.unlock() }
-        if _connection == nil {
-            let c = NSXPCConnection(serviceName: serviceName)
-            c.remoteObjectInterface = NSXPCInterface(with: ChronosSinkProtocol.self)
-            c.invalidationHandler = { [weak self] in
-                guard let self else { return }
-                self.lock.lock()
-                self._connection = nil
-                self.lock.unlock()
-            }
-            c.resume()
-            _connection = c
+        if let c = _connection { return c }
+        let c = NSXPCConnection(serviceName: serviceName)
+        c.remoteObjectInterface = NSXPCInterface(with: ChronosSinkProtocol.self)
+        c.invalidationHandler = { [weak self] in
+            guard let self else { return }
+            self.lock.lock(); self._connection = nil; self.lock.unlock()
         }
-        return _connection?.remoteObjectProxyWithErrorHandler { _ in
-            // Swallowed: a down service must never surface as an app error.
-        } as? ChronosSinkProtocol
+        c.resume()
+        _connection = c
+        return c
     }
 
     @discardableResult
@@ -59,15 +54,55 @@ public final class XPCChronos: ChronosEmitting, @unchecked Sendable {
             let data = Chronos.encode(
                 event, agent: agent, session: session, model: model, user: user)
         else { return false }
-        guard let proxy = proxy() else { return false }
+        let proxy =
+            connection().remoteObjectProxyWithErrorHandler { _ in
+                // Swallowed: a down service must never surface as an app error.
+            } as? ChronosSinkProtocol
+        guard let proxy else { return false }
         proxy.emit(data)
         return true
     }
 
-    /// Fetch the sink's ledger path + public key (for a "view audit log" UI).
-    public func ledgerInfo(_ reply: @escaping (String, String) -> Void) {
-        guard let proxy = proxy() else { return reply("", "") }
-        proxy.ledgerInfo(withReply: reply)
+    /// Ledger path + public key for a "view audit log" UI.
+    public func ledgerInfo() async -> (path: String, publicKeyHex: String)? {
+        await withCheckedContinuation { cont in
+            let once = ResumeOnce(cont)
+            let proxy =
+                connection().remoteObjectProxyWithErrorHandler { _ in once.resume(nil) }
+                as? ChronosSinkProtocol
+            guard let proxy else { return once.resume(nil) }
+            proxy.ledgerInfo { path, pub in once.resume((path, pub)) }
+        }
+    }
+
+    /// Verify the chain + signatures (the service does the crypto).
+    public func verifyLedger() async -> LedgerVerdict? {
+        await withCheckedContinuation { cont in
+            let once = ResumeOnce(cont)
+            let proxy =
+                connection().remoteObjectProxyWithErrorHandler { _ in once.resume(nil) }
+                as? ChronosSinkProtocol
+            guard let proxy else { return once.resume(nil) }
+            proxy.verifyLedger { data in
+                once.resume(try? JSONDecoder().decode(LedgerVerdict.self, from: data))
+            }
+        }
+    }
+}
+
+/// Guards a CheckedContinuation against double/zero resume across the XPC reply
+/// and error-handler paths (exactly one fires, but we make resume idempotent).
+private final class ResumeOnce<T: Sendable>: @unchecked Sendable {
+    private let cont: CheckedContinuation<T?, Never>
+    private var done = false
+    private let lock = NSLock()
+    init(_ cont: CheckedContinuation<T?, Never>) { self.cont = cont }
+    func resume(_ value: T?) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !done else { return }
+        done = true
+        cont.resume(returning: value)
     }
 }
 #endif

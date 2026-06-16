@@ -16,6 +16,11 @@ import Foundation
     /// Ask the service for the current ledger location + public key so the app can
     /// surface "view audit log" / hand the signed bundle to the user.
     func ledgerInfo(withReply reply: @escaping (_ ledgerPath: String, _ publicKeyHex: String) -> Void)
+
+    /// Re-walk the ledger and verify the chain + signatures, returning a
+    /// JSON-encoded `LedgerVerdict`. Done in the service because only it has the
+    /// key and the C-ABI verifier.
+    func verifyLedger(withReply reply: @escaping (_ verdictJSON: Data) -> Void)
 }
 
 /// Common surface for the two transports so app code can hold `any ChronosEmitting`

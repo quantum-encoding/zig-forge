@@ -39,6 +39,14 @@ final class SinkService: NSObject, NSXPCListenerDelegate, ChronosSinkProtocol {
         reply(sink.ledgerPath, sink.publicKeyHex)
     }
 
+    func verifyLedger(withReply reply: @escaping (Data) -> Void) {
+        let r = sink.verify()
+        let verdict = LedgerVerdict(
+            events: r.events, signed: r.signed, chainOk: r.chainOk, sigsOk: r.sigsOk,
+            firstBadSeq: r.firstBadSeq)
+        reply((try? JSONEncoder().encode(verdict)) ?? Data())
+    }
+
     func listener(
         _ listener: NSXPCListener, shouldAcceptNewConnection newConnection: NSXPCConnection
     ) -> Bool {
