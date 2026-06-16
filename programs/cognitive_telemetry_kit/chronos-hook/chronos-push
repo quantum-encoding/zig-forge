@@ -46,7 +46,7 @@ else
   h=$(git rev-parse HEAD); base=""
   while [ -n "$h" ]; do
     case "$(git log -1 --format=%s "$h" 2>/dev/null)" in
-      "[CHRONOS]"*) h=$(git rev-parse "$h^" 2>/dev/null || echo "") ;;
+      "[CHRONOS]"* | "[CHRONOS:"*) h=$(git rev-parse "$h^" 2>/dev/null || echo "") ;;
       "")           break ;;
       *)            base="$h"; break ;;
     esac
@@ -54,7 +54,8 @@ else
   [ -n "$base" ] || base=$(git rev-list --max-parents=0 HEAD | tail -1)
 fi
 
-ticks_total=$(git log --format=%s "${base}..HEAD" 2>/dev/null | grep -c '^\[CHRONOS\]' || true)
+# Match legacy [CHRONOS] and per-agent [CHRONOS:claude]/[CHRONOS:grok]/… ticks.
+ticks_total=$(git log --format=%s "${base}..HEAD" 2>/dev/null | grep -cE '^\[CHRONOS(:[A-Za-z0-9_-]+)?\]' || true)
 
 if [ "${ticks_total:-0}" -eq 0 ]; then
   echo "chronos-push: no ticks to fold"
@@ -73,13 +74,15 @@ else
     subj=$(git log -1 --format=%s "$sha")
     tree=$(git rev-parse "${sha}^{tree}")
     case "$subj" in
-      "[CHRONOS]"*)
+      "[CHRONOS]"* | "[CHRONOS:"*)
         pending=1; tip_tree="$tree"
         # Verbose action ("Edit /path/to/file") and the cognitive state captured
         # at that tick (gerund / thinking-summary / activity), so the squash log
         # records WHAT was done and the INTENT behind it — nothing is lost.
+        # The agent segment (::claude::/::grok::/…) is matched generically so the
+        # state extraction works regardless of which agent authored the tick.
         d=$(printf '%s' "$subj" | sed -n 's/.* → tool-completion - \(.*\)$/\1/p')
-        st=$(printf '%s' "$subj" | sed -n 's/.*::claude-code::\([^:]*\)::TICK.*/\1/p')
+        st=$(printf '%s' "$subj" | sed -n 's/.*::[^:]*::\([^:]*\)::TICK.*/\1/p')
         if [ -n "$d" ]; then
           if [ -n "$st" ]; then descs+=("[$st] $d"); else descs+=("$d"); fi
         fi
@@ -130,7 +133,7 @@ fi
 
 # Leak guard: never push if any [CHRONOS] tick would still reach the remote.
 if git rev-parse --verify -q "$upstream" >/dev/null 2>&1; then
-  remaining=$(git log --format=%s "${upstream}..HEAD" 2>/dev/null | grep -c '^\[CHRONOS\]' || true)
+  remaining=$(git log --format=%s "${upstream}..HEAD" 2>/dev/null | grep -cE '^\[CHRONOS(:[A-Za-z0-9_-]+)?\]' || true)
   if [ "${remaining:-0}" -gt 0 ]; then
     echo "chronos-push: ERROR — ${remaining} [CHRONOS] tick(s) still present after fold; refusing to push." >&2
     exit 1

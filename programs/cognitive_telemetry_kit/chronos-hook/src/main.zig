@@ -14,6 +14,20 @@ const LEDGER_SOCKET_DEFAULT = "/tmp/chronos-ledger.sock";
 // (execvp does PATH resolution, which execve would not.)
 extern "c" fn fork() std.c.pid_t;
 extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
+extern "c" fn getppid() std.c.pid_t;
+
+// Agent identity is resolved at RUNTIME, never from config — because Grok reads
+// its hooks from ~/.claude (shares Claude's settings.json), so the same hook
+// command fires for both. Config can't tell them apart; the kernel can. We climb
+// the process tree and match the executing agent binary. `CHRONOS_AGENT` overrides.
+const AgentPattern = struct { needle: []const u8, name: []const u8 };
+const AGENT_PATTERNS = [_]AgentPattern{
+    .{ .needle = "grok", .name = "grok" },
+    .{ .needle = "codex", .name = "codex" },
+    .{ .needle = "gemini", .name = "gemini" },
+    .{ .needle = "antigravity", .name = "gemini" },
+    .{ .needle = "claude", .name = "claude" },
+};
 
 pub fn main() !u8 {
     const allocator = std.heap.c_allocator;
@@ -92,9 +106,24 @@ pub fn main() !u8 {
     const cognitive_state = try getCognitiveState(allocator, tool_name);
     defer allocator.free(cognitive_state);
 
-    // Generate CHRONOS timestamp
-    const chronos_output = try generateChronosTimestamp(allocator);
+    // Which agent is running this hook (kernel ground truth — see resolveAgent).
+    const agent = try resolveAgent(allocator);
+    defer allocator.free(agent);
+
+    // Generate CHRONOS timestamp (agent → the `::<agent>::` body segment).
+    const chronos_output = try generateChronosTimestamp(allocator, agent);
     defer allocator.free(chronos_output);
+
+    // Stamp the agent into the tick PREFIX: [CHRONOS] -> [CHRONOS:<agent>]. The
+    // fold/squash (chronos-push) matches ^\[CHRONOS(:…)?\], so per-agent ticks
+    // still squash cleanly, and the aiconductor app attributes each tick to its
+    // provider by this prefix.
+    const TICK_PREFIX = "[CHRONOS]";
+    const stamped: []const u8 = if (std.mem.startsWith(u8, chronos_output, TICK_PREFIX))
+        try std.fmt.allocPrint(allocator, "[CHRONOS:{s}]{s}", .{ agent, chronos_output[TICK_PREFIX.len..] })
+    else
+        try allocator.dupe(u8, chronos_output);
+    defer allocator.free(stamped);
 
     // Build commit message
     var commit_msg = std.ArrayList(u8).empty;
@@ -102,14 +131,14 @@ pub fn main() !u8 {
 
     // Inject cognitive state into CHRONOS output
     // Replace "::::TICK" with "::<state>::TICK"
-    if (std.mem.indexOf(u8, chronos_output, "::::TICK")) |pos| {
-        try commit_msg.appendSlice(allocator, chronos_output[0..pos]);
+    if (std.mem.indexOf(u8, stamped, "::::TICK")) |pos| {
+        try commit_msg.appendSlice(allocator, stamped[0..pos]);
         try commit_msg.appendSlice(allocator, "::");
         try commit_msg.appendSlice(allocator, cognitive_state);
         try commit_msg.appendSlice(allocator, "::");
-        try commit_msg.appendSlice(allocator, chronos_output[pos + 4 ..]);
+        try commit_msg.appendSlice(allocator, stamped[pos + 4 ..]);
     } else {
-        try commit_msg.appendSlice(allocator, chronos_output);
+        try commit_msg.appendSlice(allocator, stamped);
     }
 
     // Append tool description if available
@@ -125,7 +154,7 @@ pub fn main() !u8 {
     // of which leaves no git diff. Best-effort and non-blocking: any failure is
     // swallowed so it can never affect ticking. The hook holds NO signing key;
     // the sink chains and signs (see ../chronos-ledger/DESIGN.md, Addition 1).
-    emitLedgerEvent(allocator, hook_json, repo_root, tool_name, file_path, desc_field, cognitive_state) catch {};
+    emitLedgerEvent(allocator, hook_json, repo_root, agent, tool_name, file_path, desc_field, cognitive_state) catch {};
 
     // Stage all changes
     _ = try runCommand(allocator, &[_][]const u8{ "git", "add", "." });
@@ -166,6 +195,7 @@ fn emitLedgerEvent(
     allocator: std.mem.Allocator,
     hook_json: []const u8,
     repo_root: ?[]const u8,
+    agent: []const u8,
     tool_name: ?[]const u8,
     file_path: ?[]const u8,
     desc_field: ?[]const u8,
@@ -209,7 +239,7 @@ fn emitLedgerEvent(
     var ts_buf: [24]u8 = undefined;
     const ts = std.fmt.bufPrint(&ts_buf, "{d}", .{ms}) catch "0";
 
-    const agent_members = [_]canonical.Member{.{ .key = "id", .value = .{ .string = AGENT_ID } }};
+    const agent_members = [_]canonical.Member{.{ .key = "id", .value = .{ .string = agent } }};
     const ev = canonical.Value{ .object = &[_]canonical.Member{
         .{ .key = "agent", .value = .{ .object = &agent_members } },
         .{ .key = "kind", .value = .{ .string = kind } },
@@ -361,8 +391,8 @@ fn getCognitiveState(allocator: std.mem.Allocator, tool_name: ?[]const u8) ![]co
     return try allocator.dupe(u8, toolActivity(tool_name));
 }
 
-fn generateChronosTimestamp(allocator: std.mem.Allocator) ![]const u8 {
-    var result = try runCommand(allocator, &[_][]const u8{ CHRONOS_STAMP_PATH, AGENT_ID, "tool-completion" });
+fn generateChronosTimestamp(allocator: std.mem.Allocator, agent: []const u8) ![]const u8 {
+    var result = try runCommand(allocator, &[_][]const u8{ CHRONOS_STAMP_PATH, agent, "tool-completion" });
     defer result.deinit();
 
     if (result.exit_code == 0 and result.stdout.len > 0) {
@@ -378,10 +408,128 @@ fn generateChronosTimestamp(allocator: std.mem.Allocator) ![]const u8 {
     // Zig 0.16: Use c.clock_gettime for wall clock time
     var ts: c.timespec = undefined;
     if (c.clock_gettime(c.CLOCK.REALTIME, &ts) != 0) {
-        return try std.fmt.allocPrint(allocator, "[FALLBACK] 0::{s}::::tool-completion", .{AGENT_ID});
+        return try std.fmt.allocPrint(allocator, "[FALLBACK] 0::{s}::::tool-completion", .{agent});
     }
     const timestamp = @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
-    return try std.fmt.allocPrint(allocator, "[FALLBACK] {d}::{s}::::tool-completion", .{ timestamp, AGENT_ID });
+    return try std.fmt.allocPrint(allocator, "[FALLBACK] {d}::{s}::::tool-completion", .{ timestamp, agent });
+}
+
+/// Resolve which coding agent is running this hook. Priority:
+///   1) CHRONOS_AGENT env (explicit override),
+///   2) nearest agent binary in our process ancestry (kernel ground truth),
+///   3) "claude-code" (legacy default).
+/// Returns an owned slice.
+fn resolveAgent(allocator: std.mem.Allocator) ![]u8 {
+    if (c.getenv("CHRONOS_AGENT")) |p| {
+        const s = std.mem.span(p);
+        if (s.len > 0) return allocator.dupe(u8, s);
+    }
+    if (try detectAncestorAgent(allocator)) |name| return name;
+    return allocator.dupe(u8, AGENT_ID);
+}
+
+const ProcRow = struct { pid: i32, ppid: i32, cmd: []const u8 };
+
+/// Climb the process tree from our parent, matching each ancestor's command line
+/// against the known agent binaries. Nearest match wins. Returns owned name or null.
+fn detectAncestorAgent(allocator: std.mem.Allocator) !?[]u8 {
+    var result = runCommand(allocator, &[_][]const u8{ "ps", "-axo", "pid=,ppid=,command=" }) catch return null;
+    defer result.deinit();
+    if (result.exit_code != 0) return null;
+
+    var rows: std.ArrayList(ProcRow) = .empty;
+    defer rows.deinit(allocator);
+    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+    while (lines.next()) |raw| {
+        var i: usize = 0;
+        const line = std.mem.trimStart(u8, raw, " ");
+        if (line.len == 0) continue;
+        const pid = scanInt(line, &i) orelse continue;
+        skipSpaces(line, &i);
+        const ppid = scanInt(line, &i) orelse continue;
+        skipSpaces(line, &i);
+        try rows.append(allocator, .{ .pid = pid, .ppid = ppid, .cmd = line[i..] });
+    }
+
+    var cur: i32 = getppid();
+    var depth: usize = 0;
+    while (cur > 1 and depth < 40) : (depth += 1) {
+        const row = findProc(rows.items, cur) orelse break;
+        if (agentFromCommand(row.cmd)) |name| return try allocator.dupe(u8, name);
+        cur = row.ppid;
+    }
+    return null;
+}
+
+/// Identify the agent from a process command line by inspecting only the
+/// EXECUTABLE (and, for runtimes like node, the script path) — never the prompt
+/// or args. This is what stops `claude -p "fix grok stuff"` from being misread as
+/// grok: the agent name must be in the binary that's running, not its arguments.
+fn agentFromCommand(cmd: []const u8) ?[]const u8 {
+    const exe = firstToken(cmd);
+    if (matchAgentToken(exe)) |n| return n;
+    if (isRuntime(basename(exe))) {
+        const rest = std.mem.trimStart(u8, cmd[exe.len..], " \t");
+        if (matchAgentToken(firstToken(rest))) |n| return n;
+    }
+    return null;
+}
+
+fn matchAgentToken(token: []const u8) ?[]const u8 {
+    for (AGENT_PATTERNS) |pat| {
+        if (containsCI(token, pat.needle)) return pat.name;
+    }
+    return null;
+}
+
+fn firstToken(s: []const u8) []const u8 {
+    var end: usize = 0;
+    while (end < s.len and s[end] != ' ' and s[end] != '\t') : (end += 1) {}
+    return s[0..end];
+}
+
+fn basename(p: []const u8) []const u8 {
+    if (std.mem.lastIndexOfScalar(u8, p, '/')) |i| return p[i + 1 ..];
+    return p;
+}
+
+fn isRuntime(name: []const u8) bool {
+    const runtimes = [_][]const u8{ "node", "deno", "bun", "python", "python3", "sh", "bash", "zsh", "ruby", "electron" };
+    for (runtimes) |r| {
+        if (std.ascii.eqlIgnoreCase(name, r)) return true;
+    }
+    return false;
+}
+
+fn findProc(rows: []const ProcRow, pid: i32) ?ProcRow {
+    for (rows) |r| {
+        if (r.pid == pid) return r;
+    }
+    return null;
+}
+
+fn scanInt(s: []const u8, i: *usize) ?i32 {
+    const start = i.*;
+    while (i.* < s.len and s[i.*] >= '0' and s[i.*] <= '9') : (i.* += 1) {}
+    if (i.* == start) return null;
+    return std.fmt.parseInt(i32, s[start..i.*], 10) catch null;
+}
+
+fn skipSpaces(s: []const u8, i: *usize) void {
+    while (i.* < s.len and (s[i.*] == ' ' or s[i.*] == '\t')) : (i.* += 1) {}
+}
+
+fn containsCI(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0 or haystack.len < needle.len) return false;
+    var i: usize = 0;
+    outer: while (i + needle.len <= haystack.len) : (i += 1) {
+        var j: usize = 0;
+        while (j < needle.len) : (j += 1) {
+            if (std.ascii.toLower(haystack[i + j]) != std.ascii.toLower(needle[j])) continue :outer;
+        }
+        return true;
+    }
+    return false;
 }
 
 const CommandResult = struct {

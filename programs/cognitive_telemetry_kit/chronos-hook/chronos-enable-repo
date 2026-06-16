@@ -45,7 +45,7 @@ if [ -e "$target.pre-chronos" ]; then
 /usr/local/bin/chronos-post-commit "$@"            # fold ticks into HEAD (+push)
 __subj=$(git log -1 --format=%s HEAD 2>/dev/null)  # then chain — real commits only
 case "$__subj" in
-  "[CHRONOS]"*) : ;;
+  "[CHRONOS]"* | "[CHRONOS:"*) : ;;
   *) "$(git rev-parse --git-path hooks)/post-commit.pre-chronos" "$@" || true ;;
 esac
 exit 0
