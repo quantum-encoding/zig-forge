@@ -75,17 +75,20 @@ pub fn main() !u8 {
     const hook_json = readAllStdin(allocator) catch try allocator.dupe(u8, "");
     defer allocator.free(hook_json);
 
-    const tool_name = try extractJsonString(allocator, hook_json, "\"tool_name\"");
+    // Field extraction is provider-agnostic: Claude/Grok use snake_case
+    // (tool_name, file_path, description), Codex's shell payload uses `command`,
+    // and other CLIs may use camelCase. Try each spelling, first hit wins.
+    const tool_name = try extractAny(allocator, hook_json, &.{ "\"tool_name\"", "\"toolName\"" });
     defer if (tool_name) |t| allocator.free(t);
 
     // Tick description: a VERBOSE action so the squash log preserves intent —
     // "<tool> <file_path>" for file tools (Edit/Write/Read/NotebookEdit/...),
-    // "<tool> <description>" for Bash etc., else just the tool name. file_path
-    // takes priority over description (an Edit has no description; a Bash has no
+    // "<tool> <description|command>" for Bash/shell, else just the tool name.
+    // file_path takes priority (an Edit has no description; a Bash has no
     // file_path), so each captures its most informative detail.
-    const file_path = try extractJsonString(allocator, hook_json, "\"file_path\"");
+    const file_path = try extractAny(allocator, hook_json, &.{ "\"file_path\"", "\"filePath\"", "\"path\"", "\"absolute_path\"" });
     defer if (file_path) |f| allocator.free(f);
-    const desc_field = try extractJsonString(allocator, hook_json, "\"description\"");
+    const desc_field = try extractAny(allocator, hook_json, &.{ "\"description\"", "\"command\"", "\"cmd\"" });
     defer if (desc_field) |d| allocator.free(d);
 
     var tool_description: ?[]const u8 = null;
@@ -178,12 +181,18 @@ pub fn main() !u8 {
 
 /// Map a Claude Code tool name to a ledger event `kind`.
 fn ledgerKind(tool: []const u8) []const u8 {
-    const eql = std.mem.eql;
-    if (eql(u8, tool, "Read") or eql(u8, tool, "NotebookRead")) return "read";
-    if (eql(u8, tool, "Edit") or eql(u8, tool, "Write") or eql(u8, tool, "MultiEdit") or eql(u8, tool, "NotebookEdit")) return "write";
-    if (eql(u8, tool, "Bash") or eql(u8, tool, "BashOutput") or eql(u8, tool, "KillShell")) return "exec";
-    if (eql(u8, tool, "WebFetch")) return "net";
-    if (eql(u8, tool, "WebSearch") or eql(u8, tool, "Grep") or eql(u8, tool, "Glob")) return "search";
+    const eq = std.ascii.eqlIgnoreCase; // tolerate casing across CLIs
+    const any = struct {
+        fn f(t: []const u8, names: []const []const u8) bool {
+            for (names) |n| if (eq(t, n)) return true;
+            return false;
+        }
+    }.f;
+    if (any(tool, &.{ "Read", "NotebookRead", "read_file", "readFile", "view" })) return "read";
+    if (any(tool, &.{ "Edit", "Write", "MultiEdit", "NotebookEdit", "write_file", "edit_file", "apply_patch", "str_replace_editor" })) return "write";
+    if (any(tool, &.{ "Bash", "BashOutput", "KillShell", "shell", "exec", "local_shell", "run_terminal_cmd" })) return "exec";
+    if (any(tool, &.{ "WebFetch", "fetch", "web_fetch" })) return "net";
+    if (any(tool, &.{ "WebSearch", "Grep", "Glob", "web_search", "grep", "glob" })) return "search";
     return "other";
 }
 
@@ -326,6 +335,16 @@ fn readAllStdin(allocator: std.mem.Allocator) ![]const u8 {
         if (buf.items.len > (1 << 20)) break;
     }
     return buf.toOwnedSlice(allocator);
+}
+
+/// Try several quoted keys in order; return the first that yields a value.
+/// Lets one hook serve providers with different payload spellings (snake_case
+/// vs camelCase, description vs command) without a per-provider code path.
+fn extractAny(allocator: std.mem.Allocator, json: []const u8, keys: []const []const u8) !?[]const u8 {
+    for (keys) |k| {
+        if (try extractJsonString(allocator, json, k)) |v| return v;
+    }
+    return null;
 }
 
 /// Extract a JSON string value for `key` (key includes its quotes, e.g.

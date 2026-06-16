@@ -1,0 +1,13 @@
+{
+  "_comment": "Chronos per-agent tick hook for OpenAI Codex. Copy to ~/.codex/hooks.json (global) or <repo>/.codex/hooks.json (per-project). Codex's hook config is Claude-compatible JSON. NOTE: Codex only runs PostToolUse for SHELL commands today (not Edit/Write/Read) — so Codex ticks cover shell/exec actions; file edits won't fire a PostToolUse tick. chronos-hook auto-detects the agent (codex) by process ancestry, so no agent name is needed here.",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash|shell|local_shell",
+        "hooks": [
+          { "type": "command", "command": "/usr/local/bin/chronos-hook" }
+        ]
+      }
+    ]
+  }
+}
