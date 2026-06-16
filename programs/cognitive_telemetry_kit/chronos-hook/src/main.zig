@@ -91,15 +91,17 @@ pub fn main() !u8 {
     const desc_field = try extractAny(allocator, hook_json, &.{ "\"description\"", "\"command\"", "\"cmd\"" });
     defer if (desc_field) |d| allocator.free(d);
 
+    // Cap the detail: Codex's `apply_patch` puts the WHOLE patch in
+    // tool_input.command, which would otherwise bloat the one-line commit subject.
     var tool_description: ?[]const u8 = null;
     if (tool_name) |verb| {
         if (file_path orelse desc_field) |detail| {
-            tool_description = try std.fmt.allocPrint(allocator, "{s} {s}", .{ verb, detail });
+            tool_description = try std.fmt.allocPrint(allocator, "{s} {s}", .{ verb, capDetail(detail, 200) });
         } else {
             tool_description = try allocator.dupe(u8, verb);
         }
     } else if (desc_field) |d| {
-        tool_description = try allocator.dupe(u8, d);
+        tool_description = try allocator.dupe(u8, capDetail(d, 200));
     }
     defer if (tool_description) |desc| allocator.free(desc);
 
@@ -335,6 +337,15 @@ fn readAllStdin(allocator: std.mem.Allocator) ![]const u8 {
         if (buf.items.len > (1 << 20)) break;
     }
     return buf.toOwnedSlice(allocator);
+}
+
+/// Truncate `s` to at most `max` bytes, backing off so a multi-byte UTF-8
+/// sequence is never split (keeps the commit subject / one-liner sane).
+fn capDetail(s: []const u8, max: usize) []const u8 {
+    if (s.len <= max) return s;
+    var end = max;
+    while (end > 0 and (s[end] & 0xC0) == 0x80) : (end -= 1) {}
+    return s[0..end];
 }
 
 /// Try several quoted keys in order; return the first that yields a value.
