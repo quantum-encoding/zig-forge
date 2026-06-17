@@ -19,6 +19,11 @@ public struct Chronos: Sendable {
     public var session: String?
     public var model: String?
     public var user: String?
+    /// Firing process pid/ppid — the join key to Guardian Shield's kernel ES view.
+    /// Carried as decimal strings to match the float-free wire schema (and the Zig
+    /// hook's `agent.pid`/`ppid`). For an in-app emitter set the spawned agent's pid.
+    public var pid: String?
+    public var ppid: String?
 
     /// Default sink socket if `$CHRONOS_LEDGER_SOCKET` is unset.
     public static let defaultSocket = "/tmp/chronos-ledger.sock"
@@ -36,6 +41,10 @@ public struct Chronos: Sendable {
     public func session(_ v: String) -> Chronos { var c = self; c.session = v; return c }
     public func model(_ v: String) -> Chronos { var c = self; c.model = v; return c }
     public func user(_ v: String) -> Chronos { var c = self; c.user = v; return c }
+    /// Set the firing process pid (and optional ppid). Accepts an Int for ergonomics.
+    public func pid(_ v: Int, ppid: Int? = nil) -> Chronos {
+        var c = self; c.pid = String(v); c.ppid = ppid.map(String.init); return c
+    }
 
     /// Fire one event at the sink. Non-blocking, best-effort: returns `true` if
     /// the datagram reached the kernel, `false` if the sink was unavailable/busy
@@ -45,7 +54,8 @@ public struct Chronos: Sendable {
     public func emit(_ event: Event) -> Bool {
         guard
             let data = Self.encode(
-                event, agent: agent, session: session, model: model, user: user)
+                event, agent: agent, session: session, model: model, user: user,
+                pid: pid, ppid: ppid)
         else { return false }
         return Self.send(data, to: socketPath)
     }
@@ -53,10 +63,12 @@ public struct Chronos: Sendable {
     /// Build the wire body (internal — exposed for tests). Float-free; carries no
     /// `seq`/`prev`/`this`/`sig`/`v` (the sink injects those).
     static func encode(
-        _ event: Event, agent: String, session: String?, model: String?, user: String?
+        _ event: Event, agent: String, session: String?, model: String?, user: String?,
+        pid: String? = nil, ppid: String? = nil
     ) -> Data? {
         let body = WireBody(
-            agent: WireAgent(id: agent, session: session, model: model, user: user),
+            agent: WireAgent(
+                id: agent, session: session, model: model, user: user, pid: pid, ppid: ppid),
             kind: event.kind,
             state: event.state,
             act: event.act,
@@ -113,4 +125,8 @@ struct WireAgent: Encodable {
     let session: String?
     let model: String?
     let user: String?
+    /// Decimal-string pid/ppid (omitted from the wire when nil — synthesized
+    /// `encodeIfPresent`). Matches the Zig hook's `agent.pid`/`ppid`.
+    var pid: String? = nil
+    var ppid: String? = nil
 }

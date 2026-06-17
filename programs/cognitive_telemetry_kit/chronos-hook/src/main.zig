@@ -111,9 +111,11 @@ pub fn main() !u8 {
     const cognitive_state = try getCognitiveState(allocator, tool_name);
     defer allocator.free(cognitive_state);
 
-    // Which agent is running this hook (kernel ground truth — see resolveAgent).
-    const agent = try resolveAgent(allocator);
-    defer allocator.free(agent);
+    // Which agent is running this hook (kernel ground truth — see resolveAgent),
+    // and the firing process's pid/ppid (the GS-correlation join key).
+    const agent_info = try resolveAgent(allocator);
+    defer allocator.free(agent_info.name);
+    const agent = agent_info.name;
 
     // Generate CHRONOS timestamp (agent → the `::<agent>::` body segment).
     const chronos_output = try generateChronosTimestamp(allocator, agent);
@@ -152,6 +154,13 @@ pub fn main() !u8 {
         try commit_msg.appendSlice(allocator, desc);
     }
 
+    // Restore the firing process's PID into the tick (the Linux ticks carried
+    // `PID-<n>`; the macOS port dropped it). Lets the squash / aiconductor attribute
+    // a tick to a specific process; the ledger below carries the same pid.
+    const pid_tag = try std.fmt.allocPrint(allocator, " PID-{d}", .{agent_info.pid});
+    defer allocator.free(pid_tag);
+    try commit_msg.appendSlice(allocator, pid_tag);
+
     // Plane 2 (accountability ledger): emit a structured event for EVERY tool
     // call — including reads/searches that change no files and so create no git
     // tick — to the privileged sink (ledger-daemon / Guardian Shield). This is
@@ -159,7 +168,7 @@ pub fn main() !u8 {
     // of which leaves no git diff. Best-effort and non-blocking: any failure is
     // swallowed so it can never affect ticking. The hook holds NO signing key;
     // the sink chains and signs (see ../chronos-ledger/DESIGN.md, Addition 1).
-    emitLedgerEvent(allocator, hook_json, repo_root, agent, tool_name, file_path, desc_field, cognitive_state) catch {};
+    emitLedgerEvent(allocator, hook_json, repo_root, agent, agent_info.pid, agent_info.ppid, tool_name, file_path, desc_field, cognitive_state) catch {};
 
     // Stage all changes
     _ = try runCommand(allocator, &[_][]const u8{ "git", "add", "." });
@@ -207,6 +216,8 @@ fn emitLedgerEvent(
     hook_json: []const u8,
     repo_root: ?[]const u8,
     agent: []const u8,
+    pid: i32,
+    ppid: i32,
     tool_name: ?[]const u8,
     file_path: ?[]const u8,
     desc_field: ?[]const u8,
@@ -250,7 +261,16 @@ fn emitLedgerEvent(
     var ts_buf: [24]u8 = undefined;
     const ts = std.fmt.bufPrint(&ts_buf, "{d}", .{ms}) catch "0";
 
-    const agent_members = [_]canonical.Member{.{ .key = "id", .value = .{ .string = agent } }};
+    // pid/ppid as decimal STRINGS (the schema is float-free and carries magnitudes
+    // as strings; keeps the wire uniform with the Swift WireAgent's String fields so
+    // CLI- and app-emitted events share one canonical shape in a unified ledger).
+    const pid_s = try std.fmt.allocPrint(a, "{d}", .{pid});
+    const ppid_s = try std.fmt.allocPrint(a, "{d}", .{ppid});
+    const agent_members = [_]canonical.Member{
+        .{ .key = "id", .value = .{ .string = agent } },
+        .{ .key = "pid", .value = .{ .string = pid_s } },
+        .{ .key = "ppid", .value = .{ .string = ppid_s } },
+    };
     const ev = canonical.Value{ .object = &[_]canonical.Member{
         .{ .key = "agent", .value = .{ .object = &agent_members } },
         .{ .key = "kind", .value = .{ .string = kind } },
@@ -444,25 +464,33 @@ fn generateChronosTimestamp(allocator: std.mem.Allocator, agent: []const u8) ![]
     return try std.fmt.allocPrint(allocator, "[FALLBACK] {d}::{s}::::tool-completion", .{ timestamp, agent });
 }
 
+/// Resolved agent identity: the agent NAME plus the firing process's pid/ppid.
+/// The pid is kernel ground truth — the join key that lets Guardian Shield's ES
+/// view of *this pid's* `open()`/`connect()` calls be compared against the agent's
+/// self-reported ledger ("the OS is the tiebreaker"). `name` is caller-owned.
+const AgentInfo = struct { name: []u8, pid: i32, ppid: i32 };
+
 /// Resolve which coding agent is running this hook. Priority:
 ///   1) CHRONOS_AGENT env (explicit override),
 ///   2) nearest agent binary in our process ancestry (kernel ground truth),
 ///   3) "claude-code" (legacy default).
-/// Returns an owned slice.
-fn resolveAgent(allocator: std.mem.Allocator) ![]u8 {
+fn resolveAgent(allocator: std.mem.Allocator) !AgentInfo {
     if (c.getenv("CHRONOS_AGENT")) |p| {
         const s = std.mem.span(p);
-        if (s.len > 0) return allocator.dupe(u8, s);
+        // Explicit override: the agent's own pid is unknown, so report the hook's
+        // parent (the process that spawned us — typically the agent or its shell).
+        if (s.len > 0) return .{ .name = try allocator.dupe(u8, s), .pid = getppid(), .ppid = 0 };
     }
-    if (try detectAncestorAgent(allocator)) |name| return name;
-    return allocator.dupe(u8, AGENT_ID);
+    if (try detectAncestorAgent(allocator)) |info| return info;
+    return .{ .name = try allocator.dupe(u8, AGENT_ID), .pid = getppid(), .ppid = 0 };
 }
 
 const ProcRow = struct { pid: i32, ppid: i32, cmd: []const u8 };
 
 /// Climb the process tree from our parent, matching each ancestor's command line
-/// against the known agent binaries. Nearest match wins. Returns owned name or null.
-fn detectAncestorAgent(allocator: std.mem.Allocator) !?[]u8 {
+/// against the known agent binaries. Nearest match wins. Returns the matched
+/// agent's name + its pid/ppid (the firing process), or null.
+fn detectAncestorAgent(allocator: std.mem.Allocator) !?AgentInfo {
     var result = runCommand(allocator, &[_][]const u8{ "ps", "-axo", "pid=,ppid=,command=" }) catch return null;
     defer result.deinit();
     if (result.exit_code != 0) return null;
@@ -485,7 +513,8 @@ fn detectAncestorAgent(allocator: std.mem.Allocator) !?[]u8 {
     var depth: usize = 0;
     while (cur > 1 and depth < 40) : (depth += 1) {
         const row = findProc(rows.items, cur) orelse break;
-        if (agentFromCommand(row.cmd)) |name| return try allocator.dupe(u8, name);
+        if (agentFromCommand(row.cmd)) |name|
+            return AgentInfo{ .name = try allocator.dupe(u8, name), .pid = row.pid, .ppid = row.ppid };
         cur = row.ppid;
     }
     return null;

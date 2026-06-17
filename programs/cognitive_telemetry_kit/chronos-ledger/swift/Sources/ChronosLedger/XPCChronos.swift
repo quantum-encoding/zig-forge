@@ -14,23 +14,32 @@ public final class XPCChronos: ChronosEmitting, @unchecked Sendable {
     private let session: String?
     private let model: String?
     private let user: String?
+    private let pid: String?
+    private let ppid: String?
     private let lock = NSLock()
     private var _connection: NSXPCConnection?
 
-    /// - Parameter serviceName: the XPC service bundle id, e.g.
-    ///   `"io.quantumencoding.cosmicduck.ChronosSink"`.
+    /// - Parameters:
+    ///   - serviceName: the XPC service bundle id, e.g.
+    ///     `"io.quantumencoding.cosmicduck.ChronosSink"`.
+    ///   - pid/ppid: firing process pid/ppid (the GS-correlation join key). For an
+    ///     in-app emitter wrapping a spawned agent, pass that child's pid.
     public init(
         serviceName: String,
         agent: String,
         session: String? = nil,
         model: String? = nil,
-        user: String? = nil
+        user: String? = nil,
+        pid: Int? = nil,
+        ppid: Int? = nil
     ) {
         self.serviceName = serviceName
         self.agent = agent
         self.session = session
         self.model = model
         self.user = user
+        self.pid = pid.map(String.init)
+        self.ppid = ppid.map(String.init)
     }
 
     private func connection() -> NSXPCConnection {
@@ -52,7 +61,8 @@ public final class XPCChronos: ChronosEmitting, @unchecked Sendable {
     public func emit(_ event: Event) -> Bool {
         guard
             let data = Chronos.encode(
-                event, agent: agent, session: session, model: model, user: user)
+                event, agent: agent, session: session, model: model, user: user,
+                pid: pid, ppid: ppid)
         else { return false }
         let proxy =
             connection().remoteObjectProxyWithErrorHandler { _ in
