@@ -377,6 +377,8 @@ lib `generateLetterFromJson` / `generateLetter(LetterInput)`. Source: rendered b
 | `accent_hex` | hex_color | No | `#1a1a1a` | Letterhead title + accents |
 | `margin` | number | No | `64` | Uniform page margin (points) |
 | `justify` | bool | No | `false` | Justify body paragraphs to both margins (last line stays ragged). For plain markdown, set `justify: true` in YAML frontmatter instead |
+| `password` | string | No | `""` | When set, the PDF is **AES-256 encrypted** (ISO 32000-2 /V5 /R6) — the open password. Validated by qpdf/pikepdf/Acrobat. Native targets only (WASM has no CSPRNG seed) |
+| `owner_password` | string | No | `password` | Permissions password (full access); defaults to `password` when blank |
 
 Caveats: PNG backgrounds with transparency are flattened onto white (fine on the
 default white page; a transparent image over a coloured region would show white

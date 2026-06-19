@@ -66,6 +66,8 @@ pub fn generateLetterFromJson(allocator: std.mem.Allocator, json_str: []const u8
     if (o.get("justify")) |v| {
         if (v == .bool) in.justify = v.bool;
     }
+    in.password = getStr(o, "password");
+    in.owner_password = getStr(o, "owner_password");
 
     return markdown.generateLetter(allocator, in) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,

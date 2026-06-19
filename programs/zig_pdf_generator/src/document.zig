@@ -18,6 +18,19 @@
 //! %%EOF
 
 const std = @import("std");
+const pdf_crypt = @import("pdf_crypt.zig");
+
+/// /P permissions: 0xFFFFFFFC — all permissions granted (reserved bits 1–2 = 0).
+pub const DEFAULT_PERMS: i32 = -4;
+
+/// Standard-encryption state attached to a PdfDocument (AES-256 /V5 /R6).
+pub const Encryption = struct {
+    dict: pdf_crypt.EncryptDict,
+    doc_id: [16]u8, // trailer /ID (and /ID[1])
+    // CSPRNG for per-object IVs, seeded from the caller's seed. Deterministic
+    // given the seed (so a fixed seed yields a reproducible file for tests).
+    prng: std.Random.DefaultCsprng,
+};
 
 // =============================================================================
 // Constants
@@ -1010,6 +1023,10 @@ pub const PdfDocument = struct {
     // PDF metadata (/Info dictionary)
     info: ?PdfInfo = null,
 
+    // Optional standard encryption (AES-256 /V5 /R6). When set, build() emits an
+    // /Encrypt dict + /ID and encrypts every stream and string with the file key.
+    encryption: ?Encryption = null,
+
     // Output buffer
     output: std.ArrayListUnmanaged(u8),
 
@@ -1032,8 +1049,81 @@ pub const PdfDocument = struct {
             .annotations = undefined,
             .annotation_count = 0,
             .current_annotation_page = 0,
+            .encryption = null,
             .output = .empty,
         };
+    }
+
+    /// Enable standard AES-256 (/V5 /R6) encryption. `perms` is the /P bit-field
+    /// (default DEFAULT_PERMS allows printing/copying). Random material (file key,
+    /// salts) is drawn from the system CSPRNG. Call before `build()`.
+    /// `seed` MUST be 32 cryptographically-random bytes in production (the file
+    /// key, salts and IVs are derived from it). Tests pass a fixed seed for a
+    /// reproducible file. `perms` is the /P bit-field (use DEFAULT_PERMS).
+    pub fn enableEncryption(self: *PdfDocument, user_pw: []const u8, owner_pw: []const u8, perms: i32, seed: [32]u8) !void {
+        var prng = std.Random.DefaultCsprng.init(seed);
+        var rnd: pdf_crypt.Randomness = undefined;
+        prng.fill(&rnd.file_key);
+        prng.fill(&rnd.u_val_salt);
+        prng.fill(&rnd.u_key_salt);
+        prng.fill(&rnd.o_val_salt);
+        prng.fill(&rnd.o_key_salt);
+        prng.fill(&rnd.perms_rand);
+        const dict = try pdf_crypt.computeEncryptDict(self.allocator, user_pw, owner_pw, perms, true, rnd);
+        var id: [16]u8 = undefined;
+        prng.fill(&id);
+        self.encryption = .{ .dict = dict, .doc_id = id, .prng = prng };
+    }
+
+    /// Encrypt a stream/string body for AESV3 (IV ‖ AES-256-CBC) when encryption
+    /// is on; otherwise returns the input unchanged. `owned` => caller frees.
+    fn encryptBytes(self: *PdfDocument, data: []const u8) !struct { bytes: []const u8, owned: bool } {
+        if (self.encryption == null) return .{ .bytes = data, .owned = false };
+        var iv: [16]u8 = undefined;
+        self.encryption.?.prng.fill(&iv); // unique IV per object
+        const out = try pdf_crypt.encryptObject(self.allocator, self.encryption.?.dict.file_key, iv, data);
+        return .{ .bytes = out, .owned = true };
+    }
+
+    /// Append a PDF string value to `buf`: a literal `(escaped)` normally, or an
+    /// encrypted hex string `<…>` (IV‖AES-CBC) when encryption is on. Used for
+    /// every dict string except those in the /Encrypt dict and the /ID.
+    fn appendEncryptableString(self: *PdfDocument, buf: *std.ArrayListUnmanaged(u8), value: []const u8) !void {
+        if (self.encryption != null) {
+            const e = try self.encryptBytes(value);
+            defer if (e.owned) self.allocator.free(@constCast(e.bytes));
+            try buf.append(self.allocator, '<');
+            const hex = "0123456789abcdef";
+            for (e.bytes) |b| {
+                try buf.append(self.allocator, hex[b >> 4]);
+                try buf.append(self.allocator, hex[b & 0x0F]);
+            }
+            try buf.append(self.allocator, '>');
+        } else {
+            try buf.append(self.allocator, '(');
+            try appendPdfString(buf, self.allocator, value);
+            try buf.append(self.allocator, ')');
+        }
+    }
+
+    /// Write the /Encrypt dictionary object (V5/R6). Its own strings are NOT
+    /// encrypted. Returns the object id.
+    fn writeEncryptObject(self: *PdfDocument, enc: Encryption) !u32 {
+        const obj_id = self.next_object_id;
+        self.next_object_id += 1;
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer buf.deinit(self.allocator);
+        try buf.appendSlice(self.allocator, "<< /Filter /Standard /V 5 /R 6 /Length 256 /CF << /StdCF << /CFM /AESV3 /Length 32 /AuthEvent /DocOpen >> >> /StmF /StdCF /StrF /StdCF ");
+        try appendHexEntry(&buf, self.allocator, "/U", &enc.dict.u);
+        try appendHexEntry(&buf, self.allocator, "/O", &enc.dict.o);
+        try appendHexEntry(&buf, self.allocator, "/UE", &enc.dict.ue);
+        try appendHexEntry(&buf, self.allocator, "/OE", &enc.dict.oe);
+        try appendHexEntry(&buf, self.allocator, "/Perms", &enc.dict.perms);
+        var pbuf: [48]u8 = undefined;
+        const pstr = std.fmt.bufPrint(&pbuf, "/P {d} /EncryptMetadata true >>", .{enc.dict.p}) catch return error.BufferTooSmall;
+        try buf.appendSlice(self.allocator, pstr);
+        try self.writeObject(obj_id, buf.items);
+        return obj_id;
     }
 
     pub fn deinit(self: *PdfDocument) void {
@@ -1456,50 +1546,57 @@ pub const PdfDocument = struct {
             try info_buf.appendSlice(self.allocator, "<< ");
 
             if (pdfinfo.title) |v| {
-                try info_buf.appendSlice(self.allocator, "/Title (");
-                try appendPdfString(&info_buf, self.allocator, v);
-                try info_buf.appendSlice(self.allocator, ") ");
+                try info_buf.appendSlice(self.allocator, "/Title ");
+                try self.appendEncryptableString(&info_buf, v);
+                try info_buf.append(self.allocator, ' ');
             }
             if (pdfinfo.author) |v| {
-                try info_buf.appendSlice(self.allocator, "/Author (");
-                try appendPdfString(&info_buf, self.allocator, v);
-                try info_buf.appendSlice(self.allocator, ") ");
+                try info_buf.appendSlice(self.allocator, "/Author ");
+                try self.appendEncryptableString(&info_buf, v);
+                try info_buf.append(self.allocator, ' ');
             }
             if (pdfinfo.subject) |v| {
-                try info_buf.appendSlice(self.allocator, "/Subject (");
-                try appendPdfString(&info_buf, self.allocator, v);
-                try info_buf.appendSlice(self.allocator, ") ");
+                try info_buf.appendSlice(self.allocator, "/Subject ");
+                try self.appendEncryptableString(&info_buf, v);
+                try info_buf.append(self.allocator, ' ');
             }
             if (pdfinfo.keywords) |v| {
-                try info_buf.appendSlice(self.allocator, "/Keywords (");
-                try appendPdfString(&info_buf, self.allocator, v);
-                try info_buf.appendSlice(self.allocator, ") ");
+                try info_buf.appendSlice(self.allocator, "/Keywords ");
+                try self.appendEncryptableString(&info_buf, v);
+                try info_buf.append(self.allocator, ' ');
             }
             if (pdfinfo.creator) |v| {
-                try info_buf.appendSlice(self.allocator, "/Creator (");
-                try appendPdfString(&info_buf, self.allocator, v);
-                try info_buf.appendSlice(self.allocator, ") ");
+                try info_buf.appendSlice(self.allocator, "/Creator ");
+                try self.appendEncryptableString(&info_buf, v);
+                try info_buf.append(self.allocator, ' ');
             }
             if (pdfinfo.producer) |v| {
-                try info_buf.appendSlice(self.allocator, "/Producer (");
-                try appendPdfString(&info_buf, self.allocator, v);
-                try info_buf.appendSlice(self.allocator, ") ");
+                try info_buf.appendSlice(self.allocator, "/Producer ");
+                try self.appendEncryptableString(&info_buf, v);
+                try info_buf.append(self.allocator, ' ');
             }
             if (pdfinfo.creation_date) |v| {
-                try info_buf.appendSlice(self.allocator, "/CreationDate (");
-                try appendPdfString(&info_buf, self.allocator, v);
-                try info_buf.appendSlice(self.allocator, ") ");
+                try info_buf.appendSlice(self.allocator, "/CreationDate ");
+                try self.appendEncryptableString(&info_buf, v);
+                try info_buf.append(self.allocator, ' ');
             }
             // Custom keys (non-standard but extractable)
             for (0..pdfinfo.custom_count) |ci| {
                 try info_buf.appendSlice(self.allocator, "/");
                 try info_buf.appendSlice(self.allocator, pdfinfo.custom_keys[ci].key);
-                try info_buf.appendSlice(self.allocator, " (");
-                try appendPdfString(&info_buf, self.allocator, pdfinfo.custom_keys[ci].value);
-                try info_buf.appendSlice(self.allocator, ") ");
+                try info_buf.append(self.allocator, ' ');
+                try self.appendEncryptableString(&info_buf, pdfinfo.custom_keys[ci].value);
+                try info_buf.append(self.allocator, ' ');
             }
             try info_buf.appendSlice(self.allocator, ">>");
             try self.writeObject(info_obj_id, info_buf.items);
+        }
+
+        // Encryption dictionary — written before the xref so its offset is
+        // recorded. Its own strings are unencrypted (hex literals).
+        var encrypt_obj_id: u32 = 0;
+        if (self.encryption) |enc| {
+            encrypt_obj_id = try self.writeEncryptObject(enc);
         }
 
         // Cross-reference table
@@ -1520,14 +1617,34 @@ pub const PdfDocument = struct {
 
         // Trailer
         try self.output.appendSlice(self.allocator, "trailer\n");
-        if (info_obj_id > 0) {
-            var buf: [192]u8 = undefined;
-            const len = std.fmt.bufPrint(&buf, "<< /Size {d} /Root 1 0 R /Info {d} 0 R >>\n", .{ self.next_object_id, info_obj_id }) catch return error.BufferTooSmall;
-            try self.output.appendSlice(self.allocator, len);
-        } else {
-            var buf: [128]u8 = undefined;
-            const len = std.fmt.bufPrint(&buf, "<< /Size {d} /Root 1 0 R >>\n", .{self.next_object_id}) catch return error.BufferTooSmall;
-            try self.output.appendSlice(self.allocator, len);
+        {
+            var buf: std.ArrayListUnmanaged(u8) = .empty;
+            defer buf.deinit(self.allocator);
+            var head: [192]u8 = undefined;
+            if (info_obj_id > 0) {
+                try buf.appendSlice(self.allocator, std.fmt.bufPrint(&head, "<< /Size {d} /Root 1 0 R /Info {d} 0 R", .{ self.next_object_id, info_obj_id }) catch return error.BufferTooSmall);
+            } else {
+                try buf.appendSlice(self.allocator, std.fmt.bufPrint(&head, "<< /Size {d} /Root 1 0 R", .{self.next_object_id}) catch return error.BufferTooSmall);
+            }
+            if (self.encryption) |enc| {
+                // /Encrypt ref + /ID (both halves the same random id; /ID is NOT
+                // encrypted). Required for an encrypted document.
+                var er: [32]u8 = undefined;
+                try buf.appendSlice(self.allocator, std.fmt.bufPrint(&er, " /Encrypt {d} 0 R /ID [<", .{encrypt_obj_id}) catch return error.BufferTooSmall);
+                const hex = "0123456789abcdef";
+                for (enc.doc_id) |b| {
+                    try buf.append(self.allocator, hex[b >> 4]);
+                    try buf.append(self.allocator, hex[b & 0x0F]);
+                }
+                try buf.appendSlice(self.allocator, "><");
+                for (enc.doc_id) |b| {
+                    try buf.append(self.allocator, hex[b >> 4]);
+                    try buf.append(self.allocator, hex[b & 0x0F]);
+                }
+                try buf.appendSlice(self.allocator, ">]");
+            }
+            try buf.appendSlice(self.allocator, " >>\n");
+            try self.output.appendSlice(self.allocator, buf.items);
         }
         try self.output.appendSlice(self.allocator, "startxref\n");
         {
@@ -1564,18 +1681,24 @@ pub const PdfDocument = struct {
         const is_compressed = compressed != null;
         defer if (compressed) |c| self.allocator.free(c);
 
+        // Encrypt the (compressed) body when encryption is enabled. The /Filter
+        // stays /FlateDecode — viewers decrypt first, then inflate.
+        const enc = try self.encryptBytes(stream_data);
+        defer if (enc.owned) self.allocator.free(@constCast(enc.bytes));
+        const final = enc.bytes;
+
         if (is_compressed) {
-            const dict = std.fmt.allocPrint(self.allocator, "<< /Length {d} /Filter /FlateDecode >>\n", .{stream_data.len}) catch return error.BufferTooSmall;
+            const dict = std.fmt.allocPrint(self.allocator, "<< /Length {d} /Filter /FlateDecode >>\n", .{final.len}) catch return error.BufferTooSmall;
             defer self.allocator.free(dict);
             try self.output.appendSlice(self.allocator, dict);
         } else {
-            const dict = std.fmt.allocPrint(self.allocator, "<< /Length {d} >>\n", .{stream_data.len}) catch return error.BufferTooSmall;
+            const dict = std.fmt.allocPrint(self.allocator, "<< /Length {d} >>\n", .{final.len}) catch return error.BufferTooSmall;
             defer self.allocator.free(dict);
             try self.output.appendSlice(self.allocator, dict);
         }
 
         try self.output.appendSlice(self.allocator, "stream\n");
-        try self.output.appendSlice(self.allocator, stream_data);
+        try self.output.appendSlice(self.allocator, final);
         try self.output.appendSlice(self.allocator, "\nendstream\nendobj\n");
     }
 
@@ -1595,15 +1718,20 @@ pub const PdfDocument = struct {
         const stream_data = if (use_compressed) compressed.? else ttf;
         defer if (compressed) |c| self.allocator.free(c);
 
+        const enc = try self.encryptBytes(stream_data);
+        defer if (enc.owned) self.allocator.free(@constCast(enc.bytes));
+        const final = enc.bytes;
+
+        // /Length1 stays the UNCOMPRESSED ttf length (post-decrypt+inflate).
         const dict = if (use_compressed)
-            try std.fmt.allocPrint(self.allocator, "<< /Length {d} /Length1 {d} /Filter /FlateDecode >>\n", .{ stream_data.len, ttf.len })
+            try std.fmt.allocPrint(self.allocator, "<< /Length {d} /Length1 {d} /Filter /FlateDecode >>\n", .{ final.len, ttf.len })
         else
-            try std.fmt.allocPrint(self.allocator, "<< /Length {d} /Length1 {d} >>\n", .{ stream_data.len, ttf.len });
+            try std.fmt.allocPrint(self.allocator, "<< /Length {d} /Length1 {d} >>\n", .{ final.len, ttf.len });
         defer self.allocator.free(dict);
         try self.output.appendSlice(self.allocator, dict);
 
         try self.output.appendSlice(self.allocator, "stream\n");
-        try self.output.appendSlice(self.allocator, stream_data);
+        try self.output.appendSlice(self.allocator, final);
         try self.output.appendSlice(self.allocator, "\nendstream\nendobj\n");
     }
 
@@ -1634,26 +1762,30 @@ pub const PdfDocument = struct {
         const stream_data = if (compressed_img) |c| c else image.data;
         defer if (compressed_img) |c| self.allocator.free(c);
 
+        const enc = try self.encryptBytes(stream_data);
+        defer if (enc.owned) self.allocator.free(@constCast(enc.bytes));
+        const final = enc.bytes;
+
         const actual_filter: []const u8 = if (filter.len > 0) filter else if (compressed_img != null) "/FlateDecode" else "";
 
         if (actual_filter.len > 0) {
             const dict = try std.fmt.allocPrint(self.allocator,
                 "<< /Type /XObject /Subtype /Image /Width {d} /Height {d} /ColorSpace {s} /BitsPerComponent 8 /Filter {s} /Length {d} >>",
-                .{ image.width, image.height, color_space, actual_filter, stream_data.len },
+                .{ image.width, image.height, color_space, actual_filter, final.len },
             );
             defer self.allocator.free(dict);
             try self.output.appendSlice(self.allocator, dict);
         } else {
             const dict = try std.fmt.allocPrint(self.allocator,
                 "<< /Type /XObject /Subtype /Image /Width {d} /Height {d} /ColorSpace {s} /BitsPerComponent 8 /Length {d} >>",
-                .{ image.width, image.height, color_space, stream_data.len },
+                .{ image.width, image.height, color_space, final.len },
             );
             defer self.allocator.free(dict);
             try self.output.appendSlice(self.allocator, dict);
         }
 
         try self.output.appendSlice(self.allocator, "\nstream\n");
-        try self.output.appendSlice(self.allocator, stream_data);
+        try self.output.appendSlice(self.allocator, final);
         try self.output.appendSlice(self.allocator, "\nendstream\nendobj\n");
     }
 
@@ -1670,15 +1802,20 @@ pub const PdfDocument = struct {
         // /Rect [x1 y1 x2 y2] - clickable region
         // /Border [0 0 0] - no visible border
         // /A << /Type /Action /S /URI /URI (url) >> - action to open URL
-        var dict_buf: [512]u8 = undefined;
-        const dict = std.fmt.bufPrint(&dict_buf, "<< /Type /Annot /Subtype /Link /Rect [{d:.2} {d:.2} {d:.2} {d:.2}] /Border [0 0 0] /A << /Type /Action /S /URI /URI ({s}) >> >>", .{
+        // Build the dict with the URI as an encryptable string (the /URI is a
+        // string and must be encrypted in an encrypted document).
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer buf.deinit(self.allocator);
+        var head: [256]u8 = undefined;
+        try buf.appendSlice(self.allocator, std.fmt.bufPrint(&head, "<< /Type /Annot /Subtype /Link /Rect [{d:.2} {d:.2} {d:.2} {d:.2}] /Border [0 0 0] /A << /Type /Action /S /URI /URI ", .{
             annot.x1,
             annot.y1,
             annot.x2,
             annot.y2,
-            annot.url,
-        }) catch return error.BufferTooSmall;
-        try self.output.appendSlice(self.allocator, dict);
+        }) catch return error.BufferTooSmall);
+        try self.appendEncryptableString(&buf, annot.url);
+        try buf.appendSlice(self.allocator, " >> >>");
+        try self.output.appendSlice(self.allocator, buf.items);
         try self.output.appendSlice(self.allocator, "\nendobj\n");
     }
 };
@@ -1688,6 +1825,18 @@ pub const PdfDocument = struct {
 // =============================================================================
 
 /// Escape parentheses and backslashes for PDF string literals
+/// Append ` /Key <hexbytes> ` — used for the binary values in the /Encrypt dict.
+fn appendHexEntry(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, key: []const u8, bytes: []const u8) !void {
+    try buf.appendSlice(allocator, key);
+    try buf.appendSlice(allocator, " <");
+    const hex = "0123456789abcdef";
+    for (bytes) |b| {
+        try buf.append(allocator, hex[b >> 4]);
+        try buf.append(allocator, hex[b & 0x0F]);
+    }
+    try buf.appendSlice(allocator, "> ");
+}
+
 fn appendPdfString(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, text: []const u8) !void {
     for (text) |c| {
         switch (c) {

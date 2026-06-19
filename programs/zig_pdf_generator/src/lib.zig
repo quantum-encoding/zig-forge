@@ -448,6 +448,26 @@ test "invoice paginates a long item list across multiple pages" {
     try std.testing.expect(std.mem.indexOf(u8, pdf[p0 + 1 ..], "/Type /Page /Parent") != null);
 }
 
+test "encrypted PDF emits /Encrypt (R6/AESV3) + /ID through build()" {
+    const std = @import("std");
+    const allocator = std.testing.allocator;
+    var doc = document.PdfDocument.init(allocator);
+    defer doc.deinit();
+    var c = document.ContentStream.init(allocator);
+    defer c.deinit();
+    try c.drawText("Confidential", 60, 700, doc.getFontId(.helvetica), 12, document.Color.black);
+    try doc.addPage(&c);
+    // Fixed seed → reproducible; real callers pass OS-random bytes.
+    try doc.enableEncryption("user-pw", "owner-pw", document.DEFAULT_PERMS, [_]u8{0x42} ** 32);
+    const pdf = try doc.build();
+    try std.testing.expect(std.mem.indexOf(u8, pdf, "/Filter /Standard") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pdf, "/V 5") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pdf, "/R 6") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pdf, "/AESV3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pdf, "/Encrypt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pdf, "/ID [<") != null);
+}
+
 test "rgbaToRgb composites transparent pixels onto white" {
     const std = @import("std");
     const allocator = std.testing.allocator;

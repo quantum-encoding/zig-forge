@@ -116,6 +116,17 @@ For the background image, send a **JPEG or a flat (non-transparent) PNG** — se
 
 ---
 
+## Encryption (AES-256, password-protected PDFs)
+
+Set `password` (+ optional `owner_password`) on the **letter** input to produce
+an AES-256 `/V5 /R6` encrypted PDF (ISO 32000-2). Validated end-to-end by qpdf
+(`--check` clean, `--decrypt` renders) and pikepdf (R6/V5/256-bit; wrong password
+rejected). **Native only** — the WASM build has no CSPRNG seed, so the WASM
+export does not expose `password` (don't surface "encrypt" in a browser-only
+flow). UI: an "Encrypt with password" field on the letter builder, server-side.
+(Engine API `PdfDocument.enableEncryption(user, owner, perms, seed)` is generic —
+invoices can get the same with a small follow-up.)
+
 ## Known limits (engine-side; don't design UI that assumes otherwise)
 
 1. **Transparent PNGs composite onto white** — a PNG with a transparent

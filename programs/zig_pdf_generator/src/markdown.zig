@@ -56,7 +56,23 @@ pub const LetterInput = struct {
     margin: f32 = 64,
     /// Justify the body paragraphs (distribute inter-word space to both margins).
     justify: bool = false,
+    /// AES-256 (V5/R6) encryption: when `password` is non-empty the PDF is
+    /// encrypted (open password = `password`; permissions password =
+    /// `owner_password` or `password` if blank). Native targets only.
+    password: []const u8 = "",
+    owner_password: []const u8 = "",
 };
+
+/// 32 random bytes for the encryption seed (file key / salts / IVs derive from
+/// it). Native: from libc arc4random. WASM has no CSPRNG here, so it returns
+/// zeros — WASM callers must not request encryption (the export omits password).
+fn osSeed() [32]u8 {
+    var s: [32]u8 = [_]u8{0} ** 32;
+    if (comptime !@import("builtin").target.cpu.arch.isWasm()) {
+        std.c.arc4random_buf(&s, s.len);
+    }
+    return s;
+}
 
 // =============================================================================
 // Data Model
@@ -1460,6 +1476,11 @@ pub fn generateLetter(allocator: std.mem.Allocator, in: LetterInput) ![]u8 {
     renderer.resolveBackground(in.background_image, in.background_opacity, in.background_fit);
     renderer.letter = in;
     renderer.justify = in.justify;
+
+    if (in.password.len > 0) {
+        const owner = if (in.owner_password.len > 0) in.owner_password else in.password;
+        try renderer.doc.enableEncryption(in.password, owner, document.DEFAULT_PERMS, osSeed());
+    }
 
     const pdf_bytes = try renderer.render();
     return try allocator.dupe(u8, pdf_bytes);
