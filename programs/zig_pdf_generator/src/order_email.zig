@@ -48,10 +48,10 @@ pub const Template = struct {
     app: []const u8,
     brand_name: []const u8,
     from_name: []const u8,
-    /// Default sender. Overridable per-call via the input `from_email` field.
-    /// The three apps whose domains Rich has not yet confirmed point at a
-    /// `.invalid` placeholder so an un-overridden send FAILS LOUDLY at the
-    /// mail layer rather than mailing from a real-but-wrong domain.
+    /// Default sender. Overridable per-call via the input `from_email_override`
+    /// field. quantify/qai/kitchenshare have no own production mail domain yet,
+    /// so they send from the shared `receipts@quantumencoding.io` identity
+    /// (the English company, Quantum Encoding Ltd) — see registry below.
     from_email: []const u8,
     subject: []const u8,
     is_physical: bool,
@@ -85,12 +85,12 @@ pub fn lookup(app: []const u8) ?Template {
         .app = "quantify",
         .brand_name = "Quantify",
         .from_name = "Quantify",
-        .from_email = "orders@CONFIGURE-ME.invalid", // TODO(rich): real Quantify sender domain
+        .from_email = "receipts@quantumencoding.io", // quantify is a product on quantumencoding.io (no own domain)
         .subject = "Your Quantify credits are ready",
         .is_physical = false,
         .item_label = "Quantify Credits",
-        .cta_label = "Go to your account",
-        .cta_url = "", // TODO(rich): Quantify account URL
+        .cta_label = "Go to Quantify",
+        .cta_url = "https://quantumencoding.io/quantify",
         .accent = "#7c3aed",
         .order_prefix = "QFY",
     };
@@ -98,12 +98,12 @@ pub fn lookup(app: []const u8) ?Template {
         .app = "kitchenshare",
         .brand_name = "Kitchen Share",
         .from_name = "Kitchen Share",
-        .from_email = "orders@CONFIGURE-ME.invalid", // TODO(rich): real Kitchen Share sender domain
+        .from_email = "receipts@quantumencoding.io", // interim: kitchen-share.net mail not live yet
         .subject = "Your Kitchen Share credits are ready",
         .is_physical = false,
         .item_label = "Kitchen Share Credits",
         .cta_label = "Go to your account",
-        .cta_url = "", // TODO(rich): Kitchen Share account URL
+        .cta_url = "", // TODO(rich): set once kitchen-share.net is live (orders@kitchen-share.net + /account)
         .accent = "#ea580c",
         .order_prefix = "KSH",
     };
@@ -111,12 +111,12 @@ pub fn lookup(app: []const u8) ?Template {
         .app = "qai",
         .brand_name = "qai",
         .from_name = "qai",
-        .from_email = "orders@CONFIGURE-ME.invalid", // TODO(rich): real qai sender domain
+        .from_email = "receipts@quantumencoding.io", // qai is a CLI sold on quantumencoding.io (no own domain)
         .subject = "Your qai credits are ready",
         .is_physical = false,
         .item_label = "qai Credits",
         .cta_label = "Go to your account",
-        .cta_url = "", // TODO(rich): qai account URL
+        .cta_url = "", // qai is a CLI tool — no customer account page; no CTA button
         .accent = "#0891b2",
         .order_prefix = "QAI",
     };
@@ -129,7 +129,7 @@ pub fn lookup(app: []const u8) ?Template {
         .is_physical = true,
         .item_label = "Order",
         .cta_label = "View your order",
-        .cta_url = "https://lutuno.com/account",
+        .cta_url = "https://app.lutuno.com", // customer dashboard (shop = lutuno.shop/shop.lutuno.com)
         .accent = "#b39a7d",
         .order_prefix = "LUT",
     };

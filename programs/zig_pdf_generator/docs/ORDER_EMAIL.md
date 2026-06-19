@@ -80,20 +80,34 @@ render(tmpl) ; envelope = { action:"send", from, to, subject, html, ... }
 
 ## Registry
 
-| app | brand | physical? | sender (`from_email`) | order ref |
-|---|---|---|---|---|
-| `exact` | Exact | no | `orders@exactpdfconverter.com` | `EXA-` |
-| `quantify` | Quantify | no | ⚠️ `orders@CONFIGURE-ME.invalid` | `QFY-` |
-| `kitchenshare` | Kitchen Share | no | ⚠️ `orders@CONFIGURE-ME.invalid` | `KSH-` |
-| `qai` | qai | no | ⚠️ `orders@CONFIGURE-ME.invalid` | `QAI-` |
-| `lutuno` | Lutuno | **yes** | `orders@lutuno.com` | `LUT-` |
+| app | brand | physical? | sender (`from_email`) | CTA target | order ref |
+|---|---|---|---|---|---|
+| `exact` | Exact | no | `orders@exactpdfconverter.com` | `…/account` (or `metadata.site`) | `EXA-` |
+| `quantify` | Quantify | no | `receipts@quantumencoding.io` | `quantumencoding.io/quantify` | `QFY-` |
+| `kitchenshare` | Kitchen Share | no | `receipts@quantumencoding.io` (interim) | — (TODO when live) | `KSH-` |
+| `qai` | qai | no | `receipts@quantumencoding.io` | — (CLI, no account page) | `QAI-` |
+| `lutuno` | Lutuno | **yes** | `orders@lutuno.com` | `app.lutuno.com` | `LUT-` |
 
-⚠️ The three digital apps whose sender domains are not yet confirmed point at a
-`.invalid` placeholder **on purpose** — an un-overridden send will fail loudly at
-the mail layer rather than send from a real-but-wrong domain. Until the real
-domains are baked into `src/order_email.zig`, pass `from_email_override` from the
-webhook. (Decided: per-app domain senders; digital apps must **not** send as
-`orders@lutuno.com`.)
+Sender rationale (confirmed against the actual projects):
+- **exact** has its own domain → `orders@exactpdfconverter.com`. Checkout already
+  tags `metadata.app='exact'` (+ `credits`/`pack`/`user_id`).
+- **quantify** and **qai** are products on `quantumencoding.io` (quantify = a
+  sub-path; qai = a CLI), so they send from the shared
+  `receipts@quantumencoding.io` identity (Quantum Encoding Ltd), not a per-app
+  domain.
+- **kitchenshare** has its own domain (`kitchen-share.net`) but mail is not live
+  yet, so it sends from `receipts@quantumencoding.io` for now — switch to
+  `orders@kitchen-share.net` once DNS/DKIM are up.
+- **lutuno** has no checkout built yet; sender `orders@lutuno.com`, CTA to the
+  customer dashboard `app.lutuno.com`.
+
+Any sender or CTA can still be overridden per-call via `from_email_override` /
+`cta_url_override` without a rebuild.
+
+> Note: the existing ecosystem webhook routes by **Stripe product ID**
+> (`getLicenseTypeFromProduct`), not `metadata.app`. That's fine — map the
+> product to an app and pass it as `product_app`; the generator's fallback
+> (`app` → `product_app` → skip) handles it.
 
 ## Legal-entity split (VAT-relevant)
 
