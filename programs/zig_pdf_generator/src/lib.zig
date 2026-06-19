@@ -345,6 +345,80 @@ test "library integration" {
     try std.testing.expect(std.mem.indexOf(u8, pdf_bytes, "QZL-2025-001") != null);
 }
 
+test "invoice table_style variants render valid PDFs" {
+    const std = @import("std");
+    const allocator = std.testing.allocator;
+    const items = [_]LineItem{
+        .{ .description = "Service A", .quantity = 1, .unit_price = 100, .total = 100 },
+        .{ .description = "Service B", .quantity = 2, .unit_price = 50, .total = 100 },
+    };
+    for ([_]invoice.TableStyle{ .bands, .boxes, .minimal }) |style| {
+        const data = InvoiceData{
+            .company_name = "Styled Co",
+            .client_name = "Client",
+            .invoice_number = "STY-1",
+            .items = &items,
+            .subtotal = 200,
+            .tax_amount = 42,
+            .total = 242,
+            .table_style = style,
+        };
+        const pdf = try generateInvoice(allocator, data);
+        defer allocator.free(pdf);
+        try std.testing.expect(std.mem.startsWith(u8, pdf, "%PDF-1.4"));
+        try std.testing.expect(std.mem.endsWith(u8, pdf, "%%EOF\n"));
+        try std.testing.expect(std.mem.indexOf(u8, pdf, "Styled Co") != null);
+    }
+}
+
+test "invoice multiple payment buttons embed clickable links" {
+    const std = @import("std");
+    const allocator = std.testing.allocator;
+    const items = [_]LineItem{.{ .description = "Item", .quantity = 1, .unit_price = 10, .total = 10 }};
+    const buttons = [_]invoice.PaymentButton{
+        .{ .label = "Pay by Card", .url = "https://checkout.stripe.com/pay/cs_test_123", .color = "#635BFF" },
+        .{ .label = "PayPal", .url = "https://paypal.me/example/10", .color = "#003087" },
+    };
+    const data = InvoiceData{
+        .company_name = "Pay Co",
+        .client_name = "Buyer",
+        .invoice_number = "PAY-1",
+        .items = &items,
+        .subtotal = 10,
+        .total = 10,
+        .payment_buttons = &buttons,
+    };
+    const pdf = try generateInvoice(allocator, data);
+    defer allocator.free(pdf);
+    // Both checkout URLs must appear as link annotations.
+    try std.testing.expect(std.mem.indexOf(u8, pdf, "checkout.stripe.com/pay/cs_test_123") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pdf, "paypal.me/example/10") != null);
+}
+
+test "invoice IRPF retention row renders when set" {
+    const std = @import("std");
+    const allocator = std.testing.allocator;
+    const items = [_]LineItem{.{ .description = "Servicio", .quantity = 1, .unit_price = 100, .total = 100 }};
+    const data = InvoiceData{
+        .company_name = "Autonomo SL",
+        .client_name = "Cliente",
+        .invoice_number = "ES-1",
+        .items = &items,
+        .subtotal = 100,
+        .tax_rate = 0.21,
+        .tax_amount = 21,
+        .irpf_rate = 0.15,
+        .irpf_amount = 15,
+        .total = 106,
+        .show_tax = true,
+    };
+    const pdf = try generateInvoice(allocator, data);
+    defer allocator.free(pdf);
+    // PDF escapes parens in text strings (IRPF \(15%\)), so match the token.
+    try std.testing.expect(std.mem.indexOf(u8, pdf, "IRPF") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pdf, "15%") != null);
+}
+
 // Pull the canonical-sample regression tests into the `zig build test` graph.
 test {
     _ = @import("sample_tests.zig");

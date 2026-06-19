@@ -132,6 +132,21 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
         }
     }
 
+    // Parse table style (bands | boxes | minimal)
+    if (getJsonString(obj, "table_style")) |style| {
+        if (std.mem.eql(u8, style, "boxes")) {
+            data.table_style = .boxes;
+        } else if (std.mem.eql(u8, style, "minimal")) {
+            data.table_style = .minimal;
+        } else {
+            data.table_style = .bands;
+        }
+    }
+
+    // IRPF retention (Spanish freelancer invoices)
+    data.irpf_rate = getJsonFloat(obj, "irpf_rate") orelse 0;
+    data.irpf_amount = getJsonFloat(obj, "irpf_amount") orelse 0;
+
     // Parse QR code mode
     if (getJsonString(obj, "qr_mode")) |mode| {
         if (std.mem.eql(u8, mode, "verifactu")) {
@@ -227,6 +242,30 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
     data.payment_button_color = try dupeJsonString(allocator, obj, "payment_button_color") orelse try allocator.dupe(u8, "#635BFF");
     data.payment_button_text_color = try dupeJsonString(allocator, obj, "payment_button_text_color") orelse try allocator.dupe(u8, "#FFFFFF");
 
+    // Parse multiple payment buttons: [{ "label", "url", "color", "text_color" }]
+    if (obj.get("payment_buttons")) |btns_val| {
+        if (btns_val == .array) {
+            const arr = btns_val.array;
+            const btns = try allocator.alloc(invoice.PaymentButton, arr.items.len);
+            for (arr.items, 0..) |bv, i| {
+                // Every field is always heap-allocated (even for malformed
+                // entries) so freeInvoiceData can free uniformly.
+                const has_obj = bv == .object;
+                const label = if (has_obj) try dupeJsonString(allocator, bv.object, "label") else null;
+                const url = if (has_obj) try dupeJsonString(allocator, bv.object, "url") else null;
+                const color = if (has_obj) try dupeJsonString(allocator, bv.object, "color") else null;
+                const text_color = if (has_obj) try dupeJsonString(allocator, bv.object, "text_color") else null;
+                btns[i] = .{
+                    .label = label orelse try allocator.dupe(u8, "Pay Now"),
+                    .url = url orelse try allocator.dupe(u8, ""),
+                    .color = color orelse try allocator.dupe(u8, "#635BFF"),
+                    .text_color = text_color orelse try allocator.dupe(u8, "#FFFFFF"),
+                };
+            }
+            data.payment_buttons = btns;
+        }
+    }
+
     // Parse line items
     if (obj.get("items")) |items_val| {
         if (items_val == .array) {
@@ -319,6 +358,15 @@ pub fn freeInvoiceData(allocator: std.mem.Allocator, data: *const invoice.Invoic
     if (data.payment_button_label.len > 0) allocator.free(data.payment_button_label);
     if (data.payment_button_color.len > 0) allocator.free(data.payment_button_color);
     if (data.payment_button_text_color.len > 0) allocator.free(data.payment_button_text_color);
+
+    // Free the multiple-payment-buttons array (each field is heap-allocated).
+    for (data.payment_buttons) |b| {
+        allocator.free(b.label);
+        allocator.free(b.url);
+        allocator.free(b.color);
+        allocator.free(b.text_color);
+    }
+    if (data.payment_buttons.len > 0) allocator.free(data.payment_buttons);
 
     if (data.notes.len > 0) allocator.free(data.notes);
     if (data.payment_terms.len > 0) allocator.free(data.payment_terms);
