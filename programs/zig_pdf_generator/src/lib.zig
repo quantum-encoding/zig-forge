@@ -425,6 +425,25 @@ test "invoice IRPF retention row renders when set" {
     try std.testing.expect(std.mem.indexOf(u8, pdf, "15%") != null);
 }
 
+test "rgbaToRgb composites transparent pixels onto white" {
+    const std = @import("std");
+    const allocator = std.testing.allocator;
+    // 3 pixels: opaque red, fully transparent, half-transparent blue.
+    const rgba = [_]u8{ 255, 0, 0, 255, 0, 0, 0, 0, 0, 0, 255, 128 };
+    const rgb = try image.rgbaToRgb(allocator, &rgba, 3, 1);
+    defer allocator.free(rgb);
+    // Opaque red stays red.
+    try std.testing.expectEqual(@as(u8, 255), rgb[0]);
+    try std.testing.expectEqual(@as(u8, 0), rgb[1]);
+    // Fully transparent -> white (not the stray 0,0,0 underneath).
+    try std.testing.expectEqual(@as(u8, 255), rgb[3]);
+    try std.testing.expectEqual(@as(u8, 255), rgb[4]);
+    try std.testing.expectEqual(@as(u8, 255), rgb[5]);
+    // Half-transparent blue -> blended toward white on R/G, partial B.
+    try std.testing.expect(rgb[6] > 120 and rgb[6] < 135); // ~127
+    try std.testing.expect(rgb[8] > 250); // B = 255*128/255 + 255*127/255 ≈ 255
+}
+
 test "invoice right-aligns + shrink-fits long meta/amounts without error" {
     const std = @import("std");
     const allocator = std.testing.allocator;

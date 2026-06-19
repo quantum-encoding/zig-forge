@@ -310,7 +310,11 @@ pub fn decodePng(allocator: std.mem.Allocator, png_data: []const u8) !struct { p
     return .{ .pixels = pixels, .info = png_info };
 }
 
-/// Convert RGBA to RGB by removing alpha channel
+/// Flatten RGBA to RGB by alpha-compositing each pixel onto a WHITE background.
+/// PDF pages here are white, so a transparent PNG (e.g. a logo with a cut-out
+/// background) blends seamlessly into the page instead of showing the stray RGB
+/// left under fully-transparent pixels (the old "white/black box" artefact).
+/// out = fg·α + 255·(1−α), per channel.
 pub fn rgbaToRgb(allocator: std.mem.Allocator, rgba: []const u8, width: u32, height: u32) ![]u8 {
     const rgb_size = width * height * 3;
     var rgb = try allocator.alloc(u8, rgb_size);
@@ -319,10 +323,11 @@ pub fn rgbaToRgb(allocator: std.mem.Allocator, rgba: []const u8, width: u32, hei
     var i: usize = 0;
     var o: usize = 0;
     while (i + 4 <= rgba.len) : (i += 4) {
-        rgb[o] = rgba[i]; // R
-        rgb[o + 1] = rgba[i + 1]; // G
-        rgb[o + 2] = rgba[i + 2]; // B
-        // Skip alpha (rgba[i + 3])
+        const a: u32 = rgba[i + 3];
+        const inv: u32 = 255 - a;
+        rgb[o] = @intCast((@as(u32, rgba[i]) * a + 255 * inv) / 255); // R
+        rgb[o + 1] = @intCast((@as(u32, rgba[i + 1]) * a + 255 * inv) / 255); // G
+        rgb[o + 2] = @intCast((@as(u32, rgba[i + 2]) * a + 255 * inv) / 255); // B
         o += 3;
     }
 

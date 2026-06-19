@@ -118,9 +118,11 @@ For the background image, send a **JPEG or a flat (non-transparent) PNG** — se
 
 ## Known limits (engine-side; don't design UI that assumes otherwise)
 
-1. **Transparent PNG backgrounds composite onto white** — the PNG decoder drops
-   alpha. Use JPEG or a flat PNG for `background_image`. (Logos with transparency
-   will get a white box.)
+1. **Transparent PNGs composite onto white** — a PNG with a transparent
+   background now blends cleanly into the (white) page; no more white/black box.
+   Note this is a flatten-onto-white, not true alpha, so a transparent image
+   placed over a *coloured* region would show white there (pages are white by
+   default, so this is rarely an issue). JPEG/flat PNG also fine.
 2. **Links are clickable, on the correct page.** Markdown/letter inline links
    (`[text](url)`) now render as real clickable PDF annotations, attached to the
    page they're drawn on (verified on a 3-page letter). Pay-button links on

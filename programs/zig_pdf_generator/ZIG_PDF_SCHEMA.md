@@ -373,10 +373,10 @@ lib `generateLetterFromJson` / `generateLetter(LetterInput)`. Source: rendered b
 | `accent_hex` | hex_color | No | `#1a1a1a` | Letterhead title + accents |
 | `margin` | number | No | `64` | Uniform page margin (points) |
 
-Caveats: PNG backgrounds with transparency composite onto white (the PNG decoder
-drops alpha) — use JPEG or a flat PNG for backgrounds; clickable links inside a
-multi-page letter currently only register on page 1 (see `document.zig` annotation
-limitation). No Svelte UI yet — author via JSON / CLI / WASM.
+Caveats: PNG backgrounds with transparency are flattened onto white (fine on the
+default white page; a transparent image over a coloured region would show white
+there). No Svelte UI yet — author via JSON / CLI / WASM. (Clickable links inside
+a multi-page letter now register on the correct page.)
 
 ---
 
