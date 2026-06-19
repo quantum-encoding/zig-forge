@@ -355,7 +355,7 @@ lib `generateLetterFromJson` / `generateLetter(LetterInput)`. Source: rendered b
 
 | Field | Type | Req | Default | Notes |
 |---|---|---|---|---|
-| `body_markdown` | string (Markdown) | Yes | `""` | The letter body. Tables (`\| … \|`), headings, lists, bold/italic/links all render. Flows across pages |
+| `body_markdown` | string (Markdown) | Yes | `""` | The letter body. Tables (`\| … \|`), headings, lists, bold/italic render; `[text](url)` links render as **clickable** annotations on whatever page they land. Flows across pages |
 | `background_image` | string | No | `""` | Full-page background. File path, `data:` URL, or raw base64. Drawn behind every page |
 | `background_opacity` | number | No | `1.0` | `<1` paints it faint (watermark-like, e.g. `0.10`) |
 | `background_fit` | `enum("cover"\|"contain"\|"stretch")` | No | `"cover"` | `cover` fills + crops; `contain` letterboxes; `stretch` distorts to page |

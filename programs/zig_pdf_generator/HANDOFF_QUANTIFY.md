@@ -121,12 +121,11 @@ For the background image, send a **JPEG or a flat (non-transparent) PNG** — se
 1. **Transparent PNG backgrounds composite onto white** — the PNG decoder drops
    alpha. Use JPEG or a flat PNG for `background_image`. (Logos with transparency
    will get a white box.)
-2. **Clickable links land only on page 1** in a single document's annotation set
-   *unless* the renderer assigns pages. The engine now supports per-page
-   annotations (`setAnnotationPage`), and invoices are single-page so pay buttons
-   are fine. Markdown/letter inline links (`[text](url)`) are **styled but not yet
-   clickable** — if you want clickable links inside letters, request the
-   "markdown link annotations" follow-up (small engine add).
+2. **Links are clickable, on the correct page.** Markdown/letter inline links
+   (`[text](url)`) now render as real clickable PDF annotations, attached to the
+   page they're drawn on (verified on a 3-page letter). Pay-button links on
+   invoices also use this. Cap is 64 link annotations per document — extra links
+   beyond that still render as text, just not clickable.
 3. **Invoices don't paginate** — a very long item list truncates rather than
    flowing to page 2. Long content belongs in the `letter` type (which flows).
 4. **Mixed page sizes in one document** aren't persisted (single MediaBox).

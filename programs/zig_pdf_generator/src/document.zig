@@ -940,7 +940,7 @@ pub const LinkAnnotation = struct {
     page: u32 = 0,
 };
 
-const MAX_ANNOTATIONS = 16;
+const MAX_ANNOTATIONS = 64;
 const MAX_CUSTOM_META = 4;
 
 /// PDF /Info dictionary metadata

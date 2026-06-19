@@ -889,6 +889,13 @@ const Renderer = struct {
         try self.checkPageBreak(content, line_h);
 
         var x = x_start;
+        // Track a contiguous run of link words (same URL) so the whole phrase
+        // becomes one clickable annotation, even across the spaces within it.
+        var link_active = false;
+        var link_url: []const u8 = "";
+        var link_x0: f32 = 0;
+        var link_x1: f32 = 0;
+
         for (words) |w| {
             const font_id = self.fontForSpan(w.kind);
             const effective_size = if (w.kind == .code) size_px - 1 else size_px;
@@ -898,9 +905,37 @@ const Renderer = struct {
                 else => color,
             };
             try content.drawText(w.text, x, self.current_y, font_id, effective_size, effective_color);
+
+            const is_link = w.kind == .link and w.url.len > 0;
+            if (is_link and link_active and std.mem.eql(u8, link_url, w.url)) {
+                link_x1 = x + w.width; // extend the current run
+            } else {
+                if (link_active) self.flushLinkRun(link_url, link_x0, link_x1, size_px);
+                if (is_link) {
+                    link_active = true;
+                    link_url = w.url;
+                    link_x0 = x;
+                    link_x1 = x + w.width;
+                } else {
+                    link_active = false;
+                }
+            }
             x += w.width;
         }
+        if (link_active) self.flushLinkRun(link_url, link_x0, link_x1, size_px);
+
         self.current_y -= line_h;
+    }
+
+    // Record a clickable link annotation for a run drawn on the current line,
+    // tagged with the page currently being assembled. Silently ignores overflow
+    // (too many links) — the text is still drawn, just not all clickable.
+    fn flushLinkRun(self: *Renderer, url: []const u8, x0: f32, x1: f32, size_px: f32) void {
+        if (x1 <= x0 or url.len == 0) return;
+        const y1 = self.current_y - size_px * 0.18;
+        const y2 = self.current_y + size_px * 0.78;
+        self.doc.setAnnotationPage(@intCast(self.pages.items.len));
+        self.doc.addLinkAnnotation(x0, y1, x1, y2, url) catch {};
     }
 
     fn drawHeading(self: *Renderer, content: *document.ContentStream, block: Block) !void {

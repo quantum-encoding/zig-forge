@@ -459,6 +459,18 @@ test "link annotations attach to their own page, not always page 0" {
     try std.testing.expect(std.mem.indexOf(u8, pdf[p0..p1], "/Annots") == null); // page 0 has none
 }
 
+test "markdown links render as clickable link annotations" {
+    const std = @import("std");
+    const allocator = std.testing.allocator;
+    const md = "See [our pricing page](https://quantumencoding.io/pricing) for the full breakdown.";
+    const pdf = try generateFromMarkdown(allocator, md);
+    defer allocator.free(pdf);
+    // A clickable /Link annotation with the URL must be emitted.
+    try std.testing.expect(std.mem.indexOf(u8, pdf, "/Subtype /Link") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pdf, "https://quantumencoding.io/pricing") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pdf, "/Annots") != null);
+}
+
 // Pull the canonical-sample regression tests into the `zig build test` graph.
 test {
     _ = @import("sample_tests.zig");
