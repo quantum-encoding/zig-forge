@@ -60,6 +60,7 @@ pub const markdown = @import("markdown.zig");
 pub const template_card = @import("template_card.zig");
 pub const order_email = @import("order_email.zig");
 pub const letter = @import("letter.zig");
+pub const pdf_crypt = @import("pdf_crypt.zig");
 pub const types = @import("types.zig");
 pub const CryptoPaymentBlock = types.CryptoPaymentBlock;
 
@@ -553,4 +554,5 @@ test {
     _ = @import("sample_tests.zig");
     _ = @import("order_email.zig");
     _ = @import("letter.zig");
+    _ = @import("pdf_crypt.zig");
 }
