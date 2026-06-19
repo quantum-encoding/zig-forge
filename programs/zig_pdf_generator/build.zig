@@ -19,6 +19,17 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // The audited ML-DSA-65 (FIPS 204) module from the sibling crypto program,
+    // imported by src/seal.zig for the post-quantum tamper-seal. Native targets
+    // only (the seal is desktop/server-side — never WASM). It resolves its own
+    // `rng.zig` relative to itself; the seal always passes a seed + deterministic
+    // sign, so the RNG path is never exercised.
+    const ml_dsa_mod = b.createModule(.{
+        .root_source_file = b.path("../zig-quantum-encryption/src/ml_dsa.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // ==========================================================================
     // Core Library (Static) - Uses ffi.zig as root for C FFI exports
     // ==========================================================================
@@ -37,6 +48,7 @@ pub fn build(b: *std.Build) void {
     // Bundle compiler-rt so static lib is self-contained (f128 ops for JSON parser)
     lib.bundle_compiler_rt = true;
 
+    lib.root_module.addImport("ml_dsa", ml_dsa_mod);
     b.installArtifact(lib);
 
     // ==========================================================================
@@ -55,6 +67,7 @@ pub fn build(b: *std.Build) void {
     });
 
     shared_lib.root_module.link_libc = true;
+    shared_lib.root_module.addImport("ml_dsa", ml_dsa_mod);
 
     // Always install the shared lib alongside the static lib
     b.installArtifact(shared_lib);
@@ -273,8 +286,24 @@ pub fn build(b: *std.Build) void {
     });
 
     exe.root_module.link_libc = true;
+    exe.root_module.addImport("ml_dsa", ml_dsa_mod);
 
     b.installArtifact(exe);
+
+    // ==========================================================================
+    // pdf-seal CLI — ML-DSA-65 post-quantum tamper-seal (native only)
+    // ==========================================================================
+    const seal_exe = b.addExecutable(.{
+        .name = "pdf-seal",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/seal_cli.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    seal_exe.root_module.link_libc = true;
+    seal_exe.root_module.addImport("ml_dsa", ml_dsa_mod);
+    b.installArtifact(seal_exe);
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
@@ -298,6 +327,7 @@ pub fn build(b: *std.Build) void {
     });
 
     lib_unit_tests.root_module.link_libc = true;
+    lib_unit_tests.root_module.addImport("ml_dsa", ml_dsa_mod);
 
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
     // Pin cwd to the package root so tests that read checked-in fixtures

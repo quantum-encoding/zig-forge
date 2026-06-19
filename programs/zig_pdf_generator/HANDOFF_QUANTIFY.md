@@ -127,6 +127,23 @@ flow). UI: an "Encrypt with password" field on the letter builder, server-side.
 (Engine API `PdfDocument.enableEncryption(user, owner, perms, seed)` is generic —
 invoices can get the same with a small follow-up.)
 
+## ML-DSA tamper-seal (post-quantum "cryptographically sealed" PDFs)
+
+A **proprietary** post-quantum seal (FIPS 204 ML-DSA-65), NOT a standard PDF
+signature — no viewer shows a green check; verify with our `pdf-seal` tool.
+Signs the PDF bytes over a `/ByteRange` and appends a `/Type /QESeal` revision
+with the signature + public key. Any later edit to the body breaks verification.
+
+- CLI: `pdf-seal sign <in> <out> <64-hex-seed>` / `pdf-seal verify <in>`
+  (exit 0 = valid, 1 = invalid/no-seal). The seed is the business's persistent
+  32-byte ML-DSA key; pin the embedded public key to a known key for authenticity.
+- Native/server-side only — a signing key must never reach a browser/WASM bundle.
+- Validated: 5 unit tests (valid / deterministic / 1-byte-tamper→invalid /
+  wrong-key→invalid / no-seal) + real-file E2E (qpdf `--check` clean, still
+  renders, tamper→exit 1). Primitive is NIST ACVP-anchored.
+- UI: surface as a server-side "seal / verify" action; show the seal status +
+  public-key fingerprint. Not a browser feature.
+
 ## Known limits (engine-side; don't design UI that assumes otherwise)
 
 1. **Transparent PNGs composite onto white** — a PNG with a transparent

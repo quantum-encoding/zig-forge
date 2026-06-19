@@ -575,4 +575,8 @@ test {
     _ = @import("order_email.zig");
     _ = @import("letter.zig");
     _ = @import("pdf_crypt.zig");
+    // seal.zig imports the `ml_dsa` module (native targets only). Importing it
+    // here (test block — never compiled for android/ios/wasm) keeps the seal off
+    // the cross-target builds while still running its tests under `zig build test`.
+    _ = @import("seal.zig");
 }
