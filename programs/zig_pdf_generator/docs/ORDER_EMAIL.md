@@ -47,6 +47,10 @@ stays in your webhook** (dedupe before/after calling; the envelope echoes back
 | `billing_country` | billing address country (ISO-2) | Lutuno entity fallback |
 | `from_email_override` | — | force the sender (see registry TODOs) |
 | `cta_url_override` | — | force the CTA target |
+| `legal_entity_name` | — | override footer entity (white-label / per-tenant) |
+| `legal_entity_company_number` | — | override; used with `legal_entity_name` |
+| `legal_entity_address` | — | override registered office (single line) |
+| `legal_entity_note` | — | override descriptor, e.g. "Private Company Limited by Shares" |
 | `line_items` | expanded line items | `[{label, quantity, amount_total}]` — Lutuno |
 
 ### Output envelope (discriminated on `action`)
@@ -57,6 +61,8 @@ stays in your webhook** (dedupe before/after calling; the envelope echoes back
   "from_name":"Exact", "from_email":"orders@exactpdfconverter.com",
   "to":"buyer@example.com", "subject":"Your Exact credits are ready",
   "order_ref":"EXA-...", "legal_entity":"Quantum Encoding Ltd",
+  "legal_entity_company_number":"16575953",
+  "legal_entity_address":"33 Oxford Street, Coalville, LE67 3GS",
   "is_physical":false, "event_id":"evt_...", "html":"<!DOCTYPE html>..." }
 ```
 
@@ -117,8 +123,18 @@ Any sender or CTA can still be overridden per-call via `from_email_override` /
   - `GB` → **Quantum Encoding Ltd** (UK)
   - any other / unknown → **Quantum Encoding Europe Limited** (Ireland, EU default)
 
-> TODO: add each entity's registered office address + company number to the
-> email footer (`renderHtml` footer in `src/order_email.zig`).
+The footer prints the entity name, company number and registered office:
+
+| entity | company no. | registered office |
+|---|---|---|
+| Quantum Encoding Ltd | 16575953 | 33 Oxford Street, Coalville, LE67 3GS |
+| Quantum Encoding Europe Limited | 807205 | The Black Church, St. Mary's Place, Dublin, Ireland, D07 P4AX (Private Company Limited by Shares) |
+
+These details are **configurable per-call**: pass `legal_entity_name` (+
+`legal_entity_company_number` / `legal_entity_address` / `legal_entity_note`) in
+the input to fully override the footer entity — e.g. a white-label / per-tenant
+deployment supplying its own company details. When omitted, the resolved QE
+entity above is used.
 
 ## Webhook usage (Next.js / edge)
 

@@ -258,6 +258,8 @@ export type OrderEmailEnvelope =
       subject: string;
       order_ref: string;
       legal_entity: string;
+      legal_entity_company_number: string;
+      legal_entity_address: string;
       is_physical: boolean;
       event_id: string | null;
       html: string;

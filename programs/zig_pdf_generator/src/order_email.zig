@@ -34,7 +34,10 @@
 //!   {"action":"send","app":"exact","from_name":"Exact",
 //!    "from_email":"orders@exactpdfconverter.com","to":"a@b.com",
 //!    "subject":"Your Exact credits are ready","order_ref":"EXA-...",
-//!    "legal_entity":"Quantum Encoding Ltd","event_id":"evt_...","html":"<...>"}
+//!    "legal_entity":"Quantum Encoding Ltd",
+//!    "legal_entity_company_number":"16575953",
+//!    "legal_entity_address":"33 Oxford Street, Coalville, LE67 3GS",
+//!    "event_id":"evt_...","html":"<...>"}
 //!   {"action":"skip","reason":"unknown app for session ...; no email sent",
 //!    "app":"","order_ref":null,"event_id":"evt_..."}
 
@@ -137,8 +140,30 @@ pub fn lookup(app: []const u8) ?Template {
 }
 
 // Legal entities.
-const ENTITY_UK = "Quantum Encoding Ltd";
-const ENTITY_EU = "Quantum Encoding Europe Limited";
+/// A billing legal entity for the receipt footer. Configurable: the caller can
+/// override all fields per-event via the `legal_entity_*` input fields (e.g. a
+/// white-label / per-tenant deployment supplying its own company details).
+pub const Entity = struct {
+    name: []const u8,
+    company_number: []const u8 = "",
+    /// Registered office, single line.
+    address: []const u8 = "",
+    /// Optional descriptor, e.g. "Private Company Limited by Shares".
+    note: []const u8 = "",
+};
+
+const ENTITY_UK = Entity{
+    .name = "Quantum Encoding Ltd",
+    .company_number = "16575953",
+    .address = "33 Oxford Street, Coalville, LE67 3GS",
+};
+
+const ENTITY_EU = Entity{
+    .name = "Quantum Encoding Europe Limited",
+    .company_number = "807205",
+    .address = "The Black Church, St. Mary's Place, Dublin, Ireland, D07 P4AX",
+    .note = "Private Company Limited by Shares",
+};
 
 // =============================================================================
 // Input model (normalized by the webhook from the Stripe event)
@@ -170,6 +195,13 @@ const Input = struct {
     /// for an app whose default is still a placeholder, no rebuild needed).
     from_email_override: []const u8 = "",
     cta_url_override: []const u8 = "",
+    /// Per-call legal-entity override for the footer. When `legal_entity_name`
+    /// is non-empty it fully replaces the resolved entity (the other three are
+    /// taken verbatim, blank if omitted).
+    legal_entity_name: []const u8 = "",
+    legal_entity_company_number: []const u8 = "",
+    legal_entity_address: []const u8 = "",
+    legal_entity_note: []const u8 = "",
     /// Lutuno physical line items.
     line_items: []const LineItem = &.{},
 };
@@ -211,9 +243,9 @@ pub fn generateFromJson(allocator: std.mem.Allocator, json_str: []const u8) Erro
     const order_ref = try buildOrderRef(allocator, tmpl.order_prefix, in.session_id, in.payment_intent_id);
     defer allocator.free(order_ref);
 
-    const legal_entity = resolveLegalEntity(tmpl, in.shipping_country, in.billing_country);
+    const entity = resolveLegalEntity(tmpl, in);
 
-    const html = try renderHtml(allocator, tmpl, in, order_ref, legal_entity);
+    const html = try renderHtml(allocator, tmpl, in, order_ref, entity);
     defer allocator.free(html);
 
     const from_email = if (in.from_email_override.len > 0) in.from_email_override else tmpl.from_email;
@@ -227,6 +259,8 @@ pub fn generateFromJson(allocator: std.mem.Allocator, json_str: []const u8) Erro
         subject: []const u8,
         order_ref: []const u8,
         legal_entity: []const u8,
+        legal_entity_company_number: []const u8,
+        legal_entity_address: []const u8,
         is_physical: bool,
         event_id: ?[]const u8,
         html: []const u8,
@@ -240,7 +274,9 @@ pub fn generateFromJson(allocator: std.mem.Allocator, json_str: []const u8) Erro
         .to = in.customer_email,
         .subject = tmpl.subject,
         .order_ref = order_ref,
-        .legal_entity = legal_entity,
+        .legal_entity = entity.name,
+        .legal_entity_company_number = entity.company_number,
+        .legal_entity_address = entity.address,
         .is_physical = tmpl.is_physical,
         .event_id = if (in.event_id.len > 0) in.event_id else null,
         .html = html,
@@ -270,10 +306,17 @@ fn skipEnvelope(allocator: std.mem.Allocator, event_id: []const u8) Error![]u8 {
 // Legal entity / order ref
 // =============================================================================
 
-fn resolveLegalEntity(tmpl: Template, shipping_country: []const u8, billing_country: []const u8) []const u8 {
+fn resolveLegalEntity(tmpl: Template, in: Input) Entity {
+    // Explicit per-call override wins (white-label / per-tenant deployments).
+    if (in.legal_entity_name.len > 0) return .{
+        .name = in.legal_entity_name,
+        .company_number = in.legal_entity_company_number,
+        .address = in.legal_entity_address,
+        .note = in.legal_entity_note,
+    };
     if (!tmpl.is_physical) return ENTITY_UK; // digital apps are all on the English account
     // Lutuno: ship-to (else bill-to) country picks the billing entity.
-    const country = if (shipping_country.len > 0) shipping_country else billing_country;
+    const country = if (in.shipping_country.len > 0) in.shipping_country else in.billing_country;
     if (eqlIgnoreCase(country, "GB")) return ENTITY_UK;
     return ENTITY_EU; // EU destinations + unknown default to the Irish entity
 }
@@ -307,7 +350,7 @@ fn renderHtml(
     tmpl: Template,
     in: Input,
     order_ref: []const u8,
-    legal_entity: []const u8,
+    entity: Entity,
 ) Error![]u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(allocator);
@@ -371,12 +414,25 @@ fn renderHtml(
 
     try buf.appendSlice(a, "</td></tr>");
 
-    // Footer with the correct legal entity.
+    // Footer with the correct legal entity, company number and registered office.
     try buf.appendSlice(a, "<tr><td style=\"padding:20px 32px;background:#f9fafb;border-top:1px solid #e5e7eb;\">");
-    try buf.appendSlice(a, "<p style=\"font-size:12px;color:#6b7280;margin:0;\">This receipt was issued by ");
-    try appendEscaped(&buf, a, legal_entity);
-    try buf.appendSlice(a, ".</p>");
-    // TODO(rich): add registered office address + company number per entity.
+    try buf.appendSlice(a, "<p style=\"font-size:12px;color:#6b7280;margin:0;line-height:1.6;\">This receipt was issued by ");
+    try appendEscaped(&buf, a, entity.name);
+    if (entity.note.len > 0) {
+        try buf.appendSlice(a, " (");
+        try appendEscaped(&buf, a, entity.note);
+        try buf.appendSlice(a, ")");
+    }
+    try buf.appendSlice(a, ".");
+    if (entity.company_number.len > 0) {
+        try buf.appendSlice(a, "<br>Company No. ");
+        try appendEscaped(&buf, a, entity.company_number);
+    }
+    if (entity.address.len > 0) {
+        try buf.appendSlice(a, "<br>Registered office: ");
+        try appendEscaped(&buf, a, entity.address);
+    }
+    try buf.appendSlice(a, "</p>");
     try buf.appendSlice(a, "</td></tr></table></td></tr></table></body></html>");
 
     return buf.toOwnedSlice(a);
@@ -511,6 +567,10 @@ fn parseInput(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !Input {
     in.billing_country = getStr(obj, "billing_country");
     in.from_email_override = getStr(obj, "from_email_override");
     in.cta_url_override = getStr(obj, "cta_url_override");
+    in.legal_entity_name = getStr(obj, "legal_entity_name");
+    in.legal_entity_company_number = getStr(obj, "legal_entity_company_number");
+    in.legal_entity_address = getStr(obj, "legal_entity_address");
+    in.legal_entity_note = getStr(obj, "legal_entity_note");
 
     if (obj.get("line_items")) |val| {
         if (val == .array) {
@@ -650,7 +710,7 @@ test "lutuno physical EU order: Irish entity, shipping copy" {
     try testing.expect(fieldEquals(out, "Widget"));
 }
 
-test "lutuno physical UK order: English entity" {
+test "lutuno physical UK order: English entity + footer details" {
     const a = testing.allocator;
     const input =
         \\{"session_id":"cs_lut_uk","app":"lutuno","customer_email":"uk@buyer.co.uk",
@@ -659,6 +719,41 @@ test "lutuno physical UK order: English entity" {
     const out = try generateFromJson(a, input);
     defer a.free(out);
     try testing.expect(fieldEquals(out, "\"legal_entity\":\"Quantum Encoding Ltd\""));
+    // Footer + envelope carry company number and registered office.
+    try testing.expect(fieldEquals(out, "\"legal_entity_company_number\":\"16575953\""));
+    try testing.expect(fieldEquals(out, "33 Oxford Street, Coalville, LE67 3GS"));
+    try testing.expect(fieldEquals(out, "Company No. 16575953"));
+}
+
+test "EU entity footer shows Dublin office, company no and note" {
+    const a = testing.allocator;
+    const input =
+        \\{"session_id":"cs_lut_eu2","app":"lutuno","customer_email":"eu@b.fr",
+        \\ "amount_total":2000,"currency":"eur","shipping_country":"FR"}
+    ;
+    const out = try generateFromJson(a, input);
+    defer a.free(out);
+    try testing.expect(fieldEquals(out, "\"legal_entity_company_number\":\"807205\""));
+    try testing.expect(fieldEquals(out, "The Black Church, St. Mary's Place, Dublin"));
+    try testing.expect(fieldEquals(out, "Private Company Limited by Shares"));
+}
+
+test "legal_entity override replaces resolved entity (white-label/per-tenant)" {
+    const a = testing.allocator;
+    const input =
+        \\{"session_id":"cs_t1","app":"lutuno","customer_email":"x@y.com",
+        \\ "amount_total":1000,"currency":"gbp","shipping_country":"GB",
+        \\ "legal_entity_name":"Tenant Store Ltd","legal_entity_company_number":"99887766",
+        \\ "legal_entity_address":"1 Tenant Way, London","legal_entity_note":"VAT GB123"}
+    ;
+    const out = try generateFromJson(a, input);
+    defer a.free(out);
+    try testing.expect(fieldEquals(out, "\"legal_entity\":\"Tenant Store Ltd\""));
+    try testing.expect(fieldEquals(out, "\"legal_entity_company_number\":\"99887766\""));
+    try testing.expect(fieldEquals(out, "1 Tenant Way, London"));
+    // The resolved QE entity must NOT leak when overridden.
+    try testing.expect(!fieldEquals(out, "Quantum Encoding Ltd"));
+    try testing.expect(!fieldEquals(out, "16575953"));
 }
 
 test "lutuno with no country defaults to Irish entity" {
