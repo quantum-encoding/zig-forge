@@ -19,6 +19,42 @@
 
 const std = @import("std");
 const document = @import("document.zig");
+const image_lib = @import("image.zig");
+
+/// How a background image is fitted to the page.
+pub const BackgroundFit = enum { cover, contain, stretch };
+
+/// Letterhead + closing furniture for the "letter" document type. The body is
+/// authored as Markdown and flowed through the same multi-page engine that
+/// `generateFromMarkdown` uses; this struct only describes the framing drawn
+/// before (letterhead) and after (signature) the flowing body, plus an optional
+/// full-page background image painted behind every page.
+pub const LetterInput = struct {
+    body_markdown: []const u8 = "",
+
+    // Full-page background. Path, `data:` URL, or raw base64. "" = none.
+    background_image: []const u8 = "",
+    background_opacity: f32 = 1.0, // <1 paints it faint (watermark-like)
+    background_fit: BackgroundFit = .cover,
+
+    // Letterhead (page 1, above the body)
+    company_name: []const u8 = "",
+    company_address: []const u8 = "", // newline- or "|"-separated lines
+    sender_contact: []const u8 = "", // e.g. "hello@acme.com · +44 …"
+    date: []const u8 = "",
+    reference: []const u8 = "",
+    recipient_name: []const u8 = "",
+    recipient_address: []const u8 = "", // newline- or "|"-separated lines
+    subject: []const u8 = "", // rendered as "Re: <subject>"
+
+    // Closing (after the body)
+    closing: []const u8 = "", // e.g. "Yours sincerely,"
+    signature_name: []const u8 = "",
+    signature_title: []const u8 = "",
+
+    accent_hex: []const u8 = "#1a1a1a",
+    margin: f32 = 64,
+};
 
 // =============================================================================
 // Data Model
@@ -574,6 +610,18 @@ const Renderer = struct {
     page_number: u32 = 1,
     total_pages: u32 = 1,
 
+    // Optional full-page background image, painted first on every page so all
+    // text/tables sit on top of it (painter order == z-order).
+    bg_image_id: ?[]const u8 = null,
+    bg_gs_id: ?[]const u8 = null, // opacity ExtGState, when background_opacity < 1
+    bg_x: f32 = 0,
+    bg_y: f32 = 0,
+    bg_w: f32 = 0,
+    bg_h: f32 = 0,
+
+    // Optional letterhead/closing furniture (letter document type).
+    letter: ?LetterInput = null,
+
     fn init(allocator: std.mem.Allocator, parsed: ParsedDocument) Renderer {
         var r = Renderer{
             .allocator = allocator,
@@ -629,6 +677,115 @@ const Renderer = struct {
         try self.pages.append(self.allocator, content.*);
         content.* = document.ContentStream.init(self.allocator);
         self.current_y = self.page_height - self.margin_top;
+        try self.drawPageBackground(content); // first op on the new page → behind text
+    }
+
+    // Decode + register the background image and pre-compute its draw rect.
+    // No-op (and silently tolerant) if the source is empty or undecodable, so a
+    // bad image never fails the whole document.
+    fn resolveBackground(self: *Renderer, src: []const u8, opacity: f32, fit: BackgroundFit) void {
+        if (src.len == 0) return;
+        const loaded = image_lib.loadImageFlexible(self.allocator, src) catch return;
+        self.bg_image_id = self.doc.addImage(loaded.image) catch return;
+        if (opacity > 0 and opacity < 1) {
+            self.bg_gs_id = self.doc.getOpacityExtGStateId(opacity);
+        }
+        const iw: f32 = @floatFromInt(loaded.image.width);
+        const ih: f32 = @floatFromInt(loaded.image.height);
+        if (iw <= 0 or ih <= 0) return;
+        switch (fit) {
+            .stretch => {
+                self.bg_x = 0;
+                self.bg_y = 0;
+                self.bg_w = self.page_width;
+                self.bg_h = self.page_height;
+            },
+            // cover = fill the page (crop overflow); contain = fit inside (letterbox)
+            .cover, .contain => {
+                const sx = self.page_width / iw;
+                const sy = self.page_height / ih;
+                const s = if (fit == .cover) @max(sx, sy) else @min(sx, sy);
+                self.bg_w = iw * s;
+                self.bg_h = ih * s;
+                self.bg_x = (self.page_width - self.bg_w) / 2;
+                self.bg_y = (self.page_height - self.bg_h) / 2;
+            },
+        }
+    }
+
+    fn drawPageBackground(self: *Renderer, content: *document.ContentStream) !void {
+        const id = self.bg_image_id orelse return;
+        if (self.bg_gs_id) |gs| {
+            try content.drawImageWithOpacity(id, gs, self.bg_x, self.bg_y, self.bg_w, self.bg_h);
+        } else {
+            try content.drawImage(id, self.bg_x, self.bg_y, self.bg_w, self.bg_h);
+        }
+    }
+
+    // Draw a single left-aligned line of text and advance current_y.
+    fn drawLine(self: *Renderer, content: *document.ContentStream, text: []const u8, kind: SpanKind, size: f32, color: document.Color) !void {
+        if (text.len == 0) return;
+        const spans = &[_]Span{.{ .kind = kind, .text = text }};
+        try self.drawSpans(content, spans, self.margin_left, self.usable_width, size, size * 1.3, color);
+    }
+
+    // Draw newline- or "|"-separated address lines as small grey text.
+    fn drawMultiline(self: *Renderer, content: *document.ContentStream, text: []const u8, color: document.Color) !void {
+        if (text.len == 0) return;
+        const sep: u8 = if (std.mem.indexOfScalar(u8, text, '\n') != null) '\n' else '|';
+        var it = std.mem.splitScalar(u8, text, sep);
+        while (it.next()) |raw| {
+            const line = std.mem.trim(u8, raw, " \t\r");
+            if (line.len == 0) continue;
+            try self.drawLine(content, line, .text, 10, color);
+        }
+    }
+
+    fn drawLetterhead(self: *Renderer, content: *document.ContentStream, L: LetterInput) !void {
+        const accent = document.Color.fromHex(L.accent_hex);
+
+        // Company name + contact block (the letterhead).
+        try self.drawLine(content, L.company_name, .bold, 20, accent);
+        self.current_y -= 2;
+        try self.drawMultiline(content, L.company_address, SUBTLE_GREY);
+        try self.drawLine(content, L.sender_contact, .text, 10, SUBTLE_GREY);
+
+        self.current_y -= 10;
+        try content.drawLine(self.margin_left, self.current_y, self.page_width - self.margin_right, self.current_y, BORDER_GREY, 0.75);
+        self.current_y -= 22;
+
+        // Date / reference.
+        try self.drawLine(content, L.date, .text, 10, INK_BLACK);
+        if (L.reference.len > 0) {
+            var buf: [256]u8 = undefined;
+            const ref = std.fmt.bufPrint(&buf, "Ref: {s}", .{L.reference}) catch L.reference;
+            try self.drawLine(content, ref, .text, 10, SUBTLE_GREY);
+        }
+        self.current_y -= 8;
+
+        // Recipient block.
+        try self.drawLine(content, L.recipient_name, .bold, 11, INK_BLACK);
+        try self.drawMultiline(content, L.recipient_address, INK_BLACK);
+        self.current_y -= 14;
+
+        // Subject line.
+        if (L.subject.len > 0) {
+            var buf: [512]u8 = undefined;
+            const subj = std.fmt.bufPrint(&buf, "Re: {s}", .{L.subject}) catch L.subject;
+            try self.drawLine(content, subj, .bold, 12, INK_BLACK);
+            self.current_y -= 10;
+        }
+    }
+
+    fn drawSignature(self: *Renderer, content: *document.ContentStream, L: LetterInput) !void {
+        if (L.closing.len == 0 and L.signature_name.len == 0) return;
+        // Keep the closing block together on one page.
+        try self.checkPageBreak(content, 80);
+        self.current_y -= 18;
+        try self.drawLine(content, L.closing, .text, 11, INK_BLACK);
+        self.current_y -= 36; // blank space for a wet/scanned signature
+        try self.drawLine(content, L.signature_name, .bold, 11, INK_BLACK);
+        try self.drawLine(content, L.signature_title, .text, 10, SUBTLE_GREY);
     }
 
     // Lay out spans across multiple lines, wrapping on word boundaries.
@@ -1107,9 +1264,17 @@ const Renderer = struct {
         var content = document.ContentStream.init(self.allocator);
         errdefer content.deinit();
 
+        // Background on the first page (subsequent pages get it via checkPageBreak).
+        try self.drawPageBackground(&content);
+
+        // Letter mode: draw the letterhead instead of a frontmatter title.
+        if (self.letter) |L| {
+            try self.drawLetterhead(&content, L);
+        }
+
         // Optional title block from frontmatter
         const fm = self.doc_parsed.frontmatter;
-        if (fm.title.len > 0) {
+        if (self.letter == null and fm.title.len > 0) {
             const t_spans = &[_]Span{.{ .kind = .bold, .text = fm.title }};
             try self.drawSpans(&content, t_spans, self.margin_left, self.usable_width, 26, 32, INK_BLACK);
             self.current_y -= 4;
@@ -1135,6 +1300,11 @@ const Renderer = struct {
                 .horizontal_rule => try self.drawHorizontalRule(&content),
                 .table => try self.drawTable(&content, block),
             }
+        }
+
+        // Letter closing / signature after the flowing body.
+        if (self.letter) |L| {
+            try self.drawSignature(&content, L);
         }
 
         // Save final page
@@ -1166,6 +1336,33 @@ pub fn generateFromMarkdown(allocator: std.mem.Allocator, md: []const u8) ![]u8 
     const parsed = try parse(arena_alloc, md);
     var renderer = Renderer.init(arena_alloc, parsed);
     defer renderer.deinit();
+
+    const pdf_bytes = try renderer.render();
+    return try allocator.dupe(u8, pdf_bytes);
+}
+
+/// Render a "letter": a Markdown body flowed through the same multi-page engine,
+/// framed by an optional letterhead + signature, on top of an optional full-page
+/// background image. Returned slice is owned by caller.
+pub fn generateLetter(allocator: std.mem.Allocator, in: LetterInput) ![]u8 {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    const parsed = try parse(arena_alloc, in.body_markdown);
+    var renderer = Renderer.init(arena_alloc, parsed);
+    defer renderer.deinit();
+
+    // Apply the requested margins uniformly.
+    renderer.margin_left = in.margin;
+    renderer.margin_right = in.margin;
+    renderer.margin_top = in.margin;
+    renderer.margin_bottom = in.margin;
+    renderer.usable_width = renderer.page_width - in.margin - in.margin;
+    renderer.current_y = renderer.page_height - in.margin;
+
+    renderer.resolveBackground(in.background_image, in.background_opacity, in.background_fit);
+    renderer.letter = in;
 
     const pdf_bytes = try renderer.render();
     return try allocator.dupe(u8, pdf_bytes);

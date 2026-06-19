@@ -21,6 +21,7 @@ const TemplateMode = enum {
     basic,
     minimalist,
     letter,
+    letter_md,
     presentation,
     proposal,
     certificate,
@@ -95,6 +96,7 @@ pub fn main(init: std.process.Init) !void {
     var opt_basic = false;
     var opt_minimalist = false;
     var opt_letter = false;
+    var opt_letter_md = false;
     var opt_presentation = false;
     var opt_proposal = false;
     var opt_certificate = false;
@@ -121,6 +123,8 @@ pub fn main(init: std.process.Init) !void {
             opt_minimalist = true;
         } else if (std.mem.eql(u8, arg, "--letter")) {
             opt_letter = true;
+        } else if (std.mem.eql(u8, arg, "--letter-md")) {
+            opt_letter_md = true;
         } else if (std.mem.eql(u8, arg, "--presentation")) {
             opt_presentation = true;
         } else if (std.mem.eql(u8, arg, "--proposal")) {
@@ -183,6 +187,8 @@ pub fn main(init: std.process.Init) !void {
         .minimalist
     else if (opt_letter)
         .letter
+    else if (opt_letter_md)
+        .letter_md
     else if (opt_presentation)
         .presentation
     else if (opt_proposal)
@@ -287,6 +293,9 @@ fn generatePdfBytes(allocator: std.mem.Allocator, mode: TemplateMode, cert_type:
         },
         .letter => {
             return try lib.generateLetterQuoteFromJson(allocator, json_data);
+        },
+        .letter_md => {
+            return try lib.generateLetterFromJson(allocator, json_data);
         },
         .presentation => {
             return try lib.generatePresentationFromJson(allocator, json_data);

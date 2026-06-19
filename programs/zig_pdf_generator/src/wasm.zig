@@ -61,6 +61,7 @@ const clean_quote = @import("clean_quote.zig");
 const letter_quote = @import("letter_quote.zig");
 const template_card = @import("template_card.zig");
 const order_email = @import("order_email.zig");
+const letter = @import("letter.zig");
 
 // =============================================================================
 // WASM Allocator
@@ -171,6 +172,28 @@ export fn zigpdf_generate_order_email(json_ptr: [*]const u8, json_len: usize, ou
 
     output_len.* = envelope.len;
     return @ptrCast(envelope.ptr);
+}
+
+/// Generate a "letter" PDF (markdown body flowed across pages + letterhead +
+/// optional full-page background image) from JSON. See src/letter.zig for the
+/// input shape. Returns the PDF bytes; free with wasm_free. Null on error.
+export fn zigpdf_generate_letter(json_ptr: [*]const u8, json_len: usize, output_len: *usize) ?[*]u8 {
+    const json_slice = json_ptr[0..json_len];
+
+    if (!std.unicode.utf8ValidateSlice(json_slice)) {
+        setLastError("Invalid UTF-8 input");
+        return null;
+    }
+
+    const pdf_bytes = letter.generateLetterFromJson(wasm_allocator, json_slice) catch |err| {
+        var buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Letter generation error: {s}", .{@errorName(err)}) catch "Letter generation error";
+        setLastError(msg);
+        return null;
+    };
+
+    output_len.* = pdf_bytes.len;
+    return @ptrCast(@constCast(pdf_bytes.ptr));
 }
 
 // Note: zigpdf_generate_crypto_receipt requires manual JSON parsing

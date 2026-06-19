@@ -59,6 +59,7 @@ pub const letter_quote = @import("letter_quote.zig");
 pub const markdown = @import("markdown.zig");
 pub const template_card = @import("template_card.zig");
 pub const order_email = @import("order_email.zig");
+pub const letter = @import("letter.zig");
 pub const types = @import("types.zig");
 pub const CryptoPaymentBlock = types.CryptoPaymentBlock;
 
@@ -225,6 +226,11 @@ pub const generateLetterQuoteFromJson = letter_quote.generateLetterQuoteFromJson
 
 // Markdown → PDF
 pub const generateFromMarkdown = markdown.generateFromMarkdown;
+
+// Letter (markdown body + letterhead + background image)
+pub const LetterInput = markdown.LetterInput;
+pub const generateLetter = markdown.generateLetter;
+pub const generateLetterFromJson = letter.generateLetterFromJson;
 
 // Template Card types
 pub const TemplateCardData = template_card.TemplateCardData;
@@ -423,4 +429,5 @@ test "invoice IRPF retention row renders when set" {
 test {
     _ = @import("sample_tests.zig");
     _ = @import("order_email.zig");
+    _ = @import("letter.zig");
 }

@@ -341,6 +341,45 @@ Two variants. `type="description"` for the prose letter page; `type="itemized"` 
 
 ---
 
+## Template: `letter`
+
+Flowing-prose **letter** with a Markdown body, a letterhead + signature, and an
+optional full-page background image. Unlike `letter_quote` (fixed one-page-per-
+block), the body is laid out by the Markdown engine, so it **flows across pages**
+(headings, paragraphs, lists, blockquotes, code, and tables all supported) and
+the background image repeats on every page behind the text.
+
+WASM export `zigpdf_generate_letter`; CLI `pdf-gen --letter-md in.json out.pdf`;
+lib `generateLetterFromJson` / `generateLetter(LetterInput)`. Source: rendered by
+`markdown.zig` (`letter.zig` is the JSON shim).
+
+| Field | Type | Req | Default | Notes |
+|---|---|---|---|---|
+| `body_markdown` | string (Markdown) | Yes | `""` | The letter body. Tables (`\| … \|`), headings, lists, bold/italic/links all render. Flows across pages |
+| `background_image` | string | No | `""` | Full-page background. File path, `data:` URL, or raw base64. Drawn behind every page |
+| `background_opacity` | number | No | `1.0` | `<1` paints it faint (watermark-like, e.g. `0.10`) |
+| `background_fit` | `enum("cover"\|"contain"\|"stretch")` | No | `"cover"` | `cover` fills + crops; `contain` letterboxes; `stretch` distorts to page |
+| `company_name` | string | No | `""` | Letterhead title (accent colour, bold) |
+| `company_address` | string | No | `""` | Newline- or `\|`-separated lines under the title |
+| `sender_contact` | string | No | `""` | One contact line (email · phone) |
+| `date` | string | No | `""` | Letter date |
+| `reference` | string | No | `""` | Rendered as `Ref: <reference>` |
+| `recipient_name` | string | No | `""` | Bold recipient line |
+| `recipient_address` | string | No | `""` | Newline- or `\|`-separated recipient lines |
+| `subject` | string | No | `""` | Rendered as `Re: <subject>` (bold) |
+| `closing` | string | No | `""` | e.g. `"Yours sincerely,"` |
+| `signature_name` | string | No | `""` | Bold name under signature space |
+| `signature_title` | string | No | `""` | Grey title under the name |
+| `accent_hex` | hex_color | No | `#1a1a1a` | Letterhead title + accents |
+| `margin` | number | No | `64` | Uniform page margin (points) |
+
+Caveats: PNG backgrounds with transparency composite onto white (the PNG decoder
+drops alpha) — use JPEG or a flat PNG for backgrounds; clickable links inside a
+multi-page letter currently only register on page 1 (see `document.zig` annotation
+limitation). No Svelte UI yet — author via JSON / CLI / WASM.
+
+---
+
 ## Template: `presentation`
 
 Freeform canvas-style renderer. Used for multi-page pitch decks with
