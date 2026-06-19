@@ -29,14 +29,37 @@ interface WasmExports {
   memory: WebAssembly.Memory;
   zigpdf_generate_presentation: (jsonPtr: number, jsonLen: number, outLenPtr: number) => number;
   zigpdf_generate_invoice: (jsonPtr: number, jsonLen: number, outLenPtr: number) => number;
+  zigpdf_generate_invoice_encrypted: (jsonPtr: number, jsonLen: number, seedPtr: number, outLenPtr: number) => number;
   zigpdf_generate_letter_quote: (jsonPtr: number, jsonLen: number, outLenPtr: number) => number;
   zigpdf_generate_letter: (jsonPtr: number, jsonLen: number, outLenPtr: number) => number;
+  zigpdf_generate_letter_encrypted: (jsonPtr: number, jsonLen: number, seedPtr: number, outLenPtr: number) => number;
   zigpdf_generate_order_email: (jsonPtr: number, jsonLen: number, outLenPtr: number) => number;
   zigpdf_free: (ptr: number, len: number) => void;
   zigpdf_get_error: () => number;
   zigpdf_version: () => number;
   wasm_alloc: (size: number) => number;
   wasm_free: (ptr: number, size: number) => void;
+}
+
+/**
+ * Allocate 32 bytes of WASM memory and fill them with cryptographically-random
+ * bytes from the host (crypto.getRandomValues). The WASM module has no
+ * in-module CSPRNG, so encryption requires the host to supply the seed; an
+ * all-zero seed is refused by the engine. Returns the pointer (free with
+ * wasm_free(ptr, 32)).
+ */
+function writeRandomSeed(
+  memory: WebAssembly.Memory,
+  exports: WasmExports
+): number {
+  const ptr = exports.wasm_alloc(32);
+  if (ptr === 0) {
+    throw new Error('Failed to allocate WASM memory for encryption seed');
+  }
+  const seed = new Uint8Array(32);
+  crypto.getRandomValues(seed);
+  new Uint8Array(memory.buffer).set(seed, ptr);
+  return ptr;
 }
 
 /**
@@ -161,6 +184,42 @@ function createModule(exports: WasmExports): ZigPdfModule {
       }
     },
 
+    // AES-256 password-encrypted invoice. The JSON must carry `password` (and
+    // optionally `owner_password`); the 32-byte CSPRNG seed is sourced from the
+    // host here (crypto.getRandomValues) since WASM has no in-module entropy.
+    generateInvoiceEncrypted(jsonString: string): Uint8Array {
+      const outLenPtr = exports.wasm_alloc(4);
+      if (outLenPtr === 0) {
+        throw new Error('Failed to allocate memory for output length');
+      }
+
+      const { ptr: jsonPtr, len: jsonLen } = writeString(memory, exports, jsonString);
+      const seedPtr = writeRandomSeed(memory, exports);
+
+      try {
+        const resultPtr = exports.zigpdf_generate_invoice_encrypted(jsonPtr, jsonLen, seedPtr, outLenPtr);
+
+        if (resultPtr === 0) {
+          const errorPtr = exports.zigpdf_get_error();
+          if (errorPtr !== 0) {
+            throw new Error(`Encrypted invoice generation failed: ${readCString(memory, errorPtr)}`);
+          }
+          throw new Error('Encrypted invoice generation failed: unknown error');
+        }
+
+        const outLen = new Uint32Array(memory.buffer, outLenPtr, 1)[0];
+        const result = readBytes(memory, resultPtr, outLen).slice();
+        exports.zigpdf_free(resultPtr, outLen);
+        return result;
+      } finally {
+        // Zero the seed before freeing — don't leave key material in the heap.
+        new Uint8Array(memory.buffer).fill(0, seedPtr, seedPtr + 32);
+        exports.wasm_free(seedPtr, 32);
+        exports.wasm_free(jsonPtr, jsonLen);
+        exports.wasm_free(outLenPtr, 4);
+      }
+    },
+
     // A receipt uses the exact same WASM export and wire format as an invoice.
     // Pass JSON with `document_type: "receipt"` (defaults show_tax to false) for
     // a non-VAT-registered business. This alias exists for call-site clarity;
@@ -259,6 +318,40 @@ function createModule(exports: WasmExports): ZigPdfModule {
 
         return result;
       } finally {
+        exports.wasm_free(jsonPtr, jsonLen);
+        exports.wasm_free(outLenPtr, 4);
+      }
+    },
+
+    // AES-256 password-encrypted letter (see generateInvoiceEncrypted). JSON
+    // carries `password`/`owner_password`; the CSPRNG seed is host-supplied.
+    generateLetterEncrypted(jsonString: string): Uint8Array {
+      const outLenPtr = exports.wasm_alloc(4);
+      if (outLenPtr === 0) {
+        throw new Error('Failed to allocate memory for output length');
+      }
+
+      const { ptr: jsonPtr, len: jsonLen } = writeString(memory, exports, jsonString);
+      const seedPtr = writeRandomSeed(memory, exports);
+
+      try {
+        const resultPtr = exports.zigpdf_generate_letter_encrypted(jsonPtr, jsonLen, seedPtr, outLenPtr);
+
+        if (resultPtr === 0) {
+          const errorPtr = exports.zigpdf_get_error();
+          if (errorPtr !== 0) {
+            throw new Error(`Encrypted letter generation failed: ${readCString(memory, errorPtr)}`);
+          }
+          throw new Error('Encrypted letter generation failed: unknown error');
+        }
+
+        const outLen = new Uint32Array(memory.buffer, outLenPtr, 1)[0];
+        const result = readBytes(memory, resultPtr, outLen).slice();
+        exports.zigpdf_free(resultPtr, outLen);
+        return result;
+      } finally {
+        new Uint8Array(memory.buffer).fill(0, seedPtr, seedPtr + 32);
+        exports.wasm_free(seedPtr, 32);
         exports.wasm_free(jsonPtr, jsonLen);
         exports.wasm_free(outLenPtr, 4);
       }

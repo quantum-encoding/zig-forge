@@ -148,6 +148,68 @@ export fn zigpdf_generate_invoice(json_ptr: [*]const u8, json_len: usize, output
     return @ptrCast(@constCast(pdf_bytes.ptr));
 }
 
+/// Generate an AES-256 password-encrypted invoice PDF, using a host-supplied
+/// 32-byte CSPRNG seed (WASM has no in-module entropy source). `seed_ptr` must
+/// point to 32 bytes of `crypto.getRandomValues` output; the file key, salts
+/// and IVs derive from it. The open/owner passwords come from the JSON
+/// (`password`, `owner_password`). An all-zero seed is rejected (returns null
+/// with an error). Free the result with wasm_free.
+export fn zigpdf_generate_invoice_encrypted(json_ptr: [*]const u8, json_len: usize, seed_ptr: [*]const u8, output_len: *usize) ?[*]u8 {
+    const json_slice = json_ptr[0..json_len];
+
+    if (!std.unicode.utf8ValidateSlice(json_slice)) {
+        setLastError("Invalid UTF-8 input");
+        return null;
+    }
+
+    var data = json_parser.parseInvoiceJson(wasm_allocator, json_slice) catch |err| {
+        var buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "JSON parse error: {s}", .{@errorName(err)}) catch "JSON parse error";
+        setLastError(msg);
+        return null;
+    };
+    defer json_parser.freeInvoiceData(wasm_allocator, &data);
+
+    var seed: [32]u8 = undefined;
+    @memcpy(&seed, seed_ptr[0..32]);
+    data.seed = seed;
+
+    const pdf_bytes = invoice.generateInvoice(wasm_allocator, data) catch |err| {
+        var buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "PDF generation error: {s}", .{@errorName(err)}) catch "PDF generation error";
+        setLastError(msg);
+        return null;
+    };
+
+    output_len.* = pdf_bytes.len;
+    return @ptrCast(@constCast(pdf_bytes.ptr));
+}
+
+/// Generate an AES-256 password-encrypted letter PDF, using a host-supplied
+/// 32-byte CSPRNG seed (see zigpdf_generate_invoice_encrypted). Passwords come
+/// from the JSON (`password`, `owner_password`). Free with wasm_free.
+export fn zigpdf_generate_letter_encrypted(json_ptr: [*]const u8, json_len: usize, seed_ptr: [*]const u8, output_len: *usize) ?[*]u8 {
+    const json_slice = json_ptr[0..json_len];
+
+    if (!std.unicode.utf8ValidateSlice(json_slice)) {
+        setLastError("Invalid UTF-8 input");
+        return null;
+    }
+
+    var seed: [32]u8 = undefined;
+    @memcpy(&seed, seed_ptr[0..32]);
+
+    const pdf_bytes = letter.generateLetterFromJsonSeeded(wasm_allocator, json_slice, seed) catch |err| {
+        var buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Letter generation error: {s}", .{@errorName(err)}) catch "Letter generation error";
+        setLastError(msg);
+        return null;
+    };
+
+    output_len.* = pdf_bytes.len;
+    return @ptrCast(@constCast(pdf_bytes.ptr));
+}
+
 /// Generate an app-aware order-confirmation email from a normalized Stripe
 /// event (JSON). Returns a JSON envelope (also bytes) the webhook acts on:
 ///   {"action":"send", from_name, from_email, to, subject, order_ref,

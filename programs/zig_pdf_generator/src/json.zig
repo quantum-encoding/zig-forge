@@ -92,6 +92,11 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
     data.font_family = try dupeJsonString(allocator, obj, "font_family") orelse try allocator.dupe(u8, "Helvetica");
     data.currency_symbol = try dupeJsonString(allocator, obj, "currency_symbol") orelse try allocator.dupe(u8, "");
 
+    // Encryption passwords (the binary `seed` is set programmatically, not via
+    // JSON — never carry key/seed bytes in the document JSON).
+    data.password = try dupeJsonString(allocator, obj, "password") orelse try allocator.dupe(u8, "");
+    data.owner_password = try dupeJsonString(allocator, obj, "owner_password") orelse try allocator.dupe(u8, "");
+
     // Parse numeric fields
     data.subtotal = getJsonFloat(obj, "subtotal") orelse 0;
     data.tax_rate = getJsonFloat(obj, "tax_rate") orelse 0.21;
@@ -376,6 +381,8 @@ pub fn freeInvoiceData(allocator: std.mem.Allocator, data: *const invoice.Invoic
     if (data.company_name_color.len > 0) allocator.free(data.company_name_color);
     if (data.font_family.len > 0) allocator.free(data.font_family);
     if (data.currency_symbol.len > 0) allocator.free(data.currency_symbol);
+    if (data.password.len > 0) allocator.free(data.password);
+    if (data.owner_password.len > 0) allocator.free(data.owner_password);
 
     // Free items
     if (data.items.len > 0) {

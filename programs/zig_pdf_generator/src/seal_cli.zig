@@ -1,7 +1,11 @@
 //! pdf-seal — apply / verify an ML-DSA-65 post-quantum tamper-seal on a PDF.
 //!
 //!   pdf-seal sign   <in.pdf> <out.pdf> <64-hex-char-seed>
-//!   pdf-seal verify <in.pdf>
+//!   pdf-seal verify <in.pdf> [--key <64-hex-seed> | --pubkey <3904-hex>]
+//!
+//! With `--key`/`--pubkey`, verify also PINS the seal to a known business key:
+//! a valid seal from a different key is rejected (authenticity, not just
+//! integrity).
 //!
 //! The seed is the signer's persistent 32-byte ML-DSA key seed (hex). NOT a
 //! standard PDF signature — verify with this tool (see src/seal.zig).
@@ -22,7 +26,7 @@ pub fn main(init: std.process.Init) !void {
     while (it.next()) |arg| try args.append(a, arg);
 
     if (args.items.len < 3) {
-        try err.writeAll("usage:\n  pdf-seal sign <in.pdf> <out.pdf> <64-hex-seed>\n  pdf-seal verify <in.pdf>\n");
+        try err.writeAll("usage:\n  pdf-seal sign <in.pdf> <out.pdf> <64-hex-seed>\n  pdf-seal verify <in.pdf> [--key <64-hex-seed> | --pubkey <3904-hex>]\n");
         try err.flush();
         std.process.exit(2);
     }
@@ -50,9 +54,47 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, cmd, "verify")) {
         const pdf = try readFile(a, io, args.items[2]);
         defer a.free(pdf);
-        const v = try seal.verify(a, pdf);
+
+        // Optional pinning: `--key <64-hex-seed>` (derive the expected pubkey
+        // from the business's signing seed) or `--pubkey <3904-hex>` (the
+        // expected public key directly). When given, the seal must be valid AND
+        // match the pinned key (authenticity, not just integrity).
+        var expected_pk: ?[seal.PK_BYTES]u8 = null;
+        var i: usize = 3;
+        while (i + 1 < args.items.len) : (i += 2) {
+            const flag = args.items[i];
+            const val = args.items[i + 1];
+            if (std.mem.eql(u8, flag, "--key")) {
+                var seed: [32]u8 = undefined;
+                if (val.len != 64 or (std.fmt.hexToBytes(&seed, val) catch null) == null) {
+                    try err.writeAll("--key must be 64 hex chars (32-byte seed)\n");
+                    try err.flush();
+                    std.process.exit(2);
+                }
+                expected_pk = seal.publicKeyFromSeed(seed) catch {
+                    try err.writeAll("failed to derive public key from seed\n");
+                    try err.flush();
+                    std.process.exit(2);
+                };
+            } else if (std.mem.eql(u8, flag, "--pubkey")) {
+                var pk: [seal.PK_BYTES]u8 = undefined;
+                if (val.len != seal.PK_BYTES * 2 or (std.fmt.hexToBytes(&pk, val) catch null) == null) {
+                    try err.print("--pubkey must be {d} hex chars\n", .{seal.PK_BYTES * 2});
+                    try err.flush();
+                    std.process.exit(2);
+                }
+                expected_pk = pk;
+            } else {
+                try err.print("unknown verify flag: {s}\n", .{flag});
+                try err.flush();
+                std.process.exit(2);
+            }
+        }
+
+        const v = if (expected_pk) |*pk| try seal.verifyPinned(a, pdf, pk) else try seal.verify(a, pdf);
         try err.print("{s}\n", .{v.reason});
         if (v.has_seal) try err.print("public key: {s}...\n", .{v.public_key_hex[0..32]});
+        if (v.pinned) |p| try err.print("key pin: {s}\n", .{if (p) "MATCH (recognized business key)" else "MISMATCH (unrecognized key)"});
         try err.flush();
         std.process.exit(if (v.valid) 0 else 1);
     } else {

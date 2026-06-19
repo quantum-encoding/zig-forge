@@ -131,6 +131,8 @@ Supports VeriFactu/CIS/crypto-receipt modes via optional fields.
 | `crypto_sender_wallet`         | string                           | No        | none                              | Sender wallet (for receipts/confirmations)                                   |
 | `show_crypto_identicons`       | bool                             | No        | `false`                           | Render blockie identicons for wallet addresses                               |
 | `crypto_custom_symbol`         | string                           | No        | derived from network              | Overrides default token symbol (e.g. `USDC` on Ethereum)                     |
+| `password`                     | string                           | No        | `""`                              | When set, produces an AES-256 (`/V5 /R6`) password-encrypted PDF. Native: seed from OS CSPRNG. WASM: use the `generateInvoiceEncrypted` host-seeded export (the plain export refuses an all-zero seed) |
+| `owner_password`               | string                           | No        | = `password`                      | Permissions (owner) password; falls back to `password` when blank            |
 
 #### `LineItem` (items[])
 

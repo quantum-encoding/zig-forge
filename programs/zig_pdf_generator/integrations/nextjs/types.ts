@@ -227,6 +227,13 @@ export interface ZigPdfModule {
   generatePresentation: (jsonString: string) => Uint8Array;
   generateInvoice: (jsonString: string) => Uint8Array;
   /**
+   * AES-256 (R6) password-encrypted invoice. The JSON must carry `password`
+   * (and optionally `owner_password`); the 32-byte CSPRNG seed is supplied by
+   * the host (crypto.getRandomValues) since WASM has no in-module entropy. An
+   * all-zero seed is refused by the engine.
+   */
+  generateInvoiceEncrypted: (jsonString: string) => Uint8Array;
+  /**
    * Generate a receipt PDF. Identical wire format and WASM export as
    * generateInvoice — this is a semantic alias. Pass JSON with
    * `document_type: "receipt"` (which defaults `show_tax` to false, omitting
@@ -240,6 +247,11 @@ export interface ZigPdfModule {
    * ZIG_PDF_SCHEMA.md for the JSON fields.
    */
   generateLetter: (jsonString: string) => Uint8Array;
+  /**
+   * AES-256 (R6) password-encrypted letter. As generateLetter, but the JSON
+   * carries `password`/`owner_password` and the host supplies the CSPRNG seed.
+   */
+  generateLetterEncrypted: (jsonString: string) => Uint8Array;
   /**
    * App-aware order-confirmation email. Returns a parsed JSON envelope (not a
    * binary PDF). See OrderEmailEnvelope and docs/ORDER_EMAIL.md.

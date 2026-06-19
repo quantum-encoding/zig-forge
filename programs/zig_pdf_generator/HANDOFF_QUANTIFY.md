@@ -118,14 +118,27 @@ For the background image, send a **JPEG or a flat (non-transparent) PNG** — se
 
 ## Encryption (AES-256, password-protected PDFs)
 
-Set `password` (+ optional `owner_password`) on the **letter** input to produce
-an AES-256 `/V5 /R6` encrypted PDF (ISO 32000-2). Validated end-to-end by qpdf
-(`--check` clean, `--decrypt` renders) and pikepdf (R6/V5/256-bit; wrong password
-rejected). **Native only** — the WASM build has no CSPRNG seed, so the WASM
-export does not expose `password` (don't surface "encrypt" in a browser-only
-flow). UI: an "Encrypt with password" field on the letter builder, server-side.
-(Engine API `PdfDocument.enableEncryption(user, owner, perms, seed)` is generic —
-invoices can get the same with a small follow-up.)
+Set `password` (+ optional `owner_password`) on the **invoice** OR **letter**
+input to produce an AES-256 `/V5 /R6` encrypted PDF (ISO 32000-2). Validated
+end-to-end by qpdf (`--check` clean, `--decrypt` renders, wrong password → exit
+2) and pikepdf (R6/V5/256-bit; wrong password rejected) on both paths.
+
+**Two ways to call it:**
+
+- **Native** (CLI / FFI / server) — just include `password` in the invoice or
+  letter JSON. The 32-byte CSPRNG seed is sourced from the OS automatically.
+- **WASM / browser / edge** — WASM has no in-module CSPRNG, so encryption goes
+  through dedicated **host-seeded exports** that take a 32-byte seed pointer:
+  - loader: `generateInvoiceEncrypted(json)` / `generateLetterEncrypted(json)`
+    (exports `zigpdf_generate_invoice_encrypted` / `…_letter_encrypted`). The
+    loader fills the seed from `crypto.getRandomValues` and zeroes it after.
+  - The plain `generateInvoice` / `generateLetter` exports do **not** encrypt on
+    WASM: an all-zero seed is **refused** by the engine (`error.InsecureSeed`),
+    so a forgotten host seed fails loudly instead of shipping a predictable key.
+
+**UI:** an "Encrypt with password" field on the invoice + letter builders. In a
+browser-only flow, call the `*Encrypted` methods. Never put a seed in the JSON —
+it's binary and host-generated.
 
 ## ML-DSA tamper-seal (post-quantum "cryptographically sealed" PDFs)
 
@@ -136,7 +149,13 @@ with the signature + public key. Any later edit to the body breaks verification.
 
 - CLI: `pdf-seal sign <in> <out> <64-hex-seed>` / `pdf-seal verify <in>`
   (exit 0 = valid, 1 = invalid/no-seal). The seed is the business's persistent
-  32-byte ML-DSA key; pin the embedded public key to a known key for authenticity.
+  32-byte ML-DSA key.
+- **Key pinning (authenticity, now implemented):** `pdf-seal verify <in> --key
+  <64-hex-seed>` (or `--pubkey <3904-hex>`) checks the seal is valid AND was
+  produced by *that* key — a valid seal from any other key is rejected
+  (`pinned: false`, exit 1). Engine: `seal.verifyPinned(alloc, pdf, &expected_pk)`
+  and `seal.publicKeyFromSeed(seed)`. Without a pin, verify is integrity-only
+  (tamper-evident, but doesn't assert *who* sealed it).
 - Native/server-side only — a signing key must never reach a browser/WASM bundle.
 - Validated: 5 unit tests (valid / deterministic / 1-byte-tamper→invalid /
   wrong-key→invalid / no-seal) + real-file E2E (qpdf `--check` clean, still

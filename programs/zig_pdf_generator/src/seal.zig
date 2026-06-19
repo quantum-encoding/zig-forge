@@ -110,6 +110,11 @@ pub const Verdict = struct {
     /// known business key for authenticity. Empty if no seal.
     public_key_hex: [PK_HEX]u8 = [_]u8{0} ** PK_HEX,
     has_seal: bool = false,
+    /// Result of pinning the embedded key to a known business key:
+    ///   null  => no pinning was requested (integrity-only verification),
+    ///   true  => the embedded key matches the expected business key,
+    ///   false => mismatch (or no seal) — the seal is from an UNRECOGNIZED key.
+    pinned: ?bool = null,
 };
 
 /// Verify the tamper-seal: recompute the ByteRange digest and ML-DSA-verify it
@@ -155,6 +160,38 @@ pub fn verify(allocator: std.mem.Allocator, sealed: []const u8) SealError!Verdic
     } else {
         verdict.valid = false;
         verdict.reason = "seal INVALID — document modified or wrong key";
+    }
+    return verdict;
+}
+
+/// The ML-DSA-65 public key for a given 32-byte business key seed. Use this to
+/// obtain the public key to pin against (e.g. from the business's persistent
+/// signing seed), or compare its hex to a `Verdict.public_key_hex`.
+pub fn publicKeyFromSeed(key_seed: [32]u8) SealError![PK_BYTES]u8 {
+    const kp = ml_dsa.keyGen(&key_seed) catch return error.SignFailed;
+    return kp.pk.data;
+}
+
+/// Verify the seal AND pin it to a known business public key. This is the
+/// authenticity check (integrity + "signed by *this* key"): a document sealed
+/// by a different key — even a valid seal — is rejected. `expected_pk` is the
+/// known business public key (see `publicKeyFromSeed`). The returned verdict is
+/// `valid` only when the signature checks out and the embedded key matches.
+pub fn verifyPinned(allocator: std.mem.Allocator, sealed: []const u8, expected_pk: *const [PK_BYTES]u8) SealError!Verdict {
+    var verdict = try verify(allocator, sealed);
+    if (!verdict.has_seal) {
+        verdict.pinned = false;
+        return verdict;
+    }
+    var expected_hex: [PK_HEX]u8 = undefined;
+    writeHex(&expected_hex, expected_pk);
+    // Public keys are not secrets, so a plain compare is fine here (no timing
+    // channel worth defending — the attacker already has both public keys).
+    const matches = std.mem.eql(u8, &expected_hex, &verdict.public_key_hex);
+    verdict.pinned = matches;
+    if (!matches) {
+        verdict.valid = false;
+        verdict.reason = "seal signed by an UNRECOGNIZED key (public-key pin mismatch)";
     }
     return verdict;
 }
@@ -307,5 +344,41 @@ test "verify reports no seal on an unsealed PDF" {
     const a = testing.allocator;
     const v = try verify(a, SAMPLE_PDF);
     try testing.expect(!v.has_seal);
+    try testing.expect(!v.valid);
+}
+
+test "verifyPinned: matching business key passes" {
+    const a = testing.allocator;
+    const seed = [_]u8{0x07} ** 32;
+    const sealed = try seal(a, SAMPLE_PDF, seed);
+    defer a.free(sealed);
+    const expected = try publicKeyFromSeed(seed);
+    const v = try verifyPinned(a, sealed, &expected);
+    try testing.expect(v.valid);
+    try testing.expect(v.pinned.? == true);
+}
+
+test "verifyPinned: a valid seal from a DIFFERENT key is rejected" {
+    const a = testing.allocator;
+    // Sealed with key A...
+    const sealed = try seal(a, SAMPLE_PDF, [_]u8{0x07} ** 32);
+    defer a.free(sealed);
+    // ...but pinned to key B. The signature is valid, yet it is not OUR key.
+    const expected_b = try publicKeyFromSeed([_]u8{0x42} ** 32);
+    const v = try verifyPinned(a, sealed, &expected_b);
+    try testing.expect(!v.valid); // authenticity fails even though integrity holds
+    try testing.expect(v.pinned.? == false);
+    try testing.expect(std.mem.indexOf(u8, v.reason, "UNRECOGNIZED") != null);
+}
+
+test "verifyPinned: tamper still caught even with the right key pinned" {
+    const a = testing.allocator;
+    const seed = [_]u8{0x07} ** 32;
+    const sealed = try seal(a, SAMPLE_PDF, seed);
+    defer a.free(sealed);
+    const pos = std.mem.indexOf(u8, sealed, "/MediaBox").?;
+    sealed[pos + 2] ^= 0x01;
+    const expected = try publicKeyFromSeed(seed);
+    const v = try verifyPinned(a, sealed, &expected);
     try testing.expect(!v.valid);
 }

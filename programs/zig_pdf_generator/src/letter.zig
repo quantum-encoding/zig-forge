@@ -37,6 +37,13 @@ pub const Error = error{ InvalidJson, OutOfMemory };
 /// String fields are borrowed from the parsed document, which is kept alive
 /// until `generateLetter` returns (it copies everything it needs synchronously).
 pub fn generateLetterFromJson(allocator: std.mem.Allocator, json_str: []const u8) Error![]u8 {
+    return generateLetterFromJsonSeeded(allocator, json_str, null);
+}
+
+/// As `generateLetterFromJson`, but with a host-supplied 32-byte encryption
+/// seed (used by the WASM host-seeded export, where there is no in-module
+/// CSPRNG). `seed == null` falls back to the OS CSPRNG on native targets.
+pub fn generateLetterFromJsonSeeded(allocator: std.mem.Allocator, json_str: []const u8, seed: ?[32]u8) Error![]u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_str, .{}) catch {
         return error.InvalidJson;
     };
@@ -68,6 +75,7 @@ pub fn generateLetterFromJson(allocator: std.mem.Allocator, json_str: []const u8
     }
     in.password = getStr(o, "password");
     in.owner_password = getStr(o, "owner_password");
+    in.seed = seed;
 
     return markdown.generateLetter(allocator, in) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,

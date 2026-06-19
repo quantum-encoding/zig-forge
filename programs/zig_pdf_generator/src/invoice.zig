@@ -176,7 +176,28 @@ pub const InvoiceData = struct {
     // payment_button_url is set, the renderer synthesizes one button from the
     // single fields, so existing callers are unchanged.
     payment_buttons: []const PaymentButton = &[_]PaymentButton{},
+
+    // Encryption (AES-256 /V5 /R6). When `password` is non-empty the invoice PDF
+    // is password-encrypted; `owner_password` falls back to `password` if blank.
+    // `seed` is the 32 bytes of random material the file key / salts / IVs derive
+    // from: null => sourced from the OS CSPRNG (native). The WASM host-seeded
+    // export sets it explicitly, since WASM has no in-module CSPRNG. An all-zero
+    // seed is refused by the engine (see PdfDocument.enableEncryption).
+    password: []const u8 = "",
+    owner_password: []const u8 = "",
+    seed: ?[32]u8 = null,
 };
+
+/// 32 bytes of random material for the encryption seed. Native: from libc
+/// arc4random. WASM has no CSPRNG here, so it returns zeros — and the engine
+/// refuses an all-zero seed, so a WASM caller must use the host-seeded export.
+fn osSeed() [32]u8 {
+    var s: [32]u8 = [_]u8{0} ** 32;
+    if (comptime !@import("builtin").target.cpu.arch.isWasm()) {
+        std.c.arc4random_buf(&s, s.len);
+    }
+    return s;
+}
 
 // =============================================================================
 // Invoice Renderer
@@ -1042,6 +1063,13 @@ pub const InvoiceRenderer = struct {
         // Add page to document
         try self.doc.addPage(&content);
 
+        // Password-protect the document (AES-256) when a password is set. Must
+        // be configured before build() so every stream/string is encrypted.
+        if (self.data.password.len > 0) {
+            const owner = if (self.data.owner_password.len > 0) self.data.owner_password else self.data.password;
+            try self.doc.enableEncryption(self.data.password, owner, document.DEFAULT_PERMS, self.data.seed orelse osSeed());
+        }
+
         // Build and return PDF
         return try self.doc.build();
     }
@@ -1302,6 +1330,54 @@ test "invoice with tax enabled still renders tax rows" {
     // rate label appears as "Tax \(20%\)" in the byte stream — match the prefix.
     try std.testing.expect(std.mem.indexOf(u8, pdf_bytes, "Subtotal") != null);
     try std.testing.expect(std.mem.indexOf(u8, pdf_bytes, "Tax ") != null);
+}
+
+test "encrypted invoice: password + fixed seed produces an /Encrypt-protected PDF" {
+    const allocator = std.testing.allocator;
+
+    const items = [_]LineItem{
+        .{ .description = "Consulting", .quantity = 1, .unit_price = 1000, .total = 1000 },
+    };
+
+    const data = InvoiceData{
+        .document_type = "invoice",
+        .company_name = "Secure Co",
+        .invoice_number = "ENC-1",
+        .invoice_date = "2026-06-19",
+        .items = &items,
+        .subtotal = 1000,
+        .total = 1000,
+        .password = "open-sesame",
+        .seed = [_]u8{0x11} ** 32, // fixed (non-zero) seed => reproducible file
+    };
+
+    const pdf_bytes = try generateInvoice(allocator, data);
+    defer allocator.free(pdf_bytes);
+
+    try std.testing.expect(std.mem.startsWith(u8, pdf_bytes, "%PDF-1.4"));
+    // The encrypt dict and a document /ID must be present once encryption is on.
+    try std.testing.expect(std.mem.indexOf(u8, pdf_bytes, "/Encrypt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pdf_bytes, "/AESV3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pdf_bytes, "/ID") != null);
+}
+
+test "encrypted invoice: an all-zero seed is refused" {
+    const allocator = std.testing.allocator;
+
+    const items = [_]LineItem{
+        .{ .description = "X", .quantity = 1, .unit_price = 1, .total = 1 },
+    };
+    const data = InvoiceData{
+        .company_name = "Co",
+        .invoice_number = "Z-1",
+        .invoice_date = "2026-06-19",
+        .items = &items,
+        .subtotal = 1,
+        .total = 1,
+        .password = "pw",
+        .seed = [_]u8{0} ** 32, // all-zero => predictable key => must be rejected
+    };
+    try std.testing.expectError(error.InsecureSeed, generateInvoice(allocator, data));
 }
 
 test "generate crypto payment invoice with identicons" {

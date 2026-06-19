@@ -1061,6 +1061,15 @@ pub const PdfDocument = struct {
     /// key, salts and IVs are derived from it). Tests pass a fixed seed for a
     /// reproducible file. `perms` is the /P bit-field (use DEFAULT_PERMS).
     pub fn enableEncryption(self: *PdfDocument, user_pw: []const u8, owner_pw: []const u8, perms: i32, seed: [32]u8) !void {
+        // An all-zero seed yields a predictable file key (the whole point of the
+        // CSPRNG seed is to randomize it). Refuse it: this catches both a WASM
+        // build with no in-module entropy source (osSeed returns zeros) and a
+        // host that forgot to fill its seed buffer. Callers must supply real
+        // randomness (native CSPRNG, or the host's crypto.getRandomValues).
+        var seed_bits: u8 = 0;
+        for (seed) |b| seed_bits |= b;
+        if (seed_bits == 0) return error.InsecureSeed;
+
         var prng = std.Random.DefaultCsprng.init(seed);
         var rnd: pdf_crypt.Randomness = undefined;
         prng.fill(&rnd.file_key);

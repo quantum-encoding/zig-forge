@@ -61,6 +61,11 @@ pub const LetterInput = struct {
     /// `owner_password` or `password` if blank). Native targets only.
     password: []const u8 = "",
     owner_password: []const u8 = "",
+    /// 32 bytes of random material the encryption file key/salts/IVs derive from.
+    /// null => sourced from the OS CSPRNG (native). The WASM host-seeded export
+    /// sets it explicitly (WASM has no in-module CSPRNG). An all-zero seed is
+    /// refused by the engine.
+    seed: ?[32]u8 = null,
 };
 
 /// 32 random bytes for the encryption seed (file key / salts / IVs derive from
@@ -1479,7 +1484,7 @@ pub fn generateLetter(allocator: std.mem.Allocator, in: LetterInput) ![]u8 {
 
     if (in.password.len > 0) {
         const owner = if (in.owner_password.len > 0) in.owner_password else in.password;
-        try renderer.doc.enableEncryption(in.password, owner, document.DEFAULT_PERMS, osSeed());
+        try renderer.doc.enableEncryption(in.password, owner, document.DEFAULT_PERMS, in.seed orelse osSeed());
     }
 
     const pdf_bytes = try renderer.render();
