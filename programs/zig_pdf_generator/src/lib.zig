@@ -425,6 +425,28 @@ test "invoice IRPF retention row renders when set" {
     try std.testing.expect(std.mem.indexOf(u8, pdf, "15%") != null);
 }
 
+test "invoice paginates a long item list across multiple pages" {
+    const std = @import("std");
+    const allocator = std.testing.allocator;
+    var items: [40]LineItem = undefined;
+    for (&items) |*it| it.* = .{ .description = "Line item with a moderately long description that wraps", .quantity = 1, .unit_price = 10, .total = 10 };
+    const data = InvoiceData{
+        .company_name = "Multi Page Co",
+        .client_name = "Client",
+        .invoice_number = "MP-1",
+        .items = &items,
+        .subtotal = 400,
+        .tax_amount = 84,
+        .total = 484,
+    };
+    const pdf = try generateInvoice(allocator, data);
+    defer allocator.free(pdf);
+    try std.testing.expect(std.mem.endsWith(u8, pdf, "%%EOF\n"));
+    // 40 items can't fit on one page → at least two page objects.
+    const p0 = std.mem.indexOf(u8, pdf, "/Type /Page /Parent").?;
+    try std.testing.expect(std.mem.indexOf(u8, pdf[p0 + 1 ..], "/Type /Page /Parent") != null);
+}
+
 test "rgbaToRgb composites transparent pixels onto white" {
     const std = @import("std");
     const allocator = std.testing.allocator;

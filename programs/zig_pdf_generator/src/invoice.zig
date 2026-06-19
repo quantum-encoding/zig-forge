@@ -291,6 +291,46 @@ pub const InvoiceRenderer = struct {
         try content.drawTextRightAligned(text, right_x, y, font_id, font, size, color);
     }
 
+    /// Draw the items-table header (column titles + bar/rule per table_style) at
+    /// the current y and advance below it. Redrawn at the top of every page so a
+    /// paginated item list keeps its headers.
+    fn drawTableHeader(self: *InvoiceRenderer, content: *document.ContentStream) !void {
+        const primary = document.Color.fromHex(self.data.primary_color);
+        const secondary = document.Color.fromHex(self.data.secondary_color);
+        const usable_width = self.page_width - self.margin_left - self.margin_right;
+        const table_style = self.data.table_style;
+        const box_border = document.Color.fromHex("#d0d0d0");
+        const header_text_color = if (table_style == .minimal) primary else document.Color.white;
+        if (table_style != .minimal) {
+            const header_border: ?document.Color = if (table_style == .boxes) box_border else null;
+            try content.drawRect(self.margin_left, self.current_y - 5, usable_width, 22, primary, header_border);
+        }
+        const col_desc = self.margin_left + 5;
+        const col_qty = self.margin_left + 280;
+        const col_price = self.margin_left + 350;
+        const col_total = self.margin_left + 450;
+        try content.drawText("Description", col_desc, self.current_y, self.font_bold, 10, header_text_color);
+        try content.drawText("Qty", col_qty, self.current_y, self.font_bold, 10, header_text_color);
+        try content.drawText("Unit Price", col_price, self.current_y, self.font_bold, 10, header_text_color);
+        try content.drawText("Total", col_total, self.current_y, self.font_bold, 10, header_text_color);
+        if (table_style == .minimal) {
+            try content.drawLine(self.margin_left, self.current_y - 6, self.margin_left + usable_width, self.current_y - 6, secondary, 0.75);
+        }
+        self.current_y -= 28;
+    }
+
+    /// Commit the current page and start a fresh one at the top. `redraw_header`
+    /// re-draws the items-table header (for paginated rows); pass false for a
+    /// fresh page that just holds the totals block. Intermediate content buffers
+    /// are freed here; the final one is freed by render's `defer`.
+    fn startNewPage(self: *InvoiceRenderer, content: *document.ContentStream, redraw_header: bool) !void {
+        try self.doc.addPage(content);
+        content.deinit();
+        content.* = document.ContentStream.init(self.allocator);
+        self.current_y = self.page_height - self.margin_top;
+        if (redraw_header) try self.drawTableHeader(content);
+    }
+
     /// Generate the complete invoice PDF
     pub fn render(self: *InvoiceRenderer) ![]const u8 {
         // Resolve crypto payment block or legacy fields
@@ -542,34 +582,16 @@ pub const InvoiceRenderer = struct {
 
         self.current_y -= 20;
 
-        // Table header — appearance depends on table_style:
-        //   bands/boxes -> filled primary bar with white text (boxes adds a border)
-        //   minimal     -> no fill; primary-coloured text + a rule underneath
+        // Items table. The header is a helper so it can be redrawn at the top of
+        // each continuation page when a long item list paginates.
         const table_style = self.data.table_style;
         const box_border = document.Color.fromHex("#d0d0d0");
-        const header_text_color = if (table_style == .minimal) primary else document.Color.white;
-        if (table_style != .minimal) {
-            const header_border: ?document.Color = if (table_style == .boxes) box_border else null;
-            try content.drawRect(self.margin_left, self.current_y - 5, usable_width, 22, primary, header_border);
-        }
-
-        // Table header text
         const col_desc = self.margin_left + 5;
         const col_qty = self.margin_left + 280;
         const col_price = self.margin_left + 350;
         const col_total = self.margin_left + 450;
 
-        try content.drawText("Description", col_desc, self.current_y, self.font_bold, 10, header_text_color);
-        try content.drawText("Qty", col_qty, self.current_y, self.font_bold, 10, header_text_color);
-        try content.drawText("Unit Price", col_price, self.current_y, self.font_bold, 10, header_text_color);
-        try content.drawText("Total", col_total, self.current_y, self.font_bold, 10, header_text_color);
-
-        // Minimal style: thin rule under the header instead of a filled bar.
-        if (table_style == .minimal) {
-            try content.drawLine(self.margin_left, self.current_y - 6, self.margin_left + usable_width, self.current_y - 6, secondary, 0.75);
-        }
-
-        self.current_y -= 28;
+        try self.drawTableHeader(&content);
 
         // Table rows - with text wrapping for descriptions
         const desc_col_width = col_qty - col_desc - 10; // Description column width with padding
@@ -587,6 +609,12 @@ pub const InvoiceRenderer = struct {
 
                 const num_lines = @max(1, wrapped.lines.len);
                 const row_height = @as(f32, @floatFromInt(num_lines)) * line_height + row_padding;
+
+                // Paginate: if this row won't fit, start a new page and redraw
+                // the table header before drawing it.
+                if (self.current_y - row_height < self.margin_bottom + 40) {
+                    try self.startNewPage(&content, true);
+                }
 
                 // Row background — depends on table_style:
                 //   bands   -> alternating #f5f5f5 fill on even rows (original)
@@ -622,12 +650,6 @@ pub const InvoiceRenderer = struct {
                 try content.drawText(total_str, col_total, self.current_y, self.font_regular, 9, document.Color.black);
 
                 self.current_y -= row_height + 2; // Move down by row height plus small gap
-
-                // Check if we need a new page
-                if (self.current_y < self.margin_bottom + 100) {
-                    // Would need multi-page support here
-                    break;
-                }
             }
         } else {
             // Blackbox mode - wrap description text
@@ -661,6 +683,12 @@ pub const InvoiceRenderer = struct {
         // =====================================================================
         // Totals Section
         // =====================================================================
+
+        // Keep the whole totals block together: if it won't fit under the last
+        // row, move it to a fresh page (no table header needed there).
+        if (self.current_y < self.margin_bottom + 160) {
+            try self.startNewPage(&content, false);
+        }
 
         self.current_y -= 20;
 

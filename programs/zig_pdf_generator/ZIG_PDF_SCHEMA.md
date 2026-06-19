@@ -145,6 +145,7 @@ Supports VeriFactu/CIS/crypto-receipt modes via optional fields.
 
 Fields accepted by the engine that the Svelte builder does not currently author:
 
+- Invoices now **paginate** automatically (long item lists flow across pages with the table header redrawn per page; totals kept together on the last page) — no field to set
 - `display_mode: "blackbox"` — engine supports single-line summary but the builder always sends `itemized`
 - `table_style` (`bands`/`boxes`/`minimal`) — engine renders all three; the Quantify builder needs a toggle to author it
 - `irpf_rate`/`irpf_amount` — engine renders the IRPF row; no Svelte UI yet (Spanish freelancer invoices)

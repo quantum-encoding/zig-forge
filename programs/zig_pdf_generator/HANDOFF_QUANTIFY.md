@@ -128,8 +128,11 @@ For the background image, send a **JPEG or a flat (non-transparent) PNG** — se
    page they're drawn on (verified on a 3-page letter). Pay-button links on
    invoices also use this. Cap is 64 link annotations per document — extra links
    beyond that still render as text, just not clickable.
-3. **Invoices don't paginate** — a very long item list truncates rather than
-   flowing to page 2. Long content belongs in the `letter` type (which flows).
+3. **Invoices now paginate** — a long item list flows across pages, the table
+   header is redrawn on each page, and the totals block is kept together on the
+   last page (moved to a fresh page if it wouldn't fit). The page-1 header
+   (company / bill-to / meta) is not repeated; continuation pages show just the
+   table header. Notes/QR/pay-buttons render on the last page.
 4. **Mixed page sizes in one document** aren't persisted (single MediaBox).
 
 ## What changed in the engine (commits on `main`)
