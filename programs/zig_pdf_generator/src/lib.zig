@@ -58,6 +58,7 @@ pub const clean_quote = @import("clean_quote.zig");
 pub const letter_quote = @import("letter_quote.zig");
 pub const markdown = @import("markdown.zig");
 pub const template_card = @import("template_card.zig");
+pub const order_email = @import("order_email.zig");
 pub const types = @import("types.zig");
 pub const CryptoPaymentBlock = types.CryptoPaymentBlock;
 
@@ -347,4 +348,5 @@ test "library integration" {
 // Pull the canonical-sample regression tests into the `zig build test` graph.
 test {
     _ = @import("sample_tests.zig");
+    _ = @import("order_email.zig");
 }

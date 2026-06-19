@@ -234,9 +234,42 @@ export interface ZigPdfModule {
    */
   generateReceipt: (jsonString: string) => Uint8Array;
   generateLetterQuote: (jsonString: string) => Uint8Array;
+  /**
+   * App-aware order-confirmation email. Returns a parsed JSON envelope (not a
+   * binary PDF). See OrderEmailEnvelope and docs/ORDER_EMAIL.md.
+   */
+  generateOrderEmail: (jsonString: string) => OrderEmailEnvelope;
   getVersion: () => string;
   getLastError: () => string | null;
 }
+
+/**
+ * Result of generateOrderEmail. Discriminated on `action`:
+ *  - "send": mail the customer with the provided fields.
+ *  - "skip": do nothing (unknown/untagged app — NEVER falls back to Lutuno).
+ */
+export type OrderEmailEnvelope =
+  | {
+      action: 'send';
+      app: string;
+      from_name: string;
+      from_email: string;
+      to: string;
+      subject: string;
+      order_ref: string;
+      legal_entity: string;
+      is_physical: boolean;
+      event_id: string | null;
+      html: string;
+    }
+  | {
+      action: 'skip';
+      reason: string;
+      app: string;
+      order_ref: string | null;
+      event_id: string | null;
+      html: string | null;
+    };
 
 // ============================================================================
 // Invoice / Receipt Types

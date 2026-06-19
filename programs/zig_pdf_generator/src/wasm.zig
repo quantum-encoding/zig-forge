@@ -60,6 +60,7 @@ const proposal = @import("proposal.zig");
 const clean_quote = @import("clean_quote.zig");
 const letter_quote = @import("letter_quote.zig");
 const template_card = @import("template_card.zig");
+const order_email = @import("order_email.zig");
 
 // =============================================================================
 // WASM Allocator
@@ -144,6 +145,32 @@ export fn zigpdf_generate_invoice(json_ptr: [*]const u8, json_len: usize, output
 
     output_len.* = pdf_bytes.len;
     return @ptrCast(@constCast(pdf_bytes.ptr));
+}
+
+/// Generate an app-aware order-confirmation email from a normalized Stripe
+/// event (JSON). Returns a JSON envelope (also bytes) the webhook acts on:
+///   {"action":"send", from_name, from_email, to, subject, order_ref,
+///    legal_entity, is_physical, event_id, html}
+///   {"action":"skip", reason, event_id}   // unknown/untagged app — NO email
+/// Returns null only on a hard error (bad UTF-8 / malformed JSON / OOM); an
+/// unknown app is a successful `skip` envelope, not null. Free with wasm_free.
+export fn zigpdf_generate_order_email(json_ptr: [*]const u8, json_len: usize, output_len: *usize) ?[*]u8 {
+    const json_slice = json_ptr[0..json_len];
+
+    if (!std.unicode.utf8ValidateSlice(json_slice)) {
+        setLastError("Invalid UTF-8 input");
+        return null;
+    }
+
+    const envelope = order_email.generateFromJson(wasm_allocator, json_slice) catch |err| {
+        var buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Order email error: {s}", .{@errorName(err)}) catch "Order email error";
+        setLastError(msg);
+        return null;
+    };
+
+    output_len.* = envelope.len;
+    return @ptrCast(envelope.ptr);
 }
 
 // Note: zigpdf_generate_crypto_receipt requires manual JSON parsing
