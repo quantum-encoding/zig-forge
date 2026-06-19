@@ -678,6 +678,29 @@ const Renderer = struct {
         content.* = document.ContentStream.init(self.allocator);
         self.current_y = self.page_height - self.margin_top;
         try self.drawPageBackground(content); // first op on the new page → behind text
+        if (self.letter != null) try self.drawRunningHeader(content);
+    }
+
+    // Compact running header for letter continuation pages (page 2+). The full
+    // letterhead/recipient block stays on page 1; here we repeat just the
+    // company name + a thin rule for continuity, then push the body below it.
+    // Drawn with direct content ops (no wrapping) so it can't re-trigger a page
+    // break at the top of a fresh page.
+    fn drawRunningHeader(self: *Renderer, content: *document.ContentStream) !void {
+        const L = self.letter orelse return;
+        if (L.company_name.len == 0) return;
+        const accent = document.Color.fromHex(L.accent_hex);
+        const hy = self.current_y;
+        try content.drawText(L.company_name, self.margin_left, hy, self.font_bold, 10, accent);
+        if (L.subject.len > 0) {
+            var buf: [256]u8 = undefined;
+            const re = std.fmt.bufPrint(&buf, "Re: {s}", .{L.subject}) catch L.subject;
+            const w = document.Font.helvetica.measureText(re, 9);
+            try content.drawText(re, self.page_width - self.margin_right - w, hy, self.font_regular, 9, SUBTLE_GREY);
+        }
+        const rule_y = hy - 6;
+        try content.drawLine(self.margin_left, rule_y, self.page_width - self.margin_right, rule_y, BORDER_GREY, 0.5);
+        self.current_y = rule_y - 18; // body continues below the running header
     }
 
     // Decode + register the background image and pre-compute its draw rect.
@@ -1287,6 +1310,12 @@ const Renderer = struct {
 
     fn drawFooter(self: *Renderer, content: *document.ContentStream) !void {
         const y = self.margin_bottom - 24;
+        // Letter footer: company name bottom-left, repeated on every page.
+        if (self.letter) |L| {
+            if (L.company_name.len > 0) {
+                try content.drawText(L.company_name, self.margin_left, y, self.font_regular, 9, SUBTLE_GREY);
+            }
+        }
         if (self.total_pages > 1) {
             var buf: [32]u8 = undefined;
             const pg = try std.fmt.bufPrint(&buf, "{d} / {d}", .{ self.page_number, self.total_pages });

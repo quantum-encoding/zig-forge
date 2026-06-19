@@ -347,7 +347,10 @@ Flowing-prose **letter** with a Markdown body, a letterhead + signature, and an
 optional full-page background image. Unlike `letter_quote` (fixed one-page-per-
 block), the body is laid out by the Markdown engine, so it **flows across pages**
 (headings, paragraphs, lists, blockquotes, code, and tables all supported) and
-the background image repeats on every page behind the text.
+the background image repeats on every page behind the text. On multi-page
+letters, page 1 carries the full letterhead/recipient block; continuation pages
+get a compact running header (company name + "Re: subject" + rule), and every
+page gets a footer (company name + `N / M`).
 
 WASM export `zigpdf_generate_letter`; CLI `pdf-gen --letter-md in.json out.pdf`;
 lib `generateLetterFromJson` / `generateLetter(LetterInput)`. Source: rendered by
