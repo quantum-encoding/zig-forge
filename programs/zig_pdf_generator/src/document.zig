@@ -649,6 +649,14 @@ pub const ContentStream = struct {
         try self.restoreState();
     }
 
+    /// Draw text anchored at its RIGHT edge: the string ends at `right_x` and
+    /// grows leftward (|<<<<|), so a long value can't run off the right margin.
+    /// `font` must match `font_id` (it's used only to measure the width).
+    pub fn drawTextRightAligned(self: *ContentStream, text: []const u8, right_x: f32, y: f32, font_id: []const u8, font: Font, size: f32, color: Color) !void {
+        const w = font.measureText(text, size);
+        try self.drawText(text, right_x - w, y, font_id, size, color);
+    }
+
     /// Draw text with character tracking (PDF Tc operator). `tracking` is in points
     /// and is added between every pair of consecutive glyphs. Use with
     /// `Font.measureTracked` to position/centre the result correctly.

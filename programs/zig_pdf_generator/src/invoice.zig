@@ -261,6 +261,36 @@ pub const InvoiceRenderer = struct {
         self.doc.deinit();
     }
 
+    /// The base (regular) font family in use, as a measurable Font enum.
+    fn fontEnumRegular(self: *const InvoiceRenderer) document.Font {
+        if (std.mem.eql(u8, self.data.font_family, "Times-Roman") or std.mem.eql(u8, self.data.font_family, "Times"))
+            return .times_roman;
+        if (std.mem.eql(u8, self.data.font_family, "Courier")) return .courier;
+        return .helvetica;
+    }
+
+    /// The bold counterpart of the family, for measuring bold (right-aligned) text.
+    fn fontEnumBold(self: *const InvoiceRenderer) document.Font {
+        return switch (self.fontEnumRegular()) {
+            .times_roman => .times_bold,
+            .courier => .courier_bold,
+            else => .helvetica_bold,
+        };
+    }
+
+    /// Draw `text` ending at `right_x` (grows leftward), shrinking the font just
+    /// enough to fit within `max_width` so a long value neither runs off the
+    /// right edge nor collides with the label to its left. Down to a 6pt floor.
+    fn drawRightFit(self: *const InvoiceRenderer, content: *document.ContentStream, text: []const u8, right_x: f32, max_width: f32, y: f32, font_id: []const u8, font: document.Font, base_size: f32, color: document.Color) !void {
+        _ = self;
+        var size = base_size;
+        const w = font.measureText(text, base_size);
+        if (w > max_width and w > 0 and max_width > 0) {
+            size = @max(6.0, base_size * max_width / w);
+        }
+        try content.drawTextRightAligned(text, right_x, y, font_id, font, size, color);
+    }
+
     /// Generate the complete invoice PDF
     pub fn render(self: *InvoiceRenderer) ![]const u8 {
         // Resolve crypto payment block or legacy fields
@@ -450,23 +480,29 @@ pub const InvoiceRenderer = struct {
         // =====================================================================
 
         const details_x = self.page_width - self.margin_right - 180;
+        // Values are anchored to the right margin and grow leftward, so a long
+        // invoice number or date can never run off the right edge.
+        const details_right = self.page_width - self.margin_right;
+        const reg = self.fontEnumRegular();
+        // Values fit within the space to the right of the (max-width) labels.
+        const meta_value_width = details_right - (details_x + 64);
         var details_y = self.page_height - self.margin_top - 50;
 
         // Document number (label tracks the document type)
         const num_label = if (is_quote) "Quote #:" else if (is_receipt) "Receipt #:" else "Invoice #:";
         try content.drawText(num_label, details_x, details_y, self.font_bold, 10, document.Color.black);
-        try content.drawText(self.data.invoice_number, details_x + 70, details_y, self.font_regular, 10, document.Color.black);
+        try self.drawRightFit(&content, self.data.invoice_number, details_right, meta_value_width, details_y, self.font_regular, reg, 10, document.Color.black);
         details_y -= 15;
 
         // Date
         try content.drawText("Date:", details_x, details_y, self.font_bold, 10, document.Color.black);
-        try content.drawText(self.data.invoice_date, details_x + 70, details_y, self.font_regular, 10, document.Color.black);
+        try self.drawRightFit(&content, self.data.invoice_date, details_right, meta_value_width, details_y, self.font_regular, reg, 10, document.Color.black);
         details_y -= 15;
 
         // Due date
         if (self.data.due_date.len > 0) {
             try content.drawText("Due Date:", details_x, details_y, self.font_bold, 10, document.Color.black);
-            try content.drawText(self.data.due_date, details_x + 70, details_y, self.font_regular, 10, document.Color.black);
+            try self.drawRightFit(&content, self.data.due_date, details_right, meta_value_width, details_y, self.font_regular, reg, 10, document.Color.black);
         }
 
         // =====================================================================
@@ -541,12 +577,7 @@ pub const InvoiceRenderer = struct {
         const row_padding: f32 = 6; // Padding above/below text in row
 
         // Get font enum for text measurement
-        const font_enum = if (std.mem.eql(u8, self.data.font_family, "Times-Roman") or std.mem.eql(u8, self.data.font_family, "Times"))
-            document.Font.times_roman
-        else if (std.mem.eql(u8, self.data.font_family, "Courier"))
-            document.Font.courier
-        else
-            document.Font.helvetica;
+        const font_enum = self.fontEnumRegular();
 
         if (self.data.display_mode == .itemized) {
             for (self.data.items, 0..) |item, i| {
@@ -636,6 +667,12 @@ pub const InvoiceRenderer = struct {
         // Separator line
         try content.drawLine(col_price - 20, self.current_y + 15, self.page_width - self.margin_right, self.current_y + 15, secondary, 0.5);
 
+        // Amount values are right-anchored so large figures grow leftward and
+        // never overrun the table's right edge.
+        const amt_right = self.margin_left + usable_width - 6;
+        const reg_t = self.fontEnumRegular();
+        const amt_width = amt_right - (col_price + 70); // space right of the widest label
+
         // Subtotal + Tax — only when VAT/tax is being shown. For a non-tax
         // receipt these rows are suppressed entirely (subtotal == total, and a
         // "Tax (0%)" line would be misleading); only the TOTAL bar is rendered.
@@ -644,7 +681,7 @@ pub const InvoiceRenderer = struct {
             try content.drawText("Subtotal:", col_price, self.current_y, self.font_regular, 10, document.Color.black);
             var subtotal_buf: [24]u8 = undefined;
             const subtotal_str = std.fmt.bufPrint(&subtotal_buf, "{s}{d:.2}", .{ self.data.currency_symbol, self.data.subtotal }) catch "0.00";
-            try content.drawText(subtotal_str, col_total, self.current_y, self.font_regular, 10, document.Color.black);
+            try self.drawRightFit(&content, subtotal_str, amt_right, amt_width, self.current_y, self.font_regular, reg_t, 10, document.Color.black);
             self.current_y -= 16;
 
             // Tax
@@ -654,7 +691,7 @@ pub const InvoiceRenderer = struct {
             try content.drawText(tax_label, col_price, self.current_y, self.font_regular, 10, document.Color.black);
             var tax_buf: [24]u8 = undefined;
             const tax_str = std.fmt.bufPrint(&tax_buf, "{s}{d:.2}", .{ self.data.currency_symbol, self.data.tax_amount }) catch "0.00";
-            try content.drawText(tax_str, col_total, self.current_y, self.font_regular, 10, document.Color.black);
+            try self.drawRightFit(&content, tax_str, amt_right, amt_width, self.current_y, self.font_regular, reg_t, 10, document.Color.black);
             self.current_y -= 16;
 
             // IRPF retention (Spanish freelancer invoices) — a negative row.
@@ -666,7 +703,7 @@ pub const InvoiceRenderer = struct {
                 try content.drawText(irpf_label, col_price, self.current_y, self.font_regular, 10, document.Color.black);
                 var irpf_buf: [24]u8 = undefined;
                 const irpf_str = std.fmt.bufPrint(&irpf_buf, "-{s}{d:.2}", .{ self.data.currency_symbol, @abs(self.data.irpf_amount) }) catch "0.00";
-                try content.drawText(irpf_str, col_total, self.current_y, self.font_regular, 10, document.Color.black);
+                try self.drawRightFit(&content, irpf_str, amt_right, amt_width, self.current_y, self.font_regular, reg_t, 10, document.Color.black);
                 self.current_y -= 16;
             }
 
@@ -683,7 +720,7 @@ pub const InvoiceRenderer = struct {
         try content.drawText("TOTAL:", col_price, self.current_y, self.font_bold, 12, document.Color.white);
         var grand_total_buf: [24]u8 = undefined;
         const grand_total_str = std.fmt.bufPrint(&grand_total_buf, "{s}{d:.2}", .{ self.data.currency_symbol, self.data.total }) catch "0.00";
-        try content.drawText(grand_total_str, col_total, self.current_y, self.font_bold, 12, document.Color.white);
+        try self.drawRightFit(&content, grand_total_str, table_right_edge - 10, (table_right_edge - 10) - (col_price + 64), self.current_y, self.font_bold, self.fontEnumBold(), 12, document.Color.white);
 
         // =====================================================================
         // Footer Section - Notes/Payment Terms then QR Code below

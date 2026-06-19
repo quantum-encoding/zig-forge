@@ -425,6 +425,28 @@ test "invoice IRPF retention row renders when set" {
     try std.testing.expect(std.mem.indexOf(u8, pdf, "15%") != null);
 }
 
+test "invoice right-aligns + shrink-fits long meta/amounts without error" {
+    const std = @import("std");
+    const allocator = std.testing.allocator;
+    const items = [_]LineItem{.{ .description = "Enterprise tier", .quantity = 1, .unit_price = 1234567.89, .total = 1234567.89 }};
+    const data = InvoiceData{
+        .company_name = "Quantum Encoding Ltd",
+        .client_name = "Client",
+        // Pathologically long number + huge amounts exercise the shrink-to-fit path.
+        .invoice_number = "2026-000802-RECUPERACION-DOMINIO-XL-EXTRA-LONG",
+        .invoice_date = "19 September 2026 (revised, second issue)",
+        .items = &items,
+        .subtotal = 1234567.89,
+        .tax_amount = 259259.26,
+        .total = 1493827.15,
+        .currency_symbol = "€",
+    };
+    const pdf = try generateInvoice(allocator, data);
+    defer allocator.free(pdf);
+    try std.testing.expect(std.mem.startsWith(u8, pdf, "%PDF-1.4"));
+    try std.testing.expect(std.mem.endsWith(u8, pdf, "%%EOF\n"));
+}
+
 test "link annotations attach to their own page, not always page 0" {
     const std = @import("std");
     const allocator = std.testing.allocator;
