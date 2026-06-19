@@ -425,6 +425,40 @@ test "invoice IRPF retention row renders when set" {
     try std.testing.expect(std.mem.indexOf(u8, pdf, "15%") != null);
 }
 
+test "link annotations attach to their own page, not always page 0" {
+    const std = @import("std");
+    const allocator = std.testing.allocator;
+    var doc = document.PdfDocument.init(allocator);
+    defer doc.deinit();
+
+    // Page 0 — no annotation.
+    var c0 = document.ContentStream.init(allocator);
+    defer c0.deinit();
+    try c0.drawText("Page one", 60, 700, doc.getFontId(.helvetica), 12, document.Color.black);
+    try doc.addPage(&c0);
+
+    // Page 1 — carries the link annotation.
+    var c1 = document.ContentStream.init(allocator);
+    defer c1.deinit();
+    try c1.drawText("Page two", 60, 700, doc.getFontId(.helvetica), 12, document.Color.black);
+    doc.setAnnotationPage(1);
+    try doc.addLinkAnnotation(60, 690, 200, 710, "https://example.com/pay");
+    try doc.addPage(&c1);
+
+    const pdf = try doc.build();
+
+    // The link URL is present...
+    try std.testing.expect(std.mem.indexOf(u8, pdf, "https://example.com/pay") != null);
+
+    // ...and /Annots is on the SECOND page object, not the first.
+    // "/Type /Page /Parent" is unique to page objects (excludes the /Pages tree).
+    const p0 = std.mem.indexOf(u8, pdf, "/Type /Page /Parent").?;
+    const p1 = std.mem.indexOf(u8, pdf[p0 + 1 ..], "/Type /Page /Parent").? + p0 + 1;
+    const annots = std.mem.indexOf(u8, pdf, "/Annots").?;
+    try std.testing.expect(annots > p1); // belongs to page 1's object
+    try std.testing.expect(std.mem.indexOf(u8, pdf[p0..p1], "/Annots") == null); // page 0 has none
+}
+
 // Pull the canonical-sample regression tests into the `zig build test` graph.
 test {
     _ = @import("sample_tests.zig");

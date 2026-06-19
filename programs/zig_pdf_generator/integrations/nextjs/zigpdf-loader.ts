@@ -30,6 +30,7 @@ interface WasmExports {
   zigpdf_generate_presentation: (jsonPtr: number, jsonLen: number, outLenPtr: number) => number;
   zigpdf_generate_invoice: (jsonPtr: number, jsonLen: number, outLenPtr: number) => number;
   zigpdf_generate_letter_quote: (jsonPtr: number, jsonLen: number, outLenPtr: number) => number;
+  zigpdf_generate_letter: (jsonPtr: number, jsonLen: number, outLenPtr: number) => number;
   zigpdf_generate_order_email: (jsonPtr: number, jsonLen: number, outLenPtr: number) => number;
   zigpdf_free: (ptr: number, len: number) => void;
   zigpdf_get_error: () => number;
@@ -214,6 +215,41 @@ function createModule(exports: WasmExports): ZigPdfModule {
             throw new Error(`Letter quote generation failed: ${errorMsg}`);
           }
           throw new Error('Letter quote generation failed: unknown error');
+        }
+
+        const outLenBytes = new Uint32Array(memory.buffer, outLenPtr, 1);
+        const outLen = outLenBytes[0];
+        const result = readBytes(memory, resultPtr, outLen).slice();
+        exports.zigpdf_free(resultPtr, outLen);
+
+        return result;
+      } finally {
+        exports.wasm_free(jsonPtr, jsonLen);
+        exports.wasm_free(outLenPtr, 4);
+      }
+    },
+
+    // Letter: markdown body flowed across pages + letterhead + optional
+    // full-page background image. Returns PDF bytes (same wire format as the
+    // other generators). See docs/ORDER_EMAIL.md sibling docs/schema for fields.
+    generateLetter(jsonString: string): Uint8Array {
+      const outLenPtr = exports.wasm_alloc(4);
+      if (outLenPtr === 0) {
+        throw new Error('Failed to allocate memory for output length');
+      }
+
+      const { ptr: jsonPtr, len: jsonLen } = writeString(memory, exports, jsonString);
+
+      try {
+        const resultPtr = exports.zigpdf_generate_letter(jsonPtr, jsonLen, outLenPtr);
+
+        if (resultPtr === 0) {
+          const errorPtr = exports.zigpdf_get_error();
+          if (errorPtr !== 0) {
+            const errorMsg = readCString(memory, errorPtr);
+            throw new Error(`Letter generation failed: ${errorMsg}`);
+          }
+          throw new Error('Letter generation failed: unknown error');
         }
 
         const outLenBytes = new Uint32Array(memory.buffer, outLenPtr, 1);

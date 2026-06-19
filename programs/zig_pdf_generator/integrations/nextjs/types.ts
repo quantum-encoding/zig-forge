@@ -235,6 +235,12 @@ export interface ZigPdfModule {
   generateReceipt: (jsonString: string) => Uint8Array;
   generateLetterQuote: (jsonString: string) => Uint8Array;
   /**
+   * Letter: markdown body flowed across pages + letterhead + optional full-page
+   * background image. Returns PDF bytes. See the `letter` template in
+   * ZIG_PDF_SCHEMA.md for the JSON fields.
+   */
+  generateLetter: (jsonString: string) => Uint8Array;
+  /**
    * App-aware order-confirmation email. Returns a parsed JSON envelope (not a
    * binary PDF). See OrderEmailEnvelope and docs/ORDER_EMAIL.md.
    */

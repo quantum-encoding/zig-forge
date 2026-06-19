@@ -934,6 +934,10 @@ pub const LinkAnnotation = struct {
     x2: f32,
     y2: f32,
     url: []const u8,
+    /// Zero-based index of the page this annotation belongs to. Set from
+    /// `current_annotation_page` at add time so multi-page documents attach
+    /// links to the correct page (not always page 0).
+    page: u32 = 0,
 };
 
 const MAX_ANNOTATIONS = 16;
@@ -990,6 +994,10 @@ pub const PdfDocument = struct {
     // Link annotations (clickable URLs)
     annotations: [MAX_ANNOTATIONS]LinkAnnotation,
     annotation_count: u8,
+    // Page index that subsequent addLinkAnnotation calls attach to. Multi-page
+    // renderers bump this as they move to each page; single-page callers leave
+    // it at 0.
+    current_annotation_page: u32 = 0,
 
     // PDF metadata (/Info dictionary)
     info: ?PdfInfo = null,
@@ -1015,6 +1023,7 @@ pub const PdfDocument = struct {
             .page_count = 0,
             .annotations = undefined,
             .annotation_count = 0,
+            .current_annotation_page = 0,
             .output = .empty,
         };
     }
@@ -1133,8 +1142,16 @@ pub const PdfDocument = struct {
             .x2 = x2,
             .y2 = y2,
             .url = url,
+            .page = self.current_annotation_page,
         };
         self.annotation_count += 1;
+    }
+
+    /// Set the page index that subsequent `addLinkAnnotation` calls attach to.
+    /// Multi-page renderers call this as they advance pages; single-page
+    /// callers never need it (default 0).
+    pub fn setAnnotationPage(self: *PdfDocument, page: u32) void {
+        self.current_annotation_page = page;
     }
 
     // -------------------------------------------------------------------------
@@ -1376,17 +1393,23 @@ pub const PdfDocument = struct {
             }
             try resources.appendSlice(self.allocator, " >>");
 
-            // Build annotations array for this page (all annotations go on page 0 for now)
+            // Build annotations array for THIS page — each annotation is
+            // attached to the page it was recorded on (annot.page == i).
             var annots_str: std.ArrayListUnmanaged(u8) = .empty;
             defer annots_str.deinit(self.allocator);
-            if (i == 0 and self.annotation_count > 0) {
-                try annots_str.appendSlice(self.allocator, " /Annots [ ");
+            if (self.annotation_count > 0) {
+                var opened = false;
                 for (0..self.annotation_count) |a| {
+                    if (self.annotations[a].page != i) continue;
+                    if (!opened) {
+                        try annots_str.appendSlice(self.allocator, " /Annots [ ");
+                        opened = true;
+                    }
                     var abuf: [32]u8 = undefined;
                     const alen = std.fmt.bufPrint(&abuf, "{d} 0 R ", .{first_annot_obj + @as(u32, @intCast(a))}) catch continue;
                     try annots_str.appendSlice(self.allocator, alen);
                 }
-                try annots_str.appendSlice(self.allocator, "]");
+                if (opened) try annots_str.appendSlice(self.allocator, "]");
             }
 
             // Page object (with optional annotations)
