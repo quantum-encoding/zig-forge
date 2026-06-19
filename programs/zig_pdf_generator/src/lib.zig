@@ -522,6 +522,20 @@ test "link annotations attach to their own page, not always page 0" {
     try std.testing.expect(std.mem.indexOf(u8, pdf[p0..p1], "/Annots") == null); // page 0 has none
 }
 
+test "justified markdown renders without error (frontmatter justify)" {
+    const std = @import("std");
+    const allocator = std.testing.allocator;
+    const md =
+        "---\njustify: true\n---\n" ++
+        "This is a paragraph long enough to wrap onto at least two lines so the " ++
+        "justification logic distributes inter-word space across the first line " ++
+        "while leaving the final line ragged as proper typesetting requires here.";
+    const pdf = try generateFromMarkdown(allocator, md);
+    defer allocator.free(pdf);
+    try std.testing.expect(std.mem.startsWith(u8, pdf, "%PDF-1.4"));
+    try std.testing.expect(std.mem.endsWith(u8, pdf, "%%EOF\n"));
+}
+
 test "markdown links render as clickable link annotations" {
     const std = @import("std");
     const allocator = std.testing.allocator;

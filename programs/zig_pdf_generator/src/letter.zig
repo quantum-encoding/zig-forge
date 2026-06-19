@@ -63,6 +63,9 @@ pub fn generateLetterFromJson(allocator: std.mem.Allocator, json_str: []const u8
     const accent = getStr(o, "accent_hex");
     if (accent.len > 0) in.accent_hex = accent;
     in.margin = getF32(o, "margin", 64);
+    if (o.get("justify")) |v| {
+        if (v == .bool) in.justify = v.bool;
+    }
 
     return markdown.generateLetter(allocator, in) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,

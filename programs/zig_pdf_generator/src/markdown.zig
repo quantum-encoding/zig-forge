@@ -54,6 +54,8 @@ pub const LetterInput = struct {
 
     accent_hex: []const u8 = "#1a1a1a",
     margin: f32 = 64,
+    /// Justify the body paragraphs (distribute inter-word space to both margins).
+    justify: bool = false,
 };
 
 // =============================================================================
@@ -115,6 +117,7 @@ pub const Frontmatter = struct {
     author: []const u8 = "",
     date: []const u8 = "",
     description: []const u8 = "",
+    justify: bool = false, // `justify: true` in frontmatter justifies body paragraphs
 };
 
 pub const ParsedDocument = struct {
@@ -527,7 +530,8 @@ fn parseFrontmatter(yaml: []const u8) Frontmatter {
         if (std.mem.eql(u8, key, "title")) fm.title = value
         else if (std.mem.eql(u8, key, "author")) fm.author = value
         else if (std.mem.eql(u8, key, "date")) fm.date = value
-        else if (std.mem.eql(u8, key, "description")) fm.description = value;
+        else if (std.mem.eql(u8, key, "description")) fm.description = value
+        else if (std.mem.eql(u8, key, "justify")) fm.justify = std.mem.eql(u8, value, "true");
     }
     return fm;
 }
@@ -621,6 +625,9 @@ const Renderer = struct {
 
     // Optional letterhead/closing furniture (letter document type).
     letter: ?LetterInput = null,
+
+    // When true, body paragraphs are justified to both margins.
+    justify: bool = false,
 
     fn init(allocator: std.mem.Allocator, parsed: ParsedDocument) Renderer {
         var r = Renderer{
@@ -749,7 +756,7 @@ const Renderer = struct {
     fn drawLine(self: *Renderer, content: *document.ContentStream, text: []const u8, kind: SpanKind, size: f32, color: document.Color) !void {
         if (text.len == 0) return;
         const spans = &[_]Span{.{ .kind = kind, .text = text }};
-        try self.drawSpans(content, spans, self.margin_left, self.usable_width, size, size * 1.3, color);
+        try self.drawSpans(content, spans, self.margin_left, self.usable_width, size, size * 1.3, color, false);
     }
 
     // Draw newline- or "|"-separated address lines as small grey text.
@@ -822,6 +829,7 @@ const Renderer = struct {
         size_px: f32,
         line_h: f32,
         color: document.Color,
+        justify: bool,
     ) !void {
         // Flatten each span into word-sized drawables; then greedy fill lines.
         const WordDraw = struct {
@@ -881,10 +889,11 @@ const Renderer = struct {
                 continue;
             }
             if (line_width + w.width > max_width and line_words.items.len > 0) {
-                // Emit line (strip trailing space)
+                // Emit a WRAPPED line (justified when requested — it's not the
+                // last line of the paragraph). Strip the trailing space first.
                 var emit = line_words.items;
                 while (emit.len > 0 and emit[emit.len - 1].is_space) emit.len -= 1;
-                try self.emitLine(content, emit, x_start, size_px, line_h, color);
+                try self.emitLine(content, emit, x_start, max_width, size_px, line_h, color, justify);
                 line_words.clearRetainingCapacity();
                 line_width = 0;
                 continue; // retry this word on fresh line
@@ -894,9 +903,11 @@ const Renderer = struct {
             idx += 1;
         }
         if (line_words.items.len > 0) {
+            // The final line of the paragraph is always left-aligned (ragged),
+            // never justified — standard typesetting.
             var emit = line_words.items;
             while (emit.len > 0 and emit[emit.len - 1].is_space) emit.len -= 1;
-            try self.emitLine(content, emit, x_start, size_px, line_h, color);
+            try self.emitLine(content, emit, x_start, max_width, size_px, line_h, color, false);
         }
     }
 
@@ -905,11 +916,29 @@ const Renderer = struct {
         content: *document.ContentStream,
         words: anytype,
         x_start: f32,
+        max_width: f32,
         size_px: f32,
         line_h: f32,
         color: document.Color,
+        justify: bool,
     ) !void {
         try self.checkPageBreak(content, line_h);
+
+        // Justification: spread the slack (max_width − natural width) evenly
+        // across the inter-word gaps so the line fills to both margins.
+        var extra_per_gap: f32 = 0;
+        if (justify) {
+            var natural: f32 = 0;
+            var gaps: usize = 0;
+            for (words) |w| {
+                natural += w.width;
+                if (w.is_space) gaps += 1;
+            }
+            const slack = max_width - natural;
+            if (gaps > 0 and slack > 0) {
+                extra_per_gap = slack / @as(f32, @floatFromInt(gaps));
+            }
+        }
 
         var x = x_start;
         // Track a contiguous run of link words (same URL) so the whole phrase
@@ -943,7 +972,9 @@ const Renderer = struct {
                     link_active = false;
                 }
             }
-            x += w.width;
+            // Widen inter-word gaps for justification (the glyph is drawn at its
+            // natural width; the extra is pure advance).
+            x += w.width + (if (w.is_space) extra_per_gap else 0);
         }
         if (link_active) self.flushLinkRun(link_url, link_x0, link_x1, size_px);
 
@@ -979,7 +1010,7 @@ const Renderer = struct {
         const promoted = try self.promoteTextToBold(block.spans);
         defer self.allocator.free(promoted);
 
-        try self.drawSpans(content, promoted, self.margin_left, self.usable_width, size, size * 1.25, INK_BLACK);
+        try self.drawSpans(content, promoted, self.margin_left, self.usable_width, size, size * 1.25, INK_BLACK, false);
         self.current_y -= gap_after;
     }
 
@@ -998,7 +1029,7 @@ const Renderer = struct {
     }
 
     fn drawParagraph(self: *Renderer, content: *document.ContentStream, block: Block) !void {
-        try self.drawSpans(content, block.spans, self.margin_left, self.usable_width, BODY_SIZE, LINE_HEIGHT, INK_BLACK);
+        try self.drawSpans(content, block.spans, self.margin_left, self.usable_width, BODY_SIZE, LINE_HEIGHT, INK_BLACK, self.justify);
         self.current_y -= PARAGRAPH_GAP;
     }
 
@@ -1010,7 +1041,7 @@ const Renderer = struct {
         const text_x = self.margin_left + 14;
         const text_w = self.usable_width - 14;
         const y_before = self.current_y;
-        try self.drawSpans(content, block.spans, text_x, text_w, BODY_SIZE, LINE_HEIGHT, MUTED_GREY);
+        try self.drawSpans(content, block.spans, text_x, text_w, BODY_SIZE, LINE_HEIGHT, MUTED_GREY, false);
         // Draw the bar spanning the prose block
         try content.drawLine(bar_x, bar_top, bar_x, self.current_y + 3, BORDER_GREY, 3);
         _ = y_before;
@@ -1037,7 +1068,7 @@ const Renderer = struct {
             // Text
             const text_x = self.margin_left + BULLET_TEXT_INDENT;
             const text_w = self.usable_width - BULLET_TEXT_INDENT;
-            try self.drawSpans(content, item.spans, text_x, text_w, BODY_SIZE, LINE_HEIGHT, INK_BLACK);
+            try self.drawSpans(content, item.spans, text_x, text_w, BODY_SIZE, LINE_HEIGHT, INK_BLACK, false);
             self.current_y -= 2; // small gap between items
         }
         self.current_y -= PARAGRAPH_GAP - 2;
@@ -1292,7 +1323,7 @@ const Renderer = struct {
             const spans_to_draw = if (is_header) try self.promoteTextToBold(cell.spans) else cell.spans;
             defer if (is_header) self.allocator.free(spans_to_draw);
 
-            try self.drawSpans(content, spans_to_draw, col_x, inner_w, BODY_SIZE, line_h, INK_BLACK);
+            try self.drawSpans(content, spans_to_draw, col_x, inner_w, BODY_SIZE, line_h, INK_BLACK, false);
 
             const consumed = start_y - self.current_y;
             if (consumed > max_consumed) max_consumed = consumed;
@@ -1340,7 +1371,7 @@ const Renderer = struct {
         const fm = self.doc_parsed.frontmatter;
         if (self.letter == null and fm.title.len > 0) {
             const t_spans = &[_]Span{.{ .kind = .bold, .text = fm.title }};
-            try self.drawSpans(&content, t_spans, self.margin_left, self.usable_width, 26, 32, INK_BLACK);
+            try self.drawSpans(&content, t_spans, self.margin_left, self.usable_width, 26, 32, INK_BLACK, false);
             self.current_y -= 4;
             if (fm.date.len > 0 or fm.author.len > 0) {
                 var meta: std.ArrayListUnmanaged(u8) = .empty;
@@ -1349,7 +1380,7 @@ const Renderer = struct {
                 if (fm.author.len > 0 and fm.date.len > 0) try meta.appendSlice(self.allocator, "  \u{00B7}  ");
                 if (fm.date.len > 0) try meta.appendSlice(self.allocator, fm.date);
                 const m_spans = &[_]Span{.{ .kind = .text, .text = meta.items }};
-                try self.drawSpans(&content, m_spans, self.margin_left, self.usable_width, 10, 14, SUBTLE_GREY);
+                try self.drawSpans(&content, m_spans, self.margin_left, self.usable_width, 10, 14, SUBTLE_GREY, false);
             }
             self.current_y -= 18;
         }
@@ -1400,6 +1431,7 @@ pub fn generateFromMarkdown(allocator: std.mem.Allocator, md: []const u8) ![]u8 
     const parsed = try parse(arena_alloc, md);
     var renderer = Renderer.init(arena_alloc, parsed);
     defer renderer.deinit();
+    renderer.justify = parsed.frontmatter.justify; // `justify: true` in frontmatter
 
     const pdf_bytes = try renderer.render();
     return try allocator.dupe(u8, pdf_bytes);
@@ -1427,6 +1459,7 @@ pub fn generateLetter(allocator: std.mem.Allocator, in: LetterInput) ![]u8 {
 
     renderer.resolveBackground(in.background_image, in.background_opacity, in.background_fit);
     renderer.letter = in;
+    renderer.justify = in.justify;
 
     const pdf_bytes = try renderer.render();
     return try allocator.dupe(u8, pdf_bytes);
