@@ -5,6 +5,7 @@ const tensor_mod = @import("tensor.zig");
 const tokenizer_mod = @import("tokenizer.zig");
 const kv_mod = @import("kv_cache.zig");
 const math = @import("math.zig");
+const quant = @import("quant.zig");
 const thread_pool_mod = @import("thread_pool.zig");
 const TensorView = tensor_mod.TensorView;
 const GGUFFile = gguf_mod.GGUFFile;
@@ -169,28 +170,126 @@ pub const Model = struct {
         return self.logits;
     }
 
-    /// Embedding forward pass: run the full causal stack over `tokens`, pool the last
-    /// token's final-norm hidden state (Qwen3-Embedding uses last-token pooling), and
-    /// L2-normalize into `out`. `out.len` selects the embedding dimension (MRL: a value
-    /// below d_model truncates then re-normalizes). Returns the number of dims written.
+    /// Embedding forward pass: run the full causal stack over `tokens` as a single
+    /// batched prefill, pool the last token's final-norm hidden state (Qwen3-Embedding
+    /// uses last-token pooling), and L2-normalize into `out`. `out.len` selects the
+    /// embedding dimension (MRL: a value below d_model truncates then re-normalizes).
+    /// Returns the number of dims written.
+    ///
+    /// Batched: every token is processed together so each weight matrix is streamed from
+    /// RAM once (not once per token). This is the prefill speedup — see math.matmulBatched.
     pub fn embed(self: *Model, tokens: []const u32, out: []f32) usize {
         const cfg = self.config;
         if (tokens.len == 0) return 0;
+        const a = self.allocator;
+        const N = @min(tokens.len, cfg.max_seq_len);
 
-        // Prefill: process every token causally so attention sees the full prefix.
-        const n = @min(tokens.len, cfg.max_seq_len);
-        for (0..n) |pos| {
-            self.runStack(tokens[pos], @intCast(pos));
+        const d = cfg.d_model;
+        const qd = cfg.n_heads * cfg.d_head;
+        const kvd = cfg.n_kv_heads * cfg.d_head;
+        const ff = cfg.d_ffn;
+
+        // Activation buffers [N × dim]. Freed on return.
+        const X = a.alloc(f32, N * d) catch return 0;
+        defer a.free(X);
+        const Xn = a.alloc(f32, N * d) catch return 0;
+        defer a.free(Xn);
+        const Q = a.alloc(f32, N * qd) catch return 0;
+        defer a.free(Q);
+        const K = a.alloc(f32, N * kvd) catch return 0;
+        defer a.free(K);
+        const V = a.alloc(f32, N * kvd) catch return 0;
+        defer a.free(V);
+        const AO = a.alloc(f32, N * qd) catch return 0;
+        defer a.free(AO);
+        const proj = a.alloc(f32, N * d) catch return 0;
+        defer a.free(proj);
+        const G = a.alloc(f32, N * ff) catch return 0;
+        defer a.free(G);
+        const U = a.alloc(f32, N * ff) catch return 0;
+        defer a.free(U);
+        const Dn = a.alloc(f32, N * d) catch return 0;
+        defer a.free(Dn);
+
+        // 1. Embedding lookup for every token.
+        const embed_w = self.getWeight("token_embd.weight") orelse return 0;
+        for (0..N) |n| math.copyRow(X[n * d ..][0..d], embed_w, tokens[n]);
+
+        // 2. Transformer layers.
+        for (0..cfg.n_layers) |layer| {
+            const li: u32 = @intCast(layer);
+
+            const attn_norm = self.getLayerWeight(li, "attn_norm.weight") orelse return 0;
+            for (0..N) |n| math.rmsnorm(Xn[n * d ..][0..d], X[n * d ..][0..d], attn_norm.asF32Slice(), cfg.rms_norm_eps);
+
+            const wq = self.getLayerWeight(li, "attn_q.weight") orelse return 0;
+            const wk = self.getLayerWeight(li, "attn_k.weight") orelse return 0;
+            const wv = self.getLayerWeight(li, "attn_v.weight") orelse return 0;
+            math.matmulBatched(Q, Xn, wq, N);
+            math.matmulBatched(K, Xn, wk, N);
+            math.matmulBatched(V, Xn, wv, N);
+
+            // QK-norm (if present) + RoPE, per token.
+            const qn = self.getLayerWeight(li, "attn_q_norm.weight");
+            const kn = self.getLayerWeight(li, "attn_k_norm.weight");
+            for (0..N) |n| {
+                const qs = Q[n * qd ..][0..qd];
+                const ks = K[n * kvd ..][0..kvd];
+                if (qn) |w| math.rmsnormHeads(qs, cfg.n_heads, cfg.d_head, w.asF32Slice(), cfg.rms_norm_eps);
+                if (kn) |w| math.rmsnormHeads(ks, cfg.n_kv_heads, cfg.d_head, w.asF32Slice(), cfg.rms_norm_eps);
+                if (cfg.rope_is_neox) {
+                    math.applyRopeNeox(qs, ks, @intCast(n), cfg.n_heads, cfg.n_kv_heads, cfg.d_head, cfg.rope_theta);
+                } else {
+                    math.applyRope(qs, ks, @intCast(n), cfg.n_heads, cfg.n_kv_heads, cfg.d_head, cfg.rope_theta);
+                }
+            }
+
+            // Causal multi-head attention over the full batch → AO [N × qd].
+            self.batchedAttention(Q, K, V, AO, N);
+
+            const wo = self.getLayerWeight(li, "attn_output.weight") orelse return 0;
+            math.matmulBatched(proj, AO, wo, N);
+            for (0..N * d) |i| X[i] += proj[i];
+
+            const ffn_norm = self.getLayerWeight(li, "ffn_norm.weight") orelse return 0;
+            for (0..N) |n| math.rmsnorm(Xn[n * d ..][0..d], X[n * d ..][0..d], ffn_norm.asF32Slice(), cfg.rms_norm_eps);
+
+            const wg = self.getLayerWeight(li, "ffn_gate.weight") orelse return 0;
+            const wu = self.getLayerWeight(li, "ffn_up.weight") orelse return 0;
+            const wd = self.getLayerWeight(li, "ffn_down.weight") orelse return 0;
+            math.matmulBatched(G, Xn, wg, N);
+            math.matmulBatched(U, Xn, wu, N);
+            for (0..N * ff) |i| G[i] = (G[i] / (1.0 + @exp(-G[i]))) * U[i]; // SwiGLU
+            math.matmulBatched(Dn, G, wd, N);
+            for (0..N * d) |i| X[i] += Dn[i];
         }
 
-        // Final RMSNorm on the last token's hidden state == last-token pooled embedding.
+        // 3. Final RMSNorm on the LAST token == last-token pooled embedding.
         const final_norm = self.getWeight("output_norm.weight") orelse return 0;
-        math.rmsnorm(self.x, self.x, final_norm.asF32Slice(), cfg.rms_norm_eps);
-
-        const dim = @min(out.len, cfg.d_model);
+        const last = X[(N - 1) * d ..][0..d];
+        const dim = @min(out.len, d);
+        math.rmsnorm(self.x, last, final_norm.asF32Slice(), cfg.rms_norm_eps);
         @memcpy(out[0..dim], self.x[0..dim]);
         math.l2normalize(out[0..dim]);
         return dim;
+    }
+
+    /// Causal multi-head attention (GQA) over a batched prefill. For each query token n
+    /// and head h, attend to key/value positions 0..=n. Parallelized over query tokens.
+    fn batchedAttention(self: *Model, Q: []const f32, K: []const f32, V: []const f32, AO: []f32, N: usize) void {
+        var ctx = AttnCtx{
+            .model = self,
+            .Q = Q.ptr,
+            .K = K.ptr,
+            .V = V.ptr,
+            .AO = AO.ptr,
+            .N = N,
+        };
+        if (self.thread_pool) |pool| {
+            pool.parallelFor(0, N, &ctx, attnWorker);
+        } else {
+            attnWorker(0, N, &ctx);
+        }
     }
 
     fn transformerLayer(self: *Model, layer: u32, pos: u32) void {
@@ -316,3 +415,50 @@ pub const Model = struct {
         return self.gguf.getTensor(name);
     }
 };
+
+// ── Batched causal attention worker (parallel over query tokens) ──
+
+const AttnCtx = struct {
+    model: *Model,
+    Q: [*]const f32,
+    K: [*]const f32,
+    V: [*]const f32,
+    AO: [*]f32,
+    N: usize,
+};
+
+fn attnWorker(start: usize, end: usize, ctx_ptr: *anyopaque) void {
+    const ctx: *AttnCtx = @alignCast(@ptrCast(ctx_ptr));
+    const cfg = ctx.model.config;
+    const dh = cfg.d_head;
+    const nh = cfg.n_heads;
+    const nkv = cfg.n_kv_heads;
+    const qd = nh * dh;
+    const kvd = nkv * dh;
+    const hpkv = nh / nkv;
+    const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(dh)));
+
+    var scores: [8192]f32 = undefined; // seq ≤ max_seq_len ≤ 8192
+
+    for (start..end) |n| {
+        const seq = n + 1; // causal: attend to positions 0..=n
+        for (0..nh) |h| {
+            const kvh = h / hpkv;
+            const q_off = n * qd + h * dh;
+
+            for (0..seq) |t| {
+                const k_off = t * kvd + kvh * dh;
+                scores[t] = quant.dotF32Simd(ctx.Q + q_off, ctx.K + k_off, dh) * scale;
+            }
+            math.softmax(scores[0..seq]);
+
+            const out = ctx.AO[q_off..][0..dh];
+            @memset(out, 0.0);
+            for (0..seq) |t| {
+                const a = scores[t];
+                const vp = ctx.V + t * kvd + kvh * dh;
+                for (0..dh) |dd| out[dd] += a * vp[dd];
+            }
+        }
+    }
+}

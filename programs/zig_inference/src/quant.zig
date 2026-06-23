@@ -123,24 +123,43 @@ pub fn dotQ4_0F32Simd(blocks: [*]const BlockQ4_0, x: [*]const f32, n_blocks: usi
     return total_sum;
 }
 
-/// Vectorized f32 dot product
+/// Vectorized f32 dot product.
+/// Uses FOUR independent accumulators to hide FMA latency: a single accumulator
+/// serializes on the ~4-cycle FMA dependency chain (latency-bound ≈ scalar speed),
+/// while 4 independent chains keep the FMA units saturated (throughput-bound).
 pub fn dotF32Simd(a: [*]const f32, b: [*]const f32, n: usize) f32 {
-    var sum_vec: @Vector(8, f32) = @splat(0.0);
+    var acc0: @Vector(8, f32) = @splat(0.0);
+    var acc1: @Vector(8, f32) = @splat(0.0);
+    var acc2: @Vector(8, f32) = @splat(0.0);
+    var acc3: @Vector(8, f32) = @splat(0.0);
     var i: usize = 0;
 
-    // Process 8 floats at a time
+    // 32 lanes per iteration across 4 independent accumulators.
+    while (i + 32 <= n) : (i += 32) {
+        const a0: @Vector(8, f32) = a[i..][0..8].*;
+        const a1: @Vector(8, f32) = a[i + 8 ..][0..8].*;
+        const a2: @Vector(8, f32) = a[i + 16 ..][0..8].*;
+        const a3: @Vector(8, f32) = a[i + 24 ..][0..8].*;
+        const b0: @Vector(8, f32) = b[i..][0..8].*;
+        const b1: @Vector(8, f32) = b[i + 8 ..][0..8].*;
+        const b2: @Vector(8, f32) = b[i + 16 ..][0..8].*;
+        const b3: @Vector(8, f32) = b[i + 24 ..][0..8].*;
+        acc0 += a0 * b0;
+        acc1 += a1 * b1;
+        acc2 += a2 * b2;
+        acc3 += a3 * b3;
+    }
+
+    var sum = @reduce(.Add, (acc0 + acc1) + (acc2 + acc3));
+
+    // 8-wide tail
     while (i + 8 <= n) : (i += 8) {
         const va: @Vector(8, f32) = a[i..][0..8].*;
         const vb: @Vector(8, f32) = b[i..][0..8].*;
-        sum_vec += va * vb;
+        sum += @reduce(.Add, va * vb);
     }
-
-    var sum = @reduce(.Add, sum_vec);
-
-    // Scalar tail
-    while (i < n) : (i += 1) {
-        sum += a[i] * b[i];
-    }
+    // scalar tail
+    while (i < n) : (i += 1) sum += a[i] * b[i];
 
     return sum;
 }

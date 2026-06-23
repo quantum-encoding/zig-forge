@@ -223,6 +223,66 @@ pub fn l2normalize(x: []f32) void {
     for (x) |*v| v.* *= inv;
 }
 
+// ── Batched (prefill) matmul ──
+//
+// out[n_tokens × n_rows] = X[n_tokens × cols] @ weightᵀ
+//
+// The per-token matmul above streams the whole weight matrix from RAM once PER TOKEN.
+// At billions of parameters that makes embedding a long sequence memory-bandwidth bound
+// (N passes over ~4 GB of weights). This variant loops the other way: each weight row is
+// dequantized to f32 ONCE, then SIMD-dotted against all N token activations — so the
+// weights are read once total and the hot dot product is vectorized. This is the single
+// biggest speedup for the embedding (prefill) path.
+
+const MAX_BATCH_COLS = 16384; // ≥ largest weight input dim we expect (ffn ≤ 12288 for 8B)
+
+const BatchCtx = struct {
+    out: [*]f32,
+    x: [*]const f32,
+    weight: TensorView,
+    n_tokens: usize,
+    n_rows: usize,
+    cols: usize,
+};
+
+fn batchWorker(start: usize, end: usize, ctx_ptr: *anyopaque) void {
+    const ctx: *BatchCtx = @alignCast(@ptrCast(ctx_ptr));
+    const cols = ctx.cols;
+    const n_rows = ctx.n_rows;
+    const n_tokens = ctx.n_tokens;
+    var wbuf: [MAX_BATCH_COLS]f32 = undefined;
+    const wf = wbuf[0..cols];
+    for (start..end) |row| {
+        // Dequantize this weight row to f32 once, reuse across all tokens.
+        copyRow(wf, ctx.weight, @intCast(row));
+        for (0..n_tokens) |n| {
+            const xn = ctx.x + n * cols;
+            ctx.out[n * n_rows + row] = quant.dotF32Simd(wf.ptr, xn, cols);
+        }
+    }
+}
+
+/// Batched matmul: out[n_tokens][n_rows] = X[n_tokens][cols] @ weightᵀ.
+/// Parallelized over output rows via the thread pool.
+pub fn matmulBatched(out: []f32, x: []const f32, weight: TensorView, n_tokens: usize) void {
+    const n_rows = weight.rows();
+    const cols = weight.cols();
+    std.debug.assert(cols <= MAX_BATCH_COLS);
+    var ctx = BatchCtx{
+        .out = out.ptr,
+        .x = x.ptr,
+        .weight = weight,
+        .n_tokens = n_tokens,
+        .n_rows = n_rows,
+        .cols = cols,
+    };
+    if (g_thread_pool) |pool| {
+        pool.parallelFor(0, n_rows, &ctx, batchWorker);
+    } else {
+        batchWorker(0, n_rows, &ctx);
+    }
+}
+
 /// Matrix-vector multiply: out[rows] = weight[rows×cols] @ x[cols]
 /// Dispatches to thread pool if available, otherwise single-threaded
 pub fn matmul(out: []f32, x: []const f32, weight: TensorView) void {
