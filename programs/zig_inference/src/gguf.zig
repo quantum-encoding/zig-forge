@@ -102,11 +102,17 @@ pub const GGUFFile = struct {
     vocab_size: u32,
     rope_freq_base: f32,
     rms_norm_eps: f32,
+    head_dim: u32, // Qwen3: attention.key_length, NOT embedding_length/head_count
+    pooling_type: u32, // 0=none 1=mean 2=cls 3=last (embedding models)
 
     // Tokenizer data (slices point into mmap or allocated)
     tokens: [][]const u8,
     scores: []f32,
     token_types: []u32,
+    merges: [][]const u8, // GPT-2 BPE merge rules ("a b"), rank = index
+    tokenizer_model: []const u8, // "llama" (SentencePiece) | "gpt2" (byte-level BPE)
+    add_bos: bool,
+    add_eos: bool,
     bos_id: u32,
     eos_id: u32,
 
@@ -153,9 +159,15 @@ pub const GGUFFile = struct {
             .vocab_size = 0,
             .rope_freq_base = 10000.0,
             .rms_norm_eps = 1e-5,
+            .head_dim = 0,
+            .pooling_type = 0,
             .tokens = &.{},
             .scores = &.{},
             .token_types = &.{},
+            .merges = &.{},
+            .tokenizer_model = "",
+            .add_bos = true,
+            .add_eos = false,
             .bos_id = 1,
             .eos_id = 2,
             .metadata = std.StringHashMap(MetadataValue).init(allocator),
@@ -172,6 +184,7 @@ pub const GGUFFile = struct {
         if (self.tokens.len > 0) self.allocator.free(self.tokens);
         if (self.scores.len > 0) self.allocator.free(self.scores);
         if (self.token_types.len > 0) self.allocator.free(self.token_types);
+        if (self.merges.len > 0) self.allocator.free(self.merges);
         self.metadata.deinit();
         self.tensors.deinit();
         _ = std.c.munmap(@ptrCast(@constCast(@alignCast(self.mmap_ptr))), self.mmap_len);
@@ -262,6 +275,12 @@ pub const GGUFFile = struct {
 
         self.rope_freq_base = self.getArchF32(arch, "rope.freq_base", &key_buf) orelse 10000.0;
         self.rms_norm_eps = self.getArchF32(arch, "attention.layer_norm_rms_epsilon", &key_buf) orelse 1e-5;
+
+        // Qwen3 (and other models) set head_dim explicitly via key_length; it is
+        // NOT always embedding_length/head_count (Qwen3-4B: 128 vs 2560/32=80).
+        self.head_dim = self.getArchU32(arch, "attention.key_length", &key_buf) orelse
+            (if (self.head_count > 0) self.embedding_length / self.head_count else 0);
+        self.pooling_type = self.getArchU32(arch, "pooling_type", &key_buf) orelse 0;
     }
 
     pub fn getArchU32(self: *const GGUFFile, arch: []const u8, suffix: []const u8, buf: *[256]u8) ?u32 {
@@ -321,12 +340,43 @@ pub const GGUFFile = struct {
                 const count: usize = @intCast(arr.len);
                 const types = try self.allocator.alloc(u32, count);
                 if (arr.elem_type == .int32 or arr.elem_type == .uint32) {
-                    const src: [*]const u32 = @alignCast(@ptrCast(arr.data_ptr));
-                    @memcpy(types, src[0..count]);
+                    // Array data may not be 4-byte aligned in the mmap — read byte-by-byte.
+                    const raw = arr.data_ptr;
+                    for (0..count) |ti| {
+                        types[ti] = std.mem.readInt(u32, raw[ti * 4 ..][0..4], .little);
+                    }
                 } else {
                     @memset(types, 0);
                 }
                 self.token_types = types;
+            }
+        }
+
+        // Tokenizer family: "llama" (SentencePiece) vs "gpt2" (byte-level BPE, Qwen3)
+        if (self.metadata.get("tokenizer.ggml.model")) |v| {
+            self.tokenizer_model = v.asString() orelse "";
+        }
+        if (self.metadata.get("tokenizer.ggml.add_bos_token")) |v| {
+            if (v == .bool_) self.add_bos = v.bool_;
+        }
+        if (self.metadata.get("tokenizer.ggml.add_eos_token")) |v| {
+            if (v == .bool_) self.add_eos = v.bool_;
+        }
+
+        // Merges (string array "a b") — present for GPT-2 BPE; rank == array index
+        if (self.metadata.get("tokenizer.ggml.merges")) |val| {
+            if (val == .array and val.array.elem_type == .string) {
+                const arr = val.array;
+                const count: usize = @intCast(arr.len);
+                const merges = try self.allocator.alloc([]const u8, count);
+                var ptr = arr.data_ptr;
+                for (0..count) |i| {
+                    const slen = readU64FromPtr(ptr);
+                    ptr += 8;
+                    merges[i] = ptr[0..slen];
+                    ptr += slen;
+                }
+                self.merges = merges;
             }
         }
 

@@ -188,6 +188,71 @@ pub fn dequantizeQ6_K(block: *const BlockQ6_K, out: *[256]f32) void {
     }
 }
 
+// ── Q4_K: 4-bit quantization (K-quant), super-block of 256 ──
+// Layout: f16 d + f16 dmin + scales[12] (6-bit packed scales & mins) + qs[128] (256 nibbles)
+//         = 2 + 2 + 12 + 128 = 144 bytes
+pub const BlockQ4_K = extern struct {
+    d: f16, // super-block scale for the 8 sub-block scales
+    dmin: f16, // super-block scale for the 8 sub-block mins
+    scales: [12]u8, // 8 × (6-bit scale, 6-bit min), bit-packed
+    qs: [128]u8, // 256 × 4-bit quants
+};
+
+/// Unpack the 6-bit scale & min for sub-block j (0..7) from the 12-byte packed array.
+/// Mirrors GGML's get_scale_min_k4 exactly.
+inline fn getScaleMinK4(j: usize, q: *const [12]u8) struct { d: u8, m: u8 } {
+    if (j < 4) {
+        return .{ .d = q[j] & 63, .m = q[j + 4] & 63 };
+    } else {
+        return .{
+            .d = (q[j + 4] & 0x0F) | ((q[j - 4] >> 6) << 4),
+            .m = (q[j + 4] >> 4) | ((q[j - 0] >> 6) << 4),
+        };
+    }
+}
+
+/// Dequantize a Q4_K block to 256 f32 values.
+/// Matches GGML's dequantize_row_q4_K: y = d1*(q&0xF) - m1, then d2*(q>>4) - m2.
+pub fn dequantizeQ4_K(block: *const BlockQ4_K, out: *[256]f32) void {
+    const d: f32 = @floatCast(block.d);
+    const min: f32 = @floatCast(block.dmin);
+
+    var is: usize = 0;
+    var qoff: usize = 0;
+    var ooff: usize = 0;
+    while (qoff < 128) : (qoff += 32) {
+        const sm0 = getScaleMinK4(is + 0, &block.scales);
+        const d1 = d * @as(f32, @floatFromInt(sm0.d));
+        const m1 = min * @as(f32, @floatFromInt(sm0.m));
+        const sm1 = getScaleMinK4(is + 1, &block.scales);
+        const d2 = d * @as(f32, @floatFromInt(sm1.d));
+        const m2 = min * @as(f32, @floatFromInt(sm1.m));
+
+        for (0..32) |l| {
+            out[ooff + l] = d1 * @as(f32, @floatFromInt(block.qs[qoff + l] & 0x0F)) - m1;
+        }
+        for (0..32) |l| {
+            out[ooff + 32 + l] = d2 * @as(f32, @floatFromInt(block.qs[qoff + l] >> 4)) - m2;
+        }
+        is += 2;
+        ooff += 64;
+    }
+}
+
+/// Dot product: Q4_K row (n_blocks blocks) dot f32 vector (dequantize-then-dot)
+pub fn dotQ4_KF32(blocks: [*]const BlockQ4_K, x: [*]const f32, n_blocks: usize) f32 {
+    var sum: f32 = 0.0;
+    var dequant_buf: [256]f32 = undefined;
+    for (0..n_blocks) |b| {
+        dequantizeQ4_K(&blocks[b], &dequant_buf);
+        const xp = x + b * 256;
+        for (0..256) |i| {
+            sum += dequant_buf[i] * xp[i];
+        }
+    }
+    return sum;
+}
+
 /// Dot product: Q6_K row (n_blocks blocks) dot f32 vector
 /// Uses dequantize-then-dot approach for correctness (matches GGML scale indexing)
 pub fn dotQ6_KF32(blocks: [*]const BlockQ6_K, x: [*]const f32, n_blocks: usize) f32 {

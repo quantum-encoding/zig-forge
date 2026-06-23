@@ -101,6 +101,46 @@ export fn ziginfer_generate(
     return @intCast(ffi_buf_pos);
 }
 
+/// Embed text into a normalized vector. If `is_query` is nonzero, the Qwen3-Embedding
+/// instruction wrapper "Instruct: {task}\nQuery:{text}" is applied (an empty `task` uses
+/// the default retrieval instruction); documents pass `is_query == 0`. Writes up to
+/// `out_capacity` floats into `out` (capacity < d_model truncates+renormalizes, MRL).
+/// Returns the number of dims written, or a negative error code.
+export fn ziginfer_embed(
+    model: *model_mod.Model,
+    text: [*:0]const u8,
+    is_query: i32,
+    task: [*:0]const u8,
+    out: [*]f32,
+    out_capacity: usize,
+) i32 {
+    const allocator = std.heap.c_allocator;
+    const text_str = std.mem.span(text);
+
+    var input_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer input_buf.deinit(allocator);
+    if (is_query != 0) {
+        const task_str = std.mem.span(task);
+        const instruction = if (task_str.len > 0) task_str else "Given a web search query, retrieve relevant passages that answer the query";
+        const s = std.fmt.allocPrint(allocator, "Instruct: {s}\nQuery:{s}", .{ instruction, text_str }) catch return -1;
+        defer allocator.free(s);
+        input_buf.appendSlice(allocator, s) catch return -1;
+    } else {
+        input_buf.appendSlice(allocator, text_str) catch return -1;
+    }
+
+    var tokens: std.ArrayListUnmanaged(u32) = .empty;
+    defer tokens.deinit(allocator);
+    const enc = model.tokenizer.encode(allocator, input_buf.items, false) catch return -1;
+    defer allocator.free(enc);
+    tokens.appendSlice(allocator, enc) catch return -1;
+    if (model.tokenizer.add_eos_default) tokens.append(allocator, model.tokenizer.eos_id) catch return -1;
+
+    const dim = @min(out_capacity, @as(usize, model.config.d_model));
+    const written = model.embed(tokens.items, out[0..dim]);
+    return @intCast(written);
+}
+
 /// Tokenize text, returns token count or negative error
 export fn ziginfer_tokenize(
     model: *model_mod.Model,

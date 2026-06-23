@@ -68,6 +68,28 @@ pub fn build(b: *std.Build) void {
     const static_step = b.step("static", "Build static library (libziginfer.a)");
     static_step.dependOn(&install_static.step);
 
+    // Lean embedding-only static library (no espeak-ng / Whisper / Vision / TTS / stb).
+    // Links nothing beyond libc — safe to embed in a sandboxed/notarized macOS app.
+    const embed_lib = b.addLibrary(.{
+        .name = "ziginfer_embed",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/ffi_embed.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+        }),
+        .linkage = .static,
+    });
+    embed_lib.root_module.link_libc = true;
+
+    const install_embed_lib = b.addInstallArtifact(embed_lib, .{
+        .dest_dir = .{ .override = .{ .custom = "lib" } },
+    });
+    const embed_lib_step = b.step("embed-lib", "Build lean embedding-only static library (libziginfer_embed.a)");
+    embed_lib_step.dependOn(&install_embed_lib.step);
+    // Ship the C header alongside the lib.
+    embed_lib_step.dependOn(&b.addInstallFileWithDir(b.path("include/ziginfer_embed.h"), .{ .custom = "include" }, "ziginfer_embed.h").step);
+    embed_lib_step.dependOn(&b.addInstallFileWithDir(b.path("include/module.modulemap"), .{ .custom = "include" }, "module.modulemap").step);
+
     // Tests
     const tests = b.addTest(.{
         .root_module = b.createModule(.{

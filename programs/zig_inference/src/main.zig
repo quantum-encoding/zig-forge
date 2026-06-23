@@ -71,6 +71,8 @@ pub fn main(init: std.process.Init) !void {
         try cmdTokenize(allocator, rest);
     } else if (std.mem.eql(u8, command, "generate")) {
         try cmdGenerate(allocator, rest);
+    } else if (std.mem.eql(u8, command, "embed")) {
+        try cmdEmbed(allocator, rest);
     } else if (std.mem.eql(u8, command, "bench")) {
         try cmdBench(allocator, rest);
     } else if (std.mem.eql(u8, command, "transcribe")) {
@@ -95,6 +97,7 @@ fn printUsage() void {
         \\  zig-infer info     <model.gguf>              Show model information
         \\  zig-infer tokenize --model <path> "text"      Tokenize text
         \\  zig-infer generate --model <path> [options]   Generate text
+        \\  zig-infer embed    --model <path> [options]   Text embedding (Qwen3-Embedding)
         \\  zig-infer bench    --model <path> [options]   Benchmark inference
         \\  zig-infer transcribe --model <path> --audio <wav> Transcribe audio
         \\  zig-infer segment   --model <path> --input <img> --output <png> Remove background
@@ -308,6 +311,99 @@ fn cmdGenerate(allocator: std.mem.Allocator, args: []const []const u8) !void {
         result.genTokPerSec(),
         result.totalSec(),
     });
+}
+
+fn cmdEmbed(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    var model_path: ?[]const u8 = null;
+    var text: ?[]const u8 = null;
+    var query: ?[]const u8 = null;
+    var task: []const u8 = "Given a web search query, retrieve relevant passages that answer the query";
+    var dim: usize = 0; // 0 = full d_model (MRL: smaller truncates+renormalizes)
+    var as_json = false;
+    var n_threads: u32 = 0;
+
+    var idx: usize = 0;
+    while (idx < args.len) : (idx += 1) {
+        const arg = args[idx];
+        const has_next = idx + 1 < args.len;
+        if (std.mem.eql(u8, arg, "--model") and has_next) {
+            idx += 1; model_path = args[idx];
+        } else if (std.mem.eql(u8, arg, "--text") and has_next) {
+            idx += 1; text = args[idx];
+        } else if (std.mem.eql(u8, arg, "--query") and has_next) {
+            idx += 1; query = args[idx];
+        } else if (std.mem.eql(u8, arg, "--task") and has_next) {
+            idx += 1; task = args[idx];
+        } else if (std.mem.eql(u8, arg, "--dim") and has_next) {
+            idx += 1; dim = std.fmt.parseInt(usize, args[idx], 10) catch 0;
+        } else if (std.mem.eql(u8, arg, "--json")) {
+            as_json = true;
+        } else if (std.mem.eql(u8, arg, "--threads") and has_next) {
+            idx += 1; n_threads = std.fmt.parseInt(u32, args[idx], 10) catch 0;
+        } else if (text == null and query == null) {
+            text = arg; // positional
+        }
+    }
+
+    if (n_threads == 0) n_threads = detectThreadCount();
+
+    const mp = model_path orelse {
+        printErr("Missing --model argument\n", .{});
+        return;
+    };
+    if (text == null and query == null) {
+        printErr("Missing --text or --query argument\n", .{});
+        return;
+    }
+
+    printErr("Loading model: {s}\n", .{mp});
+    var model = try model_mod.Model.init(allocator, mp, n_threads);
+    defer model.deinit();
+
+    // Queries get the instruction wrapper "Instruct: {task}\nQuery:{q}" (note: no space
+    // after "Query:"); documents are embedded raw. Matches Qwen3-Embedding's reference.
+    var input_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer input_buf.deinit(allocator);
+    if (query) |q| {
+        const s = try std.fmt.allocPrint(allocator, "Instruct: {s}\nQuery:{s}", .{ task, q });
+        defer allocator.free(s);
+        try input_buf.appendSlice(allocator, s);
+    } else {
+        try input_buf.appendSlice(allocator, text.?);
+    }
+
+    // Tokenize (no BOS for Qwen3) and append EOS — Qwen3-Embedding pools the EOS token.
+    var tokens_list: std.ArrayListUnmanaged(u32) = .empty;
+    defer tokens_list.deinit(allocator);
+    const enc = try model.tokenizer.encode(allocator, input_buf.items, false);
+    defer allocator.free(enc);
+    try tokens_list.appendSlice(allocator, enc);
+    if (model.tokenizer.add_eos_default) try tokens_list.append(allocator, model.tokenizer.eos_id);
+
+    const out_dim = if (dim > 0) @min(dim, @as(usize, model.config.d_model)) else model.config.d_model;
+    const out = try allocator.alloc(f32, out_dim);
+    defer allocator.free(out);
+
+    const written = model.embed(tokens_list.items, out);
+
+    if (as_json) {
+        writeStdout("[");
+        for (out[0..written], 0..) |v, vi| {
+            if (vi > 0) writeStdout(",");
+            printOut("{d:.6}", .{v});
+        }
+        writeStdout("]\n");
+    } else {
+        printErr("Embedding: dim={d}, tokens={d}\n", .{ written, tokens_list.items.len });
+        printOut("[", .{});
+        const preview = @min(written, 8);
+        for (out[0..preview], 0..) |v, vi| {
+            if (vi > 0) writeStdout(", ");
+            printOut("{d:.5}", .{v});
+        }
+        if (written > preview) writeStdout(", ...");
+        writeStdout("]\n");
+    }
 }
 
 fn cmdBench(allocator: std.mem.Allocator, args: []const []const u8) !void {

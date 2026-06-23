@@ -23,6 +23,8 @@ pub const ModelConfig = struct {
     max_seq_len: u32,
     rope_theta: f32,
     rms_norm_eps: f32,
+    rope_is_neox: bool, // Qwen/GPT-NeoX use split-half RoPE; LLaMA uses adjacent-pair
+    pooling_type: u32, // 0=none 1=mean 2=cls 3=last (embedding pooling)
 };
 
 pub const Model = struct {
@@ -59,12 +61,15 @@ pub const Model = struct {
             .d_model = gguf.embedding_length,
             .n_heads = gguf.head_count,
             .n_kv_heads = gguf.head_count_kv,
-            .d_head = if (gguf.head_count > 0) gguf.embedding_length / gguf.head_count else 128,
+            // Qwen3 head_dim (128) != embedding_length/head_count (80); use the GGUF value.
+            .d_head = if (gguf.head_dim > 0) gguf.head_dim else if (gguf.head_count > 0) gguf.embedding_length / gguf.head_count else 128,
             .d_ffn = gguf.feed_forward_length,
             .vocab_size = gguf.vocab_size,
             .max_seq_len = @min(gguf.context_length, 8192), // Cap for memory
             .rope_theta = gguf.rope_freq_base,
             .rms_norm_eps = gguf.rms_norm_eps,
+            .rope_is_neox = std.mem.startsWith(u8, gguf.architecture, "qwen"),
+            .pooling_type = gguf.pooling_type,
         };
 
         const tokenizer = try Tokenizer.init(allocator, &gguf);
@@ -133,19 +138,23 @@ pub const Model = struct {
         self.gguf.close();
     }
 
+    /// Run embedding lookup + all transformer layers for one token at `pos`.
+    /// Leaves the token's hidden state (pre final-norm) in `self.x` and updates the KV cache.
+    fn runStack(self: *Model, token: u32, pos: u32) void {
+        const embed_w = self.getWeight("token_embd.weight") orelse return;
+        math.copyRow(self.x, embed_w, token);
+        for (0..self.config.n_layers) |layer| {
+            self.transformerLayer(@intCast(layer), pos);
+        }
+    }
+
     /// Forward pass for a single token at a given position
     /// Returns logits slice [vocab_size]
     pub fn forward(self: *Model, token: u32, pos: u32) []f32 {
         const cfg = self.config;
 
-        // 1. Embedding lookup
-        const embed = self.getWeight("token_embd.weight") orelse return self.logits;
-        math.copyRow(self.x, embed, token);
-
-        // 2. Transformer layers
-        for (0..cfg.n_layers) |layer| {
-            self.transformerLayer(@intCast(layer), pos);
-        }
+        // 1-2. Embedding lookup + transformer layers
+        self.runStack(token, pos);
 
         // 3. Final RMSNorm
         const final_norm = self.getWeight("output_norm.weight") orelse return self.logits;
@@ -158,6 +167,30 @@ pub const Model = struct {
         math.matmul(self.logits, self.x, output_w);
 
         return self.logits;
+    }
+
+    /// Embedding forward pass: run the full causal stack over `tokens`, pool the last
+    /// token's final-norm hidden state (Qwen3-Embedding uses last-token pooling), and
+    /// L2-normalize into `out`. `out.len` selects the embedding dimension (MRL: a value
+    /// below d_model truncates then re-normalizes). Returns the number of dims written.
+    pub fn embed(self: *Model, tokens: []const u32, out: []f32) usize {
+        const cfg = self.config;
+        if (tokens.len == 0) return 0;
+
+        // Prefill: process every token causally so attention sees the full prefix.
+        const n = @min(tokens.len, cfg.max_seq_len);
+        for (0..n) |pos| {
+            self.runStack(tokens[pos], @intCast(pos));
+        }
+
+        // Final RMSNorm on the last token's hidden state == last-token pooled embedding.
+        const final_norm = self.getWeight("output_norm.weight") orelse return 0;
+        math.rmsnorm(self.x, self.x, final_norm.asF32Slice(), cfg.rms_norm_eps);
+
+        const dim = @min(out.len, cfg.d_model);
+        @memcpy(out[0..dim], self.x[0..dim]);
+        math.l2normalize(out[0..dim]);
+        return dim;
     }
 
     fn transformerLayer(self: *Model, layer: u32, pos: u32) void {
@@ -176,8 +209,21 @@ pub const Model = struct {
         math.matmul(self.k_buf, self.xb, wk);
         math.matmul(self.v_buf, self.xb, wv);
 
-        // RoPE on Q and K
-        math.applyRope(self.q, self.k_buf, pos, cfg.n_heads, cfg.n_kv_heads, cfg.d_head, cfg.rope_theta);
+        // Qwen3 QK-norm: per-head RMSNorm on Q and K before RoPE (if the model has it).
+        // LLaMA-family models lack these tensors and skip this step.
+        if (self.getLayerWeight(layer, "attn_q_norm.weight")) |q_norm| {
+            math.rmsnormHeads(self.q, cfg.n_heads, cfg.d_head, q_norm.asF32Slice(), cfg.rms_norm_eps);
+        }
+        if (self.getLayerWeight(layer, "attn_k_norm.weight")) |k_norm| {
+            math.rmsnormHeads(self.k_buf, cfg.n_kv_heads, cfg.d_head, k_norm.asF32Slice(), cfg.rms_norm_eps);
+        }
+
+        // RoPE on Q and K (NEOX split-half for Qwen, adjacent-pair for LLaMA)
+        if (cfg.rope_is_neox) {
+            math.applyRopeNeox(self.q, self.k_buf, pos, cfg.n_heads, cfg.n_kv_heads, cfg.d_head, cfg.rope_theta);
+        } else {
+            math.applyRope(self.q, self.k_buf, pos, cfg.n_heads, cfg.n_kv_heads, cfg.d_head, cfg.rope_theta);
+        }
 
         // Store K, V in cache
         self.kv_cache.store(layer, self.k_buf, self.v_buf, pos);

@@ -1,0 +1,8 @@
+// Swift module map for the lean embedding library.
+// In Xcode: add this directory to SWIFT_INCLUDE_PATHS (or import via a bridging header),
+// link libziginfer_embed.a, then `import ZigInferEmbed` from Swift.
+module ZigInferEmbed {
+    header "ziginfer_embed.h"
+    link "ziginfer_embed"
+    export *
+}

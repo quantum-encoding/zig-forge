@@ -121,6 +121,22 @@ pub fn copyRow(out: []f32, weight: TensorView, row: u32) void {
                 quant.dequantizeQ4_1(&blocks[b], @ptrCast(out[b * 32 ..][0..32]));
             }
         },
+        .q4_k => {
+            const row_ptr = weight.rowData(row);
+            const blocks: [*]const quant.BlockQ4_K = @alignCast(@ptrCast(row_ptr));
+            const n_blocks = cols / 256;
+            for (0..n_blocks) |b| {
+                quant.dequantizeQ4_K(&blocks[b], @ptrCast(out[b * 256 ..][0..256]));
+            }
+        },
+        .q6_k => {
+            const row_ptr = weight.rowData(row);
+            const blocks: [*]const quant.BlockQ6_K = @alignCast(@ptrCast(row_ptr));
+            const n_blocks = cols / 256;
+            for (0..n_blocks) |b| {
+                quant.dequantizeQ6_K(&blocks[b], @ptrCast(out[b * 256 ..][0..256]));
+            }
+        },
         else => {
             @memset(out[0..cols], 0.0);
         },
@@ -154,6 +170,57 @@ fn applyRopeToVec(vec: []f32, pos: u32, n_heads: u32, head_dim: u32, rope_theta:
             vec[idx + 1] = x0 * sin_a + x1 * cos_a;
         }
     }
+}
+
+/// NEOX / GPT-NeoX-style RoPE (used by Qwen, GPT-NeoX, HF "rotate_half" convention).
+/// Pairs element i with i+head_dim/2 (split-half) instead of adjacent pairs.
+pub fn applyRopeNeox(q: []f32, k: []f32, pos: u32, n_heads: u32, n_kv_heads: u32, head_dim: u32, rope_theta: f32) void {
+    applyRopeNeoxToVec(q, pos, n_heads, head_dim, rope_theta);
+    applyRopeNeoxToVec(k, pos, n_kv_heads, head_dim, rope_theta);
+}
+
+fn applyRopeNeoxToVec(vec: []f32, pos: u32, n_heads: u32, head_dim: u32, rope_theta: f32) void {
+    const pos_f: f32 = @floatFromInt(pos);
+    const half = head_dim / 2;
+    for (0..n_heads) |h| {
+        const offset = h * head_dim;
+        var i: u32 = 0;
+        while (i < half) : (i += 1) {
+            const freq = 1.0 / std.math.pow(f32, rope_theta, @as(f32, @floatFromInt(2 * i)) / @as(f32, @floatFromInt(head_dim)));
+            const angle = pos_f * freq;
+            const cos_a = @cos(angle);
+            const sin_a = @sin(angle);
+
+            const idx0 = offset + i;
+            const idx1 = offset + i + half;
+            const x0 = vec[idx0];
+            const x1 = vec[idx1];
+            vec[idx0] = x0 * cos_a - x1 * sin_a;
+            vec[idx1] = x0 * sin_a + x1 * cos_a;
+        }
+    }
+}
+
+/// Per-head RMSNorm in place (Qwen3 QK-norm): normalize each `head_dim` slice of
+/// `vec` independently using the shared `weight[head_dim]`.
+pub fn rmsnormHeads(vec: []f32, n_heads: u32, head_dim: u32, weight: []const f32, eps: f32) void {
+    for (0..n_heads) |h| {
+        const slice = vec[h * head_dim ..][0..head_dim];
+        var ss: f32 = 0.0;
+        for (slice) |v| ss += v * v;
+        ss = 1.0 / @sqrt(ss / @as(f32, @floatFromInt(head_dim)) + eps);
+        for (0..head_dim) |i| {
+            slice[i] = weight[i] * (slice[i] * ss);
+        }
+    }
+}
+
+/// L2-normalize a vector in place: x /= ||x||_2
+pub fn l2normalize(x: []f32) void {
+    var ss: f32 = 0.0;
+    for (x) |v| ss += v * v;
+    const inv = 1.0 / @sqrt(ss + 1e-12);
+    for (x) |*v| v.* *= inv;
 }
 
 /// Matrix-vector multiply: out[rows] = weight[rows×cols] @ x[cols]
@@ -221,6 +288,14 @@ pub fn matmulRows(out: []f32, x: []const f32, weight: TensorView, row_start: usi
                     }
                 }
                 out[row] = sum;
+            }
+        },
+        .q4_k => {
+            const blocks_per_row = n_cols / 256;
+            for (row_start..row_end) |row| {
+                const row_ptr = weight.rowData(row);
+                const blocks: [*]const quant.BlockQ4_K = @alignCast(@ptrCast(row_ptr));
+                out[row] = quant.dotQ4_KF32(blocks, x.ptr, blocks_per_row);
             }
         },
         .q6_k => {
