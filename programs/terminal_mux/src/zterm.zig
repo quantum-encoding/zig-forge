@@ -48,6 +48,19 @@ fn pclose(fd: c.fd_t) void {
     _ = c.close(fd);
 }
 
+/// Append a JSON-escaped string ("..."), so cwd/title with quotes/backslashes don't break the output.
+fn appendJsonStr(out: *std.ArrayList(u8), alloc: std.mem.Allocator, s: []const u8) !void {
+    try out.append(alloc, '"');
+    for (s) |ch| switch (ch) {
+        '"' => try out.appendSlice(alloc, "\\\""),
+        '\\' => try out.appendSlice(alloc, "\\\\"),
+        '\n' => try out.appendSlice(alloc, "\\n"),
+        '\t' => try out.appendSlice(alloc, "\\t"),
+        else => if (ch >= 0x20) try out.append(alloc, ch), // drop other control bytes
+    };
+    try out.append(alloc, '"');
+}
+
 // ══ SERVER ════════════════════════════════════════════════════════════════════════════════════════════
 const Pane = struct { id: u64, handle: *capi.TmuxSession, fd: i32 };
 
@@ -128,11 +141,13 @@ fn handleConn(conn: i32, panes: *std.ArrayList(Pane), alloc: std.mem.Allocator) 
             var rows: u16 = 0;
             var cols: u16 = 0;
             capi.tmux_grid_size(p.handle, &rows, &cols);
-            var lb: [128]u8 = undefined;
-            const s = std.fmt.bufPrint(&lb, "{s}{{\"pane\":{d},\"rows\":{d},\"cols\":{d}}}", .{
-                if (i == 0) "" else ",", p.id, rows, cols,
-            }) catch continue;
-            try out.appendSlice(alloc, s);
+            const pane = p.handle.sess.getActiveWindow().getActivePane();
+            const pid: i64 = if (pane.pty) |pt| (if (pt.child_pid) |cp| @intCast(cp) else 0) else 0;
+            if (i != 0) try out.append(alloc, ',');
+            var hb: [96]u8 = undefined;
+            try out.appendSlice(alloc, std.fmt.bufPrint(&hb, "{{\"pane\":{d},\"rows\":{d},\"cols\":{d},\"pid\":{d},\"cwd\":", .{ p.id, rows, cols, pid }) catch "{");
+            try appendJsonStr(&out, alloc, pane.cwd[0..pane.cwd_len]);
+            try out.append(alloc, '}');
         }
         try out.appendSlice(alloc, "]\n");
         _ = pwrite(conn, out.items) catch {};
