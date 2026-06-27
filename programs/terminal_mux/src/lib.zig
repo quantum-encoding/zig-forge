@@ -46,6 +46,7 @@ pub const session = @import("session.zig");
 pub const render = @import("render.zig");
 pub const ipc = @import("ipc.zig");
 pub const config = @import("config.zig");
+pub const url = @import("url.zig");
 
 // Re-export key types
 pub const Pty = pty.Pty;

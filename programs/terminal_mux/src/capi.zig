@@ -25,6 +25,7 @@ const posix = std.posix;
 const session = @import("session.zig");
 const terminal = @import("terminal.zig");
 const config = @import("config.zig");
+const url = @import("url.zig");
 
 /// libc malloc-backed allocator — the standard choice for a C-linked library.
 const alloc = std.heap.c_allocator;
@@ -469,6 +470,21 @@ pub export fn tmux_get_theme(out: ?*CTheme) void {
     o.url = toCRgb(th.url);
     o.bold_is_bright = @intFromBool(th.bold_is_bright);
     o.cursor_style = @intFromEnum(th.cursor_style);
+}
+
+// =============================================================================
+// URL detection — scan the active pane's visible grid for links. The renderer
+// paints each range in theme.url + underline and reads the URL text for opening
+// straight from its own cell buffer (range = row, start_col, end_col-exclusive).
+// =============================================================================
+
+pub const CUrlRange = url.UrlRange; // extern struct {row, start_col, end_col: u16}
+
+pub export fn tmux_find_urls(handle: ?*TmuxSession, out: ?[*]CUrlRange, max: usize) usize {
+    const h = handle orelse return 0;
+    const buf = out orelse return 0;
+    const grid = &activePane(h).terminal.grid;
+    return url.findUrls(grid, buf[0..max]);
 }
 
 // =============================================================================

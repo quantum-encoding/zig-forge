@@ -124,6 +124,15 @@ void     tmux_set_theme_text(const uint8_t *text, size_t len);
 void     tmux_reset_theme(void);
 void     tmux_get_theme(tmux_theme *out);
 
+/* ---- URL detection ----
+ * Scan the active pane's visible grid for links. Fill `out` with up to `max`
+ * ranges (end_col exclusive); returns the count. Paint each range in
+ * theme.url + underline, and read the URL text for opening from your own cell
+ * buffer (the cells at row/[start_col,end_col)).
+ */
+typedef struct { uint16_t row, start_col, end_col; } tmux_url_range;
+size_t   tmux_find_urls(tmux_session *handle, tmux_url_range *out, size_t max);
+
 #ifdef __cplusplus
 }
 #endif
