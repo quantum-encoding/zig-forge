@@ -68,7 +68,9 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/bench.zig"),
             .target = target,
-            .optimize = optimize,
+            // A perf bench must ALWAYS be optimized — Debug (the default `optimize`) is bounds-checked +
+            // unoptimized, ~6× slower, and misleads every comparison. Force ReleaseFast regardless of -Doptimize.
+            .optimize = .ReleaseFast,
         }),
     });
     bench.root_module.link_libc = true;
