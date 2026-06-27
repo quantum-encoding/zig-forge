@@ -488,6 +488,33 @@ pub export fn tmux_find_urls(handle: ?*TmuxSession, out: ?[*]CUrlRange, max: usi
 }
 
 // =============================================================================
+// Paste — bracketed-paste-aware. If the app enabled DEC mode 2004, wrap the data
+// in ESC[200~ … ESC[201~ so multi-line pastes don't trigger auto-indent / run
+// line-by-line. The write loop (pty.write) handles arbitrarily large pastes.
+// =============================================================================
+
+/// True if the active pane's app turned on bracketed paste (DEC 2004).
+pub export fn tmux_bracketed_paste(handle: ?*TmuxSession) bool {
+    const h = handle orelse return false;
+    return activePane(h).terminal.modes.bracketed_paste;
+}
+
+/// Paste `data` into the active pane, bracketing it when DEC 2004 is on.
+pub export fn tmux_paste(handle: ?*TmuxSession, data: ?[*]const u8, len: usize) c_long {
+    const h = handle orelse return -1;
+    const d = data orelse return -1;
+    const pane = activePane(h);
+    if (pane.terminal.modes.bracketed_paste) {
+        pane.sendInput("\x1b[200~") catch return -1;
+        pane.sendInput(d[0..len]) catch return -1;
+        pane.sendInput("\x1b[201~") catch return -1;
+    } else {
+        pane.sendInput(d[0..len]) catch return -1;
+    }
+    return @intCast(len);
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 

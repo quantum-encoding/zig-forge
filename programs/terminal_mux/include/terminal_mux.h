@@ -130,8 +130,20 @@ void     tmux_get_theme(tmux_theme *out);
  * theme.url + underline, and read the URL text for opening from your own cell
  * buffer (the cells at row/[start_col,end_col)).
  */
-typedef struct { uint16_t row, start_col, end_col; } tmux_url_range;
+/* A detected link. A single-row URL has start_row == end_row; a soft-wrapped one
+ * spans rows: row start_row is [start_col, cols), middle rows are full width, and
+ * row end_row is [0, end_col). end_col is exclusive. */
+typedef struct { uint16_t start_row, start_col, end_row, end_col; } tmux_url_range;
 size_t   tmux_find_urls(tmux_session *handle, tmux_url_range *out, size_t max);
+
+/* ---- paste ----
+ * tmux_paste sends `data` to the active pane, wrapping it in ESC[200~ … ESC[201~
+ * when the app has bracketed paste (DEC 2004) on, so big multi-line pastes go in
+ * cleanly. The write loop handles arbitrarily large input. tmux_bracketed_paste
+ * reports the current mode if you need it.
+ */
+bool     tmux_bracketed_paste(tmux_session *handle);
+long     tmux_paste(tmux_session *handle, const uint8_t *data, size_t len);
 
 #ifdef __cplusplus
 }

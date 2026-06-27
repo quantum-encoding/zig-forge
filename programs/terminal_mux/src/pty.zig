@@ -240,11 +240,31 @@ pub const Pty = struct {
         return posix.read(self.master_fd, buf);
     }
 
-    /// Write data to the PTY master (sends to shell)
+    /// Write ALL of `data` to the PTY master (sends to shell). Loops over partial
+    /// writes and waits out a full kernel buffer (EAGAIN) so big pastes aren't
+    /// truncated — the old single-write() dropped the tail of anything the kernel
+    /// only partially accepted.
     pub fn write(self: *Self, data: []const u8) !usize {
-        const ret = c.write(self.master_fd, data.ptr, data.len);
-        if (ret < 0) return error.WriteFailed;
-        return @intCast(ret);
+        var off: usize = 0;
+        while (off < data.len) {
+            const ret = c.write(self.master_fd, data.ptr + off, data.len - off);
+            if (ret > 0) {
+                off += @intCast(ret);
+                continue;
+            }
+            if (ret == 0) break;
+            switch (posix.errno(ret)) {
+                .INTR => continue, // interrupted — retry
+                .AGAIN => {
+                    // buffer full: wait until the master is writable again, then retry
+                    var pfd = [_]posix.pollfd{.{ .fd = self.master_fd, .events = posix.POLL.OUT, .revents = 0 }};
+                    _ = posix.poll(&pfd, 1000) catch {};
+                    continue;
+                },
+                else => return error.WriteFailed,
+            }
+        }
+        return off;
     }
 
     /// Check if child process is still alive
