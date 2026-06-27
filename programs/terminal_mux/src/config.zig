@@ -522,6 +522,11 @@ fn presetByName(name: []const u8) ?Theme {
     return presets.byName(name);
 }
 
+/// Runtime-active theme — the single source of truth for every renderer at run
+/// time. Set once near startup (the TUI parses the config file; C-ABI consumers
+/// push config text via tmux_set_theme_text). Read-mostly, so left unguarded.
+pub var active_theme: Theme = .{};
+
 // =============================================================================
 // Tests
 // =============================================================================

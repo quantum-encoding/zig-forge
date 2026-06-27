@@ -24,6 +24,7 @@ const posix = std.posix;
 
 const session = @import("session.zig");
 const terminal = @import("terminal.zig");
+const config = @import("config.zig");
 
 /// libc malloc-backed allocator — the standard choice for a C-linked library.
 const alloc = std.heap.c_allocator;
@@ -415,6 +416,62 @@ pub export fn tmux_focus_next_pane(handle: ?*TmuxSession) c_int {
 }
 
 // =============================================================================
+// Theme — the shared color scheme. Consumers (CosmicDuck's Metal view, a future
+// standalone GUI) read the file themselves and push the bytes via
+// tmux_set_theme_text, then read back the resolved palette via tmux_get_theme.
+// Parsing lives once in Zig (config.Theme.parse); this just exposes it over C.
+// =============================================================================
+
+/// One RGB color in the C ABI.
+pub const CRgb = extern struct { r: u8, g: u8, b: u8 };
+
+/// The resolved theme, flat for the C/Swift side.
+pub const CTheme = extern struct {
+    palette: [16]CRgb, // ANSI 0-15
+    bg: CRgb,
+    fg: CRgb,
+    cursor: CRgb,
+    cursor_text: CRgb,
+    selection_bg: CRgb,
+    selection_fg: CRgb,
+    url: CRgb,
+    bold_is_bright: u8,
+    cursor_style: u8, // 0 block, 1 bar, 2 underline
+};
+
+fn toCRgb(c: config.Color) CRgb {
+    return .{ .r = c.r, .g = c.g, .b = c.b };
+}
+
+/// Parse theme config text (the `key = value` format) and make it the active theme.
+pub export fn tmux_set_theme_text(text: ?[*]const u8, len: usize) void {
+    const t = text orelse return;
+    config.active_theme = config.Theme.parse(t[0..len]);
+}
+
+/// Reset to the built-in default theme.
+pub export fn tmux_reset_theme() void {
+    config.active_theme = .{};
+}
+
+/// Copy the active theme (resolved ANSI-16 palette + named colors) into `out`.
+pub export fn tmux_get_theme(out: ?*CTheme) void {
+    const o = out orelse return;
+    const th = &config.active_theme;
+    var i: usize = 0;
+    while (i < 16) : (i += 1) o.palette[i] = toCRgb(th.palette[i]);
+    o.bg = toCRgb(th.bg);
+    o.fg = toCRgb(th.fg);
+    o.cursor = toCRgb(th.cursor);
+    o.cursor_text = toCRgb(th.cursor_text);
+    o.selection_bg = toCRgb(th.selection_bg);
+    o.selection_fg = toCRgb(th.selection_fg);
+    o.url = toCRgb(th.url);
+    o.bold_is_bright = @intFromBool(th.bold_is_bright);
+    o.cursor_style = @intFromEnum(th.cursor_style);
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -440,4 +497,20 @@ test "CCell layout is stable for the C header" {
 test "version string is well formed" {
     const v = std.mem.sliceTo(tmux_version(), 0);
     try std.testing.expect(v.len >= 5);
+}
+
+test "theme C-ABI roundtrip + layout" {
+    const txt = "preset = matrix\nbackground = #010203\n";
+    tmux_set_theme_text(txt.ptr, txt.len);
+    var ct: CTheme = undefined;
+    tmux_get_theme(&ct);
+    try std.testing.expectEqual(@as(u8, 0x01), ct.bg.r); // override applied
+    try std.testing.expectEqual(@as(u8, 0x00), ct.fg.r); // matrix green
+    try std.testing.expectEqual(@as(u8, 0xFF), ct.fg.g);
+    try std.testing.expectEqual(@as(u8, 1), ct.bold_is_bright);
+    tmux_reset_theme();
+    tmux_get_theme(&ct);
+    try std.testing.expectEqual(@as(u8, 0xD9), ct.fg.r); // default fg restored
+    // CRgb is tightly packed so [16]CRgb maps cleanly to the Swift side
+    try std.testing.expectEqual(@as(usize, 3), @sizeOf(CRgb));
 }

@@ -98,6 +98,32 @@ int      tmux_select_window(tmux_session *handle, uint8_t index);
 uint8_t  tmux_window_count(tmux_session *handle);
 int      tmux_focus_next_pane(tmux_session *handle);
 
+/* ---- theme (shared color scheme) ----
+ * The single source of truth for colors, shared by every renderer. Read your
+ * config file yourself and push the bytes via tmux_set_theme_text (the `key =
+ * value` format: `preset = <name>` plus background/foreground/cursor/color0..15/
+ * url/bold_is_bright/cursor_style overrides), then read the resolved palette back
+ * via tmux_get_theme to build your render palette + default fg/bg.
+ */
+typedef struct { uint8_t r, g, b; } tmux_rgb;
+
+typedef struct {
+    tmux_rgb palette[16];   /* ANSI 0-15; 16-255 are the fixed xterm cube */
+    tmux_rgb bg;
+    tmux_rgb fg;
+    tmux_rgb cursor;
+    tmux_rgb cursor_text;
+    tmux_rgb selection_bg;
+    tmux_rgb selection_fg;
+    tmux_rgb url;           /* highlight color for detected URLs */
+    uint8_t  bold_is_bright;
+    uint8_t  cursor_style;  /* 0 block, 1 bar, 2 underline */
+} tmux_theme;
+
+void     tmux_set_theme_text(const uint8_t *text, size_t len);
+void     tmux_reset_theme(void);
+void     tmux_get_theme(tmux_theme *out);
+
 #ifdef __cplusplus
 }
 #endif
