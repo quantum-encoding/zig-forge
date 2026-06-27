@@ -120,24 +120,29 @@ fn handleConn(conn: i32, panes: *std.ArrayList(Pane), alloc: std.mem.Allocator) 
     const cmd = it.next() orelse return;
 
     if (std.mem.eql(u8, cmd, "list")) {
+        // JSON array, mirroring `wezterm cli list --format json` so mac-drive parses it identically.
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(alloc);
-        for (panes.items) |p| {
+        try out.appendSlice(alloc, "[");
+        for (panes.items, 0..) |p, i| {
             var rows: u16 = 0;
             var cols: u16 = 0;
             capi.tmux_grid_size(p.handle, &rows, &cols);
-            var lb: [80]u8 = undefined;
-            const s = std.fmt.bufPrint(&lb, "pane {d} {d}x{d}\n", .{ p.id, rows, cols }) catch continue;
+            var lb: [128]u8 = undefined;
+            const s = std.fmt.bufPrint(&lb, "{s}{{\"pane\":{d},\"rows\":{d},\"cols\":{d}}}", .{
+                if (i == 0) "" else ",", p.id, rows, cols,
+            }) catch continue;
             try out.appendSlice(alloc, s);
         }
+        try out.appendSlice(alloc, "]\n");
         _ = pwrite(conn, out.items) catch {};
     } else if (std.mem.eql(u8, cmd, "spawn")) {
         const id = spawnPane(panes, alloc) catch {
-            _ = pwrite(conn, "err spawn failed\n") catch {};
+            _ = pwrite(conn, "{\"ok\":false,\"error\":\"spawn failed\"}\n") catch {};
             return;
         };
         var b: [64]u8 = undefined;
-        _ = pwrite(conn, std.fmt.bufPrint(&b, "pane {d}\n", .{id}) catch "pane ?\n") catch {};
+        _ = pwrite(conn, std.fmt.bufPrint(&b, "{{\"ok\":true,\"pane\":{d}}}\n", .{id}) catch "{\"ok\":false}\n") catch {};
     } else if (std.mem.eql(u8, cmd, "send")) {
         const id = std.fmt.parseInt(u64, it.next() orelse "", 10) catch {
             _ = pwrite(conn, "err usage: send <id> <text>\n") catch {};
