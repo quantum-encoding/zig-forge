@@ -82,6 +82,26 @@ pub fn build(b: *std.Build) void {
     bench_step.dependOn(&bench_cmd.step);
 
     // ==========================================================================
+    // zterm — standalone mux server + CLI (the `wezterm cli` equivalent)
+    // ==========================================================================
+    const zterm = b.addExecutable(.{
+        .name = "zterm",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/zterm.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    zterm.root_module.link_libc = true;
+    b.installArtifact(zterm);
+
+    const zterm_run = b.addRunArtifact(zterm);
+    zterm_run.step.dependOn(b.getInstallStep());
+    if (b.args) |a| zterm_run.addArgs(a);
+    const zterm_step = b.step("zterm", "Run zterm (e.g. `zig build zterm -- cli list`)");
+    zterm_step.dependOn(&zterm_run.step);
+
+    // ==========================================================================
     // Tests
     // ==========================================================================
     const lib_tests = b.addTest(.{
