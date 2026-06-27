@@ -39,7 +39,7 @@ pub const Color = struct {
         }
     }
 
-    const system_colors = [16]Color{
+    pub const system_colors = [16]Color{
         .{ .r = 0, .g = 0, .b = 0 }, // Black
         .{ .r = 205, .g = 0, .b = 0 }, // Red
         .{ .r = 0, .g = 205, .b = 0 }, // Green
@@ -334,8 +334,226 @@ pub const RuntimeConfig = struct {
 };
 
 // =============================================================================
+// Theme — palette + default colors, the SINGLE source of truth shared by every
+// renderer (standalone TUI + the C-ABI consumers like CosmicDuck's Metal view).
+// Loaded from a simple line-based `key = value` file: a named `preset` as the
+// base, with per-key overrides on top. Parsing is string-based (file reading is
+// the caller's job) so it's unit-testable and free of std.fs/json quirks.
+// =============================================================================
+
+pub const CursorStyle = enum(u8) { block = 0, bar = 1, underline = 2 };
+
+pub const Theme = struct {
+    bg: Color = Color.fromRgb(0x12, 0x12, 0x17),
+    fg: Color = Color.fromRgb(0xD9, 0xDB, 0xE0),
+    cursor: Color = Color.fromRgb(0xF5, 0xE0, 0xDC),
+    cursor_text: Color = Color.fromRgb(0x12, 0x12, 0x17),
+    selection_bg: Color = Color.fromRgb(0x45, 0x47, 0x5A),
+    selection_fg: Color = Color.fromRgb(0xD9, 0xDB, 0xE0),
+    url: Color = Color.fromRgb(0x89, 0xB4, 0xFA), // detected-URL highlight
+    palette: [16]Color = Color.system_colors, // ANSI 0-15; 16-255 derived
+    bold_is_bright: bool = true,
+    cursor_style: CursorStyle = .block,
+
+    /// Resolve an indexed color (0-255) to RGB via this theme: 0-15 from the
+    /// themed palette (bold may promote 0-7 to the bright 8-15), 16-255 from the
+    /// fixed xterm cube/grayscale.
+    pub fn resolveIndexed(self: *const Theme, idx: u8, bold: bool) Color {
+        if (idx < 8) {
+            const i: u8 = if (bold and self.bold_is_bright) idx + 8 else idx;
+            return self.palette[i];
+        } else if (idx < 16) {
+            return self.palette[idx];
+        }
+        return Color.from256(idx); // cube/grayscale are not themed
+    }
+
+    /// Parse a theme config (text). `preset = <name>` sets the base; later keys override.
+    pub fn parse(text: []const u8) Theme {
+        var theme: Theme = presets.default;
+        // pass 1: a preset becomes the base (regardless of where it appears)
+        var p1 = std.mem.tokenizeAny(u8, text, "\n\r");
+        while (p1.next()) |raw| {
+            const line = trimSpace(raw);
+            if (line.len == 0 or line[0] == '#') continue;
+            const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+            if (std.mem.eql(u8, trimSpace(line[0..eq]), "preset")) {
+                if (presetByName(trimSpace(line[eq + 1 ..]))) |p| theme = p;
+            }
+        }
+        // pass 2: per-key overrides on top of the base
+        var p2 = std.mem.tokenizeAny(u8, text, "\n\r");
+        while (p2.next()) |raw| {
+            const line = trimSpace(raw);
+            if (line.len == 0 or line[0] == '#') continue;
+            const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+            applyOverride(&theme, trimSpace(line[0..eq]), trimSpace(line[eq + 1 ..]));
+        }
+        return theme;
+    }
+};
+
+fn trimSpace(s: []const u8) []const u8 {
+    var a: usize = 0;
+    var b: usize = s.len;
+    while (a < b and (s[a] == ' ' or s[a] == '\t')) a += 1;
+    while (b > a and (s[b - 1] == ' ' or s[b - 1] == '\t')) b -= 1;
+    return s[a..b];
+}
+
+/// Parse `#RRGGBB` (or `RRGGBB`) into a Color; null if malformed.
+pub fn parseHexColor(s_in: []const u8) ?Color {
+    var s = s_in;
+    if (s.len > 0 and s[0] == '#') s = s[1..];
+    if (s.len < 6) return null;
+    const r = std.fmt.parseInt(u8, s[0..2], 16) catch return null;
+    const g = std.fmt.parseInt(u8, s[2..4], 16) catch return null;
+    const b = std.fmt.parseInt(u8, s[4..6], 16) catch return null;
+    return Color.fromRgb(r, g, b);
+}
+
+fn applyOverride(t: *Theme, key: []const u8, val: []const u8) void {
+    const eql = std.mem.eql;
+    if (eql(u8, key, "preset")) return; // handled in pass 1
+    if (eql(u8, key, "background")) {
+        if (parseHexColor(val)) |c| t.bg = c;
+    } else if (eql(u8, key, "foreground")) {
+        if (parseHexColor(val)) |c| t.fg = c;
+    } else if (eql(u8, key, "cursor")) {
+        if (parseHexColor(val)) |c| t.cursor = c;
+    } else if (eql(u8, key, "cursor_text")) {
+        if (parseHexColor(val)) |c| t.cursor_text = c;
+    } else if (eql(u8, key, "selection_bg")) {
+        if (parseHexColor(val)) |c| t.selection_bg = c;
+    } else if (eql(u8, key, "selection_fg")) {
+        if (parseHexColor(val)) |c| t.selection_fg = c;
+    } else if (eql(u8, key, "url")) {
+        if (parseHexColor(val)) |c| t.url = c;
+    } else if (eql(u8, key, "bold_is_bright")) {
+        t.bold_is_bright = eql(u8, val, "true");
+    } else if (eql(u8, key, "cursor_style")) {
+        t.cursor_style = if (eql(u8, val, "bar")) .bar else if (eql(u8, val, "underline")) .underline else .block;
+    } else if (std.mem.startsWith(u8, key, "color")) {
+        const n = std.fmt.parseInt(u8, key[5..], 10) catch return;
+        if (n < 16) {
+            if (parseHexColor(val)) |c| t.palette[n] = c;
+        }
+    }
+}
+
+/// Built-in named themes. `preset = <name>` selects one; per-key lines override.
+pub const presets = struct {
+    pub const default: Theme = .{};
+
+    /// Old-school monochrome green CRT — everything renders green.
+    pub const matrix: Theme = .{
+        .bg = Color.fromRgb(0x00, 0x05, 0x00),
+        .fg = Color.fromRgb(0x00, 0xFF, 0x00),
+        .cursor = Color.fromRgb(0x00, 0xFF, 0x00),
+        .cursor_text = Color.fromRgb(0x00, 0x05, 0x00),
+        .selection_bg = Color.fromRgb(0x00, 0x44, 0x00),
+        .selection_fg = Color.fromRgb(0x00, 0xFF, 0x00),
+        .url = Color.fromRgb(0x66, 0xFF, 0xAA),
+        .palette = .{
+            Color.fromRgb(0x00, 0x22, 0x00), Color.fromRgb(0x00, 0x88, 0x00),
+            Color.fromRgb(0x00, 0xFF, 0x00), Color.fromRgb(0x00, 0xCC, 0x00),
+            Color.fromRgb(0x00, 0x66, 0x00), Color.fromRgb(0x00, 0xAA, 0x55),
+            Color.fromRgb(0x00, 0xDD, 0xAA), Color.fromRgb(0x00, 0xCC, 0x00),
+            Color.fromRgb(0x00, 0x44, 0x00), Color.fromRgb(0x00, 0xAA, 0x00),
+            Color.fromRgb(0x33, 0xFF, 0x33), Color.fromRgb(0x66, 0xFF, 0x66),
+            Color.fromRgb(0x00, 0x88, 0x44), Color.fromRgb(0x33, 0xFF, 0xAA),
+            Color.fromRgb(0x66, 0xFF, 0xCC), Color.fromRgb(0xCC, 0xFF, 0xCC),
+        },
+    };
+
+    /// Old-school amber CRT.
+    pub const amber: Theme = .{
+        .bg = Color.fromRgb(0x0A, 0x05, 0x00),
+        .fg = Color.fromRgb(0xFF, 0xB0, 0x00),
+        .cursor = Color.fromRgb(0xFF, 0xB0, 0x00),
+        .cursor_text = Color.fromRgb(0x0A, 0x05, 0x00),
+        .selection_bg = Color.fromRgb(0x44, 0x2A, 0x00),
+        .selection_fg = Color.fromRgb(0xFF, 0xC8, 0x44),
+        .url = Color.fromRgb(0xFF, 0xD8, 0x88),
+        .palette = .{
+            Color.fromRgb(0x2A, 0x18, 0x00), Color.fromRgb(0xCC, 0x70, 0x00),
+            Color.fromRgb(0xFF, 0xB0, 0x00), Color.fromRgb(0xFF, 0xC8, 0x44),
+            Color.fromRgb(0x88, 0x55, 0x00), Color.fromRgb(0xDD, 0x88, 0x22),
+            Color.fromRgb(0xFF, 0xD8, 0x88), Color.fromRgb(0xFF, 0xB0, 0x00),
+            Color.fromRgb(0x55, 0x33, 0x00), Color.fromRgb(0xFF, 0x88, 0x00),
+            Color.fromRgb(0xFF, 0xC8, 0x44), Color.fromRgb(0xFF, 0xE0, 0x99),
+            Color.fromRgb(0xAA, 0x66, 0x00), Color.fromRgb(0xFF, 0xAA, 0x33),
+            Color.fromRgb(0xFF, 0xE8, 0xAA), Color.fromRgb(0xFF, 0xF0, 0xCC),
+        },
+    };
+
+    /// Solarized Dark (Ethan Schoonover).
+    pub const solarized_dark: Theme = .{
+        .bg = Color.fromRgb(0x00, 0x2B, 0x36),
+        .fg = Color.fromRgb(0x83, 0x94, 0x96),
+        .cursor = Color.fromRgb(0x93, 0xA1, 0xA1),
+        .cursor_text = Color.fromRgb(0x00, 0x2B, 0x36),
+        .selection_bg = Color.fromRgb(0x07, 0x36, 0x42),
+        .selection_fg = Color.fromRgb(0x93, 0xA1, 0xA1),
+        .url = Color.fromRgb(0x26, 0x8B, 0xD2),
+        .palette = .{
+            Color.fromRgb(0x07, 0x36, 0x42), Color.fromRgb(0xDC, 0x32, 0x2F),
+            Color.fromRgb(0x85, 0x99, 0x00), Color.fromRgb(0xB5, 0x89, 0x00),
+            Color.fromRgb(0x26, 0x8B, 0xD2), Color.fromRgb(0xD3, 0x36, 0x82),
+            Color.fromRgb(0x2A, 0xA1, 0x98), Color.fromRgb(0xEE, 0xE8, 0xD5),
+            Color.fromRgb(0x00, 0x2B, 0x36), Color.fromRgb(0xCB, 0x4B, 0x16),
+            Color.fromRgb(0x58, 0x6E, 0x75), Color.fromRgb(0x65, 0x7B, 0x83),
+            Color.fromRgb(0x83, 0x94, 0x96), Color.fromRgb(0x6C, 0x71, 0xC4),
+            Color.fromRgb(0x93, 0xA1, 0xA1), Color.fromRgb(0xFD, 0xF6, 0xE3),
+        },
+    };
+
+    pub fn byName(name: []const u8) ?Theme {
+        const eq = std.mem.eql;
+        if (eq(u8, name, "default")) return default;
+        if (eq(u8, name, "matrix") or eq(u8, name, "green")) return matrix;
+        if (eq(u8, name, "amber")) return amber;
+        if (eq(u8, name, "solarized_dark") or eq(u8, name, "solarized")) return solarized_dark;
+        return null;
+    }
+};
+
+fn presetByName(name: []const u8) ?Theme {
+    return presets.byName(name);
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
+
+test "theme: preset + overrides parse" {
+    const txt =
+        \\# my theme
+        \\preset = matrix
+        \\background = #010203
+        \\color1 = #ABCDEF
+        \\bold_is_bright = false
+    ;
+    const t = Theme.parse(txt);
+    // preset base (matrix fg green)
+    try std.testing.expectEqual(@as(u8, 0x00), t.fg.r);
+    try std.testing.expectEqual(@as(u8, 0xFF), t.fg.g);
+    // overrides applied on top
+    try std.testing.expectEqual(@as(u8, 0x01), t.bg.r);
+    try std.testing.expectEqual(@as(u8, 0xAB), t.palette[1].r);
+    try std.testing.expectEqual(false, t.bold_is_bright);
+}
+
+test "theme: resolveIndexed bold promotes to bright" {
+    const t = presets.default;
+    const c3 = t.resolveIndexed(3, false);
+    const c11 = t.resolveIndexed(3, true); // bold → bright (palette 11)
+    try std.testing.expectEqual(t.palette[3].r, c3.r);
+    try std.testing.expectEqual(t.palette[11].r, c11.r);
+    // 16-255 unaffected by theme
+    const cube = t.resolveIndexed(196, false);
+    try std.testing.expect(cube.r > cube.g);
+}
 
 test "color from 256" {
     // Test system color
