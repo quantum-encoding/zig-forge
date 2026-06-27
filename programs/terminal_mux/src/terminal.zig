@@ -597,16 +597,16 @@ pub const Terminal = struct {
             const room: usize = cols - self.cursor.col; // always >= 1
             const n: usize = @min(bytes.len - idx, room);
 
+            // Hoist style + the destination slice out of the loop: indexing `self.grid.cells[base+k]` and
+            // reading `self.current_*` through the `self` pointer every iteration defeats hoisting (the
+            // compiler can't prove the writes don't alias them). A local slice + local style → tight loop.
+            const fg = self.current_fg;
+            const bg = self.current_bg;
+            const at = self.current_attrs;
             const base = self.grid.physRow(self.cursor.row) * cols + self.cursor.col;
-            var k: usize = 0;
-            while (k < n) : (k += 1) {
-                self.grid.cells[base + k] = .{
-                    .char = bytes[idx + k],
-                    .fg = self.current_fg,
-                    .bg = self.current_bg,
-                    .attrs = self.current_attrs,
-                    .width = 1,
-                };
+            const dst = self.grid.cells[base .. base + n];
+            for (dst, 0..) |*cell, k| {
+                cell.* = .{ .char = bytes[idx + k], .fg = fg, .bg = bg, .attrs = at, .width = 1 };
             }
             self.markDirty(self.cursor.row);
 

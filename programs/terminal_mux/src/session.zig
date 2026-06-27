@@ -170,8 +170,19 @@ pub const Pane = struct {
                 const chunk: V = data[i..][0..16].*;
                 // All bytes in [0x20, 0x7F) ⇒ printable, width-1 ASCII.
                 if (@reduce(.And, chunk >= lo) and @reduce(.And, chunk < hi)) {
-                    self.terminal.putPrintableRun(data[i .. i + 16]);
-                    i += 16;
+                    // Greedily extend the printable run across further 16-byte chunks, then a scalar tail,
+                    // so the WHOLE run is a single putPrintableRun call — amortizing the per-call wrap
+                    // resolution + dispatch over the whole run instead of paying it every 16 bytes.
+                    var end = i + 16;
+                    while (end + 16 <= data.len) {
+                        const c2: V = data[end..][0..16].*;
+                        if (@reduce(.And, c2 >= lo) and @reduce(.And, c2 < hi)) {
+                            end += 16;
+                        } else break;
+                    }
+                    while (end < data.len and data[end] >= 0x20 and data[end] < 0x7F) end += 1;
+                    self.terminal.putPrintableRun(data[i..end]);
+                    i = end;
                     continue;
                 }
             }
