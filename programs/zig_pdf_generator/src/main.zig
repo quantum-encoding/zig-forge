@@ -92,6 +92,17 @@ pub fn main(init: std.process.Init) !void {
     }
     const args = args_list.items;
 
+    // The `extract` verb is the inverse of generation: PDF in → MDX out. It is
+    // dispatched before the template-flag parser so the two paths never tangle.
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "extract")) {
+        runExtract(allocator, args[2..], stdout, stderr) catch |err| {
+            stderr.print("Error: extraction failed: {s}\n", .{@errorName(err)}) catch {};
+            stderr.flush() catch {};
+            std.process.exit(1);
+        };
+        return;
+    }
+
     // Parser state
     var opt_basic = false;
     var opt_minimalist = false;
@@ -221,6 +232,79 @@ pub fn main(init: std.process.Init) !void {
         try stderr.flush();
         std.process.exit(1);
     };
+}
+
+/// `extract` verb: read a PDF and emit MDX (the inverse of generation).
+///
+///   pdf-gen extract <in.pdf> [-o out.mdx] [--meta]
+///   cat in.pdf | pdf-gen extract > out.mdx
+///
+/// stdout carries the MDX (clean), stderr carries diagnostics + optional meta.
+fn runExtract(allocator: std.mem.Allocator, args: []const []const u8, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    var input_path: ?[]const u8 = null;
+    var output_path: ?[]const u8 = null;
+    var want_meta = false;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
+            i += 1;
+            if (i >= args.len) {
+                try stderr.writeAll("Error: -o requires a path argument.\n");
+                try stderr.flush();
+                return error.MissingOutputPath;
+            }
+            output_path = args[i];
+        } else if (std.mem.eql(u8, arg, "--meta")) {
+            want_meta = true;
+        } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+            try stderr.writeAll(
+                \\Usage: pdf-gen extract <in.pdf> [-o out.mdx] [--meta]
+                \\  Reads a PDF and emits MDX (Markdown + YAML frontmatter).
+                \\  If <in.pdf> is omitted, the PDF is read from stdin.
+                \\  If -o is omitted, MDX is written to stdout.
+                \\  --meta also prints extraction metadata (JSON) to stderr.
+                \\
+            );
+            try stderr.flush();
+            return;
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            try stderr.print("Error: unrecognized extract flag '{s}'\n", .{arg});
+            try stderr.flush();
+            return error.UnrecognizedFlag;
+        } else if (input_path == null) {
+            input_path = arg;
+        }
+    }
+
+    const pdf_bytes = try readInputData(allocator, input_path, stderr);
+    defer allocator.free(pdf_bytes);
+
+    const source_name = input_path orelse "";
+    const result = lib.extractToMdx(allocator, pdf_bytes, .{ .source_name = source_name }) catch |err| {
+        try stderr.print("Error: PDF extraction failed: {s}\n", .{@errorName(err)});
+        try stderr.flush();
+        return err;
+    };
+    defer allocator.free(result.mdx);
+
+    try writeOutputData(output_path, result.mdx, stdout, stderr);
+
+    if (want_meta) {
+        const meta_json = try std.json.Stringify.valueAlloc(allocator, .{
+            .pages = result.meta.pages,
+            .has_text_layer = result.meta.has_text_layer,
+            .needs_ocr = result.meta.needs_ocr,
+            .images_found = result.meta.images_found,
+            .tables_found = result.meta.tables_found,
+            .extraction_method = result.meta.extraction_method,
+            .encrypted = result.meta.encrypted,
+        }, .{ .whitespace = .indent_2 });
+        defer allocator.free(meta_json);
+        try stderr.print("{s}\n", .{meta_json});
+        try stderr.flush();
+    }
 }
 
 fn printUsage(stderr: *std.Io.Writer) void {

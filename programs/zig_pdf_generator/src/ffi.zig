@@ -211,6 +211,57 @@ export fn zigpdf_version() [*:0]const u8 {
 }
 
 // =============================================================================
+// PDF → MDX extraction (the inverse of generation)
+// =============================================================================
+
+const pdf_extract = @import("pdf_extract.zig");
+
+/// Metadata from the most recent zigpdf_extract_mdx call, serialized on demand
+/// by zigpdf_extract_meta_json.
+var last_meta: pdf_extract.ExtractionMeta = .{};
+
+/// Extract MDX (Markdown + YAML frontmatter) from PDF bytes.
+///
+/// Parameters:
+/// - pdf_ptr / pdf_len: the input PDF bytes (borrowed; caller owns)
+/// - out_len: receives the length of the returned MDX
+///
+/// Returns: pointer to MDX bytes (caller frees with zigpdf_free), or NULL on
+/// error (see zigpdf_get_error). Mirrors the zigdocx_docx_to_md FFI shape so a
+/// single Go/Wazero helper can drive both modules.
+export fn zigpdf_extract_mdx(pdf_ptr: [*]const u8, pdf_len: usize, out_len: *usize) ?[*]u8 {
+    const pdf = pdf_ptr[0..pdf_len];
+    const result = pdf_extract.extractToMdx(ffi_allocator, pdf, .{}) catch |err| {
+        var buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "PDF extraction error: {s}", .{@errorName(err)}) catch "PDF extraction error";
+        setLastError(msg);
+        return null;
+    };
+    last_meta = result.meta;
+    out_len.* = result.mdx.len;
+    return result.mdx.ptr;
+}
+
+/// Serialize the metadata of the last extraction as JSON. Returns NULL if no
+/// extraction has run or on allocation failure. Caller frees with zigpdf_free.
+export fn zigpdf_extract_meta_json(out_len: *usize) ?[*]u8 {
+    const json = std.json.Stringify.valueAlloc(ffi_allocator, .{
+        .pages = last_meta.pages,
+        .has_text_layer = last_meta.has_text_layer,
+        .needs_ocr = last_meta.needs_ocr,
+        .images_found = last_meta.images_found,
+        .tables_found = last_meta.tables_found,
+        .extraction_method = last_meta.extraction_method,
+        .encrypted = last_meta.encrypted,
+    }, .{}) catch {
+        setLastError("meta serialization failed");
+        return null;
+    };
+    out_len.* = json.len;
+    return json.ptr;
+}
+
+// =============================================================================
 // Convenience Functions
 // =============================================================================
 

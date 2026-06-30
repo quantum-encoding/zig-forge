@@ -36,6 +36,8 @@
 //! ```
 
 pub const document = @import("document.zig");
+pub const pdf_extract = @import("pdf_extract.zig");
+pub const extractToMdx = pdf_extract.extractToMdx;
 pub const invoice = @import("invoice.zig");
 pub const image = @import("image.zig");
 pub const json = @import("json.zig");
@@ -572,6 +574,7 @@ test "markdown links render as clickable link annotations" {
 // Pull the canonical-sample regression tests into the `zig build test` graph.
 test {
     _ = @import("sample_tests.zig");
+    _ = @import("pdf_extract.zig");
     _ = @import("order_email.zig");
     _ = @import("letter.zig");
     _ = @import("pdf_crypt.zig");

@@ -117,6 +117,46 @@ export fn zigpdf_version() [*:0]const u8 {
 }
 
 // =============================================================================
+// PDF → MDX Extraction (the inverse of generation)
+// =============================================================================
+
+const pdf_extract = @import("pdf_extract.zig");
+var last_meta: pdf_extract.ExtractionMeta = .{};
+
+/// Extract MDX from PDF bytes. Mirrors zigdocx_docx_to_md so one Wazero helper
+/// drives both modules. Returns MDX bytes (free with wasm_free) or 0 on error.
+export fn zigpdf_extract_mdx(pdf_ptr: [*]const u8, pdf_len: usize, output_len: *usize) ?[*]u8 {
+    const pdf = pdf_ptr[0..pdf_len];
+    const result = pdf_extract.extractToMdx(wasm_allocator, pdf, .{}) catch |err| {
+        var buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "PDF extraction error: {s}", .{@errorName(err)}) catch "PDF extraction error";
+        setLastError(msg);
+        return null;
+    };
+    last_meta = result.meta;
+    output_len.* = result.mdx.len;
+    return @ptrCast(@constCast(result.mdx.ptr));
+}
+
+/// Serialize the last extraction's metadata as JSON. Free with wasm_free.
+export fn zigpdf_extract_meta_json(output_len: *usize) ?[*]u8 {
+    const json = std.json.Stringify.valueAlloc(wasm_allocator, .{
+        .pages = last_meta.pages,
+        .has_text_layer = last_meta.has_text_layer,
+        .needs_ocr = last_meta.needs_ocr,
+        .images_found = last_meta.images_found,
+        .tables_found = last_meta.tables_found,
+        .extraction_method = last_meta.extraction_method,
+        .encrypted = last_meta.encrypted,
+    }, .{}) catch {
+        setLastError("meta serialization failed");
+        return null;
+    };
+    output_len.* = json.len;
+    return @ptrCast(@constCast(json.ptr));
+}
+
+// =============================================================================
 // PDF Generation Functions
 // =============================================================================
 
