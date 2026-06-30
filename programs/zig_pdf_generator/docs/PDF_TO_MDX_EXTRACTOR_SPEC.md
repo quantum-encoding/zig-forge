@@ -23,19 +23,30 @@
 >   canonical *library*, so the four-gate library rule doesn't apply; the name covers the dominant
 >   (generate) direction and the `extract` verb is self-describing.
 
-**P2 (partial) shipped too:** multi-column reading order — vertical-gutter detection splits each
-page into column bands (straddle-free difference-array scan, O(frags+bins)); each column is emitted
-top-to-bottom in full before the next, with a forced paragraph break at column/page boundaries.
-Verified on real ACM two-column papers (Dijkstra *Go To*, Liskov *Abstract Data Types*) — columns
-now read coherently instead of line-interleaving — with no false-split on single-column docs.
-Type0/CID **width** loading (`/W`+`/DW`, Identity) also landed (fixes glyph-positioned manuals).
+**P2 + P3 now shipped:**
+- **Multi-column reading order** — vertical-gutter detection (straddle-free difference-array scan,
+  O(frags+bins)) splits each page into column bands, emitted top-to-bottom in full before the next.
+- **Lists** — bullet glyphs (•‣◦▪·∙ / `- ` / `* `) and ordered markers (`N.`/`N)` + space) →
+  `- `/`1. ` with x-indent nesting.
+- **Tables** — cells (text split at >1.4 em gaps) → GFM when ≥2 rows share ≥2 aligned columns; weak
+  alignment falls through to plain text (guard rail, never a junk table).
+- **Links** — `/Annots /Link /A /URI` overlapping a cell → `[text](uri)`.
+- **Encryption** — empty user password: RC4 (/R 2,3,4), AES-128 (/V4 AESV2), AES-256 (/V5 R6 via the
+  audited `pdf_crypt`). Decrypted at object resolution (strings + streams + ObjStm); password-required
+  PDFs get an honest stub.
+- **Type0/CID widths** (`/W`+`/DW`, Identity) — fixes glyph-positioned manuals.
+- **Form XObjects** recursed (text no longer lost) and **image extraction** — `Do` counts images;
+  `--images`/`extract_images` writes JPEG/JPEG2000 to an `images/` sidecar and emits `![image](…)`
+  refs in reading order (raw/Flate images counted + `![image](#)` placeholder; PNG-wrapping is P4).
 
 Validated against a 91-PDF real-world corpus (ARM TRMs incl. a 1528-page manual, OrangePi BIOS/Linux
-manuals, ACM papers, scanned + Hindi/Type0 docs): **0 crashes**, 7 correctly flagged `needs_ocr`,
-sub-second on the 1528-page TRM, whole corpus in ~3s.
+manuals, ACM two-column papers, scanned + Hindi/Type0 docs, a real RC4-encrypted Canon manual):
+**0 crashes**, encrypted PDFs decrypt byte-identical to plaintext, 25 unit tests, `zig-lens --strict`
+clean, whole corpus in ~2–3 s.
 
-Still **not implemented** (P2 remainder / P3–P4): lists, tables, full Type0/CID decode for
-non-`ToUnicode` CMaps, links, image extraction, encryption, LZW.
+**P4 remainder (not implemented):** full Type0/CID decode for non-`ToUnicode` predefined CMaps,
+PNG-wrapping of raw/Flate images, LZW filter, incremental-update merge nuances, page-rotation-aware
+link/image coordinates, parallel-page performance.
 
 ---
 

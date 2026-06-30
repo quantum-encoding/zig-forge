@@ -244,6 +244,7 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8, stdout: *s
     var input_path: ?[]const u8 = null;
     var output_path: ?[]const u8 = null;
     var want_meta = false;
+    var want_images = false;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -258,13 +259,16 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8, stdout: *s
             output_path = args[i];
         } else if (std.mem.eql(u8, arg, "--meta")) {
             want_meta = true;
+        } else if (std.mem.eql(u8, arg, "--images")) {
+            want_images = true;
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             try stderr.writeAll(
-                \\Usage: pdf-gen extract <in.pdf> [-o out.mdx] [--meta]
+                \\Usage: pdf-gen extract <in.pdf> [-o out.mdx] [--meta] [--images]
                 \\  Reads a PDF and emits MDX (Markdown + YAML frontmatter).
                 \\  If <in.pdf> is omitted, the PDF is read from stdin.
                 \\  If -o is omitted, MDX is written to stdout.
-                \\  --meta also prints extraction metadata (JSON) to stderr.
+                \\  --meta    also prints extraction metadata (JSON) to stderr.
+                \\  --images  extract JPEG/JPEG2000 images to an images/ dir beside the output.
                 \\
             );
             try stderr.flush();
@@ -282,12 +286,19 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8, stdout: *s
     defer allocator.free(pdf_bytes);
 
     const source_name = input_path orelse "";
-    const result = lib.extractToMdx(allocator, pdf_bytes, .{ .source_name = source_name }) catch |err| {
+    var result = lib.extractToMdx(allocator, pdf_bytes, .{ .source_name = source_name, .extract_images = want_images }) catch |err| {
         try stderr.print("Error: PDF extraction failed: {s}\n", .{@errorName(err)});
         try stderr.flush();
         return err;
     };
-    defer allocator.free(result.mdx);
+    defer result.deinit(allocator);
+
+    if (want_images and result.images.len > 0) {
+        writeImages(output_path, result.images, stderr) catch |err| {
+            try stderr.print("Warning: could not write images: {s}\n", .{@errorName(err)});
+            try stderr.flush();
+        };
+    }
 
     try writeOutputData(output_path, result.mdx, stdout, stderr);
 
@@ -305,6 +316,39 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8, stdout: *s
         try stderr.print("{s}\n", .{meta_json});
         try stderr.flush();
     }
+}
+
+/// Write extracted image blobs into an `images/` directory beside the output
+/// file (or in the current directory when writing MDX to stdout). The MDX refs
+/// already point at `images/<name>`.
+fn writeImages(output_path: ?[]const u8, images: []const lib.pdf_extract.ExtractedImage, stderr: *std.Io.Writer) !void {
+    const io = global_io;
+    const cwd = std.Io.Dir.cwd();
+
+    // Resolve the images/ directory: <output dir>/images, else ./images.
+    var dir_buf: [4096]u8 = undefined;
+    const images_dir: []const u8 = if (output_path) |p| blk: {
+        if (std.fs.path.dirname(p)) |d| {
+            break :blk std.fmt.bufPrint(&dir_buf, "{s}/images", .{d}) catch "images";
+        }
+        break :blk "images";
+    } else "images";
+
+    cwd.createDirPath(io, images_dir) catch {};
+    var count: usize = 0;
+    for (images) |img| {
+        var path_buf: [4352]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ images_dir, img.name }) catch continue;
+        const file = cwd.createFile(io, path, .{}) catch continue;
+        defer file.close(io);
+        var wbuf: [8192]u8 = undefined;
+        var fw = file.writer(io, &wbuf);
+        fw.interface.writeAll(img.bytes) catch continue;
+        fw.interface.flush() catch {};
+        count += 1;
+    }
+    try stderr.print("Extracted {d} image(s) to {s}/\n", .{ count, images_dir });
+    try stderr.flush();
 }
 
 fn printUsage(stderr: *std.Io.Writer) void {

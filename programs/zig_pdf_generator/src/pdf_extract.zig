@@ -1883,6 +1883,12 @@ const TextState = struct {
     font: ?*Font = null,
 };
 
+/// An image's encoded bytes plus the filename the MDX refers to it by.
+const ImageBlob = struct {
+    name: []const u8,
+    bytes: []const u8,
+};
+
 const Interp = struct {
     doc: *Document,
     arena: std.mem.Allocator,
@@ -1890,6 +1896,13 @@ const Interp = struct {
     geom: PageGeom,
     frags: *std.ArrayListUnmanaged(Frag),
     any_text: *bool,
+    /// Page (or Form XObject) resources, for /XObject lookups via the Do op.
+    resources: Dict = .{},
+    image_count: *usize,
+    /// Extracted image blobs (only collected when extract_images is set).
+    images: *std.ArrayListUnmanaged(ImageBlob),
+    extract_images: bool = false,
+    depth: usize = 0, // Form-XObject recursion guard
 
     ctm: Matrix = .{},
     ctm_stack: std.ArrayListUnmanaged(Matrix) = .empty,
@@ -2027,6 +2040,88 @@ const Interp = struct {
         } else if (std.mem.eql(u8, op, "TJ")) {
             if (args.len >= 1 and args[args.len - 1] == .array) try self.showTJ(args[args.len - 1].array);
         }
+        // XObjects.
+        else if (std.mem.eql(u8, op, "Do")) {
+            if (args.len >= 1 and args[args.len - 1] == .name) self.doXObject(args[args.len - 1].name) catch {};
+        }
+    }
+
+    /// The `Do` operator: paint an XObject. Images are counted (and optionally
+    /// extracted + marked in reading order); Form XObjects are recursed into so
+    /// their text is not lost.
+    fn doXObject(self: *Interp, name: []const u8) ExtractError!void {
+        if (self.depth > 12) return; // bounded Form recursion
+        const xobjs_obj = (try self.doc.dictGet(self.resources, "XObject")) orelse return;
+        const xobjs = xobjs_obj.asDict() orelse return;
+        const ref = xobjs.get(name) orelse return;
+        const obj = try self.doc.resolve(ref);
+        if (obj != .stream) return;
+        const st = obj.stream;
+        const subtype = if (st.dict.get("Subtype")) |s| (if (s == .name) s.name else "") else "";
+
+        if (std.mem.eql(u8, subtype, "Image")) {
+            self.image_count.* += 1;
+            if (self.extract_images) try self.placeImage(st);
+            return;
+        }
+        if (std.mem.eql(u8, subtype, "Form")) {
+            // Recurse: run the form's content with its own resources/matrix.
+            const content = self.doc.decodeStreamRaw(st) catch return;
+            var form_res = self.resources;
+            if (try self.doc.dictGet(st.dict, "Resources")) |r| {
+                if (r.asDict()) |rd| form_res = rd;
+            }
+            var form_ctm = self.ctm;
+            if (st.dict.get("Matrix")) |m| {
+                if (m == .array and m.array.len >= 6) form_ctm = matFromArgs(m.array[0..6]).mul(self.ctm);
+            }
+            var form_fonts: std.StringHashMapUnmanaged(*Font) = .empty;
+            buildPageFonts(self.doc, form_res, &form_fonts) catch {};
+
+            var child = Interp{
+                .doc = self.doc,
+                .arena = self.arena,
+                .fonts = &form_fonts,
+                .geom = self.geom,
+                .frags = self.frags,
+                .any_text = self.any_text,
+                .resources = form_res,
+                .image_count = self.image_count,
+                .images = self.images,
+                .extract_images = self.extract_images,
+                .depth = self.depth + 1,
+                .ctm = form_ctm,
+            };
+            child.run(content) catch {};
+        }
+    }
+
+    /// Record an image draw: count its position (image unit square mapped by the
+    /// CTM) and, for directly-extractable encodings (JPEG/JPEG2000), collect its
+    /// bytes and emit an inline Markdown image reference in reading order.
+    fn placeImage(self: *Interp, st: *Stream) ExtractError!void {
+        // Center of the unit image square in device space → reading-order y.
+        const cy = 0.5 * self.ctm.b + 0.5 * self.ctm.d + self.ctm.f;
+        const cx = 0.5 * self.ctm.a + 0.5 * self.ctm.c + self.ctm.e;
+
+        const ext = imageExt(st.dict);
+        var ref: []const u8 = "#";
+        if (ext) |e| {
+            const name = try std.fmt.allocPrint(self.arena, "img{d}.{s}", .{ self.image_count.*, e });
+            const bytes = self.doc.decodeStreamRaw(st) catch &[_]u8{};
+            if (bytes.len > 0) {
+                try self.images.append(self.arena, .{ .name = name, .bytes = bytes });
+                ref = try std.fmt.allocPrint(self.arena, "images/{s}", .{name});
+            }
+        }
+        const marker = try std.fmt.allocPrint(self.arena, "![image]({s})", .{ref});
+        try self.frags.append(self.arena, .{
+            .x = cx,
+            .y = cy,
+            .end_x = cx + 1,
+            .size = 8, // small → never treated as a heading
+            .text = marker,
+        });
     }
 
     fn applyTd(self: *Interp, tx: f64, ty: f64) void {
@@ -2109,6 +2204,25 @@ const Interp = struct {
         }
     }
 };
+
+/// Returns the file extension for an image stream whose encoding can be written
+/// out directly (the codec's bytes are a complete image file), or null when it
+/// would need re-encoding (raw/Flate samples → PNG wrapping is a later phase).
+fn imageExt(dict: Dict) ?[]const u8 {
+    const f = dict.get("Filter") orelse return null;
+    const last: []const u8 = switch (f) {
+        .name => |n| n,
+        .array => |arr| blk: {
+            if (arr.len == 0) break :blk "";
+            const lastobj = arr[arr.len - 1];
+            break :blk if (lastobj == .name) lastobj.name else "";
+        },
+        else => "",
+    };
+    if (std.mem.eql(u8, last, "DCTDecode")) return "jpg";
+    if (std.mem.eql(u8, last, "JPXDecode")) return "jp2";
+    return null;
+}
 
 fn matFromArgs(a: []const Obj) Matrix {
     return .{
@@ -2593,9 +2707,29 @@ pub const ExtractionMeta = struct {
     encrypted: bool = false,
 };
 
+/// An extracted image to be written to the `images/` sidecar directory.
+pub const ExtractedImage = struct {
+    name: []const u8,
+    bytes: []const u8,
+};
+
 pub const ExtractResult = struct {
     mdx: []u8,
     meta: ExtractionMeta,
+    /// Populated only when ExtractOptions.extract_images is set. Owned by the
+    /// caller (allocated with the same gpa as `mdx`); free each name+bytes plus
+    /// the slice, or use freeResult.
+    images: []ExtractedImage = &.{},
+
+    /// Free everything in the result allocated with `gpa`.
+    pub fn deinit(self: *ExtractResult, gpa: std.mem.Allocator) void {
+        gpa.free(self.mdx);
+        for (self.images) |img| {
+            gpa.free(img.name);
+            gpa.free(img.bytes);
+        }
+        gpa.free(self.images);
+    }
 };
 
 /// The most common rounded font size across all lines — the body text size,
@@ -3013,6 +3147,8 @@ pub fn extractToMdx(gpa: std.mem.Allocator, pdf: []const u8, opts: ExtractOption
 
     var all_lines: std.ArrayListUnmanaged(Line) = .empty;
     var any_text = false;
+    var image_count: usize = 0;
+    var images: std.ArrayListUnmanaged(ImageBlob) = .empty;
 
     for (pages.items) |page| {
         var fonts: std.StringHashMapUnmanaged(*Font) = .empty;
@@ -3026,6 +3162,10 @@ pub fn extractToMdx(gpa: std.mem.Allocator, pdf: []const u8, opts: ExtractOption
             .geom = page.geom,
             .frags = &frags,
             .any_text = &any_text,
+            .resources = page.resources,
+            .image_count = &image_count,
+            .images = &images,
+            .extract_images = opts.extract_images,
         };
         interp.run(page.content) catch {};
 
@@ -3036,6 +3176,7 @@ pub fn extractToMdx(gpa: std.mem.Allocator, pdf: []const u8, opts: ExtractOption
 
     meta.has_text_layer = any_text;
     meta.needs_ocr = !any_text;
+    meta.images_found = image_count;
 
     // /Info for the frontmatter.
     var info: Dict = .{};
@@ -3048,7 +3189,19 @@ pub fn extractToMdx(gpa: std.mem.Allocator, pdf: []const u8, opts: ExtractOption
     meta.tables_found = tables_found;
     meta.extraction_method = "zig-native";
 
-    return .{ .mdx = try gpa.dupe(u8, mdx_arena), .meta = meta };
+    // Copy extracted image blobs into the caller's allocator (the arena dies).
+    var out_images: []ExtractedImage = &.{};
+    if (opts.extract_images and images.items.len > 0) {
+        out_images = try gpa.alloc(ExtractedImage, images.items.len);
+        for (images.items, 0..) |img, ix| {
+            out_images[ix] = .{
+                .name = try gpa.dupe(u8, img.name),
+                .bytes = try gpa.dupe(u8, img.bytes),
+            };
+        }
+    }
+
+    return .{ .mdx = try gpa.dupe(u8, mdx_arena), .meta = meta, .images = out_images };
 }
 
 // =============================================================================
@@ -3277,6 +3430,22 @@ test "link wrapping: overlapping cell → markdown link" {
     // Right y but wrong line → unchanged.
     const wrong_y = try wrapLink(a, &links, 50, 150, 600, "plain");
     try testing.expectEqualStrings("plain", wrong_y);
+}
+
+test "image extension by codec" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const jpg = Dict{ .entries = try a.dupe(Entry, &.{.{ .key = "Filter", .val = .{ .name = "DCTDecode" } }}) };
+    try testing.expectEqualStrings("jpg", imageExt(jpg).?);
+
+    const jp2 = Dict{ .entries = try a.dupe(Entry, &.{.{ .key = "Filter", .val = .{ .name = "JPXDecode" } }}) };
+    try testing.expectEqualStrings("jp2", imageExt(jp2).?);
+
+    // Flate (raw samples) is not directly writable as an image file.
+    const flate_img = Dict{ .entries = try a.dupe(Entry, &.{.{ .key = "Filter", .val = .{ .name = "FlateDecode" } }}) };
+    try testing.expect(imageExt(flate_img) == null);
 }
 
 test "RC4 known-answer vector + self-inverse" {
