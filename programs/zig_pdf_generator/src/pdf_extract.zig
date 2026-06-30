@@ -1857,10 +1857,22 @@ fn matFromArgs(a: []const Obj) Matrix {
 // Page tree
 // =============================================================================
 
+/// A hyperlink from a page /Annots /Link annotation, with its clickable
+/// rectangle in default user space (≈ device space when the page CTM is
+/// identity, which is the common case).
+const LinkAnnot = struct {
+    x0: f64,
+    y0: f64,
+    x1: f64,
+    y1: f64,
+    uri: []const u8,
+};
+
 const Page = struct {
     resources: Dict,
     geom: PageGeom,
     content: []u8,
+    links: []const LinkAnnot = &.{},
 };
 
 /// Walk /Root /Pages, inheriting /Resources, /MediaBox, /Rotate down the tree,
@@ -1916,10 +1928,12 @@ fn walkPageNode(
     if (kids_obj == null or std.mem.eql(u8, node_type, "Page")) {
         // Leaf page.
         const content = try collectPageContent(doc, node);
+        const links = collectLinks(doc, node) catch &.{};
         try out.append(doc.arena, .{
             .resources = inh.resources orelse Dict{},
             .geom = .{ .media_w = inh.media_w, .media_h = inh.media_h, .rotate = inh.rotate },
             .content = content,
+            .links = links,
         });
         return;
     }
@@ -1934,6 +1948,37 @@ fn walkPageNode(
         const kid = try doc.resolve(kid_ref);
         if (kid.asDict()) |kd| try walkPageNode(doc, kd, inh, visited, out, depth + 1);
     }
+}
+
+/// Collect URI link annotations from a page's /Annots array.
+fn collectLinks(doc: *Document, page: Dict) ExtractError![]LinkAnnot {
+    const annots_obj = try doc.dictGet(page, "Annots") orelse return &.{};
+    if (annots_obj != .array) return &.{};
+    var out: std.ArrayListUnmanaged(LinkAnnot) = .empty;
+    for (annots_obj.array) |a| {
+        const annot = (try doc.resolve(a)).asDict() orelse continue;
+        const sub = if (annot.get("Subtype")) |s| (if (s == .name) s.name else "") else "";
+        if (!std.mem.eql(u8, sub, "Link")) continue;
+        // /A action dict with /S /URI and a /URI string.
+        const action = (try doc.dictGet(annot, "A")) orelse continue;
+        const adict = action.asDict() orelse continue;
+        const uri_obj = (try doc.dictGet(adict, "URI")) orelse continue;
+        if (uri_obj != .string) continue;
+        const rect_obj = (try doc.dictGet(annot, "Rect")) orelse continue;
+        if (rect_obj != .array or rect_obj.array.len < 4) continue;
+        const a0 = rect_obj.array[0].asNumber() orelse continue;
+        const b0 = rect_obj.array[1].asNumber() orelse continue;
+        const a1 = rect_obj.array[2].asNumber() orelse continue;
+        const b1 = rect_obj.array[3].asNumber() orelse continue;
+        try out.append(doc.arena, .{
+            .x0 = @min(a0, a1),
+            .y0 = @min(b0, b1),
+            .x1 = @max(a0, a1),
+            .y1 = @max(b0, b1),
+            .uri = uri_obj.string,
+        });
+    }
+    return out.items;
 }
 
 fn collectPageContent(doc: *Document, page: Dict) ExtractError![]u8 {
@@ -1997,10 +2042,44 @@ const Line = struct {
     break_before: bool = false,
 };
 
-/// Assemble positioned fragments into reading-ordered lines (single column,
-/// P1). The sort comparator defines a TOTAL order (see CLAUDE.md §7 — an
-/// invalid comparator is exactly what panicked the competitor).
-fn assembleLines(arena: std.mem.Allocator, frags: []Frag, out: *std.ArrayListUnmanaged(Line)) ExtractError!void {
+/// Wrap `text` as a Markdown link when its cell box overlaps a /Link
+/// annotation's rectangle; otherwise return it unchanged.
+fn wrapLink(arena: std.mem.Allocator, links: []const LinkAnnot, x0: f64, x1: f64, y: f64, text: []const u8) ExtractError![]const u8 {
+    if (text.len == 0 or links.len == 0) return text;
+    for (links) |lk| {
+        if (y < lk.y0 - 2.0 or y > lk.y1 + 2.0) continue;
+        const cx = (x0 + x1) / 2.0;
+        var hit = (cx >= lk.x0 and cx <= lk.x1);
+        if (!hit) {
+            const ov = @min(x1, lk.x1) - @max(x0, lk.x0);
+            const w = x1 - x0;
+            if (ov > 0 and w > 0 and ov / w > 0.5) hit = true;
+        }
+        if (hit) return std.fmt.allocPrint(arena, "[{s}]({s})", .{ text, sanitizeUri(arena, lk.uri) catch lk.uri }) catch text;
+    }
+    return text;
+}
+
+/// Percent-encode the few characters that would break a Markdown link target.
+fn sanitizeUri(arena: std.mem.Allocator, uri: []const u8) ExtractError![]const u8 {
+    const u = std.mem.trim(u8, uri, " \t\r\n");
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    for (u) |c| {
+        switch (c) {
+            ' ' => try out.appendSlice(arena, "%20"),
+            '(' => try out.appendSlice(arena, "%28"),
+            ')' => try out.appendSlice(arena, "%29"),
+            else => try out.append(arena, c),
+        }
+    }
+    return out.items;
+}
+
+/// Assemble positioned fragments into reading-ordered lines. The sort comparator
+/// defines a TOTAL order (CLAUDE.md §7 — an invalid comparator is exactly what
+/// panicked the competitor). Cells overlapping a /Link annotation are wrapped as
+/// Markdown links.
+fn assembleLines(arena: std.mem.Allocator, frags: []Frag, links: []const LinkAnnot, out: *std.ArrayListUnmanaged(Line)) ExtractError!void {
     if (frags.len == 0) return;
 
     // Sort top-to-bottom (descending device y), then left-to-right.
@@ -2039,9 +2118,10 @@ fn assembleLines(arena: std.mem.Allocator, frags: []Frag, out: *std.ArrayListUnm
                 if (gap > fr.size * 1.4) {
                     // Column break → flush the current cell.
                     if (cell_text.items.len > 0) {
-                        try cells.append(arena, .{ .x = cell_x, .end_x = cell_end, .text = try trimTrailing(arena, cell_text.items) });
+                        const ct = try wrapLink(arena, links, cell_x, cell_end, line_y, try trimTrailing(arena, cell_text.items));
+                        try cells.append(arena, .{ .x = cell_x, .end_x = cell_end, .text = ct });
                         if (text.items.len > 0) try text.append(arena, ' ');
-                        try text.appendSlice(arena, std.mem.trim(u8, cell_text.items, " \t"));
+                        try text.appendSlice(arena, ct);
                     }
                     cell_text = .empty;
                     cell_x = fr.x;
@@ -2054,9 +2134,10 @@ fn assembleLines(arena: std.mem.Allocator, frags: []Frag, out: *std.ArrayListUnm
             prev_end = fr.end_x;
         }
         if (cell_text.items.len > 0) {
-            try cells.append(arena, .{ .x = cell_x, .end_x = cell_end, .text = try trimTrailing(arena, cell_text.items) });
+            const ct = try wrapLink(arena, links, cell_x, cell_end, line_y, try trimTrailing(arena, cell_text.items));
+            try cells.append(arena, .{ .x = cell_x, .end_x = cell_end, .text = ct });
             if (text.items.len > 0) try text.append(arena, ' ');
-            try text.appendSlice(arena, std.mem.trim(u8, cell_text.items, " \t"));
+            try text.appendSlice(arena, ct);
         }
 
         try out.append(arena, .{
@@ -2075,14 +2156,14 @@ fn assembleLines(arena: std.mem.Allocator, frags: []Frag, out: *std.ArrayListUnm
 /// gutters, and each band is emitted top-to-bottom *in full* before the next —
 /// this is what prevents the line-level interleaving of two-column papers.
 /// Single-column pages collapse to one band (identical to `assembleLines`).
-fn assemblePage(arena: std.mem.Allocator, frags: []Frag, out: *std.ArrayListUnmanaged(Line)) ExtractError!void {
+fn assemblePage(arena: std.mem.Allocator, frags: []Frag, links: []const LinkAnnot, out: *std.ArrayListUnmanaged(Line)) ExtractError!void {
     if (frags.len == 0) return;
 
     const cuts = try detectColumnCuts(arena, frags);
     const first_idx = out.items.len;
 
     if (cuts.len == 0) {
-        try assembleLines(arena, frags, out);
+        try assembleLines(arena, frags, links, out);
     } else {
         // Build band boundaries: [left, cut0, cut1, …, right].
         var bounds: std.ArrayListUnmanaged(f64) = .empty;
@@ -2100,7 +2181,7 @@ fn assemblePage(arena: std.mem.Allocator, frags: []Frag, out: *std.ArrayListUnma
                 if (mid >= lo and mid < hi) try band.append(arena, fr);
             }
             const band_start = out.items.len;
-            try assembleLines(arena, band.items, out);
+            try assembleLines(arena, band.items, links, out);
             // Mark the first line of each column (after the first) as a break.
             if (b > 0 and out.items.len > band_start) out.items[band_start].break_before = true;
         }
@@ -2679,7 +2760,7 @@ pub fn extractToMdx(gpa: std.mem.Allocator, pdf: []const u8, opts: ExtractOption
         interp.run(page.content) catch {};
 
         var page_lines: std.ArrayListUnmanaged(Line) = .empty;
-        assemblePage(arena, frags.items, &page_lines) catch {};
+        assemblePage(arena, frags.items, page.links, &page_lines) catch {};
         try all_lines.appendSlice(arena, page_lines.items);
     }
 
@@ -2909,6 +2990,23 @@ test "column detection: two-column page → one cut; single column → none" {
     }
     const cuts1 = try detectColumnCuts(a, one.items);
     try testing.expectEqual(@as(usize, 0), cuts1.len);
+}
+
+test "link wrapping: overlapping cell → markdown link" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const links = [_]LinkAnnot{.{ .x0 = 40, .y0 = 695, .x1 = 160, .y1 = 710, .uri = "https://example.com/a b" }};
+    // Cell centred at x=100, y=700 → inside the rect → wrapped (URI space encoded).
+    const hit = try wrapLink(a, &links, 50, 150, 700, "click here");
+    try testing.expectEqualStrings("[click here](https://example.com/a%20b)", hit);
+    // A cell far away → unchanged.
+    const miss = try wrapLink(a, &links, 300, 400, 700, "plain");
+    try testing.expectEqualStrings("plain", miss);
+    // Right y but wrong line → unchanged.
+    const wrong_y = try wrapLink(a, &links, 50, 150, 600, "plain");
+    try testing.expectEqualStrings("plain", wrong_y);
 }
 
 test "list marker recognition" {
