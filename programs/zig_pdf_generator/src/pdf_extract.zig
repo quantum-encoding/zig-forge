@@ -1976,12 +1976,21 @@ fn buildPageFonts(doc: *Document, resources: Dict, fonts: *std.StringHashMapUnma
 // Reading order — fragments → lines → blocks
 // =============================================================================
 
+/// A horizontal segment of a line, separated from its neighbours by a gap wide
+/// enough to look like a column break. Used for table-column alignment.
+const Cell = struct {
+    x: f64, // left edge of the cell
+    end_x: f64,
+    text: []const u8,
+};
+
 /// One assembled line of text plus the geometry needed for block inference.
 const Line = struct {
     text: []const u8,
     y: f64,
     x: f64, // left edge
     size: f64, // representative (max) font size on the line
+    cells: []Cell = &.{}, // text split at wide horizontal gaps (table columns)
     /// Forces a paragraph break before this line regardless of vertical gap —
     /// set on the first line of each column and each page so reading order never
     /// runs the bottom of one column into the top of the next.
@@ -2013,23 +2022,41 @@ fn assembleLines(arena: std.mem.Allocator, frags: []Frag, out: *std.ArrayListUnm
         // Sort this line strictly left-to-right.
         std.sort.block(Frag, line_frags.items, {}, fragLeftLess);
 
-        var text: std.ArrayListUnmanaged(u8) = .empty;
+        // Build the line as a sequence of cells. A small gap (> ~⅙ em) inserts a
+        // space *within* a cell — within a word glyphs are contiguous, so any
+        // clearly-positive gap is an inter-word space. A wide gap (> ~1.4 em)
+        // starts a new cell, which is the signal a table column detector keys on.
+        var cells: std.ArrayListUnmanaged(Cell) = .empty;
+        var text: std.ArrayListUnmanaged(u8) = .empty; // whole-line text (cells + spaces)
+        var cell_text: std.ArrayListUnmanaged(u8) = .empty;
+        var cell_x: f64 = line_frags.items[0].x;
+        var cell_end: f64 = line_frags.items[0].x;
         var prev_end: ?f64 = null;
         const left_x = line_frags.items[0].x;
         for (line_frags.items) |fr| {
             if (prev_end) |pe| {
                 const gap = fr.x - pe;
-                // Insert a space when the gap between the previous fragment's end
-                // and this one's start exceeds ~⅙ em. Within a word, glyphs are
-                // laid out contiguously (gap ≈ 0), so any clearly-positive gap is
-                // an inter-word space. ⅙ tolerates width-estimate noise without
-                // splitting words, and full word fragments clear it comfortably.
-                if (gap > fr.size * 0.17 and !endsWithSpace(text.items)) {
-                    try text.append(arena, ' ');
+                if (gap > fr.size * 1.4) {
+                    // Column break → flush the current cell.
+                    if (cell_text.items.len > 0) {
+                        try cells.append(arena, .{ .x = cell_x, .end_x = cell_end, .text = try trimTrailing(arena, cell_text.items) });
+                        if (text.items.len > 0) try text.append(arena, ' ');
+                        try text.appendSlice(arena, std.mem.trim(u8, cell_text.items, " \t"));
+                    }
+                    cell_text = .empty;
+                    cell_x = fr.x;
+                } else if (gap > fr.size * 0.17 and !endsWithSpace(cell_text.items) and cell_text.items.len > 0) {
+                    try cell_text.append(arena, ' ');
                 }
             }
-            try text.appendSlice(arena, fr.text);
+            try cell_text.appendSlice(arena, fr.text);
+            cell_end = fr.end_x;
             prev_end = fr.end_x;
+        }
+        if (cell_text.items.len > 0) {
+            try cells.append(arena, .{ .x = cell_x, .end_x = cell_end, .text = try trimTrailing(arena, cell_text.items) });
+            if (text.items.len > 0) try text.append(arena, ' ');
+            try text.appendSlice(arena, std.mem.trim(u8, cell_text.items, " \t"));
         }
 
         try out.append(arena, .{
@@ -2037,6 +2064,7 @@ fn assembleLines(arena: std.mem.Allocator, frags: []Frag, out: *std.ArrayListUnm
             .y = line_y,
             .x = left_x,
             .size = max_size,
+            .cells = cells.items,
         });
         i = j;
     }
@@ -2281,6 +2309,7 @@ fn emitMdx(
     page_count: usize,
     has_text: bool,
     opts: ExtractOptions,
+    meta_tables: *usize,
 ) ExtractError![]u8 {
     var aw: std.Io.Writer.Allocating = .init(arena);
     const w = &aw.writer;
@@ -2322,11 +2351,33 @@ fn emitMdx(
     var para: std.ArrayListUnmanaged(u8) = .empty;
     var prev_y: ?f64 = null;
     var prev_size: f64 = body_size;
+    var list_base_x: ?f64 = null; // left edge of the current list (for nesting)
+    var tables_found: usize = 0;
 
-    for (lines) |ln| {
-        if (ln.text.len == 0) continue;
+    var i: usize = 0;
+    while (i < lines.len) {
+        const ln = lines[i];
+        if (ln.text.len == 0) {
+            i += 1;
+            continue;
+        }
+
+        // --- table region? (lookahead) ---
+        if (opts.detect_tables) {
+            if (tryDetectTable(arena, lines, i, body_size)) |tbl| {
+                try flushPara(arena, w, &para);
+                list_base_x = null;
+                try emitTable(arena, w, lines[i..tbl.end], tbl.cols);
+                tables_found += 1;
+                prev_y = lines[tbl.end - 1].y;
+                prev_size = lines[tbl.end - 1].size;
+                i = tbl.end;
+                continue;
+            }
+        }
 
         const level = if (opts.detect_headings) headingLevel(ln.size, body_size, ln.text) else null;
+        const marker = if (level == null) listMarker(ln.text) else null;
 
         // A large vertical gap ends the current paragraph; so does an explicit
         // column/page break (where the next line's y jumps back up).
@@ -2336,15 +2387,26 @@ fn emitMdx(
             if (gap > prev_size * 1.8) gap_break = true;
         }
 
-        if (level != null or gap_break) {
+        if (level != null or marker != null or gap_break) {
             try flushPara(arena, w, &para);
         }
+        if (marker == null) list_base_x = null;
 
         if (level) |lv| {
-            // Heading: emit on its own line.
             var h: usize = 0;
             while (h < lv) : (h += 1) w.writeAll("#") catch {};
             w.print(" {s}\n\n", .{ln.text}) catch {};
+        } else if (marker) |m| {
+            // List item. Indent level from x relative to the list's first item.
+            if (list_base_x == null) list_base_x = ln.x;
+            const indent = indentLevel(ln.x, list_base_x.?, ln.size);
+            var s: usize = 0;
+            while (s < indent) : (s += 1) w.writeAll("  ") catch {};
+            if (m.ordered) {
+                w.print("1. {s}\n", .{m.rest}) catch {};
+            } else {
+                w.print("- {s}\n", .{m.rest}) catch {};
+            }
         } else {
             // Append to the running paragraph, de-hyphenating soft breaks.
             if (para.items.len > 0) {
@@ -2359,10 +2421,173 @@ fn emitMdx(
 
         prev_y = ln.y;
         prev_size = ln.size;
+        i += 1;
     }
     try flushPara(arena, w, &para);
 
+    meta_tables.* = tables_found;
     return aw.toOwnedSlice();
+}
+
+/// A detected list marker and the text following it.
+const ListMarker = struct {
+    ordered: bool,
+    rest: []const u8,
+};
+
+/// Recognize a leading bullet glyph or an ordered marker (`12.` / `3)` followed
+/// by a space). Returns the text after the marker, or null for non-list lines.
+fn listMarker(text: []const u8) ?ListMarker {
+    const bullets = [_][]const u8{
+        "\xe2\x80\xa2", // •
+        "\xe2\x80\xa3", // ‣
+        "\xe2\x97\xa6", // ◦
+        "\xe2\x96\xaa", // ▪
+        "\xe2\x96\xab", // ▫
+        "\xc2\xb7", // ·
+        "\xe2\x88\x99", // ∙
+    };
+    for (bullets) |b| {
+        if (std.mem.startsWith(u8, text, b)) {
+            const rest = std.mem.trimStart(u8, text[b.len..], " \t");
+            if (rest.len > 0) return .{ .ordered = false, .rest = rest };
+        }
+    }
+    // ASCII bullet: "- ", "* ", "– " at the very start.
+    if ((std.mem.startsWith(u8, text, "- ") or std.mem.startsWith(u8, text, "* "))) {
+        const rest = std.mem.trimStart(u8, text[2..], " \t");
+        if (rest.len > 0) return .{ .ordered = false, .rest = rest };
+    }
+    // Ordered: one or more digits then '.' or ')' then a space.
+    var d: usize = 0;
+    while (d < text.len and text[d] >= '0' and text[d] <= '9') d += 1;
+    if (d > 0 and d <= 3 and d + 1 < text.len and (text[d] == '.' or text[d] == ')') and text[d + 1] == ' ') {
+        const rest = std.mem.trimStart(u8, text[d + 1 ..], " \t");
+        if (rest.len > 0) return .{ .ordered = true, .rest = rest };
+    }
+    return null;
+}
+
+fn indentLevel(x: f64, base: f64, size: f64) usize {
+    if (x <= base + size) return 0;
+    const lv: usize = @intFromFloat((x - base) / (size * 1.8));
+    return @min(lv, 3);
+}
+
+const TableRegion = struct {
+    end: usize, // exclusive line index
+    cols: []f64, // sorted column x-anchors
+};
+
+/// Detect a table starting at `lines[start]`: a run of ≥2 consecutive,
+/// regularly-spaced rows each with ≥2 cells whose x-positions align into ≥2
+/// columns. Guard rail (spec §5): if alignment is weak, returns null so the rows
+/// fall through to plain text — never a fabricated junk table.
+fn tryDetectTable(arena: std.mem.Allocator, lines: []const Line, start: usize, body_size: f64) ?TableRegion {
+    var end = start;
+    var prev_y: ?f64 = null;
+    while (end < lines.len) {
+        const ln = lines[end];
+        if (end > start and ln.break_before) break;
+        if (ln.cells.len < 2 or ln.text.len == 0) break;
+        if (headingLevel(ln.size, body_size, ln.text) != null) break;
+        if (prev_y) |py| {
+            const gap = py - ln.y;
+            if (gap < 0 or gap > ln.size * 3.0) break;
+        }
+        prev_y = ln.y;
+        end += 1;
+        if (end - start > 500) break;
+    }
+    const nrows = end - start;
+    if (nrows < 2) return null;
+
+    // Cluster all cell x-anchors across rows.
+    const tol = @max(body_size * 1.5, 4.0);
+    var centers: std.ArrayListUnmanaged(f64) = .empty;
+    var counts: std.ArrayListUnmanaged(usize) = .empty;
+    var last_row: std.ArrayListUnmanaged(usize) = .empty; // last row that hit this cluster
+    for (lines[start..end], 0..) |ln, ri| {
+        for (ln.cells) |c| {
+            var matched = false;
+            for (centers.items, 0..) |ctr, ci| {
+                if (@abs(c.x - ctr) <= tol) {
+                    if (last_row.items[ci] != ri) {
+                        counts.items[ci] += 1;
+                        last_row.items[ci] = ri;
+                    }
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched) {
+                centers.append(arena, c.x) catch return null;
+                counts.append(arena, 1) catch return null;
+                last_row.append(arena, ri) catch return null;
+            }
+        }
+    }
+
+    // Keep columns present in ≥2 rows (and at least half the rows for the wider
+    // ones to count as real structure).
+    const min_cov: usize = @max(@as(usize, 2), nrows / 2);
+    var cols: std.ArrayListUnmanaged(f64) = .empty;
+    for (centers.items, 0..) |ctr, ci| {
+        if (counts.items[ci] >= min_cov) cols.append(arena, ctr) catch return null;
+    }
+    if (cols.items.len < 2) return null;
+
+    std.sort.block(f64, cols.items, {}, lessThanF64);
+    return .{ .end = end, .cols = cols.items };
+}
+
+fn lessThanF64(_: void, a: f64, b: f64) bool {
+    return a < b;
+}
+
+/// Emit a GFM table: assign each row's cells to the nearest column anchor.
+fn emitTable(arena: std.mem.Allocator, w: *std.Io.Writer, rows: []const Line, cols: []const f64) ExtractError!void {
+    if (cols.len == 0 or rows.len == 0) return;
+    w.writeAll("\n") catch {};
+
+    for (rows, 0..) |row, ri| {
+        var buckets = try arena.alloc(std.ArrayListUnmanaged(u8), cols.len);
+        for (buckets) |*b| b.* = .empty;
+        for (row.cells) |c| {
+            const col = nearestColumn(cols, c.x);
+            if (buckets[col].items.len > 0) try buckets[col].append(arena, ' ');
+            // Escape pipes so cell text can't break the table grid.
+            for (c.text) |ch| {
+                if (ch == '|') try buckets[col].appendSlice(arena, "\\|") else try buckets[col].append(arena, ch);
+            }
+        }
+        w.writeAll("|") catch {};
+        for (buckets) |b| {
+            w.print(" {s} |", .{b.items}) catch {};
+        }
+        w.writeAll("\n") catch {};
+
+        // Header separator after the first row.
+        if (ri == 0) {
+            w.writeAll("|") catch {};
+            for (cols) |_| w.writeAll(" --- |") catch {};
+            w.writeAll("\n") catch {};
+        }
+    }
+    w.writeAll("\n") catch {};
+}
+
+fn nearestColumn(cols: []const f64, x: f64) usize {
+    var best: usize = 0;
+    var best_d: f64 = std.math.inf(f64);
+    for (cols, 0..) |c, idx| {
+        const d = @abs(c - x);
+        if (d < best_d) {
+            best_d = d;
+            best = idx;
+        }
+    }
+    return best;
 }
 
 fn flushPara(arena: std.mem.Allocator, w: *std.Io.Writer, para: *std.ArrayListUnmanaged(u8)) ExtractError!void {
@@ -2467,7 +2692,9 @@ pub fn extractToMdx(gpa: std.mem.Allocator, pdf: []const u8, opts: ExtractOption
         if (inf.asDict()) |id| info = id;
     }
 
-    const mdx_arena = try emitMdx(arena, all_lines.items, info, &doc, pages.items.len, any_text, opts);
+    var tables_found: usize = 0;
+    const mdx_arena = try emitMdx(arena, all_lines.items, info, &doc, pages.items.len, any_text, opts, &tables_found);
+    meta.tables_found = tables_found;
     meta.extraction_method = "zig-native";
 
     return .{ .mdx = try gpa.dupe(u8, mdx_arena), .meta = meta };
@@ -2682,6 +2909,55 @@ test "column detection: two-column page → one cut; single column → none" {
     }
     const cuts1 = try detectColumnCuts(a, one.items);
     try testing.expectEqual(@as(usize, 0), cuts1.len);
+}
+
+test "list marker recognition" {
+    try testing.expect(listMarker("\xe2\x80\xa2 Item one").?.ordered == false);
+    try testing.expectEqualStrings("Item one", listMarker("\xe2\x80\xa2 Item one").?.rest);
+    try testing.expect(listMarker("1. First").?.ordered == true);
+    try testing.expectEqualStrings("First", listMarker("1. First").?.rest);
+    try testing.expect(listMarker("23) Twenty-three").?.ordered == true);
+    try testing.expect(listMarker("- dash item").?.ordered == false);
+    // Non-lists.
+    try testing.expect(listMarker("Just a sentence.") == null);
+    try testing.expect(listMarker("2.1Poweron") == null); // section number, no space
+    try testing.expect(listMarker("1.BIOSdataaddress") == null); // TOC entry, no space
+}
+
+test "table detection: aligned cells → GFM, prose → none" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const mk = struct {
+        fn cell(x: f64, t: []const u8) Cell {
+            return .{ .x = x, .end_x = x + 40, .text = t };
+        }
+    };
+    var rows: std.ArrayListUnmanaged(Line) = .empty;
+    const cols_a = [_]Cell{ mk.cell(50, "Name"), mk.cell(200, "Qty") };
+    const cols_b = [_]Cell{ mk.cell(50, "Widget"), mk.cell(200, "3") };
+    const cols_c = [_]Cell{ mk.cell(50, "Gadget"), mk.cell(200, "7") };
+    try rows.append(a, .{ .text = "Name Qty", .y = 700, .x = 50, .size = 10, .cells = try a.dupe(Cell, &cols_a) });
+    try rows.append(a, .{ .text = "Widget 3", .y = 686, .x = 50, .size = 10, .cells = try a.dupe(Cell, &cols_b) });
+    try rows.append(a, .{ .text = "Gadget 7", .y = 672, .x = 50, .size = 10, .cells = try a.dupe(Cell, &cols_c) });
+
+    const tbl = tryDetectTable(a, rows.items, 0, 10) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 3), tbl.end);
+    try testing.expectEqual(@as(usize, 2), tbl.cols.len);
+
+    var aw: std.Io.Writer.Allocating = .init(a);
+    try emitTable(a, &aw.writer, rows.items, tbl.cols);
+    const out = aw.written();
+    try testing.expect(std.mem.indexOf(u8, out, "| Name | Qty |") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "| --- | --- |") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "| Widget | 3 |") != null);
+
+    // A single prose line (one cell) is not a table.
+    var prose: std.ArrayListUnmanaged(Line) = .empty;
+    const one = [_]Cell{mk.cell(50, "just text")};
+    try prose.append(a, .{ .text = "just text", .y = 700, .x = 50, .size = 10, .cells = try a.dupe(Cell, &one) });
+    try testing.expect(tryDetectTable(a, prose.items, 0, 10) == null);
 }
 
 test "scanned PDF (no text) → needs_ocr, no garbage" {
