@@ -1982,6 +1982,10 @@ const Line = struct {
     y: f64,
     x: f64, // left edge
     size: f64, // representative (max) font size on the line
+    /// Forces a paragraph break before this line regardless of vertical gap —
+    /// set on the first line of each column and each page so reading order never
+    /// runs the bottom of one column into the top of the next.
+    break_before: bool = false,
 };
 
 /// Assemble positioned fragments into reading-ordered lines (single column,
@@ -2036,6 +2040,131 @@ fn assembleLines(arena: std.mem.Allocator, frags: []Frag, out: *std.ArrayListUnm
         });
         i = j;
     }
+}
+
+/// Assemble one page's fragments into reading-ordered lines, detecting columns
+/// first (spec §4.6). A multi-column page is split into bands at vertical
+/// gutters, and each band is emitted top-to-bottom *in full* before the next —
+/// this is what prevents the line-level interleaving of two-column papers.
+/// Single-column pages collapse to one band (identical to `assembleLines`).
+fn assemblePage(arena: std.mem.Allocator, frags: []Frag, out: *std.ArrayListUnmanaged(Line)) ExtractError!void {
+    if (frags.len == 0) return;
+
+    const cuts = try detectColumnCuts(arena, frags);
+    const first_idx = out.items.len;
+
+    if (cuts.len == 0) {
+        try assembleLines(arena, frags, out);
+    } else {
+        // Build band boundaries: [left, cut0, cut1, …, right].
+        var bounds: std.ArrayListUnmanaged(f64) = .empty;
+        try bounds.append(arena, -std.math.inf(f64));
+        for (cuts) |c| try bounds.append(arena, c);
+        try bounds.append(arena, std.math.inf(f64));
+
+        var b: usize = 0;
+        while (b + 1 < bounds.items.len) : (b += 1) {
+            const lo = bounds.items[b];
+            const hi = bounds.items[b + 1];
+            var band: std.ArrayListUnmanaged(Frag) = .empty;
+            for (frags) |fr| {
+                const mid = (fr.x + fr.end_x) / 2.0;
+                if (mid >= lo and mid < hi) try band.append(arena, fr);
+            }
+            const band_start = out.items.len;
+            try assembleLines(arena, band.items, out);
+            // Mark the first line of each column (after the first) as a break.
+            if (b > 0 and out.items.len > band_start) out.items[band_start].break_before = true;
+        }
+    }
+
+    // The first line of the whole page always forces a paragraph break so pages
+    // never run together.
+    if (out.items.len > first_idx) out.items[first_idx].break_before = true;
+}
+
+/// Detect vertical column gutters and return the x-positions to cut at (empty →
+/// single column). A gutter is a vertical strip that essentially no fragment
+/// *straddles*; ragged line-ends don't create false gutters because a gutter
+/// must be straddle-free over the strip, and a handful of full-width headers
+/// (below the straddle threshold) don't block it.
+fn detectColumnCuts(arena: std.mem.Allocator, frags: []const Frag) ExtractError![]f64 {
+    if (frags.len < 8) return &.{};
+
+    var left: f64 = std.math.inf(f64);
+    var right: f64 = -std.math.inf(f64);
+    for (frags) |fr| {
+        if (fr.x < left) left = fr.x;
+        if (fr.end_x > right) right = fr.end_x;
+    }
+    const width = right - left;
+    if (!(width > 0) or !std.math.isFinite(width)) return &.{};
+
+    const nbins: usize = 256;
+    const bin_w = width / @as(f64, @floatFromInt(nbins));
+    // Straddle coverage via a difference array: a fragment [x,end_x] straddles
+    // every bin strictly interior to its span.
+    var diff = try arena.alloc(i32, nbins + 1);
+    @memset(diff, 0);
+    for (frags) |fr| {
+        var a = binOf(fr.x, left, bin_w, nbins) + 1;
+        const e = binOf(fr.end_x, left, bin_w, nbins);
+        if (a > e) a = e;
+        if (a <= e and e <= nbins) {
+            diff[a] += 1;
+            diff[e] -= 1;
+        }
+    }
+    var cov = try arena.alloc(i32, nbins);
+    var running: i32 = 0;
+    for (0..nbins) |k| {
+        running += diff[k];
+        cov[k] = running;
+    }
+
+    const straddle_thresh: i32 = @max(1, @as(i32, @intCast(frags.len / 50)));
+    const min_gutter_bins: usize = @max(@as(usize, 3), nbins / 50); // ≥~2% of width
+
+    var cuts: std.ArrayListUnmanaged(f64) = .empty;
+    var k: usize = 0;
+    while (k < nbins) {
+        if (cov[k] <= straddle_thresh) {
+            const run_start = k;
+            while (k < nbins and cov[k] <= straddle_thresh) k += 1;
+            const run_end = k; // exclusive
+            const run_len = run_end - run_start;
+            // Ignore gutters touching the page edges (page margins, not columns).
+            const at_edge = (run_start == 0) or (run_end == nbins);
+            if (run_len >= min_gutter_bins and !at_edge) {
+                // Require substantial text on BOTH sides of this gutter.
+                if (hasTextOutside(cov, 0, run_start, straddle_thresh) and
+                    hasTextOutside(cov, run_end, nbins, straddle_thresh))
+                {
+                    const cut_x = left + (@as(f64, @floatFromInt(run_start + run_len / 2)) * bin_w);
+                    try cuts.append(arena, cut_x);
+                }
+            }
+        } else k += 1;
+    }
+    return cuts.items;
+}
+
+fn binOf(x: f64, left: f64, bin_w: f64, nbins: usize) usize {
+    if (bin_w <= 0) return 0;
+    const idx = (x - left) / bin_w;
+    if (idx < 0) return 0;
+    const i: usize = @intFromFloat(idx);
+    return @min(i, nbins);
+}
+
+/// True if some bin in [from,to) carries more than the straddle threshold of
+/// coverage — i.e. there is real text on that side of a candidate gutter.
+fn hasTextOutside(cov: []const i32, from: usize, to: usize, thresh: i32) bool {
+    var k = from;
+    while (k < to) : (k += 1) {
+        if (cov[k] > thresh) return true;
+    }
+    return false;
 }
 
 fn fragLess(_: void, a: Frag, b: Frag) bool {
@@ -2199,8 +2328,9 @@ fn emitMdx(
 
         const level = if (opts.detect_headings) headingLevel(ln.size, body_size, ln.text) else null;
 
-        // A large vertical gap ends the current paragraph.
-        var gap_break = false;
+        // A large vertical gap ends the current paragraph; so does an explicit
+        // column/page break (where the next line's y jumps back up).
+        var gap_break = ln.break_before;
         if (prev_y) |py| {
             const gap = py - ln.y;
             if (gap > prev_size * 1.8) gap_break = true;
@@ -2324,7 +2454,7 @@ pub fn extractToMdx(gpa: std.mem.Allocator, pdf: []const u8, opts: ExtractOption
         interp.run(page.content) catch {};
 
         var page_lines: std.ArrayListUnmanaged(Line) = .empty;
-        assembleLines(arena, frags.items, &page_lines) catch {};
+        assemblePage(arena, frags.items, &page_lines) catch {};
         try all_lines.appendSlice(arena, page_lines.items);
     }
 
@@ -2523,6 +2653,35 @@ test "xref stream (PDF 1.5) resolves objects via /Type /XRef" {
     try testing.expectEqual(off1, loc.offset);
     const cat = try doc.catalog();
     try testing.expectEqualStrings("Catalog", cat.get("Type").?.name);
+}
+
+test "column detection: two-column page → one cut; single column → none" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    // Two columns: left band x∈[50,250], right band x∈[350,550], clear gutter
+    // at ~300. Ten lines each.
+    var two: std.ArrayListUnmanaged(Frag) = .empty;
+    var row: usize = 0;
+    while (row < 10) : (row += 1) {
+        const y = 700.0 - @as(f64, @floatFromInt(row)) * 14.0;
+        try two.append(a, .{ .x = 50, .y = y, .end_x = 250, .size = 12, .text = "L" });
+        try two.append(a, .{ .x = 350, .y = y, .end_x = 550, .size = 12, .text = "R" });
+    }
+    const cuts2 = try detectColumnCuts(a, two.items);
+    try testing.expectEqual(@as(usize, 1), cuts2.len);
+    try testing.expect(cuts2[0] > 250 and cuts2[0] < 350);
+
+    // Single column: full-width lines, no gutter.
+    var one: std.ArrayListUnmanaged(Frag) = .empty;
+    row = 0;
+    while (row < 10) : (row += 1) {
+        const y = 700.0 - @as(f64, @floatFromInt(row)) * 14.0;
+        try one.append(a, .{ .x = 50, .y = y, .end_x = 550, .size = 12, .text = "full" });
+    }
+    const cuts1 = try detectColumnCuts(a, one.items);
+    try testing.expectEqual(@as(usize, 0), cuts1.len);
 }
 
 test "scanned PDF (no text) → needs_ocr, no garbage" {

@@ -23,8 +23,19 @@
 >   canonical *library*, so the four-gate library rule doesn't apply; the name covers the dominant
 >   (generate) direction and the `extract` verb is self-describing.
 
-Remaining phases (P2–P4) below are **not yet implemented**: multi-column reading order, lists,
-tables, Type0/CID fonts, links, image extraction, encryption, LZW.
+**P2 (partial) shipped too:** multi-column reading order — vertical-gutter detection splits each
+page into column bands (straddle-free difference-array scan, O(frags+bins)); each column is emitted
+top-to-bottom in full before the next, with a forced paragraph break at column/page boundaries.
+Verified on real ACM two-column papers (Dijkstra *Go To*, Liskov *Abstract Data Types*) — columns
+now read coherently instead of line-interleaving — with no false-split on single-column docs.
+Type0/CID **width** loading (`/W`+`/DW`, Identity) also landed (fixes glyph-positioned manuals).
+
+Validated against a 91-PDF real-world corpus (ARM TRMs incl. a 1528-page manual, OrangePi BIOS/Linux
+manuals, ACM papers, scanned + Hindi/Type0 docs): **0 crashes**, 7 correctly flagged `needs_ocr`,
+sub-second on the 1528-page TRM, whole corpus in ~3s.
+
+Still **not implemented** (P2 remainder / P3–P4): lists, tables, full Type0/CID decode for
+non-`ToUnicode` CMaps, links, image extraction, encryption, LZW.
 
 ---
 
