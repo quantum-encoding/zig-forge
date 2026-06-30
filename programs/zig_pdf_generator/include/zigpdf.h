@@ -159,6 +159,121 @@ const char* zigpdf_get_error(void);
 const char* zigpdf_version(void);
 
 /* ============================================================================
+ * PDF -> MDX Extraction (the inverse of generation)
+ * ============================================================================
+ *
+ * The same library both generates PDFs (above) and extracts existing PDFs into
+ * MDX (Markdown + YAML frontmatter). The extractor handles classic + xref-stream
+ * cross references, object streams, Flate/LZW/ASCIIHex/ASCII85/RunLength filters,
+ * simple + Type0/CID fonts (incl. embedded CMaps), multi-column reading order,
+ * lists, GFM tables, links, page rotation, empty-user-password encryption
+ * (RC4 / AES-128 / AES-256), and image extraction.
+ *
+ * Memory model:
+ * - The returned MDX buffer is caller-owned: free it with zigpdf_free().
+ * - Metadata and image blobs are retained in library-owned globals tied to the
+ *   MOST RECENT extract call. They are replaced on the next extract call and
+ *   released by zigpdf_extract_free_images(). These globals are NOT thread-safe.
+ */
+
+/**
+ * @brief Extract MDX from PDF bytes with default options.
+ *
+ * Default options: no image extraction, table + heading detection enabled.
+ *
+ * @param pdf      Pointer to the input PDF bytes (borrowed; caller retains)
+ * @param pdf_len  Length of the input PDF
+ * @param out_len  Receives the length of the returned MDX
+ * @return Pointer to MDX bytes on success, NULL on error (see zigpdf_get_error)
+ *
+ * @note Caller must free the returned buffer with zigpdf_free()
+ */
+uint8_t* zigpdf_extract_mdx(const uint8_t* pdf, size_t pdf_len, size_t* out_len);
+
+/**
+ * @brief Extract MDX from PDF bytes with explicit options.
+ *
+ * @param pdf             Pointer to the input PDF bytes (borrowed)
+ * @param pdf_len         Length of the input PDF
+ * @param extract_images  Nonzero: decode image XObjects into blobs reachable via
+ *                        zigpdf_extract_image_count/_name/_data (JPEG/JP2 pass
+ *                        through; raw/Flate samples are PNG-wrapped). Zero: emit
+ *                        a `![image](#)` placeholder only.
+ * @param detect_tables   Nonzero: reconstruct aligned cell grids as GFM tables.
+ * @param detect_headings Nonzero: promote larger-than-body lines to `#` headings.
+ * @param source_name     Optional NUL-terminated name for the frontmatter
+ *                        `source:` field (may be NULL).
+ * @param out_len         Receives the length of the returned MDX
+ * @return Pointer to MDX bytes on success, NULL on error
+ *
+ * @note Caller must free the returned buffer with zigpdf_free()
+ */
+uint8_t* zigpdf_extract_mdx_opts(const uint8_t* pdf, size_t pdf_len,
+                                 int extract_images, int detect_tables,
+                                 int detect_headings, const char* source_name,
+                                 size_t* out_len);
+
+/**
+ * @brief Serialize the last extraction's metadata as a JSON object.
+ *
+ * Fields: pages, has_text_layer, needs_ocr, images_found, tables_found,
+ * extraction_method, encrypted. Returns NULL if no extraction has run.
+ *
+ * @param out_len Receives the length of the returned JSON
+ * @return Pointer to JSON bytes, or NULL
+ *
+ * @note Caller must free the returned buffer with zigpdf_free()
+ */
+uint8_t* zigpdf_extract_meta_json(size_t* out_len);
+
+/**
+ * @brief Number of image blobs captured by the last extract_images run.
+ *
+ * Indices 0..count-1 are valid for the accessors below. Note this is the count
+ * of blobs actually emitted (JPEG/JP2/PNG); it may be lower than the metadata
+ * `images_found` (which counts every image XObject, including ones whose color
+ * space is not yet wrappable, e.g. Indexed/CMYK).
+ *
+ * @return Image blob count (0 if the last extract did not request images)
+ */
+size_t zigpdf_extract_image_count(void);
+
+/**
+ * @brief Borrowed pointer to image `idx`'s file name (e.g. "img0.png").
+ *
+ * The pointer is owned by the library and stays valid until the next extract
+ * call or zigpdf_extract_free_images(); it is NOT NUL-terminated and must NOT
+ * be freed. Returns NULL (out_len = 0) if idx is out of range.
+ *
+ * @param idx     Image index in [0, zigpdf_extract_image_count())
+ * @param out_len Receives the name length
+ * @return Borrowed name pointer, or NULL
+ */
+const uint8_t* zigpdf_extract_image_name(size_t idx, size_t* out_len);
+
+/**
+ * @brief Borrowed pointer to image `idx`'s encoded bytes (a complete JPEG / JP2
+ *        / PNG file).
+ *
+ * Same borrow contract as zigpdf_extract_image_name: do not free; valid until
+ * the next extract call or zigpdf_extract_free_images().
+ *
+ * @param idx     Image index in [0, zigpdf_extract_image_count())
+ * @param out_len Receives the byte length
+ * @return Borrowed data pointer, or NULL if idx is out of range
+ */
+const uint8_t* zigpdf_extract_image_data(size_t idx, size_t* out_len);
+
+/**
+ * @brief Release the image set retained from the last extract call.
+ *
+ * Optional — the next extract call frees it automatically — but lets a caller
+ * drop the bytes once copied. Idempotent. Invalidates pointers previously
+ * returned by zigpdf_extract_image_name / zigpdf_extract_image_data.
+ */
+void zigpdf_extract_free_images(void);
+
+/* ============================================================================
  * File Output Functions
  * ============================================================================ */
 

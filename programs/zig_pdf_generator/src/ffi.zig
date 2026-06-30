@@ -216,11 +216,46 @@ export fn zigpdf_version() [*:0]const u8 {
 
 const pdf_extract = @import("pdf_extract.zig");
 
-/// Metadata from the most recent zigpdf_extract_mdx call, serialized on demand
-/// by zigpdf_extract_meta_json.
+/// Metadata from the most recent extract call, serialized on demand by
+/// zigpdf_extract_meta_json. Holds only static strings — no ownership.
 var last_meta: pdf_extract.ExtractionMeta = .{};
 
-/// Extract MDX (Markdown + YAML frontmatter) from PDF bytes.
+/// Image blobs from the most recent extract call made with `extract_images`.
+/// Owned here; borrowed (not copied) by zigpdf_extract_image_name/_data. Freed
+/// on the next extract call or by zigpdf_extract_free_images. Single global, so
+/// NOT thread-safe — same contract as last_meta / last_error.
+var last_images: []pdf_extract.ExtractedImage = &.{};
+
+fn freeLastImages() void {
+    for (last_images) |img| {
+        ffi_allocator.free(img.name);
+        ffi_allocator.free(img.bytes);
+    }
+    if (last_images.len > 0) ffi_allocator.free(last_images);
+    last_images = &.{};
+}
+
+/// Shared body for both extract entry points: release any prior image set, run
+/// the extractor, take ownership of the new image blobs, stash metadata, and
+/// hand back the MDX buffer (caller-owned). The ExtractResult's other members
+/// are deliberately not deinit'd — `mdx` is returned to the caller and `images`
+/// is retained in `last_images`; `meta` holds only static strings.
+fn runExtract(pdf: []const u8, opts: pdf_extract.ExtractOptions, out_len: *usize) ?[*]u8 {
+    freeLastImages();
+    const result = pdf_extract.extractToMdx(ffi_allocator, pdf, opts) catch |err| {
+        var buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "PDF extraction error: {s}", .{@errorName(err)}) catch "PDF extraction error";
+        setLastError(msg);
+        return null;
+    };
+    last_meta = result.meta;
+    last_images = result.images;
+    out_len.* = result.mdx.len;
+    return result.mdx.ptr;
+}
+
+/// Extract MDX (Markdown + YAML frontmatter) from PDF bytes with default options
+/// (no image extraction; table + heading detection on).
 ///
 /// Parameters:
 /// - pdf_ptr / pdf_len: the input PDF bytes (borrowed; caller owns)
@@ -230,16 +265,36 @@ var last_meta: pdf_extract.ExtractionMeta = .{};
 /// error (see zigpdf_get_error). Mirrors the zigdocx_docx_to_md FFI shape so a
 /// single Go/Wazero helper can drive both modules.
 export fn zigpdf_extract_mdx(pdf_ptr: [*]const u8, pdf_len: usize, out_len: *usize) ?[*]u8 {
-    const pdf = pdf_ptr[0..pdf_len];
-    const result = pdf_extract.extractToMdx(ffi_allocator, pdf, .{}) catch |err| {
-        var buf: [128]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "PDF extraction error: {s}", .{@errorName(err)}) catch "PDF extraction error";
-        setLastError(msg);
-        return null;
+    return runExtract(pdf_ptr[0..pdf_len], .{}, out_len);
+}
+
+/// Extract MDX with explicit options.
+///
+/// - extract_images:   nonzero → decode image XObjects into blobs reachable via
+///                     zigpdf_extract_image_count/_name/_data (JPEG/JP2 passthrough,
+///                     raw/Flate samples PNG-wrapped). 0 → emit `![image](#)` only.
+/// - detect_tables:    nonzero → reconstruct aligned cell grids as GFM tables.
+/// - detect_headings:  nonzero → promote larger-than-body lines to `#` headings.
+/// - source_name:      optional NUL-terminated string for the frontmatter
+///                     `source:` field (may be NULL).
+///
+/// Same return/ownership contract as zigpdf_extract_mdx.
+export fn zigpdf_extract_mdx_opts(
+    pdf_ptr: [*]const u8,
+    pdf_len: usize,
+    extract_images: c_int,
+    detect_tables: c_int,
+    detect_headings: c_int,
+    source_name: ?[*:0]const u8,
+    out_len: *usize,
+) ?[*]u8 {
+    const opts = pdf_extract.ExtractOptions{
+        .extract_images = extract_images != 0,
+        .detect_tables = detect_tables != 0,
+        .detect_headings = detect_headings != 0,
+        .source_name = if (source_name) |s| std.mem.span(s) else "",
     };
-    last_meta = result.meta;
-    out_len.* = result.mdx.len;
-    return result.mdx.ptr;
+    return runExtract(pdf_ptr[0..pdf_len], opts, out_len);
 }
 
 /// Serialize the metadata of the last extraction as JSON. Returns NULL if no
@@ -259,6 +314,48 @@ export fn zigpdf_extract_meta_json(out_len: *usize) ?[*]u8 {
     };
     out_len.* = json.len;
     return json.ptr;
+}
+
+/// Number of image blobs captured by the last extract call made with
+/// `extract_images` set (0 otherwise). Indices 0..count-1 are valid for
+/// zigpdf_extract_image_name / zigpdf_extract_image_data.
+export fn zigpdf_extract_image_count() usize {
+    return last_images.len;
+}
+
+/// Borrowed pointer to image `idx`'s file name (e.g. "img0.png"), with its
+/// length in out_len. NOT NUL-terminated. The pointer is owned by the library
+/// and stays valid until the next extract call or zigpdf_extract_free_images;
+/// do not free it. Returns NULL (and sets out_len = 0) if idx is out of range.
+export fn zigpdf_extract_image_name(idx: usize, out_len: *usize) ?[*]const u8 {
+    if (idx >= last_images.len) {
+        out_len.* = 0;
+        return null;
+    }
+    const name = last_images[idx].name;
+    out_len.* = name.len;
+    return name.ptr;
+}
+
+/// Borrowed pointer to image `idx`'s encoded bytes (a complete JPEG / JP2 / PNG
+/// file), with its length in out_len. Same borrow contract as
+/// zigpdf_extract_image_name — do not free; valid until the next extract call or
+/// zigpdf_extract_free_images. Returns NULL (out_len = 0) if idx is out of range.
+export fn zigpdf_extract_image_data(idx: usize, out_len: *usize) ?[*]const u8 {
+    if (idx >= last_images.len) {
+        out_len.* = 0;
+        return null;
+    }
+    const bytes = last_images[idx].bytes;
+    out_len.* = bytes.len;
+    return bytes.ptr;
+}
+
+/// Release the image set retained from the last extract call. Optional — the
+/// next extract call frees it automatically — but lets a caller drop the bytes
+/// early once it has copied them out. Idempotent.
+export fn zigpdf_extract_free_images() void {
+    freeLastImages();
 }
 
 // =============================================================================

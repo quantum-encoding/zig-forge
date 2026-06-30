@@ -123,19 +123,62 @@ export fn zigpdf_version() [*:0]const u8 {
 const pdf_extract = @import("pdf_extract.zig");
 var last_meta: pdf_extract.ExtractionMeta = .{};
 
-/// Extract MDX from PDF bytes. Mirrors zigdocx_docx_to_md so one Wazero helper
-/// drives both modules. Returns MDX bytes (free with wasm_free) or 0 on error.
-export fn zigpdf_extract_mdx(pdf_ptr: [*]const u8, pdf_len: usize, output_len: *usize) ?[*]u8 {
-    const pdf = pdf_ptr[0..pdf_len];
-    const result = pdf_extract.extractToMdx(wasm_allocator, pdf, .{}) catch |err| {
+/// Image blobs from the last extract call made with `extract_images`. Owned
+/// here; borrowed by zigpdf_extract_image_name/_data; freed on the next extract
+/// call or by zigpdf_extract_free_images.
+var last_images: []pdf_extract.ExtractedImage = &.{};
+
+fn freeLastImages() void {
+    for (last_images) |img| {
+        wasm_allocator.free(img.name);
+        wasm_allocator.free(img.bytes);
+    }
+    if (last_images.len > 0) wasm_allocator.free(last_images);
+    last_images = &.{};
+}
+
+fn runExtract(pdf: []const u8, opts: pdf_extract.ExtractOptions, output_len: *usize) ?[*]u8 {
+    freeLastImages();
+    const result = pdf_extract.extractToMdx(wasm_allocator, pdf, opts) catch |err| {
         var buf: [128]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "PDF extraction error: {s}", .{@errorName(err)}) catch "PDF extraction error";
         setLastError(msg);
         return null;
     };
     last_meta = result.meta;
+    last_images = result.images;
     output_len.* = result.mdx.len;
     return @ptrCast(@constCast(result.mdx.ptr));
+}
+
+/// Extract MDX from PDF bytes with default options. Mirrors zigdocx_docx_to_md
+/// so one Wazero helper drives both modules. Returns MDX bytes (free with
+/// wasm_free) or 0 on error.
+export fn zigpdf_extract_mdx(pdf_ptr: [*]const u8, pdf_len: usize, output_len: *usize) ?[*]u8 {
+    return runExtract(pdf_ptr[0..pdf_len], .{}, output_len);
+}
+
+/// Extract MDX with explicit options. The bool flags are passed as u32 (0/1);
+/// source_name is a (ptr,len) slice into linear memory (len 0 → none). When
+/// extract_images is nonzero, image blobs are reachable via
+/// zigpdf_extract_image_count/_name/_data after this returns.
+export fn zigpdf_extract_mdx_opts(
+    pdf_ptr: [*]const u8,
+    pdf_len: usize,
+    extract_images: u32,
+    detect_tables: u32,
+    detect_headings: u32,
+    source_name_ptr: [*]const u8,
+    source_name_len: usize,
+    output_len: *usize,
+) ?[*]u8 {
+    const opts = pdf_extract.ExtractOptions{
+        .extract_images = extract_images != 0,
+        .detect_tables = detect_tables != 0,
+        .detect_headings = detect_headings != 0,
+        .source_name = if (source_name_len > 0) source_name_ptr[0..source_name_len] else "",
+    };
+    return runExtract(pdf_ptr[0..pdf_len], opts, output_len);
 }
 
 /// Serialize the last extraction's metadata as JSON. Free with wasm_free.
@@ -154,6 +197,42 @@ export fn zigpdf_extract_meta_json(output_len: *usize) ?[*]u8 {
     };
     output_len.* = json.len;
     return @ptrCast(@constCast(json.ptr));
+}
+
+/// Number of image blobs captured by the last extract call made with
+/// `extract_images` set (0 otherwise).
+export fn zigpdf_extract_image_count() usize {
+    return last_images.len;
+}
+
+/// Borrowed pointer (into linear memory) to image `idx`'s file name, length in
+/// out_len. Owned by the module; valid until the next extract call or
+/// zigpdf_extract_free_images — do not wasm_free it. 0 if idx is out of range.
+export fn zigpdf_extract_image_name(idx: usize, out_len: *usize) ?[*]u8 {
+    if (idx >= last_images.len) {
+        out_len.* = 0;
+        return null;
+    }
+    const name = last_images[idx].name;
+    out_len.* = name.len;
+    return @ptrCast(@constCast(name.ptr));
+}
+
+/// Borrowed pointer to image `idx`'s encoded bytes (complete JPEG/JP2/PNG file),
+/// length in out_len. Same borrow contract as zigpdf_extract_image_name.
+export fn zigpdf_extract_image_data(idx: usize, out_len: *usize) ?[*]u8 {
+    if (idx >= last_images.len) {
+        out_len.* = 0;
+        return null;
+    }
+    const bytes = last_images[idx].bytes;
+    out_len.* = bytes.len;
+    return @ptrCast(@constCast(bytes.ptr));
+}
+
+/// Release the retained image set early (the next extract call frees it anyway).
+export fn zigpdf_extract_free_images() void {
+    freeLastImages();
 }
 
 // =============================================================================
