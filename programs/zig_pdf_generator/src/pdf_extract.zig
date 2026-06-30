@@ -570,6 +570,182 @@ fn scanEndstream(buf: []const u8, from: usize) usize {
 }
 
 // =============================================================================
+// Encryption — standard security handler, empty user password
+// =============================================================================
+
+const Md5 = std.crypto.hash.Md5;
+const pdf_crypt = @import("pdf_crypt.zig");
+
+/// The 32-byte password-padding string (ISO 32000-1 Algorithm 2).
+const pad_string = [32]u8{
+    0x28, 0xBF, 0x4E, 0x5E, 0x4E, 0x75, 0x8A, 0x41, 0x64, 0x00, 0x4E, 0x56, 0xFF, 0xFA, 0x01, 0x08,
+    0x2E, 0x2E, 0x00, 0xB6, 0xD0, 0x68, 0x3E, 0x80, 0x2F, 0x0C, 0xA9, 0xFE, 0x64, 0x53, 0x69, 0x7A,
+};
+
+const CryptMethod = enum { rc4, aesv2, aesv3, identity };
+
+/// Decrypts the strings and streams of an encrypted PDF with the empty user
+/// password. Supports the common standard-security-handler variants: RC4
+/// (/V 1,2 and /V 4 with /V2), AES-128 (/V 4 with /AESV2), and AES-256
+/// (/V 5 /R 6, key derived via the audited `pdf_crypt`).
+const Decryptor = struct {
+    file_key: [32]u8 = undefined,
+    key_len: usize = 5, // bytes
+    method: CryptMethod = .rc4,
+
+    /// Algorithm 1: per-object key = MD5(file_key ++ obj# ++ gen [++ "sAlT"]),
+    /// truncated to min(key_len+5, 16). Not used for AES-256 (/V 5).
+    fn objectKey(self: *const Decryptor, num: u32, gen: u16, out: *[16]u8) usize {
+        var h = Md5.init(.{});
+        h.update(self.file_key[0..self.key_len]);
+        h.update(&[_]u8{ @truncate(num), @truncate(num >> 8), @truncate(num >> 16) });
+        h.update(&[_]u8{ @truncate(gen), @truncate(gen >> 8) });
+        if (self.method == .aesv2) h.update("sAlT");
+        var digest: [16]u8 = undefined;
+        h.final(&digest);
+        const klen = @min(self.key_len + 5, @as(usize, 16));
+        @memcpy(out[0..klen], digest[0..klen]);
+        return klen;
+    }
+
+    fn decryptData(self: *const Decryptor, arena: std.mem.Allocator, num: u32, gen: u16, data: []const u8) ExtractError![]u8 {
+        switch (self.method) {
+            .identity => return arena.dupe(u8, data),
+            .aesv3 => return aesCbcDecrypt(arena, self.file_key[0..32], data),
+            .rc4 => {
+                var key: [16]u8 = undefined;
+                const klen = self.objectKey(num, gen, &key);
+                const out = try arena.alloc(u8, data.len);
+                rc4(key[0..klen], data, out);
+                return out;
+            },
+            .aesv2 => {
+                var key: [16]u8 = undefined;
+                const klen = self.objectKey(num, gen, &key);
+                return aesCbcDecrypt(arena, key[0..klen], data);
+            },
+        }
+    }
+};
+
+fn rc4(key: []const u8, data: []const u8, out: []u8) void {
+    if (key.len == 0) {
+        @memcpy(out, data);
+        return;
+    }
+    var s: [256]u8 = undefined;
+    for (0..256) |i| s[i] = @truncate(i);
+    var j: u8 = 0;
+    for (0..256) |i| {
+        j +%= s[i] +% key[i % key.len];
+        std.mem.swap(u8, &s[i], &s[j]);
+    }
+    var a: u8 = 0;
+    j = 0;
+    for (0..data.len) |k| {
+        a +%= 1;
+        j +%= s[a];
+        std.mem.swap(u8, &s[a], &s[j]);
+        out[k] = data[k] ^ s[s[a] +% s[j]];
+    }
+}
+
+/// AES-CBC decrypt where `data` = IV(16) ‖ ciphertext, PKCS#7-padded. Key length
+/// selects AES-128 vs AES-256.
+fn aesCbcDecrypt(arena: std.mem.Allocator, key: []const u8, data: []const u8) ExtractError![]u8 {
+    if (data.len < 32 or (data.len - 16) % 16 != 0) return arena.dupe(u8, "");
+    var iv: [16]u8 = undefined;
+    @memcpy(&iv, data[0..16]);
+    const ct = data[16..];
+    const out = try arena.alloc(u8, ct.len);
+
+    if (key.len >= 32) {
+        var k: [32]u8 = undefined;
+        @memcpy(&k, key[0..32]);
+        cbcDecrypt(std.crypto.core.aes.Aes256.initDec(k), iv, ct, out);
+    } else {
+        var k: [16]u8 = [_]u8{0} ** 16;
+        @memcpy(k[0..@min(key.len, 16)], key[0..@min(key.len, 16)]);
+        cbcDecrypt(std.crypto.core.aes.Aes128.initDec(k), iv, ct, out);
+    }
+
+    // Strip PKCS#7 padding.
+    if (out.len == 0) return out;
+    const pad = out[out.len - 1];
+    if (pad >= 1 and pad <= 16 and pad <= out.len) return out[0 .. out.len - pad];
+    return out;
+}
+
+fn cbcDecrypt(ctx: anytype, iv_in: [16]u8, ct: []const u8, out: []u8) void {
+    var prev = iv_in;
+    var i: usize = 0;
+    while (i + 16 <= ct.len) : (i += 16) {
+        var block: [16]u8 = undefined;
+        @memcpy(&block, ct[i .. i + 16]);
+        var dec: [16]u8 = undefined;
+        ctx.decrypt(&dec, &block);
+        for (0..16) |b| out[i + b] = dec[b] ^ prev[b];
+        prev = block;
+    }
+}
+
+/// Algorithm 2: derive the RC4/AES-128 file key for the empty user password.
+fn computeFileKeyRC4(dec: *Decryptor, o_str: []const u8, p: i64, id0: []const u8, r: i64, enc_meta: bool) void {
+    var h = Md5.init(.{});
+    h.update(&pad_string); // empty password → padding only
+
+    var o32: [32]u8 = [_]u8{0} ** 32;
+    @memcpy(o32[0..@min(o_str.len, 32)], o_str[0..@min(o_str.len, 32)]);
+    h.update(&o32);
+
+    const p32: u32 = @bitCast(@as(i32, @truncate(p)));
+    h.update(&[_]u8{ @truncate(p32), @truncate(p32 >> 8), @truncate(p32 >> 16), @truncate(p32 >> 24) });
+    h.update(id0);
+    if (r >= 4 and !enc_meta) h.update(&[_]u8{ 0xFF, 0xFF, 0xFF, 0xFF });
+
+    var digest: [16]u8 = undefined;
+    h.final(&digest);
+
+    if (r >= 3) {
+        var it: usize = 0;
+        while (it < 50) : (it += 1) {
+            var hh = Md5.init(.{});
+            hh.update(digest[0..dec.key_len]);
+            hh.final(&digest);
+        }
+    }
+    @memcpy(dec.file_key[0..dec.key_len], digest[0..dec.key_len]);
+}
+
+/// Decrypt every string and stream inside `obj` in place (arena memory is
+/// mutable), keyed by the owning indirect object's number/generation. Strings
+/// nested in arrays/dicts are handled recursively.
+fn decryptObjInPlace(doc: *Document, obj: Obj, num: u32, gen: u16, depth: usize) Obj {
+    if (depth > 64) return obj;
+    const dec = &(doc.decryptor orelse return obj);
+    switch (obj) {
+        .string => |s| {
+            const out = dec.decryptData(doc.arena, num, gen, s) catch return obj;
+            return Obj{ .string = out };
+        },
+        .array => |arr| {
+            for (arr) |*it| it.* = decryptObjInPlace(doc, it.*, num, gen, depth + 1);
+            return obj;
+        },
+        .dict => |d| {
+            for (d.entries) |*e| e.val = decryptObjInPlace(doc, e.val, num, gen, depth + 1);
+            return obj;
+        },
+        .stream => |st| {
+            st.raw = dec.decryptData(doc.arena, num, gen, st.raw) catch st.raw;
+            for (st.dict.entries) |*e| e.val = decryptObjInPlace(doc, e.val, num, gen, depth + 1);
+            return obj;
+        },
+        else => return obj,
+    }
+}
+
+// =============================================================================
 // Document — xref resolution, object cache, stream decoding
 // =============================================================================
 
@@ -590,6 +766,10 @@ pub const Document = struct {
     objstm_cache: std.AutoHashMapUnmanaged(u32, ObjStm) = .empty,
     trailer: Dict = .{},
     encrypted: bool = false,
+    /// Set when the PDF is encrypted and the empty user password unlocked it.
+    decryptor: ?Decryptor = null,
+    /// The /Encrypt dictionary's own object number — never decrypted.
+    encrypt_obj_num: ?u32 = null,
 
     const ObjStm = struct {
         /// (object number, byte offset within `data`) pairs.
@@ -611,9 +791,87 @@ pub const Document = struct {
         };
         if (doc.xref.count() == 0) try doc.rebuildXref();
 
-        // Detect encryption (P1 doesn't decrypt — surface a clean signal).
-        if (doc.trailer.get("Encrypt") != null) doc.encrypted = true;
+        // Encryption: try to unlock with the empty user password. On success a
+        // decryptor is installed and `encrypted` stays true (callers can still
+        // see the document was encrypted). On failure (real password required)
+        // the decryptor stays null and extraction surfaces a clean signal.
+        if (doc.trailer.get("Encrypt") != null) {
+            doc.encrypted = true;
+            doc.setupDecryption() catch {};
+        }
         return doc;
+    }
+
+    /// Parse /Encrypt and derive the file key for the empty user password.
+    fn setupDecryption(self: *Document) ExtractError!void {
+        const enc_ref = self.trailer.get("Encrypt") orelse return;
+        if (enc_ref == .ref) self.encrypt_obj_num = enc_ref.ref.num;
+        const enc = (try self.resolve(enc_ref)).asDict() orelse return;
+
+        const v = if (enc.get("V")) |o| (o.asInt() orelse 0) else 0;
+        const r = if (enc.get("R")) |o| (o.asInt() orelse 0) else 0;
+        const length_bits = if (enc.get("Length")) |o| (o.asInt() orelse 40) else 40;
+
+        // /ID[0] — the first file identifier (not encrypted).
+        var id0: []const u8 = "";
+        if (self.trailer.get("ID")) |idobj| {
+            if (idobj == .array and idobj.array.len >= 1 and idobj.array[0] == .string) {
+                id0 = idobj.array[0].string;
+            }
+        }
+
+        var dec = Decryptor{};
+
+        if (v >= 5 or r >= 5) {
+            // AES-256 (/V 5 /R 6): derive the file key via the audited pdf_crypt.
+            const u_str = if (enc.get("U")) |o| (if (o == .string) o.string else "") else "";
+            const ue_str = if (enc.get("UE")) |o| (if (o == .string) o.string else "") else "";
+            if (u_str.len < 48 or ue_str.len < 32) return;
+            var u_buf: [48]u8 = undefined;
+            var ue_buf: [32]u8 = undefined;
+            @memcpy(&u_buf, u_str[0..48]);
+            @memcpy(&ue_buf, ue_str[0..32]);
+            const fk = pdf_crypt.recoverFileKeyUser(self.arena, "", u_buf, ue_buf) catch return;
+            const key = fk orelse return; // empty password rejected → leave locked
+            @memcpy(dec.file_key[0..32], &key);
+            dec.key_len = 32;
+            dec.method = .aesv3;
+            self.decryptor = dec;
+            return;
+        }
+
+        // RC4 / AES-128 (/R 2,3,4).
+        dec.key_len = if (r == 2) 5 else @intCast(@max(5, @divTrunc(length_bits, 8)));
+        dec.method = .rc4;
+        if (v == 4) {
+            // Crypt-filter method: /CF /StdCF /CFM = /V2 (RC4) or /AESV2.
+            if (try self.dictGet(enc, "CF")) |cf_obj| {
+                if (cf_obj.asDict()) |cf| {
+                    if (try self.dictGet(cf, "StdCF")) |std_cf| {
+                        if (std_cf.asDict()) |scf| {
+                            const cfm = if (scf.get("CFM")) |m| (if (m == .name) m.name else "") else "";
+                            if (std.mem.eql(u8, cfm, "AESV2")) {
+                                dec.method = .aesv2;
+                                dec.key_len = 16;
+                            } else if (std.mem.eql(u8, cfm, "V2")) {
+                                dec.method = .rc4;
+                            }
+                        }
+                    }
+                }
+            }
+            // If streams use the Identity filter, nothing is encrypted.
+            if (enc.get("StmF")) |sf| {
+                if (sf == .name and std.mem.eql(u8, sf.name, "Identity")) dec.method = .identity;
+            }
+        }
+
+        const o_str = if (enc.get("O")) |o| (if (o == .string) o.string else "") else "";
+        const p_val: i64 = if (enc.get("P")) |o| (o.asInt() orelse 0) else 0;
+        const enc_meta: bool = if (enc.get("EncryptMetadata")) |o| (o != .boolean or o.boolean) else true;
+
+        computeFileKeyRC4(&dec, o_str, p_val, id0, r, enc_meta);
+        self.decryptor = dec;
     }
 
     // --- xref construction ----------------------------------------------------
@@ -826,12 +1084,11 @@ pub const Document = struct {
     /// Resolve an indirect reference to its object, caching the result. Returns
     /// null object on any failure (never panics).
     pub fn resolveRef(self: *Document, num: u32, gen: u16) ExtractError!Obj {
-        _ = gen;
         if (self.cache.get(num)) |o| return o;
         const loc = self.xref.get(num) orelse return Obj{ .null = {} };
         // Pre-seed cache with null to break ref cycles.
         try self.cache.put(self.arena, num, .{ .null = {} });
-        const obj = switch (loc) {
+        var obj = switch (loc) {
             .offset => |o| blk: {
                 if (o >= self.file.len) break :blk Obj{ .null = {} };
                 var parser = Parser.init(self.file, o, self.file, self.arena);
@@ -839,6 +1096,12 @@ pub const Document = struct {
             },
             .in_objstm => |c| try self.objectFromObjStm(c.stream_num, c.index, num),
         };
+        // Decrypt directly-stored objects (objects inside an ObjStm are already
+        // plaintext once the ObjStm stream itself was decrypted). The /Encrypt
+        // dictionary is never decrypted.
+        if (self.decryptor != null and loc == .offset and (self.encrypt_obj_num == null or num != self.encrypt_obj_num.?)) {
+            obj = decryptObjInPlace(self, obj, num, gen, 0);
+        }
         try self.cache.put(self.arena, num, obj);
         return obj;
     }
@@ -881,6 +1144,11 @@ pub const Document = struct {
         const obj = parser.parseObject() catch return ExtractError.BrokenXref;
         if (obj != .stream) return ExtractError.BrokenXref;
         const st = obj.stream;
+        // The ObjStm stream itself is encrypted as a normal stream; decrypt its
+        // raw bytes before decoding. The objects inside are NOT re-encrypted.
+        if (self.decryptor) |*dec| {
+            st.raw = dec.decryptData(self.arena, stream_num, 0, st.raw) catch st.raw;
+        }
         const n: usize = @intCast(@max(0, (st.dict.get("N") orelse Obj{ .integer = 0 }).asInt() orelse 0));
         const first: usize = @intCast(@max(0, (st.dict.get("First") orelse Obj{ .integer = 0 }).asInt() orelse 0));
         const data = try self.decodeStreamRaw(st);
@@ -2731,9 +2999,11 @@ pub fn extractToMdx(gpa: std.mem.Allocator, pdf: []const u8, opts: ExtractOption
 
     var meta = ExtractionMeta{ .encrypted = doc.encrypted };
 
-    // Encrypted PDFs are P3 — surface a clean, honest result, never a crash.
-    if (doc.encrypted) {
-        const note = "---\nextraction_method: zig-native\nhas_text_layer: false\nneeds_ocr: false\nencrypted: true\n---\n\n> This PDF is encrypted; decryption is not yet supported.\n";
+    // Encrypted PDF that the empty user password could not unlock (a real
+    // password is required) → honest stub, never a crash. If a decryptor was
+    // installed, extraction proceeds normally below.
+    if (doc.encrypted and doc.decryptor == null) {
+        const note = "---\nextraction_method: zig-native\nhas_text_layer: false\nneeds_ocr: false\nencrypted: true\n---\n\n> This PDF is encrypted and requires a password to open.\n";
         return .{ .mdx = try gpa.dupe(u8, note), .meta = meta };
     }
 
@@ -3007,6 +3277,19 @@ test "link wrapping: overlapping cell → markdown link" {
     // Right y but wrong line → unchanged.
     const wrong_y = try wrapLink(a, &links, 50, 150, 600, "plain");
     try testing.expectEqualStrings("plain", wrong_y);
+}
+
+test "RC4 known-answer vector + self-inverse" {
+    // Classic vector: key "Key", "Plaintext" → BBF316E8D940AF0AD3.
+    const key = "Key";
+    const pt = "Plaintext";
+    var ct: [9]u8 = undefined;
+    rc4(key, pt, &ct);
+    try testing.expectEqualSlices(u8, &.{ 0xBB, 0xF3, 0x16, 0xE8, 0xD9, 0x40, 0xAF, 0x0A, 0xD3 }, &ct);
+    // RC4 is its own inverse.
+    var back: [9]u8 = undefined;
+    rc4(key, &ct, &back);
+    try testing.expectEqualStrings(pt, &back);
 }
 
 test "list marker recognition" {
