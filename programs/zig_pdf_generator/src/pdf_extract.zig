@@ -1081,12 +1081,70 @@ fn buildFont(doc: *Document, font_dict: Dict) ExtractError!Font {
         try seedSimpleEncoding(doc, font_dict, &font);
         try loadSimpleWidths(doc, font_dict, &font);
     } else {
-        // Type0: width default + /DescendantFonts /W is P3; advance with default.
+        // Type0: load CID widths from the descendant CIDFont's /W + /DW. Without
+        // these, single-glyph-per-Tj layouts (common in hardware manuals) lose
+        // every inter-word space because the default advance overshoots and the
+        // gap-based space detector never fires. Assumes Identity-H (CID = code),
+        // which covers the overwhelming majority of real Type0 fonts.
         font.default_width = 1000;
+        try loadType0Widths(doc, font_dict, &font);
         if (font.to_unicode.count() > 0) font.any_mapped = true;
     }
 
     return font;
+}
+
+/// Load CID glyph widths from a Type0 font's descendant CIDFont (/W ranges and
+/// /DW default). CID is taken equal to the byte code (Identity encoding).
+fn loadType0Widths(doc: *Document, font_dict: Dict, font: *Font) ExtractError!void {
+    const desc_obj = try doc.dictGet(font_dict, "DescendantFonts") orelse return;
+    // /DescendantFonts is a one-element array (or, rarely, a direct dict).
+    const cid_dict: Dict = switch (desc_obj) {
+        .array => |arr| blk: {
+            if (arr.len == 0) return;
+            break :blk (try doc.resolve(arr[0])).asDict() orelse return;
+        },
+        .dict => |d| d,
+        .stream => |s| s.dict,
+        else => return,
+    };
+
+    if (try doc.dictGet(cid_dict, "DW")) |dw| {
+        if (dw.asNumber()) |v| font.default_width = v;
+    }
+
+    const w_obj = try doc.dictGet(cid_dict, "W") orelse return;
+    if (w_obj != .array) return;
+    const w = w_obj.array;
+
+    var i: usize = 0;
+    while (i < w.len) {
+        const first = (try doc.resolve(w[i])).asInt() orelse break;
+        if (i + 1 >= w.len) break;
+        const second = try doc.resolve(w[i + 1]);
+        if (second == .array) {
+            // Form 1: `c [w_c w_{c+1} …]`
+            for (second.array, 0..) |wo, k| {
+                const wv = (try doc.resolve(wo)).asNumber() orelse continue;
+                const cid: u32 = std.math.cast(u32, first + @as(i64, @intCast(k))) orelse continue;
+                try font.widths.put(doc.arena, cid, wv);
+            }
+            i += 2;
+        } else {
+            // Form 2: `c_first c_last w`
+            if (i + 2 >= w.len) break;
+            const last = second.asInt() orelse break;
+            const wv = (try doc.resolve(w[i + 2])).asNumber() orelse 0;
+            var cid = first;
+            var guard: usize = 0;
+            while (cid <= last and guard < 70000) : (cid += 1) {
+                const c: u32 = std.math.cast(u32, cid) orelse break;
+                try font.widths.put(doc.arena, c, wv);
+                guard += 1;
+            }
+            i += 3;
+        }
+    }
 }
 
 /// Populate code→Unicode for a simple font from /Encoding (base + /Differences),
@@ -1957,9 +2015,12 @@ fn assembleLines(arena: std.mem.Allocator, frags: []Frag, out: *std.ArrayListUnm
         for (line_frags.items) |fr| {
             if (prev_end) |pe| {
                 const gap = fr.x - pe;
-                // Insert a space when the gap exceeds ~¼ em and the existing
-                // text doesn't already end in whitespace.
-                if (gap > fr.size * 0.25 and !endsWithSpace(text.items)) {
+                // Insert a space when the gap between the previous fragment's end
+                // and this one's start exceeds ~⅙ em. Within a word, glyphs are
+                // laid out contiguously (gap ≈ 0), so any clearly-positive gap is
+                // an inter-word space. ⅙ tolerates width-estimate noise without
+                // splitting words, and full word fragments clear it comfortably.
+                if (gap > fr.size * 0.17 and !endsWithSpace(text.items)) {
                     try text.append(arena, ' ');
                 }
             }
