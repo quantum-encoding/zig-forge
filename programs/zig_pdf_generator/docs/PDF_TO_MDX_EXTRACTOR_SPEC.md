@@ -37,16 +37,33 @@
 - **Type0/CID widths** (`/W`+`/DW`, Identity) — fixes glyph-positioned manuals.
 - **Form XObjects** recursed (text no longer lost) and **image extraction** — `Do` counts images;
   `--images`/`extract_images` writes JPEG/JPEG2000 to an `images/` sidecar and emits `![image](…)`
-  refs in reading order (raw/Flate images counted + `![image](#)` placeholder; PNG-wrapping is P4).
+  refs in reading order.
+
+**P4 now shipped:**
+- **LZW filter** (`LZWDecode`) — MSB-first variable-width (9→12 bit) TIFF/PDF LZW with `/EarlyChange`,
+  ClearTable/EOD, KWKWK, 4096-entry freeze + DoS output cap, then `Predictor`. Golden vector anchored
+  to the PDF 32000-1 §7.4.4.2 worked example. Recovers text from LZW-compressed content streams.
+- **PNG-wrapping of raw/Flate images** — raw/Flate sample XObjects (DeviceGray/RGB, ICCBased via `/N`)
+  wrap into valid PNGs (BE chunk lengths, CRC-32, filter-None scanlines, zlib IDAT); CMYK/Indexed/odd
+  bit depths fall back to the `#` placeholder (never a corrupt file).
+- **Embedded CMap parsing** — Type0 `/Encoding` CMap streams parse `codespacerange` (variable-width
+  code splitting) + `cidrange`/`cidchar` (code→CID) for correct width lookup and a bounded printable-
+  ASCII CID→Unicode fallback when no `/ToUnicode` is present. Predefined external CJK CMaps
+  (`UniGB-UCS2-H`, …) still fall back to Identity — they require shipping the Adobe CID tables.
+- **Rotation-aware coordinates** — page `/Rotate` (90/180/270, clockwise per §7.7.3.3) is applied to
+  fragment + link rectangles before reading-order assembly, so text/links/columns land in visual order
+  on rotated pages. No-op (zero regression) for the common `/Rotate 0` case.
 
 Validated against a 91-PDF real-world corpus (ARM TRMs incl. a 1528-page manual, OrangePi BIOS/Linux
-manuals, ACM two-column papers, scanned + Hindi/Type0 docs, a real RC4-encrypted Canon manual):
-**0 crashes**, encrypted PDFs decrypt byte-identical to plaintext, 25 unit tests, `zig-lens --strict`
-clean, whole corpus in ~2–3 s.
+manuals, ACM two-column papers, LZW-compressed ACM scans, scanned + Hindi/Type0 docs, a real
+RC4-encrypted Canon manual): **0 crashes** (text + `--images` sweeps), LZW PDFs (the Parnas paper)
+extract full text + tables, **82 raw/Flate images PNG-wrapped + 1105 JPEGs extracted across the
+corpus — all 82 PNGs decode under Apple `sips`**, encrypted PDFs decrypt byte-identical to plaintext,
+**145 unit tests**, `zig-lens --strict` clean, native + wasm + shared (FFI) all build.
 
-**P4 remainder (not implemented):** full Type0/CID decode for non-`ToUnicode` predefined CMaps,
-PNG-wrapping of raw/Flate images, LZW filter, incremental-update merge nuances, page-rotation-aware
-link/image coordinates, parallel-page performance.
+**Still deferred (true P4+ tail):** predefined external CJK CMap tables (Adobe-Japan1 etc.),
+Indexed/CMYK/Separation image color spaces, `/SMask` transparency, incremental-update merge nuances,
+parallel-page performance.
 
 ---
 
@@ -303,9 +320,10 @@ encoding tables.
    (single column), paragraphs + headings, frontmatter, CLI `extract`, no-panic.
 2. **P2 — layout:** multi-column reading order, lists, de-hyphenation, scanned
    detection (`needs_ocr`).
-3. **P3 — rich:** tables, Type0/CID fonts, links, image extraction, encryption.
-4. **P4 — polish:** Mac/Standard encodings, LZW/ASCII85/RunLength filters,
-   incremental-update merge, performance (parallel pages).
+3. **P3 — rich:** tables, Type0/CID fonts, links, image extraction, encryption. ✅ shipped
+4. **P4 — polish:** LZWDecode, PNG-wrapping raw/Flate images, embedded Type0/CID CMap parsing,
+   page-rotation-aware coordinates. ✅ shipped. *(Deferred tail: predefined external CJK CMap tables,
+   Indexed/CMYK/SMask image color spaces, incremental-update merge, parallel-page performance.)*
 
 ---
 

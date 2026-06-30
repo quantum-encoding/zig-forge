@@ -1214,6 +1214,14 @@ pub const Document = struct {
                 data = try ascii85Decode(self.arena, data);
             } else if (std.mem.eql(u8, fname, "RunLengthDecode") or std.mem.eql(u8, fname, "RL")) {
                 data = try runLengthDecode(self.arena, data);
+            } else if (std.mem.eql(u8, fname, "LZWDecode") or std.mem.eql(u8, fname, "LZW")) {
+                // /EarlyChange defaults to 1 (PDF/TIFF default) when absent.
+                const early_change: i64 = if (pd) |d|
+                    (if (d.get("EarlyChange")) |e| (e.asInt() orelse 1) else 1)
+                else
+                    1;
+                data = try lzwDecode(self.arena, data, early_change);
+                data = try self.maybePredict(data, pd);
             } else if (std.mem.eql(u8, fname, "DCTDecode") or std.mem.eql(u8, fname, "JPXDecode") or
                 std.mem.eql(u8, fname, "JBIG2Decode") or std.mem.eql(u8, fname, "CCITTFaxDecode"))
             {
@@ -1294,6 +1302,14 @@ fn winAnsiCodepoint(b: u8) u21 {
 }
 
 pub const Font = struct {
+    /// One `<lo> <hi>` entry of an embedded CMap's codespace. `nbytes` is the
+    /// byte length of the hex strings (1–4), which selects how many bytes a code
+    /// of this range consumes during string splitting.
+    pub const CodespaceRange = struct { low: u32, high: u32, nbytes: u8 };
+
+    /// Result of consuming one variable-width code from a content-stream string.
+    pub const NextCode = struct { code: u32, len: u8 };
+
     /// code → Unicode string (UTF-8). Built from /ToUnicode, then /Encoding.
     to_unicode: std.AutoHashMapUnmanaged(u32, []const u8) = .empty,
     /// code → glyph advance width, in 1/1000 em (glyph space).
@@ -1304,9 +1320,15 @@ pub const Font = struct {
     any_mapped: bool = false,
     /// Composite (Type0) fonts consume 2 bytes per code; simple fonts consume 1.
     bytes_per_code: u8 = 1,
+    /// Embedded-CMap codespace ranges (empty → Identity / fixed-step behavior).
+    codespace: []const CodespaceRange = &.{},
+    /// Embedded-CMap code → CID map (empty → CID == code, i.e. Identity).
+    cid_map: std.AutoHashMapUnmanaged(u32, u32) = .empty,
 
     /// Decode one code's Unicode into `out`; returns whether a mapping existed.
-    fn appendUnicode(self: *Font, arena: std.mem.Allocator, code: u32, out: *std.ArrayListUnmanaged(u8)) ExtractError!bool {
+    /// `code` is the original character code (key into /ToUnicode); `cid` is the
+    /// resolved CID (code itself under Identity, else via the embedded CMap).
+    fn appendUnicode(self: *Font, arena: std.mem.Allocator, code: u32, cid: u32, out: *std.ArrayListUnmanaged(u8)) ExtractError!bool {
         if (self.to_unicode.get(code)) |u| {
             try out.appendSlice(arena, u);
             return true;
@@ -1319,12 +1341,66 @@ pub const Font = struct {
                 try out.appendSlice(arena, buf[0..n]);
                 return true;
             }
+        } else if (self.cid_map.count() > 0) {
+            // Bounded, honest CID→Unicode fallback for Type0 fonts that carry an
+            // embedded non-identity CMap but NO /ToUnicode. Only surface a CID
+            // that lands in printable ASCII / Latin-1 — common in Identity-style
+            // embedded subsets where CID≈Unicode. Never fabricate beyond that:
+            // glyph-index CIDs outside this window stay unmapped (no text layer).
+            if ((cid >= 0x20 and cid <= 0x7E) or (cid >= 0xA0 and cid <= 0xFF)) {
+                var buf: [4]u8 = undefined;
+                const n = std.unicode.utf8Encode(@intCast(cid), &buf) catch return false;
+                try out.appendSlice(arena, buf[0..n]);
+                return true;
+            }
         }
         return false;
     }
 
-    fn widthOf(self: *Font, code: u32) f64 {
-        return self.widths.get(code) orelse self.default_width;
+    fn widthOf(self: *Font, cid: u32) f64 {
+        return self.widths.get(cid) orelse self.default_width;
+    }
+
+    /// Consume the next code starting at `bytes[i]` (caller guarantees i < len).
+    /// With no embedded codespace this reproduces the legacy fixed-step split
+    /// (`bytes_per_code` bytes per code). With a codespace it matches the code
+    /// against the per-byte range windows, preferring the longest matching
+    /// range, and falls back to `bytes_per_code` (capped to the remaining
+    /// bytes) then a single byte when nothing matches.
+    fn nextCode(self: *Font, bytes: []const u8, i: usize) NextCode {
+        const remaining = bytes.len - i;
+        if (self.codespace.len == 0) {
+            const step: u8 = if (self.bytes_per_code == 0) 1 else self.bytes_per_code;
+            var code: u32 = bytes[i];
+            if (step == 2 and i + 1 < bytes.len) code = (@as(u32, bytes[i]) << 8) | bytes[i + 1];
+            return .{ .code = code, .len = step };
+        }
+        var best_len: u8 = 0;
+        var best_code: u32 = 0;
+        for (self.codespace) |r| {
+            const L = r.nbytes;
+            if (L == 0 or L > 4 or L > remaining) continue;
+            var ok = true;
+            var k: u8 = 0;
+            while (k < L) : (k += 1) {
+                const shift: u5 = @intCast(8 * (L - 1 - k));
+                const lo_b: u8 = @truncate(r.low >> shift);
+                const hi_b: u8 = @truncate(r.high >> shift);
+                const b = bytes[i + k];
+                if (b < lo_b or b > hi_b) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (ok and L > best_len) {
+                best_len = L;
+                best_code = @truncate(readBE(bytes[i .. i + L]));
+            }
+        }
+        if (best_len > 0) return .{ .code = best_code, .len = best_len };
+        var step: u8 = if (self.bytes_per_code == 0) 1 else self.bytes_per_code;
+        if (step > remaining) step = 1;
+        return .{ .code = @truncate(readBE(bytes[i .. i + step])), .len = step };
     }
 };
 
@@ -1352,11 +1428,30 @@ fn buildFont(doc: *Document, font_dict: Dict) ExtractError!Font {
         // Type0: load CID widths from the descendant CIDFont's /W + /DW. Without
         // these, single-glyph-per-Tj layouts (common in hardware manuals) lose
         // every inter-word space because the default advance overshoots and the
-        // gap-based space detector never fires. Assumes Identity-H (CID = code),
-        // which covers the overwhelming majority of real Type0 fonts.
+        // gap-based space detector never fires.
         font.default_width = 1000;
+
+        // /Encoding selects the code→CID mapping. A name (Identity-H/-V or a
+        // predefined Adobe CMap) keeps the Identity fast path (CID == code, the
+        // empty-codespace branch). An embedded stream is decoded and parsed into
+        // explicit codespace + cid_map, which also enables variable-width code
+        // splitting and the CID→Unicode fallback.
+        if (try doc.dictGet(font_dict, "Encoding")) |enc| {
+            switch (enc) {
+                // Predefined CMap names: Identity-H/-V need no table (CID = code).
+                // Other names (e.g. UniGB-UCS2-H) are external Adobe resource
+                // files we do not ship; fall back to Identity rather than guess.
+                .name => {},
+                .stream => |st| {
+                    const data = doc.decodeStreamRaw(st) catch &[_]u8{};
+                    parseEncodingCMap(doc.arena, data, &font) catch {};
+                },
+                else => {},
+            }
+        }
+
         try loadType0Widths(doc, font_dict, &font);
-        if (font.to_unicode.count() > 0) font.any_mapped = true;
+        if (font.to_unicode.count() > 0 or font.cid_map.count() > 0) font.any_mapped = true;
     }
 
     return font;
@@ -1489,6 +1584,92 @@ fn parseToUnicode(arena: std.mem.Allocator, data: []const u8, font: *Font) Extra
         } else if (t.kind == .keyword and std.mem.eql(u8, t.text, "beginbfrange")) {
             try parseBfRange(arena, &lex, font);
         }
+    }
+}
+
+/// Parse an embedded /Encoding CMap stream (Type0/CID fonts). Fills the font's
+/// `codespace` (from begincodespacerange) and `cid_map` (from begincidrange /
+/// begincidchar), and derives `bytes_per_code` from the widest codespace range.
+/// Malformed input never panics: every loop is bounded and unexpected tokens
+/// end the current section.
+fn parseEncodingCMap(arena: std.mem.Allocator, data: []const u8, font: *Font) ExtractError!void {
+    var lex = Lexer.init(data, 0, arena);
+    var ranges: std.ArrayListUnmanaged(Font.CodespaceRange) = .empty;
+    while (true) {
+        const t = lex.next() catch break;
+        if (t.kind == .eof) break;
+        if (t.kind != .keyword) continue;
+        if (std.mem.eql(u8, t.text, "begincodespacerange")) {
+            try parseCodespaceRange(arena, &lex, &ranges);
+        } else if (std.mem.eql(u8, t.text, "begincidrange")) {
+            try parseCidRange(arena, &lex, font);
+        } else if (std.mem.eql(u8, t.text, "begincidchar")) {
+            try parseCidChar(arena, &lex, font);
+        }
+    }
+    font.codespace = ranges.items;
+    var maxn: u8 = 0;
+    for (ranges.items) |r| {
+        if (r.nbytes > maxn) maxn = r.nbytes;
+    }
+    if (maxn > 0) font.bytes_per_code = maxn;
+}
+
+fn parseCodespaceRange(arena: std.mem.Allocator, lex: *Lexer, ranges: *std.ArrayListUnmanaged(Font.CodespaceRange)) ExtractError!void {
+    var guard: usize = 0;
+    while (guard < 65536) : (guard += 1) {
+        const lo = lex.next() catch break;
+        if (lo.kind == .keyword and std.mem.eql(u8, lo.text, "endcodespacerange")) break;
+        if (lo.kind != .string) break;
+        const hi = lex.next() catch break;
+        if (hi.kind != .string) break;
+        if (ranges.items.len >= 65536) continue; // cap stored ranges, keep draining
+        const n = lo.text.len;
+        if (n == 0 or n > 4) continue; // u32 holds at most 4 bytes
+        try ranges.append(arena, .{
+            .low = @truncate(readBE(lo.text)),
+            .high = @truncate(readBE(hi.text)),
+            .nbytes = @intCast(n),
+        });
+    }
+}
+
+fn parseCidRange(arena: std.mem.Allocator, lex: *Lexer, font: *Font) ExtractError!void {
+    var guard: usize = 0;
+    while (guard < 65536) : (guard += 1) {
+        const lo = lex.next() catch break;
+        if (lo.kind == .keyword and std.mem.eql(u8, lo.text, "endcidrange")) break;
+        if (lo.kind != .string) break;
+        const hi = lex.next() catch break;
+        if (hi.kind != .string) break;
+        const cidt = lex.next() catch break;
+        if (cidt.kind != .integer) break; // destination CID is a base integer
+        const lov: u32 = @truncate(readBE(lo.text));
+        const hiv: u32 = @truncate(readBE(hi.text));
+        if (hiv < lov or hiv - lov > 65536) continue; // bound per-range expansion
+        if (font.cid_map.count() >= 1 << 20) continue; // global map cap
+        const base = cidt.int_val;
+        var code = lov;
+        while (true) {
+            const cid = std.math.cast(u32, base + @as(i64, @intCast(code - lov)));
+            if (cid) |c| try font.cid_map.put(arena, code, c);
+            if (code == hiv) break;
+            code += 1;
+        }
+    }
+}
+
+fn parseCidChar(arena: std.mem.Allocator, lex: *Lexer, font: *Font) ExtractError!void {
+    var guard: usize = 0;
+    while (guard < 1 << 20) : (guard += 1) {
+        const codet = lex.next() catch break;
+        if (codet.kind == .keyword and std.mem.eql(u8, codet.text, "endcidchar")) break;
+        if (codet.kind != .string) break;
+        const cidt = lex.next() catch break;
+        if (cidt.kind != .integer) break;
+        const code: u32 = @truncate(readBE(codet.text));
+        const cid = std.math.cast(u32, cidt.int_val) orelse continue;
+        try font.cid_map.put(arena, code, cid);
     }
 }
 
@@ -1736,6 +1917,94 @@ fn runLengthDecode(arena: std.mem.Allocator, data: []const u8) ExtractError![]u8
     return out.items;
 }
 
+/// LZWDecode (PDF/TIFF variant): variable-width MSB-first codes → bytes. Width
+/// runs 9→12 bits; code 256 = ClearTable (reset dict + width to 9), 257 = EOD.
+/// The dictionary seeds 0..255 as single bytes (258 is the first free code).
+/// `early_change` (the /EarlyChange parm, default 1) bumps the width one code
+/// early — width grows when next_code hits 2^width-1 rather than 2^width —
+/// matching the PDF/TIFF default encoder. Bounded at 4096 dict entries (the dict
+/// freezes on overflow until a ClearTable arrives) and 256 MiB output; malformed
+/// or truncated input returns what was decoded rather than panicking.
+fn lzwDecode(arena: std.mem.Allocator, data: []const u8, early_change: i64) ExtractError![]u8 {
+    const max_output: usize = 256 * 1024 * 1024;
+    const ec: usize = if (early_change == 0) 0 else 1;
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+
+    // Single-byte slices for codes 0..255, kept stable for the dict to point at.
+    const lits = try arena.alloc(u8, 256);
+    for (lits, 0..) |*b, i| b.* = @intCast(i);
+    var dict: [4096][]const u8 = undefined;
+    var li: usize = 0;
+    while (li < 256) : (li += 1) dict[li] = lits[li .. li + 1];
+
+    var next_code: usize = 258;
+    var width: u6 = 9;
+    var prev: ?usize = null;
+
+    var bitbuf: u32 = 0;
+    var nbits: u6 = 0;
+    var bi: usize = 0; // next input byte to consume
+
+    while (true) {
+        // Refill the bit buffer until a full code is available (MSB-first).
+        while (nbits < width) {
+            if (bi >= data.len) return out.items; // out of bits — stop cleanly
+            bitbuf = (bitbuf << 8) | data[bi];
+            bi += 1;
+            nbits += 8;
+        }
+        nbits -= width;
+        const code: usize = (bitbuf >> @as(u5, @intCast(nbits))) &
+            ((@as(u32, 1) << @as(u5, @intCast(width))) - 1);
+
+        if (code == 257) break; // EOD
+        if (code == 256) { // ClearTable — reset dictionary and width.
+            next_code = 258;
+            width = 9;
+            prev = null;
+            continue;
+        }
+
+        var entry: []const u8 = undefined;
+        if (prev == null) {
+            // First data code after start/clear must be a single-byte literal.
+            if (code >= 256) return out.items; // malformed — stop gracefully
+            entry = dict[code];
+        } else if (code < next_code) {
+            entry = dict[code];
+        } else if (code == next_code) {
+            // KWKWK: code names the entry we are about to define.
+            const p = dict[prev.?];
+            const buf = try arena.alloc(u8, p.len + 1);
+            @memcpy(buf[0..p.len], p);
+            buf[p.len] = p[0];
+            entry = buf;
+        } else {
+            return out.items; // code out of range — malformed, stop gracefully
+        }
+
+        if (out.items.len + entry.len > max_output) return ExtractError.UnsupportedFilter;
+        try out.appendSlice(arena, entry);
+
+        if (prev) |pc| {
+            // Define dict[next_code] = dict[prev] ++ entry[0]. When the table is
+            // full we freeze it (decode keeps going) until a ClearTable resets it.
+            if (next_code < 4096) {
+                const p = dict[pc];
+                const buf = try arena.alloc(u8, p.len + 1);
+                @memcpy(buf[0..p.len], p);
+                buf[p.len] = entry[0];
+                dict[next_code] = buf;
+                next_code += 1;
+                if (width < 12 and next_code + ec >= (@as(usize, 1) << @intCast(width))) width += 1;
+            }
+        }
+        prev = code;
+    }
+    return out.items;
+}
+
 const PredictorParams = struct {
     predictor: i64 = 1,
     colors: i64 = 1,
@@ -1850,6 +2119,32 @@ const Matrix = struct {
         return .{ .e = tx, .f = ty };
     }
 };
+
+/// Map a point from PDF default user space into the *displayed* (post-/Rotate)
+/// space. `w`/`h` are the unrotated MediaBox width/height. Per PDF 32000-1
+/// §7.7.3.3 the page's `/Rotate` is a **clockwise** viewing rotation, so we
+/// rotate each point the same way the viewer rotates the page. After this
+/// transform the displayed page's "up" is +y and "right" is +x, so the normal
+/// reading-order sort (y descending, then x ascending) yields visual order.
+///
+/// Deriving the 90° row: default user space puts the origin at the lower-left,
+/// +x right, +y up, with page extent w×h. Rotating the page 90° clockwise for
+/// display swaps the axes (the original top edge becomes the right edge), so the
+/// displayed extent is h×w. Track the corners:
+///   - lower-left  (0,0) → displayed upper-left  (0, w)
+///   - lower-right (w,0) → displayed lower-left   (0, 0)
+///   - upper-left  (0,h) → displayed upper-right  (h, w)
+/// The unique affine map hitting those is (x,y) → (y, w − x). Composing one more
+/// 90° clockwise turn gives 180° → (w − x, h − y), and a third gives
+/// 270° → (h − y, x).
+fn rotatePoint(x: f64, y: f64, rotate: i64, w: f64, h: f64) struct { x: f64, y: f64 } {
+    return switch (rotate) {
+        90 => .{ .x = y, .y = w - x },
+        180 => .{ .x = w - x, .y = h - y },
+        270 => .{ .x = h - y, .y = x },
+        else => .{ .x = x, .y = y }, // 0 (and any non-quadrant value) → identity
+    };
+}
 
 // =============================================================================
 // Content-stream interpreter → positioned text fragments
@@ -2107,12 +2402,20 @@ const Interp = struct {
         const ext = imageExt(st.dict);
         var ref: []const u8 = "#";
         if (ext) |e| {
+            // Codec bytes (JPEG/JPEG2000) are already a complete image file.
             const name = try std.fmt.allocPrint(self.arena, "img{d}.{s}", .{ self.image_count.*, e });
             const bytes = self.doc.decodeStreamRaw(st) catch &[_]u8{};
             if (bytes.len > 0) {
                 try self.images.append(self.arena, .{ .name = name, .bytes = bytes });
                 ref = try std.fmt.allocPrint(self.arena, "images/{s}", .{name});
             }
+        } else if (self.pngFromImage(st)) |png| {
+            // Raw / Flate samples → wrap as PNG. On any shape PNG can't represent
+            // (CMYK, Indexed, odd bit depth, missing dims) pngFromImage returns
+            // null and the `#` placeholder below is kept.
+            const name = try std.fmt.allocPrint(self.arena, "img{d}.png", .{self.image_count.*});
+            try self.images.append(self.arena, .{ .name = name, .bytes = png });
+            ref = try std.fmt.allocPrint(self.arena, "images/{s}", .{name});
         }
         const marker = try std.fmt.allocPrint(self.arena, "![image]({s})", .{ref});
         try self.frags.append(self.arena, .{
@@ -2122,6 +2425,25 @@ const Interp = struct {
             .size = 8, // small → never treated as a heading
             .text = marker,
         });
+    }
+
+    /// Try to wrap a raw/Flate image XObject's decoded samples as a PNG. Returns
+    /// null (→ `#` placeholder) on any unsupported colour space, bit depth,
+    /// component count, missing dimensions, or decode failure. Never panics.
+    fn pngFromImage(self: *Interp, st: *Stream) ?[]u8 {
+        const w_obj = (self.doc.dictGet(st.dict, "Width") catch return null) orelse return null;
+        const h_obj = (self.doc.dictGet(st.dict, "Height") catch return null) orelse return null;
+        const width = std.math.cast(u32, w_obj.asInt() orelse return null) orelse return null;
+        const height = std.math.cast(u32, h_obj.asInt() orelse return null) orelse return null;
+
+        const bpc_obj = self.doc.dictGet(st.dict, "BitsPerComponent") catch return null;
+        const bpc: u32 = if (bpc_obj) |b| (std.math.cast(u32, b.asInt() orelse 8) orelse 8) else 8;
+
+        const cs_obj = (self.doc.dictGet(st.dict, "ColorSpace") catch return null) orelse return null;
+        const ncomp = colorSpaceNComp(self.doc, cs_obj) orelse return null;
+
+        const samples = self.doc.decodeStreamRaw(st) catch return null;
+        return pngWrap(self.arena, width, height, bpc, ncomp, samples) catch null;
     }
 
     fn applyTd(self: *Interp, tx: f64, ty: f64) void {
@@ -2164,17 +2486,22 @@ const Interp = struct {
         const size = @max(@abs(@sqrt(trm_start.c * trm_start.c + trm_start.d * trm_start.d)), 0.01);
 
         var text: std.ArrayListUnmanaged(u8) = .empty;
-        const step: usize = if (font) |fp| fp.bytes_per_code else 1;
 
         var i: usize = 0;
-        while (i < bytes.len) : (i += step) {
-            var code: u32 = bytes[i];
-            if (step == 2 and i + 1 < bytes.len) code = (@as(u32, bytes[i]) << 8) | bytes[i + 1];
+        while (i < bytes.len) {
+            // Variable-width split: nextCode honors an embedded codespace and
+            // otherwise reproduces the legacy fixed `bytes_per_code` step.
+            const nc: Font.NextCode = if (font) |fp| fp.nextCode(bytes, i) else .{ .code = bytes[i], .len = 1 };
+            const code = nc.code;
+            const len: usize = if (nc.len == 0) 1 else nc.len;
 
             var w0: f64 = 0.5;
             if (font) |fp| {
-                _ = fp.appendUnicode(self.arena, code, &text) catch {};
-                w0 = fp.widthOf(code) / 1000.0;
+                // Resolve CID through the embedded CMap (identity when empty),
+                // then key widths and the CID→Unicode fallback off the CID.
+                const cid = fp.cid_map.get(code) orelse code;
+                _ = fp.appendUnicode(self.arena, code, cid, &text) catch {};
+                w0 = fp.widthOf(cid) / 1000.0;
             } else {
                 // No font resource — best-effort WinAnsi for ASCII.
                 const cp = winAnsiCodepoint(@truncate(code));
@@ -2185,10 +2512,12 @@ const Interp = struct {
                 }
             }
 
-            const is_space = (step == 1 and code == 32);
+            const is_space = (len == 1 and code == 32);
             const word = if (is_space) self.ts.word_spacing else 0;
             const tx = (w0 * self.ts.tf_size + self.ts.char_spacing + word) * self.ts.h_scale;
             self.ts.tm = Matrix.translation(tx, 0).mul(self.ts.tm);
+
+            i += len;
         }
 
         const end_x = self.renderMatrix().e;
@@ -2206,8 +2535,9 @@ const Interp = struct {
 };
 
 /// Returns the file extension for an image stream whose encoding can be written
-/// out directly (the codec's bytes are a complete image file), or null when it
-/// would need re-encoding (raw/Flate samples → PNG wrapping is a later phase).
+/// out directly (the codec's bytes are a complete image file), or null. A null
+/// return is not "give up": raw/Flate sample streams are PNG-wrapped by
+/// `Interp.pngFromImage`, which has the document handle needed to decode them.
 fn imageExt(dict: Dict) ?[]const u8 {
     const f = dict.get("Filter") orelse return null;
     const last: []const u8 = switch (f) {
@@ -2222,6 +2552,144 @@ fn imageExt(dict: Dict) ?[]const u8 {
     if (std.mem.eql(u8, last, "DCTDecode")) return "jpg";
     if (std.mem.eql(u8, last, "JPXDecode")) return "jp2";
     return null;
+}
+
+/// Component count for a PDF device colour-space name, or null if it isn't one
+/// of the simple device families.
+fn deviceNComp(n: []const u8) ?u32 {
+    if (std.mem.eql(u8, n, "DeviceGray") or std.mem.eql(u8, n, "CalGray") or std.mem.eql(u8, n, "G")) return 1;
+    if (std.mem.eql(u8, n, "DeviceRGB") or std.mem.eql(u8, n, "CalRGB") or std.mem.eql(u8, n, "RGB")) return 3;
+    if (std.mem.eql(u8, n, "DeviceCMYK") or std.mem.eql(u8, n, "CMYK")) return 4;
+    return null;
+}
+
+/// Resolve an image /ColorSpace object to its component count. Handles name
+/// spaces (Device*/Cal*) and `[/ICCBased <stream>]` (via the stream's /N).
+/// Indexed/Separation/DeviceN/Lab/Pattern are not v1-supported → null. CMYK
+/// resolves to 4 so `pngWrap` is the single point that rejects it.
+fn colorSpaceNComp(doc: *Document, cs: Obj) ?u32 {
+    const r = doc.resolve(cs) catch return null;
+    switch (r) {
+        .name => |n| return deviceNComp(n),
+        .array => |arr| {
+            if (arr.len == 0) return null;
+            const head = doc.resolve(arr[0]) catch return null;
+            if (head != .name) return null;
+            const fam = head.name;
+            if (std.mem.eql(u8, fam, "ICCBased")) {
+                if (arr.len < 2) return null;
+                const stm = doc.resolve(arr[1]) catch return null;
+                if (stm != .stream) return null;
+                const nobj = (doc.dictGet(stm.stream.dict, "N") catch return null) orelse return null;
+                const n = nobj.asInt() orelse return null;
+                if (n == 1 or n == 3 or n == 4) return @intCast(n);
+                return null;
+            }
+            return deviceNComp(fam);
+        },
+        else => return null,
+    }
+}
+
+/// Wrap raw image samples in a minimal, valid PNG byte stream: 8-byte signature,
+/// IHDR, a single zlib-compressed IDAT (filter-None scanlines), and IEND, each
+/// chunk framed with a big-endian length and a CRC-32 over type+data.
+///
+/// Supported: 1-component grayscale (color type 0) and 3-component truecolor
+/// (color type 2). 4-component (CMYK) cannot be represented in PNG → error, so
+/// the caller emits the `#` placeholder rather than a corrupt file. Bit depths
+/// are restricted to PNG's set (1/2/4/8/16; truecolor only 8/16). Short sample
+/// buffers are zero-padded; over-long ones are truncated — never out-of-bounds.
+fn pngWrap(
+    arena: std.mem.Allocator,
+    width: u32,
+    height: u32,
+    bits_per_component: u32,
+    ncomp: u32,
+    samples: []const u8,
+) ExtractError![]u8 {
+    const color_type: u8 = switch (ncomp) {
+        1 => 0, // grayscale
+        3 => 2, // truecolor
+        else => return ExtractError.UnsupportedFilter, // CMYK / unsupported
+    };
+    const bit_depth: u8 = switch (bits_per_component) {
+        1, 2, 4, 8, 16 => @intCast(bits_per_component),
+        else => return ExtractError.UnsupportedFilter,
+    };
+    // PNG truecolor only permits 8- or 16-bit channels.
+    if (color_type == 2 and bit_depth != 8 and bit_depth != 16) return ExtractError.UnsupportedFilter;
+    if (width == 0 or height == 0) return ExtractError.MalformedObject;
+    // Bound dimensions so the row/raster arithmetic can't overflow.
+    if (width > (1 << 24) or height > (1 << 24)) return ExtractError.MalformedObject;
+
+    // Bytes per scanline, rounded up to a byte boundary.
+    const bits_per_row: u64 = @as(u64, width) * ncomp * bit_depth;
+    const row_bytes: usize = @intCast((bits_per_row + 7) / 8);
+
+    // Filtered raster: each row is a 0x00 filter byte (None) + row_bytes samples.
+    const raster = try arena.alloc(u8, (row_bytes + 1) * height);
+    @memset(raster, 0);
+    var row: usize = 0;
+    while (row < height) : (row += 1) {
+        const dst = raster[row * (row_bytes + 1) ..];
+        dst[0] = 0; // filter type: None
+        const src_off = row * row_bytes;
+        if (src_off < samples.len) {
+            const avail = @min(row_bytes, samples.len - src_off);
+            @memcpy(dst[1 .. 1 + avail], samples[src_off .. src_off + avail]);
+        }
+    }
+
+    // zlib-compress the raster for IDAT. Deflate output can't exceed the input
+    // by more than the zlib header + stored-block framing; the slack below is a
+    // safe ceiling. A too-small buffer would only fail the compress (→ caller
+    // placeholder), never corrupt — but size it so real images don't trip it.
+    const out_buf = try arena.alloc(u8, raster.len + raster.len / 512 + 512);
+    var cw: std.Io.Writer = .fixed(out_buf);
+    var window: [flate.max_window_len]u8 = undefined;
+    var comp = flate.Compress.init(&cw, &window, .zlib, .level_6) catch return ExtractError.OutOfMemory;
+    comp.writer.writeAll(raster) catch return ExtractError.UnsupportedFilter;
+    comp.finish() catch return ExtractError.UnsupportedFilter;
+    const idat = cw.buffered();
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    try out.appendSlice(arena, &[_]u8{ 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A });
+
+    var ihdr: [13]u8 = undefined;
+    std.mem.writeInt(u32, ihdr[0..4], width, .big);
+    std.mem.writeInt(u32, ihdr[4..8], height, .big);
+    ihdr[8] = bit_depth;
+    ihdr[9] = color_type;
+    ihdr[10] = 0; // compression: deflate
+    ihdr[11] = 0; // filter method: adaptive
+    ihdr[12] = 0; // interlace: none
+    try pngChunk(arena, &out, "IHDR", &ihdr);
+    try pngChunk(arena, &out, "IDAT", idat);
+    try pngChunk(arena, &out, "IEND", &[_]u8{});
+    return out.items;
+}
+
+/// Append one PNG chunk: 4-byte big-endian length, 4-byte type, data, then a
+/// 4-byte big-endian CRC-32 over (type ++ data).
+fn pngChunk(
+    arena: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    typ: []const u8,
+    data: []const u8,
+) ExtractError!void {
+    var len_be: [4]u8 = undefined;
+    std.mem.writeInt(u32, &len_be, @intCast(data.len), .big);
+    try out.appendSlice(arena, &len_be);
+    try out.appendSlice(arena, typ);
+    try out.appendSlice(arena, data);
+
+    var crc = std.hash.Crc32.init();
+    crc.update(typ);
+    crc.update(data);
+    var crc_be: [4]u8 = undefined;
+    std.mem.writeInt(u32, &crc_be, crc.final(), .big);
+    try out.appendSlice(arena, &crc_be);
 }
 
 fn matFromArgs(a: []const Obj) Matrix {
@@ -3169,8 +3637,52 @@ pub fn extractToMdx(gpa: std.mem.Allocator, pdf: []const u8, opts: ExtractOption
         };
         interp.run(page.content) catch {};
 
+        // Apply the page's /Rotate so reading order + column detection run in the
+        // *displayed* coordinate frame. The content interpreter produced frags
+        // (and links arrived) in default user space, where "up" is +y and
+        // "right" is +x. For /Rotate 90/180/270 the viewer rotates the page, so
+        // we rotate every fragment and link rectangle into display space first;
+        // for 90/270 this also swaps the effective page width/height, which the
+        // extent-derived column detector then picks up automatically. No-op for
+        // the overwhelmingly common /Rotate 0 case.
+        var links_for_page = page.links;
+        if (page.geom.rotate != 0) {
+            const rot = page.geom.rotate;
+            const w = page.geom.media_w;
+            const h = page.geom.media_h;
+            for (frags.items) |*fr| {
+                // Rotate both endpoints; rotation can flip which is larger, so
+                // re-derive x-min/x-max to keep end_x >= x. Use the start
+                // point's rotated y as the fragment baseline.
+                const p0 = rotatePoint(fr.x, fr.y, rot, w, h);
+                const p1 = rotatePoint(fr.end_x, fr.y, rot, w, h);
+                fr.x = @min(p0.x, p1.x);
+                fr.end_x = @max(p0.x, p1.x);
+                fr.y = p0.y;
+            }
+            if (page.links.len > 0) {
+                const rl = try arena.alloc(LinkAnnot, page.links.len);
+                for (page.links, 0..) |lk, li| {
+                    // Rotate all four corners, then re-derive min/max so
+                    // wrapLink's overlap test still sees x0<=x1, y0<=y1.
+                    const c0 = rotatePoint(lk.x0, lk.y0, rot, w, h);
+                    const c1 = rotatePoint(lk.x1, lk.y0, rot, w, h);
+                    const c2 = rotatePoint(lk.x0, lk.y1, rot, w, h);
+                    const c3 = rotatePoint(lk.x1, lk.y1, rot, w, h);
+                    rl[li] = .{
+                        .x0 = @min(@min(c0.x, c1.x), @min(c2.x, c3.x)),
+                        .x1 = @max(@max(c0.x, c1.x), @max(c2.x, c3.x)),
+                        .y0 = @min(@min(c0.y, c1.y), @min(c2.y, c3.y)),
+                        .y1 = @max(@max(c0.y, c1.y), @max(c2.y, c3.y)),
+                        .uri = lk.uri,
+                    };
+                }
+                links_for_page = rl;
+            }
+        }
+
         var page_lines: std.ArrayListUnmanaged(Line) = .empty;
-        assemblePage(arena, frags.items, page.links, &page_lines) catch {};
+        assemblePage(arena, frags.items, links_for_page, &page_lines) catch {};
         try all_lines.appendSlice(arena, page_lines.items);
     }
 
@@ -3210,6 +3722,114 @@ pub fn extractToMdx(gpa: std.mem.Allocator, pdf: []const u8, opts: ExtractOption
 
 const testing = std.testing;
 
+test "rotatePoint: /Rotate golden vectors" {
+    // Unrotated MediaBox 600×800, a known point near the top-left of the page.
+    const w: f64 = 600;
+    const h: f64 = 800;
+    const x: f64 = 100;
+    const y: f64 = 700;
+
+    const r0 = rotatePoint(x, y, 0, w, h); // identity
+    try testing.expectEqual(@as(f64, 100), r0.x);
+    try testing.expectEqual(@as(f64, 700), r0.y);
+
+    const r90 = rotatePoint(x, y, 90, w, h); // (y, w-x) = (700, 500)
+    try testing.expectEqual(@as(f64, 700), r90.x);
+    try testing.expectEqual(@as(f64, 500), r90.y);
+
+    const r180 = rotatePoint(x, y, 180, w, h); // (w-x, h-y) = (500, 100)
+    try testing.expectEqual(@as(f64, 500), r180.x);
+    try testing.expectEqual(@as(f64, 100), r180.y);
+
+    const r270 = rotatePoint(x, y, 270, w, h); // (h-y, x) = (100, 100)
+    try testing.expectEqual(@as(f64, 100), r270.x);
+    try testing.expectEqual(@as(f64, 100), r270.y);
+}
+
+test "rotatePoint + assemblePage: /Rotate 90 fixes reading order" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const w: f64 = 600;
+    const h: f64 = 800;
+
+    // Two visual lines, chosen so the UNROTATED sort (y descending) would emit
+    // SECOND (content y=700) before FIRST (content y=100) — the wrong order.
+    // After the /Rotate 90 transform: FIRST's displayed y = w - x = 600-100 =
+    // 500, SECOND's = 600-400 = 200, so FIRST (higher displayed y) reads first.
+    var frags = [_]Frag{
+        .{ .x = 100, .y = 100, .end_x = 160, .size = 10, .text = "FIRST" },
+        .{ .x = 400, .y = 700, .end_x = 460, .size = 10, .text = "SECOND" },
+    };
+
+    for (&frags) |*fr| {
+        const p0 = rotatePoint(fr.x, fr.y, 90, w, h);
+        const p1 = rotatePoint(fr.end_x, fr.y, 90, w, h);
+        fr.x = @min(p0.x, p1.x);
+        fr.end_x = @max(p0.x, p1.x);
+        fr.y = p0.y;
+    }
+
+    var lines: std.ArrayListUnmanaged(Line) = .empty;
+    try assemblePage(a, &frags, &.{}, &lines);
+
+    try testing.expectEqual(@as(usize, 2), lines.items.len);
+    try testing.expect(std.mem.indexOf(u8, lines.items[0].text, "FIRST") != null);
+    try testing.expect(std.mem.indexOf(u8, lines.items[1].text, "SECOND") != null);
+}
+
+test "LinkAnnot rotation re-min/maxes corners (/Rotate 90)" {
+    const w: f64 = 600;
+    const h: f64 = 800;
+    const lk = LinkAnnot{ .x0 = 100, .y0 = 200, .x1 = 300, .y1 = 250, .uri = "https://example.com" };
+
+    // Rotate all four corners (90°: x' = y, y' = w - x).
+    const c0 = rotatePoint(lk.x0, lk.y0, 90, w, h); // (200, 500)
+    const c1 = rotatePoint(lk.x1, lk.y0, 90, w, h); // (200, 300)
+    const c2 = rotatePoint(lk.x0, lk.y1, 90, w, h); // (250, 500)
+    const c3 = rotatePoint(lk.x1, lk.y1, 90, w, h); // (250, 300)
+
+    const nx0 = @min(@min(c0.x, c1.x), @min(c2.x, c3.x));
+    const nx1 = @max(@max(c0.x, c1.x), @max(c2.x, c3.x));
+    const ny0 = @min(@min(c0.y, c1.y), @min(c2.y, c3.y));
+    const ny1 = @max(@max(c0.y, c1.y), @max(c2.y, c3.y));
+
+    try testing.expect(nx0 <= nx1);
+    try testing.expect(ny0 <= ny1);
+    // x-range from y ∈ [200,250]; y-range from w-x where x ∈ [100,300] → [300,500].
+    try testing.expectEqual(@as(f64, 200), nx0);
+    try testing.expectEqual(@as(f64, 250), nx1);
+    try testing.expectEqual(@as(f64, 300), ny0);
+    try testing.expectEqual(@as(f64, 500), ny1);
+}
+
+test "rotate == 0 leaves fragments untouched" {
+    const w: f64 = 600;
+    const h: f64 = 800;
+    const rotate: i64 = 0;
+    var frags = [_]Frag{
+        .{ .x = 10, .y = 20, .end_x = 50, .size = 12, .text = "A" },
+        .{ .x = 70, .y = 20, .end_x = 90, .size = 12, .text = "B" },
+    };
+    const orig = frags;
+    // Mirror the production guard: with rotate == 0 the transform never runs.
+    if (rotate != 0) {
+        for (&frags) |*fr| {
+            const p0 = rotatePoint(fr.x, fr.y, rotate, w, h);
+            const p1 = rotatePoint(fr.end_x, fr.y, rotate, w, h);
+            fr.x = @min(p0.x, p1.x);
+            fr.end_x = @max(p0.x, p1.x);
+            fr.y = p0.y;
+        }
+    }
+    for (frags, orig) |f, o| {
+        try testing.expectEqual(o.x, f.x);
+        try testing.expectEqual(o.y, f.y);
+        try testing.expectEqual(o.end_x, f.end_x);
+    }
+}
+
 test "ascii hex decode" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -3244,6 +3864,102 @@ test "inflate round-trips zlib" {
 
     const out = try inflate(a, compressed);
     try testing.expectEqualStrings(original, out);
+}
+
+/// Test helper: locate a PNG chunk's data slice by 4-byte type, walking the
+/// length/type/data/CRC framing from just past the signature.
+fn findPngChunk(png: []const u8, typ: []const u8) ?[]const u8 {
+    var i: usize = 8; // skip the 8-byte signature
+    while (i + 8 <= png.len) {
+        const len: usize = std.mem.readInt(u32, png[i..][0..4], .big);
+        const data_start = i + 8;
+        if (data_start + len + 4 > png.len) return null;
+        if (std.mem.eql(u8, png[i + 4 .. i + 8], typ)) return png[data_start .. data_start + len];
+        i = data_start + len + 4;
+    }
+    return null;
+}
+
+test "pngWrap: 2x2 DeviceRGB golden vector" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    // 2×2 RGB, 3 bytes/pixel, two 6-byte rows.
+    const samples = [_]u8{
+        0xFF, 0x00, 0x00, 0x00, 0xFF, 0x00, // red,  green
+        0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, // blue, white
+    };
+    const png = try pngWrap(a, 2, 2, 8, 3, &samples);
+
+    // Signature.
+    try testing.expect(png.len > 8);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A }, png[0..8]);
+
+    // Required chunks present.
+    const ihdr = findPngChunk(png, "IHDR") orelse return error.TestUnexpectedResult;
+    try testing.expect(findPngChunk(png, "IDAT") != null);
+    try testing.expect(findPngChunk(png, "IEND") != null);
+
+    // IHDR width / height / bit-depth / colour-type.
+    try testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, ihdr[0..4], .big));
+    try testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, ihdr[4..8], .big));
+    try testing.expectEqual(@as(u8, 8), ihdr[8]);
+    try testing.expectEqual(@as(u8, 2), ihdr[9]); // truecolor
+
+    // IDAT decompresses back to the filtered raster (0x00 filter byte per row).
+    const idat = findPngChunk(png, "IDAT").?;
+    const raw = try inflate(a, idat);
+    const expected = [_]u8{
+        0x00, 0xFF, 0x00, 0x00, 0x00, 0xFF, 0x00,
+        0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF,
+    };
+    try testing.expectEqualSlices(u8, &expected, raw);
+}
+
+test "pngWrap: grayscale 1-component" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const samples = [_]u8{ 0x10, 0x20, 0x30, 0x40 }; // 2×2 gray
+    const png = try pngWrap(a, 2, 2, 8, 1, &samples);
+
+    const ihdr = findPngChunk(png, "IHDR") orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(u8, 0), ihdr[9]); // grayscale
+
+    const idat = findPngChunk(png, "IDAT") orelse return error.TestUnexpectedResult;
+    const raw = try inflate(a, idat);
+    const expected = [_]u8{ 0x00, 0x10, 0x20, 0x00, 0x30, 0x40 };
+    try testing.expectEqualSlices(u8, &expected, raw);
+}
+
+test "pngWrap: CMYK (4 components) returns error" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const samples = [_]u8{0} ** 16; // 2×2 CMYK
+    try testing.expectError(ExtractError.UnsupportedFilter, pngWrap(a, 2, 2, 8, 4, &samples));
+}
+
+test "pngWrap: truncated samples pad without crashing" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    // Claim 2×2 RGB (needs 12 bytes) but supply only 5 — must zero-pad, not OOB.
+    const samples = [_]u8{ 0xAA, 0xBB, 0xCC, 0xDD, 0xEE };
+    const png = try pngWrap(a, 2, 2, 8, 3, &samples);
+
+    const idat = findPngChunk(png, "IDAT") orelse return error.TestUnexpectedResult;
+    const raw = try inflate(a, idat);
+    const expected = [_]u8{
+        0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+    try testing.expectEqualSlices(u8, &expected, raw);
+    try testing.expect(findPngChunk(png, "IEND") != null);
 }
 
 test "document: classic xref + catalog + page tree" {
@@ -3282,11 +3998,161 @@ test "ToUnicode bfchar + bfrange" {
     try parseToUnicode(a, cmap, &font);
 
     var out: std.ArrayListUnmanaged(u8) = .empty;
-    _ = try font.appendUnicode(a, 0x41, &out); // A
-    _ = try font.appendUnicode(a, 0x42, &out); // B
-    _ = try font.appendUnicode(a, 0x43, &out); // C
-    _ = try font.appendUnicode(a, 0x44, &out); // D
+    _ = try font.appendUnicode(a, 0x41, 0x41, &out); // A
+    _ = try font.appendUnicode(a, 0x42, 0x42, &out); // B
+    _ = try font.appendUnicode(a, 0x43, 0x43, &out); // C
+    _ = try font.appendUnicode(a, 0x44, 0x44, &out); // D
     try testing.expectEqualStrings("ABCD", out.items);
+}
+
+test "embedded CMap: codespacerange + cidrange parse (golden)" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    // Minimal embedded CID CMap: one full 2-byte codespace and one cidrange that
+    // maps codes 0x0041..0x005A → CID 1..26 (A..Z), plus one explicit cidchar.
+    const cmap =
+        "/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n" ++
+        "1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n" ++
+        "1 begincidrange\n<0041> <005A> 1\nendcidrange\n" ++
+        "1 begincidchar\n<0061> 100\nendcidchar\n" ++
+        "endcmap end end";
+    var font = Font{};
+    try parseEncodingCMap(a, cmap, &font);
+
+    // Codespace: exactly one range, 2 bytes wide, low 0x0000 high 0xFFFF.
+    try testing.expectEqual(@as(usize, 1), font.codespace.len);
+    try testing.expectEqual(@as(u32, 0x0000), font.codespace[0].low);
+    try testing.expectEqual(@as(u32, 0xFFFF), font.codespace[0].high);
+    try testing.expectEqual(@as(u8, 2), font.codespace[0].nbytes);
+    try testing.expectEqual(@as(u8, 2), font.bytes_per_code);
+
+    // cidrange: 26 codes (A..Z) + 1 cidchar = 27 entries, hand-verified samples.
+    try testing.expectEqual(@as(usize, 27), font.cid_map.count());
+    try testing.expectEqual(@as(u32, 1), font.cid_map.get(0x0041).?); // A → 1
+    try testing.expectEqual(@as(u32, 26), font.cid_map.get(0x005A).?); // Z → 26
+    try testing.expectEqual(@as(u32, 14), font.cid_map.get(0x004E).?); // N → 14
+    try testing.expectEqual(@as(u32, 100), font.cid_map.get(0x0061).?); // cidchar a → 100
+    try testing.expect(font.cid_map.get(0x0040) == null); // below range, unmapped
+    try testing.expect(font.cid_map.get(0x005B) == null); // above range, unmapped
+}
+
+test "embedded CMap: mixed-width codespace splits codes correctly" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    // 1-byte range <00>..<80> AND 2-byte range <8140>..<FFFF> (Shift-JIS-shaped).
+    const cmap =
+        "begincmap\n" ++
+        "2 begincodespacerange\n<00> <80>\n<8140> <FFFF>\nendcodespacerange\n" ++
+        "endcmap";
+    var font = Font{};
+    try parseEncodingCMap(a, cmap, &font);
+    try testing.expectEqual(@as(usize, 2), font.codespace.len);
+    try testing.expectEqual(@as(u8, 2), font.bytes_per_code); // widest range
+
+    // Crafted bytes: 0x41 (1B) | 0x81 0x40 (2B) | 0x7F (1B) | 0x82 0xFF (2B).
+    const bytes = [_]u8{ 0x41, 0x81, 0x40, 0x7F, 0x82, 0xFF };
+    const expect = [_]struct { code: u32, len: u8 }{
+        .{ .code = 0x41, .len = 1 },
+        .{ .code = 0x8140, .len = 2 },
+        .{ .code = 0x7F, .len = 1 },
+        .{ .code = 0x82FF, .len = 2 },
+    };
+    var i: usize = 0;
+    var n: usize = 0;
+    while (i < bytes.len) : (n += 1) {
+        const nc = font.nextCode(&bytes, i);
+        try testing.expectEqual(expect[n].code, nc.code);
+        try testing.expectEqual(expect[n].len, nc.len);
+        i += nc.len;
+    }
+    try testing.expectEqual(@as(usize, 4), n);
+}
+
+test "empty codespace reproduces fixed-step splitting (regression)" {
+    // 2-byte Identity case: nextCode must match the legacy `step = 2` split,
+    // including the trailing-odd-byte advance, byte-for-byte.
+    {
+        var font = Font{ .bytes_per_code = 2 };
+        const bytes = [_]u8{ 0x00, 0x41, 0x12, 0x34, 0x05 }; // last byte is odd
+        var i: usize = 0;
+        var codes: [8]u32 = undefined;
+        var n: usize = 0;
+        while (i < bytes.len) {
+            const nc = font.nextCode(&bytes, i);
+            codes[n] = nc.code;
+            n += 1;
+            i += nc.len;
+        }
+        // Legacy: 0x0041, 0x1234, then trailing 0x05 (single byte, step advances 2).
+        try testing.expectEqual(@as(usize, 3), n);
+        try testing.expectEqual(@as(u32, 0x0041), codes[0]);
+        try testing.expectEqual(@as(u32, 0x1234), codes[1]);
+        try testing.expectEqual(@as(u32, 0x05), codes[2]);
+    }
+    // 1-byte simple case: one code per byte.
+    {
+        var font = Font{ .bytes_per_code = 1 };
+        const bytes = [_]u8{ 0x48, 0x69, 0x21 }; // "Hi!"
+        var i: usize = 0;
+        var codes: [4]u32 = undefined;
+        var n: usize = 0;
+        while (i < bytes.len) {
+            const nc = font.nextCode(&bytes, i);
+            try testing.expectEqual(@as(u8, 1), nc.len);
+            codes[n] = nc.code;
+            n += 1;
+            i += nc.len;
+        }
+        try testing.expectEqual(@as(usize, 3), n);
+        try testing.expectEqual(@as(u32, 0x48), codes[0]);
+        try testing.expectEqual(@as(u32, 0x69), codes[1]);
+        try testing.expectEqual(@as(u32, 0x21), codes[2]);
+    }
+}
+
+test "embedded CMap: CID->Unicode printable fallback, no ToUnicode" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    // Type0 font, no /ToUnicode, embedded cidrange mapping code 0x0001 → CID 0x41
+    // ('A', printable) and code 0x0002 → CID 0x2000 (non-printable glyph index).
+    const cmap =
+        "begincmap\n" ++
+        "1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n" ++
+        "1 begincidchar\n<0001> 65\nendcidchar\n" ++
+        "1 begincidchar\n<0002> 8192\nendcidchar\n" ++
+        "endcmap";
+    var font = Font{ .bytes_per_code = 2 };
+    try parseEncodingCMap(a, cmap, &font);
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    // Printable CID 0x41 → surfaced as "A".
+    const m1 = try font.appendUnicode(a, 0x0001, font.cid_map.get(0x0001).?, &out);
+    try testing.expect(m1);
+    try testing.expectEqualStrings("A", out.items);
+    // Non-printable CID 0x2000 → left unmapped (no fabricated text).
+    out.clearRetainingCapacity();
+    const m2 = try font.appendUnicode(a, 0x0002, font.cid_map.get(0x0002).?, &out);
+    try testing.expect(!m2);
+    try testing.expectEqual(@as(usize, 0), out.items.len);
+}
+
+test "Identity-H Type0 without CMap surfaces no fabricated unicode" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    // No codespace, no cid_map, no ToUnicode — code is a glyph index, must NOT
+    // be surfaced as if it were Unicode.
+    var font = Font{ .bytes_per_code = 2 };
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    const mapped = try font.appendUnicode(a, 0x0041, 0x0041, &out);
+    try testing.expect(!mapped);
+    try testing.expectEqual(@as(usize, 0), out.items.len);
 }
 
 test "WinAnsi fallback decodes ASCII + specials" {
@@ -3295,9 +4161,9 @@ test "WinAnsi fallback decodes ASCII + specials" {
     const a = arena_state.allocator();
     var font = Font{};
     var out: std.ArrayListUnmanaged(u8) = .empty;
-    _ = try font.appendUnicode(a, 'H', &out);
-    _ = try font.appendUnicode(a, 'i', &out);
-    _ = try font.appendUnicode(a, 0x97, &out); // em dash —
+    _ = try font.appendUnicode(a, 'H', 'H', &out);
+    _ = try font.appendUnicode(a, 'i', 'i', &out);
+    _ = try font.appendUnicode(a, 0x97, 0x97, &out); // em dash —
     try testing.expectEqualStrings("Hi\xe2\x80\x94", out.items);
 }
 
@@ -3612,4 +4478,161 @@ test "indirect object wrapper unwrapped" {
     const obj = try p.parseObject();
     const d = obj.asDict() orelse return error.TestUnexpectedResult;
     try testing.expectEqual(@as(i64, 1), d.get("A").?.integer);
+}
+
+/// MSB-first variable-width bit packer for the LZW tests below.
+const LzwBitPacker = struct {
+    out: *std.ArrayListUnmanaged(u8),
+    a: std.mem.Allocator,
+    bitbuf: u32 = 0,
+    nbits: u6 = 0,
+
+    fn emit(self: *LzwBitPacker, code: u16, width: u6) !void {
+        self.bitbuf = (self.bitbuf << @as(u5, @intCast(width))) | code;
+        self.nbits += width;
+        while (self.nbits >= 8) {
+            self.nbits -= 8;
+            try self.out.append(self.a, @intCast((self.bitbuf >> @as(u5, @intCast(self.nbits))) & 0xFF));
+        }
+    }
+
+    fn flush(self: *LzwBitPacker) !void {
+        if (self.nbits > 0) {
+            try self.out.append(self.a, @intCast((self.bitbuf << @as(u5, @intCast(8 - self.nbits))) & 0xFF));
+            self.nbits = 0;
+        }
+    }
+};
+
+/// Reference PDF/TIFF LZW encoder (test-only) — mirrors `lzwDecode`'s width and
+/// EarlyChange rules so the two can be round-tripped against each other.
+fn lzwEncodeForTest(a: std.mem.Allocator, input: []const u8, early_change: i64) ![]u8 {
+    const ec: usize = if (early_change == 0) 0 else 1;
+    var map = std.StringHashMap(u16).init(a);
+    defer map.deinit();
+    var s: usize = 0;
+    while (s < 256) : (s += 1) {
+        const k = try a.dupe(u8, &[_]u8{@intCast(s)});
+        try map.put(k, @intCast(s));
+    }
+    var next_code: usize = 258;
+    var width: u6 = 9;
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var bp = LzwBitPacker{ .out = &out, .a = a };
+    try bp.emit(256, width); // leading ClearTable, exactly as a real PDF stream
+
+    var w: []const u8 = "";
+    for (input) |c| {
+        const wc = try std.mem.concat(a, u8, &.{ w, &[_]u8{c} });
+        if (map.get(wc) != null) {
+            w = wc;
+        } else {
+            try bp.emit(map.get(w).?, width);
+            if (next_code < 4096) {
+                try map.put(wc, @intCast(next_code));
+                next_code += 1;
+                // The decoder defines its entries one code later (it needs the
+                // next code's first byte), so the encoder — running one entry
+                // ahead — must bump the width one code later in its own count.
+                if (width < 12 and next_code + ec >= (@as(usize, 1) << @intCast(width)) + 1) width += 1;
+            }
+            w = try a.dupe(u8, &[_]u8{c});
+        }
+    }
+    if (w.len > 0) try bp.emit(map.get(w).?, width);
+    try bp.emit(257, width); // EOD
+    try bp.flush();
+    return out.items;
+}
+
+test "lzw decode: PDF spec golden vector (-----A---B)" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    // PDF 32000-1:2008 §7.4.4.2 worked example. EarlyChange = 1 (the default).
+    const encoded = [_]u8{ 0x80, 0x0B, 0x60, 0x50, 0x22, 0x0C, 0x0C, 0x85, 0x01 };
+    const expected = [_]u8{ 0x2D, 0x2D, 0x2D, 0x2D, 0x2D, 0x41, 0x2D, 0x2D, 0x2D, 0x42 };
+    const out = try lzwDecode(a, &encoded, 1);
+    try testing.expectEqualSlices(u8, &expected, out);
+}
+
+test "lzw encode matches the PDF spec golden bytes" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    // Anchors the reference encoder to the same spec example, so the round-trip
+    // tests below are trustworthy and not merely self-consistent.
+    const input = [_]u8{ 0x2D, 0x2D, 0x2D, 0x2D, 0x2D, 0x41, 0x2D, 0x2D, 0x2D, 0x42 };
+    const expected = [_]u8{ 0x80, 0x0B, 0x60, 0x50, 0x22, 0x0C, 0x0C, 0x85, 0x01 };
+    const enc = try lzwEncodeForTest(a, &input, 1);
+    try testing.expectEqualSlices(u8, &expected, enc);
+}
+
+test "lzw round-trips a long input across all code widths (ec=1 and ec=0)" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    // ~6 KiB of deterministic pseudo-random bytes: forces the dictionary past
+    // 511/1023/2047 (9→12-bit widths) and into the 4096-entry freeze.
+    var input: [6000]u8 = undefined;
+    var seed: u32 = 0x1234_5678;
+    for (&input) |*b| {
+        seed = seed *% 1664525 +% 1013904223;
+        b.* = @intCast((seed >> 24) & 0xFF);
+    }
+    inline for (.{ @as(i64, 1), @as(i64, 0) }) |ec| {
+        const enc = try lzwEncodeForTest(a, &input, ec);
+        const dec = try lzwDecode(a, enc, ec);
+        try testing.expectEqualSlices(u8, &input, dec);
+    }
+}
+
+test "lzw ClearTable mid-stream resets the dictionary" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    // Hand-packed 9-bit codes (all < 512, so width never grows):
+    //   256 Clear, 'A', 'B' (defines 258='AB'), 256 Clear (drops 258), 'C', 257 EOD
+    var bytes: std.ArrayListUnmanaged(u8) = .empty;
+    var bp = LzwBitPacker{ .out = &bytes, .a = a };
+    for ([_]u16{ 256, 'A', 'B', 256, 'C', 257 }) |code| try bp.emit(code, 9);
+    try bp.flush();
+    const out = try lzwDecode(a, bytes.items, 1);
+    try testing.expectEqualStrings("ABC", out);
+}
+
+test "lzw EarlyChange=1 vs 0 produce the documented width-bump difference" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    // Input long enough to cross the 511/512 boundary, so the code width bumps
+    // at a different code under ec=1 vs ec=0 — yielding distinct byte streams.
+    var input: [4000]u8 = undefined;
+    var seed: u32 = 0x0BADC0DE;
+    for (&input) |*b| {
+        seed = seed *% 1103515245 +% 12345;
+        b.* = @intCast((seed >> 16) & 0xFF);
+    }
+    const enc1 = try lzwEncodeForTest(a, &input, 1);
+    const enc0 = try lzwEncodeForTest(a, &input, 0);
+    try testing.expect(!std.mem.eql(u8, enc1, enc0)); // documented difference
+    // Each still decodes losslessly under its own EarlyChange setting.
+    try testing.expectEqualSlices(u8, &input, try lzwDecode(a, enc1, 1));
+    try testing.expectEqualSlices(u8, &input, try lzwDecode(a, enc0, 0));
+}
+
+test "lzw malformed/truncated input never crashes" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    // Garbage: first 9-bit code is 511 (>= next free, no prior literal) → stop empty.
+    const garbage = try lzwDecode(a, &[_]u8{ 0xFF, 0xFF, 0xFF }, 1);
+    try testing.expectEqual(@as(usize, 0), garbage.len);
+    // Empty input → empty output.
+    const empty = try lzwDecode(a, &[_]u8{}, 1);
+    try testing.expectEqual(@as(usize, 0), empty.len);
+    // Truncated tail of the spec vector: must return a (partial) prefix, no panic.
+    const truncated = try lzwDecode(a, &[_]u8{ 0x80, 0x0B, 0x60, 0x50 }, 1);
+    try testing.expect(std.mem.startsWith(u8, truncated, "-"));
 }
