@@ -198,10 +198,14 @@ pub const Currency = enum {
     EUR,
     USD,
 
+    /// The currency symbol as UTF-8. `ContentStream.showText` decodes UTF-8 →
+    /// WinAnsiEncoding, so £/€ become their correct single WinAnsi bytes (0xA3 /
+    /// 0x80). Do NOT return a raw PDF octal escape like "\\243" here — that text
+    /// is escaped again by showText and renders literally as "\243" on the page.
     pub fn symbol(self: Currency) []const u8 {
         return switch (self) {
-            .GBP => "\\243", // £ in PDF encoding
-            .EUR => "\\200", // € requires different handling
+            .GBP => "£",
+            .EUR => "€",
             .USD => "$",
         };
     }
@@ -620,11 +624,14 @@ pub const ShareCertificateRenderer = struct {
                 try numberToWords(self.allocator, self.data.shares.quantity);
             defer self.allocator.free(qty_words);
 
-            var value_buf: [32]u8 = undefined;
+            // Currency symbol as UTF-8 (showText converts it to the right WinAnsi
+            // byte). Honours the share class's currency instead of hard-coding £.
+            const cur = self.data.shares.currency.symbol();
+            var value_buf: [40]u8 = undefined;
             const value_str = if (self.data.shares.nominal_value < 1.0)
-                std.fmt.bufPrint(&value_buf, "\\2430.{d:0>2}", .{@as(u32, @intFromFloat(self.data.shares.nominal_value * 100))}) catch "\\2430.01"
+                std.fmt.bufPrint(&value_buf, "{s}0.{d:0>2}", .{ cur, @as(u32, @intFromFloat(self.data.shares.nominal_value * 100)) }) catch "£0.01"
             else
-                std.fmt.bufPrint(&value_buf, "\\243{d:.2}", .{self.data.shares.nominal_value}) catch "\\2431.00";
+                std.fmt.bufPrint(&value_buf, "{s}{d:.2}", .{ cur, self.data.shares.nominal_value }) catch "£1.00";
 
             var cert_buf: [1024]u8 = undefined;
             break :blk std.fmt.bufPrint(&cert_buf, "This is to certify that {s}, of {s} is the registered holder of {d} ({s}) [{s}] shares of {s} each [{s}] in the Company.", .{
