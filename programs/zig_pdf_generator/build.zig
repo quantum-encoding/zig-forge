@@ -263,8 +263,12 @@ pub fn build(b: *std.Build) void {
     wasm_lib.entry = .disabled; // No _start entry point, just exports
     wasm_lib.rdynamic = true; // Export all `export fn` functions
 
-    // Stack size for WASM (1MB should be plenty for PDF generation)
-    wasm_lib.stack_size = 1024 * 1024;
+    // Stack size for WASM. 1MB was "plenty for PDF generation" but the
+    // EXTRACTOR's recursive object/content parser blows it on real-world
+    // producers (Aspose.Pdf, Oracle Analytics Publisher, PDFium — 765/8008 of
+    // the CRG corpus trapped with "memory access out of bounds"). Native runs
+    // the same files fine on the default 8MB thread stack — match it.
+    wasm_lib.stack_size = 8 * 1024 * 1024;
 
     const wasm_install = b.addInstallArtifact(wasm_lib, .{
         .dest_dir = .{ .override = .{ .custom = "lib" } },

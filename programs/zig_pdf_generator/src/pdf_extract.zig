@@ -399,6 +399,15 @@ pub const Parser = struct {
     lex: Lexer,
     whole_file: []const u8,
     arena: std.mem.Allocator,
+    /// Recursion guard: arrays/dicts/indirect-object wrappers recurse through
+    /// parseFromToken; a corrupt (or hostile) file with pathological nesting
+    /// must come back as MalformedObject, not blow the stack — on wasm a
+    /// stack overflow traps as "memory access out of bounds" with no recovery.
+    depth: usize = 0,
+
+    /// Real-world PDFs nest a handful of levels deep; anything past this is
+    /// spec abuse, not content.
+    const MAX_DEPTH = 128;
 
     pub fn init(buf: []const u8, pos: usize, whole_file: []const u8, arena: std.mem.Allocator) Parser {
         return .{ .lex = Lexer.init(buf, pos, arena), .whole_file = whole_file, .arena = arena };
@@ -413,6 +422,9 @@ pub const Parser = struct {
     }
 
     fn parseFromToken(self: *Parser, tok: Token) ExtractError!Obj {
+        if (self.depth >= MAX_DEPTH) return ExtractError.MalformedObject;
+        self.depth += 1;
+        defer self.depth -= 1;
         switch (tok.kind) {
             .eof => return Obj{ .null = {} },
             .integer => {
