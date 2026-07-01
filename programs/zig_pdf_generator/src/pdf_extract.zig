@@ -2403,6 +2403,87 @@ const Interp = struct {
         }
     }
 
+    /// Render an AcroForm widget's normal appearance stream (a Form XObject)
+    /// positioned at its annotation /Rect, so filled-in field values flow into
+    /// the fragment list in reading order. Follows PDF 32000-1 §12.5.5: map the
+    /// appearance /BBox (transformed by its /Matrix) onto /Rect, then run the
+    /// stream through a child interpreter with that composed CTM. Reuses all the
+    /// existing text/frag machinery; never crashes on a malformed appearance.
+    fn renderWidgetAppearance(self: *Interp, rect: [4]f64, st: *Stream) void {
+        // Appearance BBox (default [0 0 1 1] if absent) and Matrix (default id).
+        var bx0: f64 = 0;
+        var by0: f64 = 0;
+        var bx1: f64 = 1;
+        var by1: f64 = 1;
+        if (st.dict.get("BBox")) |bb| {
+            if (bb == .array and bb.array.len >= 4) {
+                bx0 = bb.array[0].asNumber() orelse 0;
+                by0 = bb.array[1].asNumber() orelse 0;
+                bx1 = bb.array[2].asNumber() orelse 1;
+                by1 = bb.array[3].asNumber() orelse 1;
+            }
+        }
+        var mtx = Matrix{};
+        if (st.dict.get("Matrix")) |m| {
+            if (m == .array and m.array.len >= 6) mtx = matFromArgs(m.array[0..6]);
+        }
+
+        // Transform the four BBox corners by Matrix, take their bounding box.
+        const corners = [4][2]f64{
+            .{ bx0, by0 }, .{ bx1, by0 }, .{ bx1, by1 }, .{ bx0, by1 },
+        };
+        var tx0: f64 = std.math.inf(f64);
+        var ty0: f64 = std.math.inf(f64);
+        var tx1: f64 = -std.math.inf(f64);
+        var ty1: f64 = -std.math.inf(f64);
+        for (corners) |c| {
+            const px = c[0] * mtx.a + c[1] * mtx.c + mtx.e;
+            const py = c[0] * mtx.b + c[1] * mtx.d + mtx.f;
+            tx0 = @min(tx0, px);
+            ty0 = @min(ty0, py);
+            tx1 = @max(tx1, px);
+            ty1 = @max(ty1, py);
+        }
+
+        // Affine A mapping the transformed appearance box onto the widget Rect.
+        const tw = tx1 - tx0;
+        const th = ty1 - ty0;
+        const sx = if (@abs(tw) > 1e-6) (rect[2] - rect[0]) / tw else 1;
+        const sy = if (@abs(th) > 1e-6) (rect[3] - rect[1]) / th else 1;
+        const map = Matrix{
+            .a = sx,
+            .d = sy,
+            .e = rect[0] - sx * tx0,
+            .f = rect[1] - sy * ty0,
+        };
+        // Content coords → Matrix → map onto Rect (Matrix applied first).
+        const ctm = mtx.mul(map);
+
+        const content = self.doc.decodeStreamRaw(st) catch return;
+        var res: Dict = .{};
+        if (self.doc.dictGet(st.dict, "Resources") catch null) |r| {
+            if (r.asDict()) |rd| res = rd;
+        }
+        var fonts: std.StringHashMapUnmanaged(*Font) = .empty;
+        buildPageFonts(self.doc, res, &fonts) catch {};
+
+        var child = Interp{
+            .doc = self.doc,
+            .arena = self.arena,
+            .fonts = &fonts,
+            .geom = self.geom,
+            .frags = self.frags,
+            .any_text = self.any_text,
+            .resources = res,
+            .image_count = self.image_count,
+            .images = self.images,
+            .extract_images = self.extract_images,
+            .depth = self.depth + 1,
+            .ctm = ctm,
+        };
+        child.run(content) catch {};
+    }
+
     /// Record an image draw: count its position (image unit square mapped by the
     /// CTM) and, for directly-extractable encodings (JPEG/JPEG2000), collect its
     /// bytes and emit an inline Markdown image reference in reading order.
@@ -2730,11 +2811,25 @@ const LinkAnnot = struct {
     uri: []const u8,
 };
 
+/// An AcroForm field widget on a page: the field's fill-in value lives in its
+/// appearance stream (/AP /N), not the page content stream. We render that
+/// appearance stream through the normal interpreter, positioned at /Rect, so
+/// filled-in values (director agreements, HMRC P45s, …) land in reading order
+/// exactly where a PDF viewer draws them — matching poppler's pdftotext.
+const Widget = struct {
+    /// Widget rectangle in default user space, normalized (x0<=x1, y0<=y1).
+    rect: [4]f64,
+    /// The selected /AP /N appearance stream (already resolved, /AS-keyed for
+    /// checkboxes/radios).
+    stream: *Stream,
+};
+
 const Page = struct {
     resources: Dict,
     geom: PageGeom,
     content: []u8,
     links: []const LinkAnnot = &.{},
+    widgets: []const Widget = &.{},
 };
 
 /// Walk /Root /Pages, inheriting /Resources, /MediaBox, /Rotate down the tree,
@@ -2791,11 +2886,13 @@ fn walkPageNode(
         // Leaf page.
         const content = try collectPageContent(doc, node);
         const links = collectLinks(doc, node) catch &.{};
+        const widgets = collectWidgets(doc, node) catch &.{};
         try out.append(doc.arena, .{
             .resources = inh.resources orelse Dict{},
             .geom = .{ .media_w = inh.media_w, .media_h = inh.media_h, .rotate = inh.rotate },
             .content = content,
             .links = links,
+            .widgets = widgets,
         });
         return;
     }
@@ -2838,6 +2935,65 @@ fn collectLinks(doc: *Document, page: Dict) ExtractError![]LinkAnnot {
             .x1 = @max(a0, a1),
             .y1 = @max(b0, b1),
             .uri = uri_obj.string,
+        });
+    }
+    return out.items;
+}
+
+/// Collect AcroForm field widgets from a page's /Annots array, resolving each to
+/// its "normal" appearance stream (/AP /N). For push-button / checkbox / radio
+/// widgets /AP /N is a sub-dictionary keyed by appearance state; the active one
+/// is named by /AS. Hidden widgets (annotation flag bit 2) are skipped, matching
+/// what a viewer prints. Never crashes on a malformed form — a bad entry is just
+/// skipped, so page-content extraction is unaffected.
+fn collectWidgets(doc: *Document, page: Dict) ExtractError![]Widget {
+    const annots_obj = try doc.dictGet(page, "Annots") orelse return &.{};
+    if (annots_obj != .array) return &.{};
+    var out: std.ArrayListUnmanaged(Widget) = .empty;
+    for (annots_obj.array) |a| {
+        const annot = (doc.resolve(a) catch continue).asDict() orelse continue;
+        const sub = if (annot.get("Subtype")) |s| (if (s == .name) s.name else "") else "";
+        if (!std.mem.eql(u8, sub, "Widget")) continue;
+
+        // Skip Hidden widgets (annotation /F flag, bit position 2 → value 2).
+        if (doc.dictGet(annot, "F") catch null) |f| {
+            if (f.asInt()) |fl| {
+                if (fl & 2 != 0) continue;
+            }
+        }
+
+        const rect_obj = (doc.dictGet(annot, "Rect") catch continue) orelse continue;
+        if (rect_obj != .array or rect_obj.array.len < 4) continue;
+        const a0 = rect_obj.array[0].asNumber() orelse continue;
+        const b0 = rect_obj.array[1].asNumber() orelse continue;
+        const a1 = rect_obj.array[2].asNumber() orelse continue;
+        const b1 = rect_obj.array[3].asNumber() orelse continue;
+
+        // /AP /N → the normal-appearance form XObject (or a state-keyed dict).
+        const ap = (doc.dictGet(annot, "AP") catch continue) orelse continue;
+        const apd = ap.asDict() orelse continue;
+        const n = (doc.dictGet(apd, "N") catch continue) orelse continue;
+        const st: *Stream = switch (n) {
+            .stream => |s| s,
+            .dict => |nd| blk: {
+                // Appearance sub-dictionary: pick the entry named by /AS.
+                const as_obj = annot.get("AS") orelse continue;
+                if (as_obj != .name) continue;
+                const sel = (doc.dictGet(nd, as_obj.name) catch continue) orelse continue;
+                if (sel != .stream) continue;
+                break :blk sel.stream;
+            },
+            else => continue,
+        };
+
+        try out.append(doc.arena, .{
+            .rect = .{
+                @min(a0, a1),
+                @min(b0, b1),
+                @max(a0, a1),
+                @max(b0, b1),
+            },
+            .stream = st,
         });
     }
     return out.items;
@@ -3325,6 +3481,8 @@ pub const ExtractionMeta = struct {
     tables_found: usize = 0,
     extraction_method: []const u8 = "zig-native",
     encrypted: bool = false,
+    /// AcroForm widget appearances rendered into the text flow (0 = not a form).
+    form_fields: usize = 0,
 };
 
 /// An extracted image to be written to the `images/` sidecar directory.
@@ -3467,6 +3625,7 @@ fn emitMdx(
     has_text: bool,
     opts: ExtractOptions,
     meta_tables: *usize,
+    form_fields: usize,
 ) ExtractError![]u8 {
     var aw: std.Io.Writer.Allocating = .init(arena);
     const w = &aw.writer;
@@ -3496,6 +3655,7 @@ fn emitMdx(
     w.writeAll("extraction_method: zig-native\n") catch {};
     w.print("has_text_layer: {s}\n", .{if (has_text) "true" else "false"}) catch {};
     if (!has_text) w.writeAll("needs_ocr: true\n") catch {};
+    if (form_fields > 0) w.print("form_fields: {d}\n", .{form_fields}) catch {};
     w.writeAll("---\n\n") catch {};
 
     if (!has_text) {
@@ -3929,6 +4089,7 @@ pub fn extractToMdx(gpa: std.mem.Allocator, pdf: []const u8, opts: ExtractOption
     var all_lines: std.ArrayListUnmanaged(Line) = .empty;
     var any_text = false;
     var image_count: usize = 0;
+    var form_fields: usize = 0;
     var images: std.ArrayListUnmanaged(ImageBlob) = .empty;
 
     for (pages.items) |page| {
@@ -3949,6 +4110,15 @@ pub fn extractToMdx(gpa: std.mem.Allocator, pdf: []const u8, opts: ExtractOption
             .extract_images = opts.extract_images,
         };
         interp.run(page.content) catch {};
+
+        // AcroForm field values live in widget appearance streams, not the page
+        // content. Render each into the same fragment list (positioned at its
+        // /Rect) so fill-in values interleave with page text in reading order —
+        // before the /Rotate transform below, so widget frags rotate with them.
+        for (page.widgets) |wdg| {
+            interp.renderWidgetAppearance(wdg.rect, wdg.stream);
+        }
+        form_fields += page.widgets.len;
 
         // Apply the page's /Rotate so reading order + column detection run in the
         // *displayed* coordinate frame. The content interpreter produced frags
@@ -4002,6 +4172,7 @@ pub fn extractToMdx(gpa: std.mem.Allocator, pdf: []const u8, opts: ExtractOption
     meta.has_text_layer = any_text;
     meta.needs_ocr = !any_text;
     meta.images_found = image_count;
+    meta.form_fields = form_fields;
 
     // /Info for the frontmatter.
     var info: Dict = .{};
@@ -4010,7 +4181,7 @@ pub fn extractToMdx(gpa: std.mem.Allocator, pdf: []const u8, opts: ExtractOption
     }
 
     var tables_found: usize = 0;
-    const mdx_arena = try emitMdx(arena, all_lines.items, info, &doc, pages.items.len, any_text, opts, &tables_found);
+    const mdx_arena = try emitMdx(arena, all_lines.items, info, &doc, pages.items.len, any_text, opts, &tables_found, form_fields);
     meta.tables_found = tables_found;
     meta.extraction_method = "zig-native";
 
@@ -4510,6 +4681,71 @@ test "end-to-end: extract text from a minimal PDF" {
     // Frontmatter present.
     try testing.expect(std.mem.startsWith(u8, result.mdx, "---\n"));
     try testing.expect(std.mem.indexOf(u8, result.mdx, "extraction_method: zig-native") != null);
+}
+
+test "AcroForm widget appearance stream renders field value in reading order" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    // A page with static content ("Amount due") plus a single AcroForm text
+    // widget whose fill-in value ("850.00") lives ONLY in its /AP /N appearance
+    // stream — exactly the government/legal-form shape (director agreements,
+    // HMRC P45s). The widget's /Rect sits just to the right of the label so the
+    // rendered value should assemble onto the same reading line.
+    const pdf =
+        "%PDF-1.4\n" ++
+        "1 0 obj\n<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R] >> >>\nendobj\n" ++
+        "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n" ++
+        "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] " ++
+        "/Resources << /Font << /Helv 4 0 R >> >> /Contents 6 0 R /Annots [5 0 R] >>\nendobj\n" ++
+        "4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>\nendobj\n" ++
+        "5 0 obj\n<< /Type /Annot /Subtype /Widget /FT /Tx /T (Amount) /V (850.00) " ++
+        "/Rect [180 698 320 716] /P 3 0 R /AP << /N 7 0 R >> >>\nendobj\n" ++
+        "6 0 obj\n<< /Length 40 >>\nstream\n" ++
+        "BT /Helv 12 Tf 72 700 Td (Amount due) Tj ET\n" ++
+        "endstream\nendobj\n" ++
+        "7 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 140 18] " ++
+        "/Resources << /Font << /Helv 4 0 R >> >> /Length 38 >>\nstream\n" ++
+        "BT /Helv 12 Tf 2 5 Td (850.00) Tj ET\n" ++
+        "endstream\nendobj\n" ++
+        "trailer\n<< /Root 1 0 R /Size 8 >>\nstartxref\n0\n%%EOF\n";
+
+    const result = try extractToMdx(a, pdf, .{ .source_name = "form.pdf" });
+    defer a.free(result.mdx);
+
+    // The value from the appearance stream must appear …
+    try testing.expect(std.mem.indexOf(u8, result.mdx, "850.00") != null);
+    try testing.expect(std.mem.indexOf(u8, result.mdx, "Amount due") != null);
+    // … one widget was rendered, and the frontmatter records it.
+    try testing.expectEqual(@as(usize, 1), result.meta.form_fields);
+    try testing.expect(std.mem.indexOf(u8, result.mdx, "form_fields: 1") != null);
+}
+
+test "malformed AcroForm widget never crashes extraction" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    // Widget with a dangling /AP /N reference and a truncated /Rect — must be
+    // skipped silently, leaving page-content extraction intact.
+    const pdf =
+        "%PDF-1.4\n" ++
+        "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n" ++
+        "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n" ++
+        "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] " ++
+        "/Resources << /Font << /Helv 4 0 R >> >> /Contents 6 0 R /Annots [5 0 R] >>\nendobj\n" ++
+        "4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>\nendobj\n" ++
+        "5 0 obj\n<< /Type /Annot /Subtype /Widget /FT /Tx /Rect [180 698] /AP << /N 99 0 R >> >>\nendobj\n" ++
+        "6 0 obj\n<< /Length 40 >>\nstream\n" ++
+        "BT /Helv 12 Tf 72 700 Td (Amount due) Tj ET\n" ++
+        "endstream\nendobj\n" ++
+        "trailer\n<< /Root 1 0 R /Size 7 >>\nstartxref\n0\n%%EOF\n";
+
+    const result = try extractToMdx(a, pdf, .{});
+    defer a.free(result.mdx);
+    try testing.expect(std.mem.indexOf(u8, result.mdx, "Amount due") != null);
+    try testing.expectEqual(@as(usize, 0), result.meta.form_fields);
 }
 
 test "xref stream (PDF 1.5) resolves objects via /Type /XRef" {

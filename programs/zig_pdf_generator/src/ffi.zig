@@ -308,6 +308,7 @@ export fn zigpdf_extract_meta_json(out_len: *usize) ?[*]u8 {
         .tables_found = last_meta.tables_found,
         .extraction_method = last_meta.extraction_method,
         .encrypted = last_meta.encrypted,
+        .form_fields = last_meta.form_fields,
     }, .{}) catch {
         setLastError("meta serialization failed");
         return null;
