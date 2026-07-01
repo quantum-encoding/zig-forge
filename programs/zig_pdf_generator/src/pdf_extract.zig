@@ -3295,12 +3295,46 @@ fn modalBodySize(lines: []const Line) f64 {
 fn headingLevel(size: f64, body: f64, text: []const u8) ?u8 {
     // Real headings are short; a "heading" that runs on is a paragraph.
     if (text.len > 80 or wordCount(text) > 12) return null;
+    // Labelled data is not a heading, even in a big/bold font. A colon followed by
+    // a number ("Invoice No.: 108988", "GOODS : 103.40") or a currency amount
+    // ("Total £6,960.00") is a field/total — promoting it to a heading erased the
+    // label/value distinction on invoices. A trailing colon with no value after it
+    // (a real titled heading like "Pilar 1 – Abrazo Pélvico (AP):") is left alone.
+    if (hasDigitAfterColon(text) or hasCurrencyAmount(text)) return null;
     const r = size / body;
     if (r >= 1.8) return 1;
     if (r >= 1.5) return 2;
     if (r >= 1.28) return 3;
     if (r >= 1.14) return 4;
     return null;
+}
+
+/// True if a ':' is followed later in the line by a digit — the "label: value"
+/// shape of an invoice field or labelled total (not a titled heading).
+fn hasDigitAfterColon(s: []const u8) bool {
+    var seen_colon = false;
+    for (s) |c| {
+        if (c == ':') seen_colon = true else if (seen_colon and c >= '0' and c <= '9') return true;
+    }
+    return false;
+}
+
+/// True if the line carries a currency amount (a £/€/$ sign adjacent to a digit,
+/// allowing a space): "£161.78", "$ 5.00". Such lines are totals/values, not headings.
+fn hasCurrencyAmount(s: []const u8) bool {
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        // £ = 0xC2 0xA3, € = 0xE2 0x82 0xAC in UTF-8; $ = 0x24.
+        const is_sign = s[i] == '$' or
+            (i + 1 < s.len and s[i] == 0xC2 and s[i + 1] == 0xA3) or
+            (i + 2 < s.len and s[i] == 0xE2 and s[i + 1] == 0x82 and s[i + 2] == 0xAC);
+        if (is_sign) {
+            var j = i + 1;
+            while (j < s.len and (s[j] == ' ' or s[j] == 0xC2 or s[j] == 0xA3 or s[j] == 0xE2 or s[j] == 0x82 or s[j] == 0xAC)) j += 1;
+            if (j < s.len and s[j] >= '0' and s[j] <= '9') return true;
+        }
+    }
+    return false;
 }
 
 fn wordCount(s: []const u8) usize {
