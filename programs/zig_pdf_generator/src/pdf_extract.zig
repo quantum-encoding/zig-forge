@@ -3335,13 +3335,33 @@ fn headingLevel(size: f64, body: f64, text: []const u8) ?u8 {
     // ("Total £6,960.00") is a field/total — promoting it to a heading erased the
     // label/value distinction on invoices. A trailing colon with no value after it
     // (a real titled heading like "Pilar 1 – Abrazo Pélvico (AP):") is left alone.
-    if (hasDigitAfterColon(text) or hasCurrencyAmount(text)) return null;
+    if (hasDigitAfterColon(text) or hasCurrencyAmount(text) or endsWithDecimal(text)) return null;
     const r = size / body;
     if (r >= 1.8) return 1;
     if (r >= 1.5) return 2;
     if (r >= 1.28) return 3;
     if (r >= 1.14) return 4;
     return null;
+}
+
+/// True if the line ends with a decimal number ("Net Total 104.45") — a labelled
+/// total, not a heading. A heading ending in a bare integer ("Capítulo 1") or a
+/// word is unaffected.
+fn endsWithDecimal(s: []const u8) bool {
+    var i = s.len;
+    while (i > 0 and s[i - 1] == ' ') i -= 1;
+    if (i == 0 or !(s[i - 1] >= '0' and s[i - 1] <= '9')) return false;
+    var has_dot = false;
+    var n: usize = 0;
+    while (i > 0 and n < 20) : (i -= 1) {
+        const c = s[i - 1];
+        if (c >= '0' and c <= '9') {
+            n += 1;
+        } else if (c == '.') {
+            has_dot = true;
+        } else if (c == ',') {} else break;
+    }
+    return has_dot;
 }
 
 /// True if a ':' is followed later in the line by a digit — the "label: value"
