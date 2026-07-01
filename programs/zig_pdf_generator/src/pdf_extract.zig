@@ -2956,6 +2956,14 @@ fn assembleLines(arena: std.mem.Allocator, frags: []Frag, links: []const LinkAnn
         // Sort this line strictly left-to-right.
         std.sort.block(Frag, line_frags.items, {}, fragLeftLess);
 
+        // Merge touching glyph runs. Subset fonts often emit a single word as
+        // several runs ("WEDNESBUR" + "Y", "Inv" + "oice"); if a table gutter
+        // later falls in that seam the word is split across two cells. Runs whose
+        // gap is under ~a tenth of an em are the same word — join them directly.
+        // The threshold is far below an inter-word/column gap, so distinct tokens
+        // (and adjacent numeric columns) are never merged.
+        line_frags.items = mergeGlyphRuns(arena, line_frags.items) catch line_frags.items;
+
         // Build the line as a sequence of cells. A small gap (> ~⅙ em) inserts a
         // space *within* a cell — within a word glyphs are contiguous, so any
         // clearly-positive gap is an inter-word space. A wide gap (> ~1.4 em)
@@ -3206,6 +3214,33 @@ fn fragLess(_: void, a: Frag, b: Frag) bool {
 fn fragLeftLess(_: void, a: Frag, b: Frag) bool {
     if (a.x != b.x) return a.x < b.x;
     return a.end_x < b.end_x;
+}
+
+/// Combine consecutive left-to-right fragments belonging to the same word — a
+/// subset-font run seam where the gap is under ~a tenth of an em (far below an
+/// inter-word or column gap, so distinct tokens and adjacent numeric columns are
+/// never merged). Text is concatenated directly; the box spans both. Input must
+/// be sorted left-to-right; returns the input unchanged when nothing merges.
+fn mergeGlyphRuns(arena: std.mem.Allocator, frags: []Frag) ExtractError![]Frag {
+    if (frags.len < 2) return frags;
+    var out: std.ArrayListUnmanaged(Frag) = .empty;
+    try out.append(arena, frags[0]);
+    for (frags[1..]) |fr| {
+        const last = &out.items[out.items.len - 1];
+        const gap = fr.x - last.end_x;
+        const thresh = @max(last.size, fr.size) * 0.1;
+        if (gap < thresh and gap > -thresh) {
+            const joined = arena.alloc(u8, last.text.len + fr.text.len) catch return frags;
+            @memcpy(joined[0..last.text.len], last.text);
+            @memcpy(joined[last.text.len..], fr.text);
+            last.text = joined;
+            if (fr.end_x > last.end_x) last.end_x = fr.end_x;
+            if (fr.size > last.size) last.size = fr.size;
+        } else {
+            try out.append(arena, fr);
+        }
+    }
+    return out.items;
 }
 
 fn endsWithSpace(s: []const u8) bool {
