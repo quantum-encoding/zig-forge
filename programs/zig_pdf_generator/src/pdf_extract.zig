@@ -2968,6 +2968,16 @@ fn assembleLines(arena: std.mem.Allocator, frags: []Frag, links: []const LinkAnn
         // Sort this line strictly left-to-right.
         std.sort.block(Frag, line_frags.items, {}, fragLeftLess);
 
+        // Drop space-only runs whose geometry LIES: some producers (Aura's
+        // generator among them) emit padding-space runs whose advances overlap
+        // the digit glyphs that follow, so after the left-to-right sort a
+        // literal ' ' frag lands inside "350.00" → "3 50.00" and the amount is
+        // lost to every downstream parser. A space frag that overlaps a
+        // NEIGHBOURING content frag is geometric garbage — remove it; the gap
+        // detector below reproduces any real spacing. Honest space frags
+        // (no overlap) are kept as-is.
+        line_frags.items = dropOverlappingSpaceFrags(line_frags.items);
+
         // Merge touching glyph runs. Subset fonts often emit a single word as
         // several runs ("WEDNESBUR" + "Y", "Inv" + "oice"); if a table gutter
         // later falls in that seam the word is split across two cells. Runs whose
@@ -3258,6 +3268,34 @@ fn mergeGlyphRuns(arena: std.mem.Allocator, frags: []Frag) ExtractError![]Frag {
 fn endsWithSpace(s: []const u8) bool {
     return s.len > 0 and (s[s.len - 1] == ' ' or s[s.len - 1] == '\t');
 }
+
+fn isSpaceOnly(s: []const u8) bool {
+    if (s.len == 0) return false;
+    for (s) |c| if (c != ' ') return false;
+    return true;
+}
+
+/// Remove space-only frags that overlap a neighbouring content frag (see the
+/// call site in assembleLines). `frags` must be sorted left-to-right; the
+/// filter is in-place and returns the shortened slice.
+fn dropOverlappingSpaceFrags(frags: []Frag) []Frag {
+    var n: usize = 0;
+    for (frags, 0..) |fr, i| {
+        if (isSpaceOnly(fr.text)) {
+            // Overlap = a content neighbour's span intrudes into this frag's
+            // span by more than a kerning sliver (20% of the space's width).
+            const w = @max(fr.end_x - fr.x, 0.01);
+            const tol = 0.2 * w;
+            const prev_intrudes = n > 0 and !isSpaceOnly(frags[n - 1].text) and frags[n - 1].end_x > fr.x + tol;
+            const next_intrudes = i + 1 < frags.len and !isSpaceOnly(frags[i + 1].text) and frags[i + 1].x < fr.end_x - tol;
+            if (prev_intrudes or next_intrudes) continue; // geometric garbage
+        }
+        frags[n] = fr;
+        n += 1;
+    }
+    return frags[0..n];
+}
+
 
 fn trimTrailing(arena: std.mem.Allocator, s: []const u8) ![]const u8 {
     var end = s.len;
