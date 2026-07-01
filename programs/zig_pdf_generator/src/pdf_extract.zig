@@ -3090,6 +3090,34 @@ fn detectColumnCuts(arena: std.mem.Allocator, frags: []const Frag) ExtractError!
     const straddle_thresh: i32 = @max(1, @as(i32, @intCast(frags.len / 50)));
     const min_gutter_bins: usize = @max(@as(usize, 3), nbins / 50); // ≥~2% of width
 
+    // To tell a real reading-column gutter from intra-table whitespace, look at
+    // what sits to the RIGHT of a candidate gap on the rows that cross it. In a
+    // 2-column paper the right side is a full-width prose line (dense ink); in an
+    // invoice it is a short value/price (sparse ink spread over the region). Group
+    // fragments into baseline-y rows once, then per candidate gap measure the
+    // right-side ink density of the crossing rows. Dropping this test made
+    // detectColumnCuts tear invoice header labels from their values and lose the
+    // rightmost money column.
+    const yidx = try arena.alloc(usize, frags.len);
+    for (yidx, 0..) |*v, i| v.* = i;
+    std.sort.block(usize, yidx, frags, struct {
+        fn less(f: []const Frag, a: usize, b: usize) bool {
+            return f[a].y > f[b].y; // top-to-bottom
+        }
+    }.less);
+    var starts: std.ArrayListUnmanaged(usize) = .empty; // row group boundaries in yidx
+    {
+        var i: usize = 0;
+        while (i < yidx.len) {
+            try starts.append(arena, i);
+            const y0 = frags[yidx[i]].y;
+            const rtol = @max(frags[yidx[i]].size * 0.5, 1.0);
+            while (i < yidx.len and @abs(frags[yidx[i]].y - y0) <= rtol) i += 1;
+        }
+        try starts.append(arena, yidx.len); // end sentinel
+    }
+    const page_right = right;
+
     var cuts: std.ArrayListUnmanaged(f64) = .empty;
     var k: usize = 0;
     while (k < nbins) {
@@ -3101,12 +3129,45 @@ fn detectColumnCuts(arena: std.mem.Allocator, frags: []const Frag) ExtractError!
             // Ignore gutters touching the page edges (page margins, not columns).
             const at_edge = (run_start == 0) or (run_end == nbins);
             if (run_len >= min_gutter_bins and !at_edge) {
-                // Require substantial text on BOTH sides of this gutter.
+                const left_edge = left + @as(f64, @floatFromInt(run_start)) * bin_w;
+                const right_edge = left + @as(f64, @floatFromInt(run_end)) * bin_w;
+                // Require substantial text on BOTH sides of this gutter…
                 if (hasTextOutside(cov, 0, run_start, straddle_thresh) and
                     hasTextOutside(cov, run_end, nbins, straddle_thresh))
                 {
-                    const cut_x = left + (@as(f64, @floatFromInt(run_start + run_len / 2)) * bin_w);
-                    try cuts.append(arena, cut_x);
+                    // …AND that crossing rows have a *dense* right side (prose),
+                    // not a sparse one (table values). Count crossing rows whose
+                    // right-of-gap ink fills < half the right region; if most do,
+                    // the gap is a column separator, not a reading gutter.
+                    const right_w = page_right - right_edge;
+                    var crossing: usize = 0;
+                    var sparse_right: usize = 0;
+                    var ri: usize = 0;
+                    while (ri + 1 < starts.items.len) : (ri += 1) {
+                        var left_present = false;
+                        var right_ink: f64 = 0;
+                        var has_right = false;
+                        for (yidx[starts.items[ri]..starts.items[ri + 1]]) |fi| {
+                            const fr = frags[fi];
+                            if (fr.end_x <= left_edge + 1.0) left_present = true;
+                            if (fr.x >= right_edge - 1.0) {
+                                has_right = true;
+                                right_ink += fr.end_x - fr.x;
+                            }
+                        }
+                        if (left_present and has_right) {
+                            crossing += 1;
+                            if (right_w > 0 and right_ink < 0.5 * right_w) sparse_right += 1;
+                        }
+                    }
+                    // ≥40% of crossing rows sparse ⇒ a table column separator, not a
+                    // reading gutter. Real 2-column prose sits well under this (≤~27%
+                    // measured); invoice header/line-item gaps run 58–79%.
+                    const tabular = crossing > 0 and (sparse_right * 100 / crossing >= 40);
+                    if (!tabular) {
+                        const cut_x = left + (@as(f64, @floatFromInt(run_start + run_len / 2)) * bin_w);
+                        try cuts.append(arena, cut_x);
+                    }
                 }
             }
         } else k += 1;
