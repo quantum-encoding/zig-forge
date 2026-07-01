@@ -2886,6 +2886,11 @@ const Line = struct {
     x: f64, // left edge
     size: f64, // representative (max) font size on the line
     cells: []Cell = &.{}, // text split at wide horizontal gaps (table columns)
+    /// The line's fragments, left-to-right. Tables bin these into a *global*
+    /// column model (see tryDetectTable/emitTable) so a row's columns don't
+    /// depend on that row's own local gaps — the fix for invoice line-items
+    /// where a tight price/value gap used to merge "7.03 63.27" into one cell.
+    frags: []const Frag = &.{},
     /// Forces a paragraph break before this line regardless of vertical gap —
     /// set on the first line of each column and each page so reading order never
     /// runs the bottom of one column into the top of the next.
@@ -2996,6 +3001,7 @@ fn assembleLines(arena: std.mem.Allocator, frags: []Frag, links: []const LinkAnn
             .x = left_x,
             .size = max_size,
             .cells = cells.items,
+            .frags = line_frags.items, // already sorted left-to-right
         });
         i = j;
     }
@@ -3318,7 +3324,7 @@ fn emitMdx(
             if (tryDetectTable(arena, lines, i, body_size)) |tbl| {
                 try flushPara(arena, w, &para);
                 list_base_x = null;
-                try emitTable(arena, w, lines[i..tbl.end], tbl.cols);
+                try emitTable(arena, w, lines[i..tbl.end], tbl.cuts);
                 tables_found += 1;
                 prev_y = lines[tbl.end - 1].y;
                 prev_size = lines[tbl.end - 1].size;
@@ -3427,7 +3433,7 @@ fn indentLevel(x: f64, base: f64, size: f64) usize {
 
 const TableRegion = struct {
     end: usize, // exclusive line index
-    cols: []f64, // sorted column x-anchors
+    cuts: []f64, // sorted x-positions of the column-separator gutters (cols = cuts+1)
 };
 
 /// Detect a table starting at `lines[start]`: a run of ≥2 consecutive,
@@ -3435,110 +3441,217 @@ const TableRegion = struct {
 /// columns. Guard rail (spec §5): if alignment is weak, returns null so the rows
 /// fall through to plain text — never a fabricated junk table.
 fn tryDetectTable(arena: std.mem.Allocator, lines: []const Line, start: usize, body_size: f64) ?TableRegion {
+    // The first line must itself look tabular, else this isn't a table start.
+    if (lines[start].cells.len < 2 or lines[start].text.len == 0) return null;
+
     var end = start;
+    var last_tab = start; // exclusive index of the last genuinely tabular row
     var prev_y: ?f64 = null;
+    var skip: usize = 0;
+    const max_skip: usize = 5; // bridge up to this many non-tabular lines in a row
     while (end < lines.len) {
         const ln = lines[end];
-        if (end > start and ln.break_before) break;
-        if (ln.cells.len < 2 or ln.text.len == 0) break;
-        if (headingLevel(ln.size, body_size, ln.text) != null) break;
+        if (end > start and ln.break_before) break; // hard: column/page break
+        if (headingLevel(ln.size, body_size, ln.text) != null) break; // hard: heading
         if (prev_y) |py| {
             const gap = py - ln.y;
-            if (gap < 0 or gap > ln.size * 3.0) break;
+            if (gap < -1.0) break; // moved back up → new region
+            if (gap > ln.size * 10.0) break; // large section gap → end of table
+        }
+        const tabular = ln.cells.len >= 2 and ln.text.len > 0;
+        if (tabular) {
+            skip = 0;
+            end += 1;
+            last_tab = end;
+        } else {
+            // Bridge a few non-tabular lines (a lone barcode / repeated code line
+            // between items) so one line-item table doesn't shatter into per-item
+            // fragments — each fragment would have too few rows to model columns.
+            skip += 1;
+            if (skip > max_skip) break;
+            end += 1;
         }
         prev_y = ln.y;
-        end += 1;
-        if (end - start > 500) break;
+        if (end - start > 1000) break;
     }
+    end = last_tab; // don't let the table end on bridged filler
     const nrows = end - start;
     if (nrows < 2) return null;
 
-    // Cluster all cell x-anchors across rows.
-    const tol = @max(body_size * 1.5, 4.0);
-    var centers: std.ArrayListUnmanaged(f64) = .empty;
-    var counts: std.ArrayListUnmanaged(usize) = .empty;
-    var last_row: std.ArrayListUnmanaged(usize) = .empty; // last row that hit this cluster
-    for (lines[start..end], 0..) |ln, ri| {
-        for (ln.cells) |c| {
-            var matched = false;
-            for (centers.items, 0..) |ctr, ci| {
-                if (@abs(c.x - ctr) <= tol) {
-                    if (last_row.items[ci] != ri) {
-                        counts.items[ci] += 1;
-                        last_row.items[ci] = ri;
-                    }
-                    matched = true;
-                    break;
-                }
-            }
-            if (!matched) {
-                centers.append(arena, c.x) catch return null;
-                counts.append(arena, 1) catch return null;
-                last_row.append(arena, ri) catch return null;
-            }
+    const cuts = detectTableColumns(arena, lines[start..end], body_size) catch return null;
+    if (cuts.len < 1) return null; // need ≥2 columns (1 separator)
+    return .{ .end = end, .cuts = cuts };
+}
+
+/// Find column separators as vertical whitespace gutters: x-bands that are empty
+/// across (nearly) all rows. This is the pdftotext -layout principle and it is
+/// robust where left-edge clustering is not — text flows continuously inside a
+/// column so descriptions never split, while real columns are divided by
+/// consistent empty bands. Returns the sorted gutter mid-x positions (the cuts);
+/// column count is cuts.len + 1.
+fn detectTableColumns(arena: std.mem.Allocator, rows: []const Line, body: f64) ExtractError![]f64 {
+    var minx: f64 = std.math.inf(f64);
+    var maxx: f64 = -std.math.inf(f64);
+    var nrows: usize = 0;
+    for (rows) |ln| {
+        if (ln.frags.len == 0) continue;
+        nrows += 1;
+        for (ln.frags) |fr| {
+            if (fr.x < minx) minx = fr.x;
+            if (fr.end_x > maxx) maxx = fr.end_x;
         }
     }
+    if (nrows < 2 or maxx <= minx) return &.{};
 
-    // Keep columns present in ≥2 rows (and at least half the rows for the wider
-    // ones to count as real structure).
-    const min_cov: usize = @max(@as(usize, 2), nrows / 2);
-    var cols: std.ArrayListUnmanaged(f64) = .empty;
-    for (centers.items, 0..) |ctr, ci| {
-        if (counts.items[ci] >= min_cov) cols.append(arena, ctr) catch return null;
+    const nbins: usize = 512;
+    const span = maxx - minx;
+    const binw = span / @as(f64, @floatFromInt(nbins));
+    if (binw <= 0) return &.{};
+
+    // Per-bin distinct-row coverage: how many rows place any text over this x-band.
+    const cov = try arena.alloc(u32, nbins);
+    @memset(cov, 0);
+    const rowbins = try arena.alloc(bool, nbins);
+    for (rows) |ln| {
+        if (ln.frags.len == 0) continue;
+        @memset(rowbins, false);
+        for (ln.frags) |fr| {
+            var b0 = binOf(fr.x, minx, binw, nbins - 1);
+            const b1 = binOf(fr.end_x, minx, binw, nbins - 1);
+            while (b0 <= b1) : (b0 += 1) rowbins[b0] = true;
+        }
+        for (rowbins, 0..) |hit, bi| if (hit) {
+            cov[bi] += 1;
+        };
     }
-    if (cols.items.len < 2) return null;
 
-    std.sort.block(f64, cols.items, {}, lessThanF64);
-    return .{ .end = end, .cols = cols.items };
+    // A gutter bin is nearly empty (tolerate a few rows whose long text strays in).
+    const gut_max: u32 = @intCast(@max(@as(usize, 1), nrows / 8));
+    // A separator must be clearly wider than an inter-word space (~0.25 em) so a
+    // description's normal spacing never splits it; sparse coincidental gutters are
+    // pruned below by column population, not by width.
+    const min_gutter: usize = @max(@as(usize, 1), @as(usize, @intFromFloat(@max(body * 0.7, 1.0) / binw)));
+
+    var cuts: std.ArrayListUnmanaged(f64) = .empty;
+    var bi: usize = 0;
+    // Skip a leading gutter (left margin) — separators only count between text.
+    while (bi < nbins and cov[bi] <= gut_max) bi += 1;
+    while (bi < nbins) {
+        if (cov[bi] <= gut_max) {
+            const g0 = bi;
+            while (bi < nbins and cov[bi] <= gut_max) bi += 1;
+            const g1 = bi; // exclusive
+            // A trailing gutter (nothing to its right) is the right margin, not a cut.
+            if (g1 >= nbins) break;
+            if (g1 - g0 >= min_gutter) {
+                const mid = minx + (@as(f64, @floatFromInt(g0 + g1)) / 2.0) * binw;
+                try cuts.append(arena, mid);
+            }
+        } else bi += 1;
+    }
+    if (cuts.items.len > 64) return &.{}; // implausible; treat as not-a-table
+    if (cuts.items.len == 0) return &.{};
+
+    // Prune spurious columns: count how many rows populate each column, then drop
+    // any cut that would isolate a column present in too few rows — a coincidental
+    // gutter behind a rarely-used spec (e.g. "TABLE X" on 2 of 15 rows) or an
+    // always-empty band. Sparse columns merge into a dense neighbour; the columns
+    // populated on most rows (code, qty, price, value) survive. Turns a noisy
+    // 8-column split into a clean, uniform schema.
+    const ncol0 = cuts.items.len + 1;
+    const pop = try arena.alloc(usize, ncol0);
+    @memset(pop, 0);
+    const seen = try arena.alloc(bool, ncol0);
+    for (rows) |ln| {
+        if (ln.frags.len == 0) continue;
+        @memset(seen, false);
+        for (ln.frags) |fr| seen[columnOf(cuts.items, (fr.x + fr.end_x) / 2.0)] = true;
+        for (seen, 0..) |s, ci| if (s) {
+            pop[ci] += 1;
+        };
+    }
+    const min_col_cov: usize = @max(@as(usize, 2), nrows / 5);
+    var kept: std.ArrayListUnmanaged(f64) = .empty;
+    var left_dense = pop[0] >= min_col_cov;
+    for (cuts.items, 0..) |cx, i| {
+        const right_dense = pop[i + 1] >= min_col_cov;
+        if (right_dense and left_dense) {
+            try kept.append(arena, cx); // both sides real → keep the separator
+        } else {
+            left_dense = left_dense or right_dense; // merge sparse column into the run
+        }
+    }
+    return kept.items;
 }
 
 fn lessThanF64(_: void, a: f64, b: f64) bool {
     return a < b;
 }
 
-/// Emit a GFM table: assign each row's cells to the nearest column anchor.
-fn emitTable(arena: std.mem.Allocator, w: *std.Io.Writer, rows: []const Line, cols: []const f64) ExtractError!void {
-    if (cols.len == 0 or rows.len == 0) return;
+/// Emit a GFM table with a *fixed* column count (cuts.len + 1) for every row.
+/// Each fragment is placed in the column bounded by the gutter cuts on either
+/// side of its center. Because columns come from whitespace gutters, a long
+/// description stays whole and a merged price+value cell splits into its two
+/// columns — giving consistent, machine-parseable rows.
+fn emitTable(arena: std.mem.Allocator, w: *std.Io.Writer, rows: []const Line, cuts: []const f64) ExtractError!void {
+    if (rows.len == 0) return;
+    const ncol = cuts.len + 1;
     w.writeAll("\n") catch {};
 
     for (rows, 0..) |row, ri| {
-        var buckets = try arena.alloc(std.ArrayListUnmanaged(u8), cols.len);
+        var buckets = try arena.alloc(std.ArrayListUnmanaged(u8), ncol);
         for (buckets) |*b| b.* = .empty;
-        for (row.cells) |c| {
-            const col = nearestColumn(cols, c.x);
-            if (buckets[col].items.len > 0) try buckets[col].append(arena, ' ');
-            // Escape pipes so cell text can't break the table grid.
-            for (c.text) |ch| {
-                if (ch == '|') try buckets[col].appendSlice(arena, "\\|") else try buckets[col].append(arena, ch);
+        var bucket_end = try arena.alloc(f64, ncol); // last frag end_x per column, for intra-cell spacing
+        for (bucket_end) |*e| e.* = -std.math.inf(f64);
+
+        if (row.frags.len > 0) {
+            for (row.frags) |fr| {
+                const col = columnOf(cuts, (fr.x + fr.end_x) / 2.0);
+                const b = &buckets[col];
+                // Space between fragments sharing a column, mirroring line assembly.
+                if (b.items.len > 0 and fr.x - bucket_end[col] > fr.size * 0.17 and !endsWithSpace(b.items)) {
+                    try b.append(arena, ' ');
+                }
+                for (fr.text) |ch| {
+                    if (ch == '|') try b.appendSlice(arena, "\\|") else try b.append(arena, ch);
+                }
+                bucket_end[col] = fr.end_x;
+            }
+        } else {
+            // Fallback (lines without retained fragments): assign whole cells.
+            for (row.cells) |c| {
+                const col = columnOf(cuts, (c.x + c.end_x) / 2.0);
+                if (buckets[col].items.len > 0) try buckets[col].append(arena, ' ');
+                for (c.text) |ch| {
+                    if (ch == '|') try buckets[col].appendSlice(arena, "\\|") else try buckets[col].append(arena, ch);
+                }
             }
         }
+
         w.writeAll("|") catch {};
         for (buckets) |b| {
-            w.print(" {s} |", .{b.items}) catch {};
+            w.print(" {s} |", .{std.mem.trimEnd(u8, b.items, " ")}) catch {};
         }
         w.writeAll("\n") catch {};
 
         // Header separator after the first row.
         if (ri == 0) {
             w.writeAll("|") catch {};
-            for (cols) |_| w.writeAll(" --- |") catch {};
+            for (0..ncol) |_| w.writeAll(" --- |") catch {};
             w.writeAll("\n") catch {};
         }
     }
     w.writeAll("\n") catch {};
 }
 
-fn nearestColumn(cols: []const f64, x: f64) usize {
-    var best: usize = 0;
-    var best_d: f64 = std.math.inf(f64);
-    for (cols, 0..) |c, idx| {
-        const d = @abs(c - x);
-        if (d < best_d) {
-            best_d = d;
-            best = idx;
-        }
+/// The column index for center-x `cx` given sorted separator positions: the
+/// number of cuts to the left of `cx`. Column 0 is left of the first cut.
+fn columnOf(cuts: []const f64, cx: f64) usize {
+    var col: usize = 0;
+    for (cuts) |c| {
+        if (cx > c) col += 1 else break;
     }
-    return best;
+    return col;
 }
 
 fn flushPara(arena: std.mem.Allocator, w: *std.Io.Writer, para: *std.ArrayListUnmanaged(u8)) ExtractError!void {
@@ -4349,21 +4462,29 @@ test "table detection: aligned cells → GFM, prose → none" {
         fn cell(x: f64, t: []const u8) Cell {
             return .{ .x = x, .end_x = x + 40, .text = t };
         }
+        fn frag(x: f64, y: f64, t: []const u8) Frag {
+            return .{ .x = x, .y = y, .end_x = x + 40, .size = 10, .text = t };
+        }
     };
     var rows: std.ArrayListUnmanaged(Line) = .empty;
-    const cols_a = [_]Cell{ mk.cell(50, "Name"), mk.cell(200, "Qty") };
-    const cols_b = [_]Cell{ mk.cell(50, "Widget"), mk.cell(200, "3") };
-    const cols_c = [_]Cell{ mk.cell(50, "Gadget"), mk.cell(200, "7") };
-    try rows.append(a, .{ .text = "Name Qty", .y = 700, .x = 50, .size = 10, .cells = try a.dupe(Cell, &cols_a) });
-    try rows.append(a, .{ .text = "Widget 3", .y = 686, .x = 50, .size = 10, .cells = try a.dupe(Cell, &cols_b) });
-    try rows.append(a, .{ .text = "Gadget 7", .y = 672, .x = 50, .size = 10, .cells = try a.dupe(Cell, &cols_c) });
+    // Two columns separated by a wide gutter (x≈90 → 200). Cols detected from the
+    // whitespace band between them; column count is cuts.len + 1.
+    const ca = [_]Cell{ mk.cell(50, "Name"), mk.cell(200, "Qty") };
+    const cb = [_]Cell{ mk.cell(50, "Widget"), mk.cell(200, "3") };
+    const cc = [_]Cell{ mk.cell(50, "Gadget"), mk.cell(200, "7") };
+    const fa = [_]Frag{ mk.frag(50, 700, "Name"), mk.frag(200, 700, "Qty") };
+    const fb = [_]Frag{ mk.frag(50, 686, "Widget"), mk.frag(200, 686, "3") };
+    const fc = [_]Frag{ mk.frag(50, 672, "Gadget"), mk.frag(200, 672, "7") };
+    try rows.append(a, .{ .text = "Name Qty", .y = 700, .x = 50, .size = 10, .cells = try a.dupe(Cell, &ca), .frags = try a.dupe(Frag, &fa) });
+    try rows.append(a, .{ .text = "Widget 3", .y = 686, .x = 50, .size = 10, .cells = try a.dupe(Cell, &cb), .frags = try a.dupe(Frag, &fb) });
+    try rows.append(a, .{ .text = "Gadget 7", .y = 672, .x = 50, .size = 10, .cells = try a.dupe(Cell, &cc), .frags = try a.dupe(Frag, &fc) });
 
     const tbl = tryDetectTable(a, rows.items, 0, 10) orelse return error.TestUnexpectedResult;
     try testing.expectEqual(@as(usize, 3), tbl.end);
-    try testing.expectEqual(@as(usize, 2), tbl.cols.len);
+    try testing.expectEqual(@as(usize, 1), tbl.cuts.len); // 2 columns → 1 separator gutter
 
     var aw: std.Io.Writer.Allocating = .init(a);
-    try emitTable(a, &aw.writer, rows.items, tbl.cols);
+    try emitTable(a, &aw.writer, rows.items, tbl.cuts);
     const out = aw.written();
     try testing.expect(std.mem.indexOf(u8, out, "| Name | Qty |") != null);
     try testing.expect(std.mem.indexOf(u8, out, "| --- | --- |") != null);
@@ -4372,7 +4493,8 @@ test "table detection: aligned cells → GFM, prose → none" {
     // A single prose line (one cell) is not a table.
     var prose: std.ArrayListUnmanaged(Line) = .empty;
     const one = [_]Cell{mk.cell(50, "just text")};
-    try prose.append(a, .{ .text = "just text", .y = 700, .x = 50, .size = 10, .cells = try a.dupe(Cell, &one) });
+    const onef = [_]Frag{mk.frag(50, 700, "just text")};
+    try prose.append(a, .{ .text = "just text", .y = 700, .x = 50, .size = 10, .cells = try a.dupe(Cell, &one), .frags = try a.dupe(Frag, &onef) });
     try testing.expect(tryDetectTable(a, prose.items, 0, 10) == null);
 }
 
