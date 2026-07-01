@@ -212,6 +212,15 @@ pub fn RingBuffer(comptime T: type) type {
 pub const Grid = struct {
     allocator: std.mem.Allocator,
     cells: []Cell,
+    /// Per-*physical*-row soft-wrap flag: `wrapped[physRow(r)]` is true when
+    /// logical row `r` was continued onto row r+1 by DECAWM autowrap (a printable
+    /// overflowed the last column), i.e. there was NO explicit CR/LF between them.
+    /// Indexed by physRow (mirrors `cells`) so it rides the ring rotation on
+    /// scroll exactly like the cells do. INTERNAL only — never exported over the
+    /// C ABI (tmux_cell stays 16 bytes; this is Grid-level metadata, not per-cell).
+    /// Renderers/URL detection use it to distinguish a real soft-wrap from a
+    /// hard-terminated line that merely happens to fill the full width.
+    wrapped: []bool,
     rows: u16,
     cols: u16,
     /// Physical index of logical row 0. Advanced on scroll; never memcpy.
@@ -222,11 +231,16 @@ pub const Grid = struct {
     pub fn init(allocator: std.mem.Allocator, rows: u16, cols: u16) !Self {
         const size = @as(usize, rows) * @as(usize, cols);
         const cells = try allocator.alloc(Cell, size);
+        errdefer allocator.free(cells);
         @memset(cells, Cell.default);
+
+        const wrapped = try allocator.alloc(bool, rows);
+        @memset(wrapped, false);
 
         return Self{
             .allocator = allocator,
             .cells = cells,
+            .wrapped = wrapped,
             .rows = rows,
             .cols = cols,
             .row_offset = 0,
@@ -235,6 +249,19 @@ pub const Grid = struct {
 
     pub fn deinit(self: *Self) void {
         self.allocator.free(self.cells);
+        self.allocator.free(self.wrapped);
+    }
+
+    /// Whether logical row `row` was soft-wrapped (autowrap continuation follows).
+    pub inline fn isRowWrapped(self: *const Self, row: u16) bool {
+        if (row >= self.rows) return false;
+        return self.wrapped[self.physRow(row)];
+    }
+
+    /// Record (or clear) the soft-wrap flag for logical row `row`.
+    pub inline fn setRowWrapped(self: *Self, row: u16, value: bool) void {
+        if (row >= self.rows) return;
+        self.wrapped[self.physRow(row)] = value;
     }
 
     /// Map a logical row to its physical row. Single conditional subtract (both
@@ -268,6 +295,9 @@ pub const Grid = struct {
             while (c <= right and c < self.cols) : (c += 1) {
                 self.getCell(r, c).* = template;
             }
+            // Clearing through the last column removes whatever filled it, so any
+            // recorded soft-wrap for this row no longer holds — drop it.
+            if (right >= self.cols - 1) self.setRowWrapped(r, false);
         }
     }
 
@@ -296,6 +326,7 @@ pub const Grid = struct {
                 src_row += 1;
             }) {
                 @memcpy(self.rowSlice(dst_row), self.rowSlice(src_row));
+                self.setRowWrapped(dst_row, self.isRowWrapped(src_row));
             }
         }
         const clear_start = if (lines_to_move > 0) bottom - n + 1 else top;
@@ -322,6 +353,7 @@ pub const Grid = struct {
             var src_row = bottom - n;
             while (true) {
                 @memcpy(self.rowSlice(dst_row), self.rowSlice(src_row));
+                self.setRowWrapped(dst_row, self.isRowWrapped(src_row));
                 if (src_row == top) break;
                 dst_row -= 1;
                 src_row -= 1;
@@ -334,6 +366,7 @@ pub const Grid = struct {
     pub fn resize(self: *Self, new_rows: u16, new_cols: u16) !void {
         const new_size = @as(usize, new_rows) * @as(usize, new_cols);
         const new_cells = try self.allocator.alloc(Cell, new_size);
+        errdefer self.allocator.free(new_cells);
         @memset(new_cells, Cell.default);
 
         // Copy existing content in LOGICAL order, normalizing the ring back to
@@ -351,8 +384,15 @@ pub const Grid = struct {
             );
         }
 
+        // Soft-wrap flags don't survive a width change (reflow is out of scope);
+        // start fresh, all rows unwrapped.
+        const new_wrapped = try self.allocator.alloc(bool, new_rows);
+        @memset(new_wrapped, false);
+
         self.allocator.free(self.cells);
+        self.allocator.free(self.wrapped);
         self.cells = new_cells;
+        self.wrapped = new_wrapped;
         self.rows = new_rows;
         self.cols = new_cols;
         self.row_offset = 0;
@@ -553,6 +593,10 @@ pub const Terminal = struct {
     pub fn putChar(self: *Self, char: u21) void {
         if (self.cursor.col >= self.grid.cols) {
             if (self.modes.autowrap) {
+                // A printable overflowed the last column: the row we're leaving
+                // was soft-wrapped (no explicit CR/LF). Record it before newline
+                // moves the cursor off that row.
+                self.grid.setRowWrapped(self.cursor.row, true);
                 self.newline();
                 self.cursor.col = 0;
             } else {
@@ -586,6 +630,8 @@ pub const Terminal = struct {
             // Resolve a pending wrap exactly as putChar does.
             if (self.cursor.col >= self.grid.cols) {
                 if (self.modes.autowrap) {
+                    // Soft-wrap: mark the row being left before newline advances.
+                    self.grid.setRowWrapped(self.cursor.row, true);
                     self.newline();
                     self.cursor.col = 0;
                 } else {
@@ -627,6 +673,9 @@ pub const Terminal = struct {
 
     /// Handle carriage return
     pub fn carriageReturn(self: *Self) void {
+        // An explicit CR is a hard control of this row — it is not a soft-wrap
+        // continuation, so drop any recorded wrap for it.
+        self.grid.setRowWrapped(self.cursor.row, false);
         self.cursor.col = 0;
     }
 
@@ -799,6 +848,8 @@ pub const Terminal = struct {
 
         self.cursor.row = @min(base_row + row, max_row);
         self.cursor.col = @min(col, self.grid.cols - 1);
+        // Explicit cursor repositioning breaks any soft-wrap chain into this row.
+        self.grid.setRowWrapped(self.cursor.row, false);
     }
 
     /// Move cursor up (CUU)

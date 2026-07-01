@@ -46,11 +46,12 @@ fn matchesAt(grid: *const terminal.Grid, r: u16, c: u16, needle: []const u8) boo
     return true;
 }
 
-fn schemeAt(grid: *const terminal.Grid, r: u16, c: u16) bool {
+/// Length of the URL scheme that begins at (r,c), or 0 if none matches.
+fn schemeLenAt(grid: *const terminal.Grid, r: u16, c: u16) u16 {
     for (schemes) |s| {
-        if (matchesAt(grid, r, c, s)) return true;
+        if (matchesAt(grid, r, c, s)) return @intCast(s.len);
     }
-    return false;
+    return 0;
 }
 
 const End = struct { row: u16, col: u16 };
@@ -62,8 +63,12 @@ fn extendAndTrim(grid: *const terminal.Grid, r0: u16, c0: u16) End {
     var c = c0;
     while (true) {
         while (c < grid.cols and isUrlChar(charAt(grid, r, c))) c += 1;
-        // soft wrap: filled the last column and the next row continues with a URL char
-        if (c == grid.cols and r + 1 < grid.rows and isUrlChar(charAt(grid, r + 1, 0))) {
+        // Continue onto the next row only when this row was GENUINELY soft-wrapped
+        // (DECAWM autowrap with no CR/LF between), the URL filled the last column,
+        // and the next row actually resumes with a URL char. A hard line break
+        // stops the URL even if it happened to fill the full width — this is what
+        // prevents the underline from bleeding into unrelated following lines.
+        if (c == grid.cols and r + 1 < grid.rows and grid.isRowWrapped(r) and isUrlChar(charAt(grid, r + 1, 0))) {
             r += 1;
             c = 0;
             continue;
@@ -87,9 +92,13 @@ pub fn findUrls(grid: *const terminal.Grid, out: []UrlRange) usize {
             continue;
         }
         const boundary = c == 0 or !isUrlChar(charAt(grid, r, c - 1));
-        if (boundary and schemeAt(grid, r, c)) {
+        const scheme_len = schemeLenAt(grid, r, c);
+        if (boundary and scheme_len > 0) {
             const e = extendAndTrim(grid, r, c);
-            const long_enough = e.row > r or e.col > c + 4;
+            // Require at least one real host char past the scheme (or a soft-wrap
+            // onto the next row). Rejects bare schemes like "https://" or "www."
+            // with nothing after them.
+            const long_enough = e.row > r or e.col > c + scheme_len;
             if (long_enough) {
                 out[count] = .{ .start_row = r, .start_col = c, .end_row = e.row, .end_col = e.col };
                 count += 1;
@@ -130,4 +139,28 @@ test "findUrls: a URL that soft-wraps spans two rows" {
     try std.testing.expectEqual(@as(u16, 0), buf[0].start_row);
     try std.testing.expectEqual(@as(u16, 0), buf[0].start_col);
     try std.testing.expectEqual(@as(u16, 1), buf[0].end_row); // wrapped onto row 1
+}
+
+test "findUrls: a hard-terminated line that fills the width does NOT bleed onto the next line" {
+    // 19-col grid; "https://example.com" is exactly 19 chars, so it fills the
+    // last column WITHOUT triggering autowrap (autowrap is lazy). A CR/LF then
+    // hard-terminates the line, and the next line is all URL chars. The old
+    // "filled last column + next row starts with a URL char" proxy would have
+    // joined the two into one range (underline bleed); the real soft-wrap flag
+    // must keep the URL confined to its own row.
+    var term = try terminal.Terminal.init(std.testing.allocator, 4, 19, 100);
+    defer term.deinit();
+
+    term.putPrintableRun("https://example.com"); // fills row 0 exactly (col == cols)
+    try std.testing.expect(!term.grid.isRowWrapped(0)); // no autowrap fired → hard line
+    term.carriageReturn();
+    term.newline();
+    term.putPrintableRun("morestuff.com/path"); // row 1: URL chars, but a distinct line
+
+    var buf: [4]UrlRange = undefined;
+    const n = findUrls(&term.grid, &buf);
+    try std.testing.expectEqual(@as(usize, 1), n);
+    try std.testing.expectEqual(@as(u16, 0), buf[0].start_row);
+    try std.testing.expectEqual(@as(u16, 0), buf[0].end_row); // stays on its own row — no bleed
+    try std.testing.expectEqual(@as(u16, 19), buf[0].end_col); // through the full width
 }
