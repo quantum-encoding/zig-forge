@@ -575,8 +575,13 @@ pub fn signHash(hash: *const [32]u8, private_key: *const [32]u8) TxBuilderError!
     const key_pair = Ecdsa.KeyPair.fromSecretKey(secret_key) catch
         return TxBuilderError.InvalidPrivateKey;
 
-    // Sign the message hash
-    const sig = key_pair.sign(hash, null) catch
+    // Sign the (already double-SHA256'd) sighash as a PREHASHED message.
+    // sign() would hash its input again internally — signing
+    // SHA256(sighash) instead of the sighash — which produces signatures
+    // every Bitcoin node rejects. Consensus verifies ECDSA over the raw
+    // 32-byte digest, so signPrehashed is the only correct call here.
+    // Guarded by the BIP-143 published-vector test below.
+    const sig = key_pair.signPrehashed(hash.*, null) catch
         return TxBuilderError.SigningFailed;
 
     // Return signature in compact form (r || s)
@@ -1160,6 +1165,97 @@ test "BIP143 sighash uses per-input sequence" {
     const h_b = try computeSighashBip143(&b, 0, &TEST_PRIVKEY, SIGHASH_ALL);
 
     try std.testing.expect(!std.mem.eql(u8, &h_a, &h_b));
+}
+
+test "BIP-143 native P2WPKH published vector: intermediate hashes, sighash, pubkey, signature over raw digest" {
+    // Vectors verbatim from the BIP-143 "Native P2WPKH" worked example:
+    // https://github.com/bitcoin/bips/blob/master/bip-0143.mediawiki
+    //
+    // The relational tests above prove the sighash VARIES correctly per flag;
+    // this proves the bytes are the spec's bytes, and — the load-bearing part —
+    // that the signature is ECDSA over the RAW 32-byte digest (what Bitcoin
+    // consensus verifies). std Ecdsa.sign() hashes its input internally, so a
+    // sign() call on an already-double-SHA256'd sighash produces signatures
+    // that pass every same-API round-trip test yet are rejected by every
+    // Bitcoin node. verifyPrehashed() is the consensus-equivalent oracle.
+    var builder = TxBuilder.init();
+    builder.version = 1;
+    builder.locktime = 0x11;
+
+    var txid0: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&txid0, "fff7f7881a8099afa6940d42d1e7f6362bec38171ea3edf433541db4e4ad969f");
+    var txid1: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&txid1, "ef51e1b804cc89d182d279655c3aa89e815b1b309fe287d9b2b55d57b90ec68a");
+    var pkh1: [20]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&pkh1, "1d0f172a0ecb48aee1be1f2687d2963ae33f71a1");
+
+    // Input 0 is P2PK in the spec; only its outpoint + nSequence feed the
+    // input-1 sighash (via hashPrevouts / hashSequence), so its value and
+    // pubkey_hash are irrelevant here and left zero. Spec wire bytes for its
+    // nSequence are `eeffffff` = consensus integer 0xffffffee.
+    try builder.addInput(.{
+        .txid = txid0,
+        .vout = 0,
+        .value = 0,
+        .pubkey_hash = [_]u8{0} ** 20,
+        .derivation_index = 0,
+        .sequence = 0xffffffee,
+    });
+    try builder.addInput(.{
+        .txid = txid1,
+        .vout = 1,
+        .value = 600_000_000,
+        .pubkey_hash = pkh1,
+        .derivation_index = 1,
+        .sequence = 0xffffffff,
+    });
+
+    var out_pkh0: [20]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&out_pkh0, "8280b37df378db99f66f85c95a783a76ac7a6d59");
+    var out_pkh1: [20]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&out_pkh1, "3bde42dbee7e4dbe6a21b2d50ce2f0167faa8159");
+    try builder.addP2pkhOutput(0x0006b22c20, &out_pkh0);
+    try builder.addP2pkhOutput(0x000d519390, &out_pkh1);
+
+    // Intermediate hashes, verbatim from the spec.
+    var expected: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&expected, "96b827c8483d4e9b96712b6713a7b68d6e8003a781feba36c31143470b4efd37");
+    try std.testing.expectEqualSlices(u8, &expected, &computeHashPrevouts(&builder, SIGHASH_ALL));
+    _ = try std.fmt.hexToBytes(&expected, "52b0a642eea2fb7ae638c36f6252b6750293dbe574a806984b8e4d8548339a3b");
+    try std.testing.expectEqualSlices(u8, &expected, &computeHashSequence(&builder, SIGHASH_ALL));
+    _ = try std.fmt.hexToBytes(&expected, "863ef3e1a92afbfdb97f31ad0fc7683ee943e9abcf2501590ff8f6551f47e5e5");
+    try std.testing.expectEqualSlices(u8, &expected, &computeHashOutputs(&builder, SIGHASH_ALL, 1));
+
+    var privkey: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&privkey, "619c335025c7f4012e556c2a58b2506e30b8511b53ade95ea316fd8c3286feb9");
+
+    // Published sigHash for input 1.
+    const sighash = try computeSighashBip143(&builder, 1, &privkey, SIGHASH_ALL);
+    _ = try std.fmt.hexToBytes(&expected, "c37af31116d1b27caf68aae9e3ac82f1477929014d5b917657d0eb49478cb670");
+    try std.testing.expectEqualSlices(u8, &expected, &sighash);
+
+    // Published compressed public key for the spec private key.
+    var expected_pub: [33]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&expected_pub, "025476c2e83188368da1ff3e292e7acafcdb3566bb0ad253f62fc70f07aeee6357");
+    const pubkey = try derivePublicKey(&privkey);
+    try std.testing.expectEqualSlices(u8, &expected_pub, &pubkey);
+
+    // Consensus-semantics signature check. Note: the spec's exact signature
+    // bytes are NOT asserted because std's deterministic nonce zero-fills a
+    // noise slot into the HMAC input and therefore differs from strict
+    // RFC 6979; any valid low-S signature over the correct digest is
+    // consensus-valid, so verifyPrehashed against the published digest and
+    // pubkey is the correct, nonce-agnostic oracle.
+    const sig_compact = try signHash(&sighash, &privkey);
+    const Ecdsa = crypto.sign.ecdsa.Ecdsa(Secp256k1, Sha256);
+    const sig = Ecdsa.Signature.fromBytes(sig_compact);
+    const pk = try Ecdsa.PublicKey.fromSec1(&pubkey);
+    // What Bitcoin nodes compute: ECDSA over the raw digest. MUST pass.
+    try sig.verifyPrehashed(sighash, pk);
+    // Triple-hash semantics (digest re-hashed before signing) MUST NOT hold —
+    // if this verifies, signHash is signing SHA256(sighash) and every
+    // signature it emits is consensus-invalid.
+    try std.testing.expectError(error.SignatureVerificationFailed, sig.verify(&sighash, pk));
 }
 
 test "SpendableUtxo default sequence is DEFAULT_SEQUENCE" {
