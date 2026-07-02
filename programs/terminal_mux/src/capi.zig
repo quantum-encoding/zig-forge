@@ -76,6 +76,41 @@ fn activePane(h: *TmuxSession) *session.Pane {
     return h.sess.getActiveWindow().getActivePane();
 }
 
+/// Environment for spawned shells: the host process environment with TERM /
+/// COLORTERM forced to advertise this emulator's real capabilities (xterm-
+/// compatible, truecolor SGR). A GUI host launched from the Dock has no TERM
+/// at all, so without this every program in the PTY detects a dumb terminal
+/// and emits zero color. Built once; lives for the process lifetime.
+var child_env: ?[*:null]const ?[*:0]const u8 = null;
+var child_env_mutex: Mutex = .{};
+
+fn childEnviron() [*:null]const ?[*:0]const u8 {
+    child_env_mutex.lock();
+    defer child_env_mutex.unlock();
+    if (child_env) |e| return e;
+
+    const src = std.c.environ;
+    var n: usize = 0;
+    while (src[n] != null) : (n += 1) {}
+
+    // Worst case: every host entry kept + 2 forced vars + NULL terminator.
+    const buf = alloc.alloc(?[*:0]const u8, n + 3) catch return std.c.environ;
+    var i: usize = 0;
+    for (0..n) |j| {
+        const entry = std.mem.sliceTo(src[j].?, 0);
+        if (std.mem.startsWith(u8, entry, "TERM=")) continue;
+        if (std.mem.startsWith(u8, entry, "COLORTERM=")) continue;
+        buf[i] = src[j];
+        i += 1;
+    }
+    buf[i] = "TERM=xterm-256color";
+    buf[i + 1] = "COLORTERM=truecolor";
+    buf[i + 2] = null;
+    const env: [*:null]const ?[*:0]const u8 = @ptrCast(buf.ptr);
+    child_env = env;
+    return env;
+}
+
 // =============================================================================
 // C-visible data layout
 // =============================================================================
@@ -156,7 +191,7 @@ pub export fn tmux_create(rows: u16, cols: u16, shell: ?[*:0]const u8, out_id: ?
 
     const pane = sess.getActiveWindow().getActivePane();
     const shell_path: []const u8 = if (shell) |s| std.mem.sliceTo(s, 0) else defaultShell();
-    pane.spawn(shell_path, std.c.environ) catch {
+    pane.spawn(shell_path, childEnviron()) catch {
         sess.deinit();
         return null;
     };
@@ -383,7 +418,7 @@ pub export fn tmux_split(handle: ?*TmuxSession, horizontal: c_int) c_int {
     const h = handle orelse return -1;
     const dir: session.SplitDirection = if (horizontal != 0) .horizontal else .vertical;
     const new_pane = h.sess.getActiveWindow().split(dir, DEFAULT_SCROLLBACK) catch return -1;
-    new_pane.spawn(defaultShell(), std.c.environ) catch return -1;
+    new_pane.spawn(defaultShell(), childEnviron()) catch return -1;
     return 0;
 }
 
@@ -393,7 +428,7 @@ pub export fn tmux_new_window(handle: ?*TmuxSession) c_int {
     const h = handle orelse return -1;
     _ = h.sess.createWindow() catch return -1;
     h.sess.nextWindow();
-    activePane(h).spawn(defaultShell(), std.c.environ) catch return -1;
+    activePane(h).spawn(defaultShell(), childEnviron()) catch return -1;
     return 0;
 }
 
