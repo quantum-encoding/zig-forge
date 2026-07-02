@@ -131,6 +131,9 @@ pub const Modes = struct {
     bracketed_paste: bool = false,
     /// Mouse tracking modes
     mouse_tracking: MouseMode = .none,
+    /// SGR extended mouse encoding (DEC 1006) — how wheel/button events are
+    /// serialized when mouse_tracking is on.
+    mouse_sgr: bool = false,
     /// Focus events
     focus_events: bool = false,
 
@@ -445,6 +448,14 @@ pub const Scrollback = struct {
     pub fn clear(self: *Scrollback) void {
         self.head = 0;
         self.len = 0;
+    }
+
+    /// One retained line by history index: 0 = oldest, len-1 = newest.
+    /// Caller must keep `index < len`.
+    pub fn line(self: *const Scrollback, index: usize) []const Cell {
+        const slot = (self.head + index) % self.capacity_lines;
+        const start = slot * @as(usize, self.cols);
+        return self.cells[start .. start + self.cols];
     }
 
     /// Reallocate for a new column width (rare; resize path only). Clears

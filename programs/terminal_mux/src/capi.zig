@@ -342,7 +342,9 @@ pub export fn tmux_feed(handle: ?*TmuxSession, data: ?[*]const u8, len: usize) v
 pub export fn tmux_send(handle: ?*TmuxSession, data: ?[*]const u8, len: usize) c_long {
     const h = handle orelse return -1;
     const d = data orelse return -1;
-    activePane(h).sendInput(d[0..len]) catch return -1;
+    const pane = activePane(h);
+    pane.terminal.scrollback_offset = 0; // typing snaps the view to the live bottom
+    pane.sendInput(d[0..len]) catch return -1;
     return @intCast(len);
 }
 
@@ -379,15 +381,25 @@ pub export fn tmux_grid_size(handle: ?*TmuxSession, out_rows: ?*u16, out_cols: ?
 pub export fn tmux_read_cells(handle: ?*TmuxSession, out: ?[*]CCell, max_cells: usize) usize {
     const h = handle orelse return 0;
     const buf = out orelse return 0;
-    const grid = &activePane(h).terminal.grid;
+    const term = &activePane(h).terminal;
+    const grid = &term.grid;
     const cols: usize = grid.cols;
     const total = @as(usize, grid.rows) * cols;
     const n = @min(total, max_cells);
 
+    // Scrolled-back view: the first `back` rows come from the scrollback ring,
+    // the rest from the top of the live grid. Clamped to what history holds —
+    // the ring may have evicted lines since the offset was set.
+    const back: usize = if (term.modes.alt_screen) 0 else @min(term.scrollback_offset, term.scrollback.len);
+
     var i: usize = 0;
     while (i < n) : (i += 1) {
         // Map flat index → logical (row,col) so the ring offset is honored.
-        const cell = grid.getCellConst(@intCast(i / cols), @intCast(i % cols)).*;
+        const row = i / cols;
+        const cell = if (row < back)
+            term.scrollback.line(term.scrollback.len - back + row)[i % cols]
+        else
+            grid.getCellConst(@intCast(row - back), @intCast(i % cols)).*;
         var cc: CCell = undefined;
         cc.ch = cell.char;
         fillColor(cell.fg, &cc.fg_kind, &cc.fg_idx, &cc.fg_r, &cc.fg_g, &cc.fg_b);
@@ -405,7 +417,70 @@ pub export fn tmux_cursor(handle: ?*TmuxSession, out_row: ?*u16, out_col: ?*u16,
     const term = &activePane(h).terminal;
     if (out_row) |p| p.* = term.cursor.row;
     if (out_col) |p| p.* = term.cursor.col;
-    if (out_visible) |p| p.* = term.modes.cursor_visible;
+    // While scrolled back the cursor's grid position points at content that
+    // isn't on screen — hide it until the view snaps back to the live bottom.
+    if (out_visible) |p| p.* = term.modes.cursor_visible and
+        (term.modes.alt_screen or term.scrollback_offset == 0);
+}
+
+/// Route a mouse-wheel scroll of `delta` lines (positive = up / back in time,
+/// negative = down) at cell (row, col).
+///  - Mouse reporting on (vim, htop, tmux…): forwards wheel events to the
+///    app — SGR-encoded when DEC 1006 is set, legacy X10 bytes otherwise.
+///  - Alt screen without mouse reporting (less, man): sends arrow keys — the
+///    xterm "alternate scroll" convention.
+///  - Primary screen otherwise: moves the viewport through the scrollback
+///    ring; tmux_read_cells then composes history + live grid.
+/// Returns the viewport's scrollback offset after the call (0 = live bottom).
+pub export fn tmux_scroll(handle: ?*TmuxSession, delta: c_int, row: u16, col: u16) c_long {
+    const h = handle orelse return 0;
+    const pane = activePane(h);
+    const term = &pane.terminal;
+    if (delta == 0) return tmux_scroll_offset(handle);
+
+    const up = delta > 0;
+    const mag: usize = @intCast(if (up) delta else -delta);
+
+    if (term.modes.mouse_tracking != .none) {
+        var i: usize = 0;
+        var buf: [32]u8 = undefined;
+        while (i < mag) : (i += 1) {
+            if (term.modes.mouse_sgr) {
+                const btn: u8 = if (up) 64 else 65;
+                const seq = std.fmt.bufPrint(&buf, "\x1b[<{d};{d};{d}M", .{ btn, col + 1, row + 1 }) catch break;
+                pane.sendInput(seq) catch break;
+            } else {
+                // Legacy X10 bytes: 32 + button, 32 + 1-based coord (clamped).
+                const cb: u8 = if (up) 96 else 97;
+                const cx: u8 = @intCast(@min(@as(usize, col) + 33, 255));
+                const cy: u8 = @intCast(@min(@as(usize, row) + 33, 255));
+                pane.sendInput(&[_]u8{ 0x1b, '[', 'M', cb, cx, cy }) catch break;
+            }
+        }
+        return 0;
+    }
+
+    if (term.modes.alt_screen) {
+        const seq: []const u8 = if (term.modes.app_cursor)
+            (if (up) "\x1bOA" else "\x1bOB")
+        else
+            (if (up) "\x1b[A" else "\x1b[B");
+        var i: usize = 0;
+        while (i < mag) : (i += 1) pane.sendInput(seq) catch break;
+        return 0;
+    }
+
+    const cur = @min(term.scrollback_offset, term.scrollback.len);
+    term.scrollback_offset = if (up) @min(cur + mag, term.scrollback.len) else cur -| mag;
+    return @intCast(term.scrollback_offset);
+}
+
+/// Current viewport scrollback offset in lines (0 = pinned to the live bottom).
+pub export fn tmux_scroll_offset(handle: ?*TmuxSession) c_long {
+    const h = handle orelse return 0;
+    const term = &activePane(h).terminal;
+    if (term.modes.alt_screen) return 0;
+    return @intCast(@min(term.scrollback_offset, term.scrollback.len));
 }
 
 // =============================================================================
@@ -539,6 +614,7 @@ pub export fn tmux_paste(handle: ?*TmuxSession, data: ?[*]const u8, len: usize) 
     const h = handle orelse return -1;
     const d = data orelse return -1;
     const pane = activePane(h);
+    pane.terminal.scrollback_offset = 0; // pasting snaps the view to the live bottom
     if (pane.terminal.modes.bracketed_paste) {
         pane.sendInput("\x1b[200~") catch return -1;
         pane.sendInput(d[0..len]) catch return -1;

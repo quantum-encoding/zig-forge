@@ -91,6 +91,17 @@ void     tmux_grid_size(tmux_session *handle, uint16_t *out_rows, uint16_t *out_
 size_t   tmux_read_cells(tmux_session *handle, tmux_cell *out, size_t max_cells);
 void     tmux_cursor(tmux_session *handle, uint16_t *out_row, uint16_t *out_col, bool *out_visible);
 
+/* ---- scrolling ----
+ * tmux_scroll routes a wheel scroll of `delta` lines (positive = up / back in
+ * time) at cell (row, col): mouse-reporting apps get wheel events (SGR when
+ * DEC 1006 is set, X10 bytes otherwise); alt-screen apps without mouse get
+ * arrow keys (xterm "alternate scroll"); the primary screen moves the viewport
+ * through scrollback — tmux_read_cells then composes history + live grid.
+ * Typing or pasting snaps the viewport back to the live bottom. Returns the
+ * offset after the call; tmux_scroll_offset reads it without scrolling. */
+long     tmux_scroll(tmux_session *handle, int delta, uint16_t row, uint16_t col);
+long     tmux_scroll_offset(tmux_session *handle);
+
 /* ---- window / pane control ---- */
 int      tmux_split(tmux_session *handle, int horizontal);
 int      tmux_new_window(tmux_session *handle);

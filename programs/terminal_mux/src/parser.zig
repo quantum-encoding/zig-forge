@@ -892,6 +892,7 @@ fn handleDecPrivateMode(term: *Terminal, seq: CsiSequence, enable: bool) void {
             1002 => term.modes.mouse_tracking = if (enable) .button else .none,
             1003 => term.modes.mouse_tracking = if (enable) .any else .none,
             1004 => term.modes.focus_events = enable,
+            1006 => term.modes.mouse_sgr = enable,
             1049 => {
                 // Alternate screen buffer with cursor save
                 if (enable) {
