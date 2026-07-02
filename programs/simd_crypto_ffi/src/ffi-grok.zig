@@ -3175,6 +3175,40 @@ test "effective value FFI" {
     try std.testing.expectEqual(@as(i64, 9320), eff);
 }
 
+// Regression: a transaction whose output values SUM past u64 must be rejected,
+// not wrapped. The bug (fixed 3c9d392) did `total_value += output.value`, which
+// wraps silently in ReleaseFast and produced a bogus small total_output_value
+// (an attacker-chosen wrong number a fee/balance calc would then trust). The
+// fix uses @addWithOverflow and returns parse_error. Values are 0xffff…ff and
+// 1, which sum to exactly u64 overflow.
+test "quantum_bitcoin_parse_tx rejects output-value sum overflow" {
+    // Legacy (non-SegWit) tx: version | 1 input | 2 outputs | locktime.
+    const raw = [_]u8{
+        0x02, 0x00, 0x00, 0x00, // version 2
+        0x01, // input count = 1
+    } ++ [_]u8{0x11} ** 32 // prev txid
+    ++ [_]u8{
+        0x00, 0x00, 0x00, 0x00, // vout 0
+        0x00, // scriptSig len 0
+        0xff, 0xff, 0xff, 0xff, // sequence
+        0x02, // output count = 2
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // value0 = u64::MAX (LE)
+        0x00, // scriptPubKey0 len 0
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // value1 = 1 (LE)
+        0x00, // scriptPubKey1 len 0
+        0x00, 0x00, 0x00, 0x00, // locktime
+    };
+
+    const parsed = try std.testing.allocator.create(CParsedTx);
+    defer std.testing.allocator.destroy(parsed);
+
+    const rc = quantum_bitcoin_parse_tx(&raw, raw.len, parsed);
+    try std.testing.expectEqual(
+        @intFromEnum(QuantumCryptoError.parse_error),
+        rc,
+    );
+}
+
 /// FFI panic seal: convert any panic into an immediate abort() so it can never
 /// unwind across the C ABI into the Rust host (which would be undefined behaviour).
 fn ffiPanic(msg: []const u8, ret_addr: ?usize) noreturn {

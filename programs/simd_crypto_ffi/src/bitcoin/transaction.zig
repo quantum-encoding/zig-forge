@@ -555,3 +555,36 @@ test "script type detection - OP_RETURN" {
     try std.testing.expectEqual(ScriptType.op_return, result.script_type);
     try std.testing.expect(result.address_hash == null);
 }
+
+// Regression: a SegWit tx that allocates a per-input witness array and then
+// fails mid-parse (truncated witness item) must NOT leak that array. The bug
+// (fixed 3c9d392) assigned `input.witness = witness_items` only AFTER the
+// item-read loop, so a failure inside the loop left the allocation unowned and
+// unfreed. `std.testing.allocator` fails the test on any leak, so this guards
+// the errdefer + early-assign fix directly.
+test "parseTransaction frees witness array when a witness item read fails (no leak)" {
+    // Minimal SegWit tx, well-formed up to the witness item bytes:
+    //   version | marker+flag | 1 input | 1 output | witness_count=1 | item_len=5
+    // then the 5 item bytes are missing -> readBytes returns UnexpectedEof
+    // AFTER the 1-element witness array has been allocated.
+    const raw = [_]u8{
+        0x02, 0x00, 0x00, 0x00, // version 2
+        0x00, 0x01, // SegWit marker + flag
+        0x01, // input count = 1
+    } ++ [_]u8{0x11} ** 32 // prev txid
+    ++ [_]u8{
+        0x00, 0x00, 0x00, 0x00, // vout 0
+        0x00, // scriptSig len 0
+        0xff, 0xff, 0xff, 0xff, // sequence
+        0x01, // output count = 1
+        0x00, 0xe1, 0xf5, 0x05, 0x00, 0x00, 0x00, 0x00, // value 100_000_000
+        0x00, // scriptPubKey len 0
+        0x01, // input 0 witness stack count = 1  -> allocates witness_items[1]
+        0x05, // item 0 length = 5  -> readBytes needs 5 more bytes, none remain
+    };
+
+    const result = parseTransaction(std.testing.allocator, &raw);
+    try std.testing.expectError(ParseError.UnexpectedEof, result);
+    // If the test reaches here without std.testing.allocator reporting a leak,
+    // the witness array was freed on the error path.
+}
