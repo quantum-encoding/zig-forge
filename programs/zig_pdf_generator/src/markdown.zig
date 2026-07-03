@@ -51,6 +51,9 @@ pub const LetterInput = struct {
     closing: []const u8 = "", // e.g. "Yours sincerely,"
     signature_name: []const u8 = "",
     signature_title: []const u8 = "",
+    // Drawn/scanned signature image (path, `data:` URL, or raw base64; PNG
+    // with transparency recommended). "" = leave the wet-signature gap.
+    signature_image: []const u8 = "",
 
     accent_hex: []const u8 = "#1a1a1a",
     margin: f32 = 64,
@@ -644,6 +647,13 @@ const Renderer = struct {
     bg_w: f32 = 0,
     bg_h: f32 = 0,
 
+    // Optional signature image, drawn in the closing block in place of the
+    // blank wet-signature gap. Sized at natural aspect, 40pt tall (capped
+    // 180pt wide) — roughly the 50×20mm convention for document signatures.
+    sig_image_id: ?[]const u8 = null,
+    sig_w: f32 = 0,
+    sig_h: f32 = 0,
+
     // Optional letterhead/closing furniture (letter document type).
     letter: ?LetterInput = null,
 
@@ -764,6 +774,20 @@ const Renderer = struct {
         }
     }
 
+    // Decode + register the signature image at natural aspect: 40pt tall,
+    // capped at 180pt wide. Silently tolerant like resolveBackground — a bad
+    // image just leaves the wet-signature gap.
+    fn resolveSignatureImage(self: *Renderer, src: []const u8) void {
+        if (src.len == 0) return;
+        const loaded = image_lib.loadImageFlexible(self.allocator, src) catch return;
+        const iw: f32 = @floatFromInt(loaded.image.width);
+        const ih: f32 = @floatFromInt(loaded.image.height);
+        if (iw <= 0 or ih <= 0) return;
+        self.sig_image_id = self.doc.addImage(loaded.image) catch return;
+        self.sig_h = 40;
+        self.sig_w = @min(iw * (self.sig_h / ih), 180);
+    }
+
     fn drawPageBackground(self: *Renderer, content: *document.ContentStream) !void {
         const id = self.bg_image_id orelse return;
         if (self.bg_gs_id) |gs| {
@@ -831,10 +855,17 @@ const Renderer = struct {
     fn drawSignature(self: *Renderer, content: *document.ContentStream, L: LetterInput) !void {
         if (L.closing.len == 0 and L.signature_name.len == 0) return;
         // Keep the closing block together on one page.
-        try self.checkPageBreak(content, 80);
+        try self.checkPageBreak(content, 80 + self.sig_h);
         self.current_y -= 18;
         try self.drawLine(content, L.closing, .text, 11, INK_BLACK);
-        self.current_y -= 36; // blank space for a wet/scanned signature
+        if (self.sig_image_id) |sid| {
+            // Drawn signature replaces the blank wet-signature gap.
+            self.current_y -= self.sig_h + 6;
+            try content.drawImage(sid, self.margin_left, self.current_y, self.sig_w, self.sig_h);
+            self.current_y -= 14;
+        } else {
+            self.current_y -= 36; // blank space for a wet/scanned signature
+        }
         try self.drawLine(content, L.signature_name, .bold, 11, INK_BLACK);
         try self.drawLine(content, L.signature_title, .text, 10, SUBTLE_GREY);
     }
@@ -1479,6 +1510,7 @@ pub fn generateLetter(allocator: std.mem.Allocator, in: LetterInput) ![]u8 {
     renderer.current_y = renderer.page_height - in.margin;
 
     renderer.resolveBackground(in.background_image, in.background_opacity, in.background_fit);
+    renderer.resolveSignatureImage(in.signature_image);
     renderer.letter = in;
     renderer.justify = in.justify;
 

@@ -67,6 +67,7 @@ pub fn generateLetterFromJsonSeeded(allocator: std.mem.Allocator, json_str: []co
     in.closing = getStr(o, "closing");
     in.signature_name = getStr(o, "signature_name");
     in.signature_title = getStr(o, "signature_title");
+    in.signature_image = getStr(o, "signature_image");
     const accent = getStr(o, "accent_hex");
     if (accent.len > 0) in.accent_hex = accent;
     in.margin = getF32(o, "margin", 64);
