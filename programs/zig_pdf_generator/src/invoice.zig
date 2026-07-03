@@ -565,13 +565,15 @@ pub const InvoiceRenderer = struct {
                 }
                 self.current_y = by - 18;
             } else if (self.data.logo_inline) {
-                const sz = self.data.logo_width;
-                // Top-align the square with the 16pt name (cap top ~12pt above baseline).
-                try content.drawImage(lid, self.margin_left, self.current_y + 12 - sz, sz, sz);
+                // Natural aspect — never squash a non-square mark into a box.
+                const lw = self.data.logo_width;
+                const lh = if (self.data.logo_height > 0) self.data.logo_height else self.data.logo_width;
+                // Top-align with the 16pt name (cap top ~12pt above baseline).
+                try content.drawImage(lid, self.margin_left, self.current_y + 12 - lh, lw, lh);
                 if (self.data.logo_link_url) |u| {
-                    if (u.len > 0) try self.doc.addLinkAnnotation(self.margin_left, self.current_y + 12 - sz, self.margin_left + sz, self.current_y + 12, u);
+                    if (u.len > 0) try self.doc.addLinkAnnotation(self.margin_left, self.current_y + 12 - lh, self.margin_left + lw, self.current_y + 12, u);
                 }
-                block_x = self.margin_left + sz + 10;
+                block_x = self.margin_left + lw + 10;
             }
         }
         if (!self.data.logo_banner or logo_id == null) {
