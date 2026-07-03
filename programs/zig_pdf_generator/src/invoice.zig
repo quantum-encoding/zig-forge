@@ -613,7 +613,10 @@ pub const InvoiceRenderer = struct {
             // the emphasis treatment from the HDM benchmark.
             const card_border = document.Color.fromHex("#E5E7EB");
             const muted = document.Color.fromHex("#6B7280");
-            self.current_y -= 16;
+            // Clear BOTH columns above: the company block (left, current_y)
+            // and the invoice-meta block (right, details_y ends at the Due
+            // Date baseline) — plus a full line of air before the cards.
+            self.current_y = @min(self.current_y - 16, details_y - 26);
             const gap: f32 = 14;
             const card_w = (usable_width - gap) / 2;
             const pad: f32 = 12;
