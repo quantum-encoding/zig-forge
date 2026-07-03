@@ -416,6 +416,31 @@ function createModule(exports: WasmExports): ZigPdfModule {
 /**
  * Load the WASM module from a URL
  */
+/**
+ * Build the import object by ENUMERATING the module's actual WASI imports —
+ * a fixed stub list rots every time the engine gains a new import (this bit
+ * us with random_get). Every wasi fn gets a 0-returning stub except
+ * random_get, which fills real entropy (the AES-encrypted variants need it).
+ */
+function buildImports(mod: WebAssembly.Module): WebAssembly.Imports {
+  const wasi: Record<string, (...a: number[]) => number> = {};
+  for (const imp of WebAssembly.Module.imports(mod)) {
+    if (imp.module !== 'wasi_snapshot_preview1') continue;
+    if (imp.name === 'random_get') {
+      wasi.random_get = (bufPtr: number, bufLen: number) => {
+        const mem = (globalThis as { __zigpdfMemory?: WebAssembly.Memory }).__zigpdfMemory;
+        if (mem) crypto.getRandomValues(new Uint8Array(mem.buffer, bufPtr, bufLen));
+        return 0;
+      };
+    } else if (imp.name === 'proc_exit') {
+      wasi.proc_exit = () => 0;
+    } else {
+      wasi[imp.name] = () => 0;
+    }
+  }
+  return { wasi_snapshot_preview1: wasi };
+}
+
 async function loadFromUrl(wasmUrl: string): Promise<ZigPdfModule> {
   // Create shared memory
   wasmMemory = new WebAssembly.Memory({
@@ -432,25 +457,10 @@ async function loadFromUrl(wasmUrl: string): Promise<ZigPdfModule> {
 
   const wasmBytes = await response.arrayBuffer();
 
-  const imports = {
-    env: {
-      memory: wasmMemory
-    },
-    wasi_snapshot_preview1: {
-      // Minimal WASI stubs for Zig's stdlib
-      fd_write: () => 0,
-      fd_read: () => 0,
-      fd_close: () => 0,
-      fd_seek: () => 0,
-      proc_exit: () => {},
-      environ_get: () => 0,
-      environ_sizes_get: () => 0,
-      clock_time_get: () => 0
-    }
-  };
-
-  const { instance } = await WebAssembly.instantiate(wasmBytes, imports);
+  const mod = await WebAssembly.compile(wasmBytes);
+  const instance = await WebAssembly.instantiate(mod, buildImports(mod));
   const exports = instance.exports as unknown as WasmExports;
+  (globalThis as { __zigpdfMemory?: WebAssembly.Memory }).__zigpdfMemory = exports.memory;
 
   return createModule(exports);
 }
@@ -465,24 +475,10 @@ async function loadFromBuffer(wasmBytes: ArrayBuffer): Promise<ZigPdfModule> {
     shared: false
   });
 
-  const imports = {
-    env: {
-      memory: wasmMemory
-    },
-    wasi_snapshot_preview1: {
-      fd_write: () => 0,
-      fd_read: () => 0,
-      fd_close: () => 0,
-      fd_seek: () => 0,
-      proc_exit: () => {},
-      environ_get: () => 0,
-      environ_sizes_get: () => 0,
-      clock_time_get: () => 0
-    }
-  };
-
-  const { instance } = await WebAssembly.instantiate(wasmBytes, imports);
+  const mod = await WebAssembly.compile(wasmBytes);
+  const instance = await WebAssembly.instantiate(mod, buildImports(mod));
   const exports = instance.exports as unknown as WasmExports;
+  (globalThis as { __zigpdfMemory?: WebAssembly.Memory }).__zigpdfMemory = exports.memory;
 
   return createModule(exports);
 }
