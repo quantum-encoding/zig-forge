@@ -84,6 +84,12 @@ pub const InvoiceData = struct {
     // Document type
     document_type: []const u8 = "invoice", // "invoice" or "quote"
 
+    // Optional overrides for the big title and the number label — lets this
+    // one template serve statements, credit notes, purchase orders etc.
+    // (JSON "title" / "number_label"). Null keeps the classic three.
+    custom_title: ?[]const u8 = null,
+    number_label: ?[]const u8 = null,
+
     // Company info
     company_name: []const u8 = "",
     company_address: []const u8 = "",
@@ -541,11 +547,16 @@ pub const InvoiceRenderer = struct {
             }
         }
 
-        // Document title (INVOICE / QUOTE / RECEIPT)
+        // Document title (INVOICE / QUOTE / RECEIPT — or a custom override
+        // like STATEMENT / CREDIT NOTE). Right-aligned by estimated width so
+        // long titles don't run off the page; very long ones also shrink.
         const is_quote = std.mem.eql(u8, self.data.document_type, "quote");
         const is_receipt = std.mem.eql(u8, self.data.document_type, "receipt");
-        const doc_title = if (is_quote) "QUOTE" else if (is_receipt) "RECEIPT" else "INVOICE";
-        try content.drawText(doc_title, self.page_width - self.margin_right - 120, self.page_height - self.margin_top, self.font_bold, 28, title_color);
+        const doc_title = self.data.custom_title orelse (if (is_quote) "QUOTE" else if (is_receipt) "RECEIPT" else "INVOICE");
+        const title_size: f32 = if (doc_title.len > 12) 20 else 28;
+        const title_est_w = @as(f32, @floatFromInt(doc_title.len)) * title_size * 0.62;
+        const title_x = @max(self.page_width - self.margin_right - title_est_w, self.margin_left + 180);
+        try content.drawText(doc_title, title_x, self.page_height - self.margin_top, self.font_bold, title_size, title_color);
 
         self.current_y = self.page_height - self.margin_top - 50;
 
@@ -613,7 +624,7 @@ pub const InvoiceRenderer = struct {
         var details_y = self.page_height - self.margin_top - 50;
 
         // Document number (label tracks the document type)
-        const num_label = if (is_quote) "Quote #:" else if (is_receipt) "Receipt #:" else "Invoice #:";
+        const num_label = self.data.number_label orelse (if (is_quote) "Quote #:" else if (is_receipt) "Receipt #:" else "Invoice #:");
         try content.drawText(num_label, details_x, details_y, self.font_bold, 10, document.Color.black);
         try self.drawRightFit(&content, self.data.invoice_number, details_right, meta_value_width, details_y, self.font_regular, reg, 10, document.Color.black);
         details_y -= 15;

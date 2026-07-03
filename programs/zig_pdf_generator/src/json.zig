@@ -70,6 +70,8 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
 
     // Parse string fields (always allocate, even defaults, so freeInvoiceData works correctly)
     data.document_type = try dupeJsonString(allocator, obj, "document_type") orelse try allocator.dupe(u8, "invoice");
+    data.custom_title = try dupeJsonString(allocator, obj, "title");
+    data.number_label = try dupeJsonString(allocator, obj, "number_label");
     data.company_name = try dupeJsonString(allocator, obj, "company_name") orelse try allocator.dupe(u8, "");
     data.company_address = try dupeJsonString(allocator, obj, "company_address") orelse try allocator.dupe(u8, "");
     data.company_vat = try dupeJsonString(allocator, obj, "company_vat") orelse try allocator.dupe(u8, "");
@@ -341,6 +343,8 @@ fn dupeJsonString(allocator: std.mem.Allocator, obj: std.json.ObjectMap, key: []
 pub fn freeInvoiceData(allocator: std.mem.Allocator, data: *const invoice.InvoiceData) void {
     // Free string fields
     if (data.document_type.len > 0) allocator.free(data.document_type);
+    if (data.custom_title) |s| allocator.free(s);
+    if (data.number_label) |s| allocator.free(s);
     if (data.company_name.len > 0) allocator.free(data.company_name);
     if (data.company_address.len > 0) allocator.free(data.company_address);
     if (data.company_vat.len > 0) allocator.free(data.company_vat);
