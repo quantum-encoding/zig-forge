@@ -514,6 +514,17 @@ pub const Terminal = struct {
     title: [256]u8,
     title_len: usize,
 
+    // DECSCUSR cursor style (CSI Ps SP q). Default = blinking block.
+    cursor_shape: u8 = 0, // 0 block, 1 underline, 2 bar
+    cursor_blink: bool = true,
+
+    // Host-side effect queues the parser can't perform itself: bell strokes
+    // (BEL) and the last OSC 52 clipboard payload ("Pc;Pd", Pd = base64).
+    // The C API's take_* calls read-and-clear these.
+    bell_pending: u32 = 0,
+    clipboard_pending: [4096]u8 = undefined,
+    clipboard_len: usize = 0,
+
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator, rows: u16, cols: u16, scrollback_lines: u32) !Self {
@@ -1019,6 +1030,20 @@ pub const Terminal = struct {
     }
 
     /// Reset terminal to initial state
+    /// DECSCUSR (CSI Ps SP q): 0/1 blinking block, 2 steady block, 3/4 underline,
+    /// 5/6 bar — odd numbers blink, even are steady.
+    pub fn setCursorStyle(self: *Self, n: u16) void {
+        switch (n) {
+            0, 1 => { self.cursor_shape = 0; self.cursor_blink = true; },
+            2 => { self.cursor_shape = 0; self.cursor_blink = false; },
+            3 => { self.cursor_shape = 1; self.cursor_blink = true; },
+            4 => { self.cursor_shape = 1; self.cursor_blink = false; },
+            5 => { self.cursor_shape = 2; self.cursor_blink = true; },
+            6 => { self.cursor_shape = 2; self.cursor_blink = false; },
+            else => {},
+        }
+    }
+
     pub fn reset(self: *Self) void {
         self.cursor = .{};
         self.current_attrs = .{};

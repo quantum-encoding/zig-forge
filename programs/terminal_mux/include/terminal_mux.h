@@ -91,6 +91,20 @@ void     tmux_grid_size(tmux_session *handle, uint16_t *out_rows, uint16_t *out_
 size_t   tmux_read_cells(tmux_session *handle, tmux_cell *out, size_t max_cells);
 void     tmux_cursor(tmux_session *handle, uint16_t *out_row, uint16_t *out_col, bool *out_visible);
 
+/* ---- modes / cursor style / host effects ----
+ * tmux_modes bitmask: 1 app-cursor (DECCKM) · 2 bracketed paste · 4 alt screen ·
+ * 8 mouse tracking · 16 SGR mouse · 32 focus events.
+ * tmux_mouse forwards press(0)/release(1)/drag-motion(2) of button 0/1/2 with
+ * xterm mods (4 shift, 8 alt, 16 ctrl); returns 1 when reported to the app
+ * (host must not also act), 0 when the host should handle locally.
+ * take_bell / take_clipboard are read-and-clear (clipboard = OSC 52 "Pc;Pd"). */
+uint32_t tmux_modes(tmux_session *handle);
+void     tmux_cursor_style(tmux_session *handle, uint8_t *out_shape, bool *out_blink);
+uint32_t tmux_take_bell(tmux_session *handle);
+size_t   tmux_take_clipboard(tmux_session *handle, uint8_t *out, size_t max);
+size_t   tmux_title(tmux_session *handle, uint8_t *out, size_t max);
+int      tmux_mouse(tmux_session *handle, int kind, int button, uint16_t row, uint16_t col, int mods);
+
 /* ---- scrolling ----
  * tmux_scroll routes a wheel scroll of `delta` lines (positive = up / back in
  * time) at cell (row, col): mouse-reporting apps get wheel events (SGR when

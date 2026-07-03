@@ -719,7 +719,8 @@ pub fn applyAction(term: *Terminal, action: Action) void {
 fn executeC0(term: *Terminal, byte: u8) void {
     switch (byte) {
         0x07 => {
-            // BEL - bell
+            // BEL - bell: queue a stroke for the host (audio/visual is its call).
+            term.bell_pending +%= 1;
         },
         0x08 => {
             // BS - backspace
@@ -868,6 +869,12 @@ fn handleCsi(term: *Terminal, seq: CsiSequence) void {
         'u' => {
             // DECRC or Restore Cursor
             term.restoreCursor();
+        },
+        'q' => {
+            // DECSCUSR - cursor style (only with the space intermediate).
+            if (seq.intermediate_count == 1 and seq.intermediates[0] == ' ') {
+                term.setCursorStyle(seq.getParam(0, 1));
+            }
         },
         else => {},
     }
@@ -1038,6 +1045,16 @@ fn handleOsc(term: *Terminal, seq: OscSequence) void {
         },
         1 => {
             // Set icon name (ignore)
+        },
+        52 => {
+            // Clipboard (OSC 52;Pc;Pd, Pd = base64). Queue the payload for the
+            // host to decode + place on the system pasteboard. '?' (a clipboard
+            // READ request) is skipped — we never leak the host clipboard.
+            if (seq.data.len > 0 and !std.mem.endsWith(u8, seq.data, "?")) {
+                const n = @min(seq.data.len, term.clipboard_pending.len);
+                @memcpy(term.clipboard_pending[0..n], seq.data[0..n]);
+                term.clipboard_len = n;
+            }
         },
         else => {},
     }

@@ -411,6 +411,95 @@ pub export fn tmux_read_cells(handle: ?*TmuxSession, out: ?[*]CCell, max_cells: 
     return n;
 }
 
+/// DEC private modes the host renderer needs, as a bitmask:
+/// 1 app-cursor (DECCKM → SS3 arrows) · 2 bracketed paste · 4 alt screen ·
+/// 8 mouse tracking on · 16 SGR mouse encoding · 32 focus events wanted.
+pub export fn tmux_modes(handle: ?*TmuxSession) u32 {
+    const h = handle orelse return 0;
+    const m = &activePane(h).terminal.modes;
+    var out: u32 = 0;
+    if (m.app_cursor) out |= 1;
+    if (m.bracketed_paste) out |= 2;
+    if (m.alt_screen) out |= 4;
+    if (m.mouse_tracking != .none) out |= 8;
+    if (m.mouse_sgr) out |= 16;
+    if (m.focus_events) out |= 32;
+    return out;
+}
+
+/// DECSCUSR cursor style: shape 0 block / 1 underline / 2 bar, plus blink.
+pub export fn tmux_cursor_style(handle: ?*TmuxSession, out_shape: ?*u8, out_blink: ?*bool) void {
+    const h = handle orelse return;
+    const t = &activePane(h).terminal;
+    if (out_shape) |p| p.* = t.cursor_shape;
+    if (out_blink) |p| p.* = t.cursor_blink;
+}
+
+/// Bell strokes since the last call (read-and-clear).
+pub export fn tmux_take_bell(handle: ?*TmuxSession) u32 {
+    const h = handle orelse return 0;
+    const t = &activePane(h).terminal;
+    const n = t.bell_pending;
+    t.bell_pending = 0;
+    return n;
+}
+
+/// The pending OSC 52 clipboard payload ("Pc;Pd", Pd = base64), read-and-clear.
+/// Returns the copied length (0 = none pending).
+pub export fn tmux_take_clipboard(handle: ?*TmuxSession, out: ?[*]u8, max: usize) usize {
+    const h = handle orelse return 0;
+    const buf = out orelse return 0;
+    const t = &activePane(h).terminal;
+    if (t.clipboard_len == 0) return 0;
+    const n = @min(t.clipboard_len, max);
+    @memcpy(buf[0..n], t.clipboard_pending[0..n]);
+    t.clipboard_len = 0;
+    return n;
+}
+
+/// The window title (OSC 0/2), UTF-8, not NUL-terminated. Returns the length.
+pub export fn tmux_title(handle: ?*TmuxSession, out: ?[*]u8, max: usize) usize {
+    const h = handle orelse return 0;
+    const buf = out orelse return 0;
+    const t = &activePane(h).terminal;
+    const n = @min(t.title_len, max);
+    @memcpy(buf[0..n], t.title[0..n]);
+    return n;
+}
+
+/// Forward a mouse event to the app when it requested tracking. kind: 0 press,
+/// 1 release, 2 drag (button held) / motion. button: 0 left, 1 middle, 2 right.
+/// mods bitmask: 4 shift, 8 alt, 16 ctrl (xterm encoding). Returns 1 when the
+/// event was reported (host must NOT also act on it), 0 when tracking is off /
+/// below the event's level — the host handles it locally (selection etc.).
+pub export fn tmux_mouse(handle: ?*TmuxSession, kind: c_int, button: c_int, row: u16, col: u16, mods: c_int) c_int {
+    const h = handle orelse return 0;
+    const pane = activePane(h);
+    const t = &pane.terminal;
+    const mode = t.modes.mouse_tracking;
+    if (mode == .none) return 0;
+    // Level gates: X10 = press only; normal = press/release; button adds
+    // held-drag; any adds all motion.
+    if (kind == 1 and mode == .x10) return 1; // consumed, nothing sent
+    if (kind == 2 and (mode == .x10 or mode == .normal)) return 1;
+
+    var cb: c_int = if (kind == 1 and !t.modes.mouse_sgr) 3 else button;
+    if (kind == 2) cb += 32;
+    cb += mods;
+    if (t.modes.mouse_sgr) {
+        var buf: [40]u8 = undefined;
+        const fin: u8 = if (kind == 1) 'm' else 'M';
+        const seq = std.fmt.bufPrint(&buf, "\x1b[<{d};{d};{d}{c}", .{ cb, col + 1, row + 1, fin }) catch return 1;
+        pane.sendInput(seq) catch {};
+    } else {
+        const bx: u8 = @intCast(@min(@as(usize, col) + 33, 255));
+        const by: u8 = @intCast(@min(@as(usize, row) + 33, 255));
+        const cbb: u8 = @intCast(@min(@as(c_int, 32) + cb, 255));
+        pane.sendInput(&[_]u8{ 0x1b, '[', 'M', cbb, bx, by }) catch {};
+    }
+    return 1;
+}
+
 /// Report the cursor position and visibility of the active pane.
 pub export fn tmux_cursor(handle: ?*TmuxSession, out_row: ?*u16, out_col: ?*u16, out_visible: ?*bool) void {
     const h = handle orelse return;
