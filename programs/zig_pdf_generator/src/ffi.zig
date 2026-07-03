@@ -214,6 +214,8 @@ export fn zigpdf_version() [*:0]const u8 {
 // PDF → MDX extraction (the inverse of generation)
 // =============================================================================
 
+const presentation = @import("presentation.zig");
+
 const pdf_extract = @import("pdf_extract.zig");
 
 /// Metadata from the most recent extract call, serialized on demand by
@@ -1502,6 +1504,66 @@ export fn zigpdf_generate_template_card_to_file(
 // =============================================================================
 // Tests
 // =============================================================================
+
+// =============================================================================
+// Presentation / pitch-deck (ported from the Quantify vendored copy — these
+// exports predate the upstream/vendored split and the app links them)
+// =============================================================================
+
+/// Generate a freeform presentation / pitch-deck PDF from JSON input.
+/// Schema: { page_size: {width, height}, pages: [{ background_color, elements: [...] }] }
+/// See presentation.zig for supported element types (text, shape, table, image, chart).
+export fn zigpdf_generate_presentation(json_input: [*:0]const u8, output_len: *usize) ?[*]u8 {
+    const json_slice = std.mem.span(json_input);
+
+    const pdf_bytes = presentation.generatePresentationFromJson(ffi_allocator, json_slice) catch |err| {
+        var buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Presentation generation error: {s}", .{@errorName(err)}) catch "Presentation generation error";
+        setLastError(msg);
+        return null;
+    };
+
+    output_len.* = pdf_bytes.len;
+    return @ptrCast(@constCast(pdf_bytes.ptr));
+}
+
+/// Generate presentation and write directly to file.
+export fn zigpdf_generate_presentation_to_file(
+    json_input: [*:0]const u8,
+    output_path: [*:0]const u8,
+) ZigPdfError {
+    var len: usize = 0;
+    const pdf_ptr = zigpdf_generate_presentation(json_input, &len);
+
+    if (pdf_ptr == null) {
+        return .invalid_json;
+    }
+    defer zigpdf_free(pdf_ptr, len);
+
+    const path_slice = std.mem.span(output_path);
+    const pdf_data = pdf_ptr.?[0..len];
+
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    const file = std.Io.Dir.createFileAbsolute(io, path_slice, .{}) catch {
+        setLastError("Failed to create output file");
+        return .render_failed;
+    };
+    defer file.close(io);
+
+    var buf: [4096]u8 = undefined;
+    var writer = file.writer(io, &buf);
+    writer.interface.writeAll(pdf_data) catch {
+        setLastError("Failed to write PDF data");
+        return .render_failed;
+    };
+    std.Io.Writer.flush(&writer.interface) catch {
+        setLastError("Failed to flush PDF data");
+        return .render_failed;
+    };
+
+    return .success;
+}
 
 test "FFI simple document generation" {
     var len: usize = 0;
