@@ -114,6 +114,8 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
     data.logo_width = @floatCast(getJsonFloat(obj, "logo_width") orelse 80);
     data.logo_height = @floatCast(getJsonFloat(obj, "logo_height") orelse 50);
     data.logo_inline = getJsonBool(obj, "logo_inline") orelse false;
+    data.logo_banner = getJsonBool(obj, "logo_banner") orelse false;
+    data.logo_link_url = try dupeJsonString(allocator, obj, "logo_link_url");
 
     // Parse display mode
     if (getJsonString(obj, "display_mode")) |mode| {
@@ -343,6 +345,7 @@ pub fn freeInvoiceData(allocator: std.mem.Allocator, data: *const invoice.Invoic
     if (data.company_address.len > 0) allocator.free(data.company_address);
     if (data.company_vat.len > 0) allocator.free(data.company_vat);
     if (data.company_logo_base64) |s| allocator.free(s);
+    if (data.logo_link_url) |s| allocator.free(s);
     if (data.client_name.len > 0) allocator.free(data.client_name);
     if (data.client_address.len > 0) allocator.free(data.client_address);
     if (data.client_vat.len > 0) allocator.free(data.client_vat);
