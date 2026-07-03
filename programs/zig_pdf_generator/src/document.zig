@@ -796,9 +796,34 @@ pub const ContentStream = struct {
 
     /// Draw a rounded rectangle (filled)
     pub fn drawRoundedRect(self: *ContentStream, x: f32, y: f32, width: f32, height: f32, radius: f32, color: Color) !void {
-        const r = @min(radius, @min(width, height) / 2);
+        try self.drawRoundedRectEx(x, y, width, height, radius, color, null, 1.0);
+    }
 
-        try self.setFillColor(color);
+    /// Rounded rectangle with independent fill and stroke (either optional) —
+    /// the "squircle card" primitive: pass fill=null + a light stroke for the
+    /// bordered card look, or both for a filled chip with an outline.
+    pub fn drawRoundedRectEx(self: *ContentStream, x: f32, y: f32, width: f32, height: f32, radius: f32, fill_color: ?Color, stroke_color: ?Color, stroke_width: f32) !void {
+        if (fill_color == null and stroke_color == null) return;
+        try self.saveState();
+        if (fill_color) |fc| try self.setFillColor(fc);
+        if (stroke_color) |sc| {
+            try self.setStrokeColor(sc);
+            try self.setLineWidth(stroke_width);
+        }
+        try self.roundedRectPath(x, y, width, height, radius);
+        if (fill_color != null and stroke_color != null) {
+            try self.fillStroke();
+        } else if (fill_color != null) {
+            try self.fill();
+        } else {
+            try self.stroke();
+        }
+        try self.restoreState();
+    }
+
+    /// Emit the rounded-rect bezier path (no paint op).
+    fn roundedRectPath(self: *ContentStream, x: f32, y: f32, width: f32, height: f32, radius: f32) !void {
+        const r = @min(radius, @min(width, height) / 2);
 
         // Bezier control point factor for circular arc approximation
         const k: f32 = 0.5522847498; // (4/3) * tan(pi/8)
@@ -855,7 +880,6 @@ pub const ContentStream = struct {
         );
 
         try self.closePath();
-        try self.fill();
     }
 
     /// Cubic Bezier curve

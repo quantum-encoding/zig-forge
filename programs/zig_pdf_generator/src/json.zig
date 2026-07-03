@@ -148,6 +148,15 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
         }
     }
 
+    // Parse whole-document theme (classic | squircle)
+    if (getJsonString(obj, "theme")) |theme| {
+        if (std.mem.eql(u8, theme, "squircle")) {
+            data.theme = .squircle;
+        } else {
+            data.theme = .classic;
+        }
+    }
+
     // IRPF retention (Spanish freelancer invoices)
     data.irpf_rate = getJsonFloat(obj, "irpf_rate") orelse 0;
     data.irpf_amount = getJsonFloat(obj, "irpf_amount") orelse 0;

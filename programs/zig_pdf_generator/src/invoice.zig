@@ -48,6 +48,19 @@ pub const TableStyle = enum {
     minimal, // no fills; a single thin rule under the header
 };
 
+/// Whole-document visual theme. `classic` is the original layout, untouched.
+/// `squircle` is the rounded-card look modelled on the best supplier invoice
+/// in a 157-template corpus survey (HDM Solar): From/Bill-To as rounded cards
+/// with a 1pt light border (the client card emphasised in the accent colour),
+/// the items table inside a rounded container with a rounded accent header
+/// band, hairline row separators, and a rounded TOTAL chip. When set, it
+/// overrides table_style row treatment (separators) but keeps every other
+/// field working as before.
+pub const Theme = enum {
+    classic,
+    squircle,
+};
+
 /// One call-to-action payment button. Multiple can be shown side-by-stacked
 /// (e.g. "Pay by Card" via Stripe + "PayPal"). Each renders as a real clickable
 /// PDF link annotation.
@@ -159,6 +172,10 @@ pub const InvoiceData = struct {
     // original alternating-row "bands" look, so existing invoices are unchanged.
     table_style: TableStyle = .bands,
 
+    // Whole-document theme (classic | squircle). Defaults to the original
+    // layout so every existing payload renders byte-identically.
+    theme: Theme = .classic,
+
     // IRPF retention (Spanish freelancer invoices): a percentage withheld and
     // subtracted from the total. Shown as a negative "IRPF (x%)" row beneath the
     // tax row. Both default 0, which hides the row entirely.
@@ -230,6 +247,9 @@ pub const InvoiceRenderer = struct {
 
     // Page state
     current_y: f32 = 0,
+    /// Squircle theme: y of the top of the rounded table container on the
+    /// current page (set by drawTableHeader, consumed by closeTableContainer).
+    table_top: f32 = 0,
     margin_left: f32 = 40,
     margin_right: f32 = 40,
     margin_top: f32 = 40,
@@ -314,15 +334,20 @@ pub const InvoiceRenderer = struct {
 
     /// Draw the items-table header (column titles + bar/rule per table_style) at
     /// the current y and advance below it. Redrawn at the top of every page so a
-    /// paginated item list keeps its headers.
+    /// paginated item list keeps its headers. In the squircle theme the header
+    /// is a rounded accent band and the top of the rounded table container is
+    /// recorded so the container can be closed when the rows end (per page).
     fn drawTableHeader(self: *InvoiceRenderer, content: *document.ContentStream) !void {
         const primary = document.Color.fromHex(self.data.primary_color);
         const secondary = document.Color.fromHex(self.data.secondary_color);
         const usable_width = self.page_width - self.margin_left - self.margin_right;
         const table_style = self.data.table_style;
         const box_border = document.Color.fromHex("#d0d0d0");
-        const header_text_color = if (table_style == .minimal) primary else document.Color.white;
-        if (table_style != .minimal) {
+        const header_text_color = if (table_style == .minimal and self.data.theme != .squircle) primary else document.Color.white;
+        if (self.data.theme == .squircle) {
+            try content.drawRoundedRectEx(self.margin_left, self.current_y - 5, usable_width, 22, 7, primary, null, 1.0);
+            self.table_top = self.current_y + 17 + 8; // band top + container breathing room
+        } else if (table_style != .minimal) {
             const header_border: ?document.Color = if (table_style == .boxes) box_border else null;
             try content.drawRect(self.margin_left, self.current_y - 5, usable_width, 22, primary, header_border);
         }
@@ -334,10 +359,21 @@ pub const InvoiceRenderer = struct {
         try content.drawText("Qty", col_qty, self.current_y, self.font_bold, 10, header_text_color);
         try content.drawText("Unit Price", col_price, self.current_y, self.font_bold, 10, header_text_color);
         try content.drawText("Total", col_total, self.current_y, self.font_bold, 10, header_text_color);
-        if (table_style == .minimal) {
+        if (table_style == .minimal and self.data.theme != .squircle) {
             try content.drawLine(self.margin_left, self.current_y - 6, self.margin_left + usable_width, self.current_y - 6, secondary, 0.75);
         }
         self.current_y -= 28;
+    }
+
+    /// Squircle theme: close the rounded container around the items table —
+    /// a 1pt light stroke from the recorded table_top down to `bottom_y`.
+    /// Called when the rows end and, for paginated lists, before each page
+    /// break (each page gets its own container). No-op on other themes.
+    fn closeTableContainer(self: *InvoiceRenderer, content: *document.ContentStream, bottom_y: f32) !void {
+        if (self.data.theme != .squircle) return;
+        const usable_width = self.page_width - self.margin_left - self.margin_right;
+        const border = document.Color.fromHex("#E5E7EB");
+        try content.drawRoundedRectEx(self.margin_left - 8, bottom_y, usable_width + 16, self.table_top - bottom_y, 10, null, border, 1.0);
     }
 
     /// Commit the current page and start a fresh one at the top. `redraw_header`
@@ -519,8 +555,9 @@ pub const InvoiceRenderer = struct {
         try content.drawText(self.data.company_name, block_x, self.current_y, self.font_bold, 16, company_color);
         self.current_y -= 18;
 
-        // Company address (multi-line)
-        if (self.data.company_address.len > 0) {
+        // Company address (multi-line) — in the squircle theme the address
+        // moves into the "From" card below instead.
+        if (self.data.theme != .squircle and self.data.company_address.len > 0) {
             var line_iter = std.mem.splitSequence(u8, self.data.company_address, addressDelimiter(self.data.company_address));
             while (line_iter.next()) |line| {
                 try content.drawText(line, block_x, self.current_y, self.font_regular, 10, document.Color.black);
@@ -529,7 +566,7 @@ pub const InvoiceRenderer = struct {
         }
 
         // Company VAT
-        if (self.data.company_vat.len > 0) {
+        if (self.data.theme != .squircle and self.data.company_vat.len > 0) {
             var vat_buf: [64]u8 = undefined;
             const vat_line = std.fmt.bufPrint(&vat_buf, "VAT: {s}", .{self.data.company_vat}) catch self.data.company_vat;
             try content.drawText(vat_line, self.margin_left, self.current_y, self.font_regular, 10, document.Color.black);
@@ -570,31 +607,105 @@ pub const InvoiceRenderer = struct {
         // Client Section
         // =====================================================================
 
-        self.current_y -= 30;
+        if (self.data.theme == .squircle) {
+            // Squircle theme: From + Bill To as side-by-side rounded cards
+            // (1pt light border); the client card carries an accent border —
+            // the emphasis treatment from the HDM benchmark.
+            const card_border = document.Color.fromHex("#E5E7EB");
+            const muted = document.Color.fromHex("#6B7280");
+            self.current_y -= 16;
+            const gap: f32 = 14;
+            const card_w = (usable_width - gap) / 2;
+            const pad: f32 = 12;
 
-        // "Bill To" header
-        try content.drawText("Bill To:", self.margin_left, self.current_y, self.font_bold, 12, primary);
-        self.current_y -= 18;
-
-        // Client name
-        try content.drawText(self.data.client_name, self.margin_left, self.current_y, self.font_bold, 11, document.Color.black);
-        self.current_y -= 14;
-
-        // Client address
-        if (self.data.client_address.len > 0) {
-            var addr_iter = std.mem.splitSequence(u8, self.data.client_address, addressDelimiter(self.data.client_address));
-            while (addr_iter.next()) |line| {
-                try content.drawText(line, self.margin_left, self.current_y, self.font_regular, 10, document.Color.black);
-                self.current_y -= 13;
+            // Count lines to size both cards identically (label + name + lines).
+            var from_lines: f32 = 1; // company name
+            if (self.data.company_address.len > 0) {
+                var it = std.mem.splitSequence(u8, self.data.company_address, addressDelimiter(self.data.company_address));
+                while (it.next()) |_| from_lines += 1;
             }
-        }
+            if (self.data.company_vat.len > 0) from_lines += 1;
+            var to_lines: f32 = 1; // client name
+            if (self.data.client_address.len > 0) {
+                var it = std.mem.splitSequence(u8, self.data.client_address, addressDelimiter(self.data.client_address));
+                while (it.next()) |_| to_lines += 1;
+            }
+            if (self.data.client_vat.len > 0) to_lines += 1;
+            const n_lines = @max(from_lines, to_lines);
+            const card_h = 22 + n_lines * 13 + pad; // label row + lines + padding
 
-        // Client VAT
-        if (self.data.client_vat.len > 0) {
-            var cvat_buf: [64]u8 = undefined;
-            const cvat_line = std.fmt.bufPrint(&cvat_buf, "VAT: {s}", .{self.data.client_vat}) catch self.data.client_vat;
-            try content.drawText(cvat_line, self.margin_left, self.current_y, self.font_regular, 10, document.Color.black);
+            const card_top = self.current_y;
+            const from_x = self.margin_left;
+            const to_x = self.margin_left + card_w + gap;
+            try content.drawRoundedRectEx(from_x, card_top - card_h, card_w, card_h, 10, null, card_border, 1.0);
+            try content.drawRoundedRectEx(to_x, card_top - card_h, card_w, card_h, 10, null, primary, 1.5);
+
+            // From card content
+            var fy = card_top - pad - 6;
+            try content.drawText("FROM", from_x + pad, fy, self.font_bold, 8, muted);
+            fy -= 15;
+            try content.drawText(self.data.company_name, from_x + pad, fy, self.font_bold, 10, document.Color.black);
+            fy -= 13;
+            if (self.data.company_address.len > 0) {
+                var it = std.mem.splitSequence(u8, self.data.company_address, addressDelimiter(self.data.company_address));
+                while (it.next()) |line| {
+                    try content.drawText(line, from_x + pad, fy, self.font_regular, 9, document.Color.black);
+                    fy -= 13;
+                }
+            }
+            if (self.data.company_vat.len > 0) {
+                var vat_buf: [64]u8 = undefined;
+                const vat_line = std.fmt.bufPrint(&vat_buf, "VAT: {s}", .{self.data.company_vat}) catch self.data.company_vat;
+                try content.drawText(vat_line, from_x + pad, fy, self.font_regular, 9, muted);
+            }
+
+            // Bill To card content
+            var ty = card_top - pad - 6;
+            try content.drawText("BILL TO", to_x + pad, ty, self.font_bold, 8, primary);
+            ty -= 15;
+            try content.drawText(self.data.client_name, to_x + pad, ty, self.font_bold, 10, document.Color.black);
+            ty -= 13;
+            if (self.data.client_address.len > 0) {
+                var it = std.mem.splitSequence(u8, self.data.client_address, addressDelimiter(self.data.client_address));
+                while (it.next()) |line| {
+                    try content.drawText(line, to_x + pad, ty, self.font_regular, 9, document.Color.black);
+                    ty -= 13;
+                }
+            }
+            if (self.data.client_vat.len > 0) {
+                var cvat_buf: [64]u8 = undefined;
+                const cvat_line = std.fmt.bufPrint(&cvat_buf, "VAT: {s}", .{self.data.client_vat}) catch self.data.client_vat;
+                try content.drawText(cvat_line, to_x + pad, ty, self.font_regular, 9, muted);
+            }
+
+            self.current_y = card_top - card_h - 8;
+        } else {
+            self.current_y -= 30;
+
+            // "Bill To" header
+            try content.drawText("Bill To:", self.margin_left, self.current_y, self.font_bold, 12, primary);
             self.current_y -= 18;
+
+            // Client name
+            try content.drawText(self.data.client_name, self.margin_left, self.current_y, self.font_bold, 11, document.Color.black);
+            self.current_y -= 14;
+
+            // Client address
+            if (self.data.client_address.len > 0) {
+                var addr_iter = std.mem.splitSequence(u8, self.data.client_address, addressDelimiter(self.data.client_address));
+                while (addr_iter.next()) |line| {
+                    try content.drawText(line, self.margin_left, self.current_y, self.font_regular, 10, document.Color.black);
+                    self.current_y -= 13;
+                }
+            }
+
+            // Client VAT
+            if (self.data.client_vat.len > 0) {
+                var cvat_buf: [64]u8 = undefined;
+                const cvat_line = std.fmt.bufPrint(&cvat_buf, "VAT: {s}", .{self.data.client_vat}) catch self.data.client_vat;
+                try content.drawText(cvat_line, self.margin_left, self.current_y, self.font_regular, 10, document.Color.black);
+                self.current_y -= 18;
+            }
         }
 
         // =====================================================================
@@ -631,18 +742,25 @@ pub const InvoiceRenderer = struct {
                 const num_lines = @max(1, wrapped.lines.len);
                 const row_height = @as(f32, @floatFromInt(num_lines)) * line_height + row_padding;
 
-                // Paginate: if this row won't fit, start a new page and redraw
-                // the table header before drawing it.
+                // Paginate: if this row won't fit, close this page's rounded
+                // container (squircle), then start a new page and redraw the
+                // table header before drawing it.
                 if (self.current_y - row_height < self.margin_bottom + 40) {
+                    try self.closeTableContainer(&content, self.current_y + 2);
                     try self.startNewPage(&content, true);
                 }
 
-                // Row background — depends on table_style:
+                // Row background — squircle draws a hairline separator under
+                // each row; otherwise it depends on table_style:
                 //   bands   -> alternating #f5f5f5 fill on even rows (original)
                 //   boxes   -> a light border around every row, no fill
                 //   minimal -> nothing (clean rows)
                 const row_y = self.current_y - row_height + line_height;
-                switch (table_style) {
+                if (self.data.theme == .squircle) {
+                    if (i + 1 < self.data.items.len) {
+                        try content.drawLine(self.margin_left + 2, row_y - 4, self.margin_left + usable_width - 2, row_y - 4, document.Color.fromHex("#E5E7EB"), 0.5);
+                    }
+                } else switch (table_style) {
                     .bands => if (i % 2 == 0) {
                         try content.drawRect(self.margin_left, row_y, usable_width, row_height, document.Color.fromHex("#f5f5f5"), null);
                     },
@@ -681,7 +799,9 @@ pub const InvoiceRenderer = struct {
             const row_height = @as(f32, @floatFromInt(num_lines)) * line_height + row_padding;
 
             const bb_y = self.current_y - row_height + line_height;
-            switch (table_style) {
+            if (self.data.theme == .squircle) {
+                // container + header band carry the look; no row fill
+            } else switch (table_style) {
                 .bands => try content.drawRect(self.margin_left, bb_y, usable_width, row_height, document.Color.fromHex("#f5f5f5"), null),
                 .boxes => try content.drawRect(self.margin_left, bb_y, usable_width, row_height, null, box_border),
                 .minimal => {},
@@ -704,6 +824,9 @@ pub const InvoiceRenderer = struct {
         // =====================================================================
         // Totals Section
         // =====================================================================
+
+        // Squircle: the rows are done — close the rounded table container.
+        try self.closeTableContainer(&content, self.current_y + 2);
 
         // Keep the whole totals block together: if it won't fit under the last
         // row, move it to a fresh page (no table header needed there).
@@ -765,7 +888,11 @@ pub const InvoiceRenderer = struct {
         const total_bar_x = col_price - 10;
         const table_right_edge = self.margin_left + usable_width;
         const total_bar_width = table_right_edge - total_bar_x;
-        try content.drawRect(total_bar_x, self.current_y - 5, total_bar_width, 22, primary, null);
+        if (self.data.theme == .squircle) {
+            try content.drawRoundedRectEx(total_bar_x, self.current_y - 5, total_bar_width, 22, 7, primary, null, 1.0);
+        } else {
+            try content.drawRect(total_bar_x, self.current_y - 5, total_bar_width, 22, primary, null);
+        }
         try content.drawText("TOTAL:", col_price, self.current_y, self.font_bold, 12, document.Color.white);
         var grand_total_buf: [24]u8 = undefined;
         const grand_total_str = std.fmt.bufPrint(&grand_total_buf, "{s}{d:.2}", .{ self.data.currency_symbol, self.data.total }) catch "0.00";
