@@ -54,6 +54,14 @@ pub fn build(b: *std.Build) void {
     android_lib.root_module.link_libc = true;
     android_lib.root_module.strip = true;
 
+    // Position-independent code is REQUIRED on Android: this static lib is
+    // linked into Tauri's `-shared` cdylib. Without PIC, the threadlocal FFI
+    // error buffers (last_error_msg / last_error_len in ffi-grok.zig) emit TLS
+    // local-exec relocations (R_AARCH64_TLSLE_ADD_TPREL_*) that ld.lld rejects
+    // with "cannot be used with -shared". Mirrors the `-fPIC` that the
+    // canonical programs/build-android-libs.sh already passes.
+    android_lib.root_module.pic = true;
+
     // Install to zig-out/lib/android-arm64/
     const android_install = b.addInstallArtifact(android_lib, .{
         .dest_dir = .{ .override = .{ .custom = "lib/android-arm64" } },
