@@ -56,9 +56,17 @@ pub const TableStyle = enum {
 /// band, hairline row separators, and a rounded TOTAL chip. When set, it
 /// overrides table_style row treatment (separators) but keeps every other
 /// field working as before.
+/// `glass` is the "Liquid Glass" material treatment layered on squircle's
+/// geometry: a soft vertical wash of the primary colour behind the page, and
+/// every rounded container rendered as a translucent panel over that wash with
+/// a hairline border and a bright top-edge sheen (an axial gradient). It reuses
+/// all of squircle's layout metrics and page-break machinery — only the
+/// materials differ. Panels are composited beneath the text on each page so the
+/// wash and sheens always sit behind the content.
 pub const Theme = enum {
     classic,
     squircle,
+    glass,
 };
 
 /// One call-to-action payment button. Multiple can be shown side-by-stacked
@@ -259,9 +267,14 @@ pub const InvoiceRenderer = struct {
 
     // Page state
     current_y: f32 = 0,
-    /// Squircle theme: y of the top of the rounded table container on the
+    /// Squircle/glass theme: y of the top of the rounded table container on the
     /// current page (set by drawTableHeader, consumed by closeTableContainer).
     table_top: f32 = 0,
+    /// Glass theme: the background layer (wash + translucent panels + sheens)
+    /// for the current page. Composited beneath the foreground content stream at
+    /// each page flush so panels always sit behind text. Points at a stack local
+    /// in `render`; null for non-glass themes (which never draw to it).
+    bg: ?*document.ContentStream = null,
     margin_left: f32 = 40,
     margin_right: f32 = 40,
     margin_top: f32 = 40,
@@ -344,6 +357,101 @@ pub const InvoiceRenderer = struct {
         try content.drawTextRightAligned(text, right_x, y, font_id, font, size, color);
     }
 
+    // -------------------------------------------------------------------------
+    // Liquid Glass materials
+    // -------------------------------------------------------------------------
+
+    /// Themes that use squircle's rounded-card geometry (cards, rounded table
+    /// container, accent header band, rounded totals chip). Glass reuses all of
+    /// it and only swaps the materials, so every layout branch keys off this.
+    fn roundedLayout(self: *const InvoiceRenderer) bool {
+        return self.data.theme == .squircle or self.data.theme == .glass;
+    }
+
+    /// Linear blend from `a` to `b` by `t` in [0,1] (t=0 → a, t=1 → b).
+    fn mixColor(a: document.Color, b: document.Color, t: f32) document.Color {
+        return .{
+            .r = a.r + (b.r - a.r) * t,
+            .g = a.g + (b.g - a.g) * t,
+            .b = a.b + (b.b - a.b) * t,
+        };
+    }
+
+    /// Paint the page "environment": a soft vertical wash from a light tint of
+    /// the primary colour at the top fading to white by the lower third. Drawn
+    /// first into the background layer of every glass page.
+    fn drawGlassWash(self: *InvoiceRenderer, bg: *document.ContentStream) !void {
+        const primary = document.Color.fromHex(self.data.primary_color);
+        const wash_top = mixColor(document.Color.white, primary, 0.10); // ~10% tint
+        const top_y = self.page_height;
+        const fade_y = self.page_height * 0.34; // white by the lower third
+        const sh = self.doc.getAxialShadingId(wash_top, document.Color.white, 0, top_y, 0, fade_y);
+        try bg.saveState();
+        try bg.clipRect(0, 0, self.page_width, self.page_height);
+        try bg.paintShading(sh);
+        try bg.restoreState();
+    }
+
+    /// Draw one glass panel into the background layer: a translucent rounded
+    /// fill over the wash, a bright top-edge sheen (an axial gradient confined
+    /// to the top band), and an optional hairline border. Because the whole
+    /// background layer is composited beneath the page text, panels never
+    /// obscure the content drawn over them — including dynamic-height panels
+    /// (the items-table container) closed after their rows are laid down.
+    fn drawGlassPanel(
+        self: *InvoiceRenderer,
+        bg: *document.ContentStream,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        base: document.Color,
+        base_alpha: f32,
+        sheen_end: document.Color,
+        sheen_alpha: f32,
+        border: ?document.Color,
+        border_w: f32,
+    ) !void {
+        // Translucent base fill — the wash shows through.
+        try bg.saveState();
+        try bg.setExtGState(self.doc.getOpacityExtGStateId(base_alpha));
+        try bg.drawRoundedRectEx(x, y, w, h, radius, base, null, 1.0);
+        try bg.restoreState();
+
+        // Top-edge sheen: white at the very top fading to `sheen_end`, clipped
+        // to the panel silhouette AND the top band so it reads as a highlight.
+        const band_h = @min(h * 0.34, 24.0);
+        if (band_h > 1.0) {
+            const sh = self.doc.getAxialShadingId(document.Color.white, sheen_end, x, y + h, x, y + h - band_h);
+            try bg.saveState();
+            try bg.setExtGState(self.doc.getOpacityExtGStateId(sheen_alpha));
+            try bg.clipRoundedRect(x, y, w, h, radius);
+            try bg.clipRect(x, y + h - band_h, w, band_h);
+            try bg.paintShading(sh);
+            try bg.restoreState();
+        }
+
+        // Hairline border — opaque, drawn last so the edge stays crisp.
+        if (border) |bc| {
+            try bg.drawRoundedRectEx(x, y, w, h, radius, null, bc, border_w);
+        }
+    }
+
+    /// Flush the current page: composite the background layer (wash + glass
+    /// panels) beneath the foreground content, commit the page, and reset both
+    /// buffers for the next page. For non-glass themes the background layer is
+    /// empty, so the composed bytes equal the content bytes exactly.
+    fn flushPage(self: *InvoiceRenderer, content: *document.ContentStream) !void {
+        const bg = self.bg.?;
+        try bg.buffer.appendSlice(self.allocator, content.getContent());
+        try self.doc.addPage(bg);
+        content.deinit();
+        content.* = document.ContentStream.init(self.allocator);
+        bg.deinit();
+        bg.* = document.ContentStream.init(self.allocator);
+    }
+
     /// Draw the items-table header (column titles + bar/rule per table_style) at
     /// the current y and advance below it. Redrawn at the top of every page so a
     /// paginated item list keeps its headers. In the squircle theme the header
@@ -355,8 +463,13 @@ pub const InvoiceRenderer = struct {
         const usable_width = self.page_width - self.margin_left - self.margin_right;
         const table_style = self.data.table_style;
         const box_border = document.Color.fromHex("#d0d0d0");
-        const header_text_color = if (table_style == .minimal and self.data.theme != .squircle) primary else document.Color.white;
-        if (self.data.theme == .squircle) {
+        const header_text_color = if (table_style == .minimal and !self.roundedLayout()) primary else document.Color.white;
+        if (self.data.theme == .glass) {
+            // Translucent accent header band with a sheen, into the bg layer.
+            // Alpha kept high enough that white column titles stay legible.
+            try self.drawGlassPanel(self.bg.?, self.margin_left, self.current_y - 5, usable_width, 22, 7, primary, 0.90, primary, 0.50, null, 0);
+            self.table_top = self.current_y + 17 + 8;
+        } else if (self.data.theme == .squircle) {
             try content.drawRoundedRectEx(self.margin_left, self.current_y - 5, usable_width, 22, 7, primary, null, 1.0);
             self.table_top = self.current_y + 17 + 8; // band top + container breathing room
         } else if (table_style != .minimal) {
@@ -371,7 +484,7 @@ pub const InvoiceRenderer = struct {
         try content.drawText("Qty", col_qty, self.current_y, self.font_bold, 10, header_text_color);
         try content.drawText("Unit Price", col_price, self.current_y, self.font_bold, 10, header_text_color);
         try content.drawText("Total", col_total, self.current_y, self.font_bold, 10, header_text_color);
-        if (table_style == .minimal and self.data.theme != .squircle) {
+        if (table_style == .minimal and !self.roundedLayout()) {
             try content.drawLine(self.margin_left, self.current_y - 6, self.margin_left + usable_width, self.current_y - 6, secondary, 0.75);
         }
         self.current_y -= 28;
@@ -382,10 +495,23 @@ pub const InvoiceRenderer = struct {
     /// Called when the rows end and, for paginated lists, before each page
     /// break (each page gets its own container). No-op on other themes.
     fn closeTableContainer(self: *InvoiceRenderer, content: *document.ContentStream, bottom_y: f32) !void {
-        if (self.data.theme != .squircle) return;
+        if (!self.roundedLayout()) return;
         const usable_width = self.page_width - self.margin_left - self.margin_right;
-        const border = document.Color.fromHex("#E5E7EB");
-        try content.drawRoundedRectEx(self.margin_left - 8, bottom_y, usable_width + 16, self.table_top - bottom_y, 10, null, border, 1.0);
+        const x = self.margin_left - 8;
+        const w = usable_width + 16;
+        const h = self.table_top - bottom_y;
+        if (self.data.theme == .glass) {
+            // Translucent container over the wash + a hairline border. Drawn into
+            // the bg layer, so although it is emitted after the rows its fill and
+            // sheen still sit behind the already-drawn row text.
+            const primary = document.Color.fromHex(self.data.primary_color);
+            const panel_border = mixColor(document.Color.white, primary, 0.14);
+            const sheen_end = mixColor(document.Color.white, primary, 0.22);
+            try self.drawGlassPanel(self.bg.?, x, bottom_y, w, h, 10, document.Color.white, 0.70, sheen_end, 0.55, panel_border, 1.0);
+        } else {
+            const border = document.Color.fromHex("#E5E7EB");
+            try content.drawRoundedRectEx(x, bottom_y, w, h, 10, null, border, 1.0);
+        }
     }
 
     /// Commit the current page and start a fresh one at the top. `redraw_header`
@@ -393,10 +519,9 @@ pub const InvoiceRenderer = struct {
     /// fresh page that just holds the totals block. Intermediate content buffers
     /// are freed here; the final one is freed by render's `defer`.
     fn startNewPage(self: *InvoiceRenderer, content: *document.ContentStream, redraw_header: bool) !void {
-        try self.doc.addPage(content);
-        content.deinit();
-        content.* = document.ContentStream.init(self.allocator);
+        try self.flushPage(content);
         self.current_y = self.page_height - self.margin_top;
+        if (self.data.theme == .glass) try self.drawGlassWash(self.bg.?);
         if (redraw_header) try self.drawTableHeader(content);
     }
 
@@ -412,6 +537,14 @@ pub const InvoiceRenderer = struct {
 
         var content = document.ContentStream.init(self.allocator);
         defer content.deinit();
+
+        // Glass theme: a background layer (wash + translucent panels + sheens)
+        // composited beneath the foreground at every page flush. Empty for other
+        // themes, so their composed output is byte-identical to before.
+        var page_bg = document.ContentStream.init(self.allocator);
+        defer page_bg.deinit();
+        self.bg = &page_bg;
+        if (self.data.theme == .glass) try self.drawGlassWash(&page_bg);
 
         // Load images if provided
         var logo_id: ?[]const u8 = null;
@@ -532,9 +665,24 @@ pub const InvoiceRenderer = struct {
         // Usable width
         const usable_width = self.page_width - self.margin_left - self.margin_right;
 
+        // Glass theme reusable material tokens (translucent white panels + a
+        // faintly accent-tinted sheen and hairline border).
+        const glass_panel_border = mixColor(document.Color.white, primary, 0.14);
+        const glass_sheen_end = mixColor(document.Color.white, primary, 0.22);
+
         // =====================================================================
         // Header Section
         // =====================================================================
+
+        // Glass theme: a translucent panel behind the title / company / meta
+        // block at the top of the page (the "masthead" pane), drawn into the bg
+        // layer so the header text sits on top of it. The rounded layout keeps
+        // the company address in the From card below, so this block is compact.
+        if (self.data.theme == .glass) {
+            const mh_bottom = self.page_height - self.margin_top - 88;
+            const mh_top = self.page_height - self.margin_top + 18;
+            try self.drawGlassPanel(&page_bg, self.margin_left - 8, mh_bottom, usable_width + 16, mh_top - mh_bottom, 12, document.Color.white, 0.72, glass_sheen_end, 0.50, glass_panel_border, 1.0);
+        }
 
         // Logo (absolute-positioned). The inline-lockup variant is drawn beside
         // the company name below instead.
@@ -592,9 +740,9 @@ pub const InvoiceRenderer = struct {
             self.current_y -= 18;
         }
 
-        // Company address (multi-line) — in the squircle theme the address
+        // Company address (multi-line) — in the rounded-card themes the address
         // moves into the "From" card below instead.
-        if (self.data.theme != .squircle and self.data.company_address.len > 0) {
+        if (!self.roundedLayout() and self.data.company_address.len > 0) {
             var line_iter = std.mem.splitSequence(u8, self.data.company_address, addressDelimiter(self.data.company_address));
             while (line_iter.next()) |line| {
                 try content.drawText(line, block_x, self.current_y, self.font_regular, 10, document.Color.black);
@@ -603,7 +751,7 @@ pub const InvoiceRenderer = struct {
         }
 
         // Company VAT
-        if (self.data.theme != .squircle and self.data.company_vat.len > 0) {
+        if (!self.roundedLayout() and self.data.company_vat.len > 0) {
             var vat_buf: [64]u8 = undefined;
             const vat_line = std.fmt.bufPrint(&vat_buf, "VAT: {s}", .{self.data.company_vat}) catch self.data.company_vat;
             try content.drawText(vat_line, self.margin_left, self.current_y, self.font_regular, 10, document.Color.black);
@@ -644,10 +792,11 @@ pub const InvoiceRenderer = struct {
         // Client Section
         // =====================================================================
 
-        if (self.data.theme == .squircle) {
-            // Squircle theme: From + Bill To as side-by-side rounded cards
-            // (1pt light border); the client card carries an accent border —
-            // the emphasis treatment from the HDM benchmark.
+        if (self.roundedLayout()) {
+            // Rounded-card themes: From + Bill To as side-by-side cards; the
+            // client card carries an accent treatment — the emphasis from the
+            // HDM benchmark. Squircle uses bordered cards; glass uses
+            // translucent panels with a sheen over the wash.
             const card_border = document.Color.fromHex("#E5E7EB");
             const muted = document.Color.fromHex("#6B7280");
             // Clear BOTH columns above: the company block (left, current_y)
@@ -677,8 +826,16 @@ pub const InvoiceRenderer = struct {
             const card_top = self.current_y;
             const from_x = self.margin_left;
             const to_x = self.margin_left + card_w + gap;
-            try content.drawRoundedRectEx(from_x, card_top - card_h, card_w, card_h, 10, null, card_border, 1.0);
-            try content.drawRoundedRectEx(to_x, card_top - card_h, card_w, card_h, 10, null, primary, 1.5);
+            if (self.data.theme == .glass) {
+                // From: neutral translucent panel. Bill To: same glass but an
+                // accent-tinted sheen + accent hairline to carry the emphasis.
+                try self.drawGlassPanel(&page_bg, from_x, card_top - card_h, card_w, card_h, 10, document.Color.white, 0.72, glass_sheen_end, 0.50, glass_panel_border, 1.0);
+                const to_sheen = mixColor(document.Color.white, primary, 0.42);
+                try self.drawGlassPanel(&page_bg, to_x, card_top - card_h, card_w, card_h, 10, document.Color.white, 0.74, to_sheen, 0.55, primary, 1.3);
+            } else {
+                try content.drawRoundedRectEx(from_x, card_top - card_h, card_w, card_h, 10, null, card_border, 1.0);
+                try content.drawRoundedRectEx(to_x, card_top - card_h, card_w, card_h, 10, null, primary, 1.5);
+            }
 
             // From card content
             var fy = card_top - pad - 6;
@@ -796,9 +953,10 @@ pub const InvoiceRenderer = struct {
                 //   boxes   -> a light border around every row, no fill
                 //   minimal -> nothing (clean rows)
                 const row_y = self.current_y - row_height + line_height;
-                if (self.data.theme == .squircle) {
+                if (self.roundedLayout()) {
                     if (i + 1 < self.data.items.len) {
-                        try content.drawLine(self.margin_left + 2, row_y - 4, self.margin_left + usable_width - 2, row_y - 4, document.Color.fromHex("#E5E7EB"), 0.5);
+                        const sep = if (self.data.theme == .glass) document.Color.fromHex("#EDF0F3") else document.Color.fromHex("#E5E7EB");
+                        try content.drawLine(self.margin_left + 2, row_y - 4, self.margin_left + usable_width - 2, row_y - 4, sep, 0.5);
                     }
                 } else switch (table_style) {
                     .bands => if (i % 2 == 0) {
@@ -839,7 +997,7 @@ pub const InvoiceRenderer = struct {
             const row_height = @as(f32, @floatFromInt(num_lines)) * line_height + row_padding;
 
             const bb_y = self.current_y - row_height + line_height;
-            if (self.data.theme == .squircle) {
+            if (self.roundedLayout()) {
                 // container + header band carry the look; no row fill
             } else switch (table_style) {
                 .bands => try content.drawRect(self.margin_left, bb_y, usable_width, row_height, document.Color.fromHex("#f5f5f5"), null),
@@ -928,7 +1086,10 @@ pub const InvoiceRenderer = struct {
         const total_bar_x = col_price - 10;
         const table_right_edge = self.margin_left + usable_width;
         const total_bar_width = table_right_edge - total_bar_x;
-        if (self.data.theme == .squircle) {
+        if (self.data.theme == .glass) {
+            // Emphasis chip: near-opaque accent with a sheen, into the bg layer.
+            try self.drawGlassPanel(&page_bg, total_bar_x, self.current_y - 5, total_bar_width, 22, 7, primary, 0.92, primary, 0.50, null, 0);
+        } else if (self.data.theme == .squircle) {
             try content.drawRoundedRectEx(total_bar_x, self.current_y - 5, total_bar_width, 22, 7, primary, null, 1.0);
         } else {
             try content.drawRect(total_bar_x, self.current_y - 5, total_bar_width, 22, primary, null);
@@ -1227,8 +1388,9 @@ pub const InvoiceRenderer = struct {
             );
         }
 
-        // Add page to document
-        try self.doc.addPage(&content);
+        // Add page to document — composite the glass background beneath the
+        // foreground (a no-op for other themes, whose bg layer is empty).
+        try self.flushPage(&content);
 
         // Password-protect the document (AES-256) when a password is set. Must
         // be configured before build() so every stream/string is encrypted.

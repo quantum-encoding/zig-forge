@@ -50,6 +50,7 @@ const MAX_PAGES = 1024;
 const MAX_FONTS = 16;
 const MAX_IMAGES = 1024;
 const MAX_EXTGSTATES = 16;
+const MAX_SHADINGS = 32;
 
 // =============================================================================
 // PDF Object Types
@@ -93,6 +94,24 @@ pub const Color = struct {
             .b = @as(f32, @floatFromInt(b_val)) / 255.0,
         };
     }
+};
+
+/// Near-equality for two colours (used to dedup shading registrations).
+fn colorEq(a: Color, b: Color) bool {
+    return @abs(a.r - b.r) < 0.002 and @abs(a.g - b.g) < 0.002 and @abs(a.b - b.b) < 0.002;
+}
+
+/// A registered axial (type-2) gradient — the primitive behind the Liquid
+/// Glass wash and panel sheens. Painted with the `sh` operator inside a clip.
+/// Coords are absolute user-space points (the renderer never scales the CTM),
+/// and both ends extend so the end colours hold beyond the gradient axis.
+const Shading = struct {
+    c0: Color,
+    c1: Color,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
 };
 
 /// Decode one UTF-8 code point from `text` at `*pos` and return the
@@ -738,6 +757,35 @@ pub const ContentStream = struct {
     }
 
     // -------------------------------------------------------------------------
+    // Clipping & Axial Shading (Liquid Glass materials)
+    // -------------------------------------------------------------------------
+
+    /// Intersect the clip region with a rectangle, then discard the path
+    /// (`W n`). Scope with saveState/restoreState so the clip is reverted.
+    pub fn clipRect(self: *ContentStream, x: f32, y: f32, width: f32, height: f32) !void {
+        try self.rect(x, y, width, height);
+        try self.buffer.appendSlice(self.allocator, "W n\n");
+    }
+
+    /// Intersect the clip region with a rounded rectangle, then discard the
+    /// path. Used to confine a wash or sheen to a glass panel's rounded
+    /// silhouette. Scope with saveState/restoreState.
+    pub fn clipRoundedRect(self: *ContentStream, x: f32, y: f32, width: f32, height: f32, radius: f32) !void {
+        try self.roundedRectPath(x, y, width, height, radius);
+        try self.buffer.appendSlice(self.allocator, "W n\n");
+    }
+
+    /// Paint an axial (type-2) shading across the current clip region. `id`
+    /// is a resource name from PdfDocument.getAxialShadingId. Bracket the clip
+    /// setup and this call in saveState/restoreState so later drawing (and the
+    /// clip) is unaffected.
+    pub fn paintShading(self: *ContentStream, id: []const u8) !void {
+        var buf: [32]u8 = undefined;
+        const len = std.fmt.bufPrint(&buf, "/{s} sh\n", .{id}) catch return error.BufferTooSmall;
+        try self.buffer.appendSlice(self.allocator, len);
+    }
+
+    // -------------------------------------------------------------------------
     // Button Component (for clickable payment links)
     // -------------------------------------------------------------------------
 
@@ -1032,6 +1080,12 @@ pub const PdfDocument = struct {
     extgstate_opacities: [MAX_EXTGSTATES]f32,
     extgstate_count: u8,
 
+    // Axial shadings (type-2 gradients) — the Liquid Glass wash + panel sheens.
+    // Each unique (colours + coords) tuple gets one resource, referenced via
+    // "/Shn sh" in a content stream after a clip is set.
+    shadings: [MAX_SHADINGS]Shading,
+    shading_count: u8,
+
     // Pages
     page_content_ids: [MAX_PAGES]u32,
     page_count: u16,
@@ -1068,6 +1122,8 @@ pub const PdfDocument = struct {
             .image_id_overflow = undefined,
             .extgstate_opacities = undefined,
             .extgstate_count = 0,
+            .shadings = undefined,
+            .shading_count = 0,
             .page_content_ids = undefined,
             .page_count = 0,
             .annotations = undefined,
@@ -1259,6 +1315,39 @@ pub const PdfDocument = struct {
     }
 
     // -------------------------------------------------------------------------
+    // Axial Shadings (type-2 gradients — Liquid Glass wash + sheens)
+    // -------------------------------------------------------------------------
+
+    const shading_id_table = [_][]const u8{
+        "Sh0",  "Sh1",  "Sh2",  "Sh3",  "Sh4",  "Sh5",  "Sh6",  "Sh7",
+        "Sh8",  "Sh9",  "Sh10", "Sh11", "Sh12", "Sh13", "Sh14", "Sh15",
+        "Sh16", "Sh17", "Sh18", "Sh19", "Sh20", "Sh21", "Sh22", "Sh23",
+        "Sh24", "Sh25", "Sh26", "Sh27", "Sh28", "Sh29", "Sh30", "Sh31",
+    };
+
+    /// Register (or re-use) a two-colour axial gradient running from
+    /// (x0,y0)=`c0` to (x1,y1)=`c1` in absolute user space, extended at both
+    /// ends. Returns a stable resource name (e.g. "Sh0") for `paintShading`.
+    /// Deduplicates on colours+coords so redrawing the same wash across page
+    /// breaks costs one resource, not one per page.
+    pub fn getAxialShadingId(self: *PdfDocument, c0: Color, c1: Color, x0: f32, y0: f32, x1: f32, y1: f32) []const u8 {
+        for (0..self.shading_count) |i| {
+            const s = self.shadings[i];
+            if (colorEq(s.c0, c0) and colorEq(s.c1, c1) and
+                @abs(s.x0 - x0) < 0.1 and @abs(s.y0 - y0) < 0.1 and
+                @abs(s.x1 - x1) < 0.1 and @abs(s.y1 - y1) < 0.1)
+            {
+                return shading_id_table[i];
+            }
+        }
+        if (self.shading_count >= MAX_SHADINGS) return shading_id_table[0];
+        const idx = self.shading_count;
+        self.shadings[idx] = .{ .c0 = c0, .c1 = c1, .x0 = x0, .y0 = y0, .x1 = x1, .y1 = y1 };
+        self.shading_count += 1;
+        return shading_id_table[idx];
+    }
+
+    // -------------------------------------------------------------------------
     // Link Annotations (Clickable URLs)
     // -------------------------------------------------------------------------
 
@@ -1413,6 +1502,22 @@ pub const PdfDocument = struct {
         }
         self.next_object_id += self.extgstate_count;
 
+        // Build Shading dictionary (axial gradients) + reserve object IDs
+        var shading_dict: std.ArrayListUnmanaged(u8) = .empty;
+        defer shading_dict.deinit(self.allocator);
+        const first_shading_obj = self.next_object_id;
+        if (self.shading_count > 0) {
+            try shading_dict.appendSlice(self.allocator, "<< ");
+            for (0..self.shading_count) |i| {
+                var buf: [64]u8 = undefined;
+                const sh_obj_id = first_shading_obj + @as(u32, @intCast(i));
+                const len = std.fmt.bufPrint(&buf, "/Sh{d} {d} 0 R ", .{ i, sh_obj_id }) catch continue;
+                try shading_dict.appendSlice(self.allocator, len);
+            }
+            try shading_dict.appendSlice(self.allocator, ">>");
+        }
+        self.next_object_id += self.shading_count;
+
         // Build page objects
         var page_refs: std.ArrayListUnmanaged(u8) = .empty;
         defer page_refs.deinit(self.allocator);
@@ -1501,6 +1606,20 @@ pub const PdfDocument = struct {
             try self.writeObject(first_extgstate_obj + @as(u32, @intCast(i)), len);
         }
 
+        // Write Shading objects — type-2 (axial) gradients with an inline
+        // exponential-interpolation function (N=1 → linear). Extend both ends
+        // so the wash / sheen holds its end colours beyond the gradient axis.
+        for (0..self.shading_count) |i| {
+            const s = self.shadings[i];
+            var buf: [320]u8 = undefined;
+            const len = std.fmt.bufPrint(
+                &buf,
+                "<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [{d:.2} {d:.2} {d:.2} {d:.2}] /Function << /FunctionType 2 /Domain [0 1] /C0 [{d:.4} {d:.4} {d:.4}] /C1 [{d:.4} {d:.4} {d:.4}] /N 1 >> /Extend [true true] >>",
+                .{ s.x0, s.y0, s.x1, s.y1, s.c0.r, s.c0.g, s.c0.b, s.c1.r, s.c1.g, s.c1.b },
+            ) catch continue;
+            try self.writeObject(first_shading_obj + @as(u32, @intCast(i)), len);
+        }
+
         // Calculate annotation object IDs (after pages)
         const first_annot_obj = first_page_obj + @as(u32, @intCast(self.page_count)) * 2;
 
@@ -1521,6 +1640,10 @@ pub const PdfDocument = struct {
             if (self.extgstate_count > 0) {
                 try resources.appendSlice(self.allocator, " /ExtGState ");
                 try resources.appendSlice(self.allocator, extgstate_dict.items);
+            }
+            if (self.shading_count > 0) {
+                try resources.appendSlice(self.allocator, " /Shading ");
+                try resources.appendSlice(self.allocator, shading_dict.items);
             }
             try resources.appendSlice(self.allocator, " >>");
 

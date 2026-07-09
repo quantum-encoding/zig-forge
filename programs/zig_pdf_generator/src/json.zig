@@ -152,10 +152,12 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
         }
     }
 
-    // Parse whole-document theme (classic | squircle)
+    // Parse whole-document theme (classic | squircle | glass)
     if (getJsonString(obj, "theme")) |theme| {
         if (std.mem.eql(u8, theme, "squircle")) {
             data.theme = .squircle;
+        } else if (std.mem.eql(u8, theme, "glass")) {
+            data.theme = .glass;
         } else {
             data.theme = .classic;
         }
