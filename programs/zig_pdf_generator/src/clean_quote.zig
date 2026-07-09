@@ -30,6 +30,7 @@ const std = @import("std");
 const document = @import("document.zig");
 const proposal = @import("proposal.zig");
 const qrcode = @import("qrcode.zig");
+const image = @import("image.zig");
 
 // Reuse types from proposal.zig — same JSON contract
 pub const MetricItem = proposal.MetricItem;
@@ -124,6 +125,15 @@ pub const CleanQuoteRenderer = struct {
     qr_size: u32 = 0,
     qr_id: ?[]const u8 = null,
 
+    // Logo state — decoded from company_logo_base64 in render(), drawn as a
+    // small left-lockup mark in the header. logo_w/logo_h are the on-page draw
+    // size (points), aspect-preserved and clamped to the header's mark box.
+    logo_decoded: ?[]u8 = null,
+    logo_pixels: ?[]u8 = null,
+    logo_id: ?[]const u8 = null,
+    logo_w: f32 = 0,
+    logo_h: f32 = 0,
+
     pub fn init(allocator: std.mem.Allocator, data: ProposalData) CleanQuoteRenderer {
         var r = CleanQuoteRenderer{
             .allocator = allocator,
@@ -170,6 +180,7 @@ pub const CleanQuoteRenderer = struct {
 
     pub fn deinit(self: *CleanQuoteRenderer) void {
         if (self.qr_pixels) |px| self.allocator.free(px);
+        if (self.logo_decoded) |d| self.allocator.free(d);
         for (self.pages.items) |*page| page.deinit();
         self.pages.deinit(self.allocator);
         self.doc.deinit();
@@ -207,14 +218,23 @@ pub const CleanQuoteRenderer = struct {
         // ── Left block: company details grouped together ──────────
         var left_y = top_y - 16;
 
+        // Optional logo mark — a small left-lockup. When present the company
+        // text block indents to its right and the mark's top aligns with the
+        // company-name cap line; absent, the header stays text-only as before.
+        var text_x = self.margin_left;
+        if (self.logo_id) |lid| {
+            try content.drawImage(lid, self.margin_left, top_y - self.logo_h, self.logo_w, self.logo_h);
+            text_x = self.margin_left + self.logo_w + 14;
+        }
+
         // Company name — bold black, 18pt
         const company = if (self.data.company_name.len > 0) self.data.company_name else "COMPANY";
-        try self.drawTextConverted(content, company, self.margin_left, left_y, self.font_bold, 18, INK_BLACK);
+        try self.drawTextConverted(content, company, text_x, left_y, self.font_bold, 18, INK_BLACK);
         left_y -= 16;
 
         // Address (full, not truncated at first comma)
         if (self.data.company_address.len > 0) {
-            try self.drawTextConverted(content, self.data.company_address, self.margin_left, left_y, self.font_regular, detail_size, MUTED_GREY);
+            try self.drawTextConverted(content, self.data.company_address, text_x, left_y, self.font_regular, detail_size, MUTED_GREY);
             left_y -= detail_lh;
         }
 
@@ -227,15 +247,20 @@ pub const CleanQuoteRenderer = struct {
             if (have_phone) try contact.appendSlice(self.allocator, self.data.footer.phone);
             if (have_phone and have_email) try contact.appendSlice(self.allocator, "  \u{00B7}  ");
             if (have_email) try contact.appendSlice(self.allocator, self.data.footer.email);
-            try self.drawTextConverted(content, contact.items, self.margin_left, left_y, self.font_regular, detail_size, MUTED_GREY);
+            try self.drawTextConverted(content, contact.items, text_x, left_y, self.font_regular, detail_size, MUTED_GREY);
             left_y -= detail_lh;
         }
 
         // Website
         if (self.data.footer.website.len > 0) {
-            try self.drawTextConverted(content, self.data.footer.website, self.margin_left, left_y, self.font_regular, detail_size, MUTED_GREY);
+            try self.drawTextConverted(content, self.data.footer.website, text_x, left_y, self.font_regular, detail_size, MUTED_GREY);
             left_y -= detail_lh;
         }
+
+        // The mark can stand taller than the text lines beside it; keep the
+        // header baseline below whichever is lower so the separator never
+        // crosses the logo.
+        if (self.logo_id != null) left_y = @min(left_y, top_y - self.logo_h);
 
         // ── Right block: document type word + reference ──────────
         const doc_type = deriveDocTypeWord(self.data.reference);
@@ -660,6 +685,39 @@ pub const CleanQuoteRenderer = struct {
             }
         }
 
+        // Decode the company logo (if any) up front so the header can lay out
+        // around it. Same memory contract as proposal.zig: keep the decoded
+        // bytes alive until the document is built (freed in deinit); JPEG pixel
+        // data aliases decoded_bytes, PNG data is a fresh buffer we own.
+        if (self.data.company_logo_base64) |logo_b64| {
+            if (logo_b64.len > 0) {
+                const result = image.loadImageFlexible(self.allocator, logo_b64) catch null;
+                if (result) |r| {
+                    self.logo_decoded = r.decoded_bytes;
+                    if (r.image.format != .jpeg) {
+                        self.logo_pixels = @constCast(r.image.data);
+                    }
+                    self.logo_id = self.doc.addImage(r.image) catch null;
+                    if (self.logo_id != null and r.image.height > 0) {
+                        // Fit the mark to a small header box (max 40pt tall,
+                        // 120pt wide), preserving the source aspect ratio.
+                        const max_h: f32 = 40;
+                        const max_w: f32 = 120;
+                        const iw: f32 = @floatFromInt(r.image.width);
+                        const ih: f32 = @floatFromInt(r.image.height);
+                        var w = max_h * (iw / ih);
+                        var h = max_h;
+                        if (w > max_w) {
+                            w = max_w;
+                            h = max_w * (ih / iw);
+                        }
+                        self.logo_w = w;
+                        self.logo_h = h;
+                    }
+                }
+            }
+        }
+
         var content = document.ContentStream.init(self.allocator);
         errdefer content.deinit();
 
@@ -741,6 +799,10 @@ fn parseProposalJsonLocal(allocator: std.mem.Allocator, json_str: []const u8) !P
 
     data.company_name = try dupeStr(allocator, root, "company_name", "");
     data.company_address = try dupeStr(allocator, root, "company_address", "");
+    // Optional logo — raw base64, data: URL, or a file path (loadImageFlexible
+    // resolves all three). Stays null when absent/empty so the header degrades
+    // gracefully to text-only.
+    data.company_logo_base64 = dupeOptStr(allocator, root, "company_logo_base64") catch null;
     data.client_name = try dupeStr(allocator, root, "client_name", "");
     data.client_address = try dupeStr(allocator, root, "client_address", "");
     data.reference = try dupeStr(allocator, root, "reference", "");
