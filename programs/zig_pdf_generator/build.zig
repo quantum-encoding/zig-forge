@@ -196,6 +196,9 @@ pub fn build(b: *std.Build) void {
     });
 
     ios_lib.root_module.strip = true;
+    // Static consumers (Xcode link) get no Zig runtime — f128 soft-float
+    // (roundq et al.) must ride inside the archive, same as the host lib.
+    ios_lib.bundle_compiler_rt = true;
 
     const ios_install = b.addInstallArtifact(ios_lib, .{
         .dest_dir = .{ .override = .{ .custom = "lib/ios-arm64" } },
@@ -226,6 +229,7 @@ pub fn build(b: *std.Build) void {
     });
 
     ios_sim_arm_lib.root_module.strip = true;
+    ios_sim_arm_lib.bundle_compiler_rt = true;
 
     const ios_sim_arm_install = b.addInstallArtifact(ios_sim_arm_lib, .{
         .dest_dir = .{ .override = .{ .custom = "lib/ios-sim-arm64" } },
