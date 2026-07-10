@@ -42,7 +42,17 @@ fn pwrite(fd: c.fd_t, bytes: []const u8) !usize {
 fn paccept(lfd: c.fd_t) !c.fd_t {
     const f = c.accept(lfd, null, null);
     if (f < 0) return error.AcceptFailed;
+    setCloexec(f);
     return f;
+}
+/// Keep server sockets out of spawned shells. `spawn` forks a shell while the
+/// client connection is open; without CLOEXEC the child inherits the socket,
+/// the server's close is no longer the last close, and the client — which
+/// frames the response by EOF — hangs until that shell exits. (accept4/
+/// SOCK_CLOEXEC would do this atomically, but macOS has neither; fcntl is the
+/// portable form, and the single-threaded accept loop leaves no fork race.)
+fn setCloexec(fd: c.fd_t) void {
+    _ = std.posix.fcntl(fd, std.posix.F.SETFD, std.posix.FD_CLOEXEC) catch {};
 }
 fn pclose(fd: c.fd_t) void {
     _ = c.close(fd);
