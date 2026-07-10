@@ -93,6 +93,7 @@ fn runServer(alloc: std.mem.Allocator) !void {
 
     const lfd = c.socket(c.AF.UNIX, c.SOCK.STREAM, 0);
     if (lfd < 0) return error.SocketCreateFailed;
+    setCloexec(lfd); // shells spawned later must not inherit the listen socket
     var addr = fillAddr(path);
     if (c.bind(lfd, @ptrCast(&addr), @sizeOf(c.sockaddr.un)) < 0) return error.BindFailed;
     if (c.listen(lfd, 16) < 0) return error.ListenFailed;
