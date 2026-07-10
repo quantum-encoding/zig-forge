@@ -465,10 +465,13 @@ pub const InvoiceRenderer = struct {
         const usable_width = self.page_width - self.margin_left - self.margin_right;
         const table_style = self.data.table_style;
         const box_border = document.Color.fromHex("#d0d0d0");
-        const header_text_color = if (table_style == .minimal and !self.roundedLayout()) primary else document.Color.white;
+        // Glass: the header band ends up WASHED (the white table container
+        // composites over it), so white titles die — dark ink carries the
+        // contrast, same rule as the totals chip (field report).
+        const header_text_color = if (self.data.theme == .glass)
+            document.Color.fromHex(self.data.secondary_color)
+        else if (table_style == .minimal and !self.roundedLayout()) primary else document.Color.white;
         if (self.data.theme == .glass) {
-            // Translucent accent header band with a sheen, into the bg layer.
-            // Alpha kept high enough that white column titles stay legible.
             try self.drawGlassPanel(self.bg.?, self.margin_left, self.current_y - 5, usable_width, 22, 7, primary, 0.90, primary, 0.50, null, 0);
             self.table_top = self.current_y + 17 + 8;
         } else if (self.data.theme == .squircle) {
@@ -704,8 +707,9 @@ pub const InvoiceRenderer = struct {
         const is_receipt = std.mem.eql(u8, self.data.document_type, "receipt");
         const doc_title = self.data.custom_title orelse (if (is_quote) "QUOTE" else if (is_receipt) "RECEIPT" else "INVOICE");
         const title_size: f32 = if (doc_title.len > 12) 20 else 28;
-        const title_est_w = @as(f32, @floatFromInt(doc_title.len)) * title_size * 0.62;
-        const title_x = @max(self.page_width - self.margin_right - title_est_w, self.margin_left + 180);
+        const title_est_w = @as(f32, @floatFromInt(doc_title.len)) * title_size * 0.72;
+        const title_inset: f32 = if (self.data.theme == .glass) 10 else 0;
+        const title_x = @max(self.page_width - self.margin_right - title_inset - title_est_w, self.margin_left + 180);
         // Glass: the wordmark lives INSIDE the masthead panel (its ascenders
         // overflowed the rounded edge when drawn on the margin line).
         const title_y = if (self.data.theme == .glass)
