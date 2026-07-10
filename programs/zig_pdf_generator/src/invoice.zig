@@ -421,13 +421,15 @@ pub const InvoiceRenderer = struct {
 
         // Top-edge sheen: white at the very top fading to `sheen_end`, clipped
         // to the panel silhouette AND the top band so it reads as a highlight.
-        const band_h = @min(h * 0.34, 24.0);
-        if (band_h > 1.0) {
-            const sh = self.doc.getAxialShadingId(document.Color.white, sheen_end, x, y + h, x, y + h - band_h);
+        // Full-height fade: a band-clipped sheen left a hard tint seam where
+        // the band ended (field report: it sliced through the QUOTE wordmark
+        // and read as the panel's edge). Fading across the whole panel has no
+        // seam — the gradient's end IS the panel's bottom border.
+        if (h > 1.0) {
+            const sh = self.doc.getAxialShadingId(document.Color.white, sheen_end, x, y + h, x, y);
             try bg.saveState();
             try bg.setExtGState(self.doc.getOpacityExtGStateId(sheen_alpha));
             try bg.clipRoundedRect(x, y, w, h, radius);
-            try bg.clipRect(x, y + h - band_h, w, band_h);
             try bg.paintShading(sh);
             try bg.restoreState();
         }
