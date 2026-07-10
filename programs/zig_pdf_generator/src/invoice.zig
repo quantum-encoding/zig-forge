@@ -704,7 +704,13 @@ pub const InvoiceRenderer = struct {
         const title_size: f32 = if (doc_title.len > 12) 20 else 28;
         const title_est_w = @as(f32, @floatFromInt(doc_title.len)) * title_size * 0.62;
         const title_x = @max(self.page_width - self.margin_right - title_est_w, self.margin_left + 180);
-        try content.drawText(doc_title, title_x, self.page_height - self.margin_top, self.font_bold, title_size, title_color);
+        // Glass: the wordmark lives INSIDE the masthead panel (its ascenders
+        // overflowed the rounded edge when drawn on the margin line).
+        const title_y = if (self.data.theme == .glass)
+            self.page_height - self.margin_top - 10
+        else
+            self.page_height - self.margin_top;
+        try content.drawText(doc_title, title_x, title_y, self.font_bold, title_size, title_color);
 
         self.current_y = self.page_height - self.margin_top - 50;
 
@@ -821,26 +827,29 @@ pub const InvoiceRenderer = struct {
             }
             if (self.data.client_vat.len > 0) to_lines += 1;
             const n_lines = @max(from_lines, to_lines);
-            const card_h = 22 + n_lines * 13 + pad; // label row + lines + padding
+            const card_h = 26 + n_lines * 13 + pad; // label row (+4 gap) + lines + padding
 
             const card_top = self.current_y;
             const from_x = self.margin_left;
             const to_x = self.margin_left + card_w + gap;
             if (self.data.theme == .glass) {
-                // From: neutral translucent panel. Bill To: same glass but an
-                // accent-tinted sheen + accent hairline to carry the emphasis.
+                // From: neutral translucent panel. Bill To: same glass with a
+                // SOFT accent — the faded material everywhere (field report:
+                // the saturated hairline/sheen read louder than the rest).
                 try self.drawGlassPanel(&page_bg, from_x, card_top - card_h, card_w, card_h, 10, document.Color.white, 0.72, glass_sheen_end, 0.50, glass_panel_border, 1.0);
-                const to_sheen = mixColor(document.Color.white, primary, 0.42);
-                try self.drawGlassPanel(&page_bg, to_x, card_top - card_h, card_w, card_h, 10, document.Color.white, 0.74, to_sheen, 0.55, primary, 1.3);
+                const to_border = mixColor(document.Color.white, primary, 0.45);
+                try self.drawGlassPanel(&page_bg, to_x, card_top - card_h, card_w, card_h, 10, document.Color.white, 0.74, glass_sheen_end, 0.55, to_border, 1.1);
             } else {
                 try content.drawRoundedRectEx(from_x, card_top - card_h, card_w, card_h, 10, null, card_border, 1.0);
                 try content.drawRoundedRectEx(to_x, card_top - card_h, card_w, card_h, 10, null, primary, 1.5);
             }
 
-            // From card content
+            // From card content — label and name share the exact left edge;
+            // the extra 4pt under the label keeps them reading as two rows
+            // rather than a cramped lockup (field report).
             var fy = card_top - pad - 6;
             try content.drawText("FROM", from_x + pad, fy, self.font_bold, 8, muted);
-            fy -= 15;
+            fy -= 19;
             try content.drawText(self.data.company_name, from_x + pad, fy, self.font_bold, 10, document.Color.black);
             fy -= 13;
             if (self.data.company_address.len > 0) {
@@ -859,7 +868,7 @@ pub const InvoiceRenderer = struct {
             // Bill To card content
             var ty = card_top - pad - 6;
             try content.drawText("BILL TO", to_x + pad, ty, self.font_bold, 8, primary);
-            ty -= 15;
+            ty -= 19;
             try content.drawText(self.data.client_name, to_x + pad, ty, self.font_bold, 10, document.Color.black);
             ty -= 13;
             if (self.data.client_address.len > 0) {
@@ -1087,17 +1096,22 @@ pub const InvoiceRenderer = struct {
         const table_right_edge = self.margin_left + usable_width;
         const total_bar_width = table_right_edge - total_bar_x;
         if (self.data.theme == .glass) {
-            // Emphasis chip: near-opaque accent with a sheen, into the bg layer.
-            try self.drawGlassPanel(&page_bg, total_bar_x, self.current_y - 5, total_bar_width, 22, 7, primary, 0.92, primary, 0.50, null, 0);
+            // Emphasis chip in the SAME faded material as the (container-
+            // washed) header band — glass accents whisper, they don't shout
+            // (field report). Dark text carries the contrast instead.
+            const chip_fill = mixColor(document.Color.white, primary, 0.30);
+            try self.drawGlassPanel(&page_bg, total_bar_x, self.current_y - 5, total_bar_width, 22, 7, chip_fill, 0.85, glass_sheen_end, 0.50, glass_panel_border, 1.0);
         } else if (self.data.theme == .squircle) {
             try content.drawRoundedRectEx(total_bar_x, self.current_y - 5, total_bar_width, 22, 7, primary, null, 1.0);
         } else {
             try content.drawRect(total_bar_x, self.current_y - 5, total_bar_width, 22, primary, null);
         }
-        try content.drawText("TOTAL:", col_price, self.current_y, self.font_bold, 12, document.Color.white);
+        // Faded glass chip needs dark ink; solid chips keep white.
+        const total_text_color = if (self.data.theme == .glass) secondary else document.Color.white;
+        try content.drawText("TOTAL:", col_price, self.current_y, self.font_bold, 12, total_text_color);
         var grand_total_buf: [24]u8 = undefined;
         const grand_total_str = std.fmt.bufPrint(&grand_total_buf, "{s}{d:.2}", .{ self.data.currency_symbol, self.data.total }) catch "0.00";
-        try self.drawRightFit(&content, grand_total_str, table_right_edge - 10, (table_right_edge - 10) - (col_price + 64), self.current_y, self.font_bold, self.fontEnumBold(), 12, document.Color.white);
+        try self.drawRightFit(&content, grand_total_str, table_right_edge - 10, (table_right_edge - 10) - (col_price + 64), self.current_y, self.font_bold, self.fontEnumBold(), 12, total_text_color);
 
         // =====================================================================
         // Footer Section - Notes/Payment Terms then QR Code below
