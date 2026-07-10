@@ -52,7 +52,7 @@ fn paccept(lfd: c.fd_t) !c.fd_t {
 /// SOCK_CLOEXEC would do this atomically, but macOS has neither; fcntl is the
 /// portable form, and the single-threaded accept loop leaves no fork race.)
 fn setCloexec(fd: c.fd_t) void {
-    _ = std.posix.fcntl(fd, std.posix.F.SETFD, std.posix.FD_CLOEXEC) catch {};
+    _ = c.fcntl(fd, c.F.SETFD, @as(c_int, std.posix.FD_CLOEXEC));
 }
 fn pclose(fd: c.fd_t) void {
     _ = c.close(fd);
