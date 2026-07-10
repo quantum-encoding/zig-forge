@@ -708,7 +708,7 @@ pub const InvoiceRenderer = struct {
         const doc_title = self.data.custom_title orelse (if (is_quote) "QUOTE" else if (is_receipt) "RECEIPT" else "INVOICE");
         const title_size: f32 = if (doc_title.len > 12) 20 else 28;
         const title_est_w = @as(f32, @floatFromInt(doc_title.len)) * title_size * 0.72;
-        const title_inset: f32 = if (self.data.theme == .glass) 10 else 0;
+        const title_inset: f32 = if (self.roundedLayout()) 10 else 0;
         const title_x = @max(self.page_width - self.margin_right - title_inset - title_est_w, self.margin_left + 180);
         // Glass: the wordmark lives INSIDE the masthead panel (its ascenders
         // overflowed the rounded edge when drawn on the margin line).
@@ -777,7 +777,9 @@ pub const InvoiceRenderer = struct {
         const details_x = self.page_width - self.margin_right - 180;
         // Values are anchored to the right margin and grow leftward, so a long
         // invoice number or date can never run off the right edge.
-        const details_right = self.page_width - self.margin_right;
+        // Rounded themes inset the wordmark 10pt; the meta values share that
+        // right edge so QTE number/date align under the E (field report).
+        const details_right = self.page_width - self.margin_right - (if (self.roundedLayout()) @as(f32, 10) else 0);
         const reg = self.fontEnumRegular();
         // Values fit within the space to the right of the (max-width) labels.
         const meta_value_width = details_right - (details_x + 64);
@@ -816,7 +818,11 @@ pub const InvoiceRenderer = struct {
             // Date baseline) — plus a full line of air before the cards.
             self.current_y = @min(self.current_y - 16, details_y - 26);
             const gap: f32 = 14;
-            const card_w = (usable_width - gap) / 2;
+            // Cards share the table container's exact span (margin−8 … +8) —
+            // field report: edges a hair inside the table read as misaligned.
+            const row_x = self.margin_left - 8;
+            const row_w = usable_width + 16;
+            const card_w = (row_w - gap) / 2;
             const pad: f32 = 12;
 
             // Count lines to size both cards identically (label + name + lines).
@@ -836,8 +842,8 @@ pub const InvoiceRenderer = struct {
             const card_h = 26 + n_lines * 13 + pad; // label row (+4 gap) + lines + padding
 
             const card_top = self.current_y;
-            const from_x = self.margin_left;
-            const to_x = self.margin_left + card_w + gap;
+            const from_x = row_x;
+            const to_x = row_x + card_w + gap;
             if (self.data.theme == .glass) {
                 // From: neutral translucent panel. Bill To: same glass with a
                 // SOFT accent — the faded material everywhere (field report:
