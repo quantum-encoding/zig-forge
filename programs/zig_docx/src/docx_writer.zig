@@ -562,6 +562,13 @@ fn writeParagraph(
     images: *ImageCollector,
     drawing_id: *u32,
 ) !void {
+    // A page-break marker is a standalone paragraph whose only content is a
+    // hard page break. Emit it and return — no style/run processing needed.
+    if (p.style == .page_break) {
+        try buf.appendSlice(allocator, "<w:p><w:r><w:br w:type=\"page\"/></w:r></w:p>\n");
+        return;
+    }
+
     try buf.appendSlice(allocator, "<w:p><w:pPr>");
 
     switch (p.style) {

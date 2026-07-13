@@ -22,6 +22,7 @@ pub const StyleType = enum {
     code_block,
     blockquote,
     horizontal_rule,
+    page_break, // standalone paragraph carrying a hard Word page break
     other,
 };
 
