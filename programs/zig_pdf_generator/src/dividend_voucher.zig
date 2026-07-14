@@ -178,7 +178,10 @@ pub const Currency = enum {
 
     pub fn symbol(self: Currency) []const u8 {
         return switch (self) {
-            .GBP => "\\243", // £ in PDF encoding
+            // UTF-8 "£": showText decodes UTF-8 → WinAnsi (0xA3). NOT "\\243" —
+            // showText escapes the backslash again and the octal prints
+            // literally (the share_certificate.zig lesson, same bug).
+            .GBP => "£",
             .EUR => "EUR ",
             .USD => "$",
         };
@@ -376,10 +379,11 @@ pub const DividendVoucherRenderer = struct {
         const left_x = self.margin;
         const value_x = self.page_width - self.margin - 100;
 
-        // Currency symbol based on jurisdiction
+        // Currency symbol based on jurisdiction. UTF-8 "£", never "\\243" —
+        // see Currency.symbol above.
         const currency_symbol: []const u8 = switch (self.data.jurisdiction) {
             .Ireland => "EUR ",
-            .UK => "\\243", // £ in PDF encoding
+            .UK => "£",
         };
 
         // Section title
@@ -522,10 +526,11 @@ pub const DividendVoucherRenderer = struct {
         var y = self.page_height - self.margin - 540;
         const left_x = self.margin;
 
-        // Currency symbol based on jurisdiction
+        // Currency symbol based on jurisdiction. UTF-8 "£", never "\\243" —
+        // see Currency.symbol above.
         const currency_symbol: []const u8 = switch (self.data.jurisdiction) {
             .Ireland => "EUR ",
-            .UK => "\\243",
+            .UK => "£",
         };
 
         // Declaration text
