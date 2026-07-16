@@ -123,6 +123,24 @@ int      tmux_select_window(tmux_session *handle, uint8_t index);
 uint8_t  tmux_window_count(tmux_session *handle);
 int      tmux_focus_next_pane(tmux_session *handle);
 
+/* ---- pane-aware surface (composing splits in a host view) ----
+ * Pane indices are positions in the active window's pane list at call time;
+ * re-enumerate after split/close. Rects are in cells within the window extent
+ * (tmux_window_size); split rects reserve a 1-cell gap for the border.
+ * tmux_pane_cursor is PANE-LOCAL — the host adds the pane rect offset.
+ * tmux_drain drains EVERY pane of the active window (background splits must
+ * not stall on a full PTY buffer); tmux_pane_pty_fd gives each pane's fd for
+ * per-pane readability sources. tmux_close_pane refuses (-1) the last pane. */
+void     tmux_window_size(tmux_session *handle, uint16_t *out_rows, uint16_t *out_cols);
+size_t   tmux_pane_count(tmux_session *handle);
+int      tmux_pane_rect(tmux_session *handle, size_t idx, uint16_t *out_x, uint16_t *out_y, uint16_t *out_w, uint16_t *out_h);
+bool     tmux_pane_is_active(tmux_session *handle, size_t idx);
+int      tmux_focus_pane(tmux_session *handle, size_t idx);
+int      tmux_pane_pty_fd(tmux_session *handle, size_t idx);
+void     tmux_pane_cursor(tmux_session *handle, size_t idx, uint16_t *out_row, uint16_t *out_col, bool *out_visible);
+size_t   tmux_pane_read_cells(tmux_session *handle, size_t idx, tmux_cell *out, size_t max_cells);
+int      tmux_close_pane(tmux_session *handle, size_t idx);
+
 /* ---- theme (shared color scheme) ----
  * The single source of truth for colors, shared by every renderer. Read your
  * config file yourself and push the bytes via tmux_set_theme_text (the `key =
