@@ -96,6 +96,10 @@ test "library imports" {
     _ = config;
 }
 
+test "VT tier-1 external anchors" {
+    _ = @import("vt_tier1_anchors.zig");
+}
+
 test "pty module" {
     _ = pty;
 }

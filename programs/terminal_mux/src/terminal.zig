@@ -105,6 +105,8 @@ pub const SavedCursor = struct {
     bg: CellColor,
     origin_mode: bool,
     autowrap: bool,
+    /// DECSC saves the deferred-wrap state too (xterm: DECRC restores it).
+    pending_wrap: bool = false,
 };
 
 /// Scroll region
@@ -458,16 +460,27 @@ pub const Scrollback = struct {
         return self.cells[start .. start + self.cols];
     }
 
-    /// Reallocate for a new column width (rare; resize path only). Clears
-    /// history — reflow across widths is out of scope.
+    /// Reallocate for a new column width (rare; resize path only). History is
+    /// PRESERVED: each line is truncated or blank-padded to the new width.
+    /// (Reflow — re-wrapping long lines across the new width — stays out of
+    /// scope; a narrower window loses the clipped tails, not the lines.)
     pub fn resizeCols(self: *Scrollback, new_cols: u16) !void {
         if (new_cols == self.cols) return;
         const new_cells = try self.allocator.alloc(Cell, self.capacity_lines * @as(usize, new_cols));
+        // Compact the ring into the new buffer starting at slot 0.
+        var i: usize = 0;
+        while (i < self.len) : (i += 1) {
+            const src = self.line(i);
+            const dst = new_cells[i * @as(usize, new_cols) .. (i + 1) * @as(usize, new_cols)];
+            const n = @min(src.len, dst.len);
+            @memcpy(dst[0..n], src[0..n]);
+            @memset(dst[n..], Cell.default);
+        }
         self.allocator.free(self.cells);
         self.cells = new_cells;
         self.cols = new_cols;
         self.head = 0;
-        self.len = 0;
+        // len unchanged — the history survives the resize.
     }
 };
 
@@ -483,6 +496,10 @@ pub const Terminal = struct {
     cursor: Cursor,
     saved_cursor: ?SavedCursor,
     saved_cursor_alt: ?SavedCursor,
+    /// xterm deferred autowrap: the last printable filled the final column and
+    /// the cursor stays on it until the next printable forces the wrap. Any
+    /// explicit cursor motion (CR, CUP, CUU/CUD/CUF/CUB, LF, BS, TAB) cancels.
+    pending_wrap: bool = false,
 
     // Attributes for new characters
     current_attrs: CellAttrs,
@@ -611,22 +628,66 @@ pub const Terminal = struct {
         };
     }
 
+    /// Zero-width codepoints (combining marks, joiners, variation selectors)
+    /// occupy no cell. Full grapheme composition can't be represented by the
+    /// single-codepoint Cell, so they are dropped — per esctest, the one thing
+    /// they must never do is advance the cursor.
+    fn isZeroWidth(char: u21) bool {
+        return switch (char) {
+            0x0300...0x036F => true, // combining diacriticals
+            0x0483...0x0489 => true, // Cyrillic combining
+            0x0591...0x05BD, 0x05BF => true, // Hebrew points
+            0x0610...0x061A, 0x064B...0x065F, 0x0670 => true, // Arabic marks
+            0x200B...0x200F => true, // ZWSP ZWNJ ZWJ LRM RLM
+            0x1AB0...0x1AFF => true, // combining diacriticals extended
+            0x1DC0...0x1DFF => true, // combining diacriticals supplement
+            0x20D0...0x20FF => true, // combining marks for symbols
+            0xFE00...0xFE0F => true, // variation selectors (emoji/text)
+            0xFE20...0xFE2F => true, // combining half marks
+            0xFEFF => true, // ZWNBSP / BOM
+            0xE0100...0xE01EF => true, // variation selectors supplement
+            else => false,
+        };
+    }
+
+    /// Resolve a pending autowrap: the previous printable filled the last
+    /// column and the wrap was deferred until now (xterm DECAWM semantics).
+    fn resolvePendingWrap(self: *Self) void {
+        if (!self.pending_wrap) return;
+        self.pending_wrap = false;
+        // The row being left soft-wrapped (no explicit CR/LF).
+        self.grid.setRowWrapped(self.cursor.row, true);
+        self.newline();
+        self.cursor.col = 0;
+    }
+
     /// Write a character at the current cursor position
     pub fn putChar(self: *Self, char: u21) void {
-        if (self.cursor.col >= self.grid.cols) {
-            if (self.modes.autowrap) {
-                // A printable overflowed the last column: the row we're leaving
-                // was soft-wrapped (no explicit CR/LF). Record it before newline
-                // moves the cursor off that row.
-                self.grid.setRowWrapped(self.cursor.row, true);
-                self.newline();
-                self.cursor.col = 0;
-            } else {
-                self.cursor.col = self.grid.cols - 1;
-            }
-        }
+        if (isZeroWidth(char)) return;
 
         const width: u2 = if (isWideChar(char)) 2 else 1;
+
+        // Deferred autowrap (xterm "pending wrap" / esctest DECAWM cases):
+        // printing the last column leaves the cursor ON it; the wrap happens
+        // when the NEXT printable arrives. Anything else (CR, CUP, …) cancels.
+        self.resolvePendingWrap();
+
+        // A wide glyph never splits across rows: when only the last column is
+        // left, blank it as a spacer and wrap first (autowrap on).
+        if (width == 2 and self.cursor.col + 1 >= self.grid.cols and self.modes.autowrap) {
+            self.grid.getCell(self.cursor.row, self.grid.cols - 1).* = .{
+                .char = ' ',
+                .fg = self.current_fg,
+                .bg = self.current_bg,
+                .attrs = self.current_attrs,
+                .width = 1,
+            };
+            self.markDirty(self.cursor.row);
+            self.grid.setRowWrapped(self.cursor.row, true);
+            self.newline();
+            self.cursor.col = 0;
+        }
+
         const cell = self.grid.getCell(self.cursor.row, self.cursor.col);
         cell.* = .{
             .char = char,
@@ -652,7 +713,14 @@ pub const Terminal = struct {
         }
 
         self.markDirty(self.cursor.row);
-        self.cursor.col += width;
+        if (@as(u17, self.cursor.col) + width >= self.grid.cols) {
+            // Filled the last column: stay on it. With autowrap the wrap is
+            // now pending; without, the next printable overwrites in place.
+            self.cursor.col = self.grid.cols - 1;
+            self.pending_wrap = self.modes.autowrap;
+        } else {
+            self.cursor.col += width;
+        }
     }
 
     /// Bulk-write a run of printable, width-1 ASCII bytes at the cursor,
@@ -664,18 +732,10 @@ pub const Terminal = struct {
         const cols: usize = self.grid.cols;
         var idx: usize = 0;
         while (idx < bytes.len) {
-            // Resolve a pending wrap exactly as putChar does.
-            if (self.cursor.col >= self.grid.cols) {
-                if (self.modes.autowrap) {
-                    // Soft-wrap: mark the row being left before newline advances.
-                    self.grid.setRowWrapped(self.cursor.row, true);
-                    self.newline();
-                    self.cursor.col = 0;
-                } else {
-                    // Overwrite mode: every further byte lands on the last cell.
-                    self.cursor.col = self.grid.cols - 1;
-                }
-            }
+            // Resolve a deferred wrap exactly as putChar does. Without
+            // autowrap the cursor is already clamped to the last column and
+            // every further chunk overwrites it (room == 1 below).
+            self.resolvePendingWrap();
 
             const room: usize = cols - self.cursor.col; // always >= 1
             const n: usize = @min(bytes.len - idx, room);
@@ -695,11 +755,17 @@ pub const Terminal = struct {
 
             self.cursor.col += @intCast(n);
             idx += n;
+            if (self.cursor.col >= cols) {
+                // Filled the last column: cursor stays on it, wrap deferred.
+                self.cursor.col = @intCast(cols - 1);
+                self.pending_wrap = self.modes.autowrap;
+            }
         }
     }
 
     /// Handle newline
     pub fn newline(self: *Self) void {
+        self.pending_wrap = false;
         if (self.cursor.row == self.scroll_region.bottom) {
             self.scrollUp(1);
         } else if (self.cursor.row < self.grid.rows - 1) {
@@ -712,12 +778,14 @@ pub const Terminal = struct {
     pub fn carriageReturn(self: *Self) void {
         // An explicit CR is a hard control of this row — it is not a soft-wrap
         // continuation, so drop any recorded wrap for it.
+        self.pending_wrap = false;
         self.grid.setRowWrapped(self.cursor.row, false);
         self.cursor.col = 0;
     }
 
     /// Handle tab
     pub fn tab(self: *Self) void {
+        self.pending_wrap = false;
         var col = self.cursor.col + 1;
         while (col < self.grid.cols) : (col += 1) {
             if (self.tab_stops.isSet(col)) {
@@ -730,6 +798,7 @@ pub const Terminal = struct {
 
     /// Handle backspace
     pub fn backspace(self: *Self) void {
+        self.pending_wrap = false;
         if (self.cursor.col > 0) {
             self.cursor.col -= 1;
         }
@@ -841,6 +910,7 @@ pub const Terminal = struct {
 
     /// Insert blank characters at cursor (ICH)
     pub fn insertChar(self: *Self, count: u16) void {
+        self.pending_wrap = false;
         if (self.cursor.col >= self.grid.cols) return;
 
         const row = self.cursor.row;
@@ -878,8 +948,56 @@ pub const Terminal = struct {
         self.markDirty(row);
     }
 
+    /// Delete characters at cursor (DCH) — ECMA-48 §8.3.26: the tail of the
+    /// row slides left over the deleted cells; the freed end fills with blanks.
+    pub fn deleteChar(self: *Self, count: u16) void {
+        self.pending_wrap = false;
+        if (self.cursor.col >= self.grid.cols or count == 0) return;
+        const row = self.cursor.row;
+        const cols = self.grid.cols;
+        const n: u16 = @min(count, cols - self.cursor.col);
+
+        var col: u16 = self.cursor.col;
+        while (col + n < cols) : (col += 1) {
+            self.grid.getCell(row, col).* = self.grid.getCell(row, col + n).*;
+        }
+        const blank = Cell{
+            .char = ' ',
+            .fg = self.current_fg,
+            .bg = self.current_bg,
+            .attrs = .{},
+            .width = 1,
+        };
+        while (col < cols) : (col += 1) {
+            self.grid.getCell(row, col).* = blank;
+        }
+        self.markDirty(row);
+    }
+
+    /// Erase characters at cursor (ECH) — ECMA-48 §8.3.41: N cells blanked in
+    /// place; unlike DCH nothing shifts.
+    pub fn eraseChars(self: *Self, count: u16) void {
+        self.pending_wrap = false;
+        if (self.cursor.col >= self.grid.cols or count == 0) return;
+        const n: u16 = @min(count, self.grid.cols - self.cursor.col);
+        const blank = Cell{
+            .char = ' ',
+            .fg = self.current_fg,
+            .bg = self.current_bg,
+            .attrs = .{},
+            .width = 1,
+        };
+        var col: u16 = self.cursor.col;
+        const end = self.cursor.col + n;
+        while (col < end) : (col += 1) {
+            self.grid.getCell(self.cursor.row, col).* = blank;
+        }
+        self.markDirty(self.cursor.row);
+    }
+
     /// Set cursor position (CUP)
     pub fn setCursorPos(self: *Self, row: u16, col: u16) void {
+        self.pending_wrap = false;
         const base_row: u16 = if (self.modes.origin) self.scroll_region.top else 0;
         const max_row: u16 = if (self.modes.origin) self.scroll_region.bottom else self.grid.rows - 1;
 
@@ -891,6 +1009,7 @@ pub const Terminal = struct {
 
     /// Move cursor up (CUU)
     pub fn cursorUp(self: *Self, n: u16) void {
+        self.pending_wrap = false;
         const min_row: u16 = if (self.modes.origin) self.scroll_region.top else 0;
         if (self.cursor.row >= min_row + n) {
             self.cursor.row -= n;
@@ -901,6 +1020,7 @@ pub const Terminal = struct {
 
     /// Move cursor down (CUD)
     pub fn cursorDown(self: *Self, n: u16) void {
+        self.pending_wrap = false;
         const max_row: u16 = if (self.modes.origin) self.scroll_region.bottom else self.grid.rows - 1;
         if (self.cursor.row + n <= max_row) {
             self.cursor.row += n;
@@ -911,6 +1031,7 @@ pub const Terminal = struct {
 
     /// Move cursor forward (CUF)
     pub fn cursorForward(self: *Self, n: u16) void {
+        self.pending_wrap = false;
         if (self.cursor.col + n < self.grid.cols) {
             self.cursor.col += n;
         } else {
@@ -920,6 +1041,7 @@ pub const Terminal = struct {
 
     /// Move cursor backward (CUB)
     pub fn cursorBackward(self: *Self, n: u16) void {
+        self.pending_wrap = false;
         if (self.cursor.col >= n) {
             self.cursor.col -= n;
         } else {
@@ -937,6 +1059,7 @@ pub const Terminal = struct {
             .bg = self.current_bg,
             .origin_mode = self.modes.origin,
             .autowrap = self.modes.autowrap,
+            .pending_wrap = self.pending_wrap,
         };
 
         if (self.modes.alt_screen) {
@@ -958,27 +1081,42 @@ pub const Terminal = struct {
             self.current_bg = s.bg;
             self.modes.origin = s.origin_mode;
             self.modes.autowrap = s.autowrap;
+            self.pending_wrap = s.pending_wrap;
+        } else {
+            self.pending_wrap = false;
         }
     }
 
-    /// Switch to alternate screen buffer
+    /// Switch to the alternate screen buffer — SWAP semantics: the primary
+    /// grid is stashed aside untouched and `self.grid` becomes a fresh blank
+    /// grid, so every write path (putChar, erases, scrolls — they all target
+    /// `self.grid`) is alt-correct with no per-callsite dispatch. The old
+    /// design kept writing to the primary while readers looked at an
+    /// always-empty alt grid: vim rendered into your scrollback and quitting
+    /// it never restored the screen.
     pub fn enterAltScreen(self: *Self) !void {
         if (self.modes.alt_screen) return;
 
-        self.alt_grid = try Grid.init(self.allocator, self.grid.rows, self.grid.cols);
+        const fresh = try Grid.init(self.allocator, self.grid.rows, self.grid.cols);
+        self.alt_grid = self.grid; // stash the primary
+        self.grid = fresh;
         self.modes.alt_screen = true;
+        self.pending_wrap = false;
         self.markAllDirty();
     }
 
-    /// Return to main screen buffer
+    /// Return to the main screen buffer: discard the alt contents and restore
+    /// the stashed primary grid byte-exact (what `less`/vim quitting expects).
     pub fn exitAltScreen(self: *Self) void {
         if (!self.modes.alt_screen) return;
 
-        if (self.alt_grid) |*g| {
-            g.deinit();
+        if (self.alt_grid) |g| {
+            self.grid.deinit(); // the alt screen's contents die here
+            self.grid = g;
             self.alt_grid = null;
         }
         self.modes.alt_screen = false;
+        self.pending_wrap = false;
         self.markAllDirty();
     }
 
@@ -1035,12 +1173,10 @@ pub const Terminal = struct {
     }
 
     /// Get current grid (main or alt)
+    /// The grid being displayed AND written. With swap-based alt screen this
+    /// is always `self.grid` — `alt_grid` only ever holds the stashed PRIMARY
+    /// while alt mode is active (never render that one).
     pub fn getCurrentGrid(self: *Self) *Grid {
-        if (self.modes.alt_screen) {
-            if (self.alt_grid) |*g| {
-                return g;
-            }
-        }
         return &self.grid;
     }
 

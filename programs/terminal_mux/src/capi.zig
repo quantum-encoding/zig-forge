@@ -384,9 +384,8 @@ pub export fn tmux_grid_size(handle: ?*TmuxSession, out_rows: ?*u16, out_cols: ?
 /// Shared cell-copy core: a terminal's visible view (scrollback-composed) into
 /// a flat CCell buffer, row-major. Returns cells written.
 fn readTerminalCells(term: *const terminal.Terminal, buf: [*]CCell, max_cells: usize) usize {
-    // NOTE: reads term.grid (not getCurrentGrid) — the emulator's write path
-    // (putChar & co) always targets term.grid, alt screen included; alt_grid
-    // is currently never written. Matching the write path is what renders.
+    // term.grid is ALWAYS the displayed grid (swap-based alt screen: alt mode
+    // swaps a fresh grid in and stashes the primary in alt_grid).
     const grid = &term.grid;
     const cols: usize = grid.cols;
     const total = @as(usize, grid.rows) * cols;

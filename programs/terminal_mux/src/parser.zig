@@ -808,6 +808,15 @@ fn handleCsi(term: *Terminal, seq: CsiSequence) void {
             // EL - Erase Line
             term.eraseLine(@intCast(seq.getParam(0, 0)));
         },
+        'P' => {
+            // DCH - Delete Character (was silently ignored — zsh/fzf in-place
+            // line redraws depend on it; caught by the tier-1 VT anchors)
+            term.deleteChar(seq.getParam(0, 1));
+        },
+        'X' => {
+            // ECH - Erase Character (same story as DCH)
+            term.eraseChars(seq.getParam(0, 1));
+        },
         'L' => {
             // IL - Insert Line
             const n = seq.getParam(0, 1);
