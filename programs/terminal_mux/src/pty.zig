@@ -74,6 +74,10 @@ pub const Pty = struct {
         if (openpty(&master_fd, &slave_fd, null, null, &ws) != 0) {
             return error.OpenptyFailed;
         }
+        // Masters must not leak into spawned shells: a later pane's child
+        // inheriting an earlier pane's master keeps that PTY alive forever
+        // (and the same class of leak made ctl connections never EOF).
+        _ = c.fcntl(master_fd, c.F.SETFD, @as(c_int, c.FD_CLOEXEC));
 
         // openpty hands back the slave fd directly; we don't track a path.
         var slave_path: [32]u8 = undefined;
@@ -98,6 +102,8 @@ pub const Pty = struct {
             .NOCTTY = true,
         }, 0);
         errdefer _ = std.c.close(master_fd);
+        // Same CLOEXEC rationale as the Darwin path: masters never reach children.
+        _ = c.fcntl(master_fd, c.F.SETFD, @as(c_int, c.FD_CLOEXEC));
 
         // Unlock the slave
         var unlock: c_int = 0;

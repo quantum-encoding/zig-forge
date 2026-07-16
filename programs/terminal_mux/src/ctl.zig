@@ -61,6 +61,10 @@ pub fn bind(alloc: std.mem.Allocator) !Ctl {
     const fd = c.socket(c.AF.UNIX, c.SOCK.STREAM, 0);
     if (fd < 0) return error.SocketCreateFailed;
     errdefer _ = c.close(fd);
+    // Spawned shells must not inherit the listener (or any accepted conn —
+    // see accept()): a child holding a conn open means the CLI never sees EOF
+    // and hangs after `split`/`new-window`.
+    _ = c.fcntl(fd, c.F.SETFD, @as(c_int, c.FD_CLOEXEC));
     var addr = fillAddr(path);
     if (c.bind(fd, @ptrCast(&addr), @sizeOf(c.sockaddr.un)) < 0) return error.BindFailed;
     if (c.listen(fd, 16) < 0) return error.ListenFailed;
@@ -114,6 +118,7 @@ pub fn accept(
     const conn = c.accept(listen_fd, null, null);
     if (conn < 0) return false;
     defer _ = c.close(conn);
+    _ = c.fcntl(conn, c.F.SETFD, @as(c_int, c.FD_CLOEXEC));
 
     // Don't let a stalled client wedge the UI loop.
     const tv = c.timeval{ .sec = 0, .usec = 500_000 };
