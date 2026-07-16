@@ -1,10 +1,18 @@
 //! zterm — standalone mux server + CLI for terminal_mux, mirroring the `wezterm cli` verbs so the agent
 //! ecosystem (mac-drive / imsg bridge / the roster) can drive the Zig terminal exactly as it drives WezTerm.
 //!
+//! TWO servers speak this protocol:
+//!   - `zterm server` — a HEADLESS pane pool (this file), for agents that need
+//!     invisible shells.
+//!   - the interactive `tmux` binary — binds the same socket (src/ctl.zig), so
+//!     `zterm cli` drives the VISIBLE terminal: list/send/enter/capture plus
+//!     `split h|v`, `new-window`, `focus <pane>` — the wezterm-cli model.
+//!   Newest binder wins the default path; $ZTERM_SOCKET targets a specific one.
+//!
 //! Test loop (two terminals):
-//!     zterm server                 # owns the panes; runs the event loop
+//!     zterm server                 # headless pool (or just run `tmux` for the visible mux)
 //!     zterm cli list               # → pane <id> <rows>x<cols>
-//!     zterm cli spawn              # → pane <id>   (new shell)
+//!     zterm cli spawn              # → pane <id>   (new shell; headless server only)
 //!     zterm cli send <id> "ls -la" # type into a pane (no implicit Enter; add \n yourself or use --enter)
 //!     zterm cli capture <id>       # dump the pane's grid as text  (get-text)
 //!     zterm cli kill <id>
@@ -20,6 +28,13 @@ const posix = std.posix;
 const capi = @import("capi.zig");
 
 fn socketPath(alloc: std.mem.Allocator) ![:0]u8 {
+    // $ZTERM_SOCKET overrides (matches ctl.zig, so a driver can target a
+    // specific mux instance); default is the shared per-user path. Note the
+    // interactive `tmux` binary binds this same default — newest binder wins.
+    if (c.getenv("ZTERM_SOCKET")) |p| {
+        const s = std.mem.sliceTo(p, 0);
+        if (s.len > 0) return alloc.dupeZ(u8, s);
+    }
     return std.fmt.allocPrintSentinel(alloc, "/tmp/zterm-{d}.sock", .{c.getuid()}, 0);
 }
 

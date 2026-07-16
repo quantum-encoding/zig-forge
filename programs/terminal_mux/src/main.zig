@@ -18,6 +18,7 @@ const std = @import("std");
 const posix = std.posix;
 const c = std.c;
 const lib = @import("lib.zig");
+const ctl = @import("ctl.zig");
 
 /// This toolchain's std.c doesn't expose signal(3); declare the libc extern
 /// directly (same pattern as zig_ai's execvp). Portable signal() over
@@ -207,6 +208,12 @@ fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
     var input_buf: [4096]u8 = undefined;
     var pty_buf: [65536]u8 = undefined;
 
+    // Control socket — `zterm cli list/send/capture/split/...` drives THIS
+    // visible mux (the wezterm-cli model). Best-effort: a mux without remote
+    // control is degraded, not broken, so bind failures are swallowed.
+    var control: ?ctl.Ctl = ctl.bind(allocator) catch null;
+    defer if (control) |*ct| ct.deinit(allocator);
+
     // Layout/window changes need a clear + full repaint: dirty-row rendering
     // only touches rows the panes wrote, never cells the OLD layout owned.
     var force_redraw = false;
@@ -253,6 +260,11 @@ fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
                 try poll_panes.append(allocator, p);
             }
         }
+        // Control socket last, so pane indices stay 1..len(poll_panes).
+        const ctl_idx: ?usize = if (control) |ct| blk: {
+            try poll_fds.append(allocator, .{ .fd = ct.fd, .events = posix.POLL.IN, .revents = 0 });
+            break :blk poll_fds.items.len - 1;
+        } else null;
 
         const n_ready = posix.poll(poll_fds.items, 100) catch 0; // 100ms timeout
 
@@ -342,6 +354,15 @@ fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
                 if (poll_fds.items[i + 1].revents & posix.POLL.IN == 0) continue;
                 const n = p.readOutput(&pty_buf) catch continue;
                 if (n > 0) p.processOutput(pty_buf[0..n]);
+            }
+
+            // A CLI client (`zterm cli ...`) wants to drive this mux.
+            if (ctl_idx) |ci| {
+                if (poll_fds.items[ci].revents & posix.POLL.IN != 0) {
+                    if (ctl.accept(control.?.fd, initial_session, shell, env, allocator)) {
+                        force_redraw = true;
+                    }
+                }
             }
         }
 

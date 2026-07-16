@@ -226,7 +226,10 @@ def scenario_background_drain():
     drain(master, screen, 0.2)
     os.write(master, b"\x02o")            # ...and focus back to pane A NOW
 
-    deadline = time.time() + 20
+    # Generous deadline: an UNDRAINED pane never finishes no matter how long we
+    # wait (that's the assertion) — a drained one just needs CPU headroom on a
+    # loaded machine.
+    deadline = time.time() + 60
     while time.time() < deadline and not os.path.exists(marker):
         drain(master, screen, 0.25)
     ok = os.path.exists(marker)
@@ -252,7 +255,98 @@ def scenario_background_drain():
     assert not screen.scrolls, f"host scrolled during multiplexing: {screen.scrolls[:5]}"
     print("PASS background-drain (split pane streams while unfocused) + window smoke")
 
+def cli(sock_path, request):
+    """One request over the zterm control protocol; returns the response."""
+    import socket
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(5)
+    s.connect(sock_path)
+    s.sendall(request.encode() + b"\n")
+    resp = bytearray()
+    while True:
+        try:
+            chunk = s.recv(65536)
+        except OSError:
+            break
+        if not chunk:
+            break
+        resp.extend(chunk)
+    s.close()
+    return bytes(resp).decode("utf-8", "replace")
+
+def scenario_control_socket():
+    """Drive the visible mux over its control socket, wezterm-cli style.
+
+    A REAL terminal drains the mux's stdout continuously; if this harness only
+    drains between CLI calls, a post-split full redraw fills the PTY buffer and
+    the mux's blocking stdout write stalls its event loop — the CLI response
+    then never arrives. So a drainer thread plays the terminal's role here.
+    """
+    import json
+    import threading
+    sock = tempfile.mktemp(prefix="mux-qa-ctl-", suffix=".sock")
+    os.environ["ZTERM_SOCKET"] = sock          # inherited by the forked mux
+    try:
+        pid, master = spawn_mux(30, 100)
+        screen = HostScreen(30, 100)
+
+        stop = threading.Event()
+        def drainer():
+            while not stop.is_set():
+                try:
+                    data = os.read(master, 65536)
+                except OSError as e:
+                    if e.errno == errno.EIO:
+                        return
+                    time.sleep(0.02); continue
+                if data:
+                    feed(screen, data)
+                else:
+                    time.sleep(0.02)
+        t = threading.Thread(target=drainer, daemon=True)
+        t.start()
+        time.sleep(1.5)                        # shell boots
+
+        panes = json.loads(cli(sock, "list"))
+        assert len(panes) == 1 and panes[0]["active"], f"unexpected list: {panes}"
+
+        r = json.loads(cli(sock, "split h"))
+        assert r["ok"], f"split failed: {r}"
+        time.sleep(1.5)                        # new shell boots
+        panes = json.loads(cli(sock, "list"))
+        assert len(panes) == 2, f"expected 2 panes after split: {panes}"
+
+        marker = tempfile.mktemp(prefix="mux-qa-cli-")
+        assert cli(sock, f"send 1 touch {marker}").startswith("ok")
+        assert cli(sock, "enter 1").startswith("ok")
+        deadline = time.time() + 15
+        while time.time() < deadline and not os.path.exists(marker):
+            time.sleep(0.25)
+        assert os.path.exists(marker), "sent command never ran in pane 1"
+        os.unlink(marker)
+
+        cap = cli(sock, "capture 1")
+        assert "touch" in cap, f"capture missing the typed command:\n{cap[:400]}"
+
+        assert cli(sock, "focus 1").startswith("ok")
+        panes = json.loads(cli(sock, "list"))
+        assert panes[1]["active"], "focus 1 didn't take"
+
+        assert cli(sock, "kill 1").startswith("ok")
+        time.sleep(0.5)
+        panes = json.loads(cli(sock, "list"))
+        assert len(panes) == 1, f"expected 1 pane after kill: {panes}"
+
+        stop.set()
+        kill_mux(pid)                          # EIO unblocks the drainer read
+        t.join(timeout=2)
+        assert not screen.scrolls, f"host scrolled during CLI driving: {screen.scrolls[:5]}"
+        print("PASS control-socket (list/split/send/enter/capture/focus/kill)")
+    finally:
+        del os.environ["ZTERM_SOCKET"]
+
 if __name__ == "__main__":
     scenario_scroll_invariant()
     scenario_background_drain()
+    scenario_control_socket()
     print("ALL QA SCENARIOS PASS")
