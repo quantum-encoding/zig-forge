@@ -207,6 +207,16 @@ fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
     var input_buf: [4096]u8 = undefined;
     var pty_buf: [65536]u8 = undefined;
 
+    // Layout/window changes need a clear + full repaint: dirty-row rendering
+    // only touches rows the panes wrote, never cells the OLD layout owned.
+    var force_redraw = false;
+
+    // Poll set rebuilt per iteration: stdin + every pane's PTY (all windows).
+    var poll_fds: std.ArrayList(posix.pollfd) = .empty;
+    defer poll_fds.deinit(allocator);
+    var poll_panes: std.ArrayList(*lib.session.Pane) = .empty;
+    defer poll_panes.deinit(allocator);
+
     // Main event loop — poll() is portable across Linux (epoll equivalent) and
     // Darwin (kqueue equivalent) without per-platform code.
     while (running) {
@@ -229,19 +239,26 @@ fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
             }
         }
 
-        const active_pane_io = initial_session.getActiveWindow().getActivePane();
-        const pty_fd: posix.fd_t = active_pane_io.getFd() orelse -1;
+        // Poll stdin + EVERY pane's PTY across all windows: a busy pane in a
+        // background split/window must keep draining, or its app blocks on a
+        // full PTY buffer the moment focus leaves it — the whole point of a
+        // multiplexer is that it doesn't.
+        poll_fds.clearRetainingCapacity();
+        poll_panes.clearRetainingCapacity();
+        try poll_fds.append(allocator, .{ .fd = posix.STDIN_FILENO, .events = posix.POLL.IN, .revents = 0 });
+        for (initial_session.windows.items) |w| {
+            for (w.panes.items) |p| {
+                const fd = p.getFd() orelse continue;
+                try poll_fds.append(allocator, .{ .fd = fd, .events = posix.POLL.IN, .revents = 0 });
+                try poll_panes.append(allocator, p);
+            }
+        }
 
-        var poll_fds = [_]posix.pollfd{
-            .{ .fd = posix.STDIN_FILENO, .events = posix.POLL.IN, .revents = 0 },
-            .{ .fd = pty_fd, .events = posix.POLL.IN, .revents = 0 },
-        };
-
-        const n_ready = posix.poll(&poll_fds, 100) catch 0; // 100ms timeout
+        const n_ready = posix.poll(poll_fds.items, 100) catch 0; // 100ms timeout
 
         if (n_ready > 0) {
             // Handle user input from stdin
-            if (poll_fds[0].revents & posix.POLL.IN != 0) {
+            if (poll_fds.items[0].revents & posix.POLL.IN != 0) {
                 const n = posix.read(posix.STDIN_FILENO, &input_buf) catch 0;
                 if (n == 0) {
                     running = false;
@@ -257,27 +274,41 @@ fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
                                     running = false;
                                 },
                                 'c' => {
-                                    // New window
-                                    _ = initial_session.createWindow() catch {};
-                                    initial_session.nextWindow();
+                                    // New window: select it BY INDEX (nextWindow
+                                    // from window k of n lands on k+1, not the
+                                    // new last window) and spawn its shell — a
+                                    // pane without a spawned shell is dead air.
+                                    if (initial_session.createWindow() catch null) |new_win| {
+                                        _ = initial_session.selectWindow(new_win.index);
+                                        new_win.getActivePane().spawn(shell, env) catch {};
+                                    }
+                                    force_redraw = true;
                                 },
                                 'n' => {
                                     // Next window
                                     initial_session.nextWindow();
+                                    force_redraw = true;
                                 },
                                 'p' => {
                                     // Previous window
                                     initial_session.prevWindow();
+                                    force_redraw = true;
                                 },
                                 '%' => {
-                                    // Split horizontal
+                                    // Split horizontal + spawn a shell in the new pane
                                     const active_window = initial_session.getActiveWindow();
-                                    _ = active_window.split(.horizontal, 10000) catch {};
+                                    if (active_window.split(.horizontal, 10000) catch null) |new_pane| {
+                                        new_pane.spawn(shell, env) catch {};
+                                    }
+                                    force_redraw = true;
                                 },
                                 '"' => {
-                                    // Split vertical
+                                    // Split vertical + spawn a shell in the new pane
                                     const active_window = initial_session.getActiveWindow();
-                                    _ = active_window.split(.vertical, 10000) catch {};
+                                    if (active_window.split(.vertical, 10000) catch null) |new_pane| {
+                                        new_pane.spawn(shell, env) catch {};
+                                    }
+                                    force_redraw = true;
                                 },
                                 'o' => {
                                     // Next pane
@@ -304,12 +335,13 @@ fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
                 }
             }
 
-            // Handle PTY output from the active pane
-            if (pty_fd >= 0 and poll_fds[1].revents & posix.POLL.IN != 0) {
-                const n = active_pane_io.readOutput(&pty_buf) catch 0;
-                if (n > 0) {
-                    active_pane_io.processOutput(pty_buf[0..n]);
-                }
+            // Drain every pane with output ready (poll_fds[i+1] ↔ poll_panes[i]).
+            // Panes created by a split THIS iteration aren't in the set yet;
+            // the next iteration picks them up.
+            for (poll_panes.items, 0..) |p, i| {
+                if (poll_fds.items[i + 1].revents & posix.POLL.IN == 0) continue;
+                const n = p.readOutput(&pty_buf) catch continue;
+                if (n > 0) p.processOutput(pty_buf[0..n]);
             }
         }
 
@@ -318,6 +350,11 @@ fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
         try renderer.hideCursor();
 
         const active_window = initial_session.getActiveWindow();
+        if (force_redraw) {
+            force_redraw = false;
+            try renderer.clearScreen();
+            for (active_window.panes.items) |p| p.terminal.markAllDirty();
+        }
         try renderer.renderWindow(active_window, active_window.panes.items.len > 1);
 
         // Status bar
@@ -339,14 +376,26 @@ fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
         // Write output
         _ = c.write(posix.STDOUT_FILENO, renderer.getOutput().ptr, renderer.getOutput().len);
 
-        // Check if process died
-        if (!active_pane.isAlive()) {
-            // Remove dead pane or exit if last one
-            if (active_window.panes.items.len <= 1) {
-                running = false;
-            } else {
-                _ = active_window.removePane(active_pane.id);
+        // Reap dead panes in the active window (any pane, not just the focused
+        // one). Empty window → close it; last window empty → exit. The reflow
+        // after removePane re-tiles the survivors over the freed space.
+        var pi: usize = 0;
+        while (pi < active_window.panes.items.len) {
+            const p = active_window.panes.items[pi];
+            if (p.isAlive()) {
+                pi += 1;
+                continue;
             }
+            if (active_window.panes.items.len <= 1) {
+                if (!initial_session.removeWindow(initial_session.active_window_idx)) {
+                    running = false;
+                }
+                force_redraw = true;
+                break; // active_window is gone (or we're exiting)
+            }
+            _ = active_window.removePane(p.id);
+            active_window.resize(initial_session.rect) catch {};
+            force_redraw = true;
         }
     }
 

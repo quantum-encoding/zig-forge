@@ -75,7 +75,7 @@ pub const Renderer = struct {
     /// Render a full window (all panes)
     pub fn renderWindow(self: *Self, window: *Window, show_borders: bool) !void {
         for (window.panes.items) |pane| {
-            try self.renderPane(pane, show_borders);
+            try self.renderPane(pane);
         }
 
         // Draw borders between panes
@@ -84,15 +84,13 @@ pub const Renderer = struct {
         }
     }
 
-    /// Render a single pane
-    pub fn renderPane(self: *Self, pane: *Pane, show_border: bool) !void {
+    /// Render a single pane. Content goes at the pane's rect verbatim — split
+    /// rects already reserve a 1-cell gap for the border (session.Rect.split*),
+    /// so offsetting content here would shift it INTO the neighbor/gap.
+    pub fn renderPane(self: *Self, pane: *Pane) !void {
         const term = &pane.terminal;
         const grid = term.getCurrentGrid();
         const rect = pane.rect;
-
-        // If showing border, adjust rendering area
-        const render_offset_x: u16 = if (show_border) 1 else 0;
-        const render_offset_y: u16 = if (show_border) 1 else 0;
 
         var row: u16 = 0;
         while (row < grid.rows) : (row += 1) {
@@ -117,8 +115,8 @@ pub const Renderer = struct {
                     }
                 }
 
-                const screen_row = rect.y + render_offset_y + row;
-                const screen_col = rect.x + render_offset_x + col;
+                const screen_row = rect.y + row;
+                const screen_col = rect.x + col;
 
                 try self.moveCursor(screen_row, screen_col);
                 try self.setAttributes(cell.attrs, cell.fg, cell.bg);
@@ -136,8 +134,8 @@ pub const Renderer = struct {
 
         // Render cursor
         if (term.modes.cursor_visible) {
-            const cursor_row = rect.y + render_offset_y + term.cursor.row;
-            const cursor_col = rect.x + render_offset_x + term.cursor.col;
+            const cursor_row = rect.y + term.cursor.row;
+            const cursor_col = rect.x + term.cursor.col;
             try self.moveCursor(cursor_row, cursor_col);
         }
 
@@ -149,6 +147,16 @@ pub const Renderer = struct {
         // Reset attributes for border drawing
         try self.resetAttributes();
 
+        // Window extent = union of pane rects. Comparing against pane[0]'s
+        // rect (the old code) meant a 2-pane split never drew any border:
+        // pane[0]'s own right edge is never < itself.
+        var extent_x: u16 = 0;
+        var extent_y: u16 = 0;
+        for (window.panes.items) |p| {
+            extent_x = @max(extent_x, p.rect.x + p.rect.width);
+            extent_y = @max(extent_y, p.rect.y + p.rect.height);
+        }
+
         for (window.panes.items) |pane| {
             const rect = pane.rect;
 
@@ -159,8 +167,8 @@ pub const Renderer = struct {
                 try self.appendString("\x1b[90m"); // Gray for inactive
             }
 
-            // Draw right border if not at edge
-            if (rect.x + rect.width < window.panes.items[0].rect.x + window.panes.items[0].rect.width) {
+            // Draw right border in the reserved gap column, if not at the edge
+            if (rect.x + rect.width < extent_x) {
                 const border_col = rect.x + rect.width;
                 var row: u16 = rect.y;
                 while (row < rect.y + rect.height) : (row += 1) {
@@ -170,8 +178,8 @@ pub const Renderer = struct {
                 }
             }
 
-            // Draw bottom border if not at edge
-            if (rect.y + rect.height < window.panes.items[0].rect.y + window.panes.items[0].rect.height) {
+            // Draw bottom border in the reserved gap row, if not at the edge
+            if (rect.y + rect.height < extent_y) {
                 const border_row = rect.y + rect.height;
                 var col: u16 = rect.x;
                 while (col < rect.x + rect.width) : (col += 1) {
