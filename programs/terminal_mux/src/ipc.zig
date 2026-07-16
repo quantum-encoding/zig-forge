@@ -357,8 +357,10 @@ pub fn getDefaultSocketPath(allocator: std.mem.Allocator) ![]u8 {
         return std.fmt.allocPrint(allocator, "{s}/terminal_mux.sock", .{runtime_dir});
     }
 
-    // Fall back to /tmp with UID
-    const uid = std.os.linux.getuid();
+    // Fall back to /tmp with UID. libc getuid, NOT std.os.linux.getuid — the
+    // latter issues a raw Linux syscall number, which on macOS is SIGSYS
+    // ("invalid system call") the moment the server starts.
+    const uid = std.c.getuid();
     return std.fmt.allocPrint(allocator, "/tmp/terminal_mux-{d}/default.sock", .{uid});
 }
 
