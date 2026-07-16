@@ -193,11 +193,29 @@ def kill_mux(pid):
         pass
     os.waitpid(pid, 0)
 
+def wait_shell_ready(master, screen, timeout=90):
+    """Block until the focused pane's shell EXECUTES commands (not just echoes
+    typed bytes). Two traps this gate defuses: zsh cold-start takes seconds
+    under load, and zsh's init tcsetattr(TCSAFLUSH) DISCARDS input typed
+    before it's up — so the probe must be re-sent until one lands."""
+    marker = tempfile.mktemp(prefix="mux-qa-ready-")
+    deadline = time.time() + timeout
+    last_send = 0.0
+    while time.time() < deadline:
+        if time.time() - last_send > 2.0:
+            os.write(master, f"touch {marker}\n".encode())
+            last_send = time.time()
+        drain(master, screen, 0.25)
+        if os.path.exists(marker):
+            os.unlink(marker)
+            return
+    raise AssertionError(f"shell not ready within {timeout}s")
+
 def scenario_scroll_invariant():
     rows, cols = 30, 100
     pid, master = spawn_mux(rows, cols)
     screen = HostScreen(rows, cols)
-    drain(master, screen, 1.5)
+    wait_shell_ready(master, screen)
     os.write(master, b"seq 1 2000\n")
     drain(master, screen, 2.5)
     os.write(master, "echo '日本語ワイド文字 🚀🚀🚀 test'\n".encode())
@@ -215,12 +233,12 @@ def scenario_background_drain():
     pid, master = spawn_mux(rows, cols)
     screen = HostScreen(rows, cols)
     marker = tempfile.mktemp(prefix="mux-qa-bg-")
-    drain(master, screen, 1.5)
+    wait_shell_ready(master, screen)      # pane 0's shell is EXECUTING
 
     os.write(master, b"\x02%")            # Ctrl-b % : split + spawn shell
-    drain(master, screen, 1.5)            # new pane's shell boots
+    drain(master, screen, 0.5)
     os.write(master, b"\x02o")            # focus the new pane
-    drain(master, screen, 0.3)
+    wait_shell_ready(master, screen)      # pane 1's shell is EXECUTING
     cmd = f"seq 1 300000; touch {marker}\n".encode()
     os.write(master, cmd)                 # heavy stream in pane B...
     drain(master, screen, 0.2)
@@ -305,21 +323,38 @@ def scenario_control_socket():
                     time.sleep(0.02)
         t = threading.Thread(target=drainer, daemon=True)
         t.start()
-        time.sleep(1.5)                        # shell boots
+
+        def fs_ready(send_line, timeout=90):
+            # The drainer owns the master; gate on the filesystem only. Resend
+            # the probe: zsh's init tcsetattr(TCSAFLUSH) discards early input.
+            m = tempfile.mktemp(prefix="mux-qa-ready3-")
+            deadline = time.time() + timeout
+            last_send = 0.0
+            while time.time() < deadline:
+                if time.time() - last_send > 2.0:
+                    send_line(f"touch {m}")
+                    last_send = time.time()
+                if os.path.exists(m):
+                    os.unlink(m)
+                    return
+                time.sleep(0.25)
+            raise AssertionError(f"shell not ready within {timeout}s")
+
+        fs_ready(lambda cmd: os.write(master, (cmd + "\n").encode()))  # pane 0 executing
 
         panes = json.loads(cli(sock, "list"))
         assert len(panes) == 1 and panes[0]["active"], f"unexpected list: {panes}"
 
         r = json.loads(cli(sock, "split h"))
         assert r["ok"], f"split failed: {r}"
-        time.sleep(1.5)                        # new shell boots
+        fs_ready(lambda cmd: (cli(sock, f"send 1 {cmd}"), cli(sock, "enter 1")))  # pane 1 executing
         panes = json.loads(cli(sock, "list"))
         assert len(panes) == 2, f"expected 2 panes after split: {panes}"
 
         marker = tempfile.mktemp(prefix="mux-qa-cli-")
         assert cli(sock, f"send 1 touch {marker}").startswith("ok")
         assert cli(sock, "enter 1").startswith("ok")
-        deadline = time.time() + 15
+        deadline = time.time() + 90
         while time.time() < deadline and not os.path.exists(marker):
             time.sleep(0.25)
         assert os.path.exists(marker), "sent command never ran in pane 1"

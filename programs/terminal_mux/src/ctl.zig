@@ -261,8 +261,7 @@ fn handle(
             cwrite(conn, "ok\n");
             return true;
         }
-        _ = ref.window.removePane(ref.pane.id);
-        ref.window.resize(sess.rect) catch {};
+        _ = ref.window.removePaneReflow(ref.pane.id);
         cwrite(conn, "ok\n");
         return true;
     }

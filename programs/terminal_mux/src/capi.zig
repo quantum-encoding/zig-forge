@@ -717,8 +717,7 @@ pub export fn tmux_close_pane(handle: ?*TmuxSession, idx: usize) c_int {
     const w = h.sess.getActiveWindow();
     const p = paneAt(h, idx) orelse return -1;
     if (w.panes.items.len <= 1) return -1;
-    _ = w.removePane(p.id);
-    w.resize(h.sess.rect) catch {};
+    _ = w.removePaneReflow(p.id);
     return 0;
 }
 

@@ -87,18 +87,44 @@ pub const Renderer = struct {
     /// Render a single pane. Content goes at the pane's rect verbatim — split
     /// rects already reserve a 1-cell gap for the border (session.Rect.split*),
     /// so offsetting content here would shift it INTO the neighbor/gap.
+    ///
+    /// The view composes scrollback: with a non-zero scrollback_offset the
+    /// first `back` rows come from history, the rest from the top of the live
+    /// grid — same composition the C ABI's read_cells does.
     pub fn renderPane(self: *Self, pane: *Pane) !void {
         const term = &pane.terminal;
         const grid = term.getCurrentGrid();
         const rect = pane.rect;
 
+        const back: u16 = if (term.modes.alt_screen)
+            0
+        else
+            @intCast(@min(term.scrollback_offset, term.scrollback.len));
+        const offset_changed = term.scrollback_offset != term.view_offset_rendered;
+        term.view_offset_rendered = term.scrollback_offset;
+
         var row: u16 = 0;
         while (row < grid.rows) : (row += 1) {
-            if (!term.isDirty(row)) continue;
+            const from_history = row < back;
+            // Dirty bits track GRID rows; a history row only changes when the
+            // view offset moves, a live row when its (shifted) source is dirty.
+            const src_dirty = if (from_history)
+                offset_changed
+            else
+                offset_changed or term.isDirty(row - back);
+            if (!src_dirty) continue;
+
+            const hist = if (from_history)
+                term.scrollback.line(term.scrollback.len - back + row)
+            else
+                &[_]Cell{};
 
             var col: u16 = 0;
             while (col < grid.cols) : (col += 1) {
-                const cell = grid.getCellConst(row, col);
+                const cell: *const Cell = if (from_history)
+                    (if (col < hist.len) &hist[col] else &Cell.default)
+                else
+                    grid.getCellConst(row - back, col);
 
                 // Continuation of a wide glyph — the lead cell painted both
                 // columns; emitting anything here would overwrite its right
@@ -132,8 +158,9 @@ pub const Renderer = struct {
             }
         }
 
-        // Render cursor
-        if (term.modes.cursor_visible) {
+        // Render cursor (hidden while scrolled back — its grid position points
+        // at content that isn't on screen).
+        if (term.modes.cursor_visible and back == 0) {
             const cursor_row = rect.y + term.cursor.row;
             const cursor_col = rect.x + term.cursor.col;
             try self.moveCursor(cursor_row, cursor_col);
@@ -193,8 +220,40 @@ pub const Renderer = struct {
         try self.resetAttributes();
     }
 
-    /// Render status bar
-    pub fn renderStatusBar(self: *Self, cfg: *const config.StatusBarConfig, sess_name: []const u8, win_index: u8, rows: u16, cols: u16) !void {
+    /// Append only printable ASCII (0x20..0x7E), '?' for anything else — the
+    /// status bar's byte-count == column-count invariant depends on it.
+    fn appendAsciiSanitized(self: *Self, s: []const u8, max: usize) !usize {
+        var written: usize = 0;
+        for (s) |ch| {
+            if (written >= max) break;
+            try self.output.append(self.allocator, if (ch >= 0x20 and ch < 0x7F) ch else '?');
+            written += 1;
+        }
+        return written;
+    }
+
+    // Wall clock for the status bar (display only — no security decision).
+    // This toolchain's std.c lacks localtime; declare the libc externs.
+    const Tm = extern struct {
+        sec: c_int,
+        min: c_int,
+        hour: c_int,
+        mday: c_int,
+        mon: c_int,
+        year: c_int,
+        wday: c_int,
+        yday: c_int,
+        isdst: c_int,
+        gmtoff: c_long,
+        zone: ?[*:0]const u8,
+    };
+    extern "c" fn time(t: ?*i64) i64;
+    extern "c" fn localtime(t: *const i64) ?*Tm;
+
+    /// Render the status bar: `[session] 0:name* 1:name# …` on the left
+    /// (`*` current, `#` background activity), the active pane's title and a
+    /// clock on the right — tmux's default layout.
+    pub fn renderStatusBar(self: *Self, cfg: *const config.StatusBarConfig, sess: *session.Session, rows: u16, cols: u16) !void {
         if (!cfg.enabled) return;
 
         const row = switch (cfg.position) {
@@ -204,20 +263,14 @@ pub const Renderer = struct {
 
         try self.moveCursor(row, 0);
 
-        // Set status bar colors
-        try self.appendString("\x1b[");
-        try self.appendNumber(48);
-        try self.appendString(";2;");
+        // Status bar colors (truecolor SGR).
+        try self.appendString("\x1b[48;2;");
         try self.appendNumber(cfg.bg.r);
         try self.appendString(";");
         try self.appendNumber(cfg.bg.g);
         try self.appendString(";");
         try self.appendNumber(cfg.bg.b);
-        try self.appendString("m");
-
-        try self.appendString("\x1b[");
-        try self.appendNumber(38);
-        try self.appendString(";2;");
+        try self.appendString("m\x1b[38;2;");
         try self.appendNumber(cfg.fg.r);
         try self.appendString(";");
         try self.appendNumber(cfg.fg.g);
@@ -225,20 +278,65 @@ pub const Renderer = struct {
         try self.appendNumber(cfg.fg.b);
         try self.appendString("m");
 
-        // Left side: session name + window indicator. Measured by bytes
-        // appended (the text is ASCII), because the fill below must land
-        // EXACTLY on the last column: undershoot leaves stale cells, overshoot
-        // wraps the host terminal and scrolls the whole screen every frame.
+        // Everything below is measured by bytes appended (sanitized ASCII):
+        // the fill must land EXACTLY on the last column — undershoot leaves
+        // stale cells, overshoot wraps the host and scrolls the whole screen.
         const text_start = self.output.items.len;
-        try self.appendString("[");
-        try self.output.appendSlice(self.allocator, sess_name);
-        try self.appendString("] ");
-        try self.appendNumber(win_index);
-        try self.appendString(":*");
 
-        // Fill rest of line
-        var col: u16 = @intCast(@min(self.output.items.len - text_start, cols));
+        try self.appendString("[");
+        _ = try self.appendAsciiSanitized(sess.getName(), 16);
+        try self.appendString("] ");
+
+        for (sess.windows.items, 0..) |w, wi| {
+            if (self.output.items.len - text_start + 16 >= cols) break; // keep room
+            try self.appendNumber(w.index);
+            try self.appendString(":");
+            const active_pane = w.panes.items[w.active_pane_idx];
+            const wname = if (w.name_len > 0)
+                w.name[0..w.name_len]
+            else if (active_pane.terminal.title_len > 0)
+                active_pane.terminal.title[0..active_pane.terminal.title_len]
+            else
+                "shell";
+            _ = try self.appendAsciiSanitized(wname, 10);
+            const marker: u8 = if (wi == sess.active_window_idx)
+                '*'
+            else if (w.activity)
+                '#'
+            else
+                ' ';
+            try self.output.append(self.allocator, marker);
+            try self.appendString(" ");
+        }
+
+        var left_len = self.output.items.len - text_start;
+        if (left_len > cols) {
+            // Hard-truncate: every byte past this point would wrap the host's
+            // bottom row and scroll the screen. All bytes are sanitized ASCII,
+            // so byte-truncation == column-truncation.
+            self.output.items.len = text_start + cols;
+            left_len = cols;
+        }
+
+        // Right side: HH:MM. Fill the middle, then the clock flush right.
+        var now: i64 = time(null);
+        var clock_buf: [8]u8 = undefined;
+        var clock: []const u8 = "";
+        if (localtime(&now)) |tm| {
+            clock = std.fmt.bufPrint(&clock_buf, "{d:0>2}:{d:0>2}", .{
+                @as(u32, @intCast(@mod(tm.hour, 24))),
+                @as(u32, @intCast(@mod(tm.min, 60))),
+            }) catch "";
+        }
+
+        var col: usize = @min(left_len, cols);
+        const clock_start: usize = if (cols >= clock_buf.len) cols - clock.len - 1 else cols;
         while (col < cols) : (col += 1) {
+            if (col == clock_start and clock.len > 0 and col + clock.len < cols + 1) {
+                try self.output.appendSlice(self.allocator, clock);
+                col += clock.len - 1;
+                continue;
+            }
             try self.output.append(self.allocator, ' ');
         }
 

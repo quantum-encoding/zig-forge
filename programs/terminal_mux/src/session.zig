@@ -244,6 +244,11 @@ pub const Window = struct {
     index: u8, // Window number within session
     layout: Layout,
     next_pane_id: PaneId,
+    /// The extent the panes tile (window-local layout space).
+    rect: Rect,
+    /// Output arrived while this window was in the background (status-bar
+    /// activity marker; the owner clears it when the window is shown).
+    activity: bool = false,
 
     pub const Layout = enum {
         single,
@@ -267,6 +272,7 @@ pub const Window = struct {
             .index = index,
             .layout = .single,
             .next_pane_id = 1,
+            .rect = rect,
         };
 
         // Create initial pane
@@ -384,115 +390,107 @@ pub const Window = struct {
         return false;
     }
 
-    /// Resize all panes to fit new window size
+    /// Resize all panes to fit the new window size, PRESERVING the layout:
+    /// every pane-edge coordinate is scaled proportionally from the old window
+    /// extent onto the new one. Shared edges map identically (the mapping is a
+    /// pure function of the coordinate), so adjacency — including nested
+    /// splits the old equal-retile destroyed — survives. Rounding may widen a
+    /// border gap by one cell; never overlaps (monotonic map, widths clamped).
     pub fn resize(self: *Self, rect: Rect) !void {
-        if (self.panes.items.len == 0) return;
-
+        if (self.panes.items.len == 0) {
+            self.rect = rect;
+            return;
+        }
         if (self.panes.items.len == 1) {
+            self.rect = rect;
             try self.panes.items[0].resize(rect);
             return;
         }
 
-        // For now, simple equal split
-        switch (self.layout) {
-            .single => {
-                try self.panes.items[0].resize(rect);
-            },
-            .horizontal_split => {
-                const width_per_pane = rect.width / @as(u16, @intCast(self.panes.items.len));
-                for (self.panes.items, 0..) |pane, i| {
-                    const pane_rect = Rect{
-                        .x = rect.x + @as(u16, @intCast(i)) * width_per_pane,
-                        .y = rect.y,
-                        .width = width_per_pane - 1, // -1 for border
-                        .height = rect.height,
-                    };
-                    try pane.resize(pane_rect);
-                }
-            },
-            .vertical_split => {
-                const height_per_pane = rect.height / @as(u16, @intCast(self.panes.items.len));
-                for (self.panes.items, 0..) |pane, i| {
-                    const pane_rect = Rect{
-                        .x = rect.x,
-                        .y = rect.y + @as(u16, @intCast(i)) * height_per_pane,
-                        .width = rect.width,
-                        .height = height_per_pane - 1, // -1 for border
-                    };
-                    try pane.resize(pane_rect);
-                }
-            },
-            .tiled => {
-                // Implement tiled layout: divide evenly into grid
-                const num_panes = self.panes.items.len;
+        const old = self.rect;
+        const mapX = struct {
+            fn f(v: u16, o: Rect, n: Rect) u16 {
+                if (o.width == 0) return n.x;
+                const rel: u32 = v - o.x;
+                return n.x + @as(u16, @intCast(@min(rel * n.width / o.width, n.width)));
+            }
+        }.f;
+        const mapY = struct {
+            fn f(v: u16, o: Rect, n: Rect) u16 {
+                if (o.height == 0) return n.y;
+                const rel: u32 = v - o.y;
+                return n.y + @as(u16, @intCast(@min(rel * n.height / o.height, n.height)));
+            }
+        }.f;
 
-                // Calculate grid dimensions: aim for roughly square layout
-                var cols: u16 = 1;
-                var rows: u16 = 1;
-
-                if (num_panes <= 1) {
-                    cols = 1;
-                    rows = 1;
-                } else if (num_panes == 2) {
-                    cols = 2;
-                    rows = 1;
-                } else if (num_panes <= 4) {
-                    cols = 2;
-                    rows = 2;
-                } else {
-                    // For 5+ panes, calculate grid to fit all panes
-                    cols = @intCast((std.math.sqrt(num_panes) + 1));
-                    rows = @intCast((num_panes + cols - 1) / cols); // Ceiling division
-                }
-
-                const width_per_pane = if (cols > 1) rect.width / cols else rect.width;
-                const height_per_pane = if (rows > 1) rect.height / rows else rect.height;
-
-                var pane_idx: usize = 0;
-                var row: u16 = 0;
-                while (row < rows and pane_idx < num_panes) : (row += 1) {
-                    var col: u16 = 0;
-                    while (col < cols and pane_idx < num_panes) : (col += 1) {
-                        const pane = self.panes.items[pane_idx];
-
-                        // Calculate position and size
-                        const pane_x = rect.x + col * width_per_pane;
-                        const pane_y = rect.y + row * height_per_pane;
-
-                        // Check if this is the last column/row for uneven grids
-                        const is_last_col = (col == cols - 1);
-                        const is_last_row = (row == rows - 1);
-
-                        var pane_width = width_per_pane;
-                        var pane_height = height_per_pane;
-
-                        // For last column, use remaining width
-                        if (is_last_col) {
-                            pane_width = rect.x + rect.width - pane_x;
-                        }
-
-                        // For last row, use remaining height
-                        if (is_last_row) {
-                            pane_height = rect.y + rect.height - pane_y;
-                        }
-
-                        // Account for borders between panes
-                        if (!is_last_col and pane_width > 1) pane_width -= 1;
-                        if (!is_last_row and pane_height > 1) pane_height -= 1;
-
-                        const pane_rect = Rect{
-                            .x = pane_x,
-                            .y = pane_y,
-                            .width = pane_width,
-                            .height = pane_height,
-                        };
-
-                        try pane.resize(pane_rect);
-                        pane_idx += 1;
-                    }
-                }
-            },
+        for (self.panes.items) |pane| {
+            const r = pane.rect;
+            const nx = mapX(r.x, old, rect);
+            const ny = mapY(r.y, old, rect);
+            // A pane flush against the old right/bottom edge stays flush; an
+            // interior edge (borders a gap column/row) maps through the gap.
+            const flush_right = r.x + r.width >= old.x + old.width;
+            const flush_bottom = r.y + r.height >= old.y + old.height;
+            const nw = if (flush_right)
+                (rect.x + rect.width) -| nx
+            else
+                mapX(r.x + r.width, old, rect) -| nx;
+            const nh = if (flush_bottom)
+                (rect.y + rect.height) -| ny
+            else
+                mapY(r.y + r.height, old, rect) -| ny;
+            try pane.resize(.{
+                .x = nx,
+                .y = ny,
+                .width = @max(nw, 1),
+                .height = @max(nh, 1),
+            });
         }
+        self.rect = rect;
+    }
+
+    /// Remove a pane and grow a neighbor over the freed space (plus the border
+    /// gap). Neighbor search order: left, right, above, below — a neighbor
+    /// must span the removed pane's full cross-axis extent so the result is
+    /// still a clean tiling. Falls back to remove-without-reflow (background
+    /// shows through the hole) when no such neighbor exists.
+    pub fn removePaneReflow(self: *Self, pane_id: PaneId) bool {
+        var removed_rect: ?Rect = null;
+        for (self.panes.items) |p| {
+            if (p.id == pane_id) removed_rect = p.rect;
+        }
+        const r = removed_rect orelse return false;
+        if (!self.removePane(pane_id)) return false;
+
+        for (self.panes.items) |p| {
+            const q = p.rect;
+            if (q.y == r.y and q.height == r.height and q.x + q.width + 1 == r.x) {
+                p.resize(.{ .x = q.x, .y = q.y, .width = q.width + r.width + 1, .height = q.height }) catch {};
+                return true;
+            }
+        }
+        for (self.panes.items) |p| {
+            const q = p.rect;
+            if (q.y == r.y and q.height == r.height and r.x + r.width + 1 == q.x) {
+                p.resize(.{ .x = r.x, .y = q.y, .width = q.width + r.width + 1, .height = q.height }) catch {};
+                return true;
+            }
+        }
+        for (self.panes.items) |p| {
+            const q = p.rect;
+            if (q.x == r.x and q.width == r.width and q.y + q.height + 1 == r.y) {
+                p.resize(.{ .x = q.x, .y = q.y, .width = q.width, .height = q.height + r.height + 1 }) catch {};
+                return true;
+            }
+        }
+        for (self.panes.items) |p| {
+            const q = p.rect;
+            if (q.x == r.x and q.width == r.width and r.y + r.height + 1 == q.y) {
+                p.resize(.{ .x = q.x, .y = r.y, .width = q.width, .height = q.height + r.height + 1 }) catch {};
+                return true;
+            }
+        }
+        return true;
     }
 
     /// Set window name

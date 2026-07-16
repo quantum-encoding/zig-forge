@@ -520,6 +520,10 @@ pub const Terminal = struct {
     // Scrollback
     scrollback: Scrollback,
     scrollback_offset: usize, // View offset into scrollback
+    /// The offset the ANSI renderer last painted — lets it repaint history
+    /// rows only when the view moves (renderer-side state, one renderer per
+    /// terminal in the standalone).
+    view_offset_rendered: usize = 0,
 
     // Dirty tracking for efficient rendering
     dirty_rows: std.DynamicBitSet,
