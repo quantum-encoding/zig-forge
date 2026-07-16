@@ -67,6 +67,9 @@ pub fn bind(alloc: std.mem.Allocator) !Ctl {
     _ = c.fcntl(fd, c.F.SETFD, @as(c_int, c.FD_CLOEXEC));
     var addr = fillAddr(path);
     if (c.bind(fd, @ptrCast(&addr), @sizeOf(c.sockaddr.un)) < 0) return error.BindFailed;
+    // Owner-only: this socket types into the user's shell — default umask
+    // leaves it 0755 and any LOCAL user could drive the terminal.
+    _ = c.chmod(path.ptr, 0o600);
     if (c.listen(fd, 16) < 0) return error.ListenFailed;
     return .{ .fd = fd, .path = path };
 }

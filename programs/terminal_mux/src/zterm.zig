@@ -100,6 +100,9 @@ fn runServer(alloc: std.mem.Allocator) !void {
     if (lfd < 0) return error.SocketCreateFailed;
     var addr = fillAddr(path);
     if (c.bind(lfd, @ptrCast(&addr), @sizeOf(c.sockaddr.un)) < 0) return error.BindFailed;
+    // Owner-only (matches ctl.zig): any local user on a 0755 socket could
+    // spawn shells and type into them.
+    _ = c.chmod(path.ptr, 0o600);
     if (c.listen(lfd, 16) < 0) return error.ListenFailed;
     std.debug.print("zterm server: listening on {s}\n", .{path});
 
