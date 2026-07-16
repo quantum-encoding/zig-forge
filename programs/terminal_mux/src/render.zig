@@ -102,6 +102,11 @@ pub const Renderer = struct {
             while (col < grid.cols) : (col += 1) {
                 const cell = grid.getCellConst(row, col);
 
+                // Continuation of a wide glyph — the lead cell painted both
+                // columns; emitting anything here would overwrite its right
+                // half AND desync the tracked cursor from the real one.
+                if (cell.width == 0) continue;
+
                 // Skip if cell hasn't changed (when we have prev frame)
                 if (self.prev_cells) |prev| {
                     if (row < self.prev_rows and col < self.prev_cols) {
@@ -119,7 +124,13 @@ pub const Renderer = struct {
                 try self.setAttributes(cell.attrs, cell.fg, cell.bg);
                 try self.writeChar(cell.char);
 
-                self.cursor_col += 1;
+                // Track the REAL cursor advance: a wide glyph moves it 2
+                // columns. A stale tracker makes moveCursor suppress a CUP it
+                // actually needs — the next char then lands at the terminal's
+                // real cursor (worst case: last column, pending wrap → the
+                // whole host screen scrolls, smearing status-bar copies).
+                self.cursor_col += cell.width;
+                if (cell.width == 2) col += 1; // continuation handled by the lead
             }
         }
 
@@ -155,6 +166,7 @@ pub const Renderer = struct {
                 while (row < rect.y + rect.height) : (row += 1) {
                     try self.moveCursor(row, border_col);
                     try self.appendString("\xe2\x94\x82"); // │
+                    self.cursor_col += 1; // real cursor advanced past the glyph
                 }
             }
 
@@ -165,6 +177,7 @@ pub const Renderer = struct {
                 while (col < rect.x + rect.width) : (col += 1) {
                     try self.moveCursor(border_row, col);
                     try self.appendString("\xe2\x94\x80"); // ─
+                    self.cursor_col += 1; // real cursor advanced past the glyph
                 }
             }
         }
@@ -204,20 +217,28 @@ pub const Renderer = struct {
         try self.appendNumber(cfg.fg.b);
         try self.appendString("m");
 
-        // Left side: session name
+        // Left side: session name + window indicator. Measured by bytes
+        // appended (the text is ASCII), because the fill below must land
+        // EXACTLY on the last column: undershoot leaves stale cells, overshoot
+        // wraps the host terminal and scrolls the whole screen every frame.
+        const text_start = self.output.items.len;
         try self.appendString("[");
         try self.output.appendSlice(self.allocator, sess_name);
         try self.appendString("] ");
-
-        // Window indicator
         try self.appendNumber(win_index);
         try self.appendString(":*");
 
         // Fill rest of line
-        var col: u16 = @intCast(sess_name.len + 6); // Rough estimate
+        var col: u16 = @intCast(@min(self.output.items.len - text_start, cols));
         while (col < cols) : (col += 1) {
             try self.output.append(self.allocator, ' ');
         }
+
+        // The real cursor now sits on the last column with a pending wrap.
+        // Record an impossible tracked column so the next moveCursor always
+        // emits a CUP (which clears the pending wrap) instead of suppressing.
+        self.cursor_row = row;
+        self.cursor_col = cols;
 
         try self.resetAttributes();
     }

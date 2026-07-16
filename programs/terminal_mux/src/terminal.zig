@@ -636,6 +636,21 @@ pub const Terminal = struct {
             .width = width,
         };
 
+        // A wide glyph occupies two columns: blank the continuation cell
+        // (width 0) so renderers see a defined placeholder instead of whatever
+        // stale glyph was there — the ANSI renderer would otherwise repaint the
+        // stale cell over the wide glyph's right half.
+        if (width == 2 and self.cursor.col + 1 < self.grid.cols) {
+            const cont = self.grid.getCell(self.cursor.row, self.cursor.col + 1);
+            cont.* = .{
+                .char = 0,
+                .fg = self.current_fg,
+                .bg = self.current_bg,
+                .attrs = self.current_attrs,
+                .width = 0,
+            };
+        }
+
         self.markDirty(self.cursor.row);
         self.cursor.col += width;
     }

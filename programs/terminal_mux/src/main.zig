@@ -19,6 +19,12 @@ const posix = std.posix;
 const c = std.c;
 const lib = @import("lib.zig");
 
+/// This toolchain's std.c doesn't expose signal(3); declare the libc extern
+/// directly (same pattern as zig_ai's execvp). Portable signal() over
+/// sigaction per the guardian_shield lesson (platform-specific struct layout).
+const SignalHandler = ?*const fn (c_int) callconv(.c) void;
+extern "c" fn signal(sig: c_int, handler: SignalHandler) SignalHandler;
+
 const VERSION = "0.1.0";
 
 pub fn main(init: std.process.Init) !void {
@@ -131,13 +137,19 @@ fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
     // Ensure socket directory exists
     try lib.ipc.ensureSocketDir(socket_path);
 
-    // Get terminal size
-    const size = lib.pty.getTerminalSize(posix.STDIN_FILENO) catch lib.Winsize{
+    // Get terminal size (kept current via SIGWINCH below)
+    var size = lib.pty.getTerminalSize(posix.STDIN_FILENO) catch lib.Winsize{
         .ws_row = 24,
         .ws_col = 80,
         .ws_xpixel = 0,
         .ws_ypixel = 0,
     };
+    // A fresh PTY reports 0x0 until the host sets a winsize; `ws_row - 1`
+    // below would underflow u16. Fall back until a real SIGWINCH arrives.
+    if (size.ws_row < 2 or size.ws_col < 2) {
+        size.ws_row = 24;
+        size.ws_col = 80;
+    }
 
     const rect = lib.Rect{
         .x = 0,
@@ -175,6 +187,18 @@ fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
     try renderer.clearScreen();
     _ = c.write(posix.STDOUT_FILENO, renderer.getOutput().ptr, renderer.getOutput().len);
 
+    // Host terminal resize: the handler only sets a flag; the loop re-reads the
+    // size and resizes the session. Portable signal() per the guardian_shield
+    // lesson (sigaction's struct layout is platform-specific and has crashed
+    // before). poll() returning EINTR is already swallowed by the `catch 0`.
+    const winch = struct {
+        var got = std.atomic.Value(bool).init(false);
+        fn handle(_: c_int) callconv(.c) void {
+            got.store(true, .monotonic);
+        }
+    };
+    _ = signal(@intFromEnum(std.c.SIG.WINCH), winch.handle);
+
     // Input state
     var prefix_active = false;
     const cfg = lib.Config{};
@@ -186,6 +210,25 @@ fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
     // Main event loop — poll() is portable across Linux (epoll equivalent) and
     // Darwin (kqueue equivalent) without per-platform code.
     while (running) {
+        // Apply a pending host resize before anything reads pane geometry:
+        // grid + PTY follow the new size (SIGWINCH reaches the shell), and a
+        // clear + full redraw flushes stale rows the smaller frame won't touch.
+        if (winch.got.swap(false, .monotonic)) {
+            if (lib.pty.getTerminalSize(posix.STDIN_FILENO) catch null) |ns| {
+                if (ns.ws_row < 2 or ns.ws_col < 2) continue; // bogus size; keep current
+                size = ns;
+                initial_session.resize(.{
+                    .x = 0,
+                    .y = 0,
+                    .width = ns.ws_col,
+                    .height = ns.ws_row - 1, // -1 for status bar
+                }) catch {};
+                renderer.beginFrame();
+                try renderer.clearScreen();
+                _ = c.write(posix.STDOUT_FILENO, renderer.getOutput().ptr, renderer.getOutput().len);
+            }
+        }
+
         const active_pane_io = initial_session.getActiveWindow().getActivePane();
         const pty_fd: posix.fd_t = active_pane_io.getFd() orelse -1;
 
