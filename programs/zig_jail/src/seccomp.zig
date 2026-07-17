@@ -564,14 +564,16 @@ test "seccomp: Syscall number mapping - exit" {
 }
 
 test "seccomp: Filter chain construction - basic structure" {
+    var allowed_list = [_][]const u8{ "read", "write" };
+    var no_blocked = [_][]const u8{};
     var profile = profile_mod.Profile{
         .profile_name = "test",
         .description = "Test profile",
         .version = "1.0",
         .syscalls = .{
             .default_action = "kill",
-            .allowed = &[_][]const u8{ "read", "write" },
-            .blocked = &[_][]const u8{},
+            .allowed = &allowed_list,
+            .blocked = &no_blocked,
         },
         .allocator = std.testing.allocator,
     };
