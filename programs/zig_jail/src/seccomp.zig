@@ -717,14 +717,16 @@ test "seccomp: blocked syscall traps at runtime (Linux/x86_64)" {
 }
 
 test "seccomp: Error handling - invalid syscall names" {
+    var allowed_list = [_][]const u8{ "read", "nonexistent_syscall" };
+    var no_blocked = [_][]const u8{};
     var profile = profile_mod.Profile{
         .profile_name = "test",
         .description = "Test profile",
         .version = "1.0",
         .syscalls = .{
             .default_action = "kill",
-            .allowed = &[_][]const u8{ "read", "nonexistent_syscall" },
-            .blocked = &[_][]const u8{},
+            .allowed = &allowed_list,
+            .blocked = &no_blocked,
         },
         .allocator = std.testing.allocator,
     };
