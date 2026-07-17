@@ -449,8 +449,64 @@ fn getBlockInfoFromSpec(version: u8, ec_idx: usize, total_data_cw: u16, total_ec
     };
 }
 
-/// Select minimum version that can hold data
-fn selectVersion(data_len: usize, ec_level: ErrorCorrectionLevel, min_ver: u8, max_ver: u8, mode: EncodingMode) ?u8 {
+/// Bit length of the encoded data payload (excludes mode indicator, character count,
+/// terminator and any ECI/structured-append header) for `data_len` characters/bytes.
+fn payloadBitLength(data_len: usize, mode: EncodingMode) usize {
+    return switch (mode) {
+        .byte => data_len * 8,
+        .numeric => blk: {
+            const groups = data_len / 3;
+            const rem_bits: usize = switch (data_len % 3) {
+                0 => 0,
+                1 => 4,
+                2 => 7,
+                else => unreachable,
+            };
+            break :blk groups * 10 + rem_bits;
+        },
+        .alphanumeric => blk: {
+            const pairs = data_len / 2;
+            const rem_bits: usize = if (data_len % 2 == 0) 0 else 6;
+            break :blk pairs * 11 + rem_bits;
+        },
+    };
+}
+
+/// Bits consumed by an ECI header: 4-bit mode indicator + the assignment-number
+/// encoding (8, 16 or 24 bits depending on the ECI value). Mirrors the emission
+/// logic in `encodeDataWithBlocks`.
+fn eciHeaderBits(eci_val: u24) usize {
+    if (eci_val <= 127) return 4 + 8;
+    if (eci_val <= 16383) return 4 + 16;
+    return 4 + 24;
+}
+
+/// Total overhead bits contributed by optional ECI and structured-append headers.
+/// These are prepended in `encodeDataWithBlocks` but are NOT reflected in the
+/// character-capacity tables, so version selection must account for them explicitly.
+fn headerOverheadBits(config: QrConfig) usize {
+    var bits: usize = 0;
+    if (config.eci) |eci| {
+        bits += eciHeaderBits(@intFromEnum(eci));
+    }
+    if (config.structured_append != null) {
+        // 4-bit SA mode indicator + 4-bit symbol index + 4-bit total + 8-bit parity.
+        bits += 4 + 4 + 4 + 8;
+    }
+    return bits;
+}
+
+/// Select minimum version that can hold data.
+///
+/// `header_bits` is the ECI/structured-append overhead (see `headerOverheadBits`).
+/// A version qualifies only if BOTH the character-capacity table admits `data_len`
+/// AND the exact bitstream — header + mode indicator + character count + payload —
+/// fits within the version's data-codeword budget. For `header_bits == 0` the
+/// bit-accurate check never rejects what the table accepts (the tables are floor
+/// values of the same computation), so no-header behaviour is unchanged; with
+/// headers present it correctly bumps to a larger version instead of silently
+/// truncating during emission.
+fn selectVersion(data_len: usize, ec_level: ErrorCorrectionLevel, min_ver: u8, max_ver: u8, mode: EncodingMode, header_bits: usize) ?u8 {
     const ec_idx = @intFromEnum(ec_level);
     const cap_table = switch (mode) {
         .numeric => &CAPACITY_NUMERIC,
@@ -459,7 +515,14 @@ fn selectVersion(data_len: usize, ec_level: ErrorCorrectionLevel, min_ver: u8, m
     };
     var version: u8 = @max(min_ver, 1);
     while (version <= @min(max_ver, 40)) : (version += 1) {
-        if (cap_table[version - 1][ec_idx] >= data_len) {
+        if (cap_table[version - 1][ec_idx] < data_len) continue;
+
+        const bi = getBlockInfo(version, ec_level);
+        const total_data_cw = @as(usize, bi.g1_blocks) * @as(usize, bi.g1_data) +
+            @as(usize, bi.g2_blocks) * @as(usize, bi.g2_data);
+        const needed_bits = header_bits + 4 + @as(usize, getCountBits(mode, version)) +
+            payloadBitLength(data_len, mode);
+        if (needed_bits <= total_data_cw * 8) {
             return version;
         }
     }
@@ -990,36 +1053,36 @@ fn encodeDataWithBlocks(allocator: Allocator, data: []const u8, version: u8, ec_
     // ECI header (if specified)
     if (config.eci) |eci| {
         const eci_val = @intFromEnum(eci);
-        writeBits(bitstream, &bit_pos, 0b0111, 4); // ECI mode indicator
+        try writeBits(bitstream, &bit_pos, 0b0111, 4); // ECI mode indicator
         if (eci_val <= 127) {
-            writeBits(bitstream, &bit_pos, @intCast(eci_val), 8);
+            try writeBits(bitstream, &bit_pos, @intCast(eci_val), 8);
         } else if (eci_val <= 16383) {
-            writeBits(bitstream, &bit_pos, @intCast(0x8000 | eci_val), 16);
+            try writeBits(bitstream, &bit_pos, @intCast(0x8000 | eci_val), 16);
         } else {
-            writeBits(bitstream, &bit_pos, @intCast(0xC00000 | eci_val), 24);
+            try writeBits(bitstream, &bit_pos, @intCast(0xC00000 | eci_val), 24);
         }
     }
 
     // Structured append header (if specified)
     if (config.structured_append) |sa| {
-        writeBits(bitstream, &bit_pos, 0b0011, 4); // Structured append mode
-        writeBits(bitstream, &bit_pos, @as(u16, sa.symbol_index), 4);
-        writeBits(bitstream, &bit_pos, @as(u16, sa.total_symbols -| 1), 4);
-        writeBits(bitstream, &bit_pos, @as(u16, sa.parity), 8);
+        try writeBits(bitstream, &bit_pos, 0b0011, 4); // Structured append mode
+        try writeBits(bitstream, &bit_pos, @as(u16, sa.symbol_index), 4);
+        try writeBits(bitstream, &bit_pos, @as(u16, sa.total_symbols -| 1), 4);
+        try writeBits(bitstream, &bit_pos, @as(u16, sa.parity), 8);
     }
 
     // Mode indicator
-    writeBits(bitstream, &bit_pos, @intFromEnum(mode), 4);
+    try writeBits(bitstream, &bit_pos, @intFromEnum(mode), 4);
 
     // Character count indicator
     const count_bits = getCountBits(mode, version);
-    writeBits(bitstream, &bit_pos, @intCast(data.len), count_bits);
+    try writeBits(bitstream, &bit_pos, @intCast(data.len), count_bits);
 
     // Encode data based on mode
     switch (mode) {
         .byte => {
             for (data) |byte| {
-                writeBits(bitstream, &bit_pos, byte, 8);
+                try writeBits(bitstream, &bit_pos, byte, 8);
             }
         },
         .numeric => {
@@ -1028,16 +1091,16 @@ fn encodeDataWithBlocks(allocator: Allocator, data: []const u8, version: u8, ec_
                 if (i + 3 <= data.len) {
                     // 3 digits → 10 bits
                     const val: u16 = @as(u16, data[i] - '0') * 100 + @as(u16, data[i + 1] - '0') * 10 + @as(u16, data[i + 2] - '0');
-                    writeBits(bitstream, &bit_pos, val, 10);
+                    try writeBits(bitstream, &bit_pos, val, 10);
                     i += 3;
                 } else if (i + 2 <= data.len) {
                     // 2 digits → 7 bits
                     const val: u16 = @as(u16, data[i] - '0') * 10 + @as(u16, data[i + 1] - '0');
-                    writeBits(bitstream, &bit_pos, val, 7);
+                    try writeBits(bitstream, &bit_pos, val, 7);
                     i += 2;
                 } else {
                     // 1 digit → 4 bits
-                    writeBits(bitstream, &bit_pos, @as(u16, data[i] - '0'), 4);
+                    try writeBits(bitstream, &bit_pos, @as(u16, data[i] - '0'), 4);
                     i += 1;
                 }
             }
@@ -1050,12 +1113,12 @@ fn encodeDataWithBlocks(allocator: Allocator, data: []const u8, version: u8, ec_
                     const v1 = alphanumericValue(data[i]) orelse 0;
                     const v2 = alphanumericValue(data[i + 1]) orelse 0;
                     const val: u16 = @as(u16, v1) * 45 + @as(u16, v2);
-                    writeBits(bitstream, &bit_pos, val, 11);
+                    try writeBits(bitstream, &bit_pos, val, 11);
                     i += 2;
                 } else {
                     // 1 char → 6 bits
                     const v1 = alphanumericValue(data[i]) orelse 0;
-                    writeBits(bitstream, &bit_pos, @as(u16, v1), 6);
+                    try writeBits(bitstream, &bit_pos, @as(u16, v1), 6);
                     i += 1;
                 }
             }
@@ -1065,18 +1128,18 @@ fn encodeDataWithBlocks(allocator: Allocator, data: []const u8, version: u8, ec_
     // Terminator (up to 4 zero bits)
     const remaining_bits = total_data_cw * 8 - bit_pos;
     const term_bits = @min(remaining_bits, 4);
-    writeBits(bitstream, &bit_pos, 0, @intCast(term_bits));
+    try writeBits(bitstream, &bit_pos, 0, @intCast(term_bits));
 
     // Pad to byte boundary
     if (bit_pos % 8 != 0) {
-        writeBits(bitstream, &bit_pos, 0, @intCast(8 - (bit_pos % 8)));
+        try writeBits(bitstream, &bit_pos, 0, @intCast(8 - (bit_pos % 8)));
     }
 
     // Pad with 0xEC, 0x11 alternation
     var pad_byte: usize = 0;
     while (bit_pos < total_data_cw * 8) {
         const pad = if (pad_byte % 2 == 0) @as(u8, 0xEC) else @as(u8, 0x11);
-        writeBits(bitstream, &bit_pos, pad, 8);
+        try writeBits(bitstream, &bit_pos, pad, 8);
         pad_byte += 1;
     }
 
@@ -1132,18 +1195,23 @@ fn encodeDataWithBlocks(allocator: Allocator, data: []const u8, version: u8, ec_
     return result;
 }
 
-/// Write bits to a byte array
-fn writeBits(buf: []u8, bit_pos: *usize, value: u16, count: u5) void {
+/// Write `count` bits of `value` (MSB-first) to a byte array at `bit_pos`.
+///
+/// `value` is `u32` so 24-bit ECI assignment numbers (`0xC00000 | eci_val`) can be
+/// written without an `@intCast` truncation panic. Returns `error.Overflow` if a bit
+/// would land past the end of `buf` — silent truncation is the worst failure mode a
+/// codec can have (it emits a corrupt-but-scannable symbol), so the caller must handle
+/// the error rather than ship dropped bits.
+fn writeBits(buf: []u8, bit_pos: *usize, value: u32, count: u5) error{Overflow}!void {
     var remaining = count;
     const val = value;
     while (remaining > 0) {
         remaining -= 1;
         const byte_idx = bit_pos.* / 8;
         const bit_offset: u3 = @intCast(7 - (bit_pos.* % 8));
-        if (byte_idx < buf.len) {
-            if ((val >> @intCast(remaining)) & 1 == 1) {
-                buf[byte_idx] |= @as(u8, 1) << bit_offset;
-            }
+        if (byte_idx >= buf.len) return error.Overflow;
+        if ((val >> @intCast(remaining)) & 1 == 1) {
+            buf[byte_idx] |= @as(u8, 1) << bit_offset;
         }
         bit_pos.* += 1;
     }
@@ -1158,8 +1226,11 @@ pub fn encode(allocator: Allocator, data: []const u8, config: QrConfig) !QrCode 
     // Determine encoding mode
     const mode = config.mode orelse detectOptimalMode(data);
 
-    // Select version
-    const version = selectVersion(data.len, config.ec_level, config.min_version, config.max_version, mode) orelse
+    // Select version — account for ECI / structured-append header bits that the
+    // character-capacity tables do not include, so we never pick a version too
+    // small and then silently drop bits during emission.
+    const header_bits = headerOverheadBits(config);
+    const version = selectVersion(data.len, config.ec_level, config.min_version, config.max_version, mode, header_bits) orelse
         return error.DataTooLong;
 
     const size: u8 = @intCast(17 + @as(usize, version) * 4);
@@ -1504,4 +1575,70 @@ test "color rendering" {
     try std.testing.expectEqual(@as(u8, 0), img.pixels[0]);
     try std.testing.expectEqual(@as(u8, 0), img.pixels[1]);
     try std.testing.expectEqual(@as(u8, 255), img.pixels[2]);
+}
+
+// ---------------------------------------------------------------------------
+// Tier-1A upgrade #35 regression tests
+//   - ISO/IEC 18004 external anchor for the data-codeword bitstream
+//   - ECI header-bit accounting in version selection
+//   - 24-bit ECI emission (no @intCast truncation panic)
+//   - writeBits overflow surfaces as an error, never silent truncation
+// ---------------------------------------------------------------------------
+
+test "ISO 18004 worked example: 01234567 V1-M numeric data codewords" {
+    const allocator = std.testing.allocator;
+    // ISO/IEC 18004 Annex worked example. The data-codeword sequence for
+    // "01234567" at version 1, EC level M, numeric mode is fixed by the spec:
+    // mode indicator 0001, 10-bit character count (8), 10/10/7-bit digit groups
+    // (012 / 345 / 67), 4-bit terminator, byte alignment, then 0xEC/0x11 padding.
+    // These bytes come from the standard, not from this implementation, so they
+    // are a genuine external anchor for the bitstream builder.
+    const expected_data = [_]u8{
+        0x10, 0x20, 0x0C, 0x56, 0x61, 0x80,
+        0xEC, 0x11, 0xEC, 0x11, 0xEC, 0x11,
+        0xEC, 0x11, 0xEC, 0x11,
+    };
+    // Version 1 EC-M is a single block, so the interleaved output is the 16 data
+    // codewords followed by the 10 EC codewords (26 total).
+    const cw = try encodeDataWithBlocks(allocator, "01234567", 1, .M, .numeric, .{});
+    defer allocator.free(cw);
+    try std.testing.expectEqual(@as(usize, 26), cw.len);
+    try std.testing.expectEqualSlices(u8, &expected_data, cw[0..16]);
+}
+
+test "version selection accounts for ECI header overhead" {
+    const allocator = std.testing.allocator;
+    // Byte capacity for V1-M is 14 bytes; 14 bytes with no header fits V1.
+    const data = "A" ** 14;
+    var no_eci = try encode(allocator, data, .{ .ec_level = .M, .mode = .byte, .max_version = 40 });
+    defer no_eci.deinit(allocator);
+    try std.testing.expectEqual(@as(u8, 1), no_eci.version);
+
+    // The same 14 bytes plus a 12-bit ECI header (4 mode + 8 assignment) exceed
+    // V1's 128-bit data budget (12 + 4 + 8 + 112 = 136 > 128), so a header-aware
+    // selector must bump the version. Before the fix this silently truncated
+    // inside writeBits, producing a corrupt symbol.
+    var with_eci = try encode(allocator, data, .{ .ec_level = .M, .mode = .byte, .max_version = 40, .eci = .utf8 });
+    defer with_eci.deinit(allocator);
+    try std.testing.expect(with_eci.version > 1);
+}
+
+test "24-bit ECI value emits without panic" {
+    const allocator = std.testing.allocator;
+    // ECI assignment numbers above 16383 require a 24-bit encoding. Previously the
+    // writeBits value parameter was u16, so @intCast(0xC00000 | eci_val) panicked
+    // (ReleaseSafe) or was UB (ReleaseFast). Widening to u32 fixes this.
+    const big_eci: EciMode = @enumFromInt(999999);
+    var qr = try encode(allocator, "hello", .{ .eci = big_eci, .max_version = 40 });
+    defer qr.deinit(allocator);
+    try std.testing.expect(qr.size > 0);
+}
+
+test "writeBits reports overflow instead of dropping bits" {
+    var buf = [_]u8{0} ** 2; // 16 bits of capacity
+    var bit_pos: usize = 0;
+    try writeBits(&buf, &bit_pos, 0xFFFF, 16); // exactly fills the buffer
+    try std.testing.expectEqual(@as(usize, 16), bit_pos);
+    // One more bit must overflow rather than being silently discarded.
+    try std.testing.expectError(error.Overflow, writeBits(&buf, &bit_pos, 1, 1));
 }

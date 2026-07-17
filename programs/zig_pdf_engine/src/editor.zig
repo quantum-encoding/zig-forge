@@ -223,7 +223,7 @@ pub const Editor = struct {
         // Create a sentinel-terminated slice
         const path_sentinel: [:0]const u8 = path_z[0..output_path.len :0];
 
-        const fd = try std.posix.open(path_sentinel, .{
+        const fd = try std.posix.openat(std.posix.AT.FDCWD, path_sentinel, .{
             .ACCMODE = .WRONLY,
             .CREAT = true,
             .TRUNC = true,
@@ -364,8 +364,13 @@ pub const Editor = struct {
         // 5. Write startxref
         try appendFmt(self.allocator, &buf, "startxref\n{d}\n%%EOF\n", .{xref_offset});
 
-        // Write everything to file
-        _ = try std.posix.write(fd, buf.items);
+        // Write everything to file (loop to handle partial writes)
+        var total_written: usize = 0;
+        while (total_written < buf.items.len) {
+            const n = std.c.write(fd, buf.items.ptr + total_written, buf.items.len - total_written);
+            if (n <= 0) return error.WriteFailed;
+            total_written += @intCast(n);
+        }
     }
 
     /// Serialize new Info dictionary
@@ -490,8 +495,8 @@ pub const Writer = struct {
     pub fn init(allocator: std.mem.Allocator) Writer {
         return .{
             .allocator = allocator,
-            .objects = .{},
-            .pages = .{},
+            .objects = .empty,
+            .pages = .empty,
             .metadata = .{},
             .next_obj_num = 1,
         };
@@ -573,7 +578,7 @@ pub const Writer = struct {
         // Create a sentinel-terminated slice
         const path_sentinel: [:0]const u8 = path_z[0..path.len :0];
 
-        const fd = try std.posix.open(path_sentinel, .{
+        const fd = try std.posix.openat(std.posix.AT.FDCWD, path_sentinel, .{
             .ACCMODE = .WRONLY,
             .CREAT = true,
             .TRUNC = true,
@@ -686,8 +691,13 @@ pub const Writer = struct {
 
         try appendFmt(self.allocator, &buf, "startxref\n{d}\n%%EOF\n", .{xref_offset});
 
-        // Write everything
-        _ = try std.posix.write(fd, buf.items);
+        // Write everything (loop to handle partial writes)
+        var total_written: usize = 0;
+        while (total_written < buf.items.len) {
+            const n = std.c.write(fd, buf.items.ptr + total_written, buf.items.len - total_written);
+            if (n <= 0) return error.WriteFailed;
+            total_written += @intCast(n);
+        }
     }
 
     fn allocObjOffset(self: *Writer, offsets: *std.ArrayList(usize), offset: usize) u32 {
@@ -779,11 +789,11 @@ test "writer creates valid PDF" {
     try writer.save(tmp_path);
 
     // Verify file was created and has content - read first 200 bytes
-    const fd = try std.posix.open("/tmp/zigpdf_test_output.pdf", .{ .ACCMODE = .RDONLY }, 0);
+    const fd = try std.posix.openat(std.posix.AT.FDCWD, "/tmp/zigpdf_test_output.pdf", .{ .ACCMODE = .RDONLY }, 0);
     defer _ = std.c.close(fd);
 
     var buf: [200]u8 = undefined;
-    const n = try std.posix.read(fd, &buf);
+    const n = std.c.read(fd, &buf, buf.len);
     try std.testing.expect(n > 100);
     // Verify PDF header
     try std.testing.expectEqualStrings("%PDF-1.7", buf[0..8]);

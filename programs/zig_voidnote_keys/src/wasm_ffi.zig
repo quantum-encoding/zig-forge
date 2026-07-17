@@ -60,6 +60,10 @@ pub const ERR_INVALID_INPUT: i32 = -1;
 
 const hex_chars = "0123456789abcdef";
 
+/// Per-call counter mixed into the native (test-only) RNG seed. Never read on
+/// the wasm target (the whole native branch is comptime-eliminated there).
+var native_seed_ctr: u64 = 0;
+
 /// Import crypto-secure random bytes from the JS host (crypto.getRandomValues).
 /// Only linked on the wasm32-freestanding target; native builds (the test
 /// target) use a std.Random CSPRNG via getRandomBytes below so the module can
@@ -75,15 +79,17 @@ fn getRandomBytes(ptr: [*]u8, len: u32) void {
         js_get_random_bytes(ptr, len);
     } else {
         // Native (test-only) path — production is wasm and always uses the JS
-        // host import above. Seed a CSPRNG from a monotonic + address entropy
-        // mix so the generate_api_key test can exercise the full code path
-        // without a JS host. This branch is never compiled into the shipped
-        // wasm binary (comptime-eliminated).
+        // host import above. Seed a CSPRNG from the destination address plus a
+        // per-call counter so the generate_api_key test can exercise the full
+        // code path (format assertions only) without a JS host. This branch is
+        // never compiled into the shipped wasm binary (comptime-eliminated), so
+        // its entropy quality is irrelevant to production.
+        native_seed_ctr +%= 1;
         var seed: [std.Random.DefaultCsprng.secret_seed_length]u8 = undefined;
-        const t: u128 = @bitCast(std.time.nanoTimestamp());
+        const mix: u64 = @intFromPtr(ptr) ^ (native_seed_ctr *% 0x9E3779B97F4A7C15);
         var i: usize = 0;
         while (i < seed.len) : (i += 1) {
-            seed[i] = @truncate((t >> @intCast((i % 16) * 8)) ^ @intFromPtr(ptr));
+            seed[i] = @truncate(mix >> @intCast((i % 8) * 8));
         }
         var csprng = std.Random.DefaultCsprng.init(seed);
         csprng.random().bytes(ptr[0..len]);

@@ -13,7 +13,34 @@
 //! - Zero-copy where possible
 
 const std = @import("std");
+const builtin = @import("builtin");
 const crypto = std.crypto;
+
+/// Fill `buf` with cryptographically-secure random bytes from the OS CSPRNG.
+/// RFC 6455 §4.1 (the Sec-WebSocket-Key nonce) and §5.3 (the frame masking
+/// key, the defense against intermediary cache-poisoning) both require a
+/// strong entropy source — never a clock-seeded PRNG. This mirrors the OS
+/// entropy path the Zig standard library itself uses (std.Io.Threaded).
+pub fn secureRandomBytes(buf: []u8) void {
+    if (buf.len == 0) return;
+    if (comptime @TypeOf(std.c.arc4random_buf) != void) {
+        // libc arc4random_buf: present on macOS/BSD and glibc >= 2.36.
+        std.c.arc4random_buf(buf.ptr, buf.len);
+    } else if (comptime builtin.os.tag == .linux) {
+        // Fallback for libc without arc4random_buf (musl, older glibc).
+        var i: usize = 0;
+        while (i < buf.len) {
+            const rc = std.os.linux.getrandom(buf[i..].ptr, buf.len - i, 0);
+            switch (std.posix.errno(rc)) {
+                .SUCCESS => i += @intCast(rc),
+                .INTR => continue,
+                else => @panic("getrandom failed: no secure entropy source"),
+            }
+        }
+    } else {
+        @compileError("no secure RNG source available for this target");
+    }
+}
 
 /// Maximum accepted frame payload size (bytes). A frame whose declared
 /// payload length exceeds this is rejected before any allocation, which
@@ -201,7 +228,7 @@ pub const Frame = struct {
         // source of entropy — it is the defense against intermediary
         // cache-poisoning attacks. Use the CSPRNG, never a clock-seeded PRNG.
         var key: [4]u8 = undefined;
-        std.crypto.random.bytes(&key);
+        secureRandomBytes(&key);
 
         const owned_payload = try allocator.dupe(u8, payload);
         return Frame{
@@ -990,7 +1017,8 @@ test "RFC 6455 §5.7 — 256-byte binary uses 16-bit extended length (0x7E)" {
 
 test "RFC 6455 §5.7 — 64 KiB binary uses 64-bit extended length (0x7F)" {
     // Header of a 65536-byte binary frame: 0x82 0x7F <8 bytes big-endian 0x10000>
-    const wire = [_]u8{ 0x82, 0x7f, 0, 0, 0, 0, 0, 0, 0x01, 0x00 };
+    // 65536 = 0x0000_0000_0001_0000 → bytes 00 00 00 00 00 01 00 00.
+    const wire = [_]u8{ 0x82, 0x7f, 0, 0, 0, 0, 0, 0x01, 0x00, 0x00 };
     const parsed = try FrameHeader.fromBytes(&wire);
     try std.testing.expectEqual(Opcode.binary, parsed.header.opcode);
     try std.testing.expectEqual(@as(u64, 65536), parsed.header.payload_len);

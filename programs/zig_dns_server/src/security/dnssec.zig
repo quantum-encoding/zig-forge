@@ -12,6 +12,7 @@
 const std = @import("std");
 const types = @import("../protocol/types.zig");
 const zone_mod = @import("../zones/zone.zig");
+const time_compat = @import("../time_compat.zig");
 
 const Name = types.Name;
 const RecordType = types.RecordType;
@@ -26,6 +27,15 @@ const NSECRecord = types.NSECRecord;
 const NSEC3Record = types.NSEC3Record;
 const Zone = zone_mod.Zone;
 const ZoneRecord = zone_mod.ZoneRecord;
+
+/// Fill `buf` with cryptographically secure random bytes.
+///
+/// `std.crypto.random` was removed in Zig 0.16; `arc4random_buf` (libc, a
+/// ChaCha20-backed CSPRNG on modern systems) is the drop-in replacement.
+/// build.zig links libc, so this is always available.
+fn fillSecureRandom(buf: []u8) void {
+    std.c.arc4random_buf(buf.ptr, buf.len);
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // DNSSEC Key
@@ -72,28 +82,28 @@ pub const DNSSECKey = struct {
 
     fn generateECDSAP256(self: *DNSSECKey) !void {
         // Generate 256-bit key using system entropy
-        std.crypto.random.bytes(self.private_key[0..32]);
+        fillSecureRandom(self.private_key[0..32]);
         self.private_key_len = 32;
 
         // For a real implementation, compute public key from private
         // Here we generate random public key (not valid for actual signing)
-        std.crypto.random.bytes(self.public_key[0..64]);
+        fillSecureRandom(self.public_key[0..64]);
         self.public_key_len = 64;
     }
 
     fn generateECDSAP384(self: *DNSSECKey) !void {
-        std.crypto.random.bytes(self.private_key[0..48]);
+        fillSecureRandom(self.private_key[0..48]);
         self.private_key_len = 48;
-        std.crypto.random.bytes(self.public_key[0..96]);
+        fillSecureRandom(self.public_key[0..96]);
         self.public_key_len = 96;
     }
 
     fn generateEd25519(self: *DNSSECKey) !void {
         // Generate Ed25519 key pair
         var seed: [32]u8 = undefined;
-        std.crypto.random.bytes(&seed);
+        fillSecureRandom(&seed);
 
-        const key_pair = std.crypto.sign.Ed25519.KeyPair.create(seed);
+        const key_pair = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(seed);
         @memcpy(self.public_key[0..32], &key_pair.public_key.bytes);
         self.public_key_len = 32;
 
@@ -193,8 +203,8 @@ pub const DNSSECKey = struct {
         var seed: [32]u8 = undefined;
         @memcpy(&seed, self.private_key[0..32]);
 
-        const key_pair = std.crypto.sign.Ed25519.KeyPair.create(seed);
-        const sig = key_pair.sign(data, null);
+        const key_pair = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(seed);
+        const sig = try key_pair.sign(data, null);
 
         @memcpy(signature[0..64], &sig.toBytes());
         return 64;
@@ -356,7 +366,7 @@ pub const ZoneSigner = struct {
         const first = &zone.records.items[record_indices[0]];
         const key = if (use_ksk) &self.ksk else &self.zsk;
 
-        const now: u32 = @intCast(@divTrunc(std.time.timestamp(), 1));
+        const now: u32 = @intCast(@divTrunc(time_compat.timestamp(), 1));
         const inception = now - self.inception_offset;
         const expiration = now + self.signature_validity;
 
@@ -557,7 +567,7 @@ pub const Validator = struct {
         if (rrsig.algorithm != dnskey.algorithm) return false;
 
         // Check signature timing
-        const now: u32 = @intCast(@divTrunc(std.time.timestamp(), 1));
+        const now: u32 = @intCast(@divTrunc(time_compat.timestamp(), 1));
         if (now < rrsig.inception or now > rrsig.expiration) return false;
 
         // Verify signature (simplified - would need full crypto implementation)

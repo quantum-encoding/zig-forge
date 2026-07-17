@@ -262,25 +262,13 @@ fn printUsage() void {
 ///
 /// Fails closed with `error.MissingCredential` when no credential is provided;
 /// there is no baked-in default (the former hardcoded root:root is gone).
-fn buildAuthHeader(allocator: Allocator) ![]const u8 {
-    if (std.process.getEnvVarOwned(allocator, "SURREAL_AUTH")) |full| {
-        return full;
-    } else |err| switch (err) {
-        error.EnvironmentVariableNotFound => {},
-        else => return err,
+fn buildAuthHeader(allocator: Allocator, env: *std.process.Environ.Map) ![]const u8 {
+    if (env.get("SURREAL_AUTH")) |full| {
+        return allocator.dupe(u8, full);
     }
 
-    const user = std.process.getEnvVarOwned(allocator, "SURREAL_USER") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => return error.MissingCredential,
-        else => return err,
-    };
-    defer allocator.free(user);
-
-    const pass = std.process.getEnvVarOwned(allocator, "SURREAL_PASS") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => return error.MissingCredential,
-        else => return err,
-    };
-    defer allocator.free(pass);
+    const user = env.get("SURREAL_USER") orelse return error.MissingCredential;
+    const pass = env.get("SURREAL_PASS") orelse return error.MissingCredential;
 
     const raw = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ user, pass });
     defer allocator.free(raw);
@@ -324,7 +312,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // Require the SurrealDB credential from the environment — fail closed.
-    config.auth = buildAuthHeader(allocator) catch |err| {
+    config.auth = buildAuthHeader(allocator, init.environ_map) catch |err| {
         std.debug.print(
             \\Error: SurrealDB credential required.
             \\  Set SURREAL_USER and SURREAL_PASS, or SURREAL_AUTH with a full

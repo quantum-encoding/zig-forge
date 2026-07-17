@@ -890,44 +890,13 @@ pub fn signTransaction(
     return serializeSignedTransaction(builder, signed_inputs[0..builder.input_count], out);
 }
 
-/// Calculate transaction ID (double SHA256, reversed)
-pub fn calculateTxid(serialized_tx: []const u8) [32]u8 {
-    // For SegWit tx, we need to hash without witness data
-    // Find where witness starts: after outputs, before locktime
-
-    var hasher = Sha256.init(.{});
-
-    // Version (4 bytes)
-    hasher.update(serialized_tx[0..4]);
-
-    // Skip marker and flag for SegWit
-    var pos: usize = 4;
-    if (serialized_tx.len > 6 and serialized_tx[4] == 0x00 and serialized_tx[5] == 0x01) {
-        pos = 6; // Skip marker and flag
-    }
-
-    // We need to hash: version + inputs + outputs + locktime (no witness)
-    // This is complex for a full implementation, so for now hash everything
-    // (This works for non-segwit, but txid for segwit needs proper stripping)
-
-    // For proper implementation, we'd need to track positions carefully
-    // Simplified: just double-hash the whole thing (incorrect for SegWit txid display)
-    hasher.update(serialized_tx);
-
-    var first_hash: [32]u8 = undefined;
-    hasher.final(&first_hash);
-
-    var txid: [32]u8 = undefined;
-    Sha256.hash(&first_hash, &txid, .{});
-
-    // Reverse for display
-    var reversed: [32]u8 = undefined;
-    for (0..32) |i| {
-        reversed[i] = txid[31 - i];
-    }
-
-    return reversed;
-}
+// NOTE: The transaction-id computation lives in `transaction.zig`
+// (`computeTxid`), which performs correct BIP141 witness stripping for both
+// legacy and SegWit transactions. The previous `calculateTxid` here fed
+// `serialized_tx[0..4]` and then the *entire* buffer into the same hasher —
+// hashing the version bytes twice and never stripping the witness — so it
+// produced a wrong digest for every transaction. It was unused (no FFI export
+// routed to it) and has been removed rather than left as a landmine.
 
 // =============================================================================
 // Tests

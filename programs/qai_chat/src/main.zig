@@ -519,7 +519,12 @@ fn loadConversationMarkdown(
         if (std.mem.startsWith(u8, raw_line, "## [")) {
             try flushPending(gpa, io, history, &p);
             const role = parseRoleFromHeader(raw_line) orelse .user;
-            p = .{ .role = role, .active = true };
+            // flushPending already cleared content/json_buf (retaining their
+            // buffers) and nulled calls/results, so reuse `p` in place rather
+            // than reassigning a fresh struct — a `p = .{...}` here would
+            // orphan the retained ArrayList allocations and leak them.
+            p.role = role;
+            p.active = true;
             state = .content;
             continue;
         }

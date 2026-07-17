@@ -50,11 +50,14 @@ pub fn build(b: *std.Build) void {
     }
 
     // Tests
+    // link_libc is required: lib.zig's exported ingest path references libc
+    // (fopen/opendir/...), so the test binary won't link without it.
     const unit_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/lib.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
 

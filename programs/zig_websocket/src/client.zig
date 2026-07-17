@@ -68,7 +68,7 @@ pub const Client = struct {
         // RFC 6455 §4.1 requires this nonce to be selected randomly from a
         // strong source of entropy — use the CSPRNG, not a clock-seeded PRNG.
         var random_bytes: [16]u8 = undefined;
-        std.crypto.random.bytes(&random_bytes);
+        websocket.secureRandomBytes(&random_bytes);
         _ = std.base64.standard.Encoder.encode(&self.sec_websocket_key, &random_bytes);
 
         // Convert wss:// to https:// for the HTTP upgrade request

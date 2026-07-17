@@ -16,6 +16,24 @@ const posix = std.posix;
 const types = @import("../protocol/types.zig");
 const parser = @import("../protocol/parser.zig");
 const zone_mod = @import("../zones/zone.zig");
+const time_compat = @import("../time_compat.zig");
+
+/// A mutual-exclusion lock backed by `pthread_mutex`.
+///
+/// `std.Thread.Mutex` is not available in this Zig 0.16 toolchain, so we use a
+/// pthread-backed shim (build.zig links libc). Preserves the blocking
+/// `lock()` / `unlock()` semantics the callers below rely on.
+const Mutex = struct {
+    inner: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER,
+
+    pub fn lock(self: *Mutex) void {
+        _ = std.c.pthread_mutex_lock(&self.inner);
+    }
+
+    pub fn unlock(self: *Mutex) void {
+        _ = std.c.pthread_mutex_unlock(&self.inner);
+    }
+};
 
 // Cross-platform socket wrapper functions for Zig 0.16
 fn createSocket(sock_type: u32) !posix.fd_t {
@@ -533,7 +551,7 @@ pub const RateLimiter = struct {
 
     // Per-IP counters
     counters: std.AutoHashMap(u32, Counter),
-    mutex: std.Thread.Mutex = .{},
+    mutex: Mutex = .{},
 
     const Counter = struct {
         count: u32,
@@ -558,7 +576,7 @@ pub const RateLimiter = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = std.time.nanoTimestamp();
+        const now = time_compat.nanoTimestamp();
 
         const entry = self.counters.getOrPut(ip) catch return true;
         if (!entry.found_existing) {
@@ -586,7 +604,7 @@ pub const RateLimiter = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = std.time.nanoTimestamp();
+        const now = time_compat.nanoTimestamp();
         const expire_threshold = now - self.window_ns * 2;
 
         var to_remove = std.ArrayList(u32).init(self.allocator);
@@ -613,7 +631,7 @@ pub const ResponseCache = struct {
     allocator: std.mem.Allocator,
     entries: std.AutoHashMap(u64, CacheEntry),
     max_entries: u32,
-    mutex: std.Thread.Mutex = .{},
+    mutex: Mutex = .{},
 
     const CacheEntry = struct {
         response: []u8,
@@ -642,7 +660,7 @@ pub const ResponseCache = struct {
         defer self.mutex.unlock();
 
         const entry = self.entries.get(key) orelse return null;
-        const now = std.time.nanoTimestamp();
+        const now = time_compat.nanoTimestamp();
 
         if (now > entry.expires) {
             // Expired - remove
@@ -668,7 +686,7 @@ pub const ResponseCache = struct {
         const response_copy = try self.allocator.dupe(u8, response);
         errdefer self.allocator.free(response_copy);
 
-        const expires = std.time.nanoTimestamp() + @as(i128, ttl_seconds) * std.time.ns_per_s;
+        const expires = time_compat.nanoTimestamp() + @as(i128, ttl_seconds) * std.time.ns_per_s;
 
         // Remove old entry if exists
         if (self.entries.fetchRemove(key)) |old| {

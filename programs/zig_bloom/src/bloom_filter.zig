@@ -419,3 +419,30 @@ test "counting bloom filter deletion" {
     cbf.remove("hello");
     try std.testing.expect(!cbf.contains("hello"));
 }
+
+test "initCapacity rejects degenerate inputs (no NaN/inf @intFromFloat)" {
+    const allocator = std.testing.allocator;
+
+    // expected_items == 0 -> k = (m/n)*ln2 is 0/0 NaN
+    try std.testing.expectError(error.InvalidCapacity, BloomFilter(u64).initCapacity(allocator, 0, 0.01));
+    try std.testing.expectError(error.InvalidCapacity, CountingBloomFilter(u64).initCapacity(allocator, 0, 0.01));
+
+    // fp_rate <= 0 -> m infinite; fp_rate >= 1 -> m zero-or-negative; NaN rejected too
+    try std.testing.expectError(error.InvalidFPRate, BloomFilter(u64).initCapacity(allocator, 1000, 0.0));
+    try std.testing.expectError(error.InvalidFPRate, BloomFilter(u64).initCapacity(allocator, 1000, 1.0));
+    try std.testing.expectError(error.InvalidFPRate, BloomFilter(u64).initCapacity(allocator, 1000, -0.5));
+    try std.testing.expectError(error.InvalidFPRate, BloomFilter(u64).initCapacity(allocator, 1000, std.math.nan(f64)));
+    try std.testing.expectError(error.InvalidFPRate, CountingBloomFilter(u64).initCapacity(allocator, 1000, 2.0));
+}
+
+test "bloom filter integer keys (non-slice branch, no dangling toBytes)" {
+    const allocator = std.testing.allocator;
+    var bf = try BloomFilter(u64).initCapacity(allocator, 1000, 0.01);
+    defer bf.deinit();
+
+    bf.add(@as(u64, 42));
+    bf.add(@as(u64, 7));
+    try std.testing.expect(bf.contains(@as(u64, 42)));
+    try std.testing.expect(bf.contains(@as(u64, 7)));
+    try std.testing.expect(!bf.contains(@as(u64, 99999)));
+}

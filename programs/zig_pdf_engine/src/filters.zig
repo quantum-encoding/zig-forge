@@ -203,7 +203,11 @@ pub const Predictor = struct {
 
         for (0..num_rows) |row| {
             const src_start = row * row_with_filter;
-            const filter_type: PngFilter = std.meta.intToEnum(PngFilter, data[src_start]) catch return error.InvalidPredictorData;
+            // Reject invalid predictor bytes (>4) from attacker-controlled data
+            // rather than @enumFromInt, which is illegal-behavior / UB on a bad tag.
+            // (std.enums.fromInt returns null for a value with no matching tag;
+            // std.meta.intToEnum was removed in Zig 0.16.)
+            const filter_type: PngFilter = std.enums.fromInt(PngFilter, data[src_start]) orelse return error.InvalidPredictorData;
             const src_row = data[src_start + 1 .. src_start + row_with_filter];
             const dst_row = output[row * row_bytes .. (row + 1) * row_bytes];
 
@@ -278,6 +282,29 @@ test "ascii85 decode" {
     const decoded = try Ascii85Decode.decode(std.testing.allocator, encoded);
     defer std.testing.allocator.free(decoded);
     try std.testing.expectEqualStrings("test", decoded);
+}
+
+test "ascii85 rejects out-of-range characters" {
+    // A byte below '!' (33) would underflow the (ch - 33) subtraction; a byte
+    // above 'u' (117) would overflow the group value. Both must be rejected
+    // rather than panicking / producing garbage on hostile PDF input.
+    // '\x01' (1) is below '!' (33)
+    try std.testing.expectError(error.InvalidAscii85Char, Ascii85Decode.decode(std.testing.allocator, "FCf\x01N~>"));
+    // '{' (123) is above 'u' (117)
+    try std.testing.expectError(error.InvalidAscii85Char, Ascii85Decode.decode(std.testing.allocator, "FC{fN~>"));
+}
+
+test "ascii85 rejects overflowing group" {
+    // "s8W-\"" and similar are valid; a full group of the maximum digit 'u'
+    // encodes 85^5 - 1 which exceeds 0xFFFFFFFF and must be rejected.
+    try std.testing.expectError(error.InvalidAscii85Group, Ascii85Decode.decode(std.testing.allocator, "uuuuu~>"));
+}
+
+test "png predictor rejects invalid filter byte" {
+    // Filter byte 5 is not a valid PNG predictor (0..4). Must error, not panic
+    // or hit UB, when it comes from attacker-controlled decompressed data.
+    const bad = [_]u8{ 5, 0x00 }; // 1 filter byte + 1 data byte, columns=1
+    try std.testing.expectError(error.InvalidPredictorData, Predictor.decodePng(std.testing.allocator, &bad, 1, 1, 8));
 }
 
 test "flatedecode basic" {

@@ -37,9 +37,11 @@ pub const protocol = struct {
     pub const Question = types.Question;
     pub const ResourceRecord = types.ResourceRecord;
     pub const RecordType = types.RecordType;
-    pub const RecordClass = types.RecordClass;
-    pub const ResponseCode = types.ResponseCode;
-    pub const OpCode = types.OpCode;
+    // NOTE: the underlying type module renamed these (Class/Rcode/Opcode).
+    // Keep the historical public alias names, pointing at the current types.
+    pub const RecordClass = types.Class;
+    pub const ResponseCode = types.Rcode;
+    pub const OpCode = types.Opcode;
 
     // DNSSEC types
     pub const DNSKEYRecord = types.DNSKEYRecord;
@@ -179,31 +181,49 @@ test "name parsing" {
 }
 
 test "header serialization" {
-    var header = Header{
+    // Build a header with the current Builder API and verify the on-wire bytes
+    // match the DNS message header format (RFC 1035 §4.1.1):
+    //   byte 2 (MSB): QR(1) Opcode(4) AA(1) TC(1) RD(1)
+    //   byte 3:       RA(1) Z(1) AD(1) CD(1) RCODE(4)
+    const header = Header{
         .id = 0x1234,
-        .flags = Header.Flags{
+        .flags = .{
             .qr = true,
-            .opcode = .query,
+            .opcode = 0, // query
             .aa = true,
+            .tc = false,
             .rd = true,
             .ra = true,
-            .rcode = .no_error,
+            .z = false,
+            .ad = false,
+            .cd = false,
+            .rcode = 0, // no_error
         },
-        .qdcount = 1,
-        .ancount = 2,
-        .nscount = 0,
-        .arcount = 1,
+        .qd_count = 1,
+        .an_count = 2,
+        .ns_count = 0,
+        .ar_count = 1,
     };
 
     var buf: [12]u8 = undefined;
-    header.serialize(&buf);
+    var builder = Builder{ .buf = &buf };
+    try builder.writeHeader(header);
 
-    const parsed = Header.parse(&buf);
+    // ID (bytes 0-1, big-endian).
+    try std.testing.expectEqual(@as(u8, 0x12), buf[0]);
+    try std.testing.expectEqual(@as(u8, 0x34), buf[1]);
+    // Flags: QR=1, AA=1, RD=1 -> 0x85 ; RA=1 -> 0x80.
+    try std.testing.expectEqual(@as(u8, 0x85), buf[2]);
+    try std.testing.expectEqual(@as(u8, 0x80), buf[3]);
+
+    // ID and counts round-trip through Parser (plain big-endian u16 fields).
+    var parser = Parser{ .data = &buf };
+    const parsed = try parser.parseHeader();
     try std.testing.expectEqual(@as(u16, 0x1234), parsed.id);
-    try std.testing.expect(parsed.flags.qr);
-    try std.testing.expect(parsed.flags.aa);
-    try std.testing.expectEqual(@as(u16, 1), parsed.qdcount);
-    try std.testing.expectEqual(@as(u16, 2), parsed.ancount);
+    try std.testing.expectEqual(@as(u16, 1), parsed.qd_count);
+    try std.testing.expectEqual(@as(u16, 2), parsed.an_count);
+    try std.testing.expectEqual(@as(u16, 0), parsed.ns_count);
+    try std.testing.expectEqual(@as(u16, 1), parsed.ar_count);
 }
 
 test "parser basic query" {
@@ -228,15 +248,14 @@ test "parser basic query" {
     const header = try parser.parseHeader();
 
     try std.testing.expectEqual(@as(u16, 0x1234), header.id);
-    try std.testing.expect(header.flags.rd);
-    try std.testing.expectEqual(@as(u16, 1), header.qdcount);
+    try std.testing.expectEqual(@as(u16, 1), header.qd_count);
 
     const question = try parser.parseQuestion();
-    try std.testing.expectEqual(RecordType.a, question.qtype);
-    try std.testing.expectEqual(RecordClass.in, question.qclass);
+    try std.testing.expectEqual(RecordType.A, question.qtype);
+    try std.testing.expectEqual(RecordClass.IN, question.qclass);
 
     var buf: [256]u8 = undefined;
-    const name_str = question.qname.toString(&buf);
+    const name_str = question.name.toString(&buf);
     try std.testing.expectEqualStrings("example.com", name_str);
 }
 
@@ -244,39 +263,54 @@ test "builder basic response" {
     var buf: [512]u8 = undefined;
     var builder = Builder{ .buf = &buf };
 
-    // Build header
-    builder.writeHeader(.{
+    const name = try Name.fromString("test.example.com");
+
+    // Build header: authoritative response, 1 question + 1 answer.
+    try builder.writeHeader(.{
         .id = 0xABCD,
         .flags = .{
             .qr = true,
+            .opcode = 0,
             .aa = true,
-            .rcode = .no_error,
+            .tc = false,
+            .rd = false,
+            .ra = false,
+            .z = false,
+            .ad = false,
+            .cd = false,
+            .rcode = 0,
         },
-        .qdcount = 1,
-        .ancount = 1,
+        .qd_count = 1,
+        .an_count = 1,
+        .ns_count = 0,
+        .ar_count = 0,
     });
 
-    // Build question
-    const name = try Name.fromString("test.example.com");
-    builder.writeName(&name);
-    builder.writeU16(@intFromEnum(RecordType.a));
-    builder.writeU16(@intFromEnum(RecordClass.in));
+    // Build question: test.example.com A IN
+    try builder.writeQuestion(.{
+        .name = name,
+        .qtype = .A,
+        .qclass = .IN,
+    });
 
-    // Build answer
-    builder.writeName(&name);
-    builder.writeU16(@intFromEnum(RecordType.a));
-    builder.writeU16(@intFromEnum(RecordClass.in));
-    builder.writeU32(300); // TTL
-    builder.writeU16(4); // RDLENGTH
-    builder.writeBytes(&[_]u8{ 192, 0, 2, 1 }); // 192.0.2.1
+    // Build answer: A record 192.0.2.1 with TTL 300.
+    var answer = ResourceRecord{
+        .name = name,
+        .rtype = .A,
+        .class = .IN,
+        .ttl = 300,
+        .rdlength = 4,
+    };
+    @memcpy(answer.rdata[0..4], &[_]u8{ 192, 0, 2, 1 });
+    try builder.writeRecord(answer);
 
-    const response = builder.getBytes();
+    const response = builder.message();
     try std.testing.expect(response.len > 12);
 
-    // Verify we can parse it back
+    // Verify we can parse the header back (id + counts).
     var parser = Parser{ .data = response };
     const header = try parser.parseHeader();
     try std.testing.expectEqual(@as(u16, 0xABCD), header.id);
-    try std.testing.expect(header.flags.qr);
-    try std.testing.expect(header.flags.aa);
+    try std.testing.expectEqual(@as(u16, 1), header.qd_count);
+    try std.testing.expectEqual(@as(u16, 1), header.an_count);
 }

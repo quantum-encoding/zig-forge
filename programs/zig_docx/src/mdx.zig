@@ -662,3 +662,38 @@ test "generate MDX from simple document" {
     try std.testing.expect(std.mem.indexOf(u8, result.mdx, "**Bold text**") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.mdx, "- List item") != null);
 }
+
+test "H3: isSafeLinkUrl allows http/https/mailto and relative, blocks scripts" {
+    // Safe schemes and relative references.
+    try std.testing.expect(isSafeLinkUrl("http://example.com/a"));
+    try std.testing.expect(isSafeLinkUrl("https://example.com/a?b=c#d"));
+    try std.testing.expect(isSafeLinkUrl("HTTPS://EXAMPLE.COM")); // case-insensitive
+    try std.testing.expect(isSafeLinkUrl("mailto:a@b.com"));
+    try std.testing.expect(isSafeLinkUrl("./images/x.png"));
+    try std.testing.expect(isSafeLinkUrl("../docs/x.png"));
+    try std.testing.expect(isSafeLinkUrl("#anchor"));
+    try std.testing.expect(isSafeLinkUrl("/absolute/path"));
+    try std.testing.expect(isSafeLinkUrl("//host/proto-relative"));
+
+    // Dangerous schemes are rejected.
+    try std.testing.expect(!isSafeLinkUrl("javascript:alert(1)"));
+    try std.testing.expect(!isSafeLinkUrl("JavaScript:alert(1)"));
+    try std.testing.expect(!isSafeLinkUrl("  javascript:alert(1)")); // leading-space bypass
+    try std.testing.expect(!isSafeLinkUrl("data:text/html;base64,PHN2Zz4="));
+    try std.testing.expect(!isSafeLinkUrl("vbscript:msgbox(1)"));
+    try std.testing.expect(!isSafeLinkUrl("file:///etc/passwd"));
+    try std.testing.expect(!isSafeLinkUrl("tel:12345")); // not on allowlist
+    // Control-char obfuscation (e.g. "java\tscript:") is rejected outright.
+    try std.testing.expect(!isSafeLinkUrl("java\tscript:alert(1)"));
+    try std.testing.expect(!isSafeLinkUrl(""));
+}
+
+test "H3: writeEscapedLinkUrl percent-encodes parens/spaces so links can't break out" {
+    const allocator = std.testing.allocator;
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try writeEscapedLinkUrl(&aw.writer, "https://x.com/a(b)c d");
+    const out = try aw.toOwnedSlice();
+    defer allocator.free(out);
+    try std.testing.expectEqualStrings("https://x.com/a%28b%29c%20d", out);
+}

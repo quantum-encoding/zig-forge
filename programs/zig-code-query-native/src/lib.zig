@@ -452,3 +452,58 @@ export fn zcq_free_string_result(result_ptr: ?*CStringResult) void {
         r.* = CStringResult{};
     }
 }
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+const testing = std.testing;
+
+// Pull in the tests defined in the referenced modules (surreal.zig etc.).
+test {
+    testing.refAllDecls(@This());
+    _ = surreal;
+    _ = query;
+    _ = ingest;
+    _ = types;
+}
+
+test "zcq_list_documents JSON: document strings are escaped, not templated (JSON-IN-FMT fix)" {
+    // Regression test for the repo's JSON-IN-FMT anti-pattern (class 1): the
+    // document list must be produced by std.json.Stringify so a path/name
+    // containing `"` or `\` cannot break out of or inject into the JSON.
+    const DocEntry = struct {
+        path: []const u8,
+        name: []const u8,
+        extension: []const u8,
+        size: i64,
+        content_hash: []const u8,
+        ingested_at: []const u8,
+    };
+
+    const entries = [_]DocEntry{.{
+        .path = "/tmp/a\"b\\c.md", // embedded quote + backslash
+        .name = "a\"b",
+        .extension = ".md",
+        .size = 42,
+        .content_hash = "deadbeef",
+        .ingested_at = "2026-07-17T00:00:00Z",
+    }};
+
+    const json = try std.json.Stringify.valueAlloc(testing.allocator, entries[0..], .{});
+    defer testing.allocator.free(json);
+
+    // Output must be valid JSON that round-trips through the parser (the old
+    // allocPrint template would have produced invalid JSON here).
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
+    defer parsed.deinit();
+
+    try testing.expect(parsed.value == .array);
+    try testing.expectEqual(@as(usize, 1), parsed.value.array.items.len);
+    const obj = parsed.value.array.items[0].object;
+    // The parser must recover the exact original bytes, proving the quote and
+    // backslash were correctly escaped on the wire.
+    try testing.expectEqualStrings("/tmp/a\"b\\c.md", obj.get("path").?.string);
+    try testing.expectEqualStrings("a\"b", obj.get("name").?.string);
+    try testing.expectEqual(@as(i64, 42), obj.get("size").?.integer);
+}

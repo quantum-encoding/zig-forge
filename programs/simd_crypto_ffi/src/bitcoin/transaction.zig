@@ -443,19 +443,94 @@ pub fn freeTransaction(allocator: std.mem.Allocator, tx: *const Transaction) voi
 // Utility Functions
 // =============================================================================
 
-/// Calculate transaction ID (double SHA-256 of serialized tx without witness)
-pub fn calculateTxid(data: []const u8) [32]u8 {
-    const crypto = std.crypto.hash.sha2.Sha256;
+/// Compute a transaction's txid: SHA256d over the legacy (witness-stripped)
+/// serialization — version ‖ inputs ‖ outputs ‖ locktime, excluding the SegWit
+/// marker/flag and all witness stacks (BIP141).
+///
+/// The result is in Bitcoin's INTERNAL byte order (little-endian). To display
+/// the txid as the familiar big-endian hex string, reverse the 32 bytes.
+///
+/// Unlike a naive `SHA256d(raw)`, this is correct for SegWit transactions: the
+/// witness data is not committed to by the txid (it lives in the wtxid instead),
+/// so it must be stripped before hashing or every modern tx yields a wrong id.
+///
+/// Returns a parse error if the buffer is not a structurally valid transaction.
+pub fn computeTxid(data: []const u8) ParseError![32]u8 {
+    var offset: usize = 0;
 
-    // For non-segwit, just double-hash the whole thing
-    // For segwit, we need to strip witness data - for now, simplified version
+    // Version (4 bytes)
+    if (data.len < 4) return ParseError.UnexpectedEof;
+    offset = 4;
+
+    // SegWit marker (0x00) + flag (0x01) come between version and input count.
+    var is_segwit = false;
+    if (offset + 2 <= data.len and data[offset] == SEGWIT_MARKER and data[offset + 1] == SEGWIT_FLAG) {
+        is_segwit = true;
+        offset += 2;
+    }
+
+    // Start of the legacy body (input count varint). For a legacy tx this is
+    // offset 4; for SegWit it is offset 6 (marker/flag skipped).
+    const body_start = offset;
+
+    // Inputs
+    const input_count = try readVarint(data, &offset);
+    if (input_count > MAX_INPUTS) return ParseError.TooManyInputs;
+    var i: usize = 0;
+    while (i < input_count) : (i += 1) {
+        _ = try readBytes(data, &offset, 32); // prevout txid
+        _ = try readU32(data, &offset); // prevout vout
+        const script_len = try readVarint(data, &offset);
+        if (script_len > MAX_SCRIPT_SIZE) return ParseError.ScriptTooLarge;
+        _ = try readBytes(data, &offset, @intCast(script_len)); // scriptSig
+        _ = try readU32(data, &offset); // sequence
+    }
+
+    // Outputs
+    const output_count = try readVarint(data, &offset);
+    if (output_count > MAX_OUTPUTS) return ParseError.TooManyOutputs;
+    var j: usize = 0;
+    while (j < output_count) : (j += 1) {
+        _ = try readU64(data, &offset); // value
+        const script_len = try readVarint(data, &offset);
+        if (script_len > MAX_SCRIPT_SIZE) return ParseError.ScriptTooLarge;
+        _ = try readBytes(data, &offset, @intCast(script_len)); // scriptPubKey
+    }
+
+    // End of the legacy body (= witness_start for a SegWit tx).
+    const body_end = offset;
+
+    // Skip witness stacks (one per input) if present — they are NOT hashed.
+    if (is_segwit) {
+        var w_in: usize = 0;
+        while (w_in < input_count) : (w_in += 1) {
+            const witness_count = try readVarint(data, &offset);
+            if (witness_count > MAX_WITNESS_ITEMS) return ParseError.TooManyWitnessItems;
+            var w: usize = 0;
+            while (w < witness_count) : (w += 1) {
+                const item_len = try readVarint(data, &offset);
+                if (item_len > MAX_SCRIPT_SIZE) return ParseError.ScriptTooLarge;
+                _ = try readBytes(data, &offset, @intCast(item_len));
+            }
+        }
+    }
+
+    // Locktime (4 bytes)
+    if (offset + 4 > data.len) return ParseError.UnexpectedEof;
+    const locktime_start = offset;
+
+    // Hash the reconstructed legacy serialization in three contiguous pieces,
+    // without allocating: version ‖ body(inputs+outputs) ‖ locktime.
+    const Sha256 = std.crypto.hash.sha2.Sha256;
+    var hasher = Sha256.init(.{});
+    hasher.update(data[0..4]);
+    hasher.update(data[body_start..body_end]);
+    hasher.update(data[locktime_start .. locktime_start + 4]);
     var first_hash: [32]u8 = undefined;
+    hasher.final(&first_hash);
+
     var txid: [32]u8 = undefined;
-
-    crypto.hash(data, &first_hash, .{});
-    crypto.hash(&first_hash, &txid, .{});
-
-    // Reverse for display (Bitcoin uses little-endian internally but displays big-endian)
+    Sha256.hash(&first_hash, &txid, .{});
     return txid;
 }
 
@@ -562,6 +637,55 @@ test "script type detection - OP_RETURN" {
 // item-read loop, so a failure inside the loop left the allocation unowned and
 // unfreed. `std.testing.allocator` fails the test on any leak, so this guards
 // the errdefer + early-assign fix directly.
+// External anchor: SegWit txid witness-stripping.
+//
+// Vector is the coinbase transaction of Bitcoin mainnet block 500,000, fetched
+// as raw hex from the Blockstream Esplora block explorer
+//   https://blockstream.info/api/tx/2157b554dcfda405233906e461ee593875ae4b1b97615872db6a25130ecc1dd6/hex
+// The explorer (a third party this repo did not author) asserts that this exact
+// byte string has display-order txid
+//   2157b554dcfda405233906e461ee593875ae4b1b97615872db6a25130ecc1dd6
+// This is a SegWit tx (marker/flag 0x0001, coinbase witness reserved value), so
+// a naive SHA256d(raw) gives the WRONG answer — the test only passes if the
+// marker/flag and witness stack are stripped before hashing.
+test "computeTxid — SegWit coinbase (block 500000, Blockstream-anchored)" {
+    const raw_hex = "010000000001010000000000000000000000000000000000000000000000000000000000000000ffffffff4b0320a107046f0a385a632f4254432e434f4d2ffabe6d6dbdd0ee86f9a1badfd0aa1b3c9dac8d90840cf973f7b2590d6c9adde1a6e0974a010000000000000001283da9a172020000000000ffffffff02c994bb5e0000000017a914228f554bbf766d6f9cc828de1126e3d35d15e5fe870000000000000000266a24aa21a9ed10109f4b82aa3ed7ec9d02a2a90246478b3308c8b85daf62fe501d58d05727a40120000000000000000000000000000000000000000000000000000000000000000000000000";
+    var raw: [raw_hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&raw, raw_hex);
+
+    const txid_internal = try computeTxid(&raw);
+
+    // computeTxid returns internal (little-endian) order; reverse for display.
+    var display: [32]u8 = undefined;
+    for (0..32) |k| display[k] = txid_internal[31 - k];
+
+    var expected: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&expected, "2157b554dcfda405233906e461ee593875ae4b1b97615872db6a25130ecc1dd6");
+    try std.testing.expectEqualSlices(u8, &expected, &display);
+}
+
+// External anchor: legacy (non-SegWit) txid.
+//
+// Vector is the Bitcoin genesis-block coinbase, whose txid
+//   4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b
+// is one of the most widely published constants in Bitcoin; raw hex fetched from
+//   https://blockstream.info/api/tx/4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b/hex
+// Confirms the legacy path (no marker/flag, no witness) is unchanged.
+test "computeTxid — legacy genesis coinbase (Blockstream-anchored)" {
+    const raw_hex = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000";
+    var raw: [raw_hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&raw, raw_hex);
+
+    const txid_internal = try computeTxid(&raw);
+
+    var display: [32]u8 = undefined;
+    for (0..32) |k| display[k] = txid_internal[31 - k];
+
+    var expected: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&expected, "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b");
+    try std.testing.expectEqualSlices(u8, &expected, &display);
+}
+
 test "parseTransaction frees witness array when a witness item read fails (no leak)" {
     // Minimal SegWit tx, well-formed up to the witness item bytes:
     //   version | marker+flag | 1 input | 1 output | witness_count=1 | item_len=5

@@ -1964,3 +1964,27 @@ test "memory grow" {
     try std.testing.expectEqual(@as(i32, 1), result);
     try std.testing.expectEqual(@as(u32, 2), mem.size());
 }
+
+test "memory bounds arithmetic does not overflow-panic near maxInt(u32)" {
+    // Regression: effective addresses are formed with wrapping add
+    // (base +% offset) and can land near maxInt(u32). The bounds check must
+    // widen to usize before adding N, so a near-max address TRAPS
+    // (OutOfBoundsMemoryAccess) rather than panicking on u32 overflow in safe
+    // builds. Previously `addr + N > self.data.len` with addr: u32 panicked.
+    var mem = try Memory.init(std.testing.allocator, .{ .min = 1 });
+    defer mem.deinit();
+
+    const near_max: u32 = std.math.maxInt(u32) - 1; // addr + 4 overflows u32
+    try std.testing.expectError(error.OutOfBoundsMemoryAccess, mem.loadI32(near_max));
+    try std.testing.expectError(error.OutOfBoundsMemoryAccess, mem.loadI64(near_max));
+    try std.testing.expectError(error.OutOfBoundsMemoryAccess, mem.loadI16(near_max));
+    try std.testing.expectError(error.OutOfBoundsMemoryAccess, mem.loadU16(near_max));
+    try std.testing.expectError(error.OutOfBoundsMemoryAccess, mem.storeI32(near_max, 0));
+    try std.testing.expectError(error.OutOfBoundsMemoryAccess, mem.storeI64(near_max, 0));
+    try std.testing.expectError(error.OutOfBoundsMemoryAccess, mem.storeI16(near_max, 0));
+
+    // Exact-boundary case: last valid i32 slot is [len-4 .. len); len-3 traps.
+    const len: u32 = @intCast(mem.data.len);
+    try std.testing.expectEqual(@as(i32, 0), try mem.loadI32(len - 4));
+    try std.testing.expectError(error.OutOfBoundsMemoryAccess, mem.loadI32(len - 3));
+}

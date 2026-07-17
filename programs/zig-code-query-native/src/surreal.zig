@@ -301,3 +301,63 @@ pub fn validRecordId(s: []const u8) bool {
     }
     return true;
 }
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+const testing = std.testing;
+
+test "escapeSql: no special characters is identity" {
+    const out = try escapeSql(testing.allocator, "plain_name123");
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("plain_name123", out);
+}
+
+test "escapeSql: single quote is backslash-escaped" {
+    // SurrealDB single-quoted string literal: `'` -> `\'`.
+    const out = try escapeSql(testing.allocator, "O'Brien");
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("O\\'Brien", out);
+}
+
+test "escapeSql: backslash is doubled" {
+    // `\` -> `\\`.
+    const out = try escapeSql(testing.allocator, "a\\b");
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("a\\\\b", out);
+}
+
+test "escapeSql: injection vector is rendered inert inside a quoted literal" {
+    // Classic SurrealQL injection payload. After escaping, the closing quote
+    // is neutralized (`'` -> `\'`), so when interpolated into `... '{s}'` the
+    // attacker cannot terminate the string literal or start a new statement.
+    const payload = "x'; DELETE FROM code_function; --";
+    const escaped = try escapeSql(testing.allocator, payload);
+    defer testing.allocator.free(escaped);
+
+    const sql = try std.fmt.allocPrint(testing.allocator, "WHERE name = '{s}'", .{escaped});
+    defer testing.allocator.free(sql);
+
+    // The raw single quote from the payload must never appear un-escaped
+    // (i.e. every `'` in the emitted SQL that came from the payload is
+    // preceded by a backslash). The only structural quotes are the two we
+    // wrote ourselves around `{s}`.
+    try testing.expectEqualStrings("WHERE name = 'x\\'; DELETE FROM code_function; --'", sql);
+}
+
+test "validRecordId: accepts identifier characters" {
+    try testing.expect(validRecordId("Keccak"));
+    try testing.expect(validRecordId("read_all_2"));
+    try testing.expect(validRecordId("A"));
+}
+
+test "validRecordId: rejects injection and structural characters" {
+    try testing.expect(!validRecordId(""));
+    try testing.expect(!validRecordId("a'; DELETE FROM code_function; --"));
+    try testing.expect(!validRecordId("foo:bar"));
+    try testing.expect(!validRecordId("foo bar"));
+    try testing.expect(!validRecordId("foo;"));
+    try testing.expect(!validRecordId("foo-bar"));
+    try testing.expect(!validRecordId("foo.bar"));
+}

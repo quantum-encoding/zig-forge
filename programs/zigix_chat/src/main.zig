@@ -79,15 +79,17 @@ const INDEX_HTML =
     \\const chat=document.getElementById('chat'),form=document.getElementById('form'),
     \\input=document.getElementById('input'),typing=document.getElementById('typing'),
     \\btn=document.getElementById('btn');
-    \\let history=[];
+    \\let history=[];let token=localStorage.getItem('zc_token')||'';
     \\function addMsg(role,text){
     \\const d=document.createElement('div');d.className='msg '+role;d.textContent=text;
     \\chat.appendChild(d);chat.scrollTop=chat.scrollHeight;}
     \\form.onsubmit=async e=>{e.preventDefault();const q=input.value.trim();if(!q)return;
     \\input.value='';addMsg('user',q);history.push({role:'user',content:q});
     \\typing.classList.add('active');btn.disabled=true;
-    \\try{const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},
+    \\try{if(!token){token=(prompt('Access token')||'').trim();if(token)localStorage.setItem('zc_token',token);}
+    \\const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},
     \\body:JSON.stringify({messages:history})});
+    \\if(r.status===401){token='';localStorage.removeItem('zc_token');history.pop();addMsg('system','Unauthorized — token rejected');typing.classList.remove('active');btn.disabled=false;input.focus();return;}
     \\const j=await r.json();const t=j.content||j.error||'No response';
     \\addMsg('assistant',t);history.push({role:'assistant',content:t});
     \\}catch(err){addMsg('system','Error: '+err.message);}
@@ -100,6 +102,11 @@ const INDEX_HTML =
 
 var api_key_storage: [256]u8 = undefined;
 var api_key_len: usize = 0;
+
+// Shared-secret gate for POST /api/chat. Loaded from /etc/chat_token at startup.
+// Empty (len 0) means no token configured -> /api/chat fails closed (401).
+var chat_token_storage: [256]u8 = undefined;
+var chat_token_len: usize = 0;
 
 pub fn main() !void {
     // Read API key from environment or /etc/anthropic_key file
@@ -146,6 +153,29 @@ pub fn main() !void {
                     _ = posix.write(1, m, m.len);
                 }
             }
+        }
+    }
+
+    // Load shared-secret chat token from /etc/chat_token (fail closed if absent)
+    {
+        var cfd = std.c.open("/etc/chat_token", .{}, @as(c_uint, 0));
+        if (cfd < 0) cfd = std.c.open("/chat_token", .{}, @as(c_uint, 0));
+        if (cfd >= 0) {
+            const cn = posix.read(cfd, &chat_token_storage, chat_token_storage.len);
+            _ = posix.close(cfd);
+            if (cn > 0) {
+                chat_token_len = @intCast(cn);
+                // Trim trailing whitespace
+                while (chat_token_len > 0 and (chat_token_storage[chat_token_len - 1] == '\n' or chat_token_storage[chat_token_len - 1] == '\r' or chat_token_storage[chat_token_len - 1] == ' '))
+                    chat_token_len -= 1;
+            }
+        }
+        if (chat_token_len == 0) {
+            const w = "zigix-chat: WARNING /etc/chat_token missing or empty — /api/chat will reject all requests\n";
+            _ = posix.write(2, w, w.len);
+        } else {
+            const w = "zigix-chat: auth token loaded (Bearer required on /api/chat)\n";
+            _ = posix.write(1, w, w.len);
         }
     }
 
@@ -196,11 +226,42 @@ pub fn main() !void {
 
 fn handleClient(fd: c_int) void {
     var buf: [MAX_REQUEST]u8 = undefined;
+    var total: usize = 0;
 
-    // Read HTTP request
-    const n = posix.read(fd, &buf, buf.len);
-    if (n <= 0) return;
-    const request = buf[0..@intCast(n)];
+    // Phase 1: read until the end of the HTTP headers (CRLFCRLF). A single
+    // read() is not guaranteed to deliver the whole request — Zigix's TCP
+    // stack in particular can split segments (see the EOF-retry hack in
+    // tls_client.zig) — so accumulate until the header terminator appears.
+    const header_end: usize = while (true) {
+        if (std.mem.indexOf(u8, buf[0..total], "\r\n\r\n")) |idx| break idx + 4;
+        if (total >= buf.len) {
+            sendResponse(fd, "413 Payload Too Large", "text/plain", "Request too large");
+            return;
+        }
+        const n = posix.read(fd, buf[total..].ptr, buf.len - total);
+        if (n <= 0) return;
+        total += @intCast(n);
+    };
+
+    // Phase 2: if the request declares a body via Content-Length, keep reading
+    // until the full body has arrived (capped at MAX_REQUEST -> 413).
+    if (parseContentLength(buf[0..header_end])) |content_len| {
+        const need = std.math.add(usize, header_end, content_len) catch {
+            sendResponse(fd, "413 Payload Too Large", "text/plain", "Request too large");
+            return;
+        };
+        if (need > buf.len) {
+            sendResponse(fd, "413 Payload Too Large", "text/plain", "Request too large");
+            return;
+        }
+        while (total < need) {
+            const n = posix.read(fd, buf[total..].ptr, buf.len - total);
+            if (n <= 0) return;
+            total += @intCast(n);
+        }
+    }
+
+    const request = buf[0..total];
 
     // Parse first line
     const line_end = std.mem.indexOf(u8, request, "\r\n") orelse return;
@@ -222,6 +283,15 @@ fn handleClient(fd: c_int) void {
 }
 
 fn handleChatApi(fd: c_int, request: []const u8) void {
+    // Shared-token gate: require a valid `Authorization: Bearer <token>` header.
+    // Fails closed when no token is configured (chat_token_len == 0).
+    if (!checkAuth(request)) {
+        sendResponse(fd, "401 Unauthorized", "application/json",
+            \\{"error":"unauthorized"}
+        );
+        return;
+    }
+
     const body_sep = std.mem.indexOf(u8, request, "\r\n\r\n") orelse return;
     const body = request[body_sep + 4 ..];
 
@@ -312,7 +382,9 @@ fn callClaudeApi(allocator: std.mem.Allocator, chat_body: []const u8) ![]u8 {
 
 fn sendResponse(fd: c_int, status: []const u8, content_type: []const u8, body: []const u8) void {
     var hdr_buf: [512]u8 = undefined;
-    const hdr = std.fmt.bufPrint(&hdr_buf, "HTTP/1.0 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n", .{ status, content_type, body.len }) catch return;
+    // No Access-Control-Allow-Origin: the UI is same-origin; a wildcard CORS
+    // header only enables hostile third-party pages to drive this endpoint.
+    const hdr = std.fmt.bufPrint(&hdr_buf, "HTTP/1.0 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{ status, content_type, body.len }) catch return;
     _ = posix.write(fd, hdr.ptr, hdr.len);
     _ = posix.write(fd, body.ptr, body.len);
 }
@@ -352,6 +424,95 @@ fn reportMetric(timestamp: i64, latency_ms: u64, tokens_in: u32, tokens_out: u32
     const http_req = std.fmt.bufPrint(&hdr, "POST /api/ingest HTTP/1.0\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{json_body.len}) catch return;
     _ = posix.write(sock, http_req.ptr, http_req.len);
     _ = posix.write(sock, json_body.ptr, json_body.len);
+}
+
+// Parse the Content-Length header value from a header block (case-insensitive).
+fn parseContentLength(headers: []const u8) ?usize {
+    const needle = "content-length:";
+    var i: usize = 0;
+    while (i < headers.len) {
+        const line_end = std.mem.indexOfPos(u8, headers, i, "\r\n") orelse headers.len;
+        const line = headers[i..line_end];
+        if (line.len >= needle.len and std.ascii.eqlIgnoreCase(line[0..needle.len], needle)) {
+            const val = std.mem.trim(u8, line[needle.len..], " \t");
+            return std.fmt.parseInt(usize, val, 10) catch null;
+        }
+        if (line_end == headers.len) break;
+        i = line_end + 2;
+    }
+    return null;
+}
+
+// Constant-time byte-slice equality. The length check may short-circuit (length
+// is not the secret); the byte comparison must not, so accumulate all diffs.
+fn constantTimeEql(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    var diff: u8 = 0;
+    for (a, b) |x, y| diff |= x ^ y;
+    return diff == 0;
+}
+
+// Verify `Authorization: Bearer <token>` against the loaded shared secret.
+// Fails closed when no token is configured.
+fn checkAuth(request: []const u8) bool {
+    if (chat_token_len == 0) return false;
+    const header_end = std.mem.indexOf(u8, request, "\r\n\r\n") orelse request.len;
+    const headers = request[0..header_end];
+    const auth = "authorization:";
+    const bearer = "bearer ";
+    var i: usize = 0;
+    while (i < headers.len) {
+        const line_end = std.mem.indexOfPos(u8, headers, i, "\r\n") orelse headers.len;
+        const line = headers[i..line_end];
+        if (line.len >= auth.len and std.ascii.eqlIgnoreCase(line[0..auth.len], auth)) {
+            const val = std.mem.trim(u8, line[auth.len..], " \t");
+            if (val.len >= bearer.len and std.ascii.eqlIgnoreCase(val[0..bearer.len], bearer)) {
+                const token = std.mem.trim(u8, val[bearer.len..], " \t");
+                return constantTimeEql(token, chat_token_storage[0..chat_token_len]);
+            }
+            return false;
+        }
+        if (line_end == headers.len) break;
+        i = line_end + 2;
+    }
+    return false;
+}
+
+test "parseContentLength (RFC 9110 field, case-insensitive)" {
+    try std.testing.expectEqual(@as(?usize, 42), parseContentLength("Content-Length: 42\r\n"));
+    try std.testing.expectEqual(@as(?usize, 42), parseContentLength("content-length:42\r\n"));
+    try std.testing.expectEqual(@as(?usize, 0), parseContentLength("X: y\r\nCONTENT-LENGTH:  0  \r\n"));
+    try std.testing.expectEqual(@as(?usize, null), parseContentLength("Host: example\r\n"));
+}
+
+test "constantTimeEql" {
+    try std.testing.expect(constantTimeEql("abc", "abc"));
+    try std.testing.expect(constantTimeEql("", ""));
+    try std.testing.expect(!constantTimeEql("abc", "abd"));
+    try std.testing.expect(!constantTimeEql("abc", "ab"));
+    try std.testing.expect(!constantTimeEql("", "a"));
+}
+
+test "checkAuth Bearer gate (RFC 6750)" {
+    const saved_len = chat_token_len;
+    defer chat_token_len = saved_len;
+
+    const tok = "s3cr3t-token";
+    @memcpy(chat_token_storage[0..tok.len], tok);
+    chat_token_len = tok.len;
+
+    // Valid bearer token, and case-insensitive header name + scheme.
+    try std.testing.expect(checkAuth("POST /api/chat HTTP/1.1\r\nAuthorization: Bearer s3cr3t-token\r\n\r\n"));
+    try std.testing.expect(checkAuth("POST /api/chat HTTP/1.1\r\nHost: x\r\nauthorization: bearer s3cr3t-token\r\n\r\n"));
+
+    // Wrong token / wrong scheme / missing header all rejected.
+    try std.testing.expect(!checkAuth("POST /api/chat HTTP/1.1\r\nAuthorization: Bearer wrong\r\n\r\n"));
+    try std.testing.expect(!checkAuth("POST /api/chat HTTP/1.1\r\nAuthorization: Basic s3cr3t-token\r\n\r\n"));
+    try std.testing.expect(!checkAuth("POST /api/chat HTTP/1.1\r\nHost: x\r\n\r\n"));
+
+    // Fail closed when no token is configured.
+    chat_token_len = 0;
+    try std.testing.expect(!checkAuth("POST /api/chat HTTP/1.1\r\nAuthorization: Bearer s3cr3t-token\r\n\r\n"));
 }
 
 fn parseIpv4(s: []const u8) ?u32 {

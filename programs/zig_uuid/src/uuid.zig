@@ -206,19 +206,41 @@ fn parseHexDigit(c: u8) !u4 {
 // Random Number Generator (CSPRNG)
 // ============================================================================
 
-// Fills `buf` with cryptographically secure random bytes.
+const builtin = @import("builtin");
+
+// Fills `buf` with cryptographically secure random bytes from the OS CSPRNG.
 //
-// Uses `std.crypto.random`, the standard library's thread-safe, fork-safe
-// CSPRNG. This replaces a previous address-seeded `Xoshiro256` whose only
-// entropy was the ASLR slide of two adjacent module globals — an attacker who
-// observed one emitted UUID could brute-force the ~2^16–2^30 seed offline and
-// predict every past and future UUID from the process (a real risk because
+// This replaces a previous address-seeded `Xoshiro256` whose only entropy was
+// the ASLR slide of two adjacent module globals — an attacker who observed one
+// emitted UUID could brute-force the ~2^16–2^30 seed offline and predict every
+// past and future UUID from the process (a real risk because
 // `zig_token_service` uses v4 UUIDs as auth session IDs). The prior globals
 // were also not `threadlocal` despite the comment, so concurrent generation
 // raced on the state advance and could emit duplicate UUIDs. Both problems are
-// eliminated by delegating to `std.crypto.random`.
+// eliminated by delegating to the operating system's CSPRNG.
+//
+// Zig 0.16 removed the `std.crypto.random` global; the standard library itself
+// (see `std.Io.Threaded.randomSecure`) draws OS entropy from `arc4random_buf`
+// when libc is linked. libc is linked for every module in this build.zig, so
+// on all Apple/BSD targets (and glibc >= 2.36) that fork-safe, thread-safe,
+// no-seed-required primitive is used directly. On other Linux libcs it falls
+// back to the `getrandom(2)` syscall.
 fn fillRandom(buf: []u8) void {
-    std.crypto.random.bytes(buf);
+    if (comptime @TypeOf(std.c.arc4random_buf) != void) {
+        if (buf.len != 0) std.c.arc4random_buf(buf.ptr, buf.len);
+    } else if (comptime builtin.os.tag == .linux) {
+        var off: usize = 0;
+        while (off < buf.len) {
+            const rc = std.os.linux.getrandom(buf.ptr + off, buf.len - off, 0);
+            switch (std.os.linux.E.init(rc)) {
+                .SUCCESS => off += rc,
+                .INTR => continue,
+                else => @panic("getrandom(2) failed: no OS entropy available for UUID generation"),
+            }
+        }
+    } else {
+        @compileError("no cryptographically secure OS RNG available for this target");
+    }
 }
 
 fn getTimestampNs() i128 {
