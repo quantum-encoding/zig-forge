@@ -313,9 +313,12 @@ test "profile: SyscallConfig structure" {
 
 test "profile: CapabilityConfig structure" {
     const allocator = std.testing.allocator;
+    // deinit frees every element (its contract with the profile parser, which
+    // allocates all strings) — so the test must heap-allocate them too, not
+    // point at string literals.
     const cap_names = try allocator.alloc([]const u8, 2);
-    cap_names[0] = "CAP_SYS_ADMIN";
-    cap_names[1] = "CAP_NET_RAW";
+    cap_names[0] = try allocator.dupe(u8, "CAP_SYS_ADMIN");
+    cap_names[1] = try allocator.dupe(u8, "CAP_NET_RAW");
 
     var caps = CapabilityConfig{
         .drop_all = true,
