@@ -696,7 +696,11 @@ test "seccomp: blocked syscall traps at runtime (Linux/x86_64)" {
     const filter = try buildSeccompFilter(std.testing.allocator, &profile);
     defer std.testing.allocator.free(filter);
 
-    const pid = try std.posix.fork();
+    // Zig 0.16 dropped std.posix.fork — use the raw Linux syscall (this test is
+    // already gated to .linux/.x86_64 above, so no portability is lost).
+    const fork_rc = std.os.linux.fork();
+    if (std.os.linux.E.init(fork_rc) != .SUCCESS) return error.ForkFailed;
+    const pid: std.posix.pid_t = @intCast(fork_rc);
     if (pid == 0) {
         // Child: install the filter, then invoke the blocked syscall directly.
         installSeccompFilter(filter) catch {
