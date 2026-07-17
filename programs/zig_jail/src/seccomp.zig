@@ -715,16 +715,17 @@ test "seccomp: blocked syscall traps at runtime (Linux/x86_64)" {
         std.os.linux.exit(0); // reached only if the block was NOT enforced
     }
 
-    const wait_result = std.posix.waitpid(pid, 0);
-    const status = wait_result.status;
+    // std.posix.waitpid/W are gone in 0.16 — wait4 + linux.W, same as main.zig.
+    var status: u32 = undefined;
+    _ = std.os.linux.wait4(pid, &status, 0, null);
 
-    if (std.posix.W.IFEXITED(status) and std.posix.W.EXITSTATUS(status) == 2) {
+    if (std.os.linux.W.IFEXITED(status) and std.os.linux.W.EXITSTATUS(status) == 2) {
         // seccomp install itself failed in this environment — don't assert on enforcement.
         return error.SkipZigTest;
     }
 
-    try std.testing.expect(std.posix.W.IFSIGNALED(status));
-    try std.testing.expectEqual(@as(u32, std.os.linux.SIG.SYS), std.posix.W.TERMSIG(status));
+    try std.testing.expect(std.os.linux.W.IFSIGNALED(status));
+    try std.testing.expectEqual(@as(u32, std.os.linux.SIG.SYS), std.os.linux.W.TERMSIG(status));
 }
 
 test "seccomp: Error handling - invalid syscall names" {
