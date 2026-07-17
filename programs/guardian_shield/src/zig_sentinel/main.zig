@@ -677,11 +677,11 @@ fn displayResults(
     defer pid_totals.deinit();
 
     // Collect all entries
-    var entries = std.ArrayList(struct {
+    var entries: std.ArrayList(struct {
         pid: u32,
         syscall_nr: u32,
         count: u64,
-    }){};
+    }) = .empty;
     defer entries.deinit(allocator);
 
     // Get first key

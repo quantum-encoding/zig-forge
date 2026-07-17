@@ -435,9 +435,11 @@ fn cmdAdd(allocator: std.mem.Allocator, args: Args) !void {
         "Added via wardenctl";
 
     // Create new entry
-    var new_entry = json.ObjectMap.init(allocator);
-    try new_entry.put("path", json.Value{ .string = final_path });
-    try new_entry.put("description", json.Value{ .string = desc });
+    // Zig 0.16: json.ObjectMap is an unmanaged ArrayHashMap — init as `.empty`
+    // and pass the allocator to each `put`.
+    var new_entry: json.ObjectMap = .empty;
+    try new_entry.put(allocator, "path", json.Value{ .string = final_path });
+    try new_entry.put(allocator, "description", json.Value{ .string = desc });
 
     var ops_array = json.Array.init(allocator);
     for (ops) |op| {
@@ -450,7 +452,7 @@ fn cmdAdd(allocator: std.mem.Allocator, args: Args) !void {
             try ops_array.append(json.Value{ .string = op });
         }
     }
-    try new_entry.put("block_operations", json.Value{ .array = ops_array });
+    try new_entry.put(allocator, "block_operations", json.Value{ .array = ops_array });
 
     try protected_paths.array.append(json.Value{ .object = new_entry });
 

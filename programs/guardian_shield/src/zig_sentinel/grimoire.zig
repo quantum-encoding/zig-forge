@@ -638,6 +638,12 @@ pub const GrimoireEngine = struct {
         if (gop.found_existing) {
             return gop.value_ptr.*;
         }
+        // getOrPut created the slot but left value_ptr undefined. Every error
+        // path below returns without populating it; deinit() later frees every
+        // cached value, so a leftover undefined slot is an invalid free (SIGABRT,
+        // e.g. an exited/nonexistent pid whose /proc/<pid>/exe readlink fails).
+        // Drop the slot on any error so only successfully-duped names remain.
+        errdefer _ = self.binary_cache.remove(pid);
 
         // Read /proc/<pid>/exe symlink
         const path = try std.fmt.allocPrint(self.allocator, "/proc/{d}/exe", .{pid});
@@ -908,8 +914,9 @@ pub const GrimoireEngine = struct {
             // Get or create match states for this process
             const states_gop = try self.match_states.getOrPut(pid);
             if (!states_gop.found_existing) {
-                // Zig 0.16: ArrayList uses .{} for empty init
-                states_gop.value_ptr.* = .{};
+                // Zig 0.16: ArrayList empty init is `.empty` (`.{}` lacks the
+                // required items/capacity fields and no longer compiles).
+                states_gop.value_ptr.* = .empty;
             }
 
             // Find or create match state for this pattern

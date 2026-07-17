@@ -426,7 +426,7 @@ pub const CorrelationEngine = struct {
 
     /// Handle read() syscall - Track bytes read
     pub fn onRead(self: *Self, pid: u32, fd: i32, bytes: u64) !?CorrelationAlert {
-        var state = try self.getOrCreateState(pid);
+        const state = try self.getOrCreateState(pid);
 
         // Find the file being read
         for (state.recent_reads.items) |*read_info| {

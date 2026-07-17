@@ -106,7 +106,7 @@ var allocator: std.mem.Allocator = undefined;
 pub fn init(alloc: std.mem.Allocator) !void {
     if (initialized) return;
     allocator = alloc;
-    runtime_rules = .{};
+    runtime_rules = .empty;
     initialized = true;
 }
 

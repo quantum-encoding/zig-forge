@@ -430,16 +430,25 @@ pub fn sanitizeText(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
 
         if (i + seq_len > text.len) break;
 
-        // Extract a larger window to catch steganography attacks
+        // Extract a larger window to catch steganography attacks. Break only at
+        // a clear boundary (ASCII whitespace/punctuation) or the start of
+        // another base emoji (4-byte UTF-8 start) — the SAME rule detectAnomalies
+        // uses above. Crucially, do NOT break at 3-byte UTF-8 start bytes: a
+        // variation selector (U+FE0F: EF B8 8F) or ZWJ (U+200D: E2 80 8D) is part
+        // of THIS emoji. Breaking there split the emoji from its trailing bytes
+        // and let a `<emoji>\x00\x00<payload>` steganography sequence slip past
+        // validateEmoji as a bare (valid) base emoji, unredacted.
         var window_len = seq_len;
         while (window_len < remaining.len and window_len < MAX_EMOJI_BYTES) {
             const next_byte = remaining[window_len];
-            // Stop if we hit another UTF-8 start byte
-            if (next_byte >= 0x80 and (next_byte & 0xC0) != 0x80) {
+            // Stop at ASCII whitespace/punctuation (clear boundaries)
+            if (next_byte == ' ' or next_byte == '!' or next_byte == '.' or
+                next_byte == ',' or next_byte == '\n' or next_byte == '\t' or
+                next_byte == '?' or next_byte == ';' or next_byte == ':') {
                 break;
             }
-            // Stop at ASCII space/punctuation
-            if (next_byte == ' ' or next_byte == '!' or next_byte == '.' or next_byte == ',' or next_byte == '\n') {
+            // Stop at the start of another base emoji (4-byte UTF-8 start)
+            if (next_byte >= 0xF0 and (next_byte & 0xF8) == 0xF0) {
                 break;
             }
             window_len += 1;
