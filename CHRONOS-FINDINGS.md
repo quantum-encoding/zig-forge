@@ -87,3 +87,29 @@ to fold spawned-CLI-agent emits into the app ledger).
   cognitive_telemetry_kit copy, guardian-shield installed copy, and now origin/main's
   rewrite) are **out of sync** — any future edit should propagate the new dual-backend
   version to all of them, per the existing keep-in-sync convention.
+
+## Addendum (2026-07-10): terminal_mux / zterm + secrets CLI on this box
+
+- `programs/terminal_mux` is built on local main (`zig build -Doptimize=ReleaseFast`
+  in that dir): `zig-out/bin/{tmux,tmux-bench,zterm}` + `zig-out/lib/libterminal_mux.a`.
+  All 62 unit tests pass (run them with `zig test -fllvm -lc src/lib.zig src/capi.zig`
+  style — plain `zig build test` fails on this host because Debug's self-hosted linker
+  can't handle gcc-16 crt1.o's SFrame relocations; ReleaseFast/LLD is unaffected).
+- **Driving zterm** (`zterm server`, then `zterm cli …`): `send` types text with
+  **no implicit Enter**, and a trailing `\n` in the text is stripped by the wire
+  protocol — always follow `send <id> <text>` with `enter <id>`. `spawn`/`list` emit
+  JSON; `list` carries pid+cwd. A spawn-hang bug (forked shell inherited the client
+  socket, so the EOF-framed client blocked) is fixed on local main via FD_CLOEXEC —
+  use a binary built from ≥ that commit.
+- **Fresh zterm panes block at `Vault passphrase:`** — the login shell runs
+  `eval $(secrets env)`. Interactively: `send <id> test` + `enter <id>`. Headless:
+  export `SECRETS_PASSPHRASE` into the environment before spawning, which
+  short-circuits every prompt in the secrets CLI.
+- The **secrets CLI** (`~/tauri_apps/secrets-vault`, installed at
+  `/usr/local/bin/secrets`) was pulled to `902dca1` and reinstalled: adds `gen`,
+  `exec <project> -- <cmd>` (scoped child-only injection — the blessed pattern),
+  `has`, `list --names-only`, write-only `inbox`, project grants
+  (`authorize`/`revoke`), and pluggable GSM backend. `secrets env` still works but is
+  deprecated and prints a loud warning; it fails closed when headless with no
+  `SECRETS_PASSPHRASE`. Touch ID/keychain paths are macOS-only; Linux uses env var or
+  TTY prompt.
