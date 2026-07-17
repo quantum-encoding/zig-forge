@@ -144,8 +144,46 @@ pub fn parseMarkdown(allocator: std.mem.Allocator, markdown: []const u8) !ParseR
                     if (frontmatter.letterhead) |old| allocator.free(old);
                     frontmatter.letterhead = try allocator.dupe(u8, path);
                 }
+            } else if (std.mem.eql(u8, comment, "pagebreak")) {
+                // <!-- pagebreak --> on its own line → a hard Word page break.
+                try elements.append(allocator, .{ .paragraph = .{
+                    .style = .page_break,
+                    .runs = &[_]docx.Run{},
+                } });
             }
             continue; // consume comment, don't emit as paragraph
+        }
+
+        // ── Card block ( :::card … ::: ) ──
+        // Renders inner lines as a single-cell bordered table (an address
+        // "card" box). Inner lines keep inline formatting and each become a
+        // separate paragraph inside the one cell.
+        if (std.mem.eql(u8, trimmed, ":::card")) {
+            var cell_paras: std.ArrayListUnmanaged(docx.Paragraph) = .empty;
+            errdefer {
+                for (cell_paras.items) |cp| {
+                    for (cp.runs) |r| {
+                        if (r.text.len > 0) allocator.free(r.text);
+                        if (r.hyperlink_url) |u| allocator.free(u);
+                    }
+                    if (cp.runs.len > 0) allocator.free(cp.runs);
+                }
+                cell_paras.deinit(allocator);
+            }
+            while (lines.next()) |inner_raw| {
+                const inner_line = std.mem.trimEnd(u8, inner_raw, "\r");
+                const inner_trimmed = std.mem.trim(u8, inner_line, " \t");
+                if (std.mem.eql(u8, inner_trimmed, ":::")) break; // end of card
+                const runs = try parseInlineFormatting(allocator, inner_trimmed);
+                try cell_paras.append(allocator, .{ .style = .normal, .runs = runs });
+            }
+            const paras = try cell_paras.toOwnedSlice(allocator);
+            const cells = try allocator.alloc(docx.TableCell, 1);
+            cells[0] = .{ .paragraphs = paras };
+            const rows = try allocator.alloc(docx.TableRow, 1);
+            rows[0] = .{ .cells = cells };
+            try elements.append(allocator, .{ .table = .{ .rows = rows } });
+            continue;
         }
 
         // ── Horizontal rule ──

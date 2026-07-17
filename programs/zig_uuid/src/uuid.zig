@@ -203,26 +203,44 @@ fn parseHexDigit(c: u8) !u4 {
 }
 
 // ============================================================================
-// Random Number Generator (Thread-local PRNG)
+// Random Number Generator (CSPRNG)
 // ============================================================================
 
-var prng: std.Random.Xoshiro256 = undefined;
-var prng_initialized = false;
+const builtin = @import("builtin");
 
-fn getRandom() std.Random {
-    if (!prng_initialized) {
-        // Seed from memory addresses (simple entropy source)
-        const addr = @intFromPtr(&prng);
-        const addr2 = @intFromPtr(&prng_initialized);
-        const seed: u64 = addr ^ (addr2 << 32) ^ 0xDEADBEEFCAFEBABE;
-        prng = std.Random.Xoshiro256.init(seed);
-        prng_initialized = true;
-    }
-    return prng.random();
-}
-
+// Fills `buf` with cryptographically secure random bytes from the OS CSPRNG.
+//
+// This replaces a previous address-seeded `Xoshiro256` whose only entropy was
+// the ASLR slide of two adjacent module globals — an attacker who observed one
+// emitted UUID could brute-force the ~2^16–2^30 seed offline and predict every
+// past and future UUID from the process (a real risk because
+// `zig_token_service` uses v4 UUIDs as auth session IDs). The prior globals
+// were also not `threadlocal` despite the comment, so concurrent generation
+// raced on the state advance and could emit duplicate UUIDs. Both problems are
+// eliminated by delegating to the operating system's CSPRNG.
+//
+// Zig 0.16 removed the `std.crypto.random` global; the standard library itself
+// (see `std.Io.Threaded.randomSecure`) draws OS entropy from `arc4random_buf`
+// when libc is linked. libc is linked for every module in this build.zig, so
+// on all Apple/BSD targets (and glibc >= 2.36) that fork-safe, thread-safe,
+// no-seed-required primitive is used directly. On other Linux libcs it falls
+// back to the `getrandom(2)` syscall.
 fn fillRandom(buf: []u8) void {
-    getRandom().bytes(buf);
+    if (comptime @TypeOf(std.c.arc4random_buf) != void) {
+        if (buf.len != 0) std.c.arc4random_buf(buf.ptr, buf.len);
+    } else if (comptime builtin.os.tag == .linux) {
+        var off: usize = 0;
+        while (off < buf.len) {
+            const rc = std.os.linux.getrandom(buf.ptr + off, buf.len - off, 0);
+            switch (std.os.linux.E.init(rc)) {
+                .SUCCESS => off += rc,
+                .INTR => continue,
+                else => @panic("getrandom(2) failed: no OS entropy available for UUID generation"),
+            }
+        }
+    } else {
+        @compileError("no cryptographically secure OS RNG available for this target");
+    }
 }
 
 fn getTimestampNs() i128 {
@@ -464,12 +482,16 @@ test "v1 generation and timestamp extraction" {
     try std.testing.expect(ts != null);
 }
 
-test "v7 monotonic ordering" {
-    const uuid1 = v7();
-    const uuid2 = v7();
-    const cmp = UUID.compare(uuid1, uuid2);
-    // uuid2 should be >= uuid1 (likely greater due to timestamp increment)
-    try std.testing.expect(cmp != .gt);
+test "v7 timestamp ordering" {
+    // v7 sortability is guaranteed by the big-endian millisecond timestamp
+    // prefix (bytes 0-5). Within a single millisecond the tail is random
+    // (RFC 9562 §5.7 leaves rand_a/rand_b unstructured unless a monotonicity
+    // method is used), so two v7() calls in the same ms do NOT have a defined
+    // order — asserting one is flaky under a real CSPRNG. Assert the guarantee
+    // that DOES hold: a later timestamp always sorts after an earlier one.
+    const earlier = v7WithTimestamp(0x0000_0100_0000);
+    const later = v7WithTimestamp(0x0000_0100_0001);
+    try std.testing.expect(UUID.compare(earlier, later) == .lt);
 }
 
 test "batch generation produces unique UUIDs" {
@@ -518,4 +540,71 @@ test "hash consistency" {
 test "nil UUID string format" {
     const nil_str = UUID.nil.toString();
     try std.testing.expect(std.mem.eql(u8, &nil_str, "00000000-0000-0000-0000-000000000000"));
+}
+
+// ============================================================================
+// Tier-1 external anchors (RFC 9562)
+//
+// Inputs AND expected outputs are taken verbatim from RFC 9562 (the current
+// UUID standard, obsoletes RFC 4122), NOT authored here and NOT roundtrips.
+// These are the exact vectors the RFC publishes as worked examples; they pin
+// hash-input ordering, digest truncation, and version/variant bit placement so
+// a wrong v3/v5 hash order or endianness fails the build instead of passing a
+// self-consistent roundtrip (the zig_base58 failure mode CLAUDE.md §1 guards).
+// ============================================================================
+
+test "RFC 9562 A.3 — v3 (MD5) www.example.com in DNS namespace" {
+    // RFC 9562, Appendix A.3: UUIDv3 example.
+    //   namespace = 6ba7b810-9dad-11d1-80b4-00c04fd430c8 (DNS)
+    //   name      = "www.example.com"
+    //   result    = 5df41881-3aed-3515-88a7-2f4a814cf09e
+    const id = v3(namespace_dns, "www.example.com");
+    const s = id.toString();
+    try std.testing.expectEqualStrings("5df41881-3aed-3515-88a7-2f4a814cf09e", &s);
+    // Version/variant bits must be exactly as the vector encodes them.
+    try std.testing.expectEqual(UUID.Version.v3, id.getVersion());
+    try std.testing.expectEqual(UUID.Variant.rfc4122, id.getVariant());
+}
+
+test "RFC 9562 A.4 — v5 (SHA-1) www.example.com in DNS namespace" {
+    // RFC 9562, Appendix A.4: UUIDv5 example.
+    //   namespace = 6ba7b810-9dad-11d1-80b4-00c04fd430c8 (DNS)
+    //   name      = "www.example.com"
+    //   result    = 2ed6657d-e927-568b-95e1-2665a8aea6a2
+    // This vector fails if the hash input is ordered name||namespace, if the
+    // SHA-1 digest is not truncated to the first 16 bytes, or if the version
+    // nibble is not overwritten to 5.
+    const id = v5(namespace_dns, "www.example.com");
+    const s = id.toString();
+    try std.testing.expectEqualStrings("2ed6657d-e927-568b-95e1-2665a8aea6a2", &s);
+    try std.testing.expectEqual(UUID.Version.v5, id.getVersion());
+    try std.testing.expectEqual(UUID.Variant.rfc4122, id.getVariant());
+}
+
+test "RFC 9562 A.6 — v7 timestamp field layout" {
+    // RFC 9562, Appendix A.6: UUIDv7 example.
+    //   unix_ts_ms = 0x017F22E279B0 (2022-02-22 19:22:22 UTC)
+    //   result     = 017f22e2-79b0-7cc3-98c4-dc0c0c07398f
+    // rand_a / rand_b are randomly generated per call, so only the fields the
+    // RFC fully specifies for a given timestamp are asserted: the 48-bit
+    // big-endian unix_ts_ms prefix (bytes 0-5) plus the version and variant
+    // bits. The RFC's example string begins 017f22e2-79b0-7... — that prefix
+    // is exactly what we pin here.
+    const id = v7WithTimestamp(0x017F22E279B0);
+    const expected_prefix = [_]u8{ 0x01, 0x7f, 0x22, 0xe2, 0x79, 0xb0 };
+    try std.testing.expectEqualSlices(u8, &expected_prefix, id.bytes[0..6]);
+    try std.testing.expectEqual(UUID.Version.v7, id.getVersion());
+    try std.testing.expectEqual(UUID.Variant.rfc4122, id.getVariant());
+}
+
+test "RFC 9562 §5.4 — v4 version and variant bits (10 samples)" {
+    // Not a value vector (v4 is random), but the RFC fixes the version nibble
+    // to 0100b and the variant to 10b for every v4 UUID. Verify the CSPRNG
+    // path sets those bits on independent draws.
+    var i: usize = 0;
+    while (i < 10) : (i += 1) {
+        const id = v4();
+        try std.testing.expectEqual(UUID.Version.v4, id.getVersion());
+        try std.testing.expectEqual(UUID.Variant.rfc4122, id.getVariant());
+    }
 }

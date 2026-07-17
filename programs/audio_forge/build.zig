@@ -19,7 +19,7 @@ pub fn build(b: *std.Build) void {
     // ==========================================================================
     // Library Module
     // ==========================================================================
-    const lib_module = b.createModule(.{
+    const lib_module = b.addModule("audio_forge", .{
         .root_source_file = b.path("src/lib.zig"),
         .target = target,
         .optimize = optimize,

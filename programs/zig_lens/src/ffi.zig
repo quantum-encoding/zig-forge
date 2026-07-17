@@ -163,7 +163,8 @@ fn isSingleFile(path: []const u8) bool {
         std.mem.endsWith(u8, path, ".ts") or
         std.mem.endsWith(u8, path, ".tsx") or
         std.mem.endsWith(u8, path, ".jsx") or
-        std.mem.endsWith(u8, path, ".svelte");
+        std.mem.endsWith(u8, path, ".svelte") or
+        std.mem.endsWith(u8, path, ".go");
 }
 
 const AnalysisResult = struct {

@@ -10,6 +10,7 @@
 //! - Session resumption support
 
 const std = @import("std");
+const time_compat = @import("../time_compat.zig");
 const types = @import("../protocol/types.zig");
 const parser = @import("../protocol/parser.zig");
 
@@ -122,7 +123,7 @@ pub const DoTConnection = struct {
             self.recv_len = 0;
         }
 
-        self.last_activity = std.time.timestamp();
+        self.last_activity = time_compat.timestamp();
         return message;
     }
 
@@ -137,7 +138,7 @@ pub const DoTConnection = struct {
         _ = try std.posix.send(self.socket, &len_buf, 0);
         _ = try std.posix.send(self.socket, message, 0);
 
-        self.last_activity = std.time.timestamp();
+        self.last_activity = time_compat.timestamp();
     }
 };
 
@@ -260,7 +261,7 @@ pub const DoTServer = struct {
         conn.* = DoTConnection{
             .socket = client,
             .tls_state = .{},
-            .last_activity = std.time.timestamp(),
+            .last_activity = time_compat.timestamp(),
         };
 
         // Perform TLS handshake
@@ -294,7 +295,7 @@ pub const DoTServer = struct {
                 }
             } else {
                 // No complete message yet, check for timeout
-                const idle_time = std.time.timestamp() - conn.last_activity;
+                const idle_time = time_compat.timestamp() - conn.last_activity;
                 if (idle_time > self.config.idle_timeout_secs) break;
 
                 std.time.sleep(10 * std.time.ns_per_ms);
@@ -327,8 +328,10 @@ pub const DoTServer = struct {
         if (client_hello[0] != 0x16) return DoTError.TlsHandshakeFailed; // Handshake
         if (client_hello[1] != 0x03) return DoTError.TlsHandshakeFailed; // TLS major version
 
-        // Generate server random
-        std.crypto.random.bytes(&conn.tls_state.server_random);
+        // Generate server random.
+        // std.crypto.random was removed in Zig 0.16; arc4random_buf (libc CSPRNG)
+        // is the drop-in replacement (build.zig links libc).
+        std.c.arc4random_buf(&conn.tls_state.server_random, conn.tls_state.server_random.len);
 
         // Extract client random (bytes 11-42 of ClientHello)
         if (hello_len >= 43) {
@@ -351,7 +354,7 @@ pub const DoTServer = struct {
     }
 
     fn cleanupIdleConnections(self: *Self) void {
-        const now = std.time.timestamp();
+        const now = time_compat.timestamp();
         var i: usize = 0;
 
         while (i < self.connections.items.len) {

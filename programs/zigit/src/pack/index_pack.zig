@@ -88,6 +88,11 @@ pub const BuildError = error{
     VarintTooLarge,
     IdxEntriesNotSorted,
     WriteFailed,
+    // computeOid formats the object header with std.fmt.bufPrint, whose
+    // error set includes NoSpaceLeft. The 32-byte buffer can never actually
+    // overflow ("commit " + a 20-digit length + NUL is 28 bytes), but the
+    // inferred error must be representable in this explicit set.
+    NoSpaceLeft,
 } || std.compress.flate.Decompress.Error || std.Io.Reader.Error;
 
 pub fn build(

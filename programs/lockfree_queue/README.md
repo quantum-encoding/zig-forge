@@ -1,55 +1,47 @@
 # Lock-Free Message Queue
 
-Ultra-low latency inter-thread communication for trading systems.
-
-## Performance Targets
-
-- **Latency**: <50ns per message
-- **Throughput**: 100M+ msgs/sec
-- **Contention**: Zero locks, wait-free
-- **vs mutex**: 20x lower latency
+Lock-free bounded ring-buffer queues for inter-thread communication in Zig, plus a
+zero-dependency C FFI static library (`lockfree_core`).
 
 ## Queue Types
 
-- **SPSC**: Single Producer, Single Consumer (fastest)
-- **MPMC**: Multi Producer, Multi Consumer
-- **MPSC**: Multi Producer, Single Consumer
-- **SPMC**: Single Producer, Multi Consumer
+- **SPSC**: Single Producer, Single Consumer — wait-free ring buffer (`src/spsc/queue.zig`)
+- **MPMC**: Multi Producer, Multi Consumer — Dmitry Vyukov's bounded MPMC algorithm (`src/mpmc/queue.zig`)
+
+Both are **bounded** (fixed capacity, must be a power of two) and use 64-byte cache-line
+padding/alignment to prevent false sharing between producers and consumers.
 
 ## Features
 
-- Wait-free algorithms
-- Cache-line padding
-- False sharing prevention
-- Memory ordering guarantees
-- Bounded/unbounded variants
+- Wait-free SPSC / lock-free MPMC algorithms
+- Cache-line padding and aligned slots (false-sharing avoidance)
+- Explicit atomic memory-ordering (acquire/release/monotonic)
+- Zero-dependency C FFI core (`include/lockfree_core.h`) with an Android ARM64 cross-compile target
 
-## Usage
+## Usage (Zig)
 
 ```zig
-const queue = @import("lockfree-queue");
+const queue = @import("lockfree_queue");
 
-// Create SPSC queue (fastest)
+// Create an SPSC queue with a power-of-two capacity
 var q = try queue.Spsc(u64).init(allocator, 1024);
 defer q.deinit();
 
-// Producer thread
-try q.push(42);
+// Producer side
+try q.push(42); // error.QueueFull when at capacity
 
-// Consumer thread
-const value = try q.pop();  // <50ns
+// Consumer side
+const value = try q.pop(); // error.QueueEmpty when empty
 ```
+
+The Zig module is exposed as `lockfree_queue` via `b.addModule`, so other in-tree
+programs can depend on it directly.
 
 ## Build
 
 ```bash
-zig build
-zig build bench
-zig build test
+zig build          # build the lockfree_core static library
+zig build core     # same, explicit step
+zig build android  # cross-compile the core lib for aarch64-linux-android
+zig build test     # run the unit tests (queue + FFI-core layers)
 ```
-
-## Benchmarks
-
-- SPSC: 45ns per message (100M msg/s)
-- MPMC: 85ns per message (12M msg/s)
-- vs std.Mutex: 20x faster

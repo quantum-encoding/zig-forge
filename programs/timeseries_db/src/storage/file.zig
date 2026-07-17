@@ -14,13 +14,28 @@ pub const FileHeader = extern struct {
     flags: u16,              // Compression flags
     row_count: u64,          // Number of candles
     column_offsets: [6]u64,  // Offset to each column
+    // Per-column delta-encoding base value (scaled integer), indexed to match
+    // column_offsets: [0]=timestamp (unused; the timestamp base is stored
+    // in-band as the first encoded value), [1]=open, [2]=high, [3]=low,
+    // [4]=close, [5]=volume. Without this, price columns decode relative to
+    // base 0 (i.e. wrong by the full base price).
+    base_values: [6]i64,     // Scaled base value per price column
     index_offset: u64,       // Offset to B-tree index
     checksum: u32,           // CRC32 of header
-    _padding: [3968]u8,      // Pad to 4096 bytes
+    _padding: [3920]u8,      // Pad (keeps @sizeOf(FileHeader) <= SIZE)
 
     pub const MAGIC: u32 = 0x54534442; // "TSDB"
-    pub const VERSION: u16 = 1;
+    // VERSION bumped to 2: the on-disk layout now persists per-column base
+    // values. Version-1 files (which decoded every price relative to base 0)
+    // are rejected by validate() so their corrupt prices can never be read.
+    pub const VERSION: u16 = 2;
     pub const SIZE: usize = 4096;
+
+    comptime {
+        // The header must fit within the reserved SIZE region so that the
+        // first column (written at SIZE) never overlaps it.
+        std.debug.assert(@sizeOf(FileHeader) <= SIZE);
+    }
 
     pub fn init() FileHeader {
         return .{
@@ -29,9 +44,10 @@ pub const FileHeader = extern struct {
             .flags = 0,
             .row_count = 0,
             .column_offsets = [_]u64{0} ** 6,
+            .base_values = [_]i64{0} ** 6,
             .index_offset = 0,
             .checksum = 0,
-            ._padding = [_]u8{0} ** 3968,
+            ._padding = [_]u8{0} ** 3920,
         };
     }
 

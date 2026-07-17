@@ -35,6 +35,69 @@ fn formatDecimal(buf: []u8, d: Decimal) []const u8 {
     return w.buffered();
 }
 
+/// Serialize an order to the Trade-Executor wire JSON using std.json.Stringify.
+///
+/// Previously this was an `allocPrint`/`bufPrint` template with `order.symbol`
+/// substituted unescaped (JSON-IN-FMT): a symbol containing `"` or `\` either
+/// broke the message or injected additional fields into a *live order* payload.
+/// Stringify escapes the symbol; `quantity`/`price` are emitted as bare JSON
+/// numbers via `print` so the exact Decimal ASCII (no f64 round-trip) is
+/// preserved on the wire, matching the previous format byte-for-byte for
+/// well-formed symbols.
+fn buildOrderJson(
+    buf: []u8,
+    order: Order,
+    side_str: []const u8,
+    type_str: []const u8,
+    qty_str: []const u8,
+    price_str: []const u8,
+) ![]const u8 {
+    var w = std.Io.Writer.fixed(buf);
+    var js: std.json.Stringify = .{ .writer = &w, .options = .{} };
+
+    var sid_buf: [40]u8 = undefined;
+    const sid = try std.fmt.bufPrint(&sid_buf, "hft_{d}", .{order.signal_id});
+
+    try js.beginObject();
+    try js.objectField("action");
+    try js.write(side_str);
+    try js.objectField("symbol");
+    try js.write(order.symbol);
+    try js.objectField("quantity");
+    try js.print("{s}", .{qty_str});
+    try js.objectField("type");
+    try js.write(type_str);
+    try js.objectField("price");
+    try js.print("{s}", .{price_str});
+    try js.objectField("timestamp");
+    try js.write(order.timestamp);
+    try js.objectField("signal_id");
+    try js.write(sid);
+    try js.endObject();
+
+    return w.buffered();
+}
+
+/// Serialize a cancel message to the Trade-Executor wire JSON. `order_id` is a
+/// u64 (no injection surface) but is routed through Stringify for consistency
+/// with `buildOrderJson`.
+fn buildCancelJson(buf: []u8, order_id: u64) ![]const u8 {
+    var w = std.Io.Writer.fixed(buf);
+    var js: std.json.Stringify = .{ .writer = &w, .options = .{} };
+
+    var oid_buf: [40]u8 = undefined;
+    const oid = try std.fmt.bufPrint(&oid_buf, "hft_{d}", .{order_id});
+
+    try js.beginObject();
+    try js.objectField("action");
+    try js.write(@as([]const u8, "CANCEL"));
+    try js.objectField("order_id");
+    try js.write(oid);
+    try js.endObject();
+
+    return w.buffered();
+}
+
 /// Order structure for execution
 pub const Order = struct {
     symbol: []const u8,
@@ -350,17 +413,8 @@ pub const ZmqExecutor = struct {
         var price_buf: [32]u8 = undefined;
         const price_str = formatDecimal(&price_buf, order.price);
 
-        const msg = std.fmt.bufPrint(&buffer,
-            \\{{"action":"{s}","symbol":"{s}","quantity":{s},"type":"{s}","price":{s},"timestamp":{d},"signal_id":"hft_{d}"}}
-        , .{
-            side_str,
-            order.symbol,
-            qty_str,
-            type_str,
-            price_str,
-            order.timestamp,
-            order.signal_id,
-        }) catch return TradeExecutor.ExecutorError.InvalidOrder;
+        const msg = buildOrderJson(&buffer, order, side_str, type_str, qty_str, price_str) catch
+            return TradeExecutor.ExecutorError.InvalidOrder;
 
         // Send via ZeroMQ (non-blocking)
         const result = c.zmq_send(self.socket, msg.ptr, msg.len, c.ZMQ_DONTWAIT);
@@ -393,9 +447,8 @@ pub const ZmqExecutor = struct {
         }
 
         var buffer: [128]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buffer,
-            \\{{"action":"CANCEL","order_id":"hft_{d}"}}
-        , .{order_id}) catch return TradeExecutor.ExecutorError.InvalidOrder;
+        const msg = buildCancelJson(&buffer, order_id) catch
+            return TradeExecutor.ExecutorError.InvalidOrder;
 
         const result = c.zmq_send(self.socket, msg.ptr, msg.len, c.ZMQ_DONTWAIT);
         if (result < 0) {

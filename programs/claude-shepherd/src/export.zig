@@ -41,76 +41,29 @@ pub const JsonExporter = struct {
         const instances = try self.state.getAllInstances(self.allocator);
         defer self.allocator.free(instances);
 
-        var json_buf: [8192]u8 = undefined;
-        var pos: usize = 0;
+        // Serialize via std.json.Stringify so every string field (task,
+        // working_dir) is escaped correctly. The source strings originate from
+        // monitored-agent output (Chronos log / eBPF TTY), so a raw `{s}`
+        // format would let a `"`, `\`, or newline break or inject JSON.
+        // An Allocating writer also removes the old fixed-buffer overflow risk.
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+        try writeAgentsJson(&aw.writer, instances);
 
-        // Write opening bracket
-        const open = "[\n";
-        @memcpy(json_buf[pos..][0..open.len], open);
-        pos += open.len;
-
-        for (instances, 0..) |inst, i| {
-            if (i > 0) {
-                const comma = ",\n";
-                @memcpy(json_buf[pos..][0..comma.len], comma);
-                pos += comma.len;
-            }
-
-            const entry = std.fmt.bufPrint(json_buf[pos..], "  {{\n    \"pid\": {d},\n    \"task\": \"{s}\",\n    \"working_dir\": \"{s}\",\n    \"status\": \"{s}\",\n    \"started_at\": {d},\n    \"last_activity\": {d}\n  }}", .{
-                inst.pid,
-                inst.task,
-                inst.working_dir,
-                @tagName(inst.status),
-                inst.started_at,
-                inst.last_activity,
-            }) catch break;
-            pos += entry.len;
-        }
-
-        const close = "\n]\n";
-        @memcpy(json_buf[pos..][0..close.len], close);
-        pos += close.len;
-
-        writeFile(AGENTS_FILE, json_buf[0..pos]);
+        writeFile(AGENTS_FILE, aw.writer.buffered());
     }
 
     pub fn exportPermissions(self: *JsonExporter) !void {
         const requests = self.state.getPendingRequests();
 
-        var json_buf: [8192]u8 = undefined;
-        var pos: usize = 0;
+        // Serialize via std.json.Stringify so command/args/reason are escaped.
+        // These strings come from monitored-agent output and must not be
+        // interpolated raw. Allocating writer avoids the fixed-buffer overflow.
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+        try writePermissionsJson(&aw.writer, requests);
 
-        const open = "[\n";
-        @memcpy(json_buf[pos..][0..open.len], open);
-        pos += open.len;
-
-        var first = true;
-        for (requests) |req| {
-            if (req.status != .pending) continue;
-
-            if (!first) {
-                const comma = ",\n";
-                @memcpy(json_buf[pos..][0..comma.len], comma);
-                pos += comma.len;
-            }
-            first = false;
-
-            const entry = std.fmt.bufPrint(json_buf[pos..], "  {{\n    \"id\": {d},\n    \"pid\": {d},\n    \"command\": \"{s}\",\n    \"args\": \"{s}\",\n    \"reason\": \"{s}\",\n    \"timestamp\": {d}\n  }}", .{
-                req.id,
-                req.pid,
-                req.command,
-                req.args,
-                req.reason,
-                req.timestamp,
-            }) catch break;
-            pos += entry.len;
-        }
-
-        const close = "\n]\n";
-        @memcpy(json_buf[pos..][0..close.len], close);
-        pos += close.len;
-
-        writeFile(PERMISSIONS_FILE, json_buf[0..pos]);
+        writeFile(PERMISSIONS_FILE, aw.writer.buffered());
     }
 
     fn exportStatus(self: *JsonExporter) !void {
@@ -133,10 +86,50 @@ pub const JsonExporter = struct {
     }
 };
 
-fn escapeJson(s: []const u8) []const u8 {
-    // Simple pass-through for now - real implementation would escape special chars
-    // This is safe for most task descriptions
-    return s;
+/// Serialize the instance list as a JSON array via std.json.Stringify.
+///
+/// Every string field (task, working_dir) is escaped by the encoder. These
+/// strings originate from monitored-agent output (Chronos log / eBPF TTY),
+/// so a raw `{s}` format would let a `"`, `\`, or newline break the document
+/// or inject fields. Growing the writer also removes the old fixed-buffer
+/// overflow risk in the hand-rolled assembler.
+fn writeAgentsJson(w: *std.Io.Writer, instances: []const ClaudeInstance) std.Io.Writer.Error!void {
+    var js: std.json.Stringify = .{ .writer = w, .options = .{ .whitespace = .indent_2 } };
+
+    try js.beginArray();
+    for (instances) |inst| {
+        try js.write(.{
+            .pid = inst.pid,
+            .task = inst.task,
+            .working_dir = inst.working_dir,
+            .status = @tagName(inst.status),
+            .started_at = inst.started_at,
+            .last_activity = inst.last_activity,
+        });
+    }
+    try js.endArray();
+    try w.writeByte('\n');
+}
+
+/// Serialize the pending permission requests as a JSON array. command/args/
+/// reason are agent-controlled and must be encoder-escaped, never interpolated.
+fn writePermissionsJson(w: *std.Io.Writer, requests: []const PermissionRequest) std.Io.Writer.Error!void {
+    var js: std.json.Stringify = .{ .writer = w, .options = .{ .whitespace = .indent_2 } };
+
+    try js.beginArray();
+    for (requests) |req| {
+        if (req.status != .pending) continue;
+        try js.write(.{
+            .id = req.id,
+            .pid = req.pid,
+            .command = req.command,
+            .args = req.args,
+            .reason = req.reason,
+            .timestamp = req.timestamp,
+        });
+    }
+    try js.endArray();
+    try w.writeByte('\n');
 }
 
 fn writeFile(path: []const u8, data: []const u8) void {
@@ -155,4 +148,85 @@ pub fn cleanup() void {
     _ = unlink(AGENTS_FILE);
     _ = unlink(PERMISSIONS_FILE);
     _ = unlink(STATUS_FILE);
+}
+
+test "writeAgentsJson escapes JSON-special chars from agent-controlled strings" {
+    const allocator = std.testing.allocator;
+
+    // Task/working_dir originate from monitored-agent output; feed the exact
+    // characters that broke the old raw-`{s}` sink: a quote, a backslash, and a
+    // newline. The output must remain valid JSON that roundtrips.
+    const nasty_task = "hack\" ,\"injected\":true, \\slash\n newline";
+    const nasty_dir = "/tmp/\"quoted\"/path";
+    const instances = [_]ClaudeInstance{.{
+        .pid = 4321,
+        .task = nasty_task,
+        .working_dir = nasty_dir,
+        .status = .running,
+        .started_at = 100,
+        .last_activity = 200,
+    }};
+
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try writeAgentsJson(&aw.writer, &instances);
+    const bytes = aw.writer.buffered();
+
+    // Must parse as valid JSON (the old code emitted a broken document here).
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+    defer parsed.deinit();
+
+    const arr = parsed.value.array.items;
+    try std.testing.expectEqual(@as(usize, 1), arr.len);
+    const obj = arr[0].object;
+
+    // The strings must roundtrip exactly — no truncation, no field injection.
+    try std.testing.expectEqualStrings(nasty_task, obj.get("task").?.string);
+    try std.testing.expectEqualStrings(nasty_dir, obj.get("working_dir").?.string);
+    try std.testing.expectEqual(@as(i64, 4321), obj.get("pid").?.integer);
+    try std.testing.expectEqualStrings("running", obj.get("status").?.string);
+    // The injected `"injected":true` must NOT have become a real top-level field.
+    try std.testing.expect(obj.get("injected") == null);
+}
+
+test "writePermissionsJson escapes command/args/reason and skips non-pending" {
+    const allocator = std.testing.allocator;
+
+    const requests = [_]PermissionRequest{
+        .{
+            .id = 1,
+            .pid = 99,
+            .command = "rm \"x\"",
+            .args = "--flag=\"a\\b\"\n",
+            .reason = "because \"reasons\"",
+            .timestamp = 7,
+            .status = .pending,
+        },
+        // Non-pending entries must be filtered out of the export.
+        .{
+            .id = 2,
+            .pid = 100,
+            .command = "ls",
+            .args = "",
+            .reason = "done",
+            .timestamp = 8,
+            .status = .approved,
+        },
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try writePermissionsJson(&aw.writer, &requests);
+    const bytes = aw.writer.buffered();
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+    defer parsed.deinit();
+
+    const arr = parsed.value.array.items;
+    try std.testing.expectEqual(@as(usize, 1), arr.len);
+    const obj = arr[0].object;
+    try std.testing.expectEqual(@as(i64, 1), obj.get("id").?.integer);
+    try std.testing.expectEqualStrings("rm \"x\"", obj.get("command").?.string);
+    try std.testing.expectEqualStrings("--flag=\"a\\b\"\n", obj.get("args").?.string);
+    try std.testing.expectEqualStrings("because \"reasons\"", obj.get("reason").?.string);
 }

@@ -281,4 +281,12 @@ pub fn build(b: *std.Build) void {
     swarm_step.dependOn(&queen_exe.step);
     swarm_step.dependOn(&worker_exe.step);
     swarm_step.dependOn(&libtest_compression.step);
+
+    // ==================== Tests ====================
+    const test_step = b.step("test", "Run unit tests");
+
+    // Core engine tests (Task/Result + MPMC-backed VariableTester concurrency).
+    const vt_tests = b.addTest(.{ .root_module = vt_module });
+    const run_vt_tests = b.addRunArtifact(vt_tests);
+    test_step.dependOn(&run_vt_tests.step);
 }

@@ -33,7 +33,7 @@ pub const FocusManager = struct {
 
     pub fn init(allocator: std.mem.Allocator) Self {
         return .{
-            .focusable = .{},
+            .focusable = .empty,
             .allocator = allocator,
             .focus_index = -1,
             .focus_trap = false,

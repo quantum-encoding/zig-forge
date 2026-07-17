@@ -31,11 +31,27 @@ pub fn build(b: *std.Build) void {
         .root_module = manifest_test_module,
     });
 
+    // Externally-anchored SSRF regression tests (src/security_test.zig).
+    // Rooted directly on the http_client source so it can call the internal
+    // `isPrivateRedirect` guard that engine/core.zig's block_private_urls
+    // flag delegates to.
+    const security_test_module = b.createModule(.{
+        .root_source_file = b.path("src/security_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = false,
+    });
+    const security_unit_tests = b.addTest(.{
+        .root_module = security_test_module,
+    });
+
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
     const run_manifest_unit_tests = b.addRunArtifact(manifest_unit_tests);
+    const run_security_unit_tests = b.addRunArtifact(security_unit_tests);
     const test_step = b.step("test", "Run library tests");
     test_step.dependOn(&run_lib_unit_tests.step);
     test_step.dependOn(&run_manifest_unit_tests.step);
+    test_step.dependOn(&run_security_unit_tests.step);
 
     // Helper function to create executable with http-sentinel import
     const addExample = struct {
@@ -88,6 +104,11 @@ pub fn build(b: *std.Build) void {
     }
     const attack_step = b.step("attack", "Run security attack test suite");
     attack_step.dependOn(&run_attack.step);
+
+    // Wire the security attack suite into `zig build test` so the SSRF/CRLF/
+    // redirect-limit/path-traversal regressions run in CI, not just as a
+    // standalone `zig build attack` binary that nobody invokes.
+    test_step.dependOn(&run_attack.step);
 
     // Benchmark suite
     const bench = addExample(b, "http-bench", "tests/bench.zig", target, optimize, http_sentinel_module);

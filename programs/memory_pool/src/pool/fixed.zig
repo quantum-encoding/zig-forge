@@ -8,7 +8,7 @@ pub const FixedPool = struct {
     allocator: std.mem.Allocator,
     object_size: usize,
     capacity: usize,
-    memory: []align(@alignOf(*Node)) u8,
+    memory: []align(slot_align) u8,
     free_list: ?*Node,
     allocated: usize,
 
@@ -16,12 +16,25 @@ pub const FixedPool = struct {
         next: ?*Node,
     };
 
-    pub fn init(allocator: std.mem.Allocator, object_size: usize, capacity: usize) !FixedPool {
-        // Ensure object_size is at least pointer-sized for free list
-        const actual_size = @max(object_size, @sizeOf(*Node));
+    /// Slot alignment (and slot-size granularity). Raised to 16 for malloc
+    /// parity so SIMD / `long double` payloads coming from C callers are
+    /// correctly aligned. Must be >= @alignOf(*Node).
+    const slot_align = 16;
 
-        // Allocate memory for all objects with pointer alignment
-        const memory = try allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(@alignOf(*Node)), actual_size * capacity);
+    pub fn init(allocator: std.mem.Allocator, object_size: usize, capacity: usize) !FixedPool {
+        // Ensure object_size is at least pointer-sized for the free-list link,
+        // then round the slot size UP to slot_align. Without the round-up, an
+        // object_size not a multiple of the alignment (e.g. 12) places later
+        // slots at mis-aligned offsets, making the @alignCast to *Node UB.
+        const min_size = @max(object_size, @sizeOf(*Node));
+        const actual_size = std.mem.alignForward(usize, min_size, slot_align);
+
+        // Guard the total-size multiply against overflow (UB in ReleaseFast).
+        const total_size = try std.math.mul(usize, actual_size, capacity);
+
+        // Allocate memory for all objects, base-aligned to slot_align so every
+        // slot (base + i*actual_size) is slot_align-aligned.
+        const memory = try allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(slot_align), total_size);
 
         // Build free list
         var free_list: ?*Node = null;

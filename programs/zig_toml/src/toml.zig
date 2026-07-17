@@ -14,8 +14,11 @@
 //!     the pre-audit version is now an explicit `DuplicateKey` /
 //!     `DuplicateTable` / `DuplicateInlineKey` error.
 //!   * **Depth-bounded recursion.** `max_depth` (default 512) caps the
-//!     combined nesting of inline arrays and inline tables. A deeply-nested
-//!     payload returns `MaxDepthExceeded` instead of overflowing the C stack.
+//!     nesting of inline arrays/tables AND of dotted keys (`a.a.….a`) and
+//!     table headers (`[a.a.….a]`). A deeply-nested payload returns
+//!     `MaxDepthExceeded` instead of building a chain that overflows the C
+//!     stack. Teardown (`Table.deinit`) is iterative (explicit work-stack),
+//!     so even a legitimately deep tree frees without recursing.
 //!   * **Exhaustive error cleanup.** Every duped string and partial table
 //!     created during parsing is freed via `errdefer` if any subsequent step
 //!     fails. The previous version leaked on every parse error.
@@ -77,6 +80,8 @@ pub const ParseError = error{
     InvalidEscape,
     InvalidUnicodeEscape,
     UnterminatedString,
+    ControlCharacterInString,
+    ControlCharacterInComment,
     DuplicateKey,
     DuplicateInlineKey,
     DuplicateTable,
@@ -126,13 +131,41 @@ pub const Table = struct {
         return .{ .entries = std.StringHashMap(Value).init(allocator) };
     }
 
+    /// Recursively free every string, array, and nested table owned by this
+    /// table.
+    ///
+    /// The traversal is **iterative** (explicit heap work-stack), not
+    /// recursive: a `Table.deinit` that recursed once per nesting level would
+    /// overflow the C stack on a deeply-nested tree — and dotted keys / table
+    /// headers can build a tree far deeper than the inline depth cap (see
+    /// `walkPathThroughImplicitDotted` / `walkPathThroughImplicitHeaders`).
+    /// This is the free-side half of the depth-DoS fix; the parse-side cap is
+    /// the other half.
     pub fn deinit(self: *Table, allocator: Allocator) void {
-        var iter = self.entries.iterator();
-        while (iter.next()) |entry| {
-            allocator.free(entry.key_ptr.*);
-            entry.value_ptr.deinit(allocator);
+        var stack: std.ArrayListUnmanaged(Value) = .empty;
+        defer stack.deinit(allocator);
+
+        // Free this table's own keys + map, pushing each child value onto the
+        // work-stack. `self` itself is caller-owned (by value) and is not
+        // destroyed here — only nested `*Table`s popped from the stack are.
+        freeTableEntriesInto(self, allocator, &stack);
+
+        while (stack.pop()) |value| {
+            switch (value) {
+                .string => |s| allocator.free(s),
+                .datetime => |s| allocator.free(s),
+                .array => |arr| {
+                    var a = arr;
+                    for (a.items.items) |item| pushValueOrFree(&stack, allocator, item);
+                    a.items.deinit(allocator);
+                },
+                .table => |t| {
+                    freeTableEntriesInto(t, allocator, &stack);
+                    allocator.destroy(t);
+                },
+                else => {},
+            }
         }
-        self.entries.deinit();
     }
 
     pub fn get(self: *const Table, key: []const u8) ?Value {
@@ -285,7 +318,7 @@ pub const Parser = struct {
 
             const ch = self.peek();
             if (ch == '#') {
-                self.skipComment();
+                try self.skipComment();
                 continue;
             }
 
@@ -418,6 +451,12 @@ pub const Parser = struct {
     /// passing through an existing array-of-tables, descend into its LAST
     /// element. Used by both `[a.b.c]` and `[[a.b.c]]` headers.
     fn walkPathThroughImplicitHeaders(self: *Parser, segments: [][]const u8) ParseError!*Table {
+        // Depth cap for table headers. `segments` is the parent path (from the
+        // document root), so its length is the nesting depth this header walks
+        // to. Without this, `[a.a.a.….a]` with N segments builds an N-deep
+        // table chain from ~N bytes — a stack-overflow DoS on any recursive
+        // traversal. Mirrors the inline array/table cap in `parseArray`.
+        if (segments.len >= self.max_depth) return error.MaxDepthExceeded;
         var current = self.root_table;
         for (segments) |segment| {
             if (current.kind == .inline_frozen) return error.CannotExtendInlineTable;
@@ -518,6 +557,12 @@ pub const Parser = struct {
     /// dotted keys to redefine tables already defined in [table] form is
     /// not allowed" — and its inverse).
     fn walkPathThroughImplicitDotted(self: *Parser, root: *Table, segments: [][]const u8) ParseError!*Table {
+        // Depth cap for dotted keys. `segments` is the intermediate path (leaf
+        // excluded); its length is how many nested tables this assignment
+        // walks/creates. Without this, `a.a.a.….a = 1` with N segments builds
+        // an N-deep chain from ~2N bytes — the same stack-overflow DoS the
+        // inline depth cap already blocks for `[[…]]`/`{…}`.
+        if (segments.len >= self.max_depth) return error.MaxDepthExceeded;
         var current = root;
         for (segments) |segment| {
             if (current.kind == .inline_frozen) return error.CannotExtendInlineTable;
@@ -645,6 +690,7 @@ pub const Parser = struct {
                 return out.toOwnedSlice(self.allocator);
             }
             if (c == '\n' or c == '\r') return error.UnterminatedString;
+            if (isDisallowedControlSingleLine(c)) return error.ControlCharacterInString;
             if (c == '\\') {
                 self.advance();
                 try self.consumeEscape(&out, false);
@@ -667,6 +713,7 @@ pub const Parser = struct {
                 return out;
             }
             if (c == '\n' or c == '\r') return error.UnterminatedString;
+            if (isDisallowedControlSingleLine(c)) return error.ControlCharacterInString;
             self.advance();
         }
     }
@@ -721,6 +768,7 @@ pub const Parser = struct {
                 self.advance(); // '\'
                 try self.consumeEscape(&out, false);
             } else {
+                if (isDisallowedControlMultiline(c)) return error.ControlCharacterInString;
                 try out.append(self.allocator, c);
                 self.advance();
             }
@@ -755,7 +803,9 @@ pub const Parser = struct {
                 }
                 return Value{ .string = try out.toOwnedSlice(self.allocator) };
             }
-            try out.append(self.allocator, self.peek());
+            const c = self.peek();
+            if (isDisallowedControlMultiline(c)) return error.ControlCharacterInString;
+            try out.append(self.allocator, c);
             self.advance();
         }
     }
@@ -1063,7 +1113,7 @@ pub const Parser = struct {
         }
 
         // Whitespace, newlines, and comments all allowed inside arrays.
-        self.skipWhitespaceAndNewlinesAndComments();
+        try self.skipWhitespaceAndNewlinesAndComments();
 
         while (!self.eof() and self.peek() != ']') {
             var value = try self.parseValue();
@@ -1072,11 +1122,11 @@ pub const Parser = struct {
 
             try items.append(self.allocator, value);
 
-            self.skipWhitespaceAndNewlinesAndComments();
+            try self.skipWhitespaceAndNewlinesAndComments();
             if (self.eof()) return error.ExpectedCommaOrBracket;
             if (self.peek() == ',') {
                 self.advance();
-                self.skipWhitespaceAndNewlinesAndComments();
+                try self.skipWhitespaceAndNewlinesAndComments();
             } else if (self.peek() != ']') {
                 return error.ExpectedCommaOrBracket;
             }
@@ -1192,21 +1242,24 @@ pub const Parser = struct {
 
     /// Skip whitespace, newlines, and `# ...\n` comments (used inside
     /// arrays).
-    fn skipWhitespaceAndNewlinesAndComments(self: *Parser) void {
+    fn skipWhitespaceAndNewlinesAndComments(self: *Parser) ParseError!void {
         while (!self.eof()) {
             const c = self.peek();
             if (c == ' ' or c == '\t' or c == '\n' or c == '\r') {
                 self.advance();
             } else if (c == '#') {
-                self.skipComment();
+                try self.skipComment();
             } else {
                 break;
             }
         }
     }
 
-    fn skipComment(self: *Parser) void {
-        while (!self.eof() and self.peek() != '\n') self.advance();
+    fn skipComment(self: *Parser) ParseError!void {
+        while (!self.eof() and self.peek() != '\n') {
+            if (isDisallowedControlComment(self.peek())) return error.ControlCharacterInComment;
+            self.advance();
+        }
         if (!self.eof()) self.advance(); // consume newline
     }
 
@@ -1220,7 +1273,7 @@ pub const Parser = struct {
             return;
         }
         if (c == '#') {
-            self.skipComment();
+            try self.skipComment();
             return;
         }
         return error.UnexpectedCharacter;
@@ -1234,6 +1287,74 @@ pub const Parser = struct {
 fn freeSegments(allocator: Allocator, segments: *std.ArrayListUnmanaged([]const u8)) void {
     for (segments.items) |s| allocator.free(s);
     segments.deinit(allocator);
+}
+
+/// Free a table's own keys and hash-map storage, pushing each child value onto
+/// `stack` for the iterative freer in `Table.deinit`. Does NOT free the table
+/// struct itself — the caller decides whether to `destroy` it.
+fn freeTableEntriesInto(t: *Table, allocator: Allocator, stack: *std.ArrayListUnmanaged(Value)) void {
+    var iter = t.entries.iterator();
+    while (iter.next()) |entry| {
+        allocator.free(entry.key_ptr.*);
+        pushValueOrFree(stack, allocator, entry.value_ptr.*);
+    }
+    t.entries.deinit();
+}
+
+/// Push `value` onto the iterative-free work-stack. If the stack allocation
+/// itself fails (OOM while tearing down), fall back to a bounded recursive
+/// free of just that one subtree. This fallback path only runs under memory
+/// pressure and never on the hot free path.
+fn pushValueOrFree(stack: *std.ArrayListUnmanaged(Value), allocator: Allocator, value: Value) void {
+    stack.append(allocator, value) catch {
+        var v = value;
+        freeValueRecursive(&v, allocator);
+    };
+}
+
+/// Recursive free used only as the OOM fallback for `pushValueOrFree`.
+fn freeValueRecursive(self: *Value, allocator: Allocator) void {
+    switch (self.*) {
+        .string => |s| allocator.free(s),
+        .datetime => |s| allocator.free(s),
+        .array => |*arr| {
+            for (arr.items.items) |*v| freeValueRecursive(v, allocator);
+            arr.items.deinit(allocator);
+        },
+        .table => |t| {
+            var iter = t.entries.iterator();
+            while (iter.next()) |entry| {
+                allocator.free(entry.key_ptr.*);
+                freeValueRecursive(entry.value_ptr, allocator);
+            }
+            t.entries.deinit();
+            allocator.destroy(t);
+        },
+        else => {},
+    }
+}
+
+/// Control characters disallowed in single-line basic/literal strings and in
+/// TOML keys. Tab (U+0009) is the only permitted control char; `\n`/`\r` are
+/// handled separately by the string scanners (they terminate the string with
+/// `UnterminatedString`). DEL (U+007F) is also disallowed per TOML 1.0.
+fn isDisallowedControlSingleLine(c: u8) bool {
+    return (c < 0x20 and c != '\t') or c == 0x7F;
+}
+
+/// Control characters disallowed in multiline basic/literal strings. Tab,
+/// line feed, and carriage return are permitted (the latter two are content /
+/// line endings); all other C0 controls and DEL are rejected.
+fn isDisallowedControlMultiline(c: u8) bool {
+    return (c < 0x20 and c != '\t' and c != '\n' and c != '\r') or c == 0x7F;
+}
+
+/// Control characters disallowed in comments. A comment is terminated by
+/// `\n`, so the scanner never sees a line feed inside the body; tab and a
+/// trailing `\r` (CRLF) are permitted, everything else in C0 plus DEL is
+/// rejected.
+fn isDisallowedControlComment(c: u8) bool {
+    return (c < 0x20 and c != '\t' and c != '\n' and c != '\r') or c == 0x7F;
 }
 
 fn isBareKeyChar(ch: u8) bool {

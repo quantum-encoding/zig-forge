@@ -117,11 +117,13 @@ pub const HyperLogLog = struct {
             if (zeros > 0) {
                 estimate_val = m * @log(m / @as(f64, @floatFromInt(zeros)));
             }
-        } else if (estimate_val > (1.0 / 30.0) * math.pow(f64, 2.0, 32.0)) {
-            // Large range correction
-            estimate_val = -math.pow(f64, 2.0, 32.0) *
-                @log(1.0 - estimate_val / math.pow(f64, 2.0, 32.0));
         }
+        // No large-range correction: the classic Flajolet -2^32 * ln(1 - E/2^32)
+        // correction assumes a 32-bit hash where register-index collisions occur
+        // near 2^32. This implementation hashes with 64-bit Wyhash, so there are
+        // no such collisions at 2^32 scale and applying that branch actively
+        // corrupts estimates above ~1.43e8 cardinality. Modern 64-bit HLLs
+        // (e.g. Redis) omit it entirely.
 
         return @intFromFloat(@max(estimate_val, 0));
     }

@@ -67,10 +67,12 @@ pub const TSDB = struct {
             file.close(self.io);
         }
 
-        // Deinit all B-tree indexes
-        var iter = self.indexes.valueIterator();
-        while (iter.next()) |btree| {
-            btree.deinit();
+        // Deinit all B-tree indexes and free the duped symbol keys (the map
+        // stores copies of each symbol; StringHashMap does not own them).
+        var iter = self.indexes.iterator();
+        while (iter.next()) |entry| {
+            entry.value_ptr.deinit();
+            self.allocator.free(entry.key_ptr.*);
         }
         self.indexes.deinit();
     }
@@ -141,13 +143,16 @@ pub const TSDB = struct {
         // Delta-encode timestamps
         try compression.encodeTimestamps(timestamps, enc_timestamps);
 
-        // Delta-encode prices (scale by 100 for 2 decimal places)
+        // Delta-encode prices (scale by 100 for 2 decimal places).
+        // Capture each returned scaled base value so it can be persisted in the
+        // header — the encoded column itself stores 0 as a placeholder for the
+        // first value, so without the base every price would decode from 0.
         const scale = 100.0;
-        _ = try compression.encodePrices(opens, enc_opens, scale);
-        _ = try compression.encodePrices(highs, enc_highs, scale);
-        _ = try compression.encodePrices(lows, enc_lows, scale);
-        _ = try compression.encodePrices(closes, enc_closes, scale);
-        _ = try compression.encodePrices(volumes, enc_volumes, scale);
+        const base_open = try compression.encodePrices(opens, enc_opens, scale);
+        const base_high = try compression.encodePrices(highs, enc_highs, scale);
+        const base_low = try compression.encodePrices(lows, enc_lows, scale);
+        const base_close = try compression.encodePrices(closes, enc_closes, scale);
+        const base_volume = try compression.encodePrices(volumes, enc_volumes, scale);
 
         // Calculate sizes
         const ts_size = enc_timestamps.len * @sizeOf(i64);
@@ -211,6 +216,15 @@ pub const TSDB = struct {
         header.column_offsets[4] = close_offset;
         header.column_offsets[5] = volume_offset;
 
+        // Persist the per-column base values (index 0 = timestamp, whose base
+        // is stored in-band; indices 1..5 hold the price/volume bases).
+        header.base_values[0] = 0;
+        header.base_values[1] = base_open;
+        header.base_values[2] = base_high;
+        header.base_values[3] = base_low;
+        header.base_values[4] = base_close;
+        header.base_values[5] = base_volume;
+
         // Flush changes to disk
         try file_store.flush();
 
@@ -258,13 +272,14 @@ pub const TSDB = struct {
         const close_data = try file_store.getSlice(header.column_offsets[4], header.row_count * @sizeOf(i32));
         const volume_data = try file_store.getSlice(header.column_offsets[5], header.row_count * @sizeOf(i32));
 
-        // Convert byte slices to typed slices
-        const ts_slice: []const i64 = std.mem.bytesAsSlice(i64, ts_data);
-        const open_slice: []const i32 = std.mem.bytesAsSlice(i32, open_data);
-        const high_slice: []const i32 = std.mem.bytesAsSlice(i32, high_data);
-        const low_slice: []const i32 = std.mem.bytesAsSlice(i32, low_data);
-        const close_slice: []const i32 = std.mem.bytesAsSlice(i32, close_data);
-        const volume_slice: []const i32 = std.mem.bytesAsSlice(i32, volume_data);
+        // Convert byte slices to typed slices. These are align(1) (they point
+        // straight into the mmap byte region); the decoders read them unaligned.
+        const ts_slice = std.mem.bytesAsSlice(i64, ts_data);
+        const open_slice = std.mem.bytesAsSlice(i32, open_data);
+        const high_slice = std.mem.bytesAsSlice(i32, high_data);
+        const low_slice = std.mem.bytesAsSlice(i32, low_data);
+        const close_slice = std.mem.bytesAsSlice(i32, close_data);
+        const volume_slice = std.mem.bytesAsSlice(i32, volume_data);
 
         // Decode timestamps
         const dec_timestamps = try allocator.alloc(i64, header.row_count);
@@ -285,12 +300,13 @@ pub const TSDB = struct {
         const dec_volumes = try allocator.alloc(f64, header.row_count);
         defer allocator.free(dec_volumes);
 
-        // For prices, we need the base value. Calculate from first encoded value + first delta
-        const first_open_scaled = @as(i64, @intFromFloat(0.0 * scale)) + open_slice[0];
-        const first_high_scaled = @as(i64, @intFromFloat(0.0 * scale)) + high_slice[0];
-        const first_low_scaled = @as(i64, @intFromFloat(0.0 * scale)) + low_slice[0];
-        const first_close_scaled = @as(i64, @intFromFloat(0.0 * scale)) + close_slice[0];
-        const first_volume_scaled = @as(i64, @intFromFloat(0.0 * scale)) + volume_slice[0];
+        // For prices, the scaled base value is persisted in the header (the
+        // encoded column stores 0 as a placeholder for its first value).
+        const first_open_scaled = header.base_values[1];
+        const first_high_scaled = header.base_values[2];
+        const first_low_scaled = header.base_values[3];
+        const first_close_scaled = header.base_values[4];
+        const first_volume_scaled = header.base_values[5];
 
         try compression.decodePrices(open_slice, dec_opens, first_open_scaled, scale);
         try compression.decodePrices(high_slice, dec_highs, first_high_scaled, scale);
@@ -317,4 +333,153 @@ pub const TSDB = struct {
 
 test "library tests" {
     std.testing.refAllDecls(@This());
+}
+
+// ============================================================================
+// External-anchored golden vectors
+//
+// These do NOT rely on decode(encode(x)) == x. The wire-format numbers below
+// are derived independently from the documented format contract:
+//   * delta.zig documents: prices scaled by `scale` (100 for 2dp), first value
+//     replaced by 0 placeholder with the scaled base carried out-of-band, and
+//     each subsequent slot holding the successive difference of the scaled
+//     integers (i.e. the well-defined adjacent-difference / numpy.diff of the
+//     scaled series).
+//   * file.zig documents the FileHeader layout and that base_values holds the
+//     scaled base per price column.
+// The known price series is a fixed OHLC-shaped input; the expected scaled
+// integers and on-disk bytes are computed by hand from that spec, so deleting
+// every roundtrip test would still leave encode AND decode covered against
+// externally-specified numbers.
+// ============================================================================
+
+test "golden decode: hand-crafted delta bytes decode to the known price series" {
+    // Known price series (BTC-ish OHLC, exact multiples of 0.25 so f64 is exact):
+    //   [50000.00, 50000.50, 50001.00, 50000.75]
+    // Scaled by 100: [5000000, 5000050, 5000100, 5000075]
+    //   base  = 5000000
+    //   deltas (adjacent differences, slot 0 = 0 placeholder): [0, 50, 50, -25]
+    // On disk each delta is a little-endian i32. -25 = 0xFFFFFFE7.
+    var raw_bytes: [16]u8 align(4) = .{
+        0x00, 0x00, 0x00, 0x00, // slot 0: 0 (placeholder for base)
+        0x32, 0x00, 0x00, 0x00, // slot 1: 50
+        0x32, 0x00, 0x00, 0x00, // slot 2: 50
+        0xE7, 0xFF, 0xFF, 0xFF, // slot 3: -25
+    };
+    const deltas = std.mem.bytesAsSlice(i32, raw_bytes[0..]);
+
+    const base: i64 = 5000000; // externally-specified scaled base
+    const scale: f64 = 100.0;
+
+    var decoded: [4]f64 = undefined;
+    try compression.decodePrices(deltas, &decoded, base, scale);
+
+    const expected = [_]f64{ 50000.00, 50000.50, 50001.00, 50000.75 };
+    for (expected, decoded) |want, got| {
+        try std.testing.expectEqual(want, got);
+    }
+}
+
+test "golden encode: insert persists spec-derived scaled base and i32 deltas on disk" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+
+    const data_dir = "/tmp/tsdb_golden_encode";
+    std.Io.Dir.cwd().deleteTree(io, data_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, data_dir) catch {};
+
+    var db = try TSDB.init(io, allocator, data_dir);
+    defer db.deinit();
+
+    // Same known OHLC 'open' series as the golden-decode vector.
+    const candles = [_]Candle{
+        Candle.init(1700000000, 50000.00, 0, 0, 0, 0),
+        Candle.init(1700000060, 50000.50, 0, 0, 0, 0),
+        Candle.init(1700000120, 50001.00, 0, 0, 0, 0),
+        Candle.init(1700000180, 50000.75, 0, 0, 0, 0),
+    };
+    try db.insert("GOLD", &candles);
+
+    // Reopen the raw file and inspect bytes directly (NOT via decode).
+    const path = try std.fmt.allocPrint(allocator, "{s}/{s}.tsdb", .{ data_dir, "GOLD" });
+    defer allocator.free(path);
+
+    var fs = try storage.FileStorage.open(io, path, false);
+    defer fs.deinit();
+
+    const header = fs.getHeaderConst();
+    try std.testing.expectEqual(@as(u16, storage.FileHeader.VERSION), header.version);
+    try std.testing.expectEqual(@as(u64, 4), header.row_count);
+
+    // Persisted scaled base for the 'open' column must be 5000000, not 0.
+    try std.testing.expectEqual(@as(i64, 5000000), header.base_values[1]);
+
+    // The 'open' column's on-disk i32 deltas must equal the spec-derived series.
+    const open_bytes = try fs.getSlice(header.column_offsets[1], header.row_count * @sizeOf(i32));
+    const open_deltas = std.mem.bytesAsSlice(i32, open_bytes);
+    const expected_deltas = [_]i32{ 0, 50, 50, -25 };
+    for (expected_deltas, open_deltas) |want, got| {
+        try std.testing.expectEqual(want, got);
+    }
+}
+
+test "end-to-end: insert then query returns exact known prices across btree splits" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+
+    const data_dir = "/tmp/tsdb_e2e_query";
+    std.Io.Dir.cwd().deleteTree(io, data_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, data_dir) catch {};
+
+    var db = try TSDB.init(io, allocator, data_dir);
+    defer db.deinit();
+
+    // 200 candles forces multiple B-tree splits (MAX_KEYS = 63). Every field
+    // uses a distinct exact (quarter/half-precision) formula so a base-0 decode,
+    // a dropped split value, or a column mix-up all fail loudly.
+    const N: usize = 200;
+    const ts0: i64 = 1_700_000_000;
+    var candles: [N]Candle = undefined;
+    for (0..N) |i| {
+        const fi: f64 = @floatFromInt(i);
+        candles[i] = Candle.init(
+            ts0 + @as(i64, @intCast(i)) * 60,
+            50000.00 + fi * 0.25, // open
+            50100.00 + fi * 0.25, // high
+            49900.00 + fi * 0.25, // low
+            50050.00 + fi * 0.25, // close
+            1000.00 + fi * 0.50, // volume
+        );
+    }
+    try db.insert("BTCUSD", &candles);
+
+    // Query a strict sub-range: candles i = 50..150 inclusive (101 rows).
+    const start_i: usize = 50;
+    const end_i: usize = 150;
+    const start = ts0 + @as(i64, @intCast(start_i)) * 60;
+    const end = ts0 + @as(i64, @intCast(end_i)) * 60;
+
+    const rows = try db.query("BTCUSD", start, end, allocator);
+    defer allocator.free(rows);
+
+    try std.testing.expectEqual(end_i - start_i + 1, rows.len);
+
+    // Every field of every returned candle must match the exact inserted value.
+    for (rows, 0..) |row, k| {
+        const i = start_i + k;
+        const fi: f64 = @floatFromInt(i);
+        try std.testing.expectEqual(ts0 + @as(i64, @intCast(i)) * 60, row.timestamp);
+        try std.testing.expectEqual(50000.00 + fi * 0.25, row.open);
+        try std.testing.expectEqual(50100.00 + fi * 0.25, row.high);
+        try std.testing.expectEqual(49900.00 + fi * 0.25, row.low);
+        try std.testing.expectEqual(50050.00 + fi * 0.25, row.close);
+        try std.testing.expectEqual(1000.00 + fi * 0.50, row.volume);
+    }
+
+    // Spot-check the very first inserted candle (open = 50000.00, not 0.00 —
+    // the exact base-0 bug this upgrade fixes).
+    const first = try db.query("BTCUSD", ts0, ts0, allocator);
+    defer allocator.free(first);
+    try std.testing.expectEqual(@as(usize, 1), first.len);
+    try std.testing.expectEqual(@as(f64, 50000.00), first[0].open);
 }

@@ -4,6 +4,16 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Consumable library module (golden-rule check 3): re-exports the packet
+    // subsystems from src/lib.zig so other in-tree projects can @import the
+    // stack. Purely additive — the executable targets below are unchanged.
+    _ = b.addModule("zig_dpdk", .{
+        .root_source_file = b.path("src/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
     // Main executable
     const exe_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),

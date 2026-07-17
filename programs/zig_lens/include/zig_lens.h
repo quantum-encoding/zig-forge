@@ -64,6 +64,7 @@ extern "C" {
 #define ZIG_LENS_LANG_C           2
 #define ZIG_LENS_LANG_PYTHON      3
 #define ZIG_LENS_LANG_JAVASCRIPT  4
+#define ZIG_LENS_LANG_GO          5
 
 /* =========================================================================
  * Progress Callback

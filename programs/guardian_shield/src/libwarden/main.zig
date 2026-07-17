@@ -194,22 +194,32 @@ const EMERGENCY_KILL_SWITCH = "/tmp/.warden_emergency_disable";
 const EMERGENCY_KILL_SWITCH_ROOT = "/var/run/warden_emergency_disable";
 
 // Self-preservation paths - ALWAYS allowed, regardless of config
-// This ensures you can always uninstall Guardian Shield
+// This ensures you can always uninstall Guardian Shield.
+//
+// SECURITY: these are matched as ABSOLUTE-PATH PREFIXES only (startsWith),
+// never as substrings. Substring matching (the pre-v8.3 behaviour) let a
+// restricted process bypass ALL protection on an arbitrary target simply by
+// arranging the pathname to *contain* one of these tokens — e.g. a directory
+// or symlink named `.../ld.so.preload/loot` or `/home/victim/libwarden.so.bak`
+// would match `std.mem.indexOf` and disable the shield for that path. Because
+// an attacker cannot control the *leading* bytes of an absolute path they are
+// asked to touch, prefix matching against the concrete install locations
+// closes that evasion while still letting the shield be uninstalled from any
+// of its real homes. Any location previously reachable only via a substring
+// (a bare libwarden.so, a warden-config file, the emergency kill switches)
+// is now expressed as an explicit absolute prefix below.
 const SELF_PRESERVATION_PATHS = [_][]const u8{
     "/etc/ld.so.preload",
     "/etc/warden/",
+    "/etc/warden-config",
     "/usr/lib/libwarden",
     "/usr/local/lib/libwarden",
     "/usr/local/lib/security/libwarden",
     "/lib/libwarden",
     "/opt/warden/",
-};
-
-const SELF_PRESERVATION_SUBSTRINGS = [_][]const u8{
-    "libwarden.so",
-    "warden-config",
-    "ld.so.preload",
-    "warden-emergency",
+    // Emergency kill switches — removing/creating these must never be blocked.
+    EMERGENCY_KILL_SWITCH, // /tmp/.warden_emergency_disable
+    EMERGENCY_KILL_SWITCH_ROOT, // /var/run/warden_emergency_disable
 };
 
 // Emergency signal state (SIGUSR2 disables all protection)
@@ -245,6 +255,28 @@ fn installEmergencySignalHandler() void {
     }
 }
 
+/// V8.3: Prefix-only self-preservation match.
+///
+/// Returns true iff `path` begins with one of the concrete absolute
+/// self-preservation prefixes. This is a PURE function (no env, signal,
+/// filesystem or syscall dependencies) so it can be unit-tested directly and
+/// so its behaviour is deterministic regardless of host state.
+///
+/// It replaces the earlier substring (`std.mem.indexOf`) matching, which
+/// disabled all protection for any path merely *containing* a token such as
+/// "ld.so.preload" — an evasion a restricted process could arrange on an
+/// arbitrary target path. Matching only absolute prefixes means the attacker
+/// would have to control the leading bytes of the path they are asked to
+/// touch, which the shield does not grant.
+fn isSelfPreservationPath(path_slice: []const u8) bool {
+    for (SELF_PRESERVATION_PATHS) |safe_path| {
+        if (std.mem.startsWith(u8, path_slice, safe_path)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /// V8.1: Master bypass check - called BEFORE getState() in every interceptor
 /// This ensures recovery works even when config loading fails
 fn shouldBypassAllProtection(path: [*:0]const u8) bool {
@@ -271,20 +303,12 @@ fn shouldBypassAllProtection(path: [*:0]const u8) bool {
     }
 
     // 3. Self-preservation paths (ALWAYS allow removing the shield itself)
-    const path_slice = std.mem.span(path);
-
-    // Check prefix matches
-    for (SELF_PRESERVATION_PATHS) |safe_path| {
-        if (std.mem.startsWith(u8, path_slice, safe_path)) {
-            return true;
-        }
-    }
-
-    // Check substring matches (handles any install location)
-    for (SELF_PRESERVATION_SUBSTRINGS) |substring| {
-        if (std.mem.indexOf(u8, path_slice, substring)) |_| {
-            return true;
-        }
+    // SECURITY: prefix-only match against the concrete absolute install
+    // locations — see the note on SELF_PRESERVATION_PATHS. A substring match
+    // here would be an all-protection bypass an attacker can trigger by
+    // naming an intermediate path component.
+    if (isSelfPreservationPath(std.mem.span(path))) {
+        return true;
     }
 
     // 4. Magic file kill switch (filesystem check)
@@ -1798,4 +1822,65 @@ export fn mkdirat(dirfd: c_int, path: [*:0]const u8, mode: c_int) c_int {
     }
 
     return state.original_mkdirat(dirfd, path, mode);
+}
+
+// ============================================================
+// V8.3: Enforcement-logic unit tests (self-preservation match)
+// ============================================================
+//
+// These exercise the pure path-matching contract of the master bypass check.
+// They assert BOTH that legitimate self-preservation paths are still allowed
+// (so the shield can always be uninstalled) AND that the substring-evasion
+// class the pre-v8.3 code was vulnerable to is now closed.
+
+test "self-preservation: real install/uninstall paths are always allowed" {
+    // Every concrete prefix must match its own home so the shield can be removed.
+    for (SELF_PRESERVATION_PATHS) |p| {
+        try std.testing.expect(isSelfPreservationPath(p));
+    }
+
+    // And a real file living under one of those prefixes.
+    try std.testing.expect(isSelfPreservationPath("/etc/ld.so.preload"));
+    try std.testing.expect(isSelfPreservationPath("/etc/warden/config.json"));
+    try std.testing.expect(isSelfPreservationPath("/usr/lib/libwarden.so"));
+    try std.testing.expect(isSelfPreservationPath("/usr/local/lib/libwarden.so.8.2"));
+    try std.testing.expect(isSelfPreservationPath("/lib/libwarden.so"));
+    try std.testing.expect(isSelfPreservationPath("/opt/warden/uninstall.sh"));
+    try std.testing.expect(isSelfPreservationPath(EMERGENCY_KILL_SWITCH));
+    try std.testing.expect(isSelfPreservationPath(EMERGENCY_KILL_SWITCH_ROOT));
+}
+
+test "self-preservation: substring-evasion targets are NOT bypassed" {
+    // Pre-v8.3 these all matched std.mem.indexOf on a SELF_PRESERVATION_SUBSTRING
+    // and disabled ALL protection for the target. They must now be enforced,
+    // because the self-preservation token is not a leading absolute prefix.
+    const evasions = [_][]const u8{
+        // A directory/symlink component named like the preload file.
+        "/home/victim/ld.so.preload/loot",
+        "/tmp/attacker/ld.so.preload/secret",
+        // Target whose basename embeds the .so token.
+        "/home/victim/.ssh/id_rsa.libwarden.so",
+        "/home/victim/libwarden.so.bak",
+        // Embedded "warden-config" / "warden-emergency" tokens mid-path.
+        "/home/victim/data/warden-config/private.key",
+        "/var/tmp/warden-emergency/exfil.tar",
+        // Plain sensitive files with no token at all.
+        "/home/victim/.ssh/id_rsa",
+        "/etc/shadow",
+        "/etc/passwd",
+        "",
+    };
+    for (evasions) |p| {
+        try std.testing.expect(!isSelfPreservationPath(p));
+    }
+}
+
+test "self-preservation: prefix must be anchored at the start of the path" {
+    // A self-preservation prefix appearing anywhere other than offset 0 must
+    // not match — this is the crux of the substring-bypass fix.
+    try std.testing.expect(!isSelfPreservationPath("/mnt/etc/ld.so.preload"));
+    try std.testing.expect(!isSelfPreservationPath("./etc/warden/config"));
+    try std.testing.expect(!isSelfPreservationPath("relative/usr/lib/libwarden.so"));
+    // But the correctly-anchored absolute form still matches.
+    try std.testing.expect(isSelfPreservationPath("/etc/ld.so.preload"));
 }

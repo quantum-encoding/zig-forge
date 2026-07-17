@@ -37,6 +37,28 @@ pub const Voices = struct {
     }
 };
 
+/// Build the text-to-speech request body. Factored out of `textToSpeech`
+/// so the JSON serialization (and its escaping of caller-controlled
+/// identifier fields like `model_id`) can be unit-tested without a live
+/// HTTP client. Caller owns the returned slice.
+fn buildTextToSpeechBody(
+    allocator: std.mem.Allocator,
+    text: []const u8,
+    model_id: []const u8,
+    stability: f32,
+    similarity: f32,
+) ![]u8 {
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .text = text,
+        .model_id = model_id,
+        .voice_settings = .{
+            .stability = stability,
+            .similarity_boost = similarity,
+            .use_speaker_boost = true,
+        },
+    }, .{});
+}
+
 pub const ElevenLabsClient = struct {
     http_client: HttpClient,
     api_key: []const u8,
@@ -70,12 +92,10 @@ pub const ElevenLabsClient = struct {
         );
         defer self.allocator.free(endpoint);
 
-        const escaped_text = try common.escapeJsonString(self.allocator, text);
-        defer self.allocator.free(escaped_text);
-
-        const payload = try std.fmt.allocPrint(self.allocator,
-            \\{{"text":"{s}","model_id":"{s}","voice_settings":{{"stability":{d},"similarity_boost":{d},"use_speaker_boost":true}}}}
-        , .{ escaped_text, model_id, stability, similarity });
+        // Emit the whole body via std.json.Stringify so every field —
+        // including identifier fields like model_id — is escaped. A `"`
+        // in any value can no longer break or inject into the JSON.
+        const payload = try buildTextToSpeechBody(self.allocator, text, model_id, stability, similarity);
         defer self.allocator.free(payload);
 
         const headers = [_]std.http.Header{
@@ -103,14 +123,10 @@ pub const ElevenLabsClient = struct {
 
     /// Voice design: generate 3 preview voices from a text description.
     pub fn designVoice(self: *ElevenLabsClient, description: []const u8, sample_text: []const u8) ![]u8 {
-        const escaped_desc = try common.escapeJsonString(self.allocator, description);
-        defer self.allocator.free(escaped_desc);
-        const escaped_text = try common.escapeJsonString(self.allocator, sample_text);
-        defer self.allocator.free(escaped_text);
-
-        const payload = try std.fmt.allocPrint(self.allocator,
-            \\{{"voice_description":"{s}","text":"{s}"}}
-        , .{ escaped_desc, escaped_text });
+        const payload = try std.json.Stringify.valueAlloc(self.allocator, .{
+            .voice_description = description,
+            .text = sample_text,
+        }, .{});
         defer self.allocator.free(payload);
 
         const headers = [_]std.http.Header{
@@ -126,12 +142,10 @@ pub const ElevenLabsClient = struct {
 
     /// Sound effects generation.
     pub fn generateSfx(self: *ElevenLabsClient, text: []const u8, duration_seconds: f32) ![]u8 {
-        const escaped = try common.escapeJsonString(self.allocator, text);
-        defer self.allocator.free(escaped);
-
-        const payload = try std.fmt.allocPrint(self.allocator,
-            \\{{"text":"{s}","duration_seconds":{d}}}
-        , .{ escaped, duration_seconds });
+        const payload = try std.json.Stringify.valueAlloc(self.allocator, .{
+            .text = text,
+            .duration_seconds = duration_seconds,
+        }, .{});
         defer self.allocator.free(payload);
 
         const headers = [_]std.http.Header{
@@ -145,3 +159,38 @@ pub const ElevenLabsClient = struct {
         return try self.allocator.dupe(u8, response.body);
     }
 };
+
+test "TTS body escapes a hostile model_id per RFC 8259 (no JSON injection)" {
+    // External anchor: RFC 8259 §7 "String" — the two-character escape
+    // sequences are fixed by the spec, not by this codebase:
+    //   quotation mark  U+0022  ->  \"   (")
+    //   reverse solidus U+005C  ->  \\   (\)
+    //
+    // A `model_id` carrying a `"` used to be substituted unescaped by the
+    // old allocPrint template, letting a caller-controlled identifier break
+    // the JSON or inject a sibling field. Migrating to std.json.Stringify
+    // (buildTextToSpeechBody) must emit the RFC-mandated escapes instead.
+    const allocator = std.testing.allocator;
+
+    // Hostile identifier: a `"` (would close the string) followed by an
+    // injected field, plus a backslash. Per RFC 8259 both must be escaped.
+    const hostile_model_id = "evil\",\"injected\":\"x\\y";
+
+    const body = try buildTextToSpeechBody(allocator, "hello", hostile_model_id, 0.5, 0.75);
+    defer allocator.free(body);
+
+    // Golden substring — the exact bytes RFC 8259 mandates for this input.
+    // `"` -> `\"`, `\` -> `\\`. Any unescaped `"` here would be an injection.
+    const expected_field = "\"model_id\":\"evil\\\",\\\"injected\\\":\\\"x\\\\y\"";
+    try std.testing.expect(std.mem.indexOf(u8, body, expected_field) != null);
+
+    // The body must remain a single valid JSON object, and the hostile
+    // string must survive as the *value* of model_id — proving no field was
+    // injected and the parser sees exactly one model_id equal to the input.
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try std.testing.expectEqualStrings(hostile_model_id, obj.get("model_id").?.string);
+    // The injected key name must NOT appear as a real top-level field.
+    try std.testing.expect(obj.get("injected") == null);
+}

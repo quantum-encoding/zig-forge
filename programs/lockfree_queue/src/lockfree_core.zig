@@ -314,7 +314,8 @@ test "lockfree_core - invalid parameters" {
 }
 
 test "lockfree_core - push/pop basic" {
-    const queue = lfq_spsc_create(16, 256) orelse return;
+    const queue = lfq_spsc_create(16, 256);
+    try std.testing.expect(queue != null);
     defer lfq_spsc_destroy(queue);
 
     const msg = "Hello, World!";
@@ -330,7 +331,8 @@ test "lockfree_core - push/pop basic" {
 }
 
 test "lockfree_core - queue empty" {
-    const queue = lfq_spsc_create(16, 256) orelse return;
+    const queue = lfq_spsc_create(16, 256);
+    try std.testing.expect(queue != null);
     defer lfq_spsc_destroy(queue);
 
     var buf: [256]u8 = undefined;
@@ -340,15 +342,17 @@ test "lockfree_core - queue empty" {
 }
 
 test "lockfree_core - queue full" {
-    const queue = lfq_spsc_create(4, 32) orelse return;
+    const queue = lfq_spsc_create(4, 32);
+    try std.testing.expect(queue != null);
     defer lfq_spsc_destroy(queue);
 
     const msg1 = "msg1";
     const msg2 = "msg2";
     const msg3 = "msg3";
-    const msg4 = "msg4";
 
-    // Fill to capacity
+    // The underlying SPSC ring reserves one slot to distinguish full from
+    // empty (spsc/queue.zig:60), so a capacity-4 queue holds at most 3
+    // messages. Three pushes succeed...
     const err1 = lfq_spsc_push(queue, @as([*]const u8, @ptrCast(msg1)), msg1.len);
     try std.testing.expectEqual(LFQ_Error.SUCCESS, err1);
 
@@ -358,17 +362,15 @@ test "lockfree_core - queue full" {
     const err3 = lfq_spsc_push(queue, @as([*]const u8, @ptrCast(msg3)), msg3.len);
     try std.testing.expectEqual(LFQ_Error.SUCCESS, err3);
 
+    // ...and the fourth push finds the queue full.
+    const msg4 = "msg4";
     const err4 = lfq_spsc_push(queue, @as([*]const u8, @ptrCast(msg4)), msg4.len);
-    try std.testing.expectEqual(LFQ_Error.SUCCESS, err4);
-
-    // Next push should fail
-    const msg5 = "msg5";
-    const err5 = lfq_spsc_push(queue, @as([*]const u8, @ptrCast(msg5)), msg5.len);
-    try std.testing.expectEqual(LFQ_Error.QUEUE_FULL, err5);
+    try std.testing.expectEqual(LFQ_Error.QUEUE_FULL, err4);
 }
 
 test "lockfree_core - statistics" {
-    const queue = lfq_spsc_create(32, 256) orelse return;
+    const queue = lfq_spsc_create(32, 256);
+    try std.testing.expect(queue != null);
     defer lfq_spsc_destroy(queue);
 
     var stats: LFQ_Stats = undefined;

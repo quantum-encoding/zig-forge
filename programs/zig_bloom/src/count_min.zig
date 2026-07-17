@@ -82,9 +82,8 @@ pub const CountMinSketch = struct {
 
     /// Add an item with specific count
     pub fn addN(self: *Self, item: anytype, count: u32) void {
-        const data = toBytes(item);
         for (self.counters, self.seeds) |row, seed| {
-            const hash = std.hash.Wyhash.hash(seed, data);
+            const hash = hashItem(item, seed);
             const idx = hash % self.width;
             row[idx] +|= count; // Saturating add
         }
@@ -93,11 +92,10 @@ pub const CountMinSketch = struct {
 
     /// Estimate the count of an item
     pub fn estimate(self: *const Self, item: anytype) u32 {
-        const data = toBytes(item);
         var min_count: u32 = std.math.maxInt(u32);
 
         for (self.counters, self.seeds) |row, seed| {
-            const hash = std.hash.Wyhash.hash(seed, data);
+            const hash = hashItem(item, seed);
             const idx = hash % self.width;
             min_count = @min(min_count, row[idx]);
         }
@@ -146,17 +144,22 @@ pub const CountMinSketch = struct {
             self.depth * @sizeOf([]u32);
     }
 
-    fn toBytes(item: anytype) []const u8 {
+    /// Hash an item with the given seed. For non-slice types the bytes are
+    /// hashed *inside* this frame while the by-value `item` copy is still live —
+    /// returning `std.mem.asBytes(&item)` from a `toBytes` helper would dangle
+    /// into that helper's dead stack frame (the same fix already applied to
+    /// HyperLogLog.hashItem).
+    fn hashItem(item: anytype, seed: u64) u64 {
         const T = @TypeOf(item);
         if (T == []const u8) {
-            return item;
+            return std.hash.Wyhash.hash(seed, item);
         } else if (@typeInfo(T) == .pointer) {
             const child = @typeInfo(T).pointer.child;
             if (child == u8) {
-                return item;
+                return std.hash.Wyhash.hash(seed, item);
             }
         }
-        return std.mem.asBytes(&item);
+        return std.hash.Wyhash.hash(seed, std.mem.asBytes(&item));
     }
 };
 

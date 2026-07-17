@@ -573,20 +573,39 @@ pub const NatsServer = struct {
         }
     }
 
+    /// Constant-time equality for auth secrets (token / password).
+    ///
+    /// The length check short-circuits (leaking only the secret's length is
+    /// acceptable — see CLAUDE.md EQL-FOR-SECRETS class 3), but once the
+    /// lengths match the byte comparison runs over the full length with no
+    /// early exit, so it does not leak the position of the first differing
+    /// byte via timing. `std.crypto.timing_safe.eql` requires comptime-sized
+    /// arrays, which we don't have for variable-length secrets, so we use the
+    /// documented constant-time-loop alternative.
+    fn secretEql(expected: []const u8, claim: []const u8) bool {
+        if (expected.len != claim.len) return false;
+        var diff: u8 = 0;
+        for (expected, claim) |e, c| {
+            diff |= e ^ c;
+        }
+        return diff == 0;
+    }
+
     fn validateAuth(self: *NatsServer, connect_json: []const u8) bool {
         // Token auth
         if (self.config.auth_token) |expected_token| {
             const client_token = protocol.jsonGetString(connect_json, "auth_token") orelse return false;
-            return std.mem.eql(u8, client_token, expected_token);
+            return secretEql(expected_token, client_token);
         }
 
         // User/password auth
         if (self.config.auth_user) |expected_user| {
             const client_user = protocol.jsonGetString(connect_json, "user") orelse return false;
-            if (!std.mem.eql(u8, client_user, expected_user)) return false;
+            // Usernames are not secrets, but compare in constant time for uniformity.
+            if (!secretEql(expected_user, client_user)) return false;
             if (self.config.auth_pass) |expected_pass| {
                 const client_pass = protocol.jsonGetString(connect_json, "pass") orelse return false;
-                return std.mem.eql(u8, client_pass, expected_pass);
+                return secretEql(expected_pass, client_pass);
             }
             return true;
         }

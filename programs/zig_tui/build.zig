@@ -4,8 +4,9 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Main library module
-    const lib_mod = b.createModule(.{
+    // Main library module — exposed as a consumable module for other
+    // in-tree projects (`@import("zig_tui")`).
+    const lib_mod = b.addModule("zig_tui", .{
         .root_source_file = b.path("src/lib.zig"),
         .target = target,
         .optimize = optimize,

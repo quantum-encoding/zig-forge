@@ -1448,28 +1448,16 @@ export fn quantum_bitcoin_txid(
 
     const data = raw_tx[0..raw_tx_len];
 
-    // Check for SegWit marker
-    var is_segwit = false;
-    if (raw_tx_len > 5 and data[4] == 0x00 and data[5] == 0x01) {
-        is_segwit = true;
-    }
-
-    if (is_segwit) {
-        // For SegWit, we need to strip the marker, flag, and witness data
-        // This is a simplified version - proper implementation would reconstruct
-        // the legacy serialization. For now, we parse and reserialize.
-        // TODO: Implement proper witness stripping for accurate txid
-        setLastError("Bitcoin txid: SegWit txid calculation not yet implemented");
+    // Compute the txid over the legacy (witness-stripped) serialization. This is
+    // correct for both legacy and SegWit transactions: for SegWit, the marker,
+    // flag, and witness stacks are excluded (they are committed to by the wtxid,
+    // not the txid — BIP141). The result is in internal (little-endian) order.
+    const txid_bytes = bitcoin_tx.computeTxid(data) catch {
+        setLastError("Bitcoin txid: malformed transaction");
         return @intFromEnum(QuantumCryptoError.invalid_input);
-    }
+    };
 
-    // Non-SegWit: just double-hash the whole thing
-    var first_hash: [32]u8 = undefined;
-    var second_hash: [32]u8 = undefined;
-    crypto.hash.sha2.Sha256.hash(data, &first_hash, .{});
-    crypto.hash.sha2.Sha256.hash(&first_hash, &second_hash, .{});
-
-    @memcpy(txid[0..32], &second_hash);
+    @memcpy(txid[0..32], &txid_bytes);
     return @intFromEnum(QuantumCryptoError.success);
 }
 

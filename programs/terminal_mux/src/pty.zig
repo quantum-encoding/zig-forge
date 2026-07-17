@@ -74,6 +74,10 @@ pub const Pty = struct {
         if (openpty(&master_fd, &slave_fd, null, null, &ws) != 0) {
             return error.OpenptyFailed;
         }
+        // Masters must not leak into spawned shells: a later pane's child
+        // inheriting an earlier pane's master keeps that PTY alive forever
+        // (and the same class of leak made ctl connections never EOF).
+        _ = c.fcntl(master_fd, c.F.SETFD, @as(c_int, c.FD_CLOEXEC));
 
         // openpty hands back the slave fd directly; we don't track a path.
         var slave_path: [32]u8 = undefined;
@@ -98,6 +102,8 @@ pub const Pty = struct {
             .NOCTTY = true,
         }, 0);
         errdefer _ = std.c.close(master_fd);
+        // Same CLOEXEC rationale as the Darwin path: masters never reach children.
+        _ = c.fcntl(master_fd, c.F.SETFD, @as(c_int, c.FD_CLOEXEC));
 
         // Unlock the slave
         var unlock: c_int = 0;
@@ -141,11 +147,31 @@ pub const Pty = struct {
     /// Close the PTY
     pub fn close(self: *Self) void {
         if (self.child_pid) |pid| {
-            // Try to kill the child process
+            // TERM, then reap. Without the waitpid every closed pane left a
+            // zombie for the life of the host process — the GUI embeddings
+            // (CosmicDuck/aiconductor) run for days and accumulate one per
+            // closed tab/split. If TERM hasn't landed yet, escalate to KILL
+            // and reap synchronously (KILL cannot be caught; the reap is
+            // immediate, no unbounded block).
             _ = posix.kill(pid, posix.SIG.TERM) catch {};
+            var i: u8 = 0;
+            var reaped = false;
+            while (i < 20) : (i += 1) { // ~100ms grace for a clean TERM exit
+                if (c.waitpid(pid, null, c.W.NOHANG) != 0) {
+                    reaped = true;
+                    break;
+                }
+                var no_fds = [_]posix.pollfd{};
+                _ = posix.poll(&no_fds, 5) catch {}; // 5ms portable sleep
+            }
+            if (!reaped) {
+                _ = posix.kill(pid, posix.SIG.KILL) catch {};
+                _ = c.waitpid(pid, null, 0);
+            }
+            self.child_pid = null;
         }
 
-        _ = std.c.close(self.slave_fd);
+        if (self.slave_fd >= 0) _ = std.c.close(self.slave_fd);
         _ = std.c.close(self.master_fd);
     }
 

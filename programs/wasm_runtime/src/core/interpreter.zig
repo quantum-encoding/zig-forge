@@ -118,12 +118,14 @@ pub const Memory = struct {
     }
 
     pub fn loadI32(self: *const Memory, addr: u32) TrapError!i32 {
-        if (addr + 4 > self.data.len) return error.OutOfBoundsMemoryAccess;
+        const end = @as(usize, addr) + 4;
+        if (end > self.data.len) return error.OutOfBoundsMemoryAccess;
         return std.mem.readInt(i32, self.data[addr..][0..4], .little);
     }
 
     pub fn loadI64(self: *const Memory, addr: u32) TrapError!i64 {
-        if (addr + 8 > self.data.len) return error.OutOfBoundsMemoryAccess;
+        const end = @as(usize, addr) + 8;
+        if (end > self.data.len) return error.OutOfBoundsMemoryAccess;
         return std.mem.readInt(i64, self.data[addr..][0..8], .little);
     }
 
@@ -148,12 +150,14 @@ pub const Memory = struct {
     }
 
     pub fn loadI16(self: *const Memory, addr: u32) TrapError!i16 {
-        if (addr + 2 > self.data.len) return error.OutOfBoundsMemoryAccess;
+        const end = @as(usize, addr) + 2;
+        if (end > self.data.len) return error.OutOfBoundsMemoryAccess;
         return std.mem.readInt(i16, self.data[addr..][0..2], .little);
     }
 
     pub fn loadU16(self: *const Memory, addr: u32) TrapError!u16 {
-        if (addr + 2 > self.data.len) return error.OutOfBoundsMemoryAccess;
+        const end = @as(usize, addr) + 2;
+        if (end > self.data.len) return error.OutOfBoundsMemoryAccess;
         return std.mem.readInt(u16, self.data[addr..][0..2], .little);
     }
 
@@ -174,12 +178,14 @@ pub const Memory = struct {
     }
 
     pub fn storeI32(self: *Memory, addr: u32, val: i32) TrapError!void {
-        if (addr + 4 > self.data.len) return error.OutOfBoundsMemoryAccess;
+        const end = @as(usize, addr) + 4;
+        if (end > self.data.len) return error.OutOfBoundsMemoryAccess;
         std.mem.writeInt(i32, self.data[addr..][0..4], val, .little);
     }
 
     pub fn storeI64(self: *Memory, addr: u32, val: i64) TrapError!void {
-        if (addr + 8 > self.data.len) return error.OutOfBoundsMemoryAccess;
+        const end = @as(usize, addr) + 8;
+        if (end > self.data.len) return error.OutOfBoundsMemoryAccess;
         std.mem.writeInt(i64, self.data[addr..][0..8], val, .little);
     }
 
@@ -197,7 +203,8 @@ pub const Memory = struct {
     }
 
     pub fn storeI16(self: *Memory, addr: u32, val: i32) TrapError!void {
-        if (addr + 2 > self.data.len) return error.OutOfBoundsMemoryAccess;
+        const end = @as(usize, addr) + 2;
+        if (end > self.data.len) return error.OutOfBoundsMemoryAccess;
         std.mem.writeInt(i16, self.data[addr..][0..2], @truncate(@as(i32, val)), .little);
     }
 };
@@ -535,6 +542,12 @@ pub const Instance = struct {
 
     /// Internal function call - assumes args already on stack
     fn callFuncInternal(self: *Instance, func_idx: u32) TrapError!?Value {
+        // Depth guard: untrusted guests recurse through native Zig stack frames
+        // (executeOp -> callFuncInternal -> execute -> executeOp). Without this
+        // bound a recursive module overflows the host's native stack and crashes
+        // the process (untrusted-input DoS). Enforce the declared limit here.
+        if (self.call_stack.items.len >= self.max_call_depth) return error.CallStackExhaustion;
+
         const func_type = self.module.getFuncType(func_idx) orelse return error.InvalidFunction;
 
         // Check if import or defined
@@ -572,10 +585,26 @@ pub const Instance = struct {
         var frame = try self.createFrame(func_idx, func_type, code);
         errdefer frame.deinit();
 
+        // Record the depth before pushing so we can tell, after execution,
+        // whether this call's frame is still on the stack (normal fall-through
+        // via the terminal `end`) or was already popped by an explicit
+        // `.return` opcode.
+        const call_depth_before = self.call_stack.items.len;
         self.call_stack.append(self.allocator, frame) catch return error.OutOfMemory;
 
         // Execute
         try self.execute(code.body);
+
+        // Pop this call's frame on normal return. The `.return` opcode pops its
+        // own frame eagerly; a function that terminates by falling off its final
+        // `end` does not, so without this the frame lingers on `call_stack` and
+        // the caller's subsequent local_get/local_set read the callee's locals.
+        if (self.call_stack.items.len > call_depth_before) {
+            if (self.call_stack.pop()) |popped| {
+                var f = popped;
+                f.deinit();
+            }
+        }
 
         // Get return value
         if (func_type.results.len > 0) {
@@ -1934,4 +1963,28 @@ test "memory grow" {
     const result = try mem.grow(1);
     try std.testing.expectEqual(@as(i32, 1), result);
     try std.testing.expectEqual(@as(u32, 2), mem.size());
+}
+
+test "memory bounds arithmetic does not overflow-panic near maxInt(u32)" {
+    // Regression: effective addresses are formed with wrapping add
+    // (base +% offset) and can land near maxInt(u32). The bounds check must
+    // widen to usize before adding N, so a near-max address TRAPS
+    // (OutOfBoundsMemoryAccess) rather than panicking on u32 overflow in safe
+    // builds. Previously `addr + N > self.data.len` with addr: u32 panicked.
+    var mem = try Memory.init(std.testing.allocator, .{ .min = 1 });
+    defer mem.deinit();
+
+    const near_max: u32 = std.math.maxInt(u32) - 1; // addr + 4 overflows u32
+    try std.testing.expectError(error.OutOfBoundsMemoryAccess, mem.loadI32(near_max));
+    try std.testing.expectError(error.OutOfBoundsMemoryAccess, mem.loadI64(near_max));
+    try std.testing.expectError(error.OutOfBoundsMemoryAccess, mem.loadI16(near_max));
+    try std.testing.expectError(error.OutOfBoundsMemoryAccess, mem.loadU16(near_max));
+    try std.testing.expectError(error.OutOfBoundsMemoryAccess, mem.storeI32(near_max, 0));
+    try std.testing.expectError(error.OutOfBoundsMemoryAccess, mem.storeI64(near_max, 0));
+    try std.testing.expectError(error.OutOfBoundsMemoryAccess, mem.storeI16(near_max, 0));
+
+    // Exact-boundary case: last valid i32 slot is [len-4 .. len); len-3 traps.
+    const len: u32 = @intCast(mem.data.len);
+    try std.testing.expectEqual(@as(i32, 0), try mem.loadI32(len - 4));
+    try std.testing.expectError(error.OutOfBoundsMemoryAccess, mem.loadI32(len - 3));
 }

@@ -32,12 +32,9 @@ pub const HeyGenClient = struct {
 
     /// Video Agent: simple prompt → video generation.
     pub fn generateVideoAgent(self: *HeyGenClient, prompt: []const u8) ![]u8 {
-        const escaped = try common.escapeJsonString(self.allocator, prompt);
-        defer self.allocator.free(escaped);
-
-        const payload = try std.fmt.allocPrint(self.allocator,
-            \\{{"prompt":"{s}"}}
-        , .{escaped});
+        const payload = try std.json.Stringify.valueAlloc(self.allocator, .{
+            .prompt = prompt,
+        }, .{});
         defer self.allocator.free(payload);
 
         const headers = [_]std.http.Header{
@@ -66,23 +63,31 @@ pub const HeyGenClient = struct {
         width: u32,
         height: u32,
     ) ![]u8 {
-        const escaped_text = try common.escapeJsonString(self.allocator, script_text);
-        defer self.allocator.free(escaped_text);
-
-        // Build voice section
-        var voice_part: []u8 = undefined;
-        if (voice_id) |vid| {
-            voice_part = try std.fmt.allocPrint(self.allocator,
-                \\,"voice_id":"{s}"
-            , .{vid});
-        } else {
-            voice_part = try self.allocator.dupe(u8, "");
-        }
-        defer self.allocator.free(voice_part);
-
-        const payload = try std.fmt.allocPrint(self.allocator,
-            \\{{"video_inputs":[{{"character":{{"type":"avatar","avatar_id":"{s}"}},"voice":{{"type":"text","input_text":"{s}"{s}}}}}],"dimension":{{"width":{},"height":{}}}}}
-        , .{ avatar_id, escaped_text, voice_part, width, height });
+        // Emit the whole body via std.json.Stringify. Identifier fields
+        // (avatar_id, voice_id) are now escaped like everything else, so a
+        // `"` in any of them can no longer break or inject into the JSON.
+        // `emit_null_optional_fields = false` preserves the prior wire shape:
+        // voice_id is omitted entirely when the caller passes null.
+        const Character = struct {
+            type: []const u8 = "avatar",
+            avatar_id: []const u8,
+        };
+        const Voice = struct {
+            type: []const u8 = "text",
+            input_text: []const u8,
+            voice_id: ?[]const u8 = null,
+        };
+        const VideoInput = struct {
+            character: Character,
+            voice: Voice,
+        };
+        const payload = try std.json.Stringify.valueAlloc(self.allocator, .{
+            .video_inputs = [_]VideoInput{.{
+                .character = .{ .avatar_id = avatar_id },
+                .voice = .{ .input_text = script_text, .voice_id = voice_id },
+            }},
+            .dimension = .{ .width = width, .height = height },
+        }, .{ .emit_null_optional_fields = false });
         defer self.allocator.free(payload);
 
         const headers = [_]std.http.Header{

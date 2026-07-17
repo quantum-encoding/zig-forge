@@ -19,6 +19,13 @@ pub const Parser = struct {
     params: [16]u16 = [_]u16{0} ** 16,
     param_count: u8 = 0,
     intermediate: u8 = 0,
+    /// Accumulator for a UTF-8 codepoint being decoded from the input stream.
+    /// Kept separate from `params` (which is u16) so 4-byte sequences that
+    /// decode to codepoints > U+FFFF are represented correctly.
+    utf8_acc: u21 = 0,
+    /// Number of UTF-8 continuation bytes still expected for the codepoint in
+    /// `utf8_acc`. The `.utf8_2/3/4` states each decrement this toward zero.
+    utf8_remaining: u8 = 0,
 
     const Self = @This();
 
@@ -43,9 +50,7 @@ pub const Parser = struct {
             .csi_param => self.handleCsiParam(byte),
             .csi_intermediate => self.handleCsiIntermediate(byte),
             .ss3 => self.handleSs3(byte),
-            .utf8_2 => self.handleUtf8Continuation(byte, 2),
-            .utf8_3 => self.handleUtf8Continuation(byte, 3),
-            .utf8_4 => self.handleUtf8Continuation(byte, 4),
+            .utf8_2, .utf8_3, .utf8_4 => self.handleUtf8Continuation(byte),
         };
     }
 
@@ -54,6 +59,8 @@ pub const Parser = struct {
         self.state = .ground;
         self.param_count = 0;
         self.intermediate = 0;
+        self.utf8_acc = 0;
+        self.utf8_remaining = 0;
         @memset(&self.params, 0);
     }
 
@@ -79,17 +86,21 @@ pub const Parser = struct {
             return Event{ .key = KeyEvent.char(byte) };
         }
 
-        // UTF-8 multi-byte start
+        // UTF-8 multi-byte start. Seed the accumulator with the leading
+        // byte's data bits and record how many continuation bytes follow.
         if (byte >= 0xC0 and byte < 0xE0) {
-            self.params[0] = byte & 0x1F;
+            self.utf8_acc = byte & 0x1F;
+            self.utf8_remaining = 1;
             self.state = .utf8_2;
             return null;
         } else if (byte >= 0xE0 and byte < 0xF0) {
-            self.params[0] = byte & 0x0F;
+            self.utf8_acc = byte & 0x0F;
+            self.utf8_remaining = 2;
             self.state = .utf8_3;
             return null;
         } else if (byte >= 0xF0 and byte < 0xF8) {
-            self.params[0] = byte & 0x07;
+            self.utf8_acc = byte & 0x07;
+            self.utf8_remaining = 3;
             self.state = .utf8_4;
             return null;
         }
@@ -182,7 +193,10 @@ pub const Parser = struct {
             if (self.param_count == 0) self.param_count = 1;
             const idx = self.param_count - 1;
             if (idx < self.params.len) {
-                self.params[idx] = self.params[idx] * 10 + (byte - '0');
+                // Saturate at u16 max so a crafted oversized parameter (e.g.
+                // `ESC [ 70000 ~`) can't trip integer-overflow illegal
+                // behavior and panic a ReleaseSafe build mid-raw-mode.
+                self.params[idx] = self.params[idx] *| 10 +| @as(u16, byte - '0');
             }
             return null;
         } else if (byte == ';') {
@@ -342,25 +356,35 @@ pub const Parser = struct {
         };
     }
 
-    fn handleUtf8Continuation(self: *Self, byte: u8, expected_bytes: u8) ?Event {
-        // Check for valid continuation byte
+    fn handleUtf8Continuation(self: *Self, byte: u8) ?Event {
+        // A valid continuation byte is 0b10xxxxxx.
         if ((byte & 0xC0) != 0x80) {
+            // Malformed sequence: abandon the partial codepoint and reprocess
+            // this byte from ground so the following keystroke isn't swallowed
+            // (a lone ASCII/ESC byte after a truncated sequence must survive).
+            self.utf8_acc = 0;
+            self.utf8_remaining = 0;
             self.state = .ground;
-            return null; // Invalid UTF-8
+            return self.handleGround(byte);
         }
 
-        self.params[0] = (self.params[0] << 6) | (byte & 0x3F);
+        self.utf8_acc = (self.utf8_acc << 6) | (byte & 0x3F);
+        self.utf8_remaining -= 1;
 
-        if (expected_bytes == 2) {
+        if (self.utf8_remaining == 0) {
+            const cp = self.utf8_acc;
+            self.utf8_acc = 0;
             self.state = .ground;
-            return Event{ .key = KeyEvent.char(@intCast(self.params[0])) };
-        } else if (expected_bytes == 3) {
-            self.state = .utf8_3;
-            return null;
-        } else {
-            self.state = .utf8_4;
-            return null;
+            return Event{ .key = KeyEvent.char(cp) };
         }
+
+        // More continuation bytes expected; step down toward emission.
+        self.state = switch (self.utf8_remaining) {
+            1 => .utf8_2,
+            2 => .utf8_3,
+            else => .utf8_4,
+        };
+        return null;
     }
 };
 
@@ -395,4 +419,79 @@ test "Parser Ctrl+C" {
     try std.testing.expect(event_opt != null);
     const e = event_opt.?;
     try std.testing.expect(e.isCtrlC());
+}
+
+fn feedBytes(p: *Parser, bytes: []const u8) ?Event {
+    var result: ?Event = null;
+    for (bytes) |b| {
+        if (p.feed(b)) |ev| result = ev;
+    }
+    return result;
+}
+
+test "Parser UTF-8 2-byte (é)" {
+    var p = Parser{};
+    // U+00E9 'é' == C3 A9
+    const ev = feedBytes(&p, "\xC3\xA9");
+    try std.testing.expect(ev != null);
+    try std.testing.expect(ev.?.key.key == .char);
+    try std.testing.expectEqual(@as(u21, 0x00E9), ev.?.key.key.char);
+    try std.testing.expect(p.state == .ground);
+}
+
+test "Parser UTF-8 3-byte (日)" {
+    var p = Parser{};
+    // U+65E5 '日' == E6 97 A5
+    try std.testing.expect(p.feed(0xE6) == null);
+    try std.testing.expect(p.feed(0x97) == null);
+    const ev = p.feed(0xA5);
+    try std.testing.expect(ev != null);
+    try std.testing.expect(ev.?.key.key == .char);
+    try std.testing.expectEqual(@as(u21, 0x65E5), ev.?.key.key.char);
+    try std.testing.expect(p.state == .ground);
+}
+
+test "Parser UTF-8 4-byte (😀) decodes above U+FFFF" {
+    var p = Parser{};
+    // U+1F600 '😀' == F0 9F 98 80
+    try std.testing.expect(p.feed(0xF0) == null);
+    try std.testing.expect(p.feed(0x9F) == null);
+    try std.testing.expect(p.feed(0x98) == null);
+    const ev = p.feed(0x80);
+    try std.testing.expect(ev != null);
+    try std.testing.expect(ev.?.key.key == .char);
+    try std.testing.expectEqual(@as(u21, 0x1F600), ev.?.key.key.char);
+    try std.testing.expect(p.state == .ground);
+}
+
+test "Parser ASCII byte after completed UTF-8 sequence is delivered" {
+    var p = Parser{};
+    const jp = feedBytes(&p, "\xE6\x97\xA5"); // 日
+    try std.testing.expect(jp != null);
+    try std.testing.expectEqual(@as(u21, 0x65E5), jp.?.key.key.char);
+    // The next keystroke must still arrive.
+    const a = p.feed('a');
+    try std.testing.expect(a != null);
+    try std.testing.expectEqual(@as(u21, 'a'), a.?.key.key.char);
+}
+
+test "Parser malformed UTF-8 continuation recovers the following byte" {
+    var p = Parser{};
+    // Start a 3-byte sequence then feed a non-continuation ASCII byte.
+    try std.testing.expect(p.feed(0xE6) == null);
+    const a = p.feed('a'); // not a continuation byte
+    try std.testing.expect(a != null);
+    try std.testing.expectEqual(@as(u21, 'a'), a.?.key.key.char);
+    try std.testing.expect(p.state == .ground);
+}
+
+test "Parser CSI oversized parameter saturates instead of overflowing" {
+    var p = Parser{};
+    // ESC [ 70000 ~ : 70000 > u16 max; must not panic and must saturate.
+    _ = p.feed(0x1B);
+    _ = p.feed('[');
+    for ("70000") |d| _ = p.feed(d);
+    _ = p.feed('~');
+    try std.testing.expectEqual(@as(u16, std.math.maxInt(u16)), p.params[0]);
+    try std.testing.expect(p.state == .ground);
 }

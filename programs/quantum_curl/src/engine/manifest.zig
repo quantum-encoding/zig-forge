@@ -140,9 +140,11 @@ pub const ResponseManifest = struct {
     pub fn toJson(self: *const ResponseManifest, writer: anytype) !void {
         try writer.writeAll("{");
 
-        // ID
+        // ID — must be escaped: `id` comes straight from the plan file and an
+        // unescaped `"`/`\`/control char would break the JSONL line or inject
+        // arbitrary telemetry fields (JSON-IN-FMT).
         try writer.writeAll("\"id\":\"");
-        try writer.writeAll(self.id);
+        try writeEscapedString(writer, self.id);
         try writer.writeAll("\",");
 
         // Status

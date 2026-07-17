@@ -1,0 +1,8 @@
+.{
+    .name = .duck_cache_scribe,
+    .version = "0.1.0",
+    .fingerprint = 0x330dbc9fa3c22e00,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{ "build.zig", "build.zig.zon", "src", "README.md" },
+    .dependencies = .{},
+}

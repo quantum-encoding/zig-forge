@@ -109,6 +109,11 @@ pub const Document = struct {
                         self.allocator.free(row.cells);
                     }
                     self.allocator.free(t.rows);
+                    // col_widths is heap-allocated by builders that set it
+                    // (e.g. fra.zig); the DOCX parser leaves it as the empty
+                    // default. Guard on len so freeing the static empty slice
+                    // is a no-op.
+                    if (t.col_widths.len > 0) self.allocator.free(t.col_widths);
                 },
             }
         }
@@ -554,6 +559,11 @@ test {
     _ = rels;
     _ = styles;
     _ = mdx;
+    // Previously-dark test files: without an explicit reference here their
+    // `test` blocks are never collected by `zig build test` (docx.zig is the
+    // test root). Wire in the ZIP reader and FRA generator coverage.
+    _ = zip;
+    _ = fra;
 }
 
 test "parse minimal document XML" {

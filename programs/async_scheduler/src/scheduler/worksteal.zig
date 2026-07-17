@@ -8,14 +8,59 @@ const Condition = sync.Condition;
 const deque_mod = @import("../deque/worksteal.zig");
 const ThreadPool = @import("../executor/threadpool.zig").ThreadPool;
 const Task = @import("../task/handle.zig").Task;
+/// Number of tasks a worker pulls from the shared injector into its own deque
+/// per idle cycle. Batching keeps injector-mutex traffic low and populates the
+/// worker's deque so other workers can steal from it.
+const injector_batch: usize = 32;
+
 pub const Scheduler = struct {
     const Self = @This();
     const WorkQueue = deque_mod.WorkStealDeque(*TaskEntry);
     const TaskMap = std.AutoHashMap(u64, *TaskEntry);
+
+    /// Multi-producer / multi-consumer injector queue.
+    ///
+    /// Spawner threads (any thread — the C API advertises "safe to call from any
+    /// thread") enqueue here under a mutex; worker threads drain from here into
+    /// their own single-owner deque. This restores the Chase-Lev invariant that
+    /// only the owning worker ever touches its deque's `bottom` via push/pop,
+    /// which the previous design violated by having arbitrary spawners push
+    /// directly into `work_queues[task_id % n]`.
+    ///
+    /// Intrusive FIFO (via `TaskEntry.next`) so enqueue/dequeue never allocate.
+    const Injector = struct {
+        head: ?*TaskEntry = null,
+        tail: ?*TaskEntry = null,
+        mutex: Mutex = .{},
+
+        fn push(self: *Injector, entry: *TaskEntry) void {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            entry.next = null;
+            if (self.tail) |t| {
+                t.next = entry;
+            } else {
+                self.head = entry;
+            }
+            self.tail = entry;
+        }
+
+        fn pop(self: *Injector) ?*TaskEntry {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            const entry = self.head orelse return null;
+            self.head = entry.next;
+            if (self.head == null) self.tail = null;
+            entry.next = null;
+            return entry;
+        }
+    };
+
     allocator: std.mem.Allocator,
     thread_count: usize,
     thread_pool: ThreadPool,
     work_queues: []*WorkQueue,
+    injector: Injector,
     task_map: TaskMap,
     task_map_mutex: Mutex,
     next_task_id: std.atomic.Value(u64),
@@ -35,6 +80,9 @@ pub const Scheduler = struct {
         ref_count: std.atomic.Value(u32) = .{ .raw = 1 },
         mutex: Mutex = .{},
         cond: Condition = .{},
+        /// Intrusive link for the scheduler's injector FIFO. Only touched while
+        /// the injector mutex is held.
+        next: ?*TaskEntry = null,
         pub fn execute(self: *TaskEntry) void {
             self.task.state.store(.running, .release);
             self.func(self.context);
@@ -69,6 +117,7 @@ pub const Scheduler = struct {
             .thread_count = thread_count,
             .thread_pool = thread_pool,
             .work_queues = work_queues,
+            .injector = .{},
             .task_map = TaskMap.init(allocator),
             .task_map_mutex = Mutex{},
             .next_task_id = std.atomic.Value(u64).init(0),
@@ -143,9 +192,10 @@ pub const Scheduler = struct {
             defer self.task_map_mutex.unlock();
             try self.task_map.put(task_id, entry);
         }
-        // Push to queue (lock-free)
-        const thread_id = task_id % self.thread_count;
-        try self.work_queues[thread_id].push(entry);
+        // Enqueue on the shared MPMC injector. Spawners must NOT touch any
+        // worker's single-owner deque directly (that was the multi-producer
+        // push race); workers drain the injector into their own deque.
+        self.injector.push(entry);
         // Wake up all workers
         self.work_mutex.lock();
         self.work_cond.broadcast();
@@ -162,6 +212,11 @@ pub const Scheduler = struct {
                 self.unregisterTask(entry);
                 continue;
             }
+            // Drain freshly-submitted work from the shared injector into our own
+            // single-owner deque (only this worker pushes/pops its deque, so the
+            // Chase-Lev invariant holds). Populating the deque also lets other
+            // idle workers steal from us.
+            if (self.drainInjector(worker_id)) continue;
             // Work stealing: try to steal from random queue
             var attempts: usize = 0;
             var found_work = false;
@@ -191,6 +246,25 @@ pub const Scheduler = struct {
             self.work_mutex.unlock();
         }
     }
+    /// Pull up to `injector_batch` tasks from the shared injector into this
+    /// worker's own deque. Returns true if at least one task was obtained.
+    /// Only the owning worker calls `push` on `work_queues[worker_id]`, so the
+    /// single-owner deque contract is preserved. If a `push` fails (OOM while
+    /// growing), the task is executed inline rather than dropped.
+    fn drainInjector(self: *Self, worker_id: usize) bool {
+        var got = false;
+        var n: usize = 0;
+        while (n < injector_batch) : (n += 1) {
+            const entry = self.injector.pop() orelse break;
+            got = true;
+            self.work_queues[worker_id].push(entry) catch {
+                entry.execute();
+                self.unregisterTask(entry);
+            };
+        }
+        return got;
+    }
+
     fn unregisterTask(self: *Self, entry: *TaskEntry) void {
         self.task_map_mutex.lock();
         _ = self.task_map.remove(entry.task.id);

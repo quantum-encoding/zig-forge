@@ -99,7 +99,7 @@ pub const FileBrowser = struct {
         return .{
             .allocator = allocator,
             .current_path = &.{},
-            .entries = .{},
+            .entries = .empty,
             .selected_idx = 0,
             .scroll_offset = 0,
             .show_hidden = false,

@@ -21,6 +21,16 @@ const PageTree = page_mod.PageTree;
 const CMap = cmap_mod.CMap;
 
 /// PDF Document - reads entire file into memory for processing
+/// A decompressed object stream plus the header metadata (`/N`, `/First`) read
+/// from its stream dictionary. `first` is the byte offset within `data` where
+/// the stored objects begin; `n` is the number of objects. `data` is owned and
+/// freed when the document closes.
+const ObjStmCache = struct {
+    data: []u8,
+    first: usize,
+    n: u32,
+};
+
 pub const Document = struct {
     data: []const u8,
     size: usize,
@@ -29,7 +39,7 @@ pub const Document = struct {
     allocator: std.mem.Allocator,
 
     // Cache for decompressed object streams (keyed by stream object number)
-    objstm_cache: std.AutoHashMap(u32, []u8),
+    objstm_cache: std.AutoHashMap(u32, ObjStmCache),
 
     pub const OpenError = error{
         FileNotFound,
@@ -107,7 +117,7 @@ pub const Document = struct {
             .xref_table = xref_table,
             .version = version,
             .allocator = allocator,
-            .objstm_cache = std.AutoHashMap(u32, []u8).init(allocator),
+            .objstm_cache = std.AutoHashMap(u32, ObjStmCache).init(allocator),
         };
     }
 
@@ -115,8 +125,8 @@ pub const Document = struct {
     pub fn close(self: *Document) void {
         // Free cached object stream data
         var iter = self.objstm_cache.valueIterator();
-        while (iter.next()) |cached_data| {
-            self.allocator.free(cached_data.*);
+        while (iter.next()) |cached| {
+            self.allocator.free(cached.data);
         }
         self.objstm_cache.deinit();
         self.xref_table.deinit();
@@ -274,7 +284,7 @@ pub const Document = struct {
 
         switch (page_obj) {
             .dict => |dict_bytes| {
-                return self.parseMediaBox(dict_bytes);
+                return self.parseMediaBox(dict_bytes, 0);
             },
             else => return error.InvalidObject,
         }
@@ -291,8 +301,13 @@ pub const Document = struct {
         }
     }
 
-    /// Parse MediaBox from a page dictionary, with inheritance support
-    fn parseMediaBox(self: *Document, page_dict: []const u8) !PageDimensions {
+    /// Maximum /Parent chain length walked when resolving an inherited MediaBox.
+    const MAX_MEDIABOX_PARENT_DEPTH: u32 = 64;
+
+    /// Parse MediaBox from a page dictionary, with inheritance support.
+    /// `depth` bounds the /Parent walk so a self-referential or cyclic parent
+    /// pointer cannot recurse forever / overflow the stack.
+    fn parseMediaBox(self: *Document, page_dict: []const u8, depth: u32) !PageDimensions {
         var parser = DictParser.init(page_dict);
 
         // Try to get MediaBox directly
@@ -303,18 +318,20 @@ pub const Document = struct {
         }
 
         // Check for inherited MediaBox from Parent
-        if (parser.get("Parent")) |parent_obj| {
-            switch (parent_obj) {
-                .reference => |ref| {
-                    const parent = self.resolveRef(ref) catch return PageDimensions.letter;
-                    switch (parent) {
-                        .dict => |parent_dict| {
-                            return self.parseMediaBox(parent_dict);
-                        },
-                        else => {},
-                    }
-                },
-                else => {},
+        if (depth < MAX_MEDIABOX_PARENT_DEPTH) {
+            if (parser.get("Parent")) |parent_obj| {
+                switch (parent_obj) {
+                    .reference => |ref| {
+                        const parent = self.resolveRef(ref) catch return PageDimensions.letter;
+                        switch (parent) {
+                            .dict => |parent_dict| {
+                                return self.parseMediaBox(parent_dict, depth + 1);
+                            },
+                            else => {},
+                        }
+                    },
+                    else => {},
+                }
             }
         }
 
@@ -496,7 +513,13 @@ pub const Document = struct {
         var page_refs = std.ArrayList(ObjectRef).empty;
         defer page_refs.deinit(self.allocator);
 
-        try self.traversePageTree(pages_ref, &page_refs);
+        // Cycle guard: a page tree whose /Kids form a loop (a node that points
+        // back at an ancestor) must not recurse forever. Track visited nodes by
+        // object number and cap the depth as a backstop.
+        var visited = std.AutoHashMap(u32, void).init(self.allocator);
+        defer visited.deinit();
+
+        try self.traversePageTree(pages_ref, &page_refs, &visited, 0);
 
         if (page_index >= page_refs.items.len) return error.PageNotFound;
         return page_refs.items[page_index];
@@ -505,8 +528,23 @@ pub const Document = struct {
     /// Error set for page tree traversal
     const PageTreeError = error{OutOfMemory};
 
+    /// Maximum page-tree recursion depth (backstop beyond the visited set).
+    const MAX_PAGE_TREE_DEPTH: u32 = 256;
+
     /// Recursively traverse the page tree collecting page references
-    fn traversePageTree(self: *Document, node_ref: ObjectRef, page_refs: *std.ArrayList(ObjectRef)) PageTreeError!void {
+    fn traversePageTree(
+        self: *Document,
+        node_ref: ObjectRef,
+        page_refs: *std.ArrayList(ObjectRef),
+        visited: *std.AutoHashMap(u32, void),
+        depth: u32,
+    ) PageTreeError!void {
+        if (depth >= MAX_PAGE_TREE_DEPTH) return;
+
+        // Skip nodes we've already entered — breaks /Kids cycles.
+        const gop = try visited.getOrPut(node_ref.obj_num);
+        if (gop.found_existing) return;
+
         const node_obj = self.resolveRef(node_ref) catch return;
 
         switch (node_obj) {
@@ -522,7 +560,7 @@ pub const Document = struct {
                     const kids_obj = parser.get("Kids") orelse return;
                     switch (kids_obj) {
                         .array => |kids_bytes| {
-                            try self.traversePageKids(kids_bytes, page_refs);
+                            try self.traversePageKids(kids_bytes, page_refs, visited, depth + 1);
                         },
                         else => {},
                     }
@@ -536,7 +574,15 @@ pub const Document = struct {
     }
 
     /// Parse Kids array and recurse
-    fn traversePageKids(self: *Document, kids_bytes: []const u8, page_refs: *std.ArrayList(ObjectRef)) PageTreeError!void {
+    fn traversePageKids(
+        self: *Document,
+        kids_bytes: []const u8,
+        page_refs: *std.ArrayList(ObjectRef),
+        visited: *std.AutoHashMap(u32, void),
+        depth: u32,
+    ) PageTreeError!void {
+        if (depth >= MAX_PAGE_TREE_DEPTH) return;
+
         var lex = Lexer.init(kids_bytes);
 
         while (true) {
@@ -554,7 +600,7 @@ pub const Document = struct {
                 .gen_num = @intCast(gen_tok.asInt() orelse continue),
             };
 
-            try self.traversePageTree(ref, page_refs);
+            try self.traversePageTree(ref, page_refs, visited, depth + 1);
         }
     }
 
@@ -722,8 +768,25 @@ pub const Document = struct {
     }
 
     /// Decompress object stream and add to cache
-    fn decompressAndCacheObjStm(self: *Document, stream_obj_num: u32, dict_bytes: []const u8, stream_data: []const u8) ![]u8 {
+    fn decompressAndCacheObjStm(self: *Document, stream_obj_num: u32, dict_bytes: []const u8, stream_data: []const u8) !ObjStmCache {
         var parser = DictParser.init(dict_bytes);
+
+        // /N (number of objects) and /First (byte offset of the first object)
+        // are mandatory for an object stream; read them from the dict rather
+        // than guessing where the header ends.
+        const n_val: u32 = blk: {
+            const n_obj = parser.get("N") orelse return error.InvalidObject;
+            const n_int = n_obj.asInt() orelse return error.InvalidObject;
+            if (n_int < 0) return error.InvalidObject;
+            break :blk @intCast(n_int);
+        };
+
+        const first_val: usize = blk: {
+            const first_obj = parser.get("First") orelse return error.InvalidObject;
+            const first_int = first_obj.asInt() orelse return error.InvalidObject;
+            if (first_int < 0) return error.InvalidObject;
+            break :blk @intCast(first_int);
+        };
 
         // Decompress if filtered
         const data = blk: {
@@ -735,56 +798,48 @@ pub const Document = struct {
             }
             break :blk try self.allocator.dupe(u8, stream_data);
         };
+        errdefer self.allocator.free(data);
 
-        // Store in cache
-        try self.objstm_cache.put(stream_obj_num, data);
-        return data;
+        if (first_val > data.len) return error.InvalidObject;
+
+        const entry = ObjStmCache{ .data = data, .first = first_val, .n = n_val };
+
+        // Store in cache (takes ownership of `data`)
+        try self.objstm_cache.put(stream_obj_num, entry);
+        return entry;
     }
 
-    /// Extract an object from cached object stream data
-    fn extractFromCachedObjStm(self: *Document, data: []const u8, obj_index: u16) !Object {
-        // Object stream format: "obj1_num obj1_off obj2_num obj2_off ... [actual objects starting at /First]"
-        // The offsets in the header are relative to where objects start
+    /// Extract an object from a cached object stream using its `/N` and `/First`.
+    fn extractFromCachedObjStm(self: *Document, entry: ObjStmCache, obj_index: u16) !Object {
+        _ = self;
 
-        var header_lex = Lexer.init(data);
-        var obj_offsets = std.ArrayList(struct { num: u32, off: usize }).empty;
-        defer obj_offsets.deinit(self.allocator);
+        // Object stream format: N "obj_num offset" header pairs, then the stored
+        // objects beginning at `first`. Offsets in the header are relative to
+        // `first`. Read exactly N pairs, bounded to the header region [0, first).
+        const data = entry.data;
+        if (obj_index >= entry.n) return error.ObjectNotFound;
+        if (entry.first > data.len) return error.InvalidObject;
 
-        // Read all object number/offset pairs
-        // Keep track of where the header ends (after all number pairs)
-        var last_valid_pos: usize = 0;
+        var header_lex = Lexer.init(data[0..entry.first]);
+        var target_offset: ?usize = null;
 
-        while (true) {
-            // Save position before reading
-            const before_num = header_lex.getPosition();
-
+        var idx: u32 = 0;
+        while (idx < entry.n) : (idx += 1) {
             const num_tok = header_lex.next() orelse break;
-            if (num_tok.tag != .number) {
-                // We've gone past the header - backtrack
-                break;
-            }
+            if (num_tok.tag != .number) break;
 
             const off_tok = header_lex.next() orelse break;
             if (off_tok.tag != .number) break;
 
-            try obj_offsets.append(self.allocator, .{
-                .num = @intCast(num_tok.asInt() orelse 0),
-                .off = @intCast(off_tok.asInt() orelse 0),
-            });
-
-            last_valid_pos = header_lex.getPosition();
-            _ = before_num;
+            if (idx == obj_index) {
+                const off_val = off_tok.asInt() orelse return error.InvalidObject;
+                if (off_val < 0) return error.InvalidObject;
+                target_offset = @intCast(off_val);
+            }
         }
 
-        if (obj_index >= obj_offsets.items.len) return error.ObjectNotFound;
-
-        // The 'first' value in the original dict tells us where objects start
-        // Since we don't have it cached, we use the position after reading all header pairs
-        // But the offsets in the header are already relative to /First, so we use last_valid_pos
-        const first = last_valid_pos;
-        const target_offset = obj_offsets.items[obj_index].off;
-
-        const obj_start = first + target_offset;
+        const offset = target_offset orelse return error.ObjectNotFound;
+        const obj_start = entry.first + offset;
         if (obj_start >= data.len) return error.InvalidObject;
 
         var obj_lex = Lexer.init(data[obj_start..]);

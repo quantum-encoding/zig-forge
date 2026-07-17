@@ -151,20 +151,12 @@ pub const AlpacaWebSocketReal = struct {
         }
         std.debug.print("\n", .{});
 
-        // Build subscription message
+        // Build subscription message via std.json.Stringify. Symbols are
+        // caller-supplied and are emitted through Stringify's array/string
+        // encoder, which escapes `"` / `\` — the previous hand-built array
+        // (symbolsToJsonArray) interpolated symbols unescaped (JSON-IN-FMT).
         var buf: [4096]u8 = undefined;
-        const subscribe_msg = try std.fmt.bufPrint(&buf,
-            \\{{
-            \\  "action": "subscribe",
-            \\  "quotes": {s},
-            \\  "trades": {s},
-            \\  "bars": {s}
-            \\}}
-        , .{
-            try symbolsToJsonArray(symbols, self.allocator),
-            try symbolsToJsonArray(symbols, self.allocator),
-            try symbolsToJsonArray(symbols, self.allocator),
-        });
+        const subscribe_msg = try buildSubscriptionMsg(&buf, "subscribe", symbols);
 
         try self.ws_client.send(subscribe_msg);
         std.debug.print("✅ Subscription request sent\n", .{});
@@ -177,18 +169,7 @@ pub const AlpacaWebSocketReal = struct {
         }
 
         var buf: [4096]u8 = undefined;
-        const unsubscribe_msg = try std.fmt.bufPrint(&buf,
-            \\{{
-            \\  "action": "unsubscribe",
-            \\  "quotes": {s},
-            \\  "trades": {s},
-            \\  "bars": {s}
-            \\}}
-        , .{
-            try symbolsToJsonArray(symbols, self.allocator),
-            try symbolsToJsonArray(symbols, self.allocator),
-            try symbolsToJsonArray(symbols, self.allocator),
-        });
+        const unsubscribe_msg = try buildSubscriptionMsg(&buf, "unsubscribe", symbols);
 
         try self.ws_client.send(unsubscribe_msg);
     }
@@ -198,15 +179,11 @@ pub const AlpacaWebSocketReal = struct {
         const self = @as(*Self, @ptrCast(@alignCast(user.?)));
         std.debug.print("🔗 WebSocket connected, authenticating...\n", .{});
 
-        // Send authentication message
+        // Send authentication message. Built via std.json.Stringify so the
+        // credential values are JSON-escaped rather than interpolated into a
+        // format-string template (JSON-IN-FMT).
         var buf: [512]u8 = undefined;
-        const auth_msg = std.fmt.bufPrint(&buf,
-            \\{{
-            \\  "action": "auth",
-            \\  "key": "{s}",
-            \\  "secret": "{s}"
-            \\}}
-        , .{ self.api_key, self.api_secret }) catch {
+        const auth_msg = buildAuthMsg(&buf, self.api_key, self.api_secret) catch {
             std.debug.print("❌ Failed to create auth message\n", .{});
             return;
         };
@@ -461,24 +438,45 @@ pub const AlpacaWebSocketReal = struct {
     }
 };
 
-fn symbolsToJsonArray(symbols: []const []const u8, allocator: std.mem.Allocator) ![]const u8 {
-    var result = std.ArrayList(u8).empty;
-    defer result.deinit(allocator);
+/// Build an Alpaca `{action, quotes, trades, bars}` subscription control
+/// message into `buf` using std.json.Stringify. `symbols` (`[]const []const
+/// u8`) is emitted as a JSON array of properly-escaped strings for each of the
+/// three channels — no allocation, and no unescaped interpolation of
+/// caller-supplied symbols (replaces the leaking, injection-prone
+/// symbolsToJsonArray helper).
+fn buildSubscriptionMsg(buf: []u8, action: []const u8, symbols: []const []const u8) ![]const u8 {
+    var w = std.Io.Writer.fixed(buf);
+    var js: std.json.Stringify = .{ .writer = &w, .options = .{} };
 
-    try result.ensureTotalCapacity(allocator, 256);
-
-    try result.append(allocator, '[');
-    for (symbols, 0..) |symbol, i| {
-        try result.append(allocator, '"');
-        try result.appendSlice(allocator, symbol);
-        try result.append(allocator, '"');
-        if (i < symbols.len - 1) {
-            try result.append(allocator, ',');
-        }
+    try js.beginObject();
+    try js.objectField("action");
+    try js.write(action);
+    inline for (.{ "quotes", "trades", "bars" }) |channel| {
+        try js.objectField(channel);
+        try js.write(symbols);
     }
-    try result.append(allocator, ']');
+    try js.endObject();
 
-    return allocator.dupe(u8, result.items);
+    return w.buffered();
+}
+
+/// Build the Alpaca `{action:"auth", key, secret}` message into `buf` using
+/// std.json.Stringify so the credential strings are escaped rather than
+/// template-interpolated.
+fn buildAuthMsg(buf: []u8, api_key: []const u8, api_secret: []const u8) ![]const u8 {
+    var w = std.Io.Writer.fixed(buf);
+    var js: std.json.Stringify = .{ .writer = &w, .options = .{} };
+
+    try js.beginObject();
+    try js.objectField("action");
+    try js.write(@as([]const u8, "auth"));
+    try js.objectField("key");
+    try js.write(api_key);
+    try js.objectField("secret");
+    try js.write(api_secret);
+    try js.endObject();
+
+    return w.buffered();
 }
 
 /// Bridge between Alpaca WebSocket and HFT System

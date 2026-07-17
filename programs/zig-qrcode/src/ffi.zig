@@ -14,7 +14,11 @@ const ffi_allocator: std.mem.Allocator = if (is_wasm) std.heap.wasm_allocator el
 // Error Handling
 // =============================================================================
 
-var last_error: [256]u8 = undefined;
+// Zero-initialized so zigqr_get_error() returns a valid NUL-terminated (empty)
+// string even if called before any failure sets an error message. An `undefined`
+// buffer has no NUL guarantee and would cause an out-of-bounds read in a C caller
+// doing strlen (e.g. Rust CStr::from_ptr).
+var last_error: [256]u8 = [_]u8{0} ** 256;
 var last_error_len: usize = 0;
 
 fn setLastError(msg: []const u8) void {

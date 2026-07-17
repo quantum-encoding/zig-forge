@@ -250,3 +250,114 @@ pub fn getInt(obj: std.json.ObjectMap, key: []const u8) i64 {
     }
     return 0;
 }
+
+/// Escape a string for safe interpolation inside a single-quoted SurrealQL
+/// string literal. Backslash-escapes `'` and `\` (SurrealDB accepts `\'`).
+/// Caller owns the returned slice.
+///
+/// NOTE: this is ONLY valid for values placed inside quotes. Record-id
+/// positions (`table:{id}`) cannot be made safe by string escaping — use
+/// `validRecordId` to allow-list those instead.
+pub fn escapeSql(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    // Count characters that need escaping.
+    var extra: usize = 0;
+    for (input) |c| {
+        if (c == '\'' or c == '\\') extra += 1;
+    }
+
+    const buf = try allocator.alloc(u8, input.len + extra);
+    var pos: usize = 0;
+    for (input) |c| {
+        if (c == '\'') {
+            buf[pos] = '\\';
+            pos += 1;
+            buf[pos] = '\'';
+            pos += 1;
+        } else if (c == '\\') {
+            buf[pos] = '\\';
+            pos += 1;
+            buf[pos] = '\\';
+            pos += 1;
+        } else {
+            buf[pos] = c;
+            pos += 1;
+        }
+    }
+    return buf[0..pos];
+}
+
+/// Allow-list check for a SurrealQL record-id fragment interpolated as
+/// `table:{s}`. Only `[A-Za-z0-9_]` is permitted; anything else (`:`, `'`,
+/// `;`, whitespace, ...) could break out of the record-id/statement context,
+/// so such names are refused by callers rather than escaped.
+pub fn validRecordId(s: []const u8) bool {
+    if (s.len == 0) return false;
+    for (s) |c| {
+        const ok = (c >= 'A' and c <= 'Z') or
+            (c >= 'a' and c <= 'z') or
+            (c >= '0' and c <= '9') or
+            c == '_';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+const testing = std.testing;
+
+test "escapeSql: no special characters is identity" {
+    const out = try escapeSql(testing.allocator, "plain_name123");
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("plain_name123", out);
+}
+
+test "escapeSql: single quote is backslash-escaped" {
+    // SurrealDB single-quoted string literal: `'` -> `\'`.
+    const out = try escapeSql(testing.allocator, "O'Brien");
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("O\\'Brien", out);
+}
+
+test "escapeSql: backslash is doubled" {
+    // `\` -> `\\`.
+    const out = try escapeSql(testing.allocator, "a\\b");
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("a\\\\b", out);
+}
+
+test "escapeSql: injection vector is rendered inert inside a quoted literal" {
+    // Classic SurrealQL injection payload. After escaping, the closing quote
+    // is neutralized (`'` -> `\'`), so when interpolated into `... '{s}'` the
+    // attacker cannot terminate the string literal or start a new statement.
+    const payload = "x'; DELETE FROM code_function; --";
+    const escaped = try escapeSql(testing.allocator, payload);
+    defer testing.allocator.free(escaped);
+
+    const sql = try std.fmt.allocPrint(testing.allocator, "WHERE name = '{s}'", .{escaped});
+    defer testing.allocator.free(sql);
+
+    // The raw single quote from the payload must never appear un-escaped
+    // (i.e. every `'` in the emitted SQL that came from the payload is
+    // preceded by a backslash). The only structural quotes are the two we
+    // wrote ourselves around `{s}`.
+    try testing.expectEqualStrings("WHERE name = 'x\\'; DELETE FROM code_function; --'", sql);
+}
+
+test "validRecordId: accepts identifier characters" {
+    try testing.expect(validRecordId("Keccak"));
+    try testing.expect(validRecordId("read_all_2"));
+    try testing.expect(validRecordId("A"));
+}
+
+test "validRecordId: rejects injection and structural characters" {
+    try testing.expect(!validRecordId(""));
+    try testing.expect(!validRecordId("a'; DELETE FROM code_function; --"));
+    try testing.expect(!validRecordId("foo:bar"));
+    try testing.expect(!validRecordId("foo bar"));
+    try testing.expect(!validRecordId("foo;"));
+    try testing.expect(!validRecordId("foo-bar"));
+    try testing.expect(!validRecordId("foo.bar"));
+}

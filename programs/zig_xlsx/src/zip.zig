@@ -43,6 +43,10 @@ pub const ZipArchive = struct {
     const CD_SIGNATURE: u32 = 0x02014b50;
     const LOCAL_SIGNATURE: u32 = 0x04034b50;
     const MAX_FILE_SIZE: usize = 256 * 1024 * 1024; // 256 MB
+    // Absolute per-entry decompressed-output ceiling (decompression-bomb guard).
+    // A forged central-directory header cannot authorize an allocation above
+    // this, regardless of the declared uncompressed_size.
+    const MAX_UNCOMPRESSED_ENTRY: u32 = 512 * 1024 * 1024; // 512 MB
 
     pub fn open(allocator: std.mem.Allocator, path: []const u8) ZipError!ZipArchive {
         // Read entire file into memory
@@ -121,19 +125,28 @@ pub const ZipArchive = struct {
     }
 
     pub fn extract(self: *const ZipArchive, entry: *const Entry) ZipError![]u8 {
-        // Read local file header to find data start
-        const lh_offset: usize = entry.local_header_offset;
+        // Read local file header to find data start.
+        //
+        // `local_header_offset` and `compressed_size` are attacker-controlled
+        // u32s taken verbatim from the central directory. Do every offset
+        // computation in u64 so a forged value near 0xFFFFFFFF cannot wrap a
+        // 32-bit `usize` on wasm32 (the shipped wasm is ReleaseSmall with
+        // safety checks off) and slip a wrapped slice past the bound checks.
+        const lh_offset: u64 = entry.local_header_offset;
         if (lh_offset + 30 > self.data.len) return ZipError.CorruptArchive;
-        if (readU32(self.data, lh_offset) != LOCAL_SIGNATURE) return ZipError.CorruptArchive;
+        // Bounds above guarantee lh_offset < data.len, so this cast is in range.
+        const lh: usize = @intCast(lh_offset);
+        if (readU32(self.data, lh) != LOCAL_SIGNATURE) return ZipError.CorruptArchive;
 
-        const local_name_len = readU16(self.data, lh_offset + 26);
-        const local_extra_len = readU16(self.data, lh_offset + 28);
-        const data_start = lh_offset + 30 + local_name_len + local_extra_len;
-        const data_end = data_start + entry.compressed_size;
+        const local_name_len = readU16(self.data, lh + 26);
+        const local_extra_len = readU16(self.data, lh + 28);
+        const data_start: u64 = lh_offset + 30 + @as(u64, local_name_len) + @as(u64, local_extra_len);
+        const data_end: u64 = data_start + @as(u64, entry.compressed_size);
 
         if (data_end > self.data.len) return ZipError.CorruptArchive;
 
-        const compressed = self.data[data_start..data_end];
+        // data_end <= data.len (a usize), so both casts are in range.
+        const compressed = self.data[@as(usize, @intCast(data_start))..@as(usize, @intCast(data_end))];
 
         if (entry.compression_method == 0) {
             // STORED: just copy
@@ -174,7 +187,17 @@ pub const ZipArchive = struct {
         return null;
     }
 
-    fn inflate(allocator: std.mem.Allocator, compressed: []const u8, _: u32) ZipError![]u8 {
+    fn inflate(allocator: std.mem.Allocator, compressed: []const u8, uncompressed_size: u32) ZipError![]u8 {
+        // Decompression-bomb guard. Two layers:
+        //  1) Reject a declared size above an absolute per-entry ceiling before
+        //     allocating anything, so a forged central-directory header cannot
+        //     authorize a huge allocation.
+        //  2) Cap the actual decompressed output at the declared size and
+        //     require an exact match. A crafted stream that expands past its
+        //     declared `uncompressed_size` is refused instead of inflated
+        //     unbounded (raw deflate can exceed 1000:1).
+        if (uncompressed_size > MAX_UNCOMPRESSED_ENTRY) return ZipError.CorruptArchive;
+
         // Create an Io.Reader from compressed data
         var input_reader = std.Io.Reader.fixed(compressed);
 
@@ -184,9 +207,24 @@ pub const ZipArchive = struct {
         // Create raw deflate decompressor
         var decompressor = std.compress.flate.Decompress.init(&input_reader, .raw, &window_buf);
 
-        // Read all decompressed data
-        const output = decompressor.reader.allocRemaining(allocator, .unlimited) catch
+        // Read the decompressed data with a hard cap of `uncompressed_size`.
+        // `allocRemaining` returns `error.StreamTooLong` once the limit is
+        // fully consumed without reaching end-of-stream, so we pass
+        // `uncompressed_size + 1` as the read limit: a well-formed entry (whose
+        // output is exactly `uncompressed_size`) succeeds and hits EOF on the
+        // extra byte, while an over-long (bomb) stream is caught. The `+ 1`
+        // cannot overflow: the ceiling check above bounds `uncompressed_size`
+        // well below `usize` max on both 32- and 64-bit targets.
+        const read_limit: usize = @as(usize, uncompressed_size) + 1;
+        const output = decompressor.reader.allocRemaining(allocator, .limited(read_limit)) catch
             return ZipError.DecompressionFailed;
+
+        // A well-formed DEFLATE entry decompresses to exactly the declared
+        // size; anything else means a corrupt or malicious header.
+        if (output.len != uncompressed_size) {
+            allocator.free(output);
+            return ZipError.CorruptArchive;
+        }
         return output;
     }
 

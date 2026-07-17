@@ -9,6 +9,7 @@
 //!   quantum-seed-vault --ascii      # ASCII art display
 
 const std = @import("std");
+const builtin = @import("builtin");
 const linux = std.os.linux;
 const display = @import("display.zig");
 const input = @import("input.zig");
@@ -83,9 +84,12 @@ const App = struct {
         // Restore terminal
         if (self.terminal_display) |*term| {
             _ = term;
-            // Clear screen on exit
-            const reset_seq = "\x1b[2J\x1b[H\x1b[0m";
-            _ = std.c.write(std.posix.STDOUT_FILENO, reset_seq, reset_seq.len);
+            // Clear screen on exit. Suppressed under the test runner, whose
+            // result protocol shares this process's stdout (see writeStdout).
+            if (!builtin.is_test) {
+                const reset_seq = "\x1b[2J\x1b[H\x1b[0m";
+                _ = std.c.write(std.posix.STDOUT_FILENO, reset_seq, reset_seq.len);
+            }
         }
         self.input_handler.deinit();
     }
@@ -160,6 +164,10 @@ fn parseArgs(args_ptr: std.process.Args) Config {
 }
 
 fn writeStdout(data: []const u8) void {
+    // Suppressed under the test runner: `zig build test` speaks its result
+    // protocol over this process's stdout (`--listen=-`), so writing here would
+    // corrupt that IPC channel. Production behavior is unchanged.
+    if (builtin.is_test) return;
     _ = std.c.write(std.posix.STDOUT_FILENO, data.ptr, data.len);
 }
 
@@ -224,6 +232,16 @@ pub fn main(init: std.process.Init) !void {
 }
 
 // Tests
+
+// Pull in tests from imported modules (crypto/shamir.zig, etc.) so they run under
+// `zig build test`. Without referencing the imported files here, their test blocks
+// are not included in this root's test binary.
+test {
+    std.testing.refAllDecls(@This());
+    _ = crypto;
+    _ = crypto.shamir;
+}
+
 test "app initialization" {
     var app = App.init(.{ .force_terminal = true });
     defer app.deinit();

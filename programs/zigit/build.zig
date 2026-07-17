@@ -34,4 +34,22 @@ pub fn build(b: *std.Build) void {
     const run_lib_tests = b.addRunArtifact(lib_tests);
     const test_step = b.step("test", "Run library tests");
     test_step.dependOn(&run_lib_tests.step);
+
+    // Parity harness: runs tests/parity.sh, which shells out to the real
+    // `git` binary and diffs its output byte-for-byte against the freshly
+    // built `zigit`. It needs the installed executable on disk (the script
+    // resolves $ZIGIT_BIN to zig-out/bin/zigit), so depend on the install
+    // step. Kept OUT of `zig build test` because it requires a system `git`
+    // (and, for the clone/push sections, network + git-http-backend) that a
+    // hermetic unit-test run can't assume — invoke it explicitly with
+    // `zig build parity`.
+    const parity = b.addSystemCommand(&.{"bash"});
+    parity.addFileArg(b.path("tests/parity.sh"));
+    parity.setEnvironmentVariable(
+        "ZIGIT_BIN",
+        b.getInstallPath(.bin, exe.out_filename),
+    );
+    parity.step.dependOn(b.getInstallStep());
+    const parity_step = b.step("parity", "Run the git-parity harness (requires system git)");
+    parity_step.dependOn(&parity.step);
 }

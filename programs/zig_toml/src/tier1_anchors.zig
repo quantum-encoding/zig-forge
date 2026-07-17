@@ -524,3 +524,111 @@ test "anchor DoS: 5,000-deep inline table errors with MaxDepthExceeded" {
     while (i > 0) : (i -= 1) try input.append(testing.allocator, '}');
     try parseErr(input.items, error.MaxDepthExceeded);
 }
+
+test "anchor DoS: 5,000-segment dotted key errors with MaxDepthExceeded" {
+    // `a.a.a.….a = 1` with 5,000 segments. Pre-fix this built a 5,000-deep
+    // table chain from ~10 KB of input (no cap on dotted-key nesting), and the
+    // caller's mandatory `deinit` overflowed the C stack tearing it down. Now
+    // the header/dotted-key depth cap rejects it up front (mirrors the inline
+    // array/table caps), and the iterative `deinit` frees any legitimate deep
+    // tree without recursing.
+    var input: std.ArrayListUnmanaged(u8) = .empty;
+    defer input.deinit(testing.allocator);
+    var i: usize = 0;
+    while (i < 5_000) : (i += 1) {
+        if (i != 0) try input.append(testing.allocator, '.');
+        try input.append(testing.allocator, 'a');
+    }
+    try input.appendSlice(testing.allocator, " = 1\n");
+    try parseErr(input.items, error.MaxDepthExceeded);
+}
+
+test "anchor DoS: 5,000-segment table header errors with MaxDepthExceeded" {
+    // `[a.a.a.….a]` with 5,000 segments — same stack-overflow-on-teardown DoS
+    // via a table header instead of a dotted key.
+    var input: std.ArrayListUnmanaged(u8) = .empty;
+    defer input.deinit(testing.allocator);
+    try input.append(testing.allocator, '[');
+    var i: usize = 0;
+    while (i < 5_000) : (i += 1) {
+        if (i != 0) try input.append(testing.allocator, '.');
+        try input.append(testing.allocator, 'a');
+    }
+    try input.appendSlice(testing.allocator, "]\n");
+    try parseErr(input.items, error.MaxDepthExceeded);
+}
+
+test "anchor DoS: deeply-nested tree frees without stack overflow" {
+    // A legitimately deep tree (built right at the cap) must be freeable by the
+    // mandatory `deinit` on any stack size — this exercises the iterative
+    // teardown path. `max_depth`-1 dotted segments parse successfully; if
+    // `deinit` were still recursive this would risk overflow on constrained
+    // stacks. Success here means the whole chain was freed iteratively.
+    var input: std.ArrayListUnmanaged(u8) = .empty;
+    defer input.deinit(testing.allocator);
+    var i: usize = 0;
+    const depth = 500; // < DEFAULT_MAX_DEPTH (512)
+    while (i < depth) : (i += 1) {
+        if (i != 0) try input.append(testing.allocator, '.');
+        try input.append(testing.allocator, 'a');
+    }
+    try input.appendSlice(testing.allocator, " = 1\n");
+    var t = try parseOk(input.items);
+    t.deinit(testing.allocator);
+}
+
+// ============================================================================
+// Raw control characters (toml-test invalid/control/*)
+//
+// TOML 1.0 forbids unescaped control chars (U+0000–U+0008, U+000A–U+001F,
+// U+007F) in basic/literal strings (tab excepted) and in comments. Inputs and
+// expected-invalid outcomes are the toml-test corpus's `invalid/control/*`
+// cases; the specific byte values (NUL, US = U+001F, DEL = U+007F) are theirs.
+// ============================================================================
+
+test "anchor invalid control: NUL in basic string (string-null)" {
+    try parseErr("a = \"\x00\"\n", error.ControlCharacterInString);
+}
+
+test "anchor invalid control: unit separator in basic string (string-us)" {
+    try parseErr("a = \"\x1f\"\n", error.ControlCharacterInString);
+}
+
+test "anchor invalid control: DEL in basic string (string-del)" {
+    try parseErr("a = \"\x7f\"\n", error.ControlCharacterInString);
+}
+
+test "anchor invalid control: NUL in literal string (rawstring-null)" {
+    try parseErr("a = '\x00'\n", error.ControlCharacterInString);
+}
+
+test "anchor invalid control: DEL in literal string (rawstring-del)" {
+    try parseErr("a = '\x7f'\n", error.ControlCharacterInString);
+}
+
+test "anchor invalid control: NUL in multiline basic string (multi-null)" {
+    try parseErr("a = \"\"\"\x00\"\"\"\n", error.ControlCharacterInString);
+}
+
+test "anchor invalid control: unit separator in multiline literal (rawmulti-us)" {
+    try parseErr("a = '''\x1f'''\n", error.ControlCharacterInString);
+}
+
+test "anchor invalid control: NUL in comment (comment-null)" {
+    try parseErr("# \x00\n", error.ControlCharacterInComment);
+}
+
+test "anchor invalid control: unit separator in comment (comment-us)" {
+    try parseErr("# \x1f\n", error.ControlCharacterInComment);
+}
+
+test "anchor invalid control: DEL in comment (comment-del)" {
+    try parseErr("# \x7f\n", error.ControlCharacterInComment);
+}
+
+test "anchor valid control: tab is permitted in a basic string" {
+    // Tab (U+0009) is the one control char TOML allows unescaped in strings.
+    var t = try parseOk("a = \"x\ty\"\n");
+    defer t.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "x\ty", t.get("a").?.string);
+}

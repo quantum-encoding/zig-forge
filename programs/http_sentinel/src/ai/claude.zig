@@ -97,14 +97,19 @@ test "ClaudeClient initialization" {
 }
 
 test "ClaudeClient config helpers" {
+    // The three config helpers each set max_tokens to 65536 (see
+    // defaultConfig/fastConfig/deepConfig above); assert against the
+    // authoritative source values, not the stale 8000/16000 the earlier
+    // test hard-coded before the ceiling was raised.
     const default_cfg = ClaudeClient.defaultConfig();
     try std.testing.expectEqualStrings(ClaudeClient.Models.SONNET_4_5, default_cfg.model);
-    try std.testing.expectEqual(@as(u32, 8000), default_cfg.max_tokens);
+    try std.testing.expectEqual(@as(u32, 65536), default_cfg.max_tokens);
 
     const fast_cfg = ClaudeClient.fastConfig();
     try std.testing.expectEqualStrings(ClaudeClient.Models.HAIKU, fast_cfg.model);
+    try std.testing.expectEqual(@as(u32, 65536), fast_cfg.max_tokens);
 
     const deep_cfg = ClaudeClient.deepConfig();
     try std.testing.expectEqualStrings(ClaudeClient.Models.OPUS_4_1, deep_cfg.model);
-    try std.testing.expectEqual(@as(u32, 16000), deep_cfg.max_tokens);
+    try std.testing.expectEqual(@as(u32, 65536), deep_cfg.max_tokens);
 }

@@ -85,7 +85,13 @@ pub fn hashFileBlake3(path: []const u8, max_bytes: ?usize) !Hash {
             BUFFER_SIZE;
 
         const n = libc.read(fd, &buf, bytes_to_read);
-        if (n <= 0) break;
+        if (n == 0) break; // genuine EOF
+        if (n < 0) {
+            // read() failed. EINTR is retryable; anything else must propagate
+            // so a partial-prefix hash is never returned as a valid digest.
+            if (libc.errno(n) == .INTR) continue;
+            return error.ReadFailed;
+        }
 
         const bytes_read: usize = @intCast(n);
         hasher.update(buf[0..bytes_read]);
@@ -125,7 +131,13 @@ pub fn hashFileSha256(path: []const u8, max_bytes: ?usize) !Hash {
             BUFFER_SIZE;
 
         const n = libc.read(fd, &buf, bytes_to_read);
-        if (n <= 0) break;
+        if (n == 0) break; // genuine EOF
+        if (n < 0) {
+            // read() failed. EINTR is retryable; anything else must propagate
+            // so a partial-prefix hash is never returned as a valid digest.
+            if (libc.errno(n) == .INTR) continue;
+            return error.ReadFailed;
+        }
 
         const bytes_read: usize = @intCast(n);
         hasher.update(buf[0..bytes_read]);

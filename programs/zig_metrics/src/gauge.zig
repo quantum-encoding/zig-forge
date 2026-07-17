@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const Counter = @import("counter.zig").Counter;
+const escape = @import("escape.zig");
 
 /// Prometheus Gauge (value that can go up and down)
 pub const Gauge = struct {
@@ -84,13 +85,15 @@ pub const Gauge = struct {
 
     /// Set to current time (useful for last-updated timestamps)
     pub fn setToCurrentTime(self: *Self) void {
-        const now = std.time.timestamp() catch 0;
+        const now = std.time.timestamp();
         self.set(@floatFromInt(now));
     }
 
     /// Format as Prometheus exposition format
     pub fn write(self: *const Self, writer: anytype) !void {
-        try writer.print("# HELP {s} {s}\n", .{ self.name, self.help });
+        try writer.print("# HELP {s} ", .{self.name});
+        try escape.writeEscapedHelp(writer, self.help);
+        try writer.writeAll("\n");
         try writer.print("# TYPE {s} gauge\n", .{self.name});
         try writer.print("{s}", .{self.name});
 
@@ -98,7 +101,9 @@ pub const Gauge = struct {
             try writer.writeAll("{");
             for (labels, 0..) |label, i| {
                 if (i > 0) try writer.writeAll(",");
-                try writer.print("{s}=\"{s}\"", .{ label.name, label.value });
+                try writer.print("{s}=\"", .{label.name});
+                try escape.writeEscapedLabelValue(writer, label.value);
+                try writer.writeAll("\"");
             }
             try writer.writeAll("}");
         }
@@ -156,7 +161,9 @@ pub const GaugeInt = struct {
     }
 
     pub fn write(self: *const Self, writer: anytype) !void {
-        try writer.print("# HELP {s} {s}\n", .{ self.name, self.help });
+        try writer.print("# HELP {s} ", .{self.name});
+        try escape.writeEscapedHelp(writer, self.help);
+        try writer.writeAll("\n");
         try writer.print("# TYPE {s} gauge\n", .{self.name});
         try writer.print("{s}", .{self.name});
 
@@ -164,7 +171,9 @@ pub const GaugeInt = struct {
             try writer.writeAll("{");
             for (labels, 0..) |label, i| {
                 if (i > 0) try writer.writeAll(",");
-                try writer.print("{s}=\"{s}\"", .{ label.name, label.value });
+                try writer.print("{s}=\"", .{label.name});
+                try escape.writeEscapedLabelValue(writer, label.value);
+                try writer.writeAll("\"");
             }
             try writer.writeAll("}");
         }

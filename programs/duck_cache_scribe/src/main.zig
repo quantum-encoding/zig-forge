@@ -55,7 +55,8 @@ const RetryConfig = struct {
 
 // The Scribe's Mind: Configuration Structure
 const Config = struct {
-    repo_path: []const u8,
+    // NUL-terminated: the path is handed to inotify_add_watch as a C string.
+    repo_path: [:0]const u8,
     remote_name: []const u8,
     branch_name: []const u8,
     chronos_stamp_path: []const u8,
@@ -152,7 +153,7 @@ pub fn main(init: std.process.Init) !void {
     // 2. The Eternal Loop
     while (running.load(.acquire)) {
         // 3. The Unwavering Vigil (inotify)
-        try watchForChanges(config.repo_path);
+        try watchForChanges(allocator, config.repo_path);
         std.log.info("A new memory has been transcribed. The Scribe takes note.", .{});
 
         // 4. The Debounce: Prevent a storm of commits
@@ -198,7 +199,7 @@ pub fn main(init: std.process.Init) !void {
     stats.printStats();
 }
 
-fn watchForChanges(repo_path: []const u8) !void {
+fn watchForChanges(allocator: mem.Allocator, repo_path: [:0]const u8) !void {
     // Zig 0.16: Use std.os.linux.inotify_init1 directly instead of posix wrapper
     const init_result = linux.inotify_init1(0);
     if (@as(isize, @bitCast(init_result)) < 0) return error.InotifyInitFailed;
@@ -215,16 +216,55 @@ fn watchForChanges(repo_path: []const u8) !void {
 
     const watch_mask = IN_CLOSE_WRITE | IN_MODIFY | IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO;
 
-    // Zig 0.16: Use std.os.linux.inotify_add_watch directly
-    // repo_path needs to be null-terminated for the syscall
-    const repo_path_z: [*:0]const u8 = @ptrCast(repo_path.ptr);
-    const watch_result = linux.inotify_add_watch(inotify_fd, repo_path_z, watch_mask);
+    // Watch the repository root. `repo_path` is a NUL-terminated slice, so
+    // `repo_path.ptr` is a valid C string (no OOB read past the allocation).
+    const watch_result = linux.inotify_add_watch(inotify_fd, repo_path.ptr, watch_mask);
     if (@as(isize, @bitCast(watch_result)) < 0) return error.InotifyAddWatchFailed;
 
+    // Recursively add watches for every subdirectory (inotify is not recursive
+    // by itself, so a single watch on the root would miss edits below the top
+    // level). Failures here are non-fatal: we still have the root watch.
+    addWatchesRecursive(allocator, inotify_fd, repo_path, watch_mask);
+
     // This will block until an event occurs. The heart of our efficiency.
-    var event_buf: [1024]u8 = undefined;
+    var event_buf: [4096]u8 = undefined;
     const read_result = linux.read(inotify_fd, &event_buf, event_buf.len);
     if (@as(isize, @bitCast(read_result)) < 0) return error.InotifyReadFailed;
+}
+
+/// Walk `repo_path` and place an inotify watch on each subdirectory, skipping
+/// the `.git` directory (its churn would trigger a commit storm). Best-effort:
+/// any error stops the walk but leaves the already-registered watches in place.
+fn addWatchesRecursive(
+    allocator: mem.Allocator,
+    inotify_fd: posix.fd_t,
+    repo_path: [:0]const u8,
+    watch_mask: u32,
+) void {
+    // A real allocator-backed Io for directory iteration (the global
+    // single-threaded Io ships with a failing allocator).
+    var threaded = Io.Threaded.init(allocator, .{ .async_limit = .nothing, .environ = process_environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var root_dir = Io.Dir.cwd().openDir(io, repo_path, .{ .iterate = true }) catch return;
+    defer root_dir.close(io);
+
+    var walker = root_dir.walkSelectively(allocator) catch return;
+    defer walker.deinit();
+
+    while (walker.next(io) catch return) |entry| {
+        if (entry.kind != .directory) continue;
+        // Do not watch or descend into .git — commit churn there is not source.
+        if (mem.eql(u8, entry.basename, ".git")) continue;
+
+        // Descend into this directory on subsequent iterations.
+        walker.enter(io, entry) catch continue;
+
+        const full_path = std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ repo_path, entry.path }, 0) catch continue;
+        defer allocator.free(full_path);
+        _ = linux.inotify_add_watch(inotify_fd, full_path.ptr, watch_mask);
+    }
 }
 
 fn performGitCommit(allocator: mem.Allocator, config: Config) !void {
@@ -324,18 +364,45 @@ fn executeChronosStamp(allocator: mem.Allocator, config: Config) ![]u8 {
     }
 
     // Filter out libwarden output and extract only the CHRONOS line
-    var lines = mem.splitScalar(u8, stderr_list.items, '\n');
-
-    while (lines.next()) |line| {
-        const trimmed_line = mem.trim(u8, line, &std.ascii.whitespace);
-        if (mem.startsWith(u8, trimmed_line, "[CHRONOS]")) {
-            return try allocator.dupe(u8, trimmed_line);
-        }
+    if (extractChronosLine(stderr_list.items)) |line| {
+        return try allocator.dupe(u8, line);
     }
 
     // If no CHRONOS line found, return error
     std.log.err("No CHRONOS output found from chronos-stamp", .{});
     return error.ChronosStampFailed;
+}
+
+/// Scan chronos-stamp's stderr (which is interleaved with libwarden noise) and
+/// return the first line beginning with `[CHRONOS]`, whitespace-trimmed. The
+/// returned slice borrows from `bytes`. Returns null if no such line exists.
+fn extractChronosLine(bytes: []const u8) ?[]const u8 {
+    var lines = mem.splitScalar(u8, bytes, '\n');
+    while (lines.next()) |line| {
+        const trimmed_line = mem.trim(u8, line, &std.ascii.whitespace);
+        if (mem.startsWith(u8, trimmed_line, "[CHRONOS]")) {
+            return trimmed_line;
+        }
+    }
+    return null;
+}
+
+test "extractChronosLine picks the CHRONOS line out of libwarden noise" {
+    const transcript =
+        "libwarden: initializing sandbox\n" ++
+        "[warden] policy loaded: default\n" ++
+        "  [CHRONOS] 2026-07-17T00:00:00Z::duckcache-scribe::git-commit::TICK-0000000001  \n" ++
+        "libwarden: teardown\n";
+    const line = extractChronosLine(transcript) orelse return error.NoChronosLine;
+    try std.testing.expect(mem.startsWith(u8, line, "[CHRONOS]"));
+    // Surrounding whitespace must be trimmed off both ends.
+    try std.testing.expect(!mem.endsWith(u8, line, " "));
+    try std.testing.expect(mem.endsWith(u8, line, "TICK-0000000001"));
+}
+
+test "extractChronosLine returns null when no CHRONOS line is present" {
+    try std.testing.expect(extractChronosLine("libwarden: only noise here\nno stamp\n") == null);
+    try std.testing.expect(extractChronosLine("") == null);
 }
 
 fn executeCommand(allocator: mem.Allocator, cwd: []const u8, args: []const []const u8) !void {
@@ -458,7 +525,7 @@ fn loadConfig(allocator: mem.Allocator) !Config {
     const root = parsed.value.object;
 
     // Extract fields and duplicate strings
-    const repo_path = try allocator.dupe(u8, root.get("repo_path").?.string);
+    const repo_path = try allocator.dupeZ(u8, root.get("repo_path").?.string);
     const remote_name = try allocator.dupe(u8, root.get("remote_name").?.string);
     const branch_name = try allocator.dupe(u8, root.get("branch_name").?.string);
     const chronos_stamp_path = try allocator.dupe(u8, root.get("chronos_stamp_path").?.string);

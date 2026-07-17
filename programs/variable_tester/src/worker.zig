@@ -137,9 +137,11 @@ pub const Worker = struct {
         const self = try allocator.create(Worker);
         errdefer allocator.destroy(self);
 
-        // Generate random worker ID using linux getrandom syscall
+        // Generate random worker ID via libc arc4random_buf (portable across
+        // Darwin/Linux; the previous std.os.linux.getrandom left random_bytes
+        // uninitialized on macOS, reading garbage stack memory).
         var random_bytes: [8]u8 = undefined;
-        _ = std.os.linux.getrandom(&random_bytes, random_bytes.len, 0);
+        std.c.arc4random_buf(&random_bytes, random_bytes.len);
         const worker_id = std.mem.readInt(u64, &random_bytes, .little);
 
         const num_threads = config.num_threads orelse try std.Thread.getCpuCount();

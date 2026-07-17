@@ -162,6 +162,103 @@ pub fn freeLeaves(allocator: std.mem.Allocator, leaves: []Leaf) void {
     allocator.free(leaves);
 }
 
+/// True when `name` is a safe single tree-entry component. Rejects the
+/// path-traversal / repo-corruption class git guards against in fsck and
+/// checkout:
+///   * empty
+///   * "." and ".."
+///   * any '/' (an entry name is a single path component, never nested)
+///   * any embedded NUL (defensive — the wire format terminates the name
+///     at the first NUL, but a caller could hand us a pre-sliced name)
+///   * ".git" in any case-folded or NTFS/HFS-folded spelling
+pub fn isValidEntryName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    if (std.mem.eql(u8, name, ".")) return false;
+    if (std.mem.eql(u8, name, "..")) return false;
+    for (name) |c| {
+        if (c == '/' or c == 0) return false;
+    }
+    if (isDotGit(name)) return false;
+    return true;
+}
+
+/// Match ".git" the way git's `is_ntfs_dotgit` / `is_hfs_dotgit` do —
+/// case-insensitively, and defeating the filesystem-folding evasions that
+/// let a crafted name resolve to `.git` on a checkout:
+///   * trailing dots / spaces (NTFS strips them: ".git.", ".git ")
+///   * the 8.3 short name "git~1" (NTFS)
+///   * HFS+ ignorable code points interspersed (e.g. U+200C) — we strip the
+///     well-known ignorables before comparing.
+fn isDotGit(name: []const u8) bool {
+    // NTFS: strip trailing '.' and ' ' before comparing.
+    var end = name.len;
+    while (end > 0 and (name[end - 1] == '.' or name[end - 1] == ' ')) end -= 1;
+    const trimmed = name[0..end];
+
+    if (eqlIgnoreAsciiCase(trimmed, ".git")) return true;
+    // NTFS 8.3 short name for ".git" is "git~1".
+    if (eqlIgnoreAsciiCase(trimmed, "git~1")) return true;
+
+    // HFS+ folds away a set of "ignorable" code points. Strip them and
+    // re-compare against ".git" (case-insensitive). If none are present
+    // this is a cheap no-op that returns the same answer as above.
+    var buf: [16]u8 = undefined;
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < name.len) {
+        const c = name[i];
+        if (c < 0x80) {
+            if (n >= buf.len) return false;
+            buf[n] = c;
+            n += 1;
+            i += 1;
+            continue;
+        }
+        // Decode one UTF-8 code point; on any malformed sequence, bail
+        // (it can't equal an ASCII ".git" spelling).
+        const len = std.unicode.utf8ByteSequenceLength(c) catch return false;
+        if (i + len > name.len) return false;
+        const cp = std.unicode.utf8Decode(name[i .. i + len]) catch return false;
+        i += len;
+        if (isHfsIgnorable(cp)) continue; // dropped, like HFS+ does
+        return false; // a non-ignorable non-ASCII code point → not ".git"
+    }
+    return eqlIgnoreAsciiCase(buf[0..n], ".git");
+}
+
+fn eqlIgnoreAsciiCase(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |ca, cb| {
+        if (std.ascii.toLower(ca) != std.ascii.toLower(cb)) return false;
+    }
+    return true;
+}
+
+/// The code points HFS+ treats as ignorable in filename comparison — the
+/// same list git's `is_hfs_dotgit` folds away.
+fn isHfsIgnorable(cp: u21) bool {
+    return switch (cp) {
+        0x200C, // ZERO WIDTH NON-JOINER
+        0x200D, // ZERO WIDTH JOINER
+        0x200E, // LEFT-TO-RIGHT MARK
+        0x200F, // RIGHT-TO-LEFT MARK
+        0x202A, // LEFT-TO-RIGHT EMBEDDING
+        0x202B, // RIGHT-TO-LEFT EMBEDDING
+        0x202C, // POP DIRECTIONAL FORMATTING
+        0x202D, // LEFT-TO-RIGHT OVERRIDE
+        0x202E, // RIGHT-TO-LEFT OVERRIDE
+        0x206A, // INHIBIT SYMMETRIC SWAPPING
+        0x206B, // ACTIVATE SYMMETRIC SWAPPING
+        0x206C, // INHIBIT ARABIC FORM SHAPING
+        0x206D, // ACTIVATE ARABIC FORM SHAPING
+        0x206E, // NATIONAL DIGIT SHAPES
+        0x206F, // NOMINAL DIGIT SHAPES
+        0xFEFF, // ZERO WIDTH NO-BREAK SPACE (BOM)
+        => true,
+        else => false,
+    };
+}
+
 /// Iterator over a tree object's payload bytes — borrows the slice,
 /// doesn't allocate.
 pub const Iterator = struct {
@@ -180,6 +277,15 @@ pub const Iterator = struct {
         const nul = std.mem.indexOfScalarPos(u8, self.bytes, name_start, 0) orelse
             return error.MalformedTreeEntry;
         const name = self.bytes[name_start..nul];
+
+        // Reject dangerous entry names at parse time. A tree object is
+        // network-reachable (clone/fetch/pull pull packs from arbitrary
+        // servers) and the checkout path (worktree.applyTree/writeBlob)
+        // writes leaf paths straight to disk. A name containing `/`, `..`,
+        // a NUL, or `.git` (in any case- or NTFS/HFS-folded spelling) is a
+        // path-traversal / repo-corruption primitive. Real git rejects the
+        // same class in fsck/checkout. Refuse the whole object.
+        if (!isValidEntryName(name)) return error.InvalidTreeEntryName;
 
         const oid_start = nul + 1;
         if (self.bytes.len < oid_start + 20) return error.MalformedTreeEntry;
@@ -204,6 +310,63 @@ test "lessThanForTree treats subtrees as if they had a trailing slash" {
     // → tree sorts AFTER blob.
     try testing.expect(lessThanForTree({}, blob, tree));
     try testing.expect(!lessThanForTree({}, tree, blob));
+}
+
+test "isValidEntryName accepts ordinary names, rejects the traversal class" {
+    // Ordinary names pass.
+    try testing.expect(isValidEntryName("a.txt"));
+    try testing.expect(isValidEntryName("sub"));
+    try testing.expect(isValidEntryName(".gitignore")); // NOT ".git"
+    try testing.expect(isValidEntryName(".gitattributes"));
+    try testing.expect(isValidEntryName("git")); // bare "git" is fine
+    try testing.expect(isValidEntryName("..foo"));
+    try testing.expect(isValidEntryName("a..b"));
+
+    // The dangerous class is rejected.
+    try testing.expect(!isValidEntryName(""));
+    try testing.expect(!isValidEntryName("."));
+    try testing.expect(!isValidEntryName(".."));
+    try testing.expect(!isValidEntryName("a/b"));
+    try testing.expect(!isValidEntryName("/"));
+    try testing.expect(!isValidEntryName("../evil"));
+    try testing.expect(!isValidEntryName("a\x00b"));
+
+    // .git in every folded spelling.
+    try testing.expect(!isValidEntryName(".git"));
+    try testing.expect(!isValidEntryName(".GIT"));
+    try testing.expect(!isValidEntryName(".Git"));
+    try testing.expect(!isValidEntryName(".git.")); // NTFS trailing dot
+    try testing.expect(!isValidEntryName(".git ")); // NTFS trailing space
+    try testing.expect(!isValidEntryName(".git..  ")); // mixed trailing
+    try testing.expect(!isValidEntryName("git~1")); // NTFS 8.3 short name
+    try testing.expect(!isValidEntryName("GIT~1"));
+    try testing.expect(!isValidEntryName(".g\u{200c}it")); // HFS ignorable ZWNJ
+    try testing.expect(!isValidEntryName(".gi\u{200d}t")); // HFS ignorable ZWJ
+}
+
+test "Iterator.next rejects a tree entry named .. " {
+    // Build a payload with a single subtree entry named "..".
+    var oid: Oid = undefined;
+    @memset(&oid.bytes, 0x11);
+    const bad: Entry = .{ .mode = tree_mode_octal, .name = "..", .oid = oid };
+    // serialize() doesn't validate (it trusts locally-built entries), so we
+    // can use it to forge a hostile payload and confirm the PARSER refuses.
+    const bytes = try serialize(testing.allocator, &.{bad});
+    defer testing.allocator.free(bytes);
+
+    var it: Iterator = .{ .bytes = bytes };
+    try testing.expectError(error.InvalidTreeEntryName, it.next());
+}
+
+test "Iterator.next rejects a tree entry named .git" {
+    var oid: Oid = undefined;
+    @memset(&oid.bytes, 0x22);
+    const bad: Entry = .{ .mode = tree_mode_octal, .name = ".git", .oid = oid };
+    const bytes = try serialize(testing.allocator, &.{bad});
+    defer testing.allocator.free(bytes);
+
+    var it: Iterator = .{ .bytes = bytes };
+    try testing.expectError(error.InvalidTreeEntryName, it.next());
 }
 
 test "serialize then iterate round-trips" {

@@ -24,6 +24,14 @@ pub const XRefTable = struct {
     allocator: std.mem.Allocator,
     startxref_offset: u64 = 0, // Location of startxref in original file
 
+    // DoS guards for the /Prev xref chain: a self-referential or cyclic /Prev
+    // pointer must not loop forever or overflow the stack at document open.
+    visited_xref_offsets: std.AutoHashMap(u64, void),
+    xref_chain_depth: u32 = 0,
+
+    /// Maximum depth of the /Prev xref chain we will follow.
+    const MAX_XREF_CHAIN_DEPTH: u32 = 1024;
+
     pub const TrailerInfo = struct {
         size: u32, // Total number of objects
         root: objects.ObjectRef, // Catalog reference
@@ -56,11 +64,13 @@ pub const XRefTable = struct {
             .entries = std.AutoHashMap(u32, XRefEntry).init(allocator),
             .trailer = undefined,
             .allocator = allocator,
+            .visited_xref_offsets = std.AutoHashMap(u64, void).init(allocator),
         };
     }
 
     pub fn deinit(self: *XRefTable) void {
         self.entries.deinit();
+        self.visited_xref_offsets.deinit();
     }
 
     /// Get offset for an object
@@ -109,6 +119,16 @@ pub const XRefTable = struct {
     }
 
     fn parseXrefAt(self: *XRefTable, data: []const u8, offset: u64) ParseError!void {
+        // Cycle / depth guards: stop before re-parsing an offset we've already
+        // seen (a /Prev that points back into the chain) or descending past a
+        // sane chain length. Either would otherwise loop forever or overflow the
+        // stack on a malicious PDF at open time.
+        if (self.xref_chain_depth >= MAX_XREF_CHAIN_DEPTH) return;
+        const gop = try self.visited_xref_offsets.getOrPut(offset);
+        if (gop.found_existing) return;
+        self.xref_chain_depth += 1;
+        defer self.xref_chain_depth -= 1;
+
         var lex = Lexer.initAt(data, @intCast(offset));
 
         const first_token = lex.next() orelse return error.UnexpectedEof;

@@ -260,22 +260,34 @@ export fn zcq_list_documents(opaque_handle: ?*CCodeQuery, result_out: *CDocument
     };
     defer docs.deinit();
 
-    // Serialize to JSON for C consumers using allocPrint per-entry
-    var json_buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer json_buf.deinit(ffi_allocator);
+    // Serialize to JSON for C consumers via std.json.Stringify — never
+    // printf-style templating (repo anti-pattern class 1, JSON-IN-FMT).
+    // Attacker-influenced paths/names containing `"` or `\` are correctly
+    // escaped by Stringify rather than breaking or injecting JSON fields.
+    const DocEntry = struct {
+        path: []const u8,
+        name: []const u8,
+        extension: []const u8,
+        size: i64,
+        content_hash: []const u8,
+        ingested_at: []const u8,
+    };
 
-    json_buf.append(ffi_allocator, '[') catch return;
-    for (docs.items, 0..) |doc, i| {
-        if (i > 0) json_buf.append(ffi_allocator, ',') catch return;
-        const entry = std.fmt.allocPrint(ffi_allocator,
-            \\{{"path":"{s}","name":"{s}","extension":"{s}","size":{d},"content_hash":"{s}","ingested_at":"{s}"}}
-        , .{ doc.path, doc.name, doc.extension, doc.size, doc.content_hash, doc.ingested_at }) catch return;
-        defer ffi_allocator.free(entry);
-        json_buf.appendSlice(ffi_allocator, entry) catch return;
+    var entries: std.ArrayListUnmanaged(DocEntry) = .empty;
+    defer entries.deinit(ffi_allocator);
+
+    for (docs.items) |doc| {
+        entries.append(ffi_allocator, .{
+            .path = doc.path,
+            .name = doc.name,
+            .extension = doc.extension,
+            .size = doc.size,
+            .content_hash = doc.content_hash,
+            .ingested_at = doc.ingested_at,
+        }) catch return;
     }
-    json_buf.append(ffi_allocator, ']') catch return;
 
-    const json_str = ffi_allocator.dupe(u8, json_buf.items) catch return;
+    const json_str = std.json.Stringify.valueAlloc(ffi_allocator, entries.items, .{}) catch return;
     result_out.success = true;
     result_out.json_data = CString.fromSlice(json_str);
     result_out.count = @intCast(docs.total_count);
@@ -294,13 +306,18 @@ export fn zcq_find(opaque_handle: ?*CCodeQuery, term: CString, result_out: *CQue
     const handle: *FFIHandle = @ptrCast(@alignCast(opaque_handle));
     const term_slice = term.toSlice();
 
+    // Escape the caller-supplied term before interpolating into the quoted
+    // string literal (prevents SurrealQL injection over the C ABI).
+    const escaped_term = surreal.escapeSql(ffi_allocator, term_slice) catch return;
+    defer ffi_allocator.free(escaped_term);
+
     // Use raw query for simplicity — return JSON directly
     const sql = std.fmt.allocPrint(ffi_allocator,
         \\SELECT record::id(id) as id, name, file, line_start, line_end
         \\FROM code_function
         \\WHERE string::lowercase(name) CONTAINS '{s}'
         \\ORDER BY name LIMIT 50
-    , .{term_slice}) catch return;
+    , .{escaped_term}) catch return;
     defer ffi_allocator.free(sql);
 
     const response = handle.cq.rawQuery(sql) catch {
@@ -325,12 +342,17 @@ export fn zcq_search_chunks(opaque_handle: ?*CCodeQuery, term: CString, result_o
     const handle: *FFIHandle = @ptrCast(@alignCast(opaque_handle));
     const term_slice = term.toSlice();
 
+    // Escape the caller-supplied term before interpolating into the quoted
+    // string literal (prevents SurrealQL injection over the C ABI).
+    const escaped_term = surreal.escapeSql(ffi_allocator, term_slice) catch return;
+    defer ffi_allocator.free(escaped_term);
+
     const sql = std.fmt.allocPrint(ffi_allocator,
         \\SELECT *, document.path as doc_path
         \\FROM knowledge_chunk
         \\WHERE content CONTAINS '{s}'
         \\ORDER BY document, chunk_index LIMIT 20
-    , .{term_slice}) catch return;
+    , .{escaped_term}) catch return;
     defer ffi_allocator.free(sql);
 
     const response = handle.cq.rawQuery(sql) catch {
@@ -429,4 +451,59 @@ export fn zcq_free_string_result(result_ptr: ?*CStringResult) void {
         }
         r.* = CStringResult{};
     }
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+const testing = std.testing;
+
+// Pull in the tests defined in the referenced modules (surreal.zig etc.).
+test {
+    testing.refAllDecls(@This());
+    _ = surreal;
+    _ = query;
+    _ = ingest;
+    _ = types;
+}
+
+test "zcq_list_documents JSON: document strings are escaped, not templated (JSON-IN-FMT fix)" {
+    // Regression test for the repo's JSON-IN-FMT anti-pattern (class 1): the
+    // document list must be produced by std.json.Stringify so a path/name
+    // containing `"` or `\` cannot break out of or inject into the JSON.
+    const DocEntry = struct {
+        path: []const u8,
+        name: []const u8,
+        extension: []const u8,
+        size: i64,
+        content_hash: []const u8,
+        ingested_at: []const u8,
+    };
+
+    const entries = [_]DocEntry{.{
+        .path = "/tmp/a\"b\\c.md", // embedded quote + backslash
+        .name = "a\"b",
+        .extension = ".md",
+        .size = 42,
+        .content_hash = "deadbeef",
+        .ingested_at = "2026-07-17T00:00:00Z",
+    }};
+
+    const json = try std.json.Stringify.valueAlloc(testing.allocator, entries[0..], .{});
+    defer testing.allocator.free(json);
+
+    // Output must be valid JSON that round-trips through the parser (the old
+    // allocPrint template would have produced invalid JSON here).
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
+    defer parsed.deinit();
+
+    try testing.expect(parsed.value == .array);
+    try testing.expectEqual(@as(usize, 1), parsed.value.array.items.len);
+    const obj = parsed.value.array.items[0].object;
+    // The parser must recover the exact original bytes, proving the quote and
+    // backslash were correctly escaped on the wire.
+    try testing.expectEqualStrings("/tmp/a\"b\\c.md", obj.get("path").?.string);
+    try testing.expectEqualStrings("a\"b", obj.get("name").?.string);
+    try testing.expectEqual(@as(i64, 42), obj.get("size").?.integer);
 }

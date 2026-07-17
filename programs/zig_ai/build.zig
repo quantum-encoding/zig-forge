@@ -93,12 +93,17 @@ pub fn build(b: *std.Build) void {
     // Tests
     // ============================================================
 
+    // Root the test step at the aggregator (src/test_all.zig), which
+    // refAllDecls-imports the modules carrying inline unit tests — most
+    // importantly the agent security tree. cli.zig has no test blocks and
+    // no refAllDecls, so rooting there ran zero of the ~100 inline tests.
     const test_root_module = b.createModule(.{
-        .root_source_file = b.path("src/cli.zig"),
+        .root_source_file = b.path("src/test_all.zig"),
         .target = target,
         .optimize = optimize,
     });
     test_root_module.addImport("http-sentinel", http_sentinel_module);
+    test_root_module.addImport("zig_toml", zig_toml_module);
 
     const test_compile = b.addTest(.{
         .root_module = test_root_module,

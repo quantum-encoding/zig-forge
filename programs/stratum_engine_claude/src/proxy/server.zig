@@ -28,6 +28,38 @@ pub const ServerError = error{
     TooManyMiners,
 };
 
+/// Sanitize a miner-supplied `mining.authorize` worker name on ingress.
+///
+/// Defense-in-depth alongside the JSON-safe std.json.Stringify serialization
+/// downstream (dashboard broadcaster, share events): drop control characters,
+/// DEL, and non-ASCII bytes so a hostile worker name can't smuggle newlines
+/// into log lines, NULs into any C-string sink, or raw control bytes into a
+/// terminal, and cap the length so an unauthenticated peer can't force an
+/// unbounded per-connection allocation. Any residual `"`/`\` in the surviving
+/// printable-ASCII range is still escaped by std.json.Stringify at every
+/// serialization site. Caller owns the returned slice.
+fn sanitizeWorkerName(allocator: std.mem.Allocator, raw: []const u8) ![]const u8 {
+    const max_len = 128;
+    const cap = @min(raw.len, max_len);
+    var buf = try allocator.alloc(u8, cap);
+    errdefer allocator.free(buf);
+
+    var n: usize = 0;
+    for (raw) |c| {
+        if (n >= max_len) break;
+        // Keep only printable ASCII (0x20 space .. 0x7E '~'); drop
+        // C0 controls, DEL (0x7F), and any high/non-ASCII byte.
+        if (c >= 0x20 and c < 0x7f) {
+            buf[n] = c;
+            n += 1;
+        }
+    }
+
+    // Shrink the allocation to exactly the sanitized length.
+    if (n != buf.len) buf = try allocator.realloc(buf, n);
+    return buf;
+}
+
 /// Connection state for a connected miner
 pub const MinerConnection = struct {
     /// Unique miner ID
@@ -509,7 +541,7 @@ pub const StratumServer = struct {
         if (root.object.get("params")) |params| {
             if (params.array.items.len > 0) {
                 const worker = params.array.items[0].string;
-                miner.worker_name = try self.allocator.dupe(u8, worker);
+                miner.worker_name = try sanitizeWorkerName(self.allocator, worker);
             }
         }
 

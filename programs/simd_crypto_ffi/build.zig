@@ -71,10 +71,10 @@ pub fn build(b: *std.Build) void {
     android_step.dependOn(&android_install.step);
 
     // =============================================================================
-    // Zig Module (for Zig projects)
+    // Zig Module (for Zig projects) — consumable via `b.dependency(...).module("simd_crypto")`
     // =============================================================================
 
-    const crypto_module = b.createModule(.{
+    const crypto_module = b.addModule("simd_crypto", .{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
@@ -96,22 +96,17 @@ pub fn build(b: *std.Build) void {
     });
     ffi_tests.root_module.link_libc = true;
 
-    const test_step = b.step("test", "Run FFI unit tests");
-    test_step.dependOn(&b.addRunArtifact(ffi_tests).step);
-
-    // Test the Zig module
-    const module_test_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
+    // Test the Zig module (main.zig + bitcoin/*). Reuses the consumable module
+    // declared above so `zig build test` exercises exactly what downstreams import.
     const module_tests = b.addTest(.{
-        .root_module = module_test_module,
+        .root_module = crypto_module,
     });
 
-    const module_test_step = b.step("test-module", "Run Zig module tests");
-    module_test_step.dependOn(&b.addRunArtifact(module_tests).step);
+    const test_step = b.step("test", "Run FFI + Zig-module unit tests");
+    test_step.dependOn(&b.addRunArtifact(ffi_tests).step);
+    test_step.dependOn(&b.addRunArtifact(module_tests).step);
 
-    _ = crypto_module;
+    // Keep the standalone module-only test step for convenience.
+    const module_test_step = b.step("test-module", "Run Zig module tests only");
+    module_test_step.dependOn(&b.addRunArtifact(module_tests).step);
 }

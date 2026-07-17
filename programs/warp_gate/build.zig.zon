@@ -1,0 +1,13 @@
+.{
+    .name = .warp_gate,
+    .version = "0.1.0",
+    .fingerprint = 0x3d73c9c648162d7d,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "README.md",
+    },
+    .dependencies = .{},
+}

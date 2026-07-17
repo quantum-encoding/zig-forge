@@ -605,12 +605,28 @@ const integration_test = @import("integration_test.zig");
 const edge_case_test = @import("edge_case_tests.zig");
 const forge = @import("forge.zig");
 
+// Security-critical / money-path modules that previously carried `test`
+// blocks (or newly-added ones) but were never rooted into `zig build test`.
+// Rooting them compiles the modules and runs their tests in CI:
+//   * stripe.zig       — webhook HMAC verify (money path)
+//   * apple_auth.zig   — Apple Sign In OIDC handler (auth trust root)
+//   * google_auth.zig  — Google Sign In OIDC handler (auth trust root)
+//   * iap.zig          — App Store / Play in-app-purchase crediting
+const stripe = @import("stripe.zig");
+const apple_auth = @import("apple_auth.zig");
+const google_auth = @import("google_auth.zig");
+const iap = @import("iap.zig");
+
 test "module tests imported" {
     _ = auth_rl;
     _ = wal_test;
     _ = integration_test;
     _ = edge_case_test;
     _ = forge;
+    _ = stripe;
+    _ = apple_auth;
+    _ = google_auth;
+    _ = iap;
 }
 
 test "OIDC: nonce verification integration" {

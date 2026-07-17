@@ -22,7 +22,7 @@ Receiving: my-project (12.4 MB)
 - **Local discovery** - Instant transfer on same LAN via mDNS
 - **Encrypted** - ChaCha20-Poly1305 AEAD encryption
 - **Simple codes** - Human-readable transfer codes (e.g., `warp-729-alpha`)
-- **Cross-platform** - Linux, macOS, Windows
+- **Cross-platform** - Linux, macOS
 
 ## Installation
 
@@ -88,26 +88,9 @@ zig build bench
 
 ## Benchmarks
 
-```
-╔══════════════════════════════════════════════════════════════╗
-║              WARP GATE PERFORMANCE BENCHMARKS                ║
-╚══════════════════════════════════════════════════════════════╝
-
-┌─────────────────────────────────────────────────────────────┐
-│ Warp Code Generation & Parsing                             │
-└─────────────────────────────────────────────────────────────┘
-  Generate:     5.2M ops/sec
-  Parse:        8.1M ops/sec
-  Key derive:   2.1M ops/sec
-
-┌─────────────────────────────────────────────────────────────┐
-│ ChaCha20-Poly1305 Encryption                               │
-└─────────────────────────────────────────────────────────────┘
-     64 bytes:   850.00 MB/s
-   1024 bytes:  1200.00 MB/s
-  16384 bytes:  1450.00 MB/s
-  65536 bytes:  1500.00 MB/s
-```
+Run `zig build bench` to measure warp-code generation/parsing, key
+derivation, ChaCha20-Poly1305 throughput, and wire-header serialization on
+your own hardware. Numbers vary by machine, so none are quoted here.
 
 ## License
 

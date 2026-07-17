@@ -24,6 +24,18 @@ extern "c" fn fread(ptr: [*]u8, size: usize, nmemb: usize, stream: *FILE) usize;
 extern "c" fn fseek(stream: *FILE, offset: c_long, whence: c_int) c_int;
 extern "c" fn ftell(stream: *FILE) c_long;
 extern "c" fn mkdir(path: [*:0]const u8, mode: c_uint) c_int;
+extern "c" fn realpath(path: [*:0]const u8, resolved: [*]u8) ?[*:0]u8;
+
+/// Canonicalize `path` via libc realpath into `buf`. Returns the resolved slice
+/// (borrowing `buf`), or null on error (nonexistent path, symlink loop, etc).
+fn realpathInto(allocator: std.mem.Allocator, path: []const u8, buf: *[std.fs.max_path_bytes]u8) ?[]const u8 {
+    if (std.mem.indexOfScalar(u8, path, 0) != null) return null;
+    const pz = allocator.allocSentinel(u8, path.len, 0) catch return null;
+    defer allocator.free(pz);
+    @memcpy(pz, path);
+    const res = realpath(pz.ptr, buf) orelse return null;
+    return std.mem.span(res);
+}
 const FILE = std.c.FILE;
 
 pub fn main(init: std.process.Init) !void {
@@ -183,7 +195,7 @@ pub fn main(init: std.process.Init) !void {
 
         // Resolve image paths: load files relative to the markdown source
         const base_dir = extractDirectory(parsed.file_path);
-        resolveImages(allocator, &result.document, base_dir);
+        resolveImages(allocator, &result.document, base_dir, parsed.allow_absolute_images);
 
         // Load letterhead image if specified
         var letterhead: ?docx.docx_writer.LetterheadImage = null;
@@ -191,13 +203,18 @@ pub fn main(init: std.process.Init) !void {
         defer if (letterhead_data) |ld| allocator.free(ld);
 
         if (result.frontmatter.letterhead) |lh_path| {
-            // Resolve relative to markdown file's directory
-            const full_lh_path = if (lh_path.len > 0 and lh_path[0] == '/')
-                allocator.dupe(u8, lh_path) catch null
-            else if (base_dir) |dir|
-                std.fmt.allocPrint(allocator, "{s}{s}", .{ dir, lh_path }) catch null
+            // Resolve relative to markdown file's directory. Sandboxed by
+            // default (H1): reject absolute/`..`, realpath-verify under
+            // base_dir. --allow-absolute-images restores legacy passthrough.
+            const full_lh_path = if (parsed.allow_absolute_images)
+                (if (lh_path.len > 0 and lh_path[0] == '/')
+                    allocator.dupe(u8, lh_path) catch null
+                else if (base_dir) |dir|
+                    std.fmt.allocPrint(allocator, "{s}{s}", .{ dir, lh_path }) catch null
+                else
+                    allocator.dupe(u8, lh_path) catch null)
             else
-                allocator.dupe(u8, lh_path) catch null;
+                resolveSafeImagePath(allocator, base_dir, lh_path);
 
             if (full_lh_path) |flp| {
                 defer allocator.free(flp);
@@ -707,21 +724,75 @@ fn extractDirectory(path: []const u8) ?[]const u8 {
     return null;
 }
 
+/// Safely resolve a user-supplied image/letterhead path (from markdown source
+/// or frontmatter) to an on-disk file confined under `base_dir`.
+///
+/// Security (H1 — local file inclusion via CLI): the markdown may come from an
+/// untrusted uploader when a service wraps `zig-docx …--to-docx`. Without this
+/// guard `![x](/etc/passwd)` or `![x](../../secret)` would embed arbitrary
+/// server files into the output .docx. We therefore:
+///   - reject NUL bytes (C-string truncation),
+///   - reject absolute paths,
+///   - reject any `..` path segment,
+///   - realpath-canonicalize the result and require it to remain under the
+///     canonical `base_dir` (this also defeats symlink escapes).
+/// Returns an owned, canonical absolute path on success, or null on rejection.
+/// The FFI surface never calls this — CLI-only.
+fn resolveSafeImagePath(
+    allocator: std.mem.Allocator,
+    base_dir: ?[]const u8,
+    rel_path: []const u8,
+) ?[]u8 {
+    // Reject NUL bytes anywhere in the path.
+    if (std.mem.indexOfScalar(u8, rel_path, 0) != null) return null;
+    // Reject absolute paths.
+    if (rel_path.len == 0) return null;
+    if (rel_path[0] == '/') return null;
+    // Reject any `..` path segment (defends against lexical traversal).
+    var seg_it = std.mem.splitScalar(u8, rel_path, '/');
+    while (seg_it.next()) |seg| {
+        if (std.mem.eql(u8, seg, "..")) return null;
+    }
+
+    // Canonicalize the base directory (cwd when the source has no dir part).
+    const base = if (base_dir) |d| (if (d.len == 0) "." else d) else ".";
+    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const canon_base = realpathInto(allocator, base, &base_buf) orelse return null;
+
+    // Build the candidate path and canonicalize it (requires it to exist —
+    // which it must to be readable anyway).
+    const full = std.fmt.allocPrint(allocator, "{s}/{s}", .{ base, rel_path }) catch return null;
+    defer allocator.free(full);
+    var full_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const canon_full = realpathInto(allocator, full, &full_buf) orelse return null;
+
+    // Require the resolved file to live strictly under the canonical base dir.
+    if (!std.mem.startsWith(u8, canon_full, canon_base)) return null;
+    const is_root = std.mem.eql(u8, canon_base, "/");
+    if (!is_root) {
+        // Must be a proper descendant: base + "/" + something.
+        if (canon_full.len <= canon_base.len) return null;
+        if (canon_full[canon_base.len] != '/') return null;
+    }
+
+    return allocator.dupe(u8, canon_full) catch null;
+}
+
 /// Walk the document elements and resolve image paths to actual image data.
 /// Runs with image_rel_id set to a file path get their images loaded and
 /// registered in the document's media array + relationship ID updated.
-fn resolveImages(allocator: std.mem.Allocator, doc: *docx.Document, base_dir: ?[]const u8) void {
+fn resolveImages(allocator: std.mem.Allocator, doc: *docx.Document, base_dir: ?[]const u8, allow_absolute: bool) void {
     var media_list: std.ArrayListUnmanaged(docx.MediaFile) = .empty;
     var img_index: u32 = 0;
 
     for (doc.elements) |*elem| {
         switch (elem.*) {
-            .paragraph => |*p| resolveImageRuns(allocator, p.runs, base_dir, &media_list, &img_index),
+            .paragraph => |*p| resolveImageRuns(allocator, p.runs, base_dir, &media_list, &img_index, allow_absolute),
             .table => |*t| {
                 for (t.rows) |row| {
                     for (row.cells) |cell| {
                         for (cell.paragraphs) |*cp| {
-                            resolveImageRuns(allocator, cp.runs, base_dir, &media_list, &img_index);
+                            resolveImageRuns(allocator, cp.runs, base_dir, &media_list, &img_index, allow_absolute);
                         }
                     }
                 }
@@ -740,17 +811,28 @@ fn resolveImageRuns(
     base_dir: ?[]const u8,
     media_list: *std.ArrayListUnmanaged(docx.MediaFile),
     img_index: *u32,
+    allow_absolute: bool,
 ) void {
     for (runs) |*run| {
         const img_path = run.image_rel_id orelse continue;
 
-        // Build full path: use as-is if absolute, otherwise prepend base_dir
-        const full_path = if (img_path.len > 0 and img_path[0] == '/')
-            allocator.dupe(u8, img_path) catch continue
-        else if (base_dir) |dir|
-            std.fmt.allocPrint(allocator, "{s}{s}", .{ dir, img_path }) catch continue
+        // Resolve the on-disk path. By default (secure), confine it under
+        // base_dir via resolveSafeImagePath; only the explicit
+        // --allow-absolute-images opt-out restores the legacy passthrough.
+        const full_path = if (allow_absolute)
+            (if (img_path.len > 0 and img_path[0] == '/')
+                allocator.dupe(u8, img_path) catch continue
+            else if (base_dir) |dir|
+                std.fmt.allocPrint(allocator, "{s}{s}", .{ dir, img_path }) catch continue
+            else
+                allocator.dupe(u8, img_path) catch continue)
         else
-            allocator.dupe(u8, img_path) catch continue;
+            resolveSafeImagePath(allocator, base_dir, img_path) orelse {
+                std.debug.print("Warning: rejected unsafe image path '{s}' (use --allow-absolute-images for trusted local files)\n", .{img_path});
+                allocator.free(img_path);
+                run.image_rel_id = null;
+                continue;
+            };
         defer allocator.free(full_path);
 
         // Load image data
@@ -804,6 +886,10 @@ const Args = struct {
     claude_code_mode: bool = false,
     to_docx: bool = false, // MD → DOCX conversion
     fra_mode: bool = false, // JSON → FRA DOCX conversion
+    // Security: by default, image/letterhead paths are sandboxed to the
+    // markdown file's directory (absolute paths and `..` traversal rejected,
+    // symlink escapes caught via realpath). Opt out only for trusted local use.
+    allow_absolute_images: bool = false,
     doc_style: docx.docx_writer.DocumentStyle = .default, // --style minutes|default
     only_project: ?[]const u8 = null,
     // Chunker config (only used when --chunk is set)
@@ -868,6 +954,8 @@ fn parseArgs(args: []const []const u8) ?Args {
             result.to_docx = true;
         } else if (std.mem.eql(u8, arg, "--fra")) {
             result.fra_mode = true;
+        } else if (std.mem.eql(u8, arg, "--allow-absolute-images")) {
+            result.allow_absolute_images = true;
         } else if (std.mem.eql(u8, arg, "--style")) {
             i += 1;
             if (i >= args.len) {

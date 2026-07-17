@@ -144,7 +144,9 @@ pub const ReportWriter = struct {
                 var mtime_buf: [24]u8 = undefined;
                 for (group.file_infos.items, 0..) |info, fidx| {
                     try writer.writeAll("        {\n");
-                    try writer.print("          \"path\": \"{s}\",\n", .{escapeJsonString(info.path)});
+                    try writer.writeAll("          \"path\": ");
+                    try writeJsonString(writer, info.path);
+                    try writer.writeAll(",\n");
                     try writer.print("          \"mtime\": \"{s}\"\n", .{formatIso8601(info.mtime, &mtime_buf)});
                     try writer.writeAll("        }");
                     if (fidx < group.file_infos.items.len - 1) {
@@ -156,7 +158,9 @@ pub const ReportWriter = struct {
                 // Legacy format - just paths
                 for (group.files.items, 0..) |path, fidx| {
                     try writer.writeAll("        {\n");
-                    try writer.print("          \"path\": \"{s}\"\n", .{escapeJsonString(path)});
+                    try writer.writeAll("          \"path\": ");
+                    try writeJsonString(writer, path);
+                    try writer.writeAll("\n");
                     try writer.writeAll("        }");
                     if (fidx < group.files.items.len - 1) {
                         try writer.writeAll(",");
@@ -248,7 +252,9 @@ pub const ReportWriter = struct {
 
                 try writer.writeAll("      <ul class=\"file-list\">\n");
                 for (group.files.items) |path| {
-                    try writer.print("        <li>{s}</li>\n", .{escapeHtml(path)});
+                    try writer.writeAll("        <li>");
+                    try writeEscapedHtml(writer, path);
+                    try writer.writeAll("</li>\n");
                 }
                 try writer.writeAll("      </ul>\n");
                 try writer.writeAll("    </div>\n\n");
@@ -337,8 +343,12 @@ pub const ReportWriter = struct {
         _ = self;
 
         try writer.writeAll("{\n");
-        try writer.print("  \"folder_a\": \"{s}\",\n", .{escapeJsonString(result.folder_a)});
-        try writer.print("  \"folder_b\": \"{s}\",\n", .{escapeJsonString(result.folder_b)});
+        try writer.writeAll("  \"folder_a\": ");
+        try writeJsonString(writer, result.folder_a);
+        try writer.writeAll(",\n");
+        try writer.writeAll("  \"folder_b\": ");
+        try writeJsonString(writer, result.folder_b);
+        try writer.writeAll(",\n");
         try writer.print("  \"is_identical\": {},\n", .{result.isIdentical()});
 
         // Summary
@@ -407,8 +417,12 @@ pub const ReportWriter = struct {
 
         // Folder paths
         try writer.writeAll("    <div class=\"folders\">\n");
-        try writer.print("      <p><strong>Folder A:</strong> <span class=\"folder-path\">{s}</span></p>\n", .{escapeHtml(result.folder_a)});
-        try writer.print("      <p><strong>Folder B:</strong> <span class=\"folder-path\">{s}</span></p>\n", .{escapeHtml(result.folder_b)});
+        try writer.writeAll("      <p><strong>Folder A:</strong> <span class=\"folder-path\">");
+        try writeEscapedHtml(writer, result.folder_a);
+        try writer.writeAll("</span></p>\n");
+        try writer.writeAll("      <p><strong>Folder B:</strong> <span class=\"folder-path\">");
+        try writeEscapedHtml(writer, result.folder_b);
+        try writer.writeAll("</span></p>\n");
         if (result.isIdentical()) {
             try writer.writeAll("      <p style=\"color: #16a34a; font-weight: bold;\">Folders are IDENTICAL</p>\n");
         }
@@ -426,7 +440,9 @@ pub const ReportWriter = struct {
         if (result.only_in_a.items.len > 0) {
             try writer.writeAll("    <div class=\"section\">\n      <h2>Only in A</h2>\n      <ul class=\"file-list\">\n");
             for (result.only_in_a.items) |path| {
-                try writer.print("        <li>- {s}</li>\n", .{escapeHtml(path)});
+                try writer.writeAll("        <li>- ");
+                try writeEscapedHtml(writer, path);
+                try writer.writeAll("</li>\n");
             }
             try writer.writeAll("      </ul>\n    </div>\n\n");
         }
@@ -434,7 +450,9 @@ pub const ReportWriter = struct {
         if (result.only_in_b.items.len > 0) {
             try writer.writeAll("    <div class=\"section\">\n      <h2>Only in B</h2>\n      <ul class=\"file-list\">\n");
             for (result.only_in_b.items) |path| {
-                try writer.print("        <li>+ {s}</li>\n", .{escapeHtml(path)});
+                try writer.writeAll("        <li>+ ");
+                try writeEscapedHtml(writer, path);
+                try writer.writeAll("</li>\n");
             }
             try writer.writeAll("      </ul>\n    </div>\n\n");
         }
@@ -442,7 +460,9 @@ pub const ReportWriter = struct {
         if (result.modified.items.len > 0) {
             try writer.writeAll("    <div class=\"section\">\n      <h2>Modified</h2>\n      <ul class=\"file-list\">\n");
             for (result.modified.items) |path| {
-                try writer.print("        <li>~ {s}</li>\n", .{escapeHtml(path)});
+                try writer.writeAll("        <li>~ ");
+                try writeEscapedHtml(writer, path);
+                try writer.writeAll("</li>\n");
             }
             try writer.writeAll("      </ul>\n    </div>\n\n");
         }
@@ -469,7 +489,8 @@ fn writeJsonArray(writer: anytype, name: []const u8, items: []const []const u8) 
     }
     try writer.writeAll("\n");
     for (items, 0..) |item, idx| {
-        try writer.print("    \"{s}\"", .{escapeJsonString(item)});
+        try writer.writeAll("    ");
+        try writeJsonString(writer, item);
         if (idx < items.len - 1) {
             try writer.writeAll(",");
         }
@@ -530,19 +551,34 @@ fn isLeapYear(year: u32) bool {
     return (year % 4 == 0 and year % 100 != 0) or (year % 400 == 0);
 }
 
-/// Escape string for JSON (basic escaping)
-fn escapeJsonString(s: []const u8) []const u8 {
-    // For simplicity, just return as-is
-    // A full implementation would escape quotes, backslashes, newlines, etc.
-    // This is acceptable for file paths which typically don't contain these
-    return s;
+/// Write `s` as a fully-quoted, RFC 8259-escaped JSON string value to `writer`.
+///
+/// Delegates to the audited `std.json.Stringify.encodeJsonString`, which emits
+/// the surrounding quotes and escapes `"`, `\`, and control characters. This
+/// closes the JSON-injection hole where a crafted filename (containing `"` or
+/// `\`) could inject fields into the report both consumer apps parse. High
+/// bytes (0x80..0xFF) are passed through raw (escape_unicode = false) so
+/// non-UTF-8 filenames do not trigger a decode panic.
+fn writeJsonString(writer: *std.Io.Writer, s: []const u8) !void {
+    try std.json.Stringify.encodeJsonString(s, .{}, writer);
 }
 
-/// Escape string for HTML
-fn escapeHtml(s: []const u8) []const u8 {
-    // For simplicity, return as-is
-    // A full implementation would escape <, >, &, etc.
-    return s;
+/// Stream `s` into `writer` with HTML metacharacters entity-escaped.
+///
+/// Closes the stored-XSS hole where a filename such as `<img onerror=...>`
+/// executed when the generated HTML report was opened. Streaming avoids any
+/// allocation and fits the existing writer-based emitters.
+fn writeEscapedHtml(writer: anytype, s: []const u8) !void {
+    for (s) |c| {
+        switch (c) {
+            '&' => try writer.writeAll("&amp;"),
+            '<' => try writer.writeAll("&lt;"),
+            '>' => try writer.writeAll("&gt;"),
+            '"' => try writer.writeAll("&quot;"),
+            '\'' => try writer.writeAll("&#39;"),
+            else => try writer.writeByte(c),
+        }
+    }
 }
 
 // ============================================================================

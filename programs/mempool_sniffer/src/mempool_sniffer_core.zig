@@ -291,37 +291,55 @@ pub const Sniffer = struct {
 
                 // Handle inv - request full transaction via getdata
                 if (std.mem.eql(u8, command_str, "inv")) {
-                    var payload_offset: usize = 0;
+                    inv_blk: {
+                        var payload_offset: usize = 0;
 
-                    // Read CompactSize (varint) for count
-                    const first_byte = buffer[offset + payload_offset];
-                    var inv_count: u64 = 0;
-                    if (first_byte < 0xFD) {
-                        inv_count = first_byte;
-                        payload_offset += 1;
-                    } else if (first_byte == 0xFD) {
-                        inv_count = std.mem.readInt(u16, buffer[offset + payload_offset + 1..][0..2], .little);
-                        payload_offset += 3;
-                    } else if (first_byte == 0xFE) {
-                        inv_count = std.mem.readInt(u32, buffer[offset + payload_offset + 1..][0..4], .little);
-                        payload_offset += 5;
-                    } else {
-                        inv_count = std.mem.readInt(u64, buffer[offset + payload_offset + 1..][0..8], .little);
-                        payload_offset += 9;
-                    }
+                        // The inv payload must contain at least the 1-byte
+                        // CompactSize count prefix. A zero-length payload would
+                        // otherwise read buffer[offset] past the message body —
+                        // an attacker-triggerable OOB read that is UB under the
+                        // shipped ReleaseFast lib. Bail (advancing past the
+                        // message via the offset += length below) on any varint
+                        // whose byte-count does not fit within `length`.
+                        if (length < 1) break :inv_blk;
 
-                    var i: u64 = 0;
-                    while (i < inv_count and payload_offset + 36 <= length) : (i += 1) {
-                        const inv_type = std.mem.readInt(u32, buffer[offset + payload_offset..][0..4], .little);
-                        payload_offset += 4;
-
-                        if (inv_type == MSG_TX) {
-                            var hash: [32]u8 = undefined;
-                            @memcpy(&hash, buffer[offset + payload_offset..][0..32]);
-                            try bitcoin.sendGetData(sockfd, MSG_TX, hash);
+                        // Read CompactSize (varint) for count — validate each
+                        // encoding's total byte-count against the declared
+                        // message length before touching the multi-byte tail.
+                        const first_byte = buffer[offset + payload_offset];
+                        var inv_count: u64 = 0;
+                        if (first_byte < 0xFD) {
+                            inv_count = first_byte;
+                            payload_offset += 1;
+                        } else if (first_byte == 0xFD) {
+                            if (payload_offset + 3 > length) break :inv_blk; // prefix(1)+u16(2)
+                            inv_count = std.mem.readInt(u16, buffer[offset + payload_offset + 1..][0..2], .little);
+                            payload_offset += 3;
+                        } else if (first_byte == 0xFE) {
+                            if (payload_offset + 5 > length) break :inv_blk; // prefix(1)+u32(4)
+                            inv_count = std.mem.readInt(u32, buffer[offset + payload_offset + 1..][0..4], .little);
+                            payload_offset += 5;
+                        } else {
+                            if (payload_offset + 9 > length) break :inv_blk; // prefix(1)+u64(8)
+                            inv_count = std.mem.readInt(u64, buffer[offset + payload_offset + 1..][0..8], .little);
+                            payload_offset += 9;
                         }
 
-                        payload_offset += 32;
+                        // Each inv vector is 36 bytes (type(4) + hash(32)); the
+                        // loop guard already keeps every read within `length`.
+                        var i: u64 = 0;
+                        while (i < inv_count and payload_offset + 36 <= length) : (i += 1) {
+                            const inv_type = std.mem.readInt(u32, buffer[offset + payload_offset..][0..4], .little);
+                            payload_offset += 4;
+
+                            if (inv_type == MSG_TX) {
+                                var hash: [32]u8 = undefined;
+                                @memcpy(&hash, buffer[offset + payload_offset..][0..32]);
+                                try bitcoin.sendGetData(sockfd, MSG_TX, hash);
+                            }
+
+                            payload_offset += 32;
+                        }
                     }
                 }
 

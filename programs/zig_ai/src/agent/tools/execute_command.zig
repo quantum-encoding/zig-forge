@@ -84,6 +84,16 @@ pub fn execute(
 /// The argv arrays live in the parent's address space until execvp;
 /// fork copies the whole address space so the pointers are valid in
 /// the child without further allocation.
+///
+/// Audit (validator/executor tokenizer parity): argv is built from the
+/// SAME quote/escape-aware `command_parser.parse` that `validateCommand`
+/// used to approve the command — not a separate whitespace split. The
+/// previous `tokenizeAny(u8, command, " \t")` re-tokenizer ignored
+/// quotes/escapes, so a quoted command (e.g. `grep "a b" file`) would
+/// validate as three tokens but exec as four, and the allowlist gate
+/// could reason about a different token stream than the one handed to
+/// execvp. Re-running the deterministic parser on the same immutable
+/// `command` string yields exactly the argv the validator approved.
 fn runCommand(
     allocator: std.mem.Allocator,
     command: []const u8,
@@ -91,11 +101,16 @@ fn runCommand(
     exec_config: config.ExecuteCommandConfig,
     proc_table: ?*process_table.ProcessTable,
 ) !types.ToolOutput {
-    // Tokenize the command into argv in the parent. The model
-    // emits a single string for backward compat with the existing
-    // tool schema — we split on whitespace into argv. Shell
-    // features (pipes/redirects/expansion) do not work; the agent
-    // must issue multiple tool calls instead.
+    // Tokenize the command into argv in the parent using the security
+    // command parser — the identical routine (and identical input) that
+    // `sandbox.validateCommand` ran, so the executed argv is guaranteed
+    // to match the validated token stream. Shell features
+    // (pipes/redirects/expansion) do not work; the agent must issue
+    // multiple tool calls instead.
+    var parser = security.command_parser.CommandParser.init(allocator);
+    var parsed = parser.parse(command) catch return error.ForkFailed;
+    defer parsed.deinit();
+
     var argv_storage: std.ArrayListUnmanaged([:0]u8) = .empty;
     defer {
         for (argv_storage.items) |s| allocator.free(s);
@@ -104,8 +119,7 @@ fn runCommand(
     var argv_ptrs: std.ArrayListUnmanaged(?[*:0]const u8) = .empty;
     defer argv_ptrs.deinit(allocator);
 
-    var it = std.mem.tokenizeAny(u8, command, " \t");
-    while (it.next()) |tok| {
+    for (parsed.args) |tok| {
         const z = try allocator.allocSentinel(u8, tok.len, 0);
         @memcpy(z, tok);
         try argv_storage.append(allocator, z);
@@ -156,9 +170,10 @@ fn runCommand(
         }
 
         // execvp: PATH-resolved exec of argv[0]. The argv array is
-        // built from the model-supplied command tokenized on
-        // whitespace; no shell is invoked, so shell metacharacters
-        // in argv items are inert.
+        // built from the model-supplied command via the security
+        // command parser (the same tokens the validator approved);
+        // no shell is invoked, so shell metacharacters in argv items
+        // are inert.
         const prog: [*:0]const u8 = argv_storage.items[0].ptr;
         // execvp takes a non-const argv per POSIX signature, but
         // it does not modify the elements. The cast is required

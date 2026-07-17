@@ -202,6 +202,20 @@ fn serveStatsJson(fd: c_int) void {
     sendHttp(fd, "200 OK", "application/json", body_str);
 }
 
+/// Serialize a single metric entry as a JSON object via std.json.Stringify.
+/// Using Stringify (not a printf template) guarantees the attacker-influenced
+/// model string is escaped, closing the stored-XSS / JSON-corruption sink.
+fn stringifyEntry(e: *const MetricEntry, writer: *std.Io.Writer) std.json.Stringify.Error!void {
+    try std.json.Stringify.value(.{
+        .ts = e.timestamp,
+        .latency_ms = e.latency_ms,
+        .tokens_in = e.tokens_in,
+        .tokens_out = e.tokens_out,
+        .ok = e.status_ok,
+        .model = e.model[0..e.model_len],
+    }, .{}, writer);
+}
+
 fn serveRecentJson(fd: c_int) void {
     var body: [32768]u8 = undefined;
     var pos: usize = 0;
@@ -214,18 +228,27 @@ fn serveRecentJson(fd: c_int) void {
     for (start_idx..entry_count) |i| {
         const idx = i % MAX_ENTRIES;
         const e = &entries[idx];
-        if (pos > 1) {
+
+        // Serialize each entry with std.json.Stringify so the attacker-influenced
+        // model bytes are escaped ("\, control chars, etc.) instead of interpolated
+        // raw into a printf template — closes the stored-XSS / JSON-corruption sink.
+        // Serialize into a per-entry scratch first so a buffer-full entry breaks the
+        // loop cleanly without leaving a trailing comma (invalid JSON).
+        var scratch: [640]u8 = undefined;
+        var scratch_writer = std.Io.Writer.fixed(&scratch);
+        stringifyEntry(e, &scratch_writer) catch break;
+        const chunk = scratch_writer.buffered();
+
+        // Reserve one byte for the closing ']'; account for the leading comma.
+        const comma_len: usize = if (pos > 1) 1 else 0;
+        if (pos + comma_len + chunk.len + 1 > body.len) break;
+
+        if (comma_len == 1) {
             body[pos] = ',';
             pos += 1;
         }
-        const slice = std.fmt.bufPrint(body[pos..],
-            \\{{"ts":{d},"latency_ms":{d},"tokens_in":{d},"tokens_out":{d},"ok":{s},"model":"{s}"}}
-        , .{
-            e.timestamp, e.latency_ms, e.tokens_in, e.tokens_out,
-            if (e.status_ok) "true" else "false",
-            e.model[0..e.model_len],
-        }) catch break;
-        pos += slice.len;
+        @memcpy(body[pos..][0..chunk.len], chunk);
+        pos += chunk.len;
     }
 
     body[pos] = ']';
@@ -277,3 +300,63 @@ const DASHBOARD_HTML =
     \\refresh();setInterval(refresh,3000);
     \\</script></body></html>
 ;
+
+// ---- Tests ----
+
+fn testEntry(model: []const u8) MetricEntry {
+    var e: MetricEntry = .{
+        .timestamp = 1710000000,
+        .latency_ms = 1234,
+        .tokens_in = 50,
+        .tokens_out = 200,
+        .status_ok = true,
+        .model = undefined,
+        .model_len = @intCast(model.len),
+    };
+    @memcpy(e.model[0..model.len], model);
+    return e;
+}
+
+test "stringifyEntry emits the exact wire shape zigix_chat expects" {
+    // Anchor: hand-written expected bytes matching the /api/recent contract the
+    // dashboard + zigix_chat rely on (key order, unquoted bool, quoted string).
+    const e = testEntry("claude-sonnet-4-5");
+    var buf: [640]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try stringifyEntry(&e, &w);
+    try std.testing.expectEqualStrings(
+        \\{"ts":1710000000,"latency_ms":1234,"tokens_in":50,"tokens_out":200,"ok":true,"model":"claude-sonnet-4-5"}
+    , w.buffered());
+}
+
+test "stringifyEntry escapes attacker-controlled model bytes (no JSON-IN-FMT injection)" {
+    // A model containing a quote, backslash and control byte would break a printf
+    // template ("model":"{s}") — verify Stringify escapes them per the JSON spec.
+    const nasty = "cl\"aude\\\n<script>";
+    const e = testEntry(nasty);
+    var buf: [640]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try stringifyEntry(&e, &w);
+    const out = w.buffered();
+
+    // Escaped forms must be present on the wire.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\\\"") != null); // \"
+    try std.testing.expect(std.mem.indexOf(u8, out, "\\\\") != null); // \\
+    try std.testing.expect(std.mem.indexOf(u8, out, "\\n") != null); //  \n
+
+    // The output must be valid JSON and round-trip the model string exactly when
+    // read back by std.json's parser (a distinct codepath), proving no corruption.
+    const Parsed = struct {
+        ts: i64,
+        latency_ms: u32,
+        tokens_in: u32,
+        tokens_out: u32,
+        ok: bool,
+        model: []const u8,
+    };
+    const parsed = try std.json.parseFromSlice(Parsed, std.testing.allocator, out, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(nasty, parsed.value.model);
+    try std.testing.expectEqual(@as(i64, 1710000000), parsed.value.ts);
+    try std.testing.expect(parsed.value.ok);
+}

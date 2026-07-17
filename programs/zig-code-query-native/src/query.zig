@@ -3,6 +3,16 @@
 //! Extracted command logic from main.zig. These functions return data
 //! structs instead of printing directly, enabling library consumers
 //! to use the data programmatically.
+//!
+//! Security invariants:
+//!  - Every value interpolated inside a single-quoted SurrealQL string is
+//!    passed through `surreal.escapeSql` first.
+//!  - Every value interpolated as a record-id fragment (`code_function:{s}`)
+//!    is allow-listed with `surreal.validRecordId`; non-conforming names are
+//!    refused (empty result) rather than escaped, because record-id positions
+//!    cannot be made safe by string escaping.
+//!  - Returned records never alias the transient JSON parse arena: each string
+//!    field is copied into a result-owned arena that lives until `deinit`.
 
 const std = @import("std");
 const types = @import("types.zig");
@@ -16,13 +26,16 @@ const Chunk = types.Chunk;
 pub fn find(client: *SurrealClient, term: []const u8) !types.QueryResult(FunctionRecord) {
     const allocator = client.allocator;
 
+    const escaped_term = try surreal.escapeSql(allocator, term);
+    defer allocator.free(escaped_term);
+
     const sql = try std.fmt.allocPrint(allocator,
         \\SELECT record::id(id) as id, name, file, line_start, line_end
         \\FROM code_function
         \\WHERE string::lowercase(name) CONTAINS '{s}'
         \\ORDER BY name
         \\LIMIT 50
-    , .{term});
+    , .{escaped_term});
     defer allocator.free(sql);
 
     const response = try client.executeQuery(sql);
@@ -41,15 +54,21 @@ pub fn find(client: *SurrealClient, term: []const u8) !types.QueryResult(Functio
         return types.QueryResult(FunctionRecord).empty(allocator);
     }
 
-    const records = try allocator.alloc(FunctionRecord, items.len);
+    const arena = try allocator.create(std.heap.ArenaAllocator);
+    errdefer allocator.destroy(arena);
+    arena.* = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const aa = arena.allocator();
+
+    const records = try aa.alloc(FunctionRecord, items.len);
     for (items, 0..) |item, i| {
         if (item != .object) {
             records[i] = .{};
             continue;
         }
         records[i] = .{
-            .name = surreal.getString(item.object, "name"),
-            .file = surreal.getString(item.object, "file"),
+            .name = try aa.dupe(u8, surreal.getString(item.object, "name")),
+            .file = try aa.dupe(u8, surreal.getString(item.object, "file")),
             .line_start = surreal.getInt(item.object, "line_start"),
             .line_end = surreal.getInt(item.object, "line_end"),
         };
@@ -59,6 +78,7 @@ pub fn find(client: *SurrealClient, term: []const u8) !types.QueryResult(Functio
         .items = records,
         .total_count = records.len,
         .allocator = allocator,
+        .arena = arena,
     };
 }
 
@@ -67,13 +87,21 @@ pub fn context(client: *SurrealClient, name: []const u8) !types.ContextResult {
     const allocator = client.allocator;
     var result = types.ContextResult{ .allocator = allocator };
 
+    // The function-details query uses `name` inside a quoted string literal —
+    // escape it. The callers/callees queries use `name` as a record-id
+    // fragment (`code_function:{name}`) which cannot be string-escaped, so
+    // those are only issued when the name passes the record-id allow-list.
+    const escaped_name = try surreal.escapeSql(allocator, name);
+    defer allocator.free(escaped_name);
+    const name_is_record_id = surreal.validRecordId(name);
+
     // Query function details
     const func_sql = try std.fmt.allocPrint(allocator,
         \\SELECT record::id(id) as id, name, file, line_start, line_end, code
         \\FROM code_function
         \\WHERE name = '{s}'
         \\LIMIT 1
-    , .{name});
+    , .{escaped_name});
     defer allocator.free(func_sql);
 
     const func_response = try client.executeQuery(func_sql);
@@ -88,56 +116,66 @@ pub fn context(client: *SurrealClient, name: []const u8) !types.ContextResult {
     if (func_items.len == 0) return result;
     if (func_items[0] != .object) return result;
 
+    // Everything returned from here on owns its strings via this arena.
+    const arena = try allocator.create(std.heap.ArenaAllocator);
+    errdefer allocator.destroy(arena);
+    arena.* = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const aa = arena.allocator();
+
     const func_obj = func_items[0].object;
     result.func = .{
-        .name = surreal.getString(func_obj, "name"),
-        .file = surreal.getString(func_obj, "file"),
+        .name = try aa.dupe(u8, surreal.getString(func_obj, "name")),
+        .file = try aa.dupe(u8, surreal.getString(func_obj, "file")),
         .line_start = surreal.getInt(func_obj, "line_start"),
         .line_end = surreal.getInt(func_obj, "line_end"),
-        .code = surreal.getString(func_obj, "code"),
+        .code = try aa.dupe(u8, surreal.getString(func_obj, "code")),
     };
     result.found = true;
+    result.arena = arena;
 
-    // Query callees
-    const callees_sql = try std.fmt.allocPrint(allocator,
-        \\SELECT out.name as name, out.file as file, out.line_start as line_start
-        \\FROM code_calls
-        \\WHERE in = code_function:{s}
-        \\LIMIT 50
-    , .{name});
-    defer allocator.free(callees_sql);
+    // Query callees (record-id position — only if the name is allow-listed).
+    if (name_is_record_id) {
+        const callees_sql = try std.fmt.allocPrint(allocator,
+            \\SELECT out.name as name, out.file as file, out.line_start as line_start
+            \\FROM code_calls
+            \\WHERE in = code_function:{s}
+            \\LIMIT 50
+        , .{name});
+        defer allocator.free(callees_sql);
 
-    const callees_response = try client.executeQuery(callees_sql);
-    defer allocator.free(callees_response);
+        const callees_response = try client.executeQuery(callees_sql);
+        defer allocator.free(callees_response);
 
-    const callees_parsed = std.json.parseFromSlice(std.json.Value, allocator, callees_response, .{}) catch null;
-    if (callees_parsed) |cp| {
-        defer cp.deinit();
-        if (surreal.extractResult(cp.value)) |items| {
-            if (items.len > 0) {
-                result.callees = try parseCallRecords(allocator, items);
+        const callees_parsed = std.json.parseFromSlice(std.json.Value, allocator, callees_response, .{}) catch null;
+        if (callees_parsed) |cp| {
+            defer cp.deinit();
+            if (surreal.extractResult(cp.value)) |cp_items| {
+                if (cp_items.len > 0) {
+                    result.callees = try parseCallRecords(aa, cp_items);
+                }
             }
         }
-    }
 
-    // Query callers
-    const callers_sql = try std.fmt.allocPrint(allocator,
-        \\SELECT in.name as name, in.file as file, in.line_start as line_start
-        \\FROM code_calls
-        \\WHERE out = code_function:{s}
-        \\LIMIT 30
-    , .{name});
-    defer allocator.free(callers_sql);
+        // Query callers.
+        const callers_sql = try std.fmt.allocPrint(allocator,
+            \\SELECT in.name as name, in.file as file, in.line_start as line_start
+            \\FROM code_calls
+            \\WHERE out = code_function:{s}
+            \\LIMIT 30
+        , .{name});
+        defer allocator.free(callers_sql);
 
-    const callers_response = try client.executeQuery(callers_sql);
-    defer allocator.free(callers_response);
+        const callers_response = try client.executeQuery(callers_sql);
+        defer allocator.free(callers_response);
 
-    const callers_parsed = std.json.parseFromSlice(std.json.Value, allocator, callers_response, .{}) catch null;
-    if (callers_parsed) |cp| {
-        defer cp.deinit();
-        if (surreal.extractResult(cp.value)) |items| {
-            if (items.len > 0) {
-                result.callers = try parseCallRecords(allocator, items);
+        const callers_parsed = std.json.parseFromSlice(std.json.Value, allocator, callers_response, .{}) catch null;
+        if (callers_parsed) |cp| {
+            defer cp.deinit();
+            if (surreal.extractResult(cp.value)) |cp_items| {
+                if (cp_items.len > 0) {
+                    result.callers = try parseCallRecords(aa, cp_items);
+                }
             }
         }
     }
@@ -149,13 +187,16 @@ pub fn context(client: *SurrealClient, name: []const u8) !types.ContextResult {
 pub fn fileQuery(client: *SurrealClient, path: []const u8) !types.QueryResult(FunctionRecord) {
     const allocator = client.allocator;
 
+    const escaped_path = try surreal.escapeSql(allocator, path);
+    defer allocator.free(escaped_path);
+
     const sql = try std.fmt.allocPrint(allocator,
         \\SELECT record::id(id) as id, name, file, line_start, line_end
         \\FROM code_function
         \\WHERE file CONTAINS '{s}'
         \\ORDER BY file, line_start
         \\LIMIT 100
-    , .{path});
+    , .{escaped_path});
     defer allocator.free(sql);
 
     const response = try client.executeQuery(sql);
@@ -174,15 +215,21 @@ pub fn fileQuery(client: *SurrealClient, path: []const u8) !types.QueryResult(Fu
         return types.QueryResult(FunctionRecord).empty(allocator);
     }
 
-    const records = try allocator.alloc(FunctionRecord, items.len);
+    const arena = try allocator.create(std.heap.ArenaAllocator);
+    errdefer allocator.destroy(arena);
+    arena.* = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const aa = arena.allocator();
+
+    const records = try aa.alloc(FunctionRecord, items.len);
     for (items, 0..) |item, i| {
         if (item != .object) {
             records[i] = .{};
             continue;
         }
         records[i] = .{
-            .name = surreal.getString(item.object, "name"),
-            .file = surreal.getString(item.object, "file"),
+            .name = try aa.dupe(u8, surreal.getString(item.object, "name")),
+            .file = try aa.dupe(u8, surreal.getString(item.object, "file")),
             .line_start = surreal.getInt(item.object, "line_start"),
             .line_end = surreal.getInt(item.object, "line_end"),
         };
@@ -192,12 +239,19 @@ pub fn fileQuery(client: *SurrealClient, path: []const u8) !types.QueryResult(Fu
         .items = records,
         .total_count = records.len,
         .allocator = allocator,
+        .arena = arena,
     };
 }
 
 /// Find all callers of a function.
 pub fn callers(client: *SurrealClient, name: []const u8) !types.QueryResult(CallRecord) {
     const allocator = client.allocator;
+
+    // `name` is interpolated as a record-id fragment; refuse anything outside
+    // the allow-list rather than attempt to escape it.
+    if (!surreal.validRecordId(name)) {
+        return types.QueryResult(CallRecord).empty(allocator);
+    }
 
     const sql = try std.fmt.allocPrint(allocator,
         \\SELECT in.name as name, in.file as file, in.line_start as line_start
@@ -224,17 +278,30 @@ pub fn callers(client: *SurrealClient, name: []const u8) !types.QueryResult(Call
         return types.QueryResult(CallRecord).empty(allocator);
     }
 
-    const records = try parseCallRecords(allocator, items);
+    const arena = try allocator.create(std.heap.ArenaAllocator);
+    errdefer allocator.destroy(arena);
+    arena.* = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const aa = arena.allocator();
+
+    const records = try parseCallRecords(aa, items);
     return .{
         .items = records,
         .total_count = records.len,
         .allocator = allocator,
+        .arena = arena,
     };
 }
 
 /// Find all callees of a function.
 pub fn callees(client: *SurrealClient, name: []const u8) !types.QueryResult(CallRecord) {
     const allocator = client.allocator;
+
+    // `name` is interpolated as a record-id fragment; refuse anything outside
+    // the allow-list rather than attempt to escape it.
+    if (!surreal.validRecordId(name)) {
+        return types.QueryResult(CallRecord).empty(allocator);
+    }
 
     const sql = try std.fmt.allocPrint(allocator,
         \\SELECT out.name as name, out.file as file, out.line_start as line_start
@@ -260,11 +327,18 @@ pub fn callees(client: *SurrealClient, name: []const u8) !types.QueryResult(Call
         return types.QueryResult(CallRecord).empty(allocator);
     }
 
-    const records = try parseCallRecords(allocator, items);
+    const arena = try allocator.create(std.heap.ArenaAllocator);
+    errdefer allocator.destroy(arena);
+    arena.* = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const aa = arena.allocator();
+
+    const records = try parseCallRecords(aa, items);
     return .{
         .items = records,
         .total_count = records.len,
         .allocator = allocator,
+        .arena = arena,
     };
 }
 
@@ -323,13 +397,16 @@ pub fn stats(client: *SurrealClient) !types.StatsResult {
 pub fn searchChunks(client: *SurrealClient, term: []const u8) !types.QueryResult(Chunk) {
     const allocator = client.allocator;
 
+    const escaped_term = try surreal.escapeSql(allocator, term);
+    defer allocator.free(escaped_term);
+
     const sql = try std.fmt.allocPrint(allocator,
         \\SELECT *, document.path as doc_path
         \\FROM knowledge_chunk
         \\WHERE content CONTAINS '{s}'
         \\ORDER BY document, chunk_index
         \\LIMIT 20
-    , .{term});
+    , .{escaped_term});
     defer allocator.free(sql);
 
     const response = try client.executeQuery(sql);
@@ -348,16 +425,22 @@ pub fn searchChunks(client: *SurrealClient, term: []const u8) !types.QueryResult
         return types.QueryResult(Chunk).empty(allocator);
     }
 
-    const records = try allocator.alloc(Chunk, items.len);
+    const arena = try allocator.create(std.heap.ArenaAllocator);
+    errdefer allocator.destroy(arena);
+    arena.* = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const aa = arena.allocator();
+
+    const records = try aa.alloc(Chunk, items.len);
     for (items, 0..) |item, i| {
         if (item != .object) {
             records[i] = .{};
             continue;
         }
         records[i] = .{
-            .document_id = surreal.getString(item.object, "doc_path"),
+            .document_id = try aa.dupe(u8, surreal.getString(item.object, "doc_path")),
             .chunk_index = surreal.getInt(item.object, "chunk_index"),
-            .content = surreal.getString(item.object, "content"),
+            .content = try aa.dupe(u8, surreal.getString(item.object, "content")),
             .byte_offset = surreal.getInt(item.object, "byte_offset"),
             .byte_len = surreal.getInt(item.object, "byte_len"),
         };
@@ -367,6 +450,7 @@ pub fn searchChunks(client: *SurrealClient, term: []const u8) !types.QueryResult
         .items = records,
         .total_count = records.len,
         .allocator = allocator,
+        .arena = arena,
     };
 }
 
@@ -374,16 +458,18 @@ pub fn searchChunks(client: *SurrealClient, term: []const u8) !types.QueryResult
 // Helpers
 // =============================================================================
 
-fn parseCallRecords(allocator: std.mem.Allocator, items: []std.json.Value) ![]CallRecord {
-    const records = try allocator.alloc(CallRecord, items.len);
+/// Parse call records, copying every string field into `aa` (the caller's
+/// result-owned arena) so nothing aliases the transient JSON parse arena.
+fn parseCallRecords(aa: std.mem.Allocator, items: []std.json.Value) ![]CallRecord {
+    const records = try aa.alloc(CallRecord, items.len);
     for (items, 0..) |item, i| {
         if (item != .object) {
             records[i] = .{};
             continue;
         }
         records[i] = .{
-            .name = surreal.getString(item.object, "name"),
-            .file = surreal.getString(item.object, "file"),
+            .name = try aa.dupe(u8, surreal.getString(item.object, "name")),
+            .file = try aa.dupe(u8, surreal.getString(item.object, "file")),
             .line_start = surreal.getInt(item.object, "line_start"),
         };
     }

@@ -241,7 +241,7 @@ pub const DrawingContext = struct {
     pub fn init(allocator: std.mem.Allocator) DrawingContext {
         return .{
             .allocator = allocator,
-            .content = .{},
+            .content = .empty,
         };
     }
 

@@ -46,11 +46,16 @@ pub const LinearScale = struct {
 
     /// Generate nice tick values for axis labels
     pub fn ticks(self: Self, allocator: std.mem.Allocator, approx_count: usize) ![]f64 {
+        // Guard against non-finite / degenerate domains: untrusted JSON can feed
+        // inf/nan through the scale, and the @intFromFloat below is checked illegal
+        // behavior (would @trap() the WASM module) on a non-finite count.
+        if (!std.math.isFinite(self.domain_min) or !std.math.isFinite(self.domain_max) or approx_count == 0) {
+            return singleTick(allocator, self.domain_min);
+        }
+
         const span = self.domain_max - self.domain_min;
         if (span == 0) {
-            const result = try allocator.alloc(f64, 1);
-            result[0] = self.domain_min;
-            return result;
+            return singleTick(allocator, self.domain_min);
         }
 
         // Calculate nice step size
@@ -67,9 +72,14 @@ pub const LinearScale = struct {
             break :blk 10.0 * power;
         };
 
+        // A zero/non-finite nice_step would make the count computation non-finite.
+        if (!std.math.isFinite(nice_step) or nice_step == 0) {
+            return singleTick(allocator, self.domain_min);
+        }
+
         // Generate ticks
         const start = @ceil(self.domain_min / nice_step) * nice_step;
-        const count: usize = @intFromFloat(@floor((self.domain_max - start) / nice_step) + 1);
+        const count = safeTickCount(@floor((self.domain_max - start) / nice_step) + 1);
 
         var result = try allocator.alloc(f64, count);
         for (0..count) |i| {
@@ -134,9 +144,13 @@ pub const LogScale = struct {
 
     /// Generate logarithmic ticks (powers of 10)
     pub fn ticks(self: Self, allocator: std.mem.Allocator) ![]f64 {
+        // Guard non-finite domains before @intFromFloat (checked illegal behavior).
+        if (!std.math.isFinite(self.domain_min) or !std.math.isFinite(self.domain_max)) {
+            return singleTick(allocator, self.domain_min);
+        }
         const log_min = @floor(@log10(self.domain_min));
         const log_max = @ceil(@log10(self.domain_max));
-        const count: usize = @intFromFloat(log_max - log_min + 1);
+        const count = safeTickCount(log_max - log_min + 1);
 
         var result = try allocator.alloc(f64, count);
         for (0..count) |i| {
@@ -207,6 +221,14 @@ pub const TimeScale = struct {
 
     /// Generate time-based ticks
     pub fn ticks(self: Self, allocator: std.mem.Allocator, approx_count: usize) ![]i64 {
+        // Guard degenerate/inverted domains and a zero divisor: a negative span makes
+        // the later @intCast of a negative count checked illegal behavior (@trap()).
+        if (approx_count == 0 or self.domain_max <= self.domain_min) {
+            const result = try allocator.alloc(i64, 1);
+            result[0] = self.domain_min;
+            return result;
+        }
+
         const span = self.domain_max - self.domain_min;
         const target_interval = @divFloor(span, @as(i64, @intCast(approx_count)));
 
@@ -289,6 +311,28 @@ pub const BandScale = struct {
 // Utility Functions
 // =============================================================================
 
+/// Upper bound on generated tick counts. A hostile-but-finite domain/step
+/// combination could otherwise request an astronomically large allocation.
+const MAX_TICKS: usize = 100_000;
+
+/// Allocate a degenerate single-tick result (used when the domain is
+/// non-finite, zero-span, or otherwise cannot produce a meaningful axis).
+fn singleTick(allocator: std.mem.Allocator, value: f64) ![]f64 {
+    const result = try allocator.alloc(f64, 1);
+    result[0] = value;
+    return result;
+}
+
+/// Convert a computed (float) tick count into a safe usize: clamps non-finite
+/// or sub-1 values to a single tick, and caps the maximum to avoid a
+/// pathological allocation. Callers must have already excluded non-finite
+/// domains, but this stays defensive regardless.
+fn safeTickCount(count_f: f64) usize {
+    if (!std.math.isFinite(count_f) or count_f < 1) return 1;
+    if (count_f >= @as(f64, @floatFromInt(MAX_TICKS))) return MAX_TICKS;
+    return @intFromFloat(count_f);
+}
+
 /// Calculate a "nice" number close to the input
 fn niceNumber(value: f64, round: bool) f64 {
     const exp = @floor(@log10(@abs(value)));
@@ -358,4 +402,53 @@ test "band scale" {
     try std.testing.expect(scale.bandwidth() > 0);
     try std.testing.expect(scale.scale(0) >= 0);
     try std.testing.expect(scale.scale(1) > scale.scale(0));
+}
+
+test "linear scale ticks reject non-finite domain (no @intFromFloat trap)" {
+    const allocator = std.testing.allocator;
+    const inf = std.math.inf(f64);
+    const nan = std.math.nan(f64);
+
+    // +inf domain (e.g. from a JSON value like 1e999) must not trap; it must
+    // fall back to a single tick instead of driving @intFromFloat on NaN/Inf.
+    inline for (.{
+        LinearScale.init(0, inf, 0, 500),
+        LinearScale.init(-inf, 100, 0, 500),
+        LinearScale.init(0, nan, 0, 500),
+    }) |scale| {
+        const ticks = try scale.ticks(allocator, 5);
+        defer allocator.free(ticks);
+        try std.testing.expectEqual(@as(usize, 1), ticks.len);
+    }
+
+    // approx_count == 0 must not divide-by-zero / trap.
+    const scale = LinearScale.init(0, 100, 0, 500);
+    const ticks = try scale.ticks(allocator, 0);
+    defer allocator.free(ticks);
+    try std.testing.expectEqual(@as(usize, 1), ticks.len);
+}
+
+test "log scale ticks reject non-finite domain" {
+    const allocator = std.testing.allocator;
+    const inf = std.math.inf(f64);
+    const scale = LogScale.init(1, inf, 0, 300);
+    const ticks = try scale.ticks(allocator);
+    defer allocator.free(ticks);
+    try std.testing.expectEqual(@as(usize, 1), ticks.len);
+}
+
+test "time scale ticks reject inverted / zero-span domain" {
+    const allocator = std.testing.allocator;
+
+    // Inverted domain would make the tick count negative -> @intCast trap.
+    const inverted = TimeScale.init(1000, 0, 0, 500);
+    const t1 = try inverted.ticks(allocator, 5);
+    defer allocator.free(t1);
+    try std.testing.expectEqual(@as(usize, 1), t1.len);
+
+    // approx_count == 0 would divide-by-zero.
+    const scale = TimeScale.init(0, 1000, 0, 500);
+    const t2 = try scale.ticks(allocator, 0);
+    defer allocator.free(t2);
+    try std.testing.expectEqual(@as(usize, 1), t2.len);
 }

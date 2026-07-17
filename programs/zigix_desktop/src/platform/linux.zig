@@ -81,9 +81,18 @@ pub fn writeProcessInput(handle: ProcessHandle, data: []const u8) void {
 }
 
 /// Check if process is still alive.
+/// Non-blocking reap via waitpid(WNOHANG). This lets `Desktop.reapDead` free
+/// the PTY fd / heap / window slot of an exited child instead of leaking one
+/// slot per exit until `error.TooManyWindows` (functional local DoS).
 pub fn isProcessAlive(handle: ProcessHandle) bool {
-    _ = handle;
-    return true; // TODO: waitpid(WNOHANG)
+    var status: c_int = 0;
+    // waitpid(WNOHANG) returns:
+    //   0            → child exists, no state change  → still alive
+    //   handle.pid   → child exited (now reaped)      → not alive
+    //  -1            → ECHILD/EINVAL (not our child /
+    //                  already reaped)                → not alive
+    const rc = std.c.waitpid(handle.pid, &status, @intCast(std.c.W.NOHANG));
+    return rc == 0;
 }
 
 // ── System stats ─────────────────────────────────────────────────────────────
@@ -180,7 +189,8 @@ pub fn getAllocator() std.mem.Allocator {
 
 fn readProcFile(path: [*:0]const u8, buf: []u8) ?usize {
     const c = @cImport({ @cInclude("fcntl.h"); @cInclude("unistd.h"); });
-    const fd = c.open(path, c.O_RDONLY);
+    // O_CLOEXEC: never leak this /proc fd across a fork/exec into a child window.
+    const fd = c.open(path, c.O_RDONLY | c.O_CLOEXEC);
     if (fd < 0) return null;
     defer _ = c.close(fd);
     const n = c.read(fd, buf.ptr, buf.len);

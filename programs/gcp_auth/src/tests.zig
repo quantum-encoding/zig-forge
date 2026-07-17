@@ -74,6 +74,66 @@ test "RSA sign produces correct length output" {
     try std.testing.expectEqual(@as(usize, 256), signature.len);
 }
 
+// ============================================================================
+// EXTERNAL-ANCHORED VECTOR (CLAUDE.md golden rule #1)
+//
+// This is the one test that proves `sign()` produces a byte-CORRECT
+// RSASSA-PKCS1-v1_5-SHA256 signature, not merely one that is 256 bytes and
+// self-consistent. A wrong DigestInfo prefix, a PS padding off-by-one, or a
+// byte-order error in the Fe.toBytes copy-out would pass every other RSA test
+// here yet be rejected by Google. The golden bytes below were produced by a
+// DIFFERENT implementation (OpenSSL) that this library's author did not write:
+//
+//   $ printf 'gcp_auth external vector: RSASSA-PKCS1-v1_5-SHA256' > msg.txt
+//   $ openssl dgst -sha256 -sign test_key.pem -out sig.bin msg.txt
+//   $ openssl dgst -sha256 -verify pub.pem -signature sig.bin msg.txt
+//   Verified OK
+//
+// where test_key.pem is the exact 2048-bit `test_pem_2048` key above. Because
+// PKCS#1 v1.5 is deterministic, a correct signer MUST reproduce these bytes
+// exactly for this (key, message) pair.
+// ============================================================================
+
+const rsa_external_message = "gcp_auth external vector: RSASSA-PKCS1-v1_5-SHA256";
+
+// OpenSSL `dgst -sha256 -sign` of `rsa_external_message` under `test_pem_2048`.
+const rsa_external_golden_sig = [256]u8{
+    0x73, 0x21, 0x94, 0x56, 0x43, 0xd5, 0x44, 0xe4, 0x8c, 0xc5, 0x1b, 0xdc,
+    0x4c, 0xac, 0x73, 0xc3, 0x38, 0xab, 0xbb, 0x6d, 0xba, 0x7c, 0x5c, 0x77,
+    0xd6, 0xb0, 0x3f, 0xf6, 0xf2, 0x7b, 0xe2, 0x0c, 0x40, 0x1a, 0xf6, 0x38,
+    0xb8, 0xaa, 0x92, 0xa2, 0x4e, 0x3e, 0x6e, 0x2f, 0xf2, 0xfa, 0xef, 0x32,
+    0x39, 0xe0, 0xc9, 0x44, 0x92, 0x07, 0xd5, 0x7d, 0x58, 0x2c, 0xcf, 0x6c,
+    0x5e, 0xa7, 0x11, 0xd6, 0x15, 0x85, 0xd4, 0x18, 0x6c, 0x13, 0x6d, 0x4d,
+    0x9d, 0x37, 0x20, 0x35, 0x1f, 0x4d, 0xb0, 0xff, 0x9e, 0x8a, 0x5a, 0x10,
+    0x8f, 0xc0, 0xc7, 0xe2, 0xd8, 0x29, 0xdd, 0xc6, 0xa2, 0xb5, 0x79, 0x84,
+    0x24, 0x80, 0x25, 0x5f, 0xb8, 0xad, 0xf1, 0x2f, 0x64, 0x1f, 0xc9, 0x9a,
+    0x08, 0x54, 0x9d, 0x7f, 0x46, 0xaa, 0xdc, 0xa5, 0x79, 0x56, 0x05, 0xc5,
+    0x1d, 0xa7, 0x64, 0x0f, 0xf5, 0x80, 0xc6, 0xa5, 0xf2, 0x75, 0x40, 0xa5,
+    0x0c, 0xc2, 0xb1, 0xfb, 0x8a, 0x21, 0xd3, 0xd9, 0x67, 0x21, 0xe7, 0x7f,
+    0x99, 0xc0, 0xa2, 0x6a, 0xc1, 0x3a, 0x46, 0x2b, 0x40, 0x0d, 0x94, 0xb7,
+    0x5b, 0x56, 0xb4, 0x5e, 0xed, 0xd3, 0xa2, 0x7c, 0xc7, 0x50, 0x06, 0x55,
+    0xc5, 0x1e, 0xac, 0xf9, 0xf0, 0xab, 0xbf, 0x80, 0xbd, 0x4c, 0x77, 0xc4,
+    0x30, 0xfc, 0x1d, 0xac, 0x36, 0x60, 0x3d, 0xb5, 0x33, 0x67, 0xe5, 0x35,
+    0x53, 0x17, 0x49, 0x05, 0xda, 0xae, 0xdc, 0x3c, 0xae, 0x90, 0xc5, 0x54,
+    0x16, 0x64, 0x01, 0x5f, 0xf1, 0x5f, 0x50, 0x73, 0xdd, 0xf5, 0x70, 0xc8,
+    0x6f, 0x69, 0x51, 0xf6, 0xa8, 0x34, 0xee, 0x09, 0x06, 0x49, 0x9e, 0xeb,
+    0xd6, 0x00, 0x0a, 0xd6, 0x0d, 0xda, 0xb6, 0x78, 0x70, 0x33, 0xdc, 0xbd,
+    0x26, 0x1a, 0x3b, 0x5a, 0xb9, 0xe0, 0x67, 0x6e, 0xb7, 0x66, 0x89, 0x9e,
+    0x12, 0x31, 0x0b, 0x73,
+};
+
+test "RSA sign matches OpenSSL golden signature (external vector)" {
+    var key = try rsa.parsePrivateKeyPem(std.testing.allocator, test_pem_2048);
+    defer key.deinit();
+
+    const signature = try key.sign(rsa_external_message);
+    defer std.testing.allocator.free(signature);
+
+    // Byte-exact equality against the OpenSSL-produced signature. This is the
+    // external anchor: a padding/DigestInfo/endianness bug fails HERE.
+    try std.testing.expectEqualSlices(u8, &rsa_external_golden_sig, signature);
+}
+
 test "RSA sign is deterministic" {
     var key = try rsa.parsePrivateKeyPem(std.testing.allocator, test_pem_2048);
     defer key.deinit();
@@ -301,6 +361,38 @@ test "token URI rejects internal service" {
 
 test "token URI rejects empty string" {
     try std.testing.expect(!gcp.isAllowedTokenUri(""));
+}
+
+// SSRF regression: the pre-fix substring (`indexOf`) match accepted any URI
+// that merely *contained* the allowed host token. These payloads all start
+// with `https://` and contain `oauth2.googleapis.com`/`accounts.google.com`
+// somewhere, but the authority host is the attacker's — they MUST be rejected.
+test "token URI rejects allowed host smuggled into query string" {
+    // Classic bypass from the audit: allowed token appears in the query.
+    try std.testing.expect(!gcp.isAllowedTokenUri("https://evil.com/?x=://oauth2.googleapis.com/"));
+}
+
+test "token URI rejects allowed host smuggled into userinfo" {
+    // `user@host` — real authority host is evil.com.
+    try std.testing.expect(!gcp.isAllowedTokenUri("https://oauth2.googleapis.com@evil.com/token"));
+    try std.testing.expect(!gcp.isAllowedTokenUri("https://accounts.google.com@169.254.169.254/token"));
+}
+
+test "token URI rejects allowed host as a subdomain label of attacker domain" {
+    try std.testing.expect(!gcp.isAllowedTokenUri("https://oauth2.googleapis.com.evil.com/token"));
+}
+
+test "token URI rejects allowed host in path" {
+    try std.testing.expect(!gcp.isAllowedTokenUri("https://evil.com/oauth2.googleapis.com/token"));
+}
+
+test "token URI rejects allowed host in fragment" {
+    try std.testing.expect(!gcp.isAllowedTokenUri("https://evil.com/#oauth2.googleapis.com/token"));
+}
+
+test "token URI accepts allowed host case-insensitively" {
+    try std.testing.expect(gcp.isAllowedTokenUri("https://OAuth2.GoogleAPIs.com/token"));
+    try std.testing.expect(gcp.isAllowedTokenUri("HTTPS://oauth2.googleapis.com/token"));
 }
 
 test "SA fromJson rejects malicious token_uri" {

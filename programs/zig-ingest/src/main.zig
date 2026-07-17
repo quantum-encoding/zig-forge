@@ -66,7 +66,7 @@ pub fn main(init: std.process.Init) !void {
             cfg.dry_run = true;
         } else if (std.mem.eql(u8, arg, "--verbose") or std.mem.eql(u8, arg, "-v")) {
             cfg.verbose = true;
-        } else if (arg[0] != '-') {
+        } else if (arg.len > 0 and arg[0] != '-') {
             cfg.source_dir = arg;
         }
     }
@@ -74,6 +74,29 @@ pub fn main(init: std.process.Init) !void {
     if (cfg.source_dir.len == 0) {
         printUsage();
         return;
+    }
+
+    // Credential override: ZI_SURREAL_AUTH replaces the baked-in root:root
+    // default (types.Config.auth = "Basic cm9vdDpyb290"). The CLI exposes no
+    // --auth flag, so this env var is the only way to run against a DB that
+    // isn't localhost root:root. The pointer lives in the environ block for the
+    // whole process, so it is safe to hold in cfg.
+    if (init.minimal.environ.getPosix("ZI_SURREAL_AUTH")) |auth_env| {
+        if (auth_env.len > 0) cfg.auth = auth_env;
+    }
+
+    // Warn loudly if the built-in root:root default is about to travel to a
+    // non-loopback host (over plain http, base64-plaintext).
+    if (std.mem.eql(u8, cfg.auth, "Basic cm9vdDpyb290")) {
+        const is_loopback = std.mem.indexOf(u8, cfg.url, "127.0.0.1") != null or
+            std.mem.indexOf(u8, cfg.url, "localhost") != null or
+            std.mem.indexOf(u8, cfg.url, "[::1]") != null;
+        if (!is_loopback) {
+            std.debug.print(
+                "WARNING: using built-in root:root credentials against non-loopback URL {s}; set ZI_SURREAL_AUTH to override.\n",
+                .{cfg.url},
+            );
+        }
     }
 
     std.debug.print("\n=== Zig Ingest ===\n", .{});

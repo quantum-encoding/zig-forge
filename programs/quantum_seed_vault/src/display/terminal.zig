@@ -4,6 +4,7 @@
 //! and ANSI colors. Useful for development and testing.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const types = @import("types.zig");
 const Framebuffer = @import("framebuffer.zig").Framebuffer;
 
@@ -11,8 +12,14 @@ const Color = types.Color;
 const WIDTH = types.WIDTH;
 const HEIGHT = types.HEIGHT;
 
-/// Write to stdout using libc
+/// Write to stdout using libc.
+///
+/// Suppressed under the test runner: `zig build test` speaks its result
+/// protocol over this process's stdout (`--listen=-`), so emitting raw ANSI
+/// escape sequences here would corrupt that IPC channel and stall the runner.
+/// Production behavior is unchanged (`builtin.is_test` is false outside tests).
 fn writeStdout(data: []const u8) void {
+    if (builtin.is_test) return;
     _ = std.c.write(std.posix.STDOUT_FILENO, data.ptr, data.len);
 }
 

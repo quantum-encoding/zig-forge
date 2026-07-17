@@ -52,6 +52,14 @@ pub fn BloomFilter(comptime T: type) type {
 
         /// Initialize with expected capacity and desired false positive rate
         pub fn initCapacity(allocator: Allocator, expected_items: usize, fp_rate: f64) !Self {
+            // Guard against degenerate inputs before any @intFromFloat: a zero
+            // item count makes k = (m/n)*ln2 a 0/0 NaN, and an out-of-range
+            // fp_rate makes m infinite (<=0) or zero-or-negative (>=1). Feeding
+            // NaN/inf into @intFromFloat below is illegal behavior. The
+            // `!(x > 0 ...)` form also rejects NaN (all NaN comparisons are false).
+            if (expected_items == 0) return error.InvalidCapacity;
+            if (!(fp_rate > 0.0 and fp_rate < 1.0)) return error.InvalidFPRate;
+
             // Optimal number of bits: m = -n * ln(p) / (ln(2)^2)
             const n = @as(f64, @floatFromInt(expected_items));
             const ln2_sq = @log(@as(f64, 2.0)) * @log(@as(f64, 2.0));
@@ -69,7 +77,10 @@ pub fn BloomFilter(comptime T: type) type {
 
         /// Add an item to the filter
         pub fn add(self: *Self, item: T) void {
-            self.addBytes(toBytes(item));
+            var h1: u64 = undefined;
+            var h2: u64 = undefined;
+            hashItem(item, &h1, &h2);
+            self.addHashed(h1, h2);
         }
 
         /// Add raw bytes to the filter
@@ -77,7 +88,10 @@ pub fn BloomFilter(comptime T: type) type {
             var h1: u64 = undefined;
             var h2: u64 = undefined;
             doubleHash(data, &h1, &h2);
+            self.addHashed(h1, h2);
+        }
 
+        fn addHashed(self: *Self, h1: u64, h2: u64) void {
             var i: u32 = 0;
             while (i < self.num_hashes) : (i += 1) {
                 const combined = h1 +% @as(u64, i) *% h2;
@@ -90,7 +104,10 @@ pub fn BloomFilter(comptime T: type) type {
         /// Check if an item may be in the filter
         /// Returns true if item may be present, false if definitely not present
         pub fn contains(self: *const Self, item: T) bool {
-            return self.containsBytes(toBytes(item));
+            var h1: u64 = undefined;
+            var h2: u64 = undefined;
+            hashItem(item, &h1, &h2);
+            return self.containsHashed(h1, h2);
         }
 
         /// Check if raw bytes may be in the filter
@@ -98,7 +115,10 @@ pub fn BloomFilter(comptime T: type) type {
             var h1: u64 = undefined;
             var h2: u64 = undefined;
             doubleHash(data, &h1, &h2);
+            return self.containsHashed(h1, h2);
+        }
 
+        fn containsHashed(self: *const Self, h1: u64, h2: u64) bool {
             var i: u32 = 0;
             while (i < self.num_hashes) : (i += 1) {
                 const combined = h1 +% @as(u64, i) *% h2;
@@ -172,16 +192,23 @@ pub fn BloomFilter(comptime T: type) type {
             return (self.bits[word_idx] & (@as(u64, 1) << bit_offset)) != 0;
         }
 
-        fn toBytes(item: T) []const u8 {
+        /// Compute both hashes for an item. For non-slice types the bytes are
+        /// hashed *inside* this frame while the by-value `item` copy is still
+        /// live — returning `std.mem.asBytes(&item)` to a caller would dangle
+        /// into this function's dead stack frame (the same fix already applied
+        /// to HyperLogLog.hashItem).
+        fn hashItem(item: T, h1: *u64, h2: *u64) void {
             if (T == []const u8) {
-                return item;
+                doubleHash(item, h1, h2);
+                return;
             } else if (@typeInfo(T) == .pointer) {
                 const child = @typeInfo(T).pointer.child;
                 if (child == u8) {
-                    return item;
+                    doubleHash(item, h1, h2);
+                    return;
                 }
             }
-            return std.mem.asBytes(&item);
+            doubleHash(std.mem.asBytes(&item), h1, h2);
         }
 
         fn doubleHash(data: []const u8, h1: *u64, h2: *u64) void {
@@ -218,6 +245,12 @@ pub fn CountingBloomFilter(comptime T: type) type {
         }
 
         pub fn initCapacity(allocator: Allocator, expected_items: usize, fp_rate: f64) !Self {
+            // Guard against degenerate inputs before any @intFromFloat (see the
+            // BloomFilter.initCapacity comment above): NaN/inf into @intFromFloat
+            // is illegal behavior.
+            if (expected_items == 0) return error.InvalidCapacity;
+            if (!(fp_rate > 0.0 and fp_rate < 1.0)) return error.InvalidFPRate;
+
             const n = @as(f64, @floatFromInt(expected_items));
             const ln2_sq = @log(@as(f64, 2.0)) * @log(@as(f64, 2.0));
             const m = @as(usize, @intFromFloat(-n * @log(fp_rate) / ln2_sq));
@@ -231,14 +264,20 @@ pub fn CountingBloomFilter(comptime T: type) type {
         }
 
         pub fn add(self: *Self, item: T) void {
-            self.addBytes(toBytes(item));
+            var h1: u64 = undefined;
+            var h2: u64 = undefined;
+            hashItem(item, &h1, &h2);
+            self.addHashed(h1, h2);
         }
 
         pub fn addBytes(self: *Self, data: []const u8) void {
             var h1: u64 = undefined;
             var h2: u64 = undefined;
             doubleHash(data, &h1, &h2);
+            self.addHashed(h1, h2);
+        }
 
+        fn addHashed(self: *Self, h1: u64, h2: u64) void {
             var i: u32 = 0;
             while (i < self.num_hashes) : (i += 1) {
                 const combined = h1 +% @as(u64, i) *% h2;
@@ -252,14 +291,20 @@ pub fn CountingBloomFilter(comptime T: type) type {
 
         /// Remove an item (may cause false negatives if counter saturated)
         pub fn remove(self: *Self, item: T) void {
-            self.removeBytes(toBytes(item));
+            var h1: u64 = undefined;
+            var h2: u64 = undefined;
+            hashItem(item, &h1, &h2);
+            self.removeHashed(h1, h2);
         }
 
         pub fn removeBytes(self: *Self, data: []const u8) void {
             var h1: u64 = undefined;
             var h2: u64 = undefined;
             doubleHash(data, &h1, &h2);
+            self.removeHashed(h1, h2);
+        }
 
+        fn removeHashed(self: *Self, h1: u64, h2: u64) void {
             var i: u32 = 0;
             while (i < self.num_hashes) : (i += 1) {
                 const combined = h1 +% @as(u64, i) *% h2;
@@ -272,14 +317,20 @@ pub fn CountingBloomFilter(comptime T: type) type {
         }
 
         pub fn contains(self: *const Self, item: T) bool {
-            return self.containsBytes(toBytes(item));
+            var h1: u64 = undefined;
+            var h2: u64 = undefined;
+            hashItem(item, &h1, &h2);
+            return self.containsHashed(h1, h2);
         }
 
         pub fn containsBytes(self: *const Self, data: []const u8) bool {
             var h1: u64 = undefined;
             var h2: u64 = undefined;
             doubleHash(data, &h1, &h2);
+            return self.containsHashed(h1, h2);
+        }
 
+        fn containsHashed(self: *const Self, h1: u64, h2: u64) bool {
             var i: u32 = 0;
             while (i < self.num_hashes) : (i += 1) {
                 const combined = h1 +% @as(u64, i) *% h2;
@@ -294,16 +345,20 @@ pub fn CountingBloomFilter(comptime T: type) type {
             self.count = 0;
         }
 
-        fn toBytes(item: T) []const u8 {
+        /// Compute both hashes for an item, hashing non-slice bytes inside this
+        /// frame while the by-value copy is live (see BloomFilter.hashItem).
+        fn hashItem(item: T, h1: *u64, h2: *u64) void {
             if (T == []const u8) {
-                return item;
+                doubleHash(item, h1, h2);
+                return;
             } else if (@typeInfo(T) == .pointer) {
                 const child = @typeInfo(T).pointer.child;
                 if (child == u8) {
-                    return item;
+                    doubleHash(item, h1, h2);
+                    return;
                 }
             }
-            return std.mem.asBytes(&item);
+            doubleHash(std.mem.asBytes(&item), h1, h2);
         }
 
         fn doubleHash(data: []const u8, h1: *u64, h2: *u64) void {
@@ -363,4 +418,31 @@ test "counting bloom filter deletion" {
 
     cbf.remove("hello");
     try std.testing.expect(!cbf.contains("hello"));
+}
+
+test "initCapacity rejects degenerate inputs (no NaN/inf @intFromFloat)" {
+    const allocator = std.testing.allocator;
+
+    // expected_items == 0 -> k = (m/n)*ln2 is 0/0 NaN
+    try std.testing.expectError(error.InvalidCapacity, BloomFilter(u64).initCapacity(allocator, 0, 0.01));
+    try std.testing.expectError(error.InvalidCapacity, CountingBloomFilter(u64).initCapacity(allocator, 0, 0.01));
+
+    // fp_rate <= 0 -> m infinite; fp_rate >= 1 -> m zero-or-negative; NaN rejected too
+    try std.testing.expectError(error.InvalidFPRate, BloomFilter(u64).initCapacity(allocator, 1000, 0.0));
+    try std.testing.expectError(error.InvalidFPRate, BloomFilter(u64).initCapacity(allocator, 1000, 1.0));
+    try std.testing.expectError(error.InvalidFPRate, BloomFilter(u64).initCapacity(allocator, 1000, -0.5));
+    try std.testing.expectError(error.InvalidFPRate, BloomFilter(u64).initCapacity(allocator, 1000, std.math.nan(f64)));
+    try std.testing.expectError(error.InvalidFPRate, CountingBloomFilter(u64).initCapacity(allocator, 1000, 2.0));
+}
+
+test "bloom filter integer keys (non-slice branch, no dangling toBytes)" {
+    const allocator = std.testing.allocator;
+    var bf = try BloomFilter(u64).initCapacity(allocator, 1000, 0.01);
+    defer bf.deinit();
+
+    bf.add(@as(u64, 42));
+    bf.add(@as(u64, 7));
+    try std.testing.expect(bf.contains(@as(u64, 42)));
+    try std.testing.expect(bf.contains(@as(u64, 7)));
+    try std.testing.expect(!bf.contains(@as(u64, 99999)));
 }

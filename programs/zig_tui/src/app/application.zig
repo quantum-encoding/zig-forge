@@ -257,21 +257,18 @@ pub const Application = struct {
     }
 };
 
-/// Detect terminal size using ioctl
+/// Detect terminal size using ioctl(TIOCGWINSZ).
+///
+/// Uses the portable `std.posix` winsize layout and the per-OS `TIOCGWINSZ`
+/// request value (`std.posix.T.IOCGWINSZ`) via the libc `ioctl`, so this works
+/// on macOS/BSD as well as Linux. The previous implementation hardcoded the
+/// Linux x86 request number (0x5413) and issued it through `std.os.linux.ioctl`,
+/// which silently failed on darwin and left every app stuck at default_size.
 fn detectTerminalSize() ?Size {
-    const TIOCGWINSZ: u32 = 0x5413;
-
-    const Winsize = extern struct {
-        ws_row: u16,
-        ws_col: u16,
-        ws_xpixel: u16,
-        ws_ypixel: u16,
-    };
-
-    var ws: Winsize = undefined;
-    const result = std.os.linux.ioctl(std.posix.STDOUT_FILENO, TIOCGWINSZ, @intFromPtr(&ws));
-    if (result == 0 and ws.ws_col > 0 and ws.ws_row > 0) {
-        return .{ .width = ws.ws_col, .height = ws.ws_row };
+    var ws: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
+    const result = std.c.ioctl(std.posix.STDOUT_FILENO, std.posix.T.IOCGWINSZ, &ws);
+    if (result == 0 and ws.col > 0 and ws.row > 0) {
+        return .{ .width = ws.col, .height = ws.row };
     }
     return null;
 }

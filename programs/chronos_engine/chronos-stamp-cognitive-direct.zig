@@ -17,26 +17,68 @@ const c = @cImport({
     @cInclude("stdio.h");
 });
 
-/// Run get-cognitive-state and return output (using popen)
-fn runGetCognitiveState(allocator: std.mem.Allocator, pid_arg: ?[]const u8) ?[]const u8 {
-    var cmd_buf: [128]u8 = undefined;
-    const cmd_len = if (pid_arg) |pid|
-        (std.fmt.bufPrint(&cmd_buf, "get-cognitive-state {s}", .{pid}) catch return null).len
-    else blk: {
-        @memcpy(cmd_buf[0..19], "get-cognitive-state");
-        break :blk 19;
-    };
-    cmd_buf[cmd_len] = 0;
+/// Absolute path to the installed helper (see cognitive_telemetry_kit
+/// chronos-hook install.sh, which installs it here). Using an absolute path
+/// means no shell and no PATH resolution is involved when spawning it.
+const GET_COGNITIVE_STATE_PATH = "/usr/local/bin/get-cognitive-state";
 
-    const pipe = c.popen(@ptrCast(&cmd_buf), "r");
-    if (pipe == null) return null;
-    defer _ = c.pclose(pipe);
+/// Build a sanitized copy of the environment for spawning the helper process.
+/// Neutralizes PATH-planting and loader-injection vectors: PATH is pinned to a
+/// fixed set of trusted system directories, and IFS / LD_* / DYLD_* are dropped
+/// entirely. The caller owns the returned map and must call deinit on it.
+fn buildScrubbedEnv(
+    allocator: std.mem.Allocator,
+    parent: *const std.process.Environ.Map,
+) !std.process.Environ.Map {
+    var map = std.process.Environ.Map.init(allocator);
+    errdefer map.deinit();
 
-    var buffer: [4096]u8 = undefined;
-    const bytes_read = c.fread(&buffer, 1, buffer.len, pipe);
-    if (bytes_read == 0) return null;
+    var it = parent.iterator();
+    while (it.next()) |entry| {
+        const key = entry.key_ptr.*;
+        if (std.mem.eql(u8, key, "PATH")) continue;
+        if (std.mem.eql(u8, key, "IFS")) continue;
+        if (std.mem.startsWith(u8, key, "LD_")) continue;
+        if (std.mem.startsWith(u8, key, "DYLD_")) continue;
+        try map.put(key, entry.value_ptr.*);
+    }
+    // Pin PATH to trusted system directories so any tool the helper itself
+    // invokes cannot be resolved from an attacker-planted directory.
+    try map.put("PATH", "/usr/local/bin:/usr/bin:/bin");
+    return map;
+}
 
-    const trimmed = std.mem.trim(u8, buffer[0..bytes_read], " \t\n\r");
+/// Run get-cognitive-state and return its trimmed stdout.
+///
+/// Spawns the helper by its absolute path with an argv-mode exec (no shell,
+/// no `/bin/sh -c`, no PATH-based resolution of argv[0]) and a scrubbed
+/// environment. This replaces the previous `popen("get-cognitive-state")`,
+/// which ran `/bin/sh -c` against the inherited PATH and was a PATH-planting
+/// code-execution vector.
+fn runGetCognitiveState(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    parent_env: *const std.process.Environ.Map,
+    pid_arg: ?[]const u8,
+) ?[]const u8 {
+    var env = buildScrubbedEnv(allocator, parent_env) catch return null;
+    defer env.deinit();
+
+    const argv: []const []const u8 = if (pid_arg) |pid|
+        &.{ GET_COGNITIVE_STATE_PATH, pid }
+    else
+        &.{GET_COGNITIVE_STATE_PATH};
+
+    var result = std.process.run(allocator, io, .{
+        .argv = argv,
+        .environ_map = &env,
+        .stdout_limit = .limited(65536),
+        .stderr_limit = .limited(65536),
+    }) catch return null;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    const trimmed = std.mem.trim(u8, result.stdout, " \t\n\r");
     if (trimmed.len == 0) return null;
 
     return allocator.dupe(u8, trimmed) catch null;
@@ -192,6 +234,7 @@ fn readLatestStateFromMap(allocator: std.mem.Allocator, map_fd: c_int, target_pi
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
+    const parent_env = init.environ_map;
 
     // Collect args into a slice
     var args_list: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -243,7 +286,7 @@ pub fn main(init: std.process.Init) !void {
     // Get Claude PID (use provided PID if available, otherwise auto-detect)
     const claude_pid = provided_pid orelse getClaudePID() catch {
         // Fallback to script if PID detection fails
-        const cognitive_state = runGetCognitiveState(allocator, null) orelse "NOT-DETECTED";
+        const cognitive_state = runGetCognitiveState(allocator, io, parent_env, null) orelse "NOT-DETECTED";
         const modified_timestamp = injectCognitiveState(allocator, timestamp, cognitive_state) catch timestamp;
         printChronosStamp(modified_timestamp, session, pwd, action, description, null);
         return;
@@ -260,7 +303,7 @@ pub fn main(init: std.process.Init) !void {
             return;
         };
 
-        const cognitive_state = runGetCognitiveState(allocator, pid_str) orelse "NOT-DETECTED";
+        const cognitive_state = runGetCognitiveState(allocator, io, parent_env, pid_str) orelse "NOT-DETECTED";
         const modified_timestamp = injectCognitiveState(allocator, timestamp, cognitive_state) catch timestamp;
         printChronosStamp(modified_timestamp, session, pwd, action, description, claude_pid);
         return;
@@ -276,7 +319,7 @@ pub fn main(init: std.process.Init) !void {
         // Pass the Claude PID as an argument
         var pid_buf: [32]u8 = undefined;
         const pid_str = std.fmt.bufPrint(&pid_buf, "{d}", .{claude_pid}) catch break :blk "NOT-DETECTED";
-        break :blk runGetCognitiveState(allocator, pid_str) orelse "NOT-DETECTED";
+        break :blk runGetCognitiveState(allocator, io, parent_env, pid_str) orelse "NOT-DETECTED";
     };
 
     const modified_timestamp = injectCognitiveState(allocator, timestamp, cognitive_state) catch timestamp;

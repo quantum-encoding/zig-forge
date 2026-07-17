@@ -103,6 +103,10 @@ pub const Parser = struct {
     param_count: u8,
     intermediates: [2]u8,
     intermediate_count: u8,
+    /// Inside a ':' sub-parameter chain (SGR 4:3, 38:2::r:g:b): sub-params are
+    /// skipped rather than promoted to top-level params, which mis-parsed the
+    /// whole sequence (ECMA-48 §5.4.2 colon separators).
+    in_subparam: bool,
 
     // OSC state
     osc_buffer: [MAX_OSC_LEN]u8,
@@ -123,6 +127,7 @@ pub const Parser = struct {
             .param_count = 0,
             .intermediates = undefined,
             .intermediate_count = 0,
+            .in_subparam = false,
             .osc_buffer = undefined,
             .osc_len = 0,
             .osc_command = 0,
@@ -331,6 +336,7 @@ pub const Parser = struct {
         @memset(&self.params, 0);
         self.param_count = 0;
         self.intermediate_count = 0;
+        self.in_subparam = false;
 
         switch (byte) {
             0x30...0x39, ';' => {
@@ -367,7 +373,9 @@ pub const Parser = struct {
     fn handleCsiParam(self: *Self, byte: u8) Action {
         switch (byte) {
             0x30...0x39 => {
-                // Digit - accumulate parameter
+                // Digit - accumulate parameter (sub-parameter digits after a
+                // ':' are skipped, not merged into the top-level param).
+                if (self.in_subparam) return .{ .none = {} };
                 if (self.param_count == 0) {
                     self.param_count = 1;
                 }
@@ -378,18 +386,23 @@ pub const Parser = struct {
                 return .{ .none = {} };
             },
             ';' => {
-                // Parameter separator
-                if (self.param_count < MAX_PARAMS) {
+                // Parameter separator. A LEADING ';' means an empty (default)
+                // first parameter: ESC[;5H is row-default col-5 — the old code
+                // collapsed it so 5 landed in params[0] (wrong row).
+                self.in_subparam = false;
+                if (self.param_count == 0) {
+                    self.param_count = 2; // empty first + open second
+                } else if (self.param_count < MAX_PARAMS) {
                     self.param_count += 1;
                 }
                 return .{ .none = {} };
             },
             ':' => {
-                // Sub-parameter separator (for SGR colon sequences)
-                // Treat like semicolon for now
-                if (self.param_count < MAX_PARAMS) {
-                    self.param_count += 1;
-                }
+                // Colon introduces SUB-parameters of the current param
+                // (SGR 4:3, 38:2::r:g:b). Skip them; promoting them to
+                // top-level params corrupted every following parameter.
+                if (self.param_count == 0) self.param_count = 1;
+                self.in_subparam = true;
                 return .{ .none = {} };
             },
             0x20...0x2F => {
@@ -465,9 +478,12 @@ pub const Parser = struct {
                 } };
             },
             0x1B => {
-                // Possible ST (ESC \)
-                // For simplicity, treat ESC as terminator
-                self.state = .ground;
+                // ST is ESC \ — dispatch now, but land in ESCAPE state so the
+                // trailing '\' is consumed as the ST final byte. Landing in
+                // ground printed a literal backslash into the grid after every
+                // ST-terminated OSC (tmux, iTerm2 shell integration, systemd).
+                self.state = .escape;
+                self.intermediate_count = 0;
                 return .{ .osc_dispatch = .{
                     .command = self.osc_command,
                     .data = self.osc_buffer[0..self.osc_len],
@@ -613,8 +629,10 @@ pub const Parser = struct {
     fn handleDcsPassthrough(self: *Self, byte: u8) Action {
         switch (byte) {
             0x1B => {
-                // Possible ST
-                self.state = .ground;
+                // ST is ESC \ — consume the trailing '\' in ESCAPE state
+                // (ground would print it; see handleOscString).
+                self.state = .escape;
+                self.intermediate_count = 0;
                 return .{ .dcs_unhook = {} };
             },
             else => {
@@ -625,15 +643,17 @@ pub const Parser = struct {
 
     fn handleDcsIgnore(self: *Self, byte: u8) Action {
         if (byte == 0x1B) {
-            self.state = .ground;
+            self.state = .escape; // ST's '\' consumed as the escape final
+            self.intermediate_count = 0;
         }
         return .{ .none = {} };
     }
 
     fn handleSosPmApcString(self: *Self, byte: u8) Action {
         if (byte == 0x1B) {
-            // Possible ST
-            self.state = .ground;
+            // ST's '\' must not print — finish in ESCAPE state.
+            self.state = .escape;
+            self.intermediate_count = 0;
         }
         return .{ .none = {} };
     }
@@ -807,6 +827,15 @@ fn handleCsi(term: *Terminal, seq: CsiSequence) void {
         'K' => {
             // EL - Erase Line
             term.eraseLine(@intCast(seq.getParam(0, 0)));
+        },
+        'P' => {
+            // DCH - Delete Character (was silently ignored — zsh/fzf in-place
+            // line redraws depend on it; caught by the tier-1 VT anchors)
+            term.deleteChar(seq.getParam(0, 1));
+        },
+        'X' => {
+            // ECH - Erase Character (same story as DCH)
+            term.eraseChars(seq.getParam(0, 1));
         },
         'L' => {
             // IL - Insert Line

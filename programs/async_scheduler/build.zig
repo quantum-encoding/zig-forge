@@ -62,7 +62,9 @@ pub fn build(b: *std.Build) void {
     // Scheduler library module (used by tests, benchmarks)
     // ========================================================================
 
-    const scheduler_module = b.createModule(.{
+    // Consumable Zig module (root: src/main.zig) so other in-tree projects can
+    // `@import` the scheduler surface (Scheduler, Task, ThreadPool, deque).
+    const scheduler_module = b.addModule("async_scheduler", .{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,

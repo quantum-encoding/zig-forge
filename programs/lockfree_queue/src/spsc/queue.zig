@@ -291,3 +291,62 @@ test "spsc - data integrity" {
 
     try std.testing.expect(queue.isEmpty());
 }
+
+// ============================================================================
+// Multithreaded stress test
+// ============================================================================
+//
+// Single-threaded tests cannot observe the memory-ordering bugs that are the
+// only interesting failure mode of a lock-free queue. This spawns a real
+// producer thread against the consumer running on the test thread and asserts
+// strict FIFO order plus a full checksum over one million messages. Run it
+// under `-Doptimize=ReleaseFast` as well as Debug — ordering bugs hide when
+// the optimizer is off and every access is already fully fenced by the
+// debug-mode codegen.
+
+const SpscStressProducer = struct {
+    fn run(q: *SpscQueue(u64), n: u64) void {
+        var i: u64 = 0;
+        while (i < n) {
+            // SPSC push only fails when full; spin until the consumer drains.
+            q.push(i) catch {
+                std.atomic.spinLoopHint();
+                continue;
+            };
+            i += 1;
+        }
+    }
+};
+
+test "spsc - concurrent producer/consumer stress" {
+    const allocator = std.testing.allocator;
+
+    var queue = try SpscQueue(u64).init(allocator, 1024);
+    defer queue.deinit();
+
+    const n: u64 = 1_000_000;
+
+    const producer = try std.Thread.spawn(.{}, SpscStressProducer.run, .{ &queue, n });
+
+    // Consumer runs here and asserts strict FIFO order and a running checksum.
+    var expected: u64 = 0;
+    var sum: u64 = 0;
+    while (expected < n) {
+        const val = queue.pop() catch {
+            std.atomic.spinLoopHint();
+            continue;
+        };
+        // A torn write or reordered store would surface as an out-of-order
+        // value here — SPSC guarantees exact FIFO.
+        try std.testing.expectEqual(expected, val);
+        sum += val;
+        expected += 1;
+    }
+
+    producer.join();
+
+    try std.testing.expect(queue.isEmpty());
+    // Gauss sum of 0..n-1, a second independent check on completeness.
+    const gauss: u64 = (n * (n - 1)) / 2;
+    try std.testing.expectEqual(gauss, sum);
+}

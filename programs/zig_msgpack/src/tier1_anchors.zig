@@ -415,6 +415,79 @@ test "anchor: ext8 - ext type 7 with 3 bytes -> 0xc7 0x03 0x07 0x01 0x02 0x03" {
 }
 
 // ============================================================================
+// Timestamp extension (ext type -1), per the MessagePack timestamp spec:
+// https://github.com/msgpack/msgpack/blob/master/spec.md#timestamp-extension-type
+//
+//   timestamp 32: fixext4  (0xd6 0xff) + u32 BE seconds
+//   timestamp 64: fixext8  (0xd7 0xff) + u64 BE ((nanoseconds << 34) | seconds)
+//                 nanoseconds in the high 30 bits, seconds in the low 34 bits
+//   timestamp 96: ext8     (0xc7 0x0c 0xff) + u32 BE nanoseconds + i64 BE seconds
+//
+// The encoder hand-packs these three layouts (encoder.zig:344-367); these
+// anchors pin the emitted bytes to the spec's bit layout so a transposed
+// opcode or a wrong shift width fails the test. Decode is verified as the
+// generic ext value (the library has no decode-side timestamp helper yet).
+// ============================================================================
+
+test "anchor: timestamp32 (seconds=1, nanos=0) -> 0xd6 0xff 00 00 00 01" {
+    try expectEncoded(&[_]u8{ 0xd6, 0xff, 0x00, 0x00, 0x00, 0x01 }, struct {
+        fn run(enc: *msgpack.Encoder) !void {
+            try enc.writeTimestamp(1, 0);
+        }
+    }.run);
+
+    var dec = msgpack.Decoder.init(&[_]u8{ 0xd6, 0xff, 0x00, 0x00, 0x00, 0x01 });
+    const v = try dec.read();
+    try testing.expectEqual(@as(i8, -1), v.ext.type_id);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x00, 0x00, 0x01 }, v.ext.data);
+}
+
+test "anchor: timestamp64 (seconds=1, nanos=1) -> 0xd7 0xff 00 00 00 04 00 00 00 01" {
+    // val = (1 << 34) | 1 = 0x0000000400000001; verifies the 30/34-bit split:
+    // bit 34 set comes from nanoseconds, bit 0 set comes from seconds.
+    try expectEncoded(&[_]u8{ 0xd7, 0xff, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01 }, struct {
+        fn run(enc: *msgpack.Encoder) !void {
+            try enc.writeTimestamp(1, 1);
+        }
+    }.run);
+
+    var dec = msgpack.Decoder.init(&[_]u8{ 0xd7, 0xff, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01 });
+    const v = try dec.read();
+    try testing.expectEqual(@as(i8, -1), v.ext.type_id);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01 }, v.ext.data);
+}
+
+test "anchor: timestamp64 boundary (seconds=0x3ffffffff max-34bit, nanos=0) -> 0xd7 0xff 00 00 00 03 ff ff ff ff" {
+    // Seconds > 0xffffffff forces ts64 even with nanos==0; 0x3ffffffff is the
+    // widest value that fits the 34-bit seconds field.
+    try expectEncoded(&[_]u8{ 0xd7, 0xff, 0x00, 0x00, 0x00, 0x03, 0xff, 0xff, 0xff, 0xff }, struct {
+        fn run(enc: *msgpack.Encoder) !void {
+            try enc.writeTimestamp(0x3ffffffff, 0);
+        }
+    }.run);
+
+    var dec = msgpack.Decoder.init(&[_]u8{ 0xd7, 0xff, 0x00, 0x00, 0x00, 0x03, 0xff, 0xff, 0xff, 0xff });
+    const v = try dec.read();
+    try testing.expectEqual(@as(i8, -1), v.ext.type_id);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x00, 0x00, 0x03, 0xff, 0xff, 0xff, 0xff }, v.ext.data);
+}
+
+test "anchor: timestamp96 (seconds=-1, nanos=1) -> 0xc7 0x0c 0xff 00 00 00 01 ff ff ff ff ff ff ff ff" {
+    // Negative seconds (pre-1970) forces ts96: u32 BE nanoseconds, then i64 BE
+    // seconds (-1 == 0xFFFFFFFFFFFFFFFF two's complement).
+    try expectEncoded(&[_]u8{ 0xc7, 0x0c, 0xff, 0x00, 0x00, 0x00, 0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff }, struct {
+        fn run(enc: *msgpack.Encoder) !void {
+            try enc.writeTimestamp(-1, 1);
+        }
+    }.run);
+
+    var dec = msgpack.Decoder.init(&[_]u8{ 0xc7, 0x0c, 0xff, 0x00, 0x00, 0x00, 0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff });
+    const v = try dec.read();
+    try testing.expectEqual(@as(i8, -1), v.ext.type_id);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x00, 0x00, 0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff }, v.ext.data);
+}
+
+// ============================================================================
 // Reserved opcode and grammar boundaries
 // ============================================================================
 

@@ -1,56 +1,52 @@
 # Memory Pool Allocator
 
-Ultra-fast, deterministic memory allocation for trading systems.
+Deterministic, O(1) memory allocators for latency-sensitive systems, built as a
+zero-dependency Zig library with a C FFI static-library surface.
 
-## Performance Targets
+## Allocators
 
-- **Allocation**: <10ns (200x faster than malloc)
-- **Deallocation**: <5ns (free list)
-- **Fragmentation**: Zero (fixed-size pools)
-- **Determinism**: O(1) guaranteed
+- **FixedPool** (`src/pool/fixed.zig`) — single fixed object size backed by a
+  free list. `alloc`/`free`/`reset` are O(1) and never fragment. Slot size is
+  rounded up to a 16-byte alignment so SIMD / `long double` payloads from C
+  callers are correctly aligned.
+- **SlabAllocator** (`src/slab/allocator.zig`) — multiple fixed size classes.
+- **ArenaAllocator** (`src/arena/bump.zig`) — bump-pointer allocation with batch
+  free via `reset`; supports cache-line (64-byte) aligned allocations.
 
-## Pool Types
+All three allocators are single-threaded; there is no internal locking. Wrap
+them per-thread if you need concurrency.
 
-- **Fixed Pool**: Single object size (fastest)
-- **Slab Allocator**: Multiple object sizes
-- **Arena**: Bump allocator (fastest alloc, batch free)
-- **Thread-Local**: Zero contention
+## C FFI
 
-## Features
+`src/memory_pool_core.zig` exposes a C-ABI static library (`memory_pool_core`)
+with the header in `include/`. It has zero external dependencies and links
+libc for its allocation backend.
 
-- Lock-free thread-local pools
-- NUMA-aware allocation
-- Cache-line alignment
-- Memory pooling
-- Debug tracking
-
-## Usage
+## Usage (Zig)
 
 ```zig
-const pool = @import("memory-pool");
+const pool = @import("memory_pool");
 
-// Create pool for 64-byte objects
+// Create a pool for 64-byte objects, capacity 1000
 var p = try pool.FixedPool.init(allocator, 64, 1000);
 defer p.deinit();
 
-// Allocate (< 10ns)
 const ptr = try p.alloc();
-
-// Deallocate (<5ns)
 p.free(ptr);
 ```
 
 ## Build
 
 ```bash
-zig build
-zig build bench
-zig build test
+zig build            # build the C FFI static library
+zig build core       # explicit core-library step
+zig build android    # cross-compile static lib for aarch64-linux-android
+zig build test       # run unit + FFI-layer tests
+zig build bench      # build and run the microbenchmarks
 ```
 
 ## Benchmarks
 
-- Fixed pool alloc: 8ns (vs malloc 1.5µs)
-- Slab alloc: 15ns
-- Arena alloc: 3ns (bump pointer)
-- Thread-local: Zero contention
+`zig build bench` runs the microbenchmarks in `benchmarks/bench.zig` and prints
+measured timings for your machine. No fixed numbers are asserted here — run it
+locally to see the results on your target hardware.

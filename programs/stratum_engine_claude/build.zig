@@ -228,12 +228,19 @@ pub fn build(b: *std.Build) void {
     const proxy_step = b.step("proxy", "Run the ASIC Stratum proxy server");
     proxy_step.dependOn(&proxy_cmd.step);
 
-    // Tests
+    // Tests — rooted at the aggregator (src/tests.zig) so every in-tree test
+    // block is referenced and actually runs, not just the one in main.zig.
     const test_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
+        .root_source_file = b.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
     });
+
+    // The aggregated modules need the same system libraries their non-test
+    // builds link: mbedTLS (crypto/tls*), SQLite3 (storage/sqlite), and libc.
+    linkMbedtls3(test_module, target);
+    test_module.linkSystemLibrary("sqlite3", .{});
+    test_module.link_libc = true;
 
     const tests = b.addTest(.{
         .root_module = test_module,

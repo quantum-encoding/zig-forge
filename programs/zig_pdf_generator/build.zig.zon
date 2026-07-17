@@ -1,0 +1,12 @@
+.{
+    .name = .zig_pdf_generator,
+    .version = "0.1.0",
+    .fingerprint = 0x9e9493cf1f547df5,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+    .dependencies = .{},
+}

@@ -4,6 +4,94 @@ const std = @import("std");
 const testing = std.testing;
 const Scheduler = @import("scheduler/worksteal.zig").Scheduler;
 
+// std.Thread.sleep / std.time.sleep do not exist in this Zig 0.16; the library
+// links libc everywhere, so sleep via nanosleep(2).
+fn sleepNs(ns: u64) void {
+    var ts: std.c.timespec = .{
+        .sec = @intCast(ns / std.time.ns_per_s),
+        .nsec = @intCast(ns % std.time.ns_per_s),
+    };
+    _ = std.c.nanosleep(&ts, null);
+}
+
+// Shared state for the concurrent-spawner stress test.
+const SpawnStress = struct {
+    sched: *Scheduler,
+    completed: *std.atomic.Value(u64),
+    checksum: *std.atomic.Value(u64),
+    base: u64,
+    count: u64,
+
+    fn taskBody(completed: *std.atomic.Value(u64), checksum: *std.atomic.Value(u64), val: u64) void {
+        _ = checksum.fetchAdd(val, .monotonic);
+        _ = completed.fetchAdd(1, .monotonic);
+    }
+
+    fn spawnerBody(ctx: *SpawnStress) void {
+        var i: u64 = 0;
+        while (i < ctx.count) {
+            const val = ctx.base + i;
+            _ = ctx.sched.spawn(taskBody, .{ ctx.completed, ctx.checksum, val }) catch {
+                // Only reachable on allocation failure; back off and retry the
+                // same value so the checksum stays exact.
+                sleepNs(std.time.ns_per_us);
+                continue;
+            };
+            i += 1;
+        }
+    }
+};
+
+// Regression test for work-order #6: multiple threads calling spawn() (which the
+// C API advertises as safe from any thread) used to race on a single-owner deque
+// — silently losing tasks or double-executing/double-freeing. With the shared
+// MPMC injector queue every task must run exactly once, so the checksum over all
+// unique task values is exact and no allocation is leaked (testing.allocator).
+test "Scheduler - concurrent spawners stress" {
+    // Small queue_size forces deque growth under concurrent stealers, also
+    // exercising the grow-path use-after-free fix (retire-until-deinit).
+    var scheduler = try Scheduler.init(testing.allocator, .{ .thread_count = 4, .queue_size = 64 });
+    defer scheduler.deinit();
+
+    try scheduler.start();
+    defer scheduler.stop();
+
+    const num_spawners: u64 = 4;
+    const tasks_per_spawner: u64 = 2000;
+    const total = num_spawners * tasks_per_spawner;
+
+    var completed = std.atomic.Value(u64).init(0);
+    var checksum = std.atomic.Value(u64).init(0);
+
+    var ctxs: [num_spawners]SpawnStress = undefined;
+    for (&ctxs, 0..) |*ctx, s| {
+        ctx.* = .{
+            .sched = &scheduler,
+            .completed = &completed,
+            .checksum = &checksum,
+            .base = @as(u64, @intCast(s)) * tasks_per_spawner + 1,
+            .count = tasks_per_spawner,
+        };
+    }
+
+    var threads: [num_spawners]std.Thread = undefined;
+    for (&threads, 0..) |*t, s| {
+        t.* = try std.Thread.spawn(.{}, SpawnStress.spawnerBody, .{&ctxs[s]});
+    }
+    for (threads) |t| t.join();
+
+    // Every spawned task must actually execute before teardown: a task frees its
+    // boxed args only when it runs, so dropping undrained tasks would leak.
+    while (completed.load(.monotonic) < total) {
+        sleepNs(100 * std.time.ns_per_us);
+    }
+
+    try testing.expectEqual(total, completed.load(.monotonic));
+    // Values are the contiguous range 1..=total spread across the spawners.
+    const expected_checksum: u64 = total * (total + 1) / 2;
+    try testing.expectEqual(expected_checksum, checksum.load(.monotonic));
+}
+
 test "Scheduler - basic task spawn and execution" {
     var scheduler = try Scheduler.init(testing.allocator, .{ .thread_count = 2 });
     defer scheduler.deinit();
@@ -101,7 +189,7 @@ test "Scheduler - task status tracking" {
 
     const slow_task = struct {
         fn run() void {
-            std.time.sleep(10 * std.time.ns_per_ms);
+            sleepNs(10 * std.time.ns_per_ms);
         }
     }.run;
 

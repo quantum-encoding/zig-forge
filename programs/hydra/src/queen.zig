@@ -288,7 +288,13 @@ test "Queen initialization" {
     const allocator = std.heap.c_allocator;
 
     const target = [_]u8{0} ** 32;
-    var queen = try Queen.init(allocator, 0, 1000, .numeric_hash, &target);
+    // GPU-gated: skip on any machine without a usable CUDA device rather than
+    // failing the whole `zig build test` run in a GPU-less CI environment.
+    var queen = Queen.init(allocator, 0, 1000, .numeric_hash, &target) catch |err| switch (err) {
+        // Queen.init maps every GPU/CUDA failure to error.NoGpu.
+        error.NoGpu => return error.SkipZigTest,
+        else => return err,
+    };
     defer queen.deinit();
 
     try std.testing.expectEqual(@as(u64, 1000), queen.stats.total_candidates);

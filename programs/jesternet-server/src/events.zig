@@ -73,10 +73,12 @@ fn replayAdapter(raw_ctx: ?*anyopaque, seq: u64, op: types.WalOp, payload: []con
     // but not part of the events table the SSE handler tails.
     if (op != .event_insert) return;
     if (seq <= ctx.since) return;
-    if (payload.len != @sizeOf(types.EventRow)) return;
 
-    var event: types.EventRow = undefined;
-    @memcpy(std.mem.asBytes(&event), payload);
+    // Decode via the store's versioned field-wise reader (same path the
+    // recover() replay uses). Previously this @memcpy'd the raw struct
+    // and gated on `payload.len == @sizeOf(EventRow)` — a layout/arch
+    // change would have silently skipped every event on reconnect.
+    var event = store_mod.deserializeEvent(payload) orelse return;
     event.seq = seq; // seq is set at WAL-write time, not in payload
 
     ctx.outer_cb(ctx.outer_ctx, event);
@@ -100,10 +102,11 @@ test "replayFrom delivers events with seq > since, in seq order" {
     var io_threaded: Io.Threaded = .init(testing.allocator, .{});
     const io = io_threaded.io();
 
-    Io.Dir.cwd().deleteFile(io, "wal.log") catch {};
-    defer Io.Dir.cwd().deleteFile(io, "wal.log") catch {};
+    const dir = "test-data-events-order";
+    Io.Dir.cwd().deleteTree(io, dir) catch {};
+    defer Io.Dir.cwd().deleteTree(io, dir) catch {};
 
-    var store = try store_mod.Store.open(testing.allocator, io, "data");
+    var store = try store_mod.Store.open(testing.allocator, io, dir);
     defer store.deinit(io);
 
     const seq1 = try store.insertEvent(io, .commit_pushed, "jak/a", "first", "{}", 1);
@@ -129,10 +132,11 @@ test "replayFrom skips events with seq <= since (the canary path)" {
     var io_threaded: Io.Threaded = .init(testing.allocator, .{});
     const io = io_threaded.io();
 
-    Io.Dir.cwd().deleteFile(io, "wal.log") catch {};
-    defer Io.Dir.cwd().deleteFile(io, "wal.log") catch {};
+    const dir = "test-data-events-canary";
+    Io.Dir.cwd().deleteTree(io, dir) catch {};
+    defer Io.Dir.cwd().deleteTree(io, dir) catch {};
 
-    var store = try store_mod.Store.open(testing.allocator, io, "data");
+    var store = try store_mod.Store.open(testing.allocator, io, dir);
     defer store.deinit(io);
 
     const e1 = try store.insertEvent(io, .commit_pushed, "a", "E1", "{}", 1);
@@ -155,10 +159,11 @@ test "replayFrom returns 0 when since is at-or-past the tip" {
     var io_threaded: Io.Threaded = .init(testing.allocator, .{});
     const io = io_threaded.io();
 
-    Io.Dir.cwd().deleteFile(io, "wal.log") catch {};
-    defer Io.Dir.cwd().deleteFile(io, "wal.log") catch {};
+    const dir = "test-data-events-tip";
+    Io.Dir.cwd().deleteTree(io, dir) catch {};
+    defer Io.Dir.cwd().deleteTree(io, dir) catch {};
 
-    var store = try store_mod.Store.open(testing.allocator, io, "data");
+    var store = try store_mod.Store.open(testing.allocator, io, dir);
     defer store.deinit(io);
 
     _ = try store.insertEvent(io, .commit_pushed, "a", "only", "{}", 1);

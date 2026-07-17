@@ -40,6 +40,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run all tests");
 
     const unit_test_targets = [_][]const u8{
+        "src/main.zig",
         "src/agent.zig",
         "src/config.zig",
         "src/tools.zig",

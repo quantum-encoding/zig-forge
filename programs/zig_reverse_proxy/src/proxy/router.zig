@@ -236,11 +236,26 @@ pub const Router = struct {
 /// Supports: . (any char), * (zero or more), + (one or more),
 /// ? (zero or one), [abc] (char class), [^abc] (negated class),
 /// \d (digit), \w (word char), \s (whitespace), \\ (literal backslash)
+/// Upper bound on the number of backtracking steps the matcher may take before
+/// it gives up and reports "no match". The hand-rolled matcher backtracks
+/// recursively, so a `.*`-heavy pattern against a long non-matching path (the
+/// path being attacker-controlled) can otherwise blow up exponentially (ReDoS).
+/// Capping total steps makes the worst case linear-bounded; legitimate route
+/// patterns against paths up to MAX_URI (8 KiB) stay far under this budget.
+const REGEX_MAX_STEPS: usize = 100_000;
+
 fn regexMatch(pattern: []const u8, text: []const u8) bool {
-    return regexMatchImpl(pattern, 0, text, 0);
+    var budget: usize = REGEX_MAX_STEPS;
+    return regexMatchImpl(pattern, 0, text, 0, &budget);
 }
 
-fn regexMatchImpl(pattern: []const u8, pi: usize, text: []const u8, ti: usize) bool {
+fn regexMatchImpl(pattern: []const u8, pi: usize, text: []const u8, ti: usize, budget: *usize) bool {
+    // Step budget exhausted — abort the whole match and treat it as a
+    // non-match. Safe default: a route simply doesn't match rather than the
+    // proxy hanging on catastrophic backtracking.
+    if (budget.* == 0) return false;
+    budget.* -= 1;
+
     var p = pi;
     var t = ti;
 
@@ -259,7 +274,8 @@ fn regexMatchImpl(pattern: []const u8, pi: usize, text: []const u8, ti: usize) b
                     // Use non-greedy approach for correctness
                     var count: usize = 0;
                     while (true) {
-                        if (regexMatchImpl(pattern, next_p, text, t + count)) return true;
+                        if (regexMatchImpl(pattern, next_p, text, t + count, budget)) return true;
+                        if (budget.* == 0) return false;
                         if (t + count >= text.len) break;
                         if (!matchElement(pattern, p, text[t + count])) break;
                         count += 1;
@@ -271,7 +287,8 @@ fn regexMatchImpl(pattern: []const u8, pi: usize, text: []const u8, ti: usize) b
                     if (t >= text.len or !matchElement(pattern, p, text[t])) return false;
                     var count: usize = 1;
                     while (true) {
-                        if (regexMatchImpl(pattern, next_p, text, t + count)) return true;
+                        if (regexMatchImpl(pattern, next_p, text, t + count, budget)) return true;
+                        if (budget.* == 0) return false;
                         if (t + count >= text.len) break;
                         if (!matchElement(pattern, p, text[t + count])) break;
                         count += 1;
@@ -280,9 +297,9 @@ fn regexMatchImpl(pattern: []const u8, pi: usize, text: []const u8, ti: usize) b
                 },
                 '?' => {
                     // Zero or one
-                    if (regexMatchImpl(pattern, next_p, text, t)) return true;
+                    if (regexMatchImpl(pattern, next_p, text, t, budget)) return true;
                     if (t < text.len and matchElement(pattern, p, text[t])) {
-                        return regexMatchImpl(pattern, next_p, text, t + 1);
+                        return regexMatchImpl(pattern, next_p, text, t + 1, budget);
                     }
                     return false;
                 },
@@ -440,4 +457,21 @@ test "pattern matching" {
     try std.testing.expect(matchPattern("api.*", "api.example.com"));
     try std.testing.expect(matchPattern("*.example.com", "www.example.com"));
     try std.testing.expect(!matchPattern("api.*", "www.example.com"));
+}
+
+test "regex matcher still matches valid patterns" {
+    try std.testing.expect(regexMatch("/api/.*", "/api/users"));
+    try std.testing.expect(!regexMatch("/api/.*", "/other"));
+    try std.testing.expect(regexMatch("/user/\\d+", "/user/12345"));
+    try std.testing.expect(!regexMatch("/user/\\d+", "/user/"));
+}
+
+test "regex matcher is bounded against catastrophic backtracking (ReDoS)" {
+    // A `.*`-heavy pattern against a long path with no satisfying suffix forces
+    // maximal backtracking. Without the step budget this would blow up
+    // exponentially and hang the proxy; with it, the match simply terminates
+    // and reports no match.
+    const pattern = ".*.*.*.*.*.*.*.*x";
+    const text = "a" ** 128; // no trailing 'x'
+    try std.testing.expect(!regexMatch(pattern, text));
 }

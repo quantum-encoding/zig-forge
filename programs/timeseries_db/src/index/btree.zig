@@ -150,13 +150,14 @@ pub const BTree = struct {
 
         const mid = MIN_KEYS;
 
-        // Copy upper half of keys to new node
+        // Copy upper half of keys AND their values to the new node. Every node
+        // (leaf or internal) carries a value for each of its keys, so the value
+        // must always be copied — copying it only for leaves is what silently
+        // dropped the promoted key's value on every split.
         new_child.num_keys = MIN_KEYS;
         for (0..MIN_KEYS) |i| {
             new_child.keys[i] = full_child.keys[mid + 1 + i];
-            if (full_child.is_leaf) {
-                new_child.values[i] = full_child.values[mid + 1 + i];
-            }
+            new_child.values[i] = full_child.values[mid + 1 + i];
         }
 
         // Copy children if internal node
@@ -178,14 +179,17 @@ pub const BTree = struct {
         }
         parent.children[idx + 1] = new_child;
 
-        // Shift parent's keys to make space
+        // Shift parent's keys AND values to make space
         i = parent.num_keys;
         while (i > idx) : (i -= 1) {
             parent.keys[i] = parent.keys[i - 1];
+            parent.values[i] = parent.values[i - 1];
         }
 
-        // Move middle key to parent
+        // Move the middle key AND its value up to the parent, so the promoted
+        // separator keeps its row offset (internal nodes are searchable).
         parent.keys[idx] = full_child.keys[mid];
+        parent.values[idx] = full_child.values[mid];
         parent.num_keys += 1;
     }
 
@@ -198,22 +202,18 @@ pub const BTree = struct {
     fn searchNode(self: *const BTree, node: *Node, key: i64) ?u64 {
         const idx = node.searchKey(key);
 
+        // Every node stores the value alongside its own key, so an exact hit
+        // returns directly whether the node is a leaf or an internal node.
         if (idx < node.num_keys and node.keys[idx] == key) {
-            if (node.is_leaf) {
-                return node.values[idx];
-            }
-            // Found in internal node - go to predecessor in left subtree
-            var current = node.children[idx].?;
-            while (!current.is_leaf) {
-                current = current.children[current.num_keys].?;
-            }
-            return current.values[current.num_keys - 1];
+            return node.values[idx];
         }
 
         if (node.is_leaf) {
             return null;
         }
 
+        // Descend into children[idx], which holds keys strictly less than
+        // keys[idx] (and greater than keys[idx-1]).
         return self.searchNode(node.children[idx].?, key);
     }
 
@@ -230,48 +230,32 @@ pub const BTree = struct {
     }
 
     fn rangeQueryNode(self: *const BTree, node: *Node, start: i64, end: i64, results: *std.ArrayList(Entry), allocator: std.mem.Allocator) !void {
-        if (node.is_leaf) {
-            // Leaf node - check all keys in range
-            for (0..node.num_keys) |i| {
-                if (node.keys[i] >= start and node.keys[i] <= end) {
-                    try results.append(allocator, .{
-                        .key = node.keys[i],
-                        .value = node.values[i],
-                    });
-                }
-            }
-        } else {
-            // Internal node - recurse to children
-            for (0..node.num_keys) |i| {
-                // Check left subtree
-                if (node.keys[i] >= start) {
-                    if (node.children[i]) |child| {
-                        try self.rangeQueryNode(child, start, end, results, allocator);
-                    }
-                }
-
-                // Check if key is in range
-                if (node.keys[i] >= start and node.keys[i] <= end) {
-                    // Key itself matches - find value in leaf
-                    if (node.children[i]) |child| {
-                        var leaf = child;
-                        while (!leaf.is_leaf) {
-                            leaf = leaf.children[leaf.num_keys].?;
-                        }
-                        // This is approximate - in production, track actual value
-                    }
-                }
-
-                // Stop if we've passed end
-                if (node.keys[i] > end) break;
+        // In-order traversal: for each key, first descend the left subtree, then
+        // emit the key itself if it falls in range. Internal keys carry their own
+        // value now, so promoted separators are no longer skipped. Results come
+        // out sorted ascending by key. Subtrees provably outside [start, end] are
+        // pruned: children[i] holds keys < keys[i], so it is skipped when
+        // keys[i] <= start, and once keys[i] > end nothing further can match.
+        var i: usize = 0;
+        while (i < node.num_keys) : (i += 1) {
+            if (!node.is_leaf and node.keys[i] > start) {
+                try self.rangeQueryNode(node.children[i].?, start, end, results, allocator);
             }
 
-            // Check rightmost child if needed
-            if (node.num_keys > 0 and node.keys[node.num_keys - 1] <= end) {
-                if (node.children[node.num_keys]) |child| {
-                    try self.rangeQueryNode(child, start, end, results, allocator);
-                }
+            const k = node.keys[i];
+            if (k > end) {
+                // This key and every key/subtree to its right are out of range.
+                return;
             }
+            if (k >= start) {
+                try results.append(allocator, .{ .key = k, .value = node.values[i] });
+            }
+        }
+
+        // Rightmost child holds keys greater than the last separator. Reached
+        // only when every key was <= end, so it may still contain matches.
+        if (!node.is_leaf) {
+            try self.rangeQueryNode(node.children[node.num_keys].?, start, end, results, allocator);
         }
     }
 
@@ -384,4 +368,43 @@ test "btree - large dataset" {
     try std.testing.expectEqual(@as(?u64, 0), tree.search(0));
     try std.testing.expectEqual(@as(?u64, 500), tree.search(50000));
     try std.testing.expectEqual(@as(?u64, 999), tree.search(99900));
+}
+
+test "btree - splits preserve every key's value (regression: promoted-key value loss)" {
+    const allocator = std.testing.allocator;
+
+    var tree = try BTree.init(allocator);
+    defer tree.deinit();
+
+    // Insert well past MAX_KEYS (63) so multiple leaf/internal splits occur and
+    // keys get promoted into internal nodes. Before the split fix, every
+    // promoted separator lost its value (search returned a neighbouring row's
+    // value and range queries silently dropped the promoted keys).
+    const N: i64 = 500;
+    var i: i64 = 0;
+    while (i < N) : (i += 1) {
+        try tree.insert(i * 100, @intCast(i)); // key = i*100, value = i
+    }
+
+    try std.testing.expectEqual(@as(usize, @intCast(N)), tree.getSize());
+
+    // EXACT search for every single key must return its own row index — not a
+    // predecessor's — for all keys including the ones promoted on split.
+    i = 0;
+    while (i < N) : (i += 1) {
+        const got = tree.search(i * 100);
+        try std.testing.expectEqual(@as(?u64, @intCast(i)), got);
+    }
+
+    // A range query must return the exact contiguous set with no gaps at the
+    // promoted-key boundaries, in ascending key order.
+    const results = try tree.rangeQuery(100 * 100, 400 * 100, allocator);
+    defer allocator.free(results);
+
+    try std.testing.expectEqual(@as(usize, 301), results.len); // keys 100..400 inclusive
+    for (results, 0..) |entry, k| {
+        const expected_i: i64 = 100 + @as(i64, @intCast(k));
+        try std.testing.expectEqual(expected_i * 100, entry.key);
+        try std.testing.expectEqual(@as(u64, @intCast(expected_i)), entry.value);
+    }
 }

@@ -40,6 +40,18 @@ pub const sockaddr_in = extern struct {
     zero: [8]u8 = [_]u8{0} ** 8,
 };
 
+// errno numbers differ between Linux and Darwin/BSD (e.g. EAGAIN is 11 on
+// Linux but 35 on macOS). Derive them from the target's own error enum so the
+// non-blocking / connect error mapping is correct on every platform instead
+// of hardcoding one platform's values.
+const Errno = struct {
+    const ECONNREFUSED: u16 = @intFromEnum(std.posix.E.CONNREFUSED);
+    const ETIMEDOUT: u16 = @intFromEnum(std.posix.E.TIMEDOUT);
+    const EINPROGRESS: u16 = @intFromEnum(std.posix.E.INPROGRESS);
+    const EAGAIN: u16 = @intFromEnum(std.posix.E.AGAIN);
+    const ECONNRESET: u16 = @intFromEnum(std.posix.E.CONNRESET);
+};
+
 pub const SocketError = error{
     SocketCreationFailed,
     ConnectionFailed,
@@ -158,11 +170,10 @@ pub fn connect(fd: socket_t, ip_parts: [4]u8, port: u16) SocketError!void {
     const result = sysConnect(fd, &addr, @sizeOf(sockaddr_in));
     if (result < 0) {
         const errno_val: u16 = if (is_linux) @intCast(@as(usize, @bitCast(-result))) else @intCast(std.c._errno().*);
-        // Common errno values: ECONNREFUSED=111, ETIMEDOUT=110, EINPROGRESS=115
         return switch (errno_val) {
-            111 => SocketError.ConnectionRefused, // ECONNREFUSED
-            110 => SocketError.TimedOut, // ETIMEDOUT
-            115 => {}, // EINPROGRESS - non-blocking connect in progress
+            Errno.ECONNREFUSED => SocketError.ConnectionRefused,
+            Errno.ETIMEDOUT => SocketError.TimedOut,
+            Errno.EINPROGRESS => {}, // non-blocking connect in progress
             else => SocketError.ConnectionFailed,
         };
     }
@@ -195,10 +206,9 @@ pub fn recv(fd: socket_t, buf: []u8) SocketError!usize {
     const result = sysRecv(fd, buf, 0);
     if (result < 0) {
         const errno_val: u16 = if (is_linux) @intCast(@as(usize, @bitCast(-result))) else @intCast(std.c._errno().*);
-        // EAGAIN=11, EWOULDBLOCK=11, ECONNRESET=104
         return switch (errno_val) {
-            11 => SocketError.WouldBlock, // EAGAIN/EWOULDBLOCK
-            104 => SocketError.ConnectionReset, // ECONNRESET
+            Errno.EAGAIN => SocketError.WouldBlock, // EAGAIN/EWOULDBLOCK
+            Errno.ECONNRESET => SocketError.ConnectionReset,
             else => SocketError.RecvFailed,
         };
     }
@@ -211,10 +221,9 @@ pub fn recvNonblock(fd: socket_t, buf: []u8) SocketError!usize {
     const result = sysRecv(fd, buf, MSG_DONTWAIT);
     if (result < 0) {
         const errno_val: u16 = if (is_linux) @intCast(@as(usize, @bitCast(-result))) else @intCast(std.c._errno().*);
-        // EAGAIN=11, EWOULDBLOCK=11, ECONNRESET=104
         return switch (errno_val) {
-            11 => SocketError.WouldBlock, // EAGAIN/EWOULDBLOCK
-            104 => SocketError.ConnectionReset, // ECONNRESET
+            Errno.EAGAIN => SocketError.WouldBlock, // EAGAIN/EWOULDBLOCK
+            Errno.ECONNRESET => SocketError.ConnectionReset,
             else => SocketError.RecvFailed,
         };
     }
@@ -340,17 +349,20 @@ test "sockaddr_in structure size" {
     }
 }
 
-test "connect to closed port returns error" {
+test "connect to closed port returns ConnectionRefused (errno mapping)" {
     const fd = try createTcpSocket();
     defer close(fd);
 
-    // Port 59998 is very unlikely to have anything listening
+    // Port 59998 is very unlikely to have anything listening. A blocking
+    // connect to a closed localhost port returns ECONNREFUSED synchronously.
+    // This specifically validates the platform errno mapping: with the old
+    // Linux-only constants, macOS's ECONNREFUSED (61) fell through to the
+    // `else` arm and was mis-reported as ConnectionFailed.
     const result = connect(fd, .{ 127, 0, 0, 1 }, 59998);
     if (result) |_| {
-        // Somehow connected - unlikely but acceptable
+        // Somehow connected - unlikely but acceptable.
     } else |err| {
-        // Should be ConnectionRefused or ConnectionFailed
-        try std.testing.expect(err == SocketError.ConnectionRefused or err == SocketError.ConnectionFailed);
+        try std.testing.expectEqual(SocketError.ConnectionRefused, err);
     }
 }
 

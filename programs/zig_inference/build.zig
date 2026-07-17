@@ -26,6 +26,19 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run zig-infer");
     run_step.dependOn(&run_cmd.step);
 
+    // Consumable Zig module for in-tree consumers (`@import("zig_inference")`).
+    // Additive: mirrors the FFI library root (`ffi.zig`, which re-exports the full
+    // Zig surface) so other in-tree Zig programs can depend on it via addModule.
+    const mod = b.addModule("zig_inference", .{
+        .root_source_file = b.path("src/ffi.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    mod.link_libc = true;
+    mod.linkSystemLibrary("espeak-ng", .{});
+    mod.addCSourceFile(.{ .file = b.path("stb/stb_impl.c"), .flags = &.{} });
+    mod.addIncludePath(b.path("stb"));
+
     // Shared library for FFI
     const shared = b.addLibrary(.{
         .name = "ziginfer",

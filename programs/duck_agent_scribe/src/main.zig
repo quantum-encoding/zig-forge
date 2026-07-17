@@ -195,55 +195,46 @@ fn handleInit(allocator: mem.Allocator, args: []const []const u8) !void {
     const manifest_path = try std.fmt.allocPrint(allocator, "{s}/manifest.json", .{log_dir});
     defer allocator.free(manifest_path);
 
-    const manifest = try std.fmt.allocPrint(
-        allocator,
-        \\{{
-        \\  "agent": {{
-        \\    "id": "{s}",
-        \\    "chronos_tick": "{s}",
-        \\    "timestamp_iso": "{s}",
-        \\    "provider": "{s}"
-        \\  }},
-        \\  "batch": {{
-        \\    "id": "{s}",
-        \\    "is_retry": {s},
-        \\    "retry_number": {d}
-        \\  }},
-        \\  "task": {{
-        \\    "description": "{s}",
-        \\    "max_turns": {d},
-        \\    "output_file": "{s}"
-        \\  }},
-        \\  "crucible": {{
-        \\    "path": "{s}"
-        \\  }},
-        \\  "execution": {{
-        \\    "pid": {?d},
-        \\    "started_at": "{s}",
-        \\    "status": "RUNNING"
-        \\  }}
-        \\}}
-        \\
-    ,
-        .{
-            agent_id.?,
-            tick,
-            timestamp,
-            provider,
-            batch_id.?,
-            if (retry_number > 0) "true" else "false",
-            retry_number,
-            task.?,
-            max_turns,
-            output_file orelse "",
-            crucible_path orelse "",
-            pid,
-            timestamp,
+    // Serialize the manifest with std.json.Stringify so every caller-controlled
+    // string (agent_id, provider, batch_id, task, output_file, crucible_path) is
+    // escaped. Building this by hand with allocPrint let a --task value containing
+    // '"' or '\' either break the JSON (DoS) or inject fields into the record
+    // (log forgery) — JSON-IN-FMT.
+    var manifest_out: std.Io.Writer.Allocating = .init(allocator);
+    defer manifest_out.deinit();
+    var manifest_stringify: std.json.Stringify = .{
+        .writer = &manifest_out.writer,
+        .options = .{ .whitespace = .indent_2 },
+    };
+    try manifest_stringify.write(.{
+        .agent = .{
+            .id = agent_id.?,
+            .chronos_tick = tick,
+            .timestamp_iso = timestamp,
+            .provider = provider,
         },
-    );
-    defer allocator.free(manifest);
+        .batch = .{
+            .id = batch_id.?,
+            .is_retry = retry_number > 0,
+            .retry_number = retry_number,
+        },
+        .task = .{
+            .description = task.?,
+            .max_turns = max_turns,
+            .output_file = output_file orelse "",
+        },
+        .crucible = .{
+            .path = crucible_path orelse "",
+        },
+        .execution = .{
+            .pid = pid,
+            .started_at = timestamp,
+            .status = @as([]const u8, "RUNNING"),
+        },
+    });
+    try manifest_out.writer.writeAll("\n");
 
-    try writeFile(manifest_path, manifest);
+    try writeFile(manifest_path, manifest_out.written());
 
     // Create init.log
     const init_log_path = try std.fmt.allocPrint(allocator, "{s}/init.log", .{log_dir});
@@ -467,27 +458,29 @@ fn handleBatchComplete(allocator: mem.Allocator, args: []const []const u8) !void
     else
         0.0;
 
-    const manifest = try std.fmt.allocPrint(
-        allocator,
-        \\{{
-        \\  "batch": {{
-        \\    "id": "{s}",
-        \\    "completed_at": "{s}"
-        \\  }},
-        \\  "results": {{
-        \\    "total_agents": {d},
-        \\    "succeeded": {d},
-        \\    "failed": {d},
-        \\    "success_rate": {d:.2}
-        \\  }}
-        \\}}
-        \\
-    ,
-        .{ batch_id.?, timestamp, total, succeeded, failed, success_rate },
-    );
-    defer allocator.free(manifest);
+    // Serialize with std.json.Stringify so batch_id is escaped rather than
+    // interpolated raw into a JSON template (JSON-IN-FMT).
+    var manifest_out: std.Io.Writer.Allocating = .init(allocator);
+    defer manifest_out.deinit();
+    var manifest_stringify: std.json.Stringify = .{
+        .writer = &manifest_out.writer,
+        .options = .{ .whitespace = .indent_2 },
+    };
+    try manifest_stringify.write(.{
+        .batch = .{
+            .id = batch_id.?,
+            .completed_at = timestamp,
+        },
+        .results = .{
+            .total_agents = total,
+            .succeeded = succeeded,
+            .failed = failed,
+            .success_rate = success_rate,
+        },
+    });
+    try manifest_out.writer.writeAll("\n");
 
-    try writeFile(manifest_path, manifest);
+    try writeFile(manifest_path, manifest_out.written());
     std.debug.print("📊 Batch manifest completed: {s}\n", .{batch_id.?});
 }
 
@@ -841,33 +834,35 @@ fn getChronosTimestamp(allocator: mem.Allocator) ![]u8 {
     // Zig 0.16: Use std.c.clock_gettime for wall clock time
     var ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.REALTIME, &ts);
-    const timestamp_ms = @divFloor(ts.sec * 1000 + @divFloor(ts.nsec, std.time.ns_per_ms), 1);
-    const seconds = @divFloor(timestamp_ms, 1000);
-    const millis = @mod(timestamp_ms, 1000);
+    const seconds: i64 = @intCast(ts.sec);
+    const millis: u16 = @intCast(@as(i64, @intCast(@divFloor(ts.nsec, std.time.ns_per_ms))));
+    return formatTimestampIso(allocator, seconds, millis);
+}
 
-    // Calculate days since Unix epoch
-    const days_since_epoch = @divFloor(seconds, 86400);
-    const day_seconds = @mod(seconds, 86400);
-
-    const hours = @divFloor(day_seconds, 3600);
-    const minutes = @divFloor(@mod(day_seconds, 3600), 60);
-    const secs = @mod(day_seconds, 60);
-
-    // Calculate year, month, day from days_since_epoch
-    // Simplified calculation (assumes 365.25 days per year)
-    const epoch_year: i64 = 1970;
-    const approx_year = epoch_year + @divFloor(days_since_epoch * 4, 1461);
-    const year_start_day = @divFloor((approx_year - epoch_year) * 1461, 4);
-    const day_of_year = days_since_epoch - year_start_day;
-
-    // Simplified month/day (good enough for logging)
-    const month = @min(12, @divFloor(day_of_year * 12, 365) + 1);
-    const day = @min(31, @mod(day_of_year, 31) + 1);
+/// Format a UTC ISO-8601 timestamp (`YYYY-MM-DDTHH:MM:SS.mmmZ`) from an epoch
+/// second count and a millisecond fraction. Uses `std.time.epoch` for a correct
+/// proleptic-Gregorian civil calendar (leap years and month lengths handled).
+/// `epoch_seconds` must be non-negative (post-1970); callers only ever pass a
+/// real wall clock so this holds.
+fn formatTimestampIso(allocator: mem.Allocator, epoch_seconds: i64, millis: u16) ![]u8 {
+    const secs_u: u64 = if (epoch_seconds < 0) 0 else @intCast(epoch_seconds);
+    const epoch_secs = std.time.epoch.EpochSeconds{ .secs = secs_u };
+    const day_secs = epoch_secs.getDaySeconds();
+    const year_day = epoch_secs.getEpochDay().calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
 
     return try std.fmt.allocPrint(
         allocator,
-        "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>9}Z",
-        .{ approx_year, month, day, hours, minutes, secs, millis * 1000000 },
+        "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z",
+        .{
+            year_day.year,
+            month_day.month.numeric(),
+            @as(u16, month_day.day_index) + 1,
+            day_secs.getHoursIntoDay(),
+            day_secs.getMinutesIntoHour(),
+            day_secs.getSecondsIntoMinute(),
+            millis,
+        },
     );
 }
 
@@ -915,9 +910,18 @@ fn writeFile(path: []const u8, content: []const u8) !void {
 
 fn appendFile(path: []const u8, content: []const u8) !void {
     const io = Io.Threaded.global_single_threaded.io();
-    const file = try Io.Dir.openFileAbsolute(io, path, .{ .mode = .read_write });
+    // Open for appending, creating the file if it does not yet exist. `log` is
+    // the tool's core command and writes `turn-NNN.log` for a turn number that
+    // has never been seen before, so create-if-missing is required; O_APPEND
+    // semantics keep concurrent turn writes from clobbering each other (unlike
+    // the old stat().size + writePositionalAll, which both FileNotFound'd on a
+    // missing file and raced other writers).
+    // truncate=false => create-or-open without discarding existing turns.
+    // exclusive=false => opening a pre-existing file is fine (no error).
+    // An advisory exclusive lock serializes concurrent appenders so the
+    // stat()+write below observes a stable end offset.
+    const file = try Io.Dir.createFileAbsolute(io, path, .{ .truncate = false, .lock = .exclusive });
     defer file.close(io);
-    // Seek to end using stat to get file length, then write at that position
     const stat = try file.stat(io);
     try file.writePositionalAll(io, content, stat.size);
 }
@@ -944,31 +948,111 @@ test "Chronos timestamp is valid ISO format" {
     try std.testing.expect(mem.indexOf(u8, timestamp, "Z") != null);
 }
 
+test "formatTimestampIso matches external date -u -r vectors" {
+    const allocator = std.heap.c_allocator;
+
+    // Externally anchored: expected strings produced by
+    //   date -u -r <epoch> "+%Y-%m-%dT%H:%M:%S.000Z"
+    // (GNU/BSD coreutils, not this program). Covers the Unix epoch, a year
+    // boundary, a leap day (2024-02-29), a mid-year date, and an odd-second
+    // value — the cases the old approximate `days*4/1461` math got wrong.
+    const Case = struct { epoch: i64, expected: []const u8 };
+    const cases = [_]Case{
+        .{ .epoch = 0, .expected = "1970-01-01T00:00:00.000Z" },
+        .{ .epoch = 1735689600, .expected = "2025-01-01T00:00:00.000Z" },
+        .{ .epoch = 1709208000, .expected = "2024-02-29T12:00:00.000Z" },
+        .{ .epoch = 1789000000, .expected = "2026-09-10T00:26:40.000Z" },
+        .{ .epoch = 1751328000, .expected = "2025-07-01T00:00:00.000Z" },
+    };
+
+    for (cases) |case| {
+        const got = try formatTimestampIso(allocator, case.epoch, 0);
+        defer allocator.free(got);
+        try std.testing.expectEqualStrings(case.expected, got);
+    }
+
+    // Millisecond fraction is rendered honestly as 3 digits (no fake ns).
+    const with_ms = try formatTimestampIso(allocator, 1735689600, 42);
+    defer allocator.free(with_ms);
+    try std.testing.expectEqualStrings("2025-01-01T00:00:00.042Z", with_ms);
+}
+
+test "appendFile creates a missing turn file then appends in order" {
+    const allocator = std.heap.c_allocator;
+    const io = Io.Threaded.global_single_threaded.io();
+
+    // Build an absolute path inside the system temp dir that does not yet exist.
+    const tmp_base = getEnv("TMPDIR") orelse "/tmp";
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.REALTIME, &ts);
+    const path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/duckagent-scribe-appendtest-{d}-{d}.log",
+        .{ mem.trimEnd(u8, tmp_base, "/"), ts.sec, ts.nsec },
+    );
+    defer allocator.free(path);
+    defer Io.Dir.deleteFileAbsolute(io, path) catch {};
+
+    // First call must CREATE the file (this is the bug the old code hit:
+    // openFileAbsolute without create -> FileNotFound on the first log write).
+    try appendFile(path, "line-1\n");
+    try appendFile(path, "line-2\n");
+
+    const content = try readFile(allocator, path);
+    defer allocator.free(content);
+    try std.testing.expectEqualStrings("line-1\nline-2\n", content);
+}
+
 test "Manifest JSON generation format" {
     const allocator = std.heap.c_allocator;
 
     const timestamp = try getChronosTimestamp(allocator);
     defer allocator.free(timestamp);
 
-    const manifest = try std.fmt.allocPrint(
-        allocator,
-        \\{{
-        \\  "agent": {{
-        \\    "id": "test-001",
-        \\    "timestamp_iso": "{s}"
-        \\  }}
-        \\}}
-        \\
-    ,
-        .{timestamp},
-    );
-    defer allocator.free(manifest);
+    // Adversarial task: a spawned agent controls --task, so it can attempt to
+    // inject fields ("status": "SUCCESS") or break the JSON. std.json.Stringify
+    // must escape the quotes and backslashes rather than emit them raw.
+    const malicious_task =
+        \\pwn", "status": "SUCCESS", "x": "\evil\
+    ;
 
-    // Parse to verify valid JSON
+    // Build the manifest exactly the way handleInit does.
+    var manifest_out: std.Io.Writer.Allocating = .init(allocator);
+    defer manifest_out.deinit();
+    var manifest_stringify: std.json.Stringify = .{
+        .writer = &manifest_out.writer,
+        .options = .{ .whitespace = .indent_2 },
+    };
+    try manifest_stringify.write(.{
+        .agent = .{
+            .id = @as([]const u8, "test-001"),
+            .timestamp_iso = timestamp,
+        },
+        .task = .{
+            .description = malicious_task,
+        },
+        .execution = .{
+            .status = @as([]const u8, "RUNNING"),
+        },
+    });
+    const manifest = manifest_out.written();
+
+    // Parse to verify valid JSON (injection would either break this or add fields).
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, manifest, .{});
     defer parsed.deinit();
 
     try std.testing.expect(parsed.value == .object);
+
+    // The task description must round-trip byte-for-byte — no injected field.
+    const task_obj = parsed.value.object.get("task").?.object;
+    const desc = task_obj.get("description").?.string;
+    try std.testing.expectEqualStrings(malicious_task, desc);
+
+    // Injection did NOT create a top-level "status" field; execution.status is
+    // the only status and remains RUNNING.
+    try std.testing.expect(parsed.value.object.get("status") == null);
+    const exec_status = parsed.value.object.get("execution").?.object.get("status").?.string;
+    try std.testing.expectEqualStrings("RUNNING", exec_status);
 }
 
 test "Directory path construction with retry suffix" {

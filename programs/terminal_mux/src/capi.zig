@@ -307,23 +307,28 @@ pub export fn tmux_pump(handle: ?*TmuxSession, timeout_ms: c_int) c_long {
     return @intCast(r);
 }
 
-/// Drain all currently-available PTY output (non-blocking), feeding the VT
-/// emulator. Returns total bytes processed (0 if nothing was ready).
+/// Drain all currently-available PTY output (non-blocking) from EVERY pane of
+/// the active window, feeding each pane's VT emulator. Returns total bytes
+/// processed (0 if nothing was ready). Draining only the focused pane would
+/// stall background split panes on a full PTY buffer — the multiplexer's one
+/// job is that it doesn't.
 pub export fn tmux_drain(handle: ?*TmuxSession) c_long {
     const h = handle orelse return -1;
-    const pane = activePane(h);
-    const fd = pane.getFd() orelse return -1;
+    const w = h.sess.getActiveWindow();
 
     var total: c_long = 0;
     var buf: [READ_CHUNK]u8 = undefined;
-    while (true) {
-        var fds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
-        const n = posix.poll(&fds, 0) catch break;
-        if (n == 0 or (fds[0].revents & posix.POLL.IN) == 0) break;
-        const r = pane.readOutput(&buf) catch break;
-        if (r == 0) break;
-        pane.processOutput(buf[0..r]);
-        total += @intCast(r);
+    for (w.panes.items) |pane| {
+        const fd = pane.getFd() orelse continue;
+        while (true) {
+            var fds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
+            const n = posix.poll(&fds, 0) catch break;
+            if (n == 0 or (fds[0].revents & posix.POLL.IN) == 0) break;
+            const r = pane.readOutput(&buf) catch break;
+            if (r == 0) break;
+            pane.processOutput(buf[0..r]);
+            total += @intCast(r);
+        }
     }
     return total;
 }
@@ -376,12 +381,11 @@ pub export fn tmux_grid_size(handle: ?*TmuxSession, out_rows: ?*u16, out_cols: ?
     if (out_cols) |p| p.* = grid.cols;
 }
 
-/// Copy the active pane's grid into `out` in row-major order (row*cols+col).
-/// Copies at most `max_cells`; returns the number of cells written.
-pub export fn tmux_read_cells(handle: ?*TmuxSession, out: ?[*]CCell, max_cells: usize) usize {
-    const h = handle orelse return 0;
-    const buf = out orelse return 0;
-    const term = &activePane(h).terminal;
+/// Shared cell-copy core: a terminal's visible view (scrollback-composed) into
+/// a flat CCell buffer, row-major. Returns cells written.
+fn readTerminalCells(term: *const terminal.Terminal, buf: [*]CCell, max_cells: usize) usize {
+    // term.grid is ALWAYS the displayed grid (swap-based alt screen: alt mode
+    // swaps a fresh grid in and stashes the primary in alt_grid).
     const grid = &term.grid;
     const cols: usize = grid.cols;
     const total = @as(usize, grid.rows) * cols;
@@ -409,6 +413,14 @@ pub export fn tmux_read_cells(handle: ?*TmuxSession, out: ?[*]CCell, max_cells: 
         buf[i] = cc;
     }
     return n;
+}
+
+/// Copy the active pane's grid into `out` in row-major order (row*cols+col).
+/// Copies at most `max_cells`; returns the number of cells written.
+pub export fn tmux_read_cells(handle: ?*TmuxSession, out: ?[*]CCell, max_cells: usize) usize {
+    const h = handle orelse return 0;
+    const buf = out orelse return 0;
+    return readTerminalCells(&activePane(h).terminal, buf, max_cells);
 }
 
 /// DEC private modes the host renderer needs, as a bitmask:
@@ -523,10 +535,25 @@ pub export fn tmux_cursor(handle: ?*TmuxSession, out_row: ?*u16, out_col: ?*u16,
 /// Returns the viewport's scrollback offset after the call (0 = live bottom).
 pub export fn tmux_scroll(handle: ?*TmuxSession, delta: c_int, row: u16, col: u16) c_long {
     const h = handle orelse return 0;
-    const pane = activePane(h);
-    const term = &pane.terminal;
     if (delta == 0) return tmux_scroll_offset(handle);
+    return scrollPane(activePane(h), delta, row, col);
+}
 
+/// Wheel-scroll a SPECIFIC pane (multi-pane hosts route the wheel to the pane
+/// under the cursor, not the focused one). `row`/`col` are PANE-LOCAL.
+pub export fn tmux_pane_scroll(handle: ?*TmuxSession, idx: usize, delta: c_int, row: u16, col: u16) c_long {
+    const h = handle orelse return 0;
+    const p = paneAt(h, idx) orelse return 0;
+    if (delta == 0) {
+        const term = &p.terminal;
+        if (term.modes.alt_screen) return 0;
+        return @intCast(@min(term.scrollback_offset, term.scrollback.len));
+    }
+    return scrollPane(p, delta, row, col);
+}
+
+fn scrollPane(pane: *session.Pane, delta: c_int, row: u16, col: u16) c_long {
+    const term = &pane.terminal;
     const up = delta > 0;
     const mag: usize = @intCast(if (up) delta else -delta);
 
@@ -616,6 +643,153 @@ pub export fn tmux_focus_next_pane(handle: ?*TmuxSession) c_int {
 }
 
 // =============================================================================
+// Pane-aware surface — lets a host view COMPOSE all panes of the active window
+// (splits) instead of rendering only the focused pane. Pane indices are
+// positions in the active window's pane list at call time; re-enumerate after
+// split/close.
+// =============================================================================
+
+fn paneAt(h: *TmuxSession, idx: usize) ?*session.Pane {
+    const w = h.sess.getActiveWindow();
+    if (idx >= w.panes.items.len) return null;
+    return w.panes.items[idx];
+}
+
+/// The active window's full extent (the rect panes tile), in cells.
+pub export fn tmux_window_size(handle: ?*TmuxSession, out_rows: ?*u16, out_cols: ?*u16) void {
+    const h = handle orelse return;
+    if (out_rows) |p| p.* = h.sess.rect.height;
+    if (out_cols) |p| p.* = h.sess.rect.width;
+}
+
+/// Number of panes in the active window (0 if handle is NULL).
+pub export fn tmux_pane_count(handle: ?*TmuxSession) usize {
+    const h = handle orelse return 0;
+    return h.sess.getActiveWindow().panes.items.len;
+}
+
+/// Pane `idx`'s rect within the window (cells). Returns 0, -1 if out of range.
+pub export fn tmux_pane_rect(handle: ?*TmuxSession, idx: usize, out_x: ?*u16, out_y: ?*u16, out_w: ?*u16, out_h: ?*u16) c_int {
+    const h = handle orelse return -1;
+    const p = paneAt(h, idx) orelse return -1;
+    if (out_x) |o| o.* = p.rect.x;
+    if (out_y) |o| o.* = p.rect.y;
+    if (out_w) |o| o.* = p.rect.width;
+    if (out_h) |o| o.* = p.rect.height;
+    return 0;
+}
+
+/// Whether pane `idx` is the focused pane of the active window.
+pub export fn tmux_pane_is_active(handle: ?*TmuxSession, idx: usize) bool {
+    const h = handle orelse return false;
+    return idx < h.sess.getActiveWindow().panes.items.len and
+        idx == h.sess.getActiveWindow().active_pane_idx;
+}
+
+/// Focus pane `idx` of the active window. Returns 0, -1 if out of range.
+pub export fn tmux_focus_pane(handle: ?*TmuxSession, idx: usize) c_int {
+    const h = handle orelse return -1;
+    const w = h.sess.getActiveWindow();
+    if (idx >= w.panes.items.len) return -1;
+    w.panes.items[w.active_pane_idx].active = false;
+    w.active_pane_idx = idx;
+    w.panes.items[idx].active = true;
+    return 0;
+}
+
+/// Pane `idx`'s PTY master fd (-1 if none) — one readability source per pane.
+pub export fn tmux_pane_pty_fd(handle: ?*TmuxSession, idx: usize) c_int {
+    const h = handle orelse return -1;
+    const p = paneAt(h, idx) orelse return -1;
+    const fd = p.getFd() orelse return -1;
+    return @intCast(fd);
+}
+
+/// Pane `idx`'s cursor in PANE-LOCAL cells (host adds the pane rect offset).
+pub export fn tmux_pane_cursor(handle: ?*TmuxSession, idx: usize, out_row: ?*u16, out_col: ?*u16, out_visible: ?*bool) void {
+    const h = handle orelse return;
+    const p = paneAt(h, idx) orelse return;
+    const term = &p.terminal;
+    if (out_row) |o| o.* = term.cursor.row;
+    if (out_col) |o| o.* = term.cursor.col;
+    if (out_visible) |o| o.* = term.modes.cursor_visible and
+        (term.modes.alt_screen or term.scrollback_offset == 0);
+}
+
+/// Copy pane `idx`'s visible grid (scrollback-composed) into `out`, row-major
+/// at the PANE's width. Returns cells written (0 on bad idx/NULL).
+pub export fn tmux_pane_read_cells(handle: ?*TmuxSession, idx: usize, out: ?[*]CCell, max_cells: usize) usize {
+    const h = handle orelse return 0;
+    const buf = out orelse return 0;
+    const p = paneAt(h, idx) orelse return 0;
+    return readTerminalCells(&p.terminal, buf, max_cells);
+}
+
+/// Close pane `idx`: kills its shell and re-tiles the survivors. Refused (-1)
+/// for the last pane of the window — destroy the session instead.
+pub export fn tmux_close_pane(handle: ?*TmuxSession, idx: usize) c_int {
+    const h = handle orelse return -1;
+    const w = h.sess.getActiveWindow();
+    const p = paneAt(h, idx) orelse return -1;
+    if (w.panes.items.len <= 1) return -1;
+    _ = w.removePaneReflow(p.id);
+    return 0;
+}
+
+/// Move the border between pane `idx` and its right (dx) / bottom (dy)
+/// neighbor by that many cells (positive grows pane `idx`). The neighbor must
+/// span the same cross-axis extent (clean tiling). Returns 0 when anything
+/// moved, -1 otherwise. Deltas clamp so both panes keep >= 2 cells.
+pub export fn tmux_resize_split(handle: ?*TmuxSession, idx: usize, dx: c_int, dy: c_int) c_int {
+    const h = handle orelse return -1;
+    const w = h.sess.getActiveWindow();
+    const p = paneAt(h, idx) orelse return -1;
+    var changed = false;
+
+    if (dx != 0) {
+        for (w.panes.items) |q| {
+            if (q == p) continue;
+            if (q.rect.y == p.rect.y and q.rect.height == p.rect.height and
+                q.rect.x == p.rect.x + p.rect.width + 1)
+            {
+                const pw: i32 = p.rect.width;
+                const qw: i32 = q.rect.width;
+                var d: i32 = dx;
+                if (pw + d < 2) d = 2 - pw;
+                if (qw - d < 2) d = qw - 2;
+                if (d != 0) {
+                    p.resize(.{ .x = p.rect.x, .y = p.rect.y, .width = @intCast(pw + d), .height = p.rect.height }) catch {};
+                    q.resize(.{ .x = @intCast(@as(i32, q.rect.x) + d), .y = q.rect.y, .width = @intCast(qw - d), .height = q.rect.height }) catch {};
+                    changed = true;
+                }
+                break;
+            }
+        }
+    }
+    if (dy != 0) {
+        for (w.panes.items) |q| {
+            if (q == p) continue;
+            if (q.rect.x == p.rect.x and q.rect.width == p.rect.width and
+                q.rect.y == p.rect.y + p.rect.height + 1)
+            {
+                const ph: i32 = p.rect.height;
+                const qh: i32 = q.rect.height;
+                var d: i32 = dy;
+                if (ph + d < 2) d = 2 - ph;
+                if (qh - d < 2) d = qh - 2;
+                if (d != 0) {
+                    p.resize(.{ .x = p.rect.x, .y = p.rect.y, .width = p.rect.width, .height = @intCast(ph + d) }) catch {};
+                    q.resize(.{ .x = q.rect.x, .y = @intCast(@as(i32, q.rect.y) + d), .width = q.rect.width, .height = @intCast(qh - d) }) catch {};
+                    changed = true;
+                }
+                break;
+            }
+        }
+    }
+    return if (changed) 0 else -1;
+}
+
+// =============================================================================
 // Theme — the shared color scheme. Consumers (CosmicDuck's Metal view, a future
 // standalone GUI) read the file themselves and push the bytes via
 // tmux_set_theme_text, then read back the resolved palette via tmux_get_theme.
@@ -674,7 +848,8 @@ pub export fn tmux_get_theme(out: ?*CTheme) void {
 // =============================================================================
 // URL detection — scan the active pane's visible grid for links. The renderer
 // paints each range in theme.url + underline and reads the URL text for opening
-// straight from its own cell buffer (range = row, start_col, end_col-exclusive).
+// straight from its own cell buffer. A range is {start_row, start_col,
+// end_row, end_col-exclusive} — multi-row when the URL soft-wrapped.
 // =============================================================================
 
 pub const CUrlRange = url.UrlRange; // extern struct {row, start_col, end_col: u16}
@@ -735,6 +910,42 @@ test "CCell layout is stable for the C header" {
     // The Swift/C side hard-codes this layout; lock it down.
     try std.testing.expectEqual(@as(usize, 4), @alignOf(CCell));
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(CCell));
+}
+
+test "pane-aware surface: split, rects tile with a border gap, focus, close" {
+    var id: u64 = 0;
+    // /bin/cat as the "shell": no rc files, no prompt noise, sits on the pty.
+    const h = tmux_create(24, 80, "/bin/cat", &id) orelse return error.CreateFailed;
+    defer tmux_destroy(h);
+
+    try std.testing.expectEqual(@as(usize, 1), tmux_pane_count(h));
+    var rows: u16 = 0;
+    var cols: u16 = 0;
+    tmux_window_size(h, &rows, &cols);
+    try std.testing.expectEqual(@as(u16, 24), rows);
+    try std.testing.expectEqual(@as(u16, 80), cols);
+
+    try std.testing.expectEqual(@as(c_int, 0), tmux_split(h, 1));
+    try std.testing.expectEqual(@as(usize, 2), tmux_pane_count(h));
+
+    var ax: u16 = 0;
+    var aw: u16 = 0;
+    var bx: u16 = 0;
+    var bw: u16 = 0;
+    try std.testing.expectEqual(@as(c_int, 0), tmux_pane_rect(h, 0, &ax, null, &aw, null));
+    try std.testing.expectEqual(@as(c_int, 0), tmux_pane_rect(h, 1, &bx, null, &bw, null));
+    try std.testing.expectEqual(@as(u16, 0), ax);
+    try std.testing.expectEqual(ax + aw + 1, bx); // 1-cell border gap between panes
+    try std.testing.expectEqual(@as(u16, 80), bx + bw);
+
+    try std.testing.expectEqual(@as(c_int, 0), tmux_focus_pane(h, 1));
+    try std.testing.expect(tmux_pane_is_active(h, 1));
+    try std.testing.expect(!tmux_pane_is_active(h, 0));
+    try std.testing.expect(tmux_pane_pty_fd(h, 1) >= 0);
+
+    try std.testing.expectEqual(@as(c_int, 0), tmux_close_pane(h, 1));
+    try std.testing.expectEqual(@as(usize, 1), tmux_pane_count(h));
+    try std.testing.expectEqual(@as(c_int, -1), tmux_close_pane(h, 0)); // last pane refused
 }
 
 test "version string is well formed" {

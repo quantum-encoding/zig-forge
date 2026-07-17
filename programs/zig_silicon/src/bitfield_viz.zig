@@ -24,6 +24,22 @@ const ArrayWriter = struct {
     pub fn writeAll(self: *ArrayWriter, data: []const u8) !void {
         try self.list.appendSlice(self.allocator, data);
     }
+
+    /// Write `data` with XML metacharacters (& < > " ') escaped to their
+    /// entity references, so caller-supplied names cannot break out of the
+    /// surrounding element or inject markup into the SVG.
+    pub fn writeEscapedXml(self: *ArrayWriter, data: []const u8) !void {
+        for (data) |c| {
+            switch (c) {
+                '&' => try self.writeAll("&amp;"),
+                '<' => try self.writeAll("&lt;"),
+                '>' => try self.writeAll("&gt;"),
+                '"' => try self.writeAll("&quot;"),
+                '\'' => try self.writeAll("&apos;"),
+                else => try self.list.append(self.allocator, c),
+            }
+        }
+    }
 };
 
 /// Generate an SVG visualization of a register's bit layout
@@ -33,11 +49,16 @@ pub fn generateSvg(allocator: std.mem.Allocator, name: []const u8, fields: []con
 
     var writer = ArrayWriter{ .list = &output, .allocator = allocator };
 
-    // Calculate total bits
+    // Calculate total bits. A zero-width field is rejected up front: it would
+    // later drive `bit_pos - 1` below zero, panicking (Debug/ReleaseSafe) or
+    // wrapping to a huge value (ReleaseFast) when the running bit position has
+    // already reached 0.
     var total_bits: u32 = 0;
     for (fields) |f| {
+        if (f.bits == 0) return error.InvalidField;
         total_bits += f.bits;
     }
+    if (total_bits == 0) return error.InvalidField;
 
     // SVG dimensions
     const bit_width: u32 = 30;
@@ -59,9 +80,10 @@ pub fn generateSvg(allocator: std.mem.Allocator, name: []const u8, fields: []con
         \\  </style>
         \\
         \\  <!-- Title -->
-        \\  <text x="{d}" y="15" class="title" text-anchor="middle">{s}</text>
-        \\
-    , .{ width, height + 40, width, height + 40, width / 2, name });
+        \\  <text x="{d}" y="15" class="title" text-anchor="middle">
+    , .{ width, height + 40, width, height + 40, width / 2 });
+    try writer.writeEscapedXml(name);
+    try writer.writeAll("</text>\n");
 
     // Draw fields from MSB to LSB (left to right)
     var x: u32 = padding;
@@ -88,9 +110,10 @@ pub fn generateSvg(allocator: std.mem.Allocator, name: []const u8, fields: []con
         // Draw field name (centered)
         const text_x = x + field_width / 2;
         try writer.print(
-            \\  <text x="{d}" y="50" class="field-name" text-anchor="middle">{s}</text>
-            \\
-        , .{ text_x, field.name });
+            \\  <text x="{d}" y="50" class="field-name" text-anchor="middle">
+        , .{text_x});
+        try writer.writeEscapedXml(field.name);
+        try writer.writeAll("</text>\n");
 
         // Draw bit numbers
         if (field.bits == 1) {
@@ -144,4 +167,45 @@ test "generateSvg basic" {
     try std.testing.expect(std.mem.indexOf(u8, output, "TEST_REG") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "enable") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "<svg") != null);
+}
+
+test "generateSvg rejects a zero-width field (underflow guard)" {
+    const allocator = std.testing.allocator;
+
+    // Zero-width field after real bits: previously underflowed `bit_pos - 1`.
+    const fields = [_]Field{
+        .{ .name = "a", .bits = 8 },
+        .{ .name = "b", .bits = 0 },
+    };
+    try std.testing.expectError(error.InvalidField, generateSvg(allocator, "R", &fields));
+
+    // Lone zero-width field: total_bits == 0.
+    const lone = [_]Field{.{ .name = "a", .bits = 0 }};
+    try std.testing.expectError(error.InvalidField, generateSvg(allocator, "R", &lone));
+}
+
+test "generateSvg rejects an empty field list" {
+    const allocator = std.testing.allocator;
+    const empty = [_]Field{};
+    try std.testing.expectError(error.InvalidField, generateSvg(allocator, "R", &empty));
+}
+
+test "generateSvg XML-escapes register and field names" {
+    const allocator = std.testing.allocator;
+
+    const fields = [_]Field{
+        .{ .name = "R&W<x>\"'", .bits = 2 },
+    };
+    const output = try generateSvg(allocator, "A&B<C>\"'", &fields);
+    defer allocator.free(output);
+
+    // Raw metacharacters from the names must not survive into element text.
+    try std.testing.expect(std.mem.indexOf(u8, output, "A&B") == null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "R&W") == null);
+    // Escaped entity forms must be present for every metacharacter.
+    try std.testing.expect(std.mem.indexOf(u8, output, "&amp;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "&lt;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "&gt;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "&quot;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "&apos;") != null);
 }

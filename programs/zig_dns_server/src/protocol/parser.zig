@@ -42,6 +42,30 @@ pub const ParseError = error{
     InvalidRdata,
 };
 
+/// Decode the 16-bit DNS header flags field (RFC 1035 §4.1.1) into `Flags`.
+///
+/// This is the exact inverse of the packing done in `Builder.writeHeader`.
+/// A raw `@bitCast(u16)` is INCORRECT here: the packed-struct field order
+/// (rd, tc, aa, opcode, qr, rcode, cd, ad, z, ra) does not correspond to the
+/// on-wire bit positions, so a bitcast would misread every flag (e.g. an
+/// RD=1 query would decode as rd=false). Bit layout on the wire:
+///   bit 15: QR   bits 14-11: OPCODE   bit 10: AA   bit 9: TC   bit 8: RD
+///   bit  7: RA   bit 6: Z   bit 5: AD   bit 4: CD   bits 3-0: RCODE
+fn unpackFlags(f: u16) Header.Flags {
+    return .{
+        .qr = (f & 0x8000) != 0,
+        .opcode = @truncate(f >> 11),
+        .aa = (f & 0x0400) != 0,
+        .tc = (f & 0x0200) != 0,
+        .rd = (f & 0x0100) != 0,
+        .ra = (f & 0x0080) != 0,
+        .z = (f & 0x0040) != 0,
+        .ad = (f & 0x0020) != 0,
+        .cd = (f & 0x0010) != 0,
+        .rcode = @truncate(f & 0x000F),
+    };
+}
+
 /// DNS Message Parser - zero allocation
 pub const Parser = struct {
     data: []const u8,
@@ -57,7 +81,7 @@ pub const Parser = struct {
 
         const header = Header{
             .id = self.readU16BE(),
-            .flags = @bitCast(self.readU16BE()),
+            .flags = unpackFlags(self.readU16BE()),
             .qd_count = self.readU16BE(),
             .an_count = self.readU16BE(),
             .ns_count = self.readU16BE(),

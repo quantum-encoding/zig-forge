@@ -227,6 +227,11 @@ pub const TcpServer = struct {
         }
 
         const buf = conn.send_buf.?;
+        // Bound the copy against the pooled buffer size. `data` originates from
+        // the C/Rust FFI (`zcn_server_send` forwards an arbitrary `len`); without
+        // this check a `data.len > buffer_size` call is an out-of-bounds heap
+        // write (S3) — panic in safe builds, silent corruption in ReleaseFast.
+        if (data.len > buf.data.len) return error.MessageTooLarge;
         @memcpy(buf.data[0..data.len], data);
 
         const sqe = try self.ring.get_sqe();

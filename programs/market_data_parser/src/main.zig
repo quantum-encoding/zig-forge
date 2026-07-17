@@ -52,3 +52,14 @@ test "library imports" {
     const testing = std.testing;
     try testing.expect(true);
 }
+
+// Run the compile-clean modules' tests under `zig build test`: the JSON parser
+// (incl. the Tier-1A parseFastDecimal regression + external IEEE-754 anchors),
+// the order book, and the Coinbase protocol module. The `sbe`/`binance` modules
+// carry pre-existing compile-broken tests tracked under a separate work order
+// and are intentionally NOT pulled in (pulling them would break `zig build`).
+test {
+    _ = json;
+    _ = orderbook;
+    _ = coinbase;
+}

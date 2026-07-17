@@ -1,5 +1,9 @@
 const std = @import("std");
-const spsc = @import("lockfree_queue").spsc;
+// N worker threads pop tasks from one shared queue and push into one shared
+// result queue. That is multi-producer/multi-consumer on both queues, so an
+// SPSC (single-producer/single-consumer) queue is the wrong primitive and
+// races/corrupts under >1 worker. Use the lock-free MPMC queue instead.
+const mpmc = @import("lockfree_queue").mpmc;
 
 /// Task represents a unit of work to be tested
 pub const Task = struct {
@@ -37,8 +41,8 @@ pub const TestFn = *const fn (task: *const Task, allocator: std.mem.Allocator) a
 /// WorkerContext holds per-worker state
 pub const WorkerContext = struct {
     id: usize,
-    task_queue: *spsc.SpscQueue(Task),
-    result_queue: *spsc.SpscQueue(Result),
+    task_queue: *mpmc.MpmcQueue(Task),
+    result_queue: *mpmc.MpmcQueue(Result),
     test_fn: TestFn,
     allocator: std.mem.Allocator,
     running: *std.atomic.Value(bool),
@@ -60,8 +64,8 @@ pub const WorkerContext = struct {
 
     pub fn init(
         id: usize,
-        task_queue: *spsc.SpscQueue(Task),
-        result_queue: *spsc.SpscQueue(Result),
+        task_queue: *mpmc.MpmcQueue(Task),
+        result_queue: *mpmc.MpmcQueue(Result),
         test_fn: TestFn,
         allocator: std.mem.Allocator,
         running: *std.atomic.Value(bool),
@@ -113,8 +117,8 @@ pub fn workerThread(ctx: *WorkerContext) void {
 /// VariableTester orchestrates the brute-force testing engine
 pub const VariableTester = struct {
     allocator: std.mem.Allocator,
-    task_queue: spsc.SpscQueue(Task),
-    result_queue: spsc.SpscQueue(Result),
+    task_queue: mpmc.MpmcQueue(Task),
+    result_queue: mpmc.MpmcQueue(Result),
     workers: []std.Thread,
     worker_contexts: []WorkerContext,
     running: std.atomic.Value(bool),
@@ -130,10 +134,10 @@ pub const VariableTester = struct {
         errdefer allocator.destroy(self);
 
         // Initialize task and result queues
-        var task_queue = try spsc.SpscQueue(Task).init(allocator, queue_capacity);
+        var task_queue = try mpmc.MpmcQueue(Task).init(allocator, queue_capacity);
         errdefer task_queue.deinit();
 
-        var result_queue = try spsc.SpscQueue(Result).init(allocator, queue_capacity);
+        var result_queue = try mpmc.MpmcQueue(Result).init(allocator, queue_capacity);
         errdefer result_queue.deinit();
 
         // Allocate worker arrays
@@ -230,3 +234,92 @@ pub const VariableTester = struct {
         total_failed: u64,
     };
 };
+
+// ============================ Tests ============================
+
+test "Task.init / Result.init store fields" {
+    const t = Task.init(7, "abc");
+    try std.testing.expectEqual(@as(u64, 7), t.id);
+    try std.testing.expectEqualStrings("abc", t.data);
+
+    const r = Result.init(7, true, "xy", 1.5);
+    try std.testing.expectEqual(@as(u64, 7), r.task_id);
+    try std.testing.expect(r.success);
+    try std.testing.expectEqualStrings("xy", r.data);
+    try std.testing.expectEqual(@as(f64, 1.5), r.score);
+}
+
+// Deterministic test function used by the concurrency tests below.
+// Succeeds iff the task id is even; allocates a 1-byte result payload so the
+// collector exercises the same free path as the real `main`.
+fn evenParityTest(task: *const Task, allocator: std.mem.Allocator) anyerror!Result {
+    const buf = try allocator.alloc(u8, 1);
+    buf[0] = @truncate(task.id);
+    return Result.init(task.id, (task.id % 2) == 0, buf, @floatFromInt(task.id));
+}
+
+// This is the regression test for the SPSC-misuse fix: N worker threads pop
+// from one shared task queue and push into one shared result queue. With the
+// old single-producer/single-consumer queue this races and drops/dupes items;
+// with the MPMC queue every task must be processed exactly once.
+test "VariableTester processes every task exactly once across N workers" {
+    // Concurrent test_fn allocations run across worker threads, so a
+    // thread-safe allocator is required (std.testing.allocator is not).
+    const allocator = std.heap.smp_allocator;
+
+    const num_workers: usize = 8;
+    const queue_capacity: usize = 4096; // power of two, >= num_tasks
+    const num_tasks: u64 = 2000;
+
+    const tester = try VariableTester.init(allocator, num_workers, queue_capacity, evenParityTest);
+    defer tester.deinit();
+
+    try tester.start();
+
+    var task_id: u64 = 0;
+    while (task_id < num_tasks) : (task_id += 1) {
+        // Retry on transient QueueFull (shouldn't happen at this capacity, but
+        // keep the producer robust rather than dropping work).
+        while (true) {
+            tester.submitTask(Task.init(task_id, "formula")) catch {
+                std.atomic.spinLoopHint();
+                continue;
+            };
+            break;
+        }
+    }
+
+    var seen = try allocator.alloc(bool, num_tasks);
+    defer allocator.free(seen);
+    @memset(seen, false);
+
+    var collected: u64 = 0;
+    var succeeded: u64 = 0;
+    while (collected < num_tasks) {
+        if (tester.collectResult()) |result| {
+            // No task id may be reported twice.
+            try std.testing.expect(!seen[result.task_id]);
+            seen[result.task_id] = true;
+            // Success flag must match the deterministic parity rule.
+            try std.testing.expectEqual((result.task_id % 2) == 0, result.success);
+            if (result.success) succeeded += 1;
+            allocator.free(result.data);
+            collected += 1;
+        } else {
+            std.atomic.spinLoopHint();
+        }
+    }
+
+    tester.stop();
+
+    // Every id appeared exactly once.
+    for (seen) |s| try std.testing.expect(s);
+    try std.testing.expectEqual(num_tasks, collected);
+    // Exactly half the ids (the even ones) succeeded.
+    try std.testing.expectEqual(num_tasks / 2, succeeded);
+
+    const stats = tester.getStats();
+    try std.testing.expectEqual(num_tasks, stats.total_processed);
+    try std.testing.expectEqual(num_tasks / 2, stats.total_succeeded);
+    try std.testing.expectEqual(num_tasks / 2, stats.total_failed);
+}

@@ -303,20 +303,29 @@ pub const XPlaneClient = struct {
         payload_len: usize,
     };
 
-    /// Read a single WebSocket frame (blocking). Payload is in recv_buf[0..len].
-    fn readFrame(self: *XPlaneClient) !FrameInfo {
-        const conn = self.ws_connection orelse return Error.NotConnected;
-        var reader = conn.reader();
+    /// A single decoded WebSocket frame off the wire (before reassembly).
+    const RawFrame = struct {
+        fin: bool,
+        opcode: u8,
+        len: usize,
+    };
 
-        // Read first 2 bytes of header
+    /// Read one raw WebSocket frame from `reader`, writing its (unmasked)
+    /// payload into `dst`. Returns the FIN bit, opcode, and payload length.
+    /// A payload that does not fit in `dst` is an error (treated as disconnect
+    /// by callers). Generic over the reader type so it can be unit-tested
+    /// against a fixed in-memory reader without a live connection.
+    fn readRawFrame(reader: anytype, dst: []u8) !RawFrame {
+        // First 2 bytes of the frame header.
         var header: [2]u8 = undefined;
         reader.readSliceAll(&header) catch return Error.RecvFailed;
 
+        const fin = (header[0] & 0x80) != 0;
         const opcode = header[0] & 0x0F;
         const masked = (header[1] & 0x80) != 0;
         var payload_len: u64 = header[1] & 0x7F;
 
-        // Extended payload length
+        // Extended payload length.
         if (payload_len == 126) {
             var ext: [2]u8 = undefined;
             reader.readSliceAll(&ext) catch return Error.RecvFailed;
@@ -327,38 +336,94 @@ pub const XPlaneClient = struct {
             payload_len = std.mem.readInt(u64, &ext, .big);
         }
 
-        // Masking key (servers shouldn't mask, but handle it)
+        // Masking key (servers shouldn't mask, but handle it defensively).
         var mask_key: [4]u8 = undefined;
         if (masked) {
             reader.readSliceAll(&mask_key) catch return Error.RecvFailed;
         }
 
-        // Read payload into recv_buf
-        const plen: usize = @intCast(payload_len);
-        if (plen > self.recv_buf.len) return Error.RecvFailed;
+        const plen: usize = std.math.cast(usize, payload_len) orelse return Error.RecvFailed;
+        if (plen > dst.len) return Error.RecvFailed;
 
         if (plen > 0) {
-            reader.readSliceAll(self.recv_buf[0..plen]) catch return Error.RecvFailed;
-
-            // Unmask if needed
+            reader.readSliceAll(dst[0..plen]) catch return Error.RecvFailed;
             if (masked) {
-                for (self.recv_buf[0..plen], 0..) |*b, i| {
+                for (dst[0..plen], 0..) |*b, i| {
                     b.* ^= mask_key[i % 4];
                 }
             }
         }
 
-        return .{ .opcode = opcode, .payload_len = plen };
+        return .{ .fin = fin, .opcode = opcode, .len = plen };
+    }
+
+    /// Assemble a complete (possibly fragmented) data message from `reader`
+    /// into `recv_buf`, honoring the RFC 6455 FIN bit and continuation frames
+    /// (opcode 0x0). Interleaved control frames (ping/pong/close) are handled
+    /// inline: ping payloads are handed to `ctx.onPing`, pong frames ignored,
+    /// and a close frame returns opcode 0x8. Returns the assembled data
+    /// message with the opcode of its first frame (0x1 text / 0x2 binary).
+    ///
+    /// This is the fix for the dropped-continuation-frame bug: previously each
+    /// raw frame was returned directly, so a fragmented message's continuation
+    /// frames fell through `poll`'s `else => continue` and were silently lost.
+    fn assembleFrame(reader: anytype, recv_buf: []u8, ctx: anytype) !FrameInfo {
+        var total: usize = 0;
+        var msg_opcode: u8 = 0; // 0 = no data frame started yet
+
+        while (true) {
+            // Control frames are <=125 bytes and never advance `total`, so it is
+            // safe to stage them in the not-yet-assembled tail of recv_buf.
+            const raw = try readRawFrame(reader, recv_buf[total..]);
+
+            switch (raw.opcode) {
+                0x0 => { // continuation
+                    if (msg_opcode == 0) return Error.RecvFailed; // no message in progress
+                },
+                0x1, 0x2 => { // text / binary — start of a data message
+                    if (msg_opcode != 0) return Error.RecvFailed; // new start mid-message
+                    msg_opcode = raw.opcode;
+                },
+                0x8 => return .{ .opcode = 0x8, .payload_len = 0 }, // close
+                0x9 => { // ping — reply, then keep reading (may be mid-fragment)
+                    ctx.onPing(recv_buf[total..][0..raw.len]);
+                    continue;
+                },
+                0xA => continue, // pong — ignore
+                else => return Error.RecvFailed, // reserved opcode
+            }
+
+            total += raw.len;
+            if (raw.fin) return .{ .opcode = msg_opcode, .payload_len = total };
+            // else: more continuation frames follow; keep accumulating. Bounds
+            // are enforced by readRawFrame against the shrinking recv_buf tail.
+        }
+    }
+
+    /// Read a single (reassembled) WebSocket message. Payload is in
+    /// recv_buf[0..payload_len].
+    fn readFrame(self: *XPlaneClient) !FrameInfo {
+        const conn = self.ws_connection orelse return Error.NotConnected;
+        const reader = conn.reader();
+        return assembleFrame(reader, &self.recv_buf, self);
+    }
+
+    /// Control-frame callback used by `assembleFrame` for interleaved pings.
+    fn onPing(self: *XPlaneClient, payload: []const u8) void {
+        self.sendPong(payload) catch {};
     }
 
     fn sendPong(self: *XPlaneClient, payload: []const u8) !void {
         const conn = self.ws_connection orelse return;
-        // Pong frame: FIN=1, opcode=0xA, MASK=1, zero mask key
+        // RFC 6455 caps control-frame payloads at 125 bytes; clamp so a
+        // non-conforming oversized ping can't produce a malformed length byte.
+        const plen: u8 = @truncate(@min(payload.len, 125));
+        // Pong frame: FIN=1, opcode=0xA, MASK=1, zero mask key (XOR-identity).
         var header: [6]u8 = .{ 0x8A, 0x80, 0, 0, 0, 0 };
-        header[1] |= @as(u8, @truncate(payload.len));
+        header[1] |= plen;
         const writer = conn.writer();
         writer.writeAll(header[0..6]) catch return;
-        if (payload.len > 0) writer.writeAll(payload) catch return;
+        if (plen > 0) writer.writeAll(payload[0..plen]) catch return;
         conn.flush() catch {};
     }
 
@@ -401,3 +466,134 @@ pub const XPlaneClient = struct {
         return self.ws_state == .connected;
     }
 };
+
+// ============================================================================
+// Tests — WebSocket frame decoding & reassembly
+//
+// These craft raw RFC 6455 frame bytes and drive the same decode path the
+// live connection uses (readRawFrame / assembleFrame), so a regression in
+// fragmentation handling fails a test rather than silently dropping wire data.
+// ============================================================================
+
+/// Ping sink that records interleaved ping payloads for assertions.
+const TestPingSink = struct {
+    ping_count: usize = 0,
+    last: [128]u8 = undefined,
+    last_len: usize = 0,
+
+    fn onPing(self: *TestPingSink, payload: []const u8) void {
+        self.ping_count += 1;
+        @memcpy(self.last[0..payload.len], payload);
+        self.last_len = payload.len;
+    }
+};
+
+test "readRawFrame decodes an unmasked text frame" {
+    var bytes = [_]u8{ 0x81, 0x02, 'h', 'i' };
+    var reader = std.Io.Reader.fixed(&bytes);
+    var dst: [64]u8 = undefined;
+
+    const raw = try XPlaneClient.readRawFrame(&reader, &dst);
+    try std.testing.expect(raw.fin);
+    try std.testing.expectEqual(@as(u8, 0x1), raw.opcode);
+    try std.testing.expectEqual(@as(usize, 2), raw.len);
+    try std.testing.expectEqualStrings("hi", dst[0..raw.len]);
+}
+
+test "readRawFrame decodes a masked frame from the client direction" {
+    // FIN|text, MASK|len=3, mask key, then masked "abc".
+    const mask = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    var bytes = [_]u8{ 0x81, 0x83, mask[0], mask[1], mask[2], mask[3], 'a' ^ 0x01, 'b' ^ 0x02, 'c' ^ 0x03 };
+    var reader = std.Io.Reader.fixed(&bytes);
+    var dst: [64]u8 = undefined;
+
+    const raw = try XPlaneClient.readRawFrame(&reader, &dst);
+    try std.testing.expectEqual(@as(usize, 3), raw.len);
+    try std.testing.expectEqualStrings("abc", dst[0..raw.len]);
+}
+
+test "readRawFrame decodes 16-bit extended length" {
+    var bytes: [4 + 200]u8 = undefined;
+    bytes[0] = 0x82; // FIN|binary
+    bytes[1] = 0x7E; // len marker 126 -> next 2 bytes are u16 length
+    std.mem.writeInt(u16, bytes[2..4], 200, .big);
+    for (bytes[4..], 0..) |*b, i| b.* = @truncate(i);
+    var reader = std.Io.Reader.fixed(&bytes);
+    var dst: [512]u8 = undefined;
+
+    const raw = try XPlaneClient.readRawFrame(&reader, &dst);
+    try std.testing.expectEqual(@as(usize, 200), raw.len);
+    try std.testing.expectEqual(@as(u8, 0x2), raw.opcode);
+}
+
+test "readRawFrame rejects a payload larger than the destination" {
+    var bytes = [_]u8{ 0x81, 0x05, 'a', 'b', 'c', 'd', 'e' };
+    var reader = std.Io.Reader.fixed(&bytes);
+    var dst: [3]u8 = undefined; // too small for a 5-byte payload
+    try std.testing.expectError(XPlaneClient.Error.RecvFailed, XPlaneClient.readRawFrame(&reader, &dst));
+}
+
+test "assembleFrame returns a single unfragmented text message" {
+    var bytes = [_]u8{ 0x81, 0x05, 'h', 'e', 'l', 'l', 'o' };
+    var reader = std.Io.Reader.fixed(&bytes);
+    var recv_buf: [256]u8 = undefined;
+    var sink = TestPingSink{};
+
+    const info = try XPlaneClient.assembleFrame(&reader, &recv_buf, &sink);
+    try std.testing.expectEqual(@as(u8, 0x1), info.opcode);
+    try std.testing.expectEqualStrings("hello", recv_buf[0..info.payload_len]);
+}
+
+test "assembleFrame reassembles a fragmented message (the continuation-frame fix)" {
+    // "hello world" split as text(FIN=0) "hello" + continuation(FIN=1) " world".
+    var bytes = [_]u8{
+        0x01, 0x05, 'h', 'e', 'l', 'l', 'o', // FIN=0, opcode=text
+        0x80, 0x06, ' ', 'w', 'o', 'r', 'l', 'd', // FIN=1, opcode=continuation
+    };
+    var reader = std.Io.Reader.fixed(&bytes);
+    var recv_buf: [256]u8 = undefined;
+    var sink = TestPingSink{};
+
+    const info = try XPlaneClient.assembleFrame(&reader, &recv_buf, &sink);
+    try std.testing.expectEqual(@as(u8, 0x1), info.opcode);
+    try std.testing.expectEqual(@as(usize, 11), info.payload_len);
+    try std.testing.expectEqualStrings("hello world", recv_buf[0..info.payload_len]);
+}
+
+test "assembleFrame handles a ping interleaved between fragments" {
+    var bytes = [_]u8{
+        0x01, 0x03, 'a', 'b', 'c', // FIN=0, text
+        0x89, 0x02, 'p', 'i', // FIN=1, ping "pi"
+        0x80, 0x03, 'd', 'e', 'f', // FIN=1, continuation
+    };
+    var reader = std.Io.Reader.fixed(&bytes);
+    var recv_buf: [256]u8 = undefined;
+    var sink = TestPingSink{};
+
+    const info = try XPlaneClient.assembleFrame(&reader, &recv_buf, &sink);
+    try std.testing.expectEqual(@as(u8, 0x1), info.opcode);
+    try std.testing.expectEqualStrings("abcdef", recv_buf[0..info.payload_len]);
+    try std.testing.expectEqual(@as(usize, 1), sink.ping_count);
+    try std.testing.expectEqualStrings("pi", sink.last[0..sink.last_len]);
+}
+
+test "assembleFrame surfaces a close frame as opcode 0x8" {
+    var bytes = [_]u8{ 0x88, 0x00 }; // FIN|close, empty payload
+    var reader = std.Io.Reader.fixed(&bytes);
+    var recv_buf: [64]u8 = undefined;
+    var sink = TestPingSink{};
+
+    const info = try XPlaneClient.assembleFrame(&reader, &recv_buf, &sink);
+    try std.testing.expectEqual(@as(u8, 0x8), info.opcode);
+}
+
+test "assembleFrame rejects a stray continuation with no message in progress" {
+    var bytes = [_]u8{ 0x80, 0x02, 'x', 'y' }; // FIN=1, continuation, but no start
+    var reader = std.Io.Reader.fixed(&bytes);
+    var recv_buf: [64]u8 = undefined;
+    var sink = TestPingSink{};
+    try std.testing.expectError(
+        XPlaneClient.Error.RecvFailed,
+        XPlaneClient.assembleFrame(&reader, &recv_buf, &sink),
+    );
+}

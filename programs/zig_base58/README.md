@@ -16,8 +16,8 @@ A pure-Zig implementation of Base58 and Base58Check encoding for Bitcoin, Tron, 
 ## Building
 
 ```bash
-cd /sessions/epic-optimistic-volta/mnt/zig/quantum-zig-forge/programs/zig_base58
-/sessions/epic-optimistic-volta/mnt/zig/zig-aarch64-linux-0.16.0-dev.2368+380ea6fb5/zig build
+cd programs/zig_base58
+zig build
 ```
 
 ## Usage
@@ -188,15 +188,9 @@ Bitcoin, Tron, Dogecoin, and Litecoin all use this same SHA-256d construction. A
 
 ## Performance
 
-Approximate benchmarks on modern hardware:
-
-| Operation | Time |
-|-----------|------|
-| Encode 16 bytes | 0.4 μs |
-| Encode 64 bytes | 5.1 μs |
-| Encode 1KB | 1.8 ms |
-| Decode 7 chars | 0.015 μs |
-| Base58Check encode | 0.6 μs |
+A benchmark executable (`base58-bench`) is built by `zig build bench`. It measures
+small/medium/large encode, decode, and Base58Check encode. No fixed numbers are quoted
+here — run the suite on your own hardware for figures relevant to your platform.
 
 ## API Reference
 
@@ -285,10 +279,11 @@ zbase58 encode "protocol_buffer_data"
 
 ## Files
 
-- `/sessions/epic-optimistic-volta/mnt/zig/quantum-zig-forge/programs/zig_base58/src/base58.zig` - Core implementation (11KB, ~300 lines)
-- `/sessions/epic-optimistic-volta/mnt/zig/quantum-zig-forge/programs/zig_base58/src/main.zig` - CLI tool (4.4KB, ~120 lines)
-- `/sessions/epic-optimistic-volta/mnt/zig/quantum-zig-forge/programs/zig_base58/src/bench.zig` - Benchmarks (3KB, ~90 lines)
-- `/sessions/epic-optimistic-volta/mnt/zig/quantum-zig-forge/programs/zig_base58/build.zig` - Build config (3KB)
+- `src/base58.zig` - Core implementation
+- `src/lib.zig` - Library root with re-exports
+- `src/main.zig` - CLI tool
+- `src/bench.zig` - Benchmarks
+- `build.zig` - Build config
 
 ## Testing Checklist
 

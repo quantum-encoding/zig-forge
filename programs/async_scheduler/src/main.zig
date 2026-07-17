@@ -14,4 +14,8 @@ pub const WorkStealDeque = deque.WorkStealDeque;
 
 test {
     @import("std").testing.refAllDecls(@This());
+    // End-to-end scheduler tests + concurrency stress tests. This file was
+    // orphaned (imported by nothing) and never ran under `zig build test`;
+    // wiring it in makes it the regression net for the injector/UAF fixes.
+    _ = @import("test_scheduler.zig");
 }

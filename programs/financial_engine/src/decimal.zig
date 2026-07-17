@@ -122,15 +122,27 @@ pub const Decimal = struct {
     }
     
     /// Multiplication
+    ///
+    /// The raw product `self.value * other.value` is a 10^18-scaled i128
+    /// that overflows i128 long before the final 10^9-scaled result would.
+    /// The previous code executed the `*` *before* any bound test, so in a
+    /// ReleaseFast build a crafted `qty × price` silently wrapped mod 2^128
+    /// and the wrapped `position_value` sailed through every risk /
+    /// Praetorian cap. `std.math.mul` performs the widened check and returns
+    /// `error.Overflow` instead of wrapping. (findings.md C1)
     pub fn mul(self: Self, other: Self) !Self {
-        const result = @divTrunc(self.value * other.value, scale_factor);
-        return Self{ .value = result };
+        const product = try std.math.mul(i128, self.value, other.value);
+        return Self{ .value = @divTrunc(product, scale_factor) };
     }
-    
+
     /// Division
+    ///
+    /// `self.value * scale_factor` is pre-scaled so the quotient keeps 9
+    /// decimal places; that multiply can overflow i128 for large operands
+    /// and must be checked *before* it executes (see `mul` above).
     pub fn div(self: Self, other: Self) !Self {
         if (other.value == 0) return error.DivisionByZero;
-        const scaled = self.value * scale_factor;
+        const scaled = try std.math.mul(i128, self.value, scale_factor);
         return Self{ .value = @divTrunc(scaled, other.value) };
     }
     
@@ -237,6 +249,82 @@ test "Decimal fromFixedPoint" {
     // 1_000_000_000_000 at scale=12 ⇒ 1.0 ⇒ internal value 1_000_000_000
     const d4 = Decimal.fromFixedPoint(1_000_000_000_000, 12);
     try std.testing.expectEqual(@as(i128, 1_000_000_000), d4.value);
+}
+
+// External-anchored golden vectors for mul/div.
+//
+// Inputs AND expected outputs are produced by an independent implementation —
+// CPython's `decimal.Decimal` at 60-digit precision — replicating this type's
+// fixed-point storage (internal scale 10^9, @divTrunc toward zero). These are
+// NOT roundtrip (`decode(encode(x)) == x`) tests: the expected `.value`
+// integers below were computed by the reference implementation, not by calling
+// this library. Regenerate with:
+//
+//   python3 - <<'PY'
+//   from decimal import Decimal, getcontext; getcontext().prec = 60
+//   SF = 10**9
+//   iv = lambda s: int(Decimal(s) * SF)
+//   for a,b in [("1.5","2.5"),("0.1","0.2"),("12345.678","2"),("-3.5","4")]:
+//       p = iv(a)*iv(b); q = p//SF if p>=0 else -((-p)//SF); print(a,b,q)
+//   for a,b in [("1","8"),("100","8"),("1","3"),("-1","4")]:
+//       n = iv(a)*SF; q = abs(n)//abs(iv(b)); q = -q if (n<0)^(iv(b)<0) else q; print(a,b,q)
+//   PY
+test "Decimal mul golden vectors (CPython decimal reference)" {
+    const cases = [_]struct { a: []const u8, b: []const u8, want: i128 }{
+        .{ .a = "1.5", .b = "2.5", .want = 3_750_000_000 }, // 3.75
+        .{ .a = "0.1", .b = "0.2", .want = 20_000_000 }, // 0.02
+        .{ .a = "12345.678", .b = "2", .want = 24_691_356_000_000 }, // 24691.356
+        .{ .a = "-3.5", .b = "4", .want = -14_000_000_000 }, // -14
+    };
+    for (cases) |c| {
+        const a = try Decimal.fromString(c.a);
+        const b = try Decimal.fromString(c.b);
+        const got = try a.mul(b);
+        try std.testing.expectEqual(c.want, got.value);
+    }
+}
+
+test "Decimal div golden vectors (CPython decimal reference)" {
+    const cases = [_]struct { a: []const u8, b: []const u8, want: i128 }{
+        .{ .a = "1", .b = "8", .want = 125_000_000 }, // 0.125
+        .{ .a = "100", .b = "8", .want = 12_500_000_000 }, // 12.5
+        .{ .a = "1", .b = "3", .want = 333_333_333 }, // 0.333333333 (trunc)
+        .{ .a = "-1", .b = "4", .want = -250_000_000 }, // -0.25
+    };
+    for (cases) |c| {
+        const a = try Decimal.fromString(c.a);
+        const b = try Decimal.fromString(c.b);
+        const got = try a.div(b);
+        try std.testing.expectEqual(c.want, got.value);
+    }
+    try std.testing.expectError(error.DivisionByZero, (try Decimal.fromString("5")).div(Decimal.zero()));
+}
+
+// Overflow-before-check regression (findings.md C1).
+//
+// The boundary is the published i128 maximum,
+// std.math.maxInt(i128) = 170141183460469231731687303715884105727.
+//
+// mul: fromInt(10^15) has internal value 10^24 (well inside max_safe_value
+// ≈ 1.70e29, so construction is valid). Its raw self-product 10^48 exceeds
+// i128 max by ten orders of magnitude. The pre-fix code computed
+// `self.value * other.value` first, wrapping mod 2^128 into a small in-range
+// number, then divided — yielding a bogus finite `position_value` that
+// defeated every downstream risk cap. The fix must return error.Overflow.
+test "Decimal mul overflow returns error, not a wrapped value" {
+    const big = Decimal.fromInt(1_000_000_000_000_000); // 10^15, value = 10^24
+    // Sanity: the operand itself is representable (no construction overflow).
+    try std.testing.expectEqual(@as(i128, 1_000_000_000_000_000_000_000_000), big.value);
+    // 10^24 * 10^24 = 10^48 > maxInt(i128): must error rather than wrap.
+    try std.testing.expectError(error.Overflow, big.mul(big));
+}
+
+test "Decimal div overflow (pre-scale multiply) returns error" {
+    // value 2e29 is a valid i128 but 2e29 * scale_factor(1e9) = 2e38 exceeds
+    // maxInt(i128) ≈ 1.70e38, so the pre-scaling multiply inside div must be
+    // checked and surface error.Overflow.
+    const big = Decimal{ .value = 200_000_000_000_000_000_000_000_000_000 }; // 2e29
+    try std.testing.expectError(error.Overflow, big.div(Decimal.fromInt(1)));
 }
 
 test "Decimal rounding" {

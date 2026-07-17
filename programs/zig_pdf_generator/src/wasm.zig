@@ -96,7 +96,7 @@ export fn zigpdf_free(ptr: usize, size: usize) void {
 // Error Handling
 // =============================================================================
 
-var last_error: [256]u8 = undefined;
+var last_error: [256]u8 = [_]u8{0} ** 256;
 var last_error_len: usize = 0;
 
 fn setLastError(msg: []const u8) void {

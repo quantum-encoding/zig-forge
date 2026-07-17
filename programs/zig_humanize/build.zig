@@ -4,6 +4,13 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Consumable library module for in-tree @import("zig_humanize") consumers.
+    const humanize_module = b.addModule("zig_humanize", .{
+        .root_source_file = b.path("src/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Create modules for main and bench
     const exe_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -17,6 +24,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+
+    // Make the library module importable as @import("zig_humanize") from the
+    // in-tree executables as well (they also reference src/humanize.zig directly).
+    exe_module.addImport("zig_humanize", humanize_module);
+    bench_module.addImport("zig_humanize", humanize_module);
 
     // CLI executable
     const exe = b.addExecutable(.{

@@ -76,9 +76,6 @@ pub fn build(b: *std.Build) void {
         .root_module = electrum_test_module,
     });
 
-    const test_step = b.step("test", "Run Electrum unit tests");
-    test_step.dependOn(&b.addRunArtifact(electrum_tests).step);
-
     // Test the FFI layer
     const ffi_test_module = b.createModule(.{
         .root_source_file = b.path("src/ffi.zig"),
@@ -91,6 +88,14 @@ pub fn build(b: *std.Build) void {
     });
     ffi_tests.root_module.link_libc = true;
 
-    const ffi_test_step = b.step("test-ffi", "Run FFI unit tests");
+    // Default `test` step runs BOTH the core and FFI suites so the entire
+    // exported surface is gated by `zig build test` (was: FFI tests lived in
+    // a separate `test-ffi` step the default gate never ran).
+    const test_step = b.step("test", "Run all unit tests (core + FFI)");
+    test_step.dependOn(&b.addRunArtifact(electrum_tests).step);
+    test_step.dependOn(&b.addRunArtifact(ffi_tests).step);
+
+    // Retained as an alias for FFI-only runs.
+    const ffi_test_step = b.step("test-ffi", "Run FFI unit tests only");
     ffi_test_step.dependOn(&b.addRunArtifact(ffi_tests).step);
 }

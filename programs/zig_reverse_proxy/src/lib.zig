@@ -270,19 +270,29 @@ pub const ProxyServer = struct {
     fn handleConnection(self: *ProxyServer, client_socket: posix.socket_t) !void {
         defer _ = std.c.close(client_socket);
 
-        var request_buf: [65536]u8 = undefined;
-        var response_buf: [65536]u8 = undefined;
+        // Read the full request using a framing-aware read loop so that request
+        // bodies larger than a single kernel read (and larger than 64 KiB) are
+        // NOT truncated. The message is buffered into a growable heap buffer.
+        var request_data = std.ArrayListUnmanaged(u8).empty;
+        defer request_data.deinit(self.allocator);
 
-        // Read request
-        const recv_ret = c.recv(client_socket, &request_buf, request_buf.len, 0);
-        if (recv_ret <= 0) return;
-        const n: usize = @intCast(recv_ret);
+        recvFullMessage(self.allocator, client_socket, &request_data, false) catch |err| {
+            const status = if (err == error.MessageTooLarge)
+                "HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\n\r\n"
+            else
+                "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+            _ = c.send(client_socket, status.ptr, status.len, 0);
+            return;
+        };
 
-        _ = self.bytes_received.fetchAdd(n, .monotonic);
+        // Peer closed with nothing to say.
+        if (request_data.items.len == 0) return;
+
+        _ = self.bytes_received.fetchAdd(request_data.items.len, .monotonic);
         _ = self.total_requests.fetchAdd(1, .monotonic);
 
         // Parse request
-        var parser_inst = Parser.init(request_buf[0..n]);
+        var parser_inst = Parser.init(request_data.items);
         const request = parser_inst.parseRequest() catch {
             // Send 400 Bad Request
             const bad_request = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
@@ -298,9 +308,24 @@ pub const ProxyServer = struct {
             return;
         };
 
-        // Handle based on target type
+        // Backend proxying can produce a response of arbitrary size, so it uses
+        // its own framing-aware read loop into a growable buffer. Static /
+        // redirect / wasm targets produce small, bounded responses that still
+        // fit a fixed stack buffer.
+        if (target == .backend) {
+            var response_data = std.ArrayListUnmanaged(u8).empty;
+            defer response_data.deinit(self.allocator);
+
+            try self.proxyToBackend(target.backend, &request, &response_data);
+
+            _ = c.send(client_socket, response_data.items.ptr, response_data.items.len, 0);
+            _ = self.bytes_sent.fetchAdd(response_data.items.len, .monotonic);
+            return;
+        }
+
+        var response_buf: [65536]u8 = undefined;
         const response_len = switch (target) {
-            .backend => |pool| try self.proxyToBackend(pool, &request, &response_buf),
+            .backend => unreachable, // handled above
             .wasm => |wasm| try self.executeEdgeFunction(wasm, &request, &response_buf),
             .static => |static| try self.serveStatic(static, &response_buf),
             .redirect => |redir| try self.serveRedirect(redir, &response_buf),
@@ -311,19 +336,18 @@ pub const ProxyServer = struct {
         _ = self.bytes_sent.fetchAdd(response_len, .monotonic);
     }
 
-    /// Proxy request to backend
-    fn proxyToBackend(self: *ProxyServer, pool: *BackendPool, request: *const Request, response_buf: []u8) !usize {
-        _ = self;
-
+    /// Proxy request to backend. Appends the full HTTP response (or an error
+    /// response) into `response_data`.
+    fn proxyToBackend(self: *ProxyServer, pool: *BackendPool, request: *const Request, response_data: *std.ArrayListUnmanaged(u8)) !void {
         // Get backend
         const be = pool.nextBackend() orelse {
-            return buildErrorResponse(response_buf, 503, "Service Unavailable");
+            return appendErrorResponse(self.allocator, response_data, 503, "Service Unavailable");
         };
 
         // Get connection from pool
         const conn = be.getConnection() catch {
             be.markFailure();
-            return buildErrorResponse(response_buf, 502, "Bad Gateway");
+            return appendErrorResponse(self.allocator, response_data, 502, "Bad Gateway");
         };
         defer be.releaseConnection(conn, request.keep_alive);
 
@@ -337,21 +361,19 @@ pub const ProxyServer = struct {
         const msg = builder.message();
         if (c.send(conn.socket, msg.ptr, msg.len, 0) < 0) {
             be.markFailure();
-            return buildErrorResponse(response_buf, 502, "Bad Gateway");
+            return appendErrorResponse(self.allocator, response_data, 502, "Bad Gateway");
         }
 
-        // Read response
-        const recv_result = c.recv(conn.socket, response_buf.ptr, response_buf.len, 0);
-        if (recv_result < 0) {
+        // Read the full response with a framing-aware read loop (Content-Length,
+        // chunked, or close-delimited) — never a single truncating recv.
+        recvFullMessage(self.allocator, conn.socket, response_data, true) catch {
             be.markFailure();
-            return buildErrorResponse(response_buf, 502, "Bad Gateway");
-        }
-        const resp_len: usize = @intCast(recv_result);
+            response_data.clearRetainingCapacity();
+            return appendErrorResponse(self.allocator, response_data, 502, "Bad Gateway");
+        };
 
         const latency: u64 = (getTimeNs() - start_time) / 1000; // Convert to microseconds
         be.markSuccess(latency);
-
-        return resp_len;
     }
 
     /// Execute WASM edge function
@@ -436,6 +458,95 @@ pub const ServerStats = struct {
 // =============================================================================
 // Helper Functions
 // =============================================================================
+
+/// Hard upper bound on a single buffered HTTP message (headers + body). Prevents
+/// an unbounded read loop from being turned into a memory-exhaustion DoS.
+const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Per-syscall receive chunk size for the framing-aware read loop.
+const RECV_CHUNK_SIZE: usize = 64 * 1024;
+
+const Framing = struct {
+    content_length: ?usize = null,
+    chunked: bool = false,
+};
+
+/// Scan an HTTP header block (everything before the terminating CRLF CRLF, not
+/// including it) for the framing headers needed by the read loop.
+fn scanFraming(header_block: []const u8) Framing {
+    var framing = Framing{};
+    var it = std.mem.splitSequence(u8, header_block, "\r\n");
+    _ = it.next(); // skip request/status line
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const name = std.mem.trim(u8, line[0..colon], " \t");
+        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
+        if (std.ascii.eqlIgnoreCase(name, "Content-Length")) {
+            framing.content_length = std.fmt.parseInt(usize, value, 10) catch null;
+        } else if (std.ascii.eqlIgnoreCase(name, "Transfer-Encoding")) {
+            if (std.ascii.indexOfIgnoreCase(value, "chunked") != null) framing.chunked = true;
+        }
+    }
+    return framing;
+}
+
+/// Read a complete HTTP message from `socket` into `out`, framing-aware.
+///
+/// The loop reads until the header terminator is seen, determines the body
+/// framing (Content-Length, chunked, or connection-close), and keeps reading
+/// until the full body has arrived. This replaces the old single unlooped recv
+/// that truncated any message exceeding one kernel read / 64 KiB.
+fn recvFullMessage(
+    allocator: std.mem.Allocator,
+    socket: posix.socket_t,
+    out: *std.ArrayListUnmanaged(u8),
+    is_response: bool,
+) !void {
+    var chunk: [RECV_CHUNK_SIZE]u8 = undefined;
+    var header_end: ?usize = null;
+    var framing: Framing = .{};
+
+    while (true) {
+        const r = c.recv(socket, &chunk, chunk.len, 0);
+        if (r < 0) return error.RecvFailed;
+        if (r == 0) break; // peer closed the connection
+        const n: usize = @intCast(r);
+
+        if (out.items.len + n > MAX_MESSAGE_BYTES) return error.MessageTooLarge;
+        try out.appendSlice(allocator, chunk[0..n]);
+
+        // Detect end of headers once.
+        if (header_end == null) {
+            if (std.mem.indexOf(u8, out.items, "\r\n\r\n")) |idx| {
+                header_end = idx + 4;
+                framing = scanFraming(out.items[0..idx]);
+            }
+        }
+
+        if (header_end) |he| {
+            if (framing.content_length) |body_len| {
+                // Bounded by an explicit length — stop once we have it all.
+                if (out.items.len >= he + body_len) break;
+            } else if (framing.chunked) {
+                // Chunked: stop once the zero-length terminating chunk arrives.
+                if (std.mem.indexOf(u8, out.items[he - 2 ..], "0\r\n\r\n") != null) break;
+            } else if (!is_response) {
+                // A request with neither Content-Length nor chunked has no body.
+                break;
+            }
+            // A response with no framing headers is delimited by connection
+            // close: keep reading until the peer closes (loop continues).
+        }
+    }
+}
+
+/// Append a synthetic error response into a growable buffer.
+fn appendErrorResponse(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), status: u16, reason: []const u8) !void {
+    var buf: [256]u8 = undefined;
+    const len = buildErrorResponse(&buf, status, reason);
+    try out.appendSlice(allocator, buf[0..len]);
+}
 
 /// Get current time in nanoseconds using clock_gettime
 fn getTimeNs() u64 {

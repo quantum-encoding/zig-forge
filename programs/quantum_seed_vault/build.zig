@@ -65,4 +65,28 @@ pub fn build(b: *std.Build) void {
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
+
+    // Crypto-only tests (Shamir Secret Sharing / GF(256)).
+    //
+    // The full `test` step above compiles the whole application, whose UI/app
+    // tests drive a real terminal by writing ANSI escapes straight to stdout.
+    // Under the `zig build` test runner (which speaks its result protocol over
+    // the test binary's stdout via `--listen=-`), that output corrupts the IPC
+    // channel and stalls the runner — a pre-existing property of the app tests,
+    // unrelated to the crypto code. This focused step roots the test binary at
+    // the crypto module only (no terminal I/O), so the Shamir tests — including
+    // the FIPS-197 external vector and the split->combine regression — run green
+    // and verifiably under the build system.
+    const crypto_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/crypto.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+
+    const run_crypto_tests = b.addRunArtifact(crypto_tests);
+    const crypto_test_step = b.step("test-crypto", "Run crypto (Shamir SSS) tests only");
+    crypto_test_step.dependOn(&run_crypto_tests.step);
 }

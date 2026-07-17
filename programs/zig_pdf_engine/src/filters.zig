@@ -78,9 +78,13 @@ pub const Ascii85Decode = struct {
             var count: usize = 0;
 
             while (count < 5 and i < encoded.len) {
-                if (encoded[i] == '~') break;
-                if (!isWhitespace(encoded[i])) {
-                    group[count] = encoded[i];
+                const c = encoded[i];
+                if (c == '~') break;
+                if (!isWhitespace(c)) {
+                    // Valid ASCII85 data characters are '!'(33)..'u'(117).
+                    // ('z' shorthand is only valid at group start, handled above.)
+                    if (c < '!' or c > 'u') return error.InvalidAscii85Char;
+                    group[count] = c;
                     count += 1;
                 }
                 i += 1;
@@ -88,11 +92,14 @@ pub const Ascii85Decode = struct {
 
             if (count < 2) break;
 
-            // Decode group
-            var value: u32 = 0;
+            // Decode group. Accumulate in u64 so a group of high characters
+            // (e.g. "uuuuu") cannot overflow before we range-check it — a full
+            // 5-character group must encode a value that fits in u32.
+            var value: u64 = 0;
             for (group) |ch| {
                 value = value * 85 + (ch - 33);
             }
+            if (value > 0xFFFFFFFF) return error.InvalidAscii85Group;
 
             // Output bytes (count-1 bytes for count input chars)
             const output_count = count - 1;
@@ -196,7 +203,11 @@ pub const Predictor = struct {
 
         for (0..num_rows) |row| {
             const src_start = row * row_with_filter;
-            const filter_type: PngFilter = @enumFromInt(data[src_start]);
+            // Reject invalid predictor bytes (>4) from attacker-controlled data
+            // rather than @enumFromInt, which is illegal-behavior / UB on a bad tag.
+            // (std.enums.fromInt returns null for a value with no matching tag;
+            // std.meta.intToEnum was removed in Zig 0.16.)
+            const filter_type: PngFilter = std.enums.fromInt(PngFilter, data[src_start]) orelse return error.InvalidPredictorData;
             const src_row = data[src_start + 1 .. src_start + row_with_filter];
             const dst_row = output[row * row_bytes .. (row + 1) * row_bytes];
 
@@ -271,6 +282,29 @@ test "ascii85 decode" {
     const decoded = try Ascii85Decode.decode(std.testing.allocator, encoded);
     defer std.testing.allocator.free(decoded);
     try std.testing.expectEqualStrings("test", decoded);
+}
+
+test "ascii85 rejects out-of-range characters" {
+    // A byte below '!' (33) would underflow the (ch - 33) subtraction; a byte
+    // above 'u' (117) would overflow the group value. Both must be rejected
+    // rather than panicking / producing garbage on hostile PDF input.
+    // '\x01' (1) is below '!' (33)
+    try std.testing.expectError(error.InvalidAscii85Char, Ascii85Decode.decode(std.testing.allocator, "FCf\x01N~>"));
+    // '{' (123) is above 'u' (117)
+    try std.testing.expectError(error.InvalidAscii85Char, Ascii85Decode.decode(std.testing.allocator, "FC{fN~>"));
+}
+
+test "ascii85 rejects overflowing group" {
+    // "s8W-\"" and similar are valid; a full group of the maximum digit 'u'
+    // encodes 85^5 - 1 which exceeds 0xFFFFFFFF and must be rejected.
+    try std.testing.expectError(error.InvalidAscii85Group, Ascii85Decode.decode(std.testing.allocator, "uuuuu~>"));
+}
+
+test "png predictor rejects invalid filter byte" {
+    // Filter byte 5 is not a valid PNG predictor (0..4). Must error, not panic
+    // or hit UB, when it comes from attacker-controlled decompressed data.
+    const bad = [_]u8{ 5, 0x00 }; // 1 filter byte + 1 data byte, columns=1
+    try std.testing.expectError(error.InvalidPredictorData, Predictor.decodePng(std.testing.allocator, &bad, 1, 1, 8));
 }
 
 test "flatedecode basic" {

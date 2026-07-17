@@ -65,25 +65,17 @@ pub fn generate(allocator: std.mem.Allocator, device: svd.Device) ![]u8 {
 }
 
 fn generatePeripheral(writer: *ArrayWriter, peripheral: svd.Peripheral) !void {
-    // Peripheral comment
-    try writer.print(
-        \\// =============================================================================
-        \\// {s}
-        \\// {s}
-        \\// Base Address: 0x{X:0>8}
-        \\// =============================================================================
-        \\
-        \\pub const {s} = struct {{
-        \\    pub const base_address: u32 = 0x{X:0>8};
-        \\
-        \\
-    , .{
-        peripheral.name,
-        peripheral.description,
-        peripheral.base_address,
-        toLower(peripheral.name),
-        peripheral.base_address,
-    });
+    // Peripheral comment — SVD-supplied name/description are escaped so a
+    // newline or stray character cannot break out of the comment into code.
+    try writer.writeAll("// =============================================================================\n");
+    try writeEscapedDoc(writer, "// ", peripheral.name);
+    try writeEscapedDoc(writer, "// ", peripheral.description);
+    try writer.print("// Base Address: 0x{X:0>8}\n", .{peripheral.base_address});
+    try writer.writeAll("// =============================================================================\n\n");
+
+    try writer.writeAll("pub const ");
+    try writeIdent(writer, toLower(peripheral.name));
+    try writer.print(" = struct {{\n    pub const base_address: u32 = 0x{X:0>8};\n\n\n", .{peripheral.base_address});
 
     // Generate each register
     for (peripheral.registers) |register| {
@@ -97,12 +89,11 @@ fn generateRegister(writer: *ArrayWriter, base_address: u32, register: svd.Regis
     const full_address = base_address + register.offset;
 
     // Generate packed struct for register fields
-    try writer.print(
-        \\    /// {s}
-        \\    /// Offset: 0x{X:0>2}
-        \\    pub const {s} = mmio.Mmio(packed struct {{
-        \\
-    , .{ register.description, register.offset, register.name });
+    try writeEscapedDoc(writer, "    /// ", register.description);
+    try writer.print("    /// Offset: 0x{X:0>2}\n", .{register.offset});
+    try writer.writeAll("    pub const ");
+    try writeIdent(writer, register.name);
+    try writer.writeAll(" = mmio.Mmio(packed struct {\n");
 
     // Sort fields by bit offset and generate
     var sorted_fields: [64]svd.Field = undefined;
@@ -137,10 +128,14 @@ fn generateRegister(writer: *ArrayWriter, base_address: u32, register: svd.Regis
             reserved_count += 1;
         }
 
-        // Generate field
-        const field_type = getFieldType(field.bit_width);
-        try writer.print("        /// {s}\n", .{field.description});
-        try writer.print("        {s}: {s},\n", .{ field.name, field_type });
+        // Generate field. The type is the exact-width unsigned integer so the
+        // packed struct's bit layout matches the hardware register exactly.
+        var type_buf: [8]u8 = undefined;
+        const field_type = try getFieldType(&type_buf, field.bit_width);
+        try writeEscapedDoc(writer, "        /// ", field.description);
+        try writer.writeAll("        ");
+        try writeIdent(writer, field.name);
+        try writer.print(": {s},\n", .{field_type});
 
         current_bit = field.bit_offset + field.bit_width;
     }
@@ -158,25 +153,110 @@ fn generateRegister(writer: *ArrayWriter, base_address: u32, register: svd.Regis
     , .{full_address});
 }
 
-fn getFieldType(bit_width: u8) []const u8 {
-    return switch (bit_width) {
-        1 => "bool",
-        2 => "u2",
-        3 => "u3",
-        4 => "u4",
-        5 => "u5",
-        6 => "u6",
-        7 => "u7",
-        8 => "u8",
-        16 => "u16",
-        32 => "u32",
-        else => "u8", // fallback
-    };
+/// Emit the exact-width unsigned integer type for a field of `bit_width` bits.
+///
+/// A packed-struct field must have a type whose bit-size equals the field's
+/// hardware width, otherwise every subsequent field in the register is shifted
+/// to the wrong bit position and the generated code reads/writes the wrong bits
+/// of a real hardware register. The previous implementation fell back to `u8`
+/// for widths 9-15, 17-31, and >32 — this emits `u{width}` for every legal
+/// packed-struct width (1..64) and rejects anything outside that range.
+fn getFieldType(buf: []u8, bit_width: u8) ![]const u8 {
+    if (bit_width < 1 or bit_width > 64) return error.InvalidFieldWidth;
+    return std.fmt.bufPrint(buf, "u{d}", .{bit_width});
 }
 
 fn toLower(s: []const u8) []const u8 {
     // For simplicity, just return as-is (in production would properly lowercase)
     return s;
+}
+
+/// Emit `text` as a run of comment/doc lines using `prefix` (e.g. `"    /// "`).
+///
+/// SVD `<name>`/`<description>` strings are attacker-influenced and commonly
+/// multi-line in real vendor files. Emitting them raw lets an embedded newline
+/// terminate the comment and drop the remainder of the string into code
+/// position (broken or injected Zig). Splitting on `\n` and re-prefixing every
+/// line keeps the whole string inside comment context.
+fn writeEscapedDoc(writer: *ArrayWriter, prefix: []const u8, text: []const u8) !void {
+    if (text.len == 0) {
+        try writer.writeAll(prefix);
+        try writer.writeAll("\n");
+        return;
+    }
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |line_raw| {
+        const line = std.mem.trimEnd(u8, line_raw, "\r");
+        try writer.writeAll(prefix);
+        try writer.writeAll(line);
+        try writer.writeAll("\n");
+    }
+}
+
+/// True if `s` is a valid bare Zig identifier (no `@"..."` quoting needed).
+fn isValidBareIdent(s: []const u8) bool {
+    if (s.len == 0) return false;
+    const first = s[0];
+    if (!(std.ascii.isAlphabetic(first) or first == '_')) return false;
+    for (s[1..]) |c| {
+        if (!(std.ascii.isAlphanumeric(c) or c == '_')) return false;
+    }
+    return !isZigKeyword(s);
+}
+
+fn isZigKeyword(s: []const u8) bool {
+    const keywords = [_][]const u8{
+        "addrspace",   "align",     "allowzero", "and",           "anyframe",
+        "anytype",     "asm",       "async",     "await",         "break",
+        "callconv",    "catch",     "comptime",  "const",         "continue",
+        "defer",       "else",      "enum",      "errdefer",      "error",
+        "export",      "extern",    "fn",        "for",           "if",
+        "inline",      "noalias",   "noinline",  "nosuspend",     "opaque",
+        "or",          "orelse",    "packed",    "pub",           "resume",
+        "return",      "linksection", "struct",  "suspend",       "switch",
+        "test",        "threadlocal", "try",     "union",         "unreachable",
+        "usingnamespace", "var",    "volatile",  "while",
+    };
+    for (keywords) |kw| {
+        if (std.mem.eql(u8, kw, s)) return true;
+    }
+    return false;
+}
+
+/// Emit `name` as a Zig identifier. Valid bare identifiers pass through; SVD
+/// names that are not valid identifiers (dim templates like `MODE%s`, names
+/// starting with a digit, or Zig keywords) are wrapped in `@"..."` with proper
+/// string escaping so the generated file still compiles instead of injecting
+/// broken syntax.
+fn writeIdent(writer: *ArrayWriter, name: []const u8) !void {
+    if (name.len == 0) {
+        // Should not happen (parser defaults to "Unknown") but never emit an
+        // empty token, which is a syntax error.
+        try writer.writeAll("@\"_\"");
+        return;
+    }
+    if (isValidBareIdent(name)) {
+        try writer.writeAll(name);
+        return;
+    }
+    try writer.writeAll("@\"");
+    for (name) |c| {
+        switch (c) {
+            '\\' => try writer.writeAll("\\\\"),
+            '"' => try writer.writeAll("\\\""),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            else => {
+                if (c < 0x20 or c == 0x7f) {
+                    try writer.print("\\x{x:0>2}", .{c});
+                } else {
+                    try writer.writeAll(&[_]u8{c});
+                }
+            },
+        }
+    }
+    try writer.writeAll("\"");
 }
 
 test "generate basic" {

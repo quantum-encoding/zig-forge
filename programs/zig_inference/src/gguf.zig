@@ -176,6 +176,9 @@ pub const GGUFFile = struct {
             .tensor_count = 0,
         };
 
+        // On a malformed/truncated file `parse` returns an error; release the
+        // mmap and any partially-built maps/allocations instead of leaking them.
+        errdefer self.close();
         try self.parse();
         return self;
     }
@@ -208,33 +211,44 @@ pub const GGUFFile = struct {
         var cursor = Reader{ .data = self.mmap_ptr[0..self.mmap_len], .pos = 0 };
 
         // Header
-        const magic = cursor.readBytes(4);
+        const magic = try cursor.readBytes(4);
         if (!std.mem.eql(u8, magic, &GGUF_MAGIC)) return error.InvalidMagic;
 
-        const version = cursor.readU32();
+        const version = try cursor.readU32();
         if (version < 2 or version > 3) return error.UnsupportedVersion;
 
-        self.tensor_count = cursor.readU64();
-        const metadata_kv_count = cursor.readU64();
+        self.tensor_count = try cursor.readU64();
+        const metadata_kv_count = try cursor.readU64();
+
+        // Each KV pair / tensor info consumes several header bytes, so the file
+        // cannot contain more of them than it has bytes. Cap the loop counts
+        // against the mapped length to reject absurd counts up front (and to
+        // keep the loop bound sane) rather than iterating billions of times.
+        if (metadata_kv_count > self.mmap_len or self.tensor_count > self.mmap_len) {
+            return error.CorruptHeader;
+        }
 
         // Parse metadata KV pairs
         for (0..metadata_kv_count) |_| {
-            const key = cursor.readString();
+            const key = try cursor.readString();
             const value = try cursor.readMetadataValue();
             try self.metadata.put(key, value);
         }
 
         // Parse tensor infos
         for (0..self.tensor_count) |_| {
-            const name = cursor.readString();
-            const n_dims = cursor.readU32();
+            const name = try cursor.readString();
+            const n_dims = try cursor.readU32();
+            // GGUF tensors have at most 4 dimensions; a larger value would write
+            // past the fixed `dims` array (an OOB stack write with safety off).
+            if (n_dims > 4) return error.InvalidTensorDims;
             var dims: [4]u64 = .{ 1, 1, 1, 1 };
             for (0..n_dims) |d| {
-                dims[d] = cursor.readU64();
+                dims[d] = try cursor.readU64();
             }
-            const dtype_raw = cursor.readU32();
-            const dtype: GGMLType = @enumFromInt(dtype_raw);
-            const offset = cursor.readU64();
+            const dtype_raw = try cursor.readU32();
+            const dtype: GGMLType = @enumFromInt(dtype_raw); // non-exhaustive enum: any u32 is valid
+            const offset = try cursor.readU64();
 
             try self.tensors.put(name, TensorInfo{
                 .name = name,
@@ -245,13 +259,21 @@ pub const GGUFFile = struct {
             });
         }
 
-        // Data section starts at alignment boundary after all tensor infos
+        // Data section starts at alignment boundary after all tensor infos.
+        // The alignment comes from attacker-controlled metadata: reject zero or
+        // non-power-of-two values, which would make `alignUp` underflow or emit
+        // a wrong data offset.
         const alignment = if (self.metadata.get("general.alignment")) |v|
             v.asU32() orelse GGUF_DEFAULT_ALIGNMENT
         else
             GGUF_DEFAULT_ALIGNMENT;
+        if (alignment == 0 or (alignment & (alignment - 1)) != 0) {
+            return error.InvalidAlignment;
+        }
 
         self.data_offset = alignUp(cursor.pos, alignment);
+        // The tensor-data section must begin inside the mapping.
+        if (self.data_offset > self.mmap_len) return error.Truncated;
 
         // Extract model parameters from metadata
         try self.extractModelParams();
@@ -425,100 +447,142 @@ pub const GGUFFile = struct {
 
 // ── Reader utility for sequential parsing of mmap'd buffer ──
 
+/// Errors raised while parsing a malformed or truncated GGUF file.
+pub const GgufError = error{
+    /// A read would run past the end of the mmap'd buffer.
+    Truncated,
+    /// A metadata value-type tag did not name a known type.
+    InvalidType,
+    /// Nested arrays are not permitted by the GGUF spec.
+    NestedArray,
+};
+
 const Reader = struct {
     data: []const u8,
     pos: usize,
 
-    fn readU8(self: *Reader) u8 {
+    /// Reject any read that would overrun the buffer. `data.len - pos` never
+    /// underflows because every successful read keeps `pos <= data.len`.
+    inline fn ensure(self: *const Reader, n: usize) GgufError!void {
+        if (n > self.data.len - self.pos) return error.Truncated;
+    }
+
+    fn readU8(self: *Reader) GgufError!u8 {
+        try self.ensure(1);
         const val = self.data[self.pos];
         self.pos += 1;
         return val;
     }
 
-    fn readU32(self: *Reader) u32 {
+    fn readU16(self: *Reader) GgufError!u16 {
+        try self.ensure(2);
+        const val = std.mem.readInt(u16, self.data[self.pos..][0..2], .little);
+        self.pos += 2;
+        return val;
+    }
+
+    fn readI16(self: *Reader) GgufError!i16 {
+        try self.ensure(2);
+        const val = std.mem.readInt(i16, self.data[self.pos..][0..2], .little);
+        self.pos += 2;
+        return val;
+    }
+
+    fn readU32(self: *Reader) GgufError!u32 {
+        try self.ensure(4);
         const val = std.mem.readInt(u32, self.data[self.pos..][0..4], .little);
         self.pos += 4;
         return val;
     }
 
-    fn readI32(self: *Reader) i32 {
+    fn readI32(self: *Reader) GgufError!i32 {
+        try self.ensure(4);
         const val = std.mem.readInt(i32, self.data[self.pos..][0..4], .little);
         self.pos += 4;
         return val;
     }
 
-    fn readU64(self: *Reader) u64 {
+    fn readU64(self: *Reader) GgufError!u64 {
+        try self.ensure(8);
         const val = std.mem.readInt(u64, self.data[self.pos..][0..8], .little);
         self.pos += 8;
         return val;
     }
 
-    fn readI64(self: *Reader) i64 {
+    fn readI64(self: *Reader) GgufError!i64 {
+        try self.ensure(8);
         const val = std.mem.readInt(i64, self.data[self.pos..][0..8], .little);
         self.pos += 8;
         return val;
     }
 
-    fn readF32(self: *Reader) f32 {
-        const bits = self.readU32();
+    fn readF32(self: *Reader) GgufError!f32 {
+        const bits = try self.readU32();
         return @bitCast(bits);
     }
 
-    fn readF64(self: *Reader) f64 {
-        const bits = self.readU64();
+    fn readF64(self: *Reader) GgufError!f64 {
+        const bits = try self.readU64();
         return @bitCast(bits);
     }
 
-    fn readBytes(self: *Reader, n: usize) []const u8 {
+    fn readBytes(self: *Reader, n: usize) GgufError![]const u8 {
+        try self.ensure(n);
         const slice = self.data[self.pos .. self.pos + n];
         self.pos += n;
         return slice;
     }
 
-    fn readString(self: *Reader) []const u8 {
-        const len: usize = @intCast(self.readU64());
+    fn readString(self: *Reader) GgufError![]const u8 {
+        const len: usize = @intCast(try self.readU64());
         return self.readBytes(len);
     }
 
-    fn readBool(self: *Reader) bool {
-        return self.readU8() != 0;
+    fn readBool(self: *Reader) GgufError!bool {
+        return (try self.readU8()) != 0;
     }
 
-    fn readMetadataValue(self: *Reader) !MetadataValue {
-        const vtype: MetadataValueType = @enumFromInt(self.readU32());
-        return self.readValueOfType(vtype);
+    /// Read a value-type tag and reject any value outside the defined enum range,
+    /// since `@enumFromInt` on an out-of-range value is illegal behavior in
+    /// ReleaseFast (the FFI libraries are built with safety off).
+    fn readValueType(self: *Reader) GgufError!MetadataValueType {
+        const raw = try self.readU32();
+        if (raw > @intFromEnum(MetadataValueType.float64)) return error.InvalidType;
+        return @enumFromInt(raw);
     }
 
-    fn readValueOfType(self: *Reader, vtype: MetadataValueType) !MetadataValue {
+    fn readMetadataValue(self: *Reader) GgufError!MetadataValue {
+        const vtype = try self.readValueType();
+        return self.readValueOfType(vtype, false);
+    }
+
+    /// `in_array` guards against nested arrays (disallowed by the spec) so a
+    /// hostile file cannot drive unbounded recursion here.
+    fn readValueOfType(self: *Reader, vtype: MetadataValueType, in_array: bool) GgufError!MetadataValue {
         return switch (vtype) {
-            .uint8 => .{ .uint8 = self.readU8() },
-            .int8 => .{ .int8 = @bitCast(self.readU8()) },
-            .uint16 => blk: {
-                const val = std.mem.readInt(u16, self.data[self.pos..][0..2], .little);
-                self.pos += 2;
-                break :blk .{ .uint16 = val };
-            },
-            .int16 => blk: {
-                const val = std.mem.readInt(i16, self.data[self.pos..][0..2], .little);
-                self.pos += 2;
-                break :blk .{ .int16 = val };
-            },
-            .uint32 => .{ .uint32 = self.readU32() },
-            .int32 => .{ .int32 = self.readI32() },
-            .float32 => .{ .float32 = self.readF32() },
-            .bool_ => .{ .bool_ = self.readBool() },
-            .string => .{ .string = self.readString() },
-            .uint64 => .{ .uint64 = self.readU64() },
-            .int64 => .{ .int64 = self.readI64() },
-            .float64 => .{ .float64 = self.readF64() },
+            .uint8 => .{ .uint8 = try self.readU8() },
+            .int8 => .{ .int8 = @bitCast(try self.readU8()) },
+            .uint16 => .{ .uint16 = try self.readU16() },
+            .int16 => .{ .int16 = try self.readI16() },
+            .uint32 => .{ .uint32 = try self.readU32() },
+            .int32 => .{ .int32 = try self.readI32() },
+            .float32 => .{ .float32 = try self.readF32() },
+            .bool_ => .{ .bool_ = try self.readBool() },
+            .string => .{ .string = try self.readString() },
+            .uint64 => .{ .uint64 = try self.readU64() },
+            .int64 => .{ .int64 = try self.readI64() },
+            .float64 => .{ .float64 = try self.readF64() },
             .array => blk: {
-                const elem_type: MetadataValueType = @enumFromInt(self.readU32());
-                const len = self.readU64();
+                if (in_array) return error.NestedArray;
+                const elem_type = try self.readValueType();
+                const len = try self.readU64();
                 const data_start = self.data.ptr + self.pos;
-                // Skip past array data
+                // Skip past array data, bounds-checking every element. This
+                // validates the whole array region up front, so later readers
+                // that walk `data_ptr` with `len` stay inside the mmap.
                 const count: usize = @intCast(len);
                 for (0..count) |_| {
-                    self.skipValueOfType(elem_type);
+                    try self.skipValueOfType(elem_type);
                 }
                 break :blk .{ .array = .{
                     .elem_type = elem_type,
@@ -529,26 +593,22 @@ const Reader = struct {
         };
     }
 
-    fn skipValueOfType(self: *Reader, vtype: MetadataValueType) void {
-        switch (vtype) {
-            .uint8, .int8 => self.pos += 1,
-            .uint16, .int16 => self.pos += 2,
-            .uint32, .int32, .float32 => self.pos += 4,
-            .uint64, .int64, .float64 => self.pos += 8,
-            .bool_ => self.pos += 1,
+    fn skipValueOfType(self: *Reader, vtype: MetadataValueType) GgufError!void {
+        const width: usize = switch (vtype) {
+            .uint8, .int8, .bool_ => 1,
+            .uint16, .int16 => 2,
+            .uint32, .int32, .float32 => 4,
+            .uint64, .int64, .float64 => 8,
             .string => {
-                const len: usize = @intCast(self.readU64());
+                const len: usize = @intCast(try self.readU64());
+                try self.ensure(len);
                 self.pos += len;
+                return;
             },
-            .array => {
-                const elem_type: MetadataValueType = @enumFromInt(self.readU32());
-                const len = self.readU64();
-                const count: usize = @intCast(len);
-                for (0..count) |_| {
-                    self.skipValueOfType(elem_type);
-                }
-            },
-        }
+            .array => return error.NestedArray,
+        };
+        try self.ensure(width);
+        self.pos += width;
     }
 };
 

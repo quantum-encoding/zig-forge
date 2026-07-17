@@ -46,10 +46,10 @@ pub const BoxLayout = struct {
     pub fn init(allocator: std.mem.Allocator, direction: Direction) Self {
         return .{
             .direction = direction,
-            .children_list = .{},
+            .children_list = .empty,
             .spacing = 0,
             .padding = 0,
-            .computed_areas = .{},
+            .computed_areas = .empty,
             .allocator = allocator,
         };
     }

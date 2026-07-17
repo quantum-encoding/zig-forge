@@ -63,11 +63,23 @@ pub fn QueryResult(comptime T: type) type {
         items: []T,
         total_count: usize,
         allocator: std.mem.Allocator,
+        /// Optional arena owning both `items` and every string field they
+        /// reference. Non-empty results copy their strings out of the
+        /// transient JSON parse arena into this arena so they remain valid
+        /// after the query function returns.
+        arena: ?*std.heap.ArenaAllocator = null,
 
         const Self = @This();
 
         pub fn deinit(self: *Self) void {
-            self.allocator.free(self.items);
+            if (self.arena) |a| {
+                a.deinit();
+                self.allocator.destroy(a);
+                self.arena = null;
+                self.items = &.{};
+            } else if (self.items.len > 0) {
+                self.allocator.free(self.items);
+            }
         }
 
         pub fn empty(allocator: std.mem.Allocator) Self {
@@ -75,6 +87,7 @@ pub fn QueryResult(comptime T: type) type {
                 .items = &.{},
                 .total_count = 0,
                 .allocator = allocator,
+                .arena = null,
             };
         }
     };
@@ -86,10 +99,18 @@ pub const ContextResult = struct {
     callees: []CallRecord = &.{},
     found: bool = false,
     allocator: std.mem.Allocator,
+    /// Optional arena owning `func`'s strings and the caller/callee slices
+    /// (and their strings), copied out of the transient JSON parse arena.
+    arena: ?*std.heap.ArenaAllocator = null,
 
     pub fn deinit(self: *ContextResult) void {
-        if (self.callers.len > 0) self.allocator.free(self.callers);
-        if (self.callees.len > 0) self.allocator.free(self.callees);
+        if (self.arena) |a| {
+            a.deinit();
+            self.allocator.destroy(a);
+            self.arena = null;
+            self.callers = &.{};
+            self.callees = &.{};
+        }
     }
 };
 

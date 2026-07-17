@@ -392,3 +392,11 @@ test "signal handler sets g_running to false" {
     signalHandler(SIGTERM);
     try std.testing.expect(!g_running);
 }
+
+// Aggregate imported-module tests into `zig build test`. Without this
+// reference the test runner rooted at this file only discovers the tests
+// declared directly in main.zig; the JSON-export regression tests (and the
+// state model tests they build on) would never execute.
+test {
+    _ = @import("export.zig");
+}

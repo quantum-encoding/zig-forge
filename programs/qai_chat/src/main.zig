@@ -519,7 +519,12 @@ fn loadConversationMarkdown(
         if (std.mem.startsWith(u8, raw_line, "## [")) {
             try flushPending(gpa, io, history, &p);
             const role = parseRoleFromHeader(raw_line) orelse .user;
-            p = .{ .role = role, .active = true };
+            // flushPending already cleared content/json_buf (retaining their
+            // buffers) and nulled calls/results, so reuse `p` in place rather
+            // than reassigning a fresh struct — a `p = .{...}` here would
+            // orphan the retained ArrayList allocations and leak them.
+            p.role = role;
+            p.active = true;
             state = .content;
             continue;
         }
@@ -703,24 +708,6 @@ fn flushPending(
     p.content.clearRetainingCapacity();
     p.json_buf.clearRetainingCapacity();
     p.active = false;
-}
-
-/// JSON-string-escape `s`. Caller owns. Used to embed user-supplied
-/// names/contents into the markdown JSON tool blocks.
-fn escapeJsonInline(gpa: std.mem.Allocator, s: []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(gpa);
-    try out.ensureTotalCapacity(gpa, s.len + 8);
-    for (s) |c| switch (c) {
-        '"' => try out.appendSlice(gpa, "\\\""),
-        '\\' => try out.appendSlice(gpa, "\\\\"),
-        '\n' => try out.appendSlice(gpa, "\\n"),
-        '\r' => try out.appendSlice(gpa, "\\r"),
-        '\t' => try out.appendSlice(gpa, "\\t"),
-        0...0x07, 0x0b, 0x0c, 0x0e...0x1f => try out.print(gpa, "\\u{x:0>4}", .{c}),
-        else => try out.append(gpa, c),
-    };
-    return out.toOwnedSlice(gpa);
 }
 
 /// `/sessions` — list past conversations under ~/.qai/projects/<cwd>/.
@@ -1317,36 +1304,52 @@ fn saveConversationMarkdown(
         // format) which is essential for assistant.tool_use ↔ user.tool_result
         // matching when the conversation is resumed.
         if (m.tool_calls) |calls| {
-            try buf.appendSlice(gpa, "**tool calls:**\n\n```json\n[");
-            for (calls, 0..) |c, k| {
-                if (k > 0) try buf.appendSlice(gpa, ",");
-                const escaped_name = try escapeJsonInline(gpa, c.name);
-                defer gpa.free(escaped_name);
-                const escaped_id = try escapeJsonInline(gpa, c.id);
-                defer gpa.free(escaped_id);
-                try buf.print(
-                    gpa,
-                    "\n  {{\"id\":\"{s}\",\"name\":\"{s}\",\"arguments\":{s}}}",
-                    .{ escaped_id, escaped_name, c.arguments },
-                );
+            try buf.appendSlice(gpa, "**tool calls:**\n\n```json\n");
+            var js: std.Io.Writer.Allocating = .init(gpa);
+            defer js.deinit();
+            var st: std.json.Stringify = .{ .writer = &js.writer, .options = .{ .whitespace = .indent_2 } };
+            try st.beginArray();
+            for (calls) |c| {
+                try st.beginObject();
+                try st.objectField("id");
+                try st.write(c.id);
+                try st.objectField("name");
+                try st.write(c.name);
+                try st.objectField("arguments");
+                // `c.arguments` is raw provider-supplied JSON. Emit it as a
+                // structured JSON value when it parses (the common case, so
+                // `/load` re-reads it identically); fall back to a JSON string
+                // field when the provider aborted mid-stream and left it
+                // truncated, so the transcript stays valid JSON either way.
+                if (std.json.parseFromSlice(std.json.Value, gpa, c.arguments, .{})) |parsed| {
+                    defer parsed.deinit();
+                    try st.write(parsed.value);
+                } else |_| {
+                    try st.write(c.arguments);
+                }
+                try st.endObject();
             }
-            try buf.appendSlice(gpa, "\n]\n```\n\n");
+            try st.endArray();
+            try buf.appendSlice(gpa, js.written());
+            try buf.appendSlice(gpa, "\n```\n\n");
         }
         if (m.tool_results) |results| {
-            try buf.appendSlice(gpa, "**tool results:**\n\n```json\n[");
-            for (results, 0..) |r, k| {
-                if (k > 0) try buf.appendSlice(gpa, ",");
-                const escaped_id = try escapeJsonInline(gpa, r.tool_call_id);
-                defer gpa.free(escaped_id);
-                const escaped_content = try escapeJsonInline(gpa, r.content);
-                defer gpa.free(escaped_content);
-                try buf.print(
-                    gpa,
-                    "\n  {{\"tool_call_id\":\"{s}\",\"content\":\"{s}\"}}",
-                    .{ escaped_id, escaped_content },
-                );
+            try buf.appendSlice(gpa, "**tool results:**\n\n```json\n");
+            var js: std.Io.Writer.Allocating = .init(gpa);
+            defer js.deinit();
+            var st: std.json.Stringify = .{ .writer = &js.writer, .options = .{ .whitespace = .indent_2 } };
+            try st.beginArray();
+            for (results) |r| {
+                try st.beginObject();
+                try st.objectField("tool_call_id");
+                try st.write(r.tool_call_id);
+                try st.objectField("content");
+                try st.write(r.content);
+                try st.endObject();
             }
-            try buf.appendSlice(gpa, "\n]\n```\n\n");
+            try st.endArray();
+            try buf.appendSlice(gpa, js.written());
+            try buf.appendSlice(gpa, "\n```\n\n");
         }
     }
 
@@ -1570,4 +1573,135 @@ fn appendMsg(
         .timestamp = std.Io.Timestamp.now(io, .real).toSeconds(),
         .allocator = gpa,
     });
+}
+
+test "transcript save/load round-trips tool calls, results, and control chars" {
+    const gpa = std.testing.allocator;
+
+    var io_threaded = std.Io.Threaded.init(gpa, .{});
+    defer io_threaded.deinit();
+    const io = io_threaded.io();
+
+    var cfg = try cfg_mod.defaults(gpa);
+    defer cfg.deinit();
+
+    // Build a two-message history:
+    //   [0] assistant turn carrying a tool call with valid-JSON arguments
+    //       (including an embedded quote to exercise Stringify escaping),
+    //   [1] tool turn whose result content contains control characters —
+    //       notably 0x08 (backspace), the byte the deleted hand-rolled
+    //       escaper emitted raw and which broke /load on that session.
+    var history: std.ArrayList(hs.ai.common.AIMessage) = .empty;
+    defer {
+        for (history.items) |*m| m.deinit();
+        history.deinit(gpa);
+    }
+
+    const calls = try gpa.alloc(hs.ai.common.ToolCall, 1);
+    calls[0] = .{
+        .id = try gpa.dupe(u8, "call_1"),
+        .name = try gpa.dupe(u8, "exec"),
+        .arguments = try gpa.dupe(u8, "{\"cmd\":\"ls\",\"note\":\"a\\\"b\"}"),
+        .allocator = gpa,
+    };
+    try history.append(gpa, .{
+        .id = try gpa.dupe(u8, "m0"),
+        .role = .assistant,
+        .content = try gpa.dupe(u8, "running a tool"),
+        .timestamp = 0,
+        .tool_calls = calls,
+        .allocator = gpa,
+    });
+
+    const result_content = "line1\x08\x00\ttab\"quote\"\\back\nline2";
+    const results = try gpa.alloc(hs.ai.common.ToolResult, 1);
+    results[0] = .{
+        .tool_call_id = try gpa.dupe(u8, "call_1"),
+        .content = try gpa.dupe(u8, result_content),
+        .allocator = gpa,
+    };
+    try history.append(gpa, .{
+        .id = try gpa.dupe(u8, "m1"),
+        .role = .tool,
+        .content = try gpa.dupe(u8, ""),
+        .timestamp = 0,
+        .tool_results = results,
+        .allocator = gpa,
+    });
+
+    const path = ".qai_roundtrip_test.md";
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    try saveConversationMarkdown(gpa, io, path, &cfg, &history);
+
+    // loadConversationMarkdown wipes and repopulates `history` in place.
+    try loadConversationMarkdown(gpa, io, path, &history);
+
+    try std.testing.expectEqual(@as(usize, 2), history.items.len);
+
+    const m0 = history.items[0];
+    try std.testing.expectEqual(hs.ai.common.MessageRole.assistant, m0.role);
+    const loaded_calls = m0.tool_calls orelse return error.MissingToolCalls;
+    try std.testing.expectEqual(@as(usize, 1), loaded_calls.len);
+    try std.testing.expectEqualStrings("call_1", loaded_calls[0].id);
+    try std.testing.expectEqualStrings("exec", loaded_calls[0].name);
+    // Arguments survive as canonical (minified) JSON with the quote escaped.
+    try std.testing.expectEqualStrings("{\"cmd\":\"ls\",\"note\":\"a\\\"b\"}", loaded_calls[0].arguments);
+
+    const m1 = history.items[1];
+    try std.testing.expectEqual(hs.ai.common.MessageRole.tool, m1.role);
+    const loaded_results = m1.tool_results orelse return error.MissingToolResults;
+    try std.testing.expectEqual(@as(usize, 1), loaded_results.len);
+    try std.testing.expectEqualStrings("call_1", loaded_results[0].tool_call_id);
+    // The whole control-character payload — 0x08 included — round-trips byte-exact.
+    try std.testing.expectEqualStrings(result_content, loaded_results[0].content);
+}
+
+test "transcript keeps truncated tool arguments as a JSON string field" {
+    const gpa = std.testing.allocator;
+
+    var io_threaded = std.Io.Threaded.init(gpa, .{});
+    defer io_threaded.deinit();
+    const io = io_threaded.io();
+
+    var cfg = try cfg_mod.defaults(gpa);
+    defer cfg.deinit();
+
+    var history: std.ArrayList(hs.ai.common.AIMessage) = .empty;
+    defer {
+        for (history.items) |*m| m.deinit();
+        history.deinit(gpa);
+    }
+
+    // A provider that aborted mid-stream can leave `arguments` as invalid
+    // JSON. The old fmt-built path spliced it in raw and produced a corrupt
+    // transcript; the Stringify path must fall back to a JSON *string* so the
+    // file stays parseable and /load still succeeds.
+    const calls = try gpa.alloc(hs.ai.common.ToolCall, 1);
+    calls[0] = .{
+        .id = try gpa.dupe(u8, "call_x"),
+        .name = try gpa.dupe(u8, "exec"),
+        .arguments = try gpa.dupe(u8, "{\"cmd\":\"ls"), // truncated: not valid JSON
+        .allocator = gpa,
+    };
+    try history.append(gpa, .{
+        .id = try gpa.dupe(u8, "m0"),
+        .role = .assistant,
+        .content = try gpa.dupe(u8, "aborted tool"),
+        .timestamp = 0,
+        .tool_calls = calls,
+        .allocator = gpa,
+    });
+
+    const path = ".qai_roundtrip_trunc_test.md";
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    try saveConversationMarkdown(gpa, io, path, &cfg, &history);
+    // Must not raise — the transcript is valid JSON with the raw text preserved
+    // as a string value.
+    try loadConversationMarkdown(gpa, io, path, &history);
+
+    try std.testing.expectEqual(@as(usize, 1), history.items.len);
+    const loaded_calls = history.items[0].tool_calls orelse return error.MissingToolCalls;
+    try std.testing.expectEqual(@as(usize, 1), loaded_calls.len);
+    // Re-serialized as a JSON string: the original bytes wrapped in quotes.
+    try std.testing.expectEqualStrings("\"{\\\"cmd\\\":\\\"ls\"", loaded_calls[0].arguments);
 }

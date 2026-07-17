@@ -475,7 +475,9 @@ test "memory_pool_core - fixed pool exhaustion" {
     const reused = mp_fixed_pool_alloc(pool);
     try std.testing.expect(reused != null);
 
-    for (&ptrs) |ptr| {
+    // Clean up each live slot exactly once. ptrs[0] was already freed above
+    // and its slot is now held by `reused`, so free ptrs[1..] plus `reused`.
+    for (ptrs[1..]) |ptr| {
         mp_fixed_pool_free(pool, ptr);
     }
     mp_fixed_pool_free(pool, reused);
@@ -528,6 +530,60 @@ test "memory_pool_core - arena alloc" {
     const addr2 = @intFromPtr(ptr2);
     try std.testing.expectEqual(@as(usize, 0), addr1 % 8);
     try std.testing.expectEqual(@as(usize, 0), addr2 % 16);
+}
+
+test "memory_pool_core - arena alloc rejects overflow and bad alignment" {
+    const arena = mp_arena_create(1024) orelse return;
+    defer mp_arena_destroy(arena);
+
+    // Consume a little so offset != 0 and any aliasing regression is visible.
+    const guard = mp_arena_alloc(arena, 32, 8);
+    try std.testing.expect(guard != null);
+
+    var stats: MP_ArenaStats = undefined;
+    _ = mp_arena_stats(arena, &stats);
+    const offset_before = stats.offset;
+
+    // size == SIZE_MAX would wrap aligned_offset + size below buffer.len and
+    // pass the bounds check (reversed-bounds slice / UB). Must return null.
+    try std.testing.expect(mp_arena_alloc(arena, std.math.maxInt(usize), 1) == null);
+
+    // alignment 0 previously produced aligned_offset = 0 → overlapping live
+    // memory. Must return null.
+    try std.testing.expect(mp_arena_alloc(arena, 16, 0) == null);
+
+    // Non-power-of-2 alignment silently mis-aligns. Must return null.
+    try std.testing.expect(mp_arena_alloc(arena, 16, 3) == null);
+
+    // None of the rejected calls may have advanced the arena.
+    _ = mp_arena_stats(arena, &stats);
+    try std.testing.expectEqual(offset_before, stats.offset);
+
+    // A valid allocation still succeeds afterwards.
+    const ok = mp_arena_alloc(arena, 16, 8);
+    try std.testing.expect(ok != null);
+    try std.testing.expectEqual(@as(usize, 0), @intFromPtr(ok) % 8);
+}
+
+test "memory_pool_core - fixed pool tolerates odd object size (slot alignment)" {
+    // object_size 12 is not a multiple of the slot alignment; without the
+    // alignForward-to-16 fix, slot 1 landed at byte offset 12 and the internal
+    // @alignCast to *Node was UB. Every slot must be 16-aligned now.
+    const pool = mp_fixed_pool_create(12, 4) orelse return;
+    defer mp_fixed_pool_destroy(pool);
+
+    var stats: MP_FixedPoolStats = undefined;
+    try std.testing.expectEqual(MP_Error.SUCCESS, mp_fixed_pool_stats(pool, &stats));
+    // Reported object_size reflects the padded slot size (16).
+    try std.testing.expectEqual(@as(usize, 16), stats.object_size);
+
+    var ptrs: [4]?*anyopaque = undefined;
+    for (&ptrs) |*ptr| {
+        ptr.* = mp_fixed_pool_alloc(pool);
+        try std.testing.expect(ptr.* != null);
+        try std.testing.expectEqual(@as(usize, 0), @intFromPtr(ptr.*) % 16);
+    }
+    for (ptrs) |ptr| mp_fixed_pool_free(pool, ptr);
 }
 
 test "memory_pool_core - arena exhaustion" {

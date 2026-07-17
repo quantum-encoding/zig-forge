@@ -375,3 +375,109 @@ test "mpmc - overflow behavior" {
 
     try std.testing.expect(queue.isEmpty());
 }
+
+// ============================================================================
+// Multithreaded stress test
+// ============================================================================
+//
+// Vyukov's bounded MPMC queue is specified to be driven by many producers and
+// many consumers concurrently; the single-threaded tests above never exercise
+// the CAS retry / turn-handoff paths that are the whole point of the design.
+// This runs N producers and M consumers over a shared queue and verifies, via
+// a per-value seen-count array, that every message is delivered exactly once
+// (no loss, no duplication, no torn slot) and that the multiset checksum is
+// preserved. Prefer running under `-Doptimize=ReleaseFast` to expose ordering
+// bugs the debug build would mask.
+
+const MpmcStressCtx = struct {
+    queue: *MpmcQueue(u64),
+    seen: []std.atomic.Value(u32),
+    producers_done: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    consumed: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    sum: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    num_producers: usize,
+
+    fn produce(ctx: *MpmcStressCtx, start: u64, count: u64) void {
+        var i: u64 = 0;
+        while (i < count) {
+            ctx.queue.push(start + i) catch {
+                // Full — a consumer will make room; back off and retry.
+                std.atomic.spinLoopHint();
+                continue;
+            };
+            i += 1;
+        }
+        _ = ctx.producers_done.fetchAdd(1, .release);
+    }
+
+    fn consume(ctx: *MpmcStressCtx) void {
+        while (true) {
+            const val = ctx.queue.pop() catch {
+                // Empty. If every producer has finished and the queue has
+                // fully drained, no more items can ever arrive — stop.
+                if (ctx.producers_done.load(.acquire) == ctx.num_producers and
+                    ctx.queue.isEmpty())
+                {
+                    break;
+                }
+                std.atomic.spinLoopHint();
+                continue;
+            };
+            _ = ctx.seen[@intCast(val)].fetchAdd(1, .monotonic);
+            _ = ctx.consumed.fetchAdd(1, .monotonic);
+            _ = ctx.sum.fetchAdd(val, .monotonic);
+        }
+    }
+};
+
+test "mpmc - concurrent NxM stress" {
+    const allocator = std.testing.allocator;
+
+    var queue = try MpmcQueue(u64).init(allocator, 1024);
+    defer queue.deinit();
+
+    const num_producers: usize = 4;
+    const num_consumers: usize = 4;
+    const per_producer: u64 = 100_000;
+    const total: u64 = @as(u64, num_producers) * per_producer;
+
+    // seen[v] must equal exactly 1 after the run: proof of exactly-once delivery.
+    const seen = try allocator.alloc(std.atomic.Value(u32), @intCast(total));
+    defer allocator.free(seen);
+    for (seen) |*s| s.* = std.atomic.Value(u32).init(0);
+
+    var ctx = MpmcStressCtx{
+        .queue = &queue,
+        .seen = seen,
+        .num_producers = num_producers,
+    };
+
+    var producers: [num_producers]std.Thread = undefined;
+    var consumers: [num_consumers]std.Thread = undefined;
+
+    for (&producers, 0..) |*t, p| {
+        t.* = try std.Thread.spawn(.{}, MpmcStressCtx.produce, .{
+            &ctx,
+            @as(u64, @intCast(p)) * per_producer,
+            per_producer,
+        });
+    }
+    for (&consumers) |*t| {
+        t.* = try std.Thread.spawn(.{}, MpmcStressCtx.consume, .{&ctx});
+    }
+
+    for (producers) |t| t.join();
+    for (consumers) |t| t.join();
+
+    try std.testing.expectEqual(total, ctx.consumed.load(.acquire));
+    try std.testing.expect(queue.isEmpty());
+
+    // Every value in [0, total) was delivered exactly once, and the checksum
+    // of all popped values matches the checksum of all pushed values.
+    var expected_sum: u64 = 0;
+    for (seen, 0..) |*s, v| {
+        try std.testing.expectEqual(@as(u32, 1), s.load(.acquire));
+        expected_sum += @as(u64, @intCast(v));
+    }
+    try std.testing.expectEqual(expected_sum, ctx.sum.load(.acquire));
+}

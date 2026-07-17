@@ -200,8 +200,13 @@ pub fn formatRelativeTime(allocator: std.mem.Allocator, seconds: u64, options: R
         });
     }
 
-    const months = days / 30;
-    if (months < 12) {
+    // Gate the month branch on the raw day count (< 365), not on `days / 30`.
+    // `days / 30` reaches 12 at day 360 while `days / 365` is still 0 until
+    // day 365, so gating on `months < 12` left days 360-364 emitting
+    // "0 years ago". Cap the reported month count at 11 so the 330-364 day
+    // window renders "11 months" instead of an out-of-range "12 months".
+    if (days < 365) {
+        const months = @min(days / 30, 11);
         return try std.fmt.allocPrint(allocator, "{s}{d} month{s}{s}", .{
             prefix,
             months,
@@ -423,6 +428,40 @@ test "formatRelativeTime future" {
         const result = try formatRelativeTime(allocator, 7200, .{ .future = true });
         defer allocator.free(result);
         try testing.expectEqualSlices(u8, "in 2 hours", result);
+    }
+}
+
+test "formatRelativeTime year boundary" {
+    const allocator = std.heap.c_allocator;
+    const day = 86400;
+
+    // Regression: days 360-364 previously rendered "0 years ago" because
+    // `days / 30 == 12` skipped the month branch while `days / 365 == 0`.
+    {
+        const result = try formatRelativeTime(allocator, 360 * day, .{});
+        defer allocator.free(result);
+        try testing.expectEqualSlices(u8, "11 months ago", result);
+    }
+    {
+        const result = try formatRelativeTime(allocator, 364 * day, .{});
+        defer allocator.free(result);
+        try testing.expectEqualSlices(u8, "11 months ago", result);
+    }
+    {
+        const result = try formatRelativeTime(allocator, 365 * day, .{});
+        defer allocator.free(result);
+        try testing.expectEqualSlices(u8, "1 year ago", result);
+    }
+    {
+        const result = try formatRelativeTime(allocator, 730 * day, .{ .future = true });
+        defer allocator.free(result);
+        try testing.expectEqualSlices(u8, "in 2 years", result);
+    }
+    // The month branch's lower edge is unchanged (day 30 -> 1 month).
+    {
+        const result = try formatRelativeTime(allocator, 30 * day, .{});
+        defer allocator.free(result);
+        try testing.expectEqualSlices(u8, "1 month ago", result);
     }
 }
 

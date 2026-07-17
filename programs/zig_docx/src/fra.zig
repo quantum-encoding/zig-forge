@@ -222,12 +222,16 @@ pub fn generateFra(allocator: std.mem.Allocator, data: *const FraData) ![]u8 {
     else
         @as([]docx.MediaFile, &[_]docx.MediaFile{});
 
-    const doc = docx.Document{
+    var doc = docx.Document{
         .elements = try elements.toOwnedSlice(allocator),
         .media = media,
         .allocator = allocator,
     };
-    // Don't deinit doc — elements ownership transferred, docx_writer reads them
+    // generateDocx only reads the model; free it once the bytes are produced.
+    // The returned bytes are independently owned by the caller. The defer also
+    // covers the error path so no FRA call (including the FFI one) leaks the
+    // Document model (previously it was never freed).
+    defer doc.deinit();
 
     const opts = docx_writer.DocxWriterOptions{
         .title = "Fire Risk Assessment",

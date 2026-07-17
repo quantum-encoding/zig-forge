@@ -52,6 +52,19 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(lib);
 
     // ==========================================================================
+    // Consumable Zig module (for in-tree `@import("zigpdf")` consumers).
+    // Rooted at the rich library API surface (src/lib.zig), matching the
+    // `@import("zigpdf").invoice` usage documented at the top of that file.
+    // Additive — does not alter any C-ABI/WASM export.
+    // ==========================================================================
+    const zigpdf_module = b.addModule("zigpdf", .{
+        .root_source_file = b.path("src/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    zigpdf_module.addImport("ml_dsa", ml_dsa_mod);
+
+    // ==========================================================================
     // Shared Library (libzigpdf.so for JNI/FFI/Crypto Apps)
     // Build with: zig build shared
     // Output: zig-out/lib/libzigpdf.so

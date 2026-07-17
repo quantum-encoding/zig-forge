@@ -32,18 +32,21 @@ pub fn refresh() void {
     @memset(&listening_ports, false);
     ports_loaded = false;
 
-    var buf: [8192]u8 = undefined;
+    // /proc/net/tcp holds one line per socket; a few hundred sockets exceed 8 KB
+    // and truncating past a watched LISTEN entry makes a running service report
+    // STOPPED. Size generously and read the whole file (shared robust reader).
+    var buf: [262144]u8 = undefined;
 
     // Parse /proc/net/tcp for TCP LISTEN ports
-    if (readProcFile("/proc/net/tcp", &buf)) |data| {
+    if (sysinfo.readProcFile("/proc/net/tcp", &buf)) |data| {
         parseTcpPorts(data);
     }
     // Parse /proc/net/tcp6
-    if (readProcFile("/proc/net/tcp6", &buf)) |data| {
+    if (sysinfo.readProcFile("/proc/net/tcp6", &buf)) |data| {
         parseTcpPorts(data);
     }
     // Parse /proc/net/udp for UDP ports
-    if (readProcFile("/proc/net/udp", &buf)) |data| {
+    if (sysinfo.readProcFile("/proc/net/udp", &buf)) |data| {
         parseUdpPorts(data);
     }
 
@@ -165,15 +168,29 @@ pub fn render(buf: *Buffer, area: Rect, snap: *const sysinfo.SystemSnapshot) voi
     }
 }
 
-fn readProcFile(path: [*:0]const u8, buf: []u8) ?[]const u8 {
-    const c = @cImport({
-        @cInclude("fcntl.h");
-        @cInclude("unistd.h");
-    });
-    const fd = c.open(path, c.O_RDONLY);
-    if (fd < 0) return null;
-    defer _ = c.close(fd);
-    const n = c.read(fd, buf.ptr, buf.len);
-    if (n <= 0) return null;
-    return buf[0..@intCast(n)];
+// ---------------------------------------------------------------------------
+// Tests. Fixture is real /proc/net/tcp text (kernel format): state 0A = LISTEN,
+// state 01 = ESTABLISHED; local_address is "HEXADDR:HEXPORT".
+// ---------------------------------------------------------------------------
+const testing = std.testing;
+
+test "parseTcpPorts marks only LISTEN ports" {
+    @memset(&listening_ports, false);
+
+    // Header + a LISTEN on :22 (0016) and :80 (0050), and an ESTABLISHED on
+    // :8080 (1F90) which must NOT be reported as listening.
+    const fixture =
+        "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n" ++
+        "   0: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 100 1 0000 100\n" ++
+        "   1: 00000000:0050 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 101 1 0000 100\n" ++
+        "   2: 0100007F:1F90 0100007F:C000 01 00000000:00000000 00:00000000 00000000  1000        0 102 1 0000 100\n";
+
+    parseTcpPorts(fixture);
+
+    try testing.expect(listening_ports[22]); // 0x0016 LISTEN
+    try testing.expect(listening_ports[80]); // 0x0050 LISTEN
+    try testing.expect(!listening_ports[8080]); // 0x1F90 ESTABLISHED, not LISTEN
+    try testing.expect(!listening_ports[443]); // never present
+
+    @memset(&listening_ports, false);
 }

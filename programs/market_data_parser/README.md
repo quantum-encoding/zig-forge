@@ -1,191 +1,80 @@
-# High-Performance Market Data Parser
+# Market Data Parser
 
-Zero-copy parsing of exchange market data feeds at wire speed.
+A Zig parser for exchange market-data WebSocket feeds: a zero-dependency C-ABI
+static library (`market_data_core`) plus a higher-level Zig module that reads
+JSON price/quantity/field values and maintains a fixed-size order book.
 
-## Performance Targets
+## What actually works today
 
-- **Throughput**: 1M+ messages/second per core
-- **Latency**: <100ns per message
-- **Memory**: Zero allocations in hot path
-- **CPU**: Full SIMD utilization (AVX-512)
+- **JSON field parser** (`src/parsers/json_parser.zig`) — scans JSON structural
+  characters with `@Vector` (SIMD) chunks, finds fields by key, and parses
+  price / quantity / integer values. Tested against `std.fmt.parseFloat` and
+  external IEEE-754 golden doubles.
+- **Order book** (`src/orderbook/book.zig`) — top 100 levels per side, stored in
+  cache-line-aligned (`align(64)`) arrays, with binary-search insertion and
+  mid-price / spread helpers. Single-threaded: the update path uses no locks or
+  atomics, so it is **not** safe for concurrent mutation despite the historical
+  "lock-free" comment in the source.
+- **C ABI / FFI** (`src/market_data_core.zig`) — `mdc_*` exports for parser,
+  price/quantity parsing, and order-book operations. Zero external dependencies.
+  Cross-compiles to Android ARM64 (`zig build android`).
+- **Coinbase protocol module** (`src/protocols/coinbase.zig`) — message-type
+  scaffolding; compiles and is covered by the test step.
 
-## Features
+## Not yet working
 
-- ✅ Zero-copy JSON parsing
-- ✅ Cache-line aligned order book
-- ✅ Lock-free concurrent updates
-- ⏳ SIMD field extraction (TODO)
-- ⏳ Binary protocol support (FIX, SBE) (TODO)
+- **Binance protocol module** (`src/protocols/binance.zig`) and the **SBE binary
+  decoder** (`src/parsers/sbe_parser.zig`) currently **do not compile** (API
+  drift against Zig 0.16) and are excluded from `zig build test`. Do not rely on
+  them until fixed.
+- FIX protocol, multi-threading, and shared-memory order books are unimplemented.
 
-## Supported Exchanges
+## Build
 
-- **Binance**: WebSocket depth updates, trades
-- **Coinbase**: Advanced Trade L2 data
-- **More**: Coming soon (Kraken, Bybit, etc.)
-
-## Architecture
-
-```
-┌─────────────────────────────────────┐
-│  WebSocket Feed                     │
-│  (JSON messages)                    │
-└────────────┬────────────────────────┘
-             │
-             ├─> SIMD JSON Parser (<100ns)
-             │
-┌────────────▼────────────────────────┐
-│  Protocol-Specific Parser           │
-│  - Binance depth updates            │
-│  - Coinbase L2 snapshots            │
-└────────────┬────────────────────────┘
-             │
-             ├─> Order Book Update
-             │
-┌────────────▼────────────────────────┐
-│  Lock-Free Order Book               │
-│  - Top 100 levels per side          │
-│  - Cache-line aligned               │
-│  - SIMD price level search          │
-└─────────────────────────────────────┘
+```bash
+zig build            # build the FFI static library + example/bench executables
+zig build core       # just the zero-dep C-ABI static library
+zig build android    # cross-compile the static library for aarch64-linux-android
+zig build test       # run unit tests (json parser + order book + coinbase)
+zig build bench      # run the local micro-benchmark harness
+zig build example    # run the Binance parser example
+zig build orderbook  # run the order-book demo
 ```
 
-## Usage
+> The `bench` step prints numbers measured on your own machine. This repo does
+> **not** ship verified throughput/latency figures, and none should be quoted
+> without re-measuring on the target hardware.
 
-### Basic Example
+## Usage (Zig)
 
 ```zig
 const std = @import("std");
-const mdp = @import("market-data-parser");
+const mdp = @import("parser"); // the module name the build exposes to examples
 
 pub fn main() !void {
     var book = mdp.orderbook.OrderBook.init("BTCUSDT");
+    book.updateBid(50000.00, 0.1);
+    book.updateAsk(50001.00, 0.2);
 
-    // Parse Binance depth update
-    const msg = "{\"e\":\"depthUpdate\",\"s\":\"BTCUSDT\",\"b\":[[\"50000.00\",\"0.1\"]],\"a\":[[\"50001.00\",\"0.2\"]]}";
-    const update = try mdp.binance.DepthUpdate.parse(msg);
-    try update.applyToBook(&book);
-
-    // Query order book
-    const mid_price = book.getMidPrice() orelse return;
-    const spread_bps = book.getSpreadBps() orelse return;
-
-    std.debug.print("Mid price: {d:.2}\n", .{mid_price});
-    std.debug.print("Spread: {d:.2} bps\n", .{spread_bps});
+    if (book.getMidPrice()) |mid| std.debug.print("mid: {d:.2}\n", .{mid});
+    if (book.getSpreadBps()) |bps| std.debug.print("spread: {d:.2} bps\n", .{bps});
 }
 ```
 
-### Build
+## Layout
 
-```bash
-# Build library
-zig build
-
-# Run benchmarks
-zig build bench
-
-# Run examples
-zig build example
-zig build orderbook
 ```
-
-### Benchmarks
-
-```bash
-$ zig build bench --release=fast
-
-╔════════════════════════════════════════╗
-║  Market Data Parser Benchmarks        ║
-╚════════════════════════════════════════╝
-
-JSON Parser:
-  Throughput: 2.1M msg/sec
-  Latency:    ~476ns/msg
-  CPU:        1 core @ 4.5GHz
-
-Order Book Updates:
-  Throughput: 5.0M updates/sec
-  Latency:    ~200ns/update
-  Memory:     12KB per book (100 levels)
-
-vs Python (ujson + dict):
-  Speedup:    ~50x faster
-  Memory:     ~10x less
-
-vs C++ (RapidJSON + std::map):
-  Speedup:    ~3x faster
-  Memory:     ~2x less
+src/market_data_core.zig       C-ABI FFI surface (mdc_*)
+src/parsers/json_parser.zig    SIMD-assisted JSON field/number parser
+src/parsers/sbe_parser.zig     SBE binary decoder (does not compile yet)
+src/orderbook/book.zig         fixed top-100 order book
+src/protocols/binance.zig      Binance depth/trade (does not compile yet)
+src/protocols/coinbase.zig     Coinbase message scaffolding
+src/benchmarks/main_bench.zig  local micro-benchmarks
+include/                       C header for the FFI library
+examples/                      runnable Zig examples
 ```
-
-## Project Status
-
-**Phase 1** (Current):
-- [x] Project scaffolding
-- [x] Order book data structure
-- [ ] JSON parser with SIMD
-- [ ] Binance protocol parser
-- [ ] Coinbase protocol parser
-
-**Phase 2** (Next):
-- [ ] FIX protocol support
-- [ ] SBE (Simple Binary Encoding)
-- [ ] Multi-threading support
-- [ ] Shared memory order books
-
-**Phase 3** (Future):
-- [ ] FPGA acceleration hooks
-- [ ] Kernel bypass networking
-- [ ] Hardware timestamping
-
-## Performance Tips
-
-### CPU Affinity
-
-Pin to isolated CPU core for minimum jitter:
-
-```bash
-taskset -c 2 ./zig-out/bin/bench-parser
-```
-
-### Huge Pages
-
-Enable transparent huge pages for better TLB performance:
-
-```bash
-echo always > /sys/kernel/mm/transparent_hugepage/enabled
-```
-
-### NUMA Awareness
-
-Allocate memory on same NUMA node as CPU:
-
-```zig
-// TODO: NUMA-aware allocator
-const allocator = try NumaAllocator.init(numa_node);
-```
-
-## Comparison to Alternatives
-
-| Library | Language | Throughput | Latency | Memory |
-|---------|----------|------------|---------|--------|
-| **This** | **Zig** | **2.1M msg/s** | **476ns** | **12KB** |
-| ujson | Python | 40K msg/s | 25µs | 120KB |
-| RapidJSON | C++ | 700K msg/s | 1.4µs | 24KB |
-| simdjson | C++ | 1.5M msg/s | 666ns | 16KB |
-
-## Contributing
-
-Contributions welcome! Areas of focus:
-
-1. SIMD JSON parsing (AVX-512)
-2. Binary protocol support (FIX, SBE)
-3. More exchange protocols
-4. Benchmark comparisons
 
 ## License
 
 MIT
-
-## Related Projects
-
-- [zig-stratum-engine](../zig-stratum-engine) - Bitcoin mining engine
-- [zig-timeseries-db](../zig-timeseries-db) - Time series database
