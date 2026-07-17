@@ -12,7 +12,7 @@ _Generated 2026-07-17 from an investigation-only mapping pass over the audited T
 | 2.2 | `simd_crypto_ffi` | quantum_tx_builder_new (NEW) | 8 | ☐ not started |
 | 2.3 | `financial_engine` | FfiTradingSignal (Rust mirror) f64 -> i64 | 10 | ✅ LANDED quantum_vault 5a703cef (consumer-only) |
 | 2.4 | `zig_lens` | ZIG_LENS_LANG_GO=5 | 7 | ✅ LANDED zig-forge 7802b349 (in-tree binding only) |
-| 2.5 | `zdedupe` | zdedupe_list_dir | 7 | ☐ not started |
+| 2.5 | `zdedupe` | remove 7 unused C exports | 7 | ✅ LANDED zig-forge 688ada1f + zdedupe b500aca (iOS xcframework refresh deferred, harmless) |
 | 2.6 | `zig_ratelimit` | (moot — see below) | — | ✅ N/A |
 
 ---
