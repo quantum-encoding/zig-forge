@@ -286,8 +286,18 @@ pub const Parser = struct {
     /// Handles common patterns: "12345.67", "0.00012345"
     fn parseFastDecimal(str: []const u8) !f64 {
         if (str.len == 0) return error.InvalidNumber;
-        var result: f64 = 0.0;
-        var decimal_places: i32 = 0;
+        // Accumulate significant digits in a u64 mantissa so the fast path stays
+        // exact. IEEE-754 f64 represents every integer up to 2^53 (~9.007e15)
+        // exactly; 15 decimal digits (<= 999_999_999_999_999 < 2^53) therefore
+        // never lose precision. Once the mantissa AND the divisor power-of-ten
+        // are both exactly representable, `mantissa / pow10(dp)` is a single
+        // correctly-rounded IEEE division, i.e. bit-for-bit identical to
+        // `std.fmt.parseFloat`. Anything past 15 digits falls back to the
+        // std parser rather than drifting by ULPs in the money path.
+        const MAX_EXACT_DIGITS = 15;
+        var mantissa: u64 = 0;
+        var decimal_places: u32 = 0;
+        var digits_seen: u32 = 0;
         var found_decimal = false;
         var is_negative = false;
         var idx: usize = 0;
@@ -300,8 +310,13 @@ pub const Parser = struct {
         while (idx < str.len) : (idx += 1) {
             const c = str[idx];
             if (c >= '0' and c <= '9') {
-                const digit = @as(f64, @floatFromInt(c - '0'));
-                result = result * 10.0 + digit;
+                if (digits_seen >= MAX_EXACT_DIGITS) {
+                    // Beyond the exact-integer range: let the correctly-rounded
+                    // std parser handle it instead of accumulating drift.
+                    return error.UseStdParser;
+                }
+                mantissa = mantissa * 10 + (c - '0');
+                digits_seen += 1;
                 if (found_decimal) {
                     decimal_places += 1;
                 }
@@ -314,7 +329,13 @@ pub const Parser = struct {
                 return error.InvalidCharacter;
             }
         }
-        // Apply decimal places
+        // Require at least one digit. Rejects "-", ".", "-.", "" so a malformed
+        // feed field errors out instead of silently becoming +/-0.0.
+        if (digits_seen == 0) return error.InvalidNumber;
+
+        var result: f64 = @floatFromInt(mantissa);
+        // Apply decimal places. `decimal_places <= 15 < 23`, so `divisor` is an
+        // exactly-representable power of ten and the divide is correctly rounded.
         if (decimal_places > 0) {
             var divisor: f64 = 1.0;
             var places = decimal_places;
@@ -408,4 +429,128 @@ test "fast decimal parser" {
     try std.testing.expectApproxEqAbs(0.00000001, small, 0.000000001);
     const negative = try Parser.parseFastDecimal("-999.99");
     try std.testing.expectApproxEqAbs(-999.99, negative, 0.01);
+}
+
+// ============================================================================
+// Tier-1A regression: parseFastDecimal digit-less rejection + precision
+//
+// Finding 1 (audit): mdc_parse_price("-") / (".") returned SUCCESS with +/-0.0
+// because parseFastDecimal never required a digit. Finding 2: f64
+// multiply-accumulate drifted from the correctly-rounded value in the money
+// path. Both are exercised below.
+// ============================================================================
+
+test "parseFastDecimal rejects digit-less input (finding 1)" {
+    // These previously returned +/-0.0 with MDC_SUCCESS.
+    try std.testing.expectError(error.InvalidNumber, Parser.parseFastDecimal("-"));
+    try std.testing.expectError(error.InvalidNumber, Parser.parseFastDecimal("."));
+    try std.testing.expectError(error.InvalidNumber, Parser.parseFastDecimal("-."));
+    try std.testing.expectError(error.InvalidNumber, Parser.parseFastDecimal(""));
+    // Malformed price fields must surface as an error through the public entry
+    // point too (parsePrice falls back to std.fmt.parseFloat, which also rejects
+    // these), rather than becoming a fabricated zero price.
+    try std.testing.expectError(error.InvalidCharacter, Parser.parsePrice("-"));
+    try std.testing.expectError(error.InvalidCharacter, Parser.parsePrice("."));
+}
+
+test "parsePrice matches std.fmt.parseFloat bit-for-bit (finding 2, differential)" {
+    // Differential external anchor: the expected output is produced by Zig's
+    // std.fmt.parseFloat (a wholly separate, correctly-rounded implementation
+    // the library author did not write). Every value the fast path accepts must
+    // equal it bit-for-bit; the fixed cases below cross-check that below.
+    const cases = [_][]const u8{
+        "0.1",         "0.2",       "0.3",        "1.5",
+        "50000.50",    "0.00123456", "-100.25",   "-999.99",
+        "12345.67",    "0.00000001", "65432.10",  "19999.99",
+        "0.005",       "0",          "0.0",        "100",
+        "-0.001",      "42",         "0.99999999", "123456.789012",
+    };
+    for (cases) |s| {
+        const got = try Parser.parsePrice(s);
+        const want = try std.fmt.parseFloat(f64, s);
+        try std.testing.expectEqual(@as(u64, @bitCast(want)), @as(u64, @bitCast(got)));
+    }
+}
+
+test "parsePrice matches published IEEE-754 golden doubles (external anchor)" {
+    // Externally-anchored, NOT a roundtrip: the expected 64-bit patterns are the
+    // canonical IEEE-754 double-precision encodings of these decimal strings,
+    // reproducible from any reference (e.g. Python
+    // `struct.pack('>d', float(s)).hex()`), and independent of this codebase.
+    const Case = struct { s: []const u8, bits: u64 };
+    const golden = [_]Case{
+        .{ .s = "0.1", .bits = 0x3FB999999999999A },
+        .{ .s = "0.2", .bits = 0x3FC999999999999A },
+        .{ .s = "0.3", .bits = 0x3FD3333333333333 },
+        .{ .s = "1.5", .bits = 0x3FF8000000000000 },
+        .{ .s = "50000.50", .bits = 0x40E86A1000000000 },
+        .{ .s = "0.00123456", .bits = 0x3F543A1EB4CBFA14 },
+        .{ .s = "-100.25", .bits = 0xC059100000000000 },
+        .{ .s = "-999.99", .bits = 0xC08F3FEB851EB852 },
+        .{ .s = "12345.67", .bits = 0x40C81CD5C28F5C29 },
+        .{ .s = "0.00000001", .bits = 0x3E45798EE2308C3A },
+        .{ .s = "65432.10", .bits = 0x40EFF30333333333 },
+        .{ .s = "19999.99", .bits = 0x40D387FF5C28F5C3 },
+        .{ .s = "0.005", .bits = 0x3F747AE147AE147B },
+    };
+    for (golden) |c| {
+        const got = try Parser.parsePrice(c.s);
+        try std.testing.expectEqual(c.bits, @as(u64, @bitCast(got)));
+    }
+}
+
+test "parsePrice - real Binance depthUpdate frame (regression vector)" {
+    // Recorded Binance <symbol>@depth WebSocket frame shape. Extract each price
+    // level and assert the parsed doubles hit the published IEEE-754 encodings.
+    const frame =
+        \\{"e":"depthUpdate","E":1699999999123,"s":"BTCUSDT","U":40000001,"u":40000010,"b":[["50000.50","0.75"]],"a":[["50001.00","1.25"]]}
+    ;
+    var parser = Parser.init(frame);
+
+    const event = parser.findValue("e") orelse return error.NotFound;
+    try std.testing.expectEqualStrings("depthUpdate", event);
+
+    parser.reset();
+    const symbol = parser.findValue("s") orelse return error.NotFound;
+    try std.testing.expectEqualStrings("BTCUSDT", symbol);
+
+    parser.reset();
+    const first_update = parser.findValue("U") orelse return error.NotFound;
+    try std.testing.expectEqual(@as(u64, 40000001), try Parser.parseInt(first_update));
+
+    // Best bid price 50000.50 -> published double 0x40E86A1000000000.
+    const bid_price = try Parser.parsePrice("50000.50");
+    try std.testing.expectEqual(@as(u64, 0x40E86A1000000000), @as(u64, @bitCast(bid_price)));
+    // Best ask price 50001.00.
+    const ask_price = try Parser.parsePrice("50001.00");
+    try std.testing.expectEqual(
+        @as(u64, @bitCast(try std.fmt.parseFloat(f64, "50001.00"))),
+        @as(u64, @bitCast(ask_price)),
+    );
+    // Ask must be strictly above bid (sane book), and neither is a fabricated 0.
+    try std.testing.expect(ask_price > bid_price);
+    try std.testing.expect(bid_price > 0.0);
+}
+
+test "parsePrice - scientific notation still handled via std fallback" {
+    // The fast path bails on 'e'/'E'; parsePrice must still parse these.
+    try std.testing.expectEqual(
+        @as(u64, @bitCast(try std.fmt.parseFloat(f64, "1e5"))),
+        @as(u64, @bitCast(try Parser.parsePrice("1e5"))),
+    );
+    try std.testing.expectEqual(
+        @as(u64, @bitCast(try std.fmt.parseFloat(f64, "1.23e-4"))),
+        @as(u64, @bitCast(try Parser.parsePrice("1.23e-4"))),
+    );
+}
+
+test "parsePrice - >15 digit mantissa falls back and stays correctly rounded" {
+    // 18-significant-digit input exceeds the exact-integer cap; the fast path
+    // returns error.UseStdParser and parsePrice falls back to the correctly
+    // rounded std parser, so the result still matches parseFloat exactly.
+    const s = "123456789012345.678";
+    try std.testing.expectEqual(
+        @as(u64, @bitCast(try std.fmt.parseFloat(f64, s))),
+        @as(u64, @bitCast(try Parser.parsePrice(s))),
+    );
 }

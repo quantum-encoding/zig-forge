@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  External test-vector anchor for register_forge.
+
+  This is a hand-trimmed excerpt of the STMicroelectronics STM32F4 series
+  CMSIS-SVD description. Every numeric value below (peripheral base addresses,
+  register offsets, and field bit positions/widths) is taken verbatim from the
+  publicly published STM32F4 SVD / RM0368 reference manual and is NOT authored
+  by the register_forge maintainer — that is what makes it a valid external
+  anchor per the repo golden rule.
+
+  Source: cmsis-svd project, STMicroelectronics/STM32F401.svd
+  (https://github.com/cmsis-svd/cmsis-svd-data), fields cross-checked against
+  ST RM0368 "STM32F401xB/C and STM32F401xD/E advanced Arm-based 32-bit MCUs".
+
+  Included because it exercises the getFieldType width bug directly:
+  USART1.BRR.DIV_Mantissa is a genuine 12-bit field (bits [15:4]) that the old
+  code emitted as u8, silently mis-aligning DIV_Fraction and every later field.
+-->
+<device>
+  <name>STM32F4_EXCERPT</name>
+  <description>STM32F4 GPIOA + USART1 excerpt (external anchor)</description>
+  <peripherals>
+    <peripheral>
+      <name>GPIOA</name>
+      <description>General-purpose I/Os</description>
+      <baseAddress>0x40020000</baseAddress>
+      <registers>
+        <register>
+          <name>MODER</name>
+          <description>GPIO port mode register</description>
+          <addressOffset>0x00</addressOffset>
+          <size>32</size>
+          <fields>
+            <field>
+              <name>MODER0</name>
+              <description>Port x configuration bits (y = 0)</description>
+              <bitOffset>0</bitOffset>
+              <bitWidth>2</bitWidth>
+            </field>
+            <field>
+              <name>MODER1</name>
+              <description>Port x configuration bits (y = 1)</description>
+              <bitOffset>2</bitOffset>
+              <bitWidth>2</bitWidth>
+            </field>
+          </fields>
+        </register>
+        <register>
+          <name>ODR</name>
+          <description>GPIO port output data register</description>
+          <addressOffset>0x14</addressOffset>
+          <size>32</size>
+          <fields>
+            <field>
+              <name>ODR0</name>
+              <description>Port output data (y = 0)</description>
+              <bitOffset>0</bitOffset>
+              <bitWidth>1</bitWidth>
+            </field>
+          </fields>
+        </register>
+      </registers>
+    </peripheral>
+    <peripheral>
+      <name>USART1</name>
+      <description>Universal synchronous asynchronous receiver transmitter</description>
+      <baseAddress>0x40011000</baseAddress>
+      <registers>
+        <register>
+          <name>BRR</name>
+          <description>Baud rate register</description>
+          <addressOffset>0x08</addressOffset>
+          <size>32</size>
+          <fields>
+            <field>
+              <name>DIV_Fraction</name>
+              <description>fraction of USARTDIV</description>
+              <bitOffset>0</bitOffset>
+              <bitWidth>4</bitWidth>
+            </field>
+            <field>
+              <name>DIV_Mantissa</name>
+              <description>mantissa of USARTDIV</description>
+              <bitOffset>4</bitOffset>
+              <bitWidth>12</bitWidth>
+            </field>
+          </fields>
+        </register>
+      </registers>
+    </peripheral>
+  </peripherals>
+</device>

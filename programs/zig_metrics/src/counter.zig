@@ -13,6 +13,7 @@
 //! ```
 
 const std = @import("std");
+const escape = @import("escape.zig");
 
 /// Prometheus Counter (monotonically increasing)
 pub const Counter = struct {
@@ -71,7 +72,9 @@ pub const Counter = struct {
     /// Format as Prometheus exposition format
     pub fn write(self: *const Self, writer: anytype) !void {
         // Write HELP line
-        try writer.print("# HELP {s} {s}\n", .{ self.name, self.help });
+        try writer.print("# HELP {s} ", .{self.name});
+        try escape.writeEscapedHelp(writer, self.help);
+        try writer.writeAll("\n");
 
         // Write TYPE line
         try writer.print("# TYPE {s} counter\n", .{self.name});
@@ -84,7 +87,9 @@ pub const Counter = struct {
             try writer.writeAll("{");
             for (labels, 0..) |label, i| {
                 if (i > 0) try writer.writeAll(",");
-                try writer.print("{s}=\"{s}\"", .{ label.name, label.value });
+                try writer.print("{s}=\"", .{label.name});
+                try escape.writeEscapedLabelValue(writer, label.value);
+                try writer.writeAll("\"");
             }
             try writer.writeAll("}");
         }
@@ -132,7 +137,9 @@ pub const CounterF64 = struct {
     }
 
     pub fn write(self: *const Self, writer: anytype) !void {
-        try writer.print("# HELP {s} {s}\n", .{ self.name, self.help });
+        try writer.print("# HELP {s} ", .{self.name});
+        try escape.writeEscapedHelp(writer, self.help);
+        try writer.writeAll("\n");
         try writer.print("# TYPE {s} counter\n", .{self.name});
         try writer.print("{s}", .{self.name});
 
@@ -140,7 +147,9 @@ pub const CounterF64 = struct {
             try writer.writeAll("{");
             for (labels, 0..) |label, i| {
                 if (i > 0) try writer.writeAll(",");
-                try writer.print("{s}=\"{s}\"", .{ label.name, label.value });
+                try writer.print("{s}=\"", .{label.name});
+                try escape.writeEscapedLabelValue(writer, label.value);
+                try writer.writeAll("\"");
             }
             try writer.writeAll("}");
         }

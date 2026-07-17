@@ -104,6 +104,15 @@ pub const DistributedNode = struct {
     rpc_client: RpcClient,
     rpc_transport: RpcTransport,
 
+    // Stable homes for the Raft interface adapters. `getStateMachine()` /
+    // `getTransport()` return these structs *by value*; storing the address of
+    // an `init`-local copy into the heap `RaftNode` would dangle the moment
+    // `init` returns. Keeping them as fields gives them a stable address for the
+    // node's whole lifetime. Their `.ctx` pointers reference `kv_store` /
+    // `rpc_transport` above, which are already stable heap fields.
+    state_machine: raft.StateMachine,
+    transport: raft.Transport,
+
     // Runtime state
     running: std.atomic.Value(bool),
     tick_thread: ?std.Thread,
@@ -139,13 +148,14 @@ pub const DistributedNode = struct {
             }
         }
 
-        // Setup state machine
-        var sm = node.kv_store.getStateMachine();
-        node.raft_node.setStateMachine(&sm);
+        // Setup state machine — store the adapter in a stable field so the
+        // pointer handed to the RaftNode survives past `init` returning.
+        node.state_machine = node.kv_store.getStateMachine();
+        node.raft_node.setStateMachine(&node.state_machine);
 
-        // Setup transport
-        var transport = node.rpc_transport.getTransport();
-        node.raft_node.setTransport(&transport);
+        // Setup transport — same stable-field requirement as above.
+        node.transport = node.rpc_transport.getTransport();
+        node.raft_node.setTransport(&node.transport);
 
         // Register peers
         for (config.peers) |peer| {

@@ -25,6 +25,10 @@ pub const Client = struct {
     host: []const u8 = "",
     path: []const u8 = "",
     sec_websocket_key: [24]u8 = undefined,
+    /// Upper bound on a single incoming message payload. A server frame
+    /// declaring more than this is rejected before allocating, defeating
+    /// attacker-controlled memory-exhaustion DoS. Default 16 MiB.
+    max_message_size: usize = 16 * 1024 * 1024,
 
     pub fn init(allocator: Allocator) !Client {
         const io_threaded = try allocator.create(Io.Threaded);
@@ -60,15 +64,11 @@ pub const Client = struct {
         self.host = try self.allocator.dupe(u8, parsed.host);
         self.path = try self.allocator.dupe(u8, parsed.path);
 
-        // Generate Sec-WebSocket-Key (16 random bytes, base64 encoded)
+        // Generate Sec-WebSocket-Key (16 random bytes, base64 encoded).
+        // RFC 6455 §4.1 requires this nonce to be selected randomly from a
+        // strong source of entropy — use the CSPRNG, not a clock-seeded PRNG.
         var random_bytes: [16]u8 = undefined;
-        // Use timestamp as seed for PRNG
-        var seed: u64 = 0x9e3779b97f4a7c15;
-        if (std.time.Instant.now()) |instant| {
-            seed ^= @bitCast(instant.timestamp.sec);
-        } else |_| {}
-        var prng = std.Random.DefaultPrng.init(seed);
-        prng.fill(&random_bytes);
+        std.crypto.random.bytes(&random_bytes);
         _ = std.base64.standard.Encoder.encode(&self.sec_websocket_key, &random_bytes);
 
         // Convert wss:// to https:// for the HTTP upgrade request
@@ -124,6 +124,32 @@ pub const Client = struct {
             return error.UpgradeFailed;
         }
 
+        // RFC 6455 §4.1: the client MUST fail the connection unless the
+        // response carries `Upgrade: websocket`, `Connection: Upgrade`, and a
+        // `Sec-WebSocket-Accept` whose value is the base64(SHA1(key + GUID)).
+        // A bare 101 (proxy confusion / request smuggling) is NOT sufficient.
+        var saw_upgrade = false;
+        var saw_connection = false;
+        var accept_ok = false;
+        var it = response.head.iterateHeaders();
+        while (it.next()) |header| {
+            if (std.ascii.eqlIgnoreCase(header.name, "Upgrade")) {
+                if (std.ascii.eqlIgnoreCase(header.value, "websocket")) saw_upgrade = true;
+            } else if (std.ascii.eqlIgnoreCase(header.name, "Connection")) {
+                // May be a comma-separated token list (e.g. "keep-alive, Upgrade").
+                var tokens = std.mem.tokenizeAny(u8, header.value, ", \t");
+                while (tokens.next()) |tok| {
+                    if (std.ascii.eqlIgnoreCase(tok, "upgrade")) saw_connection = true;
+                }
+            } else if (std.ascii.eqlIgnoreCase(header.name, "Sec-WebSocket-Accept")) {
+                accept_ok = Handshake.validate(self.allocator, &self.sec_websocket_key, header.value) catch false;
+            }
+        }
+        if (!saw_upgrade or !saw_connection or !accept_ok) {
+            std.debug.print("WebSocket: handshake validation failed (upgrade={}, connection={}, accept={})\n", .{ saw_upgrade, saw_connection, accept_ok });
+            return error.HandshakeFailed;
+        }
+
         // Keep the connection alive for WebSocket communication
         self.connection = req.connection;
         req.connection = null; // Prevent request from closing the connection
@@ -170,89 +196,100 @@ pub const Client = struct {
 
         var reader = conn.reader();
 
-        // Read frame header (at least 2 bytes)
-        var header_buf: [14]u8 = undefined; // Max header size
-        reader.readSliceAll(header_buf[0..2]) catch |err| {
-            if (err == error.EndOfStream) {
-                self.state = .closed;
-                return null;
+        // Iterative frame loop: ping/pong are handled inline and we continue
+        // to the next frame rather than recursing, so a server streaming an
+        // unbounded flood of control frames cannot grow the stack.
+        while (true) {
+            // Read frame header (at least 2 bytes)
+            var header_buf: [14]u8 = undefined; // Max header size
+            reader.readSliceAll(header_buf[0..2]) catch |err| {
+                if (err == error.EndOfStream) {
+                    self.state = .closed;
+                    return null;
+                }
+                return err;
+            };
+
+            // Parse minimal header
+            const byte1 = header_buf[0];
+            const byte2 = header_buf[1];
+
+            const fin = (byte1 & 0x80) != 0;
+            const opcode_val = byte1 & 0x0F;
+            const opcode: Opcode = switch (opcode_val) {
+                0x0 => .continuation,
+                0x1 => .text,
+                0x2 => .binary,
+                0x8 => .close,
+                0x9 => .ping,
+                0xA => .pong,
+                else => return error.InvalidOpcode,
+            };
+
+            const masked = (byte2 & 0x80) != 0;
+            var payload_len: u64 = byte2 & 0x7F;
+
+            // Extended payload length
+            if (payload_len == 126) {
+                reader.readSliceAll(header_buf[2..4]) catch return error.ReadFailed;
+                payload_len = std.mem.readInt(u16, header_buf[2..4], .big);
+            } else if (payload_len == 127) {
+                reader.readSliceAll(header_buf[2..10]) catch return error.ReadFailed;
+                payload_len = std.mem.readInt(u64, header_buf[2..10], .big);
             }
-            return err;
-        };
 
-        // Parse minimal header
-        const byte1 = header_buf[0];
-        const byte2 = header_buf[1];
+            // Bound the attacker-controlled length BEFORE allocating. This
+            // both defeats memory-exhaustion DoS and keeps the @intCast below
+            // in range on 32-bit targets (where usize < u64).
+            if (payload_len > self.max_message_size) return error.MessageTooBig;
 
-        const fin = (byte1 & 0x80) != 0;
-        const opcode_val = byte1 & 0x0F;
-        const opcode: Opcode = switch (opcode_val) {
-            0x0 => .continuation,
-            0x1 => .text,
-            0x2 => .binary,
-            0x8 => .close,
-            0x9 => .ping,
-            0xA => .pong,
-            else => return error.InvalidOpcode,
-        };
+            // Masking key (if present)
+            var masking_key: ?[4]u8 = null;
+            if (masked) {
+                var key: [4]u8 = undefined;
+                reader.readSliceAll(&key) catch return error.ReadFailed;
+                masking_key = key;
+            }
 
-        const masked = (byte2 & 0x80) != 0;
-        var payload_len: u64 = byte2 & 0x7F;
+            // Read payload
+            const payload = try self.allocator.alloc(u8, @intCast(payload_len));
+            errdefer self.allocator.free(payload);
 
-        // Extended payload length
-        if (payload_len == 126) {
-            reader.readSliceAll(header_buf[2..4]) catch return error.ReadFailed;
-            payload_len = std.mem.readInt(u16, header_buf[2..4], .big);
-        } else if (payload_len == 127) {
-            reader.readSliceAll(header_buf[2..10]) catch return error.ReadFailed;
-            payload_len = std.mem.readInt(u64, header_buf[2..10], .big);
-        }
+            if (payload_len > 0) {
+                reader.readSliceAll(payload) catch return error.ReadFailed;
 
-        // Masking key (if present)
-        var masking_key: ?[4]u8 = null;
-        if (masked) {
-            var key: [4]u8 = undefined;
-            reader.readSliceAll(&key) catch return error.ReadFailed;
-            masking_key = key;
-        }
-
-        // Read payload
-        const payload = try self.allocator.alloc(u8, @intCast(payload_len));
-        errdefer self.allocator.free(payload);
-
-        if (payload_len > 0) {
-            reader.readSliceAll(payload) catch return error.ReadFailed;
-
-            // Unmask if needed
-            if (masking_key) |key| {
-                for (payload, 0..) |*byte, i| {
-                    byte.* ^= key[i % 4];
+                // Unmask if needed
+                if (masking_key) |key| {
+                    for (payload, 0..) |*byte, i| {
+                        byte.* ^= key[i % 4];
+                    }
                 }
             }
-        }
 
-        // Handle control frames
-        if (opcode == .close) {
-            self.state = .closing;
-            // Send close response
-            self.sendFrame(.close, &[_]u8{ 0x03, 0xe8 }) catch {}; // 1000 = normal
-            self.state = .closed;
-        } else if (opcode == .ping) {
-            // Respond with pong
-            self.sendFrame(.pong, payload) catch {};
-            self.allocator.free(payload);
-            return self.receive(); // Get next message
-        } else if (opcode == .pong) {
-            self.allocator.free(payload);
-            return self.receive(); // Ignore pong, get next message
-        }
+            // Handle control frames
+            if (opcode == .close) {
+                self.state = .closing;
+                // Send close response
+                self.sendFrame(.close, &[_]u8{ 0x03, 0xe8 }) catch {}; // 1000 = normal
+                self.state = .closed;
+            } else if (opcode == .ping) {
+                // Respond with pong, then read the next frame.
+                self.sendFrame(.pong, payload) catch {};
+                self.allocator.free(payload);
+                continue;
+            } else if (opcode == .pong) {
+                // Ignore pong, read the next frame.
+                self.allocator.free(payload);
+                continue;
+            }
 
-        return Message{
-            .opcode = opcode,
-            .payload = payload,
-            .fin = fin,
-            .allocator = self.allocator,
-        };
+            return Message{
+                .opcode = opcode,
+                .payload = payload,
+                .fin = fin,
+                .allocator = self.allocator,
+            };
+        }
     }
 
     /// Close the connection gracefully

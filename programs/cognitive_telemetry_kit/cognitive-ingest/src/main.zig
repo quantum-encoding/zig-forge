@@ -23,7 +23,9 @@ const Allocator = std.mem.Allocator;
 
 const Config = struct {
     url: []const u8 = "http://127.0.0.1:8000/sql",
-    auth: []const u8 = "Basic cm9vdDpyb290", // root:root
+    // No hardcoded default credential. Populated at startup from the
+    // environment (buildAuthHeader); the program fails closed if unset.
+    auth: []const u8 = "",
     ns: []const u8 = "cognitive",
     db: []const u8 = "telemetry",
     daemon: bool = false,
@@ -145,26 +147,27 @@ fn initSchema(allocator: Allocator) !void {
     std.debug.print("Schema initialized.\n", .{});
 }
 
+/// Build the `CREATE ... CONTENT <object>` statement for a cognitive state.
+///
+/// The record is serialised with the audited `std.json.Stringify` rather than a
+/// hand-rolled SurrealQL escaper. A JSON object is a valid SurrealQL object (the
+/// value form the `CONTENT` clause expects), and std.json escapes every quote,
+/// backslash, control character and UTF-8 sequence — so no caller-controlled
+/// state string can break out of its string context and inject SurrealQL.
+fn buildInsertSql(allocator: Allocator, state: CognitiveState) ![]u8 {
+    const record = .{
+        .state = state.state,
+        .pid = state.pid,
+        .timestamp = state.timestamp,
+    };
+    const json = try std.json.Stringify.valueAlloc(allocator, record, .{});
+    defer allocator.free(json);
+
+    return std.fmt.allocPrint(allocator, "CREATE cognitive_state CONTENT {s}", .{json});
+}
+
 fn insertState(allocator: Allocator, state: CognitiveState) !void {
-    // Escape the state string for SQL
-    var escaped: std.ArrayList(u8) = .empty;
-    defer escaped.deinit(allocator);
-
-    for (state.state) |c| {
-        switch (c) {
-            '\'' => try escaped.appendSlice(allocator, "\\'"),
-            '\\' => try escaped.appendSlice(allocator, "\\\\"),
-            '\n' => try escaped.appendSlice(allocator, "\\n"),
-            else => try escaped.append(allocator, c),
-        }
-    }
-
-    const sql = try std.fmt.allocPrint(allocator,
-        \\CREATE cognitive_state SET
-        \\  state = '{s}',
-        \\  pid = {d},
-        \\  timestamp = {d}
-    , .{ escaped.items, state.pid, state.timestamp });
+    const sql = try buildInsertSql(allocator, state);
     defer allocator.free(sql);
 
     const response = try executeQuery(allocator, sql);
@@ -250,6 +253,46 @@ fn printUsage() void {
     , .{});
 }
 
+/// Resolve the SurrealDB Authorization header from the environment.
+///
+/// Precedence:
+///   1. `SURREAL_AUTH` — used verbatim as the full header value (e.g. a
+///      pre-formed "Basic <base64>" or "Bearer <token>").
+///   2. `SURREAL_USER` + `SURREAL_PASS` — encoded into HTTP Basic auth.
+///
+/// Fails closed with `error.MissingCredential` when no credential is provided;
+/// there is no baked-in default (the former hardcoded root:root is gone).
+fn buildAuthHeader(allocator: Allocator) ![]const u8 {
+    if (std.process.getEnvVarOwned(allocator, "SURREAL_AUTH")) |full| {
+        return full;
+    } else |err| switch (err) {
+        error.EnvironmentVariableNotFound => {},
+        else => return err,
+    }
+
+    const user = std.process.getEnvVarOwned(allocator, "SURREAL_USER") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return error.MissingCredential,
+        else => return err,
+    };
+    defer allocator.free(user);
+
+    const pass = std.process.getEnvVarOwned(allocator, "SURREAL_PASS") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return error.MissingCredential,
+        else => return err,
+    };
+    defer allocator.free(pass);
+
+    const raw = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ user, pass });
+    defer allocator.free(raw);
+
+    const Encoder = std.base64.standard.Encoder;
+    const buf = try allocator.alloc(u8, Encoder.calcSize(raw.len));
+    defer allocator.free(buf);
+    const encoded = Encoder.encode(buf, raw);
+
+    return std.fmt.allocPrint(allocator, "Basic {s}", .{encoded});
+}
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     global_io = init.io;
@@ -279,6 +322,18 @@ pub fn main(init: std.process.Init) !void {
             config.db = args[i];
         }
     }
+
+    // Require the SurrealDB credential from the environment — fail closed.
+    config.auth = buildAuthHeader(allocator) catch |err| {
+        std.debug.print(
+            \\Error: SurrealDB credential required.
+            \\  Set SURREAL_USER and SURREAL_PASS, or SURREAL_AUTH with a full
+            \\  Authorization header value. The hardcoded root:root default has
+            \\  been removed.
+            \\
+        , .{});
+        return err;
+    };
 
     // io context from init
 
@@ -310,4 +365,54 @@ pub fn main(init: std.process.Init) !void {
         const count = try processCaptures(allocator);
         std.debug.print("Ingested {d} cognitive states.\n", .{count});
     }
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+test "buildInsertSql: adversarial state cannot break out of the CONTENT object" {
+    const allocator = std.testing.allocator;
+
+    // Quotes, a SurrealQL statement terminator, a backslash, and control chars —
+    // every character the old hand-rolled escaper had to get right by hand.
+    const evil = "'; DROP TABLE cognitive_state; RETURN 1; -- \"pwn\" \\back\nnew\ttab";
+    const state = CognitiveState{ .timestamp = 1730000000, .pid = 4242, .state = evil };
+
+    const sql = try buildInsertSql(allocator, state);
+    defer allocator.free(sql);
+
+    const prefix = "CREATE cognitive_state CONTENT ";
+    try std.testing.expect(std.mem.startsWith(u8, sql, prefix));
+
+    // The record body is valid JSON (a valid SurrealQL object) and round-trips
+    // the exact bytes — proving the payload stayed inside the string value and
+    // did not inject any SurrealQL structure. std.json is the external oracle.
+    const json_part = sql[prefix.len..];
+    const Record = struct { state: []const u8, pid: i32, timestamp: i64 };
+    const parsed = try std.json.parseFromSlice(Record, allocator, json_part, .{});
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings(evil, parsed.value.state);
+    try std.testing.expectEqual(@as(i32, 4242), parsed.value.pid);
+    try std.testing.expectEqual(@as(i64, 1730000000), parsed.value.timestamp);
+
+    // A raw double-quote is emitted backslash-escaped in the SQL text.
+    try std.testing.expect(std.mem.indexOf(u8, sql, "\\\"pwn\\\"") != null);
+    // The literal terminator sequence never appears as bare SQL structure —
+    // it only exists inside the quoted JSON string value.
+    try std.testing.expect(std.mem.indexOf(u8, json_part, "\"state\":") != null);
+}
+
+test "buildInsertSql: benign state serialises cleanly" {
+    const allocator = std.testing.allocator;
+
+    const state = CognitiveState{ .timestamp = 42, .pid = 7, .state = "Thinking" };
+    const sql = try buildInsertSql(allocator, state);
+    defer allocator.free(sql);
+
+    try std.testing.expectEqualStrings(
+        "CREATE cognitive_state CONTENT {\"state\":\"Thinking\",\"pid\":7,\"timestamp\":42}",
+        sql,
+    );
 }

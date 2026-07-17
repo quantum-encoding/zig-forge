@@ -250,3 +250,54 @@ pub fn getInt(obj: std.json.ObjectMap, key: []const u8) i64 {
     }
     return 0;
 }
+
+/// Escape a string for safe interpolation inside a single-quoted SurrealQL
+/// string literal. Backslash-escapes `'` and `\` (SurrealDB accepts `\'`).
+/// Caller owns the returned slice.
+///
+/// NOTE: this is ONLY valid for values placed inside quotes. Record-id
+/// positions (`table:{id}`) cannot be made safe by string escaping — use
+/// `validRecordId` to allow-list those instead.
+pub fn escapeSql(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    // Count characters that need escaping.
+    var extra: usize = 0;
+    for (input) |c| {
+        if (c == '\'' or c == '\\') extra += 1;
+    }
+
+    const buf = try allocator.alloc(u8, input.len + extra);
+    var pos: usize = 0;
+    for (input) |c| {
+        if (c == '\'') {
+            buf[pos] = '\\';
+            pos += 1;
+            buf[pos] = '\'';
+            pos += 1;
+        } else if (c == '\\') {
+            buf[pos] = '\\';
+            pos += 1;
+            buf[pos] = '\\';
+            pos += 1;
+        } else {
+            buf[pos] = c;
+            pos += 1;
+        }
+    }
+    return buf[0..pos];
+}
+
+/// Allow-list check for a SurrealQL record-id fragment interpolated as
+/// `table:{s}`. Only `[A-Za-z0-9_]` is permitted; anything else (`:`, `'`,
+/// `;`, whitespace, ...) could break out of the record-id/statement context,
+/// so such names are refused by callers rather than escaped.
+pub fn validRecordId(s: []const u8) bool {
+    if (s.len == 0) return false;
+    for (s) |c| {
+        const ok = (c >= 'A' and c <= 'Z') or
+            (c >= 'a' and c <= 'z') or
+            (c >= '0' and c <= '9') or
+            c == '_';
+        if (!ok) return false;
+    }
+    return true;
+}

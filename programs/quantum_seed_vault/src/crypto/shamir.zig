@@ -6,7 +6,29 @@
 //! - Generating SLIP-39 compatible mnemonic shares
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
+
+/// Fill `buf` with cryptographically secure random bytes from the operating
+/// system CSPRNG. Portable across the native (macOS) test target and the
+/// Raspberry Pi (arm-linux) release target.
+fn fillSecureRandom(buf: []u8) error{EntropyUnavailable}!void {
+    switch (builtin.os.tag) {
+        .linux => {
+            var i: usize = 0;
+            while (i < buf.len) {
+                const rc = std.os.linux.getrandom(buf[i..].ptr, buf.len - i, 0);
+                switch (std.os.linux.errno(rc)) {
+                    .SUCCESS => i += rc,
+                    .INTR => continue,
+                    else => return error.EntropyUnavailable,
+                }
+            }
+        },
+        // macOS / *BSD: arc4random_buf is a libc CSPRNG that cannot fail.
+        else => std.c.arc4random_buf(buf.ptr, buf.len),
+    }
+}
 
 /// Error types for SSS operations
 pub const ShamirError = error{
@@ -222,8 +244,18 @@ pub const SSS = struct {
 
         GF256.init();
 
-        // Allocate shares
+        // Allocate shares. Initialize every entry to an empty slice up front so
+        // the errdefer below has well-defined `data.len` for shares not yet built.
         const shares = try allocator.alloc(Share, num_shares);
+        for (shares) |*s| {
+            s.* = Share{
+                .index = 0,
+                .data = &[_]u8{},
+                .threshold = threshold,
+                .total = num_shares,
+                .allocator = allocator,
+            };
+        }
         errdefer {
             for (shares) |*s| {
                 if (s.data.len > 0) s.deinit();
@@ -231,26 +263,39 @@ pub const SSS = struct {
             allocator.free(shares);
         }
 
-        // Generate random coefficients for each byte position
-        var rng = std.crypto.random;
+        // Shamir Secret Sharing: for each secret byte we need ONE polynomial of
+        // degree (threshold-1),
+        //   f(x) = secret_byte + a1*x + a2*x^2 + ... + a_{k-1}*x^{k-1}
+        // and the SAME coefficients must be evaluated at every share's x. Drawing
+        // fresh coefficients per share (the previous defect) puts each share on a
+        // different polynomial, so Lagrange interpolation in combine() cannot
+        // recover the secret.
+        //
+        // Draw all coefficients once, up front: `coeffs[byte_idx * num_coeffs + j]`
+        // is a_{j+1} for secret byte `byte_idx`.
+        const num_coeffs: usize = @as(usize, threshold) - 1; // threshold >= 2, so >= 1
+        const coeffs = try allocator.alloc(u8, secret.len * num_coeffs);
+        defer {
+            // Coefficients are secret material (they define the polynomial through
+            // the secret) — zero before freeing.
+            @memset(coeffs, 0);
+            allocator.free(coeffs);
+        }
+        try fillSecureRandom(coeffs);
 
         for (shares, 0..) |*share, share_idx| {
             const x: u8 = @intCast(share_idx + 1);
-            var share_data = try allocator.alloc(u8, secret.len);
+            const share_data = try allocator.alloc(u8, secret.len);
             errdefer allocator.free(share_data);
 
             for (secret, 0..) |secret_byte, byte_idx| {
-                // Evaluate polynomial at x
-                // f(x) = secret + a1*x + a2*x^2 + ... + a(k-1)*x^(k-1)
+                // Evaluate the byte's polynomial at this share's x.
                 var y = secret_byte;
-                var x_power: u8 = x;
+                var x_power: u8 = x; // x^1, x^2, ...
+                const base = byte_idx * num_coeffs;
 
-                for (1..threshold) |_| {
-                    // Generate random coefficient (deterministic based on position for reproducibility)
-                    var coef_seed: [32]u8 = undefined;
-                    rng.bytes(&coef_seed);
-                    const coef = coef_seed[byte_idx % 32];
-
+                for (0..num_coeffs) |j| {
+                    const coef = coeffs[base + j];
                     y = GF256.add(y, GF256.multiply(coef, x_power));
                     x_power = GF256.multiply(x_power, x);
                 }
@@ -480,6 +525,110 @@ test "GF256 basic operations" {
     const b: u8 = 0x17;
     const quotient = GF256.divide(a, b);
     try std.testing.expectEqual(a, GF256.multiply(quotient, b));
+}
+
+test "GF256 multiply matches FIPS-197 worked examples (external vector)" {
+    // The field used here is GF(2^8) with the AES/Rijndael reduction polynomial
+    // x^8 + x^4 + x^3 + x + 1 (0x11B) — identical to FIPS-197. The published
+    // worked examples in FIPS-197 §4.2 ("Multiplication") are byte-exact external
+    // vectors for GF256.multiply / xtime.
+    GF256.init();
+
+    // FIPS-197 §4.2: {57} • {83} = {c1}
+    try std.testing.expectEqual(@as(u8, 0xc1), GF256.multiply(0x57, 0x83));
+    // FIPS-197 §4.2: {57} • {13} = {fe}
+    try std.testing.expectEqual(@as(u8, 0xfe), GF256.multiply(0x57, 0x13));
+    // FIPS-197 xtime ladder for {57}: •02=ae, •04=47, •08=8e, •10=07
+    try std.testing.expectEqual(@as(u8, 0xae), GF256.multiply(0x57, 0x02));
+    try std.testing.expectEqual(@as(u8, 0x47), GF256.multiply(0x57, 0x04));
+    try std.testing.expectEqual(@as(u8, 0x8e), GF256.multiply(0x57, 0x08));
+    try std.testing.expectEqual(@as(u8, 0x07), GF256.multiply(0x57, 0x10));
+    // Multiplicative identity
+    try std.testing.expectEqual(@as(u8, 0x57), GF256.multiply(0x57, 0x01));
+}
+
+test "SSS combine recovers f(0) from a fixed GF(256) line (external hand-check)" {
+    // Independent of split()'s RNG: construct shares that lie on a known degree-1
+    // polynomial over GF(2^8) and verify Lagrange interpolation at x=0 returns the
+    // secret. The share y-values are derived purely from FIPS-197 field arithmetic:
+    //   f(x) = {53} + {17}·x
+    //   f(1) = {53} XOR ({17}•{01}) = {53} XOR {17} = {44}
+    //   f(2) = {53} XOR ({17}•{02})                    ({17}•{02}=xtime{17}={2e})
+    //        = {53} XOR {2e} = {7d}
+    // combine([(1,{44}),(2,{7d})]) must yield the secret {53}.
+    const allocator = std.testing.allocator;
+    GF256.init();
+
+    // Sanity on the derived y-values via the (externally-anchored) field ops.
+    try std.testing.expectEqual(@as(u8, 0x2e), GF256.multiply(0x17, 0x02));
+    try std.testing.expectEqual(@as(u8, 0x44), GF256.add(0x53, GF256.multiply(0x17, 0x01)));
+    try std.testing.expectEqual(@as(u8, 0x7d), GF256.add(0x53, GF256.multiply(0x17, 0x02)));
+
+    var s1 = try Share.init(allocator, 1, &[_]u8{0x44}, 2, 2);
+    defer s1.deinit();
+    var s2 = try Share.init(allocator, 2, &[_]u8{0x7d}, 2, 2);
+    defer s2.deinit();
+
+    const recovered = try SSS.combine(allocator, &[_]Share{ s1, s2 });
+    defer allocator.free(recovered);
+
+    try std.testing.expectEqualSlices(u8, &[_]u8{0x53}, recovered);
+}
+
+test "SSS split then combine roundtrips (shared-polynomial regression)" {
+    const allocator = std.testing.allocator;
+
+    const secret = "correct horse battery staple \x00\xff\x10";
+
+    // Try several (threshold, total) configurations.
+    const configs = [_]struct { k: u8, n: u8 }{
+        .{ .k = 2, .n = 3 },
+        .{ .k = 3, .n = 5 },
+        .{ .k = 5, .n = 5 },
+        .{ .k = 2, .n = 2 },
+    };
+
+    for (configs) |cfg| {
+        const shares = try SSS.split(allocator, secret, cfg.k, cfg.n);
+        defer {
+            for (shares) |*s| s.deinit();
+            allocator.free(shares);
+        }
+
+        // Every threshold-sized subset must recover the exact secret. If shares
+        // were on different polynomials (the old defect) this fails.
+        // Check the first k, and the last k.
+        {
+            const subset = shares[0..cfg.k];
+            const recovered = try SSS.combine(allocator, subset);
+            defer allocator.free(recovered);
+            try std.testing.expectEqualSlices(u8, secret, recovered);
+        }
+        {
+            const subset = shares[(cfg.n - cfg.k)..cfg.n];
+            const recovered = try SSS.combine(allocator, subset);
+            defer allocator.free(recovered);
+            try std.testing.expectEqualSlices(u8, secret, recovered);
+        }
+    }
+}
+
+test "SSS shares are not the raw secret (polynomial actually applied)" {
+    const allocator = std.testing.allocator;
+    const secret = [_]u8{ 0xde, 0xad, 0xbe, 0xef };
+
+    const shares = try SSS.split(allocator, &secret, 3, 4);
+    defer {
+        for (shares) |*s| s.deinit();
+        allocator.free(shares);
+    }
+
+    // With a degree-2 polynomial and non-zero coefficients (overwhelmingly likely),
+    // no share's data should equal the plaintext secret.
+    for (shares) |s| {
+        try std.testing.expect(!std.mem.eql(u8, s.data, &secret));
+        try std.testing.expect(s.index != 0);
+    }
 }
 
 test "Share serialization roundtrip" {

@@ -201,6 +201,7 @@ pub const ParseError = error{
     LineTooLong,
     IncompleteMessage,
     InvalidContentLength,
+    ConflictingFraming,
 };
 
 pub const Parser = struct {
@@ -235,13 +236,32 @@ pub const Parser = struct {
         // Parse headers
         try self.parseHeaders(&request.headers, &request.header_count);
 
-        // Extract special headers
-        if (request.getHeader("Content-Length")) |cl| {
-            request.content_length = std.fmt.parseInt(usize, cl, 10) catch return error.InvalidContentLength;
+        // Extract special headers.
+        //
+        // Content-Length: a message MUST carry at most one Content-Length. A
+        // duplicated (or repeated-with-different-value) Content-Length is a
+        // classic request-smuggling primitive (RFC 9112 §6.3), so reject it
+        // rather than silently taking the first.
+        {
+            var seen_cl = false;
+            for (request.headers[0..request.header_count]) |h| {
+                if (std.ascii.eqlIgnoreCase(h.name, "Content-Length")) {
+                    if (seen_cl) return error.ConflictingFraming;
+                    seen_cl = true;
+                    request.content_length = std.fmt.parseInt(usize, h.value, 10) catch return error.InvalidContentLength;
+                }
+            }
         }
 
         if (request.getHeader("Transfer-Encoding")) |te| {
-            request.is_chunked = std.mem.indexOf(u8, te, "chunked") != null;
+            request.is_chunked = std.ascii.indexOfIgnoreCase(te, "chunked") != null;
+        }
+
+        // Content-Length + Transfer-Encoding on the same message is ambiguous
+        // framing and the canonical HTTP-request-smuggling vector. A proxy must
+        // never forward it; reject outright (RFC 9112 §6.1).
+        if (request.content_length != null and request.is_chunked) {
+            return error.ConflictingFraming;
         }
 
         if (request.getHeader("Host")) |host| {
@@ -255,12 +275,15 @@ pub const Parser = struct {
             request.keep_alive = request.version == .http_1_1;
         }
 
-        // Body
+        // Body: the declared Content-Length MUST match the bytes actually
+        // present. If the body is short (truncated), forwarding the
+        // Content-Length header without the matching bytes desyncs the upstream
+        // and is itself a smuggling vector — reject instead of relaying a
+        // half-message.
         if (request.content_length) |len| {
-            if (self.pos + len <= self.data.len) {
-                request.body = self.data[self.pos .. self.pos + len];
-                self.pos += len;
-            }
+            if (self.pos + len > self.data.len) return error.IncompleteMessage;
+            request.body = self.data[self.pos .. self.pos + len];
+            self.pos += len;
         }
 
         return request;
@@ -516,6 +539,46 @@ test "parse HTTP response" {
     try std.testing.expectEqual(@as(u16, 200), response.status_code);
     try std.testing.expectEqualStrings("OK", response.reason);
     try std.testing.expectEqualStrings("Hello", response.body);
+}
+
+test "reject Content-Length + Transfer-Encoding conflict (smuggling)" {
+    const data =
+        "POST /api/data HTTP/1.1\r\n" ++
+        "Host: example.com\r\n" ++
+        "Content-Length: 5\r\n" ++
+        "Transfer-Encoding: chunked\r\n" ++
+        "\r\n" ++
+        "hello";
+
+    var parser = Parser.init(data);
+    try std.testing.expectError(error.ConflictingFraming, parser.parseRequest());
+}
+
+test "reject duplicate Content-Length headers (smuggling)" {
+    const data =
+        "POST /api/data HTTP/1.1\r\n" ++
+        "Host: example.com\r\n" ++
+        "Content-Length: 5\r\n" ++
+        "Content-Length: 6\r\n" ++
+        "\r\n" ++
+        "hello";
+
+    var parser = Parser.init(data);
+    try std.testing.expectError(error.ConflictingFraming, parser.parseRequest());
+}
+
+test "reject request whose body is shorter than Content-Length" {
+    // Content-Length claims 100 bytes but only 5 are present. Relaying this with
+    // the Content-Length header intact would desync the upstream.
+    const data =
+        "POST /api/data HTTP/1.1\r\n" ++
+        "Host: example.com\r\n" ++
+        "Content-Length: 100\r\n" ++
+        "\r\n" ++
+        "short";
+
+    var parser = Parser.init(data);
+    try std.testing.expectError(error.IncompleteMessage, parser.parseRequest());
 }
 
 test "build request" {

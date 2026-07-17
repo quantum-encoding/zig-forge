@@ -142,11 +142,17 @@ fn readStdin(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
     return input_bytes;
 }
 
+/// Maximum size of a chart-spec input file, matching the 10 MB stdin cap.
+const MAX_INPUT_BYTES: u64 = 10 * 1024 * 1024;
+
 fn readFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
     const file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
 
     const stat = try file.stat(io);
+    // Cap the file size before allocating: an oversized (or bogus, e.g. a device
+    // node reporting a huge/negative size) spec must not drive an unbounded alloc.
+    if (stat.size > MAX_INPUT_BYTES) return error.InputTooLarge;
     const size: usize = @intCast(stat.size);
 
     const data = try allocator.alloc(u8, size);

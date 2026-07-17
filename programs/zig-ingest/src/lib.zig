@@ -226,3 +226,12 @@ export fn zi_free_string_result(result_ptr: ?*CStringResult) void {
         r.* = CStringResult{};
     }
 }
+
+// =============================================================================
+// Test aggregation
+// =============================================================================
+// Pull the SurrealQL-emitter / injection-fixture tests in types.zig into the
+// `zig build test` target (whose root module is this file).
+test {
+    _ = @import("types.zig");
+}

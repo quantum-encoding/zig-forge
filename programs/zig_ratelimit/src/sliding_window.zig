@@ -32,8 +32,13 @@ pub const SlidingWindowLog = struct {
     /// limit: Max requests per window
     /// window_ms: Window duration in milliseconds
     pub fn init(allocator: Allocator, limit: usize, window_ms: u64) !Self {
+        // Clamp-and-document (non-breaking): a 0 window makes the counter divide
+        // by zero; a 0 limit makes the ring buffer length 0, so `% len` divides
+        // by zero on the first insert. Clamp both to a safe minimum.
+        const safe_limit = @max(limit, 1);
+        const safe_window_ms = @max(window_ms, 1);
         // Allocate enough space for limit + some buffer
-        const capacity = limit * 2;
+        const capacity = safe_limit * 2;
         const timestamps = try allocator.alloc(i64, capacity);
         @memset(timestamps, 0);
 
@@ -41,8 +46,8 @@ pub const SlidingWindowLog = struct {
             .timestamps = timestamps,
             .head = 0,
             .count = 0,
-            .limit = limit,
-            .window_ns = @as(i64, @intCast(window_ms)) * 1_000_000,
+            .limit = safe_limit,
+            .window_ns = @as(i64, @intCast(safe_window_ms)) * 1_000_000,
             .allocator = allocator,
         };
     }
@@ -137,12 +142,14 @@ pub const SlidingWindowCounter = struct {
     /// limit: Max requests per window
     /// window_ms: Window duration in milliseconds
     pub fn init(limit: u64, window_ms: u64) Self {
+        // Clamp-and-document (non-breaking): window_ms == 0 makes the
+        // @divFloor(now - window_start, window_ns) below divide by zero.
         return Self{
             .current_count = 0,
             .previous_count = 0,
             .window_start = @intCast(compat.nowNs()),
             .limit = limit,
-            .window_ns = @as(i64, @intCast(window_ms)) * 1_000_000,
+            .window_ns = @as(i64, @intCast(@max(window_ms, 1))) * 1_000_000,
         };
     }
 
@@ -236,11 +243,13 @@ pub const FixedWindowCounter = struct {
     const Self = @This();
 
     pub fn init(limit: u64, window_ms: u64) Self {
+        // Clamp-and-document (non-breaking): a 0 window makes the reset math
+        // below compare against a zero-length window.
         return Self{
             .count = 0,
             .window_start = @intCast(compat.nowNs()),
             .limit = limit,
-            .window_ns = @as(i64, @intCast(window_ms)) * 1_000_000,
+            .window_ns = @as(i64, @intCast(@max(window_ms, 1))) * 1_000_000,
         };
     }
 

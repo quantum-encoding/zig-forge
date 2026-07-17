@@ -195,55 +195,46 @@ fn handleInit(allocator: mem.Allocator, args: []const []const u8) !void {
     const manifest_path = try std.fmt.allocPrint(allocator, "{s}/manifest.json", .{log_dir});
     defer allocator.free(manifest_path);
 
-    const manifest = try std.fmt.allocPrint(
-        allocator,
-        \\{{
-        \\  "agent": {{
-        \\    "id": "{s}",
-        \\    "chronos_tick": "{s}",
-        \\    "timestamp_iso": "{s}",
-        \\    "provider": "{s}"
-        \\  }},
-        \\  "batch": {{
-        \\    "id": "{s}",
-        \\    "is_retry": {s},
-        \\    "retry_number": {d}
-        \\  }},
-        \\  "task": {{
-        \\    "description": "{s}",
-        \\    "max_turns": {d},
-        \\    "output_file": "{s}"
-        \\  }},
-        \\  "crucible": {{
-        \\    "path": "{s}"
-        \\  }},
-        \\  "execution": {{
-        \\    "pid": {?d},
-        \\    "started_at": "{s}",
-        \\    "status": "RUNNING"
-        \\  }}
-        \\}}
-        \\
-    ,
-        .{
-            agent_id.?,
-            tick,
-            timestamp,
-            provider,
-            batch_id.?,
-            if (retry_number > 0) "true" else "false",
-            retry_number,
-            task.?,
-            max_turns,
-            output_file orelse "",
-            crucible_path orelse "",
-            pid,
-            timestamp,
+    // Serialize the manifest with std.json.Stringify so every caller-controlled
+    // string (agent_id, provider, batch_id, task, output_file, crucible_path) is
+    // escaped. Building this by hand with allocPrint let a --task value containing
+    // '"' or '\' either break the JSON (DoS) or inject fields into the record
+    // (log forgery) — JSON-IN-FMT.
+    var manifest_out: std.Io.Writer.Allocating = .init(allocator);
+    defer manifest_out.deinit();
+    var manifest_stringify: std.json.Stringify = .{
+        .writer = &manifest_out.writer,
+        .options = .{ .whitespace = .indent_2 },
+    };
+    try manifest_stringify.write(.{
+        .agent = .{
+            .id = agent_id.?,
+            .chronos_tick = tick,
+            .timestamp_iso = timestamp,
+            .provider = provider,
         },
-    );
-    defer allocator.free(manifest);
+        .batch = .{
+            .id = batch_id.?,
+            .is_retry = retry_number > 0,
+            .retry_number = retry_number,
+        },
+        .task = .{
+            .description = task.?,
+            .max_turns = max_turns,
+            .output_file = output_file orelse "",
+        },
+        .crucible = .{
+            .path = crucible_path orelse "",
+        },
+        .execution = .{
+            .pid = pid,
+            .started_at = timestamp,
+            .status = @as([]const u8, "RUNNING"),
+        },
+    });
+    try manifest_out.writer.writeAll("\n");
 
-    try writeFile(manifest_path, manifest);
+    try writeFile(manifest_path, manifest_out.written());
 
     // Create init.log
     const init_log_path = try std.fmt.allocPrint(allocator, "{s}/init.log", .{log_dir});
@@ -467,27 +458,29 @@ fn handleBatchComplete(allocator: mem.Allocator, args: []const []const u8) !void
     else
         0.0;
 
-    const manifest = try std.fmt.allocPrint(
-        allocator,
-        \\{{
-        \\  "batch": {{
-        \\    "id": "{s}",
-        \\    "completed_at": "{s}"
-        \\  }},
-        \\  "results": {{
-        \\    "total_agents": {d},
-        \\    "succeeded": {d},
-        \\    "failed": {d},
-        \\    "success_rate": {d:.2}
-        \\  }}
-        \\}}
-        \\
-    ,
-        .{ batch_id.?, timestamp, total, succeeded, failed, success_rate },
-    );
-    defer allocator.free(manifest);
+    // Serialize with std.json.Stringify so batch_id is escaped rather than
+    // interpolated raw into a JSON template (JSON-IN-FMT).
+    var manifest_out: std.Io.Writer.Allocating = .init(allocator);
+    defer manifest_out.deinit();
+    var manifest_stringify: std.json.Stringify = .{
+        .writer = &manifest_out.writer,
+        .options = .{ .whitespace = .indent_2 },
+    };
+    try manifest_stringify.write(.{
+        .batch = .{
+            .id = batch_id.?,
+            .completed_at = timestamp,
+        },
+        .results = .{
+            .total_agents = total,
+            .succeeded = succeeded,
+            .failed = failed,
+            .success_rate = success_rate,
+        },
+    });
+    try manifest_out.writer.writeAll("\n");
 
-    try writeFile(manifest_path, manifest);
+    try writeFile(manifest_path, manifest_out.written());
     std.debug.print("📊 Batch manifest completed: {s}\n", .{batch_id.?});
 }
 
@@ -950,25 +943,50 @@ test "Manifest JSON generation format" {
     const timestamp = try getChronosTimestamp(allocator);
     defer allocator.free(timestamp);
 
-    const manifest = try std.fmt.allocPrint(
-        allocator,
-        \\{{
-        \\  "agent": {{
-        \\    "id": "test-001",
-        \\    "timestamp_iso": "{s}"
-        \\  }}
-        \\}}
-        \\
-    ,
-        .{timestamp},
-    );
-    defer allocator.free(manifest);
+    // Adversarial task: a spawned agent controls --task, so it can attempt to
+    // inject fields ("status": "SUCCESS") or break the JSON. std.json.Stringify
+    // must escape the quotes and backslashes rather than emit them raw.
+    const malicious_task =
+        \\pwn", "status": "SUCCESS", "x": "\evil\
+    ;
 
-    // Parse to verify valid JSON
+    // Build the manifest exactly the way handleInit does.
+    var manifest_out: std.Io.Writer.Allocating = .init(allocator);
+    defer manifest_out.deinit();
+    var manifest_stringify: std.json.Stringify = .{
+        .writer = &manifest_out.writer,
+        .options = .{ .whitespace = .indent_2 },
+    };
+    try manifest_stringify.write(.{
+        .agent = .{
+            .id = @as([]const u8, "test-001"),
+            .timestamp_iso = timestamp,
+        },
+        .task = .{
+            .description = malicious_task,
+        },
+        .execution = .{
+            .status = @as([]const u8, "RUNNING"),
+        },
+    });
+    const manifest = manifest_out.written();
+
+    // Parse to verify valid JSON (injection would either break this or add fields).
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, manifest, .{});
     defer parsed.deinit();
 
     try std.testing.expect(parsed.value == .object);
+
+    // The task description must round-trip byte-for-byte — no injected field.
+    const task_obj = parsed.value.object.get("task").?.object;
+    const desc = task_obj.get("description").?.string;
+    try std.testing.expectEqualStrings(malicious_task, desc);
+
+    // Injection did NOT create a top-level "status" field; execution.status is
+    // the only status and remains RUNNING.
+    try std.testing.expect(parsed.value.object.get("status") == null);
+    const exec_status = parsed.value.object.get("execution").?.object.get("status").?.string;
+    try std.testing.expectEqualStrings("RUNNING", exec_status);
 }
 
 test "Directory path construction with retry suffix" {

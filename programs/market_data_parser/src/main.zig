@@ -52,3 +52,11 @@ test "library imports" {
     const testing = std.testing;
     try testing.expect(true);
 }
+
+// Run the JSON parser module's tests (incl. the Tier-1A parseFastDecimal
+// regression + external IEEE-754 anchors) under `zig build test`. Scoped to the
+// `json` module only; the sbe/binance modules carry pre-existing compile-broken
+// tests tracked under a separate work order and are intentionally not pulled in.
+test {
+    _ = json;
+}

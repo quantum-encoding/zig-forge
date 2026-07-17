@@ -78,9 +78,13 @@ pub const Ascii85Decode = struct {
             var count: usize = 0;
 
             while (count < 5 and i < encoded.len) {
-                if (encoded[i] == '~') break;
-                if (!isWhitespace(encoded[i])) {
-                    group[count] = encoded[i];
+                const c = encoded[i];
+                if (c == '~') break;
+                if (!isWhitespace(c)) {
+                    // Valid ASCII85 data characters are '!'(33)..'u'(117).
+                    // ('z' shorthand is only valid at group start, handled above.)
+                    if (c < '!' or c > 'u') return error.InvalidAscii85Char;
+                    group[count] = c;
                     count += 1;
                 }
                 i += 1;
@@ -88,11 +92,14 @@ pub const Ascii85Decode = struct {
 
             if (count < 2) break;
 
-            // Decode group
-            var value: u32 = 0;
+            // Decode group. Accumulate in u64 so a group of high characters
+            // (e.g. "uuuuu") cannot overflow before we range-check it — a full
+            // 5-character group must encode a value that fits in u32.
+            var value: u64 = 0;
             for (group) |ch| {
                 value = value * 85 + (ch - 33);
             }
+            if (value > 0xFFFFFFFF) return error.InvalidAscii85Group;
 
             // Output bytes (count-1 bytes for count input chars)
             const output_count = count - 1;
@@ -196,7 +203,7 @@ pub const Predictor = struct {
 
         for (0..num_rows) |row| {
             const src_start = row * row_with_filter;
-            const filter_type: PngFilter = @enumFromInt(data[src_start]);
+            const filter_type: PngFilter = std.meta.intToEnum(PngFilter, data[src_start]) catch return error.InvalidPredictorData;
             const src_row = data[src_start + 1 .. src_start + row_with_filter];
             const dst_row = output[row * row_bytes .. (row + 1) * row_bytes];
 

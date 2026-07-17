@@ -554,6 +554,11 @@ test {
     _ = rels;
     _ = styles;
     _ = mdx;
+    // Previously-dark test files: without an explicit reference here their
+    // `test` blocks are never collected by `zig build test` (docx.zig is the
+    // test root). Wire in the ZIP reader and FRA generator coverage.
+    _ = zip;
+    _ = fra;
 }
 
 test "parse minimal document XML" {

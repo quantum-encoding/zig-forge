@@ -192,7 +192,16 @@ fn writeParagraph(
             continue;
         }
 
-        const has_link = run.hyperlink_url != null;
+        // H3: only emit a markdown link when the target passes the scheme
+        // allowlist (blocks javascript:/data:/vbscript:/file: and control-char
+        // obfuscation). An unsafe target degrades to plain text — never a live
+        // link. The URL is percent-escaped on emission so a `)` can't break out
+        // of the `](…)` destination and inject MDX/JSX downstream.
+        const link_url: ?[]const u8 = if (run.hyperlink_url) |u|
+            (if (isSafeLinkUrl(u)) u else null)
+        else
+            null;
+        const has_link = link_url != null;
 
         // Merge consecutive runs with identical formatting (bold/italic)
         // This prevents **text1****text2** → **text1 text2**
@@ -255,10 +264,71 @@ fn writeParagraph(
         }
 
         if (has_link) {
-            try w.print("]({s})", .{run.hyperlink_url.?});
+            try w.print("](", .{});
+            try writeEscapedLinkUrl(w, link_url.?);
+            try w.print(")", .{});
         }
 
         i = merged_end;
+    }
+}
+
+/// H3 — hyperlink scheme allowlist. Returns true only for URLs safe to emit as
+/// a live markdown/MDX link: `http:`, `https:`, `mailto:`, or a relative
+/// reference (no scheme, e.g. `./a.png`, `#anchor`, `/path`, `//host/x`).
+/// Rejects script-bearing schemes (`javascript:`, `data:`, `vbscript:`,
+/// `file:`, …) and any control characters. Case-insensitive on the scheme.
+pub fn isSafeLinkUrl(url_in: []const u8) bool {
+    if (url_in.len == 0) return false;
+    // Reject control chars anywhere (NUL, tab, newline, DEL) — these enable
+    // scheme obfuscation like "java\tscript:" that browsers may still execute.
+    for (url_in) |c| {
+        if (c < 0x20 or c == 0x7f) return false;
+    }
+    // Browsers strip leading whitespace before resolving the scheme, so must we.
+    const url = std.mem.trimStart(u8, url_in, " ");
+    if (url.len == 0) return false;
+
+    // A scheme starts with an alpha char; if the first char isn't alpha, this
+    // is a relative reference (path/fragment) with no scheme — allow.
+    if (!std.ascii.isAlphabetic(url[0])) return true;
+
+    var i: usize = 0;
+    while (i < url.len) : (i += 1) {
+        const c = url[i];
+        if (c == ':') {
+            const scheme = url[0..i];
+            return std.ascii.eqlIgnoreCase(scheme, "http") or
+                std.ascii.eqlIgnoreCase(scheme, "https") or
+                std.ascii.eqlIgnoreCase(scheme, "mailto");
+        }
+        // A '/', '?' or '#' before any ':' means there is no scheme → relative.
+        if (c == '/' or c == '?' or c == '#') return true;
+        // Not a valid scheme char and no ':' yet → not a scheme → relative.
+        if (!(std.ascii.isAlphanumeric(c) or c == '+' or c == '-' or c == '.')) return true;
+    }
+    // No ':' at all → relative reference.
+    return true;
+}
+
+/// Emit a link destination with the characters that would break out of a
+/// markdown `](…)` destination percent-encoded: `(`, `)`, spaces, and any
+/// stray control byte. Prevents a `)` in the URL from terminating the link and
+/// injecting following text as MDX/JSX.
+fn writeEscapedLinkUrl(w: anytype, url: []const u8) !void {
+    for (url) |c| {
+        switch (c) {
+            '(' => try w.print("%28", .{}),
+            ')' => try w.print("%29", .{}),
+            ' ' => try w.print("%20", .{}),
+            else => {
+                if (c < 0x20 or c == 0x7f) {
+                    try w.print("%{X:0>2}", .{c});
+                } else {
+                    try w.print("{c}", .{c});
+                }
+            },
+        }
     }
 }
 

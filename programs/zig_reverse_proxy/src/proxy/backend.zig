@@ -131,7 +131,13 @@ pub const Backend = struct {
         self.pool_mutex.lock();
         defer self.pool_mutex.unlock();
 
-        // Try to find an available pooled connection
+        // Reserve the full pool capacity up front so the backing array never
+        // reallocates. Every *PooledConnection handed out then stays valid for
+        // the life of the Backend — no use-after-free when a later slot is
+        // appended while a caller still holds an earlier pointer.
+        try self.connections.ensureTotalCapacity(self.allocator, self.config.max_connections);
+
+        // 1. Reuse an idle, still-open pooled connection.
         for (self.connections.items) |*conn| {
             if (!conn.in_use and conn.isAlive()) {
                 conn.in_use = true;
@@ -141,11 +147,27 @@ pub const Backend = struct {
             }
         }
 
-        // Create new connection if under limit
+        // 2. Recycle a dead slot (one a previous non-keep-alive release closed)
+        //    by reconnecting in place. Without this, closed-but-retained entries
+        //    accumulate and the pool wedges at PoolExhausted forever after
+        //    max_connections closes.
+        for (self.connections.items) |*conn| {
+            if (!conn.in_use and !conn.isAlive()) {
+                const socket = try self.connect();
+                conn.socket = socket;
+                conn.in_use = true;
+                conn.last_used_ns = getTimeNs();
+                _ = self.active_connections.fetchAdd(1, .monotonic);
+                return conn;
+            }
+        }
+
+        // 3. Grow the pool if still under the configured limit.
         if (self.connections.items.len < self.config.max_connections) {
             const socket = try self.connect();
 
-            try self.connections.append(self.allocator, PooledConnection{
+            // Capacity is reserved above, so this never reallocates.
+            self.connections.appendAssumeCapacity(PooledConnection{
                 .socket = socket,
                 .backend = self,
                 .in_use = true,

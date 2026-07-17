@@ -170,7 +170,11 @@ fn getFloat(obj: std.json.ObjectMap, key: []const u8) ?f64 {
     const val = obj.get(key) orelse return null;
     return switch (val) {
         .integer => |i| @floatFromInt(i),
-        .float => |f| f,
+        // Reject non-finite (inf/nan) values: untrusted JSON like `1e999` parses
+        // to +inf and would otherwise flow into @intFromFloat in the scales layer
+        // (checked illegal behavior -> @trap()), killing the singleton WASM instance.
+        // Treat non-finite as "absent" so the caller's `orelse <default>` kicks in.
+        .float => |f| if (std.math.isFinite(f)) f else null,
         else => null,
     };
 }
@@ -874,4 +878,48 @@ test "unknown chart type" {
 
     const result = chartFromJson(allocator, json_str);
     try std.testing.expectError(JsonChartError.UnknownChartType, result);
+}
+
+test "non-finite JSON values do not trap the renderer" {
+    const allocator = std.testing.allocator;
+
+    // `1e999` parses to +inf; a bar chart with such a data value would previously
+    // drive an inf domain into the scales layer's @intFromFloat (checked illegal
+    // behavior -> @trap()). It must now render (or return a normal error) instead.
+    const json_str =
+        \\{
+        \\  "type": "bar",
+        \\  "width": 1e999,
+        \\  "data": {
+        \\    "categories": ["A", "B", "C"],
+        \\    "series": [
+        \\      {"name": "s", "values": [1e999, -1e999, 5]}
+        \\    ]
+        \\  }
+        \\}
+    ;
+
+    const svg = try chartFromJson(allocator, json_str);
+    defer allocator.free(svg);
+    try std.testing.expect(std.mem.indexOf(u8, svg, "<svg") != null);
+}
+
+test "non-finite margins fall back to defaults" {
+    const allocator = std.testing.allocator;
+
+    const json_str =
+        \\{
+        \\  "type": "line",
+        \\  "margin_left": 1e999,
+        \\  "data": {
+        \\    "series": [
+        \\      {"name": "s", "data": [{"x": 0, "y": 1}, {"x": 1, "y": 2}]}
+        \\    ]
+        \\  }
+        \\}
+    ;
+
+    const svg = try chartFromJson(allocator, json_str);
+    defer allocator.free(svg);
+    try std.testing.expect(std.mem.indexOf(u8, svg, "<svg") != null);
 }

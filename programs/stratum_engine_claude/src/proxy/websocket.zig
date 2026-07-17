@@ -509,65 +509,78 @@ pub const WebSocketBroadcaster = struct {
     fn serializeEvent(self: *Self, event: Event, buf: []u8) ![]const u8 {
         _ = self;
 
-        const data_json = switch (event.payload) {
-            .share => |s| try std.fmt.bufPrint(buf,
-                \\{{"type":"{s}","timestamp":{},"data":{{"miner_id":{},"miner_name":"{s}","status":"{s}","difficulty":{d},"latency_ms":{}}}}}
-            , .{
-                @tagName(event.event_type),
-                event.timestamp,
-                s.miner_id,
-                s.miner_name[0..s.miner_name_len],
-                @tagName(s.status),
-                s.difficulty,
-                s.latency_ms,
-            }),
-            .miner_status => |m| try std.fmt.bufPrint(buf,
-                \\{{"type":"{s}","timestamp":{},"data":{{"miner_id":{},"miner_name":"{s}","status":"{s}","hashrate":{d},"power":{}}}}}
-            , .{
-                @tagName(event.event_type),
-                event.timestamp,
-                m.miner_id,
-                m.miner_name[0..m.miner_name_len],
-                @tagName(m.status),
-                m.hashrate_th,
-                m.power_watts,
-            }),
-            .stats => |st| try std.fmt.bufPrint(buf,
-                \\{{"type":"{s}","timestamp":{},"data":{{"total_hashrate":{d},"total_miners":{},"online_miners":{},"accepted_24h":{},"rejected_24h":{},"btc_earned_24h":{d},"accept_rate":{d}}}}}
-            , .{
-                @tagName(event.event_type),
-                event.timestamp,
-                st.total_hashrate_th,
-                st.total_miners,
-                st.online_miners,
-                st.accepted_24h,
-                st.rejected_24h,
-                st.btc_earned_24h,
-                st.accept_rate,
-            }),
-            .alert => |a| try std.fmt.bufPrint(buf,
-                \\{{"type":"{s}","timestamp":{},"data":{{"severity":"{s}","miner_id":{?},"message":"{s}"}}}}
-            , .{
-                @tagName(event.event_type),
-                event.timestamp,
-                @tagName(a.severity),
-                a.miner_id,
-                a.message[0..a.message_len],
-            }),
-            .pool_status => |p| try std.fmt.bufPrint(buf,
-                \\{{"type":"{s}","timestamp":{},"data":{{"pool_id":"{s}","pool_name":"{s}","connected":{},"latency_ms":{},"miners":{}}}}}
-            , .{
-                @tagName(event.event_type),
-                event.timestamp,
-                p.pool_id[0..p.pool_id_len],
-                p.pool_name[0..p.pool_name_len],
-                p.connected,
-                p.latency_ms,
-                p.miners_count,
-            }),
-        };
+        // Audit (JSON-IN-FMT): every field below is emitted through
+        // std.json.Stringify into a fixed stack/caller buffer, never a
+        // printf-style `"{s}"` template. `miner_name`, `message`, and
+        // `pool_name` are attacker-influenced (a worker can pick its
+        // `mining.authorize` name); Stringify escapes `"`, `\`, and
+        // control characters, so a name like `evil","status":"x` can no
+        // longer break the frame or inject sibling fields / XSS payloads.
+        const type_name: []const u8 = @tagName(event.event_type);
+        const ts = event.timestamp;
 
-        return data_json;
+        var w = std.Io.Writer.fixed(buf);
+        var jw: std.json.Stringify = .{ .writer = &w, .options = .{} };
+
+        switch (event.payload) {
+            .share => |s| try jw.write(.{
+                .@"type" = type_name,
+                .timestamp = ts,
+                .data = .{
+                    .miner_id = s.miner_id,
+                    .miner_name = s.miner_name[0..s.miner_name_len],
+                    .status = @as([]const u8, @tagName(s.status)),
+                    .difficulty = s.difficulty,
+                    .latency_ms = s.latency_ms,
+                },
+            }),
+            .miner_status => |m| try jw.write(.{
+                .@"type" = type_name,
+                .timestamp = ts,
+                .data = .{
+                    .miner_id = m.miner_id,
+                    .miner_name = m.miner_name[0..m.miner_name_len],
+                    .status = @as([]const u8, @tagName(m.status)),
+                    .hashrate = m.hashrate_th,
+                    .power = m.power_watts,
+                },
+            }),
+            .stats => |st| try jw.write(.{
+                .@"type" = type_name,
+                .timestamp = ts,
+                .data = .{
+                    .total_hashrate = st.total_hashrate_th,
+                    .total_miners = st.total_miners,
+                    .online_miners = st.online_miners,
+                    .accepted_24h = st.accepted_24h,
+                    .rejected_24h = st.rejected_24h,
+                    .btc_earned_24h = st.btc_earned_24h,
+                    .accept_rate = st.accept_rate,
+                },
+            }),
+            .alert => |a| try jw.write(.{
+                .@"type" = type_name,
+                .timestamp = ts,
+                .data = .{
+                    .severity = @as([]const u8, @tagName(a.severity)),
+                    .miner_id = a.miner_id,
+                    .message = a.message[0..a.message_len],
+                },
+            }),
+            .pool_status => |p| try jw.write(.{
+                .@"type" = type_name,
+                .timestamp = ts,
+                .data = .{
+                    .pool_id = p.pool_id[0..p.pool_id_len],
+                    .pool_name = p.pool_name[0..p.pool_name_len],
+                    .connected = p.connected,
+                    .latency_ms = p.latency_ms,
+                    .miners = p.miners_count,
+                },
+            }),
+        }
+
+        return w.buffered();
     }
 
     fn sendWebSocketFrame(self: *Self, client: *WsClient, payload: []const u8) !void {

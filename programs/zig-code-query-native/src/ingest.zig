@@ -155,33 +155,9 @@ fn chunkContent(allocator: std.mem.Allocator, content: []const u8, chunk_size: u
 // SQL Escaping
 // =============================================================================
 
-fn escapeSql(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    // Count characters that need escaping
-    var extra: usize = 0;
-    for (input) |c| {
-        if (c == '\'' or c == '\\') extra += 1;
-    }
-
-    const buf = try allocator.alloc(u8, input.len + extra);
-    var pos: usize = 0;
-    for (input) |c| {
-        if (c == '\'') {
-            buf[pos] = '\\';
-            pos += 1;
-            buf[pos] = '\'';
-            pos += 1;
-        } else if (c == '\\') {
-            buf[pos] = '\\';
-            pos += 1;
-            buf[pos] = '\\';
-            pos += 1;
-        } else {
-            buf[pos] = c;
-            pos += 1;
-        }
-    }
-    return buf[0..pos];
-}
+// Escaping/validation helpers live in surreal.zig so query.zig, ingest.zig and
+// the FFI layer all share one audited implementation.
+const escapeSql = surreal.escapeSql;
 
 // =============================================================================
 // Path Utilities
@@ -296,6 +272,8 @@ pub fn ingestFile(client: *SurrealClient, path: []const u8, options: IngestOptio
     const ext = extension(path);
     const escaped_name = try escapeSql(allocator, name);
     defer allocator.free(escaped_name);
+    const escaped_ext = try escapeSql(allocator, ext);
+    defer allocator.free(escaped_ext);
 
     const create_doc_sql = try std.fmt.allocPrint(allocator,
         \\CREATE knowledge_document SET
@@ -305,7 +283,7 @@ pub fn ingestFile(client: *SurrealClient, path: []const u8, options: IngestOptio
         \\  size = {d},
         \\  content_hash = '{s}',
         \\  ingested_at = time::now()
-    , .{ escaped_path, escaped_name, ext, content.len, hash_hex });
+    , .{ escaped_path, escaped_name, escaped_ext, content.len, hash_hex });
     defer allocator.free(create_doc_sql);
 
     const doc_response = try client.executeQuery(create_doc_sql);
@@ -493,19 +471,29 @@ pub fn listDocuments(client: *SurrealClient) !types.QueryResult(Document) {
         return types.QueryResult(Document).empty(allocator);
     }
 
-    const docs = try allocator.alloc(Document, items.len);
+    // The strings returned by getString() are slices into `parsed`'s arena,
+    // which is freed by the `defer parsed.deinit()` above once this function
+    // returns. Copy every string field into a result-owned arena so the
+    // returned records stay valid (fixes the systemic use-after-free).
+    const arena = try allocator.create(std.heap.ArenaAllocator);
+    errdefer allocator.destroy(arena);
+    arena.* = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const aa = arena.allocator();
+
+    const docs = try aa.alloc(Document, items.len);
     for (items, 0..) |item, i| {
         if (item != .object) {
             docs[i] = .{};
             continue;
         }
         docs[i] = .{
-            .path = surreal.getString(item.object, "path"),
-            .name = surreal.getString(item.object, "name"),
-            .extension = surreal.getString(item.object, "extension"),
+            .path = try aa.dupe(u8, surreal.getString(item.object, "path")),
+            .name = try aa.dupe(u8, surreal.getString(item.object, "name")),
+            .extension = try aa.dupe(u8, surreal.getString(item.object, "extension")),
             .size = surreal.getInt(item.object, "size"),
-            .content_hash = surreal.getString(item.object, "content_hash"),
-            .ingested_at = surreal.getString(item.object, "ingested_at"),
+            .content_hash = try aa.dupe(u8, surreal.getString(item.object, "content_hash")),
+            .ingested_at = try aa.dupe(u8, surreal.getString(item.object, "ingested_at")),
         };
     }
 
@@ -513,5 +501,6 @@ pub fn listDocuments(client: *SurrealClient) !types.QueryResult(Document) {
         .items = docs,
         .total_count = docs.len,
         .allocator = allocator,
+        .arena = arena,
     };
 }

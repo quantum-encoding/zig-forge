@@ -55,6 +55,16 @@ pub fn WorkStealDeque(comptime T: type) type {
         array: atomic.Value(*Array),
         top: atomic.Value(i64),
         bottom: atomic.Value(i64),
+        /// Arrays that were grown out of. A concurrent `steal()` may still hold
+        /// a pointer to the old array after `push` swaps in the grown one, so we
+        /// must NOT free the old array at grow time (that is a use-after-free).
+        /// Instead we retire it here and free every retired array in `deinit`,
+        /// once all worker/stealer threads have joined. This is the classic
+        /// Chase-Lev "leak until teardown" strategy; memory is bounded at ~2x the
+        /// final capacity. Only the single owner mutates this list (from `push`),
+        /// and it is only read in `deinit` after threads have stopped, so it
+        /// needs no lock.
+        retired: std.ArrayListUnmanaged(*Array),
 
         pub fn init(allocator: std.mem.Allocator, capacity: usize) !Self {
             const arr = try Array.init(allocator, capacity);
@@ -64,12 +74,17 @@ pub fn WorkStealDeque(comptime T: type) type {
                 .array = atomic.Value(*Array).init(arr),
                 .top = atomic.Value(i64).init(0),
                 .bottom = atomic.Value(i64).init(0),
+                .retired = .empty,
             };
         }
 
         pub fn deinit(self: *Self) void {
             const arr = self.array.load(.monotonic);
             arr.deinit(self.allocator);
+            for (self.retired.items) |old| {
+                old.deinit(self.allocator);
+            }
+            self.retired.deinit(self.allocator);
         }
 
         /// Push task to bottom (owner only)
@@ -81,10 +96,13 @@ pub fn WorkStealDeque(comptime T: type) type {
             const current_size = bottom - top;
 
             if (current_size >= @as(i64, @intCast(arr.capacity))) {
-                // Grow array
+                // Grow array. Retire (do NOT free) the old array: a concurrent
+                // stealer may have loaded `arr` before we swap and will read
+                // from it after. Retired arrays are freed in `deinit`.
                 const new_arr = try arr.grow(self.allocator, bottom, top);
+                errdefer new_arr.deinit(self.allocator);
+                try self.retired.append(self.allocator, arr);
                 self.array.store(new_arr, .release);
-                arr.deinit(self.allocator);
                 new_arr.put(bottom, value);
             } else {
                 arr.put(bottom, value);
@@ -245,4 +263,65 @@ test "WorkStealDeque - concurrent push/steal" {
     // Should still have one item
     const stolen2 = deque.steal();
     try testing.expect(stolen2 != null);
+}
+
+// Regression test for the grow-path use-after-free (work-order #6): a single
+// owner pushes 1..=N (forcing many array doublings) while several stealer threads
+// concurrently steal. Before the fix, `push` freed the old array the instant it
+// swapped in the grown one, so a stealer that had already loaded the old array
+// pointer dereferenced freed memory. With retire-until-deinit the old arrays stay
+// live, so this must complete with every value accounted for exactly once (no
+// lost, no duplicated items) and clean under the testing allocator.
+test "WorkStealDeque - steal under growth (UAF stress)" {
+    const testing = std.testing;
+
+    const N: u64 = 20_000;
+
+    var deque = try WorkStealDeque(u64).init(testing.allocator, 8);
+    defer deque.deinit();
+
+    const Shared = struct {
+        deque: *WorkStealDeque(u64),
+        sum: std.atomic.Value(u64) = .init(0),
+        count: std.atomic.Value(u64) = .init(0),
+        producing: std.atomic.Value(bool) = .init(true),
+
+        fn stealer(self: *@This()) void {
+            while (true) {
+                if (self.deque.steal()) |v| {
+                    _ = self.sum.fetchAdd(v, .monotonic);
+                    _ = self.count.fetchAdd(1, .monotonic);
+                    continue;
+                }
+                // Owner drains the remainder via pop() after it stops producing,
+                // so a stealer is free to exit once production is finished.
+                if (!self.producing.load(.acquire)) break;
+                std.atomic.spinLoopHint();
+            }
+        }
+    };
+
+    var shared = Shared{ .deque = &deque };
+
+    var stealers: [4]std.Thread = undefined;
+    for (&stealers) |*t| {
+        t.* = try std.Thread.spawn(.{}, Shared.stealer, .{&shared});
+    }
+
+    // Owner: sole pusher/popper. Push all N (triggering repeated growth), then
+    // drain whatever the stealers did not take.
+    var i: u64 = 1;
+    while (i <= N) : (i += 1) {
+        try deque.push(i);
+    }
+    shared.producing.store(false, .release);
+    while (deque.pop()) |v| {
+        _ = shared.sum.fetchAdd(v, .monotonic);
+        _ = shared.count.fetchAdd(1, .monotonic);
+    }
+
+    for (stealers) |t| t.join();
+
+    try testing.expectEqual(N, shared.count.load(.monotonic));
+    try testing.expectEqual(N * (N + 1) / 2, shared.sum.load(.monotonic));
 }

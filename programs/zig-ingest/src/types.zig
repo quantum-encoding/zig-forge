@@ -74,13 +74,20 @@ pub const ParseResult = struct {
 
 /// Create a qualified ID from file path and function name.
 /// Example: "crypto/aegis.zig" + "init" -> "crypto_aegis_init"
+///
+/// The result is used verbatim as the text of a backtick-quoted SurrealDB
+/// record id (`code_function:`{s}``), so it must never contain a byte that can
+/// break out of that quoting. Every non-`[A-Za-z0-9_]` byte is mapped to `_`;
+/// a path component containing a backtick, quote, `;`, etc. can therefore no
+/// longer terminate the record id and inject SurrealQL.
 pub fn makeQualifiedId(allocator: Allocator, file: []const u8, name: []const u8) ![]u8 {
     var result: std.ArrayList(u8) = .empty;
 
     for (file) |c| {
-        switch (c) {
-            '/', '.', '-' => try result.append(allocator, '_'),
-            else => try result.append(allocator, c),
+        if (std.ascii.isAlphanumeric(c)) {
+            try result.append(allocator, c);
+        } else {
+            try result.append(allocator, '_');
         }
     }
 
@@ -90,8 +97,31 @@ pub fn makeQualifiedId(allocator: Allocator, file: []const u8, name: []const u8)
     }
 
     try result.append(allocator, '_');
-    try result.appendSlice(allocator, name);
+    for (name) |c| {
+        if (std.ascii.isAlphanumeric(c)) {
+            try result.append(allocator, c);
+        } else {
+            try result.append(allocator, '_');
+        }
+    }
 
+    return result.toOwnedSlice(allocator);
+}
+
+/// Restrict a SurrealDB record-id fragment to `[A-Za-z0-9_]`, mapping every
+/// other byte to `_`. Applied at every point where a value is interpolated into
+/// a backtick-quoted `code_function:`...`` record id, so no id (function
+/// qualified_id, call caller_id, or call callee) can escape the quoting and
+/// inject SurrealQL. Idempotent over already-sanitized `makeQualifiedId` output.
+pub fn sanitizeRecordId(allocator: Allocator, s: []const u8) ![]u8 {
+    var result: std.ArrayList(u8) = .empty;
+    for (s) |c| {
+        if (std.ascii.isAlphanumeric(c) or c == '_') {
+            try result.append(allocator, c);
+        } else {
+            try result.append(allocator, '_');
+        }
+    }
     return result.toOwnedSlice(allocator);
 }
 
@@ -109,6 +139,69 @@ pub fn escapeString(allocator: Allocator, s: []const u8) ![]u8 {
         }
     }
     return result.toOwnedSlice(allocator);
+}
+
+// =============================================================================
+// Tests (adversarial: SurrealQL-injection fixtures for the emitter)
+// =============================================================================
+
+test "escapeString neutralizes single quotes, backslashes, and newlines" {
+    const a = std.testing.allocator;
+    // Raw input: O'Brien \ <newline> end  (the '\\' and '\n' are Zig escapes).
+    const out = try escapeString(a, "O'Brien \\ \n end");
+    defer a.free(out);
+    try std.testing.expectEqualStrings("O\\'Brien \\\\ \\n end", out);
+}
+
+test "escapeString defuses a quoted-literal SurrealQL breakout" {
+    const a = std.testing.allocator;
+    // Attacker-controlled 'file' value trying to close the '...' literal and
+    // append a destructive statement. After escaping, the quote is inert.
+    const out = try escapeString(a, "x'; DELETE code_function; --");
+    defer a.free(out);
+    // No raw single-quote may survive except as the escaped \' sequence.
+    var j: usize = 0;
+    while (j < out.len) : (j += 1) {
+        if (out[j] == '\'') {
+            try std.testing.expect(j > 0 and out[j - 1] == '\\');
+        }
+    }
+    try std.testing.expectEqualStrings("x\\'; DELETE code_function; --", out);
+}
+
+test "makeQualifiedId restricts record-id text to [A-Za-z0-9_]" {
+    const a = std.testing.allocator;
+    // Malicious path with a backtick breakout and a quote must not survive.
+    const out = try makeQualifiedId(a, "evil`; DELETE code_function; --.zig", "init");
+    defer a.free(out);
+    for (out) |c| {
+        try std.testing.expect(std.ascii.isAlphanumeric(c) or c == '_');
+    }
+    // Trailing "_zig" stripped, name appended after '_'.
+    try std.testing.expect(std.mem.endsWith(u8, out, "_init"));
+}
+
+test "makeQualifiedId preserves the benign path shape" {
+    const a = std.testing.allocator;
+    const out = try makeQualifiedId(a, "crypto/aegis.zig", "init");
+    defer a.free(out);
+    try std.testing.expectEqualStrings("crypto_aegis_init", out);
+}
+
+test "sanitizeRecordId maps every non-word byte to underscore" {
+    const a = std.testing.allocator;
+    const out = try sanitizeRecordId(a, "abc`def'gh->ij");
+    defer a.free(out);
+    try std.testing.expectEqualStrings("abc_def_gh__ij", out);
+}
+
+test "sanitizeRecordId is idempotent over makeQualifiedId output" {
+    const a = std.testing.allocator;
+    const id = try makeQualifiedId(a, "some/weird`path.zig", "run");
+    defer a.free(id);
+    const again = try sanitizeRecordId(a, id);
+    defer a.free(again);
+    try std.testing.expectEqualStrings(id, again);
 }
 
 // =============================================================================

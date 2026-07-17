@@ -197,7 +197,7 @@ test "xlsx relationships XML validation" {
     ;
 
     var parser = xml.XmlParser.init(rels_xml);
-    var rel_count = 0;
+    var rel_count: usize = 0;
     while (parser.next()) |event| {
         switch (event) {
             .element_start => |es| {

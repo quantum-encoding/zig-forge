@@ -41,76 +41,59 @@ pub const JsonExporter = struct {
         const instances = try self.state.getAllInstances(self.allocator);
         defer self.allocator.free(instances);
 
-        var json_buf: [8192]u8 = undefined;
-        var pos: usize = 0;
+        // Serialize via std.json.Stringify so every string field (task,
+        // working_dir) is escaped correctly. The source strings originate from
+        // monitored-agent output (Chronos log / eBPF TTY), so a raw `{s}`
+        // format would let a `"`, `\`, or newline break or inject JSON.
+        // An Allocating writer also removes the old fixed-buffer overflow risk.
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+        var js: std.json.Stringify = .{ .writer = &aw.writer, .options = .{ .whitespace = .indent_2 } };
 
-        // Write opening bracket
-        const open = "[\n";
-        @memcpy(json_buf[pos..][0..open.len], open);
-        pos += open.len;
-
-        for (instances, 0..) |inst, i| {
-            if (i > 0) {
-                const comma = ",\n";
-                @memcpy(json_buf[pos..][0..comma.len], comma);
-                pos += comma.len;
-            }
-
-            const entry = std.fmt.bufPrint(json_buf[pos..], "  {{\n    \"pid\": {d},\n    \"task\": \"{s}\",\n    \"working_dir\": \"{s}\",\n    \"status\": \"{s}\",\n    \"started_at\": {d},\n    \"last_activity\": {d}\n  }}", .{
-                inst.pid,
-                inst.task,
-                inst.working_dir,
-                @tagName(inst.status),
-                inst.started_at,
-                inst.last_activity,
-            }) catch break;
-            pos += entry.len;
+        try js.beginArray();
+        for (instances) |inst| {
+            try js.write(.{
+                .pid = inst.pid,
+                .task = inst.task,
+                .working_dir = inst.working_dir,
+                .status = @tagName(inst.status),
+                .started_at = inst.started_at,
+                .last_activity = inst.last_activity,
+            });
         }
+        try js.endArray();
+        try aw.writer.writeByte('\n');
 
-        const close = "\n]\n";
-        @memcpy(json_buf[pos..][0..close.len], close);
-        pos += close.len;
-
-        writeFile(AGENTS_FILE, json_buf[0..pos]);
+        writeFile(AGENTS_FILE, aw.writer.buffered());
     }
 
     pub fn exportPermissions(self: *JsonExporter) !void {
         const requests = self.state.getPendingRequests();
 
-        var json_buf: [8192]u8 = undefined;
-        var pos: usize = 0;
+        // Serialize via std.json.Stringify so command/args/reason are escaped.
+        // These strings come from monitored-agent output and must not be
+        // interpolated raw. Allocating writer avoids the fixed-buffer overflow.
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+        var js: std.json.Stringify = .{ .writer = &aw.writer, .options = .{ .whitespace = .indent_2 } };
 
-        const open = "[\n";
-        @memcpy(json_buf[pos..][0..open.len], open);
-        pos += open.len;
-
-        var first = true;
+        try js.beginArray();
         for (requests) |req| {
             if (req.status != .pending) continue;
 
-            if (!first) {
-                const comma = ",\n";
-                @memcpy(json_buf[pos..][0..comma.len], comma);
-                pos += comma.len;
-            }
-            first = false;
-
-            const entry = std.fmt.bufPrint(json_buf[pos..], "  {{\n    \"id\": {d},\n    \"pid\": {d},\n    \"command\": \"{s}\",\n    \"args\": \"{s}\",\n    \"reason\": \"{s}\",\n    \"timestamp\": {d}\n  }}", .{
-                req.id,
-                req.pid,
-                req.command,
-                req.args,
-                req.reason,
-                req.timestamp,
-            }) catch break;
-            pos += entry.len;
+            try js.write(.{
+                .id = req.id,
+                .pid = req.pid,
+                .command = req.command,
+                .args = req.args,
+                .reason = req.reason,
+                .timestamp = req.timestamp,
+            });
         }
+        try js.endArray();
+        try aw.writer.writeByte('\n');
 
-        const close = "\n]\n";
-        @memcpy(json_buf[pos..][0..close.len], close);
-        pos += close.len;
-
-        writeFile(PERMISSIONS_FILE, json_buf[0..pos]);
+        writeFile(PERMISSIONS_FILE, aw.writer.buffered());
     }
 
     fn exportStatus(self: *JsonExporter) !void {
@@ -132,12 +115,6 @@ pub const JsonExporter = struct {
         writeFile(STATUS_FILE, json);
     }
 };
-
-fn escapeJson(s: []const u8) []const u8 {
-    // Simple pass-through for now - real implementation would escape special chars
-    // This is safe for most task descriptions
-    return s;
-}
 
 fn writeFile(path: []const u8, data: []const u8) void {
     var path_buf: [256]u8 = undefined;

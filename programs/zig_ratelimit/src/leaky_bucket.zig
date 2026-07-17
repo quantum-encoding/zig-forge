@@ -37,9 +37,14 @@ pub const LeakyBucket = struct {
     /// capacity: Maximum pending requests
     /// leak_rate: Requests processed per second
     pub fn init(capacity: f64, leak_rate: f64) Self {
+        // Clamp-and-document (non-breaking): a non-positive/non-finite leak_rate
+        // makes timeUntilAvailable divide by zero / trap in @intFromFloat; a
+        // negative capacity is nonsensical. Clamp fail-closed.
+        const cap = if (std.math.isNan(capacity) or capacity < 0) 0 else capacity;
+        const lr = if (!(leak_rate > 0) or !std.math.isFinite(leak_rate)) 1e-9 else leak_rate;
         return Self{
-            .capacity = capacity,
-            .leak_rate = leak_rate,
+            .capacity = cap,
+            .leak_rate = lr,
             .water_level = 0, // Start empty
             .last_leak = compat.nowNs(),
         };
@@ -145,8 +150,13 @@ pub const GCRA = struct {
     /// rate: Requests per second
     /// burst: Maximum burst size
     pub fn init(rate: f64, burst: f64) Self {
-        const emission_ns = @as(i64, @intFromFloat(1_000_000_000.0 / rate));
-        const tolerance_ns = @as(i64, @intFromFloat(burst * 1_000_000_000.0 / rate));
+        // Clamp-and-document (non-breaking): a non-positive/non-finite rate would
+        // make 1e9/rate non-finite and trap in @intFromFloat (UB in ReleaseFast).
+        // Clamp to a tiny positive rate and a non-negative burst; fail-closed.
+        const r = if (!(rate > 0) or !std.math.isFinite(rate)) 1e-9 else rate;
+        const b = if (std.math.isNan(burst) or burst < 0) 0 else burst;
+        const emission_ns = @as(i64, @intFromFloat(1_000_000_000.0 / r));
+        const tolerance_ns = @as(i64, @intFromFloat(b * 1_000_000_000.0 / r));
 
         return Self{
             .emission_interval = emission_ns,

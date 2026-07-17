@@ -36,6 +36,18 @@ extern "c" fn fclose(stream: *std.c.FILE) c_int;
 extern "c" fn fread(ptr: [*]u8, size: usize, nmemb: usize, stream: *std.c.FILE) usize;
 extern "c" fn fseek(stream: *std.c.FILE, offset: c_long, whence: c_int) c_int;
 extern "c" fn ftell(stream: *std.c.FILE) c_long;
+extern "c" fn realpath(path: [*:0]const u8, resolved: [*]u8) ?[*:0]u8;
+
+/// Canonicalize `path` via libc realpath into `buf`. Returns the resolved slice
+/// (borrowing `buf`), or null on error (nonexistent path, symlink loop, etc).
+fn realpathInto(allocator: std.mem.Allocator, path: []const u8, buf: *[std.fs.max_path_bytes]u8) ?[]const u8 {
+    if (std.mem.indexOfScalar(u8, path, 0) != null) return null;
+    const pz = allocator.allocSentinel(u8, path.len, 0) catch return null;
+    defer allocator.free(pz);
+    @memcpy(pz, path);
+    const res = realpath(pz.ptr, buf) orelse return null;
+    return std.mem.span(res);
+}
 
 const cdir = @cImport({
     @cInclude("dirent.h");
@@ -425,34 +437,39 @@ fn renderToolResult(
         const path_start = path_start_idx + "Full output saved to: ".len;
         var path_end = path_start;
         while (path_end < text.len and text[path_end] != '\n') : (path_end += 1) {}
-        const spill_path = text[path_start..path_end];
+        const spill_path = std.mem.trim(u8, text[path_start..path_end], " \t\r");
 
-        // Try to read the full spilled file
-        const spill_content = readFile(allocator, spill_path) catch {
-            // Fall back to the preview that's already in the jsonl
+        // H2: only read the spilled file if it is confined under this session's
+        // resource directory. An unconfined / unreadable path falls back to the
+        // preview already present in the jsonl — never an arbitrary disk read.
+        const spill_content: ?[]u8 = if (confinedSpillPath(allocator, session_resources_dir, spill_path)) |safe| blk: {
+            defer allocator.free(safe);
+            break :blk readFile(allocator, safe) catch null;
+        } else null;
+
+        if (spill_content) |sc| {
+            defer allocator.free(sc);
+            try md.appendSlice(allocator, "<!-- spilled tool result -->\n\n```\n");
+            // Cap inlined spill content at 16KB to keep output manageable
+            const inline_cap = 16 * 1024;
+            const truncated_spill = safeTruncate(sc, inline_cap);
+            try md.appendSlice(allocator, truncated_spill);
+            if (truncated_spill.len < sc.len) {
+                const suffix = try std.fmt.allocPrint(allocator,
+                    "\n... ({d} bytes truncated from {d} total)",
+                    .{ sc.len - truncated_spill.len, sc.len },
+                );
+                defer allocator.free(suffix);
+                try md.appendSlice(allocator, suffix);
+            }
+            try md.appendSlice(allocator, "\n```\n\n");
+            stats.spilled_results += 1;
+        } else {
+            // Rejected or unreadable — fall back to the inline preview.
             try md.appendSlice(allocator, "```\n");
             try md.appendSlice(allocator, text);
             try md.appendSlice(allocator, "\n```\n\n");
-            return;
-        };
-        defer allocator.free(spill_content);
-
-        try md.appendSlice(allocator, "<!-- spilled tool result -->\n\n```\n");
-        // Cap inlined spill content at 16KB to keep output manageable
-        const inline_cap = 16 * 1024;
-        const truncated_spill = safeTruncate(spill_content, inline_cap);
-        try md.appendSlice(allocator, truncated_spill);
-        if (truncated_spill.len < spill_content.len) {
-            const suffix = try std.fmt.allocPrint(allocator,
-                "\n... ({d} bytes truncated from {d} total)",
-                .{ spill_content.len - truncated_spill.len, spill_content.len },
-            );
-            defer allocator.free(suffix);
-            try md.appendSlice(allocator, suffix);
         }
-        try md.appendSlice(allocator, "\n```\n\n");
-        stats.spilled_results += 1;
-        _ = session_resources_dir;
         return;
     }
 
@@ -597,6 +614,33 @@ fn getStr(obj: std.json.Value, key: []const u8) ?[]const u8 {
     const val = obj.object.get(key) orelse return null;
     if (val != .string) return null;
     return val.string;
+}
+
+/// H2 — confine an untrusted spill path under this session's resource dir.
+///
+/// The `"Full output saved to: <path>"` string is extracted from untrusted
+/// JSONL (a shared session log). Reading an arbitrary path from it would let a
+/// malicious log exfiltrate e.g. ~/.aws/credentials into the export. We only
+/// honor the path if realpath resolves it to a real file living strictly under
+/// the canonical session resource directory (this also defeats `..` traversal
+/// and symlink escapes). Returns an owned canonical path, or null to reject.
+fn confinedSpillPath(allocator: std.mem.Allocator, base_dir: []const u8, path: []const u8) ?[]u8 {
+    if (path.len == 0) return null;
+    if (std.mem.indexOfScalar(u8, path, 0) != null) return null;
+
+    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const canon_base = realpathInto(allocator, base_dir, &base_buf) orelse return null;
+
+    var full_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const canon_full = realpathInto(allocator, path, &full_buf) orelse return null;
+
+    if (!std.mem.startsWith(u8, canon_full, canon_base)) return null;
+    const is_root = std.mem.eql(u8, canon_base, "/");
+    if (!is_root) {
+        if (canon_full.len <= canon_base.len) return null;
+        if (canon_full[canon_base.len] != '/') return null;
+    }
+    return allocator.dupe(u8, canon_full) catch null;
 }
 
 fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {

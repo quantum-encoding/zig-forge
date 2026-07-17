@@ -327,9 +327,9 @@ fn listDirJson(writer: *std.Io.Writer, allocator: std.mem.Allocator, path: []con
         const size: i64 = if (stat_result == 0) stat_buf.size else 0;
         const mtime: i64 = if (stat_result == 0) stat_buf.mtim.sec else 0;
 
-        try writer.print(
-            \\{{"name":"{s}","type":"{s}","size":{d},"mtime":{d}}}
-        , .{ escapeJsonStr(name), file_type, size, mtime });
+        try writer.writeAll("{\"name\":");
+        try writeJsonStr(writer, name);
+        try writer.print(",\"type\":\"{s}\",\"size\":{d},\"mtime\":{d}}}", .{ file_type, size, mtime });
     }
 
     try writer.writeAll("]");
@@ -365,9 +365,9 @@ fn getMetadataJson(writer: *std.Io.Writer, allocator: std.mem.Allocator, path: [
 
     var stat_buf: Stat = undefined;
     if (lstat(path_z.ptr, &stat_buf) != 0) {
-        try writer.print(
-            \\{{"error":"stat failed","path":"{s}"}}
-        , .{escapeJsonStr(path)});
+        try writer.writeAll("{\"error\":\"stat failed\",\"path\":");
+        try writeJsonStr(writer, path);
+        try writer.writeAll("}");
         return;
     }
 
@@ -380,9 +380,9 @@ fn getMetadataJson(writer: *std.Io.Writer, allocator: std.mem.Allocator, path: [
     else
         "other";
 
-    try writer.print(
-        \\{{"path":"{s}","type":"{s}","size":{d},"mtime":{d},"inode":{d}
-    , .{ escapeJsonStr(path), file_type, stat_buf.size, stat_buf.mtim.sec, stat_buf.ino });
+    try writer.writeAll("{\"path\":");
+    try writeJsonStr(writer, path);
+    try writer.print(",\"type\":\"{s}\",\"size\":{d},\"mtime\":{d},\"inode\":{d}", .{ file_type, stat_buf.size, stat_buf.mtim.sec, stat_buf.ino });
 
     // Optionally compute hash for files
     if (include_hash and std.mem.eql(u8, file_type, "file")) {
@@ -506,9 +506,9 @@ fn batchDeleteJson(writer: *std.Io.Writer, paths: [*]const [*:0]const u8, count:
             first_error = false;
 
             const path_slice = std.mem.span(paths[i]);
-            try writer.print(
-                \\{{"path":"{s}","errno":{d}}}
-            , .{ escapeJsonStr(path_slice), errno });
+            try writer.writeAll("{\"path\":");
+            try writeJsonStr(writer, path_slice);
+            try writer.print(",\"errno\":{d}}}", .{errno});
         }
     }
 
@@ -568,11 +568,15 @@ const Stat = switch (builtin.os.tag) {
 
 extern "c" fn lstat(path: [*:0]const u8, buf: *Stat) c_int;
 
-/// Simple JSON string escaping (handles quotes and backslashes)
-fn escapeJsonStr(s: []const u8) []const u8 {
-    // For simplicity, return as-is - file paths typically don't have quotes
-    // A full implementation would escape special characters
-    return s;
+/// Write `s` as a fully-quoted, RFC 8259-escaped JSON string value to `writer`.
+///
+/// Delegates to the audited `std.json.Stringify.encodeJsonString`, which emits
+/// the surrounding quotes and escapes `"`, `\`, and control characters — closing
+/// the JSON-injection hole where a crafted filename could inject fields into the
+/// metadata/list/batch JSON that FFI consumers parse. High bytes are passed
+/// through raw (escape_unicode = false) so non-UTF-8 filenames do not panic.
+fn writeJsonStr(writer: *std.Io.Writer, s: []const u8) !void {
+    try std.json.Stringify.encodeJsonString(s, .{}, writer);
 }
 
 // =============================================================================

@@ -15,6 +15,12 @@
 const std = @import("std");
 const crypto = std.crypto;
 
+/// Maximum accepted frame payload size (bytes). A frame whose declared
+/// payload length exceeds this is rejected before any allocation, which
+/// defends against attacker-controlled allocation bombs and length-field
+/// integer overflow in the header+payload arithmetic. 64 MiB.
+pub const max_frame_size: u64 = 64 * 1024 * 1024;
+
 /// WebSocket frame opcodes (RFC 6455 Section 5.2)
 pub const Opcode = enum(u4) {
     continuation = 0x0,
@@ -191,16 +197,11 @@ pub const Frame = struct {
 
     /// Create a masked frame (for client-to-server)
     pub fn initMasked(allocator: std.mem.Allocator, fin: bool, opcode: Opcode, payload: []const u8) !Frame {
+        // RFC 6455 §5.3 requires the masking key to be derived from a strong
+        // source of entropy — it is the defense against intermediary
+        // cache-poisoning attacks. Use the CSPRNG, never a clock-seeded PRNG.
         var key: [4]u8 = undefined;
-        // Use a simple deterministic seed for masking key
-        // In production, use a proper cryptographic RNG
-        // Zig 0.16 compatible - use clock_gettime instead of Instant
-        var ts: std.c.timespec = undefined;
-        _ = std.c.clock_gettime(.MONOTONIC, &ts);
-        const seed: u64 = @bitCast(ts.sec *% 1_000_000_000 +% ts.nsec);
-        var rng = std.Random.DefaultPrng.init(seed);
-        const rand = rng.random();
-        rand.bytes(&key);
+        std.crypto.random.bytes(&key);
 
         const owned_payload = try allocator.dupe(u8, payload);
         return Frame{
@@ -250,12 +251,19 @@ pub const Frame = struct {
         const header = parse_result.header;
         const header_len = parse_result.header_len;
 
-        if (data.len < header_len + header.payload_len) {
+        // Bound the attacker-controlled payload length before doing any
+        // arithmetic on it, then compute header_len + payload_len with an
+        // overflow-checked add so a length near 2^64 cannot wrap the bounds
+        // check and produce an inverted slice range.
+        if (header.payload_len > max_frame_size) return error.FrameTooLarge;
+        const total = std.math.add(usize, header_len, @intCast(header.payload_len)) catch return error.FrameTooLarge;
+
+        if (data.len < total) {
             return error.IncompleteFrame;
         }
 
         const payload_start = header_len;
-        const payload_end = header_len + @as(usize, header.payload_len);
+        const payload_end = total;
         const payload = try allocator.dupe(u8, data[payload_start..payload_end]);
 
         // Unmask payload if masked
@@ -277,7 +285,7 @@ pub const Frame = struct {
                 .payload = payload,
                 .masking_key = masking_key,
             },
-            .bytes_consumed = header_len + @as(usize, header.payload_len),
+            .bytes_consumed = total,
         };
     }
 
@@ -306,8 +314,9 @@ pub const CloseFrame = struct {
 
         const reason = payload[2..];
 
-        // Validate UTF-8
-        if (!isValidUtf8(reason)) return error.InvalidUtf8;
+        // Validate UTF-8 (RFC 6455 §8.1) with a real validator: rejects
+        // truncated sequences, overlong encodings, surrogates and > U+10FFFF.
+        if (!std.unicode.utf8ValidateSlice(reason)) return error.InvalidUtf8;
 
         return CloseFrame{
             .code = code,
@@ -453,7 +462,9 @@ pub const Connection = struct {
         var payload = std.array_list.AlignedManaged(u8, null).init(self.allocator);
         defer payload.deinit();
 
-        try payload.appendSlice(&std.mem.toBytes(code));
+        // RFC 6455 §5.5.1 / §7.1.5: the 2-byte close code is transmitted in
+        // network byte order (big-endian), not the host's native order.
+        try payload.appendSlice(&std.mem.toBytes(std.mem.nativeToBig(u16, code)));
         try payload.appendSlice(reason);
 
         return Frame.init(
@@ -492,30 +503,6 @@ pub const Connection = struct {
         return self.state == .closed;
     }
 };
-
-/// UTF-8 validation helper
-fn isValidUtf8(data: []const u8) bool {
-    var i: usize = 0;
-    while (i < data.len) {
-        const byte = data[i];
-
-        if (byte < 0x80) {
-            i += 1;
-        } else if ((byte & 0xE0) == 0xC0) {
-            if (i + 1 >= data.len) return false;
-            i += 2;
-        } else if ((byte & 0xF0) == 0xE0) {
-            if (i + 2 >= data.len) return false;
-            i += 3;
-        } else if ((byte & 0xF8) == 0xF0) {
-            if (i + 3 >= data.len) return false;
-            i += 4;
-        } else {
-            return false;
-        }
-    }
-    return true;
-}
 
 // Tests
 test "Opcode enum values" {
@@ -595,16 +582,22 @@ test "Handshake accept generation" {
     try testing.expectEqualStrings(expected, accept);
 }
 
-test "UTF-8 validation" {
+test "UTF-8 validation (real validator, RFC 6455 §8.1)" {
     const testing = std.testing;
+    const v = std.unicode.utf8ValidateSlice;
 
     // Valid UTF-8
-    try testing.expect(isValidUtf8("Hello"));
-    try testing.expect(isValidUtf8(""));
+    try testing.expect(v("Hello"));
+    try testing.expect(v(""));
+    try testing.expect(v("héllo 世界")); // multibyte
 
-    // Invalid UTF-8
-    try testing.expect(!isValidUtf8(&[_]u8{0xFF}));
-    try testing.expect(!isValidUtf8(&[_]u8{0xC0})); // Incomplete sequence
+    // Invalid UTF-8 the fake validator used to accept
+    try testing.expect(!v(&[_]u8{0xFF})); // invalid lead byte
+    try testing.expect(!v(&[_]u8{0xC0})); // truncated sequence
+    try testing.expect(!v(&[_]u8{ 0xC1, 0x41 })); // bad continuation byte
+    try testing.expect(!v(&[_]u8{ 0xC0, 0x80 })); // overlong encoding of NUL
+    try testing.expect(!v(&[_]u8{ 0xED, 0xA0, 0x80 })); // UTF-16 surrogate U+D800
+    try testing.expect(!v(&[_]u8{ 0xF4, 0x90, 0x80, 0x80 })); // > U+10FFFF
 }
 
 test "Connection state machine" {
@@ -876,4 +869,209 @@ test "Empty payload frame handling" {
     defer allocator.free(parsed.frame.payload);
 
     try testing.expectEqual(@as(usize, 0), parsed.frame.payload.len);
+}
+
+// ============================================================================
+// RFC 6455 §5.7 external byte vectors + hostile-input vectors
+//
+// The worked examples in RFC 6455 §5.7 give exact wire bytes. These are the
+// external anchor for the frame codec (per the repo golden rule): the inputs
+// AND the expected outputs come from the spec, not from this implementation.
+// The native-endian close-code bug and the fake UTF-8 validator both survived
+// for months because every prior test was a self-consistent roundtrip.
+// ============================================================================
+
+test "RFC 6455 §5.7 — single-frame unmasked text \"Hello\" encodes to exact bytes" {
+    const allocator = std.testing.allocator;
+    var frame = try Frame.init(allocator, true, .text, "Hello");
+    defer frame.deinit(allocator);
+
+    const bytes = try frame.toBytes(allocator);
+    defer allocator.free(bytes);
+
+    // RFC 6455 §5.7: 0x81 0x05 0x48 0x65 0x6c 0x6c 0x6f
+    const expected = [_]u8{ 0x81, 0x05, 0x48, 0x65, 0x6c, 0x6c, 0x6f };
+    try std.testing.expectEqualSlices(u8, &expected, bytes);
+}
+
+test "RFC 6455 §5.7 — decode single-frame unmasked \"Hello\"" {
+    const allocator = std.testing.allocator;
+    const wire = [_]u8{ 0x81, 0x05, 0x48, 0x65, 0x6c, 0x6c, 0x6f };
+
+    const r = try Frame.fromBytes(allocator, &wire);
+    defer allocator.free(r.frame.payload);
+
+    try std.testing.expect(r.frame.fin);
+    try std.testing.expectEqual(Opcode.text, r.frame.opcode);
+    try std.testing.expectEqualSlices(u8, "Hello", r.frame.payload);
+    try std.testing.expectEqual(@as(usize, wire.len), r.bytes_consumed);
+}
+
+test "RFC 6455 §5.7 — single-frame masked text \"Hello\" encodes to exact bytes" {
+    const allocator = std.testing.allocator;
+    var frame = try Frame.init(allocator, true, .text, "Hello");
+    defer frame.deinit(allocator);
+    // Fixed key from the RFC example (production keys are CSPRNG-random).
+    frame.masking_key = [4]u8{ 0x37, 0xfa, 0x21, 0x3d };
+
+    const bytes = try frame.toBytes(allocator);
+    defer allocator.free(bytes);
+
+    // RFC 6455 §5.7 masked "Hello": 0x81 0x85 <key> 0x7f 0x9f 0x4d 0x51 0x58
+    const expected = [_]u8{ 0x81, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58 };
+    try std.testing.expectEqualSlices(u8, &expected, bytes);
+}
+
+test "RFC 6455 §5.7 — decode masked \"Hello\" unmasks to plaintext" {
+    const allocator = std.testing.allocator;
+    const wire = [_]u8{ 0x81, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58 };
+
+    const r = try Frame.fromBytes(allocator, &wire);
+    defer allocator.free(r.frame.payload);
+
+    try std.testing.expectEqual(Opcode.text, r.frame.opcode);
+    try std.testing.expect(r.frame.masking_key != null);
+    try std.testing.expectEqualSlices(u8, "Hello", r.frame.payload);
+    try std.testing.expectEqual(@as(usize, wire.len), r.bytes_consumed);
+}
+
+test "RFC 6455 §5.7 — fragmented text \"Hel\"+\"lo\" decodes and reassembles" {
+    const allocator = std.testing.allocator;
+    var conn = Connection.init(allocator, true);
+    defer conn.deinit();
+
+    const wire1 = [_]u8{ 0x01, 0x03, 0x48, 0x65, 0x6c }; // fin=0, text,       "Hel"
+    const wire2 = [_]u8{ 0x80, 0x02, 0x6c, 0x6f }; //       fin=1, continuation "lo"
+
+    var f1 = try Frame.fromBytes(allocator, &wire1);
+    defer allocator.free(f1.frame.payload);
+    try std.testing.expect(!f1.frame.fin);
+    try std.testing.expectEqual(Opcode.text, f1.frame.opcode);
+    try conn.processFrame(&f1.frame);
+
+    var f2 = try Frame.fromBytes(allocator, &wire2);
+    defer allocator.free(f2.frame.payload);
+    try std.testing.expect(f2.frame.fin);
+    try std.testing.expectEqual(Opcode.continuation, f2.frame.opcode);
+    try conn.processFrame(&f2.frame);
+
+    const msg = try conn.getReassembledMessage();
+    defer if (msg) |m| allocator.free(m.payload);
+    try std.testing.expect(msg != null);
+    try std.testing.expectEqualSlices(u8, "Hello", msg.?.payload);
+}
+
+test "RFC 6455 §5.7 — unmasked Ping/Pong \"Hello\" opcode bytes" {
+    const allocator = std.testing.allocator;
+
+    var ping = try Frame.init(allocator, true, .ping, "Hello");
+    defer ping.deinit(allocator);
+    const pb = try ping.toBytes(allocator);
+    defer allocator.free(pb);
+    try std.testing.expectEqual(@as(u8, 0x89), pb[0]); // FIN + ping
+    try std.testing.expectEqual(@as(u8, 0x05), pb[1]);
+
+    var pong = try Frame.init(allocator, true, .pong, "Hello");
+    defer pong.deinit(allocator);
+    const qb = try pong.toBytes(allocator);
+    defer allocator.free(qb);
+    try std.testing.expectEqual(@as(u8, 0x8a), qb[0]); // FIN + pong
+    try std.testing.expectEqual(@as(u8, 0x05), qb[1]);
+}
+
+test "RFC 6455 §5.7 — 256-byte binary uses 16-bit extended length (0x7E)" {
+    // Header of a 256-byte binary frame: 0x82 0x7E 0x01 0x00
+    const wire = [_]u8{ 0x82, 0x7e, 0x01, 0x00 };
+    const parsed = try FrameHeader.fromBytes(&wire);
+    try std.testing.expectEqual(Opcode.binary, parsed.header.opcode);
+    try std.testing.expectEqual(@as(u64, 256), parsed.header.payload_len);
+    try std.testing.expectEqual(@as(usize, 4), parsed.header_len);
+}
+
+test "RFC 6455 §5.7 — 64 KiB binary uses 64-bit extended length (0x7F)" {
+    // Header of a 65536-byte binary frame: 0x82 0x7F <8 bytes big-endian 0x10000>
+    const wire = [_]u8{ 0x82, 0x7f, 0, 0, 0, 0, 0, 0, 0x01, 0x00 };
+    const parsed = try FrameHeader.fromBytes(&wire);
+    try std.testing.expectEqual(Opcode.binary, parsed.header.opcode);
+    try std.testing.expectEqual(@as(u64, 65536), parsed.header.payload_len);
+    try std.testing.expectEqual(@as(usize, 10), parsed.header_len);
+}
+
+test "close code 1000 is emitted big-endian on the wire (0x03 0xE8)" {
+    const allocator = std.testing.allocator;
+    var conn = Connection.init(allocator, true);
+    defer conn.deinit();
+
+    var frame = try conn.createCloseFrame(1000, "bye");
+    defer frame.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u8, 0x03), frame.payload[0]);
+    try std.testing.expectEqual(@as(u8, 0xe8), frame.payload[1]);
+    try std.testing.expectEqualSlices(u8, "bye", frame.payload[2..]);
+}
+
+test "CloseFrame code 1000 round-trips big-endian" {
+    const allocator = std.testing.allocator;
+    const cf = CloseFrame{ .code = 1000, .reason = "bye" };
+
+    const bytes = try cf.toBytes(allocator);
+    defer allocator.free(bytes);
+    try std.testing.expectEqual(@as(u8, 0x03), bytes[0]);
+    try std.testing.expectEqual(@as(u8, 0xe8), bytes[1]);
+
+    const parsed = try CloseFrame.parse(bytes);
+    try std.testing.expectEqual(@as(u16, 1000), parsed.code);
+    try std.testing.expectEqualSlices(u8, "bye", parsed.reason);
+}
+
+// ---- Hostile / malformed input vectors ------------------------------------
+
+test "negative — reserved data opcode 0x3 rejected on the wire" {
+    try std.testing.expectError(error.ReservedOpcode, FrameHeader.fromBytes(&[_]u8{ 0x83, 0x00 }));
+}
+
+test "negative — reserved control opcode 0xB rejected on the wire" {
+    try std.testing.expectError(error.ReservedOpcode, FrameHeader.fromBytes(&[_]u8{ 0x8b, 0x00 }));
+}
+
+test "negative — truncated 16-bit extended length is IncompleteHeader" {
+    try std.testing.expectError(error.IncompleteHeader, FrameHeader.fromBytes(&[_]u8{ 0x81, 0x7e, 0x01 }));
+}
+
+test "negative — oversized 64-bit length rejected before allocating" {
+    // 0x7F extended length claiming ~2^63 bytes: must error, must not OOM,
+    // must not overflow the header_len + payload_len bounds check.
+    const wire = [_]u8{ 0x82, 0x7f, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+    try std.testing.expectError(error.FrameTooLarge, Frame.fromBytes(std.testing.allocator, &wire));
+}
+
+test "negative — fragmented control frame rejected" {
+    const allocator = std.testing.allocator;
+    var conn = Connection.init(allocator, true);
+    defer conn.deinit();
+
+    var frame = try Frame.init(allocator, false, .ping, "x"); // fin=false control
+    defer frame.deinit(allocator);
+    try std.testing.expectError(error.FragmentedControlFrame, conn.processFrame(&frame));
+}
+
+test "negative — control frame with 126-byte payload rejected" {
+    const allocator = std.testing.allocator;
+    var conn = Connection.init(allocator, true);
+    defer conn.deinit();
+
+    const big = try allocator.alloc(u8, 126);
+    defer allocator.free(big);
+    @memset(big, 0x42);
+
+    var frame = try Frame.init(allocator, true, .ping, big);
+    defer frame.deinit(allocator);
+    try std.testing.expectError(error.ControlFrameTooLarge, conn.processFrame(&frame));
+}
+
+test "negative — close reason with overlong/surrogate UTF-8 rejected" {
+    // code 1000 (0x03 0xE8) followed by an overlong encoding of NUL (0xC0 0x80)
+    try std.testing.expectError(error.InvalidUtf8, CloseFrame.parse(&[_]u8{ 0x03, 0xe8, 0xc0, 0x80 }));
+    // code 1000 followed by a UTF-16 surrogate (U+D800: 0xED 0xA0 0x80)
+    try std.testing.expectError(error.InvalidUtf8, CloseFrame.parse(&[_]u8{ 0x03, 0xe8, 0xed, 0xa0, 0x80 }));
 }

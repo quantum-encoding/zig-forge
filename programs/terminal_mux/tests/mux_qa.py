@@ -396,8 +396,82 @@ def scenario_control_socket():
     finally:
         del os.environ["ZTERM_SOCKET"]
 
+def scenario_persistent_detach():
+    """`zterm server` + attach relay: the shell — including its variable state —
+    survives the client disconnecting (the tmux detach guarantee)."""
+    import json
+    import socket
+    import subprocess
+
+    zterm = os.path.join(os.path.dirname(MUX), "zterm")
+    sock_path = tempfile.mktemp(prefix="mux-qa-detach-", suffix=".sock")
+    env = dict(os.environ, ZTERM_SOCKET=sock_path)
+    srv = subprocess.Popen([zterm, "server"], env=env,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.time() + 30
+        while time.time() < deadline and not os.path.exists(sock_path):
+            time.sleep(0.1)
+        assert os.path.exists(sock_path), "server socket never appeared"
+
+        def attach():
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(2)
+            s.connect(sock_path)
+            s.sendall(b"attach 1 24 80\n")
+            return s
+
+        def drain_sock(s, seconds):
+            end = time.time() + seconds
+            while time.time() < end:
+                try:
+                    if not s.recv(65536):
+                        return
+                except socket.timeout:
+                    return
+
+        def run_until(s, cmd, path, timeout=90):
+            # Resend until it lands: the shell may still be booting and zsh's
+            # tty init discards early input (TCSAFLUSH).
+            deadline2 = time.time() + timeout
+            last = 0.0
+            while time.time() < deadline2:
+                if time.time() - last > 2.0:
+                    s.sendall((cmd + "\n").encode())
+                    last = time.time()
+                drain_sock(s, 0.25)
+                if os.path.exists(path):
+                    return
+            raise AssertionError(f"command never ran: {cmd}")
+
+        mark_a = tempfile.mktemp(prefix="mux-qa-det-a-")
+        s1 = attach()
+        drain_sock(s1, 0.5)  # snapshot
+        run_until(s1, f"MARK=alive-4711; touch {mark_a}", mark_a)
+        os.unlink(mark_a)
+        s1.close()           # ← DETACH. No kill, no signal — just hang up.
+        time.sleep(0.5)
+
+        out_file = tempfile.mktemp(prefix="mux-qa-det-b-")
+        s2 = attach()        # reattach to the SAME pane
+        drain_sock(s2, 0.5)
+        run_until(s2, f"echo $MARK > {out_file}", out_file)
+        drain_sock(s2, 0.3)
+        content = open(out_file).read().strip()
+        os.unlink(out_file)
+        s2.close()
+        assert content == "alive-4711", (
+            f"shell state lost across detach (got {content!r}) — different shell?")
+        print("PASS persistent-detach (same shell + state across hangup/reattach)")
+    finally:
+        srv.kill()
+        srv.wait()
+        if os.path.exists(sock_path):
+            os.unlink(sock_path)
+
 if __name__ == "__main__":
     scenario_scroll_invariant()
     scenario_background_drain()
     scenario_control_socket()
+    scenario_persistent_detach()
     print("ALL QA SCENARIOS PASS")

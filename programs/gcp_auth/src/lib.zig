@@ -20,11 +20,13 @@ const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 const METADATA_TOKEN_URL = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
 const METADATA_PROJECT_URL = "http://metadata.google.internal/computeMetadata/v1/project/project-id";
 
-/// Allowed token endpoint host suffixes. Prevents SSRF via attacker-controlled
+/// Allowed token endpoint hostnames. Prevents SSRF via attacker-controlled
 /// token_uri in service account JSON redirecting signed JWTs to arbitrary URLs.
+/// These are compared EXACTLY against the parsed URI authority host (never as a
+/// substring) — see `isAllowedTokenUri`.
 const allowed_token_hosts = [_][]const u8{
-    "://oauth2.googleapis.com/",
-    "://accounts.google.com/",
+    "oauth2.googleapis.com",
+    "accounts.google.com",
 };
 
 /// Default scope covering most GCP services.
@@ -404,11 +406,27 @@ pub fn autoDetect(allocator: std.mem.Allocator, client: *HttpClient, scope: []co
 // ============================================================================
 
 /// Validate that a token URI points to a known Google endpoint.
+///
+/// SECURITY: The URI is parsed with `std.Uri` and its authority *host* is
+/// compared EXACTLY (case-insensitive) against the allowlist. A substring /
+/// `indexOf` match is unsafe — it accepts SSRF payloads such as
+/// `https://evil.com/?x=://oauth2.googleapis.com/` (the allowed token appears
+/// in the query string) or `https://oauth2.googleapis.com@evil.com/` (the
+/// allowed name is smuggled into userinfo), causing the signed JWT assertion to
+/// be POSTed to the attacker host. See CLAUDE.md anti-pattern class #5.
 pub fn isAllowedTokenUri(uri: []const u8) bool {
-    // Must be HTTPS
-    if (!std.mem.startsWith(u8, uri, "https://")) return false;
-    for (allowed_token_hosts) |host| {
-        if (std.mem.indexOf(u8, uri, host) != null) return true;
+    const parsed = std.Uri.parse(uri) catch return false;
+
+    // Scheme must be exactly https (RFC 3986 §3.1: scheme is case-insensitive).
+    if (!std.ascii.eqlIgnoreCase(parsed.scheme, "https")) return false;
+
+    // Extract the percent-decoded authority host. A URI with no host
+    // (e.g. `https:///token`, an opaque or relative reference) is rejected.
+    var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
+    const host = (parsed.getHost(&host_buf) catch return false).bytes;
+
+    for (allowed_token_hosts) |allowed| {
+        if (std.ascii.eqlIgnoreCase(host, allowed)) return true;
     }
     return false;
 }

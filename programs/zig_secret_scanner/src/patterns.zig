@@ -71,6 +71,8 @@ pub const Charset = enum {
     hex, // a-fA-F0-9
     base64, // a-zA-Z0-9+/=
     base64url, // a-zA-Z0-9-_
+    jwt, // a-zA-Z0-9-_ plus '.' segment separators (header.payload.signature)
+    discord, // a-zA-Z0-9+/= plus '.', '_', '-' (dot-separated Discord token segments)
 
     pub fn isValid(self: Charset, c: u8) bool {
         return switch (self) {
@@ -79,6 +81,13 @@ pub const Charset = enum {
             .hex => std.ascii.isHex(c),
             .base64 => std.ascii.isAlphanumeric(c) or c == '+' or c == '/' or c == '=',
             .base64url => std.ascii.isAlphanumeric(c) or c == '-' or c == '_',
+            // JWTs are base64url segments joined by '.', so the dot must be a
+            // valid inter-segment char or every real header.payload.signature
+            // token fails validation and is silently dropped.
+            .jwt => std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.',
+            // Discord tokens are dot-separated segments; allow the separator and
+            // the base64url extras in addition to plain base64.
+            .discord => std.ascii.isAlphanumeric(c) or c == '+' or c == '/' or c == '=' or c == '.' or c == '_' or c == '-',
         };
     }
 };
@@ -585,7 +594,7 @@ pub const jwt_patterns = [_]Pattern{
         .prefix_len = 3,
         .min_length = 50,
         .max_length = 4000,
-        .charset = .base64url,
+        .charset = .jwt,
     },
 };
 
@@ -626,7 +635,7 @@ pub const discord_patterns = [_]Pattern{
         .min_entropy = 0.7,
         .min_length = 59,
         .max_length = 72,
-        .charset = .base64,
+        .charset = .discord,
     },
     .{
         .id = "discord-webhook",

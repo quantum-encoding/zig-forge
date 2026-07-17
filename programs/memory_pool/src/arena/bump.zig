@@ -25,8 +25,20 @@ pub const ArenaAllocator = struct {
     }
 
     pub fn alloc(self: *ArenaAllocator, size: usize, alignment: usize) ![]u8 {
+        // Alignment must be a non-zero power of two. A zero alignment makes
+        // alignForward produce garbage (and, at the FFI boundary, aligned_offset=0
+        // aliasing live data); a non-power-of-2 silently mis-aligns.
+        if (alignment == 0 or !std.math.isPowerOfTwo(alignment)) {
+            return error.InvalidAlignment;
+        }
+
+        // self.offset is always <= buffer.len (a real heap allocation), so
+        // alignForward cannot overflow here. The bump, however, can: with
+        // size == SIZE_MAX, aligned_offset + size wraps below buffer.len and
+        // would pass the bounds check, yielding a reversed-bounds slice (UB in
+        // ReleaseFast). Use checked addition.
         const aligned_offset = std.mem.alignForward(usize, self.offset, alignment);
-        const new_offset = aligned_offset + size;
+        const new_offset = std.math.add(usize, aligned_offset, size) catch return error.OutOfMemory;
 
         if (new_offset > self.buffer.len) {
             return error.OutOfMemory;

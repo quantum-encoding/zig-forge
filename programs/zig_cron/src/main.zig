@@ -464,12 +464,9 @@ test "config file parsing" {
             if (command.len == 0) continue;
 
             if (parseInterval(interval_str)) |interval| {
-                const cmd_z = try allocator.allocSentinel(u8, command.len, 0);
-                @memcpy(cmd_z, command);
                 try tasks.append(allocator, .{
                     .interval_secs = interval,
                     .command = command,
-                    .command_z = cmd_z,
                     .last_run = 0,
                     .failure_count = 0,
                     .last_exit_code = 0,

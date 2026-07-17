@@ -68,29 +68,29 @@ pub const Registry = struct {
 
     pub fn init(allocator: std.mem.Allocator) Self {
         return Self{
-            .counters = std.ArrayList(*Counter).init(allocator),
-            .gauges = std.ArrayList(*Gauge).init(allocator),
-            .histograms = std.ArrayList(*Histogram).init(allocator),
+            .counters = .empty,
+            .gauges = .empty,
+            .histograms = .empty,
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *Self) void {
-        self.counters.deinit();
-        self.gauges.deinit();
-        self.histograms.deinit();
+        self.counters.deinit(self.allocator);
+        self.gauges.deinit(self.allocator);
+        self.histograms.deinit(self.allocator);
     }
 
     pub fn registerCounter(self: *Self, c: *Counter) !void {
-        try self.counters.append(c);
+        try self.counters.append(self.allocator, c);
     }
 
     pub fn registerGauge(self: *Self, g: *Gauge) !void {
-        try self.gauges.append(g);
+        try self.gauges.append(self.allocator, g);
     }
 
     pub fn registerHistogram(self: *Self, h: *Histogram) !void {
-        try self.histograms.append(h);
+        try self.histograms.append(self.allocator, h);
     }
 
     /// Write all registered metrics

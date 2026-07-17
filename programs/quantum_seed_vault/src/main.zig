@@ -224,6 +224,16 @@ pub fn main(init: std.process.Init) !void {
 }
 
 // Tests
+
+// Pull in tests from imported modules (crypto/shamir.zig, etc.) so they run under
+// `zig build test`. Without referencing the imported files here, their test blocks
+// are not included in this root's test binary.
+test {
+    std.testing.refAllDecls(@This());
+    _ = crypto;
+    _ = crypto.shamir;
+}
+
 test "app initialization" {
     var app = App.init(.{ .force_terminal = true });
     defer app.deinit();

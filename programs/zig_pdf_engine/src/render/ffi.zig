@@ -51,6 +51,10 @@ const RenderResultHandle = struct {
 const DocumentHandle = struct {
     doc: Document,
     allocator: std.mem.Allocator,
+    // NUL-terminated copy of the PDF version string. The version slice returned
+    // by the parser points into the raw file buffer and is NOT NUL-terminated,
+    // so we copy it here once at open time and hand out this buffer to C callers.
+    version_buf: [16]u8 = [_]u8{0} ** 16,
 };
 
 // =============================================================================
@@ -548,6 +552,13 @@ pub export fn pdf_document_open(path: [*:0]const u8) ?*DocumentHandle {
         .allocator = allocator,
     };
 
+    // Copy the version into a NUL-terminated buffer up front so
+    // pdf_document_get_version can hand out a valid C string.
+    const version = handle.doc.getVersion();
+    const copy_len = @min(version.len, handle.version_buf.len - 1);
+    @memcpy(handle.version_buf[0..copy_len], version[0..copy_len]);
+    handle.version_buf[copy_len] = 0;
+
     return handle;
 }
 
@@ -568,13 +579,10 @@ pub export fn pdf_document_get_page_count(handle: ?*DocumentHandle) u32 {
 /// Returns pointer to static string
 pub export fn pdf_document_get_version(handle: ?*DocumentHandle) [*:0]const u8 {
     const h = handle orelse return "unknown";
-    // Version is stored in the document data, which is memory-mapped
-    const version = h.doc.getVersion();
-    // Return as null-terminated (assuming it's short and in valid memory)
-    if (version.len > 0 and version.len < 16) {
-        return @ptrCast(version.ptr);
-    }
-    return "1.0";
+    // version_buf was populated with a NUL-terminated copy at open time.
+    // Guard against an empty version (buffer all zeros).
+    if (h.version_buf[0] == 0) return "1.0";
+    return @ptrCast(&h.version_buf);
 }
 
 /// Get document file size in bytes

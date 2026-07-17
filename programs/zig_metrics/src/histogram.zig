@@ -17,6 +17,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Counter = @import("counter.zig").Counter;
+const escape = @import("escape.zig");
 
 /// Prometheus Histogram
 pub const Histogram = struct {
@@ -113,34 +114,42 @@ pub const Histogram = struct {
 
     /// Format as Prometheus exposition format
     pub fn write(self: *const Self, writer: anytype) !void {
-        try writer.print("# HELP {s} {s}\n", .{ self.name, self.help });
+        try writer.print("# HELP {s} ", .{self.name});
+        try escape.writeEscapedHelp(writer, self.help);
+        try writer.writeAll("\n");
         try writer.print("# TYPE {s} histogram\n", .{self.name});
 
-        // Write bucket lines
-        var cumulative: u64 = 0;
+        // Write bucket lines. `observe` already stores cumulative per-bucket
+        // counts (every bucket with bound >= val is incremented), so the
+        // stored value IS the cumulative count — load it directly. Do NOT
+        // re-accumulate here (that produced non-monotonic, doubly-counted
+        // buckets and invalid exposition).
         for (self.buckets, 0..) |bound, i| {
-            cumulative += self.bucket_counts[i].load(.monotonic);
+            const count = self.bucket_counts[i].load(.monotonic);
             try writer.print("{s}_bucket{{le=\"{d}\"", .{ self.name, bound });
 
             if (self.labels) |labels| {
                 for (labels) |label| {
-                    try writer.print(",{s}=\"{s}\"", .{ label.name, label.value });
+                    try writer.print(",{s}=\"", .{label.name});
+                    try escape.writeEscapedLabelValue(writer, label.value);
+                    try writer.writeAll("\"");
                 }
             }
 
-            try writer.print("}} {}\n", .{cumulative});
+            try writer.print("}} {}\n", .{count});
         }
 
-        // +Inf bucket
-        cumulative += self.bucket_counts[self.buckets.len].load(.monotonic) -
-            (if (self.buckets.len > 0) self.bucket_counts[self.buckets.len - 1].load(.monotonic) else 0);
+        // +Inf bucket (stored cumulative count for all observations).
+        const inf_count = self.bucket_counts[self.buckets.len].load(.monotonic);
         try writer.print("{s}_bucket{{le=\"+Inf\"", .{self.name});
         if (self.labels) |labels| {
             for (labels) |label| {
-                try writer.print(",{s}=\"{s}\"", .{ label.name, label.value });
+                try writer.print(",{s}=\"", .{label.name});
+                try escape.writeEscapedLabelValue(writer, label.value);
+                try writer.writeAll("\"");
             }
         }
-        try writer.print("}} {}\n", .{self.getCount()});
+        try writer.print("}} {}\n", .{inf_count});
 
         // Sum
         try writer.print("{s}_sum", .{self.name});
@@ -148,7 +157,9 @@ pub const Histogram = struct {
             try writer.writeAll("{");
             for (labels, 0..) |label, i| {
                 if (i > 0) try writer.writeAll(",");
-                try writer.print("{s}=\"{s}\"", .{ label.name, label.value });
+                try writer.print("{s}=\"", .{label.name});
+                try escape.writeEscapedLabelValue(writer, label.value);
+                try writer.writeAll("\"");
             }
             try writer.writeAll("}");
         }
@@ -160,7 +171,9 @@ pub const Histogram = struct {
             try writer.writeAll("{");
             for (labels, 0..) |label, i| {
                 if (i > 0) try writer.writeAll(",");
-                try writer.print("{s}=\"{s}\"", .{ label.name, label.value });
+                try writer.print("{s}=\"", .{label.name});
+                try escape.writeEscapedLabelValue(writer, label.value);
+                try writer.writeAll("\"");
             }
             try writer.writeAll("}");
         }
@@ -200,7 +213,33 @@ test "histogram prometheus format" {
 
     const written = writer.written();
     try std.testing.expect(std.mem.indexOf(u8, written, "# TYPE request_duration histogram") != null);
-    try std.testing.expect(std.mem.indexOf(u8, written, "request_duration_bucket{le=\"0.1\"}") != null);
+    // Exact cumulative bucket values (observe 0.25, 0.75 into buckets {0.1,0.5,1.0}):
+    // le=0.1 -> 0, le=0.5 -> 1, le=1.0 -> 2, le=+Inf -> 2. Must be monotonic.
+    try std.testing.expect(std.mem.indexOf(u8, written, "request_duration_bucket{le=\"0.1\"} 0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "request_duration_bucket{le=\"0.5\"} 1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "request_duration_bucket{le=\"1\"} 2\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "request_duration_bucket{le=\"+Inf\"} 2\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, written, "request_duration_sum") != null);
     try std.testing.expect(std.mem.indexOf(u8, written, "request_duration_count 2") != null);
+}
+
+test "histogram label value escaping" {
+    const allocator = std.testing.allocator;
+    var hist = try Histogram.init(allocator, "req", "Requests", &[_]f64{ 0.1, 0.5 });
+    defer hist.deinit();
+
+    const labels = [_]Counter.Label{
+        .{ .name = "path", .value = "a\"b\\c" },
+    };
+    hist.labels = &labels;
+    hist.observe(0.05);
+
+    var writer: std.Io.Writer.Allocating = std.Io.Writer.Allocating.init(allocator);
+    defer writer.deinit();
+    try hist.write(&writer.writer);
+
+    const written = writer.written();
+    // The `"` and `\` in the label value must be escaped so the exposition
+    // stays parseable.
+    try std.testing.expect(std.mem.indexOf(u8, written, "path=\"a\\\"b\\\\c\"") != null);
 }

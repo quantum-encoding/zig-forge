@@ -130,7 +130,19 @@ fn cmdTrash(allocator: std.mem.Allocator, io: Io, first_arg: []const u8, args_it
         };
         defer allocator.free(path_z);
 
-        if (c.access(path_z, 0) != 0) {
+        // Detect whether the path *itself* is a symlink WITHOUT following it, so
+        // `trash <symlink>` removes the link (rm semantics) rather than its
+        // target, and dangling symlinks stay trashable. readlink succeeds only
+        // for symlinks; it fails (EINVAL) for regular files and (ENOENT) for
+        // missing paths — that combined with the access() check below gives a
+        // symlink-aware existence test.
+        var link_buf: [Dir.max_path_bytes]u8 = undefined;
+        const is_symlink = c.readlink(path_z, &link_buf, link_buf.len) >= 0;
+
+        // Existence check that does not silently swallow a dangling symlink.
+        // access() follows links, so it would report a dangling link as
+        // "not found"; skip it when we already know the path is a symlink.
+        if (!is_symlink and c.access(path_z, 0) != 0) {
             if (force) {
                 if (verbose) wErr("trash: skipping (not found): {s}\n", .{path});
                 continue;
@@ -140,14 +152,31 @@ fn cmdTrash(allocator: std.mem.Allocator, io: Io, first_arg: []const u8, args_it
             continue;
         }
 
-        // Resolve absolute path
+        // Resolve to an absolute path. For a symlink, resolve only the PARENT
+        // directory (so ancestor symlinks are followed) and re-attach the link's
+        // own basename — never realpath() the link itself, which would resolve to
+        // the target and trash the wrong inode.
         var rp_buf: [Dir.max_path_bytes]u8 = undefined;
-        const resolved = c.realpath(path_z, &rp_buf) orelse {
+        const abs_path: []const u8 = blk: {
+            if (is_symlink) {
+                const dir_name = std.fs.path.dirname(path) orelse ".";
+                const base_name = std.fs.path.basename(path);
+                const dir_z = allocator.dupeZ(u8, dir_name) catch break :blk null;
+                defer allocator.free(dir_z);
+                const parent = c.realpath(dir_z, &rp_buf) orelse break :blk null;
+                const parent_s = std.mem.span(parent);
+                const sep: []const u8 = if (std.mem.endsWith(u8, parent_s, "/")) "" else "/";
+                break :blk std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ parent_s, sep, base_name }) catch null;
+            } else {
+                const resolved = c.realpath(path_z, &rp_buf) orelse break :blk null;
+                break :blk allocator.dupe(u8, std.mem.span(resolved)) catch null;
+            }
+        } orelse {
             wErr("trash: cannot resolve {s}\n", .{path});
             errors += 1;
             continue;
         };
-        const abs_path = std.mem.span(resolved);
+        defer allocator.free(abs_path);
 
         if (dry_run) {
             wOut("would trash: {s}\n", .{abs_path});
@@ -267,13 +296,23 @@ fn cmdList(allocator: std.mem.Allocator, io: Io, args_iter: *std.process.Args.It
     }.lt);
 
     if (json_output) {
-        wOut("[\n", .{});
-        for (entries.items, 0..) |e, idx| {
+        // Stream real JSON through an unbounded (growable) writer so filenames
+        // containing `"`, `\`, control chars, or exceeding the old 2 KiB wOut
+        // buffer can neither inject fields nor silently truncate the array.
+        var aw: std.Io.Writer.Allocating = .init(allocator);
+        defer aw.deinit();
+        var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{ .whitespace = .indent_2 } };
+
+        jw.beginArray() catch {};
+        for (entries.items) |e| {
             const tn = e.trash_name orelse "unknown";
-            wOut("  {{\"path\":\"{s}\",\"date\":\"{s}\",\"trash_name\":\"{s}\"}}", .{ e.original_path, e.date_str, tn });
-            if (idx < entries.items.len - 1) wOut(",\n", .{}) else wOut("\n", .{});
+            jw.write(.{ .path = e.original_path, .date = e.date_str, .trash_name = tn }) catch {};
         }
-        wOut("]\n", .{});
+        jw.endArray() catch {};
+        aw.writer.writeByte('\n') catch {};
+
+        const out = aw.written();
+        _ = c.write(1, out.ptr, out.len);
     } else {
         if (entries.items.len == 0) {
             wOut("Trash is empty (no tracked items).\n", .{});
@@ -859,8 +898,11 @@ const trashLinux = if (builtin.os.tag == .linux) struct {
         const info_file = try std.fmt.allocPrint(allocator, "{s}/{s}.trashinfo", .{ info_dir, final_name });
         defer allocator.free(info_file);
 
+        const encoded = try encodeTrashPath(allocator, path);
+        defer allocator.free(encoded);
+
         const now = timestampToIso8601();
-        const content = try std.fmt.allocPrint(allocator, "[Trash Info]\nPath={s}\nDeletionDate={s}\n", .{ path, &now });
+        const content = try std.fmt.allocPrint(allocator, "[Trash Info]\nPath={s}\nDeletionDate={s}\n", .{ encoded, &now });
         defer allocator.free(content);
 
         const info_file_z = try allocator.dupeZ(u8, info_file);
@@ -892,6 +934,34 @@ const TrashEntry = struct {
     }
 };
 
+// The freedesktop trash spec stores the `Path` value percent-encoded (RFC 3986),
+// leaving path separators literal. Encoding on write prevents newline injection
+// into the metadata file (a `\n` in a POSIX filename would otherwise forge extra
+// `Path=`/`DeletionDate=` lines) and makes entries interoperable with gio /
+// trash-cli, which also percent-encode. Unreserved chars + '/' stay literal.
+fn isTrashPathChar(ch: u8) bool {
+    return switch (ch) {
+        'A'...'Z', 'a'...'z', '0'...'9', '-', '.', '_', '~', '/' => true,
+        else => false,
+    };
+}
+
+fn encodeTrashPath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    try std.Uri.Component.percentEncode(&aw.writer, path, isTrashPathChar);
+    return aw.toOwnedSlice();
+}
+
+// Decode a percent-encoded `Path` value. Legacy raw values written by older
+// versions decode unchanged unless they happen to contain a literal `%XX`.
+fn decodeTrashPath(allocator: std.mem.Allocator, raw: []const u8) ?[]u8 {
+    const tmp = allocator.alloc(u8, raw.len) catch return null;
+    defer allocator.free(tmp);
+    const decoded = std.Uri.percentDecodeBackwards(tmp, raw);
+    return allocator.dupe(u8, decoded) catch null;
+}
+
 fn writeTrashInfo(allocator: std.mem.Allocator, io: Io, trash_filename: []const u8, original_path: []const u8) !void {
     // On Linux, trashLinux already writes .trashinfo — skip
     if (comptime builtin.os.tag == .linux) return;
@@ -908,8 +978,11 @@ fn writeTrashInfo(allocator: std.mem.Allocator, io: Io, trash_filename: []const 
     const file_path = try std.fmt.allocPrint(allocator, "{s}/{s}.trashinfo", .{ info_path, trash_filename });
     defer allocator.free(file_path);
 
+    const encoded = try encodeTrashPath(allocator, original_path);
+    defer allocator.free(encoded);
+
     const now = timestampToIso8601();
-    const content = try std.fmt.allocPrint(allocator, "[Trash Info]\nPath={s}\nDeletionDate={s}\n", .{ original_path, &now });
+    const content = try std.fmt.allocPrint(allocator, "[Trash Info]\nPath={s}\nDeletionDate={s}\n", .{ encoded, &now });
     defer allocator.free(content);
 
     const file = Dir.createFileAbsolute(io, file_path, .{}) catch return;
@@ -937,7 +1010,7 @@ fn readTrashInfo(allocator: std.mem.Allocator, io: Io, path: []const u8) ?TrashE
     var line_iter = std.mem.splitScalar(u8, content, '\n');
     while (line_iter.next()) |line| {
         if (std.mem.startsWith(u8, line, "Path=")) {
-            original_path = allocator.dupe(u8, line["Path=".len..]) catch null;
+            original_path = decodeTrashPath(allocator, line["Path=".len..]);
         } else if (std.mem.startsWith(u8, line, "DeletionDate=")) {
             date_str = allocator.dupe(u8, line["DeletionDate=".len..]) catch null;
         }

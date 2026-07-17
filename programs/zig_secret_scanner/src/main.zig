@@ -165,12 +165,31 @@ fn runScan(allocator: std.mem.Allocator, opts: *Options) !void {
         }
     }
 
-    // Output results
+    // Resolve the output sink. Machine-readable formats (json/sarif) and text
+    // all go to the chosen writer — stdout by default, or the file named by
+    // -o/--output. Previously every formatter used std.debug.print (stderr), so
+    // `zss scan -f sarif . > out.sarif` and `-o out.sarif` both produced an
+    // empty file. Human diagnostics still go to stderr elsewhere.
+    const to_file = opts.output_file != null;
+    const out_file = if (opts.output_file) |path|
+        std.Io.Dir.cwd().createFile(opts.io, path, .{}) catch |err| {
+            std.debug.print("Error creating output file '{s}': {s}\n", .{ path, @errorName(err) });
+            std.process.exit(2);
+        }
+    else
+        std.Io.File.stdout();
+    defer if (to_file) out_file.close(opts.io);
+
+    var out_buf: [65536]u8 = undefined;
+    var out_writer = out_file.writer(opts.io, &out_buf);
+    const w = &out_writer.interface;
+
     switch (opts.format) {
-        .text => outputText(&scan, opts),
-        .json => try outputJson(allocator, &scan),
-        .sarif => try outputSarif(allocator, &scan),
+        .text => try outputText(&scan, opts, w),
+        .json => try outputJson(allocator, &scan, w),
+        .sarif => try outputSarif(allocator, &scan, w),
     }
+    try w.flush();
 
     // Exit with error code if secrets found
     if (scan.hasFindings()) {
@@ -178,7 +197,7 @@ fn runScan(allocator: std.mem.Allocator, opts: *Options) !void {
     }
 }
 
-fn outputText(scan: *Scanner, opts: *Options) void {
+fn outputText(scan: *Scanner, opts: *Options, w: *std.Io.Writer) !void {
     const findings = scan.getSortedFindings();
 
     if (opts.quiet) return;
@@ -187,8 +206,8 @@ fn outputText(scan: *Scanner, opts: *Options) void {
 
     if (findings.len == 0) {
         if (opts.verbose) {
-            std.debug.print("No secrets detected.\n", .{});
-            std.debug.print("Scanned {d} files ({d} bytes)\n", .{ scan.files_scanned, scan.bytes_scanned });
+            try w.writeAll("No secrets detected.\n");
+            try w.print("Scanned {d} files ({d} bytes)\n", .{ scan.files_scanned, scan.bytes_scanned });
         }
         return;
     }
@@ -197,26 +216,26 @@ fn outputText(scan: *Scanner, opts: *Options) void {
     for (findings) |f| {
         const color = if (opts.color) f.severity.toColor() else "";
 
-        std.debug.print("{s}[{s}]{s} {s}\n", .{
+        try w.print("{s}[{s}]{s} {s}\n", .{
             color,
             f.severity.toString(),
             reset,
             f.pattern_name,
         });
-        std.debug.print("  {s}:{d}:{d}\n", .{
+        try w.print("  {s}:{d}:{d}\n", .{
             f.file_path,
             f.line_number,
             f.column,
         });
-        std.debug.print("  Secret: {s}\n", .{f.matched_text});
+        try w.print("  Secret: {s}\n", .{f.matched_text});
 
         if (opts.verbose) {
             if (f.entropy_score) |ent| {
-                std.debug.print("  Entropy: {d:.2}\n", .{ent});
+                try w.print("  Entropy: {d:.2}\n", .{ent});
             }
-            std.debug.print("  Pattern: {s}\n", .{f.pattern_id});
+            try w.print("  Pattern: {s}\n", .{f.pattern_id});
         }
-        std.debug.print("\n", .{});
+        try w.writeAll("\n");
     }
 
     // Summary
@@ -225,73 +244,94 @@ fn outputText(scan: *Scanner, opts: *Options) void {
     const medium = scan.countBySeverity(.medium);
     const low = scan.countBySeverity(.low);
 
-    std.debug.print("Found {d} secret(s): ", .{findings.len});
-    if (critical > 0) std.debug.print("{s}{d} critical{s} ", .{ if (opts.color) "\x1b[91m" else "", critical, reset });
-    if (high > 0) std.debug.print("{s}{d} high{s} ", .{ if (opts.color) "\x1b[31m" else "", high, reset });
-    if (medium > 0) std.debug.print("{s}{d} medium{s} ", .{ if (opts.color) "\x1b[33m" else "", medium, reset });
-    if (low > 0) std.debug.print("{s}{d} low{s} ", .{ if (opts.color) "\x1b[36m" else "", low, reset });
-    std.debug.print("\n", .{});
+    try w.print("Found {d} secret(s): ", .{findings.len});
+    if (critical > 0) try w.print("{s}{d} critical{s} ", .{ if (opts.color) "\x1b[91m" else "", critical, reset });
+    if (high > 0) try w.print("{s}{d} high{s} ", .{ if (opts.color) "\x1b[31m" else "", high, reset });
+    if (medium > 0) try w.print("{s}{d} medium{s} ", .{ if (opts.color) "\x1b[33m" else "", medium, reset });
+    if (low > 0) try w.print("{s}{d} low{s} ", .{ if (opts.color) "\x1b[36m" else "", low, reset });
+    try w.writeAll("\n");
 
     if (opts.verbose) {
-        std.debug.print("Scanned {d} files ({d} bytes)\n", .{ scan.files_scanned, scan.bytes_scanned });
+        try w.print("Scanned {d} files ({d} bytes)\n", .{ scan.files_scanned, scan.bytes_scanned });
     }
 }
 
-fn outputJson(allocator: std.mem.Allocator, scan: *Scanner) !void {
+fn outputJson(allocator: std.mem.Allocator, scan: *Scanner, w: *std.Io.Writer) !void {
     const findings = scan.getSortedFindings();
 
-    std.debug.print("{{\n", .{});
-    std.debug.print("  \"version\": \"{s}\",\n", .{VERSION});
-    std.debug.print("  \"files_scanned\": {d},\n", .{scan.files_scanned});
-    std.debug.print("  \"bytes_scanned\": {d},\n", .{scan.bytes_scanned});
-    std.debug.print("  \"findings_count\": {d},\n", .{findings.len});
-    std.debug.print("  \"findings\": [\n", .{});
+    // One anonymous-struct row per finding. std.json.Stringify escapes every
+    // string field (file paths, pattern names, secrets), so a hostile filename
+    // or matched value containing '"' / '\' / control chars can no longer break
+    // the document or inject fields (JSON-IN-FMT). Replaces the hand-rolled,
+    // truncating escapeJson helper entirely.
+    const JsonFinding = struct {
+        file: []const u8,
+        line: usize,
+        column: usize,
+        severity: []const u8,
+        pattern_id: []const u8,
+        pattern_name: []const u8,
+        secret: []const u8,
+        entropy: ?f32,
+    };
 
+    var rows = try allocator.alloc(JsonFinding, findings.len);
+    defer allocator.free(rows);
     for (findings, 0..) |f, idx| {
-        std.debug.print("    {{\n", .{});
-        std.debug.print("      \"file\": \"{s}\",\n", .{f.file_path});
-        std.debug.print("      \"line\": {d},\n", .{f.line_number});
-        std.debug.print("      \"column\": {d},\n", .{f.column});
-        std.debug.print("      \"severity\": \"{s}\",\n", .{f.severity.toString()});
-        std.debug.print("      \"pattern_id\": \"{s}\",\n", .{f.pattern_id});
-        std.debug.print("      \"pattern_name\": \"{s}\",\n", .{f.pattern_name});
-
-        // Escape the secret for JSON
-        var escaped_buf: [1024]u8 = undefined;
-        const escaped = escapeJson(f.matched_text, &escaped_buf);
-        std.debug.print("      \"secret\": \"{s}\"", .{escaped});
-
-        if (f.entropy_score) |ent| {
-            std.debug.print(",\n      \"entropy\": {d:.4}", .{ent});
-        }
-
-        std.debug.print("\n    }}", .{});
-        if (idx < findings.len - 1) std.debug.print(",", .{});
-        std.debug.print("\n", .{});
+        rows[idx] = .{
+            .file = f.file_path,
+            .line = f.line_number,
+            .column = f.column,
+            .severity = f.severity.toString(),
+            .pattern_id = f.pattern_id,
+            .pattern_name = f.pattern_name,
+            .secret = f.matched_text,
+            .entropy = f.entropy_score,
+        };
     }
 
-    std.debug.print("  ]\n", .{});
-    std.debug.print("}}\n", .{});
-
-    _ = allocator;
+    var stringify: std.json.Stringify = .{
+        .writer = w,
+        .options = .{ .whitespace = .indent_2, .emit_null_optional_fields = false },
+    };
+    try stringify.write(.{
+        .version = VERSION,
+        .files_scanned = scan.files_scanned,
+        .bytes_scanned = scan.bytes_scanned,
+        .findings_count = findings.len,
+        .findings = rows,
+    });
+    try w.writeAll("\n");
 }
 
-fn outputSarif(allocator: std.mem.Allocator, scan: *Scanner) !void {
+fn outputSarif(allocator: std.mem.Allocator, scan: *Scanner, w: *std.Io.Writer) !void {
     const findings = scan.getSortedFindings();
 
-    std.debug.print("{{\n", .{});
-    std.debug.print("  \"$schema\": \"https://json.schemastore.org/sarif-2.1.0.json\",\n", .{});
-    std.debug.print("  \"version\": \"2.1.0\",\n", .{});
-    std.debug.print("  \"runs\": [\n", .{});
-    std.debug.print("    {{\n", .{});
-    std.debug.print("      \"tool\": {{\n", .{});
-    std.debug.print("        \"driver\": {{\n", .{});
-    std.debug.print("          \"name\": \"zss\",\n", .{});
-    std.debug.print("          \"version\": \"{s}\",\n", .{VERSION});
-    std.debug.print("          \"informationUri\": \"https://github.com/quantum-encoding/zig-forge/tree/master/programs/zig_secret_scanner\"\n", .{});
-    std.debug.print("        }}\n", .{});
-    std.debug.print("      }},\n", .{});
-    std.debug.print("      \"results\": [\n", .{});
+    // Build the SARIF 2.1.0 document from typed structs and let
+    // std.json.Stringify escape every value. Previously file_path and
+    // pattern_name were interpolated unescaped (main.zig:252/313 in the old
+    // build), so a repo containing a file named with '"'/SARIF control text
+    // could forge or suppress results uploaded to code scanning (JSON-IN-FMT).
+    const SarifResult = struct {
+        ruleId: []const u8,
+        level: []const u8,
+        message: struct { text: []const u8 },
+        locations: [1]struct {
+            physicalLocation: struct {
+                artifactLocation: struct { uri: []const u8 },
+                region: struct { startLine: usize, startColumn: usize },
+            },
+        },
+    };
+
+    var results = try allocator.alloc(SarifResult, findings.len);
+    defer allocator.free(results);
+
+    // "Detected <name>" message text is allocated per finding so it can be
+    // escaped by Stringify along with everything else.
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
 
     for (findings, 0..) |f, idx| {
         const level = switch (f.severity) {
@@ -299,37 +339,39 @@ fn outputSarif(allocator: std.mem.Allocator, scan: *Scanner) !void {
             .medium => "warning",
             .low, .info => "note",
         };
-
-        std.debug.print("        {{\n", .{});
-        std.debug.print("          \"ruleId\": \"{s}\",\n", .{f.pattern_id});
-        std.debug.print("          \"level\": \"{s}\",\n", .{level});
-        std.debug.print("          \"message\": {{\n", .{});
-        std.debug.print("            \"text\": \"Detected {s}\"\n", .{f.pattern_name});
-        std.debug.print("          }},\n", .{});
-        std.debug.print("          \"locations\": [\n", .{});
-        std.debug.print("            {{\n", .{});
-        std.debug.print("              \"physicalLocation\": {{\n", .{});
-        std.debug.print("                \"artifactLocation\": {{\n", .{});
-        std.debug.print("                  \"uri\": \"{s}\"\n", .{f.file_path});
-        std.debug.print("                }},\n", .{});
-        std.debug.print("                \"region\": {{\n", .{});
-        std.debug.print("                  \"startLine\": {d},\n", .{f.line_number});
-        std.debug.print("                  \"startColumn\": {d}\n", .{f.column});
-        std.debug.print("                }}\n", .{});
-        std.debug.print("              }}\n", .{});
-        std.debug.print("            }}\n", .{});
-        std.debug.print("          ]\n", .{});
-        std.debug.print("        }}", .{});
-        if (idx < findings.len - 1) std.debug.print(",", .{});
-        std.debug.print("\n", .{});
+        const text = try std.fmt.allocPrint(arena, "Detected {s}", .{f.pattern_name});
+        results[idx] = .{
+            .ruleId = f.pattern_id,
+            .level = level,
+            .message = .{ .text = text },
+            .locations = .{.{
+                .physicalLocation = .{
+                    .artifactLocation = .{ .uri = f.file_path },
+                    .region = .{ .startLine = f.line_number, .startColumn = f.column },
+                },
+            }},
+        };
     }
 
-    std.debug.print("      ]\n", .{});
-    std.debug.print("    }}\n", .{});
-    std.debug.print("  ]\n", .{});
-    std.debug.print("}}\n", .{});
-
-    _ = allocator;
+    var stringify: std.json.Stringify = .{
+        .writer = w,
+        .options = .{ .whitespace = .indent_2 },
+    };
+    try stringify.write(.{
+        .@"$schema" = "https://json.schemastore.org/sarif-2.1.0.json",
+        .version = "2.1.0",
+        .runs = .{.{
+            .tool = .{
+                .driver = .{
+                    .name = "zss",
+                    .version = VERSION,
+                    .informationUri = "https://github.com/quantum-encoding/zig-forge/tree/master/programs/zig_secret_scanner",
+                },
+            },
+            .results = results,
+        }},
+    });
+    try w.writeAll("\n");
 }
 
 fn installHook(io: std.Io) !void {
@@ -387,7 +429,29 @@ fn installHook(io: std.Io) !void {
         std.debug.print("Error writing hook: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };
-    writer.interface.flush() catch {};
+    writer.interface.flush() catch |err| {
+        std.debug.print("Error writing hook: {s}\n", .{@errorName(err)});
+        std.process.exit(1);
+    };
+
+    // Git silently ignores non-executable hooks. createFile leaves the file at
+    // the default 0o666 (minus umask) with no exec bit, so the previously
+    // "installed" hook never ran and the tool reported success while providing
+    // zero push protection. chmod 0o755 and verify the exec bit before claiming
+    // success.
+    hook_file.setPermissions(io, .fromMode(0o755)) catch |err| {
+        std.debug.print("Error setting hook permissions: {s}\n", .{@errorName(err)});
+        std.process.exit(1);
+    };
+
+    const hook_stat = hook_file.stat(io) catch |err| {
+        std.debug.print("Error verifying hook permissions: {s}\n", .{@errorName(err)});
+        std.process.exit(1);
+    };
+    if ((hook_stat.permissions.toMode() & 0o111) == 0) {
+        std.debug.print("Error: pre-push hook is not executable after install.\n", .{});
+        std.process.exit(1);
+    }
 
     std.debug.print("Installed pre-push hook at .git/hooks/pre-push\n", .{});
     std.debug.print("Secrets will be scanned before each push.\n", .{});
@@ -499,45 +563,6 @@ fn parseFormat(s: []const u8) ?OutputFormat {
     if (std.mem.eql(u8, s, "json")) return .json;
     if (std.mem.eql(u8, s, "sarif")) return .sarif;
     return null;
-}
-
-fn escapeJson(input: []const u8, buf: []u8) []const u8 {
-    var out_idx: usize = 0;
-    for (input) |c| {
-        if (out_idx + 2 >= buf.len) break;
-        switch (c) {
-            '"' => {
-                buf[out_idx] = '\\';
-                buf[out_idx + 1] = '"';
-                out_idx += 2;
-            },
-            '\\' => {
-                buf[out_idx] = '\\';
-                buf[out_idx + 1] = '\\';
-                out_idx += 2;
-            },
-            '\n' => {
-                buf[out_idx] = '\\';
-                buf[out_idx + 1] = 'n';
-                out_idx += 2;
-            },
-            '\r' => {
-                buf[out_idx] = '\\';
-                buf[out_idx + 1] = 'r';
-                out_idx += 2;
-            },
-            '\t' => {
-                buf[out_idx] = '\\';
-                buf[out_idx + 1] = 't';
-                out_idx += 2;
-            },
-            else => {
-                buf[out_idx] = c;
-                out_idx += 1;
-            },
-        }
-    }
-    return buf[0..out_idx];
 }
 
 // Re-export for tests

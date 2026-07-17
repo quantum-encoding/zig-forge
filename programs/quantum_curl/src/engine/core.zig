@@ -611,11 +611,18 @@ pub fn Engine(comptime WriterType: type) type {
             self.output_mutex.lock();
             defer self.output_mutex.unlock();
 
-            std.Io.Writer.print(
-                &self.output_writer.interface,
-                "{{\"id\":\"{s}\",\"status\":0,\"error\":\"{s}\"}}\n",
-                .{ id, error_message },
-            ) catch {};
+            // Emit via std.json.Stringify so `id` and `error_message` are
+            // properly escaped — both are attacker-influenced (id from the plan
+            // file, error_message from libc/HTTP error text) and interpolating
+            // them into a JSON-shaped format string is the JSON-IN-FMT class.
+            const w = &self.output_writer.interface;
+            var jw: std.json.Stringify = .{ .writer = w, .options = .{} };
+            jw.write(.{
+                .id = id,
+                .status = 0,
+                .@"error" = error_message,
+            }) catch {};
+            w.writeByte('\n') catch {};
         }
     };
 }

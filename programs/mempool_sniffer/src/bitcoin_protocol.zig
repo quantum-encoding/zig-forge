@@ -767,6 +767,56 @@ test "parseTransaction: truncated payload at locktime rejected" {
     try std.testing.expectError(error.InvalidTransaction, result);
 }
 
+// ── External-anchored txid vector ──────────────────────────────────
+//
+// The txid emitted by parseTransaction must match what the Bitcoin
+// network computes. This uses the Bitcoin genesis-block coinbase
+// transaction — a real mainnet transaction whose raw serialization and
+// txid are published in the reference implementation (Bitcoin Core's
+// chainparams.cpp genesis block) and reproduced by every block explorer.
+//
+//   raw tx (204 bytes, legacy / non-segwit):
+//     01000000010000000000000000000000000000000000000000000000000000
+//     0000000000ffffffff4d04ffff001d0104455468652054696d6573203033...
+//   txid (display / big-endian):
+//     4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b
+//   output value: 50 BTC = 5_000_000_000 sat
+//
+// Neither the input nor the expected output was produced by this
+// library: the txid is the canonical genesis coinbase id, verifiable
+// against https://blockstream.info/tx/4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b
+// and rust-bitcoin's `constants::genesis_block` test fixtures.
+test "parseTransaction: genesis coinbase external txid vector (mainnet)" {
+    const raw_hex =
+        "01000000010000000000000000000000000000000000000000000000000000" ++
+        "000000000000ffffffff4d04ffff001d0104455468652054696d6573203033" ++
+        "2f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f" ++
+        "66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff01" ++
+        "00f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828" ++
+        "e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df" ++
+        "7ba0b8d578a4c702b6bf11d5fac00000000";
+
+    var raw: [204]u8 = undefined;
+    const decoded = try std.fmt.hexToBytes(&raw, raw_hex);
+    try std.testing.expectEqual(@as(usize, 204), decoded.len);
+
+    const tx = try parseTransaction(&raw);
+
+    // Expected txid in display (big-endian) byte order.
+    var expected_txid: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(
+        &expected_txid,
+        "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b",
+    );
+    try std.testing.expectEqualSlices(u8, &expected_txid, &tx.hash);
+
+    // Genesis coinbase: single input, single 50 BTC output, legacy tx.
+    try std.testing.expect(!tx.is_segwit);
+    try std.testing.expectEqual(@as(u32, 1), tx.input_count);
+    try std.testing.expectEqual(@as(u32, 1), tx.output_count);
+    try std.testing.expectEqual(@as(i64, 5_000_000_000), tx.value_satoshis);
+}
+
 test "Transaction with inputs and outputs" {
     // Minimal transaction: version + input count (1) + previous output hash (32) + previous output index (4) + script length (0) + sequence (4) + output count (1) + value (8) + script length (0) + locktime (4)
     var payload: [62]u8 = undefined;

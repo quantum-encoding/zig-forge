@@ -128,6 +128,20 @@ pub fn insertFunctions(
         defer sql.deinit(allocator);
 
         for (batch) |func| {
+            // Record-id text (backtick-quoted) restricted to [A-Za-z0-9_] so a
+            // crafted file path can't break out of `code_function:`...``.
+            const record_id = try types.sanitizeRecordId(allocator, func.qualified_id);
+            defer allocator.free(record_id);
+
+            // Every value interpolated into a '...' single-quoted literal must
+            // be escaped; previously only `code` was, leaving name/file/qid open
+            // to SurrealQL injection via crafted file paths.
+            const escaped_name = try types.escapeString(allocator, func.name);
+            defer allocator.free(escaped_name);
+            const escaped_file = try types.escapeString(allocator, func.file);
+            defer allocator.free(escaped_file);
+            const escaped_qid = try types.escapeString(allocator, func.qualified_id);
+            defer allocator.free(escaped_qid);
             const escaped_code = try types.escapeString(allocator, func.code);
             defer allocator.free(escaped_code);
 
@@ -141,7 +155,7 @@ pub fn insertFunctions(
                 \\  code = '{s}',
                 \\  language = 'zig';
                 \\
-            , .{ func.qualified_id, func.name, func.file, func.qualified_id, func.line_start, func.line_end, escaped_code });
+            , .{ record_id, escaped_name, escaped_file, escaped_qid, func.line_start, func.line_end, escaped_code });
             defer allocator.free(stmt);
 
             try sql.appendSlice(allocator, stmt);
@@ -191,10 +205,17 @@ pub fn insertCalls(
         defer sql.deinit(allocator);
 
         for (batch) |call| {
+            // Both endpoints are backtick-quoted record ids; restrict their text
+            // to [A-Za-z0-9_] so neither caller_id nor callee can inject SurrealQL.
+            const caller_id = try types.sanitizeRecordId(allocator, call.caller_id);
+            defer allocator.free(caller_id);
+            const callee_id = try types.sanitizeRecordId(allocator, call.callee);
+            defer allocator.free(callee_id);
+
             const stmt = try std.fmt.allocPrint(allocator,
                 \\RELATE code_function:`{s}`->code_calls->code_function:`{s}`;
                 \\
-            , .{ call.caller_id, call.callee });
+            , .{ caller_id, callee_id });
             defer allocator.free(stmt);
 
             try sql.appendSlice(allocator, stmt);

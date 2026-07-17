@@ -306,6 +306,69 @@ fn cmdSearch(cq: *CodeQuery, term: []const u8) void {
 // Helpers
 // =============================================================================
 
+/// Read an environment variable via libc, returning null for unset/empty.
+fn getEnv(name: [*:0]const u8) ?[]const u8 {
+    if (std.c.getenv(name)) |ptr| {
+        const s = std.mem.span(ptr);
+        if (s.len > 0) return s;
+    }
+    return null;
+}
+
+/// True if the URL points at the loopback interface (dev-only default creds
+/// are tolerated there but warned about anywhere else).
+fn isLoopbackUrl(url: []const u8) bool {
+    return std.mem.indexOf(u8, url, "127.0.0.1") != null or
+        std.mem.indexOf(u8, url, "localhost") != null or
+        std.mem.indexOf(u8, url, "[::1]") != null or
+        std.mem.indexOf(u8, url, "//::1") != null;
+}
+
+/// Build the SurrealDB connection config, letting ZCQ_* environment variables
+/// override the baked-in localhost/root:root defaults so the CLI is not
+/// hardwired to a single credential. `ZCQ_AUTH` supplies a full Authorization
+/// header value; alternatively `ZCQ_USER`/`ZCQ_PASS` are base64-encoded into a
+/// Basic header. Strings live for the process lifetime (env memory or a
+/// deliberate one-shot leak of the encoded header), which is fine for a CLI.
+fn resolveConfig(allocator: std.mem.Allocator) types.Config {
+    var cfg = types.Config{};
+
+    if (getEnv("ZCQ_URL")) |v| cfg.url = v;
+    if (getEnv("ZCQ_NS")) |v| cfg.ns = v;
+    if (getEnv("ZCQ_DB")) |v| cfg.db = v;
+
+    var auth_overridden = false;
+    if (getEnv("ZCQ_AUTH")) |v| {
+        cfg.auth = v;
+        auth_overridden = true;
+    } else if (getEnv("ZCQ_USER")) |user| {
+        const pass = getEnv("ZCQ_PASS") orelse "";
+        const raw = std.fmt.allocPrint(allocator, "{s}:{s}", .{ user, pass }) catch null;
+        if (raw) |r| {
+            defer allocator.free(r);
+            const enc = std.base64.standard.Encoder;
+            const b64 = allocator.alloc(u8, enc.calcSize(r.len)) catch null;
+            if (b64) |bb| {
+                defer allocator.free(bb);
+                const encoded = enc.encode(bb, r);
+                if (std.fmt.allocPrint(allocator, "Basic {s}", .{encoded})) |header| {
+                    cfg.auth = header; // intentionally kept for process lifetime
+                    auth_overridden = true;
+                } else |_| {}
+            }
+        }
+    }
+
+    if (!auth_overridden and !isLoopbackUrl(cfg.url)) {
+        std.debug.print(
+            "{s}Warning:{s} using default root:root credentials against non-loopback URL '{s}'. Set ZCQ_AUTH (or ZCQ_USER/ZCQ_PASS) to override.\n",
+            .{ Color.yellow, Color.reset, cfg.url },
+        );
+    }
+
+    return cfg;
+}
+
 fn printError(err: anyerror) void {
     std.debug.print("{s}Error:{s} {s}\n", .{ Color.red, Color.reset, @errorName(err) });
     if (err == lib.surreal.SurrealError.ConnectionFailed) {
@@ -386,8 +449,8 @@ pub fn main(init: std.process.Init) !void {
 
     const cmd = args[1];
 
-    // Initialize library
-    var cq = CodeQuery.init(allocator, .{}, init.minimal.environ) catch |err| {
+    // Initialize library (ZCQ_* env vars override the baked defaults).
+    var cq = CodeQuery.init(allocator, resolveConfig(allocator), init.minimal.environ) catch |err| {
         std.debug.print("{s}Error:{s} Failed to initialize: {s}\n", .{ Color.red, Color.reset, @errorName(err) });
         return;
     };

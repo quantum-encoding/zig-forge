@@ -59,4 +59,17 @@ pub fn build(b: *std.Build) void {
         .root_module = confidence_mod,
     });
     b.installArtifact(confidence_exe);
+
+    // Tests — exercise the SQL-building helpers (injection guard).
+    const test_step = b.step("test", "Run cognitive-tools tests");
+
+    const export_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/export.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    export_test_mod.linkSystemLibrary("sqlite3", .{});
+    const export_tests = b.addTest(.{ .root_module = export_test_mod });
+    test_step.dependOn(&b.addRunArtifact(export_tests).step);
 }

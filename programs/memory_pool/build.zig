@@ -83,6 +83,23 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
 
+    // FFI-layer tests (memory_pool_core.zig). These are NOT reachable from
+    // src/main.zig's refAllDecls graph, so without a dedicated test root the
+    // entire exported C-API test suite is silently skipped. Handles use
+    // std.heap.c_allocator, so this module must link libc.
+    const ffi_test_module = b.createModule(.{
+        .root_source_file = b.path("src/memory_pool_core.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
+    const ffi_tests = b.addTest(.{
+        .root_module = ffi_test_module,
+    });
+
+    test_step.dependOn(&b.addRunArtifact(ffi_tests).step);
+
     // Benchmarks
     const bench = b.addExecutable(.{
         .name = "bench",

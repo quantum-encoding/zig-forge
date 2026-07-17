@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const linux = std.os.linux;
 const profile_mod = @import("profile.zig");
 
@@ -14,6 +15,14 @@ const BPF_RET = 0x06;
 const BPF_K = 0x00;
 const BPF_ABS = 0x20;
 const BPF_JEQ = 0x10;
+const BPF_JGE = 0x30;
+
+// x32 ABI marker: on x86_64 kernels built with CONFIG_X86_X32, x32 syscalls are
+// issued with this bit set in the syscall number. They pass an AUDIT_ARCH_X86_64
+// arch check but use a *different* numbering, so a raw-nr allowlist can be bypassed
+// (or an allowed number collided). libseccomp/Docker guard against this by killing
+// any nr >= 0x40000000 before the allowlist comparisons.
+const X32_SYSCALL_BIT = 0x40000000;
 
 const sock_filter = extern struct {
     code: u16,
@@ -289,7 +298,21 @@ pub fn buildSeccompFilter(allocator: std.mem.Allocator, profile: *const profile_
         }
     }
 
-    std.debug.print("[zig-jail] Building BPF filter for {d} allowed syscalls\n", .{allowed_numbers.items.len});
+    // Blocked syscalls: emit explicit KILL rows *before* the allow rows so a denylist
+    // wins over the default action. Without this, a profile with default_action "allow"
+    // silently permits every syscall its author put in `blocked`.
+    var blocked_numbers: std.ArrayList(u32) = .empty;
+    defer blocked_numbers.deinit(allocator);
+
+    for (profile.syscalls.blocked) |syscall_name| {
+        if (syscall_map.get(syscall_name)) |syscall_num| {
+            try blocked_numbers.append(allocator, syscall_num);
+        } else {
+            std.debug.print("[zig-jail] ⚠️  Unknown blocked syscall: {s}\n", .{syscall_name});
+        }
+    }
+
+    std.debug.print("[zig-jail] Building BPF filter for {d} allowed / {d} blocked syscalls\n", .{ allowed_numbers.items.len, blocked_numbers.items.len });
 
     const default_action: u32 = if (std.mem.eql(u8, profile.syscalls.default_action, "kill"))
         SECCOMP_RET_KILL_PROCESS
@@ -331,16 +354,61 @@ pub fn buildSeccompFilter(allocator: std.mem.Allocator, profile: *const profile_
         .k = 0, // seccomp_data.nr
     });
 
-    // 4+: JEQ for each allowed syscall
-    const total_instructions = 4 + allowed_numbers.items.len + 2; // prefix + comparisons + default + allow
-    for (allowed_numbers.items, 0..) |syscall_num, i| {
-        const current_idx = 4 + i;
-        // BPF jumps are relative to NEXT instruction, not current
-        const jumps_to_allow: u8 = @intCast(total_instructions - 1 - current_idx - 1);
+    // Program layout (0-indexed):
+    //   [0] load arch
+    //   [1] JEQ arch == x86_64            (jt=1 -> skip arch kill, jf=0 -> fall to kill)
+    //   [2] RET KILL                      (wrong arch)
+    //   [3] load syscall nr
+    //   [4] JGE nr >= 0x40000000          (x32/high-nr guard -> KILL)
+    //   [5 .. 5+B)   JEQ blocked[i]       (-> KILL, else fall through)
+    //   [5+B .. 5+B+A) JEQ allowed[j]     (-> ALLOW, else fall through)
+    //   [5+B+A]     RET default_action
+    //   [5+B+A+1]   RET ALLOW
+    //   [5+B+A+2]   RET KILL              (shared target for x32 guard + blocked rows)
+    //
+    // BPF jump offsets are relative to the NEXT instruction (target - current - 1).
+    // Forward-only: the shared KILL row lives at the very end so both the x32 guard
+    // and every blocked row can reach it.
+    const num_blocked = blocked_numbers.items.len;
+    const num_allowed = allowed_numbers.items.len;
+    const total_instructions = 8 + num_blocked + num_allowed;
+    const kill_idx = total_instructions - 1;
+    const allow_idx = total_instructions - 2;
+
+    // 4: x32 ABI / high-nr guard — kill any syscall number with the x32 bit set.
+    // This must come before the allow comparisons so an x32-numbered syscall can't
+    // slip past the allowlist and land on the (possibly permissive) default action.
+    {
+        const guard_idx = 4;
+        const jumps_to_kill: u8 = @intCast(kill_idx - guard_idx - 1);
+        try filter_list.append(allocator, .{
+            .code = BPF_JMP | BPF_JGE | BPF_K,
+            .jt = jumps_to_kill, // nr >= X32 bit -> KILL
+            .jf = 0, // otherwise fall through to blocked/allow checks
+            .k = X32_SYSCALL_BIT,
+        });
+    }
+
+    // 5 .. 5+B: JEQ for each blocked syscall -> KILL (denylist wins over default)
+    for (blocked_numbers.items, 0..) |syscall_num, i| {
+        const current_idx = 5 + i;
+        const jumps_to_kill: u8 = @intCast(kill_idx - current_idx - 1);
         try filter_list.append(allocator, .{
             .code = BPF_JMP | BPF_JEQ | BPF_K,
-            .jt = jumps_to_allow,
-            .jf = 0, // Fall through to default
+            .jt = jumps_to_kill, // match -> KILL
+            .jf = 0, // no match -> next check
+            .k = syscall_num,
+        });
+    }
+
+    // 5+B .. 5+B+A: JEQ for each allowed syscall -> ALLOW
+    for (allowed_numbers.items, 0..) |syscall_num, j| {
+        const current_idx = 5 + num_blocked + j;
+        const jumps_to_allow: u8 = @intCast(allow_idx - current_idx - 1);
+        try filter_list.append(allocator, .{
+            .code = BPF_JMP | BPF_JEQ | BPF_K,
+            .jt = jumps_to_allow, // match -> ALLOW
+            .jf = 0, // no match -> next check / default
             .k = syscall_num,
         });
     }
@@ -359,6 +427,14 @@ pub fn buildSeccompFilter(allocator: std.mem.Allocator, profile: *const profile_
         .jt = 0,
         .jf = 0,
         .k = SECCOMP_RET_ALLOW,
+    });
+
+    // Shared KILL action (x32 guard + blocked rows jump here)
+    try filter_list.append(allocator, .{
+        .code = BPF_RET | BPF_K,
+        .jt = 0,
+        .jf = 0,
+        .k = SECCOMP_RET_KILL_PROCESS,
     });
 
     return try filter_list.toOwnedSlice(allocator);
@@ -514,6 +590,127 @@ test "seccomp: Filter chain construction - basic structure" {
 
     // Last instruction should be return
     try std.testing.expectEqual(@as(u16, BPF_RET | BPF_K), filter[filter.len - 1].code);
+}
+
+test "seccomp: blocked syscalls emit KILL rows before allow rows" {
+    // default_action "allow": without blocked enforcement, `write` would be permitted.
+    // The denylist must win, so the emitted filter must contain a JEQ(write) -> KILL row
+    // ahead of the JEQ(read) -> ALLOW row, plus the x32 high-nr guard.
+    var profile = profile_mod.Profile{
+        .profile_name = "test",
+        .description = "Test profile",
+        .version = "1.0",
+        .syscalls = .{
+            .default_action = "allow",
+            .allowed = &[_][]const u8{"read"}, // read == 0
+            .blocked = &[_][]const u8{"write"}, // write == 1
+        },
+        .allocator = std.testing.allocator,
+    };
+
+    const filter = try buildSeccompFilter(std.testing.allocator, &profile);
+    defer std.testing.allocator.free(filter);
+
+    // Layout: [0]ld arch [1]jeq arch [2]ret kill [3]ld nr [4]x32 guard
+    //         [5]blocked(write) [6]allowed(read) [7]default [8]allow [9]kill
+    const total = filter.len;
+    const kill_idx = total - 1;
+    const allow_idx = total - 2;
+
+    // Shared KILL return sits last and is a KILL_PROCESS RET.
+    try std.testing.expectEqual(@as(u16, BPF_RET | BPF_K), filter[kill_idx].code);
+    try std.testing.expectEqual(@as(u32, SECCOMP_RET_KILL_PROCESS), filter[kill_idx].k);
+
+    // Instruction [4] is the x32 / high-nr guard: JGE 0x40000000 -> KILL.
+    try std.testing.expectEqual(@as(u16, BPF_JMP | BPF_JGE | BPF_K), filter[4].code);
+    try std.testing.expectEqual(@as(u32, X32_SYSCALL_BIT), filter[4].k);
+    // On match it must land exactly on the KILL row (offset is relative to next instr).
+    try std.testing.expectEqual(kill_idx, 4 + 1 + @as(usize, filter[4].jt));
+
+    // Instruction [5] is the blocked `write` row -> KILL (denylist precedes allowlist).
+    try std.testing.expectEqual(@as(u16, BPF_JMP | BPF_JEQ | BPF_K), filter[5].code);
+    try std.testing.expectEqual(@as(u32, 1), filter[5].k); // write
+    try std.testing.expectEqual(kill_idx, 5 + 1 + @as(usize, filter[5].jt));
+
+    // Instruction [6] is the allowed `read` row -> ALLOW.
+    try std.testing.expectEqual(@as(u16, BPF_JMP | BPF_JEQ | BPF_K), filter[6].code);
+    try std.testing.expectEqual(@as(u32, 0), filter[6].k); // read
+    try std.testing.expectEqual(allow_idx, 6 + 1 + @as(usize, filter[6].jt));
+
+    // The ALLOW row really is SECCOMP_RET_ALLOW.
+    try std.testing.expectEqual(@as(u32, SECCOMP_RET_ALLOW), filter[allow_idx].k);
+}
+
+test "seccomp: unknown blocked syscall names are skipped, not fatal" {
+    var profile = profile_mod.Profile{
+        .profile_name = "test",
+        .description = "Test profile",
+        .version = "1.0",
+        .syscalls = .{
+            .default_action = "allow",
+            .allowed = &[_][]const u8{"read"},
+            .blocked = &[_][]const u8{ "write", "nonexistent_syscall" },
+        },
+        .allocator = std.testing.allocator,
+    };
+
+    const filter = try buildSeccompFilter(std.testing.allocator, &profile);
+    defer std.testing.allocator.free(filter);
+
+    // Only the one known blocked syscall (write) contributes a row:
+    // 4 prologue + 1 x32 guard + 1 blocked + 1 allowed + 3 tail = 10.
+    try std.testing.expectEqual(@as(usize, 10), filter.len);
+}
+
+// Linux-gated behavioral test: install a real seccomp filter in a forked child and
+// confirm that a *blocked* syscall (finding #1) actually traps with SIGSYS rather than
+// being silently permitted by the "allow" default. This is the external-behavior anchor
+// the audit called for — it fails on the pre-fix code where `blocked` was a no-op.
+test "seccomp: blocked syscall traps at runtime (Linux/x86_64)" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (builtin.cpu.arch != .x86_64) return error.SkipZigTest;
+
+    // default_action "allow" so the ONLY thing that can kill the child is the denylist.
+    // Block getpid(2) (nr 39) — a harmless, non-vDSO syscall we can invoke directly.
+    var profile = profile_mod.Profile{
+        .profile_name = "test",
+        .description = "runtime block test",
+        .version = "1.0",
+        .syscalls = .{
+            .default_action = "allow",
+            .allowed = &[_][]const u8{},
+            .blocked = &[_][]const u8{"getpid"},
+        },
+        .allocator = std.testing.allocator,
+    };
+
+    const filter = try buildSeccompFilter(std.testing.allocator, &profile);
+    defer std.testing.allocator.free(filter);
+
+    const pid = try std.posix.fork();
+    if (pid == 0) {
+        // Child: install the filter, then invoke the blocked syscall directly.
+        installSeccompFilter(filter) catch {
+            // Could not install (e.g. seccomp unavailable) — signal "inconclusive" to
+            // the parent via a distinct non-zero exit rather than a false pass/fail.
+            std.posix.exit(2);
+        };
+        // This raw getpid() must be killed by the filter (SIGSYS). If the pre-fix
+        // no-op-blocked behavior were in effect, it would return and we'd exit(0).
+        _ = std.os.linux.syscall0(.getpid);
+        std.posix.exit(0); // reached only if the block was NOT enforced
+    }
+
+    const wait_result = std.posix.waitpid(pid, 0);
+    const status = wait_result.status;
+
+    if (std.posix.W.IFEXITED(status) and std.posix.W.EXITSTATUS(status) == 2) {
+        // seccomp install itself failed in this environment — don't assert on enforcement.
+        return error.SkipZigTest;
+    }
+
+    try std.testing.expect(std.posix.W.IFSIGNALED(status));
+    try std.testing.expectEqual(@as(u32, std.os.linux.SIG.SYS), std.posix.W.TERMSIG(status));
 }
 
 test "seccomp: Error handling - invalid syscall names" {

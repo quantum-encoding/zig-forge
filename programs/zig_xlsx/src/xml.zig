@@ -44,6 +44,17 @@ pub const XmlParser = struct {
         };
     }
 
+    // Internal result of one scan step. `.skip` means a construct
+    // (comment/PI/DOCTYPE or whitespace-only text) was consumed and the caller
+    // should continue scanning; `.done` means end-of-input. This replaces the
+    // former `return self.next()` recursion so a file with many consecutive
+    // skippable constructs cannot overflow the stack.
+    const Step = union(enum) {
+        event: Event,
+        skip: void,
+        done: void,
+    };
+
     pub fn next(self: *XmlParser) ?Event {
         // If we had a self-closing tag, emit the end event
         if (self.pending_self_close) |name| {
@@ -51,19 +62,27 @@ pub const XmlParser = struct {
             return .{ .element_end = name };
         }
 
+        // Iterative scan: skipped constructs `continue` the loop instead of
+        // recursing via `self.next()` (stack-overflow DoS on hostile input,
+        // e.g. 100k `<!---->` comments). Each step advances `self.pos`, so the
+        // loop always makes progress and terminates.
         while (self.pos < self.data.len) {
-            if (self.data[self.pos] == '<') {
-                return self.parseTag();
-            } else {
-                return self.parseText();
+            const step = if (self.data[self.pos] == '<')
+                self.parseTag()
+            else
+                self.parseText();
+            switch (step) {
+                .event => |ev| return ev,
+                .skip => continue,
+                .done => return null,
             }
         }
         return null;
     }
 
-    fn parseTag(self: *XmlParser) ?Event {
+    fn parseTag(self: *XmlParser) Step {
         self.pos += 1; // skip '<'
-        if (self.pos >= self.data.len) return null;
+        if (self.pos >= self.data.len) return .done;
 
         const ch = self.data[self.pos];
 
@@ -76,13 +95,13 @@ pub const XmlParser = struct {
             }
             const name = std.mem.trim(u8, self.data[name_start..self.pos], " \t\n\r");
             if (self.pos < self.data.len) self.pos += 1; // skip '>'
-            return .{ .element_end = stripNamespace(name) };
+            return .{ .event = .{ .element_end = stripNamespace(name) } };
         }
 
         if (ch == '?' or ch == '!') {
             // Processing instruction or comment/DOCTYPE — skip to '>'
             self.skipToClose();
-            return self.next();
+            return .skip;
         }
 
         // Start tag: <name attr="val" ...> or <name .../>
@@ -155,14 +174,14 @@ pub const XmlParser = struct {
             self.pending_self_close = name;
         }
 
-        return .{ .element_start = .{
+        return .{ .event = .{ .element_start = .{
             .name = name,
             .attrs = self.attrs_buf[0..attr_count],
             .self_closing = self_closing,
-        } };
+        } } };
     }
 
-    fn parseText(self: *XmlParser) ?Event {
+    fn parseText(self: *XmlParser) Step {
         const start = self.pos;
         while (self.pos < self.data.len and self.data[self.pos] != '<') {
             self.pos += 1;
@@ -177,15 +196,15 @@ pub const XmlParser = struct {
                 break;
             }
         }
-        if (all_ws) return self.next();
+        if (all_ws) return .skip;
 
         // If it contains entities, decode them
         if (std.mem.indexOf(u8, raw, "&")) |_| {
             const decoded = decodeEntities(raw, &self.entity_buf);
-            return .{ .text = decoded };
+            return .{ .event = .{ .text = decoded } };
         }
 
-        return .{ .text = raw };
+        return .{ .event = .{ .text = raw } };
     }
 
     fn skipWhitespace(self: *XmlParser) void {
