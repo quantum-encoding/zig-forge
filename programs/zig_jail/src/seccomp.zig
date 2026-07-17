@@ -604,8 +604,8 @@ test "seccomp: blocked syscalls emit KILL rows before allow rows" {
         .version = "1.0",
         .syscalls = .{
             .default_action = "allow",
-            .allowed = &[_][]const u8{"read"}, // read == 0
-            .blocked = &[_][]const u8{"write"}, // write == 1
+            .allowed = &allowed_read, // read == 0
+            .blocked = &blocked_write, // write == 1
         },
         .allocator = std.testing.allocator,
     };
