@@ -646,14 +646,16 @@ test "seccomp: blocked syscalls emit KILL rows before allow rows" {
 }
 
 test "seccomp: unknown blocked syscall names are skipped, not fatal" {
+    var allowed_read = [_][]const u8{"read"};
+    var blocked_list = [_][]const u8{ "write", "nonexistent_syscall" };
     var profile = profile_mod.Profile{
         .profile_name = "test",
         .description = "Test profile",
         .version = "1.0",
         .syscalls = .{
             .default_action = "allow",
-            .allowed = &[_][]const u8{"read"},
-            .blocked = &[_][]const u8{ "write", "nonexistent_syscall" },
+            .allowed = &allowed_read,
+            .blocked = &blocked_list,
         },
         .allocator = std.testing.allocator,
     };
