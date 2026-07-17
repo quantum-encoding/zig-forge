@@ -95,7 +95,21 @@ Wave 1B added a test step + fixed a real latent `@alignCast` unaligned-load bug 
 
 ---
 
-## Tier 2 — wallet-signing FFI (2.1 + 2.2): NOT started, needs cross-platform coordination
+## Tier 2 — wallet-signing FFI (2.1 + 2.2): DONE on macOS, Linux just confirms
+
+**Update 2026-07-17:** 2.1 (CMerkleProof `tx_count`) and 2.2 (tx-builder opaque handle) are
+**landed and verified on macOS** — see `docs/ffi-contract-changes-2026-07.md` for the full
+bulletin. Producer (`simd_crypto_ffi`) 99/99, walletcore 87/87 (incl. RAII/concurrency
+tests), quantum_vault compiles unchanged, and the iOS + Android `quantum_crypto` archives
+were rebuilt from source on the Mac and confirmed to carry the new symbols. **Linux's only
+Tier-2 job:** run `programs/build-android-libs.sh quantum_crypto` (pure Zig cross-compile —
+already confirmed to work from macOS, so it will from Linux), then confirm the Android app
+(`cargo-ndk` / Tauri) links + runs. No source changes remain (2.2's legacy-shim removal is a
+later, optional pure-deletion follow-up). The original spec below is retained for reference.
+
+---
+
+### Original spec (reference)
 
 **Read `docs/ffi-migration-plan.md` first** (it IS in the repo) — it has the exact ABI diff,
 every verified consumer with line numbers, and the lockstep order. Status: 2.3/2.4/2.5 landed;

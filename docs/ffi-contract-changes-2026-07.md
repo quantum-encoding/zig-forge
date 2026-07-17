@@ -96,7 +96,21 @@ already uses only the `_ctx` API).
 
 ---
 
-## Verification status (2.1)
+## Cross-platform archive rebuilds (done on the Mac)
+
+The `quantum_crypto` archives for **iOS device, iOS simulator, and Android arm64** were
+rebuilt from the 2.1+2.2 source on the Mac and verified to carry the new symbols
+(`quantum_spv_proof_size` @ 1036, `quantum_tx_builder_new`, `quantum_tx_sign_ctx`):
+
+- iOS (`programs/build-ios-libs.sh quantum_crypto`) → `programs/ios-libs/{ios-arm64,ios-sim-arm64}/libquantum_crypto.a`, **repacked** for the Xcode linker.
+- Android (`programs/build-android-libs.sh quantum_crypto`) → `programs/…/android-arm64/libquantum_crypto.a` (ELF; no repack; NDK only needed at the app's final link).
+
+These archives are **gitignored** (regenerable), so they are not pushed — but the fact that
+they cross-compile clean here means each platform's rebuild is a confirmation, not a debug
+session. The Rust `libwalletcore.a` for each target is still produced by that app's own
+cargo/xcodebuild/cargo-ndk pass (walletcore source is pushed).
+
+## Verification status
 
 - Producer `simd_crypto_ffi`: `zig build` ✓, `zig build test` ✓ (98/98 — includes the new
   `quantum_spv_verify_merkle_proof honors caller tx_count` FFI test).
