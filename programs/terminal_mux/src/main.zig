@@ -246,12 +246,6 @@ fn attachToSession(allocator: std.mem.Allocator, session_name: []const u8) !void
 }
 
 fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
-    const socket_path = try lib.ipc.getDefaultSocketPath(allocator);
-    defer allocator.free(socket_path);
-
-    // Ensure socket directory exists
-    try lib.ipc.ensureSocketDir(socket_path);
-
     // Get terminal size (kept current via SIGWINCH below)
     var size = lib.pty.getTerminalSize(posix.STDIN_FILENO) catch lib.Winsize{
         .ws_row = 24,

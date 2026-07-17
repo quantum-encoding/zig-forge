@@ -102,6 +102,31 @@ fn findPane(panes: *std.ArrayList(Pane), id: u64) ?*Pane {
 /// conn == -1 marks a dead entry awaiting the sweep.
 const Attach = struct { conn: c.fd_t, pane_id: u64 };
 
+/// Write all of `data` to an attach conn, waiting at most ~200ms total for a
+/// full socket buffer. Errors (incl. timeout) mean the caller drops the client.
+fn relayWrite(fd: c.fd_t, data: []const u8) !void {
+    var off: usize = 0;
+    var waits: u8 = 0;
+    while (off < data.len) {
+        const r = c.write(fd, data.ptr + off, data.len - off);
+        if (r > 0) {
+            off += @intCast(r);
+            continue;
+        }
+        if (r == 0) return error.WriteFailed;
+        switch (posix.errno(r)) {
+            .INTR => continue,
+            .AGAIN => {
+                if (waits >= 2) return error.ClientStalled; // ~200ms budget spent
+                waits += 1;
+                var pfd = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.OUT, .revents = 0 }};
+                _ = posix.poll(&pfd, 100) catch return error.WriteFailed;
+            },
+            else => return error.WriteFailed,
+        }
+    }
+}
+
 fn runServer(alloc: std.mem.Allocator) !void {
     const path = try socketPath(alloc);
     defer alloc.free(path);
@@ -156,7 +181,11 @@ fn runServer(alloc: std.mem.Allocator) !void {
             capi.tmux_feed(p.handle, &io_buf, r);
             for (attaches.items) |*a| {
                 if (a.conn < 0 or a.pane_id != p.id) continue;
-                _ = pwrite(a.conn, io_buf[0..r]) catch {
+                // Audit finding 2: a stalled attach reader must not block the
+                // whole pool. Bounded write: wait up to 200ms for writability,
+                // then DROP the client — it can reattach and gets a fresh
+                // snapshot; skipping bytes instead would tear its VT stream.
+                relayWrite(a.conn, io_buf[0..r]) catch {
                     pclose(a.conn);
                     a.conn = -1;
                 };
@@ -169,7 +198,8 @@ fn runServer(alloc: std.mem.Allocator) !void {
             if (a.conn < 0) continue;
             const pf = pfds.items[1 + pane_count + k];
             if (pf.revents & (posix.POLL.IN | posix.POLL.HUP) == 0) continue;
-            const r = posix.read(a.conn, &io_buf) catch {
+            const r = posix.read(a.conn, &io_buf) catch |err| {
+                if (err == error.WouldBlock) continue; // spurious wakeup on a non-blocking conn
                 pclose(a.conn);
                 a.conn = -1;
                 continue;
@@ -190,6 +220,12 @@ fn runServer(alloc: std.mem.Allocator) !void {
         // A client wants to issue a command (or start an attach).
         if ((pfds.items[0].revents & posix.POLL.IN) != 0) {
             const conn = paccept(lfd) catch continue;
+            // Audit finding 1: without a receive timeout, a client that
+            // connects and sends nothing (nc -U) blocks this single-threaded
+            // loop forever — every pane stops draining. Same 500ms guard
+            // ctl.zig has always had.
+            const tv = c.timeval{ .sec = 0, .usec = 500_000 };
+            _ = c.setsockopt(conn, c.SOL.SOCKET, c.SO.RCVTIMEO, @ptrCast(&tv), @sizeOf(c.timeval));
             const keep_open = handleConn(conn, &panes, &attaches, alloc) catch false;
             if (!keep_open) pclose(conn);
         }
@@ -289,8 +325,12 @@ fn handleConn(conn: i32, panes: *std.ArrayList(Pane), attaches: *std.ArrayList(A
                 if (rows > 1 and cols > 1) _ = capi.tmux_resize(p.handle, rows, cols);
             }
         }
-        try attaches.append(alloc, .{ .conn = conn, .pane_id = id });
         try writeSnapshot(conn, p.handle, alloc);
+        // Relay writes are bounded (relayWrite); the conn must be non-blocking
+        // so a stalled reader surfaces as EAGAIN instead of wedging the loop.
+        const fl = c.fcntl(conn, c.F.GETFL, @as(c_int, 0));
+        _ = c.fcntl(conn, c.F.SETFL, fl | @as(c_int, @bitCast(c.O{ .NONBLOCK = true })));
+        try attaches.append(alloc, .{ .conn = conn, .pane_id = id });
         return true;
     } else {
         _ = pwrite(conn, "err unknown command\n") catch {};

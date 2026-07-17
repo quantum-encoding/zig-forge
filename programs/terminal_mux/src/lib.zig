@@ -44,7 +44,6 @@ pub const terminal = @import("terminal.zig");
 pub const parser = @import("parser.zig");
 pub const session = @import("session.zig");
 pub const render = @import("render.zig");
-pub const ipc = @import("ipc.zig");
 pub const config = @import("config.zig");
 pub const url = @import("url.zig");
 
@@ -72,9 +71,6 @@ pub const SplitDirection = session.SplitDirection;
 
 pub const Renderer = render.Renderer;
 
-pub const IpcServer = ipc.Server;
-pub const IpcClient = ipc.IpcClient;
-pub const MessageType = ipc.MessageType;
 
 pub const Config = config.Config;
 pub const RuntimeConfig = config.RuntimeConfig;
@@ -92,7 +88,6 @@ test "library imports" {
     _ = parser;
     _ = session;
     _ = render;
-    _ = ipc;
     _ = config;
 }
 
@@ -120,9 +115,6 @@ test "render module" {
     _ = render;
 }
 
-test "ipc module" {
-    _ = ipc;
-}
 
 test "config module" {
     _ = config;
