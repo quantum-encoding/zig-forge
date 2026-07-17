@@ -672,14 +672,17 @@ test "seccomp: blocked syscall traps at runtime (Linux/x86_64)" {
 
     // default_action "allow" so the ONLY thing that can kill the child is the denylist.
     // Block getpid(2) (nr 39) — a harmless, non-vDSO syscall we can invoke directly.
+    // Profile fields are mutable slices (deinit frees them), so the lists live in vars.
+    var no_allowed = [_][]const u8{};
+    var blocked_list = [_][]const u8{"getpid"};
     var profile = profile_mod.Profile{
         .profile_name = "test",
         .description = "runtime block test",
         .version = "1.0",
         .syscalls = .{
             .default_action = "allow",
-            .allowed = &[_][]const u8{},
-            .blocked = &[_][]const u8{"getpid"},
+            .allowed = &no_allowed,
+            .blocked = &blocked_list,
         },
         .allocator = std.testing.allocator,
     };
