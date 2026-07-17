@@ -67,7 +67,7 @@ pub const TextArea = struct {
     /// Create a new TextArea
     pub fn init(allocator: std.mem.Allocator) Self {
         return .{
-            .lines = .{},
+            .lines = .empty,
             .allocator = allocator,
             .cursor_line = 0,
             .cursor_col = 0,

@@ -321,6 +321,16 @@ pub fn initClock84MHz() void {
     const FLASH_ACR: *volatile u32 = @ptrFromInt(0x40023C00);
     FLASH_ACR.* = (FLASH_ACR.* & ~@as(u32, 0xF)) | 2; // 2 wait states
 
+    // Set bus prescalers before switching to PLL.
+    // APB1 (PCLK1) max is 42 MHz on STM32F401 (RM0090); at SYSCLK 84 MHz the
+    // reset default PPRE1 = /1 would overclock every APB1 peripheral 2x, so
+    // divide APB1 by 2 (42 MHz). AHB (HPRE) and APB2 (PPRE2) stay at /1.
+    rcc.CFGR.modify(.{
+        .HPRE = 0b0000, // AHB  /1  -> 84 MHz
+        .PPRE1 = 0b100, // APB1 /2  -> 42 MHz (in spec)
+        .PPRE2 = 0b000, // APB2 /1  -> 84 MHz
+    });
+
     // Switch to PLL
     rcc.CFGR.modify(.{ .SW = 0b10 });
     while (rcc.CFGR.read().SWS != 0b10) {}

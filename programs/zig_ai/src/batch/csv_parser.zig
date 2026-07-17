@@ -47,7 +47,11 @@ pub fn parseContent(allocator: std.mem.Allocator, content: []const u8) ![]types.
     // Parse header
     const header_line = line_iter.next() orelse return ParseError.InvalidHeader;
     const header = try parseHeader(allocator, header_line);
-    defer allocator.free(header);
+    defer {
+        // parseHeader dupes each column name; free the strings, then the slice.
+        for (header) |h| allocator.free(h);
+        allocator.free(header);
+    }
 
     // Parse data rows
     var id: u32 = 1;

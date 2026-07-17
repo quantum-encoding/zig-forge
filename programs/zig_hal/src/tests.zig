@@ -120,6 +120,20 @@ test "Reserved type generation" {
     try std.testing.expectEqual(@bitSizeOf(Reserved27), 27);
 }
 
+test "Register instantiates on a packed struct" {
+    // Regression guard for bitfield.zig:19: the `!`-precedence bug made *any*
+    // instantiation of `Register` a compile error. Instantiating it here forces
+    // the comptime layout check to be analyzed.
+    const Ctrl = packed struct {
+        enable: bool,
+        mode: u2,
+        reserved: u29,
+    };
+    const Reg = bitfield.Register(Ctrl, 0x4002_0000);
+    try std.testing.expectEqual(@as(usize, 0x4002_0000), Reg.rawAddress());
+    try std.testing.expectEqual(@sizeOf(Ctrl), @sizeOf(@TypeOf(Reg.read())));
+}
+
 // ============================================================================
 // Interrupt Tests
 // ============================================================================

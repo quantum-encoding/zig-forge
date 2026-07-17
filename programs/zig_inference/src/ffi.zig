@@ -110,7 +110,7 @@ export fn ziginfer_embed(
     model: *model_mod.Model,
     text: [*:0]const u8,
     is_query: i32,
-    task: [*:0]const u8,
+    task: ?[*:0]const u8,
     out: [*]f32,
     out_capacity: usize,
 ) i32 {
@@ -120,7 +120,8 @@ export fn ziginfer_embed(
     var input_buf: std.ArrayListUnmanaged(u8) = .empty;
     defer input_buf.deinit(allocator);
     if (is_query != 0) {
-        const task_str = std.mem.span(task);
+        // `task` may be NULL (the header documents it): fall back to "".
+        const task_str = if (task) |t| std.mem.span(t) else "";
         const instruction = if (task_str.len > 0) task_str else "Given a web search query, retrieve relevant passages that answer the query";
         const s = std.fmt.allocPrint(allocator, "Instruct: {s}\nQuery:{s}", .{ instruction, text_str }) catch return -1;
         defer allocator.free(s);

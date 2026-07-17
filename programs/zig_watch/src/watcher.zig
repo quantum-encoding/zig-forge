@@ -9,71 +9,17 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-// Platform-specific stat structure
-const Stat = switch (builtin.os.tag) {
-    .linux => switch (builtin.cpu.arch) {
-        .aarch64, .aarch64_be => extern struct {
-            // aarch64-linux uses asm-generic/stat.h layout
-            dev: u64,
-            ino: u64,
-            mode: u32, // mode comes BEFORE nlink on aarch64
-            nlink: u32, // u32, not u64 like x86_64
-            uid: u32,
-            gid: u32,
-            rdev: u64,
-            __pad1: u64 = 0,
-            size: i64,
-            blksize: i32,
-            __pad2: i32 = 0,
-            blocks: i64,
-            atim: std.c.timespec,
-            mtim: std.c.timespec,
-            ctim: std.c.timespec,
-            __unused: [2]u32 = .{ 0, 0 },
-        },
-        else => extern struct {
-            // x86_64-linux uses arch/x86/include/uapi/asm/stat.h layout
-            dev: u64,
-            ino: u64,
-            nlink: u64,
-            mode: u32,
-            uid: u32,
-            gid: u32,
-            __pad0: u32 = 0,
-            rdev: u64,
-            size: i64,
-            blksize: i64,
-            blocks: i64,
-            atim: std.c.timespec,
-            mtim: std.c.timespec,
-            ctim: std.c.timespec,
-            __unused: [3]i64 = .{ 0, 0, 0 },
-        },
-    },
-    .macos, .ios, .tvos, .watchos => extern struct {
-        dev: i32,
-        mode: u16,
-        nlink: u16,
-        ino: u64,
-        uid: u32,
-        gid: u32,
-        rdev: i32,
-        atim: std.c.timespec,
-        mtim: std.c.timespec,
-        ctim: std.c.timespec,
-        birthtim: std.c.timespec,
-        size: i64,
-        blocks: i64,
-        blksize: i32,
-        flags: u32,
-        gen: u32,
-        lspare: i32,
-        qspare: [2]i64,
-    },
-    else => std.c.Stat,
-};
+// Use libc's stat structure and the libc-provided `fstatat`. `std.c.Stat` carries
+// the correct per-OS/arch layout, and `std.c.fstatat` resolves to the `$INODE64`
+// symbol on x86_64 macOS (the hand-rolled `extern "c" fn lstat` bound plain `_lstat`,
+// which is the legacy 32-bit-inode layout on Intel Macs → misaligned mtime reads).
+const Stat = std.c.Stat;
 
-extern "c" fn lstat(path: [*:0]const u8, buf: *Stat) c_int;
+/// lstat semantics (do not follow the final symlink) via libc `fstatat` with
+/// AT_SYMLINK_NOFOLLOW, keeping the same signature/return convention (0 on success).
+fn lstat(path: [*:0]const u8, buf: *Stat) c_int {
+    return std.c.fstatat(std.c.AT.FDCWD, path, buf, std.c.AT.SYMLINK_NOFOLLOW);
+}
 
 const FileEntry = struct {
     mtime_sec: isize,
@@ -221,13 +167,17 @@ pub const Watcher = struct {
             if (!matches) return;
         }
 
-        const mtime_sec: isize = @intCast(stat_buf.mtim.sec);
-        const mtime_nsec: isize = @intCast(stat_buf.mtim.nsec);
-        const now_sec: c_long = @intCast(stat_buf.mtim.sec);
+        const mtime = stat_buf.mtime();
+        const mtime_sec: isize = @intCast(mtime.sec);
+        const mtime_nsec: isize = @intCast(mtime.nsec);
+        const now_sec: c_long = @intCast(mtime.sec);
 
         if (self.files.get(path)) |entry| {
-            // Mark as seen
-            try seen.put(self.allocator, path, {});
+            // Mark as seen using the map-owned key, NOT the caller's transient
+            // `path` slice: walkDir frees `full_path` immediately after checkFile
+            // returns, so storing `path` here would leave `seen` holding dangling
+            // keys that checkDeleted later hashes/eqls against (use-after-free).
+            try seen.put(self.allocator, self.files.getKey(path).?, {});
 
             // Check if modified
             if (entry.mtime_sec != mtime_sec or entry.mtime_nsec != mtime_nsec) {
@@ -527,6 +477,57 @@ test "file deletion detection" {
     try std.testing.expect(changed.len > 0);
     try std.testing.expectEqual(@as(usize, 0), w.files.count());
 
+    _ = rmdir(@as([*:0]const u8, @ptrCast(test_dir)));
+}
+
+test "stable rescan reports no changes (seen-set key ownership)" {
+    // Regression for the seen-set use-after-free: over an unchanged multi-file
+    // directory, every scan after the baseline must return zero changes. With the
+    // pre-fix code the `seen` set held dangling `full_path` keys (freed by walkDir),
+    // so checkDeleted could miss live files and spuriously report deletions.
+    const allocator = std.testing.allocator;
+    var w = Watcher.init(allocator, null);
+    defer w.deinit();
+
+    const test_dir = "/tmp/zig_watch_test_stable";
+    const f1_z = "/tmp/zig_watch_test_stable/a.txt\x00";
+    const f2_z = "/tmp/zig_watch_test_stable/b.txt\x00";
+    const f3_z = "/tmp/zig_watch_test_stable/c.txt\x00";
+
+    _ = unlink(@as([*:0]const u8, @ptrCast(f1_z.ptr)));
+    _ = unlink(@as([*:0]const u8, @ptrCast(f2_z.ptr)));
+    _ = unlink(@as([*:0]const u8, @ptrCast(f3_z.ptr)));
+    _ = rmdir(@as([*:0]const u8, @ptrCast(test_dir)));
+    _ = mkdir(@as([*:0]const u8, @ptrCast(test_dir.ptr)), 0o755);
+
+    for ([_][*:0]const u8{
+        @ptrCast(f1_z.ptr), @ptrCast(f2_z.ptr), @ptrCast(f3_z.ptr),
+    }) |p| {
+        const fd = open(p, O_CREAT | O_WRONLY | O_TRUNC, 0o644);
+        try std.testing.expect(fd >= 0);
+        _ = write(fd, "x", 1);
+        _ = close(fd);
+    }
+
+    try w.baseline(test_dir);
+    try std.testing.expectEqual(@as(usize, 3), w.files.count());
+
+    // Two consecutive rescans with no filesystem changes: both must be empty,
+    // and the tracked-file count must stay at 3 (no false deletions/re-adds).
+    var round: usize = 0;
+    while (round < 2) : (round += 1) {
+        const changed = try w.scan(test_dir);
+        defer {
+            for (changed) |p| allocator.free(p);
+            allocator.free(changed);
+        }
+        try std.testing.expectEqual(@as(usize, 0), changed.len);
+        try std.testing.expectEqual(@as(usize, 3), w.files.count());
+    }
+
+    _ = unlink(@as([*:0]const u8, @ptrCast(f1_z.ptr)));
+    _ = unlink(@as([*:0]const u8, @ptrCast(f2_z.ptr)));
+    _ = unlink(@as([*:0]const u8, @ptrCast(f3_z.ptr)));
     _ = rmdir(@as([*:0]const u8, @ptrCast(test_dir)));
 }
 

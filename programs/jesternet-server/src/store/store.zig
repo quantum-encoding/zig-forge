@@ -70,6 +70,9 @@ pub const Store = struct {
     allocator: std.mem.Allocator,
     mutex: SpinLock = .{},
     wal: wal_mod.WalWriter,
+    /// Owned "<data_dir>/wal.log" path (freed on deinit). Empty for a
+    /// never-opened store.
+    wal_path: []const u8 = "",
 
     // ── Row stores (in-memory mirrors of the on-disk WAL state) ──
     //
@@ -99,14 +102,21 @@ pub const Store = struct {
     // until the corresponding store methods land.
 
     pub fn open(allocator: std.mem.Allocator, io: Io, data_dir: []const u8) !Store {
-        // data_dir/wal.log — the path is the data_dir prefix + filename.
-        // For #62 scaffold we just use a fixed relative path; #64's
-        // boot wiring will pass the real data_dir.
-        _ = data_dir;
-        const wal = try wal_mod.WalWriter.open(allocator, io, "wal.log");
+        // Ensure the data directory exists, then place the WAL at
+        // "<data_dir>/wal.log". Previously `data_dir` was discarded and a
+        // cwd-relative "wal.log" was hardcoded — so `--data-dir` was a
+        // silent no-op that only worked because the systemd unit also set
+        // WorkingDirectory=<data_dir>. Running the binary from any other
+        // cwd wrote the WAL to the wrong place.
+        try Io.Dir.cwd().createDirPath(io, data_dir);
+        const wal_path = try std.fs.path.join(allocator, &.{ data_dir, "wal.log" });
+        errdefer allocator.free(wal_path);
+
+        const wal = try wal_mod.WalWriter.open(allocator, io, wal_path);
         var store = Store{
             .allocator = allocator,
             .wal = wal,
+            .wal_path = wal_path,
         };
         _ = try store.recover(io);
         return store;
@@ -115,6 +125,7 @@ pub const Store = struct {
     pub fn deinit(self: *Store, io: Io) void {
         self.tokens.deinit(self.allocator);
         self.wal.close(io);
+        if (self.wal_path.len > 0) self.allocator.free(self.wal_path);
     }
 
     /// Flush dirty state to disk + sync the WAL. Called from main.zig
@@ -237,6 +248,23 @@ pub const Store = struct {
     /// could lose an acknowledged event id. Returns the WAL seq,
     /// which becomes the SSE `id:` field.
     pub fn insertEvent(self: *Store, io: Io, kind: types.EventKind, repo: []const u8, title: []const u8, payload_json: []const u8, now_ms: i64) !u64 {
+        // Validate the payload BEFORE it is stored. `handlers/
+        // notifications.zig` embeds `row.payload.slice()` RAW (unescaped)
+        // into the response JSON array on the stated contract "the payload
+        // is already JSON". Nothing enforced that contract: an oversize
+        // value was silently TRUNCATED by FixedStr512.fromSlice (yielding
+        // unbalanced JSON), and a non-JSON value was embedded verbatim —
+        // either one corrupts the ENTIRE /api/notifications/recent array
+        // for every client. Enforce the contract at the insert boundary.
+        //
+        // An empty payload is a permitted sentinel: notifications.zig
+        // renders it as "{}", so it never reaches the raw-embed path.
+        if (payload_json.len > 512) return error.PayloadTooLarge;
+        if (payload_json.len > 0) {
+            const valid = std.json.validate(self.allocator, payload_json) catch return error.InvalidPayload;
+            if (!valid) return error.InvalidPayload;
+        }
+
         var row = types.EventRow{
             .kind = kind,
             .repo = types.FixedStr128.fromSlice(repo),
@@ -396,35 +424,152 @@ pub const Store = struct {
 
 // ── Serialization ───────────────────────────────────────────────────
 //
-// Each WAL payload is a packed in-memory layout. Versioning lives at
-// the WAL header level (WAL_VERSION = 1); a future format change bumps
-// the header and replay() validates before dispatching.
+// WAL payloads are encoded FIELD-WISE in explicit little-endian form,
+// each carrying a leading 1-byte row-format version. This is NOT a raw
+// `@sizeOf`/`asBytes` struct dump. The old dump gated replay on
+// `payload.len == @sizeOf(T)`, which made replay SILENTLY DROP EVERY
+// ROW on any of:
+//   - a field addition / reorder,
+//   - a `TokenScopes` / enum widening,
+//   - a compiler struct-layout change,
+//   - a cross-arch migration (the deploy flow builds on macOS, runs on
+//     x86_64-linux) —
+// without ever tripping WAL_VERSION, and it wrote undefined padding
+// bytes to disk (and into the CRC).
+//
+// With field-wise encoding: strings are length-prefixed from
+// `FixedString.slice()` (no padding, no capacity leak), ints are fixed
+// little-endian, enums/bools are one byte. A genuine format change bumps
+// the per-row version constant below and adds a decode branch for the
+// old version (migration) instead of losing the data. Decoders are
+// bounds-checked and return null on truncation / unknown version / a
+// length that exceeds the destination FixedString capacity.
+
+const TOKEN_ROW_VERSION: u8 = 1;
+const EVENT_ROW_VERSION: u8 = 1;
+
+const Encoder = struct {
+    buf: []u8,
+    n: usize = 0,
+
+    fn byte(self: *Encoder, v: u8) void {
+        self.buf[self.n] = v;
+        self.n += 1;
+    }
+    fn int(self: *Encoder, comptime T: type, v: T) void {
+        const size = @divExact(@bitSizeOf(T), 8);
+        std.mem.writeInt(T, self.buf[self.n..][0..size], v, .little);
+        self.n += size;
+    }
+    fn raw(self: *Encoder, s: []const u8) void {
+        @memcpy(self.buf[self.n..][0..s.len], s);
+        self.n += s.len;
+    }
+    /// Length-prefixed string: [u16 LE len][bytes].
+    fn str(self: *Encoder, s: []const u8) void {
+        self.int(u16, @intCast(s.len));
+        self.raw(s);
+    }
+};
+
+const Decoder = struct {
+    data: []const u8,
+    pos: usize = 0,
+
+    fn byte(self: *Decoder) ?u8 {
+        if (self.pos + 1 > self.data.len) return null;
+        const v = self.data[self.pos];
+        self.pos += 1;
+        return v;
+    }
+    fn int(self: *Decoder, comptime T: type) ?T {
+        const size = @divExact(@bitSizeOf(T), 8);
+        if (self.pos + size > self.data.len) return null;
+        const v = std.mem.readInt(T, self.data[self.pos..][0..size], .little);
+        self.pos += size;
+        return v;
+    }
+    fn take(self: *Decoder, len: usize) ?[]const u8 {
+        if (self.pos + len > self.data.len) return null;
+        const s = self.data[self.pos..][0..len];
+        self.pos += len;
+        return s;
+    }
+    /// Length-prefixed string → FixedString(cap). Rejects (null) rather
+    /// than truncating if the encoded length exceeds the field capacity.
+    fn str(self: *Decoder, comptime Str: type) ?Str {
+        const cap = @typeInfo(@FieldType(Str, "buf")).array.len;
+        const len = self.int(u16) orelse return null;
+        if (len > cap) return null;
+        const bytes = self.take(len) orelse return null;
+        return Str.fromSlice(bytes);
+    }
+};
 
 fn serializeToken(allocator: std.mem.Allocator, row: types.ApiTokenRow) ![]u8 {
-    const size = @sizeOf(types.ApiTokenRow);
-    const buf = try allocator.alloc(u8, size);
-    @memcpy(buf, std.mem.asBytes(&row));
-    return buf;
+    var buf: [512]u8 = undefined;
+    var enc = Encoder{ .buf = &buf };
+    enc.byte(TOKEN_ROW_VERSION);
+    enc.str(row.id.slice());
+    enc.str(row.user_handle.slice());
+    enc.raw(&row.hash);
+    enc.str(row.label.slice());
+    enc.byte(@bitCast(row.scopes));
+    enc.int(i64, row.created_at);
+    enc.int(i64, row.last_used_at);
+    enc.int(i64, row.expires_at);
+    enc.str(row.repo_pattern.slice());
+    enc.byte(@intFromBool(row.revoked));
+    return allocator.dupe(u8, buf[0..enc.n]);
 }
 
 fn deserializeToken(payload: []const u8) ?types.ApiTokenRow {
-    if (payload.len != @sizeOf(types.ApiTokenRow)) return null;
-    var row: types.ApiTokenRow = undefined;
-    @memcpy(std.mem.asBytes(&row), payload);
+    var dec = Decoder{ .data = payload };
+    if ((dec.byte() orelse return null) != TOKEN_ROW_VERSION) return null;
+    var row = types.ApiTokenRow{};
+    row.id = dec.str(types.FixedStr16) orelse return null;
+    row.user_handle = dec.str(types.FixedStr64) orelse return null;
+    const hash = dec.take(32) orelse return null;
+    @memcpy(&row.hash, hash);
+    row.label = dec.str(types.FixedStr128) orelse return null;
+    row.scopes = @bitCast(dec.byte() orelse return null);
+    row.created_at = dec.int(i64) orelse return null;
+    row.last_used_at = dec.int(i64) orelse return null;
+    row.expires_at = dec.int(i64) orelse return null;
+    row.repo_pattern = dec.str(types.FixedStr128) orelse return null;
+    row.revoked = (dec.byte() orelse return null) != 0;
     return row;
 }
 
 fn serializeEvent(allocator: std.mem.Allocator, row: types.EventRow) ![]u8 {
-    const size = @sizeOf(types.EventRow);
-    const buf = try allocator.alloc(u8, size);
-    @memcpy(buf, std.mem.asBytes(&row));
-    return buf;
+    // `seq` is the WAL sequence number, assigned at append time — it is
+    // NOT part of the payload (it is recovered from the WAL position on
+    // replay). `seen` is computed at read time from `seen_cursor`, so it
+    // is likewise not persisted here.
+    var buf: [1024]u8 = undefined;
+    var enc = Encoder{ .buf = &buf };
+    enc.byte(EVENT_ROW_VERSION);
+    enc.byte(@intFromEnum(row.kind));
+    enc.str(row.repo.slice());
+    enc.str(row.title.slice());
+    enc.str(row.payload.slice());
+    enc.int(i64, row.created_at);
+    return allocator.dupe(u8, buf[0..enc.n]);
 }
 
-fn deserializeEvent(payload: []const u8) ?types.EventRow {
-    if (payload.len != @sizeOf(types.EventRow)) return null;
-    var row: types.EventRow = undefined;
-    @memcpy(std.mem.asBytes(&row), payload);
+/// Decode an `event_insert` payload. Public so `events.zig`'s SSE
+/// replay path decodes via the exact same field-wise reader (it used to
+/// `@memcpy` the raw struct, which had the identical silent-drop hazard).
+/// `seq` is left at 0; the caller overwrites it with the WAL seq.
+pub fn deserializeEvent(payload: []const u8) ?types.EventRow {
+    var dec = Decoder{ .data = payload };
+    if ((dec.byte() orelse return null) != EVENT_ROW_VERSION) return null;
+    var row = types.EventRow{};
+    row.kind = std.enums.fromInt(types.EventKind, dec.byte() orelse return null) orelse return null;
+    row.repo = dec.str(types.FixedStr128) orelse return null;
+    row.title = dec.str(types.FixedStr256) orelse return null;
+    row.payload = dec.str(types.FixedStr512) orelse return null;
+    row.created_at = dec.int(i64) orelse return null;
     return row;
 }
 
@@ -436,16 +581,13 @@ test "Store: insert + lookup + revoke a token (in-memory only, no replay)" {
     var io_threaded: Io.Threaded = .init(testing.allocator, .{});
     const io = io_threaded.io();
 
-    const path = "test-store-tokens.log";
-    Io.Dir.cwd().deleteFile(io, path) catch {};
-    defer Io.Dir.cwd().deleteFile(io, path) catch {};
+    // Each test uses a unique data_dir so the WAL files can't collide
+    // on a shared cwd path (Store.open now honours data_dir).
+    const dir = "test-data-store-tokens";
+    Io.Dir.cwd().deleteTree(io, dir) catch {};
+    defer Io.Dir.cwd().deleteTree(io, dir) catch {};
 
-    // For tests we have to use the fixed "wal.log" path the store
-    // currently hardcodes — so just clean both up.
-    Io.Dir.cwd().deleteFile(io, "wal.log") catch {};
-    defer Io.Dir.cwd().deleteFile(io, "wal.log") catch {};
-
-    var store = try Store.open(testing.allocator, io, "data");
+    var store = try Store.open(testing.allocator, io, dir);
     defer store.deinit(io);
 
     var token: types.ApiTokenRow = .{
@@ -473,10 +615,11 @@ test "Store: insertEvent assigns durable seq" {
     var io_threaded: Io.Threaded = .init(testing.allocator, .{});
     const io = io_threaded.io();
 
-    Io.Dir.cwd().deleteFile(io, "wal.log") catch {};
-    defer Io.Dir.cwd().deleteFile(io, "wal.log") catch {};
+    const dir = "test-data-store-seq";
+    Io.Dir.cwd().deleteTree(io, dir) catch {};
+    defer Io.Dir.cwd().deleteTree(io, dir) catch {};
 
-    var store = try Store.open(testing.allocator, io, "data");
+    var store = try Store.open(testing.allocator, io, dir);
     defer store.deinit(io);
 
     const seq1 = try store.insertEvent(io, .commit_pushed, "jak/foo", "push: main → abc", "{}", 1_700_000_000_000);
@@ -489,15 +632,16 @@ test "Store: recover restores tokens from WAL" {
     var io_threaded: Io.Threaded = .init(testing.allocator, .{});
     const io = io_threaded.io();
 
-    Io.Dir.cwd().deleteFile(io, "wal.log") catch {};
-    defer Io.Dir.cwd().deleteFile(io, "wal.log") catch {};
+    const dir = "test-data-store-recover";
+    Io.Dir.cwd().deleteTree(io, dir) catch {};
+    defer Io.Dir.cwd().deleteTree(io, dir) catch {};
 
     var hash: [32]u8 = .{0} ** 32;
     hash[31] = 42;
 
     // Phase 1: open, insert, drop the store.
     {
-        var store = try Store.open(testing.allocator, io, "data");
+        var store = try Store.open(testing.allocator, io, dir);
         defer store.deinit(io);
 
         var token: types.ApiTokenRow = .{
@@ -512,7 +656,7 @@ test "Store: recover restores tokens from WAL" {
 
     // Phase 2: reopen — recover should bring the token back.
     {
-        var store = try Store.open(testing.allocator, io, "data");
+        var store = try Store.open(testing.allocator, io, dir);
         defer store.deinit(io);
 
         const found = store.lookupToken(hash);
@@ -535,10 +679,11 @@ test "Store: iterateRecent returns newest-first" {
     var io_threaded: Io.Threaded = .init(testing.allocator, .{});
     const io = io_threaded.io();
 
-    Io.Dir.cwd().deleteFile(io, "wal.log") catch {};
-    defer Io.Dir.cwd().deleteFile(io, "wal.log") catch {};
+    const dir = "test-data-store-recent";
+    Io.Dir.cwd().deleteTree(io, dir) catch {};
+    defer Io.Dir.cwd().deleteTree(io, dir) catch {};
 
-    var store = try Store.open(testing.allocator, io, "data");
+    var store = try Store.open(testing.allocator, io, dir);
     defer store.deinit(io);
 
     _ = try store.insertEvent(io, .commit_pushed, "a", "first", "{}", 1);
@@ -561,10 +706,11 @@ test "Store: TokenStore adapter wires the pipeline shape" {
     var io_threaded: Io.Threaded = .init(testing.allocator, .{});
     const io = io_threaded.io();
 
-    Io.Dir.cwd().deleteFile(io, "wal.log") catch {};
-    defer Io.Dir.cwd().deleteFile(io, "wal.log") catch {};
+    const dir = "test-data-store-adapter";
+    Io.Dir.cwd().deleteTree(io, dir) catch {};
+    defer Io.Dir.cwd().deleteTree(io, dir) catch {};
 
-    var store = try Store.open(testing.allocator, io, "data");
+    var store = try Store.open(testing.allocator, io, dir);
     defer store.deinit(io);
 
     var hash: [32]u8 = .{0} ** 32;
@@ -590,4 +736,99 @@ test "Store: TokenStore adapter wires the pipeline shape" {
 
     // Adapter's record_use is a no-op stub — calling shouldn't crash.
     ts.record_use(ts.ctx, "jak_adapter");
+}
+
+test "Store: insertEvent rejects oversize and non-JSON payloads" {
+    var io_threaded: Io.Threaded = .init(testing.allocator, .{});
+    const io = io_threaded.io();
+
+    const dir = "test-data-store-payload";
+    Io.Dir.cwd().deleteTree(io, dir) catch {};
+    defer Io.Dir.cwd().deleteTree(io, dir) catch {};
+
+    var store = try Store.open(testing.allocator, io, dir);
+    defer store.deinit(io);
+
+    // A >512-byte payload would be silently truncated by FixedStr512 and
+    // corrupt the /api/notifications/recent JSON array — reject it.
+    const oversize = "[" ++ ("0," ** 300) ++ "0]"; // ~600+ bytes, valid JSON but too big
+    try testing.expect(oversize.len > 512);
+    try testing.expectError(error.PayloadTooLarge, store.insertEvent(io, .commit_pushed, "a", "big", oversize, 1));
+
+    // A non-JSON payload embedded raw would break the response — reject it.
+    try testing.expectError(error.InvalidPayload, store.insertEvent(io, .commit_pushed, "a", "bad", "not json", 1));
+    try testing.expectError(error.InvalidPayload, store.insertEvent(io, .commit_pushed, "a", "unbalanced", "{\"k\":", 1));
+
+    // Well-formed payloads (including the empty sentinel) are accepted.
+    _ = try store.insertEvent(io, .commit_pushed, "a", "empty-ok", "", 1);
+    _ = try store.insertEvent(io, .commit_pushed, "a", "json-ok", "{\"branch\":\"main\"}", 2);
+}
+
+test "Store: versioned token serialization round-trips and rejects bad version" {
+    const t = testing.allocator;
+
+    var row = types.ApiTokenRow{
+        .id = types.FixedStr16.fromSlice("jak_roundtrip"),
+        .user_handle = types.FixedStr64.fromSlice("rich"),
+        .label = types.FixedStr128.fromSlice("ci-bot"),
+        .scopes = .{ .repo_read = true, .repo_write = true },
+        .created_at = 1_700_000_000_123,
+        .last_used_at = 1_700_000_050_456,
+        .expires_at = 1_800_000_000_789,
+        .repo_pattern = types.FixedStr128.fromSlice("rich/*"),
+        .revoked = true,
+    };
+    row.hash[0] = 0xDE;
+    row.hash[31] = 0xAD;
+
+    const wire = try serializeToken(t, row);
+    defer t.free(wire);
+
+    // First byte is the row-format version.
+    try testing.expectEqual(TOKEN_ROW_VERSION, wire[0]);
+
+    const back = deserializeToken(wire) orelse return error.DecodeFailed;
+    try testing.expectEqualStrings("jak_roundtrip", back.id.slice());
+    try testing.expectEqualStrings("rich", back.user_handle.slice());
+    try testing.expectEqualStrings("ci-bot", back.label.slice());
+    try testing.expectEqualStrings("rich/*", back.repo_pattern.slice());
+    try testing.expect(std.mem.eql(u8, &row.hash, &back.hash));
+    try testing.expect(back.scopes.repo_read and back.scopes.repo_write);
+    try testing.expectEqual(row.created_at, back.created_at);
+    try testing.expectEqual(row.last_used_at, back.last_used_at);
+    try testing.expectEqual(row.expires_at, back.expires_at);
+    try testing.expect(back.revoked);
+
+    // An unknown version byte is rejected (not misread), and a truncated
+    // payload decodes to null instead of reading past the buffer.
+    var bad_ver = try t.dupe(u8, wire);
+    defer t.free(bad_ver);
+    bad_ver[0] = 0xFF;
+    try testing.expect(deserializeToken(bad_ver) == null);
+    try testing.expect(deserializeToken(wire[0 .. wire.len - 1]) == null);
+}
+
+test "Store: versioned event serialization round-trips" {
+    const t = testing.allocator;
+
+    const row = types.EventRow{
+        .kind = .pr_merged,
+        .repo = types.FixedStr128.fromSlice("jak/forge"),
+        .title = types.FixedStr256.fromSlice("PR #7 merged into main"),
+        .payload = types.FixedStr512.fromSlice("{\"pr\":7,\"branch\":\"main\"}"),
+        .created_at = 1_700_000_000_000,
+    };
+
+    const wire = try serializeEvent(t, row);
+    defer t.free(wire);
+    try testing.expectEqual(EVENT_ROW_VERSION, wire[0]);
+
+    const back = deserializeEvent(wire) orelse return error.DecodeFailed;
+    try testing.expectEqual(types.EventKind.pr_merged, back.kind);
+    try testing.expectEqualStrings("jak/forge", back.repo.slice());
+    try testing.expectEqualStrings("PR #7 merged into main", back.title.slice());
+    try testing.expectEqualStrings("{\"pr\":7,\"branch\":\"main\"}", back.payload.slice());
+    try testing.expectEqual(row.created_at, back.created_at);
+    // seq is NOT part of the payload — the caller overlays the WAL seq.
+    try testing.expectEqual(@as(u64, 0), back.seq);
 }

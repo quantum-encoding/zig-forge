@@ -52,17 +52,37 @@ pub const ProcessHandle = struct {
 
 /// Spawn a child process via fork+execve.
 pub fn spawnProcess(path: []const u8, _: anytype) !ProcessHandle {
+    // Validate the path length in the PARENT (F-05) so the caller gets an error
+    // instead of a child that silently exit(127)s after the fork has succeeded.
+    if (path.len >= 256) return error.PathTooLong;
+
     const pid_raw = sys.fork();
     if (@as(i64, @bitCast(@as(u64, @intCast(pid_raw)))) < 0) return error.ForkFailed;
 
     if (pid_raw == 0) {
-        // Child — exec the program
-        // Null-terminate the path
+        // ── Child ──────────────────────────────────────────────────────────────
+        // fd hygiene: close every inherited descriptor above stderr before exec
+        // so the child cannot observe/inject on sibling windows' I/O fds (a
+        // cross-pane keystroke observe/inject primitive). 0/1/2 stay open for the
+        // shared console. close() on a non-open fd is a harmless no-op.
+        var fd: u64 = 3;
+        while (fd < 1024) : (fd += 1) {
+            _ = sys.close(fd);
+        }
+
+        // Null-terminate the path (length already validated above).
         var path_buf: [256]u8 = undefined;
-        if (path.len >= 256) sys.exit(127);
         @memcpy(path_buf[0..path.len], path);
         path_buf[path.len] = 0;
-        _ = sys.execve(@ptrCast(&path_buf), 0, 0);
+
+        // POSIX requires a non-NULL, NULL-terminated argv (with argv[0] set) and
+        // a non-NULL envp. The old `execve(path, 0, 0)` made conformant programs
+        // SIGSEGV on the first argv[0] deref. argv/envp are arrays of pointer-
+        // sized addresses terminated by a null (0) entry; execve takes their
+        // addresses as raw u64s.
+        var argv = [_]u64{ @intFromPtr(&path_buf), 0 };
+        var envp = [_]u64{0};
+        _ = sys.execve(@ptrCast(&path_buf), @intFromPtr(&argv), @intFromPtr(&envp));
         sys.exit(127); // exec failed
     }
 

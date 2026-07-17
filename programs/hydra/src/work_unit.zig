@@ -251,7 +251,8 @@ test "WorkGenerator produces correct batches" {
     var total_candidates: u64 = 0;
     var batch_count: u64 = 0;
 
-    while (try gen.nextBatch(allocator)) |*batch| {
+    while (try gen.nextBatch(allocator)) |next_batch| {
+        var batch = next_batch;
         defer batch.deinit(allocator);
         for (batch.headers[0..batch.count]) |h| {
             total_candidates += h.count;

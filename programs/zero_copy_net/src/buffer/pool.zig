@@ -1,7 +1,6 @@
 //! High-performance fixed-size buffer pool for io_uring zero-copy networking
-//! • O(1) lock-free acquire/release (< 10 ns alloc, < 5 ns free)
-//! • 4 KiB page-aligned buffers (perfect for IORING_REGISTER_BUFFERS)
-//! • Cache-line padded metadata → no false sharing
+//! • O(1) lock-free acquire/release via an ABA-safe Treiber stack
+//! • Page-aligned buffers (perfect for IORING_REGISTER_BUFFERS)
 //! • Full io_uring fixed-buffer registration support
 //! • Built-in statistics and safety checks
 
@@ -15,28 +14,55 @@ const builtin = @import("builtin");
 
 const page_size = std.heap.page_size_min; // 4096 on almost all systems
 
+/// Sentinel free-stack index meaning "empty" (no free buffer).
+/// Reserving the top u32 value caps the pool at maxInt(u32) buffers, which is
+/// far beyond any realistic io_uring buffer count.
+const EMPTY_IDX: u32 = std.math.maxInt(u32);
+
+/// The free stack head is a single u64 CAS word packing a monotonically
+/// increasing tag in the high 32 bits and the top buffer's array index in the
+/// low 32 bits. The tag is bumped on every push and pop so a stale
+/// compare-and-swap can never succeed against a recycled head value — this is
+/// what makes the Treiber stack ABA-safe (a plain pointer/index stack is not).
+inline fn packHead(tag: u32, idx: u32) u64 {
+    return (@as(u64, tag) << 32) | @as(u64, idx);
+}
+inline fn headTag(v: u64) u32 {
+    return @truncate(v >> 32);
+}
+inline fn headIdx(v: u64) u32 {
+    return @truncate(v);
+}
+
 pub const BufferPool = struct {
     const Self = @This();
 
-    /// One buffer + metadata (64-byte aligned → fits exactly one cache line)
+    /// One buffer + metadata. `next` is an intrusive free-stack link stored as
+    /// an array index (EMPTY_IDX == end of stack). It is read/written atomically
+    /// because a concurrent push of the same buffer would otherwise race the
+    /// acquire-side read; `in_use` is retained purely as double-free detection.
     pub const Buffer = struct {
-        data: []align(page_size) u8,        // actual network buffer
-        id: u32,                            // buffer ID for io_uring fixed buffers
-        in_use: atomic.Value(bool),         // true when owned by user
-        _padding: [56 - @sizeOf([]u8) - @sizeOf(u32) - @sizeOf(atomic.Value(bool))]u8 = undefined,
+        data: []align(page_size) u8, // actual network buffer
+        id: u32, // buffer ID (== index into `buffers`) for io_uring fixed buffers
+        in_use: atomic.Value(bool), // true when owned by user
+        next: atomic.Value(u32), // intrusive free-stack link (array index)
 
         fn init(ptr: []align(page_size) u8, id: u32) Buffer {
             return .{
                 .data = ptr,
                 .id = id,
                 .in_use = atomic.Value(bool).init(false),
+                .next = atomic.Value(u32).init(EMPTY_IDX),
             };
         }
     };
 
     allocator: mem.Allocator,
+    /// The single backing allocation (metadata block + data region). Stored so
+    /// `deinit` frees exactly what `init` allocated — the two must not drift.
+    backing: []align(page_size) u8,
     buffers: []Buffer,
-    free_stack: atomic.Value(?*Buffer),
+    free_head: atomic.Value(u64),
 
     total: usize,
     buffer_size: usize,
@@ -59,25 +85,36 @@ pub const BufferPool = struct {
     /// Create a new pool
     pub fn init(allocator: mem.Allocator, buffer_size: usize, count: usize) InitError!Self {
         if (count == 0 or buffer_size == 0) return error.OutOfMemory;
+        // The free-stack index (and buffer id) must fit in u32 with EMPTY_IDX
+        // reserved as the empty sentinel.
+        if (count >= EMPTY_IDX) return error.OutOfMemory;
 
         const aligned_size = mem.alignForward(usize, buffer_size, page_size);
         const total_mem = aligned_size * count;
+
+        // Metadata block rounded up to a page boundary so the data region that
+        // follows it starts page-aligned (required for IORING_REGISTER_BUFFERS
+        // and for the `[*]align(page_size) u8` casts below to be legal).
+        const meta_bytes = mem.alignForward(usize, count * @sizeOf(Buffer), page_size);
 
         // Allocate one contiguous block for everything
         const backing = try allocator.alignedAlloc(
             u8,
             mem.Alignment.fromByteUnits(page_size),
-            total_mem + count * @sizeOf(Buffer),
+            total_mem + meta_bytes,
         );
         errdefer allocator.free(backing);
 
         const metadata = @as([*]Buffer, @ptrCast(@alignCast(backing.ptr)))[0..count];
-        const data_start = backing.ptr + count * @sizeOf(Buffer);
+        // Page-aligned because backing.ptr is page-aligned and meta_bytes is a
+        // whole number of pages.
+        const data_start = backing.ptr + meta_bytes;
 
         var pool = Self{
             .allocator = allocator,
+            .backing = backing,
             .buffers = metadata,
-            .free_stack = atomic.Value(?*Buffer).init(null),
+            .free_head = atomic.Value(u64).init(packHead(0, EMPTY_IDX)),
             .total = count,
             .buffer_size = aligned_size,
             .stats = .{
@@ -86,7 +123,10 @@ pub const BufferPool = struct {
             },
         };
 
-        // Initialize free stack (LIFO)
+        // Initialize buffers and link them into the free stack (LIFO). Init is
+        // single-threaded, so the list is built directly with no CAS needed.
+        // Pushing in reverse leaves buffer 0 on top.
+        var head_idx: u32 = EMPTY_IDX;
         var i: usize = count;
         while (i > 0) {
             i -= 1;
@@ -94,63 +134,61 @@ pub const BufferPool = struct {
             const data_ptr: [*]align(page_size) u8 = @ptrFromInt(@intFromPtr(data_start) + i * aligned_size);
             const data_slice = data_ptr[0..aligned_size];
             buf_ptr.* = Buffer.init(data_slice, @intCast(i));
-            buf_ptr.in_use.store(false, .release);
-
-            var current = pool.free_stack.load(.monotonic);
-            while (true) {
-                buf_ptr.*.in_use.store(false, .release);
-                if (pool.free_stack.cmpxchgWeak(current, buf_ptr, .release, .monotonic)) |new_current| {
-                    current = new_current;
-                    continue;
-                }
-                break;
-            }
+            buf_ptr.next.store(head_idx, .monotonic);
+            head_idx = @intCast(i);
         }
+        pool.free_head = atomic.Value(u64).init(packHead(0, head_idx));
 
         return pool;
     }
 
     pub fn deinit(self: *Self) void {
-        if (self.buffers.len == 0) return;
-        const total_bytes = self.buffer_size * self.total + self.total * @sizeOf(Buffer);
-        const backing = @as([*]u8, @ptrCast(self.buffers.ptr))[0..total_bytes];
-        self.allocator.free(backing);
+        if (self.total == 0) return;
+        self.allocator.free(self.backing);
         self.* = undefined;
     }
 
-    /// Acquire a buffer – < 10 ns in hot path
+    /// Acquire a buffer – lock-free Treiber-stack pop.
     pub fn acquire(self: *Self) ?*Buffer {
         while (true) {
-            const top = self.free_stack.load(.acquire);
-            if (top) |buf| {
-                if (buf.in_use.cmpxchgWeak(false, true, .acq_rel, .acquire)) |_| {
-                    // Someone else grabbed it
-                    continue;
-                }
-                _ = self.stats.allocated.fetchAdd(1, .monotonic);
-                return buf;
+            const head = self.free_head.load(.acquire);
+            const idx = headIdx(head);
+            if (idx == EMPTY_IDX) return null; // pool exhausted
+            const buf = &self.buffers[idx];
+            // Atomic read guards against a torn read racing a concurrent push of
+            // this same buffer; the tagged CAS below rejects any such race.
+            const next_idx = buf.next.load(.monotonic);
+            const new_head = packHead(headTag(head) +% 1, next_idx);
+            if (self.free_head.cmpxchgWeak(head, new_head, .acq_rel, .acquire)) |_| {
+                continue; // stack changed under us — retry
             }
-            return null; // pool exhausted
+            // `buf` is now off the free stack and exclusively ours.
+            if (buf.in_use.swap(true, .acq_rel)) {
+                @panic("BufferPool: free-stack corruption (acquired an in-use buffer)");
+            }
+            _ = self.stats.allocated.fetchAdd(1, .monotonic);
+            return buf;
         }
     }
 
-    /// Release a buffer – < 5 ns
+    /// Release a buffer – lock-free Treiber-stack push.
     pub fn release(self: *Self, buf: *Buffer) void {
         if (!buf.in_use.swap(false, .acq_rel)) {
             // Double free protection
             @panic("BufferPool: double free detected");
         }
-        _ = self.stats.freed.fetchAdd(1, .monotonic);
 
-        var current = self.free_stack.load(.monotonic);
         while (true) {
-            buf.in_use.store(false, .release);
-            if (self.free_stack.cmpxchgWeak(current, buf, .release, .monotonic)) |new_current| {
-                current = new_current;
-                continue;
+            const head = self.free_head.load(.acquire);
+            // Publish this buffer's successor before it becomes reachable.
+            buf.next.store(headIdx(head), .monotonic);
+            const new_head = packHead(headTag(head) +% 1, buf.id);
+            if (self.free_head.cmpxchgWeak(head, new_head, .release, .acquire)) |_| {
+                continue; // another push/pop won — retry
             }
             break;
         }
+        _ = self.stats.freed.fetchAdd(1, .monotonic);
     }
 
     /// Register all buffers with io_uring for zero-copy (fixed buffer mode)
@@ -188,21 +226,48 @@ pub const BufferPool = struct {
 // ====================================================================
 
 test "init/deinit" {
+    // Request 4096; the pool rounds the buffer size up to a whole page, so the
+    // expectation is page-size-relative (4096 on Linux, 16384 on 16 KiB-page
+    // hosts like Apple silicon).
+    const want = mem.alignForward(usize, 4096, page_size);
     var pool = try BufferPool.init(testing.allocator, 4096, 128);
     defer pool.deinit();
     try testing.expect(pool.total == 128);
-    try testing.expect(pool.buffer_size == 4096);
+    try testing.expect(pool.buffer_size == want);
 }
 
 test "acquire/release single" {
+    const want = mem.alignForward(usize, 4096, page_size);
     var pool = try BufferPool.init(testing.allocator, 4096, 16);
     defer pool.deinit();
 
     const buf = pool.acquire() orelse return error.NoBuffer;
-    try testing.expect(buf.data.len == 4096);
+    try testing.expect(buf.data.len == want);
     try testing.expect(@intFromPtr(buf.data.ptr) == mem.alignForward(usize, @intFromPtr(buf.data.ptr), page_size));
 
     pool.release(buf);
+}
+
+test "acquire returns N distinct buffers then exhausts" {
+    // This is the exact test that would have caught the original S1 livelock:
+    // a stack that never pops hands back the same pointer (or spins forever).
+    const count = 64;
+    var pool = try BufferPool.init(testing.allocator, 1024, count);
+    defer pool.deinit();
+
+    var seen = std.AutoHashMap(usize, void).init(testing.allocator);
+    defer seen.deinit();
+
+    var bufs: [count]*BufferPool.Buffer = undefined;
+    for (&bufs) |*slot| {
+        const b = pool.acquire() orelse return error.PoolExhaustedEarly;
+        const gop = try seen.getOrPut(@intFromPtr(b));
+        try testing.expect(!gop.found_existing); // every pointer must be unique
+        slot.* = b;
+    }
+    try testing.expect(pool.acquire() == null); // now genuinely exhausted
+
+    for (bufs) |b| pool.release(b);
 }
 
 test "exhaustion" {
@@ -217,25 +282,32 @@ test "exhaustion" {
 
     pool.release(b2);
     const b5 = pool.acquire() orelse return error.TestFailed;
-    try testing.expect(b5 == b2);
+    try testing.expect(b5 == b2); // LIFO: most-recently-released comes back first
     pool.release(b1);
     pool.release(b3);
     pool.release(b4);
     pool.release(b5);
 }
 
-test "double free protection" {
+test "release then reacquire returns same buffer" {
+    // Note: release() @panic()s on an actual double free (in_use guard). That
+    // path cannot be exercised in-process without aborting the test runner, so
+    // this test verifies the observable, non-aborting invariant instead: a
+    // released buffer returns to the free stack and is handed back on reacquire.
     var pool = try BufferPool.init(testing.allocator, 1024, 1);
     defer pool.deinit();
 
     const buf = pool.acquire() orelse unreachable;
+    try testing.expect(pool.acquire() == null); // single-buffer pool now empty
     pool.release(buf);
-    if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
-        // Should panic in safe modes
-        std.debug.assert(@panic("BufferPool: double free detected").len > 0);
-    }
-    // In ReleaseFast we just silently ignore (still safe)
-    pool.release(buf);
+
+    const stats = pool.getStats();
+    try testing.expect(stats.in_use == 0);
+    try testing.expect(stats.free == 1);
+
+    const again = pool.acquire() orelse return error.NoBuffer;
+    try testing.expect(again == buf);
+    pool.release(again);
 }
 
 test "concurrent acquire/release (stress)" {

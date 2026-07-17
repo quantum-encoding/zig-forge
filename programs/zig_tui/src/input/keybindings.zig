@@ -45,7 +45,7 @@ pub const Keybindings = struct {
 
     pub fn init(allocator: std.mem.Allocator) Self {
         return .{
-            .bindings = .{},
+            .bindings = .empty,
             .allocator = allocator,
             .current_mode = .normal,
         };

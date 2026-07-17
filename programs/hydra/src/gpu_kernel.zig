@@ -385,7 +385,12 @@ pub const CompiledKernel = struct {
     module: CUmodule,
     function: CUfunction,
 
-    pub fn compile(source: []const u8, kernel_name: []const u8) CudaError!CompiledKernel {
+    pub fn compile(
+        source: []const u8,
+        kernel_name: []const u8,
+        cc_major: c_int,
+        cc_minor: c_int,
+    ) CudaError!CompiledKernel {
         const libs = try getCudaLibs();
 
         // Create null-terminated strings
@@ -399,8 +404,20 @@ pub const CompiledKernel = struct {
         }
         defer _ = libs.nvrtcDestroyProgram(&prog);
 
+        // Build the target GPU architecture from the queried compute capability
+        // instead of hardcoding one generation. NVRTC compute minor is always a
+        // single digit, so "compute_<major><minor>" (e.g. 8.6 -> compute_86,
+        // 9.0 -> compute_90, 12.0 -> compute_120). Fall back to a broadly
+        // compatible baseline if the capability could not be determined.
+        var arch_buf: [64]u8 = undefined;
+        const arch_opt: [:0]const u8 = if (cc_major > 0)
+            std.fmt.bufPrintZ(&arch_buf, "--gpu-architecture=compute_{d}{d}", .{ cc_major, cc_minor }) catch
+                return error.KernelCompilationFailed
+        else
+            "--gpu-architecture=compute_52";
+
         // Compile
-        const opts = [_][*:0]const u8{"--gpu-architecture=compute_86"};
+        const opts = [_][*:0]const u8{arch_opt.ptr};
         const compile_result = libs.nvrtcCompileProgram(prog, 1, &opts);
         if (compile_result != NVRTC_SUCCESS) {
             var log_size: usize = 0;
@@ -486,7 +503,12 @@ pub const Hydra = struct {
         device.printInfo();
 
         std.debug.print("Compiling GPU kernel...\n", .{});
-        const kernel = try CompiledKernel.compile(hash_match_kernel, "hash_match_kernel");
+        const kernel = try CompiledKernel.compile(
+            hash_match_kernel,
+            "hash_match_kernel",
+            device.compute_capability_major,
+            device.compute_capability_minor,
+        );
 
         std.debug.print("Allocating GPU memory for {} work units...\n", .{max_batch_size});
         const headers_gpu = try GpuBuffer(work_unit.WorkUnitHeader).alloc(max_batch_size);

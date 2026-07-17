@@ -92,9 +92,14 @@ pub fn simdZero(dest: []u8) void {
     const aligned_len = dest.len & ~@as(usize, 63);
 
     // Process 64 bytes at a time
+    // Use align(1) vector stores: callers pass arbitrary []u8 slices whose
+    // backing memory is not guaranteed to be 64-byte aligned (stack buffers,
+    // sub-slices of larger allocations). @alignCast to *Vec64u8 would assert
+    // 64-byte alignment and panic; an unaligned store is correct and only
+    // marginally slower on modern x86-64.
     var i: usize = 0;
     while (i < aligned_len) : (i += 64) {
-        const ptr: *Vec64u8 = @ptrCast(@alignCast(dest[i..].ptr));
+        const ptr: *align(1) Vec64u8 = @ptrCast(dest[i..].ptr);
         ptr.* = zero_vec;
     }
 
@@ -110,10 +115,12 @@ pub fn simdCopy(dest: []u8, src: []const u8) void {
     const aligned_len = len & ~@as(usize, 63);
 
     // Process 64 bytes at a time
+    // align(1) loads/stores: dest and src are arbitrary []u8 slices with no
+    // 64-byte alignment guarantee (see simdZero). @alignCast would panic.
     var i: usize = 0;
     while (i < aligned_len) : (i += 64) {
-        const src_ptr: *const Vec64u8 = @ptrCast(@alignCast(src[i..].ptr));
-        const dest_ptr: *Vec64u8 = @ptrCast(@alignCast(dest[i..].ptr));
+        const src_ptr: *align(1) const Vec64u8 = @ptrCast(src[i..].ptr);
+        const dest_ptr: *align(1) Vec64u8 = @ptrCast(dest[i..].ptr);
         dest_ptr.* = src_ptr.*;
     }
 

@@ -91,12 +91,14 @@ pub const MeshyClient = struct {
         model: []const u8,
         mode: []const u8, // "preview" or "refine"
     ) ![]u8 {
-        const escaped = try common.escapeJsonString(self.allocator, prompt);
-        defer self.allocator.free(escaped);
-
-        const payload = try std.fmt.allocPrint(self.allocator,
-            \\{{"mode":"{s}","prompt":"{s}","ai_model":"{s}","topology":"triangle"}}
-        , .{ mode, escaped, model });
+        // Whole body via std.json.Stringify so identifier fields (mode,
+        // ai_model) are escaped alongside the free-text prompt.
+        const payload = try std.json.Stringify.valueAlloc(self.allocator, .{
+            .mode = mode,
+            .prompt = prompt,
+            .ai_model = model,
+            .topology = "triangle",
+        }, .{});
         defer self.allocator.free(payload);
 
         const headers = self.authHeader();
@@ -113,12 +115,12 @@ pub const MeshyClient = struct {
 
     /// Image-to-3D: submit job with image URL.
     pub fn imageTo3D(self: *MeshyClient, image_url: []const u8, model: []const u8) ![]u8 {
-        const escaped = try common.escapeJsonString(self.allocator, image_url);
-        defer self.allocator.free(escaped);
-
-        const payload = try std.fmt.allocPrint(self.allocator,
-            \\{{"image_url":"{s}","ai_model":"{s}","should_texture":true,"topology":"triangle"}}
-        , .{ escaped, model });
+        const payload = try std.json.Stringify.valueAlloc(self.allocator, .{
+            .image_url = image_url,
+            .ai_model = model,
+            .should_texture = true,
+            .topology = "triangle",
+        }, .{});
         defer self.allocator.free(payload);
 
         const headers = self.authHeader();
@@ -134,9 +136,12 @@ pub const MeshyClient = struct {
 
     /// Remesh: re-topology an existing 3D model.
     pub fn remesh(self: *MeshyClient, input_task_id: []const u8, target_polycount: u32) ![]u8 {
-        const payload = try std.fmt.allocPrint(self.allocator,
-            \\{{"input_task_id":"{s}","target_formats":["glb","fbx","obj","usdz"],"topology":"quad","target_polycount":{}}}
-        , .{ input_task_id, target_polycount });
+        const payload = try std.json.Stringify.valueAlloc(self.allocator, .{
+            .input_task_id = input_task_id,
+            .target_formats = [_][]const u8{ "glb", "fbx", "obj", "usdz" },
+            .topology = "quad",
+            .target_polycount = target_polycount,
+        }, .{});
         defer self.allocator.free(payload);
 
         const headers = self.authHeader();
@@ -152,12 +157,12 @@ pub const MeshyClient = struct {
 
     /// Retexture: generate new textures for a 3D model.
     pub fn retexture(self: *MeshyClient, input_task_id: []const u8, style_prompt: []const u8) ![]u8 {
-        const escaped = try common.escapeJsonString(self.allocator, style_prompt);
-        defer self.allocator.free(escaped);
-
-        const payload = try std.fmt.allocPrint(self.allocator,
-            \\{{"input_task_id":"{s}","text_style_prompt":"{s}","ai_model":"meshy-6","enable_pbr":true}}
-        , .{ input_task_id, escaped });
+        const payload = try std.json.Stringify.valueAlloc(self.allocator, .{
+            .input_task_id = input_task_id,
+            .text_style_prompt = style_prompt,
+            .ai_model = "meshy-6",
+            .enable_pbr = true,
+        }, .{});
         defer self.allocator.free(payload);
 
         const headers = self.authHeader();

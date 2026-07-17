@@ -80,10 +80,10 @@ pub const Tree = struct {
         return .{
             .root = root,
             .allocator = allocator,
-            .visible_items = .{},
+            .visible_items = .empty,
             .selected_idx = 0,
             .scroll_offset = 0,
-            .expanded_paths = .{},
+            .expanded_paths = .empty,
             .show_root = true,
             .indent_size = 2,
             .show_icons = true,

@@ -186,7 +186,7 @@ fn runBenchmark(allocator: std.mem.Allocator) !void {
     // GPU benchmark
     std.debug.print("2. GPU Kernel Benchmark:\n", .{});
 
-    var gpu_device = gpu_kernel.GpuDevice.init() catch |err| {
+    const gpu_device = gpu_kernel.GpuDevice.init() catch |err| {
         std.debug.print("   GPU not available: {}\n", .{err});
         std.debug.print("   Skipping GPU benchmark\n", .{});
         return;

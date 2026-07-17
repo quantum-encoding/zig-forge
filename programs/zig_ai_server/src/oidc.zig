@@ -837,3 +837,57 @@ test "VerifiedClaims: deinit handles null optional email/nonce" {
     };
     claims.deinit(allocator);
 }
+
+test "RS256 KAT: RFC 7515 Appendix A.2 valid signature verifies (positive path)" {
+    // EXTERNAL-ANCHORED known-answer test — the trust root of Apple/Google
+    // sign-in. Every other RS256 test in this file only asserts a
+    // *rejection*; this is the ONLY one that proves a genuinely-valid RS256
+    // signature returns `true`. Without it, the zig_base58-class defect (a
+    // wrong DigestInfo DER prefix, an off-by-one in the PS padding, or a
+    // truncated hash compare) is invisible — the verifier would reject every
+    // real Google/Apple token yet still pass all the negative tests.
+    //
+    // Provenance: RFC 7515 (JSON Web Signature), Appendix A.2
+    // "Example JWS Using RSASSA-PKCS1-v1_5 SHA-256". The RSA public key
+    // (JWK "n"/"e"), the JWS Signing Input ("<protected>.<payload>" ASCII),
+    // and the JWS Signature are all published verbatim in the RFC — none of
+    // these bytes were authored here. The modulus is 2048-bit (256 bytes),
+    // so it also clears the M9 min_rsa_modulus_bytes floor.
+    const allocator = std.testing.allocator;
+
+    // RFC 7515 A.2 RSA public key, wrapped as a single-key JWKS document so
+    // the key is materialized through the same parseJwks path production
+    // uses (base64url "n"/"e" → Modulus). "kid" is synthetic (the RFC's JWK
+    // has none); everything else is the RFC's.
+    const jwks =
+        \\{"keys":[{"kty":"RSA","kid":"rfc7515a2",
+        \\"n":"ofgWCuLjybRlzo0tZWJjNiuSfb4p4fAkd_wWJcyQoTbji9k0l8W26mPddxHmfHQp-Vaw-4qPCJrcS2mJPMEzP1Pt0Bm4d4QlL-yRT-SFd2lZS-pCgNMsD1W_YpRPEwOWvG6b32690r2jZ47soMZo9wGzjb_7OMg0LOL-bSf63kpaSHSXndS5z5rexMdbBYUsLA9e-KXBdQOS-UTo7WTBEMa2R2CapHg665xsmtdVMTBQY4uDZlxvb3qCo5ZwKh9kG4LT6_I5IhlJH7aGhyxXFvUK-DWNmoudF8NAco9_h9iaGNj8q2ethFkMLs91kzk2PAcDTW9gb54h4FRWyuXpoQ",
+        \\"e":"AQAB"}]}
+    ;
+    var cache = try parseJwks(allocator, jwks, 0);
+    const key = cache.findKey("rfc7515a2") orelse return error.TestFailed;
+    try std.testing.expectEqual(@as(usize, 256), key.modulus_len); // 2048-bit
+
+    // JWS Signing Input = ASCII("<protected>.<payload>") from RFC 7515 A.2.1.
+    const signing_input = "eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJqb2UiLA0KICJleHAiOjEzMDA4MTkzODAsDQogImh0dHA6Ly9leGFtcGxlLmNvbS9pc19yb290Ijp0cnVlfQ";
+
+    // JWS Signature (base64url) from RFC 7515 A.2.1.
+    const sig_b64 = "cC4hiUPoj9Eetdgtv3hF80EGrhuB__dzERat0XF9g2VtQgr9PJbu3XOiZj5RZmh7AAuHIm4Bh-0Qc_lF5YKt_O8W2Fp5jujGbds9uJdbF9CUAr7t1dnZcAcQjbKBYNX4BAynRFdiuB--f_nZLgrnbyTyWzO75vRK5h6xBArLIARNPvkSjtQBMHlb1L07Qe7K0GarZRmB_eSN9383LcOLn6_dO--xi12jzDwusC-eOkHWEsqtFZESc6BfI7noOPqvhJ1phCnvWh6IeYI2w9QOYEUipUTI8np6LbgGY9Fs98rqVt5AXLIhWkWywlVmtVrBp0igcN_IoypGlUPQGe77Rw";
+    var sig_buf: [max_modulus_bytes]u8 = undefined;
+    const sig = base64UrlDecodeFixed(&sig_buf, sig_b64) orelse return error.TestFailed;
+    try std.testing.expectEqual(@as(usize, 256), sig.len);
+
+    // Positive path: the genuine RFC signature MUST verify.
+    try std.testing.expect(verifyRS256(key, signing_input, sig));
+
+    // Negative path 1: flip one signature bit → reject (still 256 bytes, so
+    // it passes the length check and fails in the padding/hash compare).
+    var tampered_sig: [256]u8 = sig[0..256].*;
+    tampered_sig[0] ^= 0x01;
+    try std.testing.expect(!verifyRS256(key, signing_input, &tampered_sig));
+
+    // Negative path 2: same signature, one extra message byte → the SHA-256
+    // over the message changes, so the recovered DigestInfo hash no longer
+    // matches → reject.
+    try std.testing.expect(!verifyRS256(key, signing_input ++ " ", sig));
+}

@@ -425,3 +425,55 @@ fn errStatus(status: http.Status, message: []const u8) Response {
         else => .{ .status = .internal_server_error, .body = "{\"error\":\"internal\",\"message\":\"Payment request failed\"}" },
     };
 }
+
+// ── Tests ────────────────────────────────────────────────────────────
+
+test "Stripe webhook HMAC: RFC 4231 Test Case 7 vector accepts, tamper rejects" {
+    // EXTERNAL-ANCHORED known-answer test on the money path. verifySignature
+    // is what stands between a forged webhook and store.creditAccount; before
+    // this test it had zero coverage and was not even reachable from
+    // `zig build test`.
+    //
+    // Provenance: RFC 4231, "Identifiers and Test Vectors for HMAC-SHA-224,
+    // HMAC-SHA-256, HMAC-SHA-384, and HMAC-SHA-512", Test Case 7. The key
+    // (0xaa x131), the data, and the expected HMAC-SHA-256 digest are all
+    // published verbatim in the RFC — none of these bytes were authored here.
+    //
+    // The RFC data string contains exactly one '.' after the word "data",
+    // so we split it into the Stripe framing "<t>.<body>" (verifySignature
+    // reconstructs "<t>.<body>" and HMACs it). If the framing, the digest,
+    // or the constant-time compare is wrong, accept-on-match fails.
+    const allocator = std.testing.allocator;
+
+    const secret = [_]u8{0xaa} ** 131; // RFC 4231 TC7 key
+    // RFC 4231 TC7 data = t ++ "." ++ body :
+    //   "This is a test using a larger than block-size key and a larger than
+    //    block-size data. The key needs to be hashed before being used by
+    //    the HMAC algorithm."
+    const t = "This is a test using a larger than block-size key and a larger than block-size data";
+    const body = " The key needs to be hashed before being used by the HMAC algorithm.";
+    // RFC 4231 TC7 HMAC-SHA-256 digest (hex), i.e. Stripe's v1.
+    const v1 = "9b09ffa71b942fcb27635fbcd5b0e944bfdc63644f0713938a7f51535c3a35e2";
+    const header = "t=" ++ t ++ ",v1=" ++ v1;
+
+    // Positive path: genuine RFC digest must be accepted.
+    try std.testing.expect(verifySignature(allocator, header, body, &secret));
+
+    // Negative 1: tamper the body → MAC mismatch → reject.
+    try std.testing.expect(!verifySignature(allocator, header, body ++ "X", &secret));
+
+    // Negative 2: tamper v1 (flip the final nibble) → reject.
+    const bad_v1 = "9b09ffa71b942fcb27635fbcd5b0e944bfdc63644f0713938a7f51535c3a35e3";
+    const bad_header = "t=" ++ t ++ ",v1=" ++ bad_v1;
+    try std.testing.expect(!verifySignature(allocator, bad_header, body, &secret));
+
+    // Negative 3: wrong secret → reject.
+    const wrong_secret = [_]u8{0xbb} ** 131;
+    try std.testing.expect(!verifySignature(allocator, header, body, &wrong_secret));
+
+    // Negative 4: malformed header (no v1) → reject.
+    try std.testing.expect(!verifySignature(allocator, "t=" ++ t, body, &secret));
+
+    // Negative 5: v1 not 64 hex chars → reject before any HMAC work.
+    try std.testing.expect(!verifySignature(allocator, "t=" ++ t ++ ",v1=deadbeef", body, &secret));
+}

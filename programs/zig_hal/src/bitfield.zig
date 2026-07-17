@@ -16,7 +16,7 @@ pub fn Register(comptime T: type, comptime addr: usize) type {
         if (@typeInfo(T) != .@"struct") {
             @compileError("Register type must be a struct");
         }
-        if (!@typeInfo(T).@"struct".layout == .@"packed") {
+        if (@typeInfo(T).@"struct".layout != .@"packed") {
             @compileError("Register type must be a packed struct");
         }
     }

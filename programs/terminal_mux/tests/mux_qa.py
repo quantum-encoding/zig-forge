@@ -220,6 +220,16 @@ def scenario_scroll_invariant():
     drain(master, screen, 2.5)
     os.write(master, "echo '日本語ワイド文字 🚀🚀🚀 test'\n".encode())
     drain(master, screen, 1.0)
+    # Copy-mode smoke: scroll the history, search for a seq line, exit — the
+    # composed history view must not desync the host model either.
+    os.write(master, b"\x02[")
+    drain(master, screen, 0.3)
+    os.write(master, b"kkuu")        # line up x2, half-page up x2
+    drain(master, screen, 0.4)
+    os.write(master, b"/1500\r")     # search for seq output "1500"
+    drain(master, screen, 0.4)
+    os.write(master, b"nq")          # next match, quit (snaps to bottom)
+    drain(master, screen, 0.4)
     resize_and_sync(master, pid, screen, 24, 80)
     drain(master, screen, 1.0)
     os.write(master, b"seq 1 500\n")

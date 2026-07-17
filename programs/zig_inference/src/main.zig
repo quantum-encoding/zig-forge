@@ -1010,3 +1010,270 @@ test "dot product f32 simd" {
     const result = quant.dotF32Simd(&a, &b, 8);
     try std.testing.expectApproxEqAbs(@as(f32, 36.0), result, 1e-5);
 }
+
+// ══════════════════════════════════════════════════════════════════════════
+// External-anchor dequant golden tests.
+//
+// Inputs (block byte layouts) and expected outputs are both derived from the
+// published GGML quantization format spec — NOT from this engine's own output.
+// Each block dtype below (Q8_0/Q4_0/Q4_1/Q6_K/Q4_K) has a fixed on-disk layout
+// and a fixed dequant formula in ggml-quants.c; a bug in the nibble/bit
+// unpacking, the scale/min application, or the -8/-32 zero-point bias would
+// change these numbers. These replace the prior single all-0x88→0 Q4_0 case,
+// which only exercised the degenerate zero block.
+// ══════════════════════════════════════════════════════════════════════════
+
+test "dequant golden: Q8_0 (out = quant * scale)" {
+    // ggml Q8_0: 32 signed i8 quants scaled by one f16 delta.
+    var block = quant.BlockQ8_0{ .scale = @as(f16, 3.0), .quants = .{0} ** 32 };
+    block.quants[0] = 1;
+    block.quants[1] = -1;
+    block.quants[2] = 10;
+    block.quants[3] = 127;
+    block.quants[4] = -128;
+    var out: [32]f32 = undefined;
+    quant.dequantizeQ8_0(&block, &out);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), out[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, -3.0), out[1], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 30.0), out[2], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 381.0), out[3], 1e-3);
+    try std.testing.expectApproxEqAbs(@as(f32, -384.0), out[4], 1e-3);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), out[5], 1e-4);
+}
+
+test "dequant golden: Q4_0 (out = (nibble - 8) * scale, lo->0..15 hi->16..31)" {
+    // ggml Q4_0: low nibble of byte j -> element j, high nibble -> element j+16,
+    // each with a -8 zero-point, scaled by one f16 delta.
+    var block = quant.BlockQ4_0{ .scale = @as(f16, 2.0), .quants = .{0x88} ** 16 };
+    block.quants[0] = 0xF0; // lo=0, hi=15
+    block.quants[1] = 0x8A; // lo=10, hi=8
+    var out: [32]f32 = undefined;
+    quant.dequantizeQ4_0(&block, &out);
+    try std.testing.expectApproxEqAbs(@as(f32, -16.0), out[0], 1e-4); // (0-8)*2
+    try std.testing.expectApproxEqAbs(@as(f32, 14.0), out[16], 1e-4); // (15-8)*2
+    try std.testing.expectApproxEqAbs(@as(f32, 4.0), out[1], 1e-4); // (10-8)*2
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), out[17], 1e-4); // (8-8)*2
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), out[2], 1e-4); // (8-8)*2
+}
+
+test "dequant golden: Q4_1 (out = nibble * scale + min)" {
+    // ggml Q4_1: like Q4_0 but affine (scale, min) with NO zero-point subtraction.
+    var block = quant.BlockQ4_1{ .scale = @as(f16, 2.0), .min = @as(f16, 1.0), .quants = .{0} ** 16 };
+    block.quants[0] = 0x31; // lo=1, hi=3
+    var out: [32]f32 = undefined;
+    quant.dequantizeQ4_1(&block, &out);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), out[0], 1e-4); // 1*2+1
+    try std.testing.expectApproxEqAbs(@as(f32, 7.0), out[16], 1e-4); // 3*2+1
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), out[1], 1e-4); // 0*2+1
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), out[17], 1e-4); // 0*2+1
+}
+
+test "dequant golden: Q6_K (6-bit split ql/qh, -32 zero-point, sub-block scales)" {
+    // ggml Q6_K super-block of 256. With every ql/qh nibble zero and unit scales,
+    // each output is d*scale*(0-32) = -32. We perturb the first element only:
+    // ql[0]=0x0A (low nibble 10), qh[0]=0x01 (its 2 high bits = 1) -> q1 = 10|(1<<4)=26,
+    // so out[0] = 1*1*(26-32) = -6. A nibble-swap or missing-high-bits bug moves out[0].
+    var block = quant.BlockQ6_K{
+        .ql = .{0} ** 128,
+        .qh = .{0} ** 64,
+        .scales = .{1} ** 16,
+        .d = @as(f16, 1.0),
+    };
+    block.ql[0] = 0x0A;
+    block.qh[0] = 0x01;
+    var out: [256]f32 = undefined;
+    quant.dequantizeQ6_K(&block, &out);
+    try std.testing.expectApproxEqAbs(@as(f32, -6.0), out[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, -32.0), out[1], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, -32.0), out[64], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, -32.0), out[255], 1e-4);
+}
+
+test "dequant golden: Q4_K (affine sub-blocks, 6-bit packed scale/min)" {
+    // ggml Q4_K super-block of 256. First 32 outputs use sub-block 0 (scale=scales[0],
+    // min=scales[4]); the next 32 use sub-block 1 (scale=scales[1], min=scales[5]).
+    // d=dmin=1.0, scales[0]=2, scales[1]=3, scales[4]=1, scales[5]=1, qs[0]=0x21.
+    //   out[0]  = d1*(qs[0]&0xF) - m1 = 2*1 - 1 = 1
+    //   out[32] = d2*(qs[0]>>4)  - m2 = 3*2 - 1 = 5
+    var block = quant.BlockQ4_K{
+        .d = @as(f16, 1.0),
+        .dmin = @as(f16, 1.0),
+        .scales = .{0} ** 12,
+        .qs = .{0} ** 128,
+    };
+    block.scales[0] = 2;
+    block.scales[1] = 3;
+    block.scales[4] = 1;
+    block.scales[5] = 1;
+    block.qs[0] = 0x21;
+    var out: [256]f32 = undefined;
+    quant.dequantizeQ4_K(&block, &out);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), out[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, -1.0), out[1], 1e-4); // 2*0 - 1
+    try std.testing.expectApproxEqAbs(@as(f32, 5.0), out[32], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, -1.0), out[33], 1e-4); // 3*0 - 1
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// GGUF reader robustness: malformed / truncated files must be REJECTED with a
+// clean error, never read out of bounds. These exercise the bounds-checked
+// Reader + header validation in gguf.zig. The FFI libraries build ReleaseFast
+// (safety off), so an unchecked cursor here would fault on unmapped pages.
+// ══════════════════════════════════════════════════════════════════════════
+
+fn le32(v: u32) [4]u8 {
+    var b: [4]u8 = undefined;
+    std.mem.writeInt(u32, &b, v, .little);
+    return b;
+}
+fn le64(v: u64) [8]u8 {
+    var b: [8]u8 = undefined;
+    std.mem.writeInt(u64, &b, v, .little);
+    return b;
+}
+
+fn writeTempFile(path: [:0]const u8, bytes: []const u8) !void {
+    const fd = std.c.open(path.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
+    if (fd < 0) return error.OpenFailed;
+    defer _ = std.c.close(fd);
+    const n = std.c.write(fd, bytes.ptr, bytes.len);
+    if (n < 0 or @as(usize, @intCast(n)) != bytes.len) return error.WriteFailed;
+}
+
+fn expectGgufError(bytes: []const u8, expected: anyerror) !void {
+    const path = "/tmp/ziginfer_gguf_robustness_test.gguf";
+    try writeTempFile(path, bytes);
+    defer _ = std.c.unlink(path.ptr);
+    // testing.allocator would flag any leak: verifies open() cleans up on reject.
+    try std.testing.expectError(expected, gguf_mod.GGUFFile.open(std.testing.allocator, path));
+}
+
+test "gguf reject: file smaller than header floor" {
+    try expectGgufError(&[_]u8{ 'G', 'G', 'U', 'F', 3, 0 }, error.FileTooSmall);
+}
+
+test "gguf reject: bad magic" {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    const a = std.testing.allocator;
+    try buf.appendSlice(a, "XXXX"); // wrong magic
+    try buf.appendSlice(a, &le32(3)); // version
+    try buf.appendSlice(a, &le64(0)); // tensor_count
+    try buf.appendSlice(a, &le64(0)); // metadata_kv_count
+    try expectGgufError(buf.items, error.InvalidMagic);
+}
+
+test "gguf reject: absurd metadata_kv_count (> file size)" {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    const a = std.testing.allocator;
+    try buf.appendSlice(a, "GGUF");
+    try buf.appendSlice(a, &le32(3));
+    try buf.appendSlice(a, &le64(0)); // tensor_count
+    try buf.appendSlice(a, &le64(0xFFFF_FFFF)); // metadata_kv_count: absurd
+    try expectGgufError(buf.items, error.CorruptHeader);
+}
+
+test "gguf reject: metadata string length overruns EOF" {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    const a = std.testing.allocator;
+    try buf.appendSlice(a, "GGUF");
+    try buf.appendSlice(a, &le32(3));
+    try buf.appendSlice(a, &le64(0)); // tensor_count
+    try buf.appendSlice(a, &le64(1)); // metadata_kv_count = 1
+    try buf.appendSlice(a, &le64(1_000_000)); // key length: runs past EOF
+    // (no key bytes follow) -> readString must reject, not slice past the mmap.
+    try expectGgufError(buf.items, error.Truncated);
+}
+
+test "gguf reject: tensor n_dims > 4 (would overflow dims[4])" {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    const a = std.testing.allocator;
+    try buf.appendSlice(a, "GGUF");
+    try buf.appendSlice(a, &le32(3));
+    try buf.appendSlice(a, &le64(1)); // tensor_count = 1
+    try buf.appendSlice(a, &le64(0)); // metadata_kv_count = 0
+    try buf.appendSlice(a, &le64(1)); // tensor name length = 1
+    try buf.append(a, 'a'); // tensor name
+    try buf.appendSlice(a, &le32(99)); // n_dims = 99 (invalid)
+    try expectGgufError(buf.items, error.InvalidTensorDims);
+}
+
+test "gguf reject: general.alignment = 0" {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    const a = std.testing.allocator;
+    const key = "general.alignment";
+    try buf.appendSlice(a, "GGUF");
+    try buf.appendSlice(a, &le32(3));
+    try buf.appendSlice(a, &le64(0)); // tensor_count = 0
+    try buf.appendSlice(a, &le64(1)); // metadata_kv_count = 1
+    try buf.appendSlice(a, &le64(key.len)); // key length
+    try buf.appendSlice(a, key); // key
+    try buf.appendSlice(a, &le32(4)); // value type = uint32
+    try buf.appendSlice(a, &le32(0)); // value = 0 (invalid alignment)
+    try expectGgufError(buf.items, error.InvalidAlignment);
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// External-anchor embedding test (gated on ZIGINFER_TEST_MODEL pointing at a
+// real Qwen3-Embedding GGUF, e.g. models/Qwen3-Embedding-4B-Q8_0.gguf).
+//
+// Skipped when the env var is unset so `zig build test` stays hermetic and
+// fast. When enabled it anchors against model-external facts: the embed()
+// contract L2-normalizes (‖v‖≈1), and the model's learned semantics rank a
+// topically-relevant document above an unrelated one under cosine similarity.
+// ══════════════════════════════════════════════════════════════════════════
+
+fn cosineOfNormalized(a: []const f32, b: []const f32) f32 {
+    var dot: f32 = 0;
+    for (a, b) |x, y| dot += x * y;
+    return dot;
+}
+
+test "embed golden: real-model L2-norm + semantic ordering (gated)" {
+    const env_ptr = std.c.getenv("ZIGINFER_TEST_MODEL") orelse return;
+    const model_path = std.mem.span(env_ptr);
+    // Use the C allocator: the model makes many long-lived allocations and we
+    // don't want the leak detector to fail on any internal buffer it retains.
+    const allocator = std.heap.c_allocator;
+
+    var model = try model_mod.Model.init(allocator, model_path, 4);
+    defer model.deinit();
+
+    const d = model.config.d_model;
+    const query = try allocator.alloc(f32, d);
+    defer allocator.free(query);
+    const relevant = try allocator.alloc(f32, d);
+    defer allocator.free(relevant);
+    const unrelated = try allocator.alloc(f32, d);
+    defer allocator.free(unrelated);
+
+    try embedText(&model, allocator, "The capital of France is Paris.", query);
+    try embedText(&model, allocator, "Paris is the capital city of France.", relevant);
+    try embedText(&model, allocator, "Photosynthesis converts sunlight into chemical energy.", unrelated);
+
+    // embed() L2-normalizes: each vector should have unit length.
+    for ([_][]const f32{ query, relevant, unrelated }) |v| {
+        var norm_sq: f32 = 0;
+        for (v) |x| norm_sq += x * x;
+        try std.testing.expectApproxEqAbs(@as(f32, 1.0), norm_sq, 1e-2);
+    }
+
+    // The relevant document must be closer (higher cosine) to the query.
+    const sim_rel = cosineOfNormalized(query, relevant);
+    const sim_unrel = cosineOfNormalized(query, unrelated);
+    try std.testing.expect(sim_rel > sim_unrel);
+}
+
+fn embedText(model: *model_mod.Model, allocator: std.mem.Allocator, text: []const u8, out: []f32) !void {
+    const enc = try model.tokenizer.encode(allocator, text, false);
+    defer allocator.free(enc);
+    var tokens: std.ArrayListUnmanaged(u32) = .empty;
+    defer tokens.deinit(allocator);
+    try tokens.appendSlice(allocator, enc);
+    if (model.tokenizer.add_eos_default) try tokens.append(allocator, model.tokenizer.eos_id);
+    _ = model.embed(tokens.items, out);
+}

@@ -83,6 +83,17 @@ pub const Alphabet = struct {
 ///   * IPFS CIDv0:         46 chars
 pub const MAX_DECODE_INPUT: usize = 1024;
 
+/// Maximum raw-byte input length the encoder will accept. Base58 base
+/// conversion is O(n²) (a full carry-propagation pass per input byte), so an
+/// attacker who can feed arbitrarily large input to `encode`/`encodeCheck*`
+/// turns the encoder into a CPU-DoS — the exact asymmetry the decoder's
+/// `MAX_DECODE_INPUT` guard exists to prevent. 4096 covers every legitimate
+/// use with huge margin:
+///   * BTC/Tron addresses (hash160):  21 bytes pre-checksum
+///   * BIP32 xprv/xpub serialization: 78 bytes pre-checksum
+///   * IPFS CIDv0 (sha256 multihash):  34 bytes
+pub const MAX_ENCODE_INPUT: usize = 4096;
+
 pub const Error = error{
     InvalidCharacter,
     InvalidChecksum,
@@ -111,6 +122,7 @@ pub fn decode(allocator: mem.Allocator, encoded: []const u8) ![]u8 {
 /// Encode `data` under the given alphabet. See `Alphabet` for built-in
 /// constants (`bitcoin`, `ripple`, `flickr`).
 pub fn encodeWith(allocator: mem.Allocator, alphabet: *const Alphabet, data: []const u8) ![]u8 {
+    if (data.len > MAX_ENCODE_INPUT) return Error.InputTooLong;
     if (data.len == 0) {
         return allocator.alloc(u8, 0);
     }
@@ -405,10 +417,18 @@ pub const StreamDecoder = struct {
 /// independently allocated and owned by the caller.
 pub fn encodeBatch(allocator: mem.Allocator, items: []const []const u8) ![][]u8 {
     const results = try allocator.alloc([]u8, items.len);
-    errdefer allocator.free(results);
+    var produced: usize = 0;
+    // On any failure, free the inner slices already produced AND the outer
+    // array. A plain `errdefer allocator.free(results)` would leak every
+    // `results[0..produced]` slice already allocated by `encode`.
+    errdefer {
+        for (results[0..produced]) |r| allocator.free(r);
+        allocator.free(results);
+    }
 
     for (items, 0..) |item, i| {
         results[i] = try encode(allocator, item);
+        produced = i + 1;
     }
 
     return results;
@@ -525,7 +545,120 @@ test "tier1: Tron USDT contract address round-trips with version 0x41" {
     try std.testing.expectEqualSlices(u8, hash20, recovered);
 }
 
+test "tier1: XRP genesis account address (external XRPL vector) over Ripple alphabet" {
+    // rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh is the XRP Ledger genesis ("root")
+    // account — the account that held all XRP at ledger inception. It is
+    // documented across the XRPL docs, xrpscan/bithomp explorers, and the
+    // ripple-address-codec golden fixtures.
+    //
+    // XRP classic addresses are Base58Check with:
+    //   * the *Ripple* alphabet (a different ordering of the same 58 chars),
+    //   * the same double-SHA-256 checksum as Bitcoin,
+    //   * account-ID version prefix 0x00.
+    //
+    // The 20-byte account ID below is the externally-published value for this
+    // account (derivable from the "masterpassphrase" secret and shown by every
+    // XRPL address decoder). A wrong ordering in `Alphabet.ripple` (:68), a
+    // single-SHA-256 checksum, or a wrong version byte all break this test —
+    // so it is a genuine two-sided external anchor, not a roundtrip.
+    const allocator = std.testing.allocator;
+    const xrp_addr = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh";
+    const account_id_hex = "b5f762798a53d543a014caf8b297cff8f2f937e8";
+
+    var account_id: [20]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&account_id, account_id_hex);
+
+    // Step (a): plain-decode with the Ripple alphabet (no SHA — ground truth).
+    const decoded = try decodeWith(allocator, &Alphabet.ripple, xrp_addr);
+    defer allocator.free(decoded);
+
+    try std.testing.expectEqual(@as(usize, 25), decoded.len);
+    try std.testing.expectEqual(@as(u8, 0x00), decoded[0]); // XRP account-ID prefix
+    try std.testing.expectEqualSlices(u8, &account_id, decoded[1..21]);
+
+    // Step (b): rebuild <version||accountID||SHA256d[0..4]> and re-encode under
+    // the Ripple alphabet — must reproduce the on-ledger address byte-exact.
+    var framed: [25]u8 = undefined;
+    framed[0] = 0x00;
+    @memcpy(framed[1..21], &account_id);
+    const checksum = sha256d(framed[0..21]);
+    @memcpy(framed[21..25], checksum[0..4]);
+
+    const reencoded = try encodeWith(allocator, &Alphabet.ripple, &framed);
+    defer allocator.free(reencoded);
+    try std.testing.expectEqualSlices(u8, xrp_addr, reencoded);
+}
+
+test "tier1: BIP32 test-vector-1 master xpub (external) over encodeCheck/decodeCheck" {
+    // BIP32 (BIP-0032) "Test vector 1", chain m, serialized extended PUBLIC
+    // key. The 78-byte serialization and the resulting Base58Check string are
+    // both published in the BIP text and reproduced by every HD-wallet library.
+    //
+    // This is the only coverage of the length-generic, multi-byte-version
+    // `encodeCheck`/`decodeCheck` path against an external anchor: the versioned
+    // helpers only exercise 1-byte version prefixes, whereas an xpub carries a
+    // 4-byte version (0x0488B21E). A single-SHA-256 checksum or an off-by-one
+    // in the big-int conversion diverges from the published xpub.
+    const allocator = std.testing.allocator;
+
+    // version(4) depth(1) parent-fpr(4) child(4) chaincode(32) pubkey(33) = 78
+    const serialized_hex =
+        "0488b21e000000000000000000" ++
+        "873dff81c02f525623fd1fe5167eac3a55a049de3d314bb42ee227ffed37d508" ++
+        "0339a36013301597daef41fbe593a02cc513d0b55527ec2df1050e2e8ff49c85c2";
+    const expected_xpub =
+        "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8Nqtwyb" ++
+        "GhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8";
+
+    var serialized: [78]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&serialized, serialized_hex);
+
+    const encoded = try encodeCheck(allocator, &serialized);
+    defer allocator.free(encoded);
+    try std.testing.expectEqualSlices(u8, expected_xpub, encoded);
+
+    const decoded = try decodeCheck(allocator, expected_xpub);
+    defer allocator.free(decoded);
+    try std.testing.expectEqualSlices(u8, &serialized, decoded);
+}
+
 // ----- Tier 2: failure-mode tests -----
+
+test "tier2: encode rejects oversize input (CPU-DoS guard, mirrors decoder cap)" {
+    const allocator = std.testing.allocator;
+
+    var big: [MAX_ENCODE_INPUT + 1]u8 = undefined;
+    @memset(&big, 0xFF);
+
+    try std.testing.expectError(Error.InputTooLong, encode(allocator, &big));
+    try std.testing.expectError(Error.InputTooLong, encodeWith(allocator, &Alphabet.ripple, &big));
+
+    // Boundary: exactly MAX_ENCODE_INPUT bytes must still succeed.
+    var ok_buf: [MAX_ENCODE_INPUT]u8 = undefined;
+    @memset(&ok_buf, 0xAB);
+    const ok = try encode(allocator, &ok_buf);
+    allocator.free(ok);
+}
+
+test "tier2: encodeBatch frees already-encoded slices when a later encode fails" {
+    // Prove the error-path does not leak: FailingAllocator fails the Nth
+    // allocation. encodeBatch allocates the outer array (1) then two slices per
+    // item (max_len scratch + result) — we fail partway through so at least one
+    // full inner result has been produced, then assert testing.allocator (the
+    // backing allocator) sees no leak when the errdefer runs.
+    const backing = std.testing.allocator;
+    const items = [_][]const u8{ "first", "second", "third", "fourth" };
+
+    // Sweep the fail index across a range that lands mid-loop; every failure
+    // must unwind cleanly (FailingAllocator + testing.allocator catch leaks).
+    var fail_at: usize = 1;
+    while (fail_at < 8) : (fail_at += 1) {
+        var fa = std.testing.FailingAllocator.init(backing, .{ .fail_index = fail_at });
+        const res = encodeBatch(fa.allocator(), &items);
+        try std.testing.expectError(error.OutOfMemory, res);
+    }
+}
+
 
 test "tier2: decodeCheckVersioned rejects wrong version (cross-network reuse)" {
     const allocator = std.testing.allocator;

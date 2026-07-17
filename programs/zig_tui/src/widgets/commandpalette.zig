@@ -82,8 +82,8 @@ pub const CommandPalette = struct {
     pub fn init(allocator: std.mem.Allocator) Self {
         return .{
             .allocator = allocator,
-            .commands = .{},
-            .filtered = .{},
+            .commands = .empty,
+            .filtered = .empty,
             .visible = false,
             .query = [_]u8{0} ** 256,
             .query_len = 0,

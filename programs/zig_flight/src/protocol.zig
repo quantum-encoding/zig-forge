@@ -426,3 +426,49 @@ test "parseDatarefValue" {
     try std.testing.expectEqual(@as(f64, 0.0), try parseDatarefValue("  0  \n"));
     try std.testing.expectEqual(@as(f64, -15.3), try parseDatarefValue("-15.3"));
 }
+
+// ============================================================================
+// Golden wire-format fixtures (see testdata/README.md for provenance).
+// These parse embedded X-Plane 12 Web API payloads verbatim so the parsers
+// stay pinned to the documented wire format.
+// ============================================================================
+
+const fixture_update = @embedFile("testdata/dataref_update_values.json");
+const fixture_lookup = @embedFile("testdata/dataref_lookup.json");
+const fixture_result_ok = @embedFile("testdata/result_success.json");
+const fixture_result_err = @embedFile("testdata/result_error.json");
+
+test "golden fixture: dataref_update_values (scalar + array datarefs)" {
+    try std.testing.expectEqual(MessageType.dataref_update_values, detectMessageType(fixture_update));
+
+    const batch = try parseUpdateValues(fixture_update);
+    try std.testing.expectEqual(@as(usize, 3), batch.count);
+
+    try std.testing.expectEqual(@as(u64, 9952311), batch.updates[0].id);
+    try std.testing.expectEqual(@as(f64, 250.5), batch.updates[0].value);
+
+    try std.testing.expectEqual(@as(u64, 9930321), batch.updates[1].id);
+    try std.testing.expectEqual(@as(f64, 10000.0), batch.updates[1].value);
+
+    // Array-valued dataref (per-tank fuel quantity): first element is taken.
+    try std.testing.expectEqual(@as(u64, 9940001), batch.updates[2].id);
+    try std.testing.expectEqual(@as(f64, 1200.5), batch.updates[2].value);
+}
+
+test "golden fixture: REST dataref lookup collection" {
+    const info = try parseDatarefLookup(std.testing.allocator, fixture_lookup);
+    defer std.testing.allocator.free(info.name);
+    defer std.testing.allocator.free(info.value_type);
+
+    try std.testing.expectEqual(@as(u64, 9952311), info.id);
+    try std.testing.expectEqualStrings("sim/cockpit2/gauges/indicators/airspeed_kts_pilot", info.name);
+    try std.testing.expectEqualStrings("float", info.value_type);
+}
+
+test "golden fixture: result acknowledgements" {
+    try std.testing.expectEqual(MessageType.result, detectMessageType(fixture_result_ok));
+    try std.testing.expect(parseResult(fixture_result_ok));
+
+    try std.testing.expectEqual(MessageType.result, detectMessageType(fixture_result_err));
+    try std.testing.expect(!parseResult(fixture_result_err));
+}

@@ -8,7 +8,8 @@
 //! Processes HTTP request manifests with full concurrency, retry, and circuit breaking
 
 const std = @import("std");
-const HttpClient = @import("../http_client.zig").HttpClient;
+const http_client_mod = @import("../http_client.zig");
+const HttpClient = http_client_mod.HttpClient;
 const retry_mod = @import("../retry/retry.zig");
 const RetryEngine = retry_mod.RetryEngine;
 const manifest = @import("manifest.zig");
@@ -66,6 +67,14 @@ pub const EngineConfig = struct {
 
     /// Default retry attempts (can be overridden per-request)
     default_max_retries: u32 = 3,
+
+    /// SSRF guard for the manifest's INITIAL url. The client's
+    /// `isPrivateRedirect` only fires on redirect hops, so without this a
+    /// manifest line can directly target `169.254.169.254`,
+    /// `metadata.google.internal`, `127.0.0.1`, RFC 1918 ranges, etc.
+    /// Default false keeps the trusted-operator use case permissive; set
+    /// true when quantum-curl may be fed attacker-influenced manifests.
+    block_private_urls: bool = false,
 };
 
 pub fn Engine(comptime WriterType: type) type {
@@ -253,12 +262,23 @@ pub fn Engine(comptime WriterType: type) type {
                 error.InvalidHeader,
                 => "invalid_header",
 
+                error.SsrfBlocked,
+                => "ssrf_blocked",
+
                 else => "request_failed",
             };
         }
 
         /// Execute HTTP request
         fn executeHttpRequest(self: *Self, http_client: *HttpClient, request: *manifest.RequestManifest) !HttpClient.Response {
+            // SSRF guard for the initial URL (opt-in). The client only
+            // checks redirect targets, so this is the only place a
+            // manifest line pointing straight at a metadata/loopback/RFC1918
+            // host gets stopped before the request is sent.
+            if (self.config.block_private_urls and http_client_mod.isPrivateRedirect(request.url)) {
+                return error.SsrfBlocked;
+            }
+
             // Build headers
             var headers: std.ArrayList(std.http.Header) = .empty;
             defer headers.deinit(self.allocator);

@@ -113,4 +113,22 @@ pub fn build(b: *std.Build) void {
     });
     const run_tests = b.addRunArtifact(tests);
     test_step.dependOn(&run_tests.step);
+
+    // WASM FFI crypto tests. wasm_ffi.zig is standalone (no in-tree deps) and
+    // normally only compiled for the freestanding wasm32 target, so its inline
+    // SHA-256 / HMAC / Base64URL / Base58 / mini-JWT were never type-checked or
+    // exercised by `zig build test`. Build it for the host target here so its
+    // externally-anchored vectors actually run. On native targets its host
+    // imports resolve to a fixed clock + libc arc4random_buf, hence link_libc.
+    const wasm_test_module = b.createModule(.{
+        .root_source_file = b.path("src/wasm_ffi.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const wasm_tests = b.addTest(.{
+        .root_module = wasm_test_module,
+    });
+    const run_wasm_tests = b.addRunArtifact(wasm_tests);
+    test_step.dependOn(&run_wasm_tests.step);
 }

@@ -62,4 +62,11 @@ test "hal module compiles" {
 test {
     _ = @import("tests.zig");
     _ = @import("bench.zig");
+
+    // Wire the per-target register test blocks into `zig build test` so their
+    // `test` declarations actually execute (previously dead code: the targets
+    // were only referenced via `pub const`, which does not pull in their tests).
+    _ = @import("targets/stm32f4.zig");
+    _ = @import("targets/rp2040.zig");
+    _ = @import("targets/esp32c3.zig");
 }

@@ -30,6 +30,16 @@ pub const ElectrumResult = enum(c_int) {
 threadlocal var last_error_msg: [512]u8 = undefined;
 threadlocal var last_error_len: usize = 0;
 
+/// Map an internal parse error to a C-ABI result code. `error.ServerError`
+/// (the response carried a JSON-RPC error object) maps to `server_error`;
+/// everything else (malformed JSON, wrong result type/shape) is `parse_error`.
+fn resultForError(err: anyerror) ElectrumResult {
+    return switch (err) {
+        error.ServerError => .server_error,
+        else => .parse_error,
+    };
+}
+
 fn setLastError(msg: []const u8) void {
     const copy_len = @min(msg.len, last_error_msg.len - 1);
     @memcpy(last_error_msg[0..copy_len], msg[0..copy_len]);
@@ -475,23 +485,14 @@ export fn electrum_parse_broadcast_response(
 
     const resp = response[0..response_len];
 
-    // Look for "result":"<txid>"
-    if (std.mem.indexOf(u8, resp, "\"result\":\"")) |pos| {
-        const txid_start = pos + 10;
-        if (txid_start + 64 <= resp.len) {
-            @memcpy(out_txid_hex[0..64], resp[txid_start .. txid_start + 64]);
-            return @intFromEnum(ElectrumResult.success);
-        }
-    }
-
-    // Check for error
-    if (std.mem.indexOf(u8, resp, "\"error\":")) |_| {
-        setLastError("Server returned error");
-        return @intFromEnum(ElectrumResult.server_error);
-    }
-
-    setLastError("Invalid response format");
-    return @intFromEnum(ElectrumResult.invalid_response);
+    // Structural parse (F2): reject error responses first, require a
+    // `result` that is exactly 64 lowercase-hex chars before writing a txid.
+    const txid = electrum.parseBroadcastResponse(resp) catch |err| {
+        setLastError("Failed to parse broadcast response");
+        return @intFromEnum(resultForError(err));
+    };
+    @memcpy(out_txid_hex[0..64], &txid);
+    return @intFromEnum(ElectrumResult.success);
 }
 
 /// Parse a get_transaction response to extract raw tx hex
@@ -507,30 +508,22 @@ export fn electrum_parse_get_tx_response(
     }
 
     const resp = response[0..response_len];
+    const allocator = std.heap.page_allocator;
 
-    // Look for "result":"<raw_tx_hex>"
-    if (std.mem.indexOf(u8, resp, "\"result\":\"")) |pos| {
-        const tx_start = pos + 10;
-        // Find closing quote
-        if (std.mem.indexOfScalarPos(u8, resp, tx_start, '"')) |tx_end| {
-            const tx_len = tx_end - tx_start;
-            if (tx_len > out_raw_tx_size) {
-                setLastError("Buffer too small for transaction");
-                return @intFromEnum(ElectrumResult.buffer_too_small);
-            }
-            @memcpy(out_raw_tx_hex[0..tx_len], resp[tx_start..tx_end]);
-            return @intCast(tx_len);
-        }
+    // Structural parse (F2): reject error responses first, require a
+    // non-empty, even-length, lowercase-hex string `result`.
+    const raw = electrum.parseTxResponse(allocator, resp) catch |err| {
+        setLastError("Failed to parse transaction response");
+        return @intFromEnum(resultForError(err));
+    };
+    defer allocator.free(raw);
+
+    if (raw.len > out_raw_tx_size) {
+        setLastError("Buffer too small for transaction");
+        return @intFromEnum(ElectrumResult.buffer_too_small);
     }
-
-    // Check for error
-    if (std.mem.indexOf(u8, resp, "\"error\":")) |_| {
-        setLastError("Server returned error");
-        return @intFromEnum(ElectrumResult.server_error);
-    }
-
-    setLastError("Invalid response format");
-    return @intFromEnum(ElectrumResult.invalid_response);
+    @memcpy(out_raw_tx_hex[0..raw.len], raw);
+    return @intCast(raw.len);
 }
 
 /// Parse headers.subscribe response to get current height
@@ -545,20 +538,14 @@ export fn electrum_parse_headers_response(
 
     const resp = response[0..response_len];
 
-    // Parse height from response
-    if (std.mem.indexOf(u8, resp, "\"height\":")) |pos| {
-        const start = pos + 9;
-        var end = start;
-        while (end < resp.len and resp[end] >= '0' and resp[end] <= '9') : (end += 1) {}
-        const height = std.fmt.parseInt(u32, resp[start..end], 10) catch {
-            setLastError("Failed to parse height");
-            return @intFromEnum(ElectrumResult.parse_error);
-        };
-        return @intCast(height);
-    }
-
-    setLastError("Height not found in response");
-    return @intFromEnum(ElectrumResult.invalid_response);
+    // Structural parse (F2): reject error responses first, require an object
+    // `result` with a non-negative integer `height` that fits in c_int.
+    const height = electrum.parseHeadersResponse(resp) catch |err| {
+        setLastError("Failed to parse headers response");
+        return @intFromEnum(resultForError(err));
+    };
+    // parseHeadersResponse guarantees height <= maxInt(c_int).
+    return @intCast(height);
 }
 
 // =============================================================================

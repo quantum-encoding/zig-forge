@@ -82,9 +82,9 @@ pub const StatusBar = struct {
     pub fn init(allocator: std.mem.Allocator) Self {
         return .{
             .allocator = allocator,
-            .left_segments = .{},
-            .center_segments = .{},
-            .right_segments = .{},
+            .left_segments = .empty,
+            .center_segments = .empty,
+            .right_segments = .empty,
             .mode = "NORMAL",
             .message = "",
             .message_style = Style{ .fg = Color.white },

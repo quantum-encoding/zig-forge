@@ -28,6 +28,31 @@ extern "c" fn signal(sig: c_int, handler: SignalHandler) SignalHandler;
 
 const VERSION = "0.1.0";
 
+/// Copy-mode '/' search: jump the view so the next scrollback line OLDER than
+/// the current top that contains `needle` sits at the top row. ASCII,
+/// case-sensitive ('n' repeats from the new position).
+fn searchScrollback(t: *lib.Terminal, needle: []const u8) void {
+    if (needle.len == 0 or t.scrollback.len == 0) return;
+    var line_buf: [512]u8 = undefined;
+    const cur = @min(t.scrollback_offset, t.scrollback.len);
+    var idx: usize = t.scrollback.len - cur; // history index of the view top
+    while (idx > 0) {
+        idx -= 1;
+        const cells = t.scrollback.line(idx);
+        var n: usize = 0;
+        for (cells) |cell| {
+            if (n >= line_buf.len) break;
+            if (cell.width == 0 or cell.char == 0) continue;
+            line_buf[n] = if (cell.char < 0x80) @intCast(cell.char) else '?';
+            n += 1;
+        }
+        if (std.mem.indexOf(u8, line_buf[0..n], needle) != null) {
+            t.scrollback_offset = t.scrollback.len - idx;
+            return;
+        }
+    }
+}
+
 /// One SGR-encoded mouse report from the host terminal: ESC [ < b ; x ; y (M|m).
 const MouseEvent = struct { btn: u32, col: u16, row: u16, press: bool, len: usize };
 
@@ -311,6 +336,14 @@ fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
     // only touches rows the panes wrote, never cells the OLD layout owned.
     var force_redraw = false;
 
+    // Copy mode (Ctrl-b [): keyboard scrollback navigation + '/' search over
+    // the focused pane's history. Keys are consumed, never forwarded.
+    var copy_mode = false;
+    var search_input = false;
+    var search_buf: [96]u8 = undefined;
+    var search_len: usize = 0;
+    var mode_hint_buf: [160]u8 = undefined;
+
     // Poll set rebuilt per iteration: stdin + every pane's PTY (all windows).
     var poll_fds: std.ArrayList(posix.pollfd) = .empty;
     defer poll_fds.deinit(allocator);
@@ -384,6 +417,45 @@ fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
                                 continue;
                             }
                         }
+                        if (copy_mode) {
+                            const cm_term = &initial_session.getActiveWindow().getActivePane().terminal;
+                            if (search_input) {
+                                if (byte == 0x0d) { // Enter → run the search
+                                    search_input = false;
+                                    searchScrollback(cm_term, search_buf[0..search_len]);
+                                } else if (byte == 0x1b) { // Esc → cancel input
+                                    search_input = false;
+                                    search_len = 0;
+                                } else if (byte == 0x7f or byte == 0x08) {
+                                    if (search_len > 0) search_len -= 1;
+                                } else if (byte >= 0x20 and byte < 0x7f and search_len < search_buf.len) {
+                                    search_buf[search_len] = byte;
+                                    search_len += 1;
+                                }
+                                continue;
+                            }
+                            const half: usize = @max(1, cm_term.grid.rows / 2);
+                            const cur = @min(cm_term.scrollback_offset, cm_term.scrollback.len);
+                            switch (byte) {
+                                'k' => cm_term.scrollback_offset = @min(cur + 1, cm_term.scrollback.len),
+                                'j' => cm_term.scrollback_offset = cur -| 1,
+                                'u' => cm_term.scrollback_offset = @min(cur + half, cm_term.scrollback.len),
+                                'd' => cm_term.scrollback_offset = cur -| half,
+                                'g' => cm_term.scrollback_offset = cm_term.scrollback.len,
+                                'G' => cm_term.scrollback_offset = 0,
+                                '/' => {
+                                    search_input = true;
+                                    search_len = 0;
+                                },
+                                'n' => searchScrollback(cm_term, search_buf[0..search_len]),
+                                'q', 0x1b, 0x0d => {
+                                    copy_mode = false;
+                                    cm_term.scrollback_offset = 0;
+                                },
+                                else => {},
+                            }
+                            continue;
+                        }
                         if (prefix_active) {
                             // Handle prefix commands
                             prefix_active = false;
@@ -433,6 +505,11 @@ fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
                                 'o' => {
                                     // Next pane
                                     initial_session.getActiveWindow().focusNext();
+                                },
+                                '[' => {
+                                    // Copy mode: j/k u/d g/G scroll, / search,
+                                    // n next match, q/Esc/Enter exit.
+                                    copy_mode = true;
                                 },
                                 else => {
                                     // Unknown command, send raw
@@ -493,11 +570,22 @@ fn runServer(allocator: std.mem.Allocator, session_name: []const u8) !void {
 
         // Status bar
         active_window.activity = false; // it's on screen; the flag is for others
+        const focused_term = &active_window.getActivePane().terminal;
+        const mode_hint: []const u8 = if (search_input)
+            std.fmt.bufPrint(&mode_hint_buf, "SEARCH: {s}_", .{search_buf[0..search_len]}) catch ""
+        else if (copy_mode)
+            std.fmt.bufPrint(&mode_hint_buf, "COPY [{d}/{d}]  j/k u/d g/G scroll · / search · n next · q quit", .{
+                @min(focused_term.scrollback_offset, focused_term.scrollback.len),
+                focused_term.scrollback.len,
+            }) catch ""
+        else
+            "";
         try renderer.renderStatusBar(
             &cfg.status_bar,
             initial_session,
             size.ws_row,
             size.ws_col,
+            mode_hint,
         );
 
         // Position cursor

@@ -137,6 +137,13 @@ pub const Decoder = struct {
     /// Maximum allowed container nesting depth used by `skip()` and
     /// recommended as the cap for any external recursive walker. Default
     /// `DEFAULT_MAX_DEPTH` (512). Callers can override before parsing.
+    ///
+    /// Note: `skip()` uses a fixed backing buffer sized `DEFAULT_MAX_DEPTH`,
+    /// so raising `max_depth` above `DEFAULT_MAX_DEPTH` does not increase the
+    /// effective limit `skip()` enforces — it is clamped to `DEFAULT_MAX_DEPTH`
+    /// and payloads nested deeper still return `error.MaxDepthExceeded`
+    /// (never an out-of-bounds write). Lowering it below the default works
+    /// as expected.
     max_depth: u32,
 
     const Self = @This();
@@ -417,14 +424,20 @@ pub const Decoder = struct {
             switch (value) {
                 .array => |arr| {
                     if (arr.remaining == 0) continue; // empty container, nothing to drain
-                    if (stack_len >= self.max_depth) return error.MaxDepthExceeded;
+                    // Guard against BOTH the caller-configurable cap AND the
+                    // fixed backing buffer. `max_depth` is public and callers
+                    // may raise it above `DEFAULT_MAX_DEPTH`; without the
+                    // `stack_buf.len` bound a >512-deep hostile payload would
+                    // write past `stack_buf` (panic in safe builds, stack
+                    // corruption in ReleaseFast).
+                    if (stack_len >= self.max_depth or stack_len >= stack_buf.len) return error.MaxDepthExceeded;
                     stack_buf[stack_len] = pending;
                     stack_len += 1;
                     pending = arr.remaining;
                 },
                 .map => |m| {
                     if (m.remaining == 0) continue;
-                    if (stack_len >= self.max_depth) return error.MaxDepthExceeded;
+                    if (stack_len >= self.max_depth or stack_len >= stack_buf.len) return error.MaxDepthExceeded;
                     stack_buf[stack_len] = pending;
                     stack_len += 1;
                     // A map of N entries has 2N values still to skip.
@@ -558,6 +571,22 @@ test "decoder: skip respects a tighter max_depth override" {
     var buf: [7]u8 = .{ 0x91, 0x91, 0x91, 0x91, 0x91, 0x91, 0xc0 };
     var dec = Decoder.init(&buf);
     dec.max_depth = 5;
+    try std.testing.expectError(error.MaxDepthExceeded, dec.skip());
+}
+
+test "decoder: skip clamps to buffer size when max_depth raised above DEFAULT_MAX_DEPTH" {
+    // Regression for the fixed-buffer OOB: the backing stack is
+    // DEFAULT_MAX_DEPTH slots, but max_depth is public and a caller can raise
+    // it. A payload nested deeper than DEFAULT_MAX_DEPTH must return
+    // MaxDepthExceeded, NOT write past stack_buf (panic in safe builds, stack
+    // corruption in ReleaseFast).
+    const depth: usize = DEFAULT_MAX_DEPTH + 100; // 612 levels of 0x91
+    var buf: [depth + 1]u8 = undefined;
+    for (0..depth) |i| buf[i] = 0x91; // fixarray of 1
+    buf[depth] = 0xc0; // nil leaf
+
+    var dec = Decoder.init(&buf);
+    dec.max_depth = DEFAULT_MAX_DEPTH + 512; // caller raises the cap
     try std.testing.expectError(error.MaxDepthExceeded, dec.skip());
 }
 

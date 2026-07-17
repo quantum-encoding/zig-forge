@@ -253,7 +253,7 @@ pub const Renderer = struct {
     /// Render the status bar: `[session] 0:name* 1:name# …` on the left
     /// (`*` current, `#` background activity), the active pane's title and a
     /// clock on the right — tmux's default layout.
-    pub fn renderStatusBar(self: *Self, cfg: *const config.StatusBarConfig, sess: *session.Session, rows: u16, cols: u16) !void {
+    pub fn renderStatusBar(self: *Self, cfg: *const config.StatusBarConfig, sess: *session.Session, rows: u16, cols: u16, mode_hint: []const u8) !void {
         if (!cfg.enabled) return;
 
         const row = switch (cfg.position) {
@@ -286,6 +286,12 @@ pub const Renderer = struct {
         try self.appendString("[");
         _ = try self.appendAsciiSanitized(sess.getName(), 16);
         try self.appendString("] ");
+
+        // Copy-mode / search indicator gets the front row when active.
+        if (mode_hint.len > 0) {
+            _ = try self.appendAsciiSanitized(mode_hint, 48);
+            try self.appendString("  ");
+        }
 
         for (sess.windows.items, 0..) |w, wi| {
             if (self.output.items.len - text_start + 16 >= cols) break; // keep room

@@ -30,7 +30,7 @@ pub const ChaosEngine = struct {
     injector: fault_injector.FaultInjector,
     fuzzer: fuzzer_mod.Fuzzer,
     report: report_mod.ChaosReport = .{},
-    scenarios_triggered: [20]bool = [_]bool{false} ** 20,
+    scenarios_triggered: [scenarios.ALL_SCENARIOS.len]bool = [_]bool{false} ** scenarios.ALL_SCENARIOS.len,
     specific_scenario: ?[]const u8 = null,
     seed: u64,
 
@@ -68,7 +68,7 @@ pub const ChaosEngine = struct {
     ) ?fault_injector.InjectionResult {
         // Check each scenario's trigger time
         for (scenarios.ALL_SCENARIOS, 0..) |scenario, i| {
-            if (i < 20 and !self.scenarios_triggered[i] and met_seconds >= scenario.trigger_met_s) {
+            if (!self.scenarios_triggered[i] and met_seconds >= scenario.trigger_met_s) {
                 self.scenarios_triggered[i] = true;
                 const result = self.injectByType(scenario.fault_type, imu, aoa);
                 self.report.addResult(result);
@@ -87,7 +87,7 @@ pub const ChaosEngine = struct {
         const target_id = self.specific_scenario orelse return null;
 
         for (scenarios.ALL_SCENARIOS, 0..) |scenario, i| {
-            if (i < 20 and !self.scenarios_triggered[i] and
+            if (!self.scenarios_triggered[i] and
                 std.mem.eql(u8, scenario.id, target_id) and
                 met_seconds >= scenario.trigger_met_s)
             {
@@ -108,7 +108,7 @@ pub const ChaosEngine = struct {
     ) ?fault_injector.InjectionResult {
         // 0.5% chance per tick of injecting a random fault
         if (self.injector.rng.random().int(u16) % 200 == 0) {
-            const fault_idx = self.injector.rng.random().int(u8) % 20;
+            const fault_idx = self.injector.rng.random().uintLessThan(usize, scenarios.ALL_SCENARIOS.len);
             const fault_type = scenarios.ALL_SCENARIOS[fault_idx].fault_type;
             const result = self.injectByType(fault_type, imu, aoa);
             self.report.addResult(result);

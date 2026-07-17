@@ -229,10 +229,18 @@ fn renderStatusBar(buf: *Buffer, size: Size) void {
     _ = buf.writeStr(time_x, y, time_str, theme.statusbar_style);
 }
 
+// Pull the per-module `test` blocks into the `zig build test` binary. Zig only
+// includes tests from the root file and files it references, so name each module
+// containing tests here.
+test {
+    _ = sysinfo;
+    _ = logs;
+    _ = services;
+}
+
 fn getCurrentTime(buf: *[8]u8) []const u8 {
-    var clock_ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.REALTIME, &clock_ts);
-    const epoch: u64 = @intCast(clock_ts.sec);
+    // Checked clock read; show a sentinel rather than reading undefined memory.
+    const epoch = sysinfo.currentEpochSecs() orelse return "--:--:--";
     const day_secs = epoch % 86400;
     const hour: u32 = @intCast(day_secs / 3600);
     const minute: u32 = @intCast((day_secs % 3600) / 60);

@@ -308,6 +308,16 @@ pub const Builder = struct {
 
                 var it = parsed.value.object.iterator();
                 while (it.next()) |entry| {
+                    // Claim-smuggling guard: a custom key that collides
+                    // with a registered claim already emitted above would
+                    // produce a duplicate-key payload (e.g. two `sub`
+                    // fields). Our own verifier fail-closes on duplicates
+                    // (std.json `duplicate_field_behavior = .@"error"`),
+                    // but the signed token is on the wire — a downstream
+                    // last-wins verifier (Node jsonwebtoken, most Go/Python
+                    // parsers) would read the attacker's value. Refuse to
+                    // mint such a token rather than emit a duplicate key.
+                    if (isRegisteredClaim(entry.key_ptr.*)) return Error.InvalidPayload;
                     try jw.objectField(entry.key_ptr.*);
                     try jw.write(entry.value_ptr.*);
                 }
@@ -604,6 +614,18 @@ fn verifyHmacFixed(
 // keep the full payload bytes in `claims.custom` for callers that
 // want them). String values are duped into the Claims allocator
 // before the parser's arena is freed.
+
+/// The RFC 7519 registered-claim names the Builder emits itself.
+/// A custom claim colliding with one of these would smuggle a second
+/// copy of the key into the signed payload (see the guard in
+/// `buildPayload`).
+fn isRegisteredClaim(key: []const u8) bool {
+    const registered = [_][]const u8{ "iss", "sub", "aud", "exp", "nbf", "iat", "jti" };
+    for (registered) |name| {
+        if (std.mem.eql(u8, key, name)) return true;
+    }
+    return false;
+}
 
 const HeaderJson = struct {
     alg: ?[]const u8 = null,

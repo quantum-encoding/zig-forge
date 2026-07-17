@@ -100,9 +100,29 @@ pub const Client = struct {
         const sqe = try self.ring.get_sqe();
         sqe.prep_send(self.sockfd, message, 0);
 
-        _ = try self.ring.submit();
-        // Note: Completions are not waited for here (fire-and-forget)
-        // Call flush_completions() when needed to sync
+        // Wait for the send to complete before returning. The previous
+        // fire-and-forget `submit()` returned immediately, so callers such as
+        // `authorize`/`submitShare` — which pass a heap buffer freed by
+        // `defer buf.deinit()` on return — freed that buffer while the kernel
+        // was still reading the iovec asynchronously: a use-after-free that
+        // could corrupt credentials/shares on the wire or leak freed heap
+        // contents to the pool. Reaping the CQE guarantees the kernel has
+        // consumed the buffer (copied it into the socket send buffer) before
+        // the caller frees it.
+        _ = try self.ring.submit_and_wait(1);
+        var cqe = try self.ring.copy_cqe();
+        defer self.ring.cqe_seen(&cqe);
+
+        if (cqe.res < 0) {
+            return error.SendFailed;
+        }
+
+        // A short write means the message was not fully sent; surface it rather
+        // than silently dropping the tail (previously the result was invisible).
+        const sent = @as(usize, @intCast(cqe.res));
+        if (sent != message.len) {
+            return error.ShortWrite;
+        }
     }
 
     pub fn receiveMessage(self: *Client) !?protocol.ParsedMessage {

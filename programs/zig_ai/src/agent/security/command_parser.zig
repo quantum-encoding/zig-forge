@@ -136,9 +136,24 @@ pub const CommandParser = struct {
                 std.mem.eql(u8, base, "su"))
             {
                 idx += 1;
-                // Skip sudo flags
+                // Skip sudo/doas flags. Value-taking flags (e.g. `-u user`,
+                // `-g group`, `-p prompt`) consume the FOLLOWING token too;
+                // if that token is not skipped it is mistaken for the real
+                // executable, so the allowlist gate reasons about the wrong
+                // token — a bypass in configs that permit a sudo-style
+                // wrapper. Skip the value unless the flag carries it inline
+                // (`-u=root`, `--user=root`) or the next token is itself a
+                // flag.
                 while (idx < args.len and args[idx].len > 0 and args[idx][0] == '-') {
+                    const flag = args[idx];
                     idx += 1;
+                    if (sudoFlagTakesValue(flag) and
+                        std.mem.indexOfScalar(u8, flag, '=') == null and
+                        idx < args.len and
+                        !(args[idx].len > 0 and args[idx][0] == '-'))
+                    {
+                        idx += 1;
+                    }
                 }
             } else if (std.mem.eql(u8, base, "nice") or
                 std.mem.eql(u8, base, "nohup") or
@@ -206,6 +221,28 @@ pub const CommandParser = struct {
         }
 
         return result.toOwnedSlice(self.allocator);
+    }
+
+    /// Whether a sudo/doas option flag consumes the following token as its
+    /// value. Covers the value-taking short and long options of sudo(8) /
+    /// doas(1). Non-value flags (e.g. `-i`, `-s`, `-b`, `-n`) are not listed
+    /// so their following token (the real command) is not skipped.
+    fn sudoFlagTakesValue(flag: []const u8) bool {
+        const value_flags = [_][]const u8{
+            // short forms
+            "-u", "-g", "-U", "-C", "-h", "-p", "-r", "-t", "-T", "-R", "-a",
+            // long forms
+            "--user",   "--group",  "--other-user", "--close-from",
+            "--host",   "--prompt", "--role",       "--type",
+            "--command-timeout", "--chdir", "--auth-type",
+        };
+        // Compare against the flag name up to any inline `=value`.
+        const name_end = std.mem.indexOfScalar(u8, flag, '=') orelse flag.len;
+        const name = flag[0..name_end];
+        for (value_flags) |vf| {
+            if (std.mem.eql(u8, name, vf)) return true;
+        }
+        return false;
     }
 
     fn longToShort(_: *CommandParser, long_flag: []const u8) u8 {

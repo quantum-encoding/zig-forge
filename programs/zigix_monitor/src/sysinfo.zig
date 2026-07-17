@@ -119,10 +119,8 @@ pub const SysInfoCollector = struct {
         parseNetDev(&snap);
         getDiskUsage(&snap);
 
-        // Timestamp via clock_gettime
-        var ts: std.c.timespec = undefined;
-        _ = std.c.clock_gettime(.REALTIME, &ts);
-        snap.timestamp_secs = ts.sec;
+        // Timestamp via clock_gettime (checked; 0 if the clock is unavailable)
+        snap.timestamp_secs = if (currentEpochSecs()) |e| @intCast(e) else 0;
 
         return snap;
     }
@@ -153,7 +151,9 @@ pub const SysInfoCollector = struct {
     }
 
     fn parseCpuStat(self: *SysInfoCollector, snap: *SystemSnapshot) void {
-        var buf: [4096]u8 = undefined;
+        // /proc/stat grows with core count (~ one line per CPU); 4 KB truncated
+        // later cores past ~28 cores. Size for high-core-count hosts.
+        var buf: [16384]u8 = undefined;
         const data = readProcFile("/proc/stat", &buf) orelse return;
 
         var current: CpuTimesArray = [_]CpuTimes{.{}} ** (MAX_CORES + 1);
@@ -329,8 +329,28 @@ fn getDiskUsage(snap: *SystemSnapshot) void {
     }
 }
 
-// Utility: read an entire /proc pseudo-file into a buffer
-fn readProcFile(path: [*:0]const u8, buf: []u8) ?[]const u8 {
+/// Read the current wall-clock time as seconds since the Unix epoch.
+///
+/// Returns null when `clock_gettime` fails (e.g. ENOSYS under a restrictive
+/// seccomp policy, or EFAULT) or reports a negative time, so callers never read
+/// undefined memory nor `@intCast` a negative `i64` into a `u64`. The prior code
+/// discarded the return value and used a possibly-undefined `timespec`, which
+/// could feed a near-`u64::MAX` value into date math.
+pub fn currentEpochSecs() ?u64 {
+    var ts: std.c.timespec = undefined;
+    if (std.c.clock_gettime(.REALTIME, &ts) != 0) return null;
+    if (ts.sec < 0) return null;
+    return @intCast(ts.sec);
+}
+
+/// Read an entire /proc pseudo-file into `buf`.
+///
+/// A single `read(2)` is not guaranteed to return the whole file (some /proc
+/// files are generated in chunks, and `/proc/net/tcp` on a busy host easily
+/// exceeds any fixed buffer), so this loops until EOF or `buf` fills, and
+/// retries on EINTR rather than silently truncating. Returns the populated
+/// slice, or null if the file could not be opened or nothing was read.
+pub fn readProcFile(path: [*:0]const u8, buf: []u8) ?[]const u8 {
     const c = @cImport({
         @cInclude("fcntl.h");
         @cInclude("unistd.h");
@@ -339,9 +359,19 @@ fn readProcFile(path: [*:0]const u8, buf: []u8) ?[]const u8 {
     if (fd < 0) return null;
     defer _ = c.close(fd);
 
-    const n = c.read(fd, buf.ptr, buf.len);
-    if (n <= 0) return null;
-    return buf[0..@intCast(n)];
+    var total: usize = 0;
+    while (total < buf.len) {
+        const n = c.read(fd, buf.ptr + total, buf.len - total);
+        if (n < 0) {
+            // Retry on interrupted syscall; any other error stops the read.
+            if (std.c._errno().* == @intFromEnum(std.c.E.INTR)) continue;
+            break;
+        }
+        if (n == 0) break; // EOF
+        total += @intCast(n);
+    }
+    if (total == 0) return null;
+    return buf[0..total];
 }
 
 // Utility: extract the numeric kB value from a /proc/meminfo-style line
@@ -402,4 +432,52 @@ pub fn formatRate(bytes_per_sec: u64, buf: []u8) []const u8 {
     } else {
         return std.fmt.bufPrint(buf, "{d} B/s", .{bytes_per_sec}) catch "?";
     }
+}
+
+// ---------------------------------------------------------------------------
+// Tests. Inputs are real /proc-shaped text and known constants (external
+// anchors), not roundtrips of this code's own output.
+// ---------------------------------------------------------------------------
+const testing = std.testing;
+
+test "extractKbValue parses real /proc/meminfo lines" {
+    // Lines copied from an actual Linux /proc/meminfo.
+    try testing.expectEqual(@as(u64, 16384000), extractKbValue("MemTotal:       16384000 kB"));
+    try testing.expectEqual(@as(u64, 8192000), extractKbValue("MemAvailable:    8192000 kB"));
+    try testing.expectEqual(@as(u64, 0), extractKbValue("SwapTotal:             0 kB"));
+    // No value after the colon -> 0, no crash.
+    try testing.expectEqual(@as(u64, 0), extractKbValue("Malformed: not-a-number"));
+    try testing.expectEqual(@as(u64, 0), extractKbValue("NoColonHere"));
+}
+
+test "formatKb boundary cases" {
+    var buf: [32]u8 = undefined;
+    try testing.expectEqualStrings("512 KB", formatKb(512, &buf));
+    try testing.expectEqualStrings("1.0 MB", formatKb(1024, &buf));
+    try testing.expectEqualStrings("1.0 GB", formatKb(1048576, &buf));
+    // 16 GiB expressed in kB.
+    try testing.expectEqualStrings("16.0 GB", formatKb(16 * 1048576, &buf));
+}
+
+test "formatUptime known durations" {
+    var buf: [32]u8 = undefined;
+    try testing.expectEqualStrings("0m 45s", formatUptime(45, &buf));
+    try testing.expectEqualStrings("1m 5s", formatUptime(65, &buf));
+    try testing.expectEqualStrings("2h 3m 20s", formatUptime(2 * 3600 + 3 * 60 + 20, &buf));
+    try testing.expectEqualStrings("1d 1h 1m 1s", formatUptime(86400 + 3600 + 60 + 1, &buf));
+}
+
+test "formatRate boundary cases" {
+    var buf: [32]u8 = undefined;
+    try testing.expectEqualStrings("500 B/s", formatRate(500, &buf));
+    try testing.expectEqualStrings("1.0 KB/s", formatRate(1024, &buf));
+    try testing.expectEqualStrings("1.0 MB/s", formatRate(1048576, &buf));
+    try testing.expectEqualStrings("1.0 GB/s", formatRate(1073741824, &buf));
+}
+
+test "currentEpochSecs returns a plausible time" {
+    // The clock must be available in the test host; assert it is after the
+    // year 2020 (1577836800) and non-negative-derived.
+    const now = currentEpochSecs() orelse return error.ClockUnavailable;
+    try testing.expect(now > 1577836800);
 }

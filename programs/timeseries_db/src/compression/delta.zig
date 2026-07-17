@@ -23,7 +23,9 @@ pub fn encodeTimestamps(input: []const i64, output: []i64) !void {
 }
 
 /// Decode delta-encoded timestamps
-pub fn decodeTimestamps(input: []const i64, output: []i64) !void {
+/// `input` is align(1): columns are read straight from an mmap byte slice via
+/// `bytesAsSlice`, which yields byte-aligned element pointers.
+pub fn decodeTimestamps(input: []align(1) const i64, output: []i64) !void {
     if (input.len == 0) return;
     if (output.len < input.len) return error.OutputTooSmall;
 
@@ -67,7 +69,8 @@ pub fn encodePrices(input: []const f64, output: []i32, scale: f64) !i64 {
 }
 
 /// Decode delta-encoded prices
-pub fn decodePrices(input: []const i32, output: []f64, base: i64, scale: f64) !void {
+/// `input` is align(1): see `decodeTimestamps`.
+pub fn decodePrices(input: []align(1) const i32, output: []f64, base: i64, scale: f64) !void {
     if (input.len == 0) return;
     if (output.len < input.len) return error.OutputTooSmall;
 

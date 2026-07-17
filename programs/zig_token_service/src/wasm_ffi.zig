@@ -5,6 +5,7 @@
 //! Designed for browser-based auth systems.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 // ==========================================================================
 // WASM Memory - Fixed buffers (no allocator needed)
@@ -26,11 +27,37 @@ pub const ERR_VERIFY_FAILED: i32 = -4;
 pub const ERR_TOKEN_EXPIRED: i32 = -5;
 pub const ERR_BUFFER_TOO_SMALL: i32 = -7;
 
-// Import timestamp from JavaScript (i32 to avoid BigInt issues)
-extern "env" fn js_get_timestamp() i32;
+// Host imports.
+//
+// On the freestanding wasm32 target these resolve to `env.js_get_timestamp`
+// and `env.js_get_random_bytes` — the imports `web/demo.html` and
+// `web/token-service.js` supply (do NOT rename them: the import field name is
+// the identifier and is part of the WASM ABI). On native targets (used by the
+// `zig build test` step so the inline crypto actually compiles and runs) they
+// resolve to local stand-ins: a fixed clock and libc's arc4random_buf. The
+// untaken branch is never referenced, so it is never semantically analyzed —
+// `std.c` is not compiled for the wasm build.
+const host = if (builtin.target.cpu.arch.isWasm()) wasm_host else native_host;
 
-// Import random bytes from JavaScript (crypto.getRandomValues)
-extern "env" fn js_get_random_bytes(ptr: [*]u8, len: u32) void;
+const wasm_host = struct {
+    // Import timestamp from JavaScript (i32 to avoid BigInt issues)
+    extern "env" fn js_get_timestamp() i32;
+    // Import random bytes from JavaScript (crypto.getRandomValues)
+    extern "env" fn js_get_random_bytes(ptr: [*]u8, len: u32) void;
+};
+
+const native_host = struct {
+    fn js_get_timestamp() i32 {
+        // Fixed, deterministic clock for tests (2023-11-14T22:13:20Z).
+        return 1_700_000_000;
+    }
+    fn js_get_random_bytes(ptr: [*]u8, len: u32) void {
+        std.c.arc4random_buf(ptr, len);
+    }
+};
+
+const js_get_timestamp = host.js_get_timestamp;
+const js_get_random_bytes = host.js_get_random_bytes;
 
 // ==========================================================================
 // UUID Generation
@@ -191,7 +218,9 @@ export fn base58_decode(str_ptr: [*]const u8, str_len: u32) u32 {
         leading_ones += 1;
     }
 
-    // Decode using repeated multiplication
+    // Decode using repeated multiplication. `result` holds a base-256
+    // big-integer stored little-endian (result[0] is the least-significant
+    // byte); it is reversed to big-endian on output below.
     var result: [512]u8 = undefined;
     var result_len: usize = 0;
 
@@ -202,18 +231,23 @@ export fn base58_decode(str_ptr: [*]const u8, str_len: u32) u32 {
             return 0;
         }
 
+        // result = result * 58 + val
         var carry: u32 = @intCast(val);
         var i: usize = 0;
-        while (i < result_len or carry > 0) {
-            if (i < result_len) {
-                carry += @as(u32, result[result_len - 1 - i]) * 58;
-            }
-            if (i >= result_len) {
-                result_len += 1;
-            }
-            result[result_len - 1 - i] = @truncate(carry);
+        while (i < result_len) : (i += 1) {
+            carry += @as(u32, result[i]) * 58;
+            result[i] = @truncate(carry);
             carry >>= 8;
-            i += 1;
+        }
+        // Append any remaining carry as new most-significant bytes.
+        while (carry > 0) {
+            if (result_len >= result.len) {
+                g_error_code = ERR_BUFFER_TOO_SMALL;
+                return 0;
+            }
+            result[result_len] = @truncate(carry);
+            result_len += 1;
+            carry >>= 8;
         }
     }
 
@@ -224,8 +258,12 @@ export fn base58_decode(str_ptr: [*]const u8, str_len: u32) u32 {
         return 0;
     }
 
+    // Leading '1's become leading zero bytes; then emit the big-integer
+    // most-significant byte first (reverse of the little-endian buffer).
     @memset(g_result_buf[0..leading_ones], 0);
-    @memcpy(g_result_buf[leading_ones..][0..result_len], result[0..result_len]);
+    for (0..result_len) |k| {
+        g_result_buf[leading_ones + k] = result[result_len - 1 - k];
+    }
     g_result_len = total_len;
     g_error_code = ERR_OK;
 
@@ -605,7 +643,7 @@ export fn sign_token(user_id_ptr: [*]const u8, user_id_len: u32, expires_in: i32
     g_result_len = signing_len + 1 + sig_len;
 
     g_error_code = ERR_OK;
-    return g_result_len;
+    return @intCast(g_result_len);
 }
 
 /// Verify a JWT token
@@ -740,4 +778,233 @@ export fn get_version_minor() u32 {
 
 export fn get_version_patch() u32 {
     return 0;
+}
+
+// ==========================================================================
+// Tests (native target only — externally-anchored vectors for the inline
+// SHA-256 / HMAC-SHA256 / Base64URL / Base58 / mini-JWT implementations).
+//
+// These run under `zig build test`, which compiles this file for the native
+// target. Inputs AND expected outputs come from sources this repo did not
+// author: NIST FIPS 180-2 SHA-256 examples, RFC 4231 HMAC-SHA256 KATs,
+// RFC 4648 Base64URL examples, Bitcoin Core base58_encode_decode vectors, and
+// the canonical jwt.io HS256 token. Per zig-forge CLAUDE.md golden rule §1,
+// these are not roundtrip-only self-consistency tests.
+// ==========================================================================
+
+const testing = std.testing;
+
+fn sha256Hex(data: []const u8) [64]u8 {
+    var h = Sha256.init();
+    h.update(data);
+    const digest = h.final();
+    return std.fmt.bytesToHex(digest, .lower);
+}
+
+fn hmacHex(key: []const u8, msg: []const u8) [64]u8 {
+    const mac = hmacSha256(key, msg);
+    return std.fmt.bytesToHex(mac, .lower);
+}
+
+test "SHA-256 KAT: NIST FIPS 180-2 one-block \"abc\"" {
+    try testing.expectEqualStrings(
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        &sha256Hex("abc"),
+    );
+}
+
+test "SHA-256 KAT: empty string" {
+    try testing.expectEqualStrings(
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        &sha256Hex(""),
+    );
+}
+
+test "SHA-256 KAT: NIST FIPS 180-2 two-block message" {
+    try testing.expectEqualStrings(
+        "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
+        &sha256Hex("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+    );
+}
+
+test "SHA-256 KAT: one million 'a' (multi-block streaming)" {
+    var h = Sha256.init();
+    var block: [1000]u8 = undefined;
+    @memset(&block, 'a');
+    var i: usize = 0;
+    while (i < 1000) : (i += 1) h.update(&block);
+    const digest = h.final();
+    try testing.expectEqualStrings(
+        "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0",
+        &std.fmt.bytesToHex(digest, .lower),
+    );
+}
+
+test "HMAC-SHA256 KAT: RFC 4231 Test Case 1" {
+    const key = [_]u8{0x0b} ** 20;
+    try testing.expectEqualStrings(
+        "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
+        &hmacHex(&key, "Hi There"),
+    );
+}
+
+test "HMAC-SHA256 KAT: RFC 4231 Test Case 2 (short key 'Jefe')" {
+    try testing.expectEqualStrings(
+        "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843",
+        &hmacHex("Jefe", "what do ya want for nothing?"),
+    );
+}
+
+test "HMAC-SHA256 KAT: RFC 4231 Test Case 4 (0xcd x50 message)" {
+    const key = [_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19 };
+    const msg = [_]u8{0xcd} ** 50;
+    try testing.expectEqualStrings(
+        "82558a389a443c0ea4cc819899f2083a85f0faa3e578f8077a2e3ff46729665b",
+        &hmacHex(&key, &msg),
+    );
+}
+
+test "HMAC-SHA256 KAT: RFC 4231 Test Case 6 (key longer than block, 131 bytes)" {
+    const key = [_]u8{0xaa} ** 131;
+    try testing.expectEqualStrings(
+        "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54",
+        &hmacHex(&key, "Test Using Larger Than Block-Size Key - Hash Key First"),
+    );
+}
+
+test "Base64URL encode: RFC 4648 examples (unpadded)" {
+    var out: [16]u8 = undefined;
+    // "Man" -> "TWFu", "Ma" -> "TWE", "M" -> "TQ" (base64url, no padding)
+    try testing.expectEqualStrings("TWFu", out[0..base64UrlEncode("Man", &out)]);
+    try testing.expectEqualStrings("TWE", out[0..base64UrlEncode("Ma", &out)]);
+    try testing.expectEqualStrings("TQ", out[0..base64UrlEncode("M", &out)]);
+    // URL-safe alphabet: index 62 -> '-', 63 -> '_' (standard Base64 would
+    // emit '+' and '/' here). 3 input bytes -> 4 output chars.
+    try testing.expectEqualStrings("-_-_", out[0..base64UrlEncode(&[_]u8{ 0xfb, 0xff, 0xbf }, &out)]);
+}
+
+test "Base64URL decode: inverse of the RFC 4648 examples" {
+    var out: [16]u8 = undefined;
+    try testing.expectEqualStrings("Man", out[0..(base64UrlDecode("TWFu", &out).?)]);
+    try testing.expectEqualStrings("Ma", out[0..(base64UrlDecode("TWE", &out).?)]);
+    try testing.expectEqualStrings("M", out[0..(base64UrlDecode("TQ", &out).?)]);
+    // Invalid character must be rejected.
+    try testing.expect(base64UrlDecode("T*", &out) == null);
+}
+
+test "Base58 encode: Bitcoin Core base58_encode_decode vectors" {
+    // hex input -> expected base58 (from bitcoin/src/test/data/base58_encode_decode.json)
+    try testing.expectEqual(@as(u32, 2), base58_encode(&[_]u8{0x61}, 1));
+    try testing.expectEqualStrings("2g", g_result_buf[0..g_result_len]);
+
+    try testing.expectEqual(@as(u32, 4), base58_encode(&[_]u8{ 0x62, 0x62, 0x62 }, 3));
+    try testing.expectEqualStrings("a3gV", g_result_buf[0..g_result_len]);
+
+    try testing.expectEqual(@as(u32, 4), base58_encode(&[_]u8{ 0x63, 0x63, 0x63 }, 3));
+    try testing.expectEqualStrings("aPEr", g_result_buf[0..g_result_len]);
+}
+
+test "Base58 encode: leading zero bytes map to leading '1's" {
+    // Two leading zero bytes -> two leading '1's, then encode(0x61)=="2g".
+    try testing.expectEqual(@as(u32, 4), base58_encode(&[_]u8{ 0x00, 0x00, 0x61 }, 3));
+    try testing.expectEqualStrings("112g", g_result_buf[0..g_result_len]);
+}
+
+test "Base58 decode: inverse of the Bitcoin Core vectors" {
+    try testing.expectEqual(@as(u32, 1), base58_decode("2g", 2));
+    try testing.expectEqualSlices(u8, &[_]u8{0x61}, g_result_buf[0..g_result_len]);
+
+    try testing.expectEqual(@as(u32, 3), base58_decode("a3gV", 4));
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x62, 0x62, 0x62 }, g_result_buf[0..g_result_len]);
+
+    // Invalid Base58 character ('0' is not in the alphabet) must be rejected.
+    try testing.expectEqual(@as(u32, 0), base58_decode("0", 1));
+    try testing.expectEqual(ERR_INVALID_INPUT, g_error_code);
+}
+
+test "Base58 multi-byte round-trips a 5-byte Bitcoin Core vector" {
+    // hex 516b6fcd0f <-> "ABnLTmg" (bitcoin/src/test/data/base58_encode_decode.json).
+    // This 5-byte value forces the big-integer carry to extend past one byte —
+    // the exact path the previous decode implementation corrupted.
+    const raw = [_]u8{ 0x51, 0x6b, 0x6f, 0xcd, 0x0f };
+
+    try testing.expectEqual(@as(u32, 7), base58_encode(&raw, raw.len));
+    try testing.expectEqualStrings("ABnLTmg", g_result_buf[0..g_result_len]);
+
+    try testing.expectEqual(@as(u32, 5), base58_decode("ABnLTmg", 7));
+    try testing.expectEqualSlices(u8, &raw, g_result_buf[0..g_result_len]);
+}
+
+test "verify_token: canonical jwt.io HS256 token verifies under its secret" {
+    // External anchor: the jwt.io default example. This exercises the inline
+    // Base64URL + HMAC-SHA256 + SHA-256 together against a token this repo did
+    // not mint. Secret: "your-256-bit-secret". Payload has no "exp", so the
+    // client-clock expiry branch is skipped.
+    const secret = "your-256-bit-secret";
+    try testing.expectEqual(ERR_OK, init(secret, secret.len));
+
+    const token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." ++
+        "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ." ++
+        "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+
+    try testing.expectEqual(@as(i32, 1), verify_token(token, token.len));
+    try testing.expectEqualStrings("1234567890", g_result_buf[0..g_result_len]);
+}
+
+test "verify_token: tampered signature is rejected" {
+    const secret = "your-256-bit-secret";
+    try testing.expectEqual(ERR_OK, init(secret, secret.len));
+
+    // Same token, last signature char flipped.
+    const token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." ++
+        "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ." ++
+        "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5d";
+
+    try testing.expectEqual(@as(i32, 0), verify_token(token, token.len));
+    try testing.expectEqual(ERR_VERIFY_FAILED, g_error_code);
+}
+
+test "verify_token: wrong secret is rejected" {
+    const secret = "not-the-right-secret";
+    try testing.expectEqual(ERR_OK, init(secret, secret.len));
+
+    const token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." ++
+        "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ." ++
+        "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+
+    try testing.expectEqual(@as(i32, 0), verify_token(token, token.len));
+    try testing.expectEqual(ERR_VERIFY_FAILED, g_error_code);
+}
+
+test "sign_token then verify_token round-trips and extracts the subject" {
+    const secret = "my-secret-key-123";
+    try testing.expectEqual(ERR_OK, init(secret, secret.len));
+
+    const user = "user123";
+    const tok_len = sign_token(user, user.len, 3600);
+    try testing.expect(tok_len > 0);
+
+    // Copy the token out before verify overwrites g_result_buf.
+    var token: [512]u8 = undefined;
+    @memcpy(token[0..tok_len], g_result_buf[0..tok_len]);
+
+    try testing.expectEqual(@as(i32, 1), verify_token(&token, tok_len));
+    try testing.expectEqualStrings("user123", g_result_buf[0..g_result_len]);
+}
+
+test "verify_token: expired token (exp < fixed test clock) is rejected" {
+    const secret = "my-secret-key-123";
+    try testing.expectEqual(ERR_OK, init(secret, secret.len));
+
+    // native js_get_timestamp() == 1_700_000_000; sign with negative TTL so
+    // exp lands in the past.
+    const user = "user123";
+    const tok_len = sign_token(user, user.len, -100);
+    try testing.expect(tok_len > 0);
+
+    var token: [512]u8 = undefined;
+    @memcpy(token[0..tok_len], g_result_buf[0..tok_len]);
+
+    try testing.expectEqual(@as(i32, 0), verify_token(&token, tok_len));
+    try testing.expectEqual(ERR_TOKEN_EXPIRED, g_error_code);
 }

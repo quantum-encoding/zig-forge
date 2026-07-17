@@ -33,4 +33,19 @@ pub fn build(b: *std.Build) void {
     }
     const run_step = b.step("run", "Run the Zigix system monitor");
     run_step.dependOn(&run_cmd.step);
+
+    // Test step — required by the repo-root `test-all` aggregate, which runs
+    // `zig build test` in this directory. Compiles main.zig (which pulls in the
+    // parser/formatter modules) as a test root so their `test` blocks run.
+    const test_mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    test_mod.addImport("zig_tui", tui_mod);
+    const unit_tests = b.addTest(.{ .root_module = test_mod });
+    const run_unit_tests = b.addRunArtifact(unit_tests);
+    const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&run_unit_tests.step);
 }

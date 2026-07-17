@@ -38,11 +38,9 @@ pub fn addEntry(sev: Severity, msg: []const u8) void {
     var entry = &entries[head];
     entry.severity = sev;
 
-    // Format timestamp from current time via clock_gettime
-    var clock_ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.REALTIME, &clock_ts);
-    const epoch_secs: u64 = @intCast(clock_ts.sec);
-    // Simple epoch to date/time (good enough for display)
+    // Format timestamp from current time via a checked clock read; on failure
+    // fall back to epoch 0 rather than reading undefined memory.
+    const epoch_secs: u64 = sysinfo.currentEpochSecs() orelse 0;
     formatEpoch(epoch_secs, &entry.timestamp);
 
     const len = @min(msg.len, entry.message.len);
@@ -205,49 +203,64 @@ pub fn scrollDown() void {
     if (scroll_offset > 0) scroll_offset -= 1;
 }
 
-// Simple epoch-to-date formatter (UTC)
+// Latest epoch second this formatter accepts: 9999-12-31 23:59:59 UTC.
+// Anything larger (e.g. a corrupt/undefined clock value) is clamped so the
+// bounded stdlib year loop cannot spin toward u64::MAX or overflow the year.
+const MAX_EPOCH: u64 = 253402300799;
+
+// Epoch-to-date formatter (UTC), bounded via std.time.epoch.
+//
+// The previous hand-rolled `while (true)` subtracted a year's worth of days per
+// iteration with no cap: a near-`u64::MAX` epoch spun ~5e16 iterations (render
+// hang) and eventually overflowed the year counter (panic in safe builds). This
+// uses std.time.epoch's fixed leap-year-aware calendar math and clamps the input
+// so the internal per-year loop is bounded to at most ~8000 iterations.
 fn formatEpoch(epoch: u64, buf: *[19]u8) void {
-    // Days since epoch
-    var days = epoch / 86400;
-    const day_secs = epoch % 86400;
-    const hour = day_secs / 3600;
-    const minute = (day_secs % 3600) / 60;
-    const second = day_secs % 60;
-
-    // Year calculation (simplified Gregorian)
-    var year: u32 = 1970;
-    while (true) {
-        const days_in_year: u64 = if (isLeap(year)) 366 else 365;
-        if (days < days_in_year) break;
-        days -= days_in_year;
-        year += 1;
-    }
-
-    // Month calculation
-    const leap = isLeap(year);
-    const month_days = if (leap)
-        [_]u16{ 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 }
-    else
-        [_]u16{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
-
-    var month: u32 = 1;
-    for (month_days) |md| {
-        if (days < md) break;
-        days -= md;
-        month += 1;
-    }
-    const day: u32 = @intCast(days + 1);
+    const clamped: u64 = @min(epoch, MAX_EPOCH);
+    const es = std.time.epoch.EpochSeconds{ .secs = clamped };
+    const day_secs = es.getDaySeconds();
+    const year_day = es.getEpochDay().calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
 
     _ = std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}", .{
-        year,
-        month,
-        day,
-        @as(u32, @intCast(hour)),
-        @as(u32, @intCast(minute)),
-        @as(u32, @intCast(second)),
+        year_day.year,
+        month_day.month.numeric(),
+        @as(u32, month_day.day_index) + 1,
+        day_secs.getHoursIntoDay(),
+        day_secs.getMinutesIntoHour(),
+        day_secs.getSecondsIntoMinute(),
     }) catch {};
 }
 
-fn isLeap(year: u32) bool {
-    return (year % 4 == 0 and year % 100 != 0) or (year % 400 == 0);
+// ---------------------------------------------------------------------------
+// Tests. Epoch->UTC pairs are external anchors from `date -u -r <n>`.
+// ---------------------------------------------------------------------------
+const testing = std.testing;
+
+test "formatEpoch matches known UTC timestamps" {
+    var buf: [19]u8 = undefined;
+
+    formatEpoch(0, &buf);
+    try testing.expectEqualStrings("1970-01-01 00:00:00", &buf);
+
+    // date -u -r 1000000000 -> 2001-09-09 01:46:40
+    formatEpoch(1000000000, &buf);
+    try testing.expectEqualStrings("2001-09-09 01:46:40", &buf);
+
+    // date -u -r 1700000000 -> 2023-11-14 22:13:20
+    formatEpoch(1700000000, &buf);
+    try testing.expectEqualStrings("2023-11-14 22:13:20", &buf);
+}
+
+test "formatEpoch clamps out-of-range epochs instead of hanging/overflowing" {
+    var buf: [19]u8 = undefined;
+
+    // MAX_EPOCH itself -> 9999-12-31 23:59:59 (date -u -r 253402300799).
+    formatEpoch(MAX_EPOCH, &buf);
+    try testing.expectEqualStrings("9999-12-31 23:59:59", &buf);
+
+    // A near-u64::MAX value (the old undefined-clock hazard) is clamped to the
+    // same ceiling rather than spinning the year loop toward overflow.
+    formatEpoch(std.math.maxInt(u64), &buf);
+    try testing.expectEqualStrings("9999-12-31 23:59:59", &buf);
 }

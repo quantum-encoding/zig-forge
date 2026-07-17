@@ -80,8 +80,24 @@ pub fn build(b: *std.Build) void {
         .root_module = test_module,
     });
 
+    // FFI-layer tests live in src/lockfree_core.zig, which is never imported
+    // by src/main.zig — so its tests are dead code under the main test root.
+    // Give them their own test target (link_libc: lockfree_core uses
+    // std.heap.c_allocator) and fold it into `zig build test`.
+    const core_test_module = b.createModule(.{
+        .root_source_file = b.path("src/lockfree_core.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    core_test_module.link_libc = true;
+
+    const core_tests = b.addTest(.{
+        .root_module = core_test_module,
+    });
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
+    test_step.dependOn(&b.addRunArtifact(core_tests).step);
 
     _ = queue_module;
 }

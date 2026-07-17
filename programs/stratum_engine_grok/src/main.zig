@@ -55,6 +55,11 @@ pub fn main(init: std.process.Init) !void {
     // Main loop
     while (true) {
         if (try client.receiveMessage()) |msg| {
+            // The message owns the JSON arena backing every params/result field
+            // it exposes; release it once we're done reading (all reads below
+            // are synchronous, and the Job we build dupes/copies everything it
+            // keeps, so it does not alias the arena).
+            defer msg.deinit(allocator);
             switch (msg) {
                 .notification => |notif| {
                     if (std.mem.eql(u8, notif.method, "mining.notify")) {

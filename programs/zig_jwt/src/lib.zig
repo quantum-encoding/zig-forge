@@ -26,4 +26,7 @@ pub const decode = jwt.decode;
 
 test {
     _ = jwt;
+    // Externally-anchored Tier-1 vectors (RFC 7515 A.1 + jwt.io
+    // cross-implementation goldens). golden-rule §1.
+    _ = @import("tier1_anchors.zig");
 }

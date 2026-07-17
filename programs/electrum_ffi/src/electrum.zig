@@ -88,10 +88,16 @@ pub fn buildRequest(
 ) ![]u8 {
     const T = @TypeOf(params);
     const body = if (T == void)
+        // F1: an empty `[_]u8{}` array coerces to `[]const u8` and
+        // std.json.Stringify emits any UTF-8-valid u8 slice as a JSON
+        // *string* — so void params serialized as `"params":""`, which
+        // JSON-RPC 2.0 §4 forbids and ElectrumX/aiorpcX rejects (this
+        // broke quantum_vault's block-height lookup). An empty array of a
+        // non-u8 element type serializes unambiguously as `"params":[]`.
         try std.json.Stringify.valueAlloc(allocator, .{
             .jsonrpc = "2.0",
             .method = method,
-            .params = [_]u8{},
+            .params = [_]u32{},
             .id = id,
         }, .{})
     else
@@ -395,6 +401,123 @@ fn historyEntryFromValue(obj: std.json.ObjectMap) ?TxHistoryEntry {
     }
 
     return entry;
+}
+
+/// True iff every byte of `s` is a lowercase hex digit (`0`-`9`, `a`-`f`).
+/// Bitcoin txids and raw transactions are canonical lowercase hex; an
+/// uppercase or non-hex byte means the string is not the value we expect.
+fn isLowerHex(s: []const u8) bool {
+    for (s) |c| {
+        switch (c) {
+            '0'...'9', 'a'...'f' => {},
+            else => return false,
+        }
+    }
+    return true;
+}
+
+/// Parse a `blockchain.transaction.broadcast` response and return the 64-char
+/// lowercase-hex txid.
+///
+/// Replaces the ffi.zig substring scanner (F2) that copied a fixed 64 bytes
+/// after the literal `"result":"` with no closing-quote check, no hex
+/// validation, and the `"error"` check running only *after* the result match
+/// — so a short `"result":"ok"` copied trailing JSON as a txid, and a server
+/// that returned error text as a string `result` was reported as a successful
+/// broadcast with a garbage txid. Now: parse structurally, reject error
+/// responses first, require a `result` that is exactly 64 lowercase-hex chars.
+pub fn parseBroadcastResponse(json: []const u8) ![64]u8 {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, json, .{}) catch
+        return error.ParseError;
+    defer parsed.deinit();
+
+    if (parsed.value != .object) return error.ParseError;
+    const obj = parsed.value.object;
+
+    // Reject error responses BEFORE looking at `result` — a string-typed
+    // `result` carrying error text must never be mistaken for a txid.
+    if (obj.get("error")) |err_val| {
+        if (err_val != .null) return error.ServerError;
+    }
+
+    const result_val = obj.get("result") orelse return error.ParseError;
+    if (result_val != .string) return error.ParseError;
+    const s = result_val.string;
+    if (s.len != 64) return error.ParseError;
+    if (!isLowerHex(s)) return error.ParseError;
+
+    var out: [64]u8 = undefined;
+    @memcpy(&out, s);
+    return out;
+}
+
+/// Parse a `blockchain.transaction.get` (verbose=false) response and return
+/// the raw-transaction hex. Caller owns the returned slice (`allocator.free`).
+///
+/// Replaces the ffi.zig substring scanner (F2): reject error responses first,
+/// require a string `result` that is non-empty, even-length, lowercase hex.
+pub fn parseTxResponse(allocator: std.mem.Allocator, json: []const u8) ![]u8 {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, json, .{}) catch
+        return error.ParseError;
+    defer parsed.deinit();
+
+    if (parsed.value != .object) return error.ParseError;
+    const obj = parsed.value.object;
+    if (obj.get("error")) |err_val| {
+        if (err_val != .null) return error.ServerError;
+    }
+
+    const result_val = obj.get("result") orelse return error.ParseError;
+    if (result_val != .string) return error.ParseError;
+    const s = result_val.string;
+    if (s.len == 0 or s.len % 2 != 0) return error.ParseError;
+    if (!isLowerHex(s)) return error.ParseError;
+
+    return allocator.dupe(u8, s) catch return error.ParseError;
+}
+
+/// Parse a `blockchain.headers.subscribe` response and return the tip height.
+///
+/// Replaces the ffi.zig substring scanner (F2) that matched `"height":`
+/// anywhere in the document (so an error message containing that substring
+/// parsed as a height) and `@intCast`ed a u32 to c_int (an abort path on
+/// values ≥ 2³¹). Now: reject error responses first, require an object
+/// `result` with a non-negative integer `height` that fits in c_int.
+pub fn parseHeadersResponse(json: []const u8) !u32 {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, json, .{}) catch
+        return error.ParseError;
+    defer parsed.deinit();
+
+    if (parsed.value != .object) return error.ParseError;
+    const obj = parsed.value.object;
+    if (obj.get("error")) |err_val| {
+        if (err_val != .null) return error.ServerError;
+    }
+
+    const result_val = obj.get("result") orelse return error.ParseError;
+    if (result_val != .object) return error.ParseError;
+
+    const height_val = result_val.object.get("height") orelse return error.ParseError;
+    if (height_val != .integer) return error.ParseError;
+    const h = height_val.integer;
+    // Must be non-negative and fit in c_int — the FFI returns height as a
+    // c_int, so anything larger cannot be represented and is treated as
+    // malformed rather than aborting on the cast.
+    if (h < 0 or h > std.math.maxInt(c_int)) return error.ParseError;
+
+    return @intCast(h);
 }
 
 // =============================================================================
@@ -708,4 +831,105 @@ test "ELE-3: parseHistoryResponse handles missing optional fee field" {
     try std.testing.expectEqual(@as(usize, 1), entries.len);
     try std.testing.expectEqual(@as(i32, 42), entries[0].height);
     try std.testing.expectEqual(@as(u64, 0), entries[0].fee);
+}
+
+// ============================================================================
+// F1 — void-params wire shape
+// ============================================================================
+
+test "F1: void params serialize as an empty JSON array, not a string" {
+    // Regression guard for the wire bug that broke quantum_vault's
+    // block-height lookup: a void-params request (headers.subscribe) must
+    // emit `"params":[]`, never `"params":""`. JSON-RPC 2.0 §4 requires
+    // params to be an array or object; ElectrumX rejects a string.
+    const allocator = std.testing.allocator;
+    const request = try buildRequest(allocator, "blockchain.headers.subscribe", {}, 1);
+    defer allocator.free(request);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, request, .{});
+    defer parsed.deinit();
+    const params = parsed.value.object.get("params").?;
+    try std.testing.expect(params == .array);
+    try std.testing.expectEqual(@as(usize, 0), params.array.items.len);
+}
+
+// ============================================================================
+// F2 — ffi-parser rewrites, anchored to external Bitcoin/ElectrumX vectors
+// ============================================================================
+
+test "external anchor: broadcast response yields the real first-ever Bitcoin txid" {
+    // The result string is the txid of the first Bitcoin peer-to-peer
+    // transaction (Satoshi Nakamoto -> Hal Finney, mainnet block 170,
+    // 2009-01-12). It is a fixed value publicly recorded on the Bitcoin
+    // blockchain and reproducible on any block explorer (e.g.
+    // blockstream.info / mempool.space):
+    //   f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e8b
+    const json =
+        \\{"jsonrpc":"2.0","result":"f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e8b","id":1}
+    ;
+    const txid = try parseBroadcastResponse(json);
+    try std.testing.expectEqualSlices(
+        u8,
+        "f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e8b",
+        &txid,
+    );
+}
+
+test "F2: broadcast error response is rejected, not reported as a successful txid" {
+    // Older Electrum servers return broadcast failures as an error object.
+    // The pre-fix substring parser checked `"error"` only AFTER matching
+    // `"result":"` — this must now surface as a server error.
+    const json =
+        \\{"jsonrpc":"2.0","error":{"code":1,"message":"transaction already in block chain"},"id":1}
+    ;
+    try std.testing.expectError(error.ServerError, parseBroadcastResponse(json));
+}
+
+test "F2: short string broadcast result is not accepted as a txid" {
+    // Pre-fix, `"result":"ok"` copied 64 bytes starting at the `o`, dragging
+    // in trailing JSON as a fake txid. Now it is rejected.
+    const json =
+        \\{"jsonrpc":"2.0","result":"ok","id":1}
+    ;
+    try std.testing.expectError(error.ParseError, parseBroadcastResponse(json));
+}
+
+test "external anchor: get_tx yields the Bitcoin genesis coinbase raw transaction" {
+    // The result is the raw hex of the coinbase transaction embedded in
+    // Bitcoin's genesis block (block 0). It is an immutable, publicly
+    // documented constant (Bitcoin Core `chainparams.cpp`, and quoted in
+    // the whitepaper-era genesis: the "Chancellor on brink..." message).
+    const allocator = std.testing.allocator;
+    const genesis_tx = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000";
+    const json = "{\"jsonrpc\":\"2.0\",\"result\":\"" ++ genesis_tx ++ "\",\"id\":1}";
+    const raw = try parseTxResponse(allocator, json);
+    defer allocator.free(raw);
+    try std.testing.expectEqualSlices(u8, genesis_tx, raw);
+}
+
+test "F2: get_tx error response is rejected" {
+    const json =
+        \\{"jsonrpc":"2.0","error":{"code":-32603,"message":"daemon error"},"id":1}
+    ;
+    try std.testing.expectError(error.ServerError, parseTxResponse(std.testing.allocator, json));
+}
+
+test "external anchor: headers.subscribe yields the ElectrumX-documented block height" {
+    // Example response from the ElectrumX protocol documentation
+    // (electrumx.readthedocs.io, protocol-methods, blockchain.headers.subscribe):
+    // an 80-byte serialized mainnet block header at height 520481.
+    const json =
+        \\{"jsonrpc":"2.0","result":{"height":520481,"hex":"00000020890208a0ae3a3892aa047c5468725846577cfcd9b512b50000000000000000005dc2b02f2d297a9064ee103036c14d678f9afc7e3d9409cf53fd58b82e938e8ecbeca05a2d2103188ce804c4"},"id":1}
+    ;
+    const height = try parseHeadersResponse(json);
+    try std.testing.expectEqual(@as(u32, 520481), height);
+}
+
+test "F2: headers response substring `\"height\":` inside an error message is not parsed" {
+    // Pre-fix, this matched `"height":` anywhere in the document. Now an
+    // error response (no object `result`) is rejected.
+    const json =
+        \\{"jsonrpc":"2.0","error":{"code":-32601,"message":"no such height: 999"},"id":1}
+    ;
+    try std.testing.expectError(error.ServerError, parseHeadersResponse(json));
 }

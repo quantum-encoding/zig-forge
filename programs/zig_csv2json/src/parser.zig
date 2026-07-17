@@ -310,18 +310,26 @@ fn splitCsvLine(
     var fields: std.ArrayListUnmanaged([]const u8) = .empty;
 
     var i: usize = 0;
-    while (true) {
-        if (i >= line.len) break;
+    // `pending` records that a delimiter was just consumed, so RFC 4180 requires
+    // one more field even when we are at end-of-line (a trailing delimiter such
+    // as `a,b,` yields N+1 = 3 fields, the last one empty). Without this flag the
+    // trailing empty column silently vanishes.
+    var pending = false;
+    while (i < line.len or pending) {
+        pending = false;
 
-        if (line[i] == '"') {
-            // Quoted field
+        if (i < line.len and line[i] == '"') {
+            // Quoted field. Scan to the matching closing quote, treating `""` as
+            // an escaped literal double-quote (RFC 4180 §2.7).
             i += 1; // skip opening quote
             const start = i;
             var closed = false;
+            var has_escape = false;
             while (i < line.len) {
                 if (line[i] == '"') {
                     if (i + 1 < line.len and line[i + 1] == '"') {
-                        // Escaped quote ("")
+                        // Escaped quote ("") — collapse to a single `"` in output.
+                        has_escape = true;
                         i += 2;
                     } else {
                         closed = true;
@@ -336,10 +344,32 @@ fn splitCsvLine(
                 fields.deinit(allocator);
                 return CsvError.UnclosedQuote;
             }
-            const field = line[start..i];
-            try fields.append(allocator, std.mem.trim(u8, field, " "));
+            const raw = line[start..i]; // between the quotes, still holds "" escapes
             i += 1; // skip closing quote
-            if (i < line.len and line[i] == delimiter) i += 1; // skip delimiter
+
+            // Unescape `""` -> `"`. The common no-escape case keeps the slice into
+            // `line`; only fields containing an escape need a fresh allocation.
+            const field = if (has_escape) blk: {
+                const buf = try allocator.alloc(u8, raw.len);
+                var n: usize = 0;
+                var k: usize = 0;
+                while (k < raw.len) : (n += 1) {
+                    if (raw[k] == '"' and k + 1 < raw.len and raw[k + 1] == '"') {
+                        buf[n] = '"';
+                        k += 2;
+                    } else {
+                        buf[n] = raw[k];
+                        k += 1;
+                    }
+                }
+                break :blk buf[0..n];
+            } else raw;
+
+            try fields.append(allocator, std.mem.trim(u8, field, " "));
+            if (i < line.len and line[i] == delimiter) {
+                i += 1; // consume delimiter; another field follows
+                pending = true;
+            }
         } else {
             // Unquoted field
             const start = i;
@@ -348,10 +378,9 @@ fn splitCsvLine(
             }
             const field = line[start..i];
             try fields.append(allocator, std.mem.trim(u8, field, " "));
-            if (i < line.len) {
-                i += 1; // skip delimiter
-            } else {
-                break;
+            if (i < line.len and line[i] == delimiter) {
+                i += 1; // consume delimiter; another field follows
+                pending = true;
             }
         }
     }
@@ -652,9 +681,14 @@ test "CSV quoted field with comma" {
 }
 
 test "CSV escaped quotes in quoted field" {
-    const fields = try splitCsvLine(std.testing.allocator, "\"\"\"quoted\"\"\",value", ',');
-    defer std.testing.allocator.free(fields);
+    // `"""quoted""",value` — the field is a quoted string whose content is the
+    // escaped sequence `""quoted""`, which unescapes to `"quoted"`.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const fields = try splitCsvLine(arena.allocator(), "\"\"\"quoted\"\"\",value", ',');
     try std.testing.expectEqual(@as(usize, 2), fields.len);
+    try std.testing.expectEqualStrings("\"quoted\"", fields[0]);
+    try std.testing.expectEqualStrings("value", fields[1]);
 }
 
 test "Boolean value detection — booleans are NOT numeric" {
@@ -686,15 +720,14 @@ test "splitCsvLine: RFC 4180 quoted field with embedded comma" {
 }
 
 test "splitCsvLine: RFC 4180 escaped quote inside quoted field" {
-    // RFC 4180 §2.7: double-quote inside quoted field is escaped as "".
-    const fields = try splitCsvLine(std.testing.allocator, "\"a\"\"b\",c", ',');
-    defer std.testing.allocator.free(fields);
+    // RFC 4180 §2.7: a double-quote inside a quoted field is escaped as "".
+    // This CLI is the downstream consumer, so it un-escapes `""` -> `"`:
+    // input `"a""b",c` yields the field `a"b`, matching Python csv / Excel.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const fields = try splitCsvLine(arena.allocator(), "\"a\"\"b\",c", ',');
     try std.testing.expectEqual(@as(usize, 2), fields.len);
-    // Note: the raw bytes of the field still contain the escaped "" sequence;
-    // un-escaping is a downstream concern. The contract here is just "the
-    // closing quote was correctly recognised and the comma between fields
-    // was respected."
-    try std.testing.expectEqualStrings("a\"\"b", fields[0]);
+    try std.testing.expectEqualStrings("a\"b", fields[0]);
     try std.testing.expectEqualStrings("c", fields[1]);
 }
 
@@ -712,4 +745,71 @@ test "splitCsvLine: empty fields preserved" {
     try std.testing.expectEqualStrings("a", fields[0]);
     try std.testing.expectEqualStrings("", fields[1]);
     try std.testing.expectEqualStrings("b", fields[2]);
+}
+
+test "splitCsvLine: trailing empty field preserved (N delimiters -> N+1 fields)" {
+    // RFC 4180 §2.4: each record has the same number of fields; N commas
+    // produce N+1 fields. A trailing delimiter must yield a trailing empty
+    // field, not silently drop the last column.
+    {
+        const fields = try splitCsvLine(std.testing.allocator, "a,b,", ',');
+        defer std.testing.allocator.free(fields);
+        try std.testing.expectEqual(@as(usize, 3), fields.len);
+        try std.testing.expectEqualStrings("a", fields[0]);
+        try std.testing.expectEqualStrings("b", fields[1]);
+        try std.testing.expectEqualStrings("", fields[2]);
+    }
+    {
+        const fields = try splitCsvLine(std.testing.allocator, "a,", ',');
+        defer std.testing.allocator.free(fields);
+        try std.testing.expectEqual(@as(usize, 2), fields.len);
+        try std.testing.expectEqualStrings("a", fields[0]);
+        try std.testing.expectEqualStrings("", fields[1]);
+    }
+    {
+        // A lone delimiter is two empty fields.
+        const fields = try splitCsvLine(std.testing.allocator, ",", ',');
+        defer std.testing.allocator.free(fields);
+        try std.testing.expectEqual(@as(usize, 2), fields.len);
+        try std.testing.expectEqualStrings("", fields[0]);
+        try std.testing.expectEqualStrings("", fields[1]);
+    }
+    {
+        // A quoted field may also be the one preceding the trailing delimiter.
+        const fields = try splitCsvLine(std.testing.allocator, "\"a\",", ',');
+        defer std.testing.allocator.free(fields);
+        try std.testing.expectEqual(@as(usize, 2), fields.len);
+        try std.testing.expectEqualStrings("a", fields[0]);
+        try std.testing.expectEqualStrings("", fields[1]);
+    }
+}
+
+test "splitCsvLine: doubled quotes are unescaped to a single quote" {
+    // RFC 4180 §2.7. This CLI is the terminal consumer, so it collapses the
+    // escape rather than passing raw bytes downstream.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    {
+        // Field that is a single escaped quote pair.
+        const fields = try splitCsvLine(a, "\"\"\"\",x", ',');
+        try std.testing.expectEqual(@as(usize, 2), fields.len);
+        try std.testing.expectEqualStrings("\"", fields[0]);
+        try std.testing.expectEqualStrings("x", fields[1]);
+    }
+    {
+        // Embedded escaped quote in the middle: `"she said ""hi"""` -> `she said "hi"`.
+        const fields = try splitCsvLine(a, "\"she said \"\"hi\"\"\",ok", ',');
+        try std.testing.expectEqual(@as(usize, 2), fields.len);
+        try std.testing.expectEqualStrings("she said \"hi\"", fields[0]);
+        try std.testing.expectEqualStrings("ok", fields[1]);
+    }
+    {
+        // No escape present: field stays byte-identical (fast path, no alloc).
+        const fields = try splitCsvLine(a, "\"plain\",y", ',');
+        try std.testing.expectEqual(@as(usize, 2), fields.len);
+        try std.testing.expectEqualStrings("plain", fields[0]);
+        try std.testing.expectEqualStrings("y", fields[1]);
+    }
 }
