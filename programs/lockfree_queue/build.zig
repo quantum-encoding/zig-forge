@@ -64,7 +64,8 @@ pub fn build(b: *std.Build) void {
     // Queue library module (used by tests)
     // ========================================================================
 
-    const queue_module = b.createModule(.{
+    // Consumable Zig module surface (queue types) for other in-tree programs.
+    const queue_module = b.addModule("lockfree_queue", .{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
@@ -101,3 +102,4 @@ pub fn build(b: *std.Build) void {
 
     _ = queue_module;
 }
+

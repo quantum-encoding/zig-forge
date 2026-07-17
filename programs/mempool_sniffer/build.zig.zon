@@ -1,0 +1,13 @@
+.{
+    .name = .mempool_sniffer,
+    .version = "0.1.0",
+    .fingerprint = 0x5653615e45147e68,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "include",
+    },
+    .dependencies = .{},
+}

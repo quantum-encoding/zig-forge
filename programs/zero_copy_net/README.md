@@ -1,65 +1,41 @@
 # Zero-Copy Network Stack
 
-High-performance networking with io_uring for ultra-low latency applications.
+A Linux-only, io_uring-based networking library in Zig, exposing an async TCP
+server, a UDP socket, a thin `IoUring` wrapper, and a page-aligned `BufferPool`.
 
-## Performance Targets
+> **Platform:** requires Linux with io_uring. `build.zig` detects the target OS
+> and skips the build on non-Linux platforms (macOS, Windows) — the library and
+> examples only compile on Linux.
 
-- **Latency**: <1µs syscall overhead
-- **Throughput**: 10M+ packets/sec per core
-- **CPU**: <5% for 1Gbps traffic
-- **vs epoll**: 5x lower latency
+## Components
 
-## Architecture
-
-```
-Application → Buffer Pool → io_uring → Kernel → NIC
-    ↓             ↓            ↓
-Zero-copy   Preallocated   Batch ops
-```
-
-## Features
-
-- io_uring based event loop
-- Zero-copy send/receive
-- Buffer pool management
-- TCP/UDP protocols
-- NUMA-aware allocation
+- `TcpServer` — io_uring async TCP server backed by the `BufferPool`
+- `UdpSocket` — io_uring `RECVMSG`/`SENDMSG` UDP with source-address tracking
+- `IoUring` — thin wrapper around `std.os.linux.IoUring`
+- `BufferPool` — page-aligned buffer pool for io_uring
+- C ABI (`src/ffi.zig` + `include/zero_copy_net.h`) built as a static library
 
 ## Usage
 
 ```zig
-const net = @import("zero-copy-net");
+const net = @import("net"); // module name as wired in build.zig examples
 
-// Create server with io_uring
-var server = try net.TcpServer.init(allocator, .{
-    .port = 8080,
-    .io_uring_entries = 4096,
-    .buffer_count = 1024,
-});
+var server = try net.TcpServer.init(allocator, .{ .port = 8080 });
 defer server.deinit();
-
-// Accept connections (zero-copy)
-while (true) {
-    const conn = try server.accept();
-
-    // Receive data (zero-copy)
-    const data = try conn.recv();
-
-    // Send response (zero-copy)
-    try conn.send(response);
-}
 ```
+
+See `examples/tcp_echo.zig` for a runnable example.
 
 ## Build
 
 ```bash
-zig build
-zig build bench
-zig build test
+zig build            # build the static library + examples (Linux only)
+zig build lib        # build the static library artifact
+zig build test       # run unit tests
+zig build tcp-echo   # run the TCP echo server example
 ```
 
-## Benchmarks
+## Status
 
-- TCP echo: <1µs round-trip
-- UDP send: <500ns per packet
-- Connection accept: <2µs
+Work in progress. This library has not been benchmarked or audited; there are no
+verified performance numbers. Treat it as unaudited, tree-internal code.

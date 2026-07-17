@@ -1,4 +1,0 @@
-This is a test file created for deletion testing.
-It contains some sample content.
-Line 3: More test data here.
-This file will be deleted after confirmation.

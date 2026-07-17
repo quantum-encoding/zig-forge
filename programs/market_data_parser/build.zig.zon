@@ -1,0 +1,14 @@
+.{
+    .name = .market_data_parser,
+    .version = "0.1.0",
+    .fingerprint = 0x5b2350711d4f9165,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "examples",
+        "include",
+    },
+}

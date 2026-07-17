@@ -30,6 +30,10 @@ pub fn build(b: *std.Build) void {
         testSubProject(b, "cognitive-state-server", test_all);
     }
     testSubProject(b, "cognitive-tools", test_all);
+    // chronos-ledger carries the externally-anchored suites (RFC 8785 JCS
+    // vectors, ledger hash-chain, exfil-detection, C-ABI). Wire its `test`
+    // step so `zig build test` actually runs them.
+    testSubProject(b, "chronos-ledger", test_all);
 }
 
 fn buildSubProject(

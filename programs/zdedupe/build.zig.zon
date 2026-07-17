@@ -1,0 +1,13 @@
+.{
+    .name = .zdedupe,
+    .version = "0.1.0",
+    .fingerprint = 0xe35ac3a40fff811f,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "include",
+    },
+    .dependencies = .{},
+}

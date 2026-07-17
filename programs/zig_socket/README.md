@@ -1,8 +1,8 @@
 # Zig Socket
 
-A cross-platform TCP/UDP socket abstraction and RFC 6455 WebSocket client library for Zig **0.16.0**. Actively maintained and updated with each new Zig release.
+A cross-platform TCP socket abstraction and RFC 6455 WebSocket client library for Zig **0.16.0**. Actively maintained and updated with each new Zig release.
 
-> **Two modules, one library**: Raw TCP/UDP sockets + WebSocket protocol in a single importable package.
+> **Two modules, one library**: Raw TCP sockets + WebSocket protocol in a single importable package.
 
 **Developed by [QUANTUM ENCODING LTD](https://quantumencoding.io)**
 Contact: [info@quantumencoding.io](mailto:info@quantumencoding.io)

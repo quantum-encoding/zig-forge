@@ -1,0 +1,12 @@
+.{
+    .name = .zig_pdf_engine,
+    .version = "0.1.0",
+    .fingerprint = 0xbabcb2b62ff9f5ed,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+    .dependencies = .{},
+}

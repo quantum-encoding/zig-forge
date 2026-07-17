@@ -1,0 +1,13 @@
+.{
+    .name = .zerve,
+    .version = "0.1.0",
+    .fingerprint = 0x6a70ffdb17c64f86,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "README.md",
+    },
+}

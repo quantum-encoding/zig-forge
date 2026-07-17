@@ -127,3 +127,14 @@ programs/zig_ai_server/scripts/_firebase/
 
 # Internal security audit (2026-07-17) — keep local, never publish (enumerates unpatched vulns)
 docs/program-reports-2026-07-17/
+
+# Regenerable build/test artifacts (untracked 2026-07-17)
+programs/cerberus/*.keras
+programs/zig-qrcode/zigqr_debug.wasm
+programs/zig-qrcode/zigqr_exp.wasm
+programs/zig-qrcode/zigqr_test.wasm
+programs/zig-quantum-encryption/wasm-test-output/
+programs/zig_pdf_generator/pdf-chart-tests/*.wasm
+programs/quantum_curl/root
+programs/zig_ai/test_ffi
+programs/zig_ai/test_delete.txt

@@ -64,7 +64,9 @@ pub fn build(b: *std.Build) void {
     // Pool library module (used by tests, benchmarks)
     // ========================================================================
 
-    const pool_module = b.createModule(.{
+    // Consumable module for other in-tree projects (e.g. quantum_vault).
+    // Additive: does not alter the exported C-ABI static library above.
+    const pool_module = b.addModule("memory_pool", .{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,

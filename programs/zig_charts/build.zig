@@ -19,6 +19,15 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // ==========================================================================
+    // Consumable module (for other in-tree projects: @import("zigcharts"))
+    // ==========================================================================
+    _ = b.addModule("zigcharts", .{
+        .root_source_file = b.path("src/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // ==========================================================================
     // Core Library (Static)
     // ==========================================================================
     const lib = b.addLibrary(.{

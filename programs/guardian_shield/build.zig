@@ -234,8 +234,41 @@ pub fn build(b: *std.Build) void {
     });
     const run_grimoire_tests = b.addRunArtifact(grimoire_tests);
 
+    // Previously-orphaned test blocks: existing `test "..."` declarations that
+    // were never wired into `zig build test`. Rooted here so they actually run.
+    // NOTE: only files that compile clean under Zig 0.16 are wired. warden.zig,
+    // zig_http_sentinel/config.zig, and zig_sentinel/correlation.zig carry
+    // pre-existing 0.16 API-drift compile errors and are intentionally left out
+    // until that drift is fixed (see TODO below) — wiring them would turn a
+    // runtime failure into a compile failure on the whole test step.
+    const orphan_test_sources = [_][]const u8{
+        "src/zig_http_sentinel/filter_engine.zig",
+        "src/zig_sentinel/emoji_database.zig",
+        "src/zig_sentinel/emoji_sanitizer.zig",
+        // TODO(0.16-drift): re-add after fixing API drift, then verify on a
+        // Linux host (this build.zig cross-pins to x86_64-linux):
+        //   "src/warden/warden.zig",
+        //   "src/zig_http_sentinel/config.zig",
+        //   "src/zig_sentinel/correlation.zig",
+    };
+
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_lib_tests.step);
     test_step.dependOn(&run_fork_tests.step);
     test_step.dependOn(&run_grimoire_tests.step);
+
+    for (orphan_test_sources) |src_path| {
+        const orphan_module = b.createModule(.{
+            .root_source_file = .{ .cwd_relative = src_path },
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        orphan_module.addCMacro("_FORTIFY_SOURCE", "0");
+        const orphan_tests = b.addTest(.{
+            .root_module = orphan_module,
+        });
+        const run_orphan_tests = b.addRunArtifact(orphan_tests);
+        test_step.dependOn(&run_orphan_tests.step);
+    }
 }

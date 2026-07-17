@@ -265,7 +265,10 @@ test "handshake builder" {
     const request = try builder.buildRequest(&buffer);
 
     try std.testing.expect(std.mem.indexOf(u8, request, "GET /ws HTTP/1.1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, request, "Host: example.com:443") != null);
+    // RFC 6455: the default wss:// port (443) is omitted from the Host header,
+    // so the header is "Host: example.com" with no ":443" suffix.
+    try std.testing.expect(std.mem.indexOf(u8, request, "Host: example.com\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, request, "Host: example.com:443") == null);
     try std.testing.expect(std.mem.indexOf(u8, request, "Upgrade: websocket") != null);
 }
 

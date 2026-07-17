@@ -29,7 +29,8 @@ pub fn build(b: *std.Build) void {
     // ==========================================================================
     // Core HAL Library
     // ==========================================================================
-    const hal_module = b.createModule(.{
+    // Consumable module for other in-tree packages: `@import("zig_hal")`.
+    const hal_module = b.addModule("zig_hal", .{
         .root_source_file = b.path("src/hal.zig"),
         .target = target,
         .optimize = optimize,

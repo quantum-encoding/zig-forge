@@ -4,6 +4,14 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Consumable library module (root: src/main.zig, exposing TSDB, Candle,
+    // and the storage/compression/index/query submodules).
+    _ = b.addModule("timeseries_db", .{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // CLI tool
     const cli_module = b.createModule(.{
         .root_source_file = b.path("src/cli.zig"),

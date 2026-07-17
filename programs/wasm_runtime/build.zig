@@ -15,7 +15,7 @@ pub fn build(b: *std.Build) void {
     // =========================================================================
     // WASM RUNTIME LIBRARY MODULE
     // =========================================================================
-    const wasm_module = b.createModule(.{
+    const wasm_module = b.addModule("wasm_runtime", .{
         .root_source_file = b.path("src/lib.zig"),
         .target = target,
         .optimize = optimize,
