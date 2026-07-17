@@ -598,6 +598,8 @@ test "seccomp: blocked syscalls emit KILL rows before allow rows" {
     // default_action "allow": without blocked enforcement, `write` would be permitted.
     // The denylist must win, so the emitted filter must contain a JEQ(write) -> KILL row
     // ahead of the JEQ(read) -> ALLOW row, plus the x32 high-nr guard.
+    var allowed_read = [_][]const u8{"read"};
+    var blocked_write = [_][]const u8{"write"};
     var profile = profile_mod.Profile{
         .profile_name = "test",
         .description = "Test profile",
