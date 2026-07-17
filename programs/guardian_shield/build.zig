@@ -72,37 +72,12 @@ pub fn build(b: *std.Build) void {
     sentinel.root_module.addIncludePath(.{ .cwd_relative = "/usr/include" });
     b.installArtifact(sentinel);
 
-    // test-inquisitor - The Inquisitor LSM BPF test harness
-    const inquisitor_module = b.createModule(.{
-        .root_source_file = .{ .cwd_relative = "src/zig_sentinel/test-inquisitor.zig" },
-        .target = target,
-        .optimize = optimize,
-    });
-    const inquisitor = b.addExecutable(.{
-        .name = "test-inquisitor",
-        .root_module = inquisitor_module,
-    });
-    inquisitor.root_module.link_libc = true;
-    inquisitor.root_module.linkSystemLibrary("bpf", .{});
-    inquisitor.root_module.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
-    inquisitor.root_module.addIncludePath(.{ .cwd_relative = "/usr/include" });
-    b.installArtifact(inquisitor);
-
-    // test-oracle-advanced - The All-Seeing Eye test harness
-    const oracle_advanced_module = b.createModule(.{
-        .root_source_file = .{ .cwd_relative = "src/zig_sentinel/test-oracle-advanced.zig" },
-        .target = target,
-        .optimize = optimize,
-    });
-    const oracle_advanced = b.addExecutable(.{
-        .name = "test-oracle-advanced",
-        .root_module = oracle_advanced_module,
-    });
-    oracle_advanced.root_module.link_libc = true;
-    oracle_advanced.root_module.linkSystemLibrary("bpf", .{});
-    oracle_advanced.root_module.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
-    oracle_advanced.root_module.addIncludePath(.{ .cwd_relative = "/usr/include" });
-    b.installArtifact(oracle_advanced);
+    // NOTE: the `test-inquisitor` and `test-oracle-advanced` eBPF LSM BPF harness
+    // targets were removed here. Their source files
+    // (src/zig_sentinel/test-{inquisitor,oracle-advanced}.zig) are gitignored and
+    // exist in no clone, so declaring them as install artifacts made `zig build`
+    // fail with FileNotFound on every fresh checkout (confirmed on Linux CI). If you
+    // have the local harness sources, re-add the two `addExecutable` blocks locally.
 
     // hardware-detector - Detect system capabilities for adaptive pattern loading
     const hardware_detector_module = b.createModule(.{
