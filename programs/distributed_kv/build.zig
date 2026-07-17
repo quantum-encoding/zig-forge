@@ -91,6 +91,9 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         }),
+        // The WAL's raw-syscall code emits an R_X86_64_PC64 relocation the
+        // self-hosted x86_64 backend can't handle yet — force LLVM for tests.
+        .use_llvm = true,
     });
 
     lib_unit_tests.root_module.link_libc = true;
