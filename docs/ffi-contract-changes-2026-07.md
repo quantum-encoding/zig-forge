@@ -60,31 +60,39 @@ per-arch slice *before* `lipo -create`.)
 
 ---
 
-## 2.2 — tx-builder: threadlocal singleton → opaque handle (PENDING — not shipped)
+## 2.2 — tx-builder: threadlocal singleton → opaque handle (LANDED on producer + walletcore, additive)
 
-**Nothing below has shipped.** Spec provided so consumers can plan. Full detail in
-`docs/ffi-migration-plan.md` §2.2.
+The stateful transaction builder was a hidden `threadlocal` global in `ffi-grok.zig`
+(`quantum_tx_builder_init()` + 14 state-mutating fns with no handle) — finding 5 (hidden
+global state). It now has an explicit caller-owned handle API, added **additively**
+alongside the legacy fns (legacy still works; deleted in a later shim-removal pass).
 
-The stateful transaction builder is currently a hidden `threadlocal` global in
-`ffi-grok.zig` (`quantum_tx_builder_init()` then 14 state-mutating fns that take no handle).
-This is finding 5 (hidden global state; a builder shared across threads is an unguarded
-race). It will move to a caller-owned opaque handle:
+### New symbols (additive — legacy untouched)
+- `quantum_tx_builder_new() -> void*`, `quantum_tx_builder_free(void*)`.
+- `_ctx`-suffixed variants of the 13 stateful fns, each taking the handle as their **first
+  parameter**: `quantum_tx_builder_add_input_ctx`, `…_add_p2wpkh_output_ctx`,
+  `…_add_p2pkh_output_ctx`, `…_add_p2tr_output_ctx`, `…_add_op_return_ctx`,
+  `…_total_input_ctx`, `…_total_output_ctx`, `…_fee_ctx`, `…_estimate_vsize_ctx`,
+  `…_input_count_ctx`, `…_output_count_ctx`, `quantum_tx_sign_ctx`,
+  `quantum_tx_compute_sighash_ctx`. Each handle is one independent builder.
+- **Why new names (not same-name-new-arity):** C links by symbol name. A name-preserving
+  arity change would let a stale wallet binary silently pass garbage as the handle
+  (money corruption). New names make a stale binary fail to *link* (loud) instead.
 
-- **New symbols:** `quantum_tx_builder_new() -> *handle`, `quantum_tx_builder_free(handle)`.
-- The 14 stateful fns (`add_input`, `add_p2wpkh_output`, …, `quantum_tx_sign`,
-  `quantum_tx_compute_sighash`) take the handle as their **first parameter**.
-- **Migration is additive-then-cutover:** the new handle symbols will be added *alongside*
-  the legacy threadlocal ones (which keep working), so a stale consumer never breaks. After
-  the sole consumer (**walletcore**, ~32 call sites in `quantum_crypto.rs`) migrates and is
-  verified, a later shim-removal pass deletes the legacy symbols.
-- **walletcore** is again the **only** code consumer — no other app calls these symbols
-  (verified). So quantum_vault / CosmicDuckOS / Android will again just relink.
-- Rust guidance when walletcore migrates: the handle is a raw pointer, so the Rust
-  `TxBuilder` wrapper is `!Send + !Sync` by default — **do not add `unsafe impl Send/Sync`**;
-  document "one handle per thread". Wrap the handle in an RAII `Drop` so error-path
-  early-returns can't leak (~50 KB per builder), including in the fuzz driver.
+### Who must do what
 
-When 2.2 ships, this bulletin will be updated with the same per-consumer table.
+| Consumer | Action | Reason |
+|---|---|---|
+| **walletcore** (`src/quantum_crypto.rs`) | ✅ **DONE this session** | Migrated `TxBuilder`'s internals to the handle API: struct holds an opaque `handle: *mut c_void`, all 13 methods call the `_ctx` variants, an `impl Drop` frees the handle on every path (scope/panic/cancel), the mutex is retained as a now-harmless serialization guard, and `TxBuilder` stays `!Send + !Sync` (raw pointer — **no `unsafe impl Send/Sync`**). **The public Rust API of `TxBuilder` is unchanged** (`new`, `try_acquire`, all methods keep their signatures). 87/87 tests incl. the 5 RAII/concurrency property tests. |
+| **quantum_vault** (`bitcoin.rs:629`, `litecoin.rs:688`) | **No source change; `cargo build`.** | Uses walletcore's `TxBuilder` **Rust type**, whose public API is unchanged. cargo recompiles walletcore (path dep) against the new Zig `.a`. Confirmed compiling this session. |
+| **CosmicDuckOS** (iOS) / **Android** | **Rebuild + repack the vendored archives. No source change.** | No app-level code calls the builder FFI symbols directly (verified); they consume it only through walletcore's stable Rust API. |
+
+### Remaining (small): legacy shim removal
+The legacy threadlocal fns (`quantum_tx_builder_init` + the 14 no-handle fns) and the hidden
+`threadlocal` global remain in the producer as an unused safety net, plus their now-unused
+`extern` decls in walletcore. Once every platform (iOS/Android/quantum_vault) is confirmed
+on the new API, a follow-up deletes them — a pure deletion, no consumer change (walletcore
+already uses only the `_ctx` API).
 
 ---
 

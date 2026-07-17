@@ -2628,6 +2628,257 @@ export fn quantum_tx_compute_sighash(
     return @intFromEnum(TxResult.success);
 }
 
+// =============================================================================
+// TX BUILDER — HANDLE-BASED API (2.2)
+//
+// Caller-owned opaque handle instead of the hidden threadlocal singleton above.
+// Each handle is one independent builder; the `_ctx` fns take it as their first
+// parameter. NOT thread-safe per handle — use one handle per thread (the handle
+// is a raw heap pointer; the Rust wrapper stays !Send + !Sync by design).
+//
+// The legacy threadlocal fns above are kept as a transitional shim and will be
+// removed once every consumer is confirmed on this API (walletcore is the sole
+// code consumer; verified via rg across the tree).
+// =============================================================================
+
+/// Cast an opaque builder handle to `*TxBuilder`, or null if the handle is null.
+inline fn builderFromHandle(handle: ?*anyopaque) ?*tx_builder.TxBuilder {
+    const h = handle orelse return null;
+    return @ptrCast(@alignCast(h));
+}
+
+/// Allocate a new, independent transaction builder. Returns an opaque handle,
+/// or null on OOM. Free it with `quantum_tx_builder_free`.
+export fn quantum_tx_builder_new() ?*anyopaque {
+    const b = std.heap.c_allocator.create(tx_builder.TxBuilder) catch {
+        setLastError("TX builder: allocation failed");
+        return null;
+    };
+    b.* = tx_builder.TxBuilder.init();
+    return @ptrCast(b);
+}
+
+/// Free a builder handle. Null-safe.
+export fn quantum_tx_builder_free(handle: ?*anyopaque) void {
+    const b = builderFromHandle(handle) orelse return;
+    std.heap.c_allocator.destroy(b);
+}
+
+export fn quantum_tx_builder_add_input_ctx(handle: ?*anyopaque, utxo: *const CSpendableUtxo) c_int {
+    const b = builderFromHandle(handle) orelse {
+        setLastError("TX builder: null handle");
+        return @intFromEnum(TxResult.null_pointer);
+    };
+    if (@intFromPtr(utxo) == 0) {
+        setLastError("TX builder: null UTXO pointer");
+        return @intFromEnum(TxResult.null_pointer);
+    }
+    const internal_utxo = tx_builder.SpendableUtxo{
+        .txid = utxo.txid,
+        .vout = utxo.vout,
+        .value = utxo.value,
+        .pubkey_hash = utxo.pubkey_hash,
+        .derivation_index = utxo.derivation_index,
+    };
+    b.addInput(internal_utxo) catch |err| {
+        return switch (err) {
+            error.TooManyInputs => @intFromEnum(TxResult.too_many_inputs),
+            else => @intFromEnum(TxResult.null_pointer),
+        };
+    };
+    return @intFromEnum(TxResult.success);
+}
+
+export fn quantum_tx_builder_add_p2wpkh_output_ctx(handle: ?*anyopaque, value: u64, pubkey_hash: [*c]const u8) c_int {
+    const b = builderFromHandle(handle) orelse {
+        setLastError("TX builder: null handle");
+        return @intFromEnum(TxResult.null_pointer);
+    };
+    if (@intFromPtr(pubkey_hash) == 0) {
+        setLastError("TX builder: null pubkey_hash pointer");
+        return @intFromEnum(TxResult.null_pointer);
+    }
+    var hash_arr: [20]u8 = undefined;
+    @memcpy(&hash_arr, pubkey_hash[0..20]);
+    b.addP2wpkhOutput(value, &hash_arr) catch |err| {
+        return switch (err) {
+            error.TooManyOutputs => @intFromEnum(TxResult.too_many_outputs),
+            error.OutputBelowDust => @intFromEnum(TxResult.output_below_dust),
+            else => @intFromEnum(TxResult.null_pointer),
+        };
+    };
+    return @intFromEnum(TxResult.success);
+}
+
+export fn quantum_tx_builder_add_p2pkh_output_ctx(handle: ?*anyopaque, value: u64, pubkey_hash: [*c]const u8) c_int {
+    const b = builderFromHandle(handle) orelse {
+        setLastError("TX builder: null handle");
+        return @intFromEnum(TxResult.null_pointer);
+    };
+    if (@intFromPtr(pubkey_hash) == 0) {
+        setLastError("TX builder: null pubkey_hash pointer");
+        return @intFromEnum(TxResult.null_pointer);
+    }
+    var hash_arr: [20]u8 = undefined;
+    @memcpy(&hash_arr, pubkey_hash[0..20]);
+    b.addP2pkhOutput(value, &hash_arr) catch |err| {
+        return switch (err) {
+            error.TooManyOutputs => @intFromEnum(TxResult.too_many_outputs),
+            error.OutputBelowDust => @intFromEnum(TxResult.output_below_dust),
+            else => @intFromEnum(TxResult.null_pointer),
+        };
+    };
+    return @intFromEnum(TxResult.success);
+}
+
+export fn quantum_tx_builder_add_p2tr_output_ctx(handle: ?*anyopaque, value: u64, x_only_pubkey: [*c]const u8) c_int {
+    const b = builderFromHandle(handle) orelse {
+        setLastError("TX builder: null handle");
+        return @intFromEnum(TxResult.null_pointer);
+    };
+    if (@intFromPtr(x_only_pubkey) == 0) {
+        setLastError("TX builder: null x_only_pubkey pointer");
+        return @intFromEnum(TxResult.null_pointer);
+    }
+    var pubkey_arr: [32]u8 = undefined;
+    @memcpy(&pubkey_arr, x_only_pubkey[0..32]);
+    b.addP2trOutput(value, &pubkey_arr) catch |err| {
+        return switch (err) {
+            error.TooManyOutputs => @intFromEnum(TxResult.too_many_outputs),
+            error.OutputBelowDust => @intFromEnum(TxResult.output_below_dust),
+            else => @intFromEnum(TxResult.null_pointer),
+        };
+    };
+    return @intFromEnum(TxResult.success);
+}
+
+export fn quantum_tx_builder_add_op_return_ctx(handle: ?*anyopaque, data: [*c]const u8, data_len: usize) c_int {
+    const b = builderFromHandle(handle) orelse {
+        setLastError("TX builder: null handle");
+        return @intFromEnum(TxResult.null_pointer);
+    };
+    if (data_len > 0 and @intFromPtr(data) == 0) {
+        setLastError("TX builder: null data pointer");
+        return @intFromEnum(TxResult.null_pointer);
+    }
+    const data_slice = if (data_len > 0) data[0..data_len] else &[_]u8{};
+    b.addOpReturnOutput(data_slice) catch |err| {
+        return switch (err) {
+            error.TooManyOutputs => @intFromEnum(TxResult.too_many_outputs),
+            error.BufferTooSmall => @intFromEnum(TxResult.buffer_too_small),
+            else => @intFromEnum(TxResult.null_pointer),
+        };
+    };
+    return @intFromEnum(TxResult.success);
+}
+
+export fn quantum_tx_builder_total_input_ctx(handle: ?*anyopaque) u64 {
+    const b = builderFromHandle(handle) orelse return 0;
+    return b.getTotalInputValue();
+}
+
+export fn quantum_tx_builder_total_output_ctx(handle: ?*anyopaque) u64 {
+    const b = builderFromHandle(handle) orelse return 0;
+    return b.getTotalOutputValue();
+}
+
+export fn quantum_tx_builder_fee_ctx(handle: ?*anyopaque) u64 {
+    const b = builderFromHandle(handle) orelse return 0;
+    return b.getFee();
+}
+
+export fn quantum_tx_builder_estimate_vsize_ctx(handle: ?*anyopaque) usize {
+    const b = builderFromHandle(handle) orelse return 0;
+    return b.estimateVsize();
+}
+
+export fn quantum_tx_builder_input_count_ctx(handle: ?*anyopaque) usize {
+    const b = builderFromHandle(handle) orelse return 0;
+    return b.input_count;
+}
+
+export fn quantum_tx_builder_output_count_ctx(handle: ?*anyopaque) usize {
+    const b = builderFromHandle(handle) orelse return 0;
+    return b.output_count;
+}
+
+export fn quantum_tx_sign_ctx(
+    handle: ?*anyopaque,
+    private_keys: [*c]const [32]u8,
+    key_count: usize,
+    out_tx: [*c]u8,
+    out_tx_size: usize,
+    actual_size: *usize,
+) c_int {
+    const b = builderFromHandle(handle) orelse {
+        setLastError("TX sign: null handle");
+        return @intFromEnum(TxResult.null_pointer);
+    };
+    if (@intFromPtr(private_keys) == 0) {
+        setLastError("TX sign: null private_keys pointer");
+        return @intFromEnum(TxResult.null_pointer);
+    }
+    if (@intFromPtr(out_tx) == 0 or @intFromPtr(actual_size) == 0) {
+        setLastError("TX sign: null output pointer");
+        return @intFromEnum(TxResult.null_pointer);
+    }
+    if (b.input_count == 0) {
+        setLastError("TX sign: no inputs");
+        return @intFromEnum(TxResult.no_inputs);
+    }
+    if (b.output_count == 0) {
+        setLastError("TX sign: no outputs");
+        return @intFromEnum(TxResult.no_outputs);
+    }
+    const keys_slice = private_keys[0..key_count];
+    const out_slice = out_tx[0..out_tx_size];
+    const tx_len = tx_builder.signTransaction(b, keys_slice, out_slice) catch |err| {
+        return switch (err) {
+            error.NoInputs => @intFromEnum(TxResult.no_inputs),
+            error.NoOutputs => @intFromEnum(TxResult.no_outputs),
+            error.InsufficientFunds => @intFromEnum(TxResult.insufficient_funds),
+            error.InvalidPrivateKey => @intFromEnum(TxResult.invalid_private_key),
+            error.SigningFailed => @intFromEnum(TxResult.signing_failed),
+            error.BufferTooSmall => @intFromEnum(TxResult.buffer_too_small),
+            else => @intFromEnum(TxResult.signing_failed),
+        };
+    };
+    actual_size.* = tx_len;
+    return @intFromEnum(TxResult.success);
+}
+
+export fn quantum_tx_compute_sighash_ctx(
+    handle: ?*anyopaque,
+    input_index: usize,
+    private_key: [*c]const u8,
+    sighash_out: [*c]u8,
+) c_int {
+    const b = builderFromHandle(handle) orelse {
+        setLastError("TX sighash: null handle");
+        return @intFromEnum(TxResult.null_pointer);
+    };
+    if (@intFromPtr(private_key) == 0 or @intFromPtr(sighash_out) == 0) {
+        setLastError("TX sighash: null pointer");
+        return @intFromEnum(TxResult.null_pointer);
+    }
+    var key_arr: [32]u8 = undefined;
+    @memcpy(&key_arr, private_key[0..32]);
+    const sighash = tx_builder.computeSighashBip143(
+        b,
+        input_index,
+        &key_arr,
+        tx_builder.SIGHASH_ALL,
+    ) catch |err| {
+        return switch (err) {
+            error.NoInputs => @intFromEnum(TxResult.no_inputs),
+            error.InvalidPrivateKey => @intFromEnum(TxResult.invalid_private_key),
+            else => @intFromEnum(TxResult.signing_failed),
+        };
+    };
+    @memcpy(sighash_out[0..32], &sighash);
+    return @intFromEnum(TxResult.success);
+}
+
 /// Sign a 32-byte hash with a private key (ECDSA secp256k1)
 ///
 /// Uses RFC6979 deterministic nonce generation.
@@ -2784,6 +3035,40 @@ test "tx builder fee calculation" {
 
     // Fee should be 10000 sats
     try std.testing.expectEqual(@as(u64, 10000), quantum_tx_builder_fee());
+}
+
+test "tx builder handle API (2.2): independent handles, counts, fee, null-safety" {
+    const h1 = quantum_tx_builder_new() orelse return error.OutOfMemory;
+    defer quantum_tx_builder_free(h1);
+    const h2 = quantum_tx_builder_new() orelse return error.OutOfMemory;
+    defer quantum_tx_builder_free(h2);
+
+    const utxo = CSpendableUtxo{
+        .txid = [_]u8{0x01} ** 32,
+        .vout = 0,
+        .value = 100000,
+        .pubkey_hash = [_]u8{0x02} ** 20,
+        .derivation_index = 0,
+    };
+    try std.testing.expectEqual(@as(c_int, 0), quantum_tx_builder_add_input_ctx(h1, &utxo));
+    const dest_hash = [_]u8{0x03} ** 20;
+    try std.testing.expectEqual(@as(c_int, 0), quantum_tx_builder_add_p2wpkh_output_ctx(h1, 90000, &dest_hash));
+
+    // h1 carries state; h2 is independent and empty (proves the threadlocal is gone).
+    try std.testing.expectEqual(@as(usize, 1), quantum_tx_builder_input_count_ctx(h1));
+    try std.testing.expectEqual(@as(u64, 100000), quantum_tx_builder_total_input_ctx(h1));
+    try std.testing.expectEqual(@as(u64, 90000), quantum_tx_builder_total_output_ctx(h1));
+    try std.testing.expectEqual(@as(u64, 10000), quantum_tx_builder_fee_ctx(h1));
+    try std.testing.expectEqual(@as(usize, 0), quantum_tx_builder_input_count_ctx(h2));
+    try std.testing.expectEqual(@as(u64, 0), quantum_tx_builder_total_input_ctx(h2));
+
+    // Null-handle safety: mutators reject, accessors return 0, free is a no-op.
+    try std.testing.expectEqual(
+        @as(c_int, @intFromEnum(TxResult.null_pointer)),
+        quantum_tx_builder_add_input_ctx(null, &utxo),
+    );
+    try std.testing.expectEqual(@as(usize, 0), quantum_tx_builder_input_count_ctx(null));
+    quantum_tx_builder_free(null);
 }
 
 test "derive pubkey" {
