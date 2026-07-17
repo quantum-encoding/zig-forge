@@ -725,7 +725,7 @@ test "seccomp: blocked syscall traps at runtime (Linux/x86_64)" {
     }
 
     try std.testing.expect(std.os.linux.W.IFSIGNALED(status));
-    try std.testing.expectEqual(@as(u32, std.os.linux.SIG.SYS), std.os.linux.W.TERMSIG(status));
+    try std.testing.expectEqual(@intFromEnum(std.os.linux.SIG.SYS), std.os.linux.W.TERMSIG(status));
 }
 
 test "seccomp: Error handling - invalid syscall names" {
