@@ -217,6 +217,57 @@ test "ECMA-48 ECH: erases N cells in place without moving the tail" {
     try std.testing.expectEqualStrings("ab  efghij", h.rowText(0, &buf));
 }
 
+// ── OSC / string terminators ────────────────────────────────────────────────
+
+test "ctlseqs OSC terminated by ST (ESC backslash) sets the title and prints NOTHING" {
+    // xterm ctlseqs: OSC strings end with BEL or ST (ESC \). The old parser
+    // returned to ground on the ESC, so the trailing '\' printed into the
+    // grid after every tmux/iTerm2-style title write.
+    var h = try Harness.init(5, 20);
+    defer h.deinit();
+    h.feed("\x1b]0;mytitle\x1b\\X");
+    const t = &h.term().terminal;
+    try std.testing.expectEqualStrings("mytitle", t.title[0..t.title_len]);
+    try std.testing.expectEqual(@as(u21, 'X'), h.charAt(0, 0)); // no stray backslash
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("X", h.rowText(0, &buf));
+}
+
+test "ctlseqs OSC terminated by BEL behaves identically" {
+    var h = try Harness.init(5, 20);
+    defer h.deinit();
+    h.feed("\x1b]0;beltitle\x07Y");
+    const t = &h.term().terminal;
+    try std.testing.expectEqualStrings("beltitle", t.title[0..t.title_len]);
+    try std.testing.expectEqual(@as(u21, 'Y'), h.charAt(0, 0));
+}
+
+// ── CSI parameter grammar ───────────────────────────────────────────────────
+
+test "ECMA-48 CUP with a leading empty parameter: ESC[;5H is row-default col-5" {
+    // esctest CUP default-parameter cases: an empty first param means default
+    // (row 1), and the 5 belongs to the SECOND parameter (column).
+    var h = try Harness.init(5, 20);
+    defer h.deinit();
+    h.feed("\x1b[3;3H"); // park somewhere first
+    h.feed("\x1b[;5H");
+    try std.testing.expectEqual(@as(u16, 0), h.cursor().row); // default row 1
+    try std.testing.expectEqual(@as(u16, 4), h.cursor().col); // column 5
+}
+
+test "ECMA-48 colon sub-parameters do not corrupt following params" {
+    // SGR 4:3 (curly underline) and 38:2::r:g:b use ':' SUB-parameters
+    // (ECMA-48 §5.4.2). Promoting them to top-level params made everything
+    // after them mis-parse. We skip sub-params; the params AFTER the
+    // colon-carrying one must still land correctly.
+    var h = try Harness.init(5, 20);
+    defer h.deinit();
+    h.feed("\x1b[4:3;1mZ"); // underline(with subparam) ; bold
+    const cell = h.term().terminal.grid.getCellConst(0, 0);
+    try std.testing.expectEqual(@as(u21, 'Z'), cell.char);
+    try std.testing.expect(cell.attrs.bold); // the ;1 survived the 4:3
+}
+
 // ── erase display / scrollback ──────────────────────────────────────────────
 
 test "ctlseqs ED 3 clears scrollback, ED 2 does not" {
