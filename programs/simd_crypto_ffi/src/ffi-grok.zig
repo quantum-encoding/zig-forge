@@ -586,7 +586,7 @@ export fn quantum_secure_compare(a: [*c]const u8, b: [*c]const u8, len: usize) c
 ///
 /// Returns a null-terminated string like "quantum-crypto-1.0.0"
 export fn quantum_version() [*:0]const u8 {
-    return "quantum-crypto-1.0.0";
+    return "quantum-crypto-1.1.0";
 }
 /// Get Zig stdlib version used for crypto implementations
 export fn quantum_zig_version() [*:0]const u8 {
@@ -1620,6 +1620,11 @@ pub const CMerkleProof = extern struct {
     hash_count: u32,
     /// Transaction index in the block
     index: u32,
+    /// Total number of transactions in the block (caller-supplied). This pins the
+    /// required Merkle depth so a valid-root proof cannot be replayed at the wrong
+    /// depth (CVE-2012-2459). MUST be non-zero. Previously the FFI layer synthesized
+    /// this as 1<<hash_count, which made the depth check tautological.
+    tx_count: u32,
 };
 
 /// SPV Verification Result codes
@@ -1655,6 +1660,10 @@ export fn quantum_spv_verify_merkle_proof(
         setLastError("SPV: proof depth exceeds maximum");
         return @intFromEnum(SpvResult.proof_too_deep);
     }
+    if (proof.tx_count == 0) {
+        setLastError("SPV: tx_count must be non-zero");
+        return @intFromEnum(SpvResult.invalid_input);
+    }
 
     // Convert to internal types
     const tx: spv.Hash = tx_hash[0..32].*;
@@ -1669,7 +1678,7 @@ export fn quantum_spv_verify_merkle_proof(
     const merkle_proof = spv.MerkleProof{
         .hashes = proof_hashes[0..proof.hash_count],
         .index = proof.index,
-        .tx_count = if (proof.hash_count == 0) 1 else (@as(u32, 1) << @intCast(proof.hash_count)),
+        .tx_count = proof.tx_count,
     };
 
     if (spv.verifyMerkleProof(tx, root, merkle_proof)) {
@@ -1880,6 +1889,10 @@ export fn quantum_spv_verify_payment(
         setLastError("SPV: proof depth exceeds maximum");
         return @intFromEnum(SpvResult.proof_too_deep);
     }
+    if (proof.tx_count == 0) {
+        setLastError("SPV: tx_count must be non-zero");
+        return @intFromEnum(SpvResult.invalid_input);
+    }
 
     // Convert to internal types
     const tx: spv.Hash = tx_hash[0..32].*;
@@ -1903,7 +1916,7 @@ export fn quantum_spv_verify_payment(
     const merkle_proof = spv.MerkleProof{
         .hashes = proof_hashes[0..proof.hash_count],
         .index = proof.index,
-        .tx_count = if (proof.hash_count == 0) 1 else (@as(u32, 1) << @intCast(proof.hash_count)),
+        .tx_count = proof.tx_count,
     };
 
     spv.verifyPayment(tx, merkle_proof, internal_header, prev, check_pow) catch |err| {
@@ -3194,6 +3207,44 @@ test "quantum_bitcoin_parse_tx rejects output-value sum overflow" {
     try std.testing.expectEqual(
         @intFromEnum(QuantumCryptoError.parse_error),
         rc,
+    );
+}
+
+test "quantum_spv_verify_merkle_proof honors caller tx_count (CVE-2012-2459 pin at the FFI boundary)" {
+    // 4-tx tree, our tx at index 0 (see spv.zig "Merkle Proof Verification - Valid").
+    const tx_hash = spv.hashDoubleSha256("Transaction Data");
+    const sibling_a = spv.hashDoubleSha256("Sibling A");
+    const sibling_b = spv.hashDoubleSha256("Sibling B");
+    const root = spv.hashPair(spv.hashPair(tx_hash, sibling_a), sibling_b);
+
+    var cproof = CMerkleProof{
+        .hashes = undefined,
+        .hash_count = 2,
+        .index = 0,
+        .tx_count = 4, // correct: depth-2 proof belongs to a 4-tx block
+    };
+    cproof.hashes[0] = sibling_a;
+    cproof.hashes[1] = sibling_b;
+
+    // Correct tx_count → success.
+    try std.testing.expectEqual(
+        @intFromEnum(SpvResult.success),
+        quantum_spv_verify_merkle_proof(&tx_hash, &root, &cproof),
+    );
+
+    // Attacker claims a 2-tx block (depth 1) for a depth-2 proof → rejected by the
+    // depth pin. Before this fix the FFI synthesized tx_count = 1<<hash_count and
+    // ignored the caller's field, so this mismatched-shape proof was accepted.
+    cproof.tx_count = 2;
+    try std.testing.expect(
+        quantum_spv_verify_merkle_proof(&tx_hash, &root, &cproof) != @intFromEnum(SpvResult.success),
+    );
+
+    // tx_count == 0 is rejected by the new guard.
+    cproof.tx_count = 0;
+    try std.testing.expectEqual(
+        @intFromEnum(SpvResult.invalid_input),
+        quantum_spv_verify_merkle_proof(&tx_hash, &root, &cproof),
     );
 }
 
