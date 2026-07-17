@@ -40,6 +40,7 @@ pub const LANG_RUST: c_int = ZIG_LENS_LANG_RUST as c_int;
 pub const LANG_C: c_int = ZIG_LENS_LANG_C as c_int;
 pub const LANG_PYTHON: c_int = ZIG_LENS_LANG_PYTHON as c_int;
 pub const LANG_JAVASCRIPT: c_int = ZIG_LENS_LANG_JAVASCRIPT as c_int;
+pub const LANG_GO: c_int = ZIG_LENS_LANG_GO as c_int;
 
 /// Output format for analysis results.
 #[derive(Debug, Clone, Copy)]
@@ -71,6 +72,7 @@ pub enum Language {
     C,
     Python,
     JavaScript,
+    Go,
 }
 
 impl Language {
@@ -81,6 +83,7 @@ impl Language {
             Language::C => LANG_C,
             Language::Python => LANG_PYTHON,
             Language::JavaScript => LANG_JAVASCRIPT,
+            Language::Go => LANG_GO,
         }
     }
 }

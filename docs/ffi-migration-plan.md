@@ -10,7 +10,7 @@ _Generated 2026-07-17 from an investigation-only mapping pass over the audited T
 |---|---|---|---|---|
 | 2.1 | `simd_crypto_ffi` | CMerkleProof (extern/#[repr(C)] struct layout: 1032->1036 bytes, new u32 field tx_count at offset 1032) | 6 | ☐ not started |
 | 2.2 | `simd_crypto_ffi` | quantum_tx_builder_new (NEW) | 8 | ☐ not started |
-| 2.3 | `financial_engine` | FfiTradingSignal (Rust mirror) — current_price/target_price/stop_loss f64 -> i64 | 10 | ☐ not started |
+| 2.3 | `financial_engine` | FfiTradingSignal (Rust mirror) f64 -> i64 | 10 | ✅ LANDED quantum_vault 5a703cef (consumer-only) |
 | 2.4 | `zig_lens` | ZIG_LENS_LANG_GO (new C macro = 5) | 7 | ☐ not started |
 | 2.5 | `zdedupe` | zdedupe_list_dir | 7 | ☐ not started |
 | 2.6 | `zig_ratelimit` | (moot — see below) | — | ✅ N/A |
