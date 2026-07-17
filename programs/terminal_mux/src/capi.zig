@@ -848,7 +848,8 @@ pub export fn tmux_get_theme(out: ?*CTheme) void {
 // =============================================================================
 // URL detection — scan the active pane's visible grid for links. The renderer
 // paints each range in theme.url + underline and reads the URL text for opening
-// straight from its own cell buffer (range = row, start_col, end_col-exclusive).
+// straight from its own cell buffer. A range is {start_row, start_col,
+// end_row, end_col-exclusive} — multi-row when the URL soft-wrapped.
 // =============================================================================
 
 pub const CUrlRange = url.UrlRange; // extern struct {row, start_col, end_col: u16}

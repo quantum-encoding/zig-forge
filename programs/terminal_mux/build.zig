@@ -102,6 +102,17 @@ pub fn build(b: *std.Build) void {
     zterm_step.dependOn(&zterm_run.step);
 
     // ==========================================================================
+    // End-to-end QA — tests/mux_qa.py drives the installed standalone binary
+    // through a real PTY (host-scroll invariant, background-pane drain,
+    // control socket, persistent detach). Wired here so it stops being a
+    // "runs when someone remembers" harness.
+    // ==========================================================================
+    const qa_cmd = b.addSystemCommand(&.{ "python3", "tests/mux_qa.py" });
+    qa_cmd.step.dependOn(b.getInstallStep());
+    const qa_step = b.step("qa", "Run the end-to-end PTY QA harness (needs python3)");
+    qa_step.dependOn(&qa_cmd.step);
+
+    // ==========================================================================
     // Tests
     // ==========================================================================
     const lib_tests = b.addTest(.{

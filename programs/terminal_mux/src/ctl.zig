@@ -98,18 +98,6 @@ fn nthPane(sess: *session.Session, n: usize) ?PaneRef {
     return null;
 }
 
-fn appendJsonStr(out: *std.ArrayList(u8), alloc: std.mem.Allocator, s: []const u8) !void {
-    try out.append(alloc, '"');
-    for (s) |ch| switch (ch) {
-        '"' => try out.appendSlice(alloc, "\\\""),
-        '\\' => try out.appendSlice(alloc, "\\\\"),
-        '\n' => try out.appendSlice(alloc, "\\n"),
-        '\t' => try out.appendSlice(alloc, "\\t"),
-        else => if (ch >= 0x20) try out.append(alloc, ch),
-    };
-    try out.append(alloc, '"');
-}
-
 /// Accept one pending connection and serve one request. Returns true when the
 /// command changed layout/focus (caller should clear + full-redraw).
 pub fn accept(
@@ -241,31 +229,41 @@ fn handle(
     return false;
 }
 
-/// Emit the pane list as JSON (both protocol front-ends).
+/// Emit the pane list as JSON (both protocol front-ends). Serialized with
+/// std.json.Stringify per the repo JSON-IN-FMT convention — no hand escaping.
+const PaneInfo = struct {
+    pane: usize,
+    window: usize,
+    active: bool,
+    rows: u16,
+    cols: u16,
+    pid: i64,
+    cwd: []const u8,
+};
+
 fn doList(conn: c.fd_t, sess: *session.Session, alloc: std.mem.Allocator) !void {
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(alloc);
-    try out.append(alloc, '[');
+    var infos: std.ArrayList(PaneInfo) = .empty;
+    defer infos.deinit(alloc);
     var flat: usize = 0;
     for (sess.windows.items, 0..) |w, wi| {
         for (w.panes.items, 0..) |p, pi| {
             const grid = &p.terminal.grid;
-            const pid: i64 = if (p.pty) |pt| (if (pt.child_pid) |cp| @intCast(cp) else 0) else 0;
-            const active = wi == sess.active_window_idx and pi == w.active_pane_idx;
-            if (flat != 0) try out.append(alloc, ',');
-            var hb: [128]u8 = undefined;
-            try out.appendSlice(alloc, std.fmt.bufPrint(
-                &hb,
-                "{{\"pane\":{d},\"window\":{d},\"active\":{},\"rows\":{d},\"cols\":{d},\"pid\":{d},\"cwd\":",
-                .{ flat, wi, active, grid.rows, grid.cols, pid },
-            ) catch "{");
-            try appendJsonStr(&out, alloc, p.cwd[0..p.cwd_len]);
-            try out.append(alloc, '}');
+            try infos.append(alloc, .{
+                .pane = flat,
+                .window = wi,
+                .active = wi == sess.active_window_idx and pi == w.active_pane_idx,
+                .rows = grid.rows,
+                .cols = grid.cols,
+                .pid = if (p.pty) |pt| (if (pt.child_pid) |cp| @intCast(cp) else 0) else 0,
+                .cwd = p.cwd[0..p.cwd_len],
+            });
             flat += 1;
         }
     }
-    try out.appendSlice(alloc, "]\n");
-    cwrite(conn, out.items);
+    const json = try std.json.Stringify.valueAlloc(alloc, infos.items, .{});
+    defer alloc.free(json);
+    cwrite(conn, json);
+    cwrite(conn, "\n");
 }
 
 /// Split the active pane, spawn a shell, optionally queue `run` to be typed

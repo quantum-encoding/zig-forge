@@ -69,19 +69,6 @@ fn pclose(fd: c.fd_t) void {
     _ = c.close(fd);
 }
 
-/// Append a JSON-escaped string ("..."), so cwd/title with quotes/backslashes don't break the output.
-fn appendJsonStr(out: *std.ArrayList(u8), alloc: std.mem.Allocator, s: []const u8) !void {
-    try out.append(alloc, '"');
-    for (s) |ch| switch (ch) {
-        '"' => try out.appendSlice(alloc, "\\\""),
-        '\\' => try out.appendSlice(alloc, "\\\\"),
-        '\n' => try out.appendSlice(alloc, "\\n"),
-        '\t' => try out.appendSlice(alloc, "\\t"),
-        else => if (ch >= 0x20) try out.append(alloc, ch), // drop other control bytes
-    };
-    try out.append(alloc, '"');
-}
-
 // ══ SERVER ════════════════════════════════════════════════════════════════════════════════════════════
 const Pane = struct { id: u64, handle: *capi.TmuxSession, fd: i32 };
 
@@ -246,24 +233,28 @@ fn handleConn(conn: i32, panes: *std.ArrayList(Pane), attaches: *std.ArrayList(A
     const cmd = it.next() orelse return false;
 
     if (std.mem.eql(u8, cmd, "list")) {
-        // JSON array, mirroring `wezterm cli list --format json` so mac-drive parses it identically.
-        var out: std.ArrayList(u8) = .empty;
-        defer out.deinit(alloc);
-        try out.appendSlice(alloc, "[");
-        for (panes.items, 0..) |p, i| {
+        // JSON array, mirroring `wezterm cli list --format json` so mac-drive
+        // parses it identically. std.json.Stringify per repo convention.
+        const PaneInfo = struct { pane: u64, rows: u16, cols: u16, pid: i64, cwd: []const u8 };
+        var infos: std.ArrayList(PaneInfo) = .empty;
+        defer infos.deinit(alloc);
+        for (panes.items) |p| {
             var rows: u16 = 0;
             var cols: u16 = 0;
             capi.tmux_grid_size(p.handle, &rows, &cols);
             const pane = p.handle.sess.getActiveWindow().getActivePane();
-            const pid: i64 = if (pane.pty) |pt| (if (pt.child_pid) |cp| @intCast(cp) else 0) else 0;
-            if (i != 0) try out.append(alloc, ',');
-            var hb: [96]u8 = undefined;
-            try out.appendSlice(alloc, std.fmt.bufPrint(&hb, "{{\"pane\":{d},\"rows\":{d},\"cols\":{d},\"pid\":{d},\"cwd\":", .{ p.id, rows, cols, pid }) catch "{");
-            try appendJsonStr(&out, alloc, pane.cwd[0..pane.cwd_len]);
-            try out.append(alloc, '}');
+            try infos.append(alloc, .{
+                .pane = p.id,
+                .rows = rows,
+                .cols = cols,
+                .pid = if (pane.pty) |pt| (if (pt.child_pid) |cp| @intCast(cp) else 0) else 0,
+                .cwd = pane.cwd[0..pane.cwd_len],
+            });
         }
-        try out.appendSlice(alloc, "]\n");
-        _ = pwrite(conn, out.items) catch {};
+        const json = try std.json.Stringify.valueAlloc(alloc, infos.items, .{});
+        defer alloc.free(json);
+        _ = pwrite(conn, json) catch {};
+        _ = pwrite(conn, "\n") catch {};
     } else if (std.mem.eql(u8, cmd, "spawn")) {
         const id = spawnPane(panes, alloc) catch {
             _ = pwrite(conn, "{\"ok\":false,\"error\":\"spawn failed\"}\n") catch {};
@@ -452,18 +443,22 @@ fn runClient(alloc: std.mem.Allocator, args: []const []const u8) !void {
         const verb = args[0];
         if (std.mem.eql(u8, verb, "split")) {
             const dir = if (di >= 2) args[1] else "h";
-            try req.appendSlice(alloc, "{\"cmd\":\"split\",\"dir\":\"");
-            try req.appendSlice(alloc, if (dir.len > 0 and (dir[0] == 'v' or dir[0] == 'V')) "v" else "h");
-            try req.appendSlice(alloc, "\",\"run\":");
-            try appendJsonStr(&req, alloc, payload.items);
-            try req.appendSlice(alloc, "}");
+            const json = try std.json.Stringify.valueAlloc(alloc, .{
+                .cmd = "split",
+                .dir = if (dir.len > 0 and (dir[0] == 'v' or dir[0] == 'V')) "v" else "h",
+                .run = payload.items,
+            }, .{});
+            defer alloc.free(json);
+            try req.appendSlice(alloc, json);
         } else if (std.mem.eql(u8, verb, "send")) {
-            const id = if (di >= 2) args[1] else "0";
-            try req.appendSlice(alloc, "{\"cmd\":\"send\",\"pane\":");
-            try req.appendSlice(alloc, id);
-            try req.appendSlice(alloc, ",\"text\":");
-            try appendJsonStr(&req, alloc, payload.items);
-            try req.appendSlice(alloc, "}");
+            const id_str = if (di >= 2) args[1] else "0";
+            const json = try std.json.Stringify.valueAlloc(alloc, .{
+                .cmd = "send",
+                .pane = std.fmt.parseInt(usize, id_str, 10) catch 0,
+                .text = payload.items,
+            }, .{});
+            defer alloc.free(json);
+            try req.appendSlice(alloc, json);
         } else {
             std.debug.print("zterm: '--' payload is only supported for split/send\n", .{});
             return error.BadUsage;
