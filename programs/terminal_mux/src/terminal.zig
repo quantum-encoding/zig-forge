@@ -603,9 +603,45 @@ pub const Terminal = struct {
         self.tab_stops.deinit();
     }
 
-    /// Check if a character is wide (occupies 2 columns)
+    /// Check if a character is wide (occupies 2 columns).
+    /// Anchor: Unicode 15 EastAsianWidth.txt `W`/`F` entries (UAX #11) — the
+    /// same table libc wcwidth follows, so cursor math agrees with the shell.
     fn isWideChar(char: u21) bool {
         return switch (char) {
+            // Emoji & pictographs outside the CJK blocks (EAW `W`):
+            0x231A...0x231B => true, // watch, hourglass
+            0x23E9...0x23EC => true, // fast-forward etc.
+            0x23F0, 0x23F3 => true,
+            0x25FD...0x25FE => true, // small squares
+            0x2614...0x2615 => true, // umbrella, hot beverage
+            0x2648...0x2653 => true, // zodiac
+            0x267F, 0x2693, 0x26A1 => true,
+            0x26AA...0x26AB => true,
+            0x26BD...0x26BE => true,
+            0x26C4...0x26C5 => true,
+            0x26CE, 0x26D4, 0x26EA => true,
+            0x26F2...0x26F3 => true,
+            0x26F5, 0x26FA, 0x26FD => true,
+            0x2705 => true,
+            0x270A...0x270B => true,
+            0x2728, 0x274C, 0x274E => true,
+            0x2753...0x2755 => true,
+            0x2757 => true,
+            0x2795...0x2797 => true,
+            0x27B0, 0x27BF => true,
+            0x2B1B...0x2B1C => true,
+            0x2B50, 0x2B55 => true,
+            0x1F004, 0x1F0CF, 0x1F18E => true,
+            0x1F191...0x1F19A => true,
+            0x1F201...0x1F202 => true,
+            0x1F21A, 0x1F22F => true,
+            0x1F232...0x1F23A => true,
+            0x1F250...0x1F251 => true,
+            0x1F300...0x1F64F => true, // symbols & pictographs, emoticons
+            0x1F680...0x1F6FF => true, // transport (🚀 …)
+            0x1F7E0...0x1F7EB => true, // colored circles/squares
+            0x1F90C...0x1F9FF => true, // supplemental symbols
+            0x1FA70...0x1FAFF => true, // symbols extended-A
             // Hangul Jamo
             0x1100...0x115F => true,
             // CJK Radicals, Kangxi, Ideographic Description Characters

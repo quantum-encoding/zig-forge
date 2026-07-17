@@ -140,6 +140,20 @@ test "esctest wide char at the last column wraps whole (never split)" {
     try std.testing.expectEqual(@as(u2, 0), h.term().terminal.grid.getCellConst(1, 1).width);
 }
 
+test "UAX-11: emoji are width 2 (renderers and the shell's wcwidth must agree)" {
+    // Unicode 15 EastAsianWidth.txt lists U+1F680 (rocket) and U+231A (watch)
+    // as `W`. Width-1 emoji made the Metal consumers overlap the glyph with
+    // the next cell and drift the cursor vs the shell.
+    var h = try Harness.init(5, 10);
+    defer h.deinit();
+    h.feed("\u{1F680}\u{231A}x");
+    try std.testing.expectEqual(@as(u2, 2), h.term().terminal.grid.getCellConst(0, 0).width);
+    try std.testing.expectEqual(@as(u2, 0), h.term().terminal.grid.getCellConst(0, 1).width);
+    try std.testing.expectEqual(@as(u2, 2), h.term().terminal.grid.getCellConst(0, 2).width);
+    try std.testing.expectEqual(@as(u21, 'x'), h.charAt(0, 4));
+    try std.testing.expectEqual(@as(u16, 5), h.cursor().col);
+}
+
 test "combining characters do not advance the cursor" {
     // esctest: combining-mark tests — U+0301 after 'e' must not move the
     // cursor (we drop the mark; composing is out of scope, mis-advancing is a bug).
