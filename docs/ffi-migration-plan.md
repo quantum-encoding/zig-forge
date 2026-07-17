@@ -8,7 +8,7 @@ _Generated 2026-07-17 from an investigation-only mapping pass over the audited T
 
 | # | Program | Change | Consumers | Status |
 |---|---|---|---|---|
-| 2.1 | `simd_crypto_ffi` | CMerkleProof (extern/#[repr(C)] struct layout: 1032->1036 bytes, new u32 field tx_count at offset 1032) | 6 | ☐ not started |
+| 2.1 | `simd_crypto_ffi` | CMerkleProof +tx_count (1032->1036) | 6 | ✅ LANDED simd_crypto_ffi efffe284 + walletcore 292e5b3 (verify pending: quantum_vault/iOS/Android) |
 | 2.2 | `simd_crypto_ffi` | quantum_tx_builder_new (NEW) | 8 | ☐ not started |
 | 2.3 | `financial_engine` | FfiTradingSignal (Rust mirror) f64 -> i64 | 10 | ✅ LANDED quantum_vault 5a703cef (consumer-only) |
 | 2.4 | `zig_lens` | ZIG_LENS_LANG_GO=5 | 7 | ✅ LANDED zig-forge 7802b349 (in-tree binding only) |
