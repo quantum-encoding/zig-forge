@@ -100,6 +100,12 @@ pub const Pane = struct {
     cwd: [std.fs.max_path_bytes]u8,
     cwd_len: usize,
 
+    /// Queued input delivered on the shell's FIRST OUTPUT (its prompt).
+    /// Writing at spawn time races the shell's tty init — zsh calls
+    /// tcsetattr(TCSAFLUSH) which DISCARDS anything typed before it's up.
+    boot_cmd: [1024]u8,
+    boot_len: usize,
+
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator, id: PaneId, rect: Rect, scrollback: u32) !*Self {
@@ -119,9 +125,19 @@ pub const Pane = struct {
             .title_len = 0,
             .cwd = undefined,
             .cwd_len = 0,
+            .boot_cmd = undefined,
+            .boot_len = 0,
         };
 
         return pane;
+    }
+
+    /// Queue input to be typed once the shell shows signs of life (first
+    /// output). A trailing newline is the caller's choice.
+    pub fn setBootCommand(self: *Self, cmd: []const u8) void {
+        const n = @min(cmd.len, self.boot_cmd.len);
+        @memcpy(self.boot_cmd[0..n], cmd[0..n]);
+        self.boot_len = n;
     }
 
     pub fn deinit(self: *Self) void {
@@ -160,6 +176,14 @@ pub const Pane = struct {
     /// Any control/non-ASCII byte (or a non-ground parser state) drops to the
     /// scalar state machine for that byte, then the sweep resumes.
     pub fn processOutput(self: *Self, data: []const u8) void {
+        // First output = the shell survived its tty init; deliver the queued
+        // boot command now (see setBootCommand for why not at spawn).
+        if (self.boot_len > 0 and data.len > 0) {
+            const n = self.boot_len;
+            self.boot_len = 0;
+            self.sendInput(self.boot_cmd[0..n]) catch {};
+        }
+
         const V = @Vector(16, u8);
         const lo: V = @splat(0x20); // first printable
         const hi: V = @splat(0x7F); // DEL — exclusive upper bound

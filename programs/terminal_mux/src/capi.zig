@@ -535,10 +535,25 @@ pub export fn tmux_cursor(handle: ?*TmuxSession, out_row: ?*u16, out_col: ?*u16,
 /// Returns the viewport's scrollback offset after the call (0 = live bottom).
 pub export fn tmux_scroll(handle: ?*TmuxSession, delta: c_int, row: u16, col: u16) c_long {
     const h = handle orelse return 0;
-    const pane = activePane(h);
-    const term = &pane.terminal;
     if (delta == 0) return tmux_scroll_offset(handle);
+    return scrollPane(activePane(h), delta, row, col);
+}
 
+/// Wheel-scroll a SPECIFIC pane (multi-pane hosts route the wheel to the pane
+/// under the cursor, not the focused one). `row`/`col` are PANE-LOCAL.
+pub export fn tmux_pane_scroll(handle: ?*TmuxSession, idx: usize, delta: c_int, row: u16, col: u16) c_long {
+    const h = handle orelse return 0;
+    const p = paneAt(h, idx) orelse return 0;
+    if (delta == 0) {
+        const term = &p.terminal;
+        if (term.modes.alt_screen) return 0;
+        return @intCast(@min(term.scrollback_offset, term.scrollback.len));
+    }
+    return scrollPane(p, delta, row, col);
+}
+
+fn scrollPane(pane: *session.Pane, delta: c_int, row: u16, col: u16) c_long {
+    const term = &pane.terminal;
     const up = delta > 0;
     const mag: usize = @intCast(if (up) delta else -delta);
 
@@ -719,6 +734,59 @@ pub export fn tmux_close_pane(handle: ?*TmuxSession, idx: usize) c_int {
     if (w.panes.items.len <= 1) return -1;
     _ = w.removePaneReflow(p.id);
     return 0;
+}
+
+/// Move the border between pane `idx` and its right (dx) / bottom (dy)
+/// neighbor by that many cells (positive grows pane `idx`). The neighbor must
+/// span the same cross-axis extent (clean tiling). Returns 0 when anything
+/// moved, -1 otherwise. Deltas clamp so both panes keep >= 2 cells.
+pub export fn tmux_resize_split(handle: ?*TmuxSession, idx: usize, dx: c_int, dy: c_int) c_int {
+    const h = handle orelse return -1;
+    const w = h.sess.getActiveWindow();
+    const p = paneAt(h, idx) orelse return -1;
+    var changed = false;
+
+    if (dx != 0) {
+        for (w.panes.items) |q| {
+            if (q == p) continue;
+            if (q.rect.y == p.rect.y and q.rect.height == p.rect.height and
+                q.rect.x == p.rect.x + p.rect.width + 1)
+            {
+                const pw: i32 = p.rect.width;
+                const qw: i32 = q.rect.width;
+                var d: i32 = dx;
+                if (pw + d < 2) d = 2 - pw;
+                if (qw - d < 2) d = qw - 2;
+                if (d != 0) {
+                    p.resize(.{ .x = p.rect.x, .y = p.rect.y, .width = @intCast(pw + d), .height = p.rect.height }) catch {};
+                    q.resize(.{ .x = @intCast(@as(i32, q.rect.x) + d), .y = q.rect.y, .width = @intCast(qw - d), .height = q.rect.height }) catch {};
+                    changed = true;
+                }
+                break;
+            }
+        }
+    }
+    if (dy != 0) {
+        for (w.panes.items) |q| {
+            if (q == p) continue;
+            if (q.rect.x == p.rect.x and q.rect.width == p.rect.width and
+                q.rect.y == p.rect.y + p.rect.height + 1)
+            {
+                const ph: i32 = p.rect.height;
+                const qh: i32 = q.rect.height;
+                var d: i32 = dy;
+                if (ph + d < 2) d = 2 - ph;
+                if (qh - d < 2) d = qh - 2;
+                if (d != 0) {
+                    p.resize(.{ .x = p.rect.x, .y = p.rect.y, .width = p.rect.width, .height = @intCast(ph + d) }) catch {};
+                    q.resize(.{ .x = q.rect.x, .y = @intCast(@as(i32, q.rect.y) + d), .width = q.rect.width, .height = @intCast(qh - d) }) catch {};
+                    changed = true;
+                }
+                break;
+            }
+        }
+    }
+    return if (changed) 0 else -1;
 }
 
 // =============================================================================

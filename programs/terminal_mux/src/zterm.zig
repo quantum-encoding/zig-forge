@@ -262,12 +262,55 @@ fn runClient(alloc: std.mem.Allocator, args: []const []const u8) !void {
         return error.ConnectFailed;
     }
 
-    // Join args into one request line.
+    // Build the request. `--` routes the remainder through the JSON protocol
+    // (binary-safe text; split gains a run command typed once the shell is up):
+    //   zterm cli split h -- claude        → {"cmd":"split","dir":"h","run":"claude\n"}
+    //   zterm cli send 0 -- git log -5     → {"cmd":"send","pane":0,"text":"git log -5\n"}
+    // Raw JSON also works directly: zterm cli '{"cmd":"capture","pane":0,"lines":100}'
     var req: std.ArrayList(u8) = .empty;
     defer req.deinit(alloc);
+
+    var dash: ?usize = null;
     for (args, 0..) |a, i| {
-        if (i != 0) try req.append(alloc, ' ');
-        try req.appendSlice(alloc, a);
+        if (std.mem.eql(u8, a, "--")) {
+            dash = i;
+            break;
+        }
+    }
+
+    if (dash) |di| {
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(alloc);
+        for (args[di + 1 ..], 0..) |a, i| {
+            if (i != 0) try payload.append(alloc, ' ');
+            try payload.appendSlice(alloc, a);
+        }
+        try payload.append(alloc, '\n'); // typed input: submit it
+
+        const verb = args[0];
+        if (std.mem.eql(u8, verb, "split")) {
+            const dir = if (di >= 2) args[1] else "h";
+            try req.appendSlice(alloc, "{\"cmd\":\"split\",\"dir\":\"");
+            try req.appendSlice(alloc, if (dir.len > 0 and (dir[0] == 'v' or dir[0] == 'V')) "v" else "h");
+            try req.appendSlice(alloc, "\",\"run\":");
+            try appendJsonStr(&req, alloc, payload.items);
+            try req.appendSlice(alloc, "}");
+        } else if (std.mem.eql(u8, verb, "send")) {
+            const id = if (di >= 2) args[1] else "0";
+            try req.appendSlice(alloc, "{\"cmd\":\"send\",\"pane\":");
+            try req.appendSlice(alloc, id);
+            try req.appendSlice(alloc, ",\"text\":");
+            try appendJsonStr(&req, alloc, payload.items);
+            try req.appendSlice(alloc, "}");
+        } else {
+            std.debug.print("zterm: '--' payload is only supported for split/send\n", .{});
+            return error.BadUsage;
+        }
+    } else {
+        for (args, 0..) |a, i| {
+            if (i != 0) try req.append(alloc, ' ');
+            try req.appendSlice(alloc, a);
+        }
     }
     try req.append(alloc, '\n');
     _ = try pwrite(fd, req.items);

@@ -372,6 +372,22 @@ def scenario_control_socket():
         panes = json.loads(cli(sock, "list"))
         assert len(panes) == 1, f"expected 1 pane after kill: {panes}"
 
+        # Protocol v2 (JSON): split with a queued `run` command — delivered on
+        # the shell's first output (zsh's TCSAFLUSH would discard spawn-time
+        # typing) — then capture with SGR escapes preserved.
+        run_marker = tempfile.mktemp(prefix="mux-qa-run-")
+        r = json.loads(cli(sock, json.dumps(
+            {"cmd": "split", "dir": "h", "run": f"touch {run_marker}\n"})))
+        assert r["ok"], f"json split failed: {r}"
+        deadline = time.time() + 90
+        while time.time() < deadline and not os.path.exists(run_marker):
+            time.sleep(0.25)
+        assert os.path.exists(run_marker), "queued run command never executed"
+        os.unlink(run_marker)
+        cap = cli(sock, json.dumps({"cmd": "capture", "pane": 0, "escapes": True}))
+        assert "\x1b[" in cap, "escapes capture contains no SGR"
+        assert cli(sock, json.dumps({"cmd": "kill", "pane": 1})).startswith('{"ok":true')
+
         stop.set()
         kill_mux(pid)                          # EIO unblocks the drainer read
         t.join(timeout=2)

@@ -140,6 +140,8 @@ int      tmux_pane_pty_fd(tmux_session *handle, size_t idx);
 void     tmux_pane_cursor(tmux_session *handle, size_t idx, uint16_t *out_row, uint16_t *out_col, bool *out_visible);
 size_t   tmux_pane_read_cells(tmux_session *handle, size_t idx, tmux_cell *out, size_t max_cells);
 int      tmux_close_pane(tmux_session *handle, size_t idx);
+long     tmux_pane_scroll(tmux_session *handle, size_t idx, int delta, uint16_t row, uint16_t col);
+int      tmux_resize_split(tmux_session *handle, size_t idx, int dx, int dy);
 
 /* ---- theme (shared color scheme) ----
  * The single source of truth for colors, shared by every renderer. Read your

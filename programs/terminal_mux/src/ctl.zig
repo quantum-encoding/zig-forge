@@ -24,6 +24,7 @@ const std = @import("std");
 const c = std.c;
 const posix = std.posix;
 const session = @import("session.zig");
+const terminal = @import("terminal.zig");
 
 pub const Ctl = struct {
     fd: c.fd_t,
@@ -137,38 +138,24 @@ fn handle(
     env: [*:null]const ?[*:0]const u8,
     alloc: std.mem.Allocator,
 ) !bool {
-    var buf: [4096]u8 = undefined;
+    var buf: [65536]u8 = undefined;
     const n = posix.read(conn, &buf) catch return false;
     if (n == 0) return false;
     var ln = n;
     while (ln > 0 and (buf[ln - 1] == '\n' or buf[ln - 1] == '\r')) ln -= 1;
-    var it = std.mem.tokenizeScalar(u8, buf[0..ln], ' ');
+    const line = buf[0..ln];
+
+    // Protocol v2: a request starting with '{' is JSON — binary-safe text
+    // (newlines in `send`), `split` with a queued `run` command, `capture`
+    // with scrollback depth + SGR escapes. The line protocol stays for
+    // hand-typed use.
+    if (line.len > 0 and line[0] == '{') return handleJson(conn, line, sess, shell, env, alloc);
+
+    var it = std.mem.tokenizeScalar(u8, line, ' ');
     const cmd = it.next() orelse return false;
 
     if (std.mem.eql(u8, cmd, "list")) {
-        var out: std.ArrayList(u8) = .empty;
-        defer out.deinit(alloc);
-        try out.append(alloc, '[');
-        var flat: usize = 0;
-        for (sess.windows.items, 0..) |w, wi| {
-            for (w.panes.items, 0..) |p, pi| {
-                const grid = &p.terminal.grid;
-                const pid: i64 = if (p.pty) |pt| (if (pt.child_pid) |cp| @intCast(cp) else 0) else 0;
-                const active = wi == sess.active_window_idx and pi == w.active_pane_idx;
-                if (flat != 0) try out.append(alloc, ',');
-                var hb: [128]u8 = undefined;
-                try out.appendSlice(alloc, std.fmt.bufPrint(
-                    &hb,
-                    "{{\"pane\":{d},\"window\":{d},\"active\":{},\"rows\":{d},\"cols\":{d},\"pid\":{d},\"cwd\":",
-                    .{ flat, wi, active, grid.rows, grid.cols, pid },
-                ) catch "{");
-                try appendJsonStr(&out, alloc, p.cwd[0..p.cwd_len]);
-                try out.append(alloc, '}');
-                flat += 1;
-            }
-        }
-        try out.appendSlice(alloc, "]\n");
-        cwrite(conn, out.items);
+        try doList(conn, sess, alloc);
         return false;
     } else if (std.mem.eql(u8, cmd, "send")) {
         const id = std.fmt.parseInt(usize, it.next() orelse "", 10) catch {
@@ -202,26 +189,11 @@ fn handle(
             cwrite(conn, "err no such pane\n");
             return false;
         };
-        try writeCapture(conn, ref.pane, alloc);
+        try writeCapture(conn, ref.pane, alloc, 0, false);
         return false;
     } else if (std.mem.eql(u8, cmd, "split")) {
         const dir = it.next() orelse "h";
-        const d: session.SplitDirection = if (dir.len > 0 and (dir[0] == 'v' or dir[0] == 'V'))
-            .vertical
-        else
-            .horizontal;
-        const w = sess.getActiveWindow();
-        const new_pane = w.split(d, 10_000) catch {
-            cwrite(conn, "{\"ok\":false,\"error\":\"split failed\"}\n");
-            return false;
-        };
-        new_pane.spawn(shell, env) catch {
-            cwrite(conn, "{\"ok\":false,\"error\":\"spawn failed\"}\n");
-            return true;
-        };
-        var b: [64]u8 = undefined;
-        cwrite(conn, std.fmt.bufPrint(&b, "{{\"ok\":true,\"pane\":{d}}}\n", .{flatIndexOf(sess, new_pane) orelse 0}) catch "{\"ok\":true}\n");
-        return true;
+        return doSplit(conn, sess, shell, env, dir, null);
     } else if (std.mem.eql(u8, cmd, "new-window")) {
         const new_win = sess.createWindow() catch {
             cwrite(conn, "{\"ok\":false,\"error\":\"create failed\"}\n");
@@ -269,6 +241,196 @@ fn handle(
     return false;
 }
 
+/// Emit the pane list as JSON (both protocol front-ends).
+fn doList(conn: c.fd_t, sess: *session.Session, alloc: std.mem.Allocator) !void {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    try out.append(alloc, '[');
+    var flat: usize = 0;
+    for (sess.windows.items, 0..) |w, wi| {
+        for (w.panes.items, 0..) |p, pi| {
+            const grid = &p.terminal.grid;
+            const pid: i64 = if (p.pty) |pt| (if (pt.child_pid) |cp| @intCast(cp) else 0) else 0;
+            const active = wi == sess.active_window_idx and pi == w.active_pane_idx;
+            if (flat != 0) try out.append(alloc, ',');
+            var hb: [128]u8 = undefined;
+            try out.appendSlice(alloc, std.fmt.bufPrint(
+                &hb,
+                "{{\"pane\":{d},\"window\":{d},\"active\":{},\"rows\":{d},\"cols\":{d},\"pid\":{d},\"cwd\":",
+                .{ flat, wi, active, grid.rows, grid.cols, pid },
+            ) catch "{");
+            try appendJsonStr(&out, alloc, p.cwd[0..p.cwd_len]);
+            try out.append(alloc, '}');
+            flat += 1;
+        }
+    }
+    try out.appendSlice(alloc, "]\n");
+    cwrite(conn, out.items);
+}
+
+/// Split the active pane, spawn a shell, optionally queue `run` to be typed
+/// when the shell is up (Pane.setBootCommand — spawn-time typing races zsh's
+/// TCSAFLUSH tty init). Shared by both protocol front-ends.
+fn doSplit(
+    conn: c.fd_t,
+    sess: *session.Session,
+    shell: []const u8,
+    env: [*:null]const ?[*:0]const u8,
+    dir: []const u8,
+    run: ?[]const u8,
+) bool {
+    const d: session.SplitDirection = if (dir.len > 0 and (dir[0] == 'v' or dir[0] == 'V'))
+        .vertical
+    else
+        .horizontal;
+    const w = sess.getActiveWindow();
+    const new_pane = w.split(d, 10_000) catch {
+        cwrite(conn, "{\"ok\":false,\"error\":\"split failed\"}\n");
+        return false;
+    };
+    new_pane.spawn(shell, env) catch {
+        cwrite(conn, "{\"ok\":false,\"error\":\"spawn failed\"}\n");
+        return true;
+    };
+    if (run) |r| if (r.len > 0) new_pane.setBootCommand(r);
+    var b: [64]u8 = undefined;
+    cwrite(conn, std.fmt.bufPrint(&b, "{{\"ok\":true,\"pane\":{d}}}\n", .{flatIndexOf(sess, new_pane) orelse 0}) catch "{\"ok\":true}\n");
+    return true;
+}
+
+/// JSON front-end: {"cmd":"send","pane":1,"text":"line1\nline2"},
+/// {"cmd":"split","dir":"h","run":"claude\n"},
+/// {"cmd":"capture","pane":0,"lines":100,"escapes":true}, plus
+/// list/enter/focus/kill/new-window mirroring the line protocol.
+fn handleJson(
+    conn: c.fd_t,
+    line: []const u8,
+    sess: *session.Session,
+    shell: []const u8,
+    env: [*:null]const ?[*:0]const u8,
+    alloc: std.mem.Allocator,
+) !bool {
+    const parsed = std.json.parseFromSlice(std.json.Value, alloc, line, .{}) catch {
+        cwrite(conn, "{\"ok\":false,\"error\":\"bad json\"}\n");
+        return false;
+    };
+    defer parsed.deinit();
+    const v = parsed.value;
+    if (v != .object) {
+        cwrite(conn, "{\"ok\":false,\"error\":\"expected object\"}\n");
+        return false;
+    }
+    const cmd = jsonStr(v, "cmd") orelse {
+        cwrite(conn, "{\"ok\":false,\"error\":\"missing cmd\"}\n");
+        return false;
+    };
+    const pane_idx: usize = @intCast(@max(jsonInt(v, "pane") orelse 0, 0));
+
+    if (std.mem.eql(u8, cmd, "send")) {
+        const ref = nthPane(sess, pane_idx) orelse {
+            cwrite(conn, "{\"ok\":false,\"error\":\"no such pane\"}\n");
+            return false;
+        };
+        const text = jsonStr(v, "text") orelse "";
+        ref.pane.terminal.scrollback_offset = 0;
+        if (text.len > 0) ref.pane.sendInput(text) catch {
+            cwrite(conn, "{\"ok\":false,\"error\":\"send failed\"}\n");
+            return false;
+        };
+        cwrite(conn, "{\"ok\":true}\n");
+        return false;
+    } else if (std.mem.eql(u8, cmd, "split")) {
+        return doSplit(conn, sess, shell, env, jsonStr(v, "dir") orelse "h", jsonStr(v, "run"));
+    } else if (std.mem.eql(u8, cmd, "capture")) {
+        const ref = nthPane(sess, pane_idx) orelse {
+            cwrite(conn, "{\"ok\":false,\"error\":\"no such pane\"}\n");
+            return false;
+        };
+        const lines: usize = @intCast(@max(jsonInt(v, "lines") orelse 0, 0));
+        const escapes = jsonBool(v, "escapes") orelse false;
+        try writeCapture(conn, ref.pane, alloc, lines, escapes);
+        return false;
+    }
+    if (std.mem.eql(u8, cmd, "list")) {
+        try doList(conn, sess, alloc);
+        return false;
+    } else if (std.mem.eql(u8, cmd, "enter")) {
+        const ref = nthPane(sess, pane_idx) orelse {
+            cwrite(conn, "{\"ok\":false,\"error\":\"no such pane\"}\n");
+            return false;
+        };
+        ref.pane.sendInput("\r") catch {};
+        cwrite(conn, "{\"ok\":true}\n");
+        return false;
+    } else if (std.mem.eql(u8, cmd, "focus")) {
+        const ref = nthPane(sess, pane_idx) orelse {
+            cwrite(conn, "{\"ok\":false,\"error\":\"no such pane\"}\n");
+            return false;
+        };
+        _ = sess.selectWindow(ref.win_idx);
+        ref.window.panes.items[ref.window.active_pane_idx].active = false;
+        ref.window.active_pane_idx = ref.pane_idx;
+        ref.pane.active = true;
+        cwrite(conn, "{\"ok\":true}\n");
+        return true;
+    } else if (std.mem.eql(u8, cmd, "kill")) {
+        const ref = nthPane(sess, pane_idx) orelse {
+            cwrite(conn, "{\"ok\":false,\"error\":\"no such pane\"}\n");
+            return false;
+        };
+        if (ref.window.panes.items.len <= 1) {
+            if (!sess.removeWindow(ref.win_idx)) {
+                cwrite(conn, "{\"ok\":false,\"error\":\"cannot kill the last pane\"}\n");
+                return false;
+            }
+            cwrite(conn, "{\"ok\":true}\n");
+            return true;
+        }
+        _ = ref.window.removePaneReflow(ref.pane.id);
+        cwrite(conn, "{\"ok\":true}\n");
+        return true;
+    } else if (std.mem.eql(u8, cmd, "new-window")) {
+        const new_win = sess.createWindow() catch {
+            cwrite(conn, "{\"ok\":false,\"error\":\"create failed\"}\n");
+            return false;
+        };
+        _ = sess.selectWindow(new_win.index);
+        new_win.getActivePane().spawn(shell, env) catch {
+            cwrite(conn, "{\"ok\":false,\"error\":\"spawn failed\"}\n");
+            return true;
+        };
+        if (jsonStr(v, "run")) |r| if (r.len > 0) new_win.getActivePane().setBootCommand(r);
+        cwrite(conn, "{\"ok\":true}\n");
+        return true;
+    }
+    cwrite(conn, "{\"ok\":false,\"error\":\"unknown cmd\"}\n");
+    return false;
+}
+
+fn jsonStr(v: std.json.Value, key: []const u8) ?[]const u8 {
+    const o = v.object.get(key) orelse return null;
+    return switch (o) {
+        .string => |s| s,
+        else => null,
+    };
+}
+
+fn jsonInt(v: std.json.Value, key: []const u8) ?i64 {
+    const o = v.object.get(key) orelse return null;
+    return switch (o) {
+        .integer => |i| i,
+        else => null,
+    };
+}
+
+fn jsonBool(v: std.json.Value, key: []const u8) ?bool {
+    const o = v.object.get(key) orelse return null;
+    return switch (o) {
+        .bool => |b| b,
+        else => null,
+    };
+}
+
 fn flatIndexOf(sess: *session.Session, pane: *session.Pane) ?usize {
     var i: usize = 0;
     for (sess.windows.items) |w| {
@@ -280,27 +442,90 @@ fn flatIndexOf(sess: *session.Session, pane: *session.Pane) ?usize {
     return null;
 }
 
-/// The pane's grid as UTF-8 text, one line per row, trailing blanks trimmed.
-/// Skips wide-glyph continuation cells (char 0 / width 0) — they'd emit NULs.
-fn writeCapture(conn: c.fd_t, pane: *session.Pane, alloc: std.mem.Allocator) !void {
-    const grid = pane.terminal.getCurrentGrid();
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(alloc);
-    var r: u16 = 0;
-    while (r < grid.rows) : (r += 1) {
-        const line_start = out.items.len;
-        var col: u16 = 0;
-        while (col < grid.cols) : (col += 1) {
-            const cell = grid.getCellConst(r, col);
-            if (cell.width == 0 or cell.char == 0) continue;
-            var ub: [4]u8 = undefined;
-            const len = std.unicode.utf8Encode(cell.char, &ub) catch continue;
-            try out.appendSlice(alloc, ub[0..len]);
+/// Append one row of cells as UTF-8 (trailing blanks trimmed). `escapes`
+/// re-emits SGR at every style change so colors/attrs survive the capture
+/// (wezterm's `get-text --escapes`). Skips wide-glyph continuation cells
+/// (char 0 / width 0) — they'd emit NULs.
+fn appendRow(
+    out: *std.ArrayList(u8),
+    alloc: std.mem.Allocator,
+    cells: []const terminal.Cell,
+    escapes: bool,
+    last_style: *terminal.Cell,
+) !void {
+    const line_start = out.items.len;
+    var trim_to = out.items.len; // end of the last non-blank cell
+    for (cells) |cell| {
+        if (cell.width == 0 or cell.char == 0) continue;
+        if (escapes and !(cell.attrs.eql(last_style.attrs) and
+            cell.fg.eql(last_style.fg) and cell.bg.eql(last_style.bg)))
+        {
+            try appendSgr(out, alloc, &cell);
+            last_style.* = cell;
         }
+        var ub: [4]u8 = undefined;
+        const len = std.unicode.utf8Encode(cell.char, &ub) catch continue;
+        try out.appendSlice(alloc, ub[0..len]);
+        const blank = cell.char == ' ' and cell.attrs.eql(terminal.CellAttrs.default) and
+            cell.bg == .default;
+        if (!blank) trim_to = out.items.len;
+    }
+    if (!escapes) {
+        // Plain text: cut trailing blanks entirely.
         while (out.items.len > line_start and out.items[out.items.len - 1] == ' ') {
             out.items.len -= 1;
         }
-        try out.append(alloc, '\n');
+    } else if (trim_to > line_start) {
+        out.items.len = trim_to;
+    } else {
+        out.items.len = line_start;
     }
+    try out.append(alloc, '\n');
+}
+
+fn appendSgr(out: *std.ArrayList(u8), alloc: std.mem.Allocator, cell: *const terminal.Cell) !void {
+    var buf: [64]u8 = undefined;
+    try out.appendSlice(alloc, "\x1b[0");
+    const a = cell.attrs;
+    if (a.bold) try out.appendSlice(alloc, ";1");
+    if (a.dim) try out.appendSlice(alloc, ";2");
+    if (a.italic) try out.appendSlice(alloc, ";3");
+    if (a.underline) try out.appendSlice(alloc, ";4");
+    if (a.blink) try out.appendSlice(alloc, ";5");
+    if (a.inverse) try out.appendSlice(alloc, ";7");
+    if (a.strikethrough) try out.appendSlice(alloc, ";9");
+    switch (cell.fg) {
+        .default => {},
+        .indexed => |i| try out.appendSlice(alloc, std.fmt.bufPrint(&buf, ";38;5;{d}", .{i}) catch ""),
+        .rgb => |col| try out.appendSlice(alloc, std.fmt.bufPrint(&buf, ";38;2;{d};{d};{d}", .{ col.r, col.g, col.b }) catch ""),
+    }
+    switch (cell.bg) {
+        .default => {},
+        .indexed => |i| try out.appendSlice(alloc, std.fmt.bufPrint(&buf, ";48;5;{d}", .{i}) catch ""),
+        .rgb => |col| try out.appendSlice(alloc, std.fmt.bufPrint(&buf, ";48;2;{d};{d};{d}", .{ col.r, col.g, col.b }) catch ""),
+    }
+    try out.append(alloc, 'm');
+}
+
+/// The pane's content as text: the last `hist_lines` scrollback rows, then the
+/// live grid. `escapes` preserves colors/attrs as SGR.
+fn writeCapture(conn: c.fd_t, pane: *session.Pane, alloc: std.mem.Allocator, hist_lines: usize, escapes: bool) !void {
+    const term = &pane.terminal;
+    const grid = term.getCurrentGrid();
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+
+    var last_style = terminal.Cell.default;
+
+    const back = @min(hist_lines, term.scrollback.len);
+    var i: usize = term.scrollback.len - back;
+    while (i < term.scrollback.len) : (i += 1) {
+        try appendRow(&out, alloc, term.scrollback.line(i), escapes, &last_style);
+    }
+    var r: u16 = 0;
+    while (r < grid.rows) : (r += 1) {
+        try appendRow(&out, alloc, grid.rowSlice(r), escapes, &last_style);
+    }
+    if (escapes) try out.appendSlice(alloc, "\x1b[0m");
     cwrite(conn, out.items);
 }
