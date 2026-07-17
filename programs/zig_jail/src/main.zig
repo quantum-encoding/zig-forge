@@ -236,3 +236,12 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 }
+
+// Pull the imported modules' test blocks into the `zig build test` graph —
+// without this, the test root contains zero tests and every green is vacuous.
+test {
+    _ = profile_mod;
+    _ = seccomp_mod;
+    _ = namespace_mod;
+    _ = capabilities_mod;
+}
