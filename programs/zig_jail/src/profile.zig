@@ -298,10 +298,12 @@ test "profile: Reject errno action without errno_value" {
 }
 
 test "profile: SyscallConfig structure" {
+    var allowed_list = [_][]const u8{ "read", "write" };
+    var blocked_list = [_][]const u8{"execve"};
     const config = SyscallConfig{
         .default_action = "kill",
-        .allowed = &[_][]const u8{ "read", "write" },
-        .blocked = &[_][]const u8{ "execve" },
+        .allowed = &allowed_list,
+        .blocked = &blocked_list,
     };
 
     try std.testing.expectEqualSlices(u8, "kill", config.default_action);
