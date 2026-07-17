@@ -707,12 +707,12 @@ test "seccomp: blocked syscall traps at runtime (Linux/x86_64)" {
         installSeccompFilter(filter) catch {
             // Could not install (e.g. seccomp unavailable) — signal "inconclusive" to
             // the parent via a distinct non-zero exit rather than a false pass/fail.
-            std.posix.exit(2);
+            std.os.linux.exit(2);
         };
         // This raw getpid() must be killed by the filter (SIGSYS). If the pre-fix
         // no-op-blocked behavior were in effect, it would return and we'd exit(0).
         _ = std.os.linux.syscall0(.getpid);
-        std.posix.exit(0); // reached only if the block was NOT enforced
+        std.os.linux.exit(0); // reached only if the block was NOT enforced
     }
 
     const wait_result = std.posix.waitpid(pid, 0);
