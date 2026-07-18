@@ -295,10 +295,13 @@ fn readSmall(path: []const u8, buf: []u8) ![]const u8 {
 fn resolveObjPath(alloc: std.mem.Allocator, override: ?[]const u8) ![]u8 {
     if (override) |o| return alloc.dupe(u8, o);
 
-    // Prefer <exe_dir>/guardian_shield.bpf.o, then <exe_dir>/build/... .
-    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe = std.fs.selfExePath(&exe_buf) catch return alloc.dupe(u8, "guardian_shield.bpf.o");
-    const dir = std.fs.path.dirname(exe) orelse ".";
+    // Resolve <exe_dir> via /proc/self/exe, then probe candidates next to it.
+    var exe_buf: [MAX_PATH_BYTES]u8 = undefined;
+    const n = c.readlink("/proc/self/exe", &exe_buf, exe_buf.len);
+    const dir = if (n > 0)
+        (std.fs.path.dirname(exe_buf[0..@intCast(n)]) orelse ".")
+    else
+        ".";
 
     const candidates = [_][]const u8{
         "guardian_shield.bpf.o",
@@ -307,11 +310,13 @@ fn resolveObjPath(alloc: std.mem.Allocator, override: ?[]const u8) ![]u8 {
     };
     for (candidates) |cand| {
         const p = try std.fs.path.join(alloc, &.{ dir, cand });
-        if (std.fs.accessAbsolute(p, .{})) |_| {
-            return p;
-        } else |_| {
+        var zbuf: [MAX_PATH_BYTES]u8 = undefined;
+        const zp = std.fmt.bufPrintZ(&zbuf, "{s}", .{p}) catch {
             alloc.free(p);
-        }
+            continue;
+        };
+        if (c.access(zp.ptr, c.F_OK) == 0) return p;
+        alloc.free(p);
     }
     return alloc.dupe(u8, "build/guardian_shield.bpf.o");
 }
