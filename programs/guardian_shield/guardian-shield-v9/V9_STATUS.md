@@ -256,17 +256,20 @@ tests/run_bypass_suite.sh "$HOME/gs_test_protected" "$HOME/gs_test_scratch"
 
 ## Residual risks / coverage boundaries
 
-- **Verifier acceptance unconfirmed** (see build status). The single most
-  important open item before production use.
+- **Verifier acceptance: CONFIRMED on kernel 6.18** (see Live verification). No
+  longer an open item.
 - **Mount-crossing offsets are this-kernel-specific.** `container_of(vfsmnt,
-  struct mount, mnt)` uses `offsetof` from this box's generated `vmlinux.h`.
+  struct mount, mnt)` uses `offsetof` from the generated `vmlinux.h`.
   Field *reads* are CO-RE-relocatable, but the container_of offset is not — the
   object is built for the host it runs on (regenerate `vmlinux.h` per kernel).
-- **Path-component / depth caps.** `MAX_DENTRY_DEPTH=16`,
-  `MAX_COMPONENT_LEN=64`, `MAX_PATH_LEN=256`. Protected dirs are shallow with
-  short components, so this is safe in practice; a path deeper than 16 mounts+dirs
-  or a directory component > 64 bytes would truncate (a `STAT_PATH_TRUNC` counter
-  fires). `bpf_d_path` hooks (file_open/truncate) have no such cap.
+- **Path buffer / depth caps.** `MAX_DENTRY_DEPTH=16`, `MAX_COMPONENT_LEN=64`,
+  `MAX_PATH_LEN=128` (reduced from 256 so the reconstruction state fits the BPF
+  stack + map-value bounds; the protected prefix always sits at the START of the
+  path, so 128 bytes is ample for matching). A path deeper than 16 dir levels or
+  a component > 64 bytes truncates (a `STAT_PATH_TRUNC` counter fires); the
+  reconstruction buffer is over-sized to `MAX_PATH_LEN + MAX_COMPONENT_LEN` so
+  the worst-case masked component write is provably in-bounds. `bpf_d_path`
+  hooks (file_open/truncate) resolve the full canonical path with no walk cap.
 - **Agent classification is by launcher basename.** A node/python-based agent
   whose exe is literally `node`/`python` is not tagged by default (tagging all
   node/python is too broad). Options: add those basenames to `agent_exes`
