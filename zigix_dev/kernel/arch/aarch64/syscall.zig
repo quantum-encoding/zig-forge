@@ -4833,7 +4833,9 @@ fn sysPrlimit64(frame: *exception.TrapFrame) i64 {
 }
 
 /// getrandom(buf, buflen, flags) — nr 278
-/// Fill buffer with random bytes using ARM64 timer counter PRNG.
+/// Fill buffer with cryptographically strong bytes from the ARMv8.5 FEAT_RNG
+/// hardware RNG (RNDR/RNDRRS). Falls back to timer entropy only on parts
+/// without FEAT_RNG — that path is NOT secure and is flagged loudly once.
 fn sysGetrandom(frame: *exception.TrapFrame) i64 {
     const buf_addr = frame.x[0];
     const buflen = frame.x[1];
@@ -4847,17 +4849,22 @@ fn sysGetrandom(frame: *exception.TrapFrame) i64 {
 
     if (vmm.translate(vmm.PhysAddr.from(proc.page_table), vmm.VirtAddr.from(buf_addr)) == null) return -14; // -EFAULT
 
-    // Generate random bytes using ARM64 timer counter as seed (replaces x86 RDTSC)
-    var seed: u64 = asm volatile ("mrs %[ret], CNTPCT_EL0"
-        : [ret] "=r" (-> u64),
-    );
+    // On Axion (Neoverse V2) FEAT_RNG is present, so hwrng draws true hardware
+    // entropy. Without it, hwrng mixes CNTVCT/CNTPCT — predictable, unfit for
+    // key material — so warn once and keep serving for bring-up on such parts.
+    const hwrng = @import("hwrng.zig");
+    const cpu_features = @import("cpu_features.zig");
+    const RngWarn = struct {
+        var warned: bool = false;
+    };
+    if (!cpu_features.features.rng and !RngWarn.warned) {
+        RngWarn.warned = true;
+        uart.writeString("[getrandom] WARNING: FEAT_RNG unavailable, using INSECURE timer-entropy fallback\n");
+    }
 
     // Write directly to user buffer (identity mapped on ARM64)
     const buf: [*]u8 = @ptrFromInt(buf_addr);
-    for (0..actual_len) |i| {
-        seed = seed *% 6364136223846793005 +% 1;
-        buf[i] = @truncate(seed >> 33);
-    }
+    hwrng.fillRandom(buf[0..actual_len]);
 
     return @intCast(actual_len);
 }

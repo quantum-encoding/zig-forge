@@ -7,6 +7,7 @@ const pic = @import("arch/x86_64/pic.zig");
 const pit = @import("arch/x86_64/pit.zig");
 const tss = @import("arch/x86_64/tss.zig");
 const syscall_entry = @import("arch/x86_64/syscall_entry.zig");
+const rtc = @import("arch/x86_64/rtc.zig");
 const hhdm = @import("mm/hhdm.zig");
 const pmm = @import("mm/pmm.zig");
 const vmm = @import("mm/vmm.zig");
@@ -134,6 +135,10 @@ export fn _start(boot_info_addr: u64) callconv(.c) noreturn {
     tss.initIst(); // IST1 for double fault handler
     syscall_entry.init();
     syscall_table.init();
+
+    // Latch wall-clock time from the CMOS RTC (seeds CLOCK_REALTIME). Ticks are
+    // already flowing, so realtimeNow() can advance from this boot epoch.
+    rtc.init();
     // syscall_table.trace_all = true; // Debug: trace all processes
 
     // Boot secondary CPUs (APs) via Limine SMP protocol

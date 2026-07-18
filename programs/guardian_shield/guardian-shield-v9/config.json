@@ -1,5 +1,8 @@
 {
-  "_comment": "Guardian Shield v9 policy. protected_paths are directory/file prefixes (a trailing slash is stripped automatically). agent_exes are launcher basenames whose exec tags the whole process subtree AGENT (kernel-level, comm-independent). exempt_exes are full exe paths that override an inherited AGENT tag.",
+  "_comment": "Guardian Shield v9 policy. Two postures: (1) agent-containment (default, hardening_mode=false) restricts only AI-agent process subtrees against protected_paths; (2) hardening_mode=true is DEFAULT-DENY - it protects the critical_paths set against EVERYONE except TAG_TRUSTED (trusted_exes), and turns on the self-protection hooks (bpf()/module/mount/dev-mem/ptrace). protected_paths/critical_paths are directory/file prefixes (trailing slash auto-stripped). agent_exes are launcher basenames -> TAG_AGENT. exempt_exes are full exe paths -> TAG_EXEMPT (override inherited AGENT). trusted_exes are full exe paths -> TAG_TRUSTED (unrestricted, may call bpf(); MUST include the loader's own path).",
+
+  "hardening_mode": false,
+
   "protected_paths": [
     "/etc",
     "/boot",
@@ -15,6 +18,18 @@
     "/home/founder/.claude",
     "/home/founder/Documents"
   ],
+
+  "_critical_comment": "Enforced (against all-but-trusted) ONLY when hardening_mode=true. The shield's own state (pins + install dir) + credentials. Adjust the install-dir path to wherever the loader/bpf.o/config actually live on the target host.",
+  "critical_paths": [
+    "/sys/fs/bpf/guardian_shield",
+    "/home/forge/v9",
+    "/home/forge/.ssh",
+    "/root/.ssh",
+    "/home/forge/.claude",
+    "/etc/sudoers.d",
+    "/boot"
+  ],
+
   "agent_exes": [
     "claude",
     "cursor",
@@ -26,12 +41,19 @@
     "codeium",
     "windsurf"
   ],
+
   "exempt_exes": [
     "/usr/bin/pacman",
     "/usr/bin/dpkg",
     "/usr/bin/apt",
     "/usr/bin/systemctl"
   ],
+
+  "_trusted_comment": "MUST include the loader's own exe path or it cannot load/pin/unpin under hardening_mode. Set this to the deployed loader path.",
+  "trusted_exes": [
+    "/home/forge/v9/guardian_shield_loader"
+  ],
+
   "enforce_fs": true,
   "enforce_mem": true,
   "enforce_priv": false,

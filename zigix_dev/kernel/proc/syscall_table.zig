@@ -24,6 +24,8 @@ const mmap_mod = @import("../mm/mmap.zig");
 const vma_mod = @import("../mm/vma.zig");
 const signal = @import("signal.zig");
 const syscall_entry = @import("../arch/x86_64/syscall_entry.zig");
+const cpurng = @import("../arch/x86_64/cpurng.zig");
+const rtc = @import("../arch/x86_64/rtc.zig");
 const socket_syscalls = @import("../net/socket_syscalls.zig");
 const socket_mod = @import("../net/socket.zig");
 const ext2 = @import("../fs/ext2.zig");
@@ -1550,9 +1552,19 @@ fn sysClockGettime(frame: *idt.InterruptFrame) void {
         return;
     };
 
-    const ticks = idt.getTickCount();
-    const seconds: u64 = ticks / 100;
-    const nanoseconds: u64 = (ticks % 100) * 10_000_000;
+    // CLOCK_REALTIME (0) reports real wall-clock time seeded from the CMOS RTC
+    // at boot; CLOCK_MONOTONIC (1) reports boot-relative tick time.
+    var seconds: u64 = undefined;
+    var nanoseconds: u64 = undefined;
+    if (clock_id == 0) {
+        const now = rtc.realtimeNow();
+        seconds = now.sec;
+        nanoseconds = now.nsec;
+    } else {
+        const ticks = idt.getTickCount();
+        seconds = ticks / 100;
+        nanoseconds = (ticks % 100) * 10_000_000;
+    }
 
     // Pack timespec as two little-endian u64s
     var buf: [16]u8 = undefined;
@@ -2856,8 +2868,12 @@ fn sysPrlimit64(frame: *idt.InterruptFrame) void {
     frame.rax = 0;
 }
 
+var warned_insecure_rng: bool = false;
+
 /// getrandom(buf, buflen, flags) — nr 318
-/// Fill buffer with random bytes using RDTSC-based PRNG.
+/// Fill buffer with cryptographically strong bytes from the RDRAND hardware
+/// DRBG. Falls back to an RDTSC-seeded LCG only when RDRAND is unavailable —
+/// that path is NOT secure (predictable output) and is flagged loudly once.
 fn sysGetrandom(frame: *idt.InterruptFrame) void {
     const buf_addr = frame.rdi;
     const buflen = frame.rsi;
@@ -2879,15 +2895,25 @@ fn sysGetrandom(frame: *idt.InterruptFrame) void {
         return;
     }
 
-    // Generate random bytes using RDTSC-seeded LCG
-    var seed: u64 = rdtsc();
     var rand_buf: [256]u8 = undefined;
-    for (0..actual_len) |i| {
-        seed = seed *% 6364136223846793005 +% 1;
-        rand_buf[i] = @truncate(seed >> 33);
+    const dest = rand_buf[0..actual_len];
+
+    if (!cpurng.fill(dest)) {
+        // No hardware RNG: degrade to the legacy RDTSC LCG. Predictable — unfit
+        // for key material — so warn once and keep serving so bring-up on RNG-
+        // less hypervisors still functions.
+        if (!warned_insecure_rng) {
+            warned_insecure_rng = true;
+            serial.writeString("[getrandom] WARNING: RDRAND unavailable, using INSECURE LCG fallback\n");
+        }
+        var seed: u64 = rdtsc();
+        for (0..actual_len) |i| {
+            seed = seed *% 6364136223846793005 +% 1;
+            dest[i] = @truncate(seed >> 33);
+        }
     }
 
-    if (syscall.copyToUser(current.page_table, buf_addr, rand_buf[0..actual_len])) {
+    if (syscall.copyToUser(current.page_table, buf_addr, dest)) {
         frame.rax = actual_len;
     } else {
         frame.rax = @bitCast(@as(i64, -errno.EFAULT));

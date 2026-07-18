@@ -217,6 +217,81 @@ This closes the previously-open "verifier acceptance unconfirmed" item.
 
 ---
 
+## Hardening mode (attacker / escalation posture)
+
+v9's default posture is **AI-agent containment**: every hook gates on the agent
+tag, so a human attacker (non-agent shell, dropped binary, injected code) is
+unrestricted. **Hardening mode** (`hardening_mode: true`, opt-in) adds a second
+posture — default-deny against everyone except an allowlist, plus self-protection
+so the shield cannot be trivially torn down. Agent-containment mode is unchanged
+and remains the default.
+
+### The gate inversion (core change)
+A new tag **`TAG_TRUSTED`** (from a path-keyed `trusted_exes` allowlist, not
+comm → not `prctl`-forgeable) sits above AGENT/EXEMPT. The per-hook restricted
+set is now:
+
+```
+restricted = hardening_mode ? (tag != TAG_TRUSTED)   // default-deny: everyone but trusted
+                            : (tag == TAG_AGENT);     // agent-containment (default)
+```
+
+Every filesystem hook (`fs_guard_dentry`, `path_truncate`, `file_open` write
+path) uses this, and logs the *actual* tag so a violation shows whether it was an
+agent or an untrusted attacker. In hardening mode the loader loads
+**`critical_paths`** (not `protected_paths`) into the LPM trie — the critical set
+= the shield's own state + credentials (`/sys/fs/bpf/guardian_shield`, the
+install dir, `~/.ssh`, `~/.claude`, `/etc/sudoers.d`, `/boot`).
+
+### Self-protection hooks (active for non-trusted in hardening mode)
+- **`lsm/bpf` (`gs_bpf`) — the anti-tamper hook.** Denies the `bpf()` syscall for
+  any non-trusted caller, so an attacker (even root) cannot use `bpf()`/`bpftool`
+  to detach the shield's links or manipulate its maps/progs. The **trusted loader
+  itself calls `bpf()`**, so it MUST be `TAG_TRUSTED`: (1) its exe path is in
+  `trusted_exes`, and (2) the loader also self-inserts its own tgid as
+  `TAG_TRUSTED` *before* flipping `ready` (belt-and-suspenders — the initial load
+  happens before `gs_bpf` is attached, and `ready` gates the hook, so the load
+  path is unaffected; teardown/`--unpin` by the trusted loader still works).
+- **`gs_kernel_read_file`** (module load), **`gs_sb_mount`/`gs_move_mount`**
+  (mount tricks), **`gs_ptrace`** (injection into trusted procs), **`/dev/mem`**
+  in `file_open` — all enforce for non-trusted in hardening mode, independent of
+  `enforce_priv`.
+- **`gs_capable`** — in hardening mode denies a **narrow** set for non-trusted:
+  **`CAP_SYS_MODULE` and `CAP_BPF` only**. Deliberately NOT `CAP_SYS_ADMIN`
+  (too broad — would brick normal root operation).
+
+### Honest root-tamper boundary (do NOT overstate)
+A userspace-loaded BPF-LSM raises the bar but **cannot fully contain a determined
+root**. Against a *live, already-booted* attacker (incl. root not in
+`trusted_exes`), hardening mode blocks: `bpf()`/bpftool tamper of the shield,
+fs deletion/overwrite of the pins and critical set, runtime module load / mount
+tricks, and ptrace into trusted processes. What root can **still** do, and what
+`tests/attacker_sim.sh` reports truthfully:
+- **Reboot with a modified kernel cmdline** (drop `lsm=…,bpf`) → the shield never
+  loads next boot. Editing grub is blocked at runtime if `/boot` is critical, but
+  root can `kexec`, boot rescue media, or edit the VM disk offline.
+- **Offline disk edit** of the shield config/binary while it is unloaded.
+- Anything gated on caps we intentionally don't deny (only `CAP_SYS_MODULE`/
+  `CAP_BPF` are denied; `CAP_SYS_ADMIN` is not).
+
+`tests/attacker_sim.sh` (VM-only, gated on `GS_VM_TEST=1`) measures this in two
+tiers (unprivileged + root). It is **two-phase** because creating a victim inside
+a critical path is itself blocked once hardening is active:
+`--unpin` → `attacker_sim.sh --setup` (seed victims, shield unloaded, as root) →
+load in hardening mode → `attacker_sim.sh --attack`. The attack phase runs:
+credential/shield-file tamper (glibc + raw syscall) against the seeded victims,
+pin removal via the fs, a compiled `bpf(BPF_OBJ_GET→BPF_LINK_DETACH)` probe,
+kill-the-loader (`pgrep -x guardian_shield`, the 15-char truncated comm) then
+remove-pins persistence, and module/mount attempts — then prints a
+blocked/allowed/na tally and the root-boundary caveats above. Any `ALLOWED (!!)`
+line is a real gap to report verbatim.
+
+Live result (kernel 6.18, root tier): `bpf()` detach → BLOCKED (EPERM), pin
+unlink → BLOCKED (EPERM), `modprobe` → BLOCKED (EPERM), `mount` → BLOCKED
+(EPERM) — root cannot tamper with the live shield via any of these.
+
+---
+
 ## Deploy / pin / unload
 
 ```bash

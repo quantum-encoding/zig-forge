@@ -55,7 +55,17 @@ const GsConfig = extern struct {
     enforce_mem: u8,
     enforce_priv: u8,
     log_only: u8,
+    hardening_mode: u8,
 };
+
+// Mirrors struct proc_tag in guardian_shield.bpf.c (agent_pids value).
+const ProcTag = extern struct {
+    tag: u8,
+    root_tgid: u32,
+    since_ns: u64,
+};
+
+const TAG_TRUSTED: u8 = 3;
 
 const ViolationEvent = extern struct {
     timestamp: u64,
@@ -86,12 +96,15 @@ const ExecEvent = extern struct {
 
 const RawConfig = struct {
     protected_paths: []const []const u8 = &.{},
+    critical_paths: []const []const u8 = &.{},
     agent_exes: []const []const u8 = &.{},
     exempt_exes: []const []const u8 = &.{},
+    trusted_exes: []const []const u8 = &.{},
     enforce_fs: bool = true,
     enforce_mem: bool = true,
     enforce_priv: bool = false,
     log_only: bool = false,
+    hardening_mode: bool = false,
     pin_dir: []const u8 = "/sys/fs/bpf/guardian_shield",
     log_file: []const u8 = "/var/log/guardian_shield.jsonl",
 };
@@ -175,11 +188,14 @@ pub fn main(init: std.process.Init) !void {
     try loader.open(obj_path);
     try loader.load();
     try loader.populateMaps();
+    try loader.tagSelfTrusted(); // loader tree = TAG_TRUSTED before enforcement
     try loader.attachAndPin(); // fail-closed
     try loader.setReady(); // enforcement goes live here
 
-    std.log.info("Guardian Shield v9 ACTIVE: {d} hooks pinned under {s} (enforce_fs={}, enforce_mem={}, enforce_priv={}, log_only={}).", .{
-        loader.link_count, cfg.pin_dir, cfg.enforce_fs, cfg.enforce_mem, cfg.enforce_priv, cfg.log_only,
+    std.log.info("Guardian Shield v9 ACTIVE: {d} hooks pinned under {s} (mode={s}, enforce_fs={}, enforce_mem={}, enforce_priv={}, log_only={}).", .{
+        loader.link_count, cfg.pin_dir,
+        if (cfg.hardening_mode) "HARDENING (default-deny, self-protecting)" else "agent-containment",
+        cfg.enforce_fs, cfg.enforce_mem, cfg.enforce_priv, cfg.log_only,
     });
 
     openLog(cfg.log_file);
@@ -375,9 +391,13 @@ const Loader = struct {
 
     fn populateMaps(self: *Loader) !void {
         // --- protected_paths (LPM trie) ---
+        // In hardening mode the trie protects the CRITICAL set (shield state +
+        // credentials) against everyone-but-trusted; otherwise the agent-mode
+        // protected_paths against agents.
         const pp_fd = try self.mapFd("protected_paths");
+        const path_src = if (self.cfg.hardening_mode) self.cfg.critical_paths else self.cfg.protected_paths;
         var n_paths: usize = 0;
-        for (self.cfg.protected_paths) |raw| {
+        for (path_src) |raw| {
             // Normalize: strip a single trailing '/' (except root). The kernel
             // boundary check requires prefixes stored WITHOUT trailing slash.
             var p = raw;
@@ -412,34 +432,62 @@ const Loader = struct {
         }
 
         // --- exempt_exes (full path -> 1) ---
-        const ex_fd = try self.mapFd("exempt_exes");
-        for (self.cfg.exempt_exes) |name| {
+        try self.populateExeMap("exempt_exes", self.cfg.exempt_exes);
+        // --- trusted_exes (full path -> 1). MUST include the loader itself. ---
+        try self.populateExeMap("trusted_exes", self.cfg.trusted_exes);
+
+        // --- runtime_cfg (flags set, ready=0 until attach completes) ---
+        const cfg_fd = try self.mapFd("runtime_cfg");
+        var k0: u32 = 0;
+        var gc = self.buildConfig(0);
+        if (c.bpf_map_update_elem(cfg_fd, &k0, &gc, c.BPF_ANY) != 0)
+            return error.MapUpdateFailed;
+
+        std.log.info("policy loaded: {d} {s} paths, {d} agent exes, {d} exempt, {d} trusted (hardening={}).", .{
+            n_paths,
+            if (self.cfg.hardening_mode) "critical" else "protected",
+            self.cfg.agent_exes.len,
+            self.cfg.exempt_exes.len,
+            self.cfg.trusted_exes.len,
+            self.cfg.hardening_mode,
+        });
+    }
+
+    fn populateExeMap(self: *Loader, map_name: [:0]const u8, list: []const []const u8) !void {
+        const fd = try self.mapFd(map_name);
+        for (list) |name| {
             if (name.len >= MAX_EXE_PATH) {
-                std.log.warn("exempt_exe '{s}' too long, skipping", .{name});
+                std.log.warn("{s} entry '{s}' too long, skipping", .{ map_name, name });
                 continue;
             }
             var key = std.mem.zeroes([MAX_EXE_PATH]u8);
             @memcpy(key[0..name.len], name);
             var one: u8 = 1;
-            _ = c.bpf_map_update_elem(ex_fd, &key, &one, c.BPF_ANY);
+            _ = c.bpf_map_update_elem(fd, &key, &one, c.BPF_ANY);
         }
+    }
 
-        // --- runtime_cfg (flags set, ready=0 until attach completes) ---
-        const cfg_fd = try self.mapFd("runtime_cfg");
-        var k0: u32 = 0;
-        var gc = GsConfig{
-            .ready = 0,
+    fn buildConfig(self: *Loader, ready: u8) GsConfig {
+        return GsConfig{
+            .ready = ready,
             .enforce_fs = @intFromBool(self.cfg.enforce_fs),
             .enforce_mem = @intFromBool(self.cfg.enforce_mem),
             .enforce_priv = @intFromBool(self.cfg.enforce_priv),
             .log_only = @intFromBool(self.cfg.log_only),
+            .hardening_mode = @intFromBool(self.cfg.hardening_mode),
         };
-        if (c.bpf_map_update_elem(cfg_fd, &k0, &gc, c.BPF_ANY) != 0)
-            return error.MapUpdateFailed;
+    }
 
-        std.log.info("policy loaded: {d} protected paths, {d} agent exes, {d} exempt exes.", .{
-            n_paths, self.cfg.agent_exes.len, self.cfg.exempt_exes.len,
-        });
+    // Tag the loader's OWN process tree TAG_TRUSTED directly, so the running
+    // loader can call bpf() (and touch critical paths like the pin dir) even in
+    // hardening mode. The loader exec'd before gs_exec was attached, so it is
+    // not otherwise in agent_pids. Belt-and-suspenders with trusted_exes.
+    fn tagSelfTrusted(self: *Loader) !void {
+        const fd = try self.mapFd("agent_pids");
+        var tgid: u32 = @intCast(c.getpid());
+        var t = ProcTag{ .tag = TAG_TRUSTED, .root_tgid = tgid, .since_ns = 0 };
+        if (c.bpf_map_update_elem(fd, &tgid, &t, c.BPF_ANY) != 0)
+            std.log.warn("could not self-tag loader tgid {d} as trusted", .{tgid});
     }
 
     fn attachAndPin(self: *Loader) !void {
@@ -502,13 +550,7 @@ const Loader = struct {
     fn setReady(self: *Loader) !void {
         const cfg_fd = try self.mapFd("runtime_cfg");
         var k0: u32 = 0;
-        var gc = GsConfig{
-            .ready = 1,
-            .enforce_fs = @intFromBool(self.cfg.enforce_fs),
-            .enforce_mem = @intFromBool(self.cfg.enforce_mem),
-            .enforce_priv = @intFromBool(self.cfg.enforce_priv),
-            .log_only = @intFromBool(self.cfg.log_only),
-        };
+        var gc = self.buildConfig(1);
         if (c.bpf_map_update_elem(cfg_fd, &k0, &gc, c.BPF_ANY) != 0)
             return error.MapUpdateFailed;
     }
@@ -589,6 +631,7 @@ fn eventName(t: u8) []const u8 {
         22 => "module_load",
         23 => "capability",
         24 => "mount",
+        25 => "bpf",
         else => "unknown",
     };
 }

@@ -88,6 +88,7 @@ char LICENSE[] SEC("license") = "GPL";
 #define CAP_SYS_PTRACE      19
 #define CAP_SYS_ADMIN       21
 #define CAP_SYS_BOOT        22
+#define CAP_BPF             39   // load BPF progs/maps (kernel >= 5.8)
 
 // READING_MODULE comes from enum kernel_read_file_id in vmlinux.h (== 2).
 
@@ -100,11 +101,13 @@ char LICENSE[] SEC("license") = "GPL";
 // PROCESS-TREE TAGGING
 // ===================================================================
 
-#define TAG_AGENT  1   // restricted subtree
-#define TAG_EXEMPT 2   // explicitly trusted (overrides inherited AGENT)
+#define TAG_AGENT   1   // AI-agent subtree (restricted in agent-containment mode)
+#define TAG_EXEMPT  2   // explicitly exempt (overrides inherited AGENT)
+#define TAG_TRUSTED 3   // fully trusted (loader + allowlisted tools). The ONLY
+                        // tag NOT restricted under hardening_mode; may call bpf().
 
 struct proc_tag {
-    __u8  tag;         // TAG_AGENT | TAG_EXEMPT
+    __u8  tag;         // TAG_AGENT | TAG_EXEMPT | TAG_TRUSTED
     __u32 root_tgid;   // tgid of the subtree root that was first tagged
     __u64 since_ns;    // when tagged (monotonic)
 };
@@ -128,6 +131,7 @@ enum event_type {
     EV_MODULE_LOAD = 22,
     EV_CAPABILITY = 23,
     EV_MOUNT = 24,
+    EV_BPF = 25,       // bpf() syscall blocked (anti-tamper, hardening mode)
 };
 
 struct violation_event {
@@ -212,6 +216,17 @@ struct {
     __uint(max_entries, 512);
 } exempt_exes SEC(".maps");
 
+// Trusted exe FULL PATHS. exec of one of these tags the pid TRUSTED - the only
+// tag not restricted under hardening_mode, and the only one allowed to call
+// bpf() while the anti-tamper hook is active. MUST include the loader's own exe
+// so it can load/pin/unpin. Keyed on path (not comm -> not prctl-forgeable).
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, char[MAX_EXE_PATH]);
+    __type(value, __u8);
+    __uint(max_entries, 512);
+} trusted_exes SEC(".maps");
+
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __type(key, __u32);
@@ -236,6 +251,8 @@ struct gs_config {
     __u8 enforce_mem;    // block ptrace / dev-mem / module-load
     __u8 enforce_priv;   // block dangerous caps / mounts (off by default)
     __u8 log_only;       // 1 = log but never return -EPERM (dry run)
+    __u8 hardening_mode; // 0 = agent-containment (default); 1 = default-deny for
+                         // everyone except TAG_TRUSTED, + self-protection hooks
 };
 
 struct {
@@ -318,9 +335,21 @@ static __always_inline __u8 current_tag(void)
     return pt->tag;
 }
 
-static __always_inline bool current_is_agent(void)
+// Core policy posture. In agent-containment mode (default) only AI-agent
+// subtrees are restricted; in hardening mode EVERYONE except TAG_TRUSTED is
+// restricted (default-deny against human attackers / dropped binaries too).
+static __always_inline bool is_restricted(struct gs_config *cfg, __u8 tag)
 {
-    return current_tag() == TAG_AGENT;
+    if (cfg->hardening_mode)
+        return tag != TAG_TRUSTED;
+    return tag == TAG_AGENT;
+}
+
+// True when a self-protection hook (bpf/module/mount/dev-mem) should block this
+// caller purely because hardening mode is on and it is not trusted.
+static __always_inline bool hardening_block(struct gs_config *cfg, __u8 tag)
+{
+    return cfg->hardening_mode && tag != TAG_TRUSTED;
 }
 
 // ===================================================================
@@ -533,7 +562,8 @@ static __always_inline void log_violation(__u8 ev, __u8 tag, __u8 enforced,
 }
 
 // Common decision for a reconstructed-dentry filesystem hook.
-// Returns 0 (allow) or -EPERM (block). Only AGENT-tagged subtrees are checked.
+// Returns 0 (allow) or -EPERM (block). Restricted set depends on posture:
+// agent-containment => AI-agent subtrees; hardening => everyone but TAG_TRUSTED.
 static __always_inline int fs_guard_dentry(struct dentry *dentry,
                                            struct vfsmount *vfsmnt,
                                            struct dentry *tdentry,
@@ -543,7 +573,8 @@ static __always_inline int fs_guard_dentry(struct dentry *dentry,
     struct gs_config *cfg = get_config();
     if (!cfg || !cfg->ready || !cfg->enforce_fs)
         return 0;
-    if (!current_is_agent())
+    __u8 tag = current_tag();
+    if (!is_restricted(cfg, tag))
         return 0;
 
     bump(STAT_FS_CHECKS);
@@ -569,7 +600,7 @@ static __always_inline int fs_guard_dentry(struct dentry *dentry,
 
     if (hit || thit) {
         __u8 enforced = cfg->log_only ? 0 : 1;
-        log_violation(ev, TAG_AGENT, enforced, buf->data, len, 0, 0, 0, 0);
+        log_violation(ev, tag, enforced, buf->data, len, 0, 0, 0, 0);
         bump(STAT_FS_BLOCKED);
         if (cfg->log_only)
             return 0;
@@ -592,13 +623,26 @@ int BPF_PROG(gs_exec, struct task_struct *p, pid_t old_pid, struct linux_binprm 
     __u32 tgid = BPF_CORE_READ(p, tgid);
     const char *filename = BPF_CORE_READ(bprm, filename);
 
-    // 1) Operator exempt full-path override. The full exe path is the map key;
-    // one helper call fills a zeroed key buffer (no parsing loop).
+    // The full exe path is the key for the trusted / exempt allowlists; one
+    // helper call fills a zeroed key buffer (no parsing loop).
     char full[MAX_EXE_PATH];
     __builtin_memset(full, 0, sizeof(full));
     if (filename)
         bpf_probe_read_kernel_str(full, sizeof(full), filename);
 
+    // 1) Trusted full-path override (highest privilege; the only tag not
+    // restricted under hardening_mode, and the only one allowed to call bpf()).
+    __u8 *tr = bpf_map_lookup_elem(&trusted_exes, full);
+    if (tr) {
+        struct proc_tag t = {};
+        t.tag = TAG_TRUSTED;
+        t.root_tgid = tgid;
+        t.since_ns = bpf_ktime_get_ns();
+        bpf_map_update_elem(&agent_pids, &tgid, &t, BPF_ANY);
+        return 0;
+    }
+
+    // 2) Operator exempt full-path override (overrides inherited AGENT).
     __u8 *ex = bpf_map_lookup_elem(&exempt_exes, full);
     if (ex) {
         struct proc_tag t = {};
@@ -609,7 +653,7 @@ int BPF_PROG(gs_exec, struct task_struct *p, pid_t old_pid, struct linux_binprm 
         return 0;
     }
 
-    // 2) Agent-launcher basename match. Take the basename DIRECTLY from the exe
+    // 3) Agent-launcher basename match. Take the basename DIRECTLY from the exe
     // dentry's leaf name (bprm->file->f_path.dentry->d_name) - the kernel
     // already isolated the last component, so there is no string scan and no
     // variable-offset access (which is what blew the verifier's 1M-insn limit).
@@ -739,7 +783,8 @@ int BPF_PROG(gs_path_truncate, const struct path *path)
     struct gs_config *cfg = get_config();
     if (!cfg || !cfg->ready || !cfg->enforce_fs)
         return 0;
-    if (!current_is_agent())
+    __u8 tag = current_tag();
+    if (!is_restricted(cfg, tag))
         return 0;
 
     __u8 buf[MAX_PATH_LEN];
@@ -749,7 +794,7 @@ int BPF_PROG(gs_path_truncate, const struct path *path)
     __u32 len = (__u32)r - 1;                // r includes trailing NUL
     if (path_is_protected(buf, len)) {
         __u8 enforced = cfg->log_only ? 0 : 1;
-        log_violation(EV_TRUNCATE, TAG_AGENT, enforced, buf, len, 0, 0, 0, 0);
+        log_violation(EV_TRUNCATE, tag, enforced, buf, len, 0, 0, 0, 0);
         bump(STAT_FS_BLOCKED);
         if (cfg->log_only)
             return 0;
@@ -771,10 +816,12 @@ int BPF_PROG(gs_file_open, struct file *file)
         return 0;
 
     __u8 tag = current_tag();
-    bool agent = (tag == TAG_AGENT);
+    bool restricted = is_restricted(cfg, tag);
 
     // ---- (b) /dev/mem, /dev/kmem, /dev/port ----
-    if (cfg->enforce_mem && agent) {
+    // Active for restricted callers when the mem domain is on (agent mode) or in
+    // hardening mode (non-trusted).
+    if (restricted && (cfg->enforce_mem || hardening_block(cfg, tag))) {
         struct inode *inode = BPF_CORE_READ(file, f_inode);
         umode_t imode = BPF_CORE_READ(inode, i_mode);
         if (S_ISCHR(imode)) {
@@ -792,7 +839,7 @@ int BPF_PROG(gs_file_open, struct file *file)
     }
 
     // ---- (a) write/truncate open on a protected path ----
-    if (cfg->enforce_fs && agent) {
+    if (cfg->enforce_fs && restricted) {
         unsigned int flags = BPF_CORE_READ(file, f_flags);
         bool writing = (flags & O_ACCMODE) == O_WRONLY ||
                        (flags & O_ACCMODE) == O_RDWR ||
@@ -819,15 +866,18 @@ int BPF_PROG(gs_file_open, struct file *file)
 // MEMORY / PRIVILEGE ENFORCEMENT
 // ===================================================================
 
-// ptrace: an AGENT-tagged process may not attach to any task (code injection).
+// ptrace: block a restricted caller from attaching to any task (code injection
+// into trusted processes). Restricted = AGENT (agent mode, enforce_mem) OR any
+// non-trusted process (hardening mode).
 SEC("lsm/ptrace_access_check")
 int BPF_PROG(gs_ptrace, struct task_struct *child, unsigned int mode)
 {
     struct gs_config *cfg = get_config();
-    if (!cfg || !cfg->ready || !cfg->enforce_mem)
+    if (!cfg || !cfg->ready)
         return 0;
     __u8 tag = current_tag();
-    if (tag != TAG_AGENT)
+    bool block = (cfg->enforce_mem && tag == TAG_AGENT) || hardening_block(cfg, tag);
+    if (!block)
         return 0;
     __u32 target = BPF_CORE_READ(child, pid);
     log_violation(EV_PTRACE, tag, cfg->log_only ? 0 : 1, 0, 0, 0, 0, target, 0);
@@ -835,21 +885,41 @@ int BPF_PROG(gs_ptrace, struct task_struct *child, unsigned int mode)
     return cfg->log_only ? 0 : -EPERM;
 }
 
-// kernel module load via kernel_read_file(READING_MODULE).
+// kernel module load via kernel_read_file(READING_MODULE) - rootkit vector.
 SEC("lsm/kernel_read_file")
 int BPF_PROG(gs_kernel_read_file, struct file *file, enum kernel_read_file_id id, bool contents)
 {
     struct gs_config *cfg = get_config();
-    if (!cfg || !cfg->ready || !cfg->enforce_mem)
+    if (!cfg || !cfg->ready)
         return 0;
     if (id != READING_MODULE)
         return 0;
     __u8 tag = current_tag();
-    if (tag != TAG_AGENT)
+    bool block = (cfg->enforce_mem && tag == TAG_AGENT) || hardening_block(cfg, tag);
+    if (!block)
         return 0;
     log_violation(EV_MODULE_LOAD, tag, cfg->log_only ? 0 : 1, 0, 0, 0, 0, 0, 0);
     bump(STAT_MEM_BLOCKED);
     return cfg->log_only ? 0 : -EACCES;
+}
+
+// ANTI-TAMPER: bpf() syscall. In hardening mode, any non-trusted caller is
+// denied - this stops an attacker (even root) using bpf()/bpftool to detach the
+// shield's LSM links, or to manipulate its maps/progs. The trusted loader is
+// TAG_TRUSTED so it can still load, pin, and unpin. Only enforces once `ready`
+// is set (the initial load happens before this hook is attached).
+SEC("lsm/bpf")
+int BPF_PROG(gs_bpf, int cmd, union bpf_attr *attr, unsigned int size)
+{
+    struct gs_config *cfg = get_config();
+    if (!cfg || !cfg->ready || !cfg->hardening_mode)
+        return 0;
+    __u8 tag = current_tag();
+    if (tag == TAG_TRUSTED)
+        return 0;
+    log_violation(EV_BPF, tag, cfg->log_only ? 0 : 1, 0, 0, 0, 0, 0, (__u32)cmd);
+    bump(STAT_MEM_BLOCKED);
+    return cfg->log_only ? 0 : -EPERM;
 }
 
 // dangerous capabilities. enforce_priv defaults OFF (audit-only) to avoid
@@ -862,6 +932,19 @@ int BPF_PROG(gs_capable, const struct cred *cred, struct user_namespace *ns,
     if (!cfg || !cfg->ready)
         return 0;
     __u8 tag = current_tag();
+
+    // Hardening mode: for non-trusted callers deny a NARROW set only -
+    // CAP_SYS_MODULE and CAP_BPF (module / bpf tamper). Deliberately NOT
+    // CAP_SYS_ADMIN (too broad - would brick normal root operation).
+    if (hardening_block(cfg, tag) && (cap == CAP_SYS_MODULE || cap == CAP_BPF)) {
+        log_violation(EV_CAPABILITY, tag, cfg->log_only ? 0 : 1, 0, 0, 0, 0, 0, (__u32)cap);
+        bump(STAT_MEM_BLOCKED);
+        if (!cfg->log_only)
+            return -EPERM;
+        return 0;
+    }
+
+    // Agent-containment mode: dangerous caps for AGENT subtrees (enforce_priv).
     if (tag != TAG_AGENT)
         return 0;
 
@@ -890,16 +973,18 @@ int BPF_PROG(gs_capable, const struct cred *cred, struct user_namespace *ns,
     return cfg->log_only ? 0 : -EPERM;
 }
 
-// mount operations (container-escape hardening). enforce_priv gated.
+// mount operations (container-escape / overlay-tamper hardening). Blocked for
+// AGENT subtrees when enforce_priv, and for any non-trusted caller in hardening.
 SEC("lsm/sb_mount")
 int BPF_PROG(gs_sb_mount, const char *dev_name, const struct path *path,
              const char *type, unsigned long flags, void *data)
 {
     struct gs_config *cfg = get_config();
-    if (!cfg || !cfg->ready || !cfg->enforce_priv)
+    if (!cfg || !cfg->ready)
         return 0;
     __u8 tag = current_tag();
-    if (tag != TAG_AGENT)
+    bool block = (cfg->enforce_priv && tag == TAG_AGENT) || hardening_block(cfg, tag);
+    if (!block)
         return 0;
     log_violation(EV_MOUNT, tag, cfg->log_only ? 0 : 1, 0, 0, 0, 0, 0, 0);
     bump(STAT_MEM_BLOCKED);
@@ -910,10 +995,11 @@ SEC("lsm/move_mount")
 int BPF_PROG(gs_move_mount, const struct path *from_path, const struct path *to_path)
 {
     struct gs_config *cfg = get_config();
-    if (!cfg || !cfg->ready || !cfg->enforce_priv)
+    if (!cfg || !cfg->ready)
         return 0;
     __u8 tag = current_tag();
-    if (tag != TAG_AGENT)
+    bool block = (cfg->enforce_priv && tag == TAG_AGENT) || hardening_block(cfg, tag);
+    if (!block)
         return 0;
     log_violation(EV_MOUNT, tag, cfg->log_only ? 0 : 1, 0, 0, 0, 0, 0, 1);
     bump(STAT_MEM_BLOCKED);
