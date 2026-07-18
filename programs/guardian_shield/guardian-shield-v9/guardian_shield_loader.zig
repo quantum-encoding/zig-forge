@@ -794,6 +794,7 @@ fn eventName(t: u8) []const u8 {
         9 => "open_write",
         10 => "create",
         11 => "cred_read",
+        12 => "tainted_connect",
         20 => "ptrace",
         21 => "dev_mem",
         22 => "module_load",
