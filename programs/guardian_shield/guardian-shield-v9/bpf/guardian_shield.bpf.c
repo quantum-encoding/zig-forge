@@ -694,17 +694,14 @@ int BPF_PROG(gs_path_truncate, const struct path *path)
     if (!current_is_agent())
         return 0;
 
-    struct recon_ctx *rctx = get_recon_ctx();
-    if (!rctx)
-        return 0;
-
-    long r = bpf_d_path((struct path *)path, (char *)rctx->out, MAX_PATH_LEN);
+    __u8 buf[MAX_PATH_LEN];
+    long r = bpf_d_path((struct path *)path, (char *)buf, MAX_PATH_LEN);
     if (r <= 0)
         return 0;
     __u32 len = (__u32)r - 1;                // r includes trailing NUL
-    if (path_is_protected(rctx->out, len)) {
+    if (path_is_protected(buf, len)) {
         __u8 enforced = cfg->log_only ? 0 : 1;
-        log_violation(EV_TRUNCATE, TAG_AGENT, enforced, rctx->out, len, 0, 0, 0, 0);
+        log_violation(EV_TRUNCATE, TAG_AGENT, enforced, buf, len, 0, 0, 0, 0);
         bump(STAT_FS_BLOCKED);
         if (cfg->log_only)
             return 0;
