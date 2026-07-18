@@ -520,7 +520,7 @@ const Loader = struct {
         const e_fd = try self.mapFd("exec_events");
         _ = c.ring_buffer__add(rb, e_fd, handleExec, null);
 
-        while (g_running) {
+        while (true) {
             const rc = c.ring_buffer__poll(rb, 250);
             if (rc < 0 and rc != -4) { // -EINTR is fine
                 std.log.err("ring_buffer__poll error rc={d}", .{rc});
