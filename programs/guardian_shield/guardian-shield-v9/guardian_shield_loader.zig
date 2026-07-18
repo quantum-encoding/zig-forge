@@ -99,8 +99,15 @@ const RawConfig = struct {
 // ===================================================================
 
 var g_running: bool = true;
-var g_log_file: ?std.fs.File = null;
+var g_log_fd: c_int = -1;
 const g_alloc = std.heap.c_allocator;
+
+const MAX_PATH_BYTES = 4096;
+
+fn logWrite(bytes: []const u8) void {
+    if (g_log_fd < 0) return;
+    _ = c.write(g_log_fd, bytes.ptr, bytes.len);
+}
 
 fn onSignal(_: c_int) callconv(.c) void {
     g_running = false;
