@@ -204,6 +204,17 @@ struct {
     __uint(map_flags, BPF_F_NO_PREALLOC);   // required for LPM_TRIE
 } protected_paths SEC(".maps");
 
+// Credential AssetMap (crown jewels: ~/.ssh, ~/.aws, gcloud/gh tokens, ...). A
+// SEPARATE trie from protected_paths - it gates READS (not just writes) and only
+// for TAINTED/AGENT subtrees, independent of agent/hardening posture.
+struct {
+    __uint(type, BPF_MAP_TYPE_LPM_TRIE);
+    __type(key, struct path_lpm_key);
+    __type(value, struct path_rule);
+    __uint(max_entries, MAX_PROTECTED_PATHS);
+    __uint(map_flags, BPF_F_NO_PREALLOC);
+} credential_paths SEC(".maps");
+
 // Agent-launcher basenames (exec classifier). Populated from config.
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -211,6 +222,15 @@ struct {
     __type(value, __u8);
     __uint(max_entries, 512);
 } agent_exe_names SEC(".maps");
+
+// Build-tool launcher basenames (npm/pip/cargo/...). exec of one taints the
+// whole install subtree (TAG_TAINTED, inherited + sticky).
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, char[MAX_EXE_NAME]);
+    __type(value, __u8);
+    __uint(max_entries, 512);
+} build_exe_names SEC(".maps");
 
 // Operator exempt exe FULL PATHS. exec of one of these tags the pid EXEMPT
 // (overrides inherited AGENT). Keyed on path, not comm.
