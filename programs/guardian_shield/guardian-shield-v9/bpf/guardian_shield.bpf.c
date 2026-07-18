@@ -396,9 +396,12 @@ static __always_inline __u32 reconstruct_path(struct dentry *dentry,
                                               struct vfsmount *vfsmnt,
                                               struct recon_ctx *ctx)
 {
+    // BPF_CORE_READ through a LOCAL typed pointer, never through ctx->mnt (a
+    // map-value field), so CO-RE relocates against struct mount, not recon_ctx.
+    struct mount *m = container_of(vfsmnt, struct mount, mnt);
     ctx->d = dentry;
-    ctx->mnt = container_of(vfsmnt, struct mount, mnt);
-    ctx->mnt_root = BPF_CORE_READ(ctx->mnt, mnt.mnt_root);
+    ctx->mnt = m;
+    ctx->mnt_root = BPF_CORE_READ(m, mnt.mnt_root);
     ctx->n = 0;
     ctx->off = 0;
     ctx->done = 0;
