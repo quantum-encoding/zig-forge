@@ -183,4 +183,76 @@ pub fn build(b: *std.Build) void {
 
     const recon_step = b.step("recon", "Build recon target (.linux/.none, no libc) — maps std.os.linux surface");
     recon_step.dependOn(&recon_exe.step);
+
+    // ------------------------------------------------------------------
+    // Zigix target — a runnable userspace ELF for the Zigix OS.
+    //
+    //   os_tag = .linux, abi = .none, link_libc = false
+    //
+    // Zigix speaks the Linux syscall ABI (the `syscall` instruction that
+    // std.os.linux emits), so a stock std.http.Client runs on it with no
+    // custom std.Io vtable. This target builds `src/zigix_demo.zig` — the
+    // minimal single-GET bring-up program — as an installable binary to
+    // copy onto a Zigix ext image. See ZIGIX_INTEGRATION.md for the kernel
+    // gaps (RTC, CSPRNG, poll readiness) that gate HTTPS.
+    // ------------------------------------------------------------------
+    const zigix_arch = b.option(
+        std.Target.Cpu.Arch,
+        "zigix-arch",
+        "Zigix target architecture (x86_64 or aarch64)",
+    ) orelse .x86_64;
+
+    const zigix_optimize = b.option(
+        std.builtin.OptimizeMode,
+        "zigix-optimize",
+        "Zigix optimize mode (default ReleaseSmall)",
+    ) orelse .ReleaseSmall;
+
+    const zigix_url = b.option(
+        []const u8,
+        "zigix-url",
+        "URL the Zigix demo fetches (default plaintext http:// — milestone 1)",
+    ) orelse "http://example.com/";
+
+    // Default cert-validation epoch: 2025-01-01T00:00:00Z in nanoseconds.
+    // Used only on the https:// path, to stand in for Zigix's not-yet-real
+    // wall clock. Override with -Dzigix-cert-epoch-ns once an RTC lands.
+    const zigix_cert_epoch_ns = b.option(
+        i64,
+        "zigix-cert-epoch-ns",
+        "TLS cert-validation timestamp in ns since Unix epoch (https:// only)",
+    ) orelse 1_735_689_600_000_000_000;
+
+    const zigix_opts = b.addOptions();
+    zigix_opts.addOption([]const u8, "zigix_url", zigix_url);
+    zigix_opts.addOption(i96, "zigix_cert_epoch_ns", zigix_cert_epoch_ns);
+
+    const zigix_target = b.resolveTargetQuery(.{
+        .cpu_arch = zigix_arch,
+        .os_tag = .linux,
+        .abi = .none,
+    });
+
+    const zigix_lib_module = b.addModule("http-sentinel-zigix", .{
+        .root_source_file = b.path("src/lib.zig"),
+        .target = zigix_target,
+        .optimize = zigix_optimize,
+        .link_libc = false,
+    });
+
+    const zigix_exe_module = b.createModule(.{
+        .root_source_file = b.path("src/zigix_demo.zig"),
+        .target = zigix_target,
+        .optimize = zigix_optimize,
+        .link_libc = false,
+    });
+    zigix_exe_module.addImport("http-sentinel", zigix_lib_module);
+    zigix_exe_module.addOptions("build_options", zigix_opts);
+
+    const zigix_exe = b.addExecutable(.{
+        .name = "zigix-sentinel-demo",
+        .root_module = zigix_exe_module,
+    });
+    const zigix_step = b.step("zigix", "Build the Zigix userspace HTTP demo (.linux/.none, no libc)");
+    zigix_step.dependOn(&b.addInstallArtifact(zigix_exe, .{}).step);
 }

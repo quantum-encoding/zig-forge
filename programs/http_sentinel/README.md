@@ -2,7 +2,7 @@
 
 A production-grade, **pure Zig** HTTP client library for Zig **0.16.0** — zero libc, zero `extern "c"`, zero `@cImport`.
 
-> **Pure Zig**: `link_libc = false`. Uses `std.Io.Threaded` throughout. Runs on any Zig target including freestanding OS kernels.
+> **Pure Zig**: `link_libc = false`, zero `@cImport` on the live path. Uses `std.Io.Threaded` throughout. Cross-compiles for any Linux-ABI target — including the [Zigix OS](ZIGIX_INTEGRATION.md), which services the Linux syscalls `std.os.linux` emits, so the client runs there as a userspace ELF with no custom `std.Io` backend. (It is *not* a Linux kernel module; it is hosted userspace code that talks to a kernel via syscalls.)
 
 **Developed by [QUANTUM ENCODING LTD](https://quantumencoding.io)**
 

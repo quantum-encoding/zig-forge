@@ -56,7 +56,16 @@ fn validateHeaders(headers: []const http.Header) !void {
 /// A robust, thread-safe HTTP client for Zig 0.16.0-dev.2187+
 pub const HttpClient = struct {
     allocator: std.mem.Allocator,
-    io_threaded: *std.Io.Threaded,
+    /// Non-null only when this client created its own `std.Io.Threaded` runtime
+    /// (the `init` path). When an Io handle is injected via `initWithIo` — e.g.
+    /// a Zigix `std.Io` backend, or a single-threaded runtime on a single-core
+    /// target — this stays null and `deinit` will not tear down a runtime it
+    /// does not own.
+    io_threaded: ?*std.Io.Threaded,
+    /// The Io handle every request is driven through. When `io_threaded` is
+    /// null the handle is owned by the caller, who must keep it alive for the
+    /// lifetime of this client.
+    io_handle: std.Io,
     client: http.Client,
     /// Captured response body when an SSE streaming request returned a 4xx/5xx
     /// status. Owned by `allocator` and freed by `deinit` (or on the next
@@ -64,15 +73,28 @@ pub const HttpClient = struct {
     /// user instead of an opaque ApiRequestFailed.
     last_sse_error_body: ?[]u8 = null,
 
-    /// Initialize a new HTTP client (pure Zig — no libc)
+    /// Initialize a new HTTP client backed by the default `std.Io.Threaded`
+    /// runtime (pure Zig — no libc). Suitable for any hosted target.
     pub fn init(allocator: std.mem.Allocator) !HttpClient {
         const io_threaded = try allocator.create(std.Io.Threaded);
+        errdefer allocator.destroy(io_threaded);
         io_threaded.* = std.Io.Threaded.init(allocator, .{});
-        const io_handle = io_threaded.io();
 
+        var self = initWithIo(allocator, io_threaded.io());
+        self.io_threaded = io_threaded;
+        return self;
+    }
+
+    /// Initialize against a caller-supplied Io handle. This is the seam for
+    /// running on a non-default backend — a Zigix `std.Io` implementation, or a
+    /// single-threaded `std.Io.Threaded` (`init_single_threaded`) on a
+    /// single-core target such as a fresh Zigix bring-up. The caller retains
+    /// ownership of the Io runtime; `deinit` will not tear it down.
+    pub fn initWithIo(allocator: std.mem.Allocator, io_handle: std.Io) HttpClient {
         return .{
             .allocator = allocator,
-            .io_threaded = io_threaded,
+            .io_threaded = null,
+            .io_handle = io_handle,
             .client = http.Client{
                 .allocator = allocator,
                 .io = io_handle,
@@ -80,9 +102,27 @@ pub const HttpClient = struct {
         };
     }
 
+    /// Pin the timestamp used for TLS certificate validity checks, which also
+    /// suppresses the filesystem CA rescan `std.http.Client` performs on its
+    /// first HTTPS request. Required on targets whose `CLOCK_REALTIME` is not
+    /// real wall time (e.g. Zigix's boot-relative clock, which would otherwise
+    /// read ~1970 and reject every valid certificate). Pair with `setCaBundle`
+    /// to supply trust anchors, since the rescan is skipped. Call before the
+    /// first HTTPS request.
+    pub fn setCertValidationTime(self: *HttpClient, ts: std.Io.Timestamp) void {
+        self.client.now = ts;
+    }
+
+    /// Supply CA trust anchors explicitly instead of rescanning the system
+    /// certificate store from the filesystem. Ownership of `bundle` transfers
+    /// to the underlying `std.http.Client`, which frees it in `deinit`.
+    pub fn setCaBundle(self: *HttpClient, bundle: std.crypto.Certificate.Bundle) void {
+        self.client.ca_bundle = bundle;
+    }
+
     /// Get the Io handle for timing, sleep, random, etc.
     pub fn io(self: *HttpClient) std.Io {
-        return self.io_threaded.io();
+        return self.io_handle;
     }
 
     /// Stash a copy of `body` into `last_sse_error_body` so streaming AI
@@ -103,8 +143,10 @@ pub const HttpClient = struct {
             self.last_sse_error_body = null;
         }
         self.client.deinit();
-        self.io_threaded.deinit();
-        self.allocator.destroy(self.io_threaded);
+        if (self.io_threaded) |threaded| {
+            threaded.deinit();
+            self.allocator.destroy(threaded);
+        }
     }
 
     /// Process response body with gzip decompression if needed
