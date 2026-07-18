@@ -66,12 +66,15 @@ struct open_how {
 
 enum expect { EXPECT_BLOCKED, EXPECT_ALLOWED };
 
-static const char *V_UNLINK   = "gs_victim_unlink";
-static const char *V_UNLINKAT = "gs_victim_unlinkat";
-static const char *V_TRUNCATE = "gs_victim_truncate";
-static const char *V_IOURING  = "gs_victim_iouring";
-static const char *V_RENAME   = "gs_victim_rename";
-static const char *V_CREATE   = "gs_victim_create";
+static const char *V_UNLINK    = "gs_victim_unlink";
+static const char *V_UNLINKAT  = "gs_victim_unlinkat";
+static const char *V_TRUNCATE  = "gs_victim_truncate";
+static const char *V_IOURING   = "gs_victim_iouring";
+static const char *V_RENAME    = "gs_victim_rename";
+static const char *V_CREATE    = "gs_victim_create";
+static const char *V_MOVEOUT   = "gs_victim_moveout";
+static const char *V_CLOBBER   = "gs_victim_clobber";
+static const char *V_OVERWRITE = "gs_victim_overwrite";
 
 static int join(char *out, size_t n, const char *dir, const char *name) {
     int r = snprintf(out, n, "%s/%s", dir, name);
