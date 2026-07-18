@@ -108,14 +108,17 @@ const ExecEvent = extern struct {
 const RawConfig = struct {
     protected_paths: []const []const u8 = &.{},
     critical_paths: []const []const u8 = &.{},
+    credential_paths: []const []const u8 = &.{},
     agent_exes: []const []const u8 = &.{},
     exempt_exes: []const []const u8 = &.{},
     trusted_exes: []const []const u8 = &.{},
+    build_exes: []const []const u8 = &.{},
     enforce_fs: bool = true,
     enforce_mem: bool = true,
     enforce_priv: bool = false,
     log_only: bool = false,
     hardening_mode: bool = false,
+    enforce_cred_read: bool = true,
     pin_dir: []const u8 = "/sys/fs/bpf/guardian_shield",
     log_file: []const u8 = "/var/log/guardian_shield.jsonl",
 };
