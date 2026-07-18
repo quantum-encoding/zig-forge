@@ -435,6 +435,9 @@ const Loader = struct {
         // relative-path --unpin still matches (path-string match would fail). ---
         try self.populateTrustedInodes();
 
+        // --- egress_allow (IPv4 CIDR trie): built-in private ranges + operator ---
+        const n_egress = try self.populateEgress();
+
         // --- runtime_cfg (flags set, ready=0 until attach completes) ---
         const cfg_fd = try self.mapFd("runtime_cfg");
         var k0: u32 = 0;
