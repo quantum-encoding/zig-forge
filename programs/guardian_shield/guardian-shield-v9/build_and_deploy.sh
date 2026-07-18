@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 # build_and_deploy.sh
-# Comprehensive Guardian Shield build and deployment script
+#
+# DEPRECATED for the v9 rebuild. This script builds the OLD, broken split
+# objects (guardian_shield_lsm_{filesystem,memory}.bpf.c) which are now redirect
+# stubs. Use the Zig build system instead:
+#
+#     zig build            # BPF object + loader + bypass test harness
+#     zig build bpf        # just the BPF object
+#     sudo zig-out/bin/guardian_shield_loader config.json          # load + pin
+#     sudo zig-out/bin/guardian_shield_loader config.json --unpin  # teardown
+#
+# See V9_STATUS.md for the full deploy/pin/unload procedure. This script is kept
+# only for historical reference and will fail against the stubbed sources.
 
 set -euo pipefail
 
