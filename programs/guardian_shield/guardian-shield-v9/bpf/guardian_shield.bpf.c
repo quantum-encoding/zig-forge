@@ -414,7 +414,9 @@ static __always_inline __u32 reconstruct_path(struct dentry *dentry,
 // slash; a path is protected iff a stored prefix P matches AND path[len(P)] is
 // either '/' (subtree) or end-of-string (the protected dir itself). This
 // rejects sibling false positives (e.g. "/etcfoo" vs prefix "/etc").
-static __always_inline bool path_is_protected(__u8 *path, __u32 len)
+// __noinline (bpf2bpf call): keeps the 132-byte LPM key in this function's own
+// stack frame instead of inflating every caller hook's frame.
+static __noinline bool path_is_protected(__u8 *path, __u32 len)
 {
     struct path_lpm_key key;
     __builtin_memset(&key, 0, sizeof(key));
