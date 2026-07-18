@@ -2,6 +2,15 @@
 # Zig Forge — comprehensive .gitignore
 # ═══════════════════════════════════════════════════════════════════
 
+# ── Secrets / credentials (defense-in-depth; this is a PUBLIC repo) ──
+# Never commit VM/test credentials. The canonical store is OUTSIDE git
+# (~/.config/forge-build-farm/vm-credentials); these patterns catch any
+# stray credential file that lands in the tree.
+vm-credentials
+*.vmsecret
+*credentials*.env
+.secrets/
+
 # ── Zig ───────────────────────────────────────────────────────────
 .zig-cache/
 .zig-cache.bak/
