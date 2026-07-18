@@ -41,10 +41,10 @@ char LICENSE[] SEC("license") = "GPL";
 // CONSTANTS (vmlinux.h does not provide UAPI constants)
 // ===================================================================
 
-// MAX_PATH_LEN is 128, not 256: recon_ctx is passed to bpf_loop() as a STACK
-// pointer, so it must fit the 512-byte BPF stack with room for the frame. A
-// protected prefix always sits at the START of the reconstructed path, so 128
-// bytes is more than enough to hold prefix + boundary char for matching.
+// MAX_PATH_LEN is 128 (power of two - required for the & (MAX_PATH_LEN-1) mask
+// on variable-offset writes into the per-CPU recon_buf). A protected prefix
+// always sits at the START of the reconstructed path, so 128 bytes is more than
+// enough to hold prefix + boundary char for matching.
 #define MAX_PATH_LEN        128
 #define MAX_COMPONENT_LEN   64
 #define MAX_DENTRY_DEPTH    16     // power of two: index masking for verifier
