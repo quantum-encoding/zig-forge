@@ -241,17 +241,36 @@ struct {
     __uint(max_entries, 1);
 } runtime_cfg SEC(".maps");
 
-// Per-CPU scratch buffer for path reconstruction (too big for the stack).
-struct path_scratch {
-    __u8 data[MAX_PATH_LEN];
+// Per-CPU reconstruction context (too big for the stack). Holds the walk state
+// AND the output buffer so the bpf_loop() callbacks operate on a bounded
+// PTR_TO_MAP_VALUE. Also doubles as the scratch buffer for bpf_d_path hooks
+// (they only use `out`).
+struct recon_ctx {
+    // walk state (phase 1)
+    struct dentry *d;
+    struct mount *mnt;
+    struct dentry *mnt_root;
+    struct dentry *stack[MAX_DENTRY_DEPTH];
+    __u32 n;
+    __u32 off;         // emit offset (phase 2)
+    __u8 done;
+    __u8 _pad[3];
+    // output path
+    __u8 out[MAX_PATH_LEN];
 };
 
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
     __type(key, __u32);
-    __type(value, struct path_scratch);
+    __type(value, struct recon_ctx);
     __uint(max_entries, 1);
-} path_scratch_map SEC(".maps");
+} recon_ctx_map SEC(".maps");
+
+static __always_inline struct recon_ctx *get_recon_ctx(void)
+{
+    __u32 z = 0;
+    return bpf_map_lookup_elem(&recon_ctx_map, &z);
+}
 
 // ===================================================================
 // SMALL HELPERS
