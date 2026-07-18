@@ -924,8 +924,9 @@ int BPF_PROG(gs_path_truncate, const struct path *path)
 }
 
 // ===================================================================
-// file_open: (a) block agent write/truncate opens on protected paths using the
-// canonical bpf_d_path; (b) /dev/mem family protection (memory domain).
+// file_open: (0) credential-harvest guard - deny ANY open (incl. read-only) of a
+// credential AssetMap path by a TAINTED (build-tool) or AGENT subtree; (a) block
+// restricted write/truncate opens on protected paths; (b) /dev/mem protection.
 // ===================================================================
 
 SEC("lsm/file_open")
@@ -937,6 +938,25 @@ int BPF_PROG(gs_file_open, struct file *file)
 
     __u8 tag = current_tag();
     bool restricted = is_restricted(cfg, tag);
+
+    // ---- (0) credential-read harvest block (supply-chain defense) ----
+    // ALWAYS-ON for TAINTED/AGENT subtrees, independent of agent/hardening
+    // posture. file_open fires for every open incl. O_RDONLY, so this catches
+    // the postinstall reading ~/.aws / ~/.ssh to exfiltrate. A normal/trusted/
+    // untainted process reading its own creds is unaffected.
+    if (cfg->enforce_cred_read && (tag == TAG_TAINTED || tag == TAG_AGENT)) {
+        __u8 cbuf[MAX_PATH_LEN];
+        long cr = bpf_d_path(&file->f_path, (char *)cbuf, MAX_PATH_LEN);
+        if (cr > 0) {
+            __u32 clen = (__u32)cr - 1;
+            if (cred_is_protected(cbuf, clen)) {
+                log_violation(EV_CRED_READ, tag, cfg->log_only ? 0 : 1, cbuf, clen, 0, 0, 0, 0);
+                bump(STAT_FS_BLOCKED);
+                if (!cfg->log_only)
+                    return -EPERM;
+            }
+        }
+    }
 
     // ---- (b) /dev/mem, /dev/kmem, /dev/port ----
     // Active for restricted callers when the mem domain is on (agent mode) or in
