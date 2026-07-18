@@ -245,21 +245,42 @@ struct {
     __uint(max_entries, 1);
 } runtime_cfg SEC(".maps");
 
-// Reconstruction context. Lives on the STACK (bpf_loop() requires its callback
-// context to be PTR_TO_STACK, not a map value). Sized to fit the 512-byte BPF
-// stack: 3 ptrs (24) + stack[16] (128) + 3 u32/u8 fields (12) + out[128] = 292.
-struct recon_ctx {
-    // walk state (phase 1)
-    struct dentry *d;
-    struct mount *mnt;
-    struct dentry *mnt_root;
-    struct dentry *stack[MAX_DENTRY_DEPTH];
-    __u32 n;
-    __u32 off;         // emit offset (phase 2)
-    __u8 done;
-    __u8 _pad[3];
-    // output path
-    __u8 out[MAX_PATH_LEN];
+// Path reconstruction must satisfy two verifier rules at once:
+//   - bpf_loop()'s callback context MUST be PTR_TO_STACK, and
+//   - variable-offset byte writes are only legal into a PTR_TO_MAP_VALUE.
+// So we split the two: a small fixed-layout control struct on the STACK (the
+// bpf_loop ctx, only constant-offset field accesses), and a per-CPU MAP buffer
+// that holds the dentry pointer stack + the assembled path bytes (all the
+// variable-offset, masked writes target this map value).
+
+struct recon_buf {
+    __u64 dstack[MAX_DENTRY_DEPTH];   // collected dentry pointers (leaf..root)
+    __u8  data[MAX_PATH_LEN];         // assembled absolute path
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __type(key, __u32);
+    __type(value, struct recon_buf);
+    __uint(max_entries, 1);
+} recon_buf_map SEC(".maps");
+
+static __always_inline struct recon_buf *get_recon_buf(void)
+{
+    __u32 z = 0;
+    return bpf_map_lookup_elem(&recon_buf_map, &z);
+}
+
+// Small STACK control struct = the bpf_loop context. Kernel pointers are stored
+// as __u64 (fixed-offset scalars) and cast back to typed locals in the callback.
+struct walk_ctx {
+    __u64 d;           // current dentry
+    __u64 mnt;         // current struct mount
+    __u64 mnt_root;    // current mount's root dentry
+    __u32 n;           // components collected
+    __u32 off;         // emit offset
+    __u8  done;
+    __u8  _pad[3];
 };
 
 // ===================================================================
