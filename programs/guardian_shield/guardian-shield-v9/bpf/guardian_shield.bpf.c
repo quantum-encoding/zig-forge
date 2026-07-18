@@ -1185,3 +1185,87 @@ int BPF_PROG(gs_move_mount, const struct path *from_path, const struct path *to_
     bump(STAT_MEM_BLOCKED);
     return cfg->log_only ? 0 : -EPERM;
 }
+
+// ===================================================================
+// EGRESS GUARD (supply-chain exfil block)
+// ===================================================================
+
+// True if an IPv6 address is loopback (::1), link-local (fe80::/10), or ULA
+// (fc00::/7) - i.e. not a routable public destination.
+static __always_inline bool v6_is_local(const __u8 *a)
+{
+    if (a[0] == 0xfe && (a[1] & 0xc0) == 0x80)   // fe80::/10 link-local
+        return true;
+    if ((a[0] & 0xfe) == 0xfc)                   // fc00::/7 unique-local
+        return true;
+    // ::1 loopback (and :: unspecified -> treat as local)
+    bool high_zero = true;
+#pragma unroll
+    for (int i = 0; i < 15; i++)
+        if (a[i] != 0)
+            high_zero = false;
+    if (high_zero && (a[15] == 1 || a[15] == 0))
+        return true;
+    return false;
+}
+
+// Outbound connect guard: a TAINTED (build-tool) or AGENT subtree may only
+// connect to allowlisted destinations (private/loopback/link-local/CGNAT +
+// operator CIDRs). A connect to any other (public) dest -> log EV_TAINTED_CONNECT
+// and, if enforce_egress, -EPERM. Runs BEFORE the connect completes, so the
+// verdict is independent of network reachability. Normal/trusted/untainted
+// processes are unaffected (the user's browser/curl keep working). AF_UNIX and
+// other local families are ignored.
+SEC("lsm/socket_connect")
+int BPF_PROG(gs_socket_connect, struct socket *sock, struct sockaddr *address, int addrlen)
+{
+    struct gs_config *cfg = get_config();
+    if (!cfg || !cfg->ready)
+        return 0;
+    __u8 tag = current_tag();
+    if (tag != TAG_TAINTED && tag != TAG_AGENT)
+        return 0;
+
+    __u16 fam = BPF_CORE_READ(address, sa_family);
+
+    if (fam == AF_INET) {
+        struct sockaddr_in *sin = (struct sockaddr_in *)address;
+        __be32 daddr = BPF_CORE_READ(sin, sin_addr.s_addr);   // network byte order
+        __be16 dport = BPF_CORE_READ(sin, sin_port);
+
+        struct egress_lpm_key key = {};
+        key.prefixlen = 32;
+        __builtin_memcpy(key.addr, &daddr, 4);                // MSB-first bytes
+        if (bpf_map_lookup_elem(&egress_allow, &key))
+            return 0;                                         // allowlisted
+
+        __u8 enforced = (cfg->enforce_egress && !cfg->log_only) ? 1 : 0;
+        log_violation(EV_TAINTED_CONNECT, tag, enforced, 0, 0, 0, 0,
+                      bpf_ntohs(dport), bpf_ntohl(daddr));
+        bump(STAT_MEM_BLOCKED);
+        if (cfg->enforce_egress && !cfg->log_only)
+            return -EPERM;
+        return 0;
+    }
+
+    if (fam == AF_INET6) {
+        struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)address;
+        __u8 a[16] = {};
+        BPF_CORE_READ_INTO(&a, sin6, sin6_addr);
+        __be16 dport = BPF_CORE_READ(sin6, sin6_port);
+        if (v6_is_local(a))
+            return 0;                                         // local v6 allowed
+
+        // NOTE: no operator IPv6 allowlist in v1 - global v6 dests are treated as
+        // public. aux carries family marker 6 (the 128-bit addr does not fit).
+        __u8 enforced = (cfg->enforce_egress && !cfg->log_only) ? 1 : 0;
+        log_violation(EV_TAINTED_CONNECT, tag, enforced, 0, 0, 0, 0,
+                      bpf_ntohs(dport), 6);
+        bump(STAT_MEM_BLOCKED);
+        if (cfg->enforce_egress && !cfg->log_only)
+            return -EPERM;
+        return 0;
+    }
+
+    return 0;   // AF_UNIX / AF_NETLINK / other: local IPC, never blocked
+}
