@@ -445,16 +445,38 @@ const Loader = struct {
         if (c.bpf_map_update_elem(cfg_fd, &k0, &gc, c.BPF_ANY) != 0)
             return error.MapUpdateFailed;
 
-        std.log.info("policy loaded: {d} {s} paths, {d} credential paths, {d} agent exes, {d} build exes, {d} trusted (hardening={}, cred_read={}).", .{
+        std.log.info("policy loaded: {d} {s} paths, {d} credential paths, {d} agent exes, {d} build exes, {d} trusted, {d} egress CIDRs (hardening={}, cred_read={}, egress={}).", .{
             n_paths,
             if (self.cfg.hardening_mode) "critical" else "protected",
             n_creds,
             self.cfg.agent_exes.len,
             self.cfg.build_exes.len,
             self.cfg.trusted_exes.len,
+            n_egress,
             self.cfg.hardening_mode,
             self.cfg.enforce_cred_read,
+            self.cfg.enforce_egress,
         });
+    }
+
+    // Built-in egress allowlist: loopback, RFC1918 private, link-local, CGNAT.
+    // Always inserted so LAN/localhost/registry-mirror-on-LAN work even if the
+    // operator's egress_allow omits them; operator CIDRs are added on top.
+    const EGRESS_DEFAULTS = [_][]const u8{
+        "127.0.0.0/8",   "10.0.0.0/8",     "172.16.0.0/12",
+        "192.168.0.0/16", "169.254.0.0/16", "100.64.0.0/10",
+    };
+
+    fn populateEgress(self: *Loader) !usize {
+        const fd = try self.mapFd("egress_allow");
+        var n: usize = 0;
+        for (EGRESS_DEFAULTS) |cidr| {
+            if (insertCidr(fd, cidr)) n += 1;
+        }
+        for (self.cfg.egress_allow) |cidr| {
+            if (insertCidr(fd, cidr)) n += 1;
+        }
+        return n;
     }
 
     // Insert a list of path prefixes into an LPM trie map (trailing '/' stripped;
