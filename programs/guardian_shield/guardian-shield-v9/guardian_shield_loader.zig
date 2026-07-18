@@ -190,7 +190,8 @@ pub fn main(init: std.process.Init) !void {
         _ = c.close(g_log_fd);
     };
 
-    installSignals();
+    // Note: no SIGINT handler is installed. On termination the pinned LSM links
+    // PERSIST (that is the whole point); use `--unpin` to remove enforcement.
     try loader.eventLoop();
 
     std.log.info("Guardian Shield v9 loader exiting. Enforcement REMAINS active via pinned links. Run with --unpin to remove.", .{});
