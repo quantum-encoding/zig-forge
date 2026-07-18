@@ -678,9 +678,24 @@ fn installSignals() void {
 }
 
 fn loadConfig(path: []const u8) !std.json.Parsed(RawConfig) {
-    const f = try std.fs.cwd().openFile(path, .{});
-    defer f.close();
-    const content = try f.readToEndAlloc(g_alloc, 1 << 20);
+    var zbuf: [MAX_PATH_BYTES]u8 = undefined;
+    const zpath = try std.fmt.bufPrintZ(&zbuf, "{s}", .{path});
+    const fd = c.open(zpath.ptr, c.O_RDONLY);
+    if (fd < 0) return error.ConfigOpenFailed;
+    defer _ = c.close(fd);
+
+    const size = c.lseek(fd, 0, c.SEEK_END);
+    if (size < 0 or size > (1 << 20)) return error.ConfigTooLarge;
+    _ = c.lseek(fd, 0, c.SEEK_SET);
+
+    const content = try g_alloc.alloc(u8, @intCast(size));
     defer g_alloc.free(content);
-    return std.json.parseFromSlice(RawConfig, g_alloc, content, .{ .ignore_unknown_fields = true });
+    var total: usize = 0;
+    while (total < content.len) {
+        const n = c.read(fd, content.ptr + total, content.len - total);
+        if (n < 0) return error.ConfigReadFailed;
+        if (n == 0) break;
+        total += @intCast(n);
+    }
+    return std.json.parseFromSlice(RawConfig, g_alloc, content[0..total], .{ .ignore_unknown_fields = true });
 }
