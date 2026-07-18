@@ -321,23 +321,28 @@ static __always_inline bool current_is_agent(void)
 // ===================================================================
 
 // Path reconstruction uses bpf_loop() (kernel >= 5.17) so the verifier costs
-// each walk O(1) instead of unrolling 16*64 per-byte iterations (which blew the
-// 1M-insn limit). The two callbacks operate on a per-CPU recon_ctx (a bounded
-// PTR_TO_MAP_VALUE), never on variable-offset stack slots.
+// each walk O(1). The bpf_loop context is a small STACK walk_ctx; all the
+// variable-offset writes go into the per-CPU recon_buf MAP value.
 
 // Phase 1: collect dentry components leaf..root, crossing mount points.
 static long collect_cb(__u32 i, void *c)
 {
-    struct recon_ctx *ctx = c;
+    struct walk_ctx *ctx = c;
     if (ctx->done)
         return 1;
 
-    // Load stored kernel pointers into LOCAL typed vars before any
-    // BPF_CORE_READ. Reading through a map-value field (ctx->mnt) makes CO-RE
-    // latch the relocation onto recon_ctx (no kernel BTF target) -> -EINVAL.
-    struct dentry *d = ctx->d;
-    struct mount *m = ctx->mnt;
-    struct dentry *mnt_root = ctx->mnt_root;
+    struct recon_buf *buf = get_recon_buf();
+    if (!buf) {
+        ctx->done = 1;
+        return 1;
+    }
+
+    // Cast stored __u64 back to typed locals; BPF_CORE_READ goes through these
+    // locals (real kernel types), never through a struct field, so CO-RE
+    // relocates correctly.
+    struct dentry *d = (struct dentry *)ctx->d;
+    struct mount *m = (struct mount *)ctx->mnt;
+    struct dentry *mnt_root = (struct dentry *)ctx->mnt_root;
 
     struct dentry *parent = BPF_CORE_READ(d, d_parent);
 
@@ -347,9 +352,9 @@ static long collect_cb(__u32 i, void *c)
             ctx->done = 1;
             return 1;
         }
-        ctx->d = BPF_CORE_READ(m, mnt_mountpoint);
-        ctx->mnt = pmnt;
-        ctx->mnt_root = BPF_CORE_READ(pmnt, mnt.mnt_root);
+        ctx->d = (__u64)(long)BPF_CORE_READ(m, mnt_mountpoint);
+        ctx->mnt = (__u64)(long)pmnt;
+        ctx->mnt_root = (__u64)(long)BPF_CORE_READ(pmnt, mnt.mnt_root);
         return 0;                            // re-test mountpoint vs new root
     }
     if (d == parent) {                       // fs root without a mount parent
@@ -363,28 +368,31 @@ static long collect_cb(__u32 i, void *c)
         ctx->done = 1;
         return 1;
     }
-    ctx->stack[n & (MAX_DENTRY_DEPTH - 1)] = d;
+    buf->dstack[n & (MAX_DENTRY_DEPTH - 1)] = (__u64)(long)d;  // var-off write into MAP value: OK
     ctx->n = n + 1;
-    ctx->d = parent;
+    ctx->d = (__u64)(long)parent;
     return 0;
 }
 
-// Phase 2: emit root..leaf as "/component" segments into ctx->out (forward,
-// monotonically increasing offset -> no variable-offset stack access).
+// Phase 2: emit root..leaf as "/component" segments into recon_buf->data.
 static long emit_cb(__u32 k, void *c)
 {
-    struct recon_ctx *ctx = c;
+    struct walk_ctx *ctx = c;
     if (k >= ctx->n)
         return 1;
 
+    struct recon_buf *buf = get_recon_buf();
+    if (!buf)
+        return 1;
+
     __u32 idx = ctx->n - 1 - k;
-    struct dentry *cd = ctx->stack[idx & (MAX_DENTRY_DEPTH - 1)];
+    struct dentry *cd = (struct dentry *)buf->dstack[idx & (MAX_DENTRY_DEPTH - 1)];
     __u32 nlen = BPF_CORE_READ(cd, d_name.len);
     const unsigned char *nm = BPF_CORE_READ(cd, d_name.name);
 
     __u32 off = ctx->off;
     if (off < MAX_PATH_LEN - 1) {
-        ctx->out[off] = '/';
+        buf->data[off & (MAX_PATH_LEN - 1)] = '/';   // masked var-off write: OK
         off++;
     }
     if (off < MAX_PATH_LEN - 1) {
@@ -394,40 +402,41 @@ static long emit_cb(__u32 k, void *c)
         if (nlen > MAX_COMPONENT_LEN)
             nlen = MAX_COMPONENT_LEN;
         if (nlen > 0)
-            bpf_probe_read_kernel(&ctx->out[off], nlen, nm);
+            bpf_probe_read_kernel(&buf->data[off & (MAX_PATH_LEN - 1)], nlen, nm);
         off += nlen;
     }
     ctx->off = off;
     return 0;
 }
 
-// Mount-aware absolute path reconstruction into ctx->out. Returns byte length
-// of the NUL-terminated C-string. `ctx` is a caller-owned STACK recon_ctx.
+// Mount-aware absolute path reconstruction. Assembles the path into the per-CPU
+// recon_buf and returns {buf via *out_buf, length}. The caller must consume the
+// buffer before the next reconstruct_path() call (they share the per-CPU slot).
 static __always_inline __u32 reconstruct_path(struct dentry *dentry,
                                               struct vfsmount *vfsmnt,
-                                              struct recon_ctx *ctx)
+                                              struct recon_buf **out_buf)
 {
-    // BPF_CORE_READ through a LOCAL typed pointer, never through ctx->mnt (a
-    // map-value field), so CO-RE relocates against struct mount, not recon_ctx.
+    struct walk_ctx ctx = {};
+    // BPF_CORE_READ through a LOCAL typed pointer (relocates against struct mount).
     struct mount *m = container_of(vfsmnt, struct mount, mnt);
-    ctx->d = dentry;
-    ctx->mnt = m;
-    ctx->mnt_root = BPF_CORE_READ(m, mnt.mnt_root);
-    ctx->n = 0;
-    ctx->off = 0;
-    ctx->done = 0;
+    ctx.d = (__u64)(long)dentry;
+    ctx.mnt = (__u64)(long)m;
+    ctx.mnt_root = (__u64)(long)BPF_CORE_READ(m, mnt.mnt_root);
 
-    bpf_loop(MAX_DENTRY_DEPTH, collect_cb, ctx, 0);
-    bpf_loop(MAX_DENTRY_DEPTH, emit_cb, ctx, 0);
+    bpf_loop(MAX_DENTRY_DEPTH, collect_cb, &ctx, 0);
+    bpf_loop(MAX_DENTRY_DEPTH, emit_cb, &ctx, 0);
 
-    __u32 off = ctx->off;
+    struct recon_buf *buf = get_recon_buf();
+    if (!buf)
+        return 0;
+
+    __u32 off = ctx.off;
     if (off == 0) {                          // path was the root itself
-        ctx->out[0] = '/';
+        buf->data[0] = '/';
         off = 1;
     }
-    if (off < MAX_PATH_LEN)
-        ctx->out[off] = '\0';
-    ctx->off = off;
+    buf->data[off & (MAX_PATH_LEN - 1)] = '\0';
+    *out_buf = buf;
     return off;
 }
 
