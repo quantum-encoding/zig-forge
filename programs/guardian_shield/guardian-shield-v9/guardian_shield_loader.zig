@@ -59,6 +59,13 @@ const GsConfig = extern struct {
     log_only: u8,
     hardening_mode: u8,
     enforce_cred_read: u8,
+    enforce_egress: u8,
+};
+
+// Mirrors struct egress_lpm_key (egress_allow trie key). addr in network order.
+const EgressKey = extern struct {
+    prefixlen: u32, // bits
+    addr: [4]u8,
 };
 
 // Mirrors struct proc_tag in guardian_shield.bpf.c (agent_pids value).
