@@ -729,6 +729,7 @@ fn eventName(t: u8) []const u8 {
         8 => "rmdir",
         9 => "open_write",
         10 => "create",
+        11 => "cred_read",
         20 => "ptrace",
         21 => "dev_mem",
         22 => "module_load",
