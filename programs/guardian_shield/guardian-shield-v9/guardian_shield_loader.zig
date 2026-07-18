@@ -185,8 +185,10 @@ pub fn main(init: std.process.Init) !void {
         loader.link_count, cfg.pin_dir, cfg.enforce_fs, cfg.enforce_mem, cfg.enforce_priv, cfg.log_only,
     });
 
-    try openLog(cfg.log_file);
-    defer if (g_log_file) |f| f.close();
+    openLog(cfg.log_file);
+    defer if (g_log_fd >= 0) {
+        _ = c.close(g_log_fd);
+    };
 
     installSignals();
     try loader.eventLoop();
