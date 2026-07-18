@@ -261,11 +261,14 @@ static int do_attack(const char *dir, enum expect exp) {
     }
     snprintf(p_rename_dst, sizeof(p_rename_dst), "%s.moved", p_rename);
 
-    // pid-unique out-of-tree paths for the move-out + clobber vectors.
+    // pid-unique out-of-tree paths for the move-out + clobber vectors. These sit
+    // in the protected dir's PARENT (same filesystem, unprotected) so rename does
+    // not hit EXDEV before reaching the LSM (see file header).
     long pid = (long)getpid();
-    char exfil_dst[4096], attacker_src[4096];
-    snprintf(exfil_dst, sizeof(exfil_dst), "/tmp/gs_exfil_%ld", pid);
-    snprintf(attacker_src, sizeof(attacker_src), "/tmp/gs_attacker_%ld", pid);
+    char parent[4096], exfil_dst[4096], attacker_src[4096];
+    parent_dir(dir, parent, sizeof(parent));
+    snprintf(exfil_dst, sizeof(exfil_dst), "%s/gs_exfil_%ld", parent, pid);
+    snprintf(attacker_src, sizeof(attacker_src), "%s/gs_attacker_%ld", parent, pid);
 
     printf("attack: dir=%s expect=%s\n", dir, exp == EXPECT_BLOCKED ? "blocked" : "allowed");
     int all_ok = 1;
