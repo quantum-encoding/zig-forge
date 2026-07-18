@@ -98,7 +98,6 @@ const RawConfig = struct {
 // Globals for the C-ABI ring buffer callbacks
 // ===================================================================
 
-var g_running: bool = true;
 var g_log_fd: c_int = -1;
 const g_alloc = std.heap.c_allocator;
 
