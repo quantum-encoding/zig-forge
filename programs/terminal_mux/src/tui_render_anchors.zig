@@ -294,3 +294,30 @@ test "TUI stream: box-drawing + symbol codepoints land in the grid intact" {
     // misclassification here is exactly what drifts the columns and merges text.
     try std.testing.expectEqual(@as(u2, 1), grid.getCellConst(1, 2).width); // ✳
 }
+
+test "DEC 2026: sync flag tracks h/l and the REAL claude stream closes every block" {
+    // claude Code wraps EVERY repaint in `?2026h … ?2026l` (25 pairs in the
+    // committed typed capture). The emulator grid is identical with or without
+    // the mode — only host PRESENTATION is gated — so the live-only mangling
+    // (half-erased rows, duplicated composer blocks, echo overwriting the TUI)
+    // came from painting between the pair. This anchors the flag transitions
+    // and that a full real stream ends un-suppressed (no stuck-frozen view).
+    const rect = session.Rect{ .x = 0, .y = 0, .width = 120, .height = 40 };
+    const sess = try session.Session.init(std.testing.allocator, "sync", rect, 200);
+    defer sess.deinit();
+    const term = &sess.getActiveWindow().getActivePane().terminal;
+
+    try std.testing.expect(!term.modes.synchronized);
+    feedFixture(sess, "\x1b[?2026h");
+    try std.testing.expect(term.modes.synchronized);
+    try std.testing.expect(term.sync_began_ms > 0);
+    // Grid keeps updating normally mid-sync — 2026 gates presentation, not parsing.
+    feedFixture(sess, "\x1b[Hmid-sync");
+    try std.testing.expectEqual(@as(u21, 'm'), term.grid.getCellConst(0, 0).char);
+    feedFixture(sess, "\x1b[?2026l");
+    try std.testing.expect(!term.modes.synchronized);
+
+    // Full real capture: every opened block must be closed by stream end.
+    feedFixture(sess, @embedFile("composer_fixture"));
+    try std.testing.expect(!term.modes.synchronized);
+}

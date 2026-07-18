@@ -116,6 +116,15 @@ pub const ScrollRegion = struct {
     bottom: u16,
 };
 
+/// Monotonic milliseconds (std.time.milliTimestamp is gone in Zig 0.16; this
+/// matches the clock_gettime pattern used across the repo). Monotonic on
+/// purpose: the 2026 sync timeout must not jump with wall-clock changes.
+pub fn monotonicMs() i64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    return @intCast(@as(i128, ts.sec) * 1000 + @divTrunc(ts.nsec, 1_000_000));
+}
+
 /// Terminal modes
 pub const Modes = struct {
     /// Application cursor keys (DECCKM)
@@ -139,6 +148,12 @@ pub const Modes = struct {
     mouse_sgr: bool = false,
     /// Focus events
     focus_events: bool = false,
+    /// Synchronized output (DEC 2026): the app is mid-repaint and the host
+    /// must not present the grid until the closing `?2026l` (or a timeout —
+    /// see tmux_sync_suppressed). Claude Code wraps EVERY frame in a 2026
+    /// pair; painting between them shows half-erased rows and duplicated
+    /// composer blocks (goal 556D61CB defects #4/#5).
+    synchronized: bool = false,
 
     pub const MouseMode = enum {
         none,
@@ -539,6 +554,11 @@ pub const Terminal = struct {
     // DECSCUSR cursor style (CSI Ps SP q). Default = blinking block.
     cursor_shape: u8 = 0, // 0 block, 1 underline, 2 bar
     cursor_blink: bool = true,
+
+    /// Wall-clock ms when the current DEC 2026 sync block opened — lets the
+    /// host time out a block the app never closed (crash mid-repaint) instead
+    /// of freezing the view forever.
+    sync_began_ms: i64 = 0,
 
     // Host-side effect queues the parser can't perform itself: bell strokes
     // (BEL) and the last OSC 52 clipboard payload ("Pc;Pd", Pd = base64).

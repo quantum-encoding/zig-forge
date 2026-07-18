@@ -440,6 +440,29 @@ pub export fn tmux_modes(handle: ?*TmuxSession) u32 {
     return out;
 }
 
+/// DEC 2026 synchronized output: true while any pane of the active window is
+/// mid-sync-block — the host should skip presenting this frame (keep the
+/// previous one) and retry; the closing `?2026l` arrives in the same or next
+/// drain and repaints the finished frame. Self-healing: a block left open
+/// longer than 250ms (app crashed mid-repaint) stops suppressing and clears,
+/// so the view can never freeze on a torn writer.
+pub export fn tmux_sync_suppressed(handle: ?*TmuxSession) bool {
+    const h = handle orelse return false;
+    const w = h.sess.getActiveWindow();
+    const now = terminal.monotonicMs();
+    var suppressed = false;
+    for (w.panes.items) |pane| {
+        const term = &pane.terminal;
+        if (!term.modes.synchronized) continue;
+        if (now - term.sync_began_ms < 250) {
+            suppressed = true;
+        } else {
+            term.modes.synchronized = false; // timed out — self-heal
+        }
+    }
+    return suppressed;
+}
+
 /// DECSCUSR cursor style: shape 0 block / 1 underline / 2 bar, plus blink.
 pub export fn tmux_cursor_style(handle: ?*TmuxSession, out_shape: ?*u8, out_blink: ?*bool) void {
     const h = handle orelse return;

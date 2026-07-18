@@ -99,6 +99,10 @@ void     tmux_cursor(tmux_session *handle, uint16_t *out_row, uint16_t *out_col,
  * (host must not also act), 0 when the host should handle locally.
  * take_bell / take_clipboard are read-and-clear (clipboard = OSC 52 "Pc;Pd"). */
 uint32_t tmux_modes(tmux_session *handle);
+/* DEC 2026 synchronized output: true while a pane of the active window is
+ * mid-sync-block — skip presenting this frame (keep the previous one) and
+ * retry; blocks left open >250ms self-heal so the view can never freeze. */
+bool     tmux_sync_suppressed(tmux_session *handle);
 void     tmux_cursor_style(tmux_session *handle, uint8_t *out_shape, bool *out_blink);
 uint32_t tmux_take_bell(tmux_session *handle);
 size_t   tmux_take_clipboard(tmux_session *handle, uint8_t *out, size_t max);
