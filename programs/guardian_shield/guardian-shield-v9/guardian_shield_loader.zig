@@ -57,6 +57,7 @@ const GsConfig = extern struct {
     enforce_priv: u8,
     log_only: u8,
     hardening_mode: u8,
+    enforce_cred_read: u8,
 };
 
 // Mirrors struct proc_tag in guardian_shield.bpf.c (agent_pids value).
