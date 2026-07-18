@@ -434,7 +434,39 @@ ways and asserts: **NORMAL** (untainted) reader → crown jewels **ALLOWED** (no
 false positive); **TAINTED** (exe named `npm`) reader → crown jewels **DENIED**;
 **TAINTED-INHERITED** (`yarn` forks+execs `harvester`) → crown jewels **DENIED**
 (sticky-taint proof); tainted read of `~/.npmrc` → **ALLOWED** (tiering). This is
-the endpoint block that breaks the harvest step.
+the endpoint block that breaks the harvest step. Proven live: 14/14.
+
+### The exfil half — egress guard (`gs_socket_connect`)
+The read-harvest block stops the steal; the egress guard stops the phone-home, so
+even a secret that leaks by another path can't be shipped to the attacker's C2.
+`lsm/socket_connect` fires **before** the connect completes (so the verdict is
+independent of network reachability — important on an air-gapped test VM). For a
+`TAG_TAINTED` or `TAG_AGENT` process opening an `AF_INET`/`AF_INET6` connection:
+- **`egress_allow`** LPM trie (IPv4, keyed on packed network-order address). The
+  loader **always** seeds loopback + RFC1918 private + link-local (169.254/16) +
+  CGNAT (100.64/10), so LAN/localhost/registry-mirror-on-LAN work; the operator
+  adds public registry CIDRs. A dest matching a stored prefix → allowed.
+- Any other (public, non-allowlisted) dest → log `EV_TAINTED_CONNECT` and, if
+  `enforce_egress` (default true), `-EPERM`. AF_UNIX/AF_NETLINK are ignored
+  (local IPC never blocked). Normal/trusted/untainted processes are unaffected —
+  the user's browser/curl keep working.
+- **IPv6 status (honest):** loopback (`::1`), link-local (`fe80::/10`), and ULA
+  (`fc00::/7`) are allowed inline; global IPv6 is treated as public (denied when
+  enforcing). There is **no operator IPv6 allowlist in v1** — IPv4 only in the
+  trie.
+
+**Egress tradeoff (documented):** with `enforce_egress=true` and only the private
+defaults, a tainted `npm install` reaching a public registry is also denied
+unless that registry's CIDRs are added to `egress_allow`. That is the honest cost
+of egress-jailing build tools — matches the detect-then-enforce discipline: set
+`enforce_egress=false` to log-only (`EV_TAINTED_CONNECT`) first, then allowlist
+what real installs legitimately need.
+
+`supplychain_sim.sh` §4 proves it with an inline non-blocking `connector`:
+TAINTED (`pnpm`) → public `203.0.113.10:443` (TEST-NET-3) **BLOCKED**; TAINTED →
+loopback **ALLOWED**; NORMAL → same public IP **ALLOWED** (no false positive).
+The LSM verdict (`-EPERM`) is asserted, not connection success (the VM has no
+internet).
 
 ---
 
