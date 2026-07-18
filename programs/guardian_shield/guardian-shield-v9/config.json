@@ -49,14 +49,35 @@
     "/usr/bin/systemctl"
   ],
 
-  "_trusted_comment": "MUST include the loader's own exe path or it cannot load/pin/unpin under hardening_mode. Set this to the deployed loader path.",
+  "_trusted_comment": "MUST include the loader's own exe path or it cannot load/pin/unpin under hardening_mode. Set this to the deployed loader path. (The loader also trusts itself by exe inode, so a relative-path invocation still works.)",
   "trusted_exes": [
     "/home/forge/v9/guardian_shield_loader"
+  ],
+
+  "_supplychain_comment": "SUPPLY-CHAIN / CREDENTIAL-HARVEST DEFENSE (always-on, independent of the two postures above). build_exes are launcher basenames whose exec taints the whole install subtree (TAG_TAINTED, inherited + sticky). credential_paths is the crown-jewel AssetMap: a TAINTED (build-tool) or AGENT subtree is DENIED any open (incl. read-only) of these, so a malicious npm/pip postinstall cannot read+exfil your AWS/SSH keys. A normal/trusted/untainted process reading its OWN creds is unaffected. TIERING: crown jewels only - build-tool self-secrets (~/.npmrc, ~/.pypirc, ~/.cargo/credentials) are DELIBERATELY EXCLUDED here (tools legitimately read them during install; no build tool legitimately reads your AWS/SSH keys). Expand the /home/USER paths for the target user.",
+  "build_exes": [
+    "npm", "pnpm", "yarn", "npx", "node-gyp",
+    "pip", "pip3", "poetry", "uv",
+    "cargo", "gem", "bundle",
+    "mvn", "maven", "gradle"
+  ],
+  "credential_paths": [
+    "/home/forge/.ssh",
+    "/home/forge/.aws",
+    "/home/forge/.config/gcloud",
+    "/home/forge/.config/gh",
+    "/home/forge/.git-credentials",
+    "/home/forge/.netrc",
+    "/home/forge/.kube",
+    "/home/forge/.docker/config.json",
+    "/home/forge/.claude",
+    "/root/.ssh"
   ],
 
   "enforce_fs": true,
   "enforce_mem": true,
   "enforce_priv": false,
+  "enforce_cred_read": true,
   "log_only": false,
   "pin_dir": "/sys/fs/bpf/guardian_shield",
   "log_file": "/var/log/guardian_shield.jsonl"
