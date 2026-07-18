@@ -205,22 +205,34 @@ reason to stay in monitor mode into a safe, reversible switch.
 
 ## 8. Gap analysis & roadmap
 
-**Linux v9 — two missing primitives for Threat C** (the macOS side has both):
+**Linux v9 — Threat C primitives: DONE** (proven live on kernel 6.18):
 
-1. **Credential-READ protection.** v9's `file_open` hook already sees every open;
-   it filters to write-intent today. Add a **read-deny path** on a credential
-   AssetMap (`~/.ssh`, `~/.aws`, `~/.npmrc`, `~/.gitconfig`, `~/.claude`) so the
-   *harvest* step is denied. This is the single highest-value add for the
-   supply-chain threat and folds into the hardening critical set.
-2. **Build-tool taint tagging.** v9 tags AI agents; the supply-chain threat needs
-   tagging **build-tool subtrees** (npm/pip/cargo + lifecycle scripts) as *tainted*,
-   then denying *their descendants'* credential reads and correlated egress —
-   Metatron's `BuildTreeTracker` is the reference; the BPF process-tree tagger
-   (`agent_pids`, sticky-across-exec) is the right kernel primitive to build it on.
+1. **Credential-READ protection — DONE.** A separate `credential_paths` LPM trie
+   (crown jewels: `~/.ssh`, `~/.aws`, gcloud/gh tokens, `~/.git-credentials`,
+   `~/.netrc`, `~/.kube`, `~/.docker/config.json`, `~/.claude`, `/root/.ssh`).
+   `gs_file_open` denies **any** open (incl. `O_RDONLY`) of these by a TAINTED or
+   AGENT subtree (`EV_CRED_READ`), always-on, independent of posture. Tiered:
+   build-tool self-secrets (`~/.npmrc`/`~/.pypirc`/`~/.cargo/credentials`) are
+   deliberately excluded (low false-positive). Proven: `supplychain_sim.sh`
+   14/14 — tainted npm/yarn subtrees denied crown-jewel reads, normal reads +
+   `.npmrc` allowed.
+2. **Build-tool taint tagging — DONE.** `gs_exec` tags `build_exes`
+   (npm/pnpm/yarn/pip/cargo/...) subtrees `TAG_TAINTED`, **inherited on fork,
+   sticky across exec** (built on the same `agent_pids` process-tree tagger).
+   The whole install subtree (postinstall `node`, spawned `curl`) stays tainted.
+3. **Egress / exfil block — DONE.** `gs_socket_connect` denies a TAINTED/AGENT
+   subtree's `connect()` to a non-allowlisted public dest (`EV_TAINTED_CONNECT`,
+   `-EPERM` before the connect completes). `egress_allow` LPM trie (IPv4): the
+   loader always seeds loopback + RFC1918 + link-local + CGNAT; operator adds
+   registry CIDRs. **Tradeoff (documented):** `enforce_egress=true` with only the
+   private defaults also denies a tainted `npm install` reaching a public
+   registry unless allowlisted — set `enforce_egress=false` for detect-first, or
+   allowlist the registry. IPv4 in the trie; IPv6 loopback/LL/ULA allowed inline,
+   global IPv6 treated as public (no operator IPv6 allowlist in v1).
 
-Secondary: egress correlation on Linux (the network side is a stub); a shared
-supply-chain simulation harness (postinstall → cred-sweep → exfil) that runs on
-both platforms so "did we block it" is a test, not a belief.
+Together (1)+(3) cover **both ends of the supply-chain kill chain** on Linux:
+read-harvest block + exfil block. Shared harness `supplychain_sim.sh` runs the
+postinstall → cred-sweep → exfil simulation as a test.
 
 **macOS Metatron — no new building, one validated cutover:** flip the crown-jewel
 credential assets to `block:true`, proven in a VM first (§6).
