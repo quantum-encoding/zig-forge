@@ -236,10 +236,10 @@ fn prereqChecks() !void {
     }
 
     // 3. Kernel BTF present (CO-RE)
-    std.fs.accessAbsolute("/sys/kernel/btf/vmlinux", .{}) catch {
+    if (c.access("/sys/kernel/btf/vmlinux", c.F_OK) != 0) {
         std.log.err("/sys/kernel/btf/vmlinux missing - kernel lacks CONFIG_DEBUG_INFO_BTF.", .{});
         return error.PrereqFailed;
-    };
+    }
 
     std.log.info("prereqs OK: kernel {d}.{d}, bpf-LSM active, BTF present.", .{ major, minor });
 }
