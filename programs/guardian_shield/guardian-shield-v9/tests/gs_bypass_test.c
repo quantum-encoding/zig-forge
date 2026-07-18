@@ -84,11 +84,22 @@ static int join(char *out, size_t n, const char *dir, const char *name) {
 // True if errno indicates the LSM blocked us.
 static bool is_blocked_errno(int e) { return e == EPERM || e == EACCES; }
 
+// Remove any files matching a glob (best-effort cleanup of stale temp state).
+static void clean_glob(const char *pattern) {
+    glob_t g;
+    if (glob(pattern, 0, NULL, &g) == 0) {
+        for (size_t i = 0; i < g.gl_pathc; i++)
+            unlink(g.gl_pathv[i]);
+    }
+    globfree(&g);
+}
+
 // ------------------------------------------------------------------
 // setup: create the victim files (must run in a NON-agent context).
 // ------------------------------------------------------------------
 static int do_setup(const char *dir) {
-    const char *names[] = {V_UNLINK, V_UNLINKAT, V_TRUNCATE, V_IOURING, V_RENAME};
+    const char *names[] = {V_UNLINK, V_UNLINKAT, V_TRUNCATE, V_IOURING,
+                           V_RENAME, V_MOVEOUT, V_CLOBBER, V_OVERWRITE};
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
         char p[4096];
         if (join(p, sizeof(p), dir, names[i]) != 0) return 1;
@@ -104,14 +115,16 @@ static int do_setup(const char *dir) {
         }
         close(fd);
     }
-    // Ensure a stale rename target / create target from a prior run are gone.
-    char moved[4096], created[4096];
-    char rn[4096];
+    // Ensure stale rename / create targets from a prior run are gone.
+    char moved[4096], created[4096], rn[4096];
     if (join(rn, sizeof(rn), dir, V_RENAME) == 0) {
         snprintf(moved, sizeof(moved), "%s.moved", rn);
         unlink(moved);
     }
     if (join(created, sizeof(created), dir, V_CREATE) == 0) unlink(created);
+    // Pre-clean out-of-dir move targets + malicious temp sources from prior runs.
+    clean_glob("/tmp/gs_exfil_*");
+    clean_glob("/tmp/gs_attacker_*");
     printf("setup: victims created in %s\n", dir);
     return 0;
 }
