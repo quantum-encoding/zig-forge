@@ -136,8 +136,10 @@ pub fn main(init: std.process.Init) !void {
     }
     if (expect_obj) return fail("--obj requires a path argument");
 
-    // libbpf: route its logs through our print at a sane verbosity.
-    _ = c.libbpf_set_print(if (args.verbose) libbpfPrint else null);
+    // Quiet libbpf's info/debug chatter unless --verbose (default keeps the
+    // built-in warn/err handler which is useful for verifier diagnostics).
+    if (!args.verbose)
+        _ = c.libbpf_set_print(null);
 
     // Load config first (needed for pin_dir in both modes).
     const parsed = loadConfig(args.config_path) catch |e| {
