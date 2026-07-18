@@ -321,16 +321,22 @@ static long collect_cb(__u32 i, void *c)
     if (ctx->done)
         return 1;
 
+    // Load stored kernel pointers into LOCAL typed vars before any
+    // BPF_CORE_READ. Reading through a map-value field (ctx->mnt) makes CO-RE
+    // latch the relocation onto recon_ctx (no kernel BTF target) -> -EINVAL.
     struct dentry *d = ctx->d;
+    struct mount *m = ctx->mnt;
+    struct dentry *mnt_root = ctx->mnt_root;
+
     struct dentry *parent = BPF_CORE_READ(d, d_parent);
 
-    if (d == ctx->mnt_root) {
-        struct mount *pmnt = BPF_CORE_READ(ctx->mnt, mnt_parent);
-        if (ctx->mnt == pmnt) {              // global root
+    if (d == mnt_root) {
+        struct mount *pmnt = BPF_CORE_READ(m, mnt_parent);
+        if (m == pmnt) {                     // global root
             ctx->done = 1;
             return 1;
         }
-        ctx->d = BPF_CORE_READ(ctx->mnt, mnt_mountpoint);
+        ctx->d = BPF_CORE_READ(m, mnt_mountpoint);
         ctx->mnt = pmnt;
         ctx->mnt_root = BPF_CORE_READ(pmnt, mnt.mnt_root);
         return 0;                            // re-test mountpoint vs new root
