@@ -108,10 +108,6 @@ fn logWrite(bytes: []const u8) void {
     _ = c.write(g_log_fd, bytes.ptr, bytes.len);
 }
 
-fn onSignal(_: c_int) callconv(.c) void {
-    g_running = false;
-}
-
 // ===================================================================
 // main
 // ===================================================================
