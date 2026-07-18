@@ -562,6 +562,35 @@ static __noinline bool path_is_protected(__u8 *path, __u32 len)
     return false;
 }
 
+// Same longest-prefix + boundary check against the credential AssetMap trie.
+// Separate bpf2bpf function because the map reference must be known to the
+// verifier at the lookup site (a map can't be passed as a generic pointer).
+static __noinline bool cred_is_protected(__u8 *path, __u32 len)
+{
+    struct path_lpm_key key;
+    __builtin_memset(&key, 0, sizeof(key));
+
+    if (len >= MAX_PATH_LEN)
+        len = MAX_PATH_LEN - 1;
+    key.prefixlen = len * 8;
+    if (len > 0)
+        bpf_probe_read_kernel(key.data, len, path);
+
+    struct path_rule *rule = bpf_map_lookup_elem(&credential_paths, &key);
+    if (!rule || rule->action != 1)
+        return false;
+
+    __u32 mlen = rule->prefix_len;
+    if (mlen >= len)
+        return true;
+    if (mlen < MAX_PATH_LEN) {
+        __u8 c = path[mlen & (MAX_PATH_LEN - 1)];
+        if (c == '/' || c == '\0')
+            return true;
+    }
+    return false;
+}
+
 // ===================================================================
 // VIOLATION LOGGING
 // ===================================================================
