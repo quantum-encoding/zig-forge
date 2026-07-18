@@ -243,11 +243,13 @@ bricking benign cap checks), `log_only` (global dry-run: log, never `-EPERM`).
 
 ```bash
 zig build test-harness
-# Add the harness (or a symlink named like a configured agent, e.g. `claude`)
-# to config.json agent_exes, load the loader with a protected test dir, then:
-sudo tests/run_bypass_suite.sh /home/founder/Documents/gs_test /tmp/gs_scratch
-# Expect: every destructive vector -> EPERM/EACCES in the agent context, and
-#         the non-agent control succeeds.
+# Ensure the loader is running with the test dir in protected_paths and "claude"
+# in config.json agent_exes. Then, as an UNPRIVILEGED user (NOT sudo):
+tests/run_bypass_suite.sh "$HOME/gs_test_protected" "$HOME/gs_test_scratch"
+# The suite execs a real copy of the harness named `claude` (agent tagging is by
+# the resolved exe dentry leaf, so a symlink named `claude` is intentionally NOT
+# tagged - symlink-spoof resistance). Expect: every destructive vector ->
+# EPERM/EACCES in the agent context, and the non-agent control succeeds.
 ```
 
 ---
