@@ -754,15 +754,14 @@ int BPF_PROG(gs_file_open, struct file *file)
                        (flags & O_ACCMODE) == O_RDWR ||
                        (flags & O_TRUNC) || (flags & O_CREAT);
         if (writing) {
-            __u32 zero = 0;
-            struct path_scratch *sb = bpf_map_lookup_elem(&path_scratch_map, &zero);
-            if (sb) {
-                long r = bpf_d_path(&file->f_path, (char *)sb->data, MAX_PATH_LEN);
+            struct recon_ctx *ctx = get_recon_ctx();
+            if (ctx) {
+                long r = bpf_d_path(&file->f_path, (char *)ctx->out, MAX_PATH_LEN);
                 if (r > 0) {
                     __u32 len = (__u32)r - 1;
-                    if (path_is_protected(sb->data, len)) {
+                    if (path_is_protected(ctx->out, len)) {
                         log_violation(EV_OPEN_WRITE, tag, cfg->log_only ? 0 : 1,
-                                      sb->data, len, 0, 0, 0, flags);
+                                      ctx->out, len, 0, 0, 0, flags);
                         bump(STAT_FS_BLOCKED);
                         if (!cfg->log_only)
                             return -EACCES;
