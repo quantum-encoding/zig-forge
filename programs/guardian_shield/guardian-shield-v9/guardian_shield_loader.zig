@@ -663,16 +663,6 @@ fn openLog(path: []const u8) void {
     g_log_fd = fd;
 }
 
-fn installSignals() void {
-    const act = std.posix.Sigaction{
-        .handler = .{ .handler = onSignal },
-        .mask = std.posix.sigemptyset(),
-        .flags = 0,
-    };
-    std.posix.sigaction(std.posix.SIG.INT, &act, null);
-    std.posix.sigaction(std.posix.SIG.TERM, &act, null);
-}
-
 fn loadConfig(path: []const u8) !std.json.Parsed(RawConfig) {
     var zbuf: [MAX_PATH_BYTES]u8 = undefined;
     const zpath = try std.fmt.bufPrintZ(&zbuf, "{s}", .{path});
