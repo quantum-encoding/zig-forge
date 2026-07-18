@@ -1,0 +1,8 @@
+# Build artifacts (regenerable) — see CLAUDE.md build-artifact trap.
+zig-out/
+.zig-cache/
+build/
+# Generated from the running kernel's BTF by build.zig (bpftool btf dump).
+bpf/vmlinux.h
+*.bpf.o
+*.skel.h
