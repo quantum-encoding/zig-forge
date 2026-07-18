@@ -535,23 +535,28 @@ static __always_inline int fs_guard_dentry(struct dentry *dentry,
 
     bump(STAT_FS_CHECKS);
 
-    struct recon_ctx rc = {};
+    struct recon_buf *buf = 0;
+    __u32 len = reconstruct_path(dentry, vfsmnt, &buf);
+    if (!buf)
+        return 0;
+    bool hit = path_is_protected(buf->data, len);
 
-    __u32 len = reconstruct_path(dentry, vfsmnt, &rc);
-    bool hit = path_is_protected(rc.out, len);
-
-    // Secondary path (rename dst / link dst). Reuse the same ctx after the
-    // first check.
+    // Secondary path (rename dst / link dst). path_is_protected copies out of
+    // the buffer immediately, so it is safe to reuse the per-CPU slot here.
     bool thit = false;
     if (!hit && tdentry) {
-        __u32 tlen = reconstruct_path(tdentry, tvfsmnt, &rc);
-        thit = path_is_protected(rc.out, tlen);
-        len = tlen;
+        struct recon_buf *tbuf = 0;
+        __u32 tlen = reconstruct_path(tdentry, tvfsmnt, &tbuf);
+        if (tbuf) {
+            thit = path_is_protected(tbuf->data, tlen);
+            len = tlen;
+            buf = tbuf;
+        }
     }
 
     if (hit || thit) {
         __u8 enforced = cfg->log_only ? 0 : 1;
-        log_violation(ev, TAG_AGENT, enforced, rc.out, len, 0, 0, 0, 0);
+        log_violation(ev, TAG_AGENT, enforced, buf->data, len, 0, 0, 0, 0);
         bump(STAT_FS_BLOCKED);
         if (cfg->log_only)
             return 0;
