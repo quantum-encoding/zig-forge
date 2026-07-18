@@ -136,6 +136,7 @@ enum event_type {
     EV_OPEN_WRITE = 9,
     EV_CREATE = 10,    // new-file creation (path_mknod)
     EV_CRED_READ = 11, // tainted/agent open of a credential AssetMap path
+    EV_TAINTED_CONNECT = 12, // tainted/agent connect() to a non-allowlisted dest
     EV_PTRACE = 20,
     EV_DEV_MEM = 21,
     EV_MODULE_LOAD = 22,
