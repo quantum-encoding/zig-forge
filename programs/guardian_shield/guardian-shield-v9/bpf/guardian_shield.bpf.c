@@ -309,79 +309,105 @@ static __always_inline bool current_is_agent(void)
 // PATH RECONSTRUCTION
 // ===================================================================
 
-// Mount-aware absolute path reconstruction into `out` (MAX_PATH_LEN buffer).
-// Walks dentry -> d_parent, crossing mount points via struct mount so that a
-// file on the /home mount resolves to /home/... not /... . Returns byte length
-// of the C-string written (also NUL-terminated).
+// Path reconstruction uses bpf_loop() (kernel >= 5.17) so the verifier costs
+// each walk O(1) instead of unrolling 16*64 per-byte iterations (which blew the
+// 1M-insn limit). The two callbacks operate on a per-CPU recon_ctx (a bounded
+// PTR_TO_MAP_VALUE), never on variable-offset stack slots.
+
+// Phase 1: collect dentry components leaf..root, crossing mount points.
+static long collect_cb(__u32 i, void *c)
+{
+    struct recon_ctx *ctx = c;
+    if (ctx->done)
+        return 1;
+
+    struct dentry *d = ctx->d;
+    struct dentry *parent = BPF_CORE_READ(d, d_parent);
+
+    if (d == ctx->mnt_root) {
+        struct mount *pmnt = BPF_CORE_READ(ctx->mnt, mnt_parent);
+        if (ctx->mnt == pmnt) {              // global root
+            ctx->done = 1;
+            return 1;
+        }
+        ctx->d = BPF_CORE_READ(ctx->mnt, mnt_mountpoint);
+        ctx->mnt = pmnt;
+        ctx->mnt_root = BPF_CORE_READ(pmnt, mnt.mnt_root);
+        return 0;                            // re-test mountpoint vs new root
+    }
+    if (d == parent) {                       // fs root without a mount parent
+        ctx->done = 1;
+        return 1;
+    }
+
+    __u32 n = ctx->n;
+    if (n >= MAX_DENTRY_DEPTH) {
+        bump(STAT_PATH_TRUNC);
+        ctx->done = 1;
+        return 1;
+    }
+    ctx->stack[n & (MAX_DENTRY_DEPTH - 1)] = d;
+    ctx->n = n + 1;
+    ctx->d = parent;
+    return 0;
+}
+
+// Phase 2: emit root..leaf as "/component" segments into ctx->out (forward,
+// monotonically increasing offset -> no variable-offset stack access).
+static long emit_cb(__u32 k, void *c)
+{
+    struct recon_ctx *ctx = c;
+    if (k >= ctx->n)
+        return 1;
+
+    __u32 idx = ctx->n - 1 - k;
+    struct dentry *cd = ctx->stack[idx & (MAX_DENTRY_DEPTH - 1)];
+    __u32 nlen = BPF_CORE_READ(cd, d_name.len);
+    const unsigned char *nm = BPF_CORE_READ(cd, d_name.name);
+
+    __u32 off = ctx->off;
+    if (off < MAX_PATH_LEN - 1) {
+        ctx->out[off] = '/';
+        off++;
+    }
+    if (off < MAX_PATH_LEN - 1) {
+        __u32 rem = MAX_PATH_LEN - 1 - off;  // >= 1 here
+        if (nlen > rem)
+            nlen = rem;
+        if (nlen > MAX_COMPONENT_LEN)
+            nlen = MAX_COMPONENT_LEN;
+        if (nlen > 0)
+            bpf_probe_read_kernel(&ctx->out[off], nlen, nm);
+        off += nlen;
+    }
+    ctx->off = off;
+    return 0;
+}
+
+// Mount-aware absolute path reconstruction into ctx->out. Returns byte length
+// of the NUL-terminated C-string. `ctx` must come from get_recon_ctx().
 static __always_inline __u32 reconstruct_path(struct dentry *dentry,
                                               struct vfsmount *vfsmnt,
-                                              __u8 *out)
+                                              struct recon_ctx *ctx)
 {
-    struct dentry *stack[MAX_DENTRY_DEPTH];
-    struct mount *mnt = container_of(vfsmnt, struct mount, mnt);
-    struct dentry *d = dentry;
-    struct dentry *mnt_root = BPF_CORE_READ(mnt, mnt.mnt_root);
-    int n = 0;
+    ctx->d = dentry;
+    ctx->mnt = container_of(vfsmnt, struct mount, mnt);
+    ctx->mnt_root = BPF_CORE_READ(ctx->mnt, mnt.mnt_root);
+    ctx->n = 0;
+    ctx->off = 0;
+    ctx->done = 0;
 
-    // Phase 1: collect components leaf..root (crossing mounts).
-#pragma unroll
-    for (int i = 0; i < MAX_DENTRY_DEPTH; i++) {
-        struct dentry *parent = BPF_CORE_READ(d, d_parent);
+    bpf_loop(MAX_DENTRY_DEPTH, collect_cb, ctx, 0);
+    bpf_loop(MAX_DENTRY_DEPTH, emit_cb, ctx, 0);
 
-        if (d == mnt_root) {
-            struct mount *pmnt = BPF_CORE_READ(mnt, mnt_parent);
-            if (mnt == pmnt)
-                break;                       // reached the global root
-            d = BPF_CORE_READ(mnt, mnt_mountpoint);
-            mnt = pmnt;
-            mnt_root = BPF_CORE_READ(mnt, mnt.mnt_root);
-            continue;                        // re-test mountpoint vs new root
-        }
-        if (d == parent)
-            break;                           // filesystem root without a mount parent
-
-        stack[n & (MAX_DENTRY_DEPTH - 1)] = d;
-        n++;
-        if (n >= MAX_DENTRY_DEPTH) {
-            bump(STAT_PATH_TRUNC);
-            break;
-        }
-        d = parent;
-    }
-
-    // Phase 2: emit root..leaf as "/component" segments.
-    __u32 off = 0;
-#pragma unroll
-    for (int i = MAX_DENTRY_DEPTH - 1; i >= 0; i--) {
-        if (i >= n)
-            continue;
-        struct dentry *cd = stack[i & (MAX_DENTRY_DEPTH - 1)];
-        __u32 nlen = BPF_CORE_READ(cd, d_name.len);
-        const unsigned char *nm = BPF_CORE_READ(cd, d_name.name);
-
-        if (off < MAX_PATH_LEN - 1) {
-            out[off] = '/';
-            off++;
-        }
-#pragma unroll
-        for (__u32 j = 0; j < MAX_COMPONENT_LEN; j++) {
-            if (j >= nlen)
-                break;
-            if (off >= MAX_PATH_LEN - 1)
-                break;
-            unsigned char ch = 0;
-            bpf_probe_read_kernel(&ch, 1, nm + j);
-            out[off] = ch;                   // off < MAX_PATH_LEN-1 proven above
-            off++;
-        }
-    }
-
+    __u32 off = ctx->off;
     if (off == 0) {                          // path was the root itself
-        out[0] = '/';
+        ctx->out[0] = '/';
         off = 1;
     }
     if (off < MAX_PATH_LEN)
-        out[off] = '\0';
+        ctx->out[off] = '\0';
+    ctx->off = off;
     return off;
 }
 
