@@ -505,25 +505,23 @@ static __always_inline int fs_guard_dentry(struct dentry *dentry,
 
     bump(STAT_FS_CHECKS);
 
-    struct recon_ctx *ctx = get_recon_ctx();
-    if (!ctx)
-        return 0;
+    struct recon_ctx rc = {};
 
-    __u32 len = reconstruct_path(dentry, vfsmnt, ctx);
-    bool hit = path_is_protected(ctx->out, len);
+    __u32 len = reconstruct_path(dentry, vfsmnt, &rc);
+    bool hit = path_is_protected(rc.out, len);
 
     // Secondary path (rename dst / link dst). Reuse the same ctx after the
-    // first check to keep map pressure low.
+    // first check.
     bool thit = false;
     if (!hit && tdentry) {
-        __u32 tlen = reconstruct_path(tdentry, tvfsmnt, ctx);
-        thit = path_is_protected(ctx->out, tlen);
+        __u32 tlen = reconstruct_path(tdentry, tvfsmnt, &rc);
+        thit = path_is_protected(rc.out, tlen);
         len = tlen;
     }
 
     if (hit || thit) {
         __u8 enforced = cfg->log_only ? 0 : 1;
-        log_violation(ev, TAG_AGENT, enforced, ctx->out, len, 0, 0, 0, 0);
+        log_violation(ev, TAG_AGENT, enforced, rc.out, len, 0, 0, 0, 0);
         bump(STAT_FS_BLOCKED);
         if (cfg->log_only)
             return 0;
