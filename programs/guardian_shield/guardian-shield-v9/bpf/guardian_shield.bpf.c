@@ -85,11 +85,7 @@ char LICENSE[] SEC("license") = "GPL";
 #define CAP_SYS_ADMIN       21
 #define CAP_SYS_BOOT        22
 
-// kernel_read_file_id: READING_MODULE. Value is stable in the enum; use the
-// vmlinux.h enumerator if present, else fall back to the known constant.
-#ifndef READING_MODULE
-#define READING_MODULE 2
-#endif
+// READING_MODULE comes from enum kernel_read_file_id in vmlinux.h (== 2).
 
 // container_of (struct mount <- struct vfsmount) is provided by bpf_helpers.h.
 // The offset is taken from the host's own vmlinux.h (generated from THIS
