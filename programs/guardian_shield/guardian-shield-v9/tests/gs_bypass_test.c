@@ -212,22 +212,33 @@ static int sys_openat2_write(const char *path, unsigned long long extra_flags,
 // ------------------------------------------------------------------
 static int do_attack(const char *dir, enum expect exp) {
     char p_unlink[4096], p_unlinkat[4096], p_trunc[4096], p_iou[4096],
-        p_rename[4096], p_rename_dst[4096], p_create[4096];
+        p_rename[4096], p_rename_dst[4096], p_create[4096],
+        p_moveout[4096], p_clobber[4096], p_overwrite[4096];
     if (join(p_unlink, sizeof(p_unlink), dir, V_UNLINK) ||
         join(p_unlinkat, sizeof(p_unlinkat), dir, V_UNLINKAT) ||
         join(p_trunc, sizeof(p_trunc), dir, V_TRUNCATE) ||
         join(p_iou, sizeof(p_iou), dir, V_IOURING) ||
         join(p_rename, sizeof(p_rename), dir, V_RENAME) ||
-        join(p_create, sizeof(p_create), dir, V_CREATE)) {
+        join(p_create, sizeof(p_create), dir, V_CREATE) ||
+        join(p_moveout, sizeof(p_moveout), dir, V_MOVEOUT) ||
+        join(p_clobber, sizeof(p_clobber), dir, V_CLOBBER) ||
+        join(p_overwrite, sizeof(p_overwrite), dir, V_OVERWRITE)) {
         fprintf(stderr, "attack: path too long\n");
         return 2;
     }
     snprintf(p_rename_dst, sizeof(p_rename_dst), "%s.moved", p_rename);
 
+    // pid-unique out-of-tree paths for the move-out + clobber vectors.
+    long pid = (long)getpid();
+    char exfil_dst[4096], attacker_src[4096];
+    snprintf(exfil_dst, sizeof(exfil_dst), "/tmp/gs_exfil_%ld", pid);
+    snprintf(attacker_src, sizeof(attacker_src), "/tmp/gs_attacker_%ld", pid);
+
     printf("attack: dir=%s expect=%s\n", dir, exp == EXPECT_BLOCKED ? "blocked" : "allowed");
     int all_ok = 1;
     int rc, err;
 
+    // ---- DELETE ----
     // 1. glibc unlink()
     errno = 0;
     rc = unlink(p_unlink);
@@ -240,27 +251,62 @@ static int do_attack(const char *dir, enum expect exp) {
     err = errno;
     all_ok &= check("2.syscall-unlinkat", rc, err, exp);
 
-    // 3. openat2 O_WRONLY|O_TRUNC (data destruction of an existing file)
-    errno = 0;
-    rc = sys_openat2_write(p_trunc, O_TRUNC);
-    err = errno;
-    all_ok &= check("3.openat2-trunc", rc, err, exp);
-
     // 4. io_uring UNLINKAT
     errno = 0;
     rc = iouring_unlinkat(p_iou);
     err = errno;
     all_ok &= check("4.io_uring-unlinkat", rc, err, exp);
 
-    // 5. renameat2
+    // ---- OVERWRITE ----
+    // 3. openat2 O_WRONLY|O_TRUNC + write (truncate then rewrite content)
+    errno = 0;
+    rc = sys_openat2_write(p_trunc, O_TRUNC, "X");
+    err = errno;
+    all_ok &= check("3.openat2-trunc-write", rc, err, exp);
+
+    // 9. openat2 O_WRONLY (NO O_TRUNC/O_CREAT) + write -> in-place overwrite.
+    // Proves the write-open itself is blocked, not merely O_TRUNC.
+    errno = 0;
+    rc = sys_openat2_write(p_overwrite, 0, "MALICIOUS\n");
+    err = errno;
+    all_ok &= check("9.openat2-overwrite", rc, err, exp);
+
+    // 8. clobber: write malicious temp, then atomically rename it OVER the
+    // protected file. Dest is protected -> gs_path_rename blocks on the NEW path.
+    {
+        int afd = open(attacker_src, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (afd >= 0) {
+            ssize_t w = write(afd, "MALICIOUS-OVERWRITE\n", 20);
+            (void)w;
+            close(afd);
+        }
+        errno = 0;
+        rc = (int)syscall(SYS_renameat2, AT_FDCWD, attacker_src, AT_FDCWD, p_clobber, 0);
+        err = errno;
+        all_ok &= check("8.rename-clobber", rc, err, exp);
+        unlink(attacker_src); // clean temp source regardless (no-op if it was moved)
+    }
+
+    // ---- MOVE-OUT (exfil) ----
+    // 5. renameat2 within the protected dir (source protected).
     errno = 0;
     rc = (int)syscall(SYS_renameat2, AT_FDCWD, p_rename, AT_FDCWD, p_rename_dst, 0);
     err = errno;
-    all_ok &= check("5.renameat2", rc, err, exp);
+    all_ok &= check("5.rename-within", rc, err, exp);
 
-    // 6. openat2 O_CREAT write (create a new file inside the protected dir)
+    // 7. renameat2 OUT of the protected tree to /tmp (source protected ->
+    // gs_path_rename blocks on the OLD path). This is the exfil-by-move shape.
+    unlink(exfil_dst); // ensure a clean destination
     errno = 0;
-    rc = sys_openat2_write(p_create, O_CREAT);
+    rc = (int)syscall(SYS_renameat2, AT_FDCWD, p_moveout, AT_FDCWD, exfil_dst, 0);
+    err = errno;
+    all_ok &= check("7.rename-moveout", rc, err, exp);
+    if (exp == EXPECT_ALLOWED) unlink(exfil_dst); // clean up the moved file
+
+    // ---- CREATE ----
+    // 6. openat2 O_CREAT + write (create a new file inside the protected dir)
+    errno = 0;
+    rc = sys_openat2_write(p_create, O_CREAT, "NEW\n");
     err = errno;
     all_ok &= check("6.openat2-create", rc, err, exp);
 
