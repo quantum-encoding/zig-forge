@@ -187,6 +187,18 @@ echo "### 3. TAINTED-INHERITED ('yarn' forks+execs 'harvester') - crown jewels D
 for j in "${CROWN[@]}"; do check "yarn->harvester read $(basename "$j")" BLOCKED "$WORK/yarn" "$WORK/harvester" "$j"; done
 
 echo
+echo "### 4. EXFIL BLOCK - egress from a tainted subtree (the phone-home step) ###"
+# 203.0.113.10 = TEST-NET-3 (RFC 5737): a guaranteed non-routable PUBLIC address,
+# not in any private/allowlisted range -> a tainted connect to it must be DENIED.
+check "TAINTED (pnpm) connect public 203.0.113.10:443" BLOCKED "$WORK/pnpm" 203.0.113.10 443
+# Loopback is always allowlisted -> tainted connect must be ALLOWED (no listener
+# -> ECONNREFUSED, which counts as LSM-allowed).
+check "TAINTED (pnpm) connect loopback 127.0.0.1:9"    ALLOWED "$WORK/pnpm" 127.0.0.1 9
+# A NORMAL (untainted) process reaching the same public IP must be ALLOWED (no
+# false positive on the user's own outbound).
+check "NORMAL connect public 203.0.113.10:443"         ALLOWED "$WORK/connector" 203.0.113.10 443
+
+echo
 echo "=============================================================="
 echo "SUMMARY: pass=$N_OK  fail=$N_FAIL"
 [[ $N_FAIL -gt 0 ]] && echo ">>> $N_FAIL FAIL(!!) - a real gap (harvest allowed, or false-positive on normal read)."
