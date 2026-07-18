@@ -80,6 +80,10 @@ char LICENSE[] SEC("license") = "GPL";
 #define KMEM_MINOR 2    // /dev/kmem
 #define PORT_MINOR 4    // /dev/port
 
+// Socket address families (not in vmlinux.h)
+#define AF_INET   2
+#define AF_INET6 10
+
 // Dangerous capabilities (uapi/linux/capability.h)
 #define CAP_DAC_OVERRIDE     1
 #define CAP_DAC_READ_SEARCH  2
