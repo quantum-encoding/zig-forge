@@ -27,6 +27,7 @@ const c = @cImport({
     @cInclude("sys/sysmacros.h");
     @cInclude("dirent.h");
     @cInclude("errno.h");
+    @cInclude("arpa/inet.h");
 });
 
 // ===================================================================
