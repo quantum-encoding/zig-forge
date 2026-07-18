@@ -539,35 +539,36 @@ const Loader = struct {
 // ===================================================================
 
 fn makePinDir(dir: []const u8) !void {
-    std.fs.makeDirAbsolute(dir) catch |e| switch (e) {
-        error.PathAlreadyExists => {},
-        else => return e,
-    };
+    var zbuf: [MAX_PATH_BYTES]u8 = undefined;
+    const zdir = try std.fmt.bufPrintZ(&zbuf, "{s}", .{dir});
+    if (c.mkdir(zdir.ptr, 0o755) != 0) {
+        const e = std.c._errno().*;
+        if (e != c.EEXIST) return error.MkdirFailed;
+    }
 }
 
 fn teardown(pin_dir: []const u8) !void {
-    var dir = std.fs.openDirAbsolute(pin_dir, .{ .iterate = true }) catch |e| switch (e) {
-        error.FileNotFound => {
-            std.log.info("pin dir '{s}' does not exist; nothing to unpin.", .{pin_dir});
-            return;
-        },
-        else => return e,
-    };
-    defer dir.close();
-
-    var it = dir.iterate();
-    var removed: usize = 0;
-    while (try it.next()) |entry| {
-        if (entry.kind == .file) {
-            dir.deleteFile(entry.name) catch |e| {
-                std.log.warn("could not remove pin '{s}': {t}", .{ entry.name, e });
-                continue;
-            };
-            removed += 1;
-        }
+    var zbuf: [MAX_PATH_BYTES]u8 = undefined;
+    const zdir = try std.fmt.bufPrintZ(&zbuf, "{s}", .{pin_dir});
+    const dp = c.opendir(zdir.ptr);
+    if (dp == null) {
+        std.log.info("pin dir '{s}' not present; nothing to unpin.", .{pin_dir});
+        return;
     }
+    var removed: usize = 0;
+    while (true) {
+        const ent = c.readdir(dp);
+        if (ent == null) break;
+        const name = std.mem.span(@as([*:0]const u8, @ptrCast(&ent.*.d_name)));
+        if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
+        var fbuf: [MAX_PATH_BYTES]u8 = undefined;
+        const fp = std.fmt.bufPrintZ(&fbuf, "{s}/{s}", .{ pin_dir, name }) catch continue;
+        // Removing the pin file drops the LSM link's last reference -> detach.
+        if (c.unlink(fp.ptr) == 0) removed += 1;
+    }
+    _ = c.closedir(dp);
     std.log.info("removed {d} pinned links from {s}.", .{ removed, pin_dir });
-    std.fs.deleteDirAbsolute(pin_dir) catch {};
+    _ = c.rmdir(zdir.ptr);
 }
 
 // ===================================================================
