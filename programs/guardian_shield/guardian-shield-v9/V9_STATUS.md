@@ -1,16 +1,20 @@
 # Guardian Shield v9 — Rebuild Status
 
-A correct, compiling, statically-validated BPF-LSM kernel enforcement layer that
-replaces the broken v9 prototype. This document maps every fix to the confirmed
-defect, states the exact prerequisites, records the honest build status on this
-box, gives the deploy/pin/unload procedure, and lists residual risks.
+A correct, compiling, and **live-verified** BPF-LSM kernel enforcement layer
+that replaces the broken v9 prototype. Confirmed on a kernel-6.18 BPF-LSM host:
+the object verifies, all 17 hooks attach and pin, and the external-vector suite
+blocks glibc/raw-syscall/openat2/io_uring/renameat2 destruction for agents while
+leaving non-agents untouched. This document maps every fix to the confirmed
+defect, states the exact prerequisites, records the build + live status, gives
+the deploy/pin/unload procedure, and lists residual risks.
 
 **One-line summary:** the prototype could never block anything (it matched
 full-path prefix rules against bare leaf filenames, and identified processes by
 a forgeable 15-char comm). v9 reconstructs the mount-correct absolute path,
 tags whole process trees at the kernel level, matches via an LPM trie, pins its
 links so enforcement survives loader death, and is proven by an external-vector
-bypass harness.
+bypass harness — including an io_uring deletion dispatched from a kernel worker
+thread, caught by the process-tree tag that a comm-based check would miss.
 
 ---
 
