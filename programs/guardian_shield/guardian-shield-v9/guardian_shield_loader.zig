@@ -647,10 +647,8 @@ fn handleExec(_: ?*anyopaque, data: ?*anyopaque, size: usize) callconv(.c) c_int
     };
     const json = std.json.Stringify.valueAlloc(g_alloc, record, .{}) catch return 0;
     defer g_alloc.free(json);
-    if (g_log_file) |f| {
-        f.writeAll(json) catch {};
-        f.writeAll("\n") catch {};
-    }
+    logWrite(json);
+    logWrite("\n");
     return 0;
 }
 
@@ -658,13 +656,15 @@ fn handleExec(_: ?*anyopaque, data: ?*anyopaque, size: usize) callconv(.c) c_int
 // Misc
 // ===================================================================
 
-fn openLog(path: []const u8) !void {
-    const f = std.fs.createFileAbsolute(path, .{ .truncate = false }) catch |e| {
-        std.log.warn("cannot open log '{s}': {t} (continuing without file log)", .{ path, e });
+fn openLog(path: []const u8) void {
+    var zbuf: [MAX_PATH_BYTES]u8 = undefined;
+    const zpath = std.fmt.bufPrintZ(&zbuf, "{s}", .{path}) catch return;
+    const fd = c.open(zpath.ptr, c.O_WRONLY | c.O_CREAT | c.O_APPEND, @as(c_uint, 0o644));
+    if (fd < 0) {
+        std.log.warn("cannot open log '{s}' (continuing without file log)", .{path});
         return;
-    };
-    f.seekFromEnd(0) catch {};
-    g_log_file = f;
+    }
+    g_log_fd = fd;
 }
 
 fn installSignals() void {
