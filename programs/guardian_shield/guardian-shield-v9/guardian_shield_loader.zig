@@ -189,13 +189,6 @@ fn fail(msg: []const u8) error{InvalidArgs} {
     return error.InvalidArgs;
 }
 
-fn libbpfPrint(level: c.libbpf_print_level, fmt: [*c]const u8, ap: *c.struct___va_list_tag_1) callconv(.c) c_int {
-    _ = level;
-    _ = fmt;
-    _ = ap;
-    return 0;
-}
-
 // ===================================================================
 // Prerequisites
 // ===================================================================
