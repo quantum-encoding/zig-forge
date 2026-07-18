@@ -123,6 +123,12 @@ pub fn build(b: *std.Build) void {
         }),
     });
     lib_tests.root_module.link_libc = true;
+    // The graphics recorded-stream anchor @embedFile's this committed fixture;
+    // it lives under tests/ (outside the src/ package root), so expose it as a
+    // named embed import rather than a relative @embedFile path.
+    lib_tests.root_module.addAnonymousImport("graphics_fixture", .{
+        .root_source_file = b.path("tests/fixtures/graphics_kitty_rgba.bin"),
+    });
     const run_lib_tests = b.addRunArtifact(lib_tests);
 
     const capi_tests = b.addTest(.{

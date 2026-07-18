@@ -32,6 +32,10 @@ pub const State = enum {
     dcs_ignore,
     osc_string,
     sos_pm_apc_string,
+    /// APC (ESC _) string — Kitty graphics protocol. Distinct from SOS/PM,
+    /// whose content is still ignored. Payload is streamed to the emulator's
+    /// heap-backed graphics accumulator via apc_put; ST emits apc_end.
+    apc_string,
     utf8,
 };
 
@@ -52,6 +56,12 @@ pub const Action = union(enum) {
     dcs_hook: DcsSequence,
     dcs_put: u8,
     dcs_unhook: void,
+    /// APC (Kitty graphics) — begin capture (reset the payload accumulator).
+    apc_start: void,
+    /// APC payload byte (streamed to the graphics accumulator).
+    apc_put: u8,
+    /// APC string terminated (ST) — dispatch the accumulated payload.
+    apc_end: void,
 };
 
 /// CSI sequence data
@@ -147,8 +157,11 @@ pub const Parser = struct {
 
     /// Process a single byte and return an action
     pub fn feed(self: *Self, byte: u8) Action {
-        // Handle C0 controls in any state (except when in string states)
-        if (byte < 0x20 and self.state != .osc_string and self.state != .dcs_passthrough) {
+        // Handle C0 controls in any state (except when in string states).
+        // apc_string joins osc_string / dcs_passthrough here so ESC (0x1B)
+        // reaches the string handler and is recognized as ST, rather than being
+        // swallowed by handleC0 (which would never emit apc_end).
+        if (byte < 0x20 and self.state != .osc_string and self.state != .dcs_passthrough and self.state != .apc_string) {
             return self.handleC0(byte);
         }
 
@@ -167,6 +180,7 @@ pub const Parser = struct {
             .dcs_passthrough => self.handleDcsPassthrough(byte),
             .dcs_ignore => self.handleDcsIgnore(byte),
             .sos_pm_apc_string => self.handleSosPmApcString(byte),
+            .apc_string => self.handleApcString(byte),
             .utf8 => self.handleUtf8(byte),
         };
     }
@@ -285,10 +299,15 @@ pub const Parser = struct {
                 self.state = .dcs_entry;
                 return .{ .none = {} };
             },
-            'X', '^', '_' => {
-                // SOS, PM, APC strings - ignore content
+            'X', '^' => {
+                // SOS, PM strings - ignore content
                 self.state = .sos_pm_apc_string;
                 return .{ .none = {} };
+            },
+            '_' => {
+                // APC string - Kitty graphics protocol. Begin payload capture.
+                self.state = .apc_string;
+                return .{ .apc_start = {} };
             },
             0x30...0x4F, 0x51...0x57, 0x59, 0x5A, 0x5C, 0x60...0x7E => {
                 // Final byte for simple escape
@@ -657,6 +676,26 @@ pub const Parser = struct {
         }
         return .{ .none = {} };
     }
+
+    /// APC (Kitty graphics) payload capture. Terminated by ST (ESC \) or BEL.
+    /// Every other byte is streamed to the emulator's graphics accumulator.
+    fn handleApcString(self: *Self, byte: u8) Action {
+        switch (byte) {
+            0x1B => {
+                // ST is ESC \ — consume the trailing '\' in ESCAPE state
+                // (ground would print it; see handleOscString).
+                self.state = .escape;
+                self.intermediate_count = 0;
+                return .{ .apc_end = {} };
+            },
+            0x07 => {
+                // Some emitters terminate with BEL instead of ST.
+                self.state = .ground;
+                return .{ .apc_end = {} };
+            },
+            else => return .{ .apc_put = byte },
+        }
+    }
 };
 
 /// Decode UTF-8 byte sequence to codepoint
@@ -732,6 +771,15 @@ pub fn applyAction(term: *Terminal, action: Action) void {
         },
         .dcs_unhook => {
             // DCS end
+        },
+        .apc_start => {
+            term.graphicsApcStart();
+        },
+        .apc_put => |byte| {
+            term.graphicsApcPut(byte);
+        },
+        .apc_end => {
+            term.graphicsApcEnd();
         },
     }
 }

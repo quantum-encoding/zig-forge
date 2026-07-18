@@ -26,6 +26,7 @@ const session = @import("session.zig");
 const terminal = @import("terminal.zig");
 const config = @import("config.zig");
 const url = @import("url.zig");
+const gfx = @import("graphics.zig");
 
 /// libc malloc-backed allocator — the standard choice for a C-linked library.
 const alloc = std.heap.c_allocator;
@@ -890,6 +891,136 @@ pub export fn tmux_paste(handle: ?*TmuxSession, data: ?[*]const u8, len: usize) 
 }
 
 // =============================================================================
+// Inline graphics (Kitty protocol, Phase 1) — additive ABI. A consumer that
+// ignores these calls renders exactly as before.
+//
+// The emulator is a byte-pipe + geometry tracker: it hands over the ORIGINAL
+// transmitted bytes + a format tag; the host decodes (CGImageSource on Apple).
+// Placements are line-anchored, so scroll is O(1); the ABI reports each
+// placement's CLIPPED on-screen cell rect plus the source pixel crop to sample.
+// =============================================================================
+
+/// A visible placement: the clipped on-screen cell rect + the source pixel crop
+/// the host should sample from the image texture. Additive extern struct.
+pub const CPlacement = extern struct {
+    image_id: u32,
+    cell_x: u16, // grid-local cell column of the rect's top-left
+    cell_y: u16, // grid-local cell row
+    cell_w: u16, // width in cells (clipped to the viewport)
+    cell_h: u16, // height in cells (clipped)
+    src_x: u32, // source crop in image-pixel space
+    src_y: u32,
+    src_w: u32,
+    src_h: u32,
+    z: i32, // z-order relative to text (z<0 below glyphs, z>=0 above)
+};
+
+/// Image metadata returned alongside the bytes. `format`: 0 RGBA, 1 RGB, 2 PNG,
+/// 3 iterm-blob. For RGB/RGBA `width`/`height` are the pixel dimensions; for PNG
+/// they are the transmitted hint (the host decodes for the true size).
+pub const CImageInfo = extern struct {
+    width: u32,
+    height: u32,
+    format: u8,
+};
+
+/// The idx-th VISIBLE placement in the active pane, or null if idx is past the
+/// visible count. Iterates placements in insertion order, skipping off-screen
+/// ones, so `_at` matches `_count`.
+fn nthVisiblePlacement(term: *const terminal.Terminal, idx: usize, out: *CPlacement) bool {
+    const rows = term.grid.rows;
+    const cols = term.grid.cols;
+    const top_abs = term.graphicsViewportTopAbs();
+    var seen: usize = 0;
+    for (term.graphics.placements.items) |p| {
+        const img = term.graphics.findImage(p.image_id) orelse continue;
+        const vr = gfx.clip(p, img, top_abs, rows, cols) orelse continue;
+        if (seen == idx) {
+            out.* = .{
+                .image_id = p.image_id,
+                .cell_x = vr.cell_x,
+                .cell_y = vr.cell_y,
+                .cell_w = vr.cell_w,
+                .cell_h = vr.cell_h,
+                .src_x = vr.src_x,
+                .src_y = vr.src_y,
+                .src_w = vr.src_w,
+                .src_h = vr.src_h,
+                .z = p.z,
+            };
+            return true;
+        }
+        seen += 1;
+    }
+    return false;
+}
+
+/// Number of image placements currently VISIBLE in the active pane.
+pub export fn tmux_placement_count(handle: ?*TmuxSession) usize {
+    const h = handle orelse return 0;
+    const term = &activePane(h).terminal;
+    const rows = term.grid.rows;
+    const cols = term.grid.cols;
+    const top_abs = term.graphicsViewportTopAbs();
+    var n: usize = 0;
+    for (term.graphics.placements.items) |p| {
+        const img = term.graphics.findImage(p.image_id) orelse continue;
+        if (gfx.clip(p, img, top_abs, rows, cols) != null) n += 1;
+    }
+    return n;
+}
+
+/// Fill `out` with the geometry of the idx-th visible placement. Returns 0 on
+/// success, -1 if idx is out of range or on NULL.
+pub export fn tmux_placement_at(handle: ?*TmuxSession, idx: usize, out: ?*CPlacement) c_int {
+    const h = handle orelse return -1;
+    const o = out orelse return -1;
+    const term = &activePane(h).terminal;
+    return if (nthVisiblePlacement(term, idx, o)) 0 else -1;
+}
+
+/// Copy image `image_id`'s stored bytes into `out` (at most `max`) and fill
+/// `info`. Returns the FULL byte length (which may exceed `max`), or 0 if no
+/// such image. Call with out=NULL to query the length + info, then allocate.
+pub export fn tmux_image_data(handle: ?*TmuxSession, image_id: u32, out: ?[*]u8, max: usize, info: ?*CImageInfo) usize {
+    const h = handle orelse return 0;
+    const term = &activePane(h).terminal;
+    const img = term.graphics.findImage(image_id) orelse return 0;
+    if (info) |p| p.* = .{ .width = img.width, .height = img.height, .format = @intFromEnum(img.format) };
+    if (out) |buf| {
+        const n = @min(img.bytes.len, max);
+        @memcpy(buf[0..n], img.bytes[0..n]);
+    }
+    return img.bytes.len;
+}
+
+/// Monotonic graphics generation for the active pane. Bumps whenever
+/// placements/images change (transmit, place, delete, eviction, alt-swap), so
+/// the host only re-reads/re-uploads when something actually moved.
+pub export fn tmux_graphics_generation(handle: ?*TmuxSession) u64 {
+    const h = handle orelse return 0;
+    return activePane(h).terminal.graphics_gen;
+}
+
+/// Image ids freed since the last call (a=d, eviction, overwrite, alt-exit),
+/// read-and-clear — the host releases the matching MTLTextures. Writes up to
+/// `max` ids into `out_ids` (may be NULL to just drain/count) and returns the
+/// number freed.
+pub export fn tmux_take_freed_images(handle: ?*TmuxSession, out_ids: ?[*]u32, max: usize) usize {
+    const h = handle orelse return 0;
+    const term = &activePane(h).terminal;
+    const items = term.graphics_freed.items;
+    const n = items.len;
+    if (out_ids) |buf| {
+        const m = @min(n, max);
+        var i: usize = 0;
+        while (i < m) : (i += 1) buf[i] = items[i];
+    }
+    term.graphics_freed.clearRetainingCapacity();
+    return n;
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -910,6 +1041,15 @@ test "CCell layout is stable for the C header" {
     // The Swift/C side hard-codes this layout; lock it down.
     try std.testing.expectEqual(@as(usize, 4), @alignOf(CCell));
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(CCell));
+}
+
+test "graphics ABI struct layouts are stable for the C header" {
+    // tmux_placement: u32 + 4×u16 + 4×u32 + i32 = 32 bytes, align 4.
+    try std.testing.expectEqual(@as(usize, 4), @alignOf(CPlacement));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(CPlacement));
+    // tmux_image_info: u32 + u32 + u8 → 12 bytes (align 4), matches C padding.
+    try std.testing.expectEqual(@as(usize, 4), @alignOf(CImageInfo));
+    try std.testing.expectEqual(@as(usize, 12), @sizeOf(CImageInfo));
 }
 
 test "pane-aware surface: split, rects tile with a border gap, focus, close" {

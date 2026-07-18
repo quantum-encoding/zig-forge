@@ -190,6 +190,64 @@ size_t   tmux_find_urls(tmux_session *handle, tmux_url_range *out, size_t max);
 bool     tmux_bracketed_paste(tmux_session *handle);
 long     tmux_paste(tmux_session *handle, const uint8_t *data, size_t len);
 
+/* ---- inline graphics (Kitty protocol, Phase 1) — ADDITIVE ----
+ * The emulator is a byte-pipe + geometry tracker: it captures transmitted image
+ * bytes (RGB/RGBA/PNG) verbatim and tracks placements. It does NOT decode — the
+ * host decodes (CGImageSource on Apple). Placements are anchored to an absolute
+ * line index, so scroll is O(1); the ABI reports each visible placement's
+ * CLIPPED on-screen cell rect plus the source pixel crop to sample.
+ *
+ * A consumer that ignores these calls renders exactly as before.
+ *
+ * Steady-state VRAM loop (the DOOM demo transmits+deletes one image per frame):
+ *   read tmux_graphics_generation → if it changed, re-read placements + upload
+ *   any new image (tmux_image_data → decode → MTLTexture cache keyed by
+ *   image_id) → draw a second textured-quad pass → release the textures named
+ *   by tmux_take_freed_images.
+ */
+
+/* A visible placement: the clipped on-screen CELL rect plus the SOURCE pixel
+ * crop the host samples from the image. cell_* are grid-local; src_* are in
+ * image-pixel space. z<0 draws below glyphs, z>=0 above. */
+typedef struct {
+    uint32_t image_id;
+    uint16_t cell_x;
+    uint16_t cell_y;
+    uint16_t cell_w;
+    uint16_t cell_h;
+    uint32_t src_x;
+    uint32_t src_y;
+    uint32_t src_w;
+    uint32_t src_h;
+    int32_t  z;
+} tmux_placement;
+
+/* Image metadata. format: 0 RGBA, 1 RGB, 2 PNG, 3 iterm-blob. For RGB/RGBA the
+ * width/height are pixel dims; for PNG they are the transmitted hint (the host
+ * decodes for the true size). */
+typedef struct {
+    uint32_t width;
+    uint32_t height;
+    uint8_t  format;
+} tmux_image_info;
+
+/* Number of image placements currently VISIBLE in the active pane. */
+size_t   tmux_placement_count(tmux_session *handle);
+/* Geometry of the idx-th visible placement (same order as _count). Returns 0 on
+ * success, -1 if idx is out of range or on NULL. */
+int      tmux_placement_at(tmux_session *handle, size_t idx, tmux_placement *out);
+/* Copy image image_id's stored bytes into out (at most max) and fill info.
+ * Returns the FULL byte length (may exceed max), 0 if no such image. Call with
+ * out=NULL to query length + info, then allocate. */
+size_t   tmux_image_data(tmux_session *handle, uint32_t image_id, uint8_t *out, size_t max, tmux_image_info *info);
+/* Monotonic counter; bumps when placements/images change (transmit, place,
+ * delete, eviction, alt-swap) so the host only re-uploads when something moved. */
+uint64_t tmux_graphics_generation(tmux_session *handle);
+/* Image ids freed since the last call (a=d, eviction, overwrite, alt-exit),
+ * read-and-clear — release the matching textures. Writes up to max ids into
+ * out_ids (may be NULL to just drain/count); returns the number freed. */
+size_t   tmux_take_freed_images(tmux_session *handle, uint32_t *out_ids, size_t max);
+
 #ifdef __cplusplus
 }
 #endif

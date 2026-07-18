@@ -46,6 +46,7 @@ pub const session = @import("session.zig");
 pub const render = @import("render.zig");
 pub const config = @import("config.zig");
 pub const url = @import("url.zig");
+pub const graphics = @import("graphics.zig");
 
 // Re-export key types
 pub const Pty = pty.Pty;
@@ -97,6 +98,14 @@ test "VT tier-1 external anchors" {
 
 test "TUI renderer anchors" {
     _ = @import("tui_render_anchors.zig");
+}
+
+test "graphics module" {
+    _ = graphics;
+}
+
+test "inline graphics lifecycle anchors" {
+    _ = @import("graphics_lifecycle_anchors.zig");
 }
 
 test "pty module" {

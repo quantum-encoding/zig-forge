@@ -6,6 +6,7 @@
 const std = @import("std");
 const config = @import("config.zig");
 const Color = config.Color;
+const gfx = @import("graphics.zig");
 
 /// Cell attributes (packed for memory efficiency)
 pub const CellAttrs = packed struct {
@@ -546,6 +547,39 @@ pub const Terminal = struct {
     clipboard_pending: [4096]u8 = undefined,
     clipboard_len: usize = 0,
 
+    // ---- Inline graphics (Kitty protocol, Phase 1) ----
+    // Per-screen graphics state (images + placements), riding the alt-screen
+    // swap exactly like `grid`/`alt_grid`: `graphics` is always the ACTIVE
+    // screen's state; `alt_graphics` holds the stashed PRIMARY while in alt.
+    graphics: gfx.GraphicsState = .empty,
+    alt_graphics: ?gfx.GraphicsState = null,
+    /// Image ids freed since the host last drained (a=d, eviction, alt-exit,
+    /// overwrite). Read-and-clear via tmux_take_freed_images — the VRAM guard.
+    graphics_freed: std.ArrayListUnmanaged(u32) = .empty,
+    /// Monotonic counter; bumps when placements/images change so the host only
+    /// re-uploads textures when something actually moved.
+    graphics_gen: u64 = 0,
+    /// Streaming APC payload accumulator (heap-backed, size-bounded — distinct
+    /// from the 2 KiB OSC control buffer). Holds one APC string's raw bytes.
+    apc_accum: std.ArrayListUnmanaged(u8) = .empty,
+    /// Set when the current APC payload exceeded the cap; the string is dropped.
+    apc_overflow: bool = false,
+    /// In-flight chunked transmission (Kitty m=1 continuation).
+    graphics_pending: ?GfxPending = null,
+
+    pub const GfxPending = struct {
+        id: u32,
+        format: gfx.ImageFormat,
+        width: u32,
+        height: u32,
+        action: gfx.Action,
+        cols: u16,
+        rows: u16,
+        col: u16,
+        row: u16,
+        data: std.ArrayListUnmanaged(u8) = .empty, // accumulated base64
+    };
+
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator, rows: u16, cols: u16, scrollback_lines: u32) !Self {
@@ -601,6 +635,14 @@ pub const Terminal = struct {
 
         self.dirty_rows.deinit();
         self.tab_stops.deinit();
+
+        // Graphics: free both screens' image bytes + containers (no freed-id
+        // signalling on teardown — the host is going away too).
+        self.graphics.deinit(self.allocator, null);
+        if (self.alt_graphics) |*g| g.deinit(self.allocator, null);
+        self.graphics_freed.deinit(self.allocator);
+        self.apc_accum.deinit(self.allocator);
+        if (self.graphics_pending) |*p| p.data.deinit(self.allocator);
     }
 
     /// Check if a character is wide (occupies 2 columns).
@@ -866,6 +908,14 @@ pub const Terminal = struct {
 
         self.grid.scrollUp(self.scroll_region.top, self.scroll_region.bottom, n, template);
         self.markAllDirty();
+
+        // Advance the graphics epoch (grid row 0's absolute line index) and evict
+        // any placement that has scrolled entirely out of retained history.
+        self.graphics.epoch += n;
+        const min_retained = self.graphicsMinRetainedAbs();
+        if (self.graphics.prune(self.allocator, min_retained, &self.graphics_freed)) {
+            self.graphics_gen +%= 1;
+        }
     }
 
     /// Scroll down by n lines
@@ -880,6 +930,9 @@ pub const Terminal = struct {
 
         self.grid.scrollDown(self.scroll_region.top, self.scroll_region.bottom, n, template);
         self.markAllDirty();
+
+        // Content moved down: grid row 0's absolute line index retreats.
+        self.graphics.epoch -= n;
     }
 
     /// Erase display (ED)
@@ -914,6 +967,8 @@ pub const Terminal = struct {
                     // Also clear scrollback
                     self.scrollback.clear();
                 }
+                // Clearing the whole display clears its image overlays too.
+                self.graphicsClearScreen();
             },
             else => {},
         }
@@ -1140,9 +1195,17 @@ pub const Terminal = struct {
         const fresh = try Grid.init(self.allocator, self.grid.rows, self.grid.cols);
         self.alt_grid = self.grid; // stash the primary
         self.grid = fresh;
+        // Graphics ride the SAME swap: stash the primary placements/images and
+        // give the alt screen a fresh empty set (DOOM's per-frame placements
+        // must never leak back to the primary). Any in-flight transmission is
+        // abandoned at the screen boundary.
+        self.alt_graphics = self.graphics;
+        self.graphics = .empty;
+        self.abandonGraphicsTransmission();
         self.modes.alt_screen = true;
         self.pending_wrap = false;
         self.markAllDirty();
+        self.graphics_gen +%= 1;
     }
 
     /// Return to the main screen buffer: discard the alt contents and restore
@@ -1155,9 +1218,19 @@ pub const Terminal = struct {
             self.grid = g;
             self.alt_grid = null;
         }
+        // Discard the alt screen's graphics (freeing every image and signalling
+        // the freed ids so the host releases the textures) and restore the
+        // stashed primary set byte-for-byte.
+        if (self.alt_graphics) |primary| {
+            self.graphics.deinit(self.allocator, &self.graphics_freed);
+            self.graphics = primary;
+            self.alt_graphics = null;
+        }
+        self.abandonGraphicsTransmission();
         self.modes.alt_screen = false;
         self.pending_wrap = false;
         self.markAllDirty();
+        self.graphics_gen +%= 1;
     }
 
     /// Resize terminal
@@ -1248,8 +1321,224 @@ pub const Terminal = struct {
 
         self.grid.clearRegion(0, 0, self.grid.rows - 1, self.grid.cols - 1, Cell.default);
         self.markAllDirty();
+
+        self.graphicsClearScreen();
+        self.abandonGraphicsTransmission();
+    }
+
+    // =========================================================================
+    // Inline graphics (Kitty protocol, Phase 1)
+    // =========================================================================
+
+    /// Absolute line index of grid logical row 0 for the active screen, adjusted
+    /// for the current scrollback view (the top visible line).
+    pub fn graphicsViewportTopAbs(self: *const Self) i64 {
+        const back: i64 = if (self.modes.alt_screen)
+            0
+        else
+            @intCast(@min(self.scrollback_offset, self.scrollback.len));
+        return self.graphics.epoch - back;
+    }
+
+    /// Oldest absolute line index still retained (in the grid or scrollback).
+    /// A placement whose whole rect is above this has scrolled out of history.
+    fn graphicsMinRetainedAbs(self: *const Self) i64 {
+        if (self.modes.alt_screen) return self.graphics.epoch;
+        return self.graphics.epoch - @as(i64, @intCast(self.scrollback.len));
+    }
+
+    /// Free every image/placement on the active screen (ED2/3, reset).
+    fn graphicsClearScreen(self: *Self) void {
+        if (self.graphics.placements.items.len == 0 and self.graphics.images.items.len == 0) return;
+        self.graphics.clearAll(self.allocator, &self.graphics_freed);
+        self.graphics_gen +%= 1;
+    }
+
+    /// Drop any in-flight chunked transmission + reset the APC accumulator.
+    fn abandonGraphicsTransmission(self: *Self) void {
+        if (self.graphics_pending) |*p| {
+            p.data.deinit(self.allocator);
+            self.graphics_pending = null;
+        }
+        self.apc_accum.clearRetainingCapacity();
+        self.apc_overflow = false;
+    }
+
+    /// APC begin (ESC _): reset the payload accumulator.
+    pub fn graphicsApcStart(self: *Self) void {
+        self.apc_accum.clearRetainingCapacity();
+        self.apc_overflow = false;
+    }
+
+    /// APC payload byte: append to the streaming accumulator (size-bounded).
+    pub fn graphicsApcPut(self: *Self, byte: u8) void {
+        if (self.apc_overflow) return;
+        if (self.apc_accum.items.len >= gfx.APC_ACCUM_CAP) {
+            self.apc_overflow = true;
+            return;
+        }
+        self.apc_accum.append(self.allocator, byte) catch {
+            self.apc_overflow = true;
+        };
+    }
+
+    /// APC terminated (ST): parse + dispatch the Kitty graphics command.
+    pub fn graphicsApcEnd(self: *Self) void {
+        defer self.apc_accum.clearRetainingCapacity();
+        if (self.apc_overflow) {
+            self.abandonGraphicsTransmission();
+            return;
+        }
+        const payload = self.apc_accum.items;
+        // Kitty graphics commands begin with 'G'. Anything else is some other
+        // APC string we don't handle — ignore it (never touches the grid).
+        if (payload.len == 0 or payload[0] != 'G') return;
+
+        const body = payload[1..];
+        const semi = std.mem.indexOfScalar(u8, body, ';');
+        const ctrl_s = if (semi) |s| body[0..s] else body;
+        const data_s = if (semi) |s| body[s + 1 ..] else body[body.len..];
+        const ctrl = gfx.Control.parse(ctrl_s);
+
+        // Continuation of an in-flight chunked transmission.
+        if (self.graphics_pending != null) {
+            self.graphicsAppendChunk(data_s);
+            if (!(ctrl.has_m and ctrl.m == 1)) self.graphicsFinalizePending();
+            return;
+        }
+
+        switch (ctrl.a) {
+            .place => {
+                self.graphicsPlace(ctrl.i, @intCast(@min(ctrl.c, 65535)), @intCast(@min(ctrl.r, 65535)));
+            },
+            .delete => self.graphicsDelete(ctrl.d, ctrl.i),
+            .transmit, .transmit_place => {
+                // Whitelist: direct base64 only; RGB/RGBA/PNG only.
+                if (ctrl.t != 'd') return;
+                const fmt = gfx.ImageFormat.fromKitty(ctrl.f) orelse return;
+                if (ctrl.has_m and ctrl.m == 1) {
+                    // First frame of a chunked transmission — start accumulating.
+                    var pend = GfxPending{
+                        .id = ctrl.i,
+                        .format = fmt,
+                        .width = ctrl.s,
+                        .height = ctrl.v,
+                        .action = ctrl.a,
+                        .cols = @intCast(@min(ctrl.c, 65535)),
+                        .rows = @intCast(@min(ctrl.r, 65535)),
+                        .col = self.cursor.col,
+                        .row = self.cursor.row,
+                    };
+                    pend.data.appendSlice(self.allocator, data_s) catch {
+                        pend.data.deinit(self.allocator);
+                        return;
+                    };
+                    self.graphics_pending = pend;
+                } else {
+                    // Single-frame transmission — decode directly, no copy.
+                    self.graphicsCommit(fmt, ctrl.i, ctrl.s, ctrl.v, ctrl.a, @intCast(@min(ctrl.c, 65535)), @intCast(@min(ctrl.r, 65535)), self.cursor.col, self.cursor.row, data_s);
+                }
+            },
+            .unknown => {},
+        }
+    }
+
+    fn graphicsAppendChunk(self: *Self, data_s: []const u8) void {
+        const p = &self.graphics_pending.?;
+        if (p.data.items.len + data_s.len > gfx.APC_ACCUM_CAP) {
+            // Over cap — abandon this transmission.
+            p.data.deinit(self.allocator);
+            self.graphics_pending = null;
+            return;
+        }
+        p.data.appendSlice(self.allocator, data_s) catch {
+            p.data.deinit(self.allocator);
+            self.graphics_pending = null;
+        };
+    }
+
+    fn graphicsFinalizePending(self: *Self) void {
+        const p = self.graphics_pending orelse return;
+        self.graphics_pending = null;
+        var data = p.data;
+        defer data.deinit(self.allocator);
+        self.graphicsCommit(p.format, p.id, p.width, p.height, p.action, p.cols, p.rows, p.col, p.row, data.items);
+    }
+
+    /// Decode the base64 payload, store the image, and (for a=T) place it.
+    fn graphicsCommit(
+        self: *Self,
+        fmt: gfx.ImageFormat,
+        id: u32,
+        width: u32,
+        height: u32,
+        action: gfx.Action,
+        cols: u16,
+        rows: u16,
+        col: u16,
+        row: u16,
+        b64: []const u8,
+    ) void {
+        const decoded = decodeBase64(self.allocator, b64) orelse return;
+        const img = gfx.Image{
+            .id = id,
+            .width = width,
+            .height = height,
+            .format = fmt,
+            .bytes = decoded,
+        };
+        if (!self.graphics.putImage(self.allocator, img, &self.graphics_freed)) {
+            // Over the per-pane cap — drop.
+            self.allocator.free(decoded);
+            return;
+        }
+        self.graphics_gen +%= 1;
+        if (action == .transmit_place) {
+            self.graphicsPlaceAt(id, cols, rows, col, row);
+        }
+    }
+
+    /// Place an already-transmitted image (a=p) at the current cursor.
+    fn graphicsPlace(self: *Self, id: u32, cols: u16, rows: u16) void {
+        self.graphicsPlaceAt(id, cols, rows, self.cursor.col, self.cursor.row);
+    }
+
+    fn graphicsPlaceAt(self: *Self, id: u32, cols: u16, rows: u16, col: u16, row: u16) void {
+        if (self.graphics.findImage(id) == null) return; // no such image
+        self.graphics.placements.append(self.allocator, .{
+            .image_id = id,
+            .anchor_line = self.graphics.epoch + @as(i64, row),
+            .col = col,
+            .cell_w = cols,
+            .cell_h = rows,
+            .z = 0,
+        }) catch return;
+        self.graphics_gen +%= 1;
+    }
+
+    /// Delete (a=d). d='i'/'I' → by image id; d='a'/'A' → all.
+    fn graphicsDelete(self: *Self, d: u8, id: u32) void {
+        switch (d) {
+            'a', 'A' => self.graphics.clearAll(self.allocator, &self.graphics_freed),
+            'i', 'I' => self.graphics.freeImage(self.allocator, id, &self.graphics_freed),
+            else => self.graphics.freeImage(self.allocator, id, &self.graphics_freed),
+        }
+        self.graphics_gen +%= 1;
     }
 };
+
+/// Decode standard (padded) base64 into a freshly allocated buffer, or null on
+/// malformed input.
+fn decodeBase64(allocator: std.mem.Allocator, src: []const u8) ?[]u8 {
+    const dec = std.base64.standard.Decoder;
+    const n = dec.calcSizeForSlice(src) catch return null;
+    const buf = allocator.alloc(u8, n) catch return null;
+    dec.decode(buf, src) catch {
+        allocator.free(buf);
+        return null;
+    };
+    return buf;
+}
 
 // =============================================================================
 // Tests

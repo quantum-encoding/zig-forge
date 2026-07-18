@@ -116,6 +116,8 @@ programs/zig_pdf_generator/test_*.pdf
 *.gguf
 *.ggml
 *.bin
+# Committed terminal_mux graphics recorded-stream test fixture (small, tracked).
+!programs/terminal_mux/tests/fixtures/graphics_kitty_rgba.bin
 
 # ── zig_ai_server runtime state ──────────────────────────────────
 # Ledger / snapshot / WAL files are written at runtime by the server;
