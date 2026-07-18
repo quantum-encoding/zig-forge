@@ -221,6 +221,23 @@ struct {
     __uint(map_flags, BPF_F_NO_PREALLOC);
 } credential_paths SEC(".maps");
 
+// Egress allowlist (IPv4). LPM trie keyed on {prefixlen_bits, 4 addr bytes in
+// NETWORK byte order} - a tainted/agent connect() to a dest matching a stored
+// CIDR is allowed; anything else (public C2 / webhook) is denied. The loader
+// seeds the private/loopback/link-local/CGNAT ranges by default + operator CIDRs.
+struct egress_lpm_key {
+    __u32 prefixlen;   // bits
+    __u8  addr[4];     // network byte order (MSB first)
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LPM_TRIE);
+    __type(key, struct egress_lpm_key);
+    __type(value, __u8);
+    __uint(max_entries, 512);
+    __uint(map_flags, BPF_F_NO_PREALLOC);
+} egress_allow SEC(".maps");
+
 // Agent-launcher basenames (exec classifier). Populated from config.
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
