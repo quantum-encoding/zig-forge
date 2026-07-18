@@ -248,6 +248,49 @@ explicit about where it is not.
 
 ---
 
+## Appendix A — macOS (Metatron) enforce-mode cutover (operator procedure)
+
+The macOS roadmap item (§8) is to **walk** the existing cutover ladder, not to
+build enforcement — Metatron already ships both. Verified in-app surfaces:
+
+**Custodian (destructive-op guard) 4-mode ladder** — `CustodianSettingsView.swift`,
+config `destruction-guard.json`, decoupled from shield-mode, with a live latency
+gate (p99 < 100µs) and would-deny soak evidence so "enforce is armed on data, not
+faith":
+- `off` — client not created.
+- `observe (soak)` — full pipeline, nothing blocked, logs would-deny counts;
+  "run ≥1 week before enforcing."
+- `enforceScratch` — real denies **only under scratch roots** (isolated test tier,
+  physically can't touch real data).
+- `enforce` — full protection (agent `rm -rf` of vault paths → EPERM).
+
+**Supply-chain Sentinel (credential-read + exfil)** enforces when shield-mode is
+`Enforce` **and** the crown-jewel assets carry `block:true` (today only the
+self-test anchor does; `evaluateOpen`/`evaluateFlow` already return `.deny`).
+
+**Cutover procedure** (mirrors the Linux hardening validation — isolate, prove,
+then flip; I cannot execute it here as there is no macOS host, so it is documented
+for the operator):
+1. **VM / second machine first**, never the primary dev box — the same discipline
+   as `forge-build-farm`. Install Metatron; run a macOS supply-chain simulation
+   (fake postinstall that sweeps `~/.aws`/`~/.ssh` then curls a webhook) — the
+   macOS analogue of `supplychain_sim.sh`.
+2. **Soak in `observe`** — collect would-deny counts on the crown-jewel AssetMap
+   over ≥1 week of normal dev; tune the expected-reader allowlist so legit
+   `npm→.npmrc` / `git→.config/gh` self-reads don't flag.
+3. **`enforceScratch`** — validate real denies under scratch roots (a scratch-rooted
+   `~/.aws` harvest → EPERM) with zero impact on real data.
+4. **Flip `block:true`** on the crown-jewel credential assets (ssh/aws/gcloud/gh/
+   git-credentials/kube/docker) and move shield-mode to `Enforce`; re-run the
+   simulation and confirm: tainted-descendant crown-jewel read → denied, exfil
+   (read→connect) → denied, legit build-tool self-read → allowed.
+5. **Only then enable on the real machine.**
+
+This reaches the same place the Linux side proves by default-deny in the VM —
+Metatron gets there by walking its own measured ladder rather than a cold flip.
+
+---
+
 ## 10. Testing methodology (how every claim here was earned)
 
 Risky enforcement is validated in the **`forge-build-farm` VM** (Arch clone,
