@@ -7,8 +7,11 @@ product (Metatron Security)._
 
 This document is the actionable source of truth. It records what the audit found,
 what has already been fixed, and the phased plan. Companion documents:
-`CONVERGENCE.md` (cross-platform policy/event schema and porting plan) and, once
-the v9 rework lands, `guardian-shield-v9/V9_STATUS.md`.
+`THREAT_MODELS.md` (the consolidated threat models, defensive postures, live-kernel
+proof, macOS/supply-chain comparison, and roadmap — read this for the "what defends
+against what and where it stops" picture), `CONVERGENCE.md` (cross-platform
+policy/event schema and porting plan), and `guardian-shield-v9/V9_STATUS.md` (the
+BPF-LSM rewrite status, now including hardening mode).
 
 ---
 
