@@ -504,27 +504,25 @@ static __always_inline int fs_guard_dentry(struct dentry *dentry,
 
     bump(STAT_FS_CHECKS);
 
-    __u32 zero = 0;
-    struct path_scratch *sb = bpf_map_lookup_elem(&path_scratch_map, &zero);
-    if (!sb)
+    struct recon_ctx *ctx = get_recon_ctx();
+    if (!ctx)
         return 0;
 
-    __u32 len = reconstruct_path(dentry, vfsmnt, sb->data);
-    bool hit = path_is_protected(sb->data, len);
+    __u32 len = reconstruct_path(dentry, vfsmnt, ctx);
+    bool hit = path_is_protected(ctx->out, len);
 
-    // Secondary path (rename dst / link dst). Reuse the same scratch after the
-    // first check to keep stack + map pressure low.
+    // Secondary path (rename dst / link dst). Reuse the same ctx after the
+    // first check to keep map pressure low.
     bool thit = false;
-    __u32 tlen = 0;
     if (!hit && tdentry) {
-        tlen = reconstruct_path(tdentry, tvfsmnt, sb->data);
-        thit = path_is_protected(sb->data, tlen);
+        __u32 tlen = reconstruct_path(tdentry, tvfsmnt, ctx);
+        thit = path_is_protected(ctx->out, tlen);
         len = tlen;
     }
 
     if (hit || thit) {
         __u8 enforced = cfg->log_only ? 0 : 1;
-        log_violation(ev, TAG_AGENT, enforced, sb->data, len, 0, 0, 0, 0);
+        log_violation(ev, TAG_AGENT, enforced, ctx->out, len, 0, 0, 0, 0);
         bump(STAT_FS_BLOCKED);
         if (cfg->log_only)
             return 0;
