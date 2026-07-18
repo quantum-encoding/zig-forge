@@ -21,14 +21,36 @@ fn feedFixture(sess: *session.Session, bytes: []const u8) void {
 
 /// A rounded box with a URL inside — the exact shape claude draws. Same content
 /// as tests/fixtures/claude_tui_synth.bin, inline so the test is hermetic.
+/// The leading `ESC[>1u` + `ESC[>4;2m` are claude's REAL boot handshake (Kitty
+/// keyboard push + XTMODKEYS), captured via `script` from claude 2.1.214 —
+/// the original synth fixture lacked them, which is why the grid dumped clean
+/// while the live app underlined everything: an unguarded `m`-final dispatch
+/// read XTMODKEYS' param 4 as SGR underline-on, and no reset ever follows.
 const TUI =
     "\x1b[?1049h\x1b[H\x1b[2J" ++
+    "\x1b[>1u\x1b[>4;2m" ++
     "\x1b[38;2;180;180;190m" ++
     "\u{256D}" ++ "\u{2500}" ** 20 ++ "\u{256E}\r\n" ++
     "\u{2502} \x1b[0m\x1b[1m\u{2733} Claude\x1b[0m\r\n" ++
     "\u{2502} \x1b[0mSee https://docs.anthropic.com/claude for more.\r\n" ++
     "\u{2570}" ++ "\u{2500}" ** 20 ++ "\u{2570}\r\n" ++
     "\x1b[0m\u{23F5} auto-accept on   \u{26A0} 3 files\r\n";
+
+test "XTMODKEYS (CSI > 4;2 m) must NOT set SGR underline — claude's boot handshake" {
+    const rect = session.Rect{ .x = 0, .y = 0, .width = 80, .height = 24 };
+    const sess = try session.Session.init(std.testing.allocator, "xtmod", rect, 200);
+    defer sess.deinit();
+    // Handshake first, then plain text — pre-fix, EVERY cell after the
+    // handshake carried ATTR_UNDERLINE for the rest of the session.
+    feedFixture(sess, "\x1b[>4;2mplain text after handshake");
+
+    const grid = &sess.getActiveWindow().getActivePane().terminal.grid;
+    var c: u16 = 0;
+    while (c < 10) : (c += 1) {
+        const cell = grid.getCellConst(0, c);
+        try std.testing.expect(@as(u8, @bitCast(cell.attrs)) & ATTR_UNDERLINE == 0);
+    }
+}
 
 test "TUI stream: NO spurious ATTR_UNDERLINE anywhere except the real URL" {
     const rect = session.Rect{ .x = 0, .y = 0, .width = 80, .height = 24 };

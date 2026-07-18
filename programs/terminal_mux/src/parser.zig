@@ -926,8 +926,20 @@ fn handleCsi(term: *Terminal, seq: CsiSequence) void {
             }
         },
         'm' => {
-            // SGR - Select Graphic Rendition
-            handleSgr(term, seq);
+            // SGR - Select Graphic Rendition — but ONLY without a private
+            // parameter marker. `CSI > Pp;Pv m` is XTMODKEYS (modifyOtherKeys)
+            // and other 0x3C-0x3F-prefixed m-finals are private too. Claude
+            // Code emits ESC[>4;2m in its boot handshake; dispatching that
+            // into handleSgr read param 4 as "underline on" — and with nothing
+            // ever emitting a reset, EVERY cell for the rest of the session
+            // rendered underlined (aiconductor goal 556D61CB's "pervasive
+            // underlines" defect; proved against a real script-captured
+            // claude boot stream, which contains no underline SGR at all).
+            const is_private_m = seq.intermediate_count > 0 and switch (seq.intermediates[0]) {
+                '<', '=', '>', '?' => true,
+                else => false,
+            };
+            if (!is_private_m) handleSgr(term, seq);
         },
         'r' => {
             // DECSTBM - Set Scrolling Region
