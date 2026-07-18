@@ -113,13 +113,47 @@ int main(int argc, char **argv) {
 }
 EOF
 
+# Connector: non-blocking connect() to IP:PORT. exit 10=DENIED (EPERM/EACCES from
+# the LSM, before any network attempt), 0=LSM-allowed (incl. EINPROGRESS /
+# ECONNREFUSED / ENETUNREACH - the VM has no real internet, so we assert on the
+# LSM verdict, not on whether the connection completes).
+cat > "$WORK/connector.c" <<'EOF'
+#define _GNU_SOURCE
+#include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
+int main(int argc, char **argv) {
+    if (argc < 3) { fprintf(stderr, "usage: %s IP PORT\n", argv[0]); return 2; }
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) { perror("socket"); return 3; }
+    int fl = fcntl(fd, F_GETFL, 0); fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+    struct sockaddr_in sa; memset(&sa, 0, sizeof sa);
+    sa.sin_family = AF_INET; sa.sin_port = htons((unsigned short)atoi(argv[2]));
+    if (inet_pton(AF_INET, argv[1], &sa.sin_addr) != 1) { fprintf(stderr, "bad ip\n"); return 2; }
+    errno = 0;
+    int r = connect(fd, (struct sockaddr *)&sa, sizeof sa);
+    int e = errno; close(fd);
+    if (r == 0) { printf("connect ok (LSM allowed)\n"); return 0; }
+    if (e == EINPROGRESS) { printf("connect in-progress (LSM allowed)\n"); return 0; }
+    if (e == EPERM || e == EACCES) { printf("connect DENIED errno=%d (%s)\n", e, strerror(e)); return 10; }
+    printf("connect errno=%d (%s) (LSM allowed)\n", e, strerror(e)); return 0;
+}
+EOF
+
 "$CC" -O2 -o "$WORK/cred_reader" "$WORK/cred_reader.c" || { echo "compile cred_reader failed"; exit 4; }
 "$CC" -O2 -o "$WORK/launcher"    "$WORK/launcher.c"    || { echo "compile launcher failed"; exit 4; }
+"$CC" -O2 -o "$WORK/connector"   "$WORK/connector.c"   || { echo "compile connector failed"; exit 4; }
 # Build-tool-named copies: gs_exec tags by the resolved exe's dentry leaf, so the
-# binary must literally be named `npm`/`yarn` (a shell script would leaf as bash).
+# binary must literally be named `npm`/`yarn`/`pnpm` (a shell script would leaf as bash).
 cp "$WORK/cred_reader" "$WORK/npm"          # tainted-direct reader
 cp "$WORK/cred_reader" "$WORK/harvester"    # inherited child (non-build basename)
 cp "$WORK/launcher"    "$WORK/yarn"         # tainted launcher -> forks harvester
+cp "$WORK/connector"   "$WORK/pnpm"         # tainted connector (exfil probe)
 
 N_OK=0 N_FAIL=0
 # expect BLOCKED|ALLOWED ; classify by exit code (10=blocked, else allowed/na).
