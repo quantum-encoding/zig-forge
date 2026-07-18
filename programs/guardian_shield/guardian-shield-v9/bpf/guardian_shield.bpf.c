@@ -392,26 +392,32 @@ static long emit_cb(__u32 k, void *c)
     if (!buf)
         return 1;
 
-    __u32 idx = ctx->n - 1 - k;
-    struct dentry *cd = (struct dentry *)buf->dstack[idx & (MAX_DENTRY_DEPTH - 1)];
+    __u32 sidx = ctx->n - 1 - k;
+    struct dentry *cd = (struct dentry *)buf->dstack[sidx & (MAX_DENTRY_DEPTH - 1)];
     __u32 nlen = BPF_CORE_READ(cd, d_name.len);
     const unsigned char *nm = BPF_CORE_READ(cd, d_name.name);
 
     __u32 off = ctx->off;
-    if (off < MAX_PATH_LEN - 1) {
-        buf->data[off & (MAX_PATH_LEN - 1)] = '/';   // masked var-off write: OK
-        off++;
-    }
-    if (off < MAX_PATH_LEN - 1) {
-        __u32 rem = MAX_PATH_LEN - 1 - off;  // >= 1 here
-        if (nlen > rem)
-            nlen = rem;
-        if (nlen > MAX_COMPONENT_LEN)
-            nlen = MAX_COMPONENT_LEN;
-        if (nlen > 0)
-            bpf_probe_read_kernel(&buf->data[off & (MAX_PATH_LEN - 1)], nlen, nm);
-        off += nlen;
-    }
+    if (off >= MAX_PATH_LEN - 1)             // logical buffer full - stop
+        return 1;
+
+    // '/' separator. idx in [0,127] (mask) < RECON_DATA_LEN (192).
+    __u32 idx = off & (MAX_PATH_LEN - 1);
+    buf->data[idx] = '/';
+    off++;
+
+    // Component copy. Two INDEPENDENT bounds make the access provably in-range:
+    //   didx = off & 127  -> [0,127]     and     nlen <= MAX_COMPONENT_LEN (64)
+    //   didx + nlen <= 127 + 64 = 191 < RECON_DATA_LEN (192).
+    if (nlen > MAX_COMPONENT_LEN)
+        nlen = MAX_COMPONENT_LEN;
+    __u32 didx = off & (MAX_PATH_LEN - 1);
+    if (nlen > 0)
+        bpf_probe_read_kernel(&buf->data[didx], nlen, nm);
+    off += nlen;
+
+    if (off > MAX_PATH_LEN - 1)              // cap LOGICAL length (tail is slack)
+        off = MAX_PATH_LEN - 1;
     ctx->off = off;
     return 0;
 }
