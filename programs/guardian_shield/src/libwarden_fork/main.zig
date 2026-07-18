@@ -38,6 +38,15 @@
 
 const std = @import("std");
 
+// LD_PRELOAD constraint: keep the TLS segment near-zero. Zig std's default
+// 256 KiB threadlocal signal stack (`Thread.maybeAttachSignalStack`) lands in
+// glibc's static TLS block, which is deducted from every host thread's stack —
+// making pthread_create fail with EINVAL for threads with small explicit stack
+// sizes (node/V8). See src/libwarden/main.zig for the full analysis.
+pub const std_options: std.Options = .{
+    .signal_stack_size = null,
+};
+
 const c = @cImport({
     @cInclude("dlfcn.h");
     @cInclude("unistd.h");

@@ -70,6 +70,8 @@ pub fn build(b: *std.Build) void {
     // Add system library and include paths for libbpf
     sentinel.root_module.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
     sentinel.root_module.addIncludePath(.{ .cwd_relative = "/usr/include" });
+    // WORKAROUND: Disable _FORTIFY_SOURCE (same issue as libwarden)
+    sentinel.root_module.addCMacro("_FORTIFY_SOURCE", "0");
     b.installArtifact(sentinel);
 
     // NOTE: the `test-inquisitor` and `test-oracle-advanced` eBPF LSM BPF harness
@@ -90,6 +92,9 @@ pub fn build(b: *std.Build) void {
         .root_module = hardware_detector_module,
     });
     hardware_detector_exe.root_module.link_libc = true;
+    // WORKAROUND: Disable _FORTIFY_SOURCE (same translate-c issue as libwarden;
+    // only bit under ReleaseSafe/ReleaseFast, where Zig injects -D_FORTIFY_SOURCE=2)
+    hardware_detector_exe.root_module.addCMacro("_FORTIFY_SOURCE", "0");
     b.installArtifact(hardware_detector_exe);
 
     // adaptive-pattern-loader - Load patterns based on hardware capabilities
@@ -103,6 +108,8 @@ pub fn build(b: *std.Build) void {
         .root_module = adaptive_loader_module,
     });
     adaptive_loader_exe.root_module.link_libc = true;
+    // WORKAROUND: Disable _FORTIFY_SOURCE (same issue as libwarden)
+    adaptive_loader_exe.root_module.addCMacro("_FORTIFY_SOURCE", "0");
     b.installArtifact(adaptive_loader_exe);
 
     // ============================================================
@@ -120,6 +127,8 @@ pub fn build(b: *std.Build) void {
         .root_module = wardenctl_module,
     });
     wardenctl.root_module.link_libc = true;
+    // WORKAROUND: Disable _FORTIFY_SOURCE (same issue as libwarden)
+    wardenctl.root_module.addCMacro("_FORTIFY_SOURCE", "0");
     b.installArtifact(wardenctl);
 
     // ============================================================
@@ -163,6 +172,10 @@ pub fn build(b: *std.Build) void {
         .root_module = warden_example_module,
     });
     warden_example.root_module.link_libc = true;
+    // WORKAROUND: Disable _FORTIFY_SOURCE (same issue as libwarden; the warden
+    // module it imports @cImports fortified glibc headers)
+    warden_example.root_module.addCMacro("_FORTIFY_SOURCE", "0");
+    warden_embed_module.addCMacro("_FORTIFY_SOURCE", "0");
     b.installArtifact(warden_example);
 
     // Install the warden module source for external projects to import

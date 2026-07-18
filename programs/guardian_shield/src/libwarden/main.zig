@@ -82,6 +82,20 @@
 const std = @import("std");
 const config_mod = @import("config.zig");
 
+// LD_PRELOAD constraint: this library's TLS is placed in glibc's static TLS
+// block, which glibc carves out of EVERY host thread's stack allocation.
+// Zig std defaults `signal_stack_size` to 256 KiB — `Thread.maybeAttachSignalStack`
+// instantiates a `threadlocal [256 KiB]u8` signal stack that gets pulled in
+// transitively via std.Io.Threaded. With that in static TLS, any host thread
+// created with a small explicit stack size (node/V8 worker & platform threads)
+// fails pthread_create with EINVAL — this broke `npm install` postinstall steps
+// (claude-code native binary) in every process running under the shield.
+// A preload shim must not reserve per-thread signal stacks; disabling this
+// shrinks the TLS segment from 0x4001d to ~0x1d bytes.
+pub const std_options: std.Options = .{
+    .signal_stack_size = null,
+};
+
 const c = @cImport({
     @cInclude("dlfcn.h");
     @cInclude("fcntl.h");
