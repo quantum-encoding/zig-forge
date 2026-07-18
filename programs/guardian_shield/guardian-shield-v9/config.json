@@ -74,10 +74,14 @@
     "/root/.ssh"
   ],
 
+  "_egress_comment": "EXFIL BLOCK (supply-chain, always-on for tainted/agent subtrees). A TAINTED build-tool subtree (or AGENT) may only connect() to allowlisted destinations; a connect to any other public IP (a webhook.site / attacker C2) is logged (EV_TAINTED_CONNECT) and, if enforce_egress, denied with -EPERM BEFORE the connect completes. The loader ALWAYS seeds loopback + RFC1918 private + link-local + CGNAT, so LAN/localhost/registry-mirror-on-LAN work; egress_allow adds operator public CIDRs. TRADEOFF (honest): with enforce_egress=true and only the private defaults, a tainted `npm install` reaching a PUBLIC registry (registry.npmjs.org, pypi.org, crates.io, github.com) is DENIED unless you allowlist that registry's CIDRs here. This is the cost of egress-jailing build tools; set enforce_egress=false to log-only (detect) first, or add the registry CIDRs. IPv4 only in the trie; IPv6 loopback/link-local/ULA are allowed inline, global IPv6 is treated as public (no operator IPv6 allowlist in v1).",
+  "egress_allow": [],
+
   "enforce_fs": true,
   "enforce_mem": true,
   "enforce_priv": false,
   "enforce_cred_read": true,
+  "enforce_egress": true,
   "log_only": false,
   "pin_dir": "/sys/fs/bpf/guardian_shield",
   "log_file": "/var/log/guardian_shield.jsonl"
