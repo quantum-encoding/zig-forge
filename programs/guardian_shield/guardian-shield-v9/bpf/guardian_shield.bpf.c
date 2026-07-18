@@ -253,9 +253,16 @@ struct {
 // that holds the dentry pointer stack + the assembled path bytes (all the
 // variable-offset, masked writes target this map value).
 
+// data[] is OVER-SIZED by one max component so a masked write at index <=127 of
+// up to MAX_COMPONENT_LEN bytes (127 + 64 = 191) is provably in-bounds from two
+// INDEPENDENT bounds (masked index <=127, clamped length <=64) without the
+// verifier needing to prove index+len <= logical length. Logical path length is
+// still capped at MAX_PATH_LEN-1 for matching; the tail is slack.
+#define RECON_DATA_LEN (MAX_PATH_LEN + MAX_COMPONENT_LEN)
+
 struct recon_buf {
     __u64 dstack[MAX_DENTRY_DEPTH];   // collected dentry pointers (leaf..root)
-    __u8  data[MAX_PATH_LEN];         // assembled absolute path
+    __u8  data[RECON_DATA_LEN];       // assembled absolute path (+slack tail)
 };
 
 struct {
