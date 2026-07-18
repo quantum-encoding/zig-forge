@@ -767,8 +767,28 @@ int BPF_PROG(gs_exec, struct task_struct *p, pid_t old_pid, struct linux_binprm 
             bpf_probe_read_kernel_str(ee->filename, sizeof(ee->filename), filename);
             bpf_ringbuf_submit(ee, 0);
         }
+        return 0;
     }
-    // else: inherited tag (if any) stays in place -> subtree remains tagged.
+
+    // 4) Build-tool taint. Tagging the launcher (npm/pip/cargo/...) taints the
+    // whole install subtree: TAG_TAINTED is inherited on fork and sticky across
+    // exec, so the postinstall's `node bundle.js` and anything it spawns (curl,
+    // trufflehog) stay tainted. TRUSTED/EXEMPT already returned above; do not
+    // override an inherited AGENT tag.
+    __u8 *is_build = bpf_map_lookup_elem(&build_exe_names, base);
+    if (is_build) {
+        struct proc_tag *cur = bpf_map_lookup_elem(&agent_pids, &tgid);
+        if (!cur || cur->tag != TAG_AGENT) {
+            struct proc_tag t = {};
+            t.tag = TAG_TAINTED;
+            t.root_tgid = tgid;
+            t.since_ns = bpf_ktime_get_ns();
+            bpf_map_update_elem(&agent_pids, &tgid, &t, BPF_ANY);
+        }
+        return 0;
+    }
+    // else: inherited tag (if any) stays in place -> tainted/agent subtree
+    // persists across this exec.
     return 0;
 }
 
