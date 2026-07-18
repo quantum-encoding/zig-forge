@@ -683,5 +683,10 @@ fn loadConfig(path: []const u8) !std.json.Parsed(RawConfig) {
         if (n == 0) break;
         total += @intCast(n);
     }
-    return std.json.parseFromSlice(RawConfig, g_alloc, content[0..total], .{ .ignore_unknown_fields = true });
+    // alloc_always: copy every string into the Parsed arena so it stays valid
+    // after `content` is freed (default alloc_if_needed references the input).
+    return std.json.parseFromSlice(RawConfig, g_alloc, content[0..total], .{
+        .ignore_unknown_fields = true,
+        .allocate = .alloc_always,
+    });
 }
