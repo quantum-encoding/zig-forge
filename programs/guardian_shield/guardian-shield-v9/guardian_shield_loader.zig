@@ -475,7 +475,7 @@ const Loader = struct {
                 return error.PinPathTooLong;
             };
             // Remove a stale pin from a previous run, then pin fresh.
-            std.posix.unlink(pin_path) catch {};
+            _ = c.unlink(pin_path.ptr);
             const prc = c.bpf_link__pin(link.?, pin_path.ptr);
             if (prc != 0) {
                 std.log.err("bpf_link__pin failed for '{s}' rc={d} - tearing down.", .{ name, prc });
