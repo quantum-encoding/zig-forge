@@ -36,6 +36,178 @@ const TUI =
     "\u{2570}" ++ "\u{2500}" ** 20 ++ "\u{2570}\r\n" ++
     "\x1b[0m\u{23F5} auto-accept on   \u{26A0} 3 files\r\n";
 
+test "REAL composer replay: typed text must land unmangled in the grid" {
+    // fixtures/claude_composer_typed.bin = a pty capture of claude 2.1.214
+    // booting at 120x40 and receiving the keystrokes "hey claude hows it
+    // going" (one per 30ms). The live app rendered this as
+    // "claudelhows itdgoing" — stale cells from earlier per-key redraws
+    // surviving later frames. The Metal renderer repaints the WHOLE grid
+    // every frame, so any stale text must exist IN the emulator grid; this
+    // replay pins which half owns the defect.
+    const cap = @embedFile("composer_fixture");
+    const rect = session.Rect{ .x = 0, .y = 0, .width = 120, .height = 40 };
+    const sess = try session.Session.init(std.testing.allocator, "composer", rect, 200);
+    defer sess.deinit();
+    feedFixture(sess, cap);
+
+    const grid = &sess.getActiveWindow().getActivePane().terminal.grid;
+    // Find the row containing "hey" and reconstruct its text.
+    var found: bool = false;
+    var r: u16 = 0;
+    while (r < grid.rows) : (r += 1) {
+        var buf: [200]u8 = undefined;
+        var len: usize = 0;
+        var c: u16 = 0;
+        while (c < grid.cols and len < buf.len - 4) : (c += 1) {
+            const ch = grid.getCellConst(r, c).char;
+            if (ch == 0) { buf[len] = ' '; len += 1; }
+            else if (ch < 128) { buf[len] = @intCast(ch); len += 1; }
+            else { buf[len] = '#'; len += 1; }
+        }
+        const line = std.mem.trimEnd(u8, buf[0..len], " ");
+        if (std.mem.indexOf(u8, line, "hey") != null) {
+            found = true;
+            std.debug.print("\ncomposer row {d}: [{s}]\n", .{ r, line });
+            // The typed words must appear IN ORDER with clean boundaries —
+            // no stale-cell merges like "claudelhows".
+            try std.testing.expect(std.mem.indexOf(u8, line, "hey claude hows it going") != null);
+        }
+    }
+    try std.testing.expect(found);
+}
+
+test "REAL composer replay WITH mid-stream resizes: no stale-cell mangling" {
+    // Same capture protocol, but with the app's real lifecycle: spawn at
+    // 120 cols, resize to 104 at byte 5620, type, resize back to 120 at byte
+    // 10717 (offsets logged by the pty driver). Claude re-renders after each
+    // SIGWINCH assuming ITS reflow model; if our resize leaves stale cells,
+    // the mangled-echo defect ("claudelhows") reproduces here.
+    const cap = @embedFile("composer_resize_fixture");
+    const rect = session.Rect{ .x = 0, .y = 0, .width = 120, .height = 40 };
+    const sess = try session.Session.init(std.testing.allocator, "composer-rs", rect, 200);
+    defer sess.deinit();
+
+    feedFixture(sess, cap[0..5620]);
+    try sess.resize(.{ .x = 0, .y = 0, .width = 104, .height = 40 });
+    feedFixture(sess, cap[5620..10717]);
+    try sess.resize(.{ .x = 0, .y = 0, .width = 120, .height = 40 });
+    feedFixture(sess, cap[10717..]);
+
+    const grid = &sess.getActiveWindow().getActivePane().terminal.grid;
+    var found = false;
+    var r: u16 = 0;
+    while (r < grid.rows) : (r += 1) {
+        var buf: [240]u8 = undefined;
+        var len: usize = 0;
+        var c: u16 = 0;
+        while (c < grid.cols and len < buf.len - 4) : (c += 1) {
+            const ch = grid.getCellConst(r, c).char;
+            if (ch == 0) { buf[len] = ' '; len += 1; }
+            else if (ch < 128) { buf[len] = @intCast(ch); len += 1; }
+            else { buf[len] = '#'; len += 1; }
+        }
+        const line = std.mem.trimEnd(u8, buf[0..len], " ");
+        if (std.mem.indexOf(u8, line, "hey") != null) {
+            found = true;
+            std.debug.print("\nresized composer row {d}: [{s}]\n", .{ r, line });
+            try std.testing.expect(std.mem.indexOf(u8, line, "hey claude hows it going") != null);
+            // WIDTH audit — the Swift renderer BLANKS the cell after any
+            // width-2 cell (wide-glyph continuation collapse). A spurious
+            // width-2 on an ASCII cell makes the renderer EAT the next letter
+            // ("claudelhows"-style mangling) even though the chars are right.
+            var c2: u16 = 0;
+            while (c2 < grid.cols) : (c2 += 1) {
+                const cell = grid.getCellConst(r, c2);
+                if (cell.char >= 0x20 and cell.char < 0x7F and cell.width != 1) {
+                    std.debug.print("ASCII cell width!=1 at col {d}: ch='{c}' width={d}\n",
+                        .{ c2, @as(u8, @intCast(cell.char)), cell.width });
+                    try std.testing.expect(false);
+                }
+            }
+        }
+    }
+    try std.testing.expect(found);
+}
+
+test "REAL submit cycle: transcript echo renders unmangled (scroll-region path)" {
+    // The mangled-echo screenshots show the TRANSCRIPT copy of the submitted
+    // message — rendered through claude's scroll-region machinery (DECSTBM +
+    // scroll ops) that the type-only fixtures never exercise. This capture
+    // includes typing + Enter + the model's response ("Crunched for 3s").
+    const cap = @embedFile("composer_submit_fixture");
+    const rect = session.Rect{ .x = 0, .y = 0, .width = 120, .height = 40 };
+    const sess = try session.Session.init(std.testing.allocator, "submit", rect, 200);
+    defer sess.deinit();
+    feedFixture(sess, cap);
+
+    const grid = &sess.getActiveWindow().getActivePane().terminal.grid;
+    var r: u16 = 0;
+    var sawEcho = false;
+    while (r < grid.rows) : (r += 1) {
+        var buf: [240]u8 = undefined;
+        var len: usize = 0;
+        var c: u16 = 0;
+        while (c < grid.cols and len < buf.len - 4) : (c += 1) {
+            const ch = grid.getCellConst(r, c).char;
+            if (ch == 0) { buf[len] = ' '; len += 1; }
+            else if (ch < 128) { buf[len] = @intCast(ch); len += 1; }
+            else { buf[len] = '#'; len += 1; }
+        }
+        const line = std.mem.trimEnd(u8, buf[0..len], " ");
+        if (std.mem.indexOf(u8, line, "hey") != null) {
+            std.debug.print("\nsubmit-cycle row {d}: [{s}]\n", .{ r, line });
+            // Words must have clean boundaries — the live defect merged them.
+            try std.testing.expect(std.mem.indexOf(u8, line, "hey claude hows it going") != null);
+            sawEcho = true;
+        }
+    }
+    try std.testing.expect(sawEcho);
+}
+
+test "chunked feed == single feed: split escape sequences must not change the grid" {
+    // The live app drains the PTY in arbitrary-sized chunks, so escape
+    // sequences split at read boundaries constantly — a replay that feeds one
+    // big buffer can NEVER see a split-sequence bug. Feed the real composer
+    // capture twice: whole, and in adversarial small chunks (1..7 bytes,
+    // deterministic pattern); the final grids must be identical.
+    const cap = @embedFile("composer_fixture");
+    const rect = session.Rect{ .x = 0, .y = 0, .width = 120, .height = 40 };
+
+    const a = try session.Session.init(std.testing.allocator, "whole", rect, 200);
+    defer a.deinit();
+    feedFixture(a, cap);
+
+    const b = try session.Session.init(std.testing.allocator, "chunks", rect, 200);
+    defer b.deinit();
+    var i: usize = 0;
+    var step: usize = 1;
+    while (i < cap.len) {
+        const n = @min(step, cap.len - i);
+        feedFixture(b, cap[i .. i + n]);
+        i += n;
+        step = (step % 7) + 1;   // 1,2,3,4,5,6,7,1,2,…
+    }
+
+    const ga = &a.getActiveWindow().getActivePane().terminal.grid;
+    const gb = &b.getActiveWindow().getActivePane().terminal.grid;
+    var r: u16 = 0;
+    var diffs: usize = 0;
+    while (r < ga.rows) : (r += 1) {
+        var c: u16 = 0;
+        while (c < ga.cols) : (c += 1) {
+            const ca = ga.getCellConst(r, c);
+            const cb = gb.getCellConst(r, c);
+            if (ca.char != cb.char or @as(u8, @bitCast(ca.attrs)) != @as(u8, @bitCast(cb.attrs))) {
+                if (diffs < 8)
+                    std.debug.print("chunk-split diff at {d},{d}: whole ch={d} vs chunked ch={d}\n",
+                        .{ r, c, ca.char, cb.char });
+                diffs += 1;
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), diffs);
+}
+
 test "XTMODKEYS (CSI > 4;2 m) must NOT set SGR underline — claude's boot handshake" {
     const rect = session.Rect{ .x = 0, .y = 0, .width = 80, .height = 24 };
     const sess = try session.Session.init(std.testing.allocator, "xtmod", rect, 200);

@@ -129,6 +129,17 @@ pub fn build(b: *std.Build) void {
     lib_tests.root_module.addAnonymousImport("graphics_fixture", .{
         .root_source_file = b.path("tests/fixtures/graphics_kitty_rgba.bin"),
     });
+    // Real pty-captured claude composer session (typing into the input box) —
+    // the stale-cell/mangled-echo replay anchor embeds it the same way.
+    lib_tests.root_module.addAnonymousImport("composer_fixture", .{
+        .root_source_file = b.path("tests/fixtures/claude_composer_typed.bin"),
+    });
+    lib_tests.root_module.addAnonymousImport("composer_resize_fixture", .{
+        .root_source_file = b.path("tests/fixtures/claude_composer_resize.bin"),
+    });
+    lib_tests.root_module.addAnonymousImport("composer_submit_fixture", .{
+        .root_source_file = b.path("tests/fixtures/claude_composer_submit.bin"),
+    });
     const run_lib_tests = b.addRunArtifact(lib_tests);
 
     const capi_tests = b.addTest(.{
