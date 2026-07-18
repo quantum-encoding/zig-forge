@@ -404,51 +404,23 @@ const Loader = struct {
     }
 
     fn populateMaps(self: *Loader) !void {
-        // --- protected_paths (LPM trie) ---
-        // In hardening mode the trie protects the CRITICAL set (shield state +
-        // credentials) against everyone-but-trusted; otherwise the agent-mode
-        // protected_paths against agents.
-        const pp_fd = try self.mapFd("protected_paths");
+        // --- protected_paths (LPM trie). In hardening mode the trie protects
+        // the CRITICAL set against everyone-but-trusted; otherwise the agent-mode
+        // protected_paths against agents. ---
         const path_src = if (self.cfg.hardening_mode) self.cfg.critical_paths else self.cfg.protected_paths;
-        var n_paths: usize = 0;
-        for (path_src) |raw| {
-            // Normalize: strip a single trailing '/' (except root). The kernel
-            // boundary check requires prefixes stored WITHOUT trailing slash.
-            var p = raw;
-            if (p.len > 1 and p[p.len - 1] == '/') p = p[0 .. p.len - 1];
-            if (p.len == 0 or p.len >= MAX_PATH_LEN) {
-                std.log.warn("skipping invalid protected_path '{s}'", .{raw});
-                continue;
-            }
-            var key = std.mem.zeroes(PathLpmKey);
-            key.prefixlen = @intCast(p.len * 8);
-            @memcpy(key.data[0..p.len], p);
-            var val = PathRule{ .prefix_len = @intCast(p.len), .action = 1, ._pad = .{ 0, 0, 0 } };
-            const rc = c.bpf_map_update_elem(pp_fd, &key, &val, c.BPF_ANY);
-            if (rc != 0) {
-                std.log.err("failed to insert protected_path '{s}' rc={d}", .{ p, rc });
-                return error.MapUpdateFailed;
-            }
-            n_paths += 1;
-        }
+        const n_paths = try self.populateLpm("protected_paths", path_src);
 
-        // --- agent_exe_names (basename -> 1) ---
-        const ae_fd = try self.mapFd("agent_exe_names");
-        for (self.cfg.agent_exes) |name| {
-            if (name.len >= MAX_EXE_NAME) {
-                std.log.warn("agent_exe '{s}' too long, skipping", .{name});
-                continue;
-            }
-            var key = std.mem.zeroes([MAX_EXE_NAME]u8);
-            @memcpy(key[0..name.len], name);
-            var one: u8 = 1;
-            _ = c.bpf_map_update_elem(ae_fd, &key, &one, c.BPF_ANY);
-        }
+        // --- credential_paths (LPM trie). The crown-jewel AssetMap; read-denied
+        // for TAINTED/AGENT subtrees regardless of posture. ---
+        const n_creds = try self.populateLpm("credential_paths", self.cfg.credential_paths);
 
-        // --- exempt_exes (full path -> 1) ---
+        // --- basename classifiers ---
+        try self.populateBasenameMap("agent_exe_names", self.cfg.agent_exes);
+        try self.populateBasenameMap("build_exe_names", self.cfg.build_exes);
+
+        // --- full-path allowlists ---
         try self.populateExeMap("exempt_exes", self.cfg.exempt_exes);
-        // --- trusted_exes (full path -> 1). MUST include the loader itself. ---
-        try self.populateExeMap("trusted_exes", self.cfg.trusted_exes);
+        try self.populateExeMap("trusted_exes", self.cfg.trusted_exes); // MUST include the loader
         // --- trusted_inodes ({ino,dev}). Trust the loader by exe identity so a
         // relative-path --unpin still matches (path-string match would fail). ---
         try self.populateTrustedInodes();
@@ -460,14 +432,55 @@ const Loader = struct {
         if (c.bpf_map_update_elem(cfg_fd, &k0, &gc, c.BPF_ANY) != 0)
             return error.MapUpdateFailed;
 
-        std.log.info("policy loaded: {d} {s} paths, {d} agent exes, {d} exempt, {d} trusted (hardening={}).", .{
+        std.log.info("policy loaded: {d} {s} paths, {d} credential paths, {d} agent exes, {d} build exes, {d} trusted (hardening={}, cred_read={}).", .{
             n_paths,
             if (self.cfg.hardening_mode) "critical" else "protected",
+            n_creds,
             self.cfg.agent_exes.len,
-            self.cfg.exempt_exes.len,
+            self.cfg.build_exes.len,
             self.cfg.trusted_exes.len,
             self.cfg.hardening_mode,
+            self.cfg.enforce_cred_read,
         });
+    }
+
+    // Insert a list of path prefixes into an LPM trie map (trailing '/' stripped;
+    // stored WITHOUT it, as the kernel boundary check requires). Returns count.
+    fn populateLpm(self: *Loader, map_name: [:0]const u8, list: []const []const u8) !usize {
+        const fd = try self.mapFd(map_name);
+        var n: usize = 0;
+        for (list) |raw| {
+            var p = raw;
+            if (p.len > 1 and p[p.len - 1] == '/') p = p[0 .. p.len - 1];
+            if (p.len == 0 or p.len >= MAX_PATH_LEN) {
+                std.log.warn("skipping invalid {s} entry '{s}'", .{ map_name, raw });
+                continue;
+            }
+            var key = std.mem.zeroes(PathLpmKey);
+            key.prefixlen = @intCast(p.len * 8);
+            @memcpy(key.data[0..p.len], p);
+            var val = PathRule{ .prefix_len = @intCast(p.len), .action = 1, ._pad = .{ 0, 0, 0 } };
+            if (c.bpf_map_update_elem(fd, &key, &val, c.BPF_ANY) != 0) {
+                std.log.err("failed to insert {s} '{s}'", .{ map_name, p });
+                return error.MapUpdateFailed;
+            }
+            n += 1;
+        }
+        return n;
+    }
+
+    fn populateBasenameMap(self: *Loader, map_name: [:0]const u8, list: []const []const u8) !void {
+        const fd = try self.mapFd(map_name);
+        for (list) |name| {
+            if (name.len >= MAX_EXE_NAME) {
+                std.log.warn("{s} entry '{s}' too long, skipping", .{ map_name, name });
+                continue;
+            }
+            var key = std.mem.zeroes([MAX_EXE_NAME]u8);
+            @memcpy(key[0..name.len], name);
+            var one: u8 = 1;
+            _ = c.bpf_map_update_elem(fd, &key, &one, c.BPF_ANY);
+        }
     }
 
     fn populateExeMap(self: *Loader, map_name: [:0]const u8, list: []const []const u8) !void {
