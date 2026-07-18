@@ -554,6 +554,7 @@ const Loader = struct {
             .log_only = @intFromBool(self.cfg.log_only),
             .hardening_mode = @intFromBool(self.cfg.hardening_mode),
             .enforce_cred_read = @intFromBool(self.cfg.enforce_cred_read),
+            .enforce_egress = @intFromBool(self.cfg.enforce_egress),
         };
     }
 
