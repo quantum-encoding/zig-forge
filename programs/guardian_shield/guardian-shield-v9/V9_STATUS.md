@@ -381,6 +381,63 @@ unlink → BLOCKED (EPERM), `modprobe` → BLOCKED (EPERM), `mount` → BLOCKED
 
 ---
 
+## Credential-read protection & build-tool taint (supply-chain defense)
+
+An **additive third capability** (layers on top of both agent-containment and
+hardening; both remain 100% intact). It targets the 2025-26 npm/PyPI
+supply-chain / credential-theft threat (Shai-Hulud, s1ngularity): a malicious
+package's **postinstall** runs as the developer — as a child of `npm`/`pip` —
+then **reads** credential files (`~/.aws`, `~/.ssh`, tokens) and exfiltrates
+them. It is a credential-**read** attack by a build-tool **descendant**, so the
+deny must be scoped to build-tool subtrees — a normal user/process reads its own
+creds constantly and must never be blocked.
+
+### Build-tool taint (`TAG_TAINTED`)
+`gs_exec` tags a process `TAG_TAINTED` when its exe basename is in
+`build_exe_names` (`npm`/`pnpm`/`yarn`/`npx`/`node-gyp`/`pip`/`pip3`/`poetry`/
+`uv`/`cargo`/`gem`/`bundle`/`mvn`/`maven`/`gradle`). The taint is **inherited on
+fork and sticky across exec**, so the postinstall's `node bundle.js` and anything
+it spawns (`curl`, `trufflehog`) stay tainted even though their own basenames
+aren't build tools — tagging the *launcher* taints the whole install subtree.
+Precedence: `TRUSTED`/`EXEMPT` override (a trusted exe is never tainted); an
+inherited `AGENT` tag is not downgraded. (Taint is by the resolved exe's dentry
+leaf, so a shell script named `npm` would leaf as `bash` — the sim uses real
+binaries named `npm`/`yarn`.)
+
+### Credential AssetMap (`credential_paths`) — a separate LPM trie
+The crown jewels: `~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.config/gh`,
+`~/.git-credentials`, `~/.netrc`, `~/.kube`, `~/.docker/config.json`, `~/.claude`,
+`/root/.ssh`. Separate from `protected_paths`/`critical_paths` because it gates
+**reads** (not just writes) and only for tainted/agent subtrees.
+
+### The harvest block (`gs_file_open`, always-on)
+On **any** open — including `O_RDONLY` — of a `credential_paths` path, if the
+caller's tag is `TAG_TAINTED` or `TAG_AGENT`, return `-EPERM` and log
+`EV_CRED_READ`. It uses `bpf_d_path` (canonical path) and runs **independently of
+agent/hardening posture** (`enforce_cred_read`, default on). A trusted / normal /
+untainted process reading its own `~/.ssh` is unaffected — ssh/git/aws keep
+working; only tainted build-tool subtrees are denied the crown jewels.
+
+### Tiering rationale (documented, deliberate)
+The crown-jewel deny set **excludes** build-tool self-secrets (`~/.npmrc`,
+`~/.pypirc`, `~/.cargo/credentials`) for v1: tools legitimately read those during
+install, and **no build tool legitimately reads your AWS/SSH keys during
+`npm install`** — so denying tainted reads of the crown jewels is high-value and
+low-false-positive. A later version can add Metatron-style `isBuildToolSecret`
+handling to also guard the self-secrets against non-owning tools.
+
+### Proof: `tests/supplychain_sim.sh` (VM-only, `GS_VM_TEST=1`)
+Two-phase (`--setup` seeds throwaway `~/.aws`/`~/.ssh`/gh/git-creds + a benign
+`~/.npmrc`; `--attack` after load). Compiles an inline `cred_reader` (opens+reads
+one path) and a `launcher` (fork+exec, to prove inheritance), then runs three
+ways and asserts: **NORMAL** (untainted) reader → crown jewels **ALLOWED** (no
+false positive); **TAINTED** (exe named `npm`) reader → crown jewels **DENIED**;
+**TAINTED-INHERITED** (`yarn` forks+execs `harvester`) → crown jewels **DENIED**
+(sticky-taint proof); tainted read of `~/.npmrc` → **ALLOWED** (tiering). This is
+the endpoint block that breaks the harvest step.
+
+---
+
 ## Deploy / pin / unload
 
 ```bash
