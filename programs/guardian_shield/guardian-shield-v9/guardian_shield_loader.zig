@@ -271,11 +271,21 @@ fn lsmHasBpf(lsm: []const u8) bool {
     return false;
 }
 
+// Read a whole small (proc/sys) file into `buf` via libc; return trimmed slice.
 fn readSmall(path: []const u8, buf: []u8) ![]const u8 {
-    const f = try std.fs.openFileAbsolute(path, .{});
-    defer f.close();
-    const n = try f.readAll(buf);
-    return std.mem.trim(u8, buf[0..n], " \n\r\t");
+    var zbuf: [MAX_PATH_BYTES]u8 = undefined;
+    const zpath = try std.fmt.bufPrintZ(&zbuf, "{s}", .{path});
+    const fd = c.open(zpath.ptr, c.O_RDONLY);
+    if (fd < 0) return error.OpenFailed;
+    defer _ = c.close(fd);
+    var total: usize = 0;
+    while (total < buf.len) {
+        const n = c.read(fd, buf.ptr + total, buf.len - total);
+        if (n < 0) return error.ReadFailed;
+        if (n == 0) break;
+        total += @intCast(n);
+    }
+    return std.mem.trim(u8, buf[0..total], " \n\r\t");
 }
 
 // ===================================================================
