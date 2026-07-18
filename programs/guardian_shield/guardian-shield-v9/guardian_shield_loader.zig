@@ -24,6 +24,7 @@ const c = @cImport({
     @cInclude("unistd.h");
     @cInclude("fcntl.h");
     @cInclude("sys/stat.h");
+    @cInclude("sys/sysmacros.h");
     @cInclude("dirent.h");
     @cInclude("errno.h");
 });
@@ -65,7 +66,16 @@ const ProcTag = extern struct {
     since_ns: u64,
 };
 
+// Mirrors struct exe_id (trusted_inodes key). Kernel s_dev is MKDEV(maj,min) =
+// (maj << 20) | min (MINORBITS=20).
+const ExeId = extern struct {
+    ino: u64,
+    dev: u32,
+    _pad: u32 = 0,
+};
+
 const TAG_TRUSTED: u8 = 3;
+const MINORBITS: u5 = 20;
 
 const ViolationEvent = extern struct {
     timestamp: u64,
@@ -435,6 +445,9 @@ const Loader = struct {
         try self.populateExeMap("exempt_exes", self.cfg.exempt_exes);
         // --- trusted_exes (full path -> 1). MUST include the loader itself. ---
         try self.populateExeMap("trusted_exes", self.cfg.trusted_exes);
+        // --- trusted_inodes ({ino,dev}). Trust the loader by exe identity so a
+        // relative-path --unpin still matches (path-string match would fail). ---
+        try self.populateTrustedInodes();
 
         // --- runtime_cfg (flags set, ready=0 until attach completes) ---
         const cfg_fd = try self.mapFd("runtime_cfg");
@@ -465,6 +478,19 @@ const Loader = struct {
             var one: u8 = 1;
             _ = c.bpf_map_update_elem(fd, &key, &one, c.BPF_ANY);
         }
+    }
+
+    fn populateTrustedInodes(self: *Loader) !void {
+        const fd = try self.mapFd("trusted_inodes");
+        // Every configured trusted exe...
+        var buf: [MAX_PATH_BYTES]u8 = undefined;
+        for (self.cfg.trusted_exes) |p| {
+            const zp = std.fmt.bufPrintZ(&buf, "{s}", .{p}) catch continue;
+            insertInode(fd, zp);
+        }
+        // ...AND the loader's own binary (canonical), so it trusts itself no
+        // matter what the config says or how it was invoked.
+        insertInode(fd, "/proc/self/exe");
     }
 
     fn buildConfig(self: *Loader, ready: u8) GsConfig {
@@ -535,6 +561,17 @@ const Loader = struct {
             std.log.err("no programs attached - refusing to run.", .{});
             return error.NoPrograms;
         }
+
+        // All links pinned. Drop the loader's own link fds so the PINS are the
+        // sole owners. LSM links cannot be force-detached (no LINK_DETACH), so
+        // the only way to remove one is to release every reference; making the
+        // pins the sole reference means `--unpin` (which removes the pins) fully
+        // detaches all hooks even while a logger instance is still running.
+        // The bpf_object stays open (its maps back the ring buffers).
+        const dropped = self.links.items.len;
+        for (self.links.items) |l| _ = c.bpf_link__destroy(l);
+        self.links.clearRetainingCapacity();
+        std.log.info("released {d} loader-held link fds; pins are the sole owners (--unpin fully detaches).", .{dropped});
     }
 
     // Destroy + unpin all links (fail-closed path only).
@@ -578,6 +615,24 @@ const Loader = struct {
 // Pin helpers / teardown
 // ===================================================================
 
+// Stat `path` and insert its {ino, dev} identity into the trusted_inodes map
+// (dev re-encoded to the kernel's MKDEV form so it matches inode->i_sb->s_dev).
+fn insertInode(fd: c_int, path: [:0]const u8) void {
+    var st: c.struct_stat = undefined;
+    if (c.stat(path.ptr, &st) != 0) {
+        std.log.warn("cannot stat trusted exe '{s}' for inode-trust", .{path});
+        return;
+    }
+    const maj: u32 = @intCast(c.gnu_dev_major(st.st_dev));
+    const min: u32 = @intCast(c.gnu_dev_minor(st.st_dev));
+    var id = ExeId{
+        .ino = @intCast(st.st_ino),
+        .dev = (maj << MINORBITS) | (min & ((@as(u32, 1) << MINORBITS) - 1)),
+    };
+    var one: u8 = 1;
+    _ = c.bpf_map_update_elem(fd, &id, &one, c.BPF_ANY);
+}
+
 fn makePinDir(dir: []const u8) !void {
     var zbuf: [MAX_PATH_BYTES]u8 = undefined;
     const zdir = try std.fmt.bufPrintZ(&zbuf, "{s}", .{dir});
@@ -590,24 +645,53 @@ fn makePinDir(dir: []const u8) !void {
 fn teardown(pin_dir: []const u8) !void {
     var zbuf: [MAX_PATH_BYTES]u8 = undefined;
     const zdir = try std.fmt.bufPrintZ(&zbuf, "{s}", .{pin_dir});
+
+    // Collect pin names first (do not mutate the dir mid-iteration).
+    var names: std.ArrayListUnmanaged([]u8) = .empty;
+    defer {
+        for (names.items) |n| g_alloc.free(n);
+        names.deinit(g_alloc);
+    }
     const dp = c.opendir(zdir.ptr);
     if (dp == null) {
         std.log.info("pin dir '{s}' not present; nothing to unpin.", .{pin_dir});
         return;
     }
-    var removed: usize = 0;
     while (true) {
         const ent = c.readdir(dp);
         if (ent == null) break;
         const name = std.mem.span(@as([*:0]const u8, @ptrCast(&ent.*.d_name)));
         if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
-        var fbuf: [MAX_PATH_BYTES]u8 = undefined;
-        const fp = std.fmt.bufPrintZ(&fbuf, "{s}/{s}", .{ pin_dir, name }) catch continue;
-        // Removing the pin file drops the LSM link's last reference -> detach.
-        if (c.unlink(fp.ptr) == 0) removed += 1;
+        const dup = g_alloc.dupe(u8, name) catch continue;
+        names.append(g_alloc, dup) catch {
+            g_alloc.free(dup);
+        };
     }
     _ = c.closedir(dp);
-    std.log.info("removed {d} pinned links from {s}.", .{ removed, pin_dir });
+
+    // LSM/tracing links have NO LINK_DETACH op (kernel: bpf_tracing_link has
+    // _release/_dealloc but no _detach), so the ONLY way to detach is to drive
+    // the link refcount to 0. Re-open each pinned link (fresh fd we control,
+    // ref++), then unpin (drop the bpffs pin ref) and destroy our fd LAST -
+    // this forces the final deref through a reference we own rather than relying
+    // on bpffs inode-eviction timing after a bare unlink(). Requires this
+    // process to be TAG_TRUSTED (bpf_link__open is a bpf() call) - it is, via
+    // trusted_inodes inode-trust, regardless of relative/absolute invocation.
+    var detached: usize = 0;
+    for (names.items) |name| {
+        var fbuf: [MAX_PATH_BYTES]u8 = undefined;
+        const fp = std.fmt.bufPrintZ(&fbuf, "{s}/{s}", .{ pin_dir, name }) catch continue;
+        const link = c.bpf_link__open(fp.ptr);
+        if (link != null and c.libbpf_get_error(link) == 0) {
+            _ = c.bpf_link__detach(link); // no-op (-EOPNOTSUPP) for LSM; harmless
+            _ = c.bpf_link__unpin(link); // unlink the bpffs pin
+            _ = c.bpf_link__destroy(link); // close our fd -> last ref -> release
+            detached += 1;
+        } else {
+            if (c.unlink(fp.ptr) == 0) detached += 1; // fallback
+        }
+    }
+    std.log.info("detached {d} pinned links from {s} (refcount-to-zero teardown).", .{ detached, pin_dir });
     _ = c.rmdir(zdir.ptr);
 }
 
@@ -626,6 +710,7 @@ fn eventName(t: u8) []const u8 {
         7 => "mkdir",
         8 => "rmdir",
         9 => "open_write",
+        10 => "create",
         20 => "ptrace",
         21 => "dev_mem",
         22 => "module_load",

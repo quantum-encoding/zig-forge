@@ -53,6 +53,12 @@ V_SHIELD="$SHIELD_DIR/gs_probe_victim"
 V_SUDOERS="/etc/sudoers.d/gs_probe_victim"
 V_BOOT="/boot/gs_probe_victim"
 
+# NEW-FILE injection targets - these must NOT exist (the create test drops them
+# fresh). --setup only ensures any stale ones are removed.
+C_SSH="$SSH_DIR/gs_created"
+C_CLAUDE="$CLAUDE_DIR/gs_created"
+C_SUDOERS="/etc/sudoers.d/gs_created"
+
 # ------------------------------------------------------------------
 # --setup: seed the victim files. Run BEFORE the shield loads (or after
 # --unpin), as root. Idempotent - stale victims are cleaned first.
@@ -74,6 +80,9 @@ if [[ "$MODE" == setup ]]; then
   seed_one "$V_SHIELD"  "guardian-shield probe victim"
   seed_one "$V_SUDOERS" "# guardian-shield probe victim (valid sudoers.d comment)"
   seed_one "$V_BOOT"    "guardian-shield probe victim"
+  # New-file injection targets must NOT exist for the create test.
+  for cf in "$C_SSH" "$C_CLAUDE" "$C_SUDOERS"; do sudo rm -f "$cf" 2>/dev/null || true; done
+  echo "  cleared new-file injection targets (create test drops them fresh)"
   echo "setup complete. Now load the shield in hardening mode, then run --attack."
   exit 0
 fi
@@ -87,8 +96,10 @@ trap cleanup EXIT
 CC="${CC:-cc}"
 
 cat > "$WORK/fs_probe.c" <<'EOF'
-// fs_probe <unlink-glibc|unlink-syscall|overwrite> <path>
+// fs_probe <unlink-glibc|unlink-syscall|overwrite|create> <path>
 // exit: 10 = blocked (EPERM/EACCES), 0 = op succeeded, 11 = other errno.
+// `create` injects a NEW file (O_CREAT|O_EXCL) - the target must NOT pre-exist;
+// this is the new-file-injection vector (drop a new authorized_keys/sudoers.d).
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
@@ -105,6 +116,10 @@ int main(int argc, char **argv) {
     else if (!strcmp(m, "overwrite")) {
         int fd = open(p, O_WRONLY);              // no trunc/create: pure overwrite
         if (fd >= 0) { ssize_t w = write(fd, "TAMPER\n", 7); (void)w; close(fd); rc = 0; }
+        else rc = -1;
+    } else if (!strcmp(m, "create")) {
+        int fd = open(p, O_WRONLY | O_CREAT | O_EXCL, 0644);   // fresh new file
+        if (fd >= 0) { ssize_t w = write(fd, "INJECTED\n", 9); (void)w; close(fd); rc = 0; }
         else rc = -1;
     } else { fprintf(stderr, "bad mode\n"); return 2; }
     if (rc == 0) { printf("SUCCEEDED\n"); return 0; }
@@ -196,12 +211,21 @@ for tier in user root; do
   echo
   echo "### Tier: $tier ###"
 
-  echo "-- credential / shield-file tamper (expect BLOCKED in hardening) --"
+  echo "-- credential / shield-file tamper: DELETE/OVERWRITE existing (expect BLOCKED) --"
   attack "unlink-glibc   .ssh victim"      "$tier" "$WORK/fs_probe" unlink-glibc   "$V_SSH"
   attack "unlink-syscall .claude victim"   "$tier" "$WORK/fs_probe" unlink-syscall "$V_CLAUDE"
   attack "overwrite      shield-dir victim" "$tier" "$WORK/fs_probe" overwrite      "$V_SHIELD"
   attack "unlink-syscall sudoers.d victim" "$tier" "$WORK/fs_probe" unlink-syscall "$V_SUDOERS"
   attack "unlink-syscall /boot victim"     "$tier" "$WORK/fs_probe" unlink-syscall "$V_BOOT"
+
+  echo "-- NEW-FILE injection: create fresh file in a protected dir (expect BLOCKED) --"
+  attack "create-new     .ssh (authorized_keys drop)" "$tier" "$WORK/fs_probe" create "$C_SSH"
+  attack "create-new     .claude config drop"         "$tier" "$WORK/fs_probe" create "$C_CLAUDE"
+  attack "create-new     sudoers.d (root persistence)" "$tier" "$WORK/fs_probe" create "$C_SUDOERS"
+  # If any create slipped through (a gap), remove the injected file (best effort).
+  for cf in "$C_SSH" "$C_CLAUDE" "$C_SUDOERS"; do
+    [[ "$tier" == root ]] && sudo rm -f "$cf" 2>/dev/null || rm -f "$cf" 2>/dev/null || true
+  done
 
   echo "-- shield-tamper (the interesting part) --"
   attack "unlink-syscall a BPF pin file"   "$tier" "$WORK/fs_probe" unlink-syscall "$PIN_DIR/gs_path_unlink"

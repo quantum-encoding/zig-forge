@@ -14,6 +14,11 @@ const klog = @import("klog");
 var timer_frequency: u64 = 0;
 var ticks: u64 = 0;
 
+/// Per-second heartbeat trace on the timer IRQ. Off by default so a healthy
+/// idle system doesn't spam the serial console; flip to true when debugging a
+/// hang to see what's running on CPU 0.
+pub var debug_heartbeat: bool = false;
+
 // BSS corruption watchpoint: saved copy of virtio_blk.mmio_base on a different page.
 // Set once after virtio_blk.init(), checked every timer tick. If the live value
 // changes, we catch it immediately with CPU/PID/ELR context.
@@ -100,9 +105,9 @@ pub fn interruptWithFrame(frame: *@import("exception.zig").TrapFrame) void {
     // Poll UART RX — GCE serial console may not trigger PL011 RX interrupt
     uart.pollRx();
 
-    // Heartbeat: every 100 ticks (~1s), show what's running on CPU 0
+    // Heartbeat (debug only): every 1000 ticks (~10s), show what's on CPU 0.
     const total_ticks = @atomicLoad(u64, &ticks, .monotonic);
-    if (total_ticks % 1000 == 0 and total_ticks > 0) {
+    if (debug_heartbeat and total_ticks % 1000 == 0 and total_ticks > 0) {
         const pid = if (@import("scheduler.zig").currentProcess()) |p| p.pid else 0;
         uart.print("[tick] t={} cpu={} pid={} elr={x}\n", .{ total_ticks, smp.cpuId(), pid, frame.elr });
     }

@@ -22,6 +22,11 @@ const vfs = @import("vfs.zig");
 const page_cache = @import("page_cache.zig");
 const smp = @import("smp.zig");
 
+/// Trace the first few demand-paging faults per userspace process. Off by
+/// default — demand paging on first-touch is normal, so the trace is just noise
+/// on a healthy boot; flip to true when debugging page-fault behavior.
+pub var debug_dp_trace: bool = false;
+
 // Page fault counter for PID >= 4 heartbeat (diagnostic)
 
 // Per-CPU re-entrancy guard for data_abort_same handling.
@@ -1157,7 +1162,7 @@ fn handlePageFault(frame: *TrapFrame, is_instruction: bool) void {
         const dp_trace = struct {
             var count: u32 = 0;
         };
-        if (proc.pid >= 6 and dp_trace.count < 20) {
+        if (debug_dp_trace and proc.pid >= 6 and dp_trace.count < 20) {
             dp_trace.count += 1;
             uart.print("[dp] P{} fault #{} addr={x} ELR={x} ifetch={}\n", .{ proc.pid, dp_trace.count, far, frame.elr, @as(u8, if (is_instruction) 1 else 0) });
         }

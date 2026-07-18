@@ -485,11 +485,15 @@ fn deadlockCheck() void {
             break;
         }
     }
-    if (!any_running) {
+    // All CPUs idle is only a real problem if a runnable (.ready) process
+    // exists that isn't being scheduled. Otherwise every process is legitimately
+    // blocked on I/O (console read, net accept, wait4) and will be woken by an
+    // interrupt — an idle login prompt is not a deadlock.
+    if (!any_running and anyReadyProcess()) {
         all_idle_ticks += 1;
         if (all_idle_ticks >= 100 and !deadlock_dumped) {
             deadlock_dumped = true;
-            uart.writeString("[sched] DEADLOCK? All CPUs idle. Process states:\n");
+            uart.writeString("[sched] DEADLOCK: runnable process not scheduled. Process states:\n");
             dumpProcessStates();
             rq.printStats();
         }
@@ -497,6 +501,16 @@ fn deadlockCheck() void {
         all_idle_ticks = 0;
         deadlock_dumped = false;
     }
+}
+
+/// True if any live (non-idle) process is in the runnable `.ready` state.
+fn anyReadyProcess() bool {
+    for (0..process.MAX_PROCESSES) |pi| {
+        if (process.getProcess(pi)) |p| {
+            if (p.pid != 0 and p.state == .ready) return true;
+        }
+    }
+    return false;
 }
 
 fn dumpProcessStates() void {

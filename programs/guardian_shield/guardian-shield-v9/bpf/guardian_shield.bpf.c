@@ -126,6 +126,7 @@ enum event_type {
     EV_MKDIR = 7,
     EV_RMDIR = 8,
     EV_OPEN_WRITE = 9,
+    EV_CREATE = 10,    // new-file creation (path_mknod)
     EV_PTRACE = 20,
     EV_DEV_MEM = 21,
     EV_MODULE_LOAD = 22,
@@ -226,6 +227,25 @@ struct {
     __type(value, __u8);
     __uint(max_entries, 512);
 } trusted_exes SEC(".maps");
+
+// Trusted exe INODE identities {ino, dev}. A relative-path exec of the trusted
+// loader (e.g. `./guardian_shield_loader --unpin`) yields a relative
+// bprm->filename that does NOT match the absolute trusted_exes entry, which
+// would leave the operator's own teardown un-trusted (and blocked by the
+// anti-tamper hooks). Matching the exe's inode makes trust independent of the
+// invocation path, and cannot be forged with a string.
+struct exe_id {
+    __u64 ino;
+    __u32 dev;
+    __u32 _pad;
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, struct exe_id);
+    __type(value, __u8);
+    __uint(max_entries, 512);
+} trusted_inodes SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
@@ -630,9 +650,20 @@ int BPF_PROG(gs_exec, struct task_struct *p, pid_t old_pid, struct linux_binprm 
     if (filename)
         bpf_probe_read_kernel_str(full, sizeof(full), filename);
 
-    // 1) Trusted full-path override (highest privilege; the only tag not
+    // 1a) Trusted full-path override (highest privilege; the only tag not
     // restricted under hardening_mode, and the only one allowed to call bpf()).
     __u8 *tr = bpf_map_lookup_elem(&trusted_exes, full);
+    // 1b) ...OR trusted by exe inode identity, so the loader trusts itself even
+    // when invoked by a relative path (teardown must not depend on path match).
+    if (!tr) {
+        struct inode *ei = BPF_CORE_READ(bprm, file, f_inode);
+        if (ei) {
+            struct exe_id id = {};
+            id.ino = BPF_CORE_READ(ei, i_ino);
+            id.dev = BPF_CORE_READ(ei, i_sb, s_dev);
+            tr = bpf_map_lookup_elem(&trusted_inodes, &id);
+        }
+    }
     if (tr) {
         struct proc_tag t = {};
         t.tag = TAG_TRUSTED;
@@ -742,6 +773,20 @@ int BPF_PROG(gs_path_mkdir, const struct path *dir, struct dentry *dentry, umode
 {
     struct vfsmount *mnt = BPF_CORE_READ(dir, mnt);
     return fs_guard_dentry(dentry, mnt, 0, 0, EV_MKDIR);
+}
+
+// NEW-FILE CREATION. file_open's write gate catches opening EXISTING files for
+// write, but open(O_CREAT) of a NEW file creates a fresh (negative) dentry and
+// does not go through the existing-inode write path - so a non-trusted attacker
+// could DROP a new authorized_keys / sudoers.d / ~/.claude file even though it
+// cannot touch existing ones. path_mknod fires for regular-file creation (incl.
+// the O_CREAT open path when CONFIG_SECURITY_PATH=y) plus device/fifo nodes. The
+// new `dentry` is under `dir`, so reconstruct from it exactly like the others.
+SEC("lsm/path_mknod")
+int BPF_PROG(gs_path_mknod, const struct path *dir, struct dentry *dentry, umode_t mode, unsigned int dev)
+{
+    struct vfsmount *mnt = BPF_CORE_READ(dir, mnt);
+    return fs_guard_dentry(dentry, mnt, 0, 0, EV_CREATE);
 }
 
 SEC("lsm/path_symlink")
@@ -866,9 +911,13 @@ int BPF_PROG(gs_file_open, struct file *file)
 // MEMORY / PRIVILEGE ENFORCEMENT
 // ===================================================================
 
-// ptrace: block a restricted caller from attaching to any task (code injection
-// into trusted processes). Restricted = AGENT (agent mode, enforce_mem) OR any
-// non-trusted process (hardening mode).
+// ptrace anti-injection.
+//   - Agent-containment mode: an AGENT subtree may not ptrace ANYTHING (an agent
+//     injecting into any process is the threat we contain).
+//   - Hardening mode: a non-trusted process may not ptrace a TRUSTED target
+//     (protect the loader / trusted tools from injection). It is deliberately
+//     NOT a blanket ban on all non-trusted ptrace - that would break
+//     strace/gdb/debuggers for the developer against ordinary processes.
 SEC("lsm/ptrace_access_check")
 int BPF_PROG(gs_ptrace, struct task_struct *child, unsigned int mode)
 {
@@ -876,9 +925,20 @@ int BPF_PROG(gs_ptrace, struct task_struct *child, unsigned int mode)
     if (!cfg || !cfg->ready)
         return 0;
     __u8 tag = current_tag();
-    bool block = (cfg->enforce_mem && tag == TAG_AGENT) || hardening_block(cfg, tag);
+
+    bool block = false;
+    if (cfg->enforce_mem && tag == TAG_AGENT) {
+        block = true;                        // agent containment: source-based
+    } else if (cfg->hardening_mode && tag != TAG_TRUSTED) {
+        // target-based: only block ptracing a TRUSTED process.
+        __u32 target_tgid = BPF_CORE_READ(child, tgid);
+        struct proc_tag *tp = bpf_map_lookup_elem(&agent_pids, &target_tgid);
+        if (tp && tp->tag == TAG_TRUSTED)
+            block = true;
+    }
     if (!block)
         return 0;
+
     __u32 target = BPF_CORE_READ(child, pid);
     log_violation(EV_PTRACE, tag, cfg->log_only ? 0 : 1, 0, 0, 0, 0, target, 0);
     bump(STAT_MEM_BLOCKED);

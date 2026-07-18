@@ -546,8 +546,14 @@ export fn kmain(x0_val: u64) noreturn {
 
     // Boot secondary CPUs
     {
-        const target_cpus = if (fdt.config.valid and fdt.config.cpu_count > 1)
+        // Prefer real topology: FDT (QEMU virt) or ACPI MADT (GCE / real HW,
+        // which ship no DTB). Only fall back to the SMP_CPUS guess when neither
+        // is present — otherwise a 1-vCPU instance tries to PSCI CPU_ON a
+        // nonexistent CPU 1 and logs a spurious failure.
+        const target_cpus: u32 = if (fdt.config.valid and fdt.config.cpu_count > 1)
             fdt.config.cpu_count
+        else if (acpi.parser.config.valid and acpi.parser.config.cpu_count > 0)
+            acpi.parser.config.cpu_count
         else
             smp.SMP_CPUS;
 

@@ -51,6 +51,7 @@ const CognitiveSession = struct {
     tool_count: usize,
     start_time: i64,         // Session start (unix seconds)
     last_activity: i64,      // Last activity time
+    turn_emitted: bool,      // TurnComplete D-Bus signal already fired for this idle gap
 
     fn init(pid: u32) CognitiveSession {
         return CognitiveSession{
@@ -62,6 +63,7 @@ const CognitiveSession = struct {
             .tool_count = 0,
             .start_time = 0,
             .last_activity = 0,
+            .turn_emitted = false,
         };
     }
 
@@ -106,6 +108,7 @@ const CognitiveSession = struct {
         self.state_len = 0;
         self.tool_count = 0;
         self.start_time = 0;
+        self.turn_emitted = false;
     }
 };
 
@@ -564,6 +567,7 @@ pub const CognitiveWatcher = struct {
         // Get or create session for this PID
         const session = self.getOrCreateSession(event.pid);
         session.last_activity = now;
+        session.turn_emitted = false; // fresh output → a new turn is in progress
 
         var tool_name: [128]u8 = [_]u8{0} ** 128;
         var tool_args: [1024]u8 = [_]u8{0} ** 1024;
@@ -631,11 +635,14 @@ pub const CognitiveWatcher = struct {
 
     /// Update chronosd-cognitive via D-Bus method call
     fn updateChronosdCognitive(self: *CognitiveWatcher, conn: *dbus.DBusConnection, state: []const u8, pid: u32) !void {
-        // Create method call message for UpdateCognitiveState
+        // Create method call message for UpdateCognitiveState. Target the name
+        // chronosd actually registers (org.jesternet.Chronos) — the old
+        // io.quantumencoding.chronosd.cognitive name is owned by nothing, so
+        // these calls were silently dropped.
         const msg = dbus.c.dbus_message_new_method_call(
-            "io.quantumencoding.chronosd.cognitive",
-            "/io/quantumencoding/chronosd/cognitive",
-            "io.quantumencoding.chronosd.cognitive.StateManager",
+            dbus_if.DBUS_SERVICE,
+            dbus_if.DBUS_PATH,
+            dbus_if.DBUS_INTERFACE,
             "UpdateCognitiveState",
         );
         if (msg == null) {
@@ -676,6 +683,47 @@ pub const CognitiveWatcher = struct {
 
         dbus.c.dbus_connection_flush(conn.conn);
         std.debug.print("📡 D-Bus UpdateCognitiveState(\"{s}\", {d})\n", .{ state, pid });
+    }
+
+    /// Emit the `TurnComplete` D-Bus SIGNAL on org.jesternet.Chronos. quantum-diary's
+    /// cognitive_subscriber listens for this exact (path, interface, member) on the
+    /// SYSTEM bus and treats it as the authoritative turn-complete — it drives the
+    /// Auto-Pilot drain and Phase-4 federation auto-push. Signature: `utst`
+    /// (pid: u32, tick: u64, last_tool: s, idle_duration_ns: u64).
+    fn emitTurnComplete(self: *CognitiveWatcher, conn: *dbus.DBusConnection, session: *const CognitiveSession, idle_ns: u64) void {
+        const msg = dbus.c.dbus_message_new_signal(
+            dbus_if.DBUS_PATH,
+            dbus_if.DBUS_INTERFACE,
+            "TurnComplete",
+        );
+        if (msg == null) return;
+        defer dbus.c.dbus_message_unref(msg);
+
+        var args: dbus.c.DBusMessageIter = undefined;
+        dbus.c.dbus_message_iter_init_append(msg, &args);
+
+        var pid_val: u32 = session.pid;
+        _ = dbus.c.dbus_message_iter_append_basic(&args, dbus.c.DBUS_TYPE_UINT32, &pid_val);
+
+        var tick_val: u64 = self.events_processed;
+        _ = dbus.c.dbus_message_iter_append_basic(&args, dbus.c.DBUS_TYPE_UINT64, &tick_val);
+
+        // last_tool: the final tool of the turn, else the cognitive state.
+        const label: []const u8 = if (session.tool_count > 0)
+            session.tools[session.tool_count - 1][0..session.tool_lens[session.tool_count - 1]]
+        else
+            session.getState();
+        const label_z = self.allocator.dupeZ(u8, label) catch return;
+        defer self.allocator.free(label_z);
+        const label_ptr: [*:0]const u8 = label_z.ptr;
+        _ = dbus.c.dbus_message_iter_append_basic(&args, dbus.c.DBUS_TYPE_STRING, @ptrCast(&label_ptr));
+
+        var idle_val: u64 = idle_ns;
+        _ = dbus.c.dbus_message_iter_append_basic(&args, dbus.c.DBUS_TYPE_UINT64, &idle_val);
+
+        if (dbus.c.dbus_connection_send(conn.conn, msg, null) == 0) return;
+        dbus.c.dbus_connection_flush(conn.conn);
+        std.debug.print("📡 D-Bus TurnComplete(pid={d}, last=\"{s}\", idle={d}ns)\n", .{ session.pid, label, idle_ns });
     }
 
     /// Try to load cognitive-oracle eBPF program
@@ -763,6 +811,10 @@ pub const CognitiveWatcher = struct {
         }
         defer c.ring_buffer__free(ring_buffer);
 
+        // A cognitive session that produced output and then went quiet for this
+        // long is a completed turn.
+        const IDLE_TURN_SECS: i64 = 3;
+
         // Poll ring buffer forever
         while (self.running.load(.acquire)) {
             const poll_result = c.ring_buffer__poll(ring_buffer, 100); // 100ms timeout
@@ -771,6 +823,25 @@ pub const CognitiveWatcher = struct {
                 var sleep_ts = linux.timespec{ .sec = 1, .nsec = 0 };
                 _ = linux.nanosleep(&sleep_ts, null);
                 continue;
+            }
+
+            // Turn-complete detection: emit ONE TurnComplete signal per idle gap
+            // for each active session that has gone quiet. Cheap (runs per 100ms
+            // poll tick; the turn_emitted guard prevents re-emits, and fresh
+            // output resets it — see processCognitiveEvent).
+            if (self.dbus_conn) |*conn| {
+                var ts2: std.c.timespec = undefined;
+                _ = std.c.clock_gettime(.REALTIME, &ts2);
+                const now2 = ts2.sec;
+                for (self.sessions[0..self.session_count]) |*session| {
+                    if (session.state_len == 0 or session.turn_emitted or session.last_activity == 0) continue;
+                    const idle_secs = now2 - session.last_activity;
+                    if (idle_secs >= IDLE_TURN_SECS) {
+                        const idle_ns: u64 = @intCast(idle_secs * std.time.ns_per_s);
+                        self.emitTurnComplete(conn, session, idle_ns);
+                        session.turn_emitted = true;
+                    }
+                }
             }
         }
     }
