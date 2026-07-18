@@ -105,9 +105,12 @@ char LICENSE[] SEC("license") = "GPL";
 #define TAG_EXEMPT  2   // explicitly exempt (overrides inherited AGENT)
 #define TAG_TRUSTED 3   // fully trusted (loader + allowlisted tools). The ONLY
                         // tag NOT restricted under hardening_mode; may call bpf().
+#define TAG_TAINTED 4   // build-tool subtree (npm/pip/cargo/... and everything it
+                        // spawns). Denied READ of the credential AssetMap - the
+                        // supply-chain credential-harvest block. Inherited+sticky.
 
 struct proc_tag {
-    __u8  tag;         // TAG_AGENT | TAG_EXEMPT | TAG_TRUSTED
+    __u8  tag;         // TAG_AGENT | TAG_EXEMPT | TAG_TRUSTED | TAG_TAINTED
     __u32 root_tgid;   // tgid of the subtree root that was first tagged
     __u64 since_ns;    // when tagged (monotonic)
 };
