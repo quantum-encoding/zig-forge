@@ -381,7 +381,7 @@ static long emit_cb(__u32 k, void *c)
 }
 
 // Mount-aware absolute path reconstruction into ctx->out. Returns byte length
-// of the NUL-terminated C-string. `ctx` must come from get_recon_ctx().
+// of the NUL-terminated C-string. `ctx` is a caller-owned STACK recon_ctx.
 static __always_inline __u32 reconstruct_path(struct dentry *dentry,
                                               struct vfsmount *vfsmnt,
                                               struct recon_ctx *ctx)
