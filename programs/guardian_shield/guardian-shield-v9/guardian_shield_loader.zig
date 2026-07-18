@@ -623,10 +623,8 @@ fn handleViolation(_: ?*anyopaque, data: ?*anyopaque, size: usize) callconv(.c) 
     const json = std.json.Stringify.valueAlloc(g_alloc, record, .{}) catch return 0;
     defer g_alloc.free(json);
 
-    if (g_log_file) |f| {
-        f.writeAll(json) catch {};
-        f.writeAll("\n") catch {};
-    }
+    logWrite(json);
+    logWrite("\n");
     std.debug.print("[guardian] {s} {s} pid={d} tag={d} path={s}\n", .{
         if (ev.enforced != 0) "BLOCKED" else "AUDIT",
         eventName(ev.event_type),
