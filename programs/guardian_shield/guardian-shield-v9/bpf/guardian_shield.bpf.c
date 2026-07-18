@@ -297,6 +297,8 @@ struct gs_config {
     __u8 log_only;       // 1 = log but never return -EPERM (dry run)
     __u8 hardening_mode; // 0 = agent-containment (default); 1 = default-deny for
                          // everyone except TAG_TRUSTED, + self-protection hooks
+    __u8 enforce_cred_read; // 1 = deny TAINTED/AGENT reads of credential_paths
+                            // (supply-chain harvest block; on by default)
 };
 
 struct {
