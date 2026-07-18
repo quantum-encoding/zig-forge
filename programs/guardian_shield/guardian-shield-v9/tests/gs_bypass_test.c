@@ -150,9 +150,14 @@ static int do_setup(const char *dir) {
         unlink(moved);
     }
     if (join(created, sizeof(created), dir, V_CREATE) == 0) unlink(created);
-    // Pre-clean out-of-dir move targets + malicious temp sources from prior runs.
-    clean_glob("/tmp/gs_exfil_*");
-    clean_glob("/tmp/gs_attacker_*");
+    // Pre-clean out-of-dir move targets + malicious temp sources (in the parent
+    // dir, same filesystem) from prior runs.
+    char parent[4096], pat[4096];
+    parent_dir(dir, parent, sizeof(parent));
+    snprintf(pat, sizeof(pat), "%s/gs_exfil_*", parent);
+    clean_glob(pat);
+    snprintf(pat, sizeof(pat), "%s/gs_attacker_*", parent);
+    clean_glob(pat);
     printf("setup: victims created in %s\n", dir);
     return 0;
 }
