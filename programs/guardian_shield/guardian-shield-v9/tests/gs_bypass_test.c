@@ -90,6 +90,25 @@ static int join(char *out, size_t n, const char *dir, const char *name) {
     return (r > 0 && (size_t)r < n) ? 0 : -1;
 }
 
+// Parent directory of `path` (strip trailing slash, then the last component).
+// Used to place the rename move-out dest / clobber source on the SAME
+// filesystem as the protected dir (rename can't cross filesystems -> EXDEV
+// before the LSM). Falls back to "." if the parent would be empty.
+static void parent_dir(const char *path, char *out, size_t n) {
+    snprintf(out, n, "%s", path);
+    size_t len = strlen(out);
+    while (len > 1 && out[len - 1] == '/')   // strip trailing slashes (keep root)
+        out[--len] = '\0';
+    char *slash = strrchr(out, '/');
+    if (!slash) {                            // no '/', relative name
+        snprintf(out, n, ".");
+    } else if (slash == out) {               // parent is root
+        out[1] = '\0';
+    } else {
+        *slash = '\0';
+    }
+}
+
 // True if errno indicates the LSM blocked us.
 static bool is_blocked_errno(int e) { return e == EPERM || e == EACCES; }
 
