@@ -3,16 +3,26 @@
 //
 // This is the golden external-vector anchor for the whole v9 kernel move: it
 // proves that the LSM layer closes the direct-syscall bypasses that defeat the
-// userspace libwarden LD_PRELOAD. It attacks a protected file through FIVE
-// independent kernel entry points that all sidestep libc interposition:
+// userspace libwarden LD_PRELOAD. It attacks a protected file through the four
+// destruction CATEGORIES, each via kernel entry points that sidestep libc
+// interposition:
 //
-//   1. glibc unlink()            - the interposed path (control that libwarden covers)
-//   2. raw syscall(SYS_unlinkat) - bypasses LD_PRELOAD entirely
-//   3. openat2(2) O_WRONLY|O_TRUNC - data destruction via a new-ish syscall
-//   4. io_uring IORING_OP_UNLINKAT - deletion dispatched by the kernel, no syscall per op
-//   5. renameat2(2)              - move/rename bypass
+//   DELETE:
+//     1. glibc unlink()            - the interposed path (control libwarden covers)
+//     2. raw syscall(SYS_unlinkat) - bypasses LD_PRELOAD entirely
+//     4. io_uring IORING_OP_UNLINKAT - deletion dispatched by a kernel worker thread
+//   OVERWRITE:
+//     3. openat2 O_WRONLY|O_TRUNC + write - truncate-then-rewrite destruction
+//     8. renameat2 clobber         - atomically rename a malicious temp OVER the file
+//     9. openat2 O_WRONLY + write   - in-place overwrite, NO O_TRUNC (write-open itself blocked)
+//   MOVE-OUT (exfil):
+//     5. renameat2 within-dir       - rename inside the protected tree
+//     7. renameat2 out-of-tree      - move the file OUT to /tmp (source protected)
+//   CREATE:
+//     6. openat2 O_CREAT + write    - create a new file inside the protected dir
 //
-// Plus an O_CREAT write-open probe (protected-dir write).
+// Vectors that need a destination or malicious source use pid-unique /tmp paths
+// (gs_exfil_<pid>, gs_attacker_<pid>) and clean up after themselves.
 //
 // Usage:
 //   gs_bypass_test --dir <DIR> --mode setup                 # create victims (non-agent ctx)
