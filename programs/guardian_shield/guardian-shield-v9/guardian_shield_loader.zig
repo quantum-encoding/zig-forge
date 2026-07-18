@@ -518,6 +518,7 @@ const Loader = struct {
             .enforce_priv = @intFromBool(self.cfg.enforce_priv),
             .log_only = @intFromBool(self.cfg.log_only),
             .hardening_mode = @intFromBool(self.cfg.hardening_mode),
+            .enforce_cred_read = @intFromBool(self.cfg.enforce_cred_read),
         };
     }
 
