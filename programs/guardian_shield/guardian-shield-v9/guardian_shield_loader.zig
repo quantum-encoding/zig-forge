@@ -32,7 +32,9 @@ const c = @cImport({
 // Kernel-mirrored structures (must match guardian_shield.bpf.c byte-for-byte)
 // ===================================================================
 
-const MAX_PATH_LEN = 256;
+// Must match guardian_shield.bpf.c. MAX_PATH_LEN was reduced to 128 so recon_ctx
+// fits the BPF stack (bpf_loop requires a stack context).
+const MAX_PATH_LEN = 128;
 const MAX_EXE_NAME = 64;
 const MAX_EXE_PATH = 256;
 
