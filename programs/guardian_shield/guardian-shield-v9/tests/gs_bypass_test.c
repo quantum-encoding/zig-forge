@@ -36,7 +36,9 @@
 // enforcement where CONFIG_BPF_LSM is on and the loader has tagged this process
 // tree as an agent (see tests/run_bypass_suite.sh).
 
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <glob.h>
