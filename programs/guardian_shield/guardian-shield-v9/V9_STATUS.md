@@ -166,22 +166,50 @@ attaching them would have failed the whole fail-closed load. `sb_mount` +
 
 ---
 
-## Build status on THIS box (honest)
+## Build status
 
 | Artifact | Status |
 |---|---|
-| `bpf/guardian_shield.bpf.o` | **Compiles clean** (`clang -O2 -g -target bpf -mcpu=v3`), no errors/warnings. libbpf parses it (`bpftool gen skeleton` succeeds): 18 programs, 9 maps, all expected `lsm/*` + `tp_btf/*` sections present. |
-| `guardian_shield_loader` | **Builds** (`zig build loader`). Run non-root: prereq checks pass, resolves + opens the object, then fails cleanly at `bpf_object__load` with "need root/CAP_BPF+CAP_SYS_ADMIN" — the expected boundary. `--unpin` path exercised and clean. |
-| `gs_bypass_test` | **Builds and runs.** Positive control on `/tmp` scratch: all 6 vectors (glibc unlink, raw `SYS_unlinkat`, `openat2` O_TRUNC, io_uring `UNLINKAT`, `renameat2`, `openat2` O_CREAT) execute and report PASS(allowed) — proving the harness's syscall/io_uring/openat2 machinery actually works. |
+| `bpf/guardian_shield.bpf.o` | **Compiles clean** (`clang -O2 -g -target bpf -mcpu=v3`), no errors/warnings. libbpf parses it (`bpftool gen skeleton` succeeds): 17 programs, 9 maps, all expected `lsm/*` + `tp_btf/*` sections present. |
+| `guardian_shield_loader` | **Builds** (`zig build loader`). |
+| `gs_bypass_test` | **Builds and runs.** All 6 vectors (glibc unlink, raw `SYS_unlinkat`, `openat2` O_TRUNC, io_uring `UNLINKAT`, `renameat2`, `openat2` O_CREAT) exercise real kernel entry points. |
 
-**Not done here (requires root + the constraints forbid attaching to the running
-kernel):** actually loading the object, verifier acceptance, and the live
-negative (agent-blocked) test. The object is well-formed BPF and libbpf-parseable;
-final **verifier acceptance must be confirmed with a root load** —
-`sudo bpftool prog load bpf/…` or running the loader as root. The bounded
-per-byte path copy and the mount-crossing walk are written to be verifier-safe
-(masked indices, `off < MAX-1` guards, `BPF_F_NO_PREALLOC` on the LPM trie), but
-I have not observed the verifier accept them on this box.
+## Live verification — CONFIRMED on kernel 6.18 (BPF-LSM VM)
+
+The object **verifies and enforces** on a real BPF-LSM host:
+
+- **Verifier: PASS.** The full object loads; **all 17 hooks attach and pin**
+  (`Guardian Shield v9 ACTIVE: 17 hooks pinned`). Reaching this took six
+  verifier iterations, each a distinct structural class — recorded here so the
+  shape of the final code is understood:
+  1. **-E2BIG** (1M-insn limit) — variable-offset masked scan in the exec
+     basename parse × unroll. Fixed: basename taken directly from the exe
+     dentry leaf; path walk moved to `bpf_loop()`.
+  2. **CO-RE `<invalid relocation>`** — `BPF_CORE_READ` through a map-value
+     struct field latched the relocation onto a program-local type. Fixed: load
+     kernel pointers into local typed vars first, read through those.
+  3. **`bpf_loop` ctx `R3 type=map_value expected=fp`** — the callback context
+     must be `PTR_TO_STACK`. Fixed: control state moved to a small stack struct.
+  4. **`invalid variable-offset write to stack`** — but the byte writes then
+     needed a map value. Fixed: split control (stack) from buffer (per-CPU map).
+  5. **`invalid access to map value` (off+size overrun)** — masking the index
+     bounds the start, not start+size. Fixed: over-sized the buffer + an
+     independent constant length clamp so `max_index + max_read < physical size`.
+  6. **Clean** — verifies.
+- **Enforcement: PASS, agent-only.**
+  - Non-agent process creates AND deletes files in the protected dir → **allowed**.
+  - Agent-tagged process (a real binary named `claude`): **every** destructive
+    vector **blocked** — glibc `unlink`→EPERM, raw `syscall(unlinkat)`→EPERM,
+    `openat2`+O_TRUNC→EACCES, io_uring `UNLINKAT`→EPERM, `renameat2`→EPERM,
+    `openat2` create→EACCES.
+  - The ring-buffer log shows each block with `"enforced":true` and the agent
+    tag — **including the io_uring deletion whose syscall came from the kernel
+    worker thread `comm="iou-wrk-*"`**. A `comm`-based identity would have missed
+    it; the **tgid process-tree tag caught it**. That is exactly the
+    io_uring/openat2/raw-syscall class that bypasses userspace libwarden,
+    blocked at the LSM — the whole thesis, proven live.
+
+This closes the previously-open "verifier acceptance unconfirmed" item.
 
 ---
 
