@@ -22,6 +22,10 @@ const c = @cImport({
     @cInclude("bpf/libbpf.h");
     @cInclude("bpf/bpf.h");
     @cInclude("unistd.h");
+    @cInclude("fcntl.h");
+    @cInclude("sys/stat.h");
+    @cInclude("dirent.h");
+    @cInclude("errno.h");
 });
 
 // ===================================================================
