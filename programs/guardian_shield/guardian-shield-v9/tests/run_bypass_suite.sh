@@ -3,9 +3,12 @@
 #
 # Proves the kernel LSM blocks the direct-syscall bypasses that defeat userspace
 # libwarden. Confirmed live on kernel 6.18 (BPF-LSM): every destructive vector
-# (glibc unlink, raw syscall unlinkat, openat2+O_TRUNC, io_uring UNLINKAT,
-# renameat2, openat2 create) returns EPERM/EACCES for an agent-tagged process,
-# while a non-agent process is unaffected.
+# across all four categories returns EPERM/EACCES for an agent-tagged process,
+# while a non-agent process is unaffected:
+#   DELETE    - glibc unlink, raw syscall unlinkat, io_uring UNLINKAT
+#   OVERWRITE - openat2 O_TRUNC+write, in-place openat2 write, renameat2 clobber
+#   MOVE-OUT  - renameat2 within-dir, renameat2 out-of-tree (exfil to /tmp)
+#   CREATE    - openat2 O_CREAT+write
 #
 # Preconditions:
 #   - CONFIG_BPF_LSM on, `bpf` in /sys/kernel/security/lsm.
