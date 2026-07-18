@@ -187,14 +187,22 @@ static int iouring_unlinkat(const char *path) {
     return 0;
 }
 
-static int sys_openat2_write(const char *path, unsigned long long extra_flags) {
+// Open a path for writing via openat2(2). If `content` is non-NULL and the open
+// succeeds, the bytes are written (so the "success" path is unambiguously a
+// completed overwrite/destruction, not just an opened handle). Returns 0 on a
+// successful open (errno untouched), -1 on failure with errno set by the kernel.
+static int sys_openat2_write(const char *path, unsigned long long extra_flags,
+                             const char *content) {
     struct open_how how;
     memset(&how, 0, sizeof(how));
     how.flags = O_WRONLY | extra_flags;
     how.mode = (extra_flags & O_CREAT) ? 0644 : 0;
     long fd = syscall(__NR_openat2, AT_FDCWD, path, &how, sizeof(how));
     if (fd < 0) return -1; // errno set
-    // If it opened, that's a successful (un-blocked) write handle.
+    if (content) {
+        ssize_t w = write((int)fd, content, strlen(content));
+        (void)w;
+    }
     close((int)fd);
     return 0;
 }
