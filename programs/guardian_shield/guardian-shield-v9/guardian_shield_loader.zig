@@ -346,7 +346,7 @@ const Loader = struct {
     }
 
     fn open(self: *Loader, path: []const u8) !void {
-        var pbuf: [std.fs.max_path_bytes]u8 = undefined;
+        var pbuf: [MAX_PATH_BYTES]u8 = undefined;
         const z = try std.fmt.bufPrintZ(&pbuf, "{s}", .{path});
         const o = c.bpf_object__open_file(z.ptr, null);
         if (o == null) {
@@ -469,7 +469,7 @@ const Loader = struct {
             };
 
             // Pin the link so it survives loader exit.
-            var pbuf: [std.fs.max_path_bytes]u8 = undefined;
+            var pbuf: [MAX_PATH_BYTES]u8 = undefined;
             const pin_path = std.fmt.bufPrintZ(&pbuf, "{s}/{s}", .{ self.cfg.pin_dir, std.mem.span(name) }) catch {
                 self.teardownLinks();
                 return error.PinPathTooLong;
