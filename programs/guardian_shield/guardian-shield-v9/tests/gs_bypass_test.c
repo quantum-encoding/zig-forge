@@ -21,8 +21,15 @@
 //   CREATE:
 //     6. openat2 O_CREAT + write    - create a new file inside the protected dir
 //
-// Vectors that need a destination or malicious source use pid-unique /tmp paths
-// (gs_exfil_<pid>, gs_attacker_<pid>) and clean up after themselves.
+// Vectors that need a destination or malicious source (move-out, clobber) place
+// it in the protected dir's PARENT with a pid-unique name (gs_exfil_<pid>,
+// gs_attacker_<pid>) and clean up after themselves. The parent is used, not
+// /tmp, because rename()/renameat2() CANNOT cross filesystems: a cross-fs move
+// returns EXDEV from the VFS *before* security_path_rename is ever consulted, so
+// it would never reach the LSM. exfil-by-rename is inherently intra-filesystem
+// (a cross-fs "move" is really copy+unlink, and the unlink/write vectors above
+// already cover that), so the same-fs parent is the correct target for the
+// rename hook.
 //
 // Usage:
 //   gs_bypass_test --dir <DIR> --mode setup                 # create victims (non-agent ctx)
