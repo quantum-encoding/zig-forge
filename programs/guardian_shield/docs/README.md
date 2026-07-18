@@ -8,6 +8,29 @@
 
 ---
 
+## Threat model — read this first
+
+Be precise about what each layer actually enforces:
+
+- **The Warden (user-space `LD_PRELOAD` `libwarden.so`) is an accident-prevention
+  guardrail, NOT a boundary against a hostile process.** As userspace syscall
+  interposition it is bypassable by design: `io_uring`, `openat2`, `renameat2`,
+  raw `syscall()`, and statically-linked binaries never pass through it; a process
+  can disable it for itself (`WARDEN_DISABLE=1`, the world-writable
+  `/tmp/.warden_emergency_disable` file, `SIGUSR2`); and identity is a forgeable
+  `/proc/self/comm`. Rely on it to stop an *honest* tool's fat-fingered
+  `rm -rf`, not a determined adversary.
+- **Real, non-bypassable enforcement requires the kernel layer** (BPF-LSM). That
+  work lives in `guardian-shield-v9/` and is the active upgrade path — LSM hooks
+  sit after path resolution, so the userspace-bypass list above does not apply.
+- **`zig_sentinel` is detection/telemetry, not enforcement** (except where it is
+  explicitly configured to `SIGKILL`).
+
+See `docs/AUDIT_AND_UPGRADE_PLAN.md` for the full audit and the phased plan, and
+`docs/CONVERGENCE.md` for the macOS (Metatron) convergence contract.
+
+---
+
 ## Overview
 
 Guardian Shield implements a "Defense in Depth" strategy through three independent security layers:

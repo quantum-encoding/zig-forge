@@ -244,8 +244,6 @@ pub const FilterEngine = struct {
 
     /// Log a blocked request to audit log (JSON format to stderr)
     fn logBlock(self: *Self, request: *HttpRequest, block: BlockReason) !void {
-        _ = self;
-
         const severity_str: []const u8 = switch (block.severity) {
             .info => "info",
             .warning => "warning",
@@ -253,36 +251,38 @@ pub const FilterEngine = struct {
             .critical => "critical",
         };
 
-        // Build JSON audit log entry to stderr
-        // Format: {"event":"http_block","pid":1234,"method":"GET","url":"...","filter":"...","severity":"...","reason":"..."[,"evidence":"..."]}
-        if (block.evidence) |ev| {
-            std.debug.print(
-                "{{\"event\":\"http_block\",\"pid\":{d},\"method\":\"{s}\",\"url\":\"{s}\"," ++
-                "\"filter\":\"{s}\",\"severity\":\"{s}\",\"reason\":\"{s}\",\"evidence\":\"{s}\"}}\n",
-                .{
-                    request.pid,
-                    request.method,
-                    request.url,
-                    block.filter_name,
-                    severity_str,
-                    block.reason,
-                    ev,
-                },
-            );
-        } else {
-            std.debug.print(
-                "{{\"event\":\"http_block\",\"pid\":{d},\"method\":\"{s}\",\"url\":\"{s}\"," ++
-                "\"filter\":\"{s}\",\"severity\":\"{s}\",\"reason\":\"{s}\"}}\n",
-                .{
-                    request.pid,
-                    request.method,
-                    request.url,
-                    block.filter_name,
-                    severity_str,
-                    block.reason,
-                },
-            );
-        }
+        // Serialize the audit record via std.json.Stringify rather than a
+        // printf-style JSON template. `method`, `url`, `reason`, and `evidence`
+        // are attacker-influenced (this is the outbound request being inspected):
+        // a URL or reason containing `"` or `\` would otherwise break out of the
+        // record or inject fields — the JSON-IN-FMT class documented in
+        // zig-forge/CLAUDE.md. Stringify escapes `"`, `\`, control chars and UTF-8.
+        // The optional `evidence` key is present only when set, preserving the
+        // prior wire shape.
+        const json_str = if (block.evidence) |ev|
+            try std.json.Stringify.valueAlloc(self.allocator, .{
+                .event = "http_block",
+                .pid = request.pid,
+                .method = request.method,
+                .url = request.url,
+                .filter = block.filter_name,
+                .severity = severity_str,
+                .reason = block.reason,
+                .evidence = ev,
+            }, .{})
+        else
+            try std.json.Stringify.valueAlloc(self.allocator, .{
+                .event = "http_block",
+                .pid = request.pid,
+                .method = request.method,
+                .url = request.url,
+                .filter = block.filter_name,
+                .severity = severity_str,
+                .reason = block.reason,
+            }, .{});
+        defer self.allocator.free(json_str);
+
+        std.debug.print("{s}\n", .{json_str});
     }
 
     /// Display filter engine statistics

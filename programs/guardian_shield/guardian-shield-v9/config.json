@@ -1,31 +1,41 @@
 {
+  "_comment": "Guardian Shield v9 policy. protected_paths are directory/file prefixes (a trailing slash is stripped automatically). agent_exes are launcher basenames whose exec tags the whole process subtree AGENT (kernel-level, comm-independent). exempt_exes are full exe paths that override an inherited AGENT tag.",
   "protected_paths": [
     "/etc",
+    "/boot",
     "/usr/bin",
     "/usr/sbin",
     "/usr/local/bin",
     "/usr/local/sbin",
+    "/usr/lib",
     "/lib",
     "/lib64",
-    "/boot",
-    "/root/.ssh"
+    "/root/.ssh",
+    "/home/founder/.ssh",
+    "/home/founder/.claude",
+    "/home/founder/Documents"
   ],
-  "exempt_processes": [
-    "dpkg",
-    "apt",
-    "apt-get",
-    "yum",
-    "dnf",
-    "pacman",
-    "systemd",
-    "systemctl",
-    "install",
-    "git",
-    "make",
-    "gcc",
-    "clang",
-    "zig"
+  "agent_exes": [
+    "claude",
+    "cursor",
+    "aider",
+    "cody",
+    "continue",
+    "tabnine",
+    "copilot",
+    "codeium",
+    "windsurf"
   ],
-  "log_file": "/var/log/guardian_shield.log",
-  "verbose": true
+  "exempt_exes": [
+    "/usr/bin/pacman",
+    "/usr/bin/dpkg",
+    "/usr/bin/apt",
+    "/usr/bin/systemctl"
+  ],
+  "enforce_fs": true,
+  "enforce_mem": true,
+  "enforce_priv": false,
+  "log_only": false,
+  "pin_dir": "/sys/fs/bpf/guardian_shield",
+  "log_file": "/var/log/guardian_shield.jsonl"
 }

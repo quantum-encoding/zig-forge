@@ -133,6 +133,10 @@ pub const BaselineContext = struct {
     /// Map of (PID, syscall) -> statistics
     baselines: std.AutoHashMap(BaselineKey, BaselineStats),
 
+    /// Previous CUMULATIVE counter reading per key, used to derive per-poll
+    /// rate deltas from the ever-growing BPF `syscall_counts` values.
+    prev_counts: std.AutoHashMap(BaselineKey, u64),
+
     /// Learning period duration (seconds)
     learning_period_seconds: u32,
 
@@ -155,6 +159,7 @@ pub const BaselineContext = struct {
     ) Self {
         return .{
             .baselines = std.AutoHashMap(BaselineKey, BaselineStats).init(allocator),
+            .prev_counts = std.AutoHashMap(BaselineKey, u64).init(allocator),
             .learning_period_seconds = learning_period_seconds,
             .learning_start_time = time_compat.timestamp(),
             .is_learning = true,
@@ -165,14 +170,43 @@ pub const BaselineContext = struct {
 
     pub fn deinit(self: *Self) void {
         self.baselines.deinit();
+        self.prev_counts.deinit();
     }
 
-    /// Update baseline with new observation
+    /// Update baseline with a new per-interval observation (already a rate/delta).
     pub fn updateBaseline(self: *Self, key: BaselineKey, value: u64) !void {
         if (self.baselines.getPtr(key)) |stats| {
             stats.update(value);
         } else {
             try self.baselines.put(key, BaselineStats.init(value));
+        }
+    }
+
+    /// Convert a CUMULATIVE counter reading (as stored in the BPF
+    /// `syscall_counts` map) into the per-poll DELTA for `key`, advancing the
+    /// stored previous value. Returns null when no interval can be measured yet
+    /// (first reading for the key) or the counter went backwards (map cleared /
+    /// PID reuse) — the previous value is reseeded in that case. Callers must
+    /// use this rate, never the raw cumulative total: Z-scoring an ever-growing
+    /// counter against the running mean of that same growing counter measures
+    /// monotonic drift, not anomalies.
+    pub fn deriveRate(self: *Self, key: BaselineKey, cumulative: u64) !?u64 {
+        const gop = try self.prev_counts.getOrPut(key);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = cumulative;
+            return null;
+        }
+        const prev = gop.value_ptr.*;
+        gop.value_ptr.* = cumulative;
+        if (cumulative < prev) return null; // counter reset / PID reuse — reseeded
+        return cumulative - prev;
+    }
+
+    /// Feed a cumulative counter reading, updating the baseline with the derived
+    /// per-poll rate (see deriveRate). Used by the learning-phase pass.
+    pub fn updateBaselineCumulative(self: *Self, key: BaselineKey, cumulative: u64) !void {
+        if (try self.deriveRate(key, cumulative)) |rate| {
+            try self.updateBaseline(key, rate);
         }
     }
 

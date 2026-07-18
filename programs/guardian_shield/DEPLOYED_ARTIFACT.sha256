@@ -1,0 +1,13 @@
+# Guardian Shield — deployed artifact provenance
+#
+# libwarden.so is gitignored (build output), so the binary running as root at
+# /usr/local/lib/security/libwarden.so has no git SHA on its own. This records the
+# expected sha256 of the ReleaseSafe+stripped artifact so a deployed shield can be
+# audited against a known-good build. Regenerate on each release:
+#   zig build -Doptimize=ReleaseSafe && llvm-strip zig-out/lib/libwarden.so \
+#     && sha256sum zig-out/lib/libwarden.so | tee DEPLOYED_ARTIFACT.sha256
+#
+# Verify what is live:  sha256sum /usr/local/lib/security/libwarden.so
+
+dd257e770290990c1e8a45649efcccc5f53d9560656945b0e5d670f84f5ca130  libwarden.so
+5e8ca222b0acf43addd2a17a54175853d33fa85e7b48d85296646995df9cd9c0  libwarden-fork.so

@@ -243,6 +243,18 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("⚠️  Auto-terminate: ENABLED (processes will be killed on detection)\n", .{});
         }
         std.debug.print("📝 Correlation log: {s}\n", .{correlation_log_path});
+        // HONESTY GATE: the staged-exfil correlation model links file
+        // descriptors across socket→connect→open→read→write, but every fd it
+        // needs is a syscall RETURN value. The current eBPF attaches only to
+        // raw_syscalls/sys_enter, which carries arguments, not return values —
+        // so no fd is available to feed onSocket/onConnect/onOpen and the
+        // engine receives no events. Until a sys_exit return-value capture
+        // program is added and routed here, this flag records zero correlations.
+        // Do not present it as active detection.
+        std.debug.print("⚠️  NOTE: correlation is NOT yet wired to the event stream — it\n", .{});
+        std.debug.print("         requires syscall return-value (sys_exit) capture for fd\n", .{});
+        std.debug.print("         tracking, which the current sys_enter-only eBPF lacks.\n", .{});
+        std.debug.print("         See docs/AUDIT_AND_UPGRADE_PLAN.md (Phase 2 follow-up).\n", .{});
     }
     if (enable_grimoire) {
         std.debug.print("📖 Sovereign Grimoire (V6): ENABLED\n", .{});
@@ -463,6 +475,7 @@ pub fn main(init: std.process.Init) !void {
                     &detector,
                     &alert_queue,
                     map_fd,
+                    enable_learning, // adaptive learning folds rates back in
                 );
 
                 // Display progress with alert count
@@ -478,10 +491,10 @@ pub fn main(init: std.process.Init) !void {
                         .{ elapsed, duration_seconds });
                 }
 
-                // Update baselines in detection mode (adaptive learning)
-                if (enable_learning) {
-                    try updateBaselines(&baseline_ctx, map_fd);
-                }
+                // Note: adaptive baseline updates are handled inside
+                // detectAnomalies (single rate-window advance per poll); a
+                // second updateBaselines pass here would double-advance the
+                // window and feed spurious zero deltas.
             } else {
                 const elapsed = @divTrunc(current_time - start_time, 1000);
                 std.debug.print("\r⏱️  Elapsed: {d}/{d}s", .{ elapsed, duration_seconds });
@@ -577,6 +590,7 @@ fn detectAnomalies(
     detector: *anomaly.AnomalyDetector,
     alert_queue: *anomaly.AlertQueue,
     map_fd: c_int,
+    adaptive_learning: bool,
 ) !usize {
     var alerts_this_cycle: usize = 0;
 
@@ -598,17 +612,27 @@ fn detectAnomalies(
                     .syscall_nr = key.syscall_nr,
                 };
 
-                // Check if we have a baseline for this (PID, syscall) pair
-                if (baseline_ctx.getBaseline(baseline_key)) |stats| {
-                    // Detect anomaly
-                    if (detector.detectAnomaly(baseline_key, value, stats)) |alert| {
-                        // Enqueue alert (rate limited)
-                        if (alert_queue.enqueue(alert)) {
-                            alerts_this_cycle += 1;
-                        } else {
-                            // Alert was rate limited, free its message
-                            alert.deinit(baseline_ctx.allocator);
+                // Score against the per-poll RATE, not the raw cumulative
+                // counter — and advance the rate window exactly once here, so
+                // this pass is self-contained (no separate updateBaselines call
+                // that would double-advance the window and zero out the delta).
+                if (try baseline_ctx.deriveRate(baseline_key, value)) |observed| {
+                    if (baseline_ctx.getBaseline(baseline_key)) |stats| {
+                        if (detector.detectAnomaly(baseline_key, observed, stats)) |alert| {
+                            // Enqueue alert (rate limited)
+                            if (alert_queue.enqueue(alert)) {
+                                alerts_this_cycle += 1;
+                            } else {
+                                // Alert was rate limited, free its message
+                                alert.deinit(baseline_ctx.allocator);
+                            }
                         }
+                    }
+
+                    // Adaptive learning: fold the observed rate back into the
+                    // baseline so it tracks slow legitimate drift.
+                    if (adaptive_learning) {
+                        try baseline_ctx.updateBaseline(baseline_key, observed);
                     }
                 }
             }
@@ -642,7 +666,10 @@ fn updateBaselines(ctx: *baseline.BaselineContext, map_fd: c_int) !void {
                     .pid = key.pid,
                     .syscall_nr = key.syscall_nr,
                 };
-                try ctx.updateBaseline(baseline_key, value);
+                // The BPF map value is a CUMULATIVE per-(pid,syscall) counter;
+                // feed it as such so the baseline learns a per-poll rate, not
+                // the ever-growing total (see updateBaselineCumulative).
+                try ctx.updateBaselineCumulative(baseline_key, value);
             }
 
             if (c.bpf_map_get_next_key(map_fd, &key, &next_key) != 0) {

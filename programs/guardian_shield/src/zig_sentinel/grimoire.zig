@@ -781,9 +781,34 @@ pub const GrimoireEngine = struct {
         };
     }
 
+    /// Physical index of the path/filename pointer argument for syscalls that
+    /// take one. A single pattern step's `file_read`/`file_write` class matches
+    /// BOTH `open` (path at arg0) and `openat` (path at arg1 — arg0 is the
+    /// dirfd). If a string/path constraint used a hardcoded arg_index, `openat`
+    /// would read the dirfd integer as a userspace pointer, `readUserString`
+    /// would fault, and the constraint would silently never match — which is
+    /// why the /etc/shadow, ~/.ssh and rootkit(.ko) patterns effectively never
+    /// fired (modern software opens almost exclusively via `openat`).
+    fn pathArgIndex(syscall_nr: u32) ?u8 {
+        return switch (syscall_nr) {
+            Syscall.open => 0,
+            Syscall.openat => 1,
+            Syscall.execve => 0,
+            else => null,
+        };
+    }
+
     /// Validate single argument constraint
-    fn validateConstraint(self: *Self, constraint: ArgConstraint, args: [6]u64, pid: u32) !bool {
-        const arg_value = args[constraint.arg_index];
+    fn validateConstraint(self: *Self, constraint: ArgConstraint, syscall_nr: u32, args: [6]u64, pid: u32) !bool {
+        // String/path constraints target a userspace pointer whose argument
+        // position depends on the syscall; resolve it dynamically rather than
+        // trusting the pattern's literal arg_index (see pathArgIndex). Numeric
+        // constraints (flags, mode, uid) keep their declared position.
+        const eff_index: u8 = switch (constraint.constraint_type) {
+            .str_equals, .str_prefix, .str_suffix, .str_contains => pathArgIndex(syscall_nr) orelse constraint.arg_index,
+            else => constraint.arg_index,
+        };
+        const arg_value = args[eff_index];
 
         return switch (constraint.constraint_type) {
             .any => true,
@@ -901,13 +926,22 @@ pub const GrimoireEngine = struct {
 
             self.patterns_checked += 1;
 
-            // Check whitelist if present
+            // Check whitelist if present. If the binary can't be resolved —
+            // the process already exited (a normal TOCTOU race between the eBPF
+            // event and this userspace /proc lookup) or /proc is unreadable —
+            // treat it as NOT whitelisted and keep matching. An unresolvable
+            // process must never earn a free pass, and a vanished PID must not
+            // abort detection for the entire event (the previous hard `try`
+            // propagated ProcessNotFound and silently dropped the syscall).
             if (pattern.whitelisted_binaries) |wl| {
-                const binary = try self.getProcessBinaryName(pid);
-                for (wl) |white| {
-                    if (std.mem.eql(u8, binary, white)) {
-                        continue :outer; // Skip this pattern for whitelisted binary
+                if (self.getProcessBinaryName(pid)) |binary| {
+                    for (wl) |white| {
+                        if (std.mem.eql(u8, binary, white)) {
+                            continue :outer; // Skip this pattern for whitelisted binary
+                        }
                     }
+                } else |_| {
+                    // Unresolved binary → fall through and continue matching.
                 }
             }
 
@@ -999,7 +1033,7 @@ pub const GrimoireEngine = struct {
             // Check argument constraints
             inline for (step.arg_constraints) |opt_con| {
                 if (opt_con) |con| {
-                    if (!try self.validateConstraint(con, args, pid)) {
+                    if (!try self.validateConstraint(con, syscall_nr, args, pid)) {
                         s.reset();
                         continue :outer;
                     }
@@ -1061,8 +1095,10 @@ pub const GrimoireEngine = struct {
 // ============================================================
 
 test "grimoire: pattern struct size" {
+    // Bound tracks the comptime assertion in this file: raised to 1536 bytes
+    // when patterns grew to 6 steps with 64-byte inline string constraints.
     const size = @sizeOf(GrimoirePattern);
-    try std.testing.expect(size <= 1024); // Adjusted for string constraints
+    try std.testing.expect(size <= 1536);
 }
 
 test "grimoire: hot patterns fit in L1 cache" {
@@ -1076,11 +1112,17 @@ test "grimoire: detect reverse shell pattern" {
 
     const pid: u32 = 12345;
 
-    // Simulate reverse shell sequence
-    _ = try engine.processSyscall(pid, Syscall.socket, 1000000, [_]u64{0} ** 6); // socket()
-    _ = try engine.processSyscall(pid, Syscall.dup2, 2000000, [_]u64{ 3, 0, 0, 0, 0, 0 }); // dup2(3, 0)
-    _ = try engine.processSyscall(pid, Syscall.dup2, 3000000, [_]u64{ 3, 1, 0, 0, 0, 0 }); // dup2(3, 1)
-    const result = try engine.processSyscall(pid, Syscall.execve, 4000000, [_]u64{0} ** 6); // execve()
+    // Full 6-step Metasploit-shaped sequence the current `reverse_shell_classic`
+    // pattern models: socket -> connect -> dup2(_,2) -> dup2(_,1) -> dup2(_,0)
+    // -> execve. For dup2, arg_index 1 is the target fd (2=stderr, 1=stdout,
+    // 0=stdin — Metasploit redirects stderr first, stdin last). Timestamps are
+    // 1 ms apart, well inside every per-step delta and the 5 s sequence window.
+    _ = try engine.processSyscall(pid, Syscall.socket, 1_000_000, [_]u64{0} ** 6);
+    _ = try engine.processSyscall(pid, Syscall.connect, 2_000_000, [_]u64{ 3, 0, 0, 0, 0, 0 });
+    _ = try engine.processSyscall(pid, Syscall.dup2, 3_000_000, [_]u64{ 3, 2, 0, 0, 0, 0 });
+    _ = try engine.processSyscall(pid, Syscall.dup2, 4_000_000, [_]u64{ 3, 1, 0, 0, 0, 0 });
+    _ = try engine.processSyscall(pid, Syscall.dup2, 5_000_000, [_]u64{ 3, 0, 0, 0, 0, 0 });
+    const result = try engine.processSyscall(pid, Syscall.execve, 6_000_000, [_]u64{0} ** 6);
 
     try std.testing.expect(result != null);
     if (result) |r| {

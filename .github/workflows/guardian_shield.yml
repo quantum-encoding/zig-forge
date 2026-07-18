@@ -1,0 +1,79 @@
+name: guardian_shield
+
+# Quality gate for the Guardian Shield component. Previously there was no CI at
+# all — build, test, and the zig-lens security scan were entirely manual. This
+# runs them on every change that touches guardian_shield (or the scanner it is
+# gated by) so regressions in the enforcement/detection code, the test suite, or
+# the six anti-pattern classes (see zig-forge/CLAUDE.md) are caught in PR.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "programs/guardian_shield/**"
+      - "programs/zig_lens/**"
+      - ".github/workflows/guardian_shield.yml"
+  pull_request:
+    paths:
+      - "programs/guardian_shield/**"
+      - "programs/zig_lens/**"
+      - ".github/workflows/guardian_shield.yml"
+
+# Pin the toolchain to the version this tree targets. build.zig cross-pins the
+# artifacts to x86_64-linux-gnu.2.39, so the host just needs the compiler.
+env:
+  ZIG_VERSION: "0.16.0"
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The zig_sentinel target links libbpf (linkSystemLibrary("bpf")); without
+      # the dev package the build fails to find -lbpf. clang/llvm cover the BPF
+      # object compilation used by the eBPF components.
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libbpf-dev clang llvm
+
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Build (Debug)
+        working-directory: programs/guardian_shield
+        run: zig build
+
+      - name: Test
+        working-directory: programs/guardian_shield
+        run: zig build test
+
+      - name: Build (ReleaseSafe)
+        working-directory: programs/guardian_shield
+        run: zig build -Doptimize=ReleaseSafe
+
+  lens-strict:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Build zig_lens
+        working-directory: programs/zig_lens
+        run: zig build
+
+      # CLAUDE.md invariant: the tree exits 0 under `zig-lens --strict`. This
+      # scan catches JSON-in-format-string, shell-child RCE, non-constant-time
+      # secret compares, and disabled-TLS regressions before merge.
+      - name: zig-lens --strict (guardian_shield)
+        run: |
+          BIN="$(find programs/zig_lens/zig-out -type f -name 'zig_lens' | head -1)"
+          if [ -z "$BIN" ]; then echo "zig_lens binary not found after build"; exit 1; fi
+          "$BIN" --strict programs/guardian_shield/
