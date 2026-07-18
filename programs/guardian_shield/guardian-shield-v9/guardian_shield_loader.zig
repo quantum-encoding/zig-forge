@@ -687,6 +687,34 @@ fn insertInode(fd: c_int, path: [:0]const u8) void {
     _ = c.bpf_map_update_elem(fd, &id, &one, c.BPF_ANY);
 }
 
+// Parse "a.b.c.d/prefix" and insert into the egress_allow LPM trie. addr bytes
+// are network order (inet_pton output = MSB first), matching the BPF key + the
+// dest's sin_addr.s_addr. Returns true on success.
+fn insertCidr(fd: c_int, cidr: []const u8) bool {
+    const slash = std.mem.indexOfScalar(u8, cidr, '/') orelse {
+        std.log.warn("egress_allow '{s}' missing /prefix, skipping", .{cidr});
+        return false;
+    };
+    const ip_str = cidr[0..slash];
+    const prefix = std.fmt.parseInt(u32, cidr[slash + 1 ..], 10) catch {
+        std.log.warn("egress_allow '{s}' bad prefix, skipping", .{cidr});
+        return false;
+    };
+    if (prefix > 32) {
+        std.log.warn("egress_allow '{s}' prefix > 32 (IPv6 not supported in the trie), skipping", .{cidr});
+        return false;
+    }
+    var zip: [64]u8 = undefined;
+    const zip_s = std.fmt.bufPrintZ(&zip, "{s}", .{ip_str}) catch return false;
+    var key = std.mem.zeroes(EgressKey);
+    key.prefixlen = prefix;
+    if (c.inet_pton(c.AF_INET, zip_s.ptr, &key.addr) != 1) {
+        std.log.warn("egress_allow '{s}' not a valid IPv4, skipping", .{cidr});
+        return false;
+    }
+    return c.bpf_map_update_elem(fd, &key, &@as(u8, 1), c.BPF_ANY) == 0;
+}
+
 fn makePinDir(dir: []const u8) !void {
     var zbuf: [MAX_PATH_BYTES]u8 = undefined;
     const zdir = try std.fmt.bufPrintZ(&zbuf, "{s}", .{dir});
