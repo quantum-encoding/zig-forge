@@ -424,12 +424,9 @@ static __always_inline bool path_is_protected(__u8 *path, __u32 len)
         len = MAX_PATH_LEN - 1;
     key.prefixlen = len * 8;
 
-#pragma unroll
-    for (__u32 j = 0; j < MAX_PATH_LEN; j++) {
-        if (j >= len)
-            break;
-        key.data[j] = path[j];
-    }
+    // Single bounded copy (len <= 255 <= sizeof(key.data)) - no loop.
+    if (len > 0)
+        bpf_probe_read_kernel(key.data, len, path);
 
     struct path_rule *rule = bpf_map_lookup_elem(&protected_paths, &key);
     if (!rule || rule->action != 1)
