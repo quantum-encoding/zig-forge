@@ -213,6 +213,13 @@ tool legitimately reads your AWS/SSH keys. This is high-value + low-false-positi
 for v1; a later version can add Metatron-style isBuildToolSecret handling.
 This block is always-on for tainted/agent subtrees, independent of agent-
 containment / hardening posture. It breaks the endpoint step of the harvest.
+
+EGRESS TRADEOFF: with enforce_egress=true and only the private-range defaults, a
+tainted `npm install` reaching a PUBLIC registry is also denied unless you
+allowlist that registry's CIDRs in config egress_allow. That is the honest cost
+of egress-jailing build tools - set enforce_egress=false to log-only (detect)
+first, or add the registry CIDRs. IPv4 only in the allow trie; IPv6 loopback/
+link-local/ULA are allowed inline, global IPv6 is treated as public.
 NOTE
 
 [[ $N_FAIL -eq 0 ]] && exit 0 || exit 1
