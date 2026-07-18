@@ -544,17 +544,14 @@ int BPF_PROG(gs_exec, struct task_struct *p, pid_t old_pid, struct linux_binprm 
 
     __u32 tgid = BPF_CORE_READ(p, tgid);
     const char *filename = BPF_CORE_READ(bprm, filename);
-    if (!filename)
-        return 0;
 
-    // Copy the full exe path.
+    // 1) Operator exempt full-path override. The full exe path is the map key;
+    // one helper call fills a zeroed key buffer (no parsing loop).
     char full[MAX_EXE_PATH];
     __builtin_memset(full, 0, sizeof(full));
-    long flen = bpf_probe_read_kernel_str(full, sizeof(full), filename);
-    if (flen <= 0)
-        return 0;
+    if (filename)
+        bpf_probe_read_kernel_str(full, sizeof(full), filename);
 
-    // 1) Operator exempt full-path override.
     __u8 *ex = bpf_map_lookup_elem(&exempt_exes, full);
     if (ex) {
         struct proc_tag t = {};
@@ -565,26 +562,16 @@ int BPF_PROG(gs_exec, struct task_struct *p, pid_t old_pid, struct linux_binprm 
         return 0;
     }
 
-    // 2) Agent-launcher basename match.
+    // 2) Agent-launcher basename match. Take the basename DIRECTLY from the exe
+    // dentry's leaf name (bprm->file->f_path.dentry->d_name) - the kernel
+    // already isolated the last component, so there is no string scan and no
+    // variable-offset access (which is what blew the verifier's 1M-insn limit).
+    struct dentry *ed = BPF_CORE_READ(bprm, file, f_path.dentry);
+    const unsigned char *leaf = BPF_CORE_READ(ed, d_name.name);
     char base[MAX_EXE_NAME];
     __builtin_memset(base, 0, sizeof(base));
-    // find last '/'
-    __u32 start = 0;
-#pragma unroll
-    for (__u32 i = 0; i < MAX_EXE_PATH; i++) {
-        if (i >= (__u32)flen)
-            break;
-        if (full[i] == '/')
-            start = i + 1;
-    }
-#pragma unroll
-    for (__u32 i = 0; i < MAX_EXE_NAME - 1; i++) {
-        __u32 si = (start + i) & (MAX_EXE_PATH - 1);
-        char c = full[si];
-        if (c == '\0' || (start + i) >= (__u32)flen)
-            break;
-        base[i] = c;
-    }
+    if (leaf)
+        bpf_probe_read_kernel_str(base, sizeof(base), leaf);
 
     __u8 *is_agent = bpf_map_lookup_elem(&agent_exe_names, base);
     if (is_agent) {
