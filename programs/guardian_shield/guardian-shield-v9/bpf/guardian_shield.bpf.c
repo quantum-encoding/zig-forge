@@ -322,6 +322,8 @@ struct gs_config {
                          // everyone except TAG_TRUSTED, + self-protection hooks
     __u8 enforce_cred_read; // 1 = deny TAINTED/AGENT reads of credential_paths
                             // (supply-chain harvest block; on by default)
+    __u8 enforce_egress; // 1 = deny TAINTED/AGENT connect() to non-allowlisted
+                         // public dests (exfil block; on by default)
 };
 
 struct {
