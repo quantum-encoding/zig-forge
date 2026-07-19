@@ -32,6 +32,8 @@
 
   "agent_exes": [
     "claude",
+    "quantum-diary",
+    "Quantum Diary",
     "cursor",
     "aider",
     "cody",

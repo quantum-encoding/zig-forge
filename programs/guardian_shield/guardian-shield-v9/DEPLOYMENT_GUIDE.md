@@ -1,5 +1,11 @@
 # Guardian Shield V9.0: Production Deployment Guide
 
+> **SUPERSEDED for the v9 rebuild.** This document describes the earlier
+> prototype flow (`build_and_deploy.sh`, systemd service, YAML policy). For
+> the current, live-verified v9 BPF-LSM layer use **`INSTALL.md`**
+> (`./install.sh` / `./uninstall.sh`) and see `V9_STATUS.md` for the
+> architecture and verification record.
+
 ## Overview
 
 Guardian Shield V9.0 implements **defense-in-depth** Linux security through multi-layered protection:
