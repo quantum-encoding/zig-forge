@@ -45,7 +45,27 @@ assumption, no sudo where it isn't needed.
   (back up → parse → mutate one node → atomic write). Skip it with `--no-wire-hook`
   and wire the hook by hand.
 
+**Build target (tier 1).** On Linux the installer builds **static musl**
+binaries by default: they are portable (no glibc-version dependency — one build
+runs on any distro) and it sidesteps a link failure seen with very new
+toolchains — gcc 16's `crt1.o` carries `.sframe` unwind sections whose
+`R_X86_64_PC64` relocations Zig's linker rejects when linking the *system*
+glibc CRT. macOS builds native. Override with `CHRONOS_ZIG_TARGET` (e.g.
+`CHRONOS_ZIG_TARGET=native` to force the system glibc toolchain, or a specific
+`<arch>-linux-musl`). Tier 1 needs no system C libraries, so musl is a clean fit.
+
 **Tier 2 (`install-daemon.sh`, Linux only), additionally:**
+
+> **Note.** The daemon links `libdbus-1` (a system library), so it **cannot**
+> use the static-musl path — it builds against **glibc**. On a bleeding-edge
+> box where the gcc-16 `.sframe` CRT issue above bites, the daemon build will
+> fail there until the toolchain settles (tier 1 is unaffected). Additionally,
+> the engine source currently targets a **Zig 0.16-dev** std API (`std.Io`,
+> the newer `std.process.run` signature) that is ahead of stable 0.16.0 — build
+> it with the matching Zig-dev, or wait for the engine to be pinned to stable.
+> The daemon is an optional add-on; the git-provenance tier that quantum-diary
+> detects does not need it.
+
 - **libdbus-1 dev** + **pkg-config** (Arch: `pacman -S dbus`; Debian/Ubuntu: `apt install libdbus-1-dev pkg-config`)
 - **libbpf dev** (Arch: `pacman -S libbpf`; Debian/Ubuntu: `apt install libbpf-dev`)
 - **sqlite3 dev** (Arch: `pacman -S sqlite`; Debian/Ubuntu: `apt install libsqlite3-dev`)

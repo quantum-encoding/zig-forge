@@ -71,6 +71,27 @@ FAILED=0
 fail() { echo "" >&2; echo "MISSING PREREQUISITE: $1" >&2; echo "  remediation: $2" >&2; FAILED=1; }
 note() { echo "  [ok] $*"; }
 
+# Zig target. On Linux we default to a STATIC musl build: the binaries become
+# portable (no glibc-version dependency — they run on any distro), and it
+# sidesteps a real link failure with very new toolchains (gcc 16's crt1.o
+# carries .sframe unwind sections whose R_X86_64_PC64 relocations Zig's linker
+# rejects when linking the SYSTEM glibc CRT). macOS builds native. Override
+# with CHRONOS_ZIG_TARGET (e.g. `native` to force the system toolchain, or a
+# specific `<arch>-linux-musl`).
+ZIG_TARGET="${CHRONOS_ZIG_TARGET:-}"
+if [ -z "$ZIG_TARGET" ]; then
+  case "$(uname -s)" in
+    Linux) ZIG_TARGET="$(uname -m)-linux-musl" ;;
+    *)     ZIG_TARGET="native" ;;
+  esac
+fi
+# Flag forms differ: `zig build` takes -Dtarget=, `zig build-exe` takes -target.
+BUILD_TARGET=(); EXE_TARGET=()
+if [ "$ZIG_TARGET" != native ]; then
+  BUILD_TARGET=("-Dtarget=$ZIG_TARGET")
+  EXE_TARGET=("-target" "$ZIG_TARGET")
+fi
+
 # ---------------------------------------------------------------------------
 # Prerequisite gate — collect every failure, then abort once with all of them.
 # ---------------------------------------------------------------------------
@@ -126,13 +147,13 @@ fi
 STAGE="$SCRIPT_DIR/.stage"
 if [ "$SKIP_BUILD" = 0 ]; then
   echo ""
-  echo "-- building chronos-hook (zig build) --"
-  ( cd "$HOOK_SRC" && zig build -Doptimize=ReleaseSafe )
+  echo "-- building chronos-hook (zig build, target=$ZIG_TARGET) --"
+  ( cd "$HOOK_SRC" && zig build -Doptimize=ReleaseSafe "${BUILD_TARGET[@]}" )
 
   echo "-- building chronos-stamp (daemon-free, from chronos-stamp-macos.zig) --"
   mkdir -p "$STAGE"
   ( cd "$ENGINE_SRC" && zig build-exe chronos-stamp-macos.zig -lc -O ReleaseSafe \
-        -femit-bin="$STAGE/chronos-stamp" )
+        "${EXE_TARGET[@]}" -femit-bin="$STAGE/chronos-stamp" )
 fi
 
 HOOK_BIN="$HOOK_SRC/zig-out/bin/chronos-hook"
