@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const http = std.http;
 const c = std.c;
 
@@ -14,6 +15,12 @@ const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 // from forcing an unbounded read. Decompressed output is bounded separately by
 // the caller's buffer size.
 const MAX_COMPRESSED_BODY: usize = 64 * 1024 * 1024;
+
+// Upper bound on a configured timeout (24h). An env-supplied value is clamped to
+// this before being converted to nanoseconds, so an absurd
+// `HTTP_SENTINEL_TIMEOUT_MS` can never overflow the timer's signed nanosecond
+// field (which would abort the host process through the panic seal).
+const MAX_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1000;
 
 // =============================================================================
 // HTTP Sentinel FFI - C-Compatible HTTP Client Interface
@@ -95,6 +102,35 @@ pub const HttpHeader = extern struct {
     value: [*c]const u8,
     value_len: usize,
 };
+
+// =============================================================================
+// ABI lock
+// =============================================================================
+//
+// These two structs are mirrored by hand in two places outside this repository's
+// control-flow: `include/http_sentinel.h` (the C contract) and quantum_vault's
+// `src-tauri/src/core/http_sentinel.rs` `#[repr(C)]` declarations. Neither
+// mirror is compiled against this source, so a field reorder here would be
+// caught only at runtime, as garbage status codes in a live trading path.
+//
+// The comptime assertions below pin the layout for the 64-bit targets this
+// library actually ships to (host macOS/Linux + aarch64-linux-android). Any
+// change that trips them is an FFI break and requires a lockstep update of both
+// mirrors.
+comptime {
+    if (@sizeOf(usize) == 8) {
+        std.debug.assert(@sizeOf(HttpResponse) == 24);
+        std.debug.assert(@offsetOf(HttpResponse, "status_code") == 0);
+        std.debug.assert(@offsetOf(HttpResponse, "body_len") == 8);
+        std.debug.assert(@offsetOf(HttpResponse, "truncated") == 16);
+
+        std.debug.assert(@sizeOf(HttpHeader) == 32);
+        std.debug.assert(@offsetOf(HttpHeader, "name") == 0);
+        std.debug.assert(@offsetOf(HttpHeader, "name_len") == 8);
+        std.debug.assert(@offsetOf(HttpHeader, "value") == 16);
+        std.debug.assert(@offsetOf(HttpHeader, "value_len") == 24);
+    }
+}
 
 // =============================================================================
 // Core HTTP Functions
@@ -381,7 +417,9 @@ fn performRequest(
 fn readTimeoutMs() u64 {
     if (c.getenv("HTTP_SENTINEL_TIMEOUT_MS")) |raw| {
         const v = std.mem.span(raw);
-        return std.fmt.parseInt(u64, v, 10) catch DEFAULT_TIMEOUT_MS;
+        const parsed = std.fmt.parseInt(u64, v, 10) catch return DEFAULT_TIMEOUT_MS;
+        if (parsed == 0) return 0; // 0 explicitly disables the deadline.
+        return @min(parsed, MAX_TIMEOUT_MS);
     }
     return DEFAULT_TIMEOUT_MS;
 }
@@ -432,8 +470,13 @@ fn runHttpTask(ctx: *ReqCtx) void {
 }
 
 fn timerTask(io: std.Io, ns: u64) void {
+    const Ns = @FieldType(@FieldType(std.Io.Clock.Duration, "raw"), "nanoseconds");
+    // `ns` is derived from a clamped millisecond value (see MAX_TIMEOUT_MS), so
+    // this saturating cast is unreachable in practice — it is here so a future
+    // change to the bound degrades into a very long sleep rather than an abort.
+    const nanos: Ns = std.math.cast(Ns, ns) orelse std.math.maxInt(Ns);
     const to: std.Io.Timeout = .{ .duration = .{
-        .raw = .{ .nanoseconds = @intCast(ns) },
+        .raw = .{ .nanoseconds = nanos },
         .clock = .awake,
     } };
     to.sleep(io) catch {};
@@ -619,9 +662,13 @@ export fn http_sentinel_version() [*:0]const u8 {
     return "http-sentinel-ffi-1.0.0";
 }
 
-/// Get Zig stdlib version
+/// Get the Zig toolchain version this library was compiled with.
+///
+/// Derived from `builtin.zig_version_string` at comptime — never a hand-written
+/// literal, which silently lied about the toolchain after every compiler bump
+/// (it still claimed `0.16.0-dev.1484` long after the tree moved to 0.16.0).
 export fn http_sentinel_zig_version() [*:0]const u8 {
-    return "zig-0.16.0-dev.1484";
+    return "zig-" ++ builtin.zig_version_string;
 }
 
 // =============================================================================
@@ -689,6 +736,77 @@ test "POST request with body (live, opt-in)" {
 test "version strings" {
     const version = http_sentinel_version();
     try std.testing.expect(version[0] != 0);
+}
+
+test "zig version string reports the actual compiling toolchain" {
+    const reported = std.mem.span(http_sentinel_zig_version());
+    try std.testing.expectEqualStrings("zig-" ++ builtin.zig_version_string, reported);
+    // Guards against the hardcoded-literal regression: the string must track the
+    // compiler, so it can never be a stale version that no longer builds this.
+    try std.testing.expect(std.mem.indexOf(u8, reported, builtin.zig_version_string) != null);
+}
+
+// -----------------------------------------------------------------------------
+// External ABI anchor
+//
+// The expected values below are transcribed from declarations this library did
+// not author and does not compile:
+//
+//   quantum_vault/src-tauri/src/core/http_sentinel.rs
+//     #[repr(i32)] pub enum HttpSentinelError { Success = 0, InvalidUrl = -1, … }
+//     #[repr(C)] pub struct HttpResponseFFI { status_code: u16, body_len: usize,
+//                                             truncated: bool }
+//     #[repr(C)] pub struct HttpHeaderFFI  { name: *const u8, name_len: usize,
+//                                             value: *const u8, value_len: usize }
+//
+// (mirrored again in include/http_sentinel.h). If either side drifts, this test
+// fails at build time instead of the consumer misreading a struct at runtime in
+// the live Alpaca order path.
+// -----------------------------------------------------------------------------
+test "error codes match the consumer's repr(i32) mirror" {
+    const E = HttpSentinelError;
+    try std.testing.expectEqual(@as(c_int, 0), @intFromEnum(E.success));
+    try std.testing.expectEqual(@as(c_int, -1), @intFromEnum(E.invalid_url));
+    try std.testing.expectEqual(@as(c_int, -2), @intFromEnum(E.connection_failed));
+    try std.testing.expectEqual(@as(c_int, -3), @intFromEnum(E.request_failed));
+    try std.testing.expectEqual(@as(c_int, -4), @intFromEnum(E.response_too_large));
+    try std.testing.expectEqual(@as(c_int, -5), @intFromEnum(E.invalid_input));
+    try std.testing.expectEqual(@as(c_int, -6), @intFromEnum(E.timeout));
+    try std.testing.expectEqual(@as(c_int, -7), @intFromEnum(E.tls_error));
+    try std.testing.expectEqual(@as(c_int, -8), @intFromEnum(E.internal_error));
+    try std.testing.expectEqual(@as(c_int, -9), @intFromEnum(E.buffer_too_small));
+}
+
+test "extern struct layouts match the consumer's repr(C) mirror" {
+    if (@sizeOf(usize) != 8) return error.SkipZigTest;
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(HttpResponse));
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(HttpResponse, "status_code"));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(HttpResponse, "body_len"));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(HttpResponse, "truncated"));
+
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(HttpHeader));
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(HttpHeader, "name"));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(HttpHeader, "name_len"));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(HttpHeader, "value"));
+    try std.testing.expectEqual(@as(usize, 24), @offsetOf(HttpHeader, "value_len"));
+}
+
+test "get_error tolerates a null buffer and clears on a successful-path reset" {
+    // A null buffer with a nonzero size must report the length, not memcpy to 0.
+    setLastError("boom");
+    try std.testing.expectEqual(@as(usize, 4), http_sentinel_get_error(null, 128));
+
+    var buf: [16]u8 = undefined;
+    const n = http_sentinel_get_error(&buf, buf.len);
+    try std.testing.expectEqualStrings("boom", buf[0..n]);
+    try std.testing.expectEqual(@as(u8, 0), buf[n]); // NUL-terminated
+
+    // A tiny buffer truncates and still terminates rather than overflowing.
+    var small: [3]u8 = undefined;
+    const m = http_sentinel_get_error(&small, small.len);
+    try std.testing.expectEqual(@as(usize, 2), m);
+    try std.testing.expectEqualStrings("bo", small[0..m]);
+    try std.testing.expectEqual(@as(u8, 0), small[m]);
 }
 
 // -----------------------------------------------------------------------------
@@ -831,7 +949,7 @@ const sock = struct {
         zero: [8]u8 = .{ 0, 0, 0, 0, 0, 0, 0, 0 },
     };
 
-    const ServerMode = enum { gzip_ok, plain_ok, hang };
+    const ServerMode = enum { gzip_ok, plain_ok, hang, echo_404 };
 
     const Server = struct {
         listen_fd: c_int,
@@ -839,6 +957,10 @@ const sock = struct {
         mode: ServerMode,
         thread: std.Thread,
         plain_body_len: usize,
+        /// Raw request bytes as they arrived on the wire, captured so a test can
+        /// assert what the client actually sent (not what it intended to send).
+        req_buf: [2048]u8 = undefined,
+        req_len: usize = 0,
     };
 
     fn handle(srv: *Server) void {
@@ -847,7 +969,14 @@ const sock = struct {
         defer _ = close(conn);
         // Drain the request (a small GET/POST fits in one read).
         var reqbuf: [2048]u8 = undefined;
-        _ = read(conn, &reqbuf, reqbuf.len);
+        const got = read(conn, &reqbuf, reqbuf.len);
+        if (got > 0) {
+            // read() cannot report more than the buffer it was given; clamp
+            // anyway so a hostile/buggy libc can't drive an over-long memcpy.
+            const n = @min(@as(usize, @intCast(got)), reqbuf.len);
+            @memcpy(srv.req_buf[0..n], reqbuf[0..n]);
+            srv.req_len = n;
+        }
 
         switch (srv.mode) {
             .hang => {
@@ -870,6 +999,10 @@ const sock = struct {
                 const h = std.fmt.bufPrint(&hdr, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{body.len}) catch return;
                 _ = write(conn, h.ptr, h.len);
                 _ = write(conn, &body, body.len);
+            },
+            .echo_404 => {
+                const resp = "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnope";
+                _ = write(conn, resp.ptr, resp.len);
             },
         }
     }
@@ -900,6 +1033,7 @@ const sock = struct {
             .mode = mode,
             .thread = undefined,
             .plain_body_len = 0,
+            .req_len = 0,
         };
         srv.thread = try std.Thread.spawn(.{}, handle, .{srv});
     }
@@ -950,6 +1084,51 @@ test "loopback: an oversized body is truncated and flagged, not errored" {
     try std.testing.expectEqual(@as(usize, 10), response.body_len);
     try std.testing.expect(response.truncated);
     try std.testing.expectEqualStrings("ABCDEFGHIJ", response_body[0..response.body_len]);
+}
+
+test "loopback: caller headers reach the wire verbatim and a 404 is not an error" {
+    var srv: sock.Server = undefined;
+    sock.start(&srv, .echo_404) catch |err| switch (err) {
+        error.SkipZigTest => return error.SkipZigTest,
+        else => return err,
+    };
+    defer sock.stop(&srv);
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrintZ(&url_buf, "http://127.0.0.1:{d}/", .{srv.port});
+
+    const auth = "Bearer test-token";
+    const headers = [_]HttpHeader{
+        .{ .name = "Authorization", .name_len = 13, .value = auth, .value_len = auth.len },
+        .{ .name = "X-Anchor", .name_len = 8, .value = "vault", .value_len = 5 },
+    };
+
+    var response_body: [64]u8 = undefined;
+    var response: HttpResponse = undefined;
+    const result = http_sentinel_post(
+        url.ptr,
+        &headers,
+        headers.len,
+        "{}",
+        2,
+        &response_body,
+        response_body.len,
+        &response,
+    );
+
+    // A non-2xx status is a successful exchange; the status travels in the
+    // struct, not the return code (this is the contract quantum_vault relies on).
+    try std.testing.expectEqual(@as(c_int, 0), result);
+    try std.testing.expectEqual(@as(u16, 404), response.status_code);
+    try std.testing.expectEqualStrings("nope", response_body[0..response.body_len]);
+
+    // Both headers must appear as real CRLF-delimited header lines — the header
+    // array path is what once wrote uninitialized stack memory onto the wire.
+    const sent = srv.req_buf[0..srv.req_len];
+    try std.testing.expect(std.mem.indexOf(u8, sent, "Authorization: Bearer test-token\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sent, "X-Anchor: vault\r\n") != null);
+    try std.testing.expect(std.mem.startsWith(u8, sent, "POST / HTTP/1.1\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, sent, "\r\n\r\n{}") != null);
 }
 
 test "loopback: a non-responsive server trips the request timeout" {

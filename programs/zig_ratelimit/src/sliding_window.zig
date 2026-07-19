@@ -9,6 +9,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const compat = @import("compat.zig");
+const numeric = @import("numeric.zig");
+const satI128ToI64 = numeric.satI128ToI64;
 
 /// Sliding Window Log - Exact tracking using timestamp log
 /// More accurate but uses memory proportional to request rate
@@ -25,6 +27,8 @@ pub const SlidingWindowLog = struct {
     window_ns: i64,
     /// Allocator
     allocator: Allocator,
+    /// Time source. Defaults to CLOCK_MONOTONIC; tests inject a `ManualClock`.
+    clock: compat.Clock,
 
     const Self = @This();
 
@@ -32,6 +36,11 @@ pub const SlidingWindowLog = struct {
     /// limit: Max requests per window
     /// window_ms: Window duration in milliseconds
     pub fn init(allocator: Allocator, limit: usize, window_ms: u64) !Self {
+        return initWithClock(allocator, compat.monotonic_clock, limit, window_ms);
+    }
+
+    /// Initialize against a caller-supplied clock (deterministic testing).
+    pub fn initWithClock(allocator: Allocator, clock: compat.Clock, limit: usize, window_ms: u64) !Self {
         // Clamp-and-document (non-breaking): a 0 window makes the counter divide
         // by zero; a 0 limit makes the ring buffer length 0, so `% len` divides
         // by zero on the first insert. Clamp both to a safe minimum.
@@ -49,6 +58,7 @@ pub const SlidingWindowLog = struct {
             .limit = safe_limit,
             .window_ns = @as(i64, @intCast(safe_window_ms)) * 1_000_000,
             .allocator = allocator,
+            .clock = clock,
         };
     }
 
@@ -78,7 +88,7 @@ pub const SlidingWindowLog = struct {
     /// Try to acquire (record a request)
     /// Returns true if under limit
     pub fn tryAcquire(self: *Self) bool {
-        const now: i64 = @intCast(compat.nowNs());
+        const now = satI128ToI64(self.clock.now());
         self.cleanup(now);
 
         if (self.count >= self.limit) {
@@ -95,21 +105,21 @@ pub const SlidingWindowLog = struct {
 
     /// Check if a request would be allowed without recording it
     pub fn check(self: *Self) bool {
-        const now: i64 = @intCast(compat.nowNs());
+        const now = satI128ToI64(self.clock.now());
         self.cleanup(now);
         return self.count < self.limit;
     }
 
     /// Get current request count in window
     pub fn currentCount(self: *Self) usize {
-        const now: i64 = @intCast(compat.nowNs());
+        const now = satI128ToI64(self.clock.now());
         self.cleanup(now);
         return self.count;
     }
 
     /// Get remaining requests allowed
     pub fn remaining(self: *Self) usize {
-        const now: i64 = @intCast(compat.nowNs());
+        const now = satI128ToI64(self.clock.now());
         self.cleanup(now);
         return self.limit -| self.count;
     }
@@ -135,6 +145,8 @@ pub const SlidingWindowCounter = struct {
     limit: u64,
     /// Window duration in nanoseconds
     window_ns: i64,
+    /// Time source. Defaults to CLOCK_MONOTONIC; tests inject a `ManualClock`.
+    clock: compat.Clock,
 
     const Self = @This();
 
@@ -142,14 +154,20 @@ pub const SlidingWindowCounter = struct {
     /// limit: Max requests per window
     /// window_ms: Window duration in milliseconds
     pub fn init(limit: u64, window_ms: u64) Self {
+        return initWithClock(compat.monotonic_clock, limit, window_ms);
+    }
+
+    /// Initialize against a caller-supplied clock (deterministic testing).
+    pub fn initWithClock(clock: compat.Clock, limit: u64, window_ms: u64) Self {
         // Clamp-and-document (non-breaking): window_ms == 0 makes the
         // @divFloor(now - window_start, window_ns) below divide by zero.
         return Self{
             .current_count = 0,
             .previous_count = 0,
-            .window_start = @intCast(compat.nowNs()),
+            .window_start = satI128ToI64(clock.now()),
             .limit = limit,
             .window_ns = @as(i64, @intCast(@max(window_ms, 1))) * 1_000_000,
+            .clock = clock,
         };
     }
 
@@ -187,7 +205,7 @@ pub const SlidingWindowCounter = struct {
 
     /// Try to acquire (record a request)
     pub fn tryAcquire(self: *Self) bool {
-        const now: i64 = @intCast(compat.nowNs());
+        const now = satI128ToI64(self.clock.now());
         const count = self.weightedCount(now);
 
         if (count >= @as(f64, @floatFromInt(self.limit))) {
@@ -200,20 +218,20 @@ pub const SlidingWindowCounter = struct {
 
     /// Check without recording
     pub fn check(self: *Self) bool {
-        const now: i64 = @intCast(compat.nowNs());
+        const now = satI128ToI64(self.clock.now());
         const count = self.weightedCount(now);
         return count < @as(f64, @floatFromInt(self.limit));
     }
 
     /// Get approximate current request rate
     pub fn currentRate(self: *Self) f64 {
-        const now: i64 = @intCast(compat.nowNs());
+        const now = satI128ToI64(self.clock.now());
         return self.weightedCount(now);
     }
 
     /// Get remaining requests (approximate)
     pub fn remaining(self: *Self) u64 {
-        const now: i64 = @intCast(compat.nowNs());
+        const now = satI128ToI64(self.clock.now());
         const count = self.weightedCount(now);
         const limit_f = @as(f64, @floatFromInt(self.limit));
         if (count >= limit_f) return 0;
@@ -224,7 +242,7 @@ pub const SlidingWindowCounter = struct {
     pub fn reset(self: *Self) void {
         self.current_count = 0;
         self.previous_count = 0;
-        self.window_start = @intCast(compat.nowNs());
+        self.window_start = satI128ToI64(self.clock.now());
     }
 };
 
@@ -239,17 +257,25 @@ pub const FixedWindowCounter = struct {
     limit: u64,
     /// Window duration in nanoseconds
     window_ns: i64,
+    /// Time source. Defaults to CLOCK_MONOTONIC; tests inject a `ManualClock`.
+    clock: compat.Clock,
 
     const Self = @This();
 
     pub fn init(limit: u64, window_ms: u64) Self {
+        return initWithClock(compat.monotonic_clock, limit, window_ms);
+    }
+
+    /// Initialize against a caller-supplied clock (deterministic testing).
+    pub fn initWithClock(clock: compat.Clock, limit: u64, window_ms: u64) Self {
         // Clamp-and-document (non-breaking): a 0 window makes the reset math
         // below compare against a zero-length window.
         return Self{
             .count = 0,
-            .window_start = @intCast(compat.nowNs()),
+            .window_start = satI128ToI64(clock.now()),
             .limit = limit,
             .window_ns = @as(i64, @intCast(@max(window_ms, 1))) * 1_000_000,
+            .clock = clock,
         };
     }
 
@@ -261,7 +287,7 @@ pub const FixedWindowCounter = struct {
     }
 
     pub fn tryAcquire(self: *Self) bool {
-        const now: i64 = @intCast(compat.nowNs());
+        const now = satI128ToI64(self.clock.now());
         self.maybeResetWindow(now);
 
         if (self.count >= self.limit) {
@@ -273,20 +299,20 @@ pub const FixedWindowCounter = struct {
     }
 
     pub fn check(self: *Self) bool {
-        const now: i64 = @intCast(compat.nowNs());
+        const now = satI128ToI64(self.clock.now());
         self.maybeResetWindow(now);
         return self.count < self.limit;
     }
 
     pub fn remaining(self: *Self) u64 {
-        const now: i64 = @intCast(compat.nowNs());
+        const now = satI128ToI64(self.clock.now());
         self.maybeResetWindow(now);
         return self.limit -| self.count;
     }
 
     pub fn reset(self: *Self) void {
         self.count = 0;
-        self.window_start = @intCast(compat.nowNs());
+        self.window_start = satI128ToI64(self.clock.now());
     }
 };
 
@@ -407,7 +433,9 @@ test "sliding window counter within limit" {
 }
 
 test "sliding window counter sliding behavior" {
-    var limiter = SlidingWindowCounter.init(5, 100); // 5 per 100ms
+    // Deterministic: was a real 120ms sleep.
+    var mc = compat.ManualClock{};
+    var limiter = SlidingWindowCounter.initWithClock(mc.clock(), 5, 100); // 5 per 100ms
 
     for (0..5) |_| {
         _ = limiter.tryAcquire();
@@ -415,10 +443,7 @@ test "sliding window counter sliding behavior" {
 
     try std.testing.expect(!limiter.check());
 
-    // Wait for window to advance
-    compat.sleepNs(120_000_000); // 120ms
-
-    // Should allow more requests in new window
+    mc.advanceMs(120); // window advances
     try std.testing.expect(limiter.check());
 }
 
@@ -508,7 +533,9 @@ test "fixed window counter reset behavior" {
 }
 
 test "fixed window counter boundary behavior" {
-    var limiter = FixedWindowCounter.init(3, 100); // 3 per 100ms window
+    // Deterministic: was a real 110ms sleep.
+    var mc = compat.ManualClock{};
+    var limiter = FixedWindowCounter.initWithClock(mc.clock(), 3, 100); // 3 per 100ms
 
     // Fill first window
     for (0..3) |_| {
@@ -518,16 +545,15 @@ test "fixed window counter boundary behavior" {
     // Should be full
     try std.testing.expect(!limiter.check());
 
-    // Wait for window to expire
-    compat.sleepNs(110_000_000); // 110ms
-
-    // Should allow new requests in new window
+    mc.advanceMs(110); // window expires
     try std.testing.expect(limiter.tryAcquire());
 }
 
 test "sliding window log window expiry" {
+    // Deterministic: was a real 60ms sleep.
     const allocator = std.testing.allocator;
-    var limiter = try SlidingWindowLog.init(allocator, 2, 50); // 2 per 50ms
+    var mc = compat.ManualClock{};
+    var limiter = try SlidingWindowLog.initWithClock(allocator, mc.clock(), 2, 50); // 2 per 50ms
     defer limiter.deinit();
 
     for (0..2) |_| {
@@ -537,9 +563,6 @@ test "sliding window log window expiry" {
     // Full now
     try std.testing.expect(!limiter.check());
 
-    // Wait for window to expire
-    compat.sleepNs(60_000_000); // 60ms
-
-    // Should allow new requests
+    mc.advanceMs(60); // window expires
     try std.testing.expect(limiter.tryAcquire());
 }

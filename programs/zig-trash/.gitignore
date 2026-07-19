@@ -1,0 +1,15 @@
+# Build output
+zig-out/
+.zig-cache/
+
+# Stray debug binaries from ad-hoc `zig build-exe test_*.zig` sessions.
+# NOTE: test_alloc/test_stat/test_trash_access/test_zig_api/test_zig_api2 are
+# already TRACKED (~7.5 MB); adding them here does not untrack them. They need
+# a `git rm --cached` in a separate hygiene pass.
+test_alloc
+test_stat
+test_trash_access
+test_zig_api
+test_zig_api2
+
+.DS_Store

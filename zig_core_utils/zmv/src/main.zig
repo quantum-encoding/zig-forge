@@ -1,10 +1,11 @@
 //! zmv - Move (rename) files and directories
 //!
-//! Compatible with GNU mv:
+//! Compatible with GNU mv (behavior verified against GNU coreutils 9.10):
 //! - Move files and directories
 //! - -f, --force: do not prompt before overwriting
 //! - -i, --interactive: prompt before overwrite
 //! - -n, --no-clobber: do not overwrite existing file
+//! - -f/-i/-n override each other, last one wins (GNU semantics)
 //! - -u, --update: move only when source is newer
 //! - -v, --verbose: explain what is being done
 //! - -t, --target-directory=DIR: move all SOURCE to DIRECTORY
@@ -16,35 +17,76 @@ const libc = std.c;
 const Io = std.Io;
 const Dir = Io.Dir;
 
-// Cross-platform Stat structure
-const Stat = switch (builtin.os.tag) {
-    .linux => extern struct {
-        dev: u64, ino: u64, nlink: u64, mode: u32, uid: u32, gid: u32,
-        __pad0: u32 = 0, rdev: u64, size: i64, blksize: i64, blocks: i64,
-        atim: libc.timespec, mtim: libc.timespec, ctim: libc.timespec,
-        __unused: [3]i64 = .{ 0, 0, 0 },
-    },
-    .macos, .ios, .tvos, .watchos => extern struct {
-        dev: i32, mode: u16, nlink: u16, ino: u64, uid: u32, gid: u32, rdev: i32,
-        atim: libc.timespec, mtim: libc.timespec, ctim: libc.timespec, birthtim: libc.timespec,
-        size: i64, blocks: i64, blksize: i32, flags: u32, gen: u32, lspare: i32, qspare: [2]i64,
-    },
-    else => libc.Stat,
+// Libc functions not exposed through std.c. These take only path/scalar
+// arguments, so there is no struct-layout (INODE64) hazard; all stat calls
+// below go through std.c.fstatat / std.c.stat which bind the correct
+// $INODE64 symbols on x86_64 Darwin.
+extern "c" fn strerror(errnum: c_int) ?[*:0]u8;
+extern "c" fn mkfifo(path: [*:0]const u8, mode: libc.mode_t) c_int;
+
+fn errnoValue(e: libc.E) c_int {
+    return @intFromEnum(e);
+}
+
+/// lstat: never follows symlinks (uses std.c.fstatat so the correct
+/// $INODE64 variant is bound on x86_64 Darwin).
+pub fn lstatPath(path: [:0]const u8) ?libc.Stat {
+    var st: libc.Stat = undefined;
+    if (libc.fstatat(libc.AT.FDCWD, path.ptr, &st, libc.AT.SYMLINK_NOFOLLOW) != 0) return null;
+    return st;
+}
+
+/// stat: follows symlinks.
+pub fn statPath(path: [:0]const u8) ?libc.Stat {
+    var st: libc.Stat = undefined;
+    if (libc.fstatat(libc.AT.FDCWD, path.ptr, &st, 0) != 0) return null;
+    return st;
+}
+
+pub const FileType = enum {
+    file,
+    directory,
+    symlink,
+    fifo,
+    other,
 };
 
-extern "c" fn lstat(path: [*:0]const u8, buf: *Stat) c_int;
-extern "c" fn unlink(path: [*:0]const u8) c_int;
-extern "c" fn chmod(path: [*:0]const u8, mode: libc.mode_t) c_int;
+pub fn fileTypeOf(st: libc.Stat) FileType {
+    return switch (st.mode & libc.S.IFMT) {
+        libc.S.IFREG => .file,
+        libc.S.IFDIR => .directory,
+        libc.S.IFLNK => .symlink,
+        libc.S.IFIFO => .fifo,
+        else => .other,
+    };
+}
+
+/// File type of the link itself (lstat semantics), or null if it does not exist.
+pub fn getFileType(path: [:0]const u8) ?FileType {
+    const st = lstatPath(path) orelse return null;
+    return fileTypeOf(st);
+}
 
 fn promptOverwrite(dest: []const u8) bool {
-    // Write prompt to stderr (fd 2)
+    // Write prompt to stderr (fd 2); GNU mv prompts on stderr without newline.
     const prefix = "zmv: overwrite '";
     const suffix = "'? ";
     _ = std.c.write(2, prefix.ptr, prefix.len);
     _ = std.c.write(2, dest.ptr, dest.len);
     _ = std.c.write(2, suffix.ptr, suffix.len);
+    return readYes();
+}
 
-    // Read response from stdin (fd 0)
+/// GNU mv prompts "replace 'x', overriding mode ..." when the destination
+/// exists but is not writable, -f was not given, and stdin is a tty.
+fn promptReplaceMode(dest: []const u8, mode: u32) bool {
+    var buf: [1024]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "zmv: replace '{s}', overriding mode {o:0>4}? ", .{ dest, mode & 0o7777 }) catch return false;
+    _ = std.c.write(2, msg.ptr, msg.len);
+    return readYes();
+}
+
+fn readYes() bool {
     var buf: [128]u8 = undefined;
     const n = std.c.read(0, &buf, buf.len);
     if (n <= 0) return false;
@@ -52,10 +94,9 @@ fn promptOverwrite(dest: []const u8) bool {
 }
 
 fn getFileMtime(path: [:0]const u8) ?i128 {
-    var stat_buf: Stat = undefined;
-    const result = lstat(path.ptr, &stat_buf);
-    if (result != 0) return null;
-    return @as(i128, stat_buf.mtim.sec) * 1_000_000_000 + stat_buf.mtim.nsec;
+    const st = lstatPath(path) orelse return null;
+    const ts = st.mtime();
+    return @as(i128, ts.sec) * 1_000_000_000 + ts.nsec;
 }
 
 fn sourceIsNewer(src_z: [:0]const u8, dst_z: [:0]const u8) bool {
@@ -64,13 +105,22 @@ fn sourceIsNewer(src_z: [:0]const u8, dst_z: [:0]const u8) bool {
     return src_mtime > dst_mtime;
 }
 
-// Mode constants
-const S_IFMT: u32 = 0o170000;
-const S_IFREG: u32 = 0o100000;
-const S_IFDIR: u32 = 0o40000;
-const S_IFLNK: u32 = 0o120000;
+/// GNU "same file" rule as observed against coreutils 9.10:
+/// - same (dev, ino) by lstat (covers `mv s s` and hardlinks) -> same file
+/// - source is a symlink whose referent is the destination -> same file
+///   (`mv link target` errors, while `mv target link` replaces the link).
+fn isSameFile(src_z: [:0]const u8, dst_st: libc.Stat) bool {
+    const src_st = lstatPath(src_z) orelse return false;
+    if (src_st.dev == dst_st.dev and src_st.ino == dst_st.ino) return true;
+    if (fileTypeOf(src_st) == .symlink) {
+        if (statPath(src_z)) |resolved| {
+            if (resolved.dev == dst_st.dev and resolved.ino == dst_st.ino) return true;
+        }
+    }
+    return false;
+}
 
-const Config = struct {
+pub const Config = struct {
     force: bool = false,
     interactive: bool = false,
     no_clobber: bool = false,
@@ -91,67 +141,64 @@ const Config = struct {
     }
 };
 
-const FileType = enum {
-    file,
-    directory,
-    symlink,
-    other,
-};
-
-fn getFileType(path: [:0]const u8) ?FileType {
-    var stat_buf: Stat = undefined;
-    const result = lstat(path.ptr, &stat_buf);
-    if (result != 0) return null;
-
-    const mode = stat_buf.mode & S_IFMT;
-    return switch (mode) {
-        S_IFREG => .file,
-        S_IFDIR => .directory,
-        S_IFLNK => .symlink,
-        else => .other,
-    };
-}
-
-fn fileExists(path: [:0]const u8) bool {
-    return libc.access(path.ptr, 0) == 0;
-}
-
-fn moveFile(allocator: std.mem.Allocator, src: []const u8, dst: []const u8, config: *const Config) !void {
+pub fn moveFile(allocator: std.mem.Allocator, src: []const u8, dst: []const u8, config: *const Config) !void {
     const src_z = try allocator.dupeZ(u8, src);
     defer allocator.free(src_z);
 
     const dst_z = try allocator.dupeZ(u8, dst);
     defer allocator.free(dst_z);
 
-    // Check if source exists
-    if (!fileExists(src_z)) {
+    // Source existence via lstat: a dangling symlink is a movable entity
+    // (GNU mv moves dangling symlinks; access(2) would wrongly follow them).
+    const src_st = lstatPath(src_z) orelse {
         printErrorFmt("cannot stat '{s}': No such file or directory", .{src});
         return error.FileNotFound;
-    }
+    };
+    const src_type = fileTypeOf(src_st);
 
-    // Check if destination exists
-    if (fileExists(dst_z)) {
+    // Destination existence also via lstat: a symlink (even dangling) counts
+    // as an existing destination entry for overwrite decisions.
+    if (lstatPath(dst_z)) |dst_st| {
+        // Order verified against GNU mv 9.10:
+        //   -n skips silently (even for the same file, exit 0),
+        //   then the same-file check (beats -u/-i/-f, exit 1),
+        //   then -u, then the -i prompt, then dir/non-dir conflicts.
         if (config.no_clobber) {
             return; // Don't overwrite
         }
-        // Update mode: skip if source is not newer than destination
+        if (isSameFile(src_z, dst_st)) {
+            printErrorFmt("'{s}' and '{s}' are the same file", .{ src, dst });
+            return error.SameFile;
+        }
         if (config.update) {
             if (!sourceIsNewer(src_z, dst_z)) {
                 return; // Destination is newer or same age, skip
             }
         }
-        // Interactive mode: prompt before overwriting
-        if (config.interactive and !config.force) {
+        if (config.interactive) {
             if (!promptOverwrite(dst)) {
-                return;
+                // GNU mv 9.10 exits 1 when an overwrite prompt is declined.
+                return error.PromptDeclined;
+            }
+        } else if (!config.force) {
+            // POSIX: prompt for an unwritable destination only when stdin is
+            // a tty; otherwise behave as -f. rename(2) itself does not need
+            // W_OK on the destination.
+            if (libc.isatty(0) == 1 and libc.access(dst_z.ptr, 2) != 0) { // W_OK = 2
+                if (!promptReplaceMode(dst, dst_st.mode)) {
+                    return error.PromptDeclined;
+                }
             }
         }
-        if (!config.force) {
-            // Check if writable
-            if (libc.access(dst_z.ptr, 2) != 0) { // W_OK = 2
-                printErrorFmt("cannot move to '{s}': Permission denied", .{dst});
-                return error.AccessDenied;
-            }
+
+        const dst_type = fileTypeOf(dst_st);
+        if (src_type == .directory and dst_type != .directory) {
+            printErrorFmt("cannot overwrite non-directory '{s}' with directory '{s}'", .{ dst, src });
+            return error.CannotOverwrite;
+        }
+        if (src_type != .directory and dst_type == .directory) {
+            printErrorFmt("cannot overwrite directory '{s}' with non-directory '{s}'", .{ dst, src });
+            return error.CannotOverwrite;
         }
     }
 
@@ -164,40 +211,60 @@ fn moveFile(allocator: std.mem.Allocator, src: []const u8, dst: []const u8, conf
         return;
     }
 
-    // Check if it's a cross-device error
     const err = libc._errno().*;
-    if (err == 18) { // EXDEV - cross-device link
-        // Fall back to copy + delete
+    if (err == errnoValue(.XDEV)) {
+        // Cross-device: fall back to copy + delete
         try copyAndDelete(allocator, src, dst, src_z, dst_z, config);
         return;
     }
+    if (err == errnoValue(.INVAL)) {
+        // rename(2) EINVAL: moving a directory into itself
+        printErrorFmt("cannot move '{s}' to a subdirectory of itself, '{s}'", .{ src, dst });
+        return error.RenameFailed;
+    }
+    if (err == errnoValue(.NOTEMPTY) or err == errnoValue(.EXIST)) {
+        // dir-over-dir rename onto a non-empty directory
+        printErrorFmt("cannot overwrite '{s}': Directory not empty", .{dst});
+        return error.RenameFailed;
+    }
 
-    // Other error
     printErrorFmt("cannot move '{s}' to '{s}': {s}", .{ src, dst, errnoToString(err) });
     return error.RenameFailed;
 }
 
-fn copyAndDelete(allocator: std.mem.Allocator, src: []const u8, dst: []const u8, src_z: [:0]const u8, dst_z: [:0]const u8, config: *const Config) !void {
+pub fn copyAndDelete(allocator: std.mem.Allocator, src: []const u8, dst: []const u8, src_z: [:0]const u8, dst_z: [:0]const u8, config: *const Config) !void {
     const io = Io.Threaded.global_single_threaded.io();
 
-    const src_type = getFileType(src_z);
-    if (src_type == null) {
+    const src_type = getFileType(src_z) orelse {
         printErrorFmt("cannot stat '{s}': No such file or directory", .{src});
         return error.FileNotFound;
-    }
+    };
 
-    switch (src_type.?) {
+    switch (src_type) {
         .directory => {
             try copyDirectoryRecursive(allocator, src, dst, config);
             try deleteDirectoryRecursive(allocator, src);
         },
-        .file, .symlink, .other => {
-            try copyFileContents(allocator, io, src, dst, src_z, dst_z);
-            // Delete source
-            if (unlink(src_z.ptr) != 0) {
-                printErrorFmt("cannot remove '{s}'", .{src});
-                return error.UnlinkFailed;
-            }
+        .file => {
+            try copyFileContents(io, src, dst, src_z, dst_z);
+            try unlinkSource(src, src_z);
+        },
+        .symlink => {
+            // Recreate the link itself; never copy through it (a symlink in a
+            // moved tree must stay a symlink, and must not leak its target's
+            // contents).
+            try copySymlink(src, dst, src_z, dst_z);
+            try unlinkSource(src, src_z);
+        },
+        .fifo => {
+            try copyFifo(src, dst, src_z, dst_z);
+            try unlinkSource(src, src_z);
+        },
+        .other => {
+            // Sockets/devices: refuse instead of open(2)ing them (opening a
+            // FIFO/socket can block forever; devices would be content-copied).
+            printErrorFmt("cannot move '{s}' to '{s}': Operation not supported", .{ src, dst });
+            return error.UnsupportedFileType;
         },
     }
 
@@ -206,12 +273,52 @@ fn copyAndDelete(allocator: std.mem.Allocator, src: []const u8, dst: []const u8,
     }
 }
 
-fn copyFileContents(allocator: std.mem.Allocator, io: Io, src: []const u8, dst: []const u8, src_z: [:0]const u8, dst_z: [:0]const u8) !void {
-    _ = allocator;
+fn unlinkSource(src: []const u8, src_z: [:0]const u8) !void {
+    if (libc.unlink(src_z.ptr) != 0) {
+        printErrorFmt("cannot remove '{s}': {s}", .{ src, errnoToString(libc._errno().*) });
+        return error.UnlinkFailed;
+    }
+}
 
-    // Get source file info for permissions
-    var src_stat: Stat = undefined;
-    _ = lstat(src_z.ptr, &src_stat);
+fn copySymlink(src: []const u8, dst: []const u8, src_z: [:0]const u8, dst_z: [:0]const u8) !void {
+    var target_buf: [4096]u8 = undefined;
+    const n = libc.readlink(src_z.ptr, &target_buf, target_buf.len - 1);
+    if (n < 0) {
+        printErrorFmt("cannot read symbolic link '{s}': {s}", .{ src, errnoToString(libc._errno().*) });
+        return error.ReadLinkFailed;
+    }
+    target_buf[@intCast(n)] = 0;
+    const target: [*:0]const u8 = @ptrCast(&target_buf);
+
+    // Replace any existing destination entry, like rename(2) would.
+    _ = libc.unlink(dst_z.ptr);
+    if (libc.symlink(target, dst_z.ptr) != 0) {
+        printErrorFmt("cannot create symbolic link '{s}': {s}", .{ dst, errnoToString(libc._errno().*) });
+        return error.SymLinkFailed;
+    }
+}
+
+fn copyFifo(src: []const u8, dst: []const u8, src_z: [:0]const u8, dst_z: [:0]const u8) !void {
+    const st = lstatPath(src_z) orelse {
+        printErrorFmt("cannot stat '{s}': No such file or directory", .{src});
+        return error.FileNotFound;
+    };
+    _ = libc.unlink(dst_z.ptr);
+    if (mkfifo(dst_z.ptr, @intCast(st.mode & 0o7777)) != 0) {
+        printErrorFmt("cannot create fifo '{s}': {s}", .{ dst, errnoToString(libc._errno().*) });
+        return error.MkFifoFailed;
+    }
+}
+
+fn copyFileContents(io: Io, src: []const u8, dst: []const u8, src_z: [:0]const u8, dst_z: [:0]const u8) !void {
+    _ = dst_z;
+
+    // Get source file info for permissions; propagate failure instead of
+    // reading an undefined mode (TOCTOU: source may vanish under us).
+    const src_st = lstatPath(src_z) orelse {
+        printErrorFmt("cannot stat '{s}': No such file or directory", .{src});
+        return error.FileNotFound;
+    };
 
     // Open source file
     const src_file = Dir.openFile(Dir.cwd(), io, src, .{}) catch |err| {
@@ -221,7 +328,7 @@ fn copyFileContents(allocator: std.mem.Allocator, io: Io, src: []const u8, dst: 
     defer src_file.close(io);
 
     // Create destination file
-    const dst_file = Dir.createFile(Dir.cwd(), io, dst_z, .{ .truncate = true }) catch |err| {
+    const dst_file = Dir.createFile(Dir.cwd(), io, dst, .{ .truncate = true }) catch |err| {
         printErrorFmt("cannot create '{s}': {s}", .{ dst, @errorName(err) });
         return err;
     };
@@ -247,10 +354,11 @@ fn copyFileContents(allocator: std.mem.Allocator, io: Io, src: []const u8, dst: 
         if (n == 0) break;
     }
 
-    dst_writer.interface.flush() catch {};
+    try dst_writer.interface.flush();
 
-    // Preserve permissions
-    _ = chmod(dst_z.ptr, src_stat.mode & 0o7777);
+    // Preserve permissions on the open handle (chmod-by-path would follow a
+    // racily-substituted symlink).
+    _ = libc.fchmod(dst_file.handle, @intCast(src_st.mode & 0o7777));
 }
 
 fn copyFileFallback(io: Io, src_file: Io.File, dst_file: Io.File) !void {
@@ -266,7 +374,7 @@ fn copyFileFallback(io: Io, src_file: Io.File, dst_file: Io.File) !void {
     }
 }
 
-fn copyDirectoryRecursive(allocator: std.mem.Allocator, src: []const u8, dst: []const u8, config: *const Config) !void {
+pub fn copyDirectoryRecursive(allocator: std.mem.Allocator, src: []const u8, dst: []const u8, config: *const Config) !void {
     const io = Io.Threaded.global_single_threaded.io();
 
     const src_z = try allocator.dupeZ(u8, src);
@@ -275,14 +383,17 @@ fn copyDirectoryRecursive(allocator: std.mem.Allocator, src: []const u8, dst: []
     const dst_z = try allocator.dupeZ(u8, dst);
     defer allocator.free(dst_z);
 
-    // Get source directory permissions
-    var src_stat: Stat = undefined;
-    _ = lstat(src_z.ptr, &src_stat);
+    // Get source directory permissions; propagate failure instead of passing
+    // an undefined mode to mkdir.
+    const src_st = lstatPath(src_z) orelse {
+        printErrorFmt("cannot stat '{s}': No such file or directory", .{src});
+        return error.FileNotFound;
+    };
 
     // Create destination directory
-    if (!fileExists(dst_z)) {
-        if (libc.mkdir(dst_z.ptr, src_stat.mode & 0o7777) != 0) {
-            printErrorFmt("cannot create directory '{s}': mkdir failed", .{dst});
+    if (lstatPath(dst_z) == null) {
+        if (libc.mkdir(dst_z.ptr, @intCast(src_st.mode & 0o7777)) != 0) {
+            printErrorFmt("cannot create directory '{s}': {s}", .{ dst, errnoToString(libc._errno().*) });
             return error.MkdirFailed;
         }
     }
@@ -312,21 +423,29 @@ fn copyDirectoryRecursive(allocator: std.mem.Allocator, src: []const u8, dst: []
         if (file_type) |ft| {
             switch (ft) {
                 .directory => try copyDirectoryRecursive(allocator, src_full, dst_full, config),
-                .file, .symlink, .other => try copyFileContents(allocator, io, src_full, dst_full, src_full_z, dst_full_z),
+                .file => try copyFileContents(io, src_full, dst_full, src_full_z, dst_full_z),
+                .symlink => try copySymlink(src_full, dst_full, src_full_z, dst_full_z),
+                .fifo => try copyFifo(src_full, dst_full, src_full_z, dst_full_z),
+                .other => {
+                    printErrorFmt("cannot move '{s}' to '{s}': Operation not supported", .{ src_full, dst_full });
+                    return error.UnsupportedFileType;
+                },
             }
         }
     }
 }
 
-fn deleteDirectoryRecursive(allocator: std.mem.Allocator, path: []const u8) !void {
+pub fn deleteDirectoryRecursive(allocator: std.mem.Allocator, path: []const u8) !void {
     const io = Io.Threaded.global_single_threaded.io();
 
     const path_z = try allocator.dupeZ(u8, path);
     defer allocator.free(path_z);
 
-    // Open and iterate
-    var dir = Dir.openDir(Dir.cwd(), io, path, .{ .iterate = true }) catch {
-        return;
+    // Open and iterate; propagate failures so a half-deleted source is
+    // reported (exit 1) instead of silently claiming success.
+    var dir = Dir.openDir(Dir.cwd(), io, path, .{ .iterate = true }) catch |err| {
+        printErrorFmt("cannot remove '{s}': {s}", .{ path, @errorName(err) });
+        return err;
     };
     defer dir.close(io);
 
@@ -342,36 +461,33 @@ fn deleteDirectoryRecursive(allocator: std.mem.Allocator, path: []const u8) !voi
         if (file_type) |ft| {
             switch (ft) {
                 .directory => try deleteDirectoryRecursive(allocator, full_path),
-                .file, .symlink, .other => _ = unlink(full_path_z.ptr),
+                .file, .symlink, .fifo, .other => try unlinkSource(full_path, full_path_z),
             }
         }
     }
 
     // Remove the now-empty directory
-    Dir.deleteDir(Dir.cwd(), io, path_z) catch {};
+    Dir.deleteDir(Dir.cwd(), io, path_z) catch |err| {
+        printErrorFmt("cannot remove '{s}': {s}", .{ path, @errorName(err) });
+        return err;
+    };
 }
 
-fn basename(path: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, path, '/')) |idx| {
-        return path[idx + 1 ..];
-    }
-    return path;
+/// Basename with GNU semantics: trailing slashes are ignored
+/// (`mv dir/ dest` moves as `dest/dir`, not `dest/`).
+pub fn basename(path: []const u8) []const u8 {
+    var end = path.len;
+    while (end > 0 and path[end - 1] == '/') end -= 1;
+    if (end == 0) return path; // path was "/" or all slashes
+    const start = if (std.mem.lastIndexOfScalar(u8, path[0..end], '/')) |idx| idx + 1 else 0;
+    return path[start..end];
 }
 
 fn errnoToString(err: c_int) []const u8 {
-    return switch (err) {
-        1 => "Operation not permitted",
-        2 => "No such file or directory",
-        13 => "Permission denied",
-        17 => "File exists",
-        18 => "Invalid cross-device link",
-        20 => "Not a directory",
-        21 => "Is a directory",
-        28 => "No space left on device",
-        30 => "Read-only file system",
-        39 => "Directory not empty",
-        else => "Unknown error",
-    };
+    // Host libc strerror: correct errno numbering on every platform
+    // (a hand-numbered Linux table printed 'Unknown error' on macOS).
+    if (strerror(err)) |s| return std.mem.span(s);
+    return "Unknown error";
 }
 
 fn printVerbose(src: []const u8, dst: []const u8) void {
@@ -389,6 +505,10 @@ fn printError(msg: []const u8) void {
 
 fn printErrorFmt(comptime fmt: []const u8, args: anytype) void {
     std.debug.print("zmv: " ++ fmt ++ "\n", args);
+}
+
+fn printTryHelp() void {
+    std.debug.print("Try 'zmv --help' for more information.\n", .{});
 }
 
 fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
@@ -416,11 +536,11 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                     printVersion();
                     std.process.exit(0);
                 } else if (std.mem.eql(u8, arg, "--force")) {
-                    config.force = true;
+                    setClobberMode(&config, .force);
                 } else if (std.mem.eql(u8, arg, "--interactive")) {
-                    config.interactive = true;
+                    setClobberMode(&config, .interactive);
                 } else if (std.mem.eql(u8, arg, "--no-clobber")) {
-                    config.no_clobber = true;
+                    setClobberMode(&config, .no_clobber);
                 } else if (std.mem.eql(u8, arg, "--update")) {
                     config.update = true;
                 } else if (std.mem.eql(u8, arg, "--verbose")) {
@@ -428,13 +548,16 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                 } else if (std.mem.eql(u8, arg, "--no-target-directory")) {
                     config.no_target_directory = true;
                 } else if (std.mem.startsWith(u8, arg, "--target-directory=")) {
+                    if (config.target_directory) |old| allocator.free(old);
                     config.target_directory = try allocator.dupe(u8, arg[19..]);
                 } else if (std.mem.eql(u8, arg, "--target-directory")) {
                     i += 1;
                     if (i >= args.len) {
                         printError("option '--target-directory' requires an argument");
+                        printTryHelp();
                         std.process.exit(1);
                     }
+                    if (config.target_directory) |old| allocator.free(old);
                     config.target_directory = try allocator.dupe(u8, args[i]);
                 } else if (std.mem.eql(u8, arg, "--")) {
                     i += 1;
@@ -444,14 +567,15 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                     break;
                 } else {
                     printErrorFmt("unrecognized option '{s}'", .{arg});
+                    printTryHelp();
                     std.process.exit(1);
                 }
             } else {
                 for (arg[1..]) |ch| {
                     switch (ch) {
-                        'f' => config.force = true,
-                        'i' => config.interactive = true,
-                        'n' => config.no_clobber = true,
+                        'f' => setClobberMode(&config, .force),
+                        'i' => setClobberMode(&config, .interactive),
+                        'n' => setClobberMode(&config, .no_clobber),
                         'u' => config.update = true,
                         'v' => config.verbose = true,
                         'T' => config.no_target_directory = true,
@@ -459,12 +583,15 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                             i += 1;
                             if (i >= args.len) {
                                 printError("option requires an argument -- 't'");
+                                printTryHelp();
                                 std.process.exit(1);
                             }
+                            if (config.target_directory) |old| allocator.free(old);
                             config.target_directory = try allocator.dupe(u8, args[i]);
                         },
                         else => {
                             printErrorFmt("invalid option -- '{c}'", .{ch});
+                            printTryHelp();
                             std.process.exit(1);
                         },
                     }
@@ -475,10 +602,17 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
         }
     }
 
+    // GNU rejects combining -t with -T.
+    if (config.target_directory != null and config.no_target_directory) {
+        printError("cannot combine --target-directory (-t) and --no-target-directory (-T)");
+        std.process.exit(1);
+    }
+
     // Handle target directory mode vs normal mode
     if (config.target_directory) |_| {
         if (config.sources.items.len == 0) {
             printError("missing file operand");
+            printTryHelp();
             std.process.exit(1);
         }
     } else {
@@ -488,13 +622,23 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
             } else {
                 printErrorFmt("missing destination file operand after '{s}'", .{config.sources.items[0]});
             }
-            std.debug.print("Try 'zmv --help' for more information.\n", .{});
+            printTryHelp();
             std.process.exit(1);
         }
         config.destination = config.sources.pop();
     }
 
     return config;
+}
+
+const ClobberMode = enum { force, interactive, no_clobber };
+
+/// -f/-i/-n override each other; the last one on the command line wins
+/// (GNU getopt semantics).
+fn setClobberMode(config: *Config, mode: ClobberMode) void {
+    config.force = mode == .force;
+    config.interactive = mode == .interactive;
+    config.no_clobber = mode == .no_clobber;
 }
 
 fn printHelp() void {
@@ -517,6 +661,8 @@ fn printHelp() void {
         \\      --help              display this help and exit
         \\      --version           output version information and exit
         \\
+        \\If you specify more than one of -i, -f, -n, only the final one takes effect.
+        \\
         \\zmv - High-performance file move utility in Zig
         \\
     ) catch {};
@@ -528,7 +674,7 @@ fn printVersion() void {
     var buf: [64]u8 = undefined;
     const stdout = Io.File.stdout();
     var writer = stdout.writer(io, &buf);
-    writer.interface.writeAll("zmv 0.1.0\n") catch {};
+    writer.interface.writeAll("zmv 0.2.0\n") catch {};
     writer.interface.flush() catch {};
 }
 
@@ -550,9 +696,14 @@ pub fn main(init: std.process.Init) void {
         };
         defer allocator.free(target_z);
 
-        const target_type = getFileType(target_z);
-        if (target_type != .directory) {
-            printErrorFmt("target '{s}' is not a directory", .{target_dir});
+        // Follow symlinks: -t pointing at a symlink-to-directory is valid.
+        if (statPath(target_z)) |st| {
+            if (fileTypeOf(st) != .directory) {
+                printErrorFmt("target directory '{s}': Not a directory", .{target_dir});
+                std.process.exit(1);
+            }
+        } else {
+            printErrorFmt("target directory '{s}': No such file or directory", .{target_dir});
             std.process.exit(1);
         }
 
@@ -575,12 +726,19 @@ pub fn main(init: std.process.Init) void {
         };
         defer allocator.free(dest_z);
 
-        const dest_type = getFileType(dest_z);
+        // Directory-ness of the destination follows symlinks (GNU: a symlink
+        // to a directory receives the file inside the referenced directory;
+        // it is never replaced by rename).
+        const dest_st = statPath(dest_z);
+        const dest_is_dir = if (dest_st) |st| fileTypeOf(st) == .directory else false;
 
         if (config.no_target_directory) {
             // -T: treat destination as a normal file, not a directory
             if (config.sources.items.len != 1) {
-                printError("extra operand when using -T");
+                // Operand order was SOURCE DEST EXTRA...; report the first extra.
+                const extra = if (config.sources.items.len >= 3) config.sources.items[2] else dest;
+                printErrorFmt("extra operand '{s}'", .{extra});
+                printTryHelp();
                 std.process.exit(1);
             }
             const src = config.sources.items[0];
@@ -589,7 +747,7 @@ pub fn main(init: std.process.Init) void {
             };
         } else if (config.sources.items.len == 1) {
             const src = config.sources.items[0];
-            if (dest_type == .directory) {
+            if (dest_is_dir) {
                 const dst = std.fmt.allocPrint(allocator, "{s}/{s}", .{ dest, basename(src) }) catch {
                     printError("memory allocation failed");
                     std.process.exit(1);
@@ -604,8 +762,12 @@ pub fn main(init: std.process.Init) void {
                 };
             }
         } else {
-            if (dest_type != .directory) {
-                printErrorFmt("target '{s}' is not a directory", .{dest});
+            if (dest_st == null) {
+                printErrorFmt("target '{s}': No such file or directory", .{dest});
+                std.process.exit(1);
+            }
+            if (!dest_is_dir) {
+                printErrorFmt("target '{s}': Not a directory", .{dest});
                 std.process.exit(1);
             }
 

@@ -18,6 +18,13 @@
 
 const std = @import("std");
 const compat = @import("compat.zig");
+const numeric = @import("numeric.zig");
+
+// Constructor arguments are clamped rather than rejected — see numeric.zig.
+const sanitizeRate = numeric.sanitizeRate;
+const sanitizeCapacity = numeric.sanitizeCapacity;
+const satToI64 = numeric.satToI64;
+const satI128ToI64 = numeric.satI128ToI64;
 
 /// Leaky Bucket rate limiter
 /// Water (requests) fills the bucket and leaks out at a constant rate
@@ -30,6 +37,8 @@ pub const LeakyBucket = struct {
     water_level: f64,
     /// Last leak timestamp (nanoseconds)
     last_leak: i128,
+    /// Time source. Defaults to CLOCK_MONOTONIC; tests inject a `ManualClock`.
+    clock: compat.Clock,
 
     const Self = @This();
 
@@ -37,22 +46,23 @@ pub const LeakyBucket = struct {
     /// capacity: Maximum pending requests
     /// leak_rate: Requests processed per second
     pub fn init(capacity: f64, leak_rate: f64) Self {
-        // Clamp-and-document (non-breaking): a non-positive/non-finite leak_rate
-        // makes timeUntilAvailable divide by zero / trap in @intFromFloat; a
-        // negative capacity is nonsensical. Clamp fail-closed.
-        const cap = if (std.math.isNan(capacity) or capacity < 0) 0 else capacity;
-        const lr = if (!(leak_rate > 0) or !std.math.isFinite(leak_rate)) 1e-9 else leak_rate;
+        return initWithClock(compat.monotonic_clock, capacity, leak_rate);
+    }
+
+    /// Initialize against a caller-supplied clock (deterministic testing).
+    pub fn initWithClock(clock: compat.Clock, capacity: f64, leak_rate: f64) Self {
         return Self{
-            .capacity = cap,
-            .leak_rate = lr,
+            .capacity = sanitizeCapacity(capacity),
+            .leak_rate = sanitizeRate(leak_rate),
             .water_level = 0, // Start empty
-            .last_leak = compat.nowNs(),
+            .last_leak = clock.now(),
+            .clock = clock,
         };
     }
 
     /// Leak water based on elapsed time
     fn leak(self: *Self) void {
-        const now = compat.nowNs();
+        const now = self.clock.now();
         const elapsed_ns = now - self.last_leak;
         const elapsed_sec = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000_000.0;
         const leaked = elapsed_sec * self.leak_rate;
@@ -117,19 +127,20 @@ pub const LeakyBucket = struct {
 
         const needed = amount - available;
         const wait_sec = needed / self.leak_rate;
-        return @intFromFloat(wait_sec * 1_000_000_000.0);
+        // Saturating: leak_rate clamped to MIN_RATE can push this past i64.
+        return satToI64(wait_sec * 1_000_000_000.0);
     }
 
     /// Force set water level (useful for testing)
     pub fn setLevel(self: *Self, level: f64) void {
         self.water_level = @min(level, self.capacity);
-        self.last_leak = compat.nowNs();
+        self.last_leak = self.clock.now();
     }
 
     /// Reset to empty
     pub fn reset(self: *Self) void {
         self.water_level = 0;
-        self.last_leak = compat.nowNs();
+        self.last_leak = self.clock.now();
     }
 };
 
@@ -141,8 +152,21 @@ pub const GCRA = struct {
     emission_interval: i64,
     /// Limit on advance (tolerance for bursts in nanoseconds)
     delay_tolerance: i64,
-    /// Theoretical arrival time (TAT)
+    /// Theoretical arrival time (TAT), meaningful only once `started` is true.
     tat: i128,
+    /// Whether `tat` has been seeded from the clock yet.
+    ///
+    /// This used to be encoded as `tat == 0`, which is wrong for two reasons:
+    /// the sentinel is indistinguishable from the legitimate TAT value 0 (an
+    /// injected test clock starts at 0, and a monotonic clock can legitimately
+    /// read 0 immediately after boot), and the sentinel branch admitted the
+    /// first request *unconditionally*, bypassing the tolerance check — so a
+    /// `burst` of 0 still let one request through. An explicit flag seeds
+    /// `tat = now` and then applies the ordinary rule to every request,
+    /// including the first.
+    started: bool,
+    /// Time source. Defaults to CLOCK_MONOTONIC; tests inject a `ManualClock`.
+    clock: compat.Clock,
 
     const Self = @This();
 
@@ -150,37 +174,46 @@ pub const GCRA = struct {
     /// rate: Requests per second
     /// burst: Maximum burst size
     pub fn init(rate: f64, burst: f64) Self {
-        // Clamp-and-document (non-breaking): a non-positive/non-finite rate would
-        // make 1e9/rate non-finite and trap in @intFromFloat (UB in ReleaseFast).
-        // Clamp to a tiny positive rate and a non-negative burst; fail-closed.
-        const r = if (!(rate > 0) or !std.math.isFinite(rate)) 1e-9 else rate;
-        const b = if (std.math.isNan(burst) or burst < 0) 0 else burst;
-        const emission_ns = @as(i64, @intFromFloat(1_000_000_000.0 / r));
-        const tolerance_ns = @as(i64, @intFromFloat(b * 1_000_000_000.0 / r));
+        return initWithClock(compat.monotonic_clock, rate, burst);
+    }
+
+    /// Initialize against a caller-supplied clock (deterministic testing).
+    pub fn initWithClock(clock: compat.Clock, rate: f64, burst: f64) Self {
+        const r = sanitizeRate(rate);
+        const b = sanitizeCapacity(burst);
+        // Saturating conversions. Clamping the *inputs* is not sufficient on its
+        // own: a legal clamped rate of MIN_RATE with burst 100 makes
+        // `b * 1e9 / r` = 1e20, an order of magnitude past maxInt(i64) — a bare
+        // @intFromFloat there is illegal behaviour in the ReleaseFast bench
+        // build. Saturating to maxInt is also the fail-closed direction for
+        // `emission_interval` (slower) though not for `delay_tolerance`, which
+        // is why the rate/burst clamps remain the first line of defence.
+        const emission_ns = satToI64(1_000_000_000.0 / r);
+        const tolerance_ns = satToI64(b * 1_000_000_000.0 / r);
 
         return Self{
             .emission_interval = emission_ns,
             .delay_tolerance = tolerance_ns,
-            .tat = 0, // Will be initialized on first request
+            .tat = 0, // seeded from the clock on the first request
+            .started = false,
+            .clock = clock,
         };
+    }
+
+    /// Effective TAT for a request arriving at `now`: a fresh or idle limiter
+    /// is pinned to `now` (a full bucket), otherwise the stored TAT stands.
+    fn effectiveTat(self: *const Self, now: i128) i128 {
+        return if (self.started) @max(self.tat, now) else now;
     }
 
     /// Try to acquire a slot
     pub fn tryAcquire(self: *Self) bool {
-        const now = compat.nowNs();
+        const now = self.clock.now();
+        const new_tat = self.effectiveTat(now) + self.emission_interval;
 
-        // Initialize TAT on first request
-        if (self.tat == 0) {
-            self.tat = now + self.emission_interval;
-            return true;
-        }
-
-        // Check if we're within tolerance
-        const new_tat = @max(self.tat, now) + self.emission_interval;
-        const allow_at = new_tat - self.delay_tolerance;
-
-        if (allow_at <= now) {
+        if (new_tat - self.delay_tolerance <= now) {
             self.tat = new_tat;
+            self.started = true;
             return true;
         }
 
@@ -189,32 +222,25 @@ pub const GCRA = struct {
 
     /// Check without consuming
     pub fn check(self: *Self) bool {
-        const now = compat.nowNs();
-
-        if (self.tat == 0) return true;
-
-        const new_tat = @max(self.tat, now) + self.emission_interval;
-        const allow_at = new_tat - self.delay_tolerance;
-
-        return allow_at <= now;
+        const now = self.clock.now();
+        const new_tat = self.effectiveTat(now) + self.emission_interval;
+        return new_tat - self.delay_tolerance <= now;
     }
 
     /// Get time until next request is allowed (nanoseconds)
     pub fn timeUntilAllowed(self: *Self) i64 {
-        const now = compat.nowNs();
-
-        if (self.tat == 0) return 0;
-
-        const new_tat = @max(self.tat, now) + self.emission_interval;
+        const now = self.clock.now();
+        const new_tat = self.effectiveTat(now) + self.emission_interval;
         const allow_at = new_tat - self.delay_tolerance;
 
         if (allow_at <= now) return 0;
-        return @intCast(allow_at - now);
+        return satI128ToI64(allow_at - now);
     }
 
     /// Reset the limiter
     pub fn reset(self: *Self) void {
         self.tat = 0;
+        self.started = false;
     }
 };
 
@@ -276,7 +302,9 @@ test "leaky bucket basic allow deny" {
 }
 
 test "leaky bucket drain rate behavior" {
-    var bucket = LeakyBucket.init(5, 100); // 5 capacity, 100/sec leak rate
+    // Deterministic: was a real 50ms sleep against the wall of a loose bound.
+    var mc = compat.ManualClock{};
+    var bucket = LeakyBucket.initWithClock(mc.clock(), 5, 100); // 5 capacity, 100/sec leak
 
     // Fill to capacity
     for (0..5) |_| {
@@ -284,10 +312,8 @@ test "leaky bucket drain rate behavior" {
     }
     try std.testing.expect(!bucket.tryAcquire());
 
-    // Wait for some water to leak out
-    compat.sleepNs(50_000_000); // 50ms, 5 requests should leak
-
-    // Should now allow more
+    mc.advanceMs(50); // exactly 5 units leak
+    try std.testing.expectEqual(@as(f64, 0), bucket.pending());
     try std.testing.expect(bucket.tryAcquire());
 }
 
@@ -369,7 +395,10 @@ test "gcra steady state traffic" {
 }
 
 test "gcra burst followed by steady" {
-    var gcra = GCRA.init(10, 5); // 10 req/sec, burst of 5
+    // Deterministic: was a real 100ms sleep landing right on the emission
+    // interval, i.e. it passed only because the sleep overshot.
+    var mc = compat.ManualClock{};
+    var gcra = GCRA.initWithClock(mc.clock(), 10, 5); // 10 req/sec, burst of 5
 
     // Initial burst should succeed
     for (0..5) |_| {
@@ -379,8 +408,7 @@ test "gcra burst followed by steady" {
     // Following requests should be delayed or fail
     try std.testing.expect(!gcra.check());
 
-    // Wait and try again
-    compat.sleepNs(100_000_000); // 100ms
+    mc.advanceMs(100); // exactly one emission interval
     try std.testing.expect(gcra.check());
 }
 

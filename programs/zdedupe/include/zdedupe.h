@@ -128,25 +128,43 @@ void zdedupe_use_sha256(zdedupe_ctx* ctx, bool use_sha256);
  * The returned JSON string is owned by the context and remains valid
  * until the next call to zdedupe_run_sync() or zdedupe_free().
  *
- * For find_duplicates mode, returns JSON like:
+ * For find_duplicates mode, returns JSON of exactly this shape (this block is
+ * kept in sync with src/report.zig writeDuplicateJson and is asserted by
+ * src/tier1_anchors.zig -- the Swift JSONDecoder models and the Tauri serde
+ * structs decode these exact field names):
  * {
+ *   "report_type": "duplicates",
+ *   "generated_at": "2026-07-19T17:50:52Z",
+ *   "scan_duration_ms": 23,
  *   "summary": {
  *     "files_scanned": 1000,
  *     "bytes_scanned": 1073741824,
+ *     "bytes_scanned_human": "1.0 GB",
  *     "duplicate_groups": 10,
  *     "duplicate_files": 25,
  *     "space_savings": 524288000,
- *     "scan_time_ns": 1500000000
+ *     "space_savings_human": "500.0 MB"
  *   },
  *   "groups": [
  *     {
- *       "size": 1048576,
- *       "savings": 2097152,
  *       "hash": "abc123...",
- *       "files": ["/path/a.txt", "/path/b.txt", "/path/c.txt"]
+ *       "size": 1048576,
+ *       "size_human": "1.0 MB",
+ *       "count": 3,
+ *       "savings": 2097152,
+ *       "savings_human": "2.0 MB",
+ *       "files": [
+ *         { "path": "/path/a.txt", "mtime": "2026-07-19T17:50:51Z" },
+ *         { "path": "/path/b.txt", "mtime": "2026-07-19T17:50:51Z" }
+ *       ]
  *     }
  *   ]
  * }
+ *
+ * Note: "files" is an array of OBJECTS, not of strings, and "mtime" /
+ * "generated_at" are ISO-8601 UTC strings. Paths are JSON-escaped by
+ * std.json.Stringify, so a filename containing a quote or backslash round-trips
+ * intact rather than corrupting the document.
  *
  * For compare_folders mode, returns JSON like:
  * {

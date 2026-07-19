@@ -6,7 +6,8 @@
  * Features:
  * - Real-time Bitcoin P2P connection
  * - SIMD-accelerated hash processing
- * - Whale transaction detection (>1 BTC)
+ * - Whale transaction detection (default threshold 0.1 BTC, tunable at
+ *   runtime via ms_set_whale_threshold)
  * - Callback-based event notification
  * - Zero-copy packet parsing
  *
@@ -37,7 +38,8 @@ typedef struct {
     int64_t value_satoshis;  /* Total output value in satoshis */
     uint32_t input_count;
     uint32_t output_count;
-    uint8_t is_whale;        /* 1 if value >= 1 BTC */
+    uint8_t is_whale;        /* 1 if value_satoshis >= the current whale
+                              * threshold (default 10000000 = 0.1 BTC) */
 } MS_Transaction;
 
 /* Connection status */
@@ -171,6 +173,31 @@ const char* ms_version(void);
  * @return Performance description string
  */
 const char* ms_performance_info(void);
+
+/**
+ * Get the name of the I/O backend compiled into this build
+ *
+ * @return One of "io_uring", "kqueue", "poll"
+ */
+const char* ms_get_io_backend(void);
+
+/**
+ * Set the whale-transaction threshold
+ *
+ * Transactions whose total output value is >= this threshold are reported
+ * with is_whale = 1. The threshold is process-global (not per-sniffer) and
+ * may be changed while a sniffer is running.
+ *
+ * @param threshold_satoshis Threshold in satoshis (default 10000000 = 0.1 BTC)
+ */
+void ms_set_whale_threshold(int64_t threshold_satoshis);
+
+/**
+ * Get the current whale-transaction threshold
+ *
+ * @return Threshold in satoshis
+ */
+int64_t ms_get_whale_threshold(void);
 
 #ifdef __cplusplus
 }

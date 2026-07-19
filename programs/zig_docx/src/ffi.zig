@@ -425,7 +425,7 @@ fn zig_docx_to_markdown_with_images(
         // the bytes are keyed by the original DOCX path ("media/image1.png").
         var bytes: ?[]const u8 = null;
         for (document.media) |m| {
-            if (std.mem.eql(u8, m.name, img_ref.media_name)) {
+            if (docx.mediaNameMatches(m.name, img_ref.media_name)) {
                 bytes = m.data;
                 break;
             }
@@ -550,7 +550,11 @@ fn zig_docx_info(
 
     info.word_count = word_count;
     info.paragraph_count = para_count;
-    info.image_count = @intCast(document.media.len);
+    // Saturating, not @intCast: a crafted DOCX with more media entries than a
+    // u16 holds would panic in a safety build and silently wrap in the
+    // ReleaseFast iOS/Android builds. (docx.MAX_MEDIA_FILES already bounds the
+    // parser, but this field must stay total regardless of that cap.)
+    info.image_count = std.math.cast(u16, document.media.len) orelse std.math.maxInt(u16);
 
     return info;
 }

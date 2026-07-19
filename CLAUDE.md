@@ -16,6 +16,12 @@ The library has tests whose inputs **and** expected outputs both come from sourc
 
 This rule comes from the `zig_base58` audit: 15/15 tests passed against an implementation that emitted Bitcoin addresses with a wrong checksum (single SHA-256 instead of SHA-256d). Every test was a roundtrip; none compared against an external Bitcoin address.
 
+**Prove the anchor bites: mutation-test it.** An anchor that passes tells you nothing until you have seen it fail. Before claiming a vector as an external anchor, deliberately break the thing it is supposed to catch — flip an off-by-one, remove the bounds cap, restore the bug you just fixed — confirm the test goes red, then revert and re-confirm green. Record the mutation and its observed failure in the report. A "passing" anchor that survives the mutation is decoration: it is the `zig_base58` failure mode wearing a spec citation.
+
+Four Wave-6 agents adopted this independently and each caught something: `zig_ratelimit` (off-by-one in GCRA burst tolerance → 4 tests red, including both I.371 anchors; removing the refill cap → both RFC 2697 anchors red), `zig_watch` (mutated the debounce window both directions to prove both halves of the contract are load-bearing), `http_sentinel_ffi` (drifted the C header two ways — a rename caught at compile time, an offset-only swap caught only by the runtime `sizeof` assert, which is the silent-drift shape that reaches consumers), `zig_bloom` (restored the expired-scope `errdefer` → leak test red at 49/50).
+
+**Label self-recorded checks honestly.** A SHA-256 over your own output pinned into a test is a *drift lock*, not an external anchor — it detects unintended change but cannot detect that the output was wrong from day one. Both are worth having; do not let a drift lock occupy the external-anchor column of the promotion table (`zig_bloom` labels its payload hashes this way in-file).
+
 ### 2. The library's name unambiguously describes what it does in both directions
 
 A library named `zig_X` must implement `X` in both directions or be renamed.
@@ -72,8 +78,11 @@ This rule would have caught `zig_json`'s naming gap in 30 seconds, before any au
 | `programs/zig_toml` | Full TOML 1.0.0 parser (dotted keys, array-of-tables, datetimes, hex/oct/bin/inf/nan, all escapes incl. `\UXXXXXXXX`), hardened against duplicate keys, nesting DoS, inline-table extension, reserved escapes; read-only (no emitter) | 2025-05 | toml-test corpus + TOML spec worked examples + Cargo.toml-shaped end-to-end smoke (`tier1_anchors.zig`) |
 | `programs/zig-quantum-encryption/src/ml_dsa.zig` | **ML-DSA-65 ONLY** (FIPS 204 post-quantum signatures): keyGen + sign + verify, deterministic. Single-parameter-set — NOT polymorphic over ML-DSA-44/87. | 2026-05 | NIST CAVP / ACVP FIPS 204 ML-DSA-65 KATs (`src/ml_dsa_tier1_anchors.zig`): keyGen (seed→pk,sk), sigGen (sk,msg→sig, deterministic/internal), verify — all byte-exact |
 | `programs/zig-quantum-encryption/src/ml_kem_api.zig` | **ML-KEM-768 ONLY** (FIPS 203 post-quantum KEM): keyGen + encaps + decaps, deterministic internals. Single-parameter-set — NOT polymorphic over ML-KEM-512/1024. | 2026-05 | NIST CAVP / ACVP FIPS 203 ML-KEM-768 KATs (`src/ml_kem_tier1_anchors.zig`): keyGen (d,z→ek,dk), encaps (ek,m→c,K), decaps (dk,c→K) — all byte-exact |
+| `programs/zig_docx` | **DOCX read + write ONLY** (see scope note): parses `.docx` → Markdown with a hardened OPC/ZIP reader (CRC-32 + declared-size verification, ZIP64 refused, CD-extent and duplicate-name checks, media caps) and generates `.docx` from Markdown/structured JSON with XML escaping. Consumed by docmatic iOS, the FRA browser-wasm build, and 4 other pinned consumers. | 2026-07 | A LibreOffice Writer 26.2.1.2-authored `.docx` (`src/testdata/libreoffice_writer.docx`) with per-entry CRC-32s and sizes from CPython `zipfile`, and expected text / entity decoding / table shape from CPython `xml.etree.ElementTree`; generated output asserted against PKWARE APPNOTE.TXT §4.3 and ECMA-376 Part 2 (OPC) mandatory part names; tampered-CRC / ZIP64 / overrunning-CD / duplicate-name negative vectors (`src/tier1_anchors.zig`) — mutation-tested |
 | `programs/zig_jwt` | JSON Web Token (RFC 7519) HMAC sign **and** verify: HS256/384/512, registered-claim validation (`exp`/`nbf`/`iss`/`aud`/`sub`) with injectable clock. Signature compare is constant-time; `alg:none` refused on both sign and verify. Consumed by `zig_token_service`. | 2026-07 | RFC 7515 Appendix A.1 HS256 example (spec JWK octet key + published signature) + jwt.io HS256/384/512 cross-impl goldens + an independent `std.crypto` signer (`mintHS256`) so the verifier is checked against signatures the library did not construct + `alg:none`/tampered-segment/bad-base64url negative vectors (`src/tier1_anchors.zig`) |
 
+> **Scope note (`zig_docx`):** promoted **only** for the DOCX read + write paths, which are what the external anchors cover. The same program also ships XLSX, PDF, and RAG-chunker surfaces that are **not** anchored to that depth and are **not** promoted — notably `xlsx.zig` deliberately does not neutralize CSV formula injection (leading `=`/`+`/`-`/`@`), because in-tree consumers feed that CSV to parsers and LLMs where mangling would corrupt real data; sanitizing is the **consumer's** obligation and is documented at `src/xlsx.zig:95`. Behavioural change from the 2026-07 audit: an archive whose central directory records wrong CRC-32s is now **rejected** rather than parsed.
+>
 > **Scope note:** the two post-quantum entries above are promoted **only** for their stated parameter sets (ML-DSA-65, ML-KEM-768) — the exact sets the FFI / `quantum_vault` consumers use. The implementations are monolithic single-set (parameters are module constants; vector types are comptime-sized). They are **not** generic over the other security levels (44/87, 512/1024), which remain unimplemented and unvalidated. Do not assume they cover other parameter sets.
 
 ## Pending audits
@@ -153,7 +162,21 @@ Symptom: `std.time.timestamp()` or `std.time.nanoTimestamp()` used to validate t
 
 Where it bit us: `zig_ai_server` C3 fake-clock (`1c78542`), `http_sentinel` HSEN-A livelock + deprecated time API (`c97c957`).
 
-Corrective shape: a single injected `Clock` interface that test code can override; production uses `std.time.Instant.now()` (monotonic) for elapsed-time math and `std.time.timestamp()` only for emitting wire timestamps to consumers who already trust the server clock. Never compare a wall-clock value against an attacker-controlled "issued_at" field without a server-side allowed-skew bound.
+Corrective shape: a single injected `Clock` interface that test code can override; production reads a **monotonic** clock for elapsed-time math and `std.time.timestamp()` only for emitting wire timestamps to consumers who already trust the server clock. Never compare a wall-clock value against an attacker-controlled "issued_at" field without a server-side allowed-skew bound.
+
+> **Zig 0.16 API note (verified 2026-07-19):** `std.time.Instant` and `std.time.Timer` **do not exist** in this toolchain — `std/time.zig` is constants only. Earlier revisions of this file prescribed `std.time.Instant.now()`; three separate Wave-6 agents hit that dead end independently. Use `std.c.clock_gettime(.MONOTONIC, &ts)` behind your injected `Clock` (see `zig_ratelimit/src/compat.zig` `Clock`/`ManualClock`, or `zig_watch/src/watcher.zig` `nowMs`, for the pattern). Related 0.16 removals agents keep rediscovering: `std.crypto.random.bytes` → `std.c.arc4random_buf` / `getrandom`; `std.time.sleep` → `std.c.nanosleep`.
+
+### 7. Hand-rolled libc struct layouts and unsuffixed symbol bindings
+
+Symptom: a local `extern struct Stat { ... }` paired with `extern "c" fn lstat/stat/...`, transcribed from a man page or one platform's headers.
+
+Why it is worse than it looks: on **x86_64 macOS** the unsuffixed `stat`/`lstat` symbols are the *legacy 32-bit-inode* variants whose struct layout differs from what modern headers describe — so `st_size`, `st_ino`, `st_dev`, and `st_mtime` all read garbage. It fails silently and only on Intel Macs, so an Apple-silicon dev machine never sees it. Hand-rolled Linux layouts are usually transcribed x86_64-only and mis-parse on aarch64 the same way.
+
+Where it bit us: `zdedupe` (three duplicated copies across `fast_walker`/`walker`/`compare` — garbage file sizes feeding *delete* decisions), `zig-trash` (same class, in the `rm` substitute), `zig_watch` (fixed in an earlier wave), `http_sentinel_ffi` (`$INODE64` mismatch).
+
+Corrective shape: use `std.c.fstatat` / `std.c.Stat` and let the compiler select the per-arch symbol; on Linux prefer `statx` (`std.c.Stat` is `void` there in 0.16). Note `std.c.stat` does not compile on arm64 macOS in Zig 0.16 — route both `stat` and `lstat` through `fstatat` with the appropriate flags. Normalize into one in-tree struct rather than repeating the binding per file (`zdedupe/src/pstat.zig` is the reference). Widen `dev` to `u64` packed as `(major << 32) | minor`; truncating it collides distinct devices and silently drops real files as false hard links.
+
+> **Test-hygiene trap (chronos repos):** `std.testing.tmpDir` roots fixtures at `.zig-cache/tmp` **inside the source tree**. Here the `PostToolUse` tick hook runs `git add .`, so hostile-filename fixtures, symlink cycles, and hard-link pairs get committed. Create scratch dirs under `$TMPDIR` instead and assert the path is outside the repo (`zdedupe/src/testing_scratch.zig` is the reference; its self-test asserts the path contains no `zig-forge`).
 
 ### How to use this list
 
@@ -165,5 +188,8 @@ When opening an unfamiliar file:
 4. `grep -nE 'VERIFY_NONE|InsecureSkipVerify|dangerous\(\)\.set_certificate_verifier' <file>` — disabled TLS.
 5. `grep -nE 'std\.time\.(timestamp|nanoTimestamp)' <file>` and audit every callsite for "is this a security check?" — wall-clock-in-security.
 6. For binary parsers: check for external test vectors before reading the code in depth.
+7. `grep -nE 'extern "c" fn (l?stat|fstat)|extern struct Stat' <file>` — hand-rolled libc bindings (class 7). Also grep `std.testing.tmpDir` for the in-tree-fixture trap.
 
-`zig-lens --strict programs/<dir>/` catches classes 1-4 by default. The whole repo currently exits 0 under `--strict` — keep it that way.
+`zig-lens --strict programs/<dir>/` catches classes 1-4 by default. Classes 5-7 are human-review-only.
+
+**Gate status (2026-07-19):** repo-wide `zig-lens --strict programs/` is **exit 2 with 5 gating findings**, all pre-dating Waves 4-6 and all in fleet/box-owned files: `chronos_engine/chronos-run.zig:335` (CATCH-UNREACHABLE), `guardian_shield/guardian-shield-v9/build.zig:31` (SHELL-CHILD), `terminal_mux/src/ctl.zig:196` + `:295` and `zterm.zig:275` (JSON-IN-FMT). Per-program `--strict` is clean for every program touched in Waves 3-6. Do not claim the repo exits 0 until those five are closed by their owners — and never let your own program add a sixth.

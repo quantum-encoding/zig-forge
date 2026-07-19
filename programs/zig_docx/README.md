@@ -546,7 +546,20 @@ src/
 └── chunker.zig      — Section-aware chunker with MD5 hash linking
 ```
 
-The DOCX writer emits unique drawing-object IDs per image (so stricter validators like python-docx accept the output), gates control characters out of XML escaping, and clamps image dimensions before EMU conversion to prevent u64 overflow on hostile inputs. Image dimensions are detected from PNG and JPEG headers (with SOI signature verification on JPEG).
+The DOCX writer emits unique drawing-object IDs per image (which stricter validators require), routes every piece of user text through `appendXmlEscaped`, gates control characters out of XML escaping, and clamps image dimensions before EMU conversion to prevent u64 overflow on hostile inputs. Image dimensions are detected from PNG and JPEG headers (with SOI signature verification on JPEG).
+
+### Reader hardening
+
+The ZIP reader refuses malformed and hostile archives rather than parsing them optimistically: DEFLATE-bomb caps (256 MB per entry, 1 GB cumulative, independent of the archive's own declared sizes), CRC-32 verification of every extracted entry against the central directory, ZIP64 sentinels rejected rather than read literally, duplicate entry names rejected, and central-directory records bounds-checked in full against the declared directory extent. The XML parser reads CDATA to its real terminator, decodes numeric character references, and chunks oversized entity-bearing text rather than truncating it mid-character. Embedded media names are reduced to a single safe path component before they reach `Document.media[].name` or the images FFI, so a consumer that writes them to disk cannot be walked out of its output directory.
+
+### Testing
+
+`zig build test` runs the unit tests plus `src/tier1_anchors.zig`, whose assertions are anchored outside this codebase:
+
+- **`src/testdata/libreoffice_writer.docx`** — authored by LibreOffice Writer 26.2.1.2. Its expected text, entity decoding and table shape were read out with CPython's `xml.etree.ElementTree`; its per-entry CRC-32s and sizes with CPython's `zipfile`.
+- **Generated output** — checked against PKWARE APPNOTE.TXT §4.3 record signatures/layout and ECMA-376 Part 2 (OPC) mandatory part names, with every entry's CRC verified (the same check `zipfile.testzip()` performs).
+- **Hostile input** — markdown containing `<script>`, `&`, quotes and `]]>` must appear escaped in `word/document.xml` and read back verbatim.
+- **Negative vectors** — tampered CRC, ZIP64 sentinels, an overrunning central directory, and duplicate entry names each produce their specific error.
 
 The `chunker.zig` module is standalone and can be imported as a library:
 

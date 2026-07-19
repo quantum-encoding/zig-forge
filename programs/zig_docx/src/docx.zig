@@ -84,9 +84,57 @@ pub const Element = union(enum) {
 };
 
 pub const MediaFile = struct {
+    /// Always of the form `media/<basename>` — see `sanitizeMediaName`. Never
+    /// contains `..`, a backslash, a NUL, or a leading `/`, so consumers that
+    /// join it onto an output directory cannot be walked out of it.
     name: []const u8,
     data: []const u8,
 };
+
+/// M5 — caps on the media set carried in a parsed `Document`. Independent of
+/// the ZIP reader's byte caps: these bound what the in-memory model (and every
+/// FFI consumer that walks it) has to hold.
+pub const MAX_MEDIA_FILES: usize = 1024;
+pub const MAX_MEDIA_TOTAL_BYTES: usize = 128 * 1024 * 1024;
+
+/// M7 — reduce a `word/`-relative ZIP entry path to a safe `media/<basename>`.
+///
+/// ZIP entry names are attacker-controlled: `word/media/../../../etc/passwd`
+/// is a perfectly legal entry name and was previously stored verbatim in
+/// `Document.media[].name`, which the images FFI hands back to callers who
+/// write those names to disk. Returns null for anything that is not a single
+/// safe path component under `media/`.
+pub fn sanitizeMediaName(rel_path: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, rel_path, "media/")) return null;
+    const tail = rel_path["media/".len ..];
+
+    // Must be exactly one component: no separators of either flavour.
+    if (tail.len == 0 or tail.len > 128) return null;
+    if (std.mem.indexOfAny(u8, tail, "/\\\x00") != null) return null;
+    if (std.mem.eql(u8, tail, ".") or std.mem.eql(u8, tail, "..")) return null;
+    for (tail) |c| if (c < 0x20 or c == 0x7f) return null;
+
+    // The slice is already `media/<basename>`; no rewriting needed once the
+    // tail is known to be a single clean component.
+    return rel_path;
+}
+
+/// Final path component of a media key, for matching a relationship `Target`
+/// (which the producer writes, e.g. `media/image1.png` or `../media/image1.png`)
+/// against a sanitized `MediaFile.name`. Both sides are reduced to a basename
+/// so sanitizing one side cannot desynchronize the lookup.
+pub fn mediaBasename(name: []const u8) []const u8 {
+    if (std.mem.lastIndexOfScalar(u8, name, '/')) |slash| return name[slash + 1 ..];
+    return name;
+}
+
+/// True when a relationship target and a `MediaFile.name` refer to the same
+/// embedded image.
+pub fn mediaNameMatches(media_name: []const u8, rel_target: []const u8) bool {
+    const a = mediaBasename(media_name);
+    const b = mediaBasename(rel_target);
+    return a.len > 0 and std.mem.eql(u8, a, b);
+}
 
 pub const Document = struct {
     elements: []Element,
@@ -445,16 +493,30 @@ pub fn parseDocument(allocator: std.mem.Allocator, archive: *zip.ZipArchive) !Do
 
     // 4. Extract media files
     var media: std.ArrayListUnmanaged(MediaFile) = .empty;
+    var media_bytes: usize = 0;
     for (archive.entries) |*entry| {
         if (std.mem.startsWith(u8, entry.filename, "word/media/")) {
+            // M5 — bound the media set independently of the ZIP-level caps: a
+            // document with tens of thousands of tiny images is cheap to build
+            // and expensive to hold in the Document model that FFI consumers
+            // then walk.
+            if (media.items.len >= MAX_MEDIA_FILES) break;
+
+            // M7 — the ZIP entry name is attacker-controlled and ends up in the
+            // public `Document.media[].name`, which FFI consumers (and the
+            // images API) hand back to callers who may write it to disk.
+            // Reduce it to a safe basename before it can become a zip-slip.
+            const safe_name = sanitizeMediaName(entry.filename["word/".len ..]) orelse continue;
+
             const data = archive.extract(entry) catch continue;
-            // Strip "word/" prefix — relationships reference "media/image1.png"
-            const name = if (std.mem.startsWith(u8, entry.filename, "word/"))
-                entry.filename[5..]
-            else
-                entry.filename;
+            media_bytes += data.len;
+            if (media_bytes > MAX_MEDIA_TOTAL_BYTES) {
+                allocator.free(data);
+                break;
+            }
+            errdefer allocator.free(data);
             try media.append(allocator, .{
-                .name = try allocator.dupe(u8, name),
+                .name = try allocator.dupe(u8, safe_name),
                 .data = data,
             });
         }
@@ -564,6 +626,9 @@ test {
     // test root). Wire in the ZIP reader and FRA generator coverage.
     _ = zip;
     _ = fra;
+    // Tier-1 external anchors (LibreOffice-authored fixture, CPython-verified
+    // CRCs/text, PKWARE APPNOTE + ECMA-376 structural constants).
+    _ = @import("tier1_anchors.zig");
 }
 
 test "parse minimal document XML" {

@@ -17,6 +17,10 @@ pub const Claims = jwt.Claims;
 pub const Builder = jwt.Builder;
 pub const Verifier = jwt.Verifier;
 pub const Error = jwt.Error;
+/// Injectable clock signature (`fn () i64`, Unix seconds) for Verifier.now_fn
+/// / Claims.now_fn. Re-exported so consumers can type their own config field
+/// without reaching through the `jwt.jwt` namespace.
+pub const NowFn = jwt.NowFn;
 
 pub const base64UrlEncode = jwt.base64UrlEncode;
 pub const base64UrlDecode = jwt.base64UrlDecode;

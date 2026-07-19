@@ -15,56 +15,9 @@ const libc = std.c;
 const is_linux = builtin.os.tag == .linux;
 const is_darwin = builtin.os.tag == .macos or builtin.os.tag == .ios;
 
-// Cross-platform Stat structure
-const Stat = switch (builtin.os.tag) {
-    .linux => extern struct {
-        dev: u64,
-        ino: u64,
-        nlink: u64,
-        mode: u32,
-        uid: u32,
-        gid: u32,
-        __pad0: u32 = 0,
-        rdev: u64,
-        size: i64,
-        blksize: i64,
-        blocks: i64,
-        atim: libc.timespec,
-        mtim: libc.timespec,
-        ctim: libc.timespec,
-        __unused: [3]i64 = .{ 0, 0, 0 },
-        pub fn mtime(self: @This()) libc.timespec {
-            return self.mtim;
-        }
-    },
-    .macos, .ios, .tvos, .watchos => extern struct {
-        dev: i32,
-        mode: u16,
-        nlink: u16,
-        ino: u64,
-        uid: u32,
-        gid: u32,
-        rdev: i32,
-        atim: libc.timespec,
-        mtim: libc.timespec,
-        ctim: libc.timespec,
-        birthtim: libc.timespec,
-        size: i64,
-        blocks: i64,
-        blksize: i32,
-        flags: u32,
-        gen: u32,
-        lspare: i32,
-        qspare: [2]i64,
-        pub fn mtime(self: @This()) libc.timespec {
-            return self.mtim;
-        }
-    },
-    else => libc.Stat,
-};
-
-extern "c" fn lstat(path: [*:0]const u8, buf: *Stat) c_int;
-extern "c" fn stat(path: [*:0]const u8, buf: *Stat) c_int;
+// Stat comes from pstat.zig: std.c ($INODE64-correct) on Darwin, statx on Linux.
+const pstat = @import("pstat.zig");
+const Stat = pstat.Stat;
 
 /// Unique file identifier (device + inode)
 pub const FileId = struct {
@@ -73,7 +26,7 @@ pub const FileId = struct {
 
     pub fn fromStat(s: *const Stat) FileId {
         return .{
-            .dev = @intCast(s.dev),
+            .dev = s.dev,
             .ino = s.ino,
         };
     }
@@ -112,6 +65,10 @@ pub const WalkResult = struct {
     }
 };
 
+/// Hard bound on recursion depth. `walkRecursive` is recursive per directory
+/// level; without a bound a deep (or adversarial) tree exhausts the stack.
+const max_depth: u32 = 256;
+
 /// Non-fatal error during walk
 pub const WalkError = struct {
     path: []const u8,
@@ -124,6 +81,9 @@ pub const Walker = struct {
     config: types.Config,
     /// Track seen inodes to detect hard links
     seen_inodes: std.AutoHashMap(FileId, void),
+    /// Track directories already descended into. Without this, a symlink cycle
+    /// (`ln -s .. loop`) recurses until the stack is exhausted.
+    seen_dirs: std.AutoHashMap(FileId, void),
     /// Progress callback
     progress_callback: ?types.ProgressCallback,
     /// Current progress state
@@ -134,6 +94,7 @@ pub const Walker = struct {
             .allocator = allocator,
             .config = config,
             .seen_inodes = std.AutoHashMap(FileId, void).init(allocator),
+            .seen_dirs = std.AutoHashMap(FileId, void).init(allocator),
             .progress_callback = null,
             .progress = .{
                 .phase = .scanning,
@@ -148,6 +109,7 @@ pub const Walker = struct {
 
     pub fn deinit(self: *Walker) void {
         self.seen_inodes.deinit();
+        self.seen_dirs.deinit();
     }
 
     /// Set progress callback
@@ -183,28 +145,32 @@ pub const Walker = struct {
     }
 
     fn walkRecursive(self: *Walker, path: []const u8, result: *WalkResult) !void {
+        return self.walkRecursiveDepth(path, result, 0);
+    }
+
+    fn walkRecursiveDepth(self: *Walker, path: []const u8, result: *WalkResult, depth: u32) !void {
+        if (depth > max_depth) return error.MaxDepthExceeded;
+
         const path_z = try self.allocator.dupeZ(u8, path);
         defer self.allocator.free(path_z);
 
         // Check if path is a directory or file
-        var stat_buf: Stat = undefined;
-        if (lstat(path_z.ptr, &stat_buf) != 0) {
-            return error.StatFailed;
-        }
+        const stat_buf = pstat.lstat(path_z.ptr) catch return error.StatFailed;
 
-        const is_dir = (stat_buf.mode & 0o170000) == 0o40000;
-        const is_file = (stat_buf.mode & 0o170000) == 0o100000;
-        const is_link = (stat_buf.mode & 0o170000) == 0o120000;
-
-        if (!is_dir) {
+        if (!stat_buf.isDir()) {
             // It's a file, process it directly
-            if (is_file) {
+            if (stat_buf.isFile()) {
                 try self.processFileLstat(path, &stat_buf, result);
-            } else if (is_link and self.config.follow_symlinks) {
-                self.processSymlink(path, result);
+            } else if (stat_buf.isLink() and self.config.follow_symlinks) {
+                try self.processSymlink(path, result, depth);
             }
             return;
         }
+
+        // Cycle guard: a directory reached twice (only possible via a symlink or
+        // a mount loop) is skipped rather than re-walked.
+        const dir_id = FileId.fromStat(&stat_buf);
+        if ((try self.seen_dirs.getOrPut(dir_id)).found_existing) return;
 
         // It's a directory - open and iterate
         const dir = libc.opendir(path_z.ptr) orelse {
@@ -238,38 +204,36 @@ pub const Walker = struct {
             defer self.allocator.free(full_path_z);
 
             // Get file info
-            var entry_stat: Stat = undefined;
-            if (lstat(full_path_z.ptr, &entry_stat) != 0) {
-                continue;
-            }
+            const entry_stat = pstat.lstat(full_path_z.ptr) catch continue;
 
-            const entry_is_dir = (entry_stat.mode & 0o170000) == 0o40000;
-            const entry_is_file = (entry_stat.mode & 0o170000) == 0o100000;
-            const entry_is_link = (entry_stat.mode & 0o170000) == 0o120000;
-
-            if (entry_is_dir) {
+            if (entry_stat.isDir()) {
                 // Recurse into subdirectory
-                self.walkRecursive(full_path, result) catch |err| {
+                self.walkRecursiveDepth(full_path, result, depth + 1) catch |err| {
                     const path_copy = self.allocator.dupe(u8, full_path) catch continue;
                     result.errors.append(self.allocator, .{ .path = path_copy, .err = err }) catch {
                         self.allocator.free(path_copy);
                     };
                 };
-            } else if (entry_is_file) {
+            } else if (entry_stat.isFile()) {
                 self.processFileLstat(full_path, &entry_stat, result) catch |err| {
                     const path_copy = self.allocator.dupe(u8, full_path) catch continue;
                     result.errors.append(self.allocator, .{ .path = path_copy, .err = err }) catch {
                         self.allocator.free(path_copy);
                     };
                 };
-            } else if (entry_is_link and self.config.follow_symlinks) {
-                self.processSymlink(full_path, result);
+            } else if (entry_stat.isLink() and self.config.follow_symlinks) {
+                self.processSymlink(full_path, result, depth) catch |err| {
+                    const path_copy = self.allocator.dupe(u8, full_path) catch continue;
+                    result.errors.append(self.allocator, .{ .path = path_copy, .err = err }) catch {
+                        self.allocator.free(path_copy);
+                    };
+                };
             }
         }
     }
 
     fn processFileLstat(self: *Walker, path: []const u8, stat_buf: *const Stat, result: *WalkResult) !void {
-        const size: u64 = @intCast(stat_buf.size);
+        const size: u64 = stat_buf.size;
 
         // Skip if size doesn't match criteria
         if (size < self.config.min_size) return;
@@ -286,13 +250,12 @@ pub const Walker = struct {
         const path_copy = try self.allocator.dupe(u8, path);
         errdefer self.allocator.free(path_copy);
 
-        const mtime = stat_buf.mtime();
         const file_entry = types.FileEntry{
             .path = path_copy,
             .size = size,
             .inode = stat_buf.ino,
-            .dev = @intCast(stat_buf.dev),
-            .mtime = mtime.sec,
+            .dev = stat_buf.dev,
+            .mtime = stat_buf.mtime_sec,
             .hash = null,
             .quick_hash = null,
         };
@@ -310,7 +273,8 @@ pub const Walker = struct {
         }
     }
 
-    fn processSymlink(self: *Walker, path: []const u8, result: *WalkResult) void {
+    fn processSymlink(self: *Walker, path: []const u8, result: *WalkResult, depth: u32) error{MaxDepthExceeded}!void {
+        if (depth > max_depth) return error.MaxDepthExceeded;
         const path_z = self.allocator.dupeZ(u8, path) catch return;
         defer self.allocator.free(path_z);
 
@@ -336,15 +300,12 @@ pub const Walker = struct {
         defer self.allocator.free(abs_z);
 
         // stat the target (follow the link)
-        var target_stat: Stat = undefined;
-        if (stat(abs_z.ptr, &target_stat) != 0) return;
+        const target_stat = pstat.stat(abs_z.ptr) catch return;
 
-        const target_is_dir = (target_stat.mode & 0o170000) == 0o40000;
-        const target_is_file = (target_stat.mode & 0o170000) == 0o100000;
-
-        if (target_is_dir) {
-            self.walkRecursive(abs_target, result) catch return;
-        } else if (target_is_file) {
+        if (target_stat.isDir()) {
+            // walkRecursiveDepth's seen_dirs check breaks `ln -s .. loop`.
+            self.walkRecursiveDepth(abs_target, result, depth + 1) catch return;
+        } else if (target_stat.isFile()) {
             self.processFileLstat(abs_target, &target_stat, result) catch return;
         }
     }
@@ -401,19 +362,15 @@ fn listFilesRecursive(allocator: std.mem.Allocator, path: []const u8, files: *st
         const full_path_z = try allocator.dupeZ(u8, full_path);
         defer allocator.free(full_path_z);
 
-        var stat_buf: Stat = undefined;
-        if (lstat(full_path_z.ptr, &stat_buf) != 0) {
+        const stat_buf = pstat.lstat(full_path_z.ptr) catch {
             allocator.free(full_path);
             continue;
-        }
+        };
 
-        const is_dir = (stat_buf.mode & 0o170000) == 0o40000;
-        const is_file = (stat_buf.mode & 0o170000) == 0o100000;
-
-        if (is_dir) {
+        if (stat_buf.isDir()) {
             try listFilesRecursive(allocator, full_path, files);
             allocator.free(full_path);
-        } else if (is_file) {
+        } else if (stat_buf.isFile()) {
             try files.append(allocator, full_path);
         } else {
             allocator.free(full_path);

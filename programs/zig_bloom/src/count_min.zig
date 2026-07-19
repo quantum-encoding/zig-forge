@@ -30,14 +30,26 @@ pub const CountMinSketch = struct {
 
     /// Initialize with specific dimensions
     pub fn init(allocator: Allocator, width: usize, depth: usize) !Self {
+        // Both dimensions index into the counter array (`hash % width`) and
+        // drive the min-over-rows estimate; zero for either is a division by
+        // zero / a sketch that always estimates maxInt(u32).
+        if (width == 0) return error.InvalidWidth;
+        if (depth == 0) return error.InvalidDepth;
+
         const counters = try allocator.alloc([]u32, depth);
         errdefer allocator.free(counters);
 
-        for (counters, 0..) |*row, i| {
+        // Track how many rows are live so a failure part-way through the loop
+        // (or in the `seeds` allocation below) frees exactly those. The
+        // previous form put the errdefer *inside* the loop body, where its
+        // scope ends at the closing brace of each iteration — so it never ran
+        // for a failure on a later iteration and every earlier row leaked.
+        var rows_allocated: usize = 0;
+        errdefer for (counters[0..rows_allocated]) |r| allocator.free(r);
+
+        for (counters) |*row| {
             row.* = try allocator.alloc(u32, width);
-            errdefer {
-                for (counters[0..i]) |r| allocator.free(r);
-            }
+            rows_allocated += 1;
             @memset(row.*, 0);
         }
 
@@ -61,9 +73,19 @@ pub const CountMinSketch = struct {
     /// epsilon: relative error bound (e.g., 0.01 for 1%)
     /// delta: probability of exceeding error bound (e.g., 0.001 for 0.1%)
     pub fn initWithError(allocator: Allocator, epsilon: f64, delta: f64) !Self {
-        // width = ceil(e / epsilon), depth = ceil(ln(1/delta))
+        // Guard before any @intFromFloat: epsilon <= 0 makes w infinite,
+        // delta <= 0 makes d infinite, and NaN propagates straight through.
+        // @intFromFloat on NaN/inf is illegal behavior (panic in Debug, UB in
+        // ReleaseFast). The `!(x > 0 ...)` form also rejects NaN, since every
+        // comparison against NaN is false.
+        if (!(epsilon > 0.0 and epsilon < 1.0)) return error.InvalidEpsilon;
+        if (!(delta > 0.0 and delta < 1.0)) return error.InvalidDelta;
+
+        // Cormode & Muthukrishnan (2005): w = ceil(e / epsilon), d = ceil(ln(1/delta)).
         const w = @as(usize, @intFromFloat(@ceil(math.e / epsilon)));
-        const d = @as(usize, @intFromFloat(@ceil(@log(1.0 / delta))));
+        // delta close to 1 makes ln(1/delta) round down to 0 rows; one row is
+        // the floor for a usable sketch.
+        const d = @max(@as(usize, @intFromFloat(@ceil(@log(1.0 / delta)))), 1);
         return init(allocator, w, d);
     }
 
@@ -164,7 +186,13 @@ pub const CountMinSketch = struct {
 };
 
 /// Heavy Hitters using Count-Min Sketch
-/// Tracks items that appear more than a threshold frequency
+///
+/// Tracks items whose estimated frequency crossed `threshold` at some point.
+/// The candidate set is a **superset** of the current heavy hitters: an item
+/// is admitted when its frequency crosses the threshold and is never evicted,
+/// but frequency is `estimate / total_count` and `total_count` only grows — so
+/// an item admitted early can fall below the threshold later and still be
+/// listed. Use `isHeavyHitter` to re-check an entry against the live sketch.
 pub const HeavyHitters = struct {
     sketch: CountMinSketch,
     threshold: f64,
@@ -204,8 +232,16 @@ pub const HeavyHitters = struct {
         }
     }
 
+    /// Candidate set — a superset of the current heavy hitters (see the type
+    /// doc comment). Filter with `isHeavyHitter` if staleness matters.
     pub fn getHeavyHitters(self: *const Self) std.StringHashMap(u32) {
         return self.candidates;
+    }
+
+    /// Re-check an item against the live sketch rather than trusting the
+    /// candidate set's admission-time snapshot.
+    pub fn isHeavyHitter(self: *const Self, item: []const u8) bool {
+        return self.sketch.estimateFrequency(item) >= self.threshold;
     }
 };
 

@@ -7,7 +7,10 @@
 //! - Configurable false positive rate
 //! - Automatic optimal sizing
 //! - Union and intersection operations
-//! - Serialization support
+//! - Versioned serialization (`encodeAlloc` / `decodeAlloc`, little-endian,
+//!   self-describing header) plus a raw `rawBits()` view of the bit words
+//!
+//! Not thread-safe: concurrent `add` on one filter races. Guard externally.
 //!
 //! Example:
 //! ```zig
@@ -22,6 +25,83 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const math = std.math;
+
+/// On-disk / on-wire container for a serialized filter.
+///
+/// The pre-0.2 `serialize()` returned a bare `sliceAsBytes(bits)` dump with no
+/// parameter header — two filters with different `num_bits`/`num_hashes`
+/// produced byte streams that were indistinguishable, so a decoder could not
+/// tell whether a blob was compatible with the filter it was being loaded
+/// into. This header makes the format self-describing and versioned; the raw
+/// word view is still available as `rawBits()` / `rawCounters()`.
+///
+/// Layout (all integers little-endian, so the byte stream is identical on
+/// big-endian hosts):
+///
+///     off  size  field
+///     0    4     magic "ZBLM"
+///     4    1     format version (currently 1)
+///     5    1     kind: 0 = BloomFilter (u64 words), 1 = CountingBloomFilter (u8 counters)
+///     6    2     reserved, must be 0
+///     8    8     num_bits (BloomFilter) / num_counters (CountingBloomFilter)
+///     16   4     num_hashes
+///     20   8     count (items inserted)
+///     28   ...   payload: ceil(num_bits/64) u64 words, or num_counters u8 bytes
+pub const format = struct {
+    pub const magic = [4]u8{ 'Z', 'B', 'L', 'M' };
+    pub const version: u8 = 1;
+    pub const header_len: usize = 28;
+
+    pub const Kind = enum(u8) { bloom = 0, counting = 1 };
+
+    pub const Header = struct {
+        kind: Kind,
+        len: u64, // num_bits or num_counters
+        num_hashes: u32,
+        count: u64,
+    };
+
+    pub fn writeHeader(buf: []u8, h: Header) void {
+        std.debug.assert(buf.len >= header_len);
+        @memcpy(buf[0..4], &magic);
+        buf[4] = version;
+        buf[5] = @intFromEnum(h.kind);
+        buf[6] = 0;
+        buf[7] = 0;
+        std.mem.writeInt(u64, buf[8..16], h.len, .little);
+        std.mem.writeInt(u32, buf[16..20], h.num_hashes, .little);
+        std.mem.writeInt(u64, buf[20..28], h.count, .little);
+    }
+
+    pub fn readHeader(data: []const u8, expected: Kind) !Header {
+        if (data.len < header_len) return error.TruncatedData;
+        if (!std.mem.eql(u8, data[0..4], &magic)) return error.BadMagic;
+        if (data[4] != version) return error.UnsupportedVersion;
+        if (data[5] != @intFromEnum(expected)) return error.KindMismatch;
+        if (data[6] != 0 or data[7] != 0) return error.ReservedNotZero;
+
+        const h = Header{
+            .kind = expected,
+            .len = std.mem.readInt(u64, data[8..16], .little),
+            .num_hashes = std.mem.readInt(u32, data[16..20], .little),
+            .count = std.mem.readInt(u64, data[20..28], .little),
+        };
+        // A zero length would make the `% num_bits` in addHashed a division by
+        // zero; a zero hash count makes `contains` vacuously true for every
+        // input. Both are attacker-useful in a decoded blob, so refuse them.
+        if (h.len == 0) return error.InvalidLength;
+        if (h.num_hashes == 0) return error.InvalidHashCount;
+        return h;
+    }
+
+    /// Narrow a header field to `usize`. On a 32-bit target a blob can declare
+    /// a length or count larger than `usize` holds; refuse rather than
+    /// truncating (a truncated length would size the allocation from one value
+    /// and index it with another).
+    pub fn toUsize(v: u64) !usize {
+        return std.math.cast(usize, v) orelse error.ValueTooLarge;
+    }
+};
 
 /// Standard Bloom Filter
 pub fn BloomFilter(comptime T: type) type {
@@ -174,9 +254,50 @@ pub fn BloomFilter(comptime T: type) type {
             self.count = 0;
         }
 
-        /// Serialize to bytes
-        pub fn serialize(self: *const Self) []const u8 {
-            return std.mem.sliceAsBytes(self.bits);
+        /// Raw view of the backing bit words, in host byte order. Not a
+        /// portable serialization format — use `encodeAlloc` for that.
+        pub fn rawBits(self: *const Self) []const u64 {
+            return self.bits;
+        }
+
+        /// Serialize to a versioned, self-describing, little-endian blob.
+        /// Caller owns the returned memory.
+        pub fn encodeAlloc(self: *const Self, allocator: Allocator) ![]u8 {
+            const out = try allocator.alloc(u8, format.header_len + self.bits.len * 8);
+            errdefer allocator.free(out);
+
+            format.writeHeader(out, .{
+                .kind = .bloom,
+                .len = self.num_bits,
+                .num_hashes = self.num_hashes,
+                .count = self.count,
+            });
+            for (self.bits, 0..) |word, i| {
+                const off = format.header_len + i * 8;
+                std.mem.writeInt(u64, out[off..][0..8], word, .little);
+            }
+            return out;
+        }
+
+        /// Reconstruct a filter from `encodeAlloc` output. The result owns its
+        /// own memory; `deinit` it as usual.
+        pub fn decodeAlloc(allocator: Allocator, data: []const u8) !Self {
+            const h = try format.readHeader(data, .bloom);
+
+            const num_bits = try format.toUsize(h.len);
+            const count = try format.toUsize(h.count);
+            const num_words = (num_bits + BITS_PER_WORD - 1) / BITS_PER_WORD;
+            if (data.len != format.header_len + num_words * 8) return error.LengthMismatch;
+
+            var self = try init(allocator, num_bits, h.num_hashes);
+            errdefer self.deinit();
+
+            for (self.bits, 0..) |*word, i| {
+                const off = format.header_len + i * 8;
+                word.* = std.mem.readInt(u64, data[off..][0..8], .little);
+            }
+            self.count = count;
+            return self;
         }
 
         // Internal helpers
@@ -343,6 +464,44 @@ pub fn CountingBloomFilter(comptime T: type) type {
         pub fn clear(self: *Self) void {
             @memset(self.counters, 0);
             self.count = 0;
+        }
+
+        /// Raw view of the backing counters. Not a portable serialization
+        /// format — use `encodeAlloc` for that.
+        pub fn rawCounters(self: *const Self) []const u8 {
+            return self.counters;
+        }
+
+        /// Serialize to a versioned, self-describing blob (see `format`).
+        /// Caller owns the returned memory.
+        pub fn encodeAlloc(self: *const Self, allocator: Allocator) ![]u8 {
+            const out = try allocator.alloc(u8, format.header_len + self.counters.len);
+            errdefer allocator.free(out);
+
+            format.writeHeader(out, .{
+                .kind = .counting,
+                .len = self.num_counters,
+                .num_hashes = self.num_hashes,
+                .count = self.count,
+            });
+            @memcpy(out[format.header_len..], self.counters);
+            return out;
+        }
+
+        /// Reconstruct a counting filter from `encodeAlloc` output.
+        pub fn decodeAlloc(allocator: Allocator, data: []const u8) !Self {
+            const h = try format.readHeader(data, .counting);
+
+            const num_counters = try format.toUsize(h.len);
+            const count = try format.toUsize(h.count);
+            if (data.len != format.header_len + num_counters) return error.LengthMismatch;
+
+            var self = try init(allocator, num_counters, h.num_hashes);
+            errdefer self.deinit();
+
+            @memcpy(self.counters, data[format.header_len..]);
+            self.count = count;
+            return self;
         }
 
         /// Compute both hashes for an item, hashing non-slice bytes inside this

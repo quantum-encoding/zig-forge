@@ -256,17 +256,15 @@ fn runBenchmark(allocator: std.mem.Allocator, io: std.Io, config: BenchmarkConfi
     const concurrency_str = try std.fmt.allocPrint(allocator, "{d}", .{config.concurrency});
     defer allocator.free(concurrency_str);
 
-    // Use shell to redirect stdout to file (avoids pipe buffer limits)
-    const shell_cmd = try std.fmt.allocPrint(
-        allocator,
-        "./zig-out/bin/quantum-curl --file {s} --concurrency {s} > {s}",
-        .{ temp_path, concurrency_str, output_path },
-    );
-    defer allocator.free(shell_cmd);
+    // Redirect stdout to a file natively (avoids pipe buffer limits) instead of
+    // building a `/bin/sh -c` string — SHELL-CHILD, per zig-forge/CLAUDE.md §2.
+    // `config.name` flows into these paths, so argv-mode keeps it inert.
+    const out_file = try std.Io.Dir.cwd().createFile(io, output_path, .{});
+    defer out_file.close(io);
 
     var child = try std.process.spawn(io, .{
-        .argv = &[_][]const u8{ "/bin/sh", "-c", shell_cmd },
-        .stdout = .ignore,
+        .argv = &[_][]const u8{ "./zig-out/bin/quantum-curl", "--file", temp_path, "--concurrency", concurrency_str },
+        .stdout = .{ .file = out_file },
         .stderr = .ignore,
     });
 

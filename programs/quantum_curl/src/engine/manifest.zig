@@ -33,7 +33,10 @@ pub const RequestManifest = struct {
     /// Unique identifier for tracking this request through execution
     id: []const u8,
 
-    /// HTTP method (GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS)
+    /// HTTP method. Executable: GET, POST, PUT, PATCH, DELETE.
+    /// HEAD and OPTIONS parse but the engine returns `error.MethodNotSupported`
+    /// at dispatch — the underlying client's HEAD path discards the real status
+    /// code, so wiring it would report a fake 200 for every health check.
     method: Method,
 
     /// Target URL (full URL including scheme)
@@ -189,7 +192,9 @@ pub const ResponseManifest = struct {
     }
 };
 
-/// HTTP methods supported by quantum-curl
+/// HTTP methods recognised in a plan file. Method tokens are case-sensitive
+/// uppercase per RFC 9110 §9.1 — `get` is not `GET` and is rejected.
+/// HEAD/OPTIONS are accepted by the parser but not executable (see above).
 pub const Method = enum {
     GET,
     POST,
@@ -223,6 +228,46 @@ pub const Method = enum {
     }
 };
 
+/// Errors a malformed plan row can produce. Every one of these is returned —
+/// never panicked — so a single bad line in a 200 MB machine-generated plan is
+/// logged to the fail-log and skipped instead of aborting an hours-long batch.
+pub const ParseError = error{
+    NotAnObject,
+    MissingId,
+    MissingMethod,
+    MissingUrl,
+    InvalidType,
+    InvalidMethod,
+    ValueOutOfRange,
+};
+
+/// Fetch a required string field, or return the supplied error.
+fn requireString(
+    obj: std.json.ObjectMap,
+    key: []const u8,
+    comptime missing: ParseError,
+) ParseError![]const u8 {
+    const v = obj.get(key) orelse return missing;
+    if (v != .string) return error.InvalidType;
+    return v.string;
+}
+
+/// Coerce an optional JSON number field to an unsigned integer. Non-integers,
+/// negatives, and values wider than T are rejected rather than `@intCast`-
+/// panicked (a negative `timeout_ms` used to kill the process).
+pub fn optionalUnsigned(comptime T: type, obj: std.json.ObjectMap, key: []const u8) ParseError!?T {
+    const v = obj.get(key) orelse return null;
+    switch (v) {
+        .integer => |i| {
+            if (i < 0) return error.ValueOutOfRange;
+            if (i > std.math.maxInt(T)) return error.ValueOutOfRange;
+            return @intCast(i);
+        },
+        .null => return null,
+        else => return error.InvalidType,
+    }
+}
+
 /// Parse a request manifest from a JSON line
 pub fn parseRequestManifest(allocator: std.mem.Allocator, json_line: []const u8) !RequestManifest {
     const parsed = try std.json.parseFromSlice(
@@ -233,20 +278,23 @@ pub fn parseRequestManifest(allocator: std.mem.Allocator, json_line: []const u8)
     );
     defer parsed.deinit();
 
+    // A line can be valid JSON yet not an object (`123`, `"x"`, `[]`).
+    if (parsed.value != .object) return error.NotAnObject;
     const obj = parsed.value.object;
 
     // Required fields
-    const id = try allocator.dupe(u8, obj.get("id").?.string);
+    const id = try allocator.dupe(u8, try requireString(obj, "id", error.MissingId));
     errdefer allocator.free(id);
 
-    const method_str = obj.get("method").?.string;
+    const method_str = try requireString(obj, "method", error.MissingMethod);
     const method = Method.fromString(method_str) orelse return error.InvalidMethod;
 
-    const url = try allocator.dupe(u8, obj.get("url").?.string);
+    const url = try allocator.dupe(u8, try requireString(obj, "url", error.MissingUrl));
     errdefer allocator.free(url);
 
     // Optional fields
     var body: ?[]u8 = null;
+    errdefer if (body) |b| allocator.free(b);
     if (obj.get("body")) |body_val| {
         if (body_val == .string) {
             body = try allocator.dupe(u8, body_val.string);
@@ -254,20 +302,32 @@ pub fn parseRequestManifest(allocator: std.mem.Allocator, json_line: []const u8)
     }
 
     var headers: ?std.json.ArrayHashMap([]const u8) = null;
+    errdefer if (headers) |*h| {
+        var it = h.map.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            allocator.free(entry.value_ptr.*);
+        }
+        h.deinit(allocator);
+    };
     if (obj.get("headers")) |headers_obj| {
         if (headers_obj == .object) {
             headers = std.json.ArrayHashMap([]const u8){};
             var it = headers_obj.object.iterator();
             while (it.next()) |entry| {
+                // Non-string header values used to panic on `.string`.
+                if (entry.value_ptr.* != .string) return error.InvalidType;
                 const key = try allocator.dupe(u8, entry.key_ptr.*);
+                errdefer allocator.free(key);
                 const val = try allocator.dupe(u8, entry.value_ptr.*.string);
+                errdefer allocator.free(val);
                 try headers.?.map.put(allocator, key, val);
             }
         }
     }
 
-    const timeout_ms = if (obj.get("timeout_ms")) |t| @as(u64, @intCast(t.integer)) else null;
-    const max_retries = if (obj.get("max_retries")) |r| @as(u32, @intCast(r.integer)) else null;
+    const timeout_ms = try optionalUnsigned(u64, obj, "timeout_ms");
+    const max_retries = try optionalUnsigned(u32, obj, "max_retries");
 
     return RequestManifest{
         .id = id,

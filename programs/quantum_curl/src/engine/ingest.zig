@@ -157,8 +157,16 @@ fn parseJsonArray(
         var id_buf: [32]u8 = undefined;
         const gen_id = std.fmt.bufPrint(&id_buf, "row-{}", .{i + 1}) catch "row-?";
 
-        // Use existing id if present, otherwise auto-generate
-        const id_str = if (obj.get("id")) |id_val| id_val.string else gen_id;
+        // Use existing id if present, otherwise auto-generate. A non-string id
+        // used to panic on `.string`; fall back to the generated id instead.
+        const id_str = blk: {
+            const id_val = obj.get("id") orelse break :blk gen_id;
+            if (id_val != .string) {
+                std.debug.print("[ingest] Warning: element {} has non-string id, using {s}\n", .{ i + 1, gen_id });
+                break :blk gen_id;
+            }
+            break :blk id_val.string;
+        };
 
         addRequestFromObj(allocator, obj, id_str, requests) catch |err| {
             std.debug.print("[ingest] Error parsing JSON array element {}: {}\n", .{ i + 1, err });
@@ -289,49 +297,84 @@ fn parseDelimited(
 
 // ── CSV field iterator (handles quoted fields) ───────────────────────────────
 
-const CsvFieldIterator = struct {
+/// RFC 4180 field splitter for a *single* record.
+///
+/// Known deviation from RFC 4180 §2 rule 6: a newline inside a quoted field is
+/// NOT supported, because `parseDelimited` splits the document on `\n` before
+/// this iterator ever sees a record. Escaped quotes (`""`, rule 7) are returned
+/// verbatim rather than unescaped — callers get the raw inner bytes. Both are
+/// asserted in `src/tier1_anchors.zig` so the limitation is a tested contract
+/// rather than a silent surprise.
+pub const CsvFieldIterator = struct {
     data: []const u8,
     pos: usize,
     delimiter: u8,
 
-    fn init(data: []const u8, delimiter: u8) CsvFieldIterator {
-        return .{ .data = data, .pos = 0, .delimiter = delimiter };
+    /// Is another field available? A record always has at least one field, and
+    /// exactly one more after every delimiter consumed. Without this flag the
+    /// iterator appended a phantom empty field to every record that did not end
+    /// in a delimiter — `a,b,c` yielded four fields instead of RFC 4180's three,
+    /// which shifted every column index past a short row.
+    pending: bool,
+
+    pub fn init(data: []const u8, delimiter: u8) CsvFieldIterator {
+        return .{ .data = data, .pos = 0, .delimiter = delimiter, .pending = true };
     }
 
-    fn next(self: *CsvFieldIterator) ?[]const u8 {
-        if (self.pos > self.data.len) return null;
-        if (self.pos == self.data.len) {
-            self.pos += 1;
-            return "";
+    pub fn next(self: *CsvFieldIterator) ?[]const u8 {
+        if (!self.pending) return null;
+
+        if (self.pos >= self.data.len) {
+            self.pending = false;
+            return ""; // trailing delimiter promised one final, empty field
         }
 
         if (self.data[self.pos] == '"') {
-            // Quoted field — find matching close quote
+            // Quoted field — find the matching close quote, skipping `""` pairs.
             const start = self.pos + 1;
             var end = start;
             while (end < self.data.len) {
                 if (self.data[end] == '"') {
                     if (end + 1 < self.data.len and self.data[end + 1] == '"') {
-                        end += 2; // Escaped quote ""
+                        end += 2; // Escaped quote "" (returned verbatim)
                         continue;
                     }
                     break; // End of quoted field
                 }
                 end += 1;
             }
-            // Skip past closing quote and delimiter
-            self.pos = if (end + 1 < self.data.len) end + 2 else self.data.len + 1;
+
+            var p = end;
+            if (p < self.data.len and self.data[p] == '"') p += 1; // past close quote
+            self.advancePast(p);
             return self.data[start..end];
         }
 
         // Unquoted field — find next delimiter
         const start = self.pos;
-        while (self.pos < self.data.len and self.data[self.pos] != self.delimiter) {
-            self.pos += 1;
-        }
-        const field = self.data[start..self.pos];
-        if (self.pos < self.data.len) self.pos += 1; // Skip delimiter
+        var p = self.pos;
+        while (p < self.data.len and self.data[p] != self.delimiter) p += 1;
+        const field = self.data[start..p];
+        self.advancePast(p);
         return field;
+    }
+
+    /// Position after a field body: consume one delimiter if present (another
+    /// field follows), otherwise the record is exhausted.
+    fn advancePast(self: *CsvFieldIterator, p: usize) void {
+        // Tolerate stray bytes between a closing quote and the delimiter
+        // (`"a"junk,b`) by discarding them rather than dropping the rest of
+        // the record.
+        var i = p;
+        while (i < self.data.len and self.data[i] != self.delimiter) i += 1;
+
+        if (i < self.data.len) {
+            self.pos = i + 1; // consume the delimiter; another field follows
+            self.pending = true;
+        } else {
+            self.pos = self.data.len;
+            self.pending = false;
+        }
     }
 };
 
@@ -370,20 +413,29 @@ fn addRequestFromObj(
     const id = try allocator.dupe(u8, gen_id);
     errdefer allocator.free(id);
 
-    const method_str = if (obj.get("method")) |m| m.string else "GET";
+    // Every access below is typed-checked: a JSON array element with a wrong-
+    // shaped field returns an error the caller logs and skips, rather than
+    // panicking the whole batch (see manifest.ParseError).
+    const method_str = blk: {
+        const m = obj.get("method") orelse break :blk "GET";
+        if (m != .string) return error.InvalidType;
+        break :blk m.string;
+    };
     const method = manifest.Method.fromString(method_str) orelse .GET;
 
     const url_val = obj.get("url") orelse return error.MissingUrl;
+    if (url_val != .string) return error.InvalidType;
     const url = try allocator.dupe(u8, url_val.string);
     errdefer allocator.free(url);
 
     var body: ?[]u8 = null;
+    errdefer if (body) |b| allocator.free(b);
     if (obj.get("body")) |b| {
         if (b == .string) body = try allocator.dupe(u8, b.string);
     }
 
-    const timeout_ms: ?u64 = if (obj.get("timeout_ms")) |t| @intCast(t.integer) else null;
-    const max_retries: ?u32 = if (obj.get("max_retries")) |r| @intCast(r.integer) else null;
+    const timeout_ms = try manifest.optionalUnsigned(u64, obj, "timeout_ms");
+    const max_retries = try manifest.optionalUnsigned(u32, obj, "max_retries");
 
     try requests.append(allocator, .{
         .id = id,
@@ -405,8 +457,12 @@ fn parseHeadersString(allocator: std.mem.Allocator, json_str: []const u8) !std.j
     var headers = std.json.ArrayHashMap([]const u8){};
     var it = parsed.value.object.iterator();
     while (it.next()) |entry| {
+        // Non-string header value used to panic on `.string`.
+        if (entry.value_ptr.* != .string) return error.InvalidHeaders;
         const key = try allocator.dupe(u8, entry.key_ptr.*);
+        errdefer allocator.free(key);
         const val = try allocator.dupe(u8, entry.value_ptr.*.string);
+        errdefer allocator.free(val);
         try headers.map.put(allocator, key, val);
     }
     return headers;

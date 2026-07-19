@@ -13,94 +13,15 @@ const builtin = @import("builtin");
 const types = @import("types.zig");
 const libc = std.c;
 
-// Platform-specific stat structure
-const Stat = switch (builtin.os.tag) {
-    .linux => extern struct {
-        dev: u64,
-        ino: u64,
-        nlink: u64,
-        mode: u32,
-        uid: u32,
-        gid: u32,
-        __pad0: u32 = 0,
-        rdev: u64,
-        size: i64,
-        blksize: i64,
-        blocks: i64,
-        atim: libc.timespec,
-        mtim: libc.timespec,
-        ctim: libc.timespec,
-        __unused: [3]i64 = .{ 0, 0, 0 },
-    },
-    .macos, .ios, .tvos, .watchos => extern struct {
-        dev: i32,
-        mode: u16,
-        nlink: u16,
-        ino: u64,
-        uid: u32,
-        gid: u32,
-        rdev: i32,
-        atim: libc.timespec,
-        mtim: libc.timespec,
-        ctim: libc.timespec,
-        birthtim: libc.timespec,
-        size: i64,
-        blocks: i64,
-        blksize: i32,
-        flags: u32,
-        gen: u32,
-        lspare: i32,
-        qspare: [2]i64,
-    },
-    else => libc.Stat,
-};
-
-extern "c" fn lstat(path: [*:0]const u8, buf: *Stat) c_int;
-
-// Linux statx for faster stat calls (request only needed fields)
-const Statx = extern struct {
-    stx_mask: u32,
-    stx_blksize: u32,
-    stx_attributes: u64,
-    stx_nlink: u32,
-    stx_uid: u32,
-    stx_gid: u32,
-    stx_mode: u16,
-    __spare0: u16,
-    stx_ino: u64,
-    stx_size: u64,
-    stx_blocks: u64,
-    stx_attributes_mask: u64,
-    stx_atime: extern struct { sec: i64, nsec: u32, __pad: i32 },
-    stx_btime: extern struct { sec: i64, nsec: u32, __pad: i32 },
-    stx_ctime: extern struct { sec: i64, nsec: u32, __pad: i32 },
-    stx_mtime: extern struct { sec: i64, nsec: u32, __pad: i32 },
-    stx_rdev_major: u32,
-    stx_rdev_minor: u32,
-    stx_dev_major: u32,
-    stx_dev_minor: u32,
-    stx_mnt_id: u64,
-    stx_dio_mem_align: u32,
-    stx_dio_offset_align: u32,
-    __spare3: [12]u64,
-};
-
-// statx mask flags - request only what we need
-const STATX_INO: u32 = 0x100;
-const STATX_SIZE: u32 = 0x200;
-const STATX_MTIME: u32 = 0x40;
-const STATX_BASIC_STATS: u32 = 0x7ff;
-
-// statx flags
-const AT_FDCWD: c_int = -100;
-const AT_SYMLINK_NOFOLLOW: c_int = 0x100;
-const AT_STATX_DONT_SYNC: c_int = 0x4000; // Don't sync - faster for read-only queries
-
-extern "c" fn statx(dirfd: c_int, path: [*:0]const u8, flags: c_int, mask: u32, buf: *Statx) c_int;
+// Stat comes from pstat.zig: std.c ($INODE64-correct) on Darwin, statx on Linux.
+const pstat = @import("pstat.zig");
+const Stat = pstat.Stat;
 
 /// File identifier for hard link detection
 pub const FileId = packed struct {
-    dev: u32, // Reduced from u64 - device IDs rarely need full 64 bits
+    // Full-width device id. A narrower dev could alias two distinct devices
+    // onto one FileId, which would silently drop a real file as a "hard link".
+    dev: u64,
     ino: u64,
 };
 
@@ -109,7 +30,7 @@ pub const FastFileEntry = struct {
     path: []const u8,
     size: u64,
     ino: u64,
-    dev: u32,
+    dev: u64,
     mtime: i64,
 };
 
@@ -154,6 +75,9 @@ pub const FastWalker = struct {
     // Hard link tracking (optional)
     seen_inodes: ?std.AutoHashMapUnmanaged(FileId, void),
 
+    // Visited directories, used only under follow_symlinks to break cycles
+    seen_dirs: std.AutoHashMapUnmanaged(FileId, void),
+
     // Progress throttling - use counter for speed (avoid Instant.now() overhead)
     progress_fn: ?ProgressFn,
     progress_counter: u64,
@@ -184,6 +108,7 @@ pub const FastWalker = struct {
             .files = .empty,
             .stats = .{},
             .seen_inodes = null,
+            .seen_dirs = .empty,
             .progress_fn = null,
             .progress_counter = 0,
             .progress_interval_count = 10000, // Report every 10k items
@@ -213,6 +138,7 @@ pub const FastWalker = struct {
         if (self.seen_inodes) |*map| {
             map.deinit(self.allocator);
         }
+        self.seen_dirs.deinit(self.allocator);
     }
 
     /// Enable arena allocator for path strings (faster, higher peak memory)
@@ -257,6 +183,12 @@ pub const FastWalker = struct {
         self.include_hidden = include;
     }
 
+    /// Follow symlinks: stat targets and descend into symlinked directories
+    /// (cycle-guarded). Off by default.
+    pub fn setFollowSymlinks(self: *FastWalker, follow: bool) void {
+        self.follow_symlinks = follow;
+    }
+
     /// Walk a directory tree
     pub fn walk(self: *FastWalker, root_path: []const u8) !void {
         // Pre-allocate for expected file count (estimate 100k files initially)
@@ -285,20 +217,18 @@ pub const FastWalker = struct {
         // Null terminate
         self.path_buf[self.path_len] = 0;
 
-        // Check if root is file or directory
-        var stat_buf: Stat = undefined;
-        if (lstat(@ptrCast(&self.path_buf), &stat_buf) != 0) {
-            return error.StatFailed;
-        }
+        // Check if root is file or directory. The root is always followed:
+        // scanning `zdedupe /some/symlink-to-dir` should scan the target.
+        const root_stat = try pstat.stat(@ptrCast(&self.path_buf));
 
-        const mode = stat_buf.mode & 0o170000;
-        if (mode == 0o100000) {
+        if (root_stat.isFile()) {
             // Root is a file - process it directly
-            try self.addFileFromStat(&stat_buf);
+            try self.addFileFromStat(&root_stat);
             return;
-        } else if (mode != 0o40000) {
+        } else if (!root_stat.isDir()) {
             return error.NotADirectory;
         }
+        _ = try self.markDirVisited(&root_stat);
 
         // Open root directory
         const root_dir = libc.opendir(@ptrCast(&self.path_buf)) orelse {
@@ -381,30 +311,44 @@ pub const FastWalker = struct {
                 return; // Process new directory on next iteration
             } else if (d_type == DT_REG) {
                 // Regular file - need lstat for size/inode
-                self.addFileWithLstat(parent_len) catch {
+                self.addFileWithStat(false) catch {
                     self.stats.errors += 1;
                 };
                 self.path_len = parent_len;
             } else if (d_type == DT_LNK) {
-                // Symlink - skip unless following
+                // Symlink - skipped entirely unless -L/follow_symlinks is set.
+                // When following we stat the TARGET (an lstat here would record
+                // the link's own size/inode, which is never what the user meant)
+                // and descend into symlinked directories under a visited-dir
+                // guard so `ln -s .. loop` terminates instead of recursing.
                 if (self.follow_symlinks) {
-                    self.addFileWithLstat(parent_len) catch {
+                    const target = pstat.stat(@ptrCast(&self.path_buf)) catch {
                         self.stats.errors += 1;
+                        self.path_len = parent_len;
+                        continue;
                     };
+                    if (target.isDir()) {
+                        if (self.enterSymlinkedDir(&target, parent_len)) |descended| {
+                            if (descended) return;
+                        } else |_| {
+                            self.stats.errors += 1;
+                        }
+                    } else if (target.isFile()) {
+                        self.addFileFromStat(&target) catch {
+                            self.stats.errors += 1;
+                        };
+                    }
                 }
                 self.path_len = parent_len;
             } else if (d_type == DT_UNKNOWN) {
                 // Filesystem doesn't provide d_type - fall back to lstat
-                var stat_buf: Stat = undefined;
-                if (lstat(@ptrCast(&self.path_buf), &stat_buf) != 0) {
+                const stat_buf = pstat.lstat(@ptrCast(&self.path_buf)) catch {
                     self.stats.errors += 1;
                     self.path_len = parent_len;
                     continue;
-                }
+                };
 
-                const mode = stat_buf.mode & 0o170000;
-                if (mode == 0o40000) {
-                    // Directory
+                if (stat_buf.isDir()) {
                     const sub_dir = libc.opendir(@ptrCast(&self.path_buf)) orelse {
                         self.stats.errors += 1;
                         self.path_len = parent_len;
@@ -417,9 +361,12 @@ pub const FastWalker = struct {
                     });
                     self.maybeReportProgress();
                     return;
-                } else if (mode == 0o100000) {
-                    // Regular file
+                } else if (stat_buf.isFile()) {
                     self.addFileFromStat(&stat_buf) catch {
+                        self.stats.errors += 1;
+                    };
+                } else if (stat_buf.isLink() and self.follow_symlinks) {
+                    self.addFileWithStat(true) catch {
                         self.stats.errors += 1;
                     };
                 }
@@ -431,77 +378,51 @@ pub const FastWalker = struct {
         }
     }
 
-    /// Add file by doing stat (when d_type is known but we need size/inode)
-    /// Uses statx on Linux for better performance (request only needed fields)
-    fn addFileWithLstat(self: *FastWalker, parent_len: usize) !void {
-        _ = parent_len;
-        if (builtin.os.tag == .linux) {
-            // Use statx - faster because we request only needed fields and skip sync
-            var stx: Statx = undefined;
-            const mask = STATX_INO | STATX_SIZE | STATX_MTIME;
-            if (statx(AT_FDCWD, @ptrCast(&self.path_buf), AT_SYMLINK_NOFOLLOW | AT_STATX_DONT_SYNC, mask, &stx) != 0) {
-                return error.StatFailed;
-            }
-            try self.addFileFromStatx(&stx);
-        } else {
-            // Fallback to lstat on other platforms
-            var stat_buf: Stat = undefined;
-            if (lstat(@ptrCast(&self.path_buf), &stat_buf) != 0) {
-                return error.StatFailed;
-            }
-            try self.addFileFromStat(&stat_buf);
-        }
+    /// Stat the current path and record it as a file.
+    /// `follow` picks stat() (target) over lstat() (the link itself).
+    fn addFileWithStat(self: *FastWalker, follow: bool) !void {
+        const stat_buf = if (follow)
+            try pstat.stat(@ptrCast(&self.path_buf))
+        else
+            try pstat.lstat(@ptrCast(&self.path_buf));
+        try self.addFileFromStat(&stat_buf);
     }
 
-    /// Add file from statx result (Linux-specific fast path)
-    fn addFileFromStatx(self: *FastWalker, stx: *const Statx) !void {
-        const size: u64 = stx.stx_size;
-
-        // Size filter
-        if (size < self.min_size) return;
-        if (self.max_size > 0 and size > self.max_size) return;
-
-        // Hard link detection - combine dev major/minor into single u32
-        if (self.track_hardlinks) {
-            if (self.seen_inodes == null) {
-                self.seen_inodes = .empty;
-            }
-            const dev: u32 = (stx.stx_dev_major << 8) | @as(u32, @truncate(stx.stx_dev_minor));
-            const file_id = FileId{
-                .dev = dev,
-                .ino = stx.stx_ino,
-            };
-            const result = try self.seen_inodes.?.getOrPut(self.allocator, file_id);
-            if (result.found_existing) {
-                self.stats.hard_links_skipped += 1;
-                return;
-            }
-        }
-
-        // Copy path
-        const path_alloc = if (self.arena) |*arena| arena.allocator() else self.allocator;
-        const path_copy = try path_alloc.dupe(u8, self.path_buf[0..self.path_len]);
-
-        const dev: u32 = if (self.track_hardlinks)
-            (stx.stx_dev_major << 8) | @as(u32, @truncate(stx.stx_dev_minor))
-        else
-            0;
-
-        try self.files.append(self.allocator, .{
-            .path = path_copy,
-            .size = size,
-            .ino = stx.stx_ino,
-            .dev = dev,
-            .mtime = stx.stx_mtime.sec,
+    /// Record a directory as visited. Returns false if it was already seen,
+    /// which is how symlink cycles (`ln -s .. loop`) are broken.
+    fn markDirVisited(self: *FastWalker, stat_buf: *const Stat) !bool {
+        if (!self.follow_symlinks) return true; // cycles need a symlink to exist
+        const result = try self.seen_dirs.getOrPut(self.allocator, .{
+            .dev = stat_buf.dev,
+            .ino = stat_buf.ino,
         });
+        return !result.found_existing;
+    }
 
-        self.stats.files_found += 1;
-        self.stats.total_size += size;
+    /// Descend into a symlinked directory. Returns true if the dir was pushed
+    /// onto the stack (caller must return to process it), false if it was
+    /// skipped as already-visited or unopenable.
+    fn enterSymlinkedDir(self: *FastWalker, target: *const Stat, parent_len: usize) !bool {
+        if (!try self.markDirVisited(target)) {
+            self.path_len = parent_len;
+            return false;
+        }
+        const sub_dir = libc.opendir(@ptrCast(&self.path_buf)) orelse {
+            self.path_len = parent_len;
+            return false;
+        };
+        self.stats.dirs_traversed += 1;
+        try self.dir_stack.append(self.allocator, .{
+            .dir = sub_dir,
+            .path_len = self.path_len,
+        });
+        self.maybeReportProgress();
+        return true;
     }
 
     /// Add file from already-obtained stat buffer
     fn addFileFromStat(self: *FastWalker, stat_buf: *const Stat) !void {
-        const size: u64 = @intCast(stat_buf.size);
+        const size: u64 = stat_buf.size;
 
         // Size filter
         if (size < self.min_size) return;
@@ -513,7 +434,7 @@ pub const FastWalker = struct {
                 self.seen_inodes = .empty;
             }
             const file_id = FileId{
-                .dev = @truncate(@as(u64, @intCast(stat_buf.dev))),
+                .dev = stat_buf.dev,
                 .ino = stat_buf.ino,
             };
             const result = try self.seen_inodes.?.getOrPut(self.allocator, file_id);
@@ -531,8 +452,8 @@ pub const FastWalker = struct {
             .path = path_copy,
             .size = size,
             .ino = stat_buf.ino,
-            .dev = @truncate(@as(u64, @intCast(stat_buf.dev))),
-            .mtime = stat_buf.mtim.sec,
+            .dev = stat_buf.dev,
+            .mtime = stat_buf.mtime_sec,
         });
 
         self.stats.files_found += 1;

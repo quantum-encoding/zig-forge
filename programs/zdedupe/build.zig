@@ -88,11 +88,17 @@ pub fn build(b: *std.Build) void {
     const test_modules = [_][]const u8{
         "src/types.zig",
         "src/hasher.zig",
+        "src/pstat.zig",
+        "src/testing_scratch.zig",
         "src/walker.zig",
+        "src/fast_walker.zig",
+        "src/parallel.zig",
         "src/dedupe.zig",
         "src/compare.zig",
         "src/report.zig",
         "src/lib.zig",
+        // External anchors + end-to-end contract tests (see file header).
+        "src/tier1_anchors.zig",
     };
 
     for (test_modules) |mod| {

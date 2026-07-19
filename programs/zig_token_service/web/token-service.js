@@ -13,10 +13,10 @@
  *
  *   - Anyone with access to the page can extract the secret and forge tokens.
  *   - A client can move its own clock to bypass `exp`.
- *   - `verifyToken()` here is algorithm-blind: it recomputes HMAC-SHA256 over
- *     `header.payload` and compares. It is safe against `alg:none` / alg
- *     confusion (a forged token fails the HMAC), but it does not parse or
- *     enforce the header `alg`/`typ`.
+ *   - `verifyToken()` pins the header `alg` to HS256 (anything else, including
+ *     `alg:none`, is refused before the HMAC is computed) and compares the
+ *     signature in constant time. That closes alg-confusion, but it does not
+ *     make the client a trust boundary — see above.
  *
  * This is a UX / offline convenience, NOT a security boundary. Tokens minted or
  * accepted here MUST be re-verified server-side with the secret held privately.

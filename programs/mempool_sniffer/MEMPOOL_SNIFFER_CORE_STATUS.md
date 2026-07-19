@@ -1,14 +1,32 @@
-# Mempool Sniffer Core - FFI Library (Initial Build)
+# Mempool Sniffer Core - FFI Library
 
-**Status**: ⚙️ **FOUNDATION READY** - Core infrastructure complete, Bitcoin protocol pending
+**Status**: ✅ **IMPLEMENTED** - C FFI and the Bitcoin P2P protocol are both in place
 
-**Date**: 2025-12-02
+**Date**: 2026-07-19 (protocol section rewritten; original foundation doc 2025-12-02)
 
 ---
 
 ## Executive Summary
 
-The **Mempool Sniffer Core** library foundation is complete with a production-ready C FFI, callback-based event system, and build infrastructure. The Bitcoin P2P protocol implementation from the original `mempool-sniffer` binary is ready to be integrated.
+The **Mempool Sniffer Core** library ships a C FFI, a callback-based event
+system, build infrastructure, **and** the Bitcoin P2P protocol: mainnet socket
+connection, version/verack handshake, `ping`/`pong` keepalive, `inv` → `getdata`
+transaction fetching, and legacy + BIP141 SegWit transaction parsing
+(`src/bitcoin_protocol.zig`).
+
+The transaction parser is hardened against the standard P2P parsing attacks
+(H-1..H-4: offset-overflow, value-overflow, witness-vs-txid, unbounded element
+counts) and its txid computation is anchored to external vectors — the mainnet
+genesis coinbase plus two mainnet SegWit transactions whose raw serialization
+and txid both come from the Blockstream Esplora API. Per the repo golden rule,
+those anchors are what make the parser's output trustworthy; roundtrip tests
+would not.
+
+The receive path performs **cross-recv reassembly**: bytes accumulate in a
+growable buffer and are consumed one complete message at a time, so a `tx`
+message spanning several `recv` calls is parsed rather than dropped. Buffered
+bytes are capped at Bitcoin Core's `MAX_PROTOCOL_MESSAGE_LENGTH` (4,000,000)
+plus a header.
 
 ---
 
@@ -48,13 +66,13 @@ The **Mempool Sniffer Core** library foundation is complete with a production-re
 │    - ms_sniffer_is_running()                                │
 │    - ms_sniffer_get_status()                                │
 │                                                              │
-│  ⏳ Bitcoin Protocol (PENDING - see below)                  │
+│  ✓ Bitcoin Protocol                                         │
 │    - P2P socket connection                                  │
 │    - Version handshake                                      │
 │    - io_uring async I/O                                     │
 │    - inv message parsing                                    │
 │    - getdata transaction fetching                           │
-│    - Whale detection (>1 BTC)                               │
+│    - Whale detection (default 0.1 BTC, runtime-tunable)     │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -74,7 +92,7 @@ Bitcoin Node (8333) ──► Sniffer Thread ──► Callbacks ──► Appli
                          ↓
                    Extract BTC value
                          ↓
-                  Check if whale (>1 BTC)
+                  Check if whale (default 0.1 BTC)
                          ↓
                  Invoke tx_callback()
 ```
@@ -157,18 +175,26 @@ gcc -o test_core test.c -I../include -L../zig-out/lib -lmempool_sniffer_core -lp
 
 ## Next Steps
 
-### 1. Extract Bitcoin Protocol
+### 1. Bitcoin Protocol — DONE
 
-The original `mempool-sniffer` binary at `/home/founder/zig_forge/grok/mempool-sniffer` contains a full working implementation of:
+All of the following are implemented in-tree and covered by `zig build test`:
 
-- Raw Bitcoin P2P socket connection
-- Version message handshake
-- io_uring async I/O with SQPOLL
-- inv message detection and parsing
+- Raw Bitcoin P2P socket connection (`src/socket.zig`)
+- Version message handshake, with a CSPRNG-drawn nonce
+- io_uring async I/O on Linux; blocking `recv` with timeout elsewhere
+- inv message detection and parsing (`forEachInvTxHash`)
 - getdata request for full transactions
-- Transaction output value summation
-- Whale detection (>1 BTC threshold)
+- Transaction output value summation (checked u128 accumulator)
+- Whale detection (0.1 BTC default, `ms_set_whale_threshold` to change)
 - SIMD hash endianness reversal
+
+Remaining known gaps, carried from the 2026-07-17 audit:
+
+- `src/io_backend.zig`'s `IoMux` abstraction is not on the live path; only its
+  `backend` enum is consumed (by `ms_performance_info`).
+- The `recv` path does not verify the per-message payload checksum against the
+  header's checksum field.
+- IPv4 only; no DNS resolution (`connectFromString` takes a dotted quad).
 
 **Source file:** `/home/founder/zig_forge/grok/src/stratum/client.zig` (500 lines)
 
@@ -359,16 +385,19 @@ React UI (Mempool Live Tab)
 
 ## Conclusion
 
-The **Mempool Sniffer Core** foundation is production-ready with **7/7 API tests passing**. The next phase is to integrate the battle-tested Bitcoin protocol implementation from the original binary, which will enable real-time whale detection and mempool monitoring.
+The **Mempool Sniffer Core** is implemented end-to-end: C FFI, P2P protocol,
+externally-anchored transaction parsing, and cross-recv reassembly, all green
+under `zig build test` and clean under `zig-lens --strict`.
 
-**Current Status:** Infrastructure complete, ready for Bitcoin protocol integration
+**Current Status:** Implemented; see the known gaps above.
 
-**Next Milestone:** Extract and integrate P2P protocol from `client.zig`
+**Next Milestone:** Per-message checksum verification and either wiring or
+removing the unused `IoMux` abstraction.
 
 ---
 
 **Maintained by**: Quantum Encoding Forge
 **License**: MIT
-**Version**: 1.0.0-foundation
-**Completion**: 2025-12-02 (Foundation)
+**Version**: 2.0.0-cross-platform
+**Completion**: 2026-07-19 (protocol implemented + externally anchored)
 **Performance Target**: 🏆 **<1µs latency per transaction**

@@ -16,11 +16,24 @@ zig-watch <path> [options] -- <command...>
 |---|---|
 | `--ext <exts>` | Only react to files with these extensions (comma-separated, e.g. `.zig,.json`) |
 | `--ignore <patterns>` | Ignore matching paths (comma-separated, e.g. `.git,node_modules,*.swp`) |
-| `--debounce <ms>` | Debounce time in milliseconds (default: `0`, no debounce) |
-| `--interval <time>` | Poll interval (default: `1s`). Accepts suffixes `s`/`m`/`h`/`d`, e.g. `500ms`* / `2s` / `1m` |
+| `--debounce <ms>` | Coalesce a burst of changes into one command run (default: `0`, off) |
+| `--interval <time>` | Poll interval (default: `1s`). Units: `ms`, `s`, `m`, `h`, `d` — e.g. `500ms`, `2s`, `1m30s` |
 | `-h`, `--help` | Show help |
 
-\* Interval parsing treats trailing digits with no suffix as seconds and recognizes `s`, `m`, `h`, `d` suffixes.
+Interval parsing accepts a sequence of `<number><unit>` groups (`1m30s`); a trailing
+group with no unit is read as seconds, so `--interval 2` means `2s`.
+
+### Debounce semantics
+
+`--debounce` is defer-and-coalesce, never drop:
+
+- The first change to a path fires the command immediately.
+- Further changes within the window are coalesced — no extra runs.
+- When the window elapses, the coalesced burst fires exactly once, even if
+  nothing has changed since.
+
+The window is measured on a monotonic clock (`CLOCK_MONOTONIC`), so it is
+unaffected by wall-clock steps, and it is independent of the file's own mtime.
 
 ## Examples
 
@@ -36,8 +49,18 @@ zig-watch src --debounce 500 -- zig build
 ```
 zig build            # builds the zig-watch executable
 zig build run -- ... # build and run
-zig build test       # run the watcher unit tests
+zig build test       # run the watcher + CLI-parser unit tests
 ```
+
+## What is watched
+
+- **Hidden entries are skipped** at every depth: any name starting with `.`
+  (`.git/`, `.env`, `src/.cache`) is never traversed or tracked.
+- **Symlinks are neither followed nor watched.** Entries are `lstat`'d, and only
+  regular files and directories are considered, so a symlink loop cannot hang
+  the walk.
+- The first scan establishes the baseline: pre-existing files are recorded, not
+  reported. Only changes after startup run the command.
 
 ## Notes
 

@@ -112,7 +112,7 @@ zig-forge/
 | **zig_cron** | Task scheduler — interval-based (5s/1m/1h/1d), signal-based shutdown. | `zig-cron` | Complete |
 | **zig_watch** | File watcher — poll-based change detection, extension filtering, command execution. | `zig-watch` | Complete |
 | **distributed_kv** | Raft KV store — leader election, WAL with CRC32, TTL, CAS, watch/subscribe. | `kv-server`, `kv-client` | Complete |
-| **wasm_runtime** | WebAssembly runtime — MVP spec, WASI preview1, stack VM, multi-module linking. | `wasm` | Complete |
+| **wasm_runtime** | WebAssembly interpreter — MVP instruction set, stack VM, single-module instantiation, partial WASI preview1 (stdio/args/environ/clock/random; **no filesystem preopens**). No multi-module linking. | `wasm` | Beta |
 
 ### Developer Tools
 

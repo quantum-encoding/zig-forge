@@ -78,4 +78,30 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run FFI unit tests");
     test_step.dependOn(&b.addRunArtifact(ffi_tests).step);
+
+    // C-side ABI smoke test: compiles include/http_sentinel.h with a C compiler
+    // and links it against the real static library, so drift between the shipped
+    // header and src/ffi.zig (renamed export, reordered struct field, changed
+    // error-code value) fails the build instead of surfacing at runtime in the
+    // consumer. Built in Debug unconditionally so its assert()s stay live.
+    const abi_module = b.createModule(.{
+        .target = target,
+        .optimize = .Debug,
+    });
+    abi_module.link_libc = true;
+    abi_module.addIncludePath(b.path("include"));
+    abi_module.addCSourceFile(.{
+        .file = b.path("tests/abi_smoke.c"),
+        .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" },
+    });
+
+    const abi_smoke = b.addExecutable(.{
+        .name = "abi_smoke",
+        .root_module = abi_module,
+    });
+    abi_module.linkLibrary(lib);
+
+    const abi_step = b.step("abi-smoke", "Compile+link the C header against the static library");
+    abi_step.dependOn(&b.addRunArtifact(abi_smoke).step);
+    test_step.dependOn(abi_step);
 }

@@ -1,424 +1,519 @@
-//! zmkdir - High-performance directory creation utility in Zig
+//! zmkdir - Create directories
 //!
-//! Compatible with GNU mkdir, supporting:
-//! - Creating multiple directories
-//! - Parent directory creation (-p)
-//! - Permission mode setting (-m)
-//! - Verbose output (-v)
+//! A Zig implementation of GNU coreutils `mkdir`:
+//!   zmkdir [OPTION]... DIRECTORY...
+//!
+//! Faithful to mkdir(1) semantics (anchored against GNU coreutils 9.10):
+//!   - default mode is 0777 modified by the process umask;
+//!   - `-m`/`--mode` sets the final directory's mode EXACTLY (never
+//!     narrowed by the umask), accepting both octal and chmod-style
+//!     symbolic modes with a point of departure of a=rwx (0777);
+//!     setuid/setgid/sticky bits are allowed and applied via chmod;
+//!   - `-p`/`--parents`: no error if the directory exists (and IS a
+//!     directory), ancestors are created left-to-right with mode
+//!     (0777 & ~umask) | u+wx so they are traversable even under a
+//!     restrictive umask; a concurrent creator winning the race is
+//!     benign (EEXIST-on-a-directory is tolerated, never an error);
+//!   - `-v`/`--verbose` prints "created directory 'X'" per created dir;
+//!   - unknown options are rejected, `--` ends option parsing, options
+//!     are honored even after operands (getopt permutation), long
+//!     options may be abbreviated when unambiguous;
+//!   - `-Z`/`--context` are accepted as no-ops (matches GNU on kernels
+//!     without SELinux/SMACK; `--context=CTX` prints GNU's warning);
+//!   - every failed create reports strerror(errno) and exit status 1,
+//!     but remaining operands are still attempted.
 
 const std = @import("std");
-const libc = std.c;
 
-extern "c" fn umask(mask: libc.mode_t) libc.mode_t;
-extern "c" fn stat(path: [*:0]const u8, buf: *libc.Stat) c_int;
-extern "c" fn access(path: [*:0]const u8, mode: c_int) c_int;
+const VERSION = "2.0.0";
 
-// ============================================================================
-// Configuration
-// ============================================================================
+extern "c" fn mkdir(path: [*:0]const u8, mode: c_uint) c_int;
+extern "c" fn chmod(path: [*:0]const u8, mode: c_uint) c_int;
+extern "c" fn umask(mask: c_uint) c_uint;
+extern "c" fn write(fd: c_int, buf: [*]const u8, count: usize) isize;
+extern "c" fn strerror(errnum: c_int) [*:0]const u8;
+extern "c" fn stat(path: [*:0]const u8, buf: *std.c.Stat) c_int;
 
-const Config = struct {
-    parents: bool = false,
-    verbose: bool = false,
-    mode: ?u32 = null, // null means use default (0o777 & ~umask)
-    dirs: std.ArrayListUnmanaged([]const u8) = .empty,
-
-    fn deinit(self: *Config, allocator: std.mem.Allocator) void {
-        for (self.dirs.items) |item| {
-            allocator.free(item);
+/// Write the whole slice, retrying on partial writes and EINTR.
+fn writeFull(fd: c_int, bytes: []const u8) void {
+    var off: usize = 0;
+    while (off < bytes.len) {
+        const rc = write(fd, bytes.ptr + off, bytes.len - off);
+        if (rc < 0) {
+            if (std.c._errno().* == @intFromEnum(std.c.E.INTR)) continue;
+            return; // nothing more we can do about a failing stdout/stderr
         }
-        self.dirs.deinit(allocator);
-    }
-};
-
-// ============================================================================
-// Mode Parsing
-// ============================================================================
-
-/// Parse octal mode string (e.g., "755", "0755")
-fn parseOctalMode(mode_str: []const u8) ?u32 {
-    if (mode_str.len == 0) return null;
-
-    var result: u32 = 0;
-    for (mode_str) |ch| {
-        if (ch < '0' or ch > '7') return null;
-        result = result * 8 + (ch - '0');
-    }
-    return result;
-}
-
-/// Get the current umask
-fn getUmask() u32 {
-    // Set umask to 0 to get current value, then restore it
-    const current = umask(0);
-    _ = umask(current);
-    return current;
-}
-
-/// Get default mode (0o777 & ~umask)
-fn getDefaultMode() u32 {
-    return 0o777 & ~getUmask();
-}
-
-// ============================================================================
-// Directory Creation
-// ============================================================================
-
-const MkdirError = error{
-    AccessDenied,
-    FileExists,
-    NoSpace,
-    ReadOnlyFS,
-    Unknown,
-    PathAlreadyExists,
-    FileNotFound,
-    OutOfMemory,
-};
-
-/// Create a single directory with the given mode
-fn createDir(path: [:0]const u8, mode: u32) MkdirError!void {
-    if (libc.mkdir(path.ptr, @intCast(mode)) != 0) {
-        return error.Unknown;
+        if (rc == 0) return;
+        off += @intCast(rc);
     }
 }
 
-/// Check if path exists and is a directory
-fn isDirectory(path: [:0]const u8) bool {
-    var stat_buf: libc.Stat = undefined;
-    const result = stat(path.ptr, &stat_buf);
-    if (result != 0) return false;
-    return (stat_buf.mode & 0o170000) == 0o40000;
+fn writeFmt(fd: c_int, comptime fmt: []const u8, args: anytype) void {
+    var buf: [4096 + 512]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, fmt, args) catch {
+        writeFull(fd, "zmkdir: (diagnostic too long to display)\n");
+        return;
+    };
+    writeFull(fd, msg);
 }
 
-/// Check if path exists
-fn pathExists(path: [:0]const u8) bool {
-    // F_OK = 0, check existence only
-    return access(path.ptr, 0) == 0;
+fn writeStderr(comptime fmt: []const u8, args: anytype) void {
+    writeFmt(2, fmt, args);
 }
 
-/// Create directory and optionally parent directories
-fn mkdir(allocator: std.mem.Allocator, path: []const u8, config: *const Config) !void {
-    const mode = config.mode orelse getDefaultMode();
-
-    // Need null-terminated path for syscalls
-    const path_z = try allocator.dupeZ(u8, path);
-    defer allocator.free(path_z);
-
-    if (config.parents) {
-        try mkdirParents(allocator, path_z, mode, config.verbose);
-    } else {
-        createDir(path_z, mode) catch |err| {
-            switch (err) {
-                error.PathAlreadyExists => {
-                    printErrorFmt("cannot create directory '{s}': File exists", .{path});
-                    return error.PathAlreadyExists;
-                },
-                error.FileNotFound => {
-                    printErrorFmt("cannot create directory '{s}': No such file or directory", .{path});
-                    return err;
-                },
-                error.AccessDenied => {
-                    printErrorFmt("cannot create directory '{s}': Permission denied", .{path});
-                    return err;
-                },
-                else => {
-                    printErrorFmt("cannot create directory '{s}': {}", .{ path, err });
-                    return err;
-                },
-            }
-        };
-        if (config.verbose) {
-            printVerbose("created directory", path);
-        }
-    }
+fn writeStdout(comptime fmt: []const u8, args: anytype) void {
+    writeFmt(1, fmt, args);
 }
 
-/// Create directory with all parent directories
-fn mkdirParents(allocator: std.mem.Allocator, path: [:0]const u8, mode: u32, verbose: bool) !void {
-    // Collect all components that need to be created
-    var components_to_create: std.ArrayListUnmanaged(usize) = .empty;
-    defer components_to_create.deinit(allocator);
-
-    // Walk up from path to find first existing ancestor
-    // Store the end indices of each path component
-    var end_idx = path.len;
-
-    while (end_idx > 0) {
-        // Create null-terminated path for this prefix
-        const check_path = try allocator.dupeZ(u8, path[0..end_idx]);
-        defer allocator.free(check_path);
-
-        if (pathExists(check_path)) {
-            break;
-        }
-
-        try components_to_create.append(allocator, end_idx);
-
-        // Move to parent
-        if (std.mem.lastIndexOfScalar(u8, path[0..end_idx], '/')) |idx| {
-            if (idx == 0) {
-                end_idx = 0;
-            } else {
-                end_idx = idx;
-            }
-        } else {
-            break;
-        }
-    }
-
-    // Create directories from root to leaf (reverse order)
-    var i = components_to_create.items.len;
-    while (i > 0) {
-        i -= 1;
-        const component_end = components_to_create.items[i];
-        const dir_path = path[0..component_end];
-
-        const dir_path_z = try allocator.dupeZ(u8, dir_path);
-        defer allocator.free(dir_path_z);
-
-        // For parent directories, use mode with u+wx (0o300) to allow traversal
-        const parent_mode = if (i > 0) (getDefaultMode() | 0o300) else mode;
-
-        createDir(dir_path_z, parent_mode) catch |err| {
-            switch (err) {
-                error.PathAlreadyExists => {
-                    // Already exists, that's fine for -p
-                    continue;
-                },
-                else => {
-                    printErrorFmt("cannot create directory '{s}': {}", .{ dir_path, err });
-                    return err;
-                },
-            }
-        };
-
-        if (verbose) {
-            printVerbose("created directory", dir_path);
-        }
-    }
+fn tryHelpAndExit() noreturn {
+    writeStderr("Try 'zmkdir --help' for more information.\n", .{});
+    std.process.exit(1);
 }
 
-// ============================================================================
-// Argument Parsing
-// ============================================================================
-
-fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
-    // Collect args into a slice
-    var args_list: std.ArrayListUnmanaged([]const u8) = .empty;
-    defer args_list.deinit(allocator);
-    var args_iter = std.process.Args.Iterator.init(minimal_args);
-    while (args_iter.next()) |arg| {
-        try args_list.append(allocator, arg);
-    }
-    const args = args_list.items;
-
-    var config = Config{};
-
-    var i: usize = 1; // Skip program name
-
-    while (i < args.len) : (i += 1) {
-        const arg = args[i];
-
-        if (arg.len > 0 and arg[0] == '-') {
-            if (arg.len == 1) {
-                // "-" alone is an invalid directory name for mkdir
-                printError("cannot create directory '-': Invalid argument");
-                std.process.exit(1);
-            }
-
-            if (arg[1] == '-') {
-                // Long options
-                if (std.mem.eql(u8, arg, "--help")) {
-                    printHelp();
-                    std.process.exit(0);
-                } else if (std.mem.eql(u8, arg, "--version")) {
-                    printVersion();
-                    std.process.exit(0);
-                } else if (std.mem.eql(u8, arg, "--parents")) {
-                    config.parents = true;
-                } else if (std.mem.eql(u8, arg, "--verbose")) {
-                    config.verbose = true;
-                } else if (std.mem.startsWith(u8, arg, "--mode=")) {
-                    const mode_str = arg[7..];
-                    config.mode = parseOctalMode(mode_str) orelse {
-                        printErrorFmt("invalid mode: '{s}'", .{mode_str});
-                        std.process.exit(1);
-                    };
-                } else if (std.mem.eql(u8, arg, "--mode")) {
-                    i += 1;
-                    if (i >= args.len) {
-                        printError("option '--mode' requires an argument");
-                        std.process.exit(1);
-                    }
-                    config.mode = parseOctalMode(args[i]) orelse {
-                        printErrorFmt("invalid mode: '{s}'", .{args[i]});
-                        std.process.exit(1);
-                    };
-                } else if (std.mem.eql(u8, arg, "--")) {
-                    // End of options
-                    i += 1;
-                    while (i < args.len) : (i += 1) {
-                        try config.dirs.append(allocator, try allocator.dupe(u8, args[i]));
-                    }
-                    break;
-                } else {
-                    printErrorFmt("unrecognized option '{s}'", .{arg});
-                    std.process.exit(1);
-                }
-            } else {
-                // Short options (can be combined: -pv)
-                var j: usize = 1;
-                while (j < arg.len) : (j += 1) {
-                    const ch = arg[j];
-                    switch (ch) {
-                        'p' => config.parents = true,
-                        'v' => config.verbose = true,
-                        'm' => {
-                            // -m requires argument
-                            if (j + 1 < arg.len) {
-                                // Mode attached: -m755
-                                const mode_str = arg[j + 1 ..];
-                                config.mode = parseOctalMode(mode_str) orelse {
-                                    printErrorFmt("invalid mode: '{s}'", .{mode_str});
-                                    std.process.exit(1);
-                                };
-                                break;
-                            } else {
-                                // Mode as next argument: -m 755
-                                i += 1;
-                                if (i >= args.len) {
-                                    printError("option requires an argument -- 'm'");
-                                    std.process.exit(1);
-                                }
-                                config.mode = parseOctalMode(args[i]) orelse {
-                                    printErrorFmt("invalid mode: '{s}'", .{args[i]});
-                                    std.process.exit(1);
-                                };
-                            }
-                        },
-                        else => {
-                            printErrorFmt("invalid option -- '{c}'", .{ch});
-                            std.process.exit(1);
-                        },
-                    }
-                }
-            }
-        } else {
-            // Directory argument
-            try config.dirs.append(allocator, try allocator.dupe(u8, arg));
-        }
-    }
-
-    if (config.dirs.items.len == 0) {
-        printError("missing operand");
-        std.debug.print("Try 'zmkdir --help' for more information.\n", .{});
-        std.process.exit(1);
-    }
-
-    return config;
-}
-
-// ============================================================================
-// Output
-// ============================================================================
-
-fn printVerbose(action: []const u8, path: []const u8) void {
-    const Io = std.Io;
-    const io = Io.Threaded.global_single_threaded.io();
-    var buf: [512]u8 = undefined;
-    const stdout_file = Io.File.stdout();
-    var writer = stdout_file.writer(io, &buf);
-    writer.interface.print("zmkdir: {s} '{s}'\n", .{ action, path }) catch {};
-    writer.interface.flush() catch {};
-}
-
-fn printError(msg: []const u8) void {
-    std.debug.print("zmkdir: {s}\n", .{msg});
-}
-
-fn printErrorFmt(comptime fmt: []const u8, args: anytype) void {
-    std.debug.print("zmkdir: " ++ fmt ++ "\n", args);
-}
-
-fn printHelp() void {
-    const Io = std.Io;
-    const io = Io.Threaded.global_single_threaded.io();
-    var buf: [4096]u8 = undefined;
-    const stdout_file = Io.File.stdout();
-    var writer = stdout_file.writer(io, &buf);
-    writer.interface.writeAll(
+fn printUsage() void {
+    const usage =
         \\Usage: zmkdir [OPTION]... DIRECTORY...
         \\Create the DIRECTORY(ies), if they do not already exist.
         \\
         \\Mandatory arguments to long options are mandatory for short options too.
         \\  -m, --mode=MODE   set file mode (as in chmod), not a=rwx - umask
-        \\  -p, --parents     no error if existing, make parent directories as needed
+        \\  -p, --parents     no error if existing, make parent directories as needed,
+        \\                    with their file modes unaffected by any -m option
         \\  -v, --verbose     print a message for each created directory
+        \\  -Z                accepted for GNU compatibility (SELinux; ignored)
+        \\      --context[=CTX]  likewise ignored on this platform
         \\      --help        display this help and exit
         \\      --version     output version information and exit
         \\
-        \\zmkdir - High-performance directory creation utility in Zig
-        \\
-    ) catch {};
-    writer.interface.flush() catch {};
+    ;
+    writeStdout(usage, .{});
 }
 
 fn printVersion() void {
-    const Io = std.Io;
-    const io = Io.Threaded.global_single_threaded.io();
-    var buf: [256]u8 = undefined;
-    const stdout_file = Io.File.stdout();
-    var writer = stdout_file.writer(io, &buf);
-    writer.interface.writeAll("zmkdir 0.1.0\n") catch {};
-    writer.interface.flush() catch {};
+    writeStdout("zmkdir {s}\n", .{VERSION});
 }
 
-// ============================================================================
-// Entry Point
-// ============================================================================
+// ---------------------------------------------------------------------------
+// Mode parsing (GNU gnulib mode_compile/mode_adjust semantics, restricted to
+// what mkdir needs: point of departure 0777, target IS a directory)
+// ---------------------------------------------------------------------------
 
-pub fn main(init: std.process.Init) void {
+const ModeError = error{InvalidMode};
+
+const all_mode_bits: u32 = 0o7777;
+
+/// Parse MODE (octal or symbolic) into a full 12-bit mode, starting from
+/// 0o777 (a=rwx) for symbolic clauses. `umask_value` masks clauses with no
+/// explicit "who" (GNU mode_adjust). Because the target is a directory,
+/// 'X' always grants execute. Special bits (setuid/setgid/sticky) are
+/// legal for mkdir and kept.
+fn parseMode(s: []const u8, umask_value: u32) ModeError!u32 {
+    if (s.len == 0) return error.InvalidMode;
+
+    // Numeric (octal) mode: GNU mode_compile takes the numeric path when the
+    // string begins with a digit; any non-octal digit or a value beyond
+    // 0o7777 is "invalid mode" (e.g. "999", "77777777777777"). The early
+    // bound check also prevents the u32-overflow panic the old parser had.
+    if (s[0] >= '0' and s[0] <= '9') {
+        var v: u32 = 0;
+        for (s) |c| {
+            if (c < '0' or c > '7') return error.InvalidMode;
+            v = v * 8 + (c - '0'); // cannot overflow: v is capped below
+            if (v > all_mode_bits) return error.InvalidMode;
+        }
+        return v;
+    }
+
+    // Symbolic mode: comma-separated clauses of [ugoa]*([+-=]([ugo]|[rwxXst]*))+
+    var mode: u32 = 0o777; // mkdir's point of departure: a=rwx
+    var i: usize = 0;
+    while (true) {
+        // Parse the "who" letters for this clause.
+        var who: u32 = 0;
+        while (i < s.len) : (i += 1) {
+            switch (s[i]) {
+                'u' => who |= 0o4700,
+                'g' => who |= 0o2070,
+                'o' => who |= 0o1007,
+                'a' => who |= all_mode_bits,
+                else => break,
+            }
+        }
+        const explicit_who = who != 0;
+
+        // At least one op ('+', '-', '=') must follow.
+        if (i >= s.len or (s[i] != '+' and s[i] != '-' and s[i] != '=')) {
+            return error.InvalidMode;
+        }
+        while (i < s.len and (s[i] == '+' or s[i] == '-' or s[i] == '=')) {
+            const op = s[i];
+            i += 1;
+
+            var value: u32 = 0;
+            // Copy form: exactly one of [ugo] followed by clause end/next op.
+            if (i < s.len and (s[i] == 'u' or s[i] == 'g' or s[i] == 'o') and
+                (i + 1 == s.len or s[i + 1] == ',' or s[i + 1] == '+' or
+                    s[i + 1] == '-' or s[i + 1] == '='))
+            {
+                const triad: u32 = switch (s[i]) {
+                    'u' => (mode >> 6) & 7,
+                    'g' => (mode >> 3) & 7,
+                    else => mode & 7,
+                };
+                value = triad << 6 | triad << 3 | triad;
+                i += 1;
+            } else {
+                while (i < s.len) : (i += 1) {
+                    switch (s[i]) {
+                        'r' => value |= 0o444,
+                        'w' => value |= 0o222,
+                        'x' => value |= 0o111,
+                        // X: the target of mkdir is always a directory, so
+                        // conditional execute always applies (GNU mode_adjust
+                        // with dir=true).
+                        'X' => value |= 0o111,
+                        's' => value |= 0o6000,
+                        't' => value |= 0o1000,
+                        else => break,
+                    }
+                }
+            }
+
+            const affected: u32 = if (explicit_who) who else all_mode_bits;
+            value &= affected;
+            if (!explicit_who) value &= ~umask_value;
+
+            switch (op) {
+                '+' => mode |= value,
+                '-' => mode &= ~value,
+                '=' => mode = (mode & ~affected) | value,
+                else => unreachable,
+            }
+        }
+
+        if (i == s.len) break;
+        if (s[i] != ',') return error.InvalidMode;
+        i += 1;
+        if (i == s.len) return error.InvalidMode; // trailing comma
+    }
+    return mode;
+}
+
+// ---------------------------------------------------------------------------
+// Directory creation
+// ---------------------------------------------------------------------------
+
+/// mkdir(2) on `path`; returns 0 on success or the captured errno.
+fn mkdirOne(path: []const u8, mode: u32) c_int {
+    var path_buf: [4096]u8 = undefined;
+    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch
+        return @intFromEnum(std.c.E.NAMETOOLONG);
+    if (mkdir(path_z, @intCast(mode & 0o777)) != 0) {
+        // Capture errno immediately, before any write() can clobber it.
+        return std.c._errno().*;
+    }
+    return 0;
+}
+
+/// Does `path` resolve (following symlinks, like GNU's stat-based check
+/// in make_dir_parents) to a directory?
+fn isDirectory(path: []const u8) bool {
+    var path_buf: [4096]u8 = undefined;
+    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return false;
+    var st: std.c.Stat = undefined;
+    if (stat(path_z, &st) != 0) return false;
+    return st.mode & std.c.S.IFMT == std.c.S.IFDIR;
+}
+
+fn cannotCreate(path: []const u8, err: c_int) void {
+    writeStderr("zmkdir: cannot create directory '{s}': {s}\n", .{
+        path, std.mem.span(strerror(err)),
+    });
+}
+
+/// Create one operand. `final_mode` is the full 12-bit mode for the target
+/// itself; `inter_mode` the permission bits for `-p` ancestors. The process
+/// umask is 0 while this runs, so modes are applied exactly.
+fn makeDir(path: []const u8, final_mode: u32, inter_mode: u32, parents: bool, verbose: bool) bool {
+    if (parents) {
+        // Trailing slashes belong to the final component, not an ancestor.
+        var end = path.len;
+        while (end > 0 and path[end - 1] == '/') end -= 1;
+
+        var i: usize = 1;
+        while (i < end) : (i += 1) {
+            if (path[i] != '/' or path[i - 1] == '/') continue;
+            const prefix = path[0..i];
+            const err = mkdirOne(prefix, inter_mode);
+            if (err == 0) {
+                if (verbose) writeStdout("zmkdir: created directory '{s}'\n", .{prefix});
+            } else if (err == @intFromEnum(std.c.E.EXIST)) {
+                if (!isDirectory(prefix)) {
+                    // GNU names the offending ancestor with ENOTDIR text.
+                    cannotCreate(prefix, @intFromEnum(std.c.E.NOTDIR));
+                    return false;
+                }
+            } else {
+                cannotCreate(prefix, err);
+                return false;
+            }
+        }
+    }
+
+    const err = mkdirOne(path, final_mode);
+    if (err != 0) {
+        // -p tolerates an existing directory — including one that appeared
+        // between our mkdirs (concurrent `mkdir -p` race is benign, as in GNU).
+        if (parents and err == @intFromEnum(std.c.E.EXIST) and isDirectory(path)) {
+            return true;
+        }
+        cannotCreate(path, err);
+        return false;
+    }
+
+    // -m modes beyond the 0o777 the kernel accepts (setuid/setgid/sticky)
+    // are applied exactly, GNU-style, with a follow-up chmod.
+    if (final_mode & ~@as(u32, 0o777) != 0) {
+        var path_buf: [4096]u8 = undefined;
+        if (std.fmt.bufPrintZ(&path_buf, "{s}", .{path})) |path_z| {
+            if (chmod(path_z, @intCast(final_mode & all_mode_bits)) != 0) {
+                const cerr = std.c._errno().*;
+                writeStderr("zmkdir: cannot set permissions '{s}': {s}\n", .{
+                    path, std.mem.span(strerror(cerr)),
+                });
+                return false;
+            }
+        } else |_| {}
+    }
+
+    if (verbose) writeStdout("zmkdir: created directory '{s}'\n", .{path});
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Argument parsing (getopt_long-compatible: permutation, "--", clustering,
+// attached "-mMODE", unambiguous long-option abbreviation)
+// ---------------------------------------------------------------------------
+
+// Order matches GNU mkdir's longopts table (drives the "ambiguous" listing).
+const long_opts = [_][]const u8{ "context", "mode", "parents", "verbose", "help", "version" };
+
+fn matchLongOpt(name: []const u8) union(enum) { match: []const u8, none, ambiguous } {
+    var found: ?[]const u8 = null;
+    var n_found: usize = 0;
+    for (long_opts) |cand| {
+        if (std.mem.startsWith(u8, cand, name)) {
+            if (cand.len == name.len) return .{ .match = cand }; // exact
+            found = cand;
+            n_found += 1;
+        }
+    }
+    if (n_found == 1) return .{ .match = found.? };
+    if (n_found == 0) return .none;
+    return .ambiguous;
+}
+
+fn ambiguousOptionAndExit(arg: []const u8, name: []const u8) noreturn {
+    var buf: [768]u8 = undefined;
+    var len: usize = 0;
+    if (std.fmt.bufPrint(buf[len..], "zmkdir: option '{s}' is ambiguous; possibilities:", .{arg})) |head| {
+        len += head.len;
+    } else |_| {}
+    for (long_opts) |cand| {
+        if (!std.mem.startsWith(u8, cand, name)) continue;
+        if (std.fmt.bufPrint(buf[len..], " '--{s}'", .{cand})) |piece| {
+            len += piece.len;
+        } else |_| break;
+    }
+    if (len < buf.len) {
+        buf[len] = '\n';
+        len += 1;
+    }
+    writeFull(2, buf[0..len]);
+    tryHelpAndExit();
+}
+
+const context_warning =
+    "zmkdir: warning: ignoring --context; it requires an SELinux/SMACK-enabled kernel\n";
+
+pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
 
-    var config = parseArgs(allocator, init.minimal.args) catch {
-        printError("failed to parse arguments");
-        std.process.exit(1);
-    };
-    defer config.deinit(allocator);
+    var args_list: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer args_list.deinit(allocator);
+    var args_iter = std.process.Args.Iterator.init(init.minimal.args);
+    while (args_iter.next()) |arg| {
+        try args_list.append(allocator, arg);
+    }
+    const args = args_list.items;
 
-    var error_occurred = false;
+    var mode_str: ?[]const u8 = null;
+    var parents = false;
+    var verbose = false;
+    var operands: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer operands.deinit(allocator);
+    var seen_dashdash = false;
 
-    for (config.dirs.items) |dir| {
-        mkdir(allocator, dir, &config) catch {
-            error_occurred = true;
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (!seen_dashdash and arg.len >= 2 and arg[0] == '-' and arg[1] == '-') {
+            if (arg.len == 2) {
+                seen_dashdash = true;
+                continue;
+            }
+            // Long option, possibly "--name=value", possibly abbreviated.
+            const body = arg[2..];
+            const eq = std.mem.indexOfScalar(u8, body, '=');
+            const name = if (eq) |e| body[0..e] else body;
+            const attached: ?[]const u8 = if (eq) |e| body[e + 1 ..] else null;
+
+            const canonical = switch (matchLongOpt(name)) {
+                .match => |m| m,
+                .none => {
+                    writeStderr("zmkdir: unrecognized option '{s}'\n", .{arg});
+                    tryHelpAndExit();
+                },
+                .ambiguous => ambiguousOptionAndExit(arg, name),
+            };
+
+            if (std.mem.eql(u8, canonical, "mode")) {
+                if (attached) |v| {
+                    mode_str = v;
+                } else if (i + 1 < args.len) {
+                    i += 1;
+                    mode_str = args[i];
+                } else {
+                    writeStderr("zmkdir: option '--mode' requires an argument\n", .{});
+                    tryHelpAndExit();
+                }
+            } else if (std.mem.eql(u8, canonical, "context")) {
+                // Optional argument, never consumes the next arg. Silently
+                // ignored without a value (GNU on non-SELinux kernels).
+                if (attached != null) writeStderr(context_warning, .{});
+            } else {
+                // No-argument long options reject "=value" (getopt_long).
+                if (attached != null) {
+                    writeStderr("zmkdir: option '--{s}' doesn't allow an argument\n", .{canonical});
+                    tryHelpAndExit();
+                }
+                if (std.mem.eql(u8, canonical, "help")) {
+                    printUsage();
+                    return;
+                } else if (std.mem.eql(u8, canonical, "version")) {
+                    printVersion();
+                    return;
+                } else if (std.mem.eql(u8, canonical, "parents")) {
+                    parents = true;
+                } else { // verbose
+                    verbose = true;
+                }
+            }
+        } else if (!seen_dashdash and arg.len >= 2 and arg[0] == '-') {
+            // Short option cluster; lone "-" (len 1) is an operand.
+            var j: usize = 1;
+            while (j < arg.len) : (j += 1) {
+                switch (arg[j]) {
+                    'p' => parents = true,
+                    'v' => verbose = true,
+                    'Z' => {}, // ignored (no SELinux/SMACK here), like GNU
+                    'm' => {
+                        if (j + 1 < arg.len) {
+                            mode_str = arg[j + 1 ..]; // attached: -m0755
+                        } else if (i + 1 < args.len) {
+                            i += 1;
+                            mode_str = args[i];
+                        } else {
+                            writeStderr("zmkdir: option requires an argument -- 'm'\n", .{});
+                            tryHelpAndExit();
+                        }
+                        j = arg.len; // argument consumed the rest
+                        break;
+                    },
+                    else => {
+                        writeStderr("zmkdir: invalid option -- '{c}'\n", .{arg[j]});
+                        tryHelpAndExit();
+                    },
+                }
+            }
+        } else {
+            // Operand: includes "-", "" and anything after "--".
+            try operands.append(allocator, arg);
+        }
+    }
+
+    // GNU checks for operands before validating the mode string.
+    if (operands.items.len == 0) {
+        writeStderr("zmkdir: missing operand\n", .{});
+        tryHelpAndExit();
+    }
+
+    // Clear the umask for the whole run and apply modes explicitly: an
+    // explicit -m mode is set EXACTLY, the default mode is 0777 & ~umask,
+    // and -p ancestors get (0777 & ~umask) | u+wx so they stay traversable
+    // even under a restrictive umask (all three are GNU-parity fixes).
+    const umask_value: u32 = umask(0);
+    const default_mode: u32 = 0o777 & ~umask_value;
+    var final_mode: u32 = default_mode;
+    if (mode_str) |ms| {
+        final_mode = parseMode(ms, umask_value) catch {
+            writeStderr("zmkdir: invalid mode '{s}'\n", .{ms});
+            std.process.exit(1);
         };
     }
+    const inter_mode: u32 = default_mode | 0o300;
 
-    if (error_occurred) {
-        std.process.exit(1);
+    var exit_code: u8 = 0;
+    for (operands.items) |name| {
+        if (!makeDir(name, final_mode, inter_mode, parents, verbose)) exit_code = 1;
     }
+    if (exit_code != 0) std.process.exit(exit_code);
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
+// ---------------------------------------------------------------------------
+// Unit tests for the mode parser. Expected values were captured from GNU
+// coreutils 9.10 mkdir (macOS, LC_ALL=C, 2026-07-19) by creating real
+// directories and reading the resulting permission bits — see
+// gnu_parity_test.zig for the live diff harness against the real binary.
+// ---------------------------------------------------------------------------
 
-test "parse octal mode" {
-    const testing = std.testing;
-
-    try testing.expectEqual(@as(?u32, 0o755), parseOctalMode("755"));
-    try testing.expectEqual(@as(?u32, 0o777), parseOctalMode("777"));
-    try testing.expectEqual(@as(?u32, 0o700), parseOctalMode("700"));
-    try testing.expectEqual(@as(?u32, 0o644), parseOctalMode("644"));
-    try testing.expectEqual(@as(?u32, 0), parseOctalMode("0"));
-    try testing.expectEqual(@as(?u32, null), parseOctalMode(""));
-    try testing.expectEqual(@as(?u32, null), parseOctalMode("abc"));
-    try testing.expectEqual(@as(?u32, null), parseOctalMode("888")); // 8 is not valid octal
+test "octal modes parse exactly" {
+    try std.testing.expectEqual(@as(u32, 0o777), try parseMode("777", 0o022));
+    try std.testing.expectEqual(@as(u32, 0o777), try parseMode("00777", 0o022));
+    try std.testing.expectEqual(@as(u32, 0), try parseMode("0", 0o022));
+    try std.testing.expectEqual(@as(u32, 0o4755), try parseMode("4755", 0o022));
+    try std.testing.expectEqual(@as(u32, 0o1777), try parseMode("1777", 0o022));
 }
 
-test "get default mode" {
-    // Just verify it returns something reasonable
-    const mode = getDefaultMode();
-    // Mode should be at most 0o777 and at least 0o000
-    try std.testing.expect(mode <= 0o777);
+test "invalid octal modes rejected without overflow panic" {
+    try std.testing.expectError(error.InvalidMode, parseMode("999", 0));
+    try std.testing.expectError(error.InvalidMode, parseMode("777777", 0));
+    // Regression: this input used to crash with an integer-overflow panic.
+    try std.testing.expectError(error.InvalidMode, parseMode("77777777777777", 0));
+    try std.testing.expectError(error.InvalidMode, parseMode("", 0));
+    try std.testing.expectError(error.InvalidMode, parseMode("0x1", 0));
+}
+
+test "symbolic modes match GNU mkdir observed results" {
+    // GNU: -m u=rwx,go=rx -> 0755; -m g=u -> 0777 (start is a=rwx)
+    try std.testing.expectEqual(@as(u32, 0o755), try parseMode("u=rwx,go=rx", 0o022));
+    try std.testing.expectEqual(@as(u32, 0o777), try parseMode("g=u", 0o022));
+    // GNU: -m u=,+x umask 022 -> 0177 (no-who clause masked by umask)
+    try std.testing.expectEqual(@as(u32, 0o177), try parseMode("u=,+x", 0o022));
+    try std.testing.expectEqual(@as(u32, 0o177), try parseMode("u=,+x", 0o077));
+    // GNU: -m u=,u+X -> 0177: X always applies, the target is a directory
+    try std.testing.expectEqual(@as(u32, 0o177), try parseMode("u=,u+X", 0o022));
+    // GNU: -m u+w,go-r umask 022 -> 0733
+    try std.testing.expectEqual(@as(u32, 0o733), try parseMode("u+w,go-r", 0o022));
+    // GNU: -m +x umask 077 -> 0777 (already rwx everywhere)
+    try std.testing.expectEqual(@as(u32, 0o777), try parseMode("+x", 0o077));
+    // Special bits are legal for mkdir: -m u+s,o+t -> 04777|01000
+    try std.testing.expectEqual(@as(u32, 0o5777), try parseMode("u+s,o+t", 0o022));
+}
+
+test "malformed symbolic modes rejected" {
+    try std.testing.expectError(error.InvalidMode, parseMode("rw", 0o022));
+    try std.testing.expectError(error.InvalidMode, parseMode("a=rw,", 0o022));
+    try std.testing.expectError(error.InvalidMode, parseMode("u", 0o022));
+    try std.testing.expectError(error.InvalidMode, parseMode("a=rw,q", 0o022));
 }

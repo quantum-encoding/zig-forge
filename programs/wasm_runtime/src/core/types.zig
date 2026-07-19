@@ -192,6 +192,10 @@ pub const Export = struct {
 pub const Elem = struct {
     type: ValType,
     init: []const InitExpr,
+    /// True when each `init[i].instrs` is a heap-allocated synthesized
+    /// encoding (the funcidx-vector forms) rather than a slice borrowed from
+    /// the module buffer (the element-expression forms).
+    owns_init_bytes: bool = false,
     mode: Mode,
 
     pub const Mode = union(enum) {

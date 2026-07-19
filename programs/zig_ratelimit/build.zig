@@ -83,4 +83,20 @@ pub fn build(b: *std.Build) void {
     const run_tests = b.addRunArtifact(lib_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
+
+    // compat is a separate module, so its own `test` blocks are not collected
+    // by the lib test root above. They therefore never ran — and did not even
+    // compile, since they called the removed `std.time.sleep`. Give compat its
+    // own test target so the clock and Clock/ManualClock code is covered.
+    const compat_test_module = b.createModule(.{
+        .root_source_file = b.path("src/compat.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const compat_tests = b.addTest(.{
+        .root_module = compat_test_module,
+    });
+    const run_compat_tests = b.addRunArtifact(compat_tests);
+    test_step.dependOn(&run_compat_tests.step);
 }

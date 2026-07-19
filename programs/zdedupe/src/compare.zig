@@ -13,49 +13,8 @@ const walker = @import("walker.zig");
 const libc = std.c;
 const builtin = @import("builtin");
 
-// Cross-platform Stat structure
-const Stat = switch (builtin.os.tag) {
-    .linux => extern struct {
-        dev: u64,
-        ino: u64,
-        nlink: u64,
-        mode: u32,
-        uid: u32,
-        gid: u32,
-        __pad0: u32 = 0,
-        rdev: u64,
-        size: i64,
-        blksize: i64,
-        blocks: i64,
-        atim: libc.timespec,
-        mtim: libc.timespec,
-        ctim: libc.timespec,
-        __unused: [3]i64 = .{ 0, 0, 0 },
-    },
-    .macos, .ios, .tvos, .watchos => extern struct {
-        dev: i32,
-        mode: u16,
-        nlink: u16,
-        ino: u64,
-        uid: u32,
-        gid: u32,
-        rdev: i32,
-        atim: libc.timespec,
-        mtim: libc.timespec,
-        ctim: libc.timespec,
-        birthtim: libc.timespec,
-        size: i64,
-        blocks: i64,
-        blksize: i32,
-        flags: u32,
-        gen: u32,
-        lspare: i32,
-        qspare: [2]i64,
-    },
-    else => libc.Stat,
-};
-
-extern "c" fn stat(path: [*:0]const u8, buf: *Stat) c_int;
+// Stat comes from pstat.zig: std.c ($INODE64-correct) on Darwin, statx on Linux.
+const pstat = @import("pstat.zig");
 
 /// Folder comparator
 pub const FolderComparator = struct {
@@ -265,11 +224,8 @@ fn getFileSize(allocator: std.mem.Allocator, path: []const u8) ?u64 {
     const path_z = allocator.dupeZ(u8, path) catch return null;
     defer allocator.free(path_z);
 
-    var stat_buf: Stat = undefined;
-    if (stat(path_z.ptr, &stat_buf) != 0) {
-        return null;
-    }
-    return @intCast(stat_buf.size);
+    const stat_buf = pstat.stat(path_z.ptr) catch return null;
+    return stat_buf.size;
 }
 
 /// Convenience function for folder comparison

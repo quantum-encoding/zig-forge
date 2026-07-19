@@ -390,7 +390,10 @@ fn printUsage() void {
         \\                            Use 0 for no timeout. Per-request override via timeout_ms field
         \\    -r, --retries [n]       Max retry attempts on failure (default: 1)
         \\    -o, --output-dir [dir]  Save each response body to {dir}/{id}.{ext}
-        \\                            Creates directory if it doesn't exist
+        \\                            Creates directory if it doesn't exist.
+        \\                            The id must be a single path component: ids
+        \\                            containing / \ control bytes, or equal to
+        \\                            . / .. are refused (path-traversal guard).
         \\    -e, --output-ext [ext]  File extension for saved files (default: md)
         \\    -b, --base64-field [p]  Dot-path to base64 data in JSON response body
         \\                            Decodes base64 → binary file (for images, audio, etc.)
@@ -402,7 +405,9 @@ fn printUsage() void {
         \\
         \\AUTH REFRESH (for long-running batches whose tokens outlive their TTL):
         \\    --refresh-auth-header-command <cmd>
-        \\                            Run <cmd> via `sh -c` to fetch a fresh bearer token.
+        \\                            Run <cmd> to fetch a fresh bearer token. NO SHELL:
+        \\                            <cmd> is split on whitespace and exec'd directly,
+        \\                            so pipes, redirects, globs and $VAR do not work.
         \\                            Stdout is trimmed and becomes the token value.
         \\                            Example: "gcloud auth print-access-token"
         \\    --refresh-auth-interval <seconds>

@@ -67,12 +67,32 @@ pub fn build(b: *std.Build) void {
     // ============================================================
     // TESTS
     // ============================================================
+    // Compile-only smoke test over the public surface.
     const lib_unit_tests = b.addTest(.{
         .root_module = quantum_curl_module,
     });
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
     const test_step = b.step("test", "Run quantum-curl tests");
     test_step.dependOn(&run_lib_unit_tests.step);
+
+    // Tier-1 externally-anchored tests (RFC 4648 base64 vectors, RFC 4180 CSV
+    // examples, RFC 8259 telemetry escaping re-parsed by std.json, RFC 9110
+    // method tokens, malformed-plan-row error table, path-traversal guard).
+    // This is what makes `zig build test` assert something.
+    const anchors_module = b.createModule(.{
+        .root_source_file = b.path("src/tier1_anchors.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    anchors_module.addImport("http-sentinel", http_sentinel_module);
+    anchors_module.addImport("gcp-auth", gcp_auth_module);
+
+    const anchor_tests = b.addTest(.{
+        .root_module = anchors_module,
+    });
+    const run_anchor_tests = b.addRunArtifact(anchor_tests);
+    test_step.dependOn(&run_anchor_tests.step);
 
     // ============================================================
     // BENCHMARKS

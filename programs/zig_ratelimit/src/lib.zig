@@ -37,6 +37,8 @@
 //! }
 //! ```
 
+pub const compat = @import("compat.zig");
+pub const numeric = @import("numeric.zig");
 pub const token_bucket = @import("token_bucket.zig");
 pub const leaky_bucket = @import("leaky_bucket.zig");
 pub const sliding_window = @import("sliding_window.zig");
@@ -49,6 +51,13 @@ pub const GCRA = leaky_bucket.GCRA;
 pub const SlidingWindowLog = sliding_window.SlidingWindowLog;
 pub const SlidingWindowCounter = sliding_window.SlidingWindowCounter;
 pub const FixedWindowCounter = sliding_window.FixedWindowCounter;
+
+// Time sources. Every limiter reads the clock through `Clock`; the default is
+// CLOCK_MONOTONIC (never a wall clock — an attacker-movable clock defeats a
+// rate limiter). `ManualClock` lets callers and tests drive time explicitly.
+pub const Clock = compat.Clock;
+pub const ManualClock = compat.ManualClock;
+pub const monotonic_clock = compat.monotonic_clock;
 
 /// Version info
 pub const version = "0.1.0";
@@ -71,4 +80,5 @@ pub fn createAtomicLimiter(burst: f64, rate: f64) AtomicTokenBucket {
 test {
     // Run all module tests
     @import("std").testing.refAllDecls(@This());
+    _ = @import("tier1_anchors.zig");
 }

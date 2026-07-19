@@ -190,8 +190,18 @@ pub const Sniffer = struct {
 
         self.notifyStatus(.handshake_complete, "Handshake initiated");
 
-        // Buffer for receiving data
+        // Scratch buffer for a single recv.
         var buffer: [4096]u8 align(64) = undefined;
+
+        // Reassembly buffer. TCP is a byte stream: a P2P message may span
+        // several recvs (a `tx` message — the whole point of this tool — is
+        // routinely larger than one 4 KiB read) and a single recv may carry
+        // several messages plus a partial tail. Bytes accumulate here and are
+        // consumed a whole message at a time, so nothing is dropped at a read
+        // boundary. Capped at MAX_BUFFERED so a peer that dribbles a huge
+        // declared length cannot grow it without bound.
+        var stream: std.ArrayList(u8) = .empty;
+        defer stream.deinit(self.allocator);
 
         // Platform-specific I/O setup
         // io_uring for Linux (high performance), blocking recv for others
@@ -224,128 +234,94 @@ pub const Sniffer = struct {
 
             if (bytes_read == 0) break;
 
-            // Process received data
-            var offset: usize = 0;
-            while (offset + 24 <= bytes_read) {
-                // Parse header
-                const magic = std.mem.readInt(u32, buffer[offset..][0..4], .little);
-                offset += 4;
+            if (stream.items.len + bytes_read > MAX_BUFFERED) return error.PeerFlooded;
+            try stream.appendSlice(self.allocator, buffer[0..bytes_read]);
 
-                var command_buf: [12]u8 = undefined;
-                @memcpy(&command_buf, buffer[offset..][0..12]);
-                offset += 12;
-
-                // Extract command string
-                var command_str: []const u8 = &command_buf;
-                if (std.mem.indexOfScalar(u8, &command_buf, 0)) |null_pos| {
-                    command_str = command_buf[0..null_pos];
-                }
-
-                const length = std.mem.readInt(u32, buffer[offset..][0..4], .little);
-                offset += 4;
-
-                _ = std.mem.readInt(u32, buffer[offset..][0..4], .little); // checksum
-                offset += 4;
-
-                // Verify magic
-                if (magic != MAGIC_MAINNET) continue;
-
-                // Check if we have full payload
-                if (offset + length > bytes_read) break;
-
-                // Handle version - respond with verack
-                if (std.mem.eql(u8, command_str, "version")) {
-                    try bitcoin.sendVerack(sockfd);
-                }
-
-                // Handle verack
-                if (std.mem.eql(u8, command_str, "verack")) {
-                    self.notifyStatus(.handshake_complete, "Handshake complete - listening for transactions");
-                }
-
-                // Handle ping - respond with pong
-                if (std.mem.eql(u8, command_str, "ping")) {
-                    if (length >= 8) {
-                        const nonce = std.mem.readInt(u64, buffer[offset..][0..8], .little);
-                        try bitcoin.sendPong(sockfd, nonce);
-                    }
-                }
-
-                // Handle tx - parse and invoke callback
-                if (std.mem.eql(u8, command_str, "tx")) {
-                    const tx = bitcoin.parseTransaction(buffer[offset..][0..length]) catch {
-                        offset += length;
-                        continue;
-                    };
-
-                    // Convert to C FFI type and invoke callback
-                    const c_tx = MS_Transaction{
-                        .hash = MS_TxHash{ .bytes = tx.hash },
-                        .value_satoshis = tx.value_satoshis,
-                        .input_count = tx.input_count,
-                        .output_count = tx.output_count,
-                        .is_whale = if (tx.value_satoshis >= whale_threshold.load(.acquire)) 1 else 0,
-                    };
-                    self.notifyTransaction(&c_tx);
-                }
-
-                // Handle inv - request full transaction via getdata
-                if (std.mem.eql(u8, command_str, "inv")) {
-                    inv_blk: {
-                        var payload_offset: usize = 0;
-
-                        // The inv payload must contain at least the 1-byte
-                        // CompactSize count prefix. A zero-length payload would
-                        // otherwise read buffer[offset] past the message body —
-                        // an attacker-triggerable OOB read that is UB under the
-                        // shipped ReleaseFast lib. Bail (advancing past the
-                        // message via the offset += length below) on any varint
-                        // whose byte-count does not fit within `length`.
-                        if (length < 1) break :inv_blk;
-
-                        // Read CompactSize (varint) for count — validate each
-                        // encoding's total byte-count against the declared
-                        // message length before touching the multi-byte tail.
-                        const first_byte = buffer[offset + payload_offset];
-                        var inv_count: u64 = 0;
-                        if (first_byte < 0xFD) {
-                            inv_count = first_byte;
-                            payload_offset += 1;
-                        } else if (first_byte == 0xFD) {
-                            if (payload_offset + 3 > length) break :inv_blk; // prefix(1)+u16(2)
-                            inv_count = std.mem.readInt(u16, buffer[offset + payload_offset + 1..][0..2], .little);
-                            payload_offset += 3;
-                        } else if (first_byte == 0xFE) {
-                            if (payload_offset + 5 > length) break :inv_blk; // prefix(1)+u32(4)
-                            inv_count = std.mem.readInt(u32, buffer[offset + payload_offset + 1..][0..4], .little);
-                            payload_offset += 5;
-                        } else {
-                            if (payload_offset + 9 > length) break :inv_blk; // prefix(1)+u64(8)
-                            inv_count = std.mem.readInt(u64, buffer[offset + payload_offset + 1..][0..8], .little);
-                            payload_offset += 9;
+            // Drain every complete message currently buffered. `nextFrame`
+            // returns null when the head message is still incomplete, at which
+            // point we go back for another recv and retry with more bytes.
+            //
+            // `consumed` advances instead of shifting the buffer per message;
+            // the leftover partial message is memmoved to the front exactly
+            // once per recv, below.
+            var consumed: usize = 0;
+            drain: while (true) {
+                const maybe_frame = bitcoin.nextFrame(stream.items[consumed..]) catch |err| switch (err) {
+                    // Lost the message boundary (or the peer sent junk). Scan
+                    // forward for the next magic rather than dropping the
+                    // connection; if there is none, discard everything except a
+                    // trailing window that could still hold a split magic.
+                    error.BadMagic, error.MessageTooLarge => {
+                        if (bitcoin.findMagic(stream.items, consumed + 1)) |idx| {
+                            consumed = idx;
+                            continue :drain;
                         }
+                        const keep = @min(stream.items.len - consumed, 3);
+                        consumed = stream.items.len - keep;
+                        break :drain;
+                    },
+                };
+                const frame = maybe_frame orelse break :drain; // need more bytes
 
-                        // Each inv vector is 36 bytes (type(4) + hash(32)); the
-                        // loop guard already keeps every read within `length`.
-                        var i: u64 = 0;
-                        while (i < inv_count and payload_offset + 36 <= length) : (i += 1) {
-                            const inv_type = std.mem.readInt(u32, buffer[offset + payload_offset..][0..4], .little);
-                            payload_offset += 4;
+                try self.handleFrame(sockfd, frame);
+                consumed += frame.total_len;
+            }
 
-                            if (inv_type == MSG_TX) {
-                                var hash: [32]u8 = undefined;
-                                @memcpy(&hash, buffer[offset + payload_offset..][0..32]);
-                                try bitcoin.sendGetData(sockfd, MSG_TX, hash);
-                            }
-
-                            payload_offset += 32;
-                        }
-                    }
-                }
-
-                offset += length;
+            if (consumed > 0) {
+                try stream.replaceRange(self.allocator, 0, consumed, &.{});
             }
         }
+    }
+
+    /// Dispatch one fully-reassembled P2P message.
+    ///
+    /// `frame.payload` is exactly the declared payload length and is fully
+    /// present, so payload reads need only guard against a payload that is
+    /// too SHORT for the message type — never against running off the end of
+    /// the receive buffer into an adjacent message.
+    fn handleFrame(self: *Sniffer, sockfd: socket.socket_t, frame: bitcoin.Frame) !void {
+        if (std.mem.eql(u8, frame.command, "version")) {
+            try bitcoin.sendVerack(sockfd);
+        } else if (std.mem.eql(u8, frame.command, "verack")) {
+            self.notifyStatus(.handshake_complete, "Handshake complete - listening for transactions");
+        } else if (std.mem.eql(u8, frame.command, "ping")) {
+            if (frame.payload.len >= 8) {
+                const nonce = std.mem.readInt(u64, frame.payload[0..8], .little);
+                try bitcoin.sendPong(sockfd, nonce);
+            }
+        } else if (std.mem.eql(u8, frame.command, "tx")) {
+            // A malformed tx from a hostile peer is not fatal to the session:
+            // skip it and keep reading.
+            const tx = bitcoin.parseTransaction(frame.payload) catch return;
+
+            const c_tx = MS_Transaction{
+                .hash = MS_TxHash{ .bytes = tx.hash },
+                .value_satoshis = tx.value_satoshis,
+                .input_count = tx.input_count,
+                .output_count = tx.output_count,
+                .is_whale = if (tx.value_satoshis >= whale_threshold.load(.acquire)) 1 else 0,
+            };
+            self.notifyTransaction(&c_tx);
+        } else if (std.mem.eql(u8, frame.command, "inv")) {
+            const ctx = GetDataCtx{ .sockfd = sockfd };
+            // A truncated/garbage inv payload aborts only this message.
+            bitcoin.forEachInvTxHash(frame.payload, ctx, GetDataCtx.request) catch return;
+        }
+    }
+};
+
+/// Hard cap on buffered-but-unparsed stream bytes: one maximum-size protocol
+/// message plus a header. Beyond this a peer is flooding us rather than
+/// sending anything the protocol permits.
+const MAX_BUFFERED: usize = bitcoin.MAX_PROTOCOL_MESSAGE_LENGTH + bitcoin.HEADER_LEN;
+
+/// Callback context for `forEachInvTxHash` — issues a `getdata` per MSG_TX
+/// entry so the peer sends us the full transaction.
+const GetDataCtx = struct {
+    sockfd: socket.socket_t,
+
+    fn request(self: GetDataCtx, hash: [32]u8) anyerror!void {
+        try bitcoin.sendGetData(self.sockfd, MSG_TX, hash);
     }
 };
 

@@ -1,18 +1,20 @@
 //! zcat - Concatenate files and print to stdout
 //!
-//! Compatible with GNU cat:
+//! Compatible with GNU cat (coreutils 9.x):
 //! - Concatenate FILE(s) to standard output
 //! - -n, --number: number all output lines
-//! - -b, --number-nonblank: number nonempty output lines
+//! - -b, --number-nonblank: number nonempty output lines (overrides -n)
 //! - -s, --squeeze-blank: suppress repeated empty lines
-//! - -E, --show-ends: display $ at end of each line
+//! - -E, --show-ends: display $ at end of each line (CRLF shown as ^M$)
 //! - -T, --show-tabs: display TAB characters as ^I
+//! - -v, --show-nonprinting: use ^ and M- notation
 //! - -A, --show-all: equivalent to -vET
+//! - -e: equivalent to -vE; -t: equivalent to -vT
+//! - -u: ignored (POSIX compatibility)
 
 const std = @import("std");
 const Io = std.Io;
 const Dir = Io.Dir;
-const posix = std.posix;
 
 const Config = struct {
     number_lines: bool = false,
@@ -29,232 +31,206 @@ const Config = struct {
         }
         self.files.deinit(allocator);
     }
+
+    /// True when the plain byte-copy fast path can be used.
+    fn needsProcessing(self: *const Config) bool {
+        return self.number_lines or self.number_nonblank or self.squeeze_blank or
+            self.show_ends or self.show_tabs or self.show_nonprinting;
+    }
 };
 
+/// Streaming output state. Shared across all input files: GNU cat treats the
+/// inputs as one concatenated stream (line numbers continue, squeeze state and
+/// a pending CR carry over file boundaries — verified against coreutils 9.10).
 const OutputState = struct {
     line_number: u64 = 1,
     prev_blank: bool = false,
     at_line_start: bool = true,
+    /// -E only (without -v): a '\r' has been seen and is held back one byte so
+    /// that CRLF can be rendered as "^M$" (coreutils >= 9.4 behavior). A lone
+    /// CR is emitted raw once the following byte proves it is not '\n'.
+    pending_cr: bool = false,
 };
 
-fn catFile(allocator: std.mem.Allocator, path: []const u8, config: *const Config, state: *OutputState) !void {
-    const io = Io.Threaded.global_single_threaded.io();
-    const stdout = Io.File.stdout();
-
-    // Handle stdin
-    if (std.mem.eql(u8, path, "-")) {
-        try catStdin(config, state);
-        return;
-    }
-
-    // Open file
-    const file = Dir.openFile(Dir.cwd(), io, path, .{}) catch |err| {
-        printErrorFmt("cannot open '{s}': {s}", .{ path, @errorName(err) });
-        return err;
+/// Map error names to POSIX strerror-style text, matching GNU cat's messages.
+fn errMsg(err: anyerror) []const u8 {
+    return switch (err) {
+        error.FileNotFound => "No such file or directory",
+        error.AccessDenied, error.PermissionDenied => "Permission denied",
+        error.IsDir => "Is a directory",
+        error.NotDir => "Not a directory",
+        error.NameTooLong => "File name too long",
+        error.SymLinkLoop => "Too many levels of symbolic links",
+        error.InputOutput => "Input/output error",
+        error.NoSpaceLeft => "No space left on device",
+        error.DiskQuota => "Disc quota exceeded",
+        error.FileTooBig => "File too large",
+        error.BrokenPipe => "Broken pipe",
+        error.SystemResources => "Cannot allocate memory",
+        error.DeviceBusy => "Resource busy",
+        error.NoDevice => "Operation not supported by device",
+        error.FileBusy => "Text file busy",
+        else => @errorName(err),
     };
-    defer file.close(io);
-
-    // Fast path: no special processing needed
-    if (!config.number_lines and !config.number_nonblank and !config.squeeze_blank and
-        !config.show_ends and !config.show_tabs and !config.show_nonprinting)
-    {
-        try catFileFast(io, file, stdout);
-        return;
-    }
-
-    // Slow path: line-by-line processing
-    try catFileProcessed(allocator, io, file, stdout, config, state);
 }
 
-fn catFileFast(io: Io, file: Io.File, stdout: Io.File) !void {
-    // Use sendFile for zero-copy transfer to stdout
-    var read_buf: [65536]u8 = undefined;
-    var write_buf: [65536]u8 = undefined;
+fn catFile(io: Io, path: []const u8, config: *const Config, state: *OutputState, writer: *Io.File.Writer) !void {
+    const is_stdin = std.mem.eql(u8, path, "-");
 
-    var reader = file.reader(io, &read_buf);
-    var writer = stdout.writerStreaming(io, &write_buf);
-
-    while (true) {
-        const n = writer.interface.sendFile(&reader, .unlimited) catch |err| switch (err) {
-            error.EndOfStream => break,
-            error.Unimplemented => {
-                // Fallback
-                try catFileFallback(io, file, stdout);
-                break;
-            },
-            else => return err,
+    const file = if (is_stdin)
+        Io.File.stdin()
+    else
+        Dir.openFile(Dir.cwd(), io, path, .{}) catch |err| {
+            printErrorFmt("{s}: {s}", .{ path, errMsg(err) });
+            return err;
         };
-        if (n == 0) break;
+    defer if (!is_stdin) file.close(io);
+
+    // GNU cat refuses directory operands: "cat: DIR: Is a directory", exit 1.
+    // (On macOS open() succeeds on a directory; the read would fail EISDIR.)
+    if (!is_stdin) {
+        if (file.stat(io)) |st| {
+            if (st.kind == .directory) {
+                printErrorFmt("{s}: Is a directory", .{path});
+                return error.IsDir;
+            }
+        } else |_| {}
     }
 
-    writer.interface.flush() catch {};
+    if (config.needsProcessing()) {
+        try catProcessed(io, file, path, config, state, writer);
+    } else {
+        try catFast(io, file, path, writer);
+    }
 }
 
-fn catFileFallback(io: Io, file: Io.File, stdout: Io.File) !void {
+/// Fast path: plain byte copy through the shared buffered writer.
+/// Read errors are reported with the file name and propagated (never treated
+/// as EOF); write errors propagate as error.WriteFailed for main to report.
+fn catFast(io: Io, file: Io.File, path: []const u8, writer: *Io.File.Writer) !void {
     var buf: [65536]u8 = undefined;
     while (true) {
-        const bytes_read = file.readStreaming(io, &.{&buf}) catch |err| {
-            return err;
+        const n = file.readStreaming(io, &.{&buf}) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => {
+                printErrorFmt("{s}: {s}", .{ path, errMsg(err) });
+                return err;
+            },
         };
-        if (bytes_read == 0) break;
-        stdout.writeStreamingAll(io, buf[0..bytes_read]) catch |err| {
-            return err;
-        };
+        if (n == 0) continue;
+        try writer.interface.writeAll(buf[0..n]);
     }
 }
 
-fn catFileProcessed(allocator: std.mem.Allocator, io: Io, file: Io.File, stdout: Io.File, config: *const Config, state: *OutputState) !void {
-    var write_buf: [8192]u8 = undefined;
-    var writer = stdout.writerStreaming(io, &write_buf);
-
-    var read_buf: [65536]u8 = undefined;
-    var line_buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer line_buf.deinit(allocator);
-
+/// Slow path: byte-at-a-time state machine, O(buffer) memory regardless of
+/// line length (no whole-line accumulation).
+fn catProcessed(io: Io, file: Io.File, path: []const u8, config: *const Config, state: *OutputState, writer: *Io.File.Writer) !void {
+    var buf: [65536]u8 = undefined;
     while (true) {
-        const bytes_read = file.readStreaming(io, &.{&read_buf}) catch break;
-        if (bytes_read == 0) break;
+        const n = file.readStreaming(io, &.{&buf}) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => {
+                printErrorFmt("{s}: {s}", .{ path, errMsg(err) });
+                return err;
+            },
+        };
+        if (n == 0) continue;
+        try processChunk(&writer.interface, buf[0..n], config, state);
+    }
+}
 
-        for (read_buf[0..bytes_read]) |byte| {
+fn processChunk(w: *Io.Writer, chunk: []const u8, config: *const Config, state: *OutputState) !void {
+    // -b overrides -n (GNU semantics): with -b, blank lines are never numbered.
+    const number_nonblank = config.number_nonblank;
+    const number_all = config.number_lines and !number_nonblank;
+
+    for (chunk) |byte| {
+        if (state.pending_cr) {
+            state.pending_cr = false;
             if (byte == '\n') {
-                // Process complete line
-                const line = line_buf.items;
-                const is_blank = line.len == 0;
+                // CRLF under -E renders as "^M$" (coreutils >= 9.4).
+                try w.writeAll("^M$\n");
+                state.at_line_start = true;
+                state.prev_blank = false;
+                continue;
+            }
+            // Lone CR: emit it raw, then process the current byte normally.
+            try w.writeByte('\r');
+        }
 
-                // Squeeze blank lines
-                if (config.squeeze_blank and is_blank and state.prev_blank) {
-                    line_buf.clearRetainingCapacity();
-                    continue;
-                }
-
-                // Line numbering
-                if (config.number_lines or (config.number_nonblank and !is_blank)) {
-                    writer.interface.print("{d:>6}\t", .{state.line_number}) catch {};
+        if (byte == '\n') {
+            if (state.at_line_start) {
+                // Blank line.
+                if (config.squeeze_blank and state.prev_blank) continue;
+                if (number_all) {
+                    try w.print("{d:>6}\t", .{state.line_number});
                     state.line_number += 1;
                 }
-
-                // Output line content
-                if (config.show_tabs or config.show_nonprinting) {
-                    for (line) |c| {
-                        try outputChar(&writer, c, config);
-                    }
-                } else {
-                    writer.interface.writeAll(line) catch {};
-                }
-
-                // Show line end
-                if (config.show_ends) {
-                    writer.interface.writeAll("$") catch {};
-                }
-                writer.interface.writeAll("\n") catch {};
-
-                state.prev_blank = is_blank;
-                state.at_line_start = true;
-                line_buf.clearRetainingCapacity();
+                if (config.show_ends) try w.writeByte('$');
+                try w.writeByte('\n');
+                state.prev_blank = true;
             } else {
-                try line_buf.append(allocator, byte);
+                if (config.show_ends) try w.writeByte('$');
+                try w.writeByte('\n');
+                state.at_line_start = true;
+                state.prev_blank = false;
             }
+            continue;
         }
-    }
 
-    // Handle last line without newline
-    if (line_buf.items.len > 0) {
-        const line = line_buf.items;
-        if (config.number_lines or config.number_nonblank) {
-            writer.interface.print("{d:>6}\t", .{state.line_number}) catch {};
-            state.line_number += 1;
-        }
-        if (config.show_tabs or config.show_nonprinting) {
-            for (line) |c| {
-                try outputChar(&writer, c, config);
+        if (state.at_line_start) {
+            state.at_line_start = false;
+            if (number_all or number_nonblank) {
+                try w.print("{d:>6}\t", .{state.line_number});
+                state.line_number += 1;
             }
+        }
+
+        if (byte == '\r' and config.show_ends and !config.show_nonprinting) {
+            // Hold the CR until the next byte decides CRLF vs lone CR.
+            state.pending_cr = true;
+            continue;
+        }
+
+        try outputChar(w, byte, config);
+    }
+}
+
+/// Render one non-newline byte per GNU cat's -v/-T notation (cat.c):
+///   0x00-0x1f  -> ^@..^_ (tab stays raw unless -T; -T alone shows ^I)
+///   0x7f       -> ^?
+///   0x80-0x9f  -> M-^@..M-^_
+///   0xa0-0xfe  -> M-<char>
+///   0xff       -> M-^?
+fn outputChar(w: *Io.Writer, c: u8, config: *const Config) !void {
+    if (c == '\t') {
+        if (config.show_tabs) {
+            try w.writeAll("^I");
         } else {
-            writer.interface.writeAll(line) catch {};
+            try w.writeByte('\t');
         }
+        return;
     }
-
-    writer.interface.flush() catch {};
-}
-
-fn outputChar(writer: anytype, c: u8, config: *const Config) !void {
-    if (config.show_tabs and c == '\t') {
-        writer.interface.writeAll("^I") catch {};
-    } else if (config.show_nonprinting and c < 32 and c != '\t' and c != '\n') {
-        writer.interface.print("^{c}", .{c + 64}) catch {};
-    } else if (config.show_nonprinting and c == 127) {
-        writer.interface.writeAll("^?") catch {};
-    } else if (config.show_nonprinting and c > 127) {
-        writer.interface.print("M-{c}", .{c - 128}) catch {};
-    } else {
-        writer.interface.writeAll(&[_]u8{c}) catch {};
+    if (!config.show_nonprinting) {
+        try w.writeByte(c);
+        return;
     }
-}
-
-fn catStdin(config: *const Config, state: *OutputState) !void {
-    const io = Io.Threaded.global_single_threaded.io();
-    const stdin = Io.File.stdin();
-    const stdout = Io.File.stdout();
-
-    if (!config.number_lines and !config.number_nonblank and !config.squeeze_blank and
-        !config.show_ends and !config.show_tabs and !config.show_nonprinting)
-    {
-        // Fast path
-        var buf: [65536]u8 = undefined;
-        while (true) {
-            const bytes_read = stdin.readStreaming(io, &.{&buf}) catch break;
-            if (bytes_read == 0) break;
-            stdout.writeStreamingAll(io, buf[0..bytes_read]) catch break;
+    if (c >= 128) {
+        try w.writeAll("M-");
+        const low = c - 128;
+        if (low < 32) {
+            try w.writeAll(&[_]u8{ '^', low + 64 });
+        } else if (low == 127) {
+            try w.writeAll("^?");
+        } else {
+            try w.writeByte(low);
         }
+    } else if (c < 32) {
+        try w.writeAll(&[_]u8{ '^', c + 64 });
+    } else if (c == 127) {
+        try w.writeAll("^?");
     } else {
-        // Slow path with processing
-        var write_buf: [8192]u8 = undefined;
-        var writer = stdout.writerStreaming(io, &write_buf);
-        var read_buf: [4096]u8 = undefined;
-        var line_buf: [65536]u8 = undefined;
-        var line_len: usize = 0;
-
-        while (true) {
-            const bytes_read = stdin.readStreaming(io, &.{&read_buf}) catch break;
-            if (bytes_read == 0) break;
-
-            for (read_buf[0..bytes_read]) |byte| {
-                if (byte == '\n') {
-                    const line = line_buf[0..line_len];
-                    const is_blank = line_len == 0;
-
-                    if (config.squeeze_blank and is_blank and state.prev_blank) {
-                        line_len = 0;
-                        continue;
-                    }
-
-                    if (config.number_lines or (config.number_nonblank and !is_blank)) {
-                        writer.interface.print("{d:>6}\t", .{state.line_number}) catch {};
-                        state.line_number += 1;
-                    }
-
-                    if (config.show_tabs or config.show_nonprinting) {
-                        for (line) |c| {
-                            outputChar(&writer, c, config) catch {};
-                        }
-                    } else {
-                        writer.interface.writeAll(line) catch {};
-                    }
-
-                    if (config.show_ends) {
-                        writer.interface.writeAll("$") catch {};
-                    }
-                    writer.interface.writeAll("\n") catch {};
-
-                    state.prev_blank = is_blank;
-                    line_len = 0;
-                } else if (line_len < line_buf.len) {
-                    line_buf[line_len] = byte;
-                    line_len += 1;
-                }
-            }
-        }
-
-        writer.interface.flush() catch {};
+        try w.writeByte(c);
     }
 }
 
@@ -317,6 +293,7 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                         'E' => config.show_ends = true,
                         'T' => config.show_tabs = true,
                         'v' => config.show_nonprinting = true,
+                        'u' => {}, // POSIX: accepted and ignored (GNU cat does the same)
                         'A' => {
                             config.show_nonprinting = true;
                             config.show_ends = true;
@@ -354,6 +331,16 @@ fn printErrorFmt(comptime fmt: []const u8, args: anytype) void {
     std.debug.print("zcat: " ++ fmt ++ "\n", args);
 }
 
+/// Report a failed stdout write and exit, mirroring GNU cat: "cat: write
+/// error: <strerror>", exit 1. A broken pipe exits silently with the
+/// conventional 128+SIGPIPE status instead (GNU cat dies from SIGPIPE).
+fn writeErrorExit(writer: *Io.File.Writer) noreturn {
+    const err: anyerror = writer.err orelse error.Unexpected;
+    if (err == error.BrokenPipe) std.process.exit(141);
+    printErrorFmt("write error: {s}", .{errMsg(err)});
+    std.process.exit(1);
+}
+
 fn printHelp() void {
     const io = Io.Threaded.global_single_threaded.io();
     var buf: [2048]u8 = undefined;
@@ -366,14 +353,15 @@ fn printHelp() void {
         \\With no FILE, or when FILE is -, read standard input.
         \\
         \\  -A, --show-all           equivalent to -vET
-        \\  -b, --number-nonblank    number nonempty output lines
+        \\  -b, --number-nonblank    number nonempty output lines, overrides -n
         \\  -e                       equivalent to -vE
         \\  -E, --show-ends          display $ at end of each line
         \\  -n, --number             number all output lines
         \\  -s, --squeeze-blank      suppress repeated empty output lines
         \\  -t                       equivalent to -vT
         \\  -T, --show-tabs          display TAB characters as ^I
-        \\  -v, --show-nonprinting   use ^ and M- notation
+        \\  -u                       (ignored)
+        \\  -v, --show-nonprinting   use ^ and M- notation, except for LFD and TAB
         \\      --help               display this help and exit
         \\      --version            output version information and exit
         \\
@@ -388,12 +376,13 @@ fn printVersion() void {
     var buf: [64]u8 = undefined;
     const stdout = Io.File.stdout();
     var writer = stdout.writer(io, &buf);
-    writer.interface.writeAll("zcat 0.1.0\n") catch {};
+    writer.interface.writeAll("zcat 0.2.0\n") catch {};
     writer.interface.flush() catch {};
 }
 
 pub fn main(init: std.process.Init) void {
     const allocator = init.gpa;
+    const io = Io.Threaded.global_single_threaded.io();
 
     var config = parseArgs(allocator, init.minimal.args) catch {
         std.debug.print("zcat: failed to parse arguments\n", .{});
@@ -404,11 +393,25 @@ pub fn main(init: std.process.Init) void {
     var state = OutputState{};
     var error_occurred = false;
 
+    // One shared buffered stdout writer for all files, so processing state
+    // (numbering, squeeze, pending CR) flows across file boundaries exactly
+    // like GNU cat's single output stream.
+    var write_buf: [65536]u8 = undefined;
+    var stdout_writer = Io.File.stdout().writerStreaming(io, &write_buf);
+
     for (config.files.items) |file| {
-        catFile(allocator, file, &config, &state) catch {
+        catFile(io, file, &config, &state, &stdout_writer) catch |err| {
+            if (err == error.WriteFailed) writeErrorExit(&stdout_writer);
             error_occurred = true;
         };
     }
+
+    // A CR held back at overall EOF (no following LF ever arrived) is
+    // emitted raw, matching `printf 'a\r' | cat -E` under GNU cat 9.10.
+    if (state.pending_cr) {
+        stdout_writer.interface.writeByte('\r') catch writeErrorExit(&stdout_writer);
+    }
+    stdout_writer.interface.flush() catch writeErrorExit(&stdout_writer);
 
     if (error_occurred) {
         std.process.exit(1);

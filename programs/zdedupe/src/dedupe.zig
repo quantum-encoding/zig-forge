@@ -51,6 +51,10 @@ pub const DupeFinder = struct {
     summary: types.DuplicateSummary,
     /// File hasher
     file_hasher: hasher.FileHasher,
+    /// Paths that could not be walked (unreadable, missing, not a directory).
+    /// Counted rather than printed: this type is linked into GUI apps over the
+    /// C FFI, where a write to stderr is invisible at best.
+    failed_paths: u64,
 
     pub fn init(allocator: std.mem.Allocator, config: types.Config) DupeFinder {
         return .{
@@ -69,6 +73,7 @@ pub const DupeFinder = struct {
             },
             .summary = std.mem.zeroes(types.DuplicateSummary),
             .file_hasher = hasher.FileHasher.init(config.hash_algorithm),
+            .failed_paths = 0,
         };
     }
 
@@ -105,12 +110,13 @@ pub const DupeFinder = struct {
             // Configure fast walker
             fw.setSizeFilter(self.config.min_size, self.config.max_size);
             fw.setIncludeHidden(self.config.include_hidden);
+            fw.setFollowSymlinks(self.config.follow_symlinks);
             fw.enableHardLinkDetection();
             fw.enableArenaAllocator();
 
             // Walk this path
-            fw.walk(path) catch |err| {
-                std.debug.print("Warning: Failed to scan {s}: {}\n", .{ path, err });
+            fw.walk(path) catch {
+                self.failed_paths += 1;
                 continue;
             };
 
@@ -174,6 +180,11 @@ pub const DupeFinder = struct {
     /// Get duplicate groups
     pub fn getGroups(self: *const DupeFinder) []types.DuplicateGroup {
         return self.groups.items;
+    }
+
+    /// Number of input paths that could not be walked at all.
+    pub fn getFailedPathCount(self: *const DupeFinder) u64 {
+        return self.failed_paths;
     }
 
     /// Get summary statistics
@@ -432,4 +443,6 @@ test "DupeFinder empty scan" {
 
     const summary = finder.getSummary();
     try std.testing.expectEqual(@as(u64, 0), summary.duplicate_groups);
+    // The failure is reported through the API, not printed to stderr.
+    try std.testing.expectEqual(@as(u64, 1), finder.getFailedPathCount());
 }

@@ -1,32 +1,64 @@
-//! zlink - Create links between files
+//! zlink - call the link function to create a hard link
 //!
-//! A Zig implementation of ln.
-//! Creates hard or symbolic links.
+//! A Zig implementation of GNU coreutils `link`:
+//!   link FILE1 FILE2  — create a link named FILE2 to an existing FILE1.
 //!
-//! Usage: zlink [OPTIONS] TARGET LINK_NAME
-//!        zlink [OPTIONS] TARGET... DIRECTORY
+//! Faithful to link(1) semantics: exactly two file operands, no options
+//! besides --help/--version, a bare link() call — it never unlinks,
+//! never follows "DEST is a directory" logic, and treats "-" as a
+//! filename. (Earlier revisions implemented ln-style options under this
+//! name; that identity confusion — including a data-destroying
+//! `-f same-file` unlink — was removed per the repo Golden Rule.)
+//!
+//! Usage: zlink FILE1 FILE2
 
 const std = @import("std");
 
-const VERSION = "1.0.0";
+const VERSION = "2.0.0";
 
 // C functions
 extern "c" fn write(fd: c_int, buf: [*]const u8, count: usize) isize;
 extern "c" fn link(oldpath: [*:0]const u8, newpath: [*:0]const u8) c_int;
-extern "c" fn symlink(target: [*:0]const u8, linkpath: [*:0]const u8) c_int;
-extern "c" fn unlink(path: [*:0]const u8) c_int;
-extern "c" fn readlink(path: [*:0]const u8, buf: [*]u8, bufsiz: usize) isize;
+extern "c" fn strerror(errnum: c_int) [*:0]const u8;
+
+/// Write the whole slice, retrying on partial writes and EINTR.
+/// (The previous helper ignored the write() result entirely.)
+fn writeFull(fd: c_int, bytes: []const u8) void {
+    var off: usize = 0;
+    while (off < bytes.len) {
+        const rc = write(fd, bytes.ptr + off, bytes.len - off);
+        if (rc < 0) {
+            if (std.c._errno().* == @intFromEnum(std.c.E.INTR)) continue;
+            return; // nothing more we can do about a failing stderr/stdout
+        }
+        if (rc == 0) return;
+        off += @intCast(rc);
+    }
+}
+
+/// Format buffer sized for a diagnostic carrying two PATH_MAX paths.
+/// On overflow we emit a truncated-diagnostic marker instead of
+/// silently dropping the message (previous behavior).
+fn writeFmt(fd: c_int, comptime fmt: []const u8, args: anytype) void {
+    var buf: [2 * 4096 + 256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, fmt, args) catch {
+        writeFull(fd, "zlink: (diagnostic too long to display)\n");
+        return;
+    };
+    writeFull(fd, msg);
+}
 
 fn writeStderr(comptime fmt: []const u8, args: anytype) void {
-    var buf: [4096]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    _ = write(2, msg.ptr, msg.len);
+    writeFmt(2, fmt, args);
 }
 
 fn writeStdout(comptime fmt: []const u8, args: anytype) void {
-    var buf: [4096]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    _ = write(1, msg.ptr, msg.len);
+    writeFmt(1, fmt, args);
+}
+
+fn tryHelpAndExit() noreturn {
+    writeStderr("Try 'zlink --help' for more information.\n", .{});
+    std.process.exit(1);
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -41,223 +73,90 @@ pub fn main(init: std.process.Init) !void {
     }
     const args = args_list.items;
 
-    // Options
-    var symbolic = false;
-    var force = false;
-    var verbose = false;
-    var no_dereference = false;
-    var relative = false;
-    var targets: std.ArrayListUnmanaged([]const u8) = .empty;
-    defer targets.deinit(allocator);
+    // GNU link recognizes only --help / --version (getopt_long permutes,
+    // so options are honored even after operands, until "--").
+    // A lone "-" is a filename, not an option.
+    var operands: [2][]const u8 = undefined;
+    var n_operands: usize = 0;
+    var extra_operand: ?[]const u8 = null;
+    var seen_dashdash = false;
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
-
-        if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
-            printHelp();
-            return;
-        } else if (std.mem.eql(u8, arg, "-V") or std.mem.eql(u8, arg, "--version")) {
-            writeStdout("zlink {s}\n", .{VERSION});
-            return;
-        } else if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--symbolic")) {
-            symbolic = true;
-        } else if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--force")) {
-            force = true;
-        } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
-            verbose = true;
-        } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--no-dereference")) {
-            no_dereference = true;
-        } else if (std.mem.eql(u8, arg, "-r") or std.mem.eql(u8, arg, "--relative")) {
-            relative = true;
-            symbolic = true; // -r implies -s
-        } else if (arg.len > 1 and arg[0] == '-' and arg[1] != '-') {
-            // Combined short options
-            for (arg[1..]) |ch| {
-                switch (ch) {
-                    's' => symbolic = true,
-                    'f' => force = true,
-                    'v' => verbose = true,
-                    'n' => no_dereference = true,
-                    'r' => {
-                        relative = true;
-                        symbolic = true;
-                    },
-                    else => {
-                        writeStderr("zlink: invalid option -- '{c}'\n", .{ch});
-                        std.process.exit(1);
-                    },
-                }
-            }
-        } else if (arg.len > 0 and arg[0] != '-') {
-            try targets.append(allocator, arg);
-        } else if (std.mem.eql(u8, arg, "--")) {
-            // Rest are targets
-            i += 1;
-            while (i < args.len) : (i += 1) {
-                try targets.append(allocator, args[i]);
-            }
-        } else {
-            writeStderr("zlink: invalid option: {s}\n", .{arg});
-            std.process.exit(1);
-        }
-    }
-
-    if (targets.items.len < 2) {
-        writeStderr("zlink: missing file operand\n", .{});
-        writeStderr("Try 'zlink --help' for more information.\n", .{});
-        std.process.exit(1);
-    }
-
-    // Last argument is destination
-    const dest = targets.items[targets.items.len - 1];
-    const sources = targets.items[0 .. targets.items.len - 1];
-
-    // Check if dest is a directory
-    const dest_is_dir = isDirectory(dest);
-
-    if (sources.len > 1 and !dest_is_dir) {
-        writeStderr("zlink: target '{s}' is not a directory\n", .{dest});
-        std.process.exit(1);
-    }
-
-    var errors: u32 = 0;
-
-    for (sources) |source| {
-        var link_path_buf: [4096]u8 = undefined;
-        const link_path: []const u8 = if (dest_is_dir) blk: {
-            // Append source basename to dest directory
-            const basename = std.fs.path.basename(source);
-            const len = std.fmt.bufPrint(&link_path_buf, "{s}/{s}", .{ dest, basename }) catch {
-                writeStderr("zlink: path too long\n", .{});
-                errors += 1;
+        if (!seen_dashdash and arg.len >= 2 and arg[0] == '-' and arg[1] == '-') {
+            if (arg.len == 2) {
+                seen_dashdash = true;
                 continue;
-            };
-            break :blk len;
-        } else dest;
-
-        // Create null-terminated strings
-        var source_z: [4097]u8 = undefined;
-        var link_z: [4097]u8 = undefined;
-
-        if (source.len >= source_z.len or link_path.len >= link_z.len) {
-            writeStderr("zlink: path too long\n", .{});
-            errors += 1;
-            continue;
-        }
-
-        @memcpy(source_z[0..source.len], source);
-        source_z[source.len] = 0;
-        @memcpy(link_z[0..link_path.len], link_path);
-        link_z[link_path.len] = 0;
-
-        // Remove existing if force
-        if (force) {
-            _ = unlink(@ptrCast(&link_z));
-        }
-
-        // Create the link
-        const result = if (symbolic)
-            symlink(@ptrCast(&source_z), @ptrCast(&link_z))
-        else
-            link(@ptrCast(&source_z), @ptrCast(&link_z));
-
-        if (result != 0) {
-            const errno = std.posix.errno(result);
-            const err_msg: []const u8 = switch (errno) {
-                .EXIST => "File exists",
-                .NOENT => "No such file or directory",
-                .ACCES => "Permission denied",
-                .PERM => "Operation not permitted",
-                .XDEV => "Invalid cross-device link",
-                .LOOP => "Too many symbolic links",
-                .NAMETOOLONG => "File name too long",
-                .NOSPC => "No space left on device",
-                .ROFS => "Read-only file system",
-                else => "Unknown error",
-            };
-            writeStderr("zlink: failed to create {s} link '{s}' -> '{s}': {s}\n", .{
-                if (symbolic) "symbolic" else "hard",
-                link_path,
-                source,
-                err_msg,
-            });
-            errors += 1;
-        } else if (verbose) {
-            writeStdout("'{s}' -> '{s}'\n", .{ link_path, source });
+            }
+            const opt = arg[2..];
+            // getopt_long-style unambiguous abbreviation ("--h", "--vers", ...).
+            if (std.mem.startsWith(u8, "help", opt)) {
+                printHelp();
+                return;
+            }
+            if (std.mem.startsWith(u8, "version", opt)) {
+                writeStdout("zlink {s}\n", .{VERSION});
+                return;
+            }
+            writeStderr("zlink: unrecognized option '{s}'\n", .{arg});
+            tryHelpAndExit();
+        } else if (!seen_dashdash and arg.len >= 2 and arg[0] == '-') {
+            // No short options exist in link(1).
+            writeStderr("zlink: invalid option -- '{c}'\n", .{arg[1]});
+            tryHelpAndExit();
+        } else {
+            // Operand: includes "-", "" and anything after "--".
+            if (n_operands < 2) {
+                operands[n_operands] = arg;
+                n_operands += 1;
+            } else if (extra_operand == null) {
+                extra_operand = arg;
+            }
         }
     }
 
-    if (errors > 0) {
+    if (n_operands < 2) {
+        if (n_operands == 1) {
+            writeStderr("zlink: missing operand after '{s}'\n", .{operands[0]});
+        } else {
+            writeStderr("zlink: missing operand\n", .{});
+        }
+        tryHelpAndExit();
+    }
+
+    if (extra_operand) |extra| {
+        writeStderr("zlink: extra operand '{s}'\n", .{extra});
+        tryHelpAndExit();
+    }
+
+    const file1 = operands[0];
+    const file2 = operands[1];
+
+    const file1_z = try allocator.dupeZ(u8, file1);
+    defer allocator.free(file1_z);
+    const file2_z = try allocator.dupeZ(u8, file2);
+    defer allocator.free(file2_z);
+
+    if (link(file1_z, file2_z) != 0) {
+        const err = std.c._errno().*;
+        writeStderr("zlink: cannot create link '{s}' to '{s}': {s}\n", .{
+            file2,
+            file1,
+            std.mem.span(strerror(err)),
+        });
         std.process.exit(1);
     }
-}
-
-const stat_t = extern struct {
-    st_dev: u64,
-    st_ino: u64,
-    st_nlink: u64,
-    st_mode: u32,
-    st_uid: u32,
-    st_gid: u32,
-    __pad0: u32,
-    st_rdev: u64,
-    st_size: i64,
-    st_blksize: i64,
-    st_blocks: i64,
-    st_atime: i64,
-    st_atime_nsec: i64,
-    st_mtime: i64,
-    st_mtime_nsec: i64,
-    st_ctime: i64,
-    st_ctime_nsec: i64,
-    __unused: [3]i64,
-};
-
-extern "c" fn stat(path: [*:0]const u8, buf: *stat_t) c_int;
-
-const S_IFMT: u32 = 0o170000;
-const S_IFDIR: u32 = 0o040000;
-
-fn isDirectory(path: []const u8) bool {
-    var path_z: [4097]u8 = undefined;
-    if (path.len >= path_z.len) return false;
-    @memcpy(path_z[0..path.len], path);
-    path_z[path.len] = 0;
-
-    var stat_buf: stat_t = undefined;
-    const result = stat(@ptrCast(&path_z), &stat_buf);
-
-    if (result != 0) return false;
-    return (stat_buf.st_mode & S_IFMT) == S_IFDIR;
 }
 
 fn printHelp() void {
     writeStdout(
-        \\Usage: zlink [OPTIONS] TARGET LINK_NAME
-        \\       zlink [OPTIONS] TARGET... DIRECTORY
+        \\Usage: zlink FILE1 FILE2
+        \\  or:  zlink OPTION
+        \\Call the link function to create a link named FILE2 to an existing FILE1.
         \\
-        \\Create links between files.
-        \\
-        \\Options:
-        \\  -s, --symbolic       create symbolic links instead of hard links
-        \\  -f, --force          remove existing destination files
-        \\  -v, --verbose        print name of each linked file
-        \\  -n, --no-dereference treat destination as normal file if symbolic link
-        \\  -r, --relative       create relative symbolic links
-        \\  -h, --help           display this help
-        \\  -V, --version        display version
-        \\
-        \\By default, zlink creates hard links.
-        \\Use -s for symbolic (soft) links.
-        \\
-        \\Examples:
-        \\  zlink file.txt link.txt           Create hard link
-        \\  zlink -s file.txt link.txt        Create symbolic link
-        \\  zlink -sf file.txt link.txt       Force create symbolic link
-        \\  zlink -sv file1 file2 dir/        Link multiple files to directory
-        \\  zlink -s /path/to/file link       Absolute symlink
-        \\  zlink -rs ../file link            Relative symlink
+        \\      --help     display this help and exit
+        \\      --version  output version information and exit
         \\
     , .{});
 }

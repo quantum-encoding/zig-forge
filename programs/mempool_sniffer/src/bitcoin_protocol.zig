@@ -12,6 +12,35 @@ pub const MAGIC_MAINNET: u32 = 0xD9B4BEF9;
 pub const MSG_TX: u32 = 1;
 pub const PROTOCOL_VERSION: i32 = 70015;
 
+/// Size of a P2P message header: magic(4) + command(12) + length(4) + checksum(4).
+pub const HEADER_LEN: usize = 24;
+
+/// Bitcoin Core's MAX_PROTOCOL_MESSAGE_LENGTH (`net.h`): 4 * 1000 * 1000.
+/// A header declaring more than this is malformed or hostile — without the
+/// cap, a peer sending `length = 0xffffffff` would drive the reassembly
+/// buffer to allocate 4 GiB.
+pub const MAX_PROTOCOL_MESSAGE_LENGTH: u32 = 4_000_000;
+
+/// Fill `buf` from the OS CSPRNG.
+///
+/// Zig 0.16 removed `std.crypto.random`, so this dispatches to the platform
+/// entropy source directly: the `getrandom` syscall on Linux/Android (a raw
+/// syscall, so it needs no libc version check) and `arc4random_buf` on
+/// Darwin/BSD, both of which are non-blocking CSPRNGs.
+fn secureRandomBytes(buf: []u8) void {
+    if (@import("builtin").os.tag == .linux) {
+        var filled: usize = 0;
+        while (filled < buf.len) {
+            const n = std.os.linux.getrandom(buf.ptr + filled, buf.len - filled, 0);
+            // Negative-as-unsigned return means EINTR/EAGAIN; retry.
+            if (@as(isize, @bitCast(n)) <= 0) continue;
+            filled += n;
+        }
+    } else {
+        std.c.arc4random_buf(buf.ptr, buf.len);
+    }
+}
+
 /// Build version message dynamically with current timestamp and correct double-SHA256 checksum
 pub fn buildVersionMessage() ![125]u8 {
     var message: [125]u8 = undefined;
@@ -62,8 +91,14 @@ pub fn buildVersionMessage() ![125]u8 {
     std.mem.writeInt(u16, message[offset..][0..2], 0x208D, .big);
     offset += 2;
 
-    // Nonce (random - using timestamp for simplicity)
-    std.mem.writeInt(u64, message[offset..][0..8], @as(u64, @intCast(now)), .little);
+    // Nonce. Used by peers for self-connection detection, so it must be
+    // unpredictable: a timestamp-derived nonce (the previous behaviour) is
+    // guessable by anyone who knows roughly when we connected, which lets a
+    // third party forge a nonce collision and make a peer drop us as a
+    // self-connection. Drawn from the OS CSPRNG.
+    var nonce_bytes: [8]u8 = undefined;
+    secureRandomBytes(&nonce_bytes);
+    @memcpy(message[offset..][0..8], &nonce_bytes);
     offset += 8;
 
     // User agent length (0)
@@ -214,6 +249,111 @@ pub fn sendGetData(sockfd: posix.socket_t, inv_type: u32, hash: [32]u8) !void {
     @memcpy(message[msg_offset..][0..37], &payload);
 
     _ = try sendSocket(sockfd, &message);
+}
+
+// ============================================================================
+// Stream framing
+// ============================================================================
+
+/// One complete P2P message carved out of the receive stream.
+///
+/// `command` and `payload` are sub-slices of the caller's buffer; they stay
+/// valid only until that buffer is next mutated (i.e. until the caller
+/// consumes `total_len` bytes off the front).
+pub const Frame = struct {
+    /// Command name with the NUL padding stripped ("tx", "inv", "ping", ...).
+    command: []const u8,
+    /// Exactly `length` payload bytes — guaranteed present in the buffer.
+    payload: []const u8,
+    /// Header + payload, i.e. how many bytes to drop from the front.
+    total_len: usize,
+};
+
+pub const FrameError = error{
+    /// Header declares a payload above MAX_PROTOCOL_MESSAGE_LENGTH.
+    MessageTooLarge,
+    /// No mainnet magic anywhere in the buffered bytes.
+    BadMagic,
+};
+
+/// Find the offset of the next mainnet magic sequence at or after `from`.
+///
+/// TCP gives us a byte stream, not a message stream: if a peer sends garbage
+/// or we ever lose sync mid-message, scanning forward for the magic is the
+/// only way back to a message boundary.
+pub fn findMagic(buf: []const u8, from: usize) ?usize {
+    if (from >= buf.len) return null;
+    var magic_bytes: [4]u8 = undefined;
+    std.mem.writeInt(u32, &magic_bytes, MAGIC_MAINNET, .little);
+    const idx = std.mem.indexOfPos(u8, buf, from, &magic_bytes) orelse return null;
+    return idx;
+}
+
+/// Try to take exactly one complete message off the front of `buf`.
+///
+/// Returns `null` when `buf` holds a valid but still-incomplete message — the
+/// caller should recv more bytes and call again with the grown buffer. This
+/// is what makes messages larger than a single `recv` (the common case for
+/// `tx` messages, which routinely exceed 4 KiB) parseable at all; the previous
+/// implementation discarded any message that did not fit one read.
+///
+/// `buf` is assumed to start on a message boundary. Callers that cannot
+/// guarantee that should `findMagic` first.
+pub fn nextFrame(buf: []const u8) FrameError!?Frame {
+    if (buf.len < HEADER_LEN) return null;
+
+    const magic = std.mem.readInt(u32, buf[0..4], .little);
+    if (magic != MAGIC_MAINNET) return FrameError.BadMagic;
+
+    const length = std.mem.readInt(u32, buf[16..20], .little);
+    if (length > MAX_PROTOCOL_MESSAGE_LENGTH) return FrameError.MessageTooLarge;
+
+    // total_len cannot overflow: length is a u32 bounded by 4e6 above.
+    const total_len = HEADER_LEN + @as(usize, length);
+    if (buf.len < total_len) return null; // need more bytes
+
+    const command_field = buf[4..16];
+    const command = if (std.mem.indexOfScalar(u8, command_field, 0)) |nul|
+        command_field[0..nul]
+    else
+        command_field;
+
+    return Frame{
+        .command = command,
+        .payload = buf[HEADER_LEN..total_len],
+        .total_len = total_len,
+    };
+}
+
+/// Parse an `inv` payload and invoke `on_tx_hash` for every MSG_TX entry.
+///
+/// The payload slice is exactly the message body, so every read below is
+/// bounds-checked by the slice itself plus the explicit length guards; there
+/// is no way to read past the message into an adjacent one (the bug class
+/// that finding #1 covered).
+pub fn forEachInvTxHash(
+    payload: []const u8,
+    context: anytype,
+    comptime on_tx_hash: fn (@TypeOf(context), [32]u8) anyerror!void,
+) !void {
+    var offset: usize = 0;
+    const count = try readVarint(payload, &offset);
+
+    // Each inv vector is type(4) + hash(32). A count that could not possibly
+    // fit in the remaining payload is malformed — clamp rather than trust it.
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        const entry_end = try safeOffsetAdd(offset, 36);
+        if (entry_end > payload.len) break;
+
+        const inv_type = std.mem.readInt(u32, payload[offset..][0..4], .little);
+        if (inv_type == MSG_TX) {
+            var hash: [32]u8 = undefined;
+            @memcpy(&hash, payload[offset + 4 ..][0..32]);
+            try on_tx_hash(context, hash);
+        }
+        offset = entry_end;
+    }
 }
 
 pub const Transaction = struct {
@@ -865,4 +1005,285 @@ test "Transaction with inputs and outputs" {
     try std.testing.expectEqual(@as(u32, 1), tx.input_count);
     try std.testing.expectEqual(@as(u32, 1), tx.output_count);
     try std.testing.expectEqual(@as(i64, 50000000), tx.value_satoshis);
+}
+
+// External anchor — mainnet SegWit transaction `983bc853d3d9429a…`.
+//
+// single-input P2WPKH spend (one witness stack).
+// Raw serialization AND expected txid both come from the Blockstream Esplora
+// API (`GET /api/tx/<txid>/hex` — the txid is the lookup KEY, so the explorer
+// asserts the hex↔txid binding, not this library):
+//   https://blockstream.info/tx/983bc853d3d9429a9c02f4eb02cd588b99d23c19a66bc0e4c7f673e9cf74bd16
+// Output total cross-checked against the same API's decoded `vout` values.
+test "parseTransaction: mainnet segwit external txid vector (1 input)" {
+    const raw_hex =
+        "010000000001011c495b0140185a635d3b0e527cc15f2944e51d96d1c7e4ca" ++
+        "a0eb235b1e11a7090100000000ffffffff01de58560200000000160014b7b1" ++
+        "8a4d6c03090a820237527b5bf1dcefc2a42202483045022100ed3689b10e6e" ++
+        "7414502d00c580ef36a999176e97f93933822b28e42ccbdcf5a90220211875" ++
+        "87910d4e0183fcb04076052081a20b5b43afa64752fadd1cbb5fd1f3900121" ++
+        "030b89e44e3886a8b8ff69e94dd340a59bac57cde178bae4c2f8d650c3538f" ++
+        "e2b200000000";
+
+    var raw: [192]u8 = undefined;
+    const decoded = try std.fmt.hexToBytes(&raw, raw_hex);
+    try std.testing.expectEqual(@as(usize, 192), decoded.len);
+
+    const tx = try parseTransaction(&raw);
+
+    // The txid must be the double-SHA256 of the LEGACY serialization in
+    // display byte order. Hashing the full payload instead would yield the
+    // wtxid and this assertion would fail — which is exactly the regression
+    // this anchor exists to catch.
+    var expected_txid: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&expected_txid, "983bc853d3d9429a9c02f4eb02cd588b99d23c19a66bc0e4c7f673e9cf74bd16");
+    try std.testing.expectEqualSlices(u8, &expected_txid, &tx.hash);
+
+    try std.testing.expect(tx.is_segwit);
+    try std.testing.expectEqual(@as(u32, 1), tx.input_count);
+    try std.testing.expectEqual(@as(u32, 1), tx.output_count);
+    try std.testing.expectEqual(@as(i64, 39213278), tx.value_satoshis);
+}
+
+// External anchor — mainnet SegWit transaction `0303cf121eee2024…`.
+//
+// two-input P2WPKH spend (two witness stacks — exercises the per-input witness skip loop).
+// Raw serialization AND expected txid both come from the Blockstream Esplora
+// API (`GET /api/tx/<txid>/hex` — the txid is the lookup KEY, so the explorer
+// asserts the hex↔txid binding, not this library):
+//   https://blockstream.info/tx/0303cf121eee20241a45db96ca40cd513b07d660bfff911bde90d820ed93ff93
+// Output total cross-checked against the same API's decoded `vout` values.
+test "parseTransaction: mainnet segwit external txid vector (2 input)" {
+    const raw_hex =
+        "0100000000010284cd31b839e6f25df53bd22b15cb9f71c0ea14650de02e10" ++
+        "ccbb03cb38738dc60000000000fdffffff737326560519f37a51299ae2ea15" ++
+        "00343da0fcd8061cfc36b75063a399559c411300000000fdffffff01de01f1" ++
+        "0400000000160014ac2743df103c0e546686480f855bffd3b5c51a00024830" ++
+        "4502210098d691195271bb0c877c5d4560967283df1926a0311a4ac321a18c" ++
+        "6085101930022072364c8ad4f0f72c7015431d30c6d058b9615367f27a24c1" ++
+        "77b192e6c737eeab012102357e7db0490cac75ac9145b6d63dccf0f7151c71" ++
+        "1e1c5c0f6c4daa47d12c9b140247304402202f62c5afb3d735fccd65f9a83f" ++
+        "64902d115443e3050d03acea20ef25a916dcb1022003d277d6d14713b2bac0" ++
+        "b2dbb9b57425d9db4f40f6abbb03ecb26d18801342af012103d132482dfc92" ++
+        "cd19c94f5bb584798a787b49a21feb582bcdc908236e62fbffe900000000";
+
+    var raw: [340]u8 = undefined;
+    const decoded = try std.fmt.hexToBytes(&raw, raw_hex);
+    try std.testing.expectEqual(@as(usize, 340), decoded.len);
+
+    const tx = try parseTransaction(&raw);
+
+    // The txid must be the double-SHA256 of the LEGACY serialization in
+    // display byte order. Hashing the full payload instead would yield the
+    // wtxid and this assertion would fail — which is exactly the regression
+    // this anchor exists to catch.
+    var expected_txid: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&expected_txid, "0303cf121eee20241a45db96ca40cd513b07d660bfff911bde90d820ed93ff93");
+    try std.testing.expectEqualSlices(u8, &expected_txid, &tx.hash);
+
+    try std.testing.expect(tx.is_segwit);
+    try std.testing.expectEqual(@as(u32, 2), tx.input_count);
+    try std.testing.expectEqual(@as(u32, 1), tx.output_count);
+    try std.testing.expectEqual(@as(i64, 82903518), tx.value_satoshis);
+}
+
+// ── Stream-framing tests ───────────────────────────────────────────
+//
+// The reassembly path had no coverage at all before (it used to live inline
+// in runSniffer and needed a live socket to exercise). These drive it as a
+// pure function over byte buffers.
+
+/// Test helper: wrap `payload` in a well-formed 24-byte P2P header.
+fn buildFrameForTest(buf: []u8, command: []const u8, payload: []const u8) []u8 {
+    std.mem.writeInt(u32, buf[0..4], MAGIC_MAINNET, .little);
+    @memset(buf[4..16], 0);
+    @memcpy(buf[4..][0..command.len], command);
+    std.mem.writeInt(u32, buf[16..20], @intCast(payload.len), .little);
+    var h1: [32]u8 = undefined;
+    var h2: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(payload, &h1, .{});
+    std.crypto.hash.sha2.Sha256.hash(&h1, &h2, .{});
+    @memcpy(buf[20..24], h2[0..4]);
+    @memcpy(buf[24..][0..payload.len], payload);
+    return buf[0 .. HEADER_LEN + payload.len];
+}
+
+test "nextFrame: returns null until the whole message has arrived" {
+    var buf: [HEADER_LEN + 8]u8 = undefined;
+    const payload = [_]u8{0xAA} ** 8;
+    const msg = buildFrameForTest(&buf, "ping", &payload);
+
+    // Every strict prefix is incomplete — must ask for more, never parse.
+    var n: usize = 0;
+    while (n < msg.len) : (n += 1) {
+        try std.testing.expectEqual(@as(?Frame, null), try nextFrame(msg[0..n]));
+    }
+
+    const frame = (try nextFrame(msg)).?;
+    try std.testing.expectEqualSlices(u8, "ping", frame.command);
+    try std.testing.expectEqualSlices(u8, &payload, frame.payload);
+    try std.testing.expectEqual(msg.len, frame.total_len);
+}
+
+test "nextFrame: rejects a length above MAX_PROTOCOL_MESSAGE_LENGTH" {
+    // Hostile header claiming a 4 GiB payload. Without the cap this drives
+    // the reassembly buffer to allocate until the process dies.
+    var buf: [HEADER_LEN]u8 = undefined;
+    std.mem.writeInt(u32, buf[0..4], MAGIC_MAINNET, .little);
+    @memset(buf[4..16], 0);
+    std.mem.writeInt(u32, buf[16..20], std.math.maxInt(u32), .little);
+    @memset(buf[20..24], 0);
+    try std.testing.expectError(FrameError.MessageTooLarge, nextFrame(&buf));
+}
+
+test "nextFrame: rejects a bad magic so the caller can resync" {
+    var buf: [HEADER_LEN]u8 = undefined;
+    std.mem.writeInt(u32, buf[0..4], 0xDEADBEEF, .little);
+    @memset(buf[4..24], 0);
+    try std.testing.expectError(FrameError.BadMagic, nextFrame(&buf));
+}
+
+test "findMagic: locates the next message boundary in a desynced stream" {
+    var buf: [16]u8 = undefined;
+    @memset(&buf, 0x11);
+    std.mem.writeInt(u32, buf[7..11], MAGIC_MAINNET, .little);
+    try std.testing.expectEqual(@as(?usize, 7), findMagic(&buf, 0));
+    try std.testing.expectEqual(@as(?usize, 7), findMagic(&buf, 1));
+    // Nothing after the one occurrence.
+    try std.testing.expectEqual(@as(?usize, null), findMagic(&buf, 8));
+}
+
+test "nextFrame: reassembles a real mainnet tx delivered across three reads" {
+    // The regression this guards: the old loop parsed whole messages out of a
+    // single 4096-byte recv and DROPPED anything that straddled a read
+    // boundary — silently discarding the very transactions getdata requests.
+    // Payload is the externally-anchored mainnet segwit tx above.
+    const raw_hex =
+        "010000000001011c495b0140185a635d3b0e527cc15f2944e51d96d1c7e4ca" ++
+        "a0eb235b1e11a7090100000000ffffffff01de58560200000000160014b7b1" ++
+        "8a4d6c03090a820237527b5bf1dcefc2a42202483045022100ed3689b10e6e" ++
+        "7414502d00c580ef36a999176e97f93933822b28e42ccbdcf5a9022021187587" ++
+        "910d4e0183fcb04076052081a20b5b43afa64752fadd1cbb5fd1f390012103" ++
+        "0b89e44e3886a8b8ff69e94dd340a59bac57cde178bae4c2f8d650c3538fe2" ++
+        "b200000000";
+    var raw: [192]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&raw, raw_hex);
+
+    var msg_buf: [HEADER_LEN + 192]u8 = undefined;
+    const msg = buildFrameForTest(&msg_buf, "tx", &raw);
+
+    // Feed it in three chunks, exactly as three short recvs would.
+    var stream: std.ArrayList(u8) = .empty;
+    defer stream.deinit(std.testing.allocator);
+    const splits = [_]usize{ 10, 100, msg.len };
+    var prev: usize = 0;
+    var got: ?Frame = null;
+    for (splits) |end| {
+        try stream.appendSlice(std.testing.allocator, msg[prev..end]);
+        prev = end;
+        got = try nextFrame(stream.items);
+        if (end != msg.len) {
+            // Still short — must not yield a frame yet.
+            try std.testing.expectEqual(@as(?Frame, null), got);
+        }
+    }
+
+    const frame = got.?;
+    try std.testing.expectEqualSlices(u8, "tx", frame.command);
+    const tx = try parseTransaction(frame.payload);
+    var expected_txid: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(
+        &expected_txid,
+        "983bc853d3d9429a9c02f4eb02cd588b99d23c19a66bc0e4c7f673e9cf74bd16",
+    );
+    try std.testing.expectEqualSlices(u8, &expected_txid, &tx.hash);
+}
+
+// ── inv-payload tests ──────────────────────────────────────────────
+
+const InvCollector = struct {
+    hashes: *std.ArrayList([32]u8),
+    allocator: std.mem.Allocator,
+
+    fn collect(self: InvCollector, hash: [32]u8) anyerror!void {
+        try self.hashes.append(self.allocator, hash);
+    }
+};
+
+test "forEachInvTxHash: yields only MSG_TX entries" {
+    // count=3: [MSG_TX, MSG_BLOCK(2), MSG_TX]
+    var payload: [1 + 36 * 3]u8 = undefined;
+    payload[0] = 3;
+    var o: usize = 1;
+    const types = [_]u32{ MSG_TX, 2, MSG_TX };
+    for (types, 0..) |t, i| {
+        std.mem.writeInt(u32, payload[o..][0..4], t, .little);
+        @memset(payload[o + 4 ..][0..32], @intCast(i + 1));
+        o += 36;
+    }
+
+    var hashes: std.ArrayList([32]u8) = .empty;
+    defer hashes.deinit(std.testing.allocator);
+    try forEachInvTxHash(
+        &payload,
+        InvCollector{ .hashes = &hashes, .allocator = std.testing.allocator },
+        InvCollector.collect,
+    );
+
+    try std.testing.expectEqual(@as(usize, 2), hashes.items.len);
+    try std.testing.expectEqualSlices(u8, &([_]u8{1} ** 32), &hashes.items[0]);
+    try std.testing.expectEqualSlices(u8, &([_]u8{3} ** 32), &hashes.items[1]);
+}
+
+test "forEachInvTxHash: empty payload errors instead of reading OOB" {
+    // The original inline parser read buffer[offset] with no length check,
+    // so a zero-length inv read past the message body (UB in ReleaseFast).
+    var hashes: std.ArrayList([32]u8) = .empty;
+    defer hashes.deinit(std.testing.allocator);
+    try std.testing.expectError(error.InvalidVarint, forEachInvTxHash(
+        &[_]u8{},
+        InvCollector{ .hashes = &hashes, .allocator = std.testing.allocator },
+        InvCollector.collect,
+    ));
+}
+
+test "forEachInvTxHash: lying count is clamped to the bytes actually present" {
+    // Peer claims 0xffffffffffffffff entries but sends one. The loop must
+    // stop at the payload end rather than spin or read past it.
+    var payload: [1 + 8 + 36]u8 = undefined;
+    payload[0] = 0xff;
+    std.mem.writeInt(u64, payload[1..9], std.math.maxInt(u64), .little);
+    std.mem.writeInt(u32, payload[9..13], MSG_TX, .little);
+    @memset(payload[13..45], 0x7);
+
+    var hashes: std.ArrayList([32]u8) = .empty;
+    defer hashes.deinit(std.testing.allocator);
+    try forEachInvTxHash(
+        &payload,
+        InvCollector{ .hashes = &hashes, .allocator = std.testing.allocator },
+        InvCollector.collect,
+    );
+    try std.testing.expectEqual(@as(usize, 1), hashes.items.len);
+}
+
+test "forEachInvTxHash: truncated multi-byte varint errors" {
+    // 0xfd announces a 2-byte count but only one byte follows.
+    var hashes: std.ArrayList([32]u8) = .empty;
+    defer hashes.deinit(std.testing.allocator);
+    try std.testing.expectError(error.InvalidVarint, forEachInvTxHash(
+        &[_]u8{ 0xfd, 0x01 },
+        InvCollector{ .hashes = &hashes, .allocator = std.testing.allocator },
+        InvCollector.collect,
+    ));
+}
+
+test "buildVersionMessage: nonce is drawn from the CSPRNG, not the clock" {
+    // The old implementation wrote the Unix timestamp here, so two messages
+    // built in the same second were byte-identical in the nonce field.
+    const a = try buildVersionMessage();
+    const b = try buildVersionMessage();
+    const nonce_a = std.mem.readInt(u64, a[24 + 72 ..][0..8], .little);
+    const nonce_b = std.mem.readInt(u64, b[24 + 72 ..][0..8], .little);
+    try std.testing.expect(nonce_a != nonce_b);
+    try std.testing.expect(nonce_a != 0);
 }

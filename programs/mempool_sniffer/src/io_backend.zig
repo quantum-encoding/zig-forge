@@ -137,6 +137,10 @@ const KqueueMux = struct {
     registered_fds: [64]socket.socket_t,
     registered_count: usize,
     events: [64]KEvent,
+    /// Storage backing the slice returned by `wait`. Struct-owned, not
+    /// stack-local: returning a slice of a function-local array hands the
+    /// caller a dangling pointer the moment `wait` returns.
+    pending_events: [64]Event,
 
     const Self = @This();
 
@@ -172,6 +176,7 @@ const KqueueMux = struct {
             .registered_fds = undefined,
             .registered_count = 0,
             .events = undefined,
+            .pending_events = undefined,
         };
     }
 
@@ -227,11 +232,10 @@ const KqueueMux = struct {
 
         const n = try sysKevent(self.kq, &[_]KEvent{}, &self.events, ts_ptr);
 
-        var result_events: [64]Event = undefined;
         var result_count: usize = 0;
 
         for (self.events[0..n]) |ev| {
-            result_events[result_count] = Event{
+            self.pending_events[result_count] = Event{
                 .fd = @intCast(ev.ident),
                 .types = .{
                     .read = ev.filter == EVFILT_READ,
@@ -244,9 +248,8 @@ const KqueueMux = struct {
             result_count += 1;
         }
 
-        // Copy to pending_events (since we return a slice)
-        // Note: This is a simplified approach - production code would handle this better
-        return result_events[0..result_count];
+        // Slice of struct-owned storage: valid until the next `wait` call.
+        return self.pending_events[0..result_count];
     }
 
     fn sysKevent(kq: posix.fd_t, changelist: []const KEvent, eventlist: []KEvent, timeout: ?*const posix.timespec) !usize {
@@ -272,6 +275,8 @@ const PollMux = struct {
     user_data: [64]usize,
     buffers: [64][]u8,
     fd_count: usize,
+    /// Storage backing the slice returned by `wait` — see KqueueMux.
+    pending_events: [64]Event,
 
     const Self = @This();
 
@@ -293,6 +298,7 @@ const PollMux = struct {
             .user_data = undefined,
             .buffers = undefined,
             .fd_count = 0,
+            .pending_events = undefined,
         };
     }
 
@@ -334,12 +340,11 @@ const PollMux = struct {
         const result = sysPoll(self.pollfds[0..self.fd_count], timeout_ms);
         if (result < 0) return error.PollError;
 
-        var events: [64]Event = undefined;
         var event_count: usize = 0;
 
         for (self.pollfds[0..self.fd_count], 0..) |pfd, i| {
             if (pfd.revents != 0) {
-                events[event_count] = Event{
+                self.pending_events[event_count] = Event{
                     .fd = @intCast(pfd.fd),
                     .types = .{
                         .read = (pfd.revents & POLLIN) != 0,
@@ -353,7 +358,8 @@ const PollMux = struct {
             }
         }
 
-        return events[0..event_count];
+        // Slice of struct-owned storage: valid until the next `wait` call.
+        return self.pending_events[0..event_count];
     }
 
     fn sysPoll(fds: []PollFd, timeout_ms: i32) i32 {

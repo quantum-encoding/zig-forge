@@ -18,6 +18,23 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const math = std.math;
 
+/// 2^-r for every possible register value r (registers are u8).
+///
+/// `estimate` sums 2^-register over all m registers, so this runs 2^p times
+/// per call — up to 262144 at p=18. It was `math.pow(f64, 2.0, -r)`, which
+/// takes the generic exp/log path every iteration and made `estimate` the
+/// slowest operation in the library by two orders of magnitude. Every value
+/// here is an exact power of two, so the table is byte-identical to what
+/// math.pow returned; only the cost changes.
+const inv_pow2: [256]f64 = blk: {
+    @setEvalBranchQuota(200_000);
+    var table: [256]f64 = undefined;
+    for (&table, 0..) |*slot, r| {
+        slot.* = math.pow(f64, 2.0, -@as(f64, @floatFromInt(r)));
+    }
+    break :blk table;
+};
+
 /// HyperLogLog cardinality estimator
 pub const HyperLogLog = struct {
     registers: []u8,
@@ -60,12 +77,23 @@ pub const HyperLogLog = struct {
     /// Initialize with target error rate
     /// error_rate: desired relative error (e.g., 0.01 for 1%)
     pub fn initWithError(allocator: Allocator, error_rate: f64) !Self {
-        // Standard error ≈ 1.04 / sqrt(m)
+        // Guard before any @intFromFloat: error_rate <= 0 makes m infinite and
+        // NaN propagates through @log2, and @intFromFloat on NaN/inf is
+        // illegal behavior (panic in Debug, UB in ReleaseFast). The
+        // `!(x > 0 ...)` form also rejects NaN.
+        if (!(error_rate > 0.0 and error_rate < 1.0)) return error.InvalidErrorRate;
+
+        // Standard error ≈ 1.04 / sqrt(m)  (Flajolet et al. 2007)
         // m = (1.04 / error_rate)^2
         const m = @as(f64, 1.04) / error_rate;
         const m_sq = m * m;
-        const p = @as(u6, @intFromFloat(@ceil(@log2(m_sq))));
-        return init(allocator, @max(p, 4));
+        const p_f = @ceil(@log2(m_sq));
+        // Clamp into the supported precision range *in float space*, before the
+        // conversion: an error_rate below ~0.26% yields p >= 19, which used to
+        // overflow past the supported range and fail with error.InvalidPrecision
+        // instead of degrading to maximum precision.
+        const p = @as(u6, @intFromFloat(math.clamp(p_f, 4.0, 18.0)));
+        return init(allocator, p);
     }
 
     pub fn deinit(self: *Self) void {
@@ -105,7 +133,7 @@ pub const HyperLogLog = struct {
 
         for (self.registers) |reg| {
             if (reg == 0) zeros += 1;
-            sum += math.pow(f64, 2.0, -@as(f64, @floatFromInt(reg)));
+            sum += inv_pow2[reg];
         }
 
         // Raw estimate
@@ -154,12 +182,16 @@ pub const HyperLogLog = struct {
         return self.num_registers;
     }
 
-    /// Serialize registers
+    /// Raw register bytes. This is a one-byte-per-register dump with no
+    /// parameter header: the reader must already know the precision, which is
+    /// why `deserialize` below loads into a pre-constructed estimator rather
+    /// than constructing one. Registers are single bytes, so the dump is
+    /// byte-identical across host endianness.
     pub fn serialize(self: *const Self) []const u8 {
         return self.registers;
     }
 
-    /// Deserialize registers
+    /// Load raw registers into an estimator of matching precision.
     pub fn deserialize(self: *Self, data: []const u8) !void {
         if (data.len != self.num_registers) {
             return error.InvalidData;
@@ -183,8 +215,18 @@ pub const HyperLogLog = struct {
     }
 };
 
-/// HyperLogLog++ with sparse representation for small cardinalities
-pub const HyperLogLogPlusPlus = struct {
+/// HyperLogLog with a sparse (hash-map) register representation for small
+/// cardinalities, converting to the dense array once enough registers are
+/// touched.
+///
+/// **This is not HLL++.** It was previously named `HyperLogLogPlusPlus`, which
+/// overclaimed: Heule, Nunkesser & Hall's HLL++ additionally stores a
+/// *higher-precision* sparse encoding (p' ≈ 25) and applies empirical
+/// bias-correction tables in the dense range. Neither is implemented here.
+/// What this type provides is the memory saving of sparse storage plus an
+/// unbiased small-range estimator; dense-mode accuracy is identical to plain
+/// `HyperLogLog`.
+pub const SparseHyperLogLog = struct {
     hll: ?HyperLogLog,
     sparse: ?std.AutoHashMap(u64, u8),
     precision: u6,
@@ -194,6 +236,13 @@ pub const HyperLogLogPlusPlus = struct {
     const Self = @This();
 
     pub fn init(allocator: Allocator, precision: u6) !Self {
+        // Validate up front rather than letting an out-of-range precision sail
+        // through sparse mode and only fail later, inside convertToDense, once
+        // the caller has already inserted data.
+        if (precision < 4 or precision > 18) {
+            return error.InvalidPrecision;
+        }
+
         return Self{
             .hll = null,
             .sparse = std.AutoHashMap(u64, u8).init(allocator),
@@ -241,8 +290,24 @@ pub const HyperLogLogPlusPlus = struct {
         if (self.hll) |*hll| {
             return hll.estimate();
         } else if (self.sparse) |sparse| {
-            // Linear counting for sparse mode
-            return sparse.count();
+            // Linear counting (Whang, Vander-Zanden & Taylor 1990), the same
+            // estimator HyperLogLog itself uses in its small range:
+            //
+            //     n_hat = -m * ln(V/m) = m * ln(m / zeros)
+            //
+            // The previous code returned `sparse.count()` — the number of
+            // distinct *register indices* touched, not distinct items. Two
+            // items whose hashes share their top p bits occupy one entry, so
+            // that figure undercounts by exactly the balls-into-bins collision
+            // rate (~3% at n=1000, p=14) and the bias grows with n. Linear
+            // counting inverts the occupancy expectation and removes it.
+            const filled = sparse.count();
+            const m = @as(f64, @floatFromInt(@as(usize, 1) << self.precision));
+            const zeros = m - @as(f64, @floatFromInt(filled));
+            // Every register touched: linear counting diverges (ln of 0), and
+            // the true cardinality is unbounded from below only by m itself.
+            if (zeros <= 0) return @intFromFloat(m);
+            return @intFromFloat(@round(m * @log(m / zeros)));
         }
         return 0;
     }

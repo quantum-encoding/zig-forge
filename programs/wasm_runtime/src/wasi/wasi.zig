@@ -22,19 +22,30 @@ const interpreter = @import("../core/interpreter.zig");
 const binary = @import("../core/binary.zig");
 const types = @import("../core/types.zig");
 
-// Cross-platform secure random bytes
-fn getRandomBytes(buf: []u8) void {
+/// Cross-platform secure random bytes.
+///
+/// Returns an error rather than falling back to anything weaker. The previous
+/// fallback zero-filled the buffer on unsupported targets and still reported
+/// success, so a guest asking for cryptographic randomness silently received
+/// an all-zero key. A guest that cannot be given real entropy must be told so
+/// (WASI `ENOSYS`), never handed predictable bytes.
+fn getRandomBytes(buf: []u8) error{RandomSourceUnavailable}!void {
     switch (builtin.os.tag) {
         .macos, .ios, .tvos, .watchos => {
             std.c.arc4random_buf(buf.ptr, buf.len);
         },
         .linux => {
-            _ = std.os.linux.getrandom(buf.ptr, buf.len, 0);
+            // getrandom may return a short count; loop until the buffer is
+            // filled and surface any hard failure.
+            var filled: usize = 0;
+            while (filled < buf.len) {
+                const rc = std.os.linux.getrandom(buf[filled..].ptr, buf.len - filled, 0);
+                const signed: isize = @bitCast(rc);
+                if (signed <= 0) return error.RandomSourceUnavailable;
+                filled += @intCast(signed);
+            }
         },
-        else => {
-            // Fallback for other platforms - zero fill (not cryptographically secure)
-            for (buf) |*b| b.* = 0;
-        },
+        else => return error.RandomSourceUnavailable,
     }
 }
 
@@ -174,6 +185,10 @@ pub const Config = struct {
     stdin: ?std.Io.File = null,
     stdout: ?std.Io.File = null,
     stderr: ?std.Io.File = null,
+    /// NOT IMPLEMENTED — accepted for forward compatibility and currently
+    /// DISCARDED by `WasiInstance.init`. No filesystem is exposed to the
+    /// guest; only the three standard FDs exist. Do not rely on this field as
+    /// a sandbox boundary: setting it grants nothing and restricts nothing.
     preopens: []const Preopen = &.{},
 
     pub const Preopen = struct {
@@ -365,7 +380,12 @@ pub const WasiInstance = struct {
 
         var i: u32 = 0;
         while (i < iovs_len) : (i += 1) {
-            const iov_base = iovs_ptr + i * 8;
+            // Both `iovs_ptr` and `iovs_len` are guest-supplied u32s; the
+            // iovec address must be computed in usize or the u32 multiply and
+            // add panic in safe builds long before the bounds check runs.
+            const iov_base_wide = @as(usize, iovs_ptr) + @as(usize, i) * 8;
+            if (iov_base_wide + 8 > mem.data.len) return .{ .i32 = @intFromEnum(Errno.fault) };
+            const iov_base: u32 = @intCast(iov_base_wide);
 
             // Read iovec: { buf_ptr: u32, buf_len: u32 }
             const buf_ptr = mem.loadI32(iov_base) catch return .{ .i32 = @intFromEnum(Errno.fault) };
@@ -415,7 +435,12 @@ pub const WasiInstance = struct {
 
         var i: u32 = 0;
         while (i < iovs_len) : (i += 1) {
-            const iov_base = iovs_ptr + i * 8;
+            // Both `iovs_ptr` and `iovs_len` are guest-supplied u32s; the
+            // iovec address must be computed in usize or the u32 multiply and
+            // add panic in safe builds long before the bounds check runs.
+            const iov_base_wide = @as(usize, iovs_ptr) + @as(usize, i) * 8;
+            if (iov_base_wide + 8 > mem.data.len) return .{ .i32 = @intFromEnum(Errno.fault) };
+            const iov_base: u32 = @intCast(iov_base_wide);
 
             const buf_ptr = mem.loadI32(iov_base) catch return .{ .i32 = @intFromEnum(Errno.fault) };
             const buf_len = mem.loadI32(iov_base + 4) catch return .{ .i32 = @intFromEnum(Errno.fault) };
@@ -509,23 +534,29 @@ pub const WasiInstance = struct {
 
         const mem = self.getMemory() orelse return .{ .i32 = @intFromEnum(Errno.fault) };
 
-        var buf_offset: u32 = 0;
+        // All pointer arithmetic below mixes guest-supplied base pointers with
+        // host-side lengths. Compute in usize and bounds-check against the
+        // guest memory before every write: the previous u32 adds panicked in
+        // safe builds on a large argv_ptr / argv_buf_ptr.
+        var buf_offset: usize = 0;
         for (self.config.args, 0..) |arg, i| {
-            // Write pointer to argv array
-            mem.storeI32(argv_ptr + @as(u32, @intCast(i)) * 4, @bitCast(argv_buf_ptr + buf_offset)) catch {
-                return .{ .i32 = @intFromEnum(Errno.fault) };
-            };
-
-            // Write string to buffer
-            const dest_start = argv_buf_ptr + buf_offset;
+            const slot = @as(usize, argv_ptr) + i * 4;
+            const dest_start = @as(usize, argv_buf_ptr) + buf_offset;
+            if (slot + 4 > mem.data.len) return .{ .i32 = @intFromEnum(Errno.fault) };
             if (dest_start + arg.len + 1 > mem.data.len) {
                 return .{ .i32 = @intFromEnum(Errno.fault) };
             }
+            if (dest_start > std.math.maxInt(u32)) return .{ .i32 = @intFromEnum(Errno.fault) };
+
+            // Write pointer to argv array
+            mem.storeI32(@intCast(slot), @bitCast(@as(u32, @intCast(dest_start)))) catch {
+                return .{ .i32 = @intFromEnum(Errno.fault) };
+            };
 
             @memcpy(mem.data[dest_start..][0..arg.len], arg);
             mem.data[dest_start + arg.len] = 0; // null terminator
 
-            buf_offset += @intCast(arg.len + 1);
+            buf_offset += arg.len + 1;
         }
 
         return .{ .i32 = @intFromEnum(Errno.success) };
@@ -564,29 +595,34 @@ pub const WasiInstance = struct {
 
         const mem = self.getMemory() orelse return .{ .i32 = @intFromEnum(Errno.fault) };
 
-        var buf_offset: u32 = 0;
+        // See argsGet: usize arithmetic plus an explicit bounds check on every
+        // guest pointer, rather than u32 adds that panic before the check.
+        var buf_offset: usize = 0;
         for (self.config.env, 0..) |kv, i| {
-            // Write pointer
-            mem.storeI32(environ_ptr + @as(u32, @intCast(i)) * 4, @bitCast(environ_buf_ptr + buf_offset)) catch {
-                return .{ .i32 = @intFromEnum(Errno.fault) };
-            };
-
             // Write KEY=VALUE\0
             const key = kv[0];
             const val = kv[1];
             const total_len = key.len + 1 + val.len + 1;
 
-            const dest_start = environ_buf_ptr + buf_offset;
+            const slot = @as(usize, environ_ptr) + i * 4;
+            const dest_start = @as(usize, environ_buf_ptr) + buf_offset;
+            if (slot + 4 > mem.data.len) return .{ .i32 = @intFromEnum(Errno.fault) };
             if (dest_start + total_len > mem.data.len) {
                 return .{ .i32 = @intFromEnum(Errno.fault) };
             }
+            if (dest_start > std.math.maxInt(u32)) return .{ .i32 = @intFromEnum(Errno.fault) };
+
+            // Write pointer
+            mem.storeI32(@intCast(slot), @bitCast(@as(u32, @intCast(dest_start)))) catch {
+                return .{ .i32 = @intFromEnum(Errno.fault) };
+            };
 
             @memcpy(mem.data[dest_start..][0..key.len], key);
             mem.data[dest_start + key.len] = '=';
             @memcpy(mem.data[dest_start + key.len + 1 ..][0..val.len], val);
             mem.data[dest_start + key.len + 1 + val.len] = 0;
 
-            buf_offset += @intCast(total_len);
+            buf_offset += total_len;
         }
 
         return .{ .i32 = @intFromEnum(Errno.success) };
@@ -602,7 +638,10 @@ pub const WasiInstance = struct {
 
         const mem = self.getMemory() orelse return .{ .i32 = @intFromEnum(Errno.fault) };
 
-        const clock: ClockId = @enumFromInt(clock_id);
+        // The guest picks the clock id; an unknown one must return EINVAL
+        // rather than panic on an invalid enum conversion.
+        const clock: ClockId = std.enums.fromInt(ClockId, clock_id) orelse
+            return .{ .i32 = @intFromEnum(Errno.inval) };
         const timestamp: i64 = switch (clock) {
             .realtime => blk: {
                 var ts: std.c.timespec = undefined;
@@ -637,11 +676,16 @@ pub const WasiInstance = struct {
 
         const mem = self.getMemory() orelse return .{ .i32 = @intFromEnum(Errno.fault) };
 
-        if (buf_ptr + buf_len > mem.data.len) {
+        // Widen before adding: both operands are guest-controlled u32 and the
+        // non-wrapping add panicked in safe builds.
+        const end = @as(usize, buf_ptr) + @as(usize, buf_len);
+        if (end > mem.data.len) {
             return .{ .i32 = @intFromEnum(Errno.fault) };
         }
 
-        getRandomBytes(mem.data[buf_ptr..][0..buf_len]);
+        getRandomBytes(mem.data[buf_ptr..][0..buf_len]) catch {
+            return .{ .i32 = @intFromEnum(Errno.nosys) };
+        };
 
         return .{ .i32 = @intFromEnum(Errno.success) };
     }

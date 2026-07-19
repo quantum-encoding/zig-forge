@@ -581,7 +581,7 @@ fn writeOutputFolder(
 
 fn findMediaData(doc: *const docx.Document, media_name: []const u8) ?[]const u8 {
     for (doc.media) |media| {
-        if (std.mem.eql(u8, media.name, media_name)) return media.data;
+        if (docx.mediaNameMatches(media.name, media_name)) return media.data;
     }
     return null;
 }

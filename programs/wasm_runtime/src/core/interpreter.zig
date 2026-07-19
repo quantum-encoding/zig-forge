@@ -52,6 +52,15 @@ pub const Frame = struct {
     return_ip: usize,
     /// Stack base index
     stack_base: usize,
+    /// Height of the shared label stack when this frame was entered.
+    ///
+    /// Control-flow labels live on one instance-wide stack, but they are
+    /// scoped to a single function activation: a `br` may never target a
+    /// label belonging to a caller, and a callee's terminal `end` must end
+    /// the callee — not be swallowed because the caller had labels open.
+    /// Everything control-flow-related is therefore resolved RELATIVE to this
+    /// base rather than to the absolute bottom of the stack.
+    label_base: usize,
     /// Allocator for locals
     allocator: std.mem.Allocator,
 
@@ -79,8 +88,13 @@ pub const Memory = struct {
     allocator: std.mem.Allocator,
 
     pub const PAGE_SIZE: usize = 65536;
+    /// Spec cap: 2^16 pages == 4 GiB.
+    pub const MAX_PAGES: u32 = 65536;
 
     pub fn init(allocator: std.mem.Allocator, limits: types.Limits) !Memory {
+        // The parser rejects out-of-range limits, but Memory is public API and
+        // may be constructed directly — re-check rather than trust the caller.
+        if (limits.min > MAX_PAGES) return error.InvalidMemory;
         const initial_size = @as(usize, limits.min) * PAGE_SIZE;
         const data = try allocator.alloc(u8, initial_size);
         @memset(data, 0);
@@ -97,13 +111,16 @@ pub const Memory = struct {
 
     pub fn grow(self: *Memory, pages: u32) !i32 {
         const old_pages = @as(u32, @intCast(self.data.len / PAGE_SIZE));
-        const new_pages = old_pages + pages;
+        // `pages` comes off the guest operand stack. A non-wrapping u32 add
+        // panicked in safe builds on `memory.grow 0xFFFFFFFF`; per spec the
+        // instruction must simply return -1 when the request cannot be met.
+        const new_pages = std.math.add(u32, old_pages, pages) catch return -1;
 
         if (self.limits.max) |max| {
             if (new_pages > max) return -1;
         }
 
-        if (new_pages > 65536) return -1; // Max 4GB
+        if (new_pages > MAX_PAGES) return -1; // Max 4GB
 
         const new_size = @as(usize, new_pages) * PAGE_SIZE;
         const new_data = self.allocator.realloc(self.data, new_size) catch return -1;
@@ -250,7 +267,7 @@ pub const Table = struct {
 
     pub fn grow(self: *Table, count: u32) !i32 {
         const old_size = @as(i32, @intCast(self.data.len));
-        const new_size = @as(usize, @intCast(old_size)) + count;
+        const new_size = std.math.add(usize, self.data.len, count) catch return -1;
 
         if (self.limits.max) |max| {
             if (new_size > max) return -1;
@@ -307,9 +324,17 @@ pub const Instance = struct {
     import_resolver: ?ImportResolver = null,
     import_resolver_ctx: ?*anyopaque = null,
 
-    /// Maximum stack depth
-    max_stack_depth: usize = 1024,
+    /// Maximum operand-stack depth, in values (not bytes). Enforced once per
+    /// instruction in `executeOp`. Without a bound, a guest running
+    /// `(loop (i32.const 1) (br 0))` pushes forever and exhausts host memory —
+    /// the operand-stack twin of the unbounded-recursion problem that
+    /// `max_call_depth` solves.
+    max_stack_depth: usize = 65536,
     max_call_depth: usize = 512,
+
+    /// Set when the current activation must unwind (explicit `return`, or a
+    /// `br` past its outermost label). Consumed by `execute`.
+    return_requested: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, module: *const Module) !Instance {
         var instance = Instance{
@@ -324,10 +349,20 @@ pub const Instance = struct {
             .host_funcs = std.StringHashMap(*const fn (*Instance, []const Value) TrapError!?Value).init(allocator),
         };
 
+        // Instantiation is fallible at many points below — an over-large
+        // memory, a bad init expression, an out-of-range active segment. Every
+        // one of those previously leaked everything allocated up to that point,
+        // so a stream of malformed modules exhausted host memory. `deinit` is
+        // safe to call on a partially-built instance because each slice is
+        // filled with deinit-safe empties immediately after allocation.
+        errdefer instance.deinit();
+
         // Initialize memories
         const mem_count = module.import_mem_count + @as(u32, @intCast(module.memories.len));
         if (mem_count > 0) {
             instance.memories = try allocator.alloc(Memory, mem_count);
+            // Pre-fill so an early error cannot deinit uninitialized memory.
+            for (instance.memories) |*m| m.* = .{ .data = &.{}, .limits = .{ .min = 0 }, .allocator = allocator };
             var i: usize = 0;
 
             // Import memories
@@ -353,6 +388,7 @@ pub const Instance = struct {
         const global_count = module.import_global_count + @as(u32, @intCast(module.globals.len));
         if (global_count > 0) {
             instance.globals = try allocator.alloc(Global, global_count);
+            for (instance.globals) |*g| g.* = .{ .value = .{ .i32 = 0 }, .mutable = false };
             var i: usize = 0;
 
             // Import globals
@@ -393,6 +429,7 @@ pub const Instance = struct {
         const table_count = module.import_table_count + @as(u32, @intCast(module.tables.len));
         if (table_count > 0) {
             instance.tables = try allocator.alloc(Table, table_count);
+            for (instance.tables) |*t| t.* = .{ .data = &.{}, .limits = .{ .min = 0 }, .allocator = allocator };
             var i: usize = 0;
 
             // Import tables (skip for now)
@@ -410,15 +447,22 @@ pub const Instance = struct {
                     const offset_val = try instance.evalInitExpr(active.offset.instrs);
                     const offset: u32 = @bitCast(offset_val.asI32());
 
-                    if (active.table_idx < instance.tables.len) {
-                        const table = &instance.tables[active.table_idx];
-                        for (elem.init, 0..) |init_expr, idx| {
-                            const func_val = try instance.evalInitExpr(init_expr.instrs);
-                            const func_idx = func_val.funcref orelse null;
-                            if (offset + @as(u32, @intCast(idx)) < table.data.len) {
-                                table.data[offset + @as(u32, @intCast(idx))] = func_idx;
-                            }
-                        }
+                    if (active.table_idx >= instance.tables.len) return error.InvalidTable;
+                    const table = &instance.tables[active.table_idx];
+
+                    // Compute in usize: `offset` is u32 and guest-supplied, so
+                    // `offset + idx` can wrap. An active segment that does not
+                    // fit is an instantiation trap per spec — silently
+                    // dropping the writes would leave the guest running
+                    // against a table that contradicts its own module.
+                    const start = @as(usize, offset);
+                    const end = std.math.add(usize, start, elem.init.len) catch
+                        return error.OutOfBoundsTableAccess;
+                    if (end > table.data.len) return error.OutOfBoundsTableAccess;
+
+                    for (elem.init, 0..) |init_expr, idx| {
+                        const func_val = try instance.evalInitExpr(init_expr.instrs);
+                        table.data[start + idx] = func_val.funcref orelse null;
                     }
                 },
                 .passive => {},
@@ -433,12 +477,12 @@ pub const Instance = struct {
                     const offset_val = try instance.evalInitExpr(active.offset.instrs);
                     const offset: usize = @intCast(@as(u32, @bitCast(offset_val.asI32())));
 
-                    if (active.mem_idx < instance.memories.len) {
-                        const mem = &instance.memories[active.mem_idx];
-                        if (offset + data.init.len <= mem.data.len) {
-                            @memcpy(mem.data[offset..][0..data.init.len], data.init);
-                        }
-                    }
+                    if (active.mem_idx >= instance.memories.len) return error.InvalidMemory;
+                    const mem = &instance.memories[active.mem_idx];
+                    const end = std.math.add(usize, offset, data.init.len) catch
+                        return error.OutOfBoundsMemoryAccess;
+                    if (end > mem.data.len) return error.OutOfBoundsMemoryAccess;
+                    @memcpy(mem.data[offset..][0..data.init.len], data.init);
                 },
                 .passive => {},
             }
@@ -583,28 +627,37 @@ pub const Instance = struct {
 
         // Create frame
         var frame = try self.createFrame(func_idx, func_type, code);
-        errdefer frame.deinit();
 
-        // Record the depth before pushing so we can tell, after execution,
-        // whether this call's frame is still on the stack (normal fall-through
-        // via the terminal `end`) or was already popped by an explicit
-        // `.return` opcode.
+        const label_base = frame.label_base;
         const call_depth_before = self.call_stack.items.len;
-        self.call_stack.append(self.allocator, frame) catch return error.OutOfMemory;
+        // No errdefer on `frame`: once appended, ownership passes to
+        // `call_stack` and the defer below frees it. An errdefer here would
+        // double-free on any trap out of `execute`.
+        self.call_stack.append(self.allocator, frame) catch {
+            frame.deinit();
+            return error.OutOfMemory;
+        };
 
-        // Execute
-        try self.execute(code.body);
-
-        // Pop this call's frame on normal return. The `.return` opcode pops its
-        // own frame eagerly; a function that terminates by falling off its final
-        // `end` does not, so without this the frame lingers on `call_stack` and
-        // the caller's subsequent local_get/local_set read the callee's locals.
-        if (self.call_stack.items.len > call_depth_before) {
-            if (self.call_stack.pop()) |popped| {
-                var f = popped;
-                f.deinit();
+        // This frame is owned here on EVERY exit path — normal fall-through
+        // off the terminal `end`, an explicit `return`, and a trap. Leaving it
+        // resident let the caller's subsequent local_get/local_set read the
+        // callee's locals.
+        defer {
+            if (self.call_stack.items.len > call_depth_before) {
+                if (self.call_stack.pop()) |popped| {
+                    var f = popped;
+                    f.deinit();
+                }
+            }
+            // Labels opened by this activation must not outlive it, including
+            // when the activation exited via a trap.
+            if (self.labels.items.len > label_base) {
+                self.labels.shrinkRetainingCapacity(label_base);
             }
         }
+
+        // Execute
+        try self.execute(code.body, label_base);
 
         // Get return value
         if (func_type.results.len > 0) {
@@ -616,10 +669,13 @@ pub const Instance = struct {
     }
 
     fn createFrame(self: *Instance, func_idx: u32, func_type: FuncType, code: Module.Code) TrapError!Frame {
-        // Calculate total locals
+        // Calculate total locals. The parser bounds this, but Instance is
+        // public API and may be handed a Module built by other means, so add
+        // with overflow checking rather than trusting the declaration.
         var total_locals: usize = func_type.params.len;
         for (code.locals) |local| {
-            total_locals += local.count;
+            total_locals = std.math.add(usize, total_locals, local.count) catch
+                return error.OutOfMemory;
         }
 
         var locals = self.allocator.alloc(Value, total_locals) catch return error.OutOfMemory;
@@ -656,28 +712,65 @@ pub const Instance = struct {
             .module = self.module,
             .return_ip = 0,
             .stack_base = self.stack.items.len,
+            .label_base = self.labels.items.len,
             .allocator = self.allocator,
         };
     }
 
-    /// Main execution loop
-    fn execute(self: *Instance, code: []const u8) TrapError!void {
+    /// Main execution loop.
+    ///
+    /// `label_base` is the label-stack height on entry to this function
+    /// activation. The terminating `end` is the one that returns the label
+    /// stack to that height — NOT to zero. Comparing against zero made a
+    /// callee invoked from inside a caller's `block`/`loop` fail to terminate
+    /// at its own final `end`, because the caller's labels were still
+    /// resident.
+    fn execute(self: *Instance, code: []const u8, label_base: usize) TrapError!void {
         var reader = binary.Reader.init(code);
 
         while (!reader.isEof()) {
             const byte = reader.readByte() catch return error.UnexpectedEnd;
             const op: Opcode = @enumFromInt(byte);
 
+            // Label height BEFORE the instruction runs. This is what
+            // distinguishes the two kinds of `end`: one that CLOSES A BLOCK
+            // (a label was open, so `end` consumes it and execution
+            // continues), from the function's terminal `end` (no label open
+            // at this activation's base). Testing the height AFTER the op
+            // conflated them — closing the outermost block returned the count
+            // to `label_base`, so the caller stopped executing at the block's
+            // `end` and never ran the instructions following it.
+            const labels_before = self.labels.items.len;
+
             try self.executeOp(op, &reader);
 
-            // Check for end of function
-            if (op == .end and self.labels.items.len == 0) {
+            // An explicit `return`, or a `br` past the outermost label, ends
+            // this activation. The flag is consumed here so it never leaks
+            // into the caller's loop.
+            if (self.return_requested) {
+                self.return_requested = false;
                 break;
             }
+
+            // Check for end of THIS function activation
+            if (op == .end and labels_before <= label_base) {
+                break;
+            }
+        }
+
+        // Defensive: never leak labels belonging to a finished activation into
+        // the caller's control-flow resolution.
+        if (self.labels.items.len > label_base) {
+            self.labels.shrinkRetainingCapacity(label_base);
         }
     }
 
     fn executeOp(self: *Instance, op: Opcode, reader: *binary.Reader) TrapError!void {
+        // One check per instruction bounds every push site at once. An
+        // instruction pushes a bounded number of values, so checking on entry
+        // keeps the stack within a small constant of the limit.
+        if (self.stack.items.len > self.max_stack_depth) return error.StackOverflow;
+
         switch (op) {
             // Control flow
             .@"unreachable" => return error.Unreachable,
@@ -727,7 +820,11 @@ pub const Instance = struct {
             },
 
             .end => {
-                if (self.labels.items.len > 0) {
+                // Only this activation's labels are poppable. Comparing
+                // against 0 let a callee's terminal `end` pop a label belonging
+                // to the CALLER's still-open block, which both corrupted the
+                // caller's control flow and made the callee fail to terminate.
+                if (self.labels.items.len > self.currentLabelBase()) {
                     _ = self.labels.pop();
                 }
             },
@@ -746,6 +843,12 @@ pub const Instance = struct {
             },
 
             .br_table => {
+                // The encoding is `count` labels followed by ONE default
+                // label. The reader must always advance past all count+1 of
+                // them, whichever is selected — the previous implementation
+                // broke out of the read loop early and then resumed a second
+                // loop from the same `i`, leaving the reader mid-vector and
+                // mis-selecting the default target.
                 const count = reader.readU32() catch return error.UnexpectedEnd;
                 const idx: u32 = @bitCast(self.popI32());
 
@@ -753,33 +856,35 @@ pub const Instance = struct {
                 var i: u32 = 0;
                 while (i <= count) : (i += 1) {
                     const label = reader.readU32() catch return error.UnexpectedEnd;
-                    if (i == idx or i == count) {
+                    // i == count is the default label, used when idx is out of
+                    // range of the table.
+                    if (i == idx or (i == count and idx >= count)) {
                         target = label;
-                        if (i == idx) break;
                     }
-                }
-
-                // Skip remaining labels if we found target early
-                while (i < count) : (i += 1) {
-                    _ = reader.readU32() catch return error.UnexpectedEnd;
                 }
 
                 try self.branch(target, reader);
             },
 
             .@"return" => {
-                // Return from current function
-                if (self.call_stack.pop()) |frame| {
-                    var f = frame;
-                    f.deinit();
-                }
-                // Signal to exit execute loop
-                self.labels.clearRetainingCapacity();
+                // Unwind only THIS activation's labels; the caller's labels
+                // must survive. The frame itself is popped by
+                // callFuncInternal, which owns it — popping here too made the
+                // return path and the fall-off-the-end path asymmetric.
+                self.labels.shrinkRetainingCapacity(self.currentLabelBase());
+                self.return_requested = true;
             },
 
             .call => {
                 const func_idx = reader.readU32() catch return error.UnexpectedEnd;
-                _ = try self.callFuncInternal(func_idx);
+                // callFuncInternal POPS the result off the operand stack to
+                // return it (that is what the external `callFunc` entry point
+                // wants). For an in-guest call the value must stay on the
+                // stack for the next instruction, so push it back — otherwise
+                // every non-void call silently evaporated its result.
+                if (try self.callFuncInternal(func_idx)) |result| {
+                    self.stack.append(self.allocator, result) catch return error.OutOfMemory;
+                }
             },
 
             .call_indirect => {
@@ -810,8 +915,11 @@ pub const Instance = struct {
                     return error.IndirectCallTypeMismatch;
                 }
 
-                // Call the function
-                _ = try self.callFuncInternal(func_idx);
+                // Call the function; see `.call` — the result must be returned
+                // to the operand stack.
+                if (try self.callFuncInternal(func_idx)) |result| {
+                    self.stack.append(self.allocator, result) catch return error.OutOfMemory;
+                }
             },
 
             // Parametric
@@ -880,7 +988,7 @@ pub const Instance = struct {
                 const mem_arg = try self.readMemArg(reader);
                 const base: u32 = @bitCast(self.popI32());
                 const addr = base +% mem_arg.offset;
-                const val = try self.memories[0].loadI32(addr);
+                const val = try (try self.mem0()).loadI32(addr);
                 self.stack.append(self.allocator, .{ .i32 = val }) catch return error.OutOfMemory;
             },
 
@@ -888,7 +996,7 @@ pub const Instance = struct {
                 const mem_arg = try self.readMemArg(reader);
                 const base: u32 = @bitCast(self.popI32());
                 const addr = base +% mem_arg.offset;
-                const val = try self.memories[0].loadI64(addr);
+                const val = try (try self.mem0()).loadI64(addr);
                 self.stack.append(self.allocator, .{ .i64 = val }) catch return error.OutOfMemory;
             },
 
@@ -896,7 +1004,7 @@ pub const Instance = struct {
                 const mem_arg = try self.readMemArg(reader);
                 const base: u32 = @bitCast(self.popI32());
                 const addr = base +% mem_arg.offset;
-                const val = try self.memories[0].loadF32(addr);
+                const val = try (try self.mem0()).loadF32(addr);
                 self.stack.append(self.allocator, .{ .f32 = val }) catch return error.OutOfMemory;
             },
 
@@ -904,7 +1012,7 @@ pub const Instance = struct {
                 const mem_arg = try self.readMemArg(reader);
                 const base: u32 = @bitCast(self.popI32());
                 const addr = base +% mem_arg.offset;
-                const val = try self.memories[0].loadF64(addr);
+                const val = try (try self.mem0()).loadF64(addr);
                 self.stack.append(self.allocator, .{ .f64 = val }) catch return error.OutOfMemory;
             },
 
@@ -912,7 +1020,7 @@ pub const Instance = struct {
                 const mem_arg = try self.readMemArg(reader);
                 const base: u32 = @bitCast(self.popI32());
                 const addr = base +% mem_arg.offset;
-                const val = try self.memories[0].loadI32_8s(addr);
+                const val = try (try self.mem0()).loadI32_8s(addr);
                 self.stack.append(self.allocator, .{ .i32 = val }) catch return error.OutOfMemory;
             },
 
@@ -920,7 +1028,7 @@ pub const Instance = struct {
                 const mem_arg = try self.readMemArg(reader);
                 const base: u32 = @bitCast(self.popI32());
                 const addr = base +% mem_arg.offset;
-                const val = try self.memories[0].loadI32_8u(addr);
+                const val = try (try self.mem0()).loadI32_8u(addr);
                 self.stack.append(self.allocator, .{ .i32 = val }) catch return error.OutOfMemory;
             },
 
@@ -928,7 +1036,7 @@ pub const Instance = struct {
                 const mem_arg = try self.readMemArg(reader);
                 const base: u32 = @bitCast(self.popI32());
                 const addr = base +% mem_arg.offset;
-                const val = try self.memories[0].loadI32_16s(addr);
+                const val = try (try self.mem0()).loadI32_16s(addr);
                 self.stack.append(self.allocator, .{ .i32 = val }) catch return error.OutOfMemory;
             },
 
@@ -936,7 +1044,7 @@ pub const Instance = struct {
                 const mem_arg = try self.readMemArg(reader);
                 const base: u32 = @bitCast(self.popI32());
                 const addr = base +% mem_arg.offset;
-                const val = try self.memories[0].loadI32_16u(addr);
+                const val = try (try self.mem0()).loadI32_16u(addr);
                 self.stack.append(self.allocator, .{ .i32 = val }) catch return error.OutOfMemory;
             },
 
@@ -945,7 +1053,7 @@ pub const Instance = struct {
                 const val = self.popI32();
                 const base: u32 = @bitCast(self.popI32());
                 const addr = base +% mem_arg.offset;
-                try self.memories[0].storeI32(addr, val);
+                try (try self.mem0()).storeI32(addr, val);
             },
 
             .i64_store => {
@@ -953,7 +1061,7 @@ pub const Instance = struct {
                 const val = self.popI64();
                 const base: u32 = @bitCast(self.popI32());
                 const addr = base +% mem_arg.offset;
-                try self.memories[0].storeI64(addr, val);
+                try (try self.mem0()).storeI64(addr, val);
             },
 
             .f32_store => {
@@ -961,7 +1069,7 @@ pub const Instance = struct {
                 const val = self.popF32();
                 const base: u32 = @bitCast(self.popI32());
                 const addr = base +% mem_arg.offset;
-                try self.memories[0].storeF32(addr, val);
+                try (try self.mem0()).storeF32(addr, val);
             },
 
             .f64_store => {
@@ -969,7 +1077,7 @@ pub const Instance = struct {
                 const val = self.popF64();
                 const base: u32 = @bitCast(self.popI32());
                 const addr = base +% mem_arg.offset;
-                try self.memories[0].storeF64(addr, val);
+                try (try self.mem0()).storeF64(addr, val);
             },
 
             .i32_store8 => {
@@ -977,7 +1085,7 @@ pub const Instance = struct {
                 const val = self.popI32();
                 const base: u32 = @bitCast(self.popI32());
                 const addr = base +% mem_arg.offset;
-                try self.memories[0].storeI8(addr, val);
+                try (try self.mem0()).storeI8(addr, val);
             },
 
             .i32_store16 => {
@@ -985,19 +1093,19 @@ pub const Instance = struct {
                 const val = self.popI32();
                 const base: u32 = @bitCast(self.popI32());
                 const addr = base +% mem_arg.offset;
-                try self.memories[0].storeI16(addr, val);
+                try (try self.mem0()).storeI16(addr, val);
             },
 
             .memory_size => {
                 _ = reader.readU32() catch return error.UnexpectedEnd;
-                const size: i32 = @intCast(self.memories[0].size());
+                const size: i32 = @intCast((try self.mem0()).size());
                 self.stack.append(self.allocator, .{ .i32 = size }) catch return error.OutOfMemory;
             },
 
             .memory_grow => {
                 _ = reader.readU32() catch return error.UnexpectedEnd;
                 const pages: u32 = @bitCast(self.popI32());
-                const result = self.memories[0].grow(pages) catch -1;
+                const result = (try self.mem0()).grow(pages) catch -1;
                 self.stack.append(self.allocator, .{ .i32 = result }) catch return error.OutOfMemory;
             },
 
@@ -1523,41 +1631,23 @@ pub const Instance = struct {
             },
             .i32_trunc_f32_s => {
                 const a = self.popF32();
-                if (std.math.isNan(a)) return error.InvalidConversionToInteger;
-                if (a < @as(f32, @floatFromInt(std.math.minInt(i32))) or
-                    a >= @as(f32, @floatFromInt(std.math.maxInt(i32))))
-                {
-                    return error.IntegerOverflow;
-                }
-                self.stack.append(self.allocator, .{ .i32 = @intFromFloat(a) }) catch return error.OutOfMemory;
+                const v = try truncFloatToInt(i32, f32, a);
+                self.stack.append(self.allocator, .{ .i32 = v }) catch return error.OutOfMemory;
             },
             .i32_trunc_f32_u => {
                 const a = self.popF32();
-                if (std.math.isNan(a)) return error.InvalidConversionToInteger;
-                if (a < 0 or a >= @as(f32, @floatFromInt(std.math.maxInt(u32)))) {
-                    return error.IntegerOverflow;
-                }
-                const u: u32 = @intFromFloat(a);
-                self.stack.append(self.allocator, .{ .i32 = @bitCast(u) }) catch return error.OutOfMemory;
+                const v = try truncFloatToInt(u32, f32, a);
+                self.stack.append(self.allocator, .{ .i32 = @bitCast(v) }) catch return error.OutOfMemory;
             },
             .i32_trunc_f64_s => {
                 const a = self.popF64();
-                if (std.math.isNan(a)) return error.InvalidConversionToInteger;
-                if (a < @as(f64, @floatFromInt(std.math.minInt(i32))) or
-                    a >= @as(f64, @floatFromInt(std.math.maxInt(i32))))
-                {
-                    return error.IntegerOverflow;
-                }
-                self.stack.append(self.allocator, .{ .i32 = @intFromFloat(a) }) catch return error.OutOfMemory;
+                const v = try truncFloatToInt(i32, f64, a);
+                self.stack.append(self.allocator, .{ .i32 = v }) catch return error.OutOfMemory;
             },
             .i32_trunc_f64_u => {
                 const a = self.popF64();
-                if (std.math.isNan(a)) return error.InvalidConversionToInteger;
-                if (a < 0 or a >= @as(f64, @floatFromInt(std.math.maxInt(u32)))) {
-                    return error.IntegerOverflow;
-                }
-                const u: u32 = @intFromFloat(a);
-                self.stack.append(self.allocator, .{ .i32 = @bitCast(u) }) catch return error.OutOfMemory;
+                const v = try truncFloatToInt(u32, f64, a);
+                self.stack.append(self.allocator, .{ .i32 = @bitCast(v) }) catch return error.OutOfMemory;
             },
             .i64_extend_i32_s => {
                 const a = self.popI32();
@@ -1569,25 +1659,23 @@ pub const Instance = struct {
             },
             .i64_trunc_f32_s => {
                 const a = self.popF32();
-                if (std.math.isNan(a)) return error.InvalidConversionToInteger;
-                self.stack.append(self.allocator, .{ .i64 = @intFromFloat(a) }) catch return error.OutOfMemory;
+                const v = try truncFloatToInt(i64, f32, a);
+                self.stack.append(self.allocator, .{ .i64 = v }) catch return error.OutOfMemory;
             },
             .i64_trunc_f32_u => {
                 const a = self.popF32();
-                if (std.math.isNan(a) or a < 0) return error.InvalidConversionToInteger;
-                const u: u64 = @intFromFloat(a);
-                self.stack.append(self.allocator, .{ .i64 = @bitCast(u) }) catch return error.OutOfMemory;
+                const v = try truncFloatToInt(u64, f32, a);
+                self.stack.append(self.allocator, .{ .i64 = @bitCast(v) }) catch return error.OutOfMemory;
             },
             .i64_trunc_f64_s => {
                 const a = self.popF64();
-                if (std.math.isNan(a)) return error.InvalidConversionToInteger;
-                self.stack.append(self.allocator, .{ .i64 = @intFromFloat(a) }) catch return error.OutOfMemory;
+                const v = try truncFloatToInt(i64, f64, a);
+                self.stack.append(self.allocator, .{ .i64 = v }) catch return error.OutOfMemory;
             },
             .i64_trunc_f64_u => {
                 const a = self.popF64();
-                if (std.math.isNan(a) or a < 0) return error.InvalidConversionToInteger;
-                const u: u64 = @intFromFloat(a);
-                self.stack.append(self.allocator, .{ .i64 = @bitCast(u) }) catch return error.OutOfMemory;
+                const v = try truncFloatToInt(u64, f64, a);
+                self.stack.append(self.allocator, .{ .i64 = @bitCast(v) }) catch return error.OutOfMemory;
             },
             .f32_convert_i32_s => {
                 const a = self.popI32();
@@ -1678,46 +1766,46 @@ pub const Instance = struct {
                 switch (ext_opcode) {
                     // Saturating truncation - i32
                     .i32_trunc_sat_f32_s => {
-                        const val = self.popF32();
-                        const result: i32 = if (std.math.isNan(val)) 0 else if (std.math.isInf(val)) (if (val < 0) @as(i32, -2147483648) else @as(i32, 2147483647)) else @as(i32, @intFromFloat(val));
-                        self.stack.append(self.allocator, .{ .i32 = result }) catch return error.OutOfMemory;
+                        const a = self.popF32();
+                        const v = truncSatFloatToInt(i32, f32, a);
+                        self.stack.append(self.allocator, .{ .i32 = v }) catch return error.OutOfMemory;
                     },
                     .i32_trunc_sat_f32_u => {
-                        const val = self.popF32();
-                        const result: u32 = if (std.math.isNan(val)) 0 else if (std.math.isInf(val)) (if (val < 0) @as(u32, 0) else @as(u32, 4294967295)) else @as(u32, @intFromFloat(val));
-                        self.stack.append(self.allocator, .{ .i32 = @bitCast(result) }) catch return error.OutOfMemory;
+                        const a = self.popF32();
+                        const v = truncSatFloatToInt(u32, f32, a);
+                        self.stack.append(self.allocator, .{ .i32 = @bitCast(v) }) catch return error.OutOfMemory;
                     },
                     .i32_trunc_sat_f64_s => {
-                        const val = self.popF64();
-                        const result: i32 = if (std.math.isNan(val)) 0 else if (std.math.isInf(val)) (if (val < 0) @as(i32, -2147483648) else @as(i32, 2147483647)) else @as(i32, @intFromFloat(val));
-                        self.stack.append(self.allocator, .{ .i32 = result }) catch return error.OutOfMemory;
+                        const a = self.popF64();
+                        const v = truncSatFloatToInt(i32, f64, a);
+                        self.stack.append(self.allocator, .{ .i32 = v }) catch return error.OutOfMemory;
                     },
                     .i32_trunc_sat_f64_u => {
-                        const val = self.popF64();
-                        const result: u32 = if (std.math.isNan(val)) 0 else if (std.math.isInf(val)) (if (val < 0) @as(u32, 0) else @as(u32, 4294967295)) else @as(u32, @intFromFloat(val));
-                        self.stack.append(self.allocator, .{ .i32 = @bitCast(result) }) catch return error.OutOfMemory;
+                        const a = self.popF64();
+                        const v = truncSatFloatToInt(u32, f64, a);
+                        self.stack.append(self.allocator, .{ .i32 = @bitCast(v) }) catch return error.OutOfMemory;
                     },
 
                     // Saturating truncation - i64
                     .i64_trunc_sat_f32_s => {
-                        const val = self.popF32();
-                        const result: i64 = if (std.math.isNan(val)) 0 else if (std.math.isInf(val)) (if (val < 0) @as(i64, -9223372036854775808) else @as(i64, 9223372036854775807)) else @as(i64, @intFromFloat(val));
-                        self.stack.append(self.allocator, .{ .i64 = result }) catch return error.OutOfMemory;
+                        const a = self.popF32();
+                        const v = truncSatFloatToInt(i64, f32, a);
+                        self.stack.append(self.allocator, .{ .i64 = v }) catch return error.OutOfMemory;
                     },
                     .i64_trunc_sat_f32_u => {
-                        const val = self.popF32();
-                        const result: u64 = if (std.math.isNan(val)) 0 else if (std.math.isInf(val)) (if (val < 0) @as(u64, 0) else @as(u64, 18446744073709551615)) else @as(u64, @intFromFloat(val));
-                        self.stack.append(self.allocator, .{ .i64 = @bitCast(result) }) catch return error.OutOfMemory;
+                        const a = self.popF32();
+                        const v = truncSatFloatToInt(u64, f32, a);
+                        self.stack.append(self.allocator, .{ .i64 = @bitCast(v) }) catch return error.OutOfMemory;
                     },
                     .i64_trunc_sat_f64_s => {
-                        const val = self.popF64();
-                        const result: i64 = if (std.math.isNan(val)) 0 else if (std.math.isInf(val)) (if (val < 0) @as(i64, -9223372036854775808) else @as(i64, 9223372036854775807)) else @as(i64, @intFromFloat(val));
-                        self.stack.append(self.allocator, .{ .i64 = result }) catch return error.OutOfMemory;
+                        const a = self.popF64();
+                        const v = truncSatFloatToInt(i64, f64, a);
+                        self.stack.append(self.allocator, .{ .i64 = v }) catch return error.OutOfMemory;
                     },
                     .i64_trunc_sat_f64_u => {
-                        const val = self.popF64();
-                        const result: u64 = if (std.math.isNan(val)) 0 else if (std.math.isInf(val)) (if (val < 0) @as(u64, 0) else @as(u64, 18446744073709551615)) else @as(u64, @intFromFloat(val));
-                        self.stack.append(self.allocator, .{ .i64 = @bitCast(result) }) catch return error.OutOfMemory;
+                        const a = self.popF64();
+                        const v = truncSatFloatToInt(u64, f64, a);
+                        self.stack.append(self.allocator, .{ .i64 = @bitCast(v) }) catch return error.OutOfMemory;
                     },
 
                     // Bulk memory operations
@@ -1735,15 +1823,19 @@ pub const Instance = struct {
 
                         if (size < 0 or offset < 0 or dest < 0) return error.OutOfBoundsMemoryAccess;
 
-                        const size_u = @as(u32, @bitCast(size));
-                        const offset_u = @as(u32, @bitCast(offset));
-                        const dest_u = @as(u32, @bitCast(dest));
+                        // Widen to usize before adding: the operands are guest
+                        // controlled and a u32 add panics on overflow in safe
+                        // builds instead of trapping.
+                        const size_u = @as(usize, @as(u32, @bitCast(size)));
+                        const offset_u = @as(usize, @as(u32, @bitCast(offset)));
+                        const dest_u = @as(usize, @as(u32, @bitCast(dest)));
 
+                        const mem = try self.mem0();
                         if (offset_u + size_u > data_segment.init.len) return error.OutOfBoundsMemoryAccess;
-                        if (dest_u + size_u > self.memories[0].data.len) return error.OutOfBoundsMemoryAccess;
+                        if (dest_u + size_u > mem.data.len) return error.OutOfBoundsMemoryAccess;
 
                         if (size_u > 0) {
-                            @memcpy(self.memories[0].data[dest_u..][0..size_u], data_segment.init[offset_u..][0..size_u]);
+                            @memcpy(mem.data[dest_u..][0..size_u], data_segment.init[offset_u..][0..size_u]);
                         }
                     },
 
@@ -1760,16 +1852,24 @@ pub const Instance = struct {
 
                         if (size < 0 or src < 0 or dest < 0) return error.OutOfBoundsMemoryAccess;
 
-                        const size_u = @as(u32, @bitCast(size));
-                        const src_u = @as(u32, @bitCast(src));
-                        const dest_u = @as(u32, @bitCast(dest));
+                        const size_u = @as(usize, @as(u32, @bitCast(size)));
+                        const src_u = @as(usize, @as(u32, @bitCast(src)));
+                        const dest_u = @as(usize, @as(u32, @bitCast(dest)));
 
-                        if (src_u + size_u > self.memories[0].data.len) return error.OutOfBoundsMemoryAccess;
-                        if (dest_u + size_u > self.memories[0].data.len) return error.OutOfBoundsMemoryAccess;
+                        const mem = try self.mem0();
+                        if (src_u + size_u > mem.data.len) return error.OutOfBoundsMemoryAccess;
+                        if (dest_u + size_u > mem.data.len) return error.OutOfBoundsMemoryAccess;
 
                         if (size_u > 0) {
-                            // Use memmove to handle overlapping regions
-                            std.mem.copyForwards(u8, self.memories[0].data[dest_u..][0..size_u], self.memories[0].data[src_u..][0..size_u]);
+                            // Overlap-correct in both directions: copyForwards
+                            // alone corrupts a forward-overlapping copy
+                            // (dest > src), which is exactly what memory.copy
+                            // must support.
+                            if (dest_u <= src_u) {
+                                std.mem.copyForwards(u8, mem.data[dest_u..][0..size_u], mem.data[src_u..][0..size_u]);
+                            } else {
+                                std.mem.copyBackwards(u8, mem.data[dest_u..][0..size_u], mem.data[src_u..][0..size_u]);
+                            }
                         }
                     },
 
@@ -1780,14 +1880,15 @@ pub const Instance = struct {
 
                         if (size < 0 or offset < 0) return error.OutOfBoundsMemoryAccess;
 
-                        const size_u = @as(u32, @bitCast(size));
-                        const offset_u = @as(u32, @bitCast(offset));
+                        const size_u = @as(usize, @as(u32, @bitCast(size)));
+                        const offset_u = @as(usize, @as(u32, @bitCast(offset)));
                         const value_u = @as(u8, @truncate(@as(u32, @bitCast(value))));
 
-                        if (offset_u + size_u > self.memories[0].data.len) return error.OutOfBoundsMemoryAccess;
+                        const mem = try self.mem0();
+                        if (offset_u + size_u > mem.data.len) return error.OutOfBoundsMemoryAccess;
 
                         if (size_u > 0) {
-                            @memset(self.memories[0].data[offset_u..][0..size_u], value_u);
+                            @memset(mem.data[offset_u..][0..size_u], value_u);
                         }
                     },
 
@@ -1804,6 +1905,70 @@ pub const Instance = struct {
         }
     }
 
+    /// Trapping float→int truncation (`iNN.trunc_fMM_s/u`).
+    ///
+    /// Exec §4.3.3 trunc: NaN traps, and a value whose truncation falls
+    /// outside the target range traps. Both must be checked BEFORE
+    /// `@intFromFloat`, which is illegal behavior (a safe-build panic) on an
+    /// out-of-range input — the i64 forms previously checked only NaN, so
+    /// `i64.trunc_f64_s (f64.const 1e30)` crashed the host.
+    ///
+    /// The bounds are computed as exact powers of two so they are exactly
+    /// representable in the float type: for a signed N-bit int the legal
+    /// truncated range is [-2^(N-1), 2^(N-1)), and for unsigned it is
+    /// [0, 2^N). Comparing against `maxInt` directly would be wrong, since
+    /// e.g. maxInt(i32) rounds UP to 2^31 in f32 and would admit an
+    /// out-of-range value.
+    fn truncFloatToInt(comptime I: type, comptime F: type, a: F) TrapError!I {
+        if (std.math.isNan(a)) return error.InvalidConversionToInteger;
+        const t = @trunc(a);
+        const info = @typeInfo(I).int;
+        if (info.signedness == .signed) {
+            const lo: F = @floatFromInt(@as(i128, -1) << (info.bits - 1));
+            const hi: F = @floatFromInt(@as(i128, 1) << (info.bits - 1));
+            if (!(t >= lo and t < hi)) return error.IntegerOverflow;
+        } else {
+            const hi: F = @floatFromInt(@as(u128, 1) << info.bits);
+            if (!(t >= 0 and t < hi)) return error.IntegerOverflow;
+        }
+        return @intFromFloat(t);
+    }
+
+    /// Saturating float→int truncation (`iNN.trunc_sat_fMM_s/u`).
+    ///
+    /// Exec §4.3.3 trunc_sat: NaN yields 0 and out-of-range values CLAMP to
+    /// the nearest representable bound rather than trapping. The previous
+    /// implementation special-cased only NaN and infinity, so a finite but
+    /// out-of-range value (e.g. 1e30) still reached `@intFromFloat` and
+    /// panicked the host.
+    fn truncSatFloatToInt(comptime I: type, comptime F: type, a: F) I {
+        if (std.math.isNan(a)) return 0;
+        const t = @trunc(a);
+        const info = @typeInfo(I).int;
+        if (info.signedness == .signed) {
+            const lo: F = @floatFromInt(@as(i128, -1) << (info.bits - 1));
+            const hi: F = @floatFromInt(@as(i128, 1) << (info.bits - 1));
+            if (t < lo) return std.math.minInt(I);
+            if (t >= hi) return std.math.maxInt(I);
+        } else {
+            const hi: F = @floatFromInt(@as(u128, 1) << info.bits);
+            if (t < 0) return 0;
+            if (t >= hi) return std.math.maxInt(I);
+        }
+        return @intFromFloat(t);
+    }
+
+    /// Resolve memory 0 for the memory instructions.
+    ///
+    /// Every load/store/bulk-memory opcode previously indexed `memories[0]`
+    /// unconditionally. A module that declares no memory but still contains
+    /// e.g. `i32.load` is accepted by the parser, so the guest could panic the
+    /// host with an out-of-bounds slice index. Trap instead.
+    fn mem0(self: *Instance) TrapError!*Memory {
+        if (self.memories.len == 0) return error.InvalidMemory;
+        return &self.memories[0];
+    }
+
     fn readMemArg(self: *Instance, reader: *binary.Reader) TrapError!opcodes.MemArg {
         _ = self;
         const alignment = reader.readU32() catch return error.UnexpectedEnd;
@@ -1811,10 +1976,24 @@ pub const Instance = struct {
         return .{ .alignment = alignment, .offset = offset };
     }
 
+    /// Label-stack height at entry to the currently executing activation.
+    /// Labels below this belong to callers and are out of reach.
+    fn currentLabelBase(self: *const Instance) usize {
+        if (self.call_stack.items.len == 0) return 0;
+        return self.call_stack.items[self.call_stack.items.len - 1].label_base;
+    }
+
     fn branch(self: *Instance, depth: u32, reader: *binary.Reader) TrapError!void {
-        if (depth >= self.labels.items.len) {
-            // Branch out of function
-            self.labels.clearRetainingCapacity();
+        // Depth is resolved against this activation's labels only. Previously
+        // it was resolved against the whole shared stack, so a `br` with a
+        // large depth inside a callee could retarget a CALLER's block.
+        const base = self.currentLabelBase();
+        const available = self.labels.items.len - base;
+
+        if (depth >= available) {
+            // Branch targets the implicit function-level label: return.
+            self.labels.shrinkRetainingCapacity(base);
+            self.return_requested = true;
             return;
         }
 
@@ -1830,8 +2009,19 @@ pub const Instance = struct {
             // Re-push the label for the loop
             self.labels.append(self.allocator, label) catch return error.OutOfMemory;
         } else {
-            // For block/if, skip to end
-            try self.skipToEnd(reader);
+            // For block/if, run the reader past the target block's `end`.
+            //
+            // `depth` counts OUTWARD from the innermost enclosing block, so
+            // leaving it means closing depth+1 nesting levels: the block the
+            // branch sits in, plus one for each level branched past. The
+            // previous single skipToEnd only ever closed the innermost one, so
+            // any `br`/`br_table` with depth > 0 resumed execution inside a
+            // block it was supposed to have exited — landing on the wrong
+            // instruction entirely.
+            var level: u32 = 0;
+            while (level <= depth) : (level += 1) {
+                try self.skipToEnd(reader);
+            }
             _ = self.labels.pop();
         }
     }
@@ -1841,7 +2031,14 @@ pub const Instance = struct {
         while (depth > 0 and !reader.isEof()) {
             const byte = reader.readByte() catch return error.UnexpectedEnd;
             switch (byte) {
-                0x02, 0x03, 0x04 => depth += 1,
+                0x02, 0x03, 0x04 => {
+                    // block/loop/if each carry a blocktype immediate; not
+                    // consuming it lets e.g. the 0x40 (empty) blocktype be
+                    // re-read as the memory.grow opcode and desynchronize the
+                    // whole scan.
+                    depth = std.math.add(u32, depth, 1) catch return error.UnexpectedEnd;
+                    _ = reader.readBlockType() catch return error.UnexpectedEnd;
+                },
                 0x05 => if (depth == 1) return, // Found else at same level
                 0x0B => depth -= 1,
                 else => try skipImmediate(byte, reader),
@@ -1854,7 +2051,10 @@ pub const Instance = struct {
         while (depth > 0 and !reader.isEof()) {
             const byte = reader.readByte() catch return error.UnexpectedEnd;
             switch (byte) {
-                0x02, 0x03, 0x04 => depth += 1,
+                0x02, 0x03, 0x04 => {
+                    depth = std.math.add(u32, depth, 1) catch return error.UnexpectedEnd;
+                    _ = reader.readBlockType() catch return error.UnexpectedEnd;
+                },
                 0x0B => depth -= 1,
                 else => try skipImmediate(byte, reader),
             }
@@ -1893,6 +2093,21 @@ pub const Instance = struct {
                 var i: u32 = 0;
                 while (i < count) : (i += 1) {
                     _ = reader.readByte() catch return error.UnexpectedEnd;
+                }
+            },
+            0xD0 => _ = reader.readByte() catch return error.UnexpectedEnd, // ref.null
+            0xD2 => _ = reader.readU32() catch return error.UnexpectedEnd, // ref.func
+            0xFC => {
+                // Prefixed family (trunc_sat / bulk memory / table ops)
+                const sub = reader.readU32() catch return error.UnexpectedEnd;
+                switch (sub) {
+                    0...7 => {},
+                    8, 10, 12, 14 => {
+                        _ = reader.readU32() catch return error.UnexpectedEnd;
+                        _ = reader.readU32() catch return error.UnexpectedEnd;
+                    },
+                    9, 11, 13, 15, 16, 17 => _ = reader.readU32() catch return error.UnexpectedEnd,
+                    else => return error.UnknownOpcode,
                 }
             },
             else => {},

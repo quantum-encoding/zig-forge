@@ -7,8 +7,8 @@
 //! - -i, --interactive: prompt before overwrite
 //! - -n, --no-clobber: don't overwrite existing files
 //! - -v, --verbose: explain what is being done
-//! - -p, --preserve: preserve mode, ownership, timestamps
-//! - -a, --archive: same as -dR --preserve=all
+//! - -p, --preserve: preserve mode, timestamps, ownership (if permitted)
+//! - -a, --archive: same as -R --preserve, copies symlinks as symlinks
 //! - -t, --target-directory=DIR: copy all SOURCE to DIRECTORY
 //! - -T, --no-target-directory: treat DEST as normal file
 
@@ -42,7 +42,30 @@ extern "c" fn lstat(path: [*:0]const u8, buf: *Stat) c_int;
 extern "c" fn stat(path: [*:0]const u8, buf: *Stat) c_int;
 extern "c" fn unlink(path: [*:0]const u8) c_int;
 extern "c" fn chmod(path: [*:0]const u8, mode: libc.mode_t) c_int;
+extern "c" fn chown(path: [*:0]const u8, owner: libc.uid_t, group: libc.gid_t) c_int;
 extern "c" fn symlink(target: [*:0]const u8, linkpath: [*:0]const u8) c_int;
+
+// AT_FDCWD differs per platform: Darwin uses -2, Linux uses -100.
+// (Using the Linux value on macOS makes utimensat fail EBADF for relative
+// paths, silently breaking -p timestamp preservation.)
+const AT_FDCWD: c_int = if (builtin.os.tag.isDarwin()) -2 else -100;
+
+/// Map common Zig error names to the strerror() text GNU cp prints,
+/// so error output stays pattern-compatible with GNU for scripts.
+fn gnuErrStr(err: anyerror) []const u8 {
+    return switch (err) {
+        error.AccessDenied, error.PermissionDenied => "Permission denied",
+        error.FileNotFound => "No such file or directory",
+        error.NotDir => "Not a directory",
+        error.IsDir => "Is a directory",
+        error.NoSpaceLeft => "No space left on device",
+        error.NameTooLong => "File name too long",
+        error.ReadOnlyFileSystem => "Read-only file system",
+        error.FileBusy => "Text file busy",
+        error.SymLinkLoop => "Too many levels of symbolic links",
+        else => @errorName(err),
+    };
+}
 
 fn promptOverwrite(dest: []const u8) bool {
     // Write prompt to stderr (fd 2)
@@ -163,10 +186,30 @@ fn copyFile(allocator: std.mem.Allocator, src: []const u8, dst: []const u8, conf
     const dst_z = try allocator.dupeZ(u8, dst);
     defer allocator.free(dst_z);
 
+    // Get source file info first: needed for permissions/timestamps and for
+    // the same-file check below (before we truncate anything).
+    var src_stat: Stat = undefined;
+    const stat_result = stat(src_z.ptr, &src_stat);
+    if (stat_result != 0) {
+        printErrorFmt("cannot stat '{s}': No such file or directory", .{src});
+        return error.FileNotFound;
+    }
+
     // Check if destination exists
-    if (fileExists(dst_z)) {
+    const dst_existed = fileExists(dst_z);
+    if (dst_existed) {
         if (config.no_clobber) {
-            return; // Don't overwrite
+            return; // Don't overwrite (GNU: silent, exit 0 — checked before same-file)
+        }
+        // Same-file check: `cp a a` (or onto a hardlink/symlink of the source)
+        // must NOT truncate the source. GNU: "'a' and 'a' are the same file",
+        // exit 1, checked before -i/-u/-f. (GNU coreutils 9.10 verified.)
+        var dst_stat: Stat = undefined;
+        if (stat(dst_z.ptr, &dst_stat) == 0 and
+            dst_stat.dev == src_stat.dev and dst_stat.ino == src_stat.ino)
+        {
+            printErrorFmt("'{s}' and '{s}' are the same file", .{ src, dst });
+            return error.SameFile;
         }
         // Update mode: skip if destination is newer or same age
         if (config.update) {
@@ -174,10 +217,12 @@ fn copyFile(allocator: std.mem.Allocator, src: []const u8, dst: []const u8, conf
                 return; // Destination is newer or same age, skip
             }
         }
-        // Interactive mode: prompt before overwriting
-        if (config.interactive and !config.force) {
+        // Interactive mode: prompt before overwriting.
+        // GNU prompts whenever -i is given, even combined with -f (verified);
+        // a declined overwrite makes cp exit 1 (GNU >= 9.2).
+        if (config.interactive) {
             if (!promptOverwrite(dst)) {
-                return;
+                return error.OverwriteDeclined;
             }
         }
         if (!config.force) {
@@ -189,24 +234,24 @@ fn copyFile(allocator: std.mem.Allocator, src: []const u8, dst: []const u8, conf
         }
     }
 
-    // Get source file info for permissions and timestamps
-    var src_stat: Stat = undefined;
-    const stat_result = stat(src_z.ptr, &src_stat);
-    if (stat_result != 0) {
-        printErrorFmt("cannot stat '{s}': No such file or directory", .{src});
-        return error.FileNotFound;
-    }
-
     // Open source file
     const src_file = Dir.openFile(Dir.cwd(), io, src, .{}) catch |err| {
-        printErrorFmt("cannot open '{s}' for reading: {s}", .{ src, @errorName(err) });
+        printErrorFmt("cannot open '{s}' for reading: {s}", .{ src, gnuErrStr(err) });
         return err;
     };
     defer src_file.close(io);
 
-    // Create destination file
-    const dst_file = Dir.createFile(Dir.cwd(), io, dst_z, .{ .truncate = true }) catch |err| {
-        printErrorFmt("cannot create '{s}': {s}", .{ dst, @errorName(err) });
+    // Create destination file. With -f, GNU removes an existing destination
+    // that cannot be opened (e.g. read-only) and retries.
+    const dst_file = Dir.createFile(Dir.cwd(), io, dst_z, .{ .truncate = true }) catch |err| blk: {
+        if (config.force and dst_existed) {
+            _ = unlink(dst_z.ptr);
+            break :blk Dir.createFile(Dir.cwd(), io, dst_z, .{ .truncate = true }) catch |err2| {
+                printErrorFmt("cannot create regular file '{s}': {s}", .{ dst, gnuErrStr(err2) });
+                return err2;
+            };
+        }
+        printErrorFmt("cannot create regular file '{s}': {s}", .{ dst, gnuErrStr(err) });
         return err;
     };
     defer dst_file.close(io);
@@ -245,10 +290,10 @@ fn copyFile(allocator: std.mem.Allocator, src: []const u8, dst: []const u8, conf
     // Preserve permissions if requested
     if (config.preserve or config.archive) {
         // Set permissions
-        const chmod_result = chmod(dst_z.ptr, src_stat.mode & 0o7777);
-        if (chmod_result != 0) {
-            // Non-fatal, just warn
-        }
+        _ = chmod(dst_z.ptr, src_stat.mode & 0o7777);
+
+        // Set ownership (non-fatal on failure, like GNU when not privileged)
+        _ = chown(dst_z.ptr, src_stat.uid, src_stat.gid);
 
         // Set timestamps
         const atime = src_stat.atime();
@@ -257,7 +302,9 @@ fn copyFile(allocator: std.mem.Allocator, src: []const u8, dst: []const u8, conf
             .{ .sec = @intCast(atime.sec), .nsec = atime.nsec },
             .{ .sec = @intCast(mtime.sec), .nsec = mtime.nsec },
         };
-        _ = utimensat(-100, dst_z.ptr, &times, 0);
+        if (utimensat(AT_FDCWD, dst_z.ptr, &times, 0) != 0) {
+            printErrorFmt("preserving times for '{s}'", .{dst});
+        }
     }
 
     if (config.verbose) {
@@ -309,7 +356,18 @@ fn copySymlink(allocator: std.mem.Allocator, src: []const u8, dst: []const u8, c
     }
 }
 
-fn copyDirectory(allocator: std.mem.Allocator, src: []const u8, dst: []const u8, config: *const Config) !void {
+/// Identity of the top-level destination directory, threaded through the
+/// recursion so `cp -r self self/copy` is detected when the freshly-created
+/// destination shows up inside the tree being iterated (GNU does the same:
+/// "cannot copy a directory, 'a', into itself, 'a/b'").
+const SelfCheck = struct {
+    dev: i64,
+    ino: u64,
+    top_src: []const u8,
+    top_dst: []const u8,
+};
+
+fn copyDirectory(allocator: std.mem.Allocator, src: []const u8, dst: []const u8, config: *const Config, parent_check: ?*const SelfCheck) !void {
     const io = Io.Threaded.global_single_threaded.io();
 
     const src_z = try allocator.dupeZ(u8, src);
@@ -320,27 +378,51 @@ fn copyDirectory(allocator: std.mem.Allocator, src: []const u8, dst: []const u8,
 
     // Get source directory info
     var src_stat: Stat = undefined;
-    _ = stat(src_z.ptr, &src_stat);
+    if (stat(src_z.ptr, &src_stat) != 0) {
+        // Source vanished between lstat and here (TOCTOU); never mkdir with
+        // an uninitialized mode.
+        printErrorFmt("cannot stat '{s}': No such file or directory", .{src});
+        return error.FileNotFound;
+    }
 
     // Create destination directory if it doesn't exist
     if (!fileExists(dst_z)) {
         if (libc.mkdir(dst_z.ptr, src_stat.mode & 0o7777) != 0) {
-            printErrorFmt("cannot create directory '{s}': mkdir failed", .{dst});
+            printErrorFmt("cannot create directory '{s}'", .{dst});
             return error.MkdirFailed;
         }
         if (config.verbose) {
-            printVerboseDir(dst);
+            printVerbose(src, dst); // GNU prints "'src' -> 'dst'" for created dirs
+        }
+    }
+
+    // At the top level, record the destination directory's identity so the
+    // recursion can refuse to descend into it (dir-into-itself protection).
+    var check_store: SelfCheck = undefined;
+    var self_check = parent_check;
+    if (parent_check == null) {
+        var dst_stat: Stat = undefined;
+        if (stat(dst_z.ptr, &dst_stat) == 0) {
+            check_store = .{
+                .dev = @intCast(dst_stat.dev),
+                .ino = dst_stat.ino,
+                .top_src = src,
+                .top_dst = dst,
+            };
+            self_check = &check_store;
         }
     }
 
     // Open source directory
     var dir = Dir.openDir(Dir.cwd(), io, src, .{ .iterate = true }) catch |err| {
-        printErrorFmt("cannot open directory '{s}': {s}", .{ src, @errorName(err) });
+        printErrorFmt("cannot open directory '{s}': {s}", .{ src, gnuErrStr(err) });
         return err;
     };
     defer dir.close(io);
 
-    // Iterate and copy contents
+    // Iterate and copy contents. Like GNU, keep going after a failed entry
+    // and report overall failure at the end.
+    var had_error = false;
     var iter = dir.iterate();
     while (try iter.next(io)) |entry| {
         const entry_name = entry.name;
@@ -358,22 +440,52 @@ fn copyDirectory(allocator: std.mem.Allocator, src: []const u8, dst: []const u8,
         if (file_type) |ft| {
             switch (ft) {
                 .directory => {
-                    try copyDirectory(allocator, src_full, dst_full, config);
+                    if (self_check) |sc| {
+                        var entry_stat: Stat = undefined;
+                        if (lstat(src_full_z.ptr, &entry_stat) == 0 and
+                            @as(i64, @intCast(entry_stat.dev)) == sc.dev and
+                            entry_stat.ino == sc.ino)
+                        {
+                            printErrorFmt("cannot copy a directory, '{s}', into itself, '{s}'", .{ sc.top_src, sc.top_dst });
+                            had_error = true;
+                            continue;
+                        }
+                    }
+                    copyDirectory(allocator, src_full, dst_full, config, self_check) catch {
+                        had_error = true;
+                    };
                 },
                 .symlink => {
-                    if (config.archive) {
-                        try copySymlink(allocator, src_full, dst_full, config);
-                    } else {
-                        // Follow symlinks by default (copy target)
-                        try copyFile(allocator, src_full, dst_full, config);
-                    }
+                    // POSIX/GNU -R: symlinks in the tree are copied as
+                    // symlinks, never dereferenced.
+                    copySymlink(allocator, src_full, dst_full, config) catch {
+                        had_error = true;
+                    };
                 },
                 .file, .other => {
-                    try copyFile(allocator, src_full, dst_full, config);
+                    copyFile(allocator, src_full, dst_full, config) catch {
+                        had_error = true;
+                    };
                 },
             }
         }
     }
+
+    // Preserve the directory's own mode/ownership/timestamps after its
+    // contents were copied (copying children updates the dir mtime).
+    if (config.preserve or config.archive) {
+        _ = chmod(dst_z.ptr, src_stat.mode & 0o7777);
+        _ = chown(dst_z.ptr, src_stat.uid, src_stat.gid);
+        const atime = src_stat.atime();
+        const mtime = src_stat.mtime();
+        const times: [2]Timespec = .{
+            .{ .sec = @intCast(atime.sec), .nsec = atime.nsec },
+            .{ .sec = @intCast(mtime.sec), .nsec = mtime.nsec },
+        };
+        _ = utimensat(AT_FDCWD, dst_z.ptr, &times, 0);
+    }
+
+    if (had_error) return error.PartialCopyFailure;
 }
 
 fn copy(allocator: std.mem.Allocator, src: []const u8, dst: []const u8, config: *const Config) !void {
@@ -390,15 +502,24 @@ fn copy(allocator: std.mem.Allocator, src: []const u8, dst: []const u8, config: 
     switch (file_type.?) {
         .directory => {
             if (!config.recursive and !config.archive) {
-                printErrorFmt("omitting directory '{s}'", .{src});
+                printErrorFmt("-r not specified; omitting directory '{s}'", .{src});
                 return error.IsDir;
             }
-            try copyDirectory(allocator, src, dst, config);
+            try copyDirectory(allocator, src, dst, config, null);
         },
         .symlink => {
-            if (config.archive) {
+            // GNU -R/-a: a symlink named on the command line is copied as a
+            // symlink (default -P with -R); plain cp dereferences it.
+            if (config.recursive or config.archive) {
                 try copySymlink(allocator, src, dst, config);
             } else {
+                // Dereferencing: if the link points at a directory, GNU
+                // refuses the same way it refuses a directory operand.
+                var st: Stat = undefined;
+                if (stat(src_z.ptr, &st) == 0 and (st.mode & S_IFMT) == S_IFDIR) {
+                    printErrorFmt("-r not specified; omitting directory '{s}'", .{src});
+                    return error.IsDir;
+                }
                 try copyFile(allocator, src, dst, config);
             }
         },
@@ -421,15 +542,6 @@ fn printVerbose(src: []const u8, dst: []const u8) void {
     const stdout = Io.File.stdout();
     var writer = stdout.writer(io, &buf);
     writer.interface.print("'{s}' -> '{s}'\n", .{ src, dst }) catch {};
-    writer.interface.flush() catch {};
-}
-
-fn printVerboseDir(dst: []const u8) void {
-    const io = Io.Threaded.global_single_threaded.io();
-    var buf: [512]u8 = undefined;
-    const stdout = Io.File.stdout();
-    var writer = stdout.writer(io, &buf);
-    writer.interface.print("created directory '{s}'\n", .{dst}) catch {};
     writer.interface.flush() catch {};
 }
 
@@ -470,9 +582,12 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                 } else if (std.mem.eql(u8, arg, "--force")) {
                     config.force = true;
                 } else if (std.mem.eql(u8, arg, "--interactive")) {
+                    // GNU: -i and -n override each other, last one wins
                     config.interactive = true;
+                    config.no_clobber = false;
                 } else if (std.mem.eql(u8, arg, "--no-clobber")) {
                     config.no_clobber = true;
+                    config.interactive = false;
                 } else if (std.mem.eql(u8, arg, "--verbose")) {
                     config.verbose = true;
                 } else if (std.mem.eql(u8, arg, "--preserve")) {
@@ -506,12 +621,21 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                 }
             } else {
                 // Short options
-                for (arg[1..]) |ch| {
+                var j: usize = 1;
+                while (j < arg.len) : (j += 1) {
+                    const ch = arg[j];
                     switch (ch) {
                         'r', 'R' => config.recursive = true,
                         'f' => config.force = true,
-                        'i' => config.interactive = true,
-                        'n' => config.no_clobber = true,
+                        'i' => {
+                            // GNU: -i and -n override each other, last one wins
+                            config.interactive = true;
+                            config.no_clobber = false;
+                        },
+                        'n' => {
+                            config.no_clobber = true;
+                            config.interactive = false;
+                        },
                         'v' => config.verbose = true,
                         'p' => config.preserve = true,
                         'a' => {
@@ -522,18 +646,26 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                         'u' => config.update = true,
                         'T' => config.no_target_directory = true,
                         't' => {
-                            i += 1;
-                            if (i >= args.len) {
-                                printError("option requires an argument -- 't'");
-                                std.process.exit(1);
+                            // getopt semantics: the rest of the cluster (if
+                            // any) is the option argument, e.g. -tDIR.
+                            if (j + 1 < arg.len) {
+                                config.target_directory = try allocator.dupe(u8, arg[j + 1 ..]);
+                                j = arg.len; // consumed
+                            } else {
+                                i += 1;
+                                if (i >= args.len) {
+                                    printError("option requires an argument -- 't'");
+                                    std.process.exit(1);
+                                }
+                                config.target_directory = try allocator.dupe(u8, args[i]);
                             }
-                            config.target_directory = try allocator.dupe(u8, args[i]);
                         },
                         else => {
                             printErrorFmt("invalid option -- '{c}'", .{ch});
                             std.process.exit(1);
                         },
                     }
+                    if (j >= arg.len) break;
                 }
             }
         } else {
@@ -577,11 +709,11 @@ fn printHelp() void {
         \\   or: zcp [OPTION]... -t DIRECTORY SOURCE...
         \\Copy SOURCE to DEST, or multiple SOURCEs to DIRECTORY.
         \\
-        \\  -a, --archive           same as -dR --preserve=all
+        \\  -a, --archive           archive mode; same as -R --preserve, copy symlinks
         \\  -f, --force             if existing destination cannot be opened, remove it
-        \\  -i, --interactive       prompt before overwrite
-        \\  -n, --no-clobber        do not overwrite an existing file
-        \\  -p, --preserve          preserve mode, ownership, timestamps
+        \\  -i, --interactive       prompt before overwrite (overrides a previous -n)
+        \\  -n, --no-clobber        do not overwrite an existing file (overrides -i)
+        \\  -p, --preserve          preserve mode, timestamps, ownership (if permitted)
         \\  -r, -R, --recursive     copy directories recursively
         \\  -t, --target-directory=DIR  copy all SOURCEs into DIRECTORY
         \\  -T, --no-target-directory   treat DEST as a normal file
@@ -625,10 +757,14 @@ pub fn main(init: std.process.Init) void {
         };
         defer allocator.free(target_z);
 
-        // Check target is a directory
+        // Check target is a directory (GNU wording, distinguishing missing
+        // target from non-directory target)
         const target_type = getFileType(target_z);
-        if (target_type != .directory) {
-            printErrorFmt("target '{s}' is not a directory", .{target_dir});
+        if (target_type == null) {
+            printErrorFmt("target directory '{s}': No such file or directory", .{target_dir});
+            std.process.exit(1);
+        } else if (target_type != .directory) {
+            printErrorFmt("target directory '{s}': Not a directory", .{target_dir});
             std.process.exit(1);
         }
 
@@ -684,8 +820,11 @@ pub fn main(init: std.process.Init) void {
             }
         } else {
             // Multiple sources: destination must be a directory
-            if (dest_type != .directory) {
-                printErrorFmt("target '{s}' is not a directory", .{dest});
+            if (dest_type == null) {
+                printErrorFmt("target '{s}': No such file or directory", .{dest});
+                std.process.exit(1);
+            } else if (dest_type != .directory) {
+                printErrorFmt("target '{s}': Not a directory", .{dest});
                 std.process.exit(1);
             }
 

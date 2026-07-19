@@ -92,7 +92,18 @@ pub fn parseXlsx(allocator: std.mem.Allocator, archive: *zip.ZipArchive) !Workbo
     };
 }
 
-/// Generate CSV from a sheet
+/// Generate CSV from a sheet.
+///
+/// Quotes and commas are escaped per RFC 4180, so the output parses correctly
+/// in any CSV reader.
+///
+/// It does **not** defend against spreadsheet formula injection: a cell whose
+/// text begins with `=`, `+`, `-` or `@` (e.g. `=cmd|'/c calc'!A1`) is emitted
+/// verbatim, and a spreadsheet application that later *opens* this CSV may
+/// evaluate it. That is deliberate — the in-tree consumers feed the CSV to
+/// parsers and LLMs, where mangling leading characters would corrupt real data.
+/// A consumer that hands the output to a spreadsheet application must prefix
+/// such cells itself (the usual mitigation is a leading `'`).
 pub fn sheetToCsv(allocator: std.mem.Allocator, sheet: *const Sheet) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);

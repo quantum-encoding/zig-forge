@@ -20,14 +20,30 @@ const builtin = @import("builtin");
 const libc = std.c;
 const Io = std.Io;
 
-// Cross-platform Stat structure
+// Cross-platform Stat structure.
+// NOTE: struct stat layout differs per (OS, arch); the hand-rolled layouts
+// below are gated per-arch. Anything unlisted falls back to std.c.Stat.
 const Stat = switch (builtin.os.tag) {
-    .linux => extern struct {
-        dev: u64, ino: u64, nlink: u64, mode: u32, uid: u32, gid: u32,
-        __pad0: u32 = 0, rdev: u64, size: i64, blksize: i64, blocks: i64,
-        atim: libc.timespec, mtim: libc.timespec, ctim: libc.timespec,
-        __unused: [3]i64 = .{ 0, 0, 0 },
-        pub fn mtime(self: @This()) libc.timespec { return self.mtim; }
+    .linux => switch (builtin.cpu.arch) {
+        // x86_64 glibc layout
+        .x86_64 => extern struct {
+            dev: u64, ino: u64, nlink: u64, mode: u32, uid: u32, gid: u32,
+            __pad0: u32 = 0, rdev: u64, size: i64, blksize: i64, blocks: i64,
+            atim: libc.timespec, mtim: libc.timespec, ctim: libc.timespec,
+            __unused: [3]i64 = .{ 0, 0, 0 },
+            pub fn mtime(self: @This()) libc.timespec { return self.mtim; }
+        },
+        // aarch64 glibc layout (generic asm-generic stat): st_nlink is u32 and
+        // sits AFTER st_mode; padding differs from x86_64.
+        .aarch64 => extern struct {
+            dev: u64, ino: u64, mode: u32, nlink: u32, uid: u32, gid: u32,
+            rdev: u64, __pad1: u64 = 0, size: i64, blksize: i32, __pad2: i32 = 0,
+            blocks: i64,
+            atim: libc.timespec, mtim: libc.timespec, ctim: libc.timespec,
+            __unused: [2]u32 = .{ 0, 0 },
+            pub fn mtime(self: @This()) libc.timespec { return self.mtim; }
+        },
+        else => libc.Stat,
     },
     .macos, .ios, .tvos, .watchos => extern struct {
         dev: i32, mode: u16, nlink: u16, ino: u64, uid: u32, gid: u32, rdev: i32,
@@ -64,7 +80,7 @@ const ColorMode = enum { never, auto, always };
 
 const SortMode = enum { name, size, time, none, extension };
 
-const TimeStyle = enum { default, long_iso, full_iso, iso };
+const TimeStyle = enum { default, long_iso, full_iso, iso, custom };
 
 const Config = struct {
     one_per_line: bool = false,
@@ -89,6 +105,10 @@ const Config = struct {
     comma_separated: bool = false, // -m: comma-separated output
     sort_across: bool = false, // -x: sort across rows instead of down columns
     group_directories_first: bool = false, // --group-directories-first
+    // -q / --hide-control-chars: null = auto (on when stdout is a tty),
+    // matching GNU ls's default of hiding control characters on terminals.
+    hide_control_chars: ?bool = null,
+    time_format: ?[]const u8 = null, // --time-style=+FORMAT (strftime)
     paths: std.ArrayListUnmanaged([]const u8) = .empty,
 
     fn deinit(self: *Config, allocator: std.mem.Allocator) void {
@@ -96,6 +116,7 @@ const Config = struct {
             allocator.free(item);
         }
         self.paths.deinit(allocator);
+        if (self.time_format) |tf| allocator.free(tf);
     }
 
     fn useColors(self: *const Config) bool {
@@ -105,12 +126,20 @@ const Config = struct {
             .auto => isatty(1) != 0,
         };
     }
+
+    /// GNU ls hides control characters (prints '?') when stdout is a tty
+    /// unless overridden; this prevents terminal escape injection from
+    /// hostile filenames.
+    fn hideControls(self: *const Config) bool {
+        return self.hide_control_chars orelse (isatty(1) != 0);
+    }
 };
 
 extern "c" fn isatty(fd: c_int) c_int;
 
 const FileEntry = struct {
-    name: []const u8,
+    // NUL-terminated so strcoll can use it directly (no per-comparison copy).
+    name: [:0]const u8,
     name_owned: bool,
     mode: u32,
     nlink: u32,
@@ -119,9 +148,18 @@ const FileEntry = struct {
     size: u64,
     blocks: i64,
     mtime: i64,
+    mtime_nsec: i64,
     inode: u64,
     is_link: bool,
     link_target: ?[]const u8,
+    // Mode of the symlink's resolved target (populated only when needed for
+    // -lF, where GNU classifies the TARGET, not the link name).
+    target_mode: ?u32 = null,
+    // Symlink resolves to a directory (GNU groups such links with the
+    // directories under --group-directories-first).
+    resolves_dir: bool = false,
+    // lstat failed for this entry: metadata fields are zero/unknown.
+    stat_failed: bool = false,
 
     fn deinit(self: *FileEntry, allocator: std.mem.Allocator) void {
         if (self.name_owned) {
@@ -176,14 +214,19 @@ const FileEntry = struct {
     }
 
     fn getIndicator(self: *const FileEntry) u8 {
-        if (self.isDir()) return '/';
-        if (self.isSymlink()) return '@';
-        if (self.isExecutable()) return '*';
-        if (self.isPipe()) return '|';
-        if (self.isSocket()) return '=';
-        return 0;
+        return modeIndicator(self.mode);
     }
 };
+
+fn modeIndicator(mode: u32) u8 {
+    const fmt = mode & 0o170000;
+    if (fmt == 0o40000) return '/';
+    if (fmt == 0o120000) return '@';
+    if ((mode & 0o111) != 0 and fmt == 0o100000) return '*';
+    if (fmt == 0o10000) return '|';
+    if (fmt == 0o140000) return '=';
+    return 0;
+}
 
 // Custom structs for libc functions (workaround for Zig std lib layout issues)
 const CPasswd = extern struct {
@@ -230,6 +273,7 @@ fn formatSize(size: u64, human: bool, buf: []u8) []const u8 {
         return std.fmt.bufPrint(buf, "{d}", .{size}) catch "?";
     }
 
+    // GNU ls -h rounds UP (human_ceiling): 10444 bytes -> "11K", not "10K".
     const units = [_][]const u8{ "", "K", "M", "G", "T", "P" };
     var s: f64 = @floatFromInt(size);
     var unit_idx: usize = 0;
@@ -241,10 +285,20 @@ fn formatSize(size: u64, human: bool, buf: []u8) []const u8 {
 
     if (unit_idx == 0) {
         return std.fmt.bufPrint(buf, "{d}", .{size}) catch "?";
-    } else if (s < 10) {
-        return std.fmt.bufPrint(buf, "{d:.1}{s}", .{ s, units[unit_idx] }) catch "?";
+    }
+
+    // Round up to one decimal; if that pushes us to >= 1024, bump the unit.
+    var scaled = @ceil(s * 10) / 10;
+    if (scaled >= 1024 and unit_idx < units.len - 1) {
+        s /= 1024;
+        unit_idx += 1;
+        scaled = @ceil(s * 10) / 10;
+    }
+
+    if (scaled < 10) {
+        return std.fmt.bufPrint(buf, "{d:.1}{s}", .{ scaled, units[unit_idx] }) catch "?";
     } else {
-        return std.fmt.bufPrint(buf, "{d:.0}{s}", .{ s, units[unit_idx] }) catch "?";
+        return std.fmt.bufPrint(buf, "{d:.0}{s}", .{ @ceil(s), units[unit_idx] }) catch "?";
     }
 }
 
@@ -296,9 +350,10 @@ const CTm = extern struct {
 };
 
 extern "c" fn localtime_r(timer: *const i64, result: *CTm) ?*CTm;
+extern "c" fn strftime(buf: [*]u8, maxsize: usize, format: [*:0]const u8, tm: *const CTm) usize;
 
-fn formatTime(mtime: i64, buf: []u8, time_style: TimeStyle) []const u8 {
-    const secs_per_day: i64 = 86400;
+fn formatTime(mtime: i64, mtime_nsec: i64, buf: []u8, config: *const Config) []const u8 {
+    const time_style = config.time_style;
 
     // Get current time to decide format
     var now_ts: libc.timespec = undefined;
@@ -307,12 +362,17 @@ fn formatTime(mtime: i64, buf: []u8, time_style: TimeStyle) []const u8 {
 
     const months = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
 
-    // Use localtime_r for proper timezone handling
+    // Use localtime_r for proper timezone handling. On failure (extreme or
+    // hostile mtime values) fall back to printing the raw epoch seconds
+    // instead of reading an uninitialized struct.
     var tm: CTm = undefined;
-    _ = localtime_r(&mtime, &tm);
+    if (localtime_r(&mtime, &tm) == null) {
+        return std.fmt.bufPrint(buf, "{d}", .{mtime}) catch "?";
+    }
 
     const day = tm.tm_mday;
-    const month: usize = @intCast(tm.tm_mon);
+    // Clamp: never index months[] with out-of-range libc output.
+    const month: usize = @intCast(std.math.clamp(tm.tm_mon, 0, 11));
     const year = tm.tm_year + 1900;
     const hours = tm.tm_hour;
     const mins = tm.tm_min;
@@ -330,31 +390,51 @@ fn formatTime(mtime: i64, buf: []u8, time_style: TimeStyle) []const u8 {
             }) catch "?";
         },
         .full_iso => {
-            // YYYY-MM-DD HH:MM:SS.NNNNNNNNN +ZZZZ
+            // YYYY-MM-DD HH:MM:SS.NNNNNNNNN +ZZZZ (GNU full-iso includes
+            // nanoseconds and the UTC offset)
             const mon: u32 = @intCast(month + 1);
             const d: u32 = @intCast(day);
             const h: u32 = @intCast(hours);
             const m: u32 = @intCast(mins);
             const s: u32 = @intCast(secs);
-            return std.fmt.bufPrint(buf, "{d}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}.000000000", .{
-                year, mon, d, h, m, s,
+            const nsec: u32 = @intCast(std.math.clamp(mtime_nsec, 0, 999_999_999));
+            const off_min = @divTrunc(tm.tm_gmtoff, 60);
+            const off_sign: u8 = if (off_min < 0) '-' else '+';
+            const off_abs: u32 = @intCast(@abs(off_min));
+            return std.fmt.bufPrint(buf, "{d}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}.{d:0>9} {c}{d:0>2}{d:0>2}", .{
+                year, mon, d, h, m, s, nsec, off_sign, off_abs / 60, off_abs % 60,
             }) catch "?";
+        },
+        .custom => {
+            // --time-style=+FORMAT via libc strftime
+            const fmt = config.time_format orelse return "?";
+            var fmt_buf: [256]u8 = undefined;
+            if (fmt.len >= fmt_buf.len) return "?";
+            @memcpy(fmt_buf[0..fmt.len], fmt);
+            fmt_buf[fmt.len] = 0;
+            const n = strftime(buf.ptr, buf.len, fmt_buf[0..fmt.len :0], &tm);
+            if (n == 0 and fmt.len != 0) return "?";
+            return buf[0..n];
         },
         .iso => {
             // MM-DD HH:MM or YYYY-MM-DD
-            const six_months_ago = now - (180 * secs_per_day);
+            // GNU: half a Gregorian year (31556952/2 seconds)
+            const six_months_ago = now - 15778476;
             const mon: u32 = @intCast(month + 1);
             const d: u32 = @intCast(day);
             const h: u32 = @intCast(hours);
             const m: u32 = @intCast(mins);
             if (mtime < six_months_ago or mtime > now) {
-                return std.fmt.bufPrint(buf, "{d}-{d:0>2}-{d:0>2}", .{ year, mon, d }) catch "?";
+                // GNU's iso old-file format is "%Y-%m-%d " — note the
+                // trailing blank that keeps the column 11 wide.
+                return std.fmt.bufPrint(buf, "{d}-{d:0>2}-{d:0>2} ", .{ year, mon, d }) catch "?";
             } else {
                 return std.fmt.bufPrint(buf, "{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}", .{ mon, d, h, m }) catch "?";
             }
         },
         .default => {
-            const six_months_ago = now - (180 * secs_per_day);
+            // GNU: half a Gregorian year (31556952/2 seconds)
+            const six_months_ago = now - 15778476;
 
             // Manual padding to avoid Zig 0.16 format issues
             const day_pad: []const u8 = if (day < 10) " " else "";
@@ -372,6 +452,39 @@ fn formatTime(mtime: i64, buf: []u8, time_style: TimeStyle) []const u8 {
     }
 }
 
+extern "c" fn strerror(errnum: c_int) [*:0]const u8;
+
+fn errnoText() []const u8 {
+    return std.mem.span(strerror(std.c._errno().*));
+}
+
+// GNU ls exit status: 1 = minor problems (e.g. cannot access a subdirectory
+// or a directory entry), 2 = serious trouble (cannot access a command-line
+// argument, invalid option). Single-threaded program: plain globals.
+var exit_minor: bool = false;
+var exit_serious: bool = false;
+
+/// Build a FileEntry from a stat buffer, with saturating casts so hostile
+/// filesystem values (negative st_size, huge nlink) cannot panic or wrap.
+fn entryFromStat(name: [:0]const u8, name_owned: bool, stat_buf: *const Stat) FileEntry {
+    const mtime = stat_buf.mtime();
+    return .{
+        .name = name,
+        .name_owned = name_owned,
+        .mode = stat_buf.mode,
+        .nlink = std.math.lossyCast(u32, stat_buf.nlink),
+        .uid = stat_buf.uid,
+        .gid = stat_buf.gid,
+        .size = @intCast(@max(0, stat_buf.size)),
+        .blocks = stat_buf.blocks,
+        .mtime = mtime.sec,
+        .mtime_nsec = mtime.nsec,
+        .inode = stat_buf.ino,
+        .is_link = (stat_buf.mode & 0o170000) == 0o120000,
+        .link_target = null,
+    };
+}
+
 fn readDirEntries(allocator: std.mem.Allocator, path: []const u8, config: *const Config) !std.ArrayListUnmanaged(FileEntry) {
     var entries: std.ArrayListUnmanaged(FileEntry) = .empty;
     errdefer {
@@ -383,6 +496,7 @@ fn readDirEntries(allocator: std.mem.Allocator, path: []const u8, config: *const
     defer allocator.free(path_z);
 
     const dir = libc.opendir(path_z.ptr) orelse {
+        std.debug.print("zls: cannot open directory '{s}': {s}\n", .{ path, errnoText() });
         return error.CannotOpenDirectory;
     };
     defer _ = libc.closedir(dir);
@@ -402,38 +516,60 @@ fn readDirEntries(allocator: std.mem.Allocator, path: []const u8, config: *const
         }
 
         // Get file stats
-        const full_path_slice = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ path, name });
-        defer allocator.free(full_path_slice);
-        const full_path = try allocator.dupeZ(u8, full_path_slice);
+        const full_path = try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ path, name }, 0);
         defer allocator.free(full_path);
 
         var stat_buf: Stat = undefined;
         const stat_result = lstat(full_path.ptr, &stat_buf);
 
-        if (stat_result != 0) continue;
-
-        const mtime = stat_buf.mtime();
-        var file_entry = FileEntry{
-            .name = try allocator.dupe(u8, name),
-            .name_owned = true,
-            .mode = stat_buf.mode,
-            .nlink = @intCast(stat_buf.nlink),
-            .uid = stat_buf.uid,
-            .gid = stat_buf.gid,
-            .size = @intCast(stat_buf.size),
-            .blocks = stat_buf.blocks,
-            .mtime = mtime.sec,
-            .inode = stat_buf.ino,
-            .is_link = (stat_buf.mode & 0o170000) == 0o120000,
-            .link_target = null,
+        const owned_name = try allocator.dupeZ(u8, name);
+        var file_entry: FileEntry = if (stat_result == 0)
+            entryFromStat(owned_name, true, &stat_buf)
+        else blk: {
+            // GNU still lists the entry (with unknown metadata) and warns.
+            std.debug.print("zls: cannot access '{s}': {s}\n", .{ full_path, errnoText() });
+            exit_minor = true;
+            break :blk .{
+                .name = owned_name,
+                .name_owned = true,
+                .mode = 0,
+                .nlink = 0,
+                .uid = 0,
+                .gid = 0,
+                .size = 0,
+                .blocks = 0,
+                .mtime = 0,
+                .mtime_nsec = 0,
+                .inode = 0,
+                .is_link = false,
+                .link_target = null,
+                .stat_failed = true,
+            };
         };
+        errdefer file_entry.deinit(allocator);
 
         // Read symlink target
         if (file_entry.is_link) {
             var link_buf: [4096]u8 = undefined;
             const link_len = libc.readlink(full_path.ptr, &link_buf, link_buf.len);
             if (link_len > 0) {
-                file_entry.link_target = try allocator.dupe(u8, link_buf[0..@intCast(link_len)]);
+                if (@as(usize, @intCast(link_len)) == link_buf.len) {
+                    // Truncated target: warn rather than print a wrong target.
+                    std.debug.print("zls: cannot read symbolic link '{s}': name too long\n", .{full_path});
+                    exit_minor = true;
+                } else {
+                    file_entry.link_target = try allocator.dupe(u8, link_buf[0..@intCast(link_len)]);
+                }
+            }
+            // -lF classifies the resolved target, and
+            // --group-directories-first groups dir-targeting symlinks with
+            // the directories; only stat when needed.
+            if ((config.show_indicators and config.long_format) or config.group_directories_first) {
+                var target_stat: Stat = undefined;
+                if (stat(full_path.ptr, &target_stat) == 0) {
+                    file_entry.target_mode = target_stat.mode;
+                    file_entry.resolves_dir = (target_stat.mode & 0o170000) == 0o40000;
+                }
             }
         }
 
@@ -459,73 +595,78 @@ fn getExtension(name: []const u8) []const u8 {
 extern "c" fn strcoll(s1: [*:0]const u8, s2: [*:0]const u8) c_int;
 extern "c" fn setlocale(category: c_int, locale: ?[*:0]const u8) ?[*:0]const u8;
 
-fn nameCmp(a_name: []const u8, b_name: []const u8) bool {
-    // Use strcoll for locale-aware comparison matching GNU ls behavior.
-    // We need null-terminated strings. Since FileEntry names come from readdir
-    // and are duped, we can construct them on stack for small names.
-    var a_buf: [4096]u8 = undefined;
-    var b_buf: [4096]u8 = undefined;
-    if (a_name.len < a_buf.len and b_name.len < b_buf.len) {
-        @memcpy(a_buf[0..a_name.len], a_name);
-        a_buf[a_name.len] = 0;
-        @memcpy(b_buf[0..b_name.len], b_name);
-        b_buf[b_name.len] = 0;
-        const result = strcoll(@ptrCast(a_buf[0..a_name.len :0]), @ptrCast(b_buf[0..b_name.len :0]));
-        if (result != 0) return result < 0;
-    }
-    // Fallback: byte comparison
-    return std.mem.order(u8, a_name, b_name) == .lt;
+/// True when the active locale is the POSIX/C locale (approximates GNU's
+/// hard_locale(LC_TIME) check used for posix-* time styles).
+fn localeIsPosix() bool {
+    const cur = setlocale(LC_ALL, null) orelse return true;
+    const s = std.mem.span(cur);
+    return std.mem.eql(u8, s, "C") or std.mem.eql(u8, s, "POSIX");
 }
 
+fn nameCmp(a_name: [:0]const u8, b_name: [:0]const u8) bool {
+    // Locale-aware comparison matching GNU ls (xstrcoll). Names are stored
+    // NUL-terminated in FileEntry, so no per-comparison copy is needed.
+    return strcoll(a_name.ptr, b_name.ptr) < 0;
+}
+
+// Sorting matches GNU coreutils ls.c:
+// - -r swaps the comparator's OPERANDS (GNU's rev_* comparators call
+//   compare(b, a)); it never negates the result. Negating `!lessThan(a,b)`
+//   makes lessThan(a,b) and lessThan(b,a) both true for equal keys, which
+//   violates strict weak ordering and aborts std.sort (`zls -ltr` panic).
+// - -t / -S tie-break on the collated name (GNU cmp_mtime/cmp_size fall
+//   back to the name comparator).
+// - --group-directories-first applies OUTSIDE the reversal (GNU's *_df
+//   wrappers), so directories stay first even under -r.
 fn sortEntries(entries: []FileEntry, config: *const Config) void {
-    const lessThan = struct {
-        fn dirFirst(ctx: *const Config, a: FileEntry, b: FileEntry, inner_result: bool) bool {
-            if (ctx.group_directories_first) {
-                const a_dir = a.isDir();
-                const b_dir = b.isDir();
-                if (a_dir and !b_dir) return true;
-                if (!a_dir and b_dir) return false;
+    const cmp = struct {
+        fn keyLess(ctx: *const Config, a: *const FileEntry, b: *const FileEntry) bool {
+            switch (ctx.sort_mode) {
+                .name => return nameCmp(a.name, b.name),
+                .size => {
+                    if (a.size != b.size) return a.size > b.size; // largest first
+                    return nameCmp(a.name, b.name);
+                },
+                .time => {
+                    if (a.mtime != b.mtime) return a.mtime > b.mtime; // newest first
+                    if (a.mtime_nsec != b.mtime_nsec) return a.mtime_nsec > b.mtime_nsec;
+                    return nameCmp(a.name, b.name);
+                },
+                .extension => {
+                    const order = std.mem.order(u8, getExtension(a.name), getExtension(b.name));
+                    if (order != .eq) return order == .lt;
+                    return nameCmp(a.name, b.name);
+                },
+                .none => unreachable,
             }
-            return inner_result;
         }
 
-        fn byName(ctx: *const Config, a: FileEntry, b: FileEntry) bool {
-            const result = nameCmp(a.name, b.name);
-            const final = if (ctx.reverse_sort) !result else result;
-            return dirFirst(ctx, a, b, final);
-        }
-
-        fn bySize(ctx: *const Config, a: FileEntry, b: FileEntry) bool {
-            const result = a.size > b.size; // Largest first
-            const final = if (ctx.reverse_sort) !result else result;
-            return dirFirst(ctx, a, b, final);
-        }
-
-        fn byTime(ctx: *const Config, a: FileEntry, b: FileEntry) bool {
-            const result = a.mtime > b.mtime; // Newest first
-            const final = if (ctx.reverse_sort) !result else result;
-            return dirFirst(ctx, a, b, final);
-        }
-
-        fn byExtension(ctx: *const Config, a: FileEntry, b: FileEntry) bool {
-            const ext_a = getExtension(a.name);
-            const ext_b = getExtension(b.name);
-            const cmp = std.mem.order(u8, ext_a, ext_b);
-            const result = if (cmp == .eq)
-                nameCmp(a.name, b.name)
-            else
-                cmp == .lt;
-            const final = if (ctx.reverse_sort) !result else result;
-            return dirFirst(ctx, a, b, final);
+        fn lessThan(ctx: *const Config, a: FileEntry, b: FileEntry) bool {
+            if (ctx.group_directories_first) {
+                const a_dir = a.isDir() or a.resolves_dir;
+                const b_dir = b.isDir() or b.resolves_dir;
+                if (a_dir != b_dir) return a_dir;
+            }
+            if (ctx.reverse_sort) return keyLess(ctx, &b, &a);
+            return keyLess(ctx, &a, &b);
         }
     };
 
-    switch (config.sort_mode) {
-        .name => std.mem.sort(FileEntry, entries, config, lessThan.byName),
-        .size => std.mem.sort(FileEntry, entries, config, lessThan.bySize),
-        .time => std.mem.sort(FileEntry, entries, config, lessThan.byTime),
-        .extension => std.mem.sort(FileEntry, entries, config, lessThan.byExtension),
-        .none => {},
+    if (config.sort_mode == .none) return;
+    std.mem.sort(FileEntry, entries, config, cmp.lessThan);
+}
+
+/// Write a file name, replacing control characters with '?' when the config
+/// says to hide them (GNU -q, on by default when stdout is a tty). Prevents
+/// terminal escape injection / fake-listing-line spoofing from hostile names.
+fn writeName(writer: anytype, name: []const u8, config: *const Config) void {
+    if (!config.hideControls()) {
+        writer.interface.writeAll(name) catch {};
+        return;
+    }
+    for (name) |c| {
+        const out: u8 = if (c < 0x20 or c == 0x7f) '?' else c;
+        writer.interface.writeByte(out) catch {};
     }
 }
 
@@ -534,7 +675,6 @@ fn printLongFormat(writer: anytype, entries: []const FileEntry, config: *const C
 
     // Calculate column widths
     var max_nlink: u32 = 0;
-    var max_size: u64 = 0;
     var max_user_len: usize = 0;
     var max_group_len: usize = 0;
     var max_inode: u64 = 0;
@@ -544,7 +684,6 @@ fn printLongFormat(writer: anytype, entries: []const FileEntry, config: *const C
 
     for (entries) |entry| {
         if (entry.nlink > max_nlink) max_nlink = entry.nlink;
-        if (entry.size > max_size) max_size = entry.size;
         if (entry.inode > max_inode) max_inode = entry.inode;
 
         if (config.numeric_ids) {
@@ -567,10 +706,14 @@ fn printLongFormat(writer: anytype, entries: []const FileEntry, config: *const C
         }
     }
 
-    // Calculate width for size column
-    var size_buf: [32]u8 = undefined;
-    const max_size_str = formatSize(max_size, config.human_readable, &size_buf);
-    const size_width = max_size_str.len;
+    // Calculate width for size column: widest FORMATTED size (with -h the
+    // largest size does not always format widest, e.g. "999" vs "1.0K").
+    var size_width: usize = 0;
+    for (entries) |entry| {
+        var size_buf: [32]u8 = undefined;
+        const s = formatSize(entry.size, config.human_readable, &size_buf);
+        if (s.len > size_width) size_width = s.len;
+    }
 
     // Calculate widths for numeric columns
     const nlink_width = std.fmt.count("{d}", .{max_nlink});
@@ -583,11 +726,11 @@ fn printLongFormat(writer: anytype, entries: []const FileEntry, config: *const C
     for (entries) |entry| {
         var mode_buf: [11]u8 = undefined;
         var sz_buf: [32]u8 = undefined;
-        var time_buf: [32]u8 = undefined;
+        var time_buf: [128]u8 = undefined;
 
         const mode_str = formatMode(entry.mode, &mode_buf);
         const size_str = formatSize(entry.size, config.human_readable, &sz_buf);
-        const time_str = formatTime(entry.mtime, &time_buf, config.time_style);
+        const time_str = formatTime(entry.mtime, entry.mtime_nsec, &time_buf, config);
 
         // Print inode if requested
         if (config.show_inode) {
@@ -676,19 +819,24 @@ fn printLongFormat(writer: anytype, entries: []const FileEntry, config: *const C
         if (use_colors) {
             const color = entry.getColor();
             if (color.len > 0) {
-                writer.interface.print("{s}{s}{s}", .{ color, entry.name, Color.reset }) catch {};
+                writer.interface.writeAll(color) catch {};
+                writeName(writer, entry.name, config);
+                writer.interface.writeAll(Color.reset) catch {};
             } else {
-                writer.interface.writeAll(entry.name) catch {};
+                writeName(writer, entry.name, config);
             }
         } else {
-            writer.interface.writeAll(entry.name) catch {};
+            writeName(writer, entry.name, config);
         }
 
-        // Print indicator (-F or -p)
+        // Print indicator (-F or -p). GNU long format never marks the link
+        // NAME with '@'; with -F the indicator classifies the TARGET.
         if (config.show_indicators) {
-            const indicator = entry.getIndicator();
-            if (indicator != 0) {
-                writer.interface.print("{c}", .{indicator}) catch {};
+            if (!entry.is_link) {
+                const indicator = entry.getIndicator();
+                if (indicator != 0) {
+                    writer.interface.print("{c}", .{indicator}) catch {};
+                }
             }
         } else if (config.show_dir_indicator) {
             if (entry.isDir()) {
@@ -699,7 +847,14 @@ fn printLongFormat(writer: anytype, entries: []const FileEntry, config: *const C
         // Print symlink target
         if (entry.is_link) {
             if (entry.link_target) |target| {
-                writer.interface.print(" -> {s}", .{target}) catch {};
+                writer.interface.writeAll(" -> ") catch {};
+                writeName(writer, target, config);
+                if (config.show_indicators) {
+                    if (entry.target_mode) |tm| {
+                        const ti = modeIndicator(tm);
+                        if (ti != 0) writer.interface.print("{c}", .{ti}) catch {};
+                    }
+                }
             }
         }
 
@@ -739,7 +894,7 @@ fn printColumnFormat(writer: anytype, entries: []const FileEntry, config: *const
     if (config.sort_across) {
         // -x: fill across rows (left-to-right, top-to-bottom)
         var col: usize = 0;
-        for (entries) |entry| {
+        for (entries, 0..) |entry, idx| {
             var printed_len: usize = 0;
 
             if (config.show_inode) {
@@ -767,7 +922,8 @@ fn printColumnFormat(writer: anytype, entries: []const FileEntry, config: *const
             if (col >= num_cols) {
                 writer.interface.writeAll("\n") catch {};
                 col = 0;
-            } else {
+            } else if (idx + 1 < entries.len) {
+                // No trailing padding after the final entry (GNU emits none)
                 if (col_width > printed_len) {
                     const padding = col_width - printed_len;
                     for (0..padding) |_| {
@@ -828,16 +984,17 @@ fn printColumnFormat(writer: anytype, entries: []const FileEntry, config: *const
 }
 
 fn printEntryName(writer: anytype, entry: FileEntry, use_colors: bool, config: *const Config) void {
-    _ = config;
     if (use_colors) {
         const color = entry.getColor();
         if (color.len > 0) {
-            writer.interface.print("{s}{s}{s}", .{ color, entry.name, Color.reset }) catch {};
+            writer.interface.writeAll(color) catch {};
+            writeName(writer, entry.name, config);
+            writer.interface.writeAll(Color.reset) catch {};
         } else {
-            writer.interface.writeAll(entry.name) catch {};
+            writeName(writer, entry.name, config);
         }
     } else {
-        writer.interface.writeAll(entry.name) catch {};
+        writeName(writer, entry.name, config);
     }
 }
 
@@ -888,28 +1045,10 @@ fn printOnePerLine(writer: anytype, entries: []const FileEntry, config: *const C
         }
 
         // Print name with color
-        if (use_colors) {
-            const color = entry.getColor();
-            if (color.len > 0) {
-                writer.interface.print("{s}{s}{s}", .{ color, entry.name, Color.reset }) catch {};
-            } else {
-                writer.interface.writeAll(entry.name) catch {};
-            }
-        } else {
-            writer.interface.writeAll(entry.name) catch {};
-        }
+        printEntryName(writer, entry, use_colors, config);
 
         // Print indicator (-F or -p)
-        if (config.show_indicators) {
-            const indicator = entry.getIndicator();
-            if (indicator != 0) {
-                writer.interface.print("{c}", .{indicator}) catch {};
-            }
-        } else if (config.show_dir_indicator) {
-            if (entry.isDir()) {
-                writer.interface.writeAll("/") catch {};
-            }
-        }
+        _ = printEntryIndicator(writer, entry, config);
 
         writer.interface.writeAll("\n") catch {};
     }
@@ -950,70 +1089,26 @@ fn printCommaSeparated(writer: anytype, entries: []const FileEntry, config: *con
     }
 }
 
-fn listPath(allocator: std.mem.Allocator, writer: anytype, path: []const u8, config: *const Config, print_header: bool) !void {
-    // Check if path is a file or directory
-    const path_z = try allocator.dupeZ(u8, path);
-    defer allocator.free(path_z);
-
-    var stat_buf: Stat = undefined;
-    const stat_result = lstat(path_z.ptr, &stat_buf);
-
-    if (stat_result != 0) {
-        std.debug.print("zls: cannot access '{s}': No such file or directory\n", .{path});
-        return error.FileNotFound;
+fn printEntries(writer: anytype, entries: []const FileEntry, config: *const Config) void {
+    if (config.long_format) {
+        printLongFormat(writer, entries, config);
+    } else if (config.comma_separated) {
+        printCommaSeparated(writer, entries, config);
+    } else if (config.one_per_line) {
+        printOnePerLine(writer, entries, config);
+    } else {
+        printColumnFormat(writer, entries, config);
     }
+}
 
-    const is_dir = (stat_buf.mode & 0o170000) == 0o40000;
-    const entry_mtime = stat_buf.mtime();
-
-    if (!is_dir or config.directory_only) {
-        // Single file - just print it
-        var entry = FileEntry{
-            .name = path,
-            .name_owned = false,
-            .mode = stat_buf.mode,
-            .nlink = @intCast(stat_buf.nlink),
-            .uid = stat_buf.uid,
-            .gid = stat_buf.gid,
-            .size = @intCast(stat_buf.size),
-            .blocks = stat_buf.blocks,
-            .mtime = entry_mtime.sec,
-            .inode = stat_buf.ino,
-            .is_link = (stat_buf.mode & 0o170000) == 0o120000,
-            .link_target = null,
-        };
-
-        if (entry.is_link) {
-            var link_buf: [4096]u8 = undefined;
-            const link_len = libc.readlink(path_z.ptr, &link_buf, link_buf.len);
-            if (link_len > 0) {
-                entry.link_target = try allocator.dupe(u8, link_buf[0..@intCast(link_len)]);
-            }
-        }
-        defer if (entry.link_target) |t| allocator.free(t);
-
-        var entries = [_]FileEntry{entry};
-        if (config.long_format) {
-            printLongFormat(writer, &entries, config);
-        } else if (config.comma_separated) {
-            printCommaSeparated(writer, &entries, config);
-        } else if (config.one_per_line) {
-            printOnePerLine(writer, &entries, config);
-        } else {
-            printColumnFormat(writer, &entries, config);
-        }
-        return;
-    }
-
-    // Directory listing
+fn listDirectory(allocator: std.mem.Allocator, writer: anytype, path: []const u8, config: *const Config, print_header: bool) !void {
     if (print_header) {
-        writer.interface.print("{s}:\n", .{path}) catch {};
+        writeName(writer, path, config);
+        writer.interface.writeAll(":\n") catch {};
     }
 
-    var entries = readDirEntries(allocator, path, config) catch |err| {
-        std.debug.print("zls: cannot open directory '{s}': {s}\n", .{ path, @errorName(err) });
-        return err;
-    };
+    // readDirEntries prints the strerror-based diagnostic itself.
+    var entries = try readDirEntries(allocator, path, config);
     defer {
         for (entries.items) |*e| e.deinit(allocator);
         entries.deinit(allocator);
@@ -1021,26 +1116,26 @@ fn listPath(allocator: std.mem.Allocator, writer: anytype, path: []const u8, con
 
     sortEntries(entries.items, config);
 
-    // Print "total" line for long format or -s
+    // Print "total" line for long format or -s. GNU converts the 512-byte
+    // block sum through the active size formatting (-h => "total 12K").
     if (config.long_format or config.show_size) {
         var total_blocks: i64 = 0;
         for (entries.items) |e| {
             total_blocks += e.blocks;
         }
-        writer.interface.print("total {d}\n", .{@divTrunc(total_blocks, 2)}) catch {};
+        if (config.human_readable) {
+            var tbuf: [32]u8 = undefined;
+            const bytes: u64 = @intCast(@max(0, total_blocks) * 512);
+            writer.interface.print("total {s}\n", .{formatSize(bytes, true, &tbuf)}) catch {};
+        } else {
+            writer.interface.print("total {d}\n", .{@divTrunc(@max(0, total_blocks), 2)}) catch {};
+        }
     }
 
-    if (config.long_format) {
-        printLongFormat(writer, entries.items, config);
-    } else if (config.comma_separated) {
-        printCommaSeparated(writer, entries.items, config);
-    } else if (config.one_per_line) {
-        printOnePerLine(writer, entries.items, config);
-    } else {
-        printColumnFormat(writer, entries.items, config);
-    }
+    printEntries(writer, entries.items, config);
 
-    // Recursive listing
+    // Recursive listing: failures below the command line are "minor" (GNU
+    // exits 1 for these, 2 only for command-line operands).
     if (config.recursive) {
         for (entries.items) |entry| {
             if (entry.isDir() and !std.mem.eql(u8, entry.name, ".") and !std.mem.eql(u8, entry.name, "..")) {
@@ -1048,7 +1143,9 @@ fn listPath(allocator: std.mem.Allocator, writer: anytype, path: []const u8, con
                 defer allocator.free(subpath);
 
                 writer.interface.writeAll("\n") catch {};
-                listPath(allocator, writer, subpath, config, true) catch {};
+                listDirectory(allocator, writer, subpath, config, true) catch {
+                    exit_minor = true;
+                };
             }
         }
     }
@@ -1079,22 +1176,91 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                 } else if (std.mem.eql(u8, arg, "--version")) {
                     printVersion();
                     std.process.exit(0);
-                } else if (std.mem.eql(u8, arg, "--color") or std.mem.eql(u8, arg, "--color=always")) {
+                } else if (std.mem.eql(u8, arg, "--all")) {
+                    config.show_all = true;
+                } else if (std.mem.eql(u8, arg, "--almost-all")) {
+                    config.show_almost_all = true;
+                } else if (std.mem.eql(u8, arg, "--reverse")) {
+                    config.reverse_sort = true;
+                } else if (std.mem.eql(u8, arg, "--recursive")) {
+                    config.recursive = true;
+                } else if (std.mem.eql(u8, arg, "--human-readable")) {
+                    config.human_readable = true;
+                } else if (std.mem.eql(u8, arg, "--inode")) {
+                    config.show_inode = true;
+                } else if (std.mem.eql(u8, arg, "--directory")) {
+                    config.directory_only = true;
+                } else if (std.mem.eql(u8, arg, "--classify")) {
+                    config.show_indicators = true;
+                } else if (std.mem.eql(u8, arg, "--size")) {
+                    config.show_size = true;
+                } else if (std.mem.eql(u8, arg, "--hide-control-chars")) {
+                    config.hide_control_chars = true;
+                } else if (std.mem.eql(u8, arg, "--show-control-chars")) {
+                    config.hide_control_chars = false;
+                } else if (std.mem.eql(u8, arg, "--color")) {
                     config.color_mode = .always;
-                } else if (std.mem.eql(u8, arg, "--color=never")) {
-                    config.color_mode = .never;
-                } else if (std.mem.eql(u8, arg, "--color=auto")) {
-                    config.color_mode = .auto;
                 } else if (std.mem.startsWith(u8, arg, "--color=")) {
-                    config.color_mode = .always;
-                } else if (std.mem.eql(u8, arg, "--time-style=long-iso")) {
-                    config.time_style = .long_iso;
-                } else if (std.mem.eql(u8, arg, "--time-style=full-iso")) {
-                    config.time_style = .full_iso;
-                } else if (std.mem.eql(u8, arg, "--time-style=iso")) {
-                    config.time_style = .iso;
+                    const val = arg["--color=".len..];
+                    // GNU when_args: always/yes/force, never/no/none, auto/tty/if-tty
+                    if (std.mem.eql(u8, val, "always") or std.mem.eql(u8, val, "yes") or std.mem.eql(u8, val, "force")) {
+                        config.color_mode = .always;
+                    } else if (std.mem.eql(u8, val, "never") or std.mem.eql(u8, val, "no") or std.mem.eql(u8, val, "none")) {
+                        config.color_mode = .never;
+                    } else if (std.mem.eql(u8, val, "auto") or std.mem.eql(u8, val, "tty") or std.mem.eql(u8, val, "if-tty")) {
+                        config.color_mode = .auto;
+                    } else {
+                        // Message + exit status match GNU coreutils 9.10.
+                        std.debug.print(
+                            "zls: invalid argument '{s}' for '--color'\n" ++
+                                "Valid arguments are:\n" ++
+                                "  - 'always', 'yes', 'force'\n" ++
+                                "  - 'never', 'no', 'none'\n" ++
+                                "  - 'auto', 'tty', 'if-tty'\n" ++
+                                "Try '{s} --help' for more information.\n",
+                            .{ val, args[0] },
+                        );
+                        std.process.exit(1);
+                    }
                 } else if (std.mem.startsWith(u8, arg, "--time-style=")) {
-                    config.time_style = .default;
+                    const raw = arg["--time-style=".len..];
+                    if (raw.len > 0 and raw[0] == '+') {
+                        // +FORMAT (strftime) — GNU date-style custom format
+                        config.time_style = .custom;
+                        if (config.time_format) |old| allocator.free(old);
+                        config.time_format = try allocator.dupe(u8, raw[1..]);
+                    } else {
+                        const is_posix_prefixed = std.mem.startsWith(u8, raw, "posix-");
+                        const val = if (is_posix_prefixed) raw["posix-".len..] else raw;
+                        if (std.mem.eql(u8, val, "long-iso")) {
+                            config.time_style = .long_iso;
+                        } else if (std.mem.eql(u8, val, "full-iso")) {
+                            config.time_style = .full_iso;
+                        } else if (std.mem.eql(u8, val, "iso")) {
+                            config.time_style = .iso;
+                        } else if (std.mem.eql(u8, val, "locale")) {
+                            config.time_style = .default;
+                        } else {
+                            std.debug.print(
+                                "zls: invalid argument '{s}' for 'time style'\n" ++
+                                    "Valid arguments are:\n" ++
+                                    "  - [posix-]full-iso\n" ++
+                                    "  - [posix-]long-iso\n" ++
+                                    "  - [posix-]iso\n" ++
+                                    "  - [posix-]locale\n" ++
+                                    "  - +FORMAT (e.g., +%H:%M) for a 'date'-style format\n" ++
+                                    "Try '{s} --help' for more information.\n",
+                                .{ raw, args[0] },
+                            );
+                            std.process.exit(2);
+                        }
+                        // GNU: a posix- prefixed style only takes effect
+                        // outside the POSIX/C locale; inside it, the default
+                        // locale format is used.
+                        if (is_posix_prefixed and localeIsPosix()) {
+                            config.time_style = .default;
+                        }
+                    }
                 } else if (std.mem.eql(u8, arg, "--numeric-uid-gid")) {
                     config.numeric_ids = true;
                     config.long_format = true;
@@ -1103,8 +1269,8 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                 } else if (std.mem.eql(u8, arg, "--group-directories-first")) {
                     config.group_directories_first = true;
                 } else {
-                    std.debug.print("zls: unrecognized option '{s}'\n", .{arg});
-                    std.process.exit(1);
+                    std.debug.print("{s}: unrecognized option '{s}'\nTry '{s} --help' for more information.\n", .{ args[0], arg, args[0] });
+                    std.process.exit(2);
                 }
             } else {
                 // Short options
@@ -1125,6 +1291,13 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                         'C' => config.columnar = true,
                         'X' => config.sort_mode = .extension,
                         's' => config.show_size = true,
+                        'U' => config.sort_mode = .none,
+                        'f' => {
+                            // GNU -f: list all entries in directory order
+                            config.show_all = true;
+                            config.sort_mode = .none;
+                        },
+                        'q' => config.hide_control_chars = true,
                         'n' => {
                             config.numeric_ids = true;
                             config.long_format = true;
@@ -1142,8 +1315,8 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                         'm' => config.comma_separated = true,
                         'x' => config.sort_across = true,
                         else => {
-                            std.debug.print("zls: invalid option -- '{c}'\n", .{ch});
-                            std.process.exit(1);
+                            std.debug.print("{s}: invalid option -- '{c}'\nTry '{s} --help' for more information.\n", .{ args[0], ch, args[0] });
+                            std.process.exit(2);
                         },
                     }
                 }
@@ -1174,8 +1347,9 @@ fn printHelp() void {
         \\  -a, --all      show all entries including hidden
         \\  -A             show all except . and ..
         \\  -C             list entries in columns
-        \\  -d             list directories themselves, not their contents
-        \\  -F             append indicator (*/=>@|)
+        \\  -d, --directory  list directories themselves, not their contents
+        \\  -f             list all entries in directory order
+        \\  -F, --classify append indicator (*/=>@|)
         \\  -g             like -l, but do not list owner
         \\  -G, --no-group in long listing, don't print group names
         \\  -h             human readable sizes
@@ -1185,17 +1359,20 @@ fn printHelp() void {
         \\  -n, --numeric-uid-gid  like -l, but list numeric user and group IDs
         \\  -o             like -l, but do not list group information
         \\  -p             append / indicator to directories
-        \\  -r             reverse sort order
-        \\  -R             list subdirectories recursively
-        \\  -s             print the allocated size of each file, in blocks
+        \\  -q, --hide-control-chars  print ? instead of nongraphic characters
+        \\      --show-control-chars  show nongraphic characters as-is
+        \\  -r, --reverse  reverse sort order
+        \\  -R, --recursive  list subdirectories recursively
+        \\  -s, --size     print the allocated size of each file, in blocks
         \\  -S             sort by size (largest first)
         \\  -t             sort by time (newest first)
+        \\  -U             do not sort; list entries in directory order
         \\  -x             list entries by lines instead of by columns
         \\  -X             sort alphabetically by extension
         \\      --color    colorize output (auto/always/never)
         \\      --group-directories-first  group directories before files
         \\      --time-style=STYLE  with -l, show times using style STYLE:
-        \\                          full-iso, long-iso, iso
+        \\                          full-iso, long-iso, iso, locale, +FORMAT
         \\      --help     display this help
         \\      --version  output version information
         \\
@@ -1214,14 +1391,22 @@ fn printVersion() void {
     writer.interface.flush() catch {};
 }
 
+// LC_ALL's numeric value is libc-specific: 6 on glibc/musl, 0 on
+// Darwin/BSD (where 6 is LC_MESSAGES — using it left LC_COLLATE unset and
+// broke locale-aware sorting on macOS).
+const LC_ALL: c_int = switch (builtin.os.tag) {
+    .linux => 6,
+    else => 0,
+};
+
 pub fn main(init: std.process.Init) void {
     // Set locale for strcoll-based sorting to match GNU ls behavior
-    _ = setlocale(6, ""); // LC_ALL = 6 on Linux, "" = use environment
+    _ = setlocale(LC_ALL, ""); // "" = use environment
     const allocator = init.gpa;
 
     var config = parseArgs(allocator, init.minimal.args) catch {
         std.debug.print("zls: failed to parse arguments\n", .{});
-        std.process.exit(1);
+        std.process.exit(2);
     };
     defer config.deinit(allocator);
 
@@ -1237,24 +1422,100 @@ pub fn main(init: std.process.Init) void {
     var buf: [8192]u8 = undefined;
     var writer = stdout.writerStreaming(io, &buf);
 
-    const multiple_paths = config.paths.items.len > 1;
-    var first = true;
-    var error_occurred = false;
+    // Partition operands the way GNU ls does: non-directory operands are
+    // printed first as a single sorted group, then each directory operand
+    // (also sorted) is listed. Operands that fail to stat are diagnosed
+    // first and make the exit status 2 ("serious trouble").
+    var file_ops: std.ArrayListUnmanaged(FileEntry) = .empty;
+    var dir_ops: std.ArrayListUnmanaged(FileEntry) = .empty;
+    defer {
+        for (file_ops.items) |*e| e.deinit(allocator);
+        file_ops.deinit(allocator);
+        for (dir_ops.items) |*e| e.deinit(allocator);
+        dir_ops.deinit(allocator);
+    }
 
     for (config.paths.items) |path| {
-        if (!first) {
-            writer.interface.writeAll("\n") catch {};
-        }
-        first = false;
+        const path_z = allocator.dupeZ(u8, path) catch {
+            exit_serious = true;
+            continue;
+        };
 
-        listPath(allocator, &writer, path, &config, multiple_paths or config.recursive) catch {
-            error_occurred = true;
+        var stat_buf: Stat = undefined;
+        if (lstat(path_z.ptr, &stat_buf) != 0) {
+            std.debug.print("zls: cannot access '{s}': {s}\n", .{ path, errnoText() });
+            exit_serious = true;
+            allocator.free(path_z);
+            continue;
+        }
+
+        var entry = entryFromStat(path_z, true, &stat_buf);
+
+        // GNU dereferences a command-line symlink that points to a directory
+        // (and lists its contents) unless -d, -F, or -l was given.
+        var treat_as_dir = entry.isDir();
+        if (entry.is_link and !config.directory_only and !config.show_indicators and !config.long_format) {
+            var target_buf: Stat = undefined;
+            if (stat(path_z.ptr, &target_buf) == 0 and (target_buf.mode & 0o170000) == 0o40000) {
+                treat_as_dir = true;
+            }
+        }
+
+        if (entry.is_link and !treat_as_dir) {
+            var link_buf: [4096]u8 = undefined;
+            const link_len = libc.readlink(path_z.ptr, &link_buf, link_buf.len);
+            if (link_len > 0 and @as(usize, @intCast(link_len)) < link_buf.len) {
+                entry.link_target = allocator.dupe(u8, link_buf[0..@intCast(link_len)]) catch null;
+            }
+            if (config.show_indicators and config.long_format) {
+                var target_stat: Stat = undefined;
+                if (stat(path_z.ptr, &target_stat) == 0) {
+                    entry.target_mode = target_stat.mode;
+                }
+            }
+        }
+
+        if (treat_as_dir and !config.directory_only) {
+            dir_ops.append(allocator, entry) catch {
+                var e = entry;
+                e.deinit(allocator);
+                exit_serious = true;
+            };
+        } else {
+            file_ops.append(allocator, entry) catch {
+                var e = entry;
+                e.deinit(allocator);
+                exit_serious = true;
+            };
+        }
+    }
+
+    sortEntries(file_ops.items, &config);
+    sortEntries(dir_ops.items, &config);
+
+    const print_header = config.paths.items.len > 1 or config.recursive;
+    var printed_any = false;
+
+    if (file_ops.items.len > 0) {
+        printEntries(&writer, file_ops.items, &config);
+        printed_any = true;
+    }
+
+    for (dir_ops.items) |entry| {
+        if (printed_any) writer.interface.writeAll("\n") catch {};
+        printed_any = true;
+        listDirectory(allocator, &writer, entry.name, &config, print_header) catch {
+            exit_serious = true;
         };
     }
 
-    writer.interface.flush() catch {};
+    // A swallowed write error (ENOSPC/EPIPE) must not exit 0: GNU reports
+    // "write error" and exits 2.
+    writer.interface.flush() catch {
+        std.debug.print("zls: write error\n", .{});
+        std.process.exit(2);
+    };
 
-    if (error_occurred) {
-        std.process.exit(1);
-    }
+    if (exit_serious) std.process.exit(2);
+    if (exit_minor) std.process.exit(1);
 }

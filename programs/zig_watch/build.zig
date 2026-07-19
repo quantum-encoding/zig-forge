@@ -43,6 +43,20 @@ pub fn build(b: *std.Build) void {
         .root_module = test_module,
     });
 
+    // CLI parsers (parseInterval / parseExtensions / buildCommand / parseArgs)
+    // live in main.zig and had no test target at all.
+    const cli_test_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cli_test_module.link_libc = true;
+
+    const cli_tests = b.addTest(.{
+        .root_module = cli_test_module,
+    });
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
+    test_step.dependOn(&b.addRunArtifact(cli_tests).step);
 }

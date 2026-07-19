@@ -81,7 +81,7 @@ fn benchBloomFilter(allocator: std.mem.Allocator, stdout: anytype) !void {
 
         var timer = try Timer.start();
         for (0..iterations) |i| {
-            _ = bf.contains(std.mem.asBytes(&i));
+            std.mem.doNotOptimizeAway(bf.contains(std.mem.asBytes(&i)));
         }
         const elapsed = timer.read();
         const ns_per_op = @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(iterations));
@@ -116,7 +116,7 @@ fn benchCountingBloomFilter(allocator: std.mem.Allocator, stdout: anytype) !void
     {
         var timer = try Timer.start();
         for (0..iterations) |i| {
-            _ = cbf.contains(std.mem.asBytes(&i));
+            std.mem.doNotOptimizeAway(cbf.contains(std.mem.asBytes(&i)));
         }
         const elapsed = timer.read();
         const ns_per_op = @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(iterations));
@@ -163,7 +163,9 @@ fn benchCountMinSketch(allocator: std.mem.Allocator, stdout: anytype) !void {
     {
         var timer = try Timer.start();
         for (0..iterations) |i| {
-            _ = cms.estimate(std.mem.asBytes(&i));
+            // Discarding the result lets ReleaseFast delete the whole loop —
+            // the benchmark then reported 0.0 ns/op (infM/sec).
+            std.mem.doNotOptimizeAway(cms.estimate(std.mem.asBytes(&i)));
         }
         const elapsed = timer.read();
         const ns_per_op = @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(iterations));
@@ -212,9 +214,12 @@ fn benchHyperLogLog(allocator: std.mem.Allocator, stdout: anytype) !void {
         }
 
         var timer = try Timer.start();
-        const estimate_iterations: usize = 100_000;
+        // Each estimate is a full O(m) sweep over 2^14 registers; 100k of them
+        // (the old count, which ReleaseFast was deleting outright) is minutes
+        // of real work.
+        const estimate_iterations: usize = 2_000;
         for (0..estimate_iterations) |_| {
-            _ = hll.estimate();
+            std.mem.doNotOptimizeAway(hll.estimate());
         }
         const elapsed = timer.read();
         const ns_per_op = @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(estimate_iterations));

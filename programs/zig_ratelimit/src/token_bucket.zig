@@ -15,56 +15,14 @@
 
 const std = @import("std");
 const compat = @import("compat.zig");
+const numeric = @import("numeric.zig");
 
-// ============================================================================
-// Constructor-argument sanitization (clamp-and-document, non-breaking)
-// ============================================================================
-//
-// Constructors here are infallible by contract (they return `Self`, not an
-// error union) because in-tree consumers such as `zig_token_service` call them
-// without a `try`. Rather than crash on nonsensical configuration (a `rate` of
-// 0 read from a config file → `1/0` → `@intFromFloat(inf)` traps, a negative
-// `capacity` → underflow), invalid inputs are clamped to a safe, fail-closed
-// value and documented. A clamped limiter admits *less* traffic, never more,
-// so clamping can only tighten the rate limit — the safe failure direction for
-// a security-relevant component.
-
-/// Minimum admissible refill rate (tokens/sec). Non-positive or non-finite
-/// rates (0, negative, NaN, +inf) are clamped to this so `1e9/rate`
-/// (nanoseconds-per-token) stays finite and never traps in `@intFromFloat`.
-/// ~1 token per 31.7 years — effectively "no refill", the fail-closed choice.
-const MIN_RATE: f64 = 1e-9;
-
-/// Maximum admissible capacity (burst size). Keeps token math inside f64's
-/// exact-integer range and bounds the nanosecond burst-tolerance so it cannot
-/// overflow. +inf / oversized capacities are clamped here; NaN / negative
-/// capacities clamp to 0 (a bucket that admits nothing).
-const MAX_CAPACITY: f64 = 1e15;
-
-/// Clamp a rate to a strictly-positive, finite value. Rejects 0, negatives,
-/// NaN and +inf (all → `MIN_RATE`).
-fn sanitizeRate(rate: f64) f64 {
-    if (!(rate > 0) or !std.math.isFinite(rate)) return MIN_RATE;
-    return rate;
-}
-
-/// Clamp a capacity to `[0, MAX_CAPACITY]`. NaN / negative → 0 (fail-closed).
-fn sanitizeCapacity(capacity: f64) f64 {
-    if (std.math.isNan(capacity) or capacity < 0) return 0;
-    if (capacity > MAX_CAPACITY) return MAX_CAPACITY;
-    return capacity;
-}
-
-/// Saturating f64 → i64 conversion. NaN saturates to maxInt (fail-closed: a
-/// bogus theoretical-arrival-time reads as "far future" → bucket stays shut).
-fn satToI64(x: f64) i64 {
-    if (std.math.isNan(x)) return std.math.maxInt(i64);
-    const max_f: f64 = @floatFromInt(std.math.maxInt(i64));
-    const min_f: f64 = @floatFromInt(std.math.minInt(i64));
-    if (x >= max_f) return std.math.maxInt(i64);
-    if (x <= min_f) return std.math.minInt(i64);
-    return @intFromFloat(x);
-}
+// Constructor arguments are clamped rather than rejected — see numeric.zig for
+// the rationale and the fail-closed guarantee.
+const sanitizeRate = numeric.sanitizeRate;
+const sanitizeCapacity = numeric.sanitizeCapacity;
+const satToI64 = numeric.satToI64;
+const satI128ToI64 = numeric.satI128ToI64;
 
 /// Token Bucket rate limiter
 pub const TokenBucket = struct {
@@ -76,6 +34,8 @@ pub const TokenBucket = struct {
     tokens: f64,
     /// Last refill timestamp (nanoseconds)
     last_refill: i128,
+    /// Time source. Defaults to CLOCK_MONOTONIC; tests inject a `ManualClock`.
+    clock: compat.Clock,
 
     const Self = @This();
 
@@ -83,30 +43,42 @@ pub const TokenBucket = struct {
     /// capacity: Maximum tokens (burst size)
     /// rate: Tokens added per second
     pub fn init(capacity: f64, rate: f64) Self {
+        return initWithClock(compat.monotonic_clock, capacity, rate);
+    }
+
+    /// Initialize against a caller-supplied clock (deterministic testing).
+    pub fn initWithClock(clock: compat.Clock, capacity: f64, rate: f64) Self {
         const cap = sanitizeCapacity(capacity);
         return Self{
             .capacity = cap,
             .rate = sanitizeRate(rate), // clamped >0 so timeUntilAvailable never divides by 0
             .tokens = cap, // Start full
-            .last_refill = compat.nowNs(),
+            .last_refill = clock.now(),
+            .clock = clock,
         };
     }
 
     /// Initialize with specific starting tokens
     pub fn initWithTokens(capacity: f64, rate: f64, initial_tokens: f64) Self {
+        return initWithTokensAndClock(compat.monotonic_clock, capacity, rate, initial_tokens);
+    }
+
+    /// Initialize with specific starting tokens against a caller-supplied clock.
+    pub fn initWithTokensAndClock(clock: compat.Clock, capacity: f64, rate: f64, initial_tokens: f64) Self {
         const cap = sanitizeCapacity(capacity);
         const start_tokens = if (std.math.isNan(initial_tokens) or initial_tokens < 0) 0 else initial_tokens;
         return Self{
             .capacity = cap,
             .rate = sanitizeRate(rate),
             .tokens = @min(start_tokens, cap),
-            .last_refill = compat.nowNs(),
+            .last_refill = clock.now(),
+            .clock = clock,
         };
     }
 
     /// Refill tokens based on elapsed time
     fn refill(self: *Self) void {
-        const now = compat.nowNs();
+        const now = self.clock.now();
         const elapsed_ns = now - self.last_refill;
         const elapsed_sec = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000_000.0;
         const new_tokens = elapsed_sec * self.rate;
@@ -154,19 +126,22 @@ pub const TokenBucket = struct {
 
         const needed = tokens - self.tokens;
         const wait_sec = needed / self.rate;
-        return @intFromFloat(wait_sec * 1_000_000_000.0);
+        // Saturating: `rate` is clamped to MIN_RATE, so a large `needed` still
+        // reaches ~1e24 ns — past i64 — which would be illegal behaviour in a
+        // bare @intFromFloat.
+        return satToI64(wait_sec * 1_000_000_000.0);
     }
 
     /// Force set token count (useful for testing or reset)
     pub fn setTokens(self: *Self, tokens: f64) void {
         self.tokens = @min(tokens, self.capacity);
-        self.last_refill = compat.nowNs();
+        self.last_refill = self.clock.now();
     }
 
     /// Reset to full capacity
     pub fn reset(self: *Self) void {
         self.tokens = self.capacity;
-        self.last_refill = compat.nowNs();
+        self.last_refill = self.clock.now();
     }
 
     /// Get current fill ratio (0.0 to 1.0)
@@ -225,21 +200,31 @@ pub const AtomicTokenBucket = struct {
     /// The whole mutable state: Theoretical Arrival Time in ns (monotonic clock).
     /// `tat <= now` means the bucket is full. Single atomic word => single CAS.
     tat_ns: std.atomic.Value(i64),
+    /// Time source. Defaults to CLOCK_MONOTONIC; tests inject a `ManualClock`.
+    clock: compat.Clock,
 
     const Self = @This();
 
     pub fn init(capacity: f64, rate: f64) Self {
+        return initWithClock(compat.monotonic_clock, capacity, rate);
+    }
+
+    /// Initialize against a caller-supplied clock (deterministic testing).
+    pub fn initWithClock(clock: compat.Clock, capacity: f64, rate: f64) Self {
         const cap = sanitizeCapacity(capacity);
         const r = sanitizeRate(rate);
         const period = 1_000_000_000.0 / r; // finite: r is clamped > 0
-        const now: i64 = @intCast(compat.nowNs());
+        const now = satI128ToI64(clock.now());
         return Self{
             .capacity = cap,
             .rate = r,
             .period_ns = period,
+            // Saturating: cap*period can exceed i64/f64-exact range when a
+            // large burst meets the clamped MIN_RATE.
             .tolerance_ns = cap * period,
             // Start full: tat == now => bucket at capacity.
             .tat_ns = std.atomic.Value(i64).init(now),
+            .clock = clock,
         };
     }
 
@@ -251,7 +236,7 @@ pub const AtomicTokenBucket = struct {
         const increment = tokens * self.period_ns; // finite, >= 0
 
         while (true) {
-            const now: i64 = @intCast(compat.nowNs());
+            const now = satI128ToI64(self.clock.now());
             const now_f: f64 = @floatFromInt(now);
             const tat = self.tat_ns.load(.acquire);
             const tat_eff: i64 = @max(tat, now);
@@ -279,7 +264,7 @@ pub const AtomicTokenBucket = struct {
     /// Unlike the old implementation this accounts for tokens regenerated since
     /// the last acquire, matching single-threaded `TokenBucket.available()`.
     pub fn available(self: *Self) f64 {
-        const now: i64 = @intCast(compat.nowNs());
+        const now = satI128ToI64(self.clock.now());
         const tat = self.tat_ns.load(.acquire);
         // Time-debt beyond `now` maps to tokens currently "in flight".
         const deficit_ns: f64 = @floatFromInt(@max(tat, now) - now);
@@ -303,11 +288,17 @@ test "token bucket basic" {
 }
 
 test "token bucket partial acquire" {
-    var bucket = TokenBucket.init(10, 100); // 10 tokens, 100/sec
+    // Deterministic: the previous version asserted `available() <= 5.1` against
+    // the real clock with a rate of 100/s, so it flaked whenever more than 1ms
+    // elapsed between two statements — a genuine CI-under-load hazard. With an
+    // injected clock the remaining count is exact.
+    var mc = compat.ManualClock{};
+    var bucket = TokenBucket.initWithClock(mc.clock(), 10, 100);
 
     try std.testing.expect(bucket.tryAcquire(5));
-    try std.testing.expect(bucket.available() <= 5.1); // Some refill may occur
+    try std.testing.expectEqual(@as(f64, 5), bucket.available());
     try std.testing.expect(bucket.tryAcquire(5));
+    try std.testing.expectEqual(@as(f64, 0), bucket.available());
 }
 
 test "token bucket reset" {

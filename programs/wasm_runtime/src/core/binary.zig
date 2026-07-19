@@ -25,6 +25,21 @@ pub const MAGIC: [4]u8 = .{ 0x00, 0x61, 0x73, 0x6D };
 /// WASM version 1
 pub const VERSION: [4]u8 = .{ 0x01, 0x00, 0x00, 0x00 };
 
+/// Spec cap on memory size: 2^16 pages == 4 GiB
+/// https://webassembly.github.io/spec/core/syntax/types.html#memory-types
+pub const MAX_MEMORY_PAGES: u32 = 65536;
+
+/// Runtime resource bound on table size (NOT a spec limit — the spec allows
+/// up to 2^32-1 elements). A declared table is allocated eagerly at
+/// instantiation, so an unbounded count is a trivial memory-exhaustion vector
+/// from an untrusted module.
+pub const MAX_TABLE_ELEMS: u32 = 10_000_000;
+
+/// Runtime resource bound on the number of locals a single function may
+/// declare. Locals are allocated per call frame; unbounded counts multiply by
+/// the call depth.
+pub const MAX_FUNC_LOCALS: u32 = 100_000;
+
 /// Section IDs
 pub const SectionId = enum(u8) {
     custom = 0,
@@ -159,6 +174,15 @@ pub const Module = struct {
             }
         }
         self.allocator.free(self.datas);
+
+        // Free element segments
+        for (self.elements) |e| {
+            if (e.owns_init_bytes) {
+                for (e.init) |ie| self.allocator.free(ie.instrs);
+            }
+            self.allocator.free(e.init);
+        }
+        self.allocator.free(self.elements);
     }
 
     /// Get function count (imports + defined)
@@ -252,9 +276,12 @@ pub const Reader = struct {
     }
 
     pub fn readBytes(self: *Reader, len: usize) ![]const u8 {
-        if (self.pos + len > self.data.len) return error.UnexpectedEof;
+        // Overflow-safe: `len` is decoded from the module (attacker-controlled),
+        // so `pos + len` must not wrap before the comparison.
+        const end = std.math.add(usize, self.pos, len) catch return error.UnexpectedEof;
+        if (end > self.data.len) return error.UnexpectedEof;
         const bytes = self.data[self.pos..][0..len];
-        self.pos += len;
+        self.pos = end;
         return bytes;
     }
 
@@ -263,66 +290,88 @@ pub const Reader = struct {
         return self.data[self.pos];
     }
 
-    /// Read unsigned LEB128
+    /// Read unsigned LEB128 (u32).
+    ///
+    /// Spec: https://webassembly.github.io/spec/core/binary/values.html#integers
+    /// A `u32` is encoded in at most `ceil(32/7) == 5` bytes, and the final
+    /// byte must not set bits above the 32-bit value range. Both are enforced:
+    /// an over-long encoding or a 5th byte wider than 4 value bits is
+    /// malformed and rejected rather than silently truncated.
+    ///
+    /// `shift` is a `usize` (not `u5`) so the loop bookkeeping can exceed the
+    /// shift-operand width without overflow-panicking on untrusted input.
     pub fn readU32(self: *Reader) !u32 {
         var result: u32 = 0;
-        var shift: u5 = 0;
+        var shift: usize = 0;
 
         while (true) {
             const byte = try self.readByte();
-            result |= @as(u32, byte & 0x7F) << shift;
+            const payload: u32 = byte & 0x7F;
+
+            if (shift >= 32) return error.InvalidLeb128; // over-long
+            // On the final (5th) byte only 32-28 == 4 value bits may be set.
+            const room: usize = 32 - shift;
+            if (room < 7 and payload >= (@as(u32, 1) << @intCast(room))) return error.InvalidLeb128;
+
+            result |= payload << @intCast(shift);
 
             if (byte & 0x80 == 0) break;
-
             shift += 7;
-            if (shift >= 35) return error.InvalidLeb128;
         }
 
         return result;
     }
 
-    /// Read signed LEB128 (i32)
+    /// Read signed LEB128 (i32).
+    ///
+    /// At most 5 bytes; the final byte must be a valid sign extension of the
+    /// remaining value bits (spec `sN` well-formedness), so `0xFF 0xFF 0xFF
+    /// 0xFF 0x7F`-style over-wide encodings are rejected.
     pub fn readI32(self: *Reader) !i32 {
-        var result: i32 = 0;
-        var shift: u5 = 0;
+        return @truncate(try self.readSigned(32));
+    }
+
+    /// Read signed LEB128 (i64).
+    pub fn readI64(self: *Reader) !i64 {
+        return try self.readSigned(64);
+    }
+
+    /// Shared signed-LEB128 decoder for `bits` in {32, 64}.
+    fn readSigned(self: *Reader, comptime bits: u7) !i64 {
+        var result: i64 = 0;
+        var shift: usize = 0;
 
         while (true) {
             const byte = try self.readByte();
-            result |= @as(i32, byte & 0x7F) << shift;
-            shift += 7;
+            const payload: i64 = byte & 0x7F;
 
-            if (byte & 0x80 == 0) {
-                // Sign extend if needed
-                if (shift < 32 and (byte & 0x40) != 0) {
-                    result |= @as(i32, -1) << shift;
+            if (shift >= bits) return error.InvalidLeb128; // over-long
+
+            const room: u7 = bits - @as(u7, @intCast(shift));
+            if (room < 7) {
+                // Final byte: the value bits that survive must be a proper
+                // sign extension — all the bits above `room` must equal the
+                // sign bit of the truncated value.
+                if (byte & 0x80 != 0) return error.InvalidLeb128;
+                const sign_bit: u8 = @as(u8, 1) << @intCast(room - 1);
+                const high_mask: u8 = @truncate(~((@as(u16, 1) << @intCast(room)) - 1) & 0x7F);
+                const high = (byte & 0x7F) & high_mask;
+                if (byte & sign_bit != 0) {
+                    if (high != high_mask) return error.InvalidLeb128;
+                } else {
+                    if (high != 0) return error.InvalidLeb128;
                 }
-                break;
             }
 
-            if (shift >= 35) return error.InvalidLeb128;
-        }
-
-        return result;
-    }
-
-    /// Read signed LEB128 (i64)
-    pub fn readI64(self: *Reader) !i64 {
-        var result: i64 = 0;
-        var shift: u6 = 0;
-
-        while (true) {
-            const byte = try self.readByte();
-            result |= @as(i64, byte & 0x7F) << shift;
+            result |= payload << @intCast(shift);
             shift += 7;
 
             if (byte & 0x80 == 0) {
                 if (shift < 64 and (byte & 0x40) != 0) {
-                    result |= @as(i64, -1) << shift;
+                    result |= @as(i64, -1) << @intCast(shift);
                 }
                 break;
             }
-
-            if (shift >= 70) return error.InvalidLeb128;
         }
 
         return result;
@@ -371,26 +420,52 @@ pub const Reader = struct {
         return .{ .type_idx = @intCast(idx) };
     }
 
+    /// Spec: limits are `0x00 n` or `0x01 n m`, and `n <= m` must hold.
+    /// Any other flag byte is malformed; an inverted range is malformed.
+    /// Rejecting both here keeps every downstream allocation sane.
     pub fn readLimits(self: *Reader) !Limits {
         const flags = try self.readByte();
+        if (flags != 0x00 and flags != 0x01) return error.InvalidLimits;
+
         const min = try self.readU32();
 
-        if (flags & 0x01 != 0) {
+        if (flags == 0x01) {
             const max = try self.readU32();
+            if (max < min) return error.InvalidLimits;
             return .{ .min = min, .max = max };
         }
 
         return .{ .min = min };
     }
 
+    /// Memory limits are additionally capped at 2^16 pages (4 GiB) by the
+    /// spec. Without this a module declaring `min = 0xFFFFFFFF` pages would
+    /// have `Memory.init` attempt a 256 TiB allocation.
     pub fn readMemType(self: *Reader) !MemType {
-        return .{ .limits = try self.readLimits() };
+        const limits = try self.readLimits();
+        if (limits.min > MAX_MEMORY_PAGES) return error.InvalidLimits;
+        if (limits.max) |max| {
+            if (max > MAX_MEMORY_PAGES) return error.InvalidLimits;
+        }
+        return .{ .limits = limits };
     }
 
     pub fn readTableType(self: *Reader) !TableType {
         const elem_type = try self.readValType();
         const limits = try self.readLimits();
+        if (limits.min > MAX_TABLE_ELEMS) return error.InvalidLimits;
         return .{ .elem_type = elem_type, .limits = limits };
+    }
+
+    /// Reject a declared item count that cannot possibly be backed by the
+    /// bytes that remain. Every vector element costs at least one byte on the
+    /// wire, so `count > remaining()` is malformed by construction. Without
+    /// this a 5-byte module claiming `0xFFFFFFFF` entries drives a
+    /// multi-gigabyte up-front allocation before the first read fails.
+    pub fn readCount(self: *Reader) !u32 {
+        const count = try self.readU32();
+        if (count > self.remaining()) return error.CountExceedsSection;
+        return count;
     }
 
     pub fn readGlobalType(self: *Reader) !GlobalType {
@@ -418,6 +493,10 @@ pub const ParseError = error{
     InvalidCode,
     InvalidGlobal,
     InvalidData,
+    InvalidElement,
+    InvalidLimits,
+    CountExceedsSection,
+    TooManyLocals,
 };
 
 /// Parse a WASM binary module
@@ -460,11 +539,59 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!Module {
     defer custom_list.deinit(allocator);
     var datas_list = std.ArrayList(types.Data).empty;
     defer datas_list.deinit(allocator);
+    var elements_list = std.ArrayList(types.Elem).empty;
+    defer elements_list.deinit(allocator);
+
+    // The `defer …deinit(allocator)` above each list frees only the list's own
+    // backing array — NOT the allocations the parsed elements own (type
+    // param/result slices, import and export names, global/data init bytes,
+    // per-function local declarations). Ownership does not move into `module`
+    // until the toOwnedSlice block at the very bottom, so a parse error in any
+    // later section left everything parsed so far unreachable and unfreed.
+    // Feeding a stream of malformed modules leaked memory without bound.
+    errdefer {
+        for (types_list.items) |t| {
+            allocator.free(t.params);
+            allocator.free(t.results);
+        }
+        for (imports_list.items) |imp| {
+            allocator.free(imp.module);
+            allocator.free(imp.name);
+        }
+        for (globals_list.items) |g| allocator.free(g.init);
+        for (exports_list.items) |e| allocator.free(e.name);
+        for (codes_list.items) |c| allocator.free(c.locals);
+        for (custom_list.items) |cs| allocator.free(cs.name);
+        for (datas_list.items) |d| {
+            allocator.free(d.init);
+            switch (d.mode) {
+                .active => |active| allocator.free(active.offset.instrs),
+                .passive => {},
+            }
+        }
+        for (elements_list.items) |e| {
+            if (e.owns_init_bytes) {
+                for (e.init) |ie| allocator.free(ie.instrs);
+            }
+            allocator.free(e.init);
+        }
+    }
+
+    // Binary Format §5.5.2: the non-custom sections must appear at most once
+    // and in increasing order of section id (custom sections may appear
+    // anywhere). Accepting a repeated or out-of-order section means two
+    // decoders can disagree about which of two conflicting sections wins —
+    // exactly the ambiguity a validator exists to remove.
+    var last_section_id: u8 = 0;
 
     // Parse sections
     while (!reader.isEof()) {
         const section_id_byte = reader.readByte() catch break;
         const section_id: SectionId = @enumFromInt(section_id_byte);
+        if (section_id != .custom) {
+            if (section_id_byte <= last_section_id) return error.InvalidSection;
+            last_section_id = section_id_byte;
+        }
         const section_size = reader.readU32() catch return error.InvalidSection;
 
         if (reader.pos + section_size > reader.data.len) {
@@ -485,7 +612,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!Module {
             },
 
             .type => {
-                const count = section_reader.readU32() catch return error.InvalidSection;
+                const count = section_reader.readCount() catch return error.InvalidSection;
                 var i: u32 = 0;
                 while (i < count) : (i += 1) {
                     const ft = parseType(allocator, &section_reader) catch return error.InvalidFuncType;
@@ -494,7 +621,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!Module {
             },
 
             .import => {
-                const count = section_reader.readU32() catch return error.InvalidSection;
+                const count = section_reader.readCount() catch return error.InvalidSection;
                 var i: u32 = 0;
                 while (i < count) : (i += 1) {
                     const imp = parseImport(allocator, &section_reader) catch return error.InvalidImport;
@@ -511,7 +638,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!Module {
             },
 
             .function => {
-                const count = section_reader.readU32() catch return error.InvalidSection;
+                const count = section_reader.readCount() catch return error.InvalidSection;
                 var i: u32 = 0;
                 while (i < count) : (i += 1) {
                     const type_idx = section_reader.readU32() catch return error.InvalidSection;
@@ -520,7 +647,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!Module {
             },
 
             .table => {
-                const count = section_reader.readU32() catch return error.InvalidSection;
+                const count = section_reader.readCount() catch return error.InvalidSection;
                 var i: u32 = 0;
                 while (i < count) : (i += 1) {
                     const tt = section_reader.readTableType() catch return error.InvalidSection;
@@ -529,7 +656,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!Module {
             },
 
             .memory => {
-                const count = section_reader.readU32() catch return error.InvalidSection;
+                const count = section_reader.readCount() catch return error.InvalidSection;
                 var i: u32 = 0;
                 while (i < count) : (i += 1) {
                     const mt = section_reader.readMemType() catch return error.InvalidSection;
@@ -538,7 +665,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!Module {
             },
 
             .global => {
-                const count = section_reader.readU32() catch return error.InvalidSection;
+                const count = section_reader.readCount() catch return error.InvalidSection;
                 var i: u32 = 0;
                 while (i < count) : (i += 1) {
                     const g = parseGlobal(allocator, &section_reader) catch return error.InvalidGlobal;
@@ -547,7 +674,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!Module {
             },
 
             .@"export" => {
-                const count = section_reader.readU32() catch return error.InvalidSection;
+                const count = section_reader.readCount() catch return error.InvalidSection;
                 var i: u32 = 0;
                 while (i < count) : (i += 1) {
                     const exp = parseExport(allocator, &section_reader) catch return error.InvalidExport;
@@ -560,11 +687,16 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!Module {
             },
 
             .element => {
-                // Skip for now - complex parsing
+                const count = section_reader.readCount() catch return error.InvalidSection;
+                var i: u32 = 0;
+                while (i < count) : (i += 1) {
+                    const elem = parseElement(allocator, &section_reader) catch return error.InvalidElement;
+                    elements_list.append(allocator, elem) catch return error.OutOfMemory;
+                }
             },
 
             .code => {
-                const count = section_reader.readU32() catch return error.InvalidSection;
+                const count = section_reader.readCount() catch return error.InvalidSection;
                 var i: u32 = 0;
                 while (i < count) : (i += 1) {
                     const code = parseCode(allocator, &section_reader) catch return error.InvalidCode;
@@ -573,7 +705,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!Module {
             },
 
             .data => {
-                const count = section_reader.readU32() catch return error.InvalidSection;
+                const count = section_reader.readCount() catch return error.InvalidSection;
                 var i: u32 = 0;
                 while (i < count) : (i += 1) {
                     const data_entry = parseDataEntry(allocator, &section_reader) catch return error.InvalidData;
@@ -604,6 +736,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!Module {
     module.codes = codes_list.toOwnedSlice(allocator) catch return error.OutOfMemory;
     module.custom_sections = custom_list.toOwnedSlice(allocator) catch return error.OutOfMemory;
     module.datas = datas_list.toOwnedSlice(allocator) catch return error.OutOfMemory;
+    module.elements = elements_list.toOwnedSlice(allocator) catch return error.OutOfMemory;
 
     return module;
 }
@@ -612,8 +745,9 @@ fn parseType(allocator: std.mem.Allocator, reader: *Reader) !FuncType {
     const form = try reader.readByte();
     if (form != 0x60) return error.InvalidFuncType;
 
-    // Params
-    const param_count = try reader.readU32();
+    // Params. `readCount` bounds the declared length by the bytes that remain,
+    // so a forged count cannot drive a huge up-front allocation.
+    const param_count = try reader.readCount();
     const params = try allocator.alloc(ValType, param_count);
     errdefer allocator.free(params);
     for (params) |*p| {
@@ -621,7 +755,7 @@ fn parseType(allocator: std.mem.Allocator, reader: *Reader) !FuncType {
     }
 
     // Results
-    const result_count = try reader.readU32();
+    const result_count = try reader.readCount();
     const results = try allocator.alloc(ValType, result_count);
     errdefer allocator.free(results);
     for (results) |*r| {
@@ -639,7 +773,11 @@ fn parseImport(allocator: std.mem.Allocator, reader: *Reader) !Import {
     errdefer allocator.free(name);
 
     const kind_byte = try reader.readByte();
-    const kind: ExternKind = @enumFromInt(kind_byte);
+    // `@enumFromInt` on an out-of-range value is illegal behavior — it panics
+    // in safe builds. The kind byte comes straight off the wire, so an invalid
+    // one must be an error, not a host crash.
+    const kind: ExternKind = std.enums.fromInt(ExternKind, kind_byte) orelse
+        return error.InvalidImport;
 
     const desc: Import.ImportDesc = switch (kind) {
         .func => .{ .func = try reader.readU32() },
@@ -660,12 +798,14 @@ fn parseExport(allocator: std.mem.Allocator, reader: *Reader) !Export {
     errdefer allocator.free(name);
 
     const kind_byte = try reader.readByte();
+    const kind: ExternKind = std.enums.fromInt(ExternKind, kind_byte) orelse
+        return error.InvalidExport;
     const idx = try reader.readU32();
 
     return .{
         .name = name,
         .desc = .{
-            .kind = @enumFromInt(kind_byte),
+            .kind = kind,
             .idx = idx,
         },
     };
@@ -674,12 +814,137 @@ fn parseExport(allocator: std.mem.Allocator, reader: *Reader) !Export {
 fn parseGlobal(allocator: std.mem.Allocator, reader: *Reader) !Module.Global {
     const gt = try reader.readGlobalType();
 
-    // Read init expression until end opcode
-    const init_start = reader.pos;
+    const init = try allocator.dupe(u8, try readConstExpr(reader));
+
+    return .{
+        .type = gt,
+        .init = init,
+    };
+}
+
+fn parseCode(allocator: std.mem.Allocator, reader: *Reader) !Module.Code {
+    // Binary Format §5.5.13: `code := size:u32 code:func`, where `size` is the
+    // byte length of the function that follows. It was previously discarded on
+    // the grounds that position tracking makes it redundant — but that means a
+    // module whose declared size disagrees with its actual body is ACCEPTED,
+    // and the two decoders (ours and any other) then disagree about where the
+    // next function begins. Validate it against what we actually consume.
+    const declared_size = try reader.readU32();
+    if (declared_size > reader.remaining()) return error.InvalidCode;
+    const func_start = reader.pos;
+
+    // Parse locals
+    const local_count = try reader.readCount();
+    const locals = try allocator.alloc(Module.LocalDecl, local_count);
+    errdefer allocator.free(locals);
+
+    // Each declaration carries a repeat count; the SUM is what gets allocated
+    // per call frame. Sum with overflow checking and bound it, otherwise a
+    // handful of declarations each claiming 2^32-1 locals either wraps or
+    // demands a terabyte-scale frame.
+    var total_locals: u64 = 0;
+    for (locals) |*l| {
+        l.count = try reader.readU32();
+        l.val_type = try reader.readValType();
+        total_locals += l.count;
+        if (total_locals > MAX_FUNC_LOCALS) return error.TooManyLocals;
+    }
+
+    // Body is remaining bytes (including end opcode)
+    const body_start = reader.pos;
+
+    // Skip to find end of function.
+    //
+    // Every opcode with immediates must consume them here, or an immediate
+    // byte gets mistaken for an opcode and the body boundary lands in the
+    // wrong place — which silently reinterprets the rest of the code section.
+    var depth: u32 = 1;
+    while (depth > 0) {
+        const byte = try reader.readByte();
+        switch (byte) {
+            0x02, 0x03, 0x04 => {
+                depth = try std.math.add(u32, depth, 1); // block, loop, if
+                _ = try reader.readBlockType();
+            },
+            0x0B => depth -= 1, // end
+            0x41 => _ = try reader.readI32(),
+            0x42 => _ = try reader.readI64(),
+            0x43 => _ = try reader.readBytes(4),
+            0x44 => _ = try reader.readBytes(8),
+            // br, br_if, call, local.*, global.*, table.get, table.set
+            0x0C, 0x0D, 0x10, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26 => _ = try reader.readU32(),
+            0x0E => {
+                // br_table: a vector of `count` labels plus the default label.
+                const count = try reader.readCount();
+                var i: u32 = 0;
+                while (i <= count) : (i += 1) _ = try reader.readU32();
+            },
+            0x1C => {
+                // select_t: a vector of result value types
+                const count = try reader.readCount();
+                var i: u32 = 0;
+                while (i < count) : (i += 1) _ = try reader.readByte();
+            },
+            0x28...0x3E => {
+                _ = try reader.readU32(); // align
+                _ = try reader.readU32(); // offset
+            },
+            0x3F, 0x40 => _ = try reader.readU32(),
+            0x11 => {
+                _ = try reader.readU32();
+                _ = try reader.readU32();
+            },
+            0xD0 => _ = try reader.readByte(), // ref.null <reftype>
+            0xD2 => _ = try reader.readU32(), // ref.func <funcidx>
+            0xFC => {
+                // Prefixed (saturating-truncation / bulk-memory) family
+                const sub = try reader.readU32();
+                switch (sub) {
+                    0...7 => {}, // i32/i64.trunc_sat_* — no immediates
+                    8 => { // memory.init dataidx memidx
+                        _ = try reader.readU32();
+                        _ = try reader.readU32();
+                    },
+                    9 => _ = try reader.readU32(), // data.drop dataidx
+                    10 => { // memory.copy src dst
+                        _ = try reader.readU32();
+                        _ = try reader.readU32();
+                    },
+                    11 => _ = try reader.readU32(), // memory.fill memidx
+                    12 => { // table.init elemidx tableidx
+                        _ = try reader.readU32();
+                        _ = try reader.readU32();
+                    },
+                    13 => _ = try reader.readU32(), // elem.drop elemidx
+                    14 => { // table.copy dst src
+                        _ = try reader.readU32();
+                        _ = try reader.readU32();
+                    },
+                    15, 16, 17 => _ = try reader.readU32(), // table.grow/size/fill
+                    else => return error.InvalidCode,
+                }
+            },
+            else => {},
+        }
+    }
+
+    if (reader.pos - func_start != declared_size) return error.InvalidCode;
+
+    return .{
+        .locals = locals,
+        .body = reader.data[body_start..reader.pos],
+    };
+}
+
+/// Consume a constant expression (`expr` terminated by the `end` opcode,
+/// 0x0B) and return the encoded bytes, borrowed from the reader's buffer.
+/// Every constant opcode's immediates must be consumed, or an immediate byte
+/// gets mistaken for the terminator.
+fn readConstExpr(reader: *Reader) ![]const u8 {
+    const start = reader.pos;
     while (true) {
         const byte = try reader.readByte();
-        if (byte == 0x0B) break; // end opcode
-        // Skip immediate bytes based on opcode
+        if (byte == 0x0B) break; // end
         switch (byte) {
             0x41 => _ = try reader.readI32(), // i32.const
             0x42 => _ = try reader.readI64(), // i64.const
@@ -691,59 +956,93 @@ fn parseGlobal(allocator: std.mem.Allocator, reader: *Reader) !Module.Global {
             else => {},
         }
     }
-
-    const init = try allocator.dupe(u8, reader.data[init_start..reader.pos]);
-
-    return .{
-        .type = gt,
-        .init = init,
-    };
+    return reader.data[start..reader.pos];
 }
 
-fn parseCode(allocator: std.mem.Allocator, reader: *Reader) !Module.Code {
-    _ = try reader.readU32(); // size - we don't need it, we track position
+/// Parse one element segment.
+///
+/// Spec: https://webassembly.github.io/spec/core/binary/modules.html#element-section
+/// The flags field selects among seven encodings (0..7); the bit meanings are
+/// bit0 = passive/declarative, bit1 = explicit table index / declarative,
+/// bit2 = element expressions rather than function indices.
+fn parseElement(allocator: std.mem.Allocator, reader: *Reader) !types.Elem {
+    const flags = try reader.readU32();
+    if (flags > 7) return error.InvalidElement;
 
-    // Parse locals
-    const local_count = try reader.readU32();
-    const locals = try allocator.alloc(Module.LocalDecl, local_count);
-    errdefer allocator.free(locals);
+    const uses_expressions = (flags & 0x04) != 0;
+    const is_passive_or_declarative = (flags & 0x01) != 0;
+    const has_explicit_table = (flags & 0x02) != 0;
 
-    for (locals) |*l| {
-        l.count = try reader.readU32();
-        l.val_type = try reader.readValType();
+    var table_idx: u32 = 0;
+    var offset_bytes: []const u8 = &.{};
+
+    if (!is_passive_or_declarative) {
+        // Active segment: optional table index, then the offset expression.
+        if (has_explicit_table) table_idx = try reader.readU32();
+        offset_bytes = try readConstExpr(reader);
     }
 
-    // Body is remaining bytes (including end opcode)
-    const body_start = reader.pos;
-
-    // Skip to find end of function
-    var depth: u32 = 1;
-    while (depth > 0) {
-        const byte = try reader.readByte();
-        switch (byte) {
-            0x02, 0x03, 0x04 => depth += 1, // block, loop, if
-            0x0B => depth -= 1, // end
-            0x41 => _ = try reader.readI32(),
-            0x42 => _ = try reader.readI64(),
-            0x43 => _ = try reader.readBytes(4),
-            0x44 => _ = try reader.readBytes(8),
-            0x0C, 0x0D, 0x10, 0x20, 0x21, 0x22, 0x23, 0x24 => _ = try reader.readU32(),
-            0x28...0x3E => {
-                _ = try reader.readU32(); // align
-                _ = try reader.readU32(); // offset
-            },
-            0x3F, 0x40 => _ = try reader.readU32(),
-            0x11 => {
-                _ = try reader.readU32();
-                _ = try reader.readU32();
-            },
-            else => {},
+    // Element kind / reference type byte. Present for every form except the
+    // two "active, table 0, funcidx vector" shorthands (flags 0 and 4).
+    var elem_type: ValType = .funcref;
+    if (flags != 0 and flags != 4) {
+        if (uses_expressions) {
+            elem_type = try reader.readValType();
+        } else {
+            const kind = try reader.readByte();
+            if (kind != 0x00) return error.InvalidElement; // only elemkind 0 (funcref) exists
+            elem_type = .funcref;
         }
     }
 
+    const count = try reader.readCount();
+    const inits = try allocator.alloc(types.InitExpr, count);
+    errdefer allocator.free(inits);
+
+    // Track how many synthesized encodings have been allocated so a failure
+    // partway through the vector frees exactly those, and no more.
+    var built: usize = 0;
+    errdefer if (!uses_expressions) {
+        for (inits[0..built]) |ie| allocator.free(ie.instrs);
+    };
+
+    for (inits) |*ie| {
+        if (uses_expressions) {
+            ie.* = .{ .instrs = try readConstExpr(reader) };
+        } else {
+            // A bare funcidx; synthesize the equivalent `ref.func x; end`
+            // encoding so the interpreter's single evalInitExpr path handles
+            // both forms identically.
+            const func_idx = try reader.readU32();
+            var buf: [6]u8 = undefined;
+            buf[0] = 0xD2; // ref.func
+            var n: usize = 1;
+            var v = func_idx;
+            while (true) {
+                var b: u8 = @intCast(v & 0x7F);
+                v >>= 7;
+                if (v != 0) b |= 0x80;
+                buf[n] = b;
+                n += 1;
+                if (v == 0) break;
+            }
+            buf[n] = 0x0B; // end
+            n += 1;
+            ie.* = .{ .instrs = try allocator.dupe(u8, buf[0..n]) };
+        }
+        built += 1;
+    }
+
+    // Owned only for the synthesized-encoding path; the expression path
+    // borrows from the module buffer. Track which so deinit frees correctly.
     return .{
-        .locals = locals,
-        .body = reader.data[body_start..reader.pos],
+        .type = elem_type,
+        .init = inits,
+        .owns_init_bytes = !uses_expressions,
+        .mode = if (is_passive_or_declarative)
+            (if (has_explicit_table) types.Elem.Mode{ .declarative = {} } else types.Elem.Mode{ .passive = {} })
+        else
+            types.Elem.Mode{ .active = .{ .table_idx = table_idx, .offset = .{ .instrs = offset_bytes } } },
     };
 }
 
@@ -753,24 +1052,17 @@ fn parseDataEntry(allocator: std.mem.Allocator, reader: *Reader) !types.Data {
     switch (flags) {
         0 => {
             // Active data with memory 0 and offset expression
-            const expr_start = reader.pos;
-            // Skip to end of init expression
-            while (true) {
-                const byte = try reader.readByte();
-                if (byte == 0x0b) break; // end
-                switch (byte) {
-                    0x41 => _ = try reader.readI32(),
-                    0x42 => _ = try reader.readI64(),
-                    0x23 => _ = try reader.readU32(), // global.get
-                    else => {},
-                }
-            }
-            const expr_instrs = try allocator.dupe(u8, reader.data[expr_start..reader.pos]);
+            const expr_instrs = try allocator.dupe(u8, try readConstExpr(reader));
+            // The data-length read below can fail on a malformed module; without
+            // this the offset expression leaks on that path.
+            errdefer allocator.free(expr_instrs);
 
             // Read data bytes
+            // `readBytes` bounds-checks `data_len` (attacker-controlled) before
+            // slicing; the previous direct slice panicked on an over-long
+            // declared length.
             const data_len = try reader.readU32();
-            const init = try allocator.dupe(u8, reader.data[reader.pos..][0..data_len]);
-            reader.pos += data_len;
+            const init = try allocator.dupe(u8, try reader.readBytes(data_len));
 
             return .{
                 .init = init,
@@ -782,9 +1074,11 @@ fn parseDataEntry(allocator: std.mem.Allocator, reader: *Reader) !types.Data {
         },
         1 => {
             // Passive data segment
+            // `readBytes` bounds-checks `data_len` (attacker-controlled) before
+            // slicing; the previous direct slice panicked on an over-long
+            // declared length.
             const data_len = try reader.readU32();
-            const init = try allocator.dupe(u8, reader.data[reader.pos..][0..data_len]);
-            reader.pos += data_len;
+            const init = try allocator.dupe(u8, try reader.readBytes(data_len));
 
             return .{
                 .init = init,
@@ -795,22 +1089,16 @@ fn parseDataEntry(allocator: std.mem.Allocator, reader: *Reader) !types.Data {
             // Active data with explicit memory index
             const mem_idx = try reader.readU32();
 
-            const expr_start = reader.pos;
-            while (true) {
-                const byte = try reader.readByte();
-                if (byte == 0x0b) break;
-                switch (byte) {
-                    0x41 => _ = try reader.readI32(),
-                    0x42 => _ = try reader.readI64(),
-                    0x23 => _ = try reader.readU32(),
-                    else => {},
-                }
-            }
-            const expr_instrs = try allocator.dupe(u8, reader.data[expr_start..reader.pos]);
+            const expr_instrs = try allocator.dupe(u8, try readConstExpr(reader));
+            // The data-length read below can fail on a malformed module; without
+            // this the offset expression leaks on that path.
+            errdefer allocator.free(expr_instrs);
 
+            // `readBytes` bounds-checks `data_len` (attacker-controlled) before
+            // slicing; the previous direct slice panicked on an over-long
+            // declared length.
             const data_len = try reader.readU32();
-            const init = try allocator.dupe(u8, reader.data[reader.pos..][0..data_len]);
-            reader.pos += data_len;
+            const init = try allocator.dupe(u8, try reader.readBytes(data_len));
 
             return .{
                 .init = init,

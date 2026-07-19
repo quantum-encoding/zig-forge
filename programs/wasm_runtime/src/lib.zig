@@ -98,4 +98,6 @@ test "parse module with type section" {
 
 test {
     std.testing.refAllDecls(@This());
+    // Tier-1 external anchors: spec-derived valid AND malformed modules.
+    _ = @import("tier1_anchors.zig");
 }

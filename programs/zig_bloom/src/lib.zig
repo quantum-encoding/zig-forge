@@ -7,10 +7,13 @@
 //! - HyperLogLog: Cardinality estimation with minimal memory
 //!
 //! All structures are designed for:
-//! - Zero heap allocations in hot paths
+//! - Zero heap allocations in hot paths (allocation happens at init only)
 //! - Cache-friendly memory layouts
-//! - Thread-safe operations where applicable
 //! - Configurable accuracy vs memory tradeoffs
+//!
+//! **Not thread-safe.** Nothing here uses atomics or locks; concurrent
+//! mutation of one instance races. Callers needing concurrency must guard
+//! externally (or shard, and merge with `unionWith` / `merge`).
 
 pub const bloom_filter = @import("bloom_filter.zig");
 pub const count_min = @import("count_min.zig");
@@ -22,7 +25,15 @@ pub const CountingBloomFilter = bloom_filter.CountingBloomFilter;
 pub const CountMinSketch = count_min.CountMinSketch;
 pub const HeavyHitters = count_min.HeavyHitters;
 pub const HyperLogLog = hyperloglog.HyperLogLog;
-pub const HyperLogLogPlusPlus = hyperloglog.HyperLogLogPlusPlus;
+// Renamed from `HyperLogLogPlusPlus`: the old name claimed Heule et al.'s
+// HLL++ (higher-precision sparse encoding + dense bias-correction tables),
+// neither of which this implements. See the type's doc comment.
+pub const SparseHyperLogLog = hyperloglog.SparseHyperLogLog;
+
+/// Serialized-filter container format (magic/version/params header).
+pub const format = bloom_filter.format;
+
+pub const tier1_anchors = @import("tier1_anchors.zig");
 
 // Version info
 pub const version = "0.1.0";

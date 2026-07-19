@@ -12,14 +12,11 @@
 const std = @import("std");
 const Watcher = @import("watcher.zig").Watcher;
 
-extern "c" fn time(t: ?*c_long) c_long;
-extern "c" fn nanosleep(req: *const std.c.timespec, rem: ?*std.c.timespec) c_int;
-
 const Opts = struct {
     watch_path: []const u8,
     extensions: ?[]const []const u8,
     ignore_patterns: ?[]const []const u8,
-    interval_secs: u64,
+    interval_ms: u64,
     debounce_ms: u64,
     command: []const u8,
 };
@@ -68,16 +65,18 @@ pub fn main(init: std.process.Init) !void {
         }
         std.debug.print(")", .{});
     }
-    std.debug.print(" every {d}s\n", .{opts.interval_secs});
+    std.debug.print(" every {d}ms\n", .{opts.interval_ms});
 
-    // Main loop
+    // Main loop. The interval is milliseconds, so the poll period lands in both
+    // fields of the timespec (the old code was seconds-only with `.nsec = 0`,
+    // which silently floored every sub-second interval to zero).
     const sleep_req = std.c.timespec{
-        .sec = @intCast(opts.interval_secs),
-        .nsec = 0,
+        .sec = @intCast(opts.interval_ms / std.time.ms_per_s),
+        .nsec = @intCast((opts.interval_ms % std.time.ms_per_s) * std.time.ns_per_ms),
     };
 
     while (true) {
-        _ = nanosleep(&sleep_req, null);
+        _ = std.c.nanosleep(&sleep_req, null);
 
         const changed = watcher.scan(opts.watch_path) catch continue;
         defer {
@@ -134,7 +133,7 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) ?Opts {
     var watch_path: ?[]const u8 = null;
     var extensions: ?[]const []const u8 = null;
     var ignore_patterns: ?[]const []const u8 = null;
-    var interval_secs: u64 = 1;
+    var interval_ms: u64 = std.time.ms_per_s;
     var debounce_ms: u64 = 0;
     var separator_idx: ?usize = null;
 
@@ -194,7 +193,7 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) ?Opts {
                 std.debug.print("Error: --interval requires a value\n", .{});
                 return null;
             }
-            interval_secs = parseInterval(args[i]) orelse {
+            interval_ms = parseInterval(args[i]) orelse {
                 std.debug.print("Error: invalid interval '{s}'\n", .{args[i]});
                 return null;
             };
@@ -226,7 +225,7 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) ?Opts {
         .watch_path = watch_path.?,
         .extensions = extensions,
         .ignore_patterns = ignore_patterns,
-        .interval_secs = interval_secs,
+        .interval_ms = interval_ms,
         .debounce_ms = debounce_ms,
         .command = cmd,
     };
@@ -278,32 +277,62 @@ fn parseExtensions(allocator: std.mem.Allocator, value: []const u8) ?[]const []c
     return exts;
 }
 
+/// Parse a poll interval into milliseconds.
+///
+/// Accepts a sequence of `<digits><unit>` groups (`"90s"`, `"1m30s"`) where the
+/// unit is `ms`, `s`, `m`, `h`, or `d`; a trailing group with no unit is read as
+/// seconds (`"2"` == `"2s"`). `ms` is a real two-character unit — the previous
+/// parser consumed `m` as *minutes* and then choked on the trailing `s`, so
+/// `"500ms"` (advertised in `--help`) was rejected outright.
+///
+/// Every accumulation is overflow-checked: the old `current * 10 + digit` panicked
+/// in safe builds on a long digit string.
 fn parseInterval(s: []const u8) ?u64 {
+    if (s.len == 0) return null;
+
     var total: u64 = 0;
     var current: u64 = 0;
     var has_digits = false;
+    var i: usize = 0;
 
-    for (s) |c| {
+    while (i < s.len) {
+        const c = s[i];
         if (c >= '0' and c <= '9') {
-            current = current * 10 + (c - '0');
+            current = std.math.mul(u64, current, 10) catch return null;
+            current = std.math.add(u64, current, c - '0') catch return null;
             has_digits = true;
+            i += 1;
+            continue;
+        }
+
+        if (!has_digits) return null;
+
+        // Longest-match unit: "ms" before "m".
+        var multiplier: u64 = undefined;
+        if (c == 'm' and i + 1 < s.len and s[i + 1] == 's') {
+            multiplier = 1;
+            i += 2;
         } else {
-            if (!has_digits) return null;
-            const multiplier: u64 = switch (c) {
-                's' => 1,
-                'm' => 60,
-                'h' => 3600,
-                'd' => 86400,
+            multiplier = switch (c) {
+                's' => std.time.ms_per_s,
+                'm' => std.time.ms_per_min,
+                'h' => std.time.ms_per_hour,
+                'd' => std.time.ms_per_day,
                 else => return null,
             };
-            total += current * multiplier;
-            current = 0;
-            has_digits = false;
+            i += 1;
         }
+
+        const scaled = std.math.mul(u64, current, multiplier) catch return null;
+        total = std.math.add(u64, total, scaled) catch return null;
+        current = 0;
+        has_digits = false;
     }
 
+    // A trailing unit-less group means seconds.
     if (has_digits) {
-        total += current;
+        const scaled = std.math.mul(u64, current, std.time.ms_per_s) catch return null;
+        total = std.math.add(u64, total, scaled) catch return null;
     }
 
     if (total == 0) return null;
@@ -327,9 +356,16 @@ fn printHelp() void {
         \\Options:
         \\  --ext <exts>        Filter by extensions (comma-separated, e.g. .zig,.json)
         \\  --ignore <patterns> Ignore patterns (comma-separated, e.g. .git,node_modules,*.swp)
-        \\  --debounce <ms>     Debounce time in milliseconds (default: 0, no debounce)
-        \\  --interval <time>   Poll interval (default: 1s). Supports: 1s, 500ms, 2s, etc.
+        \\  --debounce <ms>     Coalesce a burst of changes into one run (default: 0, off).
+        \\                      The first change fires immediately; further changes within
+        \\                      the window are coalesced and fire once when it elapses.
+        \\  --interval <time>   Poll interval (default: 1s). Units: ms, s, m, h, d —
+        \\                      e.g. 500ms, 2s, 1m30s. A bare number means seconds.
         \\  -h, --help          Show this help
+        \\
+        \\Notes:
+        \\  Hidden entries (names starting with '.') are skipped at every depth, as are
+        \\  symlinks, which are neither followed nor watched.
         \\
         \\Examples:
         \\  zig-watch src --ext .zig -- zig build test
@@ -339,4 +375,127 @@ fn printHelp() void {
         \\
     ;
     std.debug.print("{s}", .{help});
+}
+
+// ============================================================
+// Tests
+// ============================================================
+//
+// The CLI parsers had no test target at all before this; the `500ms` help-text
+// contradiction (advertised, but rejected by parseInterval) survived precisely
+// because nothing exercised them.
+
+test "parseInterval: units and combinations" {
+    try std.testing.expectEqual(@as(?u64, 1000), parseInterval("1s"));
+    try std.testing.expectEqual(@as(?u64, 2000), parseInterval("2s"));
+    try std.testing.expectEqual(@as(?u64, 60_000), parseInterval("1m"));
+    try std.testing.expectEqual(@as(?u64, 90_000), parseInterval("1m30s"));
+    try std.testing.expectEqual(@as(?u64, 3_600_000), parseInterval("1h"));
+    try std.testing.expectEqual(@as(?u64, 86_400_000), parseInterval("1d"));
+    // A bare number is seconds, preserving the old behaviour.
+    try std.testing.expectEqual(@as(?u64, 5000), parseInterval("5"));
+    // "ms" is a real unit now: `m` must not be eaten as minutes.
+    try std.testing.expectEqual(@as(?u64, 500), parseInterval("500ms"));
+    try std.testing.expectEqual(@as(?u64, 1), parseInterval("1ms"));
+    try std.testing.expectEqual(@as(?u64, 61_500), parseInterval("1m1s500ms"));
+}
+
+test "parseInterval: rejects malformed input instead of overflowing" {
+    try std.testing.expectEqual(@as(?u64, null), parseInterval(""));
+    try std.testing.expectEqual(@as(?u64, null), parseInterval("s"));
+    try std.testing.expectEqual(@as(?u64, null), parseInterval("abc"));
+    try std.testing.expectEqual(@as(?u64, null), parseInterval("1x"));
+    try std.testing.expectEqual(@as(?u64, null), parseInterval("0"));
+    try std.testing.expectEqual(@as(?u64, null), parseInterval("0s"));
+    // Overflow used to panic in safe builds (`current * 10 + digit`, unchecked).
+    try std.testing.expectEqual(@as(?u64, null), parseInterval("999999999999999999999"));
+    // Overflow in the unit multiply, not the digit accumulate.
+    try std.testing.expectEqual(@as(?u64, null), parseInterval("18446744073709551615d"));
+}
+
+test "parseExtensions splits on commas" {
+    const allocator = std.testing.allocator;
+
+    const one = parseExtensions(allocator, ".zig").?;
+    defer allocator.free(one);
+    try std.testing.expectEqual(@as(usize, 1), one.len);
+    try std.testing.expectEqualStrings(".zig", one[0]);
+
+    const many = parseExtensions(allocator, ".zig,.json,.md").?;
+    defer allocator.free(many);
+    try std.testing.expectEqual(@as(usize, 3), many.len);
+    try std.testing.expectEqualStrings(".zig", many[0]);
+    try std.testing.expectEqualStrings(".json", many[1]);
+    try std.testing.expectEqualStrings(".md", many[2]);
+
+    // A trailing comma yields an empty final element rather than dropping it.
+    const trailing = parseExtensions(allocator, ".zig,").?;
+    defer allocator.free(trailing);
+    try std.testing.expectEqual(@as(usize, 2), trailing.len);
+    try std.testing.expectEqualStrings("", trailing[1]);
+}
+
+test "buildCommand joins argv with single spaces" {
+    const allocator = std.testing.allocator;
+
+    const cmd = buildCommand(allocator, &.{ "zig", "build", "test" }).?;
+    defer allocator.free(cmd);
+    try std.testing.expectEqualStrings("zig build test", cmd);
+
+    const one = buildCommand(allocator, &.{"make"}).?;
+    defer allocator.free(one);
+    try std.testing.expectEqualStrings("make", one);
+
+    try std.testing.expect(buildCommand(allocator, &.{}) == null);
+}
+
+test "parseArgs: full option set" {
+    const allocator = std.testing.allocator;
+    const argv = [_][]const u8{
+        "zig-watch",  "src",         "--ext",   ".zig,.json",
+        "--ignore",   ".git",        "--interval", "500ms",
+        "--debounce", "250",         "--",      "zig",
+        "build",      "test",
+    };
+
+    const opts = parseArgs(allocator, &argv).?;
+    defer allocator.free(opts.command);
+    defer if (opts.extensions) |e| allocator.free(e);
+    defer if (opts.ignore_patterns) |p| allocator.free(p);
+
+    try std.testing.expectEqualStrings("src", opts.watch_path);
+    try std.testing.expectEqual(@as(u64, 500), opts.interval_ms);
+    try std.testing.expectEqual(@as(u64, 250), opts.debounce_ms);
+    try std.testing.expectEqual(@as(usize, 2), opts.extensions.?.len);
+    try std.testing.expectEqualStrings(".json", opts.extensions.?[1]);
+    try std.testing.expectEqual(@as(usize, 1), opts.ignore_patterns.?.len);
+    try std.testing.expectEqualStrings("zig build test", opts.command);
+}
+
+test "parseArgs: interval defaults to 1s when unspecified" {
+    const allocator = std.testing.allocator;
+    const argv = [_][]const u8{ "zig-watch", "src", "--", "make" };
+
+    const opts = parseArgs(allocator, &argv).?;
+    defer allocator.free(opts.command);
+    try std.testing.expectEqual(@as(u64, 1000), opts.interval_ms);
+    try std.testing.expectEqual(@as(u64, 0), opts.debounce_ms);
+    try std.testing.expectEqualStrings("make", opts.command);
+}
+
+test "parseArgs: rejects a missing separator, path, or command" {
+    const allocator = std.testing.allocator;
+    // No `--` separator.
+    try std.testing.expect(parseArgs(allocator, &.{ "zig-watch", "src" }) == null);
+    // Separator present but no command after it.
+    try std.testing.expect(parseArgs(allocator, &.{ "zig-watch", "src", "--" }) == null);
+    // No watch path.
+    try std.testing.expect(parseArgs(allocator, &.{ "zig-watch", "--", "make" }) == null);
+    // Unknown option.
+    try std.testing.expect(parseArgs(allocator, &.{ "zig-watch", "src", "--nope", "--", "make" }) == null);
+    // Option value missing before the separator.
+    try std.testing.expect(parseArgs(allocator, &.{ "zig-watch", "src", "--ext", "--", "make" }) == null);
+    // Unparseable interval / debounce.
+    try std.testing.expect(parseArgs(allocator, &.{ "zig-watch", "src", "--interval", "nope", "--", "make" }) == null);
+    try std.testing.expect(parseArgs(allocator, &.{ "zig-watch", "src", "--debounce", "nope", "--", "make" }) == null);
 }

@@ -23,6 +23,17 @@ pub const ZipError = error{
     FileTooLarge,
     OutOfMemory,
     ReadFailed,
+    /// H5 — the archive uses ZIP64 extensions (0xFFFFFFFF/0xFFFF sentinels in
+    /// the central directory). This reader has no ZIP64 extra-field parser, so
+    /// the sentinels are rejected rather than treated as literal sizes/offsets.
+    Zip64Unsupported,
+    /// H6 — the CRC-32 of the extracted bytes did not match the value recorded
+    /// in the central directory.
+    ChecksumMismatch,
+    /// H4 — two central-directory entries declare the same filename. Which one
+    /// `findEntry` returns is producer-dependent, so ambiguous archives (the
+    /// classic OOXML/"zip confusion" parser-differential trick) are refused.
+    DuplicateEntry,
 };
 
 pub const Entry = struct {
@@ -31,6 +42,7 @@ pub const Entry = struct {
     uncompressed_size: u32,
     compression_method: u16,
     local_header_offset: u32,
+    crc32: u32,
 };
 
 pub const ZipArchive = struct {
@@ -65,27 +77,47 @@ pub const ZipArchive = struct {
 
         // Parse EOCD
         const cd_entries = readU16(data, eocd_offset + 10);
+        const cd_size = readU32(data, eocd_offset + 12);
         const cd_offset = readU32(data, eocd_offset + 16);
 
+        // H5 — ZIP64 sentinels in the EOCD. Without a ZIP64 end-of-central-
+        // directory locator parser these would be read as literal sizes.
+        if (cd_entries == 0xFFFF or cd_size == 0xFFFFFFFF or cd_offset == 0xFFFFFFFF)
+            return ZipError.Zip64Unsupported;
+
+        // M6 — the central directory must lie wholly inside the archive and end
+        // at or before the EOCD record it is described by.
         if (cd_offset >= data.len) return ZipError.CorruptArchive;
+        const cd_end = std.math.add(usize, cd_offset, cd_size) catch
+            return ZipError.CorruptArchive;
+        if (cd_end > data.len or cd_end > eocd_offset) return ZipError.CorruptArchive;
 
         // Parse Central Directory entries
         var entries = allocator.alloc(Entry, cd_entries) catch return ZipError.OutOfMemory;
         errdefer allocator.free(entries);
 
         var filenames = allocator.alloc([]const u8, cd_entries) catch return ZipError.OutOfMemory;
+        var parsed: usize = 0;
         errdefer {
-            for (filenames[0..0]) |f| allocator.free(f);
+            // Free only the names actually duped so far — freeing `[0..0]` (the
+            // previous shape) leaked every name on a mid-loop failure.
+            for (filenames[0..parsed]) |f| allocator.free(f);
             allocator.free(filenames);
         }
 
+        // H4 — duplicate-filename detection. A linear scan would be O(n²) over
+        // up to 65 535 entries, so index the names as they are parsed.
+        var seen: std.StringHashMapUnmanaged(void) = .empty;
+        defer seen.deinit(allocator);
+        seen.ensureTotalCapacity(allocator, cd_entries) catch return ZipError.OutOfMemory;
+
         var offset: usize = cd_offset;
-        var i: usize = 0;
-        while (i < cd_entries) : (i += 1) {
-            if (offset + 46 > data.len) return ZipError.CorruptArchive;
+        while (parsed < cd_entries) {
+            if (offset + 46 > cd_end) return ZipError.CorruptArchive;
             if (readU32(data, offset) != CD_SIGNATURE) return ZipError.CorruptArchive;
 
             const method = readU16(data, offset + 10);
+            const crc = readU32(data, offset + 16);
             const comp_size = readU32(data, offset + 20);
             const uncomp_size = readU32(data, offset + 24);
             const name_len = readU16(data, offset + 28);
@@ -93,21 +125,37 @@ pub const ZipArchive = struct {
             const comment_len = readU16(data, offset + 32);
             const local_offset = readU32(data, offset + 42);
 
-            if (offset + 46 + name_len > data.len) return ZipError.CorruptArchive;
+            // H5 — per-entry ZIP64 sentinels: the real value lives in a 0x0001
+            // extra field this reader does not parse.
+            if (comp_size == 0xFFFFFFFF or uncomp_size == 0xFFFFFFFF or
+                local_offset == 0xFFFFFFFF) return ZipError.Zip64Unsupported;
+
+            // H4 — the whole record (name + extra + comment) must fit inside the
+            // central directory, not merely the name.
+            const record_end = 46 + @as(usize, name_len) + @as(usize, extra_len) +
+                @as(usize, comment_len);
+            const next_offset = std.math.add(usize, offset, record_end) catch
+                return ZipError.CorruptArchive;
+            if (next_offset > cd_end) return ZipError.CorruptArchive;
 
             const name_src = data[offset + 46 .. offset + 46 + name_len];
             const name_copy = allocator.dupe(u8, name_src) catch return ZipError.OutOfMemory;
-            filenames[i] = name_copy;
+            filenames[parsed] = name_copy;
+            parsed += 1;
 
-            entries[i] = .{
+            if (seen.getOrPutAssumeCapacity(name_copy).found_existing)
+                return ZipError.DuplicateEntry;
+
+            entries[parsed - 1] = .{
                 .filename = name_copy,
                 .compressed_size = comp_size,
                 .uncompressed_size = uncomp_size,
                 .compression_method = method,
                 .local_header_offset = local_offset,
+                .crc32 = crc,
             };
 
-            offset += 46 + name_len + extra_len + comment_len;
+            offset = next_offset;
         }
 
         return .{
@@ -152,22 +200,30 @@ pub const ZipArchive = struct {
         const cap = @min(MAX_DECOMPRESSED_PER_ENTRY, remaining_total);
         if (cap == 0) return ZipError.DecompressionFailed;
 
-        if (entry.compression_method == 0) {
+        const result = if (entry.compression_method == 0) blk: {
             // STORED: just copy
             if (compressed.len > cap) return ZipError.DecompressionFailed;
-            const result = self.allocator.dupe(u8, compressed) catch return ZipError.OutOfMemory;
-            self.bytes_decompressed = std.math.add(usize, self.bytes_decompressed, result.len) catch
-                return ZipError.DecompressionFailed;
-            return result;
-        } else if (entry.compression_method == 8) {
+            break :blk self.allocator.dupe(u8, compressed) catch return ZipError.OutOfMemory;
+        } else if (entry.compression_method == 8) blk: {
             // DEFLATED: decompress using std.compress.flate, capped.
-            const result = try inflate(self.allocator, compressed, cap);
-            self.bytes_decompressed = std.math.add(usize, self.bytes_decompressed, result.len) catch
-                return ZipError.DecompressionFailed;
-            return result;
+            break :blk try inflate(self.allocator, compressed, cap);
         } else {
             return ZipError.UnsupportedCompression;
-        }
+        };
+        errdefer self.allocator.free(result);
+
+        // H6 — verify the extracted bytes against the CRC-32 recorded in the
+        // central directory. Previously the reader trusted the archive
+        // completely; the writer computed CRCs but nothing ever checked them,
+        // so silent corruption (or a tampered entry) flowed straight into the
+        // XML parser. Also cross-checks the declared uncompressed_size, which
+        // makes the CD's own bookkeeping self-consistent.
+        if (result.len != entry.uncompressed_size) return ZipError.ChecksumMismatch;
+        if (std.hash.crc.Crc32.hash(result) != entry.crc32) return ZipError.ChecksumMismatch;
+
+        self.bytes_decompressed = std.math.add(usize, self.bytes_decompressed, result.len) catch
+            return ZipError.DecompressionFailed;
+        return result;
     }
 
     pub fn close(self: *ZipArchive) void {

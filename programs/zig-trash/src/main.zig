@@ -40,12 +40,13 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     if (std.mem.eql(u8, first_arg, "-V") or std.mem.eql(u8, first_arg, "--version")) {
-        wOut("trash 0.2.0 (zig)\n", .{});
+        wOut("trash 0.3.0 (zig)\n", .{});
         return;
     }
 
-    // Subcommand dispatch — only if first arg doesn't look like a flag or path
-    if (first_arg[0] != '-' and first_arg[0] != '.' and first_arg[0] != '/') {
+    // Subcommand dispatch — only if first arg doesn't look like a flag or path.
+    // The length guard matters: `trash ""` used to index a zero-length slice.
+    if (first_arg.len > 0 and first_arg[0] != '-' and first_arg[0] != '.' and first_arg[0] != '/') {
         if (std.mem.eql(u8, first_arg, "list")) return cmdList(allocator, io, &args_iter);
         if (std.mem.eql(u8, first_arg, "size")) return cmdSize(allocator, io, &args_iter);
         if (std.mem.eql(u8, first_arg, "empty")) return cmdEmpty(allocator, io, &args_iter);
@@ -144,10 +145,10 @@ fn cmdTrash(allocator: std.mem.Allocator, io: Io, first_arg: []const u8, args_it
         // "not found"; skip it when we already know the path is a symlink.
         if (!is_symlink and c.access(path_z, 0) != 0) {
             if (force) {
-                if (verbose) wErr("trash: skipping (not found): {s}\n", .{path});
+                if (verbose) wErrParts(&.{ "trash: skipping (not found): ", path, "\n" });
                 continue;
             }
-            wErr("trash: not found: {s}\n", .{path});
+            wErrParts(&.{ "trash: not found: ", path, "\n" });
             errors += 1;
             continue;
         }
@@ -172,30 +173,34 @@ fn cmdTrash(allocator: std.mem.Allocator, io: Io, first_arg: []const u8, args_it
                 break :blk allocator.dupe(u8, std.mem.span(resolved)) catch null;
             }
         } orelse {
-            wErr("trash: cannot resolve {s}\n", .{path});
+            wErrParts(&.{ "trash: cannot resolve ", path, "\n" });
             errors += 1;
             continue;
         };
         defer allocator.free(abs_path);
 
         if (dry_run) {
-            wOut("would trash: {s}\n", .{abs_path});
+            wOutParts(&.{ "would trash: ", abs_path, "\n" });
             continue;
         }
 
         const trash_name = trashFile(allocator, abs_path) catch {
-            wErr("trash: failed to trash {s}\n", .{abs_path});
+            wErrParts(&.{ "trash: failed to trash ", abs_path, "\n" });
             errors += 1;
             continue;
         };
         defer if (trash_name) |tn| allocator.free(tn);
 
-        // Write .trashinfo metadata
+        // Write .trashinfo metadata. The file is already in the trash at this
+        // point, so a metadata failure is not fatal — but it does make the item
+        // invisible to `list`/`restore`, so say so instead of swallowing it.
         if (trash_name) |tn| {
-            writeTrashInfo(allocator, io, tn, abs_path) catch {};
+            writeTrashInfo(allocator, io, tn, abs_path) catch {
+                wErrParts(&.{ "trash: warning: trashed but metadata not written (restore via Finder): ", abs_path, "\n" });
+            };
         }
 
-        if (verbose) wOut("trashed: {s}\n", .{abs_path});
+        if (verbose) wOutParts(&.{ "trashed: ", abs_path, "\n" });
     }
 
     if (errors > 0) std.process.exit(1);
@@ -260,7 +265,7 @@ fn cmdList(allocator: std.mem.Allocator, io: Io, args_iter: *std.process.Args.It
         const full = std.fmt.allocPrint(allocator, "{s}/{s}", .{ info_path, entry.name }) catch continue;
         defer allocator.free(full);
 
-        var te = readTrashInfo(allocator, io, full) orelse continue;
+        var te = readTrashInfo(allocator, full) orelse continue;
 
         // Apply filters
         if (older_secs) |threshold| {
@@ -319,7 +324,7 @@ fn cmdList(allocator: std.mem.Allocator, io: Io, args_iter: *std.process.Args.It
         } else {
             wOut("{d} item(s) in trash:\n\n", .{entries.items.len});
             for (entries.items) |e| {
-                wOut("  {s}  {s}\n", .{ e.date_str, e.original_path });
+                wOutParts(&.{ "  ", e.date_str, "  ", e.original_path, "\n" });
             }
         }
         // Count untracked files
@@ -396,24 +401,19 @@ fn dirSizeRecursive(allocator: std.mem.Allocator, io: Io, trash_path: []const u8
         const base = entry.name[0 .. entry.name.len - ".trashinfo".len];
         const file_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ trash_path, base }) catch continue;
         defer allocator.free(file_path);
-        const file_z = allocator.dupeZ(u8, file_path) catch continue;
-        defer allocator.free(file_z);
 
-        var st: Stat = undefined;
-        if (lstat(file_z, &st) == 0) {
-            total += @intCast(@max(st.size, 0));
-        }
+        if (lstatPath(io, file_path)) |st| total += st.size;
     }
     return total;
 }
 
-// macOS stat struct
-const Stat = extern struct {
-    dev: i32, mode: u16, nlink: u16, ino: u64, uid: u32, gid: u32, rdev: i32,
-    atime: c.timespec, mtime: c.timespec, ctime: c.timespec, _btime: c.timespec,
-    size: i64, blocks: i64, blksize: i32, flags: u32, gen: u32, _spare: i32, _reserved: [2]i64,
-};
-extern "c" fn lstat(path: [*:0]const u8, buf: *Stat) c_int;
+/// `lstat` an absolute path. Uses the `Io` layer rather than a hand-rolled
+/// `extern "c" fn lstat` + `Stat` struct: on x86_64 macOS the bare `lstat`
+/// symbol is the legacy 32-bit-inode variant, so the hand-rolled layout
+/// misread `st_size` there (`lstat$INODE64` is the 64-bit one).
+fn lstatPath(io: Io, abs_path: []const u8) ?File.Stat {
+    return Dir.cwd().statFile(io, abs_path, .{ .follow_symlinks = false }) catch null;
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Subcommand: trash empty
@@ -477,7 +477,7 @@ fn emptyOlderThan(allocator: std.mem.Allocator, io: Io, trash_path: []const u8, 
         const full = std.fmt.allocPrint(allocator, "{s}/{s}", .{ info_path, entry.name }) catch continue;
         defer allocator.free(full);
 
-        var te = readTrashInfo(allocator, io, full) orelse continue;
+        var te = readTrashInfo(allocator, full) orelse continue;
         defer te.deinit(allocator);
 
         if (te.timestamp) |ts| {
@@ -502,11 +502,20 @@ fn emptyOlderThan(allocator: std.mem.Allocator, io: Io, trash_path: []const u8, 
     }
 
     var deleted: u32 = 0;
+    var failed: u32 = 0;
     for (to_delete.items) |name| {
-        deleteTrashItem(allocator, trash_path, info_path, name);
-        deleted += 1;
+        if (deleteTrashItem(allocator, io, trash_path, info_path, name)) {
+            deleted += 1;
+        } else {
+            failed += 1;
+            wErrParts(&.{ "trash empty: could not delete ", name, "\n" });
+        }
     }
     wOut("Permanently deleted {d} item(s).\n", .{deleted});
+    if (failed > 0) {
+        wOut("{d} item(s) could not be deleted (still listed).\n", .{failed});
+        std.process.exit(1);
+    }
 }
 
 fn emptyAll(allocator: std.mem.Allocator, io: Io, trash_path: []const u8, info_path: []const u8, confirmed: bool) void {
@@ -546,71 +555,88 @@ fn emptyAll(allocator: std.mem.Allocator, io: Io, trash_path: []const u8, info_p
     }
 
     var deleted: u32 = 0;
+    var failed: u32 = 0;
     for (names.items) |name| {
-        // Delete the actual file from trash
-        const file_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ trash_path, name }) catch continue;
-        defer allocator.free(file_path);
-        const file_z = allocator.dupeZ(u8, file_path) catch continue;
-        defer allocator.free(file_z);
-
-        // Try unlink first (files), then rmdir (empty dirs), then recursive delete
-        if (c.unlink(file_z) == 0) {
-            deleted += 1;
-        } else if (c.rmdir(file_z) == 0) {
+        if (deleteTrashItem(allocator, io, trash_path, info_path, name)) {
             deleted += 1;
         } else {
-            // For non-empty directories, use recursive C delete
-            recursiveDelete(allocator, file_z);
-            deleted += 1;
+            failed += 1;
+            wErrParts(&.{ "trash empty: could not delete ", name, "\n" });
         }
-
-        // Delete the .trashinfo
-        const info_file = std.fmt.allocPrint(allocator, "{s}/{s}.trashinfo", .{ info_path, name }) catch continue;
-        defer allocator.free(info_file);
-        const info_z = allocator.dupeZ(u8, info_file) catch continue;
-        defer allocator.free(info_z);
-        _ = c.unlink(info_z);
     }
 
     var size_buf: [64]u8 = undefined;
     const size_str = humanSize(total, &size_buf);
     wOut("Permanently deleted {d} item(s) ({s}).\n", .{ deleted, size_str });
+    if (failed > 0) {
+        wOut("{d} item(s) could not be deleted (still listed).\n", .{failed});
+        std.process.exit(1);
+    }
 }
 
-fn recursiveDelete(allocator: std.mem.Allocator, path_z: [*:0]const u8) void {
-    const dir = c.opendir(path_z) orelse return;
+/// Recursively remove `path_z`. Returns true only if the directory is actually
+/// gone afterwards — the caller must not drop the item's `.trashinfo` on a
+/// partial failure, or the surviving files become invisible to `list`/`restore`.
+fn recursiveDelete(allocator: std.mem.Allocator, io: Io, path_z: [*:0]const u8) bool {
+    const dir = c.opendir(path_z) orelse return false;
     defer _ = c.closedir(dir);
+    var ok = true;
     while (c.readdir(dir)) |entry| {
         const name_ptr: [*:0]const u8 = @ptrCast(&entry.name);
         const name = std.mem.span(name_ptr);
         if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
 
-        const full = allocPrintZ(allocator, "{s}/{s}", .{ std.mem.span(path_z), name }) catch continue;
+        const full = allocPrintZ(allocator, "{s}/{s}", .{ std.mem.span(path_z), name }) catch {
+            ok = false;
+            continue;
+        };
         defer allocator.free(full);
 
-        if (entry.type == 4) { // DT_DIR
-            recursiveDelete(allocator, full);
+        // Filesystems that don't fill in d_type (DT_UNKNOWN) report every entry
+        // as "not a directory"; lstat to find out rather than unlink-and-fail.
+        const is_dir = switch (entry.type) {
+            c.DT.DIR => true,
+            c.DT.UNKNOWN => blk: {
+                const st = lstatPath(io, full) orelse break :blk false;
+                break :blk st.kind == .directory;
+            },
+            else => false,
+        };
+
+        if (is_dir) {
+            if (!recursiveDelete(allocator, io, full)) ok = false;
         } else {
-            _ = c.unlink(full);
+            if (c.unlink(full) != 0) ok = false;
         }
     }
-    _ = c.rmdir(path_z);
+    if (c.rmdir(path_z) != 0) ok = false;
+    return ok;
 }
 
-fn deleteTrashItem(allocator: std.mem.Allocator, trash_path: []const u8, info_path: []const u8, name: []const u8) void {
-    // Delete file/dir from trash
-    const file_path = allocPrintZ(allocator, "{s}/{s}", .{ trash_path, name }) catch return;
+/// Permanently remove one trashed item and its metadata. Returns true only if
+/// the item itself is gone; the `.trashinfo` is kept on failure so the item
+/// stays visible to `list` instead of becoming orphaned/untracked.
+fn deleteTrashItem(allocator: std.mem.Allocator, io: Io, trash_path: []const u8, info_path: []const u8, name: []const u8) bool {
+    const file_path = allocPrintZ(allocator, "{s}/{s}", .{ trash_path, name }) catch return false;
     defer allocator.free(file_path);
+
+    // unlink (file/symlink) → rmdir (empty dir) → recursive (non-empty dir)
+    var ok = true;
     if (c.unlink(file_path) != 0) {
         if (c.rmdir(file_path) != 0) {
-            recursiveDelete(allocator, file_path);
+            if (lstatPath(io, file_path) == null) {
+                ok = true; // already gone (e.g. the Trash was emptied in Finder)
+            } else {
+                ok = recursiveDelete(allocator, io, file_path);
+            }
         }
     }
+    if (!ok) return false;
 
-    // Delete .trashinfo
-    const info_file = allocPrintZ(allocator, "{s}/{s}.trashinfo", .{ info_path, name }) catch return;
+    const info_file = allocPrintZ(allocator, "{s}/{s}.trashinfo", .{ info_path, name }) catch return true;
     defer allocator.free(info_file);
     _ = c.unlink(info_file);
+    return true;
 }
 
 fn readConfirmation() bool {
@@ -638,6 +664,11 @@ fn cmdRestore(allocator: std.mem.Allocator, io: Io, args_iter: *std.process.Args
                 wErr("trash restore: --to requires a path\n", .{});
                 std.process.exit(1);
             };
+        } else if (arg.len == 0) {
+            // An empty pattern is a substring of every path — refuse rather than
+            // silently offer an arbitrary entry for restore.
+            wErr("trash restore: empty pattern\n", .{});
+            std.process.exit(1);
         } else if (arg[0] != '-') {
             pattern = arg;
         } else {
@@ -676,7 +707,7 @@ fn cmdRestore(allocator: std.mem.Allocator, io: Io, args_iter: *std.process.Args
         const full = std.fmt.allocPrint(allocator, "{s}/{s}", .{ info_path, entry.name }) catch continue;
         defer allocator.free(full);
 
-        var te = readTrashInfo(allocator, io, full) orelse continue;
+        var te = readTrashInfo(allocator, full) orelse continue;
 
         if (std.mem.indexOf(u8, te.original_path, pattern.?) != null) {
             const base = entry.name[0 .. entry.name.len - ".trashinfo".len];
@@ -732,11 +763,11 @@ fn cmdRestore(allocator: std.mem.Allocator, io: Io, args_iter: *std.process.Args
 
     const dest = restore_to orelse to_restore.original_path;
 
-    // Check destination doesn't exist
-    const dest_z = allocator.dupeZ(u8, dest) catch std.process.exit(1);
-    defer allocator.free(dest_z);
-    if (c.access(dest_z, 0) == 0) {
-        wErr("trash restore: destination already exists: {s}\n", .{dest});
+    // Check destination doesn't exist. lstat, not access(): access() follows
+    // symlinks, so a dangling symlink at `dest` would read as "free" and the
+    // rename below would silently clobber the link.
+    if (lstatPath(io, dest) != null) {
+        wErrParts(&.{ "trash restore: destination already exists: ", dest, "\n" });
         std.process.exit(1);
     }
 
@@ -745,7 +776,7 @@ fn cmdRestore(allocator: std.mem.Allocator, io: Io, args_iter: *std.process.Args
         Dir.createDirAbsolute(io, parent, .default_dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => {
-                wErr("trash restore: cannot create parent directory: {s}\n", .{parent});
+                wErrParts(&.{ "trash restore: cannot create parent directory: ", parent, "\n" });
                 std.process.exit(1);
             },
         };
@@ -755,7 +786,7 @@ fn cmdRestore(allocator: std.mem.Allocator, io: Io, args_iter: *std.process.Args
     const src_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ trash_path, tn }) catch return;
     defer allocator.free(src_path);
     Dir.renameAbsolute(src_path, dest, io) catch {
-        wErr("trash restore: failed to move {s} → {s}\n", .{ src_path, dest });
+        wErrParts(&.{ "trash restore: failed to move ", src_path, " \xe2\x86\x92 ", dest, "\n" });
         if (comptime builtin.os.tag == .macos) {
             wErr("hint: grant Full Disk Access to your terminal app in\n", .{});
             wErr("  System Settings > Privacy & Security > Full Disk Access\n", .{});
@@ -768,7 +799,7 @@ fn cmdRestore(allocator: std.mem.Allocator, io: Io, args_iter: *std.process.Args
     defer allocator.free(info_file_path);
     Dir.deleteFileAbsolute(io, info_file_path) catch {};
 
-    wOut("restored: {s}\n", .{dest});
+    wOutParts(&.{ "restored: ", dest, "\n" });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -921,13 +952,13 @@ const trashLinux = if (builtin.os.tag == .linux) struct {
 // Metadata: .trashinfo read/write
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const TrashEntry = struct {
+pub const TrashEntry = struct {
     original_path: []const u8,
     date_str: []const u8,
     timestamp: ?i64,
     trash_name: ?[]const u8,
 
-    fn deinit(self: *TrashEntry, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *TrashEntry, allocator: std.mem.Allocator) void {
         allocator.free(self.original_path);
         allocator.free(self.date_str);
         if (self.trash_name) |tn| allocator.free(tn);
@@ -946,7 +977,7 @@ fn isTrashPathChar(ch: u8) bool {
     };
 }
 
-fn encodeTrashPath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+pub fn encodeTrashPath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     var aw: std.Io.Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
     try std.Uri.Component.percentEncode(&aw.writer, path, isTrashPathChar);
@@ -955,7 +986,7 @@ fn encodeTrashPath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
 
 // Decode a percent-encoded `Path` value. Legacy raw values written by older
 // versions decode unchanged unless they happen to contain a literal `%XX`.
-fn decodeTrashPath(allocator: std.mem.Allocator, raw: []const u8) ?[]u8 {
+pub fn decodeTrashPath(allocator: std.mem.Allocator, raw: []const u8) ?[]u8 {
     const tmp = allocator.alloc(u8, raw.len) catch return null;
     defer allocator.free(tmp);
     const decoded = std.Uri.percentDecodeBackwards(tmp, raw);
@@ -985,13 +1016,12 @@ fn writeTrashInfo(allocator: std.mem.Allocator, io: Io, trash_filename: []const 
     const content = try std.fmt.allocPrint(allocator, "[Trash Info]\nPath={s}\nDeletionDate={s}\n", .{ encoded, &now });
     defer allocator.free(content);
 
-    const file = Dir.createFileAbsolute(io, file_path, .{}) catch return;
+    const file = try Dir.createFileAbsolute(io, file_path, .{});
     defer file.close(io);
-    file.writeStreamingAll(io, content) catch {};
+    try file.writeStreamingAll(io, content);
 }
 
-fn readTrashInfo(allocator: std.mem.Allocator, io: Io, path: []const u8) ?TrashEntry {
-    _ = io;
+pub fn readTrashInfo(allocator: std.mem.Allocator, path: []const u8) ?TrashEntry {
     // Use C file API for simplicity — .trashinfo files are tiny
     const path_z = allocator.dupeZ(u8, path) catch return null;
     defer allocator.free(path_z);
@@ -1009,14 +1039,20 @@ fn readTrashInfo(allocator: std.mem.Allocator, io: Io, path: []const u8) ?TrashE
 
     var line_iter = std.mem.splitScalar(u8, content, '\n');
     while (line_iter.next()) |line| {
+        // First occurrence wins: a file carrying a second `Path=` line (a
+        // legacy unencoded entry whose filename contained a newline) must not
+        // silently override the real one — nor leak the first allocation.
         if (std.mem.startsWith(u8, line, "Path=")) {
-            original_path = decodeTrashPath(allocator, line["Path=".len..]);
+            if (original_path == null) original_path = decodeTrashPath(allocator, line["Path=".len..]);
         } else if (std.mem.startsWith(u8, line, "DeletionDate=")) {
-            date_str = allocator.dupe(u8, line["DeletionDate=".len..]) catch null;
+            if (date_str == null) date_str = allocator.dupe(u8, line["DeletionDate=".len..]) catch null;
         }
     }
 
-    const op = original_path orelse return null;
+    const op = original_path orelse {
+        if (date_str) |ds| allocator.free(ds);
+        return null;
+    };
     const ds = date_str orelse {
         allocator.free(op);
         return null;
@@ -1056,34 +1092,47 @@ fn getInfoDir(allocator: std.mem.Allocator) ?[]const u8 {
 // Time helpers
 // ═══════════════════════════════════════════════════════════════════════════════
 
-extern "c" fn time(tloc: ?*c.time_t) c.time_t;
-extern "c" fn localtime(timer: *const c.time_t) ?*const extern struct {
-    tm_sec: c_int,
-    tm_min: c_int,
-    tm_hour: c_int,
-    tm_mday: c_int,
-    tm_mon: c_int,
-    tm_year: c_int,
-    tm_wday: c_int,
-    tm_yday: c_int,
-    tm_isdst: c_int,
-    tm_gmtoff: c_long,
-    tm_zone: ?[*:0]const u8,
+/// `struct tm`. The trailing `tm_gmtoff`/`tm_zone` fields are a BSD extension
+/// that glibc also provides, so this layout is valid on both supported targets.
+const Tm = extern struct {
+    tm_sec: c_int = 0,
+    tm_min: c_int = 0,
+    tm_hour: c_int = 0,
+    tm_mday: c_int = 0,
+    tm_mon: c_int = 0,
+    tm_year: c_int = 0,
+    tm_wday: c_int = 0,
+    tm_yday: c_int = 0,
+    tm_isdst: c_int = 0,
+    tm_gmtoff: c_long = 0,
+    tm_zone: ?[*:0]const u8 = null,
 };
 
-fn timestampToIso8601() [19]u8 {
+extern "c" fn time(tloc: ?*c.time_t) c.time_t;
+extern "c" fn localtime_r(timer: *const c.time_t, result: *Tm) ?*Tm;
+extern "c" fn mktime(tm: *Tm) c.time_t;
+
+/// The freedesktop trash spec stores `DeletionDate` as a local-time datetime
+/// with no zone suffix, so this emits local time — and `parseIso8601` below
+/// interprets it back as local time (via `mktime`, which applies the DST rules
+/// in effect on that date). Writing local and parsing as UTC — the previous
+/// behaviour — skewed `empty --older` by up to the local UTC offset.
+pub fn timestampToIso8601() [19]u8 {
     var t: c.time_t = undefined;
     _ = time(&t);
-    const tm = localtime(&t);
+    var tm: Tm = .{};
     var buf: [19]u8 = undefined;
-    if (tm) |lt| {
+    if (localtime_r(&t, &tm) != null) {
         _ = std.fmt.bufPrint(&buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}", .{
-            @as(u32, @intCast(lt.tm_year + 1900)),
-            @as(u32, @intCast(lt.tm_mon + 1)),
-            @as(u32, @intCast(lt.tm_mday)),
-            @as(u32, @intCast(lt.tm_hour)),
-            @as(u32, @intCast(lt.tm_min)),
-            @as(u32, @intCast(lt.tm_sec)),
+            // u32, not i32: `{d:0>4}` renders a leading '+' for signed types,
+            // which would push the seconds digit out of the 19-byte buffer.
+            // Clamped rather than @intCast'd so a pre-1900 clock can't panic.
+            @as(u32, @intCast(@max(tm.tm_year + 1900, 0))),
+            @as(u32, @intCast(tm.tm_mon + 1)),
+            @as(u32, @intCast(tm.tm_mday)),
+            @as(u32, @intCast(tm.tm_hour)),
+            @as(u32, @intCast(tm.tm_min)),
+            @as(u32, @intCast(tm.tm_sec)),
         }) catch {};
     } else {
         @memcpy(&buf, "1970-01-01T00:00:00");
@@ -1091,40 +1140,96 @@ fn timestampToIso8601() [19]u8 {
     return buf;
 }
 
-fn parseIso8601(s: []const u8) ?i64 {
+fn isLeapYear(y: i64) bool {
+    return (@mod(y, 4) == 0 and @mod(y, 100) != 0) or @mod(y, 400) == 0;
+}
+
+fn daysInMonth(y: i64, m: u32) u32 {
+    return switch (m) {
+        1, 3, 5, 7, 8, 10, 12 => 31,
+        4, 6, 9, 11 => 30,
+        2 => if (isLeapYear(y)) 29 else 28,
+        else => 0,
+    };
+}
+
+/// Days since 1970-01-01 in the proleptic Gregorian calendar (Howard Hinnant's
+/// `days_from_civil`). Exact for every year — the previous hand-rolled version
+/// used a fixed non-leap month table and drifted by a day inside leap years.
+///
+/// Precondition: `m` in [1,12] and `d` >= 1 (callers validate; `parseIso8601`
+/// rejects out-of-range fields before reaching here).
+pub fn daysFromCivil(y: i64, m: u32, d: u32) i64 {
+    const shifted_year = y - @as(i64, if (m <= 2) 1 else 0);
+    const era = @divFloor(shifted_year, 400);
+    const yoe: u64 = @intCast(shifted_year - era * 400); // [0, 399]
+    const mp: u64 = (@as(u64, m) + 9) % 12; // Mar=0 … Feb=11
+    const doy: u64 = (153 * mp + 2) / 5 + d - 1; // [0, 365]
+    const doe: u64 = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    return era * 146097 + @as(i64, @intCast(doe)) - 719468;
+}
+
+/// Civil datetime → Unix epoch seconds, treating the input as UTC.
+pub fn civilToEpochUtc(y: i64, mon: u32, d: u32, h: u32, mi: u32, s: u32) i64 {
+    return daysFromCivil(y, mon, d) * 86400 +
+        @as(i64, h) * 3600 + @as(i64, mi) * 60 + @as(i64, s);
+}
+
+/// Civil datetime → Unix epoch seconds, treating the input as **local** time.
+/// `mktime` with `tm_isdst = -1` resolves the offset (including DST) that was
+/// in effect on that date; the UTC computation is only a fallback.
+fn civilLocalToEpoch(y: i64, mon: u32, d: u32, h: u32, mi: u32, s: u32) i64 {
+    var tm: Tm = .{
+        .tm_sec = @intCast(s),
+        .tm_min = @intCast(mi),
+        .tm_hour = @intCast(h),
+        .tm_mday = @intCast(d),
+        .tm_mon = @intCast(mon - 1),
+        .tm_year = @intCast(y - 1900),
+        .tm_isdst = -1,
+    };
+    const t = mktime(&tm);
+    if (t != -1) return @intCast(t);
+    return civilToEpochUtc(y, mon, d, h, mi, s);
+}
+
+/// Parse `YYYY-MM-DDTHH:MM:SS` (freedesktop `DeletionDate`, local time) into
+/// Unix epoch seconds. Field ranges are validated so a corrupt or forged
+/// `.trashinfo` cannot produce a bogus age that `empty --older` would act on.
+pub fn parseIso8601(s: []const u8) ?i64 {
     if (s.len < 19) return null;
-    const year = std.fmt.parseInt(u32, s[0..4], 10) catch return null;
+    if (s[4] != '-' or s[7] != '-' or s[13] != ':' or s[16] != ':') return null;
+    if (s[10] != 'T' and s[10] != ' ') return null;
+
+    const year = std.fmt.parseInt(i64, s[0..4], 10) catch return null;
     const month = std.fmt.parseInt(u32, s[5..7], 10) catch return null;
     const mday = std.fmt.parseInt(u32, s[8..10], 10) catch return null;
     const hour = std.fmt.parseInt(u32, s[11..13], 10) catch return null;
     const minute = std.fmt.parseInt(u32, s[14..16], 10) catch return null;
     const second = std.fmt.parseInt(u32, s[17..19], 10) catch return null;
 
-    // Approximate timestamp for age comparison
-    const y = if (year >= 1970) year - 1970 else return null;
-    const days: i64 = @as(i64, @intCast(y)) * 365 + @as(i64, @intCast(y / 4)) -
-        @as(i64, @intCast(y / 100)) + @as(i64, @intCast(y / 400));
-    const month_days = [_]u32{ 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
-    const m_days: i64 = if (month >= 1 and month <= 12) @intCast(month_days[month - 1]) else return null;
-    const total_days = days + m_days + @as(i64, @intCast(mday)) - 1;
+    if (month < 1 or month > 12) return null;
+    if (mday < 1 or mday > daysInMonth(year, month)) return null;
+    if (hour > 23 or minute > 59 or second > 60) return null; // 60 = leap second
 
-    return total_days * 86400 + @as(i64, @intCast(hour)) * 3600 +
-        @as(i64, @intCast(minute)) * 60 + @as(i64, @intCast(second));
+    return civilLocalToEpoch(year, month, mday, hour, minute, second);
 }
 
-fn parseAge(s: []const u8) ?i64 {
+pub fn parseAge(s: []const u8) ?i64 {
     if (s.len < 2) return null;
     const unit = s[s.len - 1];
-    const num = std.fmt.parseInt(i64, s[0 .. s.len - 1], 10) catch return null;
+    // Unsigned: a negative age would make `now - deleted_at >= threshold` true
+    // for every entry, turning `empty --older -1d` into `empty` (delete all).
+    const num = std.fmt.parseInt(u32, s[0 .. s.len - 1], 10) catch return null;
     return switch (unit) {
-        'd' => num * 86400,
-        'h' => num * 3600,
-        'm' => num * 60,
+        'd' => @as(i64, num) * 86400,
+        'h' => @as(i64, num) * 3600,
+        'm' => @as(i64, num) * 60,
         else => null,
     };
 }
 
-fn humanSize(bytes: u64, buf: []u8) []const u8 {
+pub fn humanSize(bytes: u64, buf: []u8) []const u8 {
     const f: f64 = @floatFromInt(bytes);
     if (bytes < 1024) {
         return std.fmt.bufPrint(buf, "{d} B", .{bytes}) catch "? B";
@@ -1146,6 +1251,26 @@ fn allocPrintZ(allocator: std.mem.Allocator, comptime fmt: []const u8, args: any
     const z = try allocator.dupeZ(u8, s);
     allocator.free(s);
     return z;
+}
+
+/// Write pre-formatted pieces straight to a fd. `wOut`/`wErr` render through a
+/// fixed 2 KiB buffer and DROP the whole line on overflow, which silently
+/// swallows entries whose path approaches PATH_MAX (1024 on macOS, 4096 on
+/// Linux) — unacceptable for `list`, and for the messages that name what was
+/// or wasn't deleted. Anything carrying a filesystem path goes through here.
+fn writeParts(fd: c.fd_t, parts: []const []const u8) void {
+    for (parts) |p| {
+        if (p.len == 0) continue;
+        _ = c.write(fd, p.ptr, p.len);
+    }
+}
+
+fn wOutParts(parts: []const []const u8) void {
+    writeParts(1, parts);
+}
+
+fn wErrParts(parts: []const []const u8) void {
+    writeParts(2, parts);
 }
 
 fn wOut(comptime fmt: []const u8, args: anytype) void {

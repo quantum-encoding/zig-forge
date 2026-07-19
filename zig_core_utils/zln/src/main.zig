@@ -3,35 +3,21 @@
 //! Compatible with GNU ln:
 //! - Create hard links (default)
 //! - -s, --symbolic: create symbolic links
-//! - -f, --force: remove existing destination files
-//! - -n, --no-dereference: treat LINK_NAME as normal file if it's a symlink
+//! - -f, --force: remove existing destination files (link first; never destroys
+//!   the destination when the link cannot succeed — matches GNU coreutils)
+//! - -i, --interactive: prompt whether to remove destinations (last of -f/-i wins)
+//! - -n, --no-dereference: treat LINK_NAME as a normal file if it is a symbolic
+//!   link to a directory
+//! - -r, --relative: with -s, create symlinks relative to link location
 //! - -v, --verbose: print name of each linked file
 //! - -t, --target-directory=DIR: specify the DIRECTORY in which to create the links
+//! - -T, --no-target-directory: treat LINK_NAME as a normal file always
+//! - One-operand form `zln TARGET` creates ./TARGET_BASENAME like GNU ln.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const libc = std.c;
 const Io = std.Io;
-
-// Cross-platform Stat structure
-const Stat = switch (builtin.os.tag) {
-    .linux => extern struct {
-        dev: u64, ino: u64, nlink: u64, mode: u32, uid: u32, gid: u32,
-        __pad0: u32 = 0, rdev: u64, size: i64, blksize: i64, blocks: i64,
-        atim: libc.timespec, mtim: libc.timespec, ctim: libc.timespec,
-        __unused: [3]i64 = .{ 0, 0, 0 },
-    },
-    .macos, .ios, .tvos, .watchos => extern struct {
-        dev: i32, mode: u16, nlink: u16, ino: u64, uid: u32, gid: u32, rdev: i32,
-        atim: libc.timespec, mtim: libc.timespec, ctim: libc.timespec, birthtim: libc.timespec,
-        size: i64, blocks: i64, blksize: i32, flags: u32, gen: u32, lspare: i32, qspare: [2]i64,
-    },
-    else => libc.Stat,
-};
-
-extern "c" fn access(path: [*:0]const u8, mode: c_int) c_int;
-extern "c" fn unlink(path: [*:0]const u8) c_int;
-extern "c" fn stat(path: [*:0]const u8, buf: *Stat) c_int;
 
 const Config = struct {
     symbolic: bool = false,
@@ -55,15 +41,93 @@ const Config = struct {
     }
 };
 
-fn fileExists(path: [:0]const u8) bool {
-    return access(path.ptr, 0) == 0;
+/// stat() following symlinks; null if the path cannot be resolved.
+fn statPath(path: [:0]const u8) ?libc.Stat {
+    var st: libc.Stat = undefined;
+    if (libc.fstatat(libc.AT.FDCWD, path.ptr, &st, 0) != 0) return null;
+    return st;
 }
 
-fn isDirectory(path: [:0]const u8) bool {
-    var stat_buf: Stat = undefined;
-    const result = stat(path.ptr, &stat_buf);
-    if (result != 0) return false;
-    return (stat_buf.mode & 0o170000) == 0o40000;
+/// lstat(): stat of the path itself, never following a trailing symlink.
+fn lstatPath(path: [:0]const u8) ?libc.Stat {
+    var st: libc.Stat = undefined;
+    if (libc.fstatat(libc.AT.FDCWD, path.ptr, &st, libc.AT.SYMLINK_NOFOLLOW) != 0) return null;
+    return st;
+}
+
+fn isDirStat(st: libc.Stat) bool {
+    return std.posix.S.ISDIR(st.mode);
+}
+
+/// Is the destination a directory for link-placement purposes?
+/// With -n/--no-dereference (or -T upstream), a symlink to a directory must
+/// NOT count as a directory — GNU semantics for `ln -sfn new cur`.
+fn destIsDirectory(path: [:0]const u8, config: *const Config) bool {
+    const st = (if (config.no_dereference) lstatPath(path) else statPath(path)) orelse return false;
+    return isDirStat(st);
+}
+
+extern "c" fn strerror(errnum: c_int) ?[*:0]const u8;
+
+fn errString(err: c_int) []const u8 {
+    const s = strerror(err) orelse return "Unknown error";
+    return std.mem.span(s);
+}
+
+fn errnoNow() c_int {
+    return libc._errno().*;
+}
+
+const E_EEXIST: c_int = @intFromEnum(libc.E.EXIST);
+
+/// GNU-style basename: ignores trailing slashes ("a/b/" -> "b", "/" -> "/").
+fn basename(path: []const u8) []const u8 {
+    if (path.len == 0) return path;
+    var end = path.len;
+    while (end > 1 and path[end - 1] == '/') end -= 1;
+    const trimmed = path[0..end];
+    if (std.mem.lastIndexOfScalar(u8, trimmed, '/')) |idx| {
+        if (idx + 1 < trimmed.len) return trimmed[idx + 1 ..];
+    }
+    return trimmed;
+}
+
+fn dirnameOf(path: []const u8) []const u8 {
+    return std.fs.path.dirname(path) orelse ".";
+}
+
+/// GNU same_name(): do the two paths refer to the same directory entry?
+/// True iff the basenames match and the containing directories are the same
+/// inode. This is the guard that prevents `ln -f x x` from destroying x.
+fn sameName(allocator: std.mem.Allocator, a: []const u8, b: []const u8) bool {
+    if (!std.mem.eql(u8, basename(a), basename(b))) return false;
+
+    const da = allocator.dupeZ(u8, dirnameOf(a)) catch return false;
+    defer allocator.free(da);
+    const db = allocator.dupeZ(u8, dirnameOf(b)) catch return false;
+    defer allocator.free(db);
+
+    const sa = statPath(da) orelse return false;
+    const sb = statPath(db) orelse return false;
+    return sa.dev == sb.dev and sa.ino == sb.ino;
+}
+
+fn attemptLink(target_z: [:0]const u8, link_z: [:0]const u8, symbolic: bool) bool {
+    if (symbolic) {
+        return libc.symlink(target_z.ptr, link_z.ptr) == 0;
+    }
+    return libc.link(target_z.ptr, link_z.ptr) == 0;
+}
+
+fn printLinkError(link_name: []const u8, effective_target: []const u8, symbolic: bool, err: c_int) void {
+    if (symbolic) {
+        printErrorFmt("failed to create symbolic link '{s}': {s}", .{ link_name, errString(err) });
+    } else if (err == E_EEXIST) {
+        // GNU omits the "=> target" part for the File-exists diagnostic.
+        printErrorFmt("failed to create hard link '{s}': {s}", .{ link_name, errString(err) });
+    } else {
+        printErrorFmt("failed to create hard link '{s}' => '{s}': {s}", .{ link_name, effective_target, errString(err) });
+    }
 }
 
 fn makeLink(allocator: std.mem.Allocator, target: []const u8, link_name: []const u8, config: *const Config) !void {
@@ -86,58 +150,87 @@ fn makeLink(allocator: std.mem.Allocator, target: []const u8, link_name: []const
     const link_z = try allocator.dupeZ(u8, link_name);
     defer allocator.free(link_z);
 
-    // Handle existing file
-    if (fileExists(link_z)) {
-        if (config.interactive and !config.force) {
-            if (!promptUser(link_name)) {
-                return; // User declined
-            }
-            // User said yes, remove existing
-            if (unlink(link_z.ptr) != 0) {
-                const err = libc._errno().*;
-                printErrorFmt("cannot remove '{s}': {s}", .{ link_name, errnoToString(err) });
-                return error.UnlinkFailed;
-            }
-        } else if (config.force) {
-            if (unlink(link_z.ptr) != 0) {
-                const err = libc._errno().*;
-                printErrorFmt("cannot remove '{s}': {s}", .{ link_name, errnoToString(err) });
-                return error.UnlinkFailed;
-            }
+    if (!config.symbolic) {
+        // GNU checks that a hard-link target is accessible (dereferencing
+        // symlinks) before anything else: "failed to access 'X': ...".
+        const raw_target_z = try allocator.dupeZ(u8, target);
+        defer allocator.free(raw_target_z);
+        const tst = statPath(raw_target_z) orelse {
+            printErrorFmt("failed to access '{s}': {s}", .{ target, errString(errnoNow()) });
+            return error.TargetInaccessible;
+        };
+        if (isDirStat(tst)) {
+            printErrorFmt("{s}: hard link not allowed for directory", .{target});
+            return error.HardLinkToDirectory;
         }
     }
 
-    if (config.symbolic) {
-        // Create symbolic link
-        const result = libc.symlink(target_z.ptr, link_z.ptr);
-        if (result != 0) {
-            const err = libc._errno().*;
-            printErrorFmt("failed to create symbolic link '{s}': {s}", .{ link_name, errnoToString(err) });
-            return error.SymlinkFailed;
+    // Attempt the link FIRST. Only if it fails with EEXIST and replacement was
+    // requested (-f / -i) do we consider removing the destination. This is the
+    // GNU-compatible order: a failing link never destroys the destination.
+    if (attemptLink(target_z, link_z, config.symbolic)) {
+        if (config.verbose) printVerbose(link_name, effective_target, config.symbolic);
+        return;
+    }
+    const first_err = errnoNow();
+    if (first_err != E_EEXIST or (!config.force and !config.interactive)) {
+        printLinkError(link_name, effective_target, config.symbolic, first_err);
+        return error.LinkFailed;
+    }
+
+    // Destination exists and replacement was requested.
+    if (lstatPath(link_z)) |dst| {
+        if (isDirStat(dst)) {
+            // GNU: "ln: realdir: cannot overwrite directory" (before any prompt)
+            printErrorFmt("{s}: cannot overwrite directory", .{link_name});
+            return error.IsDirectory;
+        }
+    }
+
+    if (config.force) {
+        // Refuse to unlink the destination when it IS the source entry —
+        // otherwise `ln -f x x` would delete x (GNU same_name guard).
+        if (sameName(allocator, target, link_name)) {
+            printErrorFmt("'{s}' and '{s}' are the same file", .{ target, link_name });
+            return error.SameFile;
         }
     } else {
-        // Create hard link
-        const result = libc.link(target_z.ptr, link_z.ptr);
-        if (result != 0) {
-            const err = libc._errno().*;
-            printErrorFmt("failed to create hard link '{s}' => '{s}': {s}", .{ link_name, effective_target, errnoToString(err) });
-            return error.LinkFailed;
+        // interactive
+        if (!promptUser(link_name)) {
+            // GNU exits 1 on a declined prompt, with no extra message.
+            return error.Declined;
         }
     }
 
-    if (config.verbose) {
-        printVerbose(link_name, effective_target, config.symbolic);
+    if (!config.symbolic) {
+        // Same inode already? Unlink+relink would recreate the identical
+        // state; GNU replaces atomically. Treat as success without touching
+        // the destination so no failure mode can destroy it.
+        const raw_target_z = try allocator.dupeZ(u8, target);
+        defer allocator.free(raw_target_z);
+        if (statPath(raw_target_z)) |tst| {
+            if (lstatPath(link_z)) |dst| {
+                if (tst.dev == dst.dev and tst.ino == dst.ino) {
+                    if (config.verbose) printVerbose(link_name, effective_target, config.symbolic);
+                    return;
+                }
+            }
+        }
     }
+
+    if (libc.unlink(link_z.ptr) != 0) {
+        printErrorFmt("cannot remove '{s}': {s}", .{ link_name, errString(errnoNow()) });
+        return error.UnlinkFailed;
+    }
+
+    if (!attemptLink(target_z, link_z, config.symbolic)) {
+        printLinkError(link_name, effective_target, config.symbolic, errnoNow());
+        return error.LinkFailed;
+    }
+
+    if (config.verbose) printVerbose(link_name, effective_target, config.symbolic);
 }
 
-fn basename(path: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, path, '/')) |idx| {
-        return path[idx + 1 ..];
-    }
-    return path;
-}
-
-extern "c" fn realpath(path: [*:0]const u8, resolved_path: ?[*]u8) ?[*]u8;
 extern "c" fn getcwd(buf: [*]u8, size: usize) ?[*]u8;
 
 fn resolveAbsolute(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
@@ -153,6 +246,24 @@ fn resolveAbsolute(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
     return try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cwd, path });
 }
 
+/// Split an absolute path into components, canonicalizing "." and ".."
+/// lexically (GNU ln -r emits 'a/b/f' for 'a/./b/../b/f').
+fn appendCanonicalParts(
+    allocator: std.mem.Allocator,
+    parts: *std.ArrayListUnmanaged([]const u8),
+    abs_path: []const u8,
+) !void {
+    var iter = std.mem.splitScalar(u8, abs_path, '/');
+    while (iter.next()) |part| {
+        if (part.len == 0 or std.mem.eql(u8, part, ".")) continue;
+        if (std.mem.eql(u8, part, "..")) {
+            _ = parts.pop(); // at root, ".." is a no-op
+            continue;
+        }
+        try parts.append(allocator, part);
+    }
+}
+
 fn computeRelativePath(allocator: std.mem.Allocator, target: []const u8, link_name: []const u8) ![]const u8 {
     // Resolve both paths to absolute
     const abs_target = try resolveAbsolute(allocator, target);
@@ -166,21 +277,14 @@ fn computeRelativePath(allocator: std.mem.Allocator, target: []const u8, link_na
     else
         ".";
 
-    // Split both paths into components
+    // Split both paths into canonicalized components
     var target_parts: std.ArrayListUnmanaged([]const u8) = .empty;
     defer target_parts.deinit(allocator);
     var link_dir_parts: std.ArrayListUnmanaged([]const u8) = .empty;
     defer link_dir_parts.deinit(allocator);
 
-    var t_iter = std.mem.splitScalar(u8, abs_target, '/');
-    while (t_iter.next()) |part| {
-        if (part.len > 0) try target_parts.append(allocator, part);
-    }
-
-    var l_iter = std.mem.splitScalar(u8, link_dir, '/');
-    while (l_iter.next()) |part| {
-        if (part.len > 0) try link_dir_parts.append(allocator, part);
-    }
+    try appendCanonicalParts(allocator, &target_parts, abs_target);
+    try appendCanonicalParts(allocator, &link_dir_parts, link_dir);
 
     // Find common prefix length
     var common: usize = 0;
@@ -215,28 +319,22 @@ fn computeRelativePath(allocator: std.mem.Allocator, target: []const u8, link_na
 
 fn promptUser(link_name: []const u8) bool {
     std.debug.print("zln: replace '{s}'? ", .{link_name});
-    // Read one byte from stdin
-    var buf: [16]u8 = undefined;
+    // Read one full line from stdin so consecutive prompts don't misconsume input.
     const stdin_fd: c_int = 0;
-    const n = libc.read(stdin_fd, &buf, buf.len);
-    if (n <= 0) return false;
-    return buf[0] == 'y' or buf[0] == 'Y';
-}
-
-fn errnoToString(err: c_int) []const u8 {
-    return switch (err) {
-        1 => "Operation not permitted",
-        2 => "No such file or directory",
-        13 => "Permission denied",
-        17 => "File exists",
-        18 => "Invalid cross-device link",
-        20 => "Not a directory",
-        21 => "Is a directory",
-        28 => "No space left on device",
-        30 => "Read-only file system",
-        31 => "Too many links",
-        else => "Unknown error",
-    };
+    var first: u8 = 0;
+    var have_first = false;
+    while (true) {
+        var ch: [1]u8 = undefined;
+        const n = libc.read(stdin_fd, &ch, 1);
+        if (n <= 0) break; // EOF/error: treat as decline
+        if (!have_first) {
+            first = ch[0];
+            have_first = true;
+        }
+        if (ch[0] == '\n') break;
+    }
+    if (!have_first) return false;
+    return first == 'y' or first == 'Y';
 }
 
 fn printVerbose(link_name: []const u8, target: []const u8, symbolic: bool) void {
@@ -258,6 +356,18 @@ fn printError(msg: []const u8) void {
 
 fn printErrorFmt(comptime fmt: []const u8, args: anytype) void {
     std.debug.print("zln: " ++ fmt ++ "\n", args);
+}
+
+fn printTryHelp() void {
+    std.debug.print("Try 'zln --help' for more information.\n", .{});
+}
+
+fn setTargetDirectory(allocator: std.mem.Allocator, config: *Config, value: []const u8) !void {
+    if (config.target_directory != null) {
+        printError("multiple target directories specified");
+        std.process.exit(1);
+    }
+    config.target_directory = try allocator.dupe(u8, value);
 }
 
 fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
@@ -287,11 +397,14 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                 } else if (std.mem.eql(u8, arg, "--symbolic")) {
                     config.symbolic = true;
                 } else if (std.mem.eql(u8, arg, "--force")) {
+                    // GNU: the last of -f/-i wins
                     config.force = true;
+                    config.interactive = false;
                 } else if (std.mem.eql(u8, arg, "--no-dereference")) {
                     config.no_dereference = true;
                 } else if (std.mem.eql(u8, arg, "--interactive")) {
                     config.interactive = true;
+                    config.force = false;
                 } else if (std.mem.eql(u8, arg, "--relative")) {
                     config.relative = true;
                 } else if (std.mem.eql(u8, arg, "--no-target-directory")) {
@@ -299,14 +412,15 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                 } else if (std.mem.eql(u8, arg, "--verbose")) {
                     config.verbose = true;
                 } else if (std.mem.startsWith(u8, arg, "--target-directory=")) {
-                    config.target_directory = try allocator.dupe(u8, arg[19..]);
+                    try setTargetDirectory(allocator, &config, arg[19..]);
                 } else if (std.mem.eql(u8, arg, "--target-directory")) {
                     i += 1;
                     if (i >= args.len) {
                         printError("option '--target-directory' requires an argument");
+                        printTryHelp();
                         std.process.exit(1);
                     }
-                    config.target_directory = try allocator.dupe(u8, args[i]);
+                    try setTargetDirectory(allocator, &config, args[i]);
                 } else if (std.mem.eql(u8, arg, "--")) {
                     i += 1;
                     while (i < args.len) : (i += 1) {
@@ -315,28 +429,46 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                     break;
                 } else {
                     printErrorFmt("unrecognized option '{s}'", .{arg});
+                    printTryHelp();
                     std.process.exit(1);
                 }
             } else {
-                for (arg[1..]) |ch| {
+                const cluster = arg[1..];
+                var j: usize = 0;
+                while (j < cluster.len) : (j += 1) {
+                    const ch = cluster[j];
                     switch (ch) {
                         's' => config.symbolic = true,
-                        'f' => config.force = true,
-                        'i' => config.interactive = true,
+                        'f' => {
+                            config.force = true;
+                            config.interactive = false;
+                        },
+                        'i' => {
+                            config.interactive = true;
+                            config.force = false;
+                        },
                         'n' => config.no_dereference = true,
                         'r' => config.relative = true,
                         'T' => config.no_target_directory = true,
                         'v' => config.verbose = true,
                         't' => {
-                            i += 1;
-                            if (i >= args.len) {
-                                printError("option requires an argument -- 't'");
-                                std.process.exit(1);
+                            if (j + 1 < cluster.len) {
+                                // attached value: -tDIR
+                                try setTargetDirectory(allocator, &config, cluster[j + 1 ..]);
+                                j = cluster.len;
+                            } else {
+                                i += 1;
+                                if (i >= args.len) {
+                                    printError("option requires an argument -- 't'");
+                                    printTryHelp();
+                                    std.process.exit(1);
+                                }
+                                try setTargetDirectory(allocator, &config, args[i]);
                             }
-                            config.target_directory = try allocator.dupe(u8, args[i]);
                         },
                         else => {
                             printErrorFmt("invalid option -- '{c}'", .{ch});
+                            printTryHelp();
                             std.process.exit(1);
                         },
                     }
@@ -347,23 +479,44 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
         }
     }
 
-    // Handle target directory mode vs normal mode
-    if (config.target_directory) |_| {
-        if (config.sources.items.len == 0) {
-            printError("missing file operand");
-            std.process.exit(1);
-        }
-    } else {
-        if (config.sources.items.len < 2) {
-            if (config.sources.items.len == 0) {
-                printError("missing file operand");
-            } else {
+    // GNU: "ln: cannot do --relative without --symbolic"
+    if (config.relative and !config.symbolic) {
+        printError("cannot do --relative without --symbolic");
+        std.process.exit(1);
+    }
+
+    // GNU: "ln: cannot combine --target-directory and --no-target-directory"
+    if (config.target_directory != null and config.no_target_directory) {
+        printError("cannot combine --target-directory and --no-target-directory");
+        std.process.exit(1);
+    }
+
+    if (config.sources.items.len == 0) {
+        printError("missing file operand");
+        printTryHelp();
+        std.process.exit(1);
+    }
+
+    if (config.target_directory == null) {
+        if (config.no_target_directory) {
+            // -T requires exactly TARGET LINK_NAME
+            if (config.sources.items.len < 2) {
                 printErrorFmt("missing destination file operand after '{s}'", .{config.sources.items[0]});
+                printTryHelp();
+                std.process.exit(1);
             }
-            std.debug.print("Try 'zln --help' for more information.\n", .{});
-            std.process.exit(1);
+            if (config.sources.items.len > 2) {
+                printErrorFmt("extra operand '{s}'", .{config.sources.items[2]});
+                printTryHelp();
+                std.process.exit(1);
+            }
+            config.destination = config.sources.pop();
+        } else if (config.sources.items.len == 1) {
+            // One-operand form: `ln TARGET` == `ln -t . TARGET` (GNU coreutils)
+            config.target_directory = try allocator.dupe(u8, ".");
+        } else {
+            config.destination = config.sources.pop();
         }
-        config.destination = config.sources.pop();
     }
 
     return config;
@@ -375,7 +528,8 @@ fn printHelp() void {
     const stdout = Io.File.stdout();
     var writer = stdout.writer(io, &buf);
     writer.interface.writeAll(
-        \\Usage: zln [OPTION]... TARGET LINK_NAME
+        \\Usage: zln [OPTION]... [-T] TARGET LINK_NAME
+        \\   or: zln [OPTION]... TARGET
         \\   or: zln [OPTION]... TARGET... DIRECTORY
         \\   or: zln [OPTION]... -t DIRECTORY TARGET...
         \\Create a link to TARGET with the name LINK_NAME.
@@ -383,8 +537,9 @@ fn printHelp() void {
         \\  -s, --symbolic          make symbolic links instead of hard links
         \\  -f, --force             remove existing destination files
         \\  -i, --interactive       prompt whether to remove destinations
-        \\  -n, --no-dereference    treat LINK_NAME as normal file if it's a symlink
-        \\  -r, --relative          create relative symbolic links
+        \\  -n, --no-dereference    treat LINK_NAME as a normal file if
+        \\                            it is a symbolic link to a directory
+        \\  -r, --relative          with -s, create links relative to link location
         \\  -t, --target-directory=DIR  specify the DIRECTORY in which to create the links
         \\  -T, --no-target-directory   treat LINK_NAME as a normal file always
         \\  -v, --verbose           print name of each linked file
@@ -402,7 +557,7 @@ fn printVersion() void {
     var buf: [64]u8 = undefined;
     const stdout = Io.File.stdout();
     var writer = stdout.writer(io, &buf);
-    writer.interface.writeAll("zln 0.1.0\n") catch {};
+    writer.interface.writeAll("zln 0.2.0\n") catch {};
     writer.interface.flush() catch {};
 }
 
@@ -424,7 +579,8 @@ pub fn main(init: std.process.Init) void {
         };
         defer allocator.free(target_z);
 
-        if (!isDirectory(target_z)) {
+        const tdst = statPath(target_z);
+        if (tdst == null or !isDirStat(tdst.?)) {
             printErrorFmt("target '{s}' is not a directory", .{target_dir});
             std.process.exit(1);
         }
@@ -450,7 +606,7 @@ pub fn main(init: std.process.Init) void {
 
         if (config.sources.items.len == 1) {
             const target = config.sources.items[0];
-            if (!config.no_target_directory and isDirectory(dest_z)) {
+            if (!config.no_target_directory and destIsDirectory(dest_z, &config)) {
                 const link_name = std.fmt.allocPrint(allocator, "{s}/{s}", .{ dest, basename(target) }) catch {
                     printError("memory allocation failed");
                     std.process.exit(1);
@@ -465,8 +621,9 @@ pub fn main(init: std.process.Init) void {
                 };
             }
         } else {
-            if (!isDirectory(dest_z)) {
-                printErrorFmt("target '{s}' is not a directory", .{dest});
+            if (!destIsDirectory(dest_z, &config)) {
+                // GNU: "ln: target 'X': Not a directory"
+                printErrorFmt("target '{s}': Not a directory", .{dest});
                 std.process.exit(1);
             }
 

@@ -396,6 +396,9 @@ pub fn Engine(comptime WriterType: type) type {
         ) !StreamResult {
             const dir = self.config.output_dir.?; // caller checks shouldStream() first
 
+            // Path traversal guard — the id lands in the output filename.
+            if (!isSafeOutputId(request.id)) return error.UnsafeOutputId;
+
             // Ensure directory exists (best-effort; mkdir failures are ignored
             // because concurrent workers may race on the same dir and
             // createFile below will surface any real error).
@@ -542,6 +545,13 @@ pub fn Engine(comptime WriterType: type) type {
         /// If base64_field is set, extracts the specified JSON path, decodes base64, writes binary.
         /// Otherwise writes the raw body text.
         fn saveBodyToFile(self: *Self, dir: []const u8, id: []const u8, body: []const u8) void {
+            // Path traversal guard — see isSafeOutputId. The response record has
+            // already been emitted with the verbatim id; we only refuse the write.
+            if (!isSafeOutputId(id)) {
+                std.debug.print("[save] Error: refusing unsafe output id (path traversal guard)\n", .{});
+                return;
+            }
+
             // Ensure directory exists
             var dir_z: [4096:0]u8 = undefined;
             if (dir.len >= 4096) return;
@@ -590,9 +600,9 @@ pub fn Engine(comptime WriterType: type) type {
 
             const b64_str = b64_value.string;
 
-            // Decode base64
-            const decoded = decodeBase64(self.allocator, b64_str) orelse {
-                std.debug.print("[save] Error: base64 decode failed ({} chars)\n", .{b64_str.len});
+            // Decode base64 — strict: corruption is reported, not silently skipped.
+            const decoded = decodeBase64(self.allocator, b64_str) catch |err| {
+                std.debug.print("[save] Error: base64 decode failed ({} chars): {t}\n", .{ b64_str.len, err });
                 return;
             };
             defer self.allocator.free(decoded);
@@ -627,6 +637,30 @@ pub fn Engine(comptime WriterType: type) type {
     };
 }
 
+// ── Output-path safety ───────────────────────────────────────────────────────
+
+/// Is this request `id` safe to splice into an output file path?
+///
+/// `--output-dir` builds `{dir}/{id}.{ext}`, and plan files are routinely
+/// machine-generated (MetalEmbeddings derives ids from corpus chunk names), so
+/// ids are not operator-vetted. An id of `../../../.ssh/authorized_keys` would
+/// otherwise write a response body to an arbitrary path.
+///
+/// Accepted: a single path component of printable ASCII with no `/`, no `\`,
+/// no NUL/control bytes, not `.`/`..`, and not leading with `-` (so the file
+/// can't be mistaken for a flag by downstream shell tooling). The id is still
+/// preserved verbatim in the JSON telemetry record — only the *path* is gated.
+pub fn isSafeOutputId(id: []const u8) bool {
+    if (id.len == 0) return false;
+    if (std.mem.eql(u8, id, ".") or std.mem.eql(u8, id, "..")) return false;
+    if (id[0] == '-') return false;
+    for (id) |c| {
+        if (c == '/' or c == '\\') return false;
+        if (c < 0x20 or c == 0x7f) return false;
+    }
+    return true;
+}
+
 // ── JSON path walker ─────────────────────────────────────────────────────────
 
 /// Walk a dot-separated path through a JSON value.
@@ -656,72 +690,51 @@ fn walkJsonPath(root: std.json.Value, path: []const u8) ?std.json.Value {
 
 // ── Base64 decoder ───────────────────────────────────────────────────────────
 
-/// Decode a base64 string (standard or URL-safe) into raw bytes.
-/// Returns allocated slice or null on error.
-fn decodeBase64(allocator: std.mem.Allocator, input: []const u8) ?[]u8 {
-    if (input.len == 0) return null;
+/// Decode a base64 string (standard or URL-safe, padded or unpadded) into raw
+/// bytes. Returns an allocated slice the caller owns and frees.
+///
+/// Uses `std.base64` rather than a hand-rolled decoder. The previous bespoke
+/// implementation silently *skipped* every invalid character, so a truncated or
+/// corrupted payload decoded to plausible-looking garbage with no error — model
+/// output (images, audio) would land on disk subtly wrong. Strict decoding turns
+/// that into a reported `error.InvalidCharacter`/`InvalidPadding`.
+///
+/// MIME line breaks are tolerated (some APIs wrap at 76 columns) by stripping
+/// ASCII whitespace first; nothing else is skipped.
+pub fn decodeBase64(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    if (input.len == 0) return error.EmptyInput;
 
-    // Strip whitespace and padding for length calculation
+    // Strip ASCII whitespace (and only whitespace) into a scratch buffer.
+    const clean = try allocator.alloc(u8, input.len);
+    defer allocator.free(clean);
     var clean_len: usize = 0;
     for (input) |c| {
-        if (c != '=' and c != '\n' and c != '\r' and c != ' ') clean_len += 1;
+        if (std.ascii.isWhitespace(c)) continue;
+        clean[clean_len] = c;
+        clean_len += 1;
     }
+    const src = clean[0..clean_len];
+    if (src.len == 0) return error.EmptyInput;
 
-    // Output size: 3 bytes per 4 base64 chars
-    const out_size = (clean_len * 3) / 4 + 4;
-    const output = allocator.alloc(u8, out_size) catch return null;
-
-    var out_pos: usize = 0;
-    var buf: [4]u8 = undefined;
-    var buf_len: usize = 0;
-
-    for (input) |c| {
-        const val = b64Decode(c);
-        if (val == 0xFF) continue; // Skip whitespace, padding, invalid
-
-        buf[buf_len] = val;
-        buf_len += 1;
-
-        if (buf_len == 4) {
-            if (out_pos + 3 > output.len) break;
-            output[out_pos] = (buf[0] << 2) | (buf[1] >> 4);
-            output[out_pos + 1] = (buf[1] << 4) | (buf[2] >> 2);
-            output[out_pos + 2] = (buf[2] << 6) | buf[3];
-            out_pos += 3;
-            buf_len = 0;
-        }
-    }
-
-    // Handle remaining bytes
-    if (buf_len >= 2) {
-        if (out_pos < output.len) {
-            output[out_pos] = (buf[0] << 2) | (buf[1] >> 4);
-            out_pos += 1;
-        }
-    }
-    if (buf_len >= 3) {
-        if (out_pos < output.len) {
-            output[out_pos] = (buf[1] << 4) | (buf[2] >> 2);
-            out_pos += 1;
-        }
-    }
-
-    // Resize to actual length
-    if (out_pos == 0) {
-        allocator.free(output);
-        return null;
-    }
-
-    return output[0..out_pos];
-}
-
-fn b64Decode(c: u8) u8 {
-    return switch (c) {
-        'A'...'Z' => c - 'A',
-        'a'...'z' => c - 'a' + 26,
-        '0'...'9' => c - '0' + 52,
-        '+', '-' => 62, // '+' standard, '-' URL-safe
-        '/', '_' => 63, // '/' standard, '_' URL-safe
-        else => 0xFF, // Invalid / skip
+    // Try each alphabet/padding combination; the first that both sizes and
+    // decodes cleanly wins. Standard-padded is the common case (Vertex AI).
+    const candidates = .{
+        std.base64.standard.Decoder,
+        std.base64.url_safe.Decoder,
+        std.base64.standard_no_pad.Decoder,
+        std.base64.url_safe_no_pad.Decoder,
     };
+
+    inline for (candidates) |decoder| {
+        if (decoder.calcSizeForSlice(src)) |size| {
+            const out = try allocator.alloc(u8, size);
+            if (decoder.decode(out, src)) |_| {
+                return out;
+            } else |_| {
+                allocator.free(out);
+            }
+        } else |_| {}
+    }
+
+    return error.InvalidBase64;
 }

@@ -3,6 +3,22 @@
 //! Standalone WebAssembly JWT authentication module.
 //! No external dependencies - all crypto implemented inline.
 //! Designed for browser-based auth systems.
+//!
+//! TRUST MODEL — READ BEFORE USING
+//!
+//! `init()` copies the HMAC signing secret into this module's memory, which on
+//! the wasm32 target is the browser page's memory. Anyone with access to the
+//! page can extract it and mint arbitrary tokens. Expiry is checked against
+//! `js_get_timestamp()`, i.e. the client's own clock, which the client can
+//! move at will. This module is therefore a UX / offline convenience, NOT a
+//! security boundary: every token minted or accepted here MUST be re-verified
+//! server-side (see `src/lib.zig`, which delegates to the audited `zig_jwt`)
+//! with the secret held privately. Do not ship this as the sole verifier.
+//!
+//! What it does guarantee: `verify_token` pins the header `alg` to HS256 and
+//! refuses anything else (including `alg:none`) before computing the HMAC, and
+//! compares signatures in constant time. `sign_token` JSON-escapes the subject
+//! so a hostile `user_id` cannot inject claims.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -552,6 +568,164 @@ fn writeInt(buf: []u8, val: i64) usize {
     }
 }
 
+/// Copy `s` into `out` as the BODY of a JSON string (no surrounding quotes),
+/// escaping per RFC 8259 §7. Returns the number of bytes written, or null if
+/// `out` is too small.
+///
+/// Without this, a `user_id` containing `"` or `\` breaks out of the `sub`
+/// string in the hand-built payload and injects arbitrary claims — the
+/// JSON-IN-FMT anti-pattern (zig-forge CLAUDE.md §1) expressed via @memcpy.
+/// Worst case is 6 bytes out per byte in (`\u00XX`), so callers must size
+/// `out` at 6x the maximum subject length.
+fn jsonEscapeInto(s: []const u8, out: []u8) ?usize {
+    var n: usize = 0;
+    for (s) |c| {
+        const esc: []const u8 = switch (c) {
+            '"' => "\\\"",
+            '\\' => "\\\\",
+            0x08 => "\\b",
+            0x0c => "\\f",
+            '\n' => "\\n",
+            '\r' => "\\r",
+            '\t' => "\\t",
+            else => {
+                if (c < 0x20) {
+                    // Remaining control characters must be \u00XX escaped.
+                    if (n + 6 > out.len) return null;
+                    @memcpy(out[n..][0..4], "\\u00");
+                    out[n + 4] = hex_chars[c >> 4];
+                    out[n + 5] = hex_chars[c & 0x0F];
+                    n += 6;
+                    continue;
+                }
+                // Everything else (including UTF-8 continuation bytes) is
+                // copied verbatim, as JSON permits.
+                if (n + 1 > out.len) return null;
+                out[n] = c;
+                n += 1;
+                continue;
+            },
+        };
+        if (n + esc.len > out.len) return null;
+        @memcpy(out[n..][0..esc.len], esc);
+        n += esc.len;
+    }
+    return n;
+}
+
+/// Read the JSON string that starts at `json[start]` (i.e. `start` is the byte
+/// just after the opening quote), decoding the escapes `jsonEscapeInto` can
+/// emit, and writing the unescaped bytes to `out`. Returns the number of bytes
+/// written, or null on a malformed / oversized string.
+///
+/// A naive `indexOf(pos, "\"")` scan would stop at an ESCAPED quote and report
+/// a truncated subject, so extraction has to understand escaping too.
+fn jsonUnescapeStringInto(json: []const u8, start: usize, out: []u8) ?usize {
+    var i = start;
+    var n: usize = 0;
+    while (i < json.len) {
+        const c = json[i];
+        if (c == '"') return n; // unescaped closing quote
+        if (n >= out.len) return null;
+        if (c != '\\') {
+            out[n] = c;
+            n += 1;
+            i += 1;
+            continue;
+        }
+        if (i + 1 >= json.len) return null;
+        const e = json[i + 1];
+        switch (e) {
+            '"', '\\', '/' => {
+                out[n] = e;
+                n += 1;
+                i += 2;
+            },
+            'b' => {
+                out[n] = 0x08;
+                n += 1;
+                i += 2;
+            },
+            'f' => {
+                out[n] = 0x0c;
+                n += 1;
+                i += 2;
+            },
+            'n' => {
+                out[n] = '\n';
+                n += 1;
+                i += 2;
+            },
+            'r' => {
+                out[n] = '\r';
+                n += 1;
+                i += 2;
+            },
+            't' => {
+                out[n] = '\t';
+                n += 1;
+                i += 2;
+            },
+            'u' => {
+                // Only the \u00XX form this module emits is decoded; any
+                // other \u escape (including surrogate pairs) is refused
+                // rather than mis-decoded.
+                if (i + 6 > json.len) return null;
+                if (json[i + 2] != '0' or json[i + 3] != '0') return null;
+                const hi = hexVal(json[i + 4]) orelse return null;
+                const lo = hexVal(json[i + 5]) orelse return null;
+                out[n] = (hi << 4) | lo;
+                n += 1;
+                i += 6;
+            },
+            else => return null,
+        }
+    }
+    return null; // ran off the end without a closing quote
+}
+
+fn hexVal(c: u8) ?u8 {
+    return switch (c) {
+        '0'...'9' => c - '0',
+        'a'...'f' => c - 'a' + 10,
+        'A'...'F' => c - 'A' + 10,
+        else => null,
+    };
+}
+
+/// Locate the value of a top-level JSON string member `"<key>":"…"` and return
+/// the index of its first content byte (just past the opening quote).
+/// Tolerates whitespace around the colon. Returns null if absent.
+fn findStringValueStart(json: []const u8, key: []const u8) ?usize {
+    var search: usize = 0;
+    while (std.mem.indexOfPos(u8, json, search, key)) |k| {
+        // The key must itself be quoted: "key"
+        if (k == 0 or json[k - 1] != '"') {
+            search = k + 1;
+            continue;
+        }
+        var i = k + key.len;
+        if (i >= json.len or json[i] != '"') {
+            search = k + 1;
+            continue;
+        }
+        i += 1;
+        while (i < json.len and (json[i] == ' ' or json[i] == '\t' or json[i] == '\n' or json[i] == '\r')) i += 1;
+        if (i >= json.len or json[i] != ':') {
+            search = k + 1;
+            continue;
+        }
+        i += 1;
+        while (i < json.len and (json[i] == ' ' or json[i] == '\t' or json[i] == '\n' or json[i] == '\r')) i += 1;
+        if (i >= json.len or json[i] != '"') {
+            search = k + 1;
+            continue;
+        }
+        return i + 1;
+    }
+    return null;
+}
+
 // ==========================================================================
 // Exported Functions
 // ==========================================================================
@@ -587,16 +761,22 @@ export fn sign_token(user_id_ptr: [*]const u8, user_id_len: u32, expires_in: i32
     // Build header: {"alg":"HS256","typ":"JWT"}
     const header = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
 
-    // Build payload
-    var payload_buf: [512]u8 = undefined;
+    // Build payload. Sized for the worst case: 256 subject bytes each
+    // expanding to a 6-byte \u00XX escape, plus the fixed members.
+    var payload_buf: [1664]u8 = undefined;
     var pos: usize = 0;
 
     const prefix = "{\"sub\":\"";
     @memcpy(payload_buf[pos..][0..prefix.len], prefix);
     pos += prefix.len;
 
-    @memcpy(payload_buf[pos..][0..user_id_len], user_id_ptr[0..user_id_len]);
-    pos += user_id_len;
+    // JSON-escape the subject rather than @memcpy-ing it raw: an unescaped
+    // `"` would otherwise close the string and let the caller append claims.
+    const escaped_len = jsonEscapeInto(user_id_ptr[0..user_id_len], payload_buf[pos..]) orelse {
+        g_error_code = ERR_INVALID_INPUT;
+        return 0;
+    };
+    pos += escaped_len;
 
     const iat_prefix = "\",\"iat\":";
     @memcpy(payload_buf[pos..][0..iat_prefix.len], iat_prefix);
@@ -619,11 +799,12 @@ export fn sign_token(user_id_ptr: [*]const u8, user_id_len: u32, expires_in: i32
     var encoded_header: [64]u8 = undefined;
     const header_len = base64UrlEncode(header, &encoded_header);
 
-    var encoded_payload: [1024]u8 = undefined;
+    // ceil(1664/3)*4 = 2220, rounded up.
+    var encoded_payload: [2304]u8 = undefined;
     const payload_len = base64UrlEncode(payload, &encoded_payload);
 
     // Create signing input: header.payload
-    var signing_input: [2048]u8 = undefined;
+    var signing_input: [2688]u8 = undefined;
     @memcpy(signing_input[0..header_len], encoded_header[0..header_len]);
     signing_input[header_len] = '.';
     @memcpy(signing_input[header_len + 1 ..][0..payload_len], encoded_payload[0..payload_len]);
@@ -682,6 +863,38 @@ export fn verify_token(token_ptr: [*]const u8, token_len: u32) i32 {
     const signing_input = token[0..dot2.?];
     const provided_sig = token[dot2.? + 1 ..];
 
+    // Enforce the header algorithm BEFORE doing any crypto. The HMAC compare
+    // below already makes `alg:none` / alg-confusion forgeries fail, but
+    // being algorithm-blind means a token whose header claims RS256 (or
+    // anything else) would still be accepted on an HMAC match. Fail closed on
+    // anything that is not exactly HS256, matching the native zig_jwt path.
+    {
+        var header_json: [256]u8 = undefined;
+        const header_len = base64UrlDecode(token[0..dot1.?], &header_json) orelse {
+            g_error_code = ERR_VERIFY_FAILED;
+            return 0;
+        };
+        const header = header_json[0..header_len];
+
+        const alg_start = findStringValueStart(header, "alg") orelse {
+            g_error_code = ERR_VERIFY_FAILED;
+            return 0;
+        };
+        var alg_buf: [32]u8 = undefined;
+        const alg_len = jsonUnescapeStringInto(header, alg_start, &alg_buf) orelse {
+            g_error_code = ERR_VERIFY_FAILED;
+            return 0;
+        };
+        // `alg` is a public, enum-like header field that the caller supplied
+        // themselves, not a secret — an early exit leaks nothing they do not
+        // already know. The signature comparison below is the constant-time one.
+        // zig-lens-ignore: EQL-FOR-SECRETS public enum-like header field, attacker-supplied, no secret compared
+        if (!std.mem.eql(u8, alg_buf[0..alg_len], "HS256")) {
+            g_error_code = ERR_VERIFY_FAILED;
+            return 0;
+        }
+    }
+
     // Compute expected signature
     const expected_sig = hmacSha256(g_secret[0..g_secret_len], signing_input);
     var encoded_expected: [64]u8 = undefined;
@@ -703,22 +916,39 @@ export fn verify_token(token_ptr: [*]const u8, token_len: u32) i32 {
         return 0;
     }
 
-    // Decode payload to check expiration
+    // Decode payload to check expiration. Sized for the largest payload a
+    // `token_len <= 4096` token can carry (base64 decodes to 3/4 of input).
     const payload_b64 = token[dot1.? + 1 .. dot2.?];
-    var payload: [512]u8 = undefined;
+    var payload: [3072]u8 = undefined;
     const payload_len = base64UrlDecode(payload_b64, &payload) orelse {
         g_error_code = ERR_VERIFY_FAILED;
         return 0;
     };
 
-    // Simple exp extraction (look for "exp":)
+    // Simple exp extraction (look for "exp":). Parsed with saturating
+    // arithmetic and a digit cap: a payload carrying a 400-digit `exp` would
+    // otherwise overflow i64 and panic (integer overflow is checked in
+    // Debug/ReleaseSafe), turning a malformed token into a crash.
     const payload_str = payload[0..payload_len];
     if (std.mem.indexOf(u8, payload_str, "\"exp\":")) |exp_idx| {
         var exp_start = exp_idx + 6;
         var exp_val: i64 = 0;
+        var digits: usize = 0;
         while (exp_start < payload_len and payload_str[exp_start] >= '0' and payload_str[exp_start] <= '9') {
-            exp_val = exp_val * 10 + (payload_str[exp_start] - '0');
+            if (digits < 19) {
+                exp_val = std.math.add(i64, std.math.mul(i64, exp_val, 10) catch std.math.maxInt(i64), payload_str[exp_start] - '0') catch std.math.maxInt(i64);
+            } else {
+                // More digits than i64 can hold: clamp (far-future expiry).
+                exp_val = std.math.maxInt(i64);
+            }
+            digits += 1;
             exp_start += 1;
+        }
+        if (digits == 0) {
+            // "exp" present but not a number — refuse rather than silently
+            // treating the token as never expiring.
+            g_error_code = ERR_VERIFY_FAILED;
+            return 0;
         }
 
         const now: i64 = js_get_timestamp();
@@ -728,14 +958,16 @@ export fn verify_token(token_ptr: [*]const u8, token_len: u32) i32 {
         }
     }
 
-    // Extract subject for result
-    if (std.mem.indexOf(u8, payload_str, "\"sub\":\"")) |sub_idx| {
-        const sub_start = sub_idx + 7;
-        if (std.mem.indexOfPos(u8, payload_str, sub_start, "\"")) |sub_end| {
-            const sub = payload_str[sub_start..sub_end];
-            @memcpy(g_result_buf[0..sub.len], sub);
-            g_result_len = sub.len;
-        }
+    // Extract subject for result, decoding JSON escapes. A plain scan to the
+    // next `"` would truncate a subject that legitimately contains an escaped
+    // quote (which sign_token now emits).
+    g_result_len = 0;
+    if (findStringValueStart(payload_str, "sub")) |sub_start| {
+        const sub_len = jsonUnescapeStringInto(payload_str, sub_start, &g_result_buf) orelse {
+            g_error_code = ERR_VERIFY_FAILED;
+            return 0;
+        };
+        g_result_len = sub_len;
     }
 
     g_error_code = ERR_OK;
@@ -990,6 +1222,149 @@ test "sign_token then verify_token round-trips and extracts the subject" {
 
     try testing.expectEqual(@as(i32, 1), verify_token(&token, tok_len));
     try testing.expectEqualStrings("user123", g_result_buf[0..g_result_len]);
+}
+
+test "sign_token: a hostile subject cannot inject claims (JSON-IN-FMT)" {
+    const secret = "my-secret-key-123";
+    try testing.expectEqual(ERR_OK, init(secret, secret.len));
+
+    // The classic break-out payload: an unescaped copy would close the `sub`
+    // string and add an `admin` claim.
+    const user = "x\",\"admin\":true,\"sub\":\"y";
+    const tok_len = sign_token(user, user.len, 3600);
+    try testing.expect(tok_len > 0);
+
+    var token: [1024]u8 = undefined;
+    @memcpy(token[0..tok_len], g_result_buf[0..tok_len]);
+
+    // The payload segment must contain no unescaped quote from the subject:
+    // decode it and check there is exactly one `admin`-free `sub` member.
+    var dot1: usize = 0;
+    var dot2: usize = 0;
+    var seen: usize = 0;
+    for (token[0..tok_len], 0..) |c, i| {
+        if (c == '.') {
+            if (seen == 0) dot1 = i else dot2 = i;
+            seen += 1;
+        }
+    }
+    var payload: [2048]u8 = undefined;
+    const plen = base64UrlDecode(token[dot1 + 1 .. dot2], &payload).?;
+    const decoded = payload[0..plen];
+    // `admin` appears only INSIDE the escaped subject (\"admin\"), never as a
+    // real member: the bare-quoted forms must be absent.
+    try testing.expect(std.mem.indexOf(u8, decoded, "\"admin\"") == null);
+    // ...and `sub` must occur exactly once as a real member.
+    const first_sub = std.mem.indexOf(u8, decoded, "\"sub\":\"").?;
+    try testing.expectEqual(@as(usize, 1), first_sub); // right after the '{'
+    try testing.expect(std.mem.indexOfPos(u8, decoded, first_sub + 1, "\"sub\":\"") == null);
+
+    // And the subject must round-trip literally through verification.
+    try testing.expectEqual(@as(i32, 1), verify_token(&token, tok_len));
+    try testing.expectEqualStrings(user, g_result_buf[0..g_result_len]);
+}
+
+test "sign_token: control characters in the subject are \\u00XX escaped" {
+    const secret = "my-secret-key-123";
+    try testing.expectEqual(ERR_OK, init(secret, secret.len));
+
+    const user = "a\x01b\nc";
+    const tok_len = sign_token(user, user.len, 3600);
+    try testing.expect(tok_len > 0);
+
+    var token: [1024]u8 = undefined;
+    @memcpy(token[0..tok_len], g_result_buf[0..tok_len]);
+
+    try testing.expectEqual(@as(i32, 1), verify_token(&token, tok_len));
+    try testing.expectEqualStrings(user, g_result_buf[0..g_result_len]);
+}
+
+test "verify_token: a non-HS256 header alg is refused" {
+    // Mint a token whose header says RS256 but whose signature is a valid
+    // HMAC-SHA256 under the configured secret. Pre-hardening this verified.
+    const secret = "my-secret-key-123";
+    try testing.expectEqual(ERR_OK, init(secret, secret.len));
+
+    const header = "{\"alg\":\"RS256\",\"typ\":\"JWT\"}";
+    const payload = "{\"sub\":\"mallory\"}";
+
+    var signing_input: [256]u8 = undefined;
+    var n = base64UrlEncode(header, &signing_input);
+    signing_input[n] = '.';
+    n += 1;
+    n += base64UrlEncode(payload, signing_input[n..]);
+
+    const mac = hmacSha256(secret, signing_input[0..n]);
+    var token: [512]u8 = undefined;
+    @memcpy(token[0..n], signing_input[0..n]);
+    token[n] = '.';
+    const total = n + 1 + base64UrlEncode(&mac, token[n + 1 ..]);
+
+    try testing.expectEqual(@as(i32, 0), verify_token(&token, @intCast(total)));
+    try testing.expectEqual(ERR_VERIFY_FAILED, g_error_code);
+}
+
+test "verify_token: alg:none with an empty signature is refused" {
+    const secret = "my-secret-key-123";
+    try testing.expectEqual(ERR_OK, init(secret, secret.len));
+
+    var token: [256]u8 = undefined;
+    var n = base64UrlEncode("{\"alg\":\"none\",\"typ\":\"JWT\"}", &token);
+    token[n] = '.';
+    n += 1;
+    n += base64UrlEncode("{\"sub\":\"root\"}", token[n..]);
+    token[n] = '.';
+    n += 1;
+
+    try testing.expectEqual(@as(i32, 0), verify_token(&token, @intCast(n)));
+    try testing.expectEqual(ERR_VERIFY_FAILED, g_error_code);
+}
+
+test "verify_token: an absurdly long exp does not overflow i64" {
+    const secret = "my-secret-key-123";
+    try testing.expectEqual(ERR_OK, init(secret, secret.len));
+
+    // 60-digit exp — pre-hardening this panicked on integer overflow.
+    const payload = "{\"sub\":\"a\",\"exp\":" ++ ("9" ** 60) ++ "}";
+    const header = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
+
+    var signing_input: [512]u8 = undefined;
+    var n = base64UrlEncode(header, &signing_input);
+    signing_input[n] = '.';
+    n += 1;
+    n += base64UrlEncode(payload, signing_input[n..]);
+
+    const mac = hmacSha256(secret, signing_input[0..n]);
+    var token: [768]u8 = undefined;
+    @memcpy(token[0..n], signing_input[0..n]);
+    token[n] = '.';
+    const total = n + 1 + base64UrlEncode(&mac, token[n + 1 ..]);
+
+    // Clamps to maxInt(i64) -> far-future -> valid, no crash.
+    try testing.expectEqual(@as(i32, 1), verify_token(&token, @intCast(total)));
+}
+
+test "verify_token: a non-numeric exp is refused, not ignored" {
+    const secret = "my-secret-key-123";
+    try testing.expectEqual(ERR_OK, init(secret, secret.len));
+
+    const header = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
+    const payload = "{\"sub\":\"a\",\"exp\":\"soon\"}";
+
+    var signing_input: [256]u8 = undefined;
+    var n = base64UrlEncode(header, &signing_input);
+    signing_input[n] = '.';
+    n += 1;
+    n += base64UrlEncode(payload, signing_input[n..]);
+
+    const mac = hmacSha256(secret, signing_input[0..n]);
+    var token: [512]u8 = undefined;
+    @memcpy(token[0..n], signing_input[0..n]);
+    token[n] = '.';
+    const total = n + 1 + base64UrlEncode(&mac, token[n + 1 ..]);
+
+    try testing.expectEqual(@as(i32, 0), verify_token(&token, @intCast(total)));
+    try testing.expectEqual(ERR_VERIFY_FAILED, g_error_code);
 }
 
 test "verify_token: expired token (exp < fixed test clock) is rejected" {

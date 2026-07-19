@@ -44,6 +44,14 @@ public struct DocxInfo {
     public let hasTables: Bool
 }
 
+/// An image extracted alongside the markdown by `docxToMarkdownWithImages`.
+public struct DocxImage {
+    /// The name the markdown references (e.g. `1-image1.png`, appearing as
+    /// `./images/1-image1.png`). Always a single safe path component.
+    public let filename: String
+    public let data: Data
+}
+
 // MARK: - Errors
 
 public enum DocxError: Error, LocalizedError {
@@ -115,6 +123,59 @@ public enum ZigDocx {
             throw DocxError.conversionFailed("Output is not valid UTF-8")
         }
         return text
+    }
+
+    /// Convert DOCX bytes to markdown, keeping the embedded images.
+    ///
+    /// Unlike `docxToMarkdown(_:)`, which drops images, the returned markdown
+    /// references `./images/<name>` for every entry in `images`. Write those
+    /// bytes out under the given names — each name is a single safe path
+    /// component (no separators, no `..`), so it can be appended to an output
+    /// directory directly.
+    ///
+    /// An image whose bytes were missing from the archive is omitted from
+    /// `images` while its markdown reference is kept.
+    public static func docxToMarkdownWithImages(
+        _ docxData: Data
+    ) throws -> (markdown: String, images: [DocxImage]) {
+        var result: ZigDocxMarkdownResult = docxData.withUnsafeBytes { buf in
+            guard let ptr = buf.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
+                return ZigDocxMarkdownResult()
+            }
+            return zig_docx_to_markdown_with_images(ptr, buf.count)
+        }
+        defer { zig_docx_free_markdown_result(&result) }
+
+        if let errorMsg = result.error_msg {
+            throw DocxError.conversionFailed(String(cString: errorMsg))
+        }
+        guard let mdxData = result.mdx_data else {
+            throw DocxError.invalidInput
+        }
+        guard let markdown = String(
+            data: Data(bytes: mdxData, count: result.mdx_len),
+            encoding: .utf8
+        ) else {
+            throw DocxError.conversionFailed("Output is not valid UTF-8")
+        }
+
+        var images: [DocxImage] = []
+        if let imagePtr = result.images {
+            images.reserveCapacity(result.images_count)
+            for i in 0..<result.images_count {
+                let img = imagePtr[i]
+                guard let nameC = img.filename else { continue }
+                guard let bytes = img.data, img.len > 0 else { continue }
+                images.append(DocxImage(
+                    filename: String(cString: nameC),
+                    data: Data(bytes: bytes, count: img.len)
+                ))
+            }
+        }
+
+        // `result` (and everything it owns) is released by the deferred free —
+        // every Swift value above is an independent copy.
+        return (markdown, images)
     }
 
     /// Get document info without full conversion.

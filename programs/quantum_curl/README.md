@@ -162,9 +162,68 @@ done | quantum-curl --concurrency 100
 quantum-curl --file requests.jsonl | jq -c 'select(.status != 200)' | quantum-curl
 ```
 
+### Saving Response Bodies
+
+```bash
+# One file per response at {dir}/{id}.{ext}
+quantum-curl --file plan.jsonl --output-dir ./out --output-ext json
+
+# Decode a base64 field out of a JSON response into a binary file
+# (e.g. Vertex AI image generation)
+quantum-curl --file images.jsonl --output-dir ./png --output-ext png \
+             --base64-field predictions.0.bytesBase64Encoded
+```
+
+With `--output-dir` and no `--base64-field`, the body streams straight from the
+socket to disk (never buffered) and the telemetry record carries `body_path` +
+`body_bytes` instead of `body`.
+
+**Path-traversal guard:** the `id` becomes the filename, so it must be a single
+path component. Ids containing `/`, `\`, control bytes, or equal to `.`/`..`
+are refused for the *write*; the telemetry record still reports the id verbatim.
+
+### Failure Replay
+
+```bash
+quantum-curl --file plan.jsonl --failed-log failed.jsonl
+quantum-curl --file failed.jsonl          # rerun only the failures
+```
+
+Writes `failed.jsonl` (the raw failing input lines, replay-ready) and
+`failed.errors.jsonl` (structured diagnostics). A row fails when the status is
+`0` (transport error) or `>= 400`. Rows that fail to *parse* are logged here
+too and skipped — one malformed line never aborts the batch.
+
+### Auth Refresh (long-running batches)
+
+Tokens expire mid-batch on multi-hour runs. Either strategy refreshes them in
+the background (mutually exclusive):
+
+```bash
+# Native GCP (no subprocess): SA key, metadata server, or gcloud ADC
+quantum-curl --file plan.jsonl --gcp-auth [--gcp-auth-scope <url>]
+
+# External command
+quantum-curl --file plan.jsonl \
+  --refresh-auth-header-command "gcloud auth print-access-token" \
+  --refresh-auth-interval 1800 \
+  --auth-header-name Authorization --auth-header-prefix "Bearer "
+```
+
+`--refresh-auth-header-command` runs **without a shell**: the string is split on
+whitespace and exec'd directly, so pipes, redirects, globs and `$VAR` do not
+work (this closed an RCE). Token buffers are zeroed on rotation and shutdown,
+and tokens are never written to the telemetry stream or the fail log.
+
 ## Input Format: The Command Protocol
 
-Each line is an independent request manifest in JSON format:
+quantum-curl auto-detects the input format from the file extension, falling back
+to content sniffing: **JSONL** (`.jsonl`, `.ndjson`), **JSON array** (`.json`),
+**CSV** (`.csv`), **TSV** (`.tsv`). For CSV/TSV the header row maps columns to
+the fields below; only `url` is required, and a missing `id` is auto-generated
+(`row-1`, `row-2`, …).
+
+Each JSONL line is an independent request manifest in JSON format:
 
 ```jsonl
 {"id":"unique-id","method":"GET","url":"https://api.example.com/resource"}
@@ -177,7 +236,7 @@ Each line is an independent request manifest in JSON format:
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `id` | string | Yes | Unique identifier for request tracking |
-| `method` | string | Yes | HTTP method: GET, POST, PUT, PATCH, DELETE |
+| `method` | string | Yes | HTTP method: GET, POST, PUT, PATCH, DELETE. Uppercase only (RFC 9110 §9.1). `HEAD`/`OPTIONS` parse but are **not executable** — they fail with `MethodNotSupported`. |
 | `url` | string | Yes | Full URL including scheme |
 | `headers` | object | No | Key-value pairs for HTTP headers |
 | `body` | string | No | Request body (for POST, PUT, PATCH) |
@@ -201,8 +260,14 @@ Each response is a JSONL record with full telemetry:
 | `status` | number | HTTP status code (0 if failed before response) |
 | `latency_ms` | number | Wall-clock time in milliseconds |
 | `retry_count` | number | Number of retry attempts (0 = first try succeeded) |
-| `body` | string | Response body (truncated to 1000 chars) |
+| `body` | string | Full response body, **not truncated** (buffered mode only) |
+| `body_path` | string | Path of the on-disk body (streaming mode; replaces `body`) |
+| `body_bytes` | number | Bytes written to disk, alongside `body_path` |
 | `error` | string | Error message if request failed |
+
+Every field is emitted as properly escaped JSON — a request `id` carrying `"`
+or control characters cannot break the line or forge extra fields, so `jq`-based
+CI gating on `.status` is safe against hostile plan input.
 
 ## Examples
 
@@ -329,6 +394,31 @@ FROM alpine:latest
 COPY zig-out/bin/quantum-curl /usr/local/bin/
 ENTRYPOINT ["quantum-curl"]
 ```
+
+## Tests
+
+```bash
+zig build test
+```
+
+Correctness tests live in `src/tier1_anchors.zig` and are anchored to external
+specifications rather than to this library's own output (zig-forge golden rule
+§1 — no roundtrip-only tests):
+
+| Anchor | Covers |
+|--------|--------|
+| RFC 4648 §10 vectors + §5 URL-safe alphabet | base64 decode, incl. strict rejection of corrupt payloads |
+| RFC 4180 §2 worked examples | CSV/TSV field splitting: quoted delimiters, doubled quotes, empty fields |
+| RFC 8259 §7 | telemetry escaping — output is re-parsed by `std.json`, an independent parser |
+| RFC 9110 §9.1 | method tokens are case-sensitive uppercase |
+
+Plus a malformed-plan-row error table (every wrong-shaped JSONL line returns a
+typed error instead of panicking) and the output-path traversal guard.
+
+Documented deviation: `CsvFieldIterator` does not support newlines inside
+quoted fields (RFC 4180 §2 rule 6) because the document is split on `\n` before
+field parsing, and doubled quotes are returned verbatim rather than unescaped.
+Both are asserted, so they are a tested contract rather than a surprise.
 
 ## Benchmarking
 
