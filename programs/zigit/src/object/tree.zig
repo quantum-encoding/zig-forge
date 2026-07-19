@@ -369,6 +369,43 @@ test "Iterator.next rejects a tree entry named .git" {
     try testing.expectError(error.InvalidTreeEntryName, it.next());
 }
 
+test "serialize is byte-exact vs git mktree (external anchor)" {
+    // Golden captured from real git (a third-party implementation the author did
+    // not write), so this pins the on-wire tree format to git rather than to our
+    // own roundtrip:
+    //   blob=$(printf 'hello' | git hash-object -w --stdin)   # b6fc4c62…
+    //   printf '100644 blob %s\ta.txt\n' "$blob" | git mktree # → tree 65829399…
+    //   git cat-file tree <tree>                              # raw payload below
+    const hello_oid_bytes = [20]u8{
+        0xb6, 0xfc, 0x4c, 0x62, 0x0b, 0x67, 0xd9, 0x5f, 0x95, 0x3a,
+        0x5c, 0x1c, 0x12, 0x30, 0xaa, 0xab, 0x5d, 0xb5, 0xa1, 0xb0,
+    };
+    const entry: Entry = .{
+        .mode = blob_mode_regular,
+        .name = "a.txt",
+        .oid = .{ .bytes = hello_oid_bytes },
+    };
+
+    const bytes = try serialize(testing.allocator, &.{entry});
+    defer testing.allocator.free(bytes);
+
+    // Exact payload: "100644 a.txt\0" || 20 raw oid bytes.
+    const expected = "100644 a.txt\x00" ++ hello_oid_bytes;
+    try testing.expectEqualSlices(u8, expected, bytes);
+
+    // And the framed object oid must equal git mktree's answer.
+    var hasher = std.crypto.hash.Sha1.init(.{});
+    var header_buf: [32]u8 = undefined;
+    const header = try std.fmt.bufPrint(&header_buf, "tree {d}\x00", .{bytes.len});
+    hasher.update(header);
+    hasher.update(bytes);
+    var digest: Oid = undefined;
+    hasher.final(&digest.bytes);
+    var hex: [40]u8 = undefined;
+    digest.toHex(&hex);
+    try testing.expectEqualStrings("65829399355e5929e44741d637d52c614ac21bc3", &hex);
+}
+
 test "serialize then iterate round-trips" {
     var oid_a: Oid = undefined; @memset(&oid_a.bytes, 0xAA);
     var oid_b: Oid = undefined; @memset(&oid_b.bytes, 0xBB);

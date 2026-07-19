@@ -7,8 +7,8 @@ A pure-Zig implementation of Base58 and Base58Check encoding for Bitcoin, Tron, 
 - **Multiple alphabets**: Bitcoin/Tron/IPFS (default), Ripple/XRP, Flickr
 - **Base58Check**: SHA-256d (double SHA-256) checksum, externally validated against published test vectors from Bitcoin Core, Satoshi's genesis address, and Tron's USDT contract address
 - **Versioned helpers**: `encodeCheckVersioned` / `decodeCheckVersioned` make the network version byte explicit and reject cross-network address reuse (BTC address fed to a Tron decoder errors with `WrongVersion`)
-- **OOM-safe**: decoder rejects inputs longer than `MAX_DECODE_INPUT` (1 KiB)
-- **Streaming Encoder**: Process large data without loading everything in memory
+- **DoS-guarded**: decoder rejects inputs longer than `MAX_DECODE_INPUT` (1 KiB); encoder rejects inputs longer than `MAX_ENCODE_INPUT` (4 KiB), closing the O(n²) encoder CPU-DoS
+- **Buffered helpers**: `StreamEncoder`/`StreamDecoder` are bounded-capacity convenience buffers (Base58 base conversion is non-streamable — carries propagate across the whole input — so these are *not* true streams)
 - **Leading Zero Preservation**: Correctly preserves leading zero bytes as '1' characters
 - **Comprehensive Tests**: Full test coverage including edge cases and known vectors
 - **Benchmarks**: Performance measurement suite
@@ -221,7 +221,10 @@ Alphabet-parameterized variants. Use `&Alphabet.ripple` for XRP, `&Alphabet.flic
 ### Types
 
 #### `StreamEncoder`
-Streaming encoder for processing large data:
+Bounded convenience buffer. It accumulates writes into a fixed-capacity slab and
+encodes the whole buffer at `finish()` — Base58 base conversion is non-streamable,
+so this is a write-collector, not a true stream. `write` returns
+`error.BufferTooSmall` past the capacity you pass to `init`.
 
 ```zig
 var encoder = try StreamEncoder.init(allocator, 1024);
@@ -238,17 +241,18 @@ defer allocator.free(encoded);
 
 - `InvalidCharacter` - Input contains character not in Base58 alphabet
 - `InvalidChecksum` - Base58Check verification failed
-- `EmptyInput` - Input is empty (non-fatal, returns empty encoded string)
-- `InputTooLong` - Decoder input exceeds `MAX_DECODE_INPUT` (DoS guard)
+- `InputTooLong` - Input exceeds its DoS cap (`MAX_DECODE_INPUT` for decoders, `MAX_ENCODE_INPUT` for encoders)
 - `WrongVersion` - `decodeCheckVersioned` got a different version byte than expected (cross-network address reuse)
 - `PayloadTooShort` - `decodeCheckVersioned` got fewer than 5 bytes (no room for version + checksum)
+
+Empty input is not an error: encoding or decoding an empty slice returns an empty slice.
 
 ## Specifications
 
 - **Base58 Standard**: Bitcoin implementation
 - **Checksum Algorithm**: SHA-256d (`SHA256(SHA256(data))`)
 - **Checksum Size**: 4 bytes (first 4 bytes of the SHA-256d output)
-- **Zig Version**: 0.16.0-dev
+- **Zig Version**: 0.16.0 (see `build.zig.zon` `minimum_zig_version`)
 - **Memory**: Zero-copy where possible, allocator-based
 
 ## Examples
@@ -306,7 +310,7 @@ zbase58 encode "protocol_buffer_data"
 - Error handling with proper defer cleanup
 - 16-bit arithmetic to prevent overflow in base conversion
 - Stack-allocated alphabet lookup table (256 bytes)
-- Stream encoder for unbounded data sizes
+- `StreamEncoder`/`StreamDecoder` are bounded-capacity write-collectors, not true streams
 
 ## License
 

@@ -24,6 +24,13 @@
 //!     fails. The previous version leaked on every parse error.
 //!   * **No fixed-capacity surprises.** Arrays grow dynamically; the
 //!     pre-audit 256-element `appendAssumeCapacity` panic trap is gone.
+//!   * **UTF-8 enforced.** The whole document is validated as UTF-8 before
+//!     parsing (`InvalidUtf8`), so no ill-formed byte sequence reaches the
+//!     owned tree. Unescaped C0 control chars / DEL are rejected per context
+//!     (`ControlCharacterInString` / `ControlCharacterInComment`).
+//!   * **Datetimes are range-checked.** `.datetime` values pass full RFC 3339
+//!     field validation (see `isValidRfc3339`), not just a shape sniff —
+//!     `2021-02-30` / `24:00:61` are `InvalidDateTime`, not accepted garbage.
 //!
 //! ## Feature coverage (TOML 1.0)
 //!
@@ -82,6 +89,7 @@ pub const ParseError = error{
     UnterminatedString,
     ControlCharacterInString,
     ControlCharacterInComment,
+    InvalidUtf8,
     DuplicateKey,
     DuplicateInlineKey,
     DuplicateTable,
@@ -188,7 +196,10 @@ pub const Value = union(enum) {
     float: f64,
     boolean: bool,
     /// Raw datetime literal, e.g. `1979-05-27T07:32:00-08:00`. Validated for
-    /// shape but not parsed into a structured time type.
+    /// RFC 3339 structure AND field ranges (see `isValidRfc3339`) but stored
+    /// as the raw slice, not parsed into a structured time type. A `.datetime`
+    /// value is guaranteed to be a well-formed offset date-time, local
+    /// date-time, local date, or local time.
     datetime: []const u8,
     array: Array,
     /// Heap-allocated for pointer stability during construction.
@@ -231,6 +242,15 @@ pub const Array = struct {
 /// `result.deinit(allocator)` to free. Errors free any partial state before
 /// returning.
 pub fn parseToml(allocator: Allocator, input: []const u8) ParseError!Table {
+    // TOML 1.0 §Spec: "A TOML file must be a valid UTF-8 encoded Unicode
+    // document." Reject non-UTF-8 up front so no invalid byte sequence ever
+    // reaches the owned tree (where a consumer re-emitting it into logs, a
+    // terminal, or another format could mis-decode / smuggle bytes). Note the
+    // C0 control bytes (NUL, US, DEL) that TOML also forbids ARE valid UTF-8
+    // scalars — they pass here and are caught later by the per-context
+    // control-char checks in the string/comment scanners.
+    if (!std.unicode.utf8ValidateSlice(input)) return error.InvalidUtf8;
+
     var parser = try Parser.init(allocator, input);
     defer parser.deinitParserState();
     return try parser.parse();
@@ -943,9 +963,17 @@ pub const Parser = struct {
         }
         if (self.pos == start) return error.InvalidDateTime;
         const slice = self.input[start..self.pos];
-        // Minimal validation: a datetime needs at least YYYY-MM-DD or HH:MM:SS
+        // Minimal shape: a datetime needs at least YYYY-MM-DD or HH:MM:SS
         // shape — i.e. >= 8 chars.
         if (slice.len < 8) return error.InvalidDateTime;
+        // Full RFC 3339 field-range validation (month 01–12, day valid for the
+        // month with leap-year awareness, hour 00–23, minute 00–59, second
+        // 00–60, offset ±HH:MM). Before this, the shape-only sniff accepted
+        // `2021-02-30`, `24:00:61`, `1234-5678` etc. as `.datetime` values —
+        // downstream code trusting `.datetime` to be RFC-3339-shaped got
+        // garbage. The value is still stored as the raw slice; only validity
+        // is enforced.
+        if (!isValidRfc3339(slice)) return error.InvalidDateTime;
         const owned = try self.allocator.dupe(u8, slice);
         return Value{ .datetime = owned };
     }
@@ -1355,6 +1383,104 @@ fn isDisallowedControlMultiline(c: u8) bool {
 /// rejected.
 fn isDisallowedControlComment(c: u8) bool {
     return (c < 0x20 and c != '\t' and c != '\n' and c != '\r') or c == 0x7F;
+}
+
+// ============================================================================
+// RFC 3339 datetime validation
+//
+// A TOML datetime is one of: offset date-time, local date-time, local date, or
+// local time (TOML 1.0 §Date-Time). `parseDateTime` lexes the raw slice from
+// the datetime character class; these helpers enforce the field ranges the
+// lexer does not, so `2021-02-30`, `24:00:61`, `2100-02-29` (2100 is not a leap
+// year), and `1234-5678` are rejected rather than accepted as `.datetime`.
+// ============================================================================
+
+fn isLeapYear(y: u32) bool {
+    return (y % 4 == 0 and y % 100 != 0) or (y % 400 == 0);
+}
+
+fn daysInMonth(year: u32, month: u32) u32 {
+    return switch (month) {
+        1, 3, 5, 7, 8, 10, 12 => 31,
+        4, 6, 9, 11 => 30,
+        2 => if (isLeapYear(year)) @as(u32, 29) else 28,
+        else => 0,
+    };
+}
+
+/// Validate a `YYYY-MM-DD` slice (exactly 10 bytes). Month 01–12, day valid for
+/// the month (leap-year aware).
+fn isValidDate(d: []const u8) bool {
+    if (d.len != 10) return false;
+    for ([_]usize{ 0, 1, 2, 3, 5, 6, 8, 9 }) |i| {
+        if (!isDigit(d[i])) return false;
+    }
+    if (d[4] != '-' or d[7] != '-') return false;
+    const year: u32 = @as(u32, d[0] - '0') * 1000 + @as(u32, d[1] - '0') * 100 +
+        @as(u32, d[2] - '0') * 10 + (d[3] - '0');
+    const month: u32 = @as(u32, d[5] - '0') * 10 + (d[6] - '0');
+    const day: u32 = @as(u32, d[8] - '0') * 10 + (d[9] - '0');
+    if (month < 1 or month > 12) return false;
+    if (day < 1 or day > daysInMonth(year, month)) return false;
+    return true;
+}
+
+/// Validate a `HH:MM:SS[.frac][offset]` slice. Hour 00–23, minute 00–59,
+/// second 00–60 (leap second). Fractional seconds require ≥1 digit. If
+/// `allow_offset`, a trailing `Z`/`z` or `±HH:MM` is permitted (and the whole
+/// slice must be consumed); otherwise no offset may follow.
+fn isValidTime(t: []const u8, allow_offset: bool) bool {
+    if (t.len < 8) return false;
+    for ([_]usize{ 0, 1, 3, 4, 6, 7 }) |i| {
+        if (!isDigit(t[i])) return false;
+    }
+    if (t[2] != ':' or t[5] != ':') return false;
+    const hour: u32 = @as(u32, t[0] - '0') * 10 + (t[1] - '0');
+    const min: u32 = @as(u32, t[3] - '0') * 10 + (t[4] - '0');
+    const sec: u32 = @as(u32, t[6] - '0') * 10 + (t[7] - '0');
+    if (hour > 23 or min > 59 or sec > 60) return false;
+
+    var i: usize = 8;
+    // Optional fractional seconds.
+    if (i < t.len and t[i] == '.') {
+        i += 1;
+        const frac_start = i;
+        while (i < t.len and isDigit(t[i])) i += 1;
+        if (i == frac_start) return false; // '.' with no digits
+    }
+
+    if (i == t.len) return true; // no offset — local time / local date-time
+    if (!allow_offset) return false;
+
+    const c = t[i];
+    if (c == 'Z' or c == 'z') return i + 1 == t.len;
+    if (c == '+' or c == '-') {
+        const off = t[i + 1 ..];
+        if (off.len != 5) return false;
+        if (!isDigit(off[0]) or !isDigit(off[1]) or off[2] != ':' or
+            !isDigit(off[3]) or !isDigit(off[4])) return false;
+        const oh: u32 = @as(u32, off[0] - '0') * 10 + (off[1] - '0');
+        const om: u32 = @as(u32, off[3] - '0') * 10 + (off[4] - '0');
+        if (oh > 23 or om > 59) return false;
+        return true;
+    }
+    return false;
+}
+
+/// Validate an RFC 3339 datetime slice (offset date-time, local date-time,
+/// local date, or local time). The date/time separator may be `T`, `t`, or a
+/// single space.
+fn isValidRfc3339(s: []const u8) bool {
+    // Date present iff byte 4 is '-' (the `YYYY-` marker).
+    if (s.len >= 10 and s[4] == '-') {
+        if (!isValidDate(s[0..10])) return false;
+        if (s.len == 10) return true; // local date
+        const sep = s[10];
+        if (sep != 'T' and sep != 't' and sep != ' ') return false;
+        return isValidTime(s[11..], true);
+    }
+    // Otherwise: local time only (no offset permitted on a bare time).
+    return isValidTime(s, false);
 }
 
 fn isBareKeyChar(ch: u8) bool {

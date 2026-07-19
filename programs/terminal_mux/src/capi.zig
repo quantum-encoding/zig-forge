@@ -876,7 +876,7 @@ pub export fn tmux_get_theme(out: ?*CTheme) void {
 // end_row, end_col-exclusive} — multi-row when the URL soft-wrapped.
 // =============================================================================
 
-pub const CUrlRange = url.UrlRange; // extern struct {row, start_col, end_col: u16}
+pub const CUrlRange = url.UrlRange; // extern struct {start_row, start_col, end_row, end_col: u16}
 
 pub export fn tmux_find_urls(handle: ?*TmuxSession, out: ?[*]CUrlRange, max: usize) usize {
     const h = handle orelse return 0;

@@ -120,6 +120,11 @@ pub fn run(allocator: std.mem.Allocator, io: Io, environ: std.process.Environ, a
         defer allocator.free(idx_result.idx_bytes);
         fetched_objects = idx_result.object_count;
 
+        // Fail closed if the server didn't actually deliver every tip we
+        // asked for — otherwise we'd write refs/remotes/<name>/<branch>
+        // pointing at an oid missing from our object store.
+        try zigit.pack.index_pack.verifyWantsPresent(idx_result.idx_bytes, wants.items);
+
         try repo.objects_dir.createDirPath(io, "pack");
         var pack_dir = try repo.objects_dir.openDir(io, "pack", .{});
         defer pack_dir.close(io);

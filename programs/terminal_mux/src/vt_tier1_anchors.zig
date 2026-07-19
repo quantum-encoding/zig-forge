@@ -309,3 +309,31 @@ test "ctlseqs DECSTBM: LF at region bottom scrolls only the region" {
     try std.testing.expectEqualStrings("line3", h.rowText(2, &buf)); // moved up
     h.feed("\x1b[r");
 }
+
+test "esctest DECOM: CUP is relative to the scroll region and clamps to it" {
+    // esctest DECSETTests.test_DECSET_DECOM: with DECOM (DECSET 6) set, CUP
+    // row 1 addresses the TOP of the DECSTBM region (not the screen top), and
+    // a row beyond the region bottom clamps to the region bottom. Resetting
+    // DECOM makes CUP absolute again. Anchors the origin-mode offset in
+    // setCursorPos (terminal.zig) that the already-anchored DECSTBM case does
+    // not exercise.
+    var h = try Harness.init(8, 10);
+    defer h.deinit();
+    h.feed("\x1b[3;6r"); // DECSTBM region 1-based rows 3..6 → 0-based 2..5
+    h.feed("\x1b[?6h"); // DECOM on
+
+    // CUP 1;1 lands at the region top (0-based row 2), NOT the screen top.
+    h.feed("\x1b[1;1HA");
+    try std.testing.expectEqual(@as(u21, 'A'), h.charAt(2, 0));
+    try std.testing.expect(h.charAt(0, 0) != 'A'); // screen top is NOT the origin
+
+    // CUP to a row past the region bottom clamps to the region bottom (row 5).
+    h.feed("\x1b[10;1HB");
+    try std.testing.expectEqual(@as(u21, 'B'), h.charAt(5, 0));
+
+    // DECOM off → CUP is absolute again: row 1 is the screen top.
+    h.feed("\x1b[?6l");
+    h.feed("\x1b[1;1HC");
+    try std.testing.expectEqual(@as(u21, 'C'), h.charAt(0, 0));
+    h.feed("\x1b[r");
+}

@@ -66,22 +66,36 @@ pub fn computeValue(cmd: CommandId, fd: *const FlightData) struct { field: Field
     };
 }
 
+pub const CommandError = error{
+    /// The target autopilot dataref has not been resolved to a session ID yet.
+    DatarefNotResolved,
+    /// Serializing the dataref_set_values message failed (buffer too small).
+    BuildFailed,
+    /// The WebSocket send failed (not connected / write error).
+    SendFailed,
+};
+
 /// Execute a command: compute value, look up dataref ID, send to X-Plane.
+/// Returns an error (rather than silently swallowing it, as the old code did)
+/// so a failed autopilot command is distinguishable from a successful one and
+/// can be surfaced on the STATUS page. Uses a unique req_id per send instead of
+/// the previous hardcoded 0, so acknowledgements can be correlated.
 pub fn execute(
     client: *XPlaneClient,
     cmd: CommandId,
     fd: *const FlightData,
     registry: *const DatarefRegistry,
-) void {
+) CommandError!void {
     const result = computeValue(cmd, fd);
 
     // Find the dataref ID for this field
-    const id = findDatarefId(registry, result.field) orelse return;
+    const id = findDatarefId(registry, result.field) orelse return CommandError.DatarefNotResolved;
 
     // Build and send the set-value message
     var msg_buf: [512]u8 = undefined;
-    const msg = protocol.buildSetValueMessage(&msg_buf, 0, id, result.value) catch return;
-    client.wsSendText(msg) catch {};
+    const msg = protocol.buildSetValueMessage(&msg_buf, client.nextReqId(), id, result.value) catch
+        return CommandError.BuildFailed;
+    client.wsSendText(msg) catch return CommandError.SendFailed;
 }
 
 /// Map a key character to a CommandId. Returns null for non-command keys.
@@ -194,4 +208,21 @@ test "keyToCommand mapping" {
     try std.testing.expectEqual(CommandId.vs_down, keyToCommand('W').?);
     try std.testing.expect(keyToCommand('x') == null);
     try std.testing.expect(keyToCommand('1') == null);
+}
+
+test "execute surfaces an error when the target dataref is unresolved" {
+    // Empty registry -> no autopilot dataref resolved -> the command must
+    // report DatarefNotResolved rather than silently succeeding. The client is
+    // never touched on this path (the lookup fails first), so no connection is
+    // needed.
+    var client = try XPlaneClient.init(std.testing.allocator, "127.0.0.1", 8086);
+    defer client.deinit();
+
+    const registry = DatarefRegistry.init(); // count == 0
+    var fd = FlightData{};
+
+    try std.testing.expectError(
+        error.DatarefNotResolved,
+        execute(&client, .hdg_up, &fd, &registry),
+    );
 }

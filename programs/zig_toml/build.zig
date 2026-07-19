@@ -4,12 +4,12 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Create library module
+    // Create library module. The parser is pure Zig — no libc. (Only the
+    // demo/bench executables link libc, for their `clock_gettime` timer.)
     const lib_module = b.addModule("zig_toml", .{
         .root_source_file = b.path("src/lib.zig"),
         .target = target,
         .optimize = optimize,
-        .link_libc = true,
     });
 
     // Library
@@ -78,7 +78,6 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/lib.zig"),
         .target = target,
         .optimize = optimize,
-        .link_libc = true,
     });
     const lib_unit_tests = b.addTest(.{ .root_module = test_module });
 
@@ -86,7 +85,6 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/tier1_anchors.zig"),
         .target = target,
         .optimize = optimize,
-        .link_libc = true,
     });
     anchors_test_module.addImport("zig_toml", lib_module);
     const anchor_tests = b.addTest(.{ .root_module = anchors_test_module });

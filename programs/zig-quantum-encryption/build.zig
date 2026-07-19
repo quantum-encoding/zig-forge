@@ -312,6 +312,18 @@ pub fn build(b: *std.Build) void {
     });
     const run_kem_kat_tests = b.addRunArtifact(kem_kat_tests);
 
+    // secrets CLI vault primitives (serialize/set-bounds/encrypt-decrypt + Argon2id anchor)
+    const secrets_test_mod = b.createModule(.{
+        .root_source_file = b.path("tools/secrets.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const secrets_tests = b.addTest(.{
+        .root_module = secrets_test_mod,
+    });
+    const run_secrets_tests = b.addRunArtifact(secrets_tests);
+
     // Test step
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_ffi_tests.step);
@@ -322,6 +334,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_dsa_tests.step);
     test_step.dependOn(&run_dsa_kat_tests.step);
     test_step.dependOn(&run_kem_kat_tests.step);
+    test_step.dependOn(&run_secrets_tests.step);
 
     // ========================================================================
     // Benchmarks

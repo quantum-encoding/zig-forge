@@ -89,12 +89,33 @@ This is intentional and matches every conforming JSON consumer. The pre-audit ve
 ```bash
 zig build           # produces zig-out/bin/zig-csv2json
 zig build run -- [args]
-zig build test      # runs 48 unit tests (parser + writer)
+zig build test      # runs 62 unit tests (parser + writer + main/e2e)
 ```
+
+The test suite is anchored to the [csv-spectrum](https://github.com/maxogden/csv-spectrum)
+cross-implementation corpus (`comma_in_quotes`, `escaped_quotes`, `newlines`,
+`quotes_and_newlines`, `empty`, `utf8`, `simple`): each fixture's `.csv` is rendered
+and compared to the fixture's expected `.json`, canonically, via the independent
+`std.json` reader.
+
+## RFC 4180 behavior
+
+- **Embedded newlines inside quoted fields are supported** (RFC 4180 §2.6). When the
+  format is CSV/TSV, rows are split with a quote-aware scanner (`splitIntoRecords`),
+  so a `\n` inside `"..."` stays part of the field and is emitted as `\n` in the JSON
+  string. (Auto-detection still uses a cheap line-based heuristic, so a file whose
+  *first* rows contain multi-line cells may benefit from an explicit `-f csv`.)
+- **Doubled quotes are unescaped** (`""` → `"`, RFC 4180 §2.7): `"a""b"` yields `a"b`.
+- **Whitespace inside a quoted field is preserved** (RFC 4180 §2.5): `" padded "` stays
+  `" padded "`. Unquoted fields are still trimmed as a convenience.
+- **Trailing empty fields are preserved**: `a,b,` yields three fields (`N` delimiters →
+  `N+1` fields).
+- **Ragged rows** (row width ≠ header width): columns missing from a short row are
+  emitted as JSON `null` (so "absent" is distinguishable from "empty string"); columns
+  beyond the header get a synthetic `col{N}` name rather than a duplicate `"?"` key.
 
 ## Limitations (post-audit, documented honestly)
 
-- **Embedded newlines inside quoted CSV fields are not supported.** RFC 4180 §2.6 permits them but this parser splits on `\n` before row parsing, so a quoted field that spans multiple physical lines is reported as `UnclosedQuote`. Pre-process such CSV with a tool that joins multi-line cells (or use Python's `csv` module to convert first).
 - **No JSON parsing.** This tool reads CSV/TSV/KV; it writes JSON. The directory name `zig_csv2json` reflects that explicitly.
 
 ## Audit-driven changes (2025)

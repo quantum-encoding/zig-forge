@@ -1,15 +1,19 @@
 //! Flight recording and replay.
 //!
 //! Binary format for recording dataref streams and replaying them without X-Plane.
-//! Compact fixed-size frames: ~136 bytes/frame × 10Hz × 1hr ≈ 4.9 MB.
+//! Compact fixed-size frames: 152 bytes/frame × 10Hz × 1hr ≈ 5.5 MB.
+//! Native-endian / arch-specific layout — recordings are not portable across
+//! hosts of differing endianness or float ABI.
 //! Uses C file API for Zig 0.16 compatibility.
 
 const std = @import("std");
 const FlightData = @import("flight_data.zig").FlightData;
 
-// C file API — fseek not exposed via std.c in Zig 0.16
+// C file API — fseek/ftell not exposed via std.c in Zig 0.16
 extern "c" fn fseek(stream: *std.c.FILE, offset: c_long, whence: c_int) c_int;
+extern "c" fn ftell(stream: *std.c.FILE) c_long;
 const SEEK_SET: c_int = 0;
+const SEEK_END: c_int = 2;
 
 // ============================================================================
 // Recording format
@@ -74,9 +78,16 @@ pub const DemoFrame = extern struct {
     longitude: f64 = 0,
 };
 
+/// On-disk sizes, asserted below and used for file-length validation. Pinning
+/// these guards the wire format: a field reorder or type change that alters the
+/// frame size fails the comptime check instead of silently breaking every
+/// existing `.zflt` recording.
+pub const HEADER_SIZE: usize = 32;
+pub const FRAME_SIZE: usize = 152;
+
 comptime {
-    // Verify header is exactly 32 bytes
-    if (@sizeOf(DemoHeader) != 32) @compileError("DemoHeader must be 32 bytes");
+    if (@sizeOf(DemoHeader) != HEADER_SIZE) @compileError("DemoHeader must be 32 bytes");
+    if (@sizeOf(DemoFrame) != FRAME_SIZE) @compileError("DemoFrame must be 152 bytes");
 }
 
 fn timestampMs() u64 {
@@ -240,6 +251,27 @@ pub const DemoPlayer = struct {
             return error.UnsupportedVersion;
         }
 
+        // Validate the advertised frame_count against the actual file length so
+        // a truncated or mislabeled recording is rejected up front rather than
+        // being read as if complete (or overrunning into a short tail). Our
+        // recorder always writes exactly HEADER_SIZE + frame_count*FRAME_SIZE.
+        if (fseek(file, 0, SEEK_END) != 0) {
+            _ = std.c.fclose(file);
+            return error.ReadFailed;
+        }
+        const file_size = ftell(file);
+        if (file_size < 0) {
+            _ = std.c.fclose(file);
+            return error.ReadFailed;
+        }
+        const expected: u64 = @as(u64, HEADER_SIZE) +| header.frame_count *| @as(u64, FRAME_SIZE);
+        if (@as(u64, @intCast(file_size)) != expected) {
+            _ = std.c.fclose(file);
+            return error.CorruptFile;
+        }
+        // Rewind to the first frame.
+        _ = fseek(file, @intCast(HEADER_SIZE), SEEK_SET);
+
         return .{ .file = file, .header = header };
     }
 
@@ -382,4 +414,59 @@ test "recorder and player round-trip" {
 test "invalid file" {
     const result = DemoPlayer.init("/tmp/nonexistent_zig_flight_test.zflt");
     try std.testing.expectError(error.CannotOpenFile, result);
+}
+
+// A checked-in golden `.zflt` (see testdata/README.md). Unlike the round-trip
+// tests above, this pins the exact on-disk byte layout: it was generated
+// externally (a Python struct-packer, not this code), so a field reorder or
+// size change that the recorder and player agree on — but that breaks existing
+// recordings — fails here instead of passing silently.
+const golden_zflt = @embedFile("testdata/golden_3frame.zflt");
+
+/// Write raw bytes to `path` via the C file API, matching how DemoPlayer opens.
+fn writeFixture(path: [*:0]const u8, bytes: []const u8) !void {
+    const f = std.c.fopen(path, "wb") orelse return error.CannotOpenFile;
+    const n = std.c.fwrite(bytes.ptr, 1, bytes.len, f);
+    _ = std.c.fclose(f);
+    if (n != bytes.len) return error.WriteFailed;
+}
+
+test "golden .zflt fixture decodes to exact field values" {
+    try std.testing.expectEqual(@as(usize, HEADER_SIZE + 3 * FRAME_SIZE), golden_zflt.len);
+
+    const path: [*:0]const u8 = "/tmp/zig_flight_golden_test.zflt";
+    try writeFixture(path, golden_zflt);
+
+    var player = try DemoPlayer.init(path);
+    defer player.deinit();
+    try std.testing.expectEqual(@as(u64, 3), player.frameCount());
+
+    var fd = FlightData{};
+
+    try std.testing.expect(player.nextFrame(&fd));
+    try std.testing.expectEqual(@as(f32, 120), fd.airspeed_kts);
+    try std.testing.expectEqual(@as(f32, 10000), fd.altitude_ft);
+    try std.testing.expectEqual(@as(f32, 270), fd.heading_mag_deg);
+    try std.testing.expectEqual(@as(f32, 85), fd.n1_percent);
+    try std.testing.expectEqual(@as(f32, 5000), fd.fuel_total_kg);
+    try std.testing.expectApproxEqAbs(@as(f64, 51.4775), fd.latitude, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, -0.4614), fd.longitude, 1e-9);
+
+    try std.testing.expect(player.nextFrame(&fd));
+    try std.testing.expectEqual(@as(f32, 130), fd.airspeed_kts);
+    try std.testing.expectEqual(@as(f32, 11000), fd.altitude_ft);
+
+    try std.testing.expect(player.nextFrame(&fd));
+    try std.testing.expectEqual(@as(f32, 140), fd.airspeed_kts);
+    try std.testing.expectEqual(@as(f32, 12000), fd.altitude_ft);
+
+    try std.testing.expect(!player.nextFrame(&fd));
+    try std.testing.expect(player.isFinished());
+}
+
+test "DemoPlayer rejects a truncated file whose frame_count overstates length" {
+    // Same header (frame_count=3) but the last frame's bytes are missing.
+    const path: [*:0]const u8 = "/tmp/zig_flight_truncated_test.zflt";
+    try writeFixture(path, golden_zflt[0 .. golden_zflt.len - FRAME_SIZE]);
+    try std.testing.expectError(error.CorruptFile, DemoPlayer.init(path));
 }

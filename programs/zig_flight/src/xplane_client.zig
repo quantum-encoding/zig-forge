@@ -33,6 +33,13 @@ pub const XPlaneClient = struct {
     // Reconnect state
     reconnect_delay_ms: u64 = 500,
 
+    // One PRNG for WebSocket handshake key + per-frame masking, seeded once at
+    // init. (Masking is not security-relevant on a localhost sim link, but
+    // re-seeding a fresh PRNG from the clock on every send — as the old code
+    // did — could hand two sends in the same nanosecond tick the same mask
+    // key, and is needless work at 10 Hz.)
+    mask_rng: std.Random.DefaultPrng,
+
     pub const WsState = enum {
         disconnected,
         connected,
@@ -61,6 +68,10 @@ pub const XPlaneClient = struct {
             .environ = .{ .block = .{ .slice = @ptrCast(std.mem.span(std.c.environ)) } },
         });
 
+        var ts: std.c.timespec = undefined;
+        _ = std.c.clock_gettime(.MONOTONIC, &ts);
+        const seed: u64 = @bitCast(ts.sec *% 1_000_000_000 +% ts.nsec);
+
         return .{
             .allocator = allocator,
             .io_threaded = io_threaded,
@@ -70,6 +81,7 @@ pub const XPlaneClient = struct {
             },
             .host = try allocator.dupe(u8, host),
             .port = port,
+            .mask_rng = std.Random.DefaultPrng.init(seed),
         };
     }
 
@@ -113,12 +125,29 @@ pub const XPlaneClient = struct {
         return body;
     }
 
+    /// Chars allowed verbatim in a dataref-name query value: RFC 3986
+    /// unreserved plus `/` (dataref names are slash-separated and X-Plane's
+    /// `filter[name]` expects the slashes literal). Everything else is
+    /// percent-encoded. For today's comptime `sim/...` callers this leaves the
+    /// query byte-identical; it only bites a future caller passing a name with
+    /// `&`, `=`, spaces, etc.
+    fn isDatarefNameChar(c: u8) bool {
+        return switch (c) {
+            'A'...'Z', 'a'...'z', '0'...'9', '-', '.', '_', '~', '/' => true,
+            else => false,
+        };
+    }
+
     /// Look up a dataref by name, returning its session ID.
     pub fn findDatarefByName(self: *XPlaneClient, name: []const u8) !u64 {
-        // Build the filter URL — need to percent-encode the brackets
+        // Build the filter URL. The literal `[` `]` of filter[name] are
+        // pre-encoded; the caller-supplied name is percent-encoded so a name
+        // containing query metacharacters can't corrupt or extend the query.
         var path_buf: [1024]u8 = undefined;
-        const path = std.fmt.bufPrint(&path_buf, "/api/v3/datarefs?filter%5Bname%5D={s}", .{name}) catch
-            return Error.ApiError;
+        var w = std.Io.Writer.fixed(&path_buf);
+        w.writeAll("/api/v3/datarefs?filter%5Bname%5D=") catch return Error.ApiError;
+        std.Uri.Component.percentEncode(&w, name, isDatarefNameChar) catch return Error.ApiError;
+        const path = w.buffered();
 
         const body = try self.restGet(path);
         defer self.allocator.free(body);
@@ -146,6 +175,20 @@ pub const XPlaneClient = struct {
     // WebSocket Methods (runtime)
     // =========================================================================
 
+    /// RFC 6455 §1.3 magic GUID appended to the client key before hashing.
+    const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+    /// Compute the expected Sec-WebSocket-Accept value for a client key:
+    /// base64(SHA1(key ++ WS_GUID)). `out` receives the 28-char base64 digest.
+    fn computeAccept(key: []const u8, out: *[28]u8) void {
+        var sha1 = std.crypto.hash.Sha1.init(.{});
+        sha1.update(key);
+        sha1.update(WS_GUID);
+        var digest: [20]u8 = undefined;
+        sha1.final(&digest);
+        _ = std.base64.standard.Encoder.encode(out, &digest);
+    }
+
     /// Connect WebSocket to X-Plane streaming API.
     /// Performs HTTP→WebSocket upgrade handshake (RFC 6455).
     pub fn connectWebSocket(self: *XPlaneClient) !void {
@@ -158,11 +201,7 @@ pub const XPlaneClient = struct {
 
         // Generate Sec-WebSocket-Key (16 random bytes, base64 encoded)
         var random_bytes: [16]u8 = undefined;
-        var ts: std.c.timespec = undefined;
-        _ = std.c.clock_gettime(.MONOTONIC, &ts);
-        const seed: u64 = @bitCast(ts.sec *% 1_000_000_000 +% ts.nsec);
-        var prng = std.Random.DefaultPrng.init(seed);
-        prng.fill(&random_bytes);
+        self.mask_rng.random().bytes(&random_bytes);
         var ws_key: [24]u8 = undefined;
         _ = std.base64.standard.Encoder.encode(&ws_key, &random_bytes);
 
@@ -185,6 +224,23 @@ pub const XPlaneClient = struct {
 
         if (response.head.status != .switching_protocols)
             return Error.UpgradeFailed;
+
+        // Verify Sec-WebSocket-Accept = base64(SHA1(key ++ RFC-6455 GUID)).
+        // A server that doesn't echo the correct accept isn't a conforming
+        // WebSocket endpoint; refuse rather than steal a mis-negotiated
+        // connection. (Localhost sim link, but cheap to get right.)
+        var expected_accept: [28]u8 = undefined;
+        computeAccept(&ws_key, &expected_accept);
+        var got_accept: ?[]const u8 = null;
+        var it = response.head.iterateHeaders();
+        while (it.next()) |h| {
+            if (std.ascii.eqlIgnoreCase(h.name, "sec-websocket-accept")) {
+                got_accept = h.value;
+                break;
+            }
+        }
+        const accept = got_accept orelse return Error.UpgradeFailed;
+        if (!std.mem.eql(u8, accept, &expected_accept)) return Error.UpgradeFailed;
 
         // Steal the connection for raw WebSocket I/O
         self.ws_connection = req.connection;
@@ -218,13 +274,9 @@ pub const XPlaneClient = struct {
             header_len = 10;
         }
 
-        // Generate masking key from PRNG
+        // Generate masking key from the persistent PRNG.
         var mask_key: [4]u8 = undefined;
-        var ts2: std.c.timespec = undefined;
-        _ = std.c.clock_gettime(.MONOTONIC, &ts2);
-        const seed2: u64 = @bitCast(ts2.sec *% 1_000_000_000 +% ts2.nsec);
-        var prng2 = std.Random.DefaultPrng.init(seed2);
-        prng2.fill(&mask_key);
+        self.mask_rng.random().bytes(&mask_key);
 
         @memcpy(header_buf[header_len..][0..4], &mask_key);
         header_len += 4;
@@ -456,7 +508,7 @@ pub const XPlaneClient = struct {
         };
     }
 
-    fn nextReqId(self: *XPlaneClient) u64 {
+    pub fn nextReqId(self: *XPlaneClient) u64 {
         const id = self.next_req_id;
         self.next_req_id += 1;
         return id;
@@ -596,4 +648,28 @@ test "assembleFrame rejects a stray continuation with no message in progress" {
         XPlaneClient.Error.RecvFailed,
         XPlaneClient.assembleFrame(&reader, &recv_buf, &sink),
     );
+}
+
+test "computeAccept matches the RFC 6455 §1.3 opening-handshake example" {
+    // The RFC's worked example: a client key of "dGhlIHNhbXBsZSBub25jZQ=="
+    // must yield Sec-WebSocket-Accept "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=".
+    // This is an externally-anchored vector (RFC text), not a round-trip.
+    var accept: [28]u8 = undefined;
+    XPlaneClient.computeAccept("dGhlIHNhbXBsZSBub25jZQ==", &accept);
+    try std.testing.expectEqualStrings("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", &accept);
+}
+
+test "findDatarefByName percent-encodes query metacharacters" {
+    // Directly exercise the encoding predicate used to build the filter query.
+    // A conforming dataref path is left byte-identical; a hostile name with
+    // query metacharacters is fully escaped so it can't extend the query.
+    var buf: [256]u8 = undefined;
+
+    var w1 = std.Io.Writer.fixed(&buf);
+    try std.Uri.Component.percentEncode(&w1, "sim/cockpit2/gauges/indicators/airspeed_kts_pilot", XPlaneClient.isDatarefNameChar);
+    try std.testing.expectEqualStrings("sim/cockpit2/gauges/indicators/airspeed_kts_pilot", w1.buffered());
+
+    var w2 = std.Io.Writer.fixed(&buf);
+    try std.Uri.Component.percentEncode(&w2, "a&b=c d", XPlaneClient.isDatarefNameChar);
+    try std.testing.expectEqualStrings("a%26b%3Dc%20d", w2.buffered());
 }

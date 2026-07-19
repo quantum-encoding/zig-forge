@@ -30,3 +30,12 @@ format-pinning regression fixtures, not a substitute for a live capture.
   collection response used at startup for name→ID resolution.
 - `result_success.json` — a `result` acknowledgement with `success:true`.
 - `result_error.json` — a `result` acknowledgement with `success:false`.
+- `golden_3frame.zflt` — a 3-frame `.zflt` flight recording (488 bytes:
+  32-byte header + 3×152-byte frames), generated **outside** `demo.zig` by a
+  Python `struct` packer with known field values (airspeed 120/130/140,
+  altitude 10000/11000/12000, heading 270, N1 85, fuel 5000, lat 51.4775, lon
+  -0.4614). `demo.zig`'s "golden .zflt fixture" test writes these bytes to a
+  temp file and asserts `DemoPlayer` decodes the exact values, pinning the
+  on-disk binary layout so a field reorder or size change that the recorder and
+  player agree on — but that breaks existing recordings — fails the build.
+  Native little-endian; regenerate on a big-endian host if ever needed.

@@ -425,8 +425,9 @@ test "anchor: ext8 - ext type 7 with 3 bytes -> 0xc7 0x03 0x07 0x01 0x02 0x03" {
 //
 // The encoder hand-packs these three layouts (encoder.zig:344-367); these
 // anchors pin the emitted bytes to the spec's bit layout so a transposed
-// opcode or a wrong shift width fails the test. Decode is verified as the
-// generic ext value (the library has no decode-side timestamp helper yet).
+// opcode or a wrong shift width fails the test. Decode is verified both as
+// the generic ext value AND through the `readTimestamp` helper, so the
+// decode-side bit-unpacking is pinned to the same external bytes.
 // ============================================================================
 
 test "anchor: timestamp32 (seconds=1, nanos=0) -> 0xd6 0xff 00 00 00 01" {
@@ -440,6 +441,11 @@ test "anchor: timestamp32 (seconds=1, nanos=0) -> 0xd6 0xff 00 00 00 01" {
     const v = try dec.read();
     try testing.expectEqual(@as(i8, -1), v.ext.type_id);
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x00, 0x00, 0x01 }, v.ext.data);
+
+    var dec2 = msgpack.Decoder.init(&[_]u8{ 0xd6, 0xff, 0x00, 0x00, 0x00, 0x01 });
+    const ts = try dec2.readTimestamp();
+    try testing.expectEqual(@as(i64, 1), ts.seconds);
+    try testing.expectEqual(@as(u32, 0), ts.nanoseconds);
 }
 
 test "anchor: timestamp64 (seconds=1, nanos=1) -> 0xd7 0xff 00 00 00 04 00 00 00 01" {
@@ -455,6 +461,11 @@ test "anchor: timestamp64 (seconds=1, nanos=1) -> 0xd7 0xff 00 00 00 04 00 00 00
     const v = try dec.read();
     try testing.expectEqual(@as(i8, -1), v.ext.type_id);
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01 }, v.ext.data);
+
+    var dec2 = msgpack.Decoder.init(&[_]u8{ 0xd7, 0xff, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01 });
+    const ts = try dec2.readTimestamp();
+    try testing.expectEqual(@as(i64, 1), ts.seconds);
+    try testing.expectEqual(@as(u32, 1), ts.nanoseconds);
 }
 
 test "anchor: timestamp64 boundary (seconds=0x3ffffffff max-34bit, nanos=0) -> 0xd7 0xff 00 00 00 03 ff ff ff ff" {
@@ -470,6 +481,11 @@ test "anchor: timestamp64 boundary (seconds=0x3ffffffff max-34bit, nanos=0) -> 0
     const v = try dec.read();
     try testing.expectEqual(@as(i8, -1), v.ext.type_id);
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x00, 0x00, 0x03, 0xff, 0xff, 0xff, 0xff }, v.ext.data);
+
+    var dec2 = msgpack.Decoder.init(&[_]u8{ 0xd7, 0xff, 0x00, 0x00, 0x00, 0x03, 0xff, 0xff, 0xff, 0xff });
+    const ts = try dec2.readTimestamp();
+    try testing.expectEqual(@as(i64, 0x3ffffffff), ts.seconds);
+    try testing.expectEqual(@as(u32, 0), ts.nanoseconds);
 }
 
 test "anchor: timestamp96 (seconds=-1, nanos=1) -> 0xc7 0x0c 0xff 00 00 00 01 ff ff ff ff ff ff ff ff" {
@@ -485,6 +501,197 @@ test "anchor: timestamp96 (seconds=-1, nanos=1) -> 0xc7 0x0c 0xff 00 00 00 01 ff
     const v = try dec.read();
     try testing.expectEqual(@as(i8, -1), v.ext.type_id);
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x00, 0x00, 0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff }, v.ext.data);
+
+    var dec2 = msgpack.Decoder.init(&[_]u8{ 0xc7, 0x0c, 0xff, 0x00, 0x00, 0x00, 0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff });
+    const ts = try dec2.readTimestamp();
+    try testing.expectEqual(@as(i64, -1), ts.seconds);
+    try testing.expectEqual(@as(u32, 1), ts.nanoseconds);
+}
+
+// ============================================================================
+// Wide-width wire headers (str16/32, bin16/32, array32, map16/32, ext16/32,
+// fixext2/4/8/16). Only the 8-bit and smallest-fix forms were pinned before;
+// a transposed opcode (e.g. swapping 0xda/0xdb) or a wrong length width would
+// slip past every small-value test. These anchor the exact header bytes at
+// the size boundary that forces each wider form. Header byte sequences are
+// verbatim from the MessagePack spec's "formats" table.
+// ============================================================================
+
+test "anchor: str16 - 256-char string uses 0xda 0x01 0x00" {
+    // 256 > 0xff → str16; length is big-endian u16 0x0100.
+    var input: [256]u8 = undefined;
+    @memset(&input, 'x');
+
+    var enc_buf: [260]u8 = undefined;
+    var enc = msgpack.Encoder.init(&enc_buf);
+    try enc.writeString(&input);
+    const out = enc.getWritten();
+
+    try testing.expectEqual(@as(usize, 259), out.len);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xda, 0x01, 0x00 }, out[0..3]);
+
+    var dec = msgpack.Decoder.init(out);
+    try testing.expectEqualSlices(u8, &input, (try dec.read()).string);
+}
+
+test "anchor: str32 - 65536-char string uses 0xdb 0x00 0x01 0x00 0x00" {
+    // 65536 > 0xffff → str32; length is big-endian u32 0x00010000.
+    const n: usize = 65536;
+    const body = try testing.allocator.alloc(u8, n);
+    defer testing.allocator.free(body);
+    @memset(body, 'z');
+
+    const enc_buf = try testing.allocator.alloc(u8, n + 5);
+    defer testing.allocator.free(enc_buf);
+    var enc = msgpack.Encoder.init(enc_buf);
+    try enc.writeString(body);
+    const out = enc.getWritten();
+
+    try testing.expectEqual(@as(usize, n + 5), out.len);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xdb, 0x00, 0x01, 0x00, 0x00 }, out[0..5]);
+
+    var dec = msgpack.Decoder.init(out);
+    try testing.expectEqual(@as(usize, n), (try dec.read()).string.len);
+}
+
+test "anchor: bin16 - 256-byte binary uses 0xc5 0x01 0x00" {
+    var input: [256]u8 = undefined;
+    @memset(&input, 0xab);
+
+    var enc_buf: [260]u8 = undefined;
+    var enc = msgpack.Encoder.init(&enc_buf);
+    try enc.writeBinary(&input);
+    const out = enc.getWritten();
+
+    try testing.expectEqual(@as(usize, 259), out.len);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xc5, 0x01, 0x00 }, out[0..3]);
+
+    var dec = msgpack.Decoder.init(out);
+    try testing.expectEqualSlices(u8, &input, (try dec.read()).binary);
+}
+
+test "anchor: bin32 - 65536-byte binary uses 0xc6 0x00 0x01 0x00 0x00" {
+    const n: usize = 65536;
+    const body = try testing.allocator.alloc(u8, n);
+    defer testing.allocator.free(body);
+    @memset(body, 0xcd);
+
+    const enc_buf = try testing.allocator.alloc(u8, n + 5);
+    defer testing.allocator.free(enc_buf);
+    var enc = msgpack.Encoder.init(enc_buf);
+    try enc.writeBinary(body);
+    const out = enc.getWritten();
+
+    try testing.expectEqual(@as(usize, n + 5), out.len);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xc6, 0x00, 0x01, 0x00, 0x00 }, out[0..5]);
+
+    var dec = msgpack.Decoder.init(out);
+    try testing.expectEqual(@as(usize, n), (try dec.read()).binary.len);
+}
+
+test "anchor: array32 - 65536-element header uses 0xdd 0x00 0x01 0x00 0x00" {
+    // Header-only: writeArrayHeader emits just the header, no elements.
+    var enc_buf: [8]u8 = undefined;
+    var enc = msgpack.Encoder.init(&enc_buf);
+    try enc.writeArrayHeader(65536);
+    const out = enc.getWritten();
+
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xdd, 0x00, 0x01, 0x00, 0x00 }, out);
+
+    var dec = msgpack.Decoder.init(out);
+    const v = try dec.read();
+    try testing.expectEqual(@as(usize, 65536), v.array.len());
+}
+
+test "anchor: map16 - 16-entry header uses 0xde 0x00 0x10" {
+    // 16 > 15 (fixmap cap) → map16.
+    var enc_buf: [8]u8 = undefined;
+    var enc = msgpack.Encoder.init(&enc_buf);
+    try enc.writeMapHeader(16);
+    const out = enc.getWritten();
+
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xde, 0x00, 0x10 }, out);
+
+    var dec = msgpack.Decoder.init(out);
+    const v = try dec.read();
+    try testing.expectEqual(@as(usize, 16), v.map.len());
+}
+
+test "anchor: map32 - 65536-entry header uses 0xdf 0x00 0x01 0x00 0x00" {
+    var enc_buf: [8]u8 = undefined;
+    var enc = msgpack.Encoder.init(&enc_buf);
+    try enc.writeMapHeader(65536);
+    const out = enc.getWritten();
+
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xdf, 0x00, 0x01, 0x00, 0x00 }, out);
+
+    var dec = msgpack.Decoder.init(out);
+    const v = try dec.read();
+    try testing.expectEqual(@as(usize, 65536), v.map.len());
+}
+
+test "anchor: fixext2/4/8/16 header opcodes (0xd5/0xd6/0xd7/0xd8)" {
+    // writeExt picks the fixext form for exactly-2/4/8/16-byte payloads.
+    // Use type id 0x10 (not -1, to stay clear of the timestamp shape).
+    const sizes = [_]usize{ 2, 4, 8, 16 };
+    const opcodes = [_]u8{ 0xd5, 0xd6, 0xd7, 0xd8 };
+    inline for (sizes, opcodes) |sz, opcode| {
+        var data: [16]u8 = undefined;
+        @memset(&data, 0x5a);
+
+        var enc_buf: [20]u8 = undefined;
+        var enc = msgpack.Encoder.init(&enc_buf);
+        try enc.writeExt(0x10, data[0..sz]);
+        const out = enc.getWritten();
+
+        try testing.expectEqual(opcode, out[0]);
+        try testing.expectEqual(@as(u8, 0x10), out[1]); // type byte
+        try testing.expectEqual(@as(usize, sz + 2), out.len);
+
+        var dec = msgpack.Decoder.init(out);
+        const v = try dec.read();
+        try testing.expectEqual(@as(i8, 0x10), v.ext.type_id);
+        try testing.expectEqualSlices(u8, data[0..sz], v.ext.data);
+    }
+}
+
+test "anchor: ext16 - 256-byte ext uses 0xc8 0x01 0x00 <type>" {
+    var input: [256]u8 = undefined;
+    @memset(&input, 0x33);
+
+    var enc_buf: [262]u8 = undefined;
+    var enc = msgpack.Encoder.init(&enc_buf);
+    try enc.writeExt(9, &input);
+    const out = enc.getWritten();
+
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xc8, 0x01, 0x00, 0x09 }, out[0..4]);
+    try testing.expectEqual(@as(usize, 260), out.len);
+
+    var dec = msgpack.Decoder.init(out);
+    const v = try dec.read();
+    try testing.expectEqual(@as(i8, 9), v.ext.type_id);
+    try testing.expectEqual(@as(usize, 256), v.ext.data.len);
+}
+
+test "anchor: ext32 - 65536-byte ext uses 0xc9 0x00 0x01 0x00 0x00 <type>" {
+    const n: usize = 65536;
+    const body = try testing.allocator.alloc(u8, n);
+    defer testing.allocator.free(body);
+    @memset(body, 0x44);
+
+    const enc_buf = try testing.allocator.alloc(u8, n + 6);
+    defer testing.allocator.free(enc_buf);
+    var enc = msgpack.Encoder.init(enc_buf);
+    try enc.writeExt(11, body);
+    const out = enc.getWritten();
+
+    try testing.expectEqual(@as(usize, n + 6), out.len);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xc9, 0x00, 0x01, 0x00, 0x00, 0x0b }, out[0..6]);
+
+    var dec = msgpack.Decoder.init(out);
+    const v = try dec.read();
+    try testing.expectEqual(@as(i8, 11), v.ext.type_id);
+    try testing.expectEqual(@as(usize, n), v.ext.data.len);
 }
 
 // ============================================================================

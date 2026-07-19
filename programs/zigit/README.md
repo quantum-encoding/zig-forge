@@ -39,8 +39,9 @@ Daily-driver porcelain that previous versions lacked but v1.0 ships:
 
 ```
 zig build               # produces zig-out/bin/zigit
-zig build test          # 132 unit tests, ~5 s
-./tests/parity.sh       # 184 byte-for-byte checks vs real `git`
+zig build test          # in-tree unit tests, ~5 s
+zig build parity        # byte-for-byte checks vs real `git` (needs system git)
+./tests/parity.sh       # the same parity harness, invoked directly
 ```
 
 The parity suite includes a network-dependent clone test against
@@ -75,10 +76,6 @@ flag each gap; if any blocks your workflow, it's a v1.1 candidate.
 - **Submodules** — no `submodule` command, `.gitmodules` is treated
   as an ordinary file. `status` and `diff` print a one-line warning
   to stderr when `.gitmodules` is present.
-- **`.gitignore`** — every untracked file shows up in status; `add`
-  takes only explicit paths. Queued for v1.1.
-- **Symlinks (mode 120000)** — currently materialised as regular
-  files. Also queued for v1.1.
 - **Sparse / partial / shallow clone** — clone always fetches the
   full history.
 - **Cherry-pick / revert as commands** — the cherry-pick mechanic

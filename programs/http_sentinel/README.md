@@ -41,7 +41,51 @@ Every C dependency has been replaced with native Zig equivalents:
 
 ```bash
 zig build          # Build all
-zig build test     # Run tests
+zig build test     # Run tests (lib + manifest + SSRF regressions + attack suite)
+zig build attack   # Run the security attack suite standalone
 zig build cli      # Build AI CLI (zig-ai)
 zig build quantum  # Build Quantum Curl
 ```
+
+`zig build test` runs the library unit tests, the `engine/manifest.zig`
+hostile-input tests, the externally-anchored SSRF guard tests
+(`src/security_test.zig`), and the `tests/attack.zig` CRLF/SSRF/redirect/
+path-traversal regression suite. The live-network integration tests in
+`tests/http_client_test.zig` hit `httpbin.org` and are intentionally **not**
+wired into `zig build test`; run them by hand when a network is available.
+
+## Consumers / API stability
+
+`http_sentinel` is not a C-ABI / WASM library — it exposes **no** `export fn`,
+`extern "c"`, or `callconv(.c)` surface. It is consumed as a first-class
+**Zig module**, published as `b.addModule("http-sentinel")` (see `build.zig`),
+and imported by other in-tree programs via:
+
+```zig
+exe_module.addImport(
+    "http-sentinel",
+    b.dependency("http_sentinel", .{}).module("http-sentinel"),
+);
+```
+
+The public API contract is the export set in `src/lib.zig`: `HttpClient`,
+`AIClient`, `ClaudeClient` / `GeminiClient` / `GrokClient` / `OpenAIClient` /
+`VertexClient` / `CloudflareClient` / `DeepSeekClient`, `ResponseManager`,
+`OpenAITTSClient` / `OpenAISTTClient` / `GoogleTTSClient`, `RetryEngine`,
+`ClientPool`, `HttpError`, and the `encoding`, `ai`, `audio`, `batch` modules.
+
+Known in-tree consumers whose builds break if any of those symbols is renamed,
+removed, or has its signature changed:
+
+| Consumer | How it depends |
+|---|---|
+| `programs/gcp_auth` | `b.dependency("http_sentinel").module("http-sentinel")` |
+| `programs/zig_ai_server` | same; used in `iap.zig`, `stream.zig`, `search.zig`, `gcp.zig` |
+| `programs/qai_chat` | `build.zig.zon` dependency |
+| `programs/quantum_curl` | `build.zig.zon` dependency (wrapper program) |
+| `programs/zig_ai` | `build.zig.zon` dependency |
+
+Because five programs pin this contract, treat changes to the `src/lib.zig`
+export set — and to any re-exported type such as `ai.common.RequestConfig` or
+`ai.common.escapeJsonString` — as **breaking**: update the consumers in
+lockstep, or don't change the symbol.

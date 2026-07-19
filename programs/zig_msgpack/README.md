@@ -23,7 +23,7 @@ The encoder is hardened against silent data corruption:
 | Defense | Mechanism |
 |---|---|
 | **Deterministic float encoding** | The non-canonical `writeFloat` auto-precision helper was **removed**. Callers must pick `writeFloat32` (5 bytes) or `writeFloat64` (9 bytes) explicitly. This matters for any protocol that hashes or signs the encoded form. |
-| **Timestamp nanosecond validation** | `writeTimestamp` rejects `nanoseconds >= 1_000_000_000` with `error.InvalidNanoseconds`. Without this, a u32 value ≥ 2³⁰ would silently overflow the 30-bit nanoseconds field of the packed timestamp-64 representation. |
+| **Timestamp nanosecond validation** | `writeTimestamp` rejects `nanoseconds >= 1_000_000_000` with `error.InvalidNanoseconds`. Without this, a u32 value ≥ 2³⁰ would silently overflow the 30-bit nanoseconds field of the packed timestamp-64 representation. `Decoder.readTimestamp()` / `decodeTimestamp(ext)` mirror the same check on the decode side (hostile ts64/ts96 payloads claiming out-of-range nanoseconds are rejected with `error.InvalidTimestamp`). |
 | **Overflow-safe writes** | Same `std.math.add` guard as the decoder, on the writer side. |
 
 See [CHANGELOG / audit findings](#audit-may-2025) below for the bugs each defense closed.
@@ -152,7 +152,8 @@ const s: []const u8 = try dec.readStringValidated();  // errors on bad UTF-8
 ```bash
 zig build           # produces zig-out/bin/msgpack-demo, zig-out/lib/libzig_msgpack.a
 zig build run       # run the demo
-zig build test      # run the full test suite (lib + comprehensive + tier1 anchors)
+zig build test      # run the full test suite (lib + comprehensive + tier1 anchors + fuzz harness, 1 iteration)
+zig build fuzz --fuzz  # coverage-guided fuzzing of the decoder against arbitrary bytes
 zig build bench     # run benchmarks
 ```
 
@@ -166,8 +167,9 @@ Per the in-tree library promotion rule documented in `/CLAUDE.md`:
 | `src/decoder.zig` (tests at bottom) | 2 | Failure-mode tests — depth cap, length sanity, iterator poisoning, malformed input, UTF-8 validation. |
 | `src/encoder.zig` (tests at bottom) | 2 | Failure-mode tests — nanosecond bounds, buffer overflow, deterministic float widths. |
 | `src/comprehensive_test.zig` | 3 | End-to-end encode → decode roundtrips for every type. Cheap to keep, never sufficient on their own. |
+| `src/fuzz.zig` | 2 | Structured fuzz harness (`std.testing.fuzz`) feeding the decoder arbitrary bytes; asserts `skip()` and `read()` never crash, over-read, or corrupt memory (including with `max_depth` raised above the fixed stack size). Runs one deterministic iteration under `zig build test`; drive real fuzzing with `zig build fuzz --fuzz`. |
 
-`zig build test` runs all four test entry points.
+`zig build test` runs all four test entry points (lib, comprehensive, tier1 anchors, fuzz).
 
 ## Audit (May 2025)
 
@@ -189,6 +191,6 @@ This library was promoted via the audit gate after closing the following finding
 
 ## Limitations
 
-- **`skip()` is recursive in Zig stack terms.** Bounded by `max_depth` so it cannot DoS, but a depth of 512 means ~512 stack frames. If you target a constrained-stack environment, lower `max_depth` accordingly.
+- **`skip()` uses a fixed-size work-stack, not Zig call frames.** It is iterative — its explicit stack is sized `DEFAULT_MAX_DEPTH` (512 `usize` slots), so it cannot overflow the machine stack no matter how deeply nested the input is. Nesting past `max_depth` (or past 512, whichever is smaller) returns `error.MaxDepthExceeded`. Raising `max_depth` above 512 does **not** raise the effective `skip()` limit — the backing buffer is fixed — but it is memory-safe (never an out-of-bounds write). Lower `max_depth` if you want a tighter cap.
 - **No streaming I/O.** The decoder operates on a complete in-memory slice. For very large payloads, splice them in chunks at the application level.
 - **Single-use Decoder.** See note above.

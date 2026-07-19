@@ -821,3 +821,82 @@ test "AnthropicClient initialization" {
     try std.testing.expectEqualStrings("test-key", client.api_key);
     try std.testing.expectEqualStrings("https://test.example.com", client.base_url);
 }
+
+// External anchor: Anthropic Messages API request schema.
+//   https://docs.anthropic.com/en/api/messages
+// The documented request body is a top-level object with REQUIRED `model`
+// (string), `max_tokens` (integer), and `messages` (array of {role, content})
+// fields, plus optional `system` and `temperature`. Neither the field names
+// nor the shape below come from this codebase — they are Anthropic's published
+// contract, so this is an external-anchored test, not a roundtrip. It pins
+// buildRequestPayload's emitted JSON against that contract and proves the
+// Stringify path is injection-safe for an adversarial model identifier.
+test "buildRequestPayload matches documented Anthropic Messages API schema" {
+    const allocator = std.testing.allocator;
+
+    var client = try AnthropicClient.init(allocator, .{ .api_key = "k" });
+    defer client.deinit();
+
+    // A single user turn, shaped as the API's messages[] element.
+    const user_msg = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        "{\"role\":\"user\",\"content\":\"hello\"}",
+        .{},
+    );
+    defer user_msg.deinit();
+
+    const payload = try client.buildRequestPayload(
+        &[_]std.json.Value{user_msg.value},
+        .{ .model = "claude-sonnet-4", .max_tokens = 1024, .temperature = 0.5 },
+    );
+    defer allocator.free(payload);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+
+    // Required top-level fields, exact names and JSON types per the schema.
+    try std.testing.expectEqualStrings("claude-sonnet-4", root.get("model").?.string);
+    try std.testing.expectEqual(@as(i64, 1024), root.get("max_tokens").?.integer);
+    const messages = root.get("messages").?.array;
+    try std.testing.expectEqual(@as(usize, 1), messages.items.len);
+    try std.testing.expectEqualStrings("user", messages.items[0].object.get("role").?.string);
+    try std.testing.expectEqualStrings("hello", messages.items[0].object.get("content").?.string);
+}
+
+// Injection-safety anchor for the same builder: a model identifier containing
+// a `"` and a `\` (the exact bytes that broke the old allocPrint/hand-rolled
+// JSON shapes — CLAUDE.md anti-pattern #1) must survive as data, never as
+// JSON structure. If the payload still parses AND the model field decodes
+// byte-for-byte, the Stringify escaping is doing its job.
+test "buildRequestPayload escapes an adversarial model identifier" {
+    const allocator = std.testing.allocator;
+
+    var client = try AnthropicClient.init(allocator, .{ .api_key = "k" });
+    defer client.deinit();
+
+    const user_msg = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        "{\"role\":\"user\",\"content\":\"hi\"}",
+        .{},
+    );
+    defer user_msg.deinit();
+
+    const hostile_model = "evil\",\"max_tokens\":999999,\"x\":\"\\";
+    const payload = try client.buildRequestPayload(
+        &[_]std.json.Value{user_msg.value},
+        .{ .model = hostile_model, .max_tokens = 8 },
+    );
+    defer allocator.free(payload);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+
+    // The `"` did not open a new field: max_tokens is still the real 8, and
+    // the model decodes to the exact adversarial bytes we passed in.
+    try std.testing.expectEqualStrings(hostile_model, root.get("model").?.string);
+    try std.testing.expectEqual(@as(i64, 8), root.get("max_tokens").?.integer);
+}

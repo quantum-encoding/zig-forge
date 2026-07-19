@@ -74,15 +74,22 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn printValue(writer: anytype, value: zig_toml.Value, indent: usize) !void {
-    const indent_str = "  ";
-    var i: usize = 0;
-    var indent_buf: [256]u8 = undefined;
-    var total_indent: usize = 0;
-
-    while (i < indent) : (i += 1) {
-        @memcpy(indent_buf[total_indent .. total_indent + indent_str.len], indent_str);
-        total_indent += indent_str.len;
+    // The parser permits deep trees (inline depth capped at 512; dotted-key /
+    // header depth capped at max_depth). Unbounded recursion here — plus the
+    // old unchecked `@memcpy` into a fixed 256-byte indent buffer — would
+    // overflow the stack / the buffer on an attacker-supplied file. Bound both.
+    if (indent > 128) {
+        try writer.print("... (max display depth reached)\n", .{});
+        return;
     }
+    // 2 spaces per level, capped so `total_indent + 2` never exceeds the buffer.
+    // Initialize through `total_indent + 2` because the `.table` branch below
+    // prints `indent_buf[0 .. total_indent + 2]` (child keys get 2 extra
+    // spaces) — leaving those two bytes uninitialized printed garbage.
+    const level = @min(indent, 60);
+    var indent_buf: [128]u8 = undefined;
+    const total_indent = level * 2;
+    @memset(indent_buf[0 .. total_indent + 2], ' ');
 
     switch (value) {
         .string => |s| try writer.print("{s}String: \"{s}\"\n", .{ indent_buf[0..total_indent], s }),

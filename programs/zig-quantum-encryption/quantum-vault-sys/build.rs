@@ -42,9 +42,15 @@ fn main() {
 
         if zig_out_dir.exists() {
             println!("cargo:rustc-link-search=native={}", zig_out_dir.display());
-            // Try platform-specific first, then generic
+            // Prefer the platform-specific legacy name if a prior cross-build left one;
+            // otherwise link the current native artifact. `build.zig` was renamed
+            // quantum_vault -> quantum_crypto, so a fresh `zig build` now emits
+            // libquantum_crypto.a. Try that before the old quantum_vault fallback so a
+            // locally-rebuilt library is actually picked up instead of failing to link.
             if zig_out_dir.join(format!("lib{}.a", lib_name)).exists() {
                 println!("cargo:rustc-link-lib=static={}", lib_name);
+            } else if zig_out_dir.join("libquantum_crypto.a").exists() {
+                println!("cargo:rustc-link-lib=static=quantum_crypto");
             } else {
                 println!("cargo:rustc-link-lib=static=quantum_vault");
             }

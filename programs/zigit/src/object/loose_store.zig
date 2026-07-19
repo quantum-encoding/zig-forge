@@ -291,6 +291,29 @@ test "resolvePrefix miss returns ObjectNotFound" {
     );
 }
 
+// External anchor: git's content-addressing is `SHA1("<kind> <len>\0" || payload)`.
+// The values below are git's own published constants / `git hash-object` output
+// (a third-party implementation the author did not write), so this pins the loose
+// object oid to real git rather than to our own roundtrip.
+test "computeOid matches real git hash-object (external anchor)" {
+    // The two universal git magic constants: empty blob and empty tree.
+    const empty_blob = try computeOid(.blob, "");
+    var hex: [40]u8 = undefined;
+    empty_blob.toHex(&hex);
+    try testing.expectEqualStrings("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391", &hex);
+
+    const empty_tree = try computeOid(.tree, "");
+    empty_tree.toHex(&hex);
+    try testing.expectEqualStrings("4b825dc642cb6eb9a060e54bf8d69288fbee4904", &hex);
+
+    // Non-empty blobs (`printf '%s' … | git hash-object -t blob --stdin`).
+    (try computeOid(.blob, "hello")).toHex(&hex);
+    try testing.expectEqualStrings("b6fc4c620b67d95f953a5c1c1230aaab5db5a1b0", &hex);
+
+    (try computeOid(.blob, "hello, zigit\n")).toHex(&hex);
+    try testing.expectEqualStrings("2288ce5897d77ae86988aed4bef90c2a8eaa5db3", &hex);
+}
+
 // Re-defined locally to avoid a circular import with object/mod.zig.
 fn computeOid(kind: Kind, payload: []const u8) !Oid {
     var hasher = std.crypto.hash.Sha1.init(.{});

@@ -100,7 +100,7 @@ pub fn main(init: std.process.Init) !u8 {
     var jw = JsonWriter.init(allocator, out, opts.pretty);
     defer jw.deinit();
 
-    emit(&jw, format, lines, opts) catch |err| switch (err) {
+    emit(&jw, format, data, opts) catch |err| switch (err) {
         error.UnclosedQuote => {
             try stderr.writeAll("Error: malformed CSV — unclosed quoted field\n");
             try stderr.flush();
@@ -133,12 +133,13 @@ pub fn main(init: std.process.Init) !u8 {
 fn emit(
     jw: *JsonWriter,
     format: parser.Format,
-    lines: []const []const u8,
+    data: []const u8,
     opts: Opts,
 ) !void {
     const allocator = jw.allocator;
     switch (format) {
         .lines => {
+            const lines = try parser.splitIntoLines(allocator, data);
             const items = try parser.parseLines(allocator, lines);
             try jw.beginArray();
             for (items) |item| {
@@ -152,18 +153,36 @@ fn emit(
         },
         .csv, .tsv => {
             const delimiter: u8 = if (format == .tsv) '\t' else ',';
-            const table = try parser.parseCsv(allocator, lines, delimiter, !opts.no_headers);
+            // Quote-aware record split (RFC 4180 §2.6): a newline inside a
+            // quoted field stays part of the record instead of erroring.
+            const records = try parser.splitIntoRecords(allocator, data);
+            const table = try parser.parseCsv(allocator, records, delimiter, !opts.no_headers);
 
             try jw.beginArray();
             for (table.rows) |row| {
                 try jw.beginObject();
-                for (row, 0..) |value, col| {
-                    const col_name = if (col < table.headers.len) table.headers[col] else "?";
-                    try jw.key(col_name);
-                    if (opts.numbers and parser.isNumeric(value)) {
-                        try jw.number(value);
+                // Ragged rows: emit one key per column across the wider of the
+                // header count and this row's field count. Extra columns beyond
+                // the header get a synthetic `col{N}` name (reusing parseCsv's
+                // no-header convention) instead of duplicate ambiguous `"?"`
+                // keys; trailing columns absent from a short row are emitted as
+                // JSON `null` so a consumer can tell "absent" from "empty".
+                const width = @max(row.len, table.headers.len);
+                for (0..width) |col| {
+                    if (col < table.headers.len) {
+                        try jw.key(table.headers[col]);
                     } else {
-                        try jw.string(value);
+                        try jw.key(try std.fmt.allocPrint(allocator, "col{d}", .{col}));
+                    }
+                    if (col < row.len) {
+                        const value = row[col];
+                        if (opts.numbers and parser.isNumeric(value)) {
+                            try jw.number(value);
+                        } else {
+                            try jw.string(value);
+                        }
+                    } else {
+                        try jw.writeNull();
                     }
                 }
                 try jw.endObject();
@@ -171,6 +190,7 @@ fn emit(
             try jw.endArray();
         },
         .kv => {
+            const lines = try parser.splitIntoLines(allocator, data);
             const kv = try parser.parseKv(allocator, lines);
             try jw.beginObject();
             for (kv.keys, kv.values) |k, v| {
@@ -292,4 +312,201 @@ fn printHelp(writer: *Io.Writer) !void {
         \\  cat items.txt | zig-csv2json -f lines -p
         \\
     );
+}
+
+// ============================================================================
+// Tests
+//
+// main.zig previously had ZERO coverage: parseArgs, emit, and the end-to-end
+// CSV->JSON path were all untested. These tests drive `emit` through an
+// in-memory sink and `parseArgs` through in-memory writers, so no real I/O is
+// needed.
+//
+// Tier 1 (external cross-implementation anchor): the csv-spectrum corpus
+// (github.com/maxogden/csv-spectrum) — the de-facto CSV golden set used to
+// validate CSV parsers across languages. Each case pairs the fixture's exact
+// `.csv` input with its exact expected `.json`. We render our JSON and compare
+// it to the fixture's JSON *canonically* (both parsed by the independent
+// std.json reader and re-serialized), so the assertion is semantic, not
+// whitespace-sensitive — this is the anti-roundtrip-blindness anchor the
+// golden rule requires, sourced from a different implementation's golden file.
+// ============================================================================
+
+const testing = std.testing;
+
+/// Render `data` to JSON via the full emit pipeline into an in-memory sink.
+fn renderToJson(a: std.mem.Allocator, format: parser.Format, data: []const u8, opts: Opts) ![]u8 {
+    var sink: Io.Writer.Allocating = .init(a);
+    var jw = JsonWriter.init(a, &sink.writer, opts.pretty);
+    try emit(&jw, format, data, opts);
+    return sink.toOwnedSlice();
+}
+
+/// Assert two JSON documents are semantically equal by parsing both with the
+/// independent std.json reader and comparing their canonical re-serializations
+/// (std.json preserves object key insertion order, which our emitter and the
+/// fixtures share, so the canonical forms match iff the trees match).
+fn expectJsonEquiv(a: std.mem.Allocator, mine: []const u8, expected: []const u8) !void {
+    var pm = try std.json.parseFromSlice(std.json.Value, a, mine, .{});
+    defer pm.deinit();
+    var pe = try std.json.parseFromSlice(std.json.Value, a, expected, .{});
+    defer pe.deinit();
+    const canon_mine = try std.json.Stringify.valueAlloc(a, pm.value, .{});
+    const canon_exp = try std.json.Stringify.valueAlloc(a, pe.value, .{});
+    try testing.expectEqualStrings(canon_exp, canon_mine);
+}
+
+fn checkCsvCase(a: std.mem.Allocator, csv: []const u8, expected_json: []const u8) !void {
+    const mine = try renderToJson(a, .csv, csv, .{});
+    try expectJsonEquiv(a, mine, expected_json);
+}
+
+test "csv-spectrum: golden CSV->JSON fixtures (external cross-impl anchor)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // simple.csv
+    try checkCsvCase(a, "a,b,c\n1,2,3\n",
+        \\[{"a":"1","b":"2","c":"3"}]
+    );
+    // comma_in_quotes.csv — comma protected by quotes (no trailing newline).
+    try checkCsvCase(a, "first,last,address,city,zip\nJohn,Doe,120 any st.,\"Anytown, WW\",08123",
+        \\[{"first":"John","last":"Doe","address":"120 any st.","city":"Anytown, WW","zip":"08123"}]
+    );
+    // escaped_quotes.csv — doubled quotes unescape to a single quote (§2.7).
+    try checkCsvCase(a, "a,b\n1,\"ha \"\"ha\"\" ha\"\n3,4\n",
+        \\[{"a":"1","b":"ha \"ha\" ha"},{"a":"3","b":"4"}]
+    );
+    // newlines.csv — a bare LF inside a quoted field stays in the field (§2.6).
+    try checkCsvCase(a, "a,b,c\n1,2,3\n\"Once upon \na time\",5,6\n7,8,9\n",
+        \\[{"a":"1","b":"2","c":"3"},{"a":"Once upon \na time","b":"5","c":"6"},{"a":"7","b":"8","c":"9"}]
+    );
+    // quotes_and_newlines.csv — embedded newlines AND escaped quotes together.
+    try checkCsvCase(a, "a,b\n1,\"ha \n\"\"ha\"\" \nha\"\n3,4\n",
+        \\[{"a":"1","b":"ha \n\"ha\" \nha"},{"a":"3","b":"4"}]
+    );
+    // empty.csv — empty quoted fields become empty strings (no trailing newline).
+    try checkCsvCase(a, "a,b,c\n1,\"\",\"\"\n2,3,4",
+        \\[{"a":"1","b":"","c":""},{"a":"2","b":"3","c":"4"}]
+    );
+    // utf8.csv — multibyte content passes through verbatim (no trailing newline).
+    try checkCsvCase(a, "a,b,c\n1,2,3\n4,5,ʤ",
+        \\[{"a":"1","b":"2","c":"3"},{"a":"4","b":"5","c":"ʤ"}]
+    );
+}
+
+test "emit: --numbers emits bare numbers but keeps 007 a string (RFC 8259 §6)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const mine = try renderToJson(a, .csv, "id,code\n1,007\n2,42\n", .{ .numbers = true });
+    try expectJsonEquiv(a, mine,
+        \\[{"id":1,"code":"007"},{"id":2,"code":42}]
+    );
+}
+
+test "emit: ragged CSV rows null-fill short rows and col{N}-name extras" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Header is 3 wide; row 2 is short (2 fields), row 3 is long (4 fields).
+    const mine = try renderToJson(a, .csv, "a,b,c\n1,2\n1,2,3,4\n", .{});
+    try expectJsonEquiv(a, mine,
+        \\[{"a":"1","b":"2","c":null},{"a":"1","b":"2","c":"3","col3":"4"}]
+    );
+}
+
+test "emit: kv and lines paths" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const kv = try renderToJson(a, .kv, "name: Alice\nage: 30\n", .{ .numbers = true });
+    try expectJsonEquiv(a, kv,
+        \\{"name":"Alice","age":30}
+    );
+
+    const lines = try renderToJson(a, .lines, "Alice\nBob\nCharlie\n", .{});
+    try expectJsonEquiv(a, lines,
+        \\["Alice","Bob","Charlie"]
+    );
+}
+
+test "parseArgs: valid flags populate Opts" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var out: Io.Writer.Allocating = .init(a);
+    var err: Io.Writer.Allocating = .init(a);
+
+    const args = [_][]const u8{ "prog", "data.csv", "-p", "-n", "--no-headers", "-f", "csv", "-o", "out.json" };
+    const opts = try parseArgs(&args, &err.writer, &out.writer);
+    try testing.expectEqualStrings("data.csv", opts.file_path.?);
+    try testing.expectEqualStrings("out.json", opts.output_path.?);
+    try testing.expectEqual(parser.Format.csv, opts.format.?);
+    try testing.expect(opts.pretty);
+    try testing.expect(opts.numbers);
+    try testing.expect(opts.no_headers);
+}
+
+test "parseArgs: '-' selects stdin (file_path stays null)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var out: Io.Writer.Allocating = .init(a);
+    var err: Io.Writer.Allocating = .init(a);
+
+    const args = [_][]const u8{ "prog", "-" };
+    const opts = try parseArgs(&args, &err.writer, &out.writer);
+    try testing.expect(opts.file_path == null);
+}
+
+test "parseArgs: error paths return BadArgs" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var out: Io.Writer.Allocating = .init(a);
+    var err: Io.Writer.Allocating = .init(a);
+
+    // Unknown flag.
+    try testing.expectError(error.BadArgs, parseArgs(
+        &[_][]const u8{ "prog", "--nope" },
+        &err.writer,
+        &out.writer,
+    ));
+    // -f with no value.
+    try testing.expectError(error.BadArgs, parseArgs(
+        &[_][]const u8{ "prog", "-f" },
+        &err.writer,
+        &out.writer,
+    ));
+    // -f with an unrecognized format.
+    try testing.expectError(error.BadArgs, parseArgs(
+        &[_][]const u8{ "prog", "-f", "yaml" },
+        &err.writer,
+        &out.writer,
+    ));
+    // -o with no value.
+    try testing.expectError(error.BadArgs, parseArgs(
+        &[_][]const u8{ "prog", "-o" },
+        &err.writer,
+        &out.writer,
+    ));
+}
+
+test "parseArgs: --help returns ShowedHelp" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var out: Io.Writer.Allocating = .init(a);
+    var err: Io.Writer.Allocating = .init(a);
+
+    try testing.expectError(error.ShowedHelp, parseArgs(
+        &[_][]const u8{ "prog", "--help" },
+        &err.writer,
+        &out.writer,
+    ));
 }

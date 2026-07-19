@@ -97,7 +97,6 @@ pub const MAX_ENCODE_INPUT: usize = 4096;
 pub const Error = error{
     InvalidCharacter,
     InvalidChecksum,
-    EmptyInput,
     InputTooLong,
     WrongVersion,
     PayloadTooShort,
@@ -474,6 +473,13 @@ test "tier1: BTC encode test vectors (Bitcoin Core base58_encode_decode.json)" {
         .{ .hex = "ecac89cad93923c02321", .b58 = "EJDM8drfXA6uyA" },
         .{ .hex = "10c8511e", .b58 = "Rt5zm" },
         .{ .hex = "00000000000000000000", .b58 = "1111111111" },
+        // The canonical "whole alphabet" vector: its Base58 output is the full
+        // 58-char alphabet in order, so it exercises every output symbol, and
+        // its single 0x00 lead byte checks leading-zero handling.
+        .{
+            .hex = "000111d38e5fc9071ffcd20b4a763cc9ae4f252bb4e48fd66a835e252ada93ff480d6dd43dc62a641155a5",
+            .b58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz",
+        },
     };
 
     for (cases) |c| {
@@ -620,6 +626,41 @@ test "tier1: BIP32 test-vector-1 master xpub (external) over encodeCheck/decodeC
     const decoded = try decodeCheck(allocator, expected_xpub);
     defer allocator.free(decoded);
     try std.testing.expectEqualSlices(u8, &serialized, decoded);
+}
+
+test "tier1: Flickr short-URL codes (external) over the Flickr alphabet" {
+    // Flickr's flic.kr short URLs are the photo ID converted to Base58 under
+    // the *Flickr* alphabet (lowercase-first ordering, :71) with no checksum.
+    // Both pairs below are externally published:
+    //   * 3447346323 -> "6fCxXz"  (Douglas F. Shearer's canonical "Flickr short
+    //                               URLs explained" write-up, the reference
+    //                               explainer every later implementation cites)
+    //   * 6857269519 -> "brXijP"  (widely reproduced flic.kr/p/brXijP example)
+    //
+    // The Flickr alphabet previously had ZERO tests, so a mis-ordered
+    // `Alphabet.flickr` constant at :71 would have gone undetected (exactly the
+    // roundtrip-only gap the repo golden rule forbids). Photo IDs are encoded
+    // as their minimal big-endian byte representation; neither ID has a leading
+    // zero byte, so the codes map one-to-one with no leading-'1' padding.
+    const allocator = std.testing.allocator;
+
+    const cases = [_]struct { id_be_hex: []const u8, code: []const u8 }{
+        .{ .id_be_hex = "cd7a5493", .code = "6fCxXz" }, // 3447346323
+        .{ .id_be_hex = "0198b9a10f", .code = "brXijP" }, // 6857269519
+    };
+
+    for (cases) |c| {
+        var id_buf: [8]u8 = undefined;
+        const id_bytes = try std.fmt.hexToBytes(&id_buf, c.id_be_hex);
+
+        const encoded = try encodeWith(allocator, &Alphabet.flickr, id_bytes);
+        defer allocator.free(encoded);
+        try std.testing.expectEqualSlices(u8, c.code, encoded);
+
+        const decoded = try decodeWith(allocator, &Alphabet.flickr, c.code);
+        defer allocator.free(decoded);
+        try std.testing.expectEqualSlices(u8, id_bytes, decoded);
+    }
 }
 
 // ----- Tier 2: failure-mode tests -----

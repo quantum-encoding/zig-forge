@@ -35,6 +35,9 @@ pub const Mfd = struct {
     client: ?*XPlaneClient = null,
     registry: ?*const DatarefRegistry = null,
     demo_mode: bool = false,
+    /// Outcome of the most recent autopilot command dispatch (null = none yet),
+    /// surfaced on the STATUS page so a swallowed failure is now visible.
+    last_command_ok: ?bool = null,
 
     pub fn init() Mfd {
         var self = Mfd{};
@@ -76,7 +79,11 @@ pub const Mfd = struct {
                 if (commands.keyToCommand(key)) |cmd| {
                     if (self.client) |c| {
                         if (self.registry) |reg| {
-                            commands.execute(c, cmd, fd, reg);
+                            if (commands.execute(c, cmd, fd, reg)) |_| {
+                                self.last_command_ok = true;
+                            } else |_| {
+                                self.last_command_ok = false;
+                            }
                         }
                     }
                     return true;
@@ -199,6 +206,14 @@ pub const Mfd = struct {
 
         const mode: []const u8 = if (self.demo_mode) "DEMO" else if (self.client != null) "LIVE" else "OFFLINE";
         fb.putFmt(13, 3, "Mode:            {s}", .{mode}, .green, .black, false);
+
+        if (self.last_command_ok) |ok| {
+            if (ok) {
+                fb.putStr(14, 3, "Last command:    SENT", .green, .black, false);
+            } else {
+                fb.putStr(14, 3, "Last command:    FAILED", .bright_yellow, .black, false);
+            }
+        }
 
         fb.drawHLine(15, 3, 40, .dim);
         fb.putStr(16, 3, "Zero heap allocation in hot path", .bright_green, .black, true);

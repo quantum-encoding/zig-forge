@@ -632,3 +632,110 @@ test "anchor valid control: tab is permitted in a basic string" {
     defer t.deinit(testing.allocator);
     try testing.expectEqualSlices(u8, "x\ty", t.get("a").?.string);
 }
+
+// ============================================================================
+// Datetime field-range validation (toml-test valid/datetime/* and
+// invalid/datetime/*)
+//
+// TOML 1.0 §Date-Time = RFC 3339. The parser lexes the raw slice and now
+// validates field ranges. Inputs and expected outcomes are the toml-test
+// corpus's `datetime` cases (the specific values — `1987-07-05T17:45:00.6Z`,
+// the `2006-01-01T24:00:00Z` hour-over case, the `2006-01-32` mday-over case,
+// month-over, second-over, and the `2100-02-29` non-leap-Feb-29 — are theirs).
+// ============================================================================
+
+test "anchor valid datetime: offset with fractional seconds (datetime)" {
+    var t = try parseOk("odt = 1987-07-05T17:45:00.6Z\n");
+    defer t.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "1987-07-05T17:45:00.6Z", t.get("odt").?.datetime);
+}
+
+test "anchor valid datetime: space separator between date and time (datetime)" {
+    // RFC 3339 §5.6 NOTE / toml-test valid/datetime/datetime.toml permit a
+    // single space in place of 'T'.
+    var t = try parseOk("odt = 1987-07-05 17:45:00Z\n");
+    defer t.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "1987-07-05 17:45:00Z", t.get("odt").?.datetime);
+}
+
+test "anchor valid datetime: local date-time (no offset)" {
+    var t = try parseOk("ldt = 1979-05-27T07:32:00\n");
+    defer t.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "1979-05-27T07:32:00", t.get("ldt").?.datetime);
+}
+
+test "anchor valid datetime: leap day in a leap year (2020-02-29)" {
+    var t = try parseOk("ld = 2020-02-29\n");
+    defer t.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "2020-02-29", t.get("ld").?.datetime);
+}
+
+test "anchor valid datetime: second 60 (leap second)" {
+    var t = try parseOk("odt = 1990-12-31T23:59:60Z\n");
+    defer t.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "1990-12-31T23:59:60Z", t.get("odt").?.datetime);
+}
+
+test "anchor invalid datetime: hour 24 (hour-over)" {
+    try parseErr("d = 2006-01-01T24:00:00Z\n", error.InvalidDateTime);
+}
+
+test "anchor invalid datetime: minute 61 (minute-over)" {
+    try parseErr("d = 2006-01-01T00:61:00Z\n", error.InvalidDateTime);
+}
+
+test "anchor invalid datetime: second 61 (second-over)" {
+    try parseErr("d = 2006-01-01T00:00:61Z\n", error.InvalidDateTime);
+}
+
+test "anchor invalid datetime: day 32 (mday-over)" {
+    try parseErr("d = 2006-01-32T00:00:00Z\n", error.InvalidDateTime);
+}
+
+test "anchor invalid datetime: month 13 (month-over)" {
+    try parseErr("d = 2006-13-01T00:00:00Z\n", error.InvalidDateTime);
+}
+
+test "anchor invalid datetime: Feb 30 does not exist" {
+    try parseErr("d = 2021-02-30\n", error.InvalidDateTime);
+}
+
+test "anchor invalid datetime: Feb 29 in a non-leap century year (2100)" {
+    // 2100 is divisible by 100 but not 400 → not a leap year.
+    try parseErr("d = 2100-02-29\n", error.InvalidDateTime);
+}
+
+// ============================================================================
+// UTF-8 document validation (toml-test invalid/encoding/*)
+//
+// TOML 1.0: "A TOML file must be a valid UTF-8 encoded Unicode document." The
+// parser validates the whole input before parsing. The byte sequences below
+// (a lone 0xFF, a truncated two-byte lead 0xC3 with a non-continuation 0x28,
+// a bare continuation byte 0x80) are the classic ill-formed-UTF-8 shapes the
+// corpus's `invalid/encoding/bad-utf8-*` cases exercise.
+// ============================================================================
+
+test "anchor invalid utf8: lone 0xFF byte in a basic string" {
+    try parseErr("a = \"\xff\"\n", error.InvalidUtf8);
+}
+
+test "anchor invalid utf8: truncated two-byte sequence (0xC3 0x28) in a string" {
+    try parseErr("a = \"\xc3\x28\"\n", error.InvalidUtf8);
+}
+
+test "anchor invalid utf8: bare continuation byte (0x80) in a string" {
+    try parseErr("a = \"\x80\"\n", error.InvalidUtf8);
+}
+
+test "anchor invalid utf8: ill-formed byte in a comment" {
+    // Whole-document validation catches it regardless of where it sits.
+    try parseErr("# \xff\n", error.InvalidUtf8);
+}
+
+test "anchor valid utf8: multi-byte content in a literal string is preserved" {
+    // Snowman U+2603 (0xE2 0x98 0x83) — valid UTF-8, must pass validation and
+    // round-trip verbatim in a literal string.
+    var t = try parseOk("a = '\xe2\x98\x83'\n");
+    defer t.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "\xe2\x98\x83", t.get("a").?.string);
+}

@@ -81,3 +81,54 @@ test "NIST FIPS 204 KAT: ML-DSA-65 verify (pk, msg, sig -> accept)" {
 
     try std.testing.expect(ml_dsa.verify(&pk, msg, &sig));
 }
+
+// Negative-path anchors derived from the FIPS 204 KAT above: a single-bit
+// mutation of the signature, the message, or the public key must make verify
+// REJECT. External-anchored because the (pk, msg, sig) triple is the ACVP KAT.
+test "NIST FIPS 204 KAT: ML-DSA-65 verify rejects a tampered signature" {
+    const a = std.testing.allocator;
+
+    var pk: ml_dsa.PublicKey = undefined;
+    _ = try std.fmt.hexToBytes(&pk.data, sg_pk_hex);
+
+    var sig: ml_dsa.Signature = undefined;
+    _ = try std.fmt.hexToBytes(&sig.data, sg_sig_hex);
+    sig.data[0] ^= 0x01; // flip one bit
+
+    const msg = try hexAlloc(a, sg_msg_hex);
+    defer a.free(msg);
+
+    try std.testing.expect(!ml_dsa.verify(&pk, msg, &sig));
+}
+
+test "NIST FIPS 204 KAT: ML-DSA-65 verify rejects a tampered message" {
+    const a = std.testing.allocator;
+
+    var pk: ml_dsa.PublicKey = undefined;
+    _ = try std.fmt.hexToBytes(&pk.data, sg_pk_hex);
+
+    var sig: ml_dsa.Signature = undefined;
+    _ = try std.fmt.hexToBytes(&sig.data, sg_sig_hex);
+
+    const msg = try hexAlloc(a, sg_msg_hex);
+    defer a.free(msg);
+    msg[0] ^= 0x01; // flip one bit of the signed message
+
+    try std.testing.expect(!ml_dsa.verify(&pk, msg, &sig));
+}
+
+test "NIST FIPS 204 KAT: ML-DSA-65 verify rejects a tampered public key" {
+    const a = std.testing.allocator;
+
+    var pk: ml_dsa.PublicKey = undefined;
+    _ = try std.fmt.hexToBytes(&pk.data, sg_pk_hex);
+    pk.data[0] ^= 0x01; // flip one bit of the verifying key
+
+    var sig: ml_dsa.Signature = undefined;
+    _ = try std.fmt.hexToBytes(&sig.data, sg_sig_hex);
+
+    const msg = try hexAlloc(a, sg_msg_hex);
+    defer a.free(msg);
+
+    try std.testing.expect(!ml_dsa.verify(&pk, msg, &sig));
+}

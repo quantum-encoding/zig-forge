@@ -1,9 +1,11 @@
-//! zig2asm.zig — Emit assembly / LLVM IR from a Zig source file
+//! zig2asm — CLI wrapper around `zig build-obj` that emits assembly (.s),
+//! LLVM IR (.ll), or an object file (.o) from a single Zig source file.
 //!
 //! Usage:
-//!   zig run zig2asm.zig -- input.zig [--emit asm|llvm-ir|obj] [-O Debug|ReleaseFast|...] [--target triple]
+//!   zig2asm [options] <input.zig>   (e.g. zig2asm hello.zig --emit asm -O ReleaseFast)
 //!
-//! Requires Zig to be installed and available in PATH.
+//! Requires Zig to be installed and available in PATH; all codegen is delegated
+//! to the `zig` binary found first in PATH.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -16,10 +18,19 @@ const Options = struct {
     output_path: ?[]const u8 = null,
     emit: Emit = .assembly,
     target: ?[]const u8 = null,
+    mcpu: ?[]const u8 = null,
+    strip: bool = false,
     opt: OptLevel = .Debug,
     verbose: bool = false,
     help: bool = false,
 };
+
+/// Print a usage error to stderr and exit(1) — a friendly CLI failure with no
+/// Zig error-return trace. Used for argument-validation and compile failures.
+fn usageError(comptime fmt: []const u8, fmt_args: anytype) noreturn {
+    std.debug.print("error: " ++ fmt ++ "\n", fmt_args);
+    std.process.exit(1);
+}
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
@@ -44,50 +55,36 @@ pub fn main(init: std.process.Init) !void {
             opts.help = true;
         } else if (std.mem.eql(u8, a, "-v") or std.mem.eql(u8, a, "--verbose")) {
             opts.verbose = true;
+        } else if (std.mem.eql(u8, a, "--strip")) {
+            opts.strip = true;
         } else if (std.mem.eql(u8, a, "--emit")) {
             i += 1;
-            if (i >= args.len) {
-                std.debug.print("error: --emit requires a value (asm|llvm-ir|obj)\n", .{});
-                return error.InvalidArguments;
-            }
-            opts.emit = parseEmit(args[i]) orelse {
-                std.debug.print("error: invalid --emit; expected asm|llvm-ir|obj\n", .{});
-                return error.InvalidArguments;
-            };
+            if (i >= args.len) usageError("--emit requires a value (asm|llvm-ir|obj)", .{});
+            opts.emit = parseEmit(args[i]) orelse
+                usageError("invalid --emit; expected asm|llvm-ir|obj", .{});
         } else if (std.mem.eql(u8, a, "-o") or std.mem.eql(u8, a, "--output")) {
             i += 1;
-            if (i >= args.len) {
-                std.debug.print("error: --output requires a path\n", .{});
-                return error.InvalidArguments;
-            }
+            if (i >= args.len) usageError("--output requires a path", .{});
             opts.output_path = args[i];
         } else if (std.mem.eql(u8, a, "--target")) {
             i += 1;
-            if (i >= args.len) {
-                std.debug.print("error: --target requires a value\n", .{});
-                return error.InvalidArguments;
-            }
+            if (i >= args.len) usageError("--target requires a value", .{});
             // Try to expand shortcut, otherwise use as-is
             opts.target = expandTargetShortcut(args[i]) orelse args[i];
+        } else if (std.mem.eql(u8, a, "-mcpu")) {
+            i += 1;
+            if (i >= args.len) usageError("-mcpu requires a value (e.g. baseline, apple_m1, x86_64_v3)", .{});
+            opts.mcpu = args[i];
         } else if (std.mem.eql(u8, a, "-O")) {
             i += 1;
-            if (i >= args.len) {
-                std.debug.print("error: -O requires a value\n", .{});
-                return error.InvalidArguments;
-            }
-            opts.opt = parseOpt(args[i]) orelse {
-                std.debug.print("error: invalid -O; expected Debug|ReleaseSafe|ReleaseFast|ReleaseSmall\n", .{});
-                return error.InvalidArguments;
-            };
+            if (i >= args.len) usageError("-O requires a value", .{});
+            opts.opt = parseOpt(args[i]) orelse
+                usageError("invalid -O; expected Debug|ReleaseSafe|ReleaseFast|ReleaseSmall", .{});
         } else if (a.len > 0 and a[0] == '-') {
-            std.debug.print("error: unknown flag: {s}\n", .{a});
-            return error.InvalidArguments;
+            usageError("unknown flag: {s}", .{a});
         } else {
             // Positional input file
-            if (opts.input_path != null) {
-                std.debug.print("error: multiple input files provided\n", .{});
-                return error.InvalidArguments;
-            }
+            if (opts.input_path != null) usageError("multiple input files provided", .{});
             opts.input_path = a;
         }
     }
@@ -100,7 +97,7 @@ pub fn main(init: std.process.Init) !void {
     if (opts.input_path == null) {
         std.debug.print("error: missing input .zig file\n\n", .{});
         printHelp();
-        return error.InvalidArguments;
+        std.process.exit(1);
     }
 
     // Resolve the output path (also reported to the user after a successful build).
@@ -126,15 +123,11 @@ pub fn main(init: std.process.Init) !void {
     const term = try child.wait(io);
     switch (term) {
         .exited => |code| {
-            if (code != 0) {
-                std.debug.print("zig build-obj failed with exit code {d}\n", .{code});
-                return error.CompileFailed;
-            }
+            // Forward the child compiler's exit code (its diagnostics already
+            // reached the user via inherited stdio). No Zig error-return trace.
+            if (code != 0) std.process.exit(code);
         },
-        else => {
-            std.debug.print("zig build-obj terminated abnormally\n", .{});
-            return error.CompileFailed;
-        },
+        else => usageError("zig build-obj terminated abnormally", .{}),
     }
 
     std.debug.print("✓ Generated: {s}\n", .{output_path});
@@ -179,9 +172,20 @@ fn buildArgv(allocator: std.mem.Allocator, opts: Options) ![]const []const u8 {
         try cmd.append(allocator, try allocator.dupe(u8, t));
     }
 
+    // Target CPU / feature set (`-mcpu [cpu]`, separate-arg form per zig CLI).
+    if (opts.mcpu) |m| {
+        try cmd.append(allocator, try allocator.dupe(u8, "-mcpu"));
+        try cmd.append(allocator, try allocator.dupe(u8, m));
+    }
+
     // Optimization
     try cmd.append(allocator, try allocator.dupe(u8, "-O"));
     try cmd.append(allocator, try allocator.dupe(u8, optToString(opts.opt)));
+
+    // Strip debug info from the emitted output.
+    if (opts.strip) {
+        try cmd.append(allocator, try allocator.dupe(u8, "-fstrip"));
+    }
 
     // Emit flag (output path embedded in the flag value).
     const output_path = try resolveOutputPath(allocator, opts);
@@ -229,13 +233,16 @@ fn printHelp() void {
         \\zig2asm — emit assembly / LLVM IR / object file from Zig source
         \\
         \\USAGE:
-        \\  zig run zig2asm.zig -- [options] <input.zig>
+        \\  zig2asm [options] <input.zig>
         \\
         \\OPTIONS:
         \\  --emit <asm|llvm-ir|obj>   Output format (default: asm)
         \\  -o, --output <path>        Write output to <path>
         \\  --target <triple>          Target triple (e.g. x86_64-linux-gnu).
         \\                              Omit to build for the native host.
+        \\  -mcpu <cpu>                Target CPU / feature set (e.g. baseline,
+        \\                              apple_m1, x86_64_v3). Omit for native.
+        \\  --strip                    Omit debug symbols from the output
         \\  -O <level>                 Debug|ReleaseSafe|ReleaseFast|ReleaseSmall
         \\  -v, --verbose              Print executed zig command
         \\  -h, --help                 Show this help
@@ -252,9 +259,10 @@ fn printHelp() void {
         \\  riscv                      riscv64-linux-gnu
         \\
         \\EXAMPLES:
-        \\  zig run zig2asm.zig -- hello.zig --emit asm -O ReleaseFast
-        \\  zig run zig2asm.zig -- hello.zig --emit llvm-ir -o hello.ll
-        \\  zig run zig2asm.zig -- hello.zig --emit obj --target arm64
+        \\  zig2asm hello.zig --emit asm -O ReleaseFast
+        \\  zig2asm hello.zig --emit llvm-ir -o hello.ll
+        \\  zig2asm hello.zig --emit obj --target arm64
+        \\  zig2asm hello.zig -mcpu apple_m1 --strip
         \\
     , .{});
 }
@@ -510,6 +518,53 @@ test "buildArgv: opt level flows into -O and stem strips directory + extension" 
         .opt = .ReleaseFast,
     });
     try expectArgv(&.{ "zig", "build-obj", "path/to/mod.zig", "-O", "ReleaseFast", "-femit-bin=mod.o" }, argv);
+}
+
+test "buildArgv: -mcpu is inserted after -target and before -O" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const argv = try buildArgv(arena.allocator(), .{
+        .input_path = "hello.zig",
+        .emit = .assembly,
+        .target = "aarch64-macos-none",
+        .mcpu = "apple_m1",
+    });
+    try expectArgv(&.{ "zig", "build-obj", "hello.zig", "-target", "aarch64-macos-none", "-mcpu", "apple_m1", "-O", "Debug", "-femit-asm=hello.s", "-fno-emit-bin" }, argv);
+}
+
+test "buildArgv: -mcpu without -target still emitted before -O" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const argv = try buildArgv(arena.allocator(), .{
+        .input_path = "hello.zig",
+        .emit = .assembly,
+        .mcpu = "baseline",
+    });
+    try expectArgv(&.{ "zig", "build-obj", "hello.zig", "-mcpu", "baseline", "-O", "Debug", "-femit-asm=hello.s", "-fno-emit-bin" }, argv);
+}
+
+test "buildArgv: --strip adds -fstrip after -O" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const argv = try buildArgv(arena.allocator(), .{
+        .input_path = "hello.zig",
+        .emit = .assembly,
+        .strip = true,
+    });
+    try expectArgv(&.{ "zig", "build-obj", "hello.zig", "-O", "Debug", "-fstrip", "-femit-asm=hello.s", "-fno-emit-bin" }, argv);
+}
+
+test "buildArgv: mcpu + strip + obj combine in canonical order" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const argv = try buildArgv(arena.allocator(), .{
+        .input_path = "hello.zig",
+        .emit = .obj,
+        .opt = .ReleaseSmall,
+        .mcpu = "x86_64_v3",
+        .strip = true,
+    });
+    try expectArgv(&.{ "zig", "build-obj", "hello.zig", "-mcpu", "x86_64_v3", "-O", "ReleaseSmall", "-fstrip", "-femit-bin=hello.o" }, argv);
 }
 
 test "buildArgv: missing input path errors" {

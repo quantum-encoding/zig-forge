@@ -290,12 +290,10 @@ fn splitKv(line: []const u8) ?KvPair {
 /// callers can surface a meaningful diagnostic instead of swallowing
 /// malformed input.
 ///
-/// Embedded newlines inside a quoted field are NOT supported. This parser
-/// splits the input on `\n` BEFORE row parsing, so any quoted field that
-/// spans multiple lines will be reported as `UnclosedQuote` on the first
-/// line and (likely) malformed rows after — see RFC 4180 §2.6 limitation
-/// in the README. Round-tripping multi-line spreadsheet cells through this
-/// tool requires preprocessing.
+/// Embedded newlines inside a quoted field ARE supported when the CSV/TSV
+/// front-end uses `splitIntoRecords` (quote-aware record scanning per RFC
+/// 4180 §2.6) rather than the naive `splitIntoLines`. A record that still
+/// has an unbalanced `"` at end-of-input is reported as `UnclosedQuote`.
 pub const CsvError = error{
     /// A quoted field opened with `"` did not have a matching closing `"`
     /// before end-of-line.
@@ -365,7 +363,11 @@ fn splitCsvLine(
                 break :blk buf[0..n];
             } else raw;
 
-            try fields.append(allocator, std.mem.trim(u8, field, " "));
+            // A quoted field's whitespace is significant — quoting exists
+            // precisely to preserve it (RFC 4180 §2.5). Do NOT trim here; only
+            // the unquoted branch below trims as a convenience. Matches the
+            // reference Python `csv` reader: `" padded "` stays `" padded "`.
+            try fields.append(allocator, field);
             if (i < line.len and line[i] == delimiter) {
                 i += 1; // consume delimiter; another field follows
                 pending = true;
@@ -417,6 +419,45 @@ pub fn splitIntoLines(allocator: std.mem.Allocator, data: []const u8) ![]const [
     }
 
     return lines.toOwnedSlice(allocator);
+}
+
+/// Split raw CSV/TSV bytes into logical records, honoring RFC 4180 §2.6: a
+/// newline inside a quoted field does NOT terminate the record. Quote state is
+/// tracked across physical line breaks — a `""` escape toggles the state twice
+/// (so it stays inside the quote), which is exactly what we want for boundary
+/// detection. The record terminator is an unquoted `\n`; a single `\r`
+/// immediately preceding it (CRLF) is stripped, matching `splitIntoLines`,
+/// while any `\r`/`\n` INSIDE a quoted field is preserved verbatim for the JSON
+/// escaper to encode. This is the quote-aware front-end `parseCsv` should be
+/// fed (instead of `splitIntoLines`) so multi-line spreadsheet cells parse
+/// correctly rather than erroring as `UnclosedQuote`.
+pub fn splitIntoRecords(allocator: std.mem.Allocator, data: []const u8) ![]const []const u8 {
+    var records: std.ArrayListUnmanaged([]const u8) = .empty;
+
+    var in_quote = false;
+    var start: usize = 0;
+    var i: usize = 0;
+    while (i < data.len) : (i += 1) {
+        const c = data[i];
+        if (c == '"') {
+            in_quote = !in_quote;
+        } else if (c == '\n' and !in_quote) {
+            const end = if (i > start and data[i - 1] == '\r') i - 1 else i;
+            try records.append(allocator, data[start..end]);
+            start = i + 1;
+        }
+    }
+    // Trailing record with no terminating newline.
+    if (start < data.len) {
+        const end = if (data[data.len - 1] == '\r' and !in_quote)
+            data.len - 1
+        else
+            data.len;
+        const rec = data[start..end];
+        if (rec.len > 0) try records.append(allocator, rec);
+    }
+
+    return records.toOwnedSlice(allocator);
 }
 
 pub fn parseFormat(s: []const u8) ?Format {
@@ -812,4 +853,53 @@ test "splitCsvLine: doubled quotes are unescaped to a single quote" {
         try std.testing.expectEqualStrings("plain", fields[0]);
         try std.testing.expectEqualStrings("y", fields[1]);
     }
+}
+
+test "splitCsvLine: whitespace inside a quoted field is preserved (RFC 4180 §2.5)" {
+    // Anchored to the reference Python `csv` reader: csv.reader on
+    // `" padded ",b` yields the field `" padded "` — quoting exists precisely
+    // to protect surrounding spaces, so they must survive. Unquoted fields
+    // still get the convenience trim (see the next test).
+    const fields = try splitCsvLine(std.testing.allocator, "\" padded \",b", ',');
+    defer std.testing.allocator.free(fields);
+    try std.testing.expectEqual(@as(usize, 2), fields.len);
+    try std.testing.expectEqualStrings(" padded ", fields[0]);
+    try std.testing.expectEqualStrings("b", fields[1]);
+}
+
+test "splitCsvLine: unquoted fields are still trimmed" {
+    const fields = try splitCsvLine(std.testing.allocator, "  a  ,  b  ", ',');
+    defer std.testing.allocator.free(fields);
+    try std.testing.expectEqual(@as(usize, 2), fields.len);
+    try std.testing.expectEqualStrings("a", fields[0]);
+    try std.testing.expectEqualStrings("b", fields[1]);
+}
+
+test "splitIntoRecords: unquoted newlines split records; CRLF stripped" {
+    const data = "a,b\r\n1,2\r\n3,4";
+    const recs = try splitIntoRecords(std.testing.allocator, data);
+    defer std.testing.allocator.free(recs);
+    try std.testing.expectEqual(@as(usize, 3), recs.len);
+    try std.testing.expectEqualStrings("a,b", recs[0]);
+    try std.testing.expectEqualStrings("1,2", recs[1]);
+    try std.testing.expectEqualStrings("3,4", recs[2]);
+}
+
+test "splitIntoRecords: newline inside a quoted field does NOT split (RFC 4180 §2.6)" {
+    // csv-spectrum `newlines.csv` middle record: the LF between "Once upon "
+    // and "a time" is inside quotes, so it stays a single logical record.
+    const data = "a,b,c\n1,2,3\n\"Once upon \na time\",5,6\n7,8,9\n";
+    const recs = try splitIntoRecords(std.testing.allocator, data);
+    defer std.testing.allocator.free(recs);
+    try std.testing.expectEqual(@as(usize, 4), recs.len);
+    try std.testing.expectEqualStrings("a,b,c", recs[0]);
+    try std.testing.expectEqualStrings("1,2,3", recs[1]);
+    try std.testing.expectEqualStrings("\"Once upon \na time\",5,6", recs[2]);
+    try std.testing.expectEqualStrings("7,8,9", recs[3]);
+
+    // And that record splits into three fields with the embedded newline intact.
+    const fields = try splitCsvLine(std.testing.allocator, recs[2], ',');
+    defer std.testing.allocator.free(fields);
+    try std.testing.expectEqual(@as(usize, 3), fields.len);
+    try std.testing.expectEqualStrings("Once upon \na time", fields[0]);
 }

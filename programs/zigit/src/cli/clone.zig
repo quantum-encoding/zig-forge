@@ -124,6 +124,11 @@ pub fn run(allocator: std.mem.Allocator, io: Io, environ: std.process.Environ, a
     const idx_result = try zigit.pack.index_pack.build(allocator, pack_bytes);
     defer allocator.free(idx_result.idx_bytes);
 
+    // Fail closed if the server didn't deliver every advertised tip we asked
+    // for — a partial pack would leave packed-refs pointing at oids missing
+    // from the object store (a silently-corrupt clone).
+    try zigit.pack.index_pack.verifyWantsPresent(idx_result.idx_bytes, wants_list.items);
+
     // 8. Write pack files into .git/objects/pack/.
     var repo = try zigit.Repository.discover(allocator, io);
     defer repo.deinit();

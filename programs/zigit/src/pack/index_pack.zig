@@ -31,6 +31,7 @@ const Pack = @import("pack.zig").Pack;
 const ObjType = @import("pack.zig").ObjType;
 const writer_mod = @import("writer.zig");
 const idx_writer = @import("idx_writer.zig");
+const idx_reader = @import("idx.zig");
 const delta_mod = @import("delta.zig");
 const Oid = @import("../object/oid.zig").Oid;
 const Kind = @import("../object/kind.zig").Kind;
@@ -190,6 +191,25 @@ pub fn build(
     return .{ .pack_oid = pack_oid, .idx_bytes = idx_bytes, .object_count = pack.object_count };
 }
 
+/// Verify that every wanted tip oid was actually delivered in the pack we
+/// just indexed. `build` proves each object's oid is internally consistent
+/// (recomputed SHA-1) and that the pack trailer checksum holds, but nothing
+/// otherwise cross-checks that the server sent the objects the client asked
+/// for. Without this, a broken or hostile upload-pack could omit a wanted
+/// branch tip and we'd still write a ref pointing at an oid we don't have —
+/// a silently-corrupt clone/fetch. Real git's fetch fails closed the same
+/// way ("did not send all necessary objects").
+///
+/// `wants` are the advertised tip oids in 40-char lowercase hex. Returns
+/// `error.WantNotDelivered` on the first want missing from `idx_bytes`.
+pub fn verifyWantsPresent(idx_bytes: []const u8, wants: []const [40]u8) !void {
+    const idx = try idx_reader.Idx.parse(idx_bytes);
+    for (wants) |want_hex| {
+        const oid = Oid.fromHex(&want_hex) catch return error.WantNotDelivered;
+        if (idx.findOffset(oid) == null) return error.WantNotDelivered;
+    }
+}
+
 /// Inflate the zlib stream starting at `start_offset` in `pack_bytes`,
 /// expecting `expected_size` decompressed bytes. Returns the number
 /// of *compressed* input bytes consumed. We discard the inflated
@@ -346,4 +366,37 @@ test "build idx for a fresh pack containing two blobs" {
     try testing.expectEqual(@as(u32, 2), idx.object_count);
     try testing.expect(idx.findOffset(oid_a_real) != null);
     try testing.expect(idx.findOffset(oid_b_real) != null);
+}
+
+test "verifyWantsPresent accepts delivered wants and rejects a missing one" {
+    const allocator = testing.allocator;
+    const PackWriter = @import("writer.zig").PackWriter;
+
+    const oid_a = try computeOid(.blob, "hello");
+    const oid_b = try computeOid(.blob, "world");
+
+    var w = try PackWriter.init(allocator, 2);
+    defer w.deinit();
+    _ = try w.addObject(oid_a, .blob, "hello");
+    _ = try w.addObject(oid_b, .blob, "world");
+    const finished = try w.finish();
+    defer allocator.free(finished.pack_bytes);
+
+    const result = try build(allocator, finished.pack_bytes);
+    defer allocator.free(result.idx_bytes);
+
+    var hex_a: [40]u8 = undefined;
+    oid_a.toHex(&hex_a);
+    var hex_b: [40]u8 = undefined;
+    oid_b.toHex(&hex_b);
+
+    // Both wants are in the pack → passes.
+    try verifyWantsPresent(result.idx_bytes, &.{ hex_a, hex_b });
+
+    // A want that was never delivered → fails closed.
+    const not_delivered = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".*;
+    try testing.expectError(
+        error.WantNotDelivered,
+        verifyWantsPresent(result.idx_bytes, &.{ hex_a, not_delivered }),
+    );
 }

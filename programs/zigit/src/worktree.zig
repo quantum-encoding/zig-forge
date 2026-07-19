@@ -79,6 +79,15 @@ fn writeBlob(
     mode: u32,
     oid: Oid,
 ) !void {
+    // Refuse to write through a symlinked parent. `createDirPath` follows an
+    // existing symlink component, so a mode-120000 blob materialised earlier
+    // in this same `applyTree` pass as a real OS symlink (e.g. `d` → /tmp/x)
+    // would let a later leaf `d/f` escape the work root — the classic checkout
+    // "plant a symlink, then write through it" attack. Tree-entry name
+    // validation (object/tree.isValidEntryName) already blocks `..`/`/`/`.git`
+    // inside a single component; this closes the cross-entry ordering gap.
+    try assertParentsNotSymlinked(io, work_root, rel_path);
+
     if (std.fs.path.dirname(rel_path)) |parent| {
         try work_root.createDirPath(io, parent);
     }
@@ -149,6 +158,27 @@ fn writeBlob(
     }
 }
 
+/// lstat every parent component of `rel_path` (a '/'-joined relative path)
+/// and refuse if any existing component is a symlink. Each prefix is checked
+/// with `follow_symlinks = false`, so the prefix's own final component is
+/// evaluated without dereference; we return on the first symlink, before path
+/// resolution would traverse it, so a symlinked component is never followed.
+fn assertParentsNotSymlinked(io: Io, work_root: Dir, rel_path: []const u8) !void {
+    var end: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, rel_path, end, '/')) |slash| {
+        const prefix = rel_path[0..slash];
+        if (prefix.len > 0) {
+            if (work_root.statFile(io, prefix, .{ .follow_symlinks = false })) |st| {
+                if (st.kind == .sym_link) return error.UnsafeSymlinkInPath;
+            } else |err| switch (err) {
+                error.FileNotFound => {},
+                else => return err,
+            }
+        }
+        end = slash + 1;
+    }
+}
+
 /// Best-effort delete of every path in `paths` (in order). FileNotFound
 /// is silently swallowed so callers can pass paths that may or may not
 /// exist (e.g. files removed by an earlier checkout step).
@@ -159,4 +189,33 @@ pub fn removePaths(io: Io, work_root: Dir, paths: []const []const u8) !void {
             else => return err,
         };
     }
+}
+
+const testing = std.testing;
+
+test "assertParentsNotSymlinked refuses a symlinked parent component" {
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // A plain nested path with no symlink parents is allowed (nothing exists
+    // yet — FileNotFound on the parents is fine).
+    try assertParentsNotSymlinked(io, tmp.dir, "a/b/c.txt");
+
+    // Real directories as parents are allowed.
+    try tmp.dir.createDirPath(io, "real/sub");
+    try assertParentsNotSymlinked(io, tmp.dir, "real/sub/c.txt");
+
+    // Plant a symlink `d` (the attack: a mode-120000 blob checked out first),
+    // then a later leaf `d/f` must be refused rather than written through it.
+    try tmp.dir.symLink(io, "/tmp", "d", .{});
+    try testing.expectError(
+        error.UnsafeSymlinkInPath,
+        assertParentsNotSymlinked(io, tmp.dir, "d/f"),
+    );
+    // Deeper below the symlink is refused too.
+    try testing.expectError(
+        error.UnsafeSymlinkInPath,
+        assertParentsNotSymlinked(io, tmp.dir, "d/e/f"),
+    );
 }

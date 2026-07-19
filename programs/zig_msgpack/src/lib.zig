@@ -55,6 +55,8 @@ pub const Value = decoder.Value;
 pub const ArrayIterator = decoder.ArrayIterator;
 pub const MapIterator = decoder.MapIterator;
 pub const Extension = decoder.Extension;
+pub const Timestamp = decoder.Timestamp;
+pub const decodeTimestamp = decoder.decodeTimestamp;
 
 /// Version info
 pub const version = "0.1.0";

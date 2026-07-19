@@ -67,10 +67,14 @@ test "REAL composer replay: typed text must land unmangled in the grid" {
         const line = std.mem.trimEnd(u8, buf[0..len], " ");
         if (std.mem.indexOf(u8, line, "hey") != null) {
             found = true;
-            std.debug.print("\ncomposer row {d}: [{s}]\n", .{ r, line });
             // The typed words must appear IN ORDER with clean boundaries —
-            // no stale-cell merges like "claudelhows".
-            try std.testing.expect(std.mem.indexOf(u8, line, "hey claude hows it going") != null);
+            // no stale-cell merges like "claudelhows". Dump the offending row
+            // only on failure — a passing test must stay silent so it doesn't
+            // pollute the `zig build test` IPC stream.
+            if (std.mem.indexOf(u8, line, "hey claude hows it going") == null) {
+                std.debug.print("\ncomposer row {d}: [{s}]\n", .{ r, line });
+                try std.testing.expect(false);
+            }
         }
     }
     try std.testing.expect(found);
@@ -109,8 +113,10 @@ test "REAL composer replay WITH mid-stream resizes: no stale-cell mangling" {
         const line = std.mem.trimEnd(u8, buf[0..len], " ");
         if (std.mem.indexOf(u8, line, "hey") != null) {
             found = true;
-            std.debug.print("\nresized composer row {d}: [{s}]\n", .{ r, line });
-            try std.testing.expect(std.mem.indexOf(u8, line, "hey claude hows it going") != null);
+            if (std.mem.indexOf(u8, line, "hey claude hows it going") == null) {
+                std.debug.print("\nresized composer row {d}: [{s}]\n", .{ r, line });
+                try std.testing.expect(false);
+            }
             // WIDTH audit — the Swift renderer BLANKS the cell after any
             // width-2 cell (wide-glyph continuation collapse). A spurious
             // width-2 on an ASCII cell makes the renderer EAT the next letter
@@ -155,9 +161,11 @@ test "REAL submit cycle: transcript echo renders unmangled (scroll-region path)"
         }
         const line = std.mem.trimEnd(u8, buf[0..len], " ");
         if (std.mem.indexOf(u8, line, "hey") != null) {
-            std.debug.print("\nsubmit-cycle row {d}: [{s}]\n", .{ r, line });
             // Words must have clean boundaries — the live defect merged them.
-            try std.testing.expect(std.mem.indexOf(u8, line, "hey claude hows it going") != null);
+            if (std.mem.indexOf(u8, line, "hey claude hows it going") == null) {
+                std.debug.print("\nsubmit-cycle row {d}: [{s}]\n", .{ r, line });
+                try std.testing.expect(false);
+            }
             sawEcho = true;
         }
     }

@@ -70,3 +70,29 @@ test "NIST FIPS 203 KAT: ML-KEM-768 decaps (dk,c -> K)" {
     _ = try std.fmt.hexToBytes(&exp_k, en_k_hex);
     try std.testing.expectEqualSlices(u8, &exp_k, &k);
 }
+
+// Negative-path anchor derived from the FIPS 203 encaps/decaps KAT above.
+// A corrupted ciphertext must trigger implicit rejection: decaps returns a
+// pseudorandom shared secret (deterministically derived from dk's z), never
+// the true K and never a visible error. External-anchored because (dk, c, K)
+// is the ACVP KAT triple.
+test "NIST FIPS 203 KAT: ML-KEM-768 decaps implicit rejection on tampered ciphertext" {
+    var dk: mlkem.DecapsulationKey768 = undefined;
+    _ = try std.fmt.hexToBytes(&dk.data, en_dk_hex);
+
+    var c: mlkem.Ciphertext768 = undefined;
+    _ = try std.fmt.hexToBytes(&c.data, en_c_hex);
+    c.data[0] ^= 0x01; // flip one ciphertext bit
+
+    const k_reject = mlkem.decaps768(&dk, &c);
+
+    var true_k: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&true_k, en_k_hex);
+
+    // Must NOT recover the real shared secret.
+    try std.testing.expect(!std.mem.eql(u8, &k_reject, &true_k));
+
+    // Implicit rejection is deterministic: same dk + same bad ct -> same K.
+    const k_reject2 = mlkem.decaps768(&dk, &c);
+    try std.testing.expectEqualSlices(u8, &k_reject, &k_reject2);
+}

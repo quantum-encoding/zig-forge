@@ -56,10 +56,15 @@ Quantum Vault uses **ML-KEM-768** as the default, providing Category 3 security 
 
 ## API Reference
 
+The ML-KEM-768 primitives below live in `src/ml_kem_api.zig` (`pqc` here is that
+source module). `build.zig` does not expose a Zig package module — non-Zig
+consumers link the static/shared `quantum_crypto` library and call the C ABI in
+`include/quantum_vault.h` (`qv_mlkem768_*`, `qv_mldsa65_*`, `qv_hybrid_*`).
+
 ### Key Generation
 
 ```zig
-const pqc = @import("quantum-vault-pqc");
+const pqc = @import("ml_kem_api.zig");
 
 // Generate a fresh key pair
 const keypair = try pqc.keyGen768();
@@ -91,7 +96,7 @@ const K = pqc.decaps768(&my_dk, &ciphertext);
 
 ### Prerequisites
 
-- Zig 0.13.0 or later
+- Zig 0.16.0 (the source uses 0.16 idioms: `std.process.Init`, `std.debug.FullPanic`, `std.Io`)
 - No external dependencies (pure Zig implementation)
 
 ### Build Commands
@@ -163,14 +168,13 @@ const HybridKEM = struct {
 };
 ```
 
-### Phase 2: QNFT Backup Signing (Future)
+### QNFT Backup Signing (ML-DSA-65)
 
-Sign backups with hybrid signatures (ML-DSA + Ed25519):
-
-```zig
-// TODO: Implement ML-DSA-65 (FIPS 204)
-// This provides post-quantum signature protection for QNFT backups
-```
+ML-DSA-65 (FIPS 204) is implemented (`src/ml_dsa.zig`): deterministic and
+randomized `sign`, `verify`, and `keyGen`, byte-exact against the NIST ACVP
+KATs (`src/ml_dsa_tier1_anchors.zig`) and exported over the C ABI as
+`qv_mldsa65_*`. It provides post-quantum signature protection for QNFT backups.
+Hybrid ML-DSA + Ed25519 signing is not yet implemented.
 
 ### Phase 3: Guardian Multi-Sig (Future)
 
@@ -237,7 +241,13 @@ Covers:
 NIST provides official test vectors at:
 https://csrc.nist.gov/projects/cryptographic-algorithm-validation-program
 
-TODO: Integrate NIST ACVP test vectors for validation.
+NIST ACVP KATs are integrated and run under `zig build test`:
+- `src/ml_kem_tier1_anchors.zig` — FIPS 203 ML-KEM-768 keyGen / encaps / decaps
+  (byte-exact) plus a decaps implicit-rejection negative vector.
+- `src/ml_dsa_tier1_anchors.zig` — FIPS 204 ML-DSA-65 keyGen / sigGen / verify
+  (byte-exact) plus verify-reject vectors for tampered sig / message / key.
+- `src/nist_vectors.zig` — a second independent ACVP decaps vector and FIPS 203
+  size assertions.
 
 ## References
 

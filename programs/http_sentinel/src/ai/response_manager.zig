@@ -239,25 +239,25 @@ pub const StoredResponse = struct {
     }
 
     pub fn writeJson(self: *const StoredResponse, writer: anytype) !void {
-        try writer.writeAll("{");
-        try writer.print("\"id\":\"{s}\",", .{self.id});
-        try writer.print("\"timestamp\":{},", .{self.timestamp});
-        try writer.print("\"provider\":\"{s}\",", .{self.response.metadata.provider});
-        try writer.print("\"model\":\"{s}\",", .{self.response.metadata.model});
-
-        // Escape and write request
-        const escaped_prompt = try common.escapeJsonString(self.allocator, self.request.prompt);
-        defer self.allocator.free(escaped_prompt);
-        try writer.print("\"request\":\"{s}\",", .{escaped_prompt});
-
-        // Escape and write response
-        const escaped_response = try common.escapeJsonString(self.allocator, self.response.message.content);
-        defer self.allocator.free(escaped_response);
-        try writer.print("\"response\":\"{s}\",", .{escaped_response});
-
-        try writer.print("\"input_tokens\":{},", .{self.response.usage.input_tokens});
-        try writer.print("\"output_tokens\":{}", .{self.response.usage.output_tokens});
-        try writer.writeAll("}");
+        // Emit the whole record through std.json.Stringify (CLAUDE.md
+        // anti-pattern #1). The previous hand-built JSON interpolated `id`,
+        // `provider`, and `model` UNESCAPED via writer.print("\"{s}\""), so
+        // any of those fields carrying a `"` / `\` / control char broke the
+        // JSON or injected a sibling field; only `request`/`response` were
+        // run through the escape helper. Stringify escapes every field.
+        // Field order is preserved to keep the on-wire shape stable.
+        const json = try std.json.Stringify.valueAlloc(self.allocator, .{
+            .id = self.id,
+            .timestamp = self.timestamp,
+            .provider = self.response.metadata.provider,
+            .model = self.response.metadata.model,
+            .request = self.request.prompt,
+            .response = self.response.message.content,
+            .input_tokens = self.response.usage.input_tokens,
+            .output_tokens = self.response.usage.output_tokens,
+        }, .{});
+        defer self.allocator.free(json);
+        try writer.writeAll(json);
     }
 };
 

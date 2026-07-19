@@ -71,6 +71,59 @@ pub const Extension = struct {
     data: []const u8,
 };
 
+/// A decoded MessagePack timestamp (ext type -1).
+///
+/// `seconds` is the signed count of seconds since the Unix epoch (can be
+/// negative for pre-1970 instants encoded as timestamp-96); `nanoseconds`
+/// is the sub-second fraction, always in the spec-mandated half-open range
+/// `[0, 1_000_000_000)`.
+pub const Timestamp = struct {
+    seconds: i64,
+    nanoseconds: u32,
+};
+
+/// Decode a MessagePack timestamp (ext type -1) from an already-read
+/// `Extension` value.
+///
+/// The encoder centralizes the three wire layouts in `writeTimestamp`; this
+/// is the matching decode side so callers do not hand-unpack the
+/// bit-twiddling themselves. Dispatch is on `data.len`:
+///
+///   * 4  bytes → timestamp 32: u32 BE seconds, nanoseconds = 0
+///   * 8  bytes → timestamp 64: u64 BE = (nanoseconds << 34) | seconds
+///                (nanoseconds in the high 30 bits, seconds in the low 34)
+///   * 12 bytes → timestamp 96: u32 BE nanoseconds, then i64 BE seconds
+///
+/// Errors with `error.InvalidTimestamp` if `type_id != -1`, the payload is
+/// not one of the three spec lengths, or the decoded `nanoseconds` is
+/// `>= 1_000_000_000` (the spec says this field MUST be a valid nanosecond
+/// fraction — a hostile timestamp-64/96 can claim otherwise, and the
+/// mirror-image check to `writeTimestamp`'s reject keeps a corrupt value
+/// from flowing downstream).
+pub fn decodeTimestamp(ext: Extension) !Timestamp {
+    if (ext.type_id != -1) return error.InvalidTimestamp;
+    switch (ext.data.len) {
+        4 => {
+            const seconds = std.mem.readInt(u32, ext.data[0..4], .big);
+            return .{ .seconds = seconds, .nanoseconds = 0 };
+        },
+        8 => {
+            const val = std.mem.readInt(u64, ext.data[0..8], .big);
+            const nanoseconds: u32 = @intCast(val >> 34);
+            const seconds: u64 = val & 0x3_ffff_ffff; // low 34 bits
+            if (nanoseconds >= 1_000_000_000) return error.InvalidTimestamp;
+            return .{ .seconds = @intCast(seconds), .nanoseconds = nanoseconds };
+        },
+        12 => {
+            const nanoseconds = std.mem.readInt(u32, ext.data[0..4], .big);
+            const seconds = std.mem.readInt(i64, ext.data[4..12], .big);
+            if (nanoseconds >= 1_000_000_000) return error.InvalidTimestamp;
+            return .{ .seconds = seconds, .nanoseconds = nanoseconds };
+        },
+        else => return error.InvalidTimestamp,
+    }
+}
+
 /// Array iterator for lazy decoding.
 ///
 /// On any error from an element read, the iterator is **poisoned** —
@@ -497,6 +550,20 @@ pub const Decoder = struct {
             else => error.TypeMismatch,
         };
     }
+
+    /// Read the next value, require it to be a timestamp extension (ext type
+    /// -1), and decode it into seconds + nanoseconds. Errors with
+    /// `error.TypeMismatch` if the next value is not an ext, and with
+    /// `error.InvalidTimestamp` if the ext is not a well-formed timestamp
+    /// (wrong type id, wrong length, or out-of-range nanoseconds). See
+    /// `decodeTimestamp` for the layout details.
+    pub fn readTimestamp(self: *Self) !Timestamp {
+        const value = try self.read();
+        return switch (value) {
+            .ext => |e| decodeTimestamp(e),
+            else => error.TypeMismatch,
+        };
+    }
 };
 
 // ============================================================================
@@ -683,4 +750,85 @@ test "decoder: skip fully drains nested containers (not just top level)" {
     try dec.skip();
     try std.testing.expectEqual(@as(usize, 3), dec.pos);
     try std.testing.expect(!dec.hasMore());
+}
+
+// ============================================================================
+// Timestamp decode (ext type -1) — mirror of encoder.writeTimestamp
+// ============================================================================
+
+test "decoder: readTimestamp decodes timestamp32 (0xd6 0xff seconds)" {
+    // timestamp 32: fixext4, seconds=1, nanos implicitly 0.
+    var buf: [6]u8 = .{ 0xd6, 0xff, 0x00, 0x00, 0x00, 0x01 };
+    var dec = Decoder.init(&buf);
+    const ts = try dec.readTimestamp();
+    try std.testing.expectEqual(@as(i64, 1), ts.seconds);
+    try std.testing.expectEqual(@as(u32, 0), ts.nanoseconds);
+}
+
+test "decoder: readTimestamp decodes timestamp64 30/34-bit split" {
+    // timestamp 64: fixext8, (1 << 34) | 1 → seconds=1, nanoseconds=1.
+    var buf: [10]u8 = .{ 0xd7, 0xff, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01 };
+    var dec = Decoder.init(&buf);
+    const ts = try dec.readTimestamp();
+    try std.testing.expectEqual(@as(i64, 1), ts.seconds);
+    try std.testing.expectEqual(@as(u32, 1), ts.nanoseconds);
+}
+
+test "decoder: readTimestamp decodes timestamp96 negative seconds" {
+    // timestamp 96: ext8 len=12, nanos=1, seconds=-1 (pre-1970).
+    var buf: [15]u8 = .{ 0xc7, 0x0c, 0xff, 0x00, 0x00, 0x00, 0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+    var dec = Decoder.init(&buf);
+    const ts = try dec.readTimestamp();
+    try std.testing.expectEqual(@as(i64, -1), ts.seconds);
+    try std.testing.expectEqual(@as(u32, 1), ts.nanoseconds);
+}
+
+test "decoder: readTimestamp round-trips every writeTimestamp layout" {
+    // Encode with the library's own writer, decode with readTimestamp, and
+    // require the values survive the wire — one case per layout (ts32/64/96).
+    const cases = [_]Timestamp{
+        .{ .seconds = 0, .nanoseconds = 0 }, // ts32
+        .{ .seconds = 1_700_000_000, .nanoseconds = 0 }, // ts32 (fits u32, nanos 0)
+        .{ .seconds = 1_700_000_000, .nanoseconds = 123_456_789 }, // ts64
+        .{ .seconds = 0x3_ffff_ffff, .nanoseconds = 999_999_999 }, // ts64 max seconds field
+        .{ .seconds = -1, .nanoseconds = 1 }, // ts96 (negative)
+        .{ .seconds = 0x4_0000_0000, .nanoseconds = 0 }, // ts96 (seconds > 34-bit)
+    };
+    for (cases) |c| {
+        var buf: [32]u8 = undefined;
+        var enc = @import("encoder.zig").Encoder.init(&buf);
+        try enc.writeTimestamp(c.seconds, c.nanoseconds);
+        var dec = Decoder.init(enc.getWritten());
+        const ts = try dec.readTimestamp();
+        try std.testing.expectEqual(c.seconds, ts.seconds);
+        try std.testing.expectEqual(c.nanoseconds, ts.nanoseconds);
+    }
+}
+
+test "decoder: readTimestamp rejects non-timestamp ext type" {
+    // fixext4 with type id 5 (not -1) must be rejected as InvalidTimestamp.
+    var buf: [6]u8 = .{ 0xd6, 0x05, 0x00, 0x00, 0x00, 0x01 };
+    var dec = Decoder.init(&buf);
+    try std.testing.expectError(error.InvalidTimestamp, dec.readTimestamp());
+}
+
+test "decoder: readTimestamp rejects a non-ext value" {
+    // A bare nil is not an ext at all → TypeMismatch.
+    var buf: [1]u8 = .{0xc0};
+    var dec = Decoder.init(&buf);
+    try std.testing.expectError(error.TypeMismatch, dec.readTimestamp());
+}
+
+test "decoder: decodeTimestamp rejects out-of-range nanoseconds in ts96" {
+    // Hand-built ts96 claiming nanoseconds = 1e9 (invalid; spec range is
+    // [0, 1e9)). decodeTimestamp must reject it just as the encoder does.
+    var data: [12]u8 = undefined;
+    std.mem.writeInt(u32, data[0..4], 1_000_000_000, .big);
+    std.mem.writeInt(i64, data[4..12], 5, .big);
+    try std.testing.expectError(error.InvalidTimestamp, decodeTimestamp(.{ .type_id = -1, .data = &data }));
+}
+
+test "decoder: decodeTimestamp rejects a wrong-length payload" {
+    // ext type -1 but 3 bytes — not one of the three spec lengths (4/8/12).
+    try std.testing.expectError(error.InvalidTimestamp, decodeTimestamp(.{ .type_id = -1, .data = &[_]u8{ 0, 0, 0 } }));
 }

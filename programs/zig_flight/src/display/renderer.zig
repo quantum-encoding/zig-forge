@@ -152,29 +152,45 @@ pub const Renderer = struct {
         self.emit("\x1b[0m");
     }
 
-    /// Flush output buffer to stdout in a single write.
+    /// Flush the remaining buffered output to stdout.
     pub fn flush(self: *Renderer) void {
-        if (self.out_len > 0) {
-            _ = std.c.write(posix.STDOUT_FILENO, &self.out_buf, self.out_len);
-        }
+        self.flushBuffer();
     }
 
     // --- Internal helpers ---
 
-    fn emit(self: *Renderer, s: []const u8) void {
-        for (s) |byte| {
-            if (self.out_len < self.out_buf.len) {
-                self.out_buf[self.out_len] = byte;
-                self.out_len += 1;
+    /// Write the buffered bytes to stdout, tolerating short writes and
+    /// EINTR/EAGAIN. POSIX permits `write` to transfer fewer bytes than
+    /// requested, so a single unchecked call can tear a frame; loop until
+    /// every byte is out (or an unrecoverable error occurs), then reset.
+    fn flushBuffer(self: *Renderer) void {
+        var off: usize = 0;
+        while (off < self.out_len) {
+            const n = std.c.write(posix.STDOUT_FILENO, self.out_buf[off..].ptr, self.out_len - off);
+            if (n < 0) {
+                switch (std.posix.errno(n)) {
+                    .INTR, .AGAIN => continue,
+                    else => break, // unrecoverable (e.g. EPIPE) — drop the rest
+                }
             }
+            if (n == 0) break; // no progress possible
+            off += @intCast(n);
         }
+        self.out_len = 0;
     }
 
+    fn emit(self: *Renderer, s: []const u8) void {
+        for (s) |byte| self.emitByte(byte);
+    }
+
+    /// Append a byte, flushing the buffer first if it is full. This makes the
+    /// renderer overflow-safe: a frame whose ANSI output exceeds `out_buf`
+    /// (worst case ~110 KiB of per-cell SGR churn) is drained in segments
+    /// instead of silently dropping the tail and desyncing the terminal.
     fn emitByte(self: *Renderer, byte: u8) void {
-        if (self.out_len < self.out_buf.len) {
-            self.out_buf[self.out_len] = byte;
-            self.out_len += 1;
-        }
+        if (self.out_len >= self.out_buf.len) self.flushBuffer();
+        self.out_buf[self.out_len] = byte;
+        self.out_len += 1;
     }
 
     fn emitChar(self: *Renderer, char: u21) void {
@@ -215,3 +231,35 @@ pub const Renderer = struct {
         self.emit(s);
     }
 };
+
+// ============================================================================
+// Tests
+//
+// emitChar's UTF-8 output is anchored against the Unicode-defined byte
+// sequences for the exact codepoints the MFD draws (box-drawing, block, and a
+// 4-byte astral codepoint). This pins the encoder to the standard rather than
+// to its own round-trip, and exercises the overflow-safe emitByte append path.
+// ============================================================================
+
+test "emitChar UTF-8 byte sequences match Unicode encoding" {
+    // Heap-allocate: the Renderer's inline buffers are far larger than the
+    // default test stack frame.
+    const r = try std.testing.allocator.create(Renderer);
+    defer std.testing.allocator.destroy(r);
+    r.out_len = 0;
+
+    const Case = struct { cp: u21, bytes: []const u8 };
+    const cases = [_]Case{
+        .{ .cp = 'A', .bytes = "\x41" }, // U+0041, 1 byte
+        .{ .cp = 0x00A9, .bytes = "\xC2\xA9" }, // © U+00A9, 2 bytes
+        .{ .cp = 0x2500, .bytes = "\xE2\x94\x80" }, // ─ box-drawing, 3 bytes
+        .{ .cp = 0x2588, .bytes = "\xE2\x96\x88" }, // █ full block, 3 bytes
+        .{ .cp = 0x2591, .bytes = "\xE2\x96\x91" }, // ░ light shade, 3 bytes
+        .{ .cp = 0x1F6E9, .bytes = "\xF0\x9F\x9B\xA9" }, // 🛩 small airplane, 4 bytes
+    };
+    inline for (cases) |c| {
+        r.out_len = 0;
+        r.emitChar(c.cp);
+        try std.testing.expectEqualStrings(c.bytes, r.out_buf[0..r.out_len]);
+    }
+}

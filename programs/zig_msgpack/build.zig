@@ -94,8 +94,24 @@ pub fn build(b: *std.Build) void {
     anchors_test_module.addImport("msgpack", lib_module);
     const anchor_tests = b.addTest(.{ .root_module = anchors_test_module });
 
+    // Fuzz harness (untrusted-bytes → Decoder) for `skip()` and `read()`.
+    // `zig build fuzz --fuzz` runs the coverage-guided fuzzer; the same target
+    // is folded into `zig build test`, where std.testing.fuzz executes a
+    // single deterministic iteration so the harness stays green in CI.
+    const fuzz_test_module = b.createModule(.{
+        .root_source_file = b.path("src/fuzz.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    fuzz_test_module.addImport("msgpack", lib_module);
+    const fuzz_tests = b.addTest(.{ .root_module = fuzz_test_module });
+
+    const fuzz_step = b.step("fuzz", "Fuzz the decoder against arbitrary bytes");
+    fuzz_step.dependOn(&b.addRunArtifact(fuzz_tests).step);
+
     const test_step = b.step("test", "Run unit tests, end-to-end tests, and spec anchors");
     test_step.dependOn(&b.addRunArtifact(lib_tests).step);
     test_step.dependOn(&b.addRunArtifact(comprehensive_tests).step);
     test_step.dependOn(&b.addRunArtifact(anchor_tests).step);
+    test_step.dependOn(&b.addRunArtifact(fuzz_tests).step);
 }
