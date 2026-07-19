@@ -22,6 +22,12 @@ autopush="${CHRONOS_AUTOPUSH:-true}"
 git config chronos.enabled true
 git config chronos.autopush "$autopush"
 
+# Resolve the chronos-post-commit path baked into the shim. Portable installs may
+# live in ~/.local/bin (or anywhere), so prefer an explicit env override, then a
+# PATH lookup, and only fall back to the historical /usr/local/bin path. This is
+# what lets a per-user install work with no PATH assumptions in the git hook.
+post_commit_bin="${CHRONOS_POST_COMMIT_BIN:-$(command -v chronos-post-commit 2>/dev/null || echo /usr/local/bin/chronos-post-commit)}"
+
 hookdir="$(git rev-parse --git-path hooks)"
 mkdir -p "$hookdir"
 target="$hookdir/post-commit"
@@ -38,36 +44,36 @@ if [ -e "$target.pre-chronos" ]; then
   # the final, real (non-[CHRONOS]) commit. This ensures a chained auditor (e.g.
   # the red-team hook) sees the squashed commit and NEVER fires on a transient
   # tick or during the squash recommit (which would spawn a storm of auditors).
-  cat > "$target" <<'SHIM'
+  cat > "$target" <<SHIM
 #!/bin/bash
 # >>> chronos post-commit shim >>>
-[ -n "${CHRONOS_SQUASHING:-}" ] && exit 0          # squash recommit: do nothing
-/usr/local/bin/chronos-post-commit "$@"            # fold ticks into HEAD (+push)
-__subj=$(git log -1 --format=%s HEAD 2>/dev/null)  # then chain — real commits only
-case "$__subj" in
+[ -n "\${CHRONOS_SQUASHING:-}" ] && exit 0          # squash recommit: do nothing
+"$post_commit_bin" "\$@"                            # fold ticks into HEAD (+push)
+__subj=\$(git log -1 --format=%s HEAD 2>/dev/null)  # then chain — real commits only
+case "\$__subj" in
   "[CHRONOS]"* | "[CHRONOS:"*) : ;;
-  *) "$(git rev-parse --git-path hooks)/post-commit.pre-chronos" "$@" || true ;;
+  *) "\$(git rev-parse --git-path hooks)/post-commit.pre-chronos" "\$@" || true ;;
 esac
 exit 0
 SHIM
 else
-  cat > "$target" <<'SHIM'
+  cat > "$target" <<SHIM
 #!/bin/bash
 # >>> chronos post-commit shim >>>
-exec /usr/local/bin/chronos-post-commit "$@"
+exec "$post_commit_bin" "\$@"
 SHIM
 fi
 chmod +x "$target"
 
 echo "chronos: enabled in $repo (autopush=$autopush)"
 echo "  ticking:  git config chronos.enabled  -> $(git config --get chronos.enabled)"
-echo "  squash:   $target -> /usr/local/bin/chronos-post-commit"
+echo "  squash:   $target -> $post_commit_bin"
 
 # Pre-flight the cognitive telemetry source. Without it, every tick stamp in this
 # repo silently reads NOT-DETECTED (macOS: the capture dylib must be installed and
 # Claude launched under it; Linux: the watcher DB must exist + be schema'd, which
 # --init creates). Non-fatal: ticking still works, the gerund is just absent.
-gcs="$(command -v get-cognitive-state || echo /usr/local/bin/get-cognitive-state)"
+gcs="${CHRONOS_STATE_BIN:-$(command -v get-cognitive-state 2>/dev/null || echo /usr/local/bin/get-cognitive-state)}"
 if [ -x "$gcs" ]; then
   if "$gcs" --init; then
     echo "  telemetry: $("$gcs")"

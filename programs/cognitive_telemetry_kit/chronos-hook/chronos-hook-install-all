@@ -2,11 +2,13 @@
 # Install chronos-hook symlinks in all git repositories
 # This script can be installed globally in /usr/local/bin
 
-HOOK_BINARY="/usr/local/bin/chronos-hook"
+# Resolve the installed chronos-hook: env override, then PATH, then the historical
+# /usr/local/bin default — so this works for a per-user (~/.local/bin) install too.
+HOOK_BINARY="${CHRONOS_HOOK_BIN:-$(command -v chronos-hook 2>/dev/null || echo /usr/local/bin/chronos-hook)}"
 
-if [ ! -f "$HOOK_BINARY" ]; then
-    echo "❌ chronos-hook not found at $HOOK_BINARY"
-    echo "Please install it first with: cd chronos-hook && ./install.sh"
+if [ ! -x "$HOOK_BINARY" ]; then
+    echo "❌ chronos-hook not found/executable at $HOOK_BINARY"
+    echo "Please install it first (chronos-installer/install.sh), or set CHRONOS_HOOK_BIN."
     exit 1
 fi
 
@@ -24,13 +26,9 @@ find "$HOME" -name ".git" -type d 2>/dev/null | while read -r git_dir; do
     hooks_dir="$repo_dir/.claude/hooks"
     mkdir -p "$hooks_dir"
 
-    # Create symlink to global hook binary
+    # Create symlink to global hook binary. `ln -sf` atomically replaces any
+    # existing symlink, so no separate (blocked-on-some-boxes) `rm` is needed.
     hook_file="$hooks_dir/tool-result-hook.sh"
-
-    # Remove old hook if it exists
-    [ -e "$hook_file" ] && rm -f "$hook_file"
-
-    # Create symlink
     ln -sf "$HOOK_BINARY" "$hook_file"
 
     count=$((count + 1))

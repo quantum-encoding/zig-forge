@@ -1,0 +1,35 @@
+# Chronos turn-complete / cognitive D-Bus daemon — systemd --user unit TEMPLATE.
+#
+# install-daemon.sh renders this to ~/.config/systemd/user/chronosd.service with
+# the ExecStart placeholder replaced by the ABSOLUTE path of the installed daemon
+# binary (never a hardcoded /usr/local/bin). A --user unit is the right default:
+# it serves the operator's session bus and the daemon
+# serves the human operator's session bus and needs no root, no DynamicUser, and
+# no system-wide state dir. (A root/system alternative ships as
+# programs/chronos_engine/config/chronosd.service — see INSTALL.md.)
+#
+# It is installed DISABLED. Starting a daemon is the operator's choice; the
+# installer prints the enable command and does not run it.
+
+[Unit]
+Description=Chronos turn-complete / cognitive D-Bus daemon (per-user)
+Documentation=https://github.com/quantum-encoding/zig-forge
+After=dbus.service
+Wants=dbus.service
+
+[Service]
+Type=simple
+ExecStart=@EXECSTART@
+Restart=on-failure
+RestartSec=5
+
+# Per-user hardening (the subset that is meaningful for a --user unit; the
+# aggressive system-unit sandboxing lives in the root variant).
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,2 @@
+# Build staging produced by install.sh (the daemon-free chronos-stamp is compiled here)
+.stage/

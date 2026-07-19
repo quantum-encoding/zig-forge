@@ -5,10 +5,30 @@ const c = std.c;
 const canonical = @import("canonical"); // RFC 8785 encoder (chronos-ledger)
 const emit_client = @import("chronos_emit"); // non-blocking UDS writer (chronos-ledger)
 
-const CHRONOS_STAMP_PATH = "/usr/local/bin/chronos-stamp";
-const GET_COGNITIVE_STATE_PATH = "/usr/local/bin/get-cognitive-state";
+// Helper-binary locations. These default to the historical /usr/local/bin paths
+// (a system-wide install), but each is overridable at RUNTIME via an env var so a
+// per-user install (e.g. ~/.local/bin) works with no PATH assumptions — the
+// portable installer bakes the absolute resolved paths into the settings.json
+// PostToolUse hook command. Absent/empty env → the default below. runCommand()
+// execs via execvp, so a bare name would also PATH-resolve, but we prefer an
+// explicit absolute path so ticks never silently fall back to [FALLBACK] because
+// the hook's runtime PATH differs from the shell's.
+const CHRONOS_STAMP_DEFAULT = "/usr/local/bin/chronos-stamp";
+const GET_COGNITIVE_STATE_DEFAULT = "/usr/local/bin/get-cognitive-state";
+const CHRONOS_ENABLE_REPO_DEFAULT = "/usr/local/bin/chronos-enable-repo";
 const AGENT_ID = "claude-code";
 const LEDGER_SOCKET_DEFAULT = "/tmp/chronos-ledger.sock";
+
+/// Resolve a helper-binary path: the `name` env var if set to a non-empty value,
+/// else `default`. The returned slice points at process-lifetime memory (the
+/// environment block or a static default), so it is safe to use without freeing.
+fn envOr(name: [*:0]const u8, default: []const u8) []const u8 {
+    if (c.getenv(name)) |p| {
+        const v = std.mem.span(p);
+        if (v.len > 0) return v;
+    }
+    return default;
+}
 
 // std.c exposes neither fork nor execvp in this Zig build — declare them.
 // (execvp does PATH resolution, which execve would not.)
@@ -326,7 +346,7 @@ fn ensureSquashShim(allocator: std.mem.Allocator) !void {
 
     const root = (try gitOutput(allocator, &[_][]const u8{ "git", "rev-parse", "--show-toplevel" })) orelse return;
     defer allocator.free(root);
-    var install = try runCommand(allocator, &[_][]const u8{ "/usr/local/bin/chronos-enable-repo", root });
+    var install = try runCommand(allocator, &[_][]const u8{ envOr("CHRONOS_ENABLE_REPO_BIN", CHRONOS_ENABLE_REPO_DEFAULT), root });
     install.deinit();
 }
 
@@ -429,7 +449,7 @@ fn toolActivity(tool_name: ?[]const u8) []const u8 {
 /// tap wrote to /tmp/cognitive-state-<pid> (get-cognitive-state resolves the
 /// firing claude's PID itself); on NOT-DETECTED, falls back to the tool activity.
 fn getCognitiveState(allocator: std.mem.Allocator, tool_name: ?[]const u8) ![]const u8 {
-    var result = try runCommand(allocator, &[_][]const u8{GET_COGNITIVE_STATE_PATH});
+    var result = try runCommand(allocator, &[_][]const u8{envOr("CHRONOS_STATE_BIN", GET_COGNITIVE_STATE_DEFAULT)});
     defer result.deinit();
 
     if (result.exit_code == 0) {
@@ -442,7 +462,7 @@ fn getCognitiveState(allocator: std.mem.Allocator, tool_name: ?[]const u8) ![]co
 }
 
 fn generateChronosTimestamp(allocator: std.mem.Allocator, agent: []const u8) ![]const u8 {
-    var result = try runCommand(allocator, &[_][]const u8{ CHRONOS_STAMP_PATH, agent, "tool-completion" });
+    var result = try runCommand(allocator, &[_][]const u8{ envOr("CHRONOS_STAMP_BIN", CHRONOS_STAMP_DEFAULT), agent, "tool-completion" });
     defer result.deinit();
 
     if (result.exit_code == 0 and result.stdout.len > 0) {
