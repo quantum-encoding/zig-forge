@@ -33,4 +33,17 @@ pub fn build(b: *std.Build) void {
     });
 
     b.installArtifact(exe);
+
+    // Tests — exercise the pure parsing/attribution helpers (agent misattribution
+    // guard, hostile `ps` rows, structured field extraction that ignores keys
+    // appearing only inside string values, UTF-8-safe truncation). These are
+    // I/O-free, so no libc / canonical / emit wiring is needed here.
+    const test_step = b.step("test", "Run chronos-hook tests");
+    const test_mod = b.createModule(.{
+        .root_source_file = b.path("src/parse.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const unit_tests = b.addTest(.{ .root_module = test_mod });
+    test_step.dependOn(&b.addRunArtifact(unit_tests).step);
 }

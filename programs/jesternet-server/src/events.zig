@@ -53,8 +53,8 @@ pub fn replayFrom(
     // long-held lock, but SSE replay only fires on reconnect (rare
     // path) and the alternative (snapshot copy + release) costs
     // proportional to WAL size. For v1 the simple lock is fine.
-    store.mutex.lock();
-    defer store.mutex.unlock();
+    store.mutex.lockUncancelable(store.io);
+    defer store.mutex.unlock(store.io);
 
     _ = try store.wal.replay(io, &inner_ctx, replayAdapter);
     return inner_ctx.emitted;

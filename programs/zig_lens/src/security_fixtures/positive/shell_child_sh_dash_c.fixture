@@ -1,0 +1,7 @@
+// EXTERNAL ANCHOR: zig-forge/CLAUDE.md "High-signal anti-patterns" §2
+// (SHELL-CHILD, shape (b)). The "sh" + "-c" argv pair on one line —
+// the exact shape that pipes the next argument to a shell parser,
+// independent of the enclosing function. MUST fire SHELL-CHILD.
+pub fn runViaSh(cmd: []const u8) [3][]const u8 {
+    return [_][]const u8{ "sh", "-c", cmd };
+}

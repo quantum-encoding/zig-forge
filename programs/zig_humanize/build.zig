@@ -58,8 +58,21 @@ pub fn build(b: *std.Build) void {
     });
     const run_lib_tests = b.addRunArtifact(lib_tests);
 
+    // Tier-1 externally-anchored vectors (go-humanize / python humanize).
+    // Separate module so it exercises the public @import("zig_humanize")
+    // surface exactly as an in-tree consumer would.
+    const anchors_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tier1_anchors.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    anchors_test_module.addImport("zig_humanize", humanize_module);
+    const anchor_tests = b.addTest(.{ .root_module = anchors_test_module });
+    const run_anchor_tests = b.addRunArtifact(anchor_tests);
+
     const test_step = b.step("test", "Run library tests");
     test_step.dependOn(&run_lib_tests.step);
+    test_step.dependOn(&run_anchor_tests.step);
 
     // Benchmark
     const bench = b.addExecutable(.{

@@ -15,8 +15,18 @@
  * - Caller MUST free outputs with zigpdf_free()
  *
  * Thread Safety:
- * - All functions are thread-safe
- * - Error messages use thread-local storage
+ * - Generation functions (zigpdf_generate_*, zigpdf_qr_*, zigpdf_identicon_*)
+ *   are reentrant: they take borrowed inputs and return freshly-allocated
+ *   outputs, so distinct threads may call them concurrently.
+ * - Error messages use thread-local storage: zigpdf_get_error() returns this
+ *   thread's most recent error, valid until the next zigpdf call on the SAME
+ *   thread. A generate/get-error pair must stay on one thread.
+ * - The extractor result accessors are NOT thread-safe. zigpdf_extract_mdx()
+ *   and the zigpdf_extract_meta_json()/zigpdf_extract_image_* /
+ *   zigpdf_extract_free_images() family share a single process-global result
+ *   (last_meta / last_images); concurrent extraction from multiple threads
+ *   races and can double-free. Serialise all extractor calls with a caller-
+ *   side lock, or confine extraction to one thread.
  *
  * Example:
  * @code

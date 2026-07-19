@@ -115,16 +115,6 @@ pub const MissionElapsedTime = struct {
     pub fn wholeSeconds(self: MissionElapsedTime) u64 {
         return self.ticks / self.ticks_per_second;
     }
-
-    /// Format as MM:SS.mmm
-    pub fn format(self: MissionElapsedTime, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-        const total_ms = (self.ticks * 1000) / self.ticks_per_second;
-        const secs = total_ms / 1000;
-        const ms = total_ms % 1000;
-        const mins = secs / 60;
-        const s = secs % 60;
-        try writer.print("{d:0>2}:{d:0>2}.{d:0>3}", .{ mins, s, ms });
-    }
 };
 
 // Fixed16 = 16 fractional bits (Q47.16), about 0.0000153 resolution

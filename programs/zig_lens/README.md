@@ -14,6 +14,7 @@ Built for the [Quantum Zig Forge](https://github.com/quantum-encoding/quantum-zi
 | **Python** | Indent-aware scanner | Functions, classes, imports, decorators, docstrings, constants, unsafe patterns (`eval`, `exec`, `os.system`) |
 | **JavaScript/TypeScript** | Line-based scanner | Functions, arrow functions, classes, interfaces, type aliases, enums (TS), imports/require, JSDoc, tests (`describe`/`it`/`test`) |
 | **Svelte** | JS/TS scanner (within `<script>` blocks) | Same as JS/TS |
+| **Go** | Line-based scanner | Functions, methods, structs, interfaces, `import`, constants, unsafe patterns |
 
 ## Quick Start
 
@@ -182,9 +183,13 @@ src/
 │   ├── c_lang.zig           C line-based analyzer
 │   ├── python.zig           Python indent-aware analyzer
 │   ├── javascript.zig       JS/TS/Svelte line-based analyzer
+│   ├── go.zig               Go line-based analyzer
 │   ├── complexity.zig       Cyclomatic complexity via AST traversal
 │   ├── patterns.zig         Allocator/Io/SIMD/packed struct/catch {} detection
-│   └── quality.zig          Doc coverage, test density, TODO/FIXME/HACK markers
+│   ├── quality.zig          Doc coverage, test density, TODO/FIXME/HACK markers
+│   ├── security_patterns.zig  Security anti-pattern scanner — active ruleset + per-line scan + inline suppression
+│   ├── rule_engine.zig      Data-driven rule schema + TOML loader + line/enclosing-fn/group matchers
+│   └── default_rules.toml    Embedded default ruleset (JSON-IN-FMT, SHELL-CHILD, EQL-FOR-SECRETS, …)
 ├── graph/
 │   ├── builder.zig          Dependency graph construction — nodes, edges, fan-in/fan-out, hubs, orphans
 │   ├── dot.zig              Graphviz DOT export with directory clusters and role-based coloring
@@ -201,7 +206,7 @@ src/
 
 - **Compiler-grade parsing for Zig.** Uses `std.zig.Ast.parse()` — the same parser the Zig compiler uses. No regex hacks, no custom tokenizers.
 - **Graceful degradation.** Bad file? Report it, skip it, continue. One parse error never aborts the scan.
-- **Zero external dependencies.** Pure Zig, builds with `zig build` and nothing else.
+- **Minimal dependencies.** Pure Zig sources with two deliberate exceptions: the build links libc, and the security rule engine parses its ruleset with the in-tree `zig_toml` library (`build.zig` wires it in). No third-party package-manager dependencies; builds with `zig build` and nothing else.
 - **Deterministic output.** Same input always produces identical output. Files are sorted, no hash map iteration order leaks.
 - **JSON is source of truth.** All output formats derive from the same analysis data. Analyze once, render many ways.
 - **Context-window aware.** `--compact` mode minimizes JSON size while maximizing structural insight for AI agents.

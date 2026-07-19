@@ -116,29 +116,14 @@ export fn ziginfer_embed(
 ) i32 {
     const allocator = std.heap.c_allocator;
     const text_str = std.mem.span(text);
-
-    var input_buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer input_buf.deinit(allocator);
-    if (is_query != 0) {
-        // `task` may be NULL (the header documents it): fall back to "".
-        const task_str = if (task) |t| std.mem.span(t) else "";
-        const instruction = if (task_str.len > 0) task_str else "Given a web search query, retrieve relevant passages that answer the query";
-        const s = std.fmt.allocPrint(allocator, "Instruct: {s}\nQuery:{s}", .{ instruction, text_str }) catch return -1;
-        defer allocator.free(s);
-        input_buf.appendSlice(allocator, s) catch return -1;
-    } else {
-        input_buf.appendSlice(allocator, text_str) catch return -1;
-    }
-
-    var tokens: std.ArrayListUnmanaged(u32) = .empty;
-    defer tokens.deinit(allocator);
-    const enc = model.tokenizer.encode(allocator, input_buf.items, false) catch return -1;
-    defer allocator.free(enc);
-    tokens.appendSlice(allocator, enc) catch return -1;
-    if (model.tokenizer.add_eos_default) tokens.append(allocator, model.tokenizer.eos_id) catch return -1;
+    // `task` may be NULL (the header documents it): fall back to "".
+    const task_str = if (task) |t| std.mem.span(t) else "";
 
     const dim = @min(out_capacity, @as(usize, model.config.d_model));
-    const written = model.embed(tokens.items, out[0..dim]);
+    const written = model.embedInto(allocator, text_str, is_query != 0, task_str, out[0..dim]) catch |e| return switch (e) {
+        error.EmptyInput => -2,
+        else => -1,
+    };
     return @intCast(written);
 }
 

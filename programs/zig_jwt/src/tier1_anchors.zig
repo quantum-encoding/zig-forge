@@ -219,3 +219,196 @@ test "collision guard: a genuinely-custom claim still signs and round-trips" {
     // The non-colliding custom claim is preserved in the raw payload.
     try std.testing.expect(std.mem.indexOf(u8, claims.custom.?, "\"role\":\"admin\"") != null);
 }
+
+// ── Externally-anchored negative & interop vectors ──────────────────
+//
+// Mints an HS256 compact JWS over arbitrary header/payload JSON using
+// std.crypto directly (NOT the library's internal signData), so these
+// vectors cross-check the verifier against a signature it did not
+// construct — and let us hand-shape headers/payloads the Builder API
+// won't emit (alg:none, aud arrays, malformed audience).
+fn mintHS256(
+    allocator: std.mem.Allocator,
+    header_json: []const u8,
+    payload_json: []const u8,
+    secret: []const u8,
+) ![]u8 {
+    const h = try jwt.base64UrlEncode(allocator, header_json);
+    defer allocator.free(h);
+    const p = try jwt.base64UrlEncode(allocator, payload_json);
+    defer allocator.free(p);
+    const signing_input = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ h, p });
+    defer allocator.free(signing_input);
+    var mac: [std.crypto.auth.hmac.sha2.HmacSha256.mac_length]u8 = undefined;
+    std.crypto.auth.hmac.sha2.HmacSha256.create(&mac, signing_input, secret);
+    const sig = try jwt.base64UrlEncode(allocator, &mac);
+    defer allocator.free(sig);
+    return std.fmt.allocPrint(allocator, "{s}.{s}.{s}", .{ h, p, sig });
+}
+
+test "alg:none: a literal none-header token is refused under both HS256 and none" {
+    const allocator = std.testing.allocator;
+
+    // The canonical unsecured-JWS shape: alg=none, empty signature.
+    // A well-formed HMAC over it (secret irrelevant) still must not
+    // verify — the header alg enum-compare rejects before any HMAC.
+    const header = "{\"alg\":\"none\",\"typ\":\"JWT\"}";
+    const payload = "{\"sub\":\"attacker\"}";
+    const h = try jwt.base64UrlEncode(allocator, header);
+    defer allocator.free(h);
+    const p = try jwt.base64UrlEncode(allocator, payload);
+    defer allocator.free(p);
+    // Unsecured JWS carries an empty signature segment.
+    const token = try std.fmt.allocPrint(allocator, "{s}.{s}.", .{ h, p });
+    defer allocator.free(token);
+
+    var verifier = jwt.Verifier.init(allocator);
+    defer verifier.deinit();
+
+    // Asking for HS256 must fail the enum-compare (header says none).
+    try std.testing.expectError(
+        jwt.Error.InvalidAlgorithm,
+        verifier.verify(token, .HS256, "secret-key"),
+    );
+    // Asking for none is rejected before parsing (verify's first line).
+    try std.testing.expectError(
+        jwt.Error.InvalidAlgorithm,
+        verifier.verify(token, .none, "secret-key"),
+    );
+}
+
+test "structure: tokens without exactly three segments are InvalidToken" {
+    const allocator = std.testing.allocator;
+
+    var verifier = jwt.Verifier.init(allocator);
+    defer verifier.deinit();
+
+    try std.testing.expectError(jwt.Error.InvalidToken, verifier.verify("a.b", .HS256, "k"));
+    try std.testing.expectError(jwt.Error.InvalidToken, verifier.verify("a.b.c.d", .HS256, "k"));
+    try std.testing.expectError(jwt.Error.InvalidToken, verifier.verify("onlyonepart", .HS256, "k"));
+}
+
+test "base64url: a non-alphabet character in the signature is rejected, not crashed" {
+    const allocator = std.testing.allocator;
+
+    const token = try mintHS256(allocator, "{\"alg\":\"HS256\",\"typ\":\"JWT\"}", "{\"sub\":\"x\"}", "k");
+    defer allocator.free(token);
+
+    // Corrupt the last signature byte to '!', which is outside the
+    // url_safe_no_pad alphabet. The decode must fail cleanly and the
+    // verifier must return InvalidSignature (never panic on bad input).
+    var bad = try allocator.dupe(u8, token);
+    defer allocator.free(bad);
+    bad[bad.len - 1] = '!';
+
+    var verifier = jwt.Verifier.init(allocator);
+    defer verifier.deinit();
+    try std.testing.expectError(jwt.Error.InvalidSignature, verifier.verify(bad, .HS256, "k"));
+}
+
+// ── RFC 7519 §4.1.3: `aud` array-of-strings interop ─────────────────
+
+test "aud array: expected audience matching an array member verifies" {
+    const allocator = std.testing.allocator;
+
+    const token = try mintHS256(
+        allocator,
+        "{\"alg\":\"HS256\",\"typ\":\"JWT\"}",
+        "{\"sub\":\"x\",\"aud\":[\"app-a\",\"app-b\"]}",
+        "k",
+    );
+    defer allocator.free(token);
+
+    var verifier = jwt.Verifier.init(allocator);
+    defer verifier.deinit();
+    try verifier.setAudience("app-b"); // member of the array
+
+    var claims = try verifier.verify(token, .HS256, "k");
+    defer claims.deinit();
+    // Array form lands in aud_list; single-string aud stays null.
+    try std.testing.expect(claims.aud == null);
+    try std.testing.expectEqual(@as(usize, 2), claims.aud_list.?.len);
+    try std.testing.expectEqualStrings("app-a", claims.aud_list.?[0]);
+    try std.testing.expectEqualStrings("app-b", claims.aud_list.?[1]);
+}
+
+test "aud array: expected audience absent from the array is InvalidAudience" {
+    const allocator = std.testing.allocator;
+
+    const token = try mintHS256(
+        allocator,
+        "{\"alg\":\"HS256\",\"typ\":\"JWT\"}",
+        "{\"sub\":\"x\",\"aud\":[\"app-a\",\"app-b\"]}",
+        "k",
+    );
+    defer allocator.free(token);
+
+    var verifier = jwt.Verifier.init(allocator);
+    defer verifier.deinit();
+    try verifier.setAudience("app-c"); // not a member
+
+    try std.testing.expectError(
+        jwt.Error.InvalidAudience,
+        verifier.verify(token, .HS256, "k"),
+    );
+}
+
+test "aud array: no audience expectation accepts the array-form token" {
+    const allocator = std.testing.allocator;
+
+    const token = try mintHS256(
+        allocator,
+        "{\"alg\":\"HS256\",\"typ\":\"JWT\"}",
+        "{\"sub\":\"x\",\"aud\":[\"app-a\",\"app-b\"]}",
+        "k",
+    );
+    defer allocator.free(token);
+
+    var verifier = jwt.Verifier.init(allocator);
+    defer verifier.deinit();
+
+    var claims = try verifier.verify(token, .HS256, "k");
+    defer claims.deinit();
+    try std.testing.expectEqual(@as(usize, 2), claims.aud_list.?.len);
+}
+
+test "aud single-string form still validates against the array-aware check" {
+    const allocator = std.testing.allocator;
+
+    const token = try mintHS256(
+        allocator,
+        "{\"alg\":\"HS256\",\"typ\":\"JWT\"}",
+        "{\"sub\":\"x\",\"aud\":\"app-a\"}",
+        "k",
+    );
+    defer allocator.free(token);
+
+    var verifier = jwt.Verifier.init(allocator);
+    defer verifier.deinit();
+    try verifier.setAudience("app-a");
+
+    var claims = try verifier.verify(token, .HS256, "k");
+    defer claims.deinit();
+    try std.testing.expectEqualStrings("app-a", claims.aud.?);
+    try std.testing.expect(claims.aud_list == null);
+}
+
+test "aud malformed: a non-string array member is rejected as InvalidPayload" {
+    const allocator = std.testing.allocator;
+
+    // `aud` array containing a number is not RFC-legal; fail closed.
+    const token = try mintHS256(
+        allocator,
+        "{\"alg\":\"HS256\",\"typ\":\"JWT\"}",
+        "{\"sub\":\"x\",\"aud\":[\"app-a\",42]}",
+        "k",
+    );
+    defer allocator.free(token);
+
+    var verifier = jwt.Verifier.init(allocator);
+    defer verifier.deinit();
+    try std.testing.expectError(
+        jwt.Error.InvalidPayload,
+        verifier.verify(token, .HS256, "k"),
+    );
+}

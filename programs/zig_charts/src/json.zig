@@ -923,3 +923,45 @@ test "non-finite margins fall back to defaults" {
     defer allocator.free(svg);
     try std.testing.expect(std.mem.indexOf(u8, svg, "<svg") != null);
 }
+
+test "rendered charts are well-formed XML (external anchor: XML 1.0 well-formedness)" {
+    const allocator = std.testing.allocator;
+
+    // Each spec is rendered through the full public JSON path and the emitted
+    // SVG is checked against XML 1.0 well-formedness rules (matched/nested tags,
+    // quoted attributes, escaped '<'/'&'/'>') — an external contract, not a
+    // roundtrip. Any browser or SVG parser the consumers embed into applies the
+    // same rules, so this pins the output to what those renderers accept.
+    const specs = [_][]const u8{
+        // pie
+        \\{"type":"pie","width":400,"height":300,"data":{"segments":[
+        \\{"label":"A","value":30},{"label":"B","value":50},{"label":"C","value":20}]}}
+        ,
+        // grouped bar with multiple series + value labels
+        \\{"type":"bar","data":{"categories":["Q1","Q2","Q3"],"series":[
+        \\{"name":"2024","values":[100,120,110]},{"name":"2025","values":[110,130,125]}]},
+        \\"config":{"show_values":true}}
+        ,
+        // gauge
+        \\{"type":"gauge","data":{"value":75,"label":"CPU Usage"},"config":{"min":0,"max":100}}
+        ,
+        // line with a time-ish domain
+        \\{"type":"line","data":{"series":[{"name":"s","data":[
+        \\{"x":0,"y":1},{"x":1,"y":4},{"x":2,"y":9}]}]}}
+        ,
+        // labels carrying XML metacharacters must flow through escaping into
+        // well-formed output, not break the document (injection via data labels).
+        \\{"type":"bar","data":{"categories":["<x>","a&b","q\"q"],"series":[
+        \\{"name":"s&<1>","values":[1,2,3]}]}}
+        ,
+    };
+
+    for (specs) |spec| {
+        const svg = try chartFromJson(allocator, spec);
+        defer allocator.free(svg);
+        svg_module.assertWellFormedXml(svg) catch |err| {
+            std.debug.print("well-formedness failed ({any}) for spec:\n{s}\nOUTPUT:\n{s}\n", .{ err, spec, svg });
+            return err;
+        };
+    }
+}

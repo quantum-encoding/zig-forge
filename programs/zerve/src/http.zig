@@ -54,7 +54,10 @@ pub const Parsed = union(enum) {
 /// request occupies so it can wait for the body.
 pub fn parse(buf: []const u8) Parsed {
     const term = std.mem.indexOf(u8, buf, "\r\n\r\n") orelse {
-        // Cap the head size so a slow client can't grow it unbounded.
+        // Defensive cap for direct callers of the public `parse` on a large
+        // buffer. The server core enforces a tighter limit (its READ_CAP) and
+        // answers an oversized head with `431` before `buf` ever reaches this
+        // size, so in the shipped server this branch is the outer backstop.
         if (buf.len > 64 * 1024) return .invalid;
         return .incomplete;
     };
@@ -151,6 +154,13 @@ pub const Response = struct {
 /// Serialize `res` into `out` (a connection's write buffer). Returns the number
 /// of bytes written, or null if it doesn't fit. Pure formatting, no alloc.
 pub fn writeResponse(out: []u8, res: *const Response, keep_alive: bool) ?usize {
+    // Response-header-injection guard. `content_type` is the only
+    // caller-influenced value interpolated into the head; a handler that set it
+    // from request-derived data could otherwise smuggle a CRLF and split the
+    // response (inject headers / a second response). Refuse rather than emit a
+    // corrupt head. `reason` comes from a fixed table and needs no check.
+    if (std.mem.indexOfAny(u8, res.content_type, "\r\n") != null) return null;
+
     const reason = reasonPhrase(res.status);
     const conn = if (keep_alive) "keep-alive" else "close";
     const head = std.fmt.bufPrint(out, "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: {s}\r\n\r\n", .{
@@ -169,7 +179,9 @@ fn reasonPhrase(status: u16) []const u8 {
         400 => "Bad Request",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        413 => "Content Too Large",
         429 => "Too Many Requests",
+        431 => "Request Header Fields Too Large",
         500 => "Internal Server Error",
         503 => "Service Unavailable",
         else => "OK",
@@ -215,4 +227,115 @@ test "writeResponse" {
     try std.testing.expect(std.mem.startsWith(u8, out, "HTTP/1.1 200 OK\r\n"));
     try std.testing.expect(std.mem.indexOf(u8, out, "Content-Length: 11\r\n") != null);
     try std.testing.expect(std.mem.endsWith(u8, out, "\r\n\r\n{\"ok\":true}"));
+}
+
+// ── External-anchored conformance ────────────────────────────────────
+//
+// Inputs and expected fields are taken from the HTTP/1.1 specs, not authored
+// round-trips: the request-message example is RFC 7230 §2.1 verbatim, the
+// version-defaulting rules are RFC 9112 §9.3 / RFC 7230 §6.3, and the exact
+// serialized response bytes below match the RFC 9112 §2.1 message grammar.
+
+test "RFC 7230 §2.1 example request parses field-for-field" {
+    // The worked example from RFC 7230 "Message Format", verbatim.
+    const raw =
+        "GET /hello.txt HTTP/1.1\r\n" ++
+        "User-Agent: curl/7.16.3 libcurl/7.16.3 OpenSSL/0.9.7l zlib/1.2.3\r\n" ++
+        "Host: www.example.com\r\n" ++
+        "Accept-Language: en, mi\r\n\r\n";
+    const p = parse(raw);
+    try std.testing.expect(p == .ok);
+    const r = p.ok;
+    try std.testing.expectEqual(Method.GET, r.method);
+    try std.testing.expectEqualStrings("/hello.txt", r.target);
+    try std.testing.expectEqualStrings("/hello.txt", r.path);
+    try std.testing.expect(r.http_11);
+    try std.testing.expect(r.keep_alive); // 1.1 default persistent (RFC 9112 §9.3)
+    try std.testing.expectEqual(@as(usize, 0), r.content_length);
+    try std.testing.expectEqual(raw.len, r.total_len);
+}
+
+test "HTTP/1.0 defaults to close; keep-alive opts back in (RFC 7230 §6.3)" {
+    {
+        const p = parse("GET / HTTP/1.0\r\nHost: x\r\n\r\n");
+        try std.testing.expect(p == .ok);
+        try std.testing.expect(!p.ok.keep_alive); // 1.0 default: close
+        try std.testing.expect(!p.ok.http_11);
+    }
+    {
+        const p = parse("GET / HTTP/1.0\r\nConnection: keep-alive\r\n\r\n");
+        try std.testing.expect(p == .ok);
+        try std.testing.expect(p.ok.keep_alive); // explicit opt-in
+    }
+}
+
+test "case-insensitive header names (RFC 9110 §5.1)" {
+    const p = parse("POST /x HTTP/1.1\r\nCONTENT-LENGTH: 3\r\nCoNnEcTiOn: CLOSE\r\n\r\nabc");
+    try std.testing.expect(p == .ok);
+    try std.testing.expectEqual(@as(usize, 3), p.ok.content_length);
+    try std.testing.expect(!p.ok.keep_alive);
+}
+
+test "malformed corpus is rejected or tolerated per spec" {
+    // Request line missing the HTTP-version token → invalid.
+    try std.testing.expect(parse("GET /\r\n\r\n") == .invalid);
+    // Unsupported/other HTTP version → invalid.
+    try std.testing.expect(parse("GET / HTTP/2.0\r\n\r\n") == .invalid);
+    // Non-numeric Content-Length → invalid (can't frame the body).
+    try std.testing.expect(parse("POST / HTTP/1.1\r\nContent-Length: xyz\r\n\r\n") == .invalid);
+    // A header line without a colon is skipped, not fatal (RFC 9112 tolerant read).
+    {
+        const p = parse("GET / HTTP/1.1\r\nGarbageNoColon\r\nHost: x\r\n\r\n");
+        try std.testing.expect(p == .ok);
+    }
+}
+
+test "pipelined batch: total_len frames the first request only" {
+    const first = "GET /a HTTP/1.1\r\nHost: x\r\n\r\n";
+    const second = "GET /b HTTP/1.1\r\nHost: x\r\n\r\n";
+    const p = parse(first ++ second);
+    try std.testing.expect(p == .ok);
+    // The first request occupies exactly `first.len` bytes; the server shifts
+    // the remainder and re-parses `second`.
+    try std.testing.expectEqual(first.len, p.ok.total_len);
+    try std.testing.expect(p.ok.total_len < (first ++ second).len);
+}
+
+test "writeResponse emits exact RFC 9112 message bytes (golden)" {
+    var buf: [256]u8 = undefined;
+    var res = Response{};
+    res.json("{\"ok\":true}");
+    const n = writeResponse(&buf, &res, true).?;
+    try std.testing.expectEqualStrings(
+        "HTTP/1.1 200 OK\r\n" ++
+            "Content-Type: application/json\r\n" ++
+            "Content-Length: 11\r\n" ++
+            "Connection: keep-alive\r\n\r\n" ++
+            "{\"ok\":true}",
+        buf[0..n],
+    );
+}
+
+test "writeResponse rejects CRLF-injected content_type (header injection)" {
+    var buf: [256]u8 = undefined;
+    var res = Response{};
+    res.content_type = "text/plain\r\nX-Injected: 1";
+    res.body = "hi";
+    try std.testing.expect(writeResponse(&buf, &res, true) == null);
+}
+
+test "error status lines carry a reason phrase" {
+    var buf: [256]u8 = undefined;
+    inline for (.{
+        .{ @as(u16, 413), "413 Content Too Large" },
+        .{ @as(u16, 431), "431 Request Header Fields Too Large" },
+        .{ @as(u16, 400), "400 Bad Request" },
+    }) |case| {
+        var res = Response{};
+        res.status = case[0];
+        res.content_type = "text/plain; charset=utf-8";
+        const n = writeResponse(&buf, &res, false).?;
+        try std.testing.expect(std.mem.startsWith(u8, buf[0..n], "HTTP/1.1 " ++ case[1] ++ "\r\n"));
+        try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "Connection: close\r\n") != null);
+    }
 }

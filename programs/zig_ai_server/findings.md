@@ -1,5 +1,41 @@
 # zig_ai_server — red-team findings
 
+> ## ⚠️ RECONCILED 2026-07-19 — this 2026-04-27 red-team doc is a resolved-issue archive
+>
+> Every CRITICAL and HIGH finding below was re-verified against current
+> `src/` on 2026-07-19 and is **fixed**. This document is retained only as a
+> historical record; do **not** treat any item below as an open issue. The
+> remediations landed across the C1–C5 campaign and audit waves 1–2. Status
+> of each finding, with the source anchor proving the fix:
+>
+> | # | Finding | Status | Fix anchor (current source) |
+> |---|---------|--------|-----------------------------|
+> | C1 | JWT `iss` unvalidated / `aud` bypass-by-omission | **FIXED** | `oidc.zig:97,186` `iss` captured + `iss`/`aud` mandatory in `verifyJwt`; `apple_auth.zig:144` issuer compare |
+> | C2 | `/agent` discards auth + shared `/tmp` workspace | **FIXED** | `agent.zig:283` workspace scoped by `auth.account.id`; auth/billing-gated |
+> | C3 | `nowMs()` was a call-counter, not a clock | **FIXED** | `store/types.zig:193` `nowMs(io)` reads `io.vtable.now(.real)` |
+> | C4 | `bash` blocklist bypass → RCE | **FIXED** | `security.zig:3,192` executable **allowlist** + structured argv exec |
+> | C5 | Unescaped JSON in WAL/Firestore/ledger/BQ | **FIXED** | `store/store.zig`, `firestore.zig`, `ledger.zig`, `bq.zig` all stream `std.json.Stringify`; the last two raw sinks (Apple/Google sign-in response, vertex endpoint doc) closed 2026-07-19 — see below |
+> | H1 | CORS `*` on every response | **FIXED** | `main.zig:520` origin echoed only when in `QAI_CORS_ORIGINS` allowlist (default off) |
+> | H2 | `X-Forwarded-For` trusted from any peer | **FIXED** | `router.zig:132,170` `trust_xff` gated on `QAI_TRUST_XFF`; `extractClientIp(request, trust_xff)` |
+> | H3 | Fresh key minted every login, unrevokable | **FIXED** | `apple_auth.zig:287` revokes prior `app-auth` keys before minting |
+> | H4 | WAL full-file rewrite per append | **FIXED** | `store/wal.zig:31` append-only writer |
+> | H5 | `Io.Threaded`-per-connection + no idle timeout | **FIXED** | `main.zig:86` single shared `boot_io`; Slowloris `SO_RCVTIMEO` timeout |
+> | H6 | Weak operator bootstrap admin key | **FIXED** | `main.zig:133` `MIN_BOOTSTRAP_KEY_LEN = 32`, refuses to boot otherwise |
+> | H7 | Pricing prefix-match undercharge | **FIXED** | `models.zig:440` exact-match-only contract |
+> | H8 | SSE billed per-chunk not per-token | **FIXED** | `stream.zig:100,317` bills provider-reported `output_tokens` from terminal usage event |
+> | H9 | Symlink TOCTOU in agent file tools | **FIXED** | `security.zig:102,122` `follow_symlinks=false` + `resolve_beneath=true` |
+> | H10 | $3/$15 default silently applied to unknown models | **FIXED** | subsumed by H7 exact-match-only (unknown models rejected upstream, `chat.zig` `error.InvalidModel`) |
+> | M4/M9/M14 | account-id length, RSA modulus floor, account-id chars | **FIXED** | `security.zig:265` `validateAccountId`; `oidc.zig` sub-2048-bit key rejected (test at `oidc.zig:777`) |
+> | M1–M15 (rest) | assorted MEDIUM foot-guns | **addressed by the C1–C5 campaign**; not each individually re-verified in the 2026-07-19 pass |
+>
+> Two residual C5-class raw-JSON sinks that survived the original campaign
+> were closed on 2026-07-19 (wave 4): the Apple/Google sign-in response
+> builders now serialize via `json.zig:writeSignInResponse`
+> (`std.json.Stringify`, client `name`/`email` escaped), and
+> `vertex.zig:saveEndpointToFirestore` streams the Firestore document via
+> `std.json.Stringify` with `security.validateModelName` guarding the
+> document-path segment.
+
 Audit date: 2026-04-27. Manual review across `src/` (10,675 LoC). Routes mapped from `router.zig`. Auth, billing, JWT verification, agent sandbox, WAL/Firestore persistence, rate limiting and CORS reviewed. No patches applied.
 
 Severity legend: **CRITICAL** = exploitable now / direct authn bypass / financial fraud, **HIGH** = exploitable with mild prerequisites or material loss, **MEDIUM** = bug class with real impact but bounded blast.

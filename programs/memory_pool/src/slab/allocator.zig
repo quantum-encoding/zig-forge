@@ -207,6 +207,18 @@ pub const SlabAllocator = struct {
     /// owns the pointer (O(NUM_CLASSES) = O(10) = effectively O(1)).
     /// For oversized allocations, searches the oversized tracking list.
     pub fn free(self: *Self, ptr: *anyopaque) void {
+        // Zig callers get the strict contract: freeing a foreign pointer is a
+        // programming error and aborts. FFI callers use `tryFree` instead so a
+        // bad pointer from C cannot take down the host process.
+        if (!self.tryFree(ptr)) {
+            @panic("SlabAllocator: free() called with pointer not owned by this allocator");
+        }
+    }
+
+    /// Free `ptr` if it belongs to this allocator; returns false (without
+    /// touching any state) if the pointer is foreign. Non-fatal counterpart to
+    /// `free`, used at the C ABI boundary where aborting the host is unacceptable.
+    pub fn tryFree(self: *Self, ptr: *anyopaque) bool {
         const addr = @intFromPtr(ptr);
 
         // Check each slab's address range
@@ -215,7 +227,7 @@ pub const SlabAllocator = struct {
                 if (addr >= slab.base_addr and addr < slab.end_addr) {
                     slab.pool.free(ptr);
                     self.total_freed += 1;
-                    return;
+                    return true;
                 }
             }
         }
@@ -228,13 +240,12 @@ pub const SlabAllocator = struct {
                 _ = self.oversized.swapRemove(i);
                 self.oversized_freed += 1;
                 self.total_freed += 1;
-                return;
+                return true;
             }
         }
 
-        // If we get here, the pointer wasn't allocated by this slab allocator.
-        // In debug/safe modes, this is a programming error.
-        @panic("SlabAllocator: free() called with pointer not owned by this allocator");
+        // Pointer wasn't allocated by this slab allocator.
+        return false;
     }
 
     /// Convenience: allocate and return a typed pointer.

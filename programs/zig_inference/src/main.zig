@@ -1132,6 +1132,21 @@ fn le64(v: u64) [8]u8 {
     return b;
 }
 
+/// Append a GGUF string (u64 length prefix + raw bytes), used by the positive
+/// header fixture below to build spec-shaped metadata keys, string values, and
+/// the tensor name.
+fn ggufStr(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, s: []const u8) !void {
+    try buf.appendSlice(a, &le64(s.len));
+    try buf.appendSlice(a, s);
+}
+
+/// Append a `key = uint32` GGUF metadata KV pair (value type tag 4 = uint32).
+fn ggufKvU32(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, key: []const u8, v: u32) !void {
+    try ggufStr(buf, a, key);
+    try buf.appendSlice(a, &le32(4)); // MetadataValueType.uint32
+    try buf.appendSlice(a, &le32(v));
+}
+
 fn writeTempFile(path: [:0]const u8, bytes: []const u8) !void {
     const fd = std.c.open(path.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
     if (fd < 0) return error.OpenFailed;
@@ -1215,6 +1230,91 @@ test "gguf reject: general.alignment = 0" {
     try buf.appendSlice(a, &le32(4)); // value type = uint32
     try buf.appendSlice(a, &le32(0)); // value = 0 (invalid alignment)
     try expectGgufError(buf.items, error.InvalidAlignment);
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// Positive GGUF header fixture: hand-build a spec-compliant minimal GGUF v3 by
+// its documented on-disk layout (magic, version, counts, KV pairs with the
+// uint32/string/array value encodings, then a tensor-info record), and assert
+// the parser extracts every field to its known value. The bytes are laid out
+// per the ggml GGUF spec — NOT read back from this engine's own writer (it has
+// none) — so this anchors read-side field extraction, alignment math, the
+// Qwen3 head_dim = attention.key_length rule, and the string-array + tensor
+// registry paths against the external format, complementing the reject tests.
+// ══════════════════════════════════════════════════════════════════════════
+
+test "gguf accept: minimal well-formed v3 header extracts every field" {
+    const a = std.testing.allocator;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(a);
+
+    try buf.appendSlice(a, "GGUF");
+    try buf.appendSlice(a, &le32(3)); // version
+    try buf.appendSlice(a, &le64(1)); // tensor_count = 1
+    try buf.appendSlice(a, &le64(8)); // metadata_kv_count = 8
+
+    // 1) general.architecture = "llama" (string, value type tag 8)
+    try ggufStr(&buf, a, "general.architecture");
+    try buf.appendSlice(a, &le32(8)); // MetadataValueType.string
+    try ggufStr(&buf, a, "llama");
+    // 2..6) arch params (uint32)
+    try ggufKvU32(&buf, a, "llama.block_count", 12);
+    try ggufKvU32(&buf, a, "llama.embedding_length", 64);
+    try ggufKvU32(&buf, a, "llama.attention.head_count", 8);
+    try ggufKvU32(&buf, a, "llama.context_length", 2048);
+    // Qwen3-style explicit head_dim: 16, NOT embedding_length/head_count = 64/8 = 8.
+    try ggufKvU32(&buf, a, "llama.attention.key_length", 16);
+    // 7) general.alignment = 32
+    try ggufKvU32(&buf, a, "general.alignment", 32);
+    // 8) tokenizer.ggml.tokens = ["a", "bb"] (array of string) — exercises the
+    //    array path and sets vocab_size from the token count (no vocab_size key).
+    try ggufStr(&buf, a, "tokenizer.ggml.tokens");
+    try buf.appendSlice(a, &le32(9)); // MetadataValueType.array
+    try buf.appendSlice(a, &le32(8)); // element type = string
+    try buf.appendSlice(a, &le64(2)); // array length = 2
+    try ggufStr(&buf, a, "a");
+    try ggufStr(&buf, a, "bb");
+
+    // Tensor info: token_embd.weight, 2-D [64, 2], dtype q8_0 (=8), offset 0.
+    try ggufStr(&buf, a, "token_embd.weight");
+    try buf.appendSlice(a, &le32(2)); // n_dims
+    try buf.appendSlice(a, &le64(64)); // dims[0]
+    try buf.appendSlice(a, &le64(2)); // dims[1]
+    try buf.appendSlice(a, &le32(8)); // GGMLType.q8_0
+    try buf.appendSlice(a, &le64(0)); // offset into tensor-data section
+
+    // Data section begins at the next 32-byte boundary after the header.
+    const header_end = buf.items.len;
+    const expected_data_offset = (header_end + 31) & ~@as(usize, 31);
+    try buf.appendNTimes(a, 0, expected_data_offset - header_end + 16); // pad + a little tensor data
+
+    const path = "/tmp/ziginfer_gguf_accept_test.gguf";
+    try writeTempFile(path, buf.items);
+    defer _ = std.c.unlink(path.ptr);
+
+    var g = try gguf_mod.GGUFFile.open(a, path);
+    defer g.close();
+
+    try std.testing.expectEqual(@as(u64, 1), g.tensor_count);
+    try std.testing.expectEqualStrings("llama", g.architecture);
+    try std.testing.expectEqual(@as(u32, 12), g.block_count);
+    try std.testing.expectEqual(@as(u32, 64), g.embedding_length);
+    try std.testing.expectEqual(@as(u32, 8), g.head_count);
+    try std.testing.expectEqual(@as(u32, 8), g.head_count_kv); // absent -> defaults to head_count
+    try std.testing.expectEqual(@as(u32, 2048), g.context_length);
+    try std.testing.expectEqual(@as(u32, 16), g.head_dim); // key_length wins over 64/8
+    try std.testing.expectEqual(@as(u32, 2), g.vocab_size); // from token count
+    try std.testing.expectEqual(@as(usize, 2), g.tokens.len);
+    try std.testing.expectEqualStrings("a", g.tokens[0]);
+    try std.testing.expectEqualStrings("bb", g.tokens[1]);
+    try std.testing.expectEqual(expected_data_offset, g.data_offset);
+    try std.testing.expectEqual(@as(u32, 32), g.metadata.get("general.alignment").?.asU32().?);
+
+    const t = g.getTensor("token_embd.weight").?;
+    try std.testing.expectEqual(@as(u32, 2), t.n_dims);
+    try std.testing.expectEqual(@as(u64, 64), t.shape[0]);
+    try std.testing.expectEqual(@as(u64, 2), t.shape[1]);
+    try std.testing.expectEqual(tensor_mod.GGMLType.q8_0, t.dtype);
 }
 
 // ══════════════════════════════════════════════════════════════════════════

@@ -1,45 +1,15 @@
 const std = @import("std");
-const net = std.net;
 const crypto = std.crypto;
-const tls = std.crypto.tls;
 
 // JSON-RPC envelopes go through std.json.Stringify on anonymous structs
 // — never via hand-rolled escape + concatenation. The standard library
 // owns string safety and tuple-to-array serialisation. Batch 9.
-
-// =============================================================================
-// ELECTRUM PROTOCOL CONSTANTS
-// =============================================================================
-
-/// Maximum response size (1MB should be plenty)
-pub const MAX_RESPONSE_SIZE: usize = 1024 * 1024;
-
-/// Maximum scripthash batch size
-pub const MAX_BATCH_SIZE: usize = 100;
-
-/// Protocol version we support
-pub const PROTOCOL_VERSION: []const u8 = "1.4";
-
-/// Default connection timeout (30 seconds)
-pub const DEFAULT_TIMEOUT_MS: u32 = 30000;
-
-// =============================================================================
-// ERROR TYPES
-// =============================================================================
-
-pub const ElectrumError = error{
-    ConnectionFailed,
-    TlsHandshakeFailed,
-    SendFailed,
-    ReceiveFailed,
-    Timeout,
-    InvalidResponse,
-    ServerError,
-    BufferTooSmall,
-    InvalidScripthash,
-    NotConnected,
-    ParseError,
-};
+//
+// This module is pure protocol logic with NO networking: scripthash
+// computation, JSON-RPC framing, response parsing. Sockets and TLS live in
+// the consuming Rust layer. (The former in-Zig networking client's imports,
+// constants, and connection-flavored error variants were removed as dead
+// code — they were never reachable from any exported path.)
 
 // =============================================================================
 // UTXO STRUCTURE

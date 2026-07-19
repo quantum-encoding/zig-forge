@@ -1,0 +1,9 @@
+// EXTERNAL ANCHOR: zig-forge/CLAUDE.md "High-signal anti-patterns" §2
+// (SHELL-CHILD, shape (c)). libc system() routes its argument through
+// /bin/sh -c — identical RCE class, but the shell invocation is hidden
+// from the call site (no "/bin/sh" literal). MUST fire SHELL-CHILD.
+const std = @import("std");
+
+pub fn legacyRun(cmd: [*:0]const u8) c_int {
+    return std.c.system(cmd);
+}

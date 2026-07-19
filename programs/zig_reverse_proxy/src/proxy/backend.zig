@@ -167,6 +167,7 @@ pub const Backend = struct {
             const socket = try self.connect();
 
             // Capacity is reserved above, so this never reallocates.
+            // zig-lens-ignore: ASSUME-CAPACITY ensureTotalCapacity(max_connections) at getConnection() head reserves the full pool; this append is guarded by items.len < max_connections, so capacity is provably sufficient.
             self.connections.appendAssumeCapacity(PooledConnection{
                 .socket = socket,
                 .backend = self,

@@ -1,0 +1,9 @@
+// EXTERNAL ANCHOR: zig-forge/CLAUDE.md default_rules.toml ASSUME-CAPACITY.
+// *AssumeCapacity writes past end-of-buffer when the capacity invariant
+// doesn't hold — the shape behind shipped silent buffer overflows.
+// MUST fire as a gating finding.
+const std = @import("std");
+
+pub fn push(list: *std.ArrayListUnmanaged(u8), item: u8) void {
+    list.appendAssumeCapacity(item);
+}

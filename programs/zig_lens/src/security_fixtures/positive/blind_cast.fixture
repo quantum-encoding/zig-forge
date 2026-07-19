@@ -1,0 +1,7 @@
+// EXTERNAL ANCHOR: zig-forge/CLAUDE.md default_rules.toml BLIND-CAST
+// (the Ariane 5 shape). A narrowing @intCast with no visible bounds
+// check — should be std.math.cast (returns ?T). ADVISORY (gate=false):
+// MUST surface as a WARN, MUST NOT gate --strict.
+pub fn narrow(x: u32) u8 {
+    return @intCast(x);
+}

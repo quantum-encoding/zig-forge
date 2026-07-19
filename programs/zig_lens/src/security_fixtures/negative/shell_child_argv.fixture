@@ -1,0 +1,10 @@
+// CORRECTIVE SHAPE (zig-forge/CLAUDE.md §2): argv-mode process spawn
+// with a tokenized, fixed argv and NO shell — no "/bin/sh" literal, no
+// "sh"+"-c" pair, no libc system()/popen(). The scanner MUST NOT emit
+// a SHELL-CHILD finding here.
+const std = @import("std");
+
+pub fn runGit(allocator: std.mem.Allocator) !void {
+    var child = std.process.Child.init(&.{ "git", "status" }, allocator);
+    try child.spawn();
+}

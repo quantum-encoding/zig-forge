@@ -158,6 +158,69 @@ pub fn writeReport(allocator: std.mem.Allocator, report: *const models.ProjectRe
     return buf.items;
 }
 
+/// Focused import/dependency view — the `--imports` flag. Lists every
+/// file's `@import`s classified as std / local / package, so an operator
+/// (or agent) can read the dependency surface without the full report.
+pub fn writeImportsReport(allocator: std.mem.Allocator, report: *const models.ProjectReport) ![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+
+    try appendFmt(allocator, &buf, "\n\x1b[1;36mzig-lens\x1b[0m — {s} \x1b[2m(imports)\x1b[0m\n", .{report.name});
+    try appendFmt(allocator, &buf, "\n  \x1b[1mFiles:\x1b[0m {d:<8}  \x1b[1mImports:\x1b[0m {d}\n", .{ report.summary.total_files, report.summary.total_imports });
+
+    for (report.files.items) |*file| {
+        if (file.imports.items.len == 0) continue;
+        try appendFmt(allocator, &buf, "\n\x1b[1;33m{s}\x1b[0m\n", .{file.relative_path});
+        for (file.imports.items) |imp| {
+            const kind = switch (imp.kind) {
+                .std_lib => "\x1b[2mstd  \x1b[0m",
+                .local => "\x1b[36mlocal\x1b[0m",
+                .package => "\x1b[35mpkg  \x1b[0m",
+            };
+            if (imp.binding_name.len > 0) {
+                try appendFmt(allocator, &buf, "  {s}  {s:<28} \x1b[2mas {s}\x1b[0m\n", .{ kind, imp.path, imp.binding_name });
+            } else {
+                try appendFmt(allocator, &buf, "  {s}  {s}\n", .{ kind, imp.path });
+            }
+        }
+    }
+
+    try buf.append(allocator, '\n');
+    return buf.items;
+}
+
+/// Focused unsafe-operations audit — the `--unsafe` flag. Lists every
+/// `@ptrCast` / `@intFromPtr` / `asm` / etc. the unsafe-ops analyzer
+/// recorded, with its risk level and enclosing function.
+pub fn writeUnsafeReport(allocator: std.mem.Allocator, report: *const models.ProjectReport) ![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+
+    try appendFmt(allocator, &buf, "\n\x1b[1;36mzig-lens\x1b[0m — {s} \x1b[2m(unsafe operations)\x1b[0m\n", .{report.name});
+    try appendFmt(allocator, &buf, "\n  \x1b[1mFiles:\x1b[0m {d:<8}  \x1b[1mUnsafe ops:\x1b[0m {d}\n", .{ report.summary.total_files, report.summary.total_unsafe_ops });
+
+    if (report.summary.total_unsafe_ops == 0) {
+        try appendFmt(allocator, &buf, "\n  \x1b[32mNo unsafe operations recorded.\x1b[0m\n", .{});
+        return buf.items;
+    }
+
+    for (report.files.items) |*file| {
+        if (file.unsafe_ops.items.len == 0) continue;
+        try appendFmt(allocator, &buf, "\n\x1b[1;33m{s}\x1b[0m\n", .{file.relative_path});
+        for (file.unsafe_ops.items) |op| {
+            const risk = switch (op.risk_level) {
+                .critical => "\x1b[1;31mCRITICAL\x1b[0m",
+                .high => "\x1b[1;31mHIGH\x1b[0m    ",
+                .medium => "\x1b[1;33mMEDIUM\x1b[0m  ",
+                .low => "\x1b[2mLOW\x1b[0m     ",
+            };
+            const ctx = if (op.context_fn.len > 0) op.context_fn else "\x1b[2m(top-level)\x1b[0m";
+            try appendFmt(allocator, &buf, "  {s}  {s:<18} :{d:<5} \x1b[2min\x1b[0m {s}\n", .{ risk, op.operation, op.line, ctx });
+        }
+    }
+
+    try buf.append(allocator, '\n');
+    return buf.items;
+}
+
 fn indentedBlock(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), text: []const u8, indent: []const u8) !void {
     var it = std.mem.splitScalar(u8, text, '\n');
     while (it.next()) |line| {
@@ -172,4 +235,56 @@ fn appendFmt(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), com
     const s = try std.fmt.allocPrint(allocator, fmt, args);
     defer allocator.free(s);
     try buf.appendSlice(allocator, s);
+}
+
+// ── Tests: the --imports / --unsafe focused views ────────────────────
+//
+// These guard against the flags regressing to no-ops (their prior
+// state): the renderers must surface the imports / unsafe-ops the
+// analyzers recorded.
+
+test "writeImportsReport lists imports with kind + binding" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var report = models.ProjectReport.init();
+    var file = models.FileReport.init();
+    file.relative_path = "core.zig";
+    try file.imports.append(a, .{ .path = "std", .kind = .std_lib, .binding_name = "std", .line = 1 });
+    try file.imports.append(a, .{ .path = "ring.zig", .kind = .local, .binding_name = "ring", .line = 2 });
+    try report.files.append(a, file);
+    report.computeSummary();
+
+    const out = try writeImportsReport(a, &report);
+    try std.testing.expect(std.mem.indexOf(u8, out, "core.zig") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "ring.zig") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "as ring") != null);
+}
+
+test "writeUnsafeReport lists unsafe ops with risk + line" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var report = models.ProjectReport.init();
+    var file = models.FileReport.init();
+    file.relative_path = "mmio.zig";
+    try file.unsafe_ops.append(a, .{ .line = 42, .operation = "@ptrCast", .context_fn = "mapReg", .risk_level = .high });
+    try report.files.append(a, file);
+    report.computeSummary();
+
+    const out = try writeUnsafeReport(a, &report);
+    try std.testing.expect(std.mem.indexOf(u8, out, "mmio.zig") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "@ptrCast") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "42") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "mapReg") != null);
+}
+
+test "writeUnsafeReport reports clean when no unsafe ops" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var report = models.ProjectReport.init();
+    report.computeSummary();
+    const out = try writeUnsafeReport(a, &report);
+    try std.testing.expect(std.mem.indexOf(u8, out, "No unsafe operations") != null);
 }

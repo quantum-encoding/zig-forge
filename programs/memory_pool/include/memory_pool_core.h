@@ -6,10 +6,13 @@
  * Performance:
  * - **Fixed Pool**: <10ns alloc, <5ns free
  * - **Arena**: <3ns alloc, O(1) reset
+ * - **Slab**: <15ns alloc (10 power-of-2 size classes, malloc fallback >4096)
  *
  * Features:
  * - O(1) fixed-size allocation
  * - Sequential bump allocation
+ * - Multi-size-class slab allocation
+ * - Optional secure zero-on-free (mp_fixed_pool_create_secure)
  * - Zero fragmentation
  *
  * ZERO DEPENDENCIES:
@@ -86,6 +89,15 @@ typedef struct MP_FixedPool MP_FixedPool;
  */
 typedef struct MP_Arena MP_Arena;
 
+/**
+ * Opaque slab allocator handle.
+ *
+ * Lifetime:
+ * - Created with mp_slab_create()
+ * - Destroyed with mp_slab_destroy()
+ */
+typedef struct MP_Slab MP_Slab;
+
 /* ============================================================================
  * Core Types
  * ============================================================================ */
@@ -119,6 +131,16 @@ typedef struct {
     size_t available;          /* Available bytes */
 } MP_ArenaStats;
 
+/**
+ * Slab allocator statistics.
+ */
+typedef struct {
+    size_t total_allocated;    /* Cumulative allocations (all size classes) */
+    size_t total_freed;        /* Cumulative frees */
+    size_t in_use;             /* Live allocations (total_allocated - total_freed) */
+    size_t oversized_in_use;   /* Live allocations above the 4096-byte max class */
+} MP_SlabStats;
+
 /* ============================================================================
  * Fixed Pool Operations
  * ============================================================================ */
@@ -148,6 +170,29 @@ typedef struct {
  *   }
  */
 MP_FixedPool* mp_fixed_pool_create(size_t object_size, size_t capacity);
+
+/**
+ * Create a new fixed-size memory pool with secure zero-on-free enabled.
+ *
+ * Identical to mp_fixed_pool_create(), and the returned handle uses the same
+ * destroy/alloc/free/reset/stats entry points, except:
+ *   - mp_fixed_pool_free() zeroes the slot's payload before recycling it, so
+ *     freed secret material does not survive until the slot is reused.
+ *   - mp_fixed_pool_destroy() and mp_fixed_pool_reset() securely wipe the
+ *     entire backing buffer.
+ *
+ * Intended for secret-bearing callers (keys, passphrases). There is a small
+ * per-free cost (a memset of the slot); use mp_fixed_pool_create() when the
+ * payload is not sensitive.
+ *
+ * Parameters:
+ *   object_size - Size of each object in bytes (must be > 0)
+ *   capacity    - Maximum number of objects (must be > 0)
+ *
+ * Returns:
+ *   Pool handle, or NULL on allocation failure
+ */
+MP_FixedPool* mp_fixed_pool_create_secure(size_t object_size, size_t capacity);
 
 /**
  * Destroy fixed pool and free resources.
@@ -347,6 +392,91 @@ MP_Error mp_arena_stats(
 );
 
 /* ============================================================================
+ * Slab Allocator Operations
+ * ============================================================================ */
+
+/**
+ * Create a new slab allocator.
+ *
+ * Maintains 10 power-of-2 size classes (8, 16, 32, 64, 128, 256, 512, 1024,
+ * 2048, 4096 bytes), each backed by its own fixed pool with `capacity` slots.
+ * Requests larger than 4096 bytes fall back to the backing allocator.
+ *
+ * Parameters:
+ *   capacity - Number of objects per size class (must be > 0)
+ *
+ * Returns:
+ *   Slab handle, or NULL on allocation failure
+ *
+ * Example:
+ *   MP_Slab* slab = mp_slab_create(256);
+ */
+MP_Slab* mp_slab_create(size_t capacity);
+
+/**
+ * Destroy slab allocator and free all resources.
+ *
+ * Parameters:
+ *   slab - Slab handle (NULL is safe, will be no-op)
+ */
+void mp_slab_destroy(MP_Slab* slab);
+
+/**
+ * Allocate memory from the slab allocator.
+ *
+ * Parameters:
+ *   slab - Slab handle (must not be NULL)
+ *   size - Requested size in bytes
+ *
+ * Returns:
+ *   Pointer to allocated memory, or NULL if the size class is exhausted
+ *   (or the backing allocator fails for oversized requests)
+ *
+ * Performance:
+ *   <15ns for size <= 4096 (slab path); malloc fallback above that
+ */
+void* mp_slab_alloc(MP_Slab* slab, size_t size);
+
+/**
+ * Free memory back to the slab allocator.
+ *
+ * Parameters:
+ *   slab - Slab handle (must not be NULL)
+ *   ptr  - Pointer previously returned by mp_slab_alloc()
+ *
+ * Note:
+ *   A pointer not owned by this allocator is ignored (no-op); it does not
+ *   abort the process.
+ */
+void mp_slab_free(MP_Slab* slab, void* ptr);
+
+/**
+ * Reset the slab allocator (free all allocations).
+ *
+ * Parameters:
+ *   slab - Slab handle (must not be NULL)
+ *
+ * Note:
+ *   Invalidates all previously allocated pointers
+ */
+void mp_slab_reset(MP_Slab* slab);
+
+/**
+ * Get slab allocator statistics.
+ *
+ * Parameters:
+ *   slab      - Slab handle (must not be NULL)
+ *   stats_out - Output statistics
+ *
+ * Returns:
+ *   MP_SUCCESS or MP_INVALID_HANDLE
+ */
+MP_Error mp_slab_stats(
+    const MP_Slab* slab,
+    MP_SlabStats* stats_out
+);
+
+/* ============================================================================
  * Utility Functions
  * ============================================================================ */
 
@@ -365,7 +495,7 @@ const char* mp_error_string(MP_Error error_code);
  * Get library version string.
  *
  * Returns:
- *   Null-terminated version string (e.g., "1.0.0-core")
+ *   Null-terminated version string (e.g., "2.0.0-core")
  */
 const char* mp_version(void);
 

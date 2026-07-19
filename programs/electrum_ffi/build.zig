@@ -29,6 +29,11 @@ pub fn build(b: *std.Build) void {
     // Install to zig-out/lib/
     b.installArtifact(lib);
 
+    // Install the committed C header alongside the artifact so consumers have
+    // a single source of truth for the exported symbols and struct layouts
+    // (the "lockstep consumers" rule in zig-forge/CLAUDE.md).
+    b.installFile("include/electrum_ffi.h", "include/electrum_ffi.h");
+
     // =============================================================================
     // Android ARM64 Cross-Compilation Target
     // =============================================================================

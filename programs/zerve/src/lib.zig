@@ -29,6 +29,8 @@ pub const writeResponse = http.writeResponse;
 pub const Reactor = @import("reactor.zig").Reactor;
 
 test {
-    // Pull in the parser/response-builder test suite.
+    // Pull in every module's test block: parser/response-builder (http),
+    // server core + connection pool + loopback integration (server).
     _ = http;
+    _ = server;
 }

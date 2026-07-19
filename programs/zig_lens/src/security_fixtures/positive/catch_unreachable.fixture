@@ -1,0 +1,9 @@
+// EXTERNAL ANCHOR: zig-forge/CLAUDE.md default_rules.toml CATCH-UNREACHABLE.
+// `catch unreachable` on a fallible call turns a recoverable error into
+// a whole-process abort — forbidden on any path reachable by hostile
+// input. MUST fire as a gating finding.
+const std = @import("std");
+
+pub fn fmtInt(n: u64, buf: []u8) []const u8 {
+    return std.fmt.bufPrint(buf, "{d}", .{n}) catch unreachable;
+}

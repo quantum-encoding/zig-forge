@@ -41,6 +41,30 @@ accept lock, no per-request heap allocation at steady state.
 - Keep-alive (1.1 default) and `Connection: close`, request **pipelining**
 - `TCP_NODELAY`, configurable backlog and worker count
 - Allocation-free response builder
+- **DoS hardening:** a request head larger than the read buffer gets a `431`
+  (not a busy-spin), a body that can't fit gets a `413`, a per-connection
+  **idle timeout** reaps slow-loris / half-open connections, and an optional
+  **`max_connections`** ceiling bounds the per-worker connection pool
+- Response-header-injection guard on `Response.content_type`
+
+## Limits & configuration
+
+`Config` (all fields optional):
+
+| Field | Default | Meaning |
+|---|---|---|
+| `host` / `port` | `0.0.0.0:8080` | Bind address (IPv4). |
+| `workers` | `0` (= CPU count) | SO_REUSEPORT worker threads. |
+| `backlog` | `1024` | `listen()` backlog per worker. |
+| `idle_timeout_ms` | `30000` | Close a connection idle (no read progress) this long. `0` disables the sweep. The timer is monotonic-clock based, so a clock step can't defeat it; an actively-served keep-alive connection resets it on every read and is never reaped. |
+| `max_connections` | `0` (= unlimited) | Per-worker live-connection ceiling. At the cap, new accepts are drained and closed immediately instead of growing the pool. |
+
+**Hard size ceiling.** The request **head and body share a fixed 16 KiB
+per-connection buffer.** A header block that exceeds it is answered with `431
+Request Header Fields Too Large`; a declared body that would overflow it is
+answered with `413 Content Too Large`. Both then close the connection. This is
+a deliberate zero-allocation trade-off — for large uploads, terminate/spool at
+a proxy in front of zerve.
 
 ## Layout
 
@@ -94,6 +118,10 @@ keep-alive** on the host (macOS/arm64, Debug build).
 ## Scope / not yet
 
 - No chunked **request** body decoding (responses use `Content-Length`).
+- Request head **and** body must fit the 16 KiB per-connection buffer; larger
+  requests are rejected with `431`/`413` (see *Limits* above), not spooled.
 - No TLS (terminate at a proxy, or add a TLS layer above the connection state
   machine).
 - HTTP/1.1 only.
+- **Linux epoll backend not yet implemented** — the reactor interface is
+  backend-agnostic and the kqueue build is macOS/BSD only today.

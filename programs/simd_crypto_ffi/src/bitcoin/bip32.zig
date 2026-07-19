@@ -271,6 +271,16 @@ pub const ExtendedKey = struct {
 
     const Self = @This();
 
+    /// Scrub the secret material (private key + chain code) held by this key.
+    /// Public key, depth, and fingerprints are not secret and left intact.
+    /// Callers `defer key.secureZero()` on transient copies so derived private
+    /// keys do not linger on the stack after use. `secureZero` is a volatile
+    /// store the optimizer may not elide.
+    pub fn secureZero(self: *Self) void {
+        std.crypto.secureZero(u8, &self.private_key);
+        std.crypto.secureZero(u8, &self.chain_code);
+    }
+
     /// Create master key from seed (BIP32 master key generation)
     pub fn fromSeed(seed: []const u8) Bip32Error!Self {
         if (seed.len < 16 or seed.len > 64) {
@@ -282,6 +292,7 @@ pub const ExtendedKey = struct {
         hmac.update(seed);
         var output: [64]u8 = undefined;
         hmac.final(&output);
+        defer std.crypto.secureZero(u8, &output);
 
         const private_key = output[0..32].*;
         const chain_code = output[32..64].*;

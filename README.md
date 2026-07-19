@@ -72,7 +72,7 @@ zig-forge/
 | **guardian_shield** | Linux security framework — seccomp-BPF, LD_PRELOAD, eBPF monitoring, fork bomb prevention. | `zig-sentinel` | Complete |
 | **zig_jail** | Syscall sandbox — seccomp-BPF, namespaces, capability dropping, security profiles. | `zig-jail` | Complete |
 | **zig_port_scanner** | TCP port scanner — multi-threaded, service detection, poll()-based non-blocking I/O. | `zig-port-scanner` | Complete |
-| **electrum_ffi** | Electrum wallet FFI — scripthash computation, JSON-RPC, Bitcoin SPV. | `libelectrum_ffi.a` | Complete |
+| **electrum_ffi** | Electrum wallet FFI — scripthash computation, JSON-RPC request framing, response parsing (no networking). | `libelectrum_ffi.a` | Complete |
 | **mempool_sniffer** | Bitcoin mempool monitor — P2P protocol, whale detection, cross-platform (io_uring/kqueue/poll). | `libmempool_sniffer_core.a` | WIP |
 | **quantum_seed_vault** | Crypto seed manager — Raspberry Pi LCD HAT, BIP39, terminal UI, ARMv6 target. | `quantum-seed-vault` | WIP |
 

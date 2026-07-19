@@ -21,19 +21,23 @@ print_header() {
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 }
 
+# Note: use `VAR=$((VAR+1))`, not `((VAR++))`. Under `set -e`, a function whose
+# last command is `((VAR++))` returns exit status 1 when VAR was 0 (the
+# post-increment expression evaluates to the old value 0), which aborts the
+# whole script after the first counter bump.
 print_pass() {
     echo -e "${GREEN}✓ $1${NC}"
-    ((PASSED++))
+    PASSED=$((PASSED + 1))
 }
 
 print_fail() {
     echo -e "${RED}✗ $1${NC}"
-    ((FAILED++))
+    FAILED=$((FAILED + 1))
 }
 
 print_skip() {
     echo -e "${YELLOW}⊘ $1${NC}"
-    ((SKIPPED++))
+    SKIPPED=$((SKIPPED + 1))
 }
 
 # Check if we're in the right directory
@@ -102,12 +106,10 @@ if ping -c 1 -W 2 google.com >/dev/null 2>&1; then
     else
         print_fail "Integration tests failed"
         cat /tmp/test-integration.log
-        # Don't exit - integration tests are optional
-        ((FAILED++))
+        # Don't exit - integration tests are optional (print_fail already counted)
     fi
 else
     print_skip "Integration tests (no network)"
-    ((SKIPPED++))
 fi
 
 echo ""

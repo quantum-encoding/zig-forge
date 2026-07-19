@@ -1,5 +1,36 @@
 # Changelog - zig-port-scanner
 
+## V2.0.1 - Audit hardening pass (2026-07-19)
+
+Maintenance pass addressing the `docs/program-reports-2026-07-17` audit findings.
+No CLI flags changed; existing invocations behave the same or better.
+
+- **Version strings reconciled** to `2.0.0` across `src/main.zig` (`VERSION`),
+  `README.md`, this changelog, and `build.zig.zon`. The source constant
+  previously reported `5.0.0` while the docs said `2.0.0`.
+- **Port de-duplication**: `parsePortSpec` now sorts ascending and collapses
+  duplicates, so `-p=80,80` and overlapping ranges (`-p=1-100,50-60`) scan each
+  port exactly once instead of emitting duplicate connect syscalls and rows.
+- **Thread cap honesty**: `-j` is now honored up to the documented 100-thread
+  ceiling (bounded by the port count) regardless of CPU count. Previously the
+  code silently clamped to `min(100, cpu*4)`, so `-j=100` on a 4-core box ran
+  only 16 workers. `-j=0` is now guarded to 1 (no divide-by-zero).
+- **Diagnostics moved out of the resolver**: `resolveHost` no longer prints; it
+  returns an error and `main` prints the user-facing message. A library resolver
+  that printed also corrupted the Zig test runner's stdout protocol under
+  `zig build test`.
+- **Tests**: added an offline open-port test that binds a real loopback listener
+  and asserts `scanPort` classifies it `.open` (the connect-success branch was
+  previously only covered by network-gated integration tests); split and
+  strengthened the de-duplication tests. Total: 32 tests.
+- **build.zig test filters fixed**: `test-unit` / `test-integration` used a
+  runtime `--test-filter` argument the 0.16.0 test runner rejects; they now use
+  the compile-time `.filters` option and pass cleanly.
+- **Native connect-timeout**: confirmed Zig 0.16.0 ships connect-with-timeout in
+  `std.Io` (`ConnectOptions.timeout`), so the vendored `stdlib-timeout-patch.zig`
+  / `patches/` are obsolete and no longer a build dependency (retained only as
+  historical reference).
+
 ## V2.0.0 - Sovereign Forge Edition (2025-10-08)
 
 ### Critical Fixes
@@ -168,7 +199,7 @@ All critical fixes verified:
 
 ### Future Enhancements (V3 Candidates)
 
-- [ ] Full comma-separated port support (currently warns and scans only first port)
+- [x] Full comma-separated port support (implemented; de-duplicated in V2.0.1)
 - [ ] Async I/O for higher concurrency with fewer threads
 - [ ] JSON output format for integration with monitoring systems
 - [ ] Banner grabbing for service fingerprinting

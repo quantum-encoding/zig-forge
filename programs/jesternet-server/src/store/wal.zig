@@ -52,24 +52,6 @@ const WAL_MAGIC = [4]u8{ 'W', 'A', 'L', '1' };
 const WAL_VERSION: u32 = 1;
 const HEADER_LEN: u64 = 8; // magic + version
 
-// SpinLock — mutex without io dependency. Same shape as zig_ai_server
-// uses to serialize store mutations. Sufficient for in-process
-// atomicity (audit caveat #1: single-process only; multi-process
-// reopens a different design point).
-const SpinLock = struct {
-    state: std.atomic.Value(u32) = .init(0),
-
-    pub fn lock(self: *SpinLock) void {
-        while (self.state.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) {
-            std.atomic.spinLoopHint();
-        }
-    }
-
-    pub fn unlock(self: *SpinLock) void {
-        self.state.store(0, .release);
-    }
-};
-
 pub const WalWriter = struct {
     allocator: std.mem.Allocator,
     file: Io.File,
@@ -83,8 +65,13 @@ pub const WalWriter = struct {
     next_seq: u64,
 
     /// Serializes cursor-and-write. Two threads doing positional
-    /// writes at the same cursor would interleave bytes.
-    mutex: SpinLock = .{},
+    /// writes at the same cursor would interleave bytes. A parking
+    /// mutex (`std.Io.Mutex`), NOT a spin loop: `appendInternal` holds
+    /// this lock across `file.sync(io)` on the durable path, so a busy
+    /// spin would burn a full core per contending thread for the whole
+    /// fsync. `appendInternal` already has the request's `io`, so it
+    /// parks/wakes through that.
+    mutex: Io.Mutex = .init,
 
     /// Open or create the WAL file at `path`. If the file exists it's
     /// opened in append-without-truncate mode; if it's new, the header
@@ -108,10 +95,14 @@ pub const WalWriter = struct {
         } else if (existing_len < HEADER_LEN) {
             return error.WalCorrupt;
         } else {
-            // Verify magic.
+            // Verify magic. A short read would leave `hdr_buf` partly
+            // undefined and the magic compare could pass on stack
+            // garbage — treat anything less than a full header as
+            // corruption rather than trusting the leftover bytes.
             var hdr_buf: [HEADER_LEN]u8 = undefined;
             const data: [1][]u8 = .{&hdr_buf};
-            _ = try file.readPositional(io, &data, 0);
+            const got = try file.readPositional(io, &data, 0);
+            if (got < HEADER_LEN) return error.WalCorrupt;
             if (!std.mem.eql(u8, hdr_buf[0..4], &WAL_MAGIC)) return error.WalCorrupt;
         }
 
@@ -176,8 +167,8 @@ pub const WalWriter = struct {
         const crc = std.hash.Crc32.hash(payload);
         std.mem.writeInt(u32, header[5..9], crc, .little);
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         const start = self.cursor;
 
@@ -222,10 +213,14 @@ pub const WalWriter = struct {
         defer buf.deinit(self.allocator);
 
         while (pos + 9 <= total_len) {
-            // Read header.
+            // Read header. A short read here means the file ends mid-
+            // header despite the `pos + 9 <= total_len` guard (a race
+            // with a concurrent truncation, or an I/O anomaly) — stop
+            // rather than interpret undefined bytes as a payload length.
             var hdr_buf: [9]u8 = undefined;
             const hdr_data: [1][]u8 = .{&hdr_buf};
-            _ = try self.file.readPositional(io, &hdr_data, pos);
+            const hdr_read = try self.file.readPositional(io, &hdr_data, pos);
+            if (hdr_read < hdr_buf.len) break;
 
             const op_byte = hdr_buf[0];
             const payload_len = std.mem.readInt(u32, hdr_buf[1..5], .little);
@@ -233,10 +228,12 @@ pub const WalWriter = struct {
             const next_pos = pos + 9 + payload_len;
             if (next_pos > total_len) break; // truncated tail
 
-            // Read payload.
+            // Read payload. A short read (fewer than payload_len bytes)
+            // means a truncated tail — stop, same as the CRC path below.
             try buf.resize(self.allocator, payload_len);
             const pl_data: [1][]u8 = .{buf.items};
-            _ = try self.file.readPositional(io, &pl_data, pos + 9);
+            const pl_read = try self.file.readPositional(io, &pl_data, pos + 9);
+            if (pl_read < payload_len) break;
 
             const computed_crc = std.hash.Crc32.hash(buf.items);
             if (computed_crc != stored_crc) break; // corrupt entry; stop

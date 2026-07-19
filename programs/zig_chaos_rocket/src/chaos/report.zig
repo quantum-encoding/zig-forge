@@ -22,6 +22,8 @@ pub const ChaosReport = struct {
     not_applicable: u32 = 0,
     fuzz_iterations: u64 = 0,
     fuzz_crashes: u64 = 0,
+    fuzz_errors_handled: u64 = 0,
+    fuzz_safety_catches: u64 = 0,
     scenario_results: [32]?fault_injector.InjectionResult = [_]?fault_injector.InjectionResult{null} ** 32,
     scenario_count: u8 = 0,
 
@@ -51,6 +53,8 @@ pub const ChaosReport = struct {
     pub fn addFuzzResult(self: *ChaosReport, result: fuzzer_mod.FuzzResult) void {
         self.fuzz_iterations += result.iterations;
         self.fuzz_crashes += result.crashes;
+        self.fuzz_errors_handled += result.errors_handled;
+        self.fuzz_safety_catches += result.safety_catches;
     }
 };
 
@@ -80,6 +84,8 @@ pub fn generateTextReport(report: *const ChaosReport, writer: anytype) !void {
         try writer.print("\n  FUZZ TESTING\n", .{});
         try writer.print("  {s}\n", .{SEPARATOR_DASH_68});
         try writer.print("  Iterations:     {d:>12}\n", .{report.fuzz_iterations});
+        try writer.print("  Errors handled: {d:>12}\n", .{report.fuzz_errors_handled});
+        try writer.print("  Safety catches: {d:>12}\n", .{report.fuzz_safety_catches});
         try writer.print("  Crashes:        {d:>12}  (should be 0)\n", .{report.fuzz_crashes});
         try writer.print("  Undefined behavior: 0  (structurally impossible)\n", .{});
     }
@@ -98,4 +104,46 @@ pub fn generateTextReport(report: *const ChaosReport, writer: anytype) !void {
     }
 
     try writer.print("{s}\n", .{SEPARATOR_EQ_72});
+}
+
+// ============================================================================
+// Tests — scorecard tallying
+// ============================================================================
+const testing = std.testing;
+
+fn mkResult(id: []const u8, caught: bool, by: scenarios.CaughtBy) fault_injector.InjectionResult {
+    return .{ .injected = true, .caught = caught, .caught_by = by, .detail = "", .scenario_id = id };
+}
+
+test "addResult tallies caught, missed, and caught_by buckets" {
+    var report = ChaosReport{};
+    report.addResult(mkResult("A", true, .runtime_safety));
+    report.addResult(mkResult("B", true, .error_handling));
+    report.addResult(mkResult("C", false, .runtime_safety));
+
+    try testing.expectEqual(@as(u32, 3), report.total_injected);
+    try testing.expectEqual(@as(u32, 2), report.total_caught);
+    try testing.expectEqual(@as(u32, 1), report.total_missed);
+    try testing.expectEqual(@as(u32, 1), report.runtime_safety_catches);
+    try testing.expectEqual(@as(u32, 1), report.error_handling_catches);
+    try testing.expectEqual(@as(u8, 3), report.scenario_count);
+}
+
+test "addResult caps stored details at the array bound without overflow" {
+    var report = ChaosReport{};
+    var i: usize = 0;
+    while (i < 40) : (i += 1) report.addResult(mkResult("X", true, .assertion));
+    try testing.expectEqual(@as(u32, 40), report.total_injected);
+    try testing.expectEqual(@as(u8, 32), report.scenario_count); // stored slots capped
+    try testing.expectEqual(@as(u32, 40), report.assertion_catches);
+}
+
+test "addFuzzResult accumulates iterations, errors, and safety catches" {
+    var report = ChaosReport{};
+    report.addFuzzResult(.{ .iterations = 100, .errors_handled = 5, .safety_catches = 2, .crashes = 0, .undefined_behavior = 0 });
+    report.addFuzzResult(.{ .iterations = 50, .errors_handled = 3, .safety_catches = 1, .crashes = 0, .undefined_behavior = 0 });
+    try testing.expectEqual(@as(u64, 150), report.fuzz_iterations);
+    try testing.expectEqual(@as(u64, 8), report.fuzz_errors_handled);
+    try testing.expectEqual(@as(u64, 3), report.fuzz_safety_catches);
+    try testing.expectEqual(@as(u64, 0), report.fuzz_crashes);
 }

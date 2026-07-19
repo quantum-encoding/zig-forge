@@ -274,6 +274,53 @@ pub const Model = struct {
         return dim;
     }
 
+    /// End-to-end embed of a raw string: applies the Qwen3-Embedding query wrapper
+    /// when `is_query` is set, tokenizes, appends the default EOS when the model
+    /// requests it, and runs `embed` into `out` (capacity below d_model truncates +
+    /// re-normalizes, MRL). Returns dims written, or `error.EmptyInput` if the text
+    /// tokenizes to nothing.
+    ///
+    /// This is the single source of truth for the FFI embed path — both `ffi.zig`
+    /// and `ffi_embed.zig` call it, so the wrapper/tokenize/EOS sequence cannot
+    /// drift between the two library roots (it previously had — the empty-input
+    /// guard existed in only one).
+    pub fn embedInto(
+        self: *Model,
+        allocator: Allocator,
+        text: []const u8,
+        is_query: bool,
+        task: []const u8,
+        out: []f32,
+    ) !usize {
+        var input_buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer input_buf.deinit(allocator);
+        if (is_query) {
+            const instruction = if (task.len > 0)
+                task
+            else
+                "Given a web search query, retrieve relevant passages that answer the query";
+            // Build "Instruct: {task}\nQuery:{text}" by parts — no format string, so
+            // a literal '{' in the caller's task/text can never be a format directive.
+            try input_buf.appendSlice(allocator, "Instruct: ");
+            try input_buf.appendSlice(allocator, instruction);
+            try input_buf.appendSlice(allocator, "\nQuery:");
+            try input_buf.appendSlice(allocator, text);
+        } else {
+            try input_buf.appendSlice(allocator, text);
+        }
+
+        var tokens: std.ArrayListUnmanaged(u32) = .empty;
+        defer tokens.deinit(allocator);
+        const enc = try self.tokenizer.encode(allocator, input_buf.items, false);
+        defer allocator.free(enc);
+        try tokens.appendSlice(allocator, enc);
+        if (self.tokenizer.add_eos_default) try tokens.append(allocator, self.tokenizer.eos_id);
+
+        if (tokens.items.len == 0) return error.EmptyInput;
+
+        return self.embed(tokens.items, out);
+    }
+
     /// Causal multi-head attention (GQA) over a batched prefill. For each query token n
     /// and head h, attend to key/value positions 0..=n. Parallelized over query tokens.
     fn batchedAttention(self: *Model, Q: []const f32, K: []const f32, V: []const f32, AO: []f32, N: usize) void {

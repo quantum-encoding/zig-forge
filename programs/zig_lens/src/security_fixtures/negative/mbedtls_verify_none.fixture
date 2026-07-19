@@ -1,0 +1,8 @@
+// CORRECTIVE SHAPE (zig-forge/CLAUDE.md §4): certificate validation
+// left ON. The scanner MUST NOT emit an MBEDTLS-VERIFY-NONE finding
+// for the REQUIRED authmode.
+const std = @import("std");
+
+pub fn configTls(conf: *anyopaque) void {
+    mbedtls_ssl_conf_authmode(conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+}

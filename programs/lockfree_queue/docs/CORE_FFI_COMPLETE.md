@@ -1,91 +1,81 @@
-# Lock-Free Queue Core - Pure Computational FFI Complete
+# Lock-Free Queue Core — C FFI
 
-**Status**: ✅ **PRODUCTION-READY** - Wait-free SPSC queue with zero dependencies
+**Status**: In production use by `quantum_vault` via the `lfq_spsc_*` C ABI.
 
-**Completion Date**: 2025-12-01
-
----
-
-## Executive Summary
-
-The **Lock-Free Queue Core** extracts the wait-free SPSC (Single Producer Single Consumer) queue, providing a **zero-dependency C FFI** for ultra-low-latency inter-thread communication.
-
-### Performance Achievements
-
-| Metric | Value | Comparison |
-|--------|-------|------------|
-| **Throughput** | 100M+ msg/sec | Industry-leading |
-| **Latency** | <50ns/operation | Sub-microsecond |
-| **Wait-Free** | Yes | No locks, no blocking |
-| **Cache-Line Aligned** | Yes | Prevents false sharing |
+The **Lock-Free Queue Core** exposes the SPSC (Single Producer, Single Consumer)
+ring buffer as a **zero-dependency C FFI** for low-latency inter-thread
+communication. The Zig library also ships an MPMC (Multi Producer, Multi
+Consumer) ring, but only the SPSC queue is currently wrapped in the C ABI.
 
 ---
 
-## Key Achievements
+## What the numbers actually are
 
-| Feature | Status | Details |
-|---------|--------|---------|
-| **SPSC Queue** | ✅ Complete | Wait-free ring buffer |
-| **Cache-Line Alignment** | ✅ Complete | 64-byte padding |
-| **Power-of-2 Capacity** | ✅ Complete | Efficient modulo via bitwise AND |
-| **C Header** | ✅ Complete | `lockfree_core.h` |
-| **Static Library** | ✅ Complete | `liblockfree_core.a` (6.8 MB) |
-| **C Test Suite** | ✅ Complete | **104/105 tests passed (99%)** |
-| **Zero Dependencies** | ✅ Verified | No external libs |
+There is a real benchmark now (`src/bench.zig`, run via `zig build bench`).
+Earlier revisions of this document quoted a fixed "100M+ msg/sec / <50ns" with
+no benchmark behind them and a "104/105 C tests passed" summary for a C test
+suite that does not exist in the tree. Both have been removed. Run the
+benchmark to get numbers for your own hardware:
+
+```bash
+zig build bench -Doptimize=ReleaseFast   # Debug numbers are meaningless
+```
+
+Representative figures (Apple Silicon, ReleaseFast — **yours will differ**):
+
+| Path | Latency | Throughput | Notes |
+|------|---------|------------|-------|
+| SPSC ring, single-thread hot loop | ~0.5 ns/pair | ~1.8 B pairs/s | wait-free, everything in L1 |
+| MPMC ring, single-thread uncontended | ~10 ns/pair | ~100 M pairs/s | lock-free CAS path |
+| SPSC 1 producer / 1 consumer | ~8 ns/msg | ~130 M msg/s | 2 threads, the real SPSC use case |
+| FFI copy path (`lfq_spsc_push`/`pop`) | ~10 ns/pair | ~100 M pairs/s | dominated by malloc+free per message |
+
+The SPSC ring push/pop is genuinely **wait-free** (bounded steps, no retry
+loop). The MPMC ring is **lock-free** (a CAS retry loop — not wait-free). The C
+FFI copies each payload through the C allocator (one `malloc` per push, one
+`free` per pop), so its end-to-end latency is allocator-bound rather than the
+raw ring's few-nanosecond cost. It is not zero-copy.
 
 ---
 
-## Architecture
-
-### What's Included (Pure Computation)
+## What's included
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  Lock-Free Queue Core API (lockfree_core.zig)               │
+│  Lock-Free Queue Core API (src/lockfree_core.zig)           │
 │                                                             │
-│  ✓ SPSC Queue (100M+ msg/sec)                               │
+│  SPSC byte-buffer queue over spsc/queue.zig                 │
 │    - Cache-line aligned head/tail (prevents false sharing)  │
-│    - Wait-free push/pop operations                          │
-│    - Power-of-2 capacity with efficient indexing            │
+│    - Wait-free push/pop on the ring                         │
+│    - Power-of-2 capacity with efficient masked indexing     │
+│    - Per-message copy through the C allocator               │
 │                                                             │
-│  ✓ Message Passing                                          │
+│  C ABI:                                                     │
 │    - lfq_spsc_create(capacity, buffer_size)                 │
-│    - lfq_spsc_push(data, len)                               │
-│    - lfq_spsc_pop(data_out, len, size_out)                  │
-│    - lfq_spsc_stats()                                       │
+│    - lfq_spsc_push(queue, data, len)                        │
+│    - lfq_spsc_pop(queue, data_out, len, size_out)           │
+│    - lfq_spsc_stats / is_empty / is_full / len              │
+│    - lfq_error_string / lfq_version / lfq_performance_info   │
 └─────────────────────────────────────────────────────────────┘
-                           │
-                           ▼
-         ┌─────────────────────────────────┐
-         │  Internal Components            │
-         │  - spsc/queue.zig               │
-         └─────────────────────────────────┘
 ```
 
-### What's Excluded
+**Not exposed over the C ABI:** the MPMC ring (`src/mpmc/queue.zig`) exists and
+is tested, but there are no `lfq_mpmc_*` exports yet. Also excluded by design:
+networking, file I/O, global state.
 
-- ❌ Networking
-- ❌ File I/O
-- ❌ MPMC queue (stubbed, future work)
-- ❌ Global state
+**Capacity semantics:** the SPSC ring reserves one slot to distinguish full
+from empty, so a queue created with `capacity = N` holds at most `N − 1`
+messages. `capacity` in `LFQ_Stats` reports `N`.
 
 ---
 
-## Performance Profile
+## Memory
 
-### SPSC Queue
-
-- **100M+ messages/second** sustained throughput
-- **<50ns latency** per push/pop operation
-- **Wait-free** (no locks, no spinning, no blocking)
-- **Cache-line aligned** (64-byte padding between head/tail)
-
-### Memory
-
-- **Static Library**: 6.8 MB
-- **Queue Instance**: ~200 bytes + (capacity * sizeof(Message))
-- **Per-Message Allocation**: Variable (based on message size)
-- **Alignment**: 64-byte cache-line alignment for head/tail
+- **Queue instance**: `QueueContext` + a ring of `capacity` `Message` records.
+- **Per-message allocation**: each `lfq_spsc_push` allocates `len` bytes via the
+  C allocator and copies the payload in; each `lfq_spsc_pop` copies out and
+  frees. There is no preallocated buffer pool.
+- **Alignment**: 64-byte cache-line alignment on the ring head/tail counters.
 
 ---
 
@@ -121,22 +111,25 @@ printf("Queue: %zu/%zu messages\n", stats.length, stats.capacity);
 lfq_spsc_destroy(queue);
 ```
 
+`lfq_spsc_push` returns `LFQ_INVALID_PARAM` if `data` is NULL, `len` is 0, or
+`len > buffer_size`. `lfq_spsc_pop` returns `LFQ_INVALID_PARAM` if `data_out` or
+`size_out` is NULL. Both return `LFQ_INVALID_HANDLE` for a NULL queue. If the
+output buffer is smaller than the message, the copy is truncated but `size_out`
+reports the true message length.
+
 ---
 
-## Build System
-
-### Compile Core Library
+## Build
 
 ```bash
-cd /home/founder/github_public/quantum-zig-forge/programs/lockfree_queue
-zig build core
+zig build              # build liblockfree_core.a (host)
+zig build core         # same, explicit step
+zig build android      # cross-compile for aarch64-linux-android
+zig build test         # unit + concurrent stress tests
+zig build bench -Doptimize=ReleaseFast   # microbenchmarks
 ```
 
-**Output:**
-- `zig-out/lib/liblockfree_core.a` (6.8 MB)
-- No external dependencies
-
-### Compile C Application
+### Compile a C application
 
 ```bash
 gcc -o app app.c \
@@ -146,256 +139,57 @@ gcc -o app app.c \
     -lpthread
 ```
 
-**Dependencies:**
-- `liblockfree_core.a` (static)
-- `pthread` (for atomic operations)
-- **NO networking**, **NO file I/O**
+The static library has no external dependencies beyond libc/pthread.
 
 ---
 
-## Test Results
+## Tests
 
-### C Test Suite
+All tests are Zig tests run by `zig build test` (there is no separate C test
+harness). Coverage:
 
-**File:** `test_core/test.c`
+- **SPSC ring** (`src/spsc/queue.zig`): full/empty/wraparound/capacity-boundary,
+  FIFO order, non-power-of-2 rejection, plus a **concurrent producer/consumer
+  stress test** pushing 1,000,000 sequenced values across two threads and
+  asserting strict FIFO order and a Gauss-sum checksum.
+- **MPMC ring** (`src/mpmc/queue.zig`): turn-cycle correctness, full/empty,
+  capacity boundary, plus an **N×M stress test** (4 producers × 4 consumers over
+  a 1024-slot queue) asserting exactly-once delivery via a per-value seen-count
+  array and a multiset-sum checksum.
+- **C FFI** (`src/lockfree_core.zig`): create/destroy (incl. NULL-safe destroy),
+  invalid parameters, push/pop roundtrip, queue-empty, queue-full at the
+  reserve-one boundary, statistics, and the helper/version strings.
 
-**Command:**
+Run the stress tests under an optimized build as well — memory-ordering bugs
+hide when the optimizer is off:
+
 ```bash
-gcc -o test_core test.c -I../include -L../zig-out/lib -llockfree_core -lpthread
-./test_core
+zig build test -Doptimize=ReleaseFast
 ```
-
-**Results:**
-```
-╔══════════════════════════════════════════════════════════╗
-║  Test Summary                                            ║
-╠══════════════════════════════════════════════════════════╣
-║  Passed: 104                                             ║
-║  Failed: 1                                               ║
-╚══════════════════════════════════════════════════════════╝
-```
-
-### Test Coverage
-
-| Test Suite | Tests | Status | Notes |
-|------------|-------|--------|-------|
-| Queue lifecycle | 2 | ✅ ALL PASS | Create/destroy |
-| Basic push/pop | 5 | ✅ ALL PASS | Message passing |
-| Queue empty | 4 | ✅ ALL PASS | Empty detection |
-| Queue full | 1 | ⚠️ 1 MINOR | isFull check timing |
-| Multiple messages | 10 | ✅ ALL PASS | Batch operations |
-| Queue stats | 7 | ✅ ALL PASS | Statistics API |
-| Error handling | 6 | ✅ ALL PASS | Comprehensive |
-| Binary data | 4 | ✅ ALL PASS | Non-text messages |
-| Wraparound | 60 | ✅ ALL PASS | Ring buffer |
-| **TOTAL** | **104/105** | **99% PASS** | **🏆 Production ready** |
-
-**Known Issue:**
-- 1 test: `isFull()` check timing after allocations - minor edge case, doesn't affect core functionality
-
-**Status:** Ready for production use in HFT systems and low-latency applications.
-
----
-
-## Use Cases
-
-### 1. Rust Trading Engine
-
-```rust
-// Safe Rust wrapper
-pub struct SpscQueue {
-    handle: *mut LFQ_SpscQueue,
-}
-
-impl SpscQueue {
-    pub fn new(capacity: usize, buffer_size: usize) -> Result<Self, Error> {
-        let handle = unsafe {
-            lfq_spsc_create(capacity, buffer_size)
-        };
-
-        if handle.is_null() {
-            return Err(Error::OutOfMemory);
-        }
-
-        Ok(SpscQueue { handle })
-    }
-
-    pub fn push(&mut self, data: &[u8]) -> Result<(), Error> {
-        unsafe {
-            let err = lfq_spsc_push(
-                self.handle,
-                data.as_ptr(),
-                data.len(),
-            );
-
-            match err {
-                LFQ_SUCCESS => Ok(()),
-                LFQ_QUEUE_FULL => Err(Error::QueueFull),
-                _ => Err(Error::Unknown),
-            }
-        }
-    }
-
-    pub fn pop(&mut self, buf: &mut [u8]) -> Result<Vec<u8>, Error> {
-        let mut size = 0;
-        unsafe {
-            let err = lfq_spsc_pop(
-                self.handle,
-                buf.as_mut_ptr(),
-                buf.len(),
-                &mut size,
-            );
-
-            match err {
-                LFQ_SUCCESS => Ok(buf[..size].to_vec()),
-                LFQ_QUEUE_EMPTY => Err(Error::QueueEmpty),
-                _ => Err(Error::Unknown),
-            }
-        }
-    }
-}
-
-impl Drop for SpscQueue {
-    fn drop(&mut self) {
-        unsafe { lfq_spsc_destroy(self.handle); }
-    }
-}
-```
-
-### 2. Python High-Performance Queue
-
-```python
-import ctypes
-
-lib = ctypes.CDLL('./liblockfree_core.so')
-
-# Create queue
-queue = lib.lfq_spsc_create(256, 1024)
-
-# Producer
-msg = b"Market data update"
-lib.lfq_spsc_push(queue, msg, len(msg))
-
-# Consumer
-buf = ctypes.create_string_buffer(1024)
-size = ctypes.c_size_t()
-err = lib.lfq_spsc_pop(queue, buf, 1024, ctypes.byref(size))
-
-if err == 0:  # LFQ_SUCCESS
-    print(f"Got: {buf.value[:size.value]}")
-
-# Cleanup
-lib.lfq_spsc_destroy(queue)
-```
-
-### 3. C++ HFT System
-
-```cpp
-// C++ RAII wrapper
-class SpscQueue {
-    LFQ_SpscQueue* queue_;
-public:
-    SpscQueue(size_t capacity, size_t buffer_size) {
-        queue_ = lfq_spsc_create(capacity, buffer_size);
-        if (!queue_) throw std::bad_alloc();
-    }
-
-    ~SpscQueue() {
-        lfq_spsc_destroy(queue_);
-    }
-
-    void push(const std::vector<uint8_t>& data) {
-        LFQ_Error err = lfq_spsc_push(
-            queue_,
-            data.data(),
-            data.size()
-        );
-
-        if (err == LFQ_QUEUE_FULL) {
-            throw std::runtime_error("Queue full");
-        }
-    }
-
-    std::optional<std::vector<uint8_t>> pop() {
-        uint8_t buf[4096];
-        size_t size;
-
-        LFQ_Error err = lfq_spsc_pop(queue_, buf, sizeof(buf), &size);
-
-        if (err == LFQ_SUCCESS) {
-            return std::vector<uint8_t>(buf, buf + size);
-        }
-
-        return std::nullopt;
-    }
-};
-```
-
----
-
-## Comparison to Alternatives
-
-| Library | Throughput | Latency | Wait-Free | Cache-Aligned |
-|---------|------------|---------|-----------|---------------|
-| **This** | **100M+ msg/s** | **<50ns** | **✅** | **✅** |
-| Boost lockfree | 50M msg/s | ~100ns | ❌ | ❌ |
-| Folly MPMC | 30M msg/s | ~150ns | ❌ | ✅ |
-| std::queue + mutex | 5M msg/s | ~500ns | ❌ | ❌ |
-
-**Winner:** Lock-Free Queue Core is the **fastest SPSC implementation** with wait-free guarantees.
 
 ---
 
 ## Thread Safety
 
-### Guarantees
-
-- ✅ **SPSC**: Wait-free for 1 producer + 1 consumer
-- ✅ **Multiple queues**: Safe from different threads
-- ⚠️ **Shared queue**: Must be SPSC only (not thread-safe for multiple producers/consumers)
-
-### Example: Multi-Threaded
-
-```c
-// Thread 1: Producer
-LFQ_SpscQueue* q = lfq_spsc_create(256, 1024);
-const char* msg = "Market update";
-lfq_spsc_push(q, (const uint8_t*)msg, strlen(msg));
-
-// Thread 2: Consumer (SAFE - different role)
-uint8_t buf[1024];
-size_t size;
-lfq_spsc_pop(q, buf, sizeof(buf), &size);
-
-// Thread 3: Different queue (SAFE - different queue)
-LFQ_SpscQueue* q2 = lfq_spsc_create(256, 1024);
-```
+- **SPSC**: safe for exactly one producer thread + one consumer thread on a
+  given queue; the underlying ring push/pop is wait-free.
+- **Multiple queues**: independent queues are safe from independent threads.
+- **Do not** drive a single SPSC queue from multiple producers or multiple
+  consumers — use the MPMC ring for that (Zig-only for now).
 
 ---
 
-## Strategic Value
+## Consumers
 
-The **Lock-Free Queue Core** is now a **foundational strategic asset** enabling:
+- `quantum_vault/src-tauri/src/core/lockfree.rs` — full Rust binding over all 11
+  `lfq_*` exports, linked as `static=lockfree_core`.
 
-- ✅ **HFT Trading** - Ultra-low-latency order routing
-- ✅ **Market Data Pipelines** - Pairs with market_data_core for complete stack
-- ✅ **Real-Time Systems** - Game engines, audio processing
-- ✅ **Cross-Language IPC** - Rust/C++/Python high-performance queues
-
-**Performance Leadership:** 100M+ msg/sec makes this one of the **fastest SPSC queues available**.
-
----
-
-## Conclusion
-
-The **Lock-Free Queue Core** FFI successfully extracts the wait-free SPSC queue into a production-ready, zero-dependency library. With **104/105 tests passing (99%)** and **100M+ msg/sec throughput**, it's ready for integration into high-performance systems.
-
-**Production Status:** Core functionality complete and tested. Ready for deployment in HFT systems, real-time applications, and low-latency data pipelines.
+Any change to exported symbol names, signatures, `LFQ_Stats` layout, or
+`LFQ_Error` values must be mirrored in that binding and the `.a` rebuilt for
+host + Android + iOS (on macOS, remember `scripts/repack-for-xcode.sh`).
 
 ---
 
 **Maintained by**: Quantum Encoding Forge
 **License**: MIT
 **Version**: 1.0.0-core
-**Completion**: 2025-12-01
-**Performance**: 🏆 **Wait-Free SPSC Queue - 100M+ msg/sec**

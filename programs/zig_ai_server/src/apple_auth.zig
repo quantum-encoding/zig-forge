@@ -210,10 +210,6 @@ fn handleVerifiedClaims(
 
     // Get balance
     const balance = if (store.getAccountLocked(account_id_str)) |acct| acct.balance_ticks else WELCOME_BONUS;
-    const is_negative = balance < 0;
-    const abs_balance = @abs(balance);
-    const usd_major = abs_balance / 10_000_000_000;
-    const usd_minor = (abs_balance % 10_000_000_000) / 1_000_000;
 
     // Build response (matches Go backend format)
     const email = claims.email orelse "";
@@ -222,13 +218,15 @@ fn handleVerifiedClaims(
         break :blk e;
     } else "";
 
-    const resp = std.fmt.allocPrint(allocator,
-        \\{{"token":"{s}","session_token":"{s}","api_key":"{s}","email":"{s}","credit_usd":{s}{d}.{d:0>4},"is_new":{s},"user":{{"id":"{s}","email":"{s}","display_name":"{s}","photo_url":"","credit_ticks":{d},"role":"user"}}}}
-    , .{
-        raw_key, raw_key, raw_key, email,
-        if (is_negative) "-" else "", usd_major, usd_minor,
-        if (is_new) "true" else "false",
-        account_id_str, email, display_name, balance,
+    // JSON-IN-FMT fix: the client-supplied `name` (→ display_name) and `email`
+    // are now escaped by std.json.Stringify instead of raw `{s}` interpolation.
+    const resp = json_util.writeSignInResponse(allocator, .{
+        .raw_key = raw_key,
+        .email = email,
+        .is_new = is_new,
+        .account_id = account_id_str,
+        .display_name = display_name,
+        .balance_ticks = balance,
     }) catch {
         return .{ .status = .internal_server_error, .body =
             \\{"error":"internal","message":"Failed to build response"}

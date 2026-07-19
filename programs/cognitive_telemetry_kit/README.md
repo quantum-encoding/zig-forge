@@ -20,7 +20,50 @@ The cognitive state **"Verifying git commits"** is captured in real-time from Cl
 
 ---
 
-## The Architecture
+## Current architecture (read this first)
+
+The kit has grown two planes that share one capture point. **This is the maintained
+design; the eBPF / GNOME / systemd stack described further down is the legacy Linux
+capture path and is optional.** The canonical reference is
+[`chronos-ledger/DESIGN.md`](chronos-ledger/DESIGN.md).
+
+1. **Plane 1 — squashable git ticks.** `chronos-hook` (a compiled Zig
+   `PostToolUse` hook) fires after every tool call. It resolves which coding
+   agent is running from **process ancestry** — matching the executable, not the
+   prompt, so `claude -p "fix grok"` is not misattributed — and stamps a
+   `[CHRONOS:<agent>]` commit that later folds away via `chronos-push`.
+   Multi-agent aware: `claude`, `grok`, `codex`, `gemini` (see
+   `chronos-hook/src/parse.zig`).
+
+2. **Plane 2 — permanent accountability ledger.** The same hook also emits a
+   structured, hash-chained, ML-DSA-65-signed event **for every tool call**
+   (including reads/searches that leave no git diff) over a non-blocking AF_UNIX
+   datagram to a privileged sink (`ledger-daemon`). The emit client holds **no
+   signing key**; the sink injects `seq`/`prev`/`this`/`sig`. `ledger-verify`
+   replays the stream to detect tampering and exfil chains (read → search →
+   send). Event bodies are canonicalised with an RFC 8785 (JCS) encoder so the
+   Zig / Rust / Swift emitters all hash identically.
+
+**Capture sources.** On **macOS** the live cognitive-state gerund comes from a
+DYLD `write()` interposer (`libcognitive-capture`) that writes
+`/tmp/cognitive-state-<pid>`, read by `get-cognitive-state`. On **Linux** the
+legacy eBPF watcher below can serve the same file/DB. When no live state is
+available the hook falls back to the tool's activity (Editing / Reading / …).
+
+**FFI note.** `chronos-ledger` also ships a C-ABI static lib
+(`libchronos_ledger.a`, `include/chronos_ledger.h`) and a Rust crate + Swift
+package; the exported symbols, `CL_*` sizes, and the datagram JSON shape are a
+consumed contract (CosmicDuckOS, `rust_gui`, aiconductor) — change them in
+lockstep. See `chronos-ledger/DESIGN.md`.
+
+---
+
+## The Architecture (legacy Linux capture stack)
+
+> The components in this section are the original Linux-first capture path (eBPF
+> TTY tap → SQLite → D-Bus oracle → GNOME panel). They still work on Linux but
+> are **optional** and not required by the two-plane architecture above; the
+> `src/` eBPF/C sources are not built by the top-level `build.zig`.
 
 ### 1. **cognitive-watcher** (eBPF + Userspace Daemon)
 - Captures **ALL** TTY output from Claude processes via eBPF kprobe on `tty_write()`

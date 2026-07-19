@@ -272,6 +272,27 @@ pub fn validateAccountId(id: []const u8) ?[]const u8 {
     return id;
 }
 
+/// Validate a dedicated-endpoint model name at the trust boundary. Returns the
+/// input when accepted, `null` when rejected.
+///
+/// A model_name is used both as a Firestore **document id** — a path segment
+/// in the REST URL `.../zig_dedicated_endpoints/{model_name}` — and as a value
+/// in the document body / register response. The accepted set is
+/// `[A-Za-z0-9._-]`: dots are allowed because real names look like
+/// `qwen3.5-35b`, while `/`, `:`, quotes, whitespace, backslash and control
+/// chars are banned — those are the characters that could escape the document
+/// path or, in any non-escaping serializer, the surrounding JSON. Length is
+/// bounded at `Limits.max_model_name` (128).
+pub fn validateModelName(name: []const u8) ?[]const u8 {
+    if (name.len == 0 or name.len > Limits.max_model_name) return null;
+    for (name) |c| {
+        if (std.ascii.isAlphanumeric(c)) continue;
+        if (c == '-' or c == '_' or c == '.') continue;
+        return null;
+    }
+    return name;
+}
+
 // ── Request limits ──────────────────────────────────────────
 
 pub const Limits = struct {

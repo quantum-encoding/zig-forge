@@ -2,16 +2,18 @@
 
 A NATS-compatible message broker and client library written in Zig.
 
-Implements the core [NATS protocol](https://docs.nats.io/reference/reference-protocols/nats-protocol) over TCP: publish/subscribe messaging with subject-based routing, wildcard matching, queue groups, request/reply, and authentication.
+Implements the core [NATS protocol](https://docs.nats.io/reference/reference-protocols/nats-protocol) over TCP: publish/subscribe messaging with subject-based routing, wildcard matching, queue groups, request/reply, authentication, headers (HPUB/HMSG), and a single-node **JetStream** implementation (streams, consumers, persistence).
 
 ## Features
 
-- **Full NATS text protocol** — INFO, CONNECT, PUB, SUB, UNSUB, MSG, PING/PONG, +OK/-ERR
+- **Full NATS text protocol** — INFO, CONNECT, PUB, SUB, UNSUB, MSG, HPUB, HMSG, PING/PONG, +OK/-ERR
+- **Message headers** — NATS/1.0 header frames (HPUB / HMSG)
 - **Subject wildcards** — `*` (single token) and `>` (full wildcard)
 - **Queue groups** — round-robin delivery across group members
 - **Request/reply** — inbox pattern with timeout
 - **Backpressure** — slow consumer detection and disconnection
-- **Authentication** — token and user/password
+- **Authentication** — token and user/password (constant-time secret comparison)
+- **JetStream** — streams, pull + push consumers, dedup, retention, memory or file/WAL storage, and a `$JS.API.*` JSON admin surface
 - **Dual subscription model** — callback-based and channel-based (bounded queue)
 - **Cross-platform** — macOS and Linux (poll-based I/O)
 - **Zero-allocation protocol parsing** — only payloads are copied
@@ -20,10 +22,10 @@ Implements the core [NATS protocol](https://docs.nats.io/reference/reference-pro
 
 ```bash
 zig build           # Build all binaries
-zig build test      # Run all 62 tests
+zig build test      # Run the test suite (~164 tests)
 ```
 
-Requires Zig 0.14+.
+Requires Zig 0.16+ (the code uses Zig 0.16 std APIs — `std.Io.Writer`, `std.json.Stringify`, `std.process.Init`).
 
 ## CLI Tools
 
@@ -32,12 +34,15 @@ Requires Zig 0.14+.
 ```bash
 zig build run-server -- --port 4222 --name myserver
 zig build run-server -- --token s3cret         # with auth
+zig build run-server -- --jetstream --store-dir ./data   # JetStream with file storage
 ```
 
 Options:
 - `--port PORT` — Listen port (default: 4222)
 - `--name NAME` — Server name (default: zats)
 - `--token TOKEN` — Require auth token
+- `--jetstream`, `-js` — Enable JetStream (streams/consumers/persistence)
+- `--store-dir DIR` — JetStream file-store directory (memory store if omitted)
 
 ### zats-pub
 
@@ -135,9 +140,9 @@ Each connection tracks `pending_bytes` against a configurable `max_pending_bytes
 
 ## Compatibility
 
-Standard NATS clients (Go, Rust, JavaScript, etc.) can connect to zats-server. The protocol implementation covers the core NATS text protocol.
+Standard NATS clients (Go, Rust, JavaScript, etc.) can connect to zats-server. The protocol implementation covers the core NATS text protocol, headers, and a single-node JetStream surface. Wire-level compatibility is anchored by `src/protocol_anchors.zig`, whose frames are copied byte-for-byte (including the spec's own HPUB/HMSG header/total byte counts) from the [published NATS protocol spec](https://docs.nats.io/reference/reference-protocols/nats-protocol).
 
-Not implemented: TLS, clustering, JetStream (persistence/streams/consumers).
+Not implemented: TLS, clustering (single-node only).
 
 ## License
 

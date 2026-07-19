@@ -92,6 +92,40 @@ export fn mp_fixed_pool_create(object_size: usize, capacity: usize) ?*MP_FixedPo
     return @ptrCast(pool);
 }
 
+/// Create a new fixed-size memory pool with secure-zeroing enabled.
+///
+/// Identical to `mp_fixed_pool_create`, except every `mp_fixed_pool_free`
+/// zeroes the slot payload and `mp_fixed_pool_destroy` / `mp_fixed_pool_reset`
+/// securely wipe the entire backing buffer. Intended for secret-bearing
+/// callers (keys, passphrases) that must not leave freed material in memory
+/// until a slot is reused.
+///
+/// Parameters:
+///   object_size - Size of each object in bytes
+///   capacity    - Maximum number of objects
+///
+/// Returns:
+///   Pool handle, or NULL on allocation failure
+///
+/// Note:
+///   Handles from this function are otherwise indistinguishable from
+///   `mp_fixed_pool_create` handles and use the same destroy/alloc/free/stats
+///   entry points.
+export fn mp_fixed_pool_create_secure(object_size: usize, capacity: usize) ?*MP_FixedPool {
+    if (object_size == 0 or capacity == 0) return null;
+
+    const allocator = std.heap.c_allocator;
+
+    const pool = allocator.create(pool_mod.FixedPool) catch return null;
+
+    pool.* = pool_mod.FixedPool.initSecure(allocator, object_size, capacity) catch {
+        allocator.destroy(pool);
+        return null;
+    };
+
+    return @ptrCast(pool);
+}
+
 /// Destroy fixed pool and free resources
 ///
 /// Parameters:
@@ -366,7 +400,9 @@ export fn mp_slab_alloc(slab: ?*MP_Slab, size: usize) ?*anyopaque {
 export fn mp_slab_free(slab: ?*MP_Slab, ptr: ?*anyopaque) void {
     const slab_ptr: *slab_mod.SlabAllocator = @ptrCast(@alignCast(slab orelse return));
     if (ptr) |p| {
-        slab_ptr.free(p);
+        // Non-fatal: a foreign pointer from C is ignored rather than aborting
+        // the host process (this lib is embedded in a GUI app).
+        _ = slab_ptr.tryFree(p);
     }
 }
 
@@ -504,6 +540,75 @@ test "memory_pool_core - fixed pool stats" {
     try std.testing.expectEqual(@as(usize, 7), stats.available);
 
     mp_fixed_pool_free(pool, ptr);
+}
+
+test "memory_pool_core - fixed pool double-free keeps stats sane" {
+    const pool = mp_fixed_pool_create(64, 4) orelse return;
+    defer mp_fixed_pool_destroy(pool);
+
+    const ptr = mp_fixed_pool_alloc(pool);
+    try std.testing.expect(ptr != null);
+
+    mp_fixed_pool_free(pool, ptr);
+    // Double-free the last outstanding slot: must not underflow `allocated`
+    // (which feeds `available = capacity - allocated`).
+    mp_fixed_pool_free(pool, ptr);
+
+    var stats: MP_FixedPoolStats = undefined;
+    try std.testing.expectEqual(MP_Error.SUCCESS, mp_fixed_pool_stats(pool, &stats));
+    try std.testing.expectEqual(@as(usize, 0), stats.allocated);
+    try std.testing.expectEqual(@as(usize, 4), stats.available);
+}
+
+test "memory_pool_core - secure fixed pool lifecycle" {
+    const pool = mp_fixed_pool_create_secure(128, 8) orelse return;
+    defer mp_fixed_pool_destroy(pool);
+
+    const ptr = mp_fixed_pool_alloc(pool);
+    try std.testing.expect(ptr != null);
+
+    // Write a payload, then free (which securely wipes the slot).
+    const bytes: [*]u8 = @ptrCast(ptr.?);
+    @memset(bytes[0..128], 0xCD);
+    mp_fixed_pool_free(pool, ptr);
+
+    // Re-alloc returns the same slot; the tail (past the free-list link) is 0.
+    const reused = mp_fixed_pool_alloc(pool) orelse return;
+    try std.testing.expectEqual(@intFromPtr(ptr), @intFromPtr(reused));
+    const rbytes: [*]u8 = @ptrCast(reused);
+    var i: usize = @sizeOf(usize);
+    while (i < 128) : (i += 1) {
+        try std.testing.expectEqual(@as(u8, 0), rbytes[i]);
+    }
+    mp_fixed_pool_free(pool, reused);
+}
+
+test "memory_pool_core - secure create rejects zero args" {
+    try std.testing.expect(mp_fixed_pool_create_secure(0, 8) == null);
+    try std.testing.expect(mp_fixed_pool_create_secure(64, 0) == null);
+}
+
+test "memory_pool_core - slab free of foreign pointer is a no-op, not a crash" {
+    const slab = mp_slab_create(8) orelse return;
+    defer mp_slab_destroy(slab);
+
+    const owned = mp_slab_alloc(slab, 64);
+    try std.testing.expect(owned != null);
+
+    // A pointer this allocator never handed out. mp_slab_free must ignore it
+    // (the underlying SlabAllocator.free would @panic; the FFI wrapper uses
+    // tryFree so a bad C pointer cannot abort the host process).
+    var foreign: u64 = 0;
+    mp_slab_free(slab, &foreign);
+
+    // The foreign free changed nothing; the real allocation still frees fine.
+    var stats: MP_SlabStats = undefined;
+    try std.testing.expectEqual(MP_Error.SUCCESS, mp_slab_stats(slab, &stats));
+    try std.testing.expectEqual(@as(usize, 1), stats.in_use);
+
+    mp_slab_free(slab, owned);
+    try std.testing.expectEqual(MP_Error.SUCCESS, mp_slab_stats(slab, &stats));
+    try std.testing.expectEqual(@as(usize, 0), stats.in_use);
 }
 
 test "memory_pool_core - arena create/destroy lifecycle" {

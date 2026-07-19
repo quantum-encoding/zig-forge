@@ -9,13 +9,15 @@
 //! - No global state
 //!
 //! Thread Safety:
-//! - SPSC: Wait-free for single producer + single consumer
+//! - SPSC: single producer + single consumer (the underlying ring is wait-free)
 //! - Multiple queues can be used safely from different threads
 //!
 //! Performance:
-//! - Push/Pop: <50ns latency
-//! - Throughput: 100M+ messages/second
-//! - Cache-line aligned to prevent false sharing
+//! - The underlying SPSC ring is wait-free and cache-line aligned to prevent
+//!   false sharing. This FFI copies each payload through the C allocator
+//!   (one malloc per push, one free per pop), so end-to-end push/pop latency
+//!   is dominated by the allocator, not the ring. Run `zig build bench` to
+//!   measure both the raw ring and the FFI path on your hardware.
 
 const std = @import("std");
 const spsc = @import("spsc/queue.zig");
@@ -135,10 +137,11 @@ export fn lfq_spsc_destroy(queue: ?*LFQ_SpscQueue) void {
 ///   SUCCESS if pushed
 ///   QUEUE_FULL if queue is at capacity
 ///   INVALID_HANDLE if queue is NULL
-///   INVALID_PARAM if data is NULL or len is 0
+///   INVALID_PARAM if data is NULL, len is 0, or len > buffer_size
 ///
 /// Performance:
-///   ~50ns per push (wait-free)
+///   Copies the payload through the C allocator, so latency is
+///   allocator-bound (one malloc per push), not the raw ring-buffer cost.
 ///
 /// Thread Safety:
 ///   Only ONE thread may call push (single producer)
@@ -148,16 +151,19 @@ export fn lfq_spsc_destroy(queue: ?*LFQ_SpscQueue) void {
 ///   LFQ_Error err = lfq_spsc_push(queue, (const uint8_t*)msg, strlen(msg));
 export fn lfq_spsc_push(
     queue: ?*LFQ_SpscQueue,
-    data: [*]const u8,
+    data: ?[*]const u8,
     len: usize,
 ) LFQ_Error {
     const ctx: *QueueContext = @ptrCast(@alignCast(queue orelse return .INVALID_HANDLE));
 
+    // Honor the header's NULL contract: a null data pointer is a caller error,
+    // not undefined behavior (the parameter is nullable so C NULL is well-defined).
+    const data_ptr = data orelse return .INVALID_PARAM;
     if (len == 0 or len > ctx.buffer_size) return .INVALID_PARAM;
 
     // Allocate buffer for message
     const buf = ctx.allocator.alloc(u8, len) catch return .OUT_OF_MEMORY;
-    @memcpy(buf, data[0..len]);
+    @memcpy(buf, data_ptr[0..len]);
 
     const msg = Message{
         .data = buf,
@@ -185,9 +191,11 @@ export fn lfq_spsc_push(
 ///   SUCCESS if popped
 ///   QUEUE_EMPTY if queue is empty
 ///   INVALID_HANDLE if queue is NULL
+///   INVALID_PARAM if data_out or size_out is NULL
 ///
 /// Performance:
-///   ~50ns per pop (wait-free)
+///   Copies the payload out and frees the per-message buffer, so latency is
+///   allocator-bound (one free per pop), not the raw ring-buffer cost.
 ///
 /// Thread Safety:
 ///   Only ONE thread may call pop (single consumer)
@@ -200,18 +208,23 @@ export fn lfq_spsc_push(
 ///   }
 export fn lfq_spsc_pop(
     queue: ?*LFQ_SpscQueue,
-    data_out: [*]u8,
+    data_out: ?[*]u8,
     len: usize,
-    size_out: *usize,
+    size_out: ?*usize,
 ) LFQ_Error {
     const ctx: *QueueContext = @ptrCast(@alignCast(queue orelse return .INVALID_HANDLE));
+
+    // Honor the header's NULL contract before consuming a message — validating
+    // the output pointers after a successful pop would drop the message.
+    const out_ptr = data_out orelse return .INVALID_PARAM;
+    const size_ptr = size_out orelse return .INVALID_PARAM;
 
     const msg = ctx.queue.pop() catch return .QUEUE_EMPTY;
 
     // Copy data to output
     const copy_len = @min(msg.len, len);
-    @memcpy(data_out[0..copy_len], msg.data[0..copy_len]);
-    size_out.* = msg.len;
+    @memcpy(out_ptr[0..copy_len], msg.data[0..copy_len]);
+    size_ptr.* = msg.len;
 
     // Free the message buffer
     ctx.allocator.free(msg.data);
@@ -285,7 +298,7 @@ export fn lfq_version() [*:0]const u8 {
 
 /// Get performance info string
 export fn lfq_performance_info() [*:0]const u8 {
-    return "100M+ msg/sec | <50ns latency | Wait-free SPSC";
+    return "Wait-free SPSC ring | cache-line aligned | FFI copies via C allocator";
 }
 
 // ============================================================================
@@ -390,6 +403,41 @@ test "lockfree_core - statistics" {
     try std.testing.expectEqual(LFQ_Error.SUCCESS, err);
     try std.testing.expectEqual(@as(usize, 1), stats.length);
     try std.testing.expect(!stats.is_empty);
+}
+
+test "lockfree_core - null parameter rejection" {
+    const queue = lfq_spsc_create(16, 256);
+    try std.testing.expect(queue != null);
+    defer lfq_spsc_destroy(queue);
+
+    // Null data on push is a caller error, not UB.
+    try std.testing.expectEqual(LFQ_Error.INVALID_PARAM, lfq_spsc_push(queue, null, 4));
+
+    // Push a real message so a rejected pop has something it must NOT drop.
+    const msg = "data";
+    try std.testing.expectEqual(
+        LFQ_Error.SUCCESS,
+        lfq_spsc_push(queue, @as([*]const u8, @ptrCast(msg)), msg.len),
+    );
+
+    var buf: [256]u8 = undefined;
+    var size: usize = 0;
+
+    // Null output pointers on pop -> INVALID_PARAM, checked BEFORE consuming.
+    try std.testing.expectEqual(LFQ_Error.INVALID_PARAM, lfq_spsc_pop(queue, null, buf.len, &size));
+    try std.testing.expectEqual(LFQ_Error.INVALID_PARAM, lfq_spsc_pop(queue, &buf, buf.len, null));
+
+    // The message survived the rejected pops and can still be read.
+    try std.testing.expectEqual(@as(usize, 1), lfq_spsc_len(queue));
+    try std.testing.expectEqual(LFQ_Error.SUCCESS, lfq_spsc_pop(queue, &buf, buf.len, &size));
+    try std.testing.expectEqual(msg.len, size);
+
+    // Null handle -> INVALID_HANDLE (distinct from INVALID_PARAM).
+    try std.testing.expectEqual(
+        LFQ_Error.INVALID_HANDLE,
+        lfq_spsc_push(null, @as([*]const u8, @ptrCast(msg)), msg.len),
+    );
+    try std.testing.expectEqual(LFQ_Error.INVALID_HANDLE, lfq_spsc_pop(null, &buf, buf.len, &size));
 }
 
 test "lockfree_core - helper functions" {

@@ -113,3 +113,28 @@ test "fromEpochMs: padding on small components" {
     const result = fromEpochMs(1704164645006, &buf);
     try testing.expectEqualStrings("2024-01-02T03:04:05.006Z", result);
 }
+
+test "fromEpochMs: external anchor — Date.prototype.toISOString() goldens" {
+    // EXTERNAL ANCHOR (zig-forge/CLAUDE.md golden rule §1). These
+    // (epoch-ms → string) pairs are NOT hand-derived; each was produced
+    // by `new Date(ms).toISOString()` under Node.js — the exact call the
+    // TS reference's recent.ts `toItem()` uses. They cover the cases a
+    // hand-rolled calendar most often gets wrong: the century-rule leap
+    // day (2000-02-29 — divisible by 400, so a leap year), the ordinary
+    // leap-to-March rollover (2024-03-01), sub-second precision, and the
+    // end-of-year 23:59:59.999 boundary.
+    const cases = [_]struct { ms: i64, want: []const u8 }{
+        .{ .ms = 0, .want = "1970-01-01T00:00:00.000Z" },
+        .{ .ms = 1000, .want = "1970-01-01T00:00:01.000Z" },
+        .{ .ms = 951782400000, .want = "2000-02-29T00:00:00.000Z" },
+        .{ .ms = 1709251200000, .want = "2024-03-01T00:00:00.000Z" },
+        .{ .ms = 1234567890123, .want = "2009-02-13T23:31:30.123Z" },
+        .{ .ms = 1580515200000, .want = "2020-02-01T00:00:00.000Z" },
+        .{ .ms = 4102444799000, .want = "2099-12-31T23:59:59.000Z" },
+        .{ .ms = 1798761599999, .want = "2026-12-31T23:59:59.999Z" },
+    };
+    var buf: [ISO_LEN]u8 = undefined;
+    for (cases) |c| {
+        try testing.expectEqualStrings(c.want, fromEpochMs(c.ms, &buf));
+    }
+}

@@ -1,0 +1,11 @@
+// EXTERNAL ANCHOR: zig-forge/CLAUDE.md "High-signal anti-patterns" §2
+// (SHELL-CHILD, shape (a)). Minimized from the real vertex.zig
+// runTokenCommand / auth_refresher.zig CommandSource: a "/bin/sh"
+// literal in the body of a function that also spawns a child process,
+// re-introducing shell-metacharacter RCE. MUST fire SHELL-CHILD.
+const std = @import("std");
+
+pub fn runShell(allocator: std.mem.Allocator, cmd: []const u8) !void {
+    var child = std.process.Child.init(&.{ "/bin/sh", "-c", cmd }, allocator);
+    try child.spawn();
+}

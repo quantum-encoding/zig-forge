@@ -109,30 +109,38 @@ test "parse invalid port range - reversed" {
     };
 }
 
-test "port deduplication" {
+test "port deduplication - repeated singletons" {
     const allocator = std.heap.c_allocator;
 
     var ports: std.ArrayList(u16) = .empty;
     defer ports.deinit(allocator);
 
+    // parsePortSpec now collapses duplicates itself.
     try main.parsePortSpec("80,80,80", &ports, allocator);
+    try testing.expectEqual(@as(usize, 1), ports.items.len);
+    try testing.expectEqual(@as(u16, 80), ports.items[0]);
+}
 
-    // Should deduplicate
-    var unique: std.ArrayList(u16) = .empty;
-    defer unique.deinit(allocator);
+test "port deduplication - overlapping ranges are collapsed and sorted" {
+    const allocator = std.heap.c_allocator;
 
-    for (ports.items) |port| {
-        var found = false;
-        for (unique.items) |existing| {
-            if (existing == port) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) try unique.append(allocator, port);
+    var ports: std.ArrayList(u16) = .empty;
+    defer ports.deinit(allocator);
+
+    // 1-100 and 50-60 overlap; 443 appears twice. Result must be the union,
+    // sorted ascending, each port exactly once: 1..100 then 443 = 101 ports.
+    try main.parsePortSpec("1-100,50-60,443,443", &ports, allocator);
+    try testing.expectEqual(@as(usize, 101), ports.items.len);
+    try testing.expectEqual(@as(u16, 1), ports.items[0]);
+    try testing.expectEqual(@as(u16, 100), ports.items[99]);
+    try testing.expectEqual(@as(u16, 443), ports.items[100]);
+
+    // Strictly increasing, no repeats.
+    var prev: u16 = 0;
+    for (ports.items) |p| {
+        try testing.expect(p > prev);
+        prev = p;
     }
-
-    try testing.expectEqual(@as(usize, 1), unique.items.len);
 }
 
 // ============================================================================
@@ -212,6 +220,30 @@ test "scan localhost - IPv6" {
     try testing.expect(status != .open);
 }
 
+test "scan open port on a locally-bound listener - should be open" {
+    const io = std.testing.io;
+
+    // Bind a real TCP listener on loopback so scanPort() must classify it
+    // .open. Iterate candidate high ports to dodge a transient AddressInUse.
+    // This is the only offline test that exercises the connect-success branch;
+    // the .open path is otherwise only covered by network integration tests.
+    var server: Io.net.Server = undefined;
+    var bound_port: u16 = 0;
+    var candidate: u16 = 54411;
+    while (candidate < 54511) : (candidate += 1) {
+        const listen_addr = try IpAddress.parse("127.0.0.1", candidate);
+        server = listen_addr.listen(io, .{ .reuse_address = true }) catch continue;
+        bound_port = candidate;
+        break;
+    }
+    try testing.expect(bound_port != 0); // could not bind any candidate port
+    defer server.deinit(io);
+
+    const target = try IpAddress.parse("127.0.0.1", bound_port);
+    const status = try main.scanPort(io, target, 1000);
+    try testing.expectEqual(PortStatus.open, status);
+}
+
 // ============================================================================
 // DNS RESOLUTION TESTS
 // ============================================================================
@@ -266,10 +298,8 @@ test "timeout on unreachable host" {
     const addr = try IpAddress.parse("192.0.2.1", 80);
 
     const start_time = getMonotonicMs();
-    const status = try main.scanPort(io, addr, 1000); // 1 second timeout
+    _ = try main.scanPort(io, addr, 1000); // 1 second timeout
     const elapsed_ms = getMonotonicMs() - start_time;
-
-    std.debug.print("\nDEBUG INFO - status: {s}, elapsed_ms: {d}\n", .{ status.toString(), elapsed_ms });
 
     // In proxied environments or corporate firewalls, this might succeed (.open) or fail immediately.
     // The critical check is that it returns within the 1-second timeout bound (+ overhead) and does not hang.
@@ -378,8 +408,9 @@ test "integration: scan google.com HTTP" {
 
     const io = std.testing.io;
 
-    const addr = main.resolveHost(io, "google.com") catch |err| {
-        std.debug.print("Skipping integration test (no network): {}\n", .{err});
+    const addr = main.resolveHost(io, "google.com") catch {
+        // No network: skip silently (printing corrupts the test runner's
+        // stdout protocol under `zig build test`).
         return error.SkipZigTest;
     };
 
@@ -397,8 +428,8 @@ test "integration: scan github.com SSH" {
 
     const io = std.testing.io;
 
-    const addr = main.resolveHost(io, "github.com") catch |err| {
-        std.debug.print("Skipping integration test (no network): {}\n", .{err});
+    const addr = main.resolveHost(io, "github.com") catch {
+        // No network: skip silently (see google.com test above).
         return error.SkipZigTest;
     };
 

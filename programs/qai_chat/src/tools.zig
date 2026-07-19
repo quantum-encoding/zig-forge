@@ -99,6 +99,48 @@ const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_WRITE_BYTES: usize = 1024 * 1024;
 const MAX_BASH_OUTPUT: usize = 16 * 1024;
 
+/// The read-only tools (`read_file`, `grep`, `ls`) run with NO confirmation
+/// prompt on any path the model asks for. That makes them a silent
+/// exfiltration channel: a prompt-injected model can read `~/.ssh/id_ed25519`
+/// or `.env` and the content flows straight into the next provider request.
+/// `isSensitivePath` matches the well-known credential/secret patterns so the
+/// content channels can refuse instead — the user is told to share such files
+/// explicitly if they really want the agent to see them.
+///
+/// Matching is on the request path as-given (basename + substrings); it does
+/// not resolve symlinks, so it is a best-effort guard, not a sandbox. It errs
+/// toward refusing: false positives cost the user one "share it explicitly"
+/// message, false negatives leak a secret.
+fn isSensitivePath(path: []const u8) bool {
+    const base = std.fs.path.basename(path);
+
+    // Dotenv files: .env, .env.local, .env.production, …
+    if (std.mem.eql(u8, base, ".env")) return true;
+    if (std.mem.startsWith(u8, base, ".env.")) return true;
+
+    // Private SSH keys (public `.pub` counterparts are safe to read).
+    const priv_key_prefixes = [_][]const u8{ "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa" };
+    for (priv_key_prefixes) |p| {
+        if (std.mem.startsWith(u8, base, p) and !std.mem.endsWith(u8, base, ".pub")) return true;
+    }
+
+    // Key material by extension / suffix.
+    if (std.mem.endsWith(u8, base, ".pem")) return true;
+    if (std.mem.endsWith(u8, base, ".key")) return true;
+    if (std.mem.endsWith(u8, base, "_key")) return true;
+    if (std.mem.endsWith(u8, base, ".p12") or std.mem.endsWith(u8, base, ".pfx")) return true;
+
+    // Whole-tree secrets: anything under ~/.ssh or an .aws credentials file,
+    // qai's own approvals file, and cloud/CLI token caches under .config.
+    if (std.mem.startsWith(u8, path, ".ssh/") or std.mem.indexOf(u8, path, "/.ssh/") != null) return true;
+    if (std.mem.indexOf(u8, path, ".aws/credentials") != null) return true;
+    if (std.mem.indexOf(u8, path, ".qai/approvals") != null) return true;
+    if ((std.mem.indexOf(u8, path, "/.config/") != null or std.mem.startsWith(u8, path, ".config/")) and
+        (std.mem.indexOf(u8, base, "token") != null or std.mem.indexOf(u8, base, "credential") != null)) return true;
+
+    return false;
+}
+
 pub const ExecError = error{
     UnknownTool,
     InvalidArguments,
@@ -192,6 +234,7 @@ fn optionalString(args: std.json.Value, key: []const u8) ?[]const u8 {
 // ─── read_file ──────────────────────────────────────────────────────────
 
 fn readFile(io: std.Io, gpa: std.mem.Allocator, path: []const u8) ![]u8 {
+    if (isSensitivePath(path)) return std.fmt.allocPrint(gpa, "error: refused: '{s}' matches a sensitive-credential pattern (SSH key / .env / token store). Ask the user to paste the relevant contents if they want you to see them.", .{path});
     const data = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(MAX_FILE_BYTES)) catch |err| switch (err) {
         error.FileNotFound => return std.fmt.allocPrint(gpa, "error: file not found: {s}", .{path}),
         error.AccessDenied => return std.fmt.allocPrint(gpa, "error: access denied: {s}", .{path}),
@@ -282,6 +325,7 @@ fn grep(
         error.FileNotFound => return std.fmt.allocPrint(gpa, "error: directory not found: {s}", .{root}),
         error.NotDir => {
             // Single file grep.
+            if (isSensitivePath(root)) return std.fmt.allocPrint(gpa, "error: refused: '{s}' matches a sensitive-credential pattern; ask the user to share it explicitly.", .{root});
             try grepFile(&ctx, root, root);
             if (ctx.matches == 0) try out.print(gpa, "(no matches)\n", .{});
             return out.toOwnedSlice(gpa);
@@ -326,6 +370,10 @@ fn grepWalk(ctx: *GrepCtx, dir: *std.Io.Dir, prefix: []const u8) !void {
 }
 
 fn grepFile(ctx: *GrepCtx, display_path: []const u8, fs_path: []const u8) !void {
+    // Never let grep's recursive walk read secret file contents into the
+    // match output — that would re-open the exfiltration channel readFile
+    // closes. Sensitive files are skipped silently during a tree walk.
+    if (isSensitivePath(fs_path)) return;
     const data = std.Io.Dir.cwd().readFileAlloc(ctx.io, fs_path, ctx.gpa, .limited(MAX_GREP_FILE_BYTES)) catch return;
     defer ctx.gpa.free(data);
 
@@ -397,6 +445,34 @@ test "matchGlob" {
     try std.testing.expect(matchGlob("main*", "main.zig"));
     try std.testing.expect(matchGlob("*", "anything"));
     try std.testing.expect(matchGlob("*main*", "src/main.zig"));
+}
+
+test "isSensitivePath flags credentials, allows normal source" {
+    // Secrets that read tools must refuse.
+    try std.testing.expect(isSensitivePath(".env"));
+    try std.testing.expect(isSensitivePath(".env.production"));
+    try std.testing.expect(isSensitivePath("config/.env.local"));
+    try std.testing.expect(isSensitivePath("/home/u/.ssh/id_ed25519"));
+    try std.testing.expect(isSensitivePath(".ssh/id_rsa"));
+    try std.testing.expect(isSensitivePath("/home/u/.ssh/known_hosts")); // under .ssh
+    try std.testing.expect(isSensitivePath("certs/server.pem"));
+    try std.testing.expect(isSensitivePath("tls/private.key"));
+    try std.testing.expect(isSensitivePath("secrets/api_key"));
+    try std.testing.expect(isSensitivePath("bundle.p12"));
+    try std.testing.expect(isSensitivePath("/home/u/.aws/credentials"));
+    try std.testing.expect(isSensitivePath(".qai/approvals"));
+    try std.testing.expect(isSensitivePath("/home/u/.config/gh/token.yml"));
+
+    // Public key counterpart is safe.
+    try std.testing.expect(!isSensitivePath("/home/u/.ssh_backup_note.txt")); // no /.ssh/ segment
+    try std.testing.expect(!isSensitivePath("id_ed25519.pub"));
+
+    // Normal project files must NOT be refused.
+    try std.testing.expect(!isSensitivePath("src/main.zig"));
+    try std.testing.expect(!isSensitivePath("README.md"));
+    try std.testing.expect(!isSensitivePath("build.zig"));
+    try std.testing.expect(!isSensitivePath("docs/keymap.md"));
+    try std.testing.expect(!isSensitivePath("environment.d.ts"));
 }
 
 // ─── write_file ─────────────────────────────────────────────────────────

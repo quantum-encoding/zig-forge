@@ -76,16 +76,22 @@ const Config = struct {
     fuzz_iterations: u64 = 100_000,
     show_comparisons: bool = false,
     show_c_compare: bool = false,
-    verbose: bool = false,
+    show_help: bool = false,
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     const io = std.Io.Threaded.global_single_threaded.io();
     var buf: [8192]u8 = undefined;
     var file_writer = std.Io.File.stdout().writerStreaming(io, &buf);
     const w = &file_writer.interface;
 
-    const config = parseArgs();
+    const config = parseArgs(init.args);
+
+    if (config.show_help) {
+        printHelp(w);
+        file_writer.flush() catch {};
+        return;
+    }
 
     // Print banner
     printBanner(w);
@@ -121,31 +127,55 @@ fn getenvSlice(name: [*:0]const u8) ?[]const u8 {
     return std.mem.sliceTo(ptr, 0);
 }
 
-fn parseArgs() Config {
+/// Value-aware boolean env flag: an unset var is `false`; the strings
+/// "0", "false", "no", "off", and "" are `false`; anything else is `true`.
+/// (Presence-only flags treated `CHAOS_TUI=0` as enabled — this fixes that.)
+fn envFlag(name: [*:0]const u8) bool {
+    const val = getenvSlice(name) orelse return false;
+    return !isFalsey(val);
+}
+
+fn isFalsey(val: []const u8) bool {
+    return val.len == 0 or
+        std.mem.eql(u8, val, "0") or
+        std.ascii.eqlIgnoreCase(val, "false") or
+        std.ascii.eqlIgnoreCase(val, "no") or
+        std.ascii.eqlIgnoreCase(val, "off");
+}
+
+fn parseMode(str: []const u8) ?chaos_engine.ChaosMode {
+    if (std.mem.eql(u8, str, "clean") or std.mem.eql(u8, str, "off")) return .off;
+    if (std.mem.eql(u8, str, "scripted")) return .scripted;
+    if (std.mem.eql(u8, str, "random")) return .random;
+    if (std.mem.eql(u8, str, "stress")) return .stress;
+    if (std.mem.eql(u8, str, "fuzz")) return .fuzz;
+    return null;
+}
+
+/// Returns the value part of `--name=value`, or null if `arg` isn't that flag.
+fn flagValue(arg: []const u8, name: []const u8) ?[]const u8 {
+    if (arg.len > name.len and std.mem.startsWith(u8, arg, name) and arg[name.len] == '=') {
+        return arg[name.len + 1 ..];
+    }
+    return null;
+}
+
+fn parseArgs(args: std.process.Args) Config {
     var config = Config{};
 
-    // Zig 0.16: use environment variables for configuration
-    //   CHAOS_MODE=clean|scripted|random|stress|fuzz
-    //   CHAOS_TUI=1
-    //   CHAOS_SCENARIO=ARIANE|MCO|MCAS|...
-    //   CHAOS_SEED=42
-    //   CHAOS_ITERATIONS=100000
-    //   CHAOS_COMPARISONS=1
+    // Configuration source order: environment variables first, then any
+    //   command-line flags override them (flags win). Both map onto Config.
+    //   CHAOS_MODE=clean|scripted|random|stress|fuzz    (--mode=)
+    //   CHAOS_TUI=1                                      (--tui / --no-tui)
+    //   CHAOS_SCENARIO=ARIANE|MCO|MCAS|...               (--scenario=)
+    //   CHAOS_SEED=42                                    (--seed=)
+    //   CHAOS_ITERATIONS=100000                          (--iterations=)
+    //   CHAOS_COMPARISONS=1                              (--comparisons)
+    //   CHAOS_C_COMPARE=1                                (--c-compare)
     if (getenvSlice("CHAOS_MODE")) |mode_str| {
-        if (std.mem.eql(u8, mode_str, "clean") or std.mem.eql(u8, mode_str, "off")) {
-            config.mode = .off;
-        } else if (std.mem.eql(u8, mode_str, "scripted")) {
-            config.mode = .scripted;
-        } else if (std.mem.eql(u8, mode_str, "random")) {
-            config.mode = .random;
-        } else if (std.mem.eql(u8, mode_str, "stress")) {
-            config.mode = .stress;
-        } else if (std.mem.eql(u8, mode_str, "fuzz")) {
-            config.mode = .fuzz;
-        }
+        if (parseMode(mode_str)) |m| config.mode = m;
     }
-
-    if (getenvSlice("CHAOS_TUI")) |_| config.tui = true;
+    config.tui = envFlag("CHAOS_TUI");
     if (getenvSlice("CHAOS_SCENARIO")) |s| {
         config.scenario = s;
         config.mode = .specific;
@@ -156,10 +186,68 @@ fn parseArgs() Config {
     if (getenvSlice("CHAOS_ITERATIONS")) |iter_str| {
         config.fuzz_iterations = std.fmt.parseInt(u64, iter_str, 10) catch 100_000;
     }
-    if (getenvSlice("CHAOS_COMPARISONS")) |_| config.show_comparisons = true;
-    if (getenvSlice("CHAOS_C_COMPARE")) |_| config.show_c_compare = true;
+    config.show_comparisons = envFlag("CHAOS_COMPARISONS");
+    config.show_c_compare = envFlag("CHAOS_C_COMPARE");
+
+    parseArgvInto(&config, args);
 
     return config;
+}
+
+/// Parse command-line flags (from `zig build run -- <flags>` or the binary
+/// directly) over the top of the env-derived config. The args come from the
+/// process init vector, so no allocator is needed — the program stays
+/// allocation-free.
+fn parseArgvInto(config: *Config, args: std.process.Args) void {
+    var it = args.iterate();
+    _ = it.next(); // skip argv[0] (program name)
+
+    while (it.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            config.show_help = true;
+        } else if (flagValue(arg, "--mode")) |v| {
+            if (parseMode(v)) |m| config.mode = m;
+        } else if (std.mem.eql(u8, arg, "--tui")) {
+            config.tui = true;
+        } else if (std.mem.eql(u8, arg, "--no-tui")) {
+            config.tui = false;
+        } else if (flagValue(arg, "--scenario")) |v| {
+            config.scenario = v;
+            config.mode = .specific;
+        } else if (flagValue(arg, "--seed")) |v| {
+            config.seed = std.fmt.parseInt(u64, v, 10) catch config.seed;
+        } else if (flagValue(arg, "--iterations")) |v| {
+            config.fuzz_iterations = std.fmt.parseInt(u64, v, 10) catch config.fuzz_iterations;
+        } else if (std.mem.eql(u8, arg, "--comparisons")) {
+            config.show_comparisons = true;
+        } else if (std.mem.eql(u8, arg, "--c-compare")) {
+            config.show_c_compare = true;
+        }
+        // Unknown flags are ignored (env-only config remains the documented path).
+    }
+}
+
+fn printHelp(w: anytype) void {
+    w.print(
+        \\zig_chaos_rocket — safety-critical chaos-engineering rocket-launch demo
+        \\
+        \\Usage: zig_chaos_rocket [flags]   (or: zig build run -- [flags])
+        \\
+        \\Flags (override the matching CHAOS_* environment variable):
+        \\  --mode=<m>          off|clean, scripted (default), random, stress, fuzz
+        \\  --scenario=<id>     run one scenario, e.g. ARIANE, MCO, MCAS
+        \\  --seed=<n>          RNG seed (default 42)
+        \\  --iterations=<n>    fuzz iterations per subsystem (default 100000)
+        \\  --tui / --no-tui    enable/disable the live TUI dashboard
+        \\  --comparisons       render the Zig-vs-disaster writeups
+        \\  --c-compare         render the C-bug comparison
+        \\  -h, --help          show this help and exit
+        \\
+        \\Environment variables: CHAOS_MODE, CHAOS_SCENARIO, CHAOS_SEED,
+        \\  CHAOS_ITERATIONS, CHAOS_TUI, CHAOS_COMPARISONS, CHAOS_C_COMPARE.
+        \\  Boolean vars accept 0/false/no/off to disable.
+        \\
+    , .{}) catch {};
 }
 
 fn printBanner(w: anytype) void {
@@ -180,17 +268,26 @@ fn runFuzzMode(w: anytype, config: Config) void {
 
     var chaos = chaos_engine.ChaosEngine.init(.fuzz, config.seed);
 
+    // Run each pass separately so each "DONE" prints after its own work
+    // (previously both ran inside a single call before the first DONE).
     w.print("  Fuzzing sensor bus...        ", .{}) catch {};
-    chaos.runFuzz(config.fuzz_iterations);
-
-    const rpt = chaos.getReport();
+    flushWriter(w);
+    chaos.fuzzSensorBus(config.fuzz_iterations);
     w.print("{s}DONE{s}\n", .{ BRIGHT_GREEN, RESET }) catch {};
+    flushWriter(w);
+
     w.print("  Fuzzing checked math...      ", .{}) catch {};
+    flushWriter(w);
+    chaos.fuzzCheckedMath(config.fuzz_iterations);
     w.print("{s}DONE{s}\n\n", .{ BRIGHT_GREEN, RESET }) catch {};
 
+    const rpt = chaos.getReport();
     w.print("  {s}RESULTS{s}\n", .{ BOLD, RESET }) catch {};
     w.print("  {s}\n", .{SEPARATOR_DASH_40}) catch {};
     w.print("  Total iterations:   {d:>12}\n", .{rpt.fuzz_iterations}) catch {};
+    w.print("  Errors handled:     {d:>12}\n", .{rpt.fuzz_errors_handled}) catch {};
+    w.print("  Safety catches:     {d:>12}\n", .{rpt.fuzz_safety_catches}) catch {};
+    // A crash would abort the process, so reaching here means crashes == 0.
     w.print("  Crashes:            {s}{d:>12}{s}  {s}\n", .{
         if (rpt.fuzz_crashes == 0) BRIGHT_GREEN else BRIGHT_RED,
         rpt.fuzz_crashes,
@@ -200,6 +297,12 @@ fn runFuzzMode(w: anytype, config: Config) void {
     w.print("  Undefined behavior: {s}{d:>12}{s}  (structurally impossible)\n\n", .{
         BRIGHT_GREEN, @as(u64, 0), RESET,
     }) catch {};
+}
+
+fn flushWriter(w: *std.Io.Writer) void {
+    // Push buffered progress text to the terminal so each "DONE" is visible
+    // as its pass completes, not all at once when main() flushes at exit.
+    w.flush() catch {};
 }
 
 fn runSimulation(w: anytype, config: Config) void {
@@ -363,4 +466,7 @@ test {
     _ = @import("sensors/sensor_bus.zig");
     _ = @import("chaos/scenarios.zig");
     _ = @import("chaos/fault_injector.zig");
+    _ = @import("chaos/engine.zig");
+    _ = @import("chaos/report.zig");
+    _ = @import("chaos/fuzzer.zig");
 }

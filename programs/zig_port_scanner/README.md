@@ -25,21 +25,32 @@ This port scanner is part of the zig_forge security monitoring infrastructure, d
 
 ## Features
 
-- **Multi-threaded scanning**: Concurrent port scanning with configurable thread count (up to 100 threads)
-- **Flexible port ranges**: Scan single ports, ranges, or comma-separated lists
-- **Non-blocking I/O**: Uses `poll()` for efficient connection testing
+- **Multi-threaded scanning**: Concurrent port scanning with configurable thread count (up to 100 threads). Because scanning is I/O-bound, `-j` is honored up to the 100-thread ceiling regardless of CPU count.
+- **Flexible port ranges**: Scan single ports, ranges, or comma-separated lists. Overlapping ranges and repeated ports are de-duplicated (sorted, each port scanned once).
+- **Connection timeout**: Uses Zig 0.16's `std.Io` connect-with-timeout (native non-blocking connect + `poll()` inside the stdlib) for a bounded per-port wait.
 - **Service detection**: Identifies common services running on open ports
 - **Timeout control**: Configurable connection timeout for faster scanning
 - **Real-time feedback**: Optional verbose mode for live results
 
 ## Building
 
+Requires Zig 0.16.0 or newer (the connect-with-timeout path uses the native
+`std.Io` networking API — no stdlib patching required; the `patches/` directory
+is retained only as historical reference for pre-0.16.0 toolchains).
+
 ```bash
-cd src/zig-port-scanner
-zig build
+zig build            # from this program directory
 ```
 
-The compiled binary will be in `zig-out/bin/zig-port-scanner`
+The compiled binary will be in `zig-out/bin/zig-port-scanner`.
+
+Tests:
+
+```bash
+zig build test              # all tests (unit + network integration)
+zig build test-unit         # offline unit tests only (no network)
+zig build test-integration  # network integration tests
+```
 
 ## Usage
 
@@ -125,11 +136,13 @@ When monitoring AI coding agents, this scanner can detect if an agent attempts t
 
 ## Architecture
 
-Built for Zig 0.16 using modern POSIX APIs:
-- Non-blocking sockets with `SOCK.NONBLOCK`
-- Poll-based connection timeout handling
-- Thread-safe result collection with mutex protection
-- Signal handling for graceful interruption
+Built for Zig 0.16:
+- TCP connect-scan via `std.Io.net.IpAddress.connect` with a per-attempt
+  `.timeout` (the stdlib drives the non-blocking connect + `poll()` internally)
+- A pool of OS worker threads, each scanning a contiguous slice of the sorted,
+  de-duplicated port list
+- Thread-safe result collection with a pthread mutex
+- SIGINT handling for graceful interruption (sets an atomic stop flag)
 
 ## Port Status Types
 

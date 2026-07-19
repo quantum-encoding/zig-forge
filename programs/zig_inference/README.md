@@ -2,9 +2,12 @@
 
 A from-scratch ML inference engine written in Zig. No frameworks, no C++ dependencies, no Python — just Zig and libc. Runs transformer models directly from GGUF and ggml binary files with quantized weight support and multi-threaded matmul.
 
-Currently supports two model architectures:
-- **LLaMA-family** (decoder-only): text generation from GGUF files
+Currently supports five model families:
+- **LLaMA / Qwen3-family** (decoder-only): text generation from GGUF files
+- **Qwen3-Embedding** (decoder-only): L2-normalized text embeddings with Matryoshka (MRL) truncation
 - **Whisper** (encoder-decoder): speech-to-text from ggml binary files
+- **U2NetP** (vision): background-removal image segmentation
+- **VITS** (text-to-speech): espeak-ng phonemizer → WAV audio
 
 ## Quick Start
 

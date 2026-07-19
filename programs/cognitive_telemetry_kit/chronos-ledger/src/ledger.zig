@@ -105,8 +105,7 @@ pub const Chain = struct {
         const a = arena.allocator();
 
         const prev_hex = std.fmt.bytesToHex(self.head, .lower); // [64]u8
-        var seq_buf: [24]u8 = undefined;
-        const seq_str = std.fmt.bufPrint(&seq_buf, "{d}", .{self.seq}) catch unreachable;
+        const seq_str = try std.fmt.allocPrint(a, "{d}", .{self.seq}); // arena-owned
 
         // Core members (everything that is hashed): caller content + v/seq/prev.
         var core: std.ArrayList(canonical.Member) = .empty;

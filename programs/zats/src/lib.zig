@@ -22,6 +22,10 @@ pub const consumer = @import("consumer.zig");
 pub const jetstream = @import("jetstream.zig");
 pub const js_api = @import("js_api.zig");
 
+// Externally-anchored NATS-spec conformance tests (pulled into `zig build test`
+// via refAllDecls below). No runtime surface — test-only.
+pub const protocol_anchors = @import("protocol_anchors.zig");
+
 // Flat convenience re-exports
 
 // Server

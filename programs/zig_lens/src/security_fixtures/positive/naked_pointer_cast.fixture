@@ -1,0 +1,6 @@
+// EXTERNAL ANCHOR: zig-forge/CLAUDE.md default_rules.toml NAKED-POINTER-CAST.
+// @ptrCast in application logic hides type-confusion / alignment bugs.
+// ADVISORY (gate=false): MUST surface as a WARN, MUST NOT gate --strict.
+pub fn cast(raw: *anyopaque) *u32 {
+    return @ptrCast(@alignCast(raw));
+}

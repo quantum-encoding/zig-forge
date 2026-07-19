@@ -57,36 +57,35 @@ pub fn handleRecent(request: *http.Server.Request, ctx: router.HandlerCtx) route
         }
     }
 
-    // Build JSON body via an allocating writer backed by the per-
-    // request arena. The arena is freed by main.zig's `defer
-    // arena.deinit()` after `respond()`, so the slice is valid for
-    // the response's send-time.
+    // Build JSON body via std.json.Stringify over an allocating writer
+    // backed by the per-request arena. The arena is freed by main.zig's
+    // `defer arena.deinit()` after `respond()`, so the slice is valid
+    // for the response's send-time. Stringify handles the array commas
+    // and all string escaping — no hand-rolled emitter (JSON-IN-FMT
+    // corrective).
     var aw = std.Io.Writer.Allocating.init(ctx.allocator);
-    const w = &aw.writer;
+    var js: std.json.Stringify = .{ .writer = &aw.writer };
 
-    w.writeAll("[") catch return internalError();
+    js.beginArray() catch return internalError();
 
     const Collector = struct {
-        writer: *std.Io.Writer,
-        first: bool,
-        oom: bool,
+        js: *std.json.Stringify,
+        failed: bool,
     };
-    var coll = Collector{ .writer = w, .first = true, .oom = false };
+    var coll = Collector{ .js = &js, .failed = false };
 
     ctx.store.iterateRecent(limit, &coll, struct {
         fn cb(raw_ctx: ?*anyopaque, row: types.EventRow) void {
             const c: *Collector = @alignCast(@ptrCast(raw_ctx orelse return));
-            if (c.oom) return;
-            writeEventJson(c.writer, row, c.first) catch {
-                c.oom = true;
-                return;
+            if (c.failed) return;
+            writeEventJson(c.js, row) catch {
+                c.failed = true;
             };
-            c.first = false;
         }
     }.cb);
 
-    if (coll.oom) return internalError();
-    w.writeAll("]") catch return internalError();
+    if (coll.failed) return internalError();
+    js.endArray() catch return internalError();
 
     return .{
         .status = .ok,
@@ -148,36 +147,61 @@ pub fn handleSeen(request: *http.Server.Request, ctx: router.HandlerCtx) router.
 
 // ── helpers ──
 
-fn writeEventJson(w: *std.Io.Writer, row: types.EventRow, is_first: bool) !void {
-    if (!is_first) try w.writeAll(",");
-    try w.writeAll("{\"id\":\"");
-    try w.print("{d}", .{row.seq});
-    try w.writeAll("\",\"kind\":\"");
-    try w.writeAll(eventKindString(row.kind));
-    try w.writeAll("\",\"repo\":\"");
-    try writeJsonEscaped(w, row.repo.slice());
-    try w.writeAll("\",\"title\":\"");
-    try writeJsonEscaped(w, row.title.slice());
-    try w.writeAll("\",\"at\":\"");
+/// Emit one event object into an open JSON array via std.json.Stringify.
+///
+/// Field ORDER is load-bearing: it mirrors the TS reference's `toItem`
+/// (jesternet-astro/src/pages/api/notifications/recent.ts) exactly —
+/// `id, kind, title, repo, at, seen, data` — because JSON.stringify
+/// preserves insertion order and the conformance suite compares bytes.
+/// (The prior hand-rolled emitter had `repo` before `title`, a silent
+/// drift from the reference; the byte-exact golden test below now pins
+/// the order.)
+///
+/// Stringify does all string escaping — the bespoke `writeJsonEscaped`
+/// helper this replaced is deleted per the repo's JSON-IN-FMT corrective
+/// ("pre-existing escape helpers should be deleted; Stringify is
+/// already audited"). The one raw-embedded field is `data`, whose bytes
+/// were validated as well-formed JSON at insertEvent time (store.zig),
+/// so `beginWriteRaw` cannot inject malformed JSON here.
+fn writeEventJson(js: *std.json.Stringify, row: types.EventRow) !void {
+    try js.beginObject();
+
+    // id: the durable WAL seq, emitted as a STRING (the reference does
+    // `String(row.id)`; SSE Last-Event-ID is a text header value). A u64
+    // is at most 20 decimal digits, so the buffer is sized to fit and
+    // bufPrint cannot overflow — but propagate the error rather than
+    // `catch unreachable` (the whole function is already `!void`).
+    try js.objectField("id");
+    var id_buf: [20]u8 = undefined;
+    try js.write(try std.fmt.bufPrint(&id_buf, "{d}", .{row.seq}));
+
+    try js.objectField("kind");
+    try js.write(eventKindString(row.kind));
+
+    try js.objectField("title");
+    try js.write(row.title.slice());
+
+    try js.objectField("repo");
+    try js.write(row.repo.slice());
+
+    try js.objectField("at");
     var iso_buf: [iso.ISO_LEN]u8 = undefined;
-    const iso_str = iso.fromEpochMs(row.created_at, &iso_buf);
-    try w.writeAll(iso_str);
-    try w.writeAll("\",\"seen\":");
-    try w.writeAll(if (row.seen) "true" else "false");
+    try js.write(iso.fromEpochMs(row.created_at, &iso_buf));
 
-    // Data field: embed the stored payload as JSON. The payload is
-    // already JSON (insertEvent's contract); embedding raw avoids
-    // a parse-then-re-emit roundtrip. If the payload is empty,
-    // emit an empty object so the field has a stable shape.
+    try js.objectField("seen");
+    try js.write(row.seen);
+
+    // data: embed the stored payload verbatim. It is already validated
+    // JSON (insertEvent rejects oversize/non-JSON), so raw-embedding
+    // avoids a parse-then-re-emit roundtrip. Empty payload → `{}`, the
+    // reference's `data = row.payload ? JSON.parse(...) : {}` fallback.
+    try js.objectField("data");
+    try js.beginWriteRaw();
     const payload_slice = row.payload.slice();
-    try w.writeAll(",\"data\":");
-    if (payload_slice.len == 0) {
-        try w.writeAll("{}");
-    } else {
-        try w.writeAll(payload_slice);
-    }
+    try js.writer.writeAll(if (payload_slice.len == 0) "{}" else payload_slice);
+    js.endWriteRaw();
 
-    try w.writeAll("}");
+    try js.endObject();
 }
 
 /// EventKind enum → string form. Mirrors the TS reference's EventKind
@@ -194,25 +218,6 @@ fn eventKindString(kind: types.EventKind) []const u8 {
         .pr_merged => "pr.merged",
         .pr_commented => "pr.commented",
     };
-}
-
-/// Minimal JSON string-escaper. Handles the four characters that
-/// MUST be escaped per RFC 8259 §7 (quote, backslash, control chars
-/// < 0x20). Non-control extended UTF-8 passes through unchanged
-/// because JSON strings are Unicode and the input from FixedString
-/// is already byte-encoded UTF-8.
-fn writeJsonEscaped(w: *std.Io.Writer, s: []const u8) !void {
-    for (s) |c| {
-        switch (c) {
-            '"' => try w.writeAll("\\\""),
-            '\\' => try w.writeAll("\\\\"),
-            '\n' => try w.writeAll("\\n"),
-            '\r' => try w.writeAll("\\r"),
-            '\t' => try w.writeAll("\\t"),
-            0...0x08, 0x0b, 0x0c, 0x0e...0x1f => try w.print("\\u{x:0>4}", .{c}),
-            else => try w.writeByte(c),
-        }
-    }
 }
 
 const body_internal_error =
@@ -234,4 +239,112 @@ fn invalidRequest(comptime message: []const u8) router.Response {
         .body = body,
         .headers = &router.headers_json_cors,
     };
+}
+
+// ── Tests ──
+//
+// EXTERNAL ANCHOR (zig-forge/CLAUDE.md golden rule §1): the expected
+// bytes below are NOT self-authored. They were produced by running the
+// TypeScript reference's `toItem()` + `JSON.stringify()` from
+// `/Users/director/work/websites/jesternet-astro/src/pages/api/
+// notifications/recent.ts` under Node.js — the exact serializer the
+// conformance suite asserts against. This pins (a) field order
+// (`id, kind, title, repo, at, seen, data`), (b) `id` as a string, (c)
+// `seen` as a bool, (d) the empty-payload → `{}` fallback, and (e) the
+// `toISOString()` timestamp form. Any drift from the reference wire
+// shape now fails the build.
+
+const testing = std.testing;
+
+/// Reproduce handleRecent's array-building over a fixed event set and
+/// compare byte-exact against the Node-generated reference output.
+fn renderEventsForTest(alloc: std.mem.Allocator, rows: []const types.EventRow) ![]u8 {
+    var aw = std.Io.Writer.Allocating.init(alloc);
+    errdefer aw.deinit();
+    var js: std.json.Stringify = .{ .writer = &aw.writer };
+    try js.beginArray();
+    for (rows) |row| try writeEventJson(&js, row);
+    try js.endArray();
+    return aw.toOwnedSlice();
+}
+
+test "recent.ts byte-exact golden (single event)" {
+    const row = types.EventRow{
+        .seq = 42,
+        .kind = .commit_pushed,
+        .title = types.FixedStr256.fromSlice("push: main -> abc"),
+        .repo = types.FixedStr128.fromSlice("jak/foo"),
+        .payload = types.FixedStr512.fromSlice("{\"branch\":\"main\",\"sha\":\"abc123\"}"),
+        .seen = false,
+        .created_at = 1779369255678,
+    };
+
+    const out = try renderEventsForTest(testing.allocator, &.{row});
+    defer testing.allocator.free(out);
+
+    // From: node → JSON.stringify([toItem(ev1)]) against recent.ts.
+    const golden =
+        "[{\"id\":\"42\",\"kind\":\"commit.pushed\",\"title\":\"push: main -> abc\"," ++
+        "\"repo\":\"jak/foo\",\"at\":\"2026-05-21T13:14:15.678Z\",\"seen\":false," ++
+        "\"data\":{\"branch\":\"main\",\"sha\":\"abc123\"}}]";
+    try testing.expectEqualStrings(golden, out);
+}
+
+test "recent.ts byte-exact golden (array, empty payload → {})" {
+    const rows = [_]types.EventRow{
+        .{
+            .seq = 42,
+            .kind = .commit_pushed,
+            .title = types.FixedStr256.fromSlice("push: main -> abc"),
+            .repo = types.FixedStr128.fromSlice("jak/foo"),
+            .payload = types.FixedStr512.fromSlice("{\"branch\":\"main\",\"sha\":\"abc123\"}"),
+            .seen = false,
+            .created_at = 1779369255678,
+        },
+        .{
+            .seq = 7,
+            .kind = .pr_merged,
+            .title = types.FixedStr256.fromSlice("PR #7 merged"),
+            .repo = types.FixedStr128.fromSlice("jak/forge"),
+            .payload = types.FixedStr512.fromSlice(""), // empty → {}
+            .seen = true,
+            .created_at = 1704164645006,
+        },
+    };
+
+    const out = try renderEventsForTest(testing.allocator, &rows);
+    defer testing.allocator.free(out);
+
+    // From: node → JSON.stringify([toItem(ev1), toItem(ev2)]) against recent.ts.
+    const golden =
+        "[{\"id\":\"42\",\"kind\":\"commit.pushed\",\"title\":\"push: main -> abc\"," ++
+        "\"repo\":\"jak/foo\",\"at\":\"2026-05-21T13:14:15.678Z\",\"seen\":false," ++
+        "\"data\":{\"branch\":\"main\",\"sha\":\"abc123\"}}," ++
+        "{\"id\":\"7\",\"kind\":\"pr.merged\",\"title\":\"PR #7 merged\"," ++
+        "\"repo\":\"jak/forge\",\"at\":\"2024-01-02T03:04:05.006Z\",\"seen\":true," ++
+        "\"data\":{}}]";
+    try testing.expectEqualStrings(golden, out);
+}
+
+test "writeEventJson escapes quotes/backslashes in title (Stringify, not hand-rolled)" {
+    // The bespoke escaper is gone; Stringify must still escape a title
+    // containing a quote and a backslash so the array stays valid JSON.
+    const row = types.EventRow{
+        .seq = 1,
+        .kind = .commit_pushed,
+        .title = types.FixedStr256.fromSlice("say \"hi\" \\ bye"),
+        .repo = types.FixedStr128.fromSlice("jak/foo"),
+        .payload = types.FixedStr512.fromSlice(""),
+        .seen = false,
+        .created_at = 0,
+    };
+    const out = try renderEventsForTest(testing.allocator, &.{row});
+    defer testing.allocator.free(out);
+
+    const golden =
+        "[{\"id\":\"1\",\"kind\":\"commit.pushed\"," ++
+        "\"title\":\"say \\\"hi\\\" \\\\ bye\"," ++
+        "\"repo\":\"jak/foo\",\"at\":\"1970-01-01T00:00:00.000Z\",\"seen\":false," ++
+        "\"data\":{}}]";
+    try testing.expectEqualStrings(golden, out);
 }

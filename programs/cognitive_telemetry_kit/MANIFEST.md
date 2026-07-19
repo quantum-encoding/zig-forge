@@ -6,9 +6,27 @@
 ## Release Date
 October 28, 2025
 
+> **Note (current layout).** This manifest below documents the original Linux
+> eBPF capture package under `src/` only. The maintained kit is now the
+> two-plane architecture in `README.md` → "Current architecture", built by the
+> top-level `build.zig`. The actively-developed components are:
+>
+> | Component | Role |
+> |---|---|
+> | `chronos-ledger/` | Tamper-evident hash chain + RFC 8785 canonicaliser + ML-DSA-65 signing + C-ABI + detection engine (the crown jewel; see `chronos-ledger/DESIGN.md`) |
+> | `chronos-hook/` | Global git `PostToolUse` hook: process-ancestry agent attribution, `[CHRONOS:<agent>]` tick, non-blocking ledger emit |
+> | `ledger-daemon/` | Privileged UDS sink: chains + signs event bodies, appends NDJSON |
+> | `ledger-verify/` | CLI: replays the NDJSON ledger through the shared detector (CI gate) |
+> | `cognitive-tools/` | `cognitive-export` / `-stats` / `-query` over the SQLite DB |
+> | `libcognitive-capture/` | macOS DYLD `write()` interposer → `/tmp/cognitive-state-<pid>` |
+> | `get-cognitive-state/` | macOS reader of the capture file (used by chronos-hook) |
+> | `cognitive-state-server/` | Linux-only in-memory D-Bus oracle over the DB |
+> | `cognitive-ingest/` | Reads the capture file, inserts into SurrealDB over HTTP |
+> | `src/` | **Legacy** Linux eBPF/C capture stack (below) — not built by the top-level `build.zig` |
+
 ## Package Contents
 
-### Source Files (`src/`)
+### Source Files (`src/`) — legacy Linux eBPF capture stack
 - `cognitive-watcher-v2.c` - Userspace daemon (15KB)
 - `cognitive-oracle-v2.bpf.c` - eBPF kernel program (8.5KB)
 - `chronos-stamp-cognitive-direct.zig` - Timestamp generator (11KB)

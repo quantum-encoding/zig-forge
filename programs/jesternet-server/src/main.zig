@@ -66,28 +66,35 @@ pub fn main(init: std.process.Init) !void {
     var config = Config{};
 
     // ── CLI args ──
+    //
+    // Strict: a malformed value (a typo'd `--port` or `--workers`) or a
+    // flag with its value missing is a hard error with a non-zero exit,
+    // NOT a silent fall-back to the default. Previously `catch 8080` /
+    // `catch 64` meant `--port 80O` (letter O) bound the default 8080
+    // and the operator never knew — a deploy-correctness footgun on the
+    // same footing as the old `--data-dir` no-op.
     var args_iter = std.process.Args.Iterator.init(init.minimal.args);
     _ = args_iter.next(); // skip argv[0]
     while (args_iter.next()) |arg| {
         if (std.mem.eql(u8, arg, "--port") or std.mem.eql(u8, arg, "-p")) {
-            if (args_iter.next()) |val| {
-                config.port = std.fmt.parseInt(u16, val, 10) catch 8080;
-            }
+            const val = args_iter.next() orelse fatalMissingValue(arg);
+            config.port = std.fmt.parseInt(u16, val, 10) catch
+                fatalBadValue(arg, val, "an integer in 0..65535");
         } else if (std.mem.eql(u8, arg, "--host") or std.mem.eql(u8, arg, "-h")) {
-            if (args_iter.next()) |val| {
-                config.host = val;
-            }
+            config.host = args_iter.next() orelse fatalMissingValue(arg);
         } else if (std.mem.eql(u8, arg, "--workers") or std.mem.eql(u8, arg, "-w")) {
-            if (args_iter.next()) |val| {
-                config.max_workers = std.fmt.parseInt(u32, val, 10) catch 64;
-            }
+            const val = args_iter.next() orelse fatalMissingValue(arg);
+            config.max_workers = std.fmt.parseInt(u32, val, 10) catch
+                fatalBadValue(arg, val, "a positive integer");
+            if (config.max_workers == 0) fatalBadValue(arg, val, "a positive integer");
         } else if (std.mem.eql(u8, arg, "--data-dir") or std.mem.eql(u8, arg, "-d")) {
-            if (args_iter.next()) |val| {
-                config.data_dir = val;
-            }
+            config.data_dir = args_iter.next() orelse fatalMissingValue(arg);
         } else if (std.mem.eql(u8, arg, "--help")) {
             printUsage();
             return;
+        } else {
+            std.debug.print("error: unknown argument '{s}' (try --help)\n", .{arg});
+            std.process.exit(2);
         }
     }
 
@@ -134,11 +141,12 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print(
         \\
-        \\  jesternet-server (scaffold)
+        \\  jesternet-server
         \\  Listening on {s}:{d}
         \\  Workers: {d}
         \\  Data dir: {s}
-        \\  Status: HTTP shell only — handlers return 501 until #61/#62/#64 land.
+        \\  Live: /healthz, /api/notifications/recent, /api/notifications/seen.
+        \\  Stubbed (501): Layer A/B, PRs, SSE stream, commit-diff.
         \\
         \\
     , .{ config.host, config.port, config.max_workers, config.data_dir });
@@ -169,6 +177,20 @@ pub fn main(init: std.process.Init) !void {
     // Skip defer cleanup — same Zig 0.16 I/O teardown issue the AI
     // server documented. All state is already in WAL once #62 lands.
     std.process.exit(0);
+}
+
+/// Print a "flag needs a value" error and exit non-zero. `noreturn` so
+/// the caller can use it as the `orelse` branch of an argument fetch.
+fn fatalMissingValue(flag: []const u8) noreturn {
+    std.debug.print("error: '{s}' requires a value (try --help)\n", .{flag});
+    std.process.exit(2);
+}
+
+/// Print a "bad value for flag" error and exit non-zero. `noreturn` so
+/// it can be the `catch` branch of a parse.
+fn fatalBadValue(flag: []const u8, value: []const u8, expected: []const u8) noreturn {
+    std.debug.print("error: invalid value '{s}' for '{s}' (expected {s})\n", .{ value, flag, expected });
+    std.process.exit(2);
 }
 
 fn printUsage() void {

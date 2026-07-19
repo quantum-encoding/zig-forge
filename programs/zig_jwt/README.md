@@ -5,7 +5,7 @@ A pure-Zig JSON Web Token (JWT, RFC 7519) library with HMAC signing and verifica
 ## What it does
 
 - **Sign** JWTs with HMAC-SHA-256/384/512 (`Builder` / `quickSign`).
-- **Verify** JWTs, including signature check and registered-claim validation for `exp`, `nbf`, `iss`, `aud`, and `sub`, with configurable clock-skew tolerance (`Verifier` / `quickVerify`).
+- **Verify** JWTs, including signature check and registered-claim validation for `exp`, `nbf`, `iss`, `aud`, and `sub`, with configurable clock-skew tolerance (`Verifier` / `quickVerify`). The `aud` claim is accepted in both RFC 7519 §4.1.3 forms — a single string or an array of strings — and the audience check passes if the expected value matches any member. For deterministic testing (or a trusted external time source), `Verifier.now_fn` overrides the wall clock used for `exp`/`nbf`.
 - **Decode** a token's header and claims without verifying the signature (`decode`) — for inspection only; never trust unverified claims.
 - Base64url encode/decode helpers (`base64UrlEncode` / `base64UrlDecode`).
 
@@ -58,6 +58,9 @@ Options for sign:
   --issuer <iss>     Set issuer claim
   --expires <sec>    Set expiration (default: 3600)
   --audience <aud>   Set audience claim
+
+Options for verify:
+  --alg <name>       Algorithm: HS256 (default), HS384, HS512
 ```
 
 ## Tests

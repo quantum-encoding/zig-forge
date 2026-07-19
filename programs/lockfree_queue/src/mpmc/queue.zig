@@ -65,7 +65,7 @@ pub fn MpmcQueue(comptime T: type) type {
             self.allocator.free(self.slots);
         }
 
-        /// Enqueue an item (lock-free, wait-free for producers)
+        /// Enqueue an item (lock-free: a CAS retry loop, not wait-free)
         pub fn push(self: *Self, value: T) !void {
             var backoff: usize = 1;
 
@@ -94,18 +94,18 @@ pub fn MpmcQueue(comptime T: type) type {
                     return error.QueueFull;
                 }
 
-                // Exponential backoff to reduce contention
-                if (backoff < 64) {
-                    var i: usize = 0;
-                    while (i < backoff) : (i += 1) {
-                        atomic.spinLoopHint();
-                    }
-                    backoff *= 2;
+                // Exponential backoff to reduce contention. Always issue at
+                // least one hint per spin, and clamp the pause length so we
+                // never fall into a hint-free hot loop once backoff saturates.
+                var i: usize = 0;
+                while (i < backoff) : (i += 1) {
+                    atomic.spinLoopHint();
                 }
+                backoff = @min(backoff * 2, 64);
             }
         }
 
-        /// Dequeue an item (lock-free, wait-free for consumers)
+        /// Dequeue an item (lock-free: a CAS retry loop, not wait-free)
         pub fn pop(self: *Self) !T {
             var backoff: usize = 1;
 
@@ -134,14 +134,14 @@ pub fn MpmcQueue(comptime T: type) type {
                     return error.QueueEmpty;
                 }
 
-                // Exponential backoff to reduce contention
-                if (backoff < 64) {
-                    var i: usize = 0;
-                    while (i < backoff) : (i += 1) {
-                        atomic.spinLoopHint();
-                    }
-                    backoff *= 2;
+                // Exponential backoff to reduce contention. Always issue at
+                // least one hint per spin, and clamp the pause length so we
+                // never fall into a hint-free hot loop once backoff saturates.
+                var i: usize = 0;
+                while (i < backoff) : (i += 1) {
+                    atomic.spinLoopHint();
                 }
+                backoff = @min(backoff * 2, 64);
             }
         }
 

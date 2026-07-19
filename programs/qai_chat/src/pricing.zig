@@ -1,9 +1,11 @@
 //! Per-model pricing lookup for cost display.
 //!
 //! Source of truth is http_sentinel/model_costs.csv (kept under that
-//! repo for upstream maintenance). We `@embedFile` it at compile time
-//! and parse on the first lookup, caching the parsed table for the
-//! life of the process.
+//! repo for upstream maintenance). NOTE: the table below is an inline
+//! copy of the relevant rows (see `csv_data`), NOT an `@embedFile` of
+//! that CSV — it can drift from the canonical file and must be updated
+//! by hand when models/prices change. Parsed on the first lookup and
+//! cached for the life of the process.
 //!
 //! Pricing semantics:
 //!   - input_per_1m / output_per_1m are dollars per 1,000,000 tokens

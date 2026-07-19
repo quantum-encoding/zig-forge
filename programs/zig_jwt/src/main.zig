@@ -49,7 +49,7 @@ pub fn main(init: std.process.Init) !void {
             try stdout.flush();
             return;
         }
-        try verifyToken(arena, stdout, args[2], args[3]);
+        try verifyToken(arena, stdout, args);
     } else if (std.mem.eql(u8, command, "decode")) {
         if (args.len < 3) {
             try stdout.print("Usage: jwt-demo decode <token>\n", .{});
@@ -78,6 +78,9 @@ fn printUsage(stdout: anytype) !void {
         \\  --issuer <iss>     Set issuer claim
         \\  --expires <sec>    Set expiration (default: 3600)
         \\  --audience <aud>   Set audience claim
+        \\
+        \\Options for verify:
+        \\  --alg <name>       Algorithm: HS256 (default), HS384, HS512
         \\
         \\Examples:
         \\  jwt-demo sign user123 mysecret --issuer myapp --expires 7200
@@ -243,15 +246,38 @@ fn signToken(allocator: std.mem.Allocator, stdout: anytype, args: []const []cons
     try stdout.print("{s}\n", .{token});
 }
 
-fn verifyToken(allocator: std.mem.Allocator, stdout: anytype, token: []const u8, secret: []const u8) !void {
+fn verifyToken(allocator: std.mem.Allocator, stdout: anytype, args: []const []const u8) !void {
+    const token = args[2];
+    const secret = args[3];
+
+    // Optional --alg lets the CLI verify HS384/HS512 tokens, not just
+    // HS256. Unknown values fall back to HS256 with a warning rather
+    // than silently mis-verifying.
+    var algorithm: jwt.Algorithm = .HS256;
+    var i: usize = 4;
+    while (i < args.len) : (i += 1) {
+        // zig-lens-ignore: EQL-FOR-SECRETS comparing a CLI arg to the literal flag name "--alg"; neither operand is a secret. The signature comparison lives in Verifier.verifyHmacSignature (timing-safe).
+        if (std.mem.eql(u8, args[i], "--alg") and i + 1 < args.len) {
+            algorithm = jwt.Algorithm.fromString(args[i + 1]) orelse blk: {
+                try stdout.print("Unknown --alg '{s}', defaulting to HS256\n", .{args[i + 1]});
+                break :blk .HS256;
+            };
+            if (algorithm == .none) {
+                try stdout.print("Refusing to verify with alg=none; use HS256/HS384/HS512\n", .{});
+                return;
+            }
+            i += 1;
+        }
+    }
+
     var verifier = jwt.Verifier.init(allocator);
     defer verifier.deinit();
 
-    const claims = verifier.verify(token, .HS256, secret) catch |err| {
+    var claims = verifier.verify(token, algorithm, secret) catch |err| {
         try stdout.print("Verification failed: {}\n", .{err});
         return;
     };
-    defer @constCast(&claims).deinit();
+    defer claims.deinit();
 
     try stdout.print("✓ Token verified!\n\n", .{});
     try stdout.print("Claims:\n", .{});

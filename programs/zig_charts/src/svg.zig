@@ -63,6 +63,25 @@ pub const SvgCanvas = struct {
         self.buffer.append(self.allocator, byte) catch {};
     }
 
+    /// Write a string with XML metacharacters escaped. Safe for both element
+    /// text content and double-quoted attribute values: escaping `< > & "`
+    /// covers the attribute-injection vectors (a `"` closes the value, `<`/`&`
+    /// open a new node/entity) as well as text-content well-formedness. Today
+    /// every caller passes library-internal constants, but the JSON spec is
+    /// attacker-influenceable, so any future config knob that reaches an `id`,
+    /// `class`, or `font-family` cannot smuggle markup into the emitted SVG.
+    fn writeEscaped(self: *Self, s: []const u8) void {
+        for (s) |c| {
+            switch (c) {
+                '<' => self.write("&lt;"),
+                '>' => self.write("&gt;"),
+                '&' => self.write("&amp;"),
+                '"' => self.write("&quot;"),
+                else => self.writeByte(c),
+            }
+        }
+    }
+
     fn sanitizeFloat(f: f64) bool {
         return !std.math.isNan(f) and !std.math.isInf(f);
     }
@@ -319,13 +338,11 @@ pub const SvgCanvas = struct {
         var buf: [256]u8 = undefined;
         var color_buf: [32]u8 = undefined;
 
-        const text_start = std.fmt.bufPrint(&buf, "<text x=\"{d:.2}\" y=\"{d:.2}\" font-family=\"{s}\" font-size=\"{d:.1}\"", .{
-            x,
-            y,
-            style.font_family,
-            style.font_size,
-        }) catch return;
-        self.write(text_start);
+        const coord_start = std.fmt.bufPrint(&buf, "<text x=\"{d:.2}\" y=\"{d:.2}\" font-family=\"", .{ x, y }) catch return;
+        self.write(coord_start);
+        self.writeEscaped(style.font_family);
+        const size_part = std.fmt.bufPrint(&buf, "\" font-size=\"{d:.1}\"", .{style.font_size}) catch return;
+        self.write(size_part);
 
         if (style.font_weight == .bold) {
             self.write(" font-weight=\"bold\"");
@@ -353,16 +370,7 @@ pub const SvgCanvas = struct {
 
         self.writeByte('>');
 
-        // Escape text content
-        for (text) |c| {
-            switch (c) {
-                '<' => self.write("&lt;"),
-                '>' => self.write("&gt;"),
-                '&' => self.write("&amp;"),
-                '"' => self.write("&quot;"),
-                else => self.writeByte(c),
-            }
-        }
+        self.writeEscaped(text);
 
         self.write("</text>\n");
     }
@@ -373,14 +381,14 @@ pub const SvgCanvas = struct {
         self.write("<g");
 
         if (id) |i| {
-            var buf: [64]u8 = undefined;
-            const s = std.fmt.bufPrint(&buf, " id=\"{s}\"", .{i}) catch return;
-            self.write(s);
+            self.write(" id=\"");
+            self.writeEscaped(i);
+            self.writeByte('"');
         }
         if (class) |c| {
-            var buf: [64]u8 = undefined;
-            const s = std.fmt.bufPrint(&buf, " class=\"{s}\"", .{c}) catch return;
-            self.write(s);
+            self.write(" class=\"");
+            self.writeEscaped(c);
+            self.writeByte('"');
         }
 
         self.write(">\n");
@@ -603,4 +611,139 @@ test "svg coordinate security nan/inf" {
     try std.testing.expect(std.mem.indexOf(u8, output, "translate(0.00,50.00)") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "rotate(0.00)") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "scale(1.00,1.00)") != null);
+}
+
+test "svg xml escaping vectors (attribute + text injection)" {
+    // External anchor: the five XML 1.0 predefined entities (W3C XML 1.0 §4.6).
+    // Expected outputs are the spec's canonical replacement strings, not values
+    // this library invented. A `"` must not close an attribute value, and `<`/`&`
+    // must not open a node/entity, for text content OR attribute values.
+    const allocator = std.testing.allocator;
+    var svg = SvgCanvas.init(allocator, 100, 100);
+    defer svg.deinit();
+
+    const c = svg.canvas();
+
+    // Attribute-escape vectors: id/class (beginGroup) and font-family (drawText).
+    c.beginGroup("a\"><script>alert(1)</script>", "cls&<b>");
+    c.drawText("5 < 10 & \"q\" > 3", 10, 20, .{ .font_family = "Arial\"><rect/>" });
+    c.endGroup();
+
+    const output = try c.finish();
+
+    // No raw markup metacharacter survives where it could break out.
+    // The only literal '<' allowed are the ones that open real elements
+    // (<g, <text, </text>, </g>); the injected "<script>" / "<rect/>" must be gone.
+    try std.testing.expect(std.mem.indexOf(u8, output, "<script>") == null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "<rect/>") == null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "</script>") == null);
+
+    // Canonical entity replacements are present.
+    try std.testing.expect(std.mem.indexOf(u8, output, "&lt;script&gt;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "&quot;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "cls&amp;&lt;b&gt;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "5 &lt; 10 &amp; &quot;q&quot; &gt; 3") != null);
+
+    // The emitted document must still be well-formed XML.
+    try assertWellFormedXml(output);
+}
+
+/// Minimal, allocation-free XML 1.0 well-formedness check for emitted SVG.
+/// Enforces the structural rules an external validator (or a browser's SVG
+/// parser) would: matched/nested tags, quoted attribute values, no raw `<` or
+/// unescaped `&` in text or attribute values. It is a checker, not a parser —
+/// its "expected" behavior is defined by the XML spec, so it serves as an
+/// external anchor for the SVG the renderer emits, not a roundtrip.
+pub fn assertWellFormedXml(s: []const u8) !void {
+    var stack: [64][]const u8 = undefined;
+    var sp: usize = 0;
+    var i: usize = 0;
+    while (i < s.len) {
+        const c = s[i];
+        if (c == '<') {
+            if (std.mem.startsWith(u8, s[i..], "<?")) {
+                const end = std.mem.indexOfPos(u8, s, i, "?>") orelse return error.UnterminatedPI;
+                i = end + 2;
+                continue;
+            }
+            if (std.mem.startsWith(u8, s[i..], "<!--")) {
+                const end = std.mem.indexOfPos(u8, s, i, "-->") orelse return error.UnterminatedComment;
+                i = end + 3;
+                continue;
+            }
+            const is_close = i + 1 < s.len and s[i + 1] == '/';
+            // Scan to the tag's closing '>', treating quoted regions as literal.
+            var j = i + 1;
+            var in_quote = false;
+            while (j < s.len) : (j += 1) {
+                const cj = s[j];
+                if (cj == '"') {
+                    in_quote = !in_quote;
+                } else if (!in_quote and cj == '<') {
+                    return error.RawLtInsideTag;
+                } else if (!in_quote and cj == '>') {
+                    break;
+                }
+            }
+            if (j >= s.len) return error.UnterminatedTag;
+            if (in_quote) return error.UnbalancedAttributeQuote;
+            const inner = s[i + 1 .. j];
+            try validateEntities(inner); // '&' inside attribute values must be an entity
+            const self_close = inner.len > 0 and inner[inner.len - 1] == '/';
+            const name_start: usize = if (is_close) 1 else 0;
+            var name_end = name_start;
+            while (name_end < inner.len and !isNameBreak(inner[name_end])) name_end += 1;
+            const name = inner[name_start..name_end];
+            if (is_close) {
+                if (sp == 0 or !std.mem.eql(u8, stack[sp - 1], name)) return error.MismatchedCloseTag;
+                sp -= 1;
+            } else if (!self_close) {
+                if (sp >= stack.len) return error.NestingTooDeep;
+                stack[sp] = name;
+                sp += 1;
+            }
+            i = j + 1;
+        } else if (c == '&') {
+            i = try validateOneEntity(s, i);
+        } else if (c == '>') {
+            // A bare '>' in text is tolerated by XML, but our emitter always
+            // escapes it, so its presence in text signals a leak.
+            return error.RawGtInText;
+        } else {
+            i += 1;
+        }
+    }
+    if (sp != 0) return error.UnbalancedTags;
+}
+
+fn isNameBreak(c: u8) bool {
+    return c == ' ' or c == '\t' or c == '\n' or c == '\r' or c == '/' or c == '>';
+}
+
+fn validateEntities(inner: []const u8) !void {
+    var i: usize = 0;
+    while (i < inner.len) {
+        if (inner[i] == '&') {
+            i = try validateOneEntity(inner, i);
+        } else i += 1;
+    }
+}
+
+fn validateOneEntity(s: []const u8, at: usize) !usize {
+    const semi = std.mem.indexOfScalarPos(u8, s, at, ';') orelse return error.UnterminatedEntity;
+    const ent = s[at .. semi + 1];
+    const named = [_][]const u8{ "&lt;", "&gt;", "&amp;", "&quot;", "&apos;" };
+    for (named) |n| {
+        if (std.mem.eql(u8, ent, n)) return semi + 1;
+    }
+    if (ent.len > 3 and ent[1] == '#') {
+        const digits = ent[2 .. ent.len - 1];
+        if (digits[0] == 'x' or digits[0] == 'X') {
+            for (digits[1..]) |d| if (!std.ascii.isHex(d)) return error.BadEntity;
+        } else {
+            for (digits) |d| if (!std.ascii.isDigit(d)) return error.BadEntity;
+        }
+        return semi + 1;
+    }
+    return error.BadEntity;
 }

@@ -779,3 +779,72 @@ test "path validation: encoded traversal blocked" {
 // because run_program invokes execve directly with the argv array — no
 // /bin/sh -c wrapper exists. See "exec allowlist:" and "exec args:"
 // tests above for the replacement coverage.
+
+// ── 11. model_name trust-boundary validation (vertex endpoints) ──
+
+test "validateModelName: accepts real dotted/hyphenated names" {
+    try testing.expect(security.validateModelName("qwen3.5-35b") != null);
+    try testing.expect(security.validateModelName("gemini_1.5_pro") != null);
+    try testing.expect(security.validateModelName("a") != null);
+}
+
+test "validateModelName: rejects path/JSON-escaping characters" {
+    // A `/` would escape the Firestore document-id path segment.
+    try testing.expect(security.validateModelName("evil/../secret") == null);
+    // A `"` would break out of the JSON string in any non-escaping serializer.
+    try testing.expect(security.validateModelName("x\",\"role\":\"admin") == null);
+    try testing.expect(security.validateModelName("has space") == null);
+    try testing.expect(security.validateModelName("has:colon") == null);
+    try testing.expect(security.validateModelName("") == null);
+    // Length bound (Limits.max_model_name == 128).
+    const too_long = "a" ** 129;
+    try testing.expect(security.validateModelName(too_long) == null);
+}
+
+// ── 12. Sign-in response JSON escaping (JSON-IN-FMT regression) ──
+
+const json_util = @import("json.zig");
+
+test "writeSignInResponse: hostile display_name cannot forge a sibling field" {
+    const a = testing.allocator;
+    // Apple's `name` is client-supplied; a `"` used to corrupt the response
+    // JSON via raw allocPrint interpolation. Feed a classic injection payload.
+    const body = try json_util.writeSignInResponse(a, .{
+        .raw_key = "qai_k_testkey",
+        .email = "user@example.com",
+        .is_new = true,
+        .account_id = "apple_001.abc.0987",
+        .display_name = "evil\",\"role\":\"admin",
+        .balance_ticks = 51_234_000_000, // 5.1234 USD
+    });
+    defer a.free(body);
+
+    // The result must be one well-formed JSON object.
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, body, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+
+    // The injected role text is trapped inside display_name, not a sibling.
+    const user = root.get("user").?.object;
+    try testing.expectEqualStrings("evil\",\"role\":\"admin", user.get("display_name").?.string);
+    try testing.expectEqualStrings("user", user.get("role").?.string);
+
+    // credit_usd preserved the fixed-decimal wire format as a JSON number.
+    try testing.expectApproxEqAbs(@as(f64, 5.1234), root.get("credit_usd").?.float, 1e-9);
+    try testing.expect(root.get("is_new").?.bool);
+}
+
+test "writeSignInResponse: negative balance keeps the minus sign and padding" {
+    const a = testing.allocator;
+    const body = try json_util.writeSignInResponse(a, .{
+        .raw_key = "k",
+        .email = "",
+        .is_new = false,
+        .account_id = "id",
+        .display_name = "",
+        .balance_ticks = -5_000_000, // -0.0005 USD
+    });
+    defer a.free(body);
+    // Raw substring check: the exact zero-padded decimal the Go backend emitted.
+    try testing.expect(std.mem.indexOf(u8, body, "\"credit_usd\":-0.0005,") != null);
+}

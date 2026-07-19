@@ -428,9 +428,29 @@ fn parseHmsg(buf: []const u8, args: []const u8, line_end: usize) ParseError!Pars
 
 // --- Encoder ---
 // All encode functions write into a provided buffer and return the written slice.
+//
+// Every encoder computes the exact wire length up front and returns an empty
+// slice (`buf[0..0]`) when the destination buffer is too small, rather than
+// blindly `@memcpy`-ing past the end. `buf[0..0]` is the pre-existing
+// insufficient-space sentinel (the old `bufPrint(...) catch return buf[0..0]`
+// paths already used it), so callers that already treat an empty return as
+// "encode failed" keep working; the difference is that an undersized subject /
+// reply / payload can no longer overflow a caller-supplied buffer. These
+// functions are `pub` and re-exported in `lib.zig`, so an external Zig consumer
+// can pass an arbitrary buffer — the guard makes that memory-safe.
+
+/// Decimal-digit count of an unsigned integer (for length pre-computation).
+fn decDigits(n: u64) usize {
+    if (n == 0) return 1;
+    var count: usize = 0;
+    var v = n;
+    while (v > 0) : (v /= 10) count += 1;
+    return count;
+}
 
 /// Encode INFO message: "INFO {json}\r\n"
 pub fn encodeInfo(buf: []u8, json: []const u8) []const u8 {
+    if (buf.len < 5 + json.len + 2) return buf[0..0];
     var pos: usize = 0;
     @memcpy(buf[pos..][0..5], "INFO ");
     pos += 5;
@@ -443,6 +463,7 @@ pub fn encodeInfo(buf: []u8, json: []const u8) []const u8 {
 
 /// Encode CONNECT message: "CONNECT {json}\r\n"
 pub fn encodeConnect(buf: []u8, json: []const u8) []const u8 {
+    if (buf.len < 8 + json.len + 2) return buf[0..0];
     var pos: usize = 0;
     @memcpy(buf[pos..][0..8], "CONNECT ");
     pos += 8;
@@ -455,6 +476,9 @@ pub fn encodeConnect(buf: []u8, json: []const u8) []const u8 {
 
 /// Encode PUB message: "PUB <subject> [reply] <#bytes>\r\n<payload>\r\n"
 pub fn encodePub(buf: []u8, subject: []const u8, reply_to: ?[]const u8, payload: []const u8) []const u8 {
+    const reply_len: usize = if (reply_to) |r| 1 + r.len else 0;
+    const required = 4 + subject.len + reply_len + 1 + decDigits(payload.len) + 2 + payload.len + 2;
+    if (buf.len < required) return buf[0..0];
     var pos: usize = 0;
     @memcpy(buf[pos..][0..4], "PUB ");
     pos += 4;
@@ -481,6 +505,9 @@ pub fn encodePub(buf: []u8, subject: []const u8, reply_to: ?[]const u8, payload:
 
 /// Encode SUB message: "SUB <subject> [queue] <sid>\r\n"
 pub fn encodeSub(buf: []u8, subject: []const u8, queue_group: ?[]const u8, sid: []const u8) []const u8 {
+    const queue_len: usize = if (queue_group) |q| 1 + q.len else 0;
+    const required = 4 + subject.len + queue_len + 1 + sid.len + 2;
+    if (buf.len < required) return buf[0..0];
     var pos: usize = 0;
     @memcpy(buf[pos..][0..4], "SUB ");
     pos += 4;
@@ -503,6 +530,9 @@ pub fn encodeSub(buf: []u8, subject: []const u8, queue_group: ?[]const u8, sid: 
 
 /// Encode UNSUB message: "UNSUB <sid> [max_msgs]\r\n"
 pub fn encodeUnsub(buf: []u8, sid: []const u8, max_msgs: ?u64) []const u8 {
+    const max_len: usize = if (max_msgs) |m| 1 + decDigits(m) else 0;
+    const required = 6 + sid.len + max_len + 2;
+    if (buf.len < required) return buf[0..0];
     var pos: usize = 0;
     @memcpy(buf[pos..][0..6], "UNSUB ");
     pos += 6;
@@ -521,6 +551,9 @@ pub fn encodeUnsub(buf: []u8, sid: []const u8, max_msgs: ?u64) []const u8 {
 
 /// Encode MSG message: "MSG <subject> <sid> [reply] <#bytes>\r\n<payload>\r\n"
 pub fn encodeMsg(buf: []u8, subject: []const u8, sid: []const u8, reply_to: ?[]const u8, payload: []const u8) []const u8 {
+    const reply_len: usize = if (reply_to) |r| 1 + r.len else 0;
+    const required = 4 + subject.len + 1 + sid.len + reply_len + 1 + decDigits(payload.len) + 2 + payload.len + 2;
+    if (buf.len < required) return buf[0..0];
     var pos: usize = 0;
     @memcpy(buf[pos..][0..4], "MSG ");
     pos += 4;
@@ -551,6 +584,10 @@ pub fn encodeMsg(buf: []u8, subject: []const u8, sid: []const u8, reply_to: ?[]c
 
 /// Encode HPUB message: "HPUB <subject> [reply] <hdr_len> <total_len>\r\n<headers><payload>\r\n"
 pub fn encodeHpub(buf: []u8, subject: []const u8, reply_to: ?[]const u8, headers: []const u8, payload: []const u8) []const u8 {
+    const reply_len: usize = if (reply_to) |r| 1 + r.len else 0;
+    const required = 5 + subject.len + reply_len + 1 + decDigits(headers.len) +
+        1 + decDigits(headers.len + payload.len) + 2 + headers.len + payload.len + 2;
+    if (buf.len < required) return buf[0..0];
     var pos: usize = 0;
     @memcpy(buf[pos..][0..5], "HPUB ");
     pos += 5;
@@ -583,6 +620,10 @@ pub fn encodeHpub(buf: []u8, subject: []const u8, reply_to: ?[]const u8, headers
 
 /// Encode HMSG message: "HMSG <subject> <sid> [reply] <hdr_len> <total_len>\r\n<headers><payload>\r\n"
 pub fn encodeHmsg(buf: []u8, subject: []const u8, sid: []const u8, reply_to: ?[]const u8, headers: []const u8, payload: []const u8) []const u8 {
+    const reply_len: usize = if (reply_to) |r| 1 + r.len else 0;
+    const required = 5 + subject.len + 1 + sid.len + reply_len + 1 + decDigits(headers.len) +
+        1 + decDigits(headers.len + payload.len) + 2 + headers.len + payload.len + 2;
+    if (buf.len < required) return buf[0..0];
     var pos: usize = 0;
     @memcpy(buf[pos..][0..5], "HMSG ");
     pos += 5;
@@ -619,24 +660,28 @@ pub fn encodeHmsg(buf: []u8, subject: []const u8, sid: []const u8, reply_to: ?[]
 
 /// Encode PING: "PING\r\n"
 pub fn encodePing(buf: []u8) []const u8 {
+    if (buf.len < 6) return buf[0..0];
     @memcpy(buf[0..6], "PING\r\n");
     return buf[0..6];
 }
 
 /// Encode PONG: "PONG\r\n"
 pub fn encodePong(buf: []u8) []const u8 {
+    if (buf.len < 6) return buf[0..0];
     @memcpy(buf[0..6], "PONG\r\n");
     return buf[0..6];
 }
 
 /// Encode +OK: "+OK\r\n"
 pub fn encodeOk(buf: []u8) []const u8 {
+    if (buf.len < 5) return buf[0..0];
     @memcpy(buf[0..5], "+OK\r\n");
     return buf[0..5];
 }
 
 /// Encode -ERR: "-ERR '<message>'\r\n"
 pub fn encodeErr(buf: []u8, message: []const u8) []const u8 {
+    if (buf.len < 6 + message.len + 3) return buf[0..0];
     var pos: usize = 0;
     @memcpy(buf[pos..][0..6], "-ERR '");
     pos += 6;
@@ -649,14 +694,44 @@ pub fn encodeErr(buf: []u8, message: []const u8) []const u8 {
 
 // --- JSON helpers ---
 
+/// True if `json[pos]` opens an object *key* rather than appearing inside a
+/// value: a key's opening quote is preceded (ignoring whitespace) by `{` or `,`.
+/// Anchoring on structure stops a key-shaped token that occurs inside a string
+/// *value* from being mistaken for the real key (the substring-match gap).
+fn isKeyPosition(json: []const u8, pos: usize) bool {
+    if (pos == 0) return false; // valid objects start with '{', not a bare key
+    var i = pos;
+    while (i > 0) {
+        i -= 1;
+        switch (json[i]) {
+            ' ', '\t', '\n', '\r' => continue,
+            '{', ',' => return true,
+            else => return false,
+        }
+    }
+    return false;
+}
+
 /// Extract a string value from a JSON object by key.
 /// Simple scanner — no nested object support needed for CONNECT payloads.
 /// Returns null if key not found.
+///
+/// Robustness notes (see zats.md finding S2 / upgrade U3):
+///   - key matches are anchored to object structure via `isKeyPosition`, so a
+///     key that is a substring of a *value* is not mis-matched;
+///   - value scanning is escape-aware: a `\"` inside the value no longer
+///     terminates the scan early, so the *full* value slice is returned rather
+///     than a truncated prefix.
+/// It intentionally does NOT unescape the returned slice — that would require
+/// allocation and break this function's zero-allocation, borrow-from-input
+/// contract. Callers that need the decoded bytes of an escaped value must
+/// unescape themselves; NATS CONNECT auth fields are not escaped in practice.
 pub fn jsonGetString(json: []const u8, key: []const u8) ?[]const u8 {
     // Search for "key":"value"
     var pos: usize = 0;
     while (pos + key.len + 4 < json.len) : (pos += 1) {
         if (json[pos] != '"') continue;
+        if (!isKeyPosition(json, pos)) continue;
         const key_start = pos + 1;
         if (key_start + key.len >= json.len) break;
         if (!std.mem.eql(u8, json[key_start..][0..key.len], key)) continue;
@@ -668,7 +743,14 @@ pub fn jsonGetString(json: []const u8, key: []const u8) ?[]const u8 {
         if (scan >= json.len or json[scan] != '"') continue;
         const val_start = scan + 1;
         var val_end = val_start;
-        while (val_end < json.len and json[val_end] != '"') : (val_end += 1) {}
+        while (val_end < json.len and json[val_end] != '"') {
+            // Skip an escape pair so an embedded \" does not end the value early.
+            if (json[val_end] == '\\' and val_end + 1 < json.len) {
+                val_end += 2;
+            } else {
+                val_end += 1;
+            }
+        }
         if (val_end >= json.len) continue;
         return json[val_start..val_end];
     }
@@ -914,6 +996,21 @@ test "jsonGetBool" {
     try std.testing.expect(jsonGetBool(json, "missing") == null);
 }
 
+test "jsonGetString ignores a key that only appears inside a value" {
+    // The real object has no "pass" key; "pass" appears only inside the "name"
+    // value. Structure anchoring must not report it as a field.
+    const json = "{\"name\":\"the \\\"pass\\\" phrase\",\"auth_token\":\"real\"}";
+    try std.testing.expect(jsonGetString(json, "pass") == null);
+    try std.testing.expectEqualStrings("real", jsonGetString(json, "auth_token").?);
+}
+
+test "jsonGetString returns the full value when it contains an escaped quote" {
+    // Token is `ab"cd` on the wire as ab\"cd. The scan must reach the true
+    // closing quote and return the whole (still-escaped) slice, not `ab`.
+    const json = "{\"auth_token\":\"ab\\\"cd\"}";
+    try std.testing.expectEqualStrings("ab\\\"cd", jsonGetString(json, "auth_token").?);
+}
+
 test "parse HPUB without reply" {
     const input = "HPUB foo 18 23\r\nNATS/1.0\r\nA: B\r\n\r\nHello\r\n";
     const result = try parse(input);
@@ -981,4 +1078,29 @@ test "encode HMSG" {
     const hdrs = "NATS/1.0\r\nA: B\r\n\r\n";
     const encoded = encodeHmsg(&buf, "foo", "1", null, hdrs, "Hello");
     try std.testing.expectEqualStrings("HMSG foo 1 18 23\r\nNATS/1.0\r\nA: B\r\n\r\nHello\r\n", encoded);
+}
+
+test "encoders reject undersized buffers instead of overflowing" {
+    // "PUB foo.bar 5\r\nHello\r\n" is 22 bytes; a 21-byte buffer must not be written past.
+    var small: [21]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), encodePub(&small, "foo.bar", null, "Hello").len);
+
+    // Exactly-sized buffer must still succeed.
+    var exact: [22]u8 = undefined;
+    try std.testing.expectEqualStrings("PUB foo.bar 5\r\nHello\r\n", encodePub(&exact, "foo.bar", null, "Hello"));
+
+    // Every encoder returns an empty slice on a zero-length buffer rather than
+    // dereferencing out of bounds.
+    var empty: [0]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), encodeInfo(&empty, "{}").len);
+    try std.testing.expectEqual(@as(usize, 0), encodeConnect(&empty, "{}").len);
+    try std.testing.expectEqual(@as(usize, 0), encodeSub(&empty, "foo", null, "1").len);
+    try std.testing.expectEqual(@as(usize, 0), encodeUnsub(&empty, "1", 5).len);
+    try std.testing.expectEqual(@as(usize, 0), encodeMsg(&empty, "foo", "1", null, "hi").len);
+    try std.testing.expectEqual(@as(usize, 0), encodeHpub(&empty, "foo", null, "NATS/1.0\r\n\r\n", "hi").len);
+    try std.testing.expectEqual(@as(usize, 0), encodeHmsg(&empty, "foo", "1", null, "NATS/1.0\r\n\r\n", "hi").len);
+    try std.testing.expectEqual(@as(usize, 0), encodePing(&empty).len);
+    try std.testing.expectEqual(@as(usize, 0), encodePong(&empty).len);
+    try std.testing.expectEqual(@as(usize, 0), encodeOk(&empty).len);
+    try std.testing.expectEqual(@as(usize, 0), encodeErr(&empty, "boom").len);
 }

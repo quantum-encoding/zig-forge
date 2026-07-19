@@ -65,6 +65,71 @@ pub fn stringify(allocator: std.mem.Allocator, value: anytype) ![]u8 {
     return buf.toOwnedSlice(allocator);
 }
 
+/// Serialize the OAuth sign-in success response (shared by apple_auth.zig and
+/// google_auth.zig) as JSON. Caller owns the returned slice.
+///
+/// Every string field — notably the client-supplied `email` and the Apple
+/// `display_name` (derived from the request's `name`) — is escaped by
+/// std.json.Stringify, so a `"` or `\` can no longer corrupt the response or
+/// smuggle a sibling field (JSON-IN-FMT). This replaced two `allocPrint`
+/// format-string builders that interpolated those fields raw.
+///
+/// `credit_usd` is emitted with `print` as a raw JSON number, preserving the
+/// exact `<sign><major>.<minor:0>4>` fixed-decimal wire format the Go backend
+/// produced (a plain float would not reproduce the zero-padded minor units).
+pub fn writeSignInResponse(
+    allocator: std.mem.Allocator,
+    args: struct {
+        raw_key: []const u8,
+        email: []const u8,
+        is_new: bool,
+        account_id: []const u8,
+        display_name: []const u8,
+        balance_ticks: i64,
+    },
+) ![]u8 {
+    const is_negative = args.balance_ticks < 0;
+    const abs_balance = @abs(args.balance_ticks);
+    const usd_major = abs_balance / 10_000_000_000;
+    const usd_minor = (abs_balance % 10_000_000_000) / 1_000_000;
+
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+
+    try jw.beginObject();
+    try jw.objectField("token");
+    try jw.write(args.raw_key);
+    try jw.objectField("session_token");
+    try jw.write(args.raw_key);
+    try jw.objectField("api_key");
+    try jw.write(args.raw_key);
+    try jw.objectField("email");
+    try jw.write(args.email);
+    try jw.objectField("credit_usd");
+    try jw.print("{s}{d}.{d:0>4}", .{ if (is_negative) "-" else "", usd_major, usd_minor });
+    try jw.objectField("is_new");
+    try jw.write(args.is_new);
+    try jw.objectField("user");
+    try jw.beginObject();
+    try jw.objectField("id");
+    try jw.write(args.account_id);
+    try jw.objectField("email");
+    try jw.write(args.email);
+    try jw.objectField("display_name");
+    try jw.write(args.display_name);
+    try jw.objectField("photo_url");
+    try jw.write("");
+    try jw.objectField("credit_ticks");
+    try jw.write(args.balance_ticks);
+    try jw.objectField("role");
+    try jw.write("user");
+    try jw.endObject();
+    try jw.endObject();
+
+    return aw.toOwnedSlice();
+}
+
 pub const Error = error{
     PayloadTooLarge,
     EmptyBody,

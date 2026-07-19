@@ -134,6 +134,22 @@ test "RSA sign matches OpenSSL golden signature (external vector)" {
     try std.testing.expectEqualSlices(u8, &rsa_external_golden_sig, signature);
 }
 
+test "RSA sign fails closed when public exponent mismatches (fault-injection guard)" {
+    // The signer self-verifies sig^e mod n == EM before releasing the
+    // signature (Bellcore countermeasure). Simulate a corrupted verify path by
+    // swapping in a wrong public exponent (e=3 instead of the key's 65537):
+    // sig^3 mod n cannot equal EM, so sign() MUST refuse rather than emit a
+    // fault-corruptible signature.
+    var key = try rsa.parsePrivateKeyPem(std.testing.allocator, test_pem_2048);
+    defer key.deinit();
+
+    const wrong_e = [_]u8{0x03};
+    key.e_bytes = &wrong_e;
+
+    const result = key.sign("this signature must not be released");
+    try std.testing.expectError(error.SignatureVerificationFailed, result);
+}
+
 test "RSA sign is deterministic" {
     var key = try rsa.parsePrivateKeyPem(std.testing.allocator, test_pem_2048);
     defer key.deinit();
@@ -323,16 +339,38 @@ test "JWT claims injection via backslash in scope is escaped" {
     try std.testing.expect(std.mem.indexOf(u8, claims, "\"injected\":true") == null);
 }
 
-test "JSON escape handles control characters" {
-    const escaped = try jwt.jsonEscape(std.testing.allocator, "line1\nline2\ttab\x00null");
-    defer std.testing.allocator.free(escaped);
-    try std.testing.expectEqualStrings("line1\\nline2\\ttab\\u0000null", escaped);
-}
+test "JWT claims with control characters produce parseable JSON" {
+    // The claims path now emits via std.json.Stringify. A raw control char in a
+    // field must be escaped (\u00XX) so the token stays valid JSON — regression
+    // guard for the escaper swap.
+    var key = try rsa.parsePrivateKeyPem(std.testing.allocator, test_pem_2048);
+    defer key.deinit();
 
-test "JSON escape handles quotes and backslashes" {
-    const escaped = try jwt.jsonEscape(std.testing.allocator, "say \"hello\" \\ world");
-    defer std.testing.allocator.free(escaped);
-    try std.testing.expectEqualStrings("say \\\"hello\\\" \\\\ world", escaped);
+    const token = try jwt.createSignedJwt(std.testing.allocator, &key, .{
+        .issuer = "svc\n\t\"acct",
+        .scope = "a\\b",
+        .audience = "https://oauth2.googleapis.com/token",
+    }, 1700000000);
+    defer std.testing.allocator.free(token);
+
+    var it = std.mem.splitScalar(u8, token, '.');
+    _ = it.next();
+    const claims_b64 = it.next().?;
+    const claims_len = try std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(claims_b64);
+    const claims = try std.testing.allocator.alloc(u8, claims_len);
+    defer std.testing.allocator.free(claims);
+    try std.base64.url_safe_no_pad.Decoder.decode(claims, claims_b64);
+
+    const parsed = try std.json.parseFromSlice(struct {
+        iss: []const u8,
+        scope: []const u8,
+        aud: []const u8,
+        iat: i64,
+        exp: i64,
+    }, std.testing.allocator, claims, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("svc\n\t\"acct", parsed.value.iss);
+    try std.testing.expectEqualStrings("a\\b", parsed.value.scope);
 }
 
 // ============================================================================
@@ -491,6 +529,76 @@ test "isExpired within 60s grace window triggers refresh" {
 
     // Should be considered expired (within 60s grace)
     try std.testing.expect(token.isExpired(now));
+}
+
+// ============================================================================
+// SECURITY: Token-exchange response parsing + expires_in clamp
+// (audit upgrade #4 — the token-exchange response path was previously untested)
+// ============================================================================
+
+test "parseTokenResponse: normal response sets expires_at = now + expires_in" {
+    const now: i64 = 1700000000;
+    var token = try gcp.parseTokenResponse(
+        std.testing.allocator,
+        "{\"access_token\":\"ya29.abc\",\"expires_in\":3600,\"token_type\":\"Bearer\"}",
+        now,
+    );
+    defer token.deinit();
+    try std.testing.expectEqualStrings("ya29.abc", token.access_token);
+    try std.testing.expectEqual(now + 3600, token.expires_at);
+}
+
+test "parseTokenResponse: missing expires_in defaults to 3600" {
+    const now: i64 = 1700000000;
+    var token = try gcp.parseTokenResponse(
+        std.testing.allocator,
+        "{\"access_token\":\"ya29.abc\"}",
+        now,
+    );
+    defer token.deinit();
+    try std.testing.expectEqual(now + 3600, token.expires_at);
+}
+
+test "parseTokenResponse: oversized expires_in is clamped to 7200 (no stale-token pinning)" {
+    const now: i64 = 1700000000;
+    // A hostile endpoint returning a huge lifetime must not pin the token far
+    // into the future — the clamp caps it at 7200s.
+    var token = try gcp.parseTokenResponse(
+        std.testing.allocator,
+        "{\"access_token\":\"ya29.abc\",\"expires_in\":999999999}",
+        now,
+    );
+    defer token.deinit();
+    try std.testing.expectEqual(now + 7200, token.expires_at);
+}
+
+test "parseTokenResponse: negative expires_in is clamped to 0 (no overflow, token immediately stale)" {
+    const now: i64 = 1700000000;
+    var token = try gcp.parseTokenResponse(
+        std.testing.allocator,
+        "{\"access_token\":\"ya29.abc\",\"expires_in\":-100}",
+        now,
+    );
+    defer token.deinit();
+    // Clamped to now + 0; isExpired(now) is true (already within grace window).
+    try std.testing.expectEqual(now, token.expires_at);
+    try std.testing.expect(token.isExpired(now));
+}
+
+test "parseTokenResponse: malformed JSON fails closed" {
+    const result = gcp.parseTokenResponse(std.testing.allocator, "not json{{", 1700000000);
+    try std.testing.expectError(error.InvalidTokenResponse, result);
+}
+
+test "parseTokenResponse: missing access_token fails closed" {
+    // A response without the required access_token must not yield an empty-token
+    // Token — it must error.
+    const result = gcp.parseTokenResponse(
+        std.testing.allocator,
+        "{\"expires_in\":3600,\"token_type\":\"Bearer\"}",
+        1700000000,
+    );
+    try std.testing.expectError(error.InvalidTokenResponse, result);
 }
 
 // ============================================================================

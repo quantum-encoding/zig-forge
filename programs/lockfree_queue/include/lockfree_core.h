@@ -1,17 +1,20 @@
 /**
- * Lock-Free Queue Core - High-Performance C API
+ * Lock-Free Queue Core - Low-Latency C API
  *
- * Wait-free SPSC (Single Producer Single Consumer) queue.
+ * SPSC (Single Producer Single Consumer) byte-buffer queue.
  *
  * Performance:
- * - **100M+ messages/second** sustained throughput
- * - **<50ns latency** per push/pop operation
- * - **Wait-free** (no locks, no blocking)
+ * - The underlying ring push/pop is wait-free (no locks, no retry loop) and
+ *   cache-line aligned to prevent false sharing.
+ * - This FFI copies each payload through the C allocator (one malloc per push,
+ *   one free per pop), so end-to-end latency is allocator-bound, not the raw
+ *   ring's few-nanosecond cost. It is NOT zero-copy.
+ * - Run `zig build bench -Doptimize=ReleaseFast` to measure on your hardware.
  *
  * Features:
- * - Cache-line aligned to prevent false sharing
+ * - Cache-line aligned head/tail to prevent false sharing
  * - Ring buffer design with power-of-2 capacity
- * - Zero-copy message passing (internal buffers)
+ * - Reserves one slot: a capacity-N queue holds at most N-1 messages
  *
  * ZERO DEPENDENCIES:
  * - No networking
@@ -108,13 +111,14 @@ typedef enum {
  *   Queue handle, or NULL on allocation failure
  *
  * Performance:
- *   ~200ns (allocation + initialization)
+ *   Allocation + initialization (bounded, not on the hot path)
  *
  * Thread Safety:
  *   Safe to create multiple queues from different threads
  *
  * Memory:
- *   Allocates: capacity * buffer_size bytes + queue overhead
+ *   Allocates the ring (capacity slots) up front; each pushed message is
+ *   allocated on demand (len bytes) and freed on pop. No preallocated pool.
  *
  * Example:
  *   // Queue for 256 messages, each up to 1KB
@@ -152,7 +156,7 @@ void lfq_spsc_destroy(LFQ_SpscQueue* queue);
  *   LFQ_INVALID_PARAM if data is NULL or len is 0 or len > buffer_size
  *
  * Performance:
- *   ~50ns per push (wait-free)
+ *   One malloc + memcpy per push (allocator-bound; see the header banner).
  *
  * Thread Safety:
  *   Only ONE thread may call push (single producer)
@@ -184,9 +188,10 @@ LFQ_Error lfq_spsc_push(
  *   LFQ_SUCCESS if popped
  *   LFQ_QUEUE_EMPTY if queue is empty
  *   LFQ_INVALID_HANDLE if queue is NULL
+ *   LFQ_INVALID_PARAM if data_out or size_out is NULL
  *
  * Performance:
- *   ~50ns per pop (wait-free)
+ *   One memcpy + free per pop (allocator-bound; see the header banner).
  *
  * Thread Safety:
  *   Only ONE thread may call pop (single consumer)

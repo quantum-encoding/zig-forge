@@ -1,9 +1,9 @@
 # qai
 
 A pure-Zig terminal chat client and agent for Anthropic, OpenAI, Grok,
-Gemini, and DeepSeek. Streams every turn, executes tools locally with
-explicit approval, tracks token cost per session, and saves a markdown
-transcript of every conversation grouped by project.
+Gemini, DeepSeek, and Cloudflare Workers AI. Streams every turn, executes
+tools locally with explicit approval, tracks token cost per session, and
+saves a markdown transcript of every conversation grouped by project.
 
 ```
 $ qai "What is Zig in one sentence?"
@@ -24,7 +24,7 @@ runtime around. Concrete numbers from the same machine:
 | Claude Code (Node/Ink)| n/a    | ~400 MB / worker (10 workers ≈ 4 GB) |
 | **qai**               | **1.4 MB ReleaseFast** | **~10 MB** |
 
-Same UX, ~40× lighter per process. All five providers, six tools, and
+Same UX, ~40× lighter per process. All six providers, six tools, and
 the agent loop go through one streaming event surface.
 
 ## Quick start
@@ -52,16 +52,21 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 ## Providers
 
-All five accept a `--provider=NAME` override and per-provider config in
+All six accept a `--provider=NAME` override and per-provider config in
 `qai.toml`. Defaults shown:
 
-| Name        | Default model                  | Default endpoint                                  |
-|-------------|--------------------------------|----------------------------------------------------|
-| `anthropic` | `claude-sonnet-4-6`            | `https://api.anthropic.com`                       |
-| `openai`    | `gpt-5.4`                      | `https://api.openai.com/v1`                        |
-| `grok`      | `grok-4-1-fast-non-reasoning`  | `https://api.x.ai/v1`                              |
-| `gemini`    | `gemini-2.5-flash`             | `https://generativelanguage.googleapis.com/v1beta` |
-| `deepseek`  | `deepseek-chat`                | `https://api.deepseek.com/anthropic`               |
+| Name         | Default model                  | Default endpoint                                   |
+|--------------|--------------------------------|----------------------------------------------------|
+| `anthropic`  | `claude-sonnet-4-6`            | `https://api.anthropic.com`                        |
+| `openai`     | `gpt-5.4`                      | `https://api.openai.com/v1`                        |
+| `grok`       | `grok-4-1-fast-non-reasoning`  | `https://api.x.ai/v1`                              |
+| `gemini`     | `gemini-2.5-flash`             | `https://generativelanguage.googleapis.com/v1beta` |
+| `deepseek`   | `deepseek-chat`                | `https://api.deepseek.com/anthropic`               |
+| `cloudflare` | `@cf/google/gemma-4-26b-a4b-it`| `https://api.cloudflare.com/client/v4`             |
+
+`cloudflare` (alias `cf`) is Cloudflare Workers AI; it needs both
+`CF_API_TOKEN` and `CF_ACCOUNT_ID` in the environment (the account ID
+lives in the URL path, not a header).
 
 Switch mid-session with `/provider NAME`. The API key is re-resolved
 per turn so different providers can use different keys without restart.
@@ -77,33 +82,45 @@ Six tools, three read-only (no prompt) and three writable (gated):
 | `grep`       | auto     | Recursive substring search with optional file glob       |
 | `write_file` | y/a/N    | Create or overwrite a file (1 MB cap)                   |
 | `edit_file`  | y/a/N    | Exact-string replacement; refuses non-unique matches    |
-| `bash`       | y/a/r/N  | Run via `/bin/sh -c`; cwd + danger badge before approval|
+| `exec`       | y/a/r/N  | Run a program by `argv` (no shell); cwd + danger badge  |
+
+`exec` takes a structured `argv: string[]` (e.g. `["git","status"]`) and
+runs it directly via `execvp` — there is **no** `/bin/sh -c`, so argv
+entries are never word-split, glob-expanded, or interpreted. This is the
+SHELL-CHILD-hardened replacement for the old `bash` tool. The read tools
+(`read_file`, `grep`, `ls`) refuse well-known credential paths (SSH keys,
+`.env`, token stores) so a prompt-injected model can't exfiltrate secrets.
 
 ### Approval flow
 
 When the model invokes a writable tool, qai prints a preview and prompts:
 
 ```
-[bash] $ rm -rf /tmp/foo    (cwd: /Users/director/work/zig-forge)
+[exec] $ rm -rf /tmp/foo    (cwd: /Users/director/work/zig-forge)
 [!DANGER] recursive force-delete
 Proceed? [y]es / [a]lways exact / [r]ule "rm *" / [N]o:
 ```
 
 - `y` — allow this one call.
-- `a` — allow + remember this exact path / command for the rest of the session.
-- `r` (bash only) — install a prefix rule on the first whole token, e.g. `r`
-  on `git status -s` auto-approves any future `git ...` command but not `github`.
+- `a` — allow + remember this exact call (argv-boundary-precise) for the session.
+- `r` (exec only) — install a rule on `argv[0]`, e.g. `r` on `["git","status","-s"]`
+  auto-approves any future `git ...` call but not `github`. Shell interpreters
+  (`sh`, `bash`, …) are refused as rules — they'd re-open the shell-escape hole —
+  and fall back to exact-only.
 - `N` (or empty / EOF) — deny. The model gets a "user declined" tool result
   and adapts.
 
 Approvals persist between runs at `.qai/approvals` (project-local). Use
-`/forget` to clear.
+`/forget` to clear. Because the file is read from the *current directory*,
+qai asks you to confirm any command-execution approvals it loads at startup
+before honoring them (a repo can't silently grant itself `exec` rights).
 
 `--yes / -y` auto-approves all writable tool calls — use only for trusted
 scripted runs. Each auto-approved call still prints an `[auto-approve]` trace.
 
-The danger badge flags `rm -rf`, `sudo`, `curl|sh`, `git push --force`,
-`chmod -R 777`, `dd if=`, `kill -9`, fork bombs, and similar foot-guns.
+The danger badge flags shell escapes (`sh -c`, `env bash -c`), `rm -rf`,
+`sudo`, `git push --force`, `chmod -R 777`, `dd`, `kill -9`, raw block-device
+writes, and similar foot-guns.
 
 ## Slash commands
 
@@ -266,7 +283,7 @@ src/
   config.zig     # tiny TOML-ish parser + per-provider settings
   agent.zig     # streaming agent loop + tools dispatch + approvals
                  # + UsageStats (per-provider cost buckets)
-  tools.zig     # 6 tools (read_file, ls, grep, write_file, edit_file, bash)
+  tools.zig     # 6 tools (read_file, ls, grep, write_file, edit_file, exec)
                  # + danger heuristics + glob matcher
   pricing.zig   # inlined model price table for cost estimation
 ```

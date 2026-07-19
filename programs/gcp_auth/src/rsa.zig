@@ -45,7 +45,11 @@ pub const RsaPrivateKey = struct {
     n: Modulus,
     modulus_len: usize,
     d_bytes: []const u8,
-    // Keep the DER buffer alive so d_bytes slice remains valid
+    // Public exponent (e), retained for the post-sign self-verification below.
+    // Public value — not secret — so the verify step may use the branchy
+    // public-exponent modexp path.
+    e_bytes: []const u8,
+    // Keep the DER buffer alive so d_bytes / e_bytes slices remain valid
     _der_buf: []const u8,
     allocator: std.mem.Allocator,
 
@@ -83,6 +87,18 @@ pub const RsaPrivateKey = struct {
         // 3. RSA signature: sig = em^d mod n
         const m = Fe.fromBytes(self.n, pad, .big) catch return error.PaddingOverflow;
         const sig_fe = self.n.powWithEncodedExponent(m, self.d_bytes, .big) catch return error.NullExponent;
+
+        // 3a. Fail-closed self-verification: check sig^e mod n == EM before
+        // releasing the signature. This is the Boneh–DeMillo–Lipton ("Bellcore")
+        // countermeasure: a single bit-flip during the private-key modexp (a
+        // hardware fault, a cosmic-ray SEU, a latent padding bug) yields a
+        // faulty signature from which an attacker can recover a prime factor of
+        // n and thus the private key. Verifying with the public exponent turns
+        // any such fault into an error instead of an exfiltrated key. e is
+        // public, so the branchy public-exponent path leaks nothing.
+        const recovered = self.n.powWithEncodedPublicExponent(sig_fe, self.e_bytes, .big) catch
+            return error.SignatureVerificationFailed;
+        if (!recovered.eql(m)) return error.SignatureVerificationFailed;
 
         const result = try self.allocator.alloc(u8, self.modulus_len);
         errdefer self.allocator.free(result);
@@ -230,9 +246,12 @@ fn parsePkcs8Der(allocator: std.mem.Allocator, der_bytes: []u8) ParseError!RsaPr
     if (n_bytes.len == 0 or n_bytes.len > max_modulus_bytes) return error.InvalidRsaKey;
     if (n_bytes.len < min_modulus_bytes) return error.KeyTooWeak;
 
-    // Public exponent (e) — skip, we don't need it for signing
+    // Public exponent (e) — retained for the post-sign self-verification.
     const e_elem = try parseDerElement(inner_bytes, n_elem.slice.end);
     if (e_elem.identifier.tag != .integer) return error.InvalidRsaKey;
+    var e_bytes = inner_bytes[e_elem.slice.start..e_elem.slice.end];
+    while (e_bytes.len > 0 and e_bytes[0] == 0) e_bytes = e_bytes[1..];
+    if (e_bytes.len == 0) return error.InvalidRsaKey;
 
     // Private exponent (d)
     const d_elem = try parseDerElement(inner_bytes, e_elem.slice.end);
@@ -252,10 +271,18 @@ fn parsePkcs8Der(allocator: std.mem.Allocator, der_bytes: []u8) ParseError!RsaPr
     var d_in_der = der_bytes[d_start_in_der..d_end_in_der];
     while (d_in_der.len > 0 and d_in_der[0] == 0) d_in_der = d_in_der[1..];
 
+    // Same offset translation for e (public exponent), kept for self-verify.
+    const e_start_in_der = octet_elem.slice.start + e_elem.slice.start;
+    const e_end_in_der = octet_elem.slice.start + e_elem.slice.end;
+    var e_in_der = der_bytes[e_start_in_der..e_end_in_der];
+    while (e_in_der.len > 0 and e_in_der[0] == 0) e_in_der = e_in_der[1..];
+    if (e_in_der.len == 0) return error.InvalidRsaKey;
+
     return RsaPrivateKey{
         .n = modulus,
         .modulus_len = n_bytes.len,
         .d_bytes = d_in_der,
+        .e_bytes = e_in_der,
         ._der_buf = der_bytes,
         .allocator = allocator,
     };

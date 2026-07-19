@@ -24,6 +24,11 @@ comptime {
     _ = rule_engine;
     _ = scanner;
     _ = models;
+    // External-anchored security-rule fixture corpus (known-positive /
+    // known-negative fixtures per detector class). See the module header.
+    _ = @import("security_fixtures_test.zig");
+    // Terminal renderer tests guard the --imports / --unsafe views.
+    _ = terminal_output;
 }
 const rust_analyzer = @import("analyzers/rust.zig");
 const c_analyzer = @import("analyzers/c_lang.zig");
@@ -301,6 +306,21 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    // Focused views. `--imports` / `--unsafe` produce a filtered
+    // terminal report. They intentionally defer to an explicit
+    // `--format` (e.g. `--imports --format dot` still yields the
+    // dependency graph), so only intercept the default terminal format.
+    if (config.imports_only and config.format == .terminal) {
+        const imports_view = try terminal_output.writeImportsReport(allocator, &report);
+        if (config.output_file.len > 0) writeOutputFile(io, config.output_file, imports_view) else std.debug.print("{s}", .{imports_view});
+        return;
+    }
+    if (config.unsafe_only and config.format == .terminal) {
+        const unsafe_view = try terminal_output.writeUnsafeReport(allocator, &report);
+        if (config.output_file.len > 0) writeOutputFile(io, config.output_file, unsafe_view) else std.debug.print("{s}", .{unsafe_view});
+        return;
+    }
+
     // Generate output
     const output = switch (config.format) {
         .json => try json_output.writeProjectReport(allocator, &report, config.compact),
@@ -367,7 +387,7 @@ fn printUsage() void {
         \\
         \\zig-lens — Multi-language source code analysis and visualization
         \\
-        \\Supported: Zig, Rust, C, Python, JavaScript/TypeScript, Svelte
+        \\Supported: Zig, Rust, C, Python, JavaScript/TypeScript, Svelte, Go
         \\
         \\Usage: zig-lens <path> [options]
         \\

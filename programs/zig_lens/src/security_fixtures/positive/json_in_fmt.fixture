@@ -1,0 +1,10 @@
+// EXTERNAL ANCHOR: zig-forge/CLAUDE.md "High-signal anti-patterns" §1
+// (JSON-IN-FMT). Minimized from the real Stratum buildJson / oidc.zig
+// shape that shipped billing-fraud-capable JSON: a caller-controlled
+// string interpolated UNESCAPED into a printf-style JSON template.
+// The scanner MUST flag this as a gating JSON-IN-FMT finding.
+const std = @import("std");
+
+pub fn buildJson(allocator: std.mem.Allocator, user: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{{\"user\":\"{s}\"}}", .{user});
+}

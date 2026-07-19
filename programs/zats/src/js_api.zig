@@ -522,11 +522,35 @@ fn writeConsumerInfo(jw: *std.json.Stringify, consumer: *consumer_mod.Consumer) 
 }
 
 // --- JSON helpers (pub for use by server.zig) ---
+//
+// These mirror protocol.zig's hand-rolled scanner. See zats.md finding S2 /
+// upgrade U3: key matches are anchored to object structure (`isKeyPosition`) so
+// a key-shaped token inside a value is not mis-matched, and string-value scans
+// skip `\"` escape pairs so an embedded quote does not truncate the value.
+// Returned slices borrow from `data` and are not unescaped (zero-allocation
+// contract).
+
+/// True if `data[pos]` opens an object key: its quote is preceded (ignoring
+/// whitespace) by `{` or `,`.
+fn isKeyPosition(data: []const u8, pos: usize) bool {
+    if (pos == 0) return false;
+    var i = pos;
+    while (i > 0) {
+        i -= 1;
+        switch (data[i]) {
+            ' ', '\t', '\n', '\r' => continue,
+            '{', ',' => return true,
+            else => return false,
+        }
+    }
+    return false;
+}
 
 pub fn jsonGetString(data: []const u8, key: []const u8) ?[]const u8 {
     var pos: usize = 0;
     while (pos + key.len + 4 < data.len) : (pos += 1) {
         if (data[pos] != '"') continue;
+        if (!isKeyPosition(data, pos)) continue;
         const key_start = pos + 1;
         if (key_start + key.len >= data.len) break;
         if (!std.mem.eql(u8, data[key_start..][0..key.len], key)) continue;
@@ -536,7 +560,13 @@ pub fn jsonGetString(data: []const u8, key: []const u8) ?[]const u8 {
         if (scan >= data.len or data[scan] != '"') continue;
         const val_start = scan + 1;
         var val_end = val_start;
-        while (val_end < data.len and data[val_end] != '"') : (val_end += 1) {}
+        while (val_end < data.len and data[val_end] != '"') {
+            if (data[val_end] == '\\' and val_end + 1 < data.len) {
+                val_end += 2;
+            } else {
+                val_end += 1;
+            }
+        }
         if (val_end >= data.len) continue;
         return data[val_start..val_end];
     }
@@ -547,6 +577,7 @@ pub fn jsonGetInt(data: []const u8, key: []const u8) ?u64 {
     var pos: usize = 0;
     while (pos + key.len + 4 < data.len) : (pos += 1) {
         if (data[pos] != '"') continue;
+        if (!isKeyPosition(data, pos)) continue;
         const key_start = pos + 1;
         if (key_start + key.len >= data.len) break;
         if (!std.mem.eql(u8, data[key_start..][0..key.len], key)) continue;
@@ -566,6 +597,7 @@ fn jsonGetStringArray(allocator: std.mem.Allocator, data: []const u8, key: []con
     var pos: usize = 0;
     while (pos + key.len + 4 < data.len) : (pos += 1) {
         if (data[pos] != '"') continue;
+        if (!isKeyPosition(data, pos)) continue;
         const key_start = pos + 1;
         if (key_start + key.len >= data.len) break;
         if (!std.mem.eql(u8, data[key_start..][0..key.len], key)) continue;
@@ -582,7 +614,13 @@ fn jsonGetStringArray(allocator: std.mem.Allocator, data: []const u8, key: []con
             if (data[scan] != '"') break;
             const str_start = scan + 1;
             var str_end = str_start;
-            while (str_end < data.len and data[str_end] != '"') : (str_end += 1) {}
+            while (str_end < data.len and data[str_end] != '"') {
+                if (data[str_end] == '\\' and str_end + 1 < data.len) {
+                    str_end += 2;
+                } else {
+                    str_end += 1;
+                }
+            }
             if (str_end >= data.len) break;
             items.append(allocator, data[str_start..str_end]) catch return null;
             scan = str_end + 1;

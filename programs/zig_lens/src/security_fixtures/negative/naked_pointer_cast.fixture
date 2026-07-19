@@ -1,0 +1,5 @@
+// CORRECTIVE SHAPE: a plain reference, no @ptrCast / @ptrFromInt /
+// @intToPtr. The scanner MUST NOT emit a NAKED-POINTER-CAST finding.
+pub fn refValue(value: *u32) *u32 {
+    return value;
+}

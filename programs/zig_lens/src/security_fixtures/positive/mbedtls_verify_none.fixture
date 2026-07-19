@@ -1,0 +1,9 @@
+// EXTERNAL ANCHOR: zig-forge/CLAUDE.md "High-signal anti-patterns" §4
+// (MBEDTLS-VERIFY-NONE). The literal mbedTLS flag that disables
+// certificate validation. The scanner MUST flag every source line
+// referencing this token (outside comments / multiline-string fixtures).
+const std = @import("std");
+
+pub fn configTls(conf: *anyopaque) void {
+    mbedtls_ssl_conf_authmode(conf, MBEDTLS_SSL_VERIFY_NONE);
+}

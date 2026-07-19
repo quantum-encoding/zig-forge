@@ -328,7 +328,11 @@ export fn quantum_chacha20_encrypt(
         setLastError("ChaCha20: ciphertext pointer is null");
         return @intFromEnum(QuantumCryptoError.invalid_output);
     }
-    const key_arr: [32]u8 = key[0..32].*;
+    var key_arr: [32]u8 = key[0..32].*;
+    // Scrub the on-stack copy of the symmetric key before returning so it does
+    // not linger in a frame that may be reused. `secureZero` is a volatile
+    // store loop the optimizer may not elide.
+    defer crypto.secureZero(u8, &key_arr);
     const nonce_arr: [12]u8 = nonce[0..12].*;
     const plaintext_slice = if (plaintext_len > 0) plaintext[0..plaintext_len] else &[_]u8{};
     const ciphertext_slice = ciphertext[0..plaintext_len];
@@ -2004,13 +2008,14 @@ export fn quantum_bip32_from_seed(
         return @intFromEnum(Bip32Result.null_pointer);
     }
 
-    const master = bip32.ExtendedKey.fromSeed(seed[0..seed_len]) catch |err| {
+    var master = bip32.ExtendedKey.fromSeed(seed[0..seed_len]) catch |err| {
         return switch (err) {
             error.InvalidSeed => @intFromEnum(Bip32Result.invalid_seed),
             error.InvalidKey => @intFromEnum(Bip32Result.invalid_key),
             else => @intFromEnum(Bip32Result.invalid_key),
         };
     };
+    defer master.secureZero();
 
     copyExtendedKey(&master, out_key);
     return @intFromEnum(Bip32Result.success);
@@ -2033,8 +2038,9 @@ export fn quantum_bip32_derive_child(
         return @intFromEnum(Bip32Result.null_pointer);
     }
 
-    const parent_key = convertFromCKey(parent);
-    const child = parent_key.deriveChild(index) catch |err| {
+    var parent_key = convertFromCKey(parent);
+    defer parent_key.secureZero();
+    var child = parent_key.deriveChild(index) catch |err| {
         return switch (err) {
             error.HardenedPublicDerivation => @intFromEnum(Bip32Result.hardened_public),
             error.InvalidKey => @intFromEnum(Bip32Result.invalid_key),
@@ -2042,6 +2048,7 @@ export fn quantum_bip32_derive_child(
             else => @intFromEnum(Bip32Result.invalid_key),
         };
     };
+    defer child.secureZero();
 
     copyExtendedKey(&child, out_child);
     return @intFromEnum(Bip32Result.success);
@@ -2069,8 +2076,9 @@ export fn quantum_bip32_derive_path(
         return @intFromEnum(Bip32Result.invalid_path);
     }
 
-    const master_key = convertFromCKey(master);
-    const derived = master_key.derivePath(path[0..path_len]) catch |err| {
+    var master_key = convertFromCKey(master);
+    defer master_key.secureZero();
+    var derived = master_key.derivePath(path[0..path_len]) catch |err| {
         return switch (err) {
             error.InvalidPath => @intFromEnum(Bip32Result.invalid_path),
             error.HardenedPublicDerivation => @intFromEnum(Bip32Result.hardened_public),
@@ -2079,6 +2087,7 @@ export fn quantum_bip32_derive_path(
             else => @intFromEnum(Bip32Result.invalid_key),
         };
     };
+    defer derived.secureZero();
 
     copyExtendedKey(&derived, out_key);
     return @intFromEnum(Bip32Result.success);
@@ -2099,7 +2108,8 @@ export fn quantum_bip32_neuter(
         return @intFromEnum(Bip32Result.null_pointer);
     }
 
-    const internal_key = convertFromCKey(key);
+    var internal_key = convertFromCKey(key);
+    defer internal_key.secureZero();
     const neutered = internal_key.neuter();
     copyExtendedKey(&neutered, out_public);
     return @intFromEnum(Bip32Result.success);
@@ -2122,7 +2132,8 @@ export fn quantum_bip32_serialize(
         return @intFromEnum(Bip32Result.null_pointer);
     }
 
-    const internal_key = convertFromCKey(key);
+    var internal_key = convertFromCKey(key);
+    defer internal_key.secureZero();
     const serialized = internal_key.serialize(mainnet != 0);
     @memcpy(out_bytes[0..82], &serialized);
     return 82;
@@ -2610,6 +2621,7 @@ export fn quantum_tx_compute_sighash(
 
     var key_arr: [32]u8 = undefined;
     @memcpy(&key_arr, private_key[0..32]);
+    defer crypto.secureZero(u8, &key_arr);
 
     const sighash = tx_builder.computeSighashBip143(
         &tx_builder_storage,
@@ -2863,6 +2875,7 @@ export fn quantum_tx_compute_sighash_ctx(
     }
     var key_arr: [32]u8 = undefined;
     @memcpy(&key_arr, private_key[0..32]);
+    defer crypto.secureZero(u8, &key_arr);
     const sighash = tx_builder.computeSighashBip143(
         b,
         input_index,
@@ -2909,6 +2922,7 @@ export fn quantum_ecdsa_sign(
     var key_arr: [32]u8 = undefined;
     @memcpy(&hash_arr, hash[0..32]);
     @memcpy(&key_arr, private_key[0..32]);
+    defer crypto.secureZero(u8, &key_arr);
 
     // Sign to get compact signature
     const sig_compact = tx_builder.signHash(&hash_arr, &key_arr) catch |err| {
@@ -2952,6 +2966,7 @@ export fn quantum_derive_pubkey(
 
     var key_arr: [32]u8 = undefined;
     @memcpy(&key_arr, private_key[0..32]);
+    defer crypto.secureZero(u8, &key_arr);
 
     const pubkey = tx_builder.derivePublicKey(&key_arr) catch |err| {
         return switch (err) {
@@ -3493,6 +3508,65 @@ test "quantum_bitcoin_parse_tx rejects output-value sum overflow" {
         @intFromEnum(QuantumCryptoError.parse_error),
         rc,
     );
+}
+
+// External anchor at the C-ABI boundary (finding 5). The internal computeTxid
+// carries the Blockstream vector; this exercises the exported `quantum_bitcoin_txid`
+// symbol that quantum_vault/walletcore actually bind, confirming the SegWit
+// witness-stripping fix reaches the FFI surface (before Wave 1 this returned
+// invalid_input for any SegWit tx).
+//
+// Vector: coinbase tx of Bitcoin mainnet block 500,000, raw hex from Blockstream
+//   https://blockstream.info/api/tx/2157b554dcfda405233906e461ee593875ae4b1b97615872db6a25130ecc1dd6/hex
+// Display-order txid asserted by the explorer (a third party this repo did not
+// author): 2157b554dcfda405233906e461ee593875ae4b1b97615872db6a25130ecc1dd6.
+test "quantum_bitcoin_txid — SegWit coinbase through the C ABI (block 500000, Blockstream-anchored)" {
+    const raw_hex = "010000000001010000000000000000000000000000000000000000000000000000000000000000ffffffff4b0320a107046f0a385a632f4254432e434f4d2ffabe6d6dbdd0ee86f9a1badfd0aa1b3c9dac8d90840cf973f7b2590d6c9adde1a6e0974a010000000000000001283da9a172020000000000ffffffff02c994bb5e0000000017a914228f554bbf766d6f9cc828de1126e3d35d15e5fe870000000000000000266a24aa21a9ed10109f4b82aa3ed7ec9d02a2a90246478b3308c8b85daf62fe501d58d05727a40120000000000000000000000000000000000000000000000000000000000000000000000000";
+    var raw: [raw_hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&raw, raw_hex);
+
+    var txid_internal: [32]u8 = undefined;
+    const rc = quantum_bitcoin_txid(&raw, raw.len, &txid_internal);
+    try std.testing.expectEqual(@intFromEnum(QuantumCryptoError.success), rc);
+
+    // The C export returns internal (little-endian) order; reverse for display.
+    var display: [32]u8 = undefined;
+    for (0..32) |k| display[k] = txid_internal[31 - k];
+
+    var expected: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&expected, "2157b554dcfda405233906e461ee593875ae4b1b97615872db6a25130ecc1dd6");
+    try std.testing.expectEqualSlices(u8, &expected, &display);
+}
+
+// Golden decode of the same Blockstream-anchored block-500000 coinbase through
+// the exported `quantum_bitcoin_parse_tx` (finding 5). The raw hex and its txid
+// come from Blockstream; the field expectations below (SegWit flag, 1 input / 2
+// outputs, the P2SH + OP_RETURN witness-commitment output pair, and the total
+// output value 1,589,351,625 sat = 15.89 BTC block-500000 coinbase reward) are
+// what a spec-conformant decoder must recover from those bytes.
+test "quantum_bitcoin_parse_tx — SegWit coinbase golden decode (block 500000)" {
+    const raw_hex = "010000000001010000000000000000000000000000000000000000000000000000000000000000ffffffff4b0320a107046f0a385a632f4254432e434f4d2ffabe6d6dbdd0ee86f9a1badfd0aa1b3c9dac8d90840cf973f7b2590d6c9adde1a6e0974a010000000000000001283da9a172020000000000ffffffff02c994bb5e0000000017a914228f554bbf766d6f9cc828de1126e3d35d15e5fe870000000000000000266a24aa21a9ed10109f4b82aa3ed7ec9d02a2a90246478b3308c8b85daf62fe501d58d05727a40120000000000000000000000000000000000000000000000000000000000000000000000000";
+    var raw: [raw_hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&raw, raw_hex);
+
+    const parsed = try std.testing.allocator.create(CParsedTx);
+    defer std.testing.allocator.destroy(parsed);
+
+    const rc = quantum_bitcoin_parse_tx(&raw, raw.len, parsed);
+    try std.testing.expectEqual(@intFromEnum(QuantumCryptoError.success), rc);
+
+    try std.testing.expectEqual(@as(i32, 1), parsed.version);
+    try std.testing.expectEqual(@as(u32, 1), parsed.input_count);
+    try std.testing.expectEqual(@as(u32, 2), parsed.output_count);
+    try std.testing.expect(parsed.is_segwit);
+    try std.testing.expectEqual(@as(u64, 1_589_351_625), parsed.total_output_value);
+    try std.testing.expectEqual(@as(u64, 1_589_351_625), parsed.outputs[0].value);
+    try std.testing.expectEqual(CScriptType.p2sh, parsed.outputs[0].script_type);
+    try std.testing.expectEqual(@as(u64, 0), parsed.outputs[1].value);
+    try std.testing.expectEqual(CScriptType.op_return, parsed.outputs[1].script_type);
+    // Coinbase input: prevout is all-zeroes with vout 0xffffffff.
+    try std.testing.expectEqual(@as(u32, 0xffffffff), parsed.inputs[0].prev_vout);
+    try std.testing.expect(parsed.inputs[0].has_witness);
 }
 
 test "quantum_spv_verify_merkle_proof honors caller tx_count (CVE-2012-2459 pin at the FFI boundary)" {

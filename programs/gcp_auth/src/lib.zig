@@ -443,8 +443,16 @@ fn exchangeToken(allocator: std.mem.Allocator, client: *HttpClient, url: []const
     return parseTokenResponse(allocator, response.body, now);
 }
 
-/// Parse a Google OAuth2 token response JSON.
-fn parseTokenResponse(allocator: std.mem.Allocator, body: []const u8, now: i64) !Token {
+/// Parse a Google OAuth2 token response JSON into a `Token`.
+///
+/// Pure and side-effect-free (no network): given the raw response body and the
+/// current epoch seconds it returns the cached token, clamping `expires_in`
+/// into `[0, 7200]` so a hostile/buggy token endpoint cannot pin a stale token
+/// forever or drive `now + expires_in` to overflow. Exposed so the clamp and
+/// the malformed-body error path are directly testable without a live endpoint.
+/// Returns `error.InvalidTokenResponse` on malformed JSON or a missing
+/// `access_token`.
+pub fn parseTokenResponse(allocator: std.mem.Allocator, body: []const u8, now: i64) !Token {
     const parsed = std.json.parseFromSlice(TokenResponse, allocator, body, .{
         .ignore_unknown_fields = true,
         .allocate = .alloc_always,

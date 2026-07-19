@@ -164,9 +164,12 @@ fn generateReedSolomon(allocator: Allocator, data: []const u8, ec_count: usize) 
             remainder[i] = remainder[i + 1];
         }
         remainder[ec_count - 1] = 0;
-        // Add generator * factor
+        // Add generator * factor. `gen` is built with gen[0] = constant term
+        // and gen[ec_count] = leading coefficient (== 1), so the non-leading
+        // coefficients in decreasing-degree order — matching remainder[0] as the
+        // highest-degree cell — are gen[ec_count-1], gen[ec_count-2], …, gen[0].
         for (0..ec_count) |i| {
-            remainder[i] ^= GF.multiply(gen[i + 1], factor);
+            remainder[i] ^= GF.multiply(gen[ec_count - 1 - i], factor);
         }
     }
 
@@ -671,21 +674,34 @@ fn placeTimingPatterns(matrix: []u8, size: usize) void {
 }
 
 /// Place format information
+/// The 2-bit error-correction-level indicator used inside the format
+/// information string. This is NOT the raw enum ordinal: ISO/IEC 18004 encodes
+/// L=01, M=00, Q=11, H=10, whereas `ErrorCorrectionLevel` orders them L,M,Q,H.
+fn formatEcBits(ec_level: ErrorCorrectionLevel) u2 {
+    return switch (ec_level) {
+        .L => 0b01,
+        .M => 0b00,
+        .Q => 0b11,
+        .H => 0b10,
+    };
+}
+
 fn placeFormatInfo(matrix: []u8, size: usize, ec_level: ErrorCorrectionLevel, mask: u3) void {
     // Format string: 5 data bits + 10 BCH error correction bits
-    const format_data: u5 = (@as(u5, @intFromEnum(ec_level)) << 3) | @as(u5, mask);
+    const format_data: u5 = (@as(u5, formatEcBits(ec_level)) << 3) | @as(u5, mask);
 
-    // BCH(15,5) encoding
-    var format_bits: u15 = @as(u15, format_data) << 10;
-    var gen: u15 = 0b10100110111 << 4;
-
-    while (gen >= 0b10100110111) {
-        if (format_bits & (gen & 0x7FFF) != 0) {
-            format_bits ^= gen;
+    // BCH(15,5) encoding: remainder of (format_data << 10) modulo the generator
+    // polynomial G(x) = 0b10100110111 (0x537), by leading-bit long division.
+    var rem: u15 = @as(u15, format_data) << 10;
+    const g: u15 = 0b10100110111;
+    var deg: u3 = 5;
+    while (deg > 0) {
+        deg -= 1;
+        if (rem & (@as(u15, 1) << (@as(u4, 10) + deg)) != 0) {
+            rem ^= g << @as(u4, deg);
         }
-        gen >>= 1;
     }
-    format_bits = (@as(u15, format_data) << 10) | format_bits;
+    var format_bits: u15 = (@as(u15, format_data) << 10) | rem;
     format_bits ^= 0b101010000010010; // XOR mask
 
     // Place format bits
@@ -1062,8 +1078,15 @@ fn encodeDataWithBlocks(allocator: Allocator, data: []const u8, version: u8, ec_
         },
     }
 
-    // Terminator (up to 4 zero bits)
-    const remaining_bits = total_data_cw * 8 - bit_pos;
+    // Terminator (up to 4 zero bits). Guard against a version whose data
+    // capacity is smaller than the bitstream we actually produced: the
+    // capacity table consulted by selectVersion and the per-block codeword
+    // counts derived by getBlockInfo can disagree at high versions, which
+    // would otherwise underflow the subtraction below and panic. Surface it
+    // as error.DataTooLong (which the FFI/CLI already report) instead.
+    const capacity_bits = total_data_cw * 8;
+    if (bit_pos > capacity_bits) return error.DataTooLong;
+    const remaining_bits = capacity_bits - bit_pos;
     const term_bits = @min(remaining_bits, 4);
     writeBits(bitstream, &bit_pos, 0, @intCast(term_bits));
 
@@ -1504,4 +1527,131 @@ test "color rendering" {
     try std.testing.expectEqual(@as(u8, 0), img.pixels[0]);
     try std.testing.expectEqual(@as(u8, 0), img.pixels[1]);
     try std.testing.expectEqual(@as(u8, 255), img.pixels[2]);
+}
+
+// ============================================================================
+// Tier-1 external anchors
+//
+// These vectors have inputs AND expected outputs drawn from sources this
+// library's author did not write, per zig-forge/CLAUDE.md golden rule §1:
+//
+//  1. The Reed-Solomon codewords for the ISO/IEC 18004 Annex I worked example
+//     ("01234567", version 1-M) — data codewords and the 10 EC codewords are
+//     both taken verbatim from the standard.
+//  2. The BCH(15,5) format-information strings from ISO/IEC 18004 Table C.1.
+//  3. Full module matrices produced by segno 1.6.6 (an independent,
+//     spec-compliant QR generator) for two payloads where this encoder's
+//     penalty-driven mask selection agrees with segno's, so the symbols are
+//     byte-for-byte comparable — validating finder/timing/alignment/format/
+//     data/ECC/mask placement end-to-end against a foreign implementation.
+//
+// Before the 2026-07 fix these anchors would have failed: the RS division
+// indexed the generator polynomial in the wrong direction, and the format
+// string used the raw EC enum ordinal plus a broken BCH remainder loop, so
+// every emitted symbol was undecodable by any conformant reader.
+// ============================================================================
+
+test "anchor: ISO/IEC 18004 Reed-Solomon codewords (01234567, 1-M)" {
+    const allocator = std.testing.allocator;
+    // Data codewords for "01234567" at version 1, level M (from the standard's
+    // worked example): mode 0001, count 8, digits 012/345/67, terminator+pad.
+    const data = [_]u8{ 0x10, 0x20, 0x0C, 0x56, 0x61, 0x80, 0xEC, 0x11, 0xEC, 0x11, 0xEC, 0x11, 0xEC, 0x11, 0xEC, 0x11 };
+    // The 10 EC codewords the standard lists for this example.
+    const expected_ec = [_]u8{ 0xA5, 0x24, 0xD4, 0xC1, 0xED, 0x36, 0xC7, 0x87, 0x2C, 0x55 };
+    const ec = try generateReedSolomon(allocator, &data, expected_ec.len);
+    defer allocator.free(ec);
+    try std.testing.expectEqualSlices(u8, &expected_ec, ec);
+}
+
+test "anchor: ISO/IEC 18004 format-information strings (Table C.1)" {
+    // Blank matrix large enough for a version-1 symbol; placeFormatInfo only
+    // touches the format modules and the dark module, so size 21 suffices.
+    const size: usize = 21;
+    var matrix: [size * size]u8 = undefined;
+
+    // (ec_level, mask) -> the 15-bit BCH format string from the standard.
+    const Vec = struct { ec: ErrorCorrectionLevel, mask: u3, bits: u15 };
+    const vectors = [_]Vec{
+        .{ .ec = .L, .mask = 0, .bits = 0b111011111000100 },
+        .{ .ec = .M, .mask = 0, .bits = 0b101010000010010 },
+        .{ .ec = .Q, .mask = 5, .bits = 0b010000110000011 },
+        .{ .ec = .H, .mask = 7, .bits = 0b000100000111011 },
+    };
+    for (vectors) |v| {
+        @memset(&matrix, 0);
+        placeFormatInfo(&matrix, size, v.ec, v.mask);
+        // Reconstruct the placed value from the first (top-left) copy, which
+        // placeFormatInfo writes MSB-first across the documented positions.
+        const positions = [_][2]usize{
+            .{ 0, 8 }, .{ 1, 8 }, .{ 2, 8 }, .{ 3, 8 }, .{ 4, 8 }, .{ 5, 8 },
+            .{ 7, 8 }, .{ 8, 8 }, .{ 8, 7 }, .{ 8, 5 }, .{ 8, 4 }, .{ 8, 3 },
+            .{ 8, 2 }, .{ 8, 1 }, .{ 8, 0 },
+        };
+        var got: u15 = 0;
+        for (positions) |p| {
+            got = (got << 1) | @as(u15, @intCast(matrix[p[1] * size + p[0]]));
+        }
+        try std.testing.expectEqual(v.bits, got);
+    }
+}
+
+fn expectMatchesGolden(data: []const u8, ec_level: ErrorCorrectionLevel, mode: EncodingMode, golden: []const []const u8) !void {
+    const allocator = std.testing.allocator;
+    var qr = try encode(allocator, data, .{ .ec_level = ec_level, .mode = mode, .min_version = 1 });
+    defer qr.deinit(allocator);
+    try std.testing.expectEqual(golden.len, @as(usize, qr.size));
+    for (0..qr.size) |y| {
+        const row = golden[y];
+        try std.testing.expectEqual(golden.len, row.len);
+        for (0..qr.size) |x| {
+            const want: u8 = if (row[x] == '1') 1 else 0;
+            const got: u8 = if (qr.getModule(x, y)) 1 else 0;
+            if (want != got) {
+                std.debug.print("golden mismatch at ({d},{d}): want {d} got {d}\n", .{ x, y, want, got });
+                return error.GoldenMismatch;
+            }
+        }
+    }
+}
+
+test "anchor: full symbol matches segno (HELLO WORLD, 1-M alphanumeric)" {
+    const golden_hello_M = [_][]const u8{
+        "111111100010101111111", "100000101110001000001", "101110100010101011101",
+        "101110100010101011101", "101110101011101011101", "100000100111001000001",
+        "111111101010101111111", "000000000000000000000", "101010100100100010010",
+        "011110001001000010001", "000111111101001011000", "111101011001110101110",
+        "010011110101001110101", "000000001010001000101", "111111100000100101100",
+        "100000100110001101000", "101110101100101111111", "101110100011010100010",
+        "101110101111011101001", "100000100001110001011", "111111101101011100001",
+    };
+    try expectMatchesGolden("HELLO WORLD", .M, .alphanumeric, &golden_hello_M);
+}
+
+test "anchor: full symbol matches segno (BIP21 URI, 3-M byte)" {
+    const golden_bip21_M = [_][]const u8{
+        "11111110011101011000101111111", "10000010001001010000101000001", "10111010100100010010001011101",
+        "10111010100011101000101011101", "10111010111100001011101011101", "10000010101010011100001000001",
+        "11111110101010101010101111111", "00000000101110101010100000000", "10111110010100111100101111100",
+        "10001001011101000111110110011", "00110010000111111100101001100", "10011101011100001010100011010",
+        "11001011100100110110000010100", "01000000000110101001100111101", "01101110100011110000110001100",
+        "11101100011110001001101111000", "10010111100100110000100100111", "11111101000111011010110110111",
+        "10000110011001111010000001000", "10110001001000001000100011011", "10100010101011010100111110110",
+        "00000000100000111001100011111", "11111110010111010001101010100", "10000010101000011001100010011",
+        "10111010111110011110111111111", "10111010110110000001100010111", "10111010101110111000000110110",
+        "10000010011101111011111110010", "11111110101110000101000011100",
+    };
+    try expectMatchesGolden("bitcoin:1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2", .M, .byte, &golden_bip21_M);
+}
+
+test "encode produces decodable symbol across versions (regression guard)" {
+    // Round-trip-free structural guard: a wrong RS/format/placement regression
+    // changes the emitted matrix, which the segno golden anchors above catch.
+    // This case only asserts a large multi-block byte symbol still encodes
+    // without overflow (the high-version capacity guard) and stays square.
+    const allocator = std.testing.allocator;
+    var buf: [400]u8 = undefined;
+    for (&buf, 0..) |*b, i| b.* = @intCast('A' + (i % 26));
+    var qr = try encode(allocator, &buf, .{ .ec_level = .Q, .mode = .byte });
+    defer qr.deinit(allocator);
+    try std.testing.expect(qr.size == 17 + @as(usize, qr.version) * 4);
 }

@@ -100,6 +100,28 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(tests).step);
     test_step.dependOn(&b.addRunArtifact(core_tests).step);
 
+    // ========================================================================
+    // Benchmark executable
+    // ========================================================================
+    //
+    // Substantiates (or corrects) the ns/throughput numbers in the docs.
+    // Always run under -Doptimize=ReleaseFast; Debug figures are meaningless.
+
+    const bench_module = b.createModule(.{
+        .root_source_file = b.path("src/bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bench_module.link_libc = true; // benchFfiPath uses std.heap.c_allocator
+
+    const bench_exe = b.addExecutable(.{
+        .name = "lockfree_bench",
+        .root_module = bench_module,
+    });
+
+    const bench_step = b.step("bench", "Run queue microbenchmarks (use -Doptimize=ReleaseFast)");
+    bench_step.dependOn(&b.addRunArtifact(bench_exe).step);
+
     _ = queue_module;
 }
 

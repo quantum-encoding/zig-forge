@@ -86,28 +86,28 @@ const GF = struct {
     // GF(256) with primitive polynomial 0x11D (x^8 + x^4 + x^3 + x^2 + 1)
     const PRIMITIVE: u16 = 0x11D;
 
-    // Precomputed tables
-    var exp_table: [512]u8 = undefined;
-    var log_table: [256]u8 = undefined;
-    var initialized: bool = false;
-
-    fn init() void {
-        if (initialized) return;
-
+    // exp/log tables, computed at comptime. Previously these were mutable globals
+    // filled lazily under a plain `initialized` bool, which raced when two threads
+    // encoded concurrently through the static/shared FFI lib (one could read
+    // half-built tables → wrong RS codewords). Comptime tables are immutable and
+    // shared safely across threads with no init step.
+    const tables = blk: {
+        @setEvalBranchQuota(4000);
+        var exp: [512]u8 = undefined;
+        var log: [256]u8 = undefined;
         var x: u16 = 1;
         for (0..255) |i| {
-            exp_table[i] = @intCast(x);
-            log_table[@intCast(x)] = @intCast(i);
+            exp[i] = @intCast(x);
+            log[@intCast(x)] = @intCast(i);
             x <<= 1;
             if (x >= 256) x ^= PRIMITIVE;
         }
-        // Extend exp_table for easier modular arithmetic
-        for (255..512) |i| {
-            exp_table[i] = exp_table[i - 255];
-        }
-        log_table[0] = 0; // log(0) undefined, but set to 0 for convenience
-        initialized = true;
-    }
+        for (255..512) |i| exp[i] = exp[i - 255];
+        log[0] = 0; // log(0) undefined; 0 by convention (multiply guards a==0/b==0)
+        break :blk .{ .exp = exp, .log = log };
+    };
+    const exp_table = tables.exp;
+    const log_table = tables.log;
 
     fn multiply(a: u8, b: u8) u8 {
         if (a == 0 or b == 0) return 0;
@@ -134,39 +134,44 @@ const GF = struct {
 // Reed-Solomon Encoder
 // ============================================================================
 
-/// Generate Reed-Solomon error correction codewords
+/// Generate Reed-Solomon error correction codewords.
+///
+/// The previous implementation built the generator polynomial with its
+/// coefficients in reversed order, so every EC codeword was wrong and the
+/// symbols were undecodable (data recoverable, EC irrecoverable). This is the
+/// standard Reed-Solomon remainder computation, verified byte-exact against the
+/// ISO/IEC 18004 worked example: data "01234567" at version 1, EC level M
+/// (`10 20 0C 56 61 80 EC 11 ...`) yields EC codewords
+/// `A5 24 D4 C1 ED 36 C7 87 2C 55` — externally-anchored values the author did
+/// not write (see the tier-1 anchor test).
 fn generateReedSolomon(allocator: Allocator, data: []const u8, ec_count: usize) ![]u8 {
-    GF.init();
-
-    // Generate generator polynomial coefficients
-    var gen = try allocator.alloc(u8, ec_count + 1);
-    defer allocator.free(gen);
-    @memset(gen, 0);
-    gen[0] = 1;
-
-    for (0..ec_count) |i| {
-        // Multiply by (x - alpha^i)
-        var j: usize = ec_count;
-        while (j > 0) : (j -= 1) {
-            gen[j] = gen[j - 1] ^ GF.multiply(gen[j], GF.exp_table[i]);
+    // Generator polynomial (the divisor), monic leading term implicit.
+    // divisor[j] is the coefficient of x^(ec_count-1-j); it is the product of
+    // (x - α^i) for i = 0 .. ec_count-1 (roots α^0, α^1, ...).
+    const divisor = try allocator.alloc(u8, ec_count);
+    defer allocator.free(divisor);
+    @memset(divisor, 0);
+    divisor[ec_count - 1] = 1;
+    var root: u8 = 1;
+    for (0..ec_count) |_| {
+        for (0..ec_count) |j| {
+            divisor[j] = GF.multiply(divisor[j], root);
+            if (j + 1 < ec_count) divisor[j] ^= divisor[j + 1];
         }
-        gen[0] = GF.multiply(gen[0], GF.exp_table[i]);
+        root = GF.multiply(root, 2);
     }
 
-    // Polynomial division
+    // Remainder of data·x^ec_count divided by the generator polynomial.
     var remainder = try allocator.alloc(u8, ec_count);
     @memset(remainder, 0);
-
     for (data) |byte| {
         const factor = byte ^ remainder[0];
-        // Shift remainder left
         for (0..ec_count - 1) |i| {
             remainder[i] = remainder[i + 1];
         }
         remainder[ec_count - 1] = 0;
-        // Add generator * factor
         for (0..ec_count) |i| {
-            remainder[i] ^= GF.multiply(gen[i + 1], factor);
+            remainder[i] ^= GF.multiply(divisor[i], factor);
         }
     }
 
@@ -651,17 +656,23 @@ fn placeFinderPattern(matrix: []u8, size: usize, cx: usize, cy: usize) void {
         }
     }
 
-    // Separator (white border)
-    for (0..8) |i| {
-        // Horizontal
-        if (cy > 0 or i < 8) {
-            const y = if (cy == 0) 7 else cy - 1;
-            const x = cx + i;
-            if (x < size and y < size and i < 8) {
-                if (cy == 0) {
-                    if (cx + i < size) matrix[7 * size + cx + i] = 0;
-                }
-            }
+    // White separator: the one-module border between the finder and the rest of
+    // the symbol. The previous loop only ever wrote the top separator of the
+    // top-left finder; the other separators survived only because those cells kept
+    // the sentinel 2 (rendered as white). Fill the full ring around the 7x7 finder
+    // that lies inside the matrix so the returned `modules` slice holds only 0/1
+    // in these cells, honouring the documented "1=black, 0=white" invariant.
+    var dy: isize = -1;
+    while (dy <= 7) : (dy += 1) {
+        var dx: isize = -1;
+        while (dx <= 7) : (dx += 1) {
+            if (dy != -1 and dy != 7 and dx != -1 and dx != 7) continue; // ring only
+            const sx = @as(isize, @intCast(cx)) + dx;
+            const sy = @as(isize, @intCast(cy)) + dy;
+            if (sx < 0 or sy < 0) continue;
+            const ux: usize = @intCast(sx);
+            const uy: usize = @intCast(sy);
+            if (ux < size and uy < size) matrix[uy * size + ux] = 0;
         }
     }
 }
@@ -733,23 +744,44 @@ fn placeTimingPatterns(matrix: []u8, size: usize) void {
     }
 }
 
+/// EC-level indicator value used in the format-information field.
+///
+/// This is NOT the enum ordinal: ISO/IEC 18004 §8.9 assigns the 2-bit field
+/// L=0b01, M=0b00, Q=0b11, H=0b10. Using the raw `@intFromEnum` value (L=0, M=1,
+/// Q=2, H=3) writes a format string that decoders read as the wrong EC level,
+/// which — together with the mask bits — makes every produced symbol undecodable.
+fn formatEcField(ec_level: ErrorCorrectionLevel) u2 {
+    return switch (ec_level) {
+        .L => 0b01,
+        .M => 0b00,
+        .Q => 0b11,
+        .H => 0b10,
+    };
+}
+
+/// Compute the 15-bit format-information string for an EC level + mask.
+///
+/// 5 data bits (2-bit EC indicator + 3-bit mask) followed by 10 BCH(15,5) parity
+/// bits (generator G(x) = 0b10100110111, degree 10), finally XORed with the fixed
+/// mask 0b101010000010010. Computed in u32 so the polynomial reduction cannot
+/// truncate. Matches the worked strings in ISO/IEC 18004 Table C.1.
+fn formatInfoBits(ec_level: ErrorCorrectionLevel, mask: u3) u15 {
+    const data: u32 = (@as(u32, formatEcField(ec_level)) << 3) | @as(u32, mask);
+    var v: u32 = data << 10;
+    // Polynomial division: reduce bits 14..10 by the degree-10 generator.
+    for (0..5) |k| {
+        const bit: u5 = @intCast(14 - k);
+        if ((v >> bit) & 1 == 1) {
+            v ^= @as(u32, 0b10100110111) << @intCast(bit - 10);
+        }
+    }
+    const bits: u32 = ((data << 10) | (v & 0x3FF)) ^ 0b101010000010010;
+    return @intCast(bits & 0x7FFF);
+}
+
 /// Place format information
 fn placeFormatInfo(matrix: []u8, size: usize, ec_level: ErrorCorrectionLevel, mask: u3) void {
-    // Format string: 5 data bits + 10 BCH error correction bits
-    const format_data: u5 = (@as(u5, @intFromEnum(ec_level)) << 3) | @as(u5, mask);
-
-    // BCH(15,5) encoding
-    var format_bits: u15 = @as(u15, format_data) << 10;
-    var gen: u15 = 0b10100110111 << 4;
-
-    while (gen >= 0b10100110111) {
-        if (format_bits & (gen & 0x7FFF) != 0) {
-            format_bits ^= gen;
-        }
-        gen >>= 1;
-    }
-    format_bits = (@as(u15, format_data) << 10) | format_bits;
-    format_bits ^= 0b101010000010010; // XOR mask
+    const format_bits: u15 = formatInfoBits(ec_level, mask);
 
     // Place format bits
     const format_positions_1 = [_][2]usize{
@@ -1260,7 +1292,12 @@ pub fn encode(allocator: Allocator, data: []const u8, config: QrConfig) !QrCode 
     // Place data
     placeDataBits(matrix, size, version, final_data);
 
-    // Try all masks and select best
+    // Try all masks and select the one with the lowest penalty. Per ISO/IEC 18004
+    // §8.8.2 the penalty is scored on the COMPLETE symbol: mask applied AND the
+    // format information for that mask placed. The previous code scored a matrix
+    // that still held sentinel (unset) cells and no format info, which skewed
+    // penalty rules 1/2/4 and could pick a mask with poor scan reliability on
+    // dense high-version symbols.
     var best_mask: u3 = 0;
     var best_penalty: u32 = std.math.maxInt(u32);
 
@@ -1270,6 +1307,7 @@ pub fn encode(allocator: Allocator, data: []const u8, config: QrConfig) !QrCode 
         defer allocator.free(test_matrix);
 
         applyMask(test_matrix, size, version, mask);
+        placeFormatInfo(test_matrix, size, config.ec_level, mask);
         const penalty = calculatePenalty(test_matrix, size);
 
         if (penalty < best_penalty) {
@@ -1481,7 +1519,6 @@ test "deterministic output" {
 }
 
 test "GF multiply" {
-    GF.init();
     try std.testing.expectEqual(@as(u8, 0), GF.multiply(0, 5));
     try std.testing.expectEqual(@as(u8, 0), GF.multiply(5, 0));
     try std.testing.expectEqual(@as(u8, 1), GF.multiply(1, 1));
@@ -1598,12 +1635,58 @@ test "ISO 18004 worked example: 01234567 V1-M numeric data codewords" {
         0xEC, 0x11, 0xEC, 0x11, 0xEC, 0x11,
         0xEC, 0x11, 0xEC, 0x11,
     };
+    // The 10 Reed-Solomon EC codewords for that exact data block are also fixed by
+    // the standard: A5 24 D4 C1 ED 36 C7 87 2C 55. These are external anchors the
+    // author did not write — they caught a generator-polynomial ordering bug that
+    // made every produced symbol undecodable (data recoverable, EC irrecoverable).
+    const expected_ec = [_]u8{ 0xA5, 0x24, 0xD4, 0xC1, 0xED, 0x36, 0xC7, 0x87, 0x2C, 0x55 };
     // Version 1 EC-M is a single block, so the interleaved output is the 16 data
     // codewords followed by the 10 EC codewords (26 total).
     const cw = try encodeDataWithBlocks(allocator, "01234567", 1, .M, .numeric, .{});
     defer allocator.free(cw);
     try std.testing.expectEqual(@as(usize, 26), cw.len);
     try std.testing.expectEqualSlices(u8, &expected_data, cw[0..16]);
+    try std.testing.expectEqualSlices(u8, &expected_ec, cw[16..26]);
+}
+
+test "Reed-Solomon EC codewords match ISO 18004 worked example" {
+    const allocator = std.testing.allocator;
+    // Direct anchor for generateReedSolomon: the ISO/IEC 18004 worked-example data
+    // block and its published 10 EC codewords. A roundtrip test cannot catch a
+    // wrong-but-self-consistent RS implementation; these external values can.
+    const data = [_]u8{
+        0x10, 0x20, 0x0C, 0x56, 0x61, 0x80,
+        0xEC, 0x11, 0xEC, 0x11, 0xEC, 0x11,
+        0xEC, 0x11, 0xEC, 0x11,
+    };
+    const expected_ec = [_]u8{ 0xA5, 0x24, 0xD4, 0xC1, 0xED, 0x36, 0xC7, 0x87, 0x2C, 0x55 };
+    const ec = try generateReedSolomon(allocator, &data, 10);
+    defer allocator.free(ec);
+    try std.testing.expectEqualSlices(u8, &expected_ec, ec);
+}
+
+test "format information strings match ISO 18004 Table C.1" {
+    // All 32 published format-information bit strings (15-bit, post-BCH, post-XOR),
+    // indexed [ec_level_enum][mask]. Source: ISO/IEC 18004 Table C.1 (widely
+    // republished). These anchor both the EC-level field mapping (L=01, M=00, Q=11,
+    // H=10 — NOT the enum ordinal) and the BCH(15,5) computation. A wrong mapping or
+    // BCH here makes every symbol read as the wrong EC level / mask and fail to decode.
+    const table = [4][8]u15{
+        // L
+        .{ 0x77C4, 0x72F3, 0x7DAA, 0x789D, 0x662F, 0x6318, 0x6C41, 0x6976 },
+        // M
+        .{ 0x5412, 0x5125, 0x5E7C, 0x5B4B, 0x45F9, 0x40CE, 0x4F97, 0x4AA0 },
+        // Q
+        .{ 0x355F, 0x3068, 0x3F31, 0x3A06, 0x24B4, 0x2183, 0x2EDA, 0x2BED },
+        // H
+        .{ 0x1689, 0x13BE, 0x1CE7, 0x19D0, 0x0762, 0x0255, 0x0D0C, 0x083B },
+    };
+    const levels = [_]ErrorCorrectionLevel{ .L, .M, .Q, .H };
+    for (levels, 0..) |lvl, li| {
+        for (0..8) |m| {
+            try std.testing.expectEqual(table[li][m], formatInfoBits(lvl, @intCast(m)));
+        }
+    }
 }
 
 test "version selection accounts for ECI header overhead" {

@@ -171,32 +171,58 @@ pub fn registerEndpoint(ep: DedicatedEndpoint) !void {
 
 fn saveEndpointToFirestore(allocator: std.mem.Allocator, ep: DedicatedEndpoint) void {
     const ctx = registry_gcp orelse return;
+
+    // model_name is the Firestore document id (a path segment in the REST URL).
+    // Reject anything that isn't a safe id so a `/` or quote can't escape the
+    // document path. Defense-in-depth: handleRegisterEndpoint already validates
+    // it, but the pub registerEndpoint entry point could be reached elsewhere.
+    if (security.validateModelName(ep.model_name) == null) return;
+
     const url = std.fmt.allocPrint(allocator,
         "https://firestore.googleapis.com/v1/projects/{s}/databases/(default)/documents/zig_dedicated_endpoints/{s}",
         .{ PROJECT_ID, ep.model_name },
     ) catch return;
     defer allocator.free(url);
 
-    const extra_field = if (ep.extra_params) |p|
-        std.fmt.allocPrint(allocator,
-            \\,"extra_params":{{"stringValue":"{s}"}}
-        , .{p}) catch ""
-    else
-        "";
-    defer if (extra_field.len > 0) allocator.free(extra_field);
+    // JSON-IN-FMT fix: stream the Firestore typed-value envelope via
+    // std.json.Stringify so admin-supplied endpoint_id / region / display_name
+    // / extra_params are escaped instead of raw `{s}` interpolation into the
+    // document body.
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    var jw: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    writeEndpointDoc(&jw, ep) catch return;
 
-    const body = std.fmt.allocPrint(allocator,
-        \\{{"fields":{{"model_name":{{"stringValue":"{s}"}},"endpoint_id":{{"stringValue":"{s}"}},"region":{{"stringValue":"{s}"}},"display_name":{{"stringValue":"{s}"}},"active":{{"booleanValue":{s}}}{s}}}}}
-    , .{
-        ep.model_name, ep.endpoint_id, ep.region,
-        if (ep.display_name.len > 0) ep.display_name else ep.model_name,
-        if (ep.active) "true" else "false",
-        extra_field,
-    }) catch return;
-    defer allocator.free(body);
-
-    var resp = ctx.patch(url, body) catch return;
+    var resp = ctx.patch(url, aw.written()) catch return;
     resp.deinit();
+}
+
+fn writeFsString(jw: *std.json.Stringify, name: []const u8, val: []const u8) !void {
+    try jw.objectField(name);
+    try jw.beginObject();
+    try jw.objectField("stringValue");
+    try jw.write(val);
+    try jw.endObject();
+}
+
+fn writeEndpointDoc(jw: *std.json.Stringify, ep: DedicatedEndpoint) !void {
+    try jw.beginObject();
+    try jw.objectField("fields");
+    try jw.beginObject();
+    try writeFsString(jw, "model_name", ep.model_name);
+    try writeFsString(jw, "endpoint_id", ep.endpoint_id);
+    try writeFsString(jw, "region", ep.region);
+    try writeFsString(jw, "display_name", if (ep.display_name.len > 0) ep.display_name else ep.model_name);
+    try jw.objectField("active");
+    try jw.beginObject();
+    try jw.objectField("booleanValue");
+    try jw.write(ep.active);
+    try jw.endObject();
+    if (ep.extra_params) |p| {
+        try writeFsString(jw, "extra_params", p);
+    }
+    try jw.endObject();
+    try jw.endObject();
 }
 
 /// Remove a dedicated endpoint
@@ -1375,6 +1401,14 @@ pub fn handleRegisterEndpoint(
     defer parsed.deinit();
     const req = parsed.value;
 
+    // model_name becomes a Firestore document id (path segment) — validate it
+    // at the boundary so a `/` or quote can never reach the document path.
+    if (security.validateModelName(req.model_name) == null) {
+        return .{ .status = .bad_request, .body =
+            \\{"error":"invalid_model_name","message":"model_name may contain only letters, digits, '.', '-' and '_'"}
+        };
+    }
+
     registerEndpoint(.{
         .model_name = req.model_name,
         .endpoint_id = req.endpoint_id,
@@ -1387,9 +1421,12 @@ pub fn handleRegisterEndpoint(
         };
     };
 
-    return .{ .body = std.fmt.allocPrint(allocator,
-        \\{{"status":"registered","model_name":"{s}","endpoint_id":"{s}","region":"{s}"}}
-    , .{ req.model_name, req.endpoint_id, req.region }) catch
+    return .{ .body = std.json.Stringify.valueAlloc(allocator, .{
+        .status = "registered",
+        .model_name = req.model_name,
+        .endpoint_id = req.endpoint_id,
+        .region = req.region,
+    }, .{}) catch
         \\{"status":"registered"}
     };
 }

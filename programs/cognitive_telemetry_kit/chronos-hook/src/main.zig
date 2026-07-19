@@ -4,6 +4,7 @@ const builtin = @import("builtin");
 const c = std.c;
 const canonical = @import("canonical"); // RFC 8785 encoder (chronos-ledger)
 const emit_client = @import("chronos_emit"); // non-blocking UDS writer (chronos-ledger)
+const parse = @import("parse.zig"); // pure, unit-tested parsing/attribution helpers
 
 // Helper-binary locations. These default to the historical /usr/local/bin paths
 // (a system-wide install), but each is overridable at RUNTIME via an env var so a
@@ -39,15 +40,8 @@ extern "c" fn getppid() std.c.pid_t;
 // Agent identity is resolved at RUNTIME, never from config — because Grok reads
 // its hooks from ~/.claude (shares Claude's settings.json), so the same hook
 // command fires for both. Config can't tell them apart; the kernel can. We climb
-// the process tree and match the executing agent binary. `CHRONOS_AGENT` overrides.
-const AgentPattern = struct { needle: []const u8, name: []const u8 };
-const AGENT_PATTERNS = [_]AgentPattern{
-    .{ .needle = "grok", .name = "grok" },
-    .{ .needle = "codex", .name = "codex" },
-    .{ .needle = "gemini", .name = "gemini" },
-    .{ .needle = "antigravity", .name = "gemini" },
-    .{ .needle = "claude", .name = "claude" },
-};
+// the process tree and match the executing agent binary (see parse.zig's
+// AGENT_PATTERNS / agentFromCommand). `CHRONOS_AGENT` overrides.
 
 pub fn main() !u8 {
     const allocator = std.heap.c_allocator;
@@ -95,10 +89,26 @@ pub fn main() !u8 {
     const hook_json = readAllStdin(allocator) catch try allocator.dupe(u8, "");
     defer allocator.free(hook_json);
 
+    // Parse the payload ONCE into a JSON tree so field extraction matches real
+    // object keys, not any textual occurrence of the key. This is what stops a
+    // Bash `command` value that literally contains `"url":"..."` from being
+    // mis-read as a WebFetch url (see parse.extractField). If stdin is not valid
+    // JSON (unexpected provider shape / truncation) we keep root=null and
+    // extractField degrades to the tolerant byte scanner — never worse than the
+    // old hook.
+    const parsed: ?std.json.Parsed(std.json.Value) = std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        hook_json,
+        .{ .duplicate_field_behavior = .use_first },
+    ) catch null;
+    defer if (parsed) |p| p.deinit();
+    const root: ?std.json.Value = if (parsed) |p| p.value else null;
+
     // Field extraction is provider-agnostic: Claude/Grok use snake_case
     // (tool_name, file_path, description), Codex's shell payload uses `command`,
     // and other CLIs may use camelCase. Try each spelling, first hit wins.
-    const tool_name = try extractAny(allocator, hook_json, &.{ "\"tool_name\"", "\"toolName\"" });
+    const tool_name = try parse.extractField(allocator, root, hook_json, &.{ "tool_name", "toolName" });
     defer if (tool_name) |t| allocator.free(t);
 
     // Tick description: a VERBOSE action so the squash log preserves intent —
@@ -106,9 +116,9 @@ pub fn main() !u8 {
     // "<tool> <description|command>" for Bash/shell, else just the tool name.
     // file_path takes priority (an Edit has no description; a Bash has no
     // file_path), so each captures its most informative detail.
-    const file_path = try extractAny(allocator, hook_json, &.{ "\"file_path\"", "\"filePath\"", "\"path\"", "\"absolute_path\"" });
+    const file_path = try parse.extractField(allocator, root, hook_json, &.{ "file_path", "filePath", "path", "absolute_path" });
     defer if (file_path) |f| allocator.free(f);
-    const desc_field = try extractAny(allocator, hook_json, &.{ "\"description\"", "\"command\"", "\"cmd\"" });
+    const desc_field = try parse.extractField(allocator, root, hook_json, &.{ "description", "command", "cmd" });
     defer if (desc_field) |d| allocator.free(d);
 
     // Cap the detail: Codex's `apply_patch` puts the WHOLE patch in
@@ -116,12 +126,12 @@ pub fn main() !u8 {
     var tool_description: ?[]const u8 = null;
     if (tool_name) |verb| {
         if (file_path orelse desc_field) |detail| {
-            tool_description = try std.fmt.allocPrint(allocator, "{s} {s}", .{ verb, capDetail(detail, 200) });
+            tool_description = try std.fmt.allocPrint(allocator, "{s} {s}", .{ verb, parse.capDetail(detail, 200) });
         } else {
             tool_description = try allocator.dupe(u8, verb);
         }
     } else if (desc_field) |d| {
-        tool_description = try allocator.dupe(u8, capDetail(d, 200));
+        tool_description = try allocator.dupe(u8, parse.capDetail(d, 200));
     }
     defer if (tool_description) |desc| allocator.free(desc);
 
@@ -188,7 +198,7 @@ pub fn main() !u8 {
     // of which leaves no git diff. Best-effort and non-blocking: any failure is
     // swallowed so it can never affect ticking. The hook holds NO signing key;
     // the sink chains and signs (see ../chronos-ledger/DESIGN.md, Addition 1).
-    emitLedgerEvent(allocator, hook_json, repo_root, agent, agent_info.pid, agent_info.ppid, tool_name, file_path, desc_field, cognitive_state) catch {};
+    emitLedgerEvent(allocator, root, hook_json, repo_root, agent, agent_info.pid, agent_info.ppid, tool_name, file_path, desc_field, cognitive_state) catch {};
 
     // Stage all changes
     _ = try runCommand(allocator, &[_][]const u8{ "git", "add", "." });
@@ -210,29 +220,13 @@ pub fn main() !u8 {
     return if (commit_result.exit_code == 0) 0 else 1;
 }
 
-/// Map a Claude Code tool name to a ledger event `kind`.
-fn ledgerKind(tool: []const u8) []const u8 {
-    const eq = std.ascii.eqlIgnoreCase; // tolerate casing across CLIs
-    const any = struct {
-        fn f(t: []const u8, names: []const []const u8) bool {
-            for (names) |n| if (eq(t, n)) return true;
-            return false;
-        }
-    }.f;
-    if (any(tool, &.{ "Read", "NotebookRead", "read_file", "readFile", "view" })) return "read";
-    if (any(tool, &.{ "Edit", "Write", "MultiEdit", "NotebookEdit", "write_file", "edit_file", "apply_patch", "str_replace_editor" })) return "write";
-    if (any(tool, &.{ "Bash", "BashOutput", "KillShell", "shell", "exec", "local_shell", "run_terminal_cmd" })) return "exec";
-    if (any(tool, &.{ "WebFetch", "fetch", "web_fetch" })) return "net";
-    if (any(tool, &.{ "WebSearch", "Grep", "Glob", "web_search", "grep", "glob" })) return "search";
-    return "other";
-}
-
 /// Build a v1 ledger event body (no seq/prev/this/sig — the sink owns those) and
 /// fire it at the sink, non-blocking. The body is assembled via the RFC 8785
 /// encoder, NOT a format string, so caller-controlled values (paths, URLs, the
 /// cognitive-state line) are escaped — no JSON-injection (JSON-IN-FMT).
 fn emitLedgerEvent(
     allocator: std.mem.Allocator,
+    root: ?std.json.Value,
     hook_json: []const u8,
     repo_root: ?[]const u8,
     agent: []const u8,
@@ -248,10 +242,10 @@ fn emitLedgerEvent(
     const a = arena.allocator();
 
     const name = tool_name orelse "unknown";
-    const kind = ledgerKind(name);
+    const kind = parse.ledgerKind(name);
     const is_web = std.mem.eql(u8, name, "WebFetch") or std.mem.eql(u8, name, "WebSearch");
 
-    const url = try extractJsonString(a, hook_json, "\"url\"");
+    const url = try parse.extractField(a, root, hook_json, &.{"url"});
     const detail: ?[]const u8 = file_path orelse url orelse desc_field;
 
     const source_trust: []const u8 = if (is_web)
@@ -379,72 +373,6 @@ fn readAllStdin(allocator: std.mem.Allocator) ![]const u8 {
     return buf.toOwnedSlice(allocator);
 }
 
-/// Truncate `s` to at most `max` bytes, backing off so a multi-byte UTF-8
-/// sequence is never split (keeps the commit subject / one-liner sane).
-fn capDetail(s: []const u8, max: usize) []const u8 {
-    if (s.len <= max) return s;
-    var end = max;
-    while (end > 0 and (s[end] & 0xC0) == 0x80) : (end -= 1) {}
-    return s[0..end];
-}
-
-/// Try several quoted keys in order; return the first that yields a value.
-/// Lets one hook serve providers with different payload spellings (snake_case
-/// vs camelCase, description vs command) without a per-provider code path.
-fn extractAny(allocator: std.mem.Allocator, json: []const u8, keys: []const []const u8) !?[]const u8 {
-    for (keys) |k| {
-        if (try extractJsonString(allocator, json, k)) |v| return v;
-    }
-    return null;
-}
-
-/// Extract a JSON string value for `key` (key includes its quotes, e.g.
-/// "\"tool_name\""). Finds the first occurrence, then the next "..." after the
-/// colon, honouring backslash escapes. Returns owned bytes or null.
-fn extractJsonString(allocator: std.mem.Allocator, json: []const u8, key: []const u8) !?[]const u8 {
-    const kpos = std.mem.indexOf(u8, json, key) orelse return null;
-    var i = kpos + key.len;
-    while (i < json.len and (json[i] == ' ' or json[i] == '\t' or json[i] == ':')) i += 1;
-    if (i >= json.len or json[i] != '"') return null;
-    i += 1;
-    const start = i;
-    while (i < json.len) : (i += 1) {
-        if (json[i] == '\\') {
-            i += 1; // skip the escaped char
-            continue;
-        }
-        if (json[i] == '"') break;
-    }
-    if (i > json.len) return null;
-    return try allocator.dupe(u8, json[start..i]);
-}
-
-/// Map a Claude Code tool name to a gerund activity, used as the cognitive-state
-/// fallback when no live spinner gerund is available from the PTY tap.
-fn toolActivity(tool_name: ?[]const u8) []const u8 {
-    const t = tool_name orelse return "Working";
-    const map = [_]struct { []const u8, []const u8 }{
-        .{ "Bash", "Executing" },
-        .{ "Edit", "Editing" },
-        .{ "MultiEdit", "Editing" },
-        .{ "Write", "Writing" },
-        .{ "NotebookEdit", "Editing" },
-        .{ "Read", "Reading" },
-        .{ "Glob", "Searching" },
-        .{ "Grep", "Searching" },
-        .{ "TodoWrite", "Planning" },
-        .{ "Task", "Delegating" },
-        .{ "Agent", "Delegating" },
-        .{ "WebFetch", "Researching" },
-        .{ "WebSearch", "Researching" },
-        .{ "ExitPlanMode", "Planning" },
-    };
-    for (map) |kv| {
-        if (std.mem.eql(u8, t, kv[0])) return kv[1];
-    }
-    return "Working"; // MCP tools (mcp__*) and anything unmapped
-}
-
 /// Resolve the cognitive state for the stamp. Prefers the live gerund that a PTY
 /// tap wrote to /tmp/cognitive-state-<pid> (get-cognitive-state resolves the
 /// firing claude's PID itself); on NOT-DETECTED, falls back to the tool activity.
@@ -458,7 +386,7 @@ fn getCognitiveState(allocator: std.mem.Allocator, tool_name: ?[]const u8) ![]co
             return try allocator.dupe(u8, state);
         }
     }
-    return try allocator.dupe(u8, toolActivity(tool_name));
+    return try allocator.dupe(u8, parse.toolActivity(tool_name));
 }
 
 fn generateChronosTimestamp(allocator: std.mem.Allocator, agent: []const u8) ![]const u8 {
@@ -505,110 +433,32 @@ fn resolveAgent(allocator: std.mem.Allocator) !AgentInfo {
     return .{ .name = try allocator.dupe(u8, AGENT_ID), .pid = getppid(), .ppid = 0 };
 }
 
-const ProcRow = struct { pid: i32, ppid: i32, cmd: []const u8 };
-
 /// Climb the process tree from our parent, matching each ancestor's command line
 /// against the known agent binaries. Nearest match wins. Returns the matched
-/// agent's name + its pid/ppid (the firing process), or null.
+/// agent's name + its pid/ppid (the firing process), or null. The per-row parse
+/// and command→agent matching live in parse.zig (unit-tested against hostile
+/// `ps` output and prompt-arg misattribution).
 fn detectAncestorAgent(allocator: std.mem.Allocator) !?AgentInfo {
     var result = runCommand(allocator, &[_][]const u8{ "ps", "-axo", "pid=,ppid=,command=" }) catch return null;
     defer result.deinit();
     if (result.exit_code != 0) return null;
 
-    var rows: std.ArrayList(ProcRow) = .empty;
+    var rows: std.ArrayList(parse.ProcRow) = .empty;
     defer rows.deinit(allocator);
     var lines = std.mem.splitScalar(u8, result.stdout, '\n');
     while (lines.next()) |raw| {
-        var i: usize = 0;
-        const line = std.mem.trimStart(u8, raw, " ");
-        if (line.len == 0) continue;
-        const pid = scanInt(line, &i) orelse continue;
-        skipSpaces(line, &i);
-        const ppid = scanInt(line, &i) orelse continue;
-        skipSpaces(line, &i);
-        try rows.append(allocator, .{ .pid = pid, .ppid = ppid, .cmd = line[i..] });
+        if (parse.parseProcRow(raw)) |row| try rows.append(allocator, row);
     }
 
     var cur: i32 = getppid();
     var depth: usize = 0;
     while (cur > 1 and depth < 40) : (depth += 1) {
-        const row = findProc(rows.items, cur) orelse break;
-        if (agentFromCommand(row.cmd)) |name|
+        const row = parse.findProc(rows.items, cur) orelse break;
+        if (parse.agentFromCommand(row.cmd)) |name|
             return AgentInfo{ .name = try allocator.dupe(u8, name), .pid = row.pid, .ppid = row.ppid };
         cur = row.ppid;
     }
     return null;
-}
-
-/// Identify the agent from a process command line by inspecting only the
-/// EXECUTABLE (and, for runtimes like node, the script path) — never the prompt
-/// or args. This is what stops `claude -p "fix grok stuff"` from being misread as
-/// grok: the agent name must be in the binary that's running, not its arguments.
-fn agentFromCommand(cmd: []const u8) ?[]const u8 {
-    const exe = firstToken(cmd);
-    if (matchAgentToken(exe)) |n| return n;
-    if (isRuntime(basename(exe))) {
-        const rest = std.mem.trimStart(u8, cmd[exe.len..], " \t");
-        if (matchAgentToken(firstToken(rest))) |n| return n;
-    }
-    return null;
-}
-
-fn matchAgentToken(token: []const u8) ?[]const u8 {
-    for (AGENT_PATTERNS) |pat| {
-        if (containsCI(token, pat.needle)) return pat.name;
-    }
-    return null;
-}
-
-fn firstToken(s: []const u8) []const u8 {
-    var end: usize = 0;
-    while (end < s.len and s[end] != ' ' and s[end] != '\t') : (end += 1) {}
-    return s[0..end];
-}
-
-fn basename(p: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, p, '/')) |i| return p[i + 1 ..];
-    return p;
-}
-
-fn isRuntime(name: []const u8) bool {
-    const runtimes = [_][]const u8{ "node", "deno", "bun", "python", "python3", "sh", "bash", "zsh", "ruby", "electron" };
-    for (runtimes) |r| {
-        if (std.ascii.eqlIgnoreCase(name, r)) return true;
-    }
-    return false;
-}
-
-fn findProc(rows: []const ProcRow, pid: i32) ?ProcRow {
-    for (rows) |r| {
-        if (r.pid == pid) return r;
-    }
-    return null;
-}
-
-fn scanInt(s: []const u8, i: *usize) ?i32 {
-    const start = i.*;
-    while (i.* < s.len and s[i.*] >= '0' and s[i.*] <= '9') : (i.* += 1) {}
-    if (i.* == start) return null;
-    return std.fmt.parseInt(i32, s[start..i.*], 10) catch null;
-}
-
-fn skipSpaces(s: []const u8, i: *usize) void {
-    while (i.* < s.len and (s[i.*] == ' ' or s[i.*] == '\t')) : (i.* += 1) {}
-}
-
-fn containsCI(haystack: []const u8, needle: []const u8) bool {
-    if (needle.len == 0 or haystack.len < needle.len) return false;
-    var i: usize = 0;
-    outer: while (i + needle.len <= haystack.len) : (i += 1) {
-        var j: usize = 0;
-        while (j < needle.len) : (j += 1) {
-            if (std.ascii.toLower(haystack[i + j]) != std.ascii.toLower(needle[j])) continue :outer;
-        }
-        return true;
-    }
-    return false;
 }
 
 const CommandResult = struct {

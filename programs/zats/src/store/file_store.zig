@@ -52,6 +52,16 @@ const TOMBSTONE_BODY_LEN: u32 = 8;
 /// Minimum full message body: seq(8) + ts(8) + subject_len(2) + header_len(4) + data_len(4)
 const MSG_FIXED_OVERHEAD: u32 = 26;
 
+/// Upper bound on a single WAL record body (`total_len`) accepted during
+/// recovery. A record's `total_len` is a file-supplied `u32` that is read
+/// *before* the CRC covering it can be checked, so a corrupt or truncated file
+/// could otherwise name a length up to ~4 GiB and force that much speculative
+/// allocation per record. 256 MiB is far larger than any legitimate broker
+/// message (NATS default max_payload is 1 MiB) while capping the blast radius
+/// of a bad length to a bounded, recoverable failure. Records above this are
+/// treated as corruption and stop recovery.
+const MAX_RECORD_LEN: u32 = 256 * 1024 * 1024;
+
 pub const FileStore = struct {
     data_file: ?*std.c.FILE,
     data_dir: []const u8,
@@ -202,6 +212,12 @@ pub const FileStore = struct {
                 offset += 4 + 12; // total_len + body + crc
                 continue;
             }
+
+            // Reject an implausibly large length before allocating: `total_len`
+            // is read straight from the file and cannot be CRC-validated until
+            // after we would have allocated for it, so a corrupt length must not
+            // be trusted to size an allocation. Treat as end-of-valid-log.
+            if (total_len > MAX_RECORD_LEN) break;
 
             // Full message record: body(total_len) + crc(4)
             const body_plus_crc = total_len + 4; // body + CRC32

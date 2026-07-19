@@ -1,0 +1,7 @@
+// EXTERNAL ANCHOR: zig-forge/CLAUDE.md default_rules.toml FLOAT-OBSESSION
+// (the Mars Climate Orbiter / Patriot shape). A raw f64 holding a
+// financial quantity ("balance") that should be a base-unit integer or
+// a typed Quantity. ADVISORY (gate=false): MUST surface as a WARN.
+const Account = struct {
+    balance: f64,
+};

@@ -6,11 +6,20 @@ verified by the conformance suite at `contract-tests/` in that repo.
 
 ## Status
 
-Scaffold only (task #59). The HTTP shell + auth pipeline + store/WAL
-land in tasks #60–#62; the git-correctness modules (imported from
-zigit) land in #63 (blocked on the conformance suite going green
-against the Workers reference); handlers tie the layers together
-in #64.
+Mid-scaffold. **Landed** (tasks #60–#62): the HTTP shell + accept loop,
+the router, the fail-closed auth pipeline + token parsing, the two-path
+WAL (durable-before-ack / batched), the store (in-memory rows +
+versioned field-wise WAL serialization + crash recovery), the events
+log with durable `Last-Event-ID` replay, the SSE writer primitive, and
+the two live authenticated endpoints (`GET /api/notifications/recent`,
+`POST /api/notifications/seen`).
+
+**Not yet landed:** Layer A (source-adapter shim), Layer B (git
+smart-HTTP), PRs, the SSE *stream* endpoint, and the commit-diff
+endpoint all return `501` stubs. The git-correctness wrappers over
+`zigit` (the `src/git/` tree below) and the `source`/`smart_http`/`prs`
+handlers are **planned, not present** — no source file imports `zigit`
+yet. These are marked *(planned)* in the Layout tree.
 
 See `CONTRACT.md` and `CONFORMANCE.md` in the jesternet-astro repo
 for the contract this server implements.
@@ -46,7 +55,7 @@ src/
 ├── events.zig        Events table mounted on WAL primitive.
 │                       insertEvent → durable seq;
 │                       replayFrom(since) → SSE handler input.
-├── git/              Thin wrappers over zigit:
+├── git/              (planned) Thin wrappers over zigit — NOT PRESENT YET:
 │   ├── objects.zig     byte-exact encoder (anchored to git mktree)
 │   ├── pack.zig        parser + writer, OFS_DELTA, deltify cache
 │   ├── refs.zig        decideRefUpdate state machine
@@ -54,12 +63,13 @@ src/
 │   ├── blame.zig
 │   └── diff.zig
 └── handlers/
-    ├── source.zig         Layer A — POST /api/source/{method}
-    ├── smart_http.zig     Layer B — info/refs, upload-pack, receive-pack
-    ├── prs.zig            Layer C — PRs (open/close/reopen/comment/merge)
-    ├── notifications.zig  Layer C — recent, seen, stream (SSE durable replay)
-    ├── settings.zig       Layer C — PATCH /api/repos/.../settings
-    └── tokens.zig         Layer C — token CRUD
+    ├── source.zig         (planned) Layer A — POST /api/source/{method}
+    ├── smart_http.zig     (planned) Layer B — info/refs, upload/receive-pack
+    ├── prs.zig            (planned) Layer C — PRs (open/close/reopen/comment/merge)
+    ├── notifications.zig  Layer C — recent + seen live; stream (SSE) is a 501 stub
+    ├── settings.zig       Layer C — PATCH /api/repos/.../settings (401: session-only)
+    ├── tokens.zig         Layer C — token CRUD (401: session-only)
+    └── iso_timestamp.zig  toISOString() clone for event `at` fields
 ```
 
 ## Audit caveats (from ZIG_PORT_AUDIT.md)

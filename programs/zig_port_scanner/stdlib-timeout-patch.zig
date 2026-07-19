@@ -1,3 +1,9 @@
+// OBSOLETE as of Zig 0.16.0: connect-with-timeout is now shipped upstream in
+// std.Io (IpAddress.ConnectOptions.timeout, implemented by
+// Threaded.netConnectIpPosix -> posixConnectWithTimeout). Do NOT apply this to a
+// stock 0.16.0+ stdlib — the scanner builds and honors -t/--timeout without it.
+// Kept only as historical reference for pre-0.16.0 toolchains.
+//
 // Patch for /usr/local/zig/lib/std/Io/Threaded.zig
 // Implements timeout support for netConnectIpPosix
 //

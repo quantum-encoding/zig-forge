@@ -1,0 +1,8 @@
+// CORRECTIVE SHAPE: the fallible call propagates its error via `catch
+// return error.X` instead of aborting. The scanner MUST NOT emit a
+// CATCH-UNREACHABLE finding here.
+const std = @import("std");
+
+pub fn fmtInt(n: u64, buf: []u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, "{d}", .{n}) catch return error.NoSpace;
+}

@@ -1,0 +1,8 @@
+// CORRECTIVE SHAPE (zig-forge/CLAUDE.md §1): JSON built through
+// std.json.Stringify, which escapes every interpolated value. The
+// scanner MUST NOT emit a JSON-IN-FMT finding here.
+const std = @import("std");
+
+pub fn buildJson(allocator: std.mem.Allocator, user: []const u8) ![]u8 {
+    return std.json.Stringify.valueAlloc(allocator, .{ .user = user }, .{});
+}

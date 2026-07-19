@@ -256,7 +256,7 @@ pub fn formatList(allocator: std.mem.Allocator, items: []const []const u8) ![]co
 const testing = std.testing;
 
 test "formatBytes SI units" {
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     {
         const result = try formatBytesOptions(allocator, 1500, .SI);
@@ -278,7 +278,7 @@ test "formatBytes SI units" {
 }
 
 test "formatBytes binary units" {
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     {
         const result = try formatBytesOptions(allocator, 1536, .Binary);
@@ -294,7 +294,7 @@ test "formatBytes binary units" {
 }
 
 test "formatDuration" {
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     {
         const result = try formatDuration(allocator, 500);
@@ -322,7 +322,7 @@ test "formatDuration" {
 }
 
 test "formatNumber" {
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     {
         const result = try formatNumber(allocator, 1000);
@@ -356,7 +356,7 @@ test "ordinalSuffix" {
 }
 
 test "formatOrdinal" {
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     {
         const result = try formatOrdinal(allocator, 1);
@@ -378,7 +378,7 @@ test "formatOrdinal" {
 }
 
 test "formatPercentage" {
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     {
         const result = try formatPercentage(allocator, 50.0);
@@ -394,7 +394,7 @@ test "formatPercentage" {
 }
 
 test "formatRelativeTime past" {
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     {
         const result = try formatRelativeTime(allocator, 30, .{});
@@ -416,7 +416,7 @@ test "formatRelativeTime past" {
 }
 
 test "formatRelativeTime future" {
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     {
         const result = try formatRelativeTime(allocator, 300, .{ .future = true });
@@ -432,7 +432,7 @@ test "formatRelativeTime future" {
 }
 
 test "formatRelativeTime year boundary" {
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
     const day = 86400;
 
     // Regression: days 360-364 previously rendered "0 years ago" because
@@ -466,7 +466,7 @@ test "formatRelativeTime year boundary" {
 }
 
 test "formatList" {
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     {
         const items = [_][]const u8{"apple"};
@@ -495,7 +495,7 @@ test "formatList" {
 // ============================================================================
 
 test "Zero bytes edge case" {
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     const result = try formatBytes(allocator, 0);
     defer allocator.free(result);
@@ -503,7 +503,7 @@ test "Zero bytes edge case" {
 }
 
 test "Negative duration handling - edge case" {
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     const result = try formatDuration(allocator, 0);
     defer allocator.free(result);
@@ -511,7 +511,7 @@ test "Negative duration handling - edge case" {
 }
 
 test "Large numbers with comma formatting" {
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     {
         const result = try formatNumber(allocator, 1000000000);
@@ -545,7 +545,7 @@ test "Ordinal special cases - 21st, 22nd, 23rd" {
 }
 
 test "Percentage edge cases - 0%" {
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     const result = try formatPercentage(allocator, 0.0);
     defer allocator.free(result);
@@ -553,7 +553,7 @@ test "Percentage edge cases - 0%" {
 }
 
 test "Percentage edge cases - 100%" {
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     const result = try formatPercentage(allocator, 100.0);
     defer allocator.free(result);
@@ -561,7 +561,7 @@ test "Percentage edge cases - 100%" {
 }
 
 test "Percentage edge cases - >100%" {
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     const result = try formatPercentage(allocator, 150.5);
     defer allocator.free(result);
@@ -569,7 +569,7 @@ test "Percentage edge cases - >100%" {
 }
 
 test "Empty list formatting" {
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     const items = [_][]const u8{};
     const result = try formatList(allocator, &items);
@@ -578,7 +578,7 @@ test "Empty list formatting" {
 }
 
 test "Single-item list formatting" {
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     const items = [_][]const u8{"apple"};
     const result = try formatList(allocator, &items);
@@ -587,7 +587,7 @@ test "Single-item list formatting" {
 }
 
 test "Duration sub-second - milliseconds" {
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     {
         const result = try formatDuration(allocator, 1);
@@ -603,7 +603,7 @@ test "Duration sub-second - milliseconds" {
 }
 
 test "Duration with seconds sub-milliseconds" {
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     const result = try formatDuration(allocator, 1500);
     defer allocator.free(result);
@@ -611,7 +611,7 @@ test "Duration with seconds sub-milliseconds" {
 }
 
 test "Ordinal formatting edge cases" {
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     {
         const result = try formatOrdinal(allocator, 11);
@@ -639,7 +639,7 @@ test "Ordinal formatting edge cases" {
 }
 
 test "Bytes formatting SI - single byte" {
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     const result = try formatBytesOptions(allocator, 1, .SI);
     defer allocator.free(result);
@@ -647,7 +647,7 @@ test "Bytes formatting SI - single byte" {
 }
 
 test "Bytes formatting SI - edge transitions" {
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     {
         const result = try formatBytesOptions(allocator, 999, .SI);
@@ -663,7 +663,7 @@ test "Bytes formatting SI - edge transitions" {
 }
 
 test "Bytes formatting Binary - single byte" {
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     const result = try formatBytesOptions(allocator, 1, .Binary);
     defer allocator.free(result);
@@ -671,7 +671,7 @@ test "Bytes formatting Binary - single byte" {
 }
 
 test "Bytes formatting Binary - 1 MiB" {
-    const allocator = std.heap.c_allocator;
+    const allocator = std.testing.allocator;
 
     const result = try formatBytesOptions(allocator, 1048576, .Binary);
     defer allocator.free(result);

@@ -16,7 +16,7 @@ You are a senior tooling engineer at Quantum Encoding. You build developer infra
 - **Use the compiler's parser.** `std.zig.Ast.parse()` is the only acceptable way to parse Zig source. Never write custom tokenizers or regex-based extraction.
 - **Zero false positives.** It is better to report nothing than to report something incorrect. If analysis is ambiguous, say so explicitly.
 - **Structured output always.** Every analysis produces machine-readable output (JSON). Human-readable summaries are derived from the structured data, never generated separately.
-- **No external dependencies.** Pure Zig, no libc, no external tools. The binary should work on any platform Zig targets.
+- **Minimal dependencies.** Pure Zig with two deliberate exceptions: the build links libc, and the security rule engine loads its TOML ruleset via the in-tree `zig_toml` library. No third-party package-manager dependencies, no external tools at runtime. The binary works on any platform Zig targets.
 
 ---
 
@@ -445,7 +445,7 @@ Bottleneck is file I/O, not parsing. `std.zig.Ast.parse` is the compiler's own p
 4. **Deterministic output.** Same input = identical output. Sort everything. No hash map iteration order leaking into output.
 5. **Test with real code.** Fixtures for unit tests. Integration tests scan actual monorepo programs.
 6. **Comments are data.** Extract `///` doc comments and attach to declarations. Part of the API surface.
-7. **Zero external dependencies.** Pure Zig. Builds with `zig build` and nothing else.
+7. **Minimal dependencies.** Pure Zig; the build links libc and the rule engine imports the in-tree `zig_toml` library. No third-party package-manager dependencies. Builds with `zig build` and nothing else.
 8. **Context-window aware.** `--compact` JSON mode minimizes size while maximizing structural insight for AI agents.
 
 ---

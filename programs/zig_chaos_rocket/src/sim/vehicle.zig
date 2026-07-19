@@ -55,29 +55,8 @@ pub const VehicleState = struct {
         return @as(f64, @floatFromInt(self.met_ticks)) / @as(f64, @floatFromInt(self.ticks_per_second));
     }
 
-    pub fn metFormatted(self: *const VehicleState) MetFormatted {
-        return .{ .state = self };
-    }
-
     pub fn speedMps(self: *const VehicleState) f64 {
         return self.velocity.magnitude();
-    }
-};
-
-pub const MetFormatted = struct {
-    state: *const VehicleState,
-
-    pub fn format(self: MetFormatted, comptime _: []const u8, _: @import("std").fmt.FormatOptions, writer: anytype) !void {
-        const total_ms = (self.state.met_ticks * 1000) / self.state.ticks_per_second;
-        const secs = total_ms / 1000;
-        const ms = total_ms % 1000;
-        const mins = secs / 60;
-        const s = secs % 60;
-        if (self.state.met_ticks == 0) {
-            try writer.print("T+00:00.000", .{});
-        } else {
-            try writer.print("T+{d:0>2}:{d:0>2}.{d:0>3}", .{ mins, s, ms });
-        }
     }
 };
 

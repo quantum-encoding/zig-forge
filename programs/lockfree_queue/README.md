@@ -43,5 +43,10 @@ programs can depend on it directly.
 zig build          # build the lockfree_core static library
 zig build core     # same, explicit step
 zig build android  # cross-compile the core lib for aarch64-linux-android
-zig build test     # run the unit tests (queue + FFI-core layers)
+zig build test     # run the unit + concurrent stress tests (queue + FFI-core layers)
+zig build bench -Doptimize=ReleaseFast   # microbenchmarks (SPSC/MPMC rings + FFI path)
 ```
+
+Performance numbers come from `zig build bench` (there are no hard-coded claims);
+the SPSC ring push/pop is wait-free, the MPMC ring is lock-free (a CAS retry loop),
+and the C FFI copies each payload through the allocator, so it is not zero-copy.

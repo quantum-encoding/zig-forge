@@ -771,3 +771,18 @@ pub fn findScenario(id: []const u8) ?*const Scenario {
 }
 
 const std = @import("std");
+
+test "findScenario resolves known ids and rejects unknown ones" {
+    const ariane = findScenario("ARIANE") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.eql(u8, ariane.id, "ARIANE"));
+    try std.testing.expect(findScenario("NOT_A_SCENARIO") == null);
+    try std.testing.expect(findScenario("") == null);
+}
+
+test "scenario ids are unique" {
+    for (ALL_SCENARIOS, 0..) |a, i| {
+        for (ALL_SCENARIOS[i + 1 ..]) |b| {
+            try std.testing.expect(!std.mem.eql(u8, a.id, b.id));
+        }
+    }
+}

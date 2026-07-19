@@ -342,11 +342,11 @@ const Canvas = struct {
 
 ## Future Enhancements
 
+Pie/donut, scatter/bubble, and heatmap charts are **already implemented** (see the
+chart-type list above and `src/lib.zig` exports) — they are no longer roadmap items.
+
 - [ ] PNG rasterization backend
 - [ ] Interactive SVG with JavaScript hooks
-- [ ] Pie/donut charts
-- [ ] Scatter plots
-- [ ] Heatmaps
 - [ ] Annotations and tooltips
 - [ ] Responsive sizing
 - [ ] Animation support

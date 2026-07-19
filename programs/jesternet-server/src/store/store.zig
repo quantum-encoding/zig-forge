@@ -1,7 +1,9 @@
 // Store — single owner of all mutable state.
 //
-// Pattern lifted from zig_ai_server/src/store/store.zig: SpinLock-
-// protected in-memory hashmaps + WAL for durability. Audit caveat #1
+// Pattern lifted from zig_ai_server/src/store/store.zig: mutex-
+// protected in-memory hashmaps + WAL for durability (the zig_ai_server
+// original span-spun on a SpinLock; this store parks on std.Io.Mutex —
+// see the lock note below). Audit caveat #1
 // applies (single-process atomicity); going multi-process reopens the
 // design point and would need either SQLite BEGIN IMMEDIATE or an
 // out-of-process lock manager.
@@ -24,18 +26,24 @@ const types = @import("types.zig");
 const wal_mod = @import("wal.zig");
 const pipeline = @import("../auth/pipeline.zig");
 
-const SpinLock = struct {
-    state: std.atomic.Value(u32) = .init(0),
-
-    pub fn lock(self: *SpinLock) void {
-        while (self.state.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) {
-            std.atomic.spinLoopHint();
-        }
-    }
-    pub fn unlock(self: *SpinLock) void {
-        self.state.store(0, .release);
-    }
-};
+// The store is guarded by a parking mutex, NOT a spin lock. Mutations
+// hold this lock across the whole WAL append — and `appendDurable`
+// fsyncs *inside* the WAL lock (see wal.zig) — so a contending request
+// thread would spin-burn a full CPU core for the entire ms-scale disk
+// sync if this were a busy spin loop. `std.Io.Mutex` parks the waiter
+// on the futex instead. Behaviour is identical (mutual exclusion); only
+// the wait discipline changes. Audit caveat #1 (single-process
+// atomicity) is unaffected.
+//
+// `std.Io.Mutex.lock/unlock` take an `io` — but only touch it when
+// contended (the uncontended path is a lone cmpxchg), and the futex
+// ops are keyed on the lock's address, so any threaded `io` parks/wakes
+// correctly regardless of which per-connection `Io.Threaded` is live.
+// Read paths (lookupToken, iterateRecent) reach the store through the
+// pipeline's io-less TokenStore adapter, so the store stashes the io it
+// was opened with (`self.io`) and locks through that everywhere rather
+// than threading io into the read-path signatures (which would change
+// the security-critical TokenStore interface).
 
 /// Recent-events ring buffer size. Tradeoff: bigger = more
 /// GET /api/notifications/recent calls served without WAL walk;
@@ -68,7 +76,11 @@ const HashContext = struct {
 
 pub const Store = struct {
     allocator: std.mem.Allocator,
-    mutex: SpinLock = .{},
+    mutex: Io.Mutex = .init,
+    /// The io the store was opened with. Used only to park/wake the
+    /// mutex futex (see the lock note above); valid for the store's
+    /// lifetime because main.zig's boot io outlives the store.
+    io: Io,
     wal: wal_mod.WalWriter,
     /// Owned "<data_dir>/wal.log" path (freed on deinit). Empty for a
     /// never-opened store.
@@ -115,6 +127,7 @@ pub const Store = struct {
         const wal = try wal_mod.WalWriter.open(allocator, io, wal_path);
         var store = Store{
             .allocator = allocator,
+            .io = io,
             .wal = wal,
             .wal_path = wal_path,
         };
@@ -175,8 +188,8 @@ pub const Store = struct {
         const payload = try serializeToken(self.allocator, row);
         defer self.allocator.free(payload);
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         try self.tokens.put(self.allocator, row.hash, row);
         // WAL after in-memory put so a successful return implies both
@@ -189,8 +202,8 @@ pub const Store = struct {
 
     /// Mark a token revoked. Durable.
     pub fn revokeToken(self: *Store, io: Io, hash: [32]u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         const row = self.tokens.getPtr(hash) orelse return error.TokenNotFound;
         if (row.revoked) return; // idempotent
@@ -206,8 +219,8 @@ pub const Store = struct {
     /// callers can use it after mutex release without worrying about
     /// hashmap rehash invalidating pointers. Read-only path; no WAL.
     pub fn lookupToken(self: *Store, hash: [32]u8) ?types.ApiTokenRow {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         const row_ptr = self.tokens.getPtr(hash) orelse return null;
         return row_ptr.*;
     }
@@ -216,8 +229,8 @@ pub const Store = struct {
     /// lost last_used update is a minor display-staleness issue, not
     /// a correctness issue. Don't block info/refs on this fsync.
     pub fn recordTokenUse(self: *Store, io: Io, hash: [32]u8, now_ms: i64) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         if (self.tokens.getPtr(hash)) |row| {
             row.last_used_at = now_ms;
@@ -276,8 +289,8 @@ pub const Store = struct {
         const wire = try serializeEvent(self.allocator, row);
         defer self.allocator.free(wire);
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         const seq = try self.wal.appendDurable(io, .event_insert, wire);
         row.seq = seq;
@@ -308,8 +321,8 @@ pub const Store = struct {
     /// output (typically `GET /api/notifications/recent`). `limit`
     /// caps output count. Read-only; no WAL.
     pub fn iterateRecent(self: *Store, limit: usize, ctx: ?*anyopaque, cb: *const fn (ctx: ?*anyopaque, row: types.EventRow) void) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         const n = @min(limit, self.recent_count);
         var i: usize = 0;
@@ -325,8 +338,8 @@ pub const Store = struct {
     /// lost seen-flag flip is a UI display issue, not a correctness
     /// issue. Idempotent + monotonic (seen_cursor only increases).
     pub fn markEventsSeenUpTo(self: *Store, io: Io, up_to: u64) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         if (up_to <= self.seen_cursor) return; // idempotent
 

@@ -16,7 +16,7 @@ Production-ready cryptographic functions for Rust via Zig FFI.
 ### 1. Build the Library
 
 ```bash
-cd /home/founder/github_public/quantum-zig-forge/programs/simd_crypto_ffi
+cd <zig-forge>/programs/simd_crypto_ffi
 zig build -Doptimize=ReleaseFast
 ```
 
@@ -68,7 +68,7 @@ cp examples/quantum_crypto.rs ffi/
 ```rust
 fn main() {
     // Point to the Zig static library
-    let lib_path = "/home/founder/github_public/quantum-zig-forge/programs/simd_crypto_ffi/zig-out/lib";
+    let lib_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../simd_crypto_ffi/zig-out/lib");
 
     println!("cargo:rustc-link-search=native={}", lib_path);
     println!("cargo:rustc-link-lib=static=quantum_crypto");
@@ -369,7 +369,7 @@ MIT License (same as Zig stdlib)
 Questions? Issues? Check:
 1. `examples/test_c.c` - Working C example
 2. `examples/quantum_crypto.rs` - Working Rust bindings
-3. `src/ffi_minimal.zig` - FFI source code
+3. `src/ffi-grok.zig` - FFI source code (the C-ABI build root)
 
 ---
 

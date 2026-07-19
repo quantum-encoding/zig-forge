@@ -161,13 +161,20 @@ pub const ChaosEngine = struct {
         };
     }
 
-    /// Run the fuzzer
+    /// Run both fuzz passes and fold their results into the report.
     pub fn runFuzz(self: *ChaosEngine, iterations: u64) void {
-        const sensor_result = self.fuzzer.fuzzSensorBus(iterations);
-        self.report.addFuzzResult(sensor_result);
+        self.fuzzSensorBus(iterations);
+        self.fuzzCheckedMath(iterations);
+    }
 
-        const math_result = self.fuzzer.fuzzCheckedMath(iterations);
-        self.report.addFuzzResult(math_result);
+    /// Fuzz the sensor bus and record the result (separate pass for progress UI).
+    pub fn fuzzSensorBus(self: *ChaosEngine, iterations: u64) void {
+        self.report.addFuzzResult(self.fuzzer.fuzzSensorBus(iterations));
+    }
+
+    /// Fuzz the checked-math helpers and record the result.
+    pub fn fuzzCheckedMath(self: *ChaosEngine, iterations: u64) void {
+        self.report.addFuzzResult(self.fuzzer.fuzzCheckedMath(iterations));
     }
 
     pub fn getReport(self: *const ChaosEngine) *const report_mod.ChaosReport {
@@ -185,3 +192,85 @@ pub const ChaosEngine = struct {
         };
     }
 };
+
+// ============================================================================
+// Tests — chaos scheduling
+// ============================================================================
+const testing = std.testing;
+
+test "off mode injects nothing" {
+    var engine = ChaosEngine.init(.off, 1);
+    var imu = imu_mod.IMU.init();
+    var aoa = aoa_mod.AoASensor.init();
+    var met: f64 = 0;
+    while (met < 500.0) : (met += 0.1) {
+        try testing.expect(engine.tick(met, &imu, &aoa) == null);
+    }
+    try testing.expectEqual(@as(u32, 0), engine.getReport().total_injected);
+}
+
+test "scripted mode triggers each scenario exactly once" {
+    var engine = ChaosEngine.init(.scripted, 1);
+    var imu = imu_mod.IMU.init();
+    var aoa = aoa_mod.AoASensor.init();
+
+    // No scenario triggers before the earliest trigger_met_s.
+    var earliest: f64 = std.math.floatMax(f64);
+    for (scenarios.ALL_SCENARIOS) |s| earliest = @min(earliest, s.trigger_met_s);
+    try testing.expect(engine.tick(earliest - 0.1, &imu, &aoa) == null);
+
+    // Drive the full mission window; count injections.
+    var injected: usize = 0;
+    var met: f64 = 0;
+    while (met < 600.0) : (met += 0.1) {
+        if (engine.tick(met, &imu, &aoa) != null) injected += 1;
+    }
+    try testing.expectEqual(scenarios.ALL_SCENARIOS.len, injected);
+    try testing.expectEqual(@as(u32, scenarios.ALL_SCENARIOS.len), engine.getReport().total_injected);
+
+    // Every scenario slot is marked triggered exactly once (idempotent after).
+    for (engine.scenarios_triggered) |t| try testing.expect(t);
+    try testing.expect(engine.tick(600.0, &imu, &aoa) == null);
+}
+
+test "specific mode triggers only the named scenario" {
+    var engine = ChaosEngine.init(.specific, 1);
+    engine.specific_scenario = "ARIANE";
+    var imu = imu_mod.IMU.init();
+    var aoa = aoa_mod.AoASensor.init();
+
+    const ariane = scenarios.findScenario("ARIANE").?;
+    var injected: usize = 0;
+    var hit_id: []const u8 = "";
+    var met: f64 = 0;
+    while (met < 600.0) : (met += 0.1) {
+        if (engine.tick(met, &imu, &aoa)) |r| {
+            injected += 1;
+            hit_id = r.scenario_id;
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), injected);
+    try testing.expect(std.mem.eql(u8, hit_id, "ARIANE"));
+    try testing.expect(ariane.trigger_met_s <= 600.0);
+}
+
+test "random mode never panics over a full run" {
+    var engine = ChaosEngine.init(.random, 12345);
+    var imu = imu_mod.IMU.init();
+    var aoa = aoa_mod.AoASensor.init();
+    var met: f64 = 0;
+    while (met < 600.0) : (met += 0.1) {
+        _ = engine.tick(met, &imu, &aoa);
+    }
+    // All recorded results stay within the report's capacity.
+    try testing.expect(engine.getReport().total_injected == engine.getReport().total_caught +
+        engine.getReport().total_missed);
+}
+
+test "fuzz passes fold observations into the report" {
+    var engine = ChaosEngine.init(.fuzz, 7);
+    engine.runFuzz(1000);
+    const rpt = engine.getReport();
+    try testing.expectEqual(@as(u64, 2000), rpt.fuzz_iterations); // two passes
+    try testing.expectEqual(@as(u64, 0), rpt.fuzz_crashes);
+}

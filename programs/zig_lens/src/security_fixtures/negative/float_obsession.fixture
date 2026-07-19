@@ -1,0 +1,7 @@
+// OUT-OF-SCOPE SHAPE: f64 fields whose names are NOT quantity/temporal
+// tells (bias, weight — ML coefficients, legitimately floats). The
+// scanner MUST NOT emit a FLOAT-OBSESSION finding here.
+const Model = struct {
+    bias: f64,
+    weight: f64,
+};

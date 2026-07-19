@@ -18,7 +18,8 @@ const Mutex = struct {
     }
 };
 
-const VERSION = "5.0.0"; // Using native Zig 0.16 networking API with timeout support - Community example
+// Keep in sync with README.md, docs/CHANGELOG.md, and build.zig.zon.
+const VERSION = "2.0.0"; // Sovereign Forge Edition; native Zig 0.16 connect-timeout networking
 const MAX_PORTS = 65535;
 const DEFAULT_TIMEOUT_MS = 1000;
 const MAX_THREADS = 100;
@@ -194,8 +195,7 @@ fn scanThread(data: *ThreadData) !void {
 
             if (data.config.verbose) {
                 const service = getServiceName(port);
-                std.debug.print("Port {d:>5}: {s:<8} {s}\n",
-                    .{ port, status.toString(), service });
+                std.debug.print("Port {d:>5}: {s:<8} {s}\n", .{ port, status.toString(), service });
             }
         }
     }
@@ -215,8 +215,7 @@ fn printResults(config: *ScanConfig) !void {
     std.debug.print("{s}\n", .{"─" ** 40});
 
     for (config.results.items) |result| {
-        std.debug.print("{d:<10} {s:<10} {s}\n",
-            .{ result.port, result.status.toString(), result.service });
+        std.debug.print("{d:<10} {s:<10} {s}\n", .{ result.port, result.status.toString(), result.service });
     }
 
     var open_count: usize = 0;
@@ -269,8 +268,10 @@ pub fn resolveHost(io: Io, hostname: []const u8) !IpAddress {
         &result,
     );
 
+    // Diagnostics are the caller's responsibility: a library resolver returns
+    // an error, it does not print. (Printing here also corrupts the Zig test
+    // runner's stdout protocol under `zig build test`.)
     if (@intFromEnum(rc) != 0 or result == null) {
-        std.debug.print("❌ DNS resolution failed for '{s}': {}\n", .{ hostname, rc });
         return ScannerError.ResolutionFailed;
     }
 
@@ -284,10 +285,12 @@ pub fn resolveHost(io: Io, hostname: []const u8) !IpAddress {
         posix.AF.INET => blk: {
             const sockaddr_ptr: *align(1) const posix.sockaddr.in = @ptrCast(addr_ptr);
             const bytes: [4]u8 = @bitCast(sockaddr_ptr.addr);
-            break :blk IpAddress{ .ip4 = .{
-                .bytes = bytes,
-                .port = 0, // Will be set per-port in scanner
-            } };
+            break :blk IpAddress{
+                .ip4 = .{
+                    .bytes = bytes,
+                    .port = 0, // Will be set per-port in scanner
+                },
+            };
         },
         posix.AF.INET6 => blk: {
             const sockaddr_ptr: *align(1) const posix.sockaddr.in6 = @ptrCast(addr_ptr);
@@ -298,10 +301,7 @@ pub fn resolveHost(io: Io, hostname: []const u8) !IpAddress {
                 .interface = .{ .index = sockaddr_ptr.scope_id },
             } };
         },
-        else => {
-            std.debug.print("❌ Unsupported address family from DNS: {d}\n", .{addr_info.family});
-            return ScannerError.ResolutionFailed;
-        },
+        else => return ScannerError.ResolutionFailed,
     };
 
     return addr;
@@ -328,7 +328,7 @@ pub fn parsePortSpec(spec: []const u8, ports: *std.ArrayList(u16), allocator: st
         const trimmed = std.mem.trim(u8, part, " \t");
         if (std.mem.indexOf(u8, trimmed, "-")) |dash_pos| {
             const start_str = trimmed[0..dash_pos];
-            const end_str = trimmed[dash_pos + 1..];
+            const end_str = trimmed[dash_pos + 1 ..];
             const start = std.fmt.parseInt(u16, start_str, 10) catch return ScannerError.InvalidPortRange;
             const end = std.fmt.parseInt(u16, end_str, 10) catch return ScannerError.InvalidPortRange;
             if (start > end or start == 0) return ScannerError.InvalidPortRange;
@@ -340,6 +340,28 @@ pub fn parsePortSpec(spec: []const u8, ports: *std.ArrayList(u16), allocator: st
             try ports.append(allocator, port);
         }
     }
+
+    // Sort ascending and collapse duplicates so overlapping ranges / repeated
+    // singletons (e.g. "-p=80,80" or "-p=1-100,50-60") are each scanned exactly
+    // once. Output is already printed sorted, so ordering the list here matches
+    // the report table and removes wasted connect() syscalls and duplicate rows.
+    dedupePorts(ports);
+}
+
+/// In-place ascending sort + adjacent-duplicate removal of a port list.
+fn dedupePorts(ports: *std.ArrayList(u16)) void {
+    const items = ports.items;
+    if (items.len < 2) return;
+    std.mem.sort(u16, items, {}, std.sort.asc(u16));
+    var write: usize = 1;
+    var read: usize = 1;
+    while (read < items.len) : (read += 1) {
+        if (items[read] != items[write - 1]) {
+            items[write] = items[read];
+            write += 1;
+        }
+    }
+    ports.shrinkRetainingCapacity(write);
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -356,9 +378,12 @@ pub fn main(init: std.process.Init) !void {
     }
     const args = args_list.items;
 
+    // No arguments at all: a host is required, so this is a usage error. Exit
+    // non-zero to match the "flags but no host" path below and CLI convention
+    // (-h/--help and --version are handled in the parse loop and exit 0).
     if (args.len < 2) {
         printUsage(args[0]);
-        return;
+        std.process.exit(1);
     }
 
     // Argument Parsing (simplified for brevity, mostly same as original)
@@ -374,17 +399,31 @@ pub fn main(init: std.process.Init) !void {
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "--version")) { std.debug.print("v{s}\n", .{VERSION}); return; }
-        else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) { printUsage(args[0]); return; }
-        else if (std.mem.startsWith(u8, arg, "-p=")) { parsed_config.port_spec = arg[std.mem.indexOf(u8, arg, "=").? + 1 ..]; }
-        else if (std.mem.startsWith(u8, arg, "-t=")) { parsed_config.timeout_ms = try std.fmt.parseInt(u32, arg[std.mem.indexOf(u8, arg, "=").? + 1 ..], 10); }
-        else if (std.mem.startsWith(u8, arg, "-j=")) { parsed_config.thread_count = try std.fmt.parseInt(usize, arg[std.mem.indexOf(u8, arg, "=").? + 1 ..], 10); }
-        else if (std.mem.eql(u8, arg, "-v")) { parsed_config.verbose = true; }
-        else if (std.mem.eql(u8, arg, "-c")) { parsed_config.show_closed = true; }
-        else if (!std.mem.startsWith(u8, arg, "-")) { parsed_config.host = arg; }
+        if (std.mem.eql(u8, arg, "--version")) {
+            std.debug.print("v{s}\n", .{VERSION});
+            return;
+        } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+            printUsage(args[0]);
+            return;
+        } else if (std.mem.startsWith(u8, arg, "-p=")) {
+            parsed_config.port_spec = arg[std.mem.indexOf(u8, arg, "=").? + 1 ..];
+        } else if (std.mem.startsWith(u8, arg, "-t=")) {
+            parsed_config.timeout_ms = try std.fmt.parseInt(u32, arg[std.mem.indexOf(u8, arg, "=").? + 1 ..], 10);
+        } else if (std.mem.startsWith(u8, arg, "-j=")) {
+            parsed_config.thread_count = try std.fmt.parseInt(usize, arg[std.mem.indexOf(u8, arg, "=").? + 1 ..], 10);
+        } else if (std.mem.eql(u8, arg, "-v")) {
+            parsed_config.verbose = true;
+        } else if (std.mem.eql(u8, arg, "-c")) {
+            parsed_config.show_closed = true;
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            parsed_config.host = arg;
+        }
     }
 
-    const host = parsed_config.host orelse { printUsage(args[0]); return error.NoHost; };
+    const host = parsed_config.host orelse {
+        printUsage(args[0]);
+        std.process.exit(1);
+    };
     var config = try ScanConfig.init(allocator, host);
     defer config.deinit();
 
@@ -393,19 +432,22 @@ pub fn main(init: std.process.Init) !void {
     if (config.ports.items.len == 0) return ScannerError.InvalidPortRange;
 
     const total_ports = config.ports.items.len;
-    const cpu_count = std.Thread.getCpuCount() catch 4;
-    const max_worker_threads = @min(@as(usize, MAX_THREADS), @as(usize, cpu_count) * 4);
-    var thread_count: usize = @min(parsed_config.thread_count, max_worker_threads);
-    if (thread_count > total_ports) {
-        thread_count = @max(@as(usize, 1), total_ports);
-    }
+    // Port scanning is I/O-bound: each worker blocks in connect(), so useful
+    // concurrency tracks the requested thread count (up to MAX_THREADS), not
+    // CPU count. Honor -j as documented ("up to 100"), clamped only by the hard
+    // ceiling and the number of ports, and never below 1 (guards -j=0).
+    var thread_count: usize = @min(parsed_config.thread_count, @as(usize, MAX_THREADS));
+    thread_count = @max(@as(usize, 1), @min(thread_count, total_ports));
 
     config.timeout_ms = parsed_config.timeout_ms;
     config.thread_count = thread_count;
     config.verbose = parsed_config.verbose;
     config.show_closed = parsed_config.show_closed;
 
-    const target_addr = try resolveHost(main_io, config.host);
+    const target_addr = resolveHost(main_io, config.host) catch |err| {
+        std.debug.print("❌ Failed to resolve host '{s}': {t}\n", .{ config.host, err });
+        return err;
+    };
 
     std.debug.print("\n🔍 zig-port-scanner v{s}\n", .{VERSION});
     std.debug.print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n", .{});

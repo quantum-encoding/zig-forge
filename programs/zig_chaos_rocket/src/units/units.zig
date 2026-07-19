@@ -72,10 +72,6 @@ pub fn Quantity(comptime UnitTag: type) type {
         pub fn isNan(self: Self) bool {
             return std.math.isNan(self.value);
         }
-
-        pub fn format(self: Self, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-            try writer.print("{d:.3}", .{self.value});
-        }
     };
 }
 

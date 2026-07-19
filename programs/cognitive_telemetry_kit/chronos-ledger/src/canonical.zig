@@ -46,11 +46,7 @@ pub fn encode(allocator: std.mem.Allocator, out: *Buf, v: Value) (std.mem.Alloca
     switch (v) {
         .null => try out.appendSlice(allocator, "null"),
         .bool => |b| try out.appendSlice(allocator, if (b) "true" else "false"),
-        .int => |n| {
-            var buf: [24]u8 = undefined;
-            const s = std.fmt.bufPrint(&buf, "{d}", .{n}) catch unreachable;
-            try out.appendSlice(allocator, s);
-        },
+        .int => |n| try out.print(allocator, "{d}", .{n}),
         .string => |s| try writeString(allocator, out, s),
         .array => |arr| {
             try out.append(allocator, '[');

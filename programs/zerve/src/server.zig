@@ -25,6 +25,15 @@ pub const Config = struct {
     /// 0 → auto-detect (CPU count).
     workers: usize = 0,
     backlog: u31 = 1024,
+    /// Close a connection that has been idle (no bytes read) for longer than
+    /// this. Guards against slow-loris / half-open connection holds. 0 disables
+    /// the sweep. Active connections update their timer on every read, so a
+    /// busy keep-alive connection is never reaped.
+    idle_timeout_ms: u32 = 30_000,
+    /// Ceiling on live connections **per worker**. When reached, further
+    /// accepts are drained and closed immediately instead of growing the pool
+    /// unbounded. 0 → unlimited (the historical behavior).
+    max_connections: usize = 0,
 };
 
 /// A request handler fills in `res`; the server serializes it onto the wire.
@@ -44,21 +53,49 @@ const Conn = struct {
     wlen: usize = 0,
     wsent: usize = 0,
     keep_alive: bool = true,
+    /// Monotonic-clock nanoseconds of the last read activity; drives the idle
+    /// sweep. Monotonic (never wall-clock) so a clock step can't defeat the
+    /// slow-loris guard.
+    last_active: u64 = 0,
+    /// Freelist link (valid only while pooled).
     next_free: ?*Conn = null,
+    /// Live-list links (valid only while acquired) — an intrusive doubly-linked
+    /// list of in-use connections so the idle sweep can walk them in O(live).
+    next_live: ?*Conn = null,
+    prev_live: ?*Conn = null,
 };
 
 const ConnPool = struct {
     allocator: std.mem.Allocator,
     free: ?*Conn = null,
+    live_head: ?*Conn = null,
+    live_count: usize = 0,
+    /// 0 → unlimited.
+    max: usize = 0,
 
     fn acquire(self: *ConnPool) !*Conn {
-        if (self.free) |conn| {
-            self.free = conn.next_free;
-            return conn;
-        }
-        return self.allocator.create(Conn);
+        if (self.max != 0 and self.live_count >= self.max) return error.TooManyConnections;
+        const conn = if (self.free) |free_conn| blk: {
+            self.free = free_conn.next_free;
+            break :blk free_conn;
+        } else try self.allocator.create(Conn);
+
+        // Push onto the live list.
+        conn.prev_live = null;
+        conn.next_live = self.live_head;
+        if (self.live_head) |h| h.prev_live = conn;
+        self.live_head = conn;
+        self.live_count += 1;
+        return conn;
     }
     fn release(self: *ConnPool, conn: *Conn) void {
+        // Unlink from the live list.
+        if (conn.prev_live) |p| p.next_live = conn.next_live else self.live_head = conn.next_live;
+        if (conn.next_live) |nx| nx.prev_live = conn.prev_live;
+        conn.next_live = null;
+        conn.prev_live = null;
+        self.live_count -= 1;
+
         conn.next_free = self.free;
         self.free = conn;
     }
@@ -107,11 +144,18 @@ fn workerMain(server: *Server) void {
     defer reactor.deinit();
     reactor.addRead(lfd, LISTENER_UDATA) catch return;
 
-    var pool = ConnPool{ .allocator = std.heap.c_allocator };
+    var pool = ConnPool{ .allocator = std.heap.c_allocator, .max = server.config.max_connections };
     var events: [EVENTS_CAP]c.Kevent = undefined;
 
+    const idle_ns: u64 = @as(u64, server.config.idle_timeout_ms) * std.time.ns_per_ms;
+    // With the sweep enabled, cap the poll timeout so an all-idle worker still
+    // wakes often enough to reap a stalled connection near its deadline.
+    const poll_ms: i32 = if (idle_ns == 0) 1000 else @intCast(@min(@as(u64, 1000), @max(@as(u64, 50), server.config.idle_timeout_ms)));
+    const sweep_interval_ns: u64 = @as(u64, @intCast(poll_ms)) * std.time.ns_per_ms / 2;
+    var last_sweep: u64 = if (idle_ns == 0) 0 else monotonicNs();
+
     while (server.running.load(.acquire)) {
-        const n = reactor.poll(&events, 1000);
+        const n = reactor.poll(&events, poll_ms);
         var idx: usize = 0;
         while (idx < n) : (idx += 1) {
             const ev = Reactor.decode(events[idx]);
@@ -126,6 +170,35 @@ fn workerMain(server: *Server) void {
                 onReadable(conn, &reactor, &pool, server.handler);
             }
         }
+
+        // Idle sweep — bounded to at most once per (poll_ms/2) so a busy worker
+        // doesn't walk the live list on every event batch.
+        if (idle_ns != 0) {
+            const now = monotonicNs();
+            if (now -| last_sweep >= sweep_interval_ns) {
+                sweepIdle(&pool, &reactor, idle_ns, now);
+                last_sweep = now;
+            }
+        }
+    }
+}
+
+/// Monotonic clock in nanoseconds. Never steps backward across NTP/clock
+/// adjustments, so it is the correct base for the slow-loris idle deadline.
+fn monotonicNs() u64 {
+    var ts: c.timespec = undefined;
+    if (c.clock_gettime(c.CLOCK.MONOTONIC, &ts) != 0) return 0;
+    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}
+
+/// Close every live connection idle for at least `idle_ns`. Runs off the
+/// worker's own poll wakeup, so it needs no separate timer fd.
+fn sweepIdle(pool: *ConnPool, reactor: *Reactor, idle_ns: u64, now: u64) void {
+    var it = pool.live_head;
+    while (it) |conn| {
+        const next = conn.next_live; // capture before closeConn unlinks it
+        if (now -| conn.last_active >= idle_ns) closeConn(conn, reactor, pool);
+        it = next;
     }
 }
 
@@ -151,6 +224,7 @@ fn acceptAll(lfd: posix.socket_t, reactor: *Reactor, pool: *ConnPool) void {
         conn.wsent = 0;
         conn.keep_alive = true;
         conn.next_free = null;
+        conn.last_active = monotonicNs();
         reactor.addRead(cfd, @intFromPtr(conn)) catch {
             _ = c.close(cfd);
             pool.release(conn);
@@ -174,6 +248,7 @@ fn onReadable(conn: *Conn, reactor: *Reactor, pool: *ConnPool, handler: Handler)
         }
         if (r == 0) return closeConn(conn, reactor, pool); // peer closed
         conn.rlen += @intCast(r);
+        conn.last_active = monotonicNs(); // reset idle timer on read progress
     }
     processAndRespond(conn, reactor, pool, handler);
 }
@@ -183,9 +258,19 @@ fn processAndRespond(conn: *Conn, reactor: *Reactor, pool: *ConnPool, handler: H
         if (conn.wsent < conn.wlen) return; // a response is still flushing
 
         switch (http.parse(conn.rbuf[0..conn.rlen])) {
-            .incomplete => return, // need more bytes
-            .invalid => return closeConn(conn, reactor, pool),
+            .incomplete => {
+                // Head still incomplete but the read buffer is full → the
+                // header block is larger than READ_CAP and can never complete.
+                // Answer 431 and close instead of busy-spinning on a
+                // level-triggered readable socket that never drains.
+                if (conn.rlen == conn.rbuf.len) return respondError(conn, reactor, pool, 431);
+                return; // genuinely need more bytes
+            },
+            .invalid => return respondError(conn, reactor, pool, 400),
             .ok => |req| {
+                // A declared body that cannot fit the fixed buffer can never be
+                // fully read → reject with 413 rather than parking the conn.
+                if (req.total_len > conn.rbuf.len) return respondError(conn, reactor, pool, 413);
                 if (req.total_len > conn.rlen) return; // body still arriving
 
                 var res = http.Response{};
@@ -215,6 +300,27 @@ fn processAndRespond(conn: *Conn, reactor: *Reactor, pool: *ConnPool, handler: H
                 }
             },
         }
+    }
+}
+
+/// Emit a minimal error response (empty body, `Connection: close`) and tear the
+/// connection down. Used for oversized heads (431), oversized bodies (413), and
+/// malformed input (400) — none of which may keep-alive.
+fn respondError(conn: *Conn, reactor: *Reactor, pool: *ConnPool, status: u16) void {
+    var res = http.Response{};
+    res.status = status;
+    res.content_type = "text/plain; charset=utf-8";
+    res.body = ""; // the status line already carries the reason phrase
+    conn.keep_alive = false;
+
+    const wn = http.writeResponse(&conn.wbuf, &res, false) orelse
+        return closeConn(conn, reactor, pool);
+    conn.wlen = wn;
+    conn.wsent = 0;
+
+    switch (flush(conn, reactor)) {
+        .blocked => return, // onWritable closes once the head flushes (keep_alive=false)
+        else => return closeConn(conn, reactor, pool),
     }
 }
 
@@ -316,4 +422,158 @@ fn setNoDelay(fd: posix.socket_t) void {
     const one = std.mem.toBytes(@as(c_int, 1));
     // TCP_NODELAY = 1, IPPROTO_TCP = 6 — disable Nagle for low-latency replies.
     posix.setsockopt(fd, posix.IPPROTO.TCP, 1, &one) catch {};
+}
+
+// ── Tests ────────────────────────────────────────────────────────────
+
+const testing = std.testing;
+
+test "parseIpv4 accepts dotted-quad, falls back to INADDR_ANY otherwise" {
+    try testing.expectEqual(@as(u32, @bitCast([4]u8{ 127, 0, 0, 1 })), parseIpv4("127.0.0.1"));
+    try testing.expectEqual(@as(u32, @bitCast([4]u8{ 0, 0, 0, 0 })), parseIpv4("0.0.0.0"));
+    try testing.expectEqual(@as(u32, 0), parseIpv4("not.an.ip")); // non-numeric octet
+    try testing.expectEqual(@as(u32, 0), parseIpv4("1.2.3")); // too few octets
+    try testing.expectEqual(@as(u32, 0), parseIpv4("1.2.3.4.5")); // too many octets
+    try testing.expectEqual(@as(u32, 0), parseIpv4("999.0.0.0")); // octet overflows u8
+}
+
+test "ConnPool enforces max_connections and reuses freed conns" {
+    var pool = ConnPool{ .allocator = testing.allocator, .max = 2 };
+    defer {
+        var it = pool.free;
+        while (it) |conn| {
+            const nx = conn.next_free;
+            testing.allocator.destroy(conn);
+            it = nx;
+        }
+    }
+
+    const a = try pool.acquire();
+    const b = try pool.acquire();
+    try testing.expectEqual(@as(usize, 2), pool.live_count);
+    try testing.expectError(error.TooManyConnections, pool.acquire()); // at cap
+
+    pool.release(a);
+    try testing.expectEqual(@as(usize, 1), pool.live_count);
+    const reused = try pool.acquire();
+    try testing.expectEqual(a, reused); // came off the freelist, not a fresh alloc
+    try testing.expectEqual(@as(usize, 2), pool.live_count);
+
+    pool.release(b);
+    pool.release(reused);
+    try testing.expectEqual(@as(usize, 0), pool.live_count);
+}
+
+fn testHandler(req: *const http.Request, res: *http.Response) void {
+    if (req.pathEquals("/ok")) res.text("hello") else res.notFound();
+}
+
+fn loopbackAddr(port: u16) c.sockaddr.in {
+    return .{
+        .port = std.mem.nativeToBig(u16, port),
+        .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
+    };
+}
+
+fn getFreePort() !u16 {
+    const fd_raw = c.socket(c.AF.INET, c.SOCK.STREAM, 0);
+    if (fd_raw < 0) return error.SocketFailed;
+    const fd: posix.socket_t = @intCast(fd_raw);
+    defer _ = c.close(fd);
+
+    const one = std.mem.toBytes(@as(c_int, 1));
+    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, &one) catch {};
+
+    var addr = loopbackAddr(0); // port 0 → kernel assigns an ephemeral port
+    if (c.bind(fd, @ptrCast(&addr), @sizeOf(c.sockaddr.in)) < 0) return error.BindFailed;
+    var slen: c.socklen_t = @sizeOf(c.sockaddr.in);
+    if (c.getsockname(fd, @ptrCast(&addr), &slen) < 0) return error.GetsocknameFailed;
+    return std.mem.bigToNative(u16, addr.port);
+}
+
+fn sleepMs(ms: u64) void {
+    var req = c.timespec{ .sec = @intCast(ms / 1000), .nsec = @intCast((ms % 1000) * std.time.ns_per_ms) };
+    var rem: c.timespec = undefined;
+    _ = c.nanosleep(&req, &rem);
+}
+
+fn connectWithRetry(port: u16) !posix.socket_t {
+    var addr = loopbackAddr(port);
+    var attempt: usize = 0;
+    while (attempt < 200) : (attempt += 1) {
+        const fd_raw = c.socket(c.AF.INET, c.SOCK.STREAM, 0);
+        if (fd_raw < 0) return error.SocketFailed;
+        const fd: posix.socket_t = @intCast(fd_raw);
+        if (c.connect(fd, @ptrCast(&addr), @sizeOf(c.sockaddr.in)) == 0) {
+            // 2s receive timeout so a wedged read can never hang the test.
+            const tv = posix.timeval{ .sec = 2, .usec = 0 };
+            posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {};
+            return fd;
+        }
+        _ = c.close(fd);
+        sleepMs(5);
+    }
+    return error.ConnectFailed;
+}
+
+fn writeAll(fd: posix.socket_t, bytes: []const u8) void {
+    var off: usize = 0;
+    while (off < bytes.len) {
+        const w = c.write(fd, bytes[off..].ptr, bytes.len - off);
+        if (w <= 0) return; // peer may have closed (e.g. after a 431)
+        off += @intCast(w);
+    }
+}
+
+fn readResponse(fd: posix.socket_t, buf: []u8) usize {
+    var total: usize = 0;
+    var tries: usize = 0;
+    while (tries < 10 and total < buf.len) : (tries += 1) {
+        const r = c.read(fd, buf[total..].ptr, buf.len - total);
+        if (r <= 0) break;
+        total += @intCast(r);
+        if (std.mem.indexOf(u8, buf[0..total], "\r\n\r\n") != null) break; // head complete
+    }
+    return total;
+}
+
+test "loopback integration: 200 + keep-alive, pipelined follow-up, 431 on oversized head" {
+    const port = getFreePort() catch return error.SkipZigTest;
+    var server = Server.init(.{
+        .host = "127.0.0.1",
+        .port = port,
+        .workers = 1,
+        .idle_timeout_ms = 0, // disable the sweep so a slow test step can't be reaped
+    }, testHandler);
+
+    const th = std.Thread.spawn(.{}, Server.run, .{&server}) catch return error.SkipZigTest;
+    defer {
+        server.stop();
+        th.join();
+    }
+
+    var buf: [1024]u8 = undefined;
+
+    // 1) GET /ok → 200, body "hello", keep-alive.
+    const fd = connectWithRetry(port) catch return error.SkipZigTest;
+    defer _ = c.close(fd);
+    writeAll(fd, "GET /ok HTTP/1.1\r\nHost: x\r\n\r\n");
+    const n1 = readResponse(fd, &buf);
+    try testing.expect(std.mem.indexOf(u8, buf[0..n1], "200 OK") != null);
+    try testing.expect(std.mem.indexOf(u8, buf[0..n1], "hello") != null);
+    try testing.expect(std.mem.indexOf(u8, buf[0..n1], "keep-alive") != null);
+
+    // 2) Second request on the SAME connection (keep-alive path) → 404.
+    writeAll(fd, "GET /nope HTTP/1.1\r\nHost: x\r\n\r\n");
+    const n2 = readResponse(fd, &buf);
+    try testing.expect(std.mem.indexOf(u8, buf[0..n2], "404") != null);
+
+    // 3) Oversized header block (> READ_CAP, no terminator) → 431, not a spin.
+    const fd2 = connectWithRetry(port) catch return error.SkipZigTest;
+    defer _ = c.close(fd2);
+    var pad: [READ_CAP + 512]u8 = undefined;
+    @memset(&pad, 'A'); // never contains "\r\n\r\n"
+    writeAll(fd2, &pad);
+    const n3 = readResponse(fd2, &buf);
+    try testing.expect(std.mem.indexOf(u8, buf[0..n3], "431") != null);
 }

@@ -127,7 +127,7 @@ const plain_text_headers: [1]http.Header = .{
 
 /// Server-wide store, set once at boot. Read-only after `setStore`
 /// returns — handlers read the pointer, store internals synchronise
-/// via SpinLock.
+/// via the store's parking mutex.
 var server_store: ?*store_mod.Store = null;
 
 pub fn setStore(store: *store_mod.Store) void {

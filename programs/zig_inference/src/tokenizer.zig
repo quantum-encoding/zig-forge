@@ -95,7 +95,7 @@ pub const Tokenizer = struct {
                 n += 1;
                 break :blk v;
             };
-            const len = std.unicode.utf8Encode(cp, self.byte_buf[off..]) catch unreachable;
+            const len = try std.unicode.utf8Encode(cp, self.byte_buf[off..]);
             self.byte_str[b] = self.byte_buf[off .. off + len];
             off += len;
         }

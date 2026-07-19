@@ -31,40 +31,56 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the port scanner");
     run_step.dependOn(&run_cmd.step);
 
-    // Test configuration
-    const test_mod = b.createModule(.{
+    // --- Tests ---
+    //
+    // Zig 0.16 note: test-name filters are a *compile-time* option on addTest
+    // (`.filters`), NOT a runtime `--test-filter` argument. The stock 0.16.0
+    // test runner rejects `--test-filter` on the command line ("unrecognized
+    // command line argument"), so each filtered subset needs its own test
+    // artifact.
+    //
+    // Each test artifact gets its own module: a Module cannot be reused as the
+    // root of more than one Compile step.
+
+    // `zig build test` — run every test (unit + network integration).
+    const test_all_mod = b.createModule(.{
         .root_source_file = b.path("src/test.zig"),
         .target = target,
         .optimize = optimize,
     });
+    test_all_mod.link_libc = true;
+    const test_all = b.addTest(.{ .root_module = test_all_mod });
+    const test_step = b.step("test", "Run all tests (unit + network integration)");
+    test_step.dependOn(&b.addRunArtifact(test_all).step);
 
-    const tests = b.addTest(.{
-        .root_module = test_mod,
+    // `zig build test-unit` — deterministic, offline tests only.
+    // Excludes anything requiring network (the `integration:` tests) plus the
+    // localhost socket/DNS/timeout tests, so this step is hermetic and safe in
+    // isolated CI.
+    const test_unit_mod = b.createModule(.{
+        .root_source_file = b.path("src/test.zig"),
+        .target = target,
+        .optimize = optimize,
     });
+    test_unit_mod.link_libc = true;
+    const test_unit = b.addTest(.{
+        .root_module = test_unit_mod,
+        .filters = &.{ "parse", "service", "status", "IP", "dedup" },
+    });
+    const unit_test_step = b.step("test-unit", "Run offline unit tests only (no network)");
+    unit_test_step.dependOn(&b.addRunArtifact(test_unit).step);
 
-    // Tests also need libc for DNS resolution
-    tests.root_module.link_libc = true;
-
-    const test_run = b.addRunArtifact(tests);
-
-    const test_step = b.step("test", "Run all unit tests");
-    test_step.dependOn(&test_run.step);
-
-    // Unit tests only (no network required)
-    const unit_test_step = b.step("test-unit", "Run unit tests only (no network)");
-    const unit_test_run = b.addRunArtifact(tests);
-    unit_test_run.addArg("--test-filter");
-    unit_test_run.addArg("parse");
-    unit_test_run.addArg("--test-filter");
-    unit_test_run.addArg("service");
-    unit_test_run.addArg("--test-filter");
-    unit_test_run.addArg("status");
-    unit_test_step.dependOn(&unit_test_run.step);
-
-    // Integration tests (require network)
-    const integration_test_step = b.step("test-integration", "Run integration tests (requires network)");
-    const integration_test_run = b.addRunArtifact(tests);
-    integration_test_run.addArg("--test-filter");
-    integration_test_run.addArg("integration");
-    integration_test_step.dependOn(&integration_test_run.step);
+    // `zig build test-integration` — network-dependent tests only.
+    const test_int_mod = b.createModule(.{
+        .root_source_file = b.path("src/test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    test_int_mod.link_libc = true;
+    const test_int = b.addTest(.{
+        .root_module = test_int_mod,
+        .filters = &.{"integration"},
+    });
+    const integration_test_step = b.step("test-integration", "Run network integration tests (requires network)");
+    integration_test_step.dependOn(&b.addRunArtifact(test_int).step);
 }

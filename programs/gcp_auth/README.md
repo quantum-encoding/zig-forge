@@ -17,7 +17,10 @@ Pure-Zig Google Cloud OAuth2 authentication library: it acquires and refreshes t
 
 - The token endpoint host is validated against an exact-match allowlist (`oauth2.googleapis.com`, `accounts.google.com`) to prevent SSRF via an attacker-controlled `token_uri` in service-account JSON — see `isAllowedTokenUri`.
 - The RSA private-key operation uses the constant-time (`cmov`) modular-exponentiation path; the source enforces at comptime that `std.options.side_channels_mitigations` is not `.none`.
-- Access-token buffers are zeroed on `deinit`.
+- Every produced signature is self-verified (`sig^e mod n == EM`) before release — the Boneh–DeMillo–Lipton ("Bellcore") fault-attack countermeasure. A bit-flip during the private-key modexp becomes `error.SignatureVerificationFailed` instead of a key-leaking faulty signature; signing fails closed.
+- JWT claims are emitted with `std.json.Stringify` (no hand-rolled escaper), so no claim value can break out of its JSON string.
+- `sign()`'s correctness is anchored to an external OpenSSL-generated golden signature (`src/tests.zig`), not merely self-consistency roundtrips.
+- Access-token buffers are zeroed on `deinit`; RSA private-key DER is zeroed on `deinit`.
 
 ## Build
 

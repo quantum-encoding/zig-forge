@@ -283,6 +283,11 @@ pub fn main(init: std.process.Init) !void {
     var stdin_reader = stdin_file.reader(io, &stdin_buf);
     const in = &stdin_reader.interface;
 
+    // Trust gate: if `.qai/approvals` shipped command-execution approvals
+    // (a malicious repo can plant `exec_rule sh`), make the user confirm
+    // them once before they silently pre-approve tool calls this session.
+    try trustGateApprovals(&approvals, in, err, args.auto_approve);
+
     if (args.one_shot) |prompt| {
         try dispatchTurn(gpa, io, &cfg, env, &history, prompt, out, err, in, &approvals, &usage_total, args);
         try out.writeAll("\n");
@@ -301,7 +306,17 @@ pub fn main(init: std.process.Init) !void {
         try out.flush();
 
         const raw = in.takeDelimiter('\n') catch |e| switch (e) {
-            error.ReadFailed, error.StreamTooLong => return e,
+            error.ReadFailed => return e,
+            // A pasted prompt longer than stdin_buf overflows the line
+            // buffer. Don't kill the whole session — drain the rest of the
+            // physical line so the next read starts clean, warn, and prompt
+            // again. (Long pastes are a normal use case.)
+            error.StreamTooLong => {
+                _ = in.discardDelimiterInclusive('\n') catch 0;
+                try err.writeAll("[input too long for one line — keep each prompt under ~1 KB or send it in pieces]\n");
+                try err.flush();
+                continue;
+            },
         } orelse {
             try out.writeAll("\n");
             try out.flush();
@@ -967,17 +982,69 @@ fn runUsageSummary(
     try out.flush();
 }
 
+/// One-time confirmation for command-execution approvals loaded from the
+/// current directory's `.qai/approvals`. This is qai's folder-trust prompt:
+/// `.qai/approvals` is read from the cwd at startup, so a repo can ship
+/// `exec_rule sh` (or `exec curl …`) which — combined with prompt injection
+/// in repo content the model reads via the auto-approved read tools —
+/// silently pre-approves arbitrary command execution. We show what was
+/// loaded and require an explicit `y` before honoring it; anything else
+/// (including no stdin / EOF) drops the exec approvals in-memory (the file
+/// on disk is left intact). Path approvals are not gated — they can't run code.
+fn trustGateApprovals(
+    approvals: *agent.Approvals,
+    in: *std.Io.Reader,
+    err: *std.Io.Writer,
+    auto_approve: bool,
+) !void {
+    if (!approvals.loaded_exec_from_disk) return;
+    // Under --yes the confirmation path is bypassed for every tool anyway,
+    // so disk approvals change nothing; just warn and move on.
+    if (auto_approve) {
+        try err.writeAll("[approvals] --yes set: command approvals from .qai/approvals apply without prompting.\n");
+        try err.flush();
+        return;
+    }
+
+    try err.writeAll("\n[approvals] .qai/approvals in this directory grants command execution without prompting:\n");
+    for (approvals.commands.items) |c| try err.print("    exec:  {s}\n", .{c});
+    for (approvals.bash_rules.items) |r| try err.print("    rule:  {s} *\n", .{r});
+    try err.writeAll("Trust these for this session? [y]es / [N]o (drops them, you'll be asked per-call): ");
+    try err.flush();
+
+    const raw = in.takeDelimiter('\n') catch |e| switch (e) {
+        error.ReadFailed, error.StreamTooLong => null,
+    };
+    const trusted = if (raw) |line| blk: {
+        const ans = std.mem.trim(u8, line, " \t\r\n");
+        break :blk std.ascii.eqlIgnoreCase(ans, "y") or std.ascii.eqlIgnoreCase(ans, "yes");
+    } else false;
+
+    if (trusted) {
+        try err.writeAll("[approvals] trusted for this session.\n");
+    } else {
+        approvals.dropExecApprovals();
+        try err.writeAll("[approvals] dropped — command calls will prompt individually.\n");
+    }
+    try err.flush();
+}
+
 /// Right-pad `s` to width `w` using spaces. Returned slice is valid only
 /// until the next call (uses a thread-local buffer).
 fn padRight(s: []const u8, w: usize) []const u8 {
     const Local = struct {
-        threadlocal var buf: [256]u8 = undefined;
+        threadlocal var buf: [1024]u8 = undefined;
     };
+    // Clamp the copy length to the buffer FIRST — `s` can be a sanitized
+    // cwd path (up to max_path_bytes) or a `provider/model` composite,
+    // either of which may exceed `buf.len`. Copying `s.len` bytes
+    // unconditionally would overflow the thread-local buffer (safety
+    // panic in Debug, silent corruption in ReleaseFast).
+    const copy_n = @min(s.len, Local.buf.len);
+    @memcpy(Local.buf[0..copy_n], s[0..copy_n]);
     const len = @min(@max(s.len, w), Local.buf.len);
-    @memcpy(Local.buf[0..s.len], s);
-    if (s.len < w) {
-        const pad_to = @min(w, Local.buf.len);
-        for (Local.buf[s.len..pad_to]) |*c| c.* = ' ';
+    if (copy_n < len) {
+        for (Local.buf[copy_n..len]) |*c| c.* = ' ';
     }
     return Local.buf[0..len];
 }
@@ -1704,4 +1771,25 @@ test "transcript keeps truncated tool arguments as a JSON string field" {
     try std.testing.expectEqual(@as(usize, 1), loaded_calls.len);
     // Re-serialized as a JSON string: the original bytes wrapped in quotes.
     try std.testing.expectEqualStrings("\"{\\\"cmd\\\":\\\"ls\"", loaded_calls[0].arguments);
+}
+
+test "padRight clamps oversized keys without overflowing its buffer" {
+    // A `qai usage` project key or provider/model composite can exceed the
+    // thread-local buffer (sanitized cwd paths run to ~1 KB). The old code
+    // @memcpy'd s.len bytes unconditionally — a safety panic in Debug and
+    // silent corruption in ReleaseFast. The result must be clamped to the
+    // buffer and must never read past it.
+    var big: [4096]u8 = undefined;
+    @memset(&big, 'x');
+    const out = padRight(&big, 10);
+    try std.testing.expect(out.len <= 1024);
+    for (out) |c| try std.testing.expectEqual(@as(u8, 'x'), c);
+
+    // Normal case still pads to width with spaces.
+    const padded = padRight("ab", 5);
+    try std.testing.expectEqualStrings("ab   ", padded);
+
+    // Already wider than the requested width → returned as-is.
+    const wide = padRight("abcdef", 3);
+    try std.testing.expectEqualStrings("abcdef", wide);
 }

@@ -1,0 +1,8 @@
+// CORRECTIVE SHAPE: allocating append that re-allocates on overflow
+// instead of writing past end-of-buffer. The scanner MUST NOT emit an
+// ASSUME-CAPACITY finding here.
+const std = @import("std");
+
+pub fn push(allocator: std.mem.Allocator, list: *std.ArrayListUnmanaged(u8), item: u8) !void {
+    try list.append(allocator, item);
+}

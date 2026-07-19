@@ -49,6 +49,22 @@ pub fn loadDefault(allocator: std.mem.Allocator) !void {
     try setFromToml(allocator, default_rules_toml);
 }
 
+/// Free the active ruleset + its coverage arena and reset to the
+/// unloaded state. Safe to call when nothing is loaded. Exposed so
+/// tests (and any embedder that wants to swap rulesets) don't have to
+/// re-implement the loader-owned teardown by hand.
+pub fn unload() void {
+    if (active_set) |*s| s.deinit();
+    active_set = null;
+    if (active_arena) |a| {
+        const backing = a.child_allocator;
+        a.deinit();
+        backing.destroy(a);
+    }
+    active_arena = null;
+    active_coverage = &[_]RuleCoverage{};
+}
+
 pub fn loadCustom(allocator: std.mem.Allocator, toml_source: []const u8) !void {
     try setFromToml(allocator, toml_source);
 }

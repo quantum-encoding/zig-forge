@@ -17,9 +17,6 @@ pub const FuzzResult = struct {
 
 pub const Fuzzer = struct {
     rng: std.Random.Xoshiro256,
-    total_iterations: u64 = 0,
-    total_errors: u64 = 0,
-    total_safety: u64 = 0,
 
     pub fn init(seed: u64) Fuzzer {
         return .{
@@ -85,8 +82,6 @@ pub const Fuzzer = struct {
                     result.errors_handled += 1;
                 },
             }
-
-            self.total_iterations += 1;
         }
 
         return result;
@@ -130,20 +125,8 @@ pub const Fuzzer = struct {
             if (checked_math.checkedMul(u8, a, b)) |_| {} else |_| {
                 result.errors_handled += 1;
             }
-
-            self.total_iterations += 1;
         }
 
         return result;
-    }
-
-    pub fn totalReport(self: *const Fuzzer) FuzzResult {
-        return .{
-            .iterations = self.total_iterations,
-            .errors_handled = self.total_errors,
-            .safety_catches = self.total_safety,
-            .crashes = 0, // Always 0 in Zig
-            .undefined_behavior = 0, // Structurally impossible
-        };
     }
 };

@@ -34,6 +34,19 @@ fn getUnixTimestamp() i64 {
     return ts.sec;
 }
 
+/// Injected wall-clock source for `exp`/`nbf` validation.
+///
+/// JWT `exp`/`nbf` are wall-clock quantities by spec, so the default is
+/// the libc REALTIME clock. Routing every security-relevant time read
+/// through one overridable function is the repo's class-6 corrective
+/// shape (CLAUDE.md "Wall-clock time in security checks"): tests can
+/// substitute a fixed clock so expiry validation is deterministic
+/// instead of racing the host clock, and a caller with a trusted time
+/// source can supply it. Overriding it never weakens verification —
+/// the default remains the real clock and every comparison still
+/// fails closed.
+pub const NowFn = *const fn () i64;
+
 /// Supported JWT algorithms
 pub const Algorithm = enum {
     HS256,
@@ -80,7 +93,12 @@ pub const Claims = struct {
     // Registered claims
     iss: ?[]const u8 = null, // Issuer
     sub: ?[]const u8 = null, // Subject
-    aud: ?[]const u8 = null, // Audience
+    aud: ?[]const u8 = null, // Audience (single-string form, RFC 7519 §4.1.3)
+    // Audience array form (RFC 7519 §4.1.3 permits `aud` to be either a
+    // single string OR an array of strings). When a verified token
+    // carries the array form, its members land here and `aud` stays
+    // null; a single-string `aud` populates `aud` and leaves this null.
+    aud_list: ?[]const []const u8 = null,
     exp: ?i64 = null, // Expiration time
     nbf: ?i64 = null, // Not before
     iat: ?i64 = null, // Issued at
@@ -90,6 +108,12 @@ pub const Claims = struct {
     custom: ?[]const u8 = null,
 
     allocator: Allocator,
+
+    // Injected clock for isExpired/isValidYet. Defaults to the real
+    // REALTIME clock; verify() propagates the Verifier's clock here so
+    // a caller inspecting the returned claims sees the same time source
+    // the signature-time validation used.
+    now_fn: NowFn = &getUnixTimestamp,
 
     const Self = @This();
 
@@ -103,6 +127,10 @@ pub const Claims = struct {
         if (self.iss) |s| self.allocator.free(s);
         if (self.sub) |s| self.allocator.free(s);
         if (self.aud) |s| self.allocator.free(s);
+        if (self.aud_list) |list| {
+            for (list) |s| self.allocator.free(s);
+            self.allocator.free(list);
+        }
         if (self.jti) |s| self.allocator.free(s);
         if (self.custom) |s| self.allocator.free(s);
         self.* = undefined;
@@ -111,7 +139,7 @@ pub const Claims = struct {
     /// Check if token is expired
     pub fn isExpired(self: *const Self) bool {
         if (self.exp) |exp| {
-            return getUnixTimestamp() > exp;
+            return self.now_fn() > exp;
         }
         return false;
     }
@@ -119,7 +147,7 @@ pub const Claims = struct {
     /// Check if token is valid yet (nbf claim)
     pub fn isValidYet(self: *const Self) bool {
         if (self.nbf) |nbf| {
-            return getUnixTimestamp() >= nbf;
+            return self.now_fn() >= nbf;
         }
         return true;
     }
@@ -337,6 +365,10 @@ pub const Verifier = struct {
     validate_exp: bool = true,
     validate_nbf: bool = true,
     clock_skew: i64 = 0, // Seconds of clock skew tolerance
+    // Injected clock for exp/nbf validation (see NowFn). Default is the
+    // real REALTIME clock; tests override it for determinism. Never
+    // weakens verification — a hostile override still fails closed.
+    now_fn: NowFn = &getUnixTimestamp,
     allocator: Allocator,
 
     const Self = @This();
@@ -430,6 +462,9 @@ pub const Verifier = struct {
         // Parse claims
         var claims = try parsePayload(self.allocator, payload_json);
         errdefer claims.deinit();
+        // Propagate the injected clock so isExpired/isValidYet on the
+        // returned claims agree with the validation performed here.
+        claims.now_fn = self.now_fn;
 
         // Validate claims
         try self.validateClaims(&claims);
@@ -438,7 +473,7 @@ pub const Verifier = struct {
     }
 
     fn validateClaims(self: *Self, claims: *Claims) !void {
-        const now = getUnixTimestamp();
+        const now = self.now_fn();
 
         // Check expiration
         if (self.validate_exp) {
@@ -469,15 +504,30 @@ pub const Verifier = struct {
             }
         }
 
-        // Check audience
+        // Check audience. RFC 7519 §4.1.3: `aud` may be a single string
+        // or an array of strings, and the check passes if the expected
+        // audience matches ANY member. `claims.aud` holds the string
+        // form, `claims.aud_list` the array form (mutually exclusive per
+        // token). Absence of both is MissingClaim.
         if (self.expected_aud) |expected| {
-            if (claims.aud) |actual| {
-                if (!std.mem.eql(u8, expected, actual)) {
-                    return Error.InvalidAudience;
-                }
-            } else {
+            if (claims.aud == null and claims.aud_list == null) {
                 return Error.MissingClaim;
             }
+            var matched = false;
+            if (claims.aud) |actual| {
+                if (std.mem.eql(u8, expected, actual)) matched = true;
+            }
+            if (!matched) {
+                if (claims.aud_list) |list| {
+                    for (list) |candidate| {
+                        if (std.mem.eql(u8, expected, candidate)) {
+                            matched = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!matched) return Error.InvalidAudience;
         }
 
         // Check subject
@@ -530,12 +580,20 @@ fn signData(allocator: Allocator, algorithm: Algorithm, secret: []const u8, data
         .HS256 => try hmacSign(allocator, std.crypto.auth.hmac.sha2.HmacSha256, secret, data),
         .HS384 => try hmacSign(allocator, std.crypto.auth.hmac.sha2.HmacSha384, secret, data),
         .HS512 => try hmacSign(allocator, std.crypto.auth.hmac.sha2.HmacSha512, secret, data),
-        .none => try allocator.dupe(u8, ""),
+        // Audit H-2 is single-sourced here: `.none` never yields a
+        // signature. Builder.sign already refuses `.none` up front, but
+        // this internal helper is module-callable, so returning an empty
+        // "signature" would let a future caller mint an unauthenticated
+        // triple. Fail loudly instead.
+        .none => return Error.InvalidAlgorithm,
     };
 }
 
 fn hmacSign(allocator: Allocator, comptime Hmac: type, secret: []const u8, data: []const u8) ![]u8 {
     var mac: [Hmac.mac_length]u8 = undefined;
+    // Defense in depth: scrub the raw MAC from the stack once it has
+    // been base64url-encoded, so a later stack reuse can't leak it.
+    defer std.crypto.secureZero(u8, &mac);
     Hmac.create(&mac, data, secret);
     return try base64UrlEncode(allocator, &mac);
 }
@@ -588,6 +646,8 @@ fn verifyHmacFixed(
 ) bool {
     if (provided.len != Hmac.mac_length) return false;
     var expected: [Hmac.mac_length]u8 = undefined;
+    // Scrub the recomputed MAC from the stack on the way out.
+    defer std.crypto.secureZero(u8, &expected);
     Hmac.create(&expected, data, secret);
     const provided_arr: *const [Hmac.mac_length]u8 = provided[0..Hmac.mac_length];
     return std.crypto.timing_safe.eql([Hmac.mac_length]u8, expected, provided_arr.*);
@@ -635,7 +695,12 @@ const HeaderJson = struct {
 const PayloadJson = struct {
     iss: ?[]const u8 = null,
     sub: ?[]const u8 = null,
-    aud: ?[]const u8 = null,
+    // `aud` is intentionally a std.json.Value, not `?[]const u8`: RFC
+    // 7519 §4.1.3 allows both a JSON string and a JSON array of strings.
+    // Typing it as a string would make any RFC-legal array-form token
+    // fail parsing (fail-closed, but a real interop bug against
+    // externally-minted tokens). parsePayload narrows it below.
+    aud: ?std.json.Value = null,
     exp: ?i64 = null,
     nbf: ?i64 = null,
     iat: ?i64 = null,
@@ -656,8 +721,37 @@ fn parsePayload(allocator: Allocator, json: []const u8) !Claims {
 
     if (parsed.value.iss) |s| claims.iss = try allocator.dupe(u8, s);
     if (parsed.value.sub) |s| claims.sub = try allocator.dupe(u8, s);
-    if (parsed.value.aud) |s| claims.aud = try allocator.dupe(u8, s);
     if (parsed.value.jti) |s| claims.jti = try allocator.dupe(u8, s);
+
+    // Narrow `aud`: string → claims.aud, array-of-strings → claims.aud_list.
+    // Any other JSON shape (number, bool, object, or an array with a
+    // non-string member) is a malformed audience — reject fail-closed
+    // rather than silently drop it. Strings are duped out before the
+    // parser arena (parsed.deinit) frees them.
+    if (parsed.value.aud) |aud_val| {
+        switch (aud_val) {
+            .string, .number_string => |s| claims.aud = try allocator.dupe(u8, s),
+            .array => |arr| {
+                const list = try allocator.alloc([]const u8, arr.items.len);
+                var filled: usize = 0;
+                errdefer {
+                    for (list[0..filled]) |e| allocator.free(e);
+                    allocator.free(list);
+                }
+                for (arr.items) |item| {
+                    switch (item) {
+                        .string, .number_string => |s| {
+                            list[filled] = try allocator.dupe(u8, s);
+                            filled += 1;
+                        },
+                        else => return Error.InvalidPayload,
+                    }
+                }
+                claims.aud_list = list;
+            },
+            else => return Error.InvalidPayload,
+        }
+    }
     claims.exp = parsed.value.exp;
     claims.nbf = parsed.value.nbf;
     claims.iat = parsed.value.iat;
@@ -1295,6 +1389,88 @@ test "H-3: malformed header JSON is rejected (Error.InvalidAlgorithm)" {
     try std.testing.expectError(
         Error.InvalidAlgorithm,
         verifier.verify(token, .HS256, "secret-key"),
+    );
+}
+
+// ── Injected-clock (class-6 corrective shape) regression tests ──────
+
+fn fixedClock1000() i64 {
+    return 1000;
+}
+
+test "injected clock: expiry is evaluated against now_fn, not the host clock" {
+    const allocator = std.testing.allocator;
+
+    var builder = Builder.init(allocator);
+    defer builder.deinit();
+    try builder.setSubject("user123");
+    // exp=1500 is far in the past on the real clock, but our fake clock
+    // reads 1000, so the token is still live under the injected time.
+    builder.setExpiration(1500);
+
+    const token = try builder.sign(.HS256, "secret-key");
+    defer allocator.free(token);
+
+    var verifier = Verifier.init(allocator);
+    defer verifier.deinit();
+    verifier.now_fn = &fixedClock1000;
+
+    var claims = try verifier.verify(token, .HS256, "secret-key");
+    defer claims.deinit();
+    try std.testing.expectEqualStrings("user123", claims.sub.?);
+    // The clock propagates to the returned claims' helpers.
+    try std.testing.expect(!claims.isExpired());
+}
+
+test "injected clock: a token expired under the fake clock is rejected deterministically" {
+    const allocator = std.testing.allocator;
+
+    var builder = Builder.init(allocator);
+    defer builder.deinit();
+    try builder.setSubject("user123");
+    // exp=500 < fake-now 1000 → expired regardless of the host clock.
+    builder.setExpiration(500);
+
+    const token = try builder.sign(.HS256, "secret-key");
+    defer allocator.free(token);
+
+    var verifier = Verifier.init(allocator);
+    defer verifier.deinit();
+    verifier.now_fn = &fixedClock1000;
+
+    try std.testing.expectError(
+        Error.TokenExpired,
+        verifier.verify(token, .HS256, "secret-key"),
+    );
+}
+
+test "injected clock: nbf in the future under the fake clock is not-yet-valid" {
+    const allocator = std.testing.allocator;
+
+    var builder = Builder.init(allocator);
+    defer builder.deinit();
+    try builder.setSubject("user123");
+    builder.setNotBefore(2000); // after fake-now 1000
+    builder.setExpiration(3000);
+
+    const token = try builder.sign(.HS256, "secret-key");
+    defer allocator.free(token);
+
+    var verifier = Verifier.init(allocator);
+    defer verifier.deinit();
+    verifier.now_fn = &fixedClock1000;
+
+    try std.testing.expectError(
+        Error.TokenNotYetValid,
+        verifier.verify(token, .HS256, "secret-key"),
+    );
+}
+
+test "signData refuses .none (H-2 single-sourced in the internal helper)" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(
+        Error.InvalidAlgorithm,
+        signData(allocator, .none, "secret", "header.payload"),
     );
 }
 

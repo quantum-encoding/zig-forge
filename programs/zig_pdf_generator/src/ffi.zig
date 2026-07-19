@@ -81,9 +81,14 @@ pub const ZigPdfError = enum(c_int) {
 // Result Buffer
 // =============================================================================
 
-/// Thread-local storage for error message
-var last_error: [256]u8 = [_]u8{0} ** 256;
-var last_error_len: usize = 0;
+/// Thread-local storage for error message. `threadlocal` here honours the
+/// contract documented in include/zigpdf.h ("Error messages use thread-local
+/// storage" / "valid until the next zigpdf call on the same thread"): each
+/// thread gets its own buffer, so a generate/get-error pair on one thread is
+/// never clobbered by a concurrent call on another. Same-thread usage — the
+/// documented pattern — is byte-for-byte unchanged.
+threadlocal var last_error: [256]u8 = [_]u8{0} ** 256;
+threadlocal var last_error_len: usize = 0;
 
 fn setLastError(msg: []const u8) void {
     const copy_len = @min(msg.len, last_error.len - 1);

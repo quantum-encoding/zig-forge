@@ -1,0 +1,8 @@
+// CORRECTIVE SHAPE: std.math.cast returns ?T and forces the caller to
+// handle overflow — the fix the BLIND-CAST rule points to. The scanner
+// MUST NOT emit a BLIND-CAST finding here.
+const std = @import("std");
+
+pub fn narrow(x: u32) ?u8 {
+    return std.math.cast(u8, x);
+}
