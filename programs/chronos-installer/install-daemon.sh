@@ -107,15 +107,23 @@ fi
 # ---------------------------------------------------------------------------
 # Build the engine. This compiles all engine artifacts (including the daemon).
 # ---------------------------------------------------------------------------
+# The engine targets an older 0.16.0-dev std API (verified ≈dev.2510), not
+# stable 0.16.0. Point CHRONOS_DAEMON_ZIG at a matching Zig to build it; else
+# fall back to whatever `zig` is on PATH (which will fail loudly if stable).
+DAEMON_ZIG="${CHRONOS_DAEMON_ZIG:-zig}"
+
 if [ "$SKIP_BUILD" = 0 ]; then
   echo ""
-  echo "-- building the chronos engine (zig build) --"
-  if ! ( cd "$ENGINE_SRC" && zig build -Doptimize=ReleaseSafe ); then
+  echo "-- building the chronos engine ($DAEMON_ZIG build) --"
+  if ! ( cd "$ENGINE_SRC" && "$DAEMON_ZIG" build -Doptimize=ReleaseSafe ); then
     echo "" >&2
-    echo "ERROR: 'zig build' failed in $ENGINE_SRC. The D-Bus daemon tier could not be" >&2
-    echo "  built on this machine. Common causes: a toolchain link mismatch (a very new" >&2
-    echo "  system CRT vs the installed Zig linker), or a missing dev library above." >&2
-    echo "  The git-provenance tier (install.sh) does NOT need any of this and is unaffected." >&2
+    echo "ERROR: '$DAEMON_ZIG build' failed in $ENGINE_SRC. The D-Bus daemon tier could not" >&2
+    echo "  be built on this machine. Known causes (see INSTALL.md):" >&2
+    echo "    - wrong Zig: the engine needs ~0.16.0-dev.2510, NOT stable 0.16.0." >&2
+    echo "      Retry with CHRONOS_DAEMON_ZIG=/path/to/that/zig install-daemon.sh" >&2
+    echo "    - bleeding-edge glibc/gcc (gcc-16 .sframe CRT; fortify __builtin_va_arg_pack)." >&2
+    echo "    - a missing dev library listed above." >&2
+    echo "  The git-provenance tier (install.sh) needs NONE of this and is unaffected." >&2
     exit 1
   fi
 fi

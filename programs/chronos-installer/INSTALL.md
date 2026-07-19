@@ -56,15 +56,24 @@ glibc CRT. macOS builds native. Override with `CHRONOS_ZIG_TARGET` (e.g.
 
 **Tier 2 (`install-daemon.sh`, Linux only), additionally:**
 
-> **Note.** The daemon links `libdbus-1` (a system library), so it **cannot**
-> use the static-musl path — it builds against **glibc**. On a bleeding-edge
-> box where the gcc-16 `.sframe` CRT issue above bites, the daemon build will
-> fail there until the toolchain settles (tier 1 is unaffected). Additionally,
-> the engine source currently targets a **Zig 0.16-dev** std API (`std.Io`,
-> the newer `std.process.run` signature) that is ahead of stable 0.16.0 — build
-> it with the matching Zig-dev, or wait for the engine to be pinned to stable.
-> The daemon is an optional add-on; the git-provenance tier that quantum-diary
-> detects does not need it.
+> **Note — the daemon has stricter build requirements than tier 1.** It links
+> `libdbus-1` (a system library), so it **cannot** use the static-musl path —
+> it builds against **glibc**. Two things to know:
+>
+> 1. **Zig version.** The engine source targets an **older `0.16.0-dev`** std
+>    API (`std.Io`, `std.process.Init`, the `std.process.run(allocator, io, …)`
+>    signature) — verified to resolve at **≈`0.16.0-dev.2510`**. Stable
+>    `0.16.0` *removed/changed* those, and older dev builds (≤`dev.1859`) don't
+>    have `std.process.Init` yet. Build the daemon with a Zig from that dev
+>    window (set `CHRONOS_DAEMON_ZIG=/path/to/zig`), not stable.
+> 2. **glibc.** On a very new box the glibc↔Zig `translate-c` path can fail two
+>    ways: the gcc-16 `.sframe` CRT relocation (see tier-1 note), and a fortify
+>    header using `__builtin_va_arg_pack` (`bits/stdio2.h`) that Zig's C parser
+>    doesn't implement. Both are toolchain-version issues, not source bugs;
+>    a mainstream glibc/gcc builds cleanly.
+>
+> The daemon is an **optional add-on** — the git-provenance tier that
+> quantum-diary detects (tier 1) needs none of this.
 
 - **libdbus-1 dev** + **pkg-config** (Arch: `pacman -S dbus`; Debian/Ubuntu: `apt install libdbus-1-dev pkg-config`)
 - **libbpf dev** (Arch: `pacman -S libbpf`; Debian/Ubuntu: `apt install libbpf-dev`)
