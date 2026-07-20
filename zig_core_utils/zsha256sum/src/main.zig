@@ -22,42 +22,88 @@ const Config = struct {
     }
 };
 
+extern "c" fn strerror(errnum: c_int) [*:0]const u8;
+
+fn errno() c_int {
+    return std.c._errno().*;
+}
+
+// Write all bytes, retrying on EINTR and short writes. libc.write can return
+// fewer bytes than requested (slow/full pipe) or -1/EINTR; ignoring that would
+// silently drop part of a checksum line.
+fn writeAll(fd: c_int, data: []const u8) void {
+    var off: usize = 0;
+    while (off < data.len) {
+        const n = libc.write(fd, data.ptr + off, data.len - off);
+        if (n < 0) {
+            if (errno() == @intFromEnum(std.c.E.INTR)) continue;
+            return; // unrecoverable write error; nothing more we can do
+        }
+        if (n == 0) return;
+        off += @intCast(n);
+    }
+}
+
+// Read into buf, retrying on EINTR. Returns <0 on a genuine error (errno set),
+// 0 on EOF, >0 bytes read. This is what lets us distinguish a real I/O error
+// (e.g. EISDIR when a directory is opened and read) from clean end-of-file.
+fn readRetry(fd: c_int, buf: []u8) isize {
+    while (true) {
+        const n = libc.read(fd, buf.ptr, buf.len);
+        if (n < 0 and errno() == @intFromEnum(std.c.E.INTR)) continue;
+        return n;
+    }
+}
+
 fn writeStdout(data: []const u8) void {
-    _ = libc.write(libc.STDOUT_FILENO, data.ptr, data.len);
+    writeAll(libc.STDOUT_FILENO, data);
 }
 
 fn writeStderr(data: []const u8) void {
-    _ = libc.write(libc.STDERR_FILENO, data.ptr, data.len);
+    writeAll(libc.STDERR_FILENO, data);
+}
+
+// Emit "zsha256sum: <name>: <strerror(errno)>\n", matching GNU coreutils'
+// per-file diagnostic (GNU uses strerror too, so the message text lines up).
+fn reportFileError(name: []const u8, en: c_int) void {
+    writeStderr("zsha256sum: ");
+    writeStderr(name);
+    writeStderr(": ");
+    writeStderr(std.mem.span(strerror(en)));
+    writeStderr("\n");
 }
 
 fn hashFile(allocator: std.mem.Allocator, path: []const u8, is_stdin: bool) ![HEX_LENGTH]u8 {
     var hash = Sha256.init(.{});
     var buffer: [BUFFER_SIZE]u8 = undefined;
+    const disp = if (is_stdin) "standard input" else path;
 
-    if (is_stdin) {
-        while (true) {
-            const n = libc.read(libc.STDIN_FILENO, &buffer, buffer.len);
-            if (n <= 0) break;
-            hash.update(buffer[0..@intCast(n)]);
-        }
-    } else {
+    var fd: c_int = libc.STDIN_FILENO;
+    if (!is_stdin) {
         const path_z = try allocator.dupeZ(u8, path);
         defer allocator.free(path_z);
 
-        const fd = libc.open(path_z.ptr, .{ .ACCMODE = .RDONLY }, @as(libc.mode_t, 0));
+        fd = libc.open(path_z.ptr, .{ .ACCMODE = .RDONLY }, @as(libc.mode_t, 0));
         if (fd < 0) {
-            writeStderr("zsha256sum: ");
-            writeStderr(path);
-            writeStderr(": No such file or directory\n");
+            reportFileError(disp, errno());
             return error.OpenError;
         }
-        defer _ = libc.close(fd);
+    }
+    defer if (!is_stdin) {
+        _ = libc.close(fd);
+    };
 
-        while (true) {
-            const n = libc.read(fd, &buffer, buffer.len);
-            if (n <= 0) break;
-            hash.update(buffer[0..@intCast(n)]);
+    while (true) {
+        const n = readRetry(fd, &buffer);
+        if (n < 0) {
+            // Genuine read error (e.g. EISDIR for a directory, or EIO). GNU
+            // reports this and exits non-zero rather than emitting the
+            // empty-input hash as if it were a valid checksum.
+            reportFileError(disp, errno());
+            return error.ReadError;
         }
+        if (n == 0) break;
+        hash.update(buffer[0..@intCast(n)]);
     }
 
     const digest = hash.finalResult();
@@ -85,82 +131,146 @@ fn printHash(path: []const u8, hex: *const [HEX_LENGTH]u8, config: *const Config
     }
 }
 
+const CheckState = struct {
+    all_ok: bool = true,
+    saw_valid: bool = false,
+    mismatches: usize = 0,
+    read_failures: usize = 0,
+};
+
+fn isHexDigit(c: u8) bool {
+    return (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
+}
+
+fn asciiLower(c: u8) u8 {
+    return if (c >= 'A' and c <= 'Z') c + 32 else c;
+}
+
+// Handle one line of a checksum file. Returns without touching `saw_valid`
+// for improperly-formatted lines (GNU tracks whether ANY line was valid so it
+// can error with "no properly formatted checksum lines found").
+fn handleCheckLine(allocator: std.mem.Allocator, line: []const u8, config: *const Config, state: *CheckState) void {
+    // Trim a trailing CR so CRLF checksum files parse.
+    var l = line;
+    if (l.len > 0 and l[l.len - 1] == '\r') l = l[0 .. l.len - 1];
+    if (l.len < HEX_LENGTH + 2) return;
+
+    const hash_str = l[0..HEX_LENGTH];
+    for (hash_str) |c| {
+        if (!isHexDigit(c)) return;
+    }
+    // GNU line format: <hash><space>(<space>|'*')<filename>
+    if (l[HEX_LENGTH] != ' ') return;
+    if (l[HEX_LENGTH + 1] != ' ' and l[HEX_LENGTH + 1] != '*') return;
+    const filename = l[HEX_LENGTH + 2 ..];
+    if (filename.len == 0) return;
+
+    // Properly formatted checksum line.
+    state.saw_valid = true;
+
+    const computed = hashFile(allocator, filename, false) catch {
+        if (!config.status_only) {
+            writeStdout(filename);
+            writeStdout(": FAILED open or read\n");
+        }
+        state.read_failures += 1;
+        state.all_ok = false;
+        return;
+    };
+
+    // Case-insensitive hex comparison (GNU compares parsed bytes).
+    var match = true;
+    for (computed, hash_str) |a, b| {
+        if (a != asciiLower(b)) {
+            match = false;
+            break;
+        }
+    }
+
+    if (match) {
+        if (!config.quiet and !config.status_only) {
+            writeStdout(filename);
+            writeStdout(": OK\n");
+        }
+    } else {
+        if (!config.status_only) {
+            writeStdout(filename);
+            writeStdout(": FAILED\n");
+        }
+        state.mismatches += 1;
+        state.all_ok = false;
+    }
+}
+
+// Emit "zsha256sum: WARNING: N <thing> <verb>\n" with GNU singular/plural.
+fn warnCount(count: usize, singular: []const u8, plural: []const u8) void {
+    var buf: [128]u8 = undefined;
+    const word = if (count == 1) singular else plural;
+    const msg = std.fmt.bufPrint(&buf, "zsha256sum: WARNING: {d} {s}\n", .{ count, word }) catch return;
+    writeStderr(msg);
+}
+
 fn checkFile(allocator: std.mem.Allocator, checksum_file: []const u8, config: *const Config) !bool {
     const path_z = try allocator.dupeZ(u8, checksum_file);
     defer allocator.free(path_z);
 
     const fd = libc.open(path_z.ptr, .{ .ACCMODE = .RDONLY }, @as(libc.mode_t, 0));
     if (fd < 0) {
-        writeStderr("zsha256sum: ");
-        writeStderr(checksum_file);
-        writeStderr(": No such file or directory\n");
+        reportFileError(checksum_file, errno());
         return error.OpenError;
     }
     defer _ = libc.close(fd);
 
     var file_buffer: [8192]u8 = undefined;
-    var line_buffer: [1024]u8 = undefined;
+    var line_buffer: [4096]u8 = undefined;
     var line_len: usize = 0;
-    var all_ok = true;
-    var failed: usize = 0;
+    var line_overflow = false;
+    var state = CheckState{};
 
-    outer: while (true) {
-        const n = libc.read(fd, &file_buffer, file_buffer.len);
-        if (n <= 0) break;
+    while (true) {
+        const n = readRetry(fd, &file_buffer);
+        if (n < 0) {
+            reportFileError(checksum_file, errno());
+            return error.ReadError;
+        }
+        if (n == 0) break;
         const bytes_read: usize = @intCast(n);
 
         for (file_buffer[0..bytes_read]) |byte| {
             if (byte == '\n') {
-                const line = line_buffer[0..line_len];
+                if (!line_overflow) handleCheckLine(allocator, line_buffer[0..line_len], config, &state);
                 line_len = 0;
-                if (line.len < HEX_LENGTH + 2) continue;
-
-                const hash_str = line[0..HEX_LENGTH];
-                var filename_start: usize = HEX_LENGTH;
-                if (line[HEX_LENGTH] == ' ' and line.len > HEX_LENGTH + 1) {
-                    if (line[HEX_LENGTH + 1] == ' ' or line[HEX_LENGTH + 1] == '*') {
-                        filename_start = HEX_LENGTH + 2;
-                    }
-                }
-
-                const filename = line[filename_start..];
-                if (filename.len == 0) continue;
-
-                const computed = hashFile(allocator, filename, false) catch {
-                    if (!config.status_only) {
-                        writeStdout(filename);
-                        writeStdout(": FAILED open or read\n");
-                    }
-                    failed += 1;
-                    all_ok = false;
-                    continue;
-                };
-
-                if (std.mem.eql(u8, &computed, hash_str)) {
-                    if (!config.quiet and !config.status_only) {
-                        writeStdout(filename);
-                        writeStdout(": OK\n");
-                    }
-                } else {
-                    if (!config.status_only) {
-                        writeStdout(filename);
-                        writeStdout(": FAILED\n");
-                    }
-                    failed += 1;
-                    all_ok = false;
-                }
+                line_overflow = false;
             } else if (line_len < line_buffer.len) {
                 line_buffer[line_len] = byte;
                 line_len += 1;
+            } else {
+                // Line longer than the buffer: don't silently truncate to a
+                // wrong filename — discard the whole (malformed) line.
+                line_overflow = true;
             }
         }
-        if (bytes_read < file_buffer.len) break :outer;
     }
 
-    if (!config.status_only and failed > 0) {
-        writeStderr("zsha256sum: WARNING: checksum mismatch\n");
+    // Flush a final line that lacked a trailing newline; GNU verifies it.
+    if (line_len > 0 and !line_overflow) {
+        handleCheckLine(allocator, line_buffer[0..line_len], config, &state);
     }
-    return all_ok;
+
+    if (!state.saw_valid) {
+        writeStderr("zsha256sum: ");
+        writeStderr(checksum_file);
+        writeStderr(": no properly formatted checksum lines found\n");
+        return error.NoValidLines;
+    }
+
+    if (!config.status_only) {
+        if (state.read_failures > 0)
+            warnCount(state.read_failures, "listed file could not be read", "listed files could not be read");
+        if (state.mismatches > 0)
+            warnCount(state.mismatches, "computed checksum did NOT match", "computed checksums did NOT match");
+    }
+    return state.all_ok;
 }
 
 fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
@@ -183,7 +293,13 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                 else if (std.mem.eql(u8, arg, "--text")) config.binary_mode = false
                 else if (std.mem.eql(u8, arg, "--quiet")) config.quiet = true
                 else if (std.mem.eql(u8, arg, "--status")) config.status_only = true
-                else if (std.mem.eql(u8, arg, "--tag")) config.bsd_tag = true;
+                else if (std.mem.eql(u8, arg, "--tag")) config.bsd_tag = true
+                else {
+                    writeStderr("zsha256sum: unrecognized option '");
+                    writeStderr(arg);
+                    writeStderr("'\nTry 'zsha256sum --help' for more information.\n");
+                    std.process.exit(1);
+                }
             } else {
                 for (arg[1..]) |ch| {
                     switch (ch) {
@@ -191,7 +307,12 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                         'b' => config.binary_mode = true,
                         't' => config.binary_mode = false,
                         'q' => config.quiet = true,
-                        else => {},
+                        else => {
+                            const buf = [_]u8{ 'z', 's', 'h', 'a', '2', '5', '6', 's', 'u', 'm', ':', ' ', 'i', 'n', 'v', 'a', 'l', 'i', 'd', ' ', 'o', 'p', 't', 'i', 'o', 'n', ' ', '-', '-', ' ', '\'', ch, '\'', '\n' };
+                            writeStderr(&buf);
+                            writeStderr("Try 'zsha256sum --help' for more information.\n");
+                            std.process.exit(1);
+                        },
                     }
                 }
             }

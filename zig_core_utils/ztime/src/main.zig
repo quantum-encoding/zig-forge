@@ -1,7 +1,19 @@
 //! ztime - GNU time replacement in pure Zig
 //!
 //! Measures real (wall clock), user (CPU in user mode), and system (CPU in kernel mode)
-//! time for command execution. Compatible with GNU time output format.
+//! time for command execution.
+//!
+//! Output modes:
+//!   * default (no flag): bash-builtin `time` style (`real\t0m0.000s`), NOT the GNU
+//!     standalone `/usr/bin/time` default one-liner. Kept for backwards compatibility.
+//!   * -p / --portable: POSIX `real/user/sys` seconds.
+//!   * -v / --verbose:  GNU-verbose multi-line report.
+//!   * -f / --format:   GNU format-string specifiers (%e %E %U %S %P %M %c %w ... — see -h).
+//!
+//! The -f specifiers follow GNU `time`'s documented semantics (info time / man 1 time):
+//! %e = elapsed seconds, %E = elapsed [h:]mm:ss.ss, %w = voluntary ctx switches,
+//! %c = involuntary ctx switches, %M = max RSS in KB (normalized on Darwin where the
+//! kernel reports ru_maxrss in bytes).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -33,34 +45,30 @@ const Timer = struct {
 extern "c" fn fork() c_int;
 extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 extern "c" fn waitpid(pid: c_int, status: *c_int, options: c_int) c_int;
-extern "c" fn getrusage(who: c_int, usage: *rusage) c_int;
+extern "c" fn getpagesize() c_int;
 
+// Use the platform-correct rusage / timeval layouts from std.c. The previous
+// hand-rolled struct declared `usec` as `isize` (8 bytes); on 64-bit Darwin
+// `tv_usec` is a 32-bit `suseconds_t` (c_int) followed by 4 bytes of padding, so an
+// 8-byte read straddled usec + padding and could corrupt user/sys time whenever the
+// padding was non-zero. std.c.timeval uses the correct `suseconds_t` width per OS.
+const rusage = std.c.rusage;
 const RUSAGE_CHILDREN: c_int = -1;
 
-// rusage structure (cross-platform)
-const timeval = extern struct {
-    sec: isize,
-    usec: isize,
-};
+/// Read a timeval field as microseconds (i64), coercing whatever platform-specific
+/// integer widths sec/usec have (time_t / suseconds_t) into a common type.
+fn tvMicros(tv: std.c.timeval) i64 {
+    return @as(i64, @intCast(tv.sec)) * 1_000_000 + @as(i64, @intCast(tv.usec));
+}
 
-const rusage = extern struct {
-    utime: timeval,
-    stime: timeval,
-    maxrss: isize,
-    ixrss: isize,
-    idrss: isize,
-    isrss: isize,
-    minflt: isize,
-    majflt: isize,
-    nswap: isize,
-    inblock: isize,
-    oublock: isize,
-    msgsnd: isize,
-    msgrcv: isize,
-    nsignals: isize,
-    nvcsw: isize,
-    nivcsw: isize,
-};
+/// Normalize a raw ru_maxrss value to kilobytes. Linux reports ru_maxrss in KB;
+/// Darwin (macOS/iOS and relatives) reports it in BYTES, so divide by 1024 there.
+fn maxRssKb(raw: isize) isize {
+    return switch (builtin.os.tag) {
+        .macos, .ios, .tvos, .watchos, .visionos => @divTrunc(raw, 1024),
+        else => raw,
+    };
+}
 
 // Wait status macros
 fn WIFEXITED(status: c_int) bool {
@@ -141,6 +149,14 @@ const TimingResult = struct {
     involuntary_ctx_switches: isize,
     block_input_ops: isize,
     block_output_ops: isize,
+    swaps: isize = 0,
+    signals: isize = 0,
+    msgs_sent: isize = 0,
+    msgs_recv: isize = 0,
+    shared_text_kb: isize = 0,
+    unshared_data_kb: isize = 0,
+    unshared_stack_kb: isize = 0,
+    page_size: isize = 0,
 
     fn realTimeSecs(self: TimingResult) f64 {
         return @as(f64, @floatFromInt(self.real_time_ns)) / 1_000_000_000.0;
@@ -185,7 +201,7 @@ fn executeAndTime(allocator: std.mem.Allocator, command: []const []const u8, qui
 
     // Get rusage before fork
     var rusage_before: rusage = undefined;
-    _ = getrusage(RUSAGE_CHILDREN, &rusage_before);
+    _ = std.c.getrusage(RUSAGE_CHILDREN, &rusage_before);
 
     // Start wall clock timer
     var timer = try Timer.start();
@@ -224,13 +240,11 @@ fn executeAndTime(allocator: std.mem.Allocator, command: []const []const u8, qui
 
     // Get rusage after
     var rusage_after: rusage = undefined;
-    _ = getrusage(RUSAGE_CHILDREN, &rusage_after);
+    _ = std.c.getrusage(RUSAGE_CHILDREN, &rusage_after);
 
-    // Calculate delta rusage
-    const user_us = (rusage_after.utime.sec - rusage_before.utime.sec) * 1_000_000 +
-        (rusage_after.utime.usec - rusage_before.utime.usec);
-    const sys_us = (rusage_after.stime.sec - rusage_before.stime.sec) * 1_000_000 +
-        (rusage_after.stime.usec - rusage_before.stime.usec);
+    // Calculate delta rusage (microseconds), using platform-correct field widths.
+    const user_us = tvMicros(rusage_after.utime) - tvMicros(rusage_before.utime);
+    const sys_us = tvMicros(rusage_after.stime) - tvMicros(rusage_before.stime);
 
     // Parse exit status
     var exit_code: i32 = 0;
@@ -249,13 +263,21 @@ fn executeAndTime(allocator: std.mem.Allocator, command: []const []const u8, qui
         .real_time_ns = elapsed_ns,
         .user_time_us = user_us,
         .sys_time_us = sys_us,
-        .max_rss_kb = rusage_after.maxrss,
+        .max_rss_kb = maxRssKb(rusage_after.maxrss),
         .minor_faults = rusage_after.minflt - rusage_before.minflt,
         .major_faults = rusage_after.majflt - rusage_before.majflt,
         .voluntary_ctx_switches = rusage_after.nvcsw - rusage_before.nvcsw,
         .involuntary_ctx_switches = rusage_after.nivcsw - rusage_before.nivcsw,
         .block_input_ops = rusage_after.inblock - rusage_before.inblock,
         .block_output_ops = rusage_after.oublock - rusage_before.oublock,
+        .swaps = rusage_after.nswap - rusage_before.nswap,
+        .signals = rusage_after.nsignals - rusage_before.nsignals,
+        .msgs_sent = rusage_after.msgsnd - rusage_before.msgsnd,
+        .msgs_recv = rusage_after.msgrcv - rusage_before.msgrcv,
+        .shared_text_kb = rusage_after.ixrss,
+        .unshared_data_kb = rusage_after.idrss,
+        .unshared_stack_kb = rusage_after.isrss,
+        .page_size = getpagesize(),
     };
 }
 
@@ -268,6 +290,24 @@ fn formatTime(secs: f64) struct { mins: u32, secs: f64 } {
     const mins: u32 = @intCast(total_secs / 60);
     const remaining = secs - @as(f64, @floatFromInt(mins * 60));
     return .{ .mins = mins, .secs = remaining };
+}
+
+/// GNU `%E`: elapsed real time as `[h:]mm:ss.ss`.
+///   < 1 hour  -> `m:ss.ss`  (e.g. 65.0s -> "1:05.00")
+///   >= 1 hour -> `h:mm:ss`  (e.g. 3661s -> "1:01:01")
+/// Ref: GNU time info manual, "%E" specifier.
+fn formatElapsedClock(buf: []u8, secs_in: f64) []const u8 {
+    const secs = @max(0.0, secs_in);
+    const total: u64 = @intFromFloat(secs);
+    const hours = total / 3600;
+    if (hours > 0) {
+        const mins = (total % 3600) / 60;
+        const s = total % 60;
+        return std.fmt.bufPrint(buf, "{d}:{d:0>2}:{d:0>2}", .{ hours, mins, s }) catch "";
+    }
+    const mins = total / 60;
+    const s = secs - @as(f64, @floatFromInt(mins * 60));
+    return std.fmt.bufPrint(buf, "{d}:{d:0>5.2}", .{ mins, s }) catch "";
 }
 
 fn printDefaultOutput(fd: c_int, result: TimingResult) void {
@@ -301,13 +341,23 @@ fn printVerboseOutput(fd: c_int, result: TimingResult, command: []const []const 
     printFmtFd(fd, "\tPercent of CPU this job got: {d:.0}%\n", .{result.cpuPercent()});
     printFmtFd(fd, "\tElapsed (wall clock) time (m:ss): {d}:{d:0>5.2}\n", .{ real.mins, real.secs });
 
+    printFmtFd(fd, "\tAverage shared text size (kbytes): {d}\n", .{result.shared_text_kb});
+    printFmtFd(fd, "\tAverage unshared data size (kbytes): {d}\n", .{result.unshared_data_kb});
+    printFmtFd(fd, "\tAverage stack size (kbytes): {d}\n", .{result.unshared_stack_kb});
+    printFmtFd(fd, "\tAverage total size (kbytes): {d}\n", .{result.shared_text_kb + result.unshared_data_kb + result.unshared_stack_kb});
     printFmtFd(fd, "\tMaximum resident set size (kbytes): {d}\n", .{result.max_rss_kb});
-    printFmtFd(fd, "\tMinor (reclaiming a frame) page faults: {d}\n", .{result.minor_faults});
+    printFmtFd(fd, "\tAverage resident set size (kbytes): {d}\n", .{result.unshared_data_kb});
     printFmtFd(fd, "\tMajor (requiring I/O) page faults: {d}\n", .{result.major_faults});
+    printFmtFd(fd, "\tMinor (reclaiming a frame) page faults: {d}\n", .{result.minor_faults});
     printFmtFd(fd, "\tVoluntary context switches: {d}\n", .{result.voluntary_ctx_switches});
     printFmtFd(fd, "\tInvoluntary context switches: {d}\n", .{result.involuntary_ctx_switches});
+    printFmtFd(fd, "\tSwaps: {d}\n", .{result.swaps});
     printFmtFd(fd, "\tFile system inputs: {d}\n", .{result.block_input_ops});
     printFmtFd(fd, "\tFile system outputs: {d}\n", .{result.block_output_ops});
+    printFmtFd(fd, "\tSocket messages sent: {d}\n", .{result.msgs_sent});
+    printFmtFd(fd, "\tSocket messages received: {d}\n", .{result.msgs_recv});
+    printFmtFd(fd, "\tSignals delivered: {d}\n", .{result.signals});
+    printFmtFd(fd, "\tPage size (bytes): {d}\n", .{result.page_size});
     printFmtFd(fd, "\tExit status: {d}\n", .{result.exit_code});
 }
 
@@ -318,10 +368,13 @@ fn printCustomOutput(fd: c_int, result: TimingResult, command: []const []const u
         if (format[i] == '%' and i + 1 < format.len) {
             const spec = format[i + 1];
             switch (spec) {
-                'e', 'E' => {
+                // %e: elapsed real time in seconds.
+                'e' => {
                     const s = std.fmt.bufPrint(&buf, "{d:.2}", .{result.realTimeSecs()}) catch "";
                     writeFd(fd, s);
                 },
+                // %E: elapsed real time in [h:]mm:ss.ss clock format (distinct from %e).
+                'E' => writeFd(fd, formatElapsedClock(&buf, result.realTimeSecs())),
                 'U' => {
                     const s = std.fmt.bufPrint(&buf, "{d:.2}", .{result.userTimeSecs()}) catch "";
                     writeFd(fd, s);
@@ -346,11 +399,13 @@ fn printCustomOutput(fd: c_int, result: TimingResult, command: []const []const u
                     const s = std.fmt.bufPrint(&buf, "{d}", .{result.minor_faults}) catch "";
                     writeFd(fd, s);
                 },
-                'c' => {
+                // GNU: %w = voluntary ("waits"), %c = involuntary ctx switches.
+                // (These were previously swapped.)
+                'w' => {
                     const s = std.fmt.bufPrint(&buf, "{d}", .{result.voluntary_ctx_switches}) catch "";
                     writeFd(fd, s);
                 },
-                'w' => {
+                'c' => {
                     const s = std.fmt.bufPrint(&buf, "{d}", .{result.involuntary_ctx_switches}) catch "";
                     writeFd(fd, s);
                 },
@@ -366,6 +421,52 @@ fn printCustomOutput(fd: c_int, result: TimingResult, command: []const []const u
                     const s = std.fmt.bufPrint(&buf, "{d}", .{result.exit_code}) catch "";
                     writeFd(fd, s);
                 },
+                // %W swaps, %k signals delivered, %r/%s socket msgs recv/sent.
+                'W' => {
+                    const s = std.fmt.bufPrint(&buf, "{d}", .{result.swaps}) catch "";
+                    writeFd(fd, s);
+                },
+                'k' => {
+                    const s = std.fmt.bufPrint(&buf, "{d}", .{result.signals}) catch "";
+                    writeFd(fd, s);
+                },
+                'r' => {
+                    const s = std.fmt.bufPrint(&buf, "{d}", .{result.msgs_recv}) catch "";
+                    writeFd(fd, s);
+                },
+                's' => {
+                    const s = std.fmt.bufPrint(&buf, "{d}", .{result.msgs_sent}) catch "";
+                    writeFd(fd, s);
+                },
+                // Memory averages. Modern kernels leave the ru_i*rss fields at 0, so
+                // GNU (and ztime) emit 0 for these — matching real GNU time output.
+                'X' => {
+                    const s = std.fmt.bufPrint(&buf, "{d}", .{result.shared_text_kb}) catch "";
+                    writeFd(fd, s);
+                },
+                'D' => {
+                    const s = std.fmt.bufPrint(&buf, "{d}", .{result.unshared_data_kb}) catch "";
+                    writeFd(fd, s);
+                },
+                'p' => {
+                    const s = std.fmt.bufPrint(&buf, "{d}", .{result.unshared_stack_kb}) catch "";
+                    writeFd(fd, s);
+                },
+                't' => {
+                    // %t: average resident set size (KB). idrss-derived; 0 on modern kernels.
+                    const s = std.fmt.bufPrint(&buf, "{d}", .{result.unshared_data_kb}) catch "";
+                    writeFd(fd, s);
+                },
+                'K' => {
+                    // %K: average total (text+data+stack) memory (KB).
+                    const total = result.shared_text_kb + result.unshared_data_kb + result.unshared_stack_kb;
+                    const s = std.fmt.bufPrint(&buf, "{d}", .{total}) catch "";
+                    writeFd(fd, s);
+                },
+                'Z' => {
+                    const s = std.fmt.bufPrint(&buf, "{d}", .{result.page_size}) catch "";
+                    writeFd(fd, s);
+                },
                 'C' => {
                     for (command, 0..) |arg, j| {
                         if (j > 0) writeFd(fd, " ");
@@ -373,8 +474,6 @@ fn printCustomOutput(fd: c_int, result: TimingResult, command: []const []const u
                     }
                 },
                 '%' => writeFd(fd, "%"),
-                'n' => writeFd(fd, "\n"),
-                't' => writeFd(fd, "\t"),
                 else => {
                     writeFd(fd, "%");
                     const b: [1]u8 = .{spec};
@@ -423,18 +522,29 @@ fn printHelp() void {
         \\  -h, --help       Show this help message
         \\  --version        Show version
         \\
-        \\Format specifiers for -f:
+        \\Format specifiers for -f (GNU time semantics):
         \\  %e  Elapsed real time (seconds)
+        \\  %E  Elapsed real time ([h:]mm:ss.ss)
         \\  %U  User CPU time (seconds)
         \\  %S  System CPU time (seconds)
         \\  %P  Percent CPU ((U+S)/E)
         \\  %M  Maximum resident set size (KB)
+        \\  %K  Average total memory (KB)
+        \\  %X  Average shared text (KB)
+        \\  %D  Average unshared data (KB)
+        \\  %p  Average unshared stack (KB)
+        \\  %t  Average resident set size (KB)
+        \\  %Z  System page size (bytes)
         \\  %F  Major page faults
         \\  %R  Minor page faults
-        \\  %c  Voluntary context switches
-        \\  %w  Involuntary context switches
+        \\  %w  Voluntary context switches
+        \\  %c  Involuntary context switches
+        \\  %W  Times swapped out of memory
+        \\  %k  Signals delivered
         \\  %I  File system inputs
         \\  %O  File system outputs
+        \\  %r  Socket messages received
+        \\  %s  Socket messages sent
         \\  %x  Exit status
         \\  %C  Command being timed
         \\  %%  Literal %
@@ -598,6 +708,12 @@ pub fn main(init: std.process.Init) !void {
     }
     defer {
         if (opened_fd >= 0) _ = libc.close(opened_fd);
+    }
+
+    // GNU time prints this to the timing stream when the child died from a signal,
+    // before the resource summary. Ref: GNU time resuse.c summarize().
+    if (result.signal) |sig| {
+        printFmtFd(output_fd, "Command terminated by signal {d}\n", .{sig});
     }
 
     // Print timing output

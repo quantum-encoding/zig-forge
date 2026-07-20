@@ -25,4 +25,29 @@ pub fn build(b: *std.Build) void {
 
     const run_step = b.step("run", "Run zfree");
     run_step.dependOn(&run_cmd.step);
+
+    // ---- Tests -----------------------------------------------------------
+    // Externally-anchored parity tests. Pure-function tests compare renderReport
+    // / computeMemUsed / formatValue output byte-for-byte against real procps-ng
+    // 4.0.6 `free` output captured from a Linux host. A handful of end-to-end
+    // tests spawn the built binary to pin --help/--version/invalid-option
+    // behavior (exit codes + stdout/stderr routing) against documented GNU free.
+    const test_opts = b.addOptions();
+    test_opts.addOptionPath("zfree_bin", exe.getEmittedBin());
+
+    const tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/gnu_parity_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    tests.root_module.addOptions("build_options", test_opts);
+
+    const run_tests = b.addRunArtifact(tests);
+    run_tests.has_side_effects = true; // always re-run (spawns child processes)
+
+    const test_step = b.step("test", "Run GNU-parity tests against the built zfree");
+    test_step.dependOn(&run_tests.step);
 }

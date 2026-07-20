@@ -15,6 +15,7 @@ extern "c" fn localtime(t: *const i64) ?*Tm;
 extern "c" fn gmtime(t: *const i64) ?*Tm;
 extern "c" fn strftime(s: [*]u8, max: usize, format: [*:0]const u8, tm: *const Tm) usize;
 extern "c" fn mktime(tm: *Tm) i64;
+extern "c" fn timegm(tm: *Tm) i64;
 
 const Tm = extern struct {
     tm_sec: c_int,
@@ -112,11 +113,13 @@ fn printUsage() void {
         \\  zdate -Iseconds             # ISO 8601 with seconds
         \\
     ;
-    writeStderr(usage);
+    // GNU date writes --help/--version to stdout on the success path so that
+    // `date --help | grep` and `date --version | head` work in scripts.
+    writeStdout(usage);
 }
 
 fn printVersion() void {
-    writeStderr("zdate " ++ VERSION ++ " - High-performance date utility\n");
+    writeStdout("zdate " ++ VERSION ++ " - High-performance date utility\n");
 }
 
 fn parseArgs(args: []const []const u8) !Config {
@@ -174,6 +177,17 @@ fn parseArgs(args: []const []const u8) !Config {
                 writeStderr(err_msg);
                 return error.InvalidOption;
             }
+        } else {
+            // Non-option operand. GNU date's only positional forms are the
+            // set-time MMDDhhmm[[CC]YY][.ss] syntax (unimplemented — it needs
+            // privilege and mutates the system clock) and +FORMAT. Anything
+            // else is an extra operand: error out with exit 1 like GNU, rather
+            // than silently ignoring it and printing the current date.
+            var err_buf: [256]u8 = undefined;
+            const err_msg = std.fmt.bufPrint(&err_buf, "zdate: extra operand '{s}'\n", .{arg}) catch "zdate: extra operand\n";
+            writeStderr(err_msg);
+            writeStderr("Try 'zdate --help' for more information.\n");
+            return error.ExtraOperand;
         }
     }
 
@@ -232,6 +246,46 @@ fn getRfc3339Format(precision: []const u8) []const u8 {
     } else {
         return "%Y-%m-%d";
     }
+}
+
+fn substituteColonTz(buf: []u8, fmt: []const u8, timestamp: i64, utc: bool) []const u8 {
+    // Replace "%z" with a colon-separated UTC offset "+HH:MM" as required by
+    // ISO 8601 / RFC 3339. macOS/BSD strftime lacks the GNU "%:z" extension,
+    // so we format the offset from tm_gmtoff by hand.
+    const ts = timestamp;
+    const tm_ptr = if (utc) gmtime(&ts) else localtime(&ts);
+    const off: c_long = if (tm_ptr) |p| p.tm_gmtoff else 0;
+    const sign: u8 = if (off < 0) '-' else '+';
+    const abs_off: c_long = if (off < 0) -off else off;
+    const hh: u8 = @intCast(@divTrunc(abs_off, 3600));
+    const mm: u8 = @intCast(@divTrunc(@rem(abs_off, 3600), 60));
+
+    // "+HH:MM" — six bytes, formatted by hand (no strftime %:z on macOS).
+    const off_arr = [6]u8{
+        sign,
+        '0' + hh / 10,
+        '0' + hh % 10,
+        ':',
+        '0' + mm / 10,
+        '0' + mm % 10,
+    };
+
+    var w: usize = 0;
+    var i: usize = 0;
+    while (i < fmt.len) {
+        if (i + 1 < fmt.len and fmt[i] == '%' and fmt[i + 1] == 'z') {
+            if (w + off_arr.len > buf.len) return fmt;
+            @memcpy(buf[w .. w + off_arr.len], &off_arr);
+            w += off_arr.len;
+            i += 2;
+        } else {
+            if (w >= buf.len) return fmt;
+            buf[w] = fmt[i];
+            w += 1;
+            i += 1;
+        }
+    }
+    return buf[0..w];
 }
 
 fn getFileModTime(path: []const u8) !i64 {
@@ -300,7 +354,104 @@ fn parseDateString(date_str: []const u8, utc: bool) ?i64 {
         return mktime(&tm);
     }
 
+    // Absolute forms: "YYYY-MM-DD", "YYYY-MM-DD HH:MM[:SS]",
+    // "YYYY-MM-DDTHH:MM[:SS]", or time-only "HH:MM[:SS]".
+    if (parseAbsoluteDate(date_str, utc)) |ts| {
+        return ts;
+    }
+
     return null;
+}
+
+fn scanInt(s: []const u8, i: *usize, max_digits: usize) ?c_int {
+    var v: c_int = 0;
+    var n: usize = 0;
+    while (i.* < s.len and s[i.*] >= '0' and s[i.*] <= '9' and n < max_digits) {
+        v = v * 10 + @as(c_int, s[i.*] - '0');
+        i.* += 1;
+        n += 1;
+    }
+    if (n == 0) return null;
+    return v;
+}
+
+fn tryParseDate(s: []const u8, i: *usize, tm: *Tm) bool {
+    var idx = i.*;
+    const y = scanInt(s, &idx, 4) orelse return false;
+    if (idx >= s.len or s[idx] != '-') return false;
+    idx += 1;
+    const mo = scanInt(s, &idx, 2) orelse return false;
+    if (idx >= s.len or s[idx] != '-') return false;
+    idx += 1;
+    const d = scanInt(s, &idx, 2) orelse return false;
+    tm.tm_year = y - 1900;
+    tm.tm_mon = mo - 1;
+    tm.tm_mday = d;
+    i.* = idx;
+    return true;
+}
+
+fn tryParseTime(s: []const u8, i: *usize, tm: *Tm) bool {
+    var idx = i.*;
+    const h = scanInt(s, &idx, 2) orelse return false;
+    if (idx >= s.len or s[idx] != ':') return false;
+    idx += 1;
+    const mi = scanInt(s, &idx, 2) orelse return false;
+    var sec: c_int = 0;
+    if (idx < s.len and s[idx] == ':') {
+        idx += 1;
+        sec = scanInt(s, &idx, 2) orelse return false;
+    }
+    tm.tm_hour = h;
+    tm.tm_min = mi;
+    tm.tm_sec = sec;
+    i.* = idx;
+    return true;
+}
+
+fn parseAbsoluteDate(s_in: []const u8, utc: bool) ?i64 {
+    const s = std.mem.trim(u8, s_in, " ");
+    if (s.len == 0) return null;
+
+    var now_ts = time(null);
+    const base = if (utc) gmtime(&now_ts) else localtime(&now_ts);
+    if (base == null) return null;
+    var tm = base.?.*;
+
+    var i: usize = 0;
+    var has_date = false;
+    var has_time = false;
+
+    if (tryParseDate(s, &i, &tm)) {
+        has_date = true;
+        if (i < s.len and (s[i] == 'T' or s[i] == ' ')) {
+            i += 1;
+            if (!tryParseTime(s, &i, &tm)) return null;
+            has_time = true;
+        }
+    } else {
+        i = 0;
+        if (tryParseTime(s, &i, &tm)) {
+            has_time = true;
+        }
+    }
+
+    if (!has_date and !has_time) return null;
+
+    // The whole string must be consumed (no trailing junk).
+    while (i < s.len and s[i] == ' ') i += 1;
+    if (i != s.len) return null;
+
+    // A bare date implies midnight; a bare time keeps today's date.
+    if (has_date and !has_time) {
+        tm.tm_hour = 0;
+        tm.tm_min = 0;
+        tm.tm_sec = 0;
+    }
+    // Let mktime/timegm re-derive DST rather than trusting the base tm.
+    tm.tm_isdst = -1;
+
+    return if (utc) timegm(&tm) else mktime(&tm);
 }
 
 fn parseI64(s: []const u8) ?i64 {
@@ -313,10 +464,14 @@ fn parseI64(s: []const u8) ?i64 {
     } else if (s[0] == '+') {
         start = 1;
     }
+    if (start >= s.len) return null;
     var val: i64 = 0;
     for (s[start..]) |c| {
         if (c < '0' or c > '9') return null;
-        val = val * 10 + @as(i64, c - '0');
+        // Checked arithmetic: overflow -> null so the caller reports
+        // "invalid date" (exit 1) like GNU date, instead of panicking.
+        val = std.math.mul(i64, val, 10) catch return null;
+        val = std.math.add(i64, val, @as(i64, c - '0')) catch return null;
     }
     return if (negative) -val else val;
 }
@@ -356,7 +511,11 @@ fn parseRelativeDate(s: []const u8, tm: *Tm) bool {
     var num: c_int = 0;
     var has_num = false;
     while (idx < s.len and s[idx] >= '0' and s[idx] <= '9') {
-        num = num * 10 + @as(c_int, @intCast(s[idx] - '0'));
+        // Checked arithmetic: an oversized relative count overflows c_int;
+        // return false so the input falls through to "invalid date" (exit 1)
+        // instead of trapping on attacker- or script-supplied -d input.
+        num = std.math.mul(c_int, num, 10) catch return false;
+        num = std.math.add(c_int, num, @as(c_int, @intCast(s[idx] - '0'))) catch return false;
         has_num = true;
         idx += 1;
     }
@@ -506,14 +665,15 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // Determine format
+    var fmt_buf: [256]u8 = undefined;
     const format: []const u8 = if (config.format) |f|
         f
     else if (config.rfc_2822)
         getRfc2822Format()
     else if (config.rfc_3339) |precision|
-        getRfc3339Format(precision)
+        substituteColonTz(&fmt_buf, getRfc3339Format(precision), timestamp, config.utc)
     else if (config.iso_8601) |precision|
-        getIso8601Format(precision)
+        substituteColonTz(&fmt_buf, getIso8601Format(precision), timestamp, config.utc)
     else
         getDefaultFormat();
 

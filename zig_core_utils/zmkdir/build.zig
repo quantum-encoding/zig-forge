@@ -40,4 +40,24 @@ pub fn build(b: *std.Build) void {
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
+
+    // GNU-parity tests: diff zmkdir's live output against the real GNU
+    // coreutils `mkdir` binary. These need the built executable's path,
+    // exposed via a build_options module (`zmkdir_bin`). The LazyPath
+    // dependency also guarantees the exe is built before the tests run.
+    const parity_opts = b.addOptions();
+    parity_opts.addOptionPath("zmkdir_bin", exe.getEmittedBin());
+
+    const parity_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/gnu_parity_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    parity_tests.root_module.addImport("build_options", parity_opts.createModule());
+
+    const run_parity_tests = b.addRunArtifact(parity_tests);
+    test_step.dependOn(&run_parity_tests.step);
 }

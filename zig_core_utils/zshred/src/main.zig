@@ -16,7 +16,6 @@ extern "c" fn close(fd: c_int) c_int;
 extern "c" fn write(fd: c_int, buf: [*]const u8, count: usize) isize;
 extern "c" fn lseek(fd: c_int, offset: i64, whence: c_int) i64;
 extern "c" fn fsync(fd: c_int) c_int;
-extern "c" fn time(t: ?*i64) i64;
 
 const SEEK_SET: c_int = 0;
 const O_WRONLY: c_int = 1;
@@ -67,6 +66,7 @@ const Stat = switch (builtin.os.tag) {
 };
 
 extern "c" fn stat(path: [*:0]const u8, buf: *Stat) c_int;
+extern "c" fn fstat(fd: c_int, buf: *Stat) c_int;
 
 const Config = struct {
     iterations: u32 = 3,
@@ -75,8 +75,6 @@ const Config = struct {
     verbose: bool = false,
     force: bool = false,
     exact: bool = false,
-    files: [64][]const u8 = undefined,
-    file_count: usize = 0,
 };
 
 fn writeStdout(data: []const u8) void {
@@ -103,23 +101,44 @@ fn printUsage() void {
         \\      --version      Output version information and exit
         \\
     ;
-    writeStderr(usage);
+    writeStdout(usage);
 }
 
 fn printVersion() void {
-    writeStderr("zshred " ++ VERSION ++ "\n");
+    writeStdout("zshred " ++ VERSION ++ "\n");
+}
+
+fn rngFatal() noreturn {
+    // A secure-wipe tool must NEVER fall back to a predictable stream: if the
+    // OS entropy source fails we abort the pass rather than write guessable
+    // "random" data (the old code fell back to a time()-seeded LCG). Better to
+    // leave the file un-shredded and error than to give a false guarantee.
+    writeStderr("zshred: fatal: could not obtain random data from the OS\n");
+    std.process.exit(1);
 }
 
 fn getRandom(buf: []u8) void {
-    // Use getrandom syscall on Linux (arc4random_buf not available on glibc)
-    const result = std.os.linux.getrandom(buf.ptr, buf.len, 0);
-    if (@as(isize, @bitCast(result)) < 0) {
-        // Fallback: fill with pseudo-random data using simple PRNG
-        var seed: u64 = @bitCast(time(null));
-        for (buf) |*byte| {
-            seed = seed *% 6364136223846793005 +% 1442695040888963407;
-            byte.* = @truncate(seed >> 33);
-        }
+    // Cross-platform OS CSPRNG.
+    //
+    // The previous implementation called std.os.linux.getrandom directly on
+    // ALL platforms; on macOS that issues a Linux-ABI raw syscall that returns
+    // a non-negative value WITHOUT filling the buffer, so every "random" pass
+    // wrote the uninitialized stack buffer (a constant 0xAA in Debug, zeros in
+    // ReleaseFast) to disk — voiding the entire security guarantee. See the
+    // gnu_parity_test.zig "random overwrite is non-constant" anchor.
+    switch (builtin.os.tag) {
+        .linux => {
+            // getrandom(2) may return short; loop until the buffer is full.
+            var off: usize = 0;
+            while (off < buf.len) {
+                const rc = std.os.linux.getrandom(buf[off..].ptr, buf.len - off, 0);
+                const signed: isize = @bitCast(rc);
+                if (signed <= 0) rngFatal();
+                off += @intCast(signed);
+            }
+        },
+        // arc4random_buf is a CSPRNG on Darwin/BSD, cannot fail, no length cap.
+        else => std.c.arc4random_buf(buf.ptr, buf.len),
     }
 }
 
@@ -140,39 +159,38 @@ fn formatSize(size: u64, buf: []u8) []const u8 {
     }
 }
 
+/// Write exactly `len` bytes from `buf` to `fd`, advancing past short writes.
+/// Treats a return of 0 as an error (it is never a success and previously
+/// spun the loop forever), and resumes from the correct buffer offset instead
+/// of re-writing the head bytes on every partial write.
+fn writeFull(fd: c_int, buf: []const u8, len: usize) !void {
+    var off: usize = 0;
+    while (off < len) {
+        const w = write(fd, buf[off..].ptr, len - off);
+        if (w <= 0) return error.WriteFailed;
+        off += @intCast(w);
+    }
+}
+
+fn roundUpToBlock(size: u64, blksize: u64) u64 {
+    if (blksize == 0) return size;
+    return ((size + blksize - 1) / blksize) * blksize;
+}
+
 fn shredFile(path: []const u8, cfg: *const Config) !void {
     var path_buf: [4096]u8 = undefined;
     const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return error.PathTooLong;
 
-    // Get file size
-    var stat_buf: Stat = undefined;
-    if (stat(path_z, &stat_buf) != 0) {
-        writeStderr("zshred: cannot stat '");
-        writeStderr(path);
-        writeStderr("'\n");
-        return error.StatFailed;
-    }
-
-    const file_size: u64 = @intCast(stat_buf.size);
-    if (file_size == 0) {
-        if (cfg.verbose) {
-            writeStderr("zshred: ");
-            writeStderr(path);
-            writeStderr(": empty file\n");
-        }
-        if (cfg.remove) {
-            _ = unlink(path_z);
-        }
-        return;
-    }
-
-    // Open file for writing
-    if (cfg.force) {
-        // Try to change permissions if needed
+    // Open FIRST, then stat via the fd. Doing stat(path) then open(path) as two
+    // separate name resolutions is a TOCTOU window (an attacker could swap the
+    // target between the two); fstat(fd) measures exactly the object we will
+    // overwrite. Under -f we only chmod-and-retry when the initial open fails,
+    // rather than unconditionally chmod'ing a path we have not yet opened.
+    var fd = open(path_z, O_WRONLY, 0);
+    if (fd < 0 and cfg.force) {
         _ = chmod(path_z, 0o600);
+        fd = open(path_z, O_WRONLY, 0);
     }
-
-    const fd = open(path_z, O_WRONLY, 0);
     if (fd < 0) {
         writeStderr("zshred: cannot open '");
         writeStderr(path);
@@ -180,6 +198,33 @@ fn shredFile(path: []const u8, cfg: *const Config) !void {
         return error.OpenFailed;
     }
     defer _ = close(fd);
+
+    // Get file size from the opened descriptor.
+    var stat_buf: Stat = undefined;
+    if (fstat(fd, &stat_buf) != 0) {
+        writeStderr("zshred: cannot stat '");
+        writeStderr(path);
+        writeStderr("'\n");
+        return error.StatFailed;
+    }
+
+    const file_size: u64 = @intCast(stat_buf.size);
+    // GNU shred overwrites up to the next filesystem-block boundary by default
+    // to scrub tail slack; -x/--exact disables that and writes only file_size.
+    const blksize: u64 = if (stat_buf.st_blksize > 0) @intCast(stat_buf.st_blksize) else 0;
+    const write_size: u64 = if (cfg.exact) file_size else roundUpToBlock(file_size, blksize);
+    if (file_size == 0) {
+        if (cfg.verbose) {
+            writeStderr("zshred: ");
+            writeStderr(path);
+            writeStderr(": empty file\n");
+        }
+        if (cfg.remove) {
+            _ = close(fd);
+            _ = unlink(path_z);
+        }
+        return;
+    }
 
     var buf: [65536]u8 = undefined;
     var size_buf: [32]u8 = undefined;
@@ -206,17 +251,16 @@ fn shredFile(path: []const u8, cfg: *const Config) !void {
         // Seek to beginning
         _ = lseek(fd, 0, SEEK_SET);
 
-        var remaining = file_size;
+        var remaining = write_size;
         while (remaining > 0) {
             const chunk = @min(remaining, buf.len);
             getRandom(buf[0..chunk]);
 
-            const written = write(fd, &buf, chunk);
-            if (written < 0) {
+            writeFull(fd, &buf, chunk) catch {
                 if (cfg.verbose) writeStderr(" FAILED\n");
                 return error.WriteFailed;
-            }
-            remaining -= @intCast(written);
+            };
+            remaining -= chunk;
         }
 
         // Sync to disk
@@ -246,15 +290,14 @@ fn shredFile(path: []const u8, cfg: *const Config) !void {
         _ = lseek(fd, 0, SEEK_SET);
         @memset(&buf, 0);
 
-        var remaining = file_size;
+        var remaining = write_size;
         while (remaining > 0) {
             const chunk = @min(remaining, buf.len);
-            const written = write(fd, &buf, chunk);
-            if (written < 0) {
+            writeFull(fd, &buf, chunk) catch {
                 if (cfg.verbose) writeStderr(" FAILED\n");
                 return error.WriteFailed;
-            }
-            remaining -= @intCast(written);
+            };
+            remaining -= chunk;
         }
 
         _ = fsync(fd);
@@ -284,28 +327,34 @@ fn shredFile(path: []const u8, cfg: *const Config) !void {
 }
 
 fn parseInt(s: []const u8) ?u32 {
-    var result: u32 = 0;
-    for (s) |c| {
-        if (c < '0' or c > '9') return null;
-        result = result * 10 + (c - '0');
-    }
-    return result;
+    // std.fmt.parseInt rejects empty strings, non-digits, and — critically —
+    // values that overflow u32, returning error.Overflow instead of the raw
+    // `result * 10 + d` u32 wrap/panic the hand-rolled loop performed. GNU
+    // shred likewise rejects a pass count that overflows its integer type
+    // ("invalid number of passes: 'N': Value too large to be stored...").
+    return std.fmt.parseInt(u32, s, 10) catch null;
+}
+
+fn oom() noreturn {
+    writeStderr("zshred: out of memory\n");
+    std.process.exit(1);
 }
 
 pub fn main(init: std.process.Init) void {
     var cfg = Config{};
+    const alloc = std.heap.page_allocator;
 
-    // Collect args into array
-    var args_storage: [256][]const u8 = undefined;
-    var args_count: usize = 0;
+    // Collect args into a growable list — no fixed cap. The previous [256]
+    // arg / [64] file caps silently DROPPED operands past the limit, so
+    // `zshred *` on a large glob would report success while leaving files
+    // untouched. GNU shred processes every operand; so must we.
+    var args_list: std.ArrayListUnmanaged([]const u8) = .empty;
+    var files_list: std.ArrayListUnmanaged([]const u8) = .empty;
     var args_iter = std.process.Args.Iterator.init(init.minimal.args);
     while (args_iter.next()) |arg| {
-        if (args_count < args_storage.len) {
-            args_storage[args_count] = arg;
-            args_count += 1;
-        }
+        args_list.append(alloc, arg) catch oom();
     }
-    const args = args_storage[0..args_count];
+    const args = args_list.items;
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -334,7 +383,7 @@ pub fn main(init: std.process.Init) void {
                 if (parseInt(val)) |n| {
                     cfg.iterations = n;
                 } else {
-                    writeStderr("zshred: invalid iteration count\n");
+                    writeStderr("zshred: invalid number of passes\n");
                     std.process.exit(1);
                 }
             }
@@ -343,7 +392,7 @@ pub fn main(init: std.process.Init) void {
             if (parseInt(val)) |n| {
                 cfg.iterations = n;
             } else {
-                writeStderr("zshred: invalid iteration count\n");
+                writeStderr("zshred: invalid number of passes\n");
                 std.process.exit(1);
             }
         } else if (std.mem.startsWith(u8, arg, "-n")) {
@@ -351,24 +400,18 @@ pub fn main(init: std.process.Init) void {
             if (parseInt(val)) |n| {
                 cfg.iterations = n;
             } else {
-                writeStderr("zshred: invalid iteration count\n");
+                writeStderr("zshred: invalid number of passes\n");
                 std.process.exit(1);
-            }
-        } else if (arg.len > 0 and arg[0] != '-') {
-            if (cfg.file_count < cfg.files.len) {
-                cfg.files[cfg.file_count] = arg;
-                cfg.file_count += 1;
             }
         } else if (std.mem.eql(u8, arg, "--")) {
             // Rest are files
             i += 1;
             while (i < args.len) : (i += 1) {
-                if (cfg.file_count < cfg.files.len) {
-                    cfg.files[cfg.file_count] = args[i];
-                    cfg.file_count += 1;
-                }
+                files_list.append(alloc, args[i]) catch oom();
             }
             break;
+        } else if (arg.len > 0 and arg[0] != '-') {
+            files_list.append(alloc, arg) catch oom();
         } else {
             writeStderr("zshred: unrecognized option '");
             writeStderr(arg);
@@ -377,14 +420,14 @@ pub fn main(init: std.process.Init) void {
         }
     }
 
-    if (cfg.file_count == 0) {
+    if (files_list.items.len == 0) {
         writeStderr("zshred: missing file operand\n");
         writeStderr("Try 'zshred --help' for more information.\n");
         std.process.exit(1);
     }
 
     var exit_code: u8 = 0;
-    for (cfg.files[0..cfg.file_count]) |path| {
+    for (files_list.items) |path| {
         shredFile(path, &cfg) catch {
             exit_code = 1;
         };

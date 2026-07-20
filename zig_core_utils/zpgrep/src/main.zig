@@ -6,6 +6,7 @@
 //! Usage: zpgrep [OPTIONS] PATTERN
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const VERSION = "1.0.0";
 
@@ -29,6 +30,58 @@ const c_read = @extern(*const fn (c_int, [*]u8, usize) callconv(.c) isize, .{ .n
 
 const O_RDONLY: c_int = 0;
 
+// ---------------------------------------------------------------------------
+// POSIX ERE matching via libc regcomp/regexec.
+//
+// procps-ng `pgrep` matches its PATTERN as an *extended* regular expression
+// (regcomp(REG_EXTENDED)), NOT a literal substring. `pgrep '^ssh$'`,
+// `pgrep 'foo|bar'`, `pgrep 'ba.h'` all depend on this. The previous
+// implementation used std.mem.indexOf (substring), which silently mismatched
+// every anchored/alternation/metacharacter pattern.
+// ---------------------------------------------------------------------------
+const REG_EXTENDED: c_int = 1; // same value on glibc and BSD/macOS
+const REG_NOMATCH: c_int = 1;
+
+// regoff_t differs by libc: glibc uses `int`, BSD/macOS uses off_t (64-bit).
+const regoff_t = if (builtin.os.tag == .linux) c_int else i64;
+const regmatch_t = extern struct { rm_so: regoff_t, rm_eo: regoff_t };
+
+// regex_t (preg) is an opaque compiled-pattern buffer whose size varies by
+// libc (glibc ~64 bytes, BSD ~32). Over-allocate so both fit; we only ever
+// pass a pointer to it.
+const RegexStorage = extern struct { buf: [128]u8 align(16) = undefined };
+
+extern "c" fn regcomp(preg: *RegexStorage, pattern: [*:0]const u8, cflags: c_int) c_int;
+extern "c" fn regexec(preg: *const RegexStorage, string: [*:0]const u8, nmatch: usize, pmatch: [*]regmatch_t, eflags: c_int) c_int;
+extern "c" fn regfree(preg: *RegexStorage) void;
+
+pub const Matcher = struct {
+    preg: RegexStorage,
+    exact: bool,
+
+    pub fn init(pattern_z: [*:0]const u8, exact: bool) !Matcher {
+        var m: Matcher = .{ .preg = .{}, .exact = exact };
+        if (regcomp(&m.preg, pattern_z, REG_EXTENDED) != 0) return error.InvalidRegex;
+        return m;
+    }
+
+    pub fn deinit(self: *Matcher) void {
+        regfree(&self.preg);
+    }
+
+    /// text_z must be NUL-terminated; text_len is its length excluding the NUL.
+    pub fn matches(self: *const Matcher, text_z: [*:0]const u8, text_len: usize) bool {
+        var pmatch: [1]regmatch_t = undefined;
+        if (regexec(&self.preg, text_z, 1, &pmatch, 0) != 0) return false;
+        if (self.exact) {
+            // -x: anchored whole-string match. procps requires the match to
+            // span the entire candidate string.
+            return pmatch[0].rm_so == 0 and @as(usize, @intCast(pmatch[0].rm_eo)) == text_len;
+        }
+        return true;
+    }
+};
+
 // Writers
 fn writeStderr(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
@@ -42,10 +95,17 @@ fn writeStdout(comptime fmt: []const u8, args: anytype) void {
     _ = write(1, msg.ptr, msg.len);
 }
 
+// Write raw bytes without the 4096-byte format-buffer cap (used for -a, whose
+// command line can exceed the stack buffer and would otherwise be dropped).
+fn writeBytes(fd: c_int, bytes: []const u8) void {
+    if (bytes.len == 0) return;
+    _ = write(fd, bytes.ptr, bytes.len);
+}
+
 const ProcessInfo = struct {
     pid: i32,
-    name: []const u8,
-    cmdline: []const u8,
+    name: [:0]const u8,
+    cmdline: [:0]const u8,
     uid: u32,
     start_time: u64,
 };
@@ -182,33 +242,54 @@ pub fn main(init: std.process.Init) !void {
         matches.deinit(allocator);
     }
 
-    try findProcesses(allocator, &matches, pattern.?, full_match, exact_match, user_filter);
+    // Compile the pattern as an extended regular expression (procps parity).
+    const pattern_z = try allocator.dupeZ(u8, pattern.?);
+    defer allocator.free(pattern_z);
+    var matcher = Matcher.init(pattern_z.ptr, exact_match) catch {
+        // procps exits EXIT_USAGE (2) on an invalid regular expression.
+        writeStderr("zpgrep: invalid regular expression: {s}\n", .{pattern.?});
+        std.process.exit(2);
+    };
+    defer matcher.deinit();
 
-    if (matches.items.len == 0) {
-        std.process.exit(1); // No matches
-    }
+    try findProcesses(allocator, &matches, &matcher, full_match, user_filter);
 
-    // Filter to newest/oldest if requested
+    // Apply -n/-o selection with a deterministic PID tie-break (procps breaks
+    // start_time ties by PID: highest PID for -n/newest, lowest for -o/oldest).
     var targets = matches.items;
     var single_target: [1]ProcessInfo = undefined;
-
-    if (newest_only or oldest_only) {
+    if ((newest_only or oldest_only) and matches.items.len > 0) {
         var selected = targets[0];
         for (targets[1..]) |p| {
-            if (newest_only and p.start_time > selected.start_time) {
-                selected = p;
-            } else if (oldest_only and p.start_time < selected.start_time) {
-                selected = p;
+            if (newest_only) {
+                if (p.start_time > selected.start_time or
+                    (p.start_time == selected.start_time and p.pid > selected.pid))
+                {
+                    selected = p;
+                }
+            } else { // oldest_only
+                if (p.start_time < selected.start_time or
+                    (p.start_time == selected.start_time and p.pid < selected.pid))
+                {
+                    selected = p;
+                }
             }
         }
         single_target[0] = selected;
         targets = &single_target;
     }
 
-    // Count only mode
+    // -c/--count: print the count even when it is zero. procps-ng `pgrep -c`
+    // prints "0\n" and still returns 1 for no matches; scripts parse this
+    // field. This MUST run before the empty-set early exit below.
     if (count_only) {
-        writeStdout("{d}\n", .{targets.len});
-        return;
+        const n: usize = if (matches.items.len == 0) 0 else targets.len;
+        writeStdout("{d}\n", .{n});
+        std.process.exit(if (matches.items.len == 0) 1 else 0);
+    }
+
+    if (matches.items.len == 0) {
+        std.process.exit(1); // No matches
     }
 
     // Output results
@@ -220,7 +301,8 @@ pub fn main(init: std.process.Init) !void {
         first = false;
 
         if (list_full) {
-            writeStdout("{d} {s}", .{ p.pid, p.cmdline });
+            writeStdout("{d} ", .{p.pid});
+            writeBytes(1, p.cmdline);
         } else if (list_name) {
             writeStdout("{d} {s}", .{ p.pid, p.name });
         } else {
@@ -233,9 +315,8 @@ pub fn main(init: std.process.Init) !void {
 fn findProcesses(
     allocator: std.mem.Allocator,
     matches: *std.ArrayListUnmanaged(ProcessInfo),
-    pattern: []const u8,
+    matcher: *const Matcher,
     full_match: bool,
-    exact_match: bool,
     user_filter: ?u32,
 ) !void {
     const dir = opendir("/proc") orelse return;
@@ -257,10 +338,7 @@ fn findProcesses(
         }
 
         const match_str = if (full_match) info.cmdline else info.name;
-        const matched = if (exact_match)
-            std.mem.eql(u8, match_str, pattern)
-        else
-            std.mem.indexOf(u8, match_str, pattern) != null;
+        const matched = matcher.matches(match_str.ptr, match_str.len);
 
         if (matched) {
             try matches.append(allocator, info);
@@ -286,27 +364,39 @@ fn readProcessInfo(allocator: std.mem.Allocator, pid: i32) !ProcessInfo {
         if (len <= 0) return error.EmptyName;
         const ulen: usize = @intCast(len);
         const end = if (ulen > 0 and buf[ulen - 1] == '\n') ulen - 1 else ulen;
-        break :blk try allocator.dupe(u8, buf[0..end]);
+        break :blk try allocator.dupeZ(u8, buf[0..end]);
     };
     errdefer allocator.free(name);
 
-    // Read cmdline
+    // Read cmdline — loop until EOF into a growable buffer so command lines
+    // longer than one read (java/node invocations can exceed 4 KiB) are not
+    // truncated for -f matching or -a output.
     const cmdline_len = std.fmt.bufPrint(&path_buf, "/proc/{d}/cmdline", .{pid}) catch return error.PathTooLong;
     path_buf[cmdline_len.len] = 0;
     const cmdline = blk: {
         const fd = open(@ptrCast(&path_buf), O_RDONLY);
-        if (fd < 0) break :blk try allocator.dupe(u8, name);
+        if (fd < 0) break :blk try allocator.dupeZ(u8, name);
         defer _ = close(fd);
+        var list: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer list.deinit(allocator);
         var buf: [4096]u8 = undefined;
-        const len = c_read(fd, &buf, buf.len);
-        if (len <= 0) break :blk try allocator.dupe(u8, name);
-        const ulen: usize = @intCast(len);
-        for (buf[0..ulen]) |*ch| {
+        while (true) {
+            const len = c_read(fd, &buf, buf.len);
+            if (len <= 0) break;
+            try list.appendSlice(allocator, buf[0..@intCast(len)]);
+        }
+        if (list.items.len == 0) {
+            list.deinit(allocator);
+            break :blk try allocator.dupeZ(u8, name);
+        }
+        for (list.items) |*ch| {
             if (ch.* == 0) ch.* = ' ';
         }
-        var end = ulen;
-        while (end > 0 and buf[end - 1] == ' ') end -= 1;
-        break :blk try allocator.dupe(u8, buf[0..end]);
+        var end = list.items.len;
+        while (end > 0 and list.items[end - 1] == ' ') end -= 1;
+        const out = try allocator.dupeZ(u8, list.items[0..end]);
+        list.deinit(allocator);
+        break :blk out;
     };
     errdefer allocator.free(cmdline);
 
@@ -375,6 +465,7 @@ fn printHelp() void {
         \\Usage: zpgrep [OPTIONS] PATTERN
         \\
         \\Search for processes matching PATTERN and display their PIDs.
+        \\PATTERN is an extended regular expression (POSIX ERE).
         \\
         \\Options:
         \\  -f, --full         match against full command line

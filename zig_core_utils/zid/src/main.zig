@@ -2,7 +2,7 @@
 //!
 //! Print user and group IDs for the current user or specified user.
 //!
-//! Usage: zid [OPTION]... [USER]
+//! Usage: zid [OPTION]... [USER]...
 
 const std = @import("std");
 const posix = std.posix;
@@ -47,31 +47,54 @@ const Config = struct {
     show_real: bool = false,
     show_zero: bool = false,
     context: bool = false,
-    username: ?[]const u8 = null,
+    // Collected USER operands (GNU 9.x prints a block per operand).
+    usernames: std.ArrayListUnmanaged([]const u8) = .empty,
 };
 
+/// Robust write(2): loops until all bytes are written, retrying on EINTR and
+/// honoring short writes on slow/full pipes. Returns false on a real error.
+fn writeAll(fd: c_int, msg: []const u8) bool {
+    var off: usize = 0;
+    while (off < msg.len) {
+        const n = libc.write(fd, msg.ptr + off, msg.len - off);
+        if (n < 0) {
+            // Retry on EINTR; treat EAGAIN as a transient retry as well.
+            const errno = std.c._errno().*;
+            if (errno == @intFromEnum(std.c.E.INTR) or errno == @intFromEnum(std.c.E.AGAIN)) continue;
+            return false;
+        }
+        if (n == 0) return false; // no progress
+        off += @intCast(n);
+    }
+    return true;
+}
+
 fn writeStdout(msg: []const u8) void {
-    _ = libc.write(libc.STDOUT_FILENO, msg.ptr, msg.len);
+    _ = writeAll(libc.STDOUT_FILENO, msg);
 }
 
 fn writeStderr(msg: []const u8) void {
-    _ = libc.write(libc.STDERR_FILENO, msg.ptr, msg.len);
+    _ = writeAll(libc.STDERR_FILENO, msg);
 }
 
+// GNU `id --help` text is written to STDOUT (verified against coreutils 9.10).
 fn printUsage() void {
     const usage =
-        \\Usage: zid [OPTION]... [USER]
+        \\Usage: zid [OPTION]... [USER]...
         \\
-        \\Print user and group information for USER, or the current user.
+        \\Print user and group information for each specified USER,
+        \\or (when USER omitted) for the current process.
         \\
         \\Options:
-        \\  -a             Ignored for compatibility
+        \\  -a             Ignore, for compatibility with other versions
+        \\  -Z, --context  Print only the security context (SELinux only)
         \\  -g, --group    Print only the effective group ID
         \\  -G, --groups   Print all group IDs
-        \\  -n, --name     Print name instead of number (with -ugG)
-        \\  -r, --real     Print real ID instead of effective (with -ugG)
+        \\  -n, --name     Print a name instead of a number, for -ugG
+        \\  -r, --real     Print the real ID instead of the effective ID, for -ugG
         \\  -u, --user     Print only the effective user ID
-        \\  -z, --zero     Delimit entries with NUL, not whitespace
+        \\  -z, --zero     Delimit entries with NUL characters, not whitespace;
+        \\                   not permitted in default format
         \\      --help     Display this help and exit
         \\      --version  Output version information and exit
         \\
@@ -85,21 +108,21 @@ fn printUsage() void {
         \\  zid root             # Info for user 'root'
         \\
     ;
-    writeStderr(usage);
+    writeStdout(usage);
 }
 
+// GNU `id --version` text is written to STDOUT (verified against coreutils 9.10).
 fn printVersion() void {
-    writeStderr("zid " ++ VERSION ++ " - User/group information utility\n");
+    writeStdout("zid (zig coreutils) " ++ VERSION ++ "\n");
 }
 
-fn parseArgs(args: []const []const u8) !Config {
-    var config = Config{};
+fn parseArgs(config: *Config, allocator: std.mem.Allocator, args: []const []const u8) !void {
     var i: usize = 0;
 
     while (i < args.len) : (i += 1) {
         const arg = args[i];
 
-        if (arg.len > 0 and arg[0] == '-') {
+        if (arg.len > 0 and arg[0] == '-' and arg.len > 1) {
             if (std.mem.eql(u8, arg, "-u") or std.mem.eql(u8, arg, "--user")) {
                 config.show_user = true;
             } else if (std.mem.eql(u8, arg, "-g") or std.mem.eql(u8, arg, "--group")) {
@@ -112,6 +135,8 @@ fn parseArgs(args: []const []const u8) !Config {
                 config.show_real = true;
             } else if (std.mem.eql(u8, arg, "-z") or std.mem.eql(u8, arg, "--zero")) {
                 config.show_zero = true;
+            } else if (std.mem.eql(u8, arg, "-Z") or std.mem.eql(u8, arg, "--context")) {
+                config.context = true;
             } else if (std.mem.eql(u8, arg, "-a")) {
                 // Ignored for compatibility
             } else if (std.mem.eql(u8, arg, "--help")) {
@@ -120,8 +145,8 @@ fn parseArgs(args: []const []const u8) !Config {
             } else if (std.mem.eql(u8, arg, "--version")) {
                 printVersion();
                 std.process.exit(0);
-            } else if (arg.len > 1 and arg[1] != '-') {
-                // Combined short options like -un, -gn, -Gn
+            } else if (arg[1] != '-') {
+                // Combined short options like -un, -gn, -Gn, -ugG
                 for (arg[1..]) |ch| {
                     switch (ch) {
                         'u' => config.show_user = true,
@@ -130,6 +155,7 @@ fn parseArgs(args: []const []const u8) !Config {
                         'n' => config.show_name = true,
                         'r' => config.show_real = true,
                         'z' => config.show_zero = true,
+                        'Z' => config.context = true,
                         'a' => {},
                         else => {
                             var err_buf: [64]u8 = undefined;
@@ -146,11 +172,10 @@ fn parseArgs(args: []const []const u8) !Config {
                 return error.InvalidOption;
             }
         } else {
-            config.username = arg;
+            // Operand (a bare "-" or a USER name).
+            try config.usernames.append(allocator, arg);
         }
     }
-
-    return config;
 }
 
 fn getUsername(uid: u32) ?[]const u8 {
@@ -178,14 +203,11 @@ fn printUid(uid: u32, show_name: bool) void {
     if (show_name) {
         if (getUsername(uid)) |name| {
             writeStdout(name);
-        } else {
-            const s = std.fmt.bufPrint(&buf, "{d}", .{uid}) catch return;
-            writeStdout(s);
+            return;
         }
-    } else {
-        const s = std.fmt.bufPrint(&buf, "{d}", .{uid}) catch return;
-        writeStdout(s);
     }
+    const s = std.fmt.bufPrint(&buf, "{d}", .{uid}) catch return;
+    writeStdout(s);
 }
 
 fn printGid(gid: u32, show_name: bool) void {
@@ -193,42 +215,70 @@ fn printGid(gid: u32, show_name: bool) void {
     if (show_name) {
         if (getGroupname(gid)) |name| {
             writeStdout(name);
-        } else {
-            const s = std.fmt.bufPrint(&buf, "{d}", .{gid}) catch return;
-            writeStdout(s);
+            return;
+        }
+    }
+    const s = std.fmt.bufPrint(&buf, "{d}", .{gid}) catch return;
+    writeStdout(s);
+}
+
+/// Fetch the caller-visible group list. Returns a heap slice the caller owns
+/// (free via `allocator.free`). Grows dynamically instead of overflowing a
+/// fixed stack buffer — the pre-fix code ignored getgrouplist's -1 return and
+/// looped over an attacker/environment-controlled `ngroups` past a [64]u32
+/// array (stack OOB read for any account in >64 supplementary groups).
+fn getUserGroups(allocator: std.mem.Allocator, target_user: ?[*:0]const u8, target_gid: u32) ![]u32 {
+    if (target_user) |user| {
+        var cap: usize = 64;
+        while (true) {
+            const buf = try allocator.alloc(u32, cap);
+            var ngroups: c_int = @intCast(cap);
+            const rc = getgrouplist(user, target_gid, buf.ptr, &ngroups);
+            if (rc >= 0) {
+                // Success: `ngroups` holds the actual count written (<= cap).
+                const n: usize = if (ngroups > 0) @min(@as(usize, @intCast(ngroups)), cap) else 0;
+                return allocator.realloc(buf, n) catch buf[0..n];
+            }
+            // Overflow: buffer too small. On glibc `ngroups` is set to the total
+            // needed; on macOS it may not grow, so double as a fallback. Free and
+            // retry with a strictly larger buffer.
+            allocator.free(buf);
+            const needed: usize = if (ngroups > 0 and @as(usize, @intCast(ngroups)) > cap)
+                @intCast(ngroups)
+            else
+                cap * 2;
+            if (needed <= cap) {
+                cap = cap * 2;
+            } else {
+                cap = needed;
+            }
+            if (cap > (1 << 20)) return error.TooManyGroups;
         }
     } else {
-        const s = std.fmt.bufPrint(&buf, "{d}", .{gid}) catch return;
-        writeStdout(s);
+        // Current process: query the count first (size 0), then size the buffer.
+        var dummy: [1]u32 = undefined;
+        const count = getgroups(0, &dummy);
+        const n: usize = if (count > 0) @intCast(count) else 0;
+        const buf = try allocator.alloc(u32, if (n == 0) 1 else n);
+        if (n == 0) return allocator.realloc(buf, 0) catch buf[0..0];
+        const got = getgroups(@intCast(n), buf.ptr);
+        const actual: usize = if (got > 0) @min(@as(usize, @intCast(got)), n) else 0;
+        return allocator.realloc(buf, actual) catch buf[0..actual];
     }
 }
 
-fn getUserGroups(target_user: ?[*:0]const u8, target_gid: u32, groups: *[64]u32) usize {
-    if (target_user) |user| {
-        var ngroups: c_int = 64;
-        _ = getgrouplist(user, target_gid, groups, &ngroups);
-        return if (ngroups > 0) @intCast(ngroups) else 0;
-    } else {
-        const n = getgroups(64, groups);
-        return if (n > 0) @intCast(n) else 0;
-    }
-}
-
-fn printFullInfo(uid: u32, gid: u32, target_user: ?[*:0]const u8) void {
+fn printFullInfo(allocator: std.mem.Allocator, uid: u32, gid: u32, target_user: ?[*:0]const u8) void {
     var buf: [1024]u8 = undefined;
 
     // uid=1000(username)
     const username = getUsername(uid);
-    var pos: usize = 0;
-
     if (username) |name| {
         const s = std.fmt.bufPrint(&buf, "uid={d}({s}) ", .{ uid, name }) catch return;
-        pos = s.len;
+        writeStdout(s);
     } else {
         const s = std.fmt.bufPrint(&buf, "uid={d} ", .{uid}) catch return;
-        pos = s.len;
+        writeStdout(s);
     }
-    writeStdout(buf[0..pos]);
 
     // gid=1000(groupname)
     const groupname = getGroupname(gid);
@@ -241,15 +291,13 @@ fn printFullInfo(uid: u32, gid: u32, target_user: ?[*:0]const u8) void {
     }
 
     // groups=...
-    var groups: [64]u32 = undefined;
-    const ngroups = getUserGroups(target_user, gid, &groups);
+    const groups = getUserGroups(allocator, target_user, gid) catch &[_]u32{};
+    defer allocator.free(groups);
 
-    if (ngroups > 0) {
+    if (groups.len > 0) {
         writeStdout(" groups=");
-        var i: usize = 0;
-        while (i < ngroups) : (i += 1) {
+        for (groups, 0..) |g, i| {
             if (i > 0) writeStdout(",");
-            const g = groups[i];
             const gname = getGroupname(g);
             if (gname) |name| {
                 const s = std.fmt.bufPrint(&buf, "{d}({s})", .{ g, name }) catch continue;
@@ -264,20 +312,87 @@ fn printFullInfo(uid: u32, gid: u32, target_user: ?[*:0]const u8) void {
     writeStdout("\n");
 }
 
-fn printGroups(show_name: bool, delimiter: []const u8, target_user: ?[*:0]const u8, target_gid: u32) void {
-    var groups: [64]u32 = undefined;
-    const ngroups = getUserGroups(target_user, target_gid, &groups);
+fn printGroups(allocator: std.mem.Allocator, show_name: bool, zero: bool, target_user: ?[*:0]const u8, target_gid: u32) void {
+    const groups = getUserGroups(allocator, target_user, target_gid) catch &[_]u32{};
+    defer allocator.free(groups);
 
-    if (ngroups > 0) {
-        var i: usize = 0;
-        while (i < ngroups) : (i += 1) {
-            if (i > 0) writeStdout(delimiter);
-            printGid(groups[i], show_name);
+    for (groups, 0..) |g, i| {
+        if (zero) {
+            // GNU -z: NUL is a *terminator* — emitted after every entry,
+            // including the last, and no trailing newline.
+            printGid(g, show_name);
+            writeStdout("\x00");
+        } else {
+            if (i > 0) writeStdout(" ");
+            printGid(g, show_name);
         }
     }
-    if (delimiter[0] != 0) {
-        writeStdout("\n");
+    if (!zero) writeStdout("\n");
+}
+
+/// Validate mutually-exclusive / dependent flag combinations exactly as GNU id
+/// does. Returns error (caller exits 1) after emitting the GNU diagnostic.
+fn validateFlags(config: *const Config) !void {
+    const selectors: u8 = @as(u8, @intFromBool(config.show_user)) +
+        @as(u8, @intFromBool(config.show_group)) +
+        @as(u8, @intFromBool(config.show_groups));
+
+    if (selectors > 1) {
+        writeStderr("zid: cannot print \"only\" of more than one choice\n");
+        return error.BadUsage;
     }
+
+    const default_format = selectors == 0;
+    if (default_format and (config.show_name or config.show_real)) {
+        writeStderr("zid: printing only names or real IDs requires -u, -g, or -G\n");
+        return error.BadUsage;
+    }
+    if (default_format and config.show_zero) {
+        writeStderr("zid: option --zero not permitted in default format\n");
+        return error.BadUsage;
+    }
+}
+
+/// Emit output for a single subject (a named USER, or the current process when
+/// `username` is null). Returns false if the named user could not be resolved.
+fn emitFor(allocator: std.mem.Allocator, config: *const Config, username: ?[]const u8) bool {
+    var uid: u32 = undefined;
+    var gid: u32 = undefined;
+    var target_user_z: ?[*:0]const u8 = null;
+    var name_buf: [256]u8 = undefined;
+
+    if (username) |name| {
+        const name_z = std.fmt.bufPrintZ(&name_buf, "{s}", .{name}) catch {
+            writeStderr("zid: username too long\n");
+            return false;
+        };
+        const pw = getpwnam(name_z.ptr);
+        if (pw == null) {
+            var err_buf: [256]u8 = undefined;
+            const err_msg = std.fmt.bufPrint(&err_buf, "zid: '{s}': no such user\n", .{name}) catch "zid: no such user\n";
+            writeStderr(err_msg);
+            return false;
+        }
+        uid = pw.?.pw_uid;
+        gid = pw.?.pw_gid;
+        target_user_z = name_z.ptr;
+    } else {
+        uid = if (config.show_real) getuid() else geteuid();
+        gid = if (config.show_real) getgid() else getegid();
+    }
+
+    if (config.show_user) {
+        printUid(uid, config.show_name);
+        writeStdout(if (config.show_zero) "\x00" else "\n");
+    } else if (config.show_group) {
+        printGid(gid, config.show_name);
+        writeStdout(if (config.show_zero) "\x00" else "\n");
+    } else if (config.show_groups) {
+        printGroups(allocator, config.show_name, config.show_zero, target_user_z, gid);
+    } else {
+        printFullInfo(allocator, uid, gid, target_user_z);
+    }
+    return true;
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -291,51 +406,30 @@ pub fn main(init: std.process.Init) !void {
     }
     const args = args_list.items;
 
-    const config = parseArgs(args[1..]) catch {
+    var config = Config{};
+    defer config.usernames.deinit(allocator);
+    parseArgs(&config, allocator, args[1..]) catch {
         std.process.exit(1);
     };
 
-    // Get user info
-    var uid: u32 = undefined;
-    var gid: u32 = undefined;
+    // GNU -Z on a non-SELinux kernel is an error, not a silent no-op.
+    if (config.context) {
+        writeStderr("zid: --context (-Z) works only on an SELinux-enabled kernel\n");
+        std.process.exit(1);
+    }
 
-    var target_user_z: ?[*:0]const u8 = null;
-    var name_buf: [256]u8 = undefined;
+    validateFlags(&config) catch {
+        std.process.exit(1);
+    };
 
-    if (config.username) |name| {
-        const name_z = std.fmt.bufPrintZ(&name_buf, "{s}", .{name}) catch {
-            writeStderr("zid: username too long\n");
-            std.process.exit(1);
-        };
-
-        const pw = getpwnam(name_z.ptr);
-        if (pw == null) {
-            var err_buf: [256]u8 = undefined;
-            const err_msg = std.fmt.bufPrint(&err_buf, "zid: '{s}': no such user\n", .{name}) catch "zid: no such user\n";
-            writeStderr(err_msg);
-            std.process.exit(1);
+    var had_error = false;
+    if (config.usernames.items.len == 0) {
+        if (!emitFor(allocator, &config, null)) had_error = true;
+    } else {
+        for (config.usernames.items) |name| {
+            if (!emitFor(allocator, &config, name)) had_error = true;
         }
-        uid = pw.?.pw_uid;
-        gid = pw.?.pw_gid;
-        target_user_z = name_z.ptr;
-    } else {
-        uid = if (config.show_real) getuid() else geteuid();
-        gid = if (config.show_real) getgid() else getegid();
     }
 
-    const delimiter: []const u8 = if (config.show_zero) "\x00" else " ";
-
-    // Determine output mode
-    if (config.show_user) {
-        printUid(uid, config.show_name);
-        if (!config.show_zero) writeStdout("\n");
-    } else if (config.show_group) {
-        printGid(gid, config.show_name);
-        if (!config.show_zero) writeStdout("\n");
-    } else if (config.show_groups) {
-        printGroups(config.show_name, delimiter, target_user_z, gid);
-    } else {
-        // Full output
-        printFullInfo(uid, gid, target_user_z);
-    }
+    if (had_error) std.process.exit(1);
 }

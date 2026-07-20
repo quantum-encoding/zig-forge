@@ -34,7 +34,13 @@ const Stat = switch (builtin.os.tag) {
 
 // External C functions
 extern "c" fn stat(path: [*:0]const u8, buf: *Stat) c_int;
+extern "c" fn lstat(path: [*:0]const u8, buf: *Stat) c_int;
 extern "c" fn chmod(path: [*:0]const u8, mode: libc.mode_t) c_int;
+
+// File-type bits (S_IFMT masks)
+const S_IFMT: u32 = 0o170000;
+const S_IFDIR: u32 = 0o040000;
+const S_IFLNK: u32 = 0o120000;
 
 const Config = struct {
     recursive: bool = false,
@@ -72,23 +78,46 @@ const ModeChange = struct {
     special: u32, // special bits (setuid=0o4000, setgid=0o2000, sticky=0o1000)
 };
 
-fn parseOctalMode(s: []const u8) ?u32 {
-    var mode: u32 = 0;
-    for (s) |ch| {
-        if (ch < '0' or ch > '7') return null;
-        mode = mode * 8 + (ch - '0');
+const ModeError = error{ InvalidMode, OutOfMemory };
+
+// A mode operand is either numeric (octal) or symbolic. GNU treats an operand
+// whose first character is a decimal digit as numeric; anything else is symbolic.
+const ModeKind = union(enum) {
+    octal: u32,
+    symbolic,
+    invalid,
+};
+
+// Classify the mode operand and, for numeric modes, validate + parse it.
+// GNU accepts octal values <= 0o7777 (leading zeros allowed, e.g. "00755"),
+// and rejects anything larger ("010000", "200000"), overlong overflowing
+// digit runs, and non-octal digits ("888"). Empty operands are invalid.
+fn classifyMode(s: []const u8) ModeKind {
+    if (s.len == 0) return .invalid;
+    // First char a decimal digit => numeric operand (per GNU).
+    if (s[0] >= '0' and s[0] <= '9') {
+        var mode: u32 = 0;
+        for (s) |ch| {
+            if (ch < '0' or ch > '7') return .invalid; // '8'/'9'/letters => invalid
+            mode = std.math.mul(u32, mode, 8) catch return .invalid;
+            mode = std.math.add(u32, mode, ch - '0') catch return .invalid;
+            if (mode > 0o7777) return .invalid; // out of range (e.g. 010000)
+        }
+        return .{ .octal = mode };
     }
-    return mode;
+    return .symbolic;
 }
 
-fn parseSymbolicMode(allocator: std.mem.Allocator, mode_str: []const u8, current_mode: u32) !u32 {
-    var new_mode = current_mode;
+fn parseSymbolicMode(allocator: std.mem.Allocator, mode_str: []const u8, current_mode: u32, is_dir: bool) ModeError!u32 {
+    var new_mode = current_mode & 0o7777;
 
     // Split by comma for multiple clauses
     var clauses = std.mem.splitScalar(u8, mode_str, ',');
 
+    var any_clause = false;
     while (clauses.next()) |clause| {
         if (clause.len == 0) continue;
+        any_clause = true;
 
         var changes: std.ArrayListUnmanaged(ModeChange) = .empty;
         defer changes.deinit(allocator);
@@ -109,45 +138,51 @@ fn parseSymbolicMode(allocator: std.mem.Allocator, mode_str: []const u8, current
         }
 
         // Default to 'a' if no who specified
-        if (who == 0) who = 7;
+        const who_masked = if (who == 0) 7 else who;
 
-        // Parse operator and permissions (can have multiple: u+x-w)
+        // Parse operator and permissions (can have multiple: u+x-w).
+        // A clause MUST contain at least one operator, and any character
+        // that is neither an operator nor a valid permission is a hard
+        // error (matches GNU: "u+xZ" -> invalid mode).
         while (i < clause.len) {
             const op: ModeOp = switch (clause[i]) {
                 '+' => .add,
                 '-' => .remove,
                 '=' => .set,
-                else => break,
+                else => return error.InvalidMode,
             };
             i += 1;
 
             // Parse permissions
             var perms: u32 = 0;
             var special: u32 = 0;
-            while (i < clause.len) {
+            perm_loop: while (i < clause.len) {
                 switch (clause[i]) {
                     'r' => perms |= 4,
                     'w' => perms |= 2,
                     'x' => perms |= 1,
                     'X' => {
-                        // Execute only if directory or already has execute
-                        if ((current_mode & 0o111) != 0 or (current_mode & 0o40000) != 0) {
+                        // Execute only if a directory or already has execute
+                        if ((current_mode & 0o111) != 0 or is_dir) {
                             perms |= 1;
                         }
                     },
                     's' => {
-                        if ((who & 4) != 0) special |= 0o4000;
-                        if ((who & 2) != 0) special |= 0o2000;
+                        if ((who_masked & 4) != 0) special |= 0o4000;
+                        if ((who_masked & 2) != 0) special |= 0o2000;
                     },
                     't' => special |= 0o1000,
-                    '+', '-', '=' => break, // next operation
-                    else => break,
+                    '+', '-', '=' => break :perm_loop, // next operation
+                    else => return error.InvalidMode,
                 }
                 i += 1;
             }
 
-            try changes.append(allocator, .{ .who = who, .op = op, .perms = perms, .special = special });
+            try changes.append(allocator, .{ .who = who_masked, .op = op, .perms = perms, .special = special });
         }
+
+        // A clause with a who but no operator (e.g. "a", "zzz") is invalid.
+        if (changes.items.len == 0) return error.InvalidMode;
 
         // Apply changes
         for (changes.items) |change| {
@@ -189,7 +224,31 @@ fn parseSymbolicMode(allocator: std.mem.Allocator, mode_str: []const u8, current
         }
     }
 
+    // An operand of only empty clauses (e.g. "" or ",,") is invalid.
+    if (!any_clause) return error.InvalidMode;
+
     return new_mode;
+}
+
+// Render the low 12 mode bits as the 9-char "rwxr-xr-x" string GNU appends to
+// -v/-c diagnostics, honouring setuid/setgid (s/S) and sticky (t/T).
+fn permString(mode: u32) [9]u8 {
+    var b: [9]u8 = undefined;
+    b[0] = if (mode & 0o400 != 0) 'r' else '-';
+    b[1] = if (mode & 0o200 != 0) 'w' else '-';
+    b[2] = execChar(mode & 0o100 != 0, mode & 0o4000 != 0, 's', 'S');
+    b[3] = if (mode & 0o040 != 0) 'r' else '-';
+    b[4] = if (mode & 0o020 != 0) 'w' else '-';
+    b[5] = execChar(mode & 0o010 != 0, mode & 0o2000 != 0, 's', 'S');
+    b[6] = if (mode & 0o004 != 0) 'r' else '-';
+    b[7] = if (mode & 0o002 != 0) 'w' else '-';
+    b[8] = execChar(mode & 0o001 != 0, mode & 0o1000 != 0, 't', 'T');
+    return b;
+}
+
+fn execChar(exec: bool, special: bool, special_on: u8, special_off: u8) u8 {
+    if (special) return if (exec) special_on else special_off;
+    return if (exec) 'x' else '-';
 }
 
 const ChmodError = error{
@@ -208,7 +267,7 @@ fn isRootPath(path: []const u8) bool {
     return true;
 }
 
-fn chmodFile(allocator: std.mem.Allocator, path: []const u8, config: *const Config) ChmodError!void {
+fn chmodFile(allocator: std.mem.Allocator, path: []const u8, config: *const Config, had_error: *bool) ChmodError!void {
     const path_z = try allocator.dupeZ(u8, path);
     defer allocator.free(path_z);
 
@@ -249,18 +308,25 @@ fn chmodFile(allocator: std.mem.Allocator, path: []const u8, config: *const Conf
             return error.FileNotFound;
         }
         break :blk ref_stat.mode & 0o7777;
-    } else if (parseOctalMode(config.mode_str)) |octal|
-        octal
-    else
-        try parseSymbolicMode(allocator, config.mode_str, current_mode);
+    } else switch (classifyMode(config.mode_str)) {
+        .octal => |octal| octal,
+        // The mode string is validated once up front in main(); by the time
+        // we get here it is known-good, so a parse error is unreachable.
+        .symbolic => parseSymbolicMode(allocator, config.mode_str, current_mode, is_dir) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidMode => unreachable,
+        },
+        .invalid => unreachable,
+    };
 
     // Handle recursive BEFORE changing directory permissions
     if (config.recursive and is_dir) {
-        try chmodRecursive(allocator, path, config);
+        try chmodRecursive(allocator, path, config, had_error);
     }
 
-    // Apply chmod
-    const chmod_result = chmod(path_z.ptr, @intCast(new_mode));
+    // Apply chmod. new_mode is bounded to the low 12 bits, so the cast to
+    // mode_t (u16 on macOS) cannot overflow.
+    const chmod_result = chmod(path_z.ptr, @intCast(new_mode & 0o7777));
 
     if (chmod_result != 0) {
         if (!config.quiet) {
@@ -276,20 +342,26 @@ fn chmodFile(allocator: std.mem.Allocator, path: []const u8, config: *const Conf
         var buf: [256]u8 = undefined;
         var writer = stdout.writer(io, &buf);
 
-        if (new_mode != current_mode) {
-            writer.interface.print("mode of '{s}' changed from {o:0>4} to {o:0>4}\n", .{
+        const new_bits = new_mode & 0o7777;
+        if (new_bits != current_mode) {
+            const from = permString(current_mode);
+            const to = permString(new_bits);
+            writer.interface.print("mode of '{s}' changed from {o:0>4} ({s}) to {o:0>4} ({s})\n", .{
                 path,
                 current_mode,
-                new_mode,
+                from[0..],
+                new_bits,
+                to[0..],
             }) catch {};
         } else if (config.verbose) {
-            writer.interface.print("mode of '{s}' retained as {o:0>4}\n", .{ path, current_mode }) catch {};
+            const cur = permString(current_mode);
+            writer.interface.print("mode of '{s}' retained as {o:0>4} ({s})\n", .{ path, current_mode, cur[0..] }) catch {};
         }
         writer.interface.flush() catch {};
     }
 }
 
-fn chmodRecursive(allocator: std.mem.Allocator, dir_path: []const u8, config: *const Config) ChmodError!void {
+fn chmodRecursive(allocator: std.mem.Allocator, dir_path: []const u8, config: *const Config, had_error: *bool) ChmodError!void {
     const dir_path_z = try allocator.dupeZ(u8, dir_path);
     defer allocator.free(dir_path_z);
 
@@ -314,7 +386,23 @@ fn chmodRecursive(allocator: std.mem.Allocator, dir_path: []const u8, config: *c
         const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, name });
         defer allocator.free(full_path);
 
-        chmodFile(allocator, full_path, config) catch {};
+        // Do NOT follow symlinks encountered during traversal. GNU chmod's
+        // default (-P) semantics never dereference or descend into a symlink
+        // found while walking the tree; doing so would let an attacker who
+        // controls a directory redirect our (possibly root) mode changes onto
+        // arbitrary files outside it. Classify with lstat and skip symlinks.
+        const full_path_z = allocator.dupeZ(u8, full_path) catch return error.OutOfMemory;
+        defer allocator.free(full_path_z);
+        var lst: Stat = undefined;
+        if (lstat(full_path_z.ptr, &lst) == 0 and (@as(u32, lst.mode) & S_IFMT) == S_IFLNK) {
+            continue;
+        }
+
+        chmodFile(allocator, full_path, config, had_error) catch {
+            // A failure on any entry must be reflected in the exit status
+            // (GNU chmod -R returns non-zero if any entry fails).
+            had_error.* = true;
+        };
     }
 }
 
@@ -466,9 +554,36 @@ pub fn main(init: std.process.Init) void {
     };
     defer config.deinit(allocator);
 
+    // Validate the mode operand exactly once, before touching any file — GNU
+    // chmod rejects an invalid mode (empty, "888", "zzz", ">0o7777", trailing
+    // garbage) with exit 1 and never processes the operands. A symbolic mode's
+    // validity is independent of the target file, so a syntax check with a
+    // dummy current mode is sufficient.
+    if (config.reference_file == null) {
+        const bad = switch (classifyMode(config.mode_str)) {
+            .octal => false,
+            .invalid => true,
+            .symbolic => blk: {
+                _ = parseSymbolicMode(allocator, config.mode_str, 0, false) catch |e| switch (e) {
+                    error.InvalidMode => break :blk true,
+                    error.OutOfMemory => {
+                        std.debug.print("zchmod: out of memory\n", .{});
+                        std.process.exit(1);
+                    },
+                };
+                break :blk false;
+            },
+        };
+        if (bad) {
+            std.debug.print("zchmod: invalid mode: '{s}'\n", .{config.mode_str});
+            std.debug.print("Try 'zchmod --help' for more information.\n", .{});
+            std.process.exit(1);
+        }
+    }
+
     var error_occurred = false;
     for (config.files.items) |file| {
-        chmodFile(allocator, file, &config) catch {
+        chmodFile(allocator, file, &config, &error_occurred) catch {
             error_occurred = true;
         };
     }

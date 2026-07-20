@@ -19,10 +19,16 @@ const Allocator = mem.Allocator;
 const flate = std.compress.flate;
 const builtin = @import("builtin");
 
+/// Raised when the OS CSPRNG cannot deliver the requested entropy.
+pub const RandomError = error{RandomFailure};
+
 /// Cross-platform cryptographic random bytes. SYS_getrandom on Linux
 /// (works for both gnu/musl and Android-Bionic without an API-level
 /// gate); arc4random on Darwin/BSD; /dev/urandom otherwise.
-fn fillRandomBytes(buf: []u8) void {
+///
+/// Returns error.RandomFailure if the buffer could not be fully filled;
+/// callers using the output as a nonce/key must not ignore this.
+fn fillRandomBytes(buf: []u8) RandomError!void {
     switch (builtin.os.tag) {
         .macos, .ios, .tvos, .watchos, .freebsd, .netbsd, .openbsd, .dragonfly => {
             std.c.arc4random_buf(buf.ptr, buf.len);
@@ -31,21 +37,20 @@ fn fillRandomBytes(buf: []u8) void {
             var filled: usize = 0;
             while (filled < buf.len) {
                 const rc = std.os.linux.getrandom(buf.ptr + filled, buf.len - filled, 0);
-                if (rc == 0) break;
-                if (@as(isize, @bitCast(rc)) < 0) break;
+                if (rc == 0) return error.RandomFailure;
+                if (@as(isize, @bitCast(rc)) < 0) return error.RandomFailure;
                 filled += rc;
             }
         },
         else => {
             const fd = std.c.open("/dev/urandom", .{ .ACCMODE = .RDONLY }, 0);
-            if (fd >= 0) {
-                defer _ = std.c.close(fd);
-                var filled: usize = 0;
-                while (filled < buf.len) {
-                    const n = std.c.read(fd, buf.ptr + filled, buf.len - filled);
-                    if (n <= 0) break;
-                    filled += @intCast(n);
-                }
+            if (fd < 0) return error.RandomFailure;
+            defer _ = std.c.close(fd);
+            var filled: usize = 0;
+            while (filled < buf.len) {
+                const n = std.c.read(fd, buf.ptr + filled, buf.len - filled);
+                if (n <= 0) return error.RandomFailure;
+                filled += @intCast(n);
             }
         },
     }
@@ -190,7 +195,7 @@ fn encryptData(
     key: [32]u8,
 ) !struct { ciphertext: []u8, nonce: [12]u8, tag: [16]u8 } {
     var nonce: [12]u8 = undefined;
-    fillRandomBytes(&nonce);
+    try fillRandomBytes(&nonce);
 
     const ciphertext = try allocator.alloc(u8, plaintext.len);
     var tag: [16]u8 = undefined;
@@ -560,9 +565,13 @@ pub fn getPngDimensions(data: []const u8) !PngDimensions {
     while (pos + 12 <= data.len) {
         const chunk_len = readU32BE(data[pos..][0..4]);
         const chunk_type = data[pos + 4 ..][0..4];
+        // chunk_len is an untrusted big-endian u32; bound the slice against
+        // the actual input length before indexing (else OOB panic / DoS).
+        if (pos + 8 + @as(usize, chunk_len) + 4 > data.len) return StegoError.InvalidPng;
         const chunk_data = data[pos + 8 ..][0..chunk_len];
 
         if (mem.eql(u8, chunk_type, "IHDR")) {
+            if (chunk_len < 8) return StegoError.InvalidPng;
             const width = readU32BE(chunk_data[0..4]);
             const height = readU32BE(chunk_data[4..8]);
             return PngDimensions{
@@ -571,7 +580,7 @@ pub fn getPngDimensions(data: []const u8) !PngDimensions {
             };
         }
 
-        pos += 12 + chunk_len;
+        pos += 12 + @as(usize, chunk_len);
     }
 
     return StegoError.InvalidPng;
@@ -607,9 +616,13 @@ pub fn decodePng(allocator: Allocator, data: []const u8) !PngImage {
     while (pos + 12 <= data.len) {
         const chunk_len = readU32BE(data[pos..][0..4]);
         const chunk_type = data[pos + 4 ..][0..4];
+        // chunk_len is an untrusted big-endian u32; bound the slice against
+        // the actual input length before indexing (else OOB panic / DoS).
+        if (pos + 8 + @as(usize, chunk_len) + 4 > data.len) return StegoError.InvalidPng;
         const chunk_data = data[pos + 8 ..][0..chunk_len];
 
         if (mem.eql(u8, chunk_type, "IHDR")) {
+            if (chunk_len < 10) return StegoError.InvalidPng;
             width = readU32BE(chunk_data[0..4]);
             height = readU32BE(chunk_data[4..8]);
             bit_depth = chunk_data[8];
@@ -620,10 +633,17 @@ pub fn decodePng(allocator: Allocator, data: []const u8) !PngImage {
             break;
         }
 
-        pos += 12 + chunk_len;
+        pos += 12 + @as(usize, chunk_len);
     }
 
     if (width == 0 or height == 0) return StegoError.InvalidPng;
+
+    // width/height are untrusted IHDR fields (each up to 2^32-1). Reject
+    // absurd dimensions up front — before any decompression or allocation —
+    // so a crafted IHDR can't integer-overflow the later size math or force
+    // an enormous allocation.
+    const MAX_DIM: usize = 1 << 16; // 65536 px per side is generous for stego
+    if (width > MAX_DIM or height > MAX_DIM) return StegoError.InvalidPng;
 
     // Decompress IDAT data using flate decompressor
     var decompressed: std.ArrayList(u8) = .empty;
@@ -674,13 +694,17 @@ pub fn decodePng(allocator: Allocator, data: []const u8) !PngImage {
         6 => 4,
         else => 3,
     };
-    const scanline_len = width * bpp;
-    const expected_len = height * (1 + scanline_len);
+    // Dimensions were already bounded above; use checked multiplication for
+    // the size math so nothing can overflow usize even within those bounds.
+    const scanline_len = std.math.mul(usize, width, bpp) catch return StegoError.InvalidPng;
+    const row_stride = std.math.add(usize, 1, scanline_len) catch return StegoError.InvalidPng;
+    const expected_len = std.math.mul(usize, height, row_stride) catch return StegoError.InvalidPng;
 
     if (decompressed.items.len < expected_len) return StegoError.InvalidPng;
 
     // Allocate pixel buffer
-    const pixels = try allocator.alloc(u8, width * height * bpp);
+    const pixel_count = std.math.mul(usize, scanline_len, height) catch return StegoError.InvalidPng;
+    const pixels = try allocator.alloc(u8, pixel_count);
     errdefer allocator.free(pixels);
 
     // Unfilter scanlines

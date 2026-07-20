@@ -124,6 +124,12 @@ const PAM_PROMPT_ECHO_OFF: c_int = 1;
 const PAM_PROMPT_ECHO_ON: c_int = 2;
 const PAM_ERROR_MSG: c_int = 3;
 const PAM_TEXT_INFO: c_int = 4;
+const PAM_CONV_ERR: c_int = 19;
+
+// Upper bound on the number of PAM conversation messages we will service in a
+// single callback. PAM modules never legitimately batch dozens of prompts; a
+// large/negative count is a malformed (possibly hostile) module.
+const PAM_MAX_MSG: c_int = 32;
 
 // PAM functions
 extern "c" fn pam_start(service: [*:0]const u8, user: [*:0]const u8, conv: *const pam_conv, pamh: **pam_handle_t) c_int;
@@ -201,6 +207,9 @@ const Config = struct {
     command: []const []const u8 = &.{},
     set_home: bool = true,
     stdin_password: bool = false,
+    non_interactive: bool = false,
+    // Custom -p prompt. null = use the built-in prompt; "" = suppress the prompt.
+    prompt: ?[]const u8 = null,
 };
 
 // Simple I/O helpers
@@ -224,7 +233,11 @@ fn pamConversation(
 ) callconv(.c) c_int {
     const allocator = std.heap.c_allocator;
 
-    const resp_array = allocator.alloc(pam_response, @intCast(num_msg)) catch return 1;
+    // Validate the module-supplied count before the @intCast: a value <= 0 or
+    // absurdly large is a protocol violation, not a request we should honor.
+    if (num_msg <= 0 or num_msg > PAM_MAX_MSG) return PAM_CONV_ERR;
+
+    const resp_array = allocator.alloc(pam_response, @intCast(num_msg)) catch return PAM_CONV_ERR;
 
     var i: usize = 0;
     while (i < @as(usize, @intCast(num_msg))) : (i += 1) {
@@ -320,7 +333,7 @@ fn readPassword(prompt: []const u8) ?[]const u8 {
     return result;
 }
 
-fn authenticateUser(username: []const u8) bool {
+fn authenticateUser(username: []const u8, non_interactive: bool, custom_prompt: ?[]const u8) bool {
     const allocator = std.heap.c_allocator;
 
     // Check timestamp cache first
@@ -328,9 +341,20 @@ fn authenticateUser(username: []const u8) bool {
         return true;
     }
 
-    // Prompt for password
+    // -n / --non-interactive: never prompt. Real sudo prints
+    // "sudo: a password is required" and exits 1 rather than blocking a script.
+    if (non_interactive) {
+        writeStderr("zsudo: a password is required\n");
+        std.process.exit(1);
+    }
+
+    // Prompt for password. A -p value overrides the built-in prompt; an empty
+    // -p value suppresses the prompt entirely (matches sudo's documented -p '').
     var prompt_buf: [256]u8 = undefined;
-    const prompt = std.fmt.bufPrint(&prompt_buf, "[zsudo] password for {s}: ", .{username}) catch return false;
+    const prompt = if (custom_prompt) |p|
+        p
+    else
+        std.fmt.bufPrint(&prompt_buf, "[zsudo] password for {s}: ", .{username}) catch return false;
 
     const password = readPassword(prompt) orelse return false;
     defer {
@@ -555,6 +579,44 @@ fn isUserAuthorized(username: []const u8, target_user: []const u8) bool {
     return false;
 }
 
+/// Decide whether a single /etc/sudoers line grants `username` the ability to
+/// run commands. This is a deliberately conservative reading of the sudoers(5)
+/// user-specification grammar:
+///
+///     user  host = (runas) command
+///
+/// The user field is the FIRST whitespace-delimited token and must match the
+/// login name exactly (word boundary). The previous implementation used
+/// std.mem.startsWith, so `bobby ALL=(ALL) ALL` wrongly authorized `bob`.
+/// Group specs (`%group ...`) and Defaults lines are not username grants and
+/// are rejected here (group membership is handled separately).
+///
+/// Anchored to sudoers(5): "User_Spec ::= User_List Host_List = Cmnd_Spec_List"
+/// and "each entry ... consists of a user, a host, ... and a command".
+pub fn sudoersLineGrants(raw_line: []const u8, username: []const u8) bool {
+    const line = std.mem.trimStart(u8, raw_line, " \t");
+    if (line.len == 0 or line[0] == '#') return false;
+
+    // First token is the user field.
+    var it = std.mem.tokenizeAny(u8, line, " \t");
+    const first = it.next() orelse return false;
+
+    // A leading '%' is a group spec, not a username; '+' is a netgroup. Neither
+    // is an exact-username grant.
+    if (first[0] == '%' or first[0] == '+') return false;
+
+    // Exact (word-boundary) match against the login name.
+    if (!std.mem.eql(u8, first, username)) return false;
+
+    // Remainder must contain a RunAs+command spec that grants ALL. We still do
+    // not implement per-command restrictions, so only a wildcard command is
+    // treated as a grant (fail closed on anything narrower).
+    const rest = line[first.len..];
+    if (std.mem.indexOf(u8, rest, "ALL=(ALL") == null) return false;
+    return std.mem.indexOf(u8, rest, ") ALL") != null or
+        std.mem.indexOf(u8, rest, ") NOPASSWD: ALL") != null;
+}
+
 fn checkSudoers(username: []const u8, target_user: []const u8) bool {
     _ = target_user;
     const allocator = std.heap.c_allocator;
@@ -575,20 +637,7 @@ fn checkSudoers(username: []const u8, target_user: []const u8) bool {
         while (len < buf.len and buf[len] != 0 and buf[len] != '\n') : (len += 1) {}
 
         const l = buf[0..len];
-
-        // Skip comments and empty lines
-        if (l.len == 0 or l[0] == '#') continue;
-
-        // Simple check: username ALL=(ALL) ALL or username ALL=(ALL:ALL) ALL
-        if (std.mem.startsWith(u8, l, username)) {
-            if (std.mem.indexOf(u8, l, "ALL=(ALL")) |_| {
-                if (std.mem.indexOf(u8, l, ") ALL") != null or
-                    std.mem.indexOf(u8, l, ") NOPASSWD: ALL") != null)
-                {
-                    return true;
-                }
-            }
-        }
+        if (sudoersLineGrants(l, username)) return true;
     }
 
     // Also check /etc/sudoers.d/ - simplified: just check a few common files
@@ -612,20 +661,55 @@ fn checkSudoers(username: []const u8, target_user: []const u8) bool {
             while (len < buf2.len and buf2[len] != 0 and buf2[len] != '\n') : (len += 1) {}
 
             const l = buf2[0..len];
-            if (l.len == 0 or l[0] == '#') continue;
-
-            if (std.mem.startsWith(u8, l, username)) {
-                if (std.mem.indexOf(u8, l, "ALL=(ALL")) |_| {
-                    if (std.mem.indexOf(u8, l, ") ALL") != null or
-                        std.mem.indexOf(u8, l, ") NOPASSWD: ALL") != null)
-                    {
-                        return true;
-                    }
-                }
-            }
+            if (sudoersLineGrants(l, username)) return true;
         }
     }
 
+    return false;
+}
+
+/// Decide whether an environment variable (given as a "NAME=value" span) must
+/// be dropped when preserving the caller's environment under -E.
+///
+/// zsudo always overwrites HOME/USER/LOGNAME/SHELL/PATH/TERM/SUDO_* itself, so
+/// those are dropped from the inherited set. Beyond that, sudo unconditionally
+/// removes a fixed set of variables that can subvert the dynamic loader, the
+/// shell, or a scripting interpreter regardless of env_reset — the "always
+/// removed" list documented in sudoers(5) ("Restricting environment
+/// variables") and hard-coded in sudo's env.c initial_badenv_table. Forwarding
+/// e.g. BASH_ENV/IFS/LD_PRELOAD/PYTHONPATH into a root process is a well-known
+/// privilege-escalation vector, so we scrub them here rather than relying on a
+/// short prefix denylist.
+pub fn envVarShouldDrop(span: []const u8) bool {
+    const eq = std.mem.indexOfScalar(u8, span, '=') orelse span.len;
+    const name = span[0..eq];
+
+    // Variables zsudo sets itself.
+    const overwritten = [_][]const u8{ "HOME", "USER", "LOGNAME", "SHELL", "PATH", "TERM" };
+    for (overwritten) |n| {
+        if (std.mem.eql(u8, name, n)) return true;
+    }
+    if (std.mem.startsWith(u8, name, "SUDO_")) return true;
+
+    // Dynamic-loader / shell-function injection prefixes.
+    const bad_prefixes = [_][]const u8{ "LD_", "DYLD_", "_RLD", "BASH_FUNC_" };
+    for (bad_prefixes) |p| {
+        if (std.mem.startsWith(u8, name, p)) return true;
+    }
+
+    // Fixed "always removed" names (sudoers(5) / sudo env.c).
+    const bad_names = [_][]const u8{
+        "IFS",         "CDPATH",         "ENV",             "BASH_ENV",
+        "BASHOPTS",    "SHELLOPTS",      "GLOBIGNORE",      "PS4",
+        "PERL5LIB",    "PERL5OPT",       "PERL5DB",         "PERLLIB",
+        "PYTHONPATH",  "PYTHONHOME",     "PYTHONINSPECT",   "RUBYLIB",
+        "RUBYOPT",     "JAVA_TOOL_OPTIONS", "TERMINFO",     "TERMINFO_DIRS",
+        "TERMPATH",    "TERMCAP",        "HOSTALIASES",     "NLSPATH",
+        "PATH_LOCALE", "RES_OPTIONS",    "LOCALDOMAIN",
+    };
+    for (bad_names) |n| {
+        if (std.mem.eql(u8, name, n)) return true;
+    }
     return false;
 }
 
@@ -679,6 +763,15 @@ fn executeCommand(config: *const Config, target_pw: *const Passwd) !void {
     var env_list: std.ArrayListUnmanaged(?[*:0]const u8) = .empty;
     defer env_list.deinit(allocator);
 
+    // NOTE: every buffer whose address is appended to env_list MUST live for
+    // the whole function (until execvp), because env_list stores raw pointers
+    // into these buffers and environ is pointed at them just before exec.
+    // Declaring path_buf/term_buf inside `if` blocks previously let a later
+    // declaration reuse that stack slot, corrupting PATH/TERM handed to the
+    // target command. They are hoisted to function scope here.
+    var path_buf: [4096]u8 = undefined;
+    var term_buf: [256]u8 = undefined;
+
     // Basic environment
     var home_buf: [256]u8 = undefined;
     const home_env = try std.fmt.bufPrintZ(&home_buf, "HOME={s}", .{std.mem.span(target_pw.pw_dir)});
@@ -698,7 +791,6 @@ fn executeCommand(config: *const Config, target_pw: *const Passwd) !void {
 
     // Preserve PATH
     if (std.c.getenv("PATH")) |path| {
-        var path_buf: [4096]u8 = undefined;
         const path_env = try std.fmt.bufPrintZ(&path_buf, "PATH={s}", .{std.mem.span(path)});
         try env_list.append(allocator, path_env.ptr);
     } else {
@@ -707,7 +799,6 @@ fn executeCommand(config: *const Config, target_pw: *const Passwd) !void {
 
     // Preserve TERM
     if (std.c.getenv("TERM")) |term| {
-        var term_buf: [256]u8 = undefined;
         const term_env = try std.fmt.bufPrintZ(&term_buf, "TERM={s}", .{std.mem.span(term)});
         try env_list.append(allocator, term_env.ptr);
     }
@@ -716,17 +807,10 @@ fn executeCommand(config: *const Config, target_pw: *const Passwd) !void {
     if (config.preserve_env) {
         var env_ptr = std.c.environ;
         while (env_ptr[0]) |env_var| {
-            // Skip already set vars
+            // Skip vars zsudo sets itself and the fixed set of loader/shell/
+            // interpreter variables sudo always scrubs (see envVarShouldDrop).
             const span = std.mem.span(env_var);
-            if (!std.mem.startsWith(u8, span, "HOME=") and
-                !std.mem.startsWith(u8, span, "USER=") and
-                !std.mem.startsWith(u8, span, "LOGNAME=") and
-                !std.mem.startsWith(u8, span, "SHELL=") and
-                !std.mem.startsWith(u8, span, "PATH=") and
-                !std.mem.startsWith(u8, span, "TERM=") and
-                !std.mem.startsWith(u8, span, "SUDO_") and
-                !std.mem.startsWith(u8, span, "LD_"))
-            {
+            if (!envVarShouldDrop(span)) {
                 try env_list.append(allocator, env_var);
             }
             env_ptr += 1;
@@ -755,8 +839,14 @@ fn executeCommand(config: *const Config, target_pw: *const Passwd) !void {
         _ = libc.chdir(target_pw.pw_dir);
     }
 
-    // Set supplementary groups
-    _ = initgroups(target_pw.pw_name, target_pw.pw_gid);
+    // Set supplementary groups. This MUST succeed before we drop privileges:
+    // zsudo starts (setuid-root) with the CALLING user's supplementary groups
+    // (e.g. wheel/sudo/admin/docker). If initgroups() fails and we ignore it,
+    // setgid/setuid below change the uid/gid but leave the caller's privileged
+    // supplementary groups intact — an incomplete privilege drop. Abort instead.
+    if (initgroups(target_pw.pw_name, target_pw.pw_gid) != 0) {
+        return error.InitgroupsFailed;
+    }
 
     // Set GID and UID
     if (libc.setgid(target_pw.pw_gid) != 0) {
@@ -817,10 +907,11 @@ fn parseArgs(allocator: std.mem.Allocator, init: std.process.Init) !Config {
             } else if (std.mem.eql(u8, arg, "-S") or std.mem.eql(u8, arg, "--stdin")) {
                 config.stdin_password = true;
             } else if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--prompt")) {
-                i += 1; // consume prompt argument (ignored)
+                i += 1;
                 if (i >= args.len) return error.MissingArgument;
+                config.prompt = try allocator.dupe(u8, args[i]);
             } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--non-interactive")) {
-                // Non-interactive - will fail if password needed
+                config.non_interactive = true;
             } else if (std.mem.eql(u8, arg, "-H") or std.mem.eql(u8, arg, "--set-home")) {
                 config.set_home = true;
             } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
@@ -948,7 +1039,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Authenticate
     g_stdin_password = config.stdin_password;
-    if (!authenticateUser(calling_username)) {
+    if (!authenticateUser(calling_username, config.non_interactive, config.prompt)) {
         writeStderr("zsudo: authentication failed\n");
         std.process.exit(1);
     }

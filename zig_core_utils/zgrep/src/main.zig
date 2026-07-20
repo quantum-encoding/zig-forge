@@ -22,8 +22,9 @@
 //! - -o, --only-matching: print only matched parts
 //! - -e PATTERN, --regexp=PATTERN: use PATTERN (may be repeated)
 //! - -f FILE, --file=FILE: obtain patterns from FILE
-//! - -F, --fixed-strings: treat pattern as literal string (default)
+//! - -F, --fixed-strings: treat pattern as a literal string
 //! - -E, --extended-regexp: use extended regular expressions
+//! - default (no -E/-F): POSIX basic regular expressions (BRE)
 //! - -w, --word-regexp: match whole words only
 //! - -A NUM, --after-context=NUM: print NUM lines of trailing context
 //! - -B NUM, --before-context=NUM: print NUM lines of leading context
@@ -35,8 +36,6 @@
 //! - --exclude-dir=GLOB: skip directories matching GLOB
 
 const std = @import("std");
-const posix = std.posix;
-const linux = std.os.linux;
 const libc = std.c;
 const Io = std.Io;
 
@@ -52,6 +51,174 @@ const MatchResult = struct {
     start: usize,
     end: usize,
 };
+
+// --- Alternation / group distribution -------------------------------------
+// The regex engine has no real NFA for groups; instead we distribute
+// parenthesized alternation at compile time into a flat list of alternative
+// patterns, e.g. `(ab|cd)ef` -> {`abef`, `cdef`}, `a|b` -> {`a`, `b`}. Each
+// resulting pattern is compiled independently and searched as an alternative.
+// Groups that are followed by a quantifier (`(ab)+`) are left intact (their
+// parens are still treated as no-ops by the matcher, unchanged behavior).
+const GroupSpan = struct { open: usize, close: usize };
+
+// Find the first top-level '(' ... ')' group NOT followed by a quantifier.
+// Returns null if none (or on unbalanced parens).
+fn findDistributableGroup(p: []const u8) ?GroupSpan {
+    var i: usize = 0;
+    var in_cls = false;
+    while (i < p.len) : (i += 1) {
+        const c = p[i];
+        if (c == '\\' and i + 1 < p.len) {
+            i += 1;
+            continue;
+        }
+        if (c == '[') {
+            in_cls = true;
+            continue;
+        }
+        if (c == ']' and in_cls) {
+            in_cls = false;
+            continue;
+        }
+        if (in_cls) continue;
+        if (c == '(') {
+            var depth: usize = 1;
+            var j: usize = i + 1;
+            var jc = false;
+            while (j < p.len) : (j += 1) {
+                const d = p[j];
+                if (d == '\\' and j + 1 < p.len) {
+                    j += 1;
+                    continue;
+                }
+                if (d == '[') {
+                    jc = true;
+                    continue;
+                }
+                if (d == ']' and jc) {
+                    jc = false;
+                    continue;
+                }
+                if (jc) continue;
+                if (d == '(') {
+                    depth += 1;
+                } else if (d == ')') {
+                    depth -= 1;
+                    if (depth == 0) break;
+                }
+            }
+            if (depth != 0) return null; // unbalanced parens
+            const close = j;
+            const after = close + 1;
+            const quant = after < p.len and (p[after] == '*' or p[after] == '+' or p[after] == '?');
+            if (!quant) return .{ .open = i, .close = close };
+            i = close; // quantified group: skip past it and keep scanning
+        }
+    }
+    return null;
+}
+
+const DistributeError = error{ TooComplex, OutOfMemory };
+
+fn distributeCombined(
+    allocator: std.mem.Allocator,
+    prefix: []const u8,
+    mid: []const u8,
+    suffix: []const u8,
+    out: *std.ArrayListUnmanaged([]u8),
+) DistributeError!void {
+    const combined = try allocator.alloc(u8, prefix.len + mid.len + suffix.len);
+    defer allocator.free(combined);
+    @memcpy(combined[0..prefix.len], prefix);
+    @memcpy(combined[prefix.len..][0..mid.len], mid);
+    @memcpy(combined[prefix.len + mid.len ..][0..suffix.len], suffix);
+    try distribute(allocator, combined, out);
+}
+
+// Flatten `p` into `out` as a list of alternative patterns with no top-level
+// '|' and no distributable groups. Terminates: each recursion strictly reduces
+// pattern length or paren count; the 512 guard bounds pathological expansion.
+fn distribute(allocator: std.mem.Allocator, p: []const u8, out: *std.ArrayListUnmanaged([]u8)) DistributeError!void {
+    if (out.items.len > 512) return error.TooComplex;
+
+    // 1. Split on top-level '|'.
+    {
+        var i: usize = 0;
+        var in_cls = false;
+        var depth: usize = 0;
+        var seg_start: usize = 0;
+        var found_pipe = false;
+        while (i < p.len) : (i += 1) {
+            const c = p[i];
+            if (c == '\\' and i + 1 < p.len) {
+                i += 1;
+                continue;
+            }
+            if (c == '[') {
+                in_cls = true;
+                continue;
+            }
+            if (c == ']' and in_cls) {
+                in_cls = false;
+                continue;
+            }
+            if (in_cls) continue;
+            if (c == '(') {
+                depth += 1;
+            } else if (c == ')' and depth > 0) {
+                depth -= 1;
+            } else if (c == '|' and depth == 0) {
+                try distribute(allocator, p[seg_start..i], out);
+                seg_start = i + 1;
+                found_pipe = true;
+            }
+        }
+        if (found_pipe) {
+            try distribute(allocator, p[seg_start..], out);
+            return;
+        }
+    }
+
+    // 2. No top-level '|'. Distribute the first non-quantified group.
+    const grp = findDistributableGroup(p) orelse {
+        try out.append(allocator, try allocator.dupe(u8, p));
+        return;
+    };
+
+    const prefix = p[0..grp.open];
+    const interior = p[grp.open + 1 .. grp.close];
+    const suffix = p[grp.close + 1 ..];
+
+    var i: usize = 0;
+    var in_cls = false;
+    var depth: usize = 0;
+    var seg_start: usize = 0;
+    while (i < interior.len) : (i += 1) {
+        const c = interior[i];
+        if (c == '\\' and i + 1 < interior.len) {
+            i += 1;
+            continue;
+        }
+        if (c == '[') {
+            in_cls = true;
+            continue;
+        }
+        if (c == ']' and in_cls) {
+            in_cls = false;
+            continue;
+        }
+        if (in_cls) continue;
+        if (c == '(') {
+            depth += 1;
+        } else if (c == ')' and depth > 0) {
+            depth -= 1;
+        } else if (c == '|' and depth == 0) {
+            try distributeCombined(allocator, prefix, interior[seg_start..i], suffix, out);
+            seg_start = i + 1;
+        }
+    }
+    try distributeCombined(allocator, prefix, interior[seg_start..], suffix, out);
+}
 
 // Extended Regular Expression Engine
 // Supports: . * + ? | [] [^] ^ $ () and character classes
@@ -82,9 +249,12 @@ const CompiledRegex = struct {
     const Instruction = struct {
         op: Op,
         char: u8 = 0, // For literal
-        class_start: u16 = 0, // Start index in class_data
-        class_len: u16 = 0, // Length in class_data
-        alt_jump: u16 = 0, // Jump offset for alternation
+        // usize offsets: character classes can expand well past 65535 bytes for
+        // crafted patterns (e.g. many `a-z` ranges). u16 here truncated the
+        // offset/length and produced an out-of-bounds class slice read.
+        class_start: usize = 0, // Start index in class_data
+        class_len: usize = 0, // Length in class_data
+        alt_jump: usize = 0, // Jump offset for alternation
     };
 
     instructions: []Instruction,
@@ -102,44 +272,34 @@ const CompiledRegex = struct {
     }
 
     fn compile(allocator: std.mem.Allocator, pattern: []const u8) !*CompiledRegex {
-        // Check for top-level alternation (| outside [] and ())
-        var alt_positions: std.ArrayListUnmanaged(usize) = .empty;
-        defer alt_positions.deinit(allocator);
-        {
-            var ai: usize = 0;
-            var in_cls = false;
-            var paren_depth: usize = 0;
-            while (ai < pattern.len) : (ai += 1) {
-                const ach = pattern[ai];
-                if (ach == '\\' and ai + 1 < pattern.len) {
-                    ai += 1; // skip escaped char
-                } else if (ach == '[') {
-                    in_cls = true;
-                } else if (ach == ']' and in_cls) {
-                    in_cls = false;
-                } else if (!in_cls and ach == '(') {
-                    paren_depth += 1;
-                } else if (!in_cls and ach == ')' and paren_depth > 0) {
-                    paren_depth -= 1;
-                } else if (!in_cls and paren_depth == 0 and ach == '|') {
-                    try alt_positions.append(allocator, ai);
-                }
-            }
+        // Expand parenthesized / top-level alternation into a flat set of
+        // alternative sub-patterns: `(ab|cd)ef` -> {abef, cdef}, `a|b` -> {a, b}.
+        // The previous compiler only split '|' at the very top level and treated
+        // group markers as no-ops, so `(ab|cd)` compiled to the literal "abcd".
+        var expanded: std.ArrayListUnmanaged([]u8) = .empty;
+        defer {
+            for (expanded.items) |e| allocator.free(e);
+            expanded.deinit(allocator);
         }
+        distribute(allocator, pattern, &expanded) catch {
+            for (expanded.items) |e| allocator.free(e);
+            expanded.clearRetainingCapacity();
+            try expanded.append(allocator, try allocator.dupe(u8, pattern));
+        };
 
-        if (alt_positions.items.len > 0) {
-            // Split pattern on | and compile each branch
+        if (expanded.items.len > 1) {
             var branches: std.ArrayListUnmanaged(*CompiledRegex) = .empty;
-            var start: usize = 0;
-            for (alt_positions.items) |apos| {
-                const branch = try compile(allocator, pattern[start..apos]);
-                try branches.append(allocator, branch);
-                start = apos + 1;
+            errdefer {
+                for (branches.items) |b| {
+                    b.deinit(allocator);
+                    allocator.destroy(b);
+                }
+                branches.deinit(allocator);
             }
-            // Last branch
-            const last_branch = try compile(allocator, pattern[start..]);
-            try branches.append(allocator, last_branch);
-
+            for (expanded.items) |e| {
+                const branch = try compileCore(allocator, e);
+                try branches.append(allocator, branch);
+            }
             const regex = try allocator.create(CompiledRegex);
             regex.* = .{
                 .instructions = &.{},
@@ -149,6 +309,10 @@ const CompiledRegex = struct {
             return regex;
         }
 
+        return compileCore(allocator, expanded.items[0]);
+    }
+
+    fn compileCore(allocator: std.mem.Allocator, pattern: []const u8) !*CompiledRegex {
         var instructions: std.ArrayListUnmanaged(Instruction) = .empty;
         var class_data: std.ArrayListUnmanaged(u8) = .empty;
 
@@ -1076,19 +1240,22 @@ fn grepFile(allocator: std.mem.Allocator, path: []const u8, config: *const Confi
     var had_match = false;
     const has_context = config.before_context > 0 or config.after_context > 0;
 
-    // Open file
-    const path_z = try allocator.dupeZ(u8, path);
-    defer allocator.free(path_z);
-
-    const fd_result = linux.open(path_z.ptr, .{ .ACCMODE = .RDONLY }, 0);
-    if (@as(isize, @bitCast(fd_result)) < 0) {
-        if (!config.quiet and !config.suppress_errors) {
-            std.debug.print("zgrep: {s}: No such file or directory\n", .{path});
-        }
-        return error.OpenError;
-    }
-    const fd: i32 = @intCast(fd_result);
-    defer _ = linux.close(fd);
+    // Open the input. "-" reads standard input (fd 0); GNU labels it
+    // "(standard input)" wherever a filename prefix is printed. The previous
+    // implementation issued raw Linux syscalls (open/read/close) that SIGSYS-
+    // crash on non-Linux platforms; this uses the portable std I/O layer.
+    const is_stdin = std.mem.eql(u8, path, "-");
+    const display_name: []const u8 = if (is_stdin) "(standard input)" else path;
+    const file: Io.File = if (is_stdin)
+        Io.File.stdin()
+    else
+        Io.Dir.cwd().openFile(io_ctx, path, .{}) catch {
+            if (!config.quiet and !config.suppress_errors) {
+                std.debug.print("zgrep: {s}: No such file or directory\n", .{path});
+            }
+            return error.OpenError;
+        };
+    defer if (!is_stdin) file.close(io_ctx);
 
     // Context tracking
     var before_buf = ContextBuffer.init(config.before_context);
@@ -1096,9 +1263,10 @@ fn grepFile(allocator: std.mem.Allocator, path: []const u8, config: *const Confi
     var last_printed_line: usize = 0; // Last line number we printed
     var need_separator = false; // Need to print "--" before next group
 
-    // Line storage for before context - use a simple array of allocations
+    // Line storage for before context - a rotating ring of owned copies.
     var line_storage: [MAX_CONTEXT_LINES][]const u8 = undefined;
-    var storage_count: usize = 0;
+    var storage_count: usize = 0; // how many slots are populated (<= MAX)
+    var storage_next: usize = 0; // next slot to (over)write
     defer {
         for (line_storage[0..storage_count]) |s| allocator.free(@constCast(s));
     }
@@ -1106,26 +1274,19 @@ fn grepFile(allocator: std.mem.Allocator, path: []const u8, config: *const Confi
     // Process file
     var line_num: usize = 0;
     var buffer: [BUFFER_SIZE]u8 = undefined;
-    var leftover: []u8 = &.{};
-    var leftover_buf: [8192]u8 = undefined;
+    // Growable carry buffer for input that straddles read boundaries. A fixed
+    // 8 KB buffer silently dropped the tail of any longer line, losing matches.
+    var leftover: std.ArrayListUnmanaged(u8) = .empty;
+    defer leftover.deinit(allocator);
+    var reached_max = false;
 
-    while (true) {
-        const read_result = linux.read(@intCast(fd), &buffer, buffer.len);
-        if (@as(isize, @bitCast(read_result)) <= 0) break;
-        const bytes_read: usize = @intCast(read_result);
+    outer: while (true) {
+        const bytes_read = std.posix.read(file.handle, &buffer) catch break;
         if (bytes_read == 0) break;
 
-        // Combine leftover with new data
-        var data: []const u8 = undefined;
-        var combined_buf: [BUFFER_SIZE + 8192]u8 = undefined;
-        if (leftover.len > 0) {
-            @memcpy(combined_buf[0..leftover.len], leftover);
-            @memcpy(combined_buf[leftover.len..][0..bytes_read], buffer[0..bytes_read]);
-            data = combined_buf[0 .. leftover.len + bytes_read];
-            leftover = &.{};
-        } else {
-            data = buffer[0..bytes_read];
-        }
+        // Append new bytes to the carry buffer, then process complete lines.
+        try leftover.appendSlice(allocator, buffer[0..bytes_read]);
+        const data = leftover.items;
 
         // Process lines
         var start: usize = 0;
@@ -1141,10 +1302,12 @@ fn grepFile(allocator: std.mem.Allocator, path: []const u8, config: *const Confi
                     had_match = true;
                     matches += 1;
 
-                    // Check max count
+                    // Max-count limit: stop reading but still fall through to the
+                    // count / -L summary (GNU prints min(count, NUM) under -c).
                     if (config.max_count > 0 and matches > config.max_count) {
-                        writer.interface.flush() catch {};
-                        return .{ .matches = matches - 1, .had_match = true };
+                        matches -= 1;
+                        reached_max = true;
+                        break :outer;
                     }
 
                     if (config.quiet) {
@@ -1153,7 +1316,7 @@ fn grepFile(allocator: std.mem.Allocator, path: []const u8, config: *const Confi
                     }
 
                     if (config.files_with_matches) {
-                        writer.interface.print("{s}\n", .{path}) catch {};
+                        writer.interface.print("{s}\n", .{display_name}) catch {};
                         writer.interface.flush() catch {};
                         return .{ .matches = matches, .had_match = true };
                     }
@@ -1172,7 +1335,7 @@ fn grepFile(allocator: std.mem.Allocator, path: []const u8, config: *const Confi
                             var i: usize = 0;
                             while (before_buf.get(i)) |ctx| {
                                 if (ctx.num > last_printed_line) {
-                                    printContextLine(&writer, path, ctx.num, ctx.line, config, multiple_files, false);
+                                    printContextLine(&writer, display_name, ctx.num, ctx.line, config, multiple_files, false);
                                     last_printed_line = ctx.num;
                                 }
                                 i += 1;
@@ -1181,9 +1344,9 @@ fn grepFile(allocator: std.mem.Allocator, path: []const u8, config: *const Confi
 
                         // Print the matching line
                         if (config.only_matching) {
-                            printMatch(&writer, path, line_num, line, config, multiple_files);
+                            printMatch(&writer, display_name, line_num, line, config, multiple_files);
                         } else {
-                            printContextLine(&writer, path, line_num, line, config, multiple_files, true);
+                            printContextLine(&writer, display_name, line_num, line, config, multiple_files, true);
                         }
                         last_printed_line = line_num;
 
@@ -1192,34 +1355,24 @@ fn grepFile(allocator: std.mem.Allocator, path: []const u8, config: *const Confi
                     }
                 } else if (after_remaining > 0 and !config.count_only and !config.files_without_match and !config.quiet) {
                     // Print after context line
-                    printContextLine(&writer, path, line_num, line, config, multiple_files, false);
+                    printContextLine(&writer, display_name, line_num, line, config, multiple_files, false);
                     last_printed_line = line_num;
                     after_remaining -= 1;
                 }
 
-                // Store line in before context buffer
+                // Store line in before-context ring, using a real rotating write
+                // index so a slot still referenced by before_buf is never freed.
                 if (config.before_context > 0) {
-                    // Free old line if buffer is full
-                    if (storage_count >= config.before_context and storage_count > 0) {
-                        // Rotate: free oldest, shift down
-                        if (before_buf.count > 0) {
-                            // The oldest stored line can be freed if it's been pushed out
-                        }
-                    }
-                    // Store a copy of this line
-                    if (storage_count < MAX_CONTEXT_LINES) {
-                        const line_copy = allocator.dupe(u8, line) catch line;
-                        if (line_copy.ptr != line.ptr) {
-                            line_storage[storage_count] = line_copy;
+                    const line_copy = allocator.dupe(u8, line) catch line;
+                    if (line_copy.ptr != line.ptr) {
+                        if (storage_count < MAX_CONTEXT_LINES) {
+                            line_storage[storage_next] = line_copy;
                             storage_count += 1;
-                            before_buf.push(line_copy, line_num);
+                        } else {
+                            allocator.free(@constCast(line_storage[storage_next]));
+                            line_storage[storage_next] = line_copy;
                         }
-                    } else {
-                        // Reuse oldest slot
-                        const oldest_idx = storage_count % MAX_CONTEXT_LINES;
-                        allocator.free(@constCast(line_storage[oldest_idx]));
-                        const line_copy = allocator.dupe(u8, line) catch continue;
-                        line_storage[oldest_idx] = line_copy;
+                        storage_next = (storage_next + 1) % MAX_CONTEXT_LINES;
                         before_buf.push(line_copy, line_num);
                     }
                 }
@@ -1228,27 +1381,32 @@ fn grepFile(allocator: std.mem.Allocator, path: []const u8, config: *const Confi
             }
         }
 
-        // Save leftover (incomplete line)
-        if (start < data.len) {
-            const remaining = data.len - start;
-            if (remaining <= leftover_buf.len) {
-                @memcpy(leftover_buf[0..remaining], data[start..]);
-                leftover = leftover_buf[0..remaining];
-            }
+        // Keep the unprocessed remainder (incomplete final line) for next read.
+        if (start > 0) {
+            const rem = data.len - start;
+            std.mem.copyForwards(u8, leftover.items[0..rem], data[start..]);
+            leftover.shrinkRetainingCapacity(rem);
         }
     }
 
-    // Process final leftover (file without trailing newline)
-    if (leftover.len > 0) {
+    // Process final leftover (input without a trailing newline).
+    if (leftover.items.len > 0 and !reached_max) {
+        const line = leftover.items;
         line_num += 1;
-        const contains = lineContainsPattern(leftover, config);
+        const contains = lineContainsPattern(line, config);
         const is_match = if (config.invert_match) !contains else contains;
 
         if (is_match) {
             had_match = true;
             matches += 1;
 
-            if (!config.quiet and !config.count_only and !config.files_with_matches and !config.files_without_match) {
+            if (config.files_with_matches) {
+                writer.interface.print("{s}\n", .{display_name}) catch {};
+                writer.interface.flush() catch {};
+                return .{ .matches = matches, .had_match = true };
+            }
+
+            if (!config.quiet and !config.count_only and !config.files_without_match) {
                 if (config.max_count == 0 or matches <= config.max_count) {
                     // Print separator if needed
                     if (has_context and need_separator and last_printed_line > 0 and
@@ -1262,36 +1420,37 @@ fn grepFile(allocator: std.mem.Allocator, path: []const u8, config: *const Confi
                         var i: usize = 0;
                         while (before_buf.get(i)) |ctx| {
                             if (ctx.num > last_printed_line) {
-                                printContextLine(&writer, path, ctx.num, ctx.line, config, multiple_files, false);
+                                printContextLine(&writer, display_name, ctx.num, ctx.line, config, multiple_files, false);
                             }
                             i += 1;
                         }
                     }
 
                     if (config.only_matching) {
-                        printMatch(&writer, path, line_num, leftover, config, multiple_files);
+                        printMatch(&writer, display_name, line_num, line, config, multiple_files);
                     } else {
-                        printContextLine(&writer, path, line_num, leftover, config, multiple_files, true);
+                        printContextLine(&writer, display_name, line_num, line, config, multiple_files, true);
                     }
                 }
             }
         } else if (after_remaining > 0 and !config.count_only and !config.files_without_match and !config.quiet) {
-            printContextLine(&writer, path, line_num, leftover, config, multiple_files, false);
+            printContextLine(&writer, display_name, line_num, line, config, multiple_files, false);
         }
     }
 
-    // Print count if requested
+    // Print count if requested (capped at -m NUM, matching GNU grep).
     if (config.count_only and !config.quiet) {
+        const shown = if (config.max_count > 0 and matches > config.max_count) config.max_count else matches;
         if (config.with_filename or (multiple_files and !config.no_filename)) {
-            writer.interface.print("{s}:{d}\n", .{ path, matches }) catch {};
+            writer.interface.print("{s}:{d}\n", .{ display_name, shown }) catch {};
         } else {
-            writer.interface.print("{d}\n", .{matches}) catch {};
+            writer.interface.print("{d}\n", .{shown}) catch {};
         }
     }
 
     // Print filename for -L
     if (config.files_without_match and !had_match and !config.quiet) {
-        writer.interface.print("{s}\n", .{path}) catch {};
+        writer.interface.print("{s}\n", .{display_name}) catch {};
     }
 
     writer.interface.flush() catch {};
@@ -1299,6 +1458,7 @@ fn grepFile(allocator: std.mem.Allocator, path: []const u8, config: *const Confi
 }
 
 fn grepRecursive(allocator: std.mem.Allocator, path: []const u8, config: *const Config, results: *GrepResult) void {
+    const io_ctx = Io.Threaded.global_single_threaded.io();
     const path_z = allocator.dupeZ(u8, path) catch return;
     defer allocator.free(path_z);
 
@@ -1323,27 +1483,23 @@ fn grepRecursive(allocator: std.mem.Allocator, path: []const u8, config: *const 
         const full_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ path, name }) catch continue;
         defer allocator.free(full_path);
 
-        // Check if directory
-        const full_path_z = allocator.dupeZ(u8, full_path) catch continue;
-        defer allocator.free(full_path_z);
+        // Portable stat that does NOT follow symlinks: GNU `grep -r` never
+        // descends through a symlink, so a `loop -> .` self-link cannot cause
+        // unbounded recursion. (The old code used raw `statx` with flags=0,
+        // which both crashed off-Linux and followed links into infinite loops.)
+        const st = Io.Dir.cwd().statFile(io_ctx, full_path, .{ .follow_symlinks = false }) catch continue;
 
-        var statx_buf: linux.Statx = undefined;
-        const stat_result = linux.statx(linux.AT.FDCWD, full_path_z.ptr, 0, linux.STATX{ .MODE = true }, &statx_buf);
-
-        if (stat_result == 0) {
-            const is_dir = (statx_buf.mode & 0o170000) == 0o40000;
-            if (is_dir) {
-                // Check exclude-dir patterns
-                if (!shouldExcludeDir(full_path, config)) {
-                    grepRecursive(allocator, full_path, config, results);
-                }
-            } else {
-                // Check include/exclude patterns
-                if (shouldIncludeFile(full_path, config)) {
-                    const result = grepFile(allocator, full_path, config, true) catch continue;
-                    results.matches += result.matches;
-                    if (result.had_match) results.had_match = true;
-                }
+        if (st.kind == .directory) {
+            // Check exclude-dir patterns
+            if (!shouldExcludeDir(full_path, config)) {
+                grepRecursive(allocator, full_path, config, results);
+            }
+        } else if (st.kind != .sym_link) {
+            // Regular file (symlinks are skipped during recursion, per GNU -r).
+            if (shouldIncludeFile(full_path, config)) {
+                const result = grepFile(allocator, full_path, config, true) catch continue;
+                results.matches += result.matches;
+                if (result.had_match) results.had_match = true;
             }
         }
     }
@@ -1357,11 +1513,49 @@ fn parseNumArg(args: []const []const u8, i: *usize) ?usize {
     return null;
 }
 
+// Translate a POSIX Basic Regular Expression (grep's default, no -E) into the
+// Extended form our engine compiles. In BRE `+ ? | ( ) { }` are literal and the
+// backslash forms `\+ \? \| \( \) \{ \}` are the operators (GNU extensions for
+// + ? |). `. * [ ] ^ $` are identical in both. Engine escapes like `\d \w \s
+// \b` are passed through unchanged. Caller owns the returned slice.
+fn translateBreToEre(allocator: std.mem.Allocator, pattern: []const u8) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var i: usize = 0;
+    while (i < pattern.len) : (i += 1) {
+        const c = pattern[i];
+        if (c == '\\' and i + 1 < pattern.len) {
+            const n = pattern[i + 1];
+            switch (n) {
+                // BRE operator escapes -> bare ERE metacharacters.
+                '(', ')', '{', '}', '|', '+', '?' => try out.append(allocator, n),
+                // Everything else keeps its backslash (\. \* \[ \\ \d \w \s \b ...).
+                else => {
+                    try out.append(allocator, '\\');
+                    try out.append(allocator, n);
+                },
+            }
+            i += 1; // consume the escaped char
+        } else switch (c) {
+            // Bare ERE metacharacters are literal in BRE -> escape for the engine.
+            '(', ')', '{', '}', '|', '+', '?' => {
+                try out.append(allocator, '\\');
+                try out.append(allocator, c);
+            },
+            else => try out.append(allocator, c),
+        }
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 fn addPatternEntry(allocator: std.mem.Allocator, config: *Config, pat: []const u8) !void {
     const text = try allocator.dupe(u8, pat);
     var compiled: ?*CompiledRegex = null;
     if (!config.fixed_strings) {
-        compiled = CompiledRegex.compile(allocator, pat) catch {
+        // Default mode is BRE; -E selects ERE (feed the pattern verbatim).
+        const eff = if (config.extended_regex) pat else (translateBreToEre(allocator, pat) catch pat);
+        defer if (eff.ptr != pat.ptr) allocator.free(eff);
+        compiled = CompiledRegex.compile(allocator, eff) catch {
             std.debug.print("zgrep: invalid regular expression\n", .{});
             std.process.exit(2);
         };
@@ -1373,25 +1567,20 @@ fn addPatternEntry(allocator: std.mem.Allocator, config: *Config, pat: []const u
 }
 
 fn loadPatternsFromFile(allocator: std.mem.Allocator, config: *Config, path: []const u8) !void {
-    const path_z = try allocator.dupeZ(u8, path);
-    defer allocator.free(path_z);
-
-    const fd_result = linux.open(path_z.ptr, .{ .ACCMODE = .RDONLY }, 0);
-    if (@as(isize, @bitCast(fd_result)) < 0) {
+    const io_ctx = Io.Threaded.global_single_threaded.io();
+    const file = Io.Dir.cwd().openFile(io_ctx, path, .{}) catch {
         std.debug.print("zgrep: {s}: No such file or directory\n", .{path});
         std.process.exit(2);
-    }
-    const fd: i32 = @intCast(fd_result);
-    defer _ = linux.close(fd);
+    };
+    defer file.close(io_ctx);
 
     // Read the whole file (pattern files are typically small)
     var buf: [65536]u8 = undefined;
     var total: usize = 0;
     while (total < buf.len) {
-        const read_result = linux.read(fd, buf[total..].ptr, buf.len - total);
-        const n: isize = @bitCast(read_result);
-        if (n <= 0) break;
-        total += @intCast(read_result);
+        const n = std.posix.read(file.handle, buf[total..]) catch break;
+        if (n == 0) break;
+        total += n;
     }
 
     const data = buf[0..total];
@@ -1517,8 +1706,15 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                     try addPatternEntry(allocator, &config, pat);
                     has_e_flag = true;
                     pattern_found = true;
+                } else if (std.mem.eql(u8, arg, "--text") or
+                    std.mem.eql(u8, arg, "--line-buffered") or
+                    std.mem.startsWith(u8, arg, "--binary-files="))
+                {
+                    // Accepted no-ops: input is always treated as text and
+                    // output is flushed per file, so these don't change results.
                 } else {
                     std.debug.print("zgrep: unrecognized option '{s}'\n", .{arg});
+                    std.debug.print("Try 'zgrep --help' for more information.\n", .{});
                     std.process.exit(2);
                 }
             } else {
@@ -1543,6 +1739,9 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                         'w' => config.word_regexp = true,
                         'x' => config.line_regexp = true,
                         's' => config.suppress_errors = true,
+                        // -a: process input as text. zgrep already treats all
+                        // input as text (no binary detection), so this is a no-op.
+                        'a' => {},
                         'e' => {
                             // -e PATTERN or -ePATTERN
                             var pat: []const u8 = undefined;
@@ -1615,6 +1814,7 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                         },
                         else => {
                             std.debug.print("zgrep: invalid option -- '{c}'\n", .{ch});
+                            std.debug.print("Try 'zgrep --help' for more information.\n", .{});
                             std.process.exit(2);
                         },
                     }
@@ -1632,12 +1832,15 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                 }
             }
 
-            // Compile regex unless -F (fixed strings) specified
+            // Compile regex unless -F (fixed strings) specified.
+            // Default mode is BRE; -E selects ERE (compile the pattern verbatim).
             if (!config.fixed_strings) {
-                config.compiled_regex = CompiledRegex.compile(allocator, arg) catch {
+                const eff = if (config.extended_regex) arg else (translateBreToEre(allocator, arg) catch arg);
+                config.compiled_regex = CompiledRegex.compile(allocator, eff) catch {
                     std.debug.print("zgrep: invalid regular expression\n", .{});
                     std.process.exit(2);
                 };
+                if (eff.ptr != arg.ptr) allocator.free(eff);
             }
         } else {
             try config.files.append(allocator, try allocator.dupe(u8, arg));
@@ -1739,223 +1942,6 @@ fn printVersion() void {
     writer.interface.flush() catch {};
 }
 
-fn grepStdin(allocator: std.mem.Allocator, config: *const Config) !GrepResult {
-    const io_ctx = Io.Threaded.global_single_threaded.io();
-    const stdout = Io.File.stdout();
-    var out_buf: [4096]u8 = undefined;
-    var writer = stdout.writer(io_ctx, &out_buf);
-
-    var matches: usize = 0;
-    var had_match = false;
-    var line_num: usize = 0;
-
-    // Context tracking
-    const has_context = config.before_context > 0 or config.after_context > 0;
-    var before_buf = ContextBuffer.init(config.before_context);
-    var after_remaining: usize = 0;
-    var last_printed_line: usize = 0;
-    var need_separator = false;
-
-    // Line storage for before context
-    var line_storage: [MAX_CONTEXT_LINES][]const u8 = undefined;
-    var storage_count: usize = 0;
-    defer {
-        for (line_storage[0..storage_count]) |s| allocator.free(@constCast(s));
-    }
-
-    var buffer: [BUFFER_SIZE]u8 = undefined;
-    var leftover: []u8 = &.{};
-    var leftover_buf: [8192]u8 = undefined;
-
-    while (true) {
-        const read_result = linux.read(linux.STDIN_FILENO, &buffer, buffer.len);
-        if (@as(isize, @bitCast(read_result)) <= 0) break;
-        const bytes_read: usize = @intCast(read_result);
-        if (bytes_read == 0) break;
-
-        // Combine leftover with new data
-        var data: []const u8 = undefined;
-        var combined_buf: [BUFFER_SIZE + 8192]u8 = undefined;
-        if (leftover.len > 0) {
-            @memcpy(combined_buf[0..leftover.len], leftover);
-            @memcpy(combined_buf[leftover.len..][0..bytes_read], buffer[0..bytes_read]);
-            data = combined_buf[0 .. leftover.len + bytes_read];
-            leftover = &.{};
-        } else {
-            data = buffer[0..bytes_read];
-        }
-
-        // Process lines
-        var start: usize = 0;
-        for (data, 0..) |ch, i| {
-            if (ch == '\n') {
-                const line = data[start..i];
-                line_num += 1;
-
-                const contains = lineContainsPattern(line, config);
-                const is_match = if (config.invert_match) !contains else contains;
-
-                if (is_match) {
-                    had_match = true;
-                    matches += 1;
-
-                    if (config.quiet) {
-                        writer.interface.flush() catch {};
-                        return .{ .matches = matches, .had_match = true };
-                    }
-
-                    if (!config.count_only) {
-                        // Print separator if needed (gap between groups)
-                        if (has_context and need_separator and last_printed_line > 0 and
-                            line_num > last_printed_line + 1)
-                        {
-                            writer.interface.writeAll("--\n") catch {};
-                        }
-                        need_separator = true;
-
-                        // Print before context lines
-                        if (config.before_context > 0) {
-                            var ctx_i: usize = 0;
-                            while (before_buf.get(ctx_i)) |ctx| {
-                                if (ctx.num > last_printed_line) {
-                                    if (config.line_numbers) {
-                                        if (config.use_color) {
-                                            writer.interface.writeAll(COLOR_LINE_NUM) catch {};
-                                            writer.interface.print("{d}", .{ctx.num}) catch {};
-                                            writer.interface.writeAll(COLOR_MATCH_END) catch {};
-                                            writer.interface.writeAll(COLOR_SEP) catch {};
-                                            writer.interface.writeAll("-") catch {};
-                                            writer.interface.writeAll(COLOR_MATCH_END) catch {};
-                                        } else {
-                                            writer.interface.print("{d}-", .{ctx.num}) catch {};
-                                        }
-                                    }
-                                    writer.interface.writeAll(ctx.line) catch {};
-                                    writer.interface.writeAll("\n") catch {};
-                                    last_printed_line = ctx.num;
-                                }
-                                ctx_i += 1;
-                            }
-                        }
-
-                        // Print the matching line (or just matched parts for -o)
-                        if (config.only_matching) {
-                            var mo: usize = 0;
-                            while (mo < line.len) {
-                                const rem = line[mo..];
-                                const mresult = findFirstMatch(rem, config) orelse break;
-                                if (config.line_numbers) {
-                                    if (config.use_color) {
-                                        writer.interface.writeAll(COLOR_LINE_NUM) catch {};
-                                        writer.interface.print("{d}", .{line_num}) catch {};
-                                        writer.interface.writeAll(COLOR_MATCH_END) catch {};
-                                        writer.interface.writeAll(COLOR_SEP) catch {};
-                                        writer.interface.writeAll(":") catch {};
-                                        writer.interface.writeAll(COLOR_MATCH_END) catch {};
-                                    } else {
-                                        writer.interface.print("{d}:", .{line_num}) catch {};
-                                    }
-                                }
-                                if (config.use_color) {
-                                    writer.interface.writeAll(COLOR_MATCH_START) catch {};
-                                }
-                                writer.interface.writeAll(rem[mresult.start..mresult.end]) catch {};
-                                if (config.use_color) {
-                                    writer.interface.writeAll(COLOR_MATCH_END) catch {};
-                                }
-                                writer.interface.writeAll("\n") catch {};
-                                mo += mresult.end;
-                                if (mresult.start == mresult.end) mo += 1;
-                            }
-                        } else {
-                            if (config.line_numbers) {
-                                if (config.use_color) {
-                                    writer.interface.writeAll(COLOR_LINE_NUM) catch {};
-                                    writer.interface.print("{d}", .{line_num}) catch {};
-                                    writer.interface.writeAll(COLOR_MATCH_END) catch {};
-                                    writer.interface.writeAll(COLOR_SEP) catch {};
-                                    writer.interface.writeAll(":") catch {};
-                                    writer.interface.writeAll(COLOR_MATCH_END) catch {};
-                                } else {
-                                    writer.interface.print("{d}:", .{line_num}) catch {};
-                                }
-                            }
-                            if (config.use_color) {
-                                writeColorizedLine(&writer, line, config);
-                            } else {
-                                writer.interface.writeAll(line) catch {};
-                            }
-                            writer.interface.writeAll("\n") catch {};
-                        }
-                        last_printed_line = line_num;
-
-                        // Reset after context counter
-                        after_remaining = config.after_context;
-                    }
-                } else if (after_remaining > 0 and !config.count_only and !config.quiet) {
-                    // Print after context line
-                    if (config.line_numbers) {
-                        if (config.use_color) {
-                            writer.interface.writeAll(COLOR_LINE_NUM) catch {};
-                            writer.interface.print("{d}", .{line_num}) catch {};
-                            writer.interface.writeAll(COLOR_MATCH_END) catch {};
-                            writer.interface.writeAll(COLOR_SEP) catch {};
-                            writer.interface.writeAll("-") catch {};
-                            writer.interface.writeAll(COLOR_MATCH_END) catch {};
-                        } else {
-                            writer.interface.print("{d}-", .{line_num}) catch {};
-                        }
-                    }
-                    writer.interface.writeAll(line) catch {};
-                    writer.interface.writeAll("\n") catch {};
-                    last_printed_line = line_num;
-                    after_remaining -= 1;
-                }
-
-                // Store line in before context buffer
-                if (config.before_context > 0) {
-                    if (storage_count < MAX_CONTEXT_LINES) {
-                        const line_copy = allocator.dupe(u8, line) catch line;
-                        if (line_copy.ptr != line.ptr) {
-                            line_storage[storage_count] = line_copy;
-                            storage_count += 1;
-                            before_buf.push(line_copy, line_num);
-                        }
-                    } else {
-                        // Reuse oldest slot
-                        const oldest_idx = storage_count % MAX_CONTEXT_LINES;
-                        allocator.free(@constCast(line_storage[oldest_idx]));
-                        const line_copy = allocator.dupe(u8, line) catch {
-                            start = i + 1;
-                            continue;
-                        };
-                        line_storage[oldest_idx] = line_copy;
-                        before_buf.push(line_copy, line_num);
-                    }
-                }
-
-                start = i + 1;
-            }
-        }
-
-        // Save leftover
-        if (start < data.len) {
-            const remaining = data.len - start;
-            if (remaining <= leftover_buf.len) {
-                @memcpy(leftover_buf[0..remaining], data[start..]);
-                leftover = leftover_buf[0..remaining];
-            }
-        }
-    }
-
-    if (config.count_only and !config.quiet) {
-        writer.interface.print("{d}\n", .{matches}) catch {};
-    }
-
-    writer.interface.flush() catch {};
-    return .{ .matches = matches, .had_match = had_match };
-}
-
 pub fn main(init: std.process.Init) void {
     const allocator = init.gpa;
 
@@ -1978,7 +1964,12 @@ pub fn main(init: std.process.Init) void {
     } else {
         for (config.files.items) |file| {
             if (std.mem.eql(u8, file, "-")) {
-                const result = grepStdin(allocator, &config) catch continue;
+                // Standard input goes through grepFile too ("-" opens fd 0),
+                // so stdin and file inputs share one correct code path.
+                const result = grepFile(allocator, file, &config, multiple_files) catch {
+                    had_error = true;
+                    continue;
+                };
                 total_matches += result.matches;
                 if (result.had_match) had_any_match = true;
             } else if (config.recursive) {
@@ -1997,8 +1988,10 @@ pub fn main(init: std.process.Init) void {
         }
     }
 
-    // Exit status: 0 if match, 1 if no match, 2 if error
-    if (had_error and !had_any_match) {
+    // Exit status: 2 if any file error occurred (takes precedence, matching GNU
+    // grep, which returns 2 on a read error even when other files matched),
+    // otherwise 0 if a match was found, 1 if not.
+    if (had_error) {
         std.process.exit(2);
     } else if (had_any_match) {
         std.process.exit(0);

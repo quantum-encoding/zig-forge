@@ -249,13 +249,26 @@ const CGroup = extern struct {
 extern "c" fn getpwuid(uid: libc.uid_t) ?*CPasswd;
 extern "c" fn getgrgid(gid: libc.gid_t) ?*CGroup;
 
+extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
+
 fn getTerminalWidth() u16 {
+    // GNU ls precedence: start at 80, let $COLUMNS override, then let the
+    // TIOCGWINSZ ioctl override that when stdout is a real terminal. On a
+    // pipe the ioctl fails, so $COLUMNS is what wins (matches GNU behavior
+    // for `COLUMNS=20 ls -C | cat`).
+    var width: u16 = 80;
+    if (getenv("COLUMNS")) |c| {
+        const s = std.mem.span(c);
+        if (std.fmt.parseInt(u16, s, 10)) |v| {
+            if (v > 0) width = v;
+        } else |_| {}
+    }
     var ws: libc.winsize = undefined;
     const result = libc.ioctl(1, libc.T.IOCGWINSZ, &ws);
     if (result == 0 and ws.col > 0) {
-        return ws.col;
+        width = ws.col;
     }
-    return 80; // default
+    return width;
 }
 
 fn getUserName(uid: u32) []const u8 {
@@ -700,7 +713,7 @@ fn printLongFormat(writer: anytype, entries: []const FileEntry, config: *const C
 
         if (config.show_size) {
             // blocks are 512-byte blocks, GNU ls shows in 1K blocks by default
-            const display_blocks: u64 = @intCast(@divTrunc(entry.blocks + 1, 2));
+            const display_blocks: u64 = @intCast(@divTrunc(@max(0, entry.blocks) + 1, 2));
             const bw = std.fmt.count("{d}", .{display_blocks});
             if (bw > max_blocks_width) max_blocks_width = bw;
         }
@@ -745,7 +758,7 @@ fn printLongFormat(writer: anytype, entries: []const FileEntry, config: *const C
 
         // Print allocated size in blocks if -s
         if (config.show_size) {
-            const display_blocks: u64 = @intCast(@divTrunc(entry.blocks + 1, 2));
+            const display_blocks: u64 = @intCast(@divTrunc(@max(0, entry.blocks) + 1, 2));
             const bw = std.fmt.count("{d}", .{display_blocks});
             var bpad: usize = 0;
             while (bpad + bw < max_blocks_width) : (bpad += 1) {
@@ -862,121 +875,186 @@ fn printLongFormat(writer: anytype, entries: []const FileEntry, config: *const C
     }
 }
 
-fn printColumnFormat(writer: anytype, entries: []const FileEntry, config: *const Config) void {
+/// Full printed width of one entry cell: optional inode + block-size prefixes
+/// plus the name and any -F/-p indicator. Must stay byte-for-byte in sync with
+/// printColumnCell so the column layout math matches what is emitted.
+fn entryDisplayWidth(entry: FileEntry, config: *const Config, max_blocks_width: usize) usize {
+    var w: usize = entry.name.len;
+    if (config.show_indicators) {
+        if (entry.getIndicator() != 0) w += 1;
+    } else if (config.show_dir_indicator) {
+        if (entry.isDir()) w += 1;
+    }
+    if (config.show_inode) {
+        const iw = std.fmt.count("{d}", .{entry.inode});
+        w += @max(@as(usize, 8), iw) + 1; // "{d:>8} "
+    }
+    if (config.show_size) w += max_blocks_width + 1;
+    return w;
+}
+
+/// Emit one entry cell (prefixes + name + indicator) and return the number of
+/// columns written — identical to entryDisplayWidth for the same entry.
+fn printColumnCell(writer: anytype, entry: FileEntry, use_colors: bool, config: *const Config, max_blocks_width: usize) usize {
+    var printed: usize = 0;
+    if (config.show_inode) {
+        writer.interface.print("{d:>8} ", .{entry.inode}) catch {};
+        printed += @max(@as(usize, 8), std.fmt.count("{d}", .{entry.inode})) + 1;
+    }
+    if (config.show_size) {
+        const display_blocks: u64 = @intCast(@divTrunc(@max(0, entry.blocks) + 1, 2));
+        const bw = std.fmt.count("{d}", .{display_blocks});
+        var bpad: usize = 0;
+        while (bpad + bw < max_blocks_width) : (bpad += 1) {
+            writer.interface.writeAll(" ") catch {};
+        }
+        writer.interface.print("{d} ", .{display_blocks}) catch {};
+        printed += max_blocks_width + 1;
+    }
+    printEntryName(writer, entry, use_colors, config);
+    printed += entry.name.len;
+    printed += printEntryIndicator(writer, entry, config);
+    return printed;
+}
+
+/// Advance the output column from `from` to `to`, emitting a tab whenever it
+/// lands past the next tab stop and a space otherwise. Mirrors GNU coreutils
+/// ls.c indent() with the default tabsize of 8 (so column padding is
+/// byte-identical to GNU, which prefers tabs over runs of spaces).
+fn indent(writer: anytype, from_col: usize, to_col: usize) void {
+    const tabsize: usize = 8;
+    var from = from_col;
+    while (from < to_col) {
+        if (to_col / tabsize > (from + 1) / tabsize) {
+            writer.interface.writeAll("\t") catch {};
+            from += tabsize - from % tabsize;
+        } else {
+            writer.interface.writeAll(" ") catch {};
+            from += 1;
+        }
+    }
+}
+
+/// Fallback used when the column-layout allocation fails: one entry per line.
+fn printColumnFallback(writer: anytype, entries: []const FileEntry, config: *const Config, use_colors: bool, max_blocks_width: usize) void {
+    for (entries) |entry| {
+        _ = printColumnCell(writer, entry, use_colors, config, max_blocks_width);
+        writer.interface.writeAll("\n") catch {};
+    }
+}
+
+/// Multi-column layout (-C, -x, and the default terminal format). This is a
+/// faithful port of GNU coreutils 9.10 ls.c: calculate_columns() +
+/// print_many_per_line() / print_horizontal(). Column widths are per-column
+/// (not a single uniform width), padding uses tabs via indent(), and the fit
+/// test replicates GNU's MIN_COLUMN_WIDTH seeding and strict `<` comparison —
+/// so the byte output matches GNU across varied-width filename sets and the
+/// $COLUMNS width. See the anchored parity tests in gnu_parity_test.zig.
+fn printColumnFormat(allocator: std.mem.Allocator, writer: anytype, entries: []const FileEntry, config: *const Config) void {
     if (entries.len == 0) return;
 
     const use_colors = config.useColors();
-    const term_width: usize = @intCast(getTerminalWidth());
+    const line_length: usize = @intCast(getTerminalWidth());
+    const n = entries.len;
+    const across = config.sort_across;
+    const MIN_COLUMN_WIDTH: usize = 3;
 
-    // Calculate max entry display length
-    var max_name_len: usize = 0;
+    // -s block-count column width (shared across all entries).
     var max_blocks_width: usize = 0;
-    for (entries) |entry| {
-        var len = entry.name.len;
-        if (config.show_indicators and entry.getIndicator() != 0) len += 1;
-        if (config.show_dir_indicator and entry.isDir()) len += 1;
-        if (config.show_inode) len += 10; // space for inode
-        if (len > max_name_len) max_name_len = len;
-        if (config.show_size) {
-            const display_blocks: u64 = @intCast(@divTrunc(entry.blocks + 1, 2));
+    if (config.show_size) {
+        for (entries) |entry| {
+            const display_blocks: u64 = @intCast(@divTrunc(@max(0, entry.blocks) + 1, 2));
             const bw = std.fmt.count("{d}", .{display_blocks});
             if (bw > max_blocks_width) max_blocks_width = bw;
         }
     }
 
-    // Add block size column width to max_name_len for column calculation
-    const extra_for_size = if (config.show_size) max_blocks_width + 1 else 0;
+    // Per-entry display widths (name + optional inode/size frills + indicator).
+    const widths = allocator.alloc(usize, n) catch
+        return printColumnFallback(writer, entries, config, use_colors, max_blocks_width);
+    defer allocator.free(widths);
+    for (entries, 0..) |entry, i| widths[i] = entryDisplayWidth(entry, config, max_blocks_width);
 
-    const col_width = max_name_len + extra_for_size + 2; // padding
-    const num_cols = @max(@as(usize, 1), term_width / col_width);
-    const num_rows = (entries.len + num_cols - 1) / num_cols;
+    // GNU: max_idx = line_length / MIN + (line_length % MIN != 0), then the
+    // candidate count is capped by the number of files.
+    var max_idx = line_length / MIN_COLUMN_WIDTH;
+    if (line_length % MIN_COLUMN_WIDTH != 0) max_idx += 1;
+    const max_cols = if (max_idx > 0 and max_idx < n) max_idx else n;
 
-    if (config.sort_across) {
-        // -x: fill across rows (left-to-right, top-to-bottom)
-        var col: usize = 0;
-        for (entries, 0..) |entry, idx| {
-            var printed_len: usize = 0;
+    // column_info: candidate i (0-based) describes an (i+1)-column layout.
+    // col_arr is a triangle: candidate i owns entries [i*(i+1)/2 .. +(i+1)).
+    const valid = allocator.alloc(bool, max_cols) catch
+        return printColumnFallback(writer, entries, config, use_colors, max_blocks_width);
+    defer allocator.free(valid);
+    const line_len = allocator.alloc(usize, max_cols) catch
+        return printColumnFallback(writer, entries, config, use_colors, max_blocks_width);
+    defer allocator.free(line_len);
+    const col_arr = allocator.alloc(usize, max_cols * (max_cols + 1) / 2) catch
+        return printColumnFallback(writer, entries, config, use_colors, max_blocks_width);
+    defer allocator.free(col_arr);
 
-            if (config.show_inode) {
-                writer.interface.print("{d:>8} ", .{entry.inode}) catch {};
-                printed_len += 9;
+    for (0..max_cols) |i| {
+        valid[i] = true;
+        line_len[i] = (i + 1) * MIN_COLUMN_WIDTH;
+        const off = i * (i + 1) / 2;
+        for (0..i + 1) |j| col_arr[off + j] = MIN_COLUMN_WIDTH;
+    }
+
+    for (0..n) |filesno| {
+        const nl = widths[filesno];
+        for (0..max_cols) |i| {
+            if (!valid[i]) continue;
+            const idx = if (across) filesno % (i + 1) else filesno / ((n + i) / (i + 1));
+            const real_length = nl + (if (idx == i) @as(usize, 0) else 2);
+            const off = i * (i + 1) / 2;
+            if (col_arr[off + idx] < real_length) {
+                line_len[i] += real_length - col_arr[off + idx];
+                col_arr[off + idx] = real_length;
+                valid[i] = line_len[i] < line_length;
             }
+        }
+    }
 
-            if (config.show_size) {
-                const display_blocks: u64 = @intCast(@divTrunc(entry.blocks + 1, 2));
-                const bw = std.fmt.count("{d}", .{display_blocks});
-                var bpad: usize = 0;
-                while (bpad + bw < max_blocks_width) : (bpad += 1) {
-                    writer.interface.writeAll(" ") catch {};
-                    printed_len += 1;
-                }
-                writer.interface.print("{d} ", .{display_blocks}) catch {};
-                printed_len += bw + 1;
-            }
+    var cols: usize = max_cols;
+    while (cols > 1 and !valid[cols - 1]) cols -= 1;
 
-            printEntryName(writer, entry, use_colors, config);
-            printed_len += entry.name.len;
-            printed_len += printEntryIndicator(writer, entry, config);
+    const win = col_arr[(cols - 1) * cols / 2 ..][0..cols];
+    const rows = (n + cols - 1) / cols;
 
-            col += 1;
-            if (col >= num_cols) {
+    if (across) {
+        // print_horizontal: fill left-to-right, top-to-bottom.
+        var pos: usize = 0;
+        var name_length = printColumnCell(writer, entries[0], use_colors, config, max_blocks_width);
+        var max_name_length = win[0];
+        var filesno: usize = 1;
+        while (filesno < n) : (filesno += 1) {
+            const col = filesno % cols;
+            if (col == 0) {
                 writer.interface.writeAll("\n") catch {};
-                col = 0;
-            } else if (idx + 1 < entries.len) {
-                // No trailing padding after the final entry (GNU emits none)
-                if (col_width > printed_len) {
-                    const padding = col_width - printed_len;
-                    for (0..padding) |_| {
-                        writer.interface.writeAll(" ") catch {};
-                    }
-                }
+                pos = 0;
+            } else {
+                indent(writer, pos + name_length, pos + max_name_length);
+                pos += max_name_length;
             }
+            name_length = printColumnCell(writer, entries[filesno], use_colors, config, max_blocks_width);
+            max_name_length = win[col];
         }
-        if (col > 0) {
-            writer.interface.writeAll("\n") catch {};
-        }
+        writer.interface.writeAll("\n") catch {};
     } else {
-        // Default -C: fill down columns
-        for (0..num_rows) |row| {
+        // print_many_per_line: fill down columns.
+        var row: usize = 0;
+        while (row < rows) : (row += 1) {
             var col: usize = 0;
-            while (col < num_cols) : (col += 1) {
-                const idx = col * num_rows + row;
-                if (idx >= entries.len) break;
-                const entry = entries[idx];
-
-                var printed_len: usize = 0;
-
-                if (config.show_inode) {
-                    writer.interface.print("{d:>8} ", .{entry.inode}) catch {};
-                    printed_len += 9;
-                }
-
-                if (config.show_size) {
-                    const display_blocks: u64 = @intCast(@divTrunc(entry.blocks + 1, 2));
-                    const bw = std.fmt.count("{d}", .{display_blocks});
-                    var bpad: usize = 0;
-                    while (bpad + bw < max_blocks_width) : (bpad += 1) {
-                        writer.interface.writeAll(" ") catch {};
-                        printed_len += 1;
-                    }
-                    writer.interface.print("{d} ", .{display_blocks}) catch {};
-                    printed_len += bw + 1;
-                }
-
-                printEntryName(writer, entry, use_colors, config);
-                printed_len += entry.name.len;
-                printed_len += printEntryIndicator(writer, entry, config);
-
-                // Check if this is the last column printed in this row
-                const next_idx = (col + 1) * num_rows + row;
-                if (next_idx < entries.len and col + 1 < num_cols) {
-                    if (col_width > printed_len) {
-                        const padding = col_width - printed_len;
-                        for (0..padding) |_| {
-                            writer.interface.writeAll(" ") catch {};
-                        }
-                    }
-                }
+            var filesno: usize = row;
+            var pos: usize = 0;
+            while (true) {
+                const name_length = printColumnCell(writer, entries[filesno], use_colors, config, max_blocks_width);
+                const max_name_length = win[col];
+                col += 1;
+                if (n - rows <= filesno) break;
+                filesno += rows;
+                indent(writer, pos + name_length, pos + max_name_length);
+                pos += max_name_length;
             }
             writer.interface.writeAll("\n") catch {};
         }
@@ -1021,7 +1099,7 @@ fn printOnePerLine(writer: anytype, entries: []const FileEntry, config: *const C
     var max_blocks_width: usize = 0;
     if (config.show_size) {
         for (entries) |entry| {
-            const display_blocks: u64 = @intCast(@divTrunc(entry.blocks + 1, 2));
+            const display_blocks: u64 = @intCast(@divTrunc(@max(0, entry.blocks) + 1, 2));
             const bw = std.fmt.count("{d}", .{display_blocks});
             if (bw > max_blocks_width) max_blocks_width = bw;
         }
@@ -1030,7 +1108,7 @@ fn printOnePerLine(writer: anytype, entries: []const FileEntry, config: *const C
     for (entries) |entry| {
         // Print allocated size in blocks if -s
         if (config.show_size) {
-            const display_blocks: u64 = @intCast(@divTrunc(entry.blocks + 1, 2));
+            const display_blocks: u64 = @intCast(@divTrunc(@max(0, entry.blocks) + 1, 2));
             const bw = std.fmt.count("{d}", .{display_blocks});
             var bpad: usize = 0;
             while (bpad + bw < max_blocks_width) : (bpad += 1) {
@@ -1055,33 +1133,33 @@ fn printOnePerLine(writer: anytype, entries: []const FileEntry, config: *const C
 }
 
 fn printCommaSeparated(writer: anytype, entries: []const FileEntry, config: *const Config) void {
+    // Faithful port of GNU coreutils 9.10 ls.c print_with_separator(','):
+    // stay on the current line while `pos + len + 2 < line_length` (strict),
+    // otherwise wrap. The comma is always emitted after the previous entry,
+    // followed by a space (same line) or newline (wrap).
     const use_colors = config.useColors();
-    const term_width: usize = @intCast(getTerminalWidth());
-    var line_len: usize = 0;
+    const line_length: usize = @intCast(getTerminalWidth());
+    var pos: usize = 0;
 
-    for (entries, 0..) |entry, idx| {
-        // Calculate the length this entry will take
-        var entry_len = entry.name.len;
-        if (config.show_indicators and entry.getIndicator() != 0) entry_len += 1;
-        if (config.show_dir_indicator and entry.isDir()) entry_len += 1;
+    for (entries, 0..) |entry, filesno| {
+        var len = entry.name.len;
+        if (config.show_indicators and entry.getIndicator() != 0) len += 1;
+        if (config.show_dir_indicator and entry.isDir()) len += 1;
 
-        // Check if we need a separator
-        const sep_len: usize = if (idx > 0) 2 else 0; // ", "
-
-        // Check if we'd exceed terminal width
-        if (idx > 0) {
-            if (line_len + sep_len + entry_len > term_width) {
-                writer.interface.writeAll(",\n") catch {};
-                line_len = 0;
+        if (filesno != 0) {
+            const same_line = pos + len + 2 < line_length;
+            if (same_line) {
+                pos += 2;
             } else {
-                writer.interface.writeAll(", ") catch {};
-                line_len += 2;
+                pos = 0;
             }
+            writer.interface.writeAll(",") catch {};
+            writer.interface.writeAll(if (same_line) " " else "\n") catch {};
         }
 
         printEntryName(writer, entry, use_colors, config);
-        line_len += entry.name.len;
-        line_len += printEntryIndicator(writer, entry, config);
+        _ = printEntryIndicator(writer, entry, config);
+        pos += len;
     }
 
     if (entries.len > 0) {
@@ -1089,7 +1167,7 @@ fn printCommaSeparated(writer: anytype, entries: []const FileEntry, config: *con
     }
 }
 
-fn printEntries(writer: anytype, entries: []const FileEntry, config: *const Config) void {
+fn printEntries(allocator: std.mem.Allocator, writer: anytype, entries: []const FileEntry, config: *const Config) void {
     if (config.long_format) {
         printLongFormat(writer, entries, config);
     } else if (config.comma_separated) {
@@ -1097,7 +1175,7 @@ fn printEntries(writer: anytype, entries: []const FileEntry, config: *const Conf
     } else if (config.one_per_line) {
         printOnePerLine(writer, entries, config);
     } else {
-        printColumnFormat(writer, entries, config);
+        printColumnFormat(allocator, writer, entries, config);
     }
 }
 
@@ -1132,7 +1210,7 @@ fn listDirectory(allocator: std.mem.Allocator, writer: anytype, path: []const u8
         }
     }
 
-    printEntries(writer, entries.items, config);
+    printEntries(allocator, writer, entries.items, config);
 
     // Recursive listing: failures below the command line are "minor" (GNU
     // exits 1 for these, 2 only for command-line operands).
@@ -1163,11 +1241,19 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
 
     var config = Config{};
     var i: usize = 1;
+    // After a bare "--" operand, GNU treats every remaining arg as a path,
+    // even if it begins with '-' (POSIX end-of-options idiom: `ls -- -l`).
+    var end_of_options = false;
 
     while (i < args.len) : (i += 1) {
         const arg = args[i];
 
-        if (arg.len > 0 and arg[0] == '-' and arg.len > 1) {
+        if (!end_of_options and std.mem.eql(u8, arg, "--")) {
+            end_of_options = true;
+            continue;
+        }
+
+        if (!end_of_options and arg.len > 0 and arg[0] == '-' and arg.len > 1) {
             if (arg[1] == '-') {
                 // Long options
                 if (std.mem.eql(u8, arg, "--help")) {
@@ -1497,7 +1583,7 @@ pub fn main(init: std.process.Init) void {
     var printed_any = false;
 
     if (file_ops.items.len > 0) {
-        printEntries(&writer, file_ops.items, &config);
+        printEntries(allocator, &writer, file_ops.items, &config);
         printed_any = true;
     }
 

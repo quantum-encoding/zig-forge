@@ -11,40 +11,35 @@ const std = @import("std");
 
 const VERSION = "1.0.0";
 
-// Zig 0.16 Writer abstraction
+// Upper bound on a printf field width / precision parsed from `-f`. Bounds the
+// accumulation (no usize overflow) and the size of every formatting buffer, so
+// a hostile format string cannot panic or force an unbounded output loop.
+const MAX_FIELD: usize = 4096;
+// Buffer large enough to hold any single formatted number at MAX_FIELD digits
+// plus sign, radix point, exponent and hex prefix.
+const FMT_BUF = MAX_FIELD + 64;
+
+// Zig 0.16 Writer abstraction.
+//
+// A single File.Writer is constructed once (in main) and its `interface` is
+// wrapped here. Constructing a fresh File.Writer per print — the previous
+// design — reset a seekable fd's position to 0 on every call, so every write
+// to a regular file clobbered the previous one at offset 0 (`zseq 5 > f`
+// produced a 1-byte file). The writer must be built ONCE and flushed ONCE.
 const Writer = struct {
-    io: std.Io,
-    buffer: *[8192]u8,
-    file: std.Io.File,
-
-    pub fn stdout() Writer {
-        const io_instance = std.Io.Threaded.global_single_threaded.io();
-        const static = struct {
-            var buffer: [8192]u8 = undefined;
-        };
-        return Writer{
-            .io = io_instance,
-            .buffer = &static.buffer,
-            .file = std.Io.File.stdout(),
-        };
-    }
-
-    pub fn stderr() Writer {
-        const io_instance = std.Io.Threaded.global_single_threaded.io();
-        const static = struct {
-            var buffer: [8192]u8 = undefined;
-        };
-        return Writer{
-            .io = io_instance,
-            .buffer = &static.buffer,
-            .file = std.Io.File.stderr(),
-        };
-    }
+    w: *std.Io.Writer,
+    // stderr stays effectively unbuffered (flush after each message) so that
+    // diagnostics survive the std.process.exit() calls that follow them;
+    // stdout is buffered and flushed exactly once at the end of main.
+    flush_each: bool = false,
 
     pub fn print(self: *Writer, comptime fmt: []const u8, args: anytype) void {
-        var writer = self.file.writer(self.io, self.buffer);
-        writer.interface.print(fmt, args) catch {};
-        writer.interface.flush() catch {};
+        self.w.print(fmt, args) catch return;
+        if (self.flush_each) self.w.flush() catch {};
+    }
+
+    pub fn flush(self: *Writer) void {
+        self.w.flush() catch {};
     }
 };
 
@@ -60,8 +55,16 @@ pub fn main(init: std.process.Init) !void {
     }
     const args = args_list.items;
 
-    var out = Writer.stdout();
-    var err = Writer.stderr();
+    // One buffered stdout writer for the whole run (flushed once at the end);
+    // an effectively line-flushed stderr writer for diagnostics.
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var out_buf: [8192]u8 = undefined;
+    var out_fw = std.Io.File.stdout().writerStreaming(io, &out_buf);
+    var out = Writer{ .w = &out_fw.interface, .flush_each = false };
+
+    var err_buf: [4096]u8 = undefined;
+    var err_fw = std.Io.File.stderr().writerStreaming(io, &err_buf);
+    var err = Writer{ .w = &err_fw.interface, .flush_each = true };
 
     // Parse options
     var separator: []const u8 = "\n";
@@ -78,11 +81,15 @@ pub fn main(init: std.process.Init) !void {
         if (!options_done and arg.len > 0 and arg[0] == '-' and arg.len > 1 and !isNumericArg(arg)) {
             if (std.mem.eql(u8, arg, "--")) {
                 options_done = true;
-            } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
-                printHelp(&err);
+            } else if (std.mem.eql(u8, arg, "--help")) {
+                // GNU writes --help to stdout and exits 0 (GNU seq has no -h).
+                printHelp(&out);
+                out.flush();
                 return;
-            } else if (std.mem.eql(u8, arg, "-V") or std.mem.eql(u8, arg, "--version")) {
-                err.print("zseq {s}\n", .{VERSION});
+            } else if (std.mem.eql(u8, arg, "--version")) {
+                // GNU writes --version to stdout and exits 0 (GNU seq has no -V).
+                out.print("zseq {s}\n", .{VERSION});
+                out.flush();
                 return;
             } else if (std.mem.eql(u8, arg, "-w") or std.mem.eql(u8, arg, "--equal-width")) {
                 equal_width = true;
@@ -146,36 +153,18 @@ pub fn main(init: std.process.Init) !void {
             std.process.exit(1);
         },
         1 => {
-            last = parseNumber(positional_args.items[0]) catch {
-                err.print("zseq: invalid floating point argument: '{s}'\n", .{positional_args.items[0]});
-                std.process.exit(1);
-            };
+            last = parseOperand(&err, positional_args.items[0]);
             max_precision = getDecimalPrecision(positional_args.items[0]);
         },
         2 => {
-            first = parseNumber(positional_args.items[0]) catch {
-                err.print("zseq: invalid floating point argument: '{s}'\n", .{positional_args.items[0]});
-                std.process.exit(1);
-            };
-            last = parseNumber(positional_args.items[1]) catch {
-                err.print("zseq: invalid floating point argument: '{s}'\n", .{positional_args.items[1]});
-                std.process.exit(1);
-            };
+            first = parseOperand(&err, positional_args.items[0]);
+            last = parseOperand(&err, positional_args.items[1]);
             max_precision = @max(getDecimalPrecision(positional_args.items[0]), getDecimalPrecision(positional_args.items[1]));
         },
         3 => {
-            first = parseNumber(positional_args.items[0]) catch {
-                err.print("zseq: invalid floating point argument: '{s}'\n", .{positional_args.items[0]});
-                std.process.exit(1);
-            };
-            increment = parseNumber(positional_args.items[1]) catch {
-                err.print("zseq: invalid floating point argument: '{s}'\n", .{positional_args.items[1]});
-                std.process.exit(1);
-            };
-            last = parseNumber(positional_args.items[2]) catch {
-                err.print("zseq: invalid floating point argument: '{s}'\n", .{positional_args.items[2]});
-                std.process.exit(1);
-            };
+            first = parseOperand(&err, positional_args.items[0]);
+            increment = parseOperand(&err, positional_args.items[1]);
+            last = parseOperand(&err, positional_args.items[2]);
             max_precision = @max(getDecimalPrecision(positional_args.items[0]), @max(getDecimalPrecision(positional_args.items[1]), getDecimalPrecision(positional_args.items[2])));
         },
         else => {
@@ -216,7 +205,13 @@ pub fn main(init: std.process.Init) !void {
                 printNumber(&out, current, max_precision);
             }
 
+            // No-progress guard: when |current| is so large that adding the
+            // increment leaves the f64 value unchanged (e.g. `zseq 1e19 1e19`),
+            // accumulation would loop forever. GNU seq stops here too, emitting
+            // the single value it managed to produce.
+            const prev = current;
             current += increment;
+            if (current == prev) break;
         }
     } else {
         while (current >= last - 0.0000001) {
@@ -233,14 +228,17 @@ pub fn main(init: std.process.Init) !void {
                 printNumber(&out, current, max_precision);
             }
 
+            const prev = current;
             current += increment;
+            if (current == prev) break;
         }
     }
 
-    // Print final newline
+    // Print final newline, then flush the single buffered stdout writer once.
     if (!is_first_output) {
         out.print("\n", .{});
     }
+    out.flush();
 }
 
 fn isNumericArg(arg: []const u8) bool {
@@ -322,27 +320,29 @@ fn parseFormatString(fmt: []const u8) ?ParsedFormat {
                 j += 1;
             }
 
-            // Parse width
+            // Parse width. Cap the accumulation so a pathological format like
+            // "%99999999999999999999f" can neither overflow usize (a Debug
+            // panic) nor drive an unbounded padding loop.
             var width: ?usize = null;
             if (j < fmt.len and fmt[j] >= '1' and fmt[j] <= '9') {
                 var w: usize = 0;
                 while (j < fmt.len and fmt[j] >= '0' and fmt[j] <= '9') {
-                    w = w * 10 + (fmt[j] - '0');
+                    if (w <= MAX_FIELD) w = w * 10 + (fmt[j] - '0');
                     j += 1;
                 }
-                width = w;
+                width = @min(w, MAX_FIELD);
             }
 
-            // Parse precision
+            // Parse precision (same bound as width).
             var precision: ?usize = null;
             if (j < fmt.len and fmt[j] == '.') {
                 j += 1;
                 var p: usize = 0;
                 while (j < fmt.len and fmt[j] >= '0' and fmt[j] <= '9') {
-                    p = p * 10 + (fmt[j] - '0');
+                    if (p <= MAX_FIELD) p = p * 10 + (fmt[j] - '0');
                     j += 1;
                 }
-                precision = p;
+                precision = @min(p, MAX_FIELD);
             }
 
             // Parse specifier
@@ -385,7 +385,7 @@ fn printFormatted(writer: *Writer, num: f64, pf: ParsedFormat) void {
     }
 
     // Format the number
-    var buf: [128]u8 = undefined;
+    var buf: [FMT_BUF]u8 = undefined;
     const prec = pf.precision orelse 6;
 
     const formatted = switch (pf.specifier) {
@@ -446,157 +446,148 @@ fn printFormatted(writer: *Writer, num: f64, pf: ParsedFormat) void {
     }
 }
 
+// %f / %F — fixed-point. Delegated to std.fmt, which rounds correctly (half to
+// even, like C printf) and handles the full f64 magnitude range. The previous
+// hand-rolled version truncated the final digit and panicked via @intFromFloat
+// on |value| > ~9.2e18 (beyond i64 range).
 fn formatDecimal(buf: []u8, num: f64, precision: usize, uppercase: bool) []u8 {
     _ = uppercase;
-    // Manual precision formatting for %f
-    const is_neg = num < 0;
-    const abs_val = @abs(num);
-
-    // Get integer and fractional parts
-    const int_part: i64 = @intFromFloat(abs_val);
-    const frac_part = abs_val - @as(f64, @floatFromInt(int_part));
-
-    // Format integer part
-    var pos: usize = 0;
-    if (is_neg) {
-        buf[pos] = '-';
-        pos += 1;
-    }
-
-    // Integer digits
-    var int_buf: [32]u8 = undefined;
-    const int_str = std.fmt.bufPrint(&int_buf, "{d}", .{int_part}) catch return buf[0..0];
-    @memcpy(buf[pos .. pos + int_str.len], int_str);
-    pos += int_str.len;
-
-    if (precision > 0) {
-        buf[pos] = '.';
-        pos += 1;
-
-        // Generate fractional digits
-        var frac = frac_part;
-        for (0..precision) |_| {
-            frac *= 10;
-            const digit: u8 = @intFromFloat(@mod(frac, 10));
-            buf[pos] = '0' + digit;
-            pos += 1;
-        }
-    }
-
-    return buf[0..pos];
+    return std.fmt.bufPrint(buf, "{[v]d:.[p]}", .{ .v = num, .p = precision }) catch return buf[0..0];
 }
 
+// %e / %E — scientific notation with a C/printf-style exponent (sign + at least
+// two digits, e.g. `1.500000e+06`). std.fmt's `{e}` rounds the mantissa but
+// prints the exponent as `e6` / `e-5`, so we reformat only the exponent tail.
 fn formatExponential(buf: []u8, num: f64, precision: usize, uppercase: bool) []u8 {
-    const is_neg = num < 0;
-    const abs_val = @abs(num);
+    var tmp: [FMT_BUF]u8 = undefined;
+    const z = std.fmt.bufPrint(&tmp, "{[v]e:.[p]}", .{ .v = num, .p = precision }) catch return buf[0..0];
+    const epos = std.mem.indexOfScalar(u8, z, 'e') orelse return buf[0..0];
+    const mant = z[0..epos];
+    const exp_val = std.fmt.parseInt(i32, z[epos + 1 ..], 10) catch 0;
 
     var pos: usize = 0;
-    if (is_neg) {
-        buf[pos] = '-';
-        pos += 1;
-    }
-
-    if (abs_val == 0) {
-        buf[pos] = '0';
-        pos += 1;
-        if (precision > 0) {
-            buf[pos] = '.';
-            pos += 1;
-            for (0..precision) |_| {
-                buf[pos] = '0';
-                pos += 1;
-            }
-        }
-        buf[pos] = if (uppercase) 'E' else 'e';
-        pos += 1;
-        buf[pos] = '+';
-        pos += 1;
-        buf[pos] = '0';
-        pos += 1;
-        buf[pos] = '0';
-        pos += 1;
-        return buf[0..pos];
-    }
-
-    // Calculate exponent
-    const log_val = @log10(abs_val);
-    var exp: i32 = @intFromFloat(@floor(log_val));
-    var mantissa = abs_val / std.math.pow(f64, 10, @as(f64, @floatFromInt(exp)));
-
-    // Normalize mantissa to [1, 10)
-    if (mantissa >= 10) {
-        mantissa /= 10;
-        exp += 1;
-    } else if (mantissa < 1 and mantissa > 0) {
-        mantissa *= 10;
-        exp -= 1;
-    }
-
-    // Format mantissa
-    const int_digit: u8 = @intFromFloat(mantissa);
-    buf[pos] = '0' + int_digit;
-    pos += 1;
-
-    if (precision > 0) {
-        buf[pos] = '.';
-        pos += 1;
-        var frac = mantissa - @as(f64, @floatFromInt(int_digit));
-        for (0..precision) |_| {
-            frac *= 10;
-            const digit: u8 = @intFromFloat(@mod(frac, 10));
-            buf[pos] = '0' + digit;
-            pos += 1;
-        }
-    }
-
+    if (mant.len > buf.len) return buf[0..0];
+    @memcpy(buf[0..mant.len], mant);
+    pos = mant.len;
     buf[pos] = if (uppercase) 'E' else 'e';
     pos += 1;
 
-    if (exp >= 0) {
-        buf[pos] = '+';
-        pos += 1;
-    } else {
+    var e = exp_val;
+    if (e < 0) {
         buf[pos] = '-';
         pos += 1;
-        exp = -exp;
+        e = -e;
+    } else {
+        buf[pos] = '+';
+        pos += 1;
     }
-
-    // Format exponent (at least 2 digits)
-    if (exp < 10) {
+    var eb: [12]u8 = undefined;
+    const es = std.fmt.bufPrint(&eb, "{d}", .{@as(u32, @intCast(e))}) catch return buf[0..0];
+    if (es.len < 2) {
         buf[pos] = '0';
         pos += 1;
     }
-    var exp_buf: [8]u8 = undefined;
-    const exp_str = std.fmt.bufPrint(&exp_buf, "{d}", .{@as(u32, @intCast(exp))}) catch return buf[0..0];
-    @memcpy(buf[pos .. pos + exp_str.len], exp_str);
-    pos += exp_str.len;
-
+    @memcpy(buf[pos .. pos + es.len], es);
+    pos += es.len;
     return buf[0..pos];
 }
 
+// %g / %G — the C rule: precision is the number of *significant* digits (min 1);
+// choose %e when the decimal exponent X < -4 or X >= precision, otherwise %f;
+// then strip trailing zeros and a dangling radix point.
 fn formatGeneral(buf: []u8, num: f64, precision: usize, uppercase: bool) []u8 {
-    // Choose between f and e based on magnitude
-    const abs_num = @abs(num);
-    const prec = if (precision == 0) 1 else precision;
-    const use_exp = abs_num != 0 and (abs_num < 0.0001 or abs_num >= std.math.pow(f64, 10, @as(f64, @floatFromInt(prec))));
+    const P: usize = if (precision == 0) 1 else precision;
 
-    if (use_exp) {
-        return formatExponential(buf, num, if (prec > 0) prec - 1 else 0, uppercase);
+    // Determine the post-rounding decimal exponent X via an %e formatting.
+    var etmp: [FMT_BUF]u8 = undefined;
+    const es = std.fmt.bufPrint(&etmp, "{[v]e:.[p]}", .{ .v = num, .p = P - 1 }) catch return buf[0..0];
+    const epos = std.mem.indexOfScalar(u8, es, 'e') orelse return buf[0..0];
+    const x: i32 = std.fmt.parseInt(i32, es[epos + 1 ..], 10) catch 0;
+
+    var raw: [FMT_BUF]u8 = undefined;
+    var s: []u8 = undefined;
+    var exp_style = false;
+    if (x >= -4 and x < @as(i32, @intCast(P))) {
+        // %f with precision P-1-X (X may be negative, widening the precision).
+        const fprec: usize = @intCast(@as(i32, @intCast(P)) - 1 - x);
+        s = formatDecimal(&raw, num, fprec, uppercase);
     } else {
-        return formatDecimal(buf, num, prec, uppercase);
+        s = formatExponential(&raw, num, P - 1, uppercase);
+        exp_style = true;
     }
+    return stripTrailingZeros(buf, s, exp_style);
 }
 
+// Remove trailing fractional zeros (and a trailing '.') from a formatted value.
+// For exponential style, the fractional part precedes the 'e'/'E' exponent tail.
+fn stripTrailingZeros(buf: []u8, s: []const u8, exp_style: bool) []u8 {
+    var mant_end = s.len;
+    var tail: []const u8 = s[s.len..];
+    if (exp_style) {
+        const epos = std.mem.indexOfAny(u8, s, "eE") orelse s.len;
+        mant_end = epos;
+        tail = s[epos..];
+    }
+    if (std.mem.indexOfScalar(u8, s[0..mant_end], '.') != null) {
+        while (mant_end > 0 and s[mant_end - 1] == '0') mant_end -= 1;
+        if (mant_end > 0 and s[mant_end - 1] == '.') mant_end -= 1;
+    }
+    const total = mant_end + tail.len;
+    if (total > buf.len) return buf[0..0];
+    @memcpy(buf[0..mant_end], s[0..mant_end]);
+    @memcpy(buf[mant_end..total], tail);
+    return buf[0..total];
+}
+
+// %a / %A — C99 hexadecimal float. std.fmt's `{x}` produces a valid hex-float
+// but omits the '+' on a non-negative binary exponent (`0x1p0` vs C's
+// `0x1p+0`); insert it. Explicit precision on %a is not honored (best effort);
+// the previous stub printed the raw IEEE-754 bit pattern, which was invalid.
 fn formatHex(buf: []u8, num: f64, precision: usize, uppercase: bool) []u8 {
-    // Hexadecimal floating point (simplified - treat as decimal for now)
     _ = precision;
-    _ = uppercase;
-    const result = std.fmt.bufPrint(buf, "{x}", .{@as(u64, @bitCast(num))}) catch return buf[0..0];
-    return result;
+    var tmp: [FMT_BUF]u8 = undefined;
+    const z = std.fmt.bufPrint(&tmp, "{x}", .{num}) catch return buf[0..0];
+    const ppos = std.mem.indexOfScalar(u8, z, 'p') orelse return buf[0..0];
+
+    var pos: usize = 0;
+    @memcpy(buf[0..ppos], z[0..ppos]);
+    pos = ppos;
+    buf[pos] = 'p';
+    pos += 1;
+    // Insert '+' if the exponent has no explicit sign.
+    if (ppos + 1 < z.len and z[ppos + 1] != '-' and z[ppos + 1] != '+') {
+        buf[pos] = '+';
+        pos += 1;
+    }
+    const rest = z[ppos + 1 ..];
+    @memcpy(buf[pos .. pos + rest.len], rest);
+    pos += rest.len;
+
+    const out = buf[0..pos];
+    if (uppercase) {
+        for (out) |*c| c.* = std.ascii.toUpper(c.*);
+    }
+    return out;
 }
 
 fn parseNumber(str: []const u8) !f64 {
     return std.fmt.parseFloat(f64, str);
+}
+
+/// Parse an operand, rejecting NaN the way GNU seq does. std.fmt.parseFloat
+/// (like strtold) accepts the spellings "nan"/"inf"; GNU seq rejects NaN with
+/// a dedicated diagnostic and exit status 1, but accepts infinities (an
+/// infinite bound simply yields an empty or unbounded sequence).
+fn parseOperand(err: *Writer, str: []const u8) f64 {
+    const v = parseNumber(str) catch {
+        err.print("zseq: invalid floating point argument: '{s}'\n", .{str});
+        std.process.exit(1);
+    };
+    if (std.math.isNan(v)) {
+        err.print("zseq: invalid 'not-a-number' argument: '{s}'\n", .{str});
+        std.process.exit(1);
+    }
+    return v;
 }
 
 fn getDecimalPrecision(str: []const u8) usize {
@@ -607,68 +598,28 @@ fn getDecimalPrecision(str: []const u8) usize {
 }
 
 fn getWidthWithPrecision(num: f64, precision: usize) usize {
-    var buf: [64]u8 = undefined;
+    var buf: [FMT_BUF]u8 = undefined;
     const slice = formatNumber(&buf, num, precision);
     return slice.len;
 }
 
+// Default (no -f) rendering: GNU seq prints every value with a *fixed* number
+// of fractional digits equal to the largest decimal precision among the
+// operands (`%.<prec>f`). Delegating to std.fmt rounds correctly and handles
+// the full f64 magnitude range; the previous @intFromFloat split panicked for
+// |value| beyond i64 (e.g. `zseq -w 1e19 1e19`).
 fn formatNumber(buf: []u8, num: f64, precision: usize) []u8 {
-    const int_val: i64 = @intFromFloat(num);
-    const diff = num - @as(f64, @floatFromInt(int_val));
-
-    if (@abs(diff) < 0.0000001) {
-        if (precision == 0) {
-            const result = std.fmt.bufPrint(buf, "{d}", .{int_val}) catch return buf[0..0];
-            return result;
-        } else {
-            // Format with fixed decimal precision
-            const result = std.fmt.bufPrint(buf, "{d}", .{int_val}) catch return buf[0..0];
-            var pos = result.len;
-            buf[pos] = '.';
-            pos += 1;
-            for (0..precision) |_| {
-                buf[pos] = '0';
-                pos += 1;
-            }
-            return buf[0..pos];
-        }
-    } else {
-        const result = std.fmt.bufPrint(buf, "{d:.10}", .{num}) catch return buf[0..0];
-        var end = result.len;
-        while (end > 0 and result[end - 1] == '0') {
-            end -= 1;
-        }
-        if (end > 0 and result[end - 1] == '.') {
-            end -= 1;
-        }
-        // Ensure minimum precision
-        if (precision > 0) {
-            // Find current decimal places
-            var current_prec: usize = 0;
-            if (std.mem.indexOfScalar(u8, buf[0..end], '.')) |dot| {
-                current_prec = end - dot - 1;
-            } else {
-                buf[end] = '.';
-                end += 1;
-            }
-            while (current_prec < precision) {
-                buf[end] = '0';
-                end += 1;
-                current_prec += 1;
-            }
-        }
-        return buf[0..end];
-    }
+    return std.fmt.bufPrint(buf, "{[v]d:.[p]}", .{ .v = num, .p = precision }) catch return buf[0..0];
 }
 
 fn printNumber(writer: *Writer, num: f64, precision: usize) void {
-    var buf: [64]u8 = undefined;
+    var buf: [FMT_BUF]u8 = undefined;
     const slice = formatNumber(&buf, num, precision);
     writer.print("{s}", .{slice});
 }
 
 fn printWithWidth(writer: *Writer, num: f64, width: usize, precision: usize) void {
-    var buf: [64]u8 = undefined;
+    var buf: [FMT_BUF]u8 = undefined;
     const slice = formatNumber(&buf, num, precision);
 
     if (slice.len < width) {
@@ -702,8 +653,8 @@ fn printHelp(writer: *Writer) void {
         \\  -f, --format=FORMAT     use printf style floating-point FORMAT
         \\  -s, --separator=STRING  use STRING to separate numbers (default: \n)
         \\  -w, --equal-width       equalize width by padding with leading zeros
-        \\  -h, --help              display this help and exit
-        \\  -V, --version           output version information and exit
+        \\      --help              display this help and exit
+        \\      --version           output version information and exit
         \\
         \\If FIRST or INCREMENT is omitted, it defaults to 1.
         \\The sequence ends when the sum of current and INCREMENT exceeds LAST.

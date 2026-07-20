@@ -32,6 +32,13 @@ const Stat = switch (builtin.os.tag) {
 extern "c" fn lstat(path: [*:0]const u8, buf: *Stat) c_int;
 extern "c" fn unlink(path: [*:0]const u8) c_int;
 extern "c" fn rmdir(path: [*:0]const u8) c_int;
+extern "c" fn fstatat(fd: c_int, path: [*:0]const u8, buf: *Stat, flag: c_int) c_int;
+
+// AT_SYMLINK_NOFOLLOW: do not dereference a symlink named as the final component.
+const AT_SYMLINK_NOFOLLOW: c_int = switch (builtin.os.tag) {
+    .macos, .ios, .tvos, .watchos => 0x0020,
+    else => 0x100, // linux
+};
 
 // Mode constants
 const S_IFMT: u32 = 0o170000;
@@ -45,6 +52,7 @@ const Config = struct {
     remove_empty_dirs: bool = false,
     verbose: bool = false,
     interactive: bool = false,
+    interactive_once: bool = false, // -I: prompt once before removing >3 files or recursing
     preserve_root: bool = true, // Safety default: prevent rm -rf /
     files: std.ArrayListUnmanaged([]const u8) = .empty,
 
@@ -120,6 +128,19 @@ fn promptUser(action: []const u8, path: []const u8, file_type: FileType) bool {
     return false;
 }
 
+// -I prompt-once. GNU: "remove N argument(s)[ recursively]? " on stderr, read once.
+fn promptOnce(n: usize, recursive: bool) bool {
+    var buf: [128]u8 = undefined;
+    const word = if (n == 1) "argument" else "arguments";
+    const suffix = if (recursive) " recursively" else "";
+    const prompt = std.fmt.bufPrint(&buf, "zrm: remove {d} {s}{s}? ", .{ n, word, suffix }) catch return false;
+    _ = libc.write(libc.STDERR_FILENO, prompt.ptr, prompt.len);
+    var response: [8]u8 = undefined;
+    const rn = libc.read(libc.STDIN_FILENO, &response, response.len);
+    if (rn <= 0) return false;
+    return response[0] == 'y' or response[0] == 'Y';
+}
+
 fn removeFile(allocator: std.mem.Allocator, path: []const u8, config: *const Config) !void {
     const path_z = try allocator.dupeZ(u8, path);
     defer allocator.free(path_z);
@@ -135,6 +156,21 @@ fn removeFile(allocator: std.mem.Allocator, path: []const u8, config: *const Con
 
     if (file_type == null) {
         if (!config.force) {
+            // GNU parity: a trailing slash on a non-directory reports ENOTDIR,
+            // not ENOENT. On macOS lstat("reg/") fails with ENOENT, so detect it here.
+            if (path.len > 1 and path[path.len - 1] == '/') {
+                var stripped = path;
+                while (stripped.len > 1 and stripped[stripped.len - 1] == '/') {
+                    stripped = stripped[0 .. stripped.len - 1];
+                }
+                const sz = try allocator.dupeZ(u8, stripped);
+                defer allocator.free(sz);
+                const st = getFileType(sz);
+                if (st != null and st.? != .directory) {
+                    printErrorFmt("cannot remove '{s}': Not a directory", .{path});
+                    return error.NotDir;
+                }
+            }
             printErrorFmt("cannot remove '{s}': No such file or directory", .{path});
             return error.FileNotFound;
         }
@@ -184,7 +220,7 @@ fn removeEmptyDir(path: []const u8, path_z: [:0]const u8, config: *const Config)
     const io = Io.Threaded.global_single_threaded.io();
     Dir.deleteDir(Dir.cwd(), io, path_z) catch |err| {
         if (!config.force or err != error.FileNotFound) {
-            printErrorFmt("cannot remove '{s}': {s}", .{ path, @errorName(err) });
+            printErrorFmt("cannot remove '{s}': {s}", .{ path, dirErrToString(err) });
             return err;
         }
         return;
@@ -197,45 +233,100 @@ fn removeEmptyDir(path: []const u8, path_z: [:0]const u8, config: *const Config)
 fn removeDirectoryRecursive(allocator: std.mem.Allocator, path: []const u8, config: *const Config) !void {
     const io = Io.Threaded.global_single_threaded.io();
 
-    // Open the directory
-    var dir = Dir.openDir(Dir.cwd(), io, path, .{ .iterate = true }) catch |err| {
+    // Open the top-level directory WITHOUT following a symlink named as the final
+    // component. Symlink operands never reach here (removeFile unlinks them), so an
+    // operand that resolves to a symlink at this point was swapped after classification.
+    var dir = Dir.openDir(Dir.cwd(), io, path, .{ .iterate = true, .follow_symlinks = false }) catch |err| {
         if (config.force and err == error.FileNotFound) {
             return;
         }
-        printErrorFmt("cannot open directory '{s}': {s}", .{ path, @errorName(err) });
+        printErrorFmt("cannot open directory '{s}': {s}", .{ path, dirErrToString(err) });
         return err;
     };
     defer dir.close(io);
 
-    // Iterate and remove contents
-    var iter = dir.iterate();
-    while (try iter.next(io)) |entry| {
-        const entry_name = entry.name;
+    try clearDirContents(allocator, io, dir, path, config);
 
-        // Build full path
-        const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ path, entry_name });
-        defer allocator.free(full_path);
-
-        const full_path_z = try allocator.dupeZ(u8, full_path);
-        defer allocator.free(full_path_z);
-
-        const entry_type = getFileType(full_path_z);
-        if (entry_type) |ft| {
-            switch (ft) {
-                .directory => {
-                    try removeDirectoryRecursive(allocator, full_path, config);
-                },
-                .file, .symlink, .other => {
-                    try unlinkFile(full_path, full_path_z, config);
-                },
-            }
-        }
-    }
-
-    // Now remove the empty directory
+    // Now remove the empty directory itself.
     const path_z = try allocator.dupeZ(u8, path);
     defer allocator.free(path_z);
     try removeEmptyDir(path, path_z, config);
+}
+
+// Recursively delete the contents of an *open* directory using operations relative to
+// the directory's file descriptor (openat/unlinkat semantics). This closes the TOCTOU
+// symlink-swap race the old path-string walk had: subdirectories are opened relative to
+// the parent fd with follow_symlinks=false and never re-resolved from an absolute path
+// string, so an attacker who replaces a subdirectory with a symlink mid-walk cannot make
+// us descend through it and unlink files outside the tree.
+fn clearDirContents(allocator: std.mem.Allocator, io: Io, dir: Dir, disp_path: []const u8, config: *const Config) !void {
+    var iter = dir.iterate();
+    while (try iter.next(io)) |entry| {
+        // Display path is only for verbose / error messages; deletion is fd-relative.
+        const child_disp = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ disp_path, entry.name });
+        defer allocator.free(child_disp);
+
+        var kind = entry.kind;
+        if (kind == .unknown) {
+            kind = kindAt(allocator, dir.handle, entry.name);
+        }
+
+        if (kind == .directory) {
+            var child = dir.openDir(io, entry.name, .{ .iterate = true, .follow_symlinks = false }) catch |err| {
+                if (config.force and err == error.FileNotFound) continue;
+                printErrorFmt("cannot remove '{s}': {s}", .{ child_disp, dirErrToString(err) });
+                return err;
+            };
+            {
+                defer child.close(io);
+                try clearDirContents(allocator, io, child, child_disp, config);
+            }
+            dir.deleteDir(io, entry.name) catch |err| {
+                if (config.force and err == error.FileNotFound) continue;
+                printErrorFmt("cannot remove '{s}': {s}", .{ child_disp, dirErrToString(err) });
+                return err;
+            };
+            if (config.verbose) printVerbose("removed directory", child_disp);
+        } else {
+            dir.deleteFile(io, entry.name) catch |err| {
+                if (config.force and err == error.FileNotFound) continue;
+                printErrorFmt("cannot remove '{s}': {s}", .{ child_disp, dirErrToString(err) });
+                return err;
+            };
+            if (config.verbose) printVerbose("removed", child_disp);
+        }
+    }
+}
+
+// Classify a directory entry by name relative to an open dir fd, without following a
+// symlink. Only used when readdir did not report a d_type (kind == .unknown).
+fn kindAt(allocator: std.mem.Allocator, fd: std.posix.fd_t, name: []const u8) Io.File.Kind {
+    const name_z = allocator.dupeZ(u8, name) catch return .unknown;
+    defer allocator.free(name_z);
+    var st: Stat = undefined;
+    if (fstatat(fd, name_z.ptr, &st, AT_SYMLINK_NOFOLLOW) != 0) return .unknown;
+    return switch (st.mode & S_IFMT) {
+        S_IFDIR => .directory,
+        S_IFLNK => .sym_link,
+        S_IFREG => .file,
+        else => .unknown,
+    };
+}
+
+// Map the Io.Dir/Io.File error set to GNU-style human-readable strings so directory
+// removal errors match GNU (e.g. "Directory not empty" instead of "DirNotEmpty").
+fn dirErrToString(err: anyerror) []const u8 {
+    return switch (err) {
+        error.DirNotEmpty => "Directory not empty",
+        error.FileNotFound => "No such file or directory",
+        error.AccessDenied => "Permission denied",
+        error.PermissionDenied => "Permission denied",
+        error.NotDir => "Not a directory",
+        error.FileBusy => "Device or resource busy",
+        error.ReadOnlyFileSystem => "Read-only file system",
+        error.SymLinkLoop => "Too many levels of symbolic links",
+        else => @errorName(err),
+    };
 }
 
 fn errnoToString(err: c_int) []const u8 {
@@ -299,6 +390,7 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                     break;
                 } else {
                     printErrorFmt("unrecognized option '{s}'", .{arg});
+                    std.debug.print("Try 'zrm --help' for more information.\n", .{});
                     std.process.exit(1);
                 }
             } else {
@@ -309,9 +401,10 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                         'd' => config.remove_empty_dirs = true,
                         'v' => config.verbose = true,
                         'i' => config.interactive = true,
-                        'I' => config.interactive = true, // prompt once before removing more than 3 files
+                        'I' => config.interactive_once = true, // prompt once before removing >3 files or recursing
                         else => {
                             printErrorFmt("invalid option -- '{c}'", .{ch});
+                            std.debug.print("Try 'zrm --help' for more information.\n", .{});
                             std.process.exit(1);
                         },
                     }
@@ -332,12 +425,14 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
 }
 
 fn printVerbose(action: []const u8, path: []const u8) void {
-    const io = Io.Threaded.global_single_threaded.io();
-    var buf: [512]u8 = undefined;
-    const stdout = Io.File.stdout();
-    var writer = stdout.writer(io, &buf);
-    writer.interface.print("zrm: {s} '{s}'\n", .{ action, path }) catch {};
-    writer.interface.flush() catch {};
+    // Write directly with libc.write so the bytes are appended at stdout's current
+    // offset. A fresh File.Writer does POSITIONAL writes from pos=0 on every call, so
+    // successive verbose lines would overwrite each other when stdout is a regular
+    // file (only the last, possibly truncated, line survived). GNU emits a bare
+    // "removed 'x'" / "removed directory 'x'" with no program-name prefix.
+    var buf: [4096]u8 = undefined;
+    const line = std.fmt.bufPrint(&buf, "{s} '{s}'\n", .{ action, path }) catch return;
+    _ = libc.write(libc.STDOUT_FILENO, line.ptr, line.len);
 }
 
 fn printError(msg: []const u8) void {
@@ -393,6 +488,16 @@ pub fn main(init: std.process.Init) void {
         std.process.exit(1);
     };
     defer config.deinit(allocator);
+
+    // -I: prompt once before removing more than three files, or when removing recursively.
+    if (config.interactive_once and !config.force) {
+        const n = config.files.items.len;
+        if (config.recursive or n > 3) {
+            if (!promptOnce(n, config.recursive)) {
+                return; // declined: remove nothing, exit 0
+            }
+        }
+    }
 
     var error_occurred = false;
 

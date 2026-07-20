@@ -1,9 +1,15 @@
 //! zunlink - Remove a single file
 //!
-//! A Zig implementation of unlink.
+//! A Zig implementation of GNU coreutils `unlink`.
 //! Calls the unlink() function to remove a single file.
 //!
 //! Usage: zunlink FILE
+//!
+//! Argument handling mirrors GNU getopt_long semantics for the two options
+//! `unlink` recognizes (--help / --version, unambiguous abbreviations
+//! allowed), the `--` end-of-options separator, and the "invalid option" /
+//! "unrecognized option" error shapes. Anchored against GNU coreutils 9.10
+//! (see src/gnu_parity_test.zig).
 
 const std = @import("std");
 
@@ -25,6 +31,10 @@ fn writeStdout(comptime fmt: []const u8, args: anytype) void {
     _ = write(1, msg.ptr, msg.len);
 }
 
+fn tryHelp() void {
+    writeStderr("Try 'zunlink --help' for more information.\n", .{});
+}
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
 
@@ -37,40 +47,68 @@ pub fn main(init: std.process.Init) !void {
     }
     const args = args_list.items;
 
-    if (args.len < 2) {
+    // Parse arguments getopt_long-style. `unlink` takes no operands options,
+    // only --help / --version; everything else is an operand. `--` ends
+    // option scanning so files whose names begin with '-' can be removed.
+    var operands: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer operands.deinit(allocator);
+
+    var end_of_opts = false;
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+
+        if (!end_of_opts and a.len >= 1 and a[0] == '-' and !std.mem.eql(u8, a, "-")) {
+            if (std.mem.eql(u8, a, "--")) {
+                end_of_opts = true;
+                continue;
+            }
+            if (a.len >= 2 and a[1] == '-') {
+                // Long option (possibly abbreviated, possibly with =value).
+                const body = a[2..];
+                const name = if (std.mem.indexOfScalar(u8, body, '=')) |eq| body[0..eq] else body;
+                // name is non-empty here ("--" was handled above).
+                if (std.mem.startsWith(u8, "help", name)) {
+                    printHelp();
+                    return;
+                }
+                if (std.mem.startsWith(u8, "version", name)) {
+                    printVersion();
+                    return;
+                }
+                writeStderr("zunlink: unrecognized option '{s}'\n", .{a});
+                tryHelp();
+                std.process.exit(1);
+            }
+            // Short option cluster: `unlink` has none, so the first char is
+            // an invalid option (matches GNU getopt: "invalid option -- 'x'").
+            writeStderr("zunlink: invalid option -- '{c}'\n", .{a[1]});
+            tryHelp();
+            std.process.exit(1);
+        }
+
+        try operands.append(allocator, a);
+    }
+
+    if (operands.items.len == 0) {
         writeStderr("zunlink: missing operand\n", .{});
-        writeStderr("Try 'zunlink --help' for more information.\n", .{});
+        tryHelp();
+        std.process.exit(1);
+    }
+    if (operands.items.len > 1) {
+        writeStderr("zunlink: extra operand '{s}'\n", .{operands.items[1]});
+        tryHelp();
         std.process.exit(1);
     }
 
-    const arg = args[1];
+    const operand = operands.items[0];
 
-    if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-        printHelp();
-        return;
-    }
+    // Heap-allocate the NUL-terminated path so the kernel decides on length
+    // limits (real ENAMETOOLONG) instead of an arbitrary in-process cap.
+    const path_z = try allocator.dupeZ(u8, operand);
+    defer allocator.free(path_z);
 
-    if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-V")) {
-        writeStdout("zunlink {s}\n", .{VERSION});
-        return;
-    }
-
-    if (args.len > 2) {
-        writeStderr("zunlink: extra operand '{s}'\n", .{args[2]});
-        writeStderr("Try 'zunlink --help' for more information.\n", .{});
-        std.process.exit(1);
-    }
-
-    // Create null-terminated path
-    var path_z: [4097]u8 = undefined;
-    if (arg.len >= path_z.len) {
-        writeStderr("zunlink: path too long\n", .{});
-        std.process.exit(1);
-    }
-    @memcpy(path_z[0..arg.len], arg);
-    path_z[arg.len] = 0;
-
-    const result = unlink(@ptrCast(&path_z));
+    const result = unlink(path_z.ptr);
 
     if (result != 0) {
         const errno = std.posix.errno(result);
@@ -82,26 +120,29 @@ pub fn main(init: std.process.Init) !void {
             .ISDIR => "Is a directory",
             .ROFS => "Read-only file system",
             .NAMETOOLONG => "File name too long",
-            .LOOP => "Too many symbolic links",
+            .LOOP => "Too many levels of symbolic links",
             .NOTDIR => "Not a directory",
             .IO => "Input/output error",
             else => "Unknown error",
         };
-        writeStderr("zunlink: cannot unlink '{s}': {s}\n", .{ arg, err_msg });
+        writeStderr("zunlink: cannot unlink '{s}': {s}\n", .{ operand, err_msg });
         std.process.exit(1);
     }
+}
+
+fn printVersion() void {
+    // GNU-shaped identity line (honest: this is not GNU coreutils).
+    writeStdout("zunlink (zig-forge coreutils) {s}\n", .{VERSION});
 }
 
 fn printHelp() void {
     writeStdout(
         \\Usage: zunlink FILE
+        \\  or:  zunlink OPTION
         \\Call the unlink function to remove the specified FILE.
         \\
         \\      --help     display this help and exit
         \\      --version  output version information and exit
-        \\
-        \\Unlike 'rm', unlink removes exactly one file and does not
-        \\accept any options other than --help and --version.
         \\
     , .{});
 }

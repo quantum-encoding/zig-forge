@@ -8,10 +8,13 @@ const std = @import("std");
 const simd = @import("simd.zig");
 const sparse_set = @import("sparse_set.zig");
 
-/// Maximum number of NFA states supported
-/// Keep small for cache efficiency - most regexes have <256 states
-/// 256 states = 1KB sparse set (256*2 + 256*2 = 1KB)
-const MAX_STATES = 256;
+/// Maximum number of NFA states supported.
+/// Patterns compiling to more than this are rejected with error.InvalidPattern
+/// at compile time (see Regex.compile) rather than silently mis-matching: the
+/// fixed-size SparseSet(MAX_STATES) drops out-of-range elements, and the u16
+/// state index used in the simulation must not overflow. Enforcing the bound up
+/// front is what makes both safe. 8192 states = 32KB per sparse set (2 sets).
+const MAX_STATES = 8192;
 
 /// Sparse set type for NFA state tracking
 const StateSet = sparse_set.SparseSet(MAX_STATES);
@@ -98,6 +101,12 @@ pub const Regex = struct {
 
         const start = try compiler.parse(pattern);
         const states = try compiler.states.toOwnedSlice(allocator);
+        errdefer allocator.free(states);
+
+        // Reject patterns that exceed the NFA-state bound instead of silently
+        // dropping the excess (the SparseSet is fixed-size and the simulation
+        // uses u16 indices). This turns a wrong-answer bug into a clean error.
+        if (states.len > MAX_STATES) return error.InvalidPattern;
 
         // Extract literal prefix by following states from start
         var prefix_buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -569,27 +578,29 @@ pub const Regex = struct {
     }
 };
 
+/// Sub-NFA with a single entry (`start`) and a set of dangling out-pointers
+/// (`outs`, state indices whose out1/out2 is null and awaits patching).
+const Fragment = struct {
+    start: usize,
+    outs: std.ArrayListUnmanaged(usize),
+    allocator: std.mem.Allocator,
+
+    fn init(allocator: std.mem.Allocator, start: usize) Fragment {
+        return .{
+            .start = start,
+            .outs = std.ArrayListUnmanaged(usize).empty,
+            .allocator = allocator,
+        };
+    }
+
+    fn deinit(self: *Fragment) void {
+        self.outs.deinit(self.allocator);
+    }
+};
+
 const Compiler = struct {
     states: std.ArrayListUnmanaged(Regex.State),
     allocator: std.mem.Allocator,
-
-    const Fragment = struct {
-        start: usize,
-        outs: std.ArrayListUnmanaged(usize), // Indices of states with dangling out pointers
-        allocator: std.mem.Allocator,
-
-        fn init(allocator: std.mem.Allocator, start: usize) Fragment {
-            return .{
-                .start = start,
-                .outs = std.ArrayListUnmanaged(usize).empty,
-                .allocator = allocator,
-            };
-        }
-
-        fn deinit(self: *Fragment) void {
-            self.outs.deinit(self.allocator);
-        }
-    };
 
     fn init(allocator: std.mem.Allocator) Compiler {
         return .{
@@ -618,311 +629,446 @@ const Compiler = struct {
         }
     }
 
+    /// Entry point: compile the full pattern into an NFA rooted at the returned
+    /// start-state index, terminated by exactly one `.match` accept state.
+    ///
+    /// Grammar (POSIX ERE subset, recursive descent):
+    ///   alternation  := concatenation ('|' concatenation)*
+    ///   concatenation := quantified*
+    ///   quantified   := atom ('*' | '+' | '?' | '{' interval '}')*
+    ///   atom         := '(' alternation ')' | '[' class ']' | '\' escape
+    ///                  | '.' | '^' | '$' | literal
     fn parse(self: *Compiler, pattern: []const u8) !usize {
-        var frag_stack: std.ArrayListUnmanaged(Fragment) = .empty;
-        defer {
-            for (frag_stack.items) |*f| f.deinit();
-            frag_stack.deinit(self.allocator);
+        var p = Parser{ .c = self, .pattern = pattern, .pos = 0 };
+        var frag = try p.parseAlt();
+        defer frag.deinit();
+        // Any leftover (e.g. a stray ')') is a syntax error.
+        if (p.pos != pattern.len) return error.InvalidPattern;
+
+        const match_idx = try self.addState(.{ .kind = .match });
+        self.patch(frag.outs.items, match_idx);
+        return frag.start;
+    }
+};
+
+/// Recursive-descent Thompson-construction parser.
+///
+/// Every builder returns a `Fragment` (a sub-NFA with a single entry `start`
+/// and a set of dangling `outs`). Fragments are patched together by later
+/// operators; NO fragment ever synthesizes its own `.match` accept node — the
+/// single accept state is added once, at the top level, in `Compiler.parse`.
+/// (The previous stack-based parser emitted `.match` nodes mid-parse, which is
+/// exactly why alternation dropped its left branch and groups accepted early.)
+const Parser = struct {
+    c: *Compiler,
+    pattern: []const u8,
+    pos: usize,
+
+    const Interval = struct { min: usize, max: ?usize };
+
+    // Explicit error set: the parser is mutually recursive
+    // (parseAlt -> parseConcat -> parseAtom -> parseAlt), so an inferred error
+    // set would form a dependency loop. Naming it breaks the cycle.
+    const Error = error{ InvalidPattern, OutOfMemory };
+
+    fn peek(self: *const Parser) ?u8 {
+        if (self.pos < self.pattern.len) return self.pattern[self.pos];
+        return null;
+    }
+
+    fn single(self: *Parser, state: Regex.State) !Fragment {
+        const idx = try self.c.addState(state);
+        var f = Fragment.init(self.c.allocator, idx);
+        try f.outs.append(f.allocator, idx);
+        return f;
+    }
+
+    /// An epsilon fragment (matches the empty string) implemented as a
+    /// pass-through split whose out1 is dangling.
+    fn emptyFrag(self: *Parser) !Fragment {
+        const idx = try self.c.addState(.{ .kind = .split });
+        var f = Fragment.init(self.c.allocator, idx);
+        try f.outs.append(f.allocator, idx);
+        return f;
+    }
+
+    /// f1 f2 : patch f1's outs into f2's entry; result inherits f2's outs.
+    fn concat(self: *Parser, f1: *Fragment, f2: *Fragment) !Fragment {
+        self.c.patch(f1.outs.items, f2.start);
+        var f = Fragment.init(self.c.allocator, f1.start);
+        for (f2.outs.items) |o| try f.outs.append(f.allocator, o);
+        return f;
+    }
+
+    /// f1 | f2 : new split branching to both entries; result collects BOTH
+    /// branches' dangling outs (this is the fix for the dropped-left-branch bug).
+    fn alternate(self: *Parser, f1: *Fragment, f2: *Fragment) !Fragment {
+        const split_idx = try self.c.addState(.{ .kind = .split, .out1 = f1.start, .out2 = f2.start });
+        var f = Fragment.init(self.c.allocator, split_idx);
+        for (f1.outs.items) |o| try f.outs.append(f.allocator, o);
+        for (f2.outs.items) |o| try f.outs.append(f.allocator, o);
+        return f;
+    }
+
+    /// f* : zero or more.
+    fn star(self: *Parser, frag: *Fragment) !Fragment {
+        const split_idx = try self.c.addState(.{ .kind = .split, .out1 = frag.start });
+        self.c.patch(frag.outs.items, split_idx);
+        var f = Fragment.init(self.c.allocator, split_idx);
+        try f.outs.append(f.allocator, split_idx); // out2 dangling
+        return f;
+    }
+
+    /// f+ : one or more.
+    fn plus(self: *Parser, frag: *Fragment) !Fragment {
+        const split_idx = try self.c.addState(.{ .kind = .split, .out1 = frag.start });
+        self.c.patch(frag.outs.items, split_idx);
+        var f = Fragment.init(self.c.allocator, frag.start);
+        try f.outs.append(f.allocator, split_idx); // out2 dangling
+        return f;
+    }
+
+    /// f? : zero or one.
+    fn quest(self: *Parser, frag: *Fragment) !Fragment {
+        const split_idx = try self.c.addState(.{ .kind = .split, .out1 = frag.start });
+        var f = Fragment.init(self.c.allocator, split_idx);
+        try f.outs.append(f.allocator, split_idx); // out2 dangling
+        for (frag.outs.items) |o| try f.outs.append(f.allocator, o);
+        return f;
+    }
+
+    fn parseAlt(self: *Parser) Error!Fragment {
+        var left = try self.parseConcat();
+        errdefer left.deinit();
+        while (self.peek() == '|') {
+            self.pos += 1; // consume '|'
+            var right = try self.parseConcat();
+            defer right.deinit();
+            const combined = try self.alternate(&left, &right);
+            left.deinit();
+            left = combined;
+        }
+        return left;
+    }
+
+    fn parseConcat(self: *Parser) Error!Fragment {
+        var result: ?Fragment = null;
+        errdefer if (result) |*r| r.deinit();
+
+        while (self.peek()) |c| {
+            if (c == '|' or c == ')') break;
+
+            const atom_start = self.pos;
+            var atom = try self.parseAtom();
+            const atom_src = self.pattern[atom_start..self.pos];
+            atom = self.applyQuantifiers(atom, atom_src) catch |e| {
+                atom.deinit();
+                return e;
+            };
+
+            if (result) |*r| {
+                const combined = self.concat(r, &atom) catch |e| {
+                    atom.deinit();
+                    return e;
+                };
+                r.deinit();
+                atom.deinit();
+                result = combined;
+            } else {
+                result = atom;
+            }
         }
 
-        var i: usize = 0;
-        while (i < pattern.len) {
-            const c = pattern[i];
+        if (result) |r| return r;
+        return try self.emptyFrag(); // empty concatenation == epsilon
+    }
 
-            switch (c) {
-                '.' => {
-                    const idx = try self.addState(.{ .kind = .any });
-                    var frag = Fragment.init(self.allocator, idx);
-                    try frag.outs.append(frag.allocator, idx);
-                    try frag_stack.append(self.allocator, frag);
-                },
+    /// Apply any trailing quantifiers to `frag`. `src` is the raw source text of
+    /// the just-parsed atom (excluding the quantifier), used to expand `{n,m}`
+    /// intervals by re-parsing the atom the required number of times.
+    fn applyQuantifiers(self: *Parser, frag_in: Fragment, src: []const u8) Error!Fragment {
+        var frag = frag_in;
+        while (self.peek()) |q| {
+            switch (q) {
                 '*' => {
-                    if (frag_stack.items.len == 0) return error.InvalidPattern;
-                    var frag = frag_stack.pop().?;
-                    defer frag.deinit();
-
-                    const split_idx = try self.addState(.{ .kind = .split, .out1 = frag.start });
-                    self.patch(frag.outs.items, split_idx);
-
-                    var new_frag = Fragment.init(self.allocator, split_idx);
-                    try new_frag.outs.append(new_frag.allocator, split_idx); // out2 is dangling
-                    try frag_stack.append(self.allocator, new_frag);
+                    const n = try self.star(&frag);
+                    frag.deinit();
+                    frag = n;
+                    self.pos += 1;
                 },
                 '+' => {
-                    if (frag_stack.items.len == 0) return error.InvalidPattern;
-                    var frag = frag_stack.pop().?;
-                    defer frag.deinit();
-
-                    const split_idx = try self.addState(.{ .kind = .split, .out1 = frag.start });
-                    self.patch(frag.outs.items, split_idx);
-
-                    var new_frag = Fragment.init(self.allocator, frag.start);
-                    try new_frag.outs.append(new_frag.allocator, split_idx);
-                    try frag_stack.append(self.allocator, new_frag);
+                    const n = try self.plus(&frag);
+                    frag.deinit();
+                    frag = n;
+                    self.pos += 1;
                 },
                 '?' => {
-                    if (frag_stack.items.len == 0) return error.InvalidPattern;
-                    var frag = frag_stack.pop().?;
-                    defer frag.deinit();
-
-                    const split_idx = try self.addState(.{ .kind = .split, .out1 = frag.start });
-
-                    var new_frag = Fragment.init(self.allocator, split_idx);
-                    try new_frag.outs.append(new_frag.allocator, split_idx); // out2 dangling
-                    for (frag.outs.items) |out| {
-                        try new_frag.outs.append(new_frag.allocator, out);
-                    }
-                    try frag_stack.append(self.allocator, new_frag);
-                },
-                '|' => {
-                    // Alternation - need to handle precedence properly
-                    // For now, simple two-way alternation
-                    if (frag_stack.items.len < 1) return error.InvalidPattern;
-                    // We'll handle this when we see the next atom
-                    var frag = frag_stack.pop().?;
-
-                    // Parse rest and create alternation
-                    const rest_start = try self.parse(pattern[i + 1 ..]);
-
-                    const split_idx = try self.addState(.{ .kind = .split, .out1 = frag.start, .out2 = rest_start });
+                    const n = try self.quest(&frag);
                     frag.deinit();
-
-                    var new_frag = Fragment.init(self.allocator, split_idx);
-                    // Collect outs from match state
-                    const match_idx = try self.addState(.{ .kind = .match });
-                    self.patch(&[_]usize{rest_start}, match_idx);
-
-                    try new_frag.outs.append(new_frag.allocator, match_idx);
-                    try frag_stack.append(self.allocator, new_frag);
-
-                    // Return early since we consumed the rest
-                    break;
+                    frag = n;
+                    self.pos += 1;
                 },
-                '[' => {
-                    var cc = Regex.CharClass{};
-                    i += 1;
-
-                    if (i < pattern.len and pattern[i] == '^') {
-                        cc.negated = true;
-                        i += 1;
-                    }
-
-                    while (i < pattern.len and pattern[i] != ']') {
-                        const ch = pattern[i];
-                        if (i + 2 < pattern.len and pattern[i + 1] == '-' and pattern[i + 2] != ']') {
-                            cc.setRange(ch, pattern[i + 2]);
-                            i += 3;
-                        } else {
-                            cc.set(ch);
-                            i += 1;
-                        }
-                    }
-
-                    const idx = try self.addState(.{ .kind = .{ .char_class = cc } });
-                    var frag = Fragment.init(self.allocator, idx);
-                    try frag.outs.append(frag.allocator, idx);
-                    try frag_stack.append(self.allocator, frag);
-                },
-                '\\' => {
-                    i += 1;
-                    if (i >= pattern.len) return error.InvalidPattern;
-
-                    const escaped = pattern[i];
-                    var cc = Regex.CharClass{};
-                    var is_class = false;
-
-                    switch (escaped) {
-                        'd' => {
-                            cc.setRange('0', '9');
-                            is_class = true;
-                        },
-                        'D' => {
-                            cc.setRange('0', '9');
-                            cc.negated = true;
-                            is_class = true;
-                        },
-                        'w' => {
-                            cc.setRange('a', 'z');
-                            cc.setRange('A', 'Z');
-                            cc.setRange('0', '9');
-                            cc.set('_');
-                            is_class = true;
-                        },
-                        'W' => {
-                            cc.setRange('a', 'z');
-                            cc.setRange('A', 'Z');
-                            cc.setRange('0', '9');
-                            cc.set('_');
-                            cc.negated = true;
-                            is_class = true;
-                        },
-                        's' => {
-                            cc.set(' ');
-                            cc.set('\t');
-                            cc.set('\n');
-                            cc.set('\r');
-                            is_class = true;
-                        },
-                        'S' => {
-                            cc.set(' ');
-                            cc.set('\t');
-                            cc.set('\n');
-                            cc.set('\r');
-                            cc.negated = true;
-                            is_class = true;
-                        },
-                        'n' => {
-                            const idx = try self.addState(.{ .kind = .{ .literal = '\n' } });
-                            var frag = Fragment.init(self.allocator, idx);
-                            try frag.outs.append(frag.allocator, idx);
-                            try frag_stack.append(self.allocator, frag);
-                        },
-                        't' => {
-                            const idx = try self.addState(.{ .kind = .{ .literal = '\t' } });
-                            var frag = Fragment.init(self.allocator, idx);
-                            try frag.outs.append(frag.allocator, idx);
-                            try frag_stack.append(self.allocator, frag);
-                        },
-                        'r' => {
-                            const idx = try self.addState(.{ .kind = .{ .literal = '\r' } });
-                            var frag = Fragment.init(self.allocator, idx);
-                            try frag.outs.append(frag.allocator, idx);
-                            try frag_stack.append(self.allocator, frag);
-                        },
-                        'b' => {
-                            // Word boundary
-                            const idx = try self.addState(.{ .kind = .word_boundary });
-                            var frag = Fragment.init(self.allocator, idx);
-                            try frag.outs.append(frag.allocator, idx);
-                            try frag_stack.append(self.allocator, frag);
-                        },
-                        'B' => {
-                            // Non-word boundary
-                            const idx = try self.addState(.{ .kind = .non_word_boundary });
-                            var frag = Fragment.init(self.allocator, idx);
-                            try frag.outs.append(frag.allocator, idx);
-                            try frag_stack.append(self.allocator, frag);
-                        },
-                        else => {
-                            // Literal escaped character (includes \^, \$, \., \*, etc.)
-                            const idx = try self.addState(.{ .kind = .{ .literal = escaped } });
-                            var frag = Fragment.init(self.allocator, idx);
-                            try frag.outs.append(frag.allocator, idx);
-                            try frag_stack.append(self.allocator, frag);
-                        },
-                    }
-
-                    if (is_class) {
-                        const idx = try self.addState(.{ .kind = .{ .char_class = cc } });
-                        var frag = Fragment.init(self.allocator, idx);
-                        try frag.outs.append(frag.allocator, idx);
-                        try frag_stack.append(self.allocator, frag);
+                '{' => {
+                    const saved = self.pos;
+                    if (try self.parseInterval()) |iv| {
+                        const n = try self.buildInterval(src, iv.min, iv.max);
+                        frag.deinit();
+                        frag = n;
+                    } else {
+                        // Not a valid interval: treat '{' as a literal, stop.
+                        self.pos = saved;
+                        break;
                     }
                 },
-                '^' => {
-                    const idx = try self.addState(.{ .kind = .anchor_start });
-                    var frag = Fragment.init(self.allocator, idx);
-                    try frag.outs.append(frag.allocator, idx);
-                    try frag_stack.append(self.allocator, frag);
-                },
-                '$' => {
-                    const idx = try self.addState(.{ .kind = .anchor_end });
-                    var frag = Fragment.init(self.allocator, idx);
-                    try frag.outs.append(frag.allocator, idx);
-                    try frag_stack.append(self.allocator, frag);
-                },
-                '(' => {
-                    // Find matching )
-                    var depth: usize = 1;
-                    var j = i + 1;
-                    while (j < pattern.len and depth > 0) : (j += 1) {
-                        if (pattern[j] == '(') depth += 1;
-                        if (pattern[j] == ')') depth -= 1;
-                    }
-                    if (depth != 0) return error.InvalidPattern;
-
-                    // Parse group content
-                    const group_start = try self.parse(pattern[i + 1 .. j - 1]);
-
-                    var frag = Fragment.init(self.allocator, group_start);
-                    // Need to find the dangling outs - for simplicity, mark match state
-                    try frag.outs.append(frag.allocator, self.states.items.len - 1);
-                    try frag_stack.append(self.allocator, frag);
-
-                    i = j - 1; // Will be incremented
-                },
-                ')' => {
-                    // Should not reach here if properly parsed
-                    return error.InvalidPattern;
-                },
-                else => {
-                    // Literal character
-                    const idx = try self.addState(.{ .kind = .{ .literal = c } });
-                    var frag = Fragment.init(self.allocator, idx);
-                    try frag.outs.append(frag.allocator, idx);
-                    try frag_stack.append(self.allocator, frag);
-                },
+                else => break,
             }
+        }
+        return frag;
+    }
 
-            // Concatenate fragments if:
-            // - We have at least 2 fragments
-            // - Current char is not a quantifier (those modify top fragment)
-            // - Next char is not a quantifier (let it apply to second atom first)
-            const next_is_quantifier = if (i + 1 < pattern.len)
-                (pattern[i + 1] == '*' or pattern[i + 1] == '+' or pattern[i + 1] == '?')
-            else
-                false;
+    /// Parse `{n}`, `{n,}` or `{n,m}` starting at the current '{'.
+    /// On success advances past '}' and returns the bounds; on a malformed brace
+    /// expression returns null (caller treats '{' as a literal). Counts beyond
+    /// MAX_STATES, or min>max, are hard syntax errors.
+    fn parseInterval(self: *Parser) !?Interval {
+        const p = self.pattern;
+        var i = self.pos + 1; // skip '{'
 
-            if (c != '*' and c != '+' and c != '?' and c != '|' and !next_is_quantifier) {
-                // Concatenate all fragments on the stack into one
-                while (frag_stack.items.len >= 2) {
-                    var f2 = frag_stack.pop().?;
-                    defer f2.deinit();
-                    var f1 = frag_stack.pop().?;
-                    defer f1.deinit();
+        var min: usize = 0;
+        var have_min = false;
+        while (i < p.len and p[i] >= '0' and p[i] <= '9') : (i += 1) {
+            have_min = true;
+            min = min * 10 + (p[i] - '0');
+            if (min > MAX_STATES) return error.InvalidPattern;
+        }
+        if (!have_min) return null;
 
-                    self.patch(f1.outs.items, f2.start);
-
-                    var new_frag = Fragment.init(self.allocator, f1.start);
-                    for (f2.outs.items) |out| {
-                        try new_frag.outs.append(new_frag.allocator, out);
-                    }
-                    try frag_stack.append(self.allocator, new_frag);
+        var max: ?usize = min;
+        if (i < p.len and p[i] == ',') {
+            i += 1;
+            if (i < p.len and p[i] >= '0' and p[i] <= '9') {
+                var m: usize = 0;
+                while (i < p.len and p[i] >= '0' and p[i] <= '9') : (i += 1) {
+                    m = m * 10 + (p[i] - '0');
+                    if (m > MAX_STATES) return error.InvalidPattern;
                 }
+                max = m;
+            } else {
+                max = null; // {n,}
             }
+        }
 
+        if (i >= p.len or p[i] != '}') return null;
+        if (max) |mx| {
+            if (min > mx) return error.InvalidPattern;
+        }
+        self.pos = i + 1; // consume '}'
+        return Interval{ .min = min, .max = max };
+    }
+
+    /// Expand an interval by re-parsing `src` (the atom source) the required
+    /// number of times: `min` mandatory copies, then either a starred copy
+    /// ({n,}) or `(max-min)` optional copies ({n,m}).
+    fn buildInterval(self: *Parser, src: []const u8, min: usize, max_opt: ?usize) Error!Fragment {
+        var result: ?Fragment = null;
+        errdefer if (result) |*r| r.deinit();
+
+        var k: usize = 0;
+        while (k < min) : (k += 1) {
+            var copy = try self.parseSub(src);
+            const next = try self.appendFrag(result, &copy);
+            copy.deinit();
+            result = next;
+        }
+
+        if (max_opt) |max| {
+            var j: usize = min;
+            while (j < max) : (j += 1) {
+                var copy = try self.parseSub(src);
+                var q = self.quest(&copy) catch |e| {
+                    copy.deinit();
+                    return e;
+                };
+                copy.deinit();
+                const next = try self.appendFrag(result, &q);
+                q.deinit();
+                result = next;
+            }
+        } else {
+            var copy = try self.parseSub(src);
+            var s = self.star(&copy) catch |e| {
+                copy.deinit();
+                return e;
+            };
+            copy.deinit();
+            const next = try self.appendFrag(result, &s);
+            s.deinit();
+            result = next;
+        }
+
+        if (result) |r| return r;
+        return try self.emptyFrag(); // {0} == epsilon
+    }
+
+    /// Concatenate `next` onto the running `result`. When `result` is null,
+    /// returns an independent copy of `next` (caller still owns/deinits `next`).
+    fn appendFrag(self: *Parser, result_opt: ?Fragment, next: *Fragment) !Fragment {
+        if (result_opt) |result| {
+            var r = result;
+            const combined = self.concat(&r, next) catch |e| {
+                r.deinit();
+                return e;
+            };
+            r.deinit();
+            return combined;
+        }
+        var f = Fragment.init(self.c.allocator, next.start);
+        for (next.outs.items) |o| try f.outs.append(f.allocator, o);
+        return f;
+    }
+
+    /// Re-parse an atom's source text into a fresh fragment (used to clone an
+    /// atom for interval expansion). Shares the same Compiler state array.
+    fn parseSub(self: *Parser, src: []const u8) Error!Fragment {
+        var sub = Parser{ .c = self.c, .pattern = src, .pos = 0 };
+        var f = try sub.parseAlt();
+        if (sub.pos != src.len) {
+            f.deinit();
+            return error.InvalidPattern;
+        }
+        return f;
+    }
+
+    fn parseAtom(self: *Parser) Error!Fragment {
+        const c = self.pattern[self.pos]; // caller guarantees pos<len, c not '|'/')'
+        switch (c) {
+            '(' => {
+                self.pos += 1; // consume '('
+                var inner = try self.parseAlt();
+                if (self.peek() != ')') {
+                    inner.deinit();
+                    return error.InvalidPattern;
+                }
+                self.pos += 1; // consume ')'
+                return inner;
+            },
+            '[' => return try self.parseClass(),
+            '\\' => return try self.parseEscape(),
+            '.' => {
+                self.pos += 1;
+                return try self.single(.{ .kind = .any });
+            },
+            '^' => {
+                self.pos += 1;
+                return try self.single(.{ .kind = .anchor_start });
+            },
+            '$' => {
+                self.pos += 1;
+                return try self.single(.{ .kind = .anchor_end });
+            },
+            // A quantifier with nothing to quantify is a syntax error.
+            '*', '+', '?' => return error.InvalidPattern,
+            else => {
+                self.pos += 1;
+                return try self.single(.{ .kind = .{ .literal = c } });
+            },
+        }
+    }
+
+    fn parseClass(self: *Parser) !Fragment {
+        const p = self.pattern;
+        var i = self.pos + 1; // skip '['
+        var cc = Regex.CharClass{};
+
+        if (i < p.len and p[i] == '^') {
+            cc.negated = true;
             i += 1;
         }
 
-        // Final concatenation: connect all remaining fragments on the stack
-        while (frag_stack.items.len >= 2) {
-            var f2 = frag_stack.pop().?;
-            defer f2.deinit();
-            var f1 = frag_stack.pop().?;
-            defer f1.deinit();
-
-            self.patch(f1.outs.items, f2.start);
-
-            var new_frag = Fragment.init(self.allocator, f1.start);
-            for (f2.outs.items) |out| {
-                try new_frag.outs.append(new_frag.allocator, out);
+        // POSIX: a ']' as the FIRST class member is a literal ']'.
+        var first = true;
+        var closed = false;
+        while (i < p.len) {
+            const ch = p[i];
+            if (ch == ']' and !first) {
+                closed = true;
+                i += 1;
+                break;
             }
-            try frag_stack.append(self.allocator, new_frag);
+            first = false;
+
+            if (i + 2 < p.len and p[i + 1] == '-' and p[i + 2] != ']') {
+                const lo = ch;
+                const hi = p[i + 2];
+                if (lo > hi) return error.InvalidPattern; // invalid range e.g. [z-a]
+                cc.setRange(lo, hi);
+                i += 3;
+            } else {
+                cc.set(ch);
+                i += 1;
+            }
         }
 
-        // Add match state
-        const match_idx = try self.addState(.{ .kind = .match });
+        if (!closed) return error.InvalidPattern; // unterminated '['
+        self.pos = i;
+        return try self.single(.{ .kind = .{ .char_class = cc } });
+    }
 
-        if (frag_stack.items.len == 0) {
-            return match_idx;
+    fn parseEscape(self: *Parser) !Fragment {
+        self.pos += 1; // consume '\'
+        if (self.pos >= self.pattern.len) return error.InvalidPattern;
+        const escaped = self.pattern[self.pos];
+        self.pos += 1;
+
+        var cc = Regex.CharClass{};
+        switch (escaped) {
+            'd' => {
+                cc.setRange('0', '9');
+                return try self.single(.{ .kind = .{ .char_class = cc } });
+            },
+            'D' => {
+                cc.setRange('0', '9');
+                cc.negated = true;
+                return try self.single(.{ .kind = .{ .char_class = cc } });
+            },
+            'w' => {
+                cc.setRange('a', 'z');
+                cc.setRange('A', 'Z');
+                cc.setRange('0', '9');
+                cc.set('_');
+                return try self.single(.{ .kind = .{ .char_class = cc } });
+            },
+            'W' => {
+                cc.setRange('a', 'z');
+                cc.setRange('A', 'Z');
+                cc.setRange('0', '9');
+                cc.set('_');
+                cc.negated = true;
+                return try self.single(.{ .kind = .{ .char_class = cc } });
+            },
+            's' => {
+                cc.set(' ');
+                cc.set('\t');
+                cc.set('\n');
+                cc.set('\r');
+                return try self.single(.{ .kind = .{ .char_class = cc } });
+            },
+            'S' => {
+                cc.set(' ');
+                cc.set('\t');
+                cc.set('\n');
+                cc.set('\r');
+                cc.negated = true;
+                return try self.single(.{ .kind = .{ .char_class = cc } });
+            },
+            'n' => return try self.single(.{ .kind = .{ .literal = '\n' } }),
+            't' => return try self.single(.{ .kind = .{ .literal = '\t' } }),
+            'r' => return try self.single(.{ .kind = .{ .literal = '\r' } }),
+            'b' => return try self.single(.{ .kind = .word_boundary }),
+            'B' => return try self.single(.{ .kind = .non_word_boundary }),
+            // Escaped metacharacter (\., \*, \\, …) becomes a literal.
+            else => return try self.single(.{ .kind = .{ .literal = escaped } }),
         }
-
-        // Patch final fragment to match state
-        var final_frag = frag_stack.pop().?;
-        defer final_frag.deinit();
-        self.patch(final_frag.outs.items, match_idx);
-
-        return final_frag.start;
     }
 };
 

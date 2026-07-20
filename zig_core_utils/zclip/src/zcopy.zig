@@ -155,9 +155,19 @@ pub fn main(init: std.process.Init) !void {
 
     var buf: [4096]u8 = undefined;
     while (true) {
-        const n = posix.read(posix.STDIN_FILENO, &buf) catch break;
+        // `posix.read` retries EINTR internally; a genuine read error must not
+        // be mistaken for EOF (which would copy a truncated payload as success).
+        const n = posix.read(posix.STDIN_FILENO, &buf) catch {
+            var writer = Writer.stderr();
+            writer.write("zcopy: error reading stdin\n");
+            std.process.exit(1);
+        };
         if (n == 0) break;
-        input.appendSlice(allocator, buf[0..n]) catch break;
+        input.appendSlice(allocator, buf[0..n]) catch {
+            var writer = Writer.stderr();
+            writer.write("zcopy: out of memory\n");
+            std.process.exit(1);
+        };
     }
 
     var data = input.items;
@@ -170,7 +180,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // Copy to clipboard
-    clipboard.copy(allocator, data, config.selection) catch |err| {
+    clipboard.copy(init.io, allocator, data, config.selection) catch |err| {
         var writer = Writer.stderr();
         switch (err) {
             error.NoBackendAvailable => writer.write("zcopy: no clipboard backend\n"),

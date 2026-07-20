@@ -1,7 +1,6 @@
 const std = @import("std");
 const posix = std.posix;
 const libc = std.c;
-const linux = std.os.linux;
 const regex = @import("regex.zig");
 const simd = @import("simd.zig");
 
@@ -147,6 +146,7 @@ pub fn main(init: std.process.Init) !u8 {
 
     // Process files
     var any_match = false;
+    var had_error = false;
 
     if (files.items.len == 0) {
         // Read from stdin
@@ -154,36 +154,86 @@ pub fn main(init: std.process.Init) !u8 {
             any_match = true;
         }
     } else {
+        const io = init.io;
         for (files.items) |filename| {
-            // Try mmap first for better performance
-            if (processFileMmap(&re, filename, show_filename, &opts)) |has_match| {
-                if (has_match) {
-                    any_match = true;
-                    if (opts.quiet) break;
-                }
-            } else {
-                // mmap failed, fall back to read()
-                const fd_result = linux.open(filename.ptr, .{}, 0);
-                if (@as(isize, @bitCast(fd_result)) < 0) {
-                    if (!opts.quiet) {
-                        writeStderr("zregex: ");
-                        writeStderr(filename);
-                        writeStderr(": No such file or directory\n");
-                    }
-                    continue;
-                }
-                const fd: posix.fd_t = @intCast(fd_result);
-                defer _ = linux.close(@intCast(fd));
+            // Open once; the same fd is used for both the mmap fast path and the
+            // read() fallback, so there is no second open() by path (no TOCTOU
+            // window, no duplicated work).
+            var file = std.Io.Dir.cwd().openFile(io, filename, .{}) catch |err| {
+                if (!opts.quiet) reportFileError(filename, err);
+                had_error = true;
+                continue;
+            };
+            defer file.close(io);
 
-                if (try processInput(allocator, &re, fd, filename, show_filename, &opts)) {
-                    any_match = true;
-                    if (opts.quiet) break;
-                }
+            const has_match = processOpenFile(io, allocator, &re, &file, filename, show_filename, &opts) catch |err| {
+                if (!opts.quiet) reportFileError(filename, err);
+                had_error = true;
+                continue;
+            };
+            if (has_match) {
+                any_match = true;
+                if (opts.quiet) break;
             }
         }
     }
 
+    // Exit status mirrors GNU grep: 0 on match, 1 on no match, 2 on any file
+    // access error. In quiet mode a match short-circuits to 0 regardless.
+    if (opts.quiet) return if (any_match) 0 else 1;
+    if (had_error) return 2;
     return if (any_match) 0 else 1;
+}
+
+/// Map a file-open/read error to the GNU-style diagnostic text.
+fn errnoMessage(err: anyerror) []const u8 {
+    return switch (err) {
+        error.FileNotFound => "No such file or directory",
+        error.AccessDenied, error.PermissionDenied => "Permission denied",
+        error.IsDir => "Is a directory",
+        error.NotDir => "Not a directory",
+        error.SymLinkLoop => "Too many levels of symbolic links",
+        error.NameTooLong => "File name too long",
+        else => "Cannot read file",
+    };
+}
+
+fn reportFileError(filename: []const u8, err: anyerror) void {
+    writeStderr("zregex: ");
+    writeStderr(filename);
+    writeStderr(": ");
+    writeStderr(errnoMessage(err));
+    writeStderr("\n");
+}
+
+/// Process an already-open file: mmap when the size is known and non-zero,
+/// otherwise stream via read() (pipes, char devices, empty files).
+fn processOpenFile(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    re: *const regex.Regex,
+    file: *std.Io.File,
+    filename: [:0]const u8,
+    show_filename: bool,
+    opts: *const Options,
+) !bool {
+    var size: u64 = 0;
+    if (file.stat(io)) |st| {
+        // A directory can be opened for reading but is not searchable content;
+        // report it the way GNU grep does (and force a nonzero/2 exit).
+        if (st.kind == .directory) return error.IsDir;
+        size = st.size;
+    } else |_| {}
+
+    if (size > 0) {
+        if (std.posix.mmap(null, size, .{ .READ = true }, .{ .TYPE = .PRIVATE }, file.handle, 0)) |data| {
+            defer std.posix.munmap(data);
+            return processBuffer(re, data, filename, show_filename, opts);
+        } else |_| {
+            // mmap unavailable for this fd — fall through to streaming.
+        }
+    }
+    return try processInput(allocator, re, file.handle, filename, show_filename, opts);
 }
 
 fn processInput(
@@ -204,8 +254,8 @@ fn processInput(
     var file_has_match = false;
 
     while (true) {
-        const bytes_read = linux.read(@intCast(fd), &read_buf, read_buf.len);
-        if (@as(isize, @bitCast(bytes_read)) <= 0) break;
+        const bytes_read = posix.read(fd, &read_buf) catch break;
+        if (bytes_read == 0) break;
 
         const data = read_buf[0..bytes_read];
         var start: usize = 0;
@@ -343,46 +393,15 @@ fn processInput(
     return file_has_match;
 }
 
-/// Process file using mmap for zero-copy I/O
-/// Returns null if mmap fails (caller should fall back to read())
-fn processFileMmap(
+/// Process an in-memory buffer (an mmap'd file) line by line, using SIMD to
+/// locate newlines. This is the zero-copy fast path; the caller owns the buffer.
+fn processBuffer(
     re: *const regex.Regex,
+    file_data: []const u8,
     filename: [:0]const u8,
     show_filename: bool,
     opts: *const Options,
-) ?bool {
-    // Open the file
-    const fd_result = linux.open(filename.ptr, .{}, 0);
-    if (@as(isize, @bitCast(fd_result)) < 0) return null;
-    const fd: posix.fd_t = @intCast(fd_result);
-    defer _ = linux.close(@intCast(fd));
-
-    // Get file size using statx
-    var statx_buf: linux.Statx = undefined;
-    const statx_result = linux.statx(
-        fd,
-        "",
-        linux.AT.EMPTY_PATH,
-        .{ .SIZE = true },
-        &statx_buf,
-    );
-    if (@as(isize, @bitCast(statx_result)) < 0) return null;
-
-    const file_size: usize = statx_buf.size;
-    if (file_size == 0) return false; // Empty file
-
-    // mmap the file
-    const file_data = posix.mmap(
-        null,
-        file_size,
-        .{ .READ = true },
-        .{ .TYPE = .PRIVATE },
-        fd,
-        0,
-    ) catch return null;
-    defer posix.munmap(file_data);
-
-    // Process the memory-mapped file
+) bool {
     var out = OutputBuffer{};
     var line_num: usize = 0;
     var match_count: usize = 0;

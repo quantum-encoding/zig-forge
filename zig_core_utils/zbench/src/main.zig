@@ -11,9 +11,8 @@ const std = @import("std");
 const Config = struct {
     warmup_count: u32 = 3,
     run_count: u32 = 10,
-    min_runs: u32 = 5,
-    max_runs: u32 = 100,
     shell: []const u8 = "/bin/sh",
+    shell_owned: bool = false, // true when `shell` is heap-duped (-S), false for the literal default
     show_output: bool = false,
     export_json: ?[]const u8 = null,
     export_markdown: ?[]const u8 = null,
@@ -30,6 +29,9 @@ const Config = struct {
         self.commands.deinit(allocator);
         if (self.export_json) |p| allocator.free(p);
         if (self.export_markdown) |p| allocator.free(p);
+        if (self.prepare_cmd) |p| allocator.free(p);
+        if (self.cleanup_cmd) |c| allocator.free(c);
+        if (self.shell_owned) allocator.free(self.shell);
     }
 };
 
@@ -369,12 +371,14 @@ fn runBenchmark(
     }
     clearProgress(w);
 
-    // Calculate statistics
-    const stats = calculateStats(times);
-
-    // Copy times for result
+    // Dupe BEFORE calculateStats: it sorts `times` in place, which would otherwise
+    // emit times_ns sorted instead of in run order and desync it from exit_codes[i]
+    // (which stays chronological).
     const times_copy = try allocator.dupe(u64, times);
     const exit_codes_copy = try allocator.dupe(u8, exit_codes);
+
+    // Calculate statistics (sorts `times` in place for the median)
+    const stats = calculateStats(times);
 
     return BenchmarkResult{
         .command = cmd.raw,
@@ -469,11 +473,6 @@ fn printComparison(w: *Writer, results: []const BenchmarkResult, unit: TimeUnit)
 fn exportJson(_: std.mem.Allocator, results: []const BenchmarkResult, path: []const u8) !void {
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    // Create output file - need to use proper path handling
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    @memcpy(path_buf[0..path.len], path);
-    path_buf[path.len] = 0;
-
     const file = try std.Io.Dir.cwd().createFile(io, path, .{});
     defer file.close(io);
 
@@ -486,7 +485,12 @@ fn exportJson(_: std.mem.Allocator, results: []const BenchmarkResult, path: []co
         if (i > 0) try writer.interface.writeAll(",\n");
 
         try writer.interface.print("    {{\n", .{});
-        try writer.interface.print("      \"command\": \"{s}\",\n", .{r.command});
+        // Escape the caller-controlled command so quotes/backslashes/control
+        // chars can't break out of the JSON string (JSON-IN-FMT). encodeJsonString
+        // emits the surrounding quotes plus RFC 8259-compliant escaping.
+        try writer.interface.writeAll("      \"command\": ");
+        try std.json.Stringify.encodeJsonString(r.command, .{}, &writer.interface);
+        try writer.interface.writeAll(",\n");
         try writer.interface.print("      \"mean\": {d:.6},\n", .{r.mean_ns / 1_000_000_000.0});
         try writer.interface.print("      \"stddev\": {d:.6},\n", .{r.stddev_ns / 1_000_000_000.0});
         try writer.interface.print("      \"median\": {d:.6},\n", .{r.median_ns / 1_000_000_000.0});
@@ -510,6 +514,9 @@ fn exportJson(_: std.mem.Allocator, results: []const BenchmarkResult, path: []co
 
 fn exportMarkdown(allocator: std.mem.Allocator, results: []const BenchmarkResult, path: []const u8) !void {
     _ = allocator;
+    // results[0] is read unconditionally below; when every benchmark errored the
+    // slice is empty and that indexing panics. Nothing to emit either way.
+    if (results.len == 0) return;
     const io = std.Io.Threaded.global_single_threaded.io();
 
     const file = try std.Io.Dir.cwd().createFile(io, path, .{});
@@ -580,6 +587,9 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
             i += 1;
             if (i >= args.len) return error.MissingArgument;
             config.run_count = try std.fmt.parseInt(u32, args[i], 10);
+            // A benchmark needs at least one run; `-r 0` would divide by zero
+            // in runBenchmark (mean over run_count, user_ns/system_ns average).
+            if (config.run_count == 0) return error.ZeroRuns;
         } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--name")) {
             i += 1;
             if (i >= args.len) return error.MissingArgument;
@@ -596,6 +606,7 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
             i += 1;
             if (i >= args.len) return error.MissingArgument;
             config.shell = try allocator.dupe(u8, args[i]);
+            config.shell_owned = true;
         } else if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--prepare")) {
             i += 1;
             if (i >= args.len) return error.MissingArgument;
@@ -713,11 +724,22 @@ pub fn main(init: std.process.Init) !void {
         results.deinit(allocator);
     }
 
+    // Track whether any benchmark failed to run or produced a non-zero exit,
+    // so we can mirror hyperfine's non-zero process exit on failure.
+    var any_failure = false;
+
     for (config.commands.items) |*cmd| {
         const result = runBenchmark(allocator, &config, cmd, &w) catch |err| {
             w.print("Error running benchmark: {}\n", .{err});
+            any_failure = true;
             continue;
         };
+        for (result.exit_codes) |code| {
+            if (code != 0) {
+                any_failure = true;
+                break;
+            }
+        }
         results.append(allocator, result) catch continue;
     }
 
@@ -751,6 +773,10 @@ pub fn main(init: std.process.Init) !void {
         };
         w.print("\nExported to: {s}\n", .{path});
     }
+
+    // Mirror hyperfine: a benchmark that failed to run, or that produced a
+    // non-zero command exit, makes the whole tool exit non-zero.
+    if (any_failure) std.process.exit(1);
 }
 
 // ============================================================================
@@ -765,6 +791,20 @@ test "calculate statistics" {
     try std.testing.expectEqual(@as(u64, 100), stats.min);
     try std.testing.expectEqual(@as(u64, 500), stats.max);
     try std.testing.expectEqual(@as(f64, 300), stats.median);
+}
+
+test "calculate statistics: population stddev and even-count median" {
+    // Textbook dataset {2,4,4,4,5,5,7,9}: mean = 5, population variance = 4,
+    // population stddev = 2 (Wikipedia, "Standard deviation" worked example).
+    // Even count => median = (4th+5th)/2 of the sorted values = (4+5)/2 = 4.5.
+    var times = [_]u64{ 2, 4, 4, 4, 5, 5, 7, 9 };
+    const stats = calculateStats(&times);
+
+    try std.testing.expectEqual(@as(f64, 5), stats.mean);
+    try std.testing.expectEqual(@as(f64, 2), stats.stddev);
+    try std.testing.expectEqual(@as(f64, 4.5), stats.median);
+    try std.testing.expectEqual(@as(u64, 2), stats.min);
+    try std.testing.expectEqual(@as(u64, 9), stats.max);
 }
 
 test "format time" {

@@ -23,12 +23,32 @@ const slip39 = @import("slip39.zig");
 const stego = @import("stego.zig");
 const ticket = @import("ticket.zig");
 
+/// Raised when the OS CSPRNG cannot deliver the requested entropy. Secret-
+/// sharing / key-generation callers MUST propagate this and abort — never
+/// proceed with a partially-filled (predictable) buffer.
+pub const RandomError = error{RandomFailure};
+
+/// Wall-clock seconds since the Unix epoch (this Zig std.time exposes only
+/// duration constants, so we read CLOCK_REALTIME via libc directly). Used
+/// for wire timestamps that downstream consumers already trust — never for
+/// an attacker-controlled security comparison.
+fn wallClockSeconds() i64 {
+    var ts: std.c.timespec = undefined;
+    if (std.c.clock_gettime(std.c.CLOCK.REALTIME, &ts) != 0) return 0;
+    return @intCast(ts.sec);
+}
+
 /// Cross-platform cryptographic random bytes. Goes direct to the OS
 /// CSPRNG — getrandom syscall on Linux (including Android, all API
 /// levels), arc4random on Darwin/BSD, /dev/urandom anywhere else.
-fn fillRandomBytes(buf: []u8) void {
+///
+/// Returns error.RandomFailure if the buffer could not be fully filled
+/// (e.g. seccomp-blocked getrandom, fd-exhausted /dev/urandom). Callers
+/// that use the output as secret material must NOT ignore this.
+fn fillRandomBytes(buf: []u8) RandomError!void {
     switch (builtin.os.tag) {
         .macos, .ios, .tvos, .watchos, .freebsd, .netbsd, .openbsd, .dragonfly => {
+            // arc4random_buf cannot fail on these platforms.
             std.c.arc4random_buf(buf.ptr, buf.len);
         },
         .linux => {
@@ -38,21 +58,20 @@ fn fillRandomBytes(buf: []u8) void {
             var filled: usize = 0;
             while (filled < buf.len) {
                 const rc = std.os.linux.getrandom(buf.ptr + filled, buf.len - filled, 0);
-                if (rc == 0) break; // unlikely; spin would burn CPU
-                if (@as(isize, @bitCast(rc)) < 0) break;
+                if (rc == 0) return error.RandomFailure; // no progress
+                if (@as(isize, @bitCast(rc)) < 0) return error.RandomFailure;
                 filled += rc;
             }
         },
         else => {
             const fd = std.c.open("/dev/urandom", .{ .ACCMODE = .RDONLY }, 0);
-            if (fd >= 0) {
-                defer _ = std.c.close(fd);
-                var filled: usize = 0;
-                while (filled < buf.len) {
-                    const n = std.c.read(fd, buf.ptr + filled, buf.len - filled);
-                    if (n <= 0) break;
-                    filled += @intCast(n);
-                }
+            if (fd < 0) return error.RandomFailure;
+            defer _ = std.c.close(fd);
+            var filled: usize = 0;
+            while (filled < buf.len) {
+                const n = std.c.read(fd, buf.ptr + filled, buf.len - filled);
+                if (n <= 0) return error.RandomFailure;
+                filled += @intCast(n);
             }
         },
     }
@@ -320,8 +339,10 @@ pub const SSS = struct {
             // Build polynomial: f(x) = secret_byte + a1*x + a2*x^2 + ... + a(k-1)*x^(k-1)
             coeffs[0] = secret_byte; // Constant term is the secret byte
 
-            // Generate random coefficients using cryptographic RNG
-            fillRandomBytes(coeffs[1..]);
+            // Generate random coefficients using cryptographic RNG.
+            // On RNG failure we MUST abort — proceeding would emit shares
+            // from uninitialized/predictable coefficients (weak or broken).
+            try fillRandomBytes(coeffs[1..]);
 
             // Evaluate polynomial at x = 1, 2, 3, ..., n to create shares
             for (shares) |*share| {
@@ -638,7 +659,8 @@ fn readFileAlloc(allocator: Allocator, path: []const u8, max_size: usize) ![]u8 
     const path_z = try allocator.dupeZ(u8, path);
     defer allocator.free(path_z);
 
-    const fd = std.c.open(path_z.ptr, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    // NOFOLLOW: refuse to read through a symlink planted at the input path.
+    const fd = std.c.open(path_z.ptr, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true }, @as(std.c.mode_t, 0));
     if (fd < 0) return error.FileNotFound;
     defer _ = std.c.close(fd);
 
@@ -661,7 +683,9 @@ fn writeFileAlloc(allocator: Allocator, path: []const u8, data: []const u8) !voi
     const path_z = try allocator.dupeZ(u8, path);
     defer allocator.free(path_z);
 
-    const fd = std.c.open(path_z.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
+    // NOFOLLOW: if the output path is a pre-planted symlink, fail rather
+    // than truncate/overwrite the link target.
+    const fd = std.c.open(path_z.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .NOFOLLOW = true }, @as(std.c.mode_t, 0o644));
     if (fd < 0) return error.CreateFileFailed;
     defer _ = std.c.close(fd);
 
@@ -826,7 +850,7 @@ fn doSplit(allocator: Allocator, config: *const Config) !void {
 
     // Generate random identifier for SLIP-39 (shared across all shares)
     var identifier_bytes: [2]u8 = undefined;
-    fillRandomBytes(&identifier_bytes);
+    try fillRandomBytes(&identifier_bytes);
     const slip39_identifier: u15 = @truncate((@as(u16, identifier_bytes[0]) << 7) | (identifier_bytes[1] >> 1));
 
     // Write each share to a file
@@ -1225,10 +1249,9 @@ fn doTicketCreate(allocator: Allocator, config: *Config) !void {
     var password_output: std.ArrayList(u8) = .empty;
     defer password_output.deinit(allocator);
 
-    // Get a timestamp-like value using random bytes (good enough for ticket ID purposes)
-    var timestamp_bytes: [8]u8 = undefined;
-    fillRandomBytes(&timestamp_bytes);
-    const now: i64 = @bitCast(timestamp_bytes);
+    // Wire timestamp for issued_at — a real wall clock, not random bytes,
+    // so expiry checks and the printed Issued field are meaningful.
+    const now: i64 = wallClockSeconds();
 
     for (0..count) |i| {
         const layer: u8 = @intCast(i);

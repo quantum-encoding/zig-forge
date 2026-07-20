@@ -31,6 +31,10 @@ pub fn parse(allocator: std.mem.Allocator, minimal_args: anytype) ParseError!Par
 
     var options = Options{};
     var paths = std.ArrayList([]const u8).initCapacity(allocator, 8) catch return ParseError.OutOfMemory;
+    // On any error return (incl. HelpRequested / VersionRequested from
+    // --help/--version, which main handles without deinit'ing ParseResult) the
+    // paths buffer would otherwise leak. Release it on every error path.
+    errdefer paths.deinit(allocator);
 
     while (args_iter.next()) |arg| {
         if (arg.len == 0) continue;

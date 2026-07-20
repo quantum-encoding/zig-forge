@@ -10,46 +10,82 @@ const std = @import("std");
 
 const VERSION = "1.0.0";
 
-// Signal definitions (Linux x86_64)
 const Signal = struct {
-    num: u6,
+    num: u8,
     name: []const u8,
     desc: []const u8,
 };
 
-const signals = [_]Signal{
-    .{ .num = 1, .name = "HUP", .desc = "Hangup" },
-    .{ .num = 2, .name = "INT", .desc = "Interrupt" },
-    .{ .num = 3, .name = "QUIT", .desc = "Quit" },
-    .{ .num = 4, .name = "ILL", .desc = "Illegal instruction" },
-    .{ .num = 5, .name = "TRAP", .desc = "Trace/breakpoint trap" },
-    .{ .num = 6, .name = "ABRT", .desc = "Aborted" },
-    .{ .num = 7, .name = "BUS", .desc = "Bus error" },
-    .{ .num = 8, .name = "FPE", .desc = "Floating point exception" },
-    .{ .num = 9, .name = "KILL", .desc = "Killed" },
-    .{ .num = 10, .name = "USR1", .desc = "User defined signal 1" },
-    .{ .num = 11, .name = "SEGV", .desc = "Segmentation fault" },
-    .{ .num = 12, .name = "USR2", .desc = "User defined signal 2" },
-    .{ .num = 13, .name = "PIPE", .desc = "Broken pipe" },
-    .{ .num = 14, .name = "ALRM", .desc = "Alarm clock" },
-    .{ .num = 15, .name = "TERM", .desc = "Terminated" },
-    .{ .num = 16, .name = "STKFLT", .desc = "Stack fault" },
-    .{ .num = 17, .name = "CHLD", .desc = "Child exited" },
-    .{ .num = 18, .name = "CONT", .desc = "Continued" },
-    .{ .num = 19, .name = "STOP", .desc = "Stopped (signal)" },
-    .{ .num = 20, .name = "TSTP", .desc = "Stopped" },
-    .{ .num = 21, .name = "TTIN", .desc = "Stopped (tty input)" },
-    .{ .num = 22, .name = "TTOU", .desc = "Stopped (tty output)" },
-    .{ .num = 23, .name = "URG", .desc = "Urgent I/O condition" },
-    .{ .num = 24, .name = "XCPU", .desc = "CPU time limit exceeded" },
-    .{ .num = 25, .name = "XFSZ", .desc = "File size limit exceeded" },
-    .{ .num = 26, .name = "VTALRM", .desc = "Virtual timer expired" },
-    .{ .num = 27, .name = "PROF", .desc = "Profiling timer expired" },
-    .{ .num = 28, .name = "WINCH", .desc = "Window changed" },
-    .{ .num = 29, .name = "IO", .desc = "I/O possible" },
-    .{ .num = 30, .name = "PWR", .desc = "Power failure" },
-    .{ .num = 31, .name = "SYS", .desc = "Bad system call" },
+// Highest numeric signal accepted as a specification. Covers POSIX 1-31 plus
+// the Linux real-time range (SIGRTMIN..SIGRTMAX, up to 64). Values in that band
+// with no named entry are still passed to kill(2), which validates them for the
+// running kernel (EINVAL for an out-of-range number on this platform).
+const MAX_SIGNAL: u8 = 64;
+
+// Signal table derived from the *target OS's* signal numbering (std.c.SIG),
+// NOT a hardcoded Linux table. The binary calls the native kill(2), so the
+// name->number mapping must match the platform the binary runs on: on macOS
+// SIGUSR1=30/SIGCONT=19/SIGSTOP=17, on Linux SIGUSR1=10/SIGCONT=18/SIGSTOP=19.
+// @typeInfo(std.c.SIG).@"enum".fields yields exactly the real signals (the
+// SIG.DFL/IGN/BLOCK/... helpers are pub-const decls, not enum fields).
+const signals = blk: {
+    @setEvalBranchQuota(10_000);
+    const fields = @typeInfo(std.c.SIG).@"enum".fields;
+    var arr: [fields.len]Signal = undefined;
+    for (fields, 0..) |f, idx| {
+        arr[idx] = .{
+            .num = @intCast(f.value),
+            .name = f.name,
+            .desc = signalDesc(f.name),
+        };
+    }
+    const frozen = arr;
+    break :blk frozen;
 };
+
+fn signalDesc(name: []const u8) []const u8 {
+    const table = .{
+        .{ "HUP", "Hangup" },
+        .{ "INT", "Interrupt" },
+        .{ "QUIT", "Quit" },
+        .{ "ILL", "Illegal instruction" },
+        .{ "TRAP", "Trace/breakpoint trap" },
+        .{ "ABRT", "Aborted" },
+        .{ "EMT", "Emulator trap" },
+        .{ "BUS", "Bus error" },
+        .{ "FPE", "Floating point exception" },
+        .{ "KILL", "Killed" },
+        .{ "USR1", "User defined signal 1" },
+        .{ "SEGV", "Segmentation fault" },
+        .{ "USR2", "User defined signal 2" },
+        .{ "PIPE", "Broken pipe" },
+        .{ "ALRM", "Alarm clock" },
+        .{ "TERM", "Terminated" },
+        .{ "STKFLT", "Stack fault" },
+        .{ "CHLD", "Child exited" },
+        .{ "CONT", "Continued" },
+        .{ "STOP", "Stopped (signal)" },
+        .{ "TSTP", "Stopped" },
+        .{ "TTIN", "Stopped (tty input)" },
+        .{ "TTOU", "Stopped (tty output)" },
+        .{ "URG", "Urgent I/O condition" },
+        .{ "XCPU", "CPU time limit exceeded" },
+        .{ "XFSZ", "File size limit exceeded" },
+        .{ "VTALRM", "Virtual timer expired" },
+        .{ "PROF", "Profiling timer expired" },
+        .{ "WINCH", "Window changed" },
+        .{ "IO", "I/O possible" },
+        .{ "INFO", "Information request" },
+        .{ "PWR", "Power failure" },
+        .{ "SYS", "Bad system call" },
+        .{ "XFZ", "File size limit exceeded" },
+        .{ "LOST", "Resource lost" },
+    };
+    inline for (table) |entry| {
+        if (std.mem.eql(u8, name, entry[0])) return entry[1];
+    }
+    return "Unknown signal";
+}
 
 // C functions
 extern "c" fn kill(pid: c_int, sig: c_int) c_int;
@@ -85,34 +121,45 @@ pub fn main(init: std.process.Init) !void {
     }
     const args = args_list.items;
 
-    var signal_num: u6 = 15; // Default: SIGTERM
+    var signal_num: u8 = @intCast(@intFromEnum(std.c.SIG.TERM)); // Default: SIGTERM
     var pids: std.ArrayListUnmanaged(i32) = .empty;
     defer pids.deinit(allocator);
 
     var list_mode = false;
     var list_signal: ?[]const u8 = null;
+    // Once a signal has been selected (via -s or a bare -SIGNAL), or once "--"
+    // has been seen, any further "-N" token is a target (a negative PID is a
+    // process group), NOT a new signal spec. GNU/POSIX kill semantics: the
+    // signal option is positional and precedes the operands.
+    var signal_set = false;
+    var opts_done = false;
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
 
-        if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+        if (!opts_done and std.mem.eql(u8, arg, "--")) {
+            // End of options: everything after is a PID / process group.
+            opts_done = true;
+        } else if (!opts_done and (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help"))) {
             printHelp();
             return;
-        } else if (std.mem.eql(u8, arg, "-V") or std.mem.eql(u8, arg, "--version")) {
+        } else if (!opts_done and (std.mem.eql(u8, arg, "-V") or std.mem.eql(u8, arg, "--version"))) {
             StdoutWriter.print("zkill {s}\n", .{VERSION});
             return;
-        } else if (std.mem.eql(u8, arg, "-l") or std.mem.eql(u8, arg, "--list")) {
+        } else if (!opts_done and (std.mem.eql(u8, arg, "-l") or std.mem.eql(u8, arg, "--list"))) {
             list_mode = true;
-            // Check if next arg is a signal number
-            if (i + 1 < args.len and args[i + 1][0] != '-') {
+            // Consume a following signal argument only when it is present, is
+            // non-empty, and does not itself look like an option. The `.len > 0`
+            // guard prevents an out-of-bounds index on an empty argument.
+            if (i + 1 < args.len and args[i + 1].len > 0 and args[i + 1][0] != '-') {
                 i += 1;
                 list_signal = args[i];
             }
-        } else if (std.mem.eql(u8, arg, "-L") or std.mem.eql(u8, arg, "--table")) {
+        } else if (!opts_done and (std.mem.eql(u8, arg, "-L") or std.mem.eql(u8, arg, "--table"))) {
             printSignalTable();
             return;
-        } else if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--signal")) {
+        } else if (!opts_done and (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--signal"))) {
             if (i + 1 >= args.len) {
                 StderrWriter.print("zkill: option requires an argument -- 's'\n", .{});
                 std.process.exit(1);
@@ -122,17 +169,19 @@ pub fn main(init: std.process.Init) !void {
                 StderrWriter.print("zkill: invalid signal specification: {s}\n", .{args[i]});
                 std.process.exit(1);
             };
-        } else if (arg.len > 1 and arg[0] == '-') {
-            // Could be -SIGNAL or -NUMBER
+            signal_set = true;
+        } else if (!opts_done and !signal_set and arg.len > 1 and arg[0] == '-') {
+            // Bare -SIGNAL or -NUMBER, only valid before a signal is chosen.
             const sig_spec = arg[1..];
             if (parseSignal(sig_spec)) |sig| {
                 signal_num = sig;
+                signal_set = true;
             } else {
                 StderrWriter.print("zkill: invalid signal specification: {s}\n", .{sig_spec});
                 std.process.exit(1);
             }
         } else {
-            // Parse as PID
+            // Parse as PID (may be negative for a process group).
             const pid = std.fmt.parseInt(i32, arg, 10) catch {
                 StderrWriter.print("zkill: invalid process id: {s}\n", .{arg});
                 std.process.exit(1);
@@ -144,12 +193,14 @@ pub fn main(init: std.process.Init) !void {
     if (list_mode) {
         if (list_signal) |sig_str| {
             // Convert signal number to name or vice versa
-            if (std.fmt.parseInt(u6, sig_str, 10)) |num| {
-                // Number to name
+            if (std.fmt.parseInt(u16, sig_str, 10)) |raw| {
+                // Number to name. A value > 128 is a wait(2) exit status
+                // (128 + signum); decode it the way `kill -l 137` -> KILL does.
+                const num: u16 = if (raw > 128) raw - 128 else raw;
                 if (getSignalName(num)) |name| {
                     StdoutWriter.print("{s}\n", .{name});
                 } else {
-                    StderrWriter.print("zkill: unknown signal: {d}\n", .{num});
+                    StderrWriter.print("zkill: unknown signal: {d}\n", .{raw});
                     std.process.exit(1);
                 }
             } else |_| {
@@ -195,10 +246,12 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-fn parseSignal(spec: []const u8) ?u6 {
-    // Try as number first
-    if (std.fmt.parseInt(u6, spec, 10)) |num| {
-        if (num <= 31) { // 0 is valid (null signal for checking process)
+fn parseSignal(spec: []const u8) ?u8 {
+    // Try as number first. 0 is valid (null signal, used to probe a process).
+    // Accept the full per-platform range including Linux real-time signals;
+    // kill(2) rejects a number the running kernel does not define.
+    if (std.fmt.parseInt(u8, spec, 10)) |num| {
+        if (num <= MAX_SIGNAL) {
             return num;
         }
         return null;
@@ -219,9 +272,9 @@ fn parseSignal(spec: []const u8) ?u6 {
     return null;
 }
 
-fn getSignalName(num: u6) ?[]const u8 {
+fn getSignalName(num: u16) ?[]const u8 {
     for (signals) |sig| {
-        if (sig.num == num) {
+        if (@as(u16, sig.num) == num) {
             return sig.name;
         }
     }
@@ -264,15 +317,17 @@ fn printHelp() void {
         \\  -V, --version        display version
         \\
         \\SIGNAL may be a signal name like 'HUP', 'SIGKILL', or a number.
-        \\PID may be positive (process) or negative (process group).
+        \\PID may be positive (process) or negative (process group); use '--'
+        \\before a negative PID so it is not read as a signal.
+        \\Signal numbers are platform-specific; run 'zkill -l' for this system's set.
         \\
         \\Common signals:
-        \\   1  SIGHUP      Hangup
-        \\   2  SIGINT      Interrupt (Ctrl+C)
-        \\   9  SIGKILL     Kill (cannot be caught)
-        \\  15  SIGTERM     Terminate (default)
-        \\  19  SIGSTOP     Stop (cannot be caught)
-        \\  18  SIGCONT     Continue
+        \\  SIGHUP   Hangup
+        \\  SIGINT   Interrupt (Ctrl+C)
+        \\  SIGKILL  Kill (cannot be caught)
+        \\  SIGTERM  Terminate (default)
+        \\  SIGSTOP  Stop (cannot be caught)
+        \\  SIGCONT  Continue
         \\
         \\Examples:
         \\  zkill 1234           Send SIGTERM to process 1234

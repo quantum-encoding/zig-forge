@@ -75,6 +75,7 @@ fn runTool(
     var env = std.process.Environ.Map.init(arena);
     try env.put("LC_ALL", case.lc_all);
     try env.put("TZ", "UTC");
+    if (case.columns) |cols| try env.put("COLUMNS", cols);
 
     var child = try std.process.spawn(io, .{
         .argv = argv.items,
@@ -115,6 +116,10 @@ const Case = struct {
     name: []const u8,
     args: []const []const u8,
     lc_all: []const u8 = "C",
+    /// When set, exported as $COLUMNS so both binaries pick the same line
+    /// width (the fixture stdout is a pipe, so the TIOCGWINSZ ioctl fails and
+    /// $COLUMNS is what GNU — and now zls — consult for -C/-x/-m widths).
+    columns: ?[]const u8 = null,
     /// Expected exit code shared by both binaries (cross-checked against
     /// what GNU actually returned so a stale expectation is caught).
     expect_exit: u8 = 0,
@@ -226,6 +231,24 @@ fn writeFixtures(arena: std.mem.Allocator, io: Io, dir: Io.Dir) !void {
         try dir.writeFile(io, .{ .sub_path = p, .data = "" });
     }
 
+    // varied/: VARIED-width names — the case the audit flagged, where GNU's
+    // per-column variable-width packing (and its tab-based padding) diverges
+    // from a naive single-uniform-column layout. The uniform cdiru/ fixtures
+    // above mask that bug; these expose it. Widths span 1..16 chars.
+    try dir.createDirPath(io, "varied");
+    for ([_][]const u8{
+        "varied/a",  "varied/aa",       "varied/aaa", "varied/aaaaaaaaaaaaaaaa",
+        "varied/bb", "varied/ccc",      "varied/dddddddd", "varied/e",
+        "varied/ff", "varied/g",        "varied/h",   "varied/iiiiiiiiiii",
+        "varied/j",  "varied/kkkkkkkkkkkkkkkkkkkk", "varied/ll", "varied/m",
+    }) |p| {
+        try dir.writeFile(io, .{ .sub_path = p, .data = "" });
+    }
+
+    // A file whose name begins with '-', listable only via the `--`
+    // end-of-options terminator (`ls -- -l`).
+    try dir.writeFile(io, .{ .sub_path = "-l", .data = "" });
+
     // loose file operand + symlink-to-dir operand
     try dir.writeFile(io, .{ .sub_path = "loose.txt", .data = "x" });
     try setMtime(io, dir, "loose.txt", t_old);
@@ -283,6 +306,26 @@ const parity_cases = [_]Case{
     .{ .name = "-C columns (uniform names, width 80)", .args = &.{ "-C", "cdiru" } },
     .{ .name = "-x across rows", .args = &.{ "-x", "cdiru" } },
     .{ .name = "-m comma separated", .args = &.{ "-m", "cdiru" } },
+
+    // Variable-width column packing (audit finding 1): GNU picks the largest
+    // column count that fits using per-column max widths and pads with tabs.
+    // These fixtures have varied-width names; a uniform-width layout diverges.
+    .{ .name = "-C varied widths, default 80", .args = &.{ "-C", "varied" } },
+    .{ .name = "-x varied widths, default 80", .args = &.{ "-x", "varied" } },
+    .{ .name = "-m varied widths, default 80", .args = &.{ "-m", "varied" } },
+    .{ .name = "-C varied widths, COLUMNS=20", .args = &.{ "-C", "varied" }, .columns = "20" },
+    .{ .name = "-C varied widths, COLUMNS=40", .args = &.{ "-C", "varied" }, .columns = "40" },
+    .{ .name = "-C varied widths, COLUMNS=60", .args = &.{ "-C", "varied" }, .columns = "60" },
+    .{ .name = "-C varied widths, COLUMNS=120", .args = &.{ "-C", "varied" }, .columns = "120" },
+    .{ .name = "-x varied widths, COLUMNS=40", .args = &.{ "-x", "varied" }, .columns = "40" },
+    .{ .name = "-x varied widths, COLUMNS=60", .args = &.{ "-x", "varied" }, .columns = "60" },
+    .{ .name = "-m varied widths, COLUMNS=30", .args = &.{ "-m", "varied" }, .columns = "30" },
+    .{ .name = "-C cdiru, COLUMNS=20 (was ignored, forced 80)", .args = &.{ "-C", "cdiru" }, .columns = "20" },
+
+    // `--` end-of-options terminator (audit finding 2): a file named "-l"
+    // is listable only through the POSIX `ls -- -l` idiom.
+    .{ .name = "-- terminator lists file named -l", .args = &.{ "--", "-l" } },
+    .{ .name = "-a -- terminator after flags", .args = &.{ "-a", "--", "-l" } },
 
     // Classification
     .{ .name = "-1F indicators", .args = &.{ "-1F", "kinds" } },
@@ -465,6 +508,40 @@ test "literal anchors: documented GNU ls behavior" {
         try std.testing.expectEqual(@as(u8, 0), r.exit_code);
         try std.testing.expect(std.mem.indexOf(u8, r.stdout, "11K") != null);
         try std.testing.expect(std.mem.indexOf(u8, r.stdout, "10K") == null);
+    }
+    // Column layout with tab padding (audit finding 1). These bytes were
+    // captured from GNU coreutils 9.10 `COLUMNS=40 ls -C` over the fixture
+    // {aaaaaa,bbbbbb,cc,ddddddddddd,ee,f} and transcribed literally — they are
+    // NOT produced by zls. GNU's variable-width packing yields 3 columns /
+    // 2 rows, and its indent() pads with a TAB (tabstop 8) where a run of
+    // spaces would cross a tab stop.  A uniform-column or space-only layout
+    // fails this exactly.
+    {
+        try tmp.dir.createDirPath(io, "cols");
+        for ([_][]const u8{ "cols/aaaaaa", "cols/bbbbbb", "cols/cc", "cols/ddddddddddd", "cols/ee", "cols/f" }) |p| {
+            try tmp.dir.writeFile(io, .{ .sub_path = p, .data = "" });
+        }
+        const r = try runTool(arena, io, zls, .{
+            .name = "-C tab-padding literal",
+            .args = &.{ "-C", "cols" },
+            .columns = "40",
+        }, tmp.dir);
+        try std.testing.expectEqual(@as(u8, 0), r.exit_code);
+        try std.testing.expectEqualStrings(
+            "aaaaaa\tcc\t     ee\nbbbbbb\tddddddddddd  f\n",
+            r.stdout,
+        );
+    }
+    // POSIX `ls -- -l` lists the file named "-l" (end-of-options terminator,
+    // audit finding 2). Bytes are self-evident from the operand.
+    {
+        try tmp.dir.writeFile(io, .{ .sub_path = "-l", .data = "" });
+        const r = try runTool(arena, io, zls, .{
+            .name = "-- terminator literal",
+            .args = &.{ "--", "-l" },
+        }, tmp.dir);
+        try std.testing.expectEqual(@as(u8, 0), r.exit_code);
+        try std.testing.expectEqualStrings("-l\n", r.stdout);
     }
     // POSIX ls: "If an operand names a nonexistent file... write a
     // diagnostic to standard error" — GNU exits 2 for command-line operands.

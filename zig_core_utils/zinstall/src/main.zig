@@ -8,15 +8,24 @@
 //!        zinstall -d [OPTION]... DIRECTORY...
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const VERSION = "1.0.0";
+
+// Use the platform-correct `struct stat` layout from std, rather than a
+// hand-rolled Linux/x86_64 layout that reads garbage bytes on macOS/BSD.
+// std.c.Stat switches on the target OS and exposes .mode/.size/.uid/.gid
+// plus .atime()/.mtime() helpers returning a timespec.
+const Stat = std.c.Stat;
 
 // C functions
 extern "c" fn write(fd: c_int, buf: [*]const u8, count: usize) isize;
 extern "c" fn open(path: [*:0]const u8, flags: c_int, mode: c_uint) c_int;
 extern "c" fn close(fd: c_int) c_int;
 extern "c" fn chmod(path: [*:0]const u8, mode: c_uint) c_int;
+extern "c" fn fchmod(fd: c_int, mode: c_uint) c_int;
 extern "c" fn chown(path: [*:0]const u8, owner: c_uint, group: c_uint) c_int;
+extern "c" fn fchown(fd: c_int, owner: c_uint, group: c_uint) c_int;
 extern "c" fn mkdir(path: [*:0]const u8, mode: c_uint) c_int;
 extern "c" fn unlink(path: [*:0]const u8) c_int;
 extern "c" fn rename(old: [*:0]const u8, new: [*:0]const u8) c_int;
@@ -26,6 +35,7 @@ extern "c" fn stat(path: [*:0]const u8, buf: *Stat) c_int;
 extern "c" fn getuid() c_uint;
 extern "c" fn getgid() c_uint;
 extern "c" fn utimensat(dirfd: c_int, pathname: [*:0]const u8, times: *const TimeSpec, flags: c_int) c_int;
+extern "c" fn futimens(fd: c_int, times: *const TimeSpec) c_int;
 
 const TimeSpec = extern struct {
     tv_sec: i64,
@@ -36,11 +46,16 @@ const AT_FDCWD: c_int = -100;
 
 const c_read = @extern(*const fn (c_int, [*]u8, usize) callconv(.c) isize, .{ .name = "read" });
 
+// open(2) flags are ABI values that differ between Linux and Darwin/BSD.
+// The previous hardcoded octal values were the Linux numbers and silently
+// meant something else on macOS (e.g. Linux O_TRUNC 0o1000 == Darwin O_CREAT).
+const is_darwin = builtin.target.os.tag.isDarwin();
 const O_RDONLY: c_int = 0;
 const O_WRONLY: c_int = 1;
-const O_CREAT: c_int = 0o100;
-const O_TRUNC: c_int = 0o1000;
-const O_EXCL: c_int = 0o200;
+const O_CREAT: c_int = if (is_darwin) 0x0200 else 0o100;
+const O_TRUNC: c_int = if (is_darwin) 0x0400 else 0o1000;
+const O_EXCL: c_int = if (is_darwin) 0x0800 else 0o200;
+const O_NOFOLLOW: c_int = if (is_darwin) 0x0100 else 0o400000;
 
 const Passwd = extern struct {
     pw_name: ?[*:0]const u8,
@@ -57,27 +72,6 @@ const Group = extern struct {
     gr_passwd: ?[*:0]const u8,
     gr_gid: c_uint,
     gr_mem: ?[*]?[*:0]const u8,
-};
-
-const Stat = extern struct {
-    st_dev: u64,
-    st_ino: u64,
-    st_nlink: u64,
-    st_mode: u32,
-    st_uid: u32,
-    st_gid: u32,
-    __pad0: u32,
-    st_rdev: u64,
-    st_size: i64,
-    st_blksize: i64,
-    st_blocks: i64,
-    st_atime: i64,
-    st_atime_nsec: i64,
-    st_mtime: i64,
-    st_mtime_nsec: i64,
-    st_ctime: i64,
-    st_ctime_nsec: i64,
-    __unused: [3]i64,
 };
 
 fn writeStderr(comptime fmt: []const u8, args: anytype) void {
@@ -212,8 +206,12 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.startsWith(u8, arg, "--target-directory=")) {
             target_dir = arg[19..];
         } else if (arg.len > 1 and arg[0] == '-' and arg[1] != '-') {
-            // Combined short options
-            for (arg[1..]) |ch| {
+            // Combined short options. Value-taking options (m/o/g/t) consume the
+            // rest of the cluster as their argument (GNU: `-m755`), or the next
+            // argv element if the cluster ends right after the letter (`-m 755`).
+            var j: usize = 1;
+            cluster: while (j < arg.len) : (j += 1) {
+                const ch = arg[j];
                 switch (ch) {
                     'd' => create_dirs = true,
                     'D' => create_leading = true,
@@ -223,6 +221,41 @@ pub fn main(init: std.process.Init) !void {
                     'v' => verbose = true,
                     'p' => preserve_timestamps = true,
                     'T' => no_target_dir = true,
+                    'm', 'o', 'g', 't' => {
+                        // The argument is the rest of the cluster, or the next argv.
+                        var val: []const u8 = arg[j + 1 ..];
+                        if (val.len == 0) {
+                            i += 1;
+                            if (i >= args.len) {
+                                writeStderr("zinstall: option requires an argument -- '{c}'\n", .{ch});
+                                std.process.exit(1);
+                            }
+                            val = args[i];
+                        }
+                        switch (ch) {
+                            'm' => mode = parseMode(val) orelse {
+                                writeStderr("zinstall: invalid mode: '{s}'\n", .{val});
+                                std.process.exit(1);
+                            },
+                            'o' => {
+                                owner = resolveUser(val);
+                                if (owner == null) {
+                                    writeStderr("zinstall: invalid user: '{s}'\n", .{val});
+                                    std.process.exit(1);
+                                }
+                            },
+                            'g' => {
+                                group = resolveGroup(val);
+                                if (group == null) {
+                                    writeStderr("zinstall: invalid group: '{s}'\n", .{val});
+                                    std.process.exit(1);
+                                }
+                            },
+                            't' => target_dir = val,
+                            else => unreachable,
+                        }
+                        break :cluster;
+                    },
                     else => {
                         writeStderr("zinstall: invalid option -- '{c}'\n", .{ch});
                         std.process.exit(1);
@@ -257,7 +290,7 @@ pub fn main(init: std.process.Init) !void {
             std.process.exit(1);
         };
 
-        if (stat(last_ptr, &st) == 0 and (st.st_mode & 0o170000) == 0o040000) {
+        if (stat(last_ptr, &st) == 0 and (st.mode & 0o170000) == 0o040000) {
             // Last arg is existing directory - use as target
             target_dir = last;
             _ = files.pop();
@@ -307,7 +340,7 @@ pub fn main(init: std.process.Init) !void {
     if (toNullTerminated(dest, &dest_z)) |dest_ptr| {
         var st: Stat = undefined;
         if (stat(dest_ptr, &st) == 0) {
-            dest_is_dir = (st.st_mode & 0o170000) == 0o040000;
+            dest_is_dir = (st.mode & 0o170000) == 0o040000;
         }
     }
 
@@ -355,20 +388,16 @@ pub fn main(init: std.process.Init) !void {
             }
         }
 
-        // Copy file
-        if (!copyFile(src, final_dest, mode, strip_binary, compare, preserve_timestamps)) {
+        // Copy file (mode + ownership + timestamps applied on the open fd)
+        if (!copyFile(src, final_dest, mode, owner, group, compare, preserve_timestamps)) {
             std.process.exit(1);
         }
 
-        // Set ownership
-        if (owner != null or group != null) {
-            var fd_z: [4097]u8 = undefined;
-            if (toNullTerminated(final_dest, &fd_z)) |ptr| {
-                const uid = owner orelse @as(c_uint, @bitCast(@as(i32, -1)));
-                const gid = group orelse @as(c_uint, @bitCast(@as(i32, -1)));
-                if (chown(ptr, uid, gid) != 0) {
-                    writeStderr("zinstall: cannot change ownership of '{s}'\n", .{final_dest});
-                }
+        // Strip the installed binary if requested (-s). GNU install execs
+        // strip(1); we do the same via argv-mode Child (no shell).
+        if (strip_binary) {
+            if (!stripFile(init.io, final_dest)) {
+                std.process.exit(1);
             }
         }
 
@@ -378,31 +407,42 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-fn parseMode(mode_str: []const u8) ?c_uint {
+pub fn parseMode(mode_str: []const u8) ?c_uint {
     // Try octal first
     if (std.fmt.parseInt(c_uint, mode_str, 8)) |m| {
         return m;
     } else |_| {}
 
-    // Symbolic mode (simplified)
+    // Symbolic mode. GNU install compiles the symbolic string against a base
+    // mode of 0 with a umask of 0 (the -m mode is absolute, not umask-masked),
+    // so we start from result=0 and never substitute a 0o755 fallback.
+    //
+    // The `who` mask must carry the special bits alongside the ordinary
+    // permission triads, otherwise `perm &= who` clears setuid/setgid/sticky:
+    //   u -> user perms 0o700 + setuid  0o4000
+    //   g -> group perms 0o070 + setgid 0o2000
+    //   o -> other perms 0o007 + sticky 0o1000
+    //   a -> everything 0o7777
+    // An unspecified who defaults to `a` (install umask is 0).
     var result: c_uint = 0;
-    var who: c_uint = 0o777; // default all
     var idx: usize = 0;
 
     while (idx < mode_str.len) {
         // Parse who
-        who = 0;
+        var who: c_uint = 0;
+        var who_given = false;
         while (idx < mode_str.len) {
             switch (mode_str[idx]) {
-                'u' => who |= 0o700,
-                'g' => who |= 0o070,
-                'o' => who |= 0o007,
-                'a' => who = 0o777,
+                'u' => who |= 0o4700,
+                'g' => who |= 0o2070,
+                'o' => who |= 0o1007,
+                'a' => who |= 0o7777,
                 else => break,
             }
+            who_given = true;
             idx += 1;
         }
-        if (who == 0) who = 0o777;
+        if (!who_given) who = 0o7777;
 
         if (idx >= mode_str.len) break;
 
@@ -419,8 +459,8 @@ fn parseMode(mode_str: []const u8) ?c_uint {
                 'w' => perm |= 0o222,
                 'x' => perm |= 0o111,
                 'X' => perm |= 0o111, // simplified
-                's' => perm |= 0o6000,
-                't' => perm |= 0o1000,
+                's' => perm |= 0o6000, // setuid + setgid; masked by `who`
+                't' => perm |= 0o1000, // sticky
                 else => {},
             }
             idx += 1;
@@ -441,7 +481,38 @@ fn parseMode(mode_str: []const u8) ?c_uint {
         if (idx < mode_str.len and mode_str[idx] == ',') idx += 1;
     }
 
-    return if (result != 0) result else 0o755;
+    return result;
+}
+
+// Strip the installed binary with strip(1). Uses argv-mode spawn (never a
+// shell) so a hostile file name cannot inject a command.
+fn stripFile(io: std.Io, dest: []const u8) bool {
+    var child = std.process.spawn(io, .{
+        .argv = &.{ "strip", dest },
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .inherit,
+    }) catch {
+        writeStderr("zinstall: strip: failed to run strip on '{s}'\n", .{dest});
+        return false;
+    };
+    const term = child.wait(io) catch {
+        writeStderr("zinstall: strip: wait failed on '{s}'\n", .{dest});
+        return false;
+    };
+    switch (term) {
+        .exited => |code| {
+            if (code != 0) {
+                writeStderr("zinstall: strip failed on '{s}'\n", .{dest});
+                return false;
+            }
+        },
+        else => {
+            writeStderr("zinstall: strip terminated abnormally on '{s}'\n", .{dest});
+            return false;
+        },
+    }
+    return true;
 }
 
 fn resolveUser(name: []const u8) ?c_uint {
@@ -537,7 +608,21 @@ fn getBasename(path: []const u8) []const u8 {
     return path[start..end];
 }
 
-fn copyFile(src: []const u8, dest: []const u8, mode: c_uint, strip_binary: bool, compare: bool, preserve_timestamps: bool) bool {
+// Read into `buf` until it is full or EOF/error. Returns the number of bytes
+// read (< buf.len only at EOF), or -1 on error. This normalizes away the fact
+// that a single read() may legally return fewer bytes than requested.
+fn readFull(fd: c_int, buf: []u8) isize {
+    var total: usize = 0;
+    while (total < buf.len) {
+        const n = c_read(fd, buf[total..].ptr, buf.len - total);
+        if (n < 0) return -1;
+        if (n == 0) break;
+        total += @intCast(n);
+    }
+    return @intCast(total);
+}
+
+fn copyFile(src: []const u8, dest: []const u8, mode: c_uint, owner: ?c_uint, group: ?c_uint, compare: bool, preserve_timestamps: bool) bool {
     var src_z: [4097]u8 = undefined;
     var dest_z: [4097]u8 = undefined;
 
@@ -557,7 +642,7 @@ fn copyFile(src: []const u8, dest: []const u8, mode: c_uint, strip_binary: bool,
         var dest_st: Stat = undefined;
         if (stat(src_ptr, &src_st) == 0 and stat(dest_ptr, &dest_st) == 0) {
             // If files exist and have same size, compare contents
-            if (src_st.st_size == dest_st.st_size) {
+            if (src_st.size == dest_st.size) {
                 const src_fd = open(src_ptr, O_RDONLY, 0);
                 if (src_fd < 0) {
                     writeStderr("zinstall: cannot open '{s}'\n", .{src});
@@ -573,23 +658,26 @@ fn copyFile(src: []const u8, dest: []const u8, mode: c_uint, strip_binary: bool,
                 }
                 defer _ = close(dest_fd);
 
+                // read() may legally return short and at differing offsets for
+                // the two fds, so we must NOT assume equal-length reads mean
+                // difference. Fill a fixed compare window from each fd, then
+                // compare the windows.
                 var src_buf: [65536]u8 = undefined;
                 var dest_buf: [65536]u8 = undefined;
                 var identical = true;
 
-                while (true) {
-                    const src_n = c_read(src_fd, &src_buf, src_buf.len);
-                    const dest_n = c_read(dest_fd, &dest_buf, dest_buf.len);
-
-                    if (src_n != dest_n or src_n <= 0) {
-                        if (src_n == dest_n and src_n == 0) {
-                            // Both at EOF, files are identical
-                            return true;
-                        }
+                outer: while (true) {
+                    const src_n = readFull(src_fd, &src_buf);
+                    const dest_n = readFull(dest_fd, &dest_buf);
+                    if (src_n < 0 or dest_n < 0) {
                         identical = false;
                         break;
                     }
-
+                    if (src_n != dest_n) {
+                        identical = false;
+                        break;
+                    }
+                    if (src_n == 0) break :outer; // both at EOF, identical so far
                     if (!std.mem.eql(u8, src_buf[0..@intCast(src_n)], dest_buf[0..@intCast(dest_n)])) {
                         identical = false;
                         break;
@@ -623,8 +711,11 @@ fn copyFile(src: []const u8, dest: []const u8, mode: c_uint, strip_binary: bool,
         }
     }
 
-    // Open destination
-    const dest_fd = open(dest_ptr, O_WRONLY | O_CREAT | O_TRUNC, mode);
+    // Open destination. O_NOFOLLOW refuses to follow a symlink planted at the
+    // destination path (a root-install TOCTOU: an attacker who wins the race
+    // after unlink() could otherwise get O_CREAT|O_TRUNC to truncate an
+    // arbitrary file the symlink targets).
+    const dest_fd = open(dest_ptr, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, mode);
     if (dest_fd < 0) {
         writeStderr("zinstall: cannot create '{s}'\n", .{dest});
         return false;
@@ -648,24 +739,29 @@ fn copyFile(src: []const u8, dest: []const u8, mode: c_uint, strip_binary: bool,
         }
     }
 
-    // Set final mode
-    _ = chmod(dest_ptr, mode);
+    // Apply mode/ownership on the open descriptor (fchmod/fchown) rather than
+    // by path, so we cannot be redirected onto another file between open and
+    // the metadata change.
+    _ = fchmod(dest_fd, mode);
+
+    if (owner != null or group != null) {
+        const uid = owner orelse @as(c_uint, @bitCast(@as(i32, -1)));
+        const gid = group orelse @as(c_uint, @bitCast(@as(i32, -1)));
+        if (fchown(dest_fd, uid, gid) != 0) {
+            writeStderr("zinstall: cannot change ownership of '{s}'\n", .{dest});
+        }
+    }
 
     // Preserve timestamps if requested
     if (preserve_timestamps) {
+        const at = src_stat.atime();
+        const mt = src_stat.mtime();
         var times: [2]TimeSpec = undefined;
-        times[0].tv_sec = src_stat.st_atime;
-        times[0].tv_nsec = src_stat.st_atime_nsec;
-        times[1].tv_sec = src_stat.st_mtime;
-        times[1].tv_nsec = src_stat.st_mtime_nsec;
-        _ = utimensat(AT_FDCWD, dest_ptr, &times[0], 0);
-    }
-
-    // Strip binary if requested
-    if (strip_binary) {
-        // In production, this would fork() and exec("strip", dest_ptr)
-        // For now, the feature is recognized but not implemented
-        // This would require integration with std.process.Child or raw syscalls
+        times[0].tv_sec = at.sec;
+        times[0].tv_nsec = at.nsec;
+        times[1].tv_sec = mt.sec;
+        times[1].tv_nsec = mt.nsec;
+        _ = futimens(dest_fd, &times[0]);
     }
 
     return true;

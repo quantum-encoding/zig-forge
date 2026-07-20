@@ -2018,44 +2018,38 @@ fn appendPdfString(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocato
 fn deflateCompress(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
     if (data.len == 0) return error.EmptyInput;
 
-    // Allocate output buffer — compressed size can't exceed input + zlib overhead
-    const max_out = data.len + 256;
-    var out_slice = try allocator.alloc(u8, max_out);
-    errdefer allocator.free(out_slice);
-
-    var fixed_writer: std.Io.Writer = .fixed(out_slice);
+    // Compress into a GROWABLE sink, never a fixed buffer. Deflate can expand
+    // near-incompressible data (already-compressed JPEG bytes, noisy RGB pixels)
+    // slightly past the input length via stored blocks. A `.fixed()` sink that
+    // fills mid-stream is fatal: std's flate compressor swallows the resulting
+    // NoSpaceLeft and its next drain memcpy's past the buffer end → segfault
+    // (not a catchable error). An Allocating sink can't overflow, so the
+    // `written_len >= data.len` check below cleanly routes incompressible data
+    // to the caller's uncompressed-storage fallback instead of crashing.
+    // Preallocate an output buffer: Compress.init asserts the sink buffer is
+    // >8 bytes. The Allocating sink grows past this as needed.
+    var aw: std.Io.Writer.Allocating = try .initCapacity(allocator, @max(4096, data.len / 2));
+    errdefer aw.deinit();
 
     var window_buf: [std.compress.flate.max_window_len]u8 = undefined;
 
+    // On every error path, cleanup is handled by `errdefer aw.deinit()` above —
+    // do NOT also free explicitly here, or the errdefer double-frees (which
+    // crashed the share-certificate image test on a tiny incompressible PNG).
     var compressor = std.compress.flate.Compress.init(
-        &fixed_writer,
+        &aw.writer,
         &window_buf,
         .zlib,
         .level_6,
-    ) catch {
-        allocator.free(out_slice);
-        return error.CompressFailed;
-    };
+    ) catch return error.CompressFailed;
 
-    compressor.writer.writeAll(data) catch {
-        allocator.free(out_slice);
-        return error.CompressFailed;
-    };
-    compressor.finish() catch {
-        allocator.free(out_slice);
-        return error.CompressFailed;
-    };
+    compressor.writer.writeAll(data) catch return error.CompressFailed;
+    compressor.finish() catch return error.CompressFailed;
 
-    const written_len = fixed_writer.end;
-    if (written_len == 0 or written_len >= data.len) {
-        allocator.free(out_slice);
-        return error.NoSizeReduction;
-    }
+    const written_len = aw.written().len;
+    if (written_len == 0 or written_len >= data.len) return error.NoSizeReduction;
 
-    // Shrink to actual compressed size
-    const result = try allocator.dupe(u8, out_slice[0..written_len]);
-    allocator.free(out_slice);
-    return result;
+    return aw.toOwnedSlice();
 }
 
 test "create simple PDF" {

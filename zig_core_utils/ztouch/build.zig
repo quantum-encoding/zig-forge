@@ -37,4 +37,20 @@ pub fn build(b: *std.Build) void {
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
+
+    // Externally-anchored parity tests: diff ztouch against the real GNU
+    // `touch` binary. Needs the built ztouch on disk, so point the test at
+    // its install path and make sure it is installed first.
+    const parity_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/gnu_parity_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    const run_parity_tests = b.addRunArtifact(parity_tests);
+    run_parity_tests.setEnvironmentVariable("ZTOUCH_BIN", b.getInstallPath(.bin, "ztouch"));
+    run_parity_tests.step.dependOn(b.getInstallStep());
+    test_step.dependOn(&run_parity_tests.step);
 }

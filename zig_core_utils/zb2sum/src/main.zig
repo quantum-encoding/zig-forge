@@ -50,15 +50,22 @@ const Config = struct {
 
 fn hashFile(allocator: std.mem.Allocator, path: []const u8, is_stdin: bool, config: *const Config) ![]u8 {
     const io = Io.Threaded.global_single_threaded.io();
-    var hash = Blake2b512.init(.{});
+    // BLAKE2b parameterizes the output length in its IV/param block: BLAKE2b-256
+    // is a genuinely different hash from a truncated BLAKE2b-512. expected_out_bits
+    // makes the state match GNU b2sum for every length; final() emits the full
+    // 64-byte state and we take the first digest_len bytes (the real BLAKE2b-N digest).
+    var hash = Blake2b512.init(.{ .expected_out_bits = config.digest_bits });
     var buffer: [BUFFER_SIZE]u8 = undefined;
 
     if (is_stdin) {
         const stdin = Io.File.stdin();
         while (true) {
-            const bytes_read = stdin.readStreaming(io, &.{&buffer}) catch |err| {
-                std.debug.print("zb2sum: stdin: {s}\n", .{@errorName(err)});
-                return error.ReadError;
+            const bytes_read = stdin.readStreaming(io, &.{&buffer}) catch |err| switch (err) {
+                error.EndOfStream => break,
+                else => {
+                    std.debug.print("zb2sum: stdin: {s}\n", .{@errorName(err)});
+                    return error.ReadError;
+                },
             };
             if (bytes_read == 0) break;
             hash.update(buffer[0..bytes_read]);
@@ -118,6 +125,72 @@ fn printHash(allocator: std.mem.Allocator, path: []const u8, hex: []const u8, co
     writer.interface.flush() catch {};
 }
 
+const ParsedLine = struct {
+    hash: []const u8, // hex digest as written in the checksum file
+    filename: []const u8,
+    digest_bits: u16,
+};
+
+fn isHexDigit(c: u8) bool {
+    return (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
+}
+
+fn hexEqlIgnoreCase(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |ca, cb| {
+        if (std.ascii.toLower(ca) != std.ascii.toLower(cb)) return false;
+    }
+    return true;
+}
+
+/// Parse one checksum line into (hash, filename, digest_bits), inferring the
+/// digest length from the hash's hex length so any BLAKE2b-N line verifies.
+/// Handles both the standard `HASH  FILE` / `HASH *FILE` form and GNU's
+/// `--tag` BSD form `BLAKE2b[-N] (FILE) = HASH`. Returns null for lines that
+/// are not a properly formatted checksum line.
+fn parseCheckLine(raw: []const u8) ?ParsedLine {
+    // Strip a trailing CR so Windows-authored (CRLF) files verify.
+    var line = raw;
+    if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
+    if (line.len == 0) return null;
+
+    // BSD --tag form: "BLAKE2b (FILE) = HASH" or "BLAKE2b-256 (FILE) = HASH"
+    if (std.mem.startsWith(u8, line, "BLAKE2b")) {
+        const open = std.mem.indexOf(u8, line, " (") orelse return null;
+        // Everything between " (" and ") = " is the filename.
+        const sep = std.mem.indexOf(u8, line, ") = ") orelse return null;
+        if (sep <= open + 2) return null;
+        const filename = line[open + 2 .. sep];
+        const hash = line[sep + 4 ..];
+        if (filename.len == 0 or hash.len == 0) return null;
+        for (hash) |c| if (!isHexDigit(c)) return null;
+        const bits = hexBitsFromLen(hash.len) orelse return null;
+        return .{ .hash = hash, .filename = filename, .digest_bits = bits };
+    }
+
+    // Standard form: leading run of hex, then a 2-char separator, then filename.
+    var hlen: usize = 0;
+    while (hlen < line.len and isHexDigit(line[hlen])) : (hlen += 1) {}
+    if (hlen == 0) return null;
+    const bits = hexBitsFromLen(hlen) orelse return null;
+    // GNU emits "  " (text) or " *" (binary). Require a separator + a filename.
+    if (line.len < hlen + 2) return null;
+    if (line[hlen] != ' ') return null;
+    if (line[hlen + 1] != ' ' and line[hlen + 1] != '*') return null;
+    const filename = line[hlen + 2 ..];
+    if (filename.len == 0) return null;
+    return .{ .hash = line[0..hlen], .filename = filename, .digest_bits = bits };
+}
+
+/// Map a hex-string length to BLAKE2b digest bits, rejecting anything that is
+/// not a valid BLAKE2b length (8..512 bits, multiple of 8).
+fn hexBitsFromLen(hex_len: usize) ?u16 {
+    if (hex_len == 0 or hex_len % 2 != 0) return null;
+    const bytes = hex_len / 2;
+    if (bytes < 1 or bytes > 64) return null;
+    return @intCast(bytes * 8);
+}
+
 fn checkFile(allocator: std.mem.Allocator, checksum_file: []const u8, config: *const Config) !bool {
     const io_ctx = Io.Threaded.global_single_threaded.io();
 
@@ -128,73 +201,85 @@ fn checkFile(allocator: std.mem.Allocator, checksum_file: []const u8, config: *c
     defer file.close(io_ctx);
 
     var file_buffer: [8192]u8 = undefined;
-    var line_buffer: [1024]u8 = undefined;
-    var line_len: usize = 0;
+    // Dynamically-grown line buffer so long paths are never silently truncated.
+    var line_buffer: std.ArrayListUnmanaged(u8) = .empty;
+    defer line_buffer.deinit(allocator);
     var all_ok = true;
     var failed: usize = 0;
+    var valid_lines: usize = 0;
 
     const stdout_file = Io.File.stdout();
     var stdout_buf: [384]u8 = undefined;
     var stdout_writer = stdout_file.writer(io_ctx, &stdout_buf);
 
-    const hex_len = config.hexLength();
+    const processLine = struct {
+        fn run(
+            alloc: std.mem.Allocator,
+            cfg: *const Config,
+            writer: *@TypeOf(stdout_writer),
+            raw: []const u8,
+            valid: *usize,
+            failed_ptr: *usize,
+            ok_ptr: *bool,
+        ) void {
+            const parsed = parseCheckLine(raw) orelse return;
+            valid.* += 1;
 
-    outer: while (true) {
-        const bytes_read = file.readStreaming(io_ctx, &.{&file_buffer}) catch break;
+            var line_cfg = cfg.*;
+            line_cfg.digest_bits = parsed.digest_bits;
+
+            const computed = hashFile(alloc, parsed.filename, false, &line_cfg) catch {
+                if (!cfg.status_only) {
+                    writer.interface.print("{s}: FAILED open or read\n", .{parsed.filename}) catch {};
+                    writer.interface.flush() catch {};
+                }
+                failed_ptr.* += 1;
+                ok_ptr.* = false;
+                return;
+            };
+            defer alloc.free(computed);
+
+            if (hexEqlIgnoreCase(computed, parsed.hash)) {
+                if (!cfg.quiet and !cfg.status_only) {
+                    writer.interface.print("{s}: OK\n", .{parsed.filename}) catch {};
+                    writer.interface.flush() catch {};
+                }
+            } else {
+                if (!cfg.status_only) {
+                    writer.interface.print("{s}: FAILED\n", .{parsed.filename}) catch {};
+                    writer.interface.flush() catch {};
+                }
+                failed_ptr.* += 1;
+                ok_ptr.* = false;
+            }
+        }
+    }.run;
+
+    while (true) {
+        const bytes_read = file.readStreaming(io_ctx, &.{&file_buffer}) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => break,
+        };
         if (bytes_read == 0) break;
 
         for (file_buffer[0..bytes_read]) |byte| {
             if (byte == '\n') {
-                const line = line_buffer[0..line_len];
-                line_len = 0;
-
-                if (line.len < hex_len + 2) continue;
-
-                const hash_str = line[0..hex_len];
-
-                var filename_start: usize = hex_len;
-                if (line[hex_len] == ' ' and line.len > hex_len + 1) {
-                    if (line[hex_len + 1] == ' ' or line[hex_len + 1] == '*') {
-                        filename_start = hex_len + 2;
-                    }
-                }
-
-                const filename = line[filename_start..];
-                if (filename.len == 0) continue;
-
-                const computed = hashFile(allocator, filename, false, config) catch {
-                    if (!config.status_only) {
-                        stdout_writer.interface.print("{s}: FAILED open or read\n", .{filename}) catch {};
-                        stdout_writer.interface.flush() catch {};
-                    }
-                    failed += 1;
-                    all_ok = false;
-                    continue;
-                };
-                defer allocator.free(computed);
-
-                if (std.mem.eql(u8, computed, hash_str)) {
-                    if (!config.quiet and !config.status_only) {
-                        stdout_writer.interface.print("{s}: OK\n", .{filename}) catch {};
-                        stdout_writer.interface.flush() catch {};
-                    }
-                } else {
-                    if (!config.status_only) {
-                        stdout_writer.interface.print("{s}: FAILED\n", .{filename}) catch {};
-                        stdout_writer.interface.flush() catch {};
-                    }
-                    failed += 1;
-                    all_ok = false;
-                }
+                processLine(allocator, config, &stdout_writer, line_buffer.items, &valid_lines, &failed, &all_ok);
+                line_buffer.clearRetainingCapacity();
             } else {
-                if (line_len < line_buffer.len) {
-                    line_buffer[line_len] = byte;
-                    line_len += 1;
-                }
+                try line_buffer.append(allocator, byte);
             }
         }
+    }
 
-        if (bytes_read < file_buffer.len) break :outer;
+    // Process a final line that lacked a trailing newline (GNU processes it).
+    if (line_buffer.items.len > 0) {
+        processLine(allocator, config, &stdout_writer, line_buffer.items, &valid_lines, &failed, &all_ok);
+    }
+
+    if (valid_lines == 0) {
+        std.debug.print("zb2sum: {s}: no properly formatted checksum lines found\n", .{checksum_file});
+        return error.NoValidLines;
     }
 
     if (!config.status_only and failed > 0) {
@@ -205,12 +290,16 @@ fn checkFile(allocator: std.mem.Allocator, checksum_file: []const u8, config: *c
 }
 
 fn parseNumber(s: []const u8) ?u16 {
-    var val: u16 = 0;
+    if (s.len == 0) return null;
+    // Accumulate in u32 with an overflow guard so oversized args (e.g. `-l 99999`)
+    // return null -> "invalid length" instead of panicking on u16 overflow.
+    var val: u32 = 0;
     for (s) |ch| {
         if (ch < '0' or ch > '9') return null;
-        val = val * 10 + @as(u16, ch - '0');
+        val = val * 10 + @as(u32, ch - '0');
+        if (val > 0xFFFF) return null;
     }
-    return val;
+    return @intCast(val);
 }
 
 fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {

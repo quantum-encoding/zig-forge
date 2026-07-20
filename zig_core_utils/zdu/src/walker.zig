@@ -11,6 +11,9 @@ const posix = std.posix;
 const main = @import("main.zig");
 const Options = main.Options;
 const DirStat = main.DirStat;
+const stat_mod = @import("stat.zig");
+const StatInfo = stat_mod.StatInfo;
+const statPath = stat_mod.statPath;
 
 const Thread = std.Thread;
 
@@ -101,6 +104,7 @@ pub fn walk(allocator: std.mem.Allocator, path: []const u8, options: Options) !W
         .inodes = total_inodes,
         .depth = 0,
         .dev = root_stat.dev,
+        .is_dir = true,
     });
 
     // Transfer ownership of entries
@@ -190,6 +194,7 @@ fn walkDir(ctx: *WorkerContext, dir_path: []const u8, depth: usize, parent_stat:
                     .size = sub_stats.size,
                     .blocks = dir_blocks,
                     .inodes = sub_stats.inodes,
+                    .is_dir = true,
                     .depth = depth + 1,
                     .dev = stat_result.dev,
                 });
@@ -215,62 +220,6 @@ fn walkDir(ctx: *WorkerContext, dir_path: []const u8, depth: usize, parent_stat:
     }
 
     return total;
-}
-
-const StatInfo = struct {
-    dev: u64,
-    ino: u64,
-    size: u64,
-    blocks: u64,
-    nlink: u64,
-    is_dir: bool,
-};
-
-/// Stat a path and extract relevant info using statx syscall
-fn statPath(path: []const u8, follow_symlinks: bool) !StatInfo {
-    const linux = std.os.linux;
-
-    // Build flags: AT_SYMLINK_NOFOLLOW for lstat behavior
-    var flags: u32 = linux.AT.EMPTY_PATH;
-    if (!follow_symlinks) {
-        flags |= linux.AT.SYMLINK_NOFOLLOW;
-    }
-
-    // Convert path to null-terminated
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    if (path.len >= path_buf.len) return error.NameTooLong;
-    @memcpy(path_buf[0..path.len], path);
-    path_buf[path.len] = 0;
-    const path_z: [*:0]const u8 = @ptrCast(&path_buf);
-
-    // Call statx directly
-    var statx_buf: linux.Statx = undefined;
-    const mask = linux.STATX.BASIC_STATS;
-    const rc = linux.statx(linux.AT.FDCWD, path_z, flags, mask, &statx_buf);
-
-    if (rc != 0) {
-        const err = std.posix.errno(@as(isize, @bitCast(rc)));
-        return switch (err) {
-            .ACCES => error.AccessDenied,
-            .NOENT => error.FileNotFound,
-            .NOTDIR => error.FileNotFound,
-            .LOOP => error.SymLinkLoop,
-            .NAMETOOLONG => error.NameTooLong,
-            else => error.Unexpected,
-        };
-    }
-
-    // Combine dev_major and dev_minor into a single device ID
-    const dev = (@as(u64, statx_buf.dev_major) << 32) | @as(u64, statx_buf.dev_minor);
-
-    return StatInfo{
-        .dev = dev,
-        .ino = statx_buf.ino,
-        .size = statx_buf.size,
-        .blocks = statx_buf.blocks,
-        .nlink = statx_buf.nlink,
-        .is_dir = (statx_buf.mode & linux.S.IFMT) == linux.S.IFDIR,
-    };
 }
 
 test "walk current directory" {

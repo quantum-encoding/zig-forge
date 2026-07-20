@@ -35,6 +35,7 @@ const Stat = switch (builtin.os.tag) {
 
 extern "c" fn stat(path: [*:0]const u8, buf: *Stat) c_int;
 extern "c" fn time(timer: ?*i64) i64;
+extern "c" fn localtime(timer: *const CTimeT) ?*CTm;
 
 const CTimeT = i64;
 const CTm = extern struct {
@@ -78,11 +79,31 @@ const Timespec = extern struct {
     nsec: i64,
 };
 
-// utimensat flags
-const AT_FDCWD: c_int = -100;
-const AT_SYMLINK_NOFOLLOW: c_int = 0x100;
-const UTIME_NOW: i64 = (1 << 30) - 1;
-const UTIME_OMIT: i64 = (1 << 30) - 2;
+// utimensat flags — these are ABI constants that differ per platform.
+// Linux:    AT_FDCWD = -100, AT_SYMLINK_NOFOLLOW = 0x100
+// macOS/BSD: AT_FDCWD = -2,   AT_SYMLINK_NOFOLLOW = 0x0020
+// The wrong AT_FDCWD makes every relative-path utimensat fail with EBADF (9).
+const AT_FDCWD: c_int = switch (builtin.os.tag) {
+    .linux => -100,
+    else => -2,
+};
+const AT_SYMLINK_NOFOLLOW: c_int = switch (builtin.os.tag) {
+    .linux => 0x100,
+    else => 0x0020,
+};
+// UTIME_NOW / UTIME_OMIT are ABI constants that differ per platform.
+// Linux (glibc): ((1<<30)-1) / ((1<<30)-2)   — bits/stat.h
+// macOS/BSD:     -1 / -2                       — sys/stat.h
+// Using the wrong values silently breaks the current-time path and -a/-m
+// preserve-the-other-timestamp semantics on Darwin.
+const UTIME_NOW: i64 = switch (builtin.os.tag) {
+    .linux => (1 << 30) - 1,
+    else => -1,
+};
+const UTIME_OMIT: i64 = switch (builtin.os.tag) {
+    .linux => (1 << 30) - 2,
+    else => -2,
+};
 
 extern "c" fn utimensat(dirfd: c_int, pathname: [*:0]const u8, times: ?*const [2]Timespec, flags: c_int) c_int;
 
@@ -108,7 +129,11 @@ fn touchFile(allocator: std.mem.Allocator, path: []const u8, config: *const Conf
         const ref_z = try allocator.dupeZ(u8, ref);
         defer allocator.free(ref_z);
 
-        const ref_times = try getFileTimes(ref_z);
+        const ref_times = getFileTimes(ref_z) catch {
+            const err = libc._errno().*;
+            printErrorFmt("failed to get attributes of '{s}': {s}", .{ ref, errnoToString(err) });
+            return error.TouchFailed;
+        };
         times[0] = ref_times[0]; // access time
         times[1] = ref_times[1]; // modification time
     } else if (config.timestamp) |ts| {
@@ -145,7 +170,9 @@ fn createEmptyFile(path: [:0]const u8) !void {
     const io = Io.Threaded.global_single_threaded.io();
     const Dir = Io.Dir;
 
-    const file = Dir.createFile(Dir.cwd(), io, path, .{}) catch |err| {
+    // touch never truncates: create-if-absent only. Default CreateFlags have
+    // truncate=true, which would zero a file that raced in after fileExists().
+    const file = Dir.createFile(Dir.cwd(), io, path, .{ .truncate = false }) catch |err| {
         printErrorFmt("cannot create '{s}': {s}", .{ path, @errorName(err) });
         return err;
     };
@@ -257,9 +284,12 @@ fn parseTimestamp(ts: []const u8) ?Timespec {
 
     switch (main_part.len) {
         8 => { // MMDDhhmm
-            // Get current year from time
-            const now = time(null);
-            year = @intCast(1970 + @divTrunc(now, 365 * 24 * 60 * 60));
+            // Get the true current year from localtime() (a fixed 365-day
+            // division drifts ~1 day / 4 years and can pick the wrong year
+            // near a year boundary).
+            var now = time(null);
+            const lt = localtime(&now) orelse return null;
+            year = @intCast(lt.tm_year + 1900);
             month = std.fmt.parseInt(u8, main_part[0..2], 10) catch return null;
             day = std.fmt.parseInt(u8, main_part[2..4], 10) catch return null;
             hour = std.fmt.parseInt(u8, main_part[4..6], 10) catch return null;
@@ -283,40 +313,39 @@ fn parseTimestamp(ts: []const u8) ?Timespec {
         else => return null,
     }
 
-    // Validate ranges
+    // Validate ranges. Reject impossible calendar dates (e.g. Feb 30) rather
+    // than letting mktime() silently normalize them forward — GNU rejects them.
     if (month < 1 or month > 12) return null;
-    if (day < 1 or day > 31) return null;
+    if (day < 1 or day > daysInMonth(year, month)) return null;
     if (hour > 23) return null;
     if (minute > 59) return null;
 
-    // Convert to Unix timestamp
-    const epoch_seconds = dateToTimestamp(year, month, day, hour, minute, seconds);
-    return Timespec{ .sec = epoch_seconds, .nsec = 0 };
-}
-
-fn dateToTimestamp(year: u16, month: u8, day: u8, hour: u8, minute: u8, second: u8) i64 {
-    // Days from 1970 to start of year
-    var days: i64 = 0;
-    var y: u16 = 1970;
-    while (y < year) : (y += 1) {
-        days += if (isLeapYear(y)) 366 else 365;
-    }
-
-    // Days from start of year to start of month
-    const month_days = [_]u8{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
-    var m: usize = 0;
-    while (m < month - 1) : (m += 1) {
-        days += month_days[m];
-        if (m == 1 and isLeapYear(year)) days += 1; // February in leap year
-    }
-
-    days += day - 1;
-
-    return days * 86400 + @as(i64, hour) * 3600 + @as(i64, minute) * 60 + @as(i64, second);
+    // Convert to a Unix timestamp via mktime(), which interprets the fields in
+    // LOCAL time (matching GNU touch's -t / POSIX MMDDhhmm semantics). A
+    // hand-rolled UTC computation would be off by the timezone offset.
+    var tm = CTm{
+        .tm_sec = seconds,
+        .tm_min = minute,
+        .tm_hour = hour,
+        .tm_mday = day,
+        .tm_mon = @as(c_int, month) - 1,
+        .tm_year = @as(c_int, year) - 1900,
+        .tm_isdst = -1,
+    };
+    const result = mktime(&tm);
+    if (result == -1) return null;
+    return Timespec{ .sec = result, .nsec = 0 };
 }
 
 fn isLeapYear(year: u16) bool {
     return (year % 4 == 0 and year % 100 != 0) or (year % 400 == 0);
+}
+
+fn daysInMonth(year: u16, month: u8) u8 {
+    const month_days = [_]u8{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    if (month < 1 or month > 12) return 31;
+    if (month == 2 and isLeapYear(year)) return 29;
+    return month_days[month - 1];
 }
 
 fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {

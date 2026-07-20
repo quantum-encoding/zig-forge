@@ -41,6 +41,71 @@ extern "c" fn lchown(path: [*:0]const u8, owner: libc.uid_t, group: libc.gid_t) 
 extern "c" fn stat(path: [*:0]const u8, buf: *Stat) c_int;
 extern "c" fn lstat(path: [*:0]const u8, buf: *Stat) c_int;
 
+// fd-relative (`*at`) syscalls — these are the TOCTOU- and symlink-safe
+// primitives the recursive traversal is built on. Resolving every operation
+// against a stable directory fd (rather than re-parsing a path string) means a
+// concurrent attacker cannot swap a path component for a symlink between our
+// stat and our chown, and AT_SYMLINK_NOFOLLOW means we never dereference a
+// symlink encountered inside the tree (GNU's default `-P` semantics).
+extern "c" fn openat(dirfd: c_int, path: [*:0]const u8, flags: c_int, mode: c_uint) c_int;
+extern "c" fn fstatat(dirfd: c_int, path: [*:0]const u8, buf: *Stat, flags: c_int) c_int;
+extern "c" fn fchownat(dirfd: c_int, path: [*:0]const u8, owner: libc.uid_t, group: libc.gid_t, flags: c_int) c_int;
+extern "c" fn fdopendir(fd: c_int) ?*libc.DIR;
+extern "c" fn dirfd(dirp: *libc.DIR) c_int;
+extern "c" fn close(fd: c_int) c_int;
+extern "c" fn strerror(errnum: c_int) [*:0]const u8;
+
+// *at flag / open flag constants (per-OS).
+const AT_FDCWD: c_int = switch (builtin.os.tag) {
+    .linux => -100,
+    else => -2,
+};
+const AT_SYMLINK_NOFOLLOW: c_int = switch (builtin.os.tag) {
+    .linux => 0x100,
+    else => 0x0020,
+};
+const O_RDONLY: c_int = 0;
+const O_DIRECTORY: c_int = switch (builtin.os.tag) {
+    .linux => 0o200000,
+    else => 0x100000,
+};
+const O_NOFOLLOW: c_int = switch (builtin.os.tag) {
+    .linux => 0o400000,
+    else => 0x0100,
+};
+const O_CLOEXEC: c_int = switch (builtin.os.tag) {
+    .linux => 0o2000000,
+    else => 0x1000000,
+};
+
+const S_IFMT: u32 = 0o170000;
+const S_IFDIR: u32 = 0o040000;
+const S_IFLNK: u32 = 0o120000;
+
+fn isDirMode(mode: u32) bool {
+    return (mode & S_IFMT) == S_IFDIR;
+}
+fn isLnkMode(mode: u32) bool {
+    return (mode & S_IFMT) == S_IFLNK;
+}
+
+/// The current errno, decoded to its libc message (GNU reports the real
+/// strerror(3) text rather than a hardcoded string).
+fn errnoString() []const u8 {
+    return std.mem.span(strerror(std.c._errno().*));
+}
+
+/// How recursive traversal treats symbolic links to directories.
+///  - P (default): never traverse, operate on the link itself (`chown -R` safe default)
+///  - H: traverse only a symlink given directly on the command line
+///  - L: traverse every symlink to a directory encountered
+const Traverse = enum { P, H, L };
+
+// Guards the native recursion against pathologically deep / hostile trees
+// (the low-severity unbounded-recursion finding). Deep enough for any real
+// filesystem, bounded against a fabricated one designed to blow the stack.
+const MAX_RECURSION_DEPTH: u32 = 4096;
+
 // Custom struct definitions to work around Zig std lib layout issues
 const CGroup = extern struct {
     gr_name: [*:0]const u8,
@@ -70,6 +135,7 @@ const Config = struct {
     changes: bool = false,
     quiet: bool = false,
     no_dereference: bool = false,
+    traverse: Traverse = .P,
     preserve_root: bool = true, // default on with -R
     no_preserve_root: bool = false,
     reference_file: ?[]const u8 = null,
@@ -78,6 +144,15 @@ const Config = struct {
     group: ?u32 = null,
     owner_str: []const u8 = "",
     group_str: []const u8 = "",
+    // Whether the OWNER / GROUP component was named in the spec — GNU's verbose
+    // output shape depends on this (owner-only prints just the owner name).
+    owner_specified: bool = false,
+    group_specified: bool = false,
+    // --from=CURRENT_OWNER:CURRENT_GROUP conditional change.
+    from_owner: ?u32 = null,
+    from_group: ?u32 = null,
+    from_owner_set: bool = false,
+    from_group_set: bool = false,
     files: std.ArrayListUnmanaged([]const u8) = .empty,
 
     fn deinit(self: *Config, allocator: std.mem.Allocator) void {
@@ -103,17 +178,19 @@ const ChownError = error{
 fn getUidByName(name: []const u8) ?u32 {
     if (name.len == 0) return null;
 
-    // Try parsing as numeric UID first
-    var uid: u32 = 0;
-    var is_numeric = true;
+    // An all-digit spec is a numeric UID. Parse with an overflow guard: a value
+    // that does not fit in uid_t (u32) is not a valid id, so we return null and
+    // the caller reports "invalid user" (GNU behaviour) instead of overflowing.
+    var all_digits = true;
     for (name) |ch| {
         if (ch < '0' or ch > '9') {
-            is_numeric = false;
+            all_digits = false;
             break;
         }
-        uid = uid * 10 + (ch - '0');
     }
-    if (is_numeric) return uid;
+    if (all_digits) {
+        return std.fmt.parseInt(u32, name, 10) catch return null;
+    }
 
     // Look up by name using getpwnam
     var name_buf: [256]u8 = undefined;
@@ -128,17 +205,18 @@ fn getUidByName(name: []const u8) ?u32 {
 fn getGidByName(name: []const u8) ?u32 {
     if (name.len == 0) return null;
 
-    // Try parsing as numeric GID first
-    var gid: u32 = 0;
-    var is_numeric = true;
+    // All-digit spec is a numeric GID; parse with an overflow guard (see
+    // getUidByName). Over-range => null => caller reports "invalid group".
+    var all_digits = true;
     for (name) |ch| {
         if (ch < '0' or ch > '9') {
-            is_numeric = false;
+            all_digits = false;
             break;
         }
-        gid = gid * 10 + (ch - '0');
     }
-    if (is_numeric) return gid;
+    if (all_digits) {
+        return std.fmt.parseInt(u32, name, 10) catch return null;
+    }
 
     // Look up by name using getgrnam
     var name_buf: [256]u8 = undefined;
@@ -173,113 +251,245 @@ fn isRootPath(path: []const u8) bool {
     return true;
 }
 
-fn chownFile(allocator: std.mem.Allocator, path: []const u8, config: *const Config) ChownError!void {
-    const path_z = try allocator.dupeZ(u8, path);
-    defer allocator.free(path_z);
+/// stat a name relative to `dfd` (use AT_FDCWD for absolute/cwd-relative paths).
+/// `nofollow` selects lstat vs stat semantics via AT_SYMLINK_NOFOLLOW.
+fn statAt(dfd: c_int, name_z: [*:0]const u8, nofollow: bool) ?Stat {
+    var st: Stat = undefined;
+    const flags: c_int = if (nofollow) AT_SYMLINK_NOFOLLOW else 0;
+    if (fstatat(dfd, name_z, &st, flags) != 0) return null;
+    return st;
+}
 
-    // Preserve-root check
-    if (config.recursive and !config.no_preserve_root and config.preserve_root) {
-        if (isRootPath(path)) {
-            std.debug.print("zchown: it is dangerous to operate recursively on '/'\n", .{});
-            std.debug.print("zchown: use --no-preserve-root to override this failsafe\n", .{});
+/// Emit GNU-shaped verbose / --changes diagnostics on stdout.
+///
+/// GNU's message shape depends on the SPEC, not on what actually differs:
+///   - the OLD side always shows the owner, and shows ":group" iff a group was
+///     specified in the spec;
+///   - the NEW side shows the owner iff an owner was specified and ":group" iff
+///     a group was specified (so `:grp` prints a leading colon with no owner).
+/// Matches: `changed ownership of 'F' from director:wheel to :everyone`,
+///          `ownership of 'F' retained as director` (owner-only spec), etc.
+fn reportChange(
+    path: []const u8,
+    cur_uid: u32,
+    cur_gid: u32,
+    new_uid: u32,
+    new_gid: u32,
+    changed: bool,
+    config: *const Config,
+) void {
+    if (!(config.verbose or (config.changes and changed))) return;
+
+    const io = Io.Threaded.global_single_threaded.io();
+    const stdout = Io.File.stdout();
+    var buf: [1024]u8 = undefined;
+    var writer = stdout.writer(io, &buf);
+    const w = &writer.interface;
+
+    if (changed) {
+        w.print("changed ownership of '{s}' from ", .{path}) catch {};
+        writeSpec(w, cur_uid, cur_gid, true, config.group_specified);
+        w.writeAll(" to ") catch {};
+        writeSpec(w, new_uid, new_gid, config.owner_specified, config.group_specified);
+        w.writeAll("\n") catch {};
+    } else if (config.verbose) {
+        w.print("ownership of '{s}' retained as ", .{path}) catch {};
+        writeSpec(w, cur_uid, cur_gid, true, config.group_specified);
+        w.writeAll("\n") catch {};
+    }
+    w.flush() catch {};
+}
+
+fn writeSpec(w: anytype, uid: u32, gid: u32, show_owner: bool, show_group: bool) void {
+    if (show_owner) w.print("{s}", .{getOwnerName(uid)}) catch {};
+    if (show_group) w.print(":{s}", .{getGroupName(gid)}) catch {};
+}
+
+/// Apply the ownership change to a single entry named `name_z` relative to
+/// `dfd`. `nofollow` picks fchownat's AT_SYMLINK_NOFOLLOW (operate on the link
+/// itself) vs. following the referent. `path` is only for diagnostics.
+fn applyChown(
+    dfd: c_int,
+    name_z: [*:0]const u8,
+    path: []const u8,
+    cur_uid: u32,
+    cur_gid: u32,
+    nofollow: bool,
+    config: *const Config,
+) ChownError!void {
+    // --from=OWNER:GROUP: only change entries whose current owner/group match
+    // every specified component; otherwise retain (no syscall, but -v reports
+    // "retained as", matching GNU).
+    var matches = true;
+    if (config.from_owner_set) {
+        if (cur_uid != (config.from_owner orelse cur_uid)) matches = false;
+    }
+    if (config.from_group_set) {
+        if (cur_gid != (config.from_group orelse cur_gid)) matches = false;
+    }
+
+    const new_uid: u32 = if (matches) (config.owner orelse cur_uid) else cur_uid;
+    const new_gid: u32 = if (matches) (config.group orelse cur_gid) else cur_gid;
+
+    const changed = (new_uid != cur_uid or new_gid != cur_gid);
+    if (changed) {
+        const flags: c_int = if (nofollow) AT_SYMLINK_NOFOLLOW else 0;
+        if (fchownat(dfd, name_z, new_uid, new_gid, flags) != 0) {
+            if (!config.quiet) {
+                std.debug.print("zchown: changing ownership of '{s}': {s}\n", .{ path, errnoString() });
+            }
             return error.PermissionDenied;
         }
     }
 
-    // Get current owner/group using stat/lstat
-    var stat_buf: Stat = undefined;
-    const stat_result = if (config.no_dereference)
-        lstat(path_z.ptr, &stat_buf)
-    else
-        stat(path_z.ptr, &stat_buf);
+    reportChange(path, cur_uid, cur_gid, new_uid, new_gid, changed, config);
+}
 
-    if (stat_result != 0) {
+/// Non-recursive single-operand path. Preserves the historical (GNU-matching)
+/// behaviour of dereferencing a command-line symlink unless -h/--no-dereference.
+fn chownOne(allocator: std.mem.Allocator, path: []const u8, config: *const Config) ChownError!void {
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+
+    const st = statAt(AT_FDCWD, path_z.ptr, config.no_dereference) orelse {
         if (!config.quiet) {
-            std.debug.print("zchown: cannot access '{s}': No such file or directory\n", .{path});
+            std.debug.print("zchown: cannot access '{s}': {s}\n", .{ path, errnoString() });
         }
         return error.FileNotFound;
-    }
+    };
 
-    const current_uid = stat_buf.uid;
-    const current_gid = stat_buf.gid;
-    const is_dir = (stat_buf.mode & 0o170000) == 0o40000;
+    try applyChown(AT_FDCWD, path_z.ptr, path, st.uid, st.gid, config.no_dereference, config);
+}
 
-    // Determine new owner and group
-    const new_uid: u32 = config.owner orelse current_uid;
-    const new_gid: u32 = config.group orelse current_gid;
+/// Recursively descend `fd` (an open O_DIRECTORY fd we take ownership of and
+/// close), chowning every entry. All operations are fd-relative (openat /
+/// fstatat / fchownat) so the kernel resolves against a stable directory
+/// handle — no path-string re-resolution, no TOCTOU window, and symlinks are
+/// never dereferenced under the default -P semantics.
+fn walkFd(
+    allocator: std.mem.Allocator,
+    fd: c_int,
+    config: *const Config,
+    dir_path: []const u8,
+    depth: u32,
+) void {
+    // fdopendir takes ownership of `fd`; closedir closes it. dirfd() gives us
+    // back the same fd for the *at calls while the stream is open.
+    const dirp = fdopendir(fd) orelse {
+        _ = close(fd);
+        return;
+    };
+    defer _ = libc.closedir(dirp);
+    const afd = dirfd(dirp);
 
-    // Handle recursive BEFORE changing directory
-    if (config.recursive and is_dir) {
-        chownRecursive(allocator, path, config) catch {};
-    }
+    const follow = (config.traverse == .L);
 
-    // Apply chown
-    const chown_result = if (config.no_dereference)
-        lchown(path_z.ptr, new_uid, new_gid)
-    else
-        chown(path_z.ptr, new_uid, new_gid);
+    while (true) {
+        const entry = libc.readdir(dirp) orelse break;
+        const name_ptr: [*:0]const u8 = @ptrCast(&entry.name);
+        const name = std.mem.span(name_ptr);
+        if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
 
-    if (chown_result != 0) {
-        if (!config.quiet) {
-            std.debug.print("zchown: changing ownership of '{s}': Operation not permitted\n", .{path});
+        // Sentinel-terminated copy of the entry name for the *at calls.
+        const name_z = allocator.dupeZ(u8, name) catch return;
+        defer allocator.free(name_z);
+
+        // Classify without following (we need to know if it's a symlink).
+        const lst = statAt(afd, name_z.ptr, true) orelse continue;
+        const is_link = isLnkMode(lst.mode);
+
+        const child_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, name }) catch return;
+        defer allocator.free(child_path);
+
+        // Ownership to report/apply against: under -L a symlink's referent, else
+        // the entry itself.
+        const st = if (is_link and follow)
+            (statAt(afd, name_z.ptr, false) orelse lst)
+        else
+            lst;
+
+        // GNU processes recursively in POST-ORDER: a directory's contents are
+        // chowned before the directory itself (so `chown -Rv` reports children
+        // first, parent last). Descend first, then chown this entry.
+        const descend = if (is_link) (follow and isDirMode(st.mode)) else isDirMode(lst.mode);
+        if (descend) {
+            if (depth >= MAX_RECURSION_DEPTH) {
+                if (!config.quiet) {
+                    std.debug.print("zchown: maximum recursion depth exceeded at '{s}'\n", .{child_path});
+                }
+                continue;
+            }
+            // O_NOFOLLOW on the descent fd guarantees we never open through a
+            // symlink under -P/-H; under -L we allow following.
+            const open_flags: c_int = O_RDONLY | O_DIRECTORY | O_CLOEXEC |
+                (if (follow) @as(c_int, 0) else O_NOFOLLOW);
+            const cfd = openat(afd, name_z.ptr, open_flags, 0);
+            if (cfd >= 0) {
+                walkFd(allocator, cfd, config, child_path, depth + 1);
+            }
         }
-        return error.PermissionDenied;
-    }
 
-    // Report changes
-    const changed = (new_uid != current_uid or new_gid != current_gid);
-    if (config.verbose or (config.changes and changed)) {
-        const io = Io.Threaded.global_single_threaded.io();
-        const stdout = Io.File.stdout();
-        var buf: [512]u8 = undefined;
-        var writer = stdout.writer(io, &buf);
-
-        if (changed) {
-            writer.interface.print("ownership of '{s}' changed from {s}:{s} to {s}:{s}\n", .{
-                path,
-                getOwnerName(current_uid),
-                getGroupName(current_gid),
-                getOwnerName(new_uid),
-                getGroupName(new_gid),
-            }) catch {};
-        } else if (config.verbose) {
-            writer.interface.print("ownership of '{s}' retained as {s}:{s}\n", .{
-                path,
-                getOwnerName(current_uid),
-                getGroupName(current_gid),
-            }) catch {};
-        }
-        writer.interface.flush() catch {};
+        // Under -P (default) never dereference; under -L follow the referent.
+        const nofollow = !(follow);
+        applyChown(afd, name_z.ptr, child_path, st.uid, st.gid, nofollow, config) catch {};
     }
 }
 
-fn chownRecursive(allocator: std.mem.Allocator, dir_path: []const u8, config: *const Config) ChownError!void {
-    const dir_path_z = try allocator.dupeZ(u8, dir_path);
-    defer allocator.free(dir_path_z);
-
-    const dir = libc.opendir(dir_path_z.ptr) orelse {
-        if (!config.quiet) {
-            std.debug.print("zchown: cannot open directory '{s}'\n", .{dir_path});
-        }
-        return error.CannotOpenDirectory;
-    };
-    defer _ = libc.closedir(dir);
-
-    while (true) {
-        const entry = libc.readdir(dir) orelse break;
-
-        const name_ptr: [*:0]const u8 = @ptrCast(&entry.name);
-        const name = std.mem.span(name_ptr);
-
-        if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
-
-        const full_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, name }) catch {
-            return error.OutOfMemory;
-        };
-        defer allocator.free(full_path);
-
-        chownFile(allocator, full_path, config) catch {};
+/// Recursive operand entry point (`-R`). Handles the command-line operand's
+/// symlink/traversal semantics, then descends with `walkFd`.
+fn chownRecursiveEntry(allocator: std.mem.Allocator, path: []const u8, config: *const Config) ChownError!void {
+    // Preserve-root only applies with -R.
+    if (!config.no_preserve_root and config.preserve_root and isRootPath(path)) {
+        std.debug.print("zchown: it is dangerous to operate recursively on '/'\n", .{});
+        std.debug.print("zchown: use --no-preserve-root to override this failsafe\n", .{});
+        return error.PermissionDenied;
     }
+
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+
+    // Classify the operand without following (lstat semantics).
+    const lst = statAt(AT_FDCWD, path_z.ptr, true) orelse {
+        if (!config.quiet) {
+            std.debug.print("zchown: cannot access '{s}': {s}\n", .{ path, errnoString() });
+        }
+        return error.FileNotFound;
+    };
+
+    const operand_is_link = isLnkMode(lst.mode);
+    // A command-line symlink is traversed under -L and -H (but not -P).
+    const follow_operand = operand_is_link and (config.traverse == .L or config.traverse == .H);
+
+    if (operand_is_link and !follow_operand) {
+        // -P: operate on the link itself, do not descend. This is the critical
+        // symlink-attack-safe default.
+        try applyChown(AT_FDCWD, path_z.ptr, path, lst.uid, lst.gid, true, config);
+        return;
+    }
+
+    if (follow_operand) {
+        const rst = statAt(AT_FDCWD, path_z.ptr, false) orelse {
+            if (!config.quiet) {
+                std.debug.print("zchown: cannot access '{s}': {s}\n", .{ path, errnoString() });
+            }
+            return error.FileNotFound;
+        };
+        // Post-order: descend into the target directory first, chown it last.
+        if (isDirMode(rst.mode)) {
+            const fd = openat(AT_FDCWD, path_z.ptr, O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0);
+            if (fd >= 0) walkFd(allocator, fd, config, path, 1);
+        }
+        try applyChown(AT_FDCWD, path_z.ptr, path, rst.uid, rst.gid, false, config);
+        return;
+    }
+
+    // Real file or directory operand. Post-order: contents first, operand last.
+    const nofollow = (config.traverse != .L);
+    if (isDirMode(lst.mode)) {
+        const fd = openat(AT_FDCWD, path_z.ptr, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0);
+        if (fd >= 0) walkFd(allocator, fd, config, path, 1);
+    }
+    try applyChown(AT_FDCWD, path_z.ptr, path, lst.uid, lst.gid, nofollow, config);
 }
 
 fn parseOwnerGroup(allocator: std.mem.Allocator, spec: []const u8, config: *Config) !void {
@@ -299,13 +509,7 @@ fn parseOwnerGroup(allocator: std.mem.Allocator, spec: []const u8, config: *Conf
                 return error.InvalidOwner;
             };
             config.owner_str = owner_part;
-
-            // Handle owner: (set group to owner's primary group)
-            if (group_part.len == 0 and pos < spec.len - 1) {
-                // This is "owner:" syntax - use owner's primary group
-                // Actually in standard chown, "owner:" means use owner's login group
-                // But if it's just "owner" with no colon, we don't change group
-            }
+            config.owner_specified = true;
         }
 
         if (group_part.len > 0) {
@@ -314,10 +518,12 @@ fn parseOwnerGroup(allocator: std.mem.Allocator, spec: []const u8, config: *Conf
                 return error.InvalidGroup;
             };
             config.group_str = group_part;
+            config.group_specified = true;
         } else if (owner_part.len > 0 and pos == spec.len - 1) {
-            // "owner:" syntax - use owner's login group
+            // "owner:" syntax - change group to the owner's login group.
             if (config.owner) |uid| {
                 config.group = getUserPrimaryGroup(uid);
+                config.group_specified = true;
             }
         }
     } else {
@@ -327,6 +533,37 @@ fn parseOwnerGroup(allocator: std.mem.Allocator, spec: []const u8, config: *Conf
             return error.InvalidOwner;
         };
         config.owner_str = spec;
+        config.owner_specified = true;
+    }
+}
+
+/// Parse a --from=CURRENT_OWNER:CURRENT_GROUP spec into the config's
+/// conditional-match fields. Accepts OWNER, OWNER:GROUP, or :GROUP.
+fn parseFrom(spec: []const u8, config: *Config) !void {
+    const colon_pos = std.mem.indexOfScalar(u8, spec, ':');
+    if (colon_pos) |pos| {
+        const owner_part = spec[0..pos];
+        const group_part = spec[pos + 1 ..];
+        if (owner_part.len > 0) {
+            config.from_owner = getUidByName(owner_part) orelse {
+                std.debug.print("zchown: invalid user: '{s}'\n", .{owner_part});
+                return error.InvalidOwner;
+            };
+            config.from_owner_set = true;
+        }
+        if (group_part.len > 0) {
+            config.from_group = getGidByName(group_part) orelse {
+                std.debug.print("zchown: invalid group: '{s}'\n", .{group_part});
+                return error.InvalidGroup;
+            };
+            config.from_group_set = true;
+        }
+    } else if (spec.len > 0) {
+        config.from_owner = getUidByName(spec) orelse {
+            std.debug.print("zchown: invalid user: '{s}'\n", .{spec});
+            return error.InvalidOwner;
+        };
+        config.from_owner_set = true;
     }
 }
 
@@ -343,11 +580,21 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
     var config = Config{};
     var i: usize = 1;
     var owner_group_found = false;
+    // GNU permutes options and operands: options are recognized wherever they
+    // appear (before "--"), not just before the owner/group operand.
+    var seen_dashdash = false;
 
     while (i < args.len) : (i += 1) {
         const arg = args[i];
 
-        if (arg.len > 0 and arg[0] == '-' and arg.len > 1 and !owner_group_found) {
+        // "--" terminates option processing; every following arg is an operand.
+        if (!seen_dashdash and std.mem.eql(u8, arg, "--")) {
+            seen_dashdash = true;
+            continue;
+        }
+
+        const is_option = !seen_dashdash and arg.len > 1 and arg[0] == '-';
+        if (is_option) {
             if (arg[1] == '-') {
                 if (std.mem.eql(u8, arg, "--help")) {
                     printHelp();
@@ -365,6 +612,8 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                     config.quiet = true;
                 } else if (std.mem.eql(u8, arg, "--no-dereference")) {
                     config.no_dereference = true;
+                } else if (std.mem.eql(u8, arg, "--dereference")) {
+                    config.no_dereference = false;
                 } else if (std.mem.eql(u8, arg, "--preserve-root")) {
                     config.preserve_root = true;
                     config.no_preserve_root = false;
@@ -373,6 +622,8 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                 } else if (std.mem.startsWith(u8, arg, "--reference=")) {
                     config.reference_file = try allocator.dupe(u8, arg["--reference=".len..]);
                     config.reference_file_owned = true;
+                } else if (std.mem.startsWith(u8, arg, "--from=")) {
+                    try parseFrom(arg["--from=".len..], &config);
                 } else {
                     std.debug.print("zchown: unrecognized option '{s}'\n", .{arg});
                     std.process.exit(1);
@@ -385,6 +636,10 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                         'c' => config.changes = true,
                         'f' => config.quiet = true,
                         'h' => config.no_dereference = true,
+                        // Recursion traversal control (GNU -H/-L/-P).
+                        'H' => config.traverse = .H,
+                        'L' => config.traverse = .L,
+                        'P' => config.traverse = .P,
                         else => {
                             std.debug.print("zchown: invalid option -- '{c}'\n", .{ch});
                             std.process.exit(1);
@@ -407,11 +662,14 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
         var ref_stat: Stat = undefined;
         const ref_result = stat(ref_z.ptr, &ref_stat);
         if (ref_result != 0) {
-            std.debug.print("zchown: cannot stat reference file '{s}': No such file or directory\n", .{ref_file});
+            std.debug.print("zchown: cannot stat reference file '{s}': {s}\n", .{ ref_file, errnoString() });
             std.process.exit(1);
         }
         config.owner = ref_stat.uid;
         config.group = ref_stat.gid;
+        // --reference sets both owner and group; verbose output shows both.
+        config.owner_specified = true;
+        config.group_specified = true;
     } else if (!owner_group_found) {
         std.debug.print("zchown: missing operand\n", .{});
         std.debug.print("Try 'zchown --help' for more information.\n", .{});
@@ -440,7 +698,12 @@ fn printHelp() void {
         \\  -f, --silent, --quiet  suppress most error messages
         \\  -v, --verbose       output a diagnostic for every file processed
         \\  -h, --no-dereference   affect symlinks instead of referenced files
+        \\      --dereference   affect the referent of each symlink (default)
+        \\      --from=CURRENT_OWNER:CURRENT_GROUP  change only if current matches
         \\  -R, --recursive     operate recursively
+        \\  -H                  with -R, follow a command-line symlink to a directory
+        \\  -L                  with -R, follow every symlink to a directory
+        \\  -P                  with -R, do not follow symlinks (default)
         \\      --preserve-root    fail to operate recursively on '/' (default)
         \\      --no-preserve-root do not treat '/' specially
         \\      --reference=RFILE  use RFILE's owner and group
@@ -484,7 +747,11 @@ pub fn main(init: std.process.Init) void {
 
     var error_occurred = false;
     for (config.files.items) |file| {
-        chownFile(allocator, file, &config) catch {
+        const result = if (config.recursive)
+            chownRecursiveEntry(allocator, file, &config)
+        else
+            chownOne(allocator, file, &config);
+        result catch {
             error_occurred = true;
         };
     }

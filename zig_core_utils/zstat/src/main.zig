@@ -31,6 +31,50 @@ const Stat = switch (builtin.os.tag) {
 extern "c" fn stat(path: [*:0]const u8, buf: *Stat) c_int;
 extern "c" fn lstat(path: [*:0]const u8, buf: *Stat) c_int;
 extern "c" fn readlink(path: [*:0]const u8, buf: [*]u8, bufsiz: usize) isize;
+extern "c" fn strerror(errnum: c_int) [*:0]const u8;
+
+// Broken-down local time (POSIX struct tm; tm_gmtoff/tm_zone are the BSD/GNU
+// extensions present on both macOS and glibc). Used to render timestamps in
+// local time with a UTC offset, matching GNU stat.
+const Tm = extern struct {
+    tm_sec: c_int,
+    tm_min: c_int,
+    tm_hour: c_int,
+    tm_mday: c_int,
+    tm_mon: c_int,
+    tm_year: c_int,
+    tm_wday: c_int,
+    tm_yday: c_int,
+    tm_isdst: c_int,
+    tm_gmtoff: c_long,
+    tm_zone: ?[*:0]const u8,
+};
+extern "c" fn localtime_r(timer: *const c_long, result: *Tm) ?*Tm;
+
+fn isDarwin() bool {
+    return switch (builtin.os.tag) {
+        .macos, .ios, .tvos, .watchos => true,
+        else => false,
+    };
+}
+
+/// Return the raw device number as an unsigned value, sign-safe on macOS where
+/// st_dev / st_rdev are declared i32.
+fn rawDev(dev: anytype) u64 {
+    if (comptime isDarwin()) {
+        return @as(u32, @bitCast(dev)); // i32 -> u32 -> u64
+    } else {
+        return @intCast(dev); // u64
+    }
+}
+
+fn devMajor(raw: u64) u64 {
+    return if (comptime isDarwin()) (raw >> 24) & 0xff else (raw >> 8) & 0xfff;
+}
+
+fn devMinor(raw: u64) u64 {
+    return if (comptime isDarwin()) raw & 0xffffff else raw & 0xff;
+}
 
 const Group = extern struct {
     gr_name: ?[*:0]const u8,
@@ -150,45 +194,64 @@ fn formatMode(mode: u32, buf: *[10]u8) void {
     buf[9] = if (mode & 0o001 != 0) (if (mode & 0o1000 != 0) 't' else 'x') else (if (mode & 0o1000 != 0) 'T' else '-');
 }
 
-fn formatTime(secs: i64, nsecs: i64, buf: *[32]u8) []const u8 {
-    var days: i64 = @divFloor(secs, 86400);
-    const day_secs: i64 = @mod(secs, 86400);
-    const hours: i64 = @divFloor(day_secs, 3600);
-    const mins: i64 = @divFloor(@mod(day_secs, 3600), 60);
-    const seconds: i64 = @mod(day_secs, 60);
+// Render an epoch timestamp as GNU stat does: local time, nanosecond fraction,
+// and a trailing UTC offset (" +0200"). Uses libc localtime_r so DST and the
+// offset are correct, and so pre-1970 (negative) timestamps format correctly
+// instead of panicking on an @intCast of a negative day-of-month.
+fn formatTime(secs: i64, nsecs: i64, buf: *[64]u8) []const u8 {
+    const t: c_long = @intCast(secs);
+    var tm: Tm = undefined;
+    if (localtime_r(&t, &tm) == null) return "?";
 
-    var year: i64 = 1970;
-    while (days >= 0) {
-        const is_leap = (@mod(year, 4) == 0 and (@mod(year, 100) != 0 or @mod(year, 400) == 0));
-        const days_in_year: i64 = if (is_leap) 366 else 365;
-        if (days < days_in_year) break;
-        days -= days_in_year;
-        year += 1;
+    const off = tm.tm_gmtoff;
+    const off_sign: u8 = if (off < 0) '-' else '+';
+    const off_abs: u64 = @intCast(if (off < 0) -off else off);
+    const off_h = off_abs / 3600;
+    const off_m = (off_abs % 3600) / 60;
+
+    const ns_norm: i64 = if (nsecs < 0) 0 else @mod(nsecs, 1_000_000_000);
+    const ns_u: u64 = @intCast(ns_norm);
+
+    // Cast the (always non-negative) broken-down fields to unsigned: with a
+    // signed integer the "{d:0>N}" fill specifier emits a leading '+'.
+    const s = std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}.{d:0>9} {c}{d:0>2}{d:0>2}", .{
+        @as(u32, @intCast(@as(i64, tm.tm_year) + 1900)),
+        @as(u32, @intCast(tm.tm_mon + 1)),
+        @as(u32, @intCast(tm.tm_mday)),
+        @as(u32, @intCast(tm.tm_hour)),
+        @as(u32, @intCast(tm.tm_min)),
+        @as(u32, @intCast(tm.tm_sec)),
+        ns_u,
+        off_sign,
+        off_h,
+        off_m,
+    }) catch return "?";
+
+    return s;
+}
+
+// Resolve a symlink target for %N / the default File: line. Returns null when
+// the path is not a symlink or readlink fails.
+fn readLinkTarget(path: []const u8, buf: []u8) ?[]const u8 {
+    var pbuf: [4096]u8 = undefined;
+    if (path.len >= pbuf.len) return null;
+    @memcpy(pbuf[0..path.len], path);
+    pbuf[path.len] = 0;
+    const pz: [*:0]const u8 = @ptrCast(&pbuf);
+    const n = readlink(pz, buf.ptr, buf.len);
+    if (n <= 0) return null;
+    return buf[0..@intCast(n)];
+}
+
+fn isSymlink(mode: u32) bool {
+    return (mode & 0o170000) == 0o120000;
+}
+
+fn birthSec(st: *const Stat) ?i64 {
+    if (comptime @hasField(Stat, "birthtim")) {
+        if (st.birthtim.sec != 0) return st.birthtim.sec;
     }
-
-    const is_leap = (@mod(year, 4) == 0 and (@mod(year, 100) != 0 or @mod(year, 400) == 0));
-    const month_days = [_]i64{ 31, if (is_leap) 29 else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
-
-    var month: usize = 0;
-    while (month < 12) : (month += 1) {
-        if (days < month_days[month]) break;
-        days -= month_days[month];
-    }
-
-    const day: i64 = days + 1;
-    const ns9 = @divFloor(nsecs, 1);
-
-    _ = std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}.{d:0>9}", .{
-        @as(u32, @intCast(year)),
-        @as(u32, @intCast(month + 1)),
-        @as(u32, @intCast(day)),
-        @as(u32, @intCast(hours)),
-        @as(u32, @intCast(mins)),
-        @as(u32, @intCast(seconds)),
-        @as(u32, @intCast(ns9)),
-    }) catch return "????-??-?? ??:??:??.?????????";
-
-    return buf[0..29];
+    return null;
 }
 
 fn outputFormatted(path: []const u8, st: *const Stat, format: []const u8, is_printf: bool, out: *OutputBuffer) void {
@@ -211,8 +274,8 @@ fn outputFormatted(path: []const u8, st: *const Stat, format: []const u8, is_pri
                 },
                 'b' => out.print("{d}", .{@as(u64, @intCast(st.blocks))}), // Blocks
                 'B' => out.print("{d}", .{@as(u64, 512)}), // Block size (always 512 for blocks)
-                'd' => out.print("{d}", .{@as(u64, @intCast(st.dev))}), // Device decimal
-                'D' => out.print("{x}", .{@as(u64, @intCast(st.dev))}), // Device hex
+                'd' => out.print("{d}", .{rawDev(st.dev)}), // Device decimal
+                'D' => out.print("{x}", .{rawDev(st.dev)}), // Device hex
                 'f' => out.print("{x}", .{mode}), // Raw mode hex
                 'F' => out.write(getFileType(mode, st.size)), // File type
                 'g' => out.print("{d}", .{st.gid}), // Group ID
@@ -224,37 +287,52 @@ fn outputFormatted(path: []const u8, st: *const Stat, format: []const u8, is_pri
                 'i' => out.print("{d}", .{st.ino}), // Inode
                 'm' => out.write("?"), // Mount point
                 'n' => out.write(path), // File name
-                'N' => { // Quoted file name
+                'N' => { // Quoted file name (with symlink target)
                     out.writeByte('\'');
                     out.write(path);
                     out.writeByte('\'');
+                    if (isSymlink(mode)) {
+                        var link_buf: [4096]u8 = undefined;
+                        if (readLinkTarget(path, &link_buf)) |tgt| {
+                            out.write(" -> '");
+                            out.write(tgt);
+                            out.writeByte('\'');
+                        }
+                    }
                 },
                 'o' => out.print("{d}", .{@as(u64, @intCast(st.blksize))}), // Optimal I/O size
                 's' => out.print("{d}", .{@as(u64, @intCast(st.size))}), // Size
-                't' => out.print("{x}", .{(@as(u64, @intCast(st.rdev)) >> 8) & 0xfff}), // Major device hex
-                'T' => out.print("{x}", .{@as(u64, @intCast(st.rdev)) & 0xff}), // Minor device hex
+                't' => out.print("{x}", .{devMajor(rawDev(st.rdev))}), // Major device hex
+                'T' => out.print("{x}", .{devMinor(rawDev(st.rdev))}), // Minor device hex
                 'u' => out.print("{d}", .{st.uid}), // User ID
                 'U' => { // User name
                     var usr_buf: [64]u8 = undefined;
                     out.write(getUserName(st.uid, &usr_buf));
                 },
-                'w' => out.write("-"), // Birth time (not available)
-                'W' => out.write("0"), // Birth time seconds
+                'w' => { // Birth time (human readable)
+                    if (comptime @hasField(Stat, "birthtim")) {
+                        if (birthSec(st)) |bsec| {
+                            var time_buf: [64]u8 = undefined;
+                            out.write(formatTime(bsec, st.birthtim.nsec, &time_buf));
+                        } else out.write("-");
+                    } else out.write("-");
+                },
+                'W' => out.print("{d}", .{birthSec(st) orelse 0}), // Birth time seconds
                 'x' => { // Access time
-                    var time_buf: [32]u8 = undefined;
+                    var time_buf: [64]u8 = undefined;
                     out.write(formatTime(atime.sec, atime.nsec, &time_buf));
                 },
-                'X' => out.print("{d}", .{@as(u64, @intCast(atime.sec))}), // Access time seconds
+                'X' => out.print("{d}", .{atime.sec}), // Access time seconds
                 'y' => { // Modify time
-                    var time_buf: [32]u8 = undefined;
+                    var time_buf: [64]u8 = undefined;
                     out.write(formatTime(mtime.sec, mtime.nsec, &time_buf));
                 },
-                'Y' => out.print("{d}", .{@as(u64, @intCast(mtime.sec))}), // Modify time seconds
+                'Y' => out.print("{d}", .{mtime.sec}), // Modify time seconds
                 'z' => { // Change time
-                    var time_buf: [32]u8 = undefined;
+                    var time_buf: [64]u8 = undefined;
                     out.write(formatTime(ctime.sec, ctime.nsec, &time_buf));
                 },
-                'Z' => out.print("{d}", .{@as(u64, @intCast(ctime.sec))}), // Change time seconds
+                'Z' => out.print("{d}", .{ctime.sec}), // Change time seconds
                 else => {
                     out.writeByte('%');
                     out.writeByte(format[i]);
@@ -288,22 +366,24 @@ fn outputTerse(path: []const u8, st: *const Stat, out: *OutputBuffer) void {
     const mtime = st.mtime();
     const ctime = st.ctime();
 
+    const rdev_raw = rawDev(st.rdev);
     out.write(path);
-    out.print(" {d} {d} {x} {d} {d} {x} {d} {d} {x} {x} {d} {d} {d} 0 {d}\n", .{
-        @as(u64, @intCast(st.size)),
-        @as(u64, @intCast(st.blocks)),
+    out.print(" {d} {d} {x} {d} {d} {x} {d} {d} {x} {x} {d} {d} {d} {d} {d}\n", .{
+        st.size,
+        st.blocks,
         mode,
         st.uid,
         st.gid,
-        @as(u64, @intCast(st.dev)),
+        rawDev(st.dev),
         st.ino,
-        @as(u64, @intCast(st.nlink)),
-        (@as(u64, @intCast(st.rdev)) >> 8) & 0xfff,
-        @as(u64, @intCast(st.rdev)) & 0xff,
-        @as(u64, @intCast(atime.sec)),
-        @as(u64, @intCast(mtime.sec)),
-        @as(u64, @intCast(ctime.sec)),
-        @as(u64, @intCast(st.blksize)),
+        @as(u64, st.nlink),
+        devMajor(rdev_raw),
+        devMinor(rdev_raw),
+        atime.sec,
+        mtime.sec,
+        ctime.sec,
+        birthSec(st) orelse 0,
+        st.blksize,
     });
 }
 
@@ -318,6 +398,13 @@ fn outputStat(path: []const u8, st: *const Stat, out: *OutputBuffer) bool {
 
     out.write("  File: ");
     out.write(path);
+    if (isSymlink(mode)) {
+        var link_buf: [4096]u8 = undefined;
+        if (readLinkTarget(path, &link_buf)) |tgt| {
+            out.write(" -> ");
+            out.write(tgt);
+        }
+    }
     out.writeByte('\n');
 
     out.print("  Size: {d:<10}\tBlocks: {d:<10} IO Block: {d:<6} {s}\n", .{
@@ -327,23 +414,33 @@ fn outputStat(path: []const u8, st: *const Stat, out: *OutputBuffer) bool {
         getFileType(mode, st.size),
     });
 
-    const dev: u64 = @intCast(st.dev);
-    const dev_major = (dev >> 8) & 0xfff;
-    const dev_minor = dev & 0xff;
-    out.print("Device: {x}h/{d}d\tInode: {d:<12} Links: {d}\n", .{ dev, dev_major * 256 + dev_minor, st.ino, @as(u64, @intCast(st.nlink)) });
+    // GNU 9.x prints "Device: <major>,<minor>" in decimal, and appends
+    // "Device type: <rmajor>,<rminor>" for character/block special files.
+    const dev_raw = rawDev(st.dev);
+    const fmt = mode & 0o170000;
+    const is_special = (fmt == 0o020000 or fmt == 0o060000);
+    if (is_special) {
+        const rdev_raw = rawDev(st.rdev);
+        out.print("Device: {d},{d}\tInode: {d:<11} Links: {d:<5} Device type: {d},{d}\n", .{
+            devMajor(dev_raw), devMinor(dev_raw), st.ino, @as(u64, st.nlink),
+            devMajor(rdev_raw), devMinor(rdev_raw),
+        });
+    } else {
+        out.print("Device: {d},{d}\tInode: {d:<11} Links: {d}\n", .{
+            devMajor(dev_raw), devMinor(dev_raw), st.ino, @as(u64, st.nlink),
+        });
+    }
 
     var usr_buf: [64]u8 = undefined;
     var grp_buf: [64]u8 = undefined;
     const uname = getUserName(st.uid, &usr_buf);
     const gname = getGroupName(st.gid, &grp_buf);
-    out.print("Access: ({o:0>4}/{s})  Uid: ({d:>5}/", .{ mode & 0o7777, mode_str, st.uid });
-    out.write(uname);
-    out.write(")   Gid: (");
-    out.print("{d:>5}/", .{st.gid});
-    out.write(gname);
-    out.write(")\n");
+    // GNU right-justifies the user/group name in an 8-wide field.
+    out.print("Access: ({o:0>4}/{s})  Uid: ({d:>5}/{s:>8})   Gid: ({d:>5}/{s:>8})\n", .{
+        mode & 0o7777, mode_str, st.uid, uname, st.gid, gname,
+    });
 
-    var time_buf: [32]u8 = undefined;
+    var time_buf: [64]u8 = undefined;
     out.write("Access: ");
     out.write(formatTime(atime.sec, atime.nsec, &time_buf));
     out.writeByte('\n');
@@ -356,7 +453,13 @@ fn outputStat(path: []const u8, st: *const Stat, out: *OutputBuffer) bool {
     out.write(formatTime(ctime.sec, ctime.nsec, &time_buf));
     out.writeByte('\n');
 
-    out.write(" Birth: -\n");
+    if (comptime @hasField(Stat, "birthtim")) {
+        if (birthSec(st)) |bsec| {
+            out.write(" Birth: ");
+            out.write(formatTime(bsec, st.birthtim.nsec, &time_buf));
+            out.writeByte('\n');
+        } else out.write(" Birth: -\n");
+    } else out.write(" Birth: -\n");
 
     return true;
 }
@@ -373,9 +476,12 @@ fn statFile(path: []const u8, config: *const Config, out: *OutputBuffer) bool {
     // Use stat or lstat based on dereference option
     const result = if (config.dereference) stat(path_z, &stat_buf) else lstat(path_z, &stat_buf);
     if (result != 0) {
-        _ = libc.write(libc.STDERR_FILENO, "zstat: cannot stat '", 20);
-        _ = libc.write(libc.STDERR_FILENO, path.ptr, path.len);
-        _ = libc.write(libc.STDERR_FILENO, "'\n", 2);
+        const err = std.c._errno().*; // capture before any other libc call clobbers errno
+        writeStderr("zstat: cannot stat '");
+        writeStderr(path);
+        writeStderr("': ");
+        writeStderr(std.mem.sliceTo(strerror(err), 0));
+        writeStderr("\n");
         return false;
     }
 
@@ -392,6 +498,10 @@ fn statFile(path: []const u8, config: *const Config, out: *OutputBuffer) bool {
 
 fn writeStderr(data: []const u8) void {
     _ = libc.write(libc.STDERR_FILENO, data.ptr, data.len);
+}
+
+fn writeStdout(data: []const u8) void {
+    _ = libc.write(libc.STDOUT_FILENO, data.ptr, data.len);
 }
 
 pub fn main(init: std.process.Init) void {
@@ -442,10 +552,10 @@ pub fn main(init: std.process.Init) void {
                 \\  %Z   time of last change as seconds
                 \\
             ;
-            writeStderr(help);
+            writeStdout(help);
             return;
         } else if (std.mem.eql(u8, arg, "--version")) {
-            writeStderr("zstat 1.0.0\n");
+            writeStdout("zstat 1.0.0\n");
             return;
         } else if (std.mem.eql(u8, arg, "-L") or std.mem.eql(u8, arg, "--dereference")) {
             config.dereference = true;

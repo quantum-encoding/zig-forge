@@ -67,6 +67,27 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    // Externally-anchored parity tests. They shell out to the built zcopy/zpaste
+    // binaries, so expose the install bin dir and make the tests depend on install.
+    const test_options = b.addOptions();
+    test_options.addOption([]const u8, "bin_dir", b.getInstallPath(.bin, ""));
+
+    const parity_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/gnu_parity_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = if (target.result.abi == .android) false else true,
+            .imports = &.{
+                .{ .name = "clipboard", .module = clip_module },
+                .{ .name = "build_options", .module = test_options.createModule() },
+            },
+        }),
+    });
+    const run_parity = b.addRunArtifact(parity_tests);
+    run_parity.step.dependOn(b.getInstallStep()); // binaries must exist first
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(clip_tests).step);
+    test_step.dependOn(&run_parity.step);
 }

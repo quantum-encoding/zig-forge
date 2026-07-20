@@ -10,51 +10,29 @@ const std = @import("std");
 const VERSION = "1.0.0";
 const BUFFER_SIZE = 65536;
 
-// C functions for file operations
-extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
+// C functions for file operations. Reads go through std.posix.read so that
+// EINTR is retried and real I/O errors are surfaced (not mistaken for EOF).
 extern "c" fn close(fd: c_int) c_int;
-extern "c" fn read(fd: c_int, buf: [*]u8, count: usize) isize;
 extern "c" fn write(fd: c_int, buf: [*]const u8, count: usize) isize;
 
-const O_WRONLY = 0x0001;
-const O_CREAT = 0x0040;
-const O_TRUNC = 0x0200;
-const O_APPEND = 0x0400;
+/// A stream writer that persists across print() calls.
+///
+/// The original implementation rebuilt a fresh File.Writer on every print(),
+/// which in positional mode always started at offset 0 — so consecutive
+/// diagnostics to a *redirected* (seekable) stream overwrote each other and
+/// only the last line survived. Building the File.Writer once and reusing it
+/// lets the tracked position accumulate, so every line lands in order.
+const StreamWriter = struct {
+    fw: std.Io.File.Writer,
 
-// Zig 0.16 Writer abstraction
-const Writer = struct {
-    io: std.Io,
-    buffer: *[8192]u8,
-    file: std.Io.File,
-
-    pub fn stdout() Writer {
+    fn init(file: std.Io.File, buffer: []u8) StreamWriter {
         const io_instance = std.Io.Threaded.global_single_threaded.io();
-        const static = struct {
-            var buffer: [8192]u8 = undefined;
-        };
-        return Writer{
-            .io = io_instance,
-            .buffer = &static.buffer,
-            .file = std.Io.File.stdout(),
-        };
+        return .{ .fw = file.writer(io_instance, buffer) };
     }
 
-    pub fn stderr() Writer {
-        const io_instance = std.Io.Threaded.global_single_threaded.io();
-        const static = struct {
-            var buffer: [8192]u8 = undefined;
-        };
-        return Writer{
-            .io = io_instance,
-            .buffer = &static.buffer,
-            .file = std.Io.File.stderr(),
-        };
-    }
-
-    pub fn print(self: *Writer, comptime fmt: []const u8, args: anytype) void {
-        var writer = self.file.writer(self.io, self.buffer);
-        writer.interface.print(fmt, args) catch {};
-        writer.interface.flush() catch {};
+    pub fn print(self: *StreamWriter, comptime fmt: []const u8, args: anytype) void {
+        self.fw.interface.print(fmt, args) catch {};
+        self.fw.interface.flush() catch {};
     }
 };
 
@@ -70,7 +48,10 @@ pub fn main(init: std.process.Init) !void {
     }
     const args = args_list.items;
 
-    var err = Writer.stderr();
+    var out_buf: [8192]u8 = undefined;
+    var err_buf: [8192]u8 = undefined;
+    var out = StreamWriter.init(std.Io.File.stdout(), &out_buf);
+    var err = StreamWriter.init(std.Io.File.stderr(), &err_buf);
 
     // Parse options
     var append_mode = false;
@@ -83,10 +64,12 @@ pub fn main(init: std.process.Init) !void {
         const arg = args[i];
 
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
-            printHelp(&err);
+            // GNU tee writes --help/--version to stdout, not stderr, so that
+            // `tee --help | pager` works.
+            printHelp(&out);
             return;
         } else if (std.mem.eql(u8, arg, "-V") or std.mem.eql(u8, arg, "--version")) {
-            err.print("ztee {s}\n", .{VERSION});
+            out.print("ztee {s}\n", .{VERSION});
             return;
         } else if (std.mem.eql(u8, arg, "-a") or std.mem.eql(u8, arg, "--append")) {
             append_mode = true;
@@ -100,37 +83,42 @@ pub fn main(init: std.process.Init) !void {
                 try files.append(allocator, args[i]);
             }
             break;
-        } else if (arg.len > 0 and arg[0] == '-' and arg.len > 1) {
-            // Check for combined short options
-            var all_valid = true;
+        } else if (arg.len > 1 and arg[0] == '-') {
+            // A cluster of short options. The lone "-" has length 1 and falls
+            // through to the else branch, where it is treated as a filename
+            // (GNU tee treats "-" as a literal file, not stdout).
             for (arg[1..]) |c| {
                 switch (c) {
                     'a' => append_mode = true,
                     'i' => ignore_sigint = true,
                     'p' => {},
                     else => {
-                        all_valid = false;
-                        break;
+                        // GNU reports the single offending character.
+                        err.print("ztee: invalid option -- '{c}'\n", .{c});
+                        err.print("Try 'ztee --help' for more information.\n", .{});
+                        std.process.exit(1);
                     },
                 }
-            }
-            if (!all_valid) {
-                err.print("ztee: invalid option -- '{s}'\n", .{arg[1..]});
-                err.print("Try 'ztee --help' for more information.\n", .{});
-                std.process.exit(1);
             }
         } else {
             try files.append(allocator, arg);
         }
     }
 
-    // Signal handling note: -i option is parsed but signal handling
-    // is not implemented in this version. Print warning if used.
+    // -i / --ignore-interrupts: install SIG_IGN for SIGINT like GNU tee does,
+    // so a Ctrl-C during a long copy does not kill ztee mid-stream.
     if (ignore_sigint) {
-        err.print("ztee: warning: -i option not fully implemented\n", .{});
+        const act: std.posix.Sigaction = .{
+            .handler = .{ .handler = std.posix.SIG.IGN },
+            .mask = std.posix.sigemptyset(),
+            .flags = 0,
+        };
+        std.posix.sigaction(.INT, &act, null);
     }
 
-    // Open output files using C functions
+    // Open output files. Note: GNU tee treats a filename "-" literally (it
+    // creates a file named "-") — it does NOT copy again to standard output —
+    // so we do the same for parity. (Verified against GNU coreutils 9.10.)
     var output_fds: std.ArrayListUnmanaged(c_int) = .empty;
     defer {
         for (output_fds.items) |fd| {
@@ -138,6 +126,9 @@ pub fn main(init: std.process.Init) !void {
         }
         output_fds.deinit(allocator);
     }
+    // Parallel to output_fds: the display name for write-error diagnostics.
+    var output_names: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer output_names.deinit(allocator);
 
     var had_error = false;
 
@@ -152,53 +143,50 @@ pub fn main(init: std.process.Init) !void {
         @memcpy(path_buf[0..path.len], path);
         path_buf[path.len] = 0;
 
-        const flags: c_int = if (append_mode)
-            O_WRONLY | O_CREAT | O_APPEND
-        else
-            O_WRONLY | O_CREAT | O_TRUNC;
+        // Build open flags via std.posix.O so the bit values are correct on
+        // every platform. Hardcoding Linux values (the previous bug) made -a
+        // truncate and default mode fail to truncate on macOS — silent data
+        // loss/corruption, since O_TRUNC/O_CREAT/O_APPEND differ on Darwin.
+        var oflags: std.posix.O = .{ .ACCMODE = .WRONLY, .CREAT = true };
+        if (append_mode) {
+            oflags.APPEND = true;
+        } else {
+            oflags.TRUNC = true;
+        }
 
-        const fd = open(@ptrCast(&path_buf), flags, @as(c_int, 0o644));
-        if (fd < 0) {
+        const fd = std.posix.openatZ(std.posix.AT.FDCWD, @ptrCast(&path_buf), oflags, 0o644) catch {
             err.print("ztee: {s}: Cannot open file\n", .{path});
             had_error = true;
             continue;
-        }
+        };
 
         try output_fds.append(allocator, fd);
+        try output_names.append(allocator, path);
     }
 
-    // Read from stdin (fd 0) and write to stdout (fd 1) + all files
+    // Read from stdin (fd 0) and write to stdout (fd 1) + all files.
     var buffer: [BUFFER_SIZE]u8 = undefined;
 
     while (true) {
-        const bytes_read = read(0, &buffer, BUFFER_SIZE);
+        const bytes_read = std.posix.read(0, &buffer) catch |e| {
+            // A real read error must NOT be reported as a clean EOF/success.
+            err.print("ztee: read error: {s}\n", .{@errorName(e)});
+            had_error = true;
+            break;
+        };
 
-        if (bytes_read <= 0) break;
+        if (bytes_read == 0) break; // true EOF
 
-        const data = buffer[0..@intCast(bytes_read)];
+        const data = buffer[0..bytes_read];
 
         // Write to stdout
-        var written: usize = 0;
-        while (written < data.len) {
-            const result = write(1, data.ptr + written, data.len - written);
-            if (result <= 0) {
-                had_error = true;
-                break;
-            }
-            written += @intCast(result);
-        }
+        if (!writeAll(1, data)) had_error = true;
 
-        // Write to all output files
+        // Write to all output files (and any "-" stdout duplicates)
         for (output_fds.items, 0..) |fd, idx| {
-            written = 0;
-            while (written < data.len) {
-                const result = write(fd, data.ptr + written, data.len - written);
-                if (result <= 0) {
-                    err.print("ztee: {s}: Write error\n", .{files.items[idx]});
-                    had_error = true;
-                    break;
-                }
-                written += @intCast(result);
+            if (!writeAll(fd, data)) {
+                err.print("ztee: {s}: Write error\n", .{output_names.items[idx]});
+                had_error = true;
             }
         }
     }
@@ -208,7 +196,18 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-fn printHelp(writer: *Writer) void {
+/// Write the whole slice, looping over short writes. Returns false on error.
+fn writeAll(fd: c_int, data: []const u8) bool {
+    var written: usize = 0;
+    while (written < data.len) {
+        const result = write(fd, data.ptr + written, data.len - written);
+        if (result <= 0) return false;
+        written += @intCast(result);
+    }
+    return true;
+}
+
+fn printHelp(writer: *StreamWriter) void {
     writer.print(
         \\Usage: ztee [OPTION]... [FILE]...
         \\
@@ -220,8 +219,6 @@ fn printHelp(writer: *Writer) void {
         \\  -p                        diagnose errors writing to non-pipes
         \\  -h, --help                display this help and exit
         \\  -V, --version             output version information and exit
-        \\
-        \\If a FILE is -, copy again to standard output.
         \\
         \\Examples:
         \\  ztee file.txt              Write stdin to stdout and file.txt

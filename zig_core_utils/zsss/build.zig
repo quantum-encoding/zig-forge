@@ -304,4 +304,18 @@ pub fn build(b: *std.Build) void {
 
     const run_lib_tests = b.addRunArtifact(lib_tests);
     test_step.dependOn(&run_lib_tests.step);
+
+    // Externally-anchored tests (FIPS-197 GF vectors, independently-generated
+    // Shamir shares, PNG-spec crafted inputs, ticket wire-format transcripts).
+    const anchor_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/gnu_parity_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+
+    const run_anchor_tests = b.addRunArtifact(anchor_tests);
+    test_step.dependOn(&run_anchor_tests.step);
 }

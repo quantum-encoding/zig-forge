@@ -25,6 +25,7 @@ const c = @cImport({
     @cInclude("arpa/inet.h");
     @cInclude("unistd.h");
     @cInclude("errno.h");
+    @cInclude("string.h");
     @cInclude("poll.h");
     @cInclude("time.h");
 });
@@ -37,7 +38,9 @@ const Timer = struct {
 
     pub fn start() !Timer {
         var ts: std.c.timespec = undefined;
-        _ = std.c.clock_gettime(.MONOTONIC, &ts);
+        // Finding (uninit-read): a failed clock_gettime left `ts` undefined and
+        // was read anyway, yielding a garbage start time. Fail loudly instead.
+        if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) return error.ClockFailed;
         return Timer{
             .start_time = @as(i128, ts.sec) * 1_000_000_000 + ts.nsec,
         };
@@ -45,8 +48,11 @@ const Timer = struct {
 
     pub fn read(self: Timer) u64 {
         var ts: std.c.timespec = undefined;
-        _ = std.c.clock_gettime(.MONOTONIC, &ts);
+        if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
         const now = @as(i128, ts.sec) * 1_000_000_000 + ts.nsec;
+        // Saturate: a non-monotonic reading (clock reset) must not panic the
+        // @intCast into u64 with a negative delta.
+        if (now <= self.start_time) return 0;
         return @intCast(now - self.start_time);
     }
 };
@@ -111,6 +117,58 @@ const Config = struct {
 };
 
 // ============================================================================
+// Argument value parsing / validation (pure, testable — see gnu_parity_test.zig)
+// ============================================================================
+
+// RFC 791 IPv4 header = 20 bytes; RFC 792 ICMP echo header = 8 bytes.
+const ICMP_HDR_BYTES: u32 = 8;
+const IP_HDR_BYTES: u32 = 20;
+// GNU/iputils ping caps the ICMP payload at 65507 = 65535 - 20 (IP) - 8 (ICMP);
+// larger sizes error out ("packet size N is too large. Maximum is 65507").
+pub const MAX_PAYLOAD_SIZE: u16 = 65507;
+
+pub const ArgError = error{ Invalid, OutOfRange };
+
+/// Parse a seconds value (float, e.g. "0.5") into milliseconds.
+///
+/// Hardened against the `@intFromFloat` panic that a raw parse triggered on
+/// negative, NaN, inf, or huge input (`-i -1`, `-i nan`, `-i 1e12`). Rejects
+/// anything that would not fit as a non-negative u32 millisecond count.
+pub fn parseSecondsToMs(s: []const u8) ArgError!u32 {
+    const f = std.fmt.parseFloat(f64, s) catch return error.Invalid;
+    if (std.math.isNan(f)) return error.Invalid;
+    const ms = f * 1000.0;
+    // The bound also rejects +inf (isNan already handled NaN) and negatives.
+    if (!(ms >= 0.0 and ms <= 4_000_000_000.0)) return error.OutOfRange;
+    return @intFromFloat(ms);
+}
+
+/// Parse the `-s` payload size. GNU ping rejects sizes above 65507.
+pub fn parsePayloadSize(s: []const u8) ArgError!u16 {
+    const v = std.fmt.parseInt(u16, s, 10) catch return error.Invalid;
+    if (v > MAX_PAYLOAD_SIZE) return error.OutOfRange;
+    return v;
+}
+
+/// Total datagram size reported in the "PING ..." header line: payload plus the
+/// ICMP and IP headers. Widened to u32 so a payload near 65507 cannot overflow
+/// the u16 `payload + 28` arithmetic the header line used to do.
+pub fn headerTotalBytes(payload_size: u16) u32 {
+    return @as(u32, payload_size) + ICMP_HDR_BYTES + IP_HDR_BYTES;
+}
+
+/// Build the iputils-format header line:
+///   "PING host (ip) 56(84) bytes of data.\n"
+pub fn formatHeaderLine(buf: []u8, host: []const u8, ip: []const u8, payload_size: u16) ![]u8 {
+    return std.fmt.bufPrint(buf, "PING {s} ({s}) {d}({d}) bytes of data.\n", .{
+        host,
+        ip,
+        payload_size,
+        headerTotalBytes(payload_size),
+    });
+}
+
+// ============================================================================
 // ICMP Header
 // ============================================================================
 
@@ -125,7 +183,7 @@ const IcmpHeader = extern struct {
 const ICMP_ECHO_REQUEST: u8 = 8;
 const ICMP_ECHO_REPLY: u8 = 0;
 
-fn icmpChecksum(data: []const u8) u16 {
+pub fn icmpChecksum(data: []const u8) u16 {
     var sum: u32 = 0;
     var i: usize = 0;
 
@@ -249,8 +307,12 @@ fn ping(config: *const Config) !void {
     // Create raw socket
     const sock = c.socket(c.AF_INET, c.SOCK_RAW, c.IPPROTO_ICMP);
     if (sock < 0) {
-        err_out.write("zping: socket: Operation not permitted\n");
-        err_out.write("Try: sudo setcap cap_net_raw+ep ./zping\n");
+        // Finding (gnu-parity): report the real errno, not a hardcoded EPERM.
+        const e = std.c._errno().*;
+        err_out.print("zping: socket: {s}\n", .{std.mem.sliceTo(c.strerror(e), 0)});
+        if (e == @intFromEnum(std.c.E.PERM) or e == @intFromEnum(std.c.E.ACCES)) {
+            err_out.write("Try: sudo setcap cap_net_raw+ep ./zping\n");
+        }
         std.process.exit(2);
     }
     defer _ = c.close(sock);
@@ -262,13 +324,19 @@ fn ping(config: *const Config) !void {
     };
     _ = c.setsockopt(sock, c.SOL_SOCKET, c.SO_RCVTIMEO, &tv, @sizeOf(@TypeOf(tv)));
 
-    // Print header
-    out.print("PING {s} ({s}) {d}({d}) bytes of data.\n", .{
-        config.host,
-        ip_slice,
-        config.payload_size,
-        config.payload_size + 28, // IP + ICMP headers
-    });
+    // Print header (uses the tested formatHeaderLine so the on-wire header
+    // byte-for-byte matches the pure function the tests anchor against).
+    var hdr_buf: [1024]u8 = undefined;
+    if (formatHeaderLine(&hdr_buf, config.host, ip_slice, config.payload_size)) |hdr| {
+        out.write(hdr);
+    } else |_| {
+        out.print("PING {s} ({s}) {d}({d}) bytes of data.\n", .{
+            config.host,
+            ip_slice,
+            config.payload_size,
+            headerTotalBytes(config.payload_size),
+        });
+    }
 
     // Prepare packet buffer (aligned for IcmpHeader)
     const packet_size = @sizeOf(IcmpHeader) + config.payload_size;
@@ -357,7 +425,10 @@ fn ping(config: *const Config) !void {
 
             total_elapsed_ns = timer.read();
 
-            if (recv_len < 0) {
+            // Finding (uninit-read): guard the minimum IPv4 header length BEFORE
+            // dereferencing recv_buf[0] (IHL). A short/zero-length datagram must
+            // not read the still-`undefined` receive buffer.
+            if (recv_len < @as(@TypeOf(recv_len), IP_HDR_BYTES)) {
                 break;
             }
 
@@ -515,12 +586,11 @@ fn parseArgs(args: []const []const u8) Config {
                 writer.write("zping: -i requires an argument\n");
                 std.process.exit(1);
             }
-            const interval_f = std.fmt.parseFloat(f64, args[i]) catch {
+            config.interval_ms = parseSecondsToMs(args[i]) catch {
                 var writer = Writer.stderr();
                 writer.print("zping: invalid interval '{s}'\n", .{args[i]});
                 std.process.exit(1);
             };
-            config.interval_ms = @intFromFloat(interval_f * 1000);
         } else if (std.mem.eql(u8, arg, "-W") or std.mem.eql(u8, arg, "--timeout")) {
             i += 1;
             if (i >= args.len) {
@@ -528,12 +598,11 @@ fn parseArgs(args: []const []const u8) Config {
                 writer.write("zping: -W requires an argument\n");
                 std.process.exit(1);
             }
-            const timeout_f = std.fmt.parseFloat(f64, args[i]) catch {
+            config.timeout_ms = parseSecondsToMs(args[i]) catch {
                 var writer = Writer.stderr();
                 writer.print("zping: invalid timeout '{s}'\n", .{args[i]});
                 std.process.exit(1);
             };
-            config.timeout_ms = @intFromFloat(timeout_f * 1000);
         } else if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--size")) {
             i += 1;
             if (i >= args.len) {
@@ -541,9 +610,12 @@ fn parseArgs(args: []const []const u8) Config {
                 writer.write("zping: -s requires an argument\n");
                 std.process.exit(1);
             }
-            config.payload_size = std.fmt.parseInt(u16, args[i], 10) catch {
+            config.payload_size = parsePayloadSize(args[i]) catch |e| {
                 var writer = Writer.stderr();
-                writer.print("zping: invalid size '{s}'\n", .{args[i]});
+                switch (e) {
+                    error.OutOfRange => writer.print("zping: packet size {s} is too large. Maximum is 65507\n", .{args[i]}),
+                    error.Invalid => writer.print("zping: invalid size '{s}'\n", .{args[i]}),
+                }
                 std.process.exit(1);
             };
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {

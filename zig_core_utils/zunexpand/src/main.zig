@@ -4,6 +4,11 @@
 //! Converts blanks (spaces) in input to tabs.
 //!
 //! Usage: zunexpand [OPTIONS] [FILE]...
+//!
+//! The blank-run tabification is a faithful port of GNU coreutils
+//! `src/unexpand.c` (`unexpand()` + `get_next_tab_column()`), so a maximal run
+//! of blanks (spaces AND tabs together) is treated as one unit and re-emitted
+//! as optimal tabs+spaces, and `-t`/`--tabs` implies `-a` (convert-all).
 
 const std = @import("std");
 
@@ -11,76 +16,77 @@ const VERSION = "1.0.0";
 
 // C functions
 extern "c" fn write(fd: c_int, buf: [*]const u8, count: usize) isize;
+extern "c" fn strerror(errnum: c_int) [*:0]const u8;
+extern "c" fn open(path: [*:0]const u8, flags: c_int, mode: c_int) c_int;
+extern "c" fn close(fd: c_int) c_int;
 
 const c_read = @extern(*const fn (c_int, [*]u8, usize) callconv(.c) isize, .{ .name = "read" });
+
+const TabParseError = error{ TabSizeZero, InvalidTabChar };
 
 const TabStops = struct {
     stops: [64]usize = undefined,
     count: usize = 0,
-    repeat_interval: usize = 8,
+    // Mirrors GNU's `tab_size`: nonzero means "tab stops every tab_size
+    // columns" (default 8, or a single explicit `-tN`). Zero means an explicit
+    // multi-value list is in `stops`, with NO tab stops past the last one.
+    tab_size: usize = 8,
 
-    fn parse(s: []const u8) TabStops {
+    /// Parse a -t / --tabs argument. Returns an error on a non-numeric or zero
+    /// tab size, matching GNU unexpand which errors rather than silently
+    /// falling back to width 8.
+    fn parse(s: []const u8) TabParseError!TabStops {
         var result = TabStops{};
+        result.count = 0;
 
-        if (s.len > 0 and s[0] == '+') {
-            result.repeat_interval = std.fmt.parseInt(usize, s[1..], 10) catch 8;
-            if (result.repeat_interval == 0) result.repeat_interval = 8;
-            return result;
-        }
+        if (s.len == 0) return result; // empty spec -> default width 8
 
         var it = std.mem.splitScalar(u8, s, ',');
         while (it.next()) |part| {
             if (part.len == 0) continue;
-
-            if (part[0] == '+' and result.count > 0) {
-                result.repeat_interval = std.fmt.parseInt(usize, part[1..], 10) catch 8;
-                if (result.repeat_interval == 0) result.repeat_interval = 8;
-                break;
-            }
-
+            const val = try parseSize(part);
             if (result.count < result.stops.len) {
-                const val = std.fmt.parseInt(usize, part, 10) catch continue;
-                if (val > 0) {
-                    result.stops[result.count] = val;
-                    result.count += 1;
-                }
+                result.stops[result.count] = val;
+                result.count += 1;
             }
         }
 
-        if (result.count == 1 and std.mem.indexOf(u8, s, ",") == null) {
-            result.repeat_interval = result.stops[0];
-            result.count = 0;
+        // finalize_tab_stops: default 8, single value -> that value, else 0.
+        if (result.count == 0) {
+            result.tab_size = 8;
+        } else if (result.count == 1) {
+            result.tab_size = result.stops[0];
+        } else {
+            result.tab_size = 0;
         }
 
         return result;
     }
 
-    fn nextTabStop(self: *const TabStops, col: usize) usize {
-        for (self.stops[0..self.count]) |stop| {
-            if (stop > col) return stop;
-        }
-
-        if (self.count > 0) {
-            const last = self.stops[self.count - 1];
-            if (col >= last) {
-                return col + self.repeat_interval - ((col - last) % self.repeat_interval);
-            }
-        }
-
-        return col + self.repeat_interval - (col % self.repeat_interval);
+    fn parseSize(part: []const u8) TabParseError!usize {
+        const v = std.fmt.parseInt(usize, part, 10) catch return error.InvalidTabChar;
+        if (v == 0) return error.TabSizeZero;
+        return v;
     }
 
-    fn isTabStop(self: *const TabStops, col: usize) bool {
-        for (self.stops[0..self.count]) |stop| {
-            if (stop == col) return true;
+    /// Port of GNU `get_next_tab_column`. Returns the first tab stop after
+    /// `column`. `tab_index` is advanced through the explicit list. `last_tab`
+    /// is set when we are past the last explicit stop (column+1 is returned as
+    /// a sentinel; the caller stops converting for the rest of the line).
+    fn nextTabColumn(self: *const TabStops, column: usize, tab_index: *usize, last_tab: *bool) usize {
+        last_tab.* = false;
+
+        if (self.tab_size != 0) {
+            return column + (self.tab_size - column % self.tab_size);
         }
-        if (self.count > 0) {
-            const last = self.stops[self.count - 1];
-            if (col > last) {
-                return ((col - last) % self.repeat_interval) == 0;
-            }
+
+        while (tab_index.* < self.count) : (tab_index.* += 1) {
+            const tab = self.stops[tab_index.*];
+            if (column < tab) return tab;
         }
-        return (col % self.repeat_interval) == 0;
+
+        last_tab.* = true;
+        return column + 1;
     }
 };
 
@@ -117,9 +123,8 @@ pub fn main(init: std.process.Init) !void {
     }
     const args = args_list.items;
 
-    // Options
+    // Options. `convert_all` == GNU's convert_entire_line.
     var convert_all = false;
-    var first_only = true; // Default: only leading blanks
     var tabs = TabStops{};
     var files: std.ArrayListUnmanaged([]const u8) = .empty;
     defer files.deinit(allocator);
@@ -136,9 +141,7 @@ pub fn main(init: std.process.Init) !void {
             return;
         } else if (std.mem.eql(u8, arg, "-a") or std.mem.eql(u8, arg, "--all")) {
             convert_all = true;
-            first_only = false;
         } else if (std.mem.eql(u8, arg, "--first-only")) {
-            first_only = true;
             convert_all = false;
         } else if (std.mem.eql(u8, arg, "-t") or std.mem.eql(u8, arg, "--tabs")) {
             i += 1;
@@ -146,9 +149,12 @@ pub fn main(init: std.process.Init) !void {
                 writeStderr("zunexpand: option requires an argument -- 't'\n", .{});
                 std.process.exit(1);
             }
-            tabs = TabStops.parse(args[i]);
+            tabs = parseTabsOrExit(args[i]);
+            // -t/--tabs implies convert-all (GNU unexpand behavior).
+            convert_all = true;
         } else if (std.mem.startsWith(u8, arg, "--tabs=")) {
-            tabs = TabStops.parse(arg[7..]);
+            tabs = parseTabsOrExit(arg[7..]);
+            convert_all = true;
         } else if (arg.len > 1 and arg[0] == '-' and arg[1] != '-') {
             // Combined short options or -t<N>
             var j: usize = 1;
@@ -157,12 +163,12 @@ pub fn main(init: std.process.Init) !void {
                 switch (ch) {
                     'a' => {
                         convert_all = true;
-                        first_only = false;
                     },
                     't' => {
                         // Rest of arg is the tab spec
                         if (j + 1 < arg.len) {
-                            tabs = TabStops.parse(arg[j + 1 ..]);
+                            tabs = parseTabsOrExit(arg[j + 1 ..]);
+                            convert_all = true;
                             break;
                         } else {
                             i += 1;
@@ -170,7 +176,8 @@ pub fn main(init: std.process.Init) !void {
                                 writeStderr("zunexpand: option requires an argument -- 't'\n", .{});
                                 std.process.exit(1);
                             }
-                            tabs = TabStops.parse(args[i]);
+                            tabs = parseTabsOrExit(args[i]);
+                            convert_all = true;
                             break;
                         }
                     },
@@ -204,12 +211,12 @@ pub fn main(init: std.process.Init) !void {
 
     for (files.items) |file| {
         if (std.mem.eql(u8, file, "-")) {
-            processStdin(allocator, &tabs, convert_all, first_only) catch {
+            processStdin(allocator, &tabs, convert_all) catch {
                 errors += 1;
             };
         } else {
-            processFile(allocator, file, &tabs, convert_all, first_only) catch {
-                writeStderr("zunexpand: {s}: No such file or directory\n", .{file});
+            // processFile prints its own diagnostic with the real errno.
+            processFile(allocator, file, &tabs, convert_all) catch {
                 errors += 1;
             };
         }
@@ -220,19 +227,37 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-fn processStdin(allocator: std.mem.Allocator, tabs: *const TabStops, convert_all: bool, first_only: bool) !void {
+/// Parse a tab spec, or print the GNU-style diagnostic and exit(1).
+fn parseTabsOrExit(spec: []const u8) TabStops {
+    return TabStops.parse(spec) catch |err| {
+        switch (err) {
+            error.TabSizeZero => writeStderr("zunexpand: tab size cannot be 0\n", .{}),
+            error.InvalidTabChar => writeStderr(
+                "zunexpand: tab size contains invalid character(s): '{s}'\n",
+                .{spec},
+            ),
+        }
+        std.process.exit(1);
+    };
+}
+
+fn processStdin(allocator: std.mem.Allocator, tabs: *const TabStops, convert_all: bool) !void {
     var buf: [65536]u8 = undefined;
     var line_buf: std.ArrayListUnmanaged(u8) = .empty;
     defer line_buf.deinit(allocator);
 
     while (true) {
         const n = c_read(0, &buf, buf.len);
-        if (n <= 0) break;
+        if (n < 0) {
+            writeStderr("zunexpand: -: {s}\n", .{std.mem.span(strerror(std.c._errno().*))});
+            return error.ReadFailed;
+        }
+        if (n == 0) break;
 
         const data = buf[0..@intCast(n)];
         for (data) |byte| {
             if (byte == '\n') {
-                processLine(allocator, line_buf.items, tabs, convert_all, first_only);
+                try processLine(allocator, line_buf.items, tabs, convert_all);
                 writeStdoutRaw("\n");
                 line_buf.clearRetainingCapacity();
             } else {
@@ -241,14 +266,12 @@ fn processStdin(allocator: std.mem.Allocator, tabs: *const TabStops, convert_all
         }
     }
 
-    // Handle last line without newline
     if (line_buf.items.len > 0) {
-        processLine(allocator, line_buf.items, tabs, convert_all, first_only);
+        try processLine(allocator, line_buf.items, tabs, convert_all);
     }
 }
 
-fn processFile(allocator: std.mem.Allocator, path: []const u8, tabs: *const TabStops, convert_all: bool, first_only: bool) !void {
-    // Open file using C
+fn processFile(allocator: std.mem.Allocator, path: []const u8, tabs: *const TabStops, convert_all: bool) !void {
     var path_z: [4097]u8 = undefined;
     if (path.len >= path_z.len) return error.PathTooLong;
     @memcpy(path_z[0..path.len], path);
@@ -256,7 +279,10 @@ fn processFile(allocator: std.mem.Allocator, path: []const u8, tabs: *const TabS
 
     const O_RDONLY: c_int = 0;
     const fd = open(@ptrCast(&path_z), O_RDONLY, 0);
-    if (fd < 0) return error.FileNotFound;
+    if (fd < 0) {
+        writeStderr("zunexpand: {s}: {s}\n", .{ path, std.mem.span(strerror(std.c._errno().*)) });
+        return error.OpenFailed;
+    }
     defer _ = close(fd);
 
     var buf: [65536]u8 = undefined;
@@ -265,12 +291,17 @@ fn processFile(allocator: std.mem.Allocator, path: []const u8, tabs: *const TabS
 
     while (true) {
         const n = c_read(fd, &buf, buf.len);
-        if (n <= 0) break;
+        if (n < 0) {
+            // A directory read yields EISDIR here -> "Is a directory".
+            writeStderr("zunexpand: {s}: {s}\n", .{ path, std.mem.span(strerror(std.c._errno().*)) });
+            return error.ReadFailed;
+        }
+        if (n == 0) break;
 
         const data = buf[0..@intCast(n)];
         for (data) |byte| {
             if (byte == '\n') {
-                processLine(allocator, line_buf.items, tabs, convert_all, first_only);
+                try processLine(allocator, line_buf.items, tabs, convert_all);
                 writeStdoutRaw("\n");
                 line_buf.clearRetainingCapacity();
             } else {
@@ -279,99 +310,97 @@ fn processFile(allocator: std.mem.Allocator, path: []const u8, tabs: *const TabS
         }
     }
 
-    // Handle last line without newline
     if (line_buf.items.len > 0) {
-        processLine(allocator, line_buf.items, tabs, convert_all, first_only);
+        try processLine(allocator, line_buf.items, tabs, convert_all);
     }
 }
 
-extern "c" fn open(path: [*:0]const u8, flags: c_int, mode: c_int) c_int;
-extern "c" fn close(fd: c_int) c_int;
-
-fn processLine(allocator: std.mem.Allocator, line: []const u8, tabs: *const TabStops, convert_all: bool, first_only: bool) void {
+/// Faithful port of GNU coreutils `unexpand()` for a single line (the caller
+/// splits input on '\n' and re-emits the newline, matching GNU's per-line
+/// state reset). `convert_all` is GNU's `convert_entire_line`.
+fn processLine(allocator: std.mem.Allocator, line: []const u8, tabs: *const TabStops, convert_all: bool) !void {
     if (line.len == 0) return;
 
     var output: std.ArrayListUnmanaged(u8) = .empty;
     defer output.deinit(allocator);
 
-    var col: usize = 0;
-    var space_count: usize = 0;
-    var space_start_col: usize = 0;
-    var in_leading = true;
+    // Pending blank bytes; `pending.items.len` is GNU's `pending` count. Ensure
+    // at least one slot so `pending_blank[0] = '\t'` is always writable even
+    // when the count is momentarily zero (mirrors GNU's preallocated buffer).
+    var pending: std.ArrayListUnmanaged(u8) = .empty;
+    defer pending.deinit(allocator);
+    try pending.ensureTotalCapacity(allocator, 1);
+
+    var convert = true;
+    var column: usize = 0;
+    var next_tab_column: usize = 0;
+    var tab_index: usize = 0;
+    var one_blank_before_tab_stop = false;
+    var prev_blank = true; // initial blanks are treated as preceded by a blank
 
     for (line) |ch| {
-        if (ch == ' ') {
-            if (space_count == 0) {
-                space_start_col = col;
-            }
-            space_count += 1;
-            col += 1;
-        } else {
-            // Flush accumulated spaces
-            if (space_count > 0) {
-                const should_convert = if (first_only) in_leading else convert_all or in_leading;
-                flushSpaces(allocator, &output, space_start_col, space_count, tabs, should_convert);
-                space_count = 0;
-            }
+        var emit_char = true; // GNU's g.len: cleared when the char is absorbed into a tab
 
-            if (ch != ' ' and ch != '\t') {
-                in_leading = false;
-            }
+        if (convert) {
+            const blank = ch == ' ' or ch == '\t';
 
-            output.append(allocator, ch) catch return;
+            if (blank) {
+                var last_tab = false;
+                next_tab_column = tabs.nextTabColumn(column, &tab_index, &last_tab);
 
-            if (ch == '\t') {
-                col = tabs.nextTabStop(col);
+                if (last_tab) convert = false;
+
+                if (convert) {
+                    if (ch == '\t') {
+                        column = next_tab_column;
+                        if (pending.items.len > 0) pending.items[0] = '\t';
+                    } else {
+                        column += 1;
+                        if (!(prev_blank and column >= next_tab_column)) {
+                            // Keep accumulating; not yet known if it becomes a tab.
+                            if (column == next_tab_column) one_blank_before_tab_stop = true;
+                            try pending.append(allocator, ch);
+                            prev_blank = true;
+                            continue;
+                        }
+                        // Replace the pending blanks by a tab.
+                        emit_char = false;
+                        try output.append(allocator, '\t');
+                        pending.items.ptr[0] = '\t';
+                    }
+                    // Discard pending blanks, unless it was a single blank just
+                    // before the previous tab stop.
+                    pending.items.len = if (one_blank_before_tab_stop) 1 else 0;
+                }
             } else if (ch == 0x08) { // backspace
-                if (col > 0) col -= 1;
+                if (column > 0) column -= 1;
+                next_tab_column = column;
+                if (tab_index > 0) tab_index -= 1;
             } else {
-                col += 1;
+                column += 1;
             }
+
+            if (pending.items.len > 0) {
+                if (pending.items.len > 1 and one_blank_before_tab_stop) pending.items[0] = '\t';
+                try output.appendSlice(allocator, pending.items);
+                pending.items.len = 0;
+                one_blank_before_tab_stop = false;
+            }
+
+            prev_blank = blank;
+            convert = convert and (convert_all or blank);
         }
+
+        if (emit_char) try output.append(allocator, ch);
     }
 
-    // Flush trailing spaces
-    if (space_count > 0) {
-        const should_convert = if (first_only) in_leading else convert_all or in_leading;
-        flushSpaces(allocator, &output, space_start_col, space_count, tabs, should_convert);
+    // Flush any blanks still pending at end of line.
+    if (pending.items.len > 0) {
+        if (pending.items.len > 1 and one_blank_before_tab_stop) pending.items[0] = '\t';
+        try output.appendSlice(allocator, pending.items);
     }
 
     writeStdoutRaw(output.items);
-}
-
-fn flushSpaces(allocator: std.mem.Allocator, output: *std.ArrayListUnmanaged(u8), start_col: usize, count: usize, tabs: *const TabStops, convert: bool) void {
-    if (!convert or count < 2) {
-        // Just output spaces
-        var i: usize = 0;
-        while (i < count) : (i += 1) {
-            output.append(allocator, ' ') catch return;
-        }
-        return;
-    }
-
-    var col = start_col;
-    const end_col = start_col + count;
-
-    // Convert spaces to tabs where possible
-    while (col < end_col) {
-        const next_tab_stop = tabs.nextTabStop(col);
-
-        if (next_tab_stop <= end_col and next_tab_stop > col) {
-            // Can fit a tab
-            const spaces_to_tab = next_tab_stop - col;
-            if (spaces_to_tab > 1 or (tabs.isTabStop(col) and end_col >= next_tab_stop)) {
-                output.append(allocator, '\t') catch return;
-                col = next_tab_stop;
-            } else {
-                output.append(allocator, ' ') catch return;
-                col += 1;
-            }
-        } else {
-            // Output remaining as spaces
-            output.append(allocator, ' ') catch return;
-            col += 1;
-        }
-    }
 }
 
 fn printHelp() void {
@@ -385,6 +414,7 @@ fn printHelp() void {
         \\  -a, --all        convert all blanks, instead of just initial blanks
         \\      --first-only convert only leading sequences of blanks (default)
         \\  -t, --tabs=N     have tabs N characters apart instead of 8
+        \\                   (enables -a)
         \\      --help       display this help and exit
         \\      --version    output version information and exit
         \\

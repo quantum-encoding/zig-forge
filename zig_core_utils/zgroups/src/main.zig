@@ -33,12 +33,36 @@ const Group = extern struct {
     gr_mem: ?[*]?[*:0]const u8,
 };
 
+/// Set when any write to stdout/stderr fails (short write, EPIPE, ...) so the
+/// process can exit non-zero the way GNU coreutils does on write errors.
+var write_failed: bool = false;
+
+/// Write all bytes, looping over partial writes and retrying on EINTR. On error
+/// (e.g. EPIPE from a closed pipe) set `write_failed` so main() can surface a
+/// non-zero exit code the way GNU coreutils does.
+fn writeAll(fd: libc.fd_t, data: []const u8) void {
+    var index: usize = 0;
+    while (index < data.len) {
+        const n = libc.write(fd, data.ptr + index, data.len - index);
+        if (n < 0) {
+            if (libc._errno().* == @intFromEnum(std.c.E.INTR)) continue;
+            write_failed = true;
+            return;
+        }
+        if (n == 0) {
+            write_failed = true;
+            return;
+        }
+        index += @intCast(n);
+    }
+}
+
 fn writeStdout(data: []const u8) void {
-    _ = libc.write(libc.STDOUT_FILENO, data.ptr, data.len);
+    writeAll(libc.STDOUT_FILENO, data);
 }
 
 fn writeStderr(data: []const u8) void {
-    _ = libc.write(libc.STDERR_FILENO, data.ptr, data.len);
+    writeAll(libc.STDERR_FILENO, data);
 }
 
 fn printUsage() void {
@@ -52,11 +76,13 @@ fn printUsage() void {
         \\      --version  Output version information and exit
         \\
     ;
-    writeStderr(usage);
+    // GNU coreutils writes --help / --version to stdout with exit status 0.
+    writeStdout(usage);
 }
 
 fn printVersion() void {
-    writeStderr("zgroups " ++ VERSION ++ "\n");
+    // GNU coreutils writes --version to stdout with exit status 0.
+    writeStdout("zgroups " ++ VERSION ++ "\n");
 }
 
 fn getGroupName(gid: u32, buf: []u8) []const u8 {
@@ -104,23 +130,54 @@ fn printGroups(username: ?[]const u8) bool {
         primary_gid = pw.pw_gid;
     }
 
-    // Get group list
-    var groups: [128]u32 = undefined;
+    // Group list. Use a stack buffer for the common case; grow onto the heap if
+    // the user belongs to more groups than fit (large LDAP/AD environments).
+    var stack_groups: [128]u32 = undefined;
+    var groups: []u32 = &stack_groups;
+    var heap_groups: ?[]u32 = null;
+    defer if (heap_groups) |hg| std.heap.page_allocator.free(hg);
     var ngroups: c_int = undefined;
 
     if (username == null) {
-        // For current user, use getgroups() to match GNU ordering
-        ngroups = getgroups(128, &groups);
-        if (ngroups < 0) {
-            writeStderr("zgroups: cannot get group list\n");
-            return false;
+        // For current user, use getgroups() to match GNU ordering. Grow the
+        // buffer if getgroups reports more entries than we have room for.
+        while (true) {
+            ngroups = getgroups(@intCast(groups.len), groups.ptr);
+            if (ngroups >= 0) break;
+            // -1: the caller's array is too small. Query the required count.
+            const needed = getgroups(0, groups.ptr);
+            const new_len: usize = if (needed > 0) @as(usize, @intCast(needed)) else groups.len * 2;
+            if (new_len <= groups.len) {
+                writeStderr("zgroups: cannot get group list\n");
+                return false;
+            }
+            if (heap_groups) |hg| std.heap.page_allocator.free(hg);
+            heap_groups = std.heap.page_allocator.alloc(u32, new_len) catch {
+                writeStderr("zgroups: cannot get group list\n");
+                return false;
+            };
+            groups = heap_groups.?;
         }
-        // primary_gid used in print loop below
     } else {
-        ngroups = 128;
-        if (getgrouplist(name_z, primary_gid, &groups, &ngroups) < 0) {
-            writeStderr("zgroups: cannot get group list\n");
-            return false;
+        // getgrouplist: on overflow it returns -1 and (on this platform) writes
+        // the required count back into ngroups. Retry with a grown buffer.
+        while (true) {
+            ngroups = @intCast(groups.len);
+            if (getgrouplist(name_z, primary_gid, groups.ptr, &ngroups) >= 0) break;
+            const new_len: usize = if (ngroups > @as(c_int, @intCast(groups.len)))
+                @as(usize, @intCast(ngroups))
+            else
+                groups.len * 2;
+            if (new_len <= groups.len) {
+                writeStderr("zgroups: cannot get group list\n");
+                return false;
+            }
+            if (heap_groups) |hg| std.heap.page_allocator.free(hg);
+            heap_groups = std.heap.page_allocator.alloc(u32, new_len) catch {
+                writeStderr("zgroups: cannot get group list\n");
+                return false;
+            };
+            groups = heap_groups.?;
         }
     }
 
@@ -144,25 +201,59 @@ fn printGroups(username: ?[]const u8) bool {
     return true;
 }
 
+/// Emit a GNU-style diagnostic for an unusable option and exit(1). Mirrors
+/// getopt's two shapes: "invalid option -- 'x'" for a bad short option and
+/// "unrecognized option '--foo'" for a bad long option, each followed by the
+/// "Try '<prog> --help'" hint.
+fn rejectOption(arg: []const u8) noreturn {
+    if (arg.len >= 2 and arg[1] == '-') {
+        // Long option: unrecognized option '--foo'
+        writeStderr("zgroups: unrecognized option '");
+        writeStderr(arg);
+        writeStderr("'\n");
+    } else {
+        // Short option: invalid option -- 'x' (first offending char)
+        writeStderr("zgroups: invalid option -- '");
+        writeStderr(arg[1..2]);
+        writeStderr("'\n");
+    }
+    writeStderr("Try 'zgroups --help' for more information.\n");
+    std.process.exit(1);
+}
+
 pub fn main(init: std.process.Init) !void {
     var args_iter = std.process.Args.Iterator.init(init.minimal.args);
     _ = args_iter.next(); // skip program name
 
     var users_found = false;
     var exit_code: u8 = 0;
+    var seen_double_dash = false;
 
     while (args_iter.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--help")) {
-            printUsage();
-            return;
-        } else if (std.mem.eql(u8, arg, "--version")) {
-            printVersion();
-            return;
-        } else if (arg.len > 0 and arg[0] != '-') {
-            users_found = true;
-            if (!printGroups(arg)) {
-                exit_code = 1;
+        if (!seen_double_dash) {
+            if (std.mem.eql(u8, arg, "--")) {
+                // End-of-options separator: everything after is a username.
+                seen_double_dash = true;
+                continue;
+            } else if (std.mem.eql(u8, arg, "--help")) {
+                printUsage();
+                if (write_failed) std.process.exit(1);
+                return;
+            } else if (std.mem.eql(u8, arg, "--version")) {
+                printVersion();
+                if (write_failed) std.process.exit(1);
+                return;
+            } else if (arg.len > 1 and arg[0] == '-') {
+                // Unknown option (a bare "-" is treated as a username, so
+                // require len > 1 here). GNU errors and exits 1.
+                rejectOption(arg);
             }
+        }
+
+        // Non-option argument (or anything after "--"): a username.
+        users_found = true;
+        if (!printGroups(arg)) {
+            exit_code = 1;
         }
     }
 
@@ -170,6 +261,10 @@ pub fn main(init: std.process.Init) !void {
         if (!printGroups(null)) {
             exit_code = 1;
         }
+    }
+
+    if (write_failed and exit_code == 0) {
+        exit_code = 1;
     }
 
     if (exit_code != 0) {

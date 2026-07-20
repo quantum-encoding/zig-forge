@@ -41,6 +41,18 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
 
+    // Externally-anchored GNU-parity / documented-behavior tests
+    const parity_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/gnu_parity_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    const run_parity_tests = b.addRunArtifact(parity_tests);
+    test_step.dependOn(&run_parity_tests.step);
+
     // Benchmark build (release-fast for accurate benchmarking)
     const bench_exe = b.addExecutable(.{
         .name = "zsys-bench",
@@ -48,6 +60,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = .ReleaseFast,
+            .link_libc = true,
         }),
     });
 

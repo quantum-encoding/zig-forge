@@ -11,15 +11,29 @@ const VERSION = "1.0.0";
 
 // C functions
 extern "c" fn write(fd: c_int, buf: [*]const u8, count: usize) isize;
-extern "c" fn open(path: [*:0]const u8, flags: c_int, mode: c_int) c_int;
 extern "c" fn close(fd: c_int) c_int;
 
 const c_read = @extern(*const fn (c_int, [*]u8, usize) callconv(.c) isize, .{ .name = "read" });
 
-const O_RDONLY: c_int = 0;
-const O_WRONLY: c_int = 1;
-const O_CREAT: c_int = 0o100;
-const O_TRUNC: c_int = 0o1000;
+// Open helpers built on std.posix so the O_* flags and the file-creation mode
+// are target-correct. The previous hand-rolled `extern fn open(path,flags,mode)`
+// used Linux O_* bit values and a fixed `mode` parameter; on macOS arm64 the
+// flags meant the wrong thing (no O_TRUNC) and libc read `mode` from the
+// variadic slot, so every output file was created with mode 0o000.
+fn openRead(path: [*:0]const u8) c_int {
+    const fd = std.posix.openatZ(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY }, 0) catch return -1;
+    return fd;
+}
+
+fn openWriteCreateTrunc(path: [*:0]const u8) c_int {
+    // 0o666 modified by the process umask, matching GNU coreutils' split.
+    const fd = std.posix.openatZ(std.posix.AT.FDCWD, path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o666) catch return -1;
+    return fd;
+}
+
+// Max supported suffix length; also the size of the on-stack suffix buffers.
+// `-a N` above this is rejected rather than overflowing the buffer.
+const MAX_SUFFIX_LEN: usize = 128;
 
 fn writeStderr(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
@@ -69,6 +83,7 @@ pub fn main(init: std.process.Init) !void {
     var num_chunks: usize = 0;
     var line_bytes_per_file: usize = 0;
     var numeric_suffixes = false;
+    var suffix_start: usize = 0;
     var suffix_length: usize = 2;
     var additional_suffix: []const u8 = "";
     var elide_empty = false;
@@ -163,6 +178,13 @@ pub fn main(init: std.process.Init) !void {
             };
         } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--numeric-suffixes")) {
             numeric_suffixes = true;
+        } else if (std.mem.startsWith(u8, arg, "--numeric-suffixes=")) {
+            numeric_suffixes = true;
+            const val = arg["--numeric-suffixes=".len..];
+            suffix_start = std.fmt.parseInt(usize, val, 10) catch {
+                writeStderr("zsplit: invalid start value for numeric suffixes: '{s}'\n", .{val});
+                std.process.exit(1);
+            };
         } else if (std.mem.eql(u8, arg, "-a") or std.mem.eql(u8, arg, "--suffix-length")) {
             i += 1;
             if (i >= args.len) {
@@ -337,6 +359,30 @@ pub fn main(init: std.process.Init) !void {
         writeStderr("zsplit: number of chunks must be positive\n", .{});
         std.process.exit(1);
     }
+    // Reject degenerate counts (GNU exits 1). Zero counts otherwise make the
+    // split loops fail to advance, creating output files without progress.
+    if (mode == .bytes and bytes_per_file == 0) {
+        writeStderr("zsplit: invalid number of bytes: '0'\n", .{});
+        std.process.exit(1);
+    }
+    if (mode == .line_bytes and line_bytes_per_file == 0) {
+        writeStderr("zsplit: invalid number of bytes: '0'\n", .{});
+        std.process.exit(1);
+    }
+    if (mode == .lines and lines_per_file == 0) {
+        writeStderr("zsplit: invalid number of lines: '0'\n", .{});
+        std.process.exit(1);
+    }
+    // Bound the suffix length so the fixed-size on-stack suffix buffers cannot
+    // be overflowed by an attacker-supplied `-a N`.
+    if (suffix_length == 0) {
+        writeStderr("zsplit: invalid suffix length: '0'\n", .{});
+        std.process.exit(1);
+    }
+    if (suffix_length > MAX_SUFFIX_LEN) {
+        writeStderr("zsplit: invalid suffix length: '{d}'\n", .{suffix_length});
+        std.process.exit(1);
+    }
 
     // Open input file
     var in_fd: c_int = 0; // stdin
@@ -351,7 +397,7 @@ pub fn main(init: std.process.Init) !void {
         @memcpy(path_z[0..input_file.len], input_file);
         path_z[input_file.len] = 0;
 
-        in_fd = open(@ptrCast(&path_z), O_RDONLY, 0);
+        in_fd = openRead(@ptrCast(&path_z));
         if (in_fd < 0) {
             writeStderr("zsplit: cannot open '{s}' for reading\n", .{input_file});
             std.process.exit(1);
@@ -366,23 +412,19 @@ pub fn main(init: std.process.Init) !void {
         if (in_fd != 0) _ = close(in_fd);
     }
 
-    // Calculate bytes per file for chunk mode
-    if (mode == .chunks) {
-        if (file_size) |size| {
-            bytes_per_file = (size + num_chunks - 1) / num_chunks;
-            mode = .bytes;
-        } else {
-            writeStderr("zsplit: cannot determine input size for chunk mode from stdin\n", .{});
-            std.process.exit(1);
-        }
-    }
-
     // Split the file
     switch (mode) {
-        .lines => splitByLines(allocator, in_fd, prefix, lines_per_file, suffix_length, numeric_suffixes, additional_suffix, verbose),
-        .bytes => splitByBytes(in_fd, prefix, bytes_per_file, suffix_length, numeric_suffixes, additional_suffix, verbose),
-        .line_bytes => splitByLineBytes(allocator, in_fd, prefix, line_bytes_per_file, suffix_length, numeric_suffixes, additional_suffix, elide_empty, verbose),
-        .chunks => unreachable,
+        .lines => splitByLines(allocator, in_fd, prefix, lines_per_file, suffix_length, numeric_suffixes, suffix_start, additional_suffix, verbose),
+        .bytes => splitByBytes(in_fd, prefix, bytes_per_file, suffix_length, numeric_suffixes, suffix_start, additional_suffix, verbose),
+        .line_bytes => splitByLineBytes(allocator, in_fd, prefix, line_bytes_per_file, suffix_length, numeric_suffixes, suffix_start, additional_suffix, elide_empty, verbose),
+        .chunks => {
+            const size = file_size orelse {
+                // GNU buffers stdin to satisfy -n; we require a regular file.
+                writeStderr("zsplit: cannot determine input size for chunk mode from stdin\n", .{});
+                std.process.exit(1);
+            };
+            splitByChunks(in_fd, prefix, num_chunks, size, suffix_length, numeric_suffixes, suffix_start, additional_suffix, verbose);
+        },
     }
 }
 
@@ -409,34 +451,34 @@ fn parseSize(s: []const u8) ?usize {
 }
 
 fn getFileSize(fd: c_int) ?usize {
-    const stat_t = extern struct {
-        st_dev: u64,
-        st_ino: u64,
-        st_nlink: u64,
-        st_mode: u32,
-        st_uid: u32,
-        st_gid: u32,
-        __pad0: u32,
-        st_rdev: u64,
-        st_size: i64,
-        st_blksize: i64,
-        st_blocks: i64,
-        st_atime: i64,
-        st_atime_nsec: i64,
-        st_mtime: i64,
-        st_mtime_nsec: i64,
-        st_ctime: i64,
-        st_ctime_nsec: i64,
-        __unused: [3]i64,
-    };
+    // Use std.posix.fstat so the `struct stat` layout is target-correct; the
+    // previous hand-rolled glibc/x86_64 layout read st_size from the wrong
+    // offset on macOS.
+    var st: std.c.Stat = undefined;
+    if (std.c.fstat(fd, &st) != 0) return null;
+    return if (st.size >= 0) @intCast(st.size) else null;
+}
 
-    const fstat = @extern(*const fn (c_int, *stat_t) callconv(.c) c_int, .{ .name = "fstat" });
-
-    var st: stat_t = undefined;
-    if (fstat(fd, &st) == 0) {
-        return if (st.st_size >= 0) @intCast(st.st_size) else null;
+// Returns true when `index` no longer fits in `length` digits of the given
+// radix (10 numeric / 26 alphabetic), i.e. the suffix space is exhausted.
+fn suffixExhausted(index: usize, length: usize, numeric: bool) bool {
+    const radix: usize = if (numeric) 10 else 26;
+    var max: usize = 1;
+    var k: usize = 0;
+    while (k < length) : (k += 1) {
+        max = std.math.mul(usize, max, radix) catch return false; // > usize => effectively unlimited
     }
-    return null;
+    return index >= max;
+}
+
+// Generate the suffix for `index`, exiting 1 (like GNU) if the suffix space is
+// exhausted rather than silently wrapping and overwriting earlier pieces.
+fn makeSuffix(buf: []u8, index: usize, length: usize, numeric: bool) []const u8 {
+    if (suffixExhausted(index, length, numeric)) {
+        writeStderr("zsplit: output file suffixes exhausted\n", .{});
+        std.process.exit(1);
+    }
+    return generateSuffix(buf, index, length, numeric);
 }
 
 fn generateSuffix(buf: []u8, index: usize, length: usize, numeric: bool) []const u8 {
@@ -472,18 +514,56 @@ fn openOutputFile(prefix: []const u8, suffix: []const u8, additional_suffix: []c
     @memcpy(path_buf[prefix.len + suffix.len .. total_len], additional_suffix);
     path_buf[total_len] = 0;
 
-    return open(@ptrCast(&path_buf), O_WRONLY | O_CREAT | O_TRUNC, 0o644);
+    return openWriteCreateTrunc(@ptrCast(&path_buf));
 }
 
-fn splitByLines(allocator: std.mem.Allocator, in_fd: c_int, prefix: []const u8, lines_per_file: usize, suffix_length: usize, numeric: bool, additional_suffix: []const u8, verbose: bool) void {
+// -n N: split into exactly N files by byte size. GNU always emits N files.
+// The remainder (S mod N) is distributed to the LEADING files: the first
+// `S mod N` files get `ceil(S/N)` bytes and the rest get `floor(S/N)` (verified
+// against GNU coreutils `split`: e.g. 21 bytes -n 4 => 6,5,5,5; 2000 -n 3 =>
+// 667,667,666). Empty files are produced when S < N. The input is read
+// sequentially (chunk boundaries are contiguous), so no seeking is required.
+fn splitByChunks(in_fd: c_int, prefix: []const u8, num_chunks: usize, total_size: usize, suffix_length: usize, numeric: bool, suffix_start: usize, additional_suffix: []const u8, verbose: bool) void {
+    var buf: [65536]u8 = undefined;
+    var suffix_buf: [MAX_SUFFIX_LEN]u8 = undefined;
+
+    const base = total_size / num_chunks;
+    const rem = total_size % num_chunks;
+
+    var i: usize = 0;
+    while (i < num_chunks) : (i += 1) {
+        var to_write: usize = base + @as(usize, if (i < rem) 1 else 0);
+
+        const suffix = makeSuffix(&suffix_buf, suffix_start + i, suffix_length, numeric);
+        const out_fd = openOutputFile(prefix, suffix, additional_suffix);
+        if (out_fd < 0) {
+            writeStderr("zsplit: cannot create output file\n", .{});
+            return;
+        }
+        if (verbose) {
+            writeStdout("creating file '{s}{s}{s}'\n", .{ prefix, suffix, additional_suffix });
+        }
+
+        while (to_write > 0) {
+            const want = @min(to_write, buf.len);
+            const n = c_read(in_fd, &buf, want);
+            if (n <= 0) break;
+            _ = writeFd(out_fd, buf[0..@intCast(n)]);
+            to_write -= @intCast(n);
+        }
+        _ = close(out_fd);
+    }
+}
+
+fn splitByLines(allocator: std.mem.Allocator, in_fd: c_int, prefix: []const u8, lines_per_file: usize, suffix_length: usize, numeric: bool, suffix_start: usize, additional_suffix: []const u8, verbose: bool) void {
     var buf: [65536]u8 = undefined;
     var line_buf: std.ArrayListUnmanaged(u8) = .empty;
     defer line_buf.deinit(allocator);
 
-    var file_index: usize = 0;
+    var file_index: usize = suffix_start;
     var lines_in_current: usize = 0;
     var out_fd: c_int = -1;
-    var suffix_buf: [16]u8 = undefined;
+    var suffix_buf: [MAX_SUFFIX_LEN]u8 = undefined;
 
     while (true) {
         const n = c_read(in_fd, &buf, buf.len);
@@ -496,7 +576,7 @@ fn splitByLines(allocator: std.mem.Allocator, in_fd: c_int, prefix: []const u8, 
             if (byte == '\n') {
                 // Open new file if needed
                 if (out_fd < 0) {
-                    const suffix = generateSuffix(&suffix_buf, file_index, suffix_length, numeric);
+                    const suffix = makeSuffix(&suffix_buf, file_index, suffix_length, numeric);
                     out_fd = openOutputFile(prefix, suffix, additional_suffix);
                     if (out_fd < 0) {
                         writeStderr("zsplit: cannot create output file\n", .{});
@@ -526,7 +606,7 @@ fn splitByLines(allocator: std.mem.Allocator, in_fd: c_int, prefix: []const u8, 
     // Write remaining data
     if (line_buf.items.len > 0) {
         if (out_fd < 0) {
-            const suffix = generateSuffix(&suffix_buf, file_index, suffix_length, numeric);
+            const suffix = makeSuffix(&suffix_buf, file_index, suffix_length, numeric);
             out_fd = openOutputFile(prefix, suffix, additional_suffix);
             if (verbose and out_fd >= 0) {
                 writeStdout("creating file '{s}{s}{s}'\n", .{ prefix, suffix, additional_suffix });
@@ -542,12 +622,12 @@ fn splitByLines(allocator: std.mem.Allocator, in_fd: c_int, prefix: []const u8, 
     }
 }
 
-fn splitByBytes(in_fd: c_int, prefix: []const u8, bytes_per_file: usize, suffix_length: usize, numeric: bool, additional_suffix: []const u8, verbose: bool) void {
+fn splitByBytes(in_fd: c_int, prefix: []const u8, bytes_per_file: usize, suffix_length: usize, numeric: bool, suffix_start: usize, additional_suffix: []const u8, verbose: bool) void {
     var buf: [65536]u8 = undefined;
-    var file_index: usize = 0;
+    var file_index: usize = suffix_start;
     var bytes_in_current: usize = 0;
     var out_fd: c_int = -1;
-    var suffix_buf: [16]u8 = undefined;
+    var suffix_buf: [MAX_SUFFIX_LEN]u8 = undefined;
 
     while (true) {
         const n = c_read(in_fd, &buf, buf.len);
@@ -559,7 +639,7 @@ fn splitByBytes(in_fd: c_int, prefix: []const u8, bytes_per_file: usize, suffix_
         while (offset < data.len) {
             // Open new file if needed
             if (out_fd < 0) {
-                const suffix = generateSuffix(&suffix_buf, file_index, suffix_length, numeric);
+                const suffix = makeSuffix(&suffix_buf, file_index, suffix_length, numeric);
                 out_fd = openOutputFile(prefix, suffix, additional_suffix);
                 if (out_fd < 0) {
                     writeStderr("zsplit: cannot create output file\n", .{});
@@ -596,13 +676,13 @@ fn splitByBytes(in_fd: c_int, prefix: []const u8, bytes_per_file: usize, suffix_
 }
 
 fn writeLineByteChunk(data: []const u8, out_fd_ptr: *c_int, bytes_in_current_ptr: *usize, file_index_ptr: *usize, max_bytes: usize, prefix: []const u8, suffix_length: usize, numeric: bool, additional_suffix: []const u8, verbose: bool) void {
-    var suffix_buf: [16]u8 = undefined;
+    var suffix_buf: [MAX_SUFFIX_LEN]u8 = undefined;
     var remaining = data;
 
     while (remaining.len > 0) {
         // Open new file if needed
         if (out_fd_ptr.* < 0) {
-            const suffix = generateSuffix(&suffix_buf, file_index_ptr.*, suffix_length, numeric);
+            const suffix = makeSuffix(&suffix_buf, file_index_ptr.*, suffix_length, numeric);
             out_fd_ptr.* = openOutputFile(prefix, suffix, additional_suffix);
             if (out_fd_ptr.* < 0) {
                 writeStderr("zsplit: cannot create output file\n", .{});
@@ -630,16 +710,16 @@ fn writeLineByteChunk(data: []const u8, out_fd_ptr: *c_int, bytes_in_current_ptr
     }
 }
 
-fn splitByLineBytes(allocator: std.mem.Allocator, in_fd: c_int, prefix: []const u8, max_bytes: usize, suffix_length: usize, numeric: bool, additional_suffix: []const u8, elide_empty: bool, verbose: bool) void {
+fn splitByLineBytes(allocator: std.mem.Allocator, in_fd: c_int, prefix: []const u8, max_bytes: usize, suffix_length: usize, numeric: bool, suffix_start: usize, additional_suffix: []const u8, elide_empty: bool, verbose: bool) void {
     _ = elide_empty; // line_bytes mode never produces empty files naturally
     var buf: [65536]u8 = undefined;
     var line_buf: std.ArrayListUnmanaged(u8) = .empty;
     defer line_buf.deinit(allocator);
 
-    var file_index: usize = 0;
+    var file_index: usize = suffix_start;
     var bytes_in_current: usize = 0;
     var out_fd: c_int = -1;
-    var suffix_buf: [16]u8 = undefined;
+    var suffix_buf: [MAX_SUFFIX_LEN]u8 = undefined;
 
     while (true) {
         const n = c_read(in_fd, &buf, buf.len);
@@ -666,7 +746,7 @@ fn splitByLineBytes(allocator: std.mem.Allocator, in_fd: c_int, prefix: []const 
 
                     // Open new file if needed
                     if (out_fd < 0) {
-                        const suffix = generateSuffix(&suffix_buf, file_index, suffix_length, numeric);
+                        const suffix = makeSuffix(&suffix_buf, file_index, suffix_length, numeric);
                         out_fd = openOutputFile(prefix, suffix, additional_suffix);
                         if (out_fd < 0) {
                             writeStderr("zsplit: cannot create output file\n", .{});
@@ -719,7 +799,7 @@ fn splitByLineBytes(allocator: std.mem.Allocator, in_fd: c_int, prefix: []const 
             }
 
             if (out_fd < 0) {
-                const suffix = generateSuffix(&suffix_buf, file_index, suffix_length, numeric);
+                const suffix = makeSuffix(&suffix_buf, file_index, suffix_length, numeric);
                 out_fd = openOutputFile(prefix, suffix, additional_suffix);
                 if (verbose and out_fd >= 0) {
                     writeStdout("creating file '{s}{s}{s}'\n", .{ prefix, suffix, additional_suffix });
@@ -770,4 +850,59 @@ fn printHelp() void {
         \\  zsplit --additional-suffix=.txt file.txt  Output: xaa.txt, xab.txt, ...
         \\
     , .{});
+}
+
+// ---------------------------------------------------------------------------
+// In-process unit tests for the pure helpers. Expected values are anchored to
+// documented GNU coreutils / POSIX `split` behavior (not roundtrips):
+//   - suffix format: default alphabetic "aa","ab",...,"az","ba",... and
+//     `-d` numeric "00","01",...  (POSIX split; GNU `info coreutils 'split'`).
+//   - suffix exhaustion: GNU errors "output file suffixes exhausted" exactly
+//     when the index no longer fits `length` digits of the radix (26 / 10).
+//   - SIZE suffixes: K=1024, M=1024^2, G=1024^3 (GNU split `SIZE` multipliers).
+// The full black-box parity anchor (diff vs the real `gsplit` binary) lives in
+// src/gnu_parity_test.sh, wired into `zig build test`.
+// ---------------------------------------------------------------------------
+const testing = std.testing;
+
+test "generateSuffix: alphabetic sequence matches GNU default" {
+    var buf: [8]u8 = undefined;
+    try testing.expectEqualStrings("aa", generateSuffix(&buf, 0, 2, false));
+    try testing.expectEqualStrings("ab", generateSuffix(&buf, 1, 2, false));
+    try testing.expectEqualStrings("az", generateSuffix(&buf, 25, 2, false));
+    try testing.expectEqualStrings("ba", generateSuffix(&buf, 26, 2, false));
+    try testing.expectEqualStrings("zz", generateSuffix(&buf, 26 * 26 - 1, 2, false));
+    try testing.expectEqualStrings("a", generateSuffix(&buf, 0, 1, false));
+    try testing.expectEqualStrings("aaa", generateSuffix(&buf, 0, 3, false));
+}
+
+test "generateSuffix: numeric sequence matches GNU -d" {
+    var buf: [8]u8 = undefined;
+    try testing.expectEqualStrings("00", generateSuffix(&buf, 0, 2, true));
+    try testing.expectEqualStrings("05", generateSuffix(&buf, 5, 2, true));
+    try testing.expectEqualStrings("42", generateSuffix(&buf, 42, 2, true));
+    try testing.expectEqualStrings("99", generateSuffix(&buf, 99, 2, true));
+    try testing.expectEqualStrings("003", generateSuffix(&buf, 3, 3, true));
+}
+
+test "suffixExhausted: boundary matches GNU 'suffixes exhausted' error" {
+    // length-1 alphabetic holds indices 0..25; index 26 is exhausted.
+    try testing.expect(!suffixExhausted(25, 1, false));
+    try testing.expect(suffixExhausted(26, 1, false));
+    // length-1 numeric holds 0..9; index 10 is exhausted.
+    try testing.expect(!suffixExhausted(9, 1, true));
+    try testing.expect(suffixExhausted(10, 1, true));
+    // length-2 alphabetic holds 0..675; index 676 is exhausted.
+    try testing.expect(!suffixExhausted(675, 2, false));
+    try testing.expect(suffixExhausted(676, 2, false));
+}
+
+test "parseSize: GNU SIZE multipliers" {
+    try testing.expectEqual(@as(?usize, 10), parseSize("10"));
+    try testing.expectEqual(@as(?usize, 1024), parseSize("1K"));
+    try testing.expectEqual(@as(?usize, 2 * 1024), parseSize("2k"));
+    try testing.expectEqual(@as(?usize, 1024 * 1024), parseSize("1M"));
+    try testing.expectEqual(@as(?usize, 3 * 1024 * 1024 * 1024), parseSize("3G"));
+    try testing.expectEqual(@as(?usize, null), parseSize(""));
+    try testing.expectEqual(@as(?usize, null), parseSize("abc"));
 }

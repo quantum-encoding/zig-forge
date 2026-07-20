@@ -37,12 +37,57 @@ const Config = struct {
     files: std.ArrayListUnmanaged([]const u8) = .empty,
 };
 
+const EINTR = @intFromEnum(std.c.E.INTR);
+const EISDIR = @intFromEnum(std.c.E.ISDIR);
+
+// Loop until every byte is written, retrying on EINTR and partial writes.
+// A silent give-up on a genuine error keeps znl from spinning on a dead pipe.
+fn writeAll(fd: c_int, msg: []const u8) void {
+    var off: usize = 0;
+    while (off < msg.len) {
+        const n = libc.write(fd, msg.ptr + off, msg.len - off);
+        if (n < 0) {
+            if (std.c._errno().* == EINTR) continue;
+            return;
+        }
+        if (n == 0) return;
+        off += @intCast(n);
+    }
+}
+
 fn writeStdout(msg: []const u8) void {
-    _ = libc.write(libc.STDOUT_FILENO, msg.ptr, msg.len);
+    writeAll(libc.STDOUT_FILENO, msg);
 }
 
 fn writeStderr(msg: []const u8) void {
-    _ = libc.write(libc.STDERR_FILENO, msg.ptr, msg.len);
+    writeAll(libc.STDERR_FILENO, msg);
+}
+
+// Write `count` spaces to stdout without needing a fixed-size buffer, so wide
+// (-w) or long (-s) padding can never overflow and drop the alignment.
+fn writeSpaces(count: usize, allocator: std.mem.Allocator) void {
+    const spaces_16 = "                "; // 16 spaces
+    if (count <= 4096) {
+        var remaining = count;
+        while (remaining > 0) {
+            const n = @min(remaining, spaces_16.len);
+            writeStdout(spaces_16[0..n]);
+            remaining -= n;
+        }
+        return;
+    }
+    const buf = allocator.alloc(u8, count) catch {
+        var remaining = count;
+        while (remaining > 0) {
+            const n = @min(remaining, spaces_16.len);
+            writeStdout(spaces_16[0..n]);
+            remaining -= n;
+        }
+        return;
+    };
+    defer allocator.free(buf);
+    @memset(buf, ' ');
+    writeStdout(buf);
 }
 
 fn printUsage() void {
@@ -85,11 +130,13 @@ fn printUsage() void {
         \\  cat file.txt | znl         # Read from stdin
         \\
     ;
-    writeStderr(usage);
+    // GNU nl writes --help to stdout.
+    writeStdout(usage);
 }
 
 fn printVersion() void {
-    writeStderr("znl " ++ VERSION ++ " - High-performance line numbering\n");
+    // GNU nl writes --version to stdout.
+    writeStdout("znl (zig-forge coreutils) " ++ VERSION ++ "\n");
 }
 
 fn parseStyle(s: []const u8) ?NumberingStyle {
@@ -109,6 +156,32 @@ fn parseFormat(s: []const u8) ?NumberFormat {
     return null;
 }
 
+const ParseError = error{InvalidArgument} || std.mem.Allocator.Error;
+
+fn tryHint() void {
+    writeStderr("Try 'znl --help' for more information.\n");
+}
+
+// Emit a GNU-style diagnostic ("znl: <label>: 'val'") and signal exit(1).
+fn invalidValue(label: []const u8, val: []const u8) ParseError {
+    var buf: [512]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "znl: {s}: '{s}'\n", .{ label, val }) catch "znl: invalid argument\n";
+    writeStderr(msg);
+    return error.InvalidArgument;
+}
+
+fn parseStyleOrErr(s: []const u8, label: []const u8) ParseError!NumberingStyle {
+    return parseStyle(s) orelse invalidValue(label, s);
+}
+
+fn parseFormatOrErr(s: []const u8) ParseError!NumberFormat {
+    return parseFormat(s) orelse invalidValue("invalid line numbering format", s);
+}
+
+fn parseUintOrErr(s: []const u8, label: []const u8) ParseError!usize {
+    return std.fmt.parseInt(usize, s, 10) catch invalidValue(label, s);
+}
+
 fn parseArgs(args: []const []const u8, allocator: std.mem.Allocator) !Config {
     var config = Config{};
     var i: usize = 0;
@@ -120,101 +193,70 @@ fn parseArgs(args: []const []const u8, allocator: std.mem.Allocator) !Config {
             // Short options
             var j: usize = 1;
             while (j < arg.len) : (j += 1) {
+                // Consume this option's argument, either inline (-bx) or as the
+                // next argv token (-b x). Returns null if none is available.
+                const takeArg = struct {
+                    fn f(a: []const u8, jj: usize, idx: *usize, all: []const []const u8) ?[]const u8 {
+                        if (jj + 1 < a.len) return a[jj + 1 ..];
+                        if (idx.* + 1 < all.len) {
+                            idx.* += 1;
+                            return all[idx.*];
+                        }
+                        return null;
+                    }
+                }.f;
+
                 switch (arg[j]) {
                     'b' => {
-                        if (j + 1 < arg.len) {
-                            config.body_style = parseStyle(arg[j + 1 ..]) orelse .non_empty;
-                            break;
-                        } else if (i + 1 < args.len) {
-                            i += 1;
-                            config.body_style = parseStyle(args[i]) orelse .non_empty;
-                        }
+                        if (takeArg(arg, j, &i, args)) |v| config.body_style = try parseStyleOrErr(v, "invalid body numbering style");
+                        break;
                     },
                     'f' => {
-                        if (j + 1 < arg.len) {
-                            config.footer_style = parseStyle(arg[j + 1 ..]) orelse .none;
-                            break;
-                        } else if (i + 1 < args.len) {
-                            i += 1;
-                            config.footer_style = parseStyle(args[i]) orelse .none;
-                        }
+                        if (takeArg(arg, j, &i, args)) |v| config.footer_style = try parseStyleOrErr(v, "invalid footer numbering style");
+                        break;
                     },
                     'h' => {
-                        if (j + 1 < arg.len) {
-                            config.header_style = parseStyle(arg[j + 1 ..]) orelse .none;
-                            break;
-                        } else if (i + 1 < args.len) {
-                            i += 1;
-                            config.header_style = parseStyle(args[i]) orelse .none;
-                        }
+                        if (takeArg(arg, j, &i, args)) |v| config.header_style = try parseStyleOrErr(v, "invalid header numbering style");
+                        break;
                     },
                     'n' => {
-                        if (j + 1 < arg.len) {
-                            config.number_format = parseFormat(arg[j + 1 ..]) orelse .right;
-                            break;
-                        } else if (i + 1 < args.len) {
-                            i += 1;
-                            config.number_format = parseFormat(args[i]) orelse .right;
-                        }
+                        if (takeArg(arg, j, &i, args)) |v| config.number_format = try parseFormatOrErr(v);
+                        break;
                     },
                     'w' => {
-                        if (j + 1 < arg.len) {
-                            config.width = std.fmt.parseInt(usize, arg[j + 1 ..], 10) catch 6;
-                            break;
-                        } else if (i + 1 < args.len) {
-                            i += 1;
-                            config.width = std.fmt.parseInt(usize, args[i], 10) catch 6;
-                        }
+                        if (takeArg(arg, j, &i, args)) |v| config.width = try parseUintOrErr(v, "invalid line number field width");
+                        break;
                     },
                     's' => {
-                        if (j + 1 < arg.len) {
-                            config.separator = arg[j + 1 ..];
-                            break;
-                        } else if (i + 1 < args.len) {
-                            i += 1;
-                            config.separator = args[i];
-                        }
+                        if (takeArg(arg, j, &i, args)) |v| config.separator = v;
+                        break;
                     },
                     'i' => {
-                        if (j + 1 < arg.len) {
-                            config.increment = std.fmt.parseInt(usize, arg[j + 1 ..], 10) catch 1;
-                            break;
-                        } else if (i + 1 < args.len) {
-                            i += 1;
-                            config.increment = std.fmt.parseInt(usize, args[i], 10) catch 1;
-                        }
+                        if (takeArg(arg, j, &i, args)) |v| config.increment = try parseUintOrErr(v, "invalid line number increment");
+                        break;
                     },
                     'v' => {
-                        if (j + 1 < arg.len) {
-                            config.starting_line = std.fmt.parseInt(usize, arg[j + 1 ..], 10) catch 1;
-                            break;
-                        } else if (i + 1 < args.len) {
-                            i += 1;
-                            config.starting_line = std.fmt.parseInt(usize, args[i], 10) catch 1;
-                        }
+                        if (takeArg(arg, j, &i, args)) |v| config.starting_line = try parseUintOrErr(v, "invalid starting line number");
+                        break;
                     },
                     'd' => {
-                        if (j + 1 < arg.len) {
-                            config.section_delimiter = arg[j + 1 ..];
-                            break;
-                        } else if (i + 1 < args.len) {
-                            i += 1;
-                            config.section_delimiter = args[i];
-                        }
+                        if (takeArg(arg, j, &i, args)) |v| config.section_delimiter = v;
+                        break;
                     },
                     'l' => {
-                        if (j + 1 < arg.len) {
-                            config.join_blank_lines = std.fmt.parseInt(usize, arg[j + 1 ..], 10) catch 1;
-                            break;
-                        } else if (i + 1 < args.len) {
-                            i += 1;
-                            config.join_blank_lines = std.fmt.parseInt(usize, args[i], 10) catch 1;
-                        }
+                        if (takeArg(arg, j, &i, args)) |v| config.join_blank_lines = try parseUintOrErr(v, "invalid line number of blank lines");
+                        break;
                     },
                     'p' => {
                         config.no_renumber = true;
                     },
-                    else => {},
+                    else => {
+                        var buf: [64]u8 = undefined;
+                        const msg = std.fmt.bufPrint(&buf, "znl: invalid option -- '{c}'\n", .{arg[j]}) catch "znl: invalid option\n";
+                        writeStderr(msg);
+                        tryHint();
+                        return error.InvalidArgument;
+                    },
                 }
             }
         } else if (std.mem.startsWith(u8, arg, "--")) {
@@ -225,31 +267,46 @@ fn parseArgs(args: []const []const u8, allocator: std.mem.Allocator) !Config {
                 printVersion();
                 std.process.exit(0);
             } else if (std.mem.startsWith(u8, arg, "--body-numbering=")) {
-                config.body_style = parseStyle(arg[17..]) orelse .non_empty;
+                config.body_style = try parseStyleOrErr(arg[17..], "invalid body numbering style");
             } else if (std.mem.startsWith(u8, arg, "--header-numbering=")) {
-                config.header_style = parseStyle(arg[19..]) orelse .none;
+                config.header_style = try parseStyleOrErr(arg[19..], "invalid header numbering style");
             } else if (std.mem.startsWith(u8, arg, "--footer-numbering=")) {
-                config.footer_style = parseStyle(arg[19..]) orelse .none;
+                config.footer_style = try parseStyleOrErr(arg[19..], "invalid footer numbering style");
             } else if (std.mem.startsWith(u8, arg, "--number-format=")) {
-                config.number_format = parseFormat(arg[16..]) orelse .right;
+                config.number_format = try parseFormatOrErr(arg[16..]);
             } else if (std.mem.startsWith(u8, arg, "--number-width=")) {
-                config.width = std.fmt.parseInt(usize, arg[15..], 10) catch 6;
+                config.width = try parseUintOrErr(arg[15..], "invalid line number field width");
             } else if (std.mem.startsWith(u8, arg, "--separator=")) {
                 config.separator = arg[12..];
             } else if (std.mem.startsWith(u8, arg, "--line-increment=")) {
-                config.increment = std.fmt.parseInt(usize, arg[17..], 10) catch 1;
+                config.increment = try parseUintOrErr(arg[17..], "invalid line number increment");
             } else if (std.mem.startsWith(u8, arg, "--starting-line-number=")) {
-                config.starting_line = std.fmt.parseInt(usize, arg[23..], 10) catch 1;
+                config.starting_line = try parseUintOrErr(arg[23..], "invalid starting line number");
             } else if (std.mem.startsWith(u8, arg, "--section-delimiter=")) {
                 config.section_delimiter = arg[20..];
             } else if (std.mem.startsWith(u8, arg, "--join-blank-lines=")) {
-                config.join_blank_lines = std.fmt.parseInt(usize, arg[19..], 10) catch 1;
+                config.join_blank_lines = try parseUintOrErr(arg[19..], "invalid line number of blank lines");
             } else if (std.mem.eql(u8, arg, "--no-renumber")) {
                 config.no_renumber = true;
+            } else {
+                var buf: [256]u8 = undefined;
+                const msg = std.fmt.bufPrint(&buf, "znl: unrecognized option '{s}'\n", .{arg}) catch "znl: unrecognized option\n";
+                writeStderr(msg);
+                tryHint();
+                return error.InvalidArgument;
             }
         } else {
             try config.files.append(allocator, arg);
         }
+    }
+
+    // GNU nl pads a single-character section delimiter with ':' so that, e.g.,
+    // `-d '#'` means the delimiter string "#:" (footer marker "#:", body "##").
+    if (config.section_delimiter.len == 1) {
+        const padded = try allocator.alloc(u8, 2);
+        padded[0] = config.section_delimiter[0];
+        padded[1] = ':';
+        config.section_delimiter = padded;
     }
 
     // Default to stdin if no files
@@ -308,7 +365,16 @@ fn processFile(path: []const u8, config: *const Config, line_num: *usize, alloca
 
     while (true) {
         const bytes_ret = libc.read(fd, &read_buf, read_buf.len);
-        if (bytes_ret <= 0) break;
+        if (bytes_ret == 0) break; // genuine EOF
+        if (bytes_ret < 0) {
+            const e = std.c._errno().*;
+            if (e == EINTR) continue; // interrupted syscall: retry, don't truncate
+            var err_buf: [512]u8 = undefined;
+            const reason = if (e == EISDIR) "Is a directory" else "read error";
+            const err_msg = std.fmt.bufPrint(&err_buf, "znl: {s}: {s}\n", .{ path, reason }) catch "znl: read error\n";
+            writeStderr(err_msg);
+            return error.ReadError;
+        }
         const bytes_read: usize = @intCast(bytes_ret);
 
         for (read_buf[0..bytes_read]) |c| {
@@ -326,7 +392,7 @@ fn processFile(path: []const u8, config: *const Config, line_num: *usize, alloca
                     line_buf.clearRetainingCapacity();
                 } else {
                     // Process complete line
-                    outputLine(line_buf.items, config, line_num, current_section, &consecutive_blanks);
+                    outputLine(line_buf.items, config, line_num, current_section, &consecutive_blanks, allocator);
                     line_buf.clearRetainingCapacity();
                 }
             } else {
@@ -337,7 +403,7 @@ fn processFile(path: []const u8, config: *const Config, line_num: *usize, alloca
 
     // Handle last line without newline
     if (line_buf.items.len > 0) {
-        outputLine(line_buf.items, config, line_num, current_section, &consecutive_blanks);
+        outputLine(line_buf.items, config, line_num, current_section, &consecutive_blanks, allocator);
     }
 }
 
@@ -381,7 +447,7 @@ fn detectSection(line: []const u8, delimiter: []const u8) ?SectionType {
     return null;
 }
 
-fn outputLine(line: []const u8, config: *const Config, line_num: *usize, section: SectionType, consecutive_blanks: *usize) void {
+fn outputLine(line: []const u8, config: *const Config, line_num: *usize, section: SectionType, consecutive_blanks: *usize, allocator: std.mem.Allocator) void {
     const is_empty = line.len == 0;
     const style = switch (section) {
         .header => config.header_style,
@@ -410,17 +476,24 @@ fn outputLine(line: []const u8, config: *const Config, line_num: *usize, section
     }
 
     if (should_number) {
-        var num_buf: [32]u8 = undefined;
-        const num_str = formatLineNumber(line_num.*, config.number_format, config.width, &num_buf);
+        // Size the buffer to the actual width so wide (-w) fields never overflow
+        // and silently drop the line number. Stack buffer for the common case,
+        // heap only for unusually large widths.
+        var stack_buf: [64]u8 = undefined;
+        const need = @max(config.width, 20) + 1;
+        const num_buf: []u8 = if (need <= stack_buf.len)
+            stack_buf[0..need]
+        else
+            allocator.alloc(u8, need) catch stack_buf[0..stack_buf.len];
+        defer if (need > stack_buf.len) allocator.free(num_buf);
+        const num_str = formatLineNumber(line_num.*, config.number_format, config.width, num_buf);
         writeStdout(num_str);
         writeStdout(config.separator);
         line_num.* += config.increment;
     } else {
-        // Output spaces for alignment (no separator for un-numbered lines, matching GNU nl)
-        var space_buf: [64]u8 = undefined;
+        // Output spaces for alignment (no separator for un-numbered lines, matching GNU nl).
         const pad_width = config.width + config.separator.len;
-        const spaces = std.fmt.bufPrint(&space_buf, "{s: >[1]}", .{ "", pad_width }) catch "";
-        writeStdout(spaces);
+        writeSpaces(pad_width, allocator);
     }
 
     writeStdout(line);
@@ -446,7 +519,14 @@ pub fn main(init: std.process.Init) !void {
 
     var line_num: usize = config.starting_line;
 
+    var had_error = false;
     for (config.files.items) |path| {
-        processFile(path, &config, &line_num, allocator) catch continue;
+        processFile(path, &config, &line_num, allocator) catch {
+            had_error = true;
+            continue;
+        };
     }
+
+    // GNU nl exits 1 if any file could not be read (missing, directory, etc.).
+    if (had_error) std.process.exit(1);
 }

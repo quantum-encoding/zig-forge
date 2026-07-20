@@ -3,8 +3,10 @@
 //! Key advantages over GNU/Rust implementations:
 //! - SIMD-accelerated line and byte counting using Zig's @Vector
 //! - Comptime-specialized counting paths for different option combinations
-//! - Zero allocations in hot path
-//! - Memory-mapped file I/O for large files
+//!
+//! I/O model: each input is read fully into a heap buffer (c_allocator) via
+//! posix.read, then counted in-memory. The -c (byte-only) path short-circuits
+//! on the file's stat size and does not read the contents. There is no mmap.
 
 const std = @import("std");
 const posix = std.posix;
@@ -216,15 +218,21 @@ fn countMaxLineLength(data: []const u8) u64 {
                 i += 1;
             },
             else => {
-                // Handle UTF-8 sequences
+                // Handle UTF-8 sequences. Advance the display column by the
+                // code point's wcwidth (0 for combining marks, 2 for East-Asian
+                // wide / emoji, 1 otherwise), matching GNU wc's wcwidth-based -L.
                 const char_len = getUtf8CharLen(byte);
-                if (char_len > 0) {
-                    // For now, assume each character is width 1
-                    // Full Unicode width would require lookup tables
-                    current_len += 1;
+                if (char_len > 0 and i + char_len <= data.len) {
+                    const cp = decodeUtf8(data[i..][0..char_len]);
+                    if (cp) |c| {
+                        current_len += wcwidth(c);
+                    } else {
+                        // Malformed continuation bytes: fall back to width 1.
+                        current_len += 1;
+                    }
                     i += char_len;
                 } else {
-                    // Invalid UTF-8, count as 1 byte
+                    // Invalid / truncated UTF-8, count as 1 byte.
                     current_len += 1;
                     i += 1;
                 }
@@ -244,11 +252,101 @@ fn getUtf8CharLen(first_byte: u8) usize {
     return 0; // Invalid
 }
 
+/// Decode a single UTF-8 code point from a `len`-byte slice, or null if the
+/// continuation bytes are malformed.
+fn decodeUtf8(bytes: []const u8) ?u21 {
+    return switch (bytes.len) {
+        1 => bytes[0],
+        2 => blk: {
+            if (bytes[1] & 0xC0 != 0x80) break :blk null;
+            break :blk (@as(u21, bytes[0] & 0x1F) << 6) | (bytes[1] & 0x3F);
+        },
+        3 => blk: {
+            if (bytes[1] & 0xC0 != 0x80 or bytes[2] & 0xC0 != 0x80) break :blk null;
+            break :blk (@as(u21, bytes[0] & 0x0F) << 12) |
+                (@as(u21, bytes[1] & 0x3F) << 6) | (bytes[2] & 0x3F);
+        },
+        4 => blk: {
+            if (bytes[1] & 0xC0 != 0x80 or bytes[2] & 0xC0 != 0x80 or bytes[3] & 0xC0 != 0x80)
+                break :blk null;
+            break :blk (@as(u21, bytes[0] & 0x07) << 18) | (@as(u21, bytes[1] & 0x3F) << 12) |
+                (@as(u21, bytes[2] & 0x3F) << 6) | (bytes[3] & 0x3F);
+        },
+        else => null,
+    };
+}
+
+/// Display width of a Unicode code point, following the mk_wcwidth model
+/// (Markus Kuhn) that glibc's wcwidth — and therefore GNU `wc -L` — tracks:
+/// 0 for zero-width combining marks, 2 for East-Asian wide / fullwidth / emoji,
+/// 1 otherwise. Control code points never reach here (handled by the caller).
+fn wcwidth(cp: u21) u64 {
+    if (cp == 0) return 0;
+    if (isZeroWidth(cp)) return 0;
+    if (isWide(cp)) return 2;
+    return 1;
+}
+
+fn inRange(cp: u21, lo: u21, hi: u21) bool {
+    return cp >= lo and cp <= hi;
+}
+
+fn isZeroWidth(cp: u21) bool {
+    return inRange(cp, 0x0300, 0x036F) or // combining diacritical marks
+        inRange(cp, 0x0483, 0x0489) or
+        inRange(cp, 0x0591, 0x05BD) or
+        inRange(cp, 0x0610, 0x061A) or
+        inRange(cp, 0x064B, 0x065F) or
+        cp == 0x0670 or
+        inRange(cp, 0x06D6, 0x06DC) or
+        inRange(cp, 0x06DF, 0x06E4) or
+        inRange(cp, 0x0E31, 0x0E31) or
+        inRange(cp, 0x0E34, 0x0E3A) or
+        inRange(cp, 0x0EB1, 0x0EB1) or
+        inRange(cp, 0x0EB4, 0x0EB9) or
+        inRange(cp, 0x200B, 0x200F) or // zero-width space / joiners / marks
+        inRange(cp, 0x202A, 0x202E) or
+        inRange(cp, 0x2060, 0x2064) or
+        inRange(cp, 0xFE00, 0xFE0F) or // variation selectors
+        inRange(cp, 0xFE20, 0xFE2F) or
+        cp == 0xFEFF or
+        inRange(cp, 0x1AB0, 0x1AFF) or
+        inRange(cp, 0x1DC0, 0x1DFF);
+}
+
+fn isWide(cp: u21) bool {
+    return inRange(cp, 0x1100, 0x115F) or // Hangul Jamo
+        cp == 0x2329 or cp == 0x232A or
+        inRange(cp, 0x2E80, 0x303E) or // CJK radicals … symbols
+        inRange(cp, 0x3041, 0x33FF) or // Hiragana … CJK compat
+        inRange(cp, 0x3400, 0x4DBF) or // CJK Ext A
+        inRange(cp, 0x4E00, 0x9FFF) or // CJK Unified Ideographs
+        inRange(cp, 0xA000, 0xA4CF) or // Yi
+        inRange(cp, 0xAC00, 0xD7A3) or // Hangul syllables
+        inRange(cp, 0xF900, 0xFAFF) or // CJK compat ideographs
+        inRange(cp, 0xFE10, 0xFE19) or
+        inRange(cp, 0xFE30, 0xFE6F) or
+        inRange(cp, 0xFF00, 0xFF60) or // fullwidth forms
+        inRange(cp, 0xFFE0, 0xFFE6) or
+        inRange(cp, 0x1F300, 0x1F64F) or // emoji: symbols & pictographs, emoticons
+        inRange(cp, 0x1F900, 0x1F9FF) or // supplemental symbols & pictographs
+        inRange(cp, 0x20000, 0x3FFFD); // CJK Ext B+ / supplementary ideographic
+}
+
 // ============================================================================
 // File Processing
 // ============================================================================
 
-fn countFile(path: []const u8, config: *const Config) !WordCount {
+/// A counted input plus the metadata GNU wc uses to compute column width:
+/// `size` is the byte length (file st_size / bytes read), and `statable` is
+/// true only for regular files whose size bounds the counts in advance.
+const CountResult = struct {
+    count: WordCount,
+    size: u64,
+    statable: bool,
+};
+
+fn countFile(path: []const u8, config: *const Config) !CountResult {
     const Io = std.Io;
     const io = Io.Threaded.global_single_threaded.io();
     const Dir = Io.Dir;
@@ -264,11 +362,20 @@ fn countFile(path: []const u8, config: *const Config) !WordCount {
         return err;
     };
 
+    // GNU wc rejects directories with "Is a directory" (exit 1) rather than
+    // reading them. Surface it here for every mode, including the -c fast path
+    // (which otherwise would print the directory's stat size and exit 0).
+    if (stat.kind == .directory) {
+        return error.IsDir;
+    }
+
+    const statable = stat.kind == .file;
+
     // For byte-only counting, just return the file size
     if (config.show_bytes and !config.show_lines and !config.show_words and
         !config.show_chars and !config.show_max_line_length)
     {
-        return WordCount{ .bytes = stat.size };
+        return .{ .count = WordCount{ .bytes = stat.size }, .size = stat.size, .statable = statable };
     }
 
     // Read file into buffer
@@ -288,11 +395,20 @@ fn countFile(path: []const u8, config: *const Config) !WordCount {
     }
 
     const actual_data = data[0..total_read];
-    return countData(actual_data, config);
+    return .{ .count = countData(actual_data, config), .size = total_read, .statable = statable };
 }
 
-fn countStdin(config: *const Config) !WordCount {
+fn countStdin(config: *const Config) !CountResult {
     const allocator = std.heap.c_allocator;
+
+    // stdin is statable (its size bounds the counts) only when it is a regular
+    // file, e.g. `zwc < file`. A pipe/tty falls back to GNU's minimum width.
+    const Io = std.Io;
+    const io = Io.Threaded.global_single_threaded.io();
+    const statable = blk: {
+        const st = Io.File.stdin().stat(io) catch break :blk false;
+        break :blk st.kind == .file;
+    };
 
     // Read all of stdin into memory
     var list: std.ArrayListUnmanaged(u8) = .empty;
@@ -300,12 +416,12 @@ fn countStdin(config: *const Config) !WordCount {
 
     var buf: [8192]u8 = undefined;
     while (true) {
-        const n = posix.read(posix.STDIN_FILENO, &buf) catch break;
+        const n = try posix.read(posix.STDIN_FILENO, &buf);
         if (n == 0) break;
         try list.appendSlice(allocator, buf[0..n]);
     }
 
-    return countData(list.items, config);
+    return .{ .count = countData(list.items, config), .size = list.items.len, .statable = statable };
 }
 
 fn countData(data: []const u8, config: *const Config) WordCount {
@@ -463,42 +579,40 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
 // Output
 // ============================================================================
 
-fn printStats(result: *const WordCount, config: *const Config, title: ?[]const u8, width: usize) void {
-    const Io = std.Io;
-    const io = Io.Threaded.global_single_threaded.io();
-    var buf: [256]u8 = undefined;
-    const stdout_file = Io.File.stdout();
-    var writer = stdout_file.writer(io, &buf);
-
+/// Writes one count line. `writer` is created ONCE by the caller and reused so
+/// its positional offset advances across lines; creating a fresh stdout writer
+/// per line would re-emit every line at file offset 0 (each pwrite at pos 0),
+/// silently clobbering all but the last line when stdout is a regular file.
+fn printStats(writer: anytype, result: *const WordCount, config: *const Config, title: ?[]const u8, width: usize) void {
     var first = true;
 
     if (config.show_lines) {
         if (!first) writer.interface.writeAll(" ") catch {};
-        printNumber(&writer, result.lines, width);
+        printNumber(writer, result.lines, width);
         first = false;
     }
 
     if (config.show_words) {
         if (!first) writer.interface.writeAll(" ") catch {};
-        printNumber(&writer, result.words, width);
+        printNumber(writer, result.words, width);
         first = false;
     }
 
     if (config.show_chars) {
         if (!first) writer.interface.writeAll(" ") catch {};
-        printNumber(&writer, result.chars, width);
+        printNumber(writer, result.chars, width);
         first = false;
     }
 
     if (config.show_bytes) {
         if (!first) writer.interface.writeAll(" ") catch {};
-        printNumber(&writer, result.bytes, width);
+        printNumber(writer, result.bytes, width);
         first = false;
     }
 
     if (config.show_max_line_length) {
         if (!first) writer.interface.writeAll(" ") catch {};
-        printNumber(&writer, result.max_line_length, width);
+        printNumber(writer, result.max_line_length, width);
         first = false;
     }
 
@@ -508,7 +622,6 @@ fn printStats(result: *const WordCount, config: *const Config, title: ?[]const u
     }
 
     writer.interface.writeAll("\n") catch {};
-    writer.interface.flush() catch {};
 }
 
 fn printNumber(writer: anytype, num: u64, width: usize) void {
@@ -533,14 +646,70 @@ fn computeWidth(total: *const WordCount, config: *const Config) usize {
     if (config.show_bytes) max = @max(max, total.bytes);
     if (config.show_max_line_length) max = @max(max, total.max_line_length);
 
-    // Calculate digits needed
-    if (max == 0) return 1;
+    return numDigits(max);
+}
+
+fn numDigits(value: u64) usize {
+    if (value == 0) return 1;
     var digits: usize = 0;
-    var n = max;
+    var n = value;
     while (n > 0) : (n /= 10) {
         digits += 1;
     }
     return digits;
+}
+
+fn countColumns(config: *const Config) usize {
+    var n: usize = 0;
+    if (config.show_lines) n += 1;
+    if (config.show_words) n += 1;
+    if (config.show_chars) n += 1;
+    if (config.show_bytes) n += 1;
+    if (config.show_max_line_length) n += 1;
+    return n;
+}
+
+/// Field width matching GNU wc (coreutils 9.x). Verified against the real GNU
+/// binary across regular files, pipes, multi-file totals, and single-count
+/// shortcuts (see gnu_parity_test.zig):
+///   * --total=only               -> width 1
+///   * one column, one input, no total -> width 1 (no padding)
+///   * all inputs are regular files -> digits(sum of file sizes) (the sizes
+///     bound every count, so this is computable without reading)
+///   * otherwise (pipe/tty input) -> max(7, digits(largest printed count))
+fn computeGnuWidth(
+    config: *const Config,
+    total: *const WordCount,
+    n_inputs: usize,
+    print_total: bool,
+    all_statable: bool,
+    total_size: u64,
+) usize {
+    if (config.total_mode == .only) return 1;
+    if (countColumns(config) == 1 and n_inputs <= 1 and !print_total) return 1;
+    if (all_statable) return @max(@as(usize, 1), numDigits(total_size));
+    return @max(@as(usize, 7), computeWidth(total, config));
+}
+
+/// Map a caught Zig error to the GNU/POSIX strerror-style message GNU wc emits,
+/// so `zwc missing` says "No such file or directory" not "error.FileNotFound".
+fn gnuErrorString(err: anyerror) []const u8 {
+    return switch (err) {
+        error.FileNotFound => "No such file or directory",
+        error.IsDir => "Is a directory",
+        error.AccessDenied, error.PermissionDenied => "Permission denied",
+        error.NotDir => "Not a directory",
+        error.NameTooLong => "File name too long",
+        error.SymLinkLoop => "Too many levels of symbolic links",
+        error.FileTooBig => "File too large",
+        error.SystemResources => "Cannot allocate memory",
+        error.DeviceBusy => "Device or resource busy",
+        error.InputOutput => "Input/output error",
+        error.BrokenPipe => "Broken pipe",
+        error.ConnectionResetByPeer => "Connection reset by peer",
+        error.ProcessFdQuotaExceeded, error.SystemFdQuotaExceeded => "Too many open files",
+        else => @errorName(err),
+    };
 }
 
 fn printError(msg: []const u8) void {
@@ -603,65 +772,89 @@ pub fn main(init: std.process.Init) void {
     };
     defer config.deinit(allocator);
 
+    // Create ONE stdout writer for the whole run. Its positional offset must
+    // advance across every printed line — a per-line writer would pwrite each
+    // line at offset 0, clobbering all but the last when stdout is a file.
+    const Io = std.Io;
+    const io = Io.Threaded.global_single_threaded.io();
+    var out_buf: [4096]u8 = undefined;
+    const stdout_file = Io.File.stdout();
+    var writer = stdout_file.writer(io, &out_buf);
+
     var total = WordCount{};
+    var total_size: u64 = 0;
+    var all_statable = true;
     var error_occurred = false;
     var files_processed: usize = 0;
 
-    // First pass: calculate totals for width computation
     if (config.files.items.len == 0) {
         // Read from stdin
         const result = countStdin(&config) catch |err| {
-            printErrorFmt("-: {}", .{err});
-            error_occurred = true;
+            printErrorFmt("-: {s}", .{gnuErrorString(err)});
             std.process.exit(1);
         };
-        total.add(result);
+        total.add(result.count);
+        total_size += result.size;
+        all_statable = all_statable and result.statable;
         files_processed = 1;
 
-        const width = computeWidth(&total, &config);
-        printStats(&result, &config, null, width);
+        const width = computeGnuWidth(&config, &total, 1, false, all_statable, total_size);
+        printStats(&writer, &result.count, &config, null, width);
     } else {
         const ResultItem = struct { count: WordCount, name: []const u8 };
-        // Process files - first pass to get totals for width
+        // First pass: count every input, accumulating totals for width.
         var results: std.ArrayListUnmanaged(ResultItem) = .empty;
         defer results.deinit(allocator);
 
         for (config.files.items) |file_path| {
-            if (std.mem.eql(u8, file_path, "-")) {
-                const result = countStdin(&config) catch |err| {
-                    printErrorFmt("-: {}", .{err});
+            const result = if (std.mem.eql(u8, file_path, "-"))
+                countStdin(&config) catch |err| {
+                    printErrorFmt("-: {s}", .{gnuErrorString(err)});
                     error_occurred = true;
                     continue;
-                };
-                total.add(result);
-                results.append(allocator, .{ .count = result, .name = "-" }) catch continue;
-            } else {
-                const result = countFile(file_path, &config) catch |err| {
-                    printErrorFmt("{s}: {}", .{ file_path, err });
+                }
+            else
+                countFile(file_path, &config) catch |err| {
+                    printErrorFmt("{s}: {s}", .{ file_path, gnuErrorString(err) });
                     error_occurred = true;
+                    // GNU still emits a zero-count line for a directory (it
+                    // opens it, reads 0 bytes, then errors), and the directory —
+                    // being non-regular — forces the fallback column width.
+                    if (err == error.IsDir) {
+                        all_statable = false;
+                        results.append(allocator, .{ .count = .{}, .name = file_path }) catch {};
+                        files_processed += 1;
+                    }
                     continue;
                 };
-                total.add(result);
-                results.append(allocator, .{ .count = result, .name = file_path }) catch continue;
-            }
+            total.add(result.count);
+            total_size += result.size;
+            all_statable = all_statable and result.statable;
+            const name = if (std.mem.eql(u8, file_path, "-")) "-" else file_path;
+            results.append(allocator, .{ .count = result.count, .name = name }) catch continue;
             files_processed += 1;
         }
 
-        // Second pass: print with consistent width
-        const width = @max(computeWidth(&total, &config), 1);
+        // Second pass: print with the consistent GNU-derived width.
+        const print_total = config.shouldShowTotal(files_processed);
+        const width = computeGnuWidth(&config, &total, files_processed, print_total, all_statable, total_size);
 
         // Print individual file stats (unless --total=only)
         if (config.shouldShowIndividual()) {
             for (results.items) |item| {
-                printStats(&item.count, &config, item.name, width);
+                printStats(&writer, &item.count, &config, item.name, width);
             }
         }
 
-        // Print total based on total_mode
-        if (config.shouldShowTotal(files_processed)) {
-            printStats(&total, &config, "total", width);
+        // Print total based on total_mode. GNU omits the "total" label under
+        // --total=only (the total line is the only output).
+        if (print_total) {
+            const total_title: ?[]const u8 = if (config.total_mode == .only) null else "total";
+            printStats(&writer, &total, &config, total_title, width);
         }
     }
+
+    writer.interface.flush() catch {};
 
     if (error_occurred) {
         std.process.exit(1);

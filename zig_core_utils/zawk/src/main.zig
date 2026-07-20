@@ -67,12 +67,13 @@ const Value = union(enum) {
             .number => |n| {
                 if (n == @trunc(n) and @abs(n) < 1e15) {
                     var buf: [32]u8 = undefined;
-                    const len = formatInt(&buf, @as(i64, @intFromFloat(n)));
+                    const len = formatInt(&buf, clampI64(n));
                     return try allocator.dupe(u8, buf[0..len]);
                 } else {
-                    var buf: [32]u8 = undefined;
-                    const len = formatFloat(&buf, n);
-                    return try allocator.dupe(u8, buf[0..len]);
+                    // AWK default OFMT/CONVFMT is "%.6g".
+                    var buf: [512]u8 = undefined;
+                    const s = formatFloatC(&buf, 'g', n, 6);
+                    return try allocator.dupe(u8, s);
                 }
             },
             .array => "", // Arrays can't be converted to string
@@ -99,58 +100,80 @@ const Value = union(enum) {
     }
 };
 
+// AWK numeric-string conversion: parse the longest numeric prefix of `s`,
+// including an optional exponent (e/E). Anchored to POSIX awk / std strtod
+// semantics. Uses std.fmt.parseFloat on the scanned prefix so 1e30, .5e-2,
+// etc. are honored instead of silently truncated.
+fn isIdentChar(c: u8) bool {
+    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_';
+}
+
 fn parseNumber(s: []const u8) f64 {
     if (s.len == 0) return 0;
-    var result: f64 = 0;
-    var negative = false;
     var i: usize = 0;
 
-    // Skip whitespace
+    // Skip leading whitespace
     while (i < s.len and (s[i] == ' ' or s[i] == '\t')) i += 1;
-    if (i >= s.len) return 0;
+    const start = i;
 
-    if (s[i] == '-') {
-        negative = true;
-        i += 1;
-    } else if (s[i] == '+') {
-        i += 1;
-    }
+    // Optional sign
+    if (i < s.len and (s[i] == '-' or s[i] == '+')) i += 1;
 
+    var saw_digit = false;
     // Integer part
-    while (i < s.len and s[i] >= '0' and s[i] <= '9') {
-        result = result * 10 + @as(f64, @floatFromInt(s[i] - '0'));
-        i += 1;
-    }
-
+    while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) saw_digit = true;
     // Decimal part
     if (i < s.len and s[i] == '.') {
         i += 1;
-        var frac: f64 = 0.1;
-        while (i < s.len and s[i] >= '0' and s[i] <= '9') {
-            result += @as(f64, @floatFromInt(s[i] - '0')) * frac;
-            frac *= 0.1;
-            i += 1;
+        while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) saw_digit = true;
+    }
+    if (!saw_digit) return 0;
+    // Exponent part
+    if (i < s.len and (s[i] == 'e' or s[i] == 'E')) {
+        var j = i + 1;
+        if (j < s.len and (s[j] == '+' or s[j] == '-')) j += 1;
+        if (j < s.len and s[j] >= '0' and s[j] <= '9') {
+            while (j < s.len and s[j] >= '0' and s[j] <= '9') j += 1;
+            i = j;
         }
     }
 
-    return if (negative) -result else result;
+    const token = s[start..i];
+    return std.fmt.parseFloat(f64, token) catch 0;
+}
+
+// Clamp an f64 to the i64 range before @intFromFloat to avoid UB/panic on
+// out-of-range or non-finite values.
+fn clampI64(v: f64) i64 {
+    if (std.math.isNan(v)) return 0;
+    if (v >= 9.223372036854775e18) return std.math.maxInt(i64);
+    if (v <= -9.223372036854775e18) return std.math.minInt(i64);
+    return @intFromFloat(v);
+}
+
+fn clampU64(v: f64) u64 {
+    if (std.math.isNan(v) or v <= 0) return 0;
+    if (v >= 1.8446744073709552e19) return std.math.maxInt(u64);
+    return @intFromFloat(v);
 }
 
 fn formatInt(buf: []u8, val: i64) usize {
-    var n = val;
+    // Compute magnitude in u64 so i64_min negation cannot overflow.
+    const negative = val < 0;
+    var n: u64 = if (negative) @as(u64, @intCast(-(val + 1))) + 1 else @intCast(val);
     var i: usize = buf.len;
-    const negative = n < 0;
-    if (negative) n = -n;
 
     if (n == 0) {
-        buf[buf.len - 1] = '0';
+        // Callers slice buf[0..len]; write to buf[0], not buf[buf.len-1],
+        // otherwise every integer 0 is rendered from an uninitialized byte.
+        buf[0] = '0';
         return 1;
     }
 
     while (n > 0) {
         i -= 1;
-        buf[i] = @intCast('0' + @as(u8, @intCast(@mod(n, 10))));
-        n = @divTrunc(n, 10);
+        buf[i] = @intCast('0' + @as(u8, @intCast(n % 10)));
+        n /= 10;
     }
 
     if (negative) {
@@ -163,32 +186,117 @@ fn formatInt(buf: []u8, val: i64) usize {
     return len;
 }
 
-fn formatFloat(buf: []u8, val: f64) usize {
-    // Simple float formatting - 6 decimal places
-    const int_part: i64 = @intFromFloat(val);
-    var len = formatInt(buf, int_part);
-
-    var frac = @abs(val - @as(f64, @floatFromInt(int_part)));
-    if (frac > 0.0000005) {
-        buf[len] = '.';
-        len += 1;
-
-        var decimals: usize = 0;
-        while (decimals < 6 and frac > 0.0000005) {
-            frac *= 10;
-            const digit: u8 = @intFromFloat(frac);
-            buf[len] = '0' + digit;
-            len += 1;
-            frac -= @as(f64, @floatFromInt(digit));
-            decimals += 1;
+// Format a float with C printf semantics for %f, %e, %g. `buf` must be at
+// least 512 bytes. Returns the formatted slice. Anchored to /usr/bin/awk
+// (libc printf) behavior; verified in gnu_parity_test.zig.
+fn formatFloatC(buf: []u8, spec: u8, val: f64, precision: usize) []const u8 {
+    const float = std.fmt.float;
+    if (std.math.isNan(val)) return if (spec == 'E' or spec == 'G' or spec == 'F') "NAN" else "nan";
+    if (std.math.isInf(val)) {
+        const neg = val < 0;
+        const s: []const u8 = if (spec == 'E' or spec == 'G' or spec == 'F') "INF" else "inf";
+        if (neg) {
+            buf[0] = '-';
+            @memcpy(buf[1 .. 1 + s.len], s);
+            return buf[0 .. 1 + s.len];
         }
-
-        // Remove trailing zeros
-        while (len > 0 and buf[len - 1] == '0') len -= 1;
-        if (len > 0 and buf[len - 1] == '.') len -= 1;
+        return s;
     }
 
-    return len;
+    switch (spec) {
+        'f', 'F' => {
+            return float.render(buf, val, .{ .mode = .decimal, .precision = precision }) catch buf[0..0];
+        },
+        'e', 'E' => {
+            const raw = float.render(buf[256..], val, .{ .mode = .scientific, .precision = precision }) catch return buf[0..0];
+            return fixupExponent(buf[0..256], raw, spec == 'E');
+        },
+        else => {
+            // %g: precision is number of significant digits (0 -> 1).
+            var p = precision;
+            if (p == 0) p = 1;
+            // Determine decimal exponent via a scientific rendering.
+            var tmp: [64]u8 = undefined;
+            const sci = float.render(&tmp, val, .{ .mode = .scientific, .precision = p - 1 }) catch return buf[0..0];
+            const exp = parseSciExponent(sci);
+            var out: []const u8 = undefined;
+            if (exp < -4 or exp >= @as(i64, @intCast(p))) {
+                // Use %e style with precision p-1, then trim trailing zeros.
+                out = fixupExponent(buf[0..256], sci, spec == 'G');
+                out = trimGZeros(buf[0..256], out, true);
+            } else {
+                // Use %f style with precision p-1-exp.
+                const fprec: usize = @intCast(@max(0, @as(i64, @intCast(p)) - 1 - exp));
+                const dec = float.render(buf[256..], val, .{ .mode = .decimal, .precision = fprec }) catch return buf[0..0];
+                @memcpy(buf[0..dec.len], dec);
+                out = trimGZeros(buf[0..256], buf[0..dec.len], false);
+            }
+            return out;
+        },
+    }
+}
+
+// Convert Zig scientific "1.235e4" / "1e-5" to C printf "1.235e+04".
+fn fixupExponent(buf: []u8, raw: []const u8, upper: bool) []const u8 {
+    const eidx = std.mem.indexOfScalar(u8, raw, 'e') orelse std.mem.indexOfScalar(u8, raw, 'E') orelse return raw;
+    const mant = raw[0..eidx];
+    var rest = raw[eidx + 1 ..];
+    var sign: u8 = '+';
+    if (rest.len > 0 and (rest[0] == '+' or rest[0] == '-')) {
+        sign = rest[0];
+        rest = rest[1..];
+    }
+    var w: usize = 0;
+    @memcpy(buf[w .. w + mant.len], mant);
+    w += mant.len;
+    buf[w] = if (upper) 'E' else 'e';
+    w += 1;
+    buf[w] = sign;
+    w += 1;
+    // Exponent digits, minimum 2.
+    if (rest.len < 2) {
+        var pad: usize = 2 - rest.len;
+        while (pad > 0) : (pad -= 1) {
+            buf[w] = '0';
+            w += 1;
+        }
+    }
+    @memcpy(buf[w .. w + rest.len], rest);
+    w += rest.len;
+    return buf[0..w];
+}
+
+fn parseSciExponent(sci: []const u8) i64 {
+    const eidx = std.mem.indexOfScalar(u8, sci, 'e') orelse std.mem.indexOfScalar(u8, sci, 'E') orelse return 0;
+    const rest = sci[eidx + 1 ..];
+    return std.fmt.parseInt(i64, rest, 10) catch 0;
+}
+
+// Trim trailing zeros for %g. If `is_exp` the mantissa is before 'e'/'E'.
+// `scratch` must not alias `s`.
+fn trimGZeros(scratch: []u8, s: []const u8, is_exp: bool) []const u8 {
+    if (is_exp) {
+        const eidx = std.mem.indexOfScalar(u8, s, 'e') orelse std.mem.indexOfScalar(u8, s, 'E') orelse return s;
+        var mant = s[0..eidx];
+        const exp = s[eidx..];
+        if (std.mem.indexOfScalar(u8, mant, '.') != null) {
+            while (mant.len > 0 and mant[mant.len - 1] == '0') mant = mant[0 .. mant.len - 1];
+            if (mant.len > 0 and mant[mant.len - 1] == '.') mant = mant[0 .. mant.len - 1];
+        }
+        var w: usize = 0;
+        std.mem.copyForwards(u8, scratch[w .. w + mant.len], mant);
+        w += mant.len;
+        std.mem.copyForwards(u8, scratch[w .. w + exp.len], exp);
+        w += exp.len;
+        return scratch[0..w];
+    } else {
+        var out = s;
+        if (std.mem.indexOfScalar(u8, out, '.') != null) {
+            while (out.len > 0 and out[out.len - 1] == '0') out = out[0 .. out.len - 1];
+            if (out.len > 0 and out[out.len - 1] == '.') out = out[0 .. out.len - 1];
+        }
+        return out;
+    }
 }
 
 const ExprType = enum {
@@ -236,6 +344,7 @@ const ActionType = enum {
     print_expr,
     printf_stmt,
     assign,
+    field_assign, // $N = value  (condition holds the field lvalue expr)
     array_assign, // array[key] = value
     delete_stmt,  // delete array[key]
     if_stmt,
@@ -407,6 +516,42 @@ const AwkState = struct {
         return self.fields[n];
     }
 
+    // Assign field N (1-based). Copies `value`, extends NF with empty fields if
+    // needed, then rebuilds $0 by joining fields with OFS (awk semantics). The
+    // stored field/$0 strings are heap-owned; the arena is freed at process
+    // exit like the rest of the interpreter's allocations.
+    fn setField(self: *AwkState, n: usize, value: []const u8) void {
+        if (n == 0) {
+            const owned = self.allocator.dupe(u8, value) catch return;
+            self.setLine(owned);
+            return;
+        }
+        if (n >= MAX_FIELDS) return;
+        // Snapshot existing field slices into owned copies so the rebuild does
+        // not alias the old $0 buffer we are about to replace.
+        var owned_fields: [MAX_FIELDS][]const u8 = undefined;
+        const old_nf = self.nf;
+        var k: usize = 1;
+        while (k <= old_nf and k < MAX_FIELDS) : (k += 1) {
+            owned_fields[k] = self.allocator.dupe(u8, self.fields[k]) catch "";
+        }
+        while (k < MAX_FIELDS) : (k += 1) owned_fields[k] = "";
+        owned_fields[n] = self.allocator.dupe(u8, value) catch return;
+        const new_nf = @max(old_nf, n);
+        // Rebuild $0.
+        var joined: std.ArrayListUnmanaged(u8) = .empty;
+        var f: usize = 1;
+        while (f <= new_nf) : (f += 1) {
+            if (f > 1) joined.appendSlice(self.allocator, self.ofs) catch {};
+            joined.appendSlice(self.allocator, owned_fields[f]) catch {};
+        }
+        self.line = joined.items;
+        self.fields[0] = self.line;
+        self.nf = new_nf;
+        f = 1;
+        while (f <= new_nf) : (f += 1) self.fields[f] = owned_fields[f];
+    }
+
     fn getVariable(self: *AwkState, name: []const u8) Value {
         // Built-in variables
         if (std.mem.eql(u8, name, "NF")) return .{ .number = @floatFromInt(self.nf) };
@@ -471,16 +616,28 @@ const Parser = struct {
     rules: std.ArrayListUnmanaged(Rule),
     exprs: std.ArrayListUnmanaged(Expr),
     actions: std.ArrayListUnmanaged(Action),
+    reserved_exprs: usize = 0,
+    reserved_actions: usize = 0,
+    had_error: bool = false,
 
     fn init(allocator: std.mem.Allocator, src: []const u8) Parser {
-        // Pre-allocate to prevent reallocation during parsing which would
-        // invalidate slices stored in rules/actions
+        // The AST stores raw *Expr pointers and []Expr / []Action slices into
+        // these backing lists. If a list reallocated mid-parse every stored
+        // pointer/slice would dangle (the original segfault). We reserve a
+        // capacity that scales with the program size and is a proven upper
+        // bound on the number of appends: every append in the parser is tied
+        // to consuming at least one source byte (binary operators append at
+        // most 2 nodes per operator character), so appends <= ~2*src.len. The
+        // 8x/4x margins below guarantee no realloc for any real program, and
+        // parseProgram asserts the capacity never grew as a safety net.
+        const cap_e = src.len * 8 + 4096;
+        const cap_a = src.len * 4 + 1024;
         var rules: std.ArrayListUnmanaged(Rule) = .empty;
-        rules.ensureTotalCapacity(allocator, 64) catch {};
+        rules.ensureTotalCapacity(allocator, src.len + 64) catch {};
         var exprs: std.ArrayListUnmanaged(Expr) = .empty;
-        exprs.ensureTotalCapacity(allocator, 256) catch {};
+        exprs.ensureTotalCapacity(allocator, cap_e) catch {};
         var actions: std.ArrayListUnmanaged(Action) = .empty;
-        actions.ensureTotalCapacity(allocator, 256) catch {};
+        actions.ensureTotalCapacity(allocator, cap_a) catch {};
 
         return .{
             .allocator = allocator,
@@ -488,6 +645,8 @@ const Parser = struct {
             .rules = rules,
             .exprs = exprs,
             .actions = actions,
+            .reserved_exprs = exprs.capacity,
+            .reserved_actions = actions.capacity,
         };
     }
 
@@ -518,7 +677,20 @@ const Parser = struct {
 
     fn parseProgram(self: *Parser) ![]Rule {
         while (self.peek() != null) {
+            const before = self.pos;
             try self.parseRule();
+            // Progress guard: if a rule consumed nothing we would spin forever
+            // on malformed input. Flag an error and skip one byte to terminate.
+            if (self.pos == before) {
+                self.had_error = true;
+                self.pos += 1;
+            }
+        }
+        // Safety net: if any backing list grew past its reservation, a realloc
+        // moved the buffer and every stored pointer/slice is now dangling.
+        // Refuse to execute a corrupt AST.
+        if (self.exprs.capacity != self.reserved_exprs or self.actions.capacity != self.reserved_actions) {
+            return error.ProgramTooComplex;
         }
         return self.rules.items;
     }
@@ -549,7 +721,12 @@ const Parser = struct {
             const actions_start = self.actions.items.len;
 
             while (self.peek() != '}' and self.peek() != null) {
+                const before = self.pos;
                 try self.parseAction();
+                if (self.pos == before) {
+                    self.had_error = true;
+                    self.pos += 1;
+                }
             }
 
             if (self.peek() == '}') self.pos += 1;
@@ -594,51 +771,15 @@ const Parser = struct {
         if (self.matchKeyword("printf")) {
             // printf format, args...
             var action = Action{ .action_type = .printf_stmt };
-            const exprs_start = self.exprs.items.len;
-
             self.skipWhitespace();
-            // Parse format string and arguments
-            const format_expr = try self.parseExpr();
-            try self.exprs.append(self.allocator, format_expr);
-
-            while (self.peek() == ',') {
-                self.pos += 1;
-                const arg_expr = try self.parseExpr();
-                try self.exprs.append(self.allocator, arg_expr);
-            }
-
-            action.exprs = self.exprs.items[exprs_start..];
+            action.exprs = try self.parseArgList('}');
             try self.actions.append(self.allocator, action);
         } else if (self.matchKeyword("print")) {
             var action = Action{ .action_type = .print_expr };
-
-            // Track indices of top-level expressions only (not nested ones)
-            var top_level_indices: std.ArrayListUnmanaged(usize) = .empty;
-            defer top_level_indices.deinit(self.allocator);
-
             self.skipWhitespace();
             if (self.peek() != ';' and self.peek() != '\n' and self.peek() != '}' and self.peek() != null) {
-                const expr = try self.parseExpr();
-                try self.exprs.append(self.allocator, expr);
-                try top_level_indices.append(self.allocator, self.exprs.items.len - 1);
-
-                while (self.peek() == ',') {
-                    self.pos += 1;
-                    const next_expr = try self.parseExpr();
-                    try self.exprs.append(self.allocator, next_expr);
-                    try top_level_indices.append(self.allocator, self.exprs.items.len - 1);
-                }
+                action.exprs = try self.parseArgList('}');
             }
-
-            // Copy top-level expressions to contiguous positions
-            if (top_level_indices.items.len > 0) {
-                const exprs_start = self.exprs.items.len;
-                for (top_level_indices.items) |idx| {
-                    try self.exprs.append(self.allocator, self.exprs.items[idx]);
-                }
-                action.exprs = self.exprs.items[exprs_start..];
-            }
-
             if (action.exprs.len == 0) {
                 action.action_type = .print;
             }
@@ -713,7 +854,12 @@ const Parser = struct {
                     if (self.peek() == '{') {
                         self.pos += 1;
                         while (self.peek() != '}' and self.peek() != null) {
+                            const before = self.pos;
                             try self.parseAction();
+                            if (self.pos == before) {
+                                self.had_error = true;
+                                self.pos += 1;
+                            }
                         }
                         if (self.peek() == '}') self.pos += 1;
                     } else {
@@ -760,7 +906,84 @@ const Parser = struct {
         } else if (self.matchKeyword("next")) {
             try self.actions.append(self.allocator, .{ .action_type = .next });
         } else if (self.matchKeyword("exit")) {
-            try self.actions.append(self.allocator, .{ .action_type = .exit });
+            // exit [expr] — capture the optional status expression.
+            var action = Action{ .action_type = .exit };
+            self.skipWhitespace();
+            const p = self.peek();
+            if (p != null and p.? != ';' and p.? != '}' and p.? != '\n') {
+                const e = try self.parseExpr();
+                try self.exprs.append(self.allocator, e);
+                action.condition = &self.exprs.items[self.exprs.items.len - 1];
+            }
+            try self.actions.append(self.allocator, action);
+        } else if (self.peek() == '$') {
+            // Field assignment: $N = expr / $N op= expr / $N++ / $N--
+            const stmt_start = self.pos;
+            const lhs = try self.parsePrimary();
+            try self.exprs.append(self.allocator, lhs);
+            const lhs_ptr = &self.exprs.items[self.exprs.items.len - 1];
+            self.skipWhitespace();
+
+            var op: ?BinOp = null;
+            var is_assign = false;
+            var is_incr = false;
+            var is_decr = false;
+            if (self.pos + 1 < self.src.len and self.src[self.pos] == '+' and self.src[self.pos + 1] == '+') {
+                is_incr = true;
+            } else if (self.pos + 1 < self.src.len and self.src[self.pos] == '-' and self.src[self.pos + 1] == '-') {
+                is_decr = true;
+            } else if (self.pos + 1 < self.src.len and self.src[self.pos + 1] == '=' and
+                (self.src[self.pos] == '+' or self.src[self.pos] == '-' or self.src[self.pos] == '*' or self.src[self.pos] == '/'))
+            {
+                op = switch (self.src[self.pos]) {
+                    '+' => .add,
+                    '-' => .sub,
+                    '*' => .mul,
+                    else => .div,
+                };
+            } else if (self.pos < self.src.len and self.src[self.pos] == '=' and
+                (self.pos + 1 >= self.src.len or self.src[self.pos + 1] != '='))
+            {
+                is_assign = true;
+            }
+
+            if (is_assign) {
+                self.pos += 1;
+                const value_expr = try self.parseExpr();
+                try self.exprs.append(self.allocator, value_expr);
+                try self.actions.append(self.allocator, .{
+                    .action_type = .field_assign,
+                    .condition = lhs_ptr,
+                    .exprs = self.exprs.items[self.exprs.items.len - 1 ..],
+                });
+            } else if (op != null or is_incr or is_decr) {
+                if (is_incr or is_decr) self.pos += 2 else self.pos += 2;
+                const rhs_expr = if (is_incr or is_decr) blk: {
+                    break :blk Expr{ .expr_type = .number_lit, .num_val = 1 };
+                } else try self.parseExpr();
+                try self.exprs.append(self.allocator, rhs_expr);
+                const combined = Expr{
+                    .expr_type = .binop,
+                    .op = if (is_decr) .sub else if (is_incr) .add else op.?,
+                    .left = lhs_ptr,
+                    .right = &self.exprs.items[self.exprs.items.len - 1],
+                };
+                try self.exprs.append(self.allocator, combined);
+                try self.actions.append(self.allocator, .{
+                    .action_type = .field_assign,
+                    .condition = lhs_ptr,
+                    .exprs = self.exprs.items[self.exprs.items.len - 1 ..],
+                });
+            } else {
+                // Not an assignment — parse the whole thing as an expression.
+                self.pos = stmt_start;
+                const expr = try self.parseExpr();
+                try self.exprs.append(self.allocator, expr);
+                try self.actions.append(self.allocator, .{
+                    .action_type = .expr_stmt,
+                    .exprs = self.exprs.items[self.exprs.items.len - 1 ..],
+                });
+            }
         } else {
             // Check for identifier followed by assignment, array access, or compound assignment
             self.skipWhitespace();
@@ -968,6 +1191,24 @@ const Parser = struct {
         return self.parseOr();
     }
 
+    // Parse a comma-separated list of expressions into an independently-owned
+    // slice holding ONLY the top-level expressions. This avoids the arg-list
+    // pollution bug: parseExpr appends nested operand nodes into self.exprs, so
+    // slicing self.exprs directly would interleave sub-expressions into the
+    // argument vector (e.g. substr(s, i+1) would pass `i` instead of `i+1`).
+    fn parseArgList(self: *Parser, terminator: u8) error{OutOfMemory}![]Expr {
+        var list: std.ArrayListUnmanaged(Expr) = .empty;
+        errdefer list.deinit(self.allocator);
+        if (self.peek() != terminator and self.peek() != null) {
+            try list.append(self.allocator, try self.parseExpr());
+            while (self.peek() == ',') {
+                self.pos += 1;
+                try list.append(self.allocator, try self.parseExpr());
+            }
+        }
+        return list.toOwnedSlice(self.allocator);
+    }
+
     fn parseOr(self: *Parser) !Expr {
         var left = try self.parseAnd();
 
@@ -1006,8 +1247,37 @@ const Parser = struct {
         return left;
     }
 
+    // String concatenation by juxtaposition. Precedence sits below comparison
+    // and above additive, matching POSIX awk. Conservative operand detection:
+    // only start a concat when the next token unambiguously begins a new
+    // operand ($, ", identifier, number) — never `(`, `/`, `+`, `-`, so
+    // arithmetic and regex parsing are unaffected.
+    fn parseConcat(self: *Parser) error{OutOfMemory}!Expr {
+        var left = try self.parseAddSub();
+        while (true) {
+            self.skipWhitespace();
+            if (self.pos >= self.src.len) break;
+            const c = self.src[self.pos];
+            const starts_operand = c == '$' or c == '"' or c == '_' or c == '.' or
+                (c >= '0' and c <= '9') or (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z');
+            if (!starts_operand) break;
+            // Don't swallow the `in` membership keyword as a concat operand.
+            if (c == 'i' and self.pos + 1 < self.src.len and self.src[self.pos + 1] == 'n' and
+                (self.pos + 2 >= self.src.len or !isIdentChar(self.src[self.pos + 2]))) break;
+            const right = try self.parseAddSub();
+            try self.exprs.append(self.allocator, left);
+            try self.exprs.append(self.allocator, right);
+            left = .{
+                .expr_type = .concat,
+                .left = &self.exprs.items[self.exprs.items.len - 2],
+                .right = &self.exprs.items[self.exprs.items.len - 1],
+            };
+        }
+        return left;
+    }
+
     fn parseComparison(self: *Parser) !Expr {
-        const left = try self.parseAddSub();
+        const left = try self.parseConcat();
 
         self.skipWhitespace();
         if (self.pos >= self.src.len) return left;
@@ -1040,7 +1310,7 @@ const Parser = struct {
         }
 
         if (op) |o| {
-            const right = try self.parseAddSub();
+            const right = try self.parseConcat();
             try self.exprs.append(self.allocator, left);
             try self.exprs.append(self.allocator, right);
             return .{
@@ -1125,11 +1395,28 @@ const Parser = struct {
         if (self.src[self.pos] == '-') {
             self.pos += 1;
             const operand = try self.parseUnary();
+            // Negation is 0 - operand. Synthesize a real 0 literal on the left;
+            // aliasing both sides to `operand` made -x evaluate to x-x == 0.
+            try self.exprs.append(self.allocator, .{ .expr_type = .number_lit, .num_val = 0 });
             try self.exprs.append(self.allocator, operand);
             return .{
                 .expr_type = .binop,
                 .op = .sub,
-                .left = &self.exprs.items[self.exprs.items.len - 1], // Will evaluate to 0
+                .left = &self.exprs.items[self.exprs.items.len - 2],
+                .right = &self.exprs.items[self.exprs.items.len - 1],
+            };
+        }
+
+        if (self.src[self.pos] == '+') {
+            // Unary plus forces numeric conversion: 0 + operand.
+            self.pos += 1;
+            const operand = try self.parseUnary();
+            try self.exprs.append(self.allocator, .{ .expr_type = .number_lit, .num_val = 0 });
+            try self.exprs.append(self.allocator, operand);
+            return .{
+                .expr_type = .binop,
+                .op = .add,
+                .left = &self.exprs.items[self.exprs.items.len - 2],
                 .right = &self.exprs.items[self.exprs.items.len - 1],
             };
         }
@@ -1202,13 +1489,22 @@ const Parser = struct {
             return .{ .expr_type = .regex, .str_val = pattern };
         }
 
-        // Number literal
+        // Number literal (with optional exponent, e.g. 1e30, 2.5E-3)
         if ((c >= '0' and c <= '9') or c == '.') {
             const start = self.pos;
             while (self.pos < self.src.len and
                 ((self.src[self.pos] >= '0' and self.src[self.pos] <= '9') or self.src[self.pos] == '.'))
             {
                 self.pos += 1;
+            }
+            // Exponent
+            if (self.pos < self.src.len and (self.src[self.pos] == 'e' or self.src[self.pos] == 'E')) {
+                var j = self.pos + 1;
+                if (j < self.src.len and (self.src[j] == '+' or self.src[j] == '-')) j += 1;
+                if (j < self.src.len and self.src[j] >= '0' and self.src[j] <= '9') {
+                    while (j < self.src.len and self.src[j] >= '0' and self.src[j] <= '9') j += 1;
+                    self.pos = j;
+                }
             }
             return .{ .expr_type = .number_lit, .num_val = parseNumber(self.src[start..self.pos]) };
         }
@@ -1241,24 +1537,12 @@ const Parser = struct {
             self.skipWhitespace();
             if (self.peek() == '(') {
                 self.pos += 1;
-                const args_start = self.exprs.items.len;
-
-                if (self.peek() != ')') {
-                    const arg = try self.parseExpr();
-                    try self.exprs.append(self.allocator, arg);
-
-                    while (self.peek() == ',') {
-                        self.pos += 1;
-                        const next_arg = try self.parseExpr();
-                        try self.exprs.append(self.allocator, next_arg);
-                    }
-                }
-
+                const args = try self.parseArgList(')');
                 if (self.peek() == ')') self.pos += 1;
                 return .{
                     .expr_type = .call,
                     .name = name,
-                    .args = self.exprs.items[args_start..],
+                    .args = args,
                 };
             }
 
@@ -1279,6 +1563,12 @@ const Parser = struct {
             return .{ .expr_type = .variable, .name = name };
         }
 
+        // Unrecognized token. Advance past it so the caller's parse loops make
+        // progress (never spin forever on malformed input) and record a syntax
+        // error so we exit non-zero like GNU/POSIX awk instead of running a
+        // half-parsed program.
+        self.had_error = true;
+        self.pos += 1;
         return .{ .expr_type = .number_lit, .num_val = 0 };
     }
 };
@@ -1293,7 +1583,9 @@ fn evalExpr(state: *AwkState, expr: *const Expr) Value {
             // Computed field $(expr)
             if (expr.field_expr) |fe| {
                 const n = evalExpr(state, fe).asNumber();
-                const fnum: usize = @intFromFloat(@max(0, n));
+                // Clamp before @intFromFloat: a huge/non-finite index otherwise
+                // panics ("integer part out of bounds") and aborts the process.
+                const fnum: usize = @intCast(@min(clampU64(n), @as(u64, MAX_FIELDS)));
                 return .{ .string = state.getField(fnum) };
             }
             return .{ .string = state.line };
@@ -1301,6 +1593,16 @@ fn evalExpr(state: *AwkState, expr: *const Expr) Value {
         .variable => return state.getVariable(expr.name),
         .string_lit => return .{ .string = expr.str_val },
         .number_lit => return .{ .number = expr.num_val },
+        .concat => {
+            const l = if (expr.left) |x| evalExpr(state, x) else Value.uninitialized;
+            const r = if (expr.right) |x| evalExpr(state, x) else Value.uninitialized;
+            const ls = l.asString(state.allocator) catch "";
+            const rs = r.asString(state.allocator) catch "";
+            const buf = state.allocator.alloc(u8, ls.len + rs.len) catch return .{ .string = "" };
+            @memcpy(buf[0..ls.len], ls);
+            @memcpy(buf[ls.len..], rs);
+            return .{ .string = buf };
+        },
         .regex => {
             // Regex against $0
             if (matchSimplePattern(expr.str_val, state.line)) {
@@ -1381,6 +1683,61 @@ fn evalExpr(state: *AwkState, expr: *const Expr) Value {
     }
 }
 
+// For a regex-position argument, use the literal pattern if it's a /re/ token;
+// otherwise evaluate it as a (dynamic) string pattern.
+fn regexArg(state: *AwkState, expr: *const Expr) []const u8 {
+    if (expr.expr_type == .regex) return expr.str_val;
+    return evalExpr(state, expr).asString(state.allocator) catch "";
+}
+
+// Expand an awk sub/gsub replacement string: `&` -> matched text,
+// `\&` -> literal '&', `\\` -> literal '\'.
+fn expandReplacement(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), repl: []const u8, matched: []const u8) void {
+    var i: usize = 0;
+    while (i < repl.len) : (i += 1) {
+        const c = repl[i];
+        if (c == '\\' and i + 1 < repl.len) {
+            const nxt = repl[i + 1];
+            if (nxt == '&' or nxt == '\\') {
+                out.append(allocator, nxt) catch {};
+                i += 1;
+                continue;
+            }
+            out.append(allocator, '\\') catch {};
+        } else if (c == '&') {
+            out.appendSlice(allocator, matched) catch {};
+        } else {
+            out.append(allocator, c) catch {};
+        }
+    }
+}
+
+// Write `value` back to an lvalue expression (used by sub/gsub target).
+fn assignStringToLvalue(state: *AwkState, target: *const Expr, value: []const u8) void {
+    switch (target.expr_type) {
+        .field => {
+            var n = target.field_num;
+            if (n == 0 and target.field_expr != null) {
+                const fv = evalExpr(state, target.field_expr.?).asNumber();
+                n = @intCast(@min(clampU64(fv), @as(u64, MAX_FIELDS)));
+            }
+            state.setField(n, value);
+        },
+        .variable => {
+            const owned = state.allocator.dupe(u8, value) catch return;
+            state.setVariable(target.name, .{ .string = owned }) catch {};
+        },
+        .array_access => {
+            if (target.left) |key_expr| {
+                const key = evalExpr(state, key_expr).asString(state.allocator) catch "";
+                const owned = state.allocator.dupe(u8, value) catch return;
+                state.setArrayElement(target.name, key, .{ .string = owned }) catch {};
+            }
+        },
+        else => {},
+    }
+}
+
 fn evalCall(state: *AwkState, name: []const u8, args: []Expr) Value {
     if (std.mem.eql(u8, name, "length")) {
         if (args.len > 0) {
@@ -1393,12 +1750,14 @@ fn evalCall(state: *AwkState, name: []const u8, args: []Expr) Value {
         if (args.len >= 2) {
             const s = evalExpr(state, &args[0]).asString(state.allocator) catch "";
             const start_f = evalExpr(state, &args[1]).asNumber();
-            const start: usize = if (start_f < 1) 0 else @intFromFloat(start_f - 1);
+            // Saturate to 0..s.len before @intFromFloat: a huge/non-finite arg
+            // otherwise panics and aborts. awk clamps such args to the string.
+            const start: usize = if (start_f < 1) 0 else @intCast(@min(clampU64(start_f - 1), @as(u64, s.len)));
             if (start >= s.len) return .{ .string = "" };
 
             if (args.len >= 3) {
                 const len_f = evalExpr(state, &args[2]).asNumber();
-                const len: usize = @intFromFloat(@max(0, len_f));
+                const len: usize = @intCast(@min(clampU64(len_f), @as(u64, s.len)));
                 const end = @min(start + len, s.len);
                 return .{ .string = s[start..end] };
             }
@@ -1446,13 +1805,10 @@ fn evalCall(state: *AwkState, name: []const u8, args: []Expr) Value {
         return .{ .string = "" };
     }
     if (std.mem.eql(u8, name, "sprintf")) {
-        // Simplified sprintf - just concatenate
-        var result = std.ArrayListUnmanaged(u8).empty;
-        for (args) |*arg| {
-            const s = evalExpr(state, arg).asString(state.allocator) catch "";
-            result.appendSlice(state.allocator, s) catch {};
-        }
-        return .{ .string = result.items };
+        // sprintf(fmt, args...) — honor the format string, same engine as printf.
+        if (args.len == 0) return .{ .string = "" };
+        const fmt = evalExpr(state, &args[0]).asString(state.allocator) catch "";
+        return .{ .string = formatPrintf(state, fmt, args[1..]) };
     }
     if (std.mem.eql(u8, name, "split")) {
         // split(string, array, [sep])
@@ -1525,74 +1881,67 @@ fn evalCall(state: *AwkState, name: []const u8, args: []Expr) Value {
         }
         return .{ .number = 0 };
     }
-    if (std.mem.eql(u8, name, "sub")) {
-        // sub(regexp, replacement, [target])
-        // Replace first occurrence, returns number of replacements (0 or 1)
-        if (args.len >= 2) {
-            const pattern = evalExpr(state, &args[0]).asString(state.allocator) catch "";
-            const repl = evalExpr(state, &args[1]).asString(state.allocator) catch "";
-            const target = if (args.len >= 3)
-                evalExpr(state, &args[2]).asString(state.allocator) catch ""
-            else
-                state.line;
+    if (std.mem.eql(u8, name, "sub") or std.mem.eql(u8, name, "gsub")) {
+        // sub/gsub(regexp, replacement, [target]) — replace first / all ERE
+        // matches, WRITE THE RESULT BACK to the target lvalue (default $0),
+        // and return the replacement count.
+        const global = name[0] == 'g';
+        if (args.len < 2) return .{ .number = 0 };
+        const pattern = regexArg(state, &args[0]);
+        const repl = evalExpr(state, &args[1]).asString(state.allocator) catch "";
+        const target = if (args.len >= 3) blk: {
+            break :blk evalExpr(state, &args[2]).asString(state.allocator) catch "";
+        } else state.line;
+        // Own the target bytes: writeback replaces state.line and would
+        // otherwise alias while we read from it.
+        const src = state.allocator.dupe(u8, target) catch return .{ .number = 0 };
 
-            // Simple substring replacement (first occurrence only)
-            if (std.mem.indexOf(u8, target, pattern)) |idx| {
-                var result: std.ArrayListUnmanaged(u8) = .empty;
-                result.appendSlice(state.allocator, target[0..idx]) catch {};
-                result.appendSlice(state.allocator, repl) catch {};
-                result.appendSlice(state.allocator, target[idx + pattern.len ..]) catch {};
-
-                // If target was $0 or a field, we would update it
-                // For now, return 1 for success
-                return .{ .number = 1 };
+        var result: std.ArrayListUnmanaged(u8) = .empty;
+        var count: f64 = 0;
+        var i: usize = 0;
+        while (i <= src.len) {
+            const m = regexFind(state.allocator, pattern, src, i) orelse {
+                result.appendSlice(state.allocator, src[i..]) catch {};
+                break;
+            };
+            result.appendSlice(state.allocator, src[i..m.begin]) catch {};
+            expandReplacement(state.allocator, &result, repl, src[m.begin..m.end]);
+            count += 1;
+            if (m.end == m.begin) {
+                // Empty match: emit one char and advance to avoid looping.
+                if (m.begin < src.len) result.append(state.allocator, src[m.begin]) catch {};
+                i = m.begin + 1;
+            } else {
+                i = m.end;
             }
-            return .{ .number = 0 };
-        }
-        return .{ .number = 0 };
-    }
-    if (std.mem.eql(u8, name, "gsub")) {
-        // gsub(regexp, replacement, [target])
-        // Replace all occurrences, returns count
-        if (args.len >= 2) {
-            const pattern = evalExpr(state, &args[0]).asString(state.allocator) catch "";
-            const repl = evalExpr(state, &args[1]).asString(state.allocator) catch "";
-            const target = if (args.len >= 3)
-                evalExpr(state, &args[2]).asString(state.allocator) catch ""
-            else
-                state.line;
-
-            if (pattern.len == 0) return .{ .number = 0 };
-
-            var result: std.ArrayListUnmanaged(u8) = .empty;
-            var count: f64 = 0;
-            var i: usize = 0;
-
-            while (i <= target.len) {
-                if (i + pattern.len <= target.len and std.mem.eql(u8, target[i..][0..pattern.len], pattern)) {
-                    result.appendSlice(state.allocator, repl) catch {};
-                    i += pattern.len;
-                    count += 1;
-                } else if (i < target.len) {
-                    result.append(state.allocator, target[i]) catch {};
-                    i += 1;
-                } else {
-                    break;
-                }
+            if (!global) {
+                result.appendSlice(state.allocator, src[i..]) catch {};
+                break;
             }
-
-            return .{ .number = count };
         }
-        return .{ .number = 0 };
+
+        if (count > 0) {
+            if (args.len >= 3) {
+                assignStringToLvalue(state, &args[2], result.items);
+            } else {
+                assignStringToLvalue(state, &.{ .expr_type = .field, .field_num = 0 }, result.items);
+            }
+        }
+        return .{ .number = count };
     }
     if (std.mem.eql(u8, name, "match")) {
-        // match(string, regexp) - returns position of match or 0
+        // match(string, regexp) — leftmost-longest ERE match. Sets RSTART and
+        // RLENGTH; returns the 1-based start position (0 if no match).
         if (args.len >= 2) {
             const s = evalExpr(state, &args[0]).asString(state.allocator) catch "";
-            const pattern = evalExpr(state, &args[1]).asString(state.allocator) catch "";
-            if (std.mem.indexOf(u8, s, pattern)) |idx| {
-                return .{ .number = @floatFromInt(idx + 1) };
+            const pattern = regexArg(state, &args[1]);
+            if (regexFind(state.allocator, pattern, s, 0)) |m| {
+                state.setVariable("RSTART", .{ .number = @floatFromInt(m.begin + 1) }) catch {};
+                state.setVariable("RLENGTH", .{ .number = @floatFromInt(m.end - m.begin) }) catch {};
+                return .{ .number = @floatFromInt(m.begin + 1) };
             }
+            state.setVariable("RSTART", .{ .number = 0 }) catch {};
+            state.setVariable("RLENGTH", .{ .number = -1 }) catch {};
             return .{ .number = 0 };
         }
         return .{ .number = 0 };
@@ -1629,11 +1978,354 @@ fn evalCall(state: *AwkState, name: []const u8, args: []Expr) Value {
     return .uninitialized;
 }
 
+// ---------------------------------------------------------------------------
+// POSIX ERE engine (Thompson NFA). Linear-time simulation — no catastrophic
+// backtracking, so untrusted patterns cannot wedge the process. Supports
+// ^ $ . * + ? [ ] ( ) | and backslash escapes. Anchored to /usr/bin/awk's
+// libc regex behavior (see gnu_parity_test.zig).
+// ---------------------------------------------------------------------------
+const RxKind = enum { consume, split, jmp, bol, eol, match };
+const RxState = struct {
+    kind: RxKind,
+    set: std.StaticBitSet(256) = std.StaticBitSet(256).initEmpty(),
+    out: u32 = 0,
+    out2: u32 = 0,
+};
+const RxPatch = struct { state: u32, slot: u1 };
+
+const Regex = struct {
+    states: []RxState,
+    start: u32,
+    ok: bool,
+
+    fn matches(self: *const Regex, text: []const u8) bool {
+        return self.search(text, 0) != null;
+    }
+
+    // Leftmost-longest search at or after `from`. Returns {begin, end}.
+    fn search(self: *const Regex, text: []const u8, from: usize) ?struct { begin: usize, end: usize } {
+        if (!self.ok) return null;
+        var begin = from;
+        while (begin <= text.len) : (begin += 1) {
+            if (self.runAt(text, begin)) |end| {
+                return .{ .begin = begin, .end = end };
+            }
+        }
+        return null;
+    }
+
+    // Anchored NFA simulation from `begin`; returns the longest end position
+    // reachable in a match state, or null.
+    fn runAt(self: *const Regex, text: []const u8, begin: usize) ?usize {
+        var clist_buf: [1024]u32 = undefined;
+        var nlist_buf: [1024]u32 = undefined;
+        var seen = std.StaticBitSet(4096).initEmpty();
+        var best: ?usize = null;
+
+        const n = self.closureAppend(clist_buf[0..], 0, &seen, self.start, text, begin);
+        var clist: []u32 = clist_buf[0..n];
+        if (self.listHasMatch(clist)) best = begin;
+
+        var pos = begin;
+        while (pos < text.len and clist.len > 0) {
+            const c = text[pos];
+            var cnt: usize = 0;
+            seen = std.StaticBitSet(4096).initEmpty();
+            for (clist) |si| {
+                const st = self.states[si];
+                if (st.kind == .consume and st.set.isSet(c)) {
+                    cnt = self.closureAppend(nlist_buf[0..], cnt, &seen, st.out, text, pos + 1);
+                }
+            }
+            pos += 1;
+            @memcpy(clist_buf[0..cnt], nlist_buf[0..cnt]);
+            clist = clist_buf[0..cnt];
+            if (self.listHasMatch(clist)) best = pos;
+        }
+        return best;
+    }
+
+    fn listHasMatch(self: *const Regex, list: []const u32) bool {
+        for (list) |si| {
+            if (self.states[si].kind == .match) return true;
+        }
+        return false;
+    }
+
+    fn closure(self: *const Regex, out_buf: []u32, seen: *std.StaticBitSet(4096), start_state: u32, text: []const u8, pos: usize) usize {
+        return self.closureAppend(out_buf, 0, seen, start_state, text, pos);
+    }
+
+    // Epsilon-closure of `s` added to out_buf starting at index `count`.
+    fn closureAppend(self: *const Regex, out_buf: []u32, count_in: usize, seen: *std.StaticBitSet(4096), s: u32, text: []const u8, pos: usize) usize {
+        var count = count_in;
+        if (s >= self.states.len or seen.isSet(s)) return count;
+        seen.set(s);
+        const st = self.states[s];
+        switch (st.kind) {
+            .split => {
+                count = self.closureAppend(out_buf, count, seen, st.out, text, pos);
+                count = self.closureAppend(out_buf, count, seen, st.out2, text, pos);
+            },
+            .jmp => {
+                count = self.closureAppend(out_buf, count, seen, st.out, text, pos);
+            },
+            .bol => {
+                if (pos == 0) count = self.closureAppend(out_buf, count, seen, st.out, text, pos);
+            },
+            .eol => {
+                if (pos == text.len) count = self.closureAppend(out_buf, count, seen, st.out, text, pos);
+            },
+            .consume, .match => {
+                if (count < out_buf.len) {
+                    out_buf[count] = s;
+                    count += 1;
+                }
+            },
+        }
+        return count;
+    }
+};
+
+// Regex compiler: recursive descent building a Thompson NFA.
+const RxCompiler = struct {
+    pattern: []const u8,
+    pos: usize = 0,
+    states: std.ArrayListUnmanaged(RxState),
+    allocator: std.mem.Allocator,
+    failed: bool = false,
+
+    const Frag = struct { start: u32, outs: std.ArrayListUnmanaged(RxPatch) };
+
+    fn addState(self: *RxCompiler, st: RxState) u32 {
+        const idx: u32 = @intCast(self.states.items.len);
+        self.states.appendAssumeCapacity(st);
+        return idx;
+    }
+
+    fn patch(self: *RxCompiler, outs: []const RxPatch, target: u32) void {
+        for (outs) |p| {
+            if (p.slot == 0) self.states.items[p.state].out = target else self.states.items[p.state].out2 = target;
+        }
+    }
+
+    fn parseAlt(self: *RxCompiler) error{OutOfMemory}!Frag {
+        var frag = try self.parseConcat();
+        while (self.pos < self.pattern.len and self.pattern[self.pos] == '|') {
+            self.pos += 1;
+            const rhs = try self.parseConcat();
+            const s = self.addState(.{ .kind = .split, .out = frag.start, .out2 = rhs.start });
+            var outs: std.ArrayListUnmanaged(RxPatch) = .empty;
+            try outs.appendSlice(self.allocator, frag.outs.items);
+            try outs.appendSlice(self.allocator, rhs.outs.items);
+            frag = .{ .start = s, .outs = outs };
+        }
+        return frag;
+    }
+
+    fn parseConcat(self: *RxCompiler) error{OutOfMemory}!Frag {
+        var frag: ?Frag = null;
+        while (self.pos < self.pattern.len and self.pattern[self.pos] != '|' and self.pattern[self.pos] != ')') {
+            const r = try self.parseRepeat();
+            if (frag) |*f| {
+                self.patch(f.outs.items, r.start);
+                f.outs.deinit(self.allocator);
+                f.outs = r.outs;
+            } else {
+                frag = r;
+            }
+        }
+        if (frag) |f| return f;
+        // Empty: an epsilon jmp with a dangling out.
+        const s = self.addState(.{ .kind = .jmp });
+        var outs: std.ArrayListUnmanaged(RxPatch) = .empty;
+        try outs.append(self.allocator, .{ .state = s, .slot = 0 });
+        return .{ .start = s, .outs = outs };
+    }
+
+    fn parseRepeat(self: *RxCompiler) error{OutOfMemory}!Frag {
+        var atom = try self.parseAtom();
+        while (self.pos < self.pattern.len) {
+            const c = self.pattern[self.pos];
+            if (c == '*') {
+                self.pos += 1;
+                const s = self.addState(.{ .kind = .split, .out = atom.start });
+                self.patch(atom.outs.items, s);
+                atom.outs.deinit(self.allocator);
+                var outs: std.ArrayListUnmanaged(RxPatch) = .empty;
+                try outs.append(self.allocator, .{ .state = s, .slot = 1 });
+                atom = .{ .start = s, .outs = outs };
+            } else if (c == '+') {
+                self.pos += 1;
+                const s = self.addState(.{ .kind = .split, .out = atom.start });
+                self.patch(atom.outs.items, s);
+                atom.outs.deinit(self.allocator);
+                var outs: std.ArrayListUnmanaged(RxPatch) = .empty;
+                try outs.append(self.allocator, .{ .state = s, .slot = 1 });
+                atom = .{ .start = atom.start, .outs = outs };
+            } else if (c == '?') {
+                self.pos += 1;
+                const s = self.addState(.{ .kind = .split, .out = atom.start });
+                var outs: std.ArrayListUnmanaged(RxPatch) = .empty;
+                try outs.appendSlice(self.allocator, atom.outs.items);
+                try outs.append(self.allocator, .{ .state = s, .slot = 1 });
+                atom.outs.deinit(self.allocator);
+                atom = .{ .start = s, .outs = outs };
+            } else break;
+        }
+        return atom;
+    }
+
+    fn singleOut(self: *RxCompiler, st: RxState) error{OutOfMemory}!Frag {
+        const idx = self.addState(st);
+        var outs: std.ArrayListUnmanaged(RxPatch) = .empty;
+        try outs.append(self.allocator, .{ .state = idx, .slot = 0 });
+        return .{ .start = idx, .outs = outs };
+    }
+
+    fn parseAtom(self: *RxCompiler) error{OutOfMemory}!Frag {
+        const c = self.pattern[self.pos];
+        if (c == '(') {
+            self.pos += 1;
+            const inner = try self.parseAlt();
+            if (self.pos < self.pattern.len and self.pattern[self.pos] == ')') self.pos += 1 else self.failed = true;
+            return inner;
+        }
+        if (c == '[') {
+            return self.parseClass();
+        }
+        if (c == '.') {
+            self.pos += 1;
+            var set = std.StaticBitSet(256).initEmpty();
+            set = set.complement(); // any byte
+            return self.singleOut(.{ .kind = .consume, .set = set });
+        }
+        if (c == '^') {
+            self.pos += 1;
+            return self.singleOut(.{ .kind = .bol });
+        }
+        if (c == '$') {
+            self.pos += 1;
+            return self.singleOut(.{ .kind = .eol });
+        }
+        var ch = c;
+        if (c == '\\' and self.pos + 1 < self.pattern.len) {
+            self.pos += 1;
+            ch = switch (self.pattern[self.pos]) {
+                't' => '\t',
+                'n' => '\n',
+                'r' => '\r',
+                'f' => 12,
+                'v' => 11,
+                else => |x| x,
+            };
+        }
+        self.pos += 1;
+        var set = std.StaticBitSet(256).initEmpty();
+        set.set(ch);
+        return self.singleOut(.{ .kind = .consume, .set = set });
+    }
+
+    fn parseClass(self: *RxCompiler) error{OutOfMemory}!Frag {
+        self.pos += 1; // consume '['
+        var set = std.StaticBitSet(256).initEmpty();
+        var negate = false;
+        if (self.pos < self.pattern.len and self.pattern[self.pos] == '^') {
+            negate = true;
+            self.pos += 1;
+        }
+        // A leading ']' is a literal.
+        var first = true;
+        while (self.pos < self.pattern.len and (self.pattern[self.pos] != ']' or first)) {
+            first = false;
+            var lo = self.pattern[self.pos];
+            if (lo == '\\' and self.pos + 1 < self.pattern.len) {
+                self.pos += 1;
+                lo = switch (self.pattern[self.pos]) {
+                    't' => '\t',
+                    'n' => '\n',
+                    'r' => '\r',
+                    else => |x| x,
+                };
+            }
+            self.pos += 1;
+            // Range a-z
+            if (self.pos + 1 < self.pattern.len and self.pattern[self.pos] == '-' and self.pattern[self.pos + 1] != ']') {
+                self.pos += 1;
+                var hi = self.pattern[self.pos];
+                if (hi == '\\' and self.pos + 1 < self.pattern.len) {
+                    self.pos += 1;
+                    hi = self.pattern[self.pos];
+                }
+                self.pos += 1;
+                var x: usize = lo;
+                while (x <= hi) : (x += 1) set.set(x);
+            } else {
+                set.set(lo);
+            }
+        }
+        if (self.pos < self.pattern.len and self.pattern[self.pos] == ']') self.pos += 1 else self.failed = true;
+        if (negate) set = set.complement();
+        return self.singleOut(.{ .kind = .consume, .set = set });
+    }
+};
+
+// Compile a pattern into a Regex owned by `allocator`. On failure returns a
+// Regex with ok=false; callers fall back to literal substring matching.
+fn compileRegex(allocator: std.mem.Allocator, pattern: []const u8) Regex {
+    var states: std.ArrayListUnmanaged(RxState) = .empty;
+    // Each atom adds at most ~2 states; reserve generously (plus 1 for the
+    // final match state) so appends never realloc — state indices must stay
+    // stable during compilation.
+    states.ensureTotalCapacity(allocator, pattern.len * 4 + 16) catch {
+        return .{ .states = &[_]RxState{}, .start = 0, .ok = false };
+    };
+    const reserved = states.capacity;
+    var comp = RxCompiler{ .pattern = pattern, .states = states, .allocator = allocator };
+    var frag = comp.parseAlt() catch {
+        return .{ .states = comp.states.items, .start = 0, .ok = false };
+    };
+    if (comp.pos != pattern.len or comp.failed or comp.states.capacity != reserved or
+        comp.states.items.len >= reserved)
+    {
+        frag.outs.deinit(allocator);
+        return .{ .states = comp.states.items, .start = 0, .ok = false };
+    }
+    const match_state: u32 = @intCast(comp.states.items.len);
+    comp.states.appendAssumeCapacity(.{ .kind = .match });
+    comp.patch(frag.outs.items, match_state);
+    frag.outs.deinit(allocator);
+    return .{ .states = comp.states.items, .start = frag.start, .ok = true };
+}
+
+// Match `pattern` (ERE) anywhere in `text`. Falls back to literal substring
+// search only if the pattern fails to compile.
 fn matchSimplePattern(pattern: []const u8, text: []const u8) bool {
     if (pattern.len == 0) return true;
-
-    // Simple substring match for now
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const re = compileRegex(arena.allocator(), pattern);
+    if (re.ok) return re.matches(text);
     return std.mem.indexOf(u8, text, pattern) != null;
+}
+
+// Find the leftmost-longest ERE match of `pattern` in `text` at/after `from`.
+fn regexFind(allocator: std.mem.Allocator, pattern: []const u8, text: []const u8, from: usize) ?struct { begin: usize, end: usize } {
+    // Compile into a per-call arena freed on return; the result is just byte
+    // indices, so nothing outlives the arena. sub/gsub/match run per record —
+    // compiling into the long-lived gpa leaked the NFA on every call.
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const re = compileRegex(arena.allocator(), pattern);
+    if (re.ok) {
+        if (re.search(text, from)) |m| return .{ .begin = m.begin, .end = m.end };
+        return null;
+    }
+    // Literal fallback.
+    if (std.mem.indexOfPos(u8, text, from, pattern)) |idx| {
+        return .{ .begin = idx, .end = idx + pattern.len };
+    }
+    return null;
 }
 
 fn execAction(state: *AwkState, action: *const Action) void {
@@ -1666,6 +2358,14 @@ fn execAction(state: *AwkState, action: *const Action) void {
             if (action.exprs.len > 0) {
                 const val = evalExpr(state, &action.exprs[0]);
                 state.setVariable(action.var_name, val) catch {};
+            }
+        },
+        .field_assign => {
+            // $N = value — condition holds the field lvalue expr.
+            if (action.exprs.len > 0 and action.condition != null) {
+                const v = evalExpr(state, &action.exprs[0]);
+                const s = v.asString(state.allocator) catch "";
+                assignStringToLvalue(state, action.condition.?, s);
             }
         },
         .array_assign => {
@@ -1711,6 +2411,10 @@ fn execAction(state: *AwkState, action: *const Action) void {
             state.should_next = true;
         },
         .exit => {
+            if (action.condition) |code_expr| {
+                const n = evalExpr(state, code_expr).asNumber();
+                state.exit_code = @intCast(@mod(clampI64(n), 256));
+            }
             state.should_exit = true;
         },
         .expr_stmt => {
@@ -1786,20 +2490,20 @@ fn formatPrintf(state: *AwkState, format: []const u8, args: []const Expr) []cons
                 const val = if (arg_idx < args.len) evalExpr(state, &args[arg_idx]) else Value.uninitialized;
                 arg_idx += 1;
 
-                var buf: [64]u8 = undefined;
+                var buf: [512]u8 = undefined;
                 var formatted: []const u8 = "";
 
                 switch (spec) {
                     'd', 'i' => {
-                        const n: i64 = @intFromFloat(val.asNumber());
+                        const n: i64 = clampI64(val.asNumber());
                         const len = formatInt(&buf, n);
                         formatted = buf[0..len];
                     },
                     'u' => {
-                        const n: u64 = @intFromFloat(@max(0, val.asNumber()));
+                        const n: u64 = clampU64(val.asNumber());
                         var tmp_len: usize = buf.len;
                         if (n == 0) {
-                            buf[buf.len - 1] = '0';
+                            buf[0] = '0';
                             tmp_len = 1;
                         } else {
                             var m = n;
@@ -1815,7 +2519,7 @@ fn formatPrintf(state: *AwkState, format: []const u8, args: []const Expr) []cons
                         formatted = buf[0..tmp_len];
                     },
                     'x', 'X' => {
-                        const n: u64 = @intFromFloat(@max(0, val.asNumber()));
+                        const n: u64 = clampU64(val.asNumber());
                         const hex_chars = if (spec == 'x') "0123456789abcdef" else "0123456789ABCDEF";
                         if (n == 0) {
                             buf[0] = '0';
@@ -1834,7 +2538,7 @@ fn formatPrintf(state: *AwkState, format: []const u8, args: []const Expr) []cons
                         }
                     },
                     'o' => {
-                        const n: u64 = @intFromFloat(@max(0, val.asNumber()));
+                        const n: u64 = clampU64(val.asNumber());
                         if (n == 0) {
                             buf[0] = '0';
                             formatted = buf[0..1];
@@ -1851,10 +2555,10 @@ fn formatPrintf(state: *AwkState, format: []const u8, args: []const Expr) []cons
                             formatted = buf[0..tmp_len];
                         }
                     },
-                    'f', 'e', 'g' => {
+                    'f', 'F', 'e', 'E', 'g', 'G' => {
                         const n = val.asNumber();
-                        const len = formatFloat(&buf, n);
-                        formatted = buf[0..len];
+                        const prec: usize = if (has_precision) precision else 6;
+                        formatted = formatFloatC(&buf, spec, n, prec);
                     },
                     's' => {
                         formatted = val.asString(state.allocator) catch "";
@@ -1863,14 +2567,22 @@ fn formatPrintf(state: *AwkState, format: []const u8, args: []const Expr) []cons
                         }
                     },
                     'c' => {
-                        const s = val.asString(state.allocator) catch "";
-                        if (s.len > 0) {
-                            buf[0] = s[0];
-                            formatted = buf[0..1];
-                        } else {
-                            const n: u8 = @intFromFloat(@mod(val.asNumber(), 256));
-                            buf[0] = n;
-                            formatted = buf[0..1];
+                        // A numeric arg prints the character with that code;
+                        // a string arg prints its first byte. (POSIX printf %c.)
+                        switch (val) {
+                            .number => |num| {
+                                buf[0] = @intCast(@mod(clampI64(num), 256));
+                                formatted = buf[0..1];
+                            },
+                            else => {
+                                const s = val.asString(state.allocator) catch "";
+                                if (s.len > 0) {
+                                    buf[0] = s[0];
+                                    formatted = buf[0..1];
+                                } else {
+                                    formatted = buf[0..0];
+                                }
+                            },
                         }
                     },
                     else => {},
@@ -1948,6 +2660,25 @@ const Config = struct {
     }
 };
 
+fn readProgramFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+    const fd = libc.open(path_z.ptr, .{ .ACCMODE = .RDONLY }, @as(libc.mode_t, 0));
+    if (fd < 0) return error.OpenError;
+    defer _ = libc.close(fd);
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    var chunk: [64 * 1024]u8 = undefined;
+    while (true) {
+        const n = libc.read(fd, &chunk, chunk.len);
+        if (n < 0) return error.ReadError;
+        if (n == 0) break;
+        try buf.appendSlice(allocator, chunk[0..@intCast(n)]);
+    }
+    return buf.toOwnedSlice(allocator);
+}
+
 fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
     // Collect args into a slice
     var args_list: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -1960,20 +2691,32 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
 
     var config = Config{};
     var i: usize = 1;
-    var found_program = false;
+    var positional_seen = false; // a positional program string was consumed
+    var program_from_file = false;
+    var no_more_flags = false;
 
     while (i < args.len) : (i += 1) {
         const arg = args[i];
 
-        if (arg.len > 0 and arg[0] == '-' and !found_program) {
-            if (arg.len > 1 and arg[1] == 'F') {
+        // Option parsing continues until a positional program string is seen.
+        // With -f the program comes from files, so options keep parsing.
+        if (!no_more_flags and arg.len > 1 and arg[0] == '-' and !positional_seen) {
+            if (std.mem.eql(u8, arg, "--")) {
+                no_more_flags = true;
+            } else if (std.mem.eql(u8, arg, "--help")) {
+                printHelp();
+                std.process.exit(0);
+            } else if (std.mem.eql(u8, arg, "--version")) {
+                printVersion();
+                std.process.exit(0);
+            } else if (arg[1] == 'F') {
                 if (arg.len > 2) {
                     config.fs = arg[2..];
                 } else {
                     i += 1;
                     if (i < args.len) config.fs = args[i];
                 }
-            } else if (arg.len > 1 and arg[1] == 'v') {
+            } else if (arg[1] == 'v') {
                 var var_arg: []const u8 = "";
                 if (arg.len > 2) {
                     var_arg = arg[2..];
@@ -1981,23 +2724,45 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                     i += 1;
                     if (i < args.len) var_arg = args[i];
                 }
-                // Parse name=value
                 if (std.mem.indexOf(u8, var_arg, "=")) |eq_pos| {
                     try config.variables.append(allocator, .{
                         .name = var_arg[0..eq_pos],
                         .value = var_arg[eq_pos + 1 ..],
                     });
                 }
-            } else if (std.mem.eql(u8, arg, "--help")) {
-                printHelp();
-                std.process.exit(0);
-            } else if (std.mem.eql(u8, arg, "--version")) {
-                printVersion();
-                std.process.exit(0);
+            } else if (arg[1] == 'f') {
+                // -f progfile: read the program from a file. Repeated -f files
+                // are concatenated with newlines. Positional args become data.
+                var path: []const u8 = "";
+                if (arg.len > 2) {
+                    path = arg[2..];
+                } else {
+                    i += 1;
+                    if (i < args.len) path = args[i] else {
+                        std.debug.print("zawk: -f requires an argument\n", .{});
+                        std.process.exit(2);
+                    }
+                }
+                const contents = readProgramFile(allocator, path) catch {
+                    std.debug.print("zawk: can't open program file {s}\n", .{path});
+                    std.process.exit(2);
+                };
+                if (config.program.len == 0) {
+                    config.program = contents;
+                } else {
+                    const merged = try std.mem.concat(allocator, u8, &.{ config.program, "\n", contents });
+                    allocator.free(config.program);
+                    allocator.free(contents);
+                    config.program = merged;
+                }
+                program_from_file = true;
+            } else {
+                std.debug.print("zawk: unknown option {s}\n", .{arg});
+                std.process.exit(2);
             }
-        } else if (!found_program) {
+        } else if (!positional_seen and !program_from_file) {
             config.program = try allocator.dupe(u8, arg);
-            found_program = true;
+            positional_seen = true;
         } else {
             try config.files.append(allocator, try allocator.dupe(u8, arg));
         }
@@ -2227,8 +2992,12 @@ pub fn main(init: std.process.Init) void {
 
     const rules = parser.parseProgram() catch {
         std.debug.print("zawk: syntax error\n", .{});
-        std.process.exit(1);
+        std.process.exit(2);
     };
+    if (parser.had_error) {
+        std.debug.print("zawk: syntax error in program\n", .{});
+        std.process.exit(2);
+    }
 
     // Initialize state
     var output = OutputBuffer{};

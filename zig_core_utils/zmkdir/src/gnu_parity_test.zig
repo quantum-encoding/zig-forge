@@ -49,6 +49,18 @@ const RunOutcome = struct {
     }
 };
 
+/// Resolve `bin` to an absolute path. `build_options.zmkdir_bin` is emitted
+/// relative to the build root (the test runner's cwd), but the child is
+/// spawned with `cwd` set to a temp dir, so a relative argv[0] would not be
+/// found. The test process itself never chdir's, so joining against the
+/// current working directory yields the correct absolute path.
+fn resolveBin(allocator: std.mem.Allocator, bin: []const u8) ![]u8 {
+    if (std.fs.path.isAbsolute(bin)) return allocator.dupe(u8, bin);
+    const cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(cwd);
+    return std.fs.path.join(allocator, &.{ cwd, bin });
+}
+
 /// Run `bin` with `args` inside `cwd`, LC_ALL=C, capturing everything.
 fn runTool(
     allocator: std.mem.Allocator,
@@ -56,9 +68,12 @@ fn runTool(
     args: []const []const u8,
     cwd: Io.Dir,
 ) !RunOutcome {
+    const abs_bin = try resolveBin(allocator, bin);
+    defer allocator.free(abs_bin);
+
     var argv: std.ArrayListUnmanaged([]const u8) = .empty;
     defer argv.deinit(allocator);
-    try argv.append(allocator, bin);
+    try argv.append(allocator, abs_bin);
     try argv.appendSlice(allocator, args);
 
     // C locale so GNU quoting is ASCII '...' regardless of host locale.
@@ -167,15 +182,15 @@ fn fixtureFileF(dir: Io.Dir) anyerror!void {
 }
 
 fn fixtureDirD(dir: Io.Dir) anyerror!void {
-    try dir.makeDir(io, "d");
+    try dir.createDir(io, "d", .default_dir);
 }
 
 fn fixtureDirPv1(dir: Io.Dir) anyerror!void {
-    try dir.makeDir(io, "pv1");
+    try dir.createDir(io, "pv1", .default_dir);
 }
 
 fn fixtureSymlinks(dir: Io.Dir) anyerror!void {
-    try dir.makeDir(io, "d");
+    try dir.createDir(io, "d", .default_dir);
     try dir.writeFile(io, .{ .sub_path = "f", .data = "existing\n" });
     try dir.symLink(io, "d", "symdir", .{});
     try dir.symLink(io, "f", "symfile", .{});
@@ -544,7 +559,7 @@ test "literal: EEXIST diagnostic bytes (was error.Unknown)" {
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makeDir(io, "d");
+    try tmp.dir.createDir(io, "d", .default_dir);
     var res = try runZ(allocator, &.{"d"}, tmp.dir);
     defer res.deinit(allocator);
     try testing.expectEqual(@as(u8, 1), res.code);
@@ -662,8 +677,8 @@ test "literal: -p tolerates a directory that already exists mid-chain (race fix)
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makeDir(io, "a");
-    try tmp.dir.makeDir(io, "a/b");
+    try tmp.dir.createDir(io, "a", .default_dir);
+    try tmp.dir.createDir(io, "a/b", .default_dir);
     var res = try runZ(allocator, &.{ "-p", "a/b/c" }, tmp.dir);
     defer res.deinit(allocator);
     try testing.expectEqual(@as(u8, 0), res.code);

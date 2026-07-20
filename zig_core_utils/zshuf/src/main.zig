@@ -13,16 +13,8 @@ const VERSION = "1.0.0";
 
 // C functions
 extern "c" fn write(fd: c_int, buf: [*]const u8, count: usize) isize;
-extern "c" fn open(path: [*:0]const u8, flags: c_int, mode: c_int) c_int;
 extern "c" fn close(fd: c_int) c_int;
 extern "c" fn arc4random() u32;
-
-const c_read = @extern(*const fn (c_int, [*]u8, usize) callconv(.c) isize, .{ .name = "read" });
-
-const O_RDONLY: c_int = 0;
-const O_WRONLY: c_int = 1;
-const O_CREAT: c_int = 0o100;
-const O_TRUNC: c_int = 0o1000;
 
 const Range = struct { lo: i64, hi: i64 };
 
@@ -67,6 +59,7 @@ pub fn main(init: std.process.Init) !void {
     var zero_terminated = false;
     var output_file: ?[]const u8 = null;
     var input_file: ?[]const u8 = null;
+    var extra_operand: ?[]const u8 = null;
     var echo_args: std.ArrayListUnmanaged([]const u8) = .empty;
     defer echo_args.deinit(allocator);
 
@@ -191,6 +184,8 @@ pub fn main(init: std.process.Init) !void {
                     try echo_args.append(allocator, args[i]);
                 } else if (input_file == null) {
                     input_file = args[i];
+                } else {
+                    extra_operand = args[i];
                 }
             }
         } else if (arg.len > 0 and arg[0] != '-') {
@@ -198,10 +193,18 @@ pub fn main(init: std.process.Init) !void {
                 try echo_args.append(allocator, arg);
             } else if (input_file == null) {
                 input_file = arg;
+            } else {
+                extra_operand = arg;
             }
         } else if (std.mem.eql(u8, arg, "-")) {
-            if (!echo_mode) {
+            // A bare `-` is a literal input line in echo mode; otherwise it is
+            // the stdin filename.
+            if (echo_mode) {
+                try echo_args.append(allocator, arg);
+            } else if (input_file == null) {
                 input_file = "-";
+            } else {
+                extra_operand = arg;
             }
         } else {
             writeStderr("zshuf: unrecognized option '{s}'\n", .{arg});
@@ -220,22 +223,27 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     }
 
-    // Open output file if specified
-    var out_fd: c_int = 1; // stdout
-    if (output_file) |of| {
-        var path_z: [4097]u8 = undefined;
-        if (of.len >= path_z.len) {
-            writeStderr("zshuf: path too long\n", .{});
-            std.process.exit(1);
-        }
-        @memcpy(path_z[0..of.len], of);
-        path_z[of.len] = 0;
+    // A file operand alongside -i is an extra operand (the range is the input,
+    // not the file). GNU: `shuf -i 1-3 somefile` → "extra operand", rc 1.
+    if (input_range != null and input_file != null) {
+        extra_operand = input_file;
+    }
+    if (extra_operand) |op| {
+        writeStderr("zshuf: extra operand '{s}'\n", .{op});
+        writeStderr("Try 'zshuf --help' for more information.\n", .{});
+        std.process.exit(1);
+    }
 
-        out_fd = open(@ptrCast(&path_z), O_WRONLY | O_CREAT | O_TRUNC, 0o644);
-        if (out_fd < 0) {
+    // Open output file if specified. std.posix.open computes the correct
+    // O_CREAT/O_TRUNC constants per-platform (Darwin and Linux differ), so the
+    // file is always truncated — otherwise a shorter new output leaves stale
+    // trailing bytes from the previous contents.
+    var out_fd: std.posix.fd_t = 1; // stdout
+    if (output_file) |of| {
+        out_fd = std.posix.openat(std.posix.AT.FDCWD, of, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644) catch {
             writeStderr("zshuf: cannot create '{s}'\n", .{of});
             std.process.exit(1);
-        }
+        };
     }
     defer {
         if (out_fd != 1) _ = close(out_fd);
@@ -253,13 +261,20 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (input_range) |range| {
-        // Generate numbers in range
-        var num = range.lo;
-        while (num <= range.hi) : (num += 1) {
-            var buf: [32]u8 = undefined;
-            const str = std.fmt.bufPrint(&buf, "{d}", .{num}) catch continue;
-            const copy = try allocator.dupe(u8, str);
-            try lines.append(allocator, copy);
+        // Generate numbers in range. lo == hi + 1 is a valid empty range
+        // (produces no output, matching GNU), handled by the lo <= hi guard.
+        // The break-before-increment form avoids an i64 overflow panic when
+        // hi == maxInt(i64).
+        if (range.lo <= range.hi) {
+            var num = range.lo;
+            while (true) {
+                var buf: [32]u8 = undefined;
+                const str = std.fmt.bufPrint(&buf, "{d}", .{num}) catch break;
+                const copy = try allocator.dupe(u8, str);
+                try lines.append(allocator, copy);
+                if (num == range.hi) break;
+                num += 1;
+            }
         }
     } else if (echo_mode) {
         // Use command line arguments
@@ -315,45 +330,37 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn parseRange(s: []const u8) ?Range {
+    // GNU shuf -i takes non-negative integers only, so a leading '-' (negative
+    // LO) is an invalid input range, not a hidden second dash to skip past.
+    if (s.len == 0 or s[0] == '-') return null;
+
     const dash_pos = std.mem.indexOf(u8, s, "-") orelse return null;
 
-    // Handle negative numbers - find the dash that's not at position 0
-    var actual_dash: usize = dash_pos;
-    if (dash_pos == 0) {
-        // First char is dash, look for another
-        if (std.mem.indexOfPos(u8, s, 1, "-")) |pos| {
-            actual_dash = pos;
-        } else {
-            return null;
-        }
-    }
+    const lo_str = s[0..dash_pos];
+    const hi_str = s[dash_pos + 1 ..];
 
-    const lo_str = s[0..actual_dash];
-    const hi_str = s[actual_dash + 1 ..];
-
+    // Reject a negative HI ("5--3") too.
     const lo = std.fmt.parseInt(i64, lo_str, 10) catch return null;
     const hi = std.fmt.parseInt(i64, hi_str, 10) catch return null;
+    if (lo < 0 or hi < 0) return null;
 
-    if (lo > hi) return null;
+    // lo == hi + 1 is a valid empty range in GNU (`shuf -i 5-4` → no output,
+    // rc 0); only lo > hi + 1 is genuinely invalid. lo,hi >= 0 so lo - hi
+    // cannot overflow.
+    if (lo > hi and lo - hi > 1) return null;
 
     return .{ .lo = lo, .hi = hi };
 }
 
 fn readLines(allocator: std.mem.Allocator, path: ?[]const u8, lines: *std.ArrayListUnmanaged([]const u8), terminator: u8) !void {
-    var fd: c_int = 0; // stdin
+    var fd: std.posix.fd_t = 0; // stdin
 
     if (path) |p| {
         if (!std.mem.eql(u8, p, "-")) {
-            var path_z: [4097]u8 = undefined;
-            if (p.len >= path_z.len) return error.PathTooLong;
-            @memcpy(path_z[0..p.len], p);
-            path_z[p.len] = 0;
-
-            fd = open(@ptrCast(&path_z), O_RDONLY, 0);
-            if (fd < 0) {
+            fd = std.posix.openat(std.posix.AT.FDCWD, p, .{ .ACCMODE = .RDONLY }, 0) catch {
                 writeStderr("zshuf: {s}: No such file or directory\n", .{p});
                 return error.FileNotFound;
-            }
+            };
         }
     }
     defer {
@@ -365,24 +372,26 @@ fn readLines(allocator: std.mem.Allocator, path: ?[]const u8, lines: *std.ArrayL
     defer line_buf.deinit(allocator);
 
     while (true) {
-        const n = c_read(fd, &buf, buf.len);
-        if (n <= 0) break;
+        const n = std.posix.read(fd, &buf) catch break;
+        if (n == 0) break;
 
-        const data = buf[0..@intCast(n)];
+        const data = buf[0..n];
         for (data) |byte| {
             if (byte == terminator) {
-                if (line_buf.items.len > 0) {
-                    const copy = try allocator.dupe(u8, line_buf.items);
-                    try lines.append(allocator, copy);
-                    line_buf.clearRetainingCapacity();
-                }
+                // Emit the line on EVERY terminator, even an empty segment —
+                // blank lines are real input lines (GNU keeps them). The
+                // trailing-empty case (input ends with a terminator) leaves
+                // line_buf empty, so no phantom final line is emitted below.
+                const copy = try allocator.dupe(u8, line_buf.items);
+                try lines.append(allocator, copy);
+                line_buf.clearRetainingCapacity();
             } else {
                 try line_buf.append(allocator, byte);
             }
         }
     }
 
-    // Handle last line without terminator
+    // Handle a final line not followed by a terminator.
     if (line_buf.items.len > 0) {
         const copy = try allocator.dupe(u8, line_buf.items);
         try lines.append(allocator, copy);

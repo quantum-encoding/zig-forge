@@ -20,6 +20,9 @@ extern "c" fn sigprocmask(how: c_int, set: ?*const sigset_t, oldset: ?*sigset_t)
 extern "c" fn sigemptyset(set: *sigset_t) c_int;
 extern "c" fn sigaddset(set: *sigset_t, signum: c_int) c_int;
 extern "c" fn nanosleep(req: *const libc.timespec, rem: ?*libc.timespec) c_int;
+extern "c" fn strerror(errnum: c_int) [*:0]const u8;
+extern "c" fn raise(sig: c_int) c_int;
+extern "c" fn signal(sig: c_int, handler: usize) usize;
 
 // Signal set type (platform-specific size)
 const sigset_t = switch (builtin.os.tag) {
@@ -228,15 +231,22 @@ const Duration = struct {
         // Parse integer part
         const int_part = std.fmt.parseInt(u64, str[0..numeric_end], 10) catch return error.InvalidDuration;
 
-        // Parse fractional part
+        // Parse fractional part.
+        // Accumulate at most 9 fractional digits (nanosecond resolution) and
+        // truncate the rest. The previous `frac_val * 1e9 / scale` overflowed
+        // u64 once the fractional string had ~11+ digits (and `scale *= 10`
+        // wrapped at ~20 digits), which panicked in safe builds and silently
+        // wrapped in ReleaseFast. GNU truncates excess precision rather than
+        // failing (`timeout 0.99999999999 ...` runs), so we do the same.
         var frac_ns: u64 = 0;
         if (has_dot and suffix_start > decimal_start) {
             const frac_str = str[decimal_start..suffix_start];
-            // Convert to nanoseconds (9 decimal places)
-            const frac_val = std.fmt.parseInt(u64, frac_str, 10) catch return error.InvalidDuration;
-            var scale: u64 = 1;
-            for (0..frac_str.len) |_| scale *= 10;
-            frac_ns = (frac_val * 1_000_000_000) / scale;
+            var digit_weight: u64 = 100_000_000; // weight of the 1st fractional digit, in ns
+            for (frac_str) |d| {
+                if (digit_weight == 0) break; // already consumed 9 digits
+                frac_ns += @as(u64, d - '0') * digit_weight;
+                digit_weight /= 10;
+            }
         }
 
         // Calculate total with overflow protection
@@ -331,11 +341,12 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
     var config = Config{ .duration = undefined };
     var i: usize = 1; // Skip program name
     var positional_count: usize = 0;
+    var options_ended = false; // set by a literal "--"
 
     while (i < args.len) : (i += 1) {
         const arg = args[i];
 
-        if (arg.len > 0 and arg[0] == '-') {
+        if (!options_ended and arg.len > 0 and arg[0] == '-') {
             if (std.mem.eql(u8, arg, "--help")) {
                 printHelp();
                 std.process.exit(0);
@@ -348,46 +359,46 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                 config.preserve_status = true;
             } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
                 config.verbose = true;
-            } else if (std.mem.eql(u8, arg, "-s") or std.mem.startsWith(u8, arg, "--signal")) {
-                const sig_str = if (std.mem.eql(u8, arg, "-s")) blk: {
+            } else if (std.mem.startsWith(u8, arg, "-s") or std.mem.startsWith(u8, arg, "--signal")) {
+                // Accept: "-s NAME", "-sNAME" (attached, GNU getopt form),
+                // "--signal NAME", "--signal=NAME".
+                const sig_str = if (std.mem.startsWith(u8, arg, "--signal="))
+                    arg["--signal=".len..]
+                else if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--signal")) blk: {
                     i += 1;
                     if (i >= args.len) {
                         printError("option requires an argument -- 's'");
                         std.process.exit(@intFromEnum(ExitStatus.timeout_failed));
                     }
                     break :blk args[i];
-                } else if (std.mem.startsWith(u8, arg, "--signal="))
-                    arg["--signal=".len..]
-                else blk: {
-                    i += 1;
-                    if (i >= args.len) {
-                        printError("option '--signal' requires an argument");
-                        std.process.exit(@intFromEnum(ExitStatus.timeout_failed));
-                    }
-                    break :blk args[i];
+                } else if (std.mem.startsWith(u8, arg, "-s"))
+                    arg["-s".len..] // attached short form: -sKILL
+                else {
+                    printErrorFmt("unrecognized option '{s}'", .{arg});
+                    std.process.exit(@intFromEnum(ExitStatus.timeout_failed));
                 };
 
                 config.signal = SignalNames.fromName(sig_str) orelse {
                     printError("invalid signal");
                     std.process.exit(@intFromEnum(ExitStatus.timeout_failed));
                 };
-            } else if (std.mem.eql(u8, arg, "-k") or std.mem.startsWith(u8, arg, "--kill-after")) {
-                const duration_str = if (std.mem.eql(u8, arg, "-k")) blk: {
+            } else if (std.mem.startsWith(u8, arg, "-k") or std.mem.startsWith(u8, arg, "--kill-after")) {
+                // Accept: "-k DUR", "-kDUR" (attached), "--kill-after DUR",
+                // "--kill-after=DUR".
+                const duration_str = if (std.mem.startsWith(u8, arg, "--kill-after="))
+                    arg["--kill-after=".len..]
+                else if (std.mem.eql(u8, arg, "-k") or std.mem.eql(u8, arg, "--kill-after")) blk: {
                     i += 1;
                     if (i >= args.len) {
                         printError("option requires an argument -- 'k'");
                         std.process.exit(@intFromEnum(ExitStatus.timeout_failed));
                     }
                     break :blk args[i];
-                } else if (std.mem.startsWith(u8, arg, "--kill-after="))
-                    arg["--kill-after=".len..]
-                else blk: {
-                    i += 1;
-                    if (i >= args.len) {
-                        printError("option '--kill-after' requires an argument");
-                        std.process.exit(@intFromEnum(ExitStatus.timeout_failed));
-                    }
-                    break :blk args[i];
+                } else if (std.mem.startsWith(u8, arg, "-k"))
+                    arg["-k".len..] // attached short form: -k0.2
+                else {
+                    printErrorFmt("unrecognized option '{s}'", .{arg});
+                    std.process.exit(@intFromEnum(ExitStatus.timeout_failed));
                 };
 
                 config.kill_after = Duration.parse(duration_str) catch {
@@ -395,9 +406,9 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                     std.process.exit(@intFromEnum(ExitStatus.timeout_failed));
                 };
             } else if (std.mem.eql(u8, arg, "--")) {
-                // End of options
-                i += 1;
-                break;
+                // End of options: everything after this is positional
+                // (DURATION then COMMAND), even if it starts with '-'.
+                options_ended = true;
             } else {
                 printErrorFmt("unrecognized option '{s}'", .{arg});
                 std.process.exit(@intFromEnum(ExitStatus.timeout_failed));
@@ -504,11 +515,18 @@ fn spawnChild(config: *const Config) !c_int {
         }
 
         // Execute command
-        _ = execvp(config.command_name.ptr, config.command_argv.ptr);
+        const rc = execvp(config.command_name.ptr, config.command_argv.ptr);
 
-        // If we get here, exec failed
-        // Check errno for the type of error
-        const err = std.c.errno(0);
+        // If we get here, exec failed. `std.c.errno(x)` returns the real errno
+        // only when `x == -1`, else `.SUCCESS` (see std/c.zig). The old code
+        // passed the literal 0, so `err` was always `.SUCCESS`, the NOENT
+        // branch was dead, and every failure fell through to 126 with no
+        // diagnostic. Capture the actual execvp return value instead.
+        const err = std.c.errno(rc);
+        printErrorFmt("failed to run command '{s}': {s}", .{
+            config.command_name,
+            std.mem.span(strerror(@intFromEnum(err))),
+        });
         if (err == .NOENT) {
             std.process.exit(@intFromEnum(ExitStatus.command_not_found));
         } else {
@@ -533,17 +551,66 @@ fn killProcess(pid: c_int, sig: c_int, foreground: bool) void {
     }
 }
 
-fn waitForChild(pid: c_int) ?u8 {
+/// How the child ultimately terminated. Kept distinct (exit vs signal) so we
+/// can reproduce GNU `timeout`'s signal-transparent behavior: when the child
+/// dies from a signal, GNU re-raises that signal on itself rather than doing a
+/// plain exit(128+sig), so its own parent observes the identical termination.
+const ChildResult = union(enum) {
+    exited: u8,
+    signaled: u8,
+};
+
+fn waitForChild(pid: c_int) ?ChildResult {
     var status: c_int = 0;
     const result = waitpid(pid, &status, 0);
     if (result < 0) return null;
 
     if (WIFEXITED(status)) {
-        return WEXITSTATUS(status);
+        return .{ .exited = WEXITSTATUS(status) };
     } else if (WIFSIGNALED(status)) {
-        return ExitStatus.signalExit(WTERMSIG(status));
+        return .{ .signaled = WTERMSIG(status) };
     }
     return null;
+}
+
+/// Re-raise `sig` on ourselves so our parent sees the same terminating signal
+/// (GNU signal transparency). Restores the default disposition and unblocks the
+/// signal first, since the parent blocks TERM/CHLD. Does not return.
+fn reRaise(sig: c_int) noreturn {
+    const SIG_DFL: usize = 0;
+    _ = signal(sig, SIG_DFL);
+
+    var set: sigset_t = undefined;
+    _ = sigemptyset(&set);
+    _ = sigaddset(&set, sig);
+    _ = sigprocmask(SIG_UNBLOCK, &set, null);
+
+    _ = raise(sig);
+    // Fatal default dispositions never return here; guard anyway.
+    std.process.exit(ExitStatus.signalExit(@intCast(sig)));
+}
+
+/// Map the child's termination onto ztimeout's process exit, matching GNU:
+///   - child exited normally, no timeout           -> that exit code
+///   - child died by signal, no timeout            -> re-raise (transparent)
+///   - --preserve-status                           -> child's status (128+sig / code)
+///   - timed out, killed by SIGKILL                -> re-raise SIGKILL (137/signaled 9)
+///   - timed out, otherwise                        -> 124
+fn finish(timed_out: bool, preserve: bool, child: ChildResult) noreturn {
+    switch (child) {
+        .exited => |code| {
+            if (timed_out and !preserve) {
+                std.process.exit(@intFromEnum(ExitStatus.command_timed_out));
+            }
+            std.process.exit(code);
+        },
+        .signaled => |sig| {
+            if (preserve) std.process.exit(ExitStatus.signalExit(sig));
+            if (!timed_out) reRaise(sig); // transparent: child died on its own
+            if (sig == @as(u8, @intCast(Signal.KILL))) reRaise(Signal.KILL);
+            std.process.exit(@intFromEnum(ExitStatus.command_timed_out));
+        },
+    }
 }
 
 // ============================================================================
@@ -555,16 +622,16 @@ fn doSleep(duration: Duration) void {
     _ = nanosleep(&ts, null);
 }
 
-// Check if child has exited (non-blocking)
-fn checkChildExited(pid: c_int) ?u8 {
+// Check if child has exited (non-blocking). Reaps the child on success.
+fn checkChildExited(pid: c_int) ?ChildResult {
     var status: c_int = 0;
     const WNOHANG: c_int = 1;
     const result = waitpid(pid, &status, WNOHANG);
     if (result > 0) {
         if (WIFEXITED(status)) {
-            return WEXITSTATUS(status);
+            return .{ .exited = WEXITSTATUS(status) };
         } else if (WIFSIGNALED(status)) {
-            return ExitStatus.signalExit(WTERMSIG(status));
+            return .{ .signaled = WTERMSIG(status) };
         }
     }
     return null;
@@ -574,42 +641,49 @@ fn checkChildExited(pid: c_int) ?u8 {
 // Main Timeout Logic
 // ============================================================================
 
-fn runTimeout(config: *const Config) u8 {
+fn runTimeout(config: *const Config) noreturn {
     // Block SIGCHLD and SIGTERM before spawning child
     const mask = SignalMask.block(&.{ Signal.CHLD, Signal.TERM });
-    defer mask.restore();
 
     // Spawn child process
     const child_pid = spawnChild(config) catch {
         printError("failed to spawn child process");
-        return @intFromEnum(ExitStatus.timeout_failed);
+        std.process.exit(@intFromEnum(ExitStatus.timeout_failed));
     };
 
-    // Handle zero timeout (no timeout mode)
+    // Handle zero timeout (no timeout mode): run the child to completion and
+    // reflect its termination transparently.
     if (config.duration.isZero()) {
-        const status = waitForChild(child_pid);
-        return status orelse @intFromEnum(ExitStatus.timeout_failed);
+        const status = waitForChild(child_pid) orelse {
+            mask.restore();
+            std.process.exit(@intFromEnum(ExitStatus.timeout_failed));
+        };
+        finish(false, config.preserve_status, status);
     }
 
-    // Polling approach for timeout - check every 100ms
-    const poll_interval = Duration{ .seconds = 0, .nanoseconds = 100_000_000 };
+    // Polling approach for timeout - check at most every 100ms, but never
+    // sleep past the remaining time so sub-100ms durations fire on time
+    // instead of rounding up to a 100ms boundary.
     var remaining_ns: u64 = config.duration.seconds * 1_000_000_000 + config.duration.nanoseconds;
     const poll_ns: u64 = 100_000_000;
 
     while (remaining_ns > 0) {
-        // Check if child has exited
+        // Child finished before the timeout: reflect its status transparently.
         if (checkChildExited(child_pid)) |status| {
-            return status;
+            finish(false, config.preserve_status, status);
         }
 
-        // Sleep for poll interval
-        doSleep(poll_interval);
+        // Sleep for the smaller of the poll interval and the time left.
+        const sleep_ns: u64 = @min(poll_ns, remaining_ns);
+        doSleep(Duration{ .seconds = sleep_ns / 1_000_000_000, .nanoseconds = @intCast(sleep_ns % 1_000_000_000) });
+        remaining_ns -= sleep_ns;
+    }
 
-        if (remaining_ns > poll_ns) {
-            remaining_ns -= poll_ns;
-        } else {
-            remaining_ns = 0;
-        }
+    // The child may have exited during the final sleep interval. Re-check
+    // before declaring a timeout, otherwise a fast command that finishes
+    // within the last poll window is wrongly reported as timed out (124).
+    if (checkChildExited(child_pid)) |status| {
+        finish(false, config.preserve_status, status);
     }
 
     // Timeout expired - send signal to child
@@ -619,50 +693,42 @@ fn runTimeout(config: *const Config) u8 {
 
     killProcess(child_pid, config.signal, config.foreground);
 
-    // Track if we sent SIGKILL (for correct exit status)
-    var sent_kill = false;
-
     // Handle kill-after
+    var reaped: ?ChildResult = null;
     if (config.kill_after) |kill_duration| {
         var kill_remaining_ns: u64 = kill_duration.seconds * 1_000_000_000 + kill_duration.nanoseconds;
 
+        // Capture the child's result if it dies from the initial signal within
+        // the kill-after window. `checkChildExited` REAPS the child, so we must
+        // record that here — re-calling waitpid afterwards would return -1
+        // (ECHILD) and be misread as "still running", causing a spurious
+        // SIGKILL escalation (and a wrong 137 instead of 124).
         while (kill_remaining_ns > 0) {
-            if (checkChildExited(child_pid)) |_| {
+            if (checkChildExited(child_pid)) |r| {
+                reaped = r;
                 break;
             }
 
-            doSleep(poll_interval);
-
-            if (kill_remaining_ns > poll_ns) {
-                kill_remaining_ns -= poll_ns;
-            } else {
-                kill_remaining_ns = 0;
-            }
+            const sleep_ns: u64 = @min(poll_ns, kill_remaining_ns);
+            doSleep(Duration{ .seconds = sleep_ns / 1_000_000_000, .nanoseconds = @intCast(sleep_ns % 1_000_000_000) });
+            kill_remaining_ns -= sleep_ns;
         }
 
-        // If child still running, send SIGKILL
-        if (checkChildExited(child_pid) == null) {
+        // If child still running after the window, escalate to SIGKILL.
+        if (reaped == null) {
             if (config.verbose) {
                 printVerbose("KILL", config.command_name);
             }
             killProcess(child_pid, Signal.KILL, config.foreground);
-            sent_kill = true;
         }
     }
 
-    // Wait for child to actually exit
-    _ = waitForChild(child_pid);
-
-    if (config.preserve_status) {
-        // Return 128 + signal we sent (or KILL if escalated)
-        const final_sig: u8 = if (sent_kill) @intCast(Signal.KILL) else @intCast(config.signal);
-        return ExitStatus.signalExit(final_sig);
-    } else if (sent_kill) {
-        // If we sent SIGKILL, return 137 (128 + 9)
-        return ExitStatus.signalExit(@intCast(Signal.KILL));
-    } else {
-        return @intFromEnum(ExitStatus.command_timed_out);
-    }
+    // Reap the child if not already reaped in the kill-after loop.
+    const status = reaped orelse waitForChild(child_pid) orelse {
+        mask.restore();
+        std.process.exit(@intFromEnum(ExitStatus.timeout_failed));
+    };
+    finish(true, config.preserve_status, status);
 }
 
 // ============================================================================
@@ -720,6 +786,5 @@ pub fn main(init: std.process.Init) void {
         std.process.exit(@intFromEnum(ExitStatus.timeout_failed));
     };
 
-    const exit_code = runTimeout(&config);
-    std.process.exit(exit_code);
+    runTimeout(&config);
 }

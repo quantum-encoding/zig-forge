@@ -6,6 +6,8 @@
 //! Usage: zmore [OPTIONS] [FILE]...
 
 const std = @import("std");
+const builtin = @import("builtin");
+const posix = std.posix;
 
 const VERSION = "1.0.0";
 
@@ -14,28 +16,10 @@ extern "c" fn write(fd: c_int, buf: [*]const u8, count: usize) isize;
 extern "c" fn open(path: [*:0]const u8, flags: c_int, mode: c_int) c_int;
 extern "c" fn close(fd: c_int) c_int;
 extern "c" fn isatty(fd: c_int) c_int;
-extern "c" fn tcgetattr(fd: c_int, termios: *Termios) c_int;
-extern "c" fn tcsetattr(fd: c_int, actions: c_int, termios: *const Termios) c_int;
 
 const c_read = @extern(*const fn (c_int, [*]u8, usize) callconv(.c) isize, .{ .name = "read" });
 
 const O_RDONLY: c_int = 0;
-const TCSANOW: c_int = 0;
-
-// Termios structure for terminal control
-const Termios = extern struct {
-    c_iflag: u32,
-    c_oflag: u32,
-    c_cflag: u32,
-    c_lflag: u32,
-    c_line: u8,
-    c_cc: [32]u8,
-    c_ispeed: u32,
-    c_ospeed: u32,
-};
-
-const ICANON: u32 = 0x00000002;
-const ECHO: u32 = 0x00000008;
 
 // ANSI escape codes
 const CLEAR_SCREEN = "\x1b[2J\x1b[H";
@@ -68,8 +52,11 @@ fn writeStdoutRaw(data: []const u8) void {
 }
 
 fn getTerminalSize() struct { rows: usize, cols: usize } {
-    // Try ioctl TIOCGWINSZ
-    const TIOCGWINSZ: u32 = 0x5413;
+    // Try ioctl TIOCGWINSZ (request number is OS-specific)
+    const TIOCGWINSZ: u32 = switch (builtin.os.tag) {
+        .macos, .ios, .tvos, .watchos, .visionos, .freebsd, .netbsd, .openbsd, .dragonfly => 0x40087468,
+        else => 0x5413, // Linux
+    };
     const Winsize = extern struct {
         ws_row: u16,
         ws_col: u16,
@@ -123,8 +110,17 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--squeeze")) {
             squeeze_blank = true;
         } else if (std.mem.startsWith(u8, arg, "+")) {
-            // +N starts at line N
-            start_line = std.fmt.parseInt(usize, arg[1..], 10) catch 0;
+            // +N starts at line N. GNU/POSIX more numbers lines from 1, so
+            // +1 shows the file from its first line. Convert to a 0-based
+            // index (saturating so +0 and +1 both map to index 0).
+            const n = std.fmt.parseInt(usize, arg[1..], 10) catch 1;
+            start_line = n -| 1;
+        } else if (std.mem.startsWith(u8, arg, "--lines=")) {
+            // Equals form advertised in --help.
+            num_lines = std.fmt.parseInt(usize, arg["--lines=".len..], 10) catch {
+                writeStderr("zmore: invalid number of lines: '{s}'\n", .{arg["--lines=".len..]});
+                std.process.exit(1);
+            };
         } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--lines")) {
             i += 1;
             if (i >= args.len) {
@@ -157,29 +153,45 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    // Get terminal size
+    // Get terminal size. Clamp to at least one line per page so a 1-row
+    // terminal (rows == 1) cannot produce page_lines == 0, which would
+    // livelock the pager and underflow `page_lines - 1` on ENTER.
     const term = getTerminalSize();
-    const page_lines = if (num_lines > 0) num_lines else term.rows - 1;
+    const page_lines = @max(1, if (num_lines > 0) num_lines else term.rows -| 1);
 
     // Check if output is a tty
     const is_tty = isatty(1) != 0;
 
+    var any_error = false;
+
     if (files.items.len == 0) {
         // Read from stdin
-        _ = try displayFile(allocator, "-", page_lines, start_line, clear_screen, squeeze_blank, is_tty, false);
+        _ = try displayFile(allocator, "-", page_lines, start_line, clear_screen, squeeze_blank, is_tty, false, &any_error);
     } else {
         const show_header = files.items.len > 1;
         for (files.items, 0..) |file, idx| {
             if (show_header) {
                 if (idx > 0) writeStdout("\n", .{});
-                writeStdout("{s}:::::::::::::::{s}\n", .{ REVERSE_VIDEO, NORMAL_VIDEO });
-                writeStdout("{s}{s}{s}\n", .{ REVERSE_VIDEO, file, NORMAL_VIDEO });
-                writeStdout("{s}:::::::::::::::{s}\n", .{ REVERSE_VIDEO, NORMAL_VIDEO });
+                // GNU more's file banner is a plain 14-colon rule. Reverse
+                // video is a TTY-only nicety; to a pipe/file it must be plain
+                // so downstream parsers/diffs aren't polluted with escapes.
+                if (is_tty) {
+                    writeStdout("{s}::::::::::::::{s}\n", .{ REVERSE_VIDEO, NORMAL_VIDEO });
+                    writeStdout("{s}{s}{s}\n", .{ REVERSE_VIDEO, file, NORMAL_VIDEO });
+                    writeStdout("{s}::::::::::::::{s}\n", .{ REVERSE_VIDEO, NORMAL_VIDEO });
+                } else {
+                    writeStdout("::::::::::::::\n", .{});
+                    writeStdout("{s}\n", .{file});
+                    writeStdout("::::::::::::::\n", .{});
+                }
             }
-            const should_continue = try displayFile(allocator, file, page_lines, start_line, clear_screen, squeeze_blank, is_tty, idx + 1 < files.items.len);
+            const should_continue = try displayFile(allocator, file, page_lines, start_line, clear_screen, squeeze_blank, is_tty, idx + 1 < files.items.len, &any_error);
             if (!should_continue) break;
         }
     }
+
+    // GNU more exits non-zero when a named file could not be opened.
+    if (any_error) std.process.exit(1);
 }
 
 fn displayFile(
@@ -191,6 +203,7 @@ fn displayFile(
     squeeze_blank: bool,
     is_tty: bool,
     has_more_files: bool,
+    any_error: *bool,
 ) !bool {
     // Open file
     var fd: c_int = 0;
@@ -198,6 +211,7 @@ fn displayFile(
         var path_z: [4097]u8 = undefined;
         if (path.len >= path_z.len) {
             writeStderr("zmore: path too long\n", .{});
+            any_error.* = true;
             return true;
         }
         @memcpy(path_z[0..path.len], path);
@@ -206,6 +220,7 @@ fn displayFile(
         fd = open(@ptrCast(&path_z), O_RDONLY, 0);
         if (fd < 0) {
             writeStderr("zmore: cannot open '{s}'\n", .{path});
+            any_error.* = true;
             return true;
         }
     }
@@ -267,20 +282,29 @@ fn displayFile(
         return true;
     }
 
-    // Interactive paging
-    var orig_termios: Termios = undefined;
-    const tty_fd: c_int = 2; // Use stderr for tty input (stdin might be pipe)
-    const have_tty = tcgetattr(tty_fd, &orig_termios) == 0;
+    // Interactive paging.
+    // Use std.posix.tcgetattr/tcsetattr so the termios layout and the
+    // ICANON/ECHO flag bits are correct per-OS (the previous hand-rolled
+    // Linux-glibc extern struct + constants corrupted the stack and cleared
+    // the wrong bits on macOS/BSD, where struct termios is larger).
+    const tty_fd: posix.fd_t = 2; // Use stderr for tty input (stdin might be pipe)
+    var orig_termios: posix.termios = undefined;
+    var have_tty = false;
+    if (posix.tcgetattr(tty_fd)) |t| {
+        orig_termios = t;
+        have_tty = true;
+    } else |_| {}
 
     if (have_tty) {
         var raw = orig_termios;
-        raw.c_lflag &= ~(ICANON | ECHO);
-        _ = tcsetattr(tty_fd, TCSANOW, &raw);
+        raw.lflag.ICANON = false;
+        raw.lflag.ECHO = false;
+        posix.tcsetattr(tty_fd, .NOW, raw) catch {};
     }
 
     defer {
         if (have_tty) {
-            _ = tcsetattr(tty_fd, TCSANOW, &orig_termios);
+            posix.tcsetattr(tty_fd, .NOW, orig_termios) catch {};
         }
     }
 

@@ -1,40 +1,40 @@
 //! zstty - Change and print terminal line settings
 //!
-//! A Zig implementation of stty.
+//! A Zig implementation of stty (GNU coreutils `stty`).
 //! Print or change terminal characteristics.
 //!
 //! Usage: zstty [OPTIONS] [SETTING]...
+//!
+//! Portability: the termios struct layout, flag bit positions, NCCS, control-
+//! character indices and the baud-rate encoding all differ between Linux and the
+//! BSD/Darwin family. Rather than hard-coding one ABI, this file consumes Zig's
+//! target-aware `std.c.termios` (whose flag words are POSIX-named packed structs)
+//! and only picks the small handful of constants std.c does not expose
+//! (V* cc indices, TIOC*WINSZ ioctl numbers, _POSIX_VDISABLE) per-target below.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const VERSION = "1.0.0";
+
+const os_tag = builtin.os.tag;
+const is_darwin = os_tag.isDarwin();
+
+// Target-aware termios types (correct field offsets, widths and NCCS per OS).
+const termios = std.c.termios;
+const speed_t = std.c.speed_t;
+const NCCS = std.c.NCCS;
 
 // C functions
 extern "c" fn write(fd: c_int, buf: [*]const u8, count: usize) isize;
 extern "c" fn isatty(fd: c_int) c_int;
+extern "c" fn ioctl(fd: c_int, request: c_ulong, ...) c_int;
+extern "c" fn cfgetospeed(t: *const termios) speed_t;
+extern "c" fn cfgetispeed(t: *const termios) speed_t;
+extern "c" fn cfsetospeed(t: *termios, speed: speed_t) c_int;
+extern "c" fn cfsetispeed(t: *termios, speed: speed_t) c_int;
 
-// Termios structure (Linux x86_64)
-const cc_t = u8;
-const speed_t = u32;
-const tcflag_t = u32;
-
-const NCCS = 32;
-
-const termios = extern struct {
-    c_iflag: tcflag_t,
-    c_oflag: tcflag_t,
-    c_cflag: tcflag_t,
-    c_lflag: tcflag_t,
-    c_line: cc_t,
-    c_cc: [NCCS]cc_t,
-    c_ispeed: speed_t,
-    c_ospeed: speed_t,
-};
-
-extern "c" fn tcgetattr(fd: c_int, termios_p: *termios) c_int;
-extern "c" fn tcsetattr(fd: c_int, optional_actions: c_int, termios_p: *const termios) c_int;
-
-// Terminal size
+// Terminal size ioctls. The request numbers are OS-specific.
 const winsize = extern struct {
     ws_row: u16,
     ws_col: u16,
@@ -42,111 +42,53 @@ const winsize = extern struct {
     ws_ypixel: u16,
 };
 
-extern "c" fn ioctl(fd: c_int, request: c_ulong, ...) c_int;
+const TIOCGWINSZ: c_ulong = if (is_darwin) 0x40087468 else 0x5413;
+const TIOCSWINSZ: c_ulong = if (is_darwin) 0x80087467 else 0x5414;
 
-const TIOCGWINSZ: c_ulong = 0x5413;
-const TIOCSWINSZ: c_ulong = 0x5414;
+// _POSIX_VDISABLE: the byte GNU stty writes to disable a control char.
+// 0xff on the BSD/Darwin family, 0 on Linux.
+const VDISABLE: u8 = if (is_darwin) 0xff else 0;
 
-const TCSANOW: c_int = 0;
-const TCSADRAIN: c_int = 1;
-const TCSAFLUSH: c_int = 2;
-
-// Input flags (c_iflag)
-const IGNBRK: tcflag_t = 0o000001;
-const BRKINT: tcflag_t = 0o000002;
-const IGNPAR: tcflag_t = 0o000004;
-const PARMRK: tcflag_t = 0o000010;
-const INPCK: tcflag_t = 0o000020;
-const ISTRIP: tcflag_t = 0o000040;
-const INLCR: tcflag_t = 0o000100;
-const IGNCR: tcflag_t = 0o000200;
-const ICRNL: tcflag_t = 0o000400;
-const IUCLC: tcflag_t = 0o001000;
-const IXON: tcflag_t = 0o002000;
-const IXANY: tcflag_t = 0o004000;
-const IXOFF: tcflag_t = 0o010000;
-const IMAXBEL: tcflag_t = 0o020000;
-const IUTF8: tcflag_t = 0o040000;
-
-// Output flags (c_oflag)
-const OPOST: tcflag_t = 0o000001;
-const OLCUC: tcflag_t = 0o000002;
-const ONLCR: tcflag_t = 0o000004;
-const OCRNL: tcflag_t = 0o000010;
-const ONOCR: tcflag_t = 0o000020;
-const ONLRET: tcflag_t = 0o000040;
-const OFILL: tcflag_t = 0o000100;
-const OFDEL: tcflag_t = 0o000200;
-
-// Control flags (c_cflag)
-const CSIZE: tcflag_t = 0o000060;
-const CS5: tcflag_t = 0o000000;
-const CS6: tcflag_t = 0o000020;
-const CS7: tcflag_t = 0o000040;
-const CS8: tcflag_t = 0o000060;
-const CSTOPB: tcflag_t = 0o000100;
-const CREAD: tcflag_t = 0o000200;
-const PARENB: tcflag_t = 0o000400;
-const PARODD: tcflag_t = 0o001000;
-const HUPCL: tcflag_t = 0o002000;
-const CLOCAL: tcflag_t = 0o004000;
-
-// Local flags (c_lflag)
-const ISIG: tcflag_t = 0o000001;
-const ICANON: tcflag_t = 0o000002;
-const XCASE: tcflag_t = 0o000004;
-const ECHO: tcflag_t = 0o000010;
-const ECHOE: tcflag_t = 0o000020;
-const ECHOK: tcflag_t = 0o000040;
-const ECHONL: tcflag_t = 0o000100;
-const NOFLSH: tcflag_t = 0o000200;
-const TOSTOP: tcflag_t = 0o000400;
-const ECHOCTL: tcflag_t = 0o001000;
-const ECHOPRT: tcflag_t = 0o002000;
-const ECHOKE: tcflag_t = 0o004000;
-const FLUSHO: tcflag_t = 0o010000;
-const PENDIN: tcflag_t = 0o040000;
-const IEXTEN: tcflag_t = 0o100000;
-
-// Control character indices
-const VINTR = 0;
-const VQUIT = 1;
-const VERASE = 2;
-const VKILL = 3;
-const VEOF = 4;
-const VTIME = 5;
-const VMIN = 6;
-const VSWTC = 7;
-const VSTART = 8;
-const VSTOP = 9;
-const VSUSP = 10;
-const VEOL = 11;
-const VREPRINT = 12;
-const VDISCARD = 13;
-const VWERASE = 14;
-const VLNEXT = 15;
-const VEOL2 = 16;
-
-// Baud rates
-const B0: speed_t = 0o000000;
-const B50: speed_t = 0o000001;
-const B75: speed_t = 0o000002;
-const B110: speed_t = 0o000003;
-const B134: speed_t = 0o000004;
-const B150: speed_t = 0o000005;
-const B200: speed_t = 0o000006;
-const B300: speed_t = 0o000007;
-const B600: speed_t = 0o000010;
-const B1200: speed_t = 0o000011;
-const B1800: speed_t = 0o000012;
-const B2400: speed_t = 0o000013;
-const B4800: speed_t = 0o000014;
-const B9600: speed_t = 0o000015;
-const B19200: speed_t = 0o000016;
-const B38400: speed_t = 0o000017;
-const B57600: speed_t = 0o010001;
-const B115200: speed_t = 0o010002;
-const B230400: speed_t = 0o010003;
+// Control-character array indices. POSIX gives names, not values; the numeric
+// slot each name occupies is ABI-defined and differs between Linux and Darwin.
+const CC = if (is_darwin) struct {
+    const EOF = 0;
+    const EOL = 1;
+    const EOL2 = 2;
+    const ERASE = 3;
+    const WERASE = 4;
+    const KILL = 5;
+    const REPRINT = 6;
+    const INTR = 8;
+    const QUIT = 9;
+    const SUSP = 10;
+    const DSUSP = 11;
+    const START = 12;
+    const STOP = 13;
+    const LNEXT = 14;
+    const DISCARD = 15;
+    const MIN = 16;
+    const TIME = 17;
+    const STATUS = 18;
+} else struct {
+    const INTR = 0;
+    const QUIT = 1;
+    const ERASE = 2;
+    const KILL = 3;
+    const EOF = 4;
+    const TIME = 5;
+    const MIN = 6;
+    const SWTC = 7;
+    const START = 8;
+    const STOP = 9;
+    const SUSP = 10;
+    const EOL = 11;
+    const REPRINT = 12;
+    const DISCARD = 13;
+    const WERASE = 14;
+    const LNEXT = 15;
+    const EOL2 = 16;
+};
 
 fn writeStderr(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
@@ -172,7 +114,7 @@ pub fn main(init: std.process.Init) !void {
     }
     const args = args_list.items;
 
-    const fd: c_int = 0; // stdin by default
+    var device: ?[]const u8 = null;
     var show_all = false;
     var show_settings = false;
     var settings: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -198,23 +140,56 @@ pub fn main(init: std.process.Init) !void {
                 writeStderr("zstty: option requires an argument -- 'F'\n", .{});
                 std.process.exit(1);
             }
-            // Would need to open the file - simplified for now
-            writeStderr("zstty: -F not yet implemented\n", .{});
-            std.process.exit(1);
+            device = args[i];
+        } else if (std.mem.startsWith(u8, arg, "--file=")) {
+            device = arg["--file=".len..];
+        } else if (arg.len > 2 and std.mem.startsWith(u8, arg, "-F")) {
+            device = arg[2..];
         } else {
             try settings.append(allocator, arg);
         }
     }
 
-    // Check if stdin is a terminal
+    // GNU: "when specifying an output style, modes may not be set".
+    if ((show_all or show_settings) and settings.items.len > 0) {
+        writeStderr("zstty: when specifying an output style, modes may not be set\n", .{});
+        std.process.exit(1);
+    }
+
+    // Choose the fd: a named device (-F) or stdin.
+    var fd: c_int = 0;
+    if (device) |dev| {
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        if (dev.len >= path_buf.len) {
+            writeStderr("zstty: {s}: file name too long\n", .{dev});
+            std.process.exit(1);
+        }
+        @memcpy(path_buf[0..dev.len], dev);
+        path_buf[dev.len] = 0;
+        const path_z: [*:0]const u8 = path_buf[0..dev.len :0];
+        // O_NONBLOCK|O_NOCTTY so opening a tty device never blocks on carrier and
+        // never steals a controlling terminal.
+        const opened = std.c.open(path_z, .{ .ACCMODE = .RDWR, .NONBLOCK = true, .NOCTTY = true });
+        if (opened < 0) {
+            writeStderr("zstty: {s}: No such file or directory\n", .{dev});
+            std.process.exit(1);
+        }
+        fd = opened;
+    }
+
+    // Check that the fd is a terminal
     if (isatty(fd) == 0) {
-        writeStderr("zstty: standard input: not a tty\n", .{});
+        if (device) |dev| {
+            writeStderr("zstty: {s}: Inappropriate ioctl for device\n", .{dev});
+        } else {
+            writeStderr("zstty: standard input: not a tty\n", .{});
+        }
         std.process.exit(1);
     }
 
     // Get current terminal settings
     var tio: termios = undefined;
-    if (tcgetattr(fd, &tio) != 0) {
+    if (std.c.tcgetattr(fd, &tio) != 0) {
         writeStderr("zstty: cannot get terminal attributes\n", .{});
         std.process.exit(1);
     }
@@ -232,192 +207,474 @@ pub fn main(init: std.process.Init) !void {
     // Apply settings
     var modified = false;
     i = 0;
-    while (i < settings.items.len) : (i += 1) {
-        const setting = settings.items[i];
+    while (i < settings.items.len) {
+        const s = settings.items[i];
 
-        if (applySetting(&tio, setting, fd)) {
-            modified = true;
-        } else if (setting.len > 0 and setting[0] == '-') {
-            // Check for negated flag
-            if (applyNegatedSetting(&tio, setting[1..])) {
+        switch (tryValueSetting(&tio, settings.items, &i, fd)) {
+            .set => {
                 modified = true;
-            } else {
-                writeStderr("zstty: invalid argument '{s}'\n", .{setting});
-                std.process.exit(1);
-            }
+                i += 1;
+                continue;
+            },
+            .query => {
+                i += 1;
+                continue;
+            },
+            .err => std.process.exit(1),
+            .no => {},
+        }
+
+        if (applySetting(&tio, s)) {
+            modified = true;
+        } else if (s.len > 0 and s[0] == '-' and applyFlagSetting(&tio, s[1..], false)) {
+            modified = true;
         } else {
-            writeStderr("zstty: invalid argument '{s}'\n", .{setting});
+            writeStderr("zstty: invalid argument '{s}'\n", .{s});
             std.process.exit(1);
         }
+        i += 1;
     }
 
     if (modified) {
-        if (tcsetattr(fd, TCSADRAIN, &tio) != 0) {
+        if (std.c.tcsetattr(fd, .DRAIN, &tio) != 0) {
             writeStderr("zstty: cannot set terminal attributes\n", .{});
             std.process.exit(1);
         }
     }
 }
 
-fn applySetting(tio: *termios, setting: []const u8, fd: c_int) bool {
-    // Special modes
+// ---------------------------------------------------------------------------
+// Flag tables: (setting-name -> packed-struct field). Driving set/clear/read
+// off these tables keeps the Linux and Darwin field names (which are identical,
+// POSIX-standard) working from one source.
+// ---------------------------------------------------------------------------
+
+const FlagName = struct { name: []const u8, field: []const u8 };
+
+const iflags = [_]FlagName{
+    .{ .name = "ignbrk", .field = "IGNBRK" },
+    .{ .name = "brkint", .field = "BRKINT" },
+    .{ .name = "ignpar", .field = "IGNPAR" },
+    .{ .name = "parmrk", .field = "PARMRK" },
+    .{ .name = "inpck", .field = "INPCK" },
+    .{ .name = "istrip", .field = "ISTRIP" },
+    .{ .name = "inlcr", .field = "INLCR" },
+    .{ .name = "igncr", .field = "IGNCR" },
+    .{ .name = "icrnl", .field = "ICRNL" },
+    .{ .name = "ixon", .field = "IXON" },
+    .{ .name = "ixoff", .field = "IXOFF" },
+    .{ .name = "ixany", .field = "IXANY" },
+    .{ .name = "imaxbel", .field = "IMAXBEL" },
+    .{ .name = "iutf8", .field = "IUTF8" },
+};
+
+const oflags = [_]FlagName{
+    .{ .name = "opost", .field = "OPOST" },
+    .{ .name = "onlcr", .field = "ONLCR" },
+    .{ .name = "ocrnl", .field = "OCRNL" },
+    .{ .name = "onocr", .field = "ONOCR" },
+    .{ .name = "onlret", .field = "ONLRET" },
+};
+
+const cflags = [_]FlagName{
+    .{ .name = "cstopb", .field = "CSTOPB" },
+    .{ .name = "cread", .field = "CREAD" },
+    .{ .name = "parenb", .field = "PARENB" },
+    .{ .name = "parodd", .field = "PARODD" },
+    .{ .name = "hupcl", .field = "HUPCL" },
+    .{ .name = "clocal", .field = "CLOCAL" },
+};
+
+const lflags = [_]FlagName{
+    .{ .name = "isig", .field = "ISIG" },
+    .{ .name = "icanon", .field = "ICANON" },
+    .{ .name = "echo", .field = "ECHO" },
+    .{ .name = "echoe", .field = "ECHOE" },
+    .{ .name = "echok", .field = "ECHOK" },
+    .{ .name = "echonl", .field = "ECHONL" },
+    .{ .name = "noflsh", .field = "NOFLSH" },
+    .{ .name = "tostop", .field = "TOSTOP" },
+    .{ .name = "echoctl", .field = "ECHOCTL" },
+    .{ .name = "echoprt", .field = "ECHOPRT" },
+    .{ .name = "echoke", .field = "ECHOKE" },
+    .{ .name = "iexten", .field = "IEXTEN" },
+};
+
+/// Set or clear a single boolean flag by its stty name across all four flag
+/// words. Returns true if the name matched a known flag.
+fn applyFlagSetting(tio: *termios, name: []const u8, val: bool) bool {
+    inline for (iflags) |e| {
+        if (std.mem.eql(u8, name, e.name)) {
+            @field(tio.iflag, e.field) = val;
+            return true;
+        }
+    }
+    inline for (oflags) |e| {
+        if (std.mem.eql(u8, name, e.name)) {
+            @field(tio.oflag, e.field) = val;
+            return true;
+        }
+    }
+    inline for (cflags) |e| {
+        if (std.mem.eql(u8, name, e.name)) {
+            @field(tio.cflag, e.field) = val;
+            return true;
+        }
+    }
+    inline for (lflags) |e| {
+        if (std.mem.eql(u8, name, e.name)) {
+            @field(tio.lflag, e.field) = val;
+            return true;
+        }
+    }
+    return false;
+}
+
+fn applySetting(tio: *termios, setting: []const u8) bool {
+    // Special / combination modes
     if (std.mem.eql(u8, setting, "raw")) {
-        // Raw mode: no processing
-        tio.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL | IXON);
-        tio.c_oflag &= ~OPOST;
-        tio.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
-        tio.c_cflag &= ~(CSIZE | PARENB);
-        tio.c_cflag |= CS8;
+        // GNU raw: no input processing, no output post-processing, no canonical
+        // input / signals. Matches GNU coreutils `stty raw` (verified byte-exact
+        // against gstty -g on Darwin): iflag cleared, OPOST off, ISIG+ICANON off,
+        // cs8/-parenb, VMIN=1/VTIME=0. Echo and IEXTEN are intentionally left
+        // untouched, mirroring GNU.
+        tio.iflag = .{};
+        tio.oflag.OPOST = false;
+        tio.lflag.ISIG = false;
+        tio.lflag.ICANON = false;
+        tio.cflag.PARENB = false;
+        tio.cflag.CSIZE = .CS8;
+        tio.cc[CC.MIN] = 1;
+        tio.cc[CC.TIME] = 0;
         return true;
-    } else if (std.mem.eql(u8, setting, "cooked") or std.mem.eql(u8, setting, "sane")) {
-        // Cooked/sane mode: normal processing
-        tio.c_iflag |= BRKINT | ICRNL | IMAXBEL | IXON | IUTF8;
-        tio.c_oflag |= OPOST | ONLCR;
-        tio.c_lflag |= ISIG | ICANON | IEXTEN | ECHO | ECHOE | ECHOK | ECHOCTL | ECHOKE;
-        tio.c_cflag |= CREAD;
+    } else if (std.mem.eql(u8, setting, "cooked")) {
+        // GNU `cooked` == `-raw`: OR the cooked-mode bits back on, without the
+        // full reset `sane` performs (verified byte-exact against gstty -g).
+        tio.iflag.BRKINT = true;
+        tio.iflag.IGNPAR = true;
+        tio.iflag.ISTRIP = true;
+        tio.iflag.ICRNL = true;
+        tio.iflag.IXON = true;
+        tio.oflag.OPOST = true;
+        tio.lflag.ISIG = true;
+        tio.lflag.ICANON = true;
+        tio.lflag.IEXTEN = true;
+        return true;
+    } else if (std.mem.eql(u8, setting, "sane")) {
+        // GNU sane: reset the flag words to the canonical baseline (verified
+        // byte-exact against gstty -g on Darwin).
+        tio.iflag = .{ .BRKINT = true, .ICRNL = true, .IXON = true, .IMAXBEL = true };
+        tio.oflag = .{ .OPOST = true, .ONLCR = true };
+        tio.lflag = .{
+            .ECHOKE = true,
+            .ECHOE = true,
+            .ECHOK = true,
+            .ECHO = true,
+            .ECHOCTL = true,
+            .ISIG = true,
+            .ICANON = true,
+            .IEXTEN = true,
+        };
+        tio.cflag.CREAD = true;
         return true;
     }
-
-    // Input flags
-    if (std.mem.eql(u8, setting, "ignbrk")) { tio.c_iflag |= IGNBRK; return true; }
-    if (std.mem.eql(u8, setting, "brkint")) { tio.c_iflag |= BRKINT; return true; }
-    if (std.mem.eql(u8, setting, "ignpar")) { tio.c_iflag |= IGNPAR; return true; }
-    if (std.mem.eql(u8, setting, "parmrk")) { tio.c_iflag |= PARMRK; return true; }
-    if (std.mem.eql(u8, setting, "inpck")) { tio.c_iflag |= INPCK; return true; }
-    if (std.mem.eql(u8, setting, "istrip")) { tio.c_iflag |= ISTRIP; return true; }
-    if (std.mem.eql(u8, setting, "inlcr")) { tio.c_iflag |= INLCR; return true; }
-    if (std.mem.eql(u8, setting, "igncr")) { tio.c_iflag |= IGNCR; return true; }
-    if (std.mem.eql(u8, setting, "icrnl")) { tio.c_iflag |= ICRNL; return true; }
-    if (std.mem.eql(u8, setting, "ixon")) { tio.c_iflag |= IXON; return true; }
-    if (std.mem.eql(u8, setting, "ixoff")) { tio.c_iflag |= IXOFF; return true; }
-    if (std.mem.eql(u8, setting, "ixany")) { tio.c_iflag |= IXANY; return true; }
-    if (std.mem.eql(u8, setting, "imaxbel")) { tio.c_iflag |= IMAXBEL; return true; }
-    if (std.mem.eql(u8, setting, "iutf8")) { tio.c_iflag |= IUTF8; return true; }
-
-    // Output flags
-    if (std.mem.eql(u8, setting, "opost")) { tio.c_oflag |= OPOST; return true; }
-    if (std.mem.eql(u8, setting, "onlcr")) { tio.c_oflag |= ONLCR; return true; }
-    if (std.mem.eql(u8, setting, "ocrnl")) { tio.c_oflag |= OCRNL; return true; }
-    if (std.mem.eql(u8, setting, "onocr")) { tio.c_oflag |= ONOCR; return true; }
-    if (std.mem.eql(u8, setting, "onlret")) { tio.c_oflag |= ONLRET; return true; }
-
-    // Local flags
-    if (std.mem.eql(u8, setting, "isig")) { tio.c_lflag |= ISIG; return true; }
-    if (std.mem.eql(u8, setting, "icanon")) { tio.c_lflag |= ICANON; return true; }
-    if (std.mem.eql(u8, setting, "echo")) { tio.c_lflag |= ECHO; return true; }
-    if (std.mem.eql(u8, setting, "echoe")) { tio.c_lflag |= ECHOE; return true; }
-    if (std.mem.eql(u8, setting, "echok")) { tio.c_lflag |= ECHOK; return true; }
-    if (std.mem.eql(u8, setting, "echonl")) { tio.c_lflag |= ECHONL; return true; }
-    if (std.mem.eql(u8, setting, "noflsh")) { tio.c_lflag |= NOFLSH; return true; }
-    if (std.mem.eql(u8, setting, "tostop")) { tio.c_lflag |= TOSTOP; return true; }
-    if (std.mem.eql(u8, setting, "echoctl")) { tio.c_lflag |= ECHOCTL; return true; }
-    if (std.mem.eql(u8, setting, "echoprt")) { tio.c_lflag |= ECHOPRT; return true; }
-    if (std.mem.eql(u8, setting, "echoke")) { tio.c_lflag |= ECHOKE; return true; }
-    if (std.mem.eql(u8, setting, "iexten")) { tio.c_lflag |= IEXTEN; return true; }
-
-    // Control flags
-    if (std.mem.eql(u8, setting, "cread")) { tio.c_cflag |= CREAD; return true; }
-    if (std.mem.eql(u8, setting, "clocal")) { tio.c_cflag |= CLOCAL; return true; }
-    if (std.mem.eql(u8, setting, "hupcl")) { tio.c_cflag |= HUPCL; return true; }
-    if (std.mem.eql(u8, setting, "cstopb")) { tio.c_cflag |= CSTOPB; return true; }
-    if (std.mem.eql(u8, setting, "parenb")) { tio.c_cflag |= PARENB; return true; }
-    if (std.mem.eql(u8, setting, "parodd")) { tio.c_cflag |= PARODD; return true; }
 
     // Character size
-    if (std.mem.eql(u8, setting, "cs5")) { tio.c_cflag = (tio.c_cflag & ~CSIZE) | CS5; return true; }
-    if (std.mem.eql(u8, setting, "cs6")) { tio.c_cflag = (tio.c_cflag & ~CSIZE) | CS6; return true; }
-    if (std.mem.eql(u8, setting, "cs7")) { tio.c_cflag = (tio.c_cflag & ~CSIZE) | CS7; return true; }
-    if (std.mem.eql(u8, setting, "cs8")) { tio.c_cflag = (tio.c_cflag & ~CSIZE) | CS8; return true; }
-
-    // Size settings
-    if (std.mem.startsWith(u8, setting, "rows")) {
-        if (setting.len > 4 and setting[4] == ' ') {
-            const val = std.fmt.parseInt(u16, setting[5..], 10) catch return false;
-            setRows(fd, val);
-            return true;
-        }
+    if (std.mem.eql(u8, setting, "cs5")) {
+        tio.cflag.CSIZE = .CS5;
+        return true;
     }
-    if (std.mem.startsWith(u8, setting, "cols") or std.mem.startsWith(u8, setting, "columns")) {
-        const prefix_len: usize = if (std.mem.startsWith(u8, setting, "columns")) 7 else 4;
-        if (setting.len > prefix_len and setting[prefix_len] == ' ') {
-            const val = std.fmt.parseInt(u16, setting[prefix_len + 1 ..], 10) catch return false;
-            setCols(fd, val);
-            return true;
-        }
+    if (std.mem.eql(u8, setting, "cs6")) {
+        tio.cflag.CSIZE = .CS6;
+        return true;
+    }
+    if (std.mem.eql(u8, setting, "cs7")) {
+        tio.cflag.CSIZE = .CS7;
+        return true;
+    }
+    if (std.mem.eql(u8, setting, "cs8")) {
+        tio.cflag.CSIZE = .CS8;
+        return true;
     }
 
-    return false;
+    // Plain boolean flags
+    return applyFlagSetting(tio, setting, true);
 }
 
-fn applyNegatedSetting(tio: *termios, setting: []const u8) bool {
-    // Input flags
-    if (std.mem.eql(u8, setting, "ignbrk")) { tio.c_iflag &= ~IGNBRK; return true; }
-    if (std.mem.eql(u8, setting, "brkint")) { tio.c_iflag &= ~BRKINT; return true; }
-    if (std.mem.eql(u8, setting, "ignpar")) { tio.c_iflag &= ~IGNPAR; return true; }
-    if (std.mem.eql(u8, setting, "parmrk")) { tio.c_iflag &= ~PARMRK; return true; }
-    if (std.mem.eql(u8, setting, "inpck")) { tio.c_iflag &= ~INPCK; return true; }
-    if (std.mem.eql(u8, setting, "istrip")) { tio.c_iflag &= ~ISTRIP; return true; }
-    if (std.mem.eql(u8, setting, "inlcr")) { tio.c_iflag &= ~INLCR; return true; }
-    if (std.mem.eql(u8, setting, "igncr")) { tio.c_iflag &= ~IGNCR; return true; }
-    if (std.mem.eql(u8, setting, "icrnl")) { tio.c_iflag &= ~ICRNL; return true; }
-    if (std.mem.eql(u8, setting, "ixon")) { tio.c_iflag &= ~IXON; return true; }
-    if (std.mem.eql(u8, setting, "ixoff")) { tio.c_iflag &= ~IXOFF; return true; }
-    if (std.mem.eql(u8, setting, "ixany")) { tio.c_iflag &= ~IXANY; return true; }
-    if (std.mem.eql(u8, setting, "imaxbel")) { tio.c_iflag &= ~IMAXBEL; return true; }
-    if (std.mem.eql(u8, setting, "iutf8")) { tio.c_iflag &= ~IUTF8; return true; }
+// ---------------------------------------------------------------------------
+// Value settings: those that consume a following argument (or are themselves a
+// number). rows/cols/columns, min/time, ispeed/ospeed, a bare baud number, the
+// `speed` query, and control-character assignments (intr, erase, ...).
+// ---------------------------------------------------------------------------
 
-    // Output flags
-    if (std.mem.eql(u8, setting, "opost")) { tio.c_oflag &= ~OPOST; return true; }
-    if (std.mem.eql(u8, setting, "onlcr")) { tio.c_oflag &= ~ONLCR; return true; }
-    if (std.mem.eql(u8, setting, "ocrnl")) { tio.c_oflag &= ~OCRNL; return true; }
-    if (std.mem.eql(u8, setting, "onocr")) { tio.c_oflag &= ~ONOCR; return true; }
-    if (std.mem.eql(u8, setting, "onlret")) { tio.c_oflag &= ~ONLRET; return true; }
+const ValueResult = enum { no, set, query, err };
 
-    // Local flags
-    if (std.mem.eql(u8, setting, "isig")) { tio.c_lflag &= ~ISIG; return true; }
-    if (std.mem.eql(u8, setting, "icanon")) { tio.c_lflag &= ~ICANON; return true; }
-    if (std.mem.eql(u8, setting, "echo")) { tio.c_lflag &= ~ECHO; return true; }
-    if (std.mem.eql(u8, setting, "echoe")) { tio.c_lflag &= ~ECHOE; return true; }
-    if (std.mem.eql(u8, setting, "echok")) { tio.c_lflag &= ~ECHOK; return true; }
-    if (std.mem.eql(u8, setting, "echonl")) { tio.c_lflag &= ~ECHONL; return true; }
-    if (std.mem.eql(u8, setting, "noflsh")) { tio.c_lflag &= ~NOFLSH; return true; }
-    if (std.mem.eql(u8, setting, "tostop")) { tio.c_lflag &= ~TOSTOP; return true; }
-    if (std.mem.eql(u8, setting, "echoctl")) { tio.c_lflag &= ~ECHOCTL; return true; }
-    if (std.mem.eql(u8, setting, "echoprt")) { tio.c_lflag &= ~ECHOPRT; return true; }
-    if (std.mem.eql(u8, setting, "echoke")) { tio.c_lflag &= ~ECHOKE; return true; }
-    if (std.mem.eql(u8, setting, "iexten")) { tio.c_lflag &= ~IEXTEN; return true; }
+const CcName = struct { name: []const u8, idx: usize };
 
-    // Control flags
-    if (std.mem.eql(u8, setting, "cread")) { tio.c_cflag &= ~CREAD; return true; }
-    if (std.mem.eql(u8, setting, "clocal")) { tio.c_cflag &= ~CLOCAL; return true; }
-    if (std.mem.eql(u8, setting, "hupcl")) { tio.c_cflag &= ~HUPCL; return true; }
-    if (std.mem.eql(u8, setting, "cstopb")) { tio.c_cflag &= ~CSTOPB; return true; }
-    if (std.mem.eql(u8, setting, "parenb")) { tio.c_cflag &= ~PARENB; return true; }
-    if (std.mem.eql(u8, setting, "parodd")) { tio.c_cflag &= ~PARODD; return true; }
+const cc_names = if (is_darwin) [_]CcName{
+    .{ .name = "intr", .idx = CC.INTR },
+    .{ .name = "quit", .idx = CC.QUIT },
+    .{ .name = "erase", .idx = CC.ERASE },
+    .{ .name = "kill", .idx = CC.KILL },
+    .{ .name = "eof", .idx = CC.EOF },
+    .{ .name = "eol", .idx = CC.EOL },
+    .{ .name = "eol2", .idx = CC.EOL2 },
+    .{ .name = "start", .idx = CC.START },
+    .{ .name = "stop", .idx = CC.STOP },
+    .{ .name = "susp", .idx = CC.SUSP },
+    .{ .name = "dsusp", .idx = CC.DSUSP },
+    .{ .name = "rprnt", .idx = CC.REPRINT },
+    .{ .name = "werase", .idx = CC.WERASE },
+    .{ .name = "lnext", .idx = CC.LNEXT },
+    .{ .name = "discard", .idx = CC.DISCARD },
+    .{ .name = "status", .idx = CC.STATUS },
+} else [_]CcName{
+    .{ .name = "intr", .idx = CC.INTR },
+    .{ .name = "quit", .idx = CC.QUIT },
+    .{ .name = "erase", .idx = CC.ERASE },
+    .{ .name = "kill", .idx = CC.KILL },
+    .{ .name = "eof", .idx = CC.EOF },
+    .{ .name = "eol", .idx = CC.EOL },
+    .{ .name = "eol2", .idx = CC.EOL2 },
+    .{ .name = "start", .idx = CC.START },
+    .{ .name = "stop", .idx = CC.STOP },
+    .{ .name = "susp", .idx = CC.SUSP },
+    .{ .name = "rprnt", .idx = CC.REPRINT },
+    .{ .name = "werase", .idx = CC.WERASE },
+    .{ .name = "lnext", .idx = CC.LNEXT },
+    .{ .name = "discard", .idx = CC.DISCARD },
+    .{ .name = "swtch", .idx = CC.SWTC },
+};
 
-    return false;
+/// Consume `settings[*i]` (and possibly the following token) if it names a
+/// value setting. On success `*i` is left pointing at the last token consumed.
+fn tryValueSetting(tio: *termios, settings: []const []const u8, i: *usize, fd: c_int) ValueResult {
+    const s = settings[i.*];
+
+    // `speed` query: print the output speed, like GNU `stty speed`.
+    if (std.mem.eql(u8, s, "speed")) {
+        writeStdout("{d}\n", .{ospeedNum(tio)});
+        return .query;
+    }
+
+    // rows / cols / columns N
+    if (std.mem.eql(u8, s, "rows") or std.mem.eql(u8, s, "cols") or std.mem.eql(u8, s, "columns")) {
+        const v = nextInt(u16, settings, i) orelse return valueErr(s);
+        if (std.mem.eql(u8, s, "rows")) setWinsize(fd, v, null) else setWinsize(fd, null, v);
+        return .set;
+    }
+
+    // min / time N (VMIN / VTIME are counts, not chars)
+    if (std.mem.eql(u8, s, "min")) {
+        const v = nextInt(u8, settings, i) orelse return valueErr(s);
+        tio.cc[CC.MIN] = v;
+        return .set;
+    }
+    if (std.mem.eql(u8, s, "time")) {
+        const v = nextInt(u8, settings, i) orelse return valueErr(s);
+        tio.cc[CC.TIME] = v;
+        return .set;
+    }
+
+    // ispeed / ospeed N
+    if (std.mem.eql(u8, s, "ispeed")) {
+        const v = nextInt(u32, settings, i) orelse return valueErr(s);
+        if (numToSpeed(v)) |sp| {
+            _ = cfsetispeed(tio, sp);
+            return .set;
+        }
+        return valueErr(s);
+    }
+    if (std.mem.eql(u8, s, "ospeed")) {
+        const v = nextInt(u32, settings, i) orelse return valueErr(s);
+        if (numToSpeed(v)) |sp| {
+            _ = cfsetospeed(tio, sp);
+            return .set;
+        }
+        return valueErr(s);
+    }
+
+    // Control-character assignment: `intr ^C`, `erase ^H`, `eof undef`, ...
+    inline for (cc_names) |e| {
+        if (std.mem.eql(u8, s, e.name)) {
+            if (i.* + 1 >= settings.len) return valueErr(s);
+            const val = parseCcValue(settings[i.* + 1]) orelse {
+                writeStderr("zstty: invalid integer argument '{s}'\n", .{settings[i.* + 1]});
+                return .err;
+            };
+            tio.cc[e.idx] = val;
+            i.* += 1;
+            return .set;
+        }
+    }
+
+    // A bare baud number sets both input and output speed.
+    if (s.len > 0 and allDigits(s)) {
+        const v = std.fmt.parseInt(u32, s, 10) catch return valueErr(s);
+        if (numToSpeed(v)) |sp| {
+            _ = cfsetispeed(tio, sp);
+            _ = cfsetospeed(tio, sp);
+            return .set;
+        }
+        return valueErr(s);
+    }
+
+    return .no;
 }
 
-fn setRows(fd: c_int, rows: u16) void {
+fn valueErr(name: []const u8) ValueResult {
+    writeStderr("zstty: invalid argument '{s}'\n", .{name});
+    return .err;
+}
+
+fn allDigits(s: []const u8) bool {
+    for (s) |c| {
+        if (c < '0' or c > '9') return false;
+    }
+    return true;
+}
+
+/// Read the integer token following settings[*i]; advance *i past it on success.
+fn nextInt(comptime T: type, settings: []const []const u8, i: *usize) ?T {
+    if (i.* + 1 >= settings.len) return null;
+    const tok = settings[i.* + 1];
+    const v = std.fmt.parseInt(T, tok, 10) catch return null;
+    i.* += 1;
+    return v;
+}
+
+/// Parse a control-character value the way GNU stty does:
+///   ^C / ^?  -> control char           undef / ^-  -> _POSIX_VDISABLE
+///   single char -> that byte           otherwise   -> integer (base 0)
+fn parseCcValue(s: []const u8) ?u8 {
+    if (std.mem.eql(u8, s, "undef") or std.mem.eql(u8, s, "^-")) return VDISABLE;
+    if (s.len >= 2 and s[0] == '^') {
+        if (s[1] == '?') return 0x7f;
+        return s[1] & 0x1f;
+    }
+    if (s.len == 1) return s[0];
+    const v = std.fmt.parseInt(u16, s, 0) catch return null;
+    if (v > 0xff) return null;
+    return @intCast(v);
+}
+
+// ---------------------------------------------------------------------------
+// Speed helpers
+// ---------------------------------------------------------------------------
+
+/// The numeric output baud. On Darwin/BSD speed_t's value *is* the baud; on
+/// Linux it is a Bxxxx code that must be decoded.
+fn ospeedNum(tio: *const termios) u32 {
+    return speedToNum(cfgetospeed(tio));
+}
+
+fn speedToNum(sp: speed_t) u32 {
+    if (is_darwin) return @intCast(@intFromEnum(sp));
+    // Linux: speed_t is the Bxxxx octal code.
+    return switch (@intFromEnum(sp)) {
+        0o0 => 0,
+        0o1 => 50,
+        0o2 => 75,
+        0o3 => 110,
+        0o4 => 134,
+        0o5 => 150,
+        0o6 => 200,
+        0o7 => 300,
+        0o10 => 600,
+        0o11 => 1200,
+        0o12 => 1800,
+        0o13 => 2400,
+        0o14 => 4800,
+        0o15 => 9600,
+        0o16 => 19200,
+        0o17 => 38400,
+        0o10001 => 57600,
+        0o10002 => 115200,
+        0o10003 => 230400,
+        else => 0,
+    };
+}
+
+const known_bauds = [_]u32{ 0, 50, 75, 110, 134, 150, 200, 300, 600, 1200, 1800, 2400, 4800, 9600, 19200, 38400, 57600, 115200, 230400 };
+
+fn numToSpeed(n: u32) ?speed_t {
+    if (is_darwin) {
+        // Darwin speed_t's enum values equal the baud rate.
+        for (known_bauds) |b| {
+            if (b == n) return @enumFromInt(n);
+        }
+        // Darwin also has 7200/14400/28800/76800.
+        switch (n) {
+            7200, 14400, 28800, 76800 => return @enumFromInt(n),
+            else => return null,
+        }
+    }
+    const code: u32 = switch (n) {
+        0 => 0o0,
+        50 => 0o1,
+        75 => 0o2,
+        110 => 0o3,
+        134 => 0o4,
+        150 => 0o5,
+        200 => 0o6,
+        300 => 0o7,
+        600 => 0o10,
+        1200 => 0o11,
+        1800 => 0o12,
+        2400 => 0o13,
+        4800 => 0o14,
+        9600 => 0o15,
+        19200 => 0o16,
+        38400 => 0o17,
+        57600 => 0o10001,
+        115200 => 0o10002,
+        230400 => 0o10003,
+        else => return null,
+    };
+    return @enumFromInt(code);
+}
+
+// ---------------------------------------------------------------------------
+// Window size
+// ---------------------------------------------------------------------------
+
+fn setWinsize(fd: c_int, rows: ?u16, cols: ?u16) void {
     var ws: winsize = undefined;
     if (ioctl(fd, TIOCGWINSZ, &ws) == 0) {
-        ws.ws_row = rows;
+        if (rows) |r| ws.ws_row = r;
+        if (cols) |c| ws.ws_col = c;
         _ = ioctl(fd, TIOCSWINSZ, &ws);
     }
 }
 
-fn setCols(fd: c_int, cols: u16) void {
-    var ws: winsize = undefined;
-    if (ioctl(fd, TIOCGWINSZ, &ws) == 0) {
-        ws.ws_col = cols;
-        _ = ioctl(fd, TIOCSWINSZ, &ws);
+// ---------------------------------------------------------------------------
+// Bit extraction for -g / -a
+// ---------------------------------------------------------------------------
+
+fn flagBits(v: anytype) u64 {
+    const B = std.meta.Int(.unsigned, @bitSizeOf(@TypeOf(v)));
+    return @as(B, @bitCast(v));
+}
+
+fn printSaveFormat(tio: *const termios) void {
+    // GNU emits minimal-width hex for the four flag words, then one hex value per
+    // control char at the platform's NCCS count, colon-separated.
+    writeStdout("{x}:{x}:{x}:{x}", .{
+        flagBits(tio.iflag),
+        flagBits(tio.oflag),
+        flagBits(tio.cflag),
+        flagBits(tio.lflag),
+    });
+    for (tio.cc, 0..) |cc, idx| {
+        _ = idx;
+        writeStdout(":{x}", .{cc});
     }
+    writeStdout("\n", .{});
 }
 
 fn printSettings(tio: *const termios, fd: c_int, show_all: bool) void {
     // Speed
-    const speed = baudToNum(tio.c_ospeed);
-    writeStdout("speed {d} baud; ", .{speed});
+    writeStdout("speed {d} baud; ", .{ospeedNum(tio)});
 
     // Terminal size
     var ws: winsize = undefined;
@@ -428,140 +685,94 @@ fn printSettings(tio: *const termios, fd: c_int, show_all: bool) void {
     }
 
     if (!show_all) {
-        // Brief output - show only non-default settings
+        // Brief output. (GNU additionally prints settings differing from `sane`;
+        // that diff is not reproduced here.)
         return;
     }
 
+    // Distinct buffers: formatCC may return a slice into its buffer, so each
+    // argument in a single writeStdout needs its own (else they all alias).
+    var b0: [8]u8 = undefined;
+    var b1: [8]u8 = undefined;
+    var b2: [8]u8 = undefined;
+    var b3: [8]u8 = undefined;
+
     // Control characters
     writeStdout("intr = {s}; quit = {s}; erase = {s}; kill = {s};\n", .{
-        formatCC(tio.c_cc[VINTR]),
-        formatCC(tio.c_cc[VQUIT]),
-        formatCC(tio.c_cc[VERASE]),
-        formatCC(tio.c_cc[VKILL]),
+        formatCC(&b0, tio.cc[CC.INTR]),
+        formatCC(&b1, tio.cc[CC.QUIT]),
+        formatCC(&b2, tio.cc[CC.ERASE]),
+        formatCC(&b3, tio.cc[CC.KILL]),
     });
     writeStdout("eof = {s}; start = {s}; stop = {s}; susp = {s};\n", .{
-        formatCC(tio.c_cc[VEOF]),
-        formatCC(tio.c_cc[VSTART]),
-        formatCC(tio.c_cc[VSTOP]),
-        formatCC(tio.c_cc[VSUSP]),
+        formatCC(&b0, tio.cc[CC.EOF]),
+        formatCC(&b1, tio.cc[CC.START]),
+        formatCC(&b2, tio.cc[CC.STOP]),
+        formatCC(&b3, tio.cc[CC.SUSP]),
     });
+    writeStdout("min = {d}; time = {d};\n", .{ tio.cc[CC.MIN], tio.cc[CC.TIME] });
 
     // Input flags
     writeStdout("{s}ignbrk {s}brkint {s}ignpar {s}parmrk {s}inpck {s}istrip\n", .{
-        flagPrefix(tio.c_iflag, IGNBRK),
-        flagPrefix(tio.c_iflag, BRKINT),
-        flagPrefix(tio.c_iflag, IGNPAR),
-        flagPrefix(tio.c_iflag, PARMRK),
-        flagPrefix(tio.c_iflag, INPCK),
-        flagPrefix(tio.c_iflag, ISTRIP),
+        pfx(tio.iflag.IGNBRK), pfx(tio.iflag.BRKINT), pfx(tio.iflag.IGNPAR),
+        pfx(tio.iflag.PARMRK), pfx(tio.iflag.INPCK),  pfx(tio.iflag.ISTRIP),
     });
-    writeStdout("{s}inlcr {s}igncr {s}icrnl {s}ixon {s}ixoff {s}iutf8\n", .{
-        flagPrefix(tio.c_iflag, INLCR),
-        flagPrefix(tio.c_iflag, IGNCR),
-        flagPrefix(tio.c_iflag, ICRNL),
-        flagPrefix(tio.c_iflag, IXON),
-        flagPrefix(tio.c_iflag, IXOFF),
-        flagPrefix(tio.c_iflag, IUTF8),
+    writeStdout("{s}inlcr {s}igncr {s}icrnl {s}ixon {s}ixoff {s}ixany {s}imaxbel {s}iutf8\n", .{
+        pfx(tio.iflag.INLCR), pfx(tio.iflag.IGNCR),   pfx(tio.iflag.ICRNL),
+        pfx(tio.iflag.IXON),  pfx(tio.iflag.IXOFF),   pfx(tio.iflag.IXANY),
+        pfx(tio.iflag.IMAXBEL), pfx(tio.iflag.IUTF8),
     });
 
     // Output flags
     writeStdout("{s}opost {s}onlcr {s}ocrnl {s}onocr {s}onlret\n", .{
-        flagPrefix(tio.c_oflag, OPOST),
-        flagPrefix(tio.c_oflag, ONLCR),
-        flagPrefix(tio.c_oflag, OCRNL),
-        flagPrefix(tio.c_oflag, ONOCR),
-        flagPrefix(tio.c_oflag, ONLRET),
+        pfx(tio.oflag.OPOST),  pfx(tio.oflag.ONLCR), pfx(tio.oflag.OCRNL),
+        pfx(tio.oflag.ONOCR),  pfx(tio.oflag.ONLRET),
     });
 
     // Control flags
-    const cs = switch (tio.c_cflag & CSIZE) {
-        CS5 => "cs5",
-        CS6 => "cs6",
-        CS7 => "cs7",
-        CS8 => "cs8",
-        else => "cs?",
+    const cs = switch (tio.cflag.CSIZE) {
+        .CS5 => "cs5",
+        .CS6 => "cs6",
+        .CS7 => "cs7",
+        .CS8 => "cs8",
     };
     writeStdout("{s} {s}cstopb {s}cread {s}parenb {s}parodd {s}hupcl {s}clocal\n", .{
         cs,
-        flagPrefix(tio.c_cflag, CSTOPB),
-        flagPrefix(tio.c_cflag, CREAD),
-        flagPrefix(tio.c_cflag, PARENB),
-        flagPrefix(tio.c_cflag, PARODD),
-        flagPrefix(tio.c_cflag, HUPCL),
-        flagPrefix(tio.c_cflag, CLOCAL),
+        pfx(tio.cflag.CSTOPB), pfx(tio.cflag.CREAD),  pfx(tio.cflag.PARENB),
+        pfx(tio.cflag.PARODD), pfx(tio.cflag.HUPCL),  pfx(tio.cflag.CLOCAL),
     });
 
     // Local flags
     writeStdout("{s}isig {s}icanon {s}echo {s}echoe {s}echok {s}echonl\n", .{
-        flagPrefix(tio.c_lflag, ISIG),
-        flagPrefix(tio.c_lflag, ICANON),
-        flagPrefix(tio.c_lflag, ECHO),
-        flagPrefix(tio.c_lflag, ECHOE),
-        flagPrefix(tio.c_lflag, ECHOK),
-        flagPrefix(tio.c_lflag, ECHONL),
+        pfx(tio.lflag.ISIG),  pfx(tio.lflag.ICANON), pfx(tio.lflag.ECHO),
+        pfx(tio.lflag.ECHOE), pfx(tio.lflag.ECHOK),  pfx(tio.lflag.ECHONL),
     });
     writeStdout("{s}noflsh {s}tostop {s}echoctl {s}echoprt {s}echoke {s}iexten\n", .{
-        flagPrefix(tio.c_lflag, NOFLSH),
-        flagPrefix(tio.c_lflag, TOSTOP),
-        flagPrefix(tio.c_lflag, ECHOCTL),
-        flagPrefix(tio.c_lflag, ECHOPRT),
-        flagPrefix(tio.c_lflag, ECHOKE),
-        flagPrefix(tio.c_lflag, IEXTEN),
+        pfx(tio.lflag.NOFLSH),  pfx(tio.lflag.TOSTOP),  pfx(tio.lflag.ECHOCTL),
+        pfx(tio.lflag.ECHOPRT), pfx(tio.lflag.ECHOKE),  pfx(tio.lflag.IEXTEN),
     });
 }
 
-fn printSaveFormat(tio: *const termios) void {
-    writeStdout("{x:0>8}:{x:0>8}:{x:0>8}:{x:0>8}:", .{
-        tio.c_iflag,
-        tio.c_oflag,
-        tio.c_cflag,
-        tio.c_lflag,
-    });
-    for (tio.c_cc, 0..) |cc, idx| {
-        if (idx > 0) writeStdout(":", .{});
-        writeStdout("{x:0>2}", .{cc});
+fn pfx(on: bool) []const u8 {
+    return if (on) "" else "-";
+}
+
+/// Render a control character the way GNU stty does. `buf` must be >= 3 bytes.
+fn formatCC(buf: []u8, cc: u8) []const u8 {
+    if (cc == VDISABLE) return "<undef>";
+    if (cc == 0x7f) return "^?";
+    if (cc < 32) {
+        buf[0] = '^';
+        buf[1] = cc + 0x40;
+        return buf[0..2];
     }
-    writeStdout("\n", .{});
-}
-
-fn flagPrefix(flags: tcflag_t, flag: tcflag_t) []const u8 {
-    return if (flags & flag != 0) "" else "-";
-}
-
-fn formatCC(cc: cc_t) []const u8 {
-    return switch (cc) {
-        0 => "<undef>",
-        0x7f => "^?",
-        else => if (cc < 32) blk: {
-            const chars = "^@^A^B^C^D^E^F^G^H^I^J^K^L^M^N^O^P^Q^R^S^T^U^V^W^X^Y^Z^[^\\^]^^^_";
-            break :blk chars[cc * 2 ..][0..2];
-        } else "?",
-    };
-}
-
-fn baudToNum(baud: speed_t) u32 {
-    return switch (baud) {
-        B0 => 0,
-        B50 => 50,
-        B75 => 75,
-        B110 => 110,
-        B134 => 134,
-        B150 => 150,
-        B200 => 200,
-        B300 => 300,
-        B600 => 600,
-        B1200 => 1200,
-        B1800 => 1800,
-        B2400 => 2400,
-        B4800 => 4800,
-        B9600 => 9600,
-        B19200 => 19200,
-        B38400 => 38400,
-        B57600 => 57600,
-        B115200 => 115200,
-        B230400 => 230400,
-        else => 0,
-    };
+    // Printable byte (0x20..0x7e): echo the literal character, as GNU does.
+    if (cc < 0x7f) {
+        buf[0] = cc;
+        return buf[0..1];
+    }
+    // Any remaining high byte that is not the disable sentinel.
+    return std.fmt.bufPrint(buf, "\\{o}", .{cc}) catch "?";
 }
 
 fn printHelp() void {
@@ -572,6 +783,7 @@ fn printHelp() void {
         \\Options:
         \\  -a, --all       print all current settings in human-readable form
         \\  -g, --save      print all current settings in a stty-readable form
+        \\  -F, --file DEV  open and use the specified device instead of stdin
         \\      --help      display this help and exit
         \\      --version   output version information and exit
         \\
@@ -581,33 +793,25 @@ fn printHelp() void {
         \\                  -igncr -icrnl -ixon -opost -echo -icanon -isig cs8
         \\    cooked/sane   set reasonable terminal settings
         \\
-        \\  Input settings:
-        \\    [-]ignbrk     ignore break characters
-        \\    [-]brkint     breaks cause an interrupt signal
-        \\    [-]icrnl      translate carriage return to newline
-        \\    [-]ixon       enable XON/XOFF flow control
-        \\    [-]iutf8      assume input characters are UTF-8 encoded
+        \\  Values:
+        \\    rows N / cols N       set window rows / columns
+        \\    N / ispeed N/ospeed N set line speed (baud)
+        \\    intr/erase/eof/... C  set a control character (e.g. `intr ^C`, `eof undef`)
+        \\    min N / time N        set VMIN / VTIME
+        \\    speed                 print the terminal output speed
         \\
-        \\  Output settings:
-        \\    [-]opost      postprocess output
-        \\    [-]onlcr      translate newline to carriage return-newline
-        \\
-        \\  Local settings:
-        \\    [-]echo       echo input characters
-        \\    [-]icanon     enable canonical input (line editing)
-        \\    [-]isig       enable interrupt, quit, and suspend special chars
-        \\
-        \\  Control settings:
-        \\    cs5/cs6/cs7/cs8  character size
-        \\    [-]cread      allow input to be received
-        \\    [-]parenb     generate parity bit
+        \\  Input:   [-]ignbrk [-]brkint [-]icrnl [-]ixon [-]iutf8 ...
+        \\  Output:  [-]opost [-]onlcr ...
+        \\  Local:   [-]echo [-]icanon [-]isig ...
+        \\  Control: cs5/cs6/cs7/cs8 [-]cread [-]parenb ...
         \\
         \\Examples:
         \\  zstty -a              Show all settings
         \\  zstty raw             Set raw mode
         \\  zstty sane            Reset to sane defaults
         \\  zstty -echo           Disable echo
-        \\  zstty echo            Enable echo
+        \\  zstty rows 40 cols 100
+        \\  zstty intr ^C
         \\
     , .{});
 }

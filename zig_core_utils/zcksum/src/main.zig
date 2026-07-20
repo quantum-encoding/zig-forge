@@ -8,6 +8,16 @@ const libc = std.c;
 
 const VERSION = "1.0.0";
 
+// libc strerror is not surfaced by std.c; declare it directly so open()/read()
+// diagnostics carry the real system message (matching GNU, which also uses
+// strerror): ENOENT -> "No such file or directory", EACCES -> "Permission
+// denied", EISDIR -> "Is a directory", etc.
+extern "c" fn strerror(errnum: c_int) [*:0]const u8;
+
+fn errnoValue() c_int {
+    return libc._errno().*;
+}
+
 // POSIX CRC-32 table (polynomial 0x04C11DB7, MSB first)
 const crc_table = blk: {
     @setEvalBranchQuota(10000);
@@ -26,12 +36,28 @@ const crc_table = blk: {
     break :blk table;
 };
 
+// Write all bytes, looping over short/interrupted writes. A checksum tool must
+// never emit a partial line and report success, so a real write error aborts.
+fn writeAll(fd: c_int, data: []const u8) void {
+    var written: usize = 0;
+    while (written < data.len) {
+        const n = libc.write(fd, data[written..].ptr, data.len - written);
+        if (n < 0) {
+            const e: libc.E = @enumFromInt(errnoValue());
+            if (e == .INTR or e == .AGAIN) continue;
+            return; // unrecoverable; nothing more we can do on this fd
+        }
+        if (n == 0) return;
+        written += @intCast(n);
+    }
+}
+
 fn writeStdout(data: []const u8) void {
-    _ = libc.write(libc.STDOUT_FILENO, data.ptr, data.len);
+    writeAll(libc.STDOUT_FILENO, data);
 }
 
 fn writeStderr(data: []const u8) void {
-    _ = libc.write(libc.STDERR_FILENO, data.ptr, data.len);
+    writeAll(libc.STDERR_FILENO, data);
 }
 
 fn printUsage() void {
@@ -46,21 +72,34 @@ fn printUsage() void {
         \\      --version  Output version information and exit
         \\
     ;
-    writeStderr(usage);
+    // GNU cksum writes --help/--version to stdout, not stderr.
+    writeStdout(usage);
 }
 
 fn printVersion() void {
-    writeStderr("zcksum " ++ VERSION ++ "\n");
+    writeStdout("zcksum " ++ VERSION ++ "\n");
 }
 
-fn computeCksum(fd: c_int) struct { crc: u32, len: u64 } {
+const Result = struct { crc: u32, len: u64 };
+
+// Returns null on a read() error, storing the errno in `err_out`. A negative
+// read return (EIO, EISDIR, EFAULT, ...) is NOT treated as EOF: doing so would
+// fold in the truncated length and print a plausible-but-wrong CRC with exit 0.
+// EINTR/EAGAIN are retried.
+fn computeCksum(fd: c_int, err_out: *c_int) ?Result {
     var crc: u32 = 0;
     var total_len: u64 = 0;
     var buf: [65536]u8 = undefined;
 
     while (true) {
         const n_ret = libc.read(fd, &buf, buf.len);
-        if (n_ret <= 0) break;
+        if (n_ret < 0) {
+            const e: libc.E = @enumFromInt(errnoValue());
+            if (e == .INTR or e == .AGAIN) continue;
+            err_out.* = @intFromEnum(e);
+            return null;
+        }
+        if (n_ret == 0) break; // true EOF
         const n: usize = @intCast(n_ret);
 
         for (buf[0..n]) |byte| {
@@ -96,6 +135,14 @@ fn printResult(crc: u32, len: u64, name: ?[]const u8) void {
     writeStdout("\n");
 }
 
+fn reportError(name: []const u8, err: c_int) void {
+    writeStderr("zcksum: ");
+    writeStderr(name);
+    writeStderr(": ");
+    writeStderr(std.mem.span(strerror(err)));
+    writeStderr("\n");
+}
+
 fn processFile(path: ?[]const u8) bool {
     const fd: c_int = if (path) |p| blk: {
         if (std.mem.eql(u8, p, "-")) break :blk 0;
@@ -106,9 +153,9 @@ fn processFile(path: ?[]const u8) bool {
         };
         const fd_ret = libc.open(path_z.ptr, .{ .ACCMODE = .RDONLY }, @as(libc.mode_t, 0));
         if (fd_ret < 0) {
-            writeStderr("zcksum: ");
-            writeStderr(p);
-            writeStderr(": No such file or directory\n");
+            // Report the real reason (Permission denied / Is a directory /
+            // No such file or directory), not a hardcoded ENOENT message.
+            reportError(p, errnoValue());
             return false;
         }
         break :blk fd_ret;
@@ -117,9 +164,30 @@ fn processFile(path: ?[]const u8) bool {
         if (path != null and !std.mem.eql(u8, path.?, "-")) _ = libc.close(fd);
     }
 
-    const result = computeCksum(fd);
+    var err_code: c_int = 0;
+    const result = computeCksum(fd, &err_code) orelse {
+        reportError(path orelse "-", err_code);
+        return false;
+    };
     printResult(result.crc, result.len, path);
     return true;
+}
+
+// GNU prints `cksum: invalid option -- 'x'` (short) or
+// `cksum: unrecognized option '--foo'` (long), then a Try-help line, exit 1.
+fn invalidOption(arg: []const u8) noreturn {
+    if (std.mem.startsWith(u8, arg, "--")) {
+        writeStderr("zcksum: unrecognized option '");
+        writeStderr(arg);
+        writeStderr("'\n");
+    } else {
+        writeStderr("zcksum: invalid option -- '");
+        // report the first offending short-option character
+        writeStderr(arg[1..2]);
+        writeStderr("'\n");
+    }
+    writeStderr("Try 'zcksum --help' for more information.\n");
+    std.process.exit(1);
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -128,14 +196,24 @@ pub fn main(init: std.process.Init) !void {
 
     var files_found = false;
     var exit_code: u8 = 0;
+    var opts_done = false;
 
     while (args_iter.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--help")) {
-            printUsage();
-            return;
-        } else if (std.mem.eql(u8, arg, "--version")) {
-            printVersion();
-            return;
+        if (!opts_done and std.mem.eql(u8, arg, "--")) {
+            opts_done = true;
+            continue;
+        }
+        if (!opts_done and arg.len > 1 and arg[0] == '-') {
+            if (std.mem.eql(u8, arg, "--help")) {
+                printUsage();
+                return;
+            } else if (std.mem.eql(u8, arg, "--version")) {
+                printVersion();
+                return;
+            } else {
+                // Unknown option: diagnose and exit 1 (do not treat as a path).
+                invalidOption(arg);
+            }
         } else {
             files_found = true;
             if (!processFile(arg)) {

@@ -1,6 +1,9 @@
 const std = @import("std");
 const libc = std.c;
 
+// strerror is not re-exported by std.c; declare it directly for GNU-style errno messages.
+extern "c" fn strerror(errnum: c_int) [*:0]const u8;
+
 const Encoding = enum {
     base64,
     base64url,
@@ -50,7 +53,9 @@ const OutputBuffer = struct {
     }
 
     fn finalize(self: *OutputBuffer) void {
-        if (self.col > 0) {
+        // GNU basenc appends a trailing newline only when line wrapping is active.
+        // With `-w 0` (wrapping disabled) the encoded stream has no trailing newline.
+        if (self.wrap > 0 and self.col > 0) {
             self.writeByte('\n');
         }
         self.flush();
@@ -172,17 +177,17 @@ fn decodeBase64Char(c: u8, alphabet: *const [64]u8) ?u6 {
     return null;
 }
 
-fn decodeBase64(data: []const u8, out: *OutputBuffer, alphabet: *const [64]u8, ignore_garbage: bool) void {
+// Returns true when the input was fully valid. Like GNU basenc, decoded bytes
+// from every complete group (and any completeable leftover) are emitted even on
+// an invalid stream; the return value only drives the exit status / diagnostic.
+fn decodeBase64(data: []const u8, out: *OutputBuffer, alphabet: *const [64]u8, ignore_garbage: bool) bool {
     var buf: [4]u6 = undefined;
     var buf_len: usize = 0;
-    var padding: usize = 0;
+    var invalid = false;
 
     for (data) |c| {
         if (c == '\n' or c == '\r') continue;
-        if (c == '=') {
-            padding += 1;
-            continue;
-        }
+        if (c == '=') continue; // padding: skip (group is length-validated at end)
 
         if (decodeBase64Char(c, alphabet)) |val| {
             buf[buf_len] = val;
@@ -194,18 +199,32 @@ fn decodeBase64(data: []const u8, out: *OutputBuffer, alphabet: *const [64]u8, i
                 out.writeByte((@as(u8, buf[2] & 0x03) << 6) | buf[3]);
                 buf_len = 0;
             }
-        } else if (!ignore_garbage) {
-            return; // Invalid character
+        } else if (ignore_garbage) {
+            continue;
+        } else {
+            invalid = true;
+            break; // stop at first non-alphabet byte, like GNU
         }
     }
 
-    // Handle remaining
+    // Emit completeable leftover bytes (GNU emits these even on error).
     if (buf_len >= 2) {
         out.writeByte((@as(u8, buf[0]) << 2) | (buf[1] >> 4));
     }
     if (buf_len >= 3) {
         out.writeByte((@as(u8, buf[1] & 0x0F) << 4) | (buf[2] >> 2));
     }
+
+    if (invalid) return false;
+    // RFC 4648 length + trailing-bit validation (matches GNU exactly).
+    switch (buf_len) {
+        0 => {},
+        1 => return false, // a lone sextet is never valid (4n+1)
+        2 => if ((buf[1] & 0x0F) != 0) return false, // unused low 4 bits must be zero
+        3 => if ((buf[2] & 0x03) != 0) return false, // unused low 2 bits must be zero
+        else => unreachable,
+    }
+    return true;
 }
 
 fn decodeBase32Char(c: u8, alphabet: *const [32]u8) ?u5 {
@@ -215,9 +234,10 @@ fn decodeBase32Char(c: u8, alphabet: *const [32]u8) ?u5 {
     return null;
 }
 
-fn decodeBase32(data: []const u8, out: *OutputBuffer, alphabet: *const [32]u8, ignore_garbage: bool) void {
+fn decodeBase32(data: []const u8, out: *OutputBuffer, alphabet: *const [32]u8, ignore_garbage: bool) bool {
     var buf: [8]u5 = undefined;
     var buf_len: usize = 0;
+    var invalid = false;
 
     for (data) |c| {
         if (c == '\n' or c == '\r' or c == '=') continue;
@@ -234,20 +254,36 @@ fn decodeBase32(data: []const u8, out: *OutputBuffer, alphabet: *const [32]u8, i
                 out.writeByte((@as(u8, buf[6] & 0x07) << 5) | buf[7]);
                 buf_len = 0;
             }
-        } else if (!ignore_garbage) {
-            return;
+        } else if (ignore_garbage) {
+            continue;
+        } else {
+            invalid = true;
+            break;
         }
     }
 
-    // Handle remaining
+    // Emit completeable leftover bytes.
     if (buf_len >= 2) out.writeByte((@as(u8, buf[0]) << 3) | (buf[1] >> 2));
     if (buf_len >= 4) out.writeByte((@as(u8, buf[1] & 0x03) << 6) | (@as(u8, buf[2]) << 1) | (buf[3] >> 4));
     if (buf_len >= 5) out.writeByte((@as(u8, buf[3] & 0x0F) << 4) | (buf[4] >> 1));
     if (buf_len >= 7) out.writeByte((@as(u8, buf[4] & 0x01) << 7) | (@as(u8, buf[5]) << 2) | (buf[6] >> 3));
+
+    if (invalid) return false;
+    // Valid base32 leftover counts are 0/2/4/5/7; each with its unused low bits zero.
+    switch (buf_len) {
+        0 => {},
+        2 => if ((buf[1] & 0x03) != 0) return false,
+        4 => if ((buf[3] & 0x0F) != 0) return false,
+        5 => if ((buf[4] & 0x01) != 0) return false,
+        7 => if ((buf[6] & 0x07) != 0) return false,
+        else => return false, // 1/3/6 are impossible group lengths
+    }
+    return true;
 }
 
-fn decodeBase16(data: []const u8, out: *OutputBuffer, ignore_garbage: bool) void {
+fn decodeBase16(data: []const u8, out: *OutputBuffer, ignore_garbage: bool) bool {
     var high: ?u4 = null;
+    var invalid = false;
 
     for (data) |c| {
         if (c == '\n' or c == '\r') continue;
@@ -264,15 +300,23 @@ fn decodeBase16(data: []const u8, out: *OutputBuffer, ignore_garbage: bool) void
             } else {
                 high = v;
             }
-        } else if (!ignore_garbage) {
-            return;
+        } else if (ignore_garbage) {
+            continue;
+        } else {
+            invalid = true;
+            break;
         }
     }
+
+    if (invalid) return false;
+    if (high != null) return false; // dangling high nibble (odd number of hex digits)
+    return true;
 }
 
-fn decodeBase2(data: []const u8, out: *OutputBuffer, msb_first: bool, ignore_garbage: bool) void {
+fn decodeBase2(data: []const u8, out: *OutputBuffer, msb_first: bool, ignore_garbage: bool) bool {
     var byte: u8 = 0;
-    var bit_count: u3 = 0;
+    var bit_count: u4 = 0;
+    var invalid = false;
 
     for (data) |c| {
         if (c == '\n' or c == '\r') continue;
@@ -282,18 +326,52 @@ fn decodeBase2(data: []const u8, out: *OutputBuffer, msb_first: bool, ignore_gar
             if (msb_first) {
                 byte = (byte << 1) | bit;
             } else {
-                byte = byte | (@as(u8, bit) << bit_count);
+                byte = byte | (@as(u8, bit) << @intCast(bit_count));
             }
-            bit_count +%= 1;
+            bit_count += 1;
 
-            if (bit_count == 0) {
+            if (bit_count == 8) {
                 out.writeByte(byte);
                 byte = 0;
+                bit_count = 0;
             }
-        } else if (!ignore_garbage) {
-            return;
+        } else if (ignore_garbage) {
+            continue;
+        } else {
+            invalid = true;
+            break;
         }
     }
+
+    if (invalid) return false;
+    if (bit_count != 0) return false; // trailing bits that do not complete a byte
+    return true;
+}
+
+fn writeStderr(s: []const u8) void {
+    _ = libc.write(libc.STDERR_FILENO, s.ptr, s.len);
+}
+
+// `zbasenc: <path>: <errmsg>\n`, then exit 1 (no Zig stack trace).
+fn fatalPath(path: []const u8, errmsg: [*:0]const u8) noreturn {
+    writeStderr("zbasenc: ");
+    writeStderr(path);
+    writeStderr(": ");
+    writeStderr(std.mem.span(errmsg));
+    writeStderr("\n");
+    std.process.exit(1);
+}
+
+fn fatalWrap(val: []const u8) noreturn {
+    // GNU: `basenc: invalid wrap size: '<val>'` (plain quotes in the C locale).
+    writeStderr("zbasenc: invalid wrap size: '");
+    writeStderr(val);
+    writeStderr("'\n");
+    std.process.exit(1);
+}
+
+fn parseWrap(val: []const u8) usize {
+    return std.fmt.parseInt(usize, val, 10) catch fatalWrap(val);
 }
 
 fn readInput(allocator: std.mem.Allocator, file: ?[]const u8) ![]const u8 {
@@ -311,7 +389,11 @@ fn readInput(allocator: std.mem.Allocator, file: ?[]const u8) ![]const u8 {
         const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{file.?}) catch return error.PathTooLong;
 
         const fd = libc.open(path_z.ptr, .{ .ACCMODE = .RDONLY }, @as(libc.mode_t, 0));
-        if (fd < 0) return error.OpenFailed;
+        if (fd < 0) {
+            // GNU: `basenc: <FILE>: <strerror(errno)>` on stderr, exit 1, no stack trace.
+            const errnum = libc._errno().*;
+            fatalPath(file.?, strerror(errnum));
+        }
         defer _ = libc.close(fd);
 
         var content = std.ArrayListUnmanaged(u8).empty;
@@ -372,15 +454,38 @@ pub fn main(init: std.process.Init) !void {
             encoding = .base2msbf;
         } else if (std.mem.eql(u8, arg, "--base2lsbf")) {
             encoding = .base2lsbf;
-        } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--decode")) {
+        } else if (std.mem.eql(u8, arg, "--version")) {
+            const ver = "zbasenc (zig_core_utils) — basenc-compatible\n";
+            _ = libc.write(libc.STDOUT_FILENO, ver.ptr, ver.len);
+            return;
+        } else if (std.mem.eql(u8, arg, "--decode")) {
             decode = true;
-        } else if (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--ignore-garbage")) {
+        } else if (std.mem.eql(u8, arg, "--ignore-garbage")) {
             ignore_garbage = true;
-        } else if (std.mem.startsWith(u8, arg, "-w")) {
-            const val = if (arg.len > 2) arg[2..] else args.next() orelse "76";
-            wrap = std.fmt.parseInt(usize, val, 10) catch 76;
         } else if (std.mem.startsWith(u8, arg, "--wrap=")) {
-            wrap = std.fmt.parseInt(usize, arg[7..], 10) catch 76;
+            wrap = parseWrap(arg[7..]);
+        } else if (std.mem.eql(u8, arg, "--wrap")) {
+            // Space-separated long form: consume the next token as the value.
+            wrap = parseWrap(args.next() orelse fatalWrap(""));
+        } else if (arg.len >= 2 and arg[0] == '-' and arg[1] != '-') {
+            // Cluster of short options, e.g. `-d`, `-di`, `-w76`, `-dw 76`.
+            var j: usize = 1;
+            while (j < arg.len) : (j += 1) {
+                switch (arg[j]) {
+                    'd' => decode = true,
+                    'i' => ignore_garbage = true,
+                    'w' => {
+                        // Rest of the cluster is the value; otherwise the next token.
+                        const val = if (j + 1 < arg.len) arg[j + 1 ..] else args.next() orelse fatalWrap("");
+                        wrap = parseWrap(val);
+                        j = arg.len; // 'w' consumes the remainder of the cluster
+                    },
+                    else => {
+                        writeStderr("zbasenc: invalid option\n");
+                        std.process.exit(1);
+                    },
+                }
+            }
         } else if (arg.len > 0 and arg[0] != '-') {
             file = arg;
         }
@@ -393,11 +498,12 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const data = try readInput(allocator, file);
+    defer allocator.free(data);
     var out = OutputBuffer{};
     out.wrap = wrap;
 
     if (decode) {
-        switch (encoding.?) {
+        const valid = switch (encoding.?) {
             .base64 => decodeBase64(data, &out, base64_alphabet, ignore_garbage),
             .base64url => decodeBase64(data, &out, base64url_alphabet, ignore_garbage),
             .base32 => decodeBase32(data, &out, base32_alphabet, ignore_garbage),
@@ -405,8 +511,13 @@ pub fn main(init: std.process.Init) !void {
             .base16 => decodeBase16(data, &out, ignore_garbage),
             .base2msbf => decodeBase2(data, &out, true, ignore_garbage),
             .base2lsbf => decodeBase2(data, &out, false, ignore_garbage),
-        }
+        };
         out.flush();
+        if (!valid) {
+            // GNU emits decoded bytes first, then this diagnostic, then exits 1.
+            writeStderr("zbasenc: invalid input\n");
+            std.process.exit(1);
+        }
     } else {
         switch (encoding.?) {
             .base64 => encodeBase64(data, &out, base64_alphabet),

@@ -10,9 +10,14 @@ const libc = std.c;
 
 const VERSION = "1.0.0";
 
+// GNU curl exit-code scheme (subset we implement). See `man curl` EXIT CODES.
+const EXIT_OK: u8 = 0;
+const EXIT_USAGE: u8 = 2; // failed to init / bad usage
+const EXIT_URL_MALFORMED: u8 = 3; // URL malformed
+const EXIT_COULDNT_CONNECT: u8 = 7; // failed to connect / transfer
+
 const Config = struct {
     method: http.Method = .GET,
-    url: ?[]const u8 = null,
     headers: [32]http.Header = undefined,
     header_count: usize = 0,
     data: ?[]const u8 = null,
@@ -21,17 +26,34 @@ const Config = struct {
     verbose: bool = false,
     silent: bool = false,
     follow_redirects: bool = false,
-    max_redirects: u8 = 10,
+    max_redirects: u16 = 50,
     head_only: bool = false,
     user_agent: []const u8 = "zcurl/" ++ VERSION,
 };
 
+const ParseResult = enum { proceed, help, version, usage_error };
+
+/// Write the full slice, looping on short writes and retrying on EINTR.
+/// Best-effort: errors other than EINTR terminate the loop (e.g. EPIPE).
+fn writeAllFd(fd: c_int, data: []const u8) void {
+    var written: usize = 0;
+    while (written < data.len) {
+        const n = libc.write(fd, data.ptr + written, data.len - written);
+        if (n < 0) {
+            if (libc._errno().* == @intFromEnum(libc.E.INTR)) continue;
+            return; // real error (EPIPE, etc.) — nothing sane to do here
+        }
+        if (n == 0) return;
+        written += @intCast(n);
+    }
+}
+
 fn writeStdout(data: []const u8) void {
-    _ = libc.write(libc.STDOUT_FILENO, data.ptr, data.len);
+    writeAllFd(libc.STDOUT_FILENO, data);
 }
 
 fn writeStderr(data: []const u8) void {
-    _ = libc.write(libc.STDERR_FILENO, data.ptr, data.len);
+    writeAllFd(libc.STDERR_FILENO, data);
 }
 
 fn printUsage() void {
@@ -41,7 +63,7 @@ fn printUsage() void {
         \\
         \\Options:
         \\  -X, --request METHOD  HTTP method (GET, POST, PUT, DELETE, HEAD, PATCH)
-        \\  -H, --header HEADER   Add header (format: "Name: Value")
+        \\  -H, --header HEADER   Add header (format: "Name: Value" or "Name:Value")
         \\  -d, --data DATA       HTTP POST/PUT data
         \\  -o, --output FILE     Write output to file instead of stdout
         \\  -i, --include         Include response headers in output
@@ -60,29 +82,47 @@ fn printUsage() void {
         \\  zcurl -I https://example.com
         \\
     ;
-    writeStderr(usage);
+    writeStdout(usage);
 }
 
 fn printVersion() void {
-    writeStderr("zcurl " ++ VERSION ++ " - Zig HTTP client\n");
+    writeStdout("zcurl " ++ VERSION ++ " - Zig HTTP client\n");
 }
 
-fn parseArgs(args: [][*:0]u8, cfg: *Config) bool {
+/// Parse a single -H argument. curl accepts both "Name: Value" and "Name:Value";
+/// the value's optional leading whitespace is trimmed. Returns false on a header
+/// with no ':' separator (invalid) or when the fixed header array is full.
+fn addHeader(cfg: *Config, header_str: []const u8) bool {
+    const sep = std.mem.indexOfScalar(u8, header_str, ':') orelse return false;
+    if (cfg.header_count >= cfg.headers.len) return false;
+    const value = std.mem.trimStart(u8, header_str[sep + 1 ..], " \t");
+    cfg.headers[cfg.header_count] = .{
+        .name = header_str[0..sep],
+        .value = value,
+    };
+    cfg.header_count += 1;
+    return true;
+}
+
+fn parseArgs(
+    allocator: std.mem.Allocator,
+    args: [][*:0]u8,
+    cfg: *Config,
+    urls: *std.ArrayListUnmanaged([]const u8),
+) ParseResult {
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const arg = std.mem.span(args[i]);
 
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            printUsage();
-            return false;
+            return .help;
         } else if (std.mem.eql(u8, arg, "--version")) {
-            printVersion();
-            return false;
+            return .version;
         } else if (std.mem.eql(u8, arg, "-X") or std.mem.eql(u8, arg, "--request")) {
             i += 1;
             if (i >= args.len) {
                 writeStderr("zcurl: -X requires a method\n");
-                return false;
+                return .usage_error;
             }
             const method_str = std.mem.span(args[i]);
             if (std.mem.eql(u8, method_str, "GET")) {
@@ -102,30 +142,23 @@ fn parseArgs(args: [][*:0]u8, cfg: *Config) bool {
                 writeStderr("zcurl: unknown method: ");
                 writeStderr(method_str);
                 writeStderr("\n");
-                return false;
+                return .usage_error;
             }
         } else if (std.mem.eql(u8, arg, "-H") or std.mem.eql(u8, arg, "--header")) {
             i += 1;
             if (i >= args.len) {
                 writeStderr("zcurl: -H requires a header\n");
-                return false;
+                return .usage_error;
             }
-            if (cfg.header_count < cfg.headers.len) {
-                const header_str = std.mem.span(args[i]);
-                // Parse "Name: Value"
-                if (std.mem.indexOf(u8, header_str, ": ")) |sep| {
-                    cfg.headers[cfg.header_count] = .{
-                        .name = header_str[0..sep],
-                        .value = header_str[sep + 2 ..],
-                    };
-                    cfg.header_count += 1;
-                }
+            if (!addHeader(cfg, std.mem.span(args[i]))) {
+                writeStderr("zcurl: invalid or too many headers\n");
+                return .usage_error;
             }
         } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--data")) {
             i += 1;
             if (i >= args.len) {
                 writeStderr("zcurl: -d requires data\n");
-                return false;
+                return .usage_error;
             }
             cfg.data = std.mem.span(args[i]);
             if (cfg.method == .GET) cfg.method = .POST;
@@ -133,7 +166,7 @@ fn parseArgs(args: [][*:0]u8, cfg: *Config) bool {
             i += 1;
             if (i >= args.len) {
                 writeStderr("zcurl: -o requires a filename\n");
-                return false;
+                return .usage_error;
             }
             cfg.output_file = std.mem.span(args[i]);
         } else if (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--include")) {
@@ -152,88 +185,100 @@ fn parseArgs(args: [][*:0]u8, cfg: *Config) bool {
             i += 1;
             if (i >= args.len) {
                 writeStderr("zcurl: -A requires a user-agent string\n");
-                return false;
+                return .usage_error;
             }
             cfg.user_agent = std.mem.span(args[i]);
         } else if (arg.len > 0 and arg[0] != '-') {
-            cfg.url = arg;
+            // GNU curl fetches every URL argument in sequence.
+            urls.append(allocator, arg) catch return .usage_error;
+        } else {
+            writeStderr("zcurl: unknown option: ");
+            writeStderr(arg);
+            writeStderr("\n");
+            return .usage_error;
         }
     }
 
-    if (cfg.url == null) {
+    if (urls.items.len == 0) {
         writeStderr("zcurl: no URL specified\n");
         writeStderr("Try 'zcurl --help' for more information.\n");
-        return false;
+        return .usage_error;
     }
 
-    return true;
+    return .proceed;
 }
 
-pub fn main(init: std.process.Init) !void {
-    const allocator = init.gpa;
+/// Print the status line and headers of a response (for -i / -I / -v).
+/// Uses the server's actual HTTP version and reason phrase.
+fn writeHead(response: *http.Client.Response) void {
+    var buf: [256]u8 = undefined;
+    const reason = if (response.head.reason.len != 0)
+        response.head.reason
+    else
+        (response.head.status.phrase() orelse "");
+    const line = std.fmt.bufPrint(&buf, "{s} {d} {s}\r\n", .{
+        @tagName(response.head.version),
+        @intFromEnum(response.head.status),
+        reason,
+    }) catch "HTTP/1.1 ???\r\n";
+    writeStdout(line);
 
-    // Collect args
-    var args_list: std.ArrayListUnmanaged([*:0]u8) = .empty;
-    defer args_list.deinit(allocator);
-    var args_iter = std.process.Args.Iterator.init(init.minimal.args);
-    while (args_iter.next()) |arg| {
-        // Convert to [*:0]u8 by casting the const away (safe since we don't modify)
-        try args_list.append(allocator, @constCast(arg.ptr));
+    var it = response.head.iterateHeaders();
+    while (it.next()) |h| {
+        writeStdout(h.name);
+        writeStdout(": ");
+        writeStdout(h.value);
+        writeStdout("\r\n");
     }
+    writeStdout("\r\n");
+}
 
-    var cfg = Config{};
-
-    if (!parseArgs(args_list.items[1..], &cfg)) {
-        return;
-    }
-
-    // Create HTTP client using init.io
+/// Fetch a single URL. Returns the process exit code for this transfer.
+fn fetchOne(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    cfg: *const Config,
+    url: []const u8,
+) u8 {
     var client = http.Client{
         .allocator = allocator,
-        .io = init.io,
+        .io = io,
     };
     defer client.deinit();
 
-    // Add User-Agent header
-    var all_headers: [33]http.Header = undefined;
-    all_headers[0] = .{ .name = "User-Agent", .value = cfg.user_agent };
-    for (cfg.headers[0..cfg.header_count], 0..) |h, j| {
-        all_headers[j + 1] = h;
-    }
-    const headers = all_headers[0 .. cfg.header_count + 1];
-
-    // Parse URL
-    const uri = std.Uri.parse(cfg.url.?) catch {
-        writeStderr("zcurl: invalid URL\n");
-        return;
+    const uri = std.Uri.parse(url) catch {
+        if (!cfg.silent) writeStderr("zcurl: invalid URL\n");
+        return EXIT_URL_MALFORMED;
     };
+
+    // If following redirects, allow up to max_redirects; otherwise leave them
+    // unhandled (curl without -L does not follow — it emits the 3xx response).
+    const redirect_behavior: http.Client.Request.RedirectBehavior = if (cfg.follow_redirects)
+        http.Client.Request.RedirectBehavior.init(cfg.max_redirects)
+    else
+        .unhandled;
 
     if (cfg.verbose) {
         writeStderr("> ");
         writeStderr(@tagName(cfg.method));
         writeStderr(" ");
-        writeStderr(cfg.url.?);
+        writeStderr(url);
         writeStderr("\n");
-        for (headers) |h| {
-            writeStderr("> ");
-            writeStderr(h.name);
-            writeStderr(": ");
-            writeStderr(h.value);
-            writeStderr("\n");
-        }
-        writeStderr(">\n");
     }
 
-    // Make request
+    // The User-Agent goes through the standard, overridable header slot so the
+    // client's built-in default is replaced (not appended to).
     var req = client.request(cfg.method, uri, .{
-        .extra_headers = headers,
+        .redirect_behavior = redirect_behavior,
+        .extra_headers = cfg.headers[0..cfg.header_count],
+        .headers = .{ .user_agent = .{ .override = cfg.user_agent } },
     }) catch |err| {
         if (!cfg.silent) {
             writeStderr("zcurl: connection failed: ");
             writeStderr(@errorName(err));
             writeStderr("\n");
         }
-        std.process.exit(1);
+        return EXIT_COULDNT_CONNECT;
     };
     defer req.deinit();
 
@@ -246,7 +291,7 @@ pub fn main(init: std.process.Init) !void {
                 writeStderr(@errorName(err));
                 writeStderr("\n");
             }
-            std.process.exit(1);
+            return EXIT_COULDNT_CONNECT;
         };
         body_writer.writer.writeAll(data) catch {};
         body_writer.end() catch {};
@@ -258,33 +303,28 @@ pub fn main(init: std.process.Init) !void {
                 writeStderr(@errorName(err));
                 writeStderr("\n");
             }
-            std.process.exit(1);
+            return EXIT_COULDNT_CONNECT;
         };
     }
 
-    // Receive response
-    var response = req.receiveHead(&.{}) catch |err| {
+    // Receive response. A real redirect buffer must be supplied for -L to work.
+    var redirect_buffer: [16 * 1024]u8 = undefined;
+    var response = req.receiveHead(&redirect_buffer) catch |err| {
         if (!cfg.silent) {
             writeStderr("zcurl: receive failed: ");
             writeStderr(@errorName(err));
             writeStderr("\n");
         }
-        std.process.exit(1);
+        return EXIT_COULDNT_CONNECT;
     };
 
-    // Print status in verbose mode
     if (cfg.verbose or cfg.include_headers) {
-        var status_buf: [64]u8 = undefined;
-        const status_line = std.fmt.bufPrint(&status_buf, "HTTP/1.1 {d} {s}\n", .{
-            @intFromEnum(response.head.status),
-            @tagName(response.head.status),
-        }) catch "HTTP/1.1 ???\n";
-        writeStdout(status_line);
+        writeHead(&response);
     }
 
     // Handle HEAD request (no body)
     if (cfg.head_only) {
-        return;
+        return EXIT_OK;
     }
 
     // Read body (with decompression support for gzip/deflate)
@@ -299,16 +339,16 @@ pub fn main(init: std.process.Init) !void {
             writeStderr(@errorName(err));
             writeStderr("\n");
         }
-        std.process.exit(1);
+        return EXIT_COULDNT_CONNECT;
     };
     defer allocator.free(body);
 
-    // Write output
+    // Write output — verbatim, no injected trailing newline (GNU curl does not add one).
     if (cfg.output_file) |path| {
         var path_buf: [4096]u8 = undefined;
         const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch {
-            writeStderr("zcurl: path too long\n");
-            return;
+            if (!cfg.silent) writeStderr("zcurl: path too long\n");
+            return EXIT_COULDNT_CONNECT;
         };
         const fd = libc.open(path_z.ptr, .{
             .ACCMODE = .WRONLY,
@@ -316,16 +356,73 @@ pub fn main(init: std.process.Init) !void {
             .TRUNC = true,
         }, @as(libc.mode_t, 0o644));
         if (fd < 0) {
-            writeStderr("zcurl: cannot create output file\n");
-            return;
+            if (!cfg.silent) {
+                const e: libc.E = @enumFromInt(libc._errno().*);
+                writeStderr("zcurl: cannot create output file: ");
+                writeStderr(@tagName(e));
+                writeStderr("\n");
+            }
+            return EXIT_COULDNT_CONNECT;
         }
         defer _ = libc.close(fd);
-        _ = libc.write(fd, body.ptr, body.len);
+        // Loop until every byte is flushed; surface a real error on failure.
+        var written: usize = 0;
+        while (written < body.len) {
+            const n = libc.write(fd, body.ptr + written, body.len - written);
+            if (n < 0) {
+                if (libc._errno().* == @intFromEnum(libc.E.INTR)) continue;
+                if (!cfg.silent) {
+                    const e: libc.E = @enumFromInt(libc._errno().*);
+                    writeStderr("zcurl: write failed: ");
+                    writeStderr(@tagName(e));
+                    writeStderr("\n");
+                }
+                return EXIT_COULDNT_CONNECT;
+            }
+            if (n == 0) break;
+            written += @intCast(n);
+        }
     } else {
         writeStdout(body);
-        // Add newline if body doesn't end with one
-        if (body.len > 0 and body[body.len - 1] != '\n') {
-            writeStdout("\n");
-        }
     }
+
+    return EXIT_OK;
+}
+
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+
+    // Collect args
+    var args_list: std.ArrayListUnmanaged([*:0]u8) = .empty;
+    defer args_list.deinit(allocator);
+    var args_iter = std.process.Args.Iterator.init(init.minimal.args);
+    while (args_iter.next()) |arg| {
+        try args_list.append(allocator, @constCast(arg.ptr));
+    }
+
+    var cfg = Config{};
+    var urls: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer urls.deinit(allocator);
+
+    switch (parseArgs(allocator, args_list.items[1..], &cfg, &urls)) {
+        .proceed => {},
+        .help => {
+            printUsage();
+            std.process.exit(EXIT_OK);
+        },
+        .version => {
+            printVersion();
+            std.process.exit(EXIT_OK);
+        },
+        .usage_error => std.process.exit(EXIT_USAGE),
+    }
+
+    // Fetch every URL in sequence; the process exit code is the last failure
+    // (curl continues past a failed transfer but reports a non-zero status).
+    var exit_code: u8 = EXIT_OK;
+    for (urls.items) |url| {
+        const code = fetchOne(allocator, init.io, &cfg, url);
+        if (code != EXIT_OK) exit_code = code;
+    }
+    std.process.exit(exit_code);
 }

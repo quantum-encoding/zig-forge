@@ -17,6 +17,28 @@ const VERSION = "1.0.0";
 // Extern C for isatty
 extern "c" fn isatty(fd: c_int) c_int;
 
+// Hard recursion cap to prevent stack overflow on pathologically deep or
+// symlink-looping trees even when -L is not given. Frames are kept small
+// (path buffers are heap-allocated), so this bound is far below the point of
+// stack exhaustion while still covering any realistic directory tree.
+const MAX_DEPTH: usize = 4096;
+
+// Write all of `data` to `fd`, looping over short writes and retrying on
+// EINTR. A bare libc.write() may return fewer bytes than requested (slow
+// pipe) or -1/EINTR (signal); ignoring the count silently truncates output.
+fn writeAllFd(fd: c_int, data: []const u8) void {
+    var off: usize = 0;
+    while (off < data.len) {
+        const n = libc.write(fd, data.ptr + off, data.len - off);
+        if (n < 0) {
+            if (std.c._errno().* == @intFromEnum(std.c.E.INTR)) continue;
+            return;
+        }
+        if (n == 0) return;
+        off += @intCast(n);
+    }
+}
+
 // ANSI color codes
 const Color = struct {
     const reset = "\x1b[0m";
@@ -88,7 +110,7 @@ const OutputBuffer = struct {
             self.flush();
         }
         if (data.len > self.buffer.len) {
-            _ = libc.write(libc.STDOUT_FILENO, data.ptr, data.len);
+            writeAllFd(libc.STDOUT_FILENO, data);
             return;
         }
         @memcpy(self.buffer[self.pos..][0..data.len], data);
@@ -97,7 +119,7 @@ const OutputBuffer = struct {
 
     fn flush(self: *OutputBuffer) void {
         if (self.pos > 0) {
-            _ = libc.write(libc.STDOUT_FILENO, &self.buffer, self.pos);
+            writeAllFd(libc.STDOUT_FILENO, self.buffer[0..self.pos]);
             self.pos = 0;
         }
     }
@@ -110,7 +132,7 @@ const OutputBuffer = struct {
 };
 
 fn writeStderr(msg: []const u8) void {
-    _ = libc.write(libc.STDERR_FILENO, msg.ptr, msg.len);
+    writeAllFd(libc.STDERR_FILENO, msg);
 }
 
 fn printUsage() void {
@@ -181,6 +203,11 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Config {
                     writeStderr("ztree: invalid depth value\n");
                     return error.InvalidArgument;
                 };
+                if (config.max_depth.? == 0) {
+                    // Match GNU tree: level must be greater than 0.
+                    writeStderr("ztree: Invalid level, must be greater than 0.\n");
+                    return error.InvalidArgument;
+                }
             } else if (std.mem.eql(u8, arg, "-s")) {
                 config.show_size = true;
             } else if (std.mem.eql(u8, arg, "-h")) {
@@ -316,12 +343,19 @@ fn processDirectory(
     prefix: []const u8,
     depth: usize,
     config: *const Config,
+    had_error: *bool,
+    ancestors: *std.ArrayListUnmanaged(u64),
 ) Stats {
     var stats = Stats{};
 
-    // Check depth limit
+    // Hard safety cap: prevents stack overflow on pathologically deep or
+    // symlink-looping trees even when -L is not supplied.
+    if (depth >= MAX_DEPTH) return stats;
+
+    // Check depth limit (-L). GNU tree shows exactly `max` levels below the
+    // root; the root's direct children are level 1 and are printed at depth 0.
     if (config.max_depth) |max| {
-        if (depth > max) return stats;
+        if (depth >= max) return stats;
     }
 
     // Collect entries
@@ -340,11 +374,10 @@ fn processDirectory(
             continue;
         }
 
-        // Skip based on -d or -f options
+        // -d: directories only. -f (files only) does NOT drop directories here;
+        // we still descend into them, suppressing only their display line, so
+        // files in subdirectories are reached (see the print loop below).
         if (config.dirs_only and entry.kind != .directory) {
-            continue;
-        }
-        if (config.files_only and entry.kind == .directory) {
             continue;
         }
 
@@ -410,72 +443,131 @@ fn processDirectory(
 
     // Process entries
     for (entries.items) |entry| {
-        const connector = if (entry.is_last) last_branch else branch;
-
-        // Print prefix
-        out.write(prefix);
-        out.write(connector);
-
-        // Print size if requested
-        if (config.show_size and entry.kind != .directory) {
-            var size_buf: [32]u8 = undefined;
-            const size_str = formatSize(entry.size, config.human_readable, &size_buf);
-            out.print("[{s: >7}]  ", .{size_str});
+        // Determine whether this entry is a directory we should descend into.
+        // A plain directory always is; a symlink-to-directory is only when -l
+        // (follow_symlinks) is set. openDir() follows symlinks by name, so the
+        // same open path serves both cases.
+        const is_real_dir = entry.kind == .directory;
+        var follow_symdir = false;
+        var sym_inode: u64 = 0;
+        if (!is_real_dir and config.follow_symlinks and entry.kind == .sym_link) {
+            if (dir.statFile(io, entry.name, .{ .follow_symlinks = true })) |st| {
+                if (st.kind == .directory) {
+                    follow_symdir = true;
+                    sym_inode = st.inode;
+                }
+            } else |_| {}
         }
+        const treat_as_dir = is_real_dir or follow_symdir;
 
-        // Print with color
-        const color = getFileColor(entry.kind, config);
-        if (color.len > 0) {
-            out.write(color);
-        }
+        // With -f (files only) suppress the display line for directories, but
+        // still descend so their files are reached.
+        const suppress_line = config.files_only and treat_as_dir;
 
-        // Print name
-        if (config.show_full_path) {
-            out.write(dir_path);
-            if (!std.mem.endsWith(u8, dir_path, "/")) {
-                out.write("/");
+        // ---- display line (name + decorations), unless suppressed ----
+        if (!suppress_line) {
+            const connector = if (entry.is_last) last_branch else branch;
+            out.write(prefix);
+            out.write(connector);
+
+            if (config.show_size and entry.kind != .directory) {
+                var size_buf: [32]u8 = undefined;
+                const size_str = formatSize(entry.size, config.human_readable, &size_buf);
+                out.print("[{s: >7}]  ", .{size_str});
+            }
+
+            const color = getFileColor(entry.kind, config);
+            if (color.len > 0) out.write(color);
+
+            if (config.show_full_path) {
+                out.write(dir_path);
+                if (!std.mem.endsWith(u8, dir_path, "/")) out.write("/");
+            }
+            out.write(entry.name);
+
+            if (color.len > 0) out.write(Color.reset);
+
+            // Symlink target: GNU tree prints the real link target
+            // (e.g. "link -> f0.txt"), read via readlink.
+            if (entry.kind == .sym_link) {
+                var link_buf: [4096]u8 = undefined;
+                if (dir.readLink(io, entry.name, &link_buf)) |n| {
+                    out.write(" -> ");
+                    out.write(link_buf[0..n]);
+                } else |_| {}
             }
         }
-        out.write(entry.name);
 
-        // Reset color
-        if (color.len > 0) {
-            out.write(Color.reset);
-        }
-
-        // Directory indicator
-        if (entry.kind == .directory) {
-            out.write("/");
-        } else if (entry.kind == .sym_link) {
-            out.write(" -> ...");
-        }
-
-        out.write("\n");
-
-        // Update stats
-        if (entry.kind == .directory) {
+        if (treat_as_dir) {
             stats.dirs += 1;
 
-            // Recurse into directory
-            var child_path_buf: [4096]u8 = undefined;
-            const child_path = std.fmt.bufPrint(&child_path_buf, "{s}/{s}", .{ dir_path, entry.name }) catch continue;
+            // Loop detection for followed symlink-to-directory: if the target
+            // inode is already on the path from the root, do not follow it.
+            if (follow_symdir) {
+                var is_loop = false;
+                for (ancestors.items) |ino| {
+                    if (ino == sym_inode) {
+                        is_loop = true;
+                        break;
+                    }
+                }
+                if (is_loop) {
+                    if (!suppress_line) out.write("  [recursive, not followed]\n");
+                    continue;
+                }
+            }
 
-            // Build new prefix
-            var new_prefix_buf: [4096]u8 = undefined;
+            // Heap-allocate the child path and prefix so each recursion frame
+            // stays tiny (guards against stack overflow on deep trees).
+            const child_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.name }) catch {
+                if (!suppress_line) out.write("\n");
+                continue;
+            };
+            defer allocator.free(child_path);
             const extension = if (entry.is_last) space else vertical;
-            const new_prefix = std.fmt.bufPrint(&new_prefix_buf, "{s}{s}", .{ prefix, extension }) catch continue;
+            const new_prefix = std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, extension }) catch {
+                if (!suppress_line) out.write("\n");
+                continue;
+            };
+            defer allocator.free(new_prefix);
 
-            // Create null-terminated path for openDir
-            var path_z_buf: [4096]u8 = undefined;
-            const path_z = std.fmt.bufPrintZ(&path_z_buf, "{s}", .{entry.name}) catch continue;
-
-            if (dir.openDir(io, path_z, .{ .iterate = true })) |child_dir| {
+            if (dir.openDir(io, entry.name, .{ .iterate = true })) |child_dir| {
                 defer child_dir.close(io);
-                const child_stats = processDirectory(allocator, io, out, child_dir, child_path, new_prefix, depth + 1, config);
+                if (!suppress_line) out.write("\n");
+
+                // Track this directory's inode for symlink-loop detection
+                // (only needed, and only paid for, when -l is active).
+                var pushed = false;
+                if (config.follow_symlinks) {
+                    const child_inode: u64 = if (follow_symdir) sym_inode else blk: {
+                        const s = dir.statFile(io, entry.name, .{ .follow_symlinks = true }) catch break :blk 0;
+                        break :blk s.inode;
+                    };
+                    ancestors.append(allocator, child_inode) catch {};
+                    pushed = true;
+                }
+                const child_stats = processDirectory(allocator, io, out, child_dir, child_path, new_prefix, depth + 1, config, had_error, ancestors);
+                if (pushed and ancestors.items.len > 0) _ = ancestors.pop();
                 stats.add(child_stats);
-            } else |_| {}
+            } else |_| {
+                // GNU tree annotates the directory line inline and exits 2.
+                had_error.* = true;
+                if (!suppress_line) out.write("  [error opening dir]\n");
+            }
         } else {
-            stats.files += 1;
+            if (!suppress_line) out.write("\n");
+            // Count by resolved type: GNU tree's summary counts a symlink that
+            // points to a directory as a directory (even without -l), and any
+            // other symlink or file as a file.
+            if (entry.kind == .sym_link) {
+                if (dir.statFile(io, entry.name, .{ .follow_symlinks = true })) |st| {
+                    if (st.kind == .directory) stats.dirs += 1 else stats.files += 1;
+                } else |_| {
+                    stats.files += 1;
+                }
+            } else {
+                stats.files += 1;
+            }
         }
     }
 
@@ -513,9 +605,19 @@ pub fn main(init: std.process.Init) !void {
     var out = OutputBuffer{};
     var total_stats = Stats{};
 
+    // Set true if any directory (root argument or subdirectory) could not be
+    // opened; GNU tree exits 2 in that case.
+    var had_error = false;
+
+    // Inode stack of directories along the current path, used for symlink-loop
+    // detection under -l.
+    var ancestors: std.ArrayListUnmanaged(u64) = .empty;
+    defer ancestors.deinit(allocator);
+
     // Process each directory
     for (config.directories.items, 0..) |dir_path, idx| {
-        // Print directory name
+        // Print directory name (no trailing newline yet: an open failure is
+        // annotated inline on this same line, matching GNU tree).
         if (config.use_color) {
             out.write(Color.blue);
             out.write(Color.bold);
@@ -524,38 +626,47 @@ pub fn main(init: std.process.Init) !void {
         if (config.use_color) {
             out.write(Color.reset);
         }
-        out.write("\n");
-
-        // Open the directory
-        var path_z_buf: [4096]u8 = undefined;
-        const path_z = std.fmt.bufPrintZ(&path_z_buf, "{s}", .{dir_path}) catch {
-            writeStderr("ztree: path too long\n");
-            continue;
-        };
 
         const cwd = Dir.cwd();
-        if (cwd.openDir(io, path_z, .{ .iterate = true })) |dir| {
+        if (cwd.openDir(io, dir_path, .{ .iterate = true })) |dir| {
             defer dir.close(io);
-            const stats = processDirectory(allocator, io, &out, dir, dir_path, "", 0, &config);
+            out.write("\n");
+            // GNU tree counts the root argument itself as a directory.
+            total_stats.dirs += 1;
+            ancestors.clearRetainingCapacity();
+            if (config.follow_symlinks) {
+                if (dir.statFile(io, ".", .{})) |st| {
+                    ancestors.append(allocator, st.inode) catch {};
+                } else |_| {}
+            }
+            const stats = processDirectory(allocator, io, &out, dir, dir_path, "", 0, &config, &had_error, &ancestors);
             total_stats.add(stats);
-        } else |err| {
-            var err_buf: [256]u8 = undefined;
-            const err_msg = std.fmt.bufPrint(&err_buf, "ztree: cannot open '{s}': {}\n", .{ dir_path, err }) catch "ztree: cannot open directory\n";
-            writeStderr(err_msg);
+        } else |_| {
+            // GNU tree: "<name>  [error opening dir]" inline, then exit 2.
+            out.write("  [error opening dir]\n");
+            had_error = true;
         }
 
-        // Add blank line between multiple directories
-        if (idx < config.directories.items.len - 1) {
-            out.write("\n");
-        }
+        // GNU tree prints consecutive directory trees back-to-back with no
+        // blank separator line between them.
+        _ = idx;
     }
 
-    // Print summary
+    // Print summary. GNU tree singularizes ("1 directory", "1 file") and omits
+    // the file count entirely under -d.
     out.write("\n");
     var summary_buf: [128]u8 = undefined;
-    const summary = std.fmt.bufPrint(&summary_buf, "{d} directories, {d} files\n", .{ total_stats.dirs, total_stats.files }) catch "";
+    const dir_word = if (total_stats.dirs == 1) "directory" else "directories";
+    const summary = if (config.dirs_only)
+        std.fmt.bufPrint(&summary_buf, "{d} {s}\n", .{ total_stats.dirs, dir_word }) catch ""
+    else blk: {
+        const file_word = if (total_stats.files == 1) "file" else "files";
+        break :blk std.fmt.bufPrint(&summary_buf, "{d} {s}, {d} {s}\n", .{ total_stats.dirs, dir_word, total_stats.files, file_word }) catch "";
+    };
     out.write(summary);
 
     // Flush output
     out.flush();
+
+    if (had_error) std.process.exit(2);
 }

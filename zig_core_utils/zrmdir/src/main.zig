@@ -84,6 +84,10 @@ fn parentOf(dir: []const u8) ?[]const u8 {
     var end = last_slash;
     while (end > 0 and dir[end - 1] == '/') end -= 1;
     if (end == 0) end = 1; // absolute path climbed all the way to "/"
+    // "/" (and slash-runs collapsing to it) is its own last-slash prefix.
+    // Returning it would make a `while (parentOf(dir)) |p| dir = p;` climb
+    // fixpoint on the root forever; the root has no parent, so stop.
+    if (end == dir.len) return null;
     return dir[0..end];
 }
 
@@ -286,8 +290,12 @@ pub fn main(init: std.process.Init) void {
     }
 }
 
-// ---- unit tests (pure helpers; GNU parity is covered by
-//      src/gnu_parity_test.zig which diffs against the real GNU binary) ----
+// ---- unit tests (pure helpers) ----
+//
+// End-to-end GNU parity is covered by src/gnu_parity_test.zig, which runs
+// this binary and the real GNU `rmdir` (grmdir) on identical fixtures and
+// diffs their stdout/stderr/exit-code. Both files are wired into
+// `zig build test`. The parity test skips itself if grmdir is not installed.
 
 test "parentOf follows GNU remove_parents truncation" {
     const t = std.testing;
@@ -301,6 +309,9 @@ test "parentOf follows GNU remove_parents truncation" {
     // absolute paths keep the leading "/"
     try t.expectEqualStrings("/", parentOf("/a").?);
     try t.expectEqualStrings("/a", parentOf("/a/b").?);
+    // "/" is the root: it has no parent. Without this, a parent-climb loop
+    // fixpoints on "/"->"/" forever instead of terminating.
+    try t.expectEqual(@as(?[]const u8, null), parentOf("/"));
 }
 
 test "stripTrailingSlashes" {

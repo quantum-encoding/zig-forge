@@ -6,6 +6,7 @@
 //! Usage: zvdir [OPTIONS] [FILE]...
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const VERSION = "1.0.0";
 
@@ -13,62 +14,54 @@ const VERSION = "1.0.0";
 extern "c" fn write(fd: c_int, buf: [*]const u8, count: usize) isize;
 extern "c" fn readlink(path: [*:0]const u8, buf: [*]u8, bufsiz: usize) isize;
 
-const stat_t = extern struct {
-    st_dev: u64,
-    st_ino: u64,
-    st_nlink: u64,
-    st_mode: u32,
-    st_uid: u32,
-    st_gid: u32,
-    __pad0: u32,
-    st_rdev: u64,
-    st_size: i64,
-    st_blksize: i64,
-    st_blocks: i64,
-    st_atime: i64,
-    st_atime_nsec: i64,
-    st_mtime: i64,
-    st_mtime_nsec: i64,
-    st_ctime: i64,
-    st_ctime_nsec: i64,
-    __unused: [3]i64,
+// Target-aware libc structs / calls come from std.c so the ABI matches the
+// host libc on any platform (the previous hand-rolled Linux-x86_64 structs
+// decoded to garbage on macOS/arm64).
+const Stat = std.c.Stat;
+const passwd = std.c.passwd;
+const group = std.c.group;
+const DIR = std.c.DIR;
+const dirent = std.c.dirent;
+const opendir = std.c.opendir;
+const readdir = std.c.readdir;
+const closedir = std.c.closedir;
+
+extern "c" fn getpwuid(uid: std.c.uid_t) ?*passwd;
+extern "c" fn getgrgid(gid: std.c.gid_t) ?*group;
+
+// Broken-down local time (struct tm). We only read the leading fields, which
+// share an identical layout across glibc/musl/BSD/macOS; the trailing
+// tm_gmtoff / tm_zone are included so the struct size is correct.
+const tm = extern struct {
+    tm_sec: c_int,
+    tm_min: c_int,
+    tm_hour: c_int,
+    tm_mday: c_int,
+    tm_mon: c_int,
+    tm_year: c_int,
+    tm_wday: c_int,
+    tm_yday: c_int,
+    tm_isdst: c_int,
+    tm_gmtoff: c_long,
+    tm_zone: ?[*:0]const u8,
 };
+extern "c" fn localtime_r(timep: *const i64, result: *tm) ?*tm;
+extern "c" fn time(t: ?*i64) i64;
 
-extern "c" fn stat(path: [*:0]const u8, buf: *stat_t) c_int;
-extern "c" fn lstat(path: [*:0]const u8, buf: *stat_t) c_int;
+fn lstatPath(path_z: [*:0]const u8) ?Stat {
+    var st: Stat = undefined;
+    if (std.c.fstatat(std.c.AT.FDCWD, path_z, &st, std.c.AT.SYMLINK_NOFOLLOW) != 0) return null;
+    return st;
+}
 
-const DIR = opaque {};
-const dirent = extern struct {
-    d_ino: u64,
-    d_off: i64,
-    d_reclen: u16,
-    d_type: u8,
-    d_name: [256]u8,
-};
+// mode_t is u16 on Darwin, u32 on Linux; widen for uniform bit tests.
+fn modeOf(st: *const Stat) u32 {
+    return @as(u32, st.mode);
+}
 
-extern "c" fn opendir(name: [*:0]const u8) ?*DIR;
-extern "c" fn readdir(dirp: *DIR) ?*dirent;
-extern "c" fn closedir(dirp: *DIR) c_int;
-
-const passwd = extern struct {
-    pw_name: ?[*:0]const u8,
-    pw_passwd: ?[*:0]const u8,
-    pw_uid: u32,
-    pw_gid: u32,
-    pw_gecos: ?[*:0]const u8,
-    pw_dir: ?[*:0]const u8,
-    pw_shell: ?[*:0]const u8,
-};
-
-const group = extern struct {
-    gr_name: ?[*:0]const u8,
-    gr_passwd: ?[*:0]const u8,
-    gr_gid: u32,
-    gr_mem: ?[*]?[*:0]const u8,
-};
-
-extern "c" fn getpwuid(uid: u32) ?*const passwd;
-extern "c" fn getgrgid(gid: u32) ?*const group;
+fn mtimeSec(st: *const Stat) i64 {
+    return @intCast(st.mtime().sec);
+}
 
 // File type masks
 const S_IFMT: u32 = 0o170000;
@@ -112,8 +105,21 @@ fn writeStdoutRaw(data: []const u8) void {
 
 const FileEntry = struct {
     name: []const u8,
-    stat_buf: stat_t,
-    full_path: []const u8,
+    stat_buf: Stat,
+    link_target: ?[]const u8 = null,
+};
+
+// Resolve a symlink target (raw, owned by allocator) or null on failure.
+fn readLinkAlloc(allocator: std.mem.Allocator, path_z: [*:0]const u8) ?[]const u8 {
+    var buf: [4096]u8 = undefined;
+    const n = readlink(path_z, &buf, buf.len);
+    if (n <= 0) return null;
+    return allocator.dupe(u8, buf[0..@intCast(n)]) catch null;
+}
+
+const Options = struct {
+    human_readable: bool,
+    numeric_ids: bool,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -154,6 +160,9 @@ pub fn main(init: std.process.Init) !void {
             // Short options (can be combined)
             for (arg[1..]) |ch| {
                 switch (ch) {
+                    // vdir is `ls -lb`; -l and -b are redundant no-ops but
+                    // accepted so callers may pass them (as GNU vdir does).
+                    'l', 'b' => {},
                     'a' => show_all = true,
                     'A' => show_almost_all = true,
                     'h' => human_readable = true,
@@ -193,6 +202,8 @@ pub fn main(init: std.process.Init) !void {
         try paths.append(allocator, ".");
     }
 
+    const opts = Options{ .human_readable = human_readable, .numeric_ids = numeric_ids };
+
     var first = true;
     var errors: u32 = 0;
 
@@ -203,7 +214,7 @@ pub fn main(init: std.process.Init) !void {
         }
         first = false;
 
-        // Check if path is a directory
+        // Null-terminate the path for libc calls.
         var path_z: [4097]u8 = undefined;
         if (path.len >= path_z.len) {
             writeStderr("zvdir: path too long: {s}\n", .{path});
@@ -213,43 +224,53 @@ pub fn main(init: std.process.Init) !void {
         @memcpy(path_z[0..path.len], path);
         path_z[path.len] = 0;
 
-        var path_stat: stat_t = undefined;
-        if (lstat(@ptrCast(&path_z), &path_stat) != 0) {
+        const path_stat = lstatPath(@ptrCast(&path_z)) orelse {
             writeStderr("zvdir: cannot access '{s}': No such file or directory\n", .{path});
             errors += 1;
             continue;
-        }
+        };
 
-        if ((path_stat.st_mode & S_IFMT) != S_IFDIR) {
-            // It's a file, list it directly
-            printFileEntry(allocator, path, std.fs.path.basename(path), &path_stat, human_readable, numeric_ids);
+        if ((modeOf(&path_stat) & S_IFMT) != S_IFDIR) {
+            // It's a file; list it directly (single-element listing).
+            var link_target: ?[]const u8 = null;
+            if ((modeOf(&path_stat) & S_IFMT) == S_IFLNK) {
+                link_target = readLinkAlloc(allocator, @ptrCast(&path_z));
+            }
+            defer if (link_target) |t| allocator.free(t);
+            var single = [_]FileEntry{.{
+                .name = std.fs.path.basename(path),
+                .stat_buf = path_stat,
+                .link_target = link_target,
+            }};
+            printListing(allocator, single[0..], opts);
             continue;
         }
 
-        // Open directory
-        const dir = opendir(@ptrCast(&path_z));
-        if (dir == null) {
+        // Open directory (target-aware libc opendir/readdir via std.c).
+        const dir = opendir(@ptrCast(&path_z)) orelse {
             writeStderr("zvdir: cannot open directory '{s}'\n", .{path});
             errors += 1;
             continue;
-        }
-        defer _ = closedir(dir.?);
+        };
+        defer _ = closedir(dir);
 
         // Collect entries
         var entries: std.ArrayListUnmanaged(FileEntry) = .empty;
         defer {
             for (entries.items) |entry| {
                 allocator.free(entry.name);
-                allocator.free(entry.full_path);
+                if (entry.link_target) |t| allocator.free(t);
             }
             entries.deinit(allocator);
         }
 
         var total_blocks: i64 = 0;
 
-        while (readdir(dir.?)) |entry| {
-            const name_len = std.mem.indexOfScalar(u8, &entry.d_name, 0) orelse entry.d_name.len;
-            const name = entry.d_name[0..name_len];
+        while (readdir(dir)) |entry| {
+            // dirent field names differ per OS; the name is NUL-terminated on
+            // every platform, so scan for it rather than rely on d_namlen.
+            const name_len = std.mem.indexOfScalar(u8, &entry.name, 0) orelse entry.name.len;
+            const name = entry.name[0..name_len];
 
             // Skip . and .. unless -a
             if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) {
@@ -259,72 +280,42 @@ pub fn main(init: std.process.Init) !void {
                 if (!show_all and !show_almost_all) continue;
             }
 
-            // Build full path
+            // Build the NUL-terminated full path bounds-safely: we need room
+            // for path + '/' + name + NUL.
             var full_path_buf: [8192]u8 = undefined;
-            const full_path_len = std.fmt.bufPrint(&full_path_buf, "{s}/{s}", .{ path, name }) catch continue;
-            const full_path_z = full_path_buf[0 .. full_path_len.len + 1];
-            full_path_z[full_path_len.len] = 0;
+            if (path.len + 1 + name.len + 1 > full_path_buf.len) continue;
+            @memcpy(full_path_buf[0..path.len], path);
+            full_path_buf[path.len] = '/';
+            @memcpy(full_path_buf[path.len + 1 ..][0..name.len], name);
+            full_path_buf[path.len + 1 + name.len] = 0;
+            const full_path_z: [*:0]const u8 = @ptrCast(&full_path_buf);
 
-            var entry_stat: stat_t = undefined;
-            if (lstat(@ptrCast(full_path_z.ptr), &entry_stat) != 0) {
-                continue;
+            const entry_stat = lstatPath(full_path_z) orelse continue;
+
+            total_blocks += entry_stat.blocks;
+
+            var link_target: ?[]const u8 = null;
+            if ((modeOf(&entry_stat) & S_IFMT) == S_IFLNK) {
+                link_target = readLinkAlloc(allocator, full_path_z);
             }
 
-            total_blocks += entry_stat.st_blocks;
-
             const name_copy = try allocator.dupe(u8, name);
-            const full_path_copy = try allocator.dupe(u8, full_path_len);
-
             try entries.append(allocator, .{
                 .name = name_copy,
                 .stat_buf = entry_stat,
-                .full_path = full_path_copy,
+                .link_target = link_target,
             });
         }
 
         // Sort entries
         if (!no_sort) {
-            const SortContext = struct {
-                reverse_sort: bool,
-                by_time: bool,
-                by_size: bool,
-            };
-            const ctx = SortContext{
-                .reverse_sort = reverse,
-                .by_time = sort_by_time,
-                .by_size = sort_by_size,
-            };
-
-            std.mem.sort(FileEntry, entries.items, ctx, struct {
-                fn lessThan(context: SortContext, a: FileEntry, b: FileEntry) bool {
-                    var result: bool = undefined;
-                    if (context.by_time) {
-                        if (a.stat_buf.st_mtime != b.stat_buf.st_mtime) {
-                            result = a.stat_buf.st_mtime > b.stat_buf.st_mtime;
-                        } else {
-                            result = std.mem.lessThan(u8, a.name, b.name);
-                        }
-                    } else if (context.by_size) {
-                        if (a.stat_buf.st_size != b.stat_buf.st_size) {
-                            result = a.stat_buf.st_size > b.stat_buf.st_size;
-                        } else {
-                            result = std.mem.lessThan(u8, a.name, b.name);
-                        }
-                    } else {
-                        result = std.mem.lessThan(u8, a.name, b.name);
-                    }
-                    return if (context.reverse_sort) !result else result;
-                }
-            }.lessThan);
+            sortEntries(entries.items, reverse, sort_by_time, sort_by_size);
         }
 
-        // Print total
+        // Print total (GNU reports 1 KiB blocks; st_blocks is in 512-byte units).
         writeStdout("total {d}\n", .{@divTrunc(total_blocks, 2)});
 
-        // Print entries
-        for (entries.items) |entry| {
-            printFileEntry(allocator, entry.full_path, entry.name, &entry.stat_buf, human_readable, numeric_ids);
-        }
+        printListing(allocator, entries.items, opts);
     }
 
     if (errors > 0) {
@@ -332,12 +323,58 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-fn printFileEntry(allocator: std.mem.Allocator, full_path: []const u8, name: []const u8, st: *const stat_t, human_readable: bool, numeric_ids: bool) void {
-    var buf: [8192]u8 = undefined;
-    var pos: usize = 0;
+fn sortEntries(items: []FileEntry, reverse: bool, by_time: bool, by_size: bool) void {
+    const SortContext = struct {
+        reverse_sort: bool,
+        by_time: bool,
+        by_size: bool,
+    };
+    const ctx = SortContext{ .reverse_sort = reverse, .by_time = by_time, .by_size = by_size };
+    std.mem.sort(FileEntry, items, ctx, struct {
+        fn lessThan(context: @TypeOf(ctx), a: FileEntry, b: FileEntry) bool {
+            var result: bool = undefined;
+            if (context.by_time) {
+                // GNU sorts by the full timespec (nanosecond precision), then
+                // by name for exact ties.
+                const am = a.stat_buf.mtime();
+                const bm = b.stat_buf.mtime();
+                if (am.sec != bm.sec) {
+                    result = am.sec > bm.sec;
+                } else if (am.nsec != bm.nsec) {
+                    result = am.nsec > bm.nsec;
+                } else {
+                    result = std.mem.lessThan(u8, a.name, b.name);
+                }
+            } else if (context.by_size) {
+                if (a.stat_buf.size != b.stat_buf.size) {
+                    result = a.stat_buf.size > b.stat_buf.size;
+                } else {
+                    result = std.mem.lessThan(u8, a.name, b.name);
+                }
+            } else {
+                result = std.mem.lessThan(u8, a.name, b.name);
+            }
+            return if (context.reverse_sort) !result else result;
+        }
+    }.lessThan);
+}
 
-    // File type character
-    const file_type: u8 = switch (st.st_mode & S_IFMT) {
+// A single rendered row: column strings plus raw name/link for escaping.
+const Row = struct {
+    mode: [10]u8,
+    nlink: []const u8,
+    owner: []const u8,
+    group: []const u8,
+    size: []const u8,
+    date: [12]u8,
+    name: []const u8,
+    link_target: ?[]const u8,
+};
+
+fn buildMode(st: *const Stat) [10]u8 {
+    var m: [10]u8 = undefined;
+    const mode = modeOf(st);
+    m[0] = switch (mode & S_IFMT) {
         S_IFDIR => 'd',
         S_IFLNK => 'l',
         S_IFCHR => 'c',
@@ -346,135 +383,171 @@ fn printFileEntry(allocator: std.mem.Allocator, full_path: []const u8, name: []c
         S_IFSOCK => 's',
         else => '-',
     };
-    buf[pos] = file_type;
-    pos += 1;
-
-    // Permissions
-    buf[pos] = if (st.st_mode & S_IRUSR != 0) 'r' else '-';
-    pos += 1;
-    buf[pos] = if (st.st_mode & S_IWUSR != 0) 'w' else '-';
-    pos += 1;
-    if (st.st_mode & S_ISUID != 0) {
-        buf[pos] = if (st.st_mode & S_IXUSR != 0) 's' else 'S';
-    } else {
-        buf[pos] = if (st.st_mode & S_IXUSR != 0) 'x' else '-';
-    }
-    pos += 1;
-
-    buf[pos] = if (st.st_mode & S_IRGRP != 0) 'r' else '-';
-    pos += 1;
-    buf[pos] = if (st.st_mode & S_IWGRP != 0) 'w' else '-';
-    pos += 1;
-    if (st.st_mode & S_ISGID != 0) {
-        buf[pos] = if (st.st_mode & S_IXGRP != 0) 's' else 'S';
-    } else {
-        buf[pos] = if (st.st_mode & S_IXGRP != 0) 'x' else '-';
-    }
-    pos += 1;
-
-    buf[pos] = if (st.st_mode & S_IROTH != 0) 'r' else '-';
-    pos += 1;
-    buf[pos] = if (st.st_mode & S_IWOTH != 0) 'w' else '-';
-    pos += 1;
-    if (st.st_mode & S_ISVTX != 0) {
-        buf[pos] = if (st.st_mode & S_IXOTH != 0) 't' else 'T';
-    } else {
-        buf[pos] = if (st.st_mode & S_IXOTH != 0) 'x' else '-';
-    }
-    pos += 1;
-
-    buf[pos] = ' ';
-    pos += 1;
-
-    // Link count
-    const nlink_str = std.fmt.bufPrint(buf[pos..], "{d:>3} ", .{st.st_nlink}) catch return;
-    pos += nlink_str.len;
-
-    // Owner
-    if (!numeric_ids) {
-        if (getpwuid(st.st_uid)) |pw| {
-            if (pw.pw_name) |pw_name| {
-                var name_len: usize = 0;
-                while (pw_name[name_len] != 0) : (name_len += 1) {}
-                const owner_str = std.fmt.bufPrint(buf[pos..], "{s:<8} ", .{pw_name[0..name_len]}) catch return;
-                pos += owner_str.len;
-            } else {
-                const owner_str = std.fmt.bufPrint(buf[pos..], "{d:<8} ", .{st.st_uid}) catch return;
-                pos += owner_str.len;
-            }
-        } else {
-            const owner_str = std.fmt.bufPrint(buf[pos..], "{d:<8} ", .{st.st_uid}) catch return;
-            pos += owner_str.len;
-        }
-    } else {
-        const owner_str = std.fmt.bufPrint(buf[pos..], "{d:<8} ", .{st.st_uid}) catch return;
-        pos += owner_str.len;
-    }
-
-    // Group
-    if (!numeric_ids) {
-        if (getgrgid(st.st_gid)) |gr| {
-            if (gr.gr_name) |gr_name| {
-                var name_len: usize = 0;
-                while (gr_name[name_len] != 0) : (name_len += 1) {}
-                const group_str = std.fmt.bufPrint(buf[pos..], "{s:<8} ", .{gr_name[0..name_len]}) catch return;
-                pos += group_str.len;
-            } else {
-                const group_str = std.fmt.bufPrint(buf[pos..], "{d:<8} ", .{st.st_gid}) catch return;
-                pos += group_str.len;
-            }
-        } else {
-            const group_str = std.fmt.bufPrint(buf[pos..], "{d:<8} ", .{st.st_gid}) catch return;
-            pos += group_str.len;
-        }
-    } else {
-        const group_str = std.fmt.bufPrint(buf[pos..], "{d:<8} ", .{st.st_gid}) catch return;
-        pos += group_str.len;
-    }
-
-    // Size
-    if (human_readable) {
-        const size_str = formatHumanSize(buf[pos..], st.st_size);
-        pos += size_str.len;
-    } else {
-        const size_str = std.fmt.bufPrint(buf[pos..], "{d:>8} ", .{st.st_size}) catch return;
-        pos += size_str.len;
-    }
-
-    // Date
-    const date_str = formatDate(buf[pos..], st.st_mtime);
-    pos += date_str.len;
-
-    buf[pos] = ' ';
-    pos += 1;
-
-    // Output what we have so far
-    writeStdoutRaw(buf[0..pos]);
-
-    // Name (with escaping for non-printable characters)
-    printEscaped(allocator, name);
-
-    // Symlink target
-    if ((st.st_mode & S_IFMT) == S_IFLNK) {
-        var path_z: [4097]u8 = undefined;
-        if (full_path.len < path_z.len) {
-            @memcpy(path_z[0..full_path.len], full_path);
-            path_z[full_path.len] = 0;
-
-            var link_target: [4096]u8 = undefined;
-            const link_len = readlink(@ptrCast(&path_z), &link_target, link_target.len);
-            if (link_len > 0) {
-                writeStdout(" -> ", .{});
-                printEscaped(allocator, link_target[0..@intCast(link_len)]);
-            }
-        }
-    }
-
-    writeStdout("\n", .{});
+    m[1] = if (mode & S_IRUSR != 0) 'r' else '-';
+    m[2] = if (mode & S_IWUSR != 0) 'w' else '-';
+    m[3] = if (mode & S_ISUID != 0)
+        (if (mode & S_IXUSR != 0) @as(u8, 's') else 'S')
+    else
+        (if (mode & S_IXUSR != 0) @as(u8, 'x') else '-');
+    m[4] = if (mode & S_IRGRP != 0) 'r' else '-';
+    m[5] = if (mode & S_IWGRP != 0) 'w' else '-';
+    m[6] = if (mode & S_ISGID != 0)
+        (if (mode & S_IXGRP != 0) @as(u8, 's') else 'S')
+    else
+        (if (mode & S_IXGRP != 0) @as(u8, 'x') else '-');
+    m[7] = if (mode & S_IROTH != 0) 'r' else '-';
+    m[8] = if (mode & S_IWOTH != 0) 'w' else '-';
+    m[9] = if (mode & S_ISVTX != 0)
+        (if (mode & S_IXOTH != 0) @as(u8, 't') else 'T')
+    else
+        (if (mode & S_IXOTH != 0) @as(u8, 'x') else '-');
+    return m;
 }
 
-fn printEscaped(allocator: std.mem.Allocator, name: []const u8) void {
-    _ = allocator;
+fn resolveOwner(arena: std.mem.Allocator, st: *const Stat, numeric: bool) []const u8 {
+    if (!numeric) {
+        if (getpwuid(st.uid)) |pw| {
+            if (pw.name) |nm| {
+                return arena.dupe(u8, std.mem.span(nm)) catch "?";
+            }
+        }
+    }
+    return std.fmt.allocPrint(arena, "{d}", .{st.uid}) catch "?";
+}
+
+fn resolveGroup(arena: std.mem.Allocator, st: *const Stat, numeric: bool) []const u8 {
+    if (!numeric) {
+        if (getgrgid(st.gid)) |gr| {
+            if (gr.name) |nm| {
+                return arena.dupe(u8, std.mem.span(nm)) catch "?";
+            }
+        }
+    }
+    return std.fmt.allocPrint(arena, "{d}", .{st.gid}) catch "?";
+}
+
+fn formatSize(arena: std.mem.Allocator, st: *const Stat, human_readable: bool) []const u8 {
+    if (human_readable) {
+        var buf: [32]u8 = undefined;
+        const s = formatHumanSize(&buf, st.size);
+        return arena.dupe(u8, s) catch "?";
+    }
+    return std.fmt.allocPrint(arena, "{d}", .{st.size}) catch "?";
+}
+
+// Render entries into aligned rows and print them.
+fn printListing(allocator: std.mem.Allocator, entries: []const FileEntry, opts: Options) void {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const rows = arena.alloc(Row, entries.len) catch return;
+    for (entries, 0..) |e, idx| {
+        rows[idx] = buildRow(arena, e, opts);
+    }
+
+    printRows(rows, opts);
+}
+
+fn buildRow(arena: std.mem.Allocator, e: FileEntry, opts: Options) Row {
+    return .{
+        .mode = buildMode(&e.stat_buf),
+        .nlink = std.fmt.allocPrint(arena, "{d}", .{e.stat_buf.nlink}) catch "?",
+        .owner = resolveOwner(arena, &e.stat_buf, opts.numeric_ids),
+        .group = resolveGroup(arena, &e.stat_buf, opts.numeric_ids),
+        .size = formatSize(arena, &e.stat_buf, opts.human_readable),
+        .date = formatDate(mtimeSec(&e.stat_buf)),
+        .name = e.name,
+        .link_target = e.link_target,
+    };
+}
+
+// Compute per-column widths (GNU aligns each column to the widest value in
+// the current listing), then emit each row.
+fn printRows(rows: []const Row, opts: Options) void {
+    _ = opts;
+    var w_nlink: usize = 0;
+    var w_owner: usize = 0;
+    var w_group: usize = 0;
+    var w_size: usize = 0;
+    for (rows) |r| {
+        w_nlink = @max(w_nlink, r.nlink.len);
+        w_owner = @max(w_owner, r.owner.len);
+        w_group = @max(w_group, r.group.len);
+        w_size = @max(w_size, r.size.len);
+    }
+
+    for (rows) |r| {
+        var buf: [512]u8 = undefined;
+        var pos: usize = 0;
+
+        // mode + space
+        @memcpy(buf[pos .. pos + 10], &r.mode);
+        pos += 10;
+        buf[pos] = ' ';
+        pos += 1;
+
+        // nlink right-justified
+        pos += padRight(buf[pos..], r.nlink, w_nlink);
+        buf[pos] = ' ';
+        pos += 1;
+
+        // owner left-justified
+        pos += padLeft(buf[pos..], r.owner, w_owner);
+        buf[pos] = ' ';
+        pos += 1;
+
+        // group left-justified
+        pos += padLeft(buf[pos..], r.group, w_group);
+        buf[pos] = ' ';
+        pos += 1;
+
+        // size right-justified
+        pos += padRight(buf[pos..], r.size, w_size);
+        buf[pos] = ' ';
+        pos += 1;
+
+        // date (fixed width) + space
+        @memcpy(buf[pos .. pos + r.date.len], &r.date);
+        pos += r.date.len;
+        buf[pos] = ' ';
+        pos += 1;
+
+        writeStdoutRaw(buf[0..pos]);
+
+        // name (escaped)
+        printEscaped(r.name);
+
+        if (r.link_target) |t| {
+            writeStdoutRaw(" -> ");
+            printEscaped(t);
+        }
+
+        writeStdoutRaw("\n");
+    }
+}
+
+// Right-justify `s` into `dst` padded to `width`; returns bytes written.
+fn padRight(dst: []u8, s: []const u8, width: usize) usize {
+    const pad = if (width > s.len) width - s.len else 0;
+    var n: usize = 0;
+    while (n < pad) : (n += 1) dst[n] = ' ';
+    @memcpy(dst[pad .. pad + s.len], s);
+    return pad + s.len;
+}
+
+// Left-justify `s` into `dst` padded to `width`; returns bytes written.
+fn padLeft(dst: []u8, s: []const u8, width: usize) usize {
+    @memcpy(dst[0..s.len], s);
+    const pad = if (width > s.len) width - s.len else 0;
+    var n: usize = 0;
+    while (n < pad) : (n += 1) dst[s.len + n] = ' ';
+    return s.len + pad;
+}
+
+// GNU `-b` (escape quoting style): backslash and space are escaped, common
+// control chars use C letter escapes, everything else non-printable is octal.
+fn printEscaped(name: []const u8) void {
     var buf: [4096]u8 = undefined;
     var pos: usize = 0;
 
@@ -484,12 +557,32 @@ fn printEscaped(allocator: std.mem.Allocator, name: []const u8) void {
             pos = 0;
         }
 
-        if (c >= 32 and c < 127) {
-            // Printable ASCII
+        const letter: ?u8 = switch (c) {
+            0x07 => 'a',
+            0x08 => 'b',
+            0x09 => 't',
+            0x0a => 'n',
+            0x0b => 'v',
+            0x0c => 'f',
+            0x0d => 'r',
+            '\\' => '\\',
+            else => null,
+        };
+
+        if (letter) |l| {
+            buf[pos] = '\\';
+            pos += 1;
+            buf[pos] = l;
+            pos += 1;
+        } else if (c == ' ') {
+            buf[pos] = '\\';
+            pos += 1;
+            buf[pos] = ' ';
+            pos += 1;
+        } else if (c > 32 and c < 127) {
             buf[pos] = c;
             pos += 1;
         } else {
-            // Escape non-printable
             buf[pos] = '\\';
             pos += 1;
             buf[pos] = '0' + ((c >> 6) & 0o7);
@@ -510,71 +603,52 @@ fn formatHumanSize(buf: []u8, size: i64) []const u8 {
     const abs_size: u64 = if (size < 0) 0 else @intCast(size);
 
     if (abs_size < 1024) {
-        return std.fmt.bufPrint(buf, "{d:>5}  ", .{abs_size}) catch "";
+        return std.fmt.bufPrint(buf, "{d}", .{abs_size}) catch "";
     } else if (abs_size < 1024 * 1024) {
         const kb = @as(f64, @floatFromInt(abs_size)) / 1024.0;
-        return std.fmt.bufPrint(buf, "{d:>5.1}K ", .{kb}) catch "";
+        return std.fmt.bufPrint(buf, "{d:.1}K", .{kb}) catch "";
     } else if (abs_size < 1024 * 1024 * 1024) {
         const mb = @as(f64, @floatFromInt(abs_size)) / (1024.0 * 1024.0);
-        return std.fmt.bufPrint(buf, "{d:>5.1}M ", .{mb}) catch "";
+        return std.fmt.bufPrint(buf, "{d:.1}M", .{mb}) catch "";
     } else {
         const gb = @as(f64, @floatFromInt(abs_size)) / (1024.0 * 1024.0 * 1024.0);
-        return std.fmt.bufPrint(buf, "{d:>5.1}G ", .{gb}) catch "";
+        return std.fmt.bufPrint(buf, "{d:.1}G", .{gb}) catch "";
     }
 }
 
-fn formatDate(buf: []u8, timestamp: i64) []const u8 {
-    // Convert Unix timestamp to date components
-    const SECS_PER_DAY = 86400;
-    const SECS_PER_HOUR = 3600;
-    const SECS_PER_MIN = 60;
-
-    var days = @divFloor(timestamp, SECS_PER_DAY);
-    var remaining = @mod(timestamp, SECS_PER_DAY);
-    if (remaining < 0) {
-        remaining += SECS_PER_DAY;
-        days -= 1;
-    }
-
-    const hour: u32 = @intCast(@divFloor(remaining, SECS_PER_HOUR));
-    remaining = @mod(remaining, SECS_PER_HOUR);
-    const min: u32 = @intCast(@divFloor(remaining, SECS_PER_MIN));
-
-    // Days since epoch (Jan 1, 1970)
-    var year: i32 = 1970;
-    while (true) {
-        const days_in_year: i64 = if (isLeapYear(year)) 366 else 365;
-        if (days < days_in_year) break;
-        days -= days_in_year;
-        year += 1;
-    }
-
-    const month_days = [_]u8{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
-    const month_days_leap = [_]u8{ 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
-    const mdays = if (isLeapYear(year)) &month_days_leap else &month_days;
-
-    var month: u32 = 0;
-    while (month < 12) {
-        if (days < mdays[month]) break;
-        days -= mdays[month];
-        month += 1;
-    }
-
-    const day: u32 = @intCast(days + 1);
-    month += 1;
+// GNU date rules: local time; recent files (within the past ~6 months, not in
+// the future) show "Mon DD HH:MM", others show "Mon DD  YYYY".
+fn formatDate(timestamp: i64) [12]u8 {
+    var out: [12]u8 = .{' '} ** 12;
 
     const month_names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
 
-    return std.fmt.bufPrint(buf, "{s} {d:>2} {d:0>2}:{d:0>2}", .{
-        month_names[month - 1],
-        day,
-        hour,
-        min,
-    }) catch "";
-}
+    var t: tm = undefined;
+    const ts = timestamp;
+    if (localtime_r(&ts, &t) == null) return out;
 
-fn isLeapYear(year: i32) bool {
-    return (@mod(year, 4) == 0 and @mod(year, 100) != 0) or @mod(year, 400) == 0;
+    const month_idx: usize = @intCast(@mod(t.tm_mon, 12));
+    const day: u32 = @intCast(t.tm_mday);
+    const year: u32 = @intCast(@as(i64, t.tm_year) + 1900);
+
+    // Recent window: 31556952/2 seconds (half a Gregorian year), per GNU ls.
+    const now = time(null);
+    const six_months: i64 = 31556952 / 2;
+    const recent = (timestamp > now - six_months) and (timestamp <= now);
+
+    var tail_buf: [8]u8 = undefined;
+    const tail = if (recent)
+        std.fmt.bufPrint(&tail_buf, "{d:0>2}:{d:0>2}", .{ @as(u32, @intCast(t.tm_hour)), @as(u32, @intCast(t.tm_min)) }) catch return out
+    else
+        std.fmt.bufPrint(&tail_buf, " {d:>4}", .{year}) catch return out;
+
+    // "Mon" + " " + day(space-padded width 2) + " " + tail(width 5) = 12 chars.
+    var b: [12]u8 = undefined;
+    const s = std.fmt.bufPrint(&b, "{s} {d:>2} {s}", .{ month_names[month_idx], day, tail }) catch return out;
+    // Left-align into the 12-byte field (already 12 wide in practice).
+    const n = @min(s.len, out.len);
+    @memcpy(out[0..n], s[0..n]);
+    return out;
 }
 
 fn printHelp() void {
@@ -595,7 +669,8 @@ fn printHelp() void {
         \\      --help            display this help
         \\      --version         display version
         \\
-        \\Non-printable characters are shown as octal escapes (e.g., \012 for newline).
+        \\Non-printable characters are shown as escapes (e.g., \n for newline,
+        \\\NNN octal for other bytes); space and backslash are escaped.
         \\
         \\Examples:
         \\  zvdir                 list current directory

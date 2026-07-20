@@ -33,7 +33,7 @@ const RESULTS_FILE = "tests/results.json";
 const GNU_BIN_DIRS = [_][]const u8{ "/usr/bin", "/bin", "/usr/local/bin" };
 
 // Test results cache (read from results.json)
-const TestResult = struct {
+pub const TestResult = struct {
     passed: u32 = 0,
     total: u32 = 0,
     status: enum { none, pass, warn, fail } = .none,
@@ -52,14 +52,14 @@ const Color = struct {
 };
 
 // List of all Zig coreutils with their GNU equivalents
-const UtilMapping = struct {
+pub const UtilMapping = struct {
     zig_name: []const u8,
     gnu_name: []const u8,
     category: []const u8,
     perf_ratio: ?f32, // Performance vs GNU (>1.0 = faster)
 };
 
-const UTILITIES = [_]UtilMapping{
+pub const UTILITIES = [_]UtilMapping{
     // File Operations
     .{ .zig_name = "zls", .gnu_name = "ls", .category = "file", .perf_ratio = 2.1 },
     .{ .zig_name = "zcat", .gnu_name = "cat", .category = "file", .perf_ratio = 1.8 },
@@ -108,9 +108,11 @@ const UTILITIES = [_]UtilMapping{
     .{ .zig_name = "zsha1sum", .gnu_name = "sha1sum", .category = "hash", .perf_ratio = 1.8 },
     .{ .zig_name = "zcksum", .gnu_name = "cksum", .category = "hash", .perf_ratio = 1.5 },
 
-    // Clipboard
-    .{ .zig_name = "zcopy", .gnu_name = "xclip", .category = "clipboard", .perf_ratio = 1.09 },
-    .{ .zig_name = "zpaste", .gnu_name = "xclip", .category = "clipboard", .perf_ratio = 1.09 },
+    // Clipboard (macOS pbcopy/pbpaste — distinct names so findUtilMapping does
+    // not collide with the text-processing zpaste, and --all no longer emits the
+    // same gnu target twice; audit: duplicate/colliding UTILITIES entries)
+    .{ .zig_name = "zpbcopy", .gnu_name = "pbcopy", .category = "clipboard", .perf_ratio = 1.09 },
+    .{ .zig_name = "zpbpaste", .gnu_name = "pbpaste", .category = "clipboard", .perf_ratio = 1.09 },
 
     // Misc
     .{ .zig_name = "zecho", .gnu_name = "echo", .category = "misc", .perf_ratio = 1.3 },
@@ -153,20 +155,38 @@ extern "c" fn access(path: [*:0]const u8, mode: c_int) c_int;
 extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
 extern "c" fn close(fd: c_int) c_int;
 extern "c" fn read(fd: c_int, buf: [*]u8, count: usize) isize;
+extern "c" fn readlink(path: [*:0]const u8, buf: [*]u8, bufsize: usize) isize;
 
 const F_OK: c_int = 0; // Test for existence
 const O_RDONLY: c_int = 0;
+const EINTR: c_int = 4; // POSIX EINTR — 4 on both Linux and macOS
 
 fn isTty() bool {
     return isatty(1) != 0;
 }
 
+// Loop until the whole buffer is written. A short write (slow/interrupted
+// pipe) must not silently drop the tail, and EINTR must be retried
+// (audit: write() return value ignored).
+fn writeAll(fd: std.c.fd_t, msg: []const u8) void {
+    var off: usize = 0;
+    while (off < msg.len) {
+        const n = libc.write(fd, msg.ptr + off, msg.len - off);
+        if (n < 0) {
+            if (std.c._errno().* == EINTR) continue;
+            return;
+        }
+        if (n == 0) return;
+        off += @intCast(n);
+    }
+}
+
 fn writeStdout(msg: []const u8) void {
-    _ = libc.write(libc.STDOUT_FILENO, msg.ptr, msg.len);
+    writeAll(libc.STDOUT_FILENO, msg);
 }
 
 fn writeStderr(msg: []const u8) void {
-    _ = libc.write(libc.STDERR_FILENO, msg.ptr, msg.len);
+    writeAll(libc.STDERR_FILENO, msg);
 }
 
 fn printColor(color: []const u8, msg: []const u8) void {
@@ -224,11 +244,15 @@ fn printUsage() void {
         \\  zbackup --dry-run install --all # Preview full installation
         \\
     ;
-    writeStderr(usage);
+    // GNU convention: explicitly-requested --help/help goes to stdout, exit 0,
+    // so it can be piped/captured. printUsage is only ever called for an
+    // explicit help request; the error path emits its own stderr hint.
+    writeStdout(usage);
 }
 
 fn printVersion() void {
-    writeStderr("zbackup " ++ VERSION ++ " - Zig Coreutils Backup and Swap Manager\n");
+    // GNU convention: explicitly-requested --version goes to stdout, exit 0.
+    writeStdout("zbackup " ++ VERSION ++ " - Zig Coreutils Backup and Swap Manager\n");
 }
 
 fn parseArgs(args: []const []const u8, allocator: std.mem.Allocator) !Config {
@@ -293,7 +317,7 @@ fn parseArgs(args: []const []const u8, allocator: std.mem.Allocator) !Config {
     return config;
 }
 
-fn findUtilMapping(name: []const u8) ?UtilMapping {
+pub fn findUtilMapping(name: []const u8) ?UtilMapping {
     for (UTILITIES) |util| {
         if (std.mem.eql(u8, util.gnu_name, name) or std.mem.eql(u8, util.zig_name, name)) {
             return util;
@@ -310,12 +334,11 @@ fn fileExists(path: []const u8) bool {
     return access(path_z.ptr, F_OK) == 0;
 }
 
-fn findGnuPath(gnu_name: []const u8) ?[]const u8 {
-    var path_buf: [4096]u8 = undefined;
+fn findGnuPath(gnu_name: []const u8, buf: []u8) ?[]const u8 {
     for (GNU_BIN_DIRS) |dir| {
-        const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir, gnu_name }) catch continue;
+        const full_path = std.fmt.bufPrint(buf, "{s}/{s}", .{ dir, gnu_name }) catch continue;
         if (fileExists(full_path)) {
-            // Return a static buffer - this is safe for our use case
+            // full_path aliases caller-owned `buf`, so it stays valid after return.
             return full_path;
         }
     }
@@ -338,62 +361,77 @@ const UtilStatus = struct {
     test_result: TestResult = .{},
 };
 
-// Simple JSON value extractor for test results
-fn extractTestResults(json: []const u8, zig_name: []const u8) TestResult {
+// True if a symlink target resolves into the Zig binary dir. Pure/testable.
+pub fn linkTargetIsZig(target: []const u8) bool {
+    return std.mem.indexOf(u8, target, ZBIN_DIR) != null;
+}
+
+// readlink() the given path and report whether it is a symlink pointing into
+// ZBIN_DIR — i.e. the swap really installed the Zig binary as what runs. A
+// non-symlink (real GNU binary) or a readlink error resolves to false. This
+// inspects the actual on-PATH target instead of the old
+// (zig_installed AND backup_exists) heuristic (audit finding).
+pub fn resolveActiveIsZig(path: []const u8) bool {
+    var path_buf: [4096]u8 = undefined;
+    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return false;
+    var link_buf: [4096]u8 = undefined;
+    const n = readlink(path_z.ptr, &link_buf, link_buf.len);
+    if (n <= 0) return false;
+    return linkTargetIsZig(link_buf[0..@intCast(n)]);
+}
+
+// Parse test results from results.json with std.json (the stdlib RFC 8259
+// reference parser). The previous hand-rolled scanner miscounted braces that
+// appear inside JSON string values and substring-matched the status keyword
+// across the whole object (audit finding); std.json handles string-internal
+// '{', '}', and the word "pass" correctly.
+pub fn extractResultFromValue(root: std.json.Value, zig_name: []const u8) TestResult {
     var result = TestResult{};
 
-    // Find utility section in JSON
-    // Look for "zig_name": { ... "tests_passed": N, "tests_total": M, "status": "X" }
-    var search_buf: [128]u8 = undefined;
-    const search_key = std.fmt.bufPrint(&search_buf, "\"{s}\":", .{zig_name}) catch return result;
+    const root_obj = switch (root) {
+        .object => |o| o,
+        else => return result,
+    };
+    const utils_val = root_obj.get("utilities") orelse return result;
+    const utils_obj = switch (utils_val) {
+        .object => |o| o,
+        else => return result,
+    };
+    const entry_val = utils_obj.get(zig_name) orelse return result;
+    const entry = switch (entry_val) {
+        .object => |o| o,
+        else => return result,
+    };
 
-    const util_start = std.mem.indexOf(u8, json, search_key) orelse return result;
-    const section = json[util_start..];
+    if (entry.get("tests_passed")) |v| switch (v) {
+        .integer => |n| result.passed = clampU32(n),
+        else => {},
+    };
+    if (entry.get("tests_total")) |v| switch (v) {
+        .integer => |n| result.total = clampU32(n),
+        else => {},
+    };
 
-    // Find tests_passed
-    if (std.mem.indexOf(u8, section, "\"tests_passed\":")) |idx| {
-        const num_start = idx + 15; // length of "tests_passed":
-        var num_end = num_start;
-        while (num_end < section.len and (section[num_end] == ' ' or (section[num_end] >= '0' and section[num_end] <= '9'))) {
-            num_end += 1;
-        }
-        // Skip leading spaces
-        var num_s = num_start;
-        while (num_s < num_end and section[num_s] == ' ') num_s += 1;
-        if (num_s < num_end) {
-            result.passed = std.fmt.parseInt(u32, section[num_s..num_end], 10) catch 0;
-        }
-    }
+    // Exact string match on the status field — NOT a substring scan of the
+    // object — so an unrelated field containing "pass" cannot masquerade as
+    // status (audit finding).
+    if (entry.get("status")) |v| switch (v) {
+        .string => |s| {
+            if (std.mem.eql(u8, s, "pass")) {
+                result.status = .pass;
+            } else if (std.mem.eql(u8, s, "warn")) {
+                result.status = .warn;
+            } else if (std.mem.eql(u8, s, "fail")) {
+                result.status = .fail;
+            }
+        },
+        else => {},
+    };
 
-    // Find tests_total
-    if (std.mem.indexOf(u8, section, "\"tests_total\":")) |idx| {
-        const num_start = idx + 14;
-        var num_end = num_start;
-        while (num_end < section.len and (section[num_end] == ' ' or (section[num_end] >= '0' and section[num_end] <= '9'))) {
-            num_end += 1;
-        }
-        var num_s = num_start;
-        while (num_s < num_end and section[num_s] == ' ') num_s += 1;
-        if (num_s < num_end) {
-            result.total = std.fmt.parseInt(u32, section[num_s..num_end], 10) catch 0;
-        }
-    }
-
-    // Find status
-    if (std.mem.indexOf(u8, section, "\"status\":")) |idx| {
-        const status_start = idx + 9;
-        if (std.mem.indexOf(u8, section[status_start..], "\"pass\"")) |_| {
-            result.status = .pass;
-        } else if (std.mem.indexOf(u8, section[status_start..], "\"warn\"")) |_| {
-            result.status = .warn;
-        } else if (std.mem.indexOf(u8, section[status_start..], "\"fail\"")) |_| {
-            result.status = .fail;
-        }
-    }
-
-    // Infer status from percentage if not set
+    // Infer status from percentage if not explicitly set.
     if (result.status == .none and result.total > 0) {
-        const pct = (result.passed * 100) / result.total;
+        const passed_clamped: u64 = @min(result.passed, result.total);
+        const pct = (passed_clamped * 100) / result.total;
         if (pct >= 90) {
             result.status = .pass;
         } else if (pct >= 50) {
@@ -406,11 +444,47 @@ fn extractTestResults(json: []const u8, zig_name: []const u8) TestResult {
     return result;
 }
 
-// Read test results from JSON file
-var g_test_results_cache: ?[]const u8 = null;
+fn clampU32(n: i64) u32 {
+    if (n <= 0) return 0;
+    return @intCast(@min(n, @as(i64, std.math.maxInt(u32))));
+}
+
+// Read an entire file via libc, looping until EOF so a partial read() cannot
+// truncate a large cache (audit: single read() truncation). Returns an owned
+// slice on success, null on any error.
+fn readFileAll(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {
+    var path_buf: [4096]u8 = undefined;
+    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return null;
+
+    const fd = open(path_z.ptr, O_RDONLY);
+    if (fd < 0) return null;
+    defer _ = close(fd);
+
+    var list: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer list.deinit(allocator);
+    var tmp: [65536]u8 = undefined;
+    while (true) {
+        const n = read(fd, &tmp, tmp.len);
+        if (n < 0) {
+            if (std.c._errno().* == EINTR) continue;
+            list.deinit(allocator);
+            return null;
+        }
+        if (n == 0) break;
+        list.appendSlice(allocator, tmp[0..@intCast(n)]) catch {
+            list.deinit(allocator);
+            return null;
+        };
+    }
+    return list.toOwnedSlice(allocator) catch null;
+}
+
+// Parsed results.json, kept alive for the process lifetime. The Parsed owns an
+// arena, so extractResultFromValue may reference its strings.
+var g_parsed: ?std.json.Parsed(std.json.Value) = null;
 
 fn loadTestResults(allocator: std.mem.Allocator) void {
-    if (g_test_results_cache != null) return;
+    if (g_parsed != null) return;
 
     // Try relative path first (from zig_core_utils dir)
     const paths = [_][]const u8{
@@ -419,57 +493,46 @@ fn loadTestResults(allocator: std.mem.Allocator) void {
     };
 
     for (paths) |path| {
-        var path_buf: [4096]u8 = undefined;
-        const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch continue;
-
-        const fd = open(path_z.ptr, O_RDONLY);
-        if (fd >= 0) {
-            defer _ = close(fd);
-
-            // Read file (max 64KB)
-            const buf = allocator.alloc(u8, 65536) catch continue;
-            const bytes_read = read(fd, buf.ptr, buf.len);
-            if (bytes_read > 0) {
-                g_test_results_cache = buf[0..@intCast(bytes_read)];
-                return;
-            }
-            allocator.free(buf);
-        }
+        const bytes = readFileAll(allocator, path) orelse continue;
+        defer allocator.free(bytes);
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{
+            .allocate = .alloc_always,
+        }) catch continue;
+        g_parsed = parsed;
+        return;
     }
 }
 
 fn getTestResult(zig_name: []const u8) TestResult {
-    if (g_test_results_cache) |json| {
-        return extractTestResults(json, zig_name);
-    }
-    return TestResult{};
+    const parsed = g_parsed orelse return TestResult{};
+    return extractResultFromValue(parsed.value, zig_name);
 }
 
-fn freeTestResults(allocator: std.mem.Allocator) void {
-    if (g_test_results_cache) |buf| {
-        // The cache is a slice into a larger allocation
-        const ptr: [*]u8 = @ptrCast(@constCast(buf.ptr));
-        const slice: []u8 = ptr[0..65536];
-        allocator.free(slice);
-        g_test_results_cache = null;
+fn freeTestResults() void {
+    if (g_parsed) |parsed| {
+        parsed.deinit();
+        g_parsed = null;
     }
 }
 
 fn getUtilStatus(util: UtilMapping) UtilStatus {
     var zig_path_buf: [4096]u8 = undefined;
     var backup_path_buf: [4096]u8 = undefined;
+    var gnu_path_buf: [4096]u8 = undefined;
 
     const zig_path = getZigPath(util.zig_name, &zig_path_buf);
     const backup_path = getBackupPath(util.gnu_name, &backup_path_buf);
-    const gnu_path = findGnuPath(util.gnu_name);
+    const gnu_path = findGnuPath(util.gnu_name, &gnu_path_buf);
 
     const zig_installed = if (zig_path) |p| fileExists(p) else false;
     const backup_exists = if (backup_path) |p| fileExists(p) else false;
     const gnu_exists = gnu_path != null;
 
-    // Check if currently active utility is the Zig version
-    // (This would require checking symlinks or running --version)
-    const active_is_zig = zig_installed and backup_exists;
+    // Check whether the utility that actually runs is the Zig version by
+    // reading the on-PATH binary's symlink target, rather than guessing from
+    // (zig_installed AND backup_exists) — which could report ACTIVE while GNU
+    // was still live (audit finding).
+    const active_is_zig = if (gnu_path) |gp| resolveActiveIsZig(gp) else false;
 
     // Get test results
     const test_result = getTestResult(util.zig_name);
@@ -772,13 +835,15 @@ fn cmdRestore(config: *const Config, allocator: std.mem.Allocator) void {
 }
 
 fn cmdTest(config: *const Config, allocator: std.mem.Allocator) void {
-    _ = allocator;
-
     if (!config.all and config.utilities.items.len == 0) {
         writeStderr("zbackup: test requires utility name(s) or --all\n");
         writeStderr("Try 'zbackup --help' for more information.\n");
         std.process.exit(1);
     }
+
+    // Load the recorded test outcomes so `test` reports real results instead
+    // of an unconditional PASS (audit: false-assurance).
+    loadTestResults(allocator);
 
     writeStdout("\n");
     printColor(Color.bold, "Testing Zig Coreutils\n");
@@ -817,13 +882,32 @@ fn cmdTest(config: *const Config, allocator: std.mem.Allocator) void {
             continue;
         }
 
-        // In a real implementation, we would run basic tests:
-        // 1. Check --help works
-        // 2. Run with typical inputs
-        // 3. Compare output with GNU version
-
-        printColor(Color.green, "PASS\n");
-        passed += 1;
+        // Report the recorded test outcome from results.json rather than an
+        // unconditional PASS (audit: false-assurance). A binary with no
+        // recorded results is NO DATA, never PASS.
+        const tr = status.test_result;
+        if (tr.total == 0) {
+            printColor(Color.dim, "NO DATA (run test suite first)\n");
+            skipped += 1;
+            continue;
+        }
+        var res_buf: [32]u8 = undefined;
+        const res = std.fmt.bufPrint(&res_buf, "{d}/{d}", .{ tr.passed, tr.total }) catch "?";
+        var out_buf: [64]u8 = undefined;
+        switch (tr.status) {
+            .pass => {
+                printColor(Color.green, std.fmt.bufPrint(&out_buf, "PASS ({s})\n", .{res}) catch "PASS\n");
+                passed += 1;
+            },
+            .warn => {
+                printColor(Color.yellow, std.fmt.bufPrint(&out_buf, "WARN ({s})\n", .{res}) catch "WARN\n");
+                failed += 1;
+            },
+            .fail, .none => {
+                printColor(Color.red, std.fmt.bufPrint(&out_buf, "FAIL ({s})\n", .{res}) catch "FAIL\n");
+                failed += 1;
+            },
+        }
     }
 
     writeStdout("\n");
@@ -867,5 +951,5 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // Cleanup
-    freeTestResults(allocator);
+    freeTestResults();
 }

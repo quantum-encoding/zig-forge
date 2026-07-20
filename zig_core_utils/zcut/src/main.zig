@@ -10,81 +10,7 @@ const std = @import("std");
 const VERSION = "1.0.0";
 const BUFFER_SIZE = 65536;
 
-// C functions
-extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
 extern "c" fn close(fd: c_int) c_int;
-extern "c" fn read(fd: c_int, buf: [*]u8, count: usize) isize;
-
-const O_RDONLY = 0;
-
-/// Parse escape sequences in a string, returning the processed result
-/// Supports: \n, \t, \r, \b, \f, \v, \\, \0, and octal \NNN
-fn parseEscapeSequences(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    var result: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer result.deinit(allocator);
-
-    var i: usize = 0;
-    while (i < input.len) {
-        if (input[i] == '\\' and i + 1 < input.len) {
-            const next = input[i + 1];
-            switch (next) {
-                'n' => {
-                    try result.append(allocator, '\n');
-                    i += 2;
-                },
-                't' => {
-                    try result.append(allocator, '\t');
-                    i += 2;
-                },
-                'r' => {
-                    try result.append(allocator, '\r');
-                    i += 2;
-                },
-                'b' => {
-                    try result.append(allocator, 0x08); // backspace
-                    i += 2;
-                },
-                'f' => {
-                    try result.append(allocator, 0x0C); // form feed
-                    i += 2;
-                },
-                'v' => {
-                    try result.append(allocator, 0x0B); // vertical tab
-                    i += 2;
-                },
-                '\\' => {
-                    try result.append(allocator, '\\');
-                    i += 2;
-                },
-                '0' => {
-                    // Octal escape \0, \0N, \0NN, \0NNN
-                    var val: u8 = 0;
-                    var j: usize = i + 1;
-                    var digits: usize = 0;
-                    while (j < input.len and digits < 4) : (j += 1) {
-                        const c = input[j];
-                        if (c >= '0' and c <= '7') {
-                            val = val * 8 + (c - '0');
-                            digits += 1;
-                        } else break;
-                    }
-                    try result.append(allocator, val);
-                    i = j;
-                },
-                else => {
-                    // Unknown escape, keep as-is
-                    try result.append(allocator, input[i]);
-                    i += 1;
-                },
-            }
-        } else {
-            try result.append(allocator, input[i]);
-            i += 1;
-        }
-    }
-
-    return result.toOwnedSlice(allocator);
-}
 
 const CutMode = enum {
     none,
@@ -157,8 +83,7 @@ pub fn main(init: std.process.Init) !void {
     var only_delimited = false;
     var complement = false;
     var output_delimiter: ?[]const u8 = null;
-    var output_delimiter_alloc: ?[]u8 = null; // Allocated version with escapes parsed
-    defer if (output_delimiter_alloc) |od| allocator.free(od);
+    var delimiter_given = false;
     var zero_terminated = false;
     var files: std.ArrayListUnmanaged([]const u8) = .empty;
     defer files.deinit(allocator);
@@ -257,28 +182,32 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--delimiter")) {
             if (i + 1 < args.len) {
                 i += 1;
-                if (args[i].len == 0) {
-                    err.print("zcut: delimiter must be a single character\n", .{});
+                if (args[i].len != 1) {
+                    err.print("zcut: the delimiter must be a single character\n", .{});
                     std.process.exit(1);
                 }
                 delimiter = args[i][0];
+                delimiter_given = true;
             } else {
                 err.print("zcut: option requires an argument -- 'd'\n", .{});
                 std.process.exit(1);
             }
         } else if (std.mem.startsWith(u8, arg, "-d")) {
-            if (arg.len < 3) {
-                err.print("zcut: delimiter must be a single character\n", .{});
-                std.process.exit(1);
-            }
-            delimiter = arg[2];
-        } else if (std.mem.startsWith(u8, arg, "--delimiter=")) {
-            const delim_str = arg["--delimiter=".len..];
-            if (delim_str.len == 0) {
-                err.print("zcut: delimiter must be a single character\n", .{});
+            const delim_str = arg[2..];
+            if (delim_str.len != 1) {
+                err.print("zcut: the delimiter must be a single character\n", .{});
                 std.process.exit(1);
             }
             delimiter = delim_str[0];
+            delimiter_given = true;
+        } else if (std.mem.startsWith(u8, arg, "--delimiter=")) {
+            const delim_str = arg["--delimiter=".len..];
+            if (delim_str.len != 1) {
+                err.print("zcut: the delimiter must be a single character\n", .{});
+                std.process.exit(1);
+            }
+            delimiter = delim_str[0];
+            delimiter_given = true;
         } else if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--only-delimited")) {
             only_delimited = true;
         } else if (std.mem.eql(u8, arg, "--complement")) {
@@ -288,16 +217,13 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "-n")) {
             // Ignored for compatibility
         } else if (std.mem.startsWith(u8, arg, "--output-delimiter=")) {
-            const raw = arg["--output-delimiter=".len..];
-            if (output_delimiter_alloc) |od| allocator.free(od);
-            output_delimiter_alloc = parseEscapeSequences(allocator, raw) catch null;
-            output_delimiter = output_delimiter_alloc;
+            // GNU cut uses the output delimiter string verbatim (no escape
+            // interpretation). Using it literally matches GNU byte-for-byte.
+            output_delimiter = arg["--output-delimiter=".len..];
         } else if (std.mem.eql(u8, arg, "--output-delimiter")) {
             if (i + 1 < args.len) {
                 i += 1;
-                if (output_delimiter_alloc) |od| allocator.free(od);
-                output_delimiter_alloc = parseEscapeSequences(allocator, args[i]) catch null;
-                output_delimiter = output_delimiter_alloc;
+                output_delimiter = args[i];
             } else {
                 err.print("zcut: option requires an argument -- 'output-delimiter'\n", .{});
                 std.process.exit(1);
@@ -324,6 +250,16 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     }
 
+    // -s and -d are only meaningful in field mode (GNU parity).
+    if (only_delimited and mode != .fields) {
+        err.print("zcut: suppressing non-delimited lines makes sense only when operating on fields\n", .{});
+        std.process.exit(1);
+    }
+    if (delimiter_given and mode != .fields) {
+        err.print("zcut: an input delimiter may be specified only when operating on fields\n", .{});
+        std.process.exit(1);
+    }
+
     if (list_str == null or list_str.?.len == 0) {
         err.print("zcut: missing list specification\n", .{});
         std.process.exit(1);
@@ -346,25 +282,29 @@ pub fn main(init: std.process.Init) !void {
 
     const line_delim: u8 = if (zero_terminated) 0 else '\n';
 
+    // Nonzero if any input could not be read (GNU cut exits 1 in that case).
+    var exit_code: u8 = 0;
+
     // Process files
     for (files.items) |path| {
-        var fd: c_int = 0; // stdin
+        var fd: std.posix.fd_t = std.posix.STDIN_FILENO;
         var close_fd = false;
 
         if (!std.mem.eql(u8, path, "-")) {
             var path_buf: [4096]u8 = undefined;
             if (path.len >= path_buf.len) {
                 err.print("zcut: {s}: File name too long\n", .{path});
+                exit_code = 1;
                 continue;
             }
             @memcpy(path_buf[0..path.len], path);
             path_buf[path.len] = 0;
 
-            fd = open(@ptrCast(&path_buf), O_RDONLY);
-            if (fd < 0) {
-                err.print("zcut: {s}: No such file or directory\n", .{path});
+            fd = std.posix.openatZ(std.posix.AT.FDCWD, @ptrCast(&path_buf), .{ .ACCMODE = .RDONLY }, 0) catch |e| {
+                err.print("zcut: {s}: {s}\n", .{ path, openErrorMessage(e) });
+                exit_code = 1;
                 continue;
-            }
+            };
             close_fd = true;
         }
         defer if (close_fd) {
@@ -378,6 +318,7 @@ pub fn main(init: std.process.Init) !void {
         var read_buf: [BUFFER_SIZE]u8 = undefined;
         var buf_pos: usize = 0;
         var buf_len: usize = 0;
+        var read_error = false;
 
         while (true) {
             line_buf.clearRetainingCapacity();
@@ -385,12 +326,20 @@ pub fn main(init: std.process.Init) !void {
             // Read until line delimiter
             while (true) {
                 if (buf_pos >= buf_len) {
-                    const bytes = read(fd, &read_buf, BUFFER_SIZE);
-                    if (bytes <= 0) {
+                    // std.posix.read retries on EINTR internally and returns a
+                    // typed error for real I/O failures (distinct from EOF==0).
+                    const bytes = std.posix.read(fd, &read_buf) catch |e| {
+                        err.print("zcut: {s}: {s}\n", .{ path, readErrorMessage(e) });
+                        exit_code = 1;
+                        read_error = true;
+                        buf_len = 0;
+                        break;
+                    };
+                    if (bytes == 0) {
                         buf_len = 0;
                         break;
                     }
-                    buf_len = @intCast(bytes);
+                    buf_len = bytes;
                     buf_pos = 0;
                 }
 
@@ -402,6 +351,9 @@ pub fn main(init: std.process.Init) !void {
                 }
             }
 
+            // On a read error, stop this file without emitting the partial line.
+            if (read_error) break;
+
             if (line_buf.items.len == 0 and buf_len == 0) {
                 break;
             }
@@ -409,6 +361,7 @@ pub fn main(init: std.process.Init) !void {
             const line = line_buf.items;
 
             // Process line based on mode
+            var suppressed = false;
             switch (mode) {
                 .bytes, .characters => {
                     cutBytesOrChars(&out, line, ranges.items, complement);
@@ -417,7 +370,11 @@ pub fn main(init: std.process.Init) !void {
                     const has_delim = std.mem.indexOf(u8, line, &[_]u8{delimiter}) != null;
 
                     if (!has_delim) {
-                        if (!only_delimited) {
+                        if (only_delimited) {
+                            // GNU cut with -s emits nothing at all for a
+                            // non-delimited line — not even the line delimiter.
+                            suppressed = true;
+                        } else {
                             out.print("{s}", .{line});
                         }
                     } else {
@@ -427,11 +384,36 @@ pub fn main(init: std.process.Init) !void {
                 .none => unreachable,
             }
 
-            out.print("{c}", .{line_delim});
+            if (!suppressed) out.print("{c}", .{line_delim});
 
             if (buf_len == 0) break;
         }
     }
+
+    if (exit_code != 0) std.process.exit(exit_code);
+}
+
+/// Map an open(2) failure to GNU cut's error wording.
+fn openErrorMessage(e: std.posix.OpenError) []const u8 {
+    return switch (e) {
+        error.FileNotFound => "No such file or directory",
+        error.AccessDenied => "Permission denied",
+        error.IsDir => "Is a directory",
+        error.SymLinkLoop => "Too many levels of symbolic links",
+        error.NameTooLong => "File name too long",
+        error.ProcessFdQuotaExceeded, error.SystemFdQuotaExceeded => "Too many open files",
+        else => "No such file or directory",
+    };
+}
+
+/// Map a read(2) failure to GNU cut's error wording.
+fn readErrorMessage(e: std.posix.ReadError) []const u8 {
+    return switch (e) {
+        error.IsDir => "Is a directory",
+        error.AccessDenied => "Permission denied",
+        error.InputOutput => "Input/output error",
+        else => "Input/output error",
+    };
 }
 
 fn parseRanges(
@@ -499,22 +481,12 @@ fn cutBytesOrChars(
     ranges: []const Range,
     complement: bool,
 ) void {
-    if (complement) {
-        for (line, 1..) |byte, pos| {
-            if (!isInRanges(pos, ranges, line.len)) {
-                writer.print("{c}", .{byte});
-            }
-        }
-    } else {
-        for (ranges) |range| {
-            const start = if (range.start == 0) 1 else range.start;
-            const end = if (range.end == 0) line.len else @min(range.end, line.len);
-
-            if (start > line.len) continue;
-
-            for (start..end + 1) |pos| {
-                writer.print("{c}", .{line[pos - 1]});
-            }
+    // GNU cut selects each position at most once, in ascending order,
+    // regardless of the order the ranges were given on the command line.
+    for (line, 1..) |byte, pos| {
+        const selected = isInRanges(pos, ranges, line.len);
+        if (selected != complement) {
+            writer.print("{c}", .{byte});
         }
     }
 }
@@ -538,32 +510,17 @@ fn cutFields(
 
     const out_delim = output_delimiter orelse &[_]u8{delimiter};
 
+    // GNU cut emits selected fields in ascending order, each at most once,
+    // joined by the output delimiter — independent of the given range order.
     var first = true;
-
-    if (complement) {
-        for (fields.items, 1..) |field, pos| {
-            if (!isInRanges(pos, ranges, fields.items.len)) {
-                if (!first) {
-                    writer.print("{s}", .{out_delim});
-                }
-                first = false;
-                writer.print("{s}", .{field});
+    for (fields.items, 1..) |field, pos| {
+        const selected = isInRanges(pos, ranges, fields.items.len);
+        if (selected != complement) {
+            if (!first) {
+                writer.print("{s}", .{out_delim});
             }
-        }
-    } else {
-        for (ranges) |range| {
-            const start = if (range.start == 0) 1 else range.start;
-            const end = if (range.end == 0) fields.items.len else @min(range.end, fields.items.len);
-
-            if (start > fields.items.len) continue;
-
-            for (start..end + 1) |pos| {
-                if (!first) {
-                    writer.print("{s}", .{out_delim});
-                }
-                first = false;
-                writer.print("{s}", .{fields.items[pos - 1]});
-            }
+            first = false;
+            writer.print("{s}", .{field});
         }
     }
 }

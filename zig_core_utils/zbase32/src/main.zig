@@ -1,12 +1,21 @@
 //! zbase32 - Base32 encode/decode
 //!
 //! High-performance base32 encoding/decoding in Zig.
+//!
+//! Streaming-correct: encode buffers the <=4 leftover bytes between read()
+//! chunks and only emits '=' padding at true EOF; decode carries its 8-char
+//! group / pad-count state across chunks. This matters because read() is not
+//! guaranteed to fill the buffer (pipes, terminals, FIFOs) and GNU base32
+//! emits 76-column wrapped output by default, so decoding real base32 of any
+//! size crosses read() boundaries mid-group.
 
 const std = @import("std");
 const posix = std.posix;
 const libc = std.c;
 
 const VERSION = "1.0.0";
+
+extern "c" fn strerror(errnum: c_int) [*:0]const u8;
 
 const b32_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
@@ -15,10 +24,9 @@ const b32_decode_table = blk: {
     for (&table) |*v| v.* = 0xFF;
     for (b32_chars, 0..) |c, i| {
         table[c] = @intCast(i);
-        // Also handle lowercase
-        if (c >= 'A' and c <= 'Z') {
-            table[c + 32] = @intCast(i);
-        }
+        // GNU base32 is case-sensitive: lowercase is NOT alphabet. Without
+        // -i it is "invalid input" (exit 1); with -i it is ignored as
+        // garbage. Do NOT populate lowercase entries.
     }
     table['='] = 0;
     break :blk table;
@@ -31,228 +39,331 @@ const Config = struct {
     file: ?[]const u8 = null,
 };
 
+fn errnoMsg() []const u8 {
+    return std.mem.span(strerror(libc._errno().*));
+}
+
+/// write() all of `data`, retrying on EINTR and advancing past short writes.
+/// A real write error is fatal (matches GNU, which aborts the transfer).
+fn writeAll(fd: c_int, data: []const u8) void {
+    var off: usize = 0;
+    while (off < data.len) {
+        const n = libc.write(fd, data.ptr + off, data.len - off);
+        if (n < 0) {
+            const e = libc._errno().*;
+            if (e == @intFromEnum(std.c.E.INTR)) continue;
+            const msg = errnoMsg();
+            writeRaw(libc.STDERR_FILENO, "zbase32: write error: ");
+            writeRaw(libc.STDERR_FILENO, msg);
+            writeRaw(libc.STDERR_FILENO, "\n");
+            std.process.exit(1);
+        }
+        if (n == 0) break;
+        off += @intCast(n);
+    }
+}
+
+/// Best-effort raw write for diagnostics (no recursion into error handling).
+fn writeRaw(fd: c_int, data: []const u8) void {
+    var off: usize = 0;
+    while (off < data.len) {
+        const n = libc.write(fd, data.ptr + off, data.len - off);
+        if (n <= 0) {
+            const e = libc._errno().*;
+            if (n < 0 and e == @intFromEnum(std.c.E.INTR)) continue;
+            break;
+        }
+        off += @intCast(n);
+    }
+}
+
 fn writeStdout(data: []const u8) void {
-    _ = libc.write(libc.STDOUT_FILENO, data.ptr, data.len);
+    writeAll(libc.STDOUT_FILENO, data);
 }
 
 fn writeStderr(data: []const u8) void {
-    _ = libc.write(libc.STDERR_FILENO, data.ptr, data.len);
+    writeRaw(libc.STDERR_FILENO, data);
 }
 
+const usage_text =
+    \\Usage: zbase32 [OPTION]... [FILE]
+    \\Base32 encode or decode FILE, or standard input, to standard output.
+    \\
+    \\Options:
+    \\  -d, --decode          Decode data
+    \\  -i, --ignore-garbage  When decoding, ignore non-alphabet characters
+    \\  -w, --wrap=COLS       Wrap encoded lines after COLS chars (default 76, 0 to disable)
+    \\      --help            Display this help and exit
+    \\      --version         Output version information and exit
+    \\
+    \\With no FILE, or when FILE is -, read standard input.
+    \\
+;
+
 fn printUsage() void {
-    const usage =
-        \\Usage: zbase32 [OPTION]... [FILE]
-        \\Base32 encode or decode FILE, or standard input, to standard output.
-        \\
-        \\Options:
-        \\  -d, --decode          Decode data
-        \\  -i, --ignore-garbage  When decoding, ignore non-alphabet characters
-        \\  -w, --wrap=COLS       Wrap encoded lines after COLS chars (default 76, 0 to disable)
-        \\      --help            Display this help and exit
-        \\      --version         Output version information and exit
-        \\
-        \\With no FILE, or when FILE is -, read standard input.
-        \\
-    ;
-    writeStderr(usage);
+    // GNU writes --help to STDOUT.
+    writeStdout(usage_text);
 }
 
 fn printVersion() void {
-    writeStderr("zbase32 " ++ VERSION ++ "\n");
+    // GNU writes --version to STDOUT.
+    writeStdout("zbase32 " ++ VERSION ++ "\n");
 }
 
-fn encode(input: []const u8, output: []u8) usize {
-    var out_idx: usize = 0;
-    var i: usize = 0;
-
-    // Process 5 bytes at a time -> 8 base32 chars
-    while (i + 4 < input.len) {
-        const b0 = input[i];
-        const b1 = input[i + 1];
-        const b2 = input[i + 2];
-        const b3 = input[i + 3];
-        const b4 = input[i + 4];
-
-        output[out_idx] = b32_chars[b0 >> 3];
-        output[out_idx + 1] = b32_chars[((b0 & 0x07) << 2) | (b1 >> 6)];
-        output[out_idx + 2] = b32_chars[(b1 >> 1) & 0x1F];
-        output[out_idx + 3] = b32_chars[((b1 & 0x01) << 4) | (b2 >> 4)];
-        output[out_idx + 4] = b32_chars[((b2 & 0x0F) << 1) | (b3 >> 7)];
-        output[out_idx + 5] = b32_chars[(b3 >> 2) & 0x1F];
-        output[out_idx + 6] = b32_chars[((b3 & 0x03) << 3) | (b4 >> 5)];
-        output[out_idx + 7] = b32_chars[b4 & 0x1F];
-
-        i += 5;
-        out_idx += 8;
-    }
-
-    // Handle remaining bytes
-    const remaining = input.len - i;
-    if (remaining > 0) {
-        const b0 = input[i];
-        output[out_idx] = b32_chars[b0 >> 3];
-
-        if (remaining == 1) {
-            output[out_idx + 1] = b32_chars[(b0 & 0x07) << 2];
-            output[out_idx + 2] = '=';
-            output[out_idx + 3] = '=';
-            output[out_idx + 4] = '=';
-            output[out_idx + 5] = '=';
-            output[out_idx + 6] = '=';
-            output[out_idx + 7] = '=';
-            out_idx += 8;
-        } else if (remaining == 2) {
-            const b1 = input[i + 1];
-            output[out_idx + 1] = b32_chars[((b0 & 0x07) << 2) | (b1 >> 6)];
-            output[out_idx + 2] = b32_chars[(b1 >> 1) & 0x1F];
-            output[out_idx + 3] = b32_chars[(b1 & 0x01) << 4];
-            output[out_idx + 4] = '=';
-            output[out_idx + 5] = '=';
-            output[out_idx + 6] = '=';
-            output[out_idx + 7] = '=';
-            out_idx += 8;
-        } else if (remaining == 3) {
-            const b1 = input[i + 1];
-            const b2 = input[i + 2];
-            output[out_idx + 1] = b32_chars[((b0 & 0x07) << 2) | (b1 >> 6)];
-            output[out_idx + 2] = b32_chars[(b1 >> 1) & 0x1F];
-            output[out_idx + 3] = b32_chars[((b1 & 0x01) << 4) | (b2 >> 4)];
-            output[out_idx + 4] = b32_chars[(b2 & 0x0F) << 1];
-            output[out_idx + 5] = '=';
-            output[out_idx + 6] = '=';
-            output[out_idx + 7] = '=';
-            out_idx += 8;
-        } else if (remaining == 4) {
-            const b1 = input[i + 1];
-            const b2 = input[i + 2];
-            const b3 = input[i + 3];
-            output[out_idx + 1] = b32_chars[((b0 & 0x07) << 2) | (b1 >> 6)];
-            output[out_idx + 2] = b32_chars[(b1 >> 1) & 0x1F];
-            output[out_idx + 3] = b32_chars[((b1 & 0x01) << 4) | (b2 >> 4)];
-            output[out_idx + 4] = b32_chars[((b2 & 0x0F) << 1) | (b3 >> 7)];
-            output[out_idx + 5] = b32_chars[(b3 >> 2) & 0x1F];
-            output[out_idx + 6] = b32_chars[(b3 & 0x03) << 3];
-            output[out_idx + 7] = '=';
-            out_idx += 8;
-        }
-    }
-
-    return out_idx;
+fn tryHelp() void {
+    writeStderr("Try 'zbase32 --help' for more information.\n");
 }
 
-fn decode(input: []const u8, output: []u8, ignore_garbage: bool) ?usize {
-    var out_idx: usize = 0;
-    var buf: [8]u8 = undefined;
-    var buf_idx: usize = 0;
-    var pad_count: usize = 0;
+/// Encode exactly 5 input bytes into 8 base32 chars (no padding).
+inline fn encodeGroup5(in: [5]u8, out: *[8]u8) void {
+    out[0] = b32_chars[in[0] >> 3];
+    out[1] = b32_chars[((in[0] & 0x07) << 2) | (in[1] >> 6)];
+    out[2] = b32_chars[(in[1] >> 1) & 0x1F];
+    out[3] = b32_chars[((in[1] & 0x01) << 4) | (in[2] >> 4)];
+    out[4] = b32_chars[((in[2] & 0x0F) << 1) | (in[3] >> 7)];
+    out[5] = b32_chars[(in[3] >> 2) & 0x1F];
+    out[6] = b32_chars[((in[3] & 0x03) << 3) | (in[4] >> 5)];
+    out[7] = b32_chars[in[4] & 0x1F];
+}
 
-    for (input) |c| {
-        if (c == '\n' or c == '\r' or c == ' ' or c == '\t') continue;
-        if (c == '=') {
-            pad_count += 1;
-            buf[buf_idx] = 0;
-            buf_idx += 1;
-        } else {
-            const val = b32_decode_table[c];
-            if (val == 0xFF) {
-                if (ignore_garbage) continue;
-                return null;
-            }
-            buf[buf_idx] = val;
-            buf_idx += 1;
+/// Encode a final partial group of 1..4 bytes into 8 chars WITH '=' padding.
+fn encodeFinal(in: []const u8, out: *[8]u8) void {
+    const b0 = in[0];
+    out[0] = b32_chars[b0 >> 3];
+    switch (in.len) {
+        1 => {
+            out[1] = b32_chars[(b0 & 0x07) << 2];
+            @memset(out[2..8], '=');
+        },
+        2 => {
+            const b1 = in[1];
+            out[1] = b32_chars[((b0 & 0x07) << 2) | (b1 >> 6)];
+            out[2] = b32_chars[(b1 >> 1) & 0x1F];
+            out[3] = b32_chars[(b1 & 0x01) << 4];
+            @memset(out[4..8], '=');
+        },
+        3 => {
+            const b1 = in[1];
+            const b2 = in[2];
+            out[1] = b32_chars[((b0 & 0x07) << 2) | (b1 >> 6)];
+            out[2] = b32_chars[(b1 >> 1) & 0x1F];
+            out[3] = b32_chars[((b1 & 0x01) << 4) | (b2 >> 4)];
+            out[4] = b32_chars[(b2 & 0x0F) << 1];
+            @memset(out[5..8], '=');
+        },
+        4 => {
+            const b1 = in[1];
+            const b2 = in[2];
+            const b3 = in[3];
+            out[1] = b32_chars[((b0 & 0x07) << 2) | (b1 >> 6)];
+            out[2] = b32_chars[(b1 >> 1) & 0x1F];
+            out[3] = b32_chars[((b1 & 0x01) << 4) | (b2 >> 4)];
+            out[4] = b32_chars[((b2 & 0x0F) << 1) | (b3 >> 7)];
+            out[5] = b32_chars[(b3 >> 2) & 0x1F];
+            out[6] = b32_chars[(b3 & 0x03) << 3];
+            out[7] = '=';
+        },
+        else => unreachable,
+    }
+}
+
+const Encoder = struct {
+    wrap: usize,
+    col: usize = 0,
+    pending: [4]u8 = undefined,
+    pending_len: usize = 0,
+
+    /// Emit encoded chars honoring the wrap column, carrying `col` across calls.
+    fn emit(self: *Encoder, bytes: []const u8) void {
+        if (self.wrap == 0) {
+            writeStdout(bytes);
+            return;
         }
-
-        if (buf_idx == 8) {
-            output[out_idx] = (buf[0] << 3) | (buf[1] >> 2);
-            out_idx += 1;
-            if (pad_count < 6) {
-                output[out_idx] = (buf[1] << 6) | (buf[2] << 1) | (buf[3] >> 4);
-                out_idx += 1;
+        var i: usize = 0;
+        while (i < bytes.len) {
+            const room = self.wrap - self.col;
+            const chunk = @min(room, bytes.len - i);
+            writeStdout(bytes[i .. i + chunk]);
+            i += chunk;
+            self.col += chunk;
+            if (self.col >= self.wrap) {
+                writeStdout("\n");
+                self.col = 0;
             }
-            if (pad_count < 4) {
-                output[out_idx] = (buf[3] << 4) | (buf[4] >> 1);
-                out_idx += 1;
-            }
-            if (pad_count < 3) {
-                output[out_idx] = (buf[4] << 7) | (buf[5] << 2) | (buf[6] >> 3);
-                out_idx += 1;
-            }
-            if (pad_count < 1) {
-                output[out_idx] = (buf[6] << 5) | buf[7];
-                out_idx += 1;
-            }
-            buf_idx = 0;
-            pad_count = 0;
         }
     }
 
-    return out_idx;
+    fn update(self: *Encoder, data_in: []const u8) void {
+        var data = data_in;
+        // read_buf is 40000 bytes -> at most 8000 groups -> 64000 chars,
+        // plus one pending-completion group (8) -> 64008. 65536 is ample.
+        var enc: [65536]u8 = undefined;
+        var out_idx: usize = 0;
+
+        // Complete a carried-over partial group first.
+        if (self.pending_len > 0) {
+            const need = 5 - self.pending_len;
+            if (data.len < need) {
+                @memcpy(self.pending[self.pending_len .. self.pending_len + data.len], data);
+                self.pending_len += data.len;
+                return;
+            }
+            var grp: [5]u8 = undefined;
+            @memcpy(grp[0..self.pending_len], self.pending[0..self.pending_len]);
+            @memcpy(grp[self.pending_len..5], data[0..need]);
+            encodeGroup5(grp, enc[out_idx..][0..8]);
+            out_idx += 8;
+            data = data[need..];
+            self.pending_len = 0;
+        }
+
+        // Process full 5-byte groups directly.
+        var i: usize = 0;
+        while (i + 5 <= data.len) : (i += 5) {
+            encodeGroup5(data[i..][0..5].*, enc[out_idx..][0..8]);
+            out_idx += 8;
+        }
+
+        // Stash the <=4 leftover bytes for the next chunk / finish().
+        const rem = data.len - i;
+        @memcpy(self.pending[0..rem], data[i..]);
+        self.pending_len = rem;
+
+        if (out_idx > 0) self.emit(enc[0..out_idx]);
+    }
+
+    fn finish(self: *Encoder) void {
+        if (self.pending_len > 0) {
+            var out: [8]u8 = undefined;
+            encodeFinal(self.pending[0..self.pending_len], &out);
+            self.emit(&out);
+            self.pending_len = 0;
+        }
+        if (self.wrap > 0 and self.col > 0) {
+            writeStdout("\n");
+            self.col = 0;
+        }
+    }
+};
+
+const Decoder = struct {
+    ignore_garbage: bool,
+    buf: [8]u8 = undefined,
+    buf_idx: usize = 0,
+    pad_count: usize = 0,
+
+    /// Decode a chunk; returns false on invalid input (no -i). State (buf /
+    /// buf_idx / pad_count) persists across chunks so a group split at a read
+    /// boundary is not silently dropped.
+    fn update(self: *Decoder, input: []const u8) bool {
+        var dec: [65536]u8 = undefined;
+        var out_idx: usize = 0;
+
+        for (input) |c| {
+            if (c == '\n' or c == '\r' or c == ' ' or c == '\t') continue;
+            if (c == '=') {
+                self.pad_count += 1;
+                self.buf[self.buf_idx] = 0;
+                self.buf_idx += 1;
+            } else {
+                const val = b32_decode_table[c];
+                if (val == 0xFF) {
+                    if (self.ignore_garbage) continue;
+                    if (out_idx > 0) writeStdout(dec[0..out_idx]);
+                    return false;
+                }
+                self.buf[self.buf_idx] = val;
+                self.buf_idx += 1;
+            }
+
+            if (self.buf_idx == 8) {
+                const b = &self.buf;
+                dec[out_idx] = (b[0] << 3) | (b[1] >> 2);
+                out_idx += 1;
+                if (self.pad_count < 6) {
+                    dec[out_idx] = (b[1] << 6) | (b[2] << 1) | (b[3] >> 4);
+                    out_idx += 1;
+                }
+                if (self.pad_count < 4) {
+                    dec[out_idx] = (b[3] << 4) | (b[4] >> 1);
+                    out_idx += 1;
+                }
+                if (self.pad_count < 3) {
+                    dec[out_idx] = (b[4] << 7) | (b[5] << 2) | (b[6] >> 3);
+                    out_idx += 1;
+                }
+                if (self.pad_count < 1) {
+                    dec[out_idx] = (b[6] << 5) | b[7];
+                    out_idx += 1;
+                }
+                self.buf_idx = 0;
+                self.pad_count = 0;
+            }
+        }
+
+        if (out_idx > 0) writeStdout(dec[0..out_idx]);
+        return true;
+    }
+};
+
+/// Read a chunk; returns bytes read, 0 at EOF. On a read error prints a GNU-
+/// style "read error: <strerror>" diagnostic and exits 1 (never confused with
+/// EOF).
+fn readChunk(fd: c_int, buf: []u8) usize {
+    while (true) {
+        const n = libc.read(fd, buf.ptr, buf.len);
+        if (n < 0) {
+            const e = libc._errno().*;
+            if (e == @intFromEnum(std.c.E.INTR)) continue;
+            const msg = errnoMsg();
+            writeStderr("zbase32: read error: ");
+            writeStderr(msg);
+            writeStderr("\n");
+            std.process.exit(1);
+        }
+        return @intCast(n);
+    }
 }
 
 fn processEncode(fd: c_int, wrap: usize) void {
-    var read_buf: [40000]u8 = undefined; // Multiple of 5 for clean encoding
-    var enc_buf: [65536]u8 = undefined;
-    var col: usize = 0;
+    var read_buf: [40000]u8 = undefined; // multiple of 5
+    var enc = Encoder{ .wrap = wrap };
 
     while (true) {
-        const n_ret = libc.read(fd, &read_buf, read_buf.len);
-        if (n_ret <= 0) break;
-        const n: usize = @intCast(n_ret);
-
-        const enc_len = encode(read_buf[0..n], &enc_buf);
-
-        if (wrap == 0) {
-            writeStdout(enc_buf[0..enc_len]);
-        } else {
-            var i: usize = 0;
-            while (i < enc_len) {
-                const remaining_in_line = wrap - col;
-                const chunk = @min(remaining_in_line, enc_len - i);
-                writeStdout(enc_buf[i .. i + chunk]);
-                i += chunk;
-                col += chunk;
-
-                if (col >= wrap) {
-                    writeStdout("\n");
-                    col = 0;
-                }
-            }
-        }
+        const n = readChunk(fd, &read_buf);
+        if (n == 0) break;
+        enc.update(read_buf[0..n]);
     }
-
-    if (wrap > 0 and col > 0) {
-        writeStdout("\n");
-    }
+    enc.finish();
 }
 
 fn processDecode(fd: c_int, ignore_garbage: bool) bool {
     var read_buf: [65536]u8 = undefined;
-    var dec_buf: [40960]u8 = undefined;
+    var dec = Decoder{ .ignore_garbage = ignore_garbage };
 
     while (true) {
-        const n_ret = libc.read(fd, &read_buf, read_buf.len);
-        if (n_ret <= 0) break;
-        const n: usize = @intCast(n_ret);
-
-        if (decode(read_buf[0..n], &dec_buf, ignore_garbage)) |dec_len| {
-            writeStdout(dec_buf[0..dec_len]);
-        } else {
+        const n = readChunk(fd, &read_buf);
+        if (n == 0) break;
+        if (!dec.update(read_buf[0..n])) {
             writeStderr("zbase32: invalid input\n");
             return false;
         }
     }
-
     return true;
 }
 
-fn parseNumber(s: []const u8) ?usize {
-    var result: usize = 0;
-    for (s) |c| {
-        if (c >= '0' and c <= '9') {
-            result = result * 10 + (c - '0');
-        } else return null;
-    }
-    return result;
+/// Parse a wrap-size argument. Returns null on non-numeric / overflow, which
+/// the caller turns into GNU's "invalid wrap size" diagnostic (exit 1).
+fn parseWrap(s: []const u8) ?usize {
+    if (s.len == 0) return null;
+    return std.fmt.parseInt(usize, s, 10) catch null;
+}
+
+fn invalidWrap(val: []const u8) noreturn {
+    writeStderr("zbase32: invalid wrap size: '");
+    writeStderr(val);
+    writeStderr("'\n");
+    std.process.exit(1);
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -261,32 +372,79 @@ pub fn main(init: std.process.Init) !void {
     var args_iter = std.process.Args.Iterator.init(init.minimal.args);
     _ = args_iter.next(); // skip program name
 
-    var next_is_wrap = false;
+    var no_more_opts = false;
+
     while (args_iter.next()) |arg| {
-        if (next_is_wrap) {
-            cfg.wrap = parseNumber(arg) orelse 76;
-            next_is_wrap = false;
+        if (no_more_opts or arg.len == 0 or arg[0] != '-' or std.mem.eql(u8, arg, "-")) {
+            // Operand (file). "-" means stdin.
+            if (std.mem.eql(u8, arg, "-")) {
+                cfg.file = null;
+            } else {
+                cfg.file = arg;
+            }
             continue;
         }
 
-        if (std.mem.eql(u8, arg, "--help")) {
-            printUsage();
-            return;
-        } else if (std.mem.eql(u8, arg, "--version")) {
-            printVersion();
-            return;
-        } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--decode")) {
-            cfg.decode = true;
-        } else if (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--ignore-garbage")) {
-            cfg.ignore_garbage = true;
-        } else if (std.mem.eql(u8, arg, "-w")) {
-            next_is_wrap = true;
-        } else if (std.mem.startsWith(u8, arg, "--wrap=")) {
-            cfg.wrap = parseNumber(arg[7..]) orelse 76;
-        } else if (arg.len > 0 and arg[0] != '-') {
-            cfg.file = arg;
-        } else if (std.mem.eql(u8, arg, "-")) {
-            cfg.file = null;
+        // "--" ends option processing.
+        if (std.mem.eql(u8, arg, "--")) {
+            no_more_opts = true;
+            continue;
+        }
+
+        // Long options.
+        if (std.mem.startsWith(u8, arg, "--")) {
+            if (std.mem.eql(u8, arg, "--help")) {
+                printUsage();
+                return;
+            } else if (std.mem.eql(u8, arg, "--version")) {
+                printVersion();
+                return;
+            } else if (std.mem.eql(u8, arg, "--decode")) {
+                cfg.decode = true;
+            } else if (std.mem.eql(u8, arg, "--ignore-garbage")) {
+                cfg.ignore_garbage = true;
+            } else if (std.mem.eql(u8, arg, "--wrap")) {
+                const val = args_iter.next() orelse invalidWrap("");
+                cfg.wrap = parseWrap(val) orelse invalidWrap(val);
+            } else if (std.mem.startsWith(u8, arg, "--wrap=")) {
+                const val = arg[7..];
+                cfg.wrap = parseWrap(val) orelse invalidWrap(val);
+            } else {
+                writeStderr("zbase32: unrecognized option '");
+                writeStderr(arg);
+                writeStderr("'\n");
+                tryHelp();
+                std.process.exit(1);
+            }
+            continue;
+        }
+
+        // Short-option cluster: -d, -i, -w, and combinations like -di, -w4.
+        var j: usize = 1;
+        while (j < arg.len) : (j += 1) {
+            switch (arg[j]) {
+                'd' => cfg.decode = true,
+                'i' => cfg.ignore_garbage = true,
+                'w' => {
+                    // Attached value (-w4) or the next argument (-w 4).
+                    if (j + 1 < arg.len) {
+                        const val = arg[j + 1 ..];
+                        cfg.wrap = parseWrap(val) orelse invalidWrap(val);
+                    } else {
+                        const val = args_iter.next() orelse invalidWrap("");
+                        cfg.wrap = parseWrap(val) orelse invalidWrap(val);
+                    }
+                    break; // rest of cluster consumed as the value
+                },
+                else => {
+                    const ch = [_]u8{arg[j]};
+                    writeStderr("zbase32: invalid option -- '");
+                    writeStderr(&ch);
+                    writeStderr("'\n");
+                    tryHelp();
+                    std.process.exit(1);
+                },
+            }
         }
     }
 
@@ -299,9 +457,13 @@ pub fn main(init: std.process.Init) !void {
         };
         const fd_ret = libc.open(path_z.ptr, .{ .ACCMODE = .RDONLY }, @as(libc.mode_t, 0));
         if (fd_ret < 0) {
+            // Report the real errno (ENOENT / EACCES / EISDIR / ELOOP / ...).
+            const msg = errnoMsg();
             writeStderr("zbase32: ");
             writeStderr(path);
-            writeStderr(": No such file or directory\n");
+            writeStderr(": ");
+            writeStderr(msg);
+            writeStderr("\n");
             std.process.exit(1);
         }
         break :blk fd_ret;

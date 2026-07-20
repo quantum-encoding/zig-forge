@@ -7,24 +7,24 @@ const main = @import("main.zig");
 const Options = main.Options;
 const DirStat = main.DirStat;
 
-/// Print a single entry
-pub fn printEntry(entry: DirStat, options: Options) void {
+/// Print a single entry to the caller-owned writer.
+///
+/// The writer is created ONCE by the caller and reused for the whole run. A
+/// previous version created a fresh `File.stdout()` writer per call; because a
+/// File.Writer tracks a logical position that starts at 0, each positional
+/// write landed at offset 0 and overwrote the output when stdout was a regular
+/// file (redirection), leaving only a corrupt fragment of the last line. Using
+/// one streaming writer keeps every line and preserves order.
+pub fn printEntry(w: *Io.Writer, entry: DirStat, options: Options) void {
     const size = calculateDisplaySize(entry, options);
     const size_str = formatSize(size, options);
 
     const terminator: u8 = if (options.null_terminator) 0 else '\n';
-
-    // Use Zig 0.16 I/O API
-    const io = Io.Threaded.global_single_threaded.io();
-    var buf: [4096]u8 = undefined;
-    const stdout_file = Io.File.stdout();
-    var writer = stdout_file.writer(io, &buf);
-    writer.interface.print("{s}\t{s}{c}", .{ size_str, entry.path, terminator }) catch {};
-    writer.interface.flush() catch {};
+    w.print("{s}\t{s}{c}", .{ size_str, entry.path, terminator }) catch {};
 }
 
-/// Print grand total
-pub fn printTotal(total_size: u64, total_blocks: u64, options: Options) void {
+/// Print grand total to the caller-owned writer.
+pub fn printTotal(w: *Io.Writer, total_size: u64, total_blocks: u64, options: Options) void {
     // Use apparent size if -b/--apparent-size, otherwise use blocks
     const raw_size = if (options.apparent_size)
         total_size
@@ -35,14 +35,7 @@ pub fn printTotal(total_size: u64, total_blocks: u64, options: Options) void {
     const size_str = formatSize(display_size, options);
 
     const terminator: u8 = if (options.null_terminator) 0 else '\n';
-
-    // Use Zig 0.16 I/O API
-    const io = Io.Threaded.global_single_threaded.io();
-    var buf: [4096]u8 = undefined;
-    const stdout_file = Io.File.stdout();
-    var writer = stdout_file.writer(io, &buf);
-    writer.interface.print("{s}\ttotal{c}", .{ size_str, terminator }) catch {};
-    writer.interface.flush() catch {};
+    w.print("{s}\ttotal{c}", .{ size_str, terminator }) catch {};
 }
 
 fn calculateDisplaySize(entry: DirStat, options: Options) u64 {
@@ -83,40 +76,43 @@ fn formatNumeric(size: u64, buf: []u8) []const u8 {
 }
 
 fn formatHumanBinary(bytes: u64, buf: []u8) []const u8 {
-    const units = [_][]const u8{ "", "K", "M", "G", "T", "P", "E" };
-    var size: f64 = @floatFromInt(bytes);
-    var unit_idx: usize = 0;
-
-    while (size >= 1024 and unit_idx < units.len - 1) {
-        size /= 1024;
-        unit_idx += 1;
-    }
-
-    if (unit_idx == 0) {
-        return std.fmt.bufPrint(buf, "{d}", .{bytes}) catch "???";
-    } else if (size < 10) {
-        return std.fmt.bufPrint(buf, "{d:.1}{s}", .{ size, units[unit_idx] }) catch "???";
-    } else {
-        return std.fmt.bufPrint(buf, "{d:.0}{s}", .{ size, units[unit_idx] }) catch "???";
-    }
+    return formatHuman(bytes, buf, 1024, &.{ "", "K", "M", "G", "T", "P", "E" });
 }
 
 fn formatHumanSI(bytes: u64, buf: []u8) []const u8 {
-    const units = [_][]const u8{ "", "k", "M", "G", "T", "P", "E" };
+    return formatHuman(bytes, buf, 1000, &.{ "", "k", "M", "G", "T", "P", "E" });
+}
+
+/// Human-readable size formatting matching GNU du.
+///
+/// GNU rounds sizes UP (ceiling) to the precision shown -- 12.3k is displayed
+/// as "13k", not "12k" (coreutils human.c uses human_ceiling). Rounding to
+/// nearest, as the previous implementation did, produced off-by-one sizes vs
+/// `du -h` / `du --si`. Values below the divisor are printed as exact byte
+/// counts; single-digit scaled values keep one decimal (ceil to 0.1), larger
+/// values are whole numbers (ceil to 1).
+fn formatHuman(bytes: u64, buf: []u8, comptime divisor: f64, units: []const []const u8) []const u8 {
     var size: f64 = @floatFromInt(bytes);
     var unit_idx: usize = 0;
 
-    while (size >= 1000 and unit_idx < units.len - 1) {
-        size /= 1000;
+    while (size >= divisor and unit_idx < units.len - 1) {
+        size /= divisor;
         unit_idx += 1;
     }
 
     if (unit_idx == 0) {
         return std.fmt.bufPrint(buf, "{d}", .{bytes}) catch "???";
     } else if (size < 10) {
-        return std.fmt.bufPrint(buf, "{d:.1}{s}", .{ size, units[unit_idx] }) catch "???";
+        // Ceil to one decimal place.
+        const v = std.math.ceil(size * 10.0) / 10.0;
+        // A ceil that lands on 10.0 promotes to the next display rule.
+        if (v >= 10.0) {
+            return std.fmt.bufPrint(buf, "{d:.0}{s}", .{ v, units[unit_idx] }) catch "???";
+        }
+        return std.fmt.bufPrint(buf, "{d:.1}{s}", .{ v, units[unit_idx] }) catch "???";
     } else {
-        return std.fmt.bufPrint(buf, "{d:.0}{s}", .{ size, units[unit_idx] }) catch "???";
+        const v = std.math.ceil(size);
+        return std.fmt.bufPrint(buf, "{d:.0}{s}", .{ v, units[unit_idx] }) catch "???";
     }
 }
 

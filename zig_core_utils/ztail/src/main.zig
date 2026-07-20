@@ -36,6 +36,25 @@ extern "c" fn fstat(fd: c_int, buf: *Stat) c_int;
 extern "c" fn pread(fd: c_int, buf: [*]u8, count: usize, offset: i64) isize;
 extern "c" fn kill(pid: c_int, sig: c_int) c_int;
 extern "c" fn nanosleep(req: *const libc.timespec, rem: ?*libc.timespec) c_int;
+extern "c" fn strerror(errnum: c_int) [*:0]const u8;
+
+/// Current thread's errno value (set by the most recent failed libc call).
+fn currentErrno() c_int {
+    return std.c._errno().*;
+}
+
+/// A NUL-terminated strerror string for the current errno.
+fn errnoString() []const u8 {
+    return std.mem.span(strerror(currentErrno()));
+}
+
+// File-type bits (portable subset of <sys/stat.h>).
+const S_IFMT: u32 = 0o170000;
+const S_IFDIR: u32 = 0o040000;
+
+fn isDirMode(mode: anytype) bool {
+    return (@as(u32, mode) & S_IFMT) == S_IFDIR;
+}
 
 const O_FLAGS = libc.O{ .ACCMODE = .RDONLY, .CLOEXEC = true };
 
@@ -86,12 +105,22 @@ fn printErrFmt(comptime fmt: []const u8, args: anytype) void {
     writeStderr(msg);
 }
 
-fn tailFile(allocator: std.mem.Allocator, path: []const u8, config: *const Config, print_header: bool) !void {
-    if (print_header) {
+/// Emit a `==> FILE <==` header. GNU prints a blank line before every header
+/// except the first one actually written, and labels stdin "standard input".
+fn emitHeader(path: []const u8, header_printed: *bool) void {
+    if (header_printed.*) writeStdout("\n");
+    if (std.mem.eql(u8, path, "-")) {
+        printFmt("==> standard input <==\n", .{});
+    } else {
         printFmt("==> {s} <==\n", .{path});
     }
+    header_printed.* = true;
+}
 
+fn tailFile(allocator: std.mem.Allocator, path: []const u8, config: *const Config, print_header: bool, header_printed: *bool) !void {
     if (std.mem.eql(u8, path, "-")) {
+        // stdin always "opens" successfully, so its header is emitted up front.
+        if (print_header) emitHeader(path, header_printed);
         try tailStdin(allocator, config);
         return;
     }
@@ -103,18 +132,31 @@ fn tailFile(allocator: std.mem.Allocator, path: []const u8, config: *const Confi
     var stat_buf: Stat = undefined;
     const stat_result = stat(path_z.ptr, &stat_buf);
     if (stat_result != 0) {
-        printErrFmt("ztail: cannot open '{s}' for reading: No such file\n", .{path});
+        // GNU prints no header for a file it cannot open, and reports the real
+        // errno string ("No such file or directory", "Permission denied", ...).
+        printErrFmt("ztail: cannot open '{s}' for reading: {s}\n", .{ path, errnoString() });
         return error.FileNotFound;
+    }
+
+    // A directory stats fine but cannot be tailed. GNU still prints the header
+    // (the file "opened"), then an "Is a directory" error, and exits 1.
+    if (isDirMode(stat_buf.mode)) {
+        if (print_header) emitHeader(path, header_printed);
+        printErrFmt("ztail: error reading '{s}': Is a directory\n", .{path});
+        return error.IsDir;
     }
 
     const file_size: u64 = @intCast(stat_buf.size);
 
     const fd = libc.open(path_z.ptr, O_FLAGS, @as(libc.mode_t, 0));
     if (fd < 0) {
-        printErrFmt("ztail: cannot open '{s}' for reading\n", .{path});
+        printErrFmt("ztail: cannot open '{s}' for reading: {s}\n", .{ path, errnoString() });
         return error.OpenError;
     }
     defer _ = libc.close(fd);
+
+    // Header is emitted only after a successful open of a regular file.
+    if (print_header) emitHeader(path, header_printed);
 
     if (config.bytes) |num_bytes| {
         var start_pos: u64 = undefined;
@@ -364,11 +406,15 @@ fn followFiles(allocator: std.mem.Allocator, config: *const Config, file_states:
                         state.fd = fd;
                         state.pos = 0;
 
-                        // Get new inode
+                        // Get new inode. Only trust the buffer if stat
+                        // succeeded — if the file was unlinked between open()
+                        // and here (log rotation race), stat_buf2 is undefined
+                        // and reading it would corrupt inode-change detection.
                         var stat_buf2: Stat = undefined;
-                        _ = stat(path_z.ptr, &stat_buf2);
-                        state.inode = stat_buf2.ino;
-                        state.dev = @intCast(stat_buf2.dev);
+                        if (stat(path_z.ptr, &stat_buf2) == 0) {
+                            state.inode = stat_buf2.ino;
+                            state.dev = @intCast(stat_buf2.dev);
+                        }
 
                         // Print header if multiple files
                         if (file_states.len > 1 and !config.quiet) {
@@ -398,6 +444,7 @@ fn followFiles(allocator: std.mem.Allocator, config: *const Config, file_states:
                             state.fd = fd;
                             state.pos = 0;
                             state.inode = stat_buf.ino;
+                            state.dev = @intCast(stat_buf.dev);
 
                             if (file_states.len > 1 and !config.quiet) {
                                 printFmt("\n==> {s} <==\n", .{state.path});
@@ -476,15 +523,40 @@ fn parseNumber(s: []const u8) ?ParsedNumber {
         }
     }
 
+    // A bare suffix ("k", "+M", ...) with no digits is not a valid number.
+    if (num_str.len == 0) return null;
+
+    // Accumulate with overflow detection. GNU tail clamps an out-of-range
+    // -n/-c count to the maximum (printing the whole file) rather than
+    // erroring, so we saturate to maxInt(u64) instead of returning null.
+    // Every character is still validated as a digit so trailing garbage
+    // ("999...9x") is correctly rejected.
+    var overflow = false;
     for (num_str) |ch| {
         if (ch < '0' or ch > '9') return null;
-        val = val * 10 + (ch - '0');
+        if (!overflow) {
+            const mul = @mulWithOverflow(val, 10);
+            const add = @addWithOverflow(mul[0], @as(u64, ch - '0'));
+            if (mul[1] != 0 or add[1] != 0) {
+                overflow = true;
+            } else {
+                val = add[0];
+            }
+        }
     }
 
-    return .{ .value = val * multiplier, .from_start = from_start };
+    if (overflow) return .{ .value = std.math.maxInt(u64), .from_start = from_start };
+    const scaled = @mulWithOverflow(val, multiplier);
+    const final_val = if (scaled[1] != 0) std.math.maxInt(u64) else scaled[0];
+    return .{ .value = final_val, .from_start = from_start };
 }
 
 fn parseFloat(s: []const u8) ?f64 {
+    // GNU rejects an empty sleep interval and negative intervals; a leading
+    // '-' is caught below (it is neither a digit nor '.'). An empty string
+    // must not silently become 0.0 (which would busy-spin doSleep(0)).
+    if (s.len == 0) return null;
+
     var result: f64 = 0;
     var decimal_place: f64 = 0;
     var seen_dot = false;
@@ -508,22 +580,79 @@ fn parseFloat(s: []const u8) ?f64 {
     return result;
 }
 
-fn parseInt(s: []const u8) ?i32 {
-    var val: i32 = 0;
-    var negative = false;
+const PidResult = union(enum) {
+    ok: i32,
+    invalid, // non-numeric / negative / empty
+    overflow, // exceeds pid_t (i32) range
+};
+
+/// Parse a --pid value the way GNU tail does: reject non-numeric and negative
+/// values ("invalid PID: 'X'") and report out-of-range values distinctly
+/// ("... : Value too large to be stored in data type"). GNU stores the PID in
+/// a pid_t (i32 here), so anything above maxInt(i32) overflows.
+fn parsePid(s: []const u8) PidResult {
+    if (s.len == 0) return .invalid;
+
     var start: usize = 0;
+    if (s[0] == '+') start = 1;
+    if (start >= s.len) return .invalid;
 
-    if (s.len > 0 and s[0] == '-') {
-        negative = true;
-        start = 1;
-    }
-
+    var val: i64 = 0;
     for (s[start..]) |ch| {
-        if (ch < '0' or ch > '9') return null;
-        val = val * 10 + @as(i32, @intCast(ch - '0'));
+        if (ch < '0' or ch > '9') return .invalid;
+        val = val * 10 + @as(i64, ch - '0');
+        if (val > std.math.maxInt(i32)) return .overflow;
     }
+    return .{ .ok = @intCast(val) };
+}
 
-    return if (negative) -val else val;
+/// Apply a --lines / -n value, matching GNU's error + exit(1) on garbage.
+fn applyLines(config: *Config, s: []const u8) void {
+    if (parseNumber(s)) |parsed| {
+        config.lines = parsed.value;
+        config.from_start_lines = parsed.from_start;
+        config.bytes = null;
+    } else {
+        printErrFmt("ztail: invalid number of lines: '{s}'\n", .{s});
+        std.process.exit(1);
+    }
+}
+
+/// Apply a --bytes / -c value, matching GNU's error + exit(1) on garbage.
+fn applyBytes(config: *Config, s: []const u8) void {
+    if (parseNumber(s)) |parsed| {
+        config.bytes = parsed.value;
+        config.from_start_bytes = parsed.from_start;
+        config.lines = null;
+    } else {
+        printErrFmt("ztail: invalid number of bytes: '{s}'\n", .{s});
+        std.process.exit(1);
+    }
+}
+
+/// Apply a --sleep-interval / -s value, matching GNU's error + exit(1).
+fn applySleep(config: *Config, s: []const u8) void {
+    if (parseFloat(s)) |val| {
+        config.sleep_interval = val;
+    } else {
+        printErrFmt("ztail: invalid number of seconds: '{s}'\n", .{s});
+        std.process.exit(1);
+    }
+}
+
+/// Apply a --pid value, matching GNU's two distinct error forms + exit(1).
+fn applyPid(config: *Config, s: []const u8) void {
+    switch (parsePid(s)) {
+        .ok => |v| config.pid = v,
+        .invalid => {
+            printErrFmt("ztail: invalid PID: '{s}'\n", .{s});
+            std.process.exit(1);
+        },
+        .overflow => {
+            printErrFmt("ztail: invalid PID: '{s}': Value too large to be stored in data type\n", .{s});
+            std.process.exit(1);
+        },
+    }
 }
 
 fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
@@ -551,39 +680,23 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                     printVersion();
                     std.process.exit(0);
                 } else if (std.mem.startsWith(u8, arg, "--lines=")) {
-                    if (parseNumber(arg[8..])) |parsed| {
-                        config.lines = parsed.value;
-                        config.from_start_lines = parsed.from_start;
-                    }
-                    config.bytes = null;
+                    applyLines(&config, arg[8..]);
                 } else if (std.mem.eql(u8, arg, "--lines")) {
                     i += 1;
                     if (i >= args.len) {
                         printErrFmt("ztail: option '--lines' requires an argument\n", .{});
                         std.process.exit(1);
                     }
-                    if (parseNumber(args[i])) |parsed| {
-                        config.lines = parsed.value;
-                        config.from_start_lines = parsed.from_start;
-                    }
-                    config.bytes = null;
+                    applyLines(&config, args[i]);
                 } else if (std.mem.startsWith(u8, arg, "--bytes=")) {
-                    if (parseNumber(arg[8..])) |parsed| {
-                        config.bytes = parsed.value;
-                        config.from_start_bytes = parsed.from_start;
-                    }
-                    config.lines = null;
+                    applyBytes(&config, arg[8..]);
                 } else if (std.mem.eql(u8, arg, "--bytes")) {
                     i += 1;
                     if (i >= args.len) {
                         printErrFmt("ztail: option '--bytes' requires an argument\n", .{});
                         std.process.exit(1);
                     }
-                    if (parseNumber(args[i])) |parsed| {
-                        config.bytes = parsed.value;
-                        config.from_start_bytes = parsed.from_start;
-                    }
-                    config.lines = null;
+                    applyBytes(&config, args[i]);
                 } else if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "--silent")) {
                     config.quiet = true;
                 } else if (std.mem.eql(u8, arg, "--verbose")) {
@@ -603,43 +716,23 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                 } else if (std.mem.eql(u8, arg, "--retry")) {
                     config.retry = true;
                 } else if (std.mem.startsWith(u8, arg, "--sleep-interval=")) {
-                    if (parseFloat(arg[17..])) |val| {
-                        config.sleep_interval = val;
-                    } else {
-                        printErrFmt("ztail: invalid number '{s}'\n", .{arg[17..]});
-                        std.process.exit(1);
-                    }
+                    applySleep(&config, arg[17..]);
                 } else if (std.mem.eql(u8, arg, "--sleep-interval")) {
                     i += 1;
                     if (i >= args.len) {
                         printErrFmt("ztail: option '--sleep-interval' requires an argument\n", .{});
                         std.process.exit(1);
                     }
-                    if (parseFloat(args[i])) |val| {
-                        config.sleep_interval = val;
-                    } else {
-                        printErrFmt("ztail: invalid number '{s}'\n", .{args[i]});
-                        std.process.exit(1);
-                    }
+                    applySleep(&config, args[i]);
                 } else if (std.mem.startsWith(u8, arg, "--pid=")) {
-                    if (parseInt(arg[6..])) |val| {
-                        config.pid = val;
-                    } else {
-                        printErrFmt("ztail: invalid PID '{s}'\n", .{arg[6..]});
-                        std.process.exit(1);
-                    }
+                    applyPid(&config, arg[6..]);
                 } else if (std.mem.eql(u8, arg, "--pid")) {
                     i += 1;
                     if (i >= args.len) {
                         printErrFmt("ztail: option '--pid' requires an argument\n", .{});
                         std.process.exit(1);
                     }
-                    if (parseInt(args[i])) |val| {
-                        config.pid = val;
-                    } else {
-                        printErrFmt("ztail: invalid PID '{s}'\n", .{args[i]});
-                        std.process.exit(1);
-                    }
+                    applyPid(&config, args[i]);
                 } else {
                     printErrFmt("ztail: unrecognized option '{s}'\n", .{arg});
                     std.process.exit(1);
@@ -650,11 +743,7 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                     switch (arg[j]) {
                         'n' => {
                             if (j + 1 < arg.len) {
-                                if (parseNumber(arg[j + 1 ..])) |parsed| {
-                                    config.lines = parsed.value;
-                                    config.from_start_lines = parsed.from_start;
-                                }
-                                config.bytes = null;
+                                applyLines(&config, arg[j + 1 ..]);
                                 break;
                             } else {
                                 i += 1;
@@ -662,20 +751,12 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                                     printErrFmt("ztail: option requires an argument -- 'n'\n", .{});
                                     std.process.exit(1);
                                 }
-                                if (parseNumber(args[i])) |parsed| {
-                                    config.lines = parsed.value;
-                                    config.from_start_lines = parsed.from_start;
-                                }
-                                config.bytes = null;
+                                applyLines(&config, args[i]);
                             }
                         },
                         'c' => {
                             if (j + 1 < arg.len) {
-                                if (parseNumber(arg[j + 1 ..])) |parsed| {
-                                    config.bytes = parsed.value;
-                                    config.from_start_bytes = parsed.from_start;
-                                }
-                                config.lines = null;
+                                applyBytes(&config, arg[j + 1 ..]);
                                 break;
                             } else {
                                 i += 1;
@@ -683,11 +764,7 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                                     printErrFmt("ztail: option requires an argument -- 'c'\n", .{});
                                     std.process.exit(1);
                                 }
-                                if (parseNumber(args[i])) |parsed| {
-                                    config.bytes = parsed.value;
-                                    config.from_start_bytes = parsed.from_start;
-                                }
-                                config.lines = null;
+                                applyBytes(&config, args[i]);
                             }
                         },
                         'f' => config.follow = .descriptor,
@@ -697,9 +774,7 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                         },
                         's' => {
                             if (j + 1 < arg.len) {
-                                if (parseFloat(arg[j + 1 ..])) |val| {
-                                    config.sleep_interval = val;
-                                }
+                                applySleep(&config, arg[j + 1 ..]);
                                 break;
                             } else {
                                 i += 1;
@@ -707,19 +782,13 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                                     printErrFmt("ztail: option requires an argument -- 's'\n", .{});
                                     std.process.exit(1);
                                 }
-                                if (parseFloat(args[i])) |val| {
-                                    config.sleep_interval = val;
-                                }
+                                applySleep(&config, args[i]);
                             }
                         },
                         'q' => config.quiet = true,
                         'v' => config.verbose = true,
                         '0'...'9' => {
-                            if (parseNumber(arg[j..])) |parsed| {
-                                config.lines = parsed.value;
-                                config.from_start_lines = parsed.from_start;
-                            }
-                            config.bytes = null;
+                            applyLines(&config, arg[j..]);
                             break;
                         },
                         else => {
@@ -785,7 +854,9 @@ pub fn main(init: std.process.Init) void {
 
     const multiple_files = config.files.items.len > 1;
     var error_occurred = false;
-    var first = true;
+    // Tracks whether any `==> FILE <==` header has been emitted yet, so the
+    // blank-line separator is printed before every header except the first.
+    var header_printed = false;
 
     // Create file states for follow mode
     var file_states: []FileState = &.{};
@@ -809,10 +880,6 @@ pub fn main(init: std.process.Init) void {
     // Print initial content
     for (config.files.items, 0..) |file, idx| {
         const print_header = (config.verbose or (multiple_files and !config.quiet));
-
-        if (!first and print_header) {
-            writeStdout("\n");
-        }
 
         // For follow mode, track file position after initial read
         if (config.follow != .none and !std.mem.eql(u8, file, "-")) {
@@ -841,7 +908,7 @@ pub fn main(init: std.process.Init) void {
             }
         }
 
-        tailFile(allocator, file, &config, print_header) catch {
+        tailFile(allocator, file, &config, print_header, &header_printed) catch {
             error_occurred = true;
             if (config.follow != .none and idx < file_states.len) {
                 if (!config.retry) {
@@ -849,7 +916,6 @@ pub fn main(init: std.process.Init) void {
                 }
             }
         };
-        first = false;
     }
 
     // Enter follow mode if requested

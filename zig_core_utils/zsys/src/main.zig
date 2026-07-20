@@ -103,7 +103,12 @@ fn readProcFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
 fn parseMemoryInfo(allocator: std.mem.Allocator) !MemoryInfo {
     const contents = try readProcFile(allocator, "/proc/meminfo");
     defer allocator.free(contents);
+    return parseMemoryInfoFromContents(contents);
+}
 
+// Pure parser split out from the /proc file read so it can be tested against
+// fixed fixture strings (decoupled from the live filesystem).
+pub fn parseMemoryInfoFromContents(contents: []const u8) MemoryInfo {
     var info = MemoryInfo{
         .total = 0,
         .free = 0,
@@ -155,11 +160,22 @@ fn parseMemoryInfo(allocator: std.mem.Allocator) !MemoryInfo {
     return info;
 }
 
+// Compute "used" memory the way `free` does (total minus free/buffers/cached),
+// clamped to avoid u64 underflow when the summands transiently exceed total
+// (e.g. /proc/meminfo skew, or a missing MemTotal leaving total == 0).
+pub fn computeUsedMemory(mem: MemoryInfo) u64 {
+    const reclaimable = mem.free +| mem.buffers +| mem.cached;
+    return if (reclaimable >= mem.total) 0 else mem.total - reclaimable;
+}
+
 // Parse /proc/cpuinfo
 fn parseCpuInfo(allocator: std.mem.Allocator) !CpuInfo {
     const contents = try readProcFile(allocator, "/proc/cpuinfo");
     defer allocator.free(contents);
+    return parseCpuInfoFromContents(allocator, contents);
+}
 
+pub fn parseCpuInfoFromContents(allocator: std.mem.Allocator, contents: []const u8) !CpuInfo {
     var info: CpuInfo = undefined;
     @memset(&info.model_name, 0);
     @memset(&info.vendor_id, 0);
@@ -238,7 +254,10 @@ fn parseCpuInfo(allocator: std.mem.Allocator) !CpuInfo {
 fn parseLoadAvg(allocator: std.mem.Allocator) !LoadAvg {
     const contents = try readProcFile(allocator, "/proc/loadavg");
     defer allocator.free(contents);
+    return parseLoadAvgFromContents(contents);
+}
 
+pub fn parseLoadAvgFromContents(contents: []const u8) LoadAvg {
     var info = LoadAvg{
         .one_min = 0,
         .five_min = 0,
@@ -277,7 +296,10 @@ fn parseLoadAvg(allocator: std.mem.Allocator) !LoadAvg {
 fn parseUptime(allocator: std.mem.Allocator) !UptimeInfo {
     const contents = try readProcFile(allocator, "/proc/uptime");
     defer allocator.free(contents);
+    return parseUptimeFromContents(contents);
+}
 
+pub fn parseUptimeFromContents(contents: []const u8) UptimeInfo {
     var info = UptimeInfo{
         .uptime_secs = 0,
         .idle_secs = 0,
@@ -298,8 +320,20 @@ fn parseUptime(allocator: std.mem.Allocator) !UptimeInfo {
 
 extern "c" fn uname(buf: *std.c.utsname) c_int;
 
-// Get system info via uname
-fn getSystemInfo() SystemInfo {
+// Copy src into a fixed-size dst buffer, clamping to the destination length so
+// long fields never overflow. utsname fields are __NEW_UTS_LEN (65) on Linux but
+// 256 bytes on Darwin/BSD; a real macOS `version` string is ~107 bytes, which
+// overflowed the [65]u8 destination and panicked (see regression test below).
+// Returns the number of bytes written.
+pub fn copyField(dst: []u8, src: []const u8) usize {
+    const n = @min(src.len, dst.len);
+    @memcpy(dst[0..n], src[0..n]);
+    return n;
+}
+
+// Populate a SystemInfo from a utsname, clamping every field. Split from
+// getSystemInfo() so the clamping can be exercised with a fixture utsname.
+pub fn fillSystemInfo(uts: *const std.c.utsname) SystemInfo {
     var sys: SystemInfo = undefined;
     @memset(&sys.sysname, 0);
     @memset(&sys.nodename, 0);
@@ -307,49 +341,40 @@ fn getSystemInfo() SystemInfo {
     @memset(&sys.version, 0);
     @memset(&sys.machine, 0);
 
-    var uts: std.c.utsname = undefined;
-    const result = uname(&uts);
-    if (result != 0) {
-        const unknown = "Unknown";
-        @memcpy(sys.sysname[0..unknown.len], unknown);
-        sys.sysname_len = unknown.len;
-        @memcpy(sys.nodename[0..unknown.len], unknown);
-        sys.nodename_len = unknown.len;
-        @memcpy(sys.release[0..unknown.len], unknown);
-        sys.release_len = unknown.len;
-        @memcpy(sys.version[0..unknown.len], unknown);
-        sys.version_len = unknown.len;
-        @memcpy(sys.machine[0..unknown.len], unknown);
-        sys.machine_len = unknown.len;
-        return sys;
-    }
-
-    // Copy with length tracking
-    const sysname_slice = std.mem.sliceTo(&uts.sysname, 0);
-    @memcpy(sys.sysname[0..sysname_slice.len], sysname_slice);
-    sys.sysname_len = sysname_slice.len;
-
-    const nodename_slice = std.mem.sliceTo(&uts.nodename, 0);
-    @memcpy(sys.nodename[0..nodename_slice.len], nodename_slice);
-    sys.nodename_len = nodename_slice.len;
-
-    const release_slice = std.mem.sliceTo(&uts.release, 0);
-    @memcpy(sys.release[0..release_slice.len], release_slice);
-    sys.release_len = release_slice.len;
-
-    const version_slice = std.mem.sliceTo(&uts.version, 0);
-    @memcpy(sys.version[0..version_slice.len], version_slice);
-    sys.version_len = version_slice.len;
-
-    const machine_slice = std.mem.sliceTo(&uts.machine, 0);
-    @memcpy(sys.machine[0..machine_slice.len], machine_slice);
-    sys.machine_len = machine_slice.len;
+    sys.sysname_len = copyField(&sys.sysname, std.mem.sliceTo(&uts.sysname, 0));
+    sys.nodename_len = copyField(&sys.nodename, std.mem.sliceTo(&uts.nodename, 0));
+    sys.release_len = copyField(&sys.release, std.mem.sliceTo(&uts.release, 0));
+    sys.version_len = copyField(&sys.version, std.mem.sliceTo(&uts.version, 0));
+    sys.machine_len = copyField(&sys.machine, std.mem.sliceTo(&uts.machine, 0));
 
     return sys;
 }
 
+// Get system info via uname
+fn getSystemInfo() SystemInfo {
+    var uts: std.c.utsname = undefined;
+    const result = uname(&uts);
+    if (result != 0) {
+        var sys: SystemInfo = undefined;
+        @memset(&sys.sysname, 0);
+        @memset(&sys.nodename, 0);
+        @memset(&sys.release, 0);
+        @memset(&sys.version, 0);
+        @memset(&sys.machine, 0);
+        const unknown = "Unknown";
+        sys.sysname_len = copyField(&sys.sysname, unknown);
+        sys.nodename_len = copyField(&sys.nodename, unknown);
+        sys.release_len = copyField(&sys.release, unknown);
+        sys.version_len = copyField(&sys.version, unknown);
+        sys.machine_len = copyField(&sys.machine, unknown);
+        return sys;
+    }
+
+    return fillSystemInfo(&uts);
+}
+
 // Format bytes as human-readable string
-fn formatBytes(bytes: u64, buf: []u8) []const u8 {
+pub fn formatBytes(bytes: u64, buf: []u8) []const u8 {
     const units = [_][]const u8{ "B", "Ki", "Mi", "Gi", "Ti" };
     var value: f64 = @floatFromInt(bytes);
     var unit_idx: usize = 0;
@@ -364,7 +389,7 @@ fn formatBytes(bytes: u64, buf: []u8) []const u8 {
 }
 
 // Format uptime as human-readable string
-fn formatUptime(secs: f64, buf: []u8) []const u8 {
+pub fn formatUptime(secs: f64, buf: []u8) []const u8 {
     const total_secs: u64 = @intFromFloat(secs);
     const days = total_secs / 86400;
     const hours = (total_secs % 86400) / 3600;
@@ -458,7 +483,7 @@ fn printMemory(allocator: std.mem.Allocator, w: *Writer) !void {
     w.write("               total        used        free      shared  buff/cache   available\n");
     w.print("Mem:    {s:>11} {s:>11} {s:>11} {s:>11} {s:>11} {s:>11}\n", .{
         formatBytes(mem.total, &buf1),
-        formatBytes(mem.total - mem.free - mem.buffers - mem.cached, &buf2),
+        formatBytes(computeUsedMemory(mem), &buf2),
         formatBytes(mem.free, &buf3),
         formatBytes(mem.shared, &buf4),
         formatBytes(mem.buffers + mem.cached, &buf5),
@@ -468,7 +493,7 @@ fn printMemory(allocator: std.mem.Allocator, w: *Writer) !void {
     if (mem.swap_total > 0) {
         w.print("Swap:   {s:>11} {s:>11} {s:>11}\n", .{
             formatBytes(mem.swap_total, &buf1),
-            formatBytes(mem.swap_total - mem.swap_free, &buf2),
+            formatBytes(mem.swap_total -| mem.swap_free, &buf2),
             formatBytes(mem.swap_free, &buf3),
         });
     }

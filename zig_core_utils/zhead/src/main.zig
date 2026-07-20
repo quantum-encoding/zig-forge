@@ -9,6 +9,7 @@
 const std = @import("std");
 const Io = std.Io;
 const Dir = Io.Dir;
+const maxU64 = std.math.maxInt(u64);
 
 const Config = struct {
     lines: ?u64 = 10,
@@ -27,48 +28,105 @@ const Config = struct {
     }
 };
 
-fn headFile(allocator: std.mem.Allocator, path: []const u8, config: *const Config, print_header: bool) !void {
-    const io = Io.Threaded.global_single_threaded.io();
-    const stdout = Io.File.stdout();
+/// Map a Zig error to GNU-style strerror text so diagnostics match the
+/// reference `head` output (e.g. `error.FileNotFound` -> "No such file or
+/// directory", `error.IsDir` -> "Is a directory").
+fn errString(err: anyerror) []const u8 {
+    return switch (err) {
+        error.FileNotFound => "No such file or directory",
+        error.IsDir => "Is a directory",
+        error.AccessDenied => "Permission denied",
+        error.InputOutput => "Input/output error",
+        error.NotDir => "Not a directory",
+        else => @errorName(err),
+    };
+}
 
-    var write_buf: [8192]u8 = undefined;
-    var writer = stdout.writerStreaming(io, &write_buf);
+fn reportReadError(name: []const u8, err: anyerror) void {
+    std.debug.print("zhead: error reading '{s}': {s}\n", .{ name, errString(err) });
+}
+
+/// Read into `dst`, returning 0 at end-of-stream and propagating any real
+/// read error. `readStreaming` signals EOF via `error.EndOfStream`, so we must
+/// distinguish it from genuine I/O failures (e.g. reading a directory) instead
+/// of swallowing every error as the old `catch break` did.
+fn readSome(io: Io, file: Io.File, dst: []u8) !usize {
+    return file.readStreaming(io, &.{dst}) catch |err| switch (err) {
+        error.EndOfStream => 0,
+        else => err,
+    };
+}
+
+fn headFile(
+    io: Io,
+    w: *Io.File.Writer,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    config: *const Config,
+    print_header: bool,
+) !void {
+    const is_stdin = std.mem.eql(u8, path, "-");
+    // GNU labels the stdin header "standard input", not "-".
+    const display = if (is_stdin) "standard input" else path;
 
     // Print header if needed
     if (print_header) {
-        writer.interface.print("==> {s} <==\n", .{path}) catch {};
+        try w.interface.print("==> {s} <==\n", .{display});
     }
 
     // Handle stdin
-    if (std.mem.eql(u8, path, "-")) {
-        try headStdin(allocator, io, &writer, config);
-        writer.interface.flush() catch {};
-        return;
+    if (is_stdin) {
+        return headStdin(io, w, allocator, config);
     }
 
     // Open file
     const file = Dir.openFile(Dir.cwd(), io, path, .{}) catch |err| {
-        std.debug.print("zhead: cannot open '{s}' for reading: {s}\n", .{ path, @errorName(err) });
+        std.debug.print("zhead: cannot open '{s}' for reading: {s}\n", .{ path, errString(err) });
         return err;
     };
     defer file.close(io);
 
-    // Handle negative byte count (all but last N bytes)
+    try headReader(io, w, allocator, file, path, config);
+}
+
+fn headStdin(
+    io: Io,
+    w: *Io.File.Writer,
+    allocator: std.mem.Allocator,
+    config: *const Config,
+) !void {
+    const stdin = Io.File.stdin();
+    try headReader(io, w, allocator, stdin, "standard input", config);
+}
+
+/// Core read/emit loop shared by file and stdin sources. `name` is the display
+/// name used in read-error diagnostics.
+fn headReader(
+    io: Io,
+    w: *Io.File.Writer,
+    allocator: std.mem.Allocator,
+    file: Io.File,
+    name: []const u8,
+    config: *const Config,
+) !void {
     if (config.bytes) |num_bytes| {
         if (config.negative_bytes) {
-            // Read entire file, output all but last N bytes
+            // Read entire input, output all but last N bytes
             var content: std.ArrayListUnmanaged(u8) = .empty;
             defer content.deinit(allocator);
 
             var buf: [8192]u8 = undefined;
             while (true) {
-                const bytes_read = file.readStreaming(io, &.{&buf}) catch break;
+                const bytes_read = readSome(io, file, &buf) catch |err| {
+                    reportReadError(name, err);
+                    return err;
+                };
                 if (bytes_read == 0) break;
                 try content.appendSlice(allocator, buf[0..bytes_read]);
             }
 
             if (content.items.len > num_bytes) {
-                writer.interface.writeAll(content.items[0 .. content.items.len - @as(usize, @intCast(num_bytes))]) catch {};
+                try w.interface.writeAll(content.items[0 .. content.items.len - @as(usize, @intCast(num_bytes))]);
             }
         } else {
             // Positive byte mode - output first N bytes
@@ -76,32 +134,36 @@ fn headFile(allocator: std.mem.Allocator, path: []const u8, config: *const Confi
             var buf: [8192]u8 = undefined;
             while (remaining > 0) {
                 const to_read = @min(remaining, buf.len);
-                const bytes_read = file.readStreaming(io, &.{buf[0..to_read]}) catch break;
+                const bytes_read = readSome(io, file, buf[0..to_read]) catch |err| {
+                    reportReadError(name, err);
+                    return err;
+                };
                 if (bytes_read == 0) break;
-                writer.interface.writeAll(buf[0..bytes_read]) catch {};
+                try w.interface.writeAll(buf[0..bytes_read]);
                 remaining -= bytes_read;
             }
         }
     } else if (config.lines) |num_lines| {
         if (config.negative_lines) {
-            // Read entire file, output all but last N lines
+            // Read entire input, output all but last N lines
             var content: std.ArrayListUnmanaged(u8) = .empty;
             defer content.deinit(allocator);
 
             var buf: [8192]u8 = undefined;
             while (true) {
-                const bytes_read = file.readStreaming(io, &.{&buf}) catch break;
+                const bytes_read = readSome(io, file, &buf) catch |err| {
+                    reportReadError(name, err);
+                    return err;
+                };
                 if (bytes_read == 0) break;
                 try content.appendSlice(allocator, buf[0..bytes_read]);
             }
 
-            // Count total lines and find position to stop
             var total_lines: u64 = 0;
             for (content.items) |byte| {
                 if (byte == '\n') total_lines += 1;
             }
 
-            // Output all but last N lines
             if (total_lines > num_lines) {
                 const target_lines = total_lines - num_lines;
                 var lines_output: u64 = 0;
@@ -117,7 +179,7 @@ fn headFile(allocator: std.mem.Allocator, path: []const u8, config: *const Confi
                     }
                 }
 
-                writer.interface.writeAll(content.items[0..pos]) catch {};
+                try w.interface.writeAll(content.items[0..pos]);
             }
         } else {
             // Positive line mode - output first N lines
@@ -125,13 +187,16 @@ fn headFile(allocator: std.mem.Allocator, path: []const u8, config: *const Confi
             var buf: [8192]u8 = undefined;
 
             while (lines_printed < num_lines) {
-                const bytes_read = file.readStreaming(io, &.{&buf}) catch break;
+                const bytes_read = readSome(io, file, &buf) catch |err| {
+                    reportReadError(name, err);
+                    return err;
+                };
                 if (bytes_read == 0) break;
 
                 var start: usize = 0;
                 for (buf[0..bytes_read], 0..) |byte, i| {
                     if (byte == '\n') {
-                        writer.interface.writeAll(buf[start .. i + 1]) catch {};
+                        try w.interface.writeAll(buf[start .. i + 1]);
                         start = i + 1;
                         lines_printed += 1;
                         if (lines_printed >= num_lines) break;
@@ -140,100 +205,7 @@ fn headFile(allocator: std.mem.Allocator, path: []const u8, config: *const Confi
 
                 // Write remaining partial line if we haven't hit the limit
                 if (start < bytes_read and lines_printed < num_lines) {
-                    writer.interface.writeAll(buf[start..bytes_read]) catch {};
-                }
-            }
-        }
-    }
-
-    writer.interface.flush() catch {};
-}
-
-fn headStdin(allocator: std.mem.Allocator, io: Io, writer: anytype, config: *const Config) !void {
-    const stdin = Io.File.stdin();
-
-    if (config.bytes) |num_bytes| {
-        if (config.negative_bytes) {
-            // Read all stdin, output all but last N bytes
-            var content: std.ArrayListUnmanaged(u8) = .empty;
-            defer content.deinit(allocator);
-
-            var buf: [8192]u8 = undefined;
-            while (true) {
-                const bytes_read = stdin.readStreaming(io, &.{&buf}) catch break;
-                if (bytes_read == 0) break;
-                try content.appendSlice(allocator, buf[0..bytes_read]);
-            }
-
-            if (content.items.len > num_bytes) {
-                writer.interface.writeAll(content.items[0 .. content.items.len - @as(usize, @intCast(num_bytes))]) catch {};
-            }
-        } else {
-            var remaining = num_bytes;
-            var buf: [8192]u8 = undefined;
-            while (remaining > 0) {
-                const to_read = @min(remaining, buf.len);
-                const bytes_read = stdin.readStreaming(io, &.{buf[0..to_read]}) catch break;
-                if (bytes_read == 0) break;
-                writer.interface.writeAll(buf[0..bytes_read]) catch {};
-                remaining -= bytes_read;
-            }
-        }
-    } else if (config.lines) |num_lines| {
-        if (config.negative_lines) {
-            // Read all stdin, output all but last N lines
-            var content: std.ArrayListUnmanaged(u8) = .empty;
-            defer content.deinit(allocator);
-
-            var buf: [8192]u8 = undefined;
-            while (true) {
-                const bytes_read = stdin.readStreaming(io, &.{&buf}) catch break;
-                if (bytes_read == 0) break;
-                try content.appendSlice(allocator, buf[0..bytes_read]);
-            }
-
-            var total_lines: u64 = 0;
-            for (content.items) |byte| {
-                if (byte == '\n') total_lines += 1;
-            }
-
-            if (total_lines > num_lines) {
-                const target_lines = total_lines - num_lines;
-                var lines_output: u64 = 0;
-                var pos: usize = 0;
-
-                for (content.items, 0..) |byte, idx| {
-                    if (byte == '\n') {
-                        lines_output += 1;
-                        if (lines_output >= target_lines) {
-                            pos = idx + 1;
-                            break;
-                        }
-                    }
-                }
-
-                writer.interface.writeAll(content.items[0..pos]) catch {};
-            }
-        } else {
-            var lines_printed: u64 = 0;
-            var buf: [8192]u8 = undefined;
-
-            while (lines_printed < num_lines) {
-                const bytes_read = stdin.readStreaming(io, &.{&buf}) catch break;
-                if (bytes_read == 0) break;
-
-                var start: usize = 0;
-                for (buf[0..bytes_read], 0..) |byte, i| {
-                    if (byte == '\n') {
-                        writer.interface.writeAll(buf[start .. i + 1]) catch {};
-                        start = i + 1;
-                        lines_printed += 1;
-                        if (lines_printed >= num_lines) break;
-                    }
-                }
-
-                if (start < bytes_read and lines_printed < num_lines) {
-                    writer.interface.writeAll(buf[start..bytes_read]) catch {};
+                    try w.interface.writeAll(buf[start..bytes_read]);
                 }
             }
         }
@@ -245,47 +217,117 @@ const ParsedNumber = struct {
     negative: bool,
 };
 
+/// Multiply, clamping to u64 max on overflow (GNU clamps oversized counts and
+/// still exits 0 rather than aborting).
+fn clampMul(a: u64, b: u64) u64 {
+    const m = @mulWithOverflow(a, b);
+    return if (m[1] != 0) maxU64 else m[0];
+}
+
+/// base**power, clamped to u64 max on overflow.
+fn clampPow(base: u64, power: u6) u64 {
+    var r: u64 = 1;
+    var p = power;
+    while (p > 0) : (p -= 1) r = clampMul(r, base);
+    return r;
+}
+
+/// Return the GNU unit power for a suffix letter, or null if unrecognized.
+/// Uppercase letters cover K/M/G/T/P/E/Z/Y; lowercase k and m are also
+/// accepted (matching GNU coreutils 9.x observed behavior).
+fn unitPower(c: u8) ?u6 {
+    return switch (c) {
+        'k', 'K' => 1,
+        'm', 'M' => 2,
+        'G' => 3,
+        'T' => 4,
+        'P' => 5,
+        'E' => 6,
+        'Z' => 7,
+        'Y' => 8,
+        else => null,
+    };
+}
+
+/// Parse a GNU head numeric argument.
+///
+/// Returns null on an invalid number (caller must emit "invalid number of
+/// lines/bytes" and exit 1). On numeric overflow the value is clamped to u64
+/// max instead of aborting, matching GNU (which prints the whole file, exit 0).
+///
+/// Supported suffixes (GNU parity):
+///   b  = 512
+///   kB/MB/GB/... (decimal, 1000-based)
+///   K/M/G/T/P/E/Z/Y and KiB/MiB/... (binary, 1024-based)
 fn parseNumber(s: []const u8) ?ParsedNumber {
     if (s.len == 0) return null;
 
-    var val: u64 = 0;
-    var multiplier: u64 = 1;
     var num_str = s;
     var negative = false;
 
-    // Check for leading minus (negative = all but last N)
+    // Leading minus: -n -N means "all but the last N".
     if (num_str[0] == '-') {
         negative = true;
         num_str = num_str[1..];
         if (num_str.len == 0) return null;
     }
 
-    // Check for suffix
+    // Suffix handling.
+    var multiplier: u64 = 1;
     if (num_str.len > 0) {
-        const last = num_str[num_str.len - 1];
-        switch (last) {
-            'k', 'K' => {
-                multiplier = 1024;
-                num_str = num_str[0 .. num_str.len - 1];
-            },
-            'm', 'M' => {
-                multiplier = 1024 * 1024;
-                num_str = num_str[0 .. num_str.len - 1];
-            },
-            'g', 'G' => {
-                multiplier = 1024 * 1024 * 1024;
-                num_str = num_str[0 .. num_str.len - 1];
-            },
-            else => {},
+        if (num_str[num_str.len - 1] == 'b') {
+            // Plain 'b' == 512 bytes.
+            multiplier = 512;
+            num_str = num_str[0 .. num_str.len - 1];
+        } else {
+            var base: u64 = 1024;
+            // Trailing 'B' selects decimal (1000-based); 'iB' stays binary.
+            if (num_str.len >= 1 and num_str[num_str.len - 1] == 'B') {
+                if (num_str.len >= 2 and num_str[num_str.len - 2] == 'i') {
+                    num_str = num_str[0 .. num_str.len - 2]; // drop "iB"
+                } else {
+                    base = 1000;
+                    num_str = num_str[0 .. num_str.len - 1]; // drop "B"
+                }
+            }
+            // Trailing unit letter.
+            if (num_str.len > 0) {
+                if (unitPower(num_str[num_str.len - 1])) |power| {
+                    multiplier = clampPow(base, power);
+                    num_str = num_str[0 .. num_str.len - 1];
+                } else if (base == 1000) {
+                    // A stray 'B' with no unit letter (e.g. "10B") -> ignore
+                    // multiplier; nothing to do.
+                }
+            }
         }
     }
 
+    if (num_str.len == 0) return null;
+
+    var val: u64 = 0;
+    var overflow = false;
     for (num_str) |c| {
         if (c < '0' or c > '9') return null;
-        val = val * 10 + (c - '0');
+        if (!overflow) {
+            const m = @mulWithOverflow(val, 10);
+            if (m[1] != 0) {
+                overflow = true;
+            } else {
+                const a = @addWithOverflow(m[0], @as(u64, c - '0'));
+                if (a[1] != 0) overflow = true else val = a[0];
+            }
+        }
     }
+    if (overflow) val = maxU64;
 
-    return .{ .value = val * multiplier, .negative = negative };
+    return .{ .value = clampMul(val, multiplier), .negative = negative };
+}
+
+/// Emit the GNU "invalid number of lines/bytes" diagnostic and exit 1.
+fn invalidNumber(kind: []const u8, arg: []const u8) noreturn {
+    std.debug.print("zhead: invalid number of {s}: '{s}'\n", .{ kind, arg });
+    std.process.exit(1);
 }
 
 fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
@@ -313,10 +355,9 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                     printVersion();
                     std.process.exit(0);
                 } else if (std.mem.startsWith(u8, arg, "--lines=")) {
-                    if (parseNumber(arg[8..])) |parsed| {
-                        config.lines = parsed.value;
-                        config.negative_lines = parsed.negative;
-                    }
+                    const parsed = parseNumber(arg[8..]) orelse invalidNumber("lines", arg[8..]);
+                    config.lines = parsed.value;
+                    config.negative_lines = parsed.negative;
                     config.bytes = null;
                 } else if (std.mem.eql(u8, arg, "--lines")) {
                     i += 1;
@@ -324,16 +365,14 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                         std.debug.print("zhead: option '--lines' requires an argument\n", .{});
                         std.process.exit(1);
                     }
-                    if (parseNumber(args[i])) |parsed| {
-                        config.lines = parsed.value;
-                        config.negative_lines = parsed.negative;
-                    }
+                    const parsed = parseNumber(args[i]) orelse invalidNumber("lines", args[i]);
+                    config.lines = parsed.value;
+                    config.negative_lines = parsed.negative;
                     config.bytes = null;
                 } else if (std.mem.startsWith(u8, arg, "--bytes=")) {
-                    if (parseNumber(arg[8..])) |parsed| {
-                        config.bytes = parsed.value;
-                        config.negative_bytes = parsed.negative;
-                    }
+                    const parsed = parseNumber(arg[8..]) orelse invalidNumber("bytes", arg[8..]);
+                    config.bytes = parsed.value;
+                    config.negative_bytes = parsed.negative;
                     config.lines = null;
                 } else if (std.mem.eql(u8, arg, "--bytes")) {
                     i += 1;
@@ -341,15 +380,17 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                         std.debug.print("zhead: option '--bytes' requires an argument\n", .{});
                         std.process.exit(1);
                     }
-                    if (parseNumber(args[i])) |parsed| {
-                        config.bytes = parsed.value;
-                        config.negative_bytes = parsed.negative;
-                    }
+                    const parsed = parseNumber(args[i]) orelse invalidNumber("bytes", args[i]);
+                    config.bytes = parsed.value;
+                    config.negative_bytes = parsed.negative;
                     config.lines = null;
                 } else if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "--silent")) {
+                    // Last of -q/-v wins (GNU semantics).
                     config.quiet = true;
+                    config.verbose = false;
                 } else if (std.mem.eql(u8, arg, "--verbose")) {
                     config.verbose = true;
+                    config.quiet = false;
                 } else {
                     std.debug.print("zhead: unrecognized option '{s}'\n", .{arg});
                     std.process.exit(1);
@@ -361,10 +402,9 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                     switch (arg[j]) {
                         'n' => {
                             if (j + 1 < arg.len) {
-                                if (parseNumber(arg[j + 1 ..])) |parsed| {
-                                    config.lines = parsed.value;
-                                    config.negative_lines = parsed.negative;
-                                }
+                                const parsed = parseNumber(arg[j + 1 ..]) orelse invalidNumber("lines", arg[j + 1 ..]);
+                                config.lines = parsed.value;
+                                config.negative_lines = parsed.negative;
                                 config.bytes = null;
                                 break;
                             } else {
@@ -373,19 +413,17 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                                     std.debug.print("zhead: option requires an argument -- 'n'\n", .{});
                                     std.process.exit(1);
                                 }
-                                if (parseNumber(args[i])) |parsed| {
-                                    config.lines = parsed.value;
-                                    config.negative_lines = parsed.negative;
-                                }
+                                const parsed = parseNumber(args[i]) orelse invalidNumber("lines", args[i]);
+                                config.lines = parsed.value;
+                                config.negative_lines = parsed.negative;
                                 config.bytes = null;
                             }
                         },
                         'c' => {
                             if (j + 1 < arg.len) {
-                                if (parseNumber(arg[j + 1 ..])) |parsed| {
-                                    config.bytes = parsed.value;
-                                    config.negative_bytes = parsed.negative;
-                                }
+                                const parsed = parseNumber(arg[j + 1 ..]) orelse invalidNumber("bytes", arg[j + 1 ..]);
+                                config.bytes = parsed.value;
+                                config.negative_bytes = parsed.negative;
                                 config.lines = null;
                                 break;
                             } else {
@@ -394,21 +432,25 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
                                     std.debug.print("zhead: option requires an argument -- 'c'\n", .{});
                                     std.process.exit(1);
                                 }
-                                if (parseNumber(args[i])) |parsed| {
-                                    config.bytes = parsed.value;
-                                    config.negative_bytes = parsed.negative;
-                                }
+                                const parsed = parseNumber(args[i]) orelse invalidNumber("bytes", args[i]);
+                                config.bytes = parsed.value;
+                                config.negative_bytes = parsed.negative;
                                 config.lines = null;
                             }
                         },
-                        'q' => config.quiet = true,
-                        'v' => config.verbose = true,
+                        'q' => {
+                            config.quiet = true;
+                            config.verbose = false;
+                        },
+                        'v' => {
+                            config.verbose = true;
+                            config.quiet = false;
+                        },
                         '0'...'9' => {
                             // -NUM format
-                            if (parseNumber(arg[j..])) |parsed| {
-                                config.lines = parsed.value;
-                                config.negative_lines = parsed.negative;
-                            }
+                            const parsed = parseNumber(arg[j..]) orelse invalidNumber("lines", arg[j..]);
+                            config.lines = parsed.value;
+                            config.negative_lines = parsed.negative;
                             config.bytes = null;
                             break;
                         },
@@ -448,7 +490,8 @@ fn printHelp() void {
         \\      --help         display this help and exit
         \\      --version      output version information and exit
         \\
-        \\NUM may have a multiplier suffix: k (1024), M (1024*1024), G (1024^3)
+        \\NUM may have a multiplier suffix: b (512), kB (1000), K (1024),
+        \\MB (1000*1000), M (1024*1024), and so on for G, T, P, E, Z, Y.
         \\
         \\zhead - High-performance head utility in Zig
         \\
@@ -478,22 +521,32 @@ pub fn main(init: std.process.Init) void {
     var error_occurred = false;
     var first = true;
 
+    // A single writer over stdout, shared across every file and separator.
+    // Constructing a fresh writer per call gave each its own offset tracking
+    // over a seekable (redirected) stdout, so the second file's separator
+    // clobbered the first byte at offset 0. One writer, flushed once, fixes it.
+    const io = Io.Threaded.global_single_threaded.io();
+    const stdout = Io.File.stdout();
+    var write_buf: [8192]u8 = undefined;
+    var writer = stdout.writerStreaming(io, &write_buf);
+
     for (config.files.items) |file| {
         const print_header = (config.verbose or (multiple_files and !config.quiet));
 
         if (!first and print_header) {
-            const io = Io.Threaded.global_single_threaded.io();
-            var buf: [64]u8 = undefined;
-            const stdout = Io.File.stdout();
-            var writer = stdout.writer(io, &buf);
-            writer.interface.writeAll("\n") catch {};
-            writer.interface.flush() catch {};
+            writer.interface.writeAll("\n") catch {
+                error_occurred = true;
+            };
         }
-        headFile(allocator, file, &config, print_header) catch {
+        headFile(io, &writer, allocator, file, &config, print_header) catch {
             error_occurred = true;
         };
         first = false;
     }
+
+    writer.interface.flush() catch {
+        error_occurred = true;
+    };
 
     if (error_occurred) {
         std.process.exit(1);

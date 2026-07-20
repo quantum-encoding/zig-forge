@@ -235,6 +235,15 @@ pub fn main(init: std.process.Init) !void {
         try files.append(allocator, "-");
     }
 
+    // Reject a zero page length. GNU pr: page_length==0 is invalid
+    // ("invalid number of lines: '0': Result too large", exit 1). With
+    // headers on, page_length==0 would otherwise make body_lines==0 and the
+    // page loop would spin forever emitting a header per iteration.
+    if (page_length == 0) {
+        writeStderr("zpr: '-l PAGE_LENGTH' invalid number of lines: '0': Result too large\n", .{});
+        std.process.exit(1);
+    }
+
     // Calculate body lines
     const body_lines = if (no_header)
         page_length
@@ -247,11 +256,17 @@ pub fn main(init: std.process.Init) !void {
     const timestamp = time(null);
     const date_str = formatDate(timestamp);
 
-    // Process files
+    // Process files. Track whether any file failed to open so we can exit
+    // nonzero, matching GNU pr (which exits 1 when a file cannot be opened).
+    var any_failed = false;
     for (files.items) |file| {
         const file_header = header orelse file;
-        processFile(allocator, file, file_header, date_str, page_length, page_width, body_lines, header_lines, trailer_lines, columns, number_lines, number_width, number_sep, double_space, no_header, first_page, last_page);
+        if (!processFile(allocator, file, file_header, date_str, page_length, page_width, body_lines, header_lines, trailer_lines, columns, number_lines, number_width, number_sep, double_space, no_header, first_page, last_page)) {
+            any_failed = true;
+        }
     }
+
+    if (any_failed) std.process.exit(1);
 }
 
 fn processFile(
@@ -272,15 +287,15 @@ fn processFile(
     no_header: bool,
     first_page: usize,
     last_page: usize,
-) void {
+) bool {
 
-    // Open file
+    // Open file. Returns false on failure so the caller can exit nonzero.
     var fd: c_int = 0;
     if (!std.mem.eql(u8, path, "-")) {
         var path_z: [4097]u8 = undefined;
         if (path.len >= path_z.len) {
             writeStderr("zpr: path too long\n", .{});
-            return;
+            return false;
         }
         @memcpy(path_z[0..path.len], path);
         path_z[path.len] = 0;
@@ -288,7 +303,7 @@ fn processFile(
         fd = open(@ptrCast(&path_z), O_RDONLY, 0);
         if (fd < 0) {
             writeStderr("zpr: cannot open '{s}'\n", .{path});
-            return;
+            return false;
         }
     }
     defer {
@@ -305,7 +320,9 @@ fn processFile(
     var line_buf: std.ArrayListUnmanaged(u8) = .empty;
     defer line_buf.deinit(allocator);
 
-    // Read all lines
+    // Read all lines. On allocation failure emit an error and return false so
+    // the caller exits nonzero, rather than silently dropping input bytes/lines
+    // (which would produce truncated output with an exit status of 0).
     while (true) {
         const n = c_read(fd, &buf, buf.len);
         if (n <= 0) break;
@@ -313,23 +330,35 @@ fn processFile(
         const data = buf[0..@intCast(n)];
         for (data) |byte| {
             if (byte == '\n') {
-                const line_copy = allocator.dupe(u8, line_buf.items) catch continue;
+                const line_copy = allocator.dupe(u8, line_buf.items) catch {
+                    writeStderr("zpr: out of memory\n", .{});
+                    return false;
+                };
                 lines.append(allocator, line_copy) catch {
                     allocator.free(line_copy);
-                    continue;
+                    writeStderr("zpr: out of memory\n", .{});
+                    return false;
                 };
                 line_buf.clearRetainingCapacity();
             } else {
-                line_buf.append(allocator, byte) catch continue;
+                line_buf.append(allocator, byte) catch {
+                    writeStderr("zpr: out of memory\n", .{});
+                    return false;
+                };
             }
         }
     }
 
     // Handle last line without newline
     if (line_buf.items.len > 0) {
-        const line_copy = allocator.dupe(u8, line_buf.items) catch return;
+        const line_copy = allocator.dupe(u8, line_buf.items) catch {
+            writeStderr("zpr: out of memory\n", .{});
+            return false;
+        };
         lines.append(allocator, line_copy) catch {
             allocator.free(line_copy);
+            writeStderr("zpr: out of memory\n", .{});
+            return false;
         };
     }
 
@@ -378,9 +407,13 @@ fn processFile(
             body_count += 1;
         }
 
-        // Fill remaining body lines
-        while (body_count < body_lines) : (body_count += 1) {
-            writeStdout("\n", .{});
+        // Fill remaining body lines to pad the page to full length. GNU pr
+        // only pads when headers/trailers are present; with -t/--omit-header
+        // it emits exactly the content lines and no padding.
+        if (!no_header) {
+            while (body_count < body_lines) : (body_count += 1) {
+                writeStdout("\n", .{});
+            }
         }
 
         // Print trailer
@@ -393,6 +426,8 @@ fn processFile(
 
         page_num += 1;
     }
+
+    return true;
 }
 
 fn formatDate(timestamp: i64) []const u8 {
@@ -437,8 +472,11 @@ fn formatDate(timestamp: i64) []const u8 {
         var buf: [32]u8 = undefined;
     };
 
+    // Format the year as unsigned: in Zig 0.16 a signed int with a fill/width
+    // spec ({d:0>4}) emits an explicit '+' sign, corrupting the header as
+    // "+2026-...". Coerce to u32 so no sign is emitted.
     const result = std.fmt.bufPrint(&Static.buf, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}", .{
-        year,
+        @as(u32, @intCast(year)),
         month,
         day,
         hour,

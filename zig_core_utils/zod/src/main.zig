@@ -47,6 +47,17 @@ fn writeStderr(data: []const u8) void {
     _ = libc.write(libc.STDERR_FILENO, data.ptr, data.len);
 }
 
+fn reportInvalidValue(opt: []const u8, val: []const u8) noreturn {
+    // GNU od rejects a malformed numeric argument and exits 1, e.g.
+    //   od: invalid --read-bytes argument '5xk'
+    writeStderr("zod: invalid --");
+    writeStderr(opt);
+    writeStderr(" argument '");
+    writeStderr(val);
+    writeStderr("'\n");
+    std.process.exit(1);
+}
+
 fn printUsage() void {
     const usage =
         \\Usage: zod [OPTION]... [FILE]...
@@ -75,11 +86,13 @@ fn printUsage() void {
         \\With no FILE, or when FILE is -, read standard input.
         \\
     ;
-    writeStderr(usage);
+    // GNU od writes --help to stdout (exit 0), not stderr.
+    writeStdout(usage);
 }
 
 fn printVersion() void {
-    writeStderr("zod " ++ VERSION ++ "\n");
+    // GNU od writes --version to stdout (exit 0), not stderr.
+    writeStdout("zod " ++ VERSION ++ "\n");
 }
 
 fn formatAddress(addr: usize, format: AddressFormat, buf: []u8) []const u8 {
@@ -131,7 +144,8 @@ fn fmtFloat(val: f32, buf: []u8, field_width: usize) []const u8 {
     var num_str: []const u8 = undefined;
 
     if (val == 0.0) {
-        num_str = "0";
+        // GNU prints negative zero as "-0".
+        num_str = if (std.math.signbit(val)) "-0" else "0";
     } else {
         const abs_val: f32 = if (val < 0) -val else val;
         // Get exponent to decide format
@@ -158,25 +172,35 @@ fn fmtFloat(val: f32, buf: []u8, field_width: usize) []const u8 {
         if (exp_neg) exp = -exp;
         _ = abs_val;
 
-        if (exp >= -4 and exp < 8) {
+        // %g uses decimal notation when the exponent is in [-4, P); od's float
+        // rendering switches to scientific at exponent 7 (P = 7), e.g. 1e7
+        // prints as 1e+07 while 9999999 (exp 6) stays decimal.
+        if (exp >= -4 and exp < 7) {
             // Use decimal format - use Zig's {d} with appropriate precision
             // {d} gives full decimal; we need 7 significant digits
             const dec = std.fmt.bufPrint(&tmp, "{d}", .{val}) catch return "?";
             // Truncate to 7 significant digits (like %g)
             num_str = truncateToSigDigits(dec, buf, 8);
         } else {
-            // Use scientific notation with 7 significant digits
-            // Format: d.ddddddoe+NN
-            // Zig's {e} gives us the base; add '+' to positive exponent
+            // Scientific notation "<mantissa>e±NN" with a zero-padded, minimum
+            // two-digit exponent (C printf / GNU od style): 1e7 -> 1e+07, not
+            // 1e+7. Zig's {e} emits an unpadded exponent, so rebuild it from the
+            // exponent already parsed above.
             var out_len: usize = 0;
             for (sci) |c| {
-                if (out_len > 0 and buf[out_len - 1] == 'e' and c != '-' and c != '+') {
-                    buf[out_len] = '+';
-                    out_len += 1;
-                }
+                if (c == 'e') break;
                 buf[out_len] = c;
                 out_len += 1;
             }
+            buf[out_len] = 'e';
+            out_len += 1;
+            buf[out_len] = if (exp < 0) '-' else '+';
+            out_len += 1;
+            const e_abs: u32 = @intCast(if (exp < 0) -exp else exp);
+            var ebuf: [8]u8 = undefined;
+            const e_str = std.fmt.bufPrint(&ebuf, "{d:0>2}", .{e_abs}) catch return "?";
+            @memcpy(buf[out_len..][0..e_str.len], e_str);
+            out_len += e_str.len;
             // Truncate mantissa to 7 significant digits
             num_str = truncateSciToSigDigits(buf[0..out_len], &tmp, 8);
         }
@@ -352,6 +376,16 @@ fn dumpLine(data: []const u8, offset: usize, cfg: *const Config) void {
                 const s = std.fmt.bufPrint(&val_buf, " {o:0>11}", .{val}) catch " ???";
                 writeStdout(s);
             }
+            // Handle trailing bytes (partial group): zero-pad to unit size like GNU.
+            const remainder = data.len % 4;
+            if (remainder != 0) {
+                var tmp_bytes: [4]u8 = .{ 0, 0, 0, 0 };
+                const start = data.len - remainder;
+                @memcpy(tmp_bytes[0..remainder], data[start..]);
+                const val = std.mem.readInt(u32, &tmp_bytes, .little);
+                const s = std.fmt.bufPrint(&val_buf, " {o:0>11}", .{val}) catch " ???";
+                writeStdout(s);
+            }
         },
         .hex1 => {
             for (data) |b| {
@@ -375,6 +409,16 @@ fn dumpLine(data: []const u8, offset: usize, cfg: *const Config) void {
             var i: usize = 0;
             while (i + 3 < data.len) : (i += 4) {
                 const val = std.mem.readInt(u32, data[i..][0..4], .little);
+                const s = std.fmt.bufPrint(&val_buf, " {x:0>8}", .{val}) catch " ????????";
+                writeStdout(s);
+            }
+            // Handle trailing bytes (partial group): zero-pad to unit size like GNU.
+            const remainder = data.len % 4;
+            if (remainder != 0) {
+                var tmp_bytes: [4]u8 = .{ 0, 0, 0, 0 };
+                const start = data.len - remainder;
+                @memcpy(tmp_bytes[0..remainder], data[start..]);
+                const val = std.mem.readInt(u32, &tmp_bytes, .little);
                 const s = std.fmt.bufPrint(&val_buf, " {x:0>8}", .{val}) catch " ????????";
                 writeStdout(s);
             }
@@ -448,11 +492,27 @@ fn dumpLine(data: []const u8, offset: usize, cfg: *const Config) void {
                 const s = std.fmt.bufPrint(&val_buf, " {d:>5}", .{val}) catch " ?????";
                 writeStdout(s);
             }
+            // Handle final odd byte: zero-pad to u16 like GNU.
+            if (data.len % 2 != 0) {
+                const val: u16 = data[data.len - 1];
+                const s = std.fmt.bufPrint(&val_buf, " {d:>5}", .{val}) catch " ?????";
+                writeStdout(s);
+            }
         },
         .unsigned4 => {
             var i: usize = 0;
             while (i + 3 < data.len) : (i += 4) {
                 const val = std.mem.readInt(u32, data[i..][0..4], .little);
+                const s = std.fmt.bufPrint(&val_buf, " {d:>10}", .{val}) catch " ??????????";
+                writeStdout(s);
+            }
+            // Handle trailing bytes (partial group): zero-pad to unit size like GNU.
+            const remainder = data.len % 4;
+            if (remainder != 0) {
+                var tmp_bytes: [4]u8 = .{ 0, 0, 0, 0 };
+                const start = data.len - remainder;
+                @memcpy(tmp_bytes[0..remainder], data[start..]);
+                const val = std.mem.readInt(u32, &tmp_bytes, .little);
                 const s = std.fmt.bufPrint(&val_buf, " {d:>10}", .{val}) catch " ??????????";
                 writeStdout(s);
             }
@@ -490,14 +550,17 @@ fn dumpLine(data: []const u8, offset: usize, cfg: *const Config) void {
         },
         .named => {
             for (data) |b| {
-                if (b < 33 or b == 127) {
+                // GNU od -t a names the 7-bit character (high bit masked off),
+                // so 0x80 -> nul, 0xA0 -> sp, etc.
+                const c = b & 0x7f;
+                if (c < 33 or c == 127) {
                     writeStdout(" ");
-                    writeStdout(namedChar(b));
+                    writeStdout(namedChar(c));
                 } else {
                     val_buf[0] = ' ';
                     val_buf[1] = ' ';
                     val_buf[2] = ' ';
-                    val_buf[3] = b;
+                    val_buf[3] = c;
                     writeStdout(val_buf[0..4]);
                 }
             }
@@ -508,35 +571,32 @@ fn dumpLine(data: []const u8, offset: usize, cfg: *const Config) void {
 }
 
 fn parseNumber(s: []const u8) ?usize {
-    var result: usize = 0;
-    var i: usize = 0;
+    if (s.len == 0) return null;
+
+    // Check for a size suffix (GNU: b=512, k=1024, m=1048576).
     var multiplier: usize = 1;
-
-    // Check for suffix
-    if (s.len > 0) {
-        const last = s[s.len - 1];
-        if (last == 'k' or last == 'K') {
+    var digits = s;
+    switch (s[s.len - 1]) {
+        'k', 'K' => {
             multiplier = 1024;
-        } else if (last == 'm' or last == 'M') {
+            digits = s[0 .. s.len - 1];
+        },
+        'm', 'M' => {
             multiplier = 1024 * 1024;
-        } else if (last == 'b' or last == 'B') {
+            digits = s[0 .. s.len - 1];
+        },
+        'b', 'B' => {
             multiplier = 512;
-        }
-        if (multiplier > 1) {
-            return parseNumber(s[0 .. s.len - 1]).? * multiplier;
-        }
+            digits = s[0 .. s.len - 1];
+        },
+        else => {},
     }
+    if (digits.len == 0) return null;
 
-    while (i < s.len) {
-        const c = s[i];
-        if (c >= '0' and c <= '9') {
-            result = result * 10 + (c - '0');
-        } else {
-            return null;
-        }
-        i += 1;
-    }
-    return result;
+    // Reject malformed / oversized input gracefully instead of panicking on
+    // integer overflow (parseInt) or a null suffix prefix.
+    const base = std.fmt.parseInt(usize, digits, 10) catch return null;
+    return std.math.mul(usize, base, multiplier) catch null;
 }
 
 fn parseOutputType(s: []const u8) ?OutputType {
@@ -617,6 +677,10 @@ fn dumpFile(path: ?[]const u8, cfg: *const Config) !void {
         skip_remaining -= n;
         offset += n;
     }
+    // GNU od: skipping *past* the end of input is an error ("cannot skip past
+    // end of combined input") — exit 1, no output. Skipping to exactly the end
+    // is fine (prints just the final offset line).
+    if (skip_remaining > 0) return error.SkipPastEnd;
 
     while (true) {
         // Check limit
@@ -629,9 +693,17 @@ fn dumpFile(path: ?[]const u8, cfg: *const Config) !void {
         else
             cfg.bytes_per_line;
 
-        const read_result = libc.read(fd, &line_buf, max_read);
-        if (read_result <= 0) break;
-        const n: usize = @intCast(read_result);
+        // Fill a full bytes-per-line buffer, looping on short reads (pipes,
+        // sockets, ttys) so lines are width-aligned and duplicate ('*')
+        // suppression compares full-width lines the way GNU od does.
+        var n: usize = 0;
+        while (n < max_read) {
+            const read_result = libc.read(fd, line_buf[n..].ptr, max_read - n);
+            if (read_result < 0) return error.ReadFailed;
+            if (read_result == 0) break;
+            n += @intCast(read_result);
+        }
+        if (n == 0) break;
 
         total_read += n;
         const data = line_buf[0..n];
@@ -652,10 +724,13 @@ fn dumpFile(path: ?[]const u8, cfg: *const Config) !void {
         offset += n;
     }
 
-    // Print final offset
-    var addr_buf: [16]u8 = undefined;
-    writeStdout(formatAddress(offset, cfg.address_format, &addr_buf));
-    writeStdout("\n");
+    // Print the final offset line. GNU od omits it entirely when the address
+    // radix is 'none' (-A n) — no trailing empty line.
+    if (cfg.address_format != .none) {
+        var addr_buf: [16]u8 = undefined;
+        writeStdout(formatAddress(offset, cfg.address_format, &addr_buf));
+        writeStdout("\n");
+    }
 }
 
 pub fn main(init: std.process.Init) void {
@@ -683,9 +758,11 @@ pub fn main(init: std.process.Init) void {
         } else if (std.mem.eql(u8, arg, "--version")) {
             printVersion();
             return;
-        } else if (std.mem.eql(u8, arg, "-A") or std.mem.startsWith(u8, arg, "--address-radix=")) {
+        } else if (std.mem.eql(u8, arg, "-A") or std.mem.startsWith(u8, arg, "--address-radix=") or std.mem.startsWith(u8, arg, "-A")) {
             const fmt_str = if (std.mem.startsWith(u8, arg, "--address-radix="))
                 arg["--address-radix=".len..]
+            else if (arg.len > 2)
+                arg[2..] // glued form: -Ax
             else blk: {
                 i += 1;
                 break :blk if (i < args.len) args[i] else "";
@@ -699,9 +776,11 @@ pub fn main(init: std.process.Init) void {
                     else => .octal,
                 };
             }
-        } else if (std.mem.eql(u8, arg, "-t") or std.mem.startsWith(u8, arg, "--format=")) {
+        } else if (std.mem.eql(u8, arg, "-t") or std.mem.startsWith(u8, arg, "--format=") or std.mem.startsWith(u8, arg, "-t")) {
             const fmt_str = if (std.mem.startsWith(u8, arg, "--format="))
                 arg["--format=".len..]
+            else if (arg.len > 2)
+                arg[2..] // glued form: -tx1
             else blk: {
                 i += 1;
                 break :blk if (i < args.len) args[i] else "";
@@ -709,35 +788,47 @@ pub fn main(init: std.process.Init) void {
             if (parseOutputType(fmt_str)) |ot| {
                 cfg.output_type = ot;
             }
-        } else if (std.mem.eql(u8, arg, "-j") or std.mem.startsWith(u8, arg, "--skip-bytes=")) {
+        } else if (std.mem.eql(u8, arg, "-j") or std.mem.startsWith(u8, arg, "--skip-bytes=") or std.mem.startsWith(u8, arg, "-j")) {
             const val_str = if (std.mem.startsWith(u8, arg, "--skip-bytes="))
                 arg["--skip-bytes=".len..]
+            else if (arg.len > 2)
+                arg[2..] // glued form: -j10
             else blk: {
                 i += 1;
                 break :blk if (i < args.len) args[i] else "";
             };
             if (parseNumber(val_str)) |n| {
                 cfg.skip_bytes = n;
+            } else {
+                reportInvalidValue("skip-bytes", val_str);
             }
-        } else if (std.mem.eql(u8, arg, "-N") or std.mem.startsWith(u8, arg, "--read-bytes=")) {
+        } else if (std.mem.eql(u8, arg, "-N") or std.mem.startsWith(u8, arg, "--read-bytes=") or std.mem.startsWith(u8, arg, "-N")) {
             const val_str = if (std.mem.startsWith(u8, arg, "--read-bytes="))
                 arg["--read-bytes=".len..]
+            else if (arg.len > 2)
+                arg[2..] // glued form: -N16
             else blk: {
                 i += 1;
                 break :blk if (i < args.len) args[i] else "";
             };
             if (parseNumber(val_str)) |n| {
                 cfg.limit_bytes = n;
+            } else {
+                reportInvalidValue("read-bytes", val_str);
             }
-        } else if (std.mem.eql(u8, arg, "-w") or std.mem.startsWith(u8, arg, "--width=")) {
+        } else if (std.mem.eql(u8, arg, "-w") or std.mem.startsWith(u8, arg, "--width=") or std.mem.startsWith(u8, arg, "-w")) {
             const val_str = if (std.mem.startsWith(u8, arg, "--width="))
                 arg["--width=".len..]
+            else if (arg.len > 2)
+                arg[2..] // glued form: -w32
             else blk: {
                 i += 1;
                 break :blk if (i < args.len) args[i] else "";
             };
             if (parseNumber(val_str)) |n| {
                 cfg.bytes_per_line = n;
+            } else {
+                reportInvalidValue("width", val_str);
             }
         } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--output-duplicates")) {
             cfg.show_duplicates = true;
@@ -771,6 +862,14 @@ pub fn main(init: std.process.Init) void {
                 cfg.files[cfg.file_count] = "-";
                 cfg.file_count += 1;
             }
+        } else {
+            // Any remaining token here starts with '-' and matched no known
+            // flag. GNU errors 'invalid option' and exits 1 rather than
+            // silently dumping stdin.
+            writeStderr("zod: invalid option -- '");
+            if (arg.len > 1) writeStderr(arg[1..]);
+            writeStderr("'\n");
+            std.process.exit(1);
         }
     }
 
@@ -780,12 +879,16 @@ pub fn main(init: std.process.Init) void {
             std.process.exit(1);
         };
     } else {
+        var had_error = false;
         for (cfg.files[0..cfg.file_count]) |path| {
             dumpFile(path, &cfg) catch {
                 writeStderr("zod: ");
                 writeStderr(path);
                 writeStderr(": error\n");
+                had_error = true;
             };
         }
+        // GNU od exits 1 if any file could not be opened/read.
+        if (had_error) std.process.exit(1);
     }
 }

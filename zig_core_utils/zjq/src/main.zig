@@ -89,6 +89,10 @@ const OutputContext = struct {
     use_color: bool,
     indent_str: []const u8,
     first_output: bool = true,
+    // For -e/--exit-status: track whether anything was emitted and whether the
+    // last emitted value was falsy (null or false).
+    any_output: bool = false,
+    last_falsy: bool = false,
 
     fn init(options: Options) OutputContext {
         const is_tty = isatty(1) != 0;
@@ -100,8 +104,24 @@ const OutputContext = struct {
     }
 };
 
+/// Flush pending output and, under -e/--exit-status, derive jq's exit code:
+/// 1 if the last output was null/false, 4 if there was no output, else 0.
+fn finish(ctx: *OutputContext) void {
+    flushOutput();
+    if (ctx.options.exit_status) {
+        const code: u8 = if (!ctx.any_output) 4 else if (ctx.last_falsy) 1 else 0;
+        std.process.exit(code);
+    }
+}
+
 pub fn main(init: std.process.Init) void {
-    const allocator = init.gpa;
+    // All per-value allocations (dupes, ObjectMap/Array buffers, concat
+    // scratch) are freed in bulk at process exit via this arena. jq does not
+    // leak-report, and the DebugAllocator would otherwise dump every un-freed
+    // node to stderr; the arena also bounds heap growth to one exit boundary.
+    var arena = std.heap.ArenaAllocator.init(init.gpa);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     var options = Options{};
     var filter: []const u8 = ".";
@@ -186,7 +206,7 @@ pub fn main(init: std.process.Init) void {
     if (options.null_input) {
         // Process filter with null input
         processJsonValue(allocator, .null, filter, &ctx);
-        flushOutput();
+        finish(&ctx);
         return;
     }
 
@@ -198,7 +218,9 @@ pub fn main(init: std.process.Init) void {
         };
         defer allocator.free(input);
 
-        if (options.slurp) {
+        if (options.raw_input) {
+            processRawInput(allocator, input, filter, &ctx, options.slurp);
+        } else if (options.slurp) {
             processSlurp(allocator, input, filter, &ctx);
         } else {
             processJsonStream(allocator, input, filter, &ctx);
@@ -211,7 +233,9 @@ pub fn main(init: std.process.Init) void {
             };
             defer allocator.free(content);
 
-            if (options.slurp) {
+            if (options.raw_input) {
+                processRawInput(allocator, content, filter, &ctx, options.slurp);
+            } else if (options.slurp) {
                 processSlurp(allocator, content, filter, &ctx);
             } else {
                 processJsonStream(allocator, content, filter, &ctx);
@@ -219,7 +243,7 @@ pub fn main(init: std.process.Init) void {
         }
     }
 
-    flushOutput();
+    finish(&ctx);
 }
 
 fn readStdin(allocator: std.mem.Allocator) ![]u8 {
@@ -313,7 +337,7 @@ fn processJsonStream(allocator: std.mem.Allocator, input: []const u8, filter: []
         const value_end = findJsonValueEnd(allocator, remaining) orelse {
             if (!parsed_any) {
                 writeStderr("zjq: parse error: SyntaxError\n", .{});
-                std.process.exit(1);
+                std.process.exit(5);
             }
             return;
         };
@@ -323,7 +347,7 @@ fn processJsonStream(allocator: std.mem.Allocator, input: []const u8, filter: []
         const parsed = std.json.parseFromSlice(std.json.Value, allocator, value_slice, .{}) catch |err| {
             if (parsed_any) return;
             writeStderr("zjq: parse error: {s}\n", .{@errorName(err)});
-            std.process.exit(1);
+            std.process.exit(5);
         };
         defer parsed.deinit();
 
@@ -368,6 +392,27 @@ fn processSlurp(allocator: std.mem.Allocator, input: []const u8, filter: []const
     processJsonValue(allocator, array_value, filter, ctx);
 }
 
+/// jq -R/--raw-input: treat the input as text, not JSON. Without -s each line
+/// (newline-delimited; a single trailing newline is not a final empty line)
+/// becomes a JSON string; with -s the whole input becomes one JSON string.
+fn processRawInput(allocator: std.mem.Allocator, input: []const u8, filter: []const u8, ctx: *OutputContext, slurp: bool) void {
+    if (slurp) {
+        processJsonValue(allocator, .{ .string = input }, filter, ctx);
+        return;
+    }
+    if (input.len == 0) return;
+    const trailing_nl = input[input.len - 1] == '\n';
+    var it = std.mem.splitScalar(u8, input, '\n');
+    var pending: ?[]const u8 = it.next();
+    while (pending) |line| {
+        const nxt = it.next();
+        // Drop the empty segment produced by a single trailing newline.
+        if (nxt == null and line.len == 0 and trailing_nl) break;
+        processJsonValue(allocator, .{ .string = line }, filter, ctx);
+        pending = nxt;
+    }
+}
+
 fn processJsonValue(allocator: std.mem.Allocator, value: std.json.Value, filter: []const u8, ctx: *OutputContext) void {
     // Parse and apply filter
     var results = std.ArrayListUnmanaged(std.json.Value).empty;
@@ -375,7 +420,13 @@ fn processJsonValue(allocator: std.mem.Allocator, value: std.json.Value, filter:
 
     evaluateFilter(allocator, value, filter, &results) catch |err| {
         writeStderr("zjq: filter error: {s}\n", .{@errorName(err)});
-        std.process.exit(1);
+        // Match jq's exit-code taxonomy: a filter that cannot be compiled
+        // (InvalidFilter, e.g. `.[`) exits 3; runtime errors exit 5.
+        const code: u8 = switch (err) {
+            FilterError.InvalidFilter => 3,
+            else => 5,
+        };
+        std.process.exit(code);
     };
 
     for (results.items) |result| {
@@ -671,6 +722,11 @@ fn parseArrayIndex(filter: []const u8, pos: *usize, current: std.json.Value) Fil
     switch (current) {
         .array => |arr| {
             if (negative) {
+                // -0 == 0: the first element, NOT arr[len] (which is OOB).
+                if (idx_val == 0) {
+                    if (arr.items.len == 0) return FilterError.IndexOutOfBounds;
+                    return arr.items[0];
+                }
                 if (idx_val > arr.items.len) return FilterError.IndexOutOfBounds;
                 return arr.items[arr.items.len - idx_val];
             } else {
@@ -736,19 +792,19 @@ fn splitComma(filter: []const u8) ?usize {
 fn tryBuiltinFunction(allocator: std.mem.Allocator, value: std.json.Value, filter: []const u8, results: *std.ArrayListUnmanaged(std.json.Value)) bool {
     // length
     if (std.mem.eql(u8, filter, "length")) {
-        const len: i64 = switch (value) {
-            .array => |arr| @intCast(arr.items.len),
-            .object => |obj| @intCast(obj.count()),
-            .string => |s| @intCast(s.len),
-            .null => 0,
-            .integer => |n| if (n < 0) -n else n,
-            .float => |f| blk: {
-                const abs = @abs(f);
-                break :blk @intFromFloat(abs);
-            },
-            else => 0,
+        // jq: length of a number is its absolute value, preserved as a number
+        // (e.g. `1e19 | length` prints 1e19, `2.5 | length` prints 2.5) — never
+        // truncated to i64 (which is illegal-cast for out-of-range/NaN floats).
+        const result: std.json.Value = switch (value) {
+            .array => |arr| .{ .integer = @intCast(arr.items.len) },
+            .object => |obj| .{ .integer = @intCast(obj.count()) },
+            .string => |s| .{ .integer = @intCast(s.len) },
+            .null => .{ .integer = 0 },
+            .integer => |n| .{ .integer = if (n < 0) -n else n },
+            .float => |f| .{ .float = @abs(f) },
+            else => .{ .integer = 0 },
         };
-        results.append(allocator, .{ .integer = len }) catch return true;
+        results.append(allocator, result) catch return true;
         return true;
     }
 
@@ -831,9 +887,9 @@ fn tryBuiltinFunction(allocator: std.mem.Allocator, value: std.json.Value, filte
                 var entries_arr = std.json.Array.init(allocator);
                 var iter = obj.iterator();
                 while (iter.next()) |entry| {
-                    var entry_obj = std.json.ObjectMap.init(allocator);
-                    entry_obj.put("key", .{ .string = entry.key_ptr.* }) catch return true;
-                    entry_obj.put("value", entry.value_ptr.*) catch return true;
+                    var entry_obj = std.json.ObjectMap.empty;
+                    entry_obj.put(allocator,"key", .{ .string = entry.key_ptr.* }) catch return true;
+                    entry_obj.put(allocator,"value", entry.value_ptr.*) catch return true;
                     entries_arr.append(.{ .object = entry_obj }) catch return true;
                 }
                 results.append(allocator, .{ .array = entries_arr }) catch return true;
@@ -847,7 +903,7 @@ fn tryBuiltinFunction(allocator: std.mem.Allocator, value: std.json.Value, filte
     if (std.mem.eql(u8, filter, "from_entries")) {
         switch (value) {
             .array => |arr| {
-                var obj = std.json.ObjectMap.init(allocator);
+                var obj = std.json.ObjectMap.empty;
                 for (arr.items) |item| {
                     switch (item) {
                         .object => |entry_obj| {
@@ -857,7 +913,7 @@ fn tryBuiltinFunction(allocator: std.mem.Allocator, value: std.json.Value, filte
                                 else => continue,
                             };
                             const val = entry_obj.get("value") orelse .null;
-                            obj.put(key_str, val) catch return true;
+                            obj.put(allocator,key_str, val) catch return true;
                         },
                         else => continue,
                     }
@@ -1185,7 +1241,9 @@ fn tryBuiltinFunction(allocator: std.mem.Allocator, value: std.json.Value, filte
         switch (value) {
             .array => |arr| {
                 var flat = std.json.Array.init(allocator);
-                flattenArray(allocator, arr.items, &flat, 1);
+                // jq's bare `flatten` flattens ALL levels (only `flatten(n)`
+                // limits the depth); use an effectively-unbounded depth.
+                flattenArray(allocator, arr.items, &flat, std.math.maxInt(usize));
                 results.append(allocator, .{ .array = flat }) catch return true;
                 return true;
             },
@@ -1217,27 +1275,33 @@ fn tryBuiltinFunction(allocator: std.mem.Allocator, value: std.json.Value, filte
                 // Check type of first element
                 switch (arr.items[0]) {
                     .integer => {
-                        var sum: i64 = 0;
+                        // Single pass: accumulate as i64 until the first float,
+                        // then promote once so earlier integers are not counted
+                        // twice (the old code re-added arr[1..] wholesale → e.g.
+                        // [1,2.5,3] summed to 9 instead of 6.5).
+                        var isum: i64 = 0;
+                        var fsum: f64 = 0;
+                        var is_float = false;
                         for (arr.items) |item| {
                             switch (item) {
-                                .integer => |n| sum += n,
+                                .integer => |n| {
+                                    if (is_float) fsum += @floatFromInt(n) else isum += n;
+                                },
                                 .float => |f| {
-                                    var fsum: f64 = @floatFromInt(sum);
-                                    fsum += f;
-                                    for (arr.items[1..]) |rest| {
-                                        switch (rest) {
-                                            .integer => |rn| fsum += @floatFromInt(rn),
-                                            .float => |rf| fsum += rf,
-                                            else => {},
-                                        }
+                                    if (!is_float) {
+                                        is_float = true;
+                                        fsum = @floatFromInt(isum);
                                     }
-                                    results.append(allocator, .{ .float = fsum }) catch return true;
-                                    return true;
+                                    fsum += f;
                                 },
                                 else => {},
                             }
                         }
-                        results.append(allocator, .{ .integer = sum }) catch return true;
+                        if (is_float) {
+                            results.append(allocator, .{ .float = fsum }) catch return true;
+                        } else {
+                            results.append(allocator, .{ .integer = isum }) catch return true;
+                        }
                         return true;
                     },
                     .float => {
@@ -1449,14 +1513,14 @@ fn tryBuiltinFunction(allocator: std.mem.Allocator, value: std.json.Value, filte
         const inner = filter["map_values(".len .. filter.len - 1];
         switch (value) {
             .object => |obj| {
-                var new_obj = std.json.ObjectMap.init(allocator);
+                var new_obj = std.json.ObjectMap.empty;
                 var iter = obj.iterator();
                 while (iter.next()) |entry| {
                     var sub_results = std.ArrayListUnmanaged(std.json.Value).empty;
                     defer sub_results.deinit(allocator);
                     evaluateFilter(allocator, entry.value_ptr.*, inner, &sub_results) catch continue;
                     if (sub_results.items.len > 0) {
-                        new_obj.put(entry.key_ptr.*, sub_results.items[0]) catch return true;
+                        new_obj.put(allocator,entry.key_ptr.*, sub_results.items[0]) catch return true;
                     }
                 }
                 results.append(allocator, .{ .object = new_obj }) catch return true;
@@ -1781,7 +1845,7 @@ fn tryBuiltinFunction(allocator: std.mem.Allocator, value: std.json.Value, filte
 
     // env
     if (std.mem.eql(u8, filter, "env")) {
-        const env_obj = std.json.ObjectMap.init(allocator);
+        const env_obj = std.json.ObjectMap.empty;
         // We can't easily enumerate env vars without libc environ, just return empty
         results.append(allocator, .{ .object = env_obj }) catch return true;
         return true;
@@ -1832,12 +1896,12 @@ fn tryBuiltinFunction(allocator: std.mem.Allocator, value: std.json.Value, filte
 fn tryObjectConstruction(allocator: std.mem.Allocator, value: std.json.Value, filter: []const u8, results: *std.ArrayListUnmanaged(std.json.Value)) bool {
     const inner = std.mem.trim(u8, filter[1 .. filter.len - 1], " ");
     if (inner.len == 0) {
-        const obj = std.json.ObjectMap.init(allocator);
+        const obj = std.json.ObjectMap.empty;
         results.append(allocator, .{ .object = obj }) catch return true;
         return true;
     }
 
-    var obj = std.json.ObjectMap.init(allocator);
+    var obj = std.json.ObjectMap.empty;
 
     // Split on commas at depth 0
     var start: usize = 0;
@@ -1897,7 +1961,7 @@ fn tryObjectConstruction(allocator: std.mem.Allocator, value: std.json.Value, fi
                     defer val_results.deinit(allocator);
                     evaluateFilter(allocator, value, val_part, &val_results) catch return false;
                     if (val_results.items.len > 0) {
-                        obj.put(key_str, val_results.items[0]) catch return true;
+                        obj.put(allocator,key_str, val_results.items[0]) catch return true;
                     }
                 } else {
                     // Shorthand: just a key name means {key: .key}
@@ -1905,17 +1969,17 @@ fn tryObjectConstruction(allocator: std.mem.Allocator, value: std.json.Value, fi
                         const k = pair[1 .. pair.len - 1];
                         switch (value) {
                             .object => |vobj| {
-                                obj.put(k, vobj.get(k) orelse .null) catch return true;
+                                obj.put(allocator,k, vobj.get(k) orelse .null) catch return true;
                             },
-                            else => obj.put(k, .null) catch return true,
+                            else => obj.put(allocator,k, .null) catch return true,
                         }
                     } else {
                         // Bare key shorthand
                         switch (value) {
                             .object => |vobj| {
-                                obj.put(pair, vobj.get(pair) orelse .null) catch return true;
+                                obj.put(allocator,pair, vobj.get(pair) orelse .null) catch return true;
                             },
-                            else => obj.put(pair, .null) catch return true,
+                            else => obj.put(allocator,pair, .null) catch return true,
                         }
                     }
                 }
@@ -2362,7 +2426,26 @@ fn jsonEqual(a: std.json.Value, b: std.json.Value) bool {
             .string => |bs| bs,
             else => unreachable,
         }),
-        else => false, // Arrays/objects: simplified
+        // Deep structural equality for composites (tags already match).
+        .array => |aa| blk: {
+            const bb = b.array;
+            if (aa.items.len != bb.items.len) break :blk false;
+            for (aa.items, bb.items) |x, y| {
+                if (!jsonEqual(x, y)) break :blk false;
+            }
+            break :blk true;
+        },
+        .object => |ao| blk: {
+            const bo = b.object;
+            if (ao.count() != bo.count()) break :blk false;
+            var it = ao.iterator();
+            while (it.next()) |e| {
+                const bv = bo.get(e.key_ptr.*) orelse break :blk false;
+                if (!jsonEqual(e.value_ptr.*, bv)) break :blk false;
+            }
+            break :blk true;
+        },
+        else => false,
     };
 }
 
@@ -2520,6 +2603,12 @@ fn jsonToString(allocator: std.mem.Allocator, value: std.json.Value, buf: *[4096
 }
 
 fn outputValue(allocator: std.mem.Allocator, value: std.json.Value, ctx: *OutputContext, depth: usize) void {
+    ctx.any_output = true;
+    ctx.last_falsy = switch (value) {
+        .null => true,
+        .bool => |b| !b,
+        else => false,
+    };
     if (ctx.options.raw_output) {
         switch (value) {
             .string => |s| {
@@ -2589,36 +2678,34 @@ fn outputJson(allocator: std.mem.Allocator, value: std.json.Value, ctx: *OutputC
             }
         },
         .object => |obj| {
-            if (obj.count() == 0) {
+            const total = obj.count();
+            // Ordered key view: insertion order by default, byte-sorted under -S
+            // (jq's --sort-keys). Falls back to insertion order if the scratch
+            // allocation fails.
+            const keys = orderedObjectKeys(allocator, obj, ctx.options.sort_keys);
+            if (total == 0) {
                 writeStdoutRaw("{}");
             } else if (ctx.options.compact) {
                 writeStdoutRaw("{");
-                var first = true;
-                var iter = obj.iterator();
-                while (iter.next()) |entry| {
-                    if (!first) writeStdoutRaw(",");
-                    first = false;
+                for (keys, 0..) |k, i| {
+                    if (i > 0) writeStdoutRaw(",");
                     if (ctx.use_color) writeStdoutRaw(Color.key_color);
-                    outputEscapedString(entry.key_ptr.*);
+                    outputEscapedString(k);
                     if (ctx.use_color) writeStdoutRaw(Color.reset);
                     writeStdoutRaw(":");
-                    outputJson(allocator, entry.value_ptr.*, ctx, depth + 1);
+                    outputJson(allocator, obj.get(k).?, ctx, depth + 1);
                 }
                 writeStdoutRaw("}");
             } else {
                 writeStdoutRaw("{\n");
-                var iter = obj.iterator();
-                var count: usize = 0;
-                const total = obj.count();
-                while (iter.next()) |entry| {
+                for (keys, 0..) |k, i| {
                     outputIndent(ctx, depth + 1);
                     if (ctx.use_color) writeStdoutRaw(Color.key_color);
-                    outputEscapedString(entry.key_ptr.*);
+                    outputEscapedString(k);
                     if (ctx.use_color) writeStdoutRaw(Color.reset);
                     writeStdoutRaw(": ");
-                    outputJson(allocator, entry.value_ptr.*, ctx, depth + 1);
-                    count += 1;
-                    if (count < total) {
+                    outputJson(allocator, obj.get(k).?, ctx, depth + 1);
+                    if (i + 1 < keys.len) {
                         writeStdoutRaw(",");
                     }
                     writeStdoutRaw("\n");
@@ -2637,6 +2724,24 @@ fn outputJson(allocator: std.mem.Allocator, value: std.json.Value, ctx: *OutputC
     if (depth == 0) {
         writeStdout("\n", .{});
     }
+}
+
+const KeyList = struct {
+    fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+        return std.mem.lessThan(u8, a, b);
+    }
+};
+
+/// Return the object's keys in insertion order, or byte-sorted when `sort` is
+/// set (jq's -S/--sort-keys). On allocation failure returns an empty slice.
+fn orderedObjectKeys(allocator: std.mem.Allocator, obj: std.json.ObjectMap, sort: bool) [][]const u8 {
+    const n = obj.count();
+    const keys = allocator.alloc([]const u8, n) catch return &[_][]const u8{};
+    var it = obj.iterator();
+    var i: usize = 0;
+    while (it.next()) |e| : (i += 1) keys[i] = e.key_ptr.*;
+    if (sort) std.mem.sort([]const u8, keys, {}, KeyList.lessThan);
+    return keys;
 }
 
 fn outputIndent(ctx: *OutputContext, depth: usize) void {

@@ -43,6 +43,7 @@ const Condition = struct {
 
 extern "c" fn fork() std.c.pid_t;
 extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
+extern "c" fn usleep(usec: c_uint) c_int;
 
 // Simple I/O helpers
 fn writeStderr(msg: []const u8) void {
@@ -65,12 +66,22 @@ const Config = struct {
     max_procs: usize = 1, // -P: parallel processes
     null_delim: bool = false, // -0: null delimiter
     replace_str: ?[]const u8 = null, // -I: replace string
-    max_chars: usize = 128 * 1024, // -s: max command line length
+    replace_str_owned: bool = false, // whether replace_str was heap-allocated
+    max_chars: usize = 128 * 1024, // -s: max command line length (bytes)
+    max_chars_set: bool = false, // whether -s was given explicitly
     trace: bool = false, // -t: print commands
     prompt: bool = false, // -p: prompt before execution
     no_run_if_empty: bool = false, // -r: skip if no input
-    exit_on_error: bool = false, // -x: exit if command fails
+    exit_if_too_big: bool = false, // -x: exit if an item won't fit -s (GNU semantics)
     verbose: bool = false,
+
+    fn deinit(self: *Config, allocator: std.mem.Allocator) void {
+        for (self.command) |arg| allocator.free(arg);
+        allocator.free(self.command);
+        if (self.replace_str_owned) {
+            if (self.replace_str) |rs| allocator.free(rs);
+        }
+    }
 };
 
 const ArgBatch = struct {
@@ -179,10 +190,8 @@ const WorkerPool = struct {
             self.mutex.unlock();
 
             if (queue_empty and active == 0) break;
-            // Spin wait briefly
-            for (0..1000) |_| {
-                std.atomic.spinLoopHint();
-            }
+            // Yield the CPU between polls instead of busy-spinning a whole core.
+            _ = usleep(500);
         }
     }
 
@@ -266,9 +275,18 @@ fn executeCommand(config: *const Config, args: []const []const u8, allocator: st
     if (config.replace_str) |replace| {
         // For -I mode, we run one command per input item
         // Replace occurrences of replace_str with the argument
+        var worst: u8 = 0;
         for (args) |arg| {
             var final_args: std.ArrayListUnmanaged([]const u8) = .empty;
-            defer final_args.deinit(allocator);
+            // Track, per entry, whether we allocated it (so we can free exactly those).
+            var allocated: std.ArrayListUnmanaged(bool) = .empty;
+            defer {
+                for (final_args.items, allocated.items) |item, was_alloc| {
+                    if (was_alloc) allocator.free(item);
+                }
+                final_args.deinit(allocator);
+                allocated.deinit(allocator);
+            }
 
             for (config.command) |cmd_arg| {
                 if (std.mem.indexOf(u8, cmd_arg, replace)) |_| {
@@ -289,8 +307,10 @@ fn executeCommand(config: *const Config, args: []const []const u8, allocator: st
                         allocator.free(owned);
                         return 1;
                     };
+                    allocated.append(allocator, true) catch return 1;
                 } else {
                     final_args.append(allocator, cmd_arg) catch return 1;
+                    allocated.append(allocator, false) catch return 1;
                 }
             }
 
@@ -299,26 +319,12 @@ fn executeCommand(config: *const Config, args: []const []const u8, allocator: st
             }
 
             const ret = spawnAndWait(final_args.items, allocator);
-
-            // Free allocated replacement strings
-            for (final_args.items, 0..) |item, i| {
-                var found_in_config = false;
-                for (config.command) |cmd_arg| {
-                    if (item.ptr == cmd_arg.ptr) {
-                        found_in_config = true;
-                        break;
-                    }
-                }
-                if (!found_in_config) {
-                    // This was allocated by us
-                    _ = i;
-                    // Note: we'd need to track which were allocated
-                }
-            }
-
-            if (ret != 0 and config.exit_on_error) return ret;
+            if (ret > worst) worst = ret;
+            // Stop immediately on cannot-run / not-found / signal / exit-255,
+            // matching GNU xargs (only a plain 1..125 exit -> 123 keeps going).
+            if (ret != 0 and ret != 123) return ret;
         }
-        return 0;
+        return worst;
     }
 
     // Add input arguments
@@ -334,8 +340,13 @@ fn executeCommand(config: *const Config, args: []const []const u8, allocator: st
 
     if (config.prompt) {
         writeStderr("?...");
+        // stdin has already been fully drained by readInput(); GNU reads the
+        // confirmation from the controlling terminal, so open /dev/tty here.
+        const tty_fd = libc.open("/dev/tty", .{ .ACCMODE = .RDONLY }, @as(libc.mode_t, 0));
+        if (tty_fd < 0) return 0; // no tty -> treat as "no", skip
+        defer _ = libc.close(tty_fd);
         var buf: [16]u8 = undefined;
-        const n = libc.read(libc.STDIN_FILENO, &buf, buf.len);
+        const n = libc.read(tty_fd, &buf, buf.len);
         if (n <= 0 or (buf[0] != 'y' and buf[0] != 'Y')) {
             return 0; // Skip this command
         }
@@ -346,7 +357,29 @@ fn executeCommand(config: *const Config, args: []const []const u8, allocator: st
     return ret;
 }
 
+/// Map a child's raw exit code to the xargs exit-status convention for a single
+/// invocation. Ref: GNU findutils `xargs(1)` EXIT STATUS:
+///   0   all invocations exited 0
+///   123 an invocation exited 1..125
+///   124 an invocation exited 255
+///   125 an invocation was killed by a signal   (handled in spawnAndWait)
+///   126 the command was found but could not be run
+///   127 the command was not found
+fn mapExit(code: u8) u8 {
+    if (code == 0) return 0;
+    if (code == 255) return 124;
+    if (code == 126) return 126; // child _exit(126): exec failed, not ENOENT
+    if (code == 127) return 127; // child _exit(127): ENOENT
+    return 123; // 1..125 (and any other nonzero) -> "command exited nonzero"
+}
+
+/// Fork/exec `args` and wait. Returns the xargs-convention code (see mapExit).
+/// Distinguishes "not found" (127) from "cannot run" (126) in the child by errno,
+/// and reports signal death as 125.
 fn spawnAndWait(args: []const []const u8, allocator: std.mem.Allocator) u8 {
+    // Guard: an empty argv (e.g. `-I{}` with no COMMAND) has no argv[0] to exec.
+    if (args.len == 0) return 126;
+
     // Convert to null-terminated strings for execvp
     const argv = allocator.allocSentinel(?[*:0]const u8, args.len, null) catch return 126;
     defer allocator.free(argv);
@@ -368,7 +401,10 @@ fn spawnAndWait(args: []const []const u8, allocator: std.mem.Allocator) u8 {
     if (pid == 0) {
         // Child process - execvp never returns on success
         _ = execvp(argv[0].?, argv);
-        std.c._exit(127);
+        // exec failed: distinguish "not found" (127) from "cannot run" (126).
+        const e = std.c._errno().*;
+        const enoent = @intFromEnum(std.c.E.NOENT);
+        std.c._exit(if (e == enoent) 127 else 126);
     }
 
     // Parent: wait for child
@@ -380,9 +416,10 @@ fn spawnAndWait(args: []const []const u8, allocator: std.mem.Allocator) u8 {
     // WEXITSTATUS: (status >> 8) & 0xff
     const wstatus: u32 = @bitCast(status);
     if ((wstatus & 0x7f) == 0) {
-        return @intCast((wstatus >> 8) & 0xff);
+        return mapExit(@intCast((wstatus >> 8) & 0xff));
     }
-    return 1;
+    // Killed (or stopped) by a signal.
+    return 125;
 }
 
 fn printCommand(args: []const []const u8) void {
@@ -482,6 +519,14 @@ fn readInput(config: *const Config, allocator: std.mem.Allocator) !InputList {
         }
     }
 
+    // GNU xargs treats an unmatched quote at EOF as a fatal error.
+    if (in_quote) {
+        writeStderr("zxargs: unmatched ");
+        writeStderr(if (quote_char == '"') "double" else "single");
+        writeStderr(" quote\n");
+        return error.UnterminatedQuote;
+    }
+
     // Don't forget the last item
     if (current.items.len > 0) {
         const owned = try allocator.dupe(u8, current.items);
@@ -537,6 +582,7 @@ fn parseArgs(allocator: std.mem.Allocator, init: std.process.Init) !Config {
             i += 1;
             if (i >= args.len) return error.MissingArgument;
             config.replace_str = try allocator.dupe(u8, args[i]);
+            config.replace_str_owned = true;
             config.max_args = 1; // -I implies -n 1
         } else if (std.mem.eql(u8, arg, "-i")) {
             config.replace_str = "{}";
@@ -545,6 +591,7 @@ fn parseArgs(allocator: std.mem.Allocator, init: std.process.Init) !Config {
             i += 1;
             if (i >= args.len) return error.MissingArgument;
             config.max_chars = try std.fmt.parseInt(usize, args[i], 10);
+            config.max_chars_set = true;
         } else if (std.mem.eql(u8, arg, "-t") or std.mem.eql(u8, arg, "--trace")) {
             config.trace = true;
         } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
@@ -556,7 +603,7 @@ fn parseArgs(allocator: std.mem.Allocator, init: std.process.Init) !Config {
         } else if (std.mem.eql(u8, arg, "-r") or std.mem.eql(u8, arg, "--no-run-if-empty")) {
             config.no_run_if_empty = true;
         } else if (std.mem.eql(u8, arg, "-x") or std.mem.eql(u8, arg, "--exit")) {
-            config.exit_on_error = true;
+            config.exit_if_too_big = true;
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             printUsage();
             std.process.exit(0);
@@ -574,19 +621,34 @@ fn parseArgs(allocator: std.mem.Allocator, init: std.process.Init) !Config {
                 }
             } else if (arg.len > 2 and arg[1] == 's') {
                 config.max_chars = try std.fmt.parseInt(usize, arg[2..], 10);
+                config.max_chars_set = true;
             } else if (arg.len > 2 and arg[1] == 'I') {
                 config.replace_str = try allocator.dupe(u8, arg[2..]);
+                config.replace_str_owned = true;
                 config.max_args = 1;
             } else {
                 writeStderr("zxargs: unknown option: ");
                 writeStderr(arg);
                 writeStderr("\n");
-                return error.InvalidArgument;
+                return error.Reported;
             }
         } else {
             // First non-option is the command
             found_command = true;
             try cmd_args.append(allocator, try allocator.dupe(u8, arg));
+        }
+    }
+
+    // GNU xargs rejects `-n0`: "value for -n option should be >= 1".
+    if (config.max_args) |ma| {
+        if (ma == 0) {
+            writeStderr("zxargs: value for -n option should be >= 1\n");
+            for (cmd_args.items) |a| allocator.free(a);
+            cmd_args.deinit(allocator);
+            if (config.replace_str_owned) {
+                if (config.replace_str) |rs| allocator.free(rs);
+            }
+            return error.Reported;
         }
     }
 
@@ -609,9 +671,9 @@ fn printUsage() void {
         \\  -s, --max-chars N    Limit command line to N characters
         \\  -t, --trace          Print commands before executing
         \\  -v, --verbose        Trace mode + show arg count and exit status
-        \\  -p, --interactive    Prompt before each execution
+        \\  -p, --interactive    Prompt (on /dev/tty) before each execution
         \\  -r, --no-run-if-empty  Don't run command if input is empty
-        \\  -x, --exit           Exit if command line length exceeds limit
+        \\  -x, --exit           Exit if a single item won't fit the -s size limit
         \\  -h, --help           Show this help
         \\      --version        Show version
         \\
@@ -635,18 +697,25 @@ fn printUsage() void {
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
 
-    const config = parseArgs(allocator, init) catch |err| {
-        writeStderr("zxargs: ");
-        writeStderr(@errorName(err));
-        writeStderr("\n");
+    var config = parseArgs(allocator, init) catch |err| {
+        // error.Reported means parseArgs already printed a specific message.
+        if (err != error.Reported) {
+            writeStderr("zxargs: ");
+            writeStderr(@errorName(err));
+            writeStderr("\n");
+        }
         std.process.exit(1);
     };
+    defer config.deinit(allocator);
 
     // Read all input items
     var items = readInput(&config, allocator) catch |err| {
-        writeStderr("zxargs: error reading input: ");
-        writeStderr(@errorName(err));
-        writeStderr("\n");
+        // UnterminatedQuote already printed a specific message in readInput.
+        if (err != error.UnterminatedQuote) {
+            writeStderr("zxargs: error reading input: ");
+            writeStderr(@errorName(err));
+            writeStderr("\n");
+        }
         std.process.exit(1);
     };
     defer items.deinit();
@@ -664,23 +733,32 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    // Determine batch size
-    const batch_size = config.max_args orelse items.items.len;
+    // Length of the fixed leading command (each argv entry counts its bytes plus
+    // one for the terminating NUL), used for the -s byte budget.
+    const base_len = commandBaseLen(&config);
 
     if (config.max_procs <= 1) {
         // Sequential execution
+        var worst: u8 = 0;
         var i: usize = 0;
         while (i < items.items.len) {
-            const end = @min(i + batch_size, items.items.len);
+            const end = nextBatchEnd(&config, items.items, i, base_len) catch |err| switch (err) {
+                error.ItemTooBig => {
+                    writeStderr("zxargs: argument line too long\n");
+                    std.process.exit(1);
+                },
+            };
             const batch = items.items[i..end];
 
             const ret = executeCommand(&config, batch, allocator);
-            if (ret != 0 and config.exit_on_error) {
-                std.process.exit(ret);
-            }
+            if (ret > worst) worst = ret;
+            // GNU: stop immediately on cannot-run/not-found/signal/exit-255;
+            // a plain 1..125 exit (-> 123) keeps going and is reported at the end.
+            if (ret != 0 and ret != 123) std.process.exit(ret);
 
             i = end;
         }
+        if (worst != 0) std.process.exit(worst);
     } else {
         // Parallel execution
         const pool = try WorkerPool.init(allocator, &config);
@@ -688,7 +766,12 @@ pub fn main(init: std.process.Init) !void {
 
         var i: usize = 0;
         while (i < items.items.len) {
-            const end = @min(i + batch_size, items.items.len);
+            const end = nextBatchEnd(&config, items.items, i, base_len) catch |err| switch (err) {
+                error.ItemTooBig => {
+                    writeStderr("zxargs: argument line too long\n");
+                    std.process.exit(1);
+                },
+            };
             const batch = items.items[i..end];
 
             try pool.submit(batch);
@@ -697,8 +780,46 @@ pub fn main(init: std.process.Init) !void {
 
         pool.waitForCompletion();
 
-        if (pool.getErrorCount() > 0 and config.exit_on_error) {
+        if (pool.getErrorCount() > 0) {
+            // We do not preserve the exact per-invocation code across threads;
+            // report the generic "an invocation exited nonzero" status.
             std.process.exit(123);
         }
     }
+}
+
+/// Total byte length of the fixed leading command (argv[0..]) for -s accounting:
+/// each entry's bytes plus one for the terminating NUL. Empty command -> "echo".
+fn commandBaseLen(config: *const Config) usize {
+    if (config.command.len == 0) return "echo".len + 1;
+    var total: usize = 0;
+    for (config.command) |arg| total += arg.len + 1;
+    return total;
+}
+
+/// Compute the end index (exclusive) of the batch starting at `start`, honoring
+/// both -n (max_args) and -s (max_chars). Always advances by at least one item so
+/// the loop cannot stall (this also defends against a degenerate 0 batch size).
+/// Ref: GNU findutils xargs -s "maximum number of bytes per command line".
+fn nextBatchEnd(config: *const Config, items: []const []const u8, start: usize, base_len: usize) error{ItemTooBig}!usize {
+    var end = start;
+    var len = base_len;
+    while (end < items.len) {
+        if (config.max_args) |ma| {
+            if (end - start >= ma) break;
+        }
+        const add = items[end].len + 1;
+        if (end == start) {
+            // First item always goes in; but with -x a single oversized item is fatal.
+            if (base_len + add > config.max_chars and config.exit_if_too_big) {
+                return error.ItemTooBig;
+            }
+        } else if (len + add > config.max_chars) {
+            break;
+        }
+        len += add;
+        end += 1;
+    }
+    if (end == start) end = start + 1; // guarantee forward progress
+    return end;
 }

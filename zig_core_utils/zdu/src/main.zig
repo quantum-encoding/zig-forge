@@ -63,6 +63,11 @@ pub const DirStat = struct {
     path: []const u8,
     depth: usize = 0,
     dev: u64 = 0,
+    // Whether this entry is a directory. Used by the parallel walker's
+    // bottom-up accumulation to roll up only directory subtotals into parents;
+    // file blocks are already included in their directory's own subtotal, so
+    // rolling file entries up as well double-counts them.
+    is_dir: bool = false,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -97,6 +102,17 @@ pub fn main(init: std.process.Init) !void {
     // Get start time for stats
     var timer = try Timer.start();
 
+    // One streaming stdout writer for the whole run. Creating a fresh
+    // File.stdout() writer per line seeks back to offset 0 on each positional
+    // write and corrupts redirected output (see output.zig), so we own it here
+    // and flush once at the end.
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var out_buf: [64 * 1024]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &out_buf);
+    const w = &stdout_writer.interface;
+    defer w.flush() catch {};
+
     for (targets) |path| {
         // Use parallel walker for large directories, sequential for small ones
         const num_threads = options.threads orelse (std.Thread.getCpuCount() catch 1);
@@ -117,7 +133,7 @@ pub fn main(init: std.process.Init) !void {
 
             for (result.entries) |entry| {
                 if (shouldPrint(entry, options)) {
-                    output.printEntry(entry, options);
+                    output.printEntry(w, entry, options);
                 }
                 total_entries += 1;
                 if (entry.inodes > 1) {
@@ -144,7 +160,7 @@ pub fn main(init: std.process.Init) !void {
 
             for (result.entries) |entry| {
                 if (shouldPrint(entry, options)) {
-                    output.printEntry(entry, options);
+                    output.printEntry(w, entry, options);
                 }
                 total_entries += 1;
                 if (entry.inodes > 1) {
@@ -160,7 +176,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (options.total and targets.len > 0) {
-        output.printTotal(grand_total, grand_total_blocks, options);
+        output.printTotal(w, grand_total, grand_total_blocks, options);
     }
 
     // Output JSON stats if requested
@@ -174,24 +190,35 @@ pub fn main(init: std.process.Init) !void {
         // blocks are in 512-byte units
         const total_bytes = grand_total_blocks * 512;
 
-        std.debug.print(
-            \\{{"tool":"zdu","version":"0.1.0","target":"{s}","threads":{},"elapsed_ms":{d:.3},"elapsed_s":{d:.6},"total_blocks":{},"total_bytes":{},"total_entries":{},"total_dirs":{},"total_files":{}}}
-            \\
-        , .{
-            if (targets.len > 0) targets[0] else ".",
-            num_threads,
-            elapsed_ms,
-            elapsed_s,
-            grand_total_blocks,
-            total_bytes,
-            total_entries,
-            total_dirs,
-            total_files,
-        });
+        // Build the JSON with the Stringify serializer so string fields (notably
+        // the user-supplied target path, which may contain '"', '\\', or control
+        // chars) are escaped. Interpolating the path into a format-string
+        // template would emit invalid JSON / permit field forgery.
+        const stats = .{
+            .tool = "zdu",
+            .version = "0.1.0",
+            .target = if (targets.len > 0) targets[0] else ".",
+            .threads = num_threads,
+            .elapsed_ms = elapsed_ms,
+            .elapsed_s = elapsed_s,
+            .total_blocks = grand_total_blocks,
+            .total_bytes = total_bytes,
+            .total_entries = total_entries,
+            .total_dirs = total_dirs,
+            .total_files = total_files,
+        };
+        const json = std.json.Stringify.valueAlloc(allocator, stats, .{}) catch {
+            w.flush() catch {};
+            std.process.exit(if (had_errors) 1 else 0);
+        };
+        defer allocator.free(json);
+        std.debug.print("{s}\n", .{json});
     }
 
-    // Exit with code 1 if any errors occurred (like GNU du)
+    // Exit with code 1 if any errors occurred (like GNU du). process.exit does
+    // not run defers, so flush the buffered stdout first or the output is lost.
     if (had_errors) {
+        w.flush() catch {};
         std.process.exit(1);
     }
 }
@@ -205,12 +232,20 @@ fn shouldPrint(entry: DirStat, options: Options) bool {
     // Summarize mode only prints top-level
     if (options.summarize and entry.depth > 0) return false;
 
-    // -a prints all files, otherwise just directories
-    if (!options.all and entry.depth > 0) {
-        // This is simplified - real implementation tracks file vs dir
-    }
-
+    // File-vs-directory print gating is enforced upstream: the walkers only
+    // emit file entries when options.all is set (see walker.walkDir /
+    // parallel.processDirectory), so no -a filtering is needed here.
     return true;
+}
+
+test {
+    // Pull in the unit tests declared in the sibling modules so `zig build test`
+    // (rooted at main.zig) actually runs them -- Zig only runs tests in the root
+    // file plus files referenced from a test block like this one.
+    _ = @import("output.zig");
+    _ = @import("args.zig");
+    _ = @import("walker.zig");
+    _ = @import("stat.zig");
 }
 
 test "options defaults" {

@@ -25,4 +25,15 @@ pub fn build(b: *std.Build) void {
 
     const run_step = b.step("run", "Run zpwd");
     run_step.dependOn(&run_cmd.step);
+
+    // Externally-anchored tests: a harness that diffs zpwd against the real
+    // GNU coreutils `pwd` binary across a spread of flags / env / cwd cases
+    // (see test/gnu_parity.sh). The GNU binary is the external anchor.
+    const parity = b.addSystemCommand(&.{"bash"});
+    parity.addFileArg(b.path("test/gnu_parity.sh"));
+    // Pass the just-built zpwd binary (LazyPath) as the harness argument.
+    parity.addArtifactArg(exe);
+
+    const test_step = b.step("test", "Run GNU-parity tests (diff vs real GNU pwd)");
+    test_step.dependOn(&parity.step);
 }

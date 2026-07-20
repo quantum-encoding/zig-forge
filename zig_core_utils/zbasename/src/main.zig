@@ -31,6 +31,12 @@ fn basename(path: []const u8) []const u8 {
         p = p[0 .. p.len - 1];
     }
 
+    // Root / all-slash path: GNU basename returns "/" (not the empty string).
+    // After stripping, "/", "//", "///" all collapse to a single "/".
+    if (p.len == 1 and p[0] == '/') {
+        return p;
+    }
+
     // Find last slash
     if (std.mem.lastIndexOfScalar(u8, p, '/')) |idx| {
         return p[idx + 1 ..];
@@ -59,13 +65,17 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
 
     var config = Config{};
     var i: usize = 1;
+    var no_more_opts = false;
 
     while (i < args.len) : (i += 1) {
         const arg = args[i];
 
-        if (arg.len > 0 and arg[0] == '-' and arg.len > 1) {
+        if (!no_more_opts and arg.len > 0 and arg[0] == '-' and arg.len > 1) {
             if (arg[1] == '-') {
-                if (std.mem.eql(u8, arg, "--help")) {
+                if (std.mem.eql(u8, arg, "--")) {
+                    // End-of-options sentinel: everything after is an operand.
+                    no_more_opts = true;
+                } else if (std.mem.eql(u8, arg, "--help")) {
                     printHelp();
                     std.process.exit(0);
                 } else if (std.mem.eql(u8, arg, "--version")) {
@@ -119,9 +129,16 @@ fn parseArgs(allocator: std.mem.Allocator, minimal_args: anytype) !Config {
         std.process.exit(1);
     }
 
-    // Traditional mode: basename NAME [SUFFIX]
-    if (!config.multiple and config.suffix == null and config.names.items.len == 2) {
-        config.suffix = config.names.pop();
+    // Traditional mode: basename NAME [SUFFIX]. Without -a/-s, GNU accepts at
+    // most two operands and errors on a third ("extra operand").
+    if (!config.multiple and config.suffix == null) {
+        if (config.names.items.len == 2) {
+            config.suffix = config.names.pop();
+        } else if (config.names.items.len > 2) {
+            std.debug.print("zbasename: extra operand '{s}'\n", .{config.names.items[2]});
+            std.debug.print("Try 'zbasename --help' for more information.\n", .{});
+            std.process.exit(1);
+        }
     }
 
     return config;

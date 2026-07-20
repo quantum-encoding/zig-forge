@@ -21,10 +21,37 @@ const Config = struct {
     set_vars: std.ArrayListUnmanaged([]const u8) = .empty,
     command: ?[]const []const u8 = null,
     chdir_path: ?[]const u8 = null,
+    argv0: ?[]const u8 = null,
 };
 
-/// Split a string into words, respecting single and double quotes
-/// Returns allocated slices that must be freed
+/// Map a GNU `-S` backslash-escape character to its literal byte.
+/// Returns null for escapes with no single-byte expansion (only `\c` today,
+/// which the caller handles as "terminate parsing").
+fn escapeByte(c: u8) ?u8 {
+    return switch (c) {
+        't' => '\t',
+        'n' => '\n',
+        'r' => '\r',
+        'f' => 0x0c, // form feed
+        'v' => 0x0b, // vertical tab
+        '\\' => '\\',
+        '#' => '#',
+        else => c, // unrecognized: keep the char literally (GNU errors; we are lenient)
+    };
+}
+
+/// Split a `-S`/`--split-string` argument into words the way GNU `env` does.
+///
+/// Rules mirrored from GNU coreutils `env.c` (`parse_split_string`):
+///  - Unquoted whitespace (space, tab, newline) separates words.
+///  - Single quotes preserve everything literally (no escapes, no `#`).
+///  - Double quotes group text; backslash escapes are still processed inside.
+///  - Backslash escapes `\t \n \r \f \v \\ \#` expand to their literal byte and
+///    do NOT act as separators (so `a\tb` is a single word containing a tab).
+///  - `\c` terminates parsing entirely (the shebang "stop here" escape).
+///  - `#` at the start of a word begins a comment running to end of string.
+///
+/// Returns allocated slices that must be freed.
 fn splitString(s: []const u8, allocator: std.mem.Allocator) ![][]const u8 {
     var result: std.ArrayListUnmanaged([]const u8) = .empty;
     errdefer {
@@ -37,47 +64,71 @@ fn splitString(s: []const u8, allocator: std.mem.Allocator) ![][]const u8 {
 
     var in_single_quote = false;
     var in_double_quote = false;
-    var escape_next = false;
+    // A word is "active" once any character (or an opening quote) has been seen
+    // for it; used to decide whether `#` starts a comment (only at word start).
+    var word_active = false;
     var i: usize = 0;
 
     while (i < s.len) : (i += 1) {
         const c = s[i];
 
-        if (escape_next) {
-            try current.append(allocator, c);
-            escape_next = false;
-            continue;
-        }
-
+        // Backslash escapes: processed everywhere EXCEPT inside single quotes.
         if (c == '\\' and !in_single_quote) {
-            escape_next = true;
+            if (i + 1 >= s.len) {
+                // Trailing backslash: keep it literally.
+                try current.append(allocator, '\\');
+                word_active = true;
+                continue;
+            }
+            const next = s[i + 1];
+            if (next == 'c') {
+                // \c — stop parsing entirely, flushing any word in progress.
+                if (word_active) {
+                    const word = try allocator.dupe(u8, current.items);
+                    try result.append(allocator, word);
+                    current.clearRetainingCapacity();
+                }
+                return result.toOwnedSlice(allocator);
+            }
+            try current.append(allocator, escapeByte(next) orelse next);
+            word_active = true;
+            i += 1; // consume the escaped char
             continue;
         }
 
         if (c == '\'' and !in_double_quote) {
             in_single_quote = !in_single_quote;
+            word_active = true;
             continue;
         }
 
         if (c == '"' and !in_single_quote) {
             in_double_quote = !in_double_quote;
+            word_active = true;
             continue;
         }
 
         if ((c == ' ' or c == '\t' or c == '\n') and !in_single_quote and !in_double_quote) {
-            if (current.items.len > 0) {
+            if (word_active) {
                 const word = try allocator.dupe(u8, current.items);
                 try result.append(allocator, word);
                 current.clearRetainingCapacity();
+                word_active = false;
             }
             continue;
         }
 
+        // `#` at the start of a word (unquoted) begins a comment to end of string.
+        if (c == '#' and !in_single_quote and !in_double_quote and !word_active) {
+            break;
+        }
+
         try current.append(allocator, c);
+        word_active = true;
     }
 
     // Don't forget last word
-    if (current.items.len > 0) {
+    if (word_active) {
         const word = try allocator.dupe(u8, current.items);
         try result.append(allocator, word);
     }
@@ -85,12 +136,24 @@ fn splitString(s: []const u8, allocator: std.mem.Allocator) ![][]const u8 {
     return result.toOwnedSlice(allocator);
 }
 
+fn writeAll(fd: c_int, msg: []const u8) void {
+    // A single write(2) may transfer fewer bytes than requested (e.g. a full
+    // pipe). Loop until the whole slice is written so output is never silently
+    // truncated.
+    var off: usize = 0;
+    while (off < msg.len) {
+        const n = libc.write(fd, msg.ptr + off, msg.len - off);
+        if (n <= 0) return; // EOF or error; nothing more we can do here
+        off += @intCast(n);
+    }
+}
+
 fn writeStdout(msg: []const u8) void {
-    _ = libc.write(libc.STDOUT_FILENO, msg.ptr, msg.len);
+    writeAll(libc.STDOUT_FILENO, msg);
 }
 
 fn writeStderr(msg: []const u8) void {
-    _ = libc.write(libc.STDERR_FILENO, msg.ptr, msg.len);
+    writeAll(libc.STDERR_FILENO, msg);
 }
 
 fn printUsage() void {
@@ -105,6 +168,7 @@ fn printUsage() void {
         \\  -u, --unset=NAME          Remove variable from the environment
         \\  -C, --chdir=DIR           Change working directory to DIR
         \\  -S, --split-string=S      Split S into arguments (supports quotes)
+        \\  -a, --argv0=ARG           Pass ARG as the zeroth argument of COMMAND
         \\      --help                Display this help and exit
         \\      --version             Output version information and exit
         \\
@@ -120,11 +184,13 @@ fn printUsage() void {
         \\  zenv -S'FOO=x BAR=y cmd'  # Split string into multiple args
         \\
     ;
-    writeStderr(usage);
+    // GNU coreutils writes --help to stdout with exit status 0.
+    writeStdout(usage);
 }
 
 fn printVersion() void {
-    writeStderr("zenv " ++ VERSION ++ " - High-performance environment utility\n");
+    // GNU coreutils writes --version to stdout with exit status 0.
+    writeStdout("zenv " ++ VERSION ++ " - High-performance environment utility\n");
 }
 
 fn parseArgs(args: []const []const u8, allocator: std.mem.Allocator) !Config {
@@ -162,23 +228,31 @@ fn parseArgs(args: []const []const u8, allocator: std.mem.Allocator) !Config {
             } else if (std.mem.eql(u8, arg, "-0") or std.mem.eql(u8, arg, "--null")) {
                 config.null_terminate = true;
             } else if (std.mem.eql(u8, arg, "-u") or std.mem.eql(u8, arg, "--unset")) {
-                if (i >= args.len) {
+                if (extra_idx < extra_args.items.len) {
+                    try config.unset_vars.append(allocator, extra_args.items[extra_idx]);
+                    extra_idx += 1;
+                } else if (i < args.len) {
+                    try config.unset_vars.append(allocator, args[i]);
+                    i += 1;
+                } else {
                     writeStderr("zenv: option '-u' requires an argument\n");
                     return error.MissingArgument;
                 }
-                try config.unset_vars.append(allocator, args[i]);
-                i += 1;
             } else if (std.mem.startsWith(u8, arg, "-u")) {
                 try config.unset_vars.append(allocator, arg[2..]);
             } else if (std.mem.startsWith(u8, arg, "--unset=")) {
                 try config.unset_vars.append(allocator, arg[8..]);
             } else if (std.mem.eql(u8, arg, "-C") or std.mem.eql(u8, arg, "--chdir")) {
-                if (i >= args.len) {
+                if (extra_idx < extra_args.items.len) {
+                    config.chdir_path = extra_args.items[extra_idx];
+                    extra_idx += 1;
+                } else if (i < args.len) {
+                    config.chdir_path = args[i];
+                    i += 1;
+                } else {
                     writeStderr("zenv: option '-C' requires an argument\n");
                     return error.MissingArgument;
                 }
-                config.chdir_path = args[i];
-                i += 1;
             } else if (std.mem.startsWith(u8, arg, "-C")) {
                 config.chdir_path = arg[2..];
             } else if (std.mem.startsWith(u8, arg, "--chdir=")) {
@@ -206,6 +280,22 @@ fn parseArgs(args: []const []const u8, allocator: std.mem.Allocator) !Config {
                     try extra_args.append(allocator, word);
                 }
                 allocator.free(split_words);
+            } else if (std.mem.eql(u8, arg, "-a") or std.mem.eql(u8, arg, "--argv0")) {
+                // Value may come from the -S split stream or the original argv.
+                if (extra_idx < extra_args.items.len) {
+                    config.argv0 = extra_args.items[extra_idx];
+                    extra_idx += 1;
+                } else if (i < args.len) {
+                    config.argv0 = args[i];
+                    i += 1;
+                } else {
+                    writeStderr("zenv: option '-a' requires an argument\n");
+                    return error.MissingArgument;
+                }
+            } else if (std.mem.startsWith(u8, arg, "-a")) {
+                config.argv0 = arg[2..];
+            } else if (std.mem.startsWith(u8, arg, "--argv0=")) {
+                config.argv0 = arg[8..];
             } else if (std.mem.eql(u8, arg, "--help")) {
                 printUsage();
                 std.process.exit(0);
@@ -236,10 +326,23 @@ fn parseArgs(args: []const []const u8, allocator: std.mem.Allocator) !Config {
             // NAME=VALUE assignment
             try config.set_vars.append(allocator, arg);
         } else {
-            // Command and arguments - remaining args from original only
-            if (i > 0 and i <= args.len) {
-                config.command = args[i - 1 ..];
+            // First non-option, non-assignment token: the COMMAND begins here.
+            // Tokens can arrive from two streams (the -S split words in
+            // `extra_args`, then the tail of the original `args`), so we cannot
+            // simply slice `args`. Splicing them the way GNU does — the split
+            // words occupy the position the -S option held — the command is:
+            //   [arg] ++ extra_args[extra_idx..] ++ args[i..]
+            // (`arg` is the current token; whichever stream it came from has
+            // already advanced past it.)
+            var cmd_list: std.ArrayListUnmanaged([]const u8) = .empty;
+            try cmd_list.append(allocator, arg);
+            while (extra_idx < extra_args.items.len) : (extra_idx += 1) {
+                try cmd_list.append(allocator, extra_args.items[extra_idx]);
             }
+            while (i < args.len) : (i += 1) {
+                try cmd_list.append(allocator, args[i]);
+            }
+            config.command = try cmd_list.toOwnedSlice(allocator);
             break;
         }
     }
@@ -299,8 +402,51 @@ fn printEnvironment(config: *const Config) void {
     }
 }
 
-/// Find an executable in PATH, returning null-terminated path if found
-fn findExecutable(cmd: []const u8, path_buf: []u8) ?[*:0]const u8 {
+/// _PATH_DEFPATH — the compiled-in default GNU/BSD uses when PATH is unset.
+const DEFAULT_PATH = "/usr/bin:/bin";
+
+/// Compute the PATH value of the environment zenv is about to hand the child —
+/// NOT the inherited process PATH. GNU env resolves the command against the PATH
+/// of the modified environment, so `-i PATH=/x cmd` and `PATH=/x cmd` must search
+/// /x. Precedence: a `PATH=` in set_vars wins (last one), otherwise the inherited
+/// PATH (unless -i or `-u PATH`), otherwise null (caller falls back to default).
+fn effectivePath(config: *const Config) ?[]const u8 {
+    var result: ?[]const u8 = null;
+
+    if (!config.ignore_env) {
+        var path_unset = false;
+        for (config.unset_vars.items) |name| {
+            if (std.mem.eql(u8, name, "PATH")) {
+                path_unset = true;
+                break;
+            }
+        }
+        if (!path_unset) {
+            var env_idx: usize = 0;
+            while (std.c.environ[env_idx]) |env_entry| : (env_idx += 1) {
+                const env_str = std.mem.span(env_entry);
+                if (std.mem.startsWith(u8, env_str, "PATH=")) {
+                    result = env_str[5..];
+                    break;
+                }
+            }
+        }
+    }
+
+    // set_vars override the inherited value; last assignment wins.
+    for (config.set_vars.items) |set_str| {
+        if (std.mem.startsWith(u8, set_str, "PATH=")) {
+            result = set_str[5..];
+        }
+    }
+
+    return result;
+}
+
+/// Find an executable using `search_path` (the effective child PATH), returning a
+/// null-terminated path if found. When `search_path` is null (no PATH in the
+/// child environment) GNU falls back to _PATH_DEFPATH.
+fn findExecutable(cmd: []const u8, search_path: ?[]const u8, path_buf: []u8) ?[*:0]const u8 {
     // If the command contains a slash, use it directly
     if (std.mem.indexOfScalar(u8, cmd, '/') != null) {
         const path_z = std.fmt.bufPrintZ(path_buf, "{s}", .{cmd}) catch return null;
@@ -310,21 +456,13 @@ fn findExecutable(cmd: []const u8, path_buf: []u8) ?[*:0]const u8 {
         return null;
     }
 
-    // Search PATH
-    var env_idx: usize = 0;
-    while (std.c.environ[env_idx]) |env_entry| : (env_idx += 1) {
-        const env_str = std.mem.span(env_entry);
-        if (std.mem.startsWith(u8, env_str, "PATH=")) {
-            const path_val = env_str[5..];
-            var path_iter = std.mem.splitScalar(u8, path_val, ':');
-            while (path_iter.next()) |dir| {
-                if (dir.len == 0) continue;
-                const full_path = std.fmt.bufPrintZ(path_buf, "{s}/{s}", .{ dir, cmd }) catch continue;
-                if (access(full_path.ptr, X_OK) == 0) {
-                    return full_path.ptr;
-                }
-            }
-            break;
+    const path_val = search_path orelse DEFAULT_PATH;
+    var path_iter = std.mem.splitScalar(u8, path_val, ':');
+    while (path_iter.next()) |dir| {
+        if (dir.len == 0) continue;
+        const full_path = std.fmt.bufPrintZ(path_buf, "{s}/{s}", .{ dir, cmd }) catch continue;
+        if (access(full_path.ptr, X_OK) == 0) {
+            return full_path.ptr;
         }
     }
     return null;
@@ -387,32 +525,27 @@ fn runCommand(config: *const Config, allocator: std.mem.Allocator) !void {
     // Null terminate the env array
     try env_list.append(allocator, null);
 
-    // Change directory if requested
-    if (config.chdir_path) |path| {
-        var path_buf: [4096]u8 = undefined;
-        const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch {
-            writeStderr("zenv: path too long\n");
-            std.process.exit(125);
-        };
-        if (chdir(path_z) != 0) {
-            var err_buf: [256]u8 = undefined;
-            const err_msg = std.fmt.bufPrint(&err_buf, "zenv: cannot change directory to '{s}'\n", .{path}) catch "zenv: cannot change directory\n";
-            writeStderr(err_msg);
-            std.process.exit(125);
-        }
-    }
+    // chdir (if requested) is applied by the caller before we get here.
 
-    // Build argv - need to convert slices to null-terminated strings
+    // Build argv - need to convert slices to null-terminated strings.
+    // -a/--argv0 overrides the zeroth argument handed to the child, but the
+    // executable is still located from the real command name (cmd[0]).
     var argv: std.ArrayListUnmanaged(?[*:0]const u8) = .empty;
-    for (cmd) |arg| {
+    const argv0 = config.argv0 orelse cmd[0];
+    {
+        const arg0_z = try allocator.dupeZ(u8, argv0);
+        try argv.append(allocator, arg0_z.ptr);
+    }
+    for (cmd[1..]) |arg| {
         const arg_z = try allocator.dupeZ(u8, arg);
         try argv.append(allocator, arg_z.ptr);
     }
     try argv.append(allocator, null);
 
-    // Find the executable in PATH
+    // Find the executable using the PATH of the *modified* environment.
+    const search_path = effectivePath(config);
     var exec_path_buf: [4096]u8 = undefined;
-    const exec_path = findExecutable(cmd[0], &exec_path_buf) orelse {
+    const exec_path = findExecutable(cmd[0], search_path, &exec_path_buf) orelse {
         var err_buf: [256]u8 = undefined;
         const err_msg = std.fmt.bufPrint(&err_buf, "zenv: '{s}': No such file or directory\n", .{cmd[0]}) catch "zenv: command not found\n";
         writeStderr(err_msg);
@@ -446,6 +579,22 @@ pub fn main(init: std.process.Init) !void {
     };
     defer config.unset_vars.deinit(allocator);
     defer config.set_vars.deinit(allocator);
+
+    // GNU honors -C/--chdir even when no COMMAND is supplied (and errors if the
+    // directory change fails), so apply it before either branch.
+    if (config.chdir_path) |path| {
+        var path_buf: [4096]u8 = undefined;
+        const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch {
+            writeStderr("zenv: path too long\n");
+            std.process.exit(125);
+        };
+        if (chdir(path_z) != 0) {
+            var err_buf: [4352]u8 = undefined;
+            const err_msg = std.fmt.bufPrint(&err_buf, "zenv: cannot change directory to '{s}'\n", .{path}) catch "zenv: cannot change directory\n";
+            writeStderr(err_msg);
+            std.process.exit(125);
+        }
+    }
 
     if (config.command) |_| {
         try runCommand(&config, allocator);

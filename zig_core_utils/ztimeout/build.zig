@@ -27,7 +27,7 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run ztimeout");
     run_step.dependOn(&run_cmd.step);
 
-    // Unit tests
+    // Unit tests (any inline `test` blocks in main.zig)
     const unit_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
@@ -35,10 +35,27 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-
     const run_unit_tests = b.addRunArtifact(unit_tests);
-    const test_step = b.step("test", "Run unit tests");
+
+    // Externally-anchored GNU-parity tests. They shell out to the freshly
+    // installed ztimeout binary and diff its exit status against the real
+    // GNU `timeout` (gtimeout). The binary path is passed via ZTIMEOUT_BIN,
+    // and the run depends on the install step so the binary exists first.
+    const parity_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/gnu_parity_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true, // for getenv (ZTIMEOUT_BIN override)
+        }),
+    });
+    const run_parity_tests = b.addRunArtifact(parity_tests);
+    run_parity_tests.setEnvironmentVariable("ZTIMEOUT_BIN", b.getInstallPath(.bin, "ztimeout"));
+    run_parity_tests.step.dependOn(b.getInstallStep());
+
+    const test_step = b.step("test", "Run unit + GNU-parity tests");
     test_step.dependOn(&run_unit_tests.step);
+    test_step.dependOn(&run_parity_tests.step);
 
     // Benchmark build (release-fast)
     const bench_exe = b.addExecutable(.{

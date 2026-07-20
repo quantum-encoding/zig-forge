@@ -104,11 +104,38 @@ fn printUsage() void {
         \\  zsort -u file.txt               # Sort and remove duplicates
         \\
     ;
-    writeStderr(usage);
+    // GNU sort writes --help to stdout with exit 0.
+    writeStdout(usage);
 }
 
 fn printVersion() void {
-    writeStderr("zsort " ++ VERSION ++ " - High-performance line sorting\n");
+    // GNU sort writes --version to stdout with exit 0.
+    writeStdout("zsort " ++ VERSION ++ " - High-performance line sorting\n");
+}
+
+fn fatalUnknownShort(c: u8) noreturn {
+    var buf: [64]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "zsort: invalid option -- '{c}'\n", .{c}) catch "zsort: invalid option\n";
+    writeStderr(msg);
+    writeStderr("Try 'zsort --help' for more information.\n");
+    std.process.exit(2);
+}
+
+fn fatalUnknownLong(arg: []const u8) noreturn {
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "zsort: unrecognized option '{s}'\n", .{arg}) catch "zsort: unrecognized option\n";
+    writeStderr(msg);
+    writeStderr("Try 'zsort --help' for more information.\n");
+    std.process.exit(2);
+}
+
+fn writeFd(fd: c_int, msg: []const u8) void {
+    var off: usize = 0;
+    while (off < msg.len) {
+        const n = libc.write(fd, msg.ptr + off, msg.len - off);
+        if (n <= 0) break;
+        off += @intCast(n);
+    }
 }
 
 fn parseArgs(args: []const []const u8, allocator: std.mem.Allocator) !Config {
@@ -173,7 +200,7 @@ fn parseArgs(args: []const []const u8, allocator: std.mem.Allocator) !Config {
                                 try parseKey(args[i], &config.keys, allocator);
                             }
                         },
-                        else => {},
+                        else => fatalUnknownShort(arg[j]),
                     }
                 }
             } else {
@@ -222,6 +249,14 @@ fn parseArgs(args: []const []const u8, allocator: std.mem.Allocator) !Config {
                     if (arg.len > 18) config.field_sep = arg[18];
                 } else if (std.mem.startsWith(u8, arg, "--key=")) {
                     try parseKey(arg[6..], &config.keys, allocator);
+                } else if (std.mem.startsWith(u8, arg, "--random-source=")) {
+                    // Accepted for compatibility; the value is not consumed
+                    // (the -R shuffle uses arc4random, not this source).
+                } else if (std.mem.eql(u8, arg, "--check=quiet") or std.mem.eql(u8, arg, "--check=silent")) {
+                    config.check = true;
+                    config.check_quiet = true;
+                } else {
+                    fatalUnknownLong(arg);
                 }
             }
         } else {
@@ -316,10 +351,16 @@ fn readLines(path: []const u8, config: *const Config, allocator: std.mem.Allocat
 
     var fd: c_int = 0;
     if (!is_stdin) {
-        var path_buf: [4096]u8 = undefined;
-        const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return lines;
+        // Allocate the NUL-terminated path (no fixed-size stack cap).
+        const path_z = try allocator.dupeZ(u8, path);
+        defer allocator.free(path_z);
         fd = libc.open(path_z.ptr, .{ .ACCMODE = .RDONLY }, @as(libc.mode_t, 0));
-        if (fd < 0) return lines;
+        if (fd < 0) {
+            var err_buf: [512]u8 = undefined;
+            const err_msg = std.fmt.bufPrint(&err_buf, "zsort: cannot read: {s}: No such file or directory\n", .{path}) catch "zsort: cannot read\n";
+            writeStderr(err_msg);
+            return error.OpenFailed;
+        }
     }
     defer {
         if (!is_stdin) _ = libc.close(fd);
@@ -360,40 +401,76 @@ fn getField(line: []const u8, field_num: usize, sep: ?u8) []const u8 {
     return getFieldRange(line, field_num, 0, sep);
 }
 
+fn isBlank(c: u8) bool {
+    return c == ' ' or c == '\t';
+}
+
+// GNU semantics for a `-kF[,E]` key.  Two tokenization modes:
+//
+//   * Default (sep == null): fields are separated by the transition from a
+//     non-blank to a blank; runs of blanks are one boundary and the leading
+//     blanks of a field belong to that field (GNU begfield/limfield).
+//   * Explicit (-t SEP): the literal SEP byte separates fields and empty
+//     fields are allowed.
+//
+// F and E are 1-based.  end_field == 0 means "to end of line" (a bare -kF).
 fn getFieldRange(line: []const u8, start_field: usize, end_field: usize, sep: ?u8) []const u8 {
     if (start_field == 0) return line;
 
-    const separator = sep orelse ' ';
-    var field_idx: usize = 0;
-    var start: usize = 0;
-    var field_start: usize = 0;
-    var found_start = false;
-    const actual_end = if (end_field == 0) start_field else end_field;
-
-    for (line, 0..) |c, i| {
-        if (c == separator) {
-            field_idx += 1;
-            if (field_idx == start_field and !found_start) {
-                field_start = start;
-                found_start = true;
+    if (sep) |s| {
+        // Explicit separator: field N is the N-th piece split on `s`.
+        var idx: usize = 0;
+        var field: usize = 1;
+        var begin: usize = 0;
+        // Advance to the start of `start_field`.
+        while (field < start_field and idx < line.len) : (idx += 1) {
+            if (line[idx] == s) {
+                field += 1;
+                begin = idx + 1;
             }
-            if (field_idx == actual_end and found_start) {
-                return line[field_start..i];
-            }
-            start = i + 1;
         }
+        if (field < start_field) return ""; // fewer fields than requested
+        // Find the end: end of piece `end_field`, or end of line.
+        if (end_field == 0) return line[begin..];
+        var end: usize = begin;
+        var efield: usize = start_field;
+        var j: usize = begin;
+        while (j < line.len) : (j += 1) {
+            if (line[j] == s) {
+                if (efield == end_field) {
+                    end = j;
+                    return line[begin..end];
+                }
+                efield += 1;
+            }
+        }
+        return line[begin..];
     }
 
-    // Handle last field
-    if (!found_start and field_idx + 1 == start_field) {
-        field_start = start;
-        found_start = true;
+    // Default blank-run tokenization.
+    // begin(F): from line start, (F-1) times {skip blanks; skip non-blanks}.
+    // The leading blanks of field F are NOT skipped => they belong to it.
+    var i: usize = 0;
+    var f: usize = 0;
+    while (f + 1 < start_field) : (f += 1) {
+        while (i < line.len and isBlank(line[i])) : (i += 1) {}
+        while (i < line.len and !isBlank(line[i])) : (i += 1) {}
     }
-    if (found_start) {
-        return line[field_start..];
-    }
+    const begin = i;
 
-    return "";
+    if (end_field == 0) return line[begin..];
+
+    // endContent(E): from line start, E times {skip blanks; skip non-blanks}.
+    // Lands at the first blank after field E => trailing blanks excluded.
+    var k: usize = 0;
+    var e: usize = 0;
+    while (e < end_field) : (e += 1) {
+        while (k < line.len and isBlank(line[k])) : (k += 1) {}
+        while (k < line.len and !isBlank(line[k])) : (k += 1) {}
+    }
+    const end = k;
+    if (begin >= end) return "";
+    return line[begin..end];
 }
 
 // Strip leading blanks (spaces and tabs)
@@ -440,11 +517,41 @@ fn parseGeneralNumeric(s: []const u8) f64 {
     return std.fmt.parseFloat(f64, trimmed) catch -std.math.inf(f64);
 }
 
-// Compare two values with given options
-fn compareWithOptions(
+fn invertOrder(o: std.math.Order) std.math.Order {
+    return switch (o) {
+        .lt => .gt,
+        .gt => .lt,
+        .eq => .eq,
+    };
+}
+
+// Parse the longest leading numeric prefix of `s` after skipping leading
+// blanks (GNU `-n` semantics: implicit leading-blank skip, longest numeric
+// prefix, trailing non-numeric text ignored).  Non-numeric => 0.
+fn parseNumericPrefix(s: []const u8) f64 {
+    var i: usize = 0;
+    while (i < s.len and (s[i] == ' ' or s[i] == '\t')) : (i += 1) {}
+    const start = i;
+    if (i < s.len and (s[i] == '-' or s[i] == '+')) i += 1;
+    var seen_digit = false;
+    while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) {
+        seen_digit = true;
+    }
+    if (i < s.len and s[i] == '.') {
+        i += 1;
+        while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) {
+            seen_digit = true;
+        }
+    }
+    if (!seen_digit) return 0;
+    return std.fmt.parseFloat(f64, s[start..i]) catch 0;
+}
+
+// Natural (ascending, reverse-free) comparison of two byte strings honoring
+// the fold/dictionary/ignore-nonprinting options.
+fn compareContent(
     cmp_a: []const u8,
     cmp_b: []const u8,
-    reverse: bool,
     ignore_case: bool,
     ignore_blanks: bool,
     dict_order: bool,
@@ -453,18 +560,15 @@ fn compareWithOptions(
     var a = cmp_a;
     var b = cmp_b;
 
-    // Strip leading blanks if requested
     if (ignore_blanks) {
         a = stripLeadingBlanks(a);
         b = stripLeadingBlanks(b);
     }
 
-    // Compare character by character with filtering
     var ia: usize = 0;
     var ib: usize = 0;
 
     while (true) {
-        // Skip non-matching characters based on options
         if (dict_order) {
             while (ia < a.len and !isDictChar(a[ia])) : (ia += 1) {}
             while (ib < b.len and !isDictChar(b[ib])) : (ib += 1) {}
@@ -474,8 +578,8 @@ fn compareWithOptions(
         }
 
         if (ia >= a.len and ib >= b.len) return .eq;
-        if (ia >= a.len) return if (reverse) .gt else .lt;
-        if (ib >= b.len) return if (reverse) .lt else .gt;
+        if (ia >= a.len) return .lt;
+        if (ib >= b.len) return .gt;
 
         var ca = a[ia];
         var cb = b[ib];
@@ -485,13 +589,7 @@ fn compareWithOptions(
             cb = std.ascii.toLower(cb);
         }
 
-        if (ca != cb) {
-            if (reverse) {
-                return if (ca > cb) .lt else .gt;
-            } else {
-                return if (ca < cb) .lt else .gt;
-            }
-        }
+        if (ca != cb) return if (ca < cb) .lt else .gt;
 
         ia += 1;
         ib += 1;
@@ -622,12 +720,14 @@ fn parseHumanNumeric(s: []const u8) f64 {
     return base_val;
 }
 
-fn compareLines(config: *const Config, a: []const u8, b: []const u8) bool {
-    // Get comparison strings (possibly field-specific)
+// Ascending comparison of the SORT KEY only (no last-resort whole-line
+// tiebreak).  Per-key `r` (and global `-r`) are applied here so that the sort
+// order is correct; note that `.eq` is unaffected by reversal, so callers can
+// use `keyOrder(...) == .eq` for `-u` key-equality regardless of `-r`.
+fn keyOrder(config: *const Config, a: []const u8, b: []const u8) std.math.Order {
     var cmp_a = a;
     var cmp_b = b;
 
-    // Determine effective options (from key or global config)
     var reverse = config.reverse;
     var numeric = config.numeric;
     var ignore_case = config.ignore_case;
@@ -641,20 +741,17 @@ fn compareLines(config: *const Config, a: []const u8, b: []const u8) bool {
         cmp_a = getFieldRange(a, key.field, key.end_field, config.field_sep);
         cmp_b = getFieldRange(b, key.field, key.end_field, config.field_sep);
 
-        // Apply character offset if specified
         if (key.start_char > 0) {
             const offset = key.start_char - 1; // 1-indexed
             if (offset < cmp_a.len) cmp_a = cmp_a[offset..] else cmp_a = "";
             if (offset < cmp_b.len) cmp_b = cmp_b[offset..] else cmp_b = "";
         }
 
-        // Apply end character position
         if (key.end_char > 0) {
             if (key.end_char < cmp_a.len) cmp_a = cmp_a[0..key.end_char];
             if (key.end_char < cmp_b.len) cmp_b = cmp_b[0..key.end_char];
         }
 
-        // Key-specific options override global
         if (key.reverse) reverse = true;
         if (key.numeric) numeric = true;
         if (key.ignore_case) ignore_case = true;
@@ -664,80 +761,79 @@ fn compareLines(config: *const Config, a: []const u8, b: []const u8) bool {
         if (key.ignore_nonprinting) ignore_nonprint = true;
     }
 
-    // Month sort
+    var ord: std.math.Order = .eq;
+
     if (config.month_sort) {
         const ma = parseMonth(cmp_a);
         const mb = parseMonth(cmp_b);
-        if (ma != mb) {
-            return if (reverse) ma > mb else ma < mb;
-        }
-        // Fall through to last-resort comparison
-        return std.mem.order(u8, a, b) == .lt;
-    }
-
-    // Human-readable numeric sort
-    if (config.human_numeric_sort) {
+        ord = std.math.order(ma, mb);
+    } else if (config.human_numeric_sort) {
         const ha = parseHumanNumeric(cmp_a);
         const hb = parseHumanNumeric(cmp_b);
-        if (ha != hb) {
-            return if (reverse) ha > hb else ha < hb;
+        ord = if (ha < hb) .lt else if (ha > hb) .gt else .eq;
+    } else if (config.version_sort) {
+        ord = compareVersionStrings(cmp_a, cmp_b);
+    } else if (general_numeric) {
+        const na = parseGeneralNumeric(cmp_a);
+        const nb = parseGeneralNumeric(cmp_b);
+        const a_nan = std.math.isNan(na);
+        const b_nan = std.math.isNan(nb);
+        // GNU places NaN first (smallest) in ascending order.
+        if (a_nan and b_nan) {
+            ord = .eq;
+        } else if (a_nan) {
+            ord = .lt;
+        } else if (b_nan) {
+            ord = .gt;
+        } else {
+            ord = if (na < nb) .lt else if (na > nb) .gt else .eq;
         }
-        // Fall through to last-resort comparison
-        return std.mem.order(u8, a, b) == .lt;
+    } else if (numeric) {
+        const na = parseNumericPrefix(cmp_a);
+        const nb = parseNumericPrefix(cmp_b);
+        ord = if (na < nb) .lt else if (na > nb) .gt else .eq;
+    } else {
+        ord = compareContent(cmp_a, cmp_b, ignore_case, ignore_blanks, dict_order, ignore_nonprint);
     }
 
-    // Version sort (natural sorting of version numbers)
-    if (config.version_sort) {
-        const ver_order = compareVersionStrings(cmp_a, cmp_b);
-        return if (reverse) ver_order == .gt else ver_order == .lt;
-    }
-
-    // General numeric sort (handles scientific notation, NaN, Inf)
-    if (general_numeric) {
-        const num_a = parseGeneralNumeric(cmp_a);
-        const num_b = parseGeneralNumeric(cmp_b);
-        // Handle NaN: NaN values sort after all others
-        const a_nan = std.math.isNan(num_a);
-        const b_nan = std.math.isNan(num_b);
-        if (a_nan and b_nan) return false; // Equal
-        if (a_nan) return reverse; // NaN goes last (or first if reverse)
-        if (b_nan) return !reverse;
-        return if (reverse) num_a > num_b else num_a < num_b;
-    }
-
-    // Numeric sort
-    if (numeric) {
-        var parse_a = cmp_a;
-        var parse_b = cmp_b;
-        if (ignore_blanks) {
-            parse_a = stripLeadingBlanks(parse_a);
-            parse_b = stripLeadingBlanks(parse_b);
-        }
-        const num_a = std.fmt.parseFloat(f64, parse_a) catch 0;
-        const num_b = std.fmt.parseFloat(f64, parse_b) catch 0;
-        if (num_a != num_b) {
-            return if (reverse) num_a > num_b else num_a < num_b;
-        }
-        // Fall through to last-resort comparison
-        return std.mem.order(u8, a, b) == .lt;
-    }
-
-    // String comparison with options
-    const order = compareWithOptions(cmp_a, cmp_b, reverse, ignore_case, ignore_blanks, dict_order, ignore_nonprint);
-    if (order != .eq) return order == .lt;
-
-    // Last-resort: compare full lines for stable ordering
-    return std.mem.order(u8, a, b) == .lt;
+    if (reverse) ord = invertOrder(ord);
+    return ord;
 }
 
-fn checkSorted(lines: []const []const u8, config: *const Config) bool {
+// True iff a and b compare equal under the active sort key (for -u).
+fn keysEqual(config: *const Config, a: []const u8, b: []const u8) bool {
+    return keyOrder(config, a, b) == .eq;
+}
+
+fn compareLines(config: *const Config, a: []const u8, b: []const u8) bool {
+    const ord = keyOrder(config, a, b);
+    if (ord != .eq) return ord == .lt;
+
+    // Keys compare equal.  GNU disables the last-resort whole-line comparison
+    // when -s (stable) OR -u (unique) is in effect and relies on its stable
+    // sort to keep equal-key lines in input order (so -u keeps the first input
+    // line of each equal-key group).
+    if (config.stable or config.unique) return false;
+
+    // Last-resort: compare whole lines.  GNU reverses this too under global -r.
+    const lr = std.mem.order(u8, a, b);
+    if (config.reverse) return lr == .gt;
+    return lr == .lt;
+}
+
+fn checkSorted(lines: []const []const u8, config: *const Config, file: []const u8) bool {
     if (lines.len < 2) return true;
 
     for (1..lines.len) |i| {
         if (compareLines(config, lines[i], lines[i - 1])) {
             if (!config.check_quiet) {
-                var err_buf: [256]u8 = undefined;
-                const err_msg = std.fmt.bufPrint(&err_buf, "zsort: disorder: {s}\n", .{lines[i]}) catch "zsort: disorder\n";
+                // GNU emits `sort: FILE:LINENO: disorder: LINE`.
+                var err_buf: [512]u8 = undefined;
+                const err_msg = std.fmt.bufPrint(
+                    &err_buf,
+                    "zsort: {s}:{d}: disorder: {s}\n",
+                    .{ file, i + 1, lines[i] },
+                ) catch "zsort: disorder\n";
                 writeStderr(err_msg);
             }
             return false;
@@ -773,8 +869,16 @@ pub fn main(init: std.process.Init) !void {
         all_lines.deinit(allocator);
     }
 
+    // GNU exits 2 on unreadable files but still sorts what it could read.
+    var read_error = false;
     for (config.files.items) |path| {
-        var file_lines = try readLines(path, &config, allocator);
+        var file_lines = readLines(path, &config, allocator) catch |err| switch (err) {
+            error.OpenFailed => {
+                read_error = true;
+                continue;
+            },
+            else => return err,
+        };
         defer file_lines.deinit(allocator);
         for (file_lines.items) |line| {
             try all_lines.append(allocator, line);
@@ -783,7 +887,8 @@ pub fn main(init: std.process.Init) !void {
 
     // Check mode
     if (config.check) {
-        const is_sorted = checkSorted(all_lines.items, &config);
+        const check_file = if (config.files.items.len > 0) config.files.items[0] else "-";
+        const is_sorted = checkSorted(all_lines.items, &config, check_file);
         std.process.exit(if (is_sorted) 0 else 1);
     }
 
@@ -815,21 +920,55 @@ pub fn main(init: std.process.Init) !void {
             }
         };
 
-        std.mem.sortUnstable([]const u8, all_lines.items, SortContext{ .cfg = &config }, SortContext.lessThan);
+        if (config.stable or config.unique) {
+            // Stable sort so equal-key lines keep their input order (matches
+            // GNU, whose sort is stable and whose last-resort compare is off
+            // under -s/-u).
+            std.mem.sort([]const u8, all_lines.items, SortContext{ .cfg = &config }, SortContext.lessThan);
+        } else {
+            std.mem.sortUnstable([]const u8, all_lines.items, SortContext{ .cfg = &config }, SortContext.lessThan);
+        }
     }
 
-    // Output
+    // Assemble output into a buffer (so -o out.txt where out.txt is also an
+    // input file is safe — all input has already been read).
     const terminator: []const u8 = if (config.zero_terminated) "\x00" else "\n";
+    var out_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer out_buf.deinit(allocator);
     var prev_line: ?[]const u8 = null;
 
     for (all_lines.items) |line| {
         if (config.unique) {
             if (prev_line) |prev| {
-                if (std.mem.eql(u8, line, prev)) continue;
+                // GNU -u dedups by SORT-KEY equality, not full-line bytes.
+                if (keysEqual(&config, line, prev)) continue;
             }
         }
-        writeStdout(line);
-        writeStdout(terminator);
+        try out_buf.appendSlice(allocator, line);
+        try out_buf.appendSlice(allocator, terminator);
         prev_line = line;
     }
+
+    // Write to -o FILE if given, else stdout.
+    if (config.output_file) |ofile| {
+        const ofz = try allocator.dupeZ(u8, ofile);
+        defer allocator.free(ofz);
+        const out_fd = libc.open(
+            ofz.ptr,
+            .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true },
+            @as(libc.mode_t, 0o644),
+        );
+        if (out_fd < 0) {
+            var err_buf: [512]u8 = undefined;
+            const err_msg = std.fmt.bufPrint(&err_buf, "zsort: open failed: {s}\n", .{ofile}) catch "zsort: open failed\n";
+            writeStderr(err_msg);
+            std.process.exit(2);
+        }
+        defer _ = libc.close(out_fd);
+        writeFd(out_fd, out_buf.items);
+    } else {
+        writeFd(libc.STDOUT_FILENO, out_buf.items);
+    }
+
+    if (read_error) std.process.exit(2);
 }

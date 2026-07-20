@@ -20,7 +20,9 @@ const stego = @import("stego.zig");
 /// Cross-platform cryptographic random bytes. SYS_getrandom on Linux
 /// (works for both gnu/musl and Android-Bionic without an API-level
 /// gate); arc4random on Darwin/BSD; /dev/urandom otherwise.
-fn fillRandomBytes(buf: []u8) void {
+pub const RandomError = error{RandomFailure};
+
+fn fillRandomBytes(buf: []u8) RandomError!void {
     switch (builtin.os.tag) {
         .macos, .ios, .tvos, .watchos, .freebsd, .netbsd, .openbsd, .dragonfly => {
             std.c.arc4random_buf(buf.ptr, buf.len);
@@ -29,21 +31,20 @@ fn fillRandomBytes(buf: []u8) void {
             var filled: usize = 0;
             while (filled < buf.len) {
                 const rc = std.os.linux.getrandom(buf.ptr + filled, buf.len - filled, 0);
-                if (rc == 0) break;
-                if (@as(isize, @bitCast(rc)) < 0) break;
+                if (rc == 0) return error.RandomFailure;
+                if (@as(isize, @bitCast(rc)) < 0) return error.RandomFailure;
                 filled += rc;
             }
         },
         else => {
             const fd = std.c.open("/dev/urandom", .{ .ACCMODE = .RDONLY }, 0);
-            if (fd >= 0) {
-                defer _ = std.c.close(fd);
-                var filled: usize = 0;
-                while (filled < buf.len) {
-                    const n = std.c.read(fd, buf.ptr + filled, buf.len - filled);
-                    if (n <= 0) break;
-                    filled += @intCast(n);
-                }
+            if (fd < 0) return error.RandomFailure;
+            defer _ = std.c.close(fd);
+            var filled: usize = 0;
+            while (filled < buf.len) {
+                const n = std.c.read(fd, buf.ptr + filled, buf.len - filled);
+                if (n <= 0) return error.RandomFailure;
+                filled += @intCast(n);
             }
         },
     }
@@ -73,41 +74,46 @@ pub const TicketData = struct {
     /// Ed25519 signature of ticket data by organizer
     signature: []const u8,
 
-    /// Serialize ticket to simple text format (key=value lines)
+    /// A field value may not contain a control character (in particular the
+    /// '\n' record separator), otherwise it could inject or override other
+    /// key=value lines when the ticket is parsed back. Reject rather than
+    /// silently mangle.
+    fn appendField(buf: *std.ArrayList(u8), allocator: Allocator, key: []const u8, value: []const u8) !void {
+        for (value) |c| {
+            if (c < 0x20) return error.InvalidTicketField;
+        }
+        try buf.appendSlice(allocator, key);
+        try buf.append(allocator, '=');
+        try buf.appendSlice(allocator, value);
+        try buf.append(allocator, '\n');
+    }
+
+    /// Serialize ticket to simple text format (key=value lines).
+    /// String fields are validated to contain no control characters so a
+    /// value can never inject a second field on the receiving parse; the
+    /// output is heap-grown so there is no fixed per-field length limit.
     pub fn toBytes(self: TicketData, allocator: Allocator) ![]u8 {
         var buf: std.ArrayList(u8) = .empty;
         errdefer buf.deinit(allocator);
 
-        // Simple line-based format
         try buf.appendSlice(allocator, "ZSSS_TICKET_V1\n");
 
-        var line: [512]u8 = undefined;
-        const event_line = std.fmt.bufPrint(&line, "event_id={s}\n", .{self.event_id}) catch return error.BufferTooSmall;
-        try buf.appendSlice(allocator, event_line);
+        try appendField(&buf, allocator, "event_id", self.event_id);
+        try appendField(&buf, allocator, "ticket_id", self.ticket_id);
 
-        const ticket_line = std.fmt.bufPrint(&line, "ticket_id={s}\n", .{self.ticket_id}) catch return error.BufferTooSmall;
-        try buf.appendSlice(allocator, ticket_line);
+        var num_buf: [24]u8 = undefined;
+        const issued_str = std.fmt.bufPrint(&num_buf, "{d}", .{self.issued_at}) catch unreachable;
+        try appendField(&buf, allocator, "issued_at", issued_str);
 
-        const issued_line = std.fmt.bufPrint(&line, "issued_at={d}\n", .{self.issued_at}) catch return error.BufferTooSmall;
-        try buf.appendSlice(allocator, issued_line);
-
-        if (self.seat) |seat| {
-            const seat_line = std.fmt.bufPrint(&line, "seat={s}\n", .{seat}) catch return error.BufferTooSmall;
-            try buf.appendSlice(allocator, seat_line);
-        }
-
-        if (self.tier) |tier| {
-            const tier_line = std.fmt.bufPrint(&line, "tier={s}\n", .{tier}) catch return error.BufferTooSmall;
-            try buf.appendSlice(allocator, tier_line);
-        }
+        if (self.seat) |seat| try appendField(&buf, allocator, "seat", seat);
+        if (self.tier) |tier| try appendField(&buf, allocator, "tier", tier);
 
         if (self.expires_at) |exp| {
-            const exp_line = std.fmt.bufPrint(&line, "expires_at={d}\n", .{exp}) catch return error.BufferTooSmall;
-            try buf.appendSlice(allocator, exp_line);
+            const exp_str = std.fmt.bufPrint(&num_buf, "{d}", .{exp}) catch unreachable;
+            try appendField(&buf, allocator, "expires_at", exp_str);
         }
 
-        const sig_line = std.fmt.bufPrint(&line, "signature={s}\n", .{self.signature}) catch return error.BufferTooSmall;
-        try buf.appendSlice(allocator, sig_line);
+        try appendField(&buf, allocator, "signature", self.signature);
 
         return buf.toOwnedSlice(allocator);
     }
@@ -224,7 +230,7 @@ pub const TicketError = error{
 /// Generate a cryptographically secure ticket ID
 pub fn generateTicketId(allocator: Allocator) ![]u8 {
     var random_bytes: [16]u8 = undefined;
-    fillRandomBytes(&random_bytes);
+    try fillRandomBytes(&random_bytes);
 
     const hex = try allocator.alloc(u8, 32);
     const hex_array = std.fmt.bytesToHex(random_bytes, .lower);
@@ -238,7 +244,7 @@ pub fn generatePassword(allocator: Allocator, length: usize) ![]u8 {
     const password = try allocator.alloc(u8, length);
 
     var random_bytes: [256]u8 = undefined;
-    fillRandomBytes(random_bytes[0..length]);
+    try fillRandomBytes(random_bytes[0..length]);
 
     for (password, 0..) |*c, i| {
         c.* = charset[random_bytes[i] % charset.len];

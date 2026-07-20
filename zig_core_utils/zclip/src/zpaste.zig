@@ -145,7 +145,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // Paste from clipboard
-    const data = clipboard.paste(allocator, config.selection) catch |err| {
+    const data = clipboard.paste(init.io, allocator, config.selection) catch |err| {
         var writer = Writer.stderr();
         switch (err) {
             error.NoBackendAvailable => writer.write("zpaste: no clipboard backend\n"),

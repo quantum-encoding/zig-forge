@@ -58,6 +58,74 @@ fn writeStdoutRaw(data: []const u8) void {
     }
 }
 
+/// Extract the value of a long option that takes a required argument, accepting
+/// both `--opt=VALUE` and `--opt VALUE` (space-separated) forms. Advances `i`
+/// past the consumed value for the space form. Returns null when `arg` is not
+/// this option. Exits with GNU's status 1 when the space form has no value.
+fn optValue(args: []const []const u8, i: *usize, name: []const u8) ?[]const u8 {
+    const arg = args[i.*];
+    if (!std.mem.startsWith(u8, arg, name)) return null;
+    if (arg.len == name.len) {
+        // `--opt VALUE`
+        if (i.* + 1 >= args.len) {
+            writeStderr("znumfmt: option '{s}' requires an argument\n", .{name});
+            std.process.exit(1);
+        }
+        i.* += 1;
+        return args[i.*];
+    }
+    if (arg[name.len] == '=') return arg[name.len + 1 ..];
+    return null;
+}
+
+fn parseFormat(v: []const u8, opt: []const u8) Format {
+    if (std.mem.eql(u8, v, "none")) return .none;
+    if (std.mem.eql(u8, v, "auto")) return .auto;
+    if (std.mem.eql(u8, v, "si")) return .si;
+    if (std.mem.eql(u8, v, "iec")) return .iec;
+    if (std.mem.eql(u8, v, "iec-i")) return .iec_i;
+    writeStderr("znumfmt: invalid {s} format: '{s}'\n", .{ opt, v });
+    std.process.exit(1);
+}
+
+fn parseUnit(v: []const u8, opt: []const u8) u64 {
+    return std.fmt.parseInt(u64, v, 10) catch {
+        writeStderr("znumfmt: invalid {s}: '{s}'\n", .{ opt, v });
+        std.process.exit(1);
+    };
+}
+
+fn parseRound(v: []const u8) Round {
+    if (std.mem.eql(u8, v, "up")) return .up;
+    if (std.mem.eql(u8, v, "down")) return .down;
+    if (std.mem.eql(u8, v, "from-zero")) return .from_zero;
+    if (std.mem.eql(u8, v, "towards-zero")) return .towards_zero;
+    if (std.mem.eql(u8, v, "nearest")) return .nearest;
+    writeStderr("znumfmt: invalid rounding method: '{s}'\n", .{v});
+    std.process.exit(1);
+}
+
+fn parseInvalid(v: []const u8) InvalidMode {
+    if (std.mem.eql(u8, v, "abort")) return .abort;
+    if (std.mem.eql(u8, v, "fail")) return .fail;
+    if (std.mem.eql(u8, v, "warn")) return .warn;
+    if (std.mem.eql(u8, v, "ignore")) return .ignore;
+    writeStderr("znumfmt: invalid --invalid mode: '{s}'\n", .{v});
+    std.process.exit(1);
+}
+
+/// Round `x` per the selected mode. `@round` matches C `round()` (ties away
+/// from zero), which is GNU numfmt's `nearest`.
+fn applyRound(x: f64, mode: Round) f64 {
+    return switch (mode) {
+        .up => @ceil(x),
+        .down => @floor(x),
+        .towards_zero => @trunc(x),
+        .nearest => @round(x),
+        .from_zero => if (x < 0) @floor(x) else @ceil(x),
+    };
+}
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
 
@@ -96,118 +164,89 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--version")) {
             writeStdout("znumfmt {s}\n", .{VERSION});
             return;
-        } else if (std.mem.eql(u8, arg, "--from=auto")) {
-            from_format = .auto;
-        } else if (std.mem.eql(u8, arg, "--from=si")) {
-            from_format = .si;
-        } else if (std.mem.eql(u8, arg, "--from=iec")) {
-            from_format = .iec;
-        } else if (std.mem.eql(u8, arg, "--from=iec-i")) {
-            from_format = .iec_i;
-        } else if (std.mem.eql(u8, arg, "--from=none")) {
-            from_format = .none;
-        } else if (std.mem.startsWith(u8, arg, "--from=")) {
-            writeStderr("znumfmt: invalid --from format: '{s}'\n", .{arg[7..]});
-            std.process.exit(1);
-        } else if (std.mem.eql(u8, arg, "--to=auto")) {
-            to_format = .auto;
-        } else if (std.mem.eql(u8, arg, "--to=si")) {
-            to_format = .si;
-        } else if (std.mem.eql(u8, arg, "--to=iec")) {
-            to_format = .iec;
-        } else if (std.mem.eql(u8, arg, "--to=iec-i")) {
-            to_format = .iec_i;
-        } else if (std.mem.eql(u8, arg, "--to=none")) {
-            to_format = .none;
-        } else if (std.mem.startsWith(u8, arg, "--to=")) {
-            writeStderr("znumfmt: invalid --to format: '{s}'\n", .{arg[5..]});
-            std.process.exit(1);
-        } else if (std.mem.startsWith(u8, arg, "--from-unit=")) {
-            from_unit = std.fmt.parseInt(u64, arg[12..], 10) catch {
-                writeStderr("znumfmt: invalid --from-unit: '{s}'\n", .{arg[12..]});
-                std.process.exit(1);
-            };
-        } else if (std.mem.startsWith(u8, arg, "--to-unit=")) {
-            to_unit = std.fmt.parseInt(u64, arg[10..], 10) catch {
-                writeStderr("znumfmt: invalid --to-unit: '{s}'\n", .{arg[10..]});
-                std.process.exit(1);
-            };
-        } else if (std.mem.startsWith(u8, arg, "--padding=")) {
-            padding = std.fmt.parseInt(i32, arg[10..], 10) catch {
-                writeStderr("znumfmt: invalid --padding: '{s}'\n", .{arg[10..]});
+        } else if (optValue(args, &i, "--from")) |v| {
+            from_format = parseFormat(v, "--from");
+        } else if (optValue(args, &i, "--to")) |v| {
+            to_format = parseFormat(v, "--to");
+        } else if (optValue(args, &i, "--from-unit")) |v| {
+            from_unit = parseUnit(v, "--from-unit");
+        } else if (optValue(args, &i, "--to-unit")) |v| {
+            to_unit = parseUnit(v, "--to-unit");
+        } else if (optValue(args, &i, "--padding")) |v| {
+            padding = std.fmt.parseInt(i32, v, 10) catch {
+                writeStderr("znumfmt: invalid padding value '{s}'\n", .{v});
                 std.process.exit(1);
             };
         } else if (std.mem.eql(u8, arg, "--grouping")) {
             grouping = true;
-        } else if (std.mem.eql(u8, arg, "--round=up")) {
-            round_mode = .up;
-        } else if (std.mem.eql(u8, arg, "--round=down")) {
-            round_mode = .down;
-        } else if (std.mem.eql(u8, arg, "--round=from-zero")) {
-            round_mode = .from_zero;
-        } else if (std.mem.eql(u8, arg, "--round=towards-zero")) {
-            round_mode = .towards_zero;
-        } else if (std.mem.eql(u8, arg, "--round=nearest")) {
-            round_mode = .nearest;
-        } else if (std.mem.startsWith(u8, arg, "--suffix=")) {
-            suffix = arg[9..];
-        } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--delimiter")) {
+        } else if (optValue(args, &i, "--round")) |v| {
+            round_mode = parseRound(v);
+        } else if (optValue(args, &i, "--suffix")) |v| {
+            suffix = v;
+        } else if (std.mem.eql(u8, arg, "-d")) {
             i += 1;
             if (i >= args.len) {
                 writeStderr("znumfmt: option requires an argument -- 'd'\n", .{});
                 std.process.exit(1);
             }
             if (args[i].len > 0) delimiter = args[i][0];
-        } else if (std.mem.startsWith(u8, arg, "--delimiter=")) {
-            if (arg.len > 12) delimiter = arg[12];
-        } else if (std.mem.startsWith(u8, arg, "--field=")) {
-            field = std.fmt.parseInt(usize, arg[8..], 10) catch {
-                writeStderr("znumfmt: invalid --field: '{s}'\n", .{arg[8..]});
+        } else if (arg.len > 2 and arg[0] == '-' and arg[1] == 'd') {
+            // Attached short-option value, e.g. -d,
+            delimiter = arg[2];
+        } else if (optValue(args, &i, "--delimiter")) |v| {
+            if (v.len > 0) delimiter = v[0];
+        } else if (optValue(args, &i, "--field")) |v| {
+            field = std.fmt.parseInt(usize, v, 10) catch {
+                writeStderr("znumfmt: invalid field value '{s}'\n", .{v});
                 std.process.exit(1);
             };
             if (field == 0) field = 1;
         } else if (std.mem.startsWith(u8, arg, "--header")) {
-            if (std.mem.startsWith(u8, arg, "--header=")) {
-                header_lines = std.fmt.parseInt(usize, arg[9..], 10) catch 1;
-            } else {
+            // Optional-argument option: only the `--header` / `--header=N` forms
+            // (GNU getopt does not accept a space-separated value here).
+            if (std.mem.eql(u8, arg, "--header")) {
                 header_lines = 1;
+            } else if (std.mem.startsWith(u8, arg, "--header=")) {
+                header_lines = std.fmt.parseInt(usize, arg[9..], 10) catch {
+                    writeStderr("znumfmt: invalid header value '{s}'\n", .{arg[9..]});
+                    std.process.exit(1);
+                };
+            } else {
+                writeStderr("znumfmt: unrecognized option '{s}'\n", .{arg});
+                std.process.exit(1);
             }
-        } else if (std.mem.eql(u8, arg, "--invalid=abort")) {
-            invalid_mode = .abort;
-        } else if (std.mem.eql(u8, arg, "--invalid=fail")) {
-            invalid_mode = .fail;
-        } else if (std.mem.eql(u8, arg, "--invalid=warn")) {
-            invalid_mode = .warn;
-        } else if (std.mem.eql(u8, arg, "--invalid=ignore")) {
-            invalid_mode = .ignore;
+        } else if (optValue(args, &i, "--invalid")) |v| {
+            invalid_mode = parseInvalid(v);
         } else if (std.mem.eql(u8, arg, "--")) {
             i += 1;
             while (i < args.len) : (i += 1) {
                 try numbers.append(allocator, args[i]);
             }
-        } else if (arg.len > 0 and arg[0] == '-' and arg.len > 1) {
-            // Short options
+        } else if (std.mem.startsWith(u8, arg, "--")) {
+            writeStderr("znumfmt: unrecognized option '{s}'\n", .{arg});
+            std.process.exit(1);
+        } else if (arg.len > 1 and arg[0] == '-') {
+            // Short options (bundled). Anything unknown is an invalid option;
+            // this is also how GNU rejects a bare negative like `-1000`.
             var j: usize = 1;
             while (j < arg.len) : (j += 1) {
-                switch (arg[j]) {
-                    'd' => {
-                        i += 1;
-                        if (i >= args.len) {
-                            writeStderr("znumfmt: option requires an argument -- 'd'\n", .{});
-                            std.process.exit(1);
-                        }
-                        if (args[i].len > 0) delimiter = args[i][0];
-                        break;
-                    },
-                    else => {
-                        writeStderr("znumfmt: invalid option -- '{c}'\n", .{arg[j]});
-                        std.process.exit(1);
-                    },
-                }
+                writeStderr("znumfmt: invalid option -- '{c}'\n", .{arg[j]});
+                std.process.exit(1);
             }
         } else {
             try numbers.append(allocator, arg);
         }
+    }
+
+    // --grouping cannot be combined with --to (GNU parity).
+    if (grouping and to_format != .none) {
+        writeStderr("znumfmt: grouping cannot be combined with --to\n", .{});
+        std.process.exit(1);
+    }
+    // Reject a zero unit size before it can divide-by-zero (GNU parity).
+    if (from_unit == 0 or to_unit == 0) {
+        writeStderr("znumfmt: invalid unit size: '0'\n", .{});
+        std.process.exit(1);
     }
 
     var exit_code: u8 = 0;
@@ -217,7 +256,11 @@ pub fn main(init: std.process.Init) !void {
         for (numbers.items) |num| {
             processNumber(allocator, num, from_format, to_format, from_unit, to_unit, padding, grouping, round_mode, suffix, invalid_mode, &exit_code) catch |err| {
                 if (err == error.InvalidNumber) {
+                    // In abort mode we stop immediately with no output; every
+                    // other mode passes the original token through to stdout
+                    // (GNU parity — avoids silent data loss in pipelines).
                     if (invalid_mode == .abort) std.process.exit(2);
+                    writeStdoutRaw(num);
                 }
             };
             writeStdout("\n", .{});
@@ -317,6 +360,9 @@ fn processLine(
                 const field_text = line[field_start..field_end];
                 processNumber(allocator, field_text, from_format, to_format, from_unit, to_unit, padding, grouping, round_mode, suffix, invalid_mode, exit_code) catch |err| {
                     if (err == error.InvalidNumber) {
+                        // abort: stop with no further output; other modes pass
+                        // the original field text through unchanged.
+                        if (invalid_mode == .abort) return err;
                         writeStdoutRaw(field_text);
                     }
                     // Output after the field
@@ -352,7 +398,7 @@ fn processNumber(
     invalid_mode: InvalidMode,
     exit_code: *u8,
 ) !void {
-    _ = round_mode; // Used in scaling
+    _ = grouping; // C-locale grouping inserts no separators (GNU parity)
 
     // Parse the input number
     const trimmed = std.mem.trim(u8, input, " \t");
@@ -402,23 +448,22 @@ fn processNumber(
         return error.InvalidNumber;
     };
 
-    value *= @as(f64, @floatFromInt(multiplier));
+    value *= multiplier;
     value *= @as(f64, @floatFromInt(from_unit));
     value /= @as(f64, @floatFromInt(to_unit));
 
     // Format output
-    const output = formatNumber(allocator, value, to_format, suffix) catch {
-        handleInvalid(invalid_mode, input, exit_code);
+    const output = formatNumber(allocator, value, to_format, round_mode, suffix) catch |err| {
+        if (err == error.ValueTooLarge) {
+            handleValueTooLarge(invalid_mode, value, exit_code);
+        } else {
+            handleInvalid(invalid_mode, input, exit_code);
+        }
         return error.InvalidNumber;
     };
     defer allocator.free(output);
 
-    // Apply grouping if requested
-    var final_output: []const u8 = output;
-    var grouped_buf: [256]u8 = undefined;
-    if (grouping) {
-        final_output = applyGrouping(output, &grouped_buf) catch output;
-    }
+    const final_output: []const u8 = output;
 
     // Apply padding
     if (padding != 0) {
@@ -447,75 +492,80 @@ fn processNumber(
     writeStdoutRaw(final_output);
 }
 
-fn getSuffixMultiplier(suffix_str: []const u8, format: Format) !u64 {
+fn getSuffixMultiplier(suffix_str: []const u8, format: Format) !f64 {
     if (suffix_str.len == 0) return 1;
 
-    const c = suffix_str[0];
-    const has_i = suffix_str.len >= 2 and suffix_str[1] == 'i';
-
-    // Determine base
-    const base: u64 = switch (format) {
-        .none => return error.InvalidSuffix,
-        .auto => if (has_i) 1024 else 1000,
-        .si => 1000,
-        .iec, .iec_i => 1024,
-    };
-
-    return switch (c) {
-        'K', 'k' => base,
-        'M' => base * base,
-        'G' => base * base * base,
-        'T' => base * base * base * base,
-        'P' => base * base * base * base * base,
-        'E' => base * base * base * base * base * base,
-        'Z' => base * base * base * base * base * base * base,
-        'Y' => base * base * base * base * base * base * base * base,
+    const power: u32 = switch (suffix_str[0]) {
+        'K', 'k' => 1,
+        'M' => 2,
+        'G' => 3,
+        'T' => 4,
+        'P' => 5,
+        'E' => 6,
+        'Z' => 7,
+        'Y' => 8,
         else => return error.InvalidSuffix,
     };
+
+    // Validate the trailing characters and pick the base. The `i` marker is
+    // required for iec-i, forbidden for si/iec, and optional for auto.
+    const trailing = suffix_str[1..];
+    const has_i = trailing.len == 1 and trailing[0] == 'i';
+    const base: f64 = switch (format) {
+        .none => return error.InvalidSuffix,
+        .si => blk: {
+            if (trailing.len != 0) return error.InvalidSuffix;
+            break :blk 1000.0;
+        },
+        .iec => blk: {
+            if (trailing.len != 0) return error.InvalidSuffix;
+            break :blk 1024.0;
+        },
+        .iec_i => blk: {
+            if (!has_i) return error.InvalidSuffix;
+            break :blk 1024.0;
+        },
+        .auto => blk: {
+            if (trailing.len != 0 and !has_i) return error.InvalidSuffix;
+            break :blk if (has_i) 1024.0 else 1000.0;
+        },
+    };
+
+    // base^power computed in f64 — never overflows (Z/Y are representable).
+    var mult: f64 = 1;
+    var p: u32 = 0;
+    while (p < power) : (p += 1) mult *= base;
+    return mult;
 }
 
-fn formatNumber(allocator: std.mem.Allocator, value: f64, format: Format, extra_suffix: ?[]const u8) ![]u8 {
-    const suffixes_si = [_][]const u8{ "", "K", "M", "G", "T", "P", "E", "Z", "Y" };
+fn formatNumber(allocator: std.mem.Allocator, value: f64, format: Format, round_mode: Round, extra_suffix: ?[]const u8) ![]u8 {
+    // SI uses a lowercase kilo suffix; M/G/T… stay uppercase.
+    const suffixes_si = [_][]const u8{ "", "k", "M", "G", "T", "P", "E", "Z", "Y" };
     const suffixes_iec = [_][]const u8{ "", "K", "M", "G", "T", "P", "E", "Z", "Y" };
     const suffixes_iec_i = [_][]const u8{ "", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "Zi", "Yi" };
 
     var abs_value = @abs(value);
     const is_negative = value < 0;
 
-    if (format == .none) {
-        // Just format as plain number - use integer if possible
-        var buf: [64]u8 = undefined;
-        const int_val: i64 = @intFromFloat(abs_value);
-        if (@as(f64, @floatFromInt(int_val)) == abs_value) {
-            // It's a whole number
-            const result = std.fmt.bufPrint(&buf, "{d}", .{int_val}) catch return error.FormatError;
-            const neg_len: usize = if (is_negative) 1 else 0;
-            const extra_len = if (extra_suffix) |s| s.len else 0;
-            const output = try allocator.alloc(u8, neg_len + result.len + extra_len);
-            var pos: usize = 0;
-            if (is_negative) {
-                output[0] = '-';
-                pos = 1;
-            }
-            @memcpy(output[pos .. pos + result.len], result);
-            pos += result.len;
-            if (extra_suffix) |s| @memcpy(output[pos..], s);
-            return output;
-        }
+    if (!std.math.isFinite(value)) return error.ValueTooLarge;
 
-        // Has decimal part
-        const result = std.fmt.bufPrint(&buf, "{d:.2}", .{abs_value}) catch return error.FormatError;
-        const neg_len: usize = if (is_negative) 1 else 0;
+    if (format == .none) {
+        // No scaling: print the value as-is. GNU rejects values >= 10^16
+        // (they exceed printable long-double integer precision).
+        if (abs_value >= 1e16) return error.ValueTooLarge;
+
+        // Snap values that are within rounding noise of an integer (e.g. a
+        // from-scaled 1.1K -> 1100.0000000000002) back to the integer, so the
+        // shortest-float printer emits "1100" like GNU rather than the noise.
+        const rounded = @round(value);
+        const print_val: f64 = if (@abs(value - rounded) < 1e-6 * @max(@as(f64, 1), abs_value)) rounded else value;
+
+        var buf: [64]u8 = undefined;
+        const result = std.fmt.bufPrint(&buf, "{d}", .{print_val}) catch return error.FormatError;
         const extra_len = if (extra_suffix) |s| s.len else 0;
-        const output = try allocator.alloc(u8, neg_len + result.len + extra_len);
-        var pos: usize = 0;
-        if (is_negative) {
-            output[0] = '-';
-            pos = 1;
-        }
-        @memcpy(output[pos .. pos + result.len], result);
-        pos += result.len;
-        if (extra_suffix) |s| @memcpy(output[pos..], s);
+        const output = try allocator.alloc(u8, result.len + extra_len);
+        @memcpy(output[0..result.len], result);
+        if (extra_suffix) |s| @memcpy(output[result.len..], s);
         return output;
     }
 
@@ -532,24 +582,39 @@ fn formatNumber(allocator: std.mem.Allocator, value: f64, format: Format, extra_
         .none => unreachable,
     };
 
-    var suffix_idx: usize = 0;
-    while (suffix_idx < suffixes.len - 1 and abs_value >= base) {
+    // Scale down until the mantissa is below the base (capped at the largest
+    // suffix), tracking the power. This mirrors GNU's double_to_human.
+    var power: usize = 0;
+    while (power < suffixes.len - 1 and abs_value >= base) {
         abs_value /= base;
-        suffix_idx += 1;
+        power += 1;
     }
+
+    // GNU keeps one fraction digit only when scaled and the mantissa is < 10.
+    const scaled_prec: f64 = if (abs_value < 10 and power != 0) 10 else 1;
+    abs_value = applyRound(abs_value * scaled_prec, round_mode) / scaled_prec;
+
+    // Rounding may have pushed the mantissa back up to the base (e.g. 999.6k
+    // -> 1000 -> 1.0M); rescale once more.
+    if (abs_value >= base and power < suffixes.len - 1) {
+        abs_value /= base;
+        power += 1;
+    }
+
+    // Final display precision is recomputed from the rounded mantissa, so that
+    // e.g. 9.95k rounds to 10 (integer) and prints "10k", not "10.0k".
+    const one_decimal = abs_value < 10 and power != 0;
 
     var buf: [64]u8 = undefined;
     var result: []const u8 = undefined;
-
-    // Determine precision
-    if (abs_value >= 10 or suffix_idx == 0) {
+    if (one_decimal) {
+        result = std.fmt.bufPrint(&buf, "{d:.1}", .{abs_value}) catch return error.FormatError;
+    } else {
         const int_val: i64 = @intFromFloat(abs_value);
         result = std.fmt.bufPrint(&buf, "{d}", .{int_val}) catch return error.FormatError;
-    } else {
-        result = std.fmt.bufPrint(&buf, "{d:.1}", .{abs_value}) catch return error.FormatError;
     }
 
-    const unit_suffix = suffixes[suffix_idx];
+    const unit_suffix = suffixes[power];
     const extra_len = if (extra_suffix) |s| s.len else 0;
     const neg_len: usize = if (is_negative) 1 else 0;
 
@@ -571,99 +636,31 @@ fn formatNumber(allocator: std.mem.Allocator, value: f64, format: Format, extra_
     return output;
 }
 
-fn applyGrouping(input: []const u8, buf: *[256]u8) ![]const u8 {
-    // Find the integer and decimal parts
-    var neg_offset: usize = 0;
-    if (input.len > 0 and input[0] == '-') {
-        neg_offset = 1;
-    }
-
-    // Find decimal point
-    var decimal_pos: ?usize = null;
-    for (input[neg_offset..], 0..) |c, i| {
-        if (c == '.') {
-            decimal_pos = neg_offset + i;
-            break;
-        }
-        if (!std.ascii.isDigit(c)) {
-            // Found non-digit before decimal, could be unit suffix
-            return input;
-        }
-    }
-
-    var out_pos: usize = 0;
-
-    // Copy negative sign if present
-    if (neg_offset > 0) {
-        buf[out_pos] = '-';
-        out_pos += 1;
-    }
-
-    // Find start and end of integer part
-    const int_start = neg_offset;
-    const int_end = if (decimal_pos) |dp| dp else input.len;
-    const int_part = input[int_start..int_end];
-
-    // Insert commas every 3 digits from the right
-    if (int_part.len <= 3) {
-        // No grouping needed
-        @memcpy(buf[out_pos .. out_pos + int_part.len], int_part);
-        out_pos += int_part.len;
-    } else {
-        const leading_digits = int_part.len % 3;
-        var idx: usize = 0;
-
-        // Copy leading digits (less than 3)
-        if (leading_digits > 0) {
-            @memcpy(buf[out_pos .. out_pos + leading_digits], int_part[0..leading_digits]);
-            out_pos += leading_digits;
-            idx = leading_digits;
-            buf[out_pos] = ',';
-            out_pos += 1;
-        }
-
-        // Copy remaining digits with commas every 3
-        while (idx < int_part.len) : (idx += 3) {
-            @memcpy(buf[out_pos .. out_pos + 3], int_part[idx .. idx + 3]);
-            out_pos += 3;
-            if (idx + 3 < int_part.len) {
-                buf[out_pos] = ',';
-                out_pos += 1;
-            }
-        }
-    }
-
-    // Copy decimal part if present
-    if (decimal_pos) |dp| {
-        const decimal_part = input[dp..];
-        @memcpy(buf[out_pos .. out_pos + decimal_part.len], decimal_part);
-        out_pos += decimal_part.len;
-    } else {
-        // Copy any non-digit suffix (units)
-        var suffix_start = int_end;
-        while (suffix_start < input.len and !std.ascii.isDigit(input[suffix_start])) : (suffix_start += 1) {}
-        if (suffix_start < input.len) {
-            const suffix = input[suffix_start..];
-            @memcpy(buf[out_pos .. out_pos + suffix.len], suffix);
-            out_pos += suffix.len;
-        }
-    }
-
-    return buf[0..out_pos];
-}
 
 fn handleInvalid(invalid_mode: InvalidMode, input: []const u8, exit_code: *u8) void {
     switch (invalid_mode) {
-        .abort => {
-            writeStderr("znumfmt: invalid number: '{s}'\n", .{input});
-        },
+        // abort: caller stops with exit 2 right after this.
+        .abort => writeStderr("znumfmt: invalid number: '{s}'\n", .{input}),
+        // fail: diagnose and set a non-zero final exit.
         .fail => {
-            exit_code.* = 2;
-        },
-        .warn => {
             writeStderr("znumfmt: invalid number: '{s}'\n", .{input});
             exit_code.* = 2;
         },
+        // warn: diagnose but exit 0 (GNU parity).
+        .warn => writeStderr("znumfmt: invalid number: '{s}'\n", .{input}),
+        // ignore: silent.
+        .ignore => {},
+    }
+}
+
+fn handleValueTooLarge(invalid_mode: InvalidMode, value: f64, exit_code: *u8) void {
+    switch (invalid_mode) {
+        .abort => writeStderr("znumfmt: value too large to be printed: '{e}' (consider using --to)\n", .{value}),
+        .fail => {
+            writeStderr("znumfmt: value too large to be printed: '{e}' (consider using --to)\n", .{value});
+            exit_code.* = 2;
+        },
+        .warn => writeStderr("znumfmt: value too large to be printed: '{e}' (consider using --to)\n", .{value}),
         .ignore => {},
     }
 }

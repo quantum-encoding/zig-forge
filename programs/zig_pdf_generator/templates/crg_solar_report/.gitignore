@@ -1,0 +1,6 @@
+ref_pages/
+out_pages/
+cmp/
+_smoke*
+_t_*
+_sig_test*

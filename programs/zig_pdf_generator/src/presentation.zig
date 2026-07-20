@@ -192,6 +192,11 @@ pub const PresentationRenderer = struct {
     // Coordinate system: y=0 is top of page (we convert to PDF coordinates internally)
     page_height: f32 = 1080,
     crypto_qr_pixels: ?[]u8 = null,
+    // Decoded image bytes must outlive doc.build(): addImage stores a slice that
+    // aliases these buffers (it does not copy). Freeing them per-renderImage (the
+    // old `defer free`) left doc.images[*].data dangling → use-after-free segfault
+    // at build time. Retain here; freed in deinit, which runs after render().
+    image_bufs: std.ArrayListUnmanaged([]u8) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, data: PresentationData) PresentationRenderer {
         const doc = document.PdfDocument.init(allocator);
@@ -246,6 +251,10 @@ pub const PresentationRenderer = struct {
         if (self.crypto_qr_pixels) |p| {
             self.allocator.free(p);
         }
+
+        // Free retained decoded image buffers (kept alive for doc.build()).
+        for (self.image_bufs.items) |buf| self.allocator.free(buf);
+        self.image_bufs.deinit(self.allocator);
 
         self.doc.deinit();
     }
@@ -741,7 +750,14 @@ pub const PresentationRenderer = struct {
 
         // Decode base64 and load image
         const result = image_mod.loadImageFromBase64(self.allocator, img.base64) catch return;
-        defer self.allocator.free(result.decoded_bytes);
+
+        // addImage stores a slice aliasing result.decoded_bytes without copying,
+        // so the buffer must live until doc.build(). Retain it (freed in deinit);
+        // do NOT free here or doc.images[*].data dangles → use-after-free.
+        self.image_bufs.append(self.allocator, result.decoded_bytes) catch {
+            self.allocator.free(result.decoded_bytes);
+            return;
+        };
 
         // Add image to document and get ID
         const image_id = self.doc.addImage(result.image) catch return;
@@ -1043,8 +1059,11 @@ fn parseShapeElement(obj: std.json.ObjectMap) !ShapeElement {
     if (obj.get("y")) |y| shape.y = @floatCast(getNumber(y));
     if (obj.get("width")) |w| shape.width = @floatCast(getNumber(w));
     if (obj.get("height")) |h| shape.height = @floatCast(getNumber(h));
-    if (obj.get("fill_color")) |c| shape.fill_color = c.string;
-    if (obj.get("stroke_color")) |c| shape.stroke_color = c.string;
+    // Honour an explicit JSON null: "fill_color": null means no fill, and
+    // "stroke_color": null means no stroke (overriding the struct defaults).
+    // Reading `.string` unconditionally panicked on a null union value.
+    if (obj.get("fill_color")) |c| shape.fill_color = if (c == .string) c.string else null;
+    if (obj.get("stroke_color")) |c| shape.stroke_color = if (c == .string) c.string else null;
     if (obj.get("stroke_width")) |sw| shape.stroke_width = @floatCast(getNumber(sw));
     if (obj.get("corner_radius")) |cr| shape.corner_radius = @floatCast(getNumber(cr));
     if (obj.get("opacity")) |o| shape.opacity = @floatCast(getNumber(o));

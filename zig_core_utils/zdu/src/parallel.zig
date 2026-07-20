@@ -26,6 +26,9 @@ const Mutex = struct {
 const Options = main.Options;
 const DirStat = main.DirStat;
 const libc = std.c;
+const stat_mod = @import("stat.zig");
+const StatInfo = stat_mod.StatInfo;
+const statPath = stat_mod.statPath;
 
 const Timespec = extern struct {
     sec: i64,
@@ -56,6 +59,12 @@ const WorkQueue = struct {
     items: std.ArrayList(WorkItem),
     mutex: Mutex,
     done: Atomic(bool),
+    // Number of items popped but not yet fully processed (incl. their child
+    // pushes). Guarded by `mutex`. Traversal is complete only when the queue is
+    // empty AND no worker is mid-flight; using queue-emptiness alone is a race:
+    // a worker can pop the last dir, leave the queue momentarily empty, and be
+    // killed before it pushes that dir's subtrees -> silently dropped subtrees.
+    in_flight: usize,
 
     const WorkItem = struct {
         path: []const u8,
@@ -69,6 +78,7 @@ const WorkQueue = struct {
             .items = try std.ArrayList(WorkItem).initCapacity(allocator, 256),
             .mutex = .{},
             .done = Atomic(bool).init(false),
+            .in_flight = 0,
         };
         return self;
     }
@@ -88,7 +98,26 @@ const WorkQueue = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         if (self.items.items.len == 0) return null;
+        // Count this item as in-flight under the same lock that guards the
+        // queue, so (len + in_flight) is a consistent snapshot of outstanding
+        // work for the completion poller.
+        self.in_flight += 1;
         return self.items.pop();
+    }
+
+    /// Mark the work item most recently popped by this worker as fully
+    /// processed (its child subdirs, if any, have already been pushed).
+    fn taskDone(self: *WorkQueue) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.in_flight -= 1;
+    }
+
+    /// True only when there is no queued work and no worker mid-processing.
+    fn isIdle(self: *WorkQueue) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.items.items.len == 0 and self.in_flight == 0;
     }
 
     fn setDone(self: *WorkQueue) void {
@@ -205,6 +234,13 @@ fn workerThread(ctx_ptr: *WorkerContext) void {
 
         const item = work.?;
         processDirectory(ctx, item.path, item.depth, item.dev) catch {};
+        // The WorkItem.path was dupe()'d when queued; free it now that the
+        // directory is fully processed and its children (which own their own
+        // dupes) have been pushed.
+        ctx.allocator.free(item.path);
+        // Signal completion AFTER child pushes so the poller never sees the
+        // queue drain to empty while this subtree's children are unqueued.
+        queue.taskDone();
     }
 
     // Merge local results to shared
@@ -281,8 +317,12 @@ fn processDirectory(ctx: *WorkerContext, dir_path: []const u8, depth: usize, par
         }
     }
 
-    // Add directory entry
-    if (!options.summarize or depth == 0) {
+    // Always record the directory entry. The parallel total is derived by
+    // summing the depth-1 entries (see walkParallel), so under --summarize the
+    // subtree entries must still be recorded here or the grand total collapses
+    // to ~0. Display filtering for --summarize / --max-depth happens later in
+    // main.shouldPrint, not by omitting the entry.
+    {
         const path_copy = try ctx.allocator.dupe(u8, dir_path);
         try ctx.local_results.append(ctx.allocator, DirStat{
             .path = path_copy,
@@ -291,6 +331,7 @@ fn processDirectory(ctx: *WorkerContext, dir_path: []const u8, depth: usize, par
             .inodes = local_inodes,
             .depth = depth,
             .dev = parent_dev,
+            .is_dir = true,
         });
     }
 
@@ -308,63 +349,6 @@ fn openDir(path: []const u8) !std.Io.Dir {
     }
     const cwd = std.Io.Dir.cwd();
     return cwd.openDir(io, path, .{ .iterate = true });
-}
-
-/// Stat info
-const StatInfo = struct {
-    dev: u64,
-    ino: u64,
-    size: u64,
-    blocks: u64,
-    nlink: u64,
-    is_dir: bool,
-};
-
-/// Stat a path using statx syscall
-fn statPath(path: []const u8, follow_symlinks: bool) !StatInfo {
-    const linux = std.os.linux;
-
-    // Build flags: AT_SYMLINK_NOFOLLOW for lstat behavior
-    var flags: u32 = linux.AT.EMPTY_PATH;
-    if (!follow_symlinks) {
-        flags |= linux.AT.SYMLINK_NOFOLLOW;
-    }
-
-    // Convert path to null-terminated
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    if (path.len >= path_buf.len) return error.NameTooLong;
-    @memcpy(path_buf[0..path.len], path);
-    path_buf[path.len] = 0;
-    const path_z: [*:0]const u8 = @ptrCast(&path_buf);
-
-    // Call statx directly
-    var statx_buf: linux.Statx = undefined;
-    const mask = linux.STATX.BASIC_STATS;
-    const rc = linux.statx(linux.AT.FDCWD, path_z, flags, mask, &statx_buf);
-
-    if (rc != 0) {
-        const err = std.posix.errno(@as(isize, @bitCast(rc)));
-        return switch (err) {
-            .ACCES => error.AccessDenied,
-            .NOENT => error.FileNotFound,
-            .NOTDIR => error.FileNotFound,
-            .LOOP => error.SymLinkLoop,
-            .NAMETOOLONG => error.NameTooLong,
-            else => error.Unexpected,
-        };
-    }
-
-    // Combine dev_major and dev_minor into a single device ID
-    const dev = (@as(u64, statx_buf.dev_major) << 32) | @as(u64, statx_buf.dev_minor);
-
-    return StatInfo{
-        .dev = dev,
-        .ino = statx_buf.ino,
-        .size = statx_buf.size,
-        .blocks = statx_buf.blocks,
-        .nlink = statx_buf.nlink,
-        .is_dir = (statx_buf.mode & linux.S.IFMT) == linux.S.IFDIR,
-    };
 }
 
 /// Accumulate child directory totals into parent directories
@@ -391,6 +375,12 @@ fn accumulateChildTotals(allocator: std.mem.Allocator, results: *std.ArrayList(D
     while (current_depth > 0) : (current_depth -= 1) {
         for (results.items) |entry| {
             if (entry.depth != current_depth) continue;
+            // Only directory subtotals roll up into their parent. A file's
+            // blocks are already part of its directory's own subtotal (see
+            // processDirectory's `local_blocks += stat_result.blocks`), so
+            // accumulating file entries too would double-count them (visible
+            // under `du -a`, where file entries are recorded).
+            if (!entry.is_dir) continue;
 
             // Get parent path
             const parent_path = std.fs.path.dirname(entry.path) orelse continue;
@@ -444,7 +434,7 @@ pub fn walkParallel(allocator: std.mem.Allocator, path: []const u8, options: Opt
     var dir = try openDir(path);
     defer dir.close(io);
 
-    var subdirs = std.ArrayList([]const u8).initCapacity(allocator, 32) catch unreachable;
+    var subdirs = std.ArrayList([]const u8).initCapacity(allocator, 32) catch return error.OutOfMemory;
     defer {
         for (subdirs.items) |p| allocator.free(p);
         subdirs.deinit(allocator);
@@ -514,22 +504,13 @@ pub fn walkParallel(allocator: std.mem.Allocator, path: []const u8, options: Opt
         workers[i] = try Thread.spawn(.{}, workerThread, .{&contexts[i].?});
     }
 
-    // Wait for initial processing then signal done
-    sleepNs(50_000_000); // 50ms initial delay
-
-    // Keep polling until queue is empty
-    var empty_count: usize = 0;
-    while (empty_count < 3) {
-        shared.queue.mutex.lock();
-        const queue_len = shared.queue.items.items.len;
-        shared.queue.mutex.unlock();
-
-        if (queue_len == 0) {
-            empty_count += 1;
-        } else {
-            empty_count = 0;
-        }
-        sleepNs(5_000_000); // 5ms polling
+    // Wait until every subtree is fully traversed. Completion is defined by the
+    // work queue being empty AND no worker being mid-processing (in_flight==0),
+    // not by a timing heuristic -- otherwise a slow worker holding the last
+    // directory could be terminated before it queues that directory's subtrees,
+    // silently undercounting.
+    while (!shared.queue.isIdle()) {
+        sleepNs(1_000_000); // 1ms polling
     }
     shared.queue.setDone();
 
@@ -551,7 +532,10 @@ pub fn walkParallel(allocator: std.mem.Allocator, path: []const u8, options: Opt
     var accumulated_inodes: u64 = 1 + root_files_inodes; // +1 for root itself
 
     for (shared.results.items) |entry| {
-        if (entry.depth == 1) {
+        // Sum only the direct child DIRECTORIES of root. Files at depth 1 are
+        // already folded into root_files_blocks above; counting file entries
+        // here too (under -a) would double the root total.
+        if (entry.depth == 1 and entry.is_dir) {
             accumulated_blocks += entry.blocks;
             accumulated_size += entry.size;
             accumulated_inodes += entry.inodes;
@@ -566,9 +550,13 @@ pub fn walkParallel(allocator: std.mem.Allocator, path: []const u8, options: Opt
         .inodes = accumulated_inodes,
         .depth = 0,
         .dev = root_stat.dev,
+        .is_dir = true,
     });
 
-    // Collect results before cleanup
+    // Collect results before cleanup. dupe() copies the DirStat structs (incl.
+    // their path pointers) into a caller-owned array; the path *strings* remain
+    // the per-entry dupes and are freed by the caller. Only the SharedState's
+    // own bookkeeping (struct + WorkQueue + results buffer) is freed here.
     const entries = try allocator.dupe(DirStat, shared.results.items);
 
     // Cleanup worker contexts
@@ -578,8 +566,10 @@ pub fn walkParallel(allocator: std.mem.Allocator, path: []const u8, options: Opt
         }
     }
 
-    // Don't deinit shared here - entries point to it
-    // Caller will free entries including paths
+    // Free SharedState, its WorkQueue, and the results buffer. The path strings
+    // referenced by `entries` are NOT freed (deinit only releases the ArrayList
+    // backing storage), so they stay valid for the caller to free.
+    shared.deinit();
 
     return ParallelWalkResult{
         .entries = entries,

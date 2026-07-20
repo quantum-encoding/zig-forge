@@ -1,6 +1,11 @@
 //! zprintf - Format and print data
 //!
-//! High-performance printf implementation in Zig.
+//! High-performance printf implementation in Zig, aiming for GNU `printf`
+//! (coreutils) parity. Numeric and floating-point field formatting is
+//! delegated to libc `snprintf` so the byte output matches C/GNU exactly;
+//! the argument *parsing* (overflow clamping, leading-quote char codes,
+//! base detection, diagnostics) is done here to match GNU semantics that
+//! plain `snprintf` does not provide.
 
 const std = @import("std");
 const posix = std.posix;
@@ -8,17 +13,67 @@ const libc = std.c;
 
 const VERSION = "1.0.0";
 
+extern "c" fn snprintf(buf: [*]u8, size: usize, fmt: [*:0]const u8, ...) c_int;
+
+/// Process-wide exit status. GNU printf keeps producing output after a
+/// recoverable error (e.g. "Result too large") but exits non-zero.
+var g_exit_status: u8 = 0;
+/// Allocator for transient snprintf scratch buffers, set in main().
+var g_alloc: std.mem.Allocator = undefined;
+
+// ---------------------------------------------------------------------------
+// Low-level output (handles short writes / EINTR; propagates errors to status)
+// ---------------------------------------------------------------------------
+
+fn writeAll(fd: libc.fd_t, data: []const u8) void {
+    var off: usize = 0;
+    while (off < data.len) {
+        const n = libc.write(fd, data.ptr + off, data.len - off);
+        if (n < 0) {
+            const e = libc._errno().*;
+            if (e == @intFromEnum(libc.E.INTR)) continue;
+            g_exit_status = 1;
+            return;
+        }
+        if (n == 0) {
+            g_exit_status = 1;
+            return;
+        }
+        off += @intCast(n);
+    }
+}
+
 fn writeStdout(data: []const u8) void {
-    _ = libc.write(libc.STDOUT_FILENO, data.ptr, data.len);
+    writeAll(libc.STDOUT_FILENO, data);
 }
 
 fn writeStderr(data: []const u8) void {
-    _ = libc.write(libc.STDERR_FILENO, data.ptr, data.len);
+    writeAll(libc.STDERR_FILENO, data);
 }
 
 fn writeChar(c: u8) void {
     const buf = [1]u8{c};
     writeStdout(&buf);
+}
+
+/// Emit `printf: '<arg>': <msg>` to stderr and mark the run as failed.
+fn reportError(arg: []const u8, msg: []const u8) void {
+    writeStderr("printf: '");
+    writeStderr(arg);
+    writeStderr("': ");
+    writeStderr(msg);
+    writeStderr("\n");
+    g_exit_status = 1;
+}
+
+fn reportInvalidSpec(c: u8) void {
+    writeStderr("printf: %");
+    if (c != 0) {
+        const b = [1]u8{c};
+        writeStderr(&b);
+    }
+    writeStderr(": invalid conversion specification\n");
+    g_exit_status = 1;
 }
 
 fn printUsage() void {
@@ -49,7 +104,7 @@ fn printUsage() void {
         \\  %c    character
         \\  %%    literal %
         \\
-        \\Width and precision: %10s, %.5s, %10.5s, %.3f
+        \\Width and precision: %10s, %.5s, %10.5s, %.3f (also dynamic: %*d, %.*f)
         \\Flags: - (left), + (sign), 0 (zero-pad), # (alternate)
         \\
     ;
@@ -59,6 +114,10 @@ fn printUsage() void {
 fn printVersion() void {
     writeStderr("zprintf " ++ VERSION ++ "\n");
 }
+
+// ---------------------------------------------------------------------------
+// Format-string escape sequences (\n, \t, \0NNN, \xHH ...)
+// ---------------------------------------------------------------------------
 
 fn parseEscape(fmt: []const u8, pos: *usize) ?u8 {
     if (pos.* >= fmt.len) return null;
@@ -85,7 +144,7 @@ fn parseEscape(fmt: []const u8, pos: *usize) ?u8 {
             while (digits < 3 and pos.* < fmt.len) {
                 const d = fmt[pos.*];
                 if (d >= '0' and d <= '7') {
-                    val = val * 8 + (d - '0');
+                    val = val *% 8 +% (d - '0');
                     pos.* += 1;
                     digits += 1;
                 } else break;
@@ -98,16 +157,8 @@ fn parseEscape(fmt: []const u8, pos: *usize) ?u8 {
             var digits: usize = 0;
             while (digits < 2 and pos.* < fmt.len) {
                 const d = fmt[pos.*];
-                if (d >= '0' and d <= '9') {
-                    val = val * 16 + (d - '0');
-                    pos.* += 1;
-                    digits += 1;
-                } else if (d >= 'a' and d <= 'f') {
-                    val = val * 16 + (d - 'a' + 10);
-                    pos.* += 1;
-                    digits += 1;
-                } else if (d >= 'A' and d <= 'F') {
-                    val = val * 16 + (d - 'A' + 10);
+                if (digitVal(d, 16)) |dv| {
+                    val = val *% 16 +% dv;
                     pos.* += 1;
                     digits += 1;
                 } else break;
@@ -118,24 +169,30 @@ fn parseEscape(fmt: []const u8, pos: *usize) ?u8 {
     };
 }
 
-const FormatSpec = struct {
+// ---------------------------------------------------------------------------
+// Conversion specification parsing
+// ---------------------------------------------------------------------------
+
+pub const FormatSpec = struct {
     left_align: bool = false,
     show_sign: bool = false,
     space_sign: bool = false,
     zero_pad: bool = false,
     alternate: bool = false,
     width: usize = 0,
+    width_star: bool = false,
     precision: ?usize = null,
-    specifier: u8 = 's',
+    prec_star: bool = false,
+    specifier: u8 = 0,
+    has_conversion: bool = false,
 };
 
 fn parseFormat(fmt: []const u8, pos: *usize) FormatSpec {
     var spec = FormatSpec{};
 
-    // Parse flags
+    // Flags
     while (pos.* < fmt.len) {
-        const c = fmt[pos.*];
-        switch (c) {
+        switch (fmt[pos.*]) {
             '-' => spec.left_align = true,
             '+' => spec.show_sign = true,
             ' ' => spec.space_sign = true,
@@ -146,202 +203,287 @@ fn parseFormat(fmt: []const u8, pos: *usize) FormatSpec {
         pos.* += 1;
     }
 
-    // Parse width
-    while (pos.* < fmt.len) {
-        const c = fmt[pos.*];
-        if (c >= '0' and c <= '9') {
-            spec.width = spec.width * 10 + (c - '0');
-            pos.* += 1;
-        } else break;
-    }
-
-    // Parse precision
-    if (pos.* < fmt.len and fmt[pos.*] == '.') {
+    // Width (numeric or '*')
+    if (pos.* < fmt.len and fmt[pos.*] == '*') {
+        spec.width_star = true;
         pos.* += 1;
-        spec.precision = 0;
+    } else {
         while (pos.* < fmt.len) {
             const c = fmt[pos.*];
             if (c >= '0' and c <= '9') {
-                spec.precision = spec.precision.? * 10 + (c - '0');
+                spec.width = spec.width * 10 + (c - '0');
                 pos.* += 1;
             } else break;
         }
     }
 
-    // Parse specifier
+    // Precision (numeric or '*')
+    if (pos.* < fmt.len and fmt[pos.*] == '.') {
+        pos.* += 1;
+        if (pos.* < fmt.len and fmt[pos.*] == '*') {
+            spec.prec_star = true;
+            pos.* += 1;
+        } else {
+            spec.precision = 0;
+            while (pos.* < fmt.len) {
+                const c = fmt[pos.*];
+                if (c >= '0' and c <= '9') {
+                    spec.precision = spec.precision.? * 10 + (c - '0');
+                    pos.* += 1;
+                } else break;
+            }
+        }
+    }
+
+    // Conversion specifier
     if (pos.* < fmt.len) {
         spec.specifier = fmt[pos.*];
+        spec.has_conversion = true;
         pos.* += 1;
     }
 
     return spec;
 }
 
-fn formatInt(value: i64, base: u8, uppercase: bool, buf: []u8) []const u8 {
-    const digits_lower = "0123456789abcdef";
-    const digits_upper = "0123456789ABCDEF";
-    const digits = if (uppercase) digits_upper else digits_lower;
-
-    var v: u64 = if (value < 0) @bitCast(-value) else @bitCast(value);
-    var i: usize = buf.len;
-
-    if (v == 0) {
-        i -= 1;
-        buf[i] = '0';
-    } else {
-        while (v > 0) {
-            i -= 1;
-            buf[i] = digits[@intCast(v % base)];
-            v /= base;
-        }
-    }
-
-    if (value < 0) {
-        i -= 1;
-        buf[i] = '-';
-    }
-
-    return buf[i..];
-}
-
-fn formatUint(value: u64, base: u8, uppercase: bool, buf: []u8) []const u8 {
-    const digits_lower = "0123456789abcdef";
-    const digits_upper = "0123456789ABCDEF";
-    const digits = if (uppercase) digits_upper else digits_lower;
-
-    var v = value;
-    var i: usize = buf.len;
-
-    if (v == 0) {
-        i -= 1;
-        buf[i] = '0';
-    } else {
-        while (v > 0) {
-            i -= 1;
-            buf[i] = digits[@intCast(v % base)];
-            v /= base;
-        }
-    }
-
-    return buf[i..];
-}
-
-fn printPadded(data: []const u8, spec: *const FormatSpec) void {
-    var output = data;
-
-    // Apply precision for strings
-    if (spec.specifier == 's') {
-        if (spec.precision) |prec| {
-            if (output.len > prec) {
-                output = output[0..prec];
-            }
-        }
-    }
-
-    const pad_len = if (spec.width > output.len) spec.width - output.len else 0;
-    const pad_char: u8 = if (spec.zero_pad and !spec.left_align) '0' else ' ';
-
-    if (!spec.left_align) {
-        var p: usize = 0;
-        while (p < pad_len) : (p += 1) {
-            writeChar(pad_char);
-        }
-    }
-
-    writeStdout(output);
-
-    if (spec.left_align) {
-        var p: usize = 0;
-        while (p < pad_len) : (p += 1) {
-            writeChar(' ');
-        }
-    }
-}
-
-fn parseFloat(s: []const u8) f64 {
-    return std.fmt.parseFloat(f64, s) catch 0.0;
-}
-
-fn formatFloatF(value: f64, precision: usize, buf: []u8) []const u8 {
-    // Format as fixed decimal (like %f)
-    const result = std.fmt.bufPrint(buf, "{d:.[1]}", .{ value, precision }) catch return "0";
-    return result;
-}
-
-fn formatFloatE(value: f64, precision: usize, uppercase: bool, buf: []u8) []const u8 {
-    // Format as scientific notation (like %e)
-    if (uppercase) {
-        const result = std.fmt.bufPrint(buf, "{E:.[1]}", .{ value, precision }) catch return "0";
-        return result;
-    } else {
-        const result = std.fmt.bufPrint(buf, "{e:.[1]}", .{ value, precision }) catch return "0";
-        return result;
-    }
-}
-
-fn formatFloatG(value: f64, precision: usize, uppercase: bool, buf: []u8) []const u8 {
-    // Format as shortest (like %g): uses %e or %f depending on magnitude
-    const abs_val = @abs(value);
-    const prec = if (precision == 0) 1 else precision;
-
-    // Use scientific notation if exponent < -4 or >= precision
-    if (abs_val != 0 and (abs_val < 0.0001 or abs_val >= std.math.pow(f64, 10, @floatFromInt(prec)))) {
-        return formatFloatE(value, if (prec > 0) prec - 1 else 0, uppercase, buf);
-    } else {
-        return formatFloatF(value, prec, buf);
-    }
-}
-
-fn parseInt(s: []const u8) i64 {
-    var result: i64 = 0;
-    var negative = false;
+/// Build a C printf conversion spec (e.g. "%-+08.3lld") into `out`, returning
+/// a null-terminated slice. Flags/width/precision come from `spec`.
+pub fn buildCFmt(out: []u8, spec: *const FormatSpec, len_mod: []const u8, conv: u8) [:0]const u8 {
     var i: usize = 0;
+    out[i] = '%';
+    i += 1;
+    if (spec.left_align) {
+        out[i] = '-';
+        i += 1;
+    }
+    if (spec.show_sign) {
+        out[i] = '+';
+        i += 1;
+    }
+    if (spec.space_sign) {
+        out[i] = ' ';
+        i += 1;
+    }
+    if (spec.alternate) {
+        out[i] = '#';
+        i += 1;
+    }
+    if (spec.zero_pad) {
+        out[i] = '0';
+        i += 1;
+    }
+    if (spec.width > 0) i += writeUintDec(out[i..], spec.width);
+    if (spec.precision) |p| {
+        out[i] = '.';
+        i += 1;
+        i += writeUintDec(out[i..], p);
+    }
+    for (len_mod) |ch| {
+        out[i] = ch;
+        i += 1;
+    }
+    out[i] = conv;
+    i += 1;
+    out[i] = 0;
+    return out[0..i :0];
+}
 
-    if (i < s.len and s[i] == '-') {
+pub fn writeUintDec(buf: []u8, val: usize) usize {
+    if (val == 0) {
+        buf[0] = '0';
+        return 1;
+    }
+    var tmp: [20]u8 = undefined;
+    var i: usize = 0;
+    var v = val;
+    while (v > 0) : (v /= 10) {
+        tmp[i] = '0' + @as(u8, @intCast(v % 10));
+        i += 1;
+    }
+    var j: usize = 0;
+    while (j < i) : (j += 1) buf[j] = tmp[i - 1 - j];
+    return i;
+}
+
+// ---------------------------------------------------------------------------
+// libc-backed field emission (exact C/GNU byte formatting)
+// ---------------------------------------------------------------------------
+
+/// Render `value` with C printf semantics using the flags/width/precision in
+/// `spec`. `value` must match `len_mod`+`conv` (e.g. c_longlong for "ll"+'d').
+fn emitC(spec: *const FormatSpec, len_mod: []const u8, conv: u8, value: anytype) void {
+    // Integer part of a double can be ~309 chars; add generous headroom.
+    const size = spec.width + (spec.precision orelse 0) + 1024;
+    const buf = g_alloc.alloc(u8, size) catch return;
+    defer g_alloc.free(buf);
+
+    var fbuf: [64]u8 = undefined;
+    const cf = buildCFmt(&fbuf, spec, len_mod, conv);
+    const n = snprintf(buf.ptr, size, cf.ptr, value);
+    if (n > 0) {
+        const un: usize = @intCast(n);
+        writeStdout(buf[0..@min(un, size - 1)]);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Numeric argument parsing (GNU semantics: quote char-codes, base, overflow)
+// ---------------------------------------------------------------------------
+
+pub fn digitVal(c: u8, base: u8) ?u8 {
+    const v: u8 = switch (c) {
+        '0'...'9' => c - '0',
+        'a'...'f' => c - 'a' + 10,
+        'A'...'F' => c - 'A' + 10,
+        else => return null,
+    };
+    if (v >= base) return null;
+    return v;
+}
+
+/// POSIX/GNU: a numeric argument beginning with ' or " has the value of the
+/// numeric code of the following byte. Returns null if not a quote arg.
+pub fn quoteCharValue(s: []const u8) ?u64 {
+    if (s.len >= 2 and (s[0] == '\'' or s[0] == '"')) {
+        if (s.len > 2) {
+            // GNU warns (but does not fail) when extra chars follow.
+            writeStderr("printf: warning: ");
+            writeStderr(s[2..]);
+            writeStderr(": character(s) following character constant have been ignored\n");
+        }
+        return s[1];
+    }
+    if (s.len == 1 and (s[0] == '\'' or s[0] == '"')) return 0;
+    return null;
+}
+
+/// Parse a signed integer argument, clamping to i64 range like GNU strtoimax
+/// (emitting "Result too large" on overflow) and honoring leading-quote codes.
+pub fn parseSigned(arg: []const u8) i64 {
+    if (quoteCharValue(arg)) |v| return @intCast(v);
+
+    var i: usize = 0;
+    while (i < arg.len and (arg[i] == ' ' or arg[i] == '\t')) i += 1; // strtoimax skips leading ws
+    var negative = false;
+    if (i < arg.len and arg[i] == '-') {
         negative = true;
         i += 1;
-    } else if (i < s.len and s[i] == '+') {
+    } else if (i < arg.len and arg[i] == '+') {
         i += 1;
     }
 
-    // Handle hex/octal prefixes
-    if (i + 1 < s.len and s[i] == '0') {
-        if (s[i + 1] == 'x' or s[i + 1] == 'X') {
-            // Hex
-            i += 2;
-            while (i < s.len) {
-                const c = s[i];
-                if (c >= '0' and c <= '9') {
-                    result = result * 16 + (c - '0');
-                } else if (c >= 'a' and c <= 'f') {
-                    result = result * 16 + (c - 'a' + 10);
-                } else if (c >= 'A' and c <= 'F') {
-                    result = result * 16 + (c - 'A' + 10);
-                } else break;
-                i += 1;
-            }
-            return if (negative) -result else result;
-        } else if (s[i + 1] >= '0' and s[i + 1] <= '7') {
-            // Octal
-            while (i < s.len and s[i] >= '0' and s[i] <= '7') {
-                result = result * 8 + (s[i] - '0');
-                i += 1;
-            }
-            return if (negative) -result else result;
+    var base: u8 = 10;
+    if (i + 1 < arg.len and arg[i] == '0' and (arg[i + 1] == 'x' or arg[i + 1] == 'X')) {
+        base = 16;
+        i += 2;
+    } else if (i < arg.len and arg[i] == '0') {
+        base = 8; // keep the leading '0' as a digit
+    }
+
+    const digits_start = i;
+    var mag: u64 = 0;
+    var overflow = false;
+    while (i < arg.len) : (i += 1) {
+        const d = digitVal(arg[i], base) orelse break;
+        const m = @mulWithOverflow(mag, base);
+        const a = @addWithOverflow(m[0], @as(u64, d));
+        if (m[1] != 0 or a[1] != 0) {
+            overflow = true;
+        } else {
+            mag = a[0];
         }
     }
 
-    // Decimal
-    while (i < s.len) {
-        const c = s[i];
-        if (c >= '0' and c <= '9') {
-            result = result * 10 + (c - '0');
-        } else break;
+    if (i == digits_start and arg.len != 0) {
+        reportError(arg, "expected a numeric value");
+        return 0;
+    }
+    if (i < arg.len) {
+        reportError(arg, "value not completely converted");
+    }
+
+    const i64_min_mag: u64 = @as(u64, 1) << 63;
+    if (negative) {
+        if (overflow or mag > i64_min_mag) {
+            reportError(arg, "Result too large");
+            return std.math.minInt(i64);
+        }
+        if (mag == i64_min_mag) return std.math.minInt(i64);
+        return -@as(i64, @intCast(mag));
+    } else {
+        if (overflow or mag > std.math.maxInt(i64)) {
+            reportError(arg, "Result too large");
+            return std.math.maxInt(i64);
+        }
+        return @intCast(mag);
+    }
+}
+
+/// Parse an unsigned integer argument, clamping to u64 range; negative inputs
+/// wrap two's-complement like GNU strtoumax.
+pub fn parseUnsigned(arg: []const u8) u64 {
+    if (quoteCharValue(arg)) |v| return v;
+
+    var i: usize = 0;
+    while (i < arg.len and (arg[i] == ' ' or arg[i] == '\t')) i += 1; // strtoumax skips leading ws
+    var negative = false;
+    if (i < arg.len and arg[i] == '-') {
+        negative = true;
+        i += 1;
+    } else if (i < arg.len and arg[i] == '+') {
         i += 1;
     }
 
-    return if (negative) -result else result;
+    var base: u8 = 10;
+    if (i + 1 < arg.len and arg[i] == '0' and (arg[i + 1] == 'x' or arg[i + 1] == 'X')) {
+        base = 16;
+        i += 2;
+    } else if (i < arg.len and arg[i] == '0') {
+        base = 8;
+    }
+
+    const digits_start = i;
+    var mag: u64 = 0;
+    var overflow = false;
+    while (i < arg.len) : (i += 1) {
+        const d = digitVal(arg[i], base) orelse break;
+        const m = @mulWithOverflow(mag, base);
+        const a = @addWithOverflow(m[0], @as(u64, d));
+        if (m[1] != 0 or a[1] != 0) {
+            overflow = true;
+        } else {
+            mag = a[0];
+        }
+    }
+
+    if (i == digits_start and arg.len != 0) {
+        reportError(arg, "expected a numeric value");
+        return 0;
+    }
+    if (i < arg.len) {
+        reportError(arg, "value not completely converted");
+    }
+    if (overflow) {
+        reportError(arg, "Result too large");
+        return std.math.maxInt(u64);
+    }
+
+    return if (negative) 0 -% mag else mag;
 }
+
+fn parseFloat(arg: []const u8) f64 {
+    if (quoteCharValue(arg)) |v| return @floatFromInt(v);
+    var s = arg;
+    while (s.len > 0 and (s[0] == ' ' or s[0] == '\t')) s = s[1..]; // skip leading ws
+    if (s.len == 0) return 0.0;
+    return std.fmt.parseFloat(f64, s) catch {
+        reportError(arg, "expected a numeric value");
+        return 0.0;
+    };
+}
+
+// ---------------------------------------------------------------------------
+// %b (backslash-escape interpretation) and %q (shell quoting)
+// ---------------------------------------------------------------------------
 
 /// Process backslash escapes in argument string for %b.
 /// Returns true if \c was encountered (stop all output).
@@ -371,7 +513,7 @@ fn processBackslashEscapes(arg: []const u8) struct { stop: bool } {
                     var val: u8 = 0;
                     var digits: usize = 0;
                     while (digits < 3 and pos < arg.len and arg[pos] >= '0' and arg[pos] <= '7') {
-                        val = val * 8 + (arg[pos] - '0');
+                        val = val *% 8 +% (arg[pos] - '0');
                         pos += 1;
                         digits += 1;
                     }
@@ -382,13 +524,8 @@ fn processBackslashEscapes(arg: []const u8) struct { stop: bool } {
                     var val: u8 = 0;
                     var digits: usize = 0;
                     while (digits < 2 and pos < arg.len) {
-                        const d = arg[pos];
-                        if (d >= '0' and d <= '9') {
-                            val = val * 16 + (d - '0');
-                        } else if (d >= 'a' and d <= 'f') {
-                            val = val * 16 + (d - 'a' + 10);
-                        } else if (d >= 'A' and d <= 'F') {
-                            val = val * 16 + (d - 'A' + 10);
+                        if (digitVal(arg[pos], 16)) |dv| {
+                            val = val *% 16 +% dv;
                         } else break;
                         pos += 1;
                         digits += 1;
@@ -415,7 +552,6 @@ fn shellQuote(arg: []const u8) void {
         return;
     }
 
-    // Check if quoting is needed
     var needs_quoting = false;
     for (arg) |c| {
         switch (c) {
@@ -432,7 +568,6 @@ fn shellQuote(arg: []const u8) void {
         return;
     }
 
-    // Use single quotes, escaping embedded single quotes as '\''
     writeChar('\'');
     for (arg) |c| {
         if (c == '\'') {
@@ -444,185 +579,150 @@ fn shellQuote(arg: []const u8) void {
     writeChar('\'');
 }
 
+// ---------------------------------------------------------------------------
+// String field emission (%s) — width + precision, matching GNU.
+// ---------------------------------------------------------------------------
+
+fn printString(data: []const u8, spec: *const FormatSpec) void {
+    var output = data;
+    if (spec.precision) |prec| {
+        if (output.len > prec) output = output[0..prec];
+    }
+
+    const pad_len = if (spec.width > output.len) spec.width - output.len else 0;
+    if (!spec.left_align) {
+        var p: usize = 0;
+        while (p < pad_len) : (p += 1) writeChar(' ');
+    }
+    writeStdout(output);
+    if (spec.left_align) {
+        var p: usize = 0;
+        while (p < pad_len) : (p += 1) writeChar(' ');
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Core format loop
+// ---------------------------------------------------------------------------
+
 fn doFormat(fmt: []const u8, arguments: []const []const u8) void {
     var arg_idx: usize = 0;
 
-    // Loop: reuse format string while there are remaining arguments (GNU behavior)
+    // Reuse the format string while arguments remain (GNU behavior).
     var first_pass = true;
     while (first_pass or arg_idx < arguments.len) {
         first_pass = false;
         var pos: usize = 0;
-        var int_buf: [32]u8 = undefined;
         var used_arg_this_pass = false;
 
-    while (pos < fmt.len) {
-        const c = fmt[pos];
+        while (pos < fmt.len) {
+            const c = fmt[pos];
 
-        if (c == '\\') {
-            pos += 1;
-            if (parseEscape(fmt, &pos)) |escaped| {
-                writeChar(escaped);
-            }
-        } else if (c == '%') {
-            pos += 1;
-            if (pos >= fmt.len) {
-                writeChar('%');
-                break;
-            }
-
-            if (fmt[pos] == '%') {
-                writeChar('%');
+            if (c == '\\') {
                 pos += 1;
-                continue;
-            }
+                if (parseEscape(fmt, &pos)) |escaped| {
+                    writeChar(escaped);
+                }
+            } else if (c == '%') {
+                pos += 1;
+                if (pos >= fmt.len) {
+                    // Trailing bare '%' is an error in GNU.
+                    reportInvalidSpec(0);
+                    return;
+                }
 
-            const spec = parseFormat(fmt, &pos);
-            const arg = if (arg_idx < arguments.len) arguments[arg_idx] else "";
-            used_arg_this_pass = true;
-
-            switch (spec.specifier) {
-                's' => {
-                    printPadded(arg, &spec);
-                },
-                'b' => {
-                    const result = processBackslashEscapes(arg);
-                    if (result.stop) return;
-                },
-                'q' => {
-                    shellQuote(arg);
-                },
-                'd', 'i' => {
-                    const val = parseInt(arg);
-                    const result = formatInt(val, 10, false, &int_buf);
-
-                    // Handle sign flags
-                    if (val >= 0) {
-                        if (spec.show_sign) {
-                            writeChar('+');
-                        } else if (spec.space_sign) {
-                            writeChar(' ');
-                        }
-                    }
-
-                    printPadded(result, &spec);
-                },
-                'u' => {
-                    const val: u64 = @bitCast(parseInt(arg));
-                    const result = formatUint(val, 10, false, &int_buf);
-                    printPadded(result, &spec);
-                },
-                'o' => {
-                    const val: u64 = @bitCast(parseInt(arg));
-                    const result = formatUint(val, 8, false, &int_buf);
-                    if (spec.alternate and result.len > 0 and result[0] != '0') {
-                        writeChar('0');
-                    }
-                    printPadded(result, &spec);
-                },
-                'x' => {
-                    const val: u64 = @bitCast(parseInt(arg));
-                    const result = formatUint(val, 16, false, &int_buf);
-                    if (spec.alternate and val != 0) {
-                        writeStdout("0x");
-                    }
-                    printPadded(result, &spec);
-                },
-                'X' => {
-                    const val: u64 = @bitCast(parseInt(arg));
-                    const result = formatUint(val, 16, true, &int_buf);
-                    if (spec.alternate and val != 0) {
-                        writeStdout("0X");
-                    }
-                    printPadded(result, &spec);
-                },
-                'c' => {
-                    if (arg.len > 0) {
-                        writeChar(arg[0]);
-                    }
-                },
-                'f', 'F' => {
-                    const val = parseFloat(arg);
-                    var float_buf: [64]u8 = undefined;
-                    const prec = spec.precision orelse 6;
-                    const result = formatFloatF(val, prec, &float_buf);
-
-                    if (val >= 0) {
-                        if (spec.show_sign) {
-                            writeChar('+');
-                        } else if (spec.space_sign) {
-                            writeChar(' ');
-                        }
-                    }
-
-                    printPadded(result, &spec);
-                },
-                'e', 'E' => {
-                    const val = parseFloat(arg);
-                    var float_buf: [64]u8 = undefined;
-                    const prec = spec.precision orelse 6;
-                    const uppercase = spec.specifier == 'E';
-                    const result = formatFloatE(val, prec, uppercase, &float_buf);
-
-                    if (val >= 0) {
-                        if (spec.show_sign) {
-                            writeChar('+');
-                        } else if (spec.space_sign) {
-                            writeChar(' ');
-                        }
-                    }
-
-                    printPadded(result, &spec);
-                },
-                'g', 'G' => {
-                    const val = parseFloat(arg);
-                    var float_buf: [64]u8 = undefined;
-                    const prec = spec.precision orelse 6;
-                    const uppercase = spec.specifier == 'G';
-                    const result = formatFloatG(val, prec, uppercase, &float_buf);
-
-                    if (val >= 0) {
-                        if (spec.show_sign) {
-                            writeChar('+');
-                        } else if (spec.space_sign) {
-                            writeChar(' ');
-                        }
-                    }
-
-                    printPadded(result, &spec);
-                },
-                else => {
+                if (fmt[pos] == '%') {
                     writeChar('%');
-                    writeChar(spec.specifier);
-                },
-            }
+                    pos += 1;
+                    continue;
+                }
 
-            if (arguments.len > 0) {
-                arg_idx += 1;
-            }
-        } else {
-            writeChar(c);
-            pos += 1;
-        }
-    } // end inner while (format string)
+                var spec = parseFormat(fmt, &pos);
+                if (!spec.has_conversion) {
+                    reportInvalidSpec(0);
+                    return;
+                }
 
-        // If no format specifier consumed an arg this pass, stop to avoid infinite loop
+                // Resolve dynamic width/precision ('*'): consumes arguments.
+                if (spec.width_star) {
+                    const wv = parseSigned(if (arg_idx < arguments.len) arguments[arg_idx] else "");
+                    if (arguments.len > 0) arg_idx += 1;
+                    used_arg_this_pass = true;
+                    if (wv < 0) {
+                        spec.left_align = true;
+                        spec.width = @intCast(-wv);
+                    } else {
+                        spec.width = @intCast(wv);
+                    }
+                }
+                if (spec.prec_star) {
+                    const pv = parseSigned(if (arg_idx < arguments.len) arguments[arg_idx] else "");
+                    if (arguments.len > 0) arg_idx += 1;
+                    used_arg_this_pass = true;
+                    // Negative precision means "as if omitted" (C semantics).
+                    spec.precision = if (pv < 0) null else @intCast(pv);
+                }
+
+                const arg = if (arg_idx < arguments.len) arguments[arg_idx] else "";
+                used_arg_this_pass = true;
+
+                switch (spec.specifier) {
+                    's' => printString(arg, &spec),
+                    'b' => {
+                        const result = processBackslashEscapes(arg);
+                        if (result.stop) return;
+                    },
+                    'q' => shellQuote(arg),
+                    'd', 'i' => emitC(&spec, "ll", 'd', @as(c_longlong, parseSigned(arg))),
+                    'u' => emitC(&spec, "ll", 'u', @as(c_ulonglong, parseUnsigned(arg))),
+                    'o' => emitC(&spec, "ll", 'o', @as(c_ulonglong, parseUnsigned(arg))),
+                    'x' => emitC(&spec, "ll", 'x', @as(c_ulonglong, parseUnsigned(arg))),
+                    'X' => emitC(&spec, "ll", 'X', @as(c_ulonglong, parseUnsigned(arg))),
+                    'c' => {
+                        var cspec = spec;
+                        cspec.precision = null;
+                        cspec.zero_pad = false;
+                        const ch: c_int = if (arg.len > 0) arg[0] else 0;
+                        emitC(&cspec, "", 'c', ch);
+                    },
+                    'f', 'F', 'e', 'E', 'g', 'G', 'a', 'A' => {
+                        emitC(&spec, "", spec.specifier, parseFloat(arg));
+                    },
+                    else => {
+                        reportInvalidSpec(spec.specifier);
+                        return;
+                    },
+                }
+
+                if (arguments.len > 0) arg_idx += 1;
+            } else {
+                writeChar(c);
+                pos += 1;
+            }
+        } // end inner while (format string)
+
+        // No format specifier consumed an arg this pass -> stop (avoid loop).
         if (!used_arg_this_pass) break;
     } // end outer while (reuse format for remaining args)
 }
 
 pub fn main(init: std.process.Init) void {
-    // Collect args into array
-    var args_arr: [64][]const u8 = undefined;
-    var args_len: usize = 0;
+    g_alloc = init.gpa;
+
+    // Collect args dynamically (no arbitrary 64-arg cap).
+    var args_list: std.ArrayList([]const u8) = .empty;
+    defer args_list.deinit(g_alloc);
+
     var args_iter = std.process.Args.Iterator.init(init.minimal.args);
     while (args_iter.next()) |arg| {
-        if (args_len < args_arr.len) {
-            args_arr[args_len] = arg;
-            args_len += 1;
-        }
+        args_list.append(g_alloc, arg) catch {
+            writeStderr("printf: out of memory\n");
+            std.process.exit(1);
+        };
     }
+    const args_arr = args_list.items;
 
-    if (args_len < 2) {
+    if (args_arr.len < 2) {
         printUsage();
         std.process.exit(1);
     }
@@ -637,18 +737,10 @@ pub fn main(init: std.process.Init) void {
         return;
     }
 
-    // First argument is format string
     const format = first_arg;
+    const arguments = args_arr[2..];
 
-    // Collect remaining arguments
-    var arguments: [64][]const u8 = undefined;
-    var arg_count: usize = 0;
+    doFormat(format, arguments);
 
-    var i: usize = 2;
-    while (i < args_len and arg_count < arguments.len) : (i += 1) {
-        arguments[arg_count] = args_arr[i];
-        arg_count += 1;
-    }
-
-    doFormat(format, arguments[0..arg_count]);
+    if (g_exit_status != 0) std.process.exit(g_exit_status);
 }
