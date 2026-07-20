@@ -340,8 +340,14 @@ const B = struct {
     }
 
     fn heading(self: *B, s: []const u8, o: HeadOpts) !void {
-        self.y += o.gap_before + o.size;
-        try self.text(ML, self.y, s, .{ .size = o.size, .color = o.color });
+        self.y += o.gap_before;
+        // Wrap long headings (e.g. page 16) so they don't run off the page.
+        // Single-line headings are unaffected (byte-identical to the old path).
+        const lines = try wrap(self.a, s, o.size, CW, false);
+        for (lines, 0..) |ln, i| {
+            self.y += if (i == 0) o.size else o.size * 1.15;
+            try self.text(ML, self.y, ln, .{ .size = o.size, .color = o.color });
+        }
         self.y += o.gap_after;
     }
 
@@ -739,7 +745,7 @@ fn p08(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
         "the solar system. Our costs also include scaffolding as required while " ++
         "carrying out works on the roof.", .{ .size = 10.5, .gap_after = 8 });
     try b.para("All systems we supply are installed by professional fitters. An MCS " ++
-        "Certificate will be provided.", .{ .size = 10.5, .gap_after = 10 });
+        "Certificate will be provided.", .{ .size = 10.5, .gap_after = 18 });
     try b.text(ML, b.y, "Account Details:", .{ .size = 10.5 });
     b.gap(20);
     try b.text(ML, b.y, "Bank", .{ .size = 9.5 });
@@ -1449,7 +1455,7 @@ fn p20(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
     try b.heading("CONTRACT TERMS", .{ .size = 13, .gap_after = 10 });
     try b.para("We have enclosed a copy of our contract with this quotation. Please read " ++
         "this carefully, and as always, please contact us if you require further " ++
-        "clarification.", .{ .size = 10, .gap_after = 10 });
+        "clarification.", .{ .size = 10, .gap_after = 18 });
     try b.text(ML, b.y, "Customer Declaration:", .{ .size = 11 });
     b.gap(16);
     try b.para("I confirm that I wish to continue with the installation process with " ++

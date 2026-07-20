@@ -133,8 +133,12 @@ class Page:
         self.y += dy
 
     def heading(self, s, size=21, color=GREEN, gap_before=0, gap_after=14):
-        self.y += gap_before + size
-        self.text(ML, self.y, s, size=size, color=color)
+        self.y += gap_before
+        # Wrap long headings (e.g. page 16) so they don't run off the page.
+        # Single-line headings are unaffected (byte-identical to the old path).
+        for i, ln in enumerate(wrap(s, size, CW, False)):
+            self.y += size if i == 0 else size * 1.15
+            self.text(ML, self.y, ln, size=size, color=color)
         self.y += gap_after
 
     def para(self, s, size=10.5, color=BODY, bold=False, italic=False,
@@ -537,7 +541,7 @@ def page_price(q):
            "the solar system. Our costs also include scaffolding as required while "
            "carrying out works on the roof.", size=10.5, gap_after=8)
     p.para("All systems we supply are installed by professional fitters. An MCS "
-           "Certificate will be provided.", size=10.5, gap_after=10)
+           "Certificate will be provided.", size=10.5, gap_after=18)
     p.text(ML, p.y, "Account Details:", size=10.5); p.gap(20)
     p.text(ML, p.y, "Bank", size=9.5); p.text(ML + 70, p.y, "Natwest", size=9.5)
     p.text(ML + 300, p.y, "Sort Code", size=9.5); p.text(ML + 375, p.y, "52-41-20", size=9.5)
@@ -1201,7 +1205,7 @@ def page_20(q):
     p.heading("CONTRACT TERMS", size=13, gap_after=10)
     p.para("We have enclosed a copy of our contract with this quotation. Please read "
            "this carefully, and as always, please contact us if you require further "
-           "clarification.", size=10, gap_after=10)
+           "clarification.", size=10, gap_after=18)
     p.text(ML, p.y, "Customer Declaration:", size=11); p.gap(16)
     p.para("I confirm that I wish to continue with the installation process with "
            "this quotation, and to the costs set out in this quote. I confirm that I "
