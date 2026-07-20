@@ -55,6 +55,7 @@ const director_appointment = @import("director_appointment.zig");
 const director_resignation = @import("director_resignation.zig");
 const written_resolution = @import("written_resolution.zig");
 const presentation = @import("presentation.zig");
+const crg_solar_report = @import("crg_solar_report.zig");
 const qrcode = @import("qrcode.zig");
 const proposal = @import("proposal.zig");
 const clean_quote = @import("clean_quote.zig");
@@ -577,6 +578,23 @@ export fn zigpdf_generate_presentation(json_ptr: [*]const u8, json_len: usize, o
         return null;
     };
 
+    output_len.* = pdf_bytes.len;
+    return @ptrCast(@constCast(pdf_bytes.ptr));
+}
+
+/// Generate the 20-page CRG Solar Proposal from a small CrgQuote JSON.
+export fn zigpdf_generate_crg_solar_report(json_ptr: [*]const u8, json_len: usize, output_len: *usize) ?[*]u8 {
+    const json_slice = json_ptr[0..json_len];
+    if (!std.unicode.utf8ValidateSlice(json_slice)) {
+        setLastError("Invalid UTF-8 input");
+        return null;
+    }
+    const pdf_bytes = crg_solar_report.generateCrgSolarReportFromJson(wasm_allocator, json_slice) catch |err| {
+        var buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "CRG report error: {s}", .{@errorName(err)}) catch "CRG report error";
+        setLastError(msg);
+        return null;
+    };
     output_len.* = pdf_bytes.len;
     return @ptrCast(@constCast(pdf_bytes.ptr));
 }

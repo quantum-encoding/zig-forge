@@ -25,6 +25,7 @@ const TemplateMode = enum {
     presentation,
     proposal,
     certificate,
+    crg_report,
 };
 
 /// Company / legal document sub-types selected via `--certificate <type>`.
@@ -111,6 +112,7 @@ pub fn main(init: std.process.Init) !void {
     var opt_presentation = false;
     var opt_proposal = false;
     var opt_certificate = false;
+    var opt_crg_report = false;
     var cert_type: ?CertType = null;
 
     var input_path: ?[]const u8 = null;
@@ -140,6 +142,8 @@ pub fn main(init: std.process.Init) !void {
             opt_presentation = true;
         } else if (std.mem.eql(u8, arg, "--proposal")) {
             opt_proposal = true;
+        } else if (std.mem.eql(u8, arg, "--crg-report")) {
+            opt_crg_report = true;
         } else if (std.mem.eql(u8, arg, "--certificate")) {
             opt_certificate = true;
             // Consume the next token as the document <type>. The loop's
@@ -185,8 +189,9 @@ pub fn main(init: std.process.Init) !void {
     const presentation_val: usize = if (opt_presentation) 1 else 0;
     const proposal_val: usize = if (opt_proposal) 1 else 0;
     const certificate_val: usize = if (opt_certificate) 1 else 0;
+    const crg_report_val: usize = if (opt_crg_report) 1 else 0;
 
-    const total_flags = basic_val + minimalist_val + letter_val + presentation_val + proposal_val + certificate_val;
+    const total_flags = basic_val + minimalist_val + letter_val + presentation_val + proposal_val + certificate_val + crg_report_val;
     if (total_flags > 1) {
         try stderr.writeAll("Error: Multiple template flags specified. Template flags (--basic, --minimalist, --letter, --presentation, --proposal, --certificate) are mutually exclusive.\n");
         try stderr.flush();
@@ -206,6 +211,8 @@ pub fn main(init: std.process.Init) !void {
         .proposal
     else if (opt_certificate)
         .certificate
+    else if (opt_crg_report)
+        .crg_report
     else
         .basic;
 
@@ -430,6 +437,10 @@ fn generatePdfBytes(allocator: std.mem.Allocator, mode: TemplateMode, cert_type:
         },
         .proposal => {
             return try lib.generateProposalFromJson(allocator, json_data);
+        },
+        .crg_report => {
+            // Small CrgQuote JSON (the ~28 per-lead fields) -> 20-page proposal.
+            return try lib.generateCrgSolarReportFromJson(allocator, json_data);
         },
         .certificate => {
             // cert_type is always set when mode == .certificate (the arg parser

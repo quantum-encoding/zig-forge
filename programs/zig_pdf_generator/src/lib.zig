@@ -211,6 +211,11 @@ pub const PresentationPage = presentation.Page;
 pub const PresentationElement = presentation.Element;
 pub const generatePresentationFromJson = presentation.generatePresentationFromJson;
 
+pub const crg_solar_report = @import("crg_solar_report.zig");
+pub const CrgQuote = crg_solar_report.CrgQuote;
+pub const generateCrgSolarReport = crg_solar_report.generateCrgSolarReport;
+pub const generateCrgSolarReportFromJson = crg_solar_report.generateCrgSolarReportFromJson;
+
 // Proposal types
 pub const ProposalData = proposal.ProposalData;
 pub const ProposalRenderer = proposal.ProposalRenderer;

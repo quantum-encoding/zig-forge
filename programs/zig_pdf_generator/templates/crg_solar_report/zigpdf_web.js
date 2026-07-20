@@ -13,7 +13,11 @@
 // and frees the wasm-side buffers.
 
 const GENERATORS = {
-  presentation: 'zigpdf_generate_presentation', // canvas (the CRG solar report)
+  // The CRG solar proposal: pass a small CrgQuote JSON (the ~28 per-lead fields;
+  // omitted fields fall back to the sample). Brand assets are embedded in the
+  // wasm, so nothing else is needed. -> pdf.crgReport(JSON.stringify(quote))
+  crgReport: 'zigpdf_generate_crg_solar_report',
+  presentation: 'zigpdf_generate_presentation', // raw canvas schema
   invoice: 'zigpdf_generate_invoice',
   proposal: 'zigpdf_generate_proposal',
   cleanQuote: 'zigpdf_generate_clean_quote',

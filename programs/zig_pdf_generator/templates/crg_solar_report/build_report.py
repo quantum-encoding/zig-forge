@@ -13,7 +13,9 @@ assets/ and are inlined as base64.
 import base64, json, math, pathlib
 
 HERE = pathlib.Path(__file__).parent
-ASSETS = HERE / "assets"
+# Brand assets are canonical under the generator's src/ (so the Zig module can
+# @embedFile them); this builder reads the same copy.
+ASSETS = HERE.parent.parent / "src" / "crg_assets"
 
 # ---- A4 canvas (points, top-left origin) -----------------------------------
 PW, PH = 595.28, 841.89
@@ -688,9 +690,9 @@ def page_figures(q):
     p.heading("THE FIGURES", size=15, gap_before=2, gap_after=8)
     p.para("If the system performs in line with our predictions the following "
            "would apply, remember, we have assumed that you are Out all day We have "
-           "assumed you will self-consume 0%% of the energy produced by your PV "
+           "assumed you will self-consume 0% of the energy produced by your PV "
            "system, as determined by the method set out in MGD 003, therefore "
-           "exporting 100%%", size=9.5, gap_after=10)
+           "exporting 100%", size=9.5, gap_after=10)
     w3 = [CW - 90, 45, 45]
     rows = [
         {"cells": [{"t": "ANNUAL BENEFITS", "align": "center", "bg": BAND_MD, "size": 9.5}], "widths": [CW], "h": 20},

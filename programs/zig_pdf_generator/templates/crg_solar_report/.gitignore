@@ -1,9 +1,13 @@
 ref_pages/
 out_pages/
 cmp/
+zigcmp/
 _smoke*
 _t_*
 _sig_test*
 _wasm*
 _loader*
+_crg*
 *_wasm.pdf
+crg_report_zig.pdf
+crg_wasm_*.pdf
