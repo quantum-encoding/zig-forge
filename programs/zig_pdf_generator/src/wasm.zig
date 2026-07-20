@@ -56,6 +56,7 @@ const director_resignation = @import("director_resignation.zig");
 const written_resolution = @import("written_resolution.zig");
 const presentation = @import("presentation.zig");
 const crg_solar_report = @import("crg_solar_report.zig");
+const website_health_report = @import("website_health_report.zig");
 const qrcode = @import("qrcode.zig");
 const proposal = @import("proposal.zig");
 const clean_quote = @import("clean_quote.zig");
@@ -578,6 +579,23 @@ export fn zigpdf_generate_presentation(json_ptr: [*]const u8, json_len: usize, o
         return null;
     };
 
+    output_len.* = pdf_bytes.len;
+    return @ptrCast(@constCast(pdf_bytes.ptr));
+}
+
+/// Generate a Website Health Audit PDF from a baton-audit SiteHealthReport JSON.
+export fn zigpdf_generate_health_report(json_ptr: [*]const u8, json_len: usize, output_len: *usize) ?[*]u8 {
+    const json_slice = json_ptr[0..json_len];
+    if (!std.unicode.utf8ValidateSlice(json_slice)) {
+        setLastError("Invalid UTF-8 input");
+        return null;
+    }
+    const pdf_bytes = website_health_report.generateWebsiteHealthReportFromJson(wasm_allocator, json_slice) catch |err| {
+        var buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Health report error: {s}", .{@errorName(err)}) catch "Health report error";
+        setLastError(msg);
+        return null;
+    };
     output_len.* = pdf_bytes.len;
     return @ptrCast(@constCast(pdf_bytes.ptr));
 }

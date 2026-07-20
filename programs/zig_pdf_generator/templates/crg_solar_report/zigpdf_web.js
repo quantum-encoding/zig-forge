@@ -17,6 +17,8 @@ const GENERATORS = {
   // omitted fields fall back to the sample). Brand assets are embedded in the
   // wasm, so nothing else is needed. -> pdf.crgReport(JSON.stringify(quote))
   crgReport: 'zigpdf_generate_crg_solar_report',
+  // baton-audit Website Health report: pass a SiteHealthReport JSON.
+  healthReport: 'zigpdf_generate_health_report',
   presentation: 'zigpdf_generate_presentation', // raw canvas schema
   invoice: 'zigpdf_generate_invoice',
   proposal: 'zigpdf_generate_proposal',

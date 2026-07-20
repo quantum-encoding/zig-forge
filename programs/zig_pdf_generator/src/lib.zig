@@ -216,6 +216,9 @@ pub const CrgQuote = crg_solar_report.CrgQuote;
 pub const generateCrgSolarReport = crg_solar_report.generateCrgSolarReport;
 pub const generateCrgSolarReportFromJson = crg_solar_report.generateCrgSolarReportFromJson;
 
+pub const website_health_report = @import("website_health_report.zig");
+pub const generateWebsiteHealthReportFromJson = website_health_report.generateWebsiteHealthReportFromJson;
+
 // Proposal types
 pub const ProposalData = proposal.ProposalData;
 pub const ProposalRenderer = proposal.ProposalRenderer;

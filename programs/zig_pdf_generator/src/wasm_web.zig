@@ -30,6 +30,7 @@ const clean_quote = @import("clean_quote.zig");
 const letter = @import("letter.zig");
 const order_email = @import("order_email.zig");
 const crg_solar_report = @import("crg_solar_report.zig");
+const website_health_report = @import("website_health_report.zig");
 
 const wasm_allocator = std.heap.wasm_allocator;
 
@@ -100,6 +101,20 @@ export fn zigpdf_generate_crg_solar_report(json_ptr: [*]const u8, json_len: usiz
     const pdf_bytes = crg_solar_report.generateCrgSolarReportFromJson(wasm_allocator, json_slice) catch |err| {
         var buf: [128]u8 = undefined;
         setLastError(std.fmt.bufPrint(&buf, "CRG report error: {s}", .{@errorName(err)}) catch "CRG report error");
+        return null;
+    };
+    output_len.* = pdf_bytes.len;
+    return @ptrCast(@constCast(pdf_bytes.ptr));
+}
+
+/// Website Health & Compliance Audit — baton-audit SiteHealthReport JSON in,
+/// paginating branded PDF out (QE assets embedded).
+export fn zigpdf_generate_health_report(json_ptr: [*]const u8, json_len: usize, output_len: *usize) ?[*]u8 {
+    const json_slice = json_ptr[0..json_len];
+    if (!validateUtf8(json_slice)) return null;
+    const pdf_bytes = website_health_report.generateWebsiteHealthReportFromJson(wasm_allocator, json_slice) catch |err| {
+        var buf: [128]u8 = undefined;
+        setLastError(std.fmt.bufPrint(&buf, "Health report error: {s}", .{@errorName(err)}) catch "Health report error");
         return null;
     };
     output_len.* = pdf_bytes.len;
