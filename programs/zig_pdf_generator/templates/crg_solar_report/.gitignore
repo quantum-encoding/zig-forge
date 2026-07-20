@@ -4,3 +4,6 @@ cmp/
 _smoke*
 _t_*
 _sig_test*
+_wasm*
+_loader*
+*_wasm.pdf

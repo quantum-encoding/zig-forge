@@ -28,6 +28,36 @@ system exactly (including its £0-savings values — the reference's MCS irradia
 lookup returned 0; our SvelteKit port computes it correctly, so real leads will
 show real numbers).
 
+## Browser / WASM generation
+
+The same JSON runs in the browser with no server round-trip. Build the
+freestanding WASM module (no WASI shim — imports nothing from the host):
+
+```bash
+cd ../..                       # programs/zig_pdf_generator
+zig build wasm-web             # -> zig-out/lib/zigpdf_web.wasm  (~1.3 MB)
+```
+
+Then drive it with the bundled loader (`zigpdf_web.js`):
+
+```js
+import { loadZigPdf } from './zigpdf_web.js';
+const pdf = await loadZigPdf('/zigpdf_web.wasm');            // fetch + instantiate once
+const bytes = pdf.presentation(JSON.stringify(reportTemplate)); // Uint8Array (%PDF…)
+const url = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+```
+
+Verified byte-identical to the native `pdf-gen --presentation` output for this
+report (same SHA-256). `zigpdf_web.js` also exposes `invoice`, `proposal`,
+`cleanQuote`, `letter`, and `orderEmail`. Only base64 / `data:` images work in
+the browser build (no filesystem); this template already inlines all assets, so
+it needs nothing else.
+
+> The WASM build lives in the freestanding root `src/wasm_web.zig` (the WASI
+> `src/wasm.zig` pulls in the PDF extractor + path-based image loading, which
+> don't compile for `wasm32-freestanding`). `image.zig`'s filesystem image path
+> is compiled out on freestanding.
+
 ## Layout approach
 
 - A4 canvas (595.28 × 841.89 pt), top-left origin.

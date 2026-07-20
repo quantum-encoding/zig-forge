@@ -295,6 +295,46 @@ pub fn build(b: *std.Build) void {
     wasm_step.dependOn(&wasm_install.step);
 
     // ==========================================================================
+    // Freestanding browser WASM (no WASI, no libc)
+    // Build with: zig build wasm-web
+    // Output: zig-out/lib/zigpdf_web.wasm
+    // --------------------------------------------------------------------------
+    // The WASI build above imports 27 wasi_snapshot_preview1 functions, so a
+    // browser must supply a WASI shim. This freestanding target imports NOTHING
+    // from the host — instantiate it with an empty import object. The allocator
+    // is std.heap.wasm_allocator (pure wasm pages, no libc). Suits the
+    // (ptr,len)->ptr ABI: wasm_alloc a JSON buffer, call
+    // zigpdf_generate_presentation, read the PDF bytes from exported memory,
+    // zigpdf_free. Same pattern as zig_docx `wasm-web`.
+    //
+    // NOTE: encrypted exports (…_encrypted) still need a host-provided CSPRNG
+    // seed argument; nothing here calls random_get / clock_time_get, so the
+    // presentation / invoice / letter / contract paths link clean.
+    // ==========================================================================
+    const web_wasm_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .freestanding,
+    });
+    const web_wasm_module = b.createModule(.{
+        .root_source_file = b.path("src/wasm_web.zig"),
+        .target = web_wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+    const web_wasm = b.addExecutable(.{
+        .name = "zigpdf_web",
+        .root_module = web_wasm_module,
+    });
+    web_wasm.entry = .disabled;
+    web_wasm.rdynamic = true;
+    web_wasm.export_memory = true;
+    web_wasm.stack_size = 8 * 1024 * 1024;
+    const web_wasm_install = b.addInstallArtifact(web_wasm, .{
+        .dest_dir = .{ .override = .{ .custom = "lib" } },
+    });
+    const web_wasm_step = b.step("wasm-web", "Build freestanding browser WASM module (no WASI shim)");
+    web_wasm_step.dependOn(&web_wasm_install.step);
+
+    // ==========================================================================
     // CLI Tool
     // ==========================================================================
     const exe = b.addExecutable(.{

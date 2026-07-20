@@ -9,6 +9,7 @@
 //! For full PNG compliance, a dedicated library would be needed.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const document = @import("document.zig");
 
 pub const ImageError = error{
@@ -458,22 +459,29 @@ pub fn loadImageFlexible(
 
     // Try the string as a filesystem path (relative to cwd). Uses the shared
     // single-threaded IO handle so it behaves identically from CLI and FFI.
-    const io = std.Io.Threaded.global_single_threaded.io();
-    if (std.Io.Dir.cwd().readFileAlloc(io, src, allocator, .limited(32 * 1024 * 1024))) |raw| {
-        const img = loadImage(allocator, raw) catch |err| {
+    //
+    // Skipped on freestanding (the browser WASM build): there is no filesystem,
+    // and referencing std.Io.Threaded there fails to compile (posix getrandom /
+    // IOV_MAX are absent). Browser callers must pass base64 / data: URLs, which
+    // is handled by the fall-through below.
+    if (builtin.target.os.tag != .freestanding) {
+        const io = std.Io.Threaded.global_single_threaded.io();
+        if (std.Io.Dir.cwd().readFileAlloc(io, src, allocator, .limited(32 * 1024 * 1024))) |raw| {
+            const img = loadImage(allocator, raw) catch |err| {
+                allocator.free(raw);
+                return err;
+            };
+            if (img.format == .jpeg) {
+                // JPEG image references the raw file bytes — keep them.
+                return .{ .image = img, .decoded_bytes = raw };
+            }
+            // PNG decoded to a fresh pixel buffer; the raw file bytes are done.
             allocator.free(raw);
-            return err;
-        };
-        if (img.format == .jpeg) {
-            // JPEG image references the raw file bytes — keep them.
-            return .{ .image = img, .decoded_bytes = raw };
-        }
-        // PNG decoded to a fresh pixel buffer; the raw file bytes are done.
-        allocator.free(raw);
-        return .{ .image = img, .decoded_bytes = @constCast(img.data) };
-    } else |_| {}
+            return .{ .image = img, .decoded_bytes = @constCast(img.data) };
+        } else |_| {}
+    }
 
-    // Not a file — treat as raw base64.
+    // Not a file (or freestanding) — treat as raw base64.
     return loadImageFromBase64(allocator, src);
 }
 
