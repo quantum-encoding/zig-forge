@@ -198,6 +198,24 @@ pub const Report = struct {
 const LOGO_DARK = @embedFile("health_assets/qe_logo_dark.png"); // cyan Q on navy
 const LOGO_WHITE = @embedFile("health_assets/qe_logo_white.png"); // cyan Q on white
 
+/// Read a PNG data-URI's pixel dimensions from its IHDR header (decode just the
+/// prefix). Returns null if not a base64 PNG. Used to preserve the cover
+/// screenshot's aspect ratio instead of squashing it into a fixed box.
+fn pngDims(data_uri: []const u8) ?struct { w: f64, h: f64 } {
+    const marker = "base64,";
+    const idx = std.mem.indexOf(u8, data_uri, marker) orelse return null;
+    const b64 = data_uri[idx + marker.len ..];
+    if (b64.len < 44) return null;
+    var buf: [33]u8 = undefined;
+    std.base64.standard.Decoder.decode(&buf, b64[0..44]) catch return null;
+    const sig = [_]u8{ 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
+    if (!std.mem.eql(u8, buf[0..8], &sig)) return null;
+    const w = (@as(u32, buf[16]) << 24) | (@as(u32, buf[17]) << 16) | (@as(u32, buf[18]) << 8) | buf[19];
+    const h = (@as(u32, buf[20]) << 24) | (@as(u32, buf[21]) << 16) | (@as(u32, buf[22]) << 8) | buf[23];
+    if (w == 0 or h == 0) return null;
+    return .{ .w = @floatFromInt(w), .h = @floatFromInt(h) };
+}
+
 fn dataUrl(a: std.mem.Allocator, bytes: []const u8) ![]const u8 {
     const Enc = std.base64.standard.Encoder;
     const prefix = "data:image/png;base64,";
@@ -466,12 +484,19 @@ fn buildCover(d: *Doc) !void {
         try d.text(ML, 390, d.f("Grade capped by: {s}", .{cap}), 9.5, RED, true, .left);
     }
 
-    // screenshot frame (optional)
+    // screenshot frame (optional) — fit within a box, preserving aspect ratio
     if (r.screenshotDataUri) |shot| {
-        const iw: f64 = 360;
-        const ih: f64 = 225;
+        const box_w: f64 = 440;
+        const box_h: f64 = 320;
+        var iw: f64 = box_w;
+        var ih: f64 = box_h * (10.0 / 16.0); // fallback aspect if dims unreadable
+        if (pngDims(shot)) |dim| {
+            const scale = @min(box_w / dim.w, box_h / dim.h);
+            iw = dim.w * scale;
+            ih = dim.h * scale;
+        }
         const ix = (PW - iw) / 2;
-        const iyv: f64 = 430;
+        const iyv: f64 = 428;
         try d.rect(ix - 6, iyv - 6, iw + 12, ih + 12, "#f3f4f6", RULE, 1);
         try d.image(shot, ix, iyv, iw, ih);
         try d.text(PW / 2, iyv + ih + 22, d.f("{s}", .{r.url}), 9, LGREY, false, .center);
