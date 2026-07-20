@@ -1216,7 +1216,7 @@ def page_20(q):
         {"cells": [{"t": "Date:", "align": "center", "bg": "#d9d9d9"}, {"t": ""}], "h": 30},
     ]
     p.grid(ML, [CW * 0.4, CW * 0.6], decl, y=p.y, border="#7f7f7f", sw=0.7, size=10, pad=7)
-    p.gap(6)
+    p.gap(18)
     p.text(ML, p.y, "The next steps", size=10.5); p.gap(13)
     p.para("Below are the steps both of us will take to give you a complete solar "
            "system under your control.", size=10, gap_after=8)
@@ -1232,7 +1232,7 @@ def page_20(q):
            "outstanding balance is due at this point.", size=10, gap_after=8)
     p.para("Within 14 days of install post installation pack warranties, product "
            "information and post install support certification delivered to you.",
-           size=10, gap_after=8)
+           size=10, gap_after=18)
     p.text(ML, p.y, "Your Surveyor was: -", size=10); p.gap(24)
     p.text(PW / 2, p.y, "Many thanks for your time and for your interest in our "
            "products.", size=13, color=GREEN, align="center")

@@ -1464,7 +1464,7 @@ fn p20(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
         .{ .cells = cs(a, &.{ .{ .t = "Date:", .al = .center, .bg = "#d9d9d9" }, .{ .t = "" } }), .h = 30 },
     };
     try b.grid(ML, &[_]f64{ CW * 0.4, CW * 0.6 }, &decl, .{ .border = "#7f7f7f", .sw = 0.7, .size = 10, .pad = 7 });
-    b.gap(6);
+    b.gap(18);
     try b.text(ML, b.y, "The next steps", .{ .size = 10.5 });
     b.gap(13);
     try b.para("Below are the steps both of us will take to give you a complete solar " ++
@@ -1482,7 +1482,7 @@ fn p20(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
         "any questions you may have on your system. Final payment of the " ++
         "outstanding balance is due at this point.", .{ .size = 10, .gap_after = 8 });
     try b.para("Within 14 days of install post installation pack warranties, product " ++
-        "information and post install support certification delivered to you.", .{ .size = 10, .gap_after = 8 });
+        "information and post install support certification delivered to you.", .{ .size = 10, .gap_after = 18 });
     try b.text(ML, b.y, "Your Surveyor was: -", .{ .size = 10 });
     b.gap(24);
     try b.text(PW / 2, b.y, "Many thanks for your time and for your interest in our " ++
