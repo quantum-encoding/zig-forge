@@ -215,10 +215,17 @@ const PerfMetric = struct {
     field: ?[]const u8 = null,
     fieldRating: ?[]const u8 = null,
 };
+const Lighthouse = struct {
+    performance: ?f64 = null,
+    accessibility: ?f64 = null,
+    bestPractices: ?f64 = null,
+    seo: ?f64 = null,
+};
 const Performance = struct {
     labScore: ?f64 = null,
     labSource: ?[]const u8 = null,
     labStrategy: ?[]const u8 = null,
+    lighthouse: ?Lighthouse = null,
     fieldScore: ?f64 = null,
     fieldScope: ?[]const u8 = null,
     fieldOverall: ?[]const u8 = null,
@@ -431,6 +438,40 @@ const Doc = struct {
         }
     }
 
+    // one Lighthouse gauge: a coloured ring (DevTools style) with the score
+    // inside and a category label beneath.
+    fn lhGauge(self: *Doc, cx: f64, cy: f64, label: []const u8, v: ?f64) !void {
+        const R: f64 = 23; // radius; renderer takes width as diameter (radius = width/2)
+        const col = if (v) |vv| scoreColor(vv) else LGREY;
+        // white-filled disc with a coloured ring border (DevTools gauge look)
+        try self.el(.{ .shape = .{ .shape = .circle, .x = @floatCast(cx), .y = @floatCast(cy), .width = @floatCast(R * 2), .height = @floatCast(R * 2), .fill_color = WHITE, .stroke_color = col, .stroke_width = 3 } });
+        const num = if (v) |vv| self.f("{d:.0}", .{vv}) else "\u{2014}";
+        const fs: f64 = if (num.len >= 3) 14 else 16; // shrink "100" so it fits the ring
+        try self.text(cx, cy + fs * 0.35, num, fs, col, true, .center);
+        try self.text(cx, cy + R + 14, label, 8.5, GREY, false, .center);
+    }
+
+    // The four Lighthouse category gauges (Performance / Accessibility / Best
+    // Practices / SEO) — the DevTools/PSI lab report, shown in full.
+    fn lhCard(self: *Doc, lh: Lighthouse, strategy: ?[]const u8, source: ?[]const u8) !void {
+        try self.ensure(108);
+        self.y += 2;
+        try self.text(ML, self.y + 9, self.f("Lighthouse report \u{2014} lab ({s} \u{00B7} {s})", .{ srcLabel(source), stratLabel(strategy) }), 9.5, NAVY, true, .left);
+        self.y += 20;
+        const gy = self.y + 26;
+        const items = [_]struct { l: []const u8, v: ?f64 }{
+            .{ .l = "Performance", .v = lh.performance },
+            .{ .l = "Accessibility", .v = lh.accessibility },
+            .{ .l = "Best Practices", .v = lh.bestPractices },
+            .{ .l = "SEO", .v = lh.seo },
+        };
+        for (items, 0..) |it, i| {
+            const cx = ML + CW * (@as(f64, @floatFromInt(i)) + 0.5) / 4.0;
+            try self.lhGauge(cx, gy, it.l, it.v);
+        }
+        self.y = gy + 23 + 22;
+    }
+
     // Performance: lab (synthetic) vs field (real-user CrUX) — the actual stats,
     // side by side, so the report shows numbers rather than a single vibe score.
     fn perfTable(self: *Doc, p: Performance) !void {
@@ -455,6 +496,9 @@ const Doc = struct {
             try self.perfScoreCell(ML + hw + 12, hw, yb, band_h, "FIELD (real-user)", "no CrUX data", null, "too little traffic for field data");
         }
         self.y = yb + band_h + 16;
+
+        // Lighthouse category gauges (the full DevTools/PSI lab report)
+        if (p.lighthouse) |lh| try self.lhCard(lh, p.labStrategy, p.labSource);
 
         // metric table
         const cx_lab = ML + 312;
