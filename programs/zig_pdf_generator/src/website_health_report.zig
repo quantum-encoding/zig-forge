@@ -183,6 +183,36 @@ fn wrap(a: std.mem.Allocator, s: []const u8, size: f64, maxw: f64, bold: bool) !
     }
     return out.items;
 }
+/// Insert spaces inside any word too long to fit `maxw` (long URLs, hashes), so
+/// the word-wrapper can break it instead of overflowing the column. ASCII-only
+/// split points keep it UTF-8 safe (we only ever break between ASCII bytes).
+fn breakLongTokens(a: std.mem.Allocator, s: []const u8, size: f64, maxw: f64) ![]const u8 {
+    if (textWidth(s, size, false) <= maxw) return s;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var it = std.mem.splitScalar(u8, s, ' ');
+    var first = true;
+    while (it.next()) |word| {
+        if (!first) try out.append(a, ' ');
+        first = false;
+        if (textWidth(word, size, false) <= maxw) {
+            try out.appendSlice(a, word);
+            continue;
+        }
+        var run_start: usize = 0;
+        var i: usize = 0;
+        while (i < word.len) : (i += 1) {
+            if (word[i] >= 0x80) continue; // never split inside a UTF-8 sequence
+            if (textWidth(word[run_start .. i + 1], size, false) > maxw and i > run_start) {
+                try out.appendSlice(a, word[run_start..i]);
+                try out.append(a, ' ');
+                run_start = i;
+            }
+        }
+        try out.appendSlice(a, word[run_start..]);
+    }
+    return out.items;
+}
+
 fn nLines(a: std.mem.Allocator, s: []const u8, size: f64, maxw: f64, bold: bool) !usize {
     const lines = try wrap(a, s, size, maxw, bold);
     return @max(1, lines.len);
@@ -880,7 +910,9 @@ fn kvBlock(d: *Doc, title: ?[]const u8, rows: []const ExtractedField) !void {
     const vx = ML + lw;
     const vw = CW - lw - 4;
     for (rows) |r| {
-        const lines = try wrap(d.a, r.value, 9, vw, false);
+        // Long unbroken tokens (URLs) can't word-wrap — hard-break them first so
+        // they stay inside the column instead of running off the page edge.
+        const lines = try wrap(d.a, try breakLongTokens(d.a, r.value, 9, vw), 9, vw, false);
         const step: f64 = 9 * 1.34;
         const h = @max(step, @as(f64, @floatFromInt(lines.len)) * step);
         try d.ensure(h + 4);
@@ -934,7 +966,7 @@ fn buildExtracted(d: *Doc) !void {
         try d.text(ML + 2, d.y + 8, "Linked brand profiles (sameAs)", 9.5, NAVY, true, .left);
         d.y += 13;
         for (ex.sameAs) |u| {
-            const lines = try wrap(d.a, u, 8.5, CW - 20, false);
+            const lines = try wrap(d.a, try breakLongTokens(d.a, u, 8.5, CW - 20), 8.5, CW - 20, false);
             for (lines, 0..) |ln, i| {
                 try d.ensure(12);
                 d.y += 12;
