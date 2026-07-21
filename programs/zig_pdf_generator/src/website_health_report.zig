@@ -241,6 +241,29 @@ const Performance = struct {
     hasField: bool = false,
     rows: []const PerfMetric = &.{},
 };
+// One prior/current scan (baton-audit LedgerRow) — the Scan History trend.
+const HistoryRow = struct {
+    ts: []const u8 = "",
+    host: []const u8 = "",
+    overall: f64 = 0,
+    grade: []const u8 = "",
+    perf: f64 = 0,
+    seo: f64 = 0,
+    a11y: f64 = 0,
+    sec: f64 = 0,
+    comp: f64 = 0,
+    @"struct": f64 = 0, // JSON key "struct" is a Zig keyword
+    geo: f64 = 0,
+    sust: f64 = 0,
+    fieldScore: ?f64 = null,
+    labPerf: ?f64 = null,
+    lcp: ?[]const u8 = null,
+    cls: ?[]const u8 = null,
+    inp: ?[]const u8 = null,
+    fcp: ?[]const u8 = null,
+    crit: u32 = 0,
+    warn: u32 = 0,
+};
 pub const Report = struct {
     url: []const u8 = "",
     domain: []const u8 = "",
@@ -252,6 +275,7 @@ pub const Report = struct {
     criticalCount: u32 = 0,
     warningCount: u32 = 0,
     performance: ?Performance = null,
+    history: []const HistoryRow = &.{},
 };
 
 // ---- embedded QE assets ----------------------------------------------------
@@ -411,6 +435,88 @@ const Doc = struct {
         try self.rect(bar_x, y + 4, fill, 12, col, null, 0);
         try self.text(PW - MR, y + 11, self.f("{d:.0}", .{score}), 11, col, true, .right);
         self.y += row_h;
+    }
+
+    // "2026-07-21T17:43:.." → "07-21 17:43"
+    fn dISO(self: *Doc, ts: []const u8) []const u8 {
+        if (ts.len >= 16) return self.f("{s} {s}", .{ ts[5..10], ts[11..16] });
+        if (ts.len >= 10) return ts[5..10];
+        return ts;
+    }
+
+    // Scan History — the trend across scans (overall + Δ, grade, perf, field CWV).
+    // Renders only with ≥2 rows; the latest row is highlighted.
+    fn historyTable(self: *Doc, rows: []const HistoryRow) !void {
+        if (rows.len < 2) return;
+        try self.section("Scan History");
+        try self.para("How the site has moved across scans \u{2014} the effect of each release. Overall " ++
+            "score with its change since the previous scan, plus the real-user field Core Web " ++
+            "Vitals (Chrome UX Report p75) that Google ranks on.", 10, INK, 10);
+
+        const c_date = ML + 2;
+        const c_over = ML + 150;
+        const c_delta = ML + 168;
+        const c_grade = ML + 220;
+        const c_perf = ML + 270;
+        const c_field = ML + 324;
+        const c_lcp = ML + 382;
+        const c_cls = ML + 434;
+        const c_warn = ML + 478;
+
+        try self.ensure(22);
+        const hy = self.y + 10;
+        try self.text(c_date, hy, "DATE", 8, GREY, true, .left);
+        try self.text(c_over, hy, "OVERALL", 8, GREY, true, .center);
+        try self.text(c_grade, hy, "GRADE", 8, GREY, true, .center);
+        try self.text(c_perf, hy, "PERF", 8, GREY, true, .center);
+        try self.text(c_field, hy, "FIELD", 8, GREY, true, .center);
+        try self.text(c_lcp, hy, "LCP", 8, GREY, true, .center);
+        try self.text(c_cls, hy, "CLS", 8, GREY, true, .center);
+        try self.text(c_warn, hy, "WARN", 8, GREY, true, .center);
+        self.y += 15;
+        try self.rect(ML, self.y, CW, 0.8, RULE, null, 0);
+        self.y += 1;
+
+        const rh: f64 = 20;
+        var prev: ?f64 = null;
+        for (rows, 0..) |r, i| {
+            try self.ensure(rh);
+            const y = self.y;
+            const last = i == rows.len - 1;
+            if (last) {
+                try self.rect(ML, y, CW, rh, "#ecfeff", null, 0); // faint cyan for the current scan
+            } else if (i % 2 == 1) {
+                try self.rect(ML, y, CW, rh, CARD_BG, null, 0);
+            }
+            const bold = last;
+            try self.text(c_date, y + 13, self.dISO(r.ts), 9, INK, bold, .left);
+            try self.text(c_over, y + 13, self.f("{d:.0}", .{r.overall}), 10, scoreColor(r.overall), bold, .center);
+            if (prev) |p| {
+                const d = r.overall - p;
+                if (d > 0) {
+                    try self.text(c_delta, y + 13, self.f("+{d:.0}", .{d}), 8.5, GREEN, true, .left);
+                } else if (d < 0) {
+                    try self.text(c_delta, y + 13, self.f("{d:.0}", .{d}), 8.5, RED, true, .left);
+                } else {
+                    try self.text(c_delta, y + 13, "0", 8.5, LGREY, false, .left);
+                }
+            }
+            try self.text(c_grade, y + 13, r.grade, 10, gradeColor(r.grade), bold, .center);
+            try self.text(c_perf, y + 13, self.f("{d:.0}", .{r.perf}), 9.5, scoreColor(r.perf), bold, .center);
+            if (r.fieldScore) |fs| {
+                try self.text(c_field, y + 13, self.f("{d:.0}", .{fs}), 9.5, scoreColor(fs), bold, .center);
+            } else {
+                try self.text(c_field, y + 13, "\u{2014}", 9.5, LGREY, false, .center);
+            }
+            try self.text(c_lcp, y + 13, r.lcp orelse "\u{2014}", 9, INK, bold, .center);
+            try self.text(c_cls, y + 13, r.cls orelse "\u{2014}", 9, INK, bold, .center);
+            try self.text(c_warn, y + 13, self.f("{d}", .{r.warn}), 9.5, if (r.warn == 0) GREEN else AMBER, bold, .center);
+            prev = r.overall;
+            self.y += rh;
+        }
+        self.y += 3;
+        try self.rect(ML, self.y, CW, 0.8, RULE, null, 0);
+        self.y += 8;
     }
 
     // one half of the lab/field score band
@@ -754,6 +860,9 @@ fn buildBody(d: *Doc) !void {
     d.gap(2);
     for (r.categories) |c| try d.scoreBar(c.label, c.score, c.weight);
     d.gap(10);
+
+    // 2a. Scan History — the trend across scans (renders only with ≥2 ledger rows)
+    if (r.history.len >= 2) try d.historyTable(r.history);
 
     // 2b. Performance — lab vs field stats table (when Lighthouse and/or CrUX ran)
     if (r.performance) |p| {
