@@ -216,6 +216,8 @@ const PerfMetric = struct {
     label: []const u8 = "",
     lab: ?[]const u8 = null,
     labRating: ?[]const u8 = null,
+    labDesktop: ?[]const u8 = null,
+    labDesktopRating: ?[]const u8 = null,
     field: ?[]const u8 = null,
     fieldRating: ?[]const u8 = null,
 };
@@ -233,6 +235,8 @@ const Performance = struct {
     labScore: ?f64 = null,
     labSource: ?[]const u8 = null,
     labStrategy: ?[]const u8 = null,
+    hasDesktopLab: bool = false,
+    labDesktopStrategy: ?[]const u8 = null,
     lighthouse: ?Lighthouse = null,
     runs: []const LighthouseRun = &.{},
     fieldScore: ?f64 = null,
@@ -264,6 +268,12 @@ const HistoryRow = struct {
     crit: u32 = 0,
     warn: u32 = 0,
 };
+// A captured page screenshot for the Pages Loaded gallery (baton-audit GalleryShot).
+const GalleryShot = struct {
+    url: []const u8 = "",
+    label: []const u8 = "",
+    dataUri: []const u8 = "",
+};
 pub const Report = struct {
     url: []const u8 = "",
     domain: []const u8 = "",
@@ -276,6 +286,7 @@ pub const Report = struct {
     warningCount: u32 = 0,
     performance: ?Performance = null,
     history: []const HistoryRow = &.{},
+    gallery: []const GalleryShot = &.{},
 };
 
 // ---- embedded QE assets ----------------------------------------------------
@@ -621,13 +632,20 @@ const Doc = struct {
             try self.lhCard(lh, self.f("Lighthouse report \u{2014} lab ({s} \u{00B7} {s})", .{ srcLabel(p.labSource), stratLabel(p.labStrategy) }));
         }
 
-        // metric table
-        const cx_lab = ML + 312;
-        const cx_field = ML + 430;
+        // metric table — 2 columns (Lab | Field) or 3 (Lab mobile | Lab desktop | Field)
+        const three = p.hasDesktopLab;
+        const cx_lab = if (three) ML + 268 else ML + 312;
+        const cx_lab2 = ML + 360; // desktop lab (only when three)
+        const cx_field = if (three) ML + 456 else ML + 430;
         try self.ensure(20);
         try self.text(ML + 4, self.y + 10, "Core Web Vital / lab metric", 8.5, GREY, true, .left);
-        try self.text(cx_lab, self.y + 10, "Lab", 8.5, GREY, true, .center);
-        try self.text(cx_field, self.y + 10, "Field (p75)", 8.5, GREY, true, .center);
+        if (three) {
+            try self.text(cx_lab, self.y + 10, self.f("Lab \u{00B7} {s}", .{ffLabel(p.labStrategy orelse "mobile")}), 8, GREY, true, .center);
+            try self.text(cx_lab2, self.y + 10, self.f("Lab \u{00B7} {s}", .{ffLabel(p.labDesktopStrategy orelse "desktop")}), 8, GREY, true, .center);
+        } else {
+            try self.text(cx_lab, self.y + 10, "Lab", 8.5, GREY, true, .center);
+        }
+        try self.text(cx_field, self.y + 10, "Field (p75)", 8, GREY, true, .center);
         self.y += 15;
         try self.rect(ML, self.y, CW, 0.8, RULE, null, 0);
         self.y += 1;
@@ -641,6 +659,10 @@ const Doc = struct {
             const lab = row.lab orelse "\u{2014}";
             const fld = row.field orelse "\u{2014}";
             try self.text(cx_lab, y + 13, lab, 10, ratingColor(row.labRating), row.lab != null, .center);
+            if (three) {
+                const labd = row.labDesktop orelse "\u{2014}";
+                try self.text(cx_lab2, y + 13, labd, 10, ratingColor(row.labDesktopRating), row.labDesktop != null, .center);
+            }
             try self.text(cx_field, y + 13, fld, 10, ratingColor(row.fieldRating), row.field != null, .center);
             self.y += rh;
         }
@@ -826,6 +848,51 @@ fn allFindingsSorted(a: std.mem.Allocator, r: *const Report, want_pass: bool) ![
     return list.items;
 }
 
+// Pages Loaded — a 2-column grid of page screenshots (proof of real page loads).
+fn buildGallery(d: *Doc) !void {
+    const shots = d.rep.gallery;
+    if (shots.len == 0) return;
+    try d.section("Pages Loaded");
+    try d.para("Screenshots captured during the audit \u{2014} evidence each page was loaded and " ++
+        "rendered in a real browser (Chrome DevTools Protocol), not just fetched as HTML.", 10, INK, 10);
+
+    const gap: f64 = 14;
+    const cw = (CW - gap) / 2.0; // two columns
+    var i: usize = 0;
+    while (i < shots.len) : (i += 2) {
+        // row image height = tallest image in the row at column width (capped)
+        var row_ih: f64 = cw * 9.0 / 16.0;
+        var j: usize = 0;
+        while (j < 2 and i + j < shots.len) : (j += 1) {
+            if (pngDims(shots[i + j].dataUri)) |dim| {
+                const h = cw * dim.h / dim.w;
+                if (h > row_ih) row_ih = h;
+            }
+        }
+        if (row_ih > 190) row_ih = 190;
+        const cell_h = row_ih + 22;
+        try d.ensure(cell_h + 6);
+        const y0 = d.y;
+        j = 0;
+        while (j < 2 and i + j < shots.len) : (j += 1) {
+            const shot = shots[i + j];
+            const x = ML + @as(f64, @floatFromInt(j)) * (cw + gap);
+            var iw = cw;
+            var ih = row_ih;
+            if (pngDims(shot.dataUri)) |dim| {
+                const scale = @min(cw / dim.w, row_ih / dim.h);
+                iw = dim.w * scale;
+                ih = dim.h * scale;
+            }
+            try d.rect(x, y0, cw, row_ih, "#f3f4f6", RULE, 0.8);
+            try d.image(shot.dataUri, x + (cw - iw) / 2.0, y0 + (row_ih - ih) / 2.0, iw, ih);
+            try d.text(x + 2, y0 + row_ih + 13, shot.label, 8.5, GREY, false, .left);
+        }
+        d.y = y0 + cell_h + 6;
+    }
+    d.gap(6);
+}
+
 fn buildBody(d: *Doc) !void {
     const r = d.rep;
     try d.newContentPage();
@@ -932,6 +999,9 @@ fn buildBody(d: *Doc) !void {
         }
     }
     d.gap(10);
+
+    // 5b. Pages Loaded — screenshot gallery (renders only when --shots captured any)
+    try buildGallery(d);
 
     // 6. Methodology & next steps
     try d.section("Methodology & Next Steps");
