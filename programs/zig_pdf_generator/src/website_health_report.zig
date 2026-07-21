@@ -274,6 +274,23 @@ const GalleryShot = struct {
     label: []const u8 = "",
     dataUri: []const u8 = "",
 };
+// Extracted data — what we actually read off the page (baton-audit ExtractedData).
+const ExtractedField = struct {
+    label: []const u8 = "",
+    value: []const u8 = "",
+};
+const ExtractedSchema = struct {
+    type: []const u8 = "",
+    fields: []const ExtractedField = &.{},
+};
+const Extracted = struct {
+    schemas: []const ExtractedSchema = &.{},
+    entity: []const ExtractedField = &.{},
+    sameAs: []const []const u8 = &.{},
+    page: []const ExtractedField = &.{},
+    crawlers: []const ExtractedField = &.{},
+    content: []const ExtractedField = &.{},
+};
 pub const Report = struct {
     url: []const u8 = "",
     domain: []const u8 = "",
@@ -286,6 +303,7 @@ pub const Report = struct {
     warningCount: u32 = 0,
     performance: ?Performance = null,
     history: []const HistoryRow = &.{},
+    extracted: ?Extracted = null,
     gallery: []const GalleryShot = &.{},
 };
 
@@ -848,6 +866,91 @@ fn allFindingsSorted(a: std.mem.Allocator, r: *const Report, want_pass: bool) ![
     return list.items;
 }
 
+/// A label/value row block — the show-and-tell primitive. Label in a fixed left
+/// column, value wrapped in the remainder, so it reads like a spec sheet.
+fn kvBlock(d: *Doc, title: ?[]const u8, rows: []const ExtractedField) !void {
+    if (rows.len == 0) return;
+    if (title) |t| {
+        try d.ensure(20);
+        d.y += 8;
+        try d.text(ML + 2, d.y + 8, t, 9.5, NAVY, true, .left);
+        d.y += 13;
+    }
+    const lw: f64 = 118; // label column
+    const vx = ML + lw;
+    const vw = CW - lw - 4;
+    for (rows) |r| {
+        const lines = try wrap(d.a, r.value, 9, vw, false);
+        const step: f64 = 9 * 1.34;
+        const h = @max(step, @as(f64, @floatFromInt(lines.len)) * step);
+        try d.ensure(h + 4);
+        const y0 = d.y;
+        try d.text(ML + 4, y0 + 9.5, r.label, 8.5, GREY, false, .left);
+        var yy = y0;
+        for (lines) |ln| {
+            yy += step;
+            try d.text(vx, yy - step + 9.5, ln, 9, INK, false, .left);
+        }
+        d.y = y0 + h + 3;
+    }
+}
+
+// Extracted Data — what the audit actually READ off the page. Findings say what is
+// missing; this proves what is there (schema, entity identity, crawler access,
+// content signals), so the report is evidence rather than assertion.
+fn buildExtracted(d: *Doc) !void {
+    const ex = d.rep.extracted orelse return;
+    const any = ex.schemas.len + ex.entity.len + ex.page.len + ex.crawlers.len + ex.content.len + ex.sameAs.len;
+    if (any == 0) return;
+
+    try d.section("Extracted Data");
+    try d.para("What this audit read directly from the live page \u{2014} the structured data, " ++
+        "brand identity and crawler access an engine (or an AI answer) sees. Everything below was " ++
+        "parsed from the rendered DOM, not inferred.", 10, INK, 6);
+
+    // Structured data — each schema type with the properties we found on it.
+    if (ex.schemas.len > 0) {
+        try d.ensure(24);
+        d.y += 8;
+        try d.text(ML + 2, d.y + 8, "Structured data (schema.org JSON-LD)", 9.5, NAVY, true, .left);
+        d.y += 14;
+        for (ex.schemas) |sc| {
+            try d.ensure(22);
+            // type chip
+            const tw = textWidth(sc.type, 8.5, true) + 14;
+            try d.rect(ML + 2, d.y, tw, 14, CYAN, null, 0);
+            try d.text(ML + 9, d.y + 10, sc.type, 8.5, WHITE, true, .left);
+            d.y += 18;
+            try kvBlock(d, null, sc.fields);
+            d.y += 4;
+        }
+    }
+
+    try kvBlock(d, "Business / entity identity", ex.entity);
+
+    if (ex.sameAs.len > 0) {
+        try d.ensure(20);
+        d.y += 8;
+        try d.text(ML + 2, d.y + 8, "Linked brand profiles (sameAs)", 9.5, NAVY, true, .left);
+        d.y += 13;
+        for (ex.sameAs) |u| {
+            const lines = try wrap(d.a, u, 8.5, CW - 20, false);
+            for (lines, 0..) |ln, i| {
+                try d.ensure(12);
+                d.y += 12;
+                if (i == 0) try d.text(ML + 6, d.y, "\u{2022}", 9, CYAN, true, .left);
+                try d.text(ML + 18, d.y, ln, 8.5, INK, false, .left);
+            }
+        }
+        d.y += 4;
+    }
+
+    try kvBlock(d, "Page metadata", ex.page);
+    try kvBlock(d, "AI crawler access (robots.txt)", ex.crawlers);
+    try kvBlock(d, "Content signals", ex.content);
+    d.gap(8);
+}
+
 // Pages Loaded — a 2-column grid of page screenshots (proof of real page loads).
 fn buildGallery(d: *Doc) !void {
     const shots = d.rep.gallery;
@@ -977,6 +1080,9 @@ fn buildBody(d: *Doc) !void {
         }
         d.gap(8);
     }
+
+    // 4b. Extracted Data — show-and-tell: what we actually read off the page
+    try buildExtracted(d);
 
     // 5. Prioritised fix list
     try d.section("Prioritised Fix List");
