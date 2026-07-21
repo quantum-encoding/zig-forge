@@ -112,6 +112,10 @@ fn scopeLabel(s: ?[]const u8) []const u8 {
     if (s) |v| if (std.mem.eql(u8, v, "origin")) return "origin";
     return "url";
 }
+fn ffLabel(s: []const u8) []const u8 {
+    if (std.mem.eql(u8, s, "desktop")) return "Desktop";
+    return "Mobile";
+}
 
 // ---- Helvetica AFM widths (ASCII 32..126) ----------------------------------
 const HELV = [95]u16{
@@ -221,11 +225,16 @@ const Lighthouse = struct {
     bestPractices: ?f64 = null,
     seo: ?f64 = null,
 };
+const LighthouseRun = struct {
+    strategy: []const u8 = "",
+    categories: Lighthouse = .{},
+};
 const Performance = struct {
     labScore: ?f64 = null,
     labSource: ?[]const u8 = null,
     labStrategy: ?[]const u8 = null,
     lighthouse: ?Lighthouse = null,
+    runs: []const LighthouseRun = &.{},
     fieldScore: ?f64 = null,
     fieldScope: ?[]const u8 = null,
     fieldOverall: ?[]const u8 = null,
@@ -453,10 +462,10 @@ const Doc = struct {
 
     // The four Lighthouse category gauges (Performance / Accessibility / Best
     // Practices / SEO) — the DevTools/PSI lab report, shown in full.
-    fn lhCard(self: *Doc, lh: Lighthouse, strategy: ?[]const u8, source: ?[]const u8) !void {
+    fn lhCard(self: *Doc, lh: Lighthouse, heading: []const u8) !void {
         try self.ensure(108);
         self.y += 2;
-        try self.text(ML, self.y + 9, self.f("Lighthouse report \u{2014} lab ({s} \u{00B7} {s})", .{ srcLabel(source), stratLabel(strategy) }), 9.5, NAVY, true, .left);
+        try self.text(ML, self.y + 9, heading, 9.5, NAVY, true, .left);
         self.y += 20;
         const gy = self.y + 26;
         const items = [_]struct { l: []const u8, v: ?f64 }{
@@ -497,8 +506,14 @@ const Doc = struct {
         }
         self.y = yb + band_h + 16;
 
-        // Lighthouse category gauges (the full DevTools/PSI lab report)
-        if (p.lighthouse) |lh| try self.lhCard(lh, p.labStrategy, p.labSource);
+        // Lighthouse category gauges — one card per run (mobile + desktop when --both).
+        if (p.runs.len > 0) {
+            for (p.runs) |run| {
+                try self.lhCard(run.categories, self.f("Lighthouse \u{2014} {s} lab ({s})", .{ ffLabel(run.strategy), srcLabel(p.labSource) }));
+            }
+        } else if (p.lighthouse) |lh| {
+            try self.lhCard(lh, self.f("Lighthouse report \u{2014} lab ({s} \u{00B7} {s})", .{ srcLabel(p.labSource), stratLabel(p.labStrategy) }));
+        }
 
         // metric table
         const cx_lab = ML + 312;
