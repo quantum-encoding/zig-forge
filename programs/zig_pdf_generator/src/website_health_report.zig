@@ -88,6 +88,30 @@ fn sevRank(sev: []const u8) u8 {
     if (std.mem.eql(u8, sev, "info")) return 2;
     return 3; // pass
 }
+// Core Web Vitals rating → colour (null / unknown = grey, used for "—" cells).
+fn ratingColor(r: ?[]const u8) []const u8 {
+    if (r) |rr| {
+        if (std.mem.eql(u8, rr, "good")) return GREEN;
+        if (std.mem.eql(u8, rr, "needs-improvement")) return AMBER;
+        if (std.mem.eql(u8, rr, "poor")) return RED;
+    }
+    return LGREY;
+}
+fn srcLabel(s: ?[]const u8) []const u8 {
+    if (s) |v| {
+        if (std.mem.eql(u8, v, "psi")) return "PageSpeed Insights";
+        if (std.mem.eql(u8, v, "local")) return "Lighthouse (local)";
+    }
+    return "Lighthouse";
+}
+fn stratLabel(s: ?[]const u8) []const u8 {
+    if (s) |v| if (std.mem.eql(u8, v, "desktop")) return "desktop";
+    return "mobile";
+}
+fn scopeLabel(s: ?[]const u8) []const u8 {
+    if (s) |v| if (std.mem.eql(u8, v, "origin")) return "origin";
+    return "url";
+}
 
 // ---- Helvetica AFM widths (ASCII 32..126) ----------------------------------
 const HELV = [95]u16{
@@ -182,6 +206,25 @@ const Overall = struct {
     grade: []const u8 = "F",
     cappedBy: ?[]const u8 = null,
 };
+// Lab-vs-field performance table (baton-audit PerformanceBlock / PerfMetricRow).
+const PerfMetric = struct {
+    key: []const u8 = "",
+    label: []const u8 = "",
+    lab: ?[]const u8 = null,
+    labRating: ?[]const u8 = null,
+    field: ?[]const u8 = null,
+    fieldRating: ?[]const u8 = null,
+};
+const Performance = struct {
+    labScore: ?f64 = null,
+    labSource: ?[]const u8 = null,
+    labStrategy: ?[]const u8 = null,
+    fieldScore: ?f64 = null,
+    fieldScope: ?[]const u8 = null,
+    fieldOverall: ?[]const u8 = null,
+    hasField: bool = false,
+    rows: []const PerfMetric = &.{},
+};
 pub const Report = struct {
     url: []const u8 = "",
     domain: []const u8 = "",
@@ -192,6 +235,7 @@ pub const Report = struct {
     categories: []const Category = &.{},
     criticalCount: u32 = 0,
     warningCount: u32 = 0,
+    performance: ?Performance = null,
 };
 
 // ---- embedded QE assets ----------------------------------------------------
@@ -351,6 +395,95 @@ const Doc = struct {
         try self.rect(bar_x, y + 4, fill, 12, col, null, 0);
         try self.text(PW - MR, y + 11, self.f("{d:.0}", .{score}), 11, col, true, .right);
         self.y += row_h;
+    }
+
+    // one half of the lab/field score band
+    fn perfScoreCell(self: *Doc, x: f64, w: f64, y: f64, h: f64, tag: []const u8, sub: []const u8, score: ?f64, foot: []const u8) !void {
+        try self.rect(x, y, w, h, CARD_BG, RULE, 0.8);
+        try self.rect(x, y, 4, h, CYAN, null, 0);
+        try self.text(x + 12, y + 16, tag, 8.5, GREY, true, .left);
+        try self.text(x + w - 12, y + 16, sub, 8, LGREY, false, .right);
+        if (score) |sc| {
+            const col = scoreColor(sc);
+            const num = self.f("{d:.0}", .{sc});
+            try self.text(x + 12, y + 41, num, 25, col, true, .left);
+            try self.text(x + 14 + textWidth(num, 25, true), y + 41, "/ 100", 10, LGREY, false, .left);
+        } else {
+            try self.text(x + 12, y + 41, "n/a", 18, LGREY, true, .left);
+        }
+        try self.text(x + 12, y + h - 8, foot, 8, GREY, false, .left);
+    }
+
+    fn perfLegend(self: *Doc) !void {
+        try self.ensure(14);
+        self.y += 10;
+        const items = [_]struct { c: []const u8, t: []const u8 }{
+            .{ .c = GREEN, .t = "Good" },
+            .{ .c = AMBER, .t = "Needs improvement" },
+            .{ .c = RED, .t = "Poor" },
+            .{ .c = LGREY, .t = "not reported by this source" },
+        };
+        var x = ML + 4;
+        for (items) |it| {
+            try self.text(x, self.y, "\u{2022}", 11, it.c, true, .left);
+            try self.text(x + 11, self.y, it.t, 8.5, GREY, false, .left);
+            x += 11 + textWidth(it.t, 8.5, false) + 16;
+        }
+    }
+
+    // Performance: lab (synthetic) vs field (real-user CrUX) — the actual stats,
+    // side by side, so the report shows numbers rather than a single vibe score.
+    fn perfTable(self: *Doc, p: Performance) !void {
+        try self.section("Performance — Lab vs Field");
+        try self.para("Two ways to measure speed, and they routinely disagree. \u{201C}Lab\u{201D} is a single " ++
+            "synthetic page load (Lighthouse / PageSpeed Insights): repeatable, but pessimistic and " ++
+            "sensitive to the test machine. \u{201C}Field\u{201D} is the 75th-percentile experience of real " ++
+            "Chrome users over the last 28 days (Chrome UX Report) \u{2014} the numbers Google actually " ++
+            "ranks on. Where the two disagree, the field column is the ground truth.", 10, INK, 12);
+
+        // score band: lab | field
+        const band_h: f64 = 60;
+        try self.ensure(band_h + 46);
+        const hw = (CW - 12) / 2;
+        const yb = self.y;
+        const labsub = self.f("{s} \u{00B7} {s}", .{ srcLabel(p.labSource), stratLabel(p.labStrategy) });
+        try self.perfScoreCell(ML, hw, yb, band_h, "LAB (synthetic)", labsub, p.labScore, "one load in Google\u{2019}s remote lab");
+        if (p.hasField) {
+            const fsub = self.f("CrUX \u{00B7} {s} p75", .{scopeLabel(p.fieldScope)});
+            try self.perfScoreCell(ML + hw + 12, hw, yb, band_h, "FIELD (real-user)", fsub, p.fieldScore, "real visitors, rolling 28 days");
+        } else {
+            try self.perfScoreCell(ML + hw + 12, hw, yb, band_h, "FIELD (real-user)", "no CrUX data", null, "too little traffic for field data");
+        }
+        self.y = yb + band_h + 16;
+
+        // metric table
+        const cx_lab = ML + 312;
+        const cx_field = ML + 430;
+        try self.ensure(20);
+        try self.text(ML + 4, self.y + 10, "Core Web Vital / lab metric", 8.5, GREY, true, .left);
+        try self.text(cx_lab, self.y + 10, "Lab", 8.5, GREY, true, .center);
+        try self.text(cx_field, self.y + 10, "Field (p75)", 8.5, GREY, true, .center);
+        self.y += 15;
+        try self.rect(ML, self.y, CW, 0.8, RULE, null, 0);
+        self.y += 1;
+
+        const rh: f64 = 19;
+        for (p.rows, 0..) |row, i| {
+            try self.ensure(rh);
+            const y = self.y;
+            if (i % 2 == 1) try self.rect(ML, y, CW, rh, CARD_BG, null, 0);
+            try self.text(ML + 4, y + 13, row.label, 9.5, INK, false, .left);
+            const lab = row.lab orelse "\u{2014}";
+            const fld = row.field orelse "\u{2014}";
+            try self.text(cx_lab, y + 13, lab, 10, ratingColor(row.labRating), row.lab != null, .center);
+            try self.text(cx_field, y + 13, fld, 10, ratingColor(row.fieldRating), row.field != null, .center);
+            self.y += rh;
+        }
+        self.y += 3;
+        try self.rect(ML, self.y, CW, 0.8, RULE, null, 0);
+        self.y += 8;
+        try self.perfLegend();
+        self.gap(10);
     }
 
     // severity pill: small filled tag with white caps label; returns its width
@@ -562,6 +695,11 @@ fn buildBody(d: *Doc) !void {
     d.gap(2);
     for (r.categories) |c| try d.scoreBar(c.label, c.score, c.weight);
     d.gap(10);
+
+    // 2b. Performance — lab vs field stats table (when Lighthouse and/or CrUX ran)
+    if (r.performance) |p| {
+        if (p.rows.len > 0 or p.labScore != null or p.fieldScore != null) try d.perfTable(p);
+    }
 
     // 3. Critical issues
     {
