@@ -313,8 +313,22 @@ const ExtractedSchema = struct {
     type: []const u8 = "",
     fields: []const ExtractedField = &.{},
 };
+const Authorship = struct {
+    authorName: ?[]const u8 = null,
+    authorUrl: ?[]const u8 = null,
+    authorJobTitle: ?[]const u8 = null,
+    authorSameAs: []const []const u8 = &.{},
+    isPersonSchema: bool = false,
+    visibleByline: ?[]const u8 = null,
+    reviewedBy: ?[]const u8 = null,
+    publisher: ?[]const u8 = null,
+    datePublished: ?[]const u8 = null,
+    dateModified: ?[]const u8 = null,
+    visibleDates: []const []const u8 = &.{},
+};
 const Extracted = struct {
     schemas: []const ExtractedSchema = &.{},
+    authorship: ?Authorship = null,
     entity: []const ExtractedField = &.{},
     sameAs: []const []const u8 = &.{},
     page: []const ExtractedField = &.{},
@@ -959,6 +973,42 @@ fn buildExtracted(d: *Doc) !void {
     }
 
     try kvBlock(d, "Business / entity identity", ex.entity);
+
+    // Authorship / E-E-A-T — the strongest detectable quality proxy (2026).
+    if (ex.authorship) |au| {
+        var rows: std.ArrayListUnmanaged(ExtractedField) = .empty;
+        const add = struct {
+            fn f(list: *std.ArrayListUnmanaged(ExtractedField), a: std.mem.Allocator, label: []const u8, v: ?[]const u8) void {
+                if (v) |vv| if (vv.len > 0) list.append(a, .{ .label = label, .value = vv }) catch {};
+            }
+        }.f;
+        add(&rows, d.a, "Author", au.authorName);
+        if (au.isPersonSchema) add(&rows, d.a, "Schema type", "Person (properly typed author)");
+        add(&rows, d.a, "Role", au.authorJobTitle);
+        add(&rows, d.a, "Author page", au.authorUrl);
+        if (au.authorSameAs.len > 0) {
+            var buf: std.ArrayListUnmanaged(u8) = .empty;
+            for (au.authorSameAs, 0..) |u, i| {
+                if (i > 0) buf.appendSlice(d.a, ", ") catch {};
+                buf.appendSlice(d.a, u) catch {};
+            }
+            add(&rows, d.a, "Author profiles", buf.items);
+        }
+        add(&rows, d.a, "Visible byline", au.visibleByline);
+        add(&rows, d.a, "Reviewed by", au.reviewedBy);
+        add(&rows, d.a, "Publisher", au.publisher);
+        add(&rows, d.a, "Published", au.datePublished);
+        add(&rows, d.a, "Modified", au.dateModified);
+        if (au.visibleDates.len > 0) {
+            var buf: std.ArrayListUnmanaged(u8) = .empty;
+            for (au.visibleDates, 0..) |u, i| {
+                if (i > 0) buf.appendSlice(d.a, " \u{00B7} ") catch {};
+                buf.appendSlice(d.a, u) catch {};
+            }
+            add(&rows, d.a, "Visible dates", buf.items);
+        }
+        try kvBlock(d, "Authorship / E-E-A-T", rows.items);
+    }
 
     if (ex.sameAs.len > 0) {
         try d.ensure(20);
