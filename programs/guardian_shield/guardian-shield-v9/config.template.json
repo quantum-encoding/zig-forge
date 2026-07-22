@@ -6,9 +6,10 @@
   "protected_paths": [],
   "_critical_comment": "Enforced (against all-but-trusted) ONLY when hardening_mode=true. The shield's own state (pins + install dir) + credentials.",
   "critical_paths": [],
-  "_agent_comment": "Launcher BASENAMES tagged TAG_AGENT at exec; the tag is inherited on fork and sticky across exec, so everything the agent spawns stays contained. 'quantum-diary' is the Quantum Diary app binary (cargo bin name, used by both `tauri dev` and release builds) - its embedded GUI agent runs run_command children as descendants of that binary, so tagging it gives the GUI agent the same kernel containment as CLI `claude`. 'Quantum Diary' is the Tauri bundle productName, in case a packaged build ships under that basename.",
+  "_agent_comment": "Launcher BASENAMES tagged TAG_AGENT at exec; the tag is inherited on fork and sticky across exec, so everything the agent spawns stays contained. 'quantum-diary' is the Quantum Diary app binary (cargo bin name, used by both `tauri dev` and release builds) - its embedded GUI agent runs run_command children as descendants of that binary, so tagging it gives the GUI agent the same kernel containment as CLI `claude`. 'Quantum Diary' is the Tauri bundle productName, in case a packaged build ships under that basename. CRITICAL: list BOTH 'claude' and 'claude.exe' - the npm global install execs bin/claude.exe, and tagging is on the exec'd binary's basename (bprm->filename), NOT comm (which reads 'claude' and is explicitly advisory-only). Verified empirically: with only 'claude' listed, a real Claude Code session is NOT contained at all.",
   "agent_exes": [
     "claude",
+    "claude.exe",
     "quantum-diary",
     "Quantum Diary",
     "cursor",
@@ -24,7 +25,8 @@
     "/usr/bin/pacman",
     "/usr/bin/dpkg",
     "/usr/bin/apt",
-    "/usr/bin/systemctl"
+    "/usr/bin/systemctl",
+    "${HOME}/.local/bin/trash"
   ],
   "_trusted_comment": "MUST include the loader's own exe path or it cannot load/pin/unpin under hardening_mode. install.sh resolves this to the installed loader. (The loader also trusts itself by exe inode, so a relative-path invocation still works.)",
   "trusted_exes": [
@@ -59,5 +61,6 @@
   "log_only": false,
   "pin_dir": "/sys/fs/bpf/guardian_shield",
   "log_file": "/var/log/guardian_shield.jsonl",
-  "_posture_comment": "ZERO-POLICY DEFAULT. protected_paths/critical_paths/credential_paths ship EMPTY on purpose: a freshly-installed shield attaches its hooks and observes, but denies NOTHING, so loading it can never break a working machine. Enforcement is opt-in - add the specific prefixes you want guarded, one at a time, and watch /var/log/guardian_shield.jsonl between each. log_only stays false so that the moment you DO opt a path in it genuinely protects it (rather than silently no-op'ing). Egress is log-only (enforce_egress=false) for the same reason: turn it on only after allowlisting what your agents legitimately reach. agent_exes/build_exes stay populated - tagging costs nothing and gives you the event feed you need to decide what to protect."
+  "_posture_comment": "ZERO-POLICY DEFAULT. protected_paths/critical_paths/credential_paths ship EMPTY on purpose: a freshly-installed shield attaches its hooks and observes, but denies NOTHING, so loading it can never break a working machine. Enforcement is opt-in - add the specific prefixes you want guarded, one at a time, and watch /var/log/guardian_shield.jsonl between each. log_only stays false so that the moment you DO opt a path in it genuinely protects it (rather than silently no-op'ing). Egress is log-only (enforce_egress=false) for the same reason: turn it on only after allowlisting what your agents legitimately reach. agent_exes/build_exes stay populated - tagging costs nothing and gives you the event feed you need to decide what to protect.",
+  "_exempt_comment": "Full exe paths -> TAG_EXEMPT, overriding an inherited AGENT tag. 'trash' is here so agents keep a RECOVERABLE delete while raw rm/unlink stays blocked under protected_paths - the 'block rm, allow trash' workflow. Verified: rm -> EPERM, trash -> succeeds and `trash restore` recovers the file (same-volume; cross-volume goes to $topdir/.Trash-$uid which ai-trash's list/restore does not currently search)."
 }
