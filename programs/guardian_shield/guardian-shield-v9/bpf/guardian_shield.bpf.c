@@ -199,8 +199,26 @@ struct path_lpm_key {
 struct path_rule {
     __u32 prefix_len;            // in BYTES (for boundary check)
     __u8  action;                // 1 = block
-    __u8  _pad[3];
+    __u8  _pad;
+    // Bitmask of the operations this prefix guards, bit (EV_x - 1). It fits in
+    // the old padding, so the map layout and size are unchanged. OPS_ALL is the
+    // pre-mask behaviour (guard everything); a narrower mask is the "working
+    // directory" posture (deny destroy, allow create/write); 0 is an explicit
+    // FREE hole punched under a broader guarded prefix.
+    __u16 ops;
 };
+
+#define OPS_ALL 0xFFFF
+
+// EV_* (1..10) -> op bit. Every filesystem hook already passes its EV_ code to
+// fs_guard_dentry, so the mask is DERIVED here rather than plumbed through all
+// nine hook signatures.
+static __always_inline __u16 ev_op_bit(__u8 ev)
+{
+    if (ev == 0 || ev > 16)
+        return 0;
+    return (__u16)1 << (ev - 1);
+}
 
 struct {
     __uint(type, BPF_MAP_TYPE_LPM_TRIE);
@@ -559,7 +577,15 @@ static __always_inline __u32 reconstruct_path(struct dentry *dentry,
 // rejects sibling false positives (e.g. "/etcfoo" vs prefix "/etc").
 // __noinline (bpf2bpf call): keeps the 132-byte LPM key in this function's own
 // stack frame instead of inflating every caller hook's frame.
-static __noinline bool path_is_protected(__u8 *path, __u32 len)
+// `op` is the ev_op_bit() of the operation being attempted, or 0 to ask "is this
+// path guarded at all" regardless of operation.
+//
+// NOTE the override semantics: the LPM trie returns the LONGEST matching prefix,
+// and if that entry does not guard `op` we return false WITHOUT falling back to a
+// shorter prefix. That is deliberate - it is what lets a specific subtree punch a
+// hole in a broader guard (e.g. ${HOME} blocks unlink/rename, but
+// ${HOME}/work/scratch sets ops=0 and is freely destroyable).
+static __noinline bool path_is_protected(__u8 *path, __u32 len, __u16 op)
 {
     struct path_lpm_key key;
     __builtin_memset(&key, 0, sizeof(key));
@@ -575,6 +601,8 @@ static __noinline bool path_is_protected(__u8 *path, __u32 len)
     struct path_rule *rule = bpf_map_lookup_elem(&protected_paths, &key);
     if (!rule || rule->action != 1)
         return false;
+    if (op && !(rule->ops & op))
+        return false;                        // guarded, but not for THIS op
 
     __u32 mlen = rule->prefix_len;
     if (mlen >= len)
@@ -683,7 +711,7 @@ static __always_inline int fs_guard_dentry(struct dentry *dentry,
     __u32 len = reconstruct_path(dentry, vfsmnt, &buf);
     if (!buf)
         return 0;
-    bool hit = path_is_protected(buf->data, len);
+    bool hit = path_is_protected(buf->data, len, ev_op_bit(ev));
 
     // Secondary path (rename dst / link dst). path_is_protected copies out of
     // the buffer immediately, so it is safe to reuse the per-CPU slot here.
@@ -692,7 +720,7 @@ static __always_inline int fs_guard_dentry(struct dentry *dentry,
         struct recon_buf *tbuf = 0;
         __u32 tlen = reconstruct_path(tdentry, tvfsmnt, &tbuf);
         if (tbuf) {
-            thit = path_is_protected(tbuf->data, tlen);
+            thit = path_is_protected(tbuf->data, tlen, ev_op_bit(ev));
             len = tlen;
             buf = tbuf;
         }
@@ -937,7 +965,7 @@ int BPF_PROG(gs_path_truncate, const struct path *path)
     if (r <= 0)
         return 0;
     __u32 len = (__u32)r - 1;                // r includes trailing NUL
-    if (path_is_protected(buf, len)) {
+    if (path_is_protected(buf, len, ev_op_bit(EV_TRUNCATE))) {
         __u8 enforced = cfg->log_only ? 0 : 1;
         log_violation(EV_TRUNCATE, tag, enforced, buf, len, 0, 0, 0, 0);
         bump(STAT_FS_BLOCKED);
@@ -1014,7 +1042,7 @@ int BPF_PROG(gs_file_open, struct file *file)
             long r = bpf_d_path(&file->f_path, (char *)buf, MAX_PATH_LEN);
             if (r > 0) {
                 __u32 len = (__u32)r - 1;
-                if (path_is_protected(buf, len)) {
+                if (path_is_protected(buf, len, ev_op_bit(EV_OPEN_WRITE))) {
                     log_violation(EV_OPEN_WRITE, tag, cfg->log_only ? 0 : 1,
                                   buf, len, 0, 0, 0, flags);
                     bump(STAT_FS_BLOCKED);

@@ -48,7 +48,116 @@ const PathLpmKey = extern struct {
 const PathRule = extern struct {
     prefix_len: u32, // in BYTES
     action: u8,
-    _pad: [3]u8,
+    _pad: u8,
+    // Bitmask of guarded operations, bit (EV_x - 1). Occupies the old padding,
+    // so the map value layout and size are unchanged.
+    ops: u16,
+};
+
+// Operation bits, mirroring enum event_type in the BPF object (bit = EV - 1).
+const OP_UNLINK: u16 = 1 << 0;
+const OP_RENAME: u16 = 1 << 1;
+const OP_CHMOD: u16 = 1 << 2;
+const OP_TRUNCATE: u16 = 1 << 3;
+const OP_LINK: u16 = 1 << 4;
+const OP_SYMLINK: u16 = 1 << 5;
+const OP_MKDIR: u16 = 1 << 6;
+const OP_RMDIR: u16 = 1 << 7;
+const OP_OPEN_WRITE: u16 = 1 << 8;
+const OP_CREATE: u16 = 1 << 9;
+const OPS_ALL: u16 = 0xFFFF;
+// The set that stops a runaway `rm -rf` while leaving a working tree writable.
+const OPS_DESTROY: u16 = OP_UNLINK | OP_RMDIR | OP_RENAME | OP_TRUNCATE;
+
+fn opFromName(name: []const u8) ?u16 {
+    const eq = std.mem.eql;
+    if (eq(u8, name, "*") or eq(u8, name, "all")) return OPS_ALL;
+    if (eq(u8, name, "destroy")) return OPS_DESTROY;
+    if (eq(u8, name, "unlink") or eq(u8, name, "delete")) return OP_UNLINK;
+    if (eq(u8, name, "rename") or eq(u8, name, "move")) return OP_RENAME;
+    if (eq(u8, name, "chmod")) return OP_CHMOD;
+    if (eq(u8, name, "truncate")) return OP_TRUNCATE;
+    if (eq(u8, name, "link")) return OP_LINK;
+    if (eq(u8, name, "symlink")) return OP_SYMLINK;
+    if (eq(u8, name, "mkdir")) return OP_MKDIR;
+    if (eq(u8, name, "rmdir")) return OP_RMDIR;
+    if (eq(u8, name, "open_write") or eq(u8, name, "write")) return OP_OPEN_WRITE;
+    if (eq(u8, name, "create")) return OP_CREATE;
+    return null;
+}
+
+/// Plain string list -> all-ops specs (critical_paths, credential_paths).
+fn specsFromStrings(list: []const []const u8) ![]const PathSpec {
+    const out = try g_alloc.alloc(PathSpec, list.len);
+    for (list, 0..) |p, i| out[i] = .{ .path = p, .ops = OPS_ALL };
+    return out;
+}
+
+/// protected_paths entries: a bare string guards everything (back-compatible
+/// with every config written before op masks existed); an object selects ops.
+/// An unknown op name is a hard error - silently guarding less than the operator
+/// asked for is the one failure mode this must never have.
+fn specsFromValues(list: []const std.json.Value) ![]const PathSpec {
+    const out = try g_alloc.alloc(PathSpec, list.len);
+    for (list, 0..) |v, i| {
+        switch (v) {
+            .string => |s| out[i] = .{ .path = s, .ops = OPS_ALL },
+            .object => |obj| {
+                const pv = obj.get("path") orelse {
+                    std.log.err("protected_paths[{d}]: object entry has no \"path\"", .{i});
+                    return error.InvalidConfig;
+                };
+                const p = switch (pv) {
+                    .string => |s| s,
+                    else => {
+                        std.log.err("protected_paths[{d}]: \"path\" must be a string", .{i});
+                        return error.InvalidConfig;
+                    },
+                };
+                var mask: u16 = OPS_ALL;
+                if (obj.get("block")) |bv| {
+                    switch (bv) {
+                        .array => |arr| {
+                            mask = 0; // empty list => FREE hole, intentionally
+                            for (arr.items) |ov| {
+                                const name = switch (ov) {
+                                    .string => |s| s,
+                                    else => {
+                                        std.log.err("protected_paths[{d}]: \"block\" entries must be strings", .{i});
+                                        return error.InvalidConfig;
+                                    },
+                                };
+                                mask |= opFromName(name) orelse {
+                                    std.log.err("protected_paths[{d}]: unknown operation '{s}'", .{ i, name });
+                                    return error.InvalidConfig;
+                                };
+                            }
+                        },
+                        else => {
+                            std.log.err("protected_paths[{d}]: \"block\" must be an array", .{i});
+                            return error.InvalidConfig;
+                        },
+                    }
+                }
+                out[i] = .{ .path = p, .ops = mask };
+            },
+            else => {
+                std.log.err("protected_paths[{d}]: must be a string or an object", .{i});
+                return error.InvalidConfig;
+            },
+        }
+    }
+    return out;
+}
+
+/// One protected-path entry after normalisation. JSON accepts either form:
+///   "/some/path"                                -> guards ALL operations
+///   {"path": "/p", "block": ["unlink","rmdir"]} -> guards only those
+/// An EMPTY block list is meaningful rather than a no-op: because the trie is
+/// longest-prefix, it punches a FREE hole under a broader guarded prefix.
+const PathSpec = struct {
+    path: []const u8,
+    ops: u16,
 };
 
 const GsConfig = extern struct {
@@ -114,7 +223,10 @@ const ExecEvent = extern struct {
 // ===================================================================
 
 const RawConfig = struct {
-    protected_paths: []const []const u8 = &.{},
+    // Elements are either a JSON string (guard all ops) or an object
+    // {"path": ..., "block": [...]}. Kept as Value so both forms parse; see
+    // specsFromValues().
+    protected_paths: []const std.json.Value = &.{},
     critical_paths: []const []const u8 = &.{},
     credential_paths: []const []const u8 = &.{},
     agent_exes: []const []const u8 = &.{},
@@ -417,12 +529,18 @@ const Loader = struct {
         // --- protected_paths (LPM trie). In hardening mode the trie protects
         // the CRITICAL set against everyone-but-trusted; otherwise the agent-mode
         // protected_paths against agents. ---
-        const path_src = if (self.cfg.hardening_mode) self.cfg.critical_paths else self.cfg.protected_paths;
+        // critical_paths is a plain string list (hardening is deliberately
+        // all-or-nothing); protected_paths carries per-entry operation masks.
+        const path_src: []const PathSpec = if (self.cfg.hardening_mode)
+            try specsFromStrings(self.cfg.critical_paths)
+        else
+            try specsFromValues(self.cfg.protected_paths);
         const n_paths = try self.populateLpm("protected_paths", path_src);
 
         // --- credential_paths (LPM trie). The crown-jewel AssetMap; read-denied
-        // for TAINTED/AGENT subtrees regardless of posture. ---
-        const n_creds = try self.populateLpm("credential_paths", self.cfg.credential_paths);
+        // for TAINTED/AGENT subtrees regardless of posture. Read-gating is not an
+        // op in the mask, so these are always all-ops. ---
+        const n_creds = try self.populateLpm("credential_paths", try specsFromStrings(self.cfg.credential_paths));
 
         // --- basename classifiers ---
         try self.populateBasenameMap("agent_exe_names", self.cfg.agent_exes);
@@ -481,20 +599,20 @@ const Loader = struct {
 
     // Insert a list of path prefixes into an LPM trie map (trailing '/' stripped;
     // stored WITHOUT it, as the kernel boundary check requires). Returns count.
-    fn populateLpm(self: *Loader, map_name: [:0]const u8, list: []const []const u8) !usize {
+    fn populateLpm(self: *Loader, map_name: [:0]const u8, list: []const PathSpec) !usize {
         const fd = try self.mapFd(map_name);
         var n: usize = 0;
-        for (list) |raw| {
-            var p = raw;
+        for (list) |spec| {
+            var p = spec.path;
             if (p.len > 1 and p[p.len - 1] == '/') p = p[0 .. p.len - 1];
             if (p.len == 0 or p.len >= MAX_PATH_LEN) {
-                std.log.warn("skipping invalid {s} entry '{s}'", .{ map_name, raw });
+                std.log.warn("skipping invalid {s} entry '{s}'", .{ map_name, spec.path });
                 continue;
             }
             var key = std.mem.zeroes(PathLpmKey);
             key.prefixlen = @intCast(p.len * 8);
             @memcpy(key.data[0..p.len], p);
-            var val = PathRule{ .prefix_len = @intCast(p.len), .action = 1, ._pad = .{ 0, 0, 0 } };
+            var val = PathRule{ .prefix_len = @intCast(p.len), .action = 1, ._pad = 0, .ops = spec.ops };
             if (c.bpf_map_update_elem(fd, &key, &val, c.BPF_ANY) != 0) {
                 std.log.err("failed to insert {s} '{s}'", .{ map_name, p });
                 return error.MapUpdateFailed;
