@@ -1,0 +1,32 @@
+[Unit]
+Description=Guardian Shield v9 - BPF-LSM agent containment
+Documentation=file:/opt/guardian-shield/config.json
+# Needs the bpf filesystem for its pins and the log target's filesystem.
+After=local-fs.target
+# Come up before user sessions so an agent can never race the shield at login.
+Before=multi-user.target systemd-user-sessions.service
+
+[Service]
+Type=simple
+# The loader does NOT fork: after attaching + pinning it stays in the
+# foreground consuming the BPF ringbuffer and appending violations to
+# /var/log/guardian_shield.jsonl. That foreground loop IS the daemon - it is
+# not a hang, and it is why Type=simple (not forking/oneshot) is correct.
+ExecStart=/opt/guardian-shield/guardian_shield_loader /opt/guardian-shield/config.json --verbose
+
+# Pins OUTLIVE the process by design, so a restart would otherwise find the
+# hooks already attached and refuse. Clear them first; '-' = tolerate the
+# no-pins case on a cold boot.
+ExecStartPre=-/opt/guardian-shield/guardian_shield_loader /opt/guardian-shield/config.json --unpin
+ExecStop=/opt/guardian-shield/guardian_shield_loader /opt/guardian-shield/config.json --unpin
+
+Restart=on-failure
+RestartSec=5
+
+# Must be root: loads BPF programs and pins into /sys/fs/bpf.
+# Deliberately NOT hardened with ProtectSystem/PrivateTmp - the loader needs
+# real /sys/fs/bpf and the host's own mount namespace to reconstruct paths.
+User=root
+
+[Install]
+WantedBy=multi-user.target

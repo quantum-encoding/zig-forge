@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+# baton-shield - Guardian Shield v9 query/control surface, as a baton module.
+#
+# Invoked as `baton shield <verb>` (baton dispatches `baton <name>` to the
+# `baton-<name>` executable on PATH).
+#
+# Design note: every READ path here is deliberately unprivileged. The event feed
+# is 0644 and journald is readable via the wheel/systemd-journal group, so an
+# agent can inspect the shield's state and the system log without a sudo prompt.
+# Only MUTATIONS (load/unload/policy edits) escalate - and those are exactly the
+# operations a human should be approving anyway.
+set -uo pipefail
+
+CONFIG=/opt/guardian-shield/config.json
+LOADER=/opt/guardian-shield/guardian_shield_loader
+FEED=/var/log/guardian_shield.jsonl
+PIN_DIR=/sys/fs/bpf/guardian_shield
+UNIT=guardian-shield.service
+
+die() { echo "baton shield: $*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+usage() {
+cat <<'EOF'
+baton shield - kernel-level agent containment (Guardian Shield v9)
+
+  status                 is it loaded, what is it guarding, is the daemon up
+  policy [--json]        the active protected paths and which ops each blocks
+  events [-n N] [-f]     containment events (denials, agent tagging)
+         [--kind K]      filter by event kind, e.g. unlink / agent_tagged
+  logs   [-n N] [-f]     the shield daemon's own journal
+  sys    [-n N] [-f]     the SYSTEM journal (so one CLI covers both)
+         [--since S] [-u UNIT] [-p PRIORITY]
+  guard  <path> [--block unlink,rmdir]    protect a path   (sudo)
+  free   <path>                           stop guarding it (sudo)
+  start | stop | restart | enable         daemon control   (sudo)
+
+Ops for --block: unlink rmdir rename chmod truncate link symlink mkdir
+                 open_write create, plus 'destroy' and '*'.
+Default --block is unlink,rmdir - what stops `rm -rf` while leaving the tree
+writable (rename is left alone: atomic-write tooling needs it).
+EOF
+}
+
+# ---- read-only surfaces (no sudo) -----------------------------------------
+
+cmd_status() {
+    local loaded active
+    # `systemctl is-active` PRINTS a state and also exits non-zero for
+    # inactive/missing units, so a `|| echo` fallback would capture two lines.
+    # Take the output and ignore the exit status.
+    active=$(systemctl is-active "$UNIT" 2>/dev/null); [ -n "$active" ] || active="not-installed"
+    # NB: comm is capped at 15 chars ("guardian_shield"), so `pgrep -x
+    # guardian_shield_loader` can never match. Match the full command line
+    # instead - safe from the usual self-match because this script's own argv
+    # does not contain that string.
+    if pgrep -f '/guardian_shield_loader ' >/dev/null 2>&1; then loaded=yes; else loaded=no; fi
+
+    echo "Guardian Shield v9"
+    if [ "$loaded" = yes ]; then
+        echo "  enforcement : ACTIVE (loader running, events flowing)"
+    else
+        # Pins OUTLIVE the loader, so "no process" does not prove "no
+        # enforcement" - say so rather than claim the machine is unprotected.
+        echo "  enforcement : loader not running - hooks may still be pinned"
+        echo "                (confirm: sudo ls $PIN_DIR)"
+    fi
+    echo "  daemon      : $active$([ "$active" != active ] && echo '  <- pins do NOT survive reboot without it' || true)"
+    if [ -r "$CONFIG" ] && have jq; then
+        echo "  mode        : $(jq -r 'if .hardening_mode then "hardening (default-deny)" else "agent-containment" end' "$CONFIG")"
+        echo "  log_only    : $(jq -r '.log_only' "$CONFIG")"
+        echo "  guarding    : $(jq -r '.protected_paths | length' "$CONFIG") path(s)"
+        echo "  agents      : $(jq -r '.agent_exes | length' "$CONFIG") launcher basenames"
+        echo "  exempt      : $(jq -r '.exempt_exes | map(split("/")|last) | join(", ")' "$CONFIG")"
+    fi
+    if [ -r "$FEED" ]; then
+        echo "  events      : $(wc -l < "$FEED") recorded"
+        # grep -c exits 1 on zero matches, so a `|| echo 0` fallback would
+        # print a second line. Let grep report 0 and swallow the status.
+        local denials; denials=$(grep -c '"enforced":1' "$FEED" 2>/dev/null); :
+        echo "  denials     : ${denials:-0}"
+    fi
+}
+
+cmd_policy() {
+    [ -r "$CONFIG" ] || die "cannot read $CONFIG"
+    have jq || die "jq required"
+    if [ "${1:-}" = "--json" ]; then jq '.protected_paths' "$CONFIG"; return; fi
+    local n; n=$(jq -r '.protected_paths | length' "$CONFIG")
+    if [ "$n" = 0 ]; then
+        echo "No paths guarded - the shield is loaded but protecting nothing."
+        echo "Add one:  baton shield guard ~/work"
+        return
+    fi
+    printf '%-44s %s\n' "PATH" "BLOCKED OPERATIONS"
+    jq -r '.protected_paths[] |
+           if type=="string" then "\(.)\t*  (all operations)"
+           else "\(.path)\t\(if (.block|length)==0 then "-  (explicit free hole)" else (.block|join(", ")) end)" end' \
+        "$CONFIG" | while IFS=$'\t' read -r p ops; do printf '%-44s %s\n' "$p" "$ops"; done
+}
+
+cmd_events() {
+    local n=25 follow="" kind=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -n) n="$2"; shift 2;;
+            -f|--follow) follow=1; shift;;
+            --kind) kind="$2"; shift 2;;
+            *) die "unknown option '$1'";;
+        esac
+    done
+    [ -r "$FEED" ] || die "no event feed at $FEED (is the shield loaded?)"
+    local filter='.'
+    [ -n "$kind" ] && filter="select((.event // .type // \"\") | test(\"$kind\"))"
+    if [ -n "$follow" ]; then
+        tail -f -n "$n" "$FEED" | jq -c --unbuffered "$filter" 2>/dev/null
+    else
+        tail -n "$n" "$FEED" | jq -c "$filter" 2>/dev/null
+    fi
+}
+
+cmd_logs() { local n=50 f=""; while [ $# -gt 0 ]; do case "$1" in -n) n=$2; shift 2;; -f|--follow) f=-f; shift;; *) die "unknown option '$1'";; esac; done
+    journalctl -u "$UNIT" -n "$n" --no-pager $f; }
+
+# The system journal, so an agent needs only this one CLI for both the shield
+# and the machine around it.
+cmd_sys() {
+    local n=50 f="" since="" unit="" prio=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -n) n="$2"; shift 2;;
+            -f|--follow) f=-f; shift;;
+            --since) since="$2"; shift 2;;
+            -u|--unit) unit="$2"; shift 2;;
+            -p|--priority) prio="$2"; shift 2;;
+            *) die "unknown option '$1'";;
+        esac
+    done
+    local args=(-n "$n" --no-pager)
+    [ -n "$f" ] && args+=("$f")
+    [ -n "$since" ] && args+=(--since "$since")
+    [ -n "$unit" ] && args+=(-u "$unit")
+    [ -n "$prio" ] && args+=(-p "$prio")
+    journalctl "${args[@]}"
+}
+
+# ---- mutations (sudo) ------------------------------------------------------
+
+reload_if_running() {
+    if systemctl is-active --quiet "$UNIT" 2>/dev/null; then
+        sudo systemctl restart "$UNIT" && echo "daemon restarted with the new policy"
+    elif pgrep -f '/guardian_shield_loader ' >/dev/null 2>&1; then
+        echo "note: shield is loaded but NOT under systemd - restart it yourself to apply:"
+        echo "      sudo $LOADER $CONFIG --unpin && sudo $LOADER $CONFIG --verbose"
+    else
+        echo "note: shield is not loaded; policy saved for next load"
+    fi
+}
+
+cmd_guard() {
+    local path="${1:-}"; shift || true
+    [ -n "$path" ] || die "usage: baton shield guard <path> [--block unlink,rmdir]"
+    local block="unlink,rmdir"
+    [ "${1:-}" = "--block" ] && { block="$2"; shift 2; }
+    path=$(readlink -f "$path") || die "no such path"
+    have jq || die "jq required"
+    local tmp; tmp=$(mktemp)
+    jq --arg p "$path" --arg b "$block" \
+       '.protected_paths = ((.protected_paths // []) | map(select((if type=="string" then . else .path end) != $p)))
+                           + [{path: $p, block: ($b | split(","))}]' \
+       "$CONFIG" > "$tmp" || die "failed to build policy"
+    sudo cp "$tmp" "$CONFIG" && sudo chmod 644 "$CONFIG"; rm -f "$tmp"
+    echo "guarding $path  (blocked: $block)"
+    reload_if_running
+}
+
+cmd_free() {
+    local path="${1:-}"
+    [ -n "$path" ] || die "usage: baton shield free <path>"
+    path=$(readlink -f "$path") || die "no such path"
+    local tmp; tmp=$(mktemp)
+    jq --arg p "$path" \
+       '.protected_paths = ((.protected_paths // []) | map(select((if type=="string" then . else .path end) != $p)))' \
+       "$CONFIG" > "$tmp" || die "failed to build policy"
+    sudo cp "$tmp" "$CONFIG" && sudo chmod 644 "$CONFIG"; rm -f "$tmp"
+    echo "no longer guarding $path"
+    reload_if_running
+}
+
+case "${1:-status}" in
+    status)         shift; cmd_status "$@";;
+    policy)         shift; cmd_policy "$@";;
+    events)         shift; cmd_events "$@";;
+    logs)           shift; cmd_logs "$@";;
+    sys|system)     shift; cmd_sys "$@";;
+    guard)          shift; cmd_guard "$@";;
+    free|unguard)   shift; cmd_free "$@";;
+    start|stop|restart) sudo systemctl "$1" "$UNIT";;
+    enable)         sudo systemctl enable --now "$UNIT";;
+    -h|--help|help) usage;;
+    *)              usage; exit 1;;
+esac
