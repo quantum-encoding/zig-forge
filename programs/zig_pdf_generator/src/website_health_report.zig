@@ -1108,13 +1108,49 @@ fn shortPath(d: *Doc, url: []const u8) []const u8 {
 // Pages Audited — per-page extraction from the multi-page crawl (--crawl N).
 // One row per page: what we read off each (type, title/description lengths, H1
 // count, schema types, word count) plus any per-page notes underneath.
+/// Does this page have a real problem (any note that isn't the schema line)?
+fn pageHasIssue(p: PageSummary) bool {
+    for (p.notes) |n| {
+        if (!std.mem.startsWith(u8, n, "Schema:")) return true;
+    }
+    return false;
+}
+
 fn buildPagesAudited(d: *Doc) !void {
-    const pages = d.rep.pages;
-    if (pages.len == 0) return;
+    const all = d.rep.pages;
+    if (all.len == 0) return;
     try d.section("Pages Audited");
-    try d.para(d.f("{d} pages were crawled and parsed individually. This is what each one " ++
-        "actually contains \u{2014} the title and meta-description lengths search engines truncate on, " ++
-        "the H1 count, the schema types present, and the body word count.", .{pages.len}), 10, INK, 10);
+
+    // A full-site scan can be hundreds of pages — an exhaustive table would be
+    // unreadable. Past a threshold, list only the pages with problems and state
+    // plainly how many were clean, so the omission is explicit, never silent.
+    const LIST_ALL_UPTO: usize = 25;
+    const summarise = all.len > LIST_ALL_UPTO;
+    var pages = all;
+    var clean: usize = 0;
+    if (summarise) {
+        var list: std.ArrayListUnmanaged(PageSummary) = .empty;
+        for (all) |p| {
+            if (pageHasIssue(p)) try list.append(d.a, p) else clean += 1;
+        }
+        pages = list.items;
+    }
+
+    if (summarise) {
+        try d.para(d.f("{d} pages were crawled and parsed individually. {d} had no on-page issues " ++
+            "and are not listed; the {d} below are every page that did \u{2014} with the title and " ++
+            "meta-description lengths search engines truncate on, the H1 count, the schema types " ++
+            "present, and the body word count.", .{ all.len, clean, pages.len }), 10, INK, 10);
+    } else {
+        try d.para(d.f("{d} pages were crawled and parsed individually. This is what each one " ++
+            "actually contains \u{2014} the title and meta-description lengths search engines truncate on, " ++
+            "the H1 count, the schema types present, and the body word count.", .{pages.len}), 10, INK, 10);
+    }
+    if (pages.len == 0) {
+        try d.para(d.f("All {d} pages are clean \u{2014} no title, description, heading or schema issues found.", .{all.len}), 10, GREEN, 6);
+        d.gap(8);
+        return;
+    }
 
     const c_type = ML + 190;
     const c_title = ML + 250;
