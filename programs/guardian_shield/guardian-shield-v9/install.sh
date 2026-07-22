@@ -168,7 +168,7 @@ fi
 if [ -z "$LSM_LIST" ]; then
   fail "cannot read $LSM_FILE (securityfs not mounted?)" \
        "mount securityfs (mount -t securityfs securityfs /sys/kernel/security) and re-run"
-elif ! printf '%s' "$LSM_LIST" | tr ',' '\n' | grep -qx 'bpf'; then
+elif ! printf '%s' "$LSM_LIST" | tr ',' '\n' | grep -x 'bpf' >/dev/null; then
   fail "'bpf' is NOT in the active LSM stack (currently: $LSM_LIST)" \
        "add bpf to the LSM list on the kernel cmdline, e.g. GRUB_CMDLINE_LINUX=\"... lsm=${LSM_LIST},bpf\" then grub-mkconfig -o /boot/grub/grub.cfg (or update-grub) and reboot"
 else
@@ -193,10 +193,10 @@ elif [ -r "/boot/config-$KREL" ]; then
   KCONF="$(cat "/boot/config-$KREL")"
 fi
 if [ -n "$KCONF" ]; then
-  if ! printf '%s\n' "$KCONF" | grep -qx 'CONFIG_SECURITY_PATH=y'; then
+  if ! printf '%s\n' "$KCONF" | grep -x 'CONFIG_SECURITY_PATH=y' >/dev/null; then
     fail "kernel built without CONFIG_SECURITY_PATH=y (the path_* LSM hooks do not exist)" \
          "use a kernel with CONFIG_SECURITY_PATH=y (standard on mainstream distros)"
-  elif ! printf '%s\n' "$KCONF" | grep -qx 'CONFIG_BPF_LSM=y'; then
+  elif ! printf '%s\n' "$KCONF" | grep -x 'CONFIG_BPF_LSM=y' >/dev/null; then
     fail "kernel built without CONFIG_BPF_LSM=y" \
          "use a kernel with CONFIG_BPF_LSM=y"
   else
@@ -210,7 +210,7 @@ fi
 if ! command -v clang >/dev/null 2>&1; then
   fail "clang not found" \
        "install clang/llvm (Arch: pacman -S clang llvm; Debian/Ubuntu: apt install clang llvm)"
-elif ! clang --print-targets 2>/dev/null | grep -qw 'bpf'; then
+elif ! clang --print-targets 2>/dev/null | grep -w 'bpf' >/dev/null; then
   fail "installed clang lacks the BPF target" \
        "install a full llvm/clang build (distribution clang packages include the BPF backend)"
 else
@@ -244,7 +244,7 @@ fi
 if [ ! -f /usr/include/bpf/libbpf.h ]; then
   fail "libbpf development headers not found (/usr/include/bpf/libbpf.h)" \
        "install libbpf (Arch: pacman -S libbpf; Debian/Ubuntu: apt install libbpf-dev)"
-elif ! ldconfig -p 2>/dev/null | grep -q 'libbpf\.so'; then
+elif ! ldconfig -p 2>/dev/null | grep 'libbpf\.so' >/dev/null; then
   fail "libbpf shared library not found in the linker cache" \
        "install libbpf (Arch: pacman -S libbpf; Debian/Ubuntu: apt install libbpf-dev)"
 else

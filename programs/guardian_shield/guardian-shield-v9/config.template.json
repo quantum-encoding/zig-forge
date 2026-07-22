@@ -1,38 +1,11 @@
 {
   "_template_comment": "Guardian Shield v9 policy TEMPLATE. Do NOT load this file directly - it contains placeholders (dollar-brace HOME, USER, INSTALL_DIR) that install.sh resolves for the target machine at install time: HOME = the invoking (non-root) user's home directory, USER = that user's name, INSTALL_DIR = where install.sh places the loader/object/config (default /opt/guardian-shield). The generated file is validated (strict JSON, zero unresolved placeholders) before it is installed. To regenerate without installing: ./install.sh --check-config.",
-
   "_comment": "Two postures: (1) agent-containment (default, hardening_mode=false) restricts only AI-agent process subtrees against protected_paths; (2) hardening_mode=true is DEFAULT-DENY - it protects the critical_paths set against EVERYONE except TAG_TRUSTED (trusted_exes), and turns on the self-protection hooks (bpf()/module/mount/dev-mem/ptrace). protected_paths/critical_paths are directory/file prefixes (trailing slash auto-stripped; each entry must be < 128 bytes). agent_exes are launcher basenames -> TAG_AGENT. exempt_exes are full exe paths -> TAG_EXEMPT (override inherited AGENT). trusted_exes are full exe paths -> TAG_TRUSTED (unrestricted, may call bpf(); MUST include the loader's own path).",
-
   "hardening_mode": false,
-
   "_protected_comment": "Agent-containment write/destroy protection: tagged agent subtrees cannot unlink/rename/chmod/truncate/mkdir/rmdir/link/symlink/open-for-write/create under these prefixes. NOTE ${HOME}/.claude here is a deliberate self-modification guard (an agent cannot rewrite its own settings/permission grants) - but it also blocks the agent's own session-state writes under ~/.claude/. If that breaks your workflow, run with log_only=true first and tune. ${HOME}/.claude.json (a FILE, not under the dir) is unaffected by the prefix boundary check.",
-  "protected_paths": [
-    "/etc",
-    "/boot",
-    "/usr/bin",
-    "/usr/sbin",
-    "/usr/local/bin",
-    "/usr/local/sbin",
-    "/usr/lib",
-    "/lib",
-    "/lib64",
-    "/root/.ssh",
-    "${HOME}/.ssh",
-    "${HOME}/.claude",
-    "${HOME}/.config"
-  ],
-
+  "protected_paths": [],
   "_critical_comment": "Enforced (against all-but-trusted) ONLY when hardening_mode=true. The shield's own state (pins + install dir) + credentials.",
-  "critical_paths": [
-    "/sys/fs/bpf/guardian_shield",
-    "${INSTALL_DIR}",
-    "${HOME}/.ssh",
-    "/root/.ssh",
-    "${HOME}/.claude",
-    "/etc/sudoers.d",
-    "/boot"
-  ],
-
+  "critical_paths": [],
   "_agent_comment": "Launcher BASENAMES tagged TAG_AGENT at exec; the tag is inherited on fork and sticky across exec, so everything the agent spawns stays contained. 'quantum-diary' is the Quantum Diary app binary (cargo bin name, used by both `tauri dev` and release builds) - its embedded GUI agent runs run_command children as descendants of that binary, so tagging it gives the GUI agent the same kernel containment as CLI `claude`. 'Quantum Diary' is the Tauri bundle productName, in case a packaged build ships under that basename.",
   "agent_exes": [
     "claude",
@@ -47,41 +20,37 @@
     "codeium",
     "windsurf"
   ],
-
   "exempt_exes": [
     "/usr/bin/pacman",
     "/usr/bin/dpkg",
     "/usr/bin/apt",
     "/usr/bin/systemctl"
   ],
-
   "_trusted_comment": "MUST include the loader's own exe path or it cannot load/pin/unpin under hardening_mode. install.sh resolves this to the installed loader. (The loader also trusts itself by exe inode, so a relative-path invocation still works.)",
   "trusted_exes": [
     "${INSTALL_DIR}/guardian_shield_loader"
   ],
-
   "_supplychain_comment": "SUPPLY-CHAIN / CREDENTIAL-HARVEST DEFENSE (always-on, independent of the two postures above). build_exes are launcher basenames whose exec taints the whole install subtree (TAG_TAINTED, inherited + sticky). credential_paths is the crown-jewel AssetMap: a TAINTED (build-tool) or AGENT subtree is DENIED any open (incl. read-only) of these, so a malicious npm/pip postinstall cannot read+exfil your AWS/SSH keys. A normal/trusted/untainted process reading its OWN creds is unaffected. TIERING: crown jewels only - build-tool self-secrets (~/.npmrc, ~/.pypirc, ~/.cargo/credentials) are DELIBERATELY EXCLUDED (tools legitimately read them during install). ${HOME}/.claude is ALSO deliberately excluded here (unlike protected_paths): agent-tagged processes (claude, quantum-diary) must READ their own ~/.claude state and API credentials to function at all - it stays write/delete-protected via protected_paths, and untagged processes are never affected either way.",
   "build_exes": [
-    "npm", "pnpm", "yarn", "npx", "node-gyp",
-    "pip", "pip3", "poetry", "uv",
-    "cargo", "gem", "bundle",
-    "mvn", "maven", "gradle"
+    "npm",
+    "pnpm",
+    "yarn",
+    "npx",
+    "node-gyp",
+    "pip",
+    "pip3",
+    "poetry",
+    "uv",
+    "cargo",
+    "gem",
+    "bundle",
+    "mvn",
+    "maven",
+    "gradle"
   ],
-  "credential_paths": [
-    "${HOME}/.ssh",
-    "${HOME}/.aws",
-    "${HOME}/.config/gcloud",
-    "${HOME}/.config/gh",
-    "${HOME}/.git-credentials",
-    "${HOME}/.netrc",
-    "${HOME}/.kube",
-    "${HOME}/.docker/config.json",
-    "/root/.ssh"
-  ],
-
+  "credential_paths": [],
   "_egress_comment": "EXFIL BLOCK (supply-chain, for TAINTED build-tool and AGENT subtrees). A tainted/agent process connecting to a non-allowlisted PUBLIC IP is logged (EV_TAINTED_CONNECT) and, if enforce_egress=true, denied with -EPERM before the connect completes. The loader ALWAYS seeds loopback + RFC1918 private + link-local + CGNAT, so LAN/localhost work; egress_allow adds operator public CIDRs (IPv4 only in v1). DEFAULT IS false (LOG-ONLY) in this template - deliberately: agent_exes includes claude and quantum-diary, and those agents MUST reach their AI provider's public API (api.anthropic.com etc.) to function; enabling enforcement without allowlisting those CIDRs bricks the very app this integrates with, and a tainted `npm install` could not reach a public registry either. Discipline: run log-only, review EV_TAINTED_CONNECT events, allowlist what legitimate traffic needs, THEN set true.",
   "egress_allow": [],
-
   "enforce_fs": true,
   "enforce_mem": true,
   "enforce_priv": false,
@@ -89,5 +58,6 @@
   "enforce_egress": false,
   "log_only": false,
   "pin_dir": "/sys/fs/bpf/guardian_shield",
-  "log_file": "/var/log/guardian_shield.jsonl"
+  "log_file": "/var/log/guardian_shield.jsonl",
+  "_posture_comment": "ZERO-POLICY DEFAULT. protected_paths/critical_paths/credential_paths ship EMPTY on purpose: a freshly-installed shield attaches its hooks and observes, but denies NOTHING, so loading it can never break a working machine. Enforcement is opt-in - add the specific prefixes you want guarded, one at a time, and watch /var/log/guardian_shield.jsonl between each. log_only stays false so that the moment you DO opt a path in it genuinely protects it (rather than silently no-op'ing). Egress is log-only (enforce_egress=false) for the same reason: turn it on only after allowlisting what your agents legitimately reach. agent_exes/build_exes stay populated - tagging costs nothing and gives you the event feed you need to decide what to protect."
 }
