@@ -35,6 +35,17 @@
   ],
   "_supplychain_comment": "SUPPLY-CHAIN / CREDENTIAL-HARVEST DEFENSE (always-on, independent of the two postures above). build_exes are launcher basenames whose exec taints the whole install subtree (TAG_TAINTED, inherited + sticky). credential_paths is the crown-jewel AssetMap: a TAINTED (build-tool) or AGENT subtree is DENIED any open (incl. read-only) of these, so a malicious npm/pip postinstall cannot read+exfil your AWS/SSH keys. A normal/trusted/untainted process reading its OWN creds is unaffected. TIERING: crown jewels only - build-tool self-secrets (~/.npmrc, ~/.pypirc, ~/.cargo/credentials) are DELIBERATELY EXCLUDED (tools legitimately read them during install). ${HOME}/.claude is ALSO deliberately excluded here (unlike protected_paths): agent-tagged processes (claude, quantum-diary) must READ their own ~/.claude state and API credentials to function at all - it stays write/delete-protected via protected_paths, and untagged processes are never affected either way.",
   "_freebasename_comment": "REGENERABLE-OUTPUT ESCAPE HATCH. A path whose COMPONENTS include one of these basenames is exempt from the destructive guard at ANY depth, so `rm -rf node_modules` works inside a GUARDED tree without punching 69 explicit LPM holes (measured: that is what a single monorepo needed) and without needing a new hole for every future directory. Applies to the dentry-level hooks (unlink/rmdir/rename/mkdir/link/symlink/chmod/create) - NOT to truncate or open-for-write, which resolve their path differently; that is fine because the recommended guard set is unlink+rmdir. THE SET IS DELIBERATELY CONSERVATIVE: every name here is a directory whose entire contents a tool can rebuild from source. 'dist' and 'build' are DELIBERATELY EXCLUDED even though they are usually output - they are common enough as ordinary source directory names that exempting them would silently unguard real work. Each entry is a hole in the guard and is logged by name at load time; count the allows it takes with `baton shield status` (free_allow).",
+  "_scopedfree_comment": "PER-TREE EXEMPTIONS. free_basenames above is global: a name there is exempt everywhere, so it may only contain names that imply regenerability BY THEMSELVES. 'dist', 'build' and 'target' do not - they are ordinary source directory names in plenty of projects - but they DO imply it inside a known tree. That is what scopes are for: the name is free only under its scope prefix and stays fully guarded everywhere else. Add a scope per KIND of tree, not per project, so a new project inside an existing tree is covered without a config edit. MEASURED, this is why it exists: with dist guarded, astro's second build in a tree dies at `EPERM: operation not permitted, rmdir dist/server/.prerender/_astro` inside removeEmptyDirs/ssrMoveAssets - the first build passes because there is nothing to clean, so it fails only on iteration, and the stack trace names astro rather than the shield. Max 31 scopes. Each scope is logged by name at load.",
+  "scoped_free_basenames": [
+    {
+      "scope": "${HOME}/work/websites",
+      "names": ["dist", "build", ".astro", ".wrangler", ".vercel", ".netlify", ".svelte-kit", ".output"]
+    },
+    {
+      "scope": "${HOME}/work/tauri_apps",
+      "names": ["target", "dist", "build", "gen", ".svelte-kit"]
+    }
+  ],
   "free_basenames": [
     "node_modules",
     ".next",

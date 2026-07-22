@@ -271,12 +271,27 @@ struct {
 // enumerated and re-enumerated whenever the tree changes. Matching the basename
 // expresses the actual property - "this is build output, it is reproducible" -
 // at any depth, including directories that do not exist yet.
+// The value is a SCOPE MASK, not a boolean. Bit 31 (FREE_SCOPE_GLOBAL) means
+// "free anywhere"; bits 0..30 name a scope declared in free_scopes below. This
+// is what lets `dist` be free under ~/work/websites while staying guarded in
+// every other tree - the name alone does not imply regenerability, but the name
+// WITHIN a known tree does. A name may carry several bits.
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __type(key, char[MAX_EXE_NAME]);
-    __type(value, __u8);
+    __type(value, __u32);
     __uint(max_entries, 64);
 } free_basenames SEC(".maps");
+
+// Prefix -> single scope bit. A path resolves to the bits of every scope that
+// is a prefix of it; a scoped free name only applies where those bits overlap.
+struct {
+    __uint(type, BPF_MAP_TYPE_LPM_TRIE);
+    __type(key, struct path_lpm_key);
+    __type(value, __u32);
+    __uint(max_entries, 64);
+    __uint(map_flags, BPF_F_NO_PREALLOC);
+} free_scopes SEC(".maps");
 
 // Build-tool launcher basenames (npm/pip/cargo/...). exec of one taints the
 // whole install subtree (TAG_TAINTED, inherited + sticky).
@@ -384,7 +399,7 @@ struct {
 struct recon_buf {
     __u64 dstack[MAX_DENTRY_DEPTH];   // collected dentry pointers (leaf..root)
     __u8  data[RECON_DATA_LEN];       // assembled absolute path (+slack tail)
-    __u8  has_free;                   // some component matched free_basenames
+    __u32 free_mask;                  // OR of scope masks of matching components
     __u8  _pad[7];
 };
 
@@ -410,7 +425,7 @@ struct walk_ctx {
     __u32 n;           // components collected
     __u32 off;         // emit offset
     __u8  done;
-    __u8  has_free;    // a component matched free_basenames (regenerable dir)
+    __u32 free_mask;   // OR of scope masks of components matching free_basenames
     __u8  _pad[2];
 };
 
@@ -547,11 +562,14 @@ static long emit_cb(__u32 k, void *c)
     // later would mean a second variable-offset scan, which is exactly the
     // shape that blows up the verifier. d_name.name is NUL-terminated, so the
     // fixed-size _str read is bounded and verifier-friendly.
-    if (!ctx->has_free && nlen > 0) {
+    if (nlen > 0) {
         char cname[MAX_EXE_NAME] = {};
         long r = bpf_probe_read_kernel_str(cname, sizeof(cname), nm);
-        if (r > 0 && bpf_map_lookup_elem(&free_basenames, cname))
-            ctx->has_free = 1;
+        if (r > 0) {
+            __u32 *m = bpf_map_lookup_elem(&free_basenames, cname);
+            if (m)
+                ctx->free_mask |= *m;
+        }
     }
 
     // Component copy. Two INDEPENDENT bounds make the access provably in-range:
@@ -597,7 +615,7 @@ static __always_inline __u32 reconstruct_path(struct dentry *dentry,
         off = 1;
     }
     buf->data[off & (MAX_PATH_LEN - 1)] = '\0';
-    buf->has_free = ctx.has_free;
+    buf->free_mask = ctx.free_mask;
     *out_buf = buf;
     return off;
 }
@@ -616,6 +634,25 @@ static __always_inline __u32 reconstruct_path(struct dentry *dentry,
 // shorter prefix. That is deliberate - it is what lets a specific subtree punch a
 // hole in a broader guard (e.g. ${HOME} blocks unlink/rename, but
 // ${HOME}/work/scratch sets ops=0 and is freely destroyable).
+#define FREE_SCOPE_GLOBAL 0x80000000u
+
+// Which free-scopes contain this path. Bit 31 is always set so an unscoped
+// (global) free name works everywhere, while a scoped one only fires where its
+// scope prefix actually matches.
+static __noinline __u32 free_scope_bits(__u8 *path, __u32 len)
+{
+    struct path_lpm_key key;
+    __builtin_memset(&key, 0, sizeof(key));
+    if (len >= MAX_PATH_LEN)
+        len = MAX_PATH_LEN - 1;
+    key.prefixlen = len * 8;
+    if (len > 0)
+        bpf_probe_read_kernel(key.data, len, path);
+
+    __u32 *bit = bpf_map_lookup_elem(&free_scopes, &key);
+    return FREE_SCOPE_GLOBAL | (bit ? *bit : 0);
+}
+
 static __noinline bool path_is_protected(__u8 *path, __u32 len, __u16 op)
 {
     struct path_lpm_key key;
@@ -748,7 +785,7 @@ static __always_inline int fs_guard_dentry(struct dentry *dentry,
     // no guard at all - and this is the counter that later justifies (or
     // refutes) widening the basename set. Counted rather than logged on purpose:
     // a single `npm ci` touches thousands of files and would drown the feed.
-    if (hit && buf->has_free) {
+    if (hit && (buf->free_mask & free_scope_bits(buf->data, len))) {
         bump(STAT_FREE_ALLOW);
         hit = false;
     }
@@ -761,7 +798,7 @@ static __always_inline int fs_guard_dentry(struct dentry *dentry,
         __u32 tlen = reconstruct_path(tdentry, tvfsmnt, &tbuf);
         if (tbuf) {
             thit = path_is_protected(tbuf->data, tlen, ev_op_bit(ev));
-            if (thit && tbuf->has_free) {
+            if (thit && (tbuf->free_mask & free_scope_bits(tbuf->data, tlen))) {
                 bump(STAT_FREE_ALLOW);
                 thit = false;
             }

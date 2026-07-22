@@ -160,6 +160,13 @@ const PathSpec = struct {
     ops: u16,
 };
 
+const ScopedFree = struct {
+    scope: []const u8,
+    names: []const []const u8 = &.{},
+};
+
+const FREE_SCOPE_GLOBAL: u32 = 0x8000_0000;
+
 const GsConfig = extern struct {
     ready: u8,
     enforce_fs: u8,
@@ -236,6 +243,10 @@ const RawConfig = struct {
     // Regenerable-output directory basenames. Any path with one of these as a
     // COMPONENT is exempt from the destructive guard, at any depth.
     free_basenames: []const []const u8 = &.{},
+    // Per-tree exemptions. A name here is free ONLY under its scope, so `dist`
+    // can be regenerable output under a websites tree and still be guarded
+    // source anywhere else. Each scope declares its own names; up to 31 scopes.
+    scoped_free_basenames: []const ScopedFree = &.{},
     egress_allow: []const []const u8 = &.{},
     enforce_fs: bool = true,
     enforce_mem: bool = true,
@@ -548,7 +559,7 @@ const Loader = struct {
         // --- basename classifiers ---
         try self.populateBasenameMap("agent_exe_names", self.cfg.agent_exes);
         try self.populateBasenameMap("build_exe_names", self.cfg.build_exes);
-        try self.populateBasenameMap("free_basenames", self.cfg.free_basenames);
+        try self.populateFreeNames();
 
         // --- full-path allowlists ---
         try self.populateExeMap("exempt_exes", self.cfg.exempt_exes);
@@ -644,6 +655,62 @@ const Loader = struct {
             @memcpy(key[0..name.len], name);
             var one: u8 = 1;
             _ = c.bpf_map_update_elem(fd, &key, &one, c.BPF_ANY);
+        }
+    }
+
+    /// free_basenames (name -> scope mask) and free_scopes (prefix -> scope bit).
+    /// A bare name gets FREE_SCOPE_GLOBAL; a scoped one gets only its scope's
+    /// bit, so it cannot fire outside the tree that declared it.
+    fn populateFreeNames(self: *Loader) !void {
+        const names_fd = try self.mapFd("free_basenames");
+        const scopes_fd = try self.mapFd("free_scopes");
+
+        var masks = std.StringHashMap(u32).init(g_alloc);
+        defer masks.deinit();
+
+        for (self.cfg.free_basenames) |n| {
+            const e = try masks.getOrPut(n);
+            e.value_ptr.* = if (e.found_existing) e.value_ptr.* | FREE_SCOPE_GLOBAL else FREE_SCOPE_GLOBAL;
+        }
+
+        if (self.cfg.scoped_free_basenames.len > 31) {
+            std.log.err("scoped_free_basenames: {d} scopes, max 31", .{self.cfg.scoped_free_basenames.len});
+            return error.InvalidConfig;
+        }
+        for (self.cfg.scoped_free_basenames, 0..) |sc, i| {
+            var p = sc.scope;
+            if (p.len > 1 and p[p.len - 1] == '/') p = p[0 .. p.len - 1];
+            if (p.len == 0 or p.len >= MAX_PATH_LEN) {
+                std.log.err("scoped_free_basenames: invalid scope '{s}'", .{sc.scope});
+                return error.InvalidConfig;
+            }
+            const bit: u32 = @as(u32, 1) << @intCast(i);
+            var key = std.mem.zeroes(PathLpmKey);
+            key.prefixlen = @intCast(p.len * 8);
+            @memcpy(key.data[0..p.len], p);
+            var v = bit;
+            if (c.bpf_map_update_elem(scopes_fd, &key, &v, c.BPF_ANY) != 0)
+                return error.MapUpdateFailed;
+
+            for (sc.names) |n| {
+                const e = try masks.getOrPut(n);
+                e.value_ptr.* = if (e.found_existing) e.value_ptr.* | bit else bit;
+            }
+            std.log.warn("free scope '{s}': {d} name(s) exempt from the destructive guard INSIDE this tree only.", .{ p, sc.names.len });
+        }
+
+        var it = masks.iterator();
+        while (it.next()) |kv| {
+            const n = kv.key_ptr.*;
+            if (n.len == 0 or n.len >= MAX_EXE_NAME) {
+                std.log.warn("free basename '{s}' too long, skipping", .{n});
+                continue;
+            }
+            var key = std.mem.zeroes([MAX_EXE_NAME]u8);
+            @memcpy(key[0..n.len], n);
+            var mask = kv.value_ptr.*;
+            if (c.bpf_map_update_elem(names_fd, &key, &mask, c.BPF_ANY) != 0)
+                return error.MapUpdateFailed;
         }
     }
 
