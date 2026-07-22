@@ -445,6 +445,32 @@ const Doc = struct {
             .stroke_width = @floatCast(sw),
         } });
     }
+    /// Squircle card — a rounded panel with an optional hairline border, the
+    /// "contained result" surface (document.zig's rounded-rect primitive).
+    fn card(self: *Doc, x: f64, y: f64, w: f64, h: f64, fill: ?[]const u8, stroke: ?[]const u8, radius: f64) !void {
+        try self.el(.{ .shape = .{
+            .shape = .rounded_rectangle,
+            .x = @floatCast(x),
+            .y = @floatCast(y),
+            .width = @floatCast(w),
+            .height = @floatCast(h),
+            .corner_radius = @floatCast(radius),
+            .fill_color = fill,
+            .stroke_color = stroke,
+            .stroke_width = 0.8,
+        } });
+    }
+
+    /// A card plus a rounded accent bar down its left edge. The bar is drawn as a
+    /// narrow rounded rect tucked inside the card's left radius.
+    fn accentCard(self: *Doc, x: f64, y: f64, w: f64, h: f64, fill: []const u8, accent: []const u8) !void {
+        const R: f64 = 6;
+        try self.card(x, y, w, h, fill, RULE, R);
+        // accent bar: square-ish on the right, rounded on the left — approximated
+        // by a rounded rect of the bar's own width.
+        try self.card(x, y, 3.5, h, accent, null, 1.75);
+    }
+
     fn image(self: *Doc, b64: []const u8, x: f64, y: f64, w: f64, h: f64) !void {
         try self.el(.{ .image = .{ .base64 = b64, .x = @floatCast(x), .y = @floatCast(y), .width = @floatCast(w), .height = @floatCast(h) } });
     }
@@ -784,8 +810,7 @@ const Doc = struct {
 
         try self.ensure(h + 6);
         const y0 = self.y;
-        try self.rect(ML, y0, CW, h, CARD_BG, null, 0);
-        try self.rect(ML, y0, 4, h, sevColor(fnd.severity), null, 0);
+        try self.accentCard(ML, y0, CW, h, CARD_BG, sevColor(fnd.severity));
 
         const cx = ML + 14;
         var yy = y0 + 10;
@@ -954,8 +979,7 @@ fn kvBlock(d: *Doc, title: ?[]const u8, rows: []const ExtractedField) !void {
     const fits = panel_h <= (CONTENT_BOTTOM - CONTENT_TOP);
     if (fits) {
         try d.ensure(panel_h + 2);
-        try d.rect(ML, d.y, CW, panel_h, CARD_BG, null, 0);
-        try d.rect(ML, d.y, 3.5, panel_h, NAVY, null, 0); // left accent bar
+        try d.accentCard(ML, d.y, CW, panel_h, CARD_BG, NAVY);
     }
     const y_start = d.y;
     d.y += PAD;
@@ -1144,8 +1168,7 @@ fn buildPagesAudited(d: *Doc) !void {
         const bar = if (p.titleLength == 0 or p.metaDescriptionLength == 0)
             RED
         else if (p.notes.len > 1) AMBER else GREEN;
-        try d.rect(ML, y, CW, h, CARD_BG, null, 0);
-        try d.rect(ML, y, 3.5, h, bar, null, 0);
+        try d.accentCard(ML, y, CW, h, CARD_BG, bar);
         _ = i;
 
         try d.text(ML + 14, y + 12, shortPath(d, p.url), 8.5, INK, false, .left);
@@ -1326,8 +1349,7 @@ fn buildBody(d: *Doc) !void {
             // Empty state — an audit that finds nothing should say so plainly.
             try d.ensure(52);
             const y0 = d.y + 2;
-            try d.rect(ML, y0, CW, 44, "#f0fdf4", null, 0); // faint green panel
-            try d.rect(ML, y0, 4, 44, GREEN, null, 0);
+            try d.accentCard(ML, y0, CW, 44, "#f0fdf4", GREEN);
             try d.text(ML + 16, y0 + 19, "Nothing to fix \u{2014} good work.", 11.5, GREEN, true, .left);
             try d.text(ML + 16, y0 + 34, d.f("No critical issues or warnings were found across all {d} categories.", .{r.categories.len}), 9.5, GREY, false, .left);
             d.y = y0 + 44;

@@ -777,9 +777,26 @@ pub const PresentationRenderer = struct {
         const pdf_y = self.toPdfY(shape.y);
 
         switch (shape.shape) {
-            .rectangle, .rounded_rectangle => {
-                // Draw rectangle (rounded corners not yet implemented)
+            .rectangle => {
                 try stream.drawRect(shape.x, pdf_y - shape.height, shape.width, shape.height, fill_color, stroke_color);
+            },
+            .rounded_rectangle => {
+                // The "squircle card" primitive from document.zig. A zero/negative
+                // radius degrades to a plain rect rather than emitting a bad path.
+                if (shape.corner_radius > 0) {
+                    try stream.drawRoundedRectEx(
+                        shape.x,
+                        pdf_y - shape.height,
+                        shape.width,
+                        shape.height,
+                        shape.corner_radius,
+                        fill_color,
+                        stroke_color,
+                        shape.stroke_width,
+                    );
+                } else {
+                    try stream.drawRect(shape.x, pdf_y - shape.height, shape.width, shape.height, fill_color, stroke_color);
+                }
             },
             .circle => {
                 // x,y is center, width is diameter
