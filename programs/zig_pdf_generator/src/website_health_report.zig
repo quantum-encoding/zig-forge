@@ -335,6 +335,21 @@ const Extracted = struct {
     crawlers: []const ExtractedField = &.{},
     content: []const ExtractedField = &.{},
 };
+// One crawled page (baton-audit PageSummary) — the Pages Audited table.
+const PageSummary = struct {
+    url: []const u8 = "",
+    statusCode: u32 = 0,
+    pageType: []const u8 = "",
+    title: []const u8 = "",
+    titleLength: u32 = 0,
+    metaDescriptionLength: u32 = 0,
+    canonical: ?[]const u8 = null,
+    canonicalMismatch: bool = false,
+    h1Count: u32 = 0,
+    schemaTypes: []const []const u8 = &.{},
+    wordCount: u32 = 0,
+    notes: []const []const u8 = &.{},
+};
 pub const Report = struct {
     url: []const u8 = "",
     domain: []const u8 = "",
@@ -348,6 +363,7 @@ pub const Report = struct {
     performance: ?Performance = null,
     history: []const HistoryRow = &.{},
     extracted: ?Extracted = null,
+    pages: []const PageSummary = &.{},
     gallery: []const GalleryShot = &.{},
 };
 
@@ -1033,6 +1049,106 @@ fn buildExtracted(d: *Doc) !void {
     d.gap(8);
 }
 
+/// URL → the path, trimmed for the table's left column.
+fn shortPath(d: *Doc, url: []const u8) []const u8 {
+    var p = url;
+    if (std.mem.indexOf(u8, p, "://")) |i| {
+        p = p[i + 3 ..];
+        if (std.mem.indexOfScalar(u8, p, '/')) |j| p = p[j..] else p = "/";
+    }
+    if (p.len == 0) p = "/";
+    return if (p.len > 42) d.f("{s}\u{2026}", .{p[0..41]}) else p;
+}
+
+// Pages Audited — per-page extraction from the multi-page crawl (--crawl N).
+// One row per page: what we read off each (type, title/description lengths, H1
+// count, schema types, word count) plus any per-page notes underneath.
+fn buildPagesAudited(d: *Doc) !void {
+    const pages = d.rep.pages;
+    if (pages.len == 0) return;
+    try d.section("Pages Audited");
+    try d.para(d.f("{d} pages were crawled and parsed individually. This is what each one " ++
+        "actually contains \u{2014} the title and meta-description lengths search engines truncate on, " ++
+        "the H1 count, the schema types present, and the body word count.", .{pages.len}), 10, INK, 10);
+
+    const c_type = ML + 190;
+    const c_title = ML + 250;
+    const c_desc = ML + 300;
+    const c_h1 = ML + 348;
+    const c_words = ML + 396;
+    const c_schema = ML + 430;
+
+    try d.ensure(22);
+    const hy = d.y + 10;
+    try d.text(ML + 2, hy, "PAGE", 8, GREY, true, .left);
+    try d.text(c_type, hy, "TYPE", 8, GREY, true, .left);
+    try d.text(c_title, hy, "TITLE", 8, GREY, true, .center);
+    try d.text(c_desc, hy, "DESC", 8, GREY, true, .center);
+    try d.text(c_h1, hy, "H1", 8, GREY, true, .center);
+    try d.text(c_words, hy, "WORDS", 8, GREY, true, .center);
+    try d.text(c_schema, hy, "SCHEMA", 8, GREY, true, .left);
+    d.y += 14;
+    try d.rect(ML, d.y, CW, 0.8, RULE, null, 0);
+    d.y += 1;
+
+    for (pages, 0..) |p, i| {
+        // Google truncates titles ~60 and descriptions ~155 — colour by that.
+        const t_col = if (p.titleLength == 0) RED else if (p.titleLength > 60 or p.titleLength < 30) AMBER else GREEN;
+        const d_col = if (p.metaDescriptionLength == 0) RED else if (p.metaDescriptionLength > 155 or p.metaDescriptionLength < 70) AMBER else GREEN;
+        const h_col = if (p.h1Count == 1) GREEN else RED;
+        const w_col = if (p.wordCount < 300) AMBER else GREEN;
+
+        var schema_txt: []const u8 = "\u{2014}";
+        if (p.schemaTypes.len > 0) {
+            var buf: std.ArrayListUnmanaged(u8) = .empty;
+            for (p.schemaTypes, 0..) |t, k| {
+                if (k > 0) buf.appendSlice(d.a, ", ") catch {};
+                buf.appendSlice(d.a, t) catch {};
+            }
+            schema_txt = buf.items;
+        }
+        const schema_lines = try wrap(d.a, schema_txt, 8, CW - (c_schema - ML) - 4, false);
+        const note_lines: usize = if (p.notes.len > 0) blk: {
+            var n: usize = 0;
+            for (p.notes) |nt| n += try nLines(d.a, nt, 8, CW - 26, false);
+            break :blk n;
+        } else 0;
+
+        const base_h: f64 = @max(18.0, @as(f64, @floatFromInt(schema_lines.len)) * 10.5 + 7);
+        const h = base_h + @as(f64, @floatFromInt(note_lines)) * 10.5 + (if (note_lines > 0) @as(f64, 4) else 0);
+        try d.ensure(h);
+        const y = d.y;
+        if (i % 2 == 1) try d.rect(ML, y, CW, h, CARD_BG, null, 0);
+
+        try d.text(ML + 3, y + 12, shortPath(d, p.url), 8.5, INK, false, .left);
+        try d.text(c_type, y + 12, p.pageType, 8, GREY, false, .left);
+        try d.text(c_title, y + 12, d.f("{d}", .{p.titleLength}), 9, t_col, false, .center);
+        try d.text(c_desc, y + 12, d.f("{d}", .{p.metaDescriptionLength}), 9, d_col, false, .center);
+        try d.text(c_h1, y + 12, d.f("{d}", .{p.h1Count}), 9, h_col, false, .center);
+        try d.text(c_words, y + 12, d.f("{d}", .{p.wordCount}), 9, w_col, false, .center);
+        var sy = y + 12;
+        for (schema_lines) |ln| {
+            try d.text(c_schema, sy, ln, 8, INK, false, .left);
+            sy += 10.5;
+        }
+        // per-page notes, indented under the row
+        var ny = y + base_h;
+        for (p.notes) |nt| {
+            for (try wrap(d.a, nt, 8, CW - 26, false)) |ln| {
+                try d.text(ML + 14, ny + 6, ln, 8, AMBER, false, .left);
+                ny += 10.5;
+            }
+        }
+        d.y = y + h;
+    }
+    d.y += 3;
+    try d.rect(ML, d.y, CW, 0.8, RULE, null, 0);
+    d.y += 6;
+    try d.para("Title target ~30\u{2013}60 characters, meta description ~70\u{2013}155 (Google truncates beyond); " ++
+        "exactly one H1 per page; under ~300 words reads as thin content.", 8.5, LGREY, 4);
+    d.gap(8);
+}
+
 // Pages Loaded — a 2-column grid of page screenshots (proof of real page loads).
 fn buildGallery(d: *Doc) !void {
     const shots = d.rep.gallery;
@@ -1165,6 +1281,9 @@ fn buildBody(d: *Doc) !void {
 
     // 4b. Extracted Data — show-and-tell: what we actually read off the page
     try buildExtracted(d);
+
+    // 4c. Pages Audited — per-page extraction from the multi-page crawl
+    try buildPagesAudited(d);
 
     // 5. Prioritised fix list
     try d.section("Prioritised Fix List");
