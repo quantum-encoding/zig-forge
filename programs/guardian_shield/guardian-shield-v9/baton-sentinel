@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+# baton-sentinel - one query surface over the fleet's daemon estate.
+#
+# Invoked as `baton sentinel <verb>` (baton dispatches `baton <name>` to the
+# `baton-<name>` executable on PATH).
+#
+# WHY DISCOVERY-BASED, not a hardcoded table: the daemons do NOT share a
+# contract. log-sentinel exposes GetEvents/GetSummary/GetEventsByCategory,
+# Boreas exposes GetCurrentProfile/GetFanSpeeds/SetFanProfile, Prometheus
+# exposes GetCpuStatus/SetPerformanceProfile. Each is domain-specific, so this
+# introspects at runtime and presents whatever is actually there. New daemons
+# work without touching this script; renamed methods do not silently break it.
+#
+# SAFE-READ HEURISTIC: a method that takes NO arguments and RETURNS a value is
+# a getter, and `status` calls those. Anything taking arguments, or named
+# Set*/Clear*/Reset*, is a mutation and is never called implicitly - it must be
+# asked for by name via `call`.
+#
+# Reads are unprivileged (system-bus introspection + journald via wheel), so an
+# agent can inspect machine state without a sudo prompt. Only unit control
+# escalates.
+set -uo pipefail
+
+die() { echo "baton sentinel: $*" >&2; exit 1; }
+
+# Units that ship as part of the sentinel estate (may be installed but stopped).
+UNITS=(battery bluetooth cpu disk-io filesystem gpu network scheduler temperature zram)
+
+# bus name -> object path: org.jesternet.Boreas -> /org/jesternet/Boreas
+obj_path() { printf '/%s' "$(printf '%s' "$1" | tr '.' '/')"; }
+
+# Every org.jesternet.* name currently on the system bus.
+live_names() {
+    busctl --system list --no-pager 2>/dev/null | awk '/^org\.jesternet\./ {print $1}' | sort -u
+}
+
+unit_for() {  # bus name -> systemd unit, via the bus's own metadata
+    busctl --system list --no-pager 2>/dev/null | awk -v n="$1" '$1==n {print $6}' | head -1
+}
+
+usage() {
+cat <<'EOF'
+baton sentinel - the fleet's daemon estate, through one CLI
+
+  list                    every sentinel: installed / enabled / running / on-bus
+  status [name]           call every zero-arg getter on live daemons (machine view)
+  info <name>             introspect: what methods does it actually expose
+  call <name> <Method> [args...]
+                          invoke a specific method (explicit = allowed to mutate)
+  logs <name> [-n N] [-f] that daemon's journal
+  start|stop|enable|disable <name>            unit control (sudo)
+
+<name> accepts a short form (cpu, boreas) or a full bus name.
+Reads never require sudo; only unit control does.
+EOF
+}
+
+# Resolve a short name to a live bus name, else to a unit name.
+resolve() {
+    local want="${1,,}" n
+    for n in $(live_names); do
+        [ "${n,,}" = "$want" ] && { printf '%s' "$n"; return 0; }
+        # match the leaf or the domain segment: org.jesternet.cpu.Sentinel -> cpu
+        case "${n,,}" in
+            *".${want}.sentinel"|*".${want}") printf '%s' "$n"; return 0;;
+            "org.jesternet.${want}") printf '%s' "$n"; return 0;;
+        esac
+    done
+    printf ''
+}
+
+cmd_list() {
+    printf '%-14s %-10s %-9s %-8s %s\n' NAME INSTALLED ENABLED ACTIVE BUS
+    local u bin en ac onbus
+    for u in "${UNITS[@]}"; do
+        bin=/usr/local/bin/$u-sentinel
+        [ -x "$bin" ] || bin=/usr/local/bin/$u-sentinel-daemon
+        [ -x "$bin" ] && ins=yes || ins=no
+        en=$(systemctl is-enabled "$u-sentinel.service" 2>/dev/null); [ -n "$en" ] || en=-
+        ac=$(systemctl is-active  "$u-sentinel.service" 2>/dev/null); [ -n "$ac" ] || ac=-
+        onbus=$(live_names | grep -ci "\.${u%%-*}\." 2>/dev/null); [ "$onbus" -gt 0 ] 2>/dev/null && onbus=yes || onbus=no
+        printf '%-14s %-10s %-9s %-8s %s\n' "$u" "$ins" "$en" "$ac" "$onbus"
+    done
+    # Daemons that are live on the bus but not part of the -sentinel unit set.
+    local n extra=0
+    for n in $(live_names); do
+        case "$n" in *.Sentinel|*.sentinel) continue;; esac
+        [ "$extra" = 0 ] && { echo ""; echo "Also live on the bus (not -sentinel units):"; extra=1; }
+        printf '  %-34s %s\n' "$n" "$(unit_for "$n")"
+    done
+}
+
+# Zero-arg, value-returning methods on an interface = the safe getters.
+getters_for() {  # $1 = bus name
+    local name="$1" path; path=$(obj_path "$name")
+    busctl --system introspect "$name" "$path" --no-pager 2>/dev/null |
+      awk -v iface="$name" '
+        $2=="method" && $3=="-" && $4!="-" {
+            m=$1; sub(/^\./,"",m)
+            if (m ~ /^(Introspect|GetMachineId|Ping|GetAll)$/) next
+            if (m ~ /^(Set|Clear|Reset|Delete|Remove|Stop|Restart)/) next
+            print m
+        }'
+}
+
+cmd_status() {
+    local targets
+    if [ $# -gt 0 ]; then
+        targets=$(resolve "$1"); [ -n "$targets" ] || die "no live daemon matching '$1' (try: baton sentinel list)"
+    else
+        targets=$(live_names)
+    fi
+    [ -n "$targets" ] || { echo "No jesternet daemons are live on the system bus."; echo "Start one: baton sentinel start cpu"; return; }
+    local name path m out
+    for name in $targets; do
+        path=$(obj_path "$name")
+        echo "$name"
+        local any=0
+        for m in $(getters_for "$name"); do
+            out=$(timeout 10 busctl --system call "$name" "$path" "$name" "$m" 2>/dev/null)
+            [ -n "$out" ] || continue
+            # strip the leading D-Bus signature token for readability
+            printf '  %-24s %s\n' "$m" "$(printf '%s' "$out" | cut -d' ' -f2-)"
+            any=1
+        done
+        if [ "$any" = 0 ]; then
+            # Distinguish "queryable but no getters" from "not queryable at all".
+            # A signal-only emitter (chronosd publishes TurnComplete) claims a bus
+            # name but exposes no introspectable object - that is normal, not a
+            # fault, so do not imply there are methods to go looking for.
+            if [ -z "$(busctl --system tree "$name" --no-pager 2>/dev/null | head -1)" ]; then
+                echo "  (signal-only: claims the name, exposes no objects - nothing to poll)"
+            else
+                echo "  (no zero-arg getters - see: baton sentinel info ${name})"
+            fi
+        fi
+        echo ""
+    done
+}
+
+cmd_info() {
+    local want="${1:-}"; [ -n "$want" ] || die "usage: baton sentinel info <name>"
+    local name; name=$(resolve "$want")
+    [ -n "$name" ] || die "'$want' is not live on the bus (baton sentinel list)"
+    local path; path=$(obj_path "$name")
+    echo "$name   ($path)"
+    echo "  unit: $(unit_for "$name")"
+    echo ""
+    busctl --system introspect "$name" "$path" --no-pager 2>/dev/null |
+      grep -vE "org\.freedesktop" | grep -E "method|property|signal" | sed 's/^/  /'
+}
+
+cmd_call() {
+    local want="${1:-}" method="${2:-}"; shift 2 2>/dev/null || true
+    [ -n "$want" ] && [ -n "$method" ] || die "usage: baton sentinel call <name> <Method> [args...]"
+    local name; name=$(resolve "$want"); [ -n "$name" ] || die "'$want' is not live on the bus"
+    local path; path=$(obj_path "$name")
+    timeout 20 busctl --system call "$name" "$path" "$name" "$method" "$@"
+}
+
+cmd_logs() {
+    local want="${1:-}"; shift || true
+    [ -n "$want" ] || die "usage: baton sentinel logs <name> [-n N] [-f]"
+    local n=50 f=""
+    while [ $# -gt 0 ]; do case "$1" in -n) n=$2; shift 2;; -f|--follow) f=-f; shift;; *) shift;; esac; done
+    local name unit; name=$(resolve "$want"); unit=""
+    [ -n "$name" ] && unit=$(unit_for "$name")
+    [ -n "$unit" ] && [ "$unit" != "-" ] || unit="$want-sentinel.service"
+    journalctl -u "$unit" -n "$n" --no-pager $f
+}
+
+cmd_unit() {  # start|stop|enable|disable
+    local action="$1" want="${2:-}"
+    [ -n "$want" ] || die "usage: baton sentinel $action <name>"
+    local unit="$want-sentinel.service"
+    systemctl list-unit-files "$unit" >/dev/null 2>&1 || unit="$want.service"
+    case "$action" in
+        enable) sudo systemctl enable --now "$unit";;
+        *)      sudo systemctl "$action" "$unit";;
+    esac
+    systemctl is-active "$unit" 2>/dev/null | sed 's/^/  now: /'
+}
+
+case "${1:-list}" in
+    list)                shift; cmd_list "$@";;
+    status)              shift; cmd_status "$@";;
+    info)                shift; cmd_info "$@";;
+    call)                shift; cmd_call "$@";;
+    logs)                shift; cmd_logs "$@";;
+    start|stop|enable|disable) cmd_unit "$1" "${2:-}";;
+    -h|--help|help)      usage;;
+    *)                   usage; exit 1;;
+esac
