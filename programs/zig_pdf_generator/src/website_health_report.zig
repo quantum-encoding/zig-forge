@@ -1342,16 +1342,23 @@ fn buildBody(d: *Doc) !void {
     {
         // Is there anything actionable at all? (info-level items are context, not fixes)
         var actionable: usize = 0;
+        var minor: usize = 0;
         for (try allFindingsSorted(d.a, r, false)) |fnd| {
-            if (!std.mem.eql(u8, fnd.severity, "info")) actionable += 1;
+            if (std.mem.eql(u8, fnd.severity, "info")) minor += 1 else actionable += 1;
         }
         if (actionable == 0) {
-            // Empty state — an audit that finds nothing should say so plainly.
+            // Empty state. If minor (info) items exist they still moved the score,
+            // so say so — "nothing to fix" next to a sub-100 score reads as a
+            // contradiction.
             try d.ensure(52);
             const y0 = d.y + 2;
             try d.accentCard(ML, y0, CW, 44, "#f0fdf4", GREEN);
             try d.text(ML + 16, y0 + 19, "Nothing to fix \u{2014} good work.", 11.5, GREEN, true, .left);
-            try d.text(ML + 16, y0 + 34, d.f("No critical issues or warnings were found across all {d} categories.", .{r.categories.len}), 9.5, GREY, false, .left);
+            const sub = if (minor > 0)
+                d.f("No critical issues or warnings across all {d} categories \u{2014} only {d} minor improvement(s), listed by category above.", .{ r.categories.len, minor })
+            else
+                d.f("No critical issues or warnings were found across all {d} categories.", .{r.categories.len});
+            try d.text(ML + 16, y0 + 34, sub, 9.5, GREY, false, .left);
             d.y = y0 + 44;
             d.gap(10);
         } else {
