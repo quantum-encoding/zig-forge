@@ -233,6 +233,9 @@ const RawConfig = struct {
     exempt_exes: []const []const u8 = &.{},
     trusted_exes: []const []const u8 = &.{},
     build_exes: []const []const u8 = &.{},
+    // Regenerable-output directory basenames. Any path with one of these as a
+    // COMPONENT is exempt from the destructive guard, at any depth.
+    free_basenames: []const []const u8 = &.{},
     egress_allow: []const []const u8 = &.{},
     enforce_fs: bool = true,
     enforce_mem: bool = true,
@@ -545,6 +548,7 @@ const Loader = struct {
         // --- basename classifiers ---
         try self.populateBasenameMap("agent_exe_names", self.cfg.agent_exes);
         try self.populateBasenameMap("build_exe_names", self.cfg.build_exes);
+        try self.populateBasenameMap("free_basenames", self.cfg.free_basenames);
 
         // --- full-path allowlists ---
         try self.populateExeMap("exempt_exes", self.cfg.exempt_exes);
@@ -563,7 +567,7 @@ const Loader = struct {
         if (c.bpf_map_update_elem(cfg_fd, &k0, &gc, c.BPF_ANY) != 0)
             return error.MapUpdateFailed;
 
-        std.log.info("policy loaded: {d} {s} paths, {d} credential paths, {d} agent exes, {d} build exes, {d} trusted, {d} egress CIDRs (hardening={}, cred_read={}, egress={}).", .{
+        std.log.info("policy loaded: {d} {s} paths, {d} credential paths, {d} agent exes, {d} build exes, {d} trusted, {d} egress CIDRs, {d} free basenames (hardening={}, cred_read={}, egress={}).", .{
             n_paths,
             if (self.cfg.hardening_mode) "critical" else "protected",
             n_creds,
@@ -571,10 +575,17 @@ const Loader = struct {
             self.cfg.build_exes.len,
             self.cfg.trusted_exes.len,
             n_egress,
+            self.cfg.free_basenames.len,
             self.cfg.hardening_mode,
             self.cfg.enforce_cred_read,
             self.cfg.enforce_egress,
         });
+
+        // A free basename is a deliberate hole in every guarded prefix. Name
+        // them individually at load time: a count in a summary line is too easy
+        // to skim past for something that disables enforcement by path shape.
+        for (self.cfg.free_basenames) |b|
+            std.log.warn("free basename '{s}': destructive ops are ALLOWED at any depth under a component of this name.", .{b});
     }
 
     // Built-in egress allowlist: loopback, RFC1918 private, link-local, CGNAT.
@@ -773,14 +784,78 @@ const Loader = struct {
         const e_fd = try self.mapFd("exec_events");
         _ = c.ring_buffer__add(rb, e_fd, handleExec, null);
 
+        // The stats map lives in the kernel and needs CAP_BPF to read, but
+        // `baton shield status` is deliberately an unprivileged reader. Since
+        // this loop already owns the map fds, snapshot them to a world-readable
+        // file instead of making the CLI privileged. 250ms poll * 40 = ~10s.
+        const snapshot_every = 40;
+        var ticks: u32 = 0;
         while (true) {
             const rc = c.ring_buffer__poll(rb, 250);
             if (rc < 0 and rc != -4) { // -EINTR is fine
                 std.log.err("ring_buffer__poll error rc={d}", .{rc});
                 return error.PollFailed;
             }
+            ticks += 1;
+            if (ticks >= snapshot_every) {
+                ticks = 0;
+                self.writeStats();
+            }
         }
     }
+
+    /// Dump the stats array to `<log_file>.stats` as a single JSON object,
+    /// atomically (write temp + rename) so a reader never sees a partial file.
+    /// Best-effort: a failed snapshot must never take enforcement down.
+    fn writeStats(self: *Loader) void {
+        const fd = self.mapFd("stats") catch return;
+        var vals: [stat_names.len]u64 = undefined;
+        for (0..stat_names.len) |i| {
+            var k: u32 = @intCast(i);
+            var v: u64 = 0;
+            if (c.bpf_map_lookup_elem(fd, &k, &v) != 0) v = 0;
+            vals[i] = v;
+        }
+
+        var buf: [1024]u8 = undefined;
+        var n: usize = 0;
+        buf[n] = '{';
+        n += 1;
+        for (stat_names, 0..) |name, i| {
+            const seg = std.fmt.bufPrint(buf[n..], "{s}\"{s}\":{d}", .{
+                if (i == 0) "" else ",",
+                name,
+                vals[i],
+            }) catch return;
+            n += seg.len;
+        }
+        const tail = std.fmt.bufPrint(buf[n..], "}}\n", .{}) catch return;
+        n += tail.len;
+        const written = buf[0..n];
+
+        var tmp_path: [512]u8 = undefined;
+        const tmp = std.fmt.bufPrintZ(&tmp_path, "{s}.stats.tmp", .{self.cfg.log_file}) catch return;
+        var final_path: [512]u8 = undefined;
+        const final = std.fmt.bufPrintZ(&final_path, "{s}.stats", .{self.cfg.log_file}) catch return;
+
+        const tfd = c.open(tmp.ptr, c.O_WRONLY | c.O_CREAT | c.O_TRUNC, @as(c_uint, 0o644));
+        if (tfd < 0) return;
+        _ = c.write(tfd, written.ptr, written.len);
+        _ = c.close(tfd);
+        _ = std.c.rename(tmp.ptr, final.ptr);
+    }
+};
+
+/// Index-aligned with enum stat_counter in guardian_shield.bpf.c.
+const stat_names = [_][]const u8{
+    "exec_seen",
+    "agent_tagged",
+    "fork_inherit",
+    "fs_checks",
+    "fs_blocked",
+    "mem_blocked",
+    "path_trunc",
+    "free_allow",
 };
 
 // ===================================================================

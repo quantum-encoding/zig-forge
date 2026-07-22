@@ -39,6 +39,15 @@ Ops for --block: unlink rmdir rename chmod truncate link symlink mkdir
                  open_write create, plus 'destroy' and '*'.
 Default --block is unlink,rmdir - what stops `rm -rf` while leaving the tree
 writable (rename is left alone: atomic-write tooling needs it).
+
+free_basenames in the config exempt regenerable output (node_modules, target,
+.cache, ...) at any depth, so builds work inside a guarded tree. `status` names
+them and counts what they let through.
+
+IF A BUILD FAILS INEXPLICABLY INSIDE A GUARDED TREE, RUN `baton shield events`
+FIRST. A denial surfaces as whatever errno the tool happened to be mid-syscall
+on, not as EPERM - measured: `npm ci` reports ENOTDIR and leaves node_modules
+poisoned, with nothing in its own output pointing at the shield.
 EOF
 }
 
@@ -72,14 +81,36 @@ cmd_status() {
         echo "  guarding    : $(jq -r '.protected_paths | length' "$CONFIG") path(s)"
         echo "  agents      : $(jq -r '.agent_exes | length' "$CONFIG") launcher basenames"
         echo "  exempt      : $(jq -r '.exempt_exes | map(split("/")|last) | join(", ")' "$CONFIG")"
+        # Free basenames are HOLES in every guarded prefix, so name them in full
+        # rather than counting them - an operator reading status must be able to
+        # see exactly what is unguarded without opening the config.
+        local free; free=$(jq -r '(.free_basenames // []) | join(", ")' "$CONFIG")
+        if [ -n "$free" ]; then
+            echo "  free names  : $free  <- destructive ops ALLOWED at any depth"
+        fi
     fi
     if [ -r "$FEED" ]; then
         echo "  events      : $(wc -l < "$FEED") recorded"
         # grep -c exits 1 on zero matches, so a `|| echo 0` fallback would
         # print a second line. Let grep report 0 and swallow the status.
-        local denials; denials=$(grep -c '"enforced":1' "$FEED" 2>/dev/null); :
+        # The loader emits a JSON boolean, not 0/1 - matching "enforced":1 made
+        # this report 0 denials on a feed that was full of them.
+        local denials; denials=$(grep -c '"enforced":true' "$FEED" 2>/dev/null); :
         echo "  denials     : ${denials:-0}"
     fi
+    # Kernel counters, snapshotted by the loader every ~10s so this stays an
+    # unprivileged read. free_allow is the one that matters here: it is how many
+    # destructive ops the free-basename holes let through.
+    if [ -r "$FEED.stats" ] && have jq; then
+        echo "  fs checks   : $(jq -r '.fs_checks' "$FEED.stats") ($(jq -r '.fs_blocked' "$FEED.stats") blocked, $(jq -r '.free_allow' "$FEED.stats") allowed via free names)"
+        local trunc; trunc=$(jq -r '.path_trunc' "$FEED.stats")
+        # `[ x ] && echo` as the last statement would make the whole verb exit
+        # non-zero on the ordinary path where the counter is 0.
+        if [ "$trunc" != 0 ]; then
+            echo "  path_trunc  : $trunc  <- paths too deep/long to reconstruct; those checks FAILED OPEN"
+        fi
+    fi
+    return 0
 }
 
 cmd_policy() {

@@ -264,6 +264,20 @@ struct {
     __uint(max_entries, 512);
 } agent_exe_names SEC(".maps");
 
+// Regenerable-output directory basenames (node_modules, .astro, .vite, ...).
+// If ANY component of a path is one of these, destructive ops are allowed even
+// inside a guarded tree. This is COMPONENT matching, not prefix matching: the
+// LPM trie can only express a literal prefix, so per-site holes would have to be
+// enumerated and re-enumerated whenever the tree changes. Matching the basename
+// expresses the actual property - "this is build output, it is reproducible" -
+// at any depth, including directories that do not exist yet.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, char[MAX_EXE_NAME]);
+    __type(value, __u8);
+    __uint(max_entries, 64);
+} free_basenames SEC(".maps");
+
 // Build-tool launcher basenames (npm/pip/cargo/...). exec of one taints the
 // whole install subtree (TAG_TAINTED, inherited + sticky).
 struct {
@@ -327,6 +341,7 @@ enum stat_counter {
     STAT_FS_BLOCKED = 4,
     STAT_MEM_BLOCKED = 5,
     STAT_PATH_TRUNC = 6,   // path reconstruction hit depth/length cap
+    STAT_FREE_ALLOW = 7,   // op allowed because a path component was a free basename
 };
 
 // Runtime config (single entry). The loader flips `ready` after policy load.
@@ -369,6 +384,8 @@ struct {
 struct recon_buf {
     __u64 dstack[MAX_DENTRY_DEPTH];   // collected dentry pointers (leaf..root)
     __u8  data[RECON_DATA_LEN];       // assembled absolute path (+slack tail)
+    __u8  has_free;                   // some component matched free_basenames
+    __u8  _pad[7];
 };
 
 struct {
@@ -393,7 +410,8 @@ struct walk_ctx {
     __u32 n;           // components collected
     __u32 off;         // emit offset
     __u8  done;
-    __u8  _pad[3];
+    __u8  has_free;    // a component matched free_basenames (regenerable dir)
+    __u8  _pad[2];
 };
 
 // ===================================================================
@@ -524,6 +542,18 @@ static long emit_cb(__u32 k, void *c)
     buf->data[idx] = '/';
     off++;
 
+    // Is this component a regenerable-output directory? Checked HERE because
+    // emit_cb already holds the component name - re-parsing the assembled path
+    // later would mean a second variable-offset scan, which is exactly the
+    // shape that blows up the verifier. d_name.name is NUL-terminated, so the
+    // fixed-size _str read is bounded and verifier-friendly.
+    if (!ctx->has_free && nlen > 0) {
+        char cname[MAX_EXE_NAME] = {};
+        long r = bpf_probe_read_kernel_str(cname, sizeof(cname), nm);
+        if (r > 0 && bpf_map_lookup_elem(&free_basenames, cname))
+            ctx->has_free = 1;
+    }
+
     // Component copy. Two INDEPENDENT bounds make the access provably in-range:
     //   didx = off & 127  -> [0,127]     and     nlen <= MAX_COMPONENT_LEN (64)
     //   didx + nlen <= 127 + 64 = 191 < RECON_DATA_LEN (192).
@@ -567,6 +597,7 @@ static __always_inline __u32 reconstruct_path(struct dentry *dentry,
         off = 1;
     }
     buf->data[off & (MAX_PATH_LEN - 1)] = '\0';
+    buf->has_free = ctx.has_free;
     *out_buf = buf;
     return off;
 }
@@ -712,6 +743,15 @@ static __always_inline int fs_guard_dentry(struct dentry *dentry,
     if (!buf)
         return 0;
     bool hit = path_is_protected(buf->data, len, ev_op_bit(ev));
+    // Regenerable output (node_modules/.astro/...) inside a guarded tree: allow,
+    // but COUNT it. A hole you cannot observe is indistinguishable from having
+    // no guard at all - and this is the counter that later justifies (or
+    // refutes) widening the basename set. Counted rather than logged on purpose:
+    // a single `npm ci` touches thousands of files and would drown the feed.
+    if (hit && buf->has_free) {
+        bump(STAT_FREE_ALLOW);
+        hit = false;
+    }
 
     // Secondary path (rename dst / link dst). path_is_protected copies out of
     // the buffer immediately, so it is safe to reuse the per-CPU slot here.
@@ -721,6 +761,10 @@ static __always_inline int fs_guard_dentry(struct dentry *dentry,
         __u32 tlen = reconstruct_path(tdentry, tvfsmnt, &tbuf);
         if (tbuf) {
             thit = path_is_protected(tbuf->data, tlen, ev_op_bit(ev));
+            if (thit && tbuf->has_free) {
+                bump(STAT_FREE_ALLOW);
+                thit = false;
+            }
             len = tlen;
             buf = tbuf;
         }
@@ -965,6 +1009,14 @@ int BPF_PROG(gs_path_truncate, const struct path *path)
     if (r <= 0)
         return 0;
     __u32 len = (__u32)r - 1;                // r includes trailing NUL
+    // NOTE: no free-basename exemption here. This hook takes its path from
+    // bpf_d_path() rather than the dentry walk, so it never sees the individual
+    // components, and re-scanning the assembled buffer for them would mean a
+    // second variable-offset pass - the exact shape that caused the verifier
+    // complexity blow-ups during v9 bring-up. In practice this is not a gap:
+    // the recommended guard set is unlink+rmdir, and TRUNCATE/OPEN_WRITE are
+    // not in it. It only matters if you guard a build tree with block:["*"],
+    // which is documented as unsupported for that reason.
     if (path_is_protected(buf, len, ev_op_bit(EV_TRUNCATE))) {
         __u8 enforced = cfg->log_only ? 0 : 1;
         log_violation(EV_TRUNCATE, tag, enforced, buf, len, 0, 0, 0, 0);
@@ -1042,6 +1094,14 @@ int BPF_PROG(gs_file_open, struct file *file)
             long r = bpf_d_path(&file->f_path, (char *)buf, MAX_PATH_LEN);
             if (r > 0) {
                 __u32 len = (__u32)r - 1;
+    // NOTE: no free-basename exemption here. This hook takes its path from
+    // bpf_d_path() rather than the dentry walk, so it never sees the individual
+    // components, and re-scanning the assembled buffer for them would mean a
+    // second variable-offset pass - the exact shape that caused the verifier
+    // complexity blow-ups during v9 bring-up. In practice this is not a gap:
+    // the recommended guard set is unlink+rmdir, and TRUNCATE/OPEN_WRITE are
+    // not in it. It only matters if you guard a build tree with block:["*"],
+    // which is documented as unsupported for that reason.
                 if (path_is_protected(buf, len, ev_op_bit(EV_OPEN_WRITE))) {
                     log_violation(EV_OPEN_WRITE, tag, cfg->log_only ? 0 : 1,
                                   buf, len, 0, 0, 0, flags);
