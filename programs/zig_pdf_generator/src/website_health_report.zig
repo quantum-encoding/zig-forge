@@ -931,23 +931,42 @@ fn allFindingsSorted(a: std.mem.Allocator, r: *const Report, want_pass: bool) ![
 fn kvBlock(d: *Doc, title: ?[]const u8, rows: []const ExtractedField) !void {
     if (rows.len == 0) return;
     if (title) |t| {
-        try d.ensure(20);
+        try d.ensure(24);
         d.y += 8;
         try d.text(ML + 2, d.y + 8, t, 9.5, NAVY, true, .left);
         d.y += 13;
     }
+    const PAD: f64 = 9;
+    const lx = ML + 14; // content inset inside the panel
     const lw: f64 = 118; // label column
-    const vx = ML + lw;
-    const vw = CW - lw - 4;
+    const vx = lx + lw;
+    const vw = ML + CW - vx - 12;
+    const step: f64 = 9 * 1.34;
+
+    // Pre-measure so the panel background can be drawn behind the whole block and
+    // the block stays whole on one page.
+    var inner: f64 = 0;
+    for (rows) |r| {
+        const lines = try wrap(d.a, try breakLongTokens(d.a, r.value, 9, vw), 9, vw, false);
+        inner += @max(step, @as(f64, @floatFromInt(lines.len)) * step) + 3;
+    }
+    const panel_h = inner + PAD * 2;
+    const fits = panel_h <= (CONTENT_BOTTOM - CONTENT_TOP);
+    if (fits) {
+        try d.ensure(panel_h + 2);
+        try d.rect(ML, d.y, CW, panel_h, CARD_BG, null, 0);
+        try d.rect(ML, d.y, 3.5, panel_h, NAVY, null, 0); // left accent bar
+    }
+    const y_start = d.y;
+    d.y += PAD;
     for (rows) |r| {
         // Long unbroken tokens (URLs) can't word-wrap — hard-break them first so
         // they stay inside the column instead of running off the page edge.
         const lines = try wrap(d.a, try breakLongTokens(d.a, r.value, 9, vw), 9, vw, false);
-        const step: f64 = 9 * 1.34;
         const h = @max(step, @as(f64, @floatFromInt(lines.len)) * step);
-        try d.ensure(h + 4);
+        if (!fits) try d.ensure(h + 4); // oversized block: flow + paginate, no panel
         const y0 = d.y;
-        try d.text(ML + 4, y0 + 9.5, r.label, 8.5, GREY, false, .left);
+        try d.text(lx, y0 + 9.5, r.label, 8.5, GREY, false, .left);
         var yy = y0;
         for (lines) |ln| {
             yy += step;
@@ -955,6 +974,8 @@ fn kvBlock(d: *Doc, title: ?[]const u8, rows: []const ExtractedField) !void {
         }
         d.y = y0 + h + 3;
     }
+    if (fits) d.y = y_start + panel_h;
+    d.y += 2;
 }
 
 // Extracted Data — what the audit actually READ off the page. Findings say what is
@@ -977,14 +998,14 @@ fn buildExtracted(d: *Doc) !void {
         try d.text(ML + 2, d.y + 8, "Structured data (schema.org JSON-LD)", 9.5, NAVY, true, .left);
         d.y += 14;
         for (ex.schemas) |sc| {
-            try d.ensure(22);
-            // type chip
+            try d.ensure(30);
+            // type chip, then its properties in a contained panel below
             const tw = textWidth(sc.type, 8.5, true) + 14;
             try d.rect(ML + 2, d.y, tw, 14, CYAN, null, 0);
             try d.text(ML + 9, d.y + 10, sc.type, 8.5, WHITE, true, .left);
-            d.y += 18;
+            d.y += 17;
             try kvBlock(d, null, sc.fields);
-            d.y += 4;
+            d.y += 5;
         }
     }
 
@@ -1080,7 +1101,7 @@ fn buildPagesAudited(d: *Doc) !void {
 
     try d.ensure(22);
     const hy = d.y + 10;
-    try d.text(ML + 2, hy, "PAGE", 8, GREY, true, .left);
+    try d.text(ML + 14, hy, "PAGE", 8, GREY, true, .left);
     try d.text(c_type, hy, "TYPE", 8, GREY, true, .left);
     try d.text(c_title, hy, "TITLE", 8, GREY, true, .center);
     try d.text(c_desc, hy, "DESC", 8, GREY, true, .center);
@@ -1115,12 +1136,19 @@ fn buildPagesAudited(d: *Doc) !void {
         } else 0;
 
         const base_h: f64 = @max(18.0, @as(f64, @floatFromInt(schema_lines.len)) * 10.5 + 7);
-        const h = base_h + @as(f64, @floatFromInt(note_lines)) * 10.5 + (if (note_lines > 0) @as(f64, 4) else 0);
-        try d.ensure(h);
+        const h = base_h + @as(f64, @floatFromInt(note_lines)) * 10.5 + (if (note_lines > 0) @as(f64, 6) else 0);
+        try d.ensure(h + 4);
         const y = d.y;
-        if (i % 2 == 1) try d.rect(ML, y, CW, h, CARD_BG, null, 0);
+        // Each page is a contained panel; the accent bar carries its health:
+        // red = missing title/description, amber = has notes, green = clean.
+        const bar = if (p.titleLength == 0 or p.metaDescriptionLength == 0)
+            RED
+        else if (p.notes.len > 1) AMBER else GREEN;
+        try d.rect(ML, y, CW, h, CARD_BG, null, 0);
+        try d.rect(ML, y, 3.5, h, bar, null, 0);
+        _ = i;
 
-        try d.text(ML + 3, y + 12, shortPath(d, p.url), 8.5, INK, false, .left);
+        try d.text(ML + 14, y + 12, shortPath(d, p.url), 8.5, INK, false, .left);
         try d.text(c_type, y + 12, p.pageType, 8, GREY, false, .left);
         try d.text(c_title, y + 12, d.f("{d}", .{p.titleLength}), 9, t_col, false, .center);
         try d.text(c_desc, y + 12, d.f("{d}", .{p.metaDescriptionLength}), 9, d_col, false, .center);
@@ -1134,12 +1162,13 @@ fn buildPagesAudited(d: *Doc) !void {
         // per-page notes, indented under the row
         var ny = y + base_h;
         for (p.notes) |nt| {
-            for (try wrap(d.a, nt, 8, CW - 26, false)) |ln| {
-                try d.text(ML + 14, ny + 6, ln, 8, AMBER, false, .left);
+            const note_col = if (std.mem.startsWith(u8, nt, "Schema:")) GREY else AMBER;
+            for (try wrap(d.a, nt, 8, CW - 40, false)) |ln| {
+                try d.text(ML + 24, ny + 6, ln, 8, note_col, false, .left);
                 ny += 10.5;
             }
         }
-        d.y = y + h;
+        d.y = y + h + 4; // gap between cards
     }
     d.y += 3;
     try d.rect(ML, d.y, CW, 0.8, RULE, null, 0);
@@ -1287,7 +1316,26 @@ fn buildBody(d: *Doc) !void {
 
     // 5. Prioritised fix list
     try d.section("Prioritised Fix List");
-    try d.para("Everything to address, ordered by severity.", 10, GREY, 8);
+    {
+        // Is there anything actionable at all? (info-level items are context, not fixes)
+        var actionable: usize = 0;
+        for (try allFindingsSorted(d.a, r, false)) |fnd| {
+            if (!std.mem.eql(u8, fnd.severity, "info")) actionable += 1;
+        }
+        if (actionable == 0) {
+            // Empty state — an audit that finds nothing should say so plainly.
+            try d.ensure(52);
+            const y0 = d.y + 2;
+            try d.rect(ML, y0, CW, 44, "#f0fdf4", null, 0); // faint green panel
+            try d.rect(ML, y0, 4, 44, GREEN, null, 0);
+            try d.text(ML + 16, y0 + 19, "Nothing to fix \u{2014} good work.", 11.5, GREEN, true, .left);
+            try d.text(ML + 16, y0 + 34, d.f("No critical issues or warnings were found across all {d} categories.", .{r.categories.len}), 9.5, GREY, false, .left);
+            d.y = y0 + 44;
+            d.gap(10);
+        } else {
+            try d.para("Everything to address, ordered by severity.", 10, GREY, 8);
+        }
+    }
     {
         const sorted = try allFindingsSorted(d.a, r, false);
         var n: usize = 1;
