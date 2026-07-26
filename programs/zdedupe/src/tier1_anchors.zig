@@ -122,10 +122,15 @@ test "read error propagates instead of hashing a partial prefix" {
     var scratch = try Scratch.init(allocator, "readerr");
     defer scratch.deinit();
 
-    // open() on a directory succeeds on both Darwin and Linux, but read()
-    // returns -1/EISDIR — the exact `n < 0` case that used to be treated as
-    // EOF. Two such paths previously hashed to BLAKE3("") and were therefore
-    // reported as duplicates of each other.
+    // Historical shape of the bug: open() on a directory succeeds, read()
+    // returns -1/EISDIR, and the old loop treated that as EOF — so two such
+    // paths hashed to BLAKE3("") and were reported as duplicates of each
+    // other. Since openRegularFile() gained the fstat S_ISREG guard, a
+    // directory is rejected as NotRegularFile before read() is ever
+    // attempted — an error strictly earlier than ReadFailed. The load-bearing
+    // assertion is unchanged: a pathological path must produce an error,
+    // never a digest. (The `n < 0` → ReadFailed branch remains in the read
+    // loop for genuine mid-read I/O errors on regular files.)
     try scratch.makeDir("dir_a");
     try scratch.makeDir("dir_b");
 
@@ -134,9 +139,9 @@ test "read error propagates instead of hashing a partial prefix" {
     const b = try scratch.join("dir_b");
     defer allocator.free(b);
 
-    try testing.expectError(error.ReadFailed, hasher.hashFileBlake3(a, null));
-    try testing.expectError(error.ReadFailed, hasher.hashFileSha256(a, null));
-    try testing.expectError(error.ReadFailed, hasher.hashFileBlake3(b, null));
+    try testing.expectError(error.NotRegularFile, hasher.hashFileBlake3(a, null));
+    try testing.expectError(error.NotRegularFile, hasher.hashFileSha256(a, null));
+    try testing.expectError(error.NotRegularFile, hasher.hashFileBlake3(b, null));
 
     // And explicitly: the failure is not the empty-input digest sneaking
     // through some other path.

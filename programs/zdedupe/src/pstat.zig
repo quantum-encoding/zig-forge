@@ -91,6 +91,8 @@ const STATX_NEEDED: u32 = STATX_TYPE | STATX_MODE | STATX_MTIME | STATX_INO | ST
 
 const AT_FDCWD: c_int = -100;
 const AT_SYMLINK_NOFOLLOW: c_int = 0x100;
+/// statx on the dirfd itself when path is "".
+const AT_EMPTY_PATH: c_int = 0x1000;
 /// Don't force a writeback sync — faster for read-only queries.
 const AT_STATX_DONT_SYNC: c_int = 0x4000;
 
@@ -142,6 +144,23 @@ pub fn stat(path: [*:0]const u8) Error!Stat {
     if (is_linux) return statxCall(path, 0);
     var st: std.c.Stat = undefined;
     if (std.c.fstatat(std.c.AT.FDCWD, path, &st, 0) != 0) return error.StatFailed;
+    return cStatTo(&st);
+}
+
+/// `fstat()` semantics: stat an already-open descriptor. Used to verify the
+/// file a hasher actually opened is a regular file — the walk-time type check
+/// cannot guarantee that, since the path can be replaced (e.g. by a FIFO)
+/// between walk and hash.
+pub fn fstat(fd: c_int) Error!Stat {
+    if (is_linux) {
+        var stx: Statx = undefined;
+        if (statx(fd, "", AT_EMPTY_PATH | AT_STATX_DONT_SYNC, STATX_NEEDED, &stx) != 0) {
+            return error.StatFailed;
+        }
+        return statxTo(&stx);
+    }
+    var st: std.c.Stat = undefined;
+    if (std.c.fstat(fd, &st) != 0) return error.StatFailed;
     return cStatTo(&st);
 }
 

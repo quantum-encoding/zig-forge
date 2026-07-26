@@ -9,6 +9,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const types = @import("types.zig");
+const pstat = @import("pstat.zig");
 const libc = std.c;
 
 const is_linux = builtin.os.tag == .linux;
@@ -56,17 +57,36 @@ pub const FileHasher = struct {
     }
 };
 
-/// Hash file using BLAKE3 (fastest, cryptographically secure)
-pub fn hashFileBlake3(path: []const u8, max_bytes: ?usize) !Hash {
-    // Use libc to open file
+/// Open `path` read-only and verify it is a regular file.
+///
+/// O_NONBLOCK makes open() on a FIFO return immediately instead of blocking
+/// until a writer appears — without it a scan that reaches a named pipe
+/// (steam.pipe, wine sockets, …) hangs the whole run forever. Regular-file
+/// reads are unaffected by the flag. The fstat guard then rejects anything
+/// that is not a regular file: a writerless FIFO opened with O_NONBLOCK
+/// reads as instant EOF, so without the guard every such special file would
+/// hash identically to an empty file and be reported as a "duplicate" —
+/// offering non-duplicates for deletion. The walk-time type check cannot
+/// replace this: the path can change type between walk and hash.
+fn openRegularFile(path: []const u8) !c_int {
     var path_buf: [4096]u8 = undefined;
     if (path.len >= path_buf.len) return error.PathTooLong;
     @memcpy(path_buf[0..path.len], path);
     path_buf[path.len] = 0;
     const path_z: [*:0]const u8 = @ptrCast(&path_buf);
 
-    const fd = libc.open(path_z, .{ .ACCMODE = .RDONLY }, @as(libc.mode_t, 0));
+    const fd = libc.open(path_z, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, @as(libc.mode_t, 0));
     if (fd < 0) return error.CannotOpenFile;
+    errdefer _ = libc.close(fd);
+
+    const st = pstat.fstat(fd) catch return error.CannotOpenFile;
+    if (!st.isFile()) return error.NotRegularFile;
+    return fd;
+}
+
+/// Hash file using BLAKE3 (fastest, cryptographically secure)
+pub fn hashFileBlake3(path: []const u8, max_bytes: ?usize) !Hash {
+    const fd = try openRegularFile(path);
     defer _ = libc.close(fd);
 
     var hasher = std.crypto.hash.Blake3.init(.{});
@@ -105,15 +125,7 @@ pub fn hashFileBlake3(path: []const u8, max_bytes: ?usize) !Hash {
 
 /// Hash file using SHA256
 pub fn hashFileSha256(path: []const u8, max_bytes: ?usize) !Hash {
-    // Use libc to open file
-    var path_buf: [4096]u8 = undefined;
-    if (path.len >= path_buf.len) return error.PathTooLong;
-    @memcpy(path_buf[0..path.len], path);
-    path_buf[path.len] = 0;
-    const path_z: [*:0]const u8 = @ptrCast(&path_buf);
-
-    const fd = libc.open(path_z, .{ .ACCMODE = .RDONLY }, @as(libc.mode_t, 0));
-    if (fd < 0) return error.CannotOpenFile;
+    const fd = try openRegularFile(path);
     defer _ = libc.close(fd);
 
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
@@ -362,4 +374,28 @@ test "hashToHex all ones" {
         "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
         hex,
     );
+}
+
+extern "c" fn mkfifo(path: [*:0]const u8, mode: std.c.mode_t) c_int;
+
+test "hashFile refuses non-regular files instead of hanging or hashing empty" {
+    // A FIFO is the dangerous case twice over: opened without O_NONBLOCK it
+    // blocks the worker forever (observed hanging a full $HOME scan on
+    // steam.pipe); opened with O_NONBLOCK but without the fstat guard it
+    // reads instant EOF, hashing identically to an empty file — and every
+    // special file in the scan becomes a false "duplicate" eligible for
+    // deletion. Both hash algorithms must reject it. This test completing at
+    // all proves the no-hang half; the expectError proves the no-false-dupe
+    // half (remove the isFile() guard and it goes red with a real digest).
+    const Scratch = @import("testing_scratch.zig").Scratch;
+    var scratch = try Scratch.init(std.testing.allocator, "hasher-fifo");
+    defer scratch.deinit();
+
+    const fifo_path = try scratch.joinZ("pipe.fifo");
+    defer std.testing.allocator.free(fifo_path);
+    if (mkfifo(fifo_path, 0o600) != 0) return error.SkipZigTest;
+
+    try std.testing.expectError(error.NotRegularFile, hashFileBlake3(fifo_path, null));
+    try std.testing.expectError(error.NotRegularFile, hashFileSha256(fifo_path, null));
+    try std.testing.expectError(error.NotRegularFile, hashFileBlake3(fifo_path, 4096));
 }
