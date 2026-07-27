@@ -956,8 +956,18 @@ fn handleCsi(term: *Terminal, seq: CsiSequence) void {
             term.saveCursor();
         },
         'u' => {
-            // DECRC or Restore Cursor
-            term.restoreCursor();
+            // DECRC / Restore Cursor — but ONLY the bare `CSI u`. Kitty
+            // keyboard-protocol pushes are u-finals with a private marker
+            // (`CSI > 1 u` push, `CSI < u` pop, `CSI ? u` query, `CSI = 1;1 u`
+            // set) — Claude Code sends ESC[>1u in its boot handshake, and
+            // dispatching that into restoreCursor teleported the cursor to a
+            // stale saved position. Same defect class as the 'm' case above;
+            // we don't implement the kitty protocol, so swallow those.
+            const is_private_u = seq.intermediate_count > 0 and switch (seq.intermediates[0]) {
+                '<', '=', '>', '?' => true,
+                else => false,
+            };
+            if (!is_private_u) term.restoreCursor();
         },
         'q' => {
             // DECSCUSR - cursor style (only with the space intermediate).
