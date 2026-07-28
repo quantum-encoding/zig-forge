@@ -88,6 +88,46 @@ pub const QrCodeMode = enum {
     crypto, // Cryptocurrency payment (BTC, ETH, etc.)
 };
 
+/// Fixed drawn labels for the invoice/quote template. Every field defaults to
+/// the classic English string so existing payloads render byte-identically;
+/// a `labels` object in the JSON overrides any subset for other languages
+/// (e.g. "Facturar a", "Descripción", "IVA"). The big title and the number
+/// label are handled by InvoiceData.custom_title / number_label instead.
+pub const Labels = struct {
+    // Invoice meta rows (right column)
+    date: []const u8 = "Date:",
+    due_date: []const u8 = "Due Date:",
+    // Party blocks — classic layout heading, and the rounded-card variants
+    bill_to: []const u8 = "Bill To:",
+    from_card: []const u8 = "FROM",
+    bill_to_card: []const u8 = "BILL TO",
+    // "VAT: <number>" identity lines (company + client)
+    vat_prefix: []const u8 = "VAT",
+    // Items-table column headers
+    description: []const u8 = "Description",
+    quantity: []const u8 = "Qty",
+    unit_price: []const u8 = "Unit Price",
+    line_total: []const u8 = "Total",
+    // Totals block
+    subtotal: []const u8 = "Subtotal:",
+    tax_prefix: []const u8 = "Tax", // rendered as "Tax (21%):"
+    total: []const u8 = "TOTAL:",
+    // Footer sections
+    notes: []const u8 = "Notes:",
+    payment_terms: []const u8 = "Payment Terms:",
+    click_to_pay: []const u8 = "Click to Pay Online",
+    // QR captions by mode (qr_label still overrides these when set)
+    scan_to_pay: []const u8 = "Scan to Pay",
+    bank_details: []const u8 = "Bank Details",
+    verify_invoice: []const u8 = "Verify Invoice",
+    // Footer strap-lines by QR mode
+    footer_scan_to_pay: []const u8 = "Scan QR to Pay Online",
+    footer_bank_details: []const u8 = "Bank Transfer Details Above",
+    footer_verify: []const u8 = "Scan to Verify Invoice",
+    footer_verifactu: []const u8 = "VeriFactu Compliant Invoice",
+    thank_you: []const u8 = "Thank you for your business",
+};
+
 pub const InvoiceData = struct {
     // Document type
     document_type: []const u8 = "invoice", // "invoice" or "quote"
@@ -134,6 +174,10 @@ pub const InvoiceData = struct {
     // (yet) VAT-registered, where breaking out a "Tax (0%)" line is misleading.
     // Defaults true so every existing invoice consumer is unchanged.
     show_tax: bool = true,
+
+    // Fixed drawn labels (language-neutral rendering). Defaults are the
+    // classic English strings, so omitting `labels` changes nothing.
+    labels: Labels = .{},
 
     // Optional
     qr_base64: ?[]const u8 = null, // QR code image (base64 PNG)
@@ -485,10 +529,10 @@ pub const InvoiceRenderer = struct {
         const col_qty = self.margin_left + 280;
         const col_price = self.margin_left + 350;
         const col_total = self.margin_left + 450;
-        try content.drawText("Description", col_desc, self.current_y, self.font_bold, 10, header_text_color);
-        try content.drawText("Qty", col_qty, self.current_y, self.font_bold, 10, header_text_color);
-        try content.drawText("Unit Price", col_price, self.current_y, self.font_bold, 10, header_text_color);
-        try content.drawText("Total", col_total, self.current_y, self.font_bold, 10, header_text_color);
+        try content.drawText(self.data.labels.description, col_desc, self.current_y, self.font_bold, 10, header_text_color);
+        try content.drawText(self.data.labels.quantity, col_qty, self.current_y, self.font_bold, 10, header_text_color);
+        try content.drawText(self.data.labels.unit_price, col_price, self.current_y, self.font_bold, 10, header_text_color);
+        try content.drawText(self.data.labels.line_total, col_total, self.current_y, self.font_bold, 10, header_text_color);
         if (table_style == .minimal and !self.roundedLayout()) {
             try content.drawLine(self.margin_left, self.current_y - 6, self.margin_left + usable_width, self.current_y - 6, secondary, 0.75);
         }
@@ -764,8 +808,8 @@ pub const InvoiceRenderer = struct {
 
         // Company VAT
         if (!self.roundedLayout() and self.data.company_vat.len > 0) {
-            var vat_buf: [64]u8 = undefined;
-            const vat_line = std.fmt.bufPrint(&vat_buf, "VAT: {s}", .{self.data.company_vat}) catch self.data.company_vat;
+            var vat_buf: [128]u8 = undefined;
+            const vat_line = std.fmt.bufPrint(&vat_buf, "{s}: {s}", .{ self.data.labels.vat_prefix, self.data.company_vat }) catch self.data.company_vat;
             try content.drawText(vat_line, self.margin_left, self.current_y, self.font_regular, 10, document.Color.black);
             self.current_y -= 18;
         }
@@ -792,13 +836,13 @@ pub const InvoiceRenderer = struct {
         details_y -= 15;
 
         // Date
-        try content.drawText("Date:", details_x, details_y, self.font_bold, 10, document.Color.black);
+        try content.drawText(self.data.labels.date, details_x, details_y, self.font_bold, 10, document.Color.black);
         try self.drawRightFit(&content, self.data.invoice_date, details_right, meta_value_width, details_y, self.font_regular, reg, 10, document.Color.black);
         details_y -= 15;
 
         // Due date
         if (self.data.due_date.len > 0) {
-            try content.drawText("Due Date:", details_x, details_y, self.font_bold, 10, document.Color.black);
+            try content.drawText(self.data.labels.due_date, details_x, details_y, self.font_bold, 10, document.Color.black);
             try self.drawRightFit(&content, self.data.due_date, details_right, meta_value_width, details_y, self.font_regular, reg, 10, document.Color.black);
         }
 
@@ -860,7 +904,7 @@ pub const InvoiceRenderer = struct {
             // the extra 4pt under the label keeps them reading as two rows
             // rather than a cramped lockup (field report).
             var fy = card_top - pad - 6;
-            try content.drawText("FROM", from_x + pad, fy, self.font_bold, 8, muted);
+            try content.drawText(self.data.labels.from_card, from_x + pad, fy, self.font_bold, 8, muted);
             fy -= 19;
             try content.drawText(self.data.company_name, from_x + pad, fy, self.font_bold, 10, document.Color.black);
             fy -= 13;
@@ -872,14 +916,14 @@ pub const InvoiceRenderer = struct {
                 }
             }
             if (self.data.company_vat.len > 0) {
-                var vat_buf: [64]u8 = undefined;
-                const vat_line = std.fmt.bufPrint(&vat_buf, "VAT: {s}", .{self.data.company_vat}) catch self.data.company_vat;
+                var vat_buf: [128]u8 = undefined;
+                const vat_line = std.fmt.bufPrint(&vat_buf, "{s}: {s}", .{ self.data.labels.vat_prefix, self.data.company_vat }) catch self.data.company_vat;
                 try content.drawText(vat_line, from_x + pad, fy, self.font_regular, 9, muted);
             }
 
             // Bill To card content
             var ty = card_top - pad - 6;
-            try content.drawText("BILL TO", to_x + pad, ty, self.font_bold, 8, primary);
+            try content.drawText(self.data.labels.bill_to_card, to_x + pad, ty, self.font_bold, 8, primary);
             ty -= 19;
             try content.drawText(self.data.client_name, to_x + pad, ty, self.font_bold, 10, document.Color.black);
             ty -= 13;
@@ -891,8 +935,8 @@ pub const InvoiceRenderer = struct {
                 }
             }
             if (self.data.client_vat.len > 0) {
-                var cvat_buf: [64]u8 = undefined;
-                const cvat_line = std.fmt.bufPrint(&cvat_buf, "VAT: {s}", .{self.data.client_vat}) catch self.data.client_vat;
+                var cvat_buf: [128]u8 = undefined;
+                const cvat_line = std.fmt.bufPrint(&cvat_buf, "{s}: {s}", .{ self.data.labels.vat_prefix, self.data.client_vat }) catch self.data.client_vat;
                 try content.drawText(cvat_line, to_x + pad, ty, self.font_regular, 9, muted);
             }
 
@@ -901,7 +945,7 @@ pub const InvoiceRenderer = struct {
             self.current_y -= 30;
 
             // "Bill To" header
-            try content.drawText("Bill To:", self.margin_left, self.current_y, self.font_bold, 12, primary);
+            try content.drawText(self.data.labels.bill_to, self.margin_left, self.current_y, self.font_bold, 12, primary);
             self.current_y -= 18;
 
             // Client name
@@ -919,8 +963,8 @@ pub const InvoiceRenderer = struct {
 
             // Client VAT
             if (self.data.client_vat.len > 0) {
-                var cvat_buf: [64]u8 = undefined;
-                const cvat_line = std.fmt.bufPrint(&cvat_buf, "VAT: {s}", .{self.data.client_vat}) catch self.data.client_vat;
+                var cvat_buf: [128]u8 = undefined;
+                const cvat_line = std.fmt.bufPrint(&cvat_buf, "{s}: {s}", .{ self.data.labels.vat_prefix, self.data.client_vat }) catch self.data.client_vat;
                 try content.drawText(cvat_line, self.margin_left, self.current_y, self.font_regular, 10, document.Color.black);
                 self.current_y -= 18;
             }
@@ -1069,16 +1113,16 @@ pub const InvoiceRenderer = struct {
         // "Tax (0%)" line would be misleading); only the TOTAL bar is rendered.
         if (self.data.show_tax) {
             // Subtotal
-            try content.drawText("Subtotal:", col_price, self.current_y, self.font_regular, 10, document.Color.black);
+            try content.drawText(self.data.labels.subtotal, col_price, self.current_y, self.font_regular, 10, document.Color.black);
             var subtotal_buf: [24]u8 = undefined;
             const subtotal_str = std.fmt.bufPrint(&subtotal_buf, "{s}{d:.2}", .{ self.data.currency_symbol, self.data.subtotal }) catch "0.00";
             try self.drawRightFit(&content, subtotal_str, amt_right, amt_width, self.current_y, self.font_regular, reg_t, 10, document.Color.black);
             self.current_y -= 16;
 
             // Tax
-            var tax_label_buf: [32]u8 = undefined;
+            var tax_label_buf: [64]u8 = undefined;
             const tax_pct = self.data.tax_rate * 100;
-            const tax_label = std.fmt.bufPrint(&tax_label_buf, "Tax ({d:.0}%):", .{tax_pct}) catch "Tax:";
+            const tax_label = std.fmt.bufPrint(&tax_label_buf, "{s} ({d:.0}%):", .{ self.data.labels.tax_prefix, tax_pct }) catch self.data.labels.tax_prefix;
             try content.drawText(tax_label, col_price, self.current_y, self.font_regular, 10, document.Color.black);
             var tax_buf: [24]u8 = undefined;
             const tax_str = std.fmt.bufPrint(&tax_buf, "{s}{d:.2}", .{ self.data.currency_symbol, self.data.tax_amount }) catch "0.00";
@@ -1120,7 +1164,7 @@ pub const InvoiceRenderer = struct {
         }
         // Faded glass chip needs dark ink; solid chips keep white.
         const total_text_color = if (self.data.theme == .glass) secondary else document.Color.white;
-        try content.drawText("TOTAL:", col_price, self.current_y, self.font_bold, 12, total_text_color);
+        try content.drawText(self.data.labels.total, col_price, self.current_y, self.font_bold, 12, total_text_color);
         var grand_total_buf: [24]u8 = undefined;
         const grand_total_str = std.fmt.bufPrint(&grand_total_buf, "{s}{d:.2}", .{ self.data.currency_symbol, self.data.total }) catch "0.00";
         try self.drawRightFit(&content, grand_total_str, table_right_edge - 10, (table_right_edge - 10) - (col_price + 64), self.current_y, self.font_bold, self.fontEnumBold(), 12, total_text_color);
@@ -1135,7 +1179,7 @@ pub const InvoiceRenderer = struct {
         const notes_max_width = usable_width - 10; // Full width minus small padding
 
         if (self.data.notes.len > 0) {
-            try content.drawText("Notes:", self.margin_left, self.current_y, self.font_bold, 10, secondary);
+            try content.drawText(self.data.labels.notes, self.margin_left, self.current_y, self.font_bold, 10, secondary);
             self.current_y -= 14;
 
             // Wrap notes text
@@ -1151,7 +1195,7 @@ pub const InvoiceRenderer = struct {
 
         // Payment terms (full width with text wrapping)
         if (self.data.payment_terms.len > 0) {
-            try content.drawText("Payment Terms:", self.margin_left, self.current_y, self.font_bold, 10, secondary);
+            try content.drawText(self.data.labels.payment_terms, self.margin_left, self.current_y, self.font_bold, 10, secondary);
             self.current_y -= 14;
 
             // Wrap payment terms text
@@ -1269,17 +1313,17 @@ pub const InvoiceRenderer = struct {
             const qr_label: []const u8 = if (self.data.qr_label) |custom_label|
                 if (custom_label.len > 0) custom_label else switch (effective_qr_mode) {
                     .verifactu => "VeriFactu",
-                    .payment_link => "Scan to Pay",
-                    .bank_details => "Bank Details",
-                    .verification => "Verify Invoice",
+                    .payment_link => self.data.labels.scan_to_pay,
+                    .bank_details => self.data.labels.bank_details,
+                    .verification => self.data.labels.verify_invoice,
                     .crypto => "Crypto Payment",
                     .none => "",
                 }
             else switch (effective_qr_mode) {
                 .verifactu => "VeriFactu",
-                .payment_link => "Scan to Pay",
-                .bank_details => "Bank Details",
-                .verification => "Verify Invoice",
+                .payment_link => self.data.labels.scan_to_pay,
+                .bank_details => self.data.labels.bank_details,
+                .verification => self.data.labels.verify_invoice,
                 .crypto => "Crypto Payment",
                 .none => "",
             };
@@ -1328,7 +1372,7 @@ pub const InvoiceRenderer = struct {
 
             // "Click to Pay" hint below a single button.
             if (pay_btns.len == 1) {
-                const label_text = "Click to Pay Online";
+                const label_text = self.data.labels.click_to_pay;
                 const lbl_width: f32 = @as(f32, @floatFromInt(label_text.len)) * 4.0;
                 const lbl_x = btn_x + (btn_width - lbl_width) / 2;
                 try content.drawText(label_text, lbl_x, btn_y + gap - 12, self.font_regular, 8, secondary);
@@ -1343,10 +1387,10 @@ pub const InvoiceRenderer = struct {
         // Footer text - varies by QR mode
         if (qr_id != null) {
             const footer_label: []const u8 = switch (effective_qr_mode) {
-                .verifactu => "VeriFactu Compliant Invoice",
-                .payment_link => "Scan QR to Pay Online",
-                .bank_details => "Bank Transfer Details Above",
-                .verification => "Scan to Verify Invoice",
+                .verifactu => self.data.labels.footer_verifactu,
+                .payment_link => self.data.labels.footer_scan_to_pay,
+                .bank_details => self.data.labels.footer_bank_details,
+                .verification => self.data.labels.footer_verify,
                 .crypto => "Cryptocurrency Payment Accepted",
                 .none => "",
             };
@@ -1385,9 +1429,9 @@ pub const InvoiceRenderer = struct {
                 }
             }
 
-            try content.drawText("Thank you for your business", self.page_width - self.margin_right - 130, self.margin_bottom - 25, self.font_regular, 9, secondary);
+            try content.drawText(self.data.labels.thank_you, self.page_width - self.margin_right - 130, self.margin_bottom - 25, self.font_regular, 9, secondary);
         } else {
-            try content.drawText("Thank you for your business", self.page_width / 2 - 60, self.margin_bottom - 25, self.font_regular, 9, secondary);
+            try content.drawText(self.data.labels.thank_you, self.page_width / 2 - 60, self.margin_bottom - 25, self.font_regular, 9, secondary);
         }
 
         // Branding footer with clickable link

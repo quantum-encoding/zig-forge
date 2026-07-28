@@ -94,6 +94,23 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
     data.font_family = try dupeJsonString(allocator, obj, "font_family") orelse try allocator.dupe(u8, "Helvetica");
     data.currency_symbol = try dupeJsonString(allocator, obj, "currency_symbol") orelse try allocator.dupe(u8, "");
 
+    // Fixed drawn labels — optional "labels" object, each field falling back
+    // to its English default. Every field is always heap-allocated (defaults
+    // included) so freeInvoiceData can free them uniformly.
+    {
+        const labels_obj: ?std.json.ObjectMap = if (obj.get("labels")) |lv|
+            (if (lv == .object) lv.object else null)
+        else
+            null;
+        inline for (@typeInfo(invoice.Labels).@"struct".fields) |f| {
+            const default_val = @field(data.labels, f.name);
+            @field(data.labels, f.name) = if (labels_obj) |lo|
+                try dupeJsonString(allocator, lo, f.name) orelse try allocator.dupe(u8, default_val)
+            else
+                try allocator.dupe(u8, default_val);
+        }
+    }
+
     // Encryption passwords (the binary `seed` is set programmatically, not via
     // JSON — never carry key/seed bytes in the document JSON).
     data.password = try dupeJsonString(allocator, obj, "password") orelse try allocator.dupe(u8, "");
@@ -399,6 +416,10 @@ pub fn freeInvoiceData(allocator: std.mem.Allocator, data: *const invoice.Invoic
     if (data.company_name_color.len > 0) allocator.free(data.company_name_color);
     if (data.font_family.len > 0) allocator.free(data.font_family);
     if (data.currency_symbol.len > 0) allocator.free(data.currency_symbol);
+    inline for (@typeInfo(invoice.Labels).@"struct".fields) |f| {
+        const s = @field(data.labels, f.name);
+        if (s.len > 0) allocator.free(s);
+    }
     if (data.password.len > 0) allocator.free(data.password);
     if (data.owner_password.len > 0) allocator.free(data.owner_password);
 

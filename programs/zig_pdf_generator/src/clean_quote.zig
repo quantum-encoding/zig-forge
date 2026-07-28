@@ -38,6 +38,7 @@ pub const TableItem = proposal.TableItem;
 pub const FooterInfo = proposal.FooterInfo;
 pub const ProposalSection = proposal.ProposalSection;
 pub const ProposalData = proposal.ProposalData;
+pub const QuoteLabels = proposal.QuoteLabels;
 
 // =============================================================================
 // Colour Palette
@@ -55,32 +56,28 @@ const WHITE = document.Color{ .r = 1.0, .g = 1.0, .b = 1.0 };
 // Document Type Derivation
 // =============================================================================
 
-/// Map reference prefix to document type word.
-///   QTE-... → "QUOTE"
-///   INV-... → "INVOICE"
-///   HND-... → "HANDOVER"
-///   INS-... → "INSPECTION"
-///   anything else → "QUOTE"
-fn deriveDocTypeWord(reference: []const u8) []const u8 {
+/// Map reference prefix to document type word (labels default to English:
+/// QTE→QUOTE, INV→INVOICE, HND→HANDOVER, INS→INSPECTION, else QUOTE).
+fn deriveDocTypeWord(labels: QuoteLabels, reference: []const u8) []const u8 {
     if (reference.len >= 3) {
         const p = reference[0..3];
-        if (std.ascii.eqlIgnoreCase(p, "QTE")) return "QUOTE";
-        if (std.ascii.eqlIgnoreCase(p, "INV")) return "INVOICE";
-        if (std.ascii.eqlIgnoreCase(p, "HND")) return "HANDOVER";
-        if (std.ascii.eqlIgnoreCase(p, "INS")) return "INSPECTION";
+        if (std.ascii.eqlIgnoreCase(p, "QTE")) return labels.doc_type_quote;
+        if (std.ascii.eqlIgnoreCase(p, "INV")) return labels.doc_type_invoice;
+        if (std.ascii.eqlIgnoreCase(p, "HND")) return labels.doc_type_handover;
+        if (std.ascii.eqlIgnoreCase(p, "INS")) return labels.doc_type_inspection;
     }
-    return "QUOTE";
+    return labels.doc_type_quote;
 }
 
 /// Default QR caption based on document type. Used when dashboard_text isn't set.
-fn deriveQrCaption(reference: []const u8) []const u8 {
+fn deriveQrCaption(labels: QuoteLabels, reference: []const u8) []const u8 {
     if (reference.len >= 3) {
         const p = reference[0..3];
-        if (std.ascii.eqlIgnoreCase(p, "INV")) return "Scan to pay";
-        if (std.ascii.eqlIgnoreCase(p, "HND")) return "Scan for details";
-        if (std.ascii.eqlIgnoreCase(p, "INS")) return "Scan for report";
+        if (std.ascii.eqlIgnoreCase(p, "INV")) return labels.scan_to_pay;
+        if (std.ascii.eqlIgnoreCase(p, "HND")) return labels.scan_for_details;
+        if (std.ascii.eqlIgnoreCase(p, "INS")) return labels.scan_for_report;
     }
-    return "Scan to view";
+    return labels.scan_to_view;
 }
 
 // =============================================================================
@@ -228,7 +225,7 @@ pub const CleanQuoteRenderer = struct {
         }
 
         // Company name — bold black, 18pt
-        const company = if (self.data.company_name.len > 0) self.data.company_name else "COMPANY";
+        const company = if (self.data.company_name.len > 0) self.data.company_name else self.data.labels.company_fallback;
         try self.drawTextConverted(content, company, text_x, left_y, self.font_bold, 18, INK_BLACK);
         left_y -= 16;
 
@@ -263,7 +260,7 @@ pub const CleanQuoteRenderer = struct {
         if (self.logo_id != null) left_y = @min(left_y, top_y - self.logo_h);
 
         // ── Right block: document type word + reference ──────────
-        const doc_type = deriveDocTypeWord(self.data.reference);
+        const doc_type = deriveDocTypeWord(self.data.labels, self.data.reference);
         const doc_type_size: f32 = 28;
         const doc_type_width = document.Font.helvetica_bold.measureText(doc_type, doc_type_size);
         try self.drawTextConverted(content, doc_type, right_x - doc_type_width, top_y - 20, self.font_bold, doc_type_size, self.title_color);
@@ -289,7 +286,7 @@ pub const CleanQuoteRenderer = struct {
         const top_y = self.current_y;
 
         // Left: PREPARED FOR
-        try self.drawUppercaseLabel(content, "PREPARED FOR", self.margin_left, top_y);
+        try self.drawUppercaseLabel(content, self.data.labels.prepared_for, self.margin_left, top_y);
         if (self.data.client_name.len > 0) {
             try self.drawTextConverted(content, self.data.client_name, self.margin_left, top_y - 16, self.font_bold, 13, INK_BLACK);
         }
@@ -305,11 +302,11 @@ pub const CleanQuoteRenderer = struct {
 
         // Right: DATE + VALID UNTIL
         if (self.data.date.len > 0) {
-            try self.drawUppercaseLabel(content, "DATE", col_right_x, top_y);
+            try self.drawUppercaseLabel(content, self.data.labels.date, col_right_x, top_y);
             try self.drawTextConverted(content, self.data.date, col_right_x, top_y - 16, self.font_regular, 11, INK_BLACK);
         }
         if (self.data.valid_until.len > 0) {
-            try self.drawUppercaseLabel(content, "VALID UNTIL", col_right_x + 140, top_y);
+            try self.drawUppercaseLabel(content, self.data.labels.valid_until, col_right_x + 140, top_y);
             try self.drawTextConverted(content, self.data.valid_until, col_right_x + 140, top_y - 16, self.font_regular, 11, INK_BLACK);
         }
 
@@ -337,7 +334,7 @@ pub const CleanQuoteRenderer = struct {
         const caption_raw = if (self.data.footer.dashboard_text.len > 0)
             self.data.footer.dashboard_text
         else
-            deriveQrCaption(self.data.reference);
+            deriveQrCaption(self.data.labels, self.data.reference);
 
         // Right-align QR to the content right margin
         const qr_x = self.page_width - self.margin_right - qr_size_pt;
@@ -420,7 +417,7 @@ pub const CleanQuoteRenderer = struct {
 
         if (is_whats_included) {
             // WHAT'S INCLUDED — tiny uppercase grey label, bullets with red dots
-            try self.drawUppercaseLabel(content, "WHAT'S INCLUDED", self.margin_left, self.current_y);
+            try self.drawUppercaseLabel(content, self.data.labels.whats_included, self.margin_left, self.current_y);
             self.current_y -= 18;
             try self.drawBulletList(content, section.content);
         } else if (is_next_steps) {
@@ -576,9 +573,9 @@ pub const CleanQuoteRenderer = struct {
         // Column header — bold text with grey underline
         const desc_x = self.margin_left;
         const amount_x = self.page_width - self.margin_right;
-        try self.drawTextConverted(content, "Description", desc_x, self.current_y, self.font_bold, 10, INK_BLACK);
-        const amt_hdr_width = document.Font.helvetica_bold.measureText("Amount", 10);
-        try self.drawTextConverted(content, "Amount", amount_x - amt_hdr_width, self.current_y, self.font_bold, 10, INK_BLACK);
+        try self.drawTextConverted(content, self.data.labels.description, desc_x, self.current_y, self.font_bold, 10, INK_BLACK);
+        const amt_hdr_width = document.Font.helvetica_bold.measureText(self.data.labels.amount, 10);
+        try self.drawTextConverted(content, self.data.labels.amount, amount_x - amt_hdr_width, self.current_y, self.font_bold, 10, INK_BLACK);
         self.current_y -= 6;
         try content.drawLine(desc_x, self.current_y, amount_x, self.current_y, BORDER_GREY, 0.5);
         self.current_y -= 12;
@@ -615,7 +612,7 @@ pub const CleanQuoteRenderer = struct {
         const label_x = self.page_width - self.margin_right - 160;
 
         if (section.subtotal > 0 or section.tax_rate > 0) {
-            try self.drawTextConverted(content, "Subtotal", label_x, self.current_y, self.font_regular, 11, MUTED_GREY);
+            try self.drawTextConverted(content, self.data.labels.subtotal, label_x, self.current_y, self.font_regular, 11, MUTED_GREY);
             var sub_buf: [32]u8 = undefined;
             const sub_str = try std.fmt.bufPrint(&sub_buf, "\u{00A3}{d:.2}", .{section.subtotal});
             const sub_w = document.Font.helvetica.measureText(sub_str, 11);
@@ -623,9 +620,9 @@ pub const CleanQuoteRenderer = struct {
             self.current_y -= 16;
 
             if (section.tax_rate > 0) {
-                var vat_lbl_buf: [32]u8 = undefined;
+                var vat_lbl_buf: [64]u8 = undefined;
                 const vat_pct = section.tax_rate * 100.0;
-                const vat_lbl = try std.fmt.bufPrint(&vat_lbl_buf, "VAT ({d:.0}%)", .{vat_pct});
+                const vat_lbl = std.fmt.bufPrint(&vat_lbl_buf, "{s} ({d:.0}%)", .{ self.data.labels.vat_prefix, vat_pct }) catch self.data.labels.vat_prefix;
                 try self.drawTextConverted(content, vat_lbl, label_x, self.current_y, self.font_regular, 11, MUTED_GREY);
                 const vat_amount = section.subtotal * section.tax_rate;
                 var vat_buf: [32]u8 = undefined;
@@ -641,7 +638,7 @@ pub const CleanQuoteRenderer = struct {
         }
 
         if (section.total > 0) {
-            try self.drawTextConverted(content, "Total", label_x, self.current_y, self.font_bold, 12, INK_BLACK);
+            try self.drawTextConverted(content, self.data.labels.total, label_x, self.current_y, self.font_bold, 12, INK_BLACK);
             var tot_buf: [32]u8 = undefined;
             const tot_str = try std.fmt.bufPrint(&tot_buf, "\u{00A3}{d:.2}", .{section.total});
             const tot_w = document.Font.helvetica_bold.measureText(tot_str, 12);
@@ -818,6 +815,18 @@ fn parseProposalJsonLocal(allocator: std.mem.Allocator, json_str: []const u8) !P
     }
     if (root.get("title_color")) |v| {
         if (v == .string) data.title_color = try allocator.dupe(u8, v.string);
+    }
+
+    // Fixed drawn labels — optional "labels" object; any field present
+    // overrides its English default (arena-allocated, freed with the arena).
+    if (root.get("labels")) |lv| {
+        if (lv == .object) {
+            inline for (@typeInfo(QuoteLabels).@"struct".fields) |f| {
+                if (lv.object.get(f.name)) |v| {
+                    if (v == .string) @field(data.labels, f.name) = try allocator.dupe(u8, v.string);
+                }
+            }
+        }
     }
 
     // Footer

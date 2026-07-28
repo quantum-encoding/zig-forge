@@ -154,6 +154,38 @@ pub const ProposalSection = struct {
     chart_spec: ?ChartSpec = null,
 };
 
+/// Fixed drawn labels for the minimalist (clean-quote) template. Every field
+/// defaults to the current English string so existing payloads render
+/// byte-identically; a `labels` object in the JSON overrides any subset for
+/// other languages (e.g. "FACTURA", "Descripción", "IVA"). Defined here
+/// because clean_quote.zig shares this data struct and imports this module.
+pub const QuoteLabels = struct {
+    // Header document-type words, keyed off the reference prefix
+    doc_type_quote: []const u8 = "QUOTE", // QTE- / default
+    doc_type_invoice: []const u8 = "INVOICE", // INV-
+    doc_type_handover: []const u8 = "HANDOVER", // HND-
+    doc_type_inspection: []const u8 = "INSPECTION", // INS-
+    // Header fallback when company_name is empty
+    company_fallback: []const u8 = "COMPANY",
+    // Prepared-for / dates block
+    prepared_for: []const u8 = "PREPARED FOR",
+    date: []const u8 = "DATE",
+    valid_until: []const u8 = "VALID UNTIL",
+    // Special-cased section label
+    whats_included: []const u8 = "WHAT'S INCLUDED",
+    // Pricing table
+    description: []const u8 = "Description",
+    amount: []const u8 = "Amount",
+    subtotal: []const u8 = "Subtotal",
+    vat_prefix: []const u8 = "VAT", // rendered as "VAT (20%)"
+    total: []const u8 = "Total",
+    // QR captions, keyed off the reference prefix (dashboard_text overrides)
+    scan_to_pay: []const u8 = "Scan to pay", // INV-
+    scan_for_details: []const u8 = "Scan for details", // HND-
+    scan_for_report: []const u8 = "Scan for report", // INS-
+    scan_to_view: []const u8 = "Scan to view", // default
+};
+
 pub const ProposalData = struct {
     company_name: []const u8 = "",
     company_address: []const u8 = "",
@@ -171,6 +203,9 @@ pub const ProposalData = struct {
     /// Base64-encoded property image (e.g. from solar API satellite view)
     property_image_base64: ?[]const u8 = null,
     crypto_payment: ?types.CryptoPaymentBlock = null,
+    /// Fixed drawn labels — consumed by the clean-quote template; the
+    /// brand-heavy proposal template keeps its own wording.
+    labels: QuoteLabels = .{},
 };
 
 // =============================================================================
