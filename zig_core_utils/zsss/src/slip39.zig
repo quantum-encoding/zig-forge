@@ -25,6 +25,10 @@
 //!     written in the clear in the mnemonic), and the digest comparison, which
 //!     uses a constant-time compare but whose *outcome* is necessarily
 //!     observable as an error.
+//!   * The GF(256) claim is about the source: it has no secret-dependent
+//!     branches or indices to begin with. It has NOT been verified against the
+//!     emitted machine code, so an optimiser is still trusted not to introduce
+//!     a branch. Verifying the disassembly per target remains open work.
 //!   * Secret material (master secret, EMS, group shares, round-function
 //!     output, PBKDF2 password/salt scratch) is zeroized with
 //!     `std.crypto.secureZero` before being freed.
