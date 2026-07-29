@@ -59,6 +59,15 @@ ticks_total=$(git log --format=%s "${base}..HEAD" 2>/dev/null | grep -cE '^\[CHR
 
 if [ "${ticks_total:-0}" -eq 0 ]; then
   echo "chronos-push: no ticks to fold"
+  # A -m with no ticks has nowhere to go: the summary commit it would have titled
+  # does not exist. Silently dropping it loses a message someone wrote on purpose,
+  # so say so and name the fix.
+  if [ -n "$msg_override" ]; then
+    echo "chronos-push: WARNING — your -m message was NOT used. With no ticks to fold" >&2
+    echo "               there is no summary commit to title; HEAD keeps its own message." >&2
+    echo "               To use it: git commit --amend -m \"…\" before pushing, or commit" >&2
+    echo "               with the real message in the first place." >&2
+  fi
 else
   # No merges in the range — the cumulative-tree reasoning assumes linear history.
   if [ -n "$(git rev-list --merges "${base}..HEAD" 2>/dev/null)" ]; then
