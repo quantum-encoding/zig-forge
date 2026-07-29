@@ -27,6 +27,17 @@ TEMP_DIR="/tmp/zsss_tests_$$"
 TESTS_RUN=0
 TESTS_PASSED=0
 TESTS_FAILED=0
+TESTS_SKIPPED=0
+
+# The steganography and ticket suites need a directory of sample PNGs, which is
+# only present on the Linux box. Set when it is missing so those sections are
+# skipped rather than aborting the whole run.
+SKIP_IMAGE_TESTS=false
+
+# python-shamir-mnemonic, the SLIP-0039 reference implementation, drives the
+# cross-implementation round-trip. Set when it is not importable.
+SKIP_INTEROP_TESTS=false
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 # Options
 VERBOSE=false
@@ -74,6 +85,14 @@ fail() {
     fi
 }
 
+skip() {
+    ((TESTS_SKIPPED++))
+    echo -e "${YELLOW}[SKIP]${NC} $1"
+    if [ -n "$2" ]; then
+        echo -e "${YELLOW}       Reason: $2${NC}"
+    fi
+}
+
 cleanup() {
     if ! $KEEP_TEMP && [ -d "$TEMP_DIR" ]; then
         rm -rf "$TEMP_DIR"
@@ -110,14 +129,20 @@ setup() {
     TEST_IMAGE_3=$(find "$TEST_IMAGES_DIR" -name "*.png" | head -3 | tail -1)
 
     if [ -z "$TEST_IMAGE_1" ]; then
-        echo -e "${RED}No test images found in $TEST_IMAGES_DIR${NC}"
-        exit 1
+        SKIP_IMAGE_TESTS=true
+        echo -e "${YELLOW}No test images in $TEST_IMAGES_DIR - steganography and ticket tests will be skipped${NC}"
+    else
+        log_verbose "Using test images:"
+        log_verbose "  1: $TEST_IMAGE_1"
+        log_verbose "  2: $TEST_IMAGE_2"
+        log_verbose "  3: $TEST_IMAGE_3"
     fi
 
-    log_verbose "Using test images:"
-    log_verbose "  1: $TEST_IMAGE_1"
-    log_verbose "  2: $TEST_IMAGE_2"
-    log_verbose "  3: $TEST_IMAGE_3"
+    if ! "$PYTHON_BIN" -c "import shamir_mnemonic" 2>/dev/null; then
+        SKIP_INTEROP_TESTS=true
+        echo -e "${YELLOW}python-shamir-mnemonic not importable by $PYTHON_BIN - SLIP-39 interop will be skipped${NC}"
+        echo -e "${YELLOW}  install with: pip install shamir-mnemonic  (or set PYTHON_BIN to a venv python)${NC}"
+    fi
 
     echo ""
 }
@@ -230,6 +255,234 @@ test_sss_large_secret() {
         pass "$test_name"
     else
         fail "$test_name" "Recovered data doesn't match"
+    fi
+}
+
+# =============================================================================
+# SLIP-0039 Tests
+# =============================================================================
+#
+# The mnemonic path is a different scheme from the binary shares above: the
+# master secret is Feistel-encrypted under the passphrase before splitting, so
+# these tests exercise the whole encrypt/split/encode/decode/recover pipeline.
+
+# A 32-byte master secret (256-bit, an even byte length, as SLIP-39 requires).
+slip39_make_secret() {
+    head -c 32 /dev/urandom > "$1"
+}
+
+test_slip39_single_group_roundtrip() {
+    ((TESTS_RUN++))
+    local test_name="SLIP-39: 3-of-5 single group round-trip with passphrase"
+
+    local secret_file="$TEMP_DIR/slip39_secret.bin"
+    local shares_dir="$TEMP_DIR/slip39_3of5"
+    local recovered="$TEMP_DIR/slip39_recovered.bin"
+    slip39_make_secret "$secret_file"
+    mkdir -p "$shares_dir"
+
+    if ! $ZSSS split --slip39 -t 3 -n 5 -i "$secret_file" -o "$shares_dir" \
+            --passphrase "TREZOR" >/dev/null 2>&1; then
+        fail "$test_name" "Split failed"
+        return
+    fi
+
+    local count=$(ls "$shares_dir"/*.slip39 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$count" != "5" ]; then
+        fail "$test_name" "Expected 5 mnemonic files, got $count"
+        return
+    fi
+
+    # Every share must be 20 or 33 words (128-bit / 256-bit security).
+    for share in "$shares_dir"/*.slip39; do
+        local words=$(wc -w < "$share" | tr -d ' ')
+        if [ "$words" != "33" ]; then
+            fail "$test_name" "Expected a 33-word mnemonic for a 256-bit secret, got $words"
+            return
+        fi
+    done
+
+    local s1=$(ls "$shares_dir"/*.slip39 | head -1)
+    local s3=$(ls "$shares_dir"/*.slip39 | head -3 | tail -1)
+    local s5=$(ls "$shares_dir"/*.slip39 | head -5 | tail -1)
+
+    # Format is detected from the files: no --slip39 needed on combine.
+    if ! $ZSSS combine -s "$s1" -s "$s3" -s "$s5" -o "$recovered" \
+            --passphrase "TREZOR" >/dev/null 2>&1; then
+        fail "$test_name" "Combine failed"
+        return
+    fi
+
+    if cmp -s "$secret_file" "$recovered"; then
+        pass "$test_name"
+    else
+        fail "$test_name" "Recovered master secret doesn't match"
+    fi
+}
+
+test_slip39_below_threshold_rejected() {
+    ((TESTS_RUN++))
+    local test_name="SLIP-39: below-threshold share set is rejected"
+
+    local shares_dir="$TEMP_DIR/slip39_3of5"
+    local s1=$(ls "$shares_dir"/*.slip39 | head -1)
+    local s2=$(ls "$shares_dir"/*.slip39 | head -2 | tail -1)
+
+    if $ZSSS combine -s "$s1" -s "$s2" -o "$TEMP_DIR/slip39_bad.bin" \
+            --passphrase "TREZOR" >/dev/null 2>&1; then
+        fail "$test_name" "Two of three shares were accepted"
+    else
+        pass "$test_name"
+    fi
+}
+
+test_slip39_wrong_passphrase_differs() {
+    ((TESTS_RUN++))
+    local test_name="SLIP-39: wrong passphrase yields a different secret, not an error"
+
+    local shares_dir="$TEMP_DIR/slip39_3of5"
+    local out="$TEMP_DIR/slip39_wrongpass.bin"
+    local s1=$(ls "$shares_dir"/*.slip39 | head -1)
+    local s3=$(ls "$shares_dir"/*.slip39 | head -3 | tail -1)
+    local s5=$(ls "$shares_dir"/*.slip39 | head -5 | tail -1)
+
+    # Specified behaviour: there is no passphrase check (plausible deniability).
+    if ! $ZSSS combine -s "$s1" -s "$s3" -s "$s5" -o "$out" \
+            --passphrase "NOT-TREZOR" >/dev/null 2>&1; then
+        fail "$test_name" "A wrong passphrase errored instead of returning another secret"
+        return
+    fi
+
+    if cmp -s "$TEMP_DIR/slip39_secret.bin" "$out"; then
+        fail "$test_name" "A wrong passphrase recovered the real secret"
+    else
+        pass "$test_name"
+    fi
+}
+
+test_slip39_corrupt_word_rejected() {
+    ((TESTS_RUN++))
+    local test_name="SLIP-39: corrupted word fails the RS1024 checksum"
+
+    local shares_dir="$TEMP_DIR/slip39_3of5"
+    local s1=$(ls "$shares_dir"/*.slip39 | head -1)
+    local s3=$(ls "$shares_dir"/*.slip39 | head -3 | tail -1)
+    local s5=$(ls "$shares_dir"/*.slip39 | head -5 | tail -1)
+    local tampered="$TEMP_DIR/slip39_tampered.slip39"
+
+    # Replace the final (checksum) word with a different valid wordlist entry.
+    awk '{ $NF = ($NF == "zero" ? "academic" : "zero"); print }' "$s1" > "$tampered"
+
+    if $ZSSS combine --slip39 -s "$tampered" -s "$s3" -s "$s5" \
+            -o "$TEMP_DIR/slip39_bad2.bin" >/dev/null 2>&1; then
+        fail "$test_name" "A mnemonic with a broken checksum was accepted"
+    else
+        pass "$test_name"
+    fi
+}
+
+test_slip39_multi_group_roundtrip() {
+    ((TESTS_RUN++))
+    local test_name="SLIP-39: 2-of-3 groups with independent member thresholds"
+
+    local secret_file="$TEMP_DIR/slip39_mg_secret.bin"
+    local shares_dir="$TEMP_DIR/slip39_multigroup"
+    local recovered="$TEMP_DIR/slip39_mg_recovered.bin"
+    slip39_make_secret "$secret_file"
+    mkdir -p "$shares_dir"
+
+    if ! $ZSSS split --groups "1of1,3of5,2of3" --group-threshold 2 \
+            -i "$secret_file" -o "$shares_dir" >/dev/null 2>&1; then
+        fail "$test_name" "Split failed"
+        return
+    fi
+
+    # 1 + 5 + 3 = 9 member shares.
+    local count=$(ls "$shares_dir"/*.slip39 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$count" != "9" ]; then
+        fail "$test_name" "Expected 9 mnemonic files, got $count"
+        return
+    fi
+
+    # Group 1's single share plus two of group 3's three shares.
+    local g1=$(ls "$shares_dir"/share-g1-*.slip39 | head -1)
+    local g3a=$(ls "$shares_dir"/share-g3-*.slip39 | head -1)
+    local g3b=$(ls "$shares_dir"/share-g3-*.slip39 | head -2 | tail -1)
+
+    if ! $ZSSS combine -s "$g1" -s "$g3a" -s "$g3b" -o "$recovered" >/dev/null 2>&1; then
+        fail "$test_name" "Combine across groups failed"
+        return
+    fi
+
+    if ! cmp -s "$secret_file" "$recovered"; then
+        fail "$test_name" "Recovered master secret doesn't match"
+        return
+    fi
+
+    # One group alone is below the group threshold and must be rejected.
+    local g2a=$(ls "$shares_dir"/share-g2-*.slip39 | head -1)
+    local g2b=$(ls "$shares_dir"/share-g2-*.slip39 | head -2 | tail -1)
+    local g2c=$(ls "$shares_dir"/share-g2-*.slip39 | head -3 | tail -1)
+    if $ZSSS combine -s "$g2a" -s "$g2b" -s "$g2c" -o "$TEMP_DIR/slip39_mg_bad.bin" >/dev/null 2>&1; then
+        fail "$test_name" "A single group satisfied a group threshold of 2"
+        return
+    fi
+
+    pass "$test_name"
+}
+
+test_slip39_verify_mnemonic() {
+    ((TESTS_RUN++))
+    local test_name="SLIP-39: verify reports mnemonics as valid"
+
+    local shares_dir="$TEMP_DIR/slip39_3of5"
+    local all_valid=true
+    for share in "$shares_dir"/*.slip39; do
+        if ! $ZSSS verify -s "$share" 2>&1 | grep -q "VALID (SLIP-39)"; then
+            all_valid=false
+            log_verbose "verify output for $share: $($ZSSS verify -s "$share" 2>&1)"
+        fi
+    done
+
+    if $all_valid; then
+        pass "$test_name"
+    else
+        fail "$test_name" "Some mnemonics did not verify"
+    fi
+}
+
+test_slip39_rejects_short_secret() {
+    ((TESTS_RUN++))
+    local test_name="SLIP-39: master secret below 128 bits is rejected"
+
+    local secret_file="$TEMP_DIR/slip39_short.bin"
+    head -c 8 /dev/urandom > "$secret_file"
+    mkdir -p "$TEMP_DIR/slip39_short_shares"
+
+    if $ZSSS split --slip39 -t 2 -n 3 -i "$secret_file" \
+            -o "$TEMP_DIR/slip39_short_shares" >/dev/null 2>&1; then
+        fail "$test_name" "An 8-byte master secret was accepted"
+    else
+        pass "$test_name"
+    fi
+}
+
+test_slip39_interop_reference_impl() {
+    ((TESTS_RUN++))
+    local test_name="SLIP-39: cross-implementation round-trip vs python-shamir-mnemonic"
+
+    if $SKIP_INTEROP_TESTS; then
+        ((TESTS_RUN--))
+        skip "$test_name" "python-shamir-mnemonic not installed"
+        return
+    fi
+
+    local output
+    output=$("$PYTHON_BIN" "$SCRIPT_DIR/slip39_interop.py" "$ZSSS" 2>&1)
+    if [ $? -eq 0 ]; then
+        pass "$test_name ($(echo "$output" | tail -1))"
+    else
+        fail "$test_name" "$(echo "$output" | grep FAIL | head -5)"
     fi
 }
 
@@ -795,42 +1048,74 @@ run_all_tests() {
     test_sss_large_secret
     echo ""
 
+    # SLIP-0039 Tests
+    echo -e "${YELLOW}━━━ SLIP-0039 Tests ━━━${NC}"
+    test_slip39_single_group_roundtrip
+    test_slip39_below_threshold_rejected
+    test_slip39_wrong_passphrase_differs
+    test_slip39_corrupt_word_rejected
+    test_slip39_multi_group_roundtrip
+    test_slip39_verify_mnemonic
+    test_slip39_rejects_short_secret
+    test_slip39_interop_reference_impl
+    echo ""
+
     # Steganography Tests
     echo -e "${YELLOW}━━━ Steganography Tests ━━━${NC}"
-    test_stego_basic_embed_extract
-    test_stego_with_password
-    test_stego_wrong_password
-    test_stego_multi_layer
+    if $SKIP_IMAGE_TESTS; then
+        skip "Steganography suite" "no sample PNGs available"
+    else
+        test_stego_basic_embed_extract
+        test_stego_with_password
+        test_stego_wrong_password
+        test_stego_multi_layer
+    fi
     echo ""
 
     # Ticket Tests
     echo -e "${YELLOW}━━━ Event Ticket Tests ━━━${NC}"
-    test_ticket_capacity
-    test_ticket_create_single
-    test_ticket_create_batch
-    test_ticket_verify_valid
-    test_ticket_verify_invalid
-    test_ticket_info
-    test_ticket_multi_layer_independence
-    test_ticket_large_batch
+    if $SKIP_IMAGE_TESTS; then
+        skip "Event ticket suite" "no sample PNGs available"
+    else
+        test_ticket_capacity
+        test_ticket_create_single
+        test_ticket_create_batch
+        test_ticket_verify_valid
+        test_ticket_verify_invalid
+        test_ticket_info
+        test_ticket_multi_layer_independence
+        test_ticket_large_batch
+    fi
     echo ""
 
     # Integration Tests
     echo -e "${YELLOW}━━━ Integration Tests ━━━${NC}"
-    test_integration_sss_in_stego
-    test_integration_different_images
+    if $SKIP_IMAGE_TESTS; then
+        skip "Integration suite" "no sample PNGs available"
+    else
+        test_integration_sss_in_stego
+        test_integration_different_images
+    fi
     echo ""
 
     # Error Handling Tests
     echo -e "${YELLOW}━━━ Error Handling Tests ━━━${NC}"
-    test_error_invalid_image
+    if $SKIP_IMAGE_TESTS; then
+        skip "test_error_invalid_image" "no sample PNGs available"
+    else
+        test_error_invalid_image
+    fi
     test_error_missing_file
     test_error_empty_secret
     echo ""
 
     # Performance Tests
     echo -e "${YELLOW}━━━ Performance Tests ━━━${NC}"
-    test_perf_ticket_creation_time
+    if $SKIP_IMAGE_TESTS; then
+        skip "test_perf_ticket_creation_time" "no sample PNGs available"
+    else
+        test_perf_ticket_creation_time
+    fi
     echo ""
 
     # Summary
@@ -841,6 +1126,7 @@ run_all_tests() {
     echo -e "  Tests Run:    ${TESTS_RUN}"
     echo -e "  ${GREEN}Passed:       ${TESTS_PASSED}${NC}"
     echo -e "  ${RED}Failed:       ${TESTS_FAILED}${NC}"
+    echo -e "  ${YELLOW}Skipped:      ${TESTS_SKIPPED}${NC}"
     echo ""
 
     if [ $TESTS_FAILED -eq 0 ]; then

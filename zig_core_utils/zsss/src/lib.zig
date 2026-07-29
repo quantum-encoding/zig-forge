@@ -58,6 +58,13 @@ pub const ZSSS_ERR_TICKET_NOT_FOUND: i32 = -16;
 pub const ZSSS_ERR_TICKET_EXPIRED: i32 = -17;
 pub const ZSSS_ERR_TICKET_INVALID: i32 = -18;
 pub const ZSSS_ERR_LAYER_OCCUPIED: i32 = -19;
+// SLIP-39 specific codes. Appended rather than reusing the generic codes so
+// callers can tell a malformed mnemonic from an inconsistent share set.
+pub const ZSSS_ERR_SLIP39_INVALID_MNEMONIC: i32 = -20;
+pub const ZSSS_ERR_SLIP39_INVALID_SHARE_SET: i32 = -21;
+pub const ZSSS_ERR_SLIP39_INVALID_DIGEST: i32 = -22;
+pub const ZSSS_ERR_SLIP39_INVALID_CONFIG: i32 = -23;
+pub const ZSSS_ERR_SLIP39_INVALID_PASSPHRASE: i32 = -24;
 pub const ZSSS_ERR_UNKNOWN: i32 = -99;
 
 /// Free a buffer returned by zsss functions
@@ -193,6 +200,162 @@ export fn zsss_combine(
     // Combine shares
     const secret = SSS.combine(ffi_allocator, shares_list.items) catch {
         return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_INSUFFICIENT_SHARES };
+    };
+
+    return .{ .data = secret.ptr, .len = secret.len, .error_code = ZSSS_OK };
+}
+
+// =============================================================================
+// SLIP-0039 (interoperable mnemonic shares)
+// =============================================================================
+//
+// These are separate entry points from zsss_split/zsss_combine above, which
+// implement a different (zsss-native binary) scheme and keep their existing
+// signatures and behaviour.
+
+fn slip39ErrorCode(err: anyerror) i32 {
+    return switch (err) {
+        slip39.Error.UnknownWord,
+        slip39.Error.MnemonicTooShort,
+        slip39.Error.InvalidChecksum,
+        slip39.Error.InvalidPadding,
+        slip39.Error.GroupThresholdExceedsCount,
+        => ZSSS_ERR_SLIP39_INVALID_MNEMONIC,
+
+        slip39.Error.MismatchedShareParameters,
+        slip39.Error.MismatchedMemberThreshold,
+        slip39.Error.DuplicateMemberIndex,
+        slip39.Error.DuplicateGroupIndex,
+        slip39.Error.WrongNumberOfGroups,
+        slip39.Error.WrongNumberOfShares,
+        slip39.Error.InvalidShareValueLength,
+        slip39.Error.EmptyShareSet,
+        => ZSSS_ERR_SLIP39_INVALID_SHARE_SET,
+
+        slip39.Error.InvalidDigest => ZSSS_ERR_SLIP39_INVALID_DIGEST,
+        slip39.Error.InvalidPassphrase => ZSSS_ERR_SLIP39_INVALID_PASSPHRASE,
+
+        slip39.Error.InvalidMasterSecretLength,
+        slip39.Error.InvalidThreshold,
+        slip39.Error.ThresholdOneWithMultipleMembers,
+        slip39.Error.InvalidGroupConfiguration,
+        => ZSSS_ERR_SLIP39_INVALID_CONFIG,
+
+        error.OutOfMemory => ZSSS_ERR_OUT_OF_MEMORY,
+        else => ZSSS_ERR_UNKNOWN,
+    };
+}
+
+/// Pack a list of byte slices into the same length-prefixed framing that
+/// zsss_split uses: [len1:u32 LE][bytes1][len2:u32 LE][bytes2]...
+fn packFrames(items: []const []const u8) !ZsssBuffer {
+    var total: usize = 0;
+    for (items) |item| total += 4 + item.len;
+
+    const output = try ffi_allocator.alloc(u8, total);
+    var pos: usize = 0;
+    for (items) |item| {
+        std.mem.writeInt(u32, output[pos..][0..4], @intCast(item.len), .little);
+        pos += 4;
+        @memcpy(output[pos..][0..item.len], item);
+        pos += item.len;
+    }
+    return .{ .data = output.ptr, .len = output.len, .error_code = ZSSS_OK };
+}
+
+/// Split a master secret into SLIP-0039 mnemonic shares.
+///
+/// group_specs points at `group_count` pairs of bytes
+/// (member_threshold, member_count), one pair per group.
+/// iteration_exponent must be 0-15; total PBKDF2 iterations are 10000 << e.
+///
+/// Returns the mnemonics as length-prefixed UTF-8 strings in the same framing
+/// as zsss_split, ordered group 0 members first. Free with zsss_free().
+export fn zsss_slip39_generate(
+    secret_ptr: [*]const u8,
+    secret_len: usize,
+    group_threshold: u8,
+    group_specs_ptr: [*]const u8,
+    group_count: usize,
+    passphrase_ptr: ?[*]const u8,
+    passphrase_len: usize,
+    iteration_exponent: u8,
+    extendable: bool,
+) ZsssBuffer {
+    if (secret_len == 0) {
+        return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_EMPTY_SECRET };
+    }
+    if (group_count == 0 or group_count > slip39.MAX_SHARE_COUNT or iteration_exponent > 15) {
+        return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_SLIP39_INVALID_CONFIG };
+    }
+
+    const groups = ffi_allocator.alloc(slip39.GroupSpec, group_count) catch {
+        return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_OUT_OF_MEMORY };
+    };
+    defer ffi_allocator.free(groups);
+    const spec_bytes = group_specs_ptr[0 .. group_count * 2];
+    for (groups, 0..) |*g, i| {
+        g.* = .{ .member_threshold = spec_bytes[i * 2], .member_count = spec_bytes[i * 2 + 1] };
+    }
+
+    const passphrase: []const u8 = if (passphrase_ptr) |p| p[0..passphrase_len] else "";
+
+    const mnemonics = slip39.generateMnemonics(ffi_allocator, secret_ptr[0..secret_len], .{
+        .group_threshold = group_threshold,
+        .groups = groups,
+        .passphrase = passphrase,
+        .extendable = extendable,
+        .iteration_exponent = @intCast(iteration_exponent),
+    }) catch |err| {
+        return .{ .data = null, .len = 0, .error_code = slip39ErrorCode(err) };
+    };
+    // freeMnemonics zeroizes each mnemonic: they are the shares themselves.
+    defer slip39.freeMnemonics(ffi_allocator, mnemonics);
+
+    return packFrames(@ptrCast(mnemonics)) catch
+        .{ .data = null, .len = 0, .error_code = ZSSS_ERR_OUT_OF_MEMORY };
+}
+
+/// Recover a master secret from SLIP-0039 mnemonics.
+///
+/// mnemonics_ptr holds length-prefixed UTF-8 mnemonic strings in the same
+/// framing that zsss_slip39_generate produces. Free the result with zsss_free().
+///
+/// There is no way to verify the passphrase (spec: "Passphrase verification"):
+/// a wrong passphrase returns a different master secret, not an error.
+export fn zsss_slip39_combine(
+    mnemonics_ptr: [*]const u8,
+    mnemonics_len: usize,
+    passphrase_ptr: ?[*]const u8,
+    passphrase_len: usize,
+) ZsssBuffer {
+    if (mnemonics_len == 0) {
+        return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_NO_SHARES };
+    }
+
+    var mnemonics: std.ArrayList([]const u8) = .empty;
+    defer mnemonics.deinit(ffi_allocator);
+
+    const data = mnemonics_ptr[0..mnemonics_len];
+    var pos: usize = 0;
+    while (pos + 4 <= data.len) {
+        const len = std.mem.readInt(u32, data[pos..][0..4], .little);
+        pos += 4;
+        if (pos + len > data.len) break;
+        mnemonics.append(ffi_allocator, data[pos..][0..len]) catch {
+            return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_OUT_OF_MEMORY };
+        };
+        pos += len;
+    }
+
+    if (mnemonics.items.len == 0) {
+        return .{ .data = null, .len = 0, .error_code = ZSSS_ERR_NO_SHARES };
+    }
+
+    const passphrase: []const u8 = if (passphrase_ptr) |p| p[0..passphrase_len] else "";
+
+    const secret = slip39.combineMnemonics(ffi_allocator, mnemonics.items, passphrase) catch |err| {
+        return .{ .data = null, .len = 0, .error_code = slip39ErrorCode(err) };
     };
 
     return .{ .data = secret.ptr, .len = secret.len, .error_code = ZSSS_OK };
@@ -580,6 +743,11 @@ export fn zsss_error_message(error_code: i32) [*:0]const u8 {
         ZSSS_ERR_TICKET_EXPIRED => "Ticket has expired",
         ZSSS_ERR_TICKET_INVALID => "Invalid ticket data",
         ZSSS_ERR_LAYER_OCCUPIED => "Layer already contains data",
+        ZSSS_ERR_SLIP39_INVALID_MNEMONIC => "Invalid SLIP-39 mnemonic (word, length, checksum or padding)",
+        ZSSS_ERR_SLIP39_INVALID_SHARE_SET => "Invalid SLIP-39 share set (mismatched or wrong number of shares)",
+        ZSSS_ERR_SLIP39_INVALID_DIGEST => "SLIP-39 digest check failed (shares do not belong to one secret)",
+        ZSSS_ERR_SLIP39_INVALID_CONFIG => "Invalid SLIP-39 configuration (secret length, threshold or groups)",
+        ZSSS_ERR_SLIP39_INVALID_PASSPHRASE => "SLIP-39 passphrase must be printable ASCII (32-126)",
         else => "Unknown error",
     };
 }
@@ -668,6 +836,96 @@ test "FFI combine mismatched same-secret shares returns error, no crash" {
     // mapped by the FFI layer to ZSSS_ERR_INSUFFICIENT_SHARES.
     try std.testing.expect(result.error_code != ZSSS_OK);
     try std.testing.expectEqual(ZSSS_ERR_INSUFFICIENT_SHARES, result.error_code);
+}
+
+test "FFI SLIP-39 generate and combine, single group" {
+    const master_secret = [_]u8{
+        0xBB, 0x54, 0xAA, 0xC4, 0xB8, 0x9D, 0xC8, 0x68,
+        0xBA, 0x37, 0xD9, 0xCC, 0x21, 0xB2, 0xCE, 0xCE,
+    };
+    // One group, 3 of 5.
+    const specs = [_]u8{ 3, 5 };
+    const passphrase = "TREZOR";
+
+    const generated = zsss_slip39_generate(
+        &master_secret,
+        master_secret.len,
+        1,
+        &specs,
+        1,
+        passphrase.ptr,
+        passphrase.len,
+        0,
+        true,
+    );
+    defer zsss_free(generated);
+    try std.testing.expectEqual(ZSSS_OK, generated.error_code);
+
+    // Feed back three of the five frames.
+    const a = std.testing.allocator;
+    var combo: std.ArrayList(u8) = .empty;
+    defer combo.deinit(a);
+    const buf = generated.data.?[0..generated.len];
+    for ([_]usize{ 0, 2, 4 }) |i| {
+        try combo.appendSlice(a, nthShareFrame(buf, i));
+    }
+
+    const combined = zsss_slip39_combine(combo.items.ptr, combo.items.len, passphrase.ptr, passphrase.len);
+    defer zsss_free(combined);
+    try std.testing.expectEqual(ZSSS_OK, combined.error_code);
+    try std.testing.expectEqualSlices(u8, &master_secret, combined.data.?[0..combined.len]);
+
+    // Two frames is below the member threshold: a clean error, not a crash.
+    var short: std.ArrayList(u8) = .empty;
+    defer short.deinit(a);
+    try short.appendSlice(a, nthShareFrame(buf, 0));
+    try short.appendSlice(a, nthShareFrame(buf, 2));
+    const insufficient = zsss_slip39_combine(short.items.ptr, short.items.len, passphrase.ptr, passphrase.len);
+    defer zsss_free(insufficient);
+    try std.testing.expectEqual(ZSSS_ERR_SLIP39_INVALID_SHARE_SET, insufficient.error_code);
+}
+
+test "FFI SLIP-39 generate rejects a too-short secret and a bad group spec" {
+    const short_secret = [_]u8{ 1, 2, 3, 4 };
+    const specs = [_]u8{ 2, 3 };
+    const too_short = zsss_slip39_generate(&short_secret, short_secret.len, 1, &specs, 1, null, 0, 1, true);
+    defer zsss_free(too_short);
+    try std.testing.expectEqual(ZSSS_ERR_SLIP39_INVALID_CONFIG, too_short.error_code);
+
+    const secret = [_]u8{0x42} ** 16;
+    // Group threshold above the number of groups.
+    const bad_gt = zsss_slip39_generate(&secret, secret.len, 3, &specs, 1, null, 0, 1, true);
+    defer zsss_free(bad_gt);
+    try std.testing.expectEqual(ZSSS_ERR_SLIP39_INVALID_CONFIG, bad_gt.error_code);
+
+    // Iteration exponent out of the 4-bit field's range.
+    const bad_e = zsss_slip39_generate(&secret, secret.len, 1, &specs, 1, null, 0, 16, true);
+    defer zsss_free(bad_e);
+    try std.testing.expectEqual(ZSSS_ERR_SLIP39_INVALID_CONFIG, bad_e.error_code);
+}
+
+test "FFI SLIP-39 multi-group round-trip" {
+    const master_secret = [_]u8{0x5A} ** 32;
+    // Three groups: 1of1, 2of3, 2of2; two groups required.
+    const specs = [_]u8{ 1, 1, 2, 3, 2, 2 };
+
+    const generated = zsss_slip39_generate(&master_secret, master_secret.len, 2, &specs, 3, null, 0, 0, true);
+    defer zsss_free(generated);
+    try std.testing.expectEqual(ZSSS_OK, generated.error_code);
+
+    const buf = generated.data.?[0..generated.len];
+    const a = std.testing.allocator;
+    var combo: std.ArrayList(u8) = .empty;
+    defer combo.deinit(a);
+    // Group 0's only share (frame 0) plus two of group 1's three (frames 1, 3).
+    for ([_]usize{ 0, 1, 3 }) |i| {
+        try combo.appendSlice(a, nthShareFrame(buf, i));
+    }
+
+    const combined = zsss_slip39_combine(combo.items.ptr, combo.items.len, null, 0);
+    defer zsss_free(combined);
+    try std.testing.expectEqual(ZSSS_OK, combined.error_code);
+    try std.testing.expectEqualSlices(u8, &master_secret, combined.data.?[0..combined.len]);
 }
 
 // Mixing shares of two DIFFERENT secrets with overlapping indices must also be

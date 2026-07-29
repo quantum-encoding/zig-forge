@@ -495,6 +495,20 @@ const Config = struct {
     hex_mode: bool = false,
     slip39_mode: bool = false,
     verbose: bool = false,
+
+    // SLIP-39 options
+    /// Passphrase that keys the Feistel encryption of the master secret. Empty
+    /// string when absent, per spec ("Passphrase").
+    passphrase: ?[]const u8 = null,
+    /// Group configuration as "TofN[,TofN...]"; when absent a single group is
+    /// derived from -t/-n.
+    groups_spec: ?[]const u8 = null,
+    /// Number of groups required to reconstruct the master secret.
+    group_threshold: u8 = 1,
+    /// PBKDF2 iteration exponent; total iterations are 10000 << e.
+    iteration_exponent: u4 = 1,
+    /// Extendable backup flag; new shares SHOULD set it (spec footnote 10).
+    extendable: bool = true,
     allocator: Allocator = undefined,
     // Steganography options
     image_file: ?[]const u8 = null,
@@ -529,6 +543,12 @@ const Config = struct {
         if (self.output_path) |p| self.allocator.free(p);
         if (self.image_file) |i| self.allocator.free(i);
         if (self.password) |pw| self.allocator.free(pw);
+        if (self.passphrase) |pp| {
+            // The passphrase is secret material; do not leave it on the heap.
+            std.crypto.secureZero(u8, @constCast(pp));
+            self.allocator.free(pp);
+        }
+        if (self.groups_spec) |g| self.allocator.free(g);
         if (self.event_id) |e| self.allocator.free(e);
         if (self.attendee_list) |a| self.allocator.free(a);
         if (self.ticket_tier) |t| self.allocator.free(t);
@@ -638,6 +658,21 @@ fn parseArgs(allocator: Allocator, init: std.process.Init) !Config {
             } else {
                 config.slip39_mode = true;
             }
+        } else if (mem.eql(u8, arg, "--passphrase")) {
+            const val = args_iter.next() orelse return error.MissingPassphrase;
+            config.passphrase = try allocator.dupe(u8, val);
+        } else if (mem.eql(u8, arg, "--groups")) {
+            const val = args_iter.next() orelse return error.MissingGroupsSpec;
+            config.groups_spec = try allocator.dupe(u8, val);
+            config.slip39_mode = true;
+        } else if (mem.eql(u8, arg, "--group-threshold")) {
+            const val = args_iter.next() orelse return error.MissingGroupThreshold;
+            config.group_threshold = try std.fmt.parseInt(u8, val, 10);
+        } else if (mem.eql(u8, arg, "--iteration-exponent")) {
+            const val = args_iter.next() orelse return error.MissingIterationExponent;
+            config.iteration_exponent = try std.fmt.parseInt(u4, val, 10);
+        } else if (mem.eql(u8, arg, "--no-extendable")) {
+            config.extendable = false;
         } else if (mem.eql(u8, arg, "-v") or mem.eql(u8, arg, "--verbose")) {
             config.verbose = true;
         } else {
@@ -755,10 +790,28 @@ fn printHelp() void {
         \\  --seat-prefix <str>   Seat prefix (e.g., "A-" for A-1, A-2, ...)
         \\  --pwd-length <n>      Generated password length (default: 8)
         \\  --hex                 Output shares in hex format
-        \\  --slip39              Output shares as SLIP-39 mnemonics
         \\  -v, --verbose         Verbose output
         \\  -h, --help            Show this help
         \\  -V, --version         Show version
+        \\
+        \\SLIP-39 OPTIONS (interoperable mnemonic shares):
+        \\  --slip39              Use SLIP-0039 mnemonic shares instead of the
+        \\                        binary format. On combine this is detected
+        \\                        automatically from the share files.
+        \\  --passphrase <str>    Passphrase encrypting the master secret
+        \\                        (printable ASCII only). Must match on recovery;
+        \\                        a wrong passphrase yields a different secret
+        \\                        with no error, by design.
+        \\  --groups <spec>       Multi-group config, e.g. "1of1,3of5,2of3".
+        \\                        Implies --slip39. Without it a single group is
+        \\                        built from -t/-n.
+        \\  --group-threshold <k> Groups required to recover (default: 1)
+        \\  --iteration-exponent <e>
+        \\                        PBKDF2 iteration exponent 0-15; total
+        \\                        iterations are 10000 << e (default: 1)
+        \\  --no-extendable       Clear the extendable backup flag, binding the
+        \\                        identifier into the encryption salt (only for
+        \\                        matching pre-2023 share sets)
         \\
         \\EXAMPLES:
         \\  # Split seed.bin into 5 shares, need 3 to recover
@@ -772,6 +825,16 @@ fn printHelp() void {
         \\
         \\  # Extract hidden share from PNG
         \\  zsss stego extract --image photo1.png -o extracted.sss -p "secret"
+        \\
+        \\  # SLIP-39: 3-of-5 mnemonic shares of a BIP-32 seed, with a passphrase
+        \\  zsss split --slip39 -t 3 -n 5 -i seed.bin -o ./shares/ --passphrase "TREZOR"
+        \\
+        \\  # SLIP-39: two of three groups, each with its own member threshold
+        \\  zsss split --groups "1of1,3of5,2of3" --group-threshold 2 -i seed.bin -o ./shares/
+        \\
+        \\  # SLIP-39: recover (format detected from the files)
+        \\  zsss combine -s shares/share-1.slip39 -s shares/share-3.slip39 \
+        \\    -s shares/share-5.slip39 -o seed.bin --passphrase "TREZOR"
         \\
         \\  # Create 100 event tickets (each person gets unique password)
         \\  zsss ticket create --image poster.png --event "CONCERT-2026" -c 100 -o concert_tickets
@@ -828,6 +891,14 @@ fn doSplit(allocator: Allocator, config: *const Config) !void {
         allocator.free(secret);
     }
 
+    // SLIP-39 is a different scheme from the plain Shamir path below (Feistel
+    // encryption, digest share, f(255) as the secret), not a different
+    // serialisation of it, so it branches before any splitting happens.
+    if (config.slip39_mode) {
+        makeDirectory(allocator, output_dir) catch {};
+        return doSplitSlip39(allocator, config, secret, output_dir);
+    }
+
     if (config.verbose) {
         std.debug.print("Splitting {d} byte secret into {d} shares (threshold: {d})\n", .{
             secret.len,
@@ -848,102 +919,168 @@ fn doSplit(allocator: Allocator, config: *const Config) !void {
     // Create output directory if needed
     makeDirectory(allocator, output_dir) catch {};
 
-    // Generate random identifier for SLIP-39 (shared across all shares)
-    var identifier_bytes: [2]u8 = undefined;
-    try fillRandomBytes(&identifier_bytes);
-    const slip39_identifier: u15 = @truncate((@as(u16, identifier_bytes[0]) << 7) | (identifier_bytes[1] >> 1));
-
     // Write each share to a file
     for (shares) |*share| {
         var filename_buf: [256]u8 = undefined;
 
-        if (config.slip39_mode) {
-            // SLIP-39 mnemonic output
-            const filename = std.fmt.bufPrint(&filename_buf, "{s}/share-{d}.slip39", .{
-                output_dir,
-                share.index,
-            }) catch unreachable;
+        const serialized = try share.serialize(allocator);
+        defer allocator.free(serialized);
 
-            // Create SLIP-39 metadata
-            const meta = slip39.ShareMetadata{
-                .identifier = slip39_identifier,
-                .iteration_exponent = 0, // No passphrase derivation
-                .group_index = 0,
-                .group_threshold = 1,
-                .group_count = 1,
-                .member_index = @truncate(share.index -| 1), // 0-indexed for SLIP-39
-                .member_threshold = @truncate(share.threshold),
-                .share_value = share.data,
-            };
+        const filename = std.fmt.bufPrint(&filename_buf, "{s}/share-{d}.sss", .{
+            output_dir,
+            share.index,
+        }) catch unreachable;
 
-            // Encode to word indices
-            const word_indices = try slip39.encodeToWords(allocator, meta);
-            defer allocator.free(word_indices);
-
-            // Convert to mnemonic string
-            const mnemonic = try slip39.wordsToMnemonic(allocator, word_indices);
-            defer allocator.free(mnemonic);
-
-            writeFileAlloc(allocator, filename, mnemonic) catch |err| {
+        if (config.hex_mode) {
+            // Write as hex
+            const hex_buf = try allocator.alloc(u8, serialized.len * 2);
+            defer allocator.free(hex_buf);
+            const hex_chars = "0123456789abcdef";
+            for (serialized, 0..) |byte, idx| {
+                hex_buf[idx * 2] = hex_chars[byte >> 4];
+                hex_buf[idx * 2 + 1] = hex_chars[byte & 0xF];
+            }
+            writeFileAlloc(allocator, filename, hex_buf) catch |err| {
                 std.debug.print("Error writing share: {}\n", .{err});
                 return err;
             };
-
-            if (config.verbose) {
-                std.debug.print("  Created: {s} ({d} words)\n", .{ filename, word_indices.len });
-            }
         } else {
-            // Binary output
-            const serialized = try share.serialize(allocator);
-            defer allocator.free(serialized);
+            writeFileAlloc(allocator, filename, serialized) catch |err| {
+                std.debug.print("Error writing share: {}\n", .{err});
+                return err;
+            };
+        }
 
-            const filename = std.fmt.bufPrint(&filename_buf, "{s}/share-{d}.sss", .{
-                output_dir,
-                share.index,
-            }) catch unreachable;
-
-            if (config.hex_mode) {
-                // Write as hex
-                const hex_buf = try allocator.alloc(u8, serialized.len * 2);
-                defer allocator.free(hex_buf);
-                const hex_chars = "0123456789abcdef";
-                for (serialized, 0..) |byte, idx| {
-                    hex_buf[idx * 2] = hex_chars[byte >> 4];
-                    hex_buf[idx * 2 + 1] = hex_chars[byte & 0xF];
-                }
-                writeFileAlloc(allocator, filename, hex_buf) catch |err| {
-                    std.debug.print("Error writing share: {}\n", .{err});
-                    return err;
-                };
-            } else {
-                writeFileAlloc(allocator, filename, serialized) catch |err| {
-                    std.debug.print("Error writing share: {}\n", .{err});
-                    return err;
-                };
-            }
-
-            if (config.verbose) {
-                std.debug.print("  Created: {s} ({d} bytes)\n", .{ filename, serialized.len });
-            }
+        if (config.verbose) {
+            std.debug.print("  Created: {s} ({d} bytes)\n", .{ filename, serialized.len });
         }
     }
 
-    const ext = if (config.slip39_mode) ".slip39" else ".sss";
-    std.debug.print("Successfully created {d} shares in {s}/ ({s} format)\n", .{ config.num_shares, output_dir, if (config.slip39_mode) "SLIP-39 mnemonic" else "binary" });
+    std.debug.print("Successfully created {d} shares in {s}/ (binary format)\n", .{ config.num_shares, output_dir });
     std.debug.print("Secret ID: {x:0>2}{x:0>2}{x:0>2}{x:0>2}\n", .{
         shares[0].secret_id[0],
         shares[0].secret_id[1],
         shares[0].secret_id[2],
         shares[0].secret_id[3],
     });
-    if (config.slip39_mode) {
-        std.debug.print("SLIP-39 Identifier: {d}\n", .{slip39_identifier});
-    }
     std.debug.print("Threshold: {d} of {d} shares required to recover\n", .{
         config.threshold,
         config.num_shares,
     });
-    _ = ext;
+}
+
+/// Parse a group configuration such as "1of1,3of5,2of3" into SLIP-39 group
+/// specs. Each element is <member_threshold>of<member_count>.
+fn parseGroupSpecs(allocator: Allocator, spec: []const u8) ![]slip39.GroupSpec {
+    var groups: std.ArrayList(slip39.GroupSpec) = .empty;
+    errdefer groups.deinit(allocator);
+
+    var it = mem.tokenizeAny(u8, spec, ", ");
+    while (it.next()) |item| {
+        const sep = mem.indexOf(u8, item, "of") orelse return error.InvalidGroupSpec;
+        const threshold = try std.fmt.parseInt(u8, item[0..sep], 10);
+        const count = try std.fmt.parseInt(u8, item[sep + 2 ..], 10);
+        try groups.append(allocator, .{ .member_threshold = threshold, .member_count = count });
+    }
+
+    if (groups.items.len == 0) return error.InvalidGroupSpec;
+    return groups.toOwnedSlice(allocator);
+}
+
+/// Split a master secret into SLIP-39 mnemonic shares.
+///
+/// Written to `<output_dir>/share-<n>.slip39` for a single group, or
+/// `<output_dir>/share-g<group>-<member>.slip39` when several groups are used.
+fn doSplitSlip39(allocator: Allocator, config: *const Config, secret: []const u8, output_dir: []const u8) !void {
+    const groups = if (config.groups_spec) |spec|
+        try parseGroupSpecs(allocator, spec)
+    else
+        try allocator.dupe(slip39.GroupSpec, &.{.{
+            .member_threshold = config.threshold,
+            .member_count = config.num_shares,
+        }});
+    defer allocator.free(groups);
+
+    const passphrase = config.passphrase orelse "";
+
+    const shares = slip39.generateShares(allocator, secret, .{
+        .group_threshold = config.group_threshold,
+        .groups = groups,
+        .passphrase = passphrase,
+        .extendable = config.extendable,
+        .iteration_exponent = config.iteration_exponent,
+    }) catch |err| {
+        switch (err) {
+            slip39.Error.InvalidMasterSecretLength => std.debug.print(
+                "Error: SLIP-39 requires a master secret of at least 16 bytes with an even length; got {d} bytes\n",
+                .{secret.len},
+            ),
+            slip39.Error.ThresholdOneWithMultipleMembers => std.debug.print(
+                "Error: a group with member threshold 1 must have exactly 1 member (use 1of1)\n",
+                .{},
+            ),
+            slip39.Error.InvalidGroupConfiguration => std.debug.print(
+                "Error: --group-threshold ({d}) must be between 1 and the number of groups ({d})\n",
+                .{ config.group_threshold, groups.len },
+            ),
+            slip39.Error.InvalidThreshold => std.debug.print(
+                "Error: each group needs 1 <= threshold <= count <= 16\n",
+                .{},
+            ),
+            slip39.Error.InvalidPassphrase => std.debug.print(
+                "Error: the passphrase must contain only printable ASCII (code points 32-126)\n",
+                .{},
+            ),
+            else => std.debug.print("Error generating SLIP-39 shares: {t}\n", .{err}),
+        }
+        return err;
+    };
+    defer slip39.freeShares(allocator, shares);
+
+    for (shares) |share| {
+        var filename_buf: [256]u8 = undefined;
+        const filename = if (groups.len == 1)
+            std.fmt.bufPrint(&filename_buf, "{s}/share-{d}.slip39", .{
+                output_dir,
+                @as(usize, share.member_index) + 1,
+            }) catch unreachable
+        else
+            std.fmt.bufPrint(&filename_buf, "{s}/share-g{d}-{d}.slip39", .{
+                output_dir,
+                @as(usize, share.group_index) + 1,
+                @as(usize, share.member_index) + 1,
+            }) catch unreachable;
+
+        const mnemonic = try share.toMnemonic(allocator);
+        defer {
+            // The mnemonic *is* the share; do not leave a copy on the heap.
+            std.crypto.secureZero(u8, mnemonic);
+            allocator.free(mnemonic);
+        }
+
+        writeFileAlloc(allocator, filename, mnemonic) catch |err| {
+            std.debug.print("Error writing share: {}\n", .{err});
+            return err;
+        };
+
+        if (config.verbose) {
+            std.debug.print("  Created: {s}\n", .{filename});
+        }
+    }
+
+    std.debug.print("Successfully created {d} SLIP-39 shares in {s}/\n", .{ shares.len, output_dir });
+    std.debug.print("Identifier: {d}  extendable: {}  iteration exponent: {d}\n", .{
+        shares[0].identifier,
+        config.extendable,
+        config.iteration_exponent,
+    });
+    std.debug.print("Group threshold: {d} of {d} group(s)\n", .{ config.group_threshold, groups.len });
+    for (groups, 1..) |g, i| {
+        std.debug.print("  Group {d}: {d} of {d} member share(s)\n", .{ i, g.member_threshold, g.member_count });
+    }
+    if (config.passphrase != null) {
+        std.debug.print("A passphrase was used: recovery requires the same passphrase.\n", .{});
+    }
 }
 
 fn doCombine(allocator: Allocator, config: *Config) !void {
@@ -954,6 +1091,30 @@ fn doCombine(allocator: Allocator, config: *Config) !void {
 
     const output_file = config.output_path orelse "recovered.bin";
 
+    // Load the raw file contents once: which scheme they belong to is decided
+    // from the contents, so binary share files keep working untouched while
+    // SLIP-39 mnemonics are recognised without a flag.
+    var contents: std.ArrayList([]u8) = .empty;
+    defer {
+        for (contents.items) |c| {
+            std.crypto.secureZero(u8, c);
+            allocator.free(c);
+        }
+        contents.deinit(allocator);
+    }
+
+    for (config.share_files.items) |share_path| {
+        const data = readFileAlloc(allocator, share_path, 1024 * 1024) catch |err| {
+            std.debug.print("Error reading share file '{s}': {}\n", .{ share_path, err });
+            return err;
+        };
+        try contents.append(allocator, data);
+    }
+
+    if (config.slip39_mode or allAreSlip39Mnemonics(allocator, contents.items)) {
+        return doCombineSlip39(allocator, config, contents.items, output_file);
+    }
+
     // Load shares
     var shares: std.ArrayList(Share) = .empty;
     defer {
@@ -963,13 +1124,7 @@ fn doCombine(allocator: Allocator, config: *Config) !void {
         shares.deinit(allocator);
     }
 
-    for (config.share_files.items) |share_path| {
-        const data = readFileAlloc(allocator, share_path, 1024 * 1024) catch |err| {
-            std.debug.print("Error reading share file '{s}': {}\n", .{ share_path, err });
-            return err;
-        };
-        defer allocator.free(data);
-
+    for (config.share_files.items, contents.items) |share_path, data| {
         const share = Share.deserialize(allocator, data) catch |err| {
             std.debug.print("Error parsing share file '{s}': {}\n", .{ share_path, err });
             return err;
@@ -1014,6 +1169,87 @@ fn doCombine(allocator: Allocator, config: *Config) !void {
     std.debug.print("Successfully recovered {d} byte secret to {s}\n", .{ secret.len, output_file });
 }
 
+/// True when every file's contents parse as a SLIP-39 mnemonic. Binary Shamir
+/// share files never do, so this distinguishes the two formats without a flag.
+fn allAreSlip39Mnemonics(allocator: Allocator, contents: []const []u8) bool {
+    if (contents.len == 0) return false;
+    for (contents) |data| {
+        var share = slip39.Share.fromMnemonic(allocator, mem.trim(u8, data, " \t\r\n")) catch return false;
+        share.deinit(allocator);
+    }
+    return true;
+}
+
+/// Recover a master secret from SLIP-39 mnemonics.
+fn doCombineSlip39(allocator: Allocator, config: *const Config, contents: []const []u8, output_file: []const u8) !void {
+    const mnemonics = try allocator.alloc([]const u8, contents.len);
+    defer allocator.free(mnemonics);
+    for (contents, 0..) |data, i| mnemonics[i] = mem.trim(u8, data, " \t\r\n");
+
+    if (config.verbose) {
+        for (mnemonics, config.share_files.items) |mnemonic, path| {
+            var share = slip39.Share.fromMnemonic(allocator, mnemonic) catch |err| {
+                std.debug.print("{s}: INVALID SLIP-39 mnemonic - {t}\n", .{ path, err });
+                return err;
+            };
+            defer share.deinit(allocator);
+            std.debug.print(
+                "  Loaded {s}: group {d}/{d} (threshold {d}), member {d} (threshold {d})\n",
+                .{
+                    path,
+                    @as(usize, share.group_index) + 1,
+                    share.group_count,
+                    share.group_threshold,
+                    @as(usize, share.member_index) + 1,
+                    share.member_threshold,
+                },
+            );
+        }
+    }
+
+    const passphrase = config.passphrase orelse "";
+    const secret = slip39.combineMnemonics(allocator, mnemonics, passphrase) catch |err| {
+        switch (err) {
+            slip39.Error.InvalidChecksum => std.debug.print(
+                "Error: a mnemonic has an invalid checksum. Re-check the words; do not guess a correction.\n",
+                .{},
+            ),
+            slip39.Error.WrongNumberOfGroups => std.debug.print(
+                "Error: wrong number of groups supplied - exactly the group threshold is required.\n",
+                .{},
+            ),
+            slip39.Error.WrongNumberOfShares => std.debug.print(
+                "Error: a group has the wrong number of shares - exactly its member threshold is required.\n",
+                .{},
+            ),
+            slip39.Error.InvalidDigest => std.debug.print(
+                "Error: the digest check failed. These shares do not belong to one secret.\n",
+                .{},
+            ),
+            slip39.Error.MismatchedShareParameters => std.debug.print(
+                "Error: the mnemonics do not belong to the same set (identifier, flags or thresholds differ).\n",
+                .{},
+            ),
+            else => std.debug.print("Error combining SLIP-39 shares: {t}\n", .{err}),
+        }
+        return err;
+    };
+    defer {
+        std.crypto.secureZero(u8, secret);
+        allocator.free(secret);
+    }
+
+    writeFileAlloc(allocator, output_file, secret) catch |err| {
+        std.debug.print("Error creating output file: {}\n", .{err});
+        return err;
+    };
+
+    std.debug.print("Successfully recovered {d} byte master secret to {s}\n", .{ secret.len, output_file });
+    // There is no way to verify the passphrase (spec: "Passphrase
+    // verification"), so a wrong one silently yields a different secret.
+    std.debug.print("Note: SLIP-39 cannot verify a passphrase - a wrong one yields a different secret.\n", .{});
+}
+
 fn doVerify(allocator: Allocator, config: *Config) !void {
     if (config.share_files.items.len == 0) {
         std.debug.print("Error: share file required (-s)\n", .{});
@@ -1029,6 +1265,30 @@ fn doVerify(allocator: Allocator, config: *Config) !void {
             continue;
         };
         defer allocator.free(data);
+
+        // A SLIP-39 mnemonic verifies against its RS1024 checksum instead of
+        // the binary share's CRC32.
+        if (slip39.Share.fromMnemonic(allocator, mem.trim(u8, data, " \t\r\n"))) |slip_share| {
+            var mutable = slip_share;
+            defer mutable.deinit(allocator);
+            std.debug.print("{s}: VALID (SLIP-39)\n", .{share_path});
+            if (config.verbose) {
+                std.debug.print("  Identifier: {d}\n", .{slip_share.identifier});
+                std.debug.print("  Extendable: {}\n", .{slip_share.extendable});
+                std.debug.print("  Iteration exponent: {d}\n", .{slip_share.iteration_exponent});
+                std.debug.print("  Group: {d} of {d} (threshold {d})\n", .{
+                    @as(usize, slip_share.group_index) + 1,
+                    slip_share.group_count,
+                    slip_share.group_threshold,
+                });
+                std.debug.print("  Member: {d} (threshold {d})\n", .{
+                    @as(usize, slip_share.member_index) + 1,
+                    slip_share.member_threshold,
+                });
+                std.debug.print("  Share value: {d} bytes\n", .{slip_share.value.len});
+            }
+            continue;
+        } else |_| {}
 
         const share = Share.deserialize(allocator, data) catch |err| {
             std.debug.print("{s}: INVALID - {}\n", .{ share_path, err });

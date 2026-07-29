@@ -318,4 +318,21 @@ pub fn build(b: *std.Build) void {
 
     const run_anchor_tests = b.addRunArtifact(anchor_tests);
     test_step.dependOn(&run_anchor_tests.step);
+
+    // Official SLIP-0039 test vectors. The archived vector file lives in tests/
+    // and is handed to the test module as an anonymous import so that
+    // @embedFile can reach it without keeping a second copy under src/.
+    const slip39_vectors_module = b.createModule(.{
+        .root_source_file = b.path("src/slip39_vectors_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    slip39_vectors_module.addAnonymousImport("slip39_vectors", .{
+        .root_source_file = b.path("tests/slip-0039-vectors.json"),
+    });
+
+    const slip39_vector_tests = b.addTest(.{ .root_module = slip39_vectors_module });
+    const run_slip39_vector_tests = b.addRunArtifact(slip39_vector_tests);
+    test_step.dependOn(&run_slip39_vector_tests.step);
 }

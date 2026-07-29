@@ -20,6 +20,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -46,6 +47,12 @@ extern "C" {
 #define ZSSS_ERR_TICKET_EXPIRED         -17
 #define ZSSS_ERR_TICKET_INVALID         -18
 #define ZSSS_ERR_LAYER_OCCUPIED         -19
+/* SLIP-0039 */
+#define ZSSS_ERR_SLIP39_INVALID_MNEMONIC   -20
+#define ZSSS_ERR_SLIP39_INVALID_SHARE_SET  -21
+#define ZSSS_ERR_SLIP39_INVALID_DIGEST     -22
+#define ZSSS_ERR_SLIP39_INVALID_CONFIG     -23
+#define ZSSS_ERR_SLIP39_INVALID_PASSPHRASE -24
 #define ZSSS_ERR_UNKNOWN                -99
 
 /**
@@ -130,6 +137,84 @@ ZsssBuffer zsss_split(
 ZsssBuffer zsss_combine(
     const uint8_t* shares_ptr,
     size_t shares_len
+);
+
+/*
+ * ============================================================================
+ * SLIP-0039 (interoperable mnemonic shares)
+ * ============================================================================
+ *
+ * A different scheme from zsss_split/zsss_combine above: shares produced here
+ * are standard SLIP-0039 mnemonics and interoperate with other SLIP-39
+ * implementations (Trezor, Electrum, Sparrow, python-shamir-mnemonic).
+ * See docs/slip-0039.md for the specification.
+ */
+
+/**
+ * Split a master secret into SLIP-0039 mnemonic shares.
+ *
+ * @param secret_ptr         Master secret. Must be >= 16 bytes with an even
+ *                           length (>= 128 bits of entropy, a whole number of
+ *                           16-bit units). For a BIP-32 wallet this is the
+ *                           BIP-32 master seed.
+ * @param secret_len         Length of the master secret in bytes
+ * @param group_threshold    Number of groups required to recover (1..group_count)
+ * @param group_specs_ptr    group_count pairs of bytes, one pair per group:
+ *                           (member_threshold, member_count). Both 1..16, and
+ *                           member_threshold <= member_count. A group with
+ *                           member_threshold 1 must have member_count 1.
+ * @param group_count        Number of groups (1..16). For a plain k-of-n backup
+ *                           pass group_threshold 1 and a single {k, n} pair.
+ * @param passphrase_ptr     Passphrase, or NULL for none. Printable ASCII only
+ *                           (code points 32-126).
+ * @param passphrase_len     Passphrase length in bytes
+ * @param iteration_exponent 0..15; total PBKDF2 iterations are 10000 << e.
+ *                           Use 1 to match the reference implementation default.
+ * @param extendable         Set the extendable backup flag. Pass true for new
+ *                           backups; false only to match a pre-2023 share set.
+ * @return ZsssBuffer holding the mnemonics as length-prefixed UTF-8 strings,
+ *         [len1:u32le][mnemonic1][len2:u32le][mnemonic2]..., ordered group 0's
+ *         members first. Free with zsss_free().
+ *
+ * Example:
+ *   uint8_t groups[2] = {3, 5};  // one group, 3 of 5
+ *   ZsssBuffer r = zsss_slip39_generate(seed, 32, 1, groups, 1,
+ *                                       "hunter2", 7, 1, true);
+ */
+ZsssBuffer zsss_slip39_generate(
+    const uint8_t* secret_ptr,
+    size_t secret_len,
+    uint8_t group_threshold,
+    const uint8_t* group_specs_ptr,
+    size_t group_count,
+    const uint8_t* passphrase_ptr,
+    size_t passphrase_len,
+    uint8_t iteration_exponent,
+    bool extendable
+);
+
+/**
+ * Recover a master secret from SLIP-0039 mnemonics.
+ *
+ * @param mnemonics_ptr  Length-prefixed UTF-8 mnemonic strings, same framing as
+ *                       zsss_slip39_generate output
+ * @param mnemonics_len  Total length of the mnemonics buffer
+ * @param passphrase_ptr Passphrase, or NULL for none
+ * @param passphrase_len Passphrase length in bytes
+ * @return ZsssBuffer holding the recovered master secret. Free with zsss_free().
+ *
+ * Exactly group_threshold groups must be supplied, and exactly each of those
+ * groups' member_threshold shares — no more and no fewer.
+ *
+ * SLIP-0039 provides no way to verify the passphrase: a wrong passphrase
+ * returns a DIFFERENT master secret with ZSSS_OK, it does not error. This is
+ * specified behaviour (plausible deniability), not a defect.
+ */
+ZsssBuffer zsss_slip39_combine(
+    const uint8_t* mnemonics_ptr,
+    size_t mnemonics_len,
+    const uint8_t* passphrase_ptr,
+    size_t passphrase_len
 );
 
 /*
