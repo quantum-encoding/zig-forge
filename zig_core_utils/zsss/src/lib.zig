@@ -9,6 +9,19 @@
 //! - Static libraries are compiled with PIC for shared library linking
 
 const std = @import("std");
+
+/// FFI panic seal, same as simd_crypto_ffi's: convert any panic into an immediate abort so it
+/// can never unwind across the C ABI into a host (undefined behaviour), and so the library
+/// never pulls std.debug's self-unwinder — whose Darwin path references a private dyld symbol
+/// (`__dyld_get_image_header_containing_address`) that iOS does not export, failing the link.
+fn ffiPanic(msg: []const u8, ret_addr: ?usize) noreturn {
+    @branchHint(.cold);
+    _ = ret_addr;
+    std.debug.print("FATAL ZSSS FFI PANIC: {s}\n", .{msg});
+    std.process.abort();
+}
+
+pub const panic = std.debug.FullPanic(ffiPanic);
 const Allocator = std.mem.Allocator;
 
 // Import core modules
