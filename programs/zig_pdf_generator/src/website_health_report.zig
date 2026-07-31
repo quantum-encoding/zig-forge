@@ -349,6 +349,11 @@ const PageSummary = struct {
     schemaTypes: []const []const u8 = &.{},
     wordCount: u32 = 0,
     notes: []const []const u8 = &.{},
+    // Lighthouse run for this individual page. Absent unless the scan measured
+    // every page; null on a page whose measurement failed or was skipped.
+    performance: ?u32 = null,
+    lcpMs: ?f64 = null,
+    cls: ?f64 = null,
 };
 pub const Report = struct {
     url: []const u8 = "",
@@ -1094,15 +1099,15 @@ fn buildExtracted(d: *Doc) !void {
     d.gap(8);
 }
 
-/// URL → the path, trimmed for the table's left column.
-fn shortPath(d: *Doc, url: []const u8) []const u8 {
+/// URL → the path, trimmed to `max` characters for the table's left column.
+fn shortPath(d: *Doc, url: []const u8, max: usize) []const u8 {
     var p = url;
     if (std.mem.indexOf(u8, p, "://")) |i| {
         p = p[i + 3 ..];
         if (std.mem.indexOfScalar(u8, p, '/')) |j| p = p[j..] else p = "/";
     }
     if (p.len == 0) p = "/";
-    return if (p.len > 42) d.f("{s}\u{2026}", .{p[0..41]}) else p;
+    return if (p.len > max) d.f("{s}\u{2026}", .{p[0 .. max - 1]}) else p;
 }
 
 // Pages Audited — per-page extraction from the multi-page crawl (--crawl N).
@@ -1136,15 +1141,24 @@ fn buildPagesAudited(d: *Doc) !void {
         pages = list.items;
     }
 
+    // A performance score per page only exists when the scan measured every page.
+    // Without it the column would be empty, which invites the reader to assume the
+    // entry page's score holds site-wide — the one inference the data cannot support.
+    var any_perf = false;
+    for (all) |p| {
+        if (p.performance != null) any_perf = true;
+    }
+    const perf_clause: []const u8 = if (any_perf) " each page's own Lighthouse performance score," else "";
+
     if (summarise) {
         try d.para(d.f("{d} pages were crawled and parsed individually. {d} had no on-page issues " ++
-            "and are not listed; the {d} below are every page that did \u{2014} with the title and " ++
+            "and are not listed; the {d} below are every page that did \u{2014} with{s} the title and " ++
             "meta-description lengths search engines truncate on, the H1 count, the schema types " ++
-            "present, and the body word count.", .{ all.len, clean, pages.len }), 10, INK, 10);
+            "present, and the body word count.", .{ all.len, clean, pages.len, perf_clause }), 10, INK, 10);
     } else {
         try d.para(d.f("{d} pages were crawled and parsed individually. This is what each one " ++
-            "actually contains \u{2014} the title and meta-description lengths search engines truncate on, " ++
-            "the H1 count, the schema types present, and the body word count.", .{pages.len}), 10, INK, 10);
+            "actually contains \u{2014}{s} the title and meta-description lengths search engines truncate on, " ++
+            "the H1 count, the schema types present, and the body word count.", .{ pages.len, perf_clause }), 10, INK, 10);
     }
     if (pages.len == 0) {
         try d.para(d.f("All {d} pages are clean \u{2014} no title, description, heading or schema issues found.", .{all.len}), 10, GREEN, 6);
@@ -1152,12 +1166,16 @@ fn buildPagesAudited(d: *Doc) !void {
         return;
     }
 
-    const c_type = ML + 190;
-    const c_title = ML + 250;
-    const c_desc = ML + 300;
-    const c_h1 = ML + 348;
-    const c_words = ML + 396;
+    // Two column layouts: the PERF column takes its width from the path column,
+    // so the table keeps the same right edge either way.
+    const c_type = ML + (if (any_perf) @as(f64, 166) else 190);
+    const c_title = ML + (if (any_perf) @as(f64, 222) else 250);
+    const c_desc = ML + (if (any_perf) @as(f64, 268) else 300);
+    const c_h1 = ML + (if (any_perf) @as(f64, 310) else 348);
+    const c_words = ML + (if (any_perf) @as(f64, 352) else 396);
+    const c_perf = ML + 396;
     const c_schema = ML + 430;
+    const path_max: usize = if (any_perf) 33 else 42;
 
     try d.ensure(22);
     const hy = d.y + 10;
@@ -1167,6 +1185,7 @@ fn buildPagesAudited(d: *Doc) !void {
     try d.text(c_desc, hy, "DESC", 8, GREY, true, .center);
     try d.text(c_h1, hy, "H1", 8, GREY, true, .center);
     try d.text(c_words, hy, "WORDS", 8, GREY, true, .center);
+    if (any_perf) try d.text(c_perf, hy, "PERF", 8, GREY, true, .center);
     try d.text(c_schema, hy, "SCHEMA", 8, GREY, true, .left);
     d.y += 14;
     try d.rect(ML, d.y, CW, 0.8, RULE, null, 0);
@@ -1207,12 +1226,21 @@ fn buildPagesAudited(d: *Doc) !void {
         try d.accentCard(ML, y, CW, h, CARD_BG, bar);
         _ = i;
 
-        try d.text(ML + 14, y + 12, shortPath(d, p.url), 8.5, INK, false, .left);
+        try d.text(ML + 14, y + 12, shortPath(d, p.url, path_max), 8.5, INK, false, .left);
         try d.text(c_type, y + 12, p.pageType, 8, GREY, false, .left);
         try d.text(c_title, y + 12, d.f("{d}", .{p.titleLength}), 9, t_col, false, .center);
         try d.text(c_desc, y + 12, d.f("{d}", .{p.metaDescriptionLength}), 9, d_col, false, .center);
         try d.text(c_h1, y + 12, d.f("{d}", .{p.h1Count}), 9, h_col, false, .center);
         try d.text(c_words, y + 12, d.f("{d}", .{p.wordCount}), 9, w_col, false, .center);
+        if (any_perf) {
+            // An unmeasured page is a dash, never a zero — a failed run is not a
+            // score of nothing.
+            if (p.performance) |perf| {
+                try d.text(c_perf, y + 12, d.f("{d}", .{perf}), 9, scoreColor(@floatFromInt(perf)), false, .center);
+            } else {
+                try d.text(c_perf, y + 12, "\u{2014}", 9, LGREY, false, .center);
+            }
+        }
         var sy = y + 12;
         for (schema_lines) |ln| {
             try d.text(c_schema, sy, ln, 8, INK, false, .left);
@@ -1232,6 +1260,24 @@ fn buildPagesAudited(d: *Doc) !void {
     d.y += 3;
     try d.rect(ML, d.y, CW, 0.8, RULE, null, 0);
     d.y += 6;
+    if (any_perf) {
+        // Spread across pages, not just the entry page: the average and the one
+        // page that drags it down.
+        var total: u64 = 0;
+        var scored: u32 = 0;
+        var worst: ?PageSummary = null;
+        for (all) |p| {
+            const perf = p.performance orelse continue;
+            total += perf;
+            scored += 1;
+            if (worst == null or perf < worst.?.performance.?) worst = p;
+        }
+        if (worst) |w| {
+            const avg = (total + scored / 2) / scored;
+            try d.para(d.f("Per-page performance: {d} of {d} pages measured, average {d}/100, " ++
+                "lowest {d} at {s}.", .{ scored, all.len, avg, w.performance.?, shortPath(d, w.url, 60) }), 8.5, GREY, 4);
+        }
+    }
     try d.para("Title target ~30\u{2013}60 characters, meta description ~70\u{2013}155 (Google truncates beyond); " ++
         "exactly one H1 per page; under ~300 words reads as thin content.", 8.5, LGREY, 4);
     d.gap(8);
