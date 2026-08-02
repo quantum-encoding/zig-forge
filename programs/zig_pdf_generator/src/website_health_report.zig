@@ -370,6 +370,12 @@ pub const Report = struct {
     extracted: ?Extracted = null,
     pages: []const PageSummary = &.{},
     gallery: []const GalleryShot = &.{},
+    // Titling. The scoring, categories, findings and pagination are subject-agnostic,
+    // so the same renderer serves a codebase audit as well as a site audit — only the
+    // wording differs. Emitters that scan something other than a website override
+    // these; the defaults keep every existing baton-audit report byte-identical.
+    reportTitle: []const u8 = "Website Health Audit",
+    reportBanner: []const u8 = "Website Health & Compliance Audit",
 };
 
 // ---- embedded QE assets ----------------------------------------------------
@@ -489,7 +495,7 @@ const Doc = struct {
     fn drawHeader(self: *Doc) !void {
         try self.image(self.logo_white, ML, 34, 16, 16);
         try self.text(ML + 22, 46, "Quantum Encoding", 9, NAVY, true, .left);
-        try self.text(PW - MR, 46, self.f("{s} · Website Health Audit", .{self.rep.domain}), 8.5, GREY, false, .right);
+        try self.text(PW - MR, 46, self.f("{s} · {s}", .{ self.rep.domain, self.rep.reportTitle }), 8.5, GREY, false, .right);
         try self.rect(ML, 56, CW, 0.8, CYAN, null, 0);
     }
 
@@ -884,10 +890,10 @@ fn buildCover(d: *Doc) !void {
     try d.rect(0, 0, PW, 150, NAVY, null, 0);
     try d.image(d.logo_dark, ML, 42, 50, 50);
     try d.text(ML + 64, 66, "QUANTUM ENCODING", 16, CYAN_BRIGHT, true, .left);
-    try d.text(ML + 64, 86, "Website Health & Compliance Audit", 10, CREAM, false, .left);
+    try d.text(ML + 64, 86, r.reportBanner, 10, CREAM, false, .left);
 
     // title + domain
-    try d.text(ML, 214, "Website Health Audit", 27, NAVY, true, .left);
+    try d.text(ML, 214, r.reportTitle, 27, NAVY, true, .left);
     try d.text(ML, 244, r.domain, 20, CYAN, true, .left);
     var yy: f64 = 268;
     if (r.client) |c| {
