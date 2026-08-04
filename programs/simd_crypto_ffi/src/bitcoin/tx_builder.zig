@@ -71,6 +71,20 @@ pub const DUST_LIMIT: u64 = 546;
 /// Maximum transaction size (100KB)
 pub const MAX_TX_SIZE: usize = 100000;
 
+/// Bytes reserved per output script.
+///
+/// Sized by the LARGEST script this builder can emit, which is a standards-conformant
+/// OP_RETURN: 1 byte OP_RETURN + 2 bytes OP_PUSHDATA1 and its length + 80 bytes of payload
+/// = 83. Every other form (P2PKH 25, P2SH 23, P2WPKH 22, P2TR 34) fits well inside it.
+///
+/// This was 64 while `addOpReturnOutput` accepted the full 80-byte payload the standard
+/// allows — so any payload of 63 bytes or more wrote past the row, and the slice handed to
+/// the serialiser and to the BIP143 sighash then read up to 19 bytes of whatever followed
+/// it in memory. `init()` leaves this array `undefined`, so those would have been
+/// uninitialised process bytes, signed and published to a public ledger. The Apple slices
+/// build with safety checks compiled out, so nothing would have caught it at runtime.
+pub const OUTPUT_SCRIPT_CAPACITY: usize = 83;
+
 // =============================================================================
 // Error Types
 // =============================================================================
@@ -139,7 +153,7 @@ pub const TxBuilder = struct {
     inputs: [MAX_INPUTS]SpendableUtxo,
     input_count: usize,
     outputs: [MAX_OUTPUTS]TxDestination,
-    output_scripts: [MAX_OUTPUTS][64]u8, // Storage for script data
+    output_scripts: [MAX_OUTPUTS][OUTPUT_SCRIPT_CAPACITY]u8, // Storage for script data
     output_script_lens: [MAX_OUTPUTS]usize,
     output_count: usize,
     locktime: u32,
@@ -283,19 +297,37 @@ pub const TxBuilder = struct {
     }
 
     /// Get total input value
+    /// Saturating, not wrapping.
+    ///
+    /// Input values arrive from a UTXO list a block explorer supplied, so they are
+    /// attacker-influenceable, and the Apple slices compile overflow checks OUT — a bare
+    /// `+=` would wrap silently. That matters because this feeds the insufficient-funds
+    /// comparison in `signTransaction`: a wrapped total can make outputs look affordable
+    /// when they are not. Saturating at `maxInt(u64)` keeps the comparison ordered the
+    /// right way (a suspiciously huge total fails the fee check rather than passing it),
+    /// which is the same discipline `ffi-grok.zig` already applies with `@addWithOverflow`
+    /// and `prev_tx.rs` with `checked_add`.
     pub fn getTotalInputValue(self: *const Self) u64 {
         var total: u64 = 0;
         for (self.inputs[0..self.input_count]) |input| {
-            total += input.value;
+            const sum = @addWithOverflow(total, input.value);
+            if (sum[1] != 0) return std.math.maxInt(u64);
+            total = sum[0];
         }
         return total;
     }
 
     /// Get total output value
+    /// Saturating, for the reason given on `getTotalInputValue` — and on this side the
+    /// saturation direction is what protects the fee check: an output total that would have
+    /// wrapped to a small number reads as enormous instead, so `inputs < outputs` refuses
+    /// the transaction rather than waving it through.
     pub fn getTotalOutputValue(self: *const Self) u64 {
         var total: u64 = 0;
         for (self.outputs[0..self.output_count]) |output| {
-            total += output.value;
+            const sum = @addWithOverflow(total, output.value);
+            if (sum[1] != 0) return std.math.maxInt(u64);
+            total = sum[0];
         }
         return total;
     }
