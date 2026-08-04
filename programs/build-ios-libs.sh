@@ -92,6 +92,11 @@ build_lib() {
         -femit-bin="$OUTPUT_DIR/ios-arm64/lib${lib_name}.a" \
         2>&1; then
         echo -e "${GREEN}  ✓ iOS Device${NC}"
+        # Record WHAT this archive was built from. A consumer linking a prebuilt
+        # `.a` cannot otherwise tell it apart from one built months ago, and its
+        # test suite goes green either way.
+        "$SCRIPT_DIR/../scripts/zig-source-id.sh" "$full_dir" \
+            > "$OUTPUT_DIR/ios-arm64/lib${lib_name}-source-id.txt"
     else
         echo -e "${RED}  ✗ iOS Device failed${NC}"
         return 1
@@ -113,6 +118,11 @@ build_lib() {
         -femit-bin="$OUTPUT_DIR/ios-sim-arm64/lib${lib_name}.a" \
         2>&1; then
         echo -e "${GREEN}  ✓ iOS Simulator${NC}"
+        # Record WHAT this archive was built from. A consumer linking a prebuilt
+        # `.a` cannot otherwise tell it apart from one built months ago, and its
+        # test suite goes green either way.
+        "$SCRIPT_DIR/../scripts/zig-source-id.sh" "$full_dir" \
+            > "$OUTPUT_DIR/ios-sim-arm64/lib${lib_name}-source-id.txt"
     else
         echo -e "${RED}  ✗ iOS Simulator failed${NC}"
         return 1
