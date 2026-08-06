@@ -822,10 +822,13 @@ pub const HttpClient = struct {
         defer req.deinit();
 
         try req.sendBodiless();
-        _ = try req.receiveHead(&.{});
+        const response = try req.receiveHead(&.{});
 
+        // A HEAD response carries Content-Length/Transfer-Encoding for the body the
+        // server *would* have sent, but no body follows — the status line and headers
+        // are the whole payload.
         return Response{
-            .status = .ok,
+            .status = response.head.status,
             .body = try self.allocator.alloc(u8, 0),
             .allocator = self.allocator,
         };

@@ -45,13 +45,29 @@ pub fn build(b: *std.Build) void {
         .root_module = security_test_module,
     });
 
+    // Externally-anchored HEAD status regression tests (src/head_status_test.zig).
+    // Replays RFC 9110 status lines off a loopback listener, so it needs its own
+    // root: the vectors exercise HttpClient end-to-end over a real socket rather
+    // than calling into the library surface lib.zig re-exports.
+    const head_status_test_module = b.createModule(.{
+        .root_source_file = b.path("src/head_status_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = false,
+    });
+    const head_status_unit_tests = b.addTest(.{
+        .root_module = head_status_test_module,
+    });
+
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
     const run_manifest_unit_tests = b.addRunArtifact(manifest_unit_tests);
     const run_security_unit_tests = b.addRunArtifact(security_unit_tests);
+    const run_head_status_unit_tests = b.addRunArtifact(head_status_unit_tests);
     const test_step = b.step("test", "Run library tests");
     test_step.dependOn(&run_lib_unit_tests.step);
     test_step.dependOn(&run_manifest_unit_tests.step);
     test_step.dependOn(&run_security_unit_tests.step);
+    test_step.dependOn(&run_head_status_unit_tests.step);
 
     // Helper function to create executable with http-sentinel import
     const addExample = struct {
