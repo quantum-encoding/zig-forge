@@ -15,10 +15,6 @@
 //!     `export fn zig_ai_*`; importing more than one into a single test
 //!     binary collides at link time. `ffi/mod.zig` keeps its own
 //!     `test-ffi` step.
-//!   - `src/config.zig`: force-analyzing it hits a zig_toml `Array` API
-//!     drift (`toml.Array` no longer exposes `.len`, config.zig:151),
-//!     which is a separate, out-of-scope compile break. It stays lazily
-//!     analyzed (unreferenced) so the test build remains green.
 
 const std = @import("std");
 
@@ -29,6 +25,7 @@ const security_path_validator = @import("agent/security/path_validator.zig");
 const security_sandbox = @import("agent/security/sandbox.zig");
 
 // Other modules carrying inline unit tests.
+const config = @import("config.zig");
 const agent_pricing = @import("agent/pricing.zig");
 const agent_tools = @import("agent/tools/mod.zig");
 const batch_csv_parser = @import("batch/csv_parser.zig");
@@ -64,6 +61,7 @@ test {
     std.testing.refAllDecls(security_path_validator);
     std.testing.refAllDecls(security_sandbox);
 
+    std.testing.refAllDecls(config);
     std.testing.refAllDecls(agent_pricing);
     std.testing.refAllDecls(agent_tools);
     std.testing.refAllDecls(batch_csv_parser);

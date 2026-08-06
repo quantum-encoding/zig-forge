@@ -16,7 +16,9 @@ extern "c" fn fread(ptr: [*]u8, size: usize, nmemb: usize, stream: *FILE) usize;
 /// Priority: user config (~/.config/zig_ai/models.toml) > project config (./config/models.toml) > defaults
 pub const ModelConfig = struct {
     allocator: Allocator,
-    data: ?std.StringHashMap(toml.Value),
+    /// Parsed document root. `toml.Table` owns its keys and values
+    /// recursively — one `deinit` frees the whole tree.
+    data: ?toml.Table,
 
     const Self = @This();
 
@@ -33,12 +35,7 @@ pub const ModelConfig = struct {
     /// Clean up allocated resources
     pub fn deinit(self: *Self) void {
         if (self.data) |*d| {
-            var iter = d.iterator();
-            while (iter.next()) |entry| {
-                self.allocator.free(entry.key_ptr.*);
-                entry.value_ptr.deinit(self.allocator);
-            }
-            d.deinit();
+            d.deinit(self.allocator);
             self.data = null;
         }
     }
@@ -61,9 +58,10 @@ pub const ModelConfig = struct {
             if (self.data) |*existing| {
                 // Merge user config into existing
                 self.mergeConfigs(existing, uc);
-                // Free user config after merge (keys were duped)
+                // The merge deep-copies everything it keeps, so the user
+                // config's own tree is freed whole.
                 var uc_mut = uc;
-                uc_mut.deinit();
+                uc_mut.deinit(self.allocator);
             } else {
                 self.data = uc;
             }
@@ -71,7 +69,7 @@ pub const ModelConfig = struct {
     }
 
     /// Load a single config file
-    fn loadFile(self: *Self, path: []const u8) ?std.StringHashMap(toml.Value) {
+    fn loadFile(self: *Self, path: []const u8) ?toml.Table {
         // Create null-terminated path for C
         var path_buf: [512]u8 = undefined;
         if (path.len >= path_buf.len - 1) return null;
@@ -97,46 +95,59 @@ pub const ModelConfig = struct {
         const bytes_read = fread(content.ptr, 1, size, file);
         if (bytes_read != size) return null;
 
-        // Parse TOML
-        var parser = toml.Parser.init(self.allocator, content);
-        return parser.parse() catch null;
+        // Parse TOML. `parseToml` owns the parser lifecycle and frees partial
+        // state on error, so a malformed file yields null with nothing leaked.
+        return toml.parseToml(self.allocator, content) catch null;
     }
 
     /// Merge source config into target (source values override)
-    fn mergeConfigs(self: *Self, target: *std.StringHashMap(toml.Value), source: std.StringHashMap(toml.Value)) void {
-        var iter = source.iterator();
+    fn mergeConfigs(self: *Self, target: *toml.Table, source: toml.Table) void {
+        var source_mut = source;
+        var iter = source_mut.iterator();
         while (iter.next()) |entry| {
-            const key = self.allocator.dupe(u8, entry.key_ptr.*) catch continue;
-
-            // If both are tables, merge recursively
+            // A section present in both configs merges key-by-key, so a user
+            // config that overrides one model does not drop the rest of the
+            // project's section. Anything below that level is replaced whole:
+            // models.toml is section/key shaped, and staying iterative here
+            // avoids recursing over a `[a.b.c…]` chain, which can nest deeper
+            // than the parser's inline-depth cap.
             if (entry.value_ptr.* == .table) {
-                if (target.get(key)) |existing| {
+                if (target.get(entry.key_ptr.*)) |existing| {
                     if (existing == .table) {
-                        // Both are tables - merge at the table level
-                        var existing_table = existing.table;
-                        var source_table_iter = entry.value_ptr.table.iterator();
-                        while (source_table_iter.next()) |src_entry| {
-                            const sub_key = self.allocator.dupe(u8, src_entry.key_ptr.*) catch continue;
-                            const sub_val = self.cloneValue(src_entry.value_ptr.*) catch continue;
-                            existing_table.put(sub_key, sub_val) catch {
-                                self.allocator.free(sub_key);
-                            };
+                        var section_iter = entry.value_ptr.table.iterator();
+                        while (section_iter.next()) |src_entry| {
+                            self.putOwned(existing.table, src_entry.key_ptr.*, src_entry.value_ptr.*);
                         }
-                        self.allocator.free(key);
                         continue;
                     }
                 }
             }
 
-            // Clone the value for insertion
-            const cloned = self.cloneValue(entry.value_ptr.*) catch {
-                self.allocator.free(key);
-                continue;
-            };
-            target.put(key, cloned) catch {
-                self.allocator.free(key);
-            };
+            self.putOwned(target, entry.key_ptr.*, entry.value_ptr.*);
         }
+    }
+
+    /// Deep-copy `value` under `key` into `table`, freeing whatever the table
+    /// already held there. On allocation failure the table is left untouched —
+    /// a partial merge keeps the lower-priority config rather than a torn one.
+    fn putOwned(self: *Self, table: *toml.Table, key: []const u8, value: toml.Value) void {
+        var cloned = self.cloneValue(value) catch return;
+
+        const owned_key = self.allocator.dupe(u8, key) catch {
+            cloned.deinit(self.allocator);
+            return;
+        };
+        const gop = table.entries.getOrPut(owned_key) catch {
+            self.allocator.free(owned_key);
+            cloned.deinit(self.allocator);
+            return;
+        };
+        if (gop.found_existing) {
+            // The table already owns an equal key; keep it and drop the copy.
+            self.allocator.free(owned_key);
+            gop.value_ptr.deinit(self.allocator);
+        }
+        gop.value_ptr.* = cloned;
     }
 
     /// Clone a Value (deep copy)
@@ -148,19 +159,31 @@ pub const ModelConfig = struct {
             .boolean => |b| toml.Value{ .boolean = b },
             .datetime => |d| toml.Value{ .datetime = try self.allocator.dupe(u8, d) },
             .array => |arr| {
-                const new_arr = try self.allocator.alloc(toml.Value, arr.len);
-                for (arr, 0..) |item, i| {
-                    new_arr[i] = try self.cloneValue(item);
+                var new_arr: toml.Array = .{ .items = .empty, .is_aot = arr.is_aot };
+                errdefer new_arr.deinit(self.allocator);
+
+                try new_arr.items.ensureTotalCapacityPrecise(self.allocator, arr.items.items.len);
+                for (arr.items.items) |item| {
+                    new_arr.items.appendAssumeCapacity(try self.cloneValue(item));
                 }
                 return toml.Value{ .array = new_arr };
             },
             .table => |t| {
-                var new_table = std.StringHashMap(toml.Value).init(self.allocator);
+                // Nested tables are heap-allocated for pointer stability, the
+                // same contract the parser builds them under.
+                const new_table = try self.allocator.create(toml.Table);
+                errdefer self.allocator.destroy(new_table);
+                new_table.* = toml.Table.init(self.allocator);
+                new_table.kind = t.kind;
+                errdefer new_table.deinit(self.allocator);
+
                 var iter = t.iterator();
                 while (iter.next()) |entry| {
                     const key = try self.allocator.dupe(u8, entry.key_ptr.*);
-                    const value = try self.cloneValue(entry.value_ptr.*);
-                    try new_table.put(key, value);
+                    errdefer self.allocator.free(key);
+                    var value = try self.cloneValue(entry.value_ptr.*);
+                    errdefer value.deinit(self.allocator);
+                    try new_table.entries.put(key, value);
                 }
                 return toml.Value{ .table = new_table };
             },
@@ -300,17 +323,106 @@ pub fn deinitGlobalConfig() void {
 // Tests
 test "ModelConfig defaults" {
     const allocator = std.testing.allocator;
-    var config = ModelConfig.init(allocator);
+
+    // No document loaded, so every lookup misses and the caller's default
+    // wins. Constructed directly rather than through `init`, which reads the
+    // real ~/.config/zig_ai/models.toml — asserting a specific model after
+    // that would make this pass or fail on whose machine it runs.
+    var config = ModelConfig{ .allocator = allocator, .data = null };
     defer config.deinit();
 
-    // Without a config file, getModel returns null
-    // getModelOr should return the default
+    try std.testing.expectEqual(@as(?[]const u8, null), config.getModel(Providers.anthropic, "default"));
     const model = config.getModelOr(Providers.anthropic, "default", Defaults.anthropic_default);
     try std.testing.expectEqualStrings(Defaults.anthropic_default, model);
+}
+
+test "ModelConfig.init parses and frees whatever config is on disk" {
+    // Environment-dependent by nature, so it asserts only that the load path
+    // survives the real files: parse, merge, and free without leaking (the
+    // testing allocator fails the test on a leak) — never that a particular
+    // model is configured.
+    var config = ModelConfig.init(std.testing.allocator);
+    defer config.deinit();
+
+    _ = config.getModelOr(Providers.anthropic, "default", Defaults.anthropic_default);
 }
 
 test "Defaults constants" {
     try std.testing.expectEqualStrings("claude-sonnet-4-6", Defaults.anthropic_default);
     try std.testing.expectEqualStrings("dall-e-3", Defaults.dalle3);
     try std.testing.expectEqualStrings("lyria-002", Defaults.lyria);
+}
+
+test "user config overrides one model without dropping the rest of the section" {
+    const allocator = std.testing.allocator;
+
+    const project = try toml.parseToml(allocator,
+        \\[anthropic]
+        \\main = "claude-opus-4"
+        \\small = "claude-haiku-4"
+        \\
+        \\[openai]
+        \\main = "gpt-5"
+        \\
+    );
+    var config = ModelConfig{ .allocator = allocator, .data = project };
+    defer config.deinit();
+
+    var user = try toml.parseToml(allocator,
+        \\[anthropic]
+        \\main = "claude-sonnet-4-6"
+        \\
+        \\[xai]
+        \\main = "grok-4-1"
+        \\
+    );
+    config.mergeConfigs(&config.data.?, user);
+    // Free the source before reading the result: a merge that borrowed rather
+    // than copied would be reading freed memory from here on.
+    user.deinit(allocator);
+
+    try std.testing.expectEqualStrings("claude-sonnet-4-6", config.getModel("anthropic", "main").?);
+    // The regression this pins: a section present in both configs must merge
+    // key-by-key, not replace wholesale.
+    try std.testing.expectEqualStrings("claude-haiku-4", config.getModel("anthropic", "small").?);
+    try std.testing.expectEqualStrings("gpt-5", config.getModel("openai", "main").?);
+    try std.testing.expectEqualStrings("grok-4-1", config.getModel("xai", "main").?);
+}
+
+test "merge deep-copies arrays and nested tables out of the user config" {
+    const allocator = std.testing.allocator;
+
+    const project = try toml.parseToml(allocator,
+        \\[vertex]
+        \\main = "gemini-2.5-pro"
+        \\regions = ["us-central1"]
+        \\
+    );
+    var config = ModelConfig{ .allocator = allocator, .data = project };
+    defer config.deinit();
+
+    var user = try toml.parseToml(allocator,
+        \\[vertex]
+        \\regions = ["europe-west4", "us-east5"]
+        \\limits = { rpm = 60 }
+        \\
+    );
+
+    // Deep copy, not aliasing: the merged string must not point into the
+    // user config's buffers.
+    const user_region = user.get("vertex").?.table.get("regions").?.array.items.items[0].string;
+    config.mergeConfigs(&config.data.?, user);
+    const merged_vertex = config.data.?.get("vertex").?.table;
+    const merged_regions = merged_vertex.get("regions").?.array;
+    try std.testing.expect(merged_regions.items.items[0].string.ptr != user_region.ptr);
+
+    user.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), merged_regions.items.items.len);
+    try std.testing.expectEqualStrings("europe-west4", merged_regions.items.items[0].string);
+    try std.testing.expectEqualStrings("us-east5", merged_regions.items.items[1].string);
+    // A nested table added by the user config survives the copy...
+    try std.testing.expectEqual(@as(i64, 60), merged_vertex.get("limits").?.table.get("rpm").?.integer);
+    // ...and a key only the project config set is still there.
+    try std.testing.expectEqualStrings("gemini-2.5-pro", config.getModel("vertex", "main").?);
 }
