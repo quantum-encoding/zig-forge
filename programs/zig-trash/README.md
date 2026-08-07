@@ -2,7 +2,9 @@
 
 `trash` is a CLI that moves files and directories to the OS trash instead of deleting them, and manages what is already in there (`list`, `size`, `empty`, `restore`).
 
-It is a drop-in `rm` substitute: `-v`, `-f`, `-n`, `-r`/`-R` and `--` are accepted with `rm` semantics, and it exits nonzero on failure. Agent sessions on this machine are told to use it in place of `rm`, so **its failure mode is permanent data loss** — correctness beats features here, and anything ambiguous fails safe and preserves the file.
+It is a drop-in `rm` substitute: `-v`, `-f`, `-n`, `-r`/`-R` and `--` are accepted with `rm` semantics, and it exits nonzero on failure. Agent sessions are told to use a `trash` in place of `rm`, so **the failure mode of whichever binary is installed is permanent data loss** — correctness beats features here, and anything ambiguous fails safe and preserves the file.
+
+> **This is not the deployed `trash`.** On the operator's Mac, `~/.local/bin/trash` is a separate Rust implementation (`trash 1.1.0`), and by decision (2026-08-07) it stays. This tree is source-only: build and test it, but do not install it over the deployed binary. Swapping the implementation behind a command every agent session must use — and which `rm` is blocked in favour of — is an operator call, not a maintenance step.
 
 ## Platforms
 
@@ -34,10 +36,13 @@ trash restore <pattern> [--to <path>]
 zig build                 # -> zig-out/bin/trash
 zig build test            # tier-1 anchors (fast, touches nothing outside .zig-cache)
 zig build itest           # end-to-end behavioural tests (see below)
-install -m 755 zig-out/bin/trash ~/.local/bin/trash
 ```
 
-Rebuild and reinstall after changing the source — `~/.local/bin/trash` is a copy, not a symlink, so an old binary can outlive the tree it was built from.
+Installing is deliberately not part of that sequence — see the note at the top. If a machine does adopt this binary, `~/.local/bin/trash` is a copy rather than a symlink, so the install has to be repeated after every source change or an old binary quietly outlives the tree it was built from:
+
+```sh
+install -m 755 zig-out/bin/trash ~/.local/bin/trash
+```
 
 ### Tests
 
