@@ -97,7 +97,7 @@ zig build wasm
 ls zig-out/bin/zig_docx.wasm
 ```
 
-The module exports the same C FFI as the native lib — `zig_docx_md_to_docx`, `zig_docx_to_markdown`, `zig_docx_to_markdown_with_images`, `zig_docx_info`, `zig_docx_fra_from_json`, `zig_docx_alloc`, plus matching `_free` calls and `zig_docx_version`. Imports are vanilla `wasi_snapshot_preview1` syscalls — load with Node's `node:wasi`, wasmtime, wasmer, jco, or any WASI-compatible host.
+The module exports the same C FFI as the native lib — `zig_docx_md_to_docx`, `zig_docx_md_to_docx_with_images`, `zig_docx_to_markdown`, `zig_docx_to_markdown_with_images`, `zig_docx_info`, `zig_docx_fra_from_json`, `zig_docx_alloc`, plus matching `_free` calls and `zig_docx_version`. Imports are vanilla `wasi_snapshot_preview1` syscalls — load with Node's `node:wasi`, wasmtime, wasmer, jco, or any WASI-compatible host.
 
 `pdf` and `claude_code` modules are gated out of the WASM build (subprocess and dirent.d_name aren't available under WASI). Everything else — XML, ZIP, DrawingML, FRA, MDX — works unchanged.
 
@@ -483,7 +483,8 @@ The same conversion functions exposed to the CLI are exported as a stable C ABI 
 
 | Function | Returns | Notes |
 |---|---|---|
-| `zig_docx_md_to_docx(md_ptr, md_len, opts)` | `ZigDocxResult` | Markdown → DOCX bytes |
+| `zig_docx_md_to_docx(md_ptr, md_len, opts)` | `ZigDocxResult` | Markdown → DOCX bytes. Image references fall back to their alt text — the library reads no files |
+| `zig_docx_md_to_docx_with_images(md_ptr, md_len, opts, images, images_count)` | `ZigDocxResult` | Markdown → DOCX bytes **with** the pictures: the host passes the bytes, matched to each `![](…)` by whole path or filename. Referenced twice, stored once; an unmatched reference keeps its alt text |
 | `zig_docx_to_markdown(docx_ptr, docx_len)` | `ZigDocxResult` | DOCX → MDX bytes (drops embedded images) |
 | `zig_docx_to_markdown_with_images(docx_ptr, docx_len)` | `ZigDocxMarkdownResult` | DOCX → MDX bytes **plus** the embedded images keyed by the filenames the markdown references |
 | `zig_docx_fra_from_json(json_ptr, json_len)` | `ZigDocxResult` | FRA JSON → DOCX bytes |

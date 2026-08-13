@@ -673,13 +673,21 @@ fn writeImageRun(
 ) !void {
     const rel_id = run.image_rel_id orelse return;
 
-    var cx: u64 = DEFAULT_IMAGE_CX;
-    var cy: u64 = DEFAULT_IMAGE_CY;
-    if (images.findByRid(rel_id)) |entry| {
-        const emu = pixelsToEmu(entry.width, entry.height, DEFAULT_IMAGE_CX, DEFAULT_IMAGE_CY);
-        cx = emu.cx;
-        cy = emu.cy;
-    }
+    // An unregistered rel_id means nothing resolved this reference: the CLI
+    // could not load the file, or a host called the library without supplying
+    // the bytes. Writing the drawing anyway puts the unresolved value —
+    // typically the raw markdown path — into r:embed with no matching
+    // relationship and no word/media entry, which Word reports as unreadable
+    // content. A document that silently lacks a picture is a lesser fault
+    // than one that will not open, so the alt text stands in its place.
+    const entry = images.findByRid(rel_id) orelse {
+        if (run.text.len > 0) try writeRun(allocator, buf, run);
+        return;
+    };
+
+    const emu = pixelsToEmu(entry.width, entry.height, DEFAULT_IMAGE_CX, DEFAULT_IMAGE_CY);
+    const cx: u64 = emu.cx;
+    const cy: u64 = emu.cy;
 
     const id_val = drawing_id.*;
     drawing_id.* += 1;

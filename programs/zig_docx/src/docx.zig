@@ -626,6 +626,9 @@ test {
     // test root). Wire in the ZIP reader and FRA generator coverage.
     _ = zip;
     _ = fra;
+    // The C ABI is the surface every embedder compiles against — its tests
+    // belong in the same run as everything else.
+    _ = ffi;
     // Tier-1 external anchors (LibreOffice-authored fixture, CPython-verified
     // CRCs/text, PKWARE APPNOTE + ECMA-376 structural constants).
     _ = @import("tier1_anchors.zig");

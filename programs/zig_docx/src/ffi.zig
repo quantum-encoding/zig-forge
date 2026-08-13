@@ -39,6 +39,22 @@ pub const ZigDocxOptions = extern struct {
     letterhead_ext: ?[*:0]const u8 = null,
 };
 
+/// One image the HOST supplies for markdown → DOCX.
+///
+/// `name` is matched against the reference written in the markdown: either
+/// the whole path (`./images/screenshot.png`) or its final component
+/// (`screenshot.png`). Matching on the basename too means a host whose
+/// uploads live in a flat store does not have to reproduce the author's
+/// directory layout to get the picture into the document.
+///
+/// The bytes are COPIED during conversion, so the host may free them as soon
+/// as the call returns.
+pub const ZigDocxInputImage = extern struct {
+    name: ?[*:0]const u8,
+    data: ?[*]const u8,
+    len: usize,
+};
+
 /// Document info extracted from a DOCX file.
 pub const ZigDocxInfo = extern struct {
     title: ?[*:0]u8 = null,
@@ -190,6 +206,7 @@ fn zig_docx_xlsx_sheet_names(
 
 comptime {
     @export(&zig_docx_md_to_docx, .{ .name = "zig_docx_md_to_docx" });
+    @export(&zig_docx_md_to_docx_with_images, .{ .name = "zig_docx_md_to_docx_with_images" });
     @export(&zig_docx_xlsx_to_csv, .{ .name = "zig_docx_xlsx_to_csv" });
     @export(&zig_docx_xlsx_sheet_names, .{ .name = "zig_docx_xlsx_sheet_names" });
     @export(&zig_docx_to_markdown, .{ .name = "zig_docx_to_markdown" });
@@ -230,12 +247,41 @@ fn zig_docx_md_to_docx(
     md_len: usize,
     opts: ?*const ZigDocxOptions,
 ) callconv(.c) ZigDocxResult {
+    return zig_docx_md_to_docx_with_images(md_ptr, md_len, opts, null, 0);
+}
+
+/// Markdown → DOCX with the pictures the markdown refers to.
+///
+/// The library cannot read files: loading `![alt](path)` from disk happens in
+/// the CLI, which has a filesystem and a base directory to confine it to. A
+/// host embedding the library — a WASM module in a server, an iOS app — has
+/// neither, so it passes the bytes it already holds and they are matched to
+/// the references by name.
+///
+/// A reference with no matching image is dropped rather than written out
+/// unresolved (see writeImageRun); passing null/0 here is exactly the old
+/// behaviour, minus the invalid drawing it used to emit.
+fn zig_docx_md_to_docx_with_images(
+    md_ptr: [*]const u8,
+    md_len: usize,
+    opts: ?*const ZigDocxOptions,
+    images_ptr: ?[*]const ZigDocxInputImage,
+    images_count: usize,
+) callconv(.c) ZigDocxResult {
     const md_text = md_ptr[0..md_len];
 
     var result = docx.md_parser.parseMarkdown(allocator, md_text) catch {
         return makeError("Failed to parse markdown");
     };
     defer result.deinit();
+
+    if (images_ptr) |ptr| {
+        if (images_count > 0) {
+            attachHostMedia(&result.document, ptr[0..images_count]) catch {
+                return makeError("Out of memory embedding images");
+            };
+        }
+    }
 
     // Build writer options from FFI options
     var writer_opts = docx.docx_writer.DocxWriterOptions{};
@@ -293,6 +339,121 @@ fn zig_docx_md_to_docx(
         .len = docx_bytes.len,
         .error_msg = null,
     };
+}
+
+// ─── Host-supplied media ───────────────────────────────────────────
+
+/// The part of a path after the last separator. `./images/a.png` → `a.png`.
+fn basename(path: []const u8) []const u8 {
+    if (std.mem.lastIndexOfAny(u8, path, "/\\")) |slash| return path[slash + 1 ..];
+    return path;
+}
+
+/// The file extension without its dot, defaulting to png — the DOCX writer
+/// needs one to pick the media part's content type.
+fn extensionOf(name: []const u8) []const u8 {
+    const base = basename(name);
+    if (std.mem.lastIndexOfScalar(u8, base, '.')) |dot| {
+        const ext = base[dot + 1 ..];
+        if (ext.len > 0 and ext.len <= 4) return ext;
+    }
+    return "png";
+}
+
+/// Which host image a markdown reference means, by whole path or by filename.
+fn findHostImage(images: []const ZigDocxInputImage, reference: []const u8) ?usize {
+    for (images, 0..) |img, i| {
+        const name_ptr = img.name orelse continue;
+        const name = std.mem.span(name_ptr);
+        if (std.mem.eql(u8, name, reference)) return i;
+    }
+    const ref_base = basename(reference);
+    for (images, 0..) |img, i| {
+        const name_ptr = img.name orelse continue;
+        if (std.mem.eql(u8, basename(std.mem.span(name_ptr)), ref_base)) return i;
+    }
+    return null;
+}
+
+/// Register the host's bytes against the references that name them.
+///
+/// The parser leaves each image run holding the markdown path; this is the
+/// in-memory counterpart of the CLI's disk load, replacing that path with a
+/// media entry the writer can resolve. Bytes are copied because the document
+/// owns and frees its media, and the host's buffer is only guaranteed for
+/// the duration of the call. An image referenced twice is stored once.
+fn attachHostMedia(doc: *docx.Document, images: []const ZigDocxInputImage) !void {
+    var media_list: std.ArrayListUnmanaged(docx.MediaFile) = .empty;
+    errdefer {
+        for (media_list.items) |m| {
+            allocator.free(m.name);
+            allocator.free(m.data);
+        }
+        media_list.deinit(allocator);
+    }
+
+    // Media name assigned to each host image, once it is first referenced.
+    const assigned = try allocator.alloc(?[]const u8, images.len);
+    defer allocator.free(assigned);
+    @memset(assigned, null);
+
+    for (doc.elements) |*elem| {
+        switch (elem.*) {
+            .paragraph => |*p| try attachToRuns(p.runs, images, assigned, &media_list),
+            .table => |*t| {
+                for (t.rows) |row| {
+                    for (row.cells) |cell| {
+                        for (cell.paragraphs) |*cp| {
+                            try attachToRuns(cp.runs, images, assigned, &media_list);
+                        }
+                    }
+                }
+            },
+        }
+    }
+
+    if (media_list.items.len == 0) {
+        media_list.deinit(allocator);
+        return;
+    }
+    doc.media = try media_list.toOwnedSlice(allocator);
+}
+
+fn attachToRuns(
+    runs: []docx.Run,
+    images: []const ZigDocxInputImage,
+    assigned: []?[]const u8,
+    media_list: *std.ArrayListUnmanaged(docx.MediaFile),
+) !void {
+    for (runs) |*run| {
+        const reference = run.image_rel_id orelse continue;
+        const idx = findHostImage(images, reference) orelse continue;
+
+        if (assigned[idx] == null) {
+            const host = images[idx];
+            const data_ptr = host.data orelse continue;
+            if (host.len == 0) continue;
+            const host_name = if (host.name) |n| std.mem.span(n) else "";
+
+            const media_name = try std.fmt.allocPrint(
+                allocator,
+                "image{d}.{s}",
+                .{ media_list.items.len + 1, extensionOf(host_name) },
+            );
+            errdefer allocator.free(media_name);
+            const data_copy = try allocator.dupe(u8, data_ptr[0..host.len]);
+            errdefer allocator.free(data_copy);
+
+            try media_list.append(allocator, .{ .name = media_name, .data = data_copy });
+            assigned[idx] = media_name;
+        }
+
+        // The run owns its own copy: the document frees run and media strings
+        // through separate paths.
+        const rel = try allocator.dupe(u8, assigned[idx].?);
+        allocator.free(reference);
+        run.image_rel_id = rel;
+    }
 }
 
 /// Generate a Fire Risk Assessment DOCX from JSON input.
@@ -586,4 +747,79 @@ fn zig_docx_free_info(info: *ZigDocxInfo) callconv(.c) void {
 /// Returns the library version as a null-terminated string.
 fn zig_docx_version() callconv(.c) [*:0]const u8 {
     return "1.1.0";
+}
+
+// ─── Tests ─────────────────────────────────────────────────────────
+
+const testing = std.testing;
+
+/// A file name appears verbatim in a ZIP local header, so the presence of a
+/// media part can be asserted on the raw output without inflating anything.
+fn containsBytes(haystack: []const u8, needle: []const u8) bool {
+    return std.mem.indexOf(u8, haystack, needle) != null;
+}
+
+test "host images are embedded and matched by filename" {
+    const md = "# Guide\n\n![The scheduler](./images/screenshot.png)\n";
+    const png = "\x89PNG\r\n\x1a\nnot-really-a-png-but-bytes-are-bytes";
+    const images = [_]ZigDocxInputImage{.{
+        .name = "screenshot.png", // markdown says ./images/screenshot.png
+        .data = png.ptr,
+        .len = png.len,
+    }};
+
+    const result = zig_docx_md_to_docx_with_images(md.ptr, md.len, null, &images, images.len);
+    try testing.expect(result.error_msg == null);
+    try testing.expect(result.data != null);
+    defer zig_docx_free(result.data, result.len);
+
+    const bytes = result.data.?[0..result.len];
+    try testing.expect(containsBytes(bytes, "word/media/image1.png"));
+}
+
+test "an image nobody supplied leaves no media part behind" {
+    const md = "# Guide\n\n![A shot nobody uploaded](./images/missing.png)\n";
+
+    const result = zig_docx_md_to_docx(md.ptr, md.len, null);
+    try testing.expect(result.error_msg == null);
+    try testing.expect(result.data != null);
+    defer zig_docx_free(result.data, result.len);
+
+    const bytes = result.data.?[0..result.len];
+    // No media part, and therefore no relationship for one: the alternative
+    // is a drawing pointing at nothing, which Word refuses to open.
+    try testing.expect(!containsBytes(bytes, "word/media/"));
+}
+
+test "the same picture referenced twice is stored once" {
+    const md =
+        "# Guide\n\n![One](./images/shot.png)\n\n![Two](./images/shot.png)\n";
+    const png = "\x89PNG\r\n\x1a\nbytes";
+    const images = [_]ZigDocxInputImage{.{ .name = "shot.png", .data = png.ptr, .len = png.len }};
+
+    const result = zig_docx_md_to_docx_with_images(md.ptr, md.len, null, &images, images.len);
+    try testing.expect(result.data != null);
+    defer zig_docx_free(result.data, result.len);
+
+    const bytes = result.data.?[0..result.len];
+    try testing.expect(containsBytes(bytes, "word/media/image1.png"));
+    try testing.expect(!containsBytes(bytes, "word/media/image2.png"));
+}
+
+test "a markdown reference is matched by whole path as well as filename" {
+    try testing.expectEqualStrings("a.png", basename("./images/a.png"));
+    try testing.expectEqualStrings("a.png", basename("images\\a.png"));
+    try testing.expectEqualStrings("png", extensionOf("./images/a.png"));
+    try testing.expectEqualStrings("jpg", extensionOf("shot.jpg"));
+    // No extension, or an implausible one, falls back to the DOCX writer's
+    // default rather than inventing a content type.
+    try testing.expectEqualStrings("png", extensionOf("screenshot"));
+
+    const images = [_]ZigDocxInputImage{
+        .{ .name = "./images/a.png", .data = null, .len = 0 },
+        .{ .name = "b.png", .data = null, .len = 0 },
+    };
+    try testing.expectEqual(@as(?usize, 0), findHostImage(&images, "./images/a.png"));
+    try testing.expectEqual(@as(?usize, 1), findHostImage(&images, "./shots/b.png"));
+    try testing.expectEqual(@as(?usize, null), findHostImage(&images, "c.png"));
 }

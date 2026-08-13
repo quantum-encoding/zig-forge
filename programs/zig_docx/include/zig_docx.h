@@ -45,6 +45,21 @@ typedef struct {
     const char *letterhead_ext;      // Image extension ("png", "jpg"). NULL = "png".
 } ZigDocxOptions;
 
+/// One image the HOST supplies for markdown → DOCX.
+///
+/// `name` is matched against the reference written in the markdown: either
+/// the whole path ("./images/screenshot.png") or its final component
+/// ("screenshot.png"), so a flat upload store need not reproduce the author's
+/// directory layout.
+///
+/// The bytes are COPIED during conversion; the host may free them as soon as
+/// the call returns.
+typedef struct {
+    const char *name;      // Null-terminated. Matched by path or filename.
+    const uint8_t *data;   // Image bytes.
+    size_t len;            // Length of data in bytes.
+} ZigDocxInputImage;
+
 /// Document metadata extracted from a DOCX file.
 /// Free with zig_docx_free_info().
 typedef struct {
@@ -102,6 +117,34 @@ typedef struct {
 ZigDocxResult zig_docx_md_to_docx(const uint8_t *md_ptr,
                                    size_t md_len,
                                    const ZigDocxOptions *opts);
+
+/// Convert markdown to DOCX, embedding the pictures it refers to.
+///
+/// The library cannot read files: loading `![alt](path)` from disk happens in
+/// the CLI, which has a filesystem and a base directory to confine itself to.
+/// An embedded host — a WASM module in a server, an iOS app — passes the
+/// bytes it already holds and they are matched to the markdown references by
+/// name (whole path or filename, see ZigDocxInputImage).
+///
+/// A reference with no matching image keeps its alt text and produces no
+/// drawing, so the document always opens. An image referenced twice is
+/// stored once.
+///
+/// @param md_ptr        Pointer to UTF-8 markdown text.
+/// @param md_len        Length of markdown text in bytes.
+/// @param opts          Conversion options. Pass NULL for defaults.
+/// @param images        Array of host-supplied images, or NULL.
+/// @param images_count  Number of entries in images.
+/// @return              ZigDocxResult with DOCX bytes or error.
+///
+/// Example:
+///   ZigDocxInputImage imgs[1] = {{ "screenshot.png", png_bytes, png_len }};
+///   ZigDocxResult r = zig_docx_md_to_docx_with_images(md, md_len, NULL, imgs, 1);
+ZigDocxResult zig_docx_md_to_docx_with_images(const uint8_t *md_ptr,
+                                               size_t md_len,
+                                               const ZigDocxOptions *opts,
+                                               const ZigDocxInputImage *images,
+                                               size_t images_count);
 
 /// Convert a DOCX file (in memory) to markdown text.
 ///
