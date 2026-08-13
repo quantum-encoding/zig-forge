@@ -269,16 +269,10 @@ pub const InvoiceData = struct {
     seed: ?[32]u8 = null,
 };
 
-/// 32 bytes of random material for the encryption seed. Native: from libc
-/// arc4random. WASM has no CSPRNG here, so it returns zeros — and the engine
+/// 32 bytes of random material for the encryption seed. Native: from the OS
+/// CSPRNG. WASM has no CSPRNG here, so it returns zeros — and the engine
 /// refuses an all-zero seed, so a WASM caller must use the host-seeded export.
-fn osSeed() [32]u8 {
-    var s: [32]u8 = [_]u8{0} ** 32;
-    if (comptime !@import("builtin").target.cpu.arch.isWasm()) {
-        std.c.arc4random_buf(&s, s.len);
-    }
-    return s;
-}
+const osSeed = @import("pdf_crypt.zig").osSeed;
 
 // =============================================================================
 // Invoice Renderer

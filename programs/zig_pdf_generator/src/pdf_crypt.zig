@@ -215,10 +215,76 @@ pub fn hashV5(allocator: std.mem.Allocator, password: []const u8, salt: [8]u8, u
 }
 
 // =============================================================================
+// Seed material
+// =============================================================================
+
+/// 32 bytes of random material for an encryption seed — the file key, the four
+/// salts and the object IVs all derive from it. Native targets draw it from the
+/// OS CSPRNG; WASM has no in-module CSPRNG, so it returns zeros and the engine's
+/// all-zero refusal (see `document.PdfDocument.enableEncryption`) forces a WASM
+/// caller onto the host-seeded export.
+///
+/// Entropy failure is reported the same way: the seed stays all-zero rather than
+/// partially filled, so it trips that refusal instead of silently producing a
+/// PDF encrypted under a low-entropy key. Panicking here is not an option — this
+/// path is reachable through the C ABI, where an unhandled panic is UB.
+pub fn osSeed() [32]u8 {
+    var s: [32]u8 = [_]u8{0} ** 32;
+    if (!fillOsRandom(&s)) s = [_]u8{0} ** 32;
+    return s;
+}
+
+/// Fill `buf` from the OS CSPRNG; false if no entropy was obtained.
+///
+/// Zig 0.16 removed the `std.crypto.random` global and does not declare
+/// `arc4random_buf` for every libc — on glibc `std.c.arc4random_buf` is `void`,
+/// so calling it unconditionally breaks the x86_64-linux-gnu build. Select the
+/// same way `std.Io.Threaded.randomSecure` does: prefer the fork-safe,
+/// no-seed-required `arc4random_buf` wherever the libc declares it (Apple/BSD,
+/// glibc >= 2.36), then `getrandom(2)` — through libc when it wraps the syscall
+/// (glibc >= 2.25, musl, Android >= 28), otherwise raw.
+fn fillOsRandom(buf: []u8) bool {
+    const builtin = @import("builtin");
+    if (buf.len == 0) return true;
+    if (comptime builtin.target.cpu.arch.isWasm()) return false;
+
+    if (comptime @TypeOf(std.c.arc4random_buf) != void) {
+        std.c.arc4random_buf(buf.ptr, buf.len);
+        return true;
+    } else if (comptime @TypeOf(std.posix.system.getrandom) != void) {
+        // `errno` must come from the same namespace as the call: raw syscalls
+        // encode the error in the return value, the libc wrapper in `errno`.
+        var off: usize = 0;
+        while (off < buf.len) {
+            const rc = std.posix.system.getrandom(buf.ptr + off, buf.len - off, 0);
+            switch (std.posix.errno(rc)) {
+                .SUCCESS => off += @intCast(rc),
+                .INTR => continue,
+                else => return false,
+            }
+        }
+        return true;
+    } else if (comptime builtin.os.tag == .linux) {
+        var off: usize = 0;
+        while (off < buf.len) {
+            const rc = std.os.linux.getrandom(buf.ptr + off, buf.len - off, 0);
+            switch (std.os.linux.errno(rc)) {
+                .SUCCESS => off += rc,
+                .INTR => continue,
+                else => return false,
+            }
+        }
+        return true;
+    } else {
+        @compileError("no cryptographically secure OS RNG available for this target");
+    }
+}
+
+// =============================================================================
 // /Encrypt dictionary entries (V5/R6)
 // =============================================================================
 
-/// The random material the caller supplies (production: from std.crypto.random;
+/// The random material the caller supplies (production: derived from `osSeed`;
 /// tests: fixed for reproducibility).
 pub const Randomness = struct {
     file_key: FileKey,

@@ -72,15 +72,9 @@ pub const LetterInput = struct {
 };
 
 /// 32 random bytes for the encryption seed (file key / salts / IVs derive from
-/// it). Native: from libc arc4random. WASM has no CSPRNG here, so it returns
+/// it). Native: from the OS CSPRNG. WASM has no CSPRNG here, so it returns
 /// zeros — WASM callers must not request encryption (the export omits password).
-fn osSeed() [32]u8 {
-    var s: [32]u8 = [_]u8{0} ** 32;
-    if (comptime !@import("builtin").target.cpu.arch.isWasm()) {
-        std.c.arc4random_buf(&s, s.len);
-    }
-    return s;
-}
+const osSeed = @import("pdf_crypt.zig").osSeed;
 
 // =============================================================================
 // Data Model
