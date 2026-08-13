@@ -640,6 +640,10 @@ fn writeHyperlinkRun(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(
 }
 
 /// EMU per inch (914400) and per pixel at 96 DPI (9525) for drawing geometry.
+/// Text width of a portrait A4/Letter page with the default margins, in
+/// twentieths of a point — what a table has to share out between its columns.
+const CONTENT_WIDTH_TWIPS: u16 = 9360;
+
 const EMU_PER_PIXEL: u64 = 9525;
 const MAX_IMAGE_WIDTH_EMU: u64 = 5486400; // 6 inches
 const DEFAULT_IMAGE_CX: u64 = 5486400; // 6 inches
@@ -656,9 +660,15 @@ fn pixelsToEmu(width_px: u32, height_px: u32, default_cx: u64, default_cy: u64) 
     var cx: u64 = @as(u64, width_px) * EMU_PER_PIXEL;
     var cy: u64 = @as(u64, height_px) * EMU_PER_PIXEL;
     if (cx > MAX_IMAGE_WIDTH_EMU) {
-        // Reorder to scale down first — loses a tiny amount of precision
-        // but cannot overflow u64 even with extreme inputs.
-        cy = (cy / cx) * MAX_IMAGE_WIDTH_EMU;
+        // Multiply BEFORE dividing. Dividing first computed cy/cx in integer
+        // arithmetic, which is 0 for every image wider than it is tall — so a
+        // landscape screenshot came out with cy="0" and Word drew nothing.
+        //
+        // Overflow is not reachable: dimensions are clamped to MAX_IMAGE_DIM,
+        // so cy is at most 20000 * 9525 ≈ 1.9e8 and the product with
+        // MAX_IMAGE_WIDTH_EMU ≈ 5.5e6 is ≈ 1.0e15, four orders of magnitude
+        // inside u64.
+        cy = cy * MAX_IMAGE_WIDTH_EMU / cx;
         cx = MAX_IMAGE_WIDTH_EMU;
     }
     return .{ .cx = cx, .cy = cy };
@@ -811,9 +821,32 @@ fn writeTable(
         \\
     );
 
-    if (t.col_widths.len > 0) {
+    // A table has to declare its grid. ECMA-376 requires tblGrid, and without
+    // it a reader has nothing to lay the columns out against: LibreOffice
+    // collapsed the first column to nothing and ran the second off the page.
+    // Builders that know their widths (fra.zig) supply them; markdown tables
+    // do not, so the content width is shared equally.
+    var widths: []const u16 = t.col_widths;
+    var computed: ?[]u16 = null;
+    defer if (computed) |c| allocator.free(c);
+    if (widths.len == 0) {
+        var col_count: usize = 0;
+        for (t.rows) |row| col_count = @max(col_count, row.cells.len);
+        if (col_count > 0) {
+            const each: u16 = @intCast(CONTENT_WIDTH_TWIPS / col_count);
+            const buf_widths = try allocator.alloc(u16, col_count);
+            @memset(buf_widths, each);
+            // The last column takes the rounding, so the columns still sum to
+            // the full text width.
+            buf_widths[col_count - 1] = CONTENT_WIDTH_TWIPS - each * @as(u16, @intCast(col_count - 1));
+            computed = buf_widths;
+            widths = buf_widths;
+        }
+    }
+
+    if (widths.len > 0) {
         try buf.appendSlice(allocator, "<w:tblGrid>");
-        for (t.col_widths) |w| {
+        for (widths) |w| {
             var tmp: [32]u8 = undefined;
             const s = try std.fmt.bufPrint(&tmp, "<w:gridCol w:w=\"{d}\"/>", .{w});
             try buf.appendSlice(allocator, s);
@@ -825,9 +858,9 @@ fn writeTable(
         try buf.appendSlice(allocator, "<w:tr>");
         for (row.cells, 0..) |cell, ci| {
             try buf.appendSlice(allocator, "<w:tc><w:tcPr>");
-            if (ci < t.col_widths.len) {
+            if (ci < widths.len) {
                 var tmp: [64]u8 = undefined;
-                const s = try std.fmt.bufPrint(&tmp, "<w:tcW w:w=\"{d}\" w:type=\"dxa\"/>", .{t.col_widths[ci]});
+                const s = try std.fmt.bufPrint(&tmp, "<w:tcW w:w=\"{d}\" w:type=\"dxa\"/>", .{widths[ci]});
                 try buf.appendSlice(allocator, s);
             } else {
                 try buf.appendSlice(allocator, "<w:tcW w:w=\"0\" w:type=\"auto\"/>");
@@ -959,4 +992,70 @@ fn appendXmlEscaped(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u
             else => try buf.append(allocator, c),
         }
     }
+}
+
+// ─── Tests ─────────────────────────────────────────────────────────
+
+const testing = std.testing;
+
+test "a landscape image keeps its aspect ratio when scaled to the page" {
+    // 1920x1032 — an ordinary screen recording frame, and wider than the six
+    // inches a page can give it.
+    const emu = pixelsToEmu(1920, 1032, DEFAULT_IMAGE_CX, DEFAULT_IMAGE_CY);
+    try testing.expectEqual(MAX_IMAGE_WIDTH_EMU, emu.cx);
+    try testing.expect(emu.cy > 0); // dividing before multiplying gave 0 here
+
+    // Within a pixel of the true ratio.
+    const expected_cy: u64 = MAX_IMAGE_WIDTH_EMU * 1032 / 1920;
+    try testing.expectApproxEqAbs(
+        @as(f64, @floatFromInt(emu.cy)),
+        @as(f64, @floatFromInt(expected_cy)),
+        @as(f64, EMU_PER_PIXEL),
+    );
+}
+
+test "an image that already fits is left alone, and a zero-sized one falls back" {
+    const small = pixelsToEmu(300, 200, DEFAULT_IMAGE_CX, DEFAULT_IMAGE_CY);
+    try testing.expectEqual(@as(u64, 300 * EMU_PER_PIXEL), small.cx);
+    try testing.expectEqual(@as(u64, 200 * EMU_PER_PIXEL), small.cy);
+
+    const unknown = pixelsToEmu(0, 0, DEFAULT_IMAGE_CX, DEFAULT_IMAGE_CY);
+    try testing.expectEqual(DEFAULT_IMAGE_CX, unknown.cx);
+    try testing.expectEqual(DEFAULT_IMAGE_CY, unknown.cy);
+}
+
+test "a portrait image is scaled by height as well" {
+    // Taller than wide and over the limit: the width caps, the height follows.
+    const emu = pixelsToEmu(1200, 2400, DEFAULT_IMAGE_CX, DEFAULT_IMAGE_CY);
+    try testing.expectEqual(MAX_IMAGE_WIDTH_EMU, emu.cx);
+    try testing.expectEqual(MAX_IMAGE_WIDTH_EMU * 2, emu.cy);
+}
+
+test "a markdown table declares a grid so readers can lay it out" {
+    const allocator = testing.allocator;
+
+    var cell_a = [_]docx.Paragraph{.{ .runs = &[_]docx.Run{} }};
+    var cell_b = [_]docx.Paragraph{.{ .runs = &[_]docx.Run{} }};
+    var cells = [_]docx.TableCell{
+        .{ .paragraphs = &cell_a },
+        .{ .paragraphs = &cell_b },
+    };
+    var rows = [_]docx.TableRow{.{ .cells = &cells }};
+    const table = docx.Table{ .rows = &rows };
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    var hyperlinks = HyperlinkCollector.init(allocator);
+    defer hyperlinks.deinit();
+    var images = ImageCollector.init(allocator);
+    defer images.deinit();
+    var drawing_id: u32 = 1;
+
+    try writeTable(allocator, &buf, &table, &hyperlinks, &images, &drawing_id);
+
+    const xml = buf.items;
+    try testing.expect(std.mem.indexOf(u8, xml, "<w:tblGrid>") != null);
+    // Two equal columns that between them fill the text width.
+    try testing.expect(std.mem.indexOf(u8, xml, "<w:gridCol w:w=\"4680\"/>") != null);
+    try testing.expect(std.mem.indexOf(u8, xml, "<w:tcW w:w=\"4680\" w:type=\"dxa\"/>") != null);
 }
