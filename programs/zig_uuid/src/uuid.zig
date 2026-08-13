@@ -224,15 +224,28 @@ const builtin = @import("builtin");
 // when libc is linked. libc is linked for every module in this build.zig, so
 // on all Apple/BSD targets (and glibc >= 2.36) that fork-safe, thread-safe,
 // no-seed-required primitive is used directly. On other Linux libcs it falls
-// back to the `getrandom(2)` syscall.
+// back to `getrandom(2)` — through the libc wrapper where one exists (glibc >=
+// 2.25, musl, Android >= 28), otherwise the raw syscall. `errno` must be read
+// from the same namespace as the call: a raw syscall encodes the error in its
+// return value, the libc wrapper sets `errno`.
 fn fillRandom(buf: []u8) void {
     if (comptime @TypeOf(std.c.arc4random_buf) != void) {
         if (buf.len != 0) std.c.arc4random_buf(buf.ptr, buf.len);
+    } else if (comptime @TypeOf(std.posix.system.getrandom) != void) {
+        var off: usize = 0;
+        while (off < buf.len) {
+            const rc = std.posix.system.getrandom(buf.ptr + off, buf.len - off, 0);
+            switch (std.posix.errno(rc)) {
+                .SUCCESS => off += @intCast(rc),
+                .INTR => continue,
+                else => @panic("getrandom(2) failed: no OS entropy available for UUID generation"),
+            }
+        }
     } else if (comptime builtin.os.tag == .linux) {
         var off: usize = 0;
         while (off < buf.len) {
             const rc = std.os.linux.getrandom(buf.ptr + off, buf.len - off, 0);
-            switch (std.os.linux.E.init(rc)) {
+            switch (std.os.linux.errno(rc)) {
                 .SUCCESS => off += rc,
                 .INTR => continue,
                 else => @panic("getrandom(2) failed: no OS entropy available for UUID generation"),
