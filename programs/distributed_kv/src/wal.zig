@@ -19,7 +19,6 @@
 const std = @import("std");
 const raft = @import("raft.zig");
 const posix = std.posix;
-const linux = std.os.linux;
 
 // =============================================================================
 // Constants
@@ -124,19 +123,26 @@ fn createFile(path: []const u8) !posix.fd_t {
 fn writeAll(fd: posix.fd_t, data: []const u8) !void {
     var written: usize = 0;
     while (written < data.len) {
-        const result = linux.write(@intCast(fd), data[written..].ptr, data.len - written);
-        const n: isize = @bitCast(result);
-        if (n <= 0) return WalError.IoError;
-        written += @intCast(result);
+        const n = std.c.write(fd, data[written..].ptr, data.len - written);
+        if (n < 0) {
+            if (posix.errno(n) == .INTR) continue;
+            return WalError.IoError;
+        }
+        if (n == 0) return WalError.IoError;
+        written += @intCast(n);
     }
 }
 
 /// Read bytes from fd
 fn readBytes(fd: posix.fd_t, buf: []u8) !usize {
-    const result = linux.read(@intCast(fd), buf.ptr, buf.len);
-    const n: isize = @bitCast(result);
-    if (n < 0) return WalError.IoError;
-    return @intCast(result);
+    while (true) {
+        const n = std.c.read(fd, buf.ptr, buf.len);
+        if (n < 0) {
+            if (posix.errno(n) == .INTR) continue;
+            return WalError.IoError;
+        }
+        return @intCast(n);
+    }
 }
 
 /// Sync file to disk
@@ -182,6 +188,7 @@ pub const WalWriter = struct {
             .segment_index = 0,
             .bytes_written = 0,
         };
+        errdefer allocator.free(writer.dir_path);
 
         // Find latest segment or create new one
         try writer.openOrCreateSegment();
@@ -394,6 +401,10 @@ pub const WalReader = struct {
             .current_segment_idx = 0,
             .current_fd = null,
         };
+        errdefer {
+            reader.segments.deinit(allocator);
+            allocator.free(reader.dir_path);
+        }
 
         // Discover all segments
         try reader.discoverSegments();
