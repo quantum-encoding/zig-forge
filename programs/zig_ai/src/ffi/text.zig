@@ -32,7 +32,7 @@ export fn zig_ai_text_session_create(config: *const CTextConfig) ?*CTextSession 
         .max_tokens = config.max_tokens,
         .system_prompt = dupeString(config.system_prompt.toSlice()) catch null,
         .api_key = dupeString(config.api_key.toSlice()) catch null,
-        .conversation = std.ArrayList(Message).init(allocator),
+        .conversation = .empty,
     };
 
     return @ptrCast(session);
@@ -50,7 +50,7 @@ export fn zig_ai_text_session_destroy(session: ?*CTextSession) void {
     for (s.conversation.items) |msg| {
         allocator.free(msg.content);
     }
-    s.conversation.deinit();
+    s.conversation.deinit(allocator);
 
     allocator.destroy(s);
 }
@@ -81,9 +81,9 @@ export fn zig_ai_text_send(
     }
 
     // Build context from conversation history
-    var context: ?[]const cli.AIMessage = null;
+    var context: ?[]const cli.ai.AIMessage = null;
     if (s.conversation.items.len > 0) {
-        var ai_messages = allocator.alloc(cli.AIMessage, s.conversation.items.len) catch {
+        var ai_messages = allocator.alloc(cli.ai.AIMessage, s.conversation.items.len) catch {
             response_out.success = false;
             response_out.error_code = ErrorCode.OUT_OF_MEMORY;
             return;
@@ -92,8 +92,11 @@ export fn zig_ai_text_send(
 
         for (s.conversation.items, 0..) |msg, i| {
             ai_messages[i] = .{
+                .id = "",
                 .role = if (msg.is_user) .user else .assistant,
                 .content = msg.content,
+                .timestamp = 0,
+                .allocator = allocator,
             };
         }
         context = ai_messages;
@@ -119,12 +122,12 @@ export fn zig_ai_text_send(
     };
 
     // Store in conversation
-    s.conversation.append(.{
+    s.conversation.append(allocator, .{
         .content = allocator.dupe(u8, prompt_slice) catch "",
         .is_user = true,
     }) catch {};
 
-    s.conversation.append(.{
+    s.conversation.append(allocator, .{
         .content = allocator.dupe(u8, result.message.content) catch "",
         .is_user = false,
     }) catch {};
@@ -253,12 +256,12 @@ export fn zig_ai_text_send_ex(
     };
 
     // Store in conversation
-    s.conversation.append(.{
+    s.conversation.append(allocator, .{
         .content = allocator.dupe(u8, prompt_slice) catch "",
         .is_user = true,
     }) catch {};
 
-    s.conversation.append(.{
+    s.conversation.append(allocator, .{
         .content = allocator.dupe(u8, result.message.content) catch "",
         .is_user = false,
     }) catch {};
@@ -301,7 +304,12 @@ export fn zig_ai_text_clear_history(session: ?*CTextSession) void {
 // One-shot Functions (no session needed)
 // ============================================================================
 
-/// Send a one-shot message to a provider
+/// Send a one-shot message to a provider.
+///
+/// `api_key` is accepted for C ABI stability but not consulted: the CLI reads
+/// each provider's key from its own environment variable, the same path the
+/// session functions use. `zig_ai_text_provider_available` reports whether that
+/// variable is set.
 export fn zig_ai_text_query(
     provider: CTextProvider,
     prompt: CString,
@@ -318,11 +326,12 @@ export fn zig_ai_text_query(
         return;
     }
 
+    _ = api_key;
+
     const zig_provider = mapProvider(provider);
 
     const cli_config = cli.CLIConfig{
         .provider = zig_provider,
-        .api_key = if (api_key.len > 0) api_key.toSlice() else null,
     };
 
     var cli_instance = cli.CLI.init(allocator, cli_config);
@@ -358,6 +367,7 @@ export fn zig_ai_text_calculate_cost(
         .deepseek => "deepseek",
         .gemini => "google",
         .grok => "xai",
+        .openai => "openai",
         .vertex => "google",
         .unknown => return 0,
     };
@@ -434,6 +444,7 @@ fn mapProvider(cp: CTextProvider) cli.Provider {
         .deepseek => .deepseek,
         .gemini => .gemini,
         .grok => .grok,
+        .openai => .openai,
         .vertex => .vertex,
         .unknown => .claude,
     };

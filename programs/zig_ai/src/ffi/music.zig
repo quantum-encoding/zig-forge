@@ -89,9 +89,12 @@ export fn zig_ai_music_generate(
 
         for (result.tracks, 0..) |track, i| {
             c_tracks[i] = .{
-                .data = .{
-                    .ptr = (allocator.dupe(u8, track.data) catch &[_]u8{}).ptr,
-                    .len = track.data.len,
+                .data = blk: {
+                    // len must describe the buffer actually handed over: a failed
+                    // dupe with the source length still attached is a null pointer
+                    // the caller is told it may read.
+                    const copy = allocator.dupe(u8, track.data) catch break :blk CBuffer{ .ptr = null, .len = 0 };
+                    break :blk CBuffer{ .ptr = copy.ptr, .len = copy.len };
                 },
                 .format = mapFormatToC(track.format),
                 .local_path = CString.fromSlice(allocator.dupe(u8, track.local_path) catch ""),

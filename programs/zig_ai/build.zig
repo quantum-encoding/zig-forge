@@ -113,13 +113,17 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run zig-ai tests");
     test_step.dependOn(&run_tests.step);
 
-    // FFI module tests
+    // FFI module tests.
+    // Rooted at src/test_ffi_all.zig, not src/ffi/mod.zig: the root source
+    // file fixes the module path, and every file under src/ffi/ imports its
+    // implementation as "../…", which is outside a module rooted at src/ffi/.
     const ffi_test_module = b.createModule(.{
-        .root_source_file = b.path("src/ffi/mod.zig"),
+        .root_source_file = b.path("src/test_ffi_all.zig"),
         .target = target,
         .optimize = optimize,
     });
     ffi_test_module.addImport("http-sentinel", http_sentinel_module);
+    ffi_test_module.addImport("zig_toml", zig_toml_module);
     ffi_test_module.link_libc = true;
 
     const ffi_test_compile = b.addTest(.{

@@ -91,9 +91,12 @@ export fn zig_ai_video_generate(
 
         for (result.videos, 0..) |vid, i| {
             c_videos[i] = .{
-                .data = .{
-                    .ptr = (allocator.dupe(u8, vid.data) catch &[_]u8{}).ptr,
-                    .len = vid.data.len,
+                .data = blk: {
+                    // len must describe the buffer actually handed over: a failed
+                    // dupe with the source length still attached is a null pointer
+                    // the caller is told it may read.
+                    const copy = allocator.dupe(u8, vid.data) catch break :blk CBuffer{ .ptr = null, .len = 0 };
+                    break :blk CBuffer{ .ptr = copy.ptr, .len = copy.len };
                 },
                 .format = mapFormatToC(vid.format),
                 .local_path = CString.fromSlice(allocator.dupe(u8, vid.local_path) catch ""),

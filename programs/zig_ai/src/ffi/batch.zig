@@ -47,6 +47,7 @@ export fn zig_ai_batch_create(
                 allocator.dupe(u8, req.system_prompt.toSlice()) catch null
             else
                 null,
+            .allocator = allocator,
         };
     }
 
@@ -234,6 +235,7 @@ export fn zig_ai_batch_write_results(
             .cost = r.cost_usd,
             .execution_time_ms = r.execution_time_ms,
             .error_message = if (r.error_message.ptr != null) r.error_message.toSlice() else null,
+            .allocator = allocator,
         };
     }
 
@@ -280,6 +282,7 @@ fn mapProvider(cp: CTextProvider) cli.Provider {
         .deepseek => .deepseek,
         .gemini => .gemini,
         .grok => .grok,
+        .openai => .openai,
         .vertex => .vertex,
         .unknown => .claude,
     };
@@ -291,6 +294,7 @@ fn mapProviderToC(p: cli.Provider) CTextProvider {
         .deepseek => .deepseek,
         .gemini => .gemini,
         .grok => .grok,
+        .openai => .openai,
         .vertex => .vertex,
     };
 }
