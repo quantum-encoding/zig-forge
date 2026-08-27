@@ -15,6 +15,7 @@ const terminal = @import("terminal.zig");
 const Terminal = terminal.Terminal;
 const CellAttrs = terminal.CellAttrs;
 const CellColor = terminal.CellColor;
+const config = @import("config.zig");
 
 /// Parser state machine states
 pub const State = enum {
@@ -975,8 +976,61 @@ fn handleCsi(term: *Terminal, seq: CsiSequence) void {
                 term.setCursorStyle(seq.getParam(0, 1));
             }
         },
+        'c' => {
+            // DA - Device Attributes. The app BLOCKS on this answer: vim, fzf
+            // and an inner tmux send it and wait, so silence costs them a
+            // read timeout or drops them into a degraded-capability mode.
+            const marker: u8 = if (seq.intermediate_count > 0) seq.intermediates[0] else 0;
+            switch (marker) {
+                // DA1 (`CSI c` / `CSI 0 c`) — VT220 with 132 columns (22).
+                // Any other Ps is not a request, per xterm.
+                0 => if (seq.getParam(0, 0) == 0) term.queueResponse("\x1b[?62;22c"),
+                // DA2 (`CSI > c`) — terminal id 0, firmware 277, cartridge 0.
+                '>' => term.queueResponse("\x1b[>0;277;0c"),
+                // DA3 (`CSI = c`) reports a unit id we do not have; stay silent.
+                else => {},
+            }
+        },
+        'n' => {
+            // DSR - Device Status Report. Same blocking-caller story as DA;
+            // `CSI 6 n` (CPR) is what readline and every TUI uses to find the
+            // cursor after a resize or a partial redraw.
+            const marker: u8 = if (seq.intermediate_count > 0) seq.intermediates[0] else 0;
+            const ps = seq.getParam(0, 0);
+            if (marker == 0) {
+                switch (ps) {
+                    5 => term.queueResponse("\x1b[0n"), // "terminal ready, no fault"
+                    6 => reportCursorPosition(term, false),
+                    else => {},
+                }
+            } else if (marker == '?' and ps == 6) {
+                reportCursorPosition(term, true); // DECXCPR
+            }
+        },
         else => {},
     }
+}
+
+/// Answer CPR (`CSI 6 n`) or DECXCPR (`CSI ? 6 n`).
+///
+/// Under DECOM (origin mode) the reported row is RELATIVE to the scrolling
+/// region, because that is the coordinate space the app's own CUP calls use.
+/// Reporting an absolute row there sends the app back to the wrong line the
+/// next time it seeks to the position it just read.
+fn reportCursorPosition(term: *Terminal, extended: bool) void {
+    const top: u16 = if (term.modes.origin) term.scroll_region.top else 0;
+    const bottom: u16 = if (term.modes.origin) term.scroll_region.bottom else term.grid.rows - 1;
+
+    const clamped_row = std.math.clamp(term.cursor.row, top, bottom);
+    const row = clamped_row - top + 1;
+    const col = @min(term.cursor.col, term.grid.cols - 1) + 1;
+
+    var buf: [32]u8 = undefined;
+    const reply = if (extended)
+        std.fmt.bufPrint(&buf, "\x1b[?{d};{d};1R", .{ row, col }) catch return
+    else
+        std.fmt.bufPrint(&buf, "\x1b[{d};{d}R", .{ row, col }) catch return;
+    term.queueResponse(reply);
 }
 
 fn handleDecPrivateMode(term: *Terminal, seq: CsiSequence, enable: bool) void {
@@ -1154,6 +1208,24 @@ fn handleOsc(term: *Terminal, seq: OscSequence) void {
         },
         1 => {
             // Set icon name (ignore)
+        },
+        10, 11 => {
+            // OSC 10/11 with "?" asks for the default foreground/background.
+            // Apps read it to pick a light-vs-dark scheme; unanswered they
+            // either wait or guess, and guess wrong on a dark theme.
+            if (std.mem.eql(u8, seq.data, "?")) {
+                const th = &config.active_theme;
+                const c = if (seq.command == 10) th.fg else th.bg;
+                var buf: [48]u8 = undefined;
+                // xterm answers in 16-bit-per-channel rgb:; repeating each
+                // byte is the standard 8-to-16-bit widening (0xAB -> 0xABAB).
+                const reply = std.fmt.bufPrint(
+                    &buf,
+                    "\x1b]{d};rgb:{x:0>2}{x:0>2}/{x:0>2}{x:0>2}/{x:0>2}{x:0>2}\x1b\\",
+                    .{ seq.command, c.r, c.r, c.g, c.g, c.b, c.b },
+                ) catch return;
+                term.queueResponse(reply);
+            }
         },
         52 => {
             // Clipboard (OSC 52;Pc;Pd, Pd = base64). Queue the payload for the

@@ -26,6 +26,7 @@ const session = @import("session.zig");
 const terminal = @import("terminal.zig");
 const config = @import("config.zig");
 const url = @import("url.zig");
+const pty = @import("pty.zig");
 const gfx = @import("graphics.zig");
 
 /// libc malloc-backed allocator — the standard choice for a C-linked library.
@@ -58,6 +59,14 @@ pub const TmuxSession = struct {
     id: u64,
     sess: *session.Session,
     attached: bool,
+    /// Latched when `tmux_drain` sees a pane's child go away (EOF or POLLHUP
+    /// plus a dead process). Read-and-clear via `tmux_take_exit` — without it
+    /// a dead shell leaves its last grid on screen and reads exactly like an
+    /// idle one, which in a cockpit of agent panes is indistinguishable from
+    /// "still thinking".
+    child_exited: bool = false,
+    exit_code: c_int = 0,
+    exit_signal: c_int = 0,
 };
 
 var registry: std.AutoHashMapUnmanaged(u64, *TmuxSession) = .empty;
@@ -302,7 +311,12 @@ pub export fn tmux_pump(handle: ?*TmuxSession, timeout_ms: c_int) c_long {
     if (n == 0 or (fds[0].revents & posix.POLL.IN) == 0) return 0;
 
     var buf: [READ_CHUNK]u8 = undefined;
-    const r = pane.readOutput(&buf) catch return -1;
+    // The master is non-blocking, so a spurious wakeup after poll reports
+    // WouldBlock — that is "no data", not a failure.
+    const r = pane.readOutput(&buf) catch |err| {
+        if (err == error.WouldBlock) return 0;
+        return -1;
+    };
     if (r == 0) return 0;
     pane.processOutput(buf[0..r]);
     return @intCast(r);
@@ -324,14 +338,51 @@ pub export fn tmux_drain(handle: ?*TmuxSession) c_long {
         while (true) {
             var fds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
             const n = posix.poll(&fds, 0) catch break;
-            if (n == 0 or (fds[0].revents & posix.POLL.IN) == 0) break;
+            if (n == 0) break;
+            // HUP arrives unrequested. It and a 0-byte read are both EOF on
+            // the master: the slave side has no writer left, i.e. the child is
+            // gone. Confirm with waitpid before latching, because a
+            // still-running child that merely closed stdout is not an exit.
+            const hup = (fds[0].revents & (posix.POLL.HUP | posix.POLL.ERR)) != 0;
+            if ((fds[0].revents & posix.POLL.IN) == 0) {
+                if (hup) noteIfExited(h, pane);
+                break;
+            }
             const r = pane.readOutput(&buf) catch break;
-            if (r == 0) break;
+            if (r == 0) {
+                noteIfExited(h, pane);
+                break;
+            }
             pane.processOutput(buf[0..r]);
             total += @intCast(r);
         }
     }
     return total;
+}
+
+/// Latch a pane's child exit onto the session, once. `isAlive` does the reap,
+/// so the status is available immediately afterwards.
+fn noteIfExited(h: *TmuxSession, pane: *session.Pane) void {
+    if (pane.exit_reported) return; // this pane's exit is already the host's
+    if (pane.isAlive()) return; // EOF without an exit — nothing to report
+    const st = pane.exitStatus() orelse session.Pane.PtyExitStatus{};
+    pane.exit_reported = true;
+    h.child_exited = true;
+    h.exit_code = st.code;
+    h.exit_signal = st.signal;
+}
+
+/// Whether a pane's shell has exited since the last call (read-and-clear).
+/// Writes the exit code and terminating signal (0 = not signalled) when
+/// non-null. The host should stop its PTY sources and mark the pane dead —
+/// `tmux_drain` will not report it twice.
+pub export fn tmux_take_exit(handle: ?*TmuxSession, out_code: ?*c_int, out_signal: ?*c_int) bool {
+    const h = handle orelse return false;
+    if (!h.child_exited) return false;
+    if (out_code) |p| p.* = h.exit_code;
+    if (out_signal) |p| p.* = h.exit_signal;
+    h.child_exited = false;
+    return true;
 }
 
 /// Feed raw bytes straight into the VT emulator, bypassing the PTY. This drives
@@ -490,6 +541,31 @@ pub export fn tmux_take_clipboard(handle: ?*TmuxSession, out: ?[*]u8, max: usize
     const n = @min(t.clipboard_len, max);
     @memcpy(buf[0..n], t.clipboard_pending[0..n]);
     t.clipboard_len = 0;
+    return n;
+}
+
+/// Device-report replies the emulator owes the app (DA1/DA2, DSR/CPR, OSC
+/// 10/11 colour queries), read-and-clear. The host MUST write these back into
+/// the pane with `tmux_send` — vim, fzf and an inner tmux BLOCK on them, so
+/// dropping them costs a read timeout or a degraded-capability fallback.
+/// Returns bytes copied (0 = nothing pending). The queue is bounded
+/// (`terminal.RESP_CAPACITY`); drain it on every wake alongside `tmux_drain`.
+pub export fn tmux_take_responses(handle: ?*TmuxSession, out: ?[*]u8, max: usize) usize {
+    const h = handle orelse return 0;
+    const buf = out orelse return 0;
+    const t = &activePane(h).terminal;
+    if (t.resp_len == 0) return 0;
+    const n = @min(t.resp_len, max);
+    @memcpy(buf[0..n], t.resp_pending[0..n]);
+    // A short `max` would split an escape sequence across two calls and the
+    // app would read the fragment as keystrokes; keep the tail rather than
+    // hand over a partial reply.
+    if (n == t.resp_len) {
+        t.resp_len = 0;
+    } else {
+        std.mem.copyForwards(u8, t.resp_pending[0 .. t.resp_len - n], t.resp_pending[n..t.resp_len]);
+        t.resp_len -= n;
+    }
     return n;
 }
 
@@ -888,7 +964,9 @@ pub export fn tmux_find_urls(handle: ?*TmuxSession, out: ?[*]CUrlRange, max: usi
 // =============================================================================
 // Paste — bracketed-paste-aware. If the app enabled DEC mode 2004, wrap the data
 // in ESC[200~ … ESC[201~ so multi-line pastes don't trigger auto-indent / run
-// line-by-line. The write loop (pty.write) handles arbitrarily large pastes.
+// line-by-line. The write is SYNCHRONOUS and bounded (pty.write gives up after
+// ~250ms of a child not reading), so it returns a short count instead of
+// hanging the caller — which on the Apple host is the main thread.
 // =============================================================================
 
 /// True if the active pane's app turned on bracketed paste (DEC 2004).
@@ -898,19 +976,23 @@ pub export fn tmux_bracketed_paste(handle: ?*TmuxSession) bool {
 }
 
 /// Paste `data` into the active pane, bracketing it when DEC 2004 is on.
+///
+/// Returns the number of PAYLOAD bytes that actually reached the PTY (the
+/// bracket markers are not counted), or -1 on error. A SHORT return means the
+/// child stopped reading and `Pty.write` hit its stall budget — the host must
+/// treat the remainder as unsent and retry it, not assume the paste landed.
 pub export fn tmux_paste(handle: ?*TmuxSession, data: ?[*]const u8, len: usize) c_long {
     const h = handle orelse return -1;
     const d = data orelse return -1;
     const pane = activePane(h);
     pane.terminal.scrollback_offset = 0; // pasting snaps the view to the live bottom
-    if (pane.terminal.modes.bracketed_paste) {
-        pane.sendInput("\x1b[200~") catch return -1;
-        pane.sendInput(d[0..len]) catch return -1;
-        pane.sendInput("\x1b[201~") catch return -1;
-    } else {
-        pane.sendInput(d[0..len]) catch return -1;
-    }
-    return @intCast(len);
+    const bracketed = pane.terminal.modes.bracketed_paste;
+    if (bracketed) pane.sendInput("\x1b[200~") catch return -1;
+    const n = pane.writeInput(d[0..len]) catch return -1;
+    // Close the bracket even on a short write: leaving ESC[200~ unterminated
+    // makes the app treat everything the user types next as pasted text.
+    if (bracketed) pane.sendInput("\x1b[201~") catch return @intCast(n);
+    return @intCast(n);
 }
 
 // =============================================================================
@@ -1076,6 +1158,7 @@ test "graphics ABI struct layouts are stable for the C header" {
 }
 
 test "pane-aware surface: split, rects tile with a border gap, focus, close" {
+    try pty.skipIfUnavailable();
     var id: u64 = 0;
     // /bin/cat as the "shell": no rc files, no prompt noise, sits on the pty.
     const h = tmux_create(24, 80, "/bin/cat", &id) orelse return error.CreateFailed;
@@ -1109,6 +1192,78 @@ test "pane-aware surface: split, rects tile with a border gap, focus, close" {
     try std.testing.expectEqual(@as(c_int, 0), tmux_close_pane(h, 1));
     try std.testing.expectEqual(@as(usize, 1), tmux_pane_count(h));
     try std.testing.expectEqual(@as(c_int, -1), tmux_close_pane(h, 0)); // last pane refused
+}
+
+test "tmux_take_responses drains the emulator's device replies, never splitting one" {
+    try pty.skipIfUnavailable();
+    var id: u64 = 0;
+    const h = tmux_create(24, 80, "/bin/cat", &id) orelse return error.CreateFailed;
+    defer tmux_destroy(h);
+
+    var out: [64]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), tmux_take_responses(h, &out, out.len));
+
+    tmux_feed(h, "\x1b[3;7H\x1b[6n", 10);
+    const n = tmux_take_responses(h, &out, out.len);
+    try std.testing.expectEqualStrings("\x1b[3;7R", out[0..n]);
+    try std.testing.expectEqual(@as(usize, 0), tmux_take_responses(h, &out, out.len));
+
+    // A `max` too small to hold the whole reply must keep the tail queued
+    // rather than hand the app a fragment it would type as keystrokes.
+    tmux_feed(h, "\x1b[c", 3); // 9-byte DA1 reply
+    var small: [4]u8 = undefined;
+    const a = tmux_take_responses(h, &small, small.len);
+    try std.testing.expectEqual(@as(usize, 4), a);
+    try std.testing.expectEqualStrings("\x1b[?6", small[0..a]);
+    const b = tmux_take_responses(h, &out, out.len);
+    try std.testing.expectEqualStrings("2;22c", out[0..b]);
+}
+
+test "tmux_take_exit reports a child that exited, once, with its code" {
+    try pty.skipIfUnavailable();
+    var id: u64 = 0;
+    // `false` exits immediately with status 1 — a deterministic dead child.
+    const h = tmux_create(24, 80, "/usr/bin/false", &id) orelse return error.CreateFailed;
+    defer tmux_destroy(h);
+
+    // Drain until the exit is observed. The child races us to exit, so poll a
+    // bounded number of times rather than assuming the first drain sees it.
+    var code: c_int = -1;
+    var sig: c_int = -1;
+    var seen = false;
+    var i: usize = 0;
+    while (i < 200) : (i += 1) {
+        _ = tmux_drain(h);
+        if (tmux_take_exit(h, &code, &sig)) {
+            seen = true;
+            break;
+        }
+        var no_fds = [_]posix.pollfd{};
+        _ = posix.poll(&no_fds, 5) catch {};
+    }
+    try std.testing.expect(seen);
+    try std.testing.expectEqual(@as(c_int, 1), code); // /usr/bin/false
+    try std.testing.expectEqual(@as(c_int, 0), sig); // exited, not signalled
+
+    // Read-and-clear: the host must not redraw the "exited" bar every frame.
+    try std.testing.expect(!tmux_take_exit(h, &code, &sig));
+    _ = tmux_drain(h);
+    try std.testing.expect(!tmux_take_exit(h, &code, &sig));
+}
+
+test "tmux_take_exit stays false while the shell is alive" {
+    try pty.skipIfUnavailable();
+    var id: u64 = 0;
+    const h = tmux_create(24, 80, "/bin/cat", &id) orelse return error.CreateFailed;
+    defer tmux_destroy(h);
+    var i: usize = 0;
+    while (i < 20) : (i += 1) {
+        _ = tmux_drain(h);
+        try std.testing.expect(!tmux_take_exit(h, null, null));
+        var no_fds = [_]posix.pollfd{};
+        _ = posix.poll(&no_fds, 5) catch {};
+    }
+    try std.testing.expect(tmux_is_alive(h));
 }
 
 test "version string is well formed" {

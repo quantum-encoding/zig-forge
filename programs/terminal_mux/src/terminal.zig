@@ -97,6 +97,10 @@ pub const Cursor = struct {
     };
 };
 
+/// Reply-queue capacity. A CPR is ~10 bytes and a DA ~9, so 64 holds a burst
+/// of several queries between host drains without ever reallocating.
+pub const RESP_CAPACITY = 64;
+
 /// Saved cursor state (for ESC 7 / ESC 8)
 pub const SavedCursor = struct {
     row: u16,
@@ -566,6 +570,15 @@ pub const Terminal = struct {
     bell_pending: u32 = 0,
     clipboard_pending: [4096]u8 = undefined,
     clipboard_len: usize = 0,
+
+    /// Device-report replies the emulator owes the app: DA1/DA2 (`CSI c`),
+    /// DSR-CPR (`CSI 6 n`), OSC 10/11 colour queries. The emulator must not
+    /// write to the PTY — the host owns input — so replies queue here and the
+    /// host drains them via `tmux_take_responses` and sends them back.
+    /// Bounded on purpose: an app that spams queries while the host is not
+    /// draining drops replies instead of growing the terminal without limit.
+    resp_pending: [RESP_CAPACITY]u8 = undefined,
+    resp_len: usize = 0,
 
     // ---- Inline graphics (Kitty protocol, Phase 1) ----
     // Per-screen graphics state (images + placements), riding the alt-screen
@@ -1328,8 +1341,19 @@ pub const Terminal = struct {
         }
     }
 
+    /// Queue a device-report reply for the host to write back to the PTY.
+    /// Dropped whole when it does not fit: a truncated escape sequence on the
+    /// wire is worse than no answer at all, because the app parses the
+    /// fragment as literal keystrokes.
+    pub fn queueResponse(self: *Self, bytes: []const u8) void {
+        if (bytes.len > self.resp_pending.len - self.resp_len) return;
+        @memcpy(self.resp_pending[self.resp_len..][0..bytes.len], bytes);
+        self.resp_len += bytes.len;
+    }
+
     pub fn reset(self: *Self) void {
         self.cursor = .{};
+        self.resp_len = 0; // RIS: replies owed to the pre-reset app are void
         self.current_attrs = .{};
         self.current_fg = .{ .default = {} };
         self.current_bg = .{ .default = {} };

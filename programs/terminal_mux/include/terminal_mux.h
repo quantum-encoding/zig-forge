@@ -85,6 +85,12 @@ void     tmux_feed(tmux_session *handle, const uint8_t *data, size_t len);
 long     tmux_send(tmux_session *handle, const uint8_t *data, size_t len);
 int      tmux_resize(tmux_session *handle, uint16_t rows, uint16_t cols);
 bool     tmux_is_alive(tmux_session *handle);
+/* Whether a pane's shell has exited since the last call (read-and-clear).
+ * tmux_drain latches this on EOF/POLLHUP once waitpid confirms the child is
+ * gone; drain it on every wake. out_code / out_signal (either may be NULL)
+ * receive the exit code and the terminating signal (0 = exited normally).
+ * A dead pane otherwise looks exactly like an idle one — draw something. */
+bool     tmux_take_exit(tmux_session *handle, int *out_code, int *out_signal);
 
 /* ---- grid access ---- */
 void     tmux_grid_size(tmux_session *handle, uint16_t *out_rows, uint16_t *out_cols);
@@ -106,6 +112,12 @@ bool     tmux_sync_suppressed(tmux_session *handle);
 void     tmux_cursor_style(tmux_session *handle, uint8_t *out_shape, bool *out_blink);
 uint32_t tmux_take_bell(tmux_session *handle);
 size_t   tmux_take_clipboard(tmux_session *handle, uint8_t *out, size_t max);
+/* Device-report replies the emulator owes the app (DA1/DA2, DSR/CPR, OSC 10/11
+ * colour queries), read-and-clear. Drain on every wake alongside tmux_drain and
+ * write the bytes back with tmux_send: vim/fzf/inner-tmux BLOCK on the answer.
+ * Returns bytes copied (0 = none pending). Pass max >= 64 so a reply is never
+ * split across two calls. */
+size_t   tmux_take_responses(tmux_session *handle, uint8_t *out, size_t max);
 size_t   tmux_title(tmux_session *handle, uint8_t *out, size_t max);
 int      tmux_mouse(tmux_session *handle, int kind, int button, uint16_t row, uint16_t col, int mods);
 
@@ -188,9 +200,14 @@ size_t   tmux_find_urls(tmux_session *handle, tmux_url_range *out, size_t max);
 /* ---- paste ----
  * tmux_paste sends `data` to the active pane, wrapping it in ESC[200~ … ESC[201~
  * when the app has bracketed paste (DEC 2004) on, so big multi-line pastes go in
- * cleanly. The write loop handles arbitrarily large input. tmux_bracketed_paste
- * reports the current mode if you need it.
- */
+ * cleanly. tmux_bracketed_paste reports the current mode if you need it.
+ *
+ * RETURNS the payload bytes that actually reached the PTY, which may be SHORT
+ * of `len`: a child that has stopped reading (Ctrl-Z'd, wedged, dead but not
+ * reaped) stalls the write, and rather than block the caller forever the write
+ * gives up after ~250ms of no progress. Callers MUST check the return and
+ * resend the remainder. -1 on error. Chunk large pastes and keep them off a UI
+ * thread — this call is synchronous. */
 bool     tmux_bracketed_paste(tmux_session *handle);
 long     tmux_paste(tmux_session *handle, const uint8_t *data, size_t len);
 

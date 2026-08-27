@@ -106,6 +106,12 @@ pub const Pane = struct {
     boot_cmd: [1024]u8,
     boot_len: usize,
 
+    /// Set once this pane's child exit has been handed to the host. The pane's
+    /// master fd keeps reporting EOF/HUP on every poll forever, so without
+    /// this latch each drain would re-raise the same exit and the host would
+    /// redraw its "process exited" bar every frame.
+    exit_reported: bool = false,
+
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator, id: PaneId, rect: Rect, scrollback: u32) !*Self {
@@ -219,9 +225,17 @@ pub const Pane = struct {
 
     /// Send input to the PTY
     pub fn sendInput(self: *Self, data: []const u8) !void {
+        _ = try self.writeInput(data);
+    }
+
+    /// Like `sendInput` but reports how many bytes reached the PTY. Can be
+    /// short of `data.len` when the child has stopped reading — see
+    /// `Pty.write`. Callers that must not silently drop input (paste) use this.
+    pub fn writeInput(self: *Self, data: []const u8) !usize {
         if (self.pty) |*p| {
-            _ = try p.write(data);
+            return p.write(data);
         }
+        return 0;
     }
 
     /// Read available output from PTY
@@ -242,11 +256,21 @@ pub const Pane = struct {
     }
 
     /// Check if the pane's process is still alive
-    pub fn isAlive(self: *const Self) bool {
+    pub fn isAlive(self: *Self) bool {
         if (self.pty) |*p| {
             return p.isAlive();
         }
         return false;
+    }
+
+    /// Re-export so consumers don't have to reach through pty_mod.
+    pub const PtyExitStatus = pty_mod.Pty.ExitStatus;
+
+    /// How this pane's child ended, or null while it is still running / was
+    /// never spawned. Only populated once `isAlive` has observed the exit.
+    pub fn exitStatus(self: *const Self) ?PtyExitStatus {
+        if (self.pty) |*p| return p.exit_status;
+        return null;
     }
 
     /// Get the master fd for polling

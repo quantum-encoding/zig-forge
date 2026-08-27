@@ -39,6 +39,14 @@ const Harness = struct {
         const c = self.term().terminal.cursor;
         return .{ .row = c.row, .col = c.col };
     }
+    /// The reply queue the emulator owes the app, read-and-clear (what the
+    /// host drains via tmux_take_responses).
+    fn takeResp(self: *Harness) []const u8 {
+        const t = &self.term().terminal;
+        const out = t.resp_pending[0..t.resp_len];
+        t.resp_len = 0;
+        return out;
+    }
     /// A row's text with trailing blanks trimmed (esctest's screen comparison).
     fn rowText(self: *Harness, row: u16, buf: []u8) []const u8 {
         const grid = &self.term().terminal.grid;
@@ -336,4 +344,128 @@ test "esctest DECOM: CUP is relative to the scroll region and clamps to it" {
     h.feed("\x1b[1;1HC");
     try std.testing.expectEqual(@as(u21, 'C'), h.charAt(0, 0));
     h.feed("\x1b[r");
+}
+
+
+// ── device reports: DA / DSR / CPR ──────────────────────────────────────────
+//
+// [ctlseqs] "CSI Ps n — Device Status Report (DSR). Ps = 6 → Report Cursor
+// Position (CPR) [row;column] as CSI r ; c R" — rows and columns are 1-based.
+// [ctlseqs] DECOM: "the cursor position is relative to the scrolling region",
+// which is what makes the origin-mode case below a different answer, not just
+// a different clamp. esctest covers these as test_DSR_CPR* / test_DECOM*.
+//
+// NOTE ON ANCHORING: the CPR/DSR *format and values* are spec-derived above.
+// The DA identity strings are this terminal's own declaration of capability —
+// no external source can say what WE are — so those cases are DRIFT LOCKS on
+// the emitted bytes, not external anchors. Labelled here so the distinction
+// does not get lost (repo CLAUDE.md, golden rule §1).
+
+test "ctlseqs DSR-CPR: ESC[6n answers CSI row;col R, 1-based" {
+    var h = try Harness.init(10, 40);
+    defer h.deinit();
+    h.feed("\x1b[3;7H"); // row 3, col 7 (1-based on the wire)
+    h.feed("\x1b[6n");
+    try std.testing.expectEqualStrings("\x1b[3;7R", h.takeResp());
+}
+
+test "ctlseqs DSR-CPR under DECOM: the row is RELATIVE to the scroll region" {
+    var h = try Harness.init(10, 40);
+    defer h.deinit();
+    h.feed("\x1b[3;8r"); // DECSTBM: region = absolute rows 3..8
+    h.feed("\x1b[?6h"); // DECOM on — CUP and CPR both become region-relative
+    h.feed("\x1b[2;5H"); // 2nd row OF THE REGION = absolute row 4
+    try std.testing.expectEqual(@as(u16, 3), h.cursor().row); // 0-based absolute
+    h.feed("\x1b[6n");
+    // Must report 2, not 4: the app's next CUP uses the same origin.
+    try std.testing.expectEqualStrings("\x1b[2;5R", h.takeResp());
+}
+
+test "DSR-CPR clamps a cursor parked outside the origin-mode region" {
+    // Region set AFTER the cursor was parked below it: DECOM must not report a
+    // row that underflows past the region top (row 1 is the region's first).
+    var h = try Harness.init(10, 40);
+    defer h.deinit();
+    h.feed("\x1b[1;1H"); // absolute row 0
+    h.feed("\x1b[5;8r\x1b[?6h"); // region rows 5..8, then origin mode on
+    h.term().terminal.cursor.row = 0; // force the out-of-region parking
+    h.feed("\x1b[6n");
+    try std.testing.expectEqualStrings("\x1b[1;1R", h.takeResp());
+}
+
+test "ctlseqs DSR 5 answers CSI 0 n (no malfunction)" {
+    var h = try Harness.init(5, 20);
+    defer h.deinit();
+    h.feed("\x1b[5n");
+    try std.testing.expectEqualStrings("\x1b[0n", h.takeResp());
+}
+
+test "ctlseqs DECXCPR: ESC[?6n answers CSI ? row ; col ; page R" {
+    var h = try Harness.init(10, 40);
+    defer h.deinit();
+    h.feed("\x1b[4;2H\x1b[?6n");
+    try std.testing.expectEqualStrings("\x1b[?4;2;1R", h.takeResp());
+}
+
+test "drift lock — DA1 (ESC[c) and DA2 (ESC[>c) answer with our identity" {
+    var h = try Harness.init(5, 20);
+    defer h.deinit();
+    h.feed("\x1b[c");
+    try std.testing.expectEqualStrings("\x1b[?62;22c", h.takeResp());
+    h.feed("\x1b[0c"); // explicit Ps=0 is the same request
+    try std.testing.expectEqualStrings("\x1b[?62;22c", h.takeResp());
+    h.feed("\x1b[>c");
+    try std.testing.expectEqualStrings("\x1b[>0;277;0c", h.takeResp());
+}
+
+test "ctlseqs DA: a non-zero Ps and DA3 are not requests — stay silent" {
+    var h = try Harness.init(5, 20);
+    defer h.deinit();
+    h.feed("\x1b[1c"); // not a DA request per ctlseqs
+    h.feed("\x1b[=c"); // DA3 reports a unit id we do not have
+    h.feed("\x1b[7n"); // undefined DSR
+    try std.testing.expectEqual(@as(usize, 0), h.takeResp().len);
+}
+
+test "OSC 10/11 '?' answer the themed fg/bg as 16-bit rgb:" {
+    const config = @import("config.zig");
+    const saved = config.active_theme;
+    defer config.active_theme = saved;
+    config.active_theme.fg = .{ .r = 0xD9, .g = 0xDB, .b = 0xE0 };
+    config.active_theme.bg = .{ .r = 0x12, .g = 0x12, .b = 0x17 };
+
+    var h = try Harness.init(5, 20);
+    defer h.deinit();
+    // xterm answers colour queries with 16-bit-per-channel components; the
+    // 8-bit value is widened by repetition (0xD9 -> 0xD9D9).
+    h.feed("\x1b]10;?\x1b\\");
+    try std.testing.expectEqualStrings("\x1b]10;rgb:d9d9/dbdb/e0e0\x1b\\", h.takeResp());
+    h.feed("\x1b]11;?\x1b\\");
+    try std.testing.expectEqualStrings("\x1b]11;rgb:1212/1212/1717\x1b\\", h.takeResp());
+    // A SET (non-"?") must not answer.
+    h.feed("\x1b]11;#000000\x1b\\");
+    try std.testing.expectEqual(@as(usize, 0), h.takeResp().len);
+}
+
+test "the reply queue is bounded: a query burst drops whole replies, never partial ones" {
+    const terminal = @import("terminal.zig");
+    var h = try Harness.init(10, 40);
+    defer h.deinit();
+    // Each DA1 reply is 9 bytes; 64 bytes of capacity holds 7 with 1 left over,
+    // so the 8th must be dropped ENTIRELY rather than truncated to 1 byte.
+    var i: usize = 0;
+    while (i < 20) : (i += 1) h.feed("\x1b[c");
+    const queued = h.takeResp();
+    try std.testing.expect(queued.len <= terminal.RESP_CAPACITY);
+    try std.testing.expectEqual(@as(usize, 0), queued.len % 9); // no partial reply
+    try std.testing.expectEqual(@as(usize, 63), queued.len);
+}
+
+test "RIS voids replies owed to the pre-reset app" {
+    var h = try Harness.init(5, 20);
+    defer h.deinit();
+    h.feed("\x1b[6n");
+    try std.testing.expect(h.term().terminal.resp_len > 0);
+    h.feed("\x1bc"); // RIS
+    try std.testing.expectEqual(@as(usize, 0), h.takeResp().len);
 }

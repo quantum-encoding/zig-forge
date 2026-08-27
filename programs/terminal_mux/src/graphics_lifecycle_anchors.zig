@@ -16,6 +16,7 @@ const session = @import("session.zig");
 const terminal = @import("terminal.zig");
 const gfx = @import("graphics.zig");
 const capi = @import("capi.zig");
+const pty = @import("pty.zig");
 
 const talloc = std.testing.allocator;
 
@@ -218,6 +219,7 @@ test "lifecycle 4: alt-screen placements never leak into the primary; freed on e
 // the placement appear, move with a scroll, expose its bytes, and free on delete.
 // ============================================================================
 test "graphics ABI: transmit, place, image_data, scroll-move, delete + freed" {
+    try pty.skipIfUnavailable();
     var id: u64 = 0;
     const hh = capi.tmux_create(24, 80, "/bin/cat", &id) orelse return error.CreateFailed;
     defer capi.tmux_destroy(hh);
@@ -281,6 +283,7 @@ test "graphics ABI: transmit, place, image_data, scroll-move, delete + freed" {
 test "recorded-stream anchor: committed .bin replays to the expected ABI state" {
     const fixture = @embedFile("graphics_fixture");
 
+    try pty.skipIfUnavailable();
     var id: u64 = 0;
     const hh = capi.tmux_create(24, 80, "/bin/cat", &id) orelse return error.CreateFailed;
     defer capi.tmux_destroy(hh);
