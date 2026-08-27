@@ -82,6 +82,9 @@ int      tmux_pty_fd(tmux_session *handle);
 long     tmux_pump(tmux_session *handle, int timeout_ms);
 long     tmux_drain(tmux_session *handle);
 void     tmux_feed(tmux_session *handle, const uint8_t *data, size_t len);
+/* Returns bytes ACTUALLY written, or -1. A short return means the child stopped
+ * reading and the write hit its ~250ms stall budget — the caller owns the
+ * remainder. Keystroke-sized sends never go short. */
 long     tmux_send(tmux_session *handle, const uint8_t *data, size_t len);
 int      tmux_resize(tmux_session *handle, uint16_t rows, uint16_t cols);
 bool     tmux_is_alive(tmux_session *handle);

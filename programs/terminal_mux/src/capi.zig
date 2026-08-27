@@ -394,15 +394,18 @@ pub export fn tmux_feed(handle: ?*TmuxSession, data: ?[*]const u8, len: usize) v
     activePane(h).processOutput(d[0..len]);
 }
 
-/// Send input (keystrokes) to the active pane's shell. Returns bytes written or
-/// -1 on error.
+/// Send input (keystrokes) to the active pane's shell.
+///
+/// Returns bytes ACTUALLY written, or -1 on error. A short return means the
+/// child stopped reading and the write hit its stall budget (see `Pty.write`);
+/// the caller owns the remainder. Keystroke-sized sends never go short.
 pub export fn tmux_send(handle: ?*TmuxSession, data: ?[*]const u8, len: usize) c_long {
     const h = handle orelse return -1;
     const d = data orelse return -1;
     const pane = activePane(h);
     pane.terminal.scrollback_offset = 0; // typing snaps the view to the live bottom
-    pane.sendInput(d[0..len]) catch return -1;
-    return @intCast(len);
+    const n = pane.writeInput(d[0..len]) catch return -1;
+    return @intCast(n);
 }
 
 /// Resize the active pane and its PTY to `rows`x`cols` (and notify the shell via
