@@ -13,7 +13,6 @@
 ///   GET / — HTML dashboard with live stats
 ///   GET /api/stats — JSON stats summary
 ///   GET /api/recent — JSON array of last 50 entries
-
 const std = @import("std");
 
 const posix = @cImport({
@@ -23,6 +22,7 @@ const posix = @cImport({
     @cInclude("stdlib.h");
     @cInclude("string.h");
     @cInclude("time.h");
+    @cInclude("sys/time.h");
 });
 
 const PORT: u16 = 8081;
@@ -42,6 +42,13 @@ const MetricEntry = struct {
 
 var entries: [MAX_ENTRIES]MetricEntry = undefined;
 var entry_count: usize = 0;
+/// Where the NEXT entry goes, counted since start and never capped. Distinct
+/// from `entry_count` (how many slots hold data) because the two stop agreeing
+/// the moment the ring fills: indexing by the capped count makes every write
+/// after the 10 000th land in slot 0, so the ring stops rotating and
+/// `/api/recent` freezes on the batch that filled it while live traffic is
+/// invisible.
+var write_idx: u64 = 0;
 var total_requests: u64 = 0;
 var total_latency_ms: u64 = 0;
 var total_tokens_in: u64 = 0;
@@ -49,8 +56,8 @@ var total_tokens_out: u64 = 0;
 var total_errors: u64 = 0;
 
 fn addEntry(e: MetricEntry) void {
-    const idx = entry_count % MAX_ENTRIES;
-    entries[idx] = e;
+    entries[write_idx % MAX_ENTRIES] = e;
+    write_idx += 1;
     if (entry_count < MAX_ENTRIES) entry_count += 1;
     total_requests += 1;
     total_latency_ms += e.latency_ms;
@@ -74,24 +81,88 @@ pub fn main() !void {
         const client = posix.accept(sock, @ptrCast(&caddr), &clen);
         if (client < 0) continue;
 
+        setClientTimeouts(client);
         handleClient(client);
         _ = posix.close(client);
     }
 }
 
+/// Seconds a single connection may spend blocked in one read or write.
+const CLIENT_TIMEOUT_SECS: c_long = 5;
+
+/// Bound both directions on an accepted socket.
+///
+/// The accept loop is sequential — accept, handle, close — so a peer that
+/// completes the handshake and then sends nothing used to wedge ingest, stats
+/// and dashboard alike until the kernel gave up on the socket (hours). A
+/// receive timeout turns that into a five-second stall; the send timeout stops
+/// the mirror-image case where a client accepts the connection and never reads
+/// the response.
+fn setClientTimeouts(fd: c_int) void {
+    const tv = posix.struct_timeval{ .tv_sec = CLIENT_TIMEOUT_SECS, .tv_usec = 0 };
+    _ = posix.setsockopt(fd, posix.SOL_SOCKET, posix.SO_RCVTIMEO, &tv, @sizeOf(posix.struct_timeval));
+    _ = posix.setsockopt(fd, posix.SOL_SOCKET, posix.SO_SNDTIMEO, &tv, @sizeOf(posix.struct_timeval));
+}
+
+/// Read until the CRLFCRLF header terminator is in hand, returning its offset.
+///
+/// One `read()` is not a request: TCP is free to split headers across segments,
+/// and treating the first arrival as the whole thing is what let a body land
+/// half-parsed. Bounded by the buffer and, per connection, by SO_RCVTIMEO.
+fn readHeaders(fd: c_int, buf: []u8, len: *usize) ?usize {
+    while (true) {
+        if (std.mem.indexOf(u8, buf[0..len.*], "\r\n\r\n")) |h| return h;
+        if (len.* == buf.len) return null;
+        const n = posix.read(fd, buf[len.*..].ptr, buf.len - len.*);
+        if (n <= 0) return null;
+        len.* += @intCast(n);
+    }
+}
+
+/// The declared body length, or null when the header is absent or unparseable.
+/// A request that does not say how long its body is has no body we are willing
+/// to guess at — guessing is what silently zeroed latency and token counts.
+fn contentLength(headers: []const u8) ?usize {
+    const key = "content-length:";
+    var it = std.mem.splitSequence(u8, headers, "\r\n");
+    while (it.next()) |line| {
+        if (line.len < key.len) continue;
+        if (!std.ascii.eqlIgnoreCase(line[0..key.len], key)) continue;
+        const v = std.mem.trim(u8, line[key.len..], " \t");
+        return std.fmt.parseInt(usize, v, 10) catch null;
+    }
+    return null;
+}
+
+/// Read until the whole DECLARED body is in hand, so a body split across TCP
+/// segments is never parsed as a short one. A short read used to be accepted
+/// silently: every field the parser could not find defaulted to 0 and the
+/// ingest was still acked, so real latency vanished into a healthy-looking
+/// average. Bounded twice — by Content-Length and by the buffer.
+fn readBody(fd: c_int, buf: []u8, len: *usize, body_start: usize) ?[]const u8 {
+    const declared = contentLength(buf[0..body_start]) orelse return null;
+    if (declared > buf.len - body_start) return null;
+    const want = body_start + declared;
+    while (len.* < want) {
+        const n = posix.read(fd, buf[len.*..].ptr, buf.len - len.*);
+        if (n <= 0) return null;
+        len.* += @intCast(n);
+    }
+    return buf[body_start..want];
+}
+
 fn handleClient(fd: c_int) void {
     var buf: [8192]u8 = undefined;
-    const n = posix.read(fd, &buf, buf.len);
-    if (n <= 0) return;
-    const request = buf[0..@intCast(n)];
+    var len: usize = 0;
 
-    const line_end = std.mem.indexOf(u8, request, "\r\n") orelse return;
-    const first_line = request[0..line_end];
+    const header_end = readHeaders(fd, &buf, &len) orelse return;
+    const line_end = std.mem.indexOf(u8, buf[0..header_end], "\r\n") orelse return;
+    const first_line = buf[0..line_end];
 
     if (std.mem.startsWith(u8, first_line, "POST /api/ingest")) {
-        // Metrics ingest — body is JSON
-        const body_sep = std.mem.indexOf(u8, request, "\r\n\r\n") orelse return;
-        handleMetricsClient(fd, request[body_sep + 4 ..]);
+        // Metrics ingest — body is JSON, and must be complete before it is read.
+        const body = readBody(fd, &buf, &len, header_end + 4) orelse return;
+        handleMetricsClient(fd, body);
     } else if (std.mem.startsWith(u8, first_line, "GET /api/stats")) {
         serveStatsJson(fd);
     } else if (std.mem.startsWith(u8, first_line, "GET /api/recent")) {
@@ -111,7 +182,11 @@ fn createListener(port: u16) ?c_int {
     var addr: posix.struct_sockaddr_in = std.mem.zeroes(posix.struct_sockaddr_in);
     addr.sin_family = posix.AF_INET;
     addr.sin_port = @byteSwap(@as(u16, port));
-    addr.sin_addr.s_addr = 0;
+    // Loopback, not INADDR_ANY: there is no auth, no token and no rate limit on
+    // /api/ingest, so a wildcard bind hands every reachable peer the ability to
+    // plant dashboard rows and flood the ring. A network ingestor needs a
+    // credential first, not a wider bind.
+    addr.sin_addr.s_addr = std.mem.nativeToBig(u32, 0x7F00_0001);
 
     if (posix.bind(sock, @ptrCast(&addr), @sizeOf(posix.struct_sockaddr_in)) < 0) return null;
     if (posix.listen(sock, 8) < 0) return null;
@@ -143,7 +218,14 @@ fn handleMetricsClient(fd: c_int, data: []const u8) void {
     entry.tokens_out = @truncate(@as(u64, @intCast(extractJsonInt(data, "\"tokens_out\":") orelse 0)));
 
     if (extractJsonStr(data, "\"model\":\"")) |m| {
-        const copy_len = @min(m.len, 64);
+        // Validated BEFORE truncation, on the bytes the client actually sent:
+        // a blind cut at 64 can split a codepoint, which would fail a valid
+        // name while an invalid one could still pass on its first 64 bytes.
+        if (!std.unicode.utf8ValidateSlice(m)) {
+            _ = posix.write(fd, REJECT_MSG, REJECT_MSG.len);
+            return;
+        }
+        const copy_len = utf8TruncLen(m, entry.model.len);
         @memcpy(entry.model[0..copy_len], m[0..copy_len]);
         entry.model_len = @intCast(copy_len);
     }
@@ -155,6 +237,21 @@ fn handleMetricsClient(fd: c_int, data: []const u8) void {
     addEntry(entry);
 
     _ = posix.write(fd, "OK\n", 3);
+}
+
+/// What a rejected ingest is told. The store never holds bytes it could not
+/// validate, and the client is told so rather than being acked into believing
+/// the metric landed.
+const REJECT_MSG = "ERR invalid model encoding\n";
+
+/// The largest length <= `max` that does not cut a UTF-8 codepoint in half.
+fn utf8TruncLen(s: []const u8, max: usize) usize {
+    if (s.len <= max) return s.len;
+    var n = max;
+    // s[n] is the first byte NOT copied; a continuation byte there means the
+    // cut lands inside a sequence, so walk back to its lead byte.
+    while (n > 0 and (s[n] & 0xC0) == 0x80) : (n -= 1) {}
+    return n;
 }
 
 fn extractJsonInt(data: []const u8, key: []const u8) ?i64 {
@@ -216,16 +313,25 @@ fn stringifyEntry(e: *const MetricEntry, writer: *std.Io.Writer) std.json.String
     }, .{}, writer);
 }
 
+/// The half-open range of logical indices `/api/recent` reports, newest last.
+///
+/// Windowed off the write cursor, never off `entry_count`: once the ring is
+/// full the count stops moving, so a count-based window pins the view to the
+/// batch that filled the ring and every later entry is invisible.
+fn recentWindow(writes: u64, stored: usize, want: u64) struct { start: u64, end: u64 } {
+    const count = @min(@as(u64, stored), want);
+    return .{ .start = writes - count, .end = writes };
+}
+
 fn serveRecentJson(fd: c_int) void {
     var body: [32768]u8 = undefined;
     var pos: usize = 0;
     body[pos] = '[';
     pos += 1;
 
-    const count = @min(entry_count, 50);
-    const start_idx = if (entry_count > count) entry_count - count else 0;
+    const w = recentWindow(write_idx, entry_count, 50);
 
-    for (start_idx..entry_count) |i| {
+    for (w.start..w.end) |i| {
         const idx = i % MAX_ENTRIES;
         const e = &entries[idx];
 
@@ -262,7 +368,10 @@ fn serveDashboard(fd: c_int) void {
 
 fn sendHttp(fd: c_int, status: []const u8, content_type: []const u8, body: []const u8) void {
     var hdr: [256]u8 = undefined;
-    const h = std.fmt.bufPrint(&hdr, "HTTP/1.0 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n", .{ status, content_type, body.len }) catch return;
+    // No Access-Control-Allow-Origin: the dashboard is served from this same
+    // listener, so it needs none, and a wildcard let any origin the operator
+    // visited read the full request history.
+    const h = std.fmt.bufPrint(&hdr, "HTTP/1.0 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{ status, content_type, body.len }) catch return;
     _ = posix.write(fd, h.ptr, h.len);
     _ = posix.write(fd, body.ptr, body.len);
 }
@@ -294,9 +403,15 @@ const DASHBOARD_HTML =
     \\`<div class="card"><div class="label">Errors</div><div class="value">${s.total_errors}</div></div>`+
     \\`<div class="card"><div class="label">Stored</div><div class="value">${s.entries_stored}</div></div>`;
     \\const r=await(await fetch('/api/recent')).json();
-    \\document.getElementById('rows').innerHTML=r.reverse().map(e=>
-    \\`<tr><td>${new Date(e.ts*1000).toLocaleTimeString()}</td><td>${e.model}</td><td>${e.latency_ms}ms</td><td>${e.tokens_in}</td><td>${e.tokens_out}</td><td><span class="badge ${e.ok?'ok':'err'}">${e.ok?'OK':'ERR'}</span></td></tr>`
-    \\).join('');}
+    \\// Rows are BUILT, not interpolated: e.model is attacker-supplied and an
+    \\// innerHTML sink executes whatever it contains. textContent cannot.
+    \\document.getElementById('rows').replaceChildren(...r.reverse().map(e=>{
+    \\const tr=document.createElement('tr');
+    \\for(const v of [new Date(e.ts*1000).toLocaleTimeString(),e.model,e.latency_ms+'ms',e.tokens_in,e.tokens_out]){
+    \\const td=document.createElement('td');td.textContent=v;tr.appendChild(td);}
+    \\const td=document.createElement('td'),b=document.createElement('span');
+    \\b.className='badge '+(e.ok?'ok':'err');b.textContent=e.ok?'OK':'ERR';
+    \\td.appendChild(b);tr.appendChild(td);return tr;}));}
     \\refresh();setInterval(refresh,3000);
     \\</script></body></html>
 ;
@@ -359,4 +474,71 @@ test "stringifyEntry escapes attacker-controlled model bytes (no JSON-IN-FMT inj
     try std.testing.expectEqualStrings(nasty, parsed.value.model);
     try std.testing.expectEqual(@as(i64, 1710000000), parsed.value.ts);
     try std.testing.expect(parsed.value.ok);
+}
+
+test "the ring keeps rotating past MAX_ENTRIES instead of pinning slot 0" {
+    // Reset the globals this test drives; they are process-wide.
+    write_idx = 0;
+    entry_count = 0;
+
+    // One past a full ring: the wrap is exactly where a count-based index
+    // stopped moving and every later write landed in slot 0.
+    const total: u64 = MAX_ENTRIES + 1;
+    var i: u64 = 0;
+    while (i < total) : (i += 1) {
+        var e = testEntry("m");
+        e.latency_ms = @truncate(i);
+        addEntry(e);
+    }
+
+    try std.testing.expectEqual(total, write_idx);
+    try std.testing.expectEqual(MAX_ENTRIES, entry_count);
+    // The newest write wrapped to slot 0, and slot 1 still holds the entry
+    // written one full lap earlier — the ring rotated rather than froze.
+    try std.testing.expectEqual(@as(u32, @truncate(total - 1)), entries[0].latency_ms);
+    try std.testing.expectEqual(@as(u32, 1), entries[1].latency_ms);
+
+    // /api/recent shows the 50 NEWEST, ending on the entry just written.
+    const w = recentWindow(write_idx, entry_count, 50);
+    try std.testing.expectEqual(total, w.end);
+    try std.testing.expectEqual(total - 50, w.start);
+    const newest = entries[(w.end - 1) % MAX_ENTRIES];
+    try std.testing.expectEqual(@as(u32, @truncate(total - 1)), newest.latency_ms);
+
+    write_idx = 0;
+    entry_count = 0;
+}
+
+test "recentWindow never over-reads a partly filled ring" {
+    try std.testing.expectEqual(@as(u64, 0), recentWindow(0, 0, 50).start);
+    try std.testing.expectEqual(@as(u64, 0), recentWindow(0, 0, 50).end);
+    const w = recentWindow(7, 7, 50);
+    try std.testing.expectEqual(@as(u64, 0), w.start);
+    try std.testing.expectEqual(@as(u64, 7), w.end);
+}
+
+test "contentLength reads the header case-insensitively, or refuses to guess" {
+    try std.testing.expectEqual(@as(?usize, 42), contentLength("POST /api/ingest HTTP/1.0\r\nContent-Length: 42\r\n"));
+    try std.testing.expectEqual(@as(?usize, 42), contentLength("POST / HTTP/1.0\r\ncontent-length:42\r\n"));
+    try std.testing.expectEqual(@as(?usize, 42), contentLength("POST / HTTP/1.0\r\nCONTENT-LENGTH: \t42 \r\n"));
+    // No header, and a header that is not a number: both refuse rather than
+    // fall back to "whatever arrived", which is the truncation bug itself.
+    try std.testing.expectEqual(@as(?usize, null), contentLength("GET / HTTP/1.0\r\nHost: x\r\n"));
+    try std.testing.expectEqual(@as(?usize, null), contentLength("POST / HTTP/1.0\r\nContent-Length: abc\r\n"));
+}
+
+test "utf8TruncLen cuts on a codepoint boundary" {
+    // Three 3-byte codepoints; a cut at 8 must fall back to 6.
+    const s = "\u{4f60}\u{597d}\u{4e16}";
+    try std.testing.expectEqual(@as(usize, 9), s.len);
+    try std.testing.expectEqual(@as(usize, 9), utf8TruncLen(s, 64));
+    try std.testing.expectEqual(@as(usize, 6), utf8TruncLen(s, 8));
+    try std.testing.expectEqual(@as(usize, 6), utf8TruncLen(s, 6));
+    try std.testing.expectEqual(@as(usize, 3), utf8TruncLen(s, 5));
+    try std.testing.expectEqual(@as(usize, 0), utf8TruncLen(s, 2));
+    // ASCII is never shortened below the cap.
+    try std.testing.expectEqual(@as(usize, 4), utf8TruncLen("abcdef", 4));
+    // What the ingest path rejects outright: a lone continuation byte.
+    try std.testing.expect(!std.unicode.utf8ValidateSlice("ok\x80bad"));
+    try std.testing.expect(std.unicode.utf8ValidateSlice(s));
 }
