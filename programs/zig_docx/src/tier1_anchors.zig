@@ -254,6 +254,35 @@ test "anchor: hostile markdown text is XML-escaped, not smuggled into the OOXML"
     try std.testing.expect(found);
 }
 
+test "anchor: unsafe markdown link schemes never become external relationships" {
+    const allocator = std.testing.allocator;
+
+    // H3 on the writer path: a script-bearing destination must not surface in
+    // word/_rels/document.xml.rels as a live TargetMode="External" target,
+    // while an allowlisted scheme must survive intact.
+    const md =
+        "A [live link](https://example.com/ok) and " ++
+        "an [attack link](javascript:alert(1)) in one paragraph.\n";
+
+    const bytes = try generateFromMarkdown(allocator, md);
+    defer allocator.free(bytes);
+
+    const data = try allocator.dupe(u8, bytes);
+    var archive = try zip.ZipArchive.openFromMemory(allocator, data);
+    defer archive.close();
+
+    const rels_xml = try archive.extract(archive.findEntry("word/_rels/document.xml.rels").?);
+    defer allocator.free(rels_xml);
+    try std.testing.expect(std.mem.indexOf(u8, rels_xml, "javascript:") == null);
+    try std.testing.expect(std.mem.indexOf(u8, rels_xml, "https://example.com/ok") != null);
+
+    // The unsafe link's visible text is kept as plain text, not dropped.
+    const doc_xml = try archive.extract(archive.findEntry("word/document.xml").?);
+    defer allocator.free(doc_xml);
+    try std.testing.expect(std.mem.indexOf(u8, doc_xml, "attack link") != null);
+    try std.testing.expect(std.mem.indexOf(u8, doc_xml, "javascript:") == null);
+}
+
 // =============================================================================
 // Anchor 3 — malformed archives are refused (APPNOTE-shaped negative vectors)
 // =============================================================================

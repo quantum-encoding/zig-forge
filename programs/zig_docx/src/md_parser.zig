@@ -20,6 +20,7 @@
 const std = @import("std");
 const docx = @import("docx.zig");
 const StyleType = @import("styles.zig").StyleType;
+const isSafeLinkUrl = @import("mdx.zig").isSafeLinkUrl;
 
 pub const FrontMatter = struct {
     title: ?[]const u8 = null,
@@ -511,9 +512,17 @@ pub fn parseInlineFormatting(allocator: std.mem.Allocator, text: []const u8) ![]
                 };
                 if (i > plain_start) try appendRun(allocator, &runs, text[plain_start..i], false, false, false);
                 const link_text = try allocator.dupe(u8, text[i + 1 .. close_bracket]);
+                // H3 (writer side) — scheme allowlist. An unsafe destination
+                // (javascript:, data:, file:, …) must not become a live
+                // TargetMode="External" relationship in the DOCX; keep the
+                // visible text, drop the hyperlink.
+                const url_src = text[close_bracket + 2 .. close_paren];
                 try runs.append(allocator, .{
                     .text = link_text,
-                    .hyperlink_url = try allocator.dupe(u8, text[close_bracket + 2 .. close_paren]),
+                    .hyperlink_url = if (isSafeLinkUrl(url_src))
+                        try allocator.dupe(u8, url_src)
+                    else
+                        null,
                 });
                 i = close_paren + 1;
                 plain_start = i;
