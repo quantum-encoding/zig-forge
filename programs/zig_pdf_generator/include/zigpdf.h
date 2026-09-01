@@ -530,6 +530,21 @@ ZigPdfError zigpdf_generate_proposal_to_file(const char* json_input, const char*
 uint8_t* zigpdf_generate_template_card(const char* json_input, size_t* output_len);
 ZigPdfError zigpdf_generate_template_card_to_file(const char* json_input, const char* output_path);
 
+/** @brief Generate a clean (minimal) quote PDF */
+uint8_t* zigpdf_generate_clean_quote(const char* json_input, size_t* output_len);
+ZigPdfError zigpdf_generate_clean_quote_to_file(const char* json_input, const char* output_path);
+
+/** @brief Generate a letter-style quote PDF (Word-document layout) */
+uint8_t* zigpdf_generate_letter_quote(const char* json_input, size_t* output_len);
+ZigPdfError zigpdf_generate_letter_quote_to_file(const char* json_input, const char* output_path);
+
+/** @brief Render markdown to a PDF file (buffer variant declared above) */
+ZigPdfError zigpdf_generate_markdown_to_file(const char* md_input, const char* output_path);
+
+/** @brief Generate a slide-deck presentation PDF */
+uint8_t* zigpdf_generate_presentation(const char* json_input, size_t* output_len);
+ZigPdfError zigpdf_generate_presentation_to_file(const char* json_input, const char* output_path);
+
 /* ============================================================================
  * QR Code Modes for Invoices
  * ============================================================================ */
