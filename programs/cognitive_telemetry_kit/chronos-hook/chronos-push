@@ -146,16 +146,32 @@ else
     exit 1
   fi
 
+  # Human span for the elapsed trailer. Bash 3.2 (macOS) — no printf %(%s)T.
+  chronos_span() {
+    if   [ "$1" -lt 60 ];   then printf '%ds' "$1"
+    elif [ "$1" -lt 3600 ]; then printf '%dm%02ds' $(( $1 / 60 )) $(( $1 % 60 ))
+    else                         printf '%dh%02dm' $(( $1 / 3600 )) $(( ($1 % 3600) / 60 )); fi
+  }
+
   new_head="$base"
   pending=0          # unfolded ticks waiting for a real commit to absorb them
   tip_tree=""        # tree of the most recent tick (for the trailing summary)
   descs=()           # trailing ticks' action descriptions
+  # When the trailing run of ticks began and ended, and how many there are.
+  # The agent narrating this work has no clock and estimates elapsed time from
+  # how much happened — measured, that runs long by multiples — so the duration
+  # in the shipped commit comes from the ticks' own author dates instead.
+  tick_n=0; tick_first_at=""; tick_last_at=""; tick_first_iso=""; tick_last_iso=""
   while read -r sha; do
     subj=$(git log -1 --format=%s "$sha")
     tree=$(git rev-parse "${sha}^{tree}")
     case "$subj" in
       "[CHRONOS]"* | "[CHRONOS:"*)
         pending=1; tip_tree="$tree"
+        read -r _at _iso <<< "$(git log -1 --format='%at %aI' "$sha")"
+        [ -z "$tick_first_at" ] && { tick_first_at="$_at"; tick_first_iso="$_iso"; }
+        tick_last_at="$_at"; tick_last_iso="$_iso"
+        tick_n=$(( tick_n + 1 ))
         # Verbose action ("Edit /path/to/file") and the cognitive state captured
         # at that tick (gerund / thinking-summary / activity), so the squash log
         # records WHAT was done and the INTENT behind it — nothing is lost.
@@ -172,6 +188,7 @@ else
         # re-parented onto the tick-free chain. Message preserved verbatim.
         new_head=$(git commit-tree "$tree" -p "$new_head" -m "$(git log -1 --format=%B "$sha")")
         pending=0; descs=(); tip_tree="$tree"
+        tick_n=0; tick_first_at=""; tick_last_at=""; tick_first_iso=""; tick_last_iso=""
         ;;
     esac
   done < <(git rev-list --reverse "${base}..HEAD")
@@ -183,18 +200,38 @@ else
     else
       body="- (no recorded tool descriptions)"
     fi
+    # How long the folded run actually took, as git trailers so it survives
+    # `git log --format=%(trailers)` and can be summed across commits later —
+    # prose in the body cannot be. Two ticks minimum: a single tick has no span,
+    # and "0s" would be a measurement of nothing.
+    #
+    # ELAPSED, never "worked". This is the wall clock between the first and last
+    # tick of the run, so a fold that straddles lunch says so. Naming it work
+    # would trade the model's overestimate for a machine-flavoured one, which is
+    # worse — it reads as authoritative. A long span against few ticks is real
+    # signal about how the session went, not noise to smooth away.
+    trailers=""
+    if [ "$tick_n" -ge 2 ] && [ -n "$tick_first_at" ] && [ -n "$tick_last_at" ]; then
+      elapsed=$(( tick_last_at - tick_first_at ))
+      if [ "$elapsed" -gt 0 ]; then
+        trailers="
+
+Chronos-Elapsed: $(chronos_span "$elapsed")
+Chronos-Ticks: ${tick_n} (${tick_first_iso} → ${tick_last_iso})"
+      fi
+    fi
     if [ -n "$msg_override" ]; then
       smsg="${msg_override}
 
 ${body}
 
-[chronos] squashed trailing ticks."
+[chronos] squashed trailing ticks.${trailers}"
     else
       smsg="chronos: session summary — $(date '+%Y-%m-%d %H:%M')
 
 ${body}
 
-[chronos] squashed trailing ticks."
+[chronos] squashed trailing ticks.${trailers}"
     fi
     new_head=$(git commit-tree "$tip_tree" -p "$new_head" -m "$smsg")
   elif [ -n "$msg_override" ]; then
