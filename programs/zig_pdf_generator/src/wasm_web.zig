@@ -127,7 +127,8 @@ export fn zigpdf_generate_invoice(json_ptr: [*]const u8, json_len: usize, output
     if (!validateUtf8(json_slice)) return null;
     const data = json_parser.parseInvoiceJson(wasm_allocator, json_slice) catch |err| {
         var buf: [128]u8 = undefined;
-        setLastError(std.fmt.bufPrint(&buf, "JSON parse error: {s}", .{@errorName(err)}) catch "JSON parse error");
+        const detail = json_parser.describeInvoiceError(err) orelse @errorName(err);
+        setLastError(std.fmt.bufPrint(&buf, "JSON parse error: {s}", .{detail}) catch "JSON parse error");
         return null;
     };
     defer json_parser.freeInvoiceData(wasm_allocator, &data);

@@ -253,7 +253,8 @@ export fn zigpdf_generate_invoice(json_ptr: [*]const u8, json_len: usize, output
 
     const data = json_parser.parseInvoiceJson(wasm_allocator, json_slice) catch |err| {
         var buf: [128]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "JSON parse error: {s}", .{@errorName(err)}) catch "JSON parse error";
+        const detail = json_parser.describeInvoiceError(err) orelse @errorName(err);
+        const msg = std.fmt.bufPrint(&buf, "JSON parse error: {s}", .{detail}) catch "JSON parse error";
         setLastError(msg);
         return null;
     };
@@ -286,7 +287,8 @@ export fn zigpdf_generate_invoice_encrypted(json_ptr: [*]const u8, json_len: usi
 
     var data = json_parser.parseInvoiceJson(wasm_allocator, json_slice) catch |err| {
         var buf: [128]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "JSON parse error: {s}", .{@errorName(err)}) catch "JSON parse error";
+        const detail = json_parser.describeInvoiceError(err) orelse @errorName(err);
+        const msg = std.fmt.bufPrint(&buf, "JSON parse error: {s}", .{detail}) catch "JSON parse error";
         setLastError(msg);
         return null;
     };

@@ -46,6 +46,62 @@ pub const JsonError = error{
     OutOfMemory,
 };
 
+/// Hard cap on `items`. A line-item array is allocated to the length the
+/// payload asks for, so an unbounded array is a cheap memory amplifier for a
+/// caller (WASM/FFI) that imposes no length limit of its own. 500 items is
+/// ~25 pages of invoice — far past any real document.
+pub const MAX_LINE_ITEMS: usize = 500;
+
+/// The defaults a `preset` expands to. Every field is optional: null means the
+/// preset says nothing about it, so the field keeps its ordinary default. A
+/// preset only ever supplies a *default* — an explicit key of the same name in
+/// the payload still wins.
+const PresetDefaults = struct {
+    document_type: ?[]const u8 = null,
+    show_tax: ?bool = null,
+    show_branding: ?bool = null,
+    theme: ?invoice.Theme = null,
+    table_style: ?invoice.TableStyle = null,
+};
+
+/// Valid values of the `preset` key, in the order they are documented.
+pub const preset_names = "receipt, squircle, glass, minimal";
+
+/// Resolve a `preset` value to its defaults. Null for an unrecognised name —
+/// the caller turns that into `error.UnknownPreset` rather than silently
+/// rendering the house default, so a typo is visible at the call site.
+fn presetDefaults(name: []const u8) ?PresetDefaults {
+    if (std.mem.eql(u8, name, "receipt")) return .{
+        .document_type = "receipt",
+        .show_tax = false,
+        .show_branding = false,
+        .theme = .classic,
+    };
+    if (std.mem.eql(u8, name, "squircle")) return .{
+        .theme = .squircle,
+        .table_style = .bands,
+    };
+    if (std.mem.eql(u8, name, "glass")) return .{
+        .theme = .glass,
+    };
+    if (std.mem.eql(u8, name, "minimal")) return .{
+        .table_style = .minimal,
+        .show_branding = false,
+    };
+    return null;
+}
+
+/// Human-readable detail for the invoice parser's fail-fast schema errors, so
+/// every caller surface (CLI stderr, zigpdf_get_error) names what to fix
+/// instead of just the error tag. Null for errors with no extra detail.
+pub fn describeInvoiceError(err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.UnknownPreset => "unknown \"preset\" (valid: " ++ preset_names ++ ")",
+        error.TooManyLineItems => std.fmt.comptimePrint("too many \"items\" (max {d})", .{MAX_LINE_ITEMS}),
+        else => null,
+    };
+}
+
 // =============================================================================
 // JSON Parsing
 // =============================================================================
@@ -66,10 +122,27 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
 
     const obj = root.object;
 
+    // One-word `preset` shorthand, resolved before any other field is read so
+    // the per-field defaults below can fall back to it. An unrecognised name is
+    // refused rather than ignored.
+    const preset: PresetDefaults = if (getJsonString(obj, "preset")) |name|
+        presetDefaults(name) orelse return error.UnknownPreset
+    else
+        .{};
+
+    // Bound `items` before anything is allocated. Nothing below unwinds its
+    // allocations on error, so every refusal has to happen up here.
+    if (obj.get("items")) |items_val| {
+        if (items_val == .array and items_val.array.items.len > MAX_LINE_ITEMS) {
+            return error.TooManyLineItems;
+        }
+    }
+
     var data = invoice.InvoiceData{};
 
     // Parse string fields (always allocate, even defaults, so freeInvoiceData works correctly)
-    data.document_type = try dupeJsonString(allocator, obj, "document_type") orelse try allocator.dupe(u8, "invoice");
+    data.document_type = try dupeJsonString(allocator, obj, "document_type") orelse
+        try allocator.dupe(u8, preset.document_type orelse "invoice");
     data.custom_title = try dupeJsonString(allocator, obj, "title");
     data.number_label = try dupeJsonString(allocator, obj, "number_label");
     data.company_name = try dupeJsonString(allocator, obj, "company_name") orelse try allocator.dupe(u8, "");
@@ -89,7 +162,11 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
     data.payment_terms = try dupeJsonString(allocator, obj, "payment_terms") orelse try allocator.dupe(u8, "");
     data.primary_color = try dupeJsonString(allocator, obj, "primary_color") orelse try allocator.dupe(u8, "#b39a7d");
     data.secondary_color = try dupeJsonString(allocator, obj, "secondary_color") orelse try allocator.dupe(u8, "#2c3e50");
-    data.title_color = try dupeJsonString(allocator, obj, "title_color") orelse try allocator.dupe(u8, "#b39a7d");
+    // The big title tracks the brand colour unless the payload names its own.
+    // A bare payload that only sets primary_color gets a title in that colour
+    // rather than the template's gold.
+    data.title_color = try dupeJsonString(allocator, obj, "title_color") orelse
+        try allocator.dupe(u8, data.primary_color);
     data.company_name_color = try dupeJsonString(allocator, obj, "company_name_color") orelse try allocator.dupe(u8, "#1a1a1a");
     data.font_family = try dupeJsonString(allocator, obj, "font_family") orelse try allocator.dupe(u8, "Helvetica");
     data.currency_symbol = try dupeJsonString(allocator, obj, "currency_symbol") orelse try allocator.dupe(u8, "");
@@ -125,7 +202,7 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
     // VAT/tax toggle. Explicit "show_tax" (alias "show_vat") always wins.
     // When omitted, default by document type: receipts suppress tax (a new,
     // non-VAT-registered business), everything else keeps the tax breakdown.
-    const tax_default = !std.mem.eql(u8, data.document_type, "receipt");
+    const tax_default = preset.show_tax orelse !std.mem.eql(u8, data.document_type, "receipt");
     data.show_tax = getJsonBool(obj, "show_tax") orelse
         getJsonBool(obj, "show_vat") orelse tax_default;
     data.logo_x = @floatCast(getJsonFloat(obj, "logo_x") orelse 40);
@@ -159,6 +236,7 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
     }
 
     // Parse table style (bands | boxes | minimal)
+    if (preset.table_style) |ts| data.table_style = ts;
     if (getJsonString(obj, "table_style")) |style| {
         if (std.mem.eql(u8, style, "boxes")) {
             data.table_style = .boxes;
@@ -170,6 +248,7 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
     }
 
     // Parse whole-document theme (classic | squircle | glass)
+    if (preset.theme) |th| data.theme = th;
     if (getJsonString(obj, "theme")) |theme| {
         if (std.mem.eql(u8, theme, "squircle")) {
             data.theme = .squircle;
@@ -262,6 +341,7 @@ fn parseInvoiceFromValue(allocator: std.mem.Allocator, root: std.json.Value) !in
     }
 
     // Parse show_branding boolean (defaults to true)
+    if (preset.show_branding) |sb| data.show_branding = sb;
     if (obj.get("show_branding")) |val| {
         if (val == .bool) {
             data.show_branding = val.bool;
@@ -663,6 +743,129 @@ test "show_tax explicit value and show_vat alias override the default" {
     );
     defer freeInvoiceData(allocator, &rct);
     try std.testing.expect(rct.show_tax);
+}
+
+test "preset expands to the house defaults" {
+    const allocator = std.testing.allocator;
+
+    const rct = try parseInvoiceJson(allocator, "{\"preset\": \"receipt\"}");
+    defer freeInvoiceData(allocator, &rct);
+    try std.testing.expectEqualStrings("receipt", rct.document_type);
+    try std.testing.expect(!rct.show_tax);
+    try std.testing.expect(!rct.show_branding);
+    try std.testing.expectEqual(invoice.Theme.classic, rct.theme);
+
+    const sq = try parseInvoiceJson(allocator, "{\"preset\": \"squircle\"}");
+    defer freeInvoiceData(allocator, &sq);
+    try std.testing.expectEqual(invoice.Theme.squircle, sq.theme);
+    try std.testing.expectEqual(invoice.TableStyle.bands, sq.table_style);
+    try std.testing.expectEqualStrings("invoice", sq.document_type);
+
+    const gl = try parseInvoiceJson(allocator, "{\"preset\": \"glass\"}");
+    defer freeInvoiceData(allocator, &gl);
+    try std.testing.expectEqual(invoice.Theme.glass, gl.theme);
+
+    const min = try parseInvoiceJson(allocator, "{\"preset\": \"minimal\"}");
+    defer freeInvoiceData(allocator, &min);
+    try std.testing.expectEqual(invoice.TableStyle.minimal, min.table_style);
+    try std.testing.expect(!min.show_branding);
+    try std.testing.expectEqual(invoice.Theme.classic, min.theme);
+}
+
+test "explicit keys override every field a preset would set" {
+    const allocator = std.testing.allocator;
+
+    const data = try parseInvoiceJson(allocator,
+        \\{"preset": "receipt", "document_type": "invoice", "show_tax": true,
+        \\ "show_branding": true, "theme": "glass", "table_style": "boxes"}
+    );
+    defer freeInvoiceData(allocator, &data);
+
+    try std.testing.expectEqualStrings("invoice", data.document_type);
+    try std.testing.expect(data.show_tax);
+    try std.testing.expect(data.show_branding);
+    try std.testing.expectEqual(invoice.Theme.glass, data.theme);
+    try std.testing.expectEqual(invoice.TableStyle.boxes, data.table_style);
+}
+
+test "receipt preset keeps show_tax false even when document_type is overridden" {
+    const allocator = std.testing.allocator;
+
+    // The preset sets document_type AND show_tax; overriding one must not
+    // silently restore the other's ordinary default.
+    const data = try parseInvoiceJson(allocator,
+        \\{"preset": "receipt", "document_type": "invoice"}
+    );
+    defer freeInvoiceData(allocator, &data);
+    try std.testing.expect(!data.show_tax);
+}
+
+test "absent preset leaves every default untouched" {
+    const allocator = std.testing.allocator;
+
+    const data = try parseInvoiceJson(allocator, "{\"company_name\": \"Co\"}");
+    defer freeInvoiceData(allocator, &data);
+
+    try std.testing.expectEqualStrings("invoice", data.document_type);
+    try std.testing.expect(data.show_tax);
+    try std.testing.expect(data.show_branding);
+    try std.testing.expectEqual(invoice.Theme.classic, data.theme);
+    try std.testing.expectEqual(invoice.TableStyle.bands, data.table_style);
+}
+
+test "unknown preset is refused, not silently ignored" {
+    const allocator = std.testing.allocator;
+
+    try std.testing.expectError(error.UnknownPreset, parseInvoiceJson(allocator,
+        \\{"preset": "squircel", "company_name": "Co"}
+    ));
+    // The diagnostic names the valid set so the caller can fix the typo.
+    const msg = describeInvoiceError(error.UnknownPreset).?;
+    try std.testing.expect(std.mem.indexOf(u8, msg, "squircle") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "receipt") != null);
+}
+
+test "title_color falls back to primary_color, explicit key still wins" {
+    const allocator = std.testing.allocator;
+
+    const inherited = try parseInvoiceJson(allocator,
+        \\{"company_name": "Co", "primary_color": "#3B30E0"}
+    );
+    defer freeInvoiceData(allocator, &inherited);
+    try std.testing.expectEqualStrings("#3B30E0", inherited.title_color);
+
+    const explicit = try parseInvoiceJson(allocator,
+        \\{"company_name": "Co", "primary_color": "#3B30E0", "title_color": "#b39a7d"}
+    );
+    defer freeInvoiceData(allocator, &explicit);
+    try std.testing.expectEqualStrings("#b39a7d", explicit.title_color);
+
+    // A payload that sets neither keeps the template's own default.
+    const bare = try parseInvoiceJson(allocator, "{\"company_name\": \"Co\"}");
+    defer freeInvoiceData(allocator, &bare);
+    try std.testing.expectEqualStrings("#b39a7d", bare.title_color);
+}
+
+test "line items are capped" {
+    const allocator = std.testing.allocator;
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    try buf.appendSlice(allocator, "{\"items\":[");
+    for (0..MAX_LINE_ITEMS) |i| {
+        if (i > 0) try buf.append(allocator, ',');
+        try buf.appendSlice(allocator, "{\"description\":\"x\",\"quantity\":1,\"unit_price\":1,\"total\":1}");
+    }
+    try buf.appendSlice(allocator, "]}");
+
+    // Exactly at the cap parses.
+    const at_cap = try parseInvoiceJson(allocator, buf.items);
+    defer freeInvoiceData(allocator, &at_cap);
+    try std.testing.expectEqual(MAX_LINE_ITEMS, at_cap.items.len);
+
+    // One past it is refused before anything is allocated.
+    try buf.replaceRange(allocator, buf.items.len - 2, 2, ",{\"description\":\"x\"}]}");
+    try std.testing.expectError(error.TooManyLineItems, parseInvoiceJson(allocator, buf.items));
 }
 
 test "parse invoice with colors" {

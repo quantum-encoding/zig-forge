@@ -502,6 +502,15 @@ fn reportGenerationError(stderr: *std.Io.Writer, mode: TemplateMode, err: anyerr
             "       A --{s} payload requires top-level \"company_name\" and a non-empty \"sections\" array.\n",
             .{ t, t },
         ) catch {},
+        error.UnknownPreset => stderr.print(
+            "Error: Schema mismatch. Unrecognised \"preset\" value for --{s} template.\n" ++
+            "       Valid presets: {s}. Omit \"preset\" for the plain template defaults.\n",
+            .{ t, lib.json.preset_names },
+        ) catch {},
+        error.TooManyLineItems => stderr.print(
+            "Error: Too many line items for --{s} template — \"items\" is capped at {d}.\n",
+            .{ t, lib.json.MAX_LINE_ITEMS },
+        ) catch {},
         else => stderr.print(
             "Error: PDF generation failed for mode --{s}: {s}\n",
             .{ t, @errorName(err) },

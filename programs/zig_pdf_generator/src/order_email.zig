@@ -773,15 +773,27 @@ test "legal_entity override replaces resolved entity (white-label/per-tenant)" {
     try testing.expect(!fieldEquals(out, "16575953"));
 }
 
-test "lutuno with no country defaults to Irish entity" {
+test "lutuno with no country falls to the UK entity, an EU country to the Irish one" {
     const a = testing.allocator;
-    const input =
+
+    // No ship-to or bill-to country is not an EU destination, so it bills from
+    // the UK company — the same catch-all side the storefront checkout takes.
+    const unknown =
         \\{"session_id":"cs_lut_x","app":"lutuno","customer_email":"a@b.com",
         \\ "amount_total":1000,"currency":"eur"}
     ;
-    const out = try generateFromJson(a, input);
+    const out = try generateFromJson(a, unknown);
     defer a.free(out);
-    try testing.expect(fieldEquals(out, "\"legal_entity\":\"Quantum Encoding Europe Limited\""));
+    try testing.expect(fieldEquals(out, "\"legal_entity\":\"Quantum Encoding Ltd\""));
+
+    // A named EU destination bills from the Irish company.
+    const eu =
+        \\{"session_id":"cs_lut_y","app":"lutuno","customer_email":"a@b.com",
+        \\ "amount_total":1000,"currency":"eur","shipping_country":"DE"}
+    ;
+    const out_eu = try generateFromJson(a, eu);
+    defer a.free(out_eu);
+    try testing.expect(fieldEquals(out_eu, "\"legal_entity\":\"Quantum Encoding Europe Limited\""));
 }
 
 test "from_email override replaces placeholder sender" {
