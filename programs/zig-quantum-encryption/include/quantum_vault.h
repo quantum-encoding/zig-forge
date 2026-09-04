@@ -6,7 +6,7 @@
  * Auto-generated from quantum_vault_ffi.zig
  * Do not edit manually.
  *
- * Version: 1.0.0
+ * Version: 1.1.0 (qv_version() returns "quantum-vault-pqc-1.1.0")
  */
 
 #ifndef QUANTUM_VAULT_H
@@ -225,17 +225,31 @@ QvError qv_mldsa65_verify(const QvMlDsaPublicKey* pk, const uint8_t* message,
  */
 QvError qv_hybrid_keygen(QvHybridKeyPair* keypair);
 
+/*
+ * Two shared-secret combiners share one key/ciphertext layout. The
+ * ciphertext carries no version marker: encapsulate and decapsulate with
+ * the SAME version. Use v2 for new data; v1 exists for data already
+ * produced with it. Full definition: docs/HYBRID-V2.md.
+ *
+ *   v1: K = SHA3-256("HYBRID-ML-KEM-768-X25519-v1" || ss_M || ss_X)
+ *   v2: K = HKDF-SHA3-256(salt = "", IKM = ss_M || ss_X || ct_X || pk_X,
+ *                         info = "HYBRID-ML-KEM-768-X25519-v2", L = 32)
+ *       (RFC 5869 with HMAC-SHA3-256; IKM order per X-Wing,
+ *        draft-connolly-cfrg-xwing-kem-10 section 5.3)
+ */
+
 /**
- * Hybrid encapsulation: generate combined shared secret.
+ * Hybrid encapsulation, v1 combiner.
  *
  * @param ek Input: encapsulation key
  * @param result Output: shared secret and ciphertext
- * @return QV_SUCCESS on success, error code on failure
+ * @return QV_SUCCESS on success, QV_HYBRID_INVALID_PK for a malformed key,
+ *         other error code on failure
  */
 QvError qv_hybrid_encaps(const QvHybridEncapsKey* ek, QvHybridEncapsResult* result);
 
 /**
- * Hybrid decapsulation: recover combined shared secret.
+ * Hybrid decapsulation, v1 combiner.
  *
  * @param dk Input: decapsulation key
  * @param ct Input: ciphertext
@@ -244,6 +258,32 @@ QvError qv_hybrid_encaps(const QvHybridEncapsKey* ek, QvHybridEncapsResult* resu
  */
 QvError qv_hybrid_decaps(const QvHybridDecapsKey* dk, const QvHybridCiphertext* ct,
                          uint8_t shared_secret[QV_HYBRID_SS_SIZE]);
+
+/**
+ * Hybrid encapsulation, v2 combiner (recommended for new data).
+ * Same parameters and layout as qv_hybrid_encaps; only the derived
+ * shared secret differs.
+ */
+QvError qv_hybrid_encaps_v2(const QvHybridEncapsKey* ek, QvHybridEncapsResult* result);
+
+/**
+ * Hybrid decapsulation, v2 combiner. Must be paired with
+ * qv_hybrid_encaps_v2; decapsulating a v2 ciphertext with the v1
+ * function (or vice versa) yields a different, useless secret.
+ */
+QvError qv_hybrid_decaps_v2(const QvHybridDecapsKey* dk, const QvHybridCiphertext* ct,
+                            uint8_t shared_secret[QV_HYBRID_SS_SIZE]);
+
+/**
+ * The bare v2 combiner, exposed for cross-implementation known-answer
+ * tests. Not needed for normal use.
+ *
+ * out = HKDF-SHA3-256(salt = "", IKM = ss_m || ss_x || ct_x || pk_x,
+ *                     info = "HYBRID-ML-KEM-768-X25519-v2", L = 32)
+ */
+void qv_hybrid_combine_v2(const uint8_t ss_m[32], const uint8_t ss_x[32],
+                          const uint8_t ct_x[32], const uint8_t pk_x[32],
+                          uint8_t out[QV_HYBRID_SS_SIZE]);
 
 /* ========================================================================== */
 /* Utility Functions                                                           */

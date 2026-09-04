@@ -7,7 +7,8 @@
 //! Memory management: caller allocates, library fills.
 //! Thread safety: no global state.
 //!
-//! Version: 1.0.0
+//! Version: 1.1.0 (see `VERSION_STRING`; quantum-vault-sys/build.rs refuses a
+//! static library whose embedded string does not match it)
 
 const std = @import("std");
 const ml_kem = @import("ml_kem_api.zig");
@@ -298,18 +299,17 @@ export fn qv_hybrid_keygen(keypair: *QvHybridKeyPair) QvError {
     return .success;
 }
 
-/// Hybrid encapsulation: generate combined shared secret
+/// Hybrid encapsulation, v1 combiner: SHA3-256("HYBRID-ML-KEM-768-X25519-v1" ‖ ss_M ‖ ss_X).
+/// Kept for data that must decapsulate under `qv_hybrid_decaps`; new data
+/// should use `qv_hybrid_encaps_v2`.
 export fn qv_hybrid_encaps(
     ek: *const QvHybridEncapsKey,
     result: *QvHybridEncapsResult,
 ) QvError {
-    const encaps_result = hybrid.encaps(&ek.data) catch return .hybrid_encaps_failed;
-    @memcpy(&result.shared_secret, &encaps_result.K);
-    @memcpy(&result.ciphertext.data, &encaps_result.ct);
-    return .success;
+    return hybridEncaps(ek, result, .v1);
 }
 
-/// Hybrid decapsulation: recover combined shared secret
+/// Hybrid decapsulation, v1 combiner.
 export fn qv_hybrid_decaps(
     dk: *const QvHybridDecapsKey,
     ct: *const QvHybridCiphertext,
@@ -317,6 +317,51 @@ export fn qv_hybrid_decaps(
 ) QvError {
     const ss = hybrid.decaps(&dk.data, &ct.data);
     @memcpy(shared_secret, &ss);
+    return .success;
+}
+
+/// Hybrid encapsulation, v2 combiner:
+/// HKDF-SHA3-256(salt = "", IKM = ss_M ‖ ss_X ‖ ct_X ‖ pk_X, info = "HYBRID-ML-KEM-768-X25519-v2", L = 32).
+/// Key and ciphertext layouts are identical to v1; only the derived secret
+/// differs. The ciphertext does not record which version produced it — the
+/// decapsulator must call the matching `qv_hybrid_decaps_v2`.
+export fn qv_hybrid_encaps_v2(
+    ek: *const QvHybridEncapsKey,
+    result: *QvHybridEncapsResult,
+) QvError {
+    return hybridEncaps(ek, result, .v2);
+}
+
+/// Hybrid decapsulation, v2 combiner.
+export fn qv_hybrid_decaps_v2(
+    dk: *const QvHybridDecapsKey,
+    ct: *const QvHybridCiphertext,
+    shared_secret: *[HYBRID_SS_SIZE]u8,
+) QvError {
+    const ss = hybrid.decapsV2(&dk.data, &ct.data);
+    @memcpy(shared_secret, &ss);
+    return .success;
+}
+
+/// The bare v2 combiner, for cross-implementation known-answer tests:
+/// out = HKDF-SHA3-256(salt = "", IKM = ss_m ‖ ss_x ‖ ct_x ‖ pk_x, info = "HYBRID-ML-KEM-768-X25519-v2", L = 32).
+export fn qv_hybrid_combine_v2(
+    ss_m: *const [32]u8,
+    ss_x: *const [32]u8,
+    ct_x: *const [32]u8,
+    pk_x: *const [32]u8,
+    out: *[HYBRID_SS_SIZE]u8,
+) void {
+    out.* = hybrid.combineSecretsV2(ss_m, ss_x, ct_x, pk_x);
+}
+
+fn hybridEncaps(ek: *const QvHybridEncapsKey, result: *QvHybridEncapsResult, version: hybrid.Version) QvError {
+    const encaps_result = hybrid.encapsVersioned(&ek.data, version) catch |err| return switch (err) {
+        error.InvalidPublicKey => .hybrid_invalid_pk,
+        else => .hybrid_encaps_failed,
+    };
+    @memcpy(&result.shared_secret, &encaps_result.K);
+    @memcpy(&result.ciphertext.data, &encaps_result.ct);
     return .success;
 }
 
@@ -344,9 +389,16 @@ export fn qv_constant_time_eq(a: [*]const u8, b: [*]const u8, len: usize) bool {
     return diff == 0;
 }
 
+/// Library version string. Bump on every change to the C ABI or to any
+/// wire-format-affecting algorithm: quantum-vault-sys/build.rs reads this
+/// literal from the source and refuses to link a prebuilt archive that does
+/// not embed the same string, so a stale library fails the build instead of
+/// silently shipping old code.
+pub const VERSION_STRING = "quantum-vault-pqc-1.1.0";
+
 /// Get library version string
 export fn qv_version() [*:0]const u8 {
-    return "quantum-vault-pqc-1.0.0";
+    return VERSION_STRING;
 }
 
 // ============================================================================
@@ -405,7 +457,7 @@ pub const C_HEADER =
     \\ * Auto-generated from quantum_vault_ffi.zig
     \\ * Do not edit manually.
     \\ *
-    \\ * Version: 1.0.0
+    \\ * Version: 1.1.0 (qv_version() returns "quantum-vault-pqc-1.1.0")
     \\ */
     \\
     \\#ifndef QUANTUM_VAULT_H
@@ -624,17 +676,31 @@ pub const C_HEADER =
     \\ */
     \\QvError qv_hybrid_keygen(QvHybridKeyPair* keypair);
     \\
+    \\/*
+    \\ * Two shared-secret combiners share one key/ciphertext layout. The
+    \\ * ciphertext carries no version marker: encapsulate and decapsulate with
+    \\ * the SAME version. Use v2 for new data; v1 exists for data already
+    \\ * produced with it. Full definition: docs/HYBRID-V2.md.
+    \\ *
+    \\ *   v1: K = SHA3-256("HYBRID-ML-KEM-768-X25519-v1" || ss_M || ss_X)
+    \\ *   v2: K = HKDF-SHA3-256(salt = "", IKM = ss_M || ss_X || ct_X || pk_X,
+    \\ *                         info = "HYBRID-ML-KEM-768-X25519-v2", L = 32)
+    \\ *       (RFC 5869 with HMAC-SHA3-256; IKM order per X-Wing,
+    \\ *        draft-connolly-cfrg-xwing-kem-10 section 5.3)
+    \\ */
+    \\
     \\/**
-    \\ * Hybrid encapsulation: generate combined shared secret.
+    \\ * Hybrid encapsulation, v1 combiner.
     \\ *
     \\ * @param ek Input: encapsulation key
     \\ * @param result Output: shared secret and ciphertext
-    \\ * @return QV_SUCCESS on success, error code on failure
+    \\ * @return QV_SUCCESS on success, QV_HYBRID_INVALID_PK for a malformed key,
+    \\ *         other error code on failure
     \\ */
     \\QvError qv_hybrid_encaps(const QvHybridEncapsKey* ek, QvHybridEncapsResult* result);
     \\
     \\/**
-    \\ * Hybrid decapsulation: recover combined shared secret.
+    \\ * Hybrid decapsulation, v1 combiner.
     \\ *
     \\ * @param dk Input: decapsulation key
     \\ * @param ct Input: ciphertext
@@ -643,6 +709,32 @@ pub const C_HEADER =
     \\ */
     \\QvError qv_hybrid_decaps(const QvHybridDecapsKey* dk, const QvHybridCiphertext* ct,
     \\                         uint8_t shared_secret[QV_HYBRID_SS_SIZE]);
+    \\
+    \\/**
+    \\ * Hybrid encapsulation, v2 combiner (recommended for new data).
+    \\ * Same parameters and layout as qv_hybrid_encaps; only the derived
+    \\ * shared secret differs.
+    \\ */
+    \\QvError qv_hybrid_encaps_v2(const QvHybridEncapsKey* ek, QvHybridEncapsResult* result);
+    \\
+    \\/**
+    \\ * Hybrid decapsulation, v2 combiner. Must be paired with
+    \\ * qv_hybrid_encaps_v2; decapsulating a v2 ciphertext with the v1
+    \\ * function (or vice versa) yields a different, useless secret.
+    \\ */
+    \\QvError qv_hybrid_decaps_v2(const QvHybridDecapsKey* dk, const QvHybridCiphertext* ct,
+    \\                            uint8_t shared_secret[QV_HYBRID_SS_SIZE]);
+    \\
+    \\/**
+    \\ * The bare v2 combiner, exposed for cross-implementation known-answer
+    \\ * tests. Not needed for normal use.
+    \\ *
+    \\ * out = HKDF-SHA3-256(salt = "", IKM = ss_m || ss_x || ct_x || pk_x,
+    \\ *                     info = "HYBRID-ML-KEM-768-X25519-v2", L = 32)
+    \\ */
+    \\void qv_hybrid_combine_v2(const uint8_t ss_m[32], const uint8_t ss_x[32],
+    \\                          const uint8_t ct_x[32], const uint8_t pk_x[32],
+    \\                          uint8_t out[QV_HYBRID_SS_SIZE]);
     \\
     \\/* ========================================================================== */
     \\/* Utility Functions                                                           */
@@ -729,6 +821,35 @@ test "Hybrid FFI round-trip" {
     try std.testing.expectEqual(QvError.success, qv_hybrid_decaps(&keypair.dk, &encaps_result.ciphertext, &decaps_secret));
 
     try std.testing.expect(std.mem.eql(u8, &encaps_result.shared_secret, &decaps_secret));
+}
+
+test "Hybrid FFI v2 round-trip" {
+    var keypair: QvHybridKeyPair = undefined;
+    try std.testing.expectEqual(QvError.success, qv_hybrid_keygen(&keypair));
+
+    var encaps_result: QvHybridEncapsResult = undefined;
+    try std.testing.expectEqual(QvError.success, qv_hybrid_encaps_v2(&keypair.ek, &encaps_result));
+
+    var decaps_secret: [HYBRID_SS_SIZE]u8 = undefined;
+    try std.testing.expectEqual(QvError.success, qv_hybrid_decaps_v2(&keypair.dk, &encaps_result.ciphertext, &decaps_secret));
+    try std.testing.expect(std.mem.eql(u8, &encaps_result.shared_secret, &decaps_secret));
+
+    // Mixing versions over the same ciphertext must not agree.
+    var v1_secret: [HYBRID_SS_SIZE]u8 = undefined;
+    try std.testing.expectEqual(QvError.success, qv_hybrid_decaps(&keypair.dk, &encaps_result.ciphertext, &v1_secret));
+    try std.testing.expect(!std.mem.eql(u8, &encaps_result.shared_secret, &v1_secret));
+}
+
+test "Hybrid FFI v2 combiner KAT" {
+    var out: [HYBRID_SS_SIZE]u8 = undefined;
+    qv_hybrid_combine_v2(&hybrid.kat_ss_m, &hybrid.kat_ss_x, &hybrid.kat_ct_x, &hybrid.kat_pk_x, &out);
+    const expected = hybrid.hexToArray(32, "22de6874d487bc9a0e2e68679f914ef2b3df2a4e4bb09a8ffed1095ce4dfd3e0");
+    try std.testing.expectEqualSlices(u8, &expected, &out);
+}
+
+test "Version string" {
+    try std.testing.expectEqualStrings("quantum-vault-pqc-1.1.0", std.mem.span(qv_version()));
+    try std.testing.expectEqualStrings(VERSION_STRING, std.mem.span(qv_version()));
 }
 
 test "Size query functions" {

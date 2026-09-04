@@ -213,6 +213,35 @@ pub fn build(b: *std.Build) void {
     gen_header_step.dependOn(&run_gen_header.step);
 
     // ========================================================================
+    // Hybrid KEM vector generator (docs/HYBRID-V2.md)
+    // ========================================================================
+
+    const hybrid_vectors_step = b.step("hybrid-vectors", "Print hybrid KEM combiner and full-path known-answer vectors");
+
+    const hybrid_vectors_mod = b.createModule(.{
+        .root_source_file = b.path("tools/hybrid_vectors.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "hybrid", .module = b.createModule(.{
+                .root_source_file = b.path("src/hybrid.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }) },
+        },
+    });
+
+    const hybrid_vectors_exe = b.addExecutable(.{
+        .name = "hybrid_vectors",
+        .root_module = hybrid_vectors_mod,
+    });
+
+    const run_hybrid_vectors = b.addRunArtifact(hybrid_vectors_exe);
+    hybrid_vectors_step.dependOn(&run_hybrid_vectors.step);
+
+    // ========================================================================
     // Test Modules
     // ========================================================================
 

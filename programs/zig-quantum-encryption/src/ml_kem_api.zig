@@ -262,7 +262,7 @@ pub fn encapsInternal768(ek: *const EncapsulationKey768, m: *const [32]u8) MlKem
 }
 
 /// Validate encapsulation key format
-fn validateEncapsulationKey768(ek: *const EncapsulationKey768) bool {
+pub fn validateEncapsulationKey768(ek: *const EncapsulationKey768) bool {
     // Decode each polynomial and verify coefficients are < q
     for (0..3) |i| {
         var coeffs: [N]i16 = undefined;
