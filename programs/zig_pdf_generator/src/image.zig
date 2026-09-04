@@ -22,7 +22,34 @@ pub const ImageError = error{
     InvalidPngHeader,
     UnsupportedColorType,
     DecompressFailed,
+    ImageTooLarge,
+    PngChunkTooLarge,
 };
+
+// =============================================================================
+// Decode Limits
+// =============================================================================
+//
+// A logo arrives as attacker-controlled bytes (JSON `company_logo_base64`,
+// `qr_base64`, a `data:` URL). Every buffer below is sized from numbers inside
+// those bytes, so each one needs a bound before it reaches the allocator.
+// Sizes are computed in u64 and checked against these caps *before* narrowing
+// to usize: on the wasm32 builds usize is u32, where the un-narrowed products
+// would wrap and hand the allocator a value far smaller than the loops then
+// write.
+
+/// Decoded pixel budget (width x height). 50 MP is ~7000x7000 — orders of
+/// magnitude past any logo or QR code, and still under the u32 product cap
+/// for the largest channel count.
+pub const MAX_PNG_PIXELS: u64 = 50_000_000;
+
+/// Largest single PNG chunk accepted. IHDR is 13 bytes; a real IDAT run is
+/// far under this.
+pub const MAX_PNG_CHUNK: u64 = 16 * 1024 * 1024;
+
+/// Total compressed IDAT accepted across all chunks — the zlib-bomb bound,
+/// paired with the pixel cap that bounds what it can inflate to.
+pub const MAX_PNG_IDAT_TOTAL: u64 = 32 * 1024 * 1024;
 
 // =============================================================================
 // Image Detection
@@ -79,12 +106,15 @@ pub fn decodeBase64(allocator: std.mem.Allocator, encoded: []const u8) ![]u8 {
     }
 
     const input = clean.items;
-    if (input.len == 0) return error.InvalidBase64;
+    // Canonical base64 only. A short non-canonical input ("=", "==") would
+    // otherwise underflow output_len below to ~0 and hand that to the
+    // allocator.
+    if (input.len < 4 or input.len % 4 != 0) return error.InvalidBase64;
 
     // Calculate output size
     var padding: usize = 0;
-    if (input.len > 0 and input[input.len - 1] == '=') padding += 1;
-    if (input.len > 1 and input[input.len - 2] == '=') padding += 1;
+    if (input[input.len - 1] == '=') padding += 1;
+    if (input[input.len - 2] == '=') padding += 1;
 
     const output_len = (input.len / 4) * 3 - padding;
     var output = try allocator.alloc(u8, output_len);
@@ -134,6 +164,7 @@ pub const PngInfo = struct {
     height: u32,
     bit_depth: u8,
     color_type: u8,
+    interlace: u8,
     has_alpha: bool,
 };
 
@@ -142,10 +173,14 @@ fn readU32BE(data: []const u8) u32 {
 }
 
 fn readPngChunk(data: []const u8, offset: usize) ?PngChunk {
-    if (offset + 12 > data.len) return null;
+    if (offset > data.len or data.len - offset < 12) return null;
 
     const length = readU32BE(data[offset..]);
-    if (offset + 12 + length > data.len) return null;
+    if (length > MAX_PNG_CHUNK) return null;
+    // Subtraction, never `offset + 12 + length`: that sum wraps on wasm32
+    // (usize == u32) for a chunk claiming a length near 0xFFFFFFFF, and the
+    // slice below would then run off the end of `data`.
+    if (data.len - offset - 12 < length) return null;
 
     return PngChunk{
         .length = length,
@@ -163,6 +198,7 @@ fn parsePngHeader(ihdr_data: []const u8) !PngInfo {
         .height = readU32BE(ihdr_data[4..]),
         .bit_depth = ihdr_data[8],
         .color_type = ihdr_data[9],
+        .interlace = ihdr_data[12], // 0 = none, 1 = Adam7
         .has_alpha = (ihdr_data[9] == 4 or ihdr_data[9] == 6), // Grayscale+A or RGBA
     };
 }
@@ -189,6 +225,9 @@ pub fn decodePng(allocator: std.mem.Allocator, png_data: []const u8) !struct { p
         if (std.mem.eql(u8, &chunk.chunk_type, "IHDR")) {
             info = try parsePngHeader(chunk.data);
         } else if (std.mem.eql(u8, &chunk.chunk_type, "IDAT")) {
+            if (compressed_data.items.len + chunk.data.len > MAX_PNG_IDAT_TOTAL) {
+                return error.PngChunkTooLarge;
+            }
             try compressed_data.appendSlice(allocator, chunk.data);
         } else if (std.mem.eql(u8, &chunk.chunk_type, "IEND")) {
             break;
@@ -203,11 +242,27 @@ pub fn decodePng(allocator: std.mem.Allocator, png_data: []const u8) !struct { p
         // 2 = RGB, 6 = RGBA
         return error.UnsupportedColorType;
     }
+    // Adam7 interlacing lays the scanlines out as seven sub-images, which the
+    // single-pass filter loop below cannot read. Say so rather than decoding
+    // the bytes as if they were sequential.
+    if (png_info.interlace != 0) return error.UnsupportedColorType;
+
+    // Every size below is derived from IHDR, i.e. from attacker bytes. Bound the
+    // pixel count first, then do the arithmetic in u64 so the products cannot
+    // wrap before they are checked — on wasm32 `usize` is u32, and the wrapped
+    // value would under-size the allocations that the filter loop then writes
+    // across in full.
+    if (png_info.width == 0 or png_info.height == 0) return error.InvalidPngHeader;
+    const pixel_count: u64 = @as(u64, png_info.width) * @as(u64, png_info.height);
+    if (pixel_count > MAX_PNG_PIXELS) return error.ImageTooLarge;
 
     // Decompress using zlib (DEFLATE)
     const channels: u32 = if (png_info.color_type == 6) 4 else 3;
-    const scanline_bytes = png_info.width * channels + 1; // +1 for filter byte
-    const raw_size = scanline_bytes * png_info.height;
+    const scanline_bytes_64: u64 = @as(u64, png_info.width) * channels + 1; // +1 for filter byte
+    const raw_size_64: u64 = scanline_bytes_64 * png_info.height;
+    if (raw_size_64 > std.math.maxInt(usize)) return error.ImageTooLarge;
+    const scanline_bytes: usize = @intCast(scanline_bytes_64);
+    const raw_size: usize = @intCast(raw_size_64);
 
     var decompressed = try allocator.alloc(u8, raw_size);
     defer allocator.free(decompressed);
@@ -232,9 +287,15 @@ pub fn decodePng(allocator: std.mem.Allocator, png_data: []const u8) !struct { p
         if (n == 0) break;
         total_read += n;
     }
+    // A stream that inflates to less than the scanlines IHDR promises leaves
+    // the tail of `decompressed` uninitialised, and the filter loop below reads
+    // every byte of it — so a truncated PNG would otherwise render whatever the
+    // allocator last left on that heap page into the output document. Refuse
+    // instead.
+    if (total_read < raw_size) return error.DecompressFailed;
 
     // Apply PNG filters and extract pixels
-    const pixel_bytes = png_info.width * png_info.height * channels;
+    const pixel_bytes: usize = @intCast(pixel_count * channels);
     var pixels = try allocator.alloc(u8, pixel_bytes);
     errdefer allocator.free(pixels);
 
@@ -488,6 +549,209 @@ pub fn loadImageFlexible(
 // =============================================================================
 // Tests
 // =============================================================================
+
+// -----------------------------------------------------------------------------
+// Decode-limit tests
+//
+// Each builds a PNG whose IHDR/chunk headers lie about the payload, i.e. the
+// exact shape a hostile logo takes: a few hundred bytes of JSON that steer a
+// multi-gigabyte allocation. `buildPng` emits a well-formed container so the
+// only thing under test is the bound.
+// -----------------------------------------------------------------------------
+
+/// Wrap `data` in a zlib stream of one stored (uncompressed) DEFLATE block.
+/// Hand-built rather than run through a compressor so the test fixture is a
+/// fixed, inspectable byte sequence.
+fn zlibStored(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    try out.appendSlice(allocator, &[_]u8{ 0x78, 0x01 }); // CMF/FLG
+    try out.append(allocator, 0x01); // BFINAL=1, BTYPE=00 (stored)
+    var le: [2]u8 = undefined;
+    std.mem.writeInt(u16, &le, @intCast(data.len), .little);
+    try out.appendSlice(allocator, &le);
+    std.mem.writeInt(u16, &le, ~@as(u16, @intCast(data.len)), .little);
+    try out.appendSlice(allocator, &le);
+    try out.appendSlice(allocator, data);
+
+    var be: [4]u8 = undefined;
+    std.mem.writeInt(u32, &be, std.hash.Adler32.hash(data), .big);
+    try out.appendSlice(allocator, &be);
+
+    return out.toOwnedSlice(allocator);
+}
+
+/// Assemble a PNG from an IHDR field set and a raw IDAT payload. `idat_len_override`
+/// writes a length field that disagrees with the bytes that follow, for the
+/// chunk-bound test.
+fn buildPng(
+    allocator: std.mem.Allocator,
+    width: u32,
+    height: u32,
+    color_type: u8,
+    interlace: u8,
+    idat: []const u8,
+    idat_len_override: ?u32,
+) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    try out.appendSlice(allocator, &[_]u8{ 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A });
+
+    var be: [4]u8 = undefined;
+    // IHDR
+    std.mem.writeInt(u32, &be, 13, .big);
+    try out.appendSlice(allocator, &be);
+    try out.appendSlice(allocator, "IHDR");
+    std.mem.writeInt(u32, &be, width, .big);
+    try out.appendSlice(allocator, &be);
+    std.mem.writeInt(u32, &be, height, .big);
+    try out.appendSlice(allocator, &be);
+    try out.appendSlice(allocator, &[_]u8{ 8, color_type, 0, 0, interlace });
+    try out.appendSlice(allocator, &[_]u8{ 0, 0, 0, 0 }); // CRC (unchecked here)
+
+    // IDAT
+    std.mem.writeInt(u32, &be, idat_len_override orelse @intCast(idat.len), .big);
+    try out.appendSlice(allocator, &be);
+    try out.appendSlice(allocator, "IDAT");
+    try out.appendSlice(allocator, idat);
+    try out.appendSlice(allocator, &[_]u8{ 0, 0, 0, 0 });
+
+    // IEND
+    try out.appendSlice(allocator, &[_]u8{ 0, 0, 0, 0 });
+    try out.appendSlice(allocator, "IEND");
+    try out.appendSlice(allocator, &[_]u8{ 0, 0, 0, 0 });
+
+    return out.toOwnedSlice(allocator);
+}
+
+test "PNG pixel budget is capped" {
+    const allocator = std.testing.allocator;
+
+    // 65536 x 65536 RGBA. The old u32 arithmetic wrapped
+    // (w*4+1)*h to a small value and sized the buffers from the wrapped
+    // product, while the filter loop still walked the real geometry.
+    const huge = try buildPng(allocator, 65536, 65536, 6, 0, "x", null);
+    defer allocator.free(huge);
+    try std.testing.expectError(error.ImageTooLarge, decodePng(allocator, huge));
+
+    // Just over the cap on one axis alone.
+    const wide = try buildPng(allocator, 1_000_000, 51, 2, 0, "x", null);
+    defer allocator.free(wide);
+    try std.testing.expectError(error.ImageTooLarge, decodePng(allocator, wide));
+
+    // A zero dimension is a malformed header, not a 0-byte image.
+    const zero = try buildPng(allocator, 0, 10, 2, 0, "x", null);
+    defer allocator.free(zero);
+    try std.testing.expectError(error.InvalidPngHeader, decodePng(allocator, zero));
+}
+
+test "PNG chunk length beyond the buffer or past the cap is refused" {
+    const allocator = std.testing.allocator;
+
+    // Exercise readPngChunk directly: the per-chunk cap is only *observable*
+    // when the buffer is big enough that the overrun check would otherwise let
+    // the chunk through, which needs a buffer larger than MAX_PNG_CHUNK.
+    const big = try allocator.alloc(u8, MAX_PNG_CHUNK + 64);
+    defer allocator.free(big);
+    @memset(big, 0);
+    std.mem.writeInt(u32, big[0..4], @intCast(MAX_PNG_CHUNK + 1), .big);
+    @memcpy(big[4..8], "IDAT");
+    try std.testing.expect(readPngChunk(big, 0) == null);
+
+    // One byte under the cap, and within the buffer, is accepted — so the
+    // refusal above is the cap talking and not the overrun check.
+    std.mem.writeInt(u32, big[0..4], @intCast(MAX_PNG_CHUNK - 1), .big);
+    try std.testing.expect(readPngChunk(big, 0) != null);
+
+    // A length that runs past the end of a small buffer is refused. The check
+    // is written as a subtraction because `offset + 12 + length` wraps on
+    // wasm32 (usize == u32) for a length near 0xFFFFFFFF; that wrap is not
+    // reachable on a 64-bit host, so this case only pins the in-range half.
+    var small: [32]u8 = @splat(0);
+    std.mem.writeInt(u32, small[0..4], 0xFFFF_FFF0, .big);
+    @memcpy(small[4..8], "IDAT");
+    try std.testing.expect(readPngChunk(&small, 0) == null);
+
+    // And the whole-file path refuses such a PNG rather than slicing OOB.
+    const overrun = try buildPng(allocator, 8, 8, 2, 0, "abcd", 0xFFFF_FFF0);
+    defer allocator.free(overrun);
+    try std.testing.expectError(error.DecompressFailed, decodePng(allocator, overrun));
+}
+
+test "PNG IDAT total is capped across chunks" {
+    const allocator = std.testing.allocator;
+
+    // Enough IDAT chunks to cross MAX_PNG_IDAT_TOTAL. Each is well-formed; it
+    // is only the accumulated total that is hostile.
+    const chunk_payload = try allocator.alloc(u8, 4 * 1024 * 1024);
+    defer allocator.free(chunk_payload);
+    @memset(chunk_payload, 0);
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(allocator);
+    try out.appendSlice(allocator, &[_]u8{ 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A });
+    var be: [4]u8 = undefined;
+    std.mem.writeInt(u32, &be, 13, .big);
+    try out.appendSlice(allocator, &be);
+    try out.appendSlice(allocator, "IHDR");
+    std.mem.writeInt(u32, &be, 16, .big);
+    try out.appendSlice(allocator, &be);
+    try out.appendSlice(allocator, &be);
+    try out.appendSlice(allocator, &[_]u8{ 8, 2, 0, 0, 0 });
+    try out.appendSlice(allocator, &[_]u8{ 0, 0, 0, 0 });
+
+    var n: usize = 0;
+    while (n < 9) : (n += 1) { // 9 x 4 MiB = 36 MiB > 32 MiB cap
+        std.mem.writeInt(u32, &be, @intCast(chunk_payload.len), .big);
+        try out.appendSlice(allocator, &be);
+        try out.appendSlice(allocator, "IDAT");
+        try out.appendSlice(allocator, chunk_payload);
+        try out.appendSlice(allocator, &[_]u8{ 0, 0, 0, 0 });
+    }
+
+    try std.testing.expectError(error.PngChunkTooLarge, decodePng(allocator, out.items));
+}
+
+test "PNG that inflates short of its declared scanlines is refused" {
+    const allocator = std.testing.allocator;
+
+    // A valid zlib stream carrying one filter byte + one RGB pixel, but IHDR
+    // claims 64x64 — the filter loop would otherwise read the uninitialised
+    // tail of the scanline buffer into the rendered image.
+    const payload = [_]u8{ 0, 0, 0, 0 }; // filter byte + 1 RGB pixel
+    const stream = try zlibStored(allocator, &payload);
+    defer allocator.free(stream);
+
+    const short = try buildPng(allocator, 64, 64, 2, 0, stream, null);
+    defer allocator.free(short);
+    try std.testing.expectError(error.DecompressFailed, decodePng(allocator, short));
+}
+
+test "interlaced PNG is refused rather than mis-decoded" {
+    const allocator = std.testing.allocator;
+
+    const adam7 = try buildPng(allocator, 8, 8, 2, 1, "abcd", null);
+    defer allocator.free(adam7);
+    try std.testing.expectError(error.UnsupportedColorType, decodePng(allocator, adam7));
+}
+
+test "non-canonical base64 length is refused, not underflowed" {
+    const allocator = std.testing.allocator;
+
+    // "=" / "==" made (len/4)*3 - padding wrap to ~0, which then went straight
+    // to the allocator.
+    try std.testing.expectError(error.InvalidBase64, decodeBase64(allocator, "="));
+    try std.testing.expectError(error.InvalidBase64, decodeBase64(allocator, "=="));
+    try std.testing.expectError(error.InvalidBase64, decodeBase64(allocator, "abc=="));
+    try std.testing.expectError(error.InvalidBase64, decodeBase64(allocator, "abcde"));
+
+    // Canonical input still decodes.
+    const ok = try decodeBase64(allocator, "SGVsbG8=");
+    defer allocator.free(ok);
+    try std.testing.expectEqualStrings("Hello", ok);
+}
 
 test "base64 decode" {
     const allocator = std.testing.allocator;
