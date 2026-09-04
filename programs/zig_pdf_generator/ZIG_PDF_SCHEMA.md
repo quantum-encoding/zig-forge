@@ -78,7 +78,10 @@ Supports VeriFactu/CIS/crypto-receipt modes via optional fields.
 
 | Field                          | Type                             | Required? | Fallback                          | Notes                                                                        |
 |--------------------------------|----------------------------------|-----------|-----------------------------------|------------------------------------------------------------------------------|
+| `preset`                       | `enum("receipt"\|"squircle"\|"glass"\|"minimal")` | No | none (no defaults changed) | One-word shorthand for a set of house defaults; see **`preset`** below. Read before every other field; any explicit key still overrides it. An unrecognised value is an error, not a silent fallback |
 | `document_type`                | `enum("invoice"\|"quote"\|"receipt")` | No   | `"invoice"`                       | Sets the title word (INVOICE / QUOTE / RECEIPT) and the number label. `"receipt"` also defaults `show_tax` to `false` |
+| `title`                        | string                           | No        | derived from `document_type`      | Overrides the big title word, so one template can serve statements, credit notes, purchase orders. Drawn verbatim (no upper-casing) |
+| `number_label`                 | string                           | No        | derived from `document_type`      | Overrides the reference label (`Invoice #:` / `Quote #:` / `Receipt #:`) |
 | `company_name`                 | string                           | No        | `""`                              | Header + footer                                                              |
 | `company_address`              | string                           | No        | `""`                              | Single line; no `\n` splitting in this template                              |
 | `company_vat`                  | string                           | No        | `""`                              | Tax/VAT ID; informational                                                    |
@@ -90,13 +93,14 @@ Supports VeriFactu/CIS/crypto-receipt modes via optional fields.
 | `invoice_date`                 | string                           | No        | `""`                              | Free-form date; not parsed                                                   |
 | `due_date`                     | string                           | No        | `""`                              | Free-form date; not parsed                                                   |
 | `display_mode`                 | `enum("itemized"\|"blackbox")`   | No        | `"itemized"`                      | `blackbox` collapses items into one summary line using `blackbox_description` |
-| `items`                        | array<LineItem>                  | No        | `[]`                              | See **LineItem**                                                             |
+| `items`                        | array<LineItem>                  | No        | `[]`                              | See **LineItem**. Capped at **500** entries — more is refused with `TooManyLineItems` before anything is allocated |
 | `blackbox_description`         | string                           | No        | `""`                              | One-line summary used when `display_mode="blackbox"`                         |
 | `subtotal`                     | number                           | No        | `0`                               | Pre-tax total; recalculated from items if absent                             |
 | `tax_rate`                     | number                           | No        | `0.21`                            | Fraction (`0.0`–`1.0`); 21% default                                          |
 | `tax_amount`                   | number                           | No        | derived                           | `subtotal * tax_rate` if absent                                              |
 | `total`                        | number                           | No        | derived                           | `subtotal + tax_amount` if absent                                            |
-| `show_tax`                     | bool                             | No        | `true` (but `false` for `document_type:"receipt"`) | VAT/tax toggle. When `false`, the **Subtotal** and **Tax** rows are suppressed and only the **TOTAL** bar is drawn — use for a business that is not VAT-registered. Alias: `show_vat` |
+| `currency_symbol`              | string                           | No        | `""`                              | Prepended to every money figure (e.g. `"£"`, `"€"`). Empty renders bare numbers |
+| `show_tax`                     | bool                             | No        | `true`; `false` for `document_type:"receipt"` or `preset:"receipt"` | VAT/tax toggle. When `false`, the **Subtotal** and **Tax** rows are suppressed and only the **TOTAL** bar is drawn — use for a business that is not VAT-registered. Alias: `show_vat` |
 | `notes`                        | string                           | No        | `""`                              | Free-form text block below items                                             |
 | `payment_terms`                | string                           | No        | `""`                              | Separate from notes — specifically payment terms                             |
 | `primary_color`                | hex_color                        | No        | `#b39a7d`                         | Accents, hairlines, headers                                                  |
@@ -106,18 +110,22 @@ Supports VeriFactu/CIS/crypto-receipt modes via optional fields.
 | `font_family`                  | `enum("Helvetica"\|"Times-Roman"\|"Courier")` | No | `"Helvetica"`                 | Values not in the enum fall back to Helvetica                                |
 | `template_style`               | `enum("professional"\|"modern"\|"classic"\|"creative")` | No | `"professional"` | Cosmetic variation; `professional` is the only one rendered today            |
 | `table_style`                  | `enum("bands"\|"boxes"\|"minimal")` | No | `"bands"`              | Line-item table look: `bands` = alternating row fill (original); `boxes` = bordered header + per-row borders (Spanish-invoice grid); `minimal` = no fills, one rule under the header |
+| `theme`                        | `enum("classic"\|"squircle"\|"glass")` | No | `"classic"`                | Whole-document treatment. `classic` = the original flat layout. `squircle` = rounded FROM / BILL TO cards, rounded table container with an accent header band, hairline row separators, rounded TOTAL chip. `glass` = squircle's geometry rendered as translucent panels with hairline borders and a top-edge sheen over a soft vertical wash of `primary_color`. `squircle`/`glass` override `table_style`'s row treatment; every other field still applies |
 | `irpf_rate`                    | number                           | No        | `0`                               | IRPF retention fraction (e.g. `0.15` → "IRPF (15%)"). `0` hides the row. Spanish freelancer invoices |
 | `irpf_amount`                  | number                           | No        | `0`                               | Absolute IRPF amount withheld; shown as a negative row beneath Tax (caller computes it) |
 | `logo_x`, `logo_y`             | number                           | No        | `40`, `750`                       | Logo position (points, PDF coord system)                                      |
 | `logo_width`, `logo_height`    | number                           | No        | `80`, `50`                        | Logo dimensions (points)                                                     |
-| `show_branding`                | bool                             | No        | `true`                            | "Generated by Quantum Quote" footer link                                     |
+| `logo_inline`                  | bool                             | No        | `false`                           | Draw the logo as a square lockup immediately left of the company name (name + address indent past it), using `logo_width` as the square side — instead of at the absolute `logo_x`/`logo_y` |
+| `logo_banner`                  | bool                             | No        | `false`                           | The logo **is** the identity block: drawn at its natural aspect (`logo_width` x `logo_height`) top-left, and the company-name text is suppressed (the banner normally contains it). Wins over `logo_inline` |
+| `logo_link_url`                | string                           | No        | none                              | Makes the drawn logo clickable — a PDF link annotation over its bounds |
+| `show_branding`                | bool                             | No        | `true`; `false` for `preset:"receipt"` / `preset:"minimal"` | "Generated by Quantum Quote" footer link                                     |
 | `branding_url`                 | string                           | No        | canonical marketing URL           | Destination for the footer link                                              |
 | `payment_button_url`           | string                           | No        | none                              | When set, renders a clickable PDF button with a link annotation              |
 | `payment_button_label`         | string                           | No        | `"Pay Now"`                       | Button text                                                                  |
 | `payment_button_color`         | hex_color                        | No        | `#635BFF`                         | Button fill (Stripe purple default)                                          |
 | `payment_button_text_color`    | hex_color                        | No        | `#FFFFFF`                         | Button text colour                                                           |
 | `payment_buttons`              | array of `{label,url,color,text_color}` | No | `[]`                       | Multiple pay buttons (e.g. Stripe + PayPal), each a clickable link. Takes precedence over the single `payment_button_*` fields; when empty, those are used (back-compat) |
-| `qr_mode`                      | `enum("none"\|"verifactu"\|"payment_link"\|"bank_details"\|"verification"\|"crypto")` | No | `"none"` | Determines QR placement and label. `"payment"` is an alias for `"payment_link"` |
+| `qr_mode`                      | `enum("none"\|"verifactu"\|"payment_link"\|"bank_details"\|"verification"\|"crypto")` | No | `"none"` | Determines QR placement and label. `"payment"` is an alias for `"payment_link"`, `"bank"` for `"bank_details"`, `"verify"` for `"verification"`, `"cryptocurrency"` for `"crypto"`. **Only `"crypto"` draws its own QR** (rendered natively from `crypto_wallet` + `crypto_amount`); every other mode renders the image you supply in `qr_base64` and draws nothing if it is absent |
 | `qr_base64`                    | data_url                         | No        | none                              | QR image to render when `qr_mode != "none"`                                  |
 | `qr_label`                     | string                           | No        | derived from `qr_mode`            | Caption text under the QR                                                    |
 | `verifactu_qr_base64`          | data_url                         | No        | none                              | **Legacy**; auto-promotes to `qr_base64` + `qr_mode="verifactu"`              |
@@ -131,8 +139,93 @@ Supports VeriFactu/CIS/crypto-receipt modes via optional fields.
 | `crypto_sender_wallet`         | string                           | No        | none                              | Sender wallet (for receipts/confirmations)                                   |
 | `show_crypto_identicons`       | bool                             | No        | `false`                           | Render blockie identicons for wallet addresses                               |
 | `crypto_custom_symbol`         | string                           | No        | derived from network              | Overrides default token symbol (e.g. `USDC` on Ethereum)                     |
-| `password`                     | string                           | No        | `""`                              | When set, produces an AES-256 (`/V5 /R6`) password-encrypted PDF. Native: seed from OS CSPRNG. WASM: use the `generateInvoiceEncrypted` host-seeded export (the plain export refuses an all-zero seed) |
+| `labels`                       | object                           | No        | English defaults                  | Overrides the fixed drawn strings (column headers, `Bill To:`, `Subtotal:`, footer lines) for non-English documents. Supply any subset — see **`labels`** below for all 24 fields |
+| `crypto_payment`               | `{network,to_address,from_address,amount,currency}` | No | none          | Nested form of the `crypto_*` fields; `amount` accepts a string or a number |
+| `password`                     | string                           | No        | `""`                              | When set, produces an AES-256 (`/V5 /R6`) password-encrypted PDF. Native: seed from OS CSPRNG. WASI WASM (`zig build wasm`): use the host-seeded `zigpdf_generate_invoice_encrypted` export. **Not available in the browser build** (`zig build wasm-web`), which has no entropy source and fails with `InsecureSeed` — see **Build surface** below |
 | `owner_password`               | string                           | No        | = `password`                      | Permissions (owner) password; falls back to `password` when blank            |
+
+### `preset` — one-word shorthand for a house look
+
+`preset` is read **before every other field** and expands to the defaults
+below. Everything it sets is only a *default*: an explicit key of the same
+name in the payload still wins, and that holds per field — overriding
+`document_type` on the `receipt` preset does not bring the tax rows back,
+because the preset set `show_tax` as its own default.
+
+| `preset` | Expands to |
+|---|---|
+| `"receipt"`  | `document_type:"receipt"`, `show_tax:false`, `show_branding:false`, `theme:"classic"` |
+| `"squircle"` | `theme:"squircle"`, `table_style:"bands"` |
+| `"glass"`    | `theme:"glass"` |
+| `"minimal"`  | `table_style:"minimal"`, `show_branding:false` |
+
+An unrecognised value is **refused**, not ignored: the parser returns
+`UnknownPreset` and the diagnostic names the valid set
+(`zigpdf_get_error()` → `JSON parse error: unknown "preset" (valid: receipt,
+squircle, glass, minimal)`; the CLI prints the same on stderr and exits 1).
+
+Omitting `preset` renders byte-identically to a build without the key.
+
+### `labels` — the fixed drawn strings
+
+Every string the template draws itself (as opposed to echoing from the
+payload) is overridable through the optional `labels` object, for
+non-English documents. Supply any subset; each field falls back to its
+English default. The big title and the number label are **not** here — they
+are the top-level `title` and `number_label`.
+
+```json
+{ "labels": { "bill_to": "Facturar a", "tax_prefix": "IVA", "total": "TOTAL:" } }
+```
+
+| `labels.` field | Default | Notes |
+|---|---|---|
+| **Meta rows (right column)** | | |
+| `date` | `"Date:"` |  |
+| `due_date` | `"Due Date:"` |  |
+| **Party blocks** | | |
+| `bill_to` | `"Bill To:"` | Classic layout heading |
+| `from_card` | `"FROM"` | Rounded-card layouts (`theme` squircle/glass) only |
+| `bill_to_card` | `"BILL TO"` | Rounded-card layouts only |
+| `vat_prefix` | `"VAT"` | Rendered as `"VAT: <number>"` for both company and client |
+| **Items-table column headers** | | |
+| `description` | `"Description"` |  |
+| `quantity` | `"Qty"` |  |
+| `unit_price` | `"Unit Price"` |  |
+| `line_total` | `"Total"` |  |
+| **Totals block** | | |
+| `subtotal` | `"Subtotal:"` |  |
+| `tax_prefix` | `"Tax"` | Rendered as `"Tax (21%):"` — the percentage is appended |
+| `total` | `"TOTAL:"` |  |
+| **Footer sections** | | |
+| `notes` | `"Notes:"` |  |
+| `payment_terms` | `"Payment Terms:"` |  |
+| `click_to_pay` | `"Click to Pay Online"` |  |
+| **QR captions (overridden by `qr_label`)** | | |
+| `scan_to_pay` | `"Scan to Pay"` |  |
+| `bank_details` | `"Bank Details"` |  |
+| `verify_invoice` | `"Verify Invoice"` |  |
+| **Footer strap-lines by QR mode** | | |
+| `footer_scan_to_pay` | `"Scan QR to Pay Online"` |  |
+| `footer_bank_details` | `"Bank Transfer Details Above"` |  |
+| `footer_verify` | `"Scan to Verify Invoice"` |  |
+| `footer_verifactu` | `"VeriFactu Compliant Invoice"` |  |
+| `thank_you` | `"Thank you for your business"` | Centred footer line, drawn for every QR mode |
+
+### Build surface: what the browser WASM does *not* have
+
+`zig build wasm-web` (`zig-out/lib/zigpdf_web.wasm`, the freestanding
+browser build the Lutuno storefront loads) exports the plain generators
+only. The `…_encrypted` exports —
+`zigpdf_generate_invoice_encrypted` / `zigpdf_generate_letter_encrypted` —
+exist **only** in the WASI build (`zig build wasm`) and the native FFI
+library, because they need a host-supplied 32-byte CSPRNG seed.
+
+Consequently a `password` / `owner_password` in the JSON has no effect in
+the browser build: `zigpdf_generate_invoice` there has no entropy source, so
+rather than emitting a weakly-keyed file it fails with
+`PDF generation error: InsecureSeed`. Encrypt from the native library, the
+WASI build, or the CLI.
 
 #### `LineItem` (items[])
 

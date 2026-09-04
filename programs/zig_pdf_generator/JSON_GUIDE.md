@@ -64,17 +64,49 @@ pdf-gen --demo-contract demo_contract.pdf
 
 ## Field Reference
 
+### Preset (start here)
+
+A bare payload renders the plain template. `preset` is a single word that
+turns on a whole house look, so you do not have to know which switch does
+what:
+
+```json
+{ "preset": "receipt", "company_name": "Lutuno", "items": [ ... ] }
+```
+
+| `preset` | Sets |
+|----------|------|
+| `"receipt"`  | `document_type:"receipt"` (RECEIPT title, `Receipt #:` label), `show_tax:false` (no Subtotal/Tax rows), `show_branding:false`, `theme:"classic"` |
+| `"squircle"` | `theme:"squircle"` (rounded FROM / BILL TO cards, rounded table container and TOTAL chip), `table_style:"bands"` |
+| `"glass"`    | `theme:"glass"` (squircle's shapes as translucent panels with a sheen, over a soft wash of `primary_color`) |
+| `"minimal"`  | `table_style:"minimal"` (no row fills, one rule under the header), `show_branding:false` |
+
+Everything a preset sets is a **default**. Name the same key yourself and
+yours wins — `{"preset":"squircle","table_style":"boxes"}` gives you the
+squircle theme with a boxed table. That is per field: overriding
+`document_type` on the `receipt` preset does not bring the tax rows back.
+
+An unrecognised preset is an error, not a silent fallback. The CLI prints
+the valid set to stderr and exits 1; through FFI/WASM the generator returns
+NULL and `zigpdf_get_error()` reads
+`JSON parse error: unknown "preset" (valid: receipt, squircle, glass, minimal)`.
+
+Omit `preset` and nothing changes — output is byte-identical to a build
+without the key.
+
 ### Document Type (Required)
 | Field | Type | Values | Description |
 |-------|------|--------|-------------|
-| `document_type` | string | `"invoice"`, `"quote"` | Determines header text |
+| `document_type` | string | `"invoice"`, `"quote"`, `"receipt"` | Sets the title word and the number label. `"receipt"` also defaults `show_tax` to `false` |
+| `title` | string | any | Overrides the title word outright (statements, credit notes, purchase orders). Drawn verbatim |
+| `number_label` | string | any | Overrides the reference label (`Invoice #:` / `Quote #:` / `Receipt #:`) |
 
 ### Company Information
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `company_name` | string | Yes | Your business name |
 | `company_address` | string | Yes | Full address (use `\n` for line breaks) |
-| `company_vat` | string | No | VAT/Tax registration number |
+| `company_vat` | string | No | VAT/tax registration number; drawn as `VAT: <number>` under the company name |
 | `company_logo_base64` | string | No | Base64-encoded PNG/JPEG logo |
 
 ### Client Information
@@ -82,7 +114,7 @@ pdf-gen --demo-contract demo_contract.pdf
 |-------|------|----------|-------------|
 | `client_name` | string | Yes | Client/customer name |
 | `client_address` | string | Yes | Client address (use `\n` for line breaks) |
-| `client_vat` | string | No | Client VAT number |
+| `client_vat` | string | No | Client VAT number; drawn under the client name |
 
 ### Document Details
 | Field | Type | Required | Description |
@@ -94,10 +126,13 @@ pdf-gen --demo-contract demo_contract.pdf
 ### Line Items
 
 #### Display Modes
-| Mode | Description |
+
+The `display_mode` field chooses how `items` are drawn.
+
+| `display_mode` | Description |
 |------|-------------|
 | `"itemized"` | Show full table with all items (default) |
-| `"blackbox"` | Single summary line, hides item details |
+| `"blackbox"` | Single summary line from `blackbox_description`, hides item details |
 
 #### Itemized Mode
 ```json
@@ -141,6 +176,16 @@ pdf-gen --demo-contract demo_contract.pdf
 
 **Important:** You must calculate these values. The generator displays them as provided.
 
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `show_tax` | bool | `true`; `false` for a receipt | When `false` the Subtotal and Tax rows are suppressed and only the TOTAL bar is drawn — for a business that is not VAT-registered. Alias: `show_vat` |
+| `currency_symbol` | string | `""` | Prepended to every money figure (`"£"`, `"€"`). Empty renders bare numbers |
+| `irpf_rate` | number | `0` | IRPF retention fraction (`0.15` → an `IRPF (15%)` row). `0` hides the row. Spanish freelancer invoices |
+| `irpf_amount` | number | `0` | The absolute amount withheld — you compute it; shown as a negative row beneath Tax |
+
+**Line items are capped at 500.** A longer `items` array is refused with
+`TooManyLineItems` before anything is allocated.
+
 ### Optional Sections
 | Field | Type | Description |
 |-------|------|-------------|
@@ -152,10 +197,15 @@ pdf-gen --demo-contract demo_contract.pdf
 |-------|------|---------|-------------|
 | `primary_color` | hex string | `"#b39a7d"` | Header bars, accents (gold) |
 | `secondary_color` | hex string | `"#2c3e50"` | Section headers (dark blue) |
-| `title_color` | hex string | `"#b39a7d"` | Document title color |
+| `title_color` | hex string | inherits `primary_color` | Document title colour. Set it only to break away from the brand colour |
 | `company_name_color` | hex string | `"#1a1a1a"` | Company name color |
 | `font_family` | string | `"Helvetica"` | `"Helvetica"`, `"Times"`, `"Courier"` |
-| `template_style` | string | `"professional"` | `"professional"`, `"modern"`, `"classic"` |
+| `template_style` | string | `"professional"` | `"professional"`, `"modern"`, `"classic"`, `"creative"` — cosmetic; only `professional` is rendered today |
+| `theme` | string | `"classic"` | Whole-document look: `"classic"` (original flat layout), `"squircle"` (rounded FROM / BILL TO cards, rounded table container + TOTAL chip), `"glass"` (squircle's shapes as translucent panels with a top-edge sheen over a wash of `primary_color`). `squircle`/`glass` take over the table row treatment from `table_style` |
+| `table_style` | string | `"bands"` | Items table: `"bands"` = alternating row fill, `"boxes"` = bordered header + per-row borders (Spanish-invoice grid), `"minimal"` = no fills, one rule under the header |
+| `show_branding` | bool | `true` | The "Generated by Quantum Quote" footer link |
+| `branding_url` | string | marketing URL | Where that footer link points |
+| `show_crypto_identicons` | bool | `false` | Draw blockie identicons beside wallet addresses |
 
 ### Logo Placement
 | Field | Type | Default | Description |
@@ -164,6 +214,9 @@ pdf-gen --demo-contract demo_contract.pdf
 | `logo_y` | number | 750 | Y position in points |
 | `logo_width` | number | 80 | Width in points |
 | `logo_height` | number | 50 | Height in points |
+| `logo_inline` | bool | `false` | Draw the logo as a square lockup immediately left of the company name (which indents past it), using `logo_width` as the side — instead of at the absolute `logo_x`/`logo_y` |
+| `logo_banner` | bool | `false` | The logo **is** the identity block: drawn at `logo_width` x `logo_height` top-left with the company-name text suppressed (the banner usually contains it). Wins over `logo_inline` |
+| `logo_link_url` | string | none | Makes the logo clickable — a link annotation over its drawn bounds |
 
 ### Payment Button (Clickable Link)
 
@@ -203,6 +256,23 @@ Add a clickable payment button to your invoice that opens a URL when clicked. Wo
 }
 ```
 
+**Two or more buttons — `payment_buttons[]`:**
+
+```json
+{
+  "payment_buttons": [
+    { "label": "Pay by Card", "url": "https://checkout.stripe.com/pay/cs_live_abc123", "color": "#635BFF", "text_color": "#FFFFFF" },
+    { "label": "PayPal",      "url": "https://www.paypal.com/paypalme/yourname/500",   "color": "#0070BA", "text_color": "#FFFFFF" }
+  ]
+}
+```
+
+Each entry renders as its own clickable button. Per-entry defaults are the
+same as the single-button fields (`"Pay Now"`, `#635BFF`, `#FFFFFF`), and any
+field you leave out takes them. A non-empty `payment_buttons` **takes
+precedence** over `payment_button_url` and friends; leave it out (or empty)
+and the single-button fields are used, so existing payloads are unaffected.
+
 **Notes:**
 - Button appears automatically when `payment_button_url` is provided
 - When a QR code is present, the button appears to the left of the QR code
@@ -215,7 +285,11 @@ Add a clickable payment button to your invoice that opens a URL when clicked. Wo
 ## QR Code Options
 
 ### QR Mode Types
-| Mode | Label Shown | Use Case |
+
+`qr_mode` (default `"none"`) chooses the caption and footer strap-line;
+`qr_base64` supplies the image, and `qr_label` overrides the caption.
+
+| `qr_mode` | Label Shown | Use Case |
 |------|-------------|----------|
 | `"none"` | — | No QR code |
 | `"payment_link"` | "Scan to Pay" | Stripe/payment URL |
@@ -223,6 +297,16 @@ Add a clickable payment button to your invoice that opens a URL when clicked. Wo
 | `"verification"` | "Verify Invoice" | Hosted verification link |
 | `"verifactu"` | "VeriFactu" | Spanish tax compliance |
 | `"crypto"` | "Pay with [Network]" | Cryptocurrency payment |
+
+**Only `"crypto"` draws its own QR.** For that mode the generator encodes the
+payment URI from `crypto_wallet` + `crypto_amount` and renders the QR itself,
+so you supply no image. Every other mode renders the image you hand it in
+`qr_base64` and draws nothing at all if that key is absent — the mode by
+itself only chooses the caption and the footer strap-line.
+
+`"payment"`, `"bank"`, `"verify"` and `"cryptocurrency"` are accepted as
+aliases for `"payment_link"`, `"bank_details"`, `"verification"` and
+`"crypto"`. Anything unrecognised falls back to `"none"`.
 
 ### Basic QR Code (from base64 image)
 ```json
@@ -274,6 +358,87 @@ The generator automatically creates a QR code with the payment URI:
   "verifactu_timestamp": "2024-01-09T10:30:00Z"
 }
 ```
+
+---
+
+## Non-English Documents (`labels`)
+
+Every string the template draws itself — column headings, `Bill To:`,
+`Subtotal:`, the footer lines — is overridable through an optional `labels`
+object. Supply any subset; each field keeps its English default otherwise.
+The big title and the number label are not in here: those are the top-level
+`title` and `number_label`.
+
+```json
+{
+  "labels": {
+    "bill_to": "Facturar a",
+    "description": "Descripción",
+    "quantity": "Cant.",
+    "unit_price": "Precio",
+    "line_total": "Total",
+    "subtotal": "Base imponible:",
+    "tax_prefix": "IVA",
+    "total": "TOTAL:",
+    "notes": "Notas:",
+    "thank_you": "Gracias por su confianza"
+  }
+}
+```
+
+| Group | Field | Default |
+|-------|-------|---------|
+| Meta rows | `date` | `"Date:"` |
+|  | `due_date` | `"Due Date:"` |
+| Party blocks | `bill_to` | `"Bill To:"` |
+|  | `from_card` | `"FROM"` |
+|  | `bill_to_card` | `"BILL TO"` |
+|  | `vat_prefix` | `"VAT"` |
+| Items-table headers | `description` | `"Description"` |
+|  | `quantity` | `"Qty"` |
+|  | `unit_price` | `"Unit Price"` |
+|  | `line_total` | `"Total"` |
+| Totals | `subtotal` | `"Subtotal:"` |
+|  | `tax_prefix` | `"Tax"` |
+|  | `total` | `"TOTAL:"` |
+| Footer sections | `notes` | `"Notes:"` |
+|  | `payment_terms` | `"Payment Terms:"` |
+|  | `click_to_pay` | `"Click to Pay Online"` |
+| QR captions | `scan_to_pay` | `"Scan to Pay"` |
+|  | `bank_details` | `"Bank Details"` |
+|  | `verify_invoice` | `"Verify Invoice"` |
+| Footer strap-lines | `footer_scan_to_pay` | `"Scan QR to Pay Online"` |
+|  | `footer_bank_details` | `"Bank Transfer Details Above"` |
+|  | `footer_verify` | `"Scan to Verify Invoice"` |
+|  | `footer_verifactu` | `"VeriFactu Compliant Invoice"` |
+|  | `thank_you` | `"Thank you for your business"` |
+
+`tax_prefix` has the percentage appended (`"IVA"` renders as `IVA (21%):`),
+and `vat_prefix` prefixes both identity lines (`VAT: GB123456789`).
+`from_card` / `bill_to_card` are only drawn by the `squircle` and `glass`
+themes; `bill_to` is the classic layout's heading.
+
+---
+
+## Password-Protected PDFs
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `password` | string | `""` | When set, the PDF is AES-256 encrypted (`/V5 /R6`) and needs this to open |
+| `owner_password` | string | = `password` | Permissions password; falls back to `password` when blank |
+
+**Native and CLI**: works as written; the key material comes from the OS
+CSPRNG.
+
+**WASI WASM** (`zig build wasm`): call the host-seeded
+`zigpdf_generate_invoice_encrypted` export and pass 32 bytes of
+`crypto.getRandomValues` — the plain export has no entropy source.
+
+**Browser WASM** (`zig build wasm-web`): **not available.** That build
+exports the plain generators only — there is no
+`zigpdf_generate_invoice_encrypted`. A `password` in the JSON does not
+produce a weakly-keyed file; the call fails with
+`PDF generation error: InsecureSeed`. Encrypt server-side.
 
 ---
 

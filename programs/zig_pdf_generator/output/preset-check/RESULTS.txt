@@ -1,0 +1,6 @@
+a-no-preset-lutuno     OK    1745 bytes -> a-no-preset-lutuno.pdf
+b-preset-receipt       OK    1309 bytes -> b-preset-receipt.pdf
+c-preset-squircle      OK    2162 bytes -> c-preset-squircle.pdf
+d-unknown-preset       ERROR zigpdf_get_error() = "JSON parse error: unknown "preset" (valid: receipt, squircle, glass, minimal)"
+e-preset-glass         OK    4819 bytes -> e-preset-glass.pdf
+f-preset-minimal       OK    1468 bytes -> f-preset-minimal.pdf
