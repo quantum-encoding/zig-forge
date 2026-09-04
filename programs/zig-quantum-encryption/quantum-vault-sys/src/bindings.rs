@@ -202,6 +202,20 @@ extern "C" {
         ct: *const QvHybridCiphertext,
         shared_secret: *mut [u8; QV_HYBRID_SS_SIZE],
     ) -> c_int;
+    // v2 combiner: HKDF-SHA3-256 over ss_M || ss_X || ct_X || pk_X (docs/HYBRID-V2.md)
+    pub fn qv_hybrid_encaps_v2(ek: *const QvHybridEncapsKey, result: *mut QvHybridEncapsResult) -> c_int;
+    pub fn qv_hybrid_decaps_v2(
+        dk: *const QvHybridDecapsKey,
+        ct: *const QvHybridCiphertext,
+        shared_secret: *mut [u8; QV_HYBRID_SS_SIZE],
+    ) -> c_int;
+    pub fn qv_hybrid_combine_v2(
+        ss_m: *const [u8; 32],
+        ss_x: *const [u8; 32],
+        ct_x: *const [u8; 32],
+        pk_x: *const [u8; 32],
+        out: *mut [u8; QV_HYBRID_SS_SIZE],
+    );
 
     // Utility functions
     pub fn qv_secure_zero(ptr: *mut u8, len: usize);

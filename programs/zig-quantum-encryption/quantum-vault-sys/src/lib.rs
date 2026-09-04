@@ -22,11 +22,27 @@
 //! let signature = signing_kp.sk.sign(b"message").unwrap();
 //! signing_kp.pk.verify(b"message", &signature).unwrap();
 //!
-//! // Hybrid encryption (ML-KEM + X25519)
+//! // Hybrid KEM (ML-KEM-768 + X25519), v2 combiner for new data
 //! let hybrid_kp = HybridKeyPair::generate().unwrap();
-//! let hybrid_encaps = hybrid_kp.ek.encaps().unwrap();
-//! let hybrid_ss = hybrid_kp.dk.decaps(&hybrid_encaps.ciphertext).unwrap();
+//! let hybrid_encaps = hybrid_kp.ek.encaps_v2().unwrap();
+//! let hybrid_ss = hybrid_kp.dk.decaps_v2(&hybrid_encaps.ciphertext).unwrap();
+//! // `encaps` / `decaps` are the v1 combiner, for data written before v2 existed.
 //! ```
+//!
+//! # Hybrid combiner versions
+//!
+//! `encaps_v2`/`decaps_v2` derive the shared secret with HKDF-SHA3-256 over
+//! `ss_M || ss_X || ct_X || pk_X` (info `"HYBRID-ML-KEM-768-X25519-v2"`);
+//! `encaps`/`decaps` are the original `SHA3-256("HYBRID-ML-KEM-768-X25519-v1"
+//! || ss_M || ss_X)`. Keys and ciphertexts have the same layout under both,
+//! and the ciphertext does not say which version wrote it — record that in
+//! your envelope. Byte-level definition and test vectors: `docs/HYBRID-V2.md`.
+//!
+//! # Library freshness
+//!
+//! `build.rs` reads the version string declared in `src/quantum_vault_ffi.zig`
+//! and refuses to link a static library that does not embed it, so a stale
+//! prebuilt archive fails at build time instead of silently running old code.
 //!
 //! # Security Considerations
 //!
@@ -114,11 +130,14 @@ pub fn secure_zero(data: &mut [u8]) {
 mod tests {
     use super::*;
 
+    /// The linked library must be the one the source declares. `build.rs`
+    /// exports the version it read from `src/quantum_vault_ffi.zig`
+    /// (`VERSION_STRING`) and already refused any archive not embedding it;
+    /// this closes the loop through the actual `qv_version()` call.
     #[test]
-    fn test_version() {
-        let v = version();
-        assert!(!v.is_empty());
-        assert!(v.contains('.') || v == "unknown");
+    fn test_version_matches_source() {
+        assert_eq!(version(), env!("QV_EXPECTED_VERSION"));
+        assert_eq!(version(), "quantum-vault-pqc-1.1.0");
     }
 
     #[test]
@@ -210,5 +229,20 @@ mod tests {
             encaps_result.shared_secret.as_bytes(),
             alice_ss.as_bytes()
         );
+    }
+
+    #[test]
+    fn test_hybrid_v2_full_flow() {
+        let alice_kp = HybridKeyPair::generate().expect("keygen failed");
+        let bob_pk = HybridEncapsKey::from_bytes(alice_kp.ek.as_bytes());
+        let encaps_result = bob_pk.encaps_v2().expect("encaps_v2 failed");
+
+        let alice_ct = HybridCiphertext::from_bytes(encaps_result.ciphertext.as_bytes());
+        let alice_ss = alice_kp.dk.decaps_v2(&alice_ct).expect("decaps_v2 failed");
+        assert_eq!(encaps_result.shared_secret.as_bytes(), alice_ss.as_bytes());
+
+        // Wrong-version decapsulation is silent but different.
+        let v1_ss = alice_kp.dk.decaps(&alice_ct).expect("decaps failed");
+        assert_ne!(encaps_result.shared_secret.as_bytes(), v1_ss.as_bytes());
     }
 }
