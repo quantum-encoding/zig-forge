@@ -21,7 +21,7 @@
 //!   * Lutuno is a dropshipping webstore. EU destinations bill from the Irish
 //!     company "Quantum Encoding Europe Limited"; UK (GB) destinations bill
 //!     from "Quantum Encoding Ltd". Resolved here from the ship-to country
-//!     (falls back to billing country, then defaults to the EU/Irish entity).
+//!     (falls back to billing country; non-EU destinations bill from the UK entity).
 //!
 //! I/O contract: this is a PURE, STATELESS function. JSON in -> JSON envelope
 //! out. Event-id idempotency stays in the webhook (it dedups before/after
@@ -315,10 +315,27 @@ fn resolveLegalEntity(tmpl: Template, in: Input) Entity {
         .note = in.legal_entity_note,
     };
     if (!tmpl.is_physical) return ENTITY_UK; // digital apps are all on the English account
-    // Lutuno: ship-to (else bill-to) country picks the billing entity.
+    // Lutuno: ship-to (else bill-to) country picks the billing entity. EU
+    // destinations bill from the Irish company; GB and everything else (US,
+    // AU, …) bill from the UK company — the same split the storefront makes
+    // at checkout (EU market = EUR, catch-all market = GBP), so the receipt's
+    // currency rule and this country rule always agree.
     const country = if (in.shipping_country.len > 0) in.shipping_country else in.billing_country;
-    if (eqlIgnoreCase(country, "GB")) return ENTITY_UK;
-    return ENTITY_EU; // EU destinations + unknown default to the Irish entity
+    if (isEuCountry(country)) return ENTITY_EU;
+    return ENTITY_UK;
+}
+
+/// EU member states (ISO-3166 alpha-2) — destinations that bill from the Irish entity.
+const EU_COUNTRIES = [_][]const u8{
+    "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR", "HU", "IE",
+    "IT", "LV", "LT", "LU", "MT", "NL", "PL", "PT", "RO", "SK", "SI", "ES", "SE",
+};
+
+fn isEuCountry(country: []const u8) bool {
+    for (EU_COUNTRIES) |c| {
+        if (eqlIgnoreCase(country, c)) return true;
+    }
+    return false;
 }
 
 /// "<PREFIX>-<short id>" derived deterministically from the session id (else
