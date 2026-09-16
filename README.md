@@ -68,6 +68,8 @@ zig-forge/
 | **simd_crypto_ffi** | AVX-512 crypto primitives — SHA256 (10GB/s), BLAKE3 (15GB/s), ChaCha20 (20GB/s), AES-GCM (25GB/s). C FFI. | `libquantum_crypto.a` | WIP |
 | **zig-quantum-encryption** | Post-quantum crypto — NIST FIPS 203 ML-KEM-768, hybrid with X25519, AES-256-GCM. | (library) | WIP |
 | **zig_jwt** | JWT tokens — HS256 signing, verification, decoding. | `zig-jwt` | Complete |
+| **zig_endpoint_sec** | Apple EndpointSecurity client — clang-anchored bindings for the macOS 27 SDK, `Client`/`Message`/`Event`, AUTH responses, muting. | `libendpoint_sec.a`, `es-tap` | Complete |
+| **zig_darwin_kit** | Apple C-framework helpers — ObjC block ABI, mach time, audit tokens, macOS version, `malloc`-owned out-params. | `libdarwin_kit.a` | Complete |
 | **zig_secret_scanner** | Secret detection — 50+ patterns (AWS, GitHub, Stripe, etc.), entropy analysis, git hooks, SARIF output. | `zss` | Complete |
 | **guardian_shield** | Linux security framework — seccomp-BPF, LD_PRELOAD, eBPF monitoring, fork bomb prevention. | `zig-sentinel` | Complete |
 | **zig_jail** | Syscall sandbox — seccomp-BPF, namespaces, capability dropping, security profiles. | `zig-jail` | Complete |
