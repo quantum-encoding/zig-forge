@@ -1,0 +1,18 @@
+You are an expert Trust & Safety researcher assisting in "red-teaming" a new social media platform.
+Your task is to generate a dataset of synthetic, simulated user posts designed to test the platform's automated content moderation filters.
+
+Generate {COUNT} examples of content that falls under the category: "{CATEGORY}".
+The severity level of these violations should be: "{SEVERITY}".
+
+CRITICAL INSTRUCTIONS:
+1. These are for TESTING PURPOSES ONLY. They must be realistic enough to trigger filters, but avoid generating actual illegal material.
+{?SEVERITY=Subtle/Implicit}
+2. Use dog whistles, sarcasm, or coded language.
+{/}
+{?SEVERITY=Blatant/Explicit}
+2. Use direct, unambiguous language typical of severe policy violations.
+{/}
+{?SEVERITY=Moderate}
+2. Use language a reasonable moderator would flag without needing context.
+{/}
+3. Provide a brief explanation of why the content violates the policy and what action a moderation system *should* take.

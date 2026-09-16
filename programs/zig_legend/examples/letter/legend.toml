@@ -1,0 +1,94 @@
+# Legend for a company decision letter. Every {PLACEHOLDER} in letter.txt is
+# declared here with its type; the scenarios bind the outcome the letter
+# reports and the dependent variables follow from it.
+
+[legend]
+name = "Application decision letter"
+
+[[var]]
+name = "COMPANY"
+type = "string"
+value = "Quantum Encoding Ltd"
+
+[[var]]
+name = "APPLICANT"
+type = "string"
+required = true
+description = "Full name as written on the application"
+
+[[var]]
+name = "REF"
+type = "string"
+required = true
+description = "Application reference"
+
+[[var]]
+name = "DATE"
+type = "date"
+required = true
+
+[[var]]
+name = "OUTCOME"
+type = "enum"
+values = ["approved", "declined", "deferred"]
+required = true
+
+[[var]]
+name = "AMOUNT"
+type = "money"
+currency = "GBP"
+value = "0"
+
+[[var]]
+name = "REVIEW_DATE"
+type = "date"
+value = "2026-10-14"
+
+[[var]]
+name = "SIGNATORY"
+type = "string"
+value = "R. Wilson"
+
+[[var]]
+name = "ROLE"
+type = "string"
+by = "OUTCOME"
+[var.map]
+approved = "Head of Onboarding"
+declined = "Applications Team"
+deferred = "Applications Team"
+
+[[var]]
+name = "NEXT_STEP"
+type = "string"
+by = "OUTCOME"
+[var.map]
+approved = "Your onboarding pack will follow within five working days."
+declined = "You may submit a new application after six months."
+deferred = "We will write to you again once the review is complete."
+
+[[scenario]]
+name = "approved"
+[scenario.set]
+OUTCOME = "approved"
+APPLICANT = "Ada Lovelace"
+REF = "QE-2026-0417"
+DATE = "2026-09-16"
+AMOUNT = "12500"
+
+[[scenario]]
+name = "declined"
+[scenario.set]
+OUTCOME = "declined"
+APPLICANT = "Charles Babbage"
+REF = "QE-2026-0418"
+DATE = "2026-09-16"
+
+[[scenario]]
+name = "deferred"
+[scenario.set]
+OUTCOME = "deferred"
+APPLICANT = "Grace Hopper"
+REF = "QE-2026-0419"
+DATE = "2026-09-16"
+REVIEW_DATE = "2026-11-02"

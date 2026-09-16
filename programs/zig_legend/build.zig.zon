@@ -1,0 +1,10 @@
+.{
+    .name = .zig_legend,
+    .version = "0.1.0",
+    .fingerprint = 0x8a3a68217a869785,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .zig_toml = .{ .path = "../zig_toml" },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "examples", "README.md" },
+}

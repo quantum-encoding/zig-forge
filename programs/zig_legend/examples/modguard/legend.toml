@@ -1,0 +1,31 @@
+# The Vertex AI Studio "ModGuard" demo's prompt, as a legend. The demo's
+# constants.ts lists these categories and severities; `zig_legend matrix`
+# renders all 21 prompts as JSON.
+
+[legend]
+name = "ModGuard prompt matrix"
+
+[[var]]
+name = "CATEGORY"
+type = "enum"
+values = [
+  "Hate Speech",
+  "Harassment & Bullying",
+  "Spam & Scams",
+  "Self-Harm",
+  "Misinformation",
+  "NSFW/Adult Content",
+  "Violent Extremism",
+]
+
+[[var]]
+name = "SEVERITY"
+type = "enum"
+values = ["Subtle/Implicit", "Moderate", "Blatant/Explicit"]
+
+[[var]]
+name = "COUNT"
+type = "int"
+min = 1
+max = 10
+value = 5

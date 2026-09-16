@@ -1,0 +1,29 @@
+{COMPANY}
+{DATE|long}
+
+Dear {APPLICANT},
+
+Re: application {REF}
+
+Thank you for your application to {COMPANY}. We have now completed our review.
+{?OUTCOME=approved}
+
+We are pleased to tell you that your application has been approved, with a
+facility of {AMOUNT}. {NEXT_STEP}
+{/}
+{?OUTCOME=declined}
+
+We regret that we are unable to approve your application on this occasion.
+{NEXT_STEP} If you would like the reasons for this decision, reply to this
+letter quoting reference {REF}.
+{/}
+{?OUTCOME=deferred}
+
+Your application needs further review before we can reach a decision. We
+expect to complete this by {REVIEW_DATE|long}. {NEXT_STEP}
+{/}
+
+Yours sincerely,
+
+{SIGNATORY}
+{ROLE}, {COMPANY}
