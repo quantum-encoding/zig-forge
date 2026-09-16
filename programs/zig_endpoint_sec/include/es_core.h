@@ -4,7 +4,7 @@
  *   zes_*  Zig   zig-forge/programs/zig_endpoint_sec/src/capi.zig    (libes_core_zig.a)
  *   res_*  Rust  GuardianShield/es-core/rust over the HarfangLab endpoint-sec crate (libes_core_rust.a)
  *
- * Both backends expose exactly the functions declared by ESC_DECLARE below, so a
+ * Every backend exposes exactly the functions declared by ESC_DECLARE below, so a
  * Swift host can drive either through the same shape and benchmark them against
  * its own native ES code. Everything is plain C: opaque handles, int result codes
  * that mirror the ES enums, and pointer+length strings that borrow from the message.
@@ -148,8 +148,9 @@ typedef void (*esc_handler)(void *ctx, esc_client *client, esc_message *msg, con
     uint64_t P##_now_ticks(void); \
     uint64_t P##_ticks_to_ns(uint64_t ticks);
 
-ESC_DECLARE(zes)
-ESC_DECLARE(res)
+ESC_DECLARE(zes)   /* Zig: zig-forge/programs/zig_endpoint_sec */
+ESC_DECLARE(res)   /* Rust, in-house: GuardianShield/es-core/rust (bindings generated from the SDK) */
+ESC_DECLARE(hes)   /* Rust, HarfangLab endpoint-sec 0.6.2 as shipped: GuardianShield/es-core/rust-harfanglab */
 
 #ifdef __cplusplus
 }
