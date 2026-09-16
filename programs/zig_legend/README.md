@@ -1,8 +1,8 @@
 # zig_legend
 
-Renders text templates by substituting `{VARIABLE}` placeholders from a typed legend, choosing each variable's value by scenario, by round-robin sequence, or by full matrix.
+Renders text templates by substituting `{VARIABLE}` placeholders from a typed legend, choosing each variable's value by scenario, by round-robin sequence, or by full matrix, and turns the result into agent briefs plus baton launch specs.
 
-A **legend** (TOML) declares every variable: its type (`string`, `enum`, `int`, `money`, `date`, `bool`), candidate values, default, whether it is required, and optionally that its value follows from another variable (`by` + `map`). It also names **scenarios**, each a set of bindings such as the outcome a letter reports. A **template** is plain text with `{NAME}` placeholders, filters, and `{?VAR=value}…{:}…{/}` blocks. The legend is parsed with the promoted in-tree `zig_toml`; JSON output goes through `std.json`.
+A **legend** (TOML) declares every variable: its type (`string`, `enum`, `int`, `money`, `date`, `bool`, `list`), candidate values, default, whether it is required, and optionally that its value follows from another variable (`by` + `map`). It also names **scenarios**, each a set of bindings such as the outcome a letter reports or the role an agent plays, and an optional `[launch]` table for agent profiles. A **template** is plain text with `{NAME}` placeholders, filters, and `{?VAR=value}…{:}…{/}` blocks. The legend is parsed with the promoted in-tree `zig_toml`; JSON in and out goes through `std.json`.
 
 ## Build
 
@@ -82,11 +82,47 @@ AMOUNT = "12500"
 zig_legend render -l legend.toml -t letter.txt -s approved
 zig_legend render -l legend.toml -t letter.txt -s declined --set DATE=2026-10-01
 zig_legend render -l legend.toml -t letter.txt --each-scenario --out-dir out/   # approved.txt, declined.txt, deferred.txt
-zig_legend check  -l legend.toml -t letter.txt        # lint every scenario; exit 3 on problems
+zig_legend check  -l legend.toml -t letter.txt        # lint every scenario (and [launch]); exit 3 on problems
 zig_legend vars   -t letter.txt -l legend.toml        # placeholders with their legend entry
 ```
 
 The three rendered letters are checked in under `examples/letter/expected/` and locked by `zig build test`.
+
+## Example: an agent profile
+
+`examples/agent/` builds a review panel on one filed baton work item: three scenarios (implementer, reviewer, red-team) share the goal and differ in name, role text, tools and constraints. The goal comes straight from the queue, the role text from the role library:
+
+```sh
+baton work show 6249C3B1 --json > goal.json
+baton role text reviewer > role-reviewer.txt
+
+zig_legend profile -l legend.toml -t brief.txt \
+  --bind goal.json \
+  --set PROJECT=rust_agent \
+  --set reviewer:ROLE_TEXT=@role-reviewer.txt \
+  --each-scenario --out-dir out/
+```
+
+`--bind` reads a JSON object and binds every legend variable whose `json` key is present (`GOAL_ID` has `json = "id"`, `GOAL_TEXT` has `json = "text"`), type-checked; other keys are ignored. `--set K=@file` binds a file's contents, and `--set SCENARIO:K=V` applies to one scenario only. `examples/agent/make-profile.sh <work-id> <project>` runs the whole thing.
+
+`profile` writes, per variant, `out/<scenario>.md` (the brief), and then:
+
+- `out/workflow.json`: a `baton workflow run` spec. The rendered brief is each target's `assignment` (`{brief}` from the target's `vars`), `cwd` comes from `[launch] cwd`, and provider, model, runner and flags become the spec's global flags. Every variant must agree on those, because a workflow has one flag set.
+- `out/launch.json` and stdout: one `baton launch --cwd … --brief-file … --provider … --model … --runner … --trust` argv per variant, for launching them one at a time.
+
+Nothing is launched by this tool. Pass an absolute `--out-dir` so the paths in the specs stay valid from any directory.
+
+```toml
+[launch]                       # strings may hold placeholders
+cwd = "{PROJECT_PATH}"
+provider = "{PROVIDER}"
+model = "{MODEL}"
+runner = "{RUNNER}"
+flags = ["--trust"]
+concurrency = 3
+```
+
+`brief.txt` uses `{TOOLS|bullets}` for the list of tools, `{GOAL_ID|left:8}` for the short work ref baton prints, and `{?ROLE=implementer}…{:}…{/}` so only the implementer is told to close the item. The reviewer's brief is checked in under `expected/` and locked by `zig build test`.
 
 ## Example: a prompt matrix
 
@@ -114,6 +150,8 @@ A variable takes part in a plan when it has a `values` list and is not pinned by
 |---|---|
 | `{NAME}` | substitute; money and date types format themselves (`£1,234.50`, `2026-09-16`) |
 | `{NAME\|upper}` `lower` `title` `trim` | text filters, chainable left to right |
+| `{ID\|left:8}` `right:N` | the first or last N bytes |
+| `{TOOLS}` `{TOOLS\|bullets}` `lines` `count` | a list joined by its `join` text, or one item per line, with `- `, or the item count |
 | `{DATE\|long}` `us` `uk` | `16 September 2026`, `September 16, 2026`, `16/09/2026` |
 | `{AMOUNT\|plain}` `raw` | money without the currency; the untouched bound text |
 | `{?VAR=value}…{:}…{/}` | block on equality, with optional else; `!=` and bare `{?FLAG}` (truthy) also work; nests |
@@ -122,9 +160,11 @@ A variable takes part in a plan when it has a `values` list and is not pinned by
 
 A block tag or comment alone on its line is removed with the line, so untaken branches leave no blank lines. `[legend] open = "<<"` / `close = ">>"` changes the delimiters.
 
+List variables hold their items joined by `sep` (default `,`): `value = ["Read", "Edit"]` in TOML, `--set TOOLS=Read,Edit` on the command line, a JSON array through `--bind`.
+
 ## Validation
 
-Every value, whether from the legend, a scenario or `--set`, is checked against its type: enum membership, integer bounds, decimal places for money, real calendar dates, boolean spellings. `--set` of a variable the legend does not declare is an error. Scenario names must be filesystem-safe. `check` reports unknown placeholders, unused legend variables, unbound required variables and type errors in one pass.
+Every value, whether from the legend, a scenario, `--set` or `--bind`, is checked against its type: enum membership, integer bounds, decimal places for money, real calendar dates, boolean spellings. `--set` of a variable the legend does not declare is an error. Scenario names must be filesystem-safe. `check` reports unknown placeholders, unused legend variables, unbound required variables and type errors in one pass.
 
 ## Library
 

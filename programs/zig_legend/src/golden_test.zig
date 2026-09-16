@@ -69,3 +69,29 @@ test "modguard: matrix covers category x severity" {
     try testing.expect(std.mem.indexOf(u8, out, "should be: \"Subtle/Implicit\".") != null);
     try testing.expect(std.mem.indexOf(u8, out, "Use dog whistles") != null);
 }
+
+test "agent: reviewer brief from goal.json + role text" {
+    var d = lib.Diag{};
+    var l = try lib.Legend.load(testing.allocator, @embedFile("agent.toml"), &d);
+    defer l.deinit();
+    var t = try lib.template.parse(testing.allocator, @embedFile("agent.txt"), l.delims, &d);
+    defer t.deinit();
+    const from_json = try lib.render.bindingsFromJson(testing.allocator, &l, @embedFile("agent.goal.json"), &d);
+    defer {
+        for (from_json) |kv| testing.allocator.free(kv.value);
+        testing.allocator.free(from_json);
+    }
+    var sets: std.ArrayList(lib.KV) = .empty;
+    defer sets.deinit(testing.allocator);
+    try sets.appendSlice(testing.allocator, from_json);
+    try sets.append(testing.allocator, .{ .key = "PROJECT", .value = "rust_agent" });
+    try sets.append(testing.allocator, .{ .key = "ROLE_TEXT", .value = std.mem.trimEnd(u8, @embedFile("agent.role.reviewer.txt"), "\r\n") });
+    var b = lib.render.resolve(testing.allocator, &l, "reviewer", &.{}, sets.items, &d) catch |e| {
+        std.debug.print("resolve: {s}\n", .{d.text()});
+        return e;
+    };
+    defer b.deinit(testing.allocator);
+    const out = try lib.render.renderAlloc(testing.allocator, &t, &l, &b, &d);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings(@embedFile("agent.reviewer.md"), out);
+}

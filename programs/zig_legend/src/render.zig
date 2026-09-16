@@ -104,6 +104,77 @@ pub fn resolve(
     return b;
 }
 
+pub const JsonBindError = error{ OutOfMemory, InvalidJson, BadValue };
+
+/// Bindings from a JSON object such as `baton work show <id> --json`: every
+/// legend variable whose `json` key (default: its name) is present is bound.
+/// Scalars become text, arrays bind list variables (items joined by `sep`),
+/// nulls are skipped, other keys are ignored. Values are type-checked.
+/// Returned strings are allocated with `gpa` and owned by the caller.
+pub fn bindingsFromJson(gpa: std.mem.Allocator, legend: *const Legend, bytes: []const u8, diag: *Diag) JsonBindError![]const KV {
+    var parsed = std.json.parseFromSlice(std.json.Value, gpa, bytes, .{}) catch |err| {
+        diag.set(0, "not valid JSON: {s}", .{@errorName(err)});
+        return error.InvalidJson;
+    };
+    defer parsed.deinit();
+    const obj = switch (parsed.value) {
+        .object => |o| o,
+        else => {
+            diag.set(0, "JSON bindings must be an object", .{});
+            return error.InvalidJson;
+        },
+    };
+    var out: std.ArrayList(KV) = .empty;
+    errdefer {
+        for (out.items) |kv| gpa.free(kv.value);
+        out.deinit(gpa);
+    }
+    for (legend.vars) |*v| {
+        const jv = obj.get(v.jsonKey()) orelse continue;
+        const text: []const u8 = switch (jv) {
+            .null => continue,
+            .bool => |b| try gpa.dupe(u8, if (b) "true" else "false"),
+            .integer => |i| try std.fmt.allocPrint(gpa, "{d}", .{i}),
+            .float => |f| try std.fmt.allocPrint(gpa, "{d}", .{f}),
+            .number_string => |n| try gpa.dupe(u8, n),
+            .string => |str| try gpa.dupe(u8, str),
+            .array => |arr| blk: {
+                if (v.kind != .list) {
+                    diag.set(0, "JSON key '{s}' is an array but '{s}' is not a list variable", .{ v.jsonKey(), v.name });
+                    return error.BadValue;
+                }
+                var w = std.Io.Writer.Allocating.init(gpa);
+                errdefer w.deinit();
+                for (arr.items, 0..) |item, i| {
+                    const it: []const u8 = switch (item) {
+                        .string => |str| str,
+                        .number_string => |n| n,
+                        else => {
+                            diag.set(0, "JSON key '{s}': list items must be strings", .{v.jsonKey()});
+                            return error.BadValue;
+                        },
+                    };
+                    if (std.mem.indexOf(u8, it, v.sep) != null) {
+                        diag.set(0, "JSON key '{s}': item '{s}' contains the separator '{s}'", .{ v.jsonKey(), it, v.sep });
+                        return error.BadValue;
+                    }
+                    if (i != 0) w.writer.writeAll(v.sep) catch return error.OutOfMemory;
+                    w.writer.writeAll(it) catch return error.OutOfMemory;
+                }
+                break :blk try w.toOwnedSlice();
+            },
+            .object => {
+                diag.set(0, "JSON key '{s}' is an object; only scalars and arrays bind", .{v.jsonKey()});
+                return error.BadValue;
+            },
+        };
+        errdefer gpa.free(text);
+        try legend_mod.checkValue(v, text, diag);
+        try out.append(gpa, .{ .key = v.name, .value = text });
+    }
+    return out.toOwnedSlice(gpa);
+}
+
 pub const RenderError = error{
     OutOfMemory,
     WriteFailed,
@@ -186,19 +257,21 @@ fn canonical(raw: []const u8, spec: ?*const VarSpec) []const u8 {
 }
 
 /// Filters, applied left to right after the type's default formatting:
-///   raw    skip the type formatting (money digits, ISO date)
+///   raw       skip the type formatting (money digits, ISO date, list join)
 ///   upper / lower / title / trim
-///   long   date → "16 September 2026"
-///   us     date → "September 16, 2026"
-///   uk     date → "16/09/2026"
-///   plain  money → "1,234.50" (no currency)
-pub const filter_names = [_][]const u8{ "raw", "upper", "lower", "title", "trim", "long", "us", "uk", "plain" };
+///   left:N    first N bytes;  right:N  last N bytes
+///   long      date → "16 September 2026"
+///   us        date → "September 16, 2026"
+///   uk        date → "16/09/2026"
+///   plain     money → "1,234.50" (no currency)
+///   bullets   list → "- a\n- b";  lines → "a\nb";  count → "2"
+pub const filter_names = [_][]const u8{ "raw", "upper", "lower", "title", "trim", "left", "right", "long", "us", "uk", "plain", "bullets", "lines", "count" };
 
 fn writeValue(
     gpa: std.mem.Allocator,
     raw: []const u8,
     spec: ?*const VarSpec,
-    filters: []const []const u8,
+    filters: []const template.Filter,
     w: *std.Io.Writer,
     line: u32,
     diag: *Diag,
@@ -207,14 +280,18 @@ fn writeValue(
     defer buf.deinit();
     const bw = &buf.writer;
 
-    const want_raw = filters.len > 0 and std.mem.eql(u8, filters[0], "raw");
+    const want_raw = filters.len > 0 and std.mem.eql(u8, filters[0].name, "raw");
     var date_style: enum { iso, long, us, uk } = .iso;
     var money_symbol = true;
+    var list_style: enum { join, bullets, lines, count } = .join;
     for (filters) |f| {
-        if (std.mem.eql(u8, f, "long")) date_style = .long;
-        if (std.mem.eql(u8, f, "us")) date_style = .us;
-        if (std.mem.eql(u8, f, "uk")) date_style = .uk;
-        if (std.mem.eql(u8, f, "plain")) money_symbol = false;
+        if (std.mem.eql(u8, f.name, "long")) date_style = .long;
+        if (std.mem.eql(u8, f.name, "us")) date_style = .us;
+        if (std.mem.eql(u8, f.name, "uk")) date_style = .uk;
+        if (std.mem.eql(u8, f.name, "plain")) money_symbol = false;
+        if (std.mem.eql(u8, f.name, "bullets")) list_style = .bullets;
+        if (std.mem.eql(u8, f.name, "lines")) list_style = .lines;
+        if (std.mem.eql(u8, f.name, "count")) list_style = .count;
     }
 
     // Type formatting.
@@ -234,17 +311,35 @@ fn writeValue(
             formatDate(d, date_style, bw) catch return error.OutOfMemory;
         },
         .bool => bw.writeAll(if (legend_mod.parseBool(raw) orelse false) "true" else "false") catch return error.OutOfMemory,
+        .list => {
+            const items = spec.?.splitList(gpa, raw) catch return error.OutOfMemory;
+            defer gpa.free(items);
+            formatList(items, spec.?.join, list_style, bw) catch return error.OutOfMemory;
+        },
         else => bw.writeAll(raw) catch return error.OutOfMemory,
     } else bw.writeAll(raw) catch return error.OutOfMemory;
 
     // Text filters.
     for (filters) |f| {
         const s = buf.written();
-        if (std.mem.eql(u8, f, "upper")) {
+        if (std.mem.eql(u8, f.name, "upper")) {
             for (s) |*c| c.* = std.ascii.toUpper(c.*);
-        } else if (std.mem.eql(u8, f, "lower")) {
+        } else if (std.mem.eql(u8, f.name, "lower")) {
             for (s) |*c| c.* = std.ascii.toLower(c.*);
-        } else if (std.mem.eql(u8, f, "title")) {
+        } else if (std.mem.eql(u8, f.name, "left") or std.mem.eql(u8, f.name, "right")) {
+            const n = std.fmt.parseInt(usize, f.arg, 10) catch {
+                diag.set(line, "filter '{s}' needs a number, e.g. {s}:8", .{ f.name, f.name });
+                return error.UnknownFilter;
+            };
+            if (n < s.len) {
+                if (std.mem.eql(u8, f.name, "left")) {
+                    buf.shrinkRetainingCapacity(n);
+                } else {
+                    std.mem.copyForwards(u8, s[0..n], s[s.len - n ..]);
+                    buf.shrinkRetainingCapacity(n);
+                }
+            }
+        } else if (std.mem.eql(u8, f.name, "title")) {
             var at_word_start = true;
             for (s) |*c| {
                 if (std.ascii.isAlphanumeric(c.*)) {
@@ -252,20 +347,40 @@ fn writeValue(
                     at_word_start = false;
                 } else at_word_start = true;
             }
-        } else if (std.mem.eql(u8, f, "trim")) {
+        } else if (std.mem.eql(u8, f.name, "trim")) {
             const t = std.mem.trim(u8, s, " \t\r\n");
             std.mem.copyForwards(u8, s[0..t.len], t);
             buf.shrinkRetainingCapacity(t.len);
-        } else if (std.mem.eql(u8, f, "raw") or std.mem.eql(u8, f, "long") or std.mem.eql(u8, f, "us") or
-            std.mem.eql(u8, f, "uk") or std.mem.eql(u8, f, "plain"))
+        } else if (std.mem.eql(u8, f.name, "raw") or std.mem.eql(u8, f.name, "long") or std.mem.eql(u8, f.name, "us") or
+            std.mem.eql(u8, f.name, "uk") or std.mem.eql(u8, f.name, "plain") or std.mem.eql(u8, f.name, "bullets") or
+            std.mem.eql(u8, f.name, "lines") or std.mem.eql(u8, f.name, "count"))
         {
             // Consumed above.
         } else {
-            diag.set(line, "unknown filter '{s}'", .{f});
+            diag.set(line, "unknown filter '{s}'", .{f.name});
             return error.UnknownFilter;
         }
     }
     w.writeAll(buf.written()) catch return error.WriteFailed;
+}
+
+fn formatList(items: []const []const u8, join: []const u8, style: anytype, w: *std.Io.Writer) !void {
+    switch (style) {
+        .count => try w.print("{d}", .{items.len}),
+        .join => for (items, 0..) |it, i| {
+            if (i != 0) try w.writeAll(join);
+            try w.writeAll(it);
+        },
+        .lines => for (items, 0..) |it, i| {
+            if (i != 0) try w.writeByte('\n');
+            try w.writeAll(it);
+        },
+        .bullets => for (items, 0..) |it, i| {
+            if (i != 0) try w.writeByte('\n');
+            try w.writeAll("- ");
+            try w.writeAll(it);
+        },
+    }
 }
 
 pub fn currencySymbol(code: []const u8) ?[]const u8 {
@@ -354,6 +469,10 @@ const lg =
     \\name = "NAME"
     \\value = "ada LOVELACE"
     \\[[var]]
+    \\name = "TOOLS"
+    \\type = "list"
+    \\value = ["Read", "Edit", "Bash"]
+    \\[[var]]
     \\name = "STEP"
     \\by = "OUTCOME"
     \\[var.map]
@@ -391,6 +510,16 @@ test "text filters chain" {
     const out = try renderWith("{NAME|title}|{NAME|upper}|{NAME|lower}|{WHEN|long|upper}", "yes", &.{});
     defer testing.allocator.free(out);
     try testing.expectEqualStrings("Ada Lovelace|ADA LOVELACE|ada lovelace|16 SEPTEMBER 2026", out);
+}
+
+test "list rendering and left/right" {
+    const out = try renderWith("{TOOLS}|{TOOLS|count}|{TOOLS|lines}|{TOOLS|raw}|{NAME|left:3}|{NAME|right:8|upper}|{NAME|left:99}", "yes", &.{});
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("Read, Edit, Bash|3|Read\nEdit\nBash|Read,Edit,Bash|ada|LOVELACE|ada LOVELACE", out);
+    const b = try renderWith("{TOOLS|bullets}", "yes", &.{.{ .key = "TOOLS", .value = "Grep, Glob" }});
+    defer testing.allocator.free(b);
+    try testing.expectEqualStrings("- Grep\n- Glob", b);
+    try testing.expectError(error.UnknownFilter, renderWith("{NAME|left}", "yes", &.{}));
 }
 
 test "scenario drives dependent var and blocks" {
@@ -431,6 +560,43 @@ test "money formatting edge cases" {
     try buf.writer.writeByte(' ');
     try formatMoney("1000000.05", spec, false, &buf.writer);
     try testing.expectEqualStrings("£0.00 -£999.00 1,000,000.05", buf.written());
+}
+
+test "bindings from JSON" {
+    var d = Diag{};
+    var l = try Legend.load(testing.allocator,
+        \\[[var]]
+        \\name = "GOAL_ID"
+        \\json = "id"
+        \\[[var]]
+        \\name = "N"
+        \\type = "int"
+        \\[[var]]
+        \\name = "TOOLS"
+        \\type = "list"
+        \\[[var]]
+        \\name = "FLAG"
+        \\type = "bool"
+        \\[[var]]
+        \\name = "ABSENT"
+    , &d);
+    defer l.deinit();
+    const kvs = try bindingsFromJson(testing.allocator, &l, "{\"id\":\"6249C3B1-4950\",\"N\":7,\"TOOLS\":[\"Read\",\"Edit\"],\"FLAG\":true,\"noise\":{},\"ABSENT\":null}", &d);
+    defer {
+        for (kvs) |kv| testing.allocator.free(kv.value);
+        testing.allocator.free(kvs);
+    }
+    try testing.expectEqual(@as(usize, 4), kvs.len);
+    try testing.expectEqualStrings("GOAL_ID", kvs[0].key);
+    try testing.expectEqualStrings("6249C3B1-4950", kvs[0].value);
+    try testing.expectEqualStrings("7", kvs[1].value);
+    try testing.expectEqualStrings("Read,Edit", kvs[2].value);
+    try testing.expectEqualStrings("true", kvs[3].value);
+
+    try testing.expectError(error.BadValue, bindingsFromJson(testing.allocator, &l, "{\"N\":\"x\"}", &d));
+    try testing.expectError(error.BadValue, bindingsFromJson(testing.allocator, &l, "{\"N\":[1]}", &d));
+    try testing.expectError(error.InvalidJson, bindingsFromJson(testing.allocator, &l, "[1]", &d));
+    try testing.expectError(error.InvalidJson, bindingsFromJson(testing.allocator, &l, "{", &d));
 }
 
 test "untyped render without a legend" {

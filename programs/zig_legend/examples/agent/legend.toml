@@ -1,0 +1,122 @@
+# An agent profile: who the agent is, what it may use, which project it works
+# in and which filed work item it takes. Rendered by `zig_legend profile` into
+# a brief per scenario plus the baton launch/workflow specs.
+#
+# Fill the goal from the queue:   baton work show <id> --json > goal.json
+# and each role text from the library: baton role text <role> > roles/<role>.txt
+
+[legend]
+name = "fleet-agent"
+
+[[var]]
+name = "NAME"
+type = "string"
+required = true
+description = "What the agent is addressed as"
+
+[[var]]
+name = "ROLE"
+type = "enum"
+values = ["implementer", "reviewer", "red-team", "researcher", "security-auditor"]
+required = true
+description = "A `baton role list` id"
+
+[[var]]
+name = "ROLE_TEXT"
+type = "string"
+value = ""
+description = "The role's prompt; --set ROLE_TEXT=@role.txt"
+
+[[var]]
+name = "PROJECT"
+type = "enum"
+values = ["zig-forge", "baton", "rust_agent", "GuardianShield"]
+required = true
+
+[[var]]
+name = "PROJECT_PATH"
+type = "string"
+by = "PROJECT"
+[var.map]
+zig-forge = "~/work/poly-repo/zig-forge"
+baton = "~/work/poly-repo/baton-ecosystem/baton"
+rust_agent = "~/work/poly-repo/baton-ecosystem/rust_agent"
+GuardianShield = "~/work/poly-repo/GuardianShieldSec/GuardianShield"
+
+[[var]]
+name = "GOAL_ID"
+type = "string"
+json = "id"
+required = true
+
+[[var]]
+name = "GOAL_TEXT"
+type = "string"
+json = "text"
+required = true
+
+[[var]]
+name = "ACCEPTANCE"
+type = "string"
+json = "acceptance"
+value = ""
+
+[[var]]
+name = "TOOLS"
+type = "list"
+value = ["Read", "Grep", "Glob", "Edit", "Write", "Bash"]
+
+[[var]]
+name = "CONSTRAINTS"
+type = "list"
+sep = ";"
+value = []
+description = "Must-nots, one per item; --set 'CONSTRAINTS=no force push;no rm'"
+
+[[var]]
+name = "PROVIDER"
+type = "enum"
+values = ["claude", "codex", "gemini", "glm", "qwen", "vertex"]
+value = "claude"
+
+[[var]]
+name = "MODEL"
+type = "string"
+value = "opus"
+
+[[var]]
+name = "RUNNER"
+type = "enum"
+values = ["auto", "wezterm", "aiconductor", "rust-agent"]
+value = "auto"
+
+# A review panel on one work item: three agents, three roles, same goal.
+[[scenario]]
+name = "implementer"
+[scenario.set]
+NAME = "Forge"
+ROLE = "implementer"
+
+[[scenario]]
+name = "reviewer"
+[scenario.set]
+NAME = "Lens"
+ROLE = "reviewer"
+TOOLS = ["Read", "Grep", "Glob", "Bash"]
+CONSTRAINTS = ["do not edit files, report findings only"]
+
+[[scenario]]
+name = "red-team"
+[scenario.set]
+NAME = "Breaker"
+ROLE = "red-team"
+TOOLS = ["Read", "Grep", "Glob", "Bash"]
+CONSTRAINTS = ["do not edit files, report findings only"]
+
+[launch]
+cwd = "{PROJECT_PATH}"
+provider = "{PROVIDER}"
+model = "{MODEL}"
+runner = "{RUNNER}"
+flags = ["--trust"]
+concurrency = 3

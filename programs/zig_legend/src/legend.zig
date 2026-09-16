@@ -28,10 +28,28 @@
 //! approved = "Your welcome pack follows."
 //! declined = "You may re-apply in six months."
 //!
+//! [[var]]
+//! name = "TOOLS"
+//! type = "list"                     # items joined by `sep` in bindings and
+//! sep = ","                         # on --set; rendered with `join`
+//! join = ", "
+//! value = ["Read", "Edit"]
+//!
+//! [[var]]
+//! name = "GOAL_TEXT"
+//! json = "text"                     # key read by --bind FILE.json
+//!
 //! [[scenario]]
 //! name = "approved"
 //! [scenario.set]
 //! OUTCOME = "approved"
+//!
+//! [launch]                          # `profile` output; strings may hold {VARS}
+//! cwd = "{PROJECT_PATH}"
+//! provider = "claude"
+//! model = "opus"
+//! flags = ["--trust"]
+//! concurrency = 2
 //! ```
 //!
 //! Every value is held as a string; the type decides validation and default
@@ -50,11 +68,13 @@ pub const VarType = enum {
     money,
     date,
     bool,
+    list,
 
     pub fn parse(s: []const u8) ?VarType {
         const names = [_]struct { []const u8, VarType }{
             .{ "string", .string }, .{ "enum", .enum_ },  .{ "int", .int },
             .{ "money", .money },   .{ "date", .date },   .{ "bool", .bool },
+            .{ "list", .list },
         };
         for (names) |n| if (std.mem.eql(u8, s, n[0])) return n[1];
         return null;
@@ -68,6 +88,7 @@ pub const VarType = enum {
             .money => "money",
             .date => "date",
             .bool => "bool",
+            .list => "list",
         };
     }
 };
@@ -93,6 +114,28 @@ pub const VarSpec = struct {
     /// Dependent variable: the value is `map[binding of by]`.
     by: ?[]const u8 = null,
     map: []const KV = &.{},
+    /// list: item separator inside a binding, and the text between items
+    /// when rendered.
+    sep: []const u8 = ",",
+    join: []const u8 = ", ",
+    /// Key this variable is read from by `--bind FILE.json` (defaults to name).
+    json: ?[]const u8 = null,
+
+    pub fn jsonKey(self: *const VarSpec) []const u8 {
+        return self.json orelse self.name;
+    }
+
+    /// list: the items of a binding, trimmed, empties dropped. Caller frees.
+    pub fn splitList(self: *const VarSpec, gpa: std.mem.Allocator, v: []const u8) ![]const []const u8 {
+        var out: std.ArrayList([]const u8) = .empty;
+        errdefer out.deinit(gpa);
+        var it = std.mem.splitSequence(u8, v, self.sep);
+        while (it.next()) |raw| {
+            const item = std.mem.trim(u8, raw, " \t\r\n");
+            if (item.len > 0) try out.append(gpa, item);
+        }
+        return out.toOwnedSlice(gpa);
+    }
 
     pub fn mapLookup(self: *const VarSpec, key: []const u8) ?[]const u8 {
         for (self.map) |kv| if (std.mem.eql(u8, kv.key, key)) return kv.value;
@@ -111,6 +154,17 @@ pub const Scenario = struct {
     set: []const KV,
 };
 
+/// `[launch]`: how `profile` turns a rendered brief into an agent. Every
+/// string may hold placeholders and is rendered with the variant's bindings.
+pub const Launch = struct {
+    cwd: []const u8 = "",
+    provider: []const u8 = "",
+    model: []const u8 = "",
+    runner: []const u8 = "",
+    flags: []const []const u8 = &.{},
+    concurrency: u32 = 0,
+};
+
 pub const LoadError = error{
     OutOfMemory,
     InvalidToml,
@@ -124,6 +178,7 @@ pub const Legend = struct {
     /// Declaration order.
     vars: []const VarSpec = &.{},
     scenarios: []const Scenario = &.{},
+    launch: ?Launch = null,
 
     pub fn deinit(self: *Legend) void {
         self.arena.deinit();
@@ -221,21 +276,43 @@ pub const Legend = struct {
                 var set: []const KV = &.{};
                 if (t.get("set")) |setv| {
                     const st = try expectTable(setv, "scenario.set", diag);
-                    set = try tableToKVs(a, st, "scenario.set", diag);
-                    for (set) |kv| {
-                        const spec = legend.find(kv.key) orelse {
-                            diag.set(0, "scenario '{s}' sets undeclared variable '{s}'", .{ name, kv.key });
-                            return error.BadLegend;
-                        };
-                        checkValue(spec, kv.value, diag) catch return error.BadLegend;
-                    }
+                    set = try scenarioSet(a, &legend, name, st, diag);
                 }
                 try scenarios.append(a, .{ .name = name, .set = set });
             }
         }
         legend.scenarios = try scenarios.toOwnedSlice(a);
 
-        try rejectUnknownKeys(&root, &.{ "legend", "var", "scenario" }, "top level", diag);
+        if (root.get("launch")) |lv| {
+            const lt = try expectTable(lv, "launch", diag);
+            try rejectUnknownKeys(lt, &.{ "cwd", "provider", "model", "runner", "flags", "concurrency" }, "launch", diag);
+            var launch = Launch{};
+            if (lt.get("cwd")) |v| launch.cwd = try dupeString(a, v, "launch.cwd", diag);
+            if (lt.get("provider")) |v| launch.provider = try dupeString(a, v, "launch.provider", diag);
+            if (lt.get("model")) |v| launch.model = try dupeString(a, v, "launch.model", diag);
+            if (lt.get("runner")) |v| launch.runner = try dupeString(a, v, "launch.runner", diag);
+            if (lt.get("concurrency")) |v| {
+                const c = try expectInt(v, "launch.concurrency", diag);
+                if (c < 0 or c > 1024) {
+                    diag.set(0, "launch.concurrency must be 0..1024", .{});
+                    return error.BadLegend;
+                }
+                launch.concurrency = @intCast(c);
+            }
+            if (lt.get("flags")) |v| {
+                const arr = try expectArray(v, "launch.flags", diag);
+                const flags = try a.alloc([]const u8, arr.items.items.len);
+                for (arr.items.items, 0..) |item, i| flags[i] = try dupeString(a, item, "launch.flags", diag);
+                launch.flags = flags;
+            }
+            if (launch.cwd.len == 0) {
+                diag.set(0, "launch.cwd is required", .{});
+                return error.BadLegend;
+            }
+            legend.launch = launch;
+        }
+
+        try rejectUnknownKeys(&root, &.{ "legend", "var", "scenario", "launch" }, "top level", diag);
         legend.arena = arena;
         return legend;
     }
@@ -258,7 +335,7 @@ fn parseVar(a: std.mem.Allocator, t: *const toml.Table, idx: usize, diag: *Diag)
         diag.set(0, "variable name '{s}' is not a valid placeholder name", .{spec.name});
         return error.BadLegend;
     }
-    try rejectUnknownKeys(t, &.{ "name", "type", "description", "values", "value", "required", "currency", "decimals", "min", "max", "by", "map" }, spec.name, diag);
+    try rejectUnknownKeys(t, &.{ "name", "type", "description", "values", "value", "required", "currency", "decimals", "min", "max", "by", "map", "sep", "join", "json" }, spec.name, diag);
 
     if (t.get("type")) |v| {
         const s = try dupeString(a, v, "type", diag);
@@ -281,6 +358,13 @@ fn parseVar(a: std.mem.Allocator, t: *const toml.Table, idx: usize, diag: *Diag)
     if (t.get("min")) |v| spec.min = try expectInt(v, "min", diag);
     if (t.get("max")) |v| spec.max = try expectInt(v, "max", diag);
     if (t.get("by")) |v| spec.by = try dupeString(a, v, "by", diag);
+    if (t.get("sep")) |v| spec.sep = try dupeString(a, v, "sep", diag);
+    if (t.get("join")) |v| spec.join = try dupeString(a, v, "join", diag);
+    if (t.get("json")) |v| spec.json = try dupeString(a, v, "json", diag);
+    if (spec.sep.len == 0) {
+        diag.set(0, "variable '{s}': sep must not be empty", .{spec.name});
+        return error.BadLegend;
+    }
     if (t.get("map")) |v| {
         const mt = try expectTable(v, "map", diag);
         spec.map = try tableToKVs(a, mt, "map", diag);
@@ -293,7 +377,7 @@ fn parseVar(a: std.mem.Allocator, t: *const toml.Table, idx: usize, diag: *Diag)
         const arr = try expectArray(v, "values", diag);
         var list: std.ArrayList([]const u8) = .empty;
         for (arr.items.items) |item| {
-            const s = try valueToString(a, item, "values", diag);
+            const s = try bindingToString(a, &spec, item, "values", diag);
             for (list.items) |existing| if (std.mem.eql(u8, existing, s)) {
                 diag.set(0, "variable '{s}': duplicate value '{s}'", .{ spec.name, s });
                 return error.BadLegend;
@@ -313,7 +397,7 @@ fn parseVar(a: std.mem.Allocator, t: *const toml.Table, idx: usize, diag: *Diag)
     // Validate candidates, the default and the dependent map against the type.
     for (spec.values) |val| checkValue(&spec, val, diag) catch return error.BadLegend;
     if (t.get("value")) |v| {
-        const s = try valueToString(a, v, "value", diag);
+        const s = try bindingToString(a, &spec, v, "value", diag);
         checkValue(&spec, s, diag) catch return error.BadLegend;
         spec.default = s;
     }
@@ -349,6 +433,7 @@ pub fn checkValue(spec: *const VarSpec, v: []const u8, diag: *Diag) ValueError!v
                 return error.BadValue;
             };
         },
+        .list => {},
         .money => if (!isDecimal(v, spec.decimals)) {
             diag.set(0, "'{s}' is not an amount with at most {d} decimals for '{s}'", .{ v, spec.decimals, spec.name });
             return error.BadValue;
@@ -422,9 +507,11 @@ fn expectTable(v: toml.Value, what: []const u8, diag: *Diag) LoadError!*const to
     };
 }
 
-fn expectArray(v: toml.Value, what: []const u8, diag: *Diag) LoadError!*const toml.Array {
+/// Returned by value: `Array` is stored inline in `Value`, so a pointer into
+/// the by-value parameter would dangle.
+fn expectArray(v: toml.Value, what: []const u8, diag: *Diag) LoadError!toml.Array {
     return switch (v) {
-        .array => |*arr| arr,
+        .array => |arr| arr,
         else => {
             diag.set(0, "'{s}' must be an array", .{what});
             return error.BadLegend;
@@ -476,6 +563,51 @@ fn valueToString(a: std.mem.Allocator, v: toml.Value, what: []const u8, diag: *D
             return error.BadLegend;
         },
     };
+}
+
+/// A binding for `spec`: scalars as text; for list variables a TOML array
+/// becomes its items joined by `sep`.
+fn bindingToString(a: std.mem.Allocator, spec: *const VarSpec, v: toml.Value, what: []const u8, diag: *Diag) LoadError![]const u8 {
+    if (spec.kind == .list) switch (v) {
+        .array => |arr| {
+            var out = std.Io.Writer.Allocating.init(a);
+            for (arr.items.items, 0..) |item, i| {
+                const s = try valueToString(a, item, what, diag);
+                if (std.mem.indexOf(u8, s, spec.sep) != null) {
+                    diag.set(0, "list item '{s}' of '{s}' contains the separator '{s}'", .{ s, spec.name, spec.sep });
+                    return error.BadLegend;
+                }
+                if (i != 0) out.writer.writeAll(spec.sep) catch return error.OutOfMemory;
+                out.writer.writeAll(s) catch return error.OutOfMemory;
+            }
+            return out.toOwnedSlice();
+        },
+        else => {},
+    };
+    return valueToString(a, v, what, diag);
+}
+
+/// A scenario's `set` table, validated against the legend and sorted by key.
+fn scenarioSet(a: std.mem.Allocator, legend: *const Legend, scenario_name: []const u8, t: *const toml.Table, diag: *Diag) LoadError![]const KV {
+    var out = try a.alloc(KV, t.count());
+    var it = @constCast(t).iterator();
+    var i: usize = 0;
+    while (it.next()) |e| : (i += 1) {
+        const key = e.key_ptr.*;
+        const spec = legend.find(key) orelse {
+            diag.set(0, "scenario '{s}' sets undeclared variable '{s}'", .{ scenario_name, key });
+            return error.BadLegend;
+        };
+        const value = try bindingToString(a, spec, e.value_ptr.*, "scenario.set", diag);
+        checkValue(spec, value, diag) catch return error.BadLegend;
+        out[i] = .{ .key = try a.dupe(u8, key), .value = value };
+    }
+    std.mem.sort(KV, out, {}, struct {
+        fn lt(_: void, x: KV, y: KV) bool {
+            return std.mem.lessThan(u8, x.key, y.key);
+        }
+    }.lt);
+    return out;
 }
 
 fn tableToKVs(a: std.mem.Allocator, t: *const toml.Table, what: []const u8, diag: *Diag) LoadError![]const KV {
@@ -577,7 +709,7 @@ fn expectBad(src: []const u8, needle: []const u8) !void {
 
 test "legend rejects bad shapes" {
     try expectBad("[[var]]\ntype = \"int\"\n", "has no name");
-    try expectBad("[[var]]\nname = \"A\"\ntype = \"list\"\n", "unknown type");
+    try expectBad("[[var]]\nname = \"A\"\ntype = \"blob\"\n", "unknown type");
     try expectBad("[[var]]\nname = \"A\"\ntype = \"enum\"\n", "no values");
     try expectBad("[[var]]\nname = \"A\"\ntype = \"money\"\n", "no currency");
     try expectBad("[[var]]\nname = \"A\"\ntype = \"int\"\nvalue = \"x\"\n", "not an integer");
@@ -589,6 +721,51 @@ test "legend rejects bad shapes" {
     try expectBad("[[scenario]]\nname = \"s\"\n[scenario.set]\nZ = \"1\"\n", "undeclared variable 'Z'");
     try expectBad("[[scenario]]\nname = \"../x\"\n", "scenario name");
     try expectBad("[[var]]\nname = \"O\"\ntype = \"enum\"\nvalues = [\"a\"]\n[[var]]\nname = \"S\"\nby = \"O\"\n[var.map]\nzz = \"1\"\n", "not a value of enum");
+}
+
+test "list variables and [launch]" {
+    var d = Diag{};
+    var l = Legend.load(testing.allocator,
+        \\[[var]]
+        \\name = "TOOLS"
+        \\type = "list"
+        \\value = ["Read", "Edit", "Bash"]
+        \\values = [["Read"], ["Read", "Edit"]]
+        \\json = "tools"
+        \\[[var]]
+        \\name = "P"
+        \\[[scenario]]
+        \\name = "s"
+        \\[scenario.set]
+        \\TOOLS = ["Grep"]
+        \\[launch]
+        \\cwd = "{P}"
+        \\flags = ["--trust"]
+        \\concurrency = 3
+    , &d) catch |e| {
+        std.debug.print("{s}\n", .{d.text()});
+        return e;
+    };
+    defer l.deinit();
+    const tools = l.find("TOOLS").?;
+    try testing.expectEqualStrings("Read,Edit,Bash", tools.default.?);
+    try testing.expectEqualStrings("Read,Edit", tools.values[1]);
+    try testing.expectEqualStrings("tools", tools.jsonKey());
+    try testing.expectEqualStrings("P", l.find("P").?.jsonKey());
+    try testing.expectEqualStrings("Grep", l.scenario("s").?.set[0].value);
+    const items = try tools.splitList(testing.allocator, " Read, ,Edit ");
+    defer testing.allocator.free(items);
+    try testing.expectEqual(@as(usize, 2), items.len);
+    try testing.expectEqualStrings("Edit", items[1]);
+    const launch = l.launch.?;
+    try testing.expectEqualStrings("{P}", launch.cwd);
+    try testing.expectEqualStrings("--trust", launch.flags[0]);
+    try testing.expectEqual(@as(u32, 3), launch.concurrency);
+
+    try expectBad("[[var]]\nname = \"L\"\ntype = \"list\"\nvalue = [\"a,b\"]\n", "contains the separator");
+    try expectBad("[[var]]\nname = \"L\"\nsep = \"\"\n", "sep must not be empty");
+    try expectBad("[launch]\nmodel = \"opus\"\n", "launch.cwd is required");
+    try expectBad("[launch]\ncwd = \".\"\nfoo = 1\n", "unknown key 'foo'");
 }
 
 test "invalid toml" {

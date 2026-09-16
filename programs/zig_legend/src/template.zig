@@ -6,6 +6,7 @@
 //!
 //!   {NAME}                substitute the binding of NAME
 //!   {NAME|upper|trim}     substitute, then apply filters left to right
+//!   {ID|left:8}           a filter may take one argument after ':'
 //!   {?NAME}…{/}           block kept when NAME is truthy (bool true / non-empty)
 //!   {?NAME=value}…{/}     block kept when NAME equals value
 //!   {?NAME!=value}…{/}    block kept when NAME differs from value
@@ -20,7 +21,10 @@
 const std = @import("std");
 const Diag = @import("diag.zig").Diag;
 
-pub const Filter = []const u8;
+pub const Filter = struct {
+    name: []const u8,
+    arg: []const u8 = "",
+};
 
 pub const Var = struct {
     name: []const u8,
@@ -306,12 +310,15 @@ const Parser = struct {
         }
         var filters: std.ArrayList(Filter) = .empty;
         while (it.next()) |f| {
-            const name = std.mem.trim(u8, f, " \t");
+            const spec = std.mem.trim(u8, f, " \t");
+            const colon = std.mem.indexOfScalar(u8, spec, ':');
+            const name = if (colon) |c| spec[0..c] else spec;
+            const arg = if (colon) |c| spec[c + 1 ..] else "";
             if (name.len == 0 or !isValidName(name)) {
-                self.diag.set(line, "bad filter '{s}' on '{s}'", .{ name, raw_name });
+                self.diag.set(line, "bad filter '{s}' on '{s}'", .{ spec, raw_name });
                 return error.BadFilter;
             }
-            try filters.append(self.a, try self.a.dupe(u8, name));
+            try filters.append(self.a, .{ .name = try self.a.dupe(u8, name), .arg = try self.a.dupe(u8, arg) });
         }
         return .{
             .name = try self.a.dupe(u8, raw_name),
@@ -377,7 +384,7 @@ test "plain text and placeholders" {
     try testing.expectEqual(@as(usize, 5), t.nodes.len);
     try testing.expectEqualStrings("Dear ", t.nodes[0].text);
     try testing.expectEqualStrings("NAME", t.nodes[1].variable.name);
-    try testing.expectEqualStrings("title", t.nodes[1].variable.filters[0]);
+    try testing.expectEqualStrings("title", t.nodes[1].variable.filters[0].name);
     try testing.expectEqualStrings("REF", t.nodes[3].variable.name);
     try testing.expectEqualStrings(".", t.nodes[4].text);
 }
@@ -442,6 +449,16 @@ test "errors carry line numbers" {
     try testing.expectError(error.BadName, parse(testing.allocator, "{9x}", .{}, &d));
     try testing.expectError(error.EmptyTag, parse(testing.allocator, "{ }", .{}, &d));
     try testing.expectError(error.BadCondition, parse(testing.allocator, "{?A=}{/}", .{}, &d));
+}
+
+test "filter argument" {
+    var t = try parseT("{ID|left:8|upper}");
+    defer t.deinit();
+    const f = t.nodes[0].variable.filters;
+    try testing.expectEqualStrings("left", f[0].name);
+    try testing.expectEqualStrings("8", f[0].arg);
+    try testing.expectEqualStrings("upper", f[1].name);
+    try testing.expectEqualStrings("", f[1].arg);
 }
 
 test "custom delimiters" {

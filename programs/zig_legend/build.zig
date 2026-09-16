@@ -53,6 +53,11 @@ pub fn build(b: *std.Build) void {
         .{ "letter.deferred.txt", "examples/letter/expected/deferred.txt" },
         .{ "modguard.txt", "examples/modguard/prompt.txt" },
         .{ "modguard.toml", "examples/modguard/legend.toml" },
+        .{ "agent.toml", "examples/agent/legend.toml" },
+        .{ "agent.txt", "examples/agent/brief.txt" },
+        .{ "agent.goal.json", "examples/agent/goal.json" },
+        .{ "agent.role.reviewer.txt", "examples/agent/roles/reviewer.txt" },
+        .{ "agent.reviewer.md", "examples/agent/expected/reviewer.md" },
     };
     for (example_files) |pair| {
         test_mod.addAnonymousImport(pair[0], .{ .root_source_file = b.path(pair[1]) });

@@ -1,0 +1,10 @@
+{
+  "id": "6249C3B1-4950-481D-867A-05E3049DF505",
+  "kind": "goal",
+  "project_key": "-Users-director-work-poly-repo-baton-ecosystem-rust_agent",
+  "text": "Tell the model who it is and how much room it has, in the cached prefix.\n\nThe system prompt never states the model id, its context window or its tool posture, so large-window lanes invent a small window and cut scope. Stable facts belong in the cached prefix; anything volatile belongs on the newest user turn, never the prefix.",
+  "status": "open",
+  "acceptance": "1. The system prompt states the model id, context window and tool posture, sourced from model_context_windows. 2. No volatile value is added to the cached prefix; a test asserts the prompt is byte-identical across turns. 3. A live session on a large-window lane answers its real context limit.",
+  "provider": "",
+  "model": ""
+}
