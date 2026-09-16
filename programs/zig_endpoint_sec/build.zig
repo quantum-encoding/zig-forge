@@ -35,10 +35,34 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "darwin_kit", .module = darwin_kit_mod }},
     });
     test_mod.linkSystemLibrary("EndpointSecurity", .{});
+    test_mod.addIncludePath(b.path("include"));
     const tests = b.addTest(.{ .root_module = test_mod });
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run unit tests and layout anchors (macOS only)");
     test_step.dependOn(&run_tests.step);
+
+    // C ABI static library (the zes_* half of include/es_core.h) for Swift/C hosts.
+    const capi_mod = b.createModule(.{
+        .root_source_file = b.path("src/capi.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "darwin_kit", .module = darwin_kit_mod }},
+    });
+    capi_mod.addIncludePath(b.path("include"));
+    const capi = b.addLibrary(.{
+        .linkage = .static,
+        .name = "es_core_zig",
+        .root_module = capi_mod,
+    });
+    capi.installHeader(b.path("include/es_core.h"), "es_core.h");
+    b.installArtifact(capi);
+
+    // `zig build xcode`: install, then repack the archive so Apple's ld accepts it.
+    const repack = b.addSystemCommand(&.{ "../../scripts/repack-for-xcode.sh", "zig-out/lib/libes_core_zig.a", "zig-out/lib/libendpoint_sec.a" });
+    repack.step.dependOn(b.getInstallStep());
+    const xcode_step = b.step("xcode", "Build and repack the static libraries for linking from Xcode");
+    xcode_step.dependOn(&repack.step);
 
     // Example: subscribe to a few NOTIFY events and print them. Needs the ES
     // entitlement, Developer ID signing and root to actually receive events.

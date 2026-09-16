@@ -281,7 +281,8 @@ pub const Thread = struct {
 const testing_support = @import("testing_support.zig");
 
 test "action decoding" {
-    var fx = testing_support.Fixture.init();
+    var fx: testing_support.Fixture = undefined;
+    fx.init();
     fx.message.action_type = .ES_ACTION_TYPE_AUTH;
     const m = Message.fromRaw(&fx.message);
     try std.testing.expect(m.isAuth());
@@ -297,7 +298,8 @@ test "action decoding" {
 }
 
 test "version-gated message and process fields" {
-    var fx = testing_support.Fixture.init();
+    var fx: testing_support.Fixture = undefined;
+    fx.init();
     fx.message.version = 1;
     const m = Message.fromRaw(&fx.message);
     try std.testing.expect(m.seqNum() == null);
@@ -322,7 +324,8 @@ test "version-gated message and process fields" {
 }
 
 test "process and file accessors" {
-    var fx = testing_support.Fixture.init();
+    var fx: testing_support.Fixture = undefined;
+    fx.init();
     const p = Message.fromRaw(&fx.message).process();
     try std.testing.expectEqual(@as(sys.pid_t, 4242), p.pid());
     try std.testing.expectEqual(@as(sys.pid_t, 501), p.ppid());
@@ -336,7 +339,8 @@ test "process and file accessors" {
 }
 
 test "deadline arithmetic uses the mach clock" {
-    var fx = testing_support.Fixture.init();
+    var fx: testing_support.Fixture = undefined;
+    fx.init();
     const m = Message.fromRaw(&fx.message);
     fx.message.deadline = darwin.machtime.now() + darwin.machtime.nanosToTicks(std.time.ns_per_s);
     const left = m.deadlineRemainingNanos() orelse return error.TestUnexpectedResult;

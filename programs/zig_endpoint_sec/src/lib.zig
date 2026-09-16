@@ -65,4 +65,5 @@ test {
     _ = event;
     _ = client;
     _ = versioned;
+    _ = @import("capi.zig");
 }

@@ -21,8 +21,9 @@ pub const Fixture = struct {
     pub const target_path = "/bin/zsh";
     pub const cwd_path = "/Users/tester/project";
 
-    pub fn init() Fixture {
-        var fx: Fixture = undefined;
+    /// Initialise in place: the fixture holds pointers to its own fields, so
+    /// it must never be returned or copied by value.
+    pub fn init(fx: *Fixture) void {
         fx.thread = .{ .thread_id = 0x7777 };
         fx.executable = makeFile(exe_path, 1234);
         fx.target_executable = makeFile(target_path, 1_500_000);
@@ -42,7 +43,6 @@ pub const Fixture = struct {
         fx.message.event.exec.v.fields.last_fd = 7;
         fx.message.event.exec.dyld_exec_path = token("/bin/sh");
         fx.message.thread = null;
-        return fx;
     }
 
     pub fn token(s: []const u8) sys.es_string_token_t {

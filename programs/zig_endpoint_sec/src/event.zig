@@ -347,7 +347,8 @@ test "auth and notify share a payload member" {
 }
 
 test "fromMessage points into the message for inline and pointer members" {
-    var fx = testing_support.Fixture.init();
+    var fx: testing_support.Fixture = undefined;
+    fx.init();
     switch (fromMessage(&fx.message)) {
         .exec => |e| try std.testing.expectEqual(@intFromPtr(&fx.message.event.exec), @intFromPtr(e)),
         else => return error.TestUnexpectedResult,
@@ -367,7 +368,8 @@ test "fromMessage points into the message for inline and pointer members" {
 }
 
 test "exec gated fields follow the message version" {
-    var fx = testing_support.Fixture.init();
+    var fx: testing_support.Fixture = undefined;
+    fx.init();
     const m = message.Message.fromRaw(&fx.message);
     var e = m.exec() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("/bin/zsh", e.target().executable().path());
@@ -394,7 +396,8 @@ test "findEnv over a synthetic iterator" {
             return testing_support.Fixture.token(strings[i]);
         }
     };
-    var fx = testing_support.Fixture.init();
+    var fx: testing_support.Fixture = undefined;
+    fx.init();
     var it = StringIterator{ .exec = &fx.message.event.exec, .count = 4, .get = S.get };
     try std.testing.expectEqualStrings("PATH=/usr/bin", it.next().?);
     try std.testing.expectEqualStrings("HOME=/Users/x", it.next().?);

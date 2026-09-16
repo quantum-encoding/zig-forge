@@ -447,7 +447,8 @@ test "es_new_client refuses an unentitled test binary without crashing" {
 test "respond picks flags for AUTH_OPEN and auth for everything else" {
     // Pure decision logic; no client call is made because `raw` is a dummy.
     const testing_support = @import("testing_support.zig");
-    var fx = testing_support.Fixture.init();
+    var fx: testing_support.Fixture = undefined;
+    fx.init();
     fx.message.event_type = .ES_EVENT_TYPE_AUTH_OPEN;
     try std.testing.expect(Message.fromRaw(&fx.message).eventType() == .ES_EVENT_TYPE_AUTH_OPEN);
     // The mapping itself is what matters here; the respond call needs a live client.
