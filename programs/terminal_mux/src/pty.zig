@@ -197,11 +197,13 @@ pub const Pty = struct {
         return self.slave_path[0..self.slave_path_len];
     }
 
-    /// Spawn a child process in the PTY. `argv` must be NUL-terminated (the
-    /// terminator is mandatory — execve reads it to find the end of the vector;
-    /// passing a non-terminated array makes execve dereference stack garbage as
-    /// argv[1], which fails with EFAULT on Darwin).
-    pub fn spawn(self: *Self, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) !void {
+    /// Spawn `path` in the PTY with `argv`. `argv[0]` is the name the child
+    /// sees, which may differ from `path`: a leading `-` makes a shell a login
+    /// shell. `argv` must be NUL-terminated (the terminator is mandatory —
+    /// execve reads it to find the end of the vector; passing a non-terminated
+    /// array makes execve dereference stack garbage as argv[1], which fails
+    /// with EFAULT on Darwin).
+    pub fn spawn(self: *Self, path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) !void {
         const pid = c.fork();
 
         if (pid < 0) {
@@ -212,8 +214,8 @@ pub const Pty = struct {
                 std.c._exit(1);
             };
 
-            // Execute the command - shell path (argv[0]) is already absolute.
-            _ = c.execve(argv[0].?, argv, envp);
+            // `path` is absolute; execve does no PATH search.
+            _ = c.execve(path, argv, envp);
             // If we reach here, exec failed
             std.c._exit(127);
         } else {

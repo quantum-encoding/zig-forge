@@ -162,13 +162,25 @@ pub const Pane = struct {
         // Set PTY size to match terminal
         try pty.setSize(self.rect.height, self.rect.width);
 
-        // Build argv
+        // A login shell, as Terminal.app and tmux start one: argv[0] is the
+        // shell's name with a leading `-`. Only a login shell reads
+        // /etc/zprofile (path_helper: /etc/paths, so /usr/local/bin) and
+        // ~/.zprofile. An app opened from the Dock inherits launchd's
+        // /usr/bin:/bin:/usr/sbin:/sbin, so a non-login shell in it cannot find
+        // anything installed under /usr/local/bin or added in ~/.zprofile.
+        if (shell.len == 0 or shell.len > 254) return error.ShellPathTooLong;
         var shell_buf: [256:0]u8 = undefined;
         @memcpy(shell_buf[0..shell.len], shell);
         shell_buf[shell.len] = 0;
 
-        const argv = [_:null]?[*:0]const u8{&shell_buf};
-        try pty.spawn(&argv, env);
+        const base = std.fs.path.basename(shell);
+        var name_buf: [256:0]u8 = undefined;
+        name_buf[0] = '-';
+        @memcpy(name_buf[1 .. 1 + base.len], base);
+        name_buf[1 + base.len] = 0;
+
+        const argv = [_:null]?[*:0]const u8{&name_buf};
+        try pty.spawn(&shell_buf, &argv, env);
 
         self.pty = pty;
     }
