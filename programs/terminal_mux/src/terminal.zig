@@ -929,6 +929,13 @@ pub const Terminal = struct {
             while (i < n and self.scroll_region.top + i <= self.scroll_region.bottom) : (i += 1) {
                 self.scrollback.push(self.grid.rowSlice(self.scroll_region.top + i));
             }
+            // A view scrolled back into history stays on the lines it shows
+            // while output streams in below: the offset grows with each line
+            // pushed, so the person reading or selecting is not dragged along.
+            // Clamped to what the ring still holds.
+            if (self.scrollback_offset > 0) {
+                self.scrollback_offset = @min(self.scrollback_offset + i, self.scrollback.len);
+            }
         }
 
         const template = Cell{

@@ -438,6 +438,16 @@ pub export fn tmux_grid_size(handle: ?*TmuxSession, out_rows: ?*u16, out_cols: ?
 
 /// Shared cell-copy core: a terminal's visible view (scrollback-composed) into
 /// a flat CCell buffer, row-major. Returns cells written.
+fn toCCell(cell: terminal.Cell) CCell {
+    var cc: CCell = undefined;
+    cc.ch = cell.char;
+    fillColor(cell.fg, &cc.fg_kind, &cc.fg_idx, &cc.fg_r, &cc.fg_g, &cc.fg_b);
+    fillColor(cell.bg, &cc.bg_kind, &cc.bg_idx, &cc.bg_r, &cc.bg_g, &cc.bg_b);
+    cc.attrs = @as(u8, @bitCast(cell.attrs));
+    cc.width = cell.width;
+    return cc;
+}
+
 fn readTerminalCells(term: *const terminal.Terminal, buf: [*]CCell, max_cells: usize) usize {
     // term.grid is ALWAYS the displayed grid (swap-based alt screen: alt mode
     // swaps a fresh grid in and stashes the primary in alt_grid).
@@ -459,13 +469,7 @@ fn readTerminalCells(term: *const terminal.Terminal, buf: [*]CCell, max_cells: u
             term.scrollback.line(term.scrollback.len - back + row)[i % cols]
         else
             grid.getCellConst(@intCast(row - back), @intCast(i % cols)).*;
-        var cc: CCell = undefined;
-        cc.ch = cell.char;
-        fillColor(cell.fg, &cc.fg_kind, &cc.fg_idx, &cc.fg_r, &cc.fg_g, &cc.fg_b);
-        fillColor(cell.bg, &cc.bg_kind, &cc.bg_idx, &cc.bg_r, &cc.bg_g, &cc.bg_b);
-        cc.attrs = @as(u8, @bitCast(cell.attrs));
-        cc.width = cell.width;
-        buf[i] = cc;
+        buf[i] = toCCell(cell);
     }
     return n;
 }
@@ -695,6 +699,67 @@ fn scrollPane(pane: *session.Pane, delta: c_int, row: u16, col: u16) c_long {
 }
 
 /// Current viewport scrollback offset in lines (0 = pinned to the live bottom).
+/// A pane's lines by ABSOLUTE number — stable while output streams and the
+/// view scrolls, so a host can hold a selection against content, not screen
+/// cells. `view_top` is the line at the top of the view, `live_top` the first
+/// line of the live grid, `oldest` the oldest line still retained (history is
+/// a ring, and on the alternate screen only the live grid exists). Returns 0,
+/// or -1 for a bad handle or pane.
+pub export fn tmux_pane_lines(handle: ?*TmuxSession, idx: usize, out_view_top: ?*i64, out_live_top: ?*i64, out_oldest: ?*i64) c_int {
+    const h = handle orelse return -1;
+    const p = paneAt(h, idx) orelse return -1;
+    const term = &p.terminal;
+    const live_top: i64 = term.graphics.epoch;
+    const back: i64 = if (term.modes.alt_screen) 0 else @intCast(@min(term.scrollback_offset, term.scrollback.len));
+    const held: i64 = if (term.modes.alt_screen) 0 else @intCast(term.scrollback.len);
+    if (out_view_top) |o| o.* = live_top - back;
+    if (out_live_top) |o| o.* = live_top;
+    if (out_oldest) |o| o.* = live_top - held;
+    return 0;
+}
+
+/// Copy one line, addressed by absolute number, into `out` (at most `max`
+/// cells). Returns the number of cells written, or -1 when that line is no
+/// longer retained or not yet written.
+pub export fn tmux_pane_read_line(handle: ?*TmuxSession, idx: usize, line: i64, out: ?[*]CCell, max: usize) c_long {
+    const h = handle orelse return -1;
+    const p = paneAt(h, idx) orelse return -1;
+    const buf = out orelse return -1;
+    const term = &p.terminal;
+    const live_top: i64 = term.graphics.epoch;
+    const grid = &term.grid;
+    const n = @min(@as(usize, grid.cols), max);
+    if (line >= live_top) {
+        const row = line - live_top;
+        if (row >= grid.rows) return -1;
+        var c: usize = 0;
+        while (c < n) : (c += 1) buf[c] = toCCell(grid.getCellConst(@intCast(row), @intCast(c)).*);
+        return @intCast(n);
+    }
+    if (term.modes.alt_screen) return -1;
+    const behind: i64 = live_top - line; // 1 = newest history line
+    if (behind > term.scrollback.len) return -1;
+    const cells = term.scrollback.line(term.scrollback.len - @as(usize, @intCast(behind)));
+    const m = @min(n, cells.len);
+    var c: usize = 0;
+    while (c < m) : (c += 1) buf[c] = toCCell(cells[c]);
+    return @intCast(m);
+}
+
+/// Move a pane's view so `line` (absolute) is the top visible line, clamped to
+/// retained history and the live bottom. Returns the resulting offset.
+pub export fn tmux_pane_scroll_to(handle: ?*TmuxSession, idx: usize, line: i64) c_long {
+    const h = handle orelse return 0;
+    const p = paneAt(h, idx) orelse return 0;
+    const term = &p.terminal;
+    if (term.modes.alt_screen) return 0;
+    const live_top: i64 = term.graphics.epoch;
+    const want: i64 = live_top - line;
+    const clamped: i64 = @max(0, @min(want, @as(i64, @intCast(term.scrollback.len))));
+    term.scrollback_offset = @intCast(clamped);
+    return @intCast(clamped);
+}
+
 pub export fn tmux_scroll_offset(handle: ?*TmuxSession) c_long {
     const h = handle orelse return 0;
     const term = &activePane(h).terminal;

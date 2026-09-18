@@ -108,6 +108,22 @@ void     tmux_cursor(tmux_session *handle, uint16_t *out_row, uint16_t *out_col,
  * (host must not also act), 0 when the host should handle locally.
  * take_bell / take_clipboard are read-and-clear (clipboard = OSC 52 "Pc;Pd"). */
 uint32_t tmux_modes(tmux_session *handle);
+
+/* Lines by ABSOLUTE number, stable while output streams and the view scrolls —
+ * hold a selection against these, not screen cells. view_top = top visible
+ * line, live_top = first line of the live grid, oldest = oldest retained line.
+ * 0 on success, -1 for a bad handle or pane. */
+int tmux_pane_lines(tmux_session *handle, size_t idx, int64_t *out_view_top,
+                    int64_t *out_live_top, int64_t *out_oldest);
+
+/* Copy one absolute line's cells (at most max). Cell count, or -1 when the
+ * line is no longer retained or not yet written. */
+long tmux_pane_read_line(tmux_session *handle, size_t idx, int64_t line,
+                         tmux_cell *out, size_t max);
+
+/* Put absolute `line` at the top of the pane's view (clamped). Returns the
+ * resulting scroll offset. */
+long tmux_pane_scroll_to(tmux_session *handle, size_t idx, int64_t line);
 /* DEC 2026 synchronized output: true while a pane of the active window is
  * mid-sync-block — skip presenting this frame (keep the previous one) and
  * retry; blocks left open >250ms self-heal so the view can never freeze. */
