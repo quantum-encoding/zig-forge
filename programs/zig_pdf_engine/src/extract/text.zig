@@ -10,6 +10,7 @@ const Token = lexer.Token;
 const Object = objects.Object;
 const Operator = operators.Operator;
 const CMap = cmap_mod.CMap;
+const Watchdog = @import("../test_watchdog.zig").Watchdog;
 
 /// Text extraction from PDF content streams
 /// This is a "virtual renderer" that captures text instead of drawing pixels
@@ -94,12 +95,15 @@ pub const TextExtractor = struct {
                 const op = Operator.fromString(token.data);
                 try self.executeOperator(op, &stack, &result);
 
+                // What follows ID is the image's raw bytes, not PDF syntax.
+                if (op == .InlineImageData) skipInlineImageData(&lex);
+
                 // Clear stack after operator execution
                 for (stack.items) |*operand| operand.deinit(self.allocator);
                 stack.clearRetainingCapacity();
             } else {
                 // It's an operand - push to stack
-                const operand = try parseOperand(&lex, token, self.allocator);
+                const operand = try parseOperand(&lex, token, self.allocator, 0);
                 try stack.append(self.allocator, operand);
             }
         }
@@ -408,11 +412,35 @@ fn isOperator(token: Token) bool {
     return false;
 }
 
+/// Move the lexer past the data of an inline image, to the `EI` that ends it:
+/// the first `EI` standing alone between whitespace (or at the end of the
+/// stream). `EI` itself is left for the lexer. With no such `EI` the rest of the
+/// stream is image data.
+fn skipInlineImageData(lex: *Lexer) void {
+    const data = lex.data;
+    var from = lex.position();
+    while (std.mem.indexOfPos(u8, data, from, "EI")) |at| {
+        const space_before = at > 0 and std.ascii.isWhitespace(data[at - 1]);
+        const space_after = at + 2 >= data.len or std.ascii.isWhitespace(data[at + 2]);
+        if (space_before and space_after) {
+            lex.seekTo(at);
+            return;
+        }
+        from = at + 1;
+    }
+    lex.seekTo(data.len);
+}
+
 /// Explicit error set for operand parsing (avoids recursive inference)
-const ParseOperandError = error{OutOfMemory};
+const ParseOperandError = error{ OutOfMemory, NestingTooDeep };
+
+/// Deepest array nesting accepted in a content stream. Operands nest one level
+/// in practice (the TJ array); parseArray recurses per level, so this bounds
+/// the stack against a stream of '[' bytes.
+const max_array_depth = 32;
 
 /// Parse an operand from token stream
-fn parseOperand(lex: *Lexer, token: Token, allocator: std.mem.Allocator) ParseOperandError!Operand {
+fn parseOperand(lex: *Lexer, token: Token, allocator: std.mem.Allocator, depth: u32) ParseOperandError!Operand {
     switch (token.tag) {
         .number => {
             return .{ .number = token.asFloat() orelse @floatFromInt(token.asInt() orelse 0) };
@@ -433,7 +461,8 @@ fn parseOperand(lex: *Lexer, token: Token, allocator: std.mem.Allocator) ParseOp
             return .{ .name = copy };
         },
         .array_start => {
-            return parseArray(lex, allocator);
+            if (depth >= max_array_depth) return error.NestingTooDeep;
+            return parseArray(lex, allocator, depth + 1);
         },
         .keyword_true => return .{ .boolean = true },
         .keyword_false => return .{ .boolean = false },
@@ -443,7 +472,7 @@ fn parseOperand(lex: *Lexer, token: Token, allocator: std.mem.Allocator) ParseOp
 }
 
 /// Parse array contents
-fn parseArray(lex: *Lexer, allocator: std.mem.Allocator) ParseOperandError!Operand {
+fn parseArray(lex: *Lexer, allocator: std.mem.Allocator, depth: u32) ParseOperandError!Operand {
     var items = std.ArrayList(Operand).empty;
     errdefer {
         for (items.items) |*item| item.deinit(allocator);
@@ -453,7 +482,7 @@ fn parseArray(lex: *Lexer, allocator: std.mem.Allocator) ParseOperandError!Opera
     while (lex.next()) |token| {
         if (token.tag == .array_end) break;
 
-        const operand = try parseOperand(lex, token, allocator);
+        const operand = try parseOperand(lex, token, allocator, depth);
         try items.append(allocator, operand);
     }
 
@@ -480,7 +509,8 @@ fn decodePdfString(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
                 '\\' => try result.append(allocator, '\\'),
                 '0'...'7' => {
                     // Octal escape
-                    var val: u8 = raw[i] - '0';
+                    // Up to three digits; overflow past one byte is dropped.
+                    var val: u16 = raw[i] - '0';
                     if (i + 1 < raw.len and raw[i + 1] >= '0' and raw[i + 1] <= '7') {
                         i += 1;
                         val = val * 8 + (raw[i] - '0');
@@ -489,7 +519,7 @@ fn decodePdfString(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
                             val = val * 8 + (raw[i] - '0');
                         }
                     }
-                    try result.append(allocator, val);
+                    try result.append(allocator, @truncate(val));
                 },
                 '\r' => {
                     // Line continuation
@@ -528,4 +558,62 @@ test "text extractor basic" {
     const text = try extractor.extract(content);
     defer std.testing.allocator.free(text);
     try std.testing.expectEqualStrings("Hello World", text);
+}
+
+test "inline image data is skipped, not lexed" {
+    const dog = Watchdog.arm(10);
+    defer dog.disarm();
+
+    // The bytes between ID and EI hold every delimiter, an unbalanced '(' that
+    // would swallow the rest of the stream, and an "EI" that is not the end.
+    const content = "BT (before) Tj ET BI /W 2 /H 2 ID ((>)]<\x00\xffEIx[ EI BT (after) Tj ET";
+    var extractor = TextExtractor.init(std.testing.allocator);
+    defer extractor.deinit();
+    const text = try extractor.extract(content);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("beforeafter", text);
+}
+
+test "array nesting is bounded" {
+    const dog = Watchdog.arm(10);
+    defer dog.disarm();
+
+    const content = "[" ** 100_000;
+    var extractor = TextExtractor.init(std.testing.allocator);
+    defer extractor.deinit();
+    try std.testing.expectError(error.NestingTooDeep, extractor.extract(content));
+}
+
+test "extract terminates on arbitrary bytes" {
+    const dog = Watchdog.arm(120);
+    defer dog.disarm();
+
+    var prng = std.Random.DefaultPrng.init(0xc0_47e47);
+    const rand = prng.random();
+    const alphabet = "()<>[]{}/% \n\\019.-TjJfBETDmID EI'\"*\x00\x9c\xff";
+
+    var buf: [256]u8 = undefined;
+    for (0..4000) |round| {
+        const len = rand.uintLessThan(usize, buf.len + 1);
+        if (round % 2 == 0) {
+            for (buf[0..len]) |*b| b.* = alphabet[rand.uintLessThan(usize, alphabet.len)];
+        } else {
+            rand.bytes(buf[0..len]);
+        }
+
+        var extractor = TextExtractor.init(std.testing.allocator);
+        defer extractor.deinit();
+        const text = extractor.extract(buf[0..len]) catch |err| switch (err) {
+            error.NestingTooDeep => continue,
+            else => return err,
+        };
+        std.testing.allocator.free(text);
+    }
+}
+
+test "octal escape wider than a byte" {
+    // PDF 32000-1 7.3.4.2: high-order overflow of an octal escape is ignored.
+    const decoded = try decodePdfString(std.testing.allocator, "\\777");
+    defer std.testing.allocator.free(decoded);
+    try std.testing.expectEqualSlices(u8, &.{0xFF}, decoded);
 }

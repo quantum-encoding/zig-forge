@@ -3,6 +3,9 @@ const pdf = @import("pdf-engine");
 
 const Document = pdf.Document;
 
+// Exit status is part of the contract: 0 means the text on stdout is what the
+// document holds (possibly nothing, for a scan); non-zero means extraction
+// failed and an empty stdout says nothing about the document.
 pub fn main(init: std.process.Init) void {
     const allocator = init.gpa;
     // The extracted text is the PAYLOAD and belongs on stdout. std.debug.print
@@ -21,14 +24,14 @@ pub fn main(init: std.process.Init) void {
     while (args_iter.next()) |arg| {
         args_list.append(allocator, arg) catch {
             std.debug.print("pdf-text: allocation failed\n", .{});
-            return;
+            std.process.exit(1);
         };
     }
     const args = args_list.items;
 
     if (args.len < 2) {
         printUsage(args[0]);
-        return;
+        std.process.exit(1);
     }
 
     // Parse options
@@ -45,17 +48,17 @@ pub fn main(init: std.process.Init) void {
             i += 1;
             if (i >= args.len) {
                 std.debug.print("Error: --page requires a number\n", .{});
-                return;
+                std.process.exit(1);
             }
             page_num = std.fmt.parseInt(u32, args[i], 10) catch {
                 std.debug.print("Error: Invalid page number '{s}'\n", .{args[i]});
-                return;
+                std.process.exit(1);
             };
-        } else if (arg[0] != '-') {
+        } else if (arg.len == 0 or arg[0] != '-') {
             file_path = arg;
         } else {
             std.debug.print("Error: Unknown option '{s}'\n", .{arg});
-            return;
+            std.process.exit(1);
         }
     }
 
@@ -67,20 +70,20 @@ pub fn main(init: std.process.Init) void {
     const path = file_path orelse {
         std.debug.print("Error: No PDF file specified\n", .{});
         printUsage(args[0]);
-        return;
+        std.process.exit(1);
     };
 
     // Open PDF
     var doc = Document.open(allocator, path) catch |err| {
         std.debug.print("Error: Failed to open PDF: {}\n", .{err});
-        return;
+        std.process.exit(1);
     };
     defer doc.close();
 
     // Check encryption
     if (doc.isEncrypted()) {
         std.debug.print("Error: PDF is encrypted (not supported)\n", .{});
-        return;
+        std.process.exit(1);
     }
 
     // Extract text
@@ -88,22 +91,22 @@ pub fn main(init: std.process.Init) void {
         // Extract single page (convert to 0-based)
         if (pn == 0) {
             std.debug.print("Error: Page numbers start at 1\n", .{});
-            return;
+            std.process.exit(1);
         }
 
         const page_count = doc.getPageCount() catch |err| {
             std.debug.print("Error: Failed to get page count: {}\n", .{err});
-            return;
+            std.process.exit(1);
         };
 
         if (pn > page_count) {
             std.debug.print("Error: Page {d} does not exist (document has {d} pages)\n", .{ pn, page_count });
-            return;
+            std.process.exit(1);
         }
 
         const text = doc.extractPageText(pn - 1) catch |err| {
             std.debug.print("Error: Failed to extract text from page {d}: {}\n", .{ pn, err });
-            return;
+            std.process.exit(1);
         };
         defer allocator.free(text);
 
@@ -116,7 +119,7 @@ pub fn main(init: std.process.Init) void {
         // Extract all pages
         const text = doc.extractAllText() catch |err| {
             std.debug.print("Error: Failed to extract text: {}\n", .{err});
-            return;
+            std.process.exit(1);
         };
         defer allocator.free(text);
 

@@ -195,6 +195,19 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run library tests");
     test_step.dependOn(&run_lib_unit_tests.step);
 
+    // Whole-file termination tests: PDFs that once made the parse spin forever.
+    const termination_test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/termination_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    termination_test_module.link_libc = true;
+    termination_test_module.addImport("pdf-engine", pdf_engine_module);
+    const termination_tests = b.addTest(.{ .root_module = termination_test_module });
+    const run_termination_tests = b.addRunArtifact(termination_tests);
+    run_termination_tests.setCwd(b.path("."));
+    test_step.dependOn(&run_termination_tests.step);
+
     // ========================================================================
     // Real PDF file tests (integration tests using actual PDF files)
     // ========================================================================

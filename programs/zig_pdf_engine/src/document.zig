@@ -195,7 +195,8 @@ pub const Document = struct {
                     .dict => |pages_bytes| {
                         var pages_parser = DictParser.init(pages_bytes);
                         const count_obj = pages_parser.get("Count") orelse return error.MissingPageCount;
-                        return @intCast(count_obj.asInt() orelse return error.InvalidPageCount);
+                        const declared = count_obj.asInt() orelse return error.InvalidPageCount;
+                        return std.math.cast(u32, declared) orelse error.InvalidPageCount;
                     },
                     else => return error.InvalidPages,
                 }
@@ -376,8 +377,10 @@ pub const Document = struct {
 
     /// Extract text from a specific page (0-based index)
     pub fn extractPageText(self: *Document, page_index: usize) ![]u8 {
-        // Get page dictionary reference
-        const page_ref = try self.getPageRef(page_index);
+        return self.extractPageTextByRef(try self.getPageRef(page_index));
+    }
+
+    fn extractPageTextByRef(self: *Document, page_ref: ObjectRef) ![]u8 {
         const page_obj = try self.resolveRef(page_ref);
 
         switch (page_obj) {
@@ -460,8 +463,8 @@ pub const Document = struct {
                         if (r_tok.tag != .keyword_ref) continue;
 
                         const ref = ObjectRef{
-                            .obj_num = @intCast(next_tok.asInt() orelse continue),
-                            .gen_num = @intCast(gen_tok.asInt() orelse continue),
+                            .obj_num = std.math.cast(u32, next_tok.asInt() orelse continue) orelse continue,
+                            .gen_num = std.math.cast(u16, gen_tok.asInt() orelse continue) orelse continue,
                         };
                         break :blk self.resolveRef(ref) catch continue;
                     },
@@ -507,22 +510,33 @@ pub const Document = struct {
 
     /// Get page reference by index - traverses page tree properly handling compressed objects
     fn getPageRef(self: *Document, page_index: usize) !ObjectRef {
+        const page_refs = try self.collectPageRefs();
+        defer self.allocator.free(page_refs);
+
+        if (page_index >= page_refs.len) return error.PageNotFound;
+        return page_refs[page_index];
+    }
+
+    /// The page tree's leaves in document order. This, not the root's /Count,
+    /// is how many pages there are: /Count is whatever the file claims, and a
+    /// loop bounded by it runs for as long as the file says. Caller owns the
+    /// slice.
+    fn collectPageRefs(self: *Document) ![]ObjectRef {
         const pages_ref = try self.getPagesRef();
 
-        // Build list of page refs by traversing the tree
         var page_refs = std.ArrayList(ObjectRef).empty;
-        defer page_refs.deinit(self.allocator);
+        errdefer page_refs.deinit(self.allocator);
 
         // Cycle guard: a page tree whose /Kids form a loop (a node that points
         // back at an ancestor) must not recurse forever. Track visited nodes by
-        // object number and cap the depth as a backstop.
+        // object number and cap the depth as a backstop. The visited set also
+        // bounds the walk as a whole: each object is entered at most once.
         var visited = std.AutoHashMap(u32, void).init(self.allocator);
         defer visited.deinit();
 
         try self.traversePageTree(pages_ref, &page_refs, &visited, 0);
 
-        if (page_index >= page_refs.items.len) return error.PageNotFound;
-        return page_refs.items[page_index];
+        return page_refs.toOwnedSlice(self.allocator);
     }
 
     /// Error set for page tree traversal
@@ -596,8 +610,8 @@ pub const Document = struct {
             if (r_tok.tag != .keyword_ref) continue;
 
             const ref = ObjectRef{
-                .obj_num = @intCast(num_tok.asInt() orelse continue),
-                .gen_num = @intCast(gen_tok.asInt() orelse continue),
+                .obj_num = std.math.cast(u32, num_tok.asInt() orelse continue) orelse continue,
+                .gen_num = std.math.cast(u16, gen_tok.asInt() orelse continue) orelse continue,
             };
 
             try self.traversePageTree(ref, page_refs, visited, depth + 1);
@@ -626,23 +640,7 @@ pub const Document = struct {
         const obj = try self.resolveRef(ref);
 
         switch (obj) {
-            .stream => |stream| {
-                var stream_parser = DictParser.init(stream.dict);
-
-                if (stream_parser.get("Filter")) |filter_obj| {
-                    const filter_name = filter_obj.asName() orelse return self.allocator.dupe(u8, stream.data);
-
-                    if (std.mem.eql(u8, filter_name, "FlateDecode")) {
-                        return filters.FlateDecode.decode(self.allocator, stream.data);
-                    } else if (std.mem.eql(u8, filter_name, "ASCII85Decode")) {
-                        return filters.Ascii85Decode.decode(self.allocator, stream.data);
-                    } else if (std.mem.eql(u8, filter_name, "ASCIIHexDecode")) {
-                        return filters.AsciiHexDecode.decode(self.allocator, stream.data);
-                    }
-                }
-
-                return self.allocator.dupe(u8, stream.data);
-            },
+            .stream => |stream| return filters.decodeStream(self.allocator, stream.dict, stream.data),
             else => return error.NotAStream,
         }
     }
@@ -651,6 +649,9 @@ pub const Document = struct {
     fn concatenateContentStreams(self: *Document, array_bytes: []const u8) ![]u8 {
         var result = std.ArrayList(u8).empty;
         errdefer result.deinit(self.allocator);
+
+        var decoded: usize = 0;
+        var last_failure: ?anyerror = null;
 
         var lex = Lexer.init(array_bytes);
 
@@ -665,45 +666,72 @@ pub const Document = struct {
             if (r_tok.tag != .keyword_ref) continue;
 
             const ref = ObjectRef{
-                .obj_num = @intCast(num_tok.asInt() orelse continue),
-                .gen_num = @intCast(gen_tok.asInt() orelse continue),
+                .obj_num = std.math.cast(u32, num_tok.asInt() orelse continue) orelse continue,
+                .gen_num = std.math.cast(u16, gen_tok.asInt() orelse continue) orelse continue,
             };
 
-            const stream_data = self.getDecompressedStream(ref) catch continue;
+            const stream_data = self.getDecompressedStream(ref) catch |err| {
+                if (err == error.OutOfMemory) return err;
+                last_failure = err;
+                continue;
+            };
             defer self.allocator.free(stream_data);
+            decoded += 1;
 
             try result.appendSlice(self.allocator, stream_data);
             try result.append(self.allocator, '\n');
         }
 
+        // Some streams unreadable: extract what there is. None readable: the
+        // page failed, which is not the same as the page being empty.
+        if (decoded == 0) if (last_failure) |err| return err;
+
         return result.toOwnedSlice(self.allocator);
     }
 
-    /// Extract text from all pages
+    /// Extract text from all pages.
+    ///
+    /// A page that cannot be read is skipped with a warning, but if no page
+    /// could be read the first failure is returned: text that is empty because
+    /// extraction failed must not look like text that is empty because the
+    /// document is a scan.
     pub fn extractAllText(self: *Document) ![]u8 {
-        const page_count = try self.getPageCount();
+        const page_refs = try self.collectPageRefs();
+        defer self.allocator.free(page_refs);
+
         var result = std.ArrayList(u8).empty;
         errdefer result.deinit(self.allocator);
 
-        for (0..page_count) |i| {
-            const text = self.extractPageText(i) catch |err| {
-                // Skip pages that fail to extract
-                std.debug.print("Warning: Failed to extract page {d}: {}\n", .{ i + 1, err });
-                continue;
+        var first_failure: ?anyerror = null;
+        var failed: usize = 0;
+
+        for (page_refs, 0..) |page_ref, i| {
+            const text: []u8 = self.extractPageTextByRef(page_ref) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                // A page with no /Contents is blank, not broken.
+                error.NoContents => try self.allocator.alloc(u8, 0),
+                else => blk: {
+                    std.debug.print("Warning: Failed to extract page {d}: {}\n", .{ i + 1, err });
+                    if (first_failure == null) first_failure = err;
+                    failed += 1;
+                    break :blk try self.allocator.alloc(u8, 0);
+                },
             };
             defer self.allocator.free(text);
 
             try result.appendSlice(self.allocator, text);
 
             // Add page separator if not last page
-            if (i < page_count - 1) {
+            if (i + 1 < page_refs.len) {
                 try result.appendSlice(self.allocator, "\n\n--- Page ");
-                var buf: [16]u8 = undefined;
+                var buf: [24]u8 = undefined;
                 const num_str = std.fmt.bufPrint(&buf, "{d}", .{i + 2}) catch "?";
                 try result.appendSlice(self.allocator, num_str);
                 try result.appendSlice(self.allocator, " ---\n\n");
             }
         }
+
+        if (page_refs.len > 0 and failed == page_refs.len) return first_failure.?;
 
         return result.toOwnedSlice(self.allocator);
     }
@@ -788,15 +816,9 @@ pub const Document = struct {
             break :blk @intCast(first_int);
         };
 
-        // Decompress if filtered
-        const data = blk: {
-            if (parser.get("Filter")) |filter_obj| {
-                const filter_name = filter_obj.asName() orelse break :blk try self.allocator.dupe(u8, stream_data);
-                if (std.mem.eql(u8, filter_name, "FlateDecode")) {
-                    break :blk filters.FlateDecode.decode(self.allocator, stream_data) catch return error.InvalidObject;
-                }
-            }
-            break :blk try self.allocator.dupe(u8, stream_data);
+        const data = filters.decodeStream(self.allocator, dict_bytes, stream_data) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidObject,
         };
         errdefer self.allocator.free(data);
 
@@ -851,29 +873,7 @@ pub const Document = struct {
         const obj = try self.resolveRef(ref);
 
         switch (obj) {
-            .stream => |stream| {
-                // Check for filters
-                var parser = DictParser.init(stream.dict);
-
-                if (parser.get("Filter")) |filter_obj| {
-                    const filter_name = filter_obj.asName() orelse return error.InvalidFilter;
-
-                    if (std.mem.eql(u8, filter_name, "FlateDecode")) {
-                        return filters.FlateDecode.decode(self.allocator, stream.data);
-                    } else if (std.mem.eql(u8, filter_name, "ASCII85Decode")) {
-                        return filters.Ascii85Decode.decode(self.allocator, stream.data);
-                    } else if (std.mem.eql(u8, filter_name, "ASCIIHexDecode")) {
-                        return filters.AsciiHexDecode.decode(self.allocator, stream.data);
-                    } else {
-                        return error.UnsupportedFilter;
-                    }
-                }
-
-                // No filter - return copy of raw data
-                const copy = try self.allocator.alloc(u8, stream.data.len);
-                @memcpy(copy, stream.data);
-                return copy;
-            },
+            .stream => |stream| return filters.decodeStream(self.allocator, stream.dict, stream.data),
             else => return error.NotAStream,
         }
     }

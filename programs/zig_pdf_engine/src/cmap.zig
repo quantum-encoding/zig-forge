@@ -1,4 +1,5 @@
 const std = @import("std");
+const Watchdog = @import("test_watchdog.zig").Watchdog;
 
 /// ToUnicode CMap parser for PDF text extraction
 /// Maps CID/glyph codes to Unicode codepoints
@@ -35,106 +36,134 @@ pub const CMap = struct {
         self.ranges.deinit(self.allocator);
     }
 
-    /// Parse a ToUnicode CMap stream
+    /// Parse a ToUnicode CMap stream.
+    ///
+    /// Termination: the stream is consumed through `Scanner.next`, which moves
+    /// its cursor forward on every token it returns and returns null only at
+    /// the end of the data. Every loop below takes at least one token per
+    /// iteration, so the parse is linear in `data.len` whatever the bytes are.
     pub fn parse(allocator: std.mem.Allocator, data: []const u8) !CMap {
         var cmap = CMap.init(allocator);
         errdefer cmap.deinit();
 
-        var i: usize = 0;
-        while (i < data.len) {
-            // Look for beginbfchar
-            if (findSequence(data, i, "beginbfchar")) |pos| {
-                i = pos + 11; // Skip "beginbfchar"
-                try cmap.parseBfChar(data, &i);
-                continue;
+        var scan = Scanner{ .data = data };
+        while (scan.next()) |tok| {
+            switch (tok) {
+                .word => |w| {
+                    if (std.mem.eql(u8, w, "beginbfchar")) {
+                        try cmap.parseBfChar(&scan);
+                    } else if (std.mem.eql(u8, w, "beginbfrange")) {
+                        try cmap.parseBfRange(&scan);
+                    }
+                },
+                else => {},
             }
-
-            // Look for beginbfrange
-            if (findSequence(data, i, "beginbfrange")) |pos| {
-                i = pos + 12; // Skip "beginbfrange"
-                try cmap.parseBfRange(data, &i);
-                continue;
-            }
-
-            i += 1;
         }
 
         return cmap;
     }
 
     /// Parse bfchar section: <srcCode> <dstUnicode> pairs
-    fn parseBfChar(self: *CMap, data: []const u8, pos: *usize) !void {
-        while (pos.* < data.len) {
-            skipWhitespace(data, pos);
+    fn parseBfChar(self: *CMap, scan: *Scanner) !void {
+        while (scan.next()) |tok| {
+            const src = switch (tok) {
+                .word => |w| if (std.mem.eql(u8, w, "endbfchar")) return else continue,
+                .hex => |h| hexToCode(h) orelse continue,
+                else => continue,
+            };
 
-            // Check for end marker
-            if (checkSequence(data, pos.*, "endbfchar")) {
-                pos.* += 9;
-                return;
+            const dst_tok = scan.next() orelse return;
+            switch (dst_tok) {
+                .word => |w| if (std.mem.eql(u8, w, "endbfchar")) return,
+                .hex => |h| try self.putMapping(src, h, 0),
+                else => {},
             }
-
-            // Parse source code <XX> or <XXXX>
-            const src = parseHexToken(data, pos) orelse continue;
-            skipWhitespace(data, pos);
-
-            // Parse destination Unicode <XXXX>
-            const dst_start = pos.*;
-            const dst = parseHexToken(data, pos) orelse continue;
-
-            // Convert destination to UTF-8
-            const utf8 = try hexToUtf8(self.allocator, dst);
-
-            // Store mapping
-            try self.char_map.put(src, utf8);
-            _ = dst_start;
         }
     }
 
-    /// Parse bfrange section: <srcStart> <srcEnd> <dstStart> triples
-    fn parseBfRange(self: *CMap, data: []const u8, pos: *usize) !void {
-        while (pos.* < data.len) {
-            skipWhitespace(data, pos);
+    /// Parse bfrange section: <srcStart> <srcEnd> <dstStart> triples, where the
+    /// destination is either one string (the range counts up from it) or an
+    /// array holding one string per code.
+    fn parseBfRange(self: *CMap, scan: *Scanner) !void {
+        while (scan.next()) |tok| {
+            const src_start = switch (tok) {
+                .word => |w| if (std.mem.eql(u8, w, "endbfrange")) return else continue,
+                .hex => |h| hexToCode(h) orelse continue,
+                else => continue,
+            };
 
-            // Check for end marker
-            if (checkSequence(data, pos.*, "endbfrange")) {
-                pos.* += 10;
-                return;
-            }
+            const end_tok = scan.next() orelse return;
+            const src_end = switch (end_tok) {
+                .word => |w| if (std.mem.eql(u8, w, "endbfrange")) return else continue,
+                .hex => |h| hexToCode(h) orelse continue,
+                else => continue,
+            };
 
-            // Parse source start <XX>
-            const src_start = parseHexToken(data, pos) orelse continue;
-            skipWhitespace(data, pos);
-
-            // Parse source end <XX>
-            const src_end = parseHexToken(data, pos) orelse continue;
-            skipWhitespace(data, pos);
-
-            // Check if destination is array or single value
-            if (pos.* < data.len and data[pos.*] == '[') {
-                // Array of individual mappings - expand inline
-                pos.* += 1;
-                var code = src_start;
-                while (code <= src_end and pos.* < data.len) {
-                    skipWhitespace(data, pos);
-                    if (pos.* < data.len and data[pos.*] == ']') {
-                        pos.* += 1;
-                        break;
+            const dst_tok = scan.next() orelse return;
+            switch (dst_tok) {
+                .word => |w| if (std.mem.eql(u8, w, "endbfrange")) return,
+                .array_start => {
+                    // One destination per code. The array is read to its `]`
+                    // however many entries it holds; entries past src_end are
+                    // read and dropped.
+                    var offset: u32 = 0;
+                    while (scan.next()) |item| {
+                        switch (item) {
+                            .array_end => break,
+                            .word => |w| if (std.mem.eql(u8, w, "endbfrange")) return,
+                            .hex => |h| {
+                                if (src_end >= src_start and offset <= src_end - src_start) {
+                                    try self.putMapping(src_start + offset, h, 0);
+                                }
+                                offset +|= 1;
+                            },
+                            else => {},
+                        }
                     }
-                    const dst = parseHexToken(data, pos) orelse break;
-                    const utf8 = try hexToUtf8(self.allocator, dst);
-                    try self.char_map.put(code, utf8);
-                    code += 1;
-                }
-            } else {
-                // Single base value - store as range
-                const dst_base = parseHexToken(data, pos) orelse continue;
-                try self.ranges.append(self.allocator, .{
-                    .start = src_start,
-                    .end = src_end,
-                    .base_unicode = dst_base,
-                });
+                },
+                .hex => |h| {
+                    if (src_end < src_start) continue;
+                    var units: [max_dst_units]u16 = undefined;
+                    const n = hexToUtf16(h, &units);
+                    if (n == 0) continue;
+
+                    if (singleCodepoint(units[0..n])) |cp| {
+                        try self.ranges.append(self.allocator, .{
+                            .start = src_start,
+                            .end = src_end,
+                            .base_unicode = cp,
+                        });
+                    } else if (src_end - src_start <= 0xFF) {
+                        // A multi-character destination (a ligature such as
+                        // <00660066>): the last code unit counts up across the
+                        // range, which the spec confines to one byte's worth.
+                        var offset: u32 = 0;
+                        while (offset <= src_end - src_start) : (offset += 1) {
+                            try self.putMapping(src_start + offset, h, @intCast(offset));
+                        }
+                    }
+                },
+                else => {},
             }
         }
+    }
+
+    /// Store `code -> dst`, where `dst` is the hex digits of a UTF-16BE string
+    /// and `last_unit_offset` is added to its final code unit.
+    fn putMapping(self: *CMap, code: u32, dst_hex: []const u8, last_unit_offset: u16) !void {
+        var units: [max_dst_units]u16 = undefined;
+        const n = hexToUtf16(dst_hex, &units);
+        if (n == 0) return;
+        units[n - 1] +%= last_unit_offset;
+
+        var utf8: [max_dst_units * 3]u8 = undefined;
+        const len = utf16ToUtf8(units[0..n], &utf8);
+
+        const owned = try self.allocator.dupe(u8, utf8[0..len]);
+        errdefer self.allocator.free(owned);
+        const gop = try self.char_map.getOrPut(code);
+        if (gop.found_existing) self.allocator.free(gop.value_ptr.*);
+        gop.value_ptr.* = owned;
     }
 
     /// Map a character code to Unicode (returns UTF-8 bytes)
@@ -171,7 +200,7 @@ pub const CMap = struct {
         // Check ranges
         for (self.ranges.items) |range| {
             if (code >= range.start and code <= range.end) {
-                const unicode = range.base_unicode + (code - range.start);
+                const unicode = std.math.add(u32, range.base_unicode, code - range.start) catch return null;
                 return encodeUtf8(unicode, buffer);
             }
         }
@@ -180,62 +209,103 @@ pub const CMap = struct {
     }
 };
 
-/// Find a sequence in data starting from pos
-fn findSequence(data: []const u8, start: usize, needle: []const u8) ?usize {
-    if (start + needle.len > data.len) return null;
-    const remaining = data[start..];
-    const found = std.mem.indexOf(u8, remaining, needle);
-    if (found) |offset| {
-        return start + offset;
-    }
-    return null;
-}
+/// Longest destination string kept per mapping, in UTF-16 code units. Real
+/// ToUnicode destinations are one to four units (a ligature); anything longer
+/// is cut here.
+const max_dst_units = 16;
 
-/// Check if sequence matches at exact position
-fn checkSequence(data: []const u8, pos: usize, needle: []const u8) bool {
-    if (pos + needle.len > data.len) return false;
-    return std.mem.eql(u8, data[pos..][0..needle.len], needle);
-}
+/// Tokenizer for the PostScript-flavoured CMap syntax.
+///
+/// Invariant: `next` either returns null with the cursor at the end of the
+/// data, or returns a token having moved the cursor forward by at least one
+/// byte. A byte no rule claims is returned as a one-byte `other`, never left
+/// under the cursor.
+const Scanner = struct {
+    data: []const u8,
+    pos: usize = 0,
 
-/// Skip whitespace characters
-fn skipWhitespace(data: []const u8, pos: *usize) void {
-    while (pos.* < data.len) {
-        const c = data[pos.*];
-        if (c == ' ' or c == '\t' or c == '\n' or c == '\r') {
-            pos.* += 1;
-        } else {
-            break;
+    const Tok = union(enum) {
+        /// Hex digits between `<` and `>` (or the end of the data), unparsed.
+        hex: []const u8,
+        array_start,
+        array_end,
+        /// A run of regular characters: an operator, a number, a name body.
+        word: []const u8,
+        other,
+    };
+
+    fn next(self: *Scanner) ?Tok {
+        const data = self.data;
+        while (self.pos < data.len) {
+            const c = data[self.pos];
+            if (isSpace(c)) {
+                self.pos += 1;
+            } else if (c == '%') {
+                while (self.pos < data.len and data[self.pos] != '\n' and data[self.pos] != '\r') self.pos += 1;
+            } else break;
+        }
+        if (self.pos >= data.len) return null;
+
+        const start = self.pos;
+        switch (data[start]) {
+            '[' => {
+                self.pos += 1;
+                return .array_start;
+            },
+            ']' => {
+                self.pos += 1;
+                return .array_end;
+            },
+            '<' => {
+                if (start + 1 < data.len and data[start + 1] == '<') {
+                    self.pos += 2;
+                    return .other;
+                }
+                self.pos += 1;
+                while (self.pos < data.len and data[self.pos] != '>') self.pos += 1;
+                const digits = data[start + 1 .. self.pos];
+                if (self.pos < data.len) self.pos += 1;
+                return .{ .hex = digits };
+            },
+            '(' => {
+                // Literal string, as in `/Registry (Adobe)`: skipped whole so
+                // its text cannot be mistaken for an operator.
+                self.pos += 1;
+                var depth: usize = 1;
+                while (self.pos < data.len and depth > 0) {
+                    const ch = data[self.pos];
+                    if (ch == '\\' and self.pos + 1 < data.len) {
+                        self.pos += 2;
+                        continue;
+                    }
+                    if (ch == '(') depth += 1;
+                    if (ch == ')') depth -= 1;
+                    self.pos += 1;
+                }
+                return .other;
+            },
+            else => {
+                while (self.pos < data.len and !isSpace(data[self.pos]) and !isDelimiter(data[self.pos])) self.pos += 1;
+                if (self.pos == start) {
+                    self.pos += 1;
+                    return .other;
+                }
+                return .{ .word = data[start..self.pos] };
+            },
         }
     }
-}
 
-/// Parse a hex token <XXXX> and return as u32
-fn parseHexToken(data: []const u8, pos: *usize) ?u32 {
-    skipWhitespace(data, pos);
+    fn isSpace(c: u8) bool {
+        return c == ' ' or c == '\t' or c == '\n' or c == '\r' or c == 0 or c == 0x0c;
+    }
 
-    if (pos.* >= data.len or data[pos.*] != '<') return null;
-    pos.* += 1;
-
-    var result: u32 = 0;
-    var digit_count: u32 = 0;
-
-    while (pos.* < data.len and data[pos.*] != '>') {
-        const c = data[pos.*];
-        const digit = hexDigit(c) orelse {
-            pos.* += 1;
-            continue;
+    fn isDelimiter(c: u8) bool {
+        return switch (c) {
+            '(', ')', '<', '>', '[', ']', '{', '}', '/', '%' => true,
+            else => false,
         };
-        result = (result << 4) | digit;
-        digit_count += 1;
-        pos.* += 1;
     }
-
-    if (pos.* < data.len and data[pos.*] == '>') {
-        pos.* += 1;
-    }
-
-    return if (digit_count > 0) result else null;
-}
+};
 
 fn hexDigit(c: u8) ?u32 {
     if (c >= '0' and c <= '9') return c - '0';
@@ -244,14 +314,75 @@ fn hexDigit(c: u8) ?u32 {
     return null;
 }
 
-/// Convert hex string value to UTF-8
-fn hexToUtf8(allocator: std.mem.Allocator, value: u32) ![]const u8 {
-    var buf: [8]u8 = undefined;
-    const len = encodeUtf8(value, &buf) orelse {
-        // Invalid codepoint - return empty
-        return try allocator.dupe(u8, "");
-    };
-    return try allocator.dupe(u8, buf[0..len]);
+/// A source character code: one to four bytes of hex, big-endian. Null when the
+/// token holds no digits or more than a u32's worth.
+fn hexToCode(digits: []const u8) ?u32 {
+    var result: u32 = 0;
+    var count: u32 = 0;
+    for (digits) |c| {
+        const d = hexDigit(c) orelse continue;
+        if (count == 8) return null;
+        result = (result << 4) | d;
+        count += 1;
+    }
+    return if (count > 0) result else null;
+}
+
+/// Decode hex digits as big-endian UTF-16 code units. A one-byte value (`<41>`)
+/// is taken as that code unit. Returns the number of units written.
+fn hexToUtf16(digits: []const u8, out: []u16) usize {
+    var n: usize = 0;
+    var unit: u16 = 0;
+    var nibbles: u32 = 0;
+    for (digits) |c| {
+        const d = hexDigit(c) orelse continue;
+        unit = (unit << 4) | @as(u16, @intCast(d));
+        nibbles += 1;
+        if (nibbles == 4) {
+            if (n == out.len) return n;
+            out[n] = unit;
+            n += 1;
+            unit = 0;
+            nibbles = 0;
+        }
+    }
+    if (nibbles > 0 and n < out.len) {
+        out[n] = unit;
+        n += 1;
+    }
+    return n;
+}
+
+/// The codepoint a UTF-16 string encodes, if it encodes exactly one.
+fn singleCodepoint(units: []const u16) ?u32 {
+    if (units.len == 1 and !std.unicode.utf16IsHighSurrogate(units[0]) and !std.unicode.utf16IsLowSurrogate(units[0])) {
+        return units[0];
+    }
+    if (units.len == 2 and std.unicode.utf16IsHighSurrogate(units[0]) and std.unicode.utf16IsLowSurrogate(units[1])) {
+        return 0x10000 + ((@as(u32, units[0]) - 0xD800) << 10) + (@as(u32, units[1]) - 0xDC00);
+    }
+    return null;
+}
+
+/// UTF-16 to UTF-8. Unpaired surrogates and U+0000 produce no output. `out`
+/// needs three bytes per unit.
+fn utf16ToUtf8(units: []const u16, out: []u8) usize {
+    var len: usize = 0;
+    var i: usize = 0;
+    while (i < units.len) : (i += 1) {
+        var cp: u32 = units[i];
+        if (std.unicode.utf16IsHighSurrogate(units[i])) {
+            if (i + 1 < units.len and std.unicode.utf16IsLowSurrogate(units[i + 1])) {
+                cp = 0x10000 + ((cp - 0xD800) << 10) + (@as(u32, units[i + 1]) - 0xDC00);
+                i += 1;
+            } else continue;
+        } else if (std.unicode.utf16IsLowSurrogate(units[i])) {
+            continue;
+        }
+        if (cp == 0) continue;
+        len += encodeUtf8(cp, out[len..]) orelse 0;
+    }
+    return len;
 }
 
 /// Encode a Unicode codepoint as UTF-8
@@ -351,4 +482,151 @@ test "utf8 encoding" {
     // 3-byte (e.g., € = U+20AC)
     try std.testing.expectEqual(@as(usize, 3), encodeUtf8(0x20AC, &buf).?);
     try std.testing.expectEqualStrings("€", buf[0..3]);
+}
+
+// PDF 32000-1:2008 §9.10.3, Example 2. The spec states the results: codes
+// <0000>..<005E> map to U+0020..U+007E, <005F>/<0060>/<0061> to the ligature
+// spellings "ff"/"fi"/"ffl", and <3A51> to U+2003E through a surrogate pair.
+const spec_example =
+    \\2 beginbfrange
+    \\<0000> <005E> <0020>
+    \\<005F> <0061> [<00660066> <00660069> <00660066006C>]
+    \\endbfrange
+    \\1 beginbfchar
+    \\<3A51> <D840DC3E>
+    \\endbfchar
+;
+
+fn expectMaps(cmap: *const CMap, code: u32, expected: []const u8) !void {
+    var buf: [48]u8 = undefined;
+    const len = cmap.mapCodeToBuffer(code, &buf) orelse return error.TestExpectedMapping;
+    try std.testing.expectEqualStrings(expected, buf[0..len]);
+}
+
+test "spec anchor: PDF 32000-1 9.10.3 example 2" {
+    const dog = Watchdog.arm(10);
+    defer dog.disarm();
+
+    var cmap = try CMap.parse(std.testing.allocator, spec_example);
+    defer cmap.deinit();
+
+    try expectMaps(&cmap, 0x0000, " ");
+    try expectMaps(&cmap, 0x0021, "A");
+    try expectMaps(&cmap, 0x005E, "~");
+    try expectMaps(&cmap, 0x005F, "ff");
+    try expectMaps(&cmap, 0x0060, "fi");
+    try expectMaps(&cmap, 0x0061, "ffl");
+    try expectMaps(&cmap, 0x3A51, "\xF0\xA0\x80\xBE"); // U+2003E
+    var unused: [8]u8 = undefined;
+    try std.testing.expect(cmap.mapCodeToBuffer(0x0062, &unused) == null);
+}
+
+// The construct behind 264 of the 629 pdf-text hangs: a bfrange whose array
+// holds exactly one entry per code, as Qt and wkhtmltopdf write every ToUnicode
+// CMap. See docs/pdf-text-hang-classification.md.
+test "bfrange array that exactly fills its range terminates" {
+    const dog = Watchdog.arm(10);
+    defer dog.disarm();
+
+    const data =
+        \\1 beginbfrange
+        \\<0000> <0003> [<0000> <0056> <0041> <0054>]
+        \\endbfrange
+        \\1 beginbfchar
+        \\<0010> <0021>
+        \\endbfchar
+    ;
+    var cmap = try CMap.parse(std.testing.allocator, data);
+    defer cmap.deinit();
+
+    try expectMaps(&cmap, 0x0001, "V");
+    try expectMaps(&cmap, 0x0002, "A");
+    try expectMaps(&cmap, 0x0003, "T");
+    // The section after the array is still read.
+    try expectMaps(&cmap, 0x0010, "!");
+}
+
+test "bfrange array longer or shorter than its range" {
+    const dog = Watchdog.arm(10);
+    defer dog.disarm();
+
+    const data =
+        \\2 beginbfrange
+        \\<0000> <0001> [<0041> <0042> <0043> <0044>]
+        \\<0010> <0013> [<0061>]
+        \\endbfrange
+    ;
+    var cmap = try CMap.parse(std.testing.allocator, data);
+    defer cmap.deinit();
+
+    try expectMaps(&cmap, 0x0000, "A");
+    try expectMaps(&cmap, 0x0001, "B");
+    try std.testing.expect(cmap.mapCode(0x0002) == null);
+    try expectMaps(&cmap, 0x0010, "a");
+    try std.testing.expect(cmap.mapCode(0x0011) == null);
+}
+
+test "every truncation of a CMap terminates" {
+    const dog = Watchdog.arm(30);
+    defer dog.disarm();
+
+    for (0..spec_example.len + 1) |cut| {
+        var cmap = try CMap.parse(std.testing.allocator, spec_example[0..cut]);
+        cmap.deinit();
+    }
+}
+
+test "malformed sections terminate" {
+    const dog = Watchdog.arm(10);
+    defer dog.disarm();
+
+    const cases = [_][]const u8{
+        "beginbfrange ] endbfrange",
+        "beginbfrange <00> <01> ] > ) } endbfrange",
+        "beginbfrange <00> <01> [<41> <42>",
+        "beginbfrange <00> <01> [ [ [ ] endbfrange",
+        "beginbfrange <00> <FFFFFFFF> [<41>] endbfrange",
+        "beginbfrange <FFFFFFFF> <FFFFFFFF> <10FFFF> endbfrange",
+        "beginbfrange <05> <01> <0041> endbfrange",
+        "beginbfrange <00> <FFFFFFFF> <00410042> endbfrange",
+        "beginbfchar > > > endbfchar",
+        "beginbfchar <0001> /space endbfchar",
+        "beginbfchar <0001",
+        "beginbfchar <> <> endbfchar",
+        "beginbfchar <000000000001> <0041> endbfchar",
+        "beginbfchar (endbfchar",
+        "beginbfchar % endbfchar",
+    };
+    for (cases) |data| {
+        var cmap = try CMap.parse(std.testing.allocator, data);
+        cmap.deinit();
+    }
+}
+
+test "scanner advances on every token, for arbitrary bytes" {
+    const dog = Watchdog.arm(60);
+    defer dog.disarm();
+
+    // Bytes drawn mostly from the syntax's own alphabet, so delimiters land in
+    // every position relative to each other.
+    const alphabet = "<>[]()/%{} \n\\0Aaf beginbfrange endbfchar\x00\xff";
+    var prng = std.Random.DefaultPrng.init(0x5eed_c0de);
+    const rand = prng.random();
+
+    var buf: [96]u8 = undefined;
+    for (0..4000) |_| {
+        const len = rand.uintLessThan(usize, buf.len + 1);
+        for (buf[0..len]) |*b| b.* = alphabet[rand.uintLessThan(usize, alphabet.len)];
+
+        var scan = Scanner{ .data = buf[0..len] };
+        var last = scan.pos;
+        while (scan.next()) |_| {
+            try std.testing.expect(scan.pos > last);
+            last = scan.pos;
+        }
+        try std.testing.expectEqual(len, scan.pos);
+
+        var cmap = try CMap.parse(std.testing.allocator, buf[0..len]);
+        cmap.deinit();
+    }
 }

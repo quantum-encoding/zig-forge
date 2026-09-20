@@ -312,23 +312,17 @@ pub const XRefTable = struct {
             try index_pairs.append(self.allocator, .{ 0, size_val });
         }
 
-        // Decompress stream data if filtered
-        var decompressed: ?[]u8 = null;
-        defer if (decompressed) |d| self.allocator.free(d);
-
-        const xref_data = blk: {
-            if (parser.get("Filter")) |filter_obj| {
-                const filter_name = filter_obj.asName() orelse break :blk stream_data;
-                if (std.mem.eql(u8, filter_name, "FlateDecode")) {
-                    decompressed = filters.FlateDecode.decode(self.allocator, stream_data) catch return error.XrefDecompressFailed;
-                    break :blk decompressed.?;
-                }
-            }
-            break :blk stream_data;
+        const xref_data = filters.decodeStream(self.allocator, dict_bytes, stream_data) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.XrefDecompressFailed,
         };
+        defer self.allocator.free(xref_data);
 
         // Parse the binary xref entries
         const entry_size = @as(usize, w_widths[0]) + w_widths[1] + w_widths[2];
+        // Zero-width entries consume no data, so the entry loops below would be
+        // bounded only by the counts the file declares in /Index.
+        if (entry_size == 0) return error.InvalidXrefStreamW;
         var data_pos: usize = 0;
 
         for (index_pairs.items) |pair| {

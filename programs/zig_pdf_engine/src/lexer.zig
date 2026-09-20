@@ -1,7 +1,13 @@
 const std = @import("std");
+const Watchdog = @import("test_watchdog.zig").Watchdog;
 
 /// PDF Lexer - tokenizes raw PDF bytes without allocation
 /// All tokens reference slices of the original buffer (zero-copy)
+///
+/// Progress invariant: `next` returns null only with `pos` at the end of the
+/// data; otherwise it returns a token and has moved `pos` forward by at least
+/// one byte. Every `while (lex.next())` loop in the engine terminates because
+/// of this, so it must hold for arbitrary bytes, not only for valid PDF.
 pub const Lexer = struct {
     data: []const u8,
     pos: usize,
@@ -131,8 +137,13 @@ pub const Lexer = struct {
             self.pos += 1;
         }
 
+        if (self.pos == start) {
+            // A delimiter no other rule claims: a ')' with no open string, or a
+            // '>' that is not half of '>>'. Consume it as a one-byte token.
+            self.pos += 1;
+            return .{ .tag = .unknown, .data = self.data[start..self.pos] };
+        }
         const slice = self.data[start..self.pos];
-        if (slice.len == 0) return .{ .tag = .eof, .data = slice };
 
         // Classify the token
         const tag: Token.Tag = blk: {
@@ -243,7 +254,6 @@ pub const Token = struct {
 
         // Other
         unknown,
-        eof,
     };
 
     /// Get the name without the leading '/'
@@ -345,4 +355,51 @@ test "lexer nested strings" {
     const t = lex.next().?;
     try std.testing.expectEqual(Token.Tag.literal_string, t.tag);
     try std.testing.expectEqualStrings("Hello (nested) World", t.stringContent());
+}
+
+test "a delimiter no rule claims is consumed, not returned forever" {
+    const dog = Watchdog.arm(10);
+    defer dog.disarm();
+
+    // ')' with no open string and '>' that is not half of '>>': what a lexer
+    // meets when it is handed binary, e.g. a stream whose filter was not applied.
+    var lex = Lexer.init(") > 12 >");
+    const t1 = lex.next().?;
+    try std.testing.expectEqual(Token.Tag.unknown, t1.tag);
+    try std.testing.expectEqualStrings(")", t1.data);
+    const t2 = lex.next().?;
+    try std.testing.expectEqual(Token.Tag.unknown, t2.tag);
+    try std.testing.expectEqualStrings(">", t2.data);
+    try std.testing.expectEqual(@as(i64, 12), lex.next().?.asInt().?);
+    try std.testing.expectEqualStrings(">", lex.next().?.data);
+    try std.testing.expect(lex.next() == null);
+}
+
+test "next() advances on every token, for arbitrary bytes" {
+    const dog = Watchdog.arm(60);
+    defer dog.disarm();
+
+    var prng = std.Random.DefaultPrng.init(0x1e8e_5eed);
+    const rand = prng.random();
+    const alphabet = "()<>[]{}/% \n\r\\0129.-+RTjobjstream\x00\x9c\xff";
+
+    var buf: [128]u8 = undefined;
+    for (0..8000) |round| {
+        const len = rand.uintLessThan(usize, buf.len + 1);
+        // Alternate between the syntax's own alphabet and uniform bytes.
+        if (round % 2 == 0) {
+            for (buf[0..len]) |*b| b.* = alphabet[rand.uintLessThan(usize, alphabet.len)];
+        } else {
+            rand.bytes(buf[0..len]);
+        }
+
+        var lex = Lexer.init(buf[0..len]);
+        var last = lex.pos;
+        while (lex.next()) |tok| {
+            try std.testing.expect(lex.pos > last);
+            try std.testing.expect(tok.data.len > 0);
+            last = lex.pos;
+        }
+        try std.testing.expectEqual(len, lex.pos);
+    }
 }

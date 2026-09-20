@@ -60,10 +60,25 @@ Built into `zig-out/bin/` (and runnable via `zig build`):
 ## Tests
 
 ```sh
-zig build test        # library unit tests
-zig build test-real   # integration tests against real PDF files
+zig build test        # library unit tests + whole-file termination tests
+zig build test-real   # integration tests against real PDF files (does not compile on Zig 0.16: editor.zig)
 zig build test-all    # both
 ```
+
+The parse must return for any input: an error is acceptable, never returning is not. The
+termination tests (`src/tests/termination_tests.zig`, fixtures written by
+`tests/fixtures/termination/make_fixtures.py` and cross-checked against poppler) run under a
+watchdog, so a regression fails instead of hanging the build. To check a corpus:
+
+```sh
+tests/termination_sweep.sh <dir-of-pdfs> [seconds-per-file]   # HANG must be 0
+```
+
+`docs/pdf-text-hang-classification.md` records the constructs that once hung and what is still
+not handled.
+
+`pdf-text` exit status: 0 means stdout is the document's text (empty for a scan); non-zero means
+extraction failed and an empty stdout says nothing about the document.
 
 ## Status
 

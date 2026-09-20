@@ -111,56 +111,7 @@ pub const Page = struct {
     }
 
     fn decompressStream(self: *Page, dict_bytes: []const u8, data: []const u8) ![]u8 {
-        var parser = DictParser.init(dict_bytes);
-
-        // Check for /Filter
-        if (parser.get("Filter")) |filter_obj| {
-            switch (filter_obj) {
-                .name => |filter_name| {
-                    return self.applyFilter(filter_name, data);
-                },
-                .array => |filter_array| {
-                    // Multiple filters - apply in order
-                    return self.applyFilterChain(filter_array, data);
-                },
-                else => {},
-            }
-        }
-
-        // No filter - return copy
-        return self.allocator.dupe(u8, data);
-    }
-
-    fn applyFilter(self: *Page, filter_name: []const u8, data: []const u8) ![]u8 {
-        if (std.mem.eql(u8, filter_name, "FlateDecode") or std.mem.eql(u8, filter_name, "Fl")) {
-            return filters.FlateDecode.decode(self.allocator, data);
-        } else if (std.mem.eql(u8, filter_name, "ASCII85Decode") or std.mem.eql(u8, filter_name, "A85")) {
-            return filters.Ascii85Decode.decode(self.allocator, data);
-        } else if (std.mem.eql(u8, filter_name, "ASCIIHexDecode") or std.mem.eql(u8, filter_name, "AHx")) {
-            return filters.AsciiHexDecode.decode(self.allocator, data);
-        } else if (std.mem.eql(u8, filter_name, "LZWDecode") or std.mem.eql(u8, filter_name, "LZW")) {
-            // LZWDecode requires a complete LZW decompression implementation
-            // For now, return unfiltered data with a note that decoding is needed
-            return self.allocator.dupe(u8, data);
-        } else {
-            return error.UnsupportedFilter;
-        }
-    }
-
-    fn applyFilterChain(self: *Page, filter_array: []const u8, data: []const u8) ![]u8 {
-        var current = try self.allocator.dupe(u8, data);
-        errdefer self.allocator.free(current);
-
-        var lex = Lexer.init(filter_array);
-        while (lex.next()) |token| {
-            if (token.tag == .name) {
-                const new_data = try self.applyFilter(token.nameValue(), current);
-                self.allocator.free(current);
-                current = new_data;
-            }
-        }
-
-        return current;
+        return filters.decodeStream(self.allocator, dict_bytes, data);
     }
 
     fn concatenateStreams(self: *Page, array_bytes: []const u8) ![]u8 {
@@ -181,8 +132,8 @@ pub const Page = struct {
             if (r_tok.tag != .keyword_ref) continue;
 
             const ref = ObjectRef{
-                .obj_num = @intCast(num_tok.asInt() orelse continue),
-                .gen_num = @intCast(gen_tok.asInt() orelse continue),
+                .obj_num = std.math.cast(u32, num_tok.asInt() orelse continue) orelse continue,
+                .gen_num = std.math.cast(u16, gen_tok.asInt() orelse continue) orelse continue,
             };
 
             const stream_data = self.getStreamDataForRef(ref) catch continue;
@@ -202,6 +153,15 @@ pub const PageTree = struct {
     allocator: std.mem.Allocator,
     xref_getter: *const fn (u32) ?u64,
     page_refs: std.ArrayList(ObjectRef),
+    /// Object numbers already entered. A /Kids array that points back at an
+    /// ancestor would otherwise recurse until the stack is gone; with this set
+    /// each object is entered at most once, which also bounds the whole walk.
+    visited: std.AutoHashMap(u32, void),
+    /// Current recursion depth; a chain of distinct nested /Pages nodes is cut
+    /// at `max_depth` rather than followed down the stack.
+    depth: u32 = 0,
+
+    const max_depth: u32 = 256;
 
     /// Explicit error set to avoid recursive inference
     pub const TraverseError = error{
@@ -220,11 +180,13 @@ pub const PageTree = struct {
             .allocator = allocator,
             .xref_getter = xref_getter,
             .page_refs = std.ArrayList(ObjectRef).empty,
+            .visited = std.AutoHashMap(u32, void).init(allocator),
         };
     }
 
     pub fn deinit(self: *PageTree) void {
         self.page_refs.deinit(self.allocator);
+        self.visited.deinit();
     }
 
     /// Build flat list of page references from tree
@@ -233,6 +195,13 @@ pub const PageTree = struct {
     }
 
     fn traverseNode(self: *PageTree, ref: ObjectRef) TraverseError!void {
+        const gop = try self.visited.getOrPut(ref.obj_num);
+        if (gop.found_existing) return;
+
+        if (self.depth >= max_depth) return;
+        self.depth += 1;
+        defer self.depth -= 1;
+
         const offset = self.xref_getter(ref.obj_num) orelse return error.ObjectNotFound;
 
         var lex = Lexer.initAt(self.doc_data, @intCast(offset));
@@ -284,8 +253,8 @@ pub const PageTree = struct {
             if (r_tok.tag != .keyword_ref) continue;
 
             const ref = ObjectRef{
-                .obj_num = @intCast(num_tok.asInt() orelse continue),
-                .gen_num = @intCast(gen_tok.asInt() orelse continue),
+                .obj_num = std.math.cast(u32, num_tok.asInt() orelse continue) orelse continue,
+                .gen_num = std.math.cast(u16, gen_tok.asInt() orelse continue) orelse continue,
             };
 
             try self.traverseNode(ref);

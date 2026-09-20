@@ -63,8 +63,8 @@ pub const Object = union(enum) {
                         const obj_num = first_token.asInt() orelse return error.InvalidNumber;
                         const gen_num = second.asInt() orelse return error.InvalidNumber;
                         return .{ .reference = .{
-                            .obj_num = @intCast(obj_num),
-                            .gen_num = @intCast(gen_num),
+                            .obj_num = std.math.cast(u32, obj_num) orelse return error.InvalidNumber,
+                            .gen_num = std.math.cast(u16, gen_num) orelse return error.InvalidNumber,
                         } };
                     }
                 }
@@ -97,7 +97,6 @@ pub const Object = union(enum) {
                         return .{ .array = lex.data[start..end] };
                     }
                 },
-                .eof => return error.UnexpectedEof,
                 else => {},
             }
         }
@@ -123,7 +122,7 @@ pub const Object = union(enum) {
                         if (lex.next()) |next_tok| {
                             if (next_tok.tag == .keyword_stream) {
                                 // Find stream data
-                                const stream_data = findStreamData(lex) catch {
+                                const stream_data = findStreamData(lex, dict_bytes) catch {
                                     lex.seekTo(saved);
                                     return .{ .dict = dict_bytes };
                                 };
@@ -137,37 +136,53 @@ pub const Object = union(enum) {
                         return .{ .dict = dict_bytes };
                     }
                 },
-                .eof => return error.UnexpectedEof,
                 else => {},
             }
         }
         return error.UnexpectedEof;
     }
 
-    fn findStreamData(lex: *Lexer) ![]const u8 {
-        // Skip newline after "stream" keyword
-        var pos = lex.position();
-        while (pos < lex.data.len and (lex.data[pos] == '\r' or lex.data[pos] == '\n')) {
-            pos += 1;
-        }
-
-        const start = pos;
-
-        // Find "endstream"
+    /// The bytes between `stream` and `endstream`, with the lexer left after
+    /// `endstream`.
+    ///
+    /// The extent comes from the dictionary's /Length when that is a direct
+    /// integer and `endstream` really follows it. Stream data is binary, so its
+    /// own last byte can be 0x0A or 0x0D (the tail of a zlib checksum is, about
+    /// once in a hundred streams) and only /Length can tell that byte from the
+    /// end-of-line that precedes `endstream`. Without a usable /Length the data
+    /// runs to the first `endstream`, less one end-of-line byte at most:
+    /// keeping a stray EOL byte is harmless to every decoder here, while
+    /// dropping a data byte breaks the stream.
+    fn findStreamData(lex: *Lexer, dict_bytes: []const u8) ![]const u8 {
+        const data = lex.data;
         const needle = "endstream";
-        while (pos + needle.len <= lex.data.len) : (pos += 1) {
-            if (std.mem.eql(u8, lex.data[pos .. pos + needle.len], needle)) {
-                // Found it - stream data is from start to here
-                // Back up over any trailing whitespace
-                var end = pos;
-                while (end > start and (lex.data[end - 1] == '\r' or lex.data[end - 1] == '\n')) {
-                    end -= 1;
+
+        // `stream` is followed by CRLF or LF (a lone CR is tolerated).
+        var start = lex.position();
+        if (start < data.len and data[start] == '\r') start += 1;
+        if (start < data.len and data[start] == '\n') start += 1;
+
+        var parser = DictParser.init(dict_bytes);
+        if (parser.get("Length")) |length_obj| {
+            if (length_obj == .integer and length_obj.integer >= 0) {
+                if (std.math.cast(usize, length_obj.integer)) |length| {
+                    if (length <= data.len - start) {
+                        var after = start + length;
+                        while (after < data.len and (data[after] == '\r' or data[after] == '\n' or data[after] == ' ')) after += 1;
+                        if (std.mem.startsWith(u8, data[after..], needle)) {
+                            lex.seekTo(after + needle.len);
+                            return data[start .. start + length];
+                        }
+                    }
                 }
-                lex.seekTo(pos + needle.len);
-                return lex.data[start..end];
             }
         }
-        return error.StreamEndNotFound;
+
+        const pos = std.mem.indexOfPos(u8, data, start, needle) orelse return error.StreamEndNotFound;
+        var end = pos;
+        if (end > start and (data[end - 1] == '\n' or data[end - 1] == '\r')) end -= 1;
+        lex.seekTo(pos + needle.len);
+        return data[start..end];
     }
 
     /// Check if object is null

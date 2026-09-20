@@ -17,6 +17,7 @@ pub const document = @import("document.zig");
 pub const filters = @import("filters.zig");
 pub const page = @import("page.zig");
 pub const cmap = @import("cmap.zig");
+pub const test_watchdog = @import("test_watchdog.zig");
 
 // =============================================================================
 // PDF Editor

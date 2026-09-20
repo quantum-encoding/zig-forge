@@ -1,4 +1,48 @@
 const std = @import("std");
+const lexer = @import("lexer.zig");
+const objects = @import("objects.zig");
+
+/// Decode a stream's data according to the `/Filter` entry of its dictionary.
+///
+/// `/Filter` is either one name or an array of names applied in order; both
+/// spellings are common (`/Filter/FlateDecode`, `/Filter[/FlateDecode]`). A
+/// filter this engine cannot apply is an error, never the undecoded bytes:
+/// compressed data handed on as if it were decoded gets lexed as PDF syntax by
+/// the caller. Caller owns the result.
+pub fn decodeStream(allocator: std.mem.Allocator, dict_bytes: []const u8, data: []const u8) ![]u8 {
+    var parser = objects.DictParser.init(dict_bytes);
+    const filter_obj = parser.get("Filter") orelse return allocator.dupe(u8, data);
+
+    switch (filter_obj) {
+        .name => |name| return applyFilter(allocator, name, data),
+        .array => |names| {
+            var current = try allocator.dupe(u8, data);
+            errdefer allocator.free(current);
+
+            var lex = lexer.Lexer.init(names);
+            while (lex.next()) |token| {
+                if (token.tag != .name) return error.UnsupportedFilter;
+                const decoded = try applyFilter(allocator, token.nameValue(), current);
+                allocator.free(current);
+                current = decoded;
+            }
+            return current;
+        },
+        .null_obj => return allocator.dupe(u8, data),
+        else => return error.UnsupportedFilter,
+    }
+}
+
+fn applyFilter(allocator: std.mem.Allocator, name: []const u8, data: []const u8) ![]u8 {
+    if (std.mem.eql(u8, name, "FlateDecode") or std.mem.eql(u8, name, "Fl")) {
+        return FlateDecode.decode(allocator, data);
+    } else if (std.mem.eql(u8, name, "ASCII85Decode") or std.mem.eql(u8, name, "A85")) {
+        return Ascii85Decode.decode(allocator, data);
+    } else if (std.mem.eql(u8, name, "ASCIIHexDecode") or std.mem.eql(u8, name, "AHx")) {
+        return AsciiHexDecode.decode(allocator, data);
+    }
+    return error.UnsupportedFilter;
+}
 
 /// FlateDecode filter - zlib/deflate decompression
 /// Uses Zig's built-in std.compress for zero external dependencies (Zig 0.16+ API)
@@ -318,4 +362,66 @@ test "flatedecode basic" {
     const decompressed = try FlateDecode.decode(std.testing.allocator, &compressed);
     defer std.testing.allocator.free(decompressed);
     try std.testing.expectEqualStrings("Hello World", decompressed);
+}
+
+// Stream fixtures. The compressed bytes are CPython `zlib.compress` output (an
+// implementation independent of this engine), chosen so that the final checksum
+// byte is an end-of-line character: `zlib_ends_cr` ends in 0x0D and
+// `zlib_ends_lf` in 0x0A. A stream reader that trims EOLs off the data cuts the
+// checksum and the stream fails to decode.
+const zlib_ends_cr = [_]u8{ 0x78, 0x9c, 0x73, 0x0a, 0x51, 0xd0, 0x77, 0x33, 0x54, 0x30, 0x34, 0x52, 0x08, 0x49, 0x53, 0xd0, 0x48, 0xcc, 0x4b, 0xce, 0xc8, 0x2f, 0x52, 0x30, 0xaa, 0xd3, 0x54, 0x08, 0xc9, 0x52, 0x70, 0x0d, 0x01, 0x00, 0x75, 0xbe, 0x08, 0x0d };
+const text_ends_cr = "BT /F1 12 Tf (anchor 2~) Tj ET";
+const zlib_ends_lf = [_]u8{ 0x78, 0x9c, 0x73, 0x0a, 0x51, 0xd0, 0x77, 0x33, 0x54, 0x30, 0x34, 0x52, 0x08, 0x49, 0x53, 0xd0, 0x48, 0xcc, 0x4b, 0xce, 0xc8, 0x2f, 0x52, 0xd0, 0xaf, 0xd3, 0x54, 0x08, 0xc9, 0x52, 0x70, 0x0d, 0x01, 0x00, 0x75, 0xa3, 0x08, 0x0a };
+const text_ends_lf = "BT /F1 12 Tf (anchor /~) Tj ET";
+
+fn expectStreamDecodes(comptime object: []const u8, expected: []const u8) !void {
+    var lex = lexer.Lexer.init(object);
+    const obj = try objects.Object.parse(&lex);
+    try std.testing.expect(obj == .stream);
+    const decoded = try decodeStream(std.testing.allocator, obj.stream.dict, obj.stream.data);
+    defer std.testing.allocator.free(decoded);
+    try std.testing.expectEqualStrings(expected, decoded);
+}
+
+test "/Filter given as an array is applied" {
+    // The spelling iText, ReportLab and Oracle's PDF driver write.
+    try expectStreamDecodes("<</Filter[/FlateDecode]/Length 38>>stream\n" ++ zlib_ends_cr ++ "\nendstream", text_ends_cr);
+    try expectStreamDecodes("<</Length 38/Filter/FlateDecode>>stream\r\n" ++ zlib_ends_lf ++ "\r\nendstream", text_ends_lf);
+}
+
+test "filter chain is applied in order" {
+    const hex = comptime blk: {
+        var out: [zlib_ends_cr.len * 2 + 1]u8 = undefined;
+        const digits = "0123456789abcdef";
+        for (zlib_ends_cr, 0..) |b, i| {
+            out[i * 2] = digits[b >> 4];
+            out[i * 2 + 1] = digits[b & 0xF];
+        }
+        out[out.len - 1] = '>';
+        break :blk out;
+    };
+    try expectStreamDecodes("<</Filter [ /ASCIIHexDecode /FlateDecode ] /Length 77>>stream\n" ++ hex ++ "\nendstream", text_ends_cr);
+}
+
+test "stream data whose last byte is an EOL character survives" {
+    // Direct /Length: the extent is exact whatever the bytes are.
+    try expectStreamDecodes("<</Length 38/Filter/FlateDecode>>stream\n" ++ zlib_ends_cr ++ "\nendstream", text_ends_cr);
+    try expectStreamDecodes("<</Length 38/Filter/FlateDecode>>stream\n" ++ zlib_ends_lf ++ "\nendstream", text_ends_lf);
+    // Cases only /Length gets right: no EOL before `endstream` after data that
+    // ends in one, and unfiltered data that contains the word itself.
+    try expectStreamDecodes("<</Length 38/Filter/FlateDecode>>stream\n" ++ zlib_ends_lf ++ "endstream", text_ends_lf);
+    try expectStreamDecodes("<</Length 24>>stream\n(endstream) Tj (more) Tj\nendstream", "(endstream) Tj (more) Tj");
+    // Indirect /Length, which the object parser cannot resolve: the data runs
+    // to `endstream` less one EOL byte, so a data byte is never trimmed.
+    try expectStreamDecodes("<</Length 9 0 R/Filter/FlateDecode>>stream\n" ++ zlib_ends_cr ++ "\nendstream", text_ends_cr);
+    try expectStreamDecodes("<</Length 9 0 R/Filter/FlateDecode>>stream\r\n" ++ zlib_ends_lf ++ "\r\nendstream", text_ends_lf);
+    // A /Length that lies falls back the same way.
+    try expectStreamDecodes("<</Length 5/Filter/FlateDecode>>stream\n" ++ zlib_ends_cr ++ "\nendstream", text_ends_cr);
+}
+
+test "a filter that cannot be applied is an error, never the raw bytes" {
+    const a = std.testing.allocator;
+    try std.testing.expectError(error.UnsupportedFilter, decodeStream(a, "/Filter/LZWDecode", &zlib_ends_cr));
+    try std.testing.expectError(error.UnsupportedFilter, decodeStream(a, "/Filter[/FlateDecode/DCTDecode]", &zlib_ends_cr));
+    try std.testing.expectError(error.UnsupportedFilter, decodeStream(a, "/Filter 12 0 R", &zlib_ends_cr));
 }
