@@ -47,7 +47,7 @@ Benchmark 1: ./zig-out/bin/zig-docx --markdown '/Users/director/Downloads/metatr
 
 ## 6. DOCX → MDX
 ```
-Benchmark 1: ./zig-out/bin/zig-docx '/Users/director/work/poly-repo/crg-direct-polyrepo/blog-stuff/How Much Electricity Does a 4kW Solar System Produce.docx' -o /tmp/zig-docx-bench/docx_out/solar.mdx
+Benchmark 1: ./zig-out/bin/zig-docx '/Users/director/work/poly-repo/beacon-renewables-polyrepo/blog-stuff/How Much Electricity Does a 4kW Solar System Produce.docx' -o /tmp/zig-docx-bench/docx_out/solar.mdx
   Time (mean ± σ):      20.8 ms ±   0.6 ms    [User: 18.9 ms, System: 1.3 ms]
   Range (min … max):    20.0 ms …  22.3 ms    10 runs
  

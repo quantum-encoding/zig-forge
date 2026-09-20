@@ -25,7 +25,7 @@
         },
         {
           "type": "text",
-          "content": "CRG",
+          "content": "Beacon",
           "x": 50,
           "y": 48,
           "font_size": 24,
@@ -51,7 +51,7 @@
         },
         {
           "type": "text",
-          "content": "CRG-2026-00847",
+          "content": "Beacon-2026-00847",
           "x": 792,
           "y": 40,
           "font_size": 10,
@@ -69,7 +69,7 @@
         },
         {
           "type": "text",
-          "content": "0330 133 2497",
+          "content": "0330 000 0000",
           "x": 792,
           "y": 70,
           "font_size": 10,
@@ -340,7 +340,7 @@
         },
         {
           "type": "text",
-          "content": "Why CRG Direct?",
+          "content": "Why Beacon Renewables?",
           "x": 452,
           "y": 415,
           "font_size": 12,
@@ -417,7 +417,7 @@
         },
         {
           "type": "text",
-          "content": "Next Steps: Call 0330 133 2497 or reply to this quote to book your free site survey",
+          "content": "Next Steps: Call 0330 000 0000 or reply to this quote to book your free site survey",
           "x": 421,
           "y": 540,
           "font_size": 13,

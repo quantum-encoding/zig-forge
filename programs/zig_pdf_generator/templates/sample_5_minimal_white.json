@@ -6,7 +6,7 @@
       "elements": [
         {
           "type": "text",
-          "content": "CRG",
+          "content": "Beacon",
           "x": 50,
           "y": 50,
           "font_size": 28,
@@ -43,7 +43,7 @@
         },
         {
           "type": "text",
-          "content": "CRG-2026-00847",
+          "content": "Beacon-2026-00847",
           "x": 792,
           "y": 55,
           "font_size": 10,
@@ -324,7 +324,7 @@
         },
         {
           "type": "text",
-          "content": "0330 133 2497  •  info@crgdirect.co.uk  •  crgdirect.co.uk",
+          "content": "0330 000 0000  •  info@beacon-renewables.example  •  beacon-renewables.example",
           "x": 50,
           "y": 582,
           "font_size": 10,

@@ -1,13 +1,13 @@
-# CRG Direct Proposal System
+# Beacon Renewables Proposal System
 
 ## Overview
 
-The proposal system generates branded PDF quotes for CRG Direct's solar, battery, heat pump, and EV charger installations. It produces professional multi-page PDFs with auto-layout, QR codes linking to the customer dashboard, and product-specific detail sections.
+The proposal system generates branded PDF quotes for Beacon Renewables's solar, battery, heat pump, and EV charger installations. It produces professional multi-page PDFs with auto-layout, QR codes linking to the customer dashboard, and product-specific detail sections.
 
 The system has three parts:
 
 1. **PDF Generator** (`src/proposal.zig`) — Zig binary that takes structured JSON and produces a PDF
-2. **Product Database** (`templates/crg_product_database.json`) — Catalogue of products, pricing, and pre-written proposal sections
+2. **Product Database** (`templates/beacon_product_database.json`) — Catalogue of products, pricing, and pre-written proposal sections
 3. **Svelte Admin UI** (to be built) — Web interface where admins build proposals by selecting products
 
 ## Architecture
@@ -21,7 +21,7 @@ Svelte Admin UI                    PDF Generator Binary
      |                                    |
      v                                    |
 Product Database -----> Proposal JSON -----> proposal.zig -----> PDF bytes
-(crg_product_database.json)                                        |
+(beacon_product_database.json)                                        |
                                                                    v
                                                            Customer Dashboard
                                                            (view quote, accept)
@@ -33,12 +33,12 @@ The PDF generator accepts a single JSON object. Every field has a sensible defau
 
 ```json
 {
-  "company_name": "CRG Direct",
+  "company_name": "Beacon Renewables",
   "company_address": "Unit 7 Solent Business Park, Fareham, Hampshire PO15 7FH",
   "company_logo_base64": null,
   "client_name": "Mr & Mrs Johnson",
   "client_address": "42 Oak Lane\nSouthampton\nSO16 3QR",
-  "reference": "CRG-2026-00123",
+  "reference": "Beacon-2026-00123",
   "date": "8 February 2026",
   "valid_until": "10 March 2026",
   "primary_color": "#16a34a",
@@ -46,10 +46,10 @@ The PDF generator accepts a single JSON object. Every field has a sensible defau
   "property_image_base64": null,
   "footer": {
     "phone": "01329 800 123",
-    "email": "info@crgdirect.co.uk",
-    "website": "www.crgdirect.co.uk",
-    "dashboard_text": "Sign in to your CRG Direct dashboard at dashboard.crgdirect.co.uk to view your quote, track progress and manage your installation.",
-    "dashboard_url": "https://dashboard.crgdirect.co.uk/quotes/CRG-2026-00123"
+    "email": "info@beacon-renewables.example",
+    "website": "www.beacon-renewables.example",
+    "dashboard_text": "Sign in to your Beacon Renewables dashboard at dashboard.beacon-renewables.example to view your quote, track progress and manage your installation.",
+    "dashboard_url": "https://dashboard.beacon-renewables.example/quotes/Beacon-2026-00123"
   },
   "sections": []
 }
@@ -67,7 +67,7 @@ The PDF generator accepts a single JSON object. Every field has a sensible defau
 | `reference` | string | Yes | Quote reference number |
 | `date` | string | Yes | Quote date |
 | `valid_until` | string | No | Expiry date |
-| `primary_color` | hex string | No | Default `#16a34a` (CRG green) |
+| `primary_color` | hex string | No | Default `#16a34a` (Beacon green) |
 | `secondary_color` | hex string | No | Default `#1e3a2f` (dark green) |
 | `property_image_base64` | string | No | Base64 satellite/solar API image, centered in header |
 | `footer.phone` | string | No | Footer contact bar |
@@ -139,7 +139,7 @@ The `sections` array contains an ordered list of sections. Each section has a `t
 
 ## Product Database
 
-`templates/crg_product_database.json` contains all CRG Direct products. Structure:
+`templates/beacon_product_database.json` contains all Beacon Renewables products. Structure:
 
 ```
 categories
@@ -185,7 +185,7 @@ bundles
    - Grants section: if applicable, include the grant's `proposal_section`
    - Final section: "What Happens Next" (standard template, admin can edit)
 6. **Calculate totals**: sum all `table_item.total` values for subtotal. Apply tax rate if needed. Include grant deductions.
-7. **Set dashboard_url**: `https://dashboard.crgdirect.co.uk/quotes/{reference}` — this becomes the QR code
+7. **Set dashboard_url**: `https://dashboard.beacon-renewables.example/quotes/{reference}` — this becomes the QR code
 8. **POST the complete JSON** to the PDF generator API endpoint
 9. **Store the JSON** in the database against the quote reference for the customer dashboard
 
@@ -200,7 +200,7 @@ These are larger packages with multiple product categories. A typical Warm Home 
 5. About Your Battery Storage (text — from product database)
 6. About Your Air Source Heat Pump (text — from product database)
 7. Warm Home: Local Grant Scheme (text — from product database)
-8. Why Choose CRG Direct? (text — standard template)
+8. Why Choose Beacon Renewables? (text — standard template)
 9. What Happens Next (text — standard template)
 
 ## CLI Usage
@@ -209,7 +209,7 @@ These are larger packages with multiple product categories. A typical Warm Home 
 # Generate from JSON file
 pdf-gen --proposal input.json output.pdf
 
-# Generate demo (built-in CRG solar+battery example)
+# Generate demo (built-in Beacon solar+battery example)
 pdf-gen --demo-proposal output.pdf
 ```
 

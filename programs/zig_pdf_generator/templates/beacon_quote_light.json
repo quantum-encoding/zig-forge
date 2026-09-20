@@ -24,7 +24,7 @@
         },
         {
           "type": "text",
-          "content": "CRG",
+          "content": "Beacon",
           "x": 110,
           "y": 48,
           "font_size": 28,
@@ -60,7 +60,7 @@
         },
         {
           "type": "text",
-          "content": "CRG-2026-00847",
+          "content": "Beacon-2026-00847",
           "x": 792,
           "y": 55,
           "font_size": 12,
@@ -617,7 +617,7 @@
         },
         {
           "type": "text",
-          "content": "0330 133 2497",
+          "content": "0330 000 0000",
           "x": 713,
           "y": 538,
           "font_size": 12,
@@ -668,7 +668,7 @@
         },
         {
           "type": "text",
-          "content": "CRG",
+          "content": "Beacon",
           "x": 95,
           "y": 35,
           "font_size": 20,
@@ -886,7 +886,7 @@
         },
         {
           "type": "text",
-          "content": "Page 2 of 3  -  0330 133 2497  -  info@crgdirect.co.uk  -  crgdirect.co.uk",
+          "content": "Page 2 of 3  -  0330 000 0000  -  info@beacon-renewables.example  -  beacon-renewables.example",
           "x": 421,
           "y": 582,
           "font_size": 9,
@@ -918,7 +918,7 @@
         },
         {
           "type": "text",
-          "content": "CRG",
+          "content": "Beacon",
           "x": 95,
           "y": 35,
           "font_size": 20,
@@ -1061,7 +1061,7 @@
         },
         {
           "type": "text",
-          "content": "Ready to proceed?  0330 133 2497",
+          "content": "Ready to proceed?  0330 000 0000",
           "x": 645,
           "y": 520,
           "font_size": 11,
@@ -1101,7 +1101,7 @@
         },
         {
           "type": "text",
-          "content": "Quote valid 30 days  -  CRG-2026-00847  -  MCS Certified  -  Which? Trusted Trader",
+          "content": "Quote valid 30 days  -  Beacon-2026-00847  -  MCS Certified  -  Which? Trusted Trader",
           "x": 421,
           "y": 582,
           "font_size": 9,

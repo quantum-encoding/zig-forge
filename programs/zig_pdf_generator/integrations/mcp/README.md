@@ -37,7 +37,7 @@ Optional env: `PDF_GEN_BIN` (binary path), `PDF_OUT_DIR` (default `~/Documents/g
 
 ## Example (what Claude does)
 
-> "Make CRG a £4,040 invoice with the squircle theme and export it"
+> "Make Beacon a £4,040 invoice with the squircle theme and export it"
 
 Claude calls `get_pdf_schema {template: "invoice"}`, builds the payload, calls
 `generate_pdf`, and tells you where the PDF landed. Strict fail-fast schema

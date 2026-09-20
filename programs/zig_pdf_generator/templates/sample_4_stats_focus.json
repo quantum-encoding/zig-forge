@@ -15,7 +15,7 @@
         },
         {
           "type": "text",
-          "content": "CRG",
+          "content": "Beacon",
           "x": 50,
           "y": 42,
           "font_size": 22,
@@ -41,7 +41,7 @@
         },
         {
           "type": "text",
-          "content": "Quote CRG-2026-00847  •  1st February 2026",
+          "content": "Quote Beacon-2026-00847  •  1st February 2026",
           "x": 792,
           "y": 42,
           "font_size": 10,
@@ -50,7 +50,7 @@
         },
         {
           "type": "text",
-          "content": "0330 133 2497",
+          "content": "0330 000 0000",
           "x": 792,
           "y": 58,
           "font_size": 11,
@@ -276,7 +276,7 @@
         },
         {
           "type": "text",
-          "content": "Why Choose CRG Direct?",
+          "content": "Why Choose Beacon Renewables?",
           "x": 432,
           "y": 360,
           "font_size": 18,
@@ -365,7 +365,7 @@
         },
         {
           "type": "text",
-          "content": "Ready to proceed? Call 0330 133 2497 or email info@crgdirect.co.uk",
+          "content": "Ready to proceed? Call 0330 000 0000 or email info@beacon-renewables.example",
           "x": 421,
           "y": 575,
           "font_size": 14,

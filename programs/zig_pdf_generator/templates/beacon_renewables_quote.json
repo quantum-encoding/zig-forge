@@ -37,7 +37,7 @@
         },
         {
           "type": "text",
-          "content": "CRG",
+          "content": "Beacon",
           "x": 60,
           "y": 80,
           "font_size": 48,
@@ -166,7 +166,7 @@
         },
         {
           "type": "text",
-          "content": "CRG-2026-00847",
+          "content": "Beacon-2026-00847",
           "x": 515,
           "y": 355,
           "font_size": 16,
@@ -268,7 +268,7 @@
         },
         {
           "type": "text",
-          "content": "crgdirect.co.uk  |  0800 123 4567  |  hello@crgdirect.co.uk",
+          "content": "beacon-renewables.example  |  0800 123 4567  |  hello@beacon-renewables.example",
           "x": 60,
           "y": 555,
           "font_size": 12,
@@ -299,7 +299,7 @@
         },
         {
           "type": "text",
-          "content": "CRG DIRECT",
+          "content": "BEACON RENEWABLES",
           "x": 60,
           "y": 33,
           "font_size": 14,
@@ -317,7 +317,7 @@
         },
         {
           "type": "text",
-          "content": "Why CRG Direct?",
+          "content": "Why Beacon Renewables?",
           "x": 60,
           "y": 95,
           "font_size": 26,
@@ -620,7 +620,7 @@
         },
         {
           "type": "text",
-          "content": "CRG DIRECT",
+          "content": "BEACON RENEWABLES",
           "x": 60,
           "y": 33,
           "font_size": 14,
@@ -853,7 +853,7 @@
         },
         {
           "type": "text",
-          "content": "CRG DIRECT",
+          "content": "BEACON RENEWABLES",
           "x": 60,
           "y": 33,
           "font_size": 14,
@@ -1017,7 +1017,7 @@
         },
         {
           "type": "text",
-          "content": "CRG DIRECT",
+          "content": "BEACON RENEWABLES",
           "x": 60,
           "y": 33,
           "font_size": 14,
@@ -1187,7 +1187,7 @@
         },
         {
           "type": "text",
-          "content": "I/We accept this quotation and authorise CRG Direct to proceed with the installation as described.",
+          "content": "I/We accept this quotation and authorise Beacon Renewables to proceed with the installation as described.",
           "x": 80,
           "y": 305,
           "font_size": 10,
@@ -1236,7 +1236,7 @@
         },
         {
           "type": "text",
-          "content": "CRG DIRECT LTD",
+          "content": "BEACON RENEWABLES LTD",
           "x": 60,
           "y": 470,
           "font_size": 14,
@@ -1261,7 +1261,7 @@
         },
         {
           "type": "text",
-          "content": "Tel: 0800 123 4567  |  Email: hello@crgdirect.co.uk  |  Web: crgdirect.co.uk",
+          "content": "Tel: 0800 123 4567  |  Email: hello@beacon-renewables.example  |  Web: beacon-renewables.example",
           "x": 60,
           "y": 535,
           "font_size": 10,

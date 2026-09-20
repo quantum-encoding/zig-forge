@@ -64,7 +64,7 @@ export function QuoteGenerator() {
       name: 'Mr & Mrs Johnson',
       address: '42 Oak Lane, Southampton'
     },
-    quoteRef: 'CRG-2026-00847',
+    quoteRef: 'Beacon-2026-00847',
     date: '1st February 2026',
     validUntil: '1st March 2026',
     advisor: 'James Mitchell',

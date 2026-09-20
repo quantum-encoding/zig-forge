@@ -1,11 +1,11 @@
-# CRG Solar Proposal — faithful 20-page reproduction
+# Beacon Solar Proposal — faithful 20-page reproduction
 
-A pixel-faithful reproduction of CRG Direct's genuine solar proposal
-(`crgdirect.co.uk/example-solar-proposal.pdf`, originally rendered by dompdf
+A pixel-faithful reproduction of Beacon Renewables's genuine solar proposal
+(`beacon-renewables.example/example-solar-proposal.pdf`, originally rendered by dompdf
 2.0.1) built with the in-tree **`presentation`** (canvas) renderer of
 `zig_pdf_generator`.
 
-Unlike the other `crg_*.json` templates here — which use the flowing
+Unlike the other `beacon_*.json` templates here — which use the flowing
 `clean_quote`/`proposal_legacy` "sections" schema and can only produce a single
 branded quote page — this one uses the absolute-positioned canvas so it can
 match the real report: a full-bleed cover, embedded datasheet images, grey/blue
@@ -14,21 +14,21 @@ accreditation logo strip, and the MD's signature.
 
 ## Two ways to generate — use the Zig-native one
 
-**1. Zig-native (primary).** The layout is ported to `src/crg_solar_report.zig`,
+**1. Zig-native (primary).** The layout is ported to `src/beacon_solar_report.zig`,
 which takes a small **`CrgQuote`** JSON (the ~28 per-lead fields) and emits the
 20-page PDF directly — no template JSON, no Python at deploy. The 12 brand assets
-are `@embedFile`d from `src/crg_assets/`, so the module is self-contained. This
+are `@embedFile`d from `src/beacon_assets/`, so the module is self-contained. This
 is what the website should call.
 
 ```bash
 cd ../..                                             # programs/zig_pdf_generator
 echo '{"client":"Joe Bloggs","kw":"4.92","total_price":"7,430"}' > quote.json
-zig-out/bin/pdf-gen --crg-report quote.json out.pdf  # omitted fields use the sample
+zig-out/bin/pdf-gen --beacon-report quote.json out.pdf  # omitted fields use the sample
 ```
 
 Every field has a sensible default (the "Joe Bloggs / 4.92 kW / £7,430" sample),
 so `{}` renders the sample and a partial object overrides only what it sets. The
-full field list is the `CrgQuote` struct in `src/crg_solar_report.zig`: `ref`,
+full field list is the `CrgQuote` struct in `src/beacon_solar_report.zig`: `ref`,
 `client`, `address`, `postcode`, `date`, `kw`, `annual_saving`, `total_price`,
 `net_price`, `total_price_dec`, `lifetime_saving`, `panel_count`, `panel_model`,
 `panel_model_raw`, `panel_watt`, `battery`, `battery_kwh`, `inverter`,
@@ -41,11 +41,11 @@ port was verified against. Kept for reference and quick visual iteration; not
 used at deploy.
 
 ```bash
-python3 build_report.py                                   # -> crg_solar_report.json
-../../zig-out/bin/pdf-gen --presentation crg_solar_report.json crg_solar_report.pdf
+python3 build_report.py                                   # -> beacon_solar_report.json
+../../zig-out/bin/pdf-gen --presentation beacon_solar_report.json beacon_solar_report.pdf
 ```
 
-> **Verified:** `--crg-report {}` is **byte-identical** (same SHA-256) to the
+> **Verified:** `--beacon-report {}` is **byte-identical** (same SHA-256) to the
 > Python builder's output. The port also fixed a latent Python typo (`0%%`/`100%%`
 > → `0%`/`100%` on page 11) so both now match the real reference.
 >
@@ -68,7 +68,7 @@ Then, with the bundled loader (`zigpdf_web.js`):
 ```js
 import { loadZigPdf } from './zigpdf_web.js';
 const pdf = await loadZigPdf('/zigpdf_web.wasm');
-const bytes = pdf.crgReport(JSON.stringify(quote));   // Uint8Array (%PDF…)
+const bytes = pdf.beaconReport(JSON.stringify(quote));   // Uint8Array (%PDF…)
 ```
 
 Then drive it with the bundled loader (`zigpdf_web.js`):
@@ -81,11 +81,11 @@ preview. `zigpdf_web.js` also exposes `presentation`, `invoice`, `proposal`,
 > `src/wasm.zig` pulls in the PDF extractor + path-based image loading, which
 > don't compile for `wasm32-freestanding`). `image.zig`'s filesystem image path
 > is compiled out on freestanding. Both roots export
-> `zigpdf_generate_crg_solar_report`.
+> `zigpdf_generate_beacon_solar_report`.
 
 ## Layout approach
 
-The Zig module (`src/crg_solar_report.zig`) is a faithful port of `build_report.py`:
+The Zig module (`src/beacon_solar_report.zig`) is a faithful port of `build_report.py`:
 
 - A4 canvas (595.28 × 841.89 pt), top-left origin; layout maths in `f64`.
 - Paragraphs are word-wrapped against an embedded Helvetica/Helvetica-Bold AFM
@@ -98,7 +98,7 @@ The Zig module (`src/crg_solar_report.zig`) is a faithful port of `build_report.
   left-aligned at a precomputed x, because the engine's own `measureTextWidth`
   mis-centres long strings.
 
-## Assets (`../../src/crg_assets/`)
+## Assets (`../../src/beacon_assets/`)
 
 Canonical under the generator's `src/` so the Zig module can `@embedFile` them
 (and so they ship inside the WASM). Extracted from the reference PDF with
@@ -113,7 +113,7 @@ it is placed full-bleed with no overlays.
 | `quote_photo.jpg` | page-3 install photo |
 | `medal.png` | page-4 "good hands" ribbon |
 | `reviews.jpg` | page-4 Google-reviews screenshot |
-| `logo.png` | CRG SOLAR logo (details page) |
+| `logo.png` | Beacon SOLAR logo (details page) |
 | `accreditation.png` | MCS/HIES/NICEIC/TRUSTMARK/Trustpilot strip |
 | `canadian1.jpg`, `canadian2.jpg` | Canadian Solar datasheets |
 | `sunsynk_inverter.jpg` | Sunsynk inverter datasheet |
@@ -140,5 +140,5 @@ Reproducing an image-heavy document surfaced three real bugs in
 
 ## Note
 
-The reference cover, datasheets, reviews screenshot and signature are CRG Direct
-brand assets reproduced here for CRG Direct's own proposal tooling.
+The reference cover, datasheets, reviews screenshot and signature are Beacon Renewables
+brand assets reproduced here for Beacon Renewables's own proposal tooling.

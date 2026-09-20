@@ -245,7 +245,7 @@ pub const all_templates = [_]Template{
         .description = "Social media post",
         .category = .business,
     },
-    // -- Construction (CRG Direct) --
+    // -- Construction (Beacon Renewables) --
     .{
         .name = "painting",
         .prefix = "INTERIOR HOUSE PAINTING:",

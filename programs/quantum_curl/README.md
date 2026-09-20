@@ -335,22 +335,22 @@ Failed requests are automatically retried with exponential backoff:
 - Backoff formula: `100ms * 2^attempt`
 - Example: 100ms, 200ms, 400ms, 800ms, 1600ms...
 
-## Real-World Testing: CRG Direct SvelteKit
+## Real-World Testing: Beacon Renewables SvelteKit
 
-The `examples/` directory includes battle-tested JSONL files for the [CRG Direct](https://crg-direct-sveltekit--quantum-encoding-v3.europe-west4.hosted.app/) production SvelteKit deployment.
+The `examples/` directory includes battle-tested JSONL files for the [Beacon Renewables](https://beacon-renewables.example/) production SvelteKit deployment.
 
 ### Route Coverage Test
 
 Hits every public route once to verify zero 404s after a deployment:
 
 ```bash
-quantum-curl --file examples/crg-route-test.jsonl --concurrency 10
+quantum-curl --file examples/beacon-route-test.jsonl --concurrency 10
 ```
 
 **56 endpoints** tested — public pages, service pages, auth flows, sitemap, and a deliberate 404 control. Pipe through `jq` to flag failures:
 
 ```bash
-quantum-curl --file examples/crg-route-test.jsonl --concurrency 10 \
+quantum-curl --file examples/beacon-route-test.jsonl --concurrency 10 \
   | jq -c 'select(.status >= 400 and .id != "route-056-expect-404")'
 ```
 
@@ -361,7 +361,7 @@ If that outputs nothing, the deploy is clean.
 Hammers the homepage with concurrent requests to check cold-start and throughput:
 
 ```bash
-quantum-curl --file examples/crg-stress-test.jsonl --concurrency 50
+quantum-curl --file examples/beacon-stress-test.jsonl --concurrency 50
 ```
 
 ### Example Results (europe-west4, Cloud Run)

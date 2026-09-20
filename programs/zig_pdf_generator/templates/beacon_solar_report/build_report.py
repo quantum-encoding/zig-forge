@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Build a faithful 20-page CRG Solar Proposal as a `presentation`-schema JSON
+Build a faithful 20-page Beacon Solar Proposal as a `presentation`-schema JSON
 for the Zig PDF generator (`pdf-gen --presentation <this.json> out.pdf`).
 
-The reference is crgdirect.co.uk/example-solar-proposal.pdf (dompdf 2.0.1).
+The reference is beacon-renewables.example/example-solar-proposal.pdf (dompdf 2.0.1).
 We reproduce it on an A4 canvas with absolute-positioned text/tables/images.
 
 Data-driven: the QUOTE dict at the bottom holds every customer/system value,
@@ -15,7 +15,7 @@ import base64, json, math, pathlib
 HERE = pathlib.Path(__file__).parent
 # Brand assets are canonical under the generator's src/ (so the Zig module can
 # @embedFile them); this builder reads the same copy.
-ASSETS = HERE.parent.parent / "src" / "crg_assets"
+ASSETS = HERE.parent.parent / "src" / "beacon_assets"
 
 # ---- A4 canvas (points, top-left origin) -----------------------------------
 PW, PH = 595.28, 841.89
@@ -276,7 +276,7 @@ def page_intro(q):
     p = Page()
     p.heading("Introduction", gap_after=6)
     p.y = 430
-    p.para("Welcome to CRG Direct. Here’s your bespoke solar quote. In this "
+    p.para("Welcome to Beacon Renewables. Here’s your bespoke solar quote. In this "
            "quote, you’ll find the cost of your system, your estimated savings "
            "using MCS calculations, and more information about your recommended "
            "solar system.", size=16, lh=1.28, gap_after=26)
@@ -284,7 +284,7 @@ def page_intro(q):
     colw = (CW - 30) / 2
     # left column
     p.y = top
-    p.para("At CRG Direct, we believe in delivering quality service that goes "
+    p.para("At Beacon Renewables, we believe in delivering quality service that goes "
            "above and beyond for our customers. Our dedicated team works "
            "tirelessly to ensure that every installation is done efficiently and "
            "with the utmost care. We understand the importance of clear "
@@ -298,10 +298,10 @@ def page_intro(q):
     # right column
     p.y = top
     rx = ML + colw + 30
-    p.para("If you are considering CRG Direct for your next project, we encourage "
-           "you to visit our website at www.crgdirect.co.uk for more information. "
+    p.para("If you are considering Beacon Renewables for your next project, we encourage "
+           "you to visit our website at www.beacon-renewables.example for more information. "
            "And remember, if you have any questions at all, our friendly team is "
-           "always here to help. Thank you for considering CRG Direct for your "
+           "always here to help. Thank you for considering Beacon Renewables for your "
            "solar and home improvement needs.", size=9.5, x=rx, maxw=colw)
     return p
 
@@ -385,20 +385,20 @@ def page_details(q):
     p.heading("Details & Info", gap_after=10)
     p.image("logo.png", PW - MR - 150, 34, 150, 65)
     p.gap(4)
-    p.text(ML, p.y, "CRG Direct Ltd", size=10.5, color=GREEN); p.gap(22)
+    p.text(ML, p.y, "Beacon Renewables Ltd", size=10.5, color=GREEN); p.gap(22)
     p.text(ML, p.y, "Integrated Management System", size=10.5, color=GREEN); p.gap(24)
     rows = [
         ("Document Title :", "Customer Quote"),
         ("Ref. No. :", q["ref"]),
         ("Next Review Date :", "One Year"),
-        ("MCS Accredited Company:", "CRG DIRECT LTD"),
+        ("MCS Accredited Company:", "BEACON RENEWABLES LTD"),
         ("MCS Accredited Number", "NIC600310(Company Registration Number: 10546909)"),
-        ("Registered Office Address:", "Wey Court West Union Road, Farnham, GU9 7PT"),
-        ("Principal Trading Address:", "172 Sea Front Hayling Island PO11 9HP"),
-        ("Contact Details:", "Tel: 0330 133 2497/07955568287\nadmin@crgdirect.co.uk"),
-        ("Website:", "www.crgdirect.co.uk"),
-        ("HIES Membership Number:", "CRG/A/088"),
-        ("MCS Accredited Company:", "CRG DIRECT LTD"),
+        ("Registered Office Address:", "1 Example Way, Testerton, EX1 2MP"),
+        ("Principal Trading Address:", "2 Sample Street, Demoford, DE1 4MO"),
+        ("Contact Details:", "Tel: 0330 000 0000/07700900123\nhello@beacon-renewables.example"),
+        ("Website:", "www.beacon-renewables.example"),
+        ("HIES Membership Number:", "Beacon/A/088"),
+        ("MCS Accredited Company:", "BEACON RENEWABLES LTD"),
         ("Trustmark", "2855428"),
         ("MCS Certification Number:", "NIC600310"),
         ("Project Reference:", q["ref"]),
@@ -547,7 +547,7 @@ def page_price(q):
     p.text(ML + 300, p.y, "Sort Code", size=9.5); p.text(ML + 375, p.y, "52-41-20", size=9.5)
     p.gap(24)
     p.text(ML, p.y, "Account", size=9.5); p.text(ML, p.y + 11, "Name", size=9.5)
-    p.text(ML + 70, p.y, "CRG Direct Ltd", size=9.5)
+    p.text(ML + 70, p.y, "Beacon Renewables Ltd", size=9.5)
     p.text(ML + 300, p.y, "Account", size=9.5); p.text(ML + 300, p.y + 11, "No.", size=9.5)
     p.text(ML + 375, p.y, "43634435", size=9.5)
     p.gap(24)
@@ -1266,7 +1266,7 @@ def main():
     ps = [b(QUOTE) for b in ALL_BUILDERS]
     doc = {"page_size": {"width": PW, "height": PH},
            "pages": [p.dict() for p in ps]}
-    out = HERE / "crg_solar_report.json"
+    out = HERE / "beacon_solar_report.json"
     out.write_text(json.dumps(doc))
     print("wrote %s  (%d pages, %.2f MB)" %
           (out, len(ps), out.stat().st_size / 1048576))

@@ -9,7 +9,7 @@
 //! - table: Itemized table with header, alternating rows, totals, optional notes
 //!
 //! Architecture follows contract.zig (auto-layout with checkPageBreak) but
-//! with richer section types and CRG Direct branding support.
+//! with richer section types and Beacon Renewables branding support.
 //!
 //! Supports property_image_base64 for satellite/solar API imagery.
 
@@ -1604,21 +1604,21 @@ pub fn generateProposalFromJson(allocator: std.mem.Allocator, json_str: []const 
 pub fn generateDemoProposal(allocator: std.mem.Allocator) ![]u8 {
     const demo_json =
         \\{
-        \\  "company_name": "CRG Direct",
+        \\  "company_name": "Beacon Renewables",
         \\  "company_address": "Unit 7 Solent Business Park, Fareham, Hampshire PO15 7FH",
         \\  "client_name": "Mr & Mrs Johnson",
         \\  "client_address": "42 Oak Lane\nSouthampton\nSO16 3QR",
-        \\  "reference": "CRG-2026-00123",
+        \\  "reference": "Beacon-2026-00123",
         \\  "date": "8 February 2026",
         \\  "valid_until": "10 March 2026",
         \\  "primary_color": "#16a34a",
         \\  "secondary_color": "#1e3a2f",
         \\  "footer": {
         \\    "phone": "01329 800 123",
-        \\    "email": "info@crgdirect.co.uk",
-        \\    "website": "www.crgdirect.co.uk",
-        \\    "dashboard_text": "Sign in to your CRG Direct dashboard at dashboard.crgdirect.co.uk to view your quote, track progress and manage your installation.",
-        \\    "dashboard_url": "https://dashboard.crgdirect.co.uk/quotes/CRG-2026-00123"
+        \\    "email": "info@beacon-renewables.example",
+        \\    "website": "www.beacon-renewables.example",
+        \\    "dashboard_text": "Sign in to your Beacon Renewables dashboard at dashboard.beacon-renewables.example to view your quote, track progress and manage your installation.",
+        \\    "dashboard_url": "https://dashboard.beacon-renewables.example/quotes/Beacon-2026-00123"
         \\  },
         \\  "sections": [
         \\    {
@@ -1662,13 +1662,13 @@ pub fn generateDemoProposal(allocator: std.mem.Allocator) ![]u8 {
         \\    },
         \\    {
         \\      "type": "text",
-        \\      "heading": "Why Choose CRG Direct?",
-        \\      "content": "CRG Direct has been installing solar and renewable energy systems across Hampshire and the South Coast since 2018. Every installation is completed by MCS-certified engineers to the highest industry standards.\n\n- Over 1,200 residential solar installations completed\n- Average customer saves 65% on electricity bills in year one\n- All systems remotely monitored with proactive maintenance alerts\n- 10-year workmanship warranty backed by insurance-backed guarantee\n- Finance options available from 0% APR (subject to status)\n- Rated 4.9/5 on Trustpilot with over 400 verified reviews\n\nRecent case study: A 4-bedroom detached property in Eastleigh with a similar 4.2kWp system achieved 4,100 kWh generation in its first year, exceeding projected output by 8%. The homeowner reported electricity bills reduced from \u00a3180/month to \u00a362/month."
+        \\      "heading": "Why Choose Beacon Renewables?",
+        \\      "content": "Beacon Renewables has been installing solar and renewable energy systems across Hampshire and the South Coast since 2018. Every installation is completed by MCS-certified engineers to the highest industry standards.\n\n- Over 1,200 residential solar installations completed\n- Average customer saves 65% on electricity bills in year one\n- All systems remotely monitored with proactive maintenance alerts\n- 10-year workmanship warranty backed by insurance-backed guarantee\n- Finance options available from 0% APR (subject to status)\n- Rated 4.9/5 on Trustpilot with over 400 verified reviews\n\nRecent case study: A 4-bedroom detached property in Eastleigh with a similar 4.2kWp system achieved 4,100 kWh generation in its first year, exceeding projected output by 8%. The homeowner reported electricity bills reduced from \u00a3180/month to \u00a362/month."
         \\    },
         \\    {
         \\      "type": "text",
         \\      "heading": "What Happens Next",
-        \\      "content": "Getting started with your solar installation is simple:\n\n- Review this quote and choose your preferred system configuration\n- Accept your quote online via your CRG Direct dashboard\n- We arrange a technical site survey to confirm system design (free of charge)\n- We handle all DNO applications and approvals on your behalf (typically 4-6 weeks)\n- Installation completed in 1-2 days with minimal disruption to your home\n- Full commissioning, testing and handover including monitoring app setup\n\nYour quote is saved to your CRG Direct dashboard where you can review it at any time, ask questions, and track the progress of your installation once you proceed.\n\nQuestions? Call us on 01329 800 123 or email info@crgdirect.co.uk. We are always happy to help."
+        \\      "content": "Getting started with your solar installation is simple:\n\n- Review this quote and choose your preferred system configuration\n- Accept your quote online via your Beacon Renewables dashboard\n- We arrange a technical site survey to confirm system design (free of charge)\n- We handle all DNO applications and approvals on your behalf (typically 4-6 weeks)\n- Installation completed in 1-2 days with minimal disruption to your home\n- Full commissioning, testing and handover including monitoring app setup\n\nYour quote is saved to your Beacon Renewables dashboard where you can review it at any time, ask questions, and track the progress of your installation once you proceed.\n\nQuestions? Call us on 01329 800 123 or email info@beacon-renewables.example. We are always happy to help."
         \\    }
         \\  ]
         \\}

@@ -1,15 +1,15 @@
 /**
- * CRG Direct Quote PDF Generator
+ * Beacon Renewables Quote PDF Generator
  *
  * Generates JSON templates for the ZigPDF presentation engine.
  * Use with the zigpdf WASM module to produce professional quote PDFs.
  *
  * Usage:
- *   import { generateQuoteTemplate, generateQuotePdf } from './crg-quote-generator.js';
+ *   import { generateQuoteTemplate, generateQuotePdf } from './beacon-quote-generator.js';
  *
  *   const quoteData = {
  *     customer: { name: 'Mr & Mrs Johnson', address: '42 Oak Lane, Southampton' },
- *     quoteRef: 'CRG-2026-00847',
+ *     quoteRef: 'Beacon-2026-00847',
  *     // ... see QuoteData type below
  *   };
  *
@@ -90,12 +90,12 @@
 // ============================================================================
 
 const DEFAULT_COMPANY = {
-  name: 'CRG DIRECT',
-  legalName: 'CRG DIRECT LTD',
+  name: 'BEACON RENEWABLES',
+  legalName: 'BEACON RENEWABLES LTD',
   address: 'Unit 7, Solent Business Park, Whiteley, Hampshire PO15 7FJ',
   phone: '0800 123 4567',
-  email: 'hello@crgdirect.co.uk',
-  website: 'crgdirect.co.uk',
+  email: 'hello@beacon-renewables.example',
+  website: 'beacon-renewables.example',
   companyReg: '12345678',
   vatNumber: 'GB 123 4567 89',
   mcsNumber: 'NAP-12345',
@@ -103,7 +103,7 @@ const DEFAULT_COMPANY = {
 
   // Brand colors
   colors: {
-    primary: '#10B981',      // CRG Green
+    primary: '#10B981',      // Beacon Green
     primaryDark: '#059669',
     primaryDarker: '#047857',
     primaryDarkest: '#065F46',
@@ -197,7 +197,7 @@ function generateCoverPage(data, company, colors) {
       { type: 'shape', shape: 'line', x: 60, y: 140, width: 100, height: 0, stroke_color: colors.primary, stroke_width: 4 },
 
       // Company name
-      { type: 'text', content: 'CRG', x: 60, y: 80, font_size: 48, font_weight: 'bold', color: colors.primary },
+      { type: 'text', content: 'Beacon', x: 60, y: 80, font_size: 48, font_weight: 'bold', color: colors.primary },
       { type: 'text', content: 'DIRECT', x: 155, y: 80, font_size: 48, font_weight: 'bold', color: colors.white },
       { type: 'text', content: 'RENEWABLE ENERGY SOLUTIONS', x: 60, y: 115, font_size: 14, color: colors.accent, font_weight: 'bold' },
 
@@ -251,11 +251,11 @@ function generateWhyUsPage(data, company, colors) {
     elements: [
       // Header bar
       { type: 'shape', shape: 'rectangle', x: 0, y: 0, width: 842, height: 55, fill_color: colors.dark },
-      { type: 'text', content: 'CRG DIRECT', x: 60, y: 33, font_size: 14, font_weight: 'bold', color: colors.primary },
+      { type: 'text', content: 'BEACON RENEWABLES', x: 60, y: 33, font_size: 14, font_weight: 'bold', color: colors.primary },
       { type: 'text', content: 'Why Choose Us', x: 782, y: 33, font_size: 11, color: colors.accent, align: 'right' },
 
       // Section title
-      { type: 'text', content: 'Why CRG Direct?', x: 60, y: 95, font_size: 26, font_weight: 'bold', color: colors.dark },
+      { type: 'text', content: 'Why Beacon Renewables?', x: 60, y: 95, font_size: 26, font_weight: 'bold', color: colors.dark },
       { type: 'shape', shape: 'line', x: 60, y: 108, width: 60, height: 0, stroke_color: colors.primary, stroke_width: 3 },
       { type: 'text', content: "Hampshire's trusted renewable energy experts. We've helped over 2,500 homeowners reduce their energy bills and carbon footprint with quality solar, battery, and heat pump installations.", x: 60, y: 135, font_size: 11, color: colors.darkLight, max_width: 360 },
 
@@ -306,7 +306,7 @@ function generateSystemPage(data, company, colors) {
   const elements = [
     // Header bar
     { type: 'shape', shape: 'rectangle', x: 0, y: 0, width: 842, height: 55, fill_color: colors.dark },
-    { type: 'text', content: 'CRG DIRECT', x: 60, y: 33, font_size: 14, font_weight: 'bold', color: colors.primary },
+    { type: 'text', content: 'BEACON RENEWABLES', x: 60, y: 33, font_size: 14, font_weight: 'bold', color: colors.primary },
     { type: 'text', content: 'Your System', x: 782, y: 33, font_size: 11, color: colors.accent, align: 'right' },
 
     // Section title
@@ -399,7 +399,7 @@ function generateInvestmentPage(data, company, colors) {
     elements: [
       // Header bar
       { type: 'shape', shape: 'rectangle', x: 0, y: 0, width: 842, height: 55, fill_color: colors.dark },
-      { type: 'text', content: 'CRG DIRECT', x: 60, y: 33, font_size: 14, font_weight: 'bold', color: colors.primary },
+      { type: 'text', content: 'BEACON RENEWABLES', x: 60, y: 33, font_size: 14, font_weight: 'bold', color: colors.primary },
       { type: 'text', content: 'Investment & Savings', x: 782, y: 33, font_size: 11, color: colors.accent, align: 'right' },
 
       // Section title
@@ -455,7 +455,7 @@ function generateAcceptancePage(data, company, colors) {
     elements: [
       // Header bar
       { type: 'shape', shape: 'rectangle', x: 0, y: 0, width: 842, height: 55, fill_color: colors.dark },
-      { type: 'text', content: 'CRG DIRECT', x: 60, y: 33, font_size: 14, font_weight: 'bold', color: colors.primary },
+      { type: 'text', content: 'BEACON RENEWABLES', x: 60, y: 33, font_size: 14, font_weight: 'bold', color: colors.primary },
       { type: 'text', content: 'Accept & Proceed', x: 782, y: 33, font_size: 11, color: colors.accent, align: 'right' },
 
       // Section title
@@ -485,7 +485,7 @@ function generateAcceptancePage(data, company, colors) {
       // Acceptance box
       { type: 'shape', shape: 'rectangle', x: 60, y: 255, width: 722, height: 165, fill_color: colors.background, stroke_color: colors.dark, stroke_width: 2 },
       { type: 'text', content: 'ACCEPTANCE', x: 80, y: 280, font_size: 14, font_weight: 'bold', color: colors.dark },
-      { type: 'text', content: 'I/We accept this quotation and authorise CRG Direct to proceed with the installation as described.', x: 80, y: 305, font_size: 10, color: colors.darkLight },
+      { type: 'text', content: 'I/We accept this quotation and authorise Beacon Renewables to proceed with the installation as described.', x: 80, y: 305, font_size: 10, color: colors.darkLight },
       { type: 'text', content: `A 25% deposit (${formatCurrency(deposit)}) is required to secure your installation date. Balance due on completion.`, x: 80, y: 322, font_size: 10, color: colors.darkLight },
       { type: 'text', content: 'Signed: ___________________________________________', x: 80, y: 360, font_size: 10, color: colors.darkLight },
       { type: 'text', content: 'Date: ___________________', x: 480, y: 360, font_size: 10, color: colors.darkLight },
@@ -582,7 +582,7 @@ export const exampleQuoteData = {
     name: 'Mr & Mrs Johnson',
     address: '42 Oak Lane, Southampton'
   },
-  quoteRef: 'CRG-2026-00847',
+  quoteRef: 'Beacon-2026-00847',
   date: '1st February 2026',
   validUntil: '1st March 2026',
   advisor: 'James Mitchell',

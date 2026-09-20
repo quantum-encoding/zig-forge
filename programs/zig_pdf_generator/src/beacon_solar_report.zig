@@ -1,8 +1,8 @@
-//! CRG Solar Proposal — a Zig-native, data-driven generator for the genuine
-//! 20-page CRG Direct solar proposal (reproduced from
-//! crgdirect.co.uk/example-solar-proposal.pdf).
+//! Beacon Solar Proposal — a Zig-native, data-driven generator for the genuine
+//! 20-page Beacon Renewables solar proposal (reproduced from
+//! beacon-renewables.example/example-solar-proposal.pdf).
 //!
-//! This is a port of `templates/crg_solar_report/build_report.py`: the same
+//! This is a port of `templates/beacon_solar_report/build_report.py`: the same
 //! A4-canvas layout, the same Adobe AFM Helvetica metrics, the same word-wrap,
 //! now taking a small `CrgQuote` (the ~28 per-lead fields) as JSON and emitting
 //! the PDF directly — no 2.66 MB template JSON, no Python at deploy. The 12
@@ -15,7 +15,7 @@
 //! Entry points:
 //!   generateCrgSolarReport(alloc, quote) ![]u8
 //!   generateCrgSolarReportFromJson(alloc, json) ![]u8   // parses CrgQuote
-//! CLI: pdf-gen --crg-report <quote.json> <out.pdf>   (--crg-report-demo for sample)
+//! CLI: pdf-gen --beacon-report <quote.json> <out.pdf>   (--beacon-report-demo for sample)
 
 const std = @import("std");
 const presentation = @import("presentation.zig");
@@ -122,18 +122,18 @@ fn wrap(a: std.mem.Allocator, s: []const u8, size: f64, maxw: f64, bold: bool) !
 
 // ---- embedded brand assets (base64 data URLs, built once per generate) -----
 const AssetsRaw = struct {
-    cover: []const u8 = @embedFile("crg_assets/cover_house.jpg"),
-    quote_photo: []const u8 = @embedFile("crg_assets/quote_photo.jpg"),
-    medal: []const u8 = @embedFile("crg_assets/medal.png"),
-    reviews: []const u8 = @embedFile("crg_assets/reviews.jpg"),
-    logo: []const u8 = @embedFile("crg_assets/logo.png"),
-    accreditation: []const u8 = @embedFile("crg_assets/accreditation.png"),
-    canadian1: []const u8 = @embedFile("crg_assets/canadian1.jpg"),
-    canadian2: []const u8 = @embedFile("crg_assets/canadian2.jpg"),
-    sunsynk_inverter: []const u8 = @embedFile("crg_assets/sunsynk_inverter.jpg"),
-    signature: []const u8 = @embedFile("crg_assets/signature.png"),
-    sunpath: []const u8 = @embedFile("crg_assets/sunpath.png"),
-    battery: []const u8 = @embedFile("crg_assets/battery.jpg"),
+    cover: []const u8 = @embedFile("beacon_assets/cover_house.jpg"),
+    quote_photo: []const u8 = @embedFile("beacon_assets/quote_photo.jpg"),
+    medal: []const u8 = @embedFile("beacon_assets/medal.png"),
+    reviews: []const u8 = @embedFile("beacon_assets/reviews.jpg"),
+    logo: []const u8 = @embedFile("beacon_assets/logo.png"),
+    accreditation: []const u8 = @embedFile("beacon_assets/accreditation.png"),
+    canadian1: []const u8 = @embedFile("beacon_assets/canadian1.jpg"),
+    canadian2: []const u8 = @embedFile("beacon_assets/canadian2.jpg"),
+    sunsynk_inverter: []const u8 = @embedFile("beacon_assets/sunsynk_inverter.jpg"),
+    signature: []const u8 = @embedFile("beacon_assets/signature.png"),
+    sunpath: []const u8 = @embedFile("beacon_assets/sunpath.png"),
+    battery: []const u8 = @embedFile("beacon_assets/battery.jpg"),
 };
 
 const Assets = struct {
@@ -460,14 +460,14 @@ fn p02(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
     var b = B{ .a = a };
     try b.heading("Introduction", .{ .gap_after = 6 });
     b.y = 430;
-    try b.para("Welcome to CRG Direct. Here’s your bespoke solar quote. In this " ++
+    try b.para("Welcome to Beacon Renewables. Here’s your bespoke solar quote. In this " ++
         "quote, you’ll find the cost of your system, your estimated savings " ++
         "using MCS calculations, and more information about your recommended " ++
         "solar system.", .{ .size = 16, .lh = 1.28, .gap_after = 26 });
     const top = b.y;
     const colw = (CW - 30) / 2;
     b.y = top;
-    try b.para("At CRG Direct, we believe in delivering quality service that goes " ++
+    try b.para("At Beacon Renewables, we believe in delivering quality service that goes " ++
         "above and beyond for our customers. Our dedicated team works " ++
         "tirelessly to ensure that every installation is done efficiently and " ++
         "with the utmost care. We understand the importance of clear " ++
@@ -479,10 +479,10 @@ fn p02(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
         "the best service possible.", .{ .size = 9.5, .maxw = colw });
     b.y = top;
     const rx = ML + colw + 30;
-    try b.para("If you are considering CRG Direct for your next project, we encourage " ++
-        "you to visit our website at www.crgdirect.co.uk for more information. " ++
+    try b.para("If you are considering Beacon Renewables for your next project, we encourage " ++
+        "you to visit our website at www.beacon-renewables.example for more information. " ++
         "And remember, if you have any questions at all, our friendly team is " ++
-        "always here to help. Thank you for considering CRG Direct for your " ++
+        "always here to help. Thank you for considering Beacon Renewables for your " ++
         "solar and home improvement needs.", .{ .size = 9.5, .x = rx, .maxw = colw });
     return b.page();
 }
@@ -578,7 +578,7 @@ fn p05(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
     try b.heading("Details & Info", .{ .gap_after = 10 });
     try b.image(A.logo, PW - MR - 150, 34, 150, 65);
     b.gap(4);
-    try b.text(ML, b.y, "CRG Direct Ltd", .{ .size = 10.5, .color = GREEN });
+    try b.text(ML, b.y, "Beacon Renewables Ltd", .{ .size = 10.5, .color = GREEN });
     b.gap(22);
     try b.text(ML, b.y, "Integrated Management System", .{ .size = 10.5, .color = GREEN });
     b.gap(24);
@@ -587,14 +587,14 @@ fn p05(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
         .{ .k = "Document Title :", .v = "Customer Quote" },
         .{ .k = "Ref. No. :", .v = q.ref },
         .{ .k = "Next Review Date :", .v = "One Year" },
-        .{ .k = "MCS Accredited Company:", .v = "CRG DIRECT LTD" },
+        .{ .k = "MCS Accredited Company:", .v = "BEACON RENEWABLES LTD" },
         .{ .k = "MCS Accredited Number", .v = "NIC600310(Company Registration Number: 10546909)" },
-        .{ .k = "Registered Office Address:", .v = "Wey Court West Union Road, Farnham, GU9 7PT" },
-        .{ .k = "Principal Trading Address:", .v = "172 Sea Front Hayling Island PO11 9HP" },
-        .{ .k = "Contact Details:", .v = "Tel: 0330 133 2497/07955568287\nadmin@crgdirect.co.uk" },
-        .{ .k = "Website:", .v = "www.crgdirect.co.uk" },
-        .{ .k = "HIES Membership Number:", .v = "CRG/A/088" },
-        .{ .k = "MCS Accredited Company:", .v = "CRG DIRECT LTD" },
+        .{ .k = "Registered Office Address:", .v = "1 Example Way, Testerton, EX1 2MP" },
+        .{ .k = "Principal Trading Address:", .v = "2 Sample Street, Demoford, DE1 4MO" },
+        .{ .k = "Contact Details:", .v = "Tel: 0330 000 0000/07700900123\nhello@beacon-renewables.example" },
+        .{ .k = "Website:", .v = "www.beacon-renewables.example" },
+        .{ .k = "HIES Membership Number:", .v = "Beacon/A/088" },
+        .{ .k = "MCS Accredited Company:", .v = "BEACON RENEWABLES LTD" },
         .{ .k = "Trustmark", .v = "2855428" },
         .{ .k = "MCS Certification Number:", .v = "NIC600310" },
         .{ .k = "Project Reference:", .v = q.ref },
@@ -755,7 +755,7 @@ fn p08(a: std.mem.Allocator, q: CrgQuote, A: Assets) !P.Page {
     b.gap(24);
     try b.text(ML, b.y, "Account", .{ .size = 9.5 });
     try b.text(ML, b.y + 11, "Name", .{ .size = 9.5 });
-    try b.text(ML + 70, b.y, "CRG Direct Ltd", .{ .size = 9.5 });
+    try b.text(ML + 70, b.y, "Beacon Renewables Ltd", .{ .size = 9.5 });
     try b.text(ML + 300, b.y, "Account", .{ .size = 9.5 });
     try b.text(ML + 300, b.y + 11, "No.", .{ .size = 9.5 });
     try b.text(ML + 375, b.y, "43634435", .{ .size = 9.5 });

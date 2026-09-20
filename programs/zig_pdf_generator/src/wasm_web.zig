@@ -29,7 +29,7 @@ const proposal = @import("proposal.zig");
 const clean_quote = @import("clean_quote.zig");
 const letter = @import("letter.zig");
 const order_email = @import("order_email.zig");
-const crg_solar_report = @import("crg_solar_report.zig");
+const beacon_solar_report = @import("beacon_solar_report.zig");
 const website_health_report = @import("website_health_report.zig");
 
 const wasm_allocator = std.heap.wasm_allocator;
@@ -79,7 +79,7 @@ fn validateUtf8(json_slice: []const u8) bool {
     return true;
 }
 
-/// Canvas / presentation renderer — the CRG solar proposal target.
+/// Canvas / presentation renderer — the Beacon solar proposal target.
 export fn zigpdf_generate_presentation(json_ptr: [*]const u8, json_len: usize, output_len: *usize) ?[*]u8 {
     const json_slice = json_ptr[0..json_len];
     if (!validateUtf8(json_slice)) return null;
@@ -92,15 +92,15 @@ export fn zigpdf_generate_presentation(json_ptr: [*]const u8, json_len: usize, o
     return @ptrCast(@constCast(pdf_bytes.ptr));
 }
 
-/// CRG Solar Proposal — 20-page report from a small CrgQuote JSON (the ~28
+/// Beacon Solar Proposal — 20-page report from a small CrgQuote JSON (the ~28
 /// per-lead fields; missing fields fall back to the sample defaults). Brand
 /// assets are embedded, so no images need to be supplied.
-export fn zigpdf_generate_crg_solar_report(json_ptr: [*]const u8, json_len: usize, output_len: *usize) ?[*]u8 {
+export fn zigpdf_generate_beacon_solar_report(json_ptr: [*]const u8, json_len: usize, output_len: *usize) ?[*]u8 {
     const json_slice = json_ptr[0..json_len];
     if (!validateUtf8(json_slice)) return null;
-    const pdf_bytes = crg_solar_report.generateCrgSolarReportFromJson(wasm_allocator, json_slice) catch |err| {
+    const pdf_bytes = beacon_solar_report.generateCrgSolarReportFromJson(wasm_allocator, json_slice) catch |err| {
         var buf: [128]u8 = undefined;
-        setLastError(std.fmt.bufPrint(&buf, "CRG report error: {s}", .{@errorName(err)}) catch "CRG report error");
+        setLastError(std.fmt.bufPrint(&buf, "Beacon report error: {s}", .{@errorName(err)}) catch "Beacon report error");
         return null;
     };
     output_len.* = pdf_bytes.len;

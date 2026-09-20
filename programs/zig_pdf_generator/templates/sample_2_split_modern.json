@@ -15,7 +15,7 @@
         },
         {
           "type": "text",
-          "content": "CRG",
+          "content": "Beacon",
           "x": 40,
           "y": 55,
           "font_size": 36,
@@ -157,7 +157,7 @@
         },
         {
           "type": "text",
-          "content": "Quote: CRG-2026-00847",
+          "content": "Quote: Beacon-2026-00847",
           "x": 40,
           "y": 520,
           "font_size": 10,
@@ -173,7 +173,7 @@
         },
         {
           "type": "text",
-          "content": "0330 133 2497",
+          "content": "0330 000 0000",
           "x": 40,
           "y": 570,
           "font_size": 12,
@@ -382,7 +382,7 @@
         },
         {
           "type": "text",
-          "content": "crgdirect.co.uk",
+          "content": "beacon-renewables.example",
           "x": 571,
           "y": 578,
           "font_size": 10,

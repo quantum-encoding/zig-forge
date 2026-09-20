@@ -15,7 +15,7 @@
         },
         {
           "type": "text",
-          "content": "CRG",
+          "content": "Beacon",
           "x": 60,
           "y": 55,
           "font_size": 32,
@@ -58,7 +58,7 @@
         },
         {
           "type": "text",
-          "content": "CRG-2026-00847",
+          "content": "Beacon-2026-00847",
           "x": 782,
           "y": 55,
           "font_size": 12,
@@ -230,7 +230,7 @@
         },
         {
           "type": "text",
-          "content": "Why CRG Direct?",
+          "content": "Why Beacon Renewables?",
           "x": 480,
           "y": 375,
           "font_size": 20,
@@ -275,7 +275,7 @@
         },
         {
           "type": "text",
-          "content": "Ready to start saving? Call us on 0330 133 2497 or email info@crgdirect.co.uk",
+          "content": "Ready to start saving? Call us on 0330 000 0000 or email info@beacon-renewables.example",
           "x": 421,
           "y": 555,
           "font_size": 14,
@@ -285,7 +285,7 @@
         },
         {
           "type": "text",
-          "content": "crgdirect.co.uk  •  MCS Certified  •  Which? Trusted Trader  •  RECC Member",
+          "content": "beacon-renewables.example  •  MCS Certified  •  Which? Trusted Trader  •  RECC Member",
           "x": 421,
           "y": 578,
           "font_size": 10,

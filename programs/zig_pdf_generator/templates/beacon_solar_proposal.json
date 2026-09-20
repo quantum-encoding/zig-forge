@@ -1,19 +1,19 @@
 {
-  "company_name": "CRG Direct",
+  "company_name": "Beacon Renewables",
   "company_address": "Unit 7 Solent Business Park, Fareham, Hampshire PO15 7FH",
   "client_name": "Mr & Mrs Thompson",
   "client_address": "18 Maple Drive\nPortsmouth\nPO6 2TN",
-  "reference": "CRG-2026-00456",
+  "reference": "Beacon-2026-00456",
   "date": "12 February 2026",
   "valid_until": "14 March 2026",
   "primary_color": "#16a34a",
   "secondary_color": "#1e3a2f",
   "footer": {
     "phone": "01329 800 123",
-    "email": "info@crgdirect.co.uk",
-    "website": "www.crgdirect.co.uk",
-    "dashboard_text": "Sign in to your CRG Direct dashboard at dashboard.crgdirect.co.uk to view your quote, track progress and manage your installation.",
-    "dashboard_url": "https://dashboard.crgdirect.co.uk/quotes/CRG-2026-00456"
+    "email": "info@beacon-renewables.example",
+    "website": "www.beacon-renewables.example",
+    "dashboard_text": "Sign in to your Beacon Renewables dashboard at dashboard.beacon-renewables.example to view your quote, track progress and manage your installation.",
+    "dashboard_url": "https://dashboard.beacon-renewables.example/quotes/Beacon-2026-00456"
   },
   "sections": [
     {
@@ -54,7 +54,7 @@
     {
       "type": "text",
       "heading": "Terms & Next Steps",
-      "content": "This proposal is valid for 30 days from the date shown above. To proceed:\n\n- Confirm your acceptance by signing the enclosed installation agreement\n- A deposit of 25% is required to secure your installation date\n- CRG Direct will handle all DNO applications and approvals (typically 4-6 weeks)\n- Installation is completed within 1-2 days, with minimal disruption\n- Full commissioning, testing, and handover including app setup\n\nAll installations are carried out by MCS-certified engineers to the highest industry standards. For finance options, please speak with your account manager."
+      "content": "This proposal is valid for 30 days from the date shown above. To proceed:\n\n- Confirm your acceptance by signing the enclosed installation agreement\n- A deposit of 25% is required to secure your installation date\n- Beacon Renewables will handle all DNO applications and approvals (typically 4-6 weeks)\n- Installation is completed within 1-2 days, with minimal disruption\n- Full commissioning, testing, and handover including app setup\n\nAll installations are carried out by MCS-certified engineers to the highest industry standards. For finance options, please speak with your account manager."
     }
   ]
 }

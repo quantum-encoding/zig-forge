@@ -689,7 +689,7 @@ pub fn generateDemoDividendVoucher(allocator: std.mem.Allocator) ![]u8 {
             .address = .{
                 .line1 = "172 SEA FRONT",
                 .city = "HAYLING ISLAND",
-                .postcode = "PO11 9HP",
+                .postcode = "DE1 4MO",
                 .country = "United Kingdom",
             },
         },

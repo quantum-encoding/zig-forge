@@ -283,7 +283,7 @@ pub fn build(b: *std.Build) void {
     // Stack size for WASM. 1MB was "plenty for PDF generation" but the
     // EXTRACTOR's recursive object/content parser blows it on real-world
     // producers (Aspose.Pdf, Oracle Analytics Publisher, PDFium — 765/8008 of
-    // the CRG corpus trapped with "memory access out of bounds"). Native runs
+    // the Beacon corpus trapped with "memory access out of bounds"). Native runs
     // the same files fine on the default 8MB thread stack — match it.
     wasm_lib.stack_size = 8 * 1024 * 1024;
 

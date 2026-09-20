@@ -505,7 +505,7 @@ Before generating:
 ## Example Templates
 
 See these templates for reference:
-- `crg_direct_quote.json` - Solar/renewable energy quote
+- `beacon_renewables_quote.json` - Solar/renewable energy quote
 - `construction_proposal.json` - Construction project proposal
 
 ## Generating PDFs

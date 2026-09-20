@@ -43,7 +43,7 @@ cat input.json | ./zig-out/bin/pdf-gen --letter > output.pdf
 > [!WARNING]
 > **Schema mismatches fail fast — they do not produce a blank PDF.** Feeding a payload shaped for one template into another flag is rejected with a specific diagnostic and exit code `1`:
 > ```bash
-> $ ./zig-out/bin/pdf-gen --letter crg_solar_proposal.json out.pdf
+> $ ./zig-out/bin/pdf-gen --letter beacon_solar_proposal.json out.pdf
 > Error: Schema mismatch. Missing required field 'company' (object) for --letter template.
 >        A --letter payload requires a top-level "company" object and a non-empty "pages" array.
 > $ echo $?
@@ -368,7 +368,7 @@ A structured, multi-section A4 proposal/quote document with first-class support 
 > | Section `type`s | text / table | `text` / `metrics` / `table` / `chart` |
 > | Charts | ✗ | ✓ (pie, donut, bar, progress) |
 >
-> A given payload (e.g. `templates/crg_solar_proposal.json`) is accepted by **both** flags — pick the flag for the *visual style* you want.
+> A given payload (e.g. `templates/beacon_solar_proposal.json`) is accepted by **both** flags — pick the flag for the *visual style* you want.
 
 #### Required root fields (validated — missing → `error` + exit 1)
 * **`company_name`** (`string`, **required**, non-empty): Sender identity. Missing → `Missing required field 'company_name' (string) for --proposal template.`
@@ -392,10 +392,10 @@ A structured, multi-section A4 proposal/quote document with first-class support 
 #### Canonical Payload Example
 ```json
 {
-  "company_name": "CRG Direct",
+  "company_name": "Beacon Renewables",
   "company_address": "Unit 7 Solent Business Park, Fareham, Hampshire PO15 7FH",
   "client_name": "Mr & Mrs Thompson",
-  "reference": "CRG-2026-00456",
+  "reference": "Beacon-2026-00456",
   "date": "29/05/2026",
   "valid_until": "28/06/2026",
   "primary_color": "#16a34a",
@@ -437,14 +437,14 @@ A structured, multi-section A4 proposal/quote document with first-class support 
   ],
   "footer": {
     "phone": "01329 800 123",
-    "email": "info@crgdirect.co.uk",
-    "website": "www.crgdirect.co.uk"
+    "email": "info@beacon-renewables.example",
+    "website": "www.beacon-renewables.example"
   }
 }
 ```
 
 > [!TIP]
-> Verified working inputs: `templates/crg_solar_proposal.json` and `pdf-chart-tests/crg-proposal-test.json`.
+> Verified working inputs: `templates/beacon_solar_proposal.json` and `pdf-chart-tests/beacon-proposal-test.json`.
 
 ---
 

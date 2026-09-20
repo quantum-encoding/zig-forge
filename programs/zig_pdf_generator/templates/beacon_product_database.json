@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "last_updated": "2026-02-08",
-  "description": "CRG Direct product database for proposal auto-population. Each product has a proposal_section that maps directly to a ProposalSection in the PDF generator. The admin UI selects products, and the corresponding sections are injected into the proposal JSON.",
+  "description": "Beacon Renewables product database for proposal auto-population. Each product has a proposal_section that maps directly to a ProposalSection in the PDF generator. The admin UI selects products, and the corresponding sections are injected into the proposal JSON.",
 
   "categories": {
     "solar_panels": {
@@ -271,7 +271,7 @@
         {
           "id": "solar-install-standard",
           "name": "Standard Solar Installation",
-          "manufacturer": "CRG Direct",
+          "manufacturer": "Beacon Renewables",
           "unit_price": 1450.00,
           "warranty_years": 10,
           "tags": ["standard"],
@@ -283,7 +283,7 @@
         {
           "id": "scaffolding-standard",
           "name": "Scaffolding & Access",
-          "manufacturer": "CRG Direct",
+          "manufacturer": "Beacon Renewables",
           "unit_price": 385.00,
           "tags": ["standard"],
           "table_item": {
@@ -294,7 +294,7 @@
         {
           "id": "heat-pump-install",
           "name": "Heat Pump Installation",
-          "manufacturer": "CRG Direct",
+          "manufacturer": "Beacon Renewables",
           "unit_price": 3500.00,
           "warranty_years": 10,
           "tags": ["heat-pump"],
@@ -306,7 +306,7 @@
         {
           "id": "ev-charger-install",
           "name": "EV Charger Installation",
-          "manufacturer": "CRG Direct",
+          "manufacturer": "Beacon Renewables",
           "unit_price": 350.00,
           "warranty_years": 2,
           "tags": ["ev"],
@@ -334,7 +334,7 @@
           "proposal_section": {
             "type": "text",
             "heading": "Boiler Upgrade Scheme (BUS) Grant",
-            "content": "Your installation qualifies for the government's Boiler Upgrade Scheme, which provides a grant of \u00a37,500 towards the cost of an air source heat pump. Key details:\n\n- \u00a37,500 grant applied automatically \u2014 deducted from your total price\n- Available for homes in England and Wales replacing fossil fuel heating\n- Your property must have a valid EPC (Energy Performance Certificate)\n- CRG Direct handles the entire application process on your behalf\n- No upfront cost for the grant amount \u2014 we claim directly from Ofgem\n\nThe BUS grant is funded until March 2028 but is allocated on a first-come, first-served basis. We recommend proceeding promptly to secure your grant allocation."
+            "content": "Your installation qualifies for the government's Boiler Upgrade Scheme, which provides a grant of \u00a37,500 towards the cost of an air source heat pump. Key details:\n\n- \u00a37,500 grant applied automatically \u2014 deducted from your total price\n- Available for homes in England and Wales replacing fossil fuel heating\n- Your property must have a valid EPC (Energy Performance Certificate)\n- Beacon Renewables handles the entire application process on your behalf\n- No upfront cost for the grant amount \u2014 we claim directly from Ofgem\n\nThe BUS grant is funded until March 2028 but is allocated on a first-come, first-served basis. We recommend proceeding promptly to secure your grant allocation."
           }
         },
         {
@@ -350,7 +350,7 @@
           "proposal_section": {
             "type": "text",
             "heading": "Warm Home: Local Grant Scheme",
-            "content": "You may qualify for the Warm Home: Local Grant scheme, which can provide up to \u00a315,000 towards energy efficiency improvements including insulation, solar panels, and heat pumps. Key details:\n\n- Grants of up to \u00a315,000 for eligible homeowners\n- Covers solar PV, battery storage, heat pumps, insulation and more\n- Means-tested \u2014 based on household income and property EPC rating\n- Can be combined with other measures for a whole-house approach\n- CRG Direct is an approved installer under the scheme\n\nEligibility is assessed by your local authority. We can help you check whether you qualify and guide you through the application process. Properties with an EPC rating of D or below are typically eligible."
+            "content": "You may qualify for the Warm Home: Local Grant scheme, which can provide up to \u00a315,000 towards energy efficiency improvements including insulation, solar panels, and heat pumps. Key details:\n\n- Grants of up to \u00a315,000 for eligible homeowners\n- Covers solar PV, battery storage, heat pumps, insulation and more\n- Means-tested \u2014 based on household income and property EPC rating\n- Can be combined with other measures for a whole-house approach\n- Beacon Renewables is an approved installer under the scheme\n\nEligibility is assessed by your local authority. We can help you check whether you qualify and guide you through the application process. Properties with an EPC rating of D or below are typically eligible."
           }
         },
         {
@@ -366,7 +366,7 @@
           "proposal_section": {
             "type": "text",
             "heading": "Octopus Energy Zero Bills",
-            "content": "The Octopus Energy Zero Bills programme bundles solar panels, battery storage, and a heat pump with an energy tariff that aims to reduce your bills to zero. Key details:\n\n- Octopus installs solar, battery and heat pump at no upfront cost to you\n- In return, you switch to an Octopus tariff with a fixed monthly payment\n- The system is designed so your solar generation offsets your energy usage\n- Excess generation is exported and credited to your account\n- Smart tariff integration optimises battery charging for lowest cost\n- 15-year agreement with full maintenance and monitoring included\n\nCRG Direct is an approved installation partner for the Octopus Zero Bills programme. We handle the full installation while Octopus manages the finance and tariff. This is ideal for homeowners who want to go green without any upfront investment."
+            "content": "The Octopus Energy Zero Bills programme bundles solar panels, battery storage, and a heat pump with an energy tariff that aims to reduce your bills to zero. Key details:\n\n- Octopus installs solar, battery and heat pump at no upfront cost to you\n- In return, you switch to an Octopus tariff with a fixed monthly payment\n- The system is designed so your solar generation offsets your energy usage\n- Excess generation is exported and credited to your account\n- Smart tariff integration optimises battery charging for lowest cost\n- 15-year agreement with full maintenance and monitoring included\n\nBeacon Renewables is an approved installation partner for the Octopus Zero Bills programme. We handle the full installation while Octopus manages the finance and tariff. This is ideal for homeowners who want to go green without any upfront investment."
           }
         }
       ]

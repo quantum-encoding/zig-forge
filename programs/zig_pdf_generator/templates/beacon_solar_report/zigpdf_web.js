@@ -13,10 +13,10 @@
 // and frees the wasm-side buffers.
 
 const GENERATORS = {
-  // The CRG solar proposal: pass a small CrgQuote JSON (the ~28 per-lead fields;
+  // The Beacon solar proposal: pass a small CrgQuote JSON (the ~28 per-lead fields;
   // omitted fields fall back to the sample). Brand assets are embedded in the
-  // wasm, so nothing else is needed. -> pdf.crgReport(JSON.stringify(quote))
-  crgReport: 'zigpdf_generate_crg_solar_report',
+  // wasm, so nothing else is needed. -> pdf.beaconReport(JSON.stringify(quote))
+  beaconReport: 'zigpdf_generate_beacon_solar_report',
   // baton-audit Website Health report: pass a SiteHealthReport JSON.
   healthReport: 'zigpdf_generate_health_report',
   presentation: 'zigpdf_generate_presentation', // raw canvas schema

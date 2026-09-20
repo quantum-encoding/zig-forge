@@ -49,4 +49,4 @@ The previously-dark `zip.zig` and `fra.zig` test blocks are wired into `zig buil
 
 ### Known behavioural change
 
-CRC-32 verification means an archive whose central directory records wrong CRCs is now rejected outright instead of being parsed. Verified against LibreOffice-authored, Word-authored (four `crg-direct` blog documents plus a 232-paragraph spec), self-generated, and LibreOffice-authored `.xlsx` inputs — all pass. A producer that writes zeroed CRCs into the central directory would newly fail.
+CRC-32 verification means an archive whose central directory records wrong CRCs is now rejected outright instead of being parsed. Verified against LibreOffice-authored, Word-authored (four `beacon-renewables` blog documents plus a 232-paragraph spec), self-generated, and LibreOffice-authored `.xlsx` inputs — all pass. A producer that writes zeroed CRCs into the central directory would newly fail.

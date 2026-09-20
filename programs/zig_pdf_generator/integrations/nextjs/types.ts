@@ -1,7 +1,7 @@
 /**
  * ZigPDF Quote Generator Types
  *
- * Type definitions for the CRG Direct quote PDF generator.
+ * Type definitions for the Beacon Renewables quote PDF generator.
  */
 
 // ============================================================================

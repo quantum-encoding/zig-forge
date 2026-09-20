@@ -4,7 +4,7 @@
 //! cover → executive summary → scorecard → critical issues → per-category
 //! detail → prioritised fix list → methodology.
 //!
-//! Unlike the fixed 20-page CRG solar report, this one FLOWS: content is laid
+//! Unlike the fixed 20-page Beacon solar report, this one FLOWS: content is laid
 //! out top-to-bottom and breaks to a new page automatically, so the page count
 //! scales with the number of findings. A running header + "Page N of M" footer
 //! are stamped on every content page.

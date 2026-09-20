@@ -12,7 +12,7 @@ RESULTS_FILE="$BENCH_DIR/results.md"
 PDF_LARGE="/Users/director/Downloads/arm_neoverse_v2_core_trm_102375_0002_03_en.pdf"
 PDF_SMALL="/Users/director/Downloads/AI Coding and Vibe Coding_ The Fastest-Growing SaaS Category in History.pdf"
 XLSX_FILE="/Users/director/Downloads/metatron_full_compute_valuation.xlsx"
-DOCX_FILE="/Users/director/work/poly-repo/crg-direct-polyrepo/blog-stuff/How Much Electricity Does a 4kW Solar System Produce.docx"
+DOCX_FILE="/Users/director/work/poly-repo/beacon-renewables-polyrepo/blog-stuff/How Much Electricity Does a 4kW Solar System Produce.docx"
 
 # Colors
 GREEN='\033[0;32m'

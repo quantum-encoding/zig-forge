@@ -307,7 +307,7 @@ test "RFC 8259 §7: control characters, backslashes and quotes in body/error are
 }
 
 test "telemetry: streaming record emits body_path + body_bytes, not body" {
-    // Field names are the de-facto CLI contract (MetalEmbeddings, crg-direct
+    // Field names are the de-facto CLI contract (MetalEmbeddings, beacon-renewables
     // jq pipelines). Lock them down.
     const resp = manifest.ResponseManifest{
         .id = "chunk-1",
