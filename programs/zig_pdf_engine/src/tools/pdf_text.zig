@@ -5,6 +5,14 @@ const Document = pdf.Document;
 
 pub fn main(init: std.process.Init) void {
     const allocator = init.gpa;
+    // The extracted text is the PAYLOAD and belongs on stdout. std.debug.print
+    // writes to stderr, which made `pdf-text x.pdf > out.txt` produce an empty
+    // file and no error — downstream that is indistinguishable from a PDF with
+    // no text layer, and it is enough to route a whole corpus into OCR.
+    var stdout_buffer: [4096]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
+    const stdout = &stdout_writer.interface;
+    defer stdout.flush() catch {};
 
     // Collect args
     var args_list: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -99,7 +107,11 @@ pub fn main(init: std.process.Init) void {
         };
         defer allocator.free(text);
 
-        std.debug.print("{s}\n", .{text});
+        // The extracted text is the payload, so it goes to STDOUT. std.debug.print
+        // writes to stderr, which made `pdf-text x.pdf > out.txt` yield an empty
+        // file and no error — indistinguishable downstream from a PDF that has no
+        // text layer, and enough to route a whole corpus into OCR.
+        stdout.print("{s}\n", .{text}) catch return;
     } else {
         // Extract all pages
         const text = doc.extractAllText() catch |err| {
@@ -108,7 +120,11 @@ pub fn main(init: std.process.Init) void {
         };
         defer allocator.free(text);
 
-        std.debug.print("{s}\n", .{text});
+        // The extracted text is the payload, so it goes to STDOUT. std.debug.print
+        // writes to stderr, which made `pdf-text x.pdf > out.txt` yield an empty
+        // file and no error — indistinguishable downstream from a PDF that has no
+        // text layer, and enough to route a whole corpus into OCR.
+        stdout.print("{s}\n", .{text}) catch return;
     }
 }
 
