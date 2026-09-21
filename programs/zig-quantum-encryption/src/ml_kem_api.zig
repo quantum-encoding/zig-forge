@@ -85,6 +85,8 @@ pub const MlKemError = error{
     RandomnessFailure,
     /// Invalid encapsulation key format
     InvalidEncapsulationKey,
+    /// Decapsulation key fails the FIPS 203 hash check (corrupt, truncated or substituted)
+    InvalidDecapsulationKey,
     /// Invalid ciphertext format
     InvalidCiphertext,
     /// Decapsulation failure (implicit rejection triggered)
@@ -245,6 +247,13 @@ pub fn encaps768(ek: *const EncapsulationKey768) MlKemError!EncapsResult768 {
 /// Deterministic encapsulation from message m. Public so NIST KAT anchors can
 /// drive it deterministically (FIPS 203 encaps vectors give ek, m -> c, K).
 pub fn encapsInternal768(ek: *const EncapsulationKey768, m: *const [32]u8) MlKemError!EncapsResult768 {
+    // FIPS 203 §7.2 modulus check. It lives here, not only in `encaps768`, because this function
+    // is `pub`: a caller driving it directly would otherwise encapsulate to a non-canonical key
+    // (every coefficient silently reduced mod q) that a conforming peer rejects.
+    if (!validateEncapsulationKey768(ek)) {
+        return MlKemError.InvalidEncapsulationKey;
+    }
+
     // Step 1: (K, r) ← G(m || H(ek))
     var g_input: [64]u8 = undefined;
     @memcpy(g_input[0..32], m);
@@ -277,6 +286,42 @@ pub fn validateEncapsulationKey768(ek: *const EncapsulationKey768) bool {
         }
     }
     return true;
+}
+
+/// Decapsulation key check, FIPS 203 §7.3.
+///
+/// dk = ByteEncode_12(ŝ) ‖ ek ‖ H(ek) ‖ z. Verifies that the stored hash matches the embedded
+/// encapsulation key, and that the embedded key passes the modulus check. This detects a
+/// decapsulation key that was corrupted, truncated-and-padded, or assembled from mismatched
+/// parts - any of which would otherwise make `decaps768` return a well-formed but WRONG shared
+/// secret for every ciphertext, with no error, because implicit rejection is indistinguishable
+/// from success by design.
+///
+/// The comparison is over public-derived values (ek and its hash), but is done in constant time
+/// anyway so the key's handling never depends on how much of it matched.
+pub fn validateDecapsulationKey768(dk: *const DecapsulationKey768) bool {
+    const s_hat_len = 384 * 3; // ByteEncode_12 of k = 3 polynomials
+    const ek_len = 1184;
+    comptime std.debug.assert(@sizeOf(EncapsulationKey768) == ek_len);
+    comptime std.debug.assert(@sizeOf(DecapsulationKey768) == s_hat_len + ek_len + 32 + 32);
+    const ek_bytes: *const [ek_len]u8 = dk.data[s_hat_len..][0..ek_len];
+    const stored_hash: *const [32]u8 = dk.data[s_hat_len + ek_len ..][0..32];
+
+    const computed = ntt.hashH(ek_bytes);
+    if (!constantTimeCompare(&computed, stored_hash)) return false;
+
+    const ek = EncapsulationKey768{ .data = ek_bytes.* };
+    return validateEncapsulationKey768(&ek);
+}
+
+/// `decaps768` preceded by the FIPS 203 §7.3 decapsulation-key check.
+///
+/// Use this at any boundary where the key arrives from storage, the network or another language
+/// (the C ABI does). `decaps768` remains for callers that validated the key once at import, as
+/// FIPS 203 permits, and must not pay for a SHA3-256 over 1184 bytes on every ciphertext.
+pub fn decaps768Checked(dk: *const DecapsulationKey768, c: *const Ciphertext768) MlKemError!SharedSecret {
+    if (!validateDecapsulationKey768(dk)) return MlKemError.InvalidDecapsulationKey;
+    return decaps768(dk, c);
 }
 
 // ============================================================================
@@ -569,8 +614,9 @@ fn compressMessage(poly: *const Poly, m: *[32]u8) void {
 
     for (0..N) |i| {
         // Compress_1: round(2x/q) mod 2
-        const x: u32 = @intCast(@mod(@as(i32, poly.coeffs[i]), Q));
-        const bit: u8 = @intCast(((x << 1) + @as(u32, @intCast(Q)) / 2) / @as(u32, @intCast(Q)) & 1);
+        // The coefficient is the decrypted message: secret. `ntt.compress` is division-free;
+        // computing this inline as ((2x + q/2) / q) & 1 is the KyberSlash1 bug.
+        const bit: u8 = @intCast(ntt.compress(poly.coeffs[i], 1));
 
         const byte_idx = i / 8;
         const bit_idx: u3 = @intCast(i % 8);
@@ -643,4 +689,44 @@ test "ML-KEM-768 round trip" {
 
     // Shared secrets should match
     try std.testing.expectEqualSlices(u8, &encaps_result.K, &K_decaps);
+}
+
+test "decapsulation key check: accepts generated keys, rejects every kind of damage" {
+    const d: [32]u8 = @splat(0x11);
+    const z: [32]u8 = @splat(0x22);
+    const kp = try keyGenInternal768(&d, &z);
+    try std.testing.expect(validateDecapsulationKey768(&kp.dk));
+
+    const m: [32]u8 = @splat(0x33);
+    const enc = try encapsInternal768(&kp.ek, &m);
+    try std.testing.expectEqualSlices(u8, &enc.K, &(try decaps768Checked(&kp.dk, &enc.c)));
+
+    // one flipped bit in each region the check covers: embedded ek, and the stored H(ek)
+    for ([_]usize{ 1152, 1152 + 600, 1152 + 1183, 2336, 2336 + 31 }) |pos| {
+        var bad = kp.dk;
+        bad.data[pos] ^= 0x01;
+        try std.testing.expect(!validateDecapsulationKey768(&bad));
+        try std.testing.expectError(MlKemError.InvalidDecapsulationKey, decaps768Checked(&bad, &enc.c));
+        // and this is exactly why the check matters: unchecked decapsulation "succeeds" with a wrong secret
+        const wrong = decaps768(&bad, &enc.c);
+        try std.testing.expect(!std.mem.eql(u8, &wrong, &enc.K));
+    }
+
+    // a key whose embedded ek is non-canonical but whose hash was recomputed to match: still rejected
+    var forged = kp.dk;
+    forged.data[1152] = 0xFF;
+    forged.data[1153] |= 0x0F; // first coefficient = 4095 >= q
+    const h = ntt.hashH(forged.data[1152..][0..1184]);
+    @memcpy(forged.data[2336..][0..32], &h);
+    try std.testing.expect(!validateDecapsulationKey768(&forged));
+}
+
+test "encapsInternal768 rejects a non-canonical encapsulation key" {
+    const d: [32]u8 = @splat(1);
+    const z: [32]u8 = @splat(2);
+    var kp = try keyGenInternal768(&d, &z);
+    kp.ek.data[0] = 0xFF;
+    kp.ek.data[1] |= 0x0F;
+    const m: [32]u8 = @splat(3);
+    try std.testing.expectError(MlKemError.InvalidEncapsulationKey, encapsInternal768(&kp.ek, &m));
 }

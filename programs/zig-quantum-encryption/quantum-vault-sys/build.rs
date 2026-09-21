@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 
 /// Must match `VERSION_STRING` in `../src/quantum_vault_ffi.zig`. When the Zig
 /// source is available it is authoritative and a mismatch here is an error.
-const EXPECTED_QV_VERSION: &str = "quantum-vault-pqc-1.1.0";
+const EXPECTED_QV_VERSION: &str = "quantum-vault-pqc-1.2.0";
 
 fn main() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();

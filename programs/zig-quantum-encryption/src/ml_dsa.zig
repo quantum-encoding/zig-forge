@@ -35,6 +35,8 @@ pub const DsaError = error{
     /// The rejection-sampling loop exhausted its iteration budget without a
     /// valid signature (astronomically unlikely with correct randomness).
     SigningFailed,
+    /// FIPS 204 limits the context string to 255 bytes.
+    ContextTooLong,
 };
 
 // ============================================================================
@@ -140,14 +142,12 @@ pub const Poly = struct {
     /// Check if infinity norm is less than bound
     pub fn checkNorm(self: *const Poly, bound: i32) bool {
         for (0..N) |i| {
-            var coeff = self.coeffs[i];
-            // First reduce to [0, q-1]
-            coeff = reduce32(coeff);
-            // Then reduce to centered representation [-q/2, q/2]
-            if (coeff > (Q - 1) / 2) {
-                coeff = coeff - Q;
-            }
-            if (coeff < 0) coeff = -coeff;
+            // Centre, then take |.| with a mask. Leaking WHICH coefficient exceeds the bound is
+            // fine (the early return below, as in the reference); leaking its SIGN is not, so
+            // neither the centring nor the absolute value may branch.
+            var coeff = centerReduce(self.coeffs[i]);
+            const sign_mask = coeff >> 31;
+            coeff = (coeff ^ sign_mask) - sign_mask;
             if (coeff >= bound) return false;
         }
         return true;
@@ -345,10 +345,37 @@ pub fn montgomeryReduce(a: i64) i32 {
     return result;
 }
 
-/// Simple modular reduction for NTT: compute a mod q
-/// This is more reliable than Montgomery for ML-DSA operations
+/// Constant-time reduction of `a` into [0, q-1], valid for EVERY i64.
+///
+/// This runs inside every NTT butterfly, on the secret vectors s1, s2, t0 and the mask y. It was
+/// `@mod(a, Q)`: whether that becomes a multiply is the compiler's choice, and LLVM keeps a real
+/// 64-bit divide in Debug builds and on wasm32 in every optimisation mode. Operand-dependent
+/// divide latency on secret data is a timing channel, so there is no division here at all.
+///
+/// The NTT reduces lazily - coefficients reach ~2^31 in the inverse transform before being
+/// multiplied by a 23-bit zeta - so inputs run to ~2^54 and the full i64 range is supported
+/// rather than relying on a bound a future caller could break.
+///
+/// Folding uses q = 2^23 - 2^13 + 1, i.e. 2^23 ≡ 2^13 - 1 (mod q): writing a = hi * 2^23 + lo
+/// gives a ≡ hi * (2^13 - 1) + lo, ten bits shorter. Three folds take any i64 below 2^34 in
+/// magnitude. floor(v / q) is then estimated as (v * floor(2^48 / q)) >> 48, which is off by at
+/// most one either way, and two masked corrections finish. Nothing can overflow: the largest
+/// intermediate is 2^40 * 2^13 in the first fold and 2^34 * 2^25.1 in the multiply.
 pub fn modReduce(a: i64) i32 {
-    return @intCast(@mod(a, Q));
+    const low_mask: i64 = (1 << 23) - 1;
+    const fold: i64 = (1 << 13) - 1;
+    var v: i64 = a;
+    inline for (0..3) |_| {
+        v = (v >> 23) * fold + (v & low_mask); // arithmetic shift = floor, so this holds for negatives
+    }
+
+    const multiplier: i64 = comptime @divFloor(@as(i64, 1) << 48, Q);
+    const quotient: i64 = (v * multiplier) >> 48;
+    var r: i64 = v - quotient * Q; // in (-q, 2q)
+    r += (r >> 63) & Q;
+    r -= Q;
+    r += (r >> 63) & Q;
+    return @truncate(r);
 }
 
 /// Reduce coefficient to centered representation [-q/2, q/2]
@@ -593,11 +620,11 @@ pub fn power2Round(r: i32) struct { r1: i32, r0: i32 } {
     // must stay positive (strict '>' , not '>='). Using '>=' wrongly wrapped
     // r0 = +4096 to −4096, bumping t1 up by one on the rare coefficient whose
     // t mod 2^13 is exactly 2^12 (KAT: poly 3 / coeff 85).
-    var r0 = @mod(r_plus, (1 << D));
-    if (r0 > (1 << (D - 1))) {
-        r0 = r0 - (1 << D);
-    }
-    const r1 = @divTrunc(r_plus - r0, (1 << D));
+    // r_plus is non-negative, so mod 2^d is a mask and the final division an exact shift.
+    // Branch-free: t = A*s1 + s2 carries the secret t0, and this runs on every coefficient of it.
+    var r0: i32 = r_plus & ((1 << D) - 1);
+    r0 -= (((1 << (D - 1)) - r0) >> 31) & (1 << D); // r0 > 2^(d-1)  =>  r0 -= 2^d
+    const r1 = (r_plus - r0) >> D;
     return .{ .r1 = r1, .r0 = r0 };
 }
 
@@ -606,18 +633,18 @@ pub fn power2Round(r: i32) struct { r1: i32, r0: i32 } {
 pub fn decompose(r: i32) struct { r1: i32, r0: i32 } {
     const r_plus = reduce32(r);
 
-    // r0 = r mod± α where α = 2*γ2
-    var r0 = @mod(r_plus, 2 * GAMMA2);
-    if (r0 > GAMMA2) r0 -= 2 * GAMMA2;
-
-    // r1 = (r - r0) / α, with special case for r - r0 = q - 1
-    var r1: i32 = undefined;
-    if (r_plus - r0 == Q - 1) {
-        r1 = 0;
-        r0 = r0 - 1;
-    } else {
-        r1 = @divTrunc(r_plus - r0, 2 * GAMMA2);
-    }
+    // Division-free and branch-free, for gamma2 = (q-1)/32 (alpha = 2*gamma2, 16 buckets).
+    // This runs in the signing loop on w = A*y, which depends on the secret mask y.
+    //
+    // r1 = round-to-bucket: (r + 127) >> 7 scales to ~2^16, and * 1025 >> 22 divides by
+    // alpha / 128 = 4092 (1025 / 2^22 ~ 1 / 4092.0). Bucket 16 wraps to 0 with the mask, which
+    // is exactly the FIPS 204 special case r - r0 = q - 1: there r1 = 0 and r0 = r - q.
+    comptime std.debug.assert(GAMMA2 == (Q - 1) / 32);
+    var r1: i32 = (r_plus + 127) >> 7;
+    r1 = (r1 * 1025 + (1 << 21)) >> 22;
+    r1 &= 15;
+    var r0: i32 = r_plus - r1 * 2 * GAMMA2;
+    r0 -= ((((Q - 1) / 2) - r0) >> 31) & Q; // centre: r0 > (q-1)/2  =>  r0 -= q
 
     return .{ .r1 = r1, .r0 = r0 };
 }
@@ -845,6 +872,34 @@ inline fn scrubValue(ptr: anytype) void {
 }
 
 pub fn sign(sk: *const SecretKey, msg: []const u8, randomized: bool) DsaError!Signature {
+    return signFramed(sk, "", msg, randomized);
+}
+
+/// Longest message-representative framing: 0x00 ‖ len(ctx) ‖ ctx with a 255-byte context.
+pub const MAX_CONTEXT_LEN = 255;
+
+/// ML-DSA.Sign (FIPS 204 Algorithm 2) - the standard, interoperable interface.
+///
+/// The message representative is mu = H(tr ‖ 0x00 ‖ len(ctx) ‖ ctx ‖ M). This is what every other
+/// conforming implementation computes (OpenSSL, BoringSSL, liboqs, Zig's std.crypto), so
+/// signatures made here verify there and vice versa. `ctx` is a domain-separation string of at
+/// most 255 bytes and may be empty.
+///
+/// `sign` above is ML-DSA.Sign_internal with mu = H(tr ‖ M): the same algorithm, a different
+/// framing, and therefore a signature no standard verifier accepts. It is kept unchanged because
+/// it is what the ACVP internal-interface vectors exercise and because data already signed with
+/// it must keep verifying. New signatures should use this function.
+pub fn signWithContext(sk: *const SecretKey, msg: []const u8, ctx: []const u8, randomized: bool) DsaError!Signature {
+    if (ctx.len > MAX_CONTEXT_LEN) return DsaError.ContextTooLong;
+    var framing: [2 + MAX_CONTEXT_LEN]u8 = undefined;
+    framing[0] = 0x00; // domain separator: pure ML-DSA (0x01 is HashML-DSA, not implemented)
+    framing[1] = @intCast(ctx.len);
+    @memcpy(framing[2 .. 2 + ctx.len], ctx);
+    return signFramed(sk, framing[0 .. 2 + ctx.len], msg, randomized);
+}
+
+/// ML-DSA.Sign_internal with mu = H(tr ‖ framing ‖ msg).
+fn signFramed(sk: *const SecretKey, framing: []const u8, msg: []const u8, randomized: bool) DsaError!Signature {
     // Extract components from secret key
     const rho = sk.getRho();
     const k_bytes = sk.getK();
@@ -898,10 +953,11 @@ pub fn sign(sk: *const SecretKey, msg: []const u8, randomized: bool) DsaError!Si
     var a: PolyMatrix = undefined;
     expandA(&a, rho);
 
-    // Compute μ = H(tr || msg)
+    // Compute μ = H(tr || framing || msg)
     var mu: [64]u8 = undefined;
     var h = crypto.hash.sha3.Shake256.init(.{});
     h.update(tr);
+    h.update(framing);
     h.update(msg);
     h.squeeze(&mu);
 
@@ -1074,12 +1130,8 @@ pub fn sign(sk: *const SecretKey, msg: []const u8, randomized: bool) DsaError!Si
         offset = CTILDE_BYTES;
         for (0..L) |i| {
             for (0..N) |j| {
-                var coeff = reduce32(z.polys[i].coeffs[j]);
-                // Center around 0: map [q/2+1, q-1] to negative
-                if (coeff > (Q - 1) / 2) {
-                    coeff = coeff - Q;
-                }
-                z.polys[i].coeffs[j] = coeff;
+                // Center around 0: map [q/2+1, q-1] to negative, branch-free
+                z.polys[i].coeffs[j] = centerReduce(z.polys[i].coeffs[j]);
             }
             // Simplified packing - 20 bits per coefficient
             var buf: [640]u8 = undefined;
@@ -1149,6 +1201,22 @@ fn packHints(output: []u8, hints: *const [K][N]u1, count: usize) void {
 
 /// Verify a signature against a message and public key
 pub fn verify(pk: *const PublicKey, msg: []const u8, sig: *const Signature) bool {
+    return verifyFramed(pk, "", msg, sig);
+}
+
+/// ML-DSA.Verify (FIPS 204 Algorithm 3) - the counterpart of `signWithContext`. A context longer
+/// than 255 bytes cannot have been signed, so it is a verification failure rather than an error.
+pub fn verifyWithContext(pk: *const PublicKey, msg: []const u8, ctx: []const u8, sig: *const Signature) bool {
+    if (ctx.len > MAX_CONTEXT_LEN) return false;
+    var framing: [2 + MAX_CONTEXT_LEN]u8 = undefined;
+    framing[0] = 0x00;
+    framing[1] = @intCast(ctx.len);
+    @memcpy(framing[2 .. 2 + ctx.len], ctx);
+    return verifyFramed(pk, framing[0 .. 2 + ctx.len], msg, sig);
+}
+
+/// ML-DSA.Verify_internal with mu = H(tr ‖ framing ‖ msg).
+fn verifyFramed(pk: *const PublicKey, framing: []const u8, msg: []const u8, sig: *const Signature) bool {
     // Extract ρ and t1 from public key
     const rho = pk.getRho();
 
@@ -1169,6 +1237,7 @@ pub fn verify(pk: *const PublicKey, msg: []const u8, sig: *const Signature) bool
     var mu: [64]u8 = undefined;
     var h2 = crypto.hash.sha3.Shake256.init(.{});
     h2.update(&tr);
+    h2.update(framing);
     h2.update(msg);
     h2.squeeze(&mu);
 
@@ -1399,4 +1468,85 @@ test "ML-DSA-65 sampleInBall" {
         }
     }
     try std.testing.expectEqual(TAU, count);
+}
+
+// ============================================================================
+// Division-free arithmetic: equivalence with the mathematical definition
+// ============================================================================
+//
+// `@mod` and `@divTrunc` appear below only as the ORACLE, on public loop counters.
+
+fn oracleCenter(a: i32) i32 {
+    const r = @mod(a, Q);
+    return if (r > (Q - 1) / 2) r - Q else r;
+}
+
+test "modReduce equals @mod: structured edges and 20 million pseudo-random products" {
+    const q: i64 = Q;
+    const edges = [_]i64{
+        0, 1, -1, q, -q, q - 1, -(q - 1), q + 1, 2 * q, (q - 1) * (q - 1), -((q - 1) * (q - 1)),
+        (q - 1) * (q - 1) + 1, (1 << 46), -(1 << 46), (1 << 47) - 1, -(1 << 47) + 1, (1 << 23), (1 << 23) - 1, -(1 << 23),
+        // the lazy inverse NTT really produces these: |coefficient| ~ 256 * q, times a 23-bit zeta
+        256 * q * (q - 1), -256 * q * (q - 1), (1 << 54) + 12345, -(1 << 54) - 12345,
+        std.math.maxInt(i64), std.math.minInt(i64), std.math.maxInt(i64) - q, std.math.minInt(i64) + q,
+    };
+    for (edges) |a| try std.testing.expectEqual(@as(i32, @intCast(@mod(a, q))), modReduce(a));
+    // every multiple of q near a fold boundary, where an off-by-one in the quotient would show
+    var k: i64 = -40000;
+    while (k <= 40000) : (k += 1) {
+        for ([_]i64{ -1, 0, 1 }) |d| {
+            const a = k * q * 1009 + d;
+            try std.testing.expectEqual(@as(i32, @intCast(@mod(a, q))), modReduce(a));
+        }
+    }
+    var prng = std.Random.DefaultPrng.init(0x204);
+    const r = prng.random();
+    for (0..20_000_000) |_| {
+        const x = r.intRangeAtMost(i64, -(q - 1), q - 1);
+        const y = r.intRangeAtMost(i64, -(q - 1), q - 1);
+        if (modReduce(x * y) != @as(i32, @intCast(@mod(x * y, q)))) return error.TestUnexpectedResult;
+        const any = r.int(i64); // and the whole 64-bit range, since the contract is "every i64"
+        if (modReduce(any) != @as(i32, @intCast(@mod(any, q)))) return error.TestUnexpectedResult;
+    }
+}
+
+test "decompose, power2Round and centerReduce equal their definitions for EVERY residue" {
+    const alpha: i32 = 2 * GAMMA2;
+    var r: i32 = 0;
+    while (r < Q) : (r += 1) {
+        // FIPS 204 Algorithm 36
+        var r0 = @mod(r, alpha);
+        if (r0 > GAMMA2) r0 -= alpha;
+        var r1: i32 = undefined;
+        if (r - r0 == Q - 1) {
+            r1 = 0;
+            r0 -= 1;
+        } else r1 = @divTrunc(r - r0, alpha);
+        const d = decompose(r);
+        if (d.r1 != r1 or d.r0 != r0) {
+            std.debug.print("decompose({d}) = ({d},{d}), expected ({d},{d})\n", .{ r, d.r1, d.r0, r1, r0 });
+            return error.TestUnexpectedResult;
+        }
+
+        // FIPS 204 Algorithm 35; mod+- on an even modulus has range (-2^(d-1), 2^(d-1)]
+        var p0 = @mod(r, 1 << D);
+        if (p0 > (1 << (D - 1))) p0 -= (1 << D);
+        const p = power2Round(r);
+        if (p.r0 != p0 or p.r1 != @divTrunc(r - p0, 1 << D)) return error.TestUnexpectedResult;
+
+        if (centerReduce(r) != oracleCenter(r) or centerReduce(r - Q) != oracleCenter(r)) return error.TestUnexpectedResult;
+    }
+}
+
+test "checkNorm equals the definition, including both signs at the boundary" {
+    const bound: i32 = GAMMA1 - BETA;
+    var p = Poly.init();
+    for ([_]i32{ bound - 1, -(bound - 1), Q - (bound - 1), 0 }) |inside| {
+        p.coeffs[17] = inside;
+        try std.testing.expect(p.checkNorm(bound));
+    }
+    for ([_]i32{ bound, -bound, Q - bound, bound + 1, (Q - 1) / 2, -((Q - 1) / 2) }) |outside| {
+        p.coeffs[17] = outside;
+        try std.testing.expect(!p.checkNorm(bound));
+    }
 }

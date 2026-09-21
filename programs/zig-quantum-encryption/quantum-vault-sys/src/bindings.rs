@@ -58,6 +58,7 @@ pub const QV_HYBRID_KEYGEN_FAILED: c_int = -30;
 pub const QV_HYBRID_ENCAPS_FAILED: c_int = -31;
 pub const QV_HYBRID_DECAPS_FAILED: c_int = -32;
 pub const QV_HYBRID_INVALID_PK: c_int = -33;
+pub const QV_HYBRID_INVALID_SK: c_int = -34;
 
 // ============================================================================
 // Type Definitions
@@ -191,6 +192,23 @@ extern "C" {
         pk: *const QvMlDsaPublicKey,
         message: *const u8,
         message_len: usize,
+        signature: *const QvMlDsaSignature,
+    ) -> c_int;
+    pub fn qv_mldsa65_sign_v2(
+        sk: *const QvMlDsaSecretKey,
+        message: *const u8,
+        message_len: usize,
+        context: *const u8,
+        context_len: usize,
+        signature: *mut QvMlDsaSignature,
+        randomized: bool,
+    ) -> c_int;
+    pub fn qv_mldsa65_verify_v2(
+        pk: *const QvMlDsaPublicKey,
+        message: *const u8,
+        message_len: usize,
+        context: *const u8,
+        context_len: usize,
         signature: *const QvMlDsaSignature,
     ) -> c_int;
 

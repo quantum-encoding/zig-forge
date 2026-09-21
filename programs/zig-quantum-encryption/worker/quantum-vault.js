@@ -215,6 +215,53 @@ export class QuantumVault {
     return rc === 0;
   }
 
+  /**
+   * Sign with the STANDARD ML-DSA.Sign interface (FIPS 204): mu = H(tr ‖ 0x00 ‖ len(ctx) ‖ ctx ‖ M).
+   * Interoperable with every conforming ML-DSA-65 implementation; `mlDsaSign` is the legacy
+   * internal framing and is not. `context` is a string or Uint8Array of at most 255 bytes.
+   */
+  mlDsaSignWithContext(sk, message, context = new Uint8Array(0), { randomized = true } = {}) {
+    this.#resetStack();
+    const skPtr = this.#alloc(MLDSA65_SK_SIZE);
+    this.#writeBytes(skPtr, sk);
+
+    const msgBytes = typeof message === "string" ? new TextEncoder().encode(message) : message;
+    const msgPtr = this.#alloc(msgBytes.length);
+    this.#writeBytes(msgPtr, msgBytes);
+
+    const ctxBytes = typeof context === "string" ? new TextEncoder().encode(context) : context;
+    if (ctxBytes.length > 255) throw new RangeError("mlDsaSignWithContext: context exceeds 255 bytes");
+    const ctxPtr = this.#alloc(Math.max(ctxBytes.length, 1));
+    this.#writeBytes(ctxPtr, ctxBytes);
+
+    const sigPtr = this.#alloc(MLDSA65_SIG_SIZE);
+    const rc = this.#exports.qv_mldsa65_sign_v2(skPtr, msgPtr, msgBytes.length, ctxPtr, ctxBytes.length, sigPtr, randomized ? 1 : 0);
+    checkError(rc, "mlDsaSignWithContext");
+    return this.#readBytes(sigPtr, MLDSA65_SIG_SIZE);
+  }
+
+  /** Verify a standard ML-DSA-65 signature (ours or anyone else's) → boolean */
+  mlDsaVerifyWithContext(pk, message, signature, context = new Uint8Array(0)) {
+    this.#resetStack();
+    const pkPtr = this.#alloc(MLDSA65_PK_SIZE);
+    this.#writeBytes(pkPtr, pk);
+
+    const msgBytes = typeof message === "string" ? new TextEncoder().encode(message) : message;
+    const msgPtr = this.#alloc(msgBytes.length);
+    this.#writeBytes(msgPtr, msgBytes);
+
+    const ctxBytes = typeof context === "string" ? new TextEncoder().encode(context) : context;
+    if (ctxBytes.length > 255) return false;
+    const ctxPtr = this.#alloc(Math.max(ctxBytes.length, 1));
+    this.#writeBytes(ctxPtr, ctxBytes);
+
+    const sigPtr = this.#alloc(MLDSA65_SIG_SIZE);
+    this.#writeBytes(sigPtr, signature);
+
+    const rc = this.#exports.qv_mldsa65_verify_v2(pkPtr, msgPtr, msgBytes.length, ctxPtr, ctxBytes.length, sigPtr);
+    return rc === 0;
+  }
+
   // ─── Hybrid ML-KEM+X25519 ────────────────────────────────────────────
 
   /** Generate hybrid keypair → { ek: Uint8Array, dk: Uint8Array } */

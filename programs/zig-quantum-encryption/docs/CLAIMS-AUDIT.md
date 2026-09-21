@@ -55,3 +55,18 @@ Line numbers refer to the files as they were when this audit was taken; the
 - `worker/` (Cloudflare Worker + WASM glue) — calls the same C ABI; it will
   need `qv_hybrid_encaps_v2` / `qv_hybrid_decaps_v2` wrappers if it wants v2,
   nothing there is wrong today.
+
+## Addendum — 2026-09-22 (library 1.2.0)
+
+An independent review (`docs/REVIEW-2026-09.md`) re-tested claims 1, 11 and 14 by measurement
+rather than by reading. Outcome:
+
+| # | Original verdict | Now |
+|---|---|---|
+| 1, 11 | ML-DSA KATs cover the **internal** interface only | Still true of the KATs. The standard external interface now exists (`signWithContext`, `qv_mldsa65_sign_v2`) and is byte-exact against Zig's independent `std.crypto.sign.mldsa`, with cross-verification both ways. v1 signatures were confirmed to be rejected by a standard verifier (0 of 40). |
+| 14 | "constant-time" **imprecise**, nothing backs it | Narrowed to a claim that *is* backed: no divide instruction on secret data, enforced by `zig build ct-check` across nine target/mode pairs. The pre-change code had such divides in Debug, at `-Oz`, and in **every** wasm32 mode including the shipped Worker build. Branch and memory-access timing remain unverified. |
+| — | (not previously examined) | `decaps768` performed no FIPS 203 §7.3 decapsulation-key check, and the public `encapsInternal768` skipped the §7.2 modulus check. Both fixed. |
+| — | (not previously examined) | Static archives omitted compiler-rt, so every C/Rust consumer on x86-64 Linux failed to link (`__zig_probe_stack` undefined). Present at `d3c6bb7`; fixed with `bundle_compiler_rt`. |
+| — | (not previously examined) | `ml_kem.montgomeryReduce` used the negated inverse (`+3327`; correct is `-3327`) and a checked multiply that overflows above ~645,000. Unused, so no output was ever wrong; corrected and tested. |
+| 18, 28 | No licence file | **Still open.** |
+

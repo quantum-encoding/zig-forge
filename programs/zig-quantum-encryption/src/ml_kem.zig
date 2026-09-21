@@ -171,43 +171,49 @@ const ZETAS_MULT: [128]i16 = blk: {
 // Modular Arithmetic
 // ============================================================================
 
-/// Barrett reduction: reduce a to range [0, q-1]
-/// Uses Barrett's algorithm for efficient modular reduction without division
-/// Input: any i16 value
-/// Output: equivalent value in [0, q-1]
-pub fn barrettReduce(a: i16) i16 {
-    // Barrett constant: floor(2^26 / q) = floor(67108864 / 3329) = 20159
-    const v: i32 = 20159;
-    const a32: i32 = @as(i32, a);
-
-    // t = floor(a * v / 2^26) ≈ floor(a / q)
-    var t: i32 = @divTrunc(a32 * v, 1 << 26);
-
-    // a - t*q gives value in approximately [-q, q]
-    t = a32 - t * Q;
-
-    // Conditional addition/subtraction to get into [0, q-1]
-    // Handle negative values by adding Q
-    if (t < 0) {
-        t += Q;
-    } else if (t >= Q) {
-        t -= Q;
-    }
-    return @intCast(t);
+/// Constant-time reduction of `a` into [0, q-1], valid for |a| < 2^30.
+///
+/// Every reduction of secret data in this file goes through here. There is deliberately no `/`,
+/// `%`, `@mod` or `@divTrunc` on a secret value anywhere in ML-KEM: whether a division by the
+/// constant q becomes a multiply is the COMPILER's decision, and it differs by target and mode.
+/// LLVM keeps a real divide in Debug builds and on wasm32 in every mode (it rates division as
+/// cheap there), which is the precondition for the KyberSlash timing attacks. A multiply and an
+/// arithmetic shift cannot be turned back into a divide.
+///
+/// floor(a / q) is estimated as (a * floor(2^44 / q)) >> 44. The estimate is off by at most one
+/// in either direction (it can overshoot for negative `a`), leaving a remainder in (-q, 2q),
+/// which two masked corrections bring into range. Verified exhaustively in the tests.
+pub fn modQ(a: i32) i16 {
+    const multiplier: i64 = comptime @divFloor(@as(i64, 1) << 44, Q);
+    const quotient: i32 = @truncate((@as(i64, a) * multiplier) >> 44);
+    var r: i32 = a -% quotient *% Q;
+    r += (r >> 31) & Q; // (-q, 0) -> (0, q)
+    r -= Q;
+    r += (r >> 31) & Q; // [q, 2q) -> [0, q)
+    return @truncate(r);
 }
 
-/// Montgomery reduction
-/// Given a value 'a' that represents a * R (where R = 2^16),
-/// compute a mod q
+/// Barrett reduction: reduce any i16 to [0, q-1]. Constant time (see `modQ`).
+pub fn barrettReduce(a: i16) i16 {
+    return modQ(a);
+}
+
+/// Montgomery reduction: returns a value congruent to a * 2^-16 (mod q), in (-q, q).
+/// Valid for |a| < 2^15 * q. Not used by the NTT in this file (which reduces with `modQ`); kept
+/// correct because a wrong helper in a cryptographic library gets used eventually.
 pub fn montgomeryReduce(a: i32) i16 {
-    // q^-1 mod 2^16 = 3327 (i.e., 3329 * 3327 ≡ -1 (mod 2^16))
-    const q_inv: i32 = 3327;
+    // q^-1 mod 2^16. Since 3329 * 3327 ≡ -1 (mod 2^16), the inverse is -3327 (= 62209).
+    // The previous constant, +3327, is the NEGATED inverse: with it (a - t*q) ≡ 2a (mod 2^16),
+    // which is not a multiple of 2^16, so the final division silently discarded low bits.
+    const q_inv: i32 = -3327;
 
-    // t = a * q^-1 mod 2^16
-    const t: i16 = @truncate(a * q_inv);
+    // t = a * q^-1 mod 2^16. Only the low 16 bits matter, so the multiply wraps by design;
+    // a checked multiply overflows for any |a| above about 645,000.
+    const t: i16 = @truncate(a *% q_inv);
 
-    // (a - t*q) / 2^16
-    const result = @divTrunc(a - @as(i32, t) * Q, 1 << 16);
+    // (a - t*q) / 2^16. The difference is an exact multiple of 2^16, so an arithmetic shift
+    // equals the division and can never be lowered to a divide instruction.
+    const result = (a - @as(i32, t) * Q) >> 16;
 
     return @intCast(result);
 }
@@ -251,7 +257,7 @@ pub fn ntt(f: *Poly) void {
                 // t = ζ * f[j + len]
                 // f[j + len] = f[j] - t
                 // f[j] = f[j] + t
-                const t: i16 = @intCast(@mod(zeta * @as(i32, f.coeffs[j + len]), Q));
+                const t: i16 = modQ(zeta * @as(i32, f.coeffs[j + len]));
                 f.coeffs[j + len] = barrettReduce(f.coeffs[j] - t);
                 f.coeffs[j] = barrettReduce(f.coeffs[j] + t);
             }
@@ -284,14 +290,14 @@ pub fn nttInverse(f: *Poly) void {
                 const t = f.coeffs[j];
                 f.coeffs[j] = barrettReduce(t + f.coeffs[j + len]);
                 const diff = f.coeffs[j + len] - t;
-                f.coeffs[j + len] = @intCast(@mod(zeta * @as(i32, diff), Q));
+                f.coeffs[j + len] = modQ(zeta * @as(i32, diff));
             }
         }
     }
 
     // Multiply all coefficients by 128^-1 mod q = 3303
     for (0..N) |i| {
-        f.coeffs[i] = @intCast(@mod(@as(i32, f.coeffs[i]) * INV_128, Q));
+        f.coeffs[i] = modQ(@as(i32, f.coeffs[i]) * INV_128);
     }
 }
 
@@ -312,14 +318,14 @@ fn baseCaseMultiply(a0: i16, a1: i16, b0: i16, b1: i16, gamma: i16) struct { c0:
     const gamma_32: i32 = @as(i32, gamma);
 
     // c0 = a0*b0 + a1*b1*γ
-    const c0 = @mod(a0_32 * b0_32 + @mod(a1_32 * b1_32, Q) * gamma_32, Q);
+    const c0 = modQ(a0_32 * b0_32 + @as(i32, modQ(a1_32 * b1_32)) * gamma_32);
 
     // c1 = a0*b1 + a1*b0
-    const c1 = @mod(a0_32 * b1_32 + a1_32 * b0_32, Q);
+    const c1 = modQ(a0_32 * b1_32 + a1_32 * b0_32);
 
     return .{
-        .c0 = @intCast(c0),
-        .c1 = @intCast(c1),
+        .c0 = c0,
+        .c1 = c1,
     };
 }
 
@@ -358,15 +364,21 @@ pub fn multiplyNTTs(f: *const Poly, g: *const Poly, result: *Poly) void {
 ///
 /// This lossy compression is used to reduce ciphertext size.
 pub fn compress(x: i16, comptime d: comptime_int) u16 {
-    const x_u32: u32 = @intCast(@mod(@as(i32, x), Q));
-    const two_d: u32 = @as(u32, 1) << d;
+    const x_u64: u64 = @intCast(modQ(x));
+    const two_d: u64 = @as(u64, 1) << d;
 
-    // Round((2^d * x) / q) mod 2^d
-    // = floor((2^d * x + q/2) / q) mod 2^d
-    const numerator = (x_u32 << d) + (@as(u32, @intCast(Q)) >> 1);
-    const result = numerator / @as(u32, @intCast(Q));
+    // Round((2^d * x) / q) mod 2^d = floor((2^d * x + q/2) / q) mod 2^d
+    //
+    // The division is done as a multiply by ceil(2^36 / q) and a shift. That is exact whenever
+    // numerator * q < 2^36; the numerator is below 2^23 for d <= 11, so 2^23 * 3329 < 2^35 holds.
+    // `x` is secret here (it is the decrypted message, and u/v during re-encryption): this is
+    // the exact expression KyberSlash1 and KyberSlash2 attacked in the reference code.
+    comptime std.debug.assert(d <= 11);
+    const reciprocal: u64 = comptime @divFloor((@as(u64, 1) << 36) + Q - 1, Q);
+    const numerator: u64 = (x_u64 << d) + (@as(u64, Q) >> 1);
+    const result: u64 = (numerator * reciprocal) >> 36;
 
-    return @intCast(result & (two_d - 1));
+    return @truncate(result & (two_d - 1));
 }
 
 /// Decompress_d: Maps Z_{2^d} to Z_q
@@ -396,7 +408,9 @@ pub fn byteEncode(comptime d: comptime_int, f: *const [N]i16, output: *[32 * d]u
     var bit_idx: usize = 0;
 
     for (0..N) |i| {
-        var a: u16 = @intCast(@mod(@as(i32, f[i]), if (d == 12) Q else (1 << d)));
+        // d == 12 carries full coefficients (the secret key among them); d < 12 carries compressed
+        // values, where reduction mod 2^d is a mask. Neither may divide.
+        var a: u16 = if (d == 12) @intCast(modQ(f[i])) else @as(u16, @bitCast(f[i])) & ((1 << d) - 1);
 
         for (0..d) |_| {
             const byte_idx = bit_idx / 8;
@@ -432,7 +446,7 @@ pub fn byteDecode(comptime d: comptime_int, input: *const [32 * d]u8, f: *[N]i16
 
         // For d=12, reduce modulo q
         if (d == 12) {
-            f[i] = @intCast(@mod(@as(i32, value), Q));
+            f[i] = modQ(value);
         } else {
             f[i] = @intCast(value);
         }
@@ -602,4 +616,86 @@ test "multiply NTTs" {
     // Result should be X (in standard form)
     try std.testing.expectEqual(@as(i16, 0), h.coeffs[0]);
     try std.testing.expect(h.coeffs[1] != 0); // Should have X term
+}
+
+// ============================================================================
+// Division-free arithmetic: equivalence with the mathematical definition
+// ============================================================================
+//
+// These tests use `@mod` and `/` as the ORACLE, on public loop counters, to prove that the
+// constant-time replacements compute exactly the same values. They are exhaustive over every
+// input the algorithms can produce, so there is no untested corner for a wrong answer to hide in.
+
+test "modQ equals @mod over every reachable input" {
+    // Largest magnitude ever reduced: a0*b0 + modQ(a1*b1)*gamma < 2 * 3329^2 < 2^25.
+    var a: i32 = -(1 << 25);
+    while (a <= (1 << 25)) : (a += 1) {
+        const got = modQ(a);
+        if (got != @mod(a, Q)) {
+            std.debug.print("modQ({d}) = {d}, expected {d}\n", .{ a, got, @mod(a, Q) });
+            return error.TestUnexpectedResult;
+        }
+    }
+    // and at the documented limit of the contract
+    for ([_]i32{ (1 << 30) - 1, -(1 << 30) + 1, (1 << 30) - Q, -(1 << 30) + Q }) |edge| {
+        try std.testing.expectEqual(@as(i16, @intCast(@mod(edge, Q))), modQ(edge));
+    }
+}
+
+test "barrettReduce equals @mod for every i16" {
+    var a: i32 = std.math.minInt(i16);
+    while (a <= std.math.maxInt(i16)) : (a += 1) {
+        try std.testing.expectEqual(@as(i16, @intCast(@mod(a, Q))), barrettReduce(@intCast(a)));
+    }
+}
+
+test "compress equals the rounding division for every coefficient and every d" {
+    inline for ([_]comptime_int{ 1, 4, 5, 10, 11 }) |d| {
+        var x: i32 = -Q + 1; // non-canonical inputs are accepted too
+        while (x < Q) : (x += 1) {
+            const canonical: u32 = @intCast(@mod(x, Q));
+            const expected: u32 = (((canonical << d) + (@as(u32, Q) >> 1)) / @as(u32, Q)) & ((1 << d) - 1);
+            try std.testing.expectEqual(@as(u16, @intCast(expected)), compress(@intCast(x), d));
+        }
+    }
+}
+
+test "the reciprocal multiply is an exact floor division over the whole numerator range" {
+    const reciprocal: u64 = comptime @divFloor((@as(u64, 1) << 36) + Q - 1, Q);
+    var n: u64 = 0;
+    const limit: u64 = (@as(u64, Q - 1) << 11) + (Q >> 1);
+    while (n <= limit) : (n += 1) {
+        if ((n * reciprocal) >> 36 != n / @as(u64, Q)) return error.TestUnexpectedResult;
+    }
+}
+
+test "byteEncode and byteDecode round-trip and canonicalise" {
+    var f: [N]i16 = undefined;
+    for (0..N) |i| f[i] = @intCast(@mod(@as(i32, @intCast(i)) * 1237 - 1500, Q) - if (i % 3 == 0) @as(i32, Q) else 0);
+    var bytes: [32 * 12]u8 = undefined;
+    byteEncode(12, &f, &bytes);
+    var back: [N]i16 = undefined;
+    byteDecode(12, &bytes, &back);
+    for (0..N) |i| try std.testing.expectEqual(@as(i16, @intCast(@mod(@as(i32, f[i]), Q))), back[i]);
+
+    // a 12-bit field holding a value >= q must decode to its residue
+    var raw: [32 * 12]u8 = @splat(0xFF); // every coefficient = 4095
+    byteDecode(12, &raw, &back);
+    for (0..N) |i| try std.testing.expectEqual(@as(i16, 4095 - Q), back[i]);
+}
+
+test "montgomeryReduce agrees with its definition" {
+    const r_inv: i64 = 169; // 2^-16 mod 3329: 65536 mod 3329 = 2285 and 2285 * 169 = 116 * 3329 + 1
+    try std.testing.expectEqual(@as(i64, 1), @mod(@as(i64, 65536) * r_inv, Q));
+    const limit: i32 = (1 << 15) * Q - 1;
+    var a: i32 = -limit;
+    while (a <= limit) : (a += 997) {
+        const got = montgomeryReduce(a);
+        try std.testing.expect(got > -Q and got < Q);
+        try std.testing.expectEqual(@mod(@as(i64, @mod(a, Q)) * r_inv, Q), @as(i64, @mod(@as(i32, got), Q)));
+        if (a > limit - 997) break; // avoid overflowing the counter on the last step
+    }
+    for ([_]i32{ 0, 1, -1, 65536, -65536, limit, -limit }) |edge| {
+        try std.testing.expectEqual(@mod(@as(i64, @mod(edge, Q)) * r_inv, Q), @as(i64, @mod(@as(i32, montgomeryReduce(edge)), Q)));
+    }
 }

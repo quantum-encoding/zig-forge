@@ -6,7 +6,7 @@
  * Auto-generated from quantum_vault_ffi.zig
  * Do not edit manually.
  *
- * Version: 1.1.0 (qv_version() returns "quantum-vault-pqc-1.1.0")
+ * Version: 1.2.0 (qv_version() returns "quantum-vault-pqc-1.2.0")
  */
 
 #ifndef QUANTUM_VAULT_H
@@ -74,7 +74,8 @@ typedef enum {
     QV_HYBRID_KEYGEN_FAILED = -30,
     QV_HYBRID_ENCAPS_FAILED = -31,
     QV_HYBRID_DECAPS_FAILED = -32,
-    QV_HYBRID_INVALID_PK = -33
+    QV_HYBRID_INVALID_PK = -33,
+    QV_HYBRID_INVALID_SK = -34
 } QvError;
 
 /* ========================================================================== */
@@ -212,6 +213,35 @@ QvError qv_mldsa65_sign_deterministic(const QvMlDsaSecretKey* sk, const uint8_t*
  */
 QvError qv_mldsa65_verify(const QvMlDsaPublicKey* pk, const uint8_t* message,
                           size_t message_len, const QvMlDsaSignature* signature);
+
+/**
+ * Sign with the STANDARD ML-DSA.Sign interface (FIPS 204 Algorithm 2):
+ *   mu = H(tr || 0x00 || context_len || context || message)
+ *
+ * Interoperable with every conforming ML-DSA-65 implementation. qv_mldsa65_sign
+ * uses the internal framing mu = H(tr || message) and is NOT: its signatures
+ * verify only with qv_mldsa65_verify. Sizes and layouts are identical; a
+ * signature does not record its framing, so the verifier must call the
+ * matching function. Use the _v2 pair for all new signatures.
+ *
+ * @param context Input: domain-separation string, may be NULL if context_len is 0
+ * @param context_len Input: 0..255; larger returns QV_INVALID_PARAMETER
+ * @param randomized Input: true = hedged (recommended), false = deterministic
+ */
+QvError qv_mldsa65_sign_v2(const QvMlDsaSecretKey* sk, const uint8_t* message,
+                           size_t message_len, const uint8_t* context,
+                           size_t context_len, QvMlDsaSignature* signature,
+                           bool randomized);
+
+/**
+ * Verify a signature made by qv_mldsa65_sign_v2 or by any conforming
+ * ML-DSA-65 signer using the same context.
+ *
+ * @return QV_SUCCESS if valid, QV_MLDSA_VERIFICATION_FAILED if invalid
+ */
+QvError qv_mldsa65_verify_v2(const QvMlDsaPublicKey* pk, const uint8_t* message,
+                             size_t message_len, const uint8_t* context,
+                             size_t context_len, const QvMlDsaSignature* signature);
 
 /* ========================================================================== */
 /* Hybrid API                                                                  */

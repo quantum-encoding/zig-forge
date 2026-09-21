@@ -50,6 +50,11 @@ pub fn build(b: *std.Build) void {
         .name = "quantum_crypto",
         .root_module = ffi_lib_mod,
     });
+    // Static archives are linked by NON-Zig linkers (cc, rust-lld, Xcode). Zig's compiler-rt is
+    // not on their search path, so it must travel inside the archive: ML-DSA signing has a
+    // ~126 KiB stack frame, which makes x86-64 builds call `__zig_probe_stack`, and without this
+    // every C or Rust consumer on x86-64 Linux failed to link with that symbol undefined.
+    ffi_static_lib.bundle_compiler_rt = true;
     b.installArtifact(ffi_static_lib);
 
     // FFI shared library for dynamic linking
@@ -88,6 +93,7 @@ pub fn build(b: *std.Build) void {
         .name = "quantum-crypto-pqc",
         .root_module = lib_mod,
     });
+    lib.bundle_compiler_rt = true;
     b.installArtifact(lib);
 
     // ========================================================================
@@ -134,6 +140,7 @@ pub fn build(b: *std.Build) void {
             .root_module = cross_mod,
         });
 
+        cross_lib.bundle_compiler_rt = true;
         b.installArtifact(cross_lib);
         cross_step.dependOn(&cross_lib.step);
     }
@@ -353,6 +360,19 @@ pub fn build(b: *std.Build) void {
     });
     const run_secrets_tests = b.addRunArtifact(secrets_tests);
 
+    // Differential tests against std.crypto's independent ML-KEM / ML-DSA (test-only dependency)
+    const differential_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/differential_std.zig"),
+        .target = target,
+        // These loops sign and verify thousands of times; Debug would take minutes.
+        .optimize = if (optimize == .Debug) .ReleaseSafe else optimize,
+        .link_libc = true,
+    });
+    const differential_tests = b.addTest(.{
+        .root_module = differential_test_mod,
+    });
+    const run_differential_tests = b.addRunArtifact(differential_tests);
+
     // Test step
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_ffi_tests.step);
@@ -364,6 +384,16 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_dsa_kat_tests.step);
     test_step.dependOn(&run_kem_kat_tests.step);
     test_step.dependOn(&run_secrets_tests.step);
+    test_step.dependOn(&run_differential_tests.step);
+
+    // ========================================================================
+    // Constant-time regression guard
+    // ========================================================================
+    // Compiles src/ct_probe.zig for a matrix of targets/modes and fails if any divide instruction
+    // can run on secret data. See tools/ct_divide_check.py for the why and the method.
+    const ct_check = b.addSystemCommand(&.{ "python3", "tools/ct_divide_check.py", "--zig", b.graph.zig_exe });
+    const ct_check_step = b.step("ct-check", "Fail if the compiler emitted a divide on secret data (KyberSlash guard)");
+    ct_check_step.dependOn(&ct_check.step);
 
     // ========================================================================
     // Benchmarks

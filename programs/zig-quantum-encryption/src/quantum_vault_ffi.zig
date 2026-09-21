@@ -7,7 +7,7 @@
 //! Memory management: caller allocates, library fills.
 //! Thread safety: no global state.
 //!
-//! Version: 1.1.0 (see `VERSION_STRING`; quantum-vault-sys/build.rs refuses a
+//! Version: 1.2.0 (see `VERSION_STRING`; quantum-vault-sys/build.rs refuses a
 //! static library whose embedded string does not match it)
 
 const std = @import("std");
@@ -70,6 +70,7 @@ pub const QvError = enum(c_int) {
     hybrid_encaps_failed = -31,
     hybrid_decaps_failed = -32,
     hybrid_invalid_pk = -33,
+    hybrid_invalid_sk = -34,
 };
 
 // ============================================================================
@@ -206,7 +207,12 @@ export fn qv_mlkem768_decaps(
     var mlkem_ct: ml_kem.Ciphertext768 = undefined;
     @memcpy(&mlkem_ct.data, &ct.data);
 
-    const ss = ml_kem.decaps768(&mlkem_dk, &mlkem_ct);
+    // The key crosses a language boundary here, so it gets the FIPS 203 §7.3 check every time:
+    // a corrupt key would otherwise yield a well-formed wrong secret with `QV_SUCCESS`.
+    const ss = ml_kem.decaps768Checked(&mlkem_dk, &mlkem_ct) catch |err| return switch (err) {
+        error.InvalidDecapsulationKey => .mlkem_invalid_dk,
+        else => .mlkem_decaps_failed,
+    };
     @memcpy(shared_secret, &ss);
     return .success;
 }
@@ -223,6 +229,7 @@ export fn qv_mldsa65_keygen(
     const result = ml_dsa.keyGen(seed) catch |err| return switch (err) {
         error.RandomnessFailure => .rng_failure,
         error.SigningFailed => .mldsa_keygen_failed,
+        error.ContextTooLong => unreachable, // key generation takes no context
     };
     @memcpy(&keypair.pk.data, &result.pk.data);
     @memcpy(&keypair.sk.data, &result.sk.data);
@@ -246,6 +253,7 @@ export fn qv_mldsa65_sign(
     const sig = ml_dsa.sign(secret_key, message[0..message_len], randomized) catch |err| return switch (err) {
         error.RandomnessFailure => .rng_failure,
         error.SigningFailed => .mldsa_signing_failed,
+        error.ContextTooLong => unreachable, // the internal interface has no context
     };
     @memcpy(&signature.data, &sig.data);
     return .success;
@@ -287,6 +295,52 @@ export fn qv_mldsa65_verify(
     return .mldsa_verification_failed;
 }
 
+/// Sign with the standard ML-DSA.Sign interface (FIPS 204 Algorithm 2):
+/// mu = H(tr ‖ 0x00 ‖ context_len ‖ context ‖ message).
+///
+/// Interoperable with every conforming ML-DSA-65 implementation. `qv_mldsa65_sign` uses the
+/// internal framing mu = H(tr ‖ message) and is NOT: its signatures verify only with
+/// `qv_mldsa65_verify`. Layouts and sizes are identical; only the framing differs, and a
+/// signature does not record which was used - the verifier must call the matching function.
+///
+/// `context` may be NULL when `context_len` is 0. `context_len` above 255 returns
+/// QV_ERROR_INVALID_PARAMETER.
+export fn qv_mldsa65_sign_v2(
+    sk: *const QvMlDsaSecretKey,
+    message: [*]const u8,
+    message_len: usize,
+    context: ?[*]const u8,
+    context_len: usize,
+    signature: *QvMlDsaSignature,
+    randomized: bool,
+) QvError {
+    const ctx: []const u8 = if (context_len == 0) "" else (context orelse return .invalid_parameter)[0..context_len];
+    const secret_key: *const ml_dsa.SecretKey = @ptrCast(sk);
+    const sig = ml_dsa.signWithContext(secret_key, message[0..message_len], ctx, randomized) catch |err| return switch (err) {
+        error.RandomnessFailure => .rng_failure,
+        error.SigningFailed => .mldsa_signing_failed,
+        error.ContextTooLong => .invalid_parameter,
+    };
+    @memcpy(&signature.data, &sig.data);
+    return .success;
+}
+
+/// Verify a signature made by `qv_mldsa65_sign_v2` or by any conforming ML-DSA-65 signer.
+export fn qv_mldsa65_verify_v2(
+    pk: *const QvMlDsaPublicKey,
+    message: [*]const u8,
+    message_len: usize,
+    context: ?[*]const u8,
+    context_len: usize,
+    signature: *const QvMlDsaSignature,
+) QvError {
+    const ctx: []const u8 = if (context_len == 0) "" else (context orelse return .invalid_parameter)[0..context_len];
+    const public_key: *const ml_dsa.PublicKey = @ptrCast(pk);
+    const sig: *const ml_dsa.Signature = @ptrCast(signature);
+    if (ml_dsa.verifyWithContext(public_key, message[0..message_len], ctx, sig)) return .success;
+    return .mldsa_verification_failed;
+}
+
 // ============================================================================
 // Hybrid ML-KEM+X25519 API
 // ============================================================================
@@ -315,6 +369,7 @@ export fn qv_hybrid_decaps(
     ct: *const QvHybridCiphertext,
     shared_secret: *[HYBRID_SS_SIZE]u8,
 ) QvError {
+    if (!hybrid.validateDecapsulationKey(&dk.data)) return .hybrid_invalid_sk;
     const ss = hybrid.decaps(&dk.data, &ct.data);
     @memcpy(shared_secret, &ss);
     return .success;
@@ -338,6 +393,7 @@ export fn qv_hybrid_decaps_v2(
     ct: *const QvHybridCiphertext,
     shared_secret: *[HYBRID_SS_SIZE]u8,
 ) QvError {
+    if (!hybrid.validateDecapsulationKey(&dk.data)) return .hybrid_invalid_sk;
     const ss = hybrid.decapsV2(&dk.data, &ct.data);
     @memcpy(shared_secret, &ss);
     return .success;
@@ -394,7 +450,7 @@ export fn qv_constant_time_eq(a: [*]const u8, b: [*]const u8, len: usize) bool {
 /// literal from the source and refuses to link a prebuilt archive that does
 /// not embed the same string, so a stale library fails the build instead of
 /// silently shipping old code.
-pub const VERSION_STRING = "quantum-vault-pqc-1.1.0";
+pub const VERSION_STRING = "quantum-vault-pqc-1.2.0";
 
 /// Get library version string
 export fn qv_version() [*:0]const u8 {
@@ -457,7 +513,7 @@ pub const C_HEADER =
     \\ * Auto-generated from quantum_vault_ffi.zig
     \\ * Do not edit manually.
     \\ *
-    \\ * Version: 1.1.0 (qv_version() returns "quantum-vault-pqc-1.1.0")
+    \\ * Version: 1.2.0 (qv_version() returns "quantum-vault-pqc-1.2.0")
     \\ */
     \\
     \\#ifndef QUANTUM_VAULT_H
@@ -525,7 +581,8 @@ pub const C_HEADER =
     \\    QV_HYBRID_KEYGEN_FAILED = -30,
     \\    QV_HYBRID_ENCAPS_FAILED = -31,
     \\    QV_HYBRID_DECAPS_FAILED = -32,
-    \\    QV_HYBRID_INVALID_PK = -33
+    \\    QV_HYBRID_INVALID_PK = -33,
+    \\    QV_HYBRID_INVALID_SK = -34
     \\} QvError;
     \\
     \\/* ========================================================================== */
@@ -663,6 +720,35 @@ pub const C_HEADER =
     \\ */
     \\QvError qv_mldsa65_verify(const QvMlDsaPublicKey* pk, const uint8_t* message,
     \\                          size_t message_len, const QvMlDsaSignature* signature);
+    \\
+    \\/**
+    \\ * Sign with the STANDARD ML-DSA.Sign interface (FIPS 204 Algorithm 2):
+    \\ *   mu = H(tr || 0x00 || context_len || context || message)
+    \\ *
+    \\ * Interoperable with every conforming ML-DSA-65 implementation. qv_mldsa65_sign
+    \\ * uses the internal framing mu = H(tr || message) and is NOT: its signatures
+    \\ * verify only with qv_mldsa65_verify. Sizes and layouts are identical; a
+    \\ * signature does not record its framing, so the verifier must call the
+    \\ * matching function. Use the _v2 pair for all new signatures.
+    \\ *
+    \\ * @param context Input: domain-separation string, may be NULL if context_len is 0
+    \\ * @param context_len Input: 0..255; larger returns QV_INVALID_PARAMETER
+    \\ * @param randomized Input: true = hedged (recommended), false = deterministic
+    \\ */
+    \\QvError qv_mldsa65_sign_v2(const QvMlDsaSecretKey* sk, const uint8_t* message,
+    \\                           size_t message_len, const uint8_t* context,
+    \\                           size_t context_len, QvMlDsaSignature* signature,
+    \\                           bool randomized);
+    \\
+    \\/**
+    \\ * Verify a signature made by qv_mldsa65_sign_v2 or by any conforming
+    \\ * ML-DSA-65 signer using the same context.
+    \\ *
+    \\ * @return QV_SUCCESS if valid, QV_MLDSA_VERIFICATION_FAILED if invalid
+    \\ */
+    \\QvError qv_mldsa65_verify_v2(const QvMlDsaPublicKey* pk, const uint8_t* message,
+    \\                             size_t message_len, const uint8_t* context,
+    \\                             size_t context_len, const QvMlDsaSignature* signature);
     \\
     \\/* ========================================================================== */
     \\/* Hybrid API                                                                  */
@@ -848,7 +934,7 @@ test "Hybrid FFI v2 combiner KAT" {
 }
 
 test "Version string" {
-    try std.testing.expectEqualStrings("quantum-vault-pqc-1.1.0", std.mem.span(qv_version()));
+    try std.testing.expectEqualStrings("quantum-vault-pqc-1.2.0", std.mem.span(qv_version()));
     try std.testing.expectEqualStrings(VERSION_STRING, std.mem.span(qv_version()));
 }
 
@@ -899,3 +985,52 @@ fn ffiPanic(msg: []const u8, ret_addr: ?usize) noreturn {
 /// to the default handler in a future toolchain.
 pub const panic = std.debug.FullPanic(ffiPanic);
 
+
+test "FFI: ML-DSA-65 v2 (standard interface) round trip, context binding and limits" {
+    var kp: QvMlDsaKeyPair = undefined;
+    try std.testing.expectEqual(QvError.success, qv_mldsa65_keygen(&kp, null));
+    const msg = "ffi v2";
+    const ctx = "quantum-vault/v2";
+    var sig: QvMlDsaSignature = undefined;
+
+    try std.testing.expectEqual(QvError.success, qv_mldsa65_sign_v2(&kp.sk, msg.ptr, msg.len, ctx.ptr, ctx.len, &sig, true));
+    try std.testing.expectEqual(QvError.success, qv_mldsa65_verify_v2(&kp.pk, msg.ptr, msg.len, ctx.ptr, ctx.len, &sig));
+    // the context is bound; and the legacy verifier must not accept a standard signature
+    try std.testing.expectEqual(QvError.mldsa_verification_failed, qv_mldsa65_verify_v2(&kp.pk, msg.ptr, msg.len, "other".ptr, 5, &sig));
+    try std.testing.expectEqual(QvError.mldsa_verification_failed, qv_mldsa65_verify(&kp.pk, msg.ptr, msg.len, &sig));
+
+    // NULL context is valid exactly when its length is zero
+    try std.testing.expectEqual(QvError.success, qv_mldsa65_sign_v2(&kp.sk, msg.ptr, msg.len, null, 0, &sig, false));
+    try std.testing.expectEqual(QvError.success, qv_mldsa65_verify_v2(&kp.pk, msg.ptr, msg.len, null, 0, &sig));
+    try std.testing.expectEqual(QvError.invalid_parameter, qv_mldsa65_sign_v2(&kp.sk, msg.ptr, msg.len, null, 4, &sig, false));
+
+    const long = "c" ** 256;
+    try std.testing.expectEqual(QvError.success, qv_mldsa65_sign_v2(&kp.sk, msg.ptr, msg.len, long.ptr, 255, &sig, false));
+    try std.testing.expectEqual(QvError.invalid_parameter, qv_mldsa65_sign_v2(&kp.sk, msg.ptr, msg.len, long.ptr, 256, &sig, false));
+    try std.testing.expectEqual(QvError.mldsa_verification_failed, qv_mldsa65_verify_v2(&kp.pk, msg.ptr, msg.len, long.ptr, 256, &sig));
+}
+
+test "FFI: a corrupt decapsulation key is an error, not a silently wrong secret" {
+    var kp: QvMlKemKeyPair = undefined;
+    try std.testing.expectEqual(QvError.success, qv_mlkem768_keygen(&kp));
+    var enc: QvMlKemEncapsResult = undefined;
+    try std.testing.expectEqual(QvError.success, qv_mlkem768_encaps(&kp.ek, &enc));
+    var ss: [MLKEM768_SS_SIZE]u8 = undefined;
+    try std.testing.expectEqual(QvError.success, qv_mlkem768_decaps(&kp.dk, &enc.ciphertext, &ss));
+    try std.testing.expectEqualSlices(u8, &enc.shared_secret, &ss);
+
+    var bad = kp.dk;
+    bad.data[1152 + 17] ^= 0x04; // inside the embedded encapsulation key
+    try std.testing.expectEqual(QvError.mlkem_invalid_dk, qv_mlkem768_decaps(&bad, &enc.ciphertext, &ss));
+
+    var hkp: QvHybridKeyPair = undefined;
+    try std.testing.expectEqual(QvError.success, qv_hybrid_keygen(&hkp));
+    var henc: QvHybridEncapsResult = undefined;
+    try std.testing.expectEqual(QvError.success, qv_hybrid_encaps_v2(&hkp.ek, &henc));
+    var hss: [HYBRID_SS_SIZE]u8 = undefined;
+    try std.testing.expectEqual(QvError.success, qv_hybrid_decaps_v2(&hkp.dk, &henc.ciphertext, &hss));
+    var hbad = hkp.dk;
+    hbad.data[2336 + 3] ^= 0x80; // the stored H(ek) of the ML-KEM half
+    try std.testing.expectEqual(QvError.hybrid_invalid_sk, qv_hybrid_decaps_v2(&hbad, &henc.ciphertext, &hss));
+    try std.testing.expectEqual(QvError.hybrid_invalid_sk, qv_hybrid_decaps(&hbad, &henc.ciphertext, &hss));
+}

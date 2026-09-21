@@ -168,14 +168,25 @@ const K = hybrid.decapsV2(&kp.dk, &enc.ct);   // == enc.K
 
 ### QNFT Backup Signing (ML-DSA-65)
 
-ML-DSA-65 (FIPS 204) is implemented (`src/ml_dsa.zig`): `keyGen`, deterministic
-and randomized `sign`, and `verify`, exported over the C ABI as `qv_mldsa65_*`.
-`keyGen` and deterministic `sign` are byte-exact against the NIST ACVP KATs
-(`src/ml_dsa_tier1_anchors.zig`); randomized `sign` cannot be byte-checked by
-construction and is round-trip tested. The signing interface is FIPS 204's
-**internal** one — `μ = H(tr ‖ M)` with no context string — see
-[Known Answer Tests](#known-answer-tests-kat) for what that does and does not
-cover. It provides post-quantum signature protection for QNFT backups. Hybrid
+ML-DSA-65 (FIPS 204) is implemented in `src/ml_dsa.zig` and exported over the C ABI as
+`qv_mldsa65_*`. There are two signing interfaces, and **which one you call decides whether
+anyone else can verify the result**:
+
+| | Message representative | Interoperable | Zig | C ABI |
+|---|---|---|---|---|
+| **v2 — standard `ML-DSA.Sign`** | `μ = H(tr ‖ 0x00 ‖ len(ctx) ‖ ctx ‖ M)` | **yes** — OpenSSL, BoringSSL, liboqs, Zig `std.crypto` | `signWithContext` / `verifyWithContext` | `qv_mldsa65_sign_v2` / `qv_mldsa65_verify_v2` |
+| v1 — `ML-DSA.Sign_internal` | `μ = H(tr ‖ M)` | no — verifies only with its own v1 counterpart | `sign` / `verify` | `qv_mldsa65_sign` / `qv_mldsa65_verify` |
+
+Use v2 for everything new. `ctx` is a domain-separation string of at most 255 bytes and may be
+empty. v1 is kept byte-for-byte because data already signed with it must keep verifying, and
+because it is what the ACVP internal-interface vectors exercise. Key, signature and secret-key
+layouts are identical; a signature does not record its framing, so the verifier must call the
+matching function. HashML-DSA (pre-hash) is not implemented.
+
+Both interfaces offer hedged (`randomized = true`, recommended) and deterministic signing.
+`keyGen` and deterministic v1 `sign` are byte-exact against the NIST ACVP KATs; v2 is byte-exact
+against Zig's independent `std.crypto.sign.mldsa` on every tested seed, message and context
+(`src/differential_std.zig`), and each verifier accepts the other's signatures. Hybrid
 ML-DSA + Ed25519 signing is not yet implemented.
 
 ### Phase 3: Guardian Multi-Sig (Future)
@@ -199,22 +210,45 @@ Memory usage:
 ### Constant-Time Implementation
 
 What is done:
-- ML-KEM decapsulation compares the re-encrypted ciphertext with
-  `constantTimeCompare` and picks the real or implicit-rejection secret with
-  `constantTimeSelect` (`src/ml_kem_api.zig`), so a tampered ciphertext is not
-  distinguishable by timing at that step
-- Barrett / Montgomery reductions are branch-free
-- ML-DSA signing scrubs unpacked secret polynomials, the masking seed and the
-  per-signature randomness on every exit path; ML-KEM and the hybrid KEM scrub
-  their intermediate secrets the same way (`std.crypto.secureZero`)
+- **No division on secret data, on any target.** Every reduction in ML-KEM goes through
+  `ml_kem.modQ`, and every one in ML-DSA through `ml_dsa.modReduce`, `decompose`, `power2Round`
+  and `centerReduce`: multiplies, arithmetic shifts and masks only. A `/`, `%` or `@mod` by a
+  constant is only constant-time if the compiler lowers it to a multiply, and LLVM does not do
+  that on wasm32 in any mode, nor at `-Oz` elsewhere — the precondition for the KyberSlash
+  attacks. Each replacement is proven equal to its mathematical definition by exhaustive test.
+- **`zig build ct-check` enforces it.** It compiles every secret-handling entry point for nine
+  target/mode pairs, reads the emitted assembly, and fails on any divide instruction or
+  software-divide call in cryptographic code. (The only divides it permits are `std.crypto`'s
+  Keccak sponge dividing a public byte count by its rate.) Run against the code before this
+  change it reports 15 such divides in the shipped wasm32 build and 108 in wasm32 ReleaseFast.
+- ML-KEM decapsulation compares the re-encrypted ciphertext with `constantTimeCompare` and picks
+  the real or implicit-rejection secret with `constantTimeSelect`, so a tampered ciphertext is
+  not distinguishable by timing at that step
+- ML-DSA's norm check and signature packing centre coefficients and take absolute values with
+  masks: no branch on the sign of a secret coefficient
+- ML-DSA signing scrubs unpacked secret polynomials, the masking seed and the per-signature
+  randomness on every exit path; ML-KEM and the hybrid KEM scrub their intermediate secrets the
+  same way (`std.crypto.secureZero`)
 
 What is not claimed:
-- ML-DSA signing contains the rejection-sampling loops FIPS 204 mandates; their
-  iteration count depends on secret data by design, as in every ML-DSA
-  implementation
-- No constant-time verification tooling (ctgrind, dudect, valgrind-based
-  taint) has been run against this code, so "no secret-dependent branches or
-  memory access" is not a statement this repository can back
+- ML-DSA signing contains the rejection-sampling loops FIPS 204 mandates; their iteration count
+  depends on secret data by design, as in every ML-DSA implementation
+- `ct-check` looks for divides. It does not detect secret-dependent branches or memory access in
+  general, and no ctgrind / dudect / valgrind taint run has been made, so a blanket "constant
+  time" statement is still not one this repository can back
+- **Debug builds are not constant-time and must not be shipped**; `zig build` without
+  `-Doptimize=` is Debug. `zig build cross` and `zig build wasm` pick release modes themselves
+
+### Input Validation
+
+- `encaps768` and `encapsInternal768` run the FIPS 203 §7.2 modulus check and reject a
+  non-canonical encapsulation key.
+- `validateDecapsulationKey768` / `decaps768Checked` run the FIPS 203 §7.3 check: the stored
+  `H(ek)` must match the embedded key, and that key must itself be canonical. A corrupt
+  decapsulation key otherwise yields a well-formed but wrong secret for every ciphertext with no
+  error, because implicit rejection looks like success by design. The C ABI checks on every
+  call (`QV_MLKEM_INVALID_DK`, `QV_HYBRID_INVALID_SK`); Zig callers that validated a key once at
+  import may keep using `decaps768`, as FIPS 203 permits.
 
 ### Decapsulation Failure Rate
 
@@ -242,6 +276,27 @@ Covers:
 - Compress/decompress approximation
 - Key generation validity
 - Encapsulation/decapsulation round-trip
+
+On a host whose glibc startup objects carry `.sframe` relocations (current Arch Linux), Zig
+0.16's linker cannot link the native test executables; use `zig build test
+-Dtarget=x86_64-linux-musl`. The library itself is unaffected.
+
+### Differential Tests
+
+`src/differential_std.zig` drives this library and Zig's independent `std.crypto` ML-KEM-768 and
+ML-DSA-65 with the same seeds and demands byte-for-byte agreement: keys, ciphertexts, shared
+secrets, cross-decapsulation, implicit-rejection secrets, deterministic v2 signatures across
+contexts, cross-verification both ways, and identical accept/reject verdicts on 2000 mutated
+signatures. It also pins the fact that v1 signatures are *not* accepted by a standard verifier.
+`std` is a test-only dependency.
+
+### Constant-Time Guard
+
+```bash
+zig build ct-check      # needs python3; ~1 minute
+```
+
+See [Constant-Time Implementation](#constant-time-implementation).
 
 ### Known Answer Tests (KAT)
 

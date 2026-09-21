@@ -154,12 +154,14 @@ fn ml_dsa_example() -> Result<(), quantum_vault_sys::QvError> {
     // Generate signing key pair
     let kp = MlDsaKeyPair::generate()?;
 
-    // Sign a message
+    // Sign with the standard ML-DSA.Sign interface (hedged). The context string is bound into the
+    // signature; any conforming ML-DSA-65 implementation can verify this.
     let message = b"Transaction: Send 100 QV to Alice";
-    let signature = kp.sk.sign(message)?;
+    let signature = kp.sk.sign_with_context(message, b"quantum-vault/tx/v1")?;
+    kp.pk.verify_with_context(message, b"quantum-vault/tx/v1", &signature)?;
 
-    // Verify the signature
-    kp.pk.verify(message, &signature)?;
+    // `sign` / `verify` are the legacy internal framing: kept so old signatures still verify,
+    // not interoperable, and never cross-verifying with the pair above.
     Ok(())
 }
 
@@ -288,6 +290,16 @@ QvError qv_mldsa65_sign(const QvMlDsaSecretKey* sk, const uint8_t* message,
 // Verify signature
 QvError qv_mldsa65_verify(const QvMlDsaPublicKey* pk, const uint8_t* message,
                           size_t message_len, const QvMlDsaSignature* signature);
+
+// STANDARD ML-DSA.Sign / Verify (FIPS 204 Alg. 2 / 3): mu = H(tr || 0x00 || context_len || context || message).
+// Interoperable with every conforming implementation; the two functions above are the legacy
+// internal framing and are not. context may be NULL when context_len == 0; context_len <= 255.
+QvError qv_mldsa65_sign_v2(const QvMlDsaSecretKey* sk, const uint8_t* message, size_t message_len,
+                           const uint8_t* context, size_t context_len,
+                           QvMlDsaSignature* signature, bool randomized);
+QvError qv_mldsa65_verify_v2(const QvMlDsaPublicKey* pk, const uint8_t* message, size_t message_len,
+                             const uint8_t* context, size_t context_len,
+                             const QvMlDsaSignature* signature);
 ```
 
 ### Hybrid
@@ -310,7 +322,7 @@ QvError qv_hybrid_decaps(const QvHybridDecapsKey* dk, const QvHybridCiphertext* 
 void qv_hybrid_combine_v2(const uint8_t ss_m[32], const uint8_t ss_x[32],
                           const uint8_t ct_x[32], const uint8_t pk_x[32], uint8_t out[32]);
 
-// Library version, e.g. "quantum-vault-pqc-1.1.0"
+// Library version, e.g. "quantum-vault-pqc-1.2.0"
 const char* qv_version(void);
 ```
 
@@ -324,7 +336,7 @@ const char* qv_version(void);
 | -3 | `QV_MEMORY_ERROR` | Memory allocation failed |
 | -10 to -15 | `QV_MLKEM_*` | ML-KEM specific errors |
 | -20 to -25 | `QV_MLDSA_*` | ML-DSA specific errors |
-| -30 to -33 | `QV_HYBRID_*` | Hybrid specific errors |
+| -30 to -34 | `QV_HYBRID_*` | Hybrid specific errors (`-34` = decapsulation key failed the FIPS 203 §7.3 check) |
 
 ## License
 

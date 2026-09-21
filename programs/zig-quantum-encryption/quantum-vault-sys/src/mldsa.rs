@@ -43,6 +43,25 @@ impl MlDsaPublicKey {
     pub fn verify_bool(&self, message: &[u8], signature: &MlDsaSignature) -> bool {
         self.verify(message, signature).is_ok()
     }
+
+    /// Verify with the standard ML-DSA.Verify interface (FIPS 204 Algorithm 3).
+    ///
+    /// Accepts signatures from [`MlDsaSecretKey::sign_with_context`] and from any conforming
+    /// ML-DSA-65 signer that used the same `context`. [`verify`](Self::verify) is the legacy
+    /// internal framing and does not interoperate. `context` is at most 255 bytes.
+    pub fn verify_with_context(&self, message: &[u8], context: &[u8], signature: &MlDsaSignature) -> Result<()> {
+        let code = unsafe {
+            bindings::qv_mldsa65_verify_v2(
+                &self.inner,
+                message.as_ptr(),
+                message.len(),
+                context.as_ptr(),
+                context.len(),
+                &signature.inner,
+            )
+        };
+        QvError::from_code(code)
+    }
 }
 
 impl AsRef<[u8]> for MlDsaPublicKey {
@@ -80,6 +99,40 @@ impl MlDsaSecretKey {
     /// Sign a message deterministically
     pub fn sign_deterministic(&self, message: &[u8]) -> Result<MlDsaSignature> {
         self.sign_with_mode(message, false)
+    }
+
+    /// Sign with the standard ML-DSA.Sign interface (FIPS 204 Algorithm 2), hedged.
+    ///
+    /// This is the interoperable signature: `mu = H(tr ‖ 0x00 ‖ len(ctx) ‖ ctx ‖ M)`. Use it for
+    /// everything new. [`sign`](Self::sign) keeps the legacy internal framing so previously signed
+    /// data still verifies. `context` is a domain-separation string of at most 255 bytes; pass
+    /// `&[]` for none. A longer context returns [`QvError::InvalidParameter`].
+    pub fn sign_with_context(&self, message: &[u8], context: &[u8]) -> Result<MlDsaSignature> {
+        self.sign_with_context_mode(message, context, true)
+    }
+
+    /// Deterministic variant of [`sign_with_context`](Self::sign_with_context). Prefer the hedged
+    /// one: deterministic signing is more exposed to fault attacks.
+    pub fn sign_with_context_deterministic(&self, message: &[u8], context: &[u8]) -> Result<MlDsaSignature> {
+        self.sign_with_context_mode(message, context, false)
+    }
+
+    fn sign_with_context_mode(&self, message: &[u8], context: &[u8], randomized: bool) -> Result<MlDsaSignature> {
+        let mut signature = MaybeUninit::<QvMlDsaSignature>::uninit();
+        let code = unsafe {
+            bindings::qv_mldsa65_sign_v2(
+                &self.inner,
+                message.as_ptr(),
+                message.len(),
+                context.as_ptr(),
+                context.len(),
+                signature.as_mut_ptr(),
+                randomized,
+            )
+        };
+        QvError::from_code(code)?;
+        let signature = unsafe { signature.assume_init() };
+        Ok(MlDsaSignature { inner: signature })
     }
 
     /// Sign a message with explicit randomization mode
@@ -279,5 +332,45 @@ mod tests {
         // Sign with original key, verify with reimported key
         let signature = keypair.sk.sign(message).expect("signing should succeed");
         pk2.verify(message, &signature).expect("verification should succeed");
+    }
+
+    #[test]
+    fn test_sign_with_context_roundtrip_and_binding() {
+        let kp = MlDsaKeyPair::generate().unwrap();
+        let msg = b"standard interface";
+        let sig = kp.sk.sign_with_context(msg, b"quantum-vault/v2").unwrap();
+        assert!(kp.pk.verify_with_context(msg, b"quantum-vault/v2", &sig).is_ok());
+        // the context is bound into the signature
+        assert!(kp.pk.verify_with_context(msg, b"other", &sig).is_err());
+        assert!(kp.pk.verify_with_context(msg, b"", &sig).is_err());
+        assert!(kp.pk.verify_with_context(b"tampered", b"quantum-vault/v2", &sig).is_err());
+    }
+
+    #[test]
+    fn test_legacy_and_standard_framings_never_cross_verify() {
+        let kp = MlDsaKeyPair::generate().unwrap();
+        let msg = b"framing";
+        let legacy = kp.sk.sign(msg).unwrap();
+        let standard = kp.sk.sign_with_context(msg, b"").unwrap();
+        assert!(kp.pk.verify(msg, &legacy).is_ok());
+        assert!(kp.pk.verify_with_context(msg, b"", &standard).is_ok());
+        assert!(kp.pk.verify_with_context(msg, b"", &legacy).is_err());
+        assert!(kp.pk.verify(msg, &standard).is_err());
+    }
+
+    #[test]
+    fn test_context_limits() {
+        let kp = MlDsaKeyPair::generate().unwrap();
+        assert!(kp.sk.sign_with_context(b"m", &[]).is_ok());
+        assert!(kp.sk.sign_with_context(b"m", &[0x63; 255]).is_ok());
+        assert!(matches!(kp.sk.sign_with_context(b"m", &[0x63; 256]), Err(QvError::InvalidParameter)));
+    }
+
+    #[test]
+    fn test_deterministic_context_signatures_repeat() {
+        let kp = MlDsaKeyPair::generate().unwrap();
+        let a = kp.sk.sign_with_context_deterministic(b"m", b"ctx").unwrap();
+        let b = kp.sk.sign_with_context_deterministic(b"m", b"ctx").unwrap();
+        assert_eq!(a.as_bytes()[..], b.as_bytes()[..]);
     }
 }

@@ -225,6 +225,16 @@ pub fn encapsDeterministic(
     return result;
 }
 
+/// FIPS 203 §7.3 check on the ML-KEM half of a hybrid decapsulation key. `decaps*` never fail
+/// by design, so a corrupt key would silently produce a wrong secret; callers that receive keys
+/// from storage or across an ABI should run this first (the C ABI does).
+pub fn validateDecapsulationKey(dk: *const HybridDecapsulationKey) bool {
+    var mlkem_dk: mlkem.DecapsulationKey768 = undefined;
+    @memcpy(&mlkem_dk.data, dk[0..MLKEM_DK_SIZE]);
+    defer scrub(&mlkem_dk);
+    return mlkem.validateDecapsulationKey768(&mlkem_dk);
+}
+
 // ============================================================================
 // Decapsulation
 // ============================================================================

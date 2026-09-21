@@ -74,6 +74,9 @@ pub enum QvError {
     #[error("Invalid hybrid public key")]
     HybridInvalidPk,
 
+    #[error("Invalid hybrid secret key (failed the FIPS 203 decapsulation-key check)")]
+    HybridInvalidSk,
+
     // Unknown error
     #[error("Unknown error code: {0}")]
     Unknown(c_int),
@@ -104,6 +107,7 @@ impl From<c_int> for QvError {
             QV_HYBRID_ENCAPS_FAILED => QvError::HybridEncapsFailed,
             QV_HYBRID_DECAPS_FAILED => QvError::HybridDecapsFailed,
             QV_HYBRID_INVALID_PK => QvError::HybridInvalidPk,
+            QV_HYBRID_INVALID_SK => QvError::HybridInvalidSk,
 
             _ => QvError::Unknown(code),
         }

@@ -137,7 +137,7 @@ mod tests {
     #[test]
     fn test_version_matches_source() {
         assert_eq!(version(), env!("QV_EXPECTED_VERSION"));
-        assert_eq!(version(), "quantum-vault-pqc-1.1.0");
+        assert_eq!(version(), "quantum-vault-pqc-1.2.0");
     }
 
     #[test]
