@@ -687,6 +687,58 @@ test "hard-linked snapshot trees are identical yet hold no duplicate files" {
     try testing.expectEqual(@as(u64, 3), set.file_count);
 }
 
+/// A minimal `.git` whose local and remote refs are byte-identical — true of
+/// any freshly pushed branch.
+fn addGitMetadata(scratch: *Scratch, comptime root: []const u8, comptime commit: []const u8) !void {
+    inline for (.{ "/.git", "/.git/refs", "/.git/refs/heads", "/.git/refs/remotes", "/.git/refs/remotes/origin" }) |dir| {
+        try scratch.makeDir(root ++ dir);
+    }
+    try scratch.writeFile(root ++ "/.git/HEAD", "ref: refs/heads/main\n");
+    try scratch.writeFile(root ++ "/.git/refs/heads/main", commit ++ "\n");
+    try scratch.writeFile(root ++ "/.git/refs/heads/feature", commit ++ "\n");
+    try scratch.writeFile(root ++ "/.git/refs/remotes/origin/main", commit ++ "\n");
+    try scratch.writeFile(root ++ "/.git/refs/remotes/origin/feature", commit ++ "\n");
+}
+
+test "no finding points inside .git, yet .git still decides project identity" {
+    const allocator = testing.allocator;
+    var scratch = try Scratch.init(allocator, "dirs-vcs");
+    defer scratch.deinit();
+
+    inline for (.{ "p", "q", "r" }) |root| try buildProject(&scratch, root);
+    try addGitMetadata(&scratch, "p", "1111111111111111111111111111111111111111");
+    try addGitMetadata(&scratch, "q", "1111111111111111111111111111111111111111");
+    // Same working tree, different history.
+    try addGitMetadata(&scratch, "r", "2222222222222222222222222222222222222222");
+
+    var finder = dedupe.DupeFinder.init(allocator, .{ .analyze_dirs = true });
+    defer finder.deinit();
+    const analysis = try scanDirs(&finder, &scratch);
+
+    // refs/heads and refs/remotes/origin match byte for byte inside every
+    // repo. "heads adds nothing" is true of the bytes and would delete the
+    // local branches; nothing may be reported at or below a .git directory.
+    for (analysis.identical_sets) |set| {
+        for (set.dirs) |dir| try testing.expect(std.mem.indexOf(u8, dir.path, "/.git") == null);
+    }
+    for (analysis.overlaps) |overlap| {
+        try testing.expect(std.mem.indexOf(u8, overlap.a.path, "/.git") == null);
+        try testing.expect(std.mem.indexOf(u8, overlap.b.path, "/.git") == null);
+    }
+
+    // The metadata still counts: r's tree matches p's file for file, but its
+    // history differs, so it is not a copy.
+    const set = setWith(analysis, &scratch, "p") orelse return error.SetMissing;
+    try testing.expect(setHas(set, &scratch, "q"));
+    try testing.expect(!setHas(set, &scratch, "r"));
+
+    // ...and r's unique history is what the pair with r reports as at stake.
+    const overlap = overlapOf(analysis, &scratch, "p", "r") orelse return error.OverlapMissing;
+    try testing.expectEqual(dirs.Relation.overlap, overlap.relation);
+    try testing.expect(overlap.b.only_count > 0);
+    for (overlap.b.only) |path| try testing.expect(std.mem.indexOf(u8, path, "/.git/") != null);
+}
+
 extern "c" fn geteuid() c_uint;
 
 test "an unreadable subdirectory blocks every safety verdict" {

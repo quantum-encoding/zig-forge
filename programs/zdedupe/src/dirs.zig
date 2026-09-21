@@ -44,6 +44,13 @@
 //!     count so a consumer can say "identical, ignoring N entries".
 //!   * Overlap relations are about regular-file content. Symlinks and empty
 //!     directories only matter to identical sets.
+//!   * No finding points at or inside version-control metadata (`.git`, `.hg`,
+//!     `.svn`). In there a file's *location* is its meaning: `.git/refs/heads`
+//!     can match `.git/refs/remotes/origin` byte for byte, and "heads adds
+//!     nothing" is then true of the content and ruinous as advice — deleting
+//!     it deletes the local branches. That metadata still counts toward the
+//!     identity of the project around it, so two copies of a project whose
+//!     histories differ are never called identical.
 
 const std = @import("std");
 const types = @import("types.zig");
@@ -58,6 +65,21 @@ const NodeId = u32;
 const no_node: NodeId = std.math.maxInt(NodeId);
 
 const digest_domain = "zdedupe-dir-v1\x00";
+
+/// Directory names that hold version-control metadata.
+const vcs_dir_names = [_][]const u8{ ".git", ".hg", ".svn" };
+
+/// True if `path` is, or lies inside, a version-control metadata directory.
+fn insideVcsDir(path: []const u8) bool {
+    var components = std.mem.tokenizeScalar(u8, path, '/');
+    while (components.next()) |component| {
+        for (vcs_dir_names) |name| {
+            // zig-lens-ignore: EQL-FOR-SECRETS directory names, not secrets
+            if (std.mem.eql(u8, component, name)) return true;
+        }
+    }
+    return false;
+}
 
 pub const Options = struct {
     /// A pair is reported when at least this share of the files on one side
@@ -164,6 +186,8 @@ const Node = struct {
     links: std.ArrayListUnmanaged(u32) = .empty,
     own_incomplete: bool,
     own_skipped: u32,
+    /// Is, or lies inside, `.git` / `.hg` / `.svn`: never reported on.
+    in_vcs: bool,
 
     // Recursive aggregates, filled bottom-up.
     complete: bool = true,
@@ -319,6 +343,7 @@ const Analyzer = struct {
                 .path = try self.out.dupe(u8, record.path),
                 .own_incomplete = record.incomplete,
                 .own_skipped = record.skipped,
+                .in_vcs = insideVcsDir(record.path),
             };
             const id: NodeId = @intCast(i);
             // Pre-order guarantees the parent is already registered. Scan
@@ -504,6 +529,7 @@ const Analyzer = struct {
         for (self.nodes, 0..) |*node, i| {
             // Empty directories are all "identical" to each other: noise.
             if (!node.complete or node.file_count == 0) continue;
+            if (node.in_vcs) continue; // see the module doc: never advise on VCS metadata
             const gop = try by_digest.getOrPut(self.scratch, node.digest);
             if (!gop.found_existing) gop.value_ptr.* = .empty;
             try gop.value_ptr.append(self.scratch, @intCast(i));
@@ -712,11 +738,16 @@ const Analyzer = struct {
                     while (x != no_node and y != no_node) {
                         if (x == y or self.isAncestor(x, y) or self.isAncestor(y, x)) break;
 
-                        const key = PairKey.of(x, y);
-                        if (support.getPtr(key)) |count| {
-                            count.* += 1;
-                        } else if (support.count() < self.options.max_candidate_pairs) {
-                            try support.put(self.scratch, key, 1);
+                        // Pairs inside VCS metadata earn no credit, but the
+                        // climb goes on: matching objects under two `.git`
+                        // directories are evidence for the *projects* above.
+                        if (!self.nodes[x].in_vcs and !self.nodes[y].in_vcs) {
+                            const key = PairKey.of(x, y);
+                            if (support.getPtr(key)) |count| {
+                                count.* += 1;
+                            } else if (support.count() < self.options.max_candidate_pairs) {
+                                try support.put(self.scratch, key, 1);
+                            }
                         }
 
                         x = self.nodes[x].parent;
@@ -912,6 +943,17 @@ test "parentPath" {
     try std.testing.expectEqualStrings("/", parentPath("/a").?);
     try std.testing.expect(parentPath("/") == null);
     try std.testing.expect(parentPath("name") == null);
+}
+
+test "insideVcsDir" {
+    try std.testing.expect(insideVcsDir("/home/u/proj/.git"));
+    try std.testing.expect(insideVcsDir("/home/u/proj/.git/refs/heads"));
+    try std.testing.expect(insideVcsDir("/srv/repo/.hg/store"));
+    try std.testing.expect(!insideVcsDir("/home/u/proj"));
+    try std.testing.expect(!insideVcsDir("/home/u/proj/src"));
+    // A name that merely contains ".git" is an ordinary directory.
+    try std.testing.expect(!insideVcsDir("/home/u/proj/.github/workflows"));
+    try std.testing.expect(!insideVcsDir("/home/u/my.git.notes"));
 }
 
 test "baseName" {
