@@ -60,8 +60,8 @@ pub const DupeFinder = struct {
     /// Directory-level results; present only when `config.analyze_dirs`.
     dir_analysis: ?dirs.Analysis,
     /// Owns every path in `files` (taken over from the walker), so each path
-    /// exists once. Null until a scan has collected files.
-    path_arena: ?std.heap.ArenaAllocator,
+    /// exists once. Empty until a scan has collected files.
+    path_storage: fast_walker.StringStorage,
 
     pub fn init(allocator: std.mem.Allocator, config: types.Config) DupeFinder {
         return .{
@@ -82,14 +82,14 @@ pub const DupeFinder = struct {
             .file_hasher = hasher.FileHasher.init(config.hash_algorithm),
             .failed_paths = 0,
             .dir_analysis = null,
-            .path_arena = null,
+            .path_storage = .{},
         };
     }
 
     pub fn deinit(self: *DupeFinder) void {
-        // Paths are borrowed from `path_arena`; there is nothing per file to free.
+        // Paths are borrowed from `path_storage`; there is nothing per file to free.
         self.files.deinit(self.allocator);
-        if (self.path_arena) |*arena| arena.deinit();
+        self.path_storage.deinit(self.allocator);
 
         for (self.groups.items) |*g| {
             g.deinit();
@@ -121,7 +121,8 @@ pub const DupeFinder = struct {
         fw.setExcludes(self.config.excludes);
         fw.setExcludeCacheDirs(self.config.exclude_cache_dirs);
         fw.enableHardLinkDetection();
-        fw.enableArenaAllocator();
+        // The walk is syscall-bound, so it uses the same parallelism as hashing.
+        fw.setThreads(self.config.getThreadCount());
 
         if (self.config.analyze_dirs) {
             // A directory verdict has to rest on everything the directory
@@ -148,14 +149,21 @@ pub const DupeFinder = struct {
             };
         }
 
+        // Hard links and cross-worker directory verdicts are settled here,
+        // once, across every root.
+        try fw.finish();
+
         // Convert to FileEntry, borrowing the walker's path strings, then take
-        // over the arena that holds them. Indices are kept: `FileEntry.link_of`
+        // over the storage that holds them. Indices are kept: `FileEntry.link_of`
         // refers to positions in the walker's list. The walker's directory and
-        // link records point into the same arena and stay valid below.
-        std.debug.assert(self.files.items.len == 0 and self.path_arena == null);
+        // link records point into the same storage and stay valid below.
+        std.debug.assert(self.files.items.len == 0 and self.path_storage.arenas.items.len == 0);
         self.files.deinit(self.allocator);
         self.files = try fw.toFileEntriesBorrowed(self.allocator);
-        self.path_arena = fw.takeArena();
+        self.path_storage = fw.takeStrings();
+        // The walker's own per-file records are dead weight from here on
+        // (its directory and link records are still needed for analysis).
+        fw.files.clearAndFree(self.allocator);
 
         self.summary.excluded_entries = fw.stats.excluded;
         self.summary.bytes_scanned = fw.stats.total_size;
@@ -504,10 +512,13 @@ pub const DupeFinder = struct {
             try self.groups.append(self.allocator, group);
         }
 
-        // Sort groups by savings (largest first)
-        std.mem.sort(types.DuplicateGroup, self.groups.items, {}, struct {
+        // Sort groups by savings (largest first). The hash breaks ties so the
+        // order is total: a parallel walk reports files in no fixed order, and
+        // the same disk must still produce the same report every time.
+        std.sort.heap(types.DuplicateGroup, self.groups.items, {}, struct {
             fn cmp(_: void, a: types.DuplicateGroup, b: types.DuplicateGroup) bool {
-                return a.savings > b.savings;
+                if (a.savings != b.savings) return a.savings > b.savings;
+                return std.mem.order(u8, &a.hash, &b.hash) == .lt;
             }
         }.cmp);
     }

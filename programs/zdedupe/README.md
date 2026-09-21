@@ -14,7 +14,9 @@ It is bidirectional in neither direction because it is not a codec: it *reads* a
 - **Folder comparison** — index two trees by relative path, then classify each path as identical / only-in-A / only-in-B / modified.
 - **Reports** — `text` (default), `json`, `html`.
 
-Hard links are detected by `(dev, ino)` and counted once: deleting one hard link reclaims nothing, so reporting the pair as duplicates would be a false saving.
+Hard links are detected by `(dev, ino)` and counted once: deleting one hard link reclaims nothing, so reporting the pair as duplicates would be a false saving. Of several paths to one inode the lexicographically smallest is reported, so the choice does not depend on the order the disk returned entries in.
+
+The walk is parallel (`src/fast_walker.zig`): a pool of workers pulls directories from a shared stack, each with its own string arena and result lists, and every file is stat'ed relative to its open directory (`statx(dirfd, name)`) instead of by absolute path. Measured on 642k files with a warm cache: 1.07 s single-threaded with absolute-path stats → 0.90 s with relative stats → 0.16 s on 16 threads. Results arrive in no fixed order, so nothing downstream depends on walk order (`dirs.zig` ranks the tree itself) and every report ordering has a total tie-break; five runs over a frozen tree produce byte-identical stores.
 
 ## CLI
 

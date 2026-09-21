@@ -29,6 +29,10 @@ pub const Stat = struct {
     mode: u32,
     size: u64,
     mtime_sec: i64,
+    /// Hard-link count, or 0 if the filesystem did not report one. A file with
+    /// exactly one link cannot be a hard link of anything, which lets a walker
+    /// skip inode tracking for the overwhelming majority of files.
+    nlink: u32 = 0,
 
     pub const IFMT: u32 = 0o170000;
     pub const IFREG: u32 = 0o100000;
@@ -84,10 +88,11 @@ const StatxTimestamp = extern struct { sec: i64, nsec: u32, __pad: i32 };
 /// statx mask flags — request only the fields we read.
 const STATX_TYPE: u32 = 0x001;
 const STATX_MODE: u32 = 0x002;
+const STATX_NLINK: u32 = 0x004;
 const STATX_MTIME: u32 = 0x040;
 const STATX_INO: u32 = 0x100;
 const STATX_SIZE: u32 = 0x200;
-const STATX_NEEDED: u32 = STATX_TYPE | STATX_MODE | STATX_MTIME | STATX_INO | STATX_SIZE;
+const STATX_NEEDED: u32 = STATX_TYPE | STATX_MODE | STATX_NLINK | STATX_MTIME | STATX_INO | STATX_SIZE;
 
 const AT_FDCWD: c_int = -100;
 const AT_SYMLINK_NOFOLLOW: c_int = 0x100;
@@ -105,6 +110,8 @@ fn statxTo(stx: *const Statx) Stat {
         .mode = stx.stx_mode,
         .size = stx.stx_size,
         .mtime_sec = stx.stx_mtime.sec,
+        // Only trust the count if the filesystem says it filled it in.
+        .nlink = if (stx.stx_mask & STATX_NLINK != 0) stx.stx_nlink else 0,
     };
 }
 
@@ -132,6 +139,7 @@ fn cStatTo(st: *const std.c.Stat) Stat {
         // panic, and let the size filter drop it.
         .size = if (st.size > 0) @intCast(st.size) else 0,
         .mtime_sec = st.mtime().sec,
+        .nlink = std.math.cast(u32, st.nlink) orelse 0,
     };
 }
 
@@ -161,6 +169,23 @@ pub fn fstat(fd: c_int) Error!Stat {
     }
     var st: std.c.Stat = undefined;
     if (std.c.fstat(fd, &st) != 0) return error.StatFailed;
+    return cStatTo(&st);
+}
+
+/// Stat `name` relative to the open directory `dir_fd`, without following a
+/// symlink. For a walker this is the cheap way to stat a directory's entries:
+/// the kernel starts from the directory it already has open instead of
+/// re-resolving every component of a long absolute path for each file.
+pub fn lstatAt(dir_fd: c_int, name: [*:0]const u8) Error!Stat {
+    if (is_linux) {
+        var stx: Statx = undefined;
+        if (statx(dir_fd, name, AT_SYMLINK_NOFOLLOW | AT_STATX_DONT_SYNC, STATX_NEEDED, &stx) != 0) {
+            return error.StatFailed;
+        }
+        return statxTo(&stx);
+    }
+    var st: std.c.Stat = undefined;
+    if (std.c.fstatat(dir_fd, name, &st, std.c.AT.SYMLINK_NOFOLLOW) != 0) return error.StatFailed;
     return cStatTo(&st);
 }
 

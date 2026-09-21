@@ -362,27 +362,11 @@ fn runFastScan(allocator: std.mem.Allocator, path: []const u8, opts: Options) !v
     walker.setSizeFilter(opts.min_size, opts.max_size);
     walker.setIncludeHidden(opts.include_hidden);
     walker.enableHardLinkDetection(); // Important for accuracy - skip hard links
-    walker.enableArenaAllocator(); // Use arena for faster path allocations
-
-    // Progress callback - every 7000 items (fast counter check, no time syscall)
-    walker.setProgress(struct {
-        fn callback(stats: *const fast_walker.WalkStats, current_path: []const u8) void {
-            std.debug.print("\r{} files | {} dirs | {} bytes | {s}                    ", .{
-                stats.files_found,
-                stats.dirs_traversed,
-                stats.total_size,
-                truncatePath(current_path, 40),
-            });
-        }
-
-        fn truncatePath(p: []const u8, max_len: usize) []const u8 {
-            if (p.len <= max_len) return p;
-            return p[p.len - max_len ..];
-        }
-    }.callback, 7000);
+    walker.setThreads(opts.threads);
 
     // Run fast scan
     try walker.walk(path);
+    try walker.finish();
 
     var end_ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.MONOTONIC, &end_ts);

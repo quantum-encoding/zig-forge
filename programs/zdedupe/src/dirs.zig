@@ -196,18 +196,12 @@ const Node = struct {
     bytes: u64 = 0,
     newest_mtime: i64 = std.math.minInt(i64),
     digest: Digest = @splat(0),
-    /// Span of file indices covered by the subtree: [file_lo, file_hi).
-    /// The walk is depth-first, so everything recorded between entering a
-    /// directory and leaving it belongs to that directory — its subtree is one
-    /// contiguous slice of the file list, and needs no collecting.
-    file_lo: u32 = std.math.maxInt(u32),
-    file_hi: u32 = 0,
-
-    /// False if the span holds anything but this subtree (it never should;
-    /// a pair involving such a node is skipped rather than trusted).
-    fn spanIsExact(self: *const Node) bool {
-        return self.file_count == 0 or self.file_hi - self.file_lo == self.file_count;
-    }
+    /// The subtree's files are `Analyzer.ranked[file_lo..][0..file_count]`:
+    /// files are ranked in depth-first order of the *tree*, so every subtree
+    /// is one contiguous slice and needs no collecting. (The ranking is built
+    /// from the tree, not taken from the order the walk reported things in —
+    /// a parallel walk reports them in no particular order at all.)
+    file_lo: u32 = 0,
 };
 
 const TreeHasher = union(types.Config.HashAlgorithm) {
@@ -306,6 +300,10 @@ const Analyzer = struct {
     nodes: []Node,
     /// Directory holding each file, or `no_node` (a scan root that is a file).
     file_node: []NodeId,
+    /// Nodes in depth-first pre-order; reversed, children precede parents.
+    preorder: []NodeId = &.{},
+    /// File indices in depth-first tree order; see `Node.file_lo`.
+    ranked: []u32 = &.{},
     /// Per digest: the first member by path, and how many members there are.
     /// Filled by findIdenticalSets for every digest shared by 2+ directories.
     twins: std.AutoHashMapUnmanaged(Digest, Twins) = .empty,
@@ -337,6 +335,9 @@ const Analyzer = struct {
         var by_path: std.StringHashMapUnmanaged(NodeId) = .empty;
         try by_path.ensureTotalCapacity(self.scratch, @intCast(dir_records.len));
 
+        // Records arrive in whatever order the walk produced them, so register
+        // every directory first and link parents afterwards.
+        var registered = try std.DynamicBitSetUnmanaged.initEmpty(self.scratch, dir_records.len);
         for (dir_records, 0..) |record, i| {
             self.nodes[i] = .{
                 // Result structures point at this copy, so it lives in `out`.
@@ -345,20 +346,21 @@ const Analyzer = struct {
                 .own_skipped = record.skipped,
                 .in_vcs = insideVcsDir(record.path),
             };
-            const id: NodeId = @intCast(i);
-            // Pre-order guarantees the parent is already registered. Scan
-            // roots have no registered parent and become tree roots.
-            if (parentPath(record.path)) |parent_path| {
-                if (by_path.get(parent_path)) |parent_id| {
-                    self.nodes[i].parent = parent_id;
-                    try self.nodes[parent_id].children.append(self.scratch, id);
-                }
-            }
             const gop = by_path.getOrPutAssumeCapacity(self.nodes[i].path);
             // The same path recorded twice means overlapping scan roots got
             // through. Keep the first; the second stays an orphan rather than
             // making a directory a "copy" of itself.
-            if (!gop.found_existing) gop.value_ptr.* = id;
+            if (!gop.found_existing) {
+                gop.value_ptr.* = @intCast(i);
+                registered.set(i);
+            }
+        }
+        for (self.nodes, 0..) |*node, i| {
+            if (!registered.isSet(i)) continue;
+            // Scan roots have no registered parent and become tree roots.
+            const parent_id = by_path.get(parentPath(node.path) orelse continue) orelse continue;
+            node.parent = parent_id;
+            try self.nodes[parent_id].children.append(self.scratch, @intCast(i));
         }
 
         self.file_node = try self.scratch.alloc(NodeId, self.files.len);
@@ -375,6 +377,43 @@ const Analyzer = struct {
             const owner = by_path.get(parent_path) orelse continue;
             try self.nodes[owner].links.append(self.scratch, @intCast(i));
         }
+
+        try self.rankDepthFirst();
+    }
+
+    /// Depth-first pre-order over the tree: fills `preorder`, and ranks the
+    /// files so each subtree's files are contiguous in `ranked`. A node's own
+    /// files are ranked when it is entered and its descendants' follow before
+    /// anything else, so the slice for a subtree is `file_lo .. + file_count`.
+    fn rankDepthFirst(self: *Analyzer) !void {
+        self.preorder = try self.scratch.alloc(NodeId, self.nodes.len);
+        self.ranked = try self.scratch.alloc(u32, self.files.len);
+
+        var stack: std.ArrayListUnmanaged(NodeId) = .empty;
+        defer stack.deinit(self.scratch);
+
+        var visited: usize = 0;
+        var rank: u32 = 0;
+        for (self.nodes, 0..) |*root, root_id| {
+            if (root.parent != no_node) continue;
+            try stack.append(self.scratch, @intCast(root_id));
+            while (stack.pop()) |id| {
+                const node = &self.nodes[id];
+                self.preorder[visited] = id;
+                visited += 1;
+
+                node.file_lo = rank;
+                for (node.files.items) |file_index| {
+                    self.ranked[rank] = file_index;
+                    rank += 1;
+                }
+                try stack.appendSlice(self.scratch, node.children.items);
+            }
+        }
+        // Every node hangs off exactly one root (parents are strict path
+        // prefixes, so there are no cycles) and is therefore visited once.
+        std.debug.assert(visited == self.nodes.len);
+        self.ranked = self.ranked[0..rank];
     }
 
     // ------------------------------------------------------------------
@@ -395,10 +434,10 @@ const Analyzer = struct {
         var entries: std.ArrayListUnmanaged(DigestEntry) = .empty;
 
         // Reverse pre-order visits every child before its parent.
-        var i = self.nodes.len;
-        while (i > 0) {
-            i -= 1;
-            const node = &self.nodes[i];
+        var remaining = self.preorder.len;
+        while (remaining > 0) {
+            remaining -= 1;
+            const node = &self.nodes[self.preorder[remaining]];
 
             node.complete = !node.own_incomplete;
             node.skipped = node.own_skipped;
@@ -407,8 +446,6 @@ const Analyzer = struct {
 
             for (node.files.items) |file_index| {
                 const entry = &self.files[file_index];
-                node.file_lo = @min(node.file_lo, file_index);
-                node.file_hi = @max(node.file_hi, file_index + 1);
                 node.file_count += 1;
                 node.bytes += entry.size;
                 node.newest_mtime = @max(node.newest_mtime, entry.mtime);
@@ -422,10 +459,6 @@ const Analyzer = struct {
                 const child = &self.nodes[child_id];
                 node.complete = node.complete and child.complete;
                 node.skipped += child.skipped;
-                if (child.file_count > 0) {
-                    node.file_lo = @min(node.file_lo, child.file_lo);
-                    node.file_hi = @max(node.file_hi, child.file_hi);
-                }
                 node.file_count += child.file_count;
                 node.bytes += child.bytes;
                 node.newest_mtime = @max(node.newest_mtime, child.newest_mtime);
@@ -817,12 +850,10 @@ const Analyzer = struct {
 
         const node_a = &self.nodes[id_a];
         const node_b = &self.nodes[id_b];
-        if (!node_a.spanIsExact() or !node_b.spanIsExact()) return null;
-
         self.pair_tag += 1;
         const tag = self.pair_tag;
-        for (self.content_id[node_a.file_lo..node_a.file_hi]) |id| self.seen_a[id] = tag;
-        for (self.content_id[node_b.file_lo..node_b.file_hi]) |id| self.seen_b[id] = tag;
+        for (self.subtreeFiles(node_a)) |file| self.seen_a[self.content_id[file]] = tag;
+        for (self.subtreeFiles(node_b)) |file| self.seen_b[self.content_id[file]] = tag;
 
         var side_a = try self.buildSide(id_a, self.seen_b, tag);
         var side_b = try self.buildSide(id_b, self.seen_a, tag);
@@ -878,6 +909,11 @@ const Analyzer = struct {
         return @as(f64, @floatFromInt(part)) / @as(f64, @floatFromInt(whole));
     }
 
+    /// Every file beneath `node`, as indices into `files`.
+    fn subtreeFiles(self: *const Analyzer, node: *const Node) []const u32 {
+        return self.ranked[node.file_lo..][0..@intCast(node.file_count)];
+    }
+
     /// Describe one side of a pair. `other_seen[id] == tag` <=> the other side
     /// holds content `id`.
     fn buildSide(self: *Analyzer, id: NodeId, other_seen: []const u32, tag: u32) !OverlapSide {
@@ -899,7 +935,7 @@ const Analyzer = struct {
         const only = &self.only_scratch;
         only.clearRetainingCapacity();
 
-        for (node.file_lo..node.file_hi) |file_index| {
+        for (self.subtreeFiles(node)) |file_index| {
             const entry = &self.files[file_index];
             if (other_seen[self.content_id[file_index]] == tag) {
                 side.shared_files += 1;
