@@ -27,6 +27,8 @@ pub const DEFAULT_QUICK_HASH_SIZE: usize = 4096;
 pub const FileHasher = struct {
     /// Hash algorithm to use
     algorithm: types.Config.HashAlgorithm,
+    /// Polled between reads; a cancelled hash returns `error.Cancelled`.
+    monitor: ?*const types.Monitor = null,
 
     pub fn init(algorithm: types.Config.HashAlgorithm) FileHasher {
         return .{ .algorithm = algorithm };
@@ -34,17 +36,18 @@ pub const FileHasher = struct {
 
     /// Hash entire file
     pub fn hashFile(self: *const FileHasher, path: []const u8) !Hash {
-        return switch (self.algorithm) {
-            .blake3 => hashFileBlake3(path, null),
-            .sha256 => hashFileSha256(path, null),
-        };
+        return self.hashFileLimited(path, null);
     }
 
     /// Hash first N bytes of file (quick hash for fast rejection)
     pub fn hashFileQuick(self: *const FileHasher, path: []const u8, max_bytes: usize) !Hash {
+        return self.hashFileLimited(path, max_bytes);
+    }
+
+    fn hashFileLimited(self: *const FileHasher, path: []const u8, max_bytes: ?usize) !Hash {
         return switch (self.algorithm) {
-            .blake3 => hashFileBlake3(path, max_bytes),
-            .sha256 => hashFileSha256(path, max_bytes),
+            .blake3 => hashFileWith(std.crypto.hash.Blake3, path, max_bytes, self.monitor),
+            .sha256 => hashFileWith(std.crypto.hash.sha2.Sha256, path, max_bytes, self.monitor),
         };
     }
 
@@ -86,10 +89,21 @@ fn openRegularFile(path: []const u8) !c_int {
 
 /// Hash file using BLAKE3 (fastest, cryptographically secure)
 pub fn hashFileBlake3(path: []const u8, max_bytes: ?usize) !Hash {
+    return hashFileWith(std.crypto.hash.Blake3, path, max_bytes, null);
+}
+
+/// Hash file using SHA256
+pub fn hashFileSha256(path: []const u8, max_bytes: ?usize) !Hash {
+    return hashFileWith(std.crypto.hash.sha2.Sha256, path, max_bytes, null);
+}
+
+/// The one file-reading hash loop. `monitor`, when given, is polled between
+/// reads so cancelling does not have to wait out a multi-gigabyte file.
+fn hashFileWith(comptime Hasher: type, path: []const u8, max_bytes: ?usize, monitor: ?*const types.Monitor) !Hash {
     const fd = try openRegularFile(path);
     defer _ = libc.close(fd);
 
-    var hasher = std.crypto.hash.Blake3.init(.{});
+    var hasher = Hasher.init(.{});
     var buf: [BUFFER_SIZE]u8 = undefined;
     var total_read: usize = 0;
 
@@ -98,43 +112,8 @@ pub fn hashFileBlake3(path: []const u8, max_bytes: ?usize) !Hash {
         if (max_bytes) |max| {
             if (total_read >= max) break;
         }
-
-        const bytes_to_read = if (max_bytes) |max|
-            @min(BUFFER_SIZE, max - total_read)
-        else
-            BUFFER_SIZE;
-
-        const n = libc.read(fd, &buf, bytes_to_read);
-        if (n == 0) break; // genuine EOF
-        if (n < 0) {
-            // read() failed. EINTR is retryable; anything else must propagate
-            // so a partial-prefix hash is never returned as a valid digest.
-            if (libc.errno(n) == .INTR) continue;
-            return error.ReadFailed;
-        }
-
-        const bytes_read: usize = @intCast(n);
-        hasher.update(buf[0..bytes_read]);
-        total_read += bytes_read;
-    }
-
-    var result: Hash = undefined;
-    hasher.final(&result);
-    return result;
-}
-
-/// Hash file using SHA256
-pub fn hashFileSha256(path: []const u8, max_bytes: ?usize) !Hash {
-    const fd = try openRegularFile(path);
-    defer _ = libc.close(fd);
-
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    var buf: [BUFFER_SIZE]u8 = undefined;
-    var total_read: usize = 0;
-
-    while (true) {
-        if (max_bytes) |max| {
-            if (total_read >= max) break;
+        if (monitor) |m| {
+            if (m.cancelled()) return error.Cancelled;
         }
 
         const bytes_to_read = if (max_bytes) |max|

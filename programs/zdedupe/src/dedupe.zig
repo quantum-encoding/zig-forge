@@ -59,6 +59,9 @@ pub const DupeFinder = struct {
     failed_paths: u64,
     /// Directory-level results; present only when `config.analyze_dirs`.
     dir_analysis: ?dirs.Analysis,
+    /// Owns every path in `files` (taken over from the walker), so each path
+    /// exists once. Null until a scan has collected files.
+    path_arena: ?std.heap.ArenaAllocator,
 
     pub fn init(allocator: std.mem.Allocator, config: types.Config) DupeFinder {
         return .{
@@ -79,14 +82,14 @@ pub const DupeFinder = struct {
             .file_hasher = hasher.FileHasher.init(config.hash_algorithm),
             .failed_paths = 0,
             .dir_analysis = null,
+            .path_arena = null,
         };
     }
 
     pub fn deinit(self: *DupeFinder) void {
-        for (self.files.items) |*f| {
-            f.deinit(self.allocator);
-        }
+        // Paths are borrowed from `path_arena`; there is nothing per file to free.
         self.files.deinit(self.allocator);
+        if (self.path_arena) |*arena| arena.deinit();
 
         for (self.groups.items) |*g| {
             g.deinit();
@@ -113,6 +116,7 @@ pub const DupeFinder = struct {
         var fw = fast_walker.FastWalker.init(self.allocator);
         defer fw.deinit();
 
+        fw.setMonitor(self.config.monitor);
         fw.setIncludeHidden(self.config.include_hidden);
         fw.setExcludes(self.config.excludes);
         fw.setExcludeCacheDirs(self.config.exclude_cache_dirs);
@@ -139,21 +143,19 @@ pub const DupeFinder = struct {
 
         for (roots) |path| {
             fw.walk(path) catch |err| switch (err) {
-                error.OutOfMemory => return err,
+                error.OutOfMemory, error.Cancelled => return err,
                 else => self.failed_paths += 1,
             };
         }
 
-        {
-            // Convert to FileEntry and transfer ownership. Indices are kept:
-            // `FileEntry.link_of` refers to positions in the walker's list.
-            var entries = try fw.toFileEntries(self.allocator);
-            defer entries.deinit(self.allocator);
-            errdefer for (entries.items) |*entry| entry.deinit(self.allocator);
-
-            std.debug.assert(self.files.items.len == 0);
-            try self.files.appendSlice(self.allocator, entries.items);
-        }
+        // Convert to FileEntry, borrowing the walker's path strings, then take
+        // over the arena that holds them. Indices are kept: `FileEntry.link_of`
+        // refers to positions in the walker's list. The walker's directory and
+        // link records point into the same arena and stay valid below.
+        std.debug.assert(self.files.items.len == 0 and self.path_arena == null);
+        self.files.deinit(self.allocator);
+        self.files = try fw.toFileEntriesBorrowed(self.allocator);
+        self.path_arena = fw.takeArena();
 
         self.summary.excluded_entries = fw.stats.excluded;
         self.summary.bytes_scanned = fw.stats.total_size;
@@ -179,9 +181,14 @@ pub const DupeFinder = struct {
         self.updateProgress(.quick_hashing, 0, self.countCandidates(&size_groups), null);
         try self.quickHashGroups(&size_groups);
 
+        try self.checkCancelled();
+
         // Phase 4: Full hash remaining candidates
         self.updateProgress(.full_hashing, 0, self.countCandidates(&size_groups), null);
         try self.fullHashGroups(&size_groups);
+        // Hashes missing because the scan was stopped must not be read as
+        // "these files are unique": never build results from a cancelled run.
+        try self.checkCancelled();
 
         // Phase 5: Build duplicate groups
         self.updateProgress(.reporting, 0, 0, null);
@@ -381,6 +388,7 @@ pub const DupeFinder = struct {
             self.config.hash_algorithm,
             thread_count,
             self.progress_callback,
+            self.config.monitor,
         );
     }
 
@@ -435,6 +443,7 @@ pub const DupeFinder = struct {
             self.config.hash_algorithm,
             thread_count,
             self.progress_callback,
+            self.config.monitor,
         );
     }
 
@@ -477,6 +486,16 @@ pub const DupeFinder = struct {
 
             var group = types.DuplicateGroup.init(self.allocator, size, kv.key_ptr.*);
 
+            // Oldest first, path as the tie-break: consumers present the first
+            // file as the one to keep, and "keep the oldest" should not depend
+            // on the order the walk happened to visit things in.
+            std.sort.heap(usize, kv.value_ptr.items, self.files.items, struct {
+                fn lessThan(files: []types.FileEntry, lhs: usize, rhs: usize) bool {
+                    if (files[lhs].mtime != files[rhs].mtime) return files[lhs].mtime < files[rhs].mtime;
+                    return std.mem.order(u8, files[lhs].path, files[rhs].path) == .lt;
+                }
+            }.lessThan);
+
             for (kv.value_ptr.items) |idx| {
                 const entry = &self.files.items[idx];
                 try group.addFileWithInfo(entry.path, entry.mtime);
@@ -493,7 +512,23 @@ pub const DupeFinder = struct {
         }.cmp);
     }
 
+    fn checkCancelled(self: *const DupeFinder) error{Cancelled}!void {
+        if (self.config.monitor) |m| {
+            if (m.cancelled()) return error.Cancelled;
+        }
+    }
+
     fn updateProgress(self: *DupeFinder, phase: types.Progress.Phase, processed: u64, total: u64, file: ?[]const u8) void {
+        if (self.config.monitor) |m| {
+            m.enter(switch (phase) {
+                .scanning => .scanning,
+                .size_grouping => .size_grouping,
+                .quick_hashing => .quick_hashing,
+                .full_hashing => .full_hashing,
+                .reporting => .analyzing,
+                .done => .done,
+            }, total);
+        }
         self.progress.phase = phase;
         self.progress.files_processed = processed;
         self.progress.files_total = total;

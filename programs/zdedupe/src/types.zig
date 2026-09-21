@@ -181,6 +181,9 @@ pub const Config = struct {
     /// copy of another because the file that differs was outside the size
     /// window.
     analyze_dirs: bool = false,
+    /// Optional progress/cancel channel; see `Monitor`. Borrowed, and must
+    /// outlive the scan.
+    monitor: ?*Monitor = null,
 
     /// Basenames of regenerable output, safe to ignore when deciding whether
     /// two project copies hold the same work. Deliberately absent: `.git`
@@ -261,6 +264,57 @@ pub const Progress = struct {
         if (self.files_total == 0) return 0.0;
         return @as(f64, @floatFromInt(self.files_processed)) /
             @as(f64, @floatFromInt(self.files_total)) * 100.0;
+    }
+};
+
+/// Live view of a running scan, and the way to stop one.
+///
+/// Every field is an atomic, so any thread may read progress or request
+/// cancellation while the scan runs on another — which is how a GUI keeps a
+/// progress bar moving and a Cancel button working across the C FFI without
+/// callbacks re-entering the host. The scan only ever *writes* progress and
+/// *reads* `cancel_requested`.
+pub const Monitor = struct {
+    phase: std.atomic.Value(u32) = .init(@intFromEnum(Phase.idle)),
+    /// Regular files found by the walk so far.
+    files_found: std.atomic.Value(u64) = .init(0),
+    /// Work items finished / expected in the current phase (hashing phases).
+    done: std.atomic.Value(u64) = .init(0),
+    total: std.atomic.Value(u64) = .init(0),
+    cancel_requested: std.atomic.Value(bool) = .init(false),
+
+    /// Stable numbering: part of the C ABI (`zdedupe_progress.phase`).
+    pub const Phase = enum(u32) {
+        idle = 0,
+        scanning = 1,
+        size_grouping = 2,
+        quick_hashing = 3,
+        full_hashing = 4,
+        analyzing = 5,
+        writing = 6,
+        done = 7,
+    };
+
+    pub fn reset(self: *Monitor) void {
+        self.phase.store(@intFromEnum(Phase.idle), .release);
+        self.files_found.store(0, .release);
+        self.done.store(0, .release);
+        self.total.store(0, .release);
+        self.cancel_requested.store(false, .release);
+    }
+
+    pub fn enter(self: *Monitor, phase: Phase, total: u64) void {
+        self.done.store(0, .release);
+        self.total.store(total, .release);
+        self.phase.store(@intFromEnum(phase), .release);
+    }
+
+    pub fn cancel(self: *Monitor) void {
+        self.cancel_requested.store(true, .release);
+    }
+
+    pub fn cancelled(self: *const Monitor) bool {
+        return self.cancel_requested.load(.acquire);
     }
 };
 

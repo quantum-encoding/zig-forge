@@ -97,6 +97,8 @@ pub const FastWalker = struct {
     excludes: []const []const u8, // Entry basenames to prune (borrowed)
     exclude_cache_dirs: bool, // Prune directories holding a valid CACHEDIR.TAG
     record_tree: bool, // Also record dirs, unfollowed symlinks and extra hard links
+    monitor: ?*types.Monitor, // Progress out, cancellation in (borrowed)
+    strings_released: bool = false, // takeArena() was called: the strings are not ours to free
 
     // Reusable path buffer (avoids per-file allocations)
     path_buf: [8192]u8 = undefined,
@@ -147,6 +149,7 @@ pub const FastWalker = struct {
             .excludes = &.{},
             .exclude_cache_dirs = false,
             .record_tree = false,
+            .monitor = null,
             .dir_stack = .empty,
             .files = .empty,
             .dirs = .empty,
@@ -171,6 +174,8 @@ pub const FastWalker = struct {
         if (self.arena) |*arena| {
             // Single bulk free for all paths
             arena.deinit();
+        } else if (self.strings_released) {
+            // The arena holding every string now belongs to someone else.
         } else {
             // Individual frees
             for (self.files.items) |entry| {
@@ -260,6 +265,11 @@ pub const FastWalker = struct {
         self.record_tree = true;
     }
 
+    /// Publish progress to, and take cancellation from, `monitor`.
+    pub fn setMonitor(self: *FastWalker, monitor: ?*types.Monitor) void {
+        self.monitor = monitor;
+    }
+
     /// Walk a directory tree. May be called once per root on the same walker:
     /// results accumulate, and because the inode table is shared a file
     /// reachable from two roots is still only reported once.
@@ -314,19 +324,30 @@ pub const FastWalker = struct {
         const root_dir = libc.opendir(@ptrCast(&self.path_buf)) orelse {
             return error.CannotOpenDirectory;
         };
-        errdefer _ = libc.closedir(root_dir);
+        {
+            // Ours to close only until the stack owns it: once pushed, `deinit`
+            // (or the next `walk`) closes it, and a later error such as
+            // cancellation must not close it a second time.
+            errdefer _ = libc.closedir(root_dir);
 
-        const root_index = try self.recordDir();
-        try self.dir_stack.append(self.allocator, .{
-            .dir = root_dir,
-            .path_len = self.path_len,
-            .dir_index = root_index,
-        });
+            const root_index = try self.recordDir();
+            try self.dir_stack.append(self.allocator, .{
+                .dir = root_dir,
+                .path_len = self.path_len,
+                .dir_index = root_index,
+            });
+        }
 
-        // Iterative traversal
+        // Iterative traversal. Progress and cancellation are handled once per
+        // directory: often enough to feel immediate, rare enough to be free.
         while (self.dir_stack.items.len > 0) {
+            if (self.monitor) |m| {
+                m.files_found.store(self.stats.files_found, .release);
+                if (m.cancelled()) return error.Cancelled;
+            }
             try self.processCurrentDir();
         }
+        if (self.monitor) |m| m.files_found.store(self.stats.files_found, .release);
     }
 
     fn processCurrentDir(self: *FastWalker) !void {
@@ -675,6 +696,44 @@ pub const FastWalker = struct {
         if (self.progress_counter < self.progress_interval_count) return;
         self.progress_counter = 0;
         self.progress_fn.?(&self.stats, self.path_buf[0..self.path_len]);
+    }
+
+    /// Hand the string arena (every recorded path and link target) to the
+    /// caller, who then owns it and must `deinit` it. The walker's lists stay
+    /// valid for as long as that arena lives. Returns null when the arena was
+    /// not enabled, in which case the walker keeps owning its strings.
+    ///
+    /// Together with `toFileEntriesBorrowed` this is how a scan keeps ONE copy
+    /// of each path instead of two: measured on 642k files, the second copy
+    /// (one small heap allocation per file) was a quarter of peak memory.
+    pub fn takeArena(self: *FastWalker) ?std.heap.ArenaAllocator {
+        const arena = self.arena orelse return null;
+        self.arena = null;
+        self.strings_released = true;
+        return arena;
+    }
+
+    /// Like `toFileEntries`, but the entries point at the walker's own path
+    /// strings. Only valid while the arena from `takeArena` (or the walker)
+    /// is alive; the entries must NOT be passed to `FileEntry.deinit`.
+    pub fn toFileEntriesBorrowed(self: *FastWalker, allocator: std.mem.Allocator) !std.ArrayListUnmanaged(types.FileEntry) {
+        var entries: std.ArrayListUnmanaged(types.FileEntry) = .empty;
+        errdefer entries.deinit(allocator);
+        try entries.ensureTotalCapacityPrecise(allocator, self.files.items.len);
+
+        for (self.files.items) |fast_entry| {
+            entries.appendAssumeCapacity(.{
+                .path = fast_entry.path,
+                .size = fast_entry.size,
+                .inode = fast_entry.ino,
+                .dev = fast_entry.dev,
+                .mtime = fast_entry.mtime,
+                .hash = null,
+                .quick_hash = null,
+                .link_of = fast_entry.link_of,
+            });
+        }
+        return entries;
     }
 
     /// Get results as types.FileEntry array (for compatibility with existing code)

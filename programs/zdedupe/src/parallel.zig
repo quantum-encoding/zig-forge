@@ -38,6 +38,8 @@ pub const ParallelHasher = struct {
     progress_callback: ?types.ProgressCallback,
     /// Progress data for callback
     progress: types.Progress,
+    /// Atomic progress + cancellation, shared with whoever started the scan.
+    monitor: ?*types.Monitor = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -143,9 +145,16 @@ pub const ParallelHasher = struct {
 
     /// Main worker loop - atomically grab and process jobs
     fn workerLoop(self: *ParallelHasher) void {
-        const file_hasher = hasher.FileHasher.init(self.algorithm);
+        var file_hasher = hasher.FileHasher.init(self.algorithm);
+        file_hasher.monitor = self.monitor;
 
         while (true) {
+            // A cancelled scan stops taking work; the file being read right
+            // now bails out between reads (see hasher.hashFileWith).
+            if (self.monitor) |m| {
+                if (m.cancelled()) break;
+            }
+
             // Atomically grab next job index
             const idx = self.job_index.fetchAdd(1, .acquire);
             if (idx >= self.jobs.items.len) break;
@@ -165,11 +174,14 @@ pub const ParallelHasher = struct {
 
             // Update completed count
             const completed = self.completed.fetchAdd(1, .release) + 1;
+            if (self.monitor) |m| m.done.store(completed, .release);
 
-            // Update progress (every 100 files or so to reduce callback overhead)
-            if (completed % 100 == 0 or completed == self.jobs.items.len) {
-                self.progress.files_processed = completed;
-                if (self.progress_callback) |cb| {
+            // The callback path shares one non-atomic Progress struct between
+            // workers, so it is only driven when a callback is installed (the
+            // CLI); GUI hosts read the Monitor instead.
+            if (self.progress_callback) |cb| {
+                if (completed % 100 == 0 or completed == self.jobs.items.len) {
+                    self.progress.files_processed = completed;
                     cb(&self.progress);
                 }
             }
@@ -200,9 +212,11 @@ pub fn parallelQuickHash(
     algorithm: types.Config.HashAlgorithm,
     thread_count: u32,
     progress_callback: ?types.ProgressCallback,
+    monitor: ?*types.Monitor,
 ) !void {
     var hasher_pool = ParallelHasher.init(allocator, files, algorithm, thread_count);
     defer hasher_pool.deinit();
+    hasher_pool.monitor = monitor;
 
     if (progress_callback) |cb| {
         hasher_pool.setProgressCallback(cb);
@@ -224,9 +238,11 @@ pub fn parallelFullHash(
     algorithm: types.Config.HashAlgorithm,
     thread_count: u32,
     progress_callback: ?types.ProgressCallback,
+    monitor: ?*types.Monitor,
 ) !void {
     var hasher_pool = ParallelHasher.init(allocator, files, algorithm, thread_count);
     defer hasher_pool.deinit();
+    hasher_pool.monitor = monitor;
 
     if (progress_callback) |cb| {
         hasher_pool.setProgressCallback(cb);

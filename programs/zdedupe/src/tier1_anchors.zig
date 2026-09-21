@@ -985,3 +985,362 @@ test "external contract: the directories JSON section parses with the documented
     defer parsed_plain.deinit();
     try testing.expect(parsed_plain.value.object.get("directories") == null);
 }
+
+// ===========================================================================
+// Result store, progress and cancellation
+// ===========================================================================
+//
+// The store is checked against the JSON report of the same scan: two emitters
+// that share no code below `DupeFinder`, one of which (JSON) is already
+// anchored above by an independent parser. The desktop app's Rust reader is
+// the second, fully independent implementation of the format.
+
+const store = @import("store.zig");
+const lib = @import("lib.zig");
+
+/// Bounds-checked view over a store file, for tests.
+const StoreView = struct {
+    bytes: []const u8,
+    header: store.Header,
+
+    fn open(bytes: []const u8) !StoreView {
+        if (bytes.len < store.header_size) return error.Truncated;
+        const header = std.mem.bytesToValue(store.Header, bytes[0..store.header_size]);
+        if (!std.mem.eql(u8, &header.magic, &store.magic)) return error.BadMagic;
+        if (header.version != store.format_version) return error.BadVersion;
+        if (header.file_size != bytes.len) return error.SizeMismatch;
+        return .{ .bytes = bytes, .header = header };
+    }
+
+    fn count(self: *const StoreView, id: store.SectionId) u64 {
+        return self.header.sections[@intFromEnum(id)].count;
+    }
+
+    fn record(self: *const StoreView, comptime T: type, id: store.SectionId, index: u64) !T {
+        const section = self.header.sections[@intFromEnum(id)];
+        if (index >= section.count) return error.OutOfRange;
+        const start = section.offset + index * @sizeOf(T);
+        if (start + @sizeOf(T) > self.bytes.len) return error.Truncated;
+        return std.mem.bytesToValue(T, self.bytes[@intCast(start)..][0..@sizeOf(T)]);
+    }
+
+    fn string(self: *const StoreView, offset: u64, len: u32) ![]const u8 {
+        const section = self.header.sections[@intFromEnum(store.SectionId.strings)];
+        if (offset + len > section.count) return error.OutOfRange;
+        const start: usize = @intCast(section.offset + offset);
+        return self.bytes[start..][0..len];
+    }
+};
+
+fn readWholeFile(allocator: std.mem.Allocator, path: [:0]const u8) ![]u8 {
+    const fd = std.c.open(path.ptr, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    if (fd < 0) return error.OpenFailed;
+    defer _ = std.c.close(fd);
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var buf: [16 * 1024]u8 = undefined;
+    while (true) {
+        const n = std.c.read(fd, &buf, buf.len);
+        if (n < 0) return error.ReadFailed;
+        if (n == 0) break;
+        try out.appendSlice(allocator, buf[0..@intCast(n)]);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn setMtime(scratch: *const Scratch, sub_path: []const u8, seconds: i64) !void {
+    const full = try scratch.joinZ(sub_path);
+    defer scratch.allocator.free(full);
+    const times = [2]std.c.timespec{
+        .{ .sec = seconds, .nsec = 0 },
+        .{ .sec = seconds, .nsec = 0 },
+    };
+    if (std.c.utimensat(std.c.AT.FDCWD, full.ptr, &times, 0) != 0) return error.SetMtimeFailed;
+}
+
+test "duplicate groups list the oldest file first, whatever order the walk found them in" {
+    const allocator = testing.allocator;
+    var scratch = try Scratch.init(allocator, "oldest-first");
+    defer scratch.deinit();
+
+    // Names chosen so neither creation order nor name order matches age order.
+    try scratch.writeFile("b-newest.txt", "same payload, three ages\n");
+    try scratch.writeFile("c-oldest.txt", "same payload, three ages\n");
+    try scratch.writeFile("a-middle.txt", "same payload, three ages\n");
+    try setMtime(&scratch, "b-newest.txt", 1_700_003_000);
+    try setMtime(&scratch, "c-oldest.txt", 1_700_001_000);
+    try setMtime(&scratch, "a-middle.txt", 1_700_002_000);
+
+    var finder = dedupe.DupeFinder.init(allocator, .{});
+    defer finder.deinit();
+    try finder.scan(&.{scratch.path});
+
+    const groups = finder.getGroups();
+    try testing.expectEqual(@as(usize, 1), groups.len);
+    const infos = groups[0].file_infos.items;
+    try testing.expect(pathIs(&scratch, infos[0].path, "c-oldest.txt"));
+    try testing.expect(pathIs(&scratch, infos[1].path, "a-middle.txt"));
+    try testing.expect(pathIs(&scratch, infos[2].path, "b-newest.txt"));
+    // The legacy path list must agree with it.
+    try testing.expect(pathIs(&scratch, groups[0].files.items[0], "c-oldest.txt"));
+}
+
+test "the result store holds exactly what the JSON report of the same scan says" {
+    const allocator = testing.allocator;
+    var scratch = try Scratch.init(allocator, "store");
+    defer scratch.deinit();
+
+    const hostile_dir = "dir\" ,\"injected\":1, \\ <b>";
+    try buildProject(&scratch, "p");
+    try buildProject(&scratch, "q");
+    try buildProject(&scratch, hostile_dir);
+    try scratch.writeFile(hostile_dir ++ "/src/extra.c", "only in the hostile copy\n");
+
+    var finder = dedupe.DupeFinder.init(allocator, .{ .analyze_dirs = true });
+    defer finder.deinit();
+    try finder.scan(&.{scratch.path});
+
+    // The store goes next to the fixture, not into it, and is read back whole.
+    var store_scratch = try Scratch.init(allocator, "store-out");
+    defer store_scratch.deinit();
+    const store_path = try store_scratch.joinZ("result.zds");
+    defer allocator.free(store_path);
+
+    try store.write(store_path, .{
+        .groups = finder.getGroups(),
+        .summary = finder.getSummary(),
+        .failed_paths = finder.getFailedPathCount(),
+        .analysis = finder.getDirAnalysis(),
+    });
+    // Written via a temporary name and renamed: nothing half-done is left.
+    try testing.expect(try store_scratch.exists("result.zds"));
+    try testing.expect(!try store_scratch.exists("result.zds.partial"));
+
+    const bytes = try readWholeFile(allocator, store_path);
+    defer allocator.free(bytes);
+    const view = try StoreView.open(bytes);
+
+    var json_out: std.Io.Writer.Allocating = .init(allocator);
+    defer json_out.deinit();
+    const writer = report.ReportWriter.init(allocator, .{ .format = .json });
+    try writer.writeScanReport(&json_out.writer, finder.getGroups(), finder.getSummary(), finder.getDirAnalysis());
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_out.written(), .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+
+    // Summary
+    const summary = root.get("summary").?.object;
+    try testing.expectEqual(summary.get("files_scanned").?.integer, @as(i64, @intCast(view.header.files_scanned)));
+    try testing.expectEqual(summary.get("bytes_scanned").?.integer, @as(i64, @intCast(view.header.bytes_scanned)));
+    try testing.expectEqual(summary.get("duplicate_groups").?.integer, @as(i64, @intCast(view.header.duplicate_groups)));
+    try testing.expectEqual(summary.get("duplicate_files").?.integer, @as(i64, @intCast(view.header.duplicate_files)));
+    try testing.expectEqual(summary.get("space_savings").?.integer, @as(i64, @intCast(view.header.space_savings)));
+    try testing.expect(view.header.flags & store.flag_has_directories != 0);
+
+    // Groups, in order, file for file.
+    const json_groups = root.get("groups").?.array.items;
+    try testing.expectEqual(@as(u64, json_groups.len), view.count(.groups));
+    try testing.expect(json_groups.len > 0);
+    var hex: [64]u8 = undefined;
+    for (json_groups, 0..) |json_group, gi| {
+        const group = try view.record(store.Group, .groups, gi);
+        try testing.expectEqualStrings(json_group.object.get("hash").?.string, hasher.hashToHex(&group.hash, &hex));
+        try testing.expectEqual(json_group.object.get("size").?.integer, @as(i64, @intCast(group.size)));
+        const json_files = json_group.object.get("files").?.array.items;
+        try testing.expectEqual(@as(u32, @intCast(json_files.len)), group.file_count);
+        for (json_files, 0..) |json_file, fi| {
+            const file = try view.record(store.GroupFile, .group_files, group.first_file + fi);
+            try testing.expectEqualStrings(json_file.object.get("path").?.string, try view.string(file.path_offset, file.path_len));
+            try testing.expect(file.mtime > 0);
+        }
+    }
+
+    // Identical sets.
+    const directories = root.get("directories").?.object;
+    const json_sets = directories.get("identical_sets").?.array.items;
+    try testing.expectEqual(@as(u64, json_sets.len), view.count(.sets));
+    for (json_sets, 0..) |json_set, si| {
+        const set = try view.record(store.Set, .sets, si);
+        try testing.expectEqualStrings(json_set.object.get("digest").?.string, hasher.hashToHex(&set.digest, &hex));
+        try testing.expectEqual(json_set.object.get("file_count").?.integer, @as(i64, @intCast(set.file_count)));
+        try testing.expectEqual(json_set.object.get("bytes").?.integer, @as(i64, @intCast(set.bytes)));
+        const json_dirs = json_set.object.get("dirs").?.array.items;
+        try testing.expectEqual(@as(u32, @intCast(json_dirs.len)), set.dir_count);
+        for (json_dirs, 0..) |json_dir, di| {
+            const dir = try view.record(store.SetDir, .set_dirs, set.first_dir + di);
+            try testing.expectEqualStrings(json_dir.object.get("path").?.string, try view.string(dir.path_offset, dir.path_len));
+            try testing.expectEqual(json_dir.object.get("skipped_entries").?.integer, @as(i64, @intCast(dir.skipped_entries)));
+        }
+    }
+
+    // Overlaps, including the hostile directory name and the only-here lists.
+    const json_overlaps = directories.get("overlaps").?.array.items;
+    try testing.expectEqual(@as(u64, json_overlaps.len), view.count(.overlaps));
+    try testing.expect(json_overlaps.len > 0);
+    const relation_names = [_][]const u8{ "same_content", "a_in_b", "b_in_a", "overlap" };
+    for (json_overlaps, 0..) |json_overlap, oi| {
+        const overlap = try view.record(store.Overlap, .overlaps, oi);
+        try testing.expectEqualStrings(json_overlap.object.get("relation").?.string, relation_names[overlap.relation]);
+        for ([_]store.Side{ overlap.a, overlap.b }, [_][]const u8{ "a", "b" }) |side, key| {
+            const json_side = json_overlap.object.get(key).?.object;
+            try testing.expectEqualStrings(json_side.get("path").?.string, try view.string(side.path_offset, side.path_len));
+            try testing.expectEqual(json_side.get("files").?.integer, @as(i64, @intCast(side.files)));
+            try testing.expectEqual(json_side.get("shared_files").?.integer, @as(i64, @intCast(side.shared_files)));
+            try testing.expectEqual(json_side.get("only_count").?.integer, @as(i64, @intCast(side.only_count)));
+            try testing.expectEqual(json_side.get("identical_copies").?.integer, @as(i64, @intCast(side.identical_copies)));
+            try testing.expectEqual(json_side.get("complete").?.bool, side.complete == 1);
+            const json_only = json_side.get("only").?.array.items;
+            try testing.expectEqual(@as(u32, @intCast(json_only.len)), side.only_listed);
+            for (json_only, 0..) |json_path, pi| {
+                const only = try view.record(store.OnlyPath, .only_paths, side.first_only + pi);
+                try testing.expectEqualStrings(json_path.string, try view.string(only.path_offset, only.path_len));
+            }
+        }
+    }
+}
+
+test "a store that cannot be created reports it and leaves nothing behind" {
+    const allocator = testing.allocator;
+    var scratch = try Scratch.init(allocator, "store-fail");
+    defer scratch.deinit();
+
+    const summary = std.mem.zeroes(types.DuplicateSummary);
+    const target = try scratch.join("no-such-dir/result.zds");
+    defer allocator.free(target);
+
+    try testing.expectError(error.CannotCreateFile, store.write(target, .{ .groups = &.{}, .summary = &summary }));
+    try testing.expect(!try scratch.exists("no-such-dir"));
+}
+
+test "a cancelled scan yields no results, not partial ones" {
+    const allocator = testing.allocator;
+    var scratch = try Scratch.init(allocator, "cancel");
+    defer scratch.deinit();
+    try buildFixture(&scratch);
+
+    var monitor: types.Monitor = .{};
+    monitor.cancel();
+
+    var finder = dedupe.DupeFinder.init(allocator, .{ .monitor = &monitor });
+    defer finder.deinit();
+
+    // Files whose hashing was skipped look exactly like unique files. Building
+    // groups from a stopped run would silently under-report duplicates.
+    try testing.expectError(error.Cancelled, finder.scan(&.{scratch.path}));
+    try testing.expectEqual(@as(usize, 0), finder.getGroups().len);
+}
+
+test "a hash in progress stops between reads once cancelled" {
+    const allocator = testing.allocator;
+    var scratch = try Scratch.init(allocator, "cancel-hash");
+    defer scratch.deinit();
+
+    const data = try allocator.alloc(u8, 256 * 1024);
+    defer allocator.free(data);
+    @memset(data, 0x5a);
+    try scratch.writeFile("big.bin", data);
+    const path = try scratch.join("big.bin");
+    defer allocator.free(path);
+
+    var monitor: types.Monitor = .{};
+    var file_hasher = hasher.FileHasher.init(.blake3);
+    file_hasher.monitor = &monitor;
+
+    _ = try file_hasher.hashFile(path);
+    monitor.cancel();
+    try testing.expectError(error.Cancelled, file_hasher.hashFile(path));
+}
+
+test "FFI: progress is readable, cancel stops a run, and the context recovers" {
+    const allocator = testing.allocator;
+    var scratch = try Scratch.init(allocator, "ffi-run");
+    defer scratch.deinit();
+    try buildFixture(&scratch);
+
+    var out_scratch = try Scratch.init(allocator, "ffi-out");
+    defer out_scratch.deinit();
+    const store_path = try out_scratch.joinZ("result.zds");
+    defer allocator.free(store_path);
+
+    const ctx = lib.zdedupe_init();
+    defer lib.zdedupe_free(ctx);
+    try testing.expectEqual(@as(c_int, 0), lib.zdedupe_add_path(ctx, scratch.path.ptr));
+
+    // Cancel requested before the run starts: status 2, and no file appears.
+    lib.zdedupe_cancel(ctx);
+    try testing.expectEqual(@as(c_int, 2), lib.zdedupe_run_to_file(ctx, store_path.ptr));
+    try testing.expect(!try out_scratch.exists("result.zds"));
+
+    // The same context then runs normally: a cancel does not stick.
+    try testing.expectEqual(@as(c_int, 0), lib.zdedupe_run_to_file(ctx, store_path.ptr));
+
+    var progress: lib.ZDedupeProgress = undefined;
+    lib.zdedupe_get_progress(ctx, &progress);
+    try testing.expectEqual(@intFromEnum(types.Monitor.Phase.done), progress.phase);
+    try testing.expectEqual(@as(u64, 4), progress.files_found);
+
+    const bytes = try readWholeFile(allocator, store_path);
+    defer allocator.free(bytes);
+    const view = try StoreView.open(bytes);
+    try testing.expectEqual(@as(u64, 1), view.count(.groups));
+    try testing.expectEqual(@as(u64, 3), view.count(.group_files));
+    try testing.expect(view.header.flags & store.flag_has_directories == 0);
+
+    // Compare mode has no store representation.
+    lib.zdedupe_set_mode(ctx, 1);
+    try testing.expectEqual(@as(c_int, 3), lib.zdedupe_run_to_file(ctx, store_path.ptr));
+}
+
+/// Progress callbacks carry no context, so the test reaches its monitor here.
+var cancel_at_full_hash: ?*types.Monitor = null;
+
+fn cancelWhenFullHashingStarts(progress: *const types.Progress) void {
+    if (progress.phase == .full_hashing) {
+        if (cancel_at_full_hash) |monitor| monitor.cancel();
+    }
+}
+
+test "cancelling during hashing is an error, never a clean 'no duplicates'" {
+    const allocator = testing.allocator;
+    var scratch = try Scratch.init(allocator, "cancel-midway");
+    defer scratch.deinit();
+    try buildFixture(&scratch);
+
+    var monitor: types.Monitor = .{};
+    cancel_at_full_hash = &monitor;
+    defer cancel_at_full_hash = null;
+
+    var finder = dedupe.DupeFinder.init(allocator, .{ .monitor = &monitor });
+    defer finder.deinit();
+    finder.setProgressCallback(cancelWhenFullHashingStarts);
+
+    // The walk and size grouping complete; the stop lands as full hashing
+    // begins, so no file gets a hash. A file without a hash is indistinguishable
+    // from a unique one — returning normally here would tell the user this
+    // tree (which holds three identical files) has no duplicates at all.
+    try testing.expectError(error.Cancelled, finder.scan(&.{scratch.path}));
+    try testing.expectEqual(@as(usize, 0), finder.getGroups().len);
+}
+
+test "a failed write never touches the store that is already there" {
+    const allocator = testing.allocator;
+    var scratch = try Scratch.init(allocator, "store-atomic");
+    defer scratch.deinit();
+
+    const previous = "a previous, complete result store";
+    try scratch.writeFile("result.zds", previous);
+    // Occupy the temporary name with a directory, so the new store cannot even
+    // be started. A writer that goes straight at the final path would not
+    // notice — and would have truncated the old store before failing later.
+    try scratch.makeDir("result.zds.partial");
+
+    const summary = std.mem.zeroes(types.DuplicateSummary);
+    const target = try scratch.joinZ("result.zds");
+    defer allocator.free(target);
+
+    try testing.expectError(error.CannotCreateFile, store.write(target, .{ .groups = &.{}, .summary = &summary }));
+
+    const after = try readWholeFile(allocator, target);
+    defer allocator.free(after);
+    try testing.expectEqualStrings(previous, after);
+}

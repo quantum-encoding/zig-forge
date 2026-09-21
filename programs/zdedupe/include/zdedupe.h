@@ -155,7 +155,59 @@ void zdedupe_use_default_excludes(zdedupe_ctx* ctx, bool use_defaults);
  */
 int zdedupe_add_exclude(zdedupe_ctx* ctx, const char* name);
 
+/* === Progress & cancellation === */
+
+/**
+ * Snapshot of a running scan. `phase` values:
+ *   0 idle, 1 scanning (walking), 2 size grouping, 3 quick hashing,
+ *   4 full hashing, 5 analyzing, 6 writing results, 7 done
+ * `done`/`total` count work items of the current phase (meaningful for the
+ * hashing phases); `files_found` grows during the walk.
+ */
+typedef struct {
+    uint32_t phase;
+    uint32_t _pad;
+    uint64_t files_found;
+    uint64_t done;
+    uint64_t total;
+} zdedupe_progress;
+
+/**
+ * Read the progress of the run currently executing on `ctx`.
+ *
+ * THREAD-SAFE: this and zdedupe_cancel() are the only functions that may be
+ * called from another thread while zdedupe_run_sync()/zdedupe_run_to_file()
+ * is running on the same context. They touch nothing but atomics, so a host
+ * can poll from a UI timer - no callback re-enters the host.
+ */
+void zdedupe_get_progress(const zdedupe_ctx* ctx, zdedupe_progress* out);
+
+/**
+ * Ask the run on `ctx` to stop. The walk stops at the next directory, hashing
+ * at the next file - and inside a large file, at the next 64 KiB read. The run
+ * then FAILS (NULL / status 2): results are never built from a partial scan,
+ * because a file that was not hashed is indistinguishable from a unique one.
+ * A cancel requested before the run starts cancels that run; afterwards the
+ * context is reusable.
+ */
+void zdedupe_cancel(zdedupe_ctx* ctx);
+
 /* === Execution === */
+
+/**
+ * Run a duplicate scan and write the BINARY RESULT STORE to `path` instead of
+ * returning JSON. This is the interface for GUI hosts: the file holds
+ * fixed-size records in flat sections, so a host memory-maps it and reads
+ * exactly the rows it is about to draw - no parsing, no copy of the results
+ * in memory, and a finished scan can be reopened later. The format is
+ * specified in src/store.zig. Readers MUST bounds-check every offset.
+ *
+ * The file is created with mode 0600, written to "<path>.partial" and renamed
+ * into place, so an existing store at `path` survives any failure.
+ *
+ * @return 0 ok, 1 failed, 2 cancelled, 3 unsupported (compare-folders mode)
+ */
+int zdedupe_run_to_file(zdedupe_ctx* ctx, const char* path);
 
 /**
  * Run the scan/compare operation synchronously
@@ -262,6 +314,9 @@ int zdedupe_add_exclude(zdedupe_ctx* ctx, const char* name);
  * a non-zero value next to any "identical"/"contained" claim.
  * "identical_copies" > 1 means that side is the first path of an identical
  * set and the pair stands for every member of it.
+ *
+ * Within a group, "files" is ordered oldest first (mtime, then path), so the
+ * first entry is the natural one to keep.
  *
  * Note: "files" is an array of OBJECTS, not of strings, and "mtime" /
  * "generated_at" are ISO-8601 UTC strings. Paths are JSON-escaped by

@@ -104,6 +104,7 @@ pub fn build(b: *std.Build) void {
         "src/parallel.zig",
         "src/dedupe.zig",
         "src/dirs.zig",
+        "src/store.zig",
         "src/compare.zig",
         "src/report.zig",
         "src/lib.zig",

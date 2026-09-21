@@ -23,6 +23,7 @@ pub const compare = @import("compare.zig");
 pub const report = @import("report.zig");
 pub const parallel = @import("parallel.zig");
 pub const dirs = @import("dirs.zig");
+pub const store = @import("store.zig");
 
 // Re-export commonly used types
 pub const FileEntry = types.FileEntry;
@@ -35,6 +36,7 @@ pub const ReportOptions = types.ReportOptions;
 pub const DuplicateSummary = types.DuplicateSummary;
 pub const CompareSummary = types.CompareSummary;
 pub const DirAnalysis = dirs.Analysis;
+pub const Monitor = types.Monitor;
 
 pub const DupeFinder = dedupe.DupeFinder;
 pub const FolderComparator = compare.FolderComparator;
@@ -61,6 +63,9 @@ const InternalContext = struct {
     /// Owned copies of the names passed to zdedupe_add_exclude.
     user_excludes: std.ArrayListUnmanaged([]const u8),
     use_default_excludes: bool,
+    /// Progress out / cancellation in. Lives in the context so its address is
+    /// stable for the whole run and other threads can reach it.
+    monitor: types.Monitor,
 
     const Mode = enum(c_int) { find_duplicates = 0, compare_folders = 1 };
     const alloc = std.heap.c_allocator;
@@ -74,6 +79,7 @@ const InternalContext = struct {
             .result_json = null,
             .user_excludes = .empty,
             .use_default_excludes = false,
+            .monitor = .{},
         };
         return self;
     }
@@ -92,12 +98,12 @@ const InternalContext = struct {
 
 // === Context Management ===
 
-export fn zdedupe_init() ?*ZDedupeContext {
+pub export fn zdedupe_init() ?*ZDedupeContext {
     const ctx = InternalContext.init() orelse return null;
     return @ptrCast(ctx);
 }
 
-export fn zdedupe_free(ctx: ?*ZDedupeContext) void {
+pub export fn zdedupe_free(ctx: ?*ZDedupeContext) void {
     if (ctx) |c| {
         const internal: *InternalContext = @ptrCast(@alignCast(c));
         internal.deinit();
@@ -106,7 +112,7 @@ export fn zdedupe_free(ctx: ?*ZDedupeContext) void {
 
 // === Configuration ===
 
-export fn zdedupe_add_path(ctx: ?*ZDedupeContext, path: [*:0]const u8) c_int {
+pub export fn zdedupe_add_path(ctx: ?*ZDedupeContext, path: [*:0]const u8) c_int {
     const c = ctx orelse return -1;
     const internal: *InternalContext = @ptrCast(@alignCast(c));
     const alloc = std.heap.c_allocator;
@@ -118,61 +124,61 @@ export fn zdedupe_add_path(ctx: ?*ZDedupeContext, path: [*:0]const u8) c_int {
     return 0;
 }
 
-export fn zdedupe_set_mode(ctx: ?*ZDedupeContext, mode: c_int) void {
+pub export fn zdedupe_set_mode(ctx: ?*ZDedupeContext, mode: c_int) void {
     const c = ctx orelse return;
     const internal: *InternalContext = @ptrCast(@alignCast(c));
     internal.mode = @enumFromInt(mode);
 }
 
-export fn zdedupe_set_min_size(ctx: ?*ZDedupeContext, bytes: u64) void {
+pub export fn zdedupe_set_min_size(ctx: ?*ZDedupeContext, bytes: u64) void {
     const c = ctx orelse return;
     const internal: *InternalContext = @ptrCast(@alignCast(c));
     internal.config.min_size = bytes;
 }
 
-export fn zdedupe_set_max_size(ctx: ?*ZDedupeContext, bytes: u64) void {
+pub export fn zdedupe_set_max_size(ctx: ?*ZDedupeContext, bytes: u64) void {
     const c = ctx orelse return;
     const internal: *InternalContext = @ptrCast(@alignCast(c));
     internal.config.max_size = bytes;
 }
 
-export fn zdedupe_set_include_hidden(ctx: ?*ZDedupeContext, include: bool) void {
+pub export fn zdedupe_set_include_hidden(ctx: ?*ZDedupeContext, include: bool) void {
     const c = ctx orelse return;
     const internal: *InternalContext = @ptrCast(@alignCast(c));
     internal.config.include_hidden = include;
 }
 
-export fn zdedupe_set_follow_symlinks(ctx: ?*ZDedupeContext, follow: bool) void {
+pub export fn zdedupe_set_follow_symlinks(ctx: ?*ZDedupeContext, follow: bool) void {
     const c = ctx orelse return;
     const internal: *InternalContext = @ptrCast(@alignCast(c));
     internal.config.follow_symlinks = follow;
 }
 
-export fn zdedupe_set_threads(ctx: ?*ZDedupeContext, count: u32) void {
+pub export fn zdedupe_set_threads(ctx: ?*ZDedupeContext, count: u32) void {
     const c = ctx orelse return;
     const internal: *InternalContext = @ptrCast(@alignCast(c));
     internal.config.threads = count;
 }
 
-export fn zdedupe_use_sha256(ctx: ?*ZDedupeContext, use_sha256: bool) void {
+pub export fn zdedupe_use_sha256(ctx: ?*ZDedupeContext, use_sha256: bool) void {
     const c = ctx orelse return;
     const internal: *InternalContext = @ptrCast(@alignCast(c));
     internal.config.hash_algorithm = if (use_sha256) .sha256 else .blake3;
 }
 
-export fn zdedupe_set_analyze_dirs(ctx: ?*ZDedupeContext, analyze: bool) void {
+pub export fn zdedupe_set_analyze_dirs(ctx: ?*ZDedupeContext, analyze: bool) void {
     const c = ctx orelse return;
     const internal: *InternalContext = @ptrCast(@alignCast(c));
     internal.config.analyze_dirs = analyze;
 }
 
-export fn zdedupe_use_default_excludes(ctx: ?*ZDedupeContext, use_defaults: bool) void {
+pub export fn zdedupe_use_default_excludes(ctx: ?*ZDedupeContext, use_defaults: bool) void {
     const c = ctx orelse return;
     const internal: *InternalContext = @ptrCast(@alignCast(c));
     internal.use_default_excludes = use_defaults;
 }
 
-export fn zdedupe_add_exclude(ctx: ?*ZDedupeContext, name: [*:0]const u8) c_int {
+pub export fn zdedupe_add_exclude(ctx: ?*ZDedupeContext, name: [*:0]const u8) c_int {
     const c = ctx orelse return -1;
     const internal: *InternalContext = @ptrCast(@alignCast(c));
     const alloc = std.heap.c_allocator;
@@ -190,9 +196,66 @@ export fn zdedupe_add_exclude(ctx: ?*ZDedupeContext, name: [*:0]const u8) c_int 
     return 0;
 }
 
+// === Progress & cancellation ===
+//
+// The only two entry points that may be called from another thread while a
+// run is in progress: they touch nothing but atomics inside the context.
+
+/// Mirrors `zdedupe_progress` in the C header.
+pub const ZDedupeProgress = extern struct {
+    /// `Monitor.Phase` numbering.
+    phase: u32,
+    _pad: u32 = 0,
+    files_found: u64,
+    done: u64,
+    total: u64,
+};
+
+pub export fn zdedupe_get_progress(ctx: ?*const ZDedupeContext, out: ?*ZDedupeProgress) void {
+    const c = ctx orelse return;
+    const result = out orelse return;
+    const internal: *const InternalContext = @ptrCast(@alignCast(c));
+    result.* = .{
+        .phase = internal.monitor.phase.load(.acquire),
+        .files_found = internal.monitor.files_found.load(.acquire),
+        .done = internal.monitor.done.load(.acquire),
+        .total = internal.monitor.total.load(.acquire),
+    };
+}
+
+pub export fn zdedupe_cancel(ctx: ?*ZDedupeContext) void {
+    const c = ctx orelse return;
+    const internal: *InternalContext = @ptrCast(@alignCast(c));
+    internal.monitor.cancel();
+}
+
 // === Execution ===
 
-export fn zdedupe_run_sync(ctx: ?*ZDedupeContext) ?[*:0]const u8 {
+/// Run a duplicate scan and write the binary result store (see store.zig) to
+/// `path`. Returns a `RunStatus`.
+pub export fn zdedupe_run_to_file(ctx: ?*ZDedupeContext, path: ?[*:0]const u8) c_int {
+    const c = ctx orelse return @intFromEnum(RunStatus.failed);
+    const path_z = path orelse return @intFromEnum(RunStatus.failed);
+    const internal: *InternalContext = @ptrCast(@alignCast(c));
+    if (internal.mode != .find_duplicates) return @intFromEnum(RunStatus.unsupported);
+
+    const status = runDuplicateScan(internal, std.mem.span(path_z), struct {
+        fn emit(out_path: []const u8, inner: *InternalContext, finder: *DupeFinder) RunStatus {
+            inner.monitor.enter(.writing, 0);
+            store.write(out_path, .{
+                .groups = finder.getGroups(),
+                .summary = finder.getSummary(),
+                .failed_paths = finder.getFailedPathCount(),
+                .analysis = finder.getDirAnalysis(),
+                .algorithm = inner.config.hash_algorithm,
+            }) catch return .failed;
+            return .ok;
+        }
+    }.emit);
+    return @intFromEnum(status);
+}
+
+pub export fn zdedupe_run_sync(ctx: ?*ZDedupeContext) ?[*:0]const u8 {
     const c = ctx orelse return null;
     const internal: *InternalContext = @ptrCast(@alignCast(c));
     const alloc = std.heap.c_allocator;
@@ -222,34 +285,74 @@ export fn zdedupe_run_sync(ctx: ?*ZDedupeContext) ?[*:0]const u8 {
     return null;
 }
 
-fn runDuplicates(internal: *InternalContext) ?[]u8 {
+/// Result codes of `zdedupe_run_to_file`; numbering is part of the C ABI.
+const RunStatus = enum(c_int) { ok = 0, failed = 1, cancelled = 2, unsupported = 3 };
+
+/// Runs the duplicate scan described by the context and hands the finished
+/// finder to `emit`. Shared by the JSON and the result-store entry points so
+/// both see exactly the same configuration.
+fn runDuplicateScan(
+    internal: *InternalContext,
+    context: anytype,
+    comptime emit: fn (@TypeOf(context), *InternalContext, *DupeFinder) RunStatus,
+) RunStatus {
     const alloc = std.heap.c_allocator;
+    const monitor = &internal.monitor;
+
+    // Progress restarts; a cancel requested before the run began still counts.
+    const cancel_was_requested = monitor.cancelled();
+    monitor.reset();
+    if (cancel_was_requested) monitor.cancel();
+    // Whatever happens, the next run on this context starts un-cancelled.
+    defer monitor.cancel_requested.store(false, .release);
 
     // Effective exclude list: the defaults (if asked for) plus added names.
     var excludes: std.ArrayListUnmanaged([]const u8) = .empty;
     defer excludes.deinit(alloc);
     if (internal.use_default_excludes) {
-        excludes.appendSlice(alloc, &Config.default_excludes) catch return null;
+        excludes.appendSlice(alloc, &Config.default_excludes) catch return .failed;
     }
-    excludes.appendSlice(alloc, internal.user_excludes.items) catch return null;
+    excludes.appendSlice(alloc, internal.user_excludes.items) catch return .failed;
 
     var config = internal.config;
     config.excludes = excludes.items;
     config.exclude_cache_dirs = internal.use_default_excludes;
+    config.monitor = monitor;
 
     var finder = DupeFinder.init(alloc, config);
     defer finder.deinit();
 
-    finder.scan(internal.paths.items) catch return null;
+    finder.scan(internal.paths.items) catch |err| return switch (err) {
+        error.Cancelled => .cancelled,
+        else => .failed,
+    };
 
-    // Generate JSON report using Allocating writer
-    var alloc_writer: std.Io.Writer.Allocating = .init(alloc);
-    errdefer alloc_writer.deinit();
+    const status = emit(context, internal, &finder);
+    if (status == .ok) monitor.enter(.done, 0);
+    return status;
+}
 
-    const reporter = ReportWriter.init(alloc, .{ .format = .json });
-    reporter.writeScanReport(&alloc_writer.writer, finder.getGroups(), finder.getSummary(), finder.getDirAnalysis()) catch return null;
+fn runDuplicates(internal: *InternalContext) ?[]u8 {
+    var json: ?[]u8 = null;
+    const status = runDuplicateScan(internal, &json, struct {
+        fn emit(out: *?[]u8, _: *InternalContext, finder: *DupeFinder) RunStatus {
+            const alloc = std.heap.c_allocator;
+            // Generate JSON report using Allocating writer
+            var alloc_writer: std.Io.Writer.Allocating = .init(alloc);
 
-    return alloc_writer.toOwnedSlice() catch null;
+            const reporter = ReportWriter.init(alloc, .{ .format = .json });
+            reporter.writeScanReport(&alloc_writer.writer, finder.getGroups(), finder.getSummary(), finder.getDirAnalysis()) catch {
+                alloc_writer.deinit();
+                return .failed;
+            };
+            out.* = alloc_writer.toOwnedSlice() catch {
+                alloc_writer.deinit();
+                return .failed;
+            };
+            return .ok;
+        }
+    }.emit);
+    return if (status == .ok) json else null;
 }
 
 fn runCompare(internal: *InternalContext) ?[]u8 {
@@ -277,17 +380,17 @@ fn runCompare(internal: *InternalContext) ?[]u8 {
 extern "c" fn unlink(path: [*:0]const u8) c_int;
 extern "c" fn rename(old: [*:0]const u8, new: [*:0]const u8) c_int;
 
-export fn zdedupe_delete_file(path: [*:0]const u8) c_int {
+pub export fn zdedupe_delete_file(path: [*:0]const u8) c_int {
     const result = unlink(path);
     return if (result == 0) 0 else -1;
 }
 
-export fn zdedupe_move_file(src: [*:0]const u8, dst: [*:0]const u8) c_int {
+pub export fn zdedupe_move_file(src: [*:0]const u8, dst: [*:0]const u8) c_int {
     const result = rename(src, dst);
     return if (result == 0) 0 else -1;
 }
 
-export fn zdedupe_version() [*:0]const u8 {
+pub export fn zdedupe_version() [*:0]const u8 {
     return "0.1.0";
 }
 
@@ -304,6 +407,7 @@ test "imports" {
     _ = report;
     _ = parallel;
     _ = dirs;
+    _ = store;
 }
 
 test "C FFI lifecycle" {

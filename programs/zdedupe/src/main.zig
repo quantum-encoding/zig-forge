@@ -20,6 +20,7 @@
 //!   -d, --dirs             Also report identical and overlapping directories
 //!   -x, --exclude NAME     Ignore entries with this exact name (repeatable)
 //!   --no-default-excludes  Do not ignore node_modules, caches, .DS_Store, ...
+//!   --store FILE           Write the binary result store instead of a report
 
 const std = @import("std");
 const types = @import("types.zig");
@@ -27,6 +28,7 @@ const dedupe = @import("dedupe.zig");
 const compare = @import("compare.zig");
 const report = @import("report.zig");
 const fast_walker = @import("fast_walker.zig");
+const store = @import("store.zig");
 const Io = std.Io;
 
 const VERSION = "0.1.0";
@@ -129,6 +131,12 @@ fn runMain(allocator: std.mem.Allocator, minimal_args: anytype) !void {
                 try user_excludes.append(allocator, args[i]);
             } else if (std.mem.eql(u8, arg, "--no-default-excludes")) {
                 opts.default_excludes = false;
+            } else if (std.mem.eql(u8, arg, "--store")) {
+                i += 1;
+                if (i >= args.len) {
+                    fatal("Missing argument for --store");
+                }
+                opts.store_file = args[i];
             } else {
                 std.debug.print("Unknown option: {s}\n", .{arg});
                 fatal("Use --help for usage information");
@@ -180,6 +188,8 @@ const Options = struct {
     default_excludes: bool = true,
     /// Effective exclude names, assembled after argument parsing.
     excludes: []const []const u8 = &.{},
+    /// Write the binary result store here instead of a report.
+    store_file: ?[]const u8 = null,
 };
 
 fn runDedupe(allocator: std.mem.Allocator, paths: []const []const u8, opts: Options) !void {
@@ -211,6 +221,18 @@ fn runDedupe(allocator: std.mem.Allocator, paths: []const []const u8, opts: Opti
     const groups = finder.getGroups();
     const summary = finder.getSummary();
     const dir_analysis = finder.getDirAnalysis();
+
+    if (opts.store_file) |path| {
+        try store.write(path, .{
+            .groups = groups,
+            .summary = summary,
+            .failed_paths = finder.getFailedPathCount(),
+            .analysis = dir_analysis,
+            .algorithm = opts.hash_algorithm,
+        });
+        std.debug.print("Result store written to: {s}\n", .{path});
+        return;
+    }
 
     // Write report
     const report_opts = types.ReportOptions{
@@ -432,6 +454,8 @@ fn printHelp() void {
         \\                         (size filters then apply to the file groups only,
         \\                         and symlinks are compared, not followed)
         \\  -x, --exclude NAME     Ignore entries with this exact name (repeatable)
+        \\  --store FILE           Write the binary, pageable result store (what GUI
+        \\                         hosts read) instead of a text/JSON/HTML report
         \\  --no-default-excludes  Scan everything. By default regenerable output is
         \\                         ignored: node_modules, __pycache__, .zig-cache,
         \\                         .svelte-kit, .DS_Store, ... and any directory
