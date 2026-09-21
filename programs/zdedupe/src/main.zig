@@ -17,6 +17,9 @@
 //!   -j, --threads N        Number of threads (0 = auto, default: 0)
 //!   --hashes               Include file hashes in output
 //!   --sha256               Use SHA256 instead of BLAKE3
+//!   -d, --dirs             Also report identical and overlapping directories
+//!   -x, --exclude NAME     Ignore entries with this exact name (repeatable)
+//!   --no-default-excludes  Do not ignore node_modules, caches, .DS_Store, ...
 
 const std = @import("std");
 const types = @import("types.zig");
@@ -50,6 +53,8 @@ fn runMain(allocator: std.mem.Allocator, minimal_args: anytype) !void {
     var opts = Options{};
     var paths: std.ArrayListUnmanaged([]const u8) = .empty;
     defer paths.deinit(allocator);
+    var user_excludes: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer user_excludes.deinit(allocator);
 
     // Parse arguments
     var i: usize = 1;
@@ -109,6 +114,21 @@ fn runMain(allocator: std.mem.Allocator, minimal_args: anytype) !void {
                 opts.include_hashes = true;
             } else if (std.mem.eql(u8, arg, "--sha256")) {
                 opts.hash_algorithm = .sha256;
+            } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--dirs")) {
+                opts.analyze_dirs = true;
+            } else if (std.mem.eql(u8, arg, "-x") or std.mem.eql(u8, arg, "--exclude")) {
+                i += 1;
+                if (i >= args.len) {
+                    fatal("Missing argument for --exclude");
+                }
+                // Matched against a single path component, so a name with a
+                // slash could never match; say so instead of silently not working.
+                if (args[i].len == 0 or std.mem.indexOfScalar(u8, args[i], '/') != null) {
+                    fatal("--exclude takes an entry name (e.g. node_modules), not a path");
+                }
+                try user_excludes.append(allocator, args[i]);
+            } else if (std.mem.eql(u8, arg, "--no-default-excludes")) {
+                opts.default_excludes = false;
             } else {
                 std.debug.print("Unknown option: {s}\n", .{arg});
                 fatal("Use --help for usage information");
@@ -117,6 +137,15 @@ fn runMain(allocator: std.mem.Allocator, minimal_args: anytype) !void {
             try paths.append(allocator, arg);
         }
     }
+
+    // Effective exclude list: the defaults (unless turned off) plus -x names.
+    var excludes: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer excludes.deinit(allocator);
+    if (opts.default_excludes) {
+        try excludes.appendSlice(allocator, &types.Config.default_excludes);
+    }
+    try excludes.appendSlice(allocator, user_excludes.items);
+    opts.excludes = excludes.items;
 
     // Check for subcommands
     if (paths.items.len >= 1 and std.mem.eql(u8, paths.items[0], "compare")) {
@@ -146,6 +175,11 @@ const Options = struct {
     threads: u32 = 0,
     include_hashes: bool = false,
     hash_algorithm: types.Config.HashAlgorithm = .blake3,
+    analyze_dirs: bool = false,
+    /// Ignore regenerable output (Config.default_excludes + tagged cache dirs).
+    default_excludes: bool = true,
+    /// Effective exclude names, assembled after argument parsing.
+    excludes: []const []const u8 = &.{},
 };
 
 fn runDedupe(allocator: std.mem.Allocator, paths: []const []const u8, opts: Options) !void {
@@ -156,6 +190,9 @@ fn runDedupe(allocator: std.mem.Allocator, paths: []const []const u8, opts: Opti
         .follow_symlinks = opts.follow_symlinks,
         .hash_algorithm = opts.hash_algorithm,
         .threads = opts.threads,
+        .excludes = opts.excludes,
+        .exclude_cache_dirs = opts.default_excludes,
+        .analyze_dirs = opts.analyze_dirs,
     };
 
     var finder = dedupe.DupeFinder.init(allocator, config);
@@ -173,6 +210,7 @@ fn runDedupe(allocator: std.mem.Allocator, paths: []const []const u8, opts: Opti
     // Get results
     const groups = finder.getGroups();
     const summary = finder.getSummary();
+    const dir_analysis = finder.getDirAnalysis();
 
     // Write report
     const report_opts = types.ReportOptions{
@@ -186,7 +224,7 @@ fn runDedupe(allocator: std.mem.Allocator, paths: []const []const u8, opts: Opti
         // Write to dynamic buffer using Allocating writer
         var alloc_writer: Io.Writer.Allocating = .init(allocator);
         defer alloc_writer.deinit();
-        try reporter.writeDuplicateReport(&alloc_writer.writer, groups, summary);
+        try reporter.writeScanReport(&alloc_writer.writer, groups, summary, dir_analysis);
 
         // Write buffer to file using libc
         const path_z = try allocator.dupeZ(u8, path);
@@ -208,7 +246,7 @@ fn runDedupe(allocator: std.mem.Allocator, paths: []const []const u8, opts: Opti
         // Write to stdout using Allocating writer
         var alloc_writer: Io.Writer.Allocating = .init(allocator);
         defer alloc_writer.deinit();
-        try reporter.writeDuplicateReport(&alloc_writer.writer, groups, summary);
+        try reporter.writeScanReport(&alloc_writer.writer, groups, summary, dir_analysis);
 
         const io = Io.Threaded.global_single_threaded.io();
         const stdout = Io.File.stdout();
@@ -368,7 +406,7 @@ fn parseFormat(s: []const u8) ?types.ReportFormat {
 
 fn printHelp() void {
     const io = Io.Threaded.global_single_threaded.io();
-    var buf: [2048]u8 = undefined;
+    var buf: [4096]u8 = undefined;
     const stdout = Io.File.stdout();
     var writer = stdout.writer(io, &buf);
     writer.interface.writeAll(
@@ -390,9 +428,19 @@ fn printHelp() void {
         \\  -j, --threads N        Parallel threads (0 = auto, default: 0)
         \\  --hashes               Include file hashes in output
         \\  --sha256               Use SHA256 instead of BLAKE3
+        \\  -d, --dirs             Also report identical and overlapping directories
+        \\                         (size filters then apply to the file groups only,
+        \\                         and symlinks are compared, not followed)
+        \\  -x, --exclude NAME     Ignore entries with this exact name (repeatable)
+        \\  --no-default-excludes  Scan everything. By default regenerable output is
+        \\                         ignored: node_modules, __pycache__, .zig-cache,
+        \\                         .svelte-kit, .DS_Store, ... and any directory
+        \\                         carrying a CACHEDIR.TAG (e.g. cargo's target/).
+        \\                         .git is never ignored by default.
         \\
         \\EXAMPLES:
         \\  zdedupe ~/Downloads ~/Documents
+        \\  zdedupe --dirs ~/projects ~/old-backups
         \\  zdedupe -f json -o report.json /data
         \\  zdedupe compare /backup/old /backup/new
         \\  zdedupe -m 1MB --max-size 100MB ~/files

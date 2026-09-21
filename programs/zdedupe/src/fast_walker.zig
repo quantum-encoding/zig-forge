@@ -7,6 +7,12 @@
 //! - Pre-allocated result capacity
 //! - Minimal allocations per file (only final path copy)
 //! - Direct libc calls with no abstraction overhead
+//!
+//! Beyond the flat file list it can prune entries by basename / CACHEDIR.TAG
+//! and, in tree-recording mode, remember every directory, unfollowed symlink
+//! and extra hard link it saw — the raw material for directory analysis
+//! (dirs.zig), which must know everything a directory contains, not just the
+//! files that are interesting as file-level duplicates.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -32,7 +38,33 @@ pub const FastFileEntry = struct {
     ino: u64,
     dev: u64,
     mtime: i64,
+    /// Index of the first-seen entry with the same (dev, ino). Only ever set
+    /// in tree-recording mode; otherwise extra hard links are dropped.
+    link_of: ?usize = null,
 };
+
+/// A directory seen by a tree-recording walk. Records are appended in
+/// pre-order, so a parent always precedes its children.
+pub const DirRecord = struct {
+    path: []const u8,
+    /// Something directly inside could not be read (unopenable subdirectory,
+    /// failed stat, over-long path, symlink cycle). What the directory really
+    /// holds is unknown, so it must never be reported as a copy of another.
+    incomplete: bool = false,
+    /// Direct children deliberately ignored: excluded names, tagged cache
+    /// directories, hidden entries when those are off, and special files
+    /// (sockets, FIFOs, devices — no content to lose).
+    skipped: u32 = 0,
+};
+
+/// A symlink that was not followed, recorded with its target text.
+pub const LinkRecord = struct {
+    path: []const u8,
+    target: []const u8,
+};
+
+/// First line of a valid CACHEDIR.TAG (https://bford.info/cachedir/).
+pub const cache_dir_signature = "Signature: 8a477f597d28d172789f06886806bc55";
 
 /// Fast walker statistics
 pub const WalkStats = struct {
@@ -41,6 +73,8 @@ pub const WalkStats = struct {
     total_size: u64 = 0,
     errors: u64 = 0,
     hard_links_skipped: u64 = 0,
+    /// Entries pruned by name or by CACHEDIR.TAG.
+    excluded: u64 = 0,
 };
 
 /// Progress callback type (called at throttled intervals)
@@ -60,6 +94,9 @@ pub const FastWalker = struct {
     follow_symlinks: bool,
     track_hardlinks: bool, // When false, skip inode tracking for faster scanning
     use_arena: bool, // Use arena allocator for paths (faster but uses more peak memory)
+    excludes: []const []const u8, // Entry basenames to prune (borrowed)
+    exclude_cache_dirs: bool, // Prune directories holding a valid CACHEDIR.TAG
+    record_tree: bool, // Also record dirs, unfollowed symlinks and extra hard links
 
     // Reusable path buffer (avoids per-file allocations)
     path_buf: [8192]u8 = undefined,
@@ -70,10 +107,12 @@ pub const FastWalker = struct {
 
     // Results
     files: std.ArrayListUnmanaged(FastFileEntry),
+    dirs: std.ArrayListUnmanaged(DirRecord),
+    links: std.ArrayListUnmanaged(LinkRecord),
     stats: WalkStats,
 
-    // Hard link tracking (optional)
-    seen_inodes: ?std.AutoHashMapUnmanaged(FileId, void),
+    // Hard link tracking (optional): inode -> index of its first entry in `files`
+    seen_inodes: ?std.AutoHashMapUnmanaged(FileId, usize),
 
     // Visited directories, used only under follow_symlinks to break cycles
     seen_dirs: std.AutoHashMapUnmanaged(FileId, void),
@@ -86,6 +125,7 @@ pub const FastWalker = struct {
     const DirState = struct {
         dir: *libc.DIR,
         path_len: usize, // Length of path when this dir was pushed
+        dir_index: usize, // Index into `dirs`; meaningful only when record_tree
     };
 
     // d_type constants from dirent.h
@@ -104,8 +144,13 @@ pub const FastWalker = struct {
             .follow_symlinks = false,
             .track_hardlinks = true,
             .use_arena = false,
+            .excludes = &.{},
+            .exclude_cache_dirs = false,
+            .record_tree = false,
             .dir_stack = .empty,
             .files = .empty,
+            .dirs = .empty,
+            .links = .empty,
             .stats = .{},
             .seen_inodes = null,
             .seen_dirs = .empty,
@@ -122,7 +167,7 @@ pub const FastWalker = struct {
         }
         self.dir_stack.deinit(self.allocator);
 
-        // Free file paths - arena does bulk free, otherwise individual frees
+        // Free recorded strings - arena does bulk free, otherwise individual frees
         if (self.arena) |*arena| {
             // Single bulk free for all paths
             arena.deinit();
@@ -131,8 +176,17 @@ pub const FastWalker = struct {
             for (self.files.items) |entry| {
                 self.allocator.free(entry.path);
             }
+            for (self.dirs.items) |record| {
+                self.allocator.free(record.path);
+            }
+            for (self.links.items) |record| {
+                self.allocator.free(record.path);
+                self.allocator.free(record.target);
+            }
         }
         self.files.deinit(self.allocator);
+        self.dirs.deinit(self.allocator);
+        self.links.deinit(self.allocator);
 
         // Free inode map
         if (self.seen_inodes) |*map| {
@@ -189,8 +243,33 @@ pub const FastWalker = struct {
         self.follow_symlinks = follow;
     }
 
-    /// Walk a directory tree
+    /// Prune entries whose basename equals one of `names` (exact match, files
+    /// and directories alike). The slice is borrowed and must outlive the walk.
+    pub fn setExcludes(self: *FastWalker, names: []const []const u8) void {
+        self.excludes = names;
+    }
+
+    /// Prune directories that carry a valid CACHEDIR.TAG.
+    pub fn setExcludeCacheDirs(self: *FastWalker, exclude: bool) void {
+        self.exclude_cache_dirs = exclude;
+    }
+
+    /// Record directories, unfollowed symlinks and extra hard links alongside
+    /// the file list (see `dirs`, `links`, `FastFileEntry.link_of`).
+    pub fn enableTreeRecording(self: *FastWalker) void {
+        self.record_tree = true;
+    }
+
+    /// Walk a directory tree. May be called once per root on the same walker:
+    /// results accumulate, and because the inode table is shared a file
+    /// reachable from two roots is still only reported once.
     pub fn walk(self: *FastWalker, root_path: []const u8) !void {
+        // A previous walk that failed part-way leaves its directories open.
+        for (self.dir_stack.items) |state| {
+            _ = libc.closedir(state.dir);
+        }
+        self.dir_stack.clearRetainingCapacity();
+
         // Pre-allocate for expected file count (estimate 100k files initially)
         try self.files.ensureTotalCapacity(self.allocator, 100_000);
 
@@ -230,14 +309,18 @@ pub const FastWalker = struct {
         }
         _ = try self.markDirVisited(&root_stat);
 
-        // Open root directory
+        // Open root directory. Roots are never pruned, whatever they are
+        // called: the user asked for them by name.
         const root_dir = libc.opendir(@ptrCast(&self.path_buf)) orelse {
             return error.CannotOpenDirectory;
         };
+        errdefer _ = libc.closedir(root_dir);
 
+        const root_index = try self.recordDir();
         try self.dir_stack.append(self.allocator, .{
             .dir = root_dir,
             .path_len = self.path_len,
+            .dir_index = root_index,
         });
 
         // Iterative traversal
@@ -247,7 +330,10 @@ pub const FastWalker = struct {
     }
 
     fn processCurrentDir(self: *FastWalker) !void {
-        const state = &self.dir_stack.items[self.dir_stack.items.len - 1];
+        // Copied out, not pointed at: pushing a subdirectory may reallocate
+        // the stack.
+        const state = self.dir_stack.items[self.dir_stack.items.len - 1];
+        const cur_dir = state.dir_index;
 
         while (true) {
             const entry = libc.readdir(state.dir) orelse {
@@ -267,18 +353,27 @@ pub const FastWalker = struct {
             if (name_ptr[0] == '.') {
                 if (name_ptr[1] == 0) continue; // "."
                 if (name_ptr[1] == '.' and name_ptr[2] == 0) continue; // ".."
-                if (!self.include_hidden) continue; // Hidden file
+                if (!self.include_hidden) {
+                    self.noteSkipped(cur_dir);
+                    continue; // Hidden file
+                }
             }
 
             // Get name length
             const name_len = std.mem.len(name_ptr);
+
+            if (self.isExcluded(name_ptr[0..name_len])) {
+                self.stats.excluded += 1;
+                self.noteSkipped(cur_dir);
+                continue;
+            }
 
             // Build full path in buffer
             const parent_len = state.path_len;
             const new_len = parent_len + 1 + name_len;
 
             if (new_len >= self.path_buf.len - 1) {
-                self.stats.errors += 1;
+                self.noteError(cur_dir);
                 continue; // Path too long
             }
 
@@ -292,89 +387,212 @@ pub const FastWalker = struct {
 
             if (d_type == DT_DIR) {
                 // Directory - push to stack (no lstat needed)
-                const sub_dir = libc.opendir(@ptrCast(&self.path_buf)) orelse {
-                    self.stats.errors += 1;
-                    self.path_len = parent_len;
-                    continue;
-                };
-
-                self.stats.dirs_traversed += 1;
-
-                try self.dir_stack.append(self.allocator, .{
-                    .dir = sub_dir,
-                    .path_len = self.path_len,
-                });
-
-                // Report progress (throttled)
-                self.maybeReportProgress();
-
-                return; // Process new directory on next iteration
+                if (try self.pushDir(parent_len, cur_dir)) return; // Process it on next iteration
             } else if (d_type == DT_REG) {
                 // Regular file - need lstat for size/inode
                 self.addFileWithStat(false) catch {
-                    self.stats.errors += 1;
+                    self.noteError(cur_dir);
                 };
                 self.path_len = parent_len;
             } else if (d_type == DT_LNK) {
-                // Symlink - skipped entirely unless -L/follow_symlinks is set.
-                // When following we stat the TARGET (an lstat here would record
-                // the link's own size/inode, which is never what the user meant)
-                // and descend into symlinked directories under a visited-dir
-                // guard so `ln -s .. loop` terminates instead of recursing.
-                if (self.follow_symlinks) {
-                    const target = pstat.stat(@ptrCast(&self.path_buf)) catch {
-                        self.stats.errors += 1;
-                        self.path_len = parent_len;
-                        continue;
-                    };
-                    if (target.isDir()) {
-                        if (self.enterSymlinkedDir(&target, parent_len)) |descended| {
-                            if (descended) return;
-                        } else |_| {
-                            self.stats.errors += 1;
-                        }
-                    } else if (target.isFile()) {
-                        self.addFileFromStat(&target) catch {
-                            self.stats.errors += 1;
-                        };
-                    }
-                }
-                self.path_len = parent_len;
+                if (try self.handleSymlink(parent_len, cur_dir)) return;
             } else if (d_type == DT_UNKNOWN) {
                 // Filesystem doesn't provide d_type - fall back to lstat
                 const stat_buf = pstat.lstat(@ptrCast(&self.path_buf)) catch {
-                    self.stats.errors += 1;
+                    self.noteError(cur_dir);
                     self.path_len = parent_len;
                     continue;
                 };
 
                 if (stat_buf.isDir()) {
-                    const sub_dir = libc.opendir(@ptrCast(&self.path_buf)) orelse {
-                        self.stats.errors += 1;
-                        self.path_len = parent_len;
-                        continue;
-                    };
-                    self.stats.dirs_traversed += 1;
-                    try self.dir_stack.append(self.allocator, .{
-                        .dir = sub_dir,
-                        .path_len = self.path_len,
-                    });
-                    self.maybeReportProgress();
-                    return;
+                    if (try self.pushDir(parent_len, cur_dir)) return;
                 } else if (stat_buf.isFile()) {
                     self.addFileFromStat(&stat_buf) catch {
-                        self.stats.errors += 1;
+                        self.noteError(cur_dir);
                     };
-                } else if (stat_buf.isLink() and self.follow_symlinks) {
-                    self.addFileWithStat(true) catch {
-                        self.stats.errors += 1;
-                    };
+                    self.path_len = parent_len;
+                } else if (stat_buf.isLink()) {
+                    if (try self.handleSymlink(parent_len, cur_dir)) return;
+                } else {
+                    self.noteSkipped(cur_dir);
+                    self.path_len = parent_len;
                 }
-                self.path_len = parent_len;
             } else {
                 // Other types (socket, fifo, etc) - skip
+                self.noteSkipped(cur_dir);
                 self.path_len = parent_len;
             }
+        }
+    }
+
+    /// Open the directory at the current path and push it onto the stack.
+    /// Returns true if pushed (the caller must return so it is processed
+    /// next); on false the path has been restored to `parent_len`.
+    fn pushDir(self: *FastWalker, parent_len: usize, parent_dir: usize) !bool {
+        if (self.exclude_cache_dirs and self.isCacheDir()) {
+            self.stats.excluded += 1;
+            self.noteSkipped(parent_dir);
+            self.path_len = parent_len;
+            return false;
+        }
+
+        const sub_dir = libc.opendir(@ptrCast(&self.path_buf)) orelse {
+            self.noteError(parent_dir);
+            self.path_len = parent_len;
+            return false;
+        };
+        errdefer _ = libc.closedir(sub_dir);
+
+        self.stats.dirs_traversed += 1;
+
+        const dir_index = try self.recordDir();
+        try self.dir_stack.append(self.allocator, .{
+            .dir = sub_dir,
+            .path_len = self.path_len,
+            .dir_index = dir_index,
+        });
+
+        // Report progress (throttled)
+        self.maybeReportProgress();
+        return true;
+    }
+
+    /// Handle the symlink at the current path. Skipped entirely unless
+    /// -L/follow_symlinks is set. When following we stat the TARGET (an lstat
+    /// here would record the link's own size/inode, which is never what the
+    /// user meant) and descend into symlinked directories under a visited-dir
+    /// guard so `ln -s .. loop` terminates instead of recursing.
+    ///
+    /// Returns true if a directory was pushed; otherwise the path has been
+    /// restored to `parent_len`.
+    fn handleSymlink(self: *FastWalker, parent_len: usize, cur_dir: usize) !bool {
+        if (!self.follow_symlinks) {
+            // Not followed, but a directory still *contains* the link: two
+            // copies only match if the link is in both, pointing the same way.
+            if (self.record_tree) {
+                self.recordLink() catch |err| switch (err) {
+                    error.OutOfMemory => return err,
+                    error.ReadLinkFailed => self.noteError(cur_dir),
+                };
+            }
+            self.path_len = parent_len;
+            return false;
+        }
+
+        const target = pstat.stat(@ptrCast(&self.path_buf)) catch {
+            self.noteError(cur_dir); // dangling link
+            self.path_len = parent_len;
+            return false;
+        };
+
+        if (target.isDir()) {
+            if (!try self.markDirVisited(&target)) {
+                // Already walked via another route. Its files are reported
+                // there, so from here this directory looks emptier than it is.
+                self.noteError(cur_dir);
+                self.path_len = parent_len;
+                return false;
+            }
+            return self.pushDir(parent_len, cur_dir);
+        }
+
+        if (target.isFile()) {
+            self.addFileFromStat(&target) catch {
+                self.noteError(cur_dir);
+            };
+        } else {
+            self.noteSkipped(cur_dir);
+        }
+        self.path_len = parent_len;
+        return false;
+    }
+
+    fn isExcluded(self: *const FastWalker, name: []const u8) bool {
+        for (self.excludes) |excluded| {
+            // zig-lens-ignore: EQL-FOR-SECRETS file names, not secrets
+            if (std.mem.eql(u8, excluded, name)) return true;
+        }
+        return false;
+    }
+
+    /// True if the directory at the current path holds a valid CACHEDIR.TAG.
+    /// The tag must be a regular file starting with the fixed signature; its
+    /// mere presence is not enough (that is the spec, and it stops an empty
+    /// file of that name from hiding a directory from the scan).
+    fn isCacheDir(self: *FastWalker) bool {
+        const tag = "/CACHEDIR.TAG";
+        if (self.path_len + tag.len >= self.path_buf.len) return false;
+
+        @memcpy(self.path_buf[self.path_len..][0..tag.len], tag);
+        self.path_buf[self.path_len + tag.len] = 0;
+        defer self.path_buf[self.path_len] = 0;
+
+        // NOFOLLOW + NONBLOCK: never chase a link out of the tree, never hang
+        // on a FIFO someone named CACHEDIR.TAG.
+        const fd = libc.open(
+            @ptrCast(&self.path_buf),
+            .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .NOFOLLOW = true },
+            @as(libc.mode_t, 0),
+        );
+        if (fd < 0) return false;
+        defer _ = libc.close(fd);
+
+        const st = pstat.fstat(fd) catch return false;
+        if (!st.isFile()) return false;
+
+        var buf: [cache_dir_signature.len]u8 = undefined;
+        var got: usize = 0;
+        while (got < buf.len) {
+            const n = libc.read(fd, buf[got..].ptr, buf.len - got);
+            if (n == 0) break;
+            if (n < 0) {
+                if (libc.errno(n) == .INTR) continue;
+                return false;
+            }
+            got += @intCast(n);
+        }
+        // zig-lens-ignore: EQL-FOR-SECRETS public file-format magic
+        return got == buf.len and std.mem.eql(u8, &buf, cache_dir_signature);
+    }
+
+    /// Record the directory at the current path; returns its index in `dirs`
+    /// (0 when tree recording is off, where the index is never read).
+    fn recordDir(self: *FastWalker) !usize {
+        if (!self.record_tree) return 0;
+        const path_copy = try self.stringAllocator().dupe(u8, self.path_buf[0..self.path_len]);
+        try self.dirs.append(self.allocator, .{ .path = path_copy });
+        return self.dirs.items.len - 1;
+    }
+
+    /// Record the unfollowed symlink at the current path with its target.
+    fn recordLink(self: *FastWalker) error{ OutOfMemory, ReadLinkFailed }!void {
+        var target_buf: [4096]u8 = undefined;
+        const n = libc.readlink(@ptrCast(&self.path_buf), &target_buf, target_buf.len);
+        // A result that fills the buffer may have been truncated; treat it as
+        // unreadable rather than compare a prefix.
+        if (n < 0 or @as(usize, @intCast(n)) >= target_buf.len) return error.ReadLinkFailed;
+
+        const string_alloc = self.stringAllocator();
+        const path_copy = try string_alloc.dupe(u8, self.path_buf[0..self.path_len]);
+        const target_copy = try string_alloc.dupe(u8, target_buf[0..@intCast(n)]);
+        try self.links.append(self.allocator, .{ .path = path_copy, .target = target_copy });
+    }
+
+    fn stringAllocator(self: *FastWalker) std.mem.Allocator {
+        return if (self.arena) |*arena| arena.allocator() else self.allocator;
+    }
+
+    /// Count a failure and, when recording, flag the directory it happened in.
+    fn noteError(self: *FastWalker, dir_index: usize) void {
+        self.stats.errors += 1;
+        if (self.record_tree and dir_index < self.dirs.items.len) {
+            self.dirs.items[dir_index].incomplete = true;
+        }
+    }
+
+    fn noteSkipped(self: *FastWalker, dir_index: usize) void {
+        if (self.record_tree and dir_index < self.dirs.items.len) {
+            self.dirs.items[dir_index].skipped += 1;
         }
     }
 
@@ -399,27 +617,6 @@ pub const FastWalker = struct {
         return !result.found_existing;
     }
 
-    /// Descend into a symlinked directory. Returns true if the dir was pushed
-    /// onto the stack (caller must return to process it), false if it was
-    /// skipped as already-visited or unopenable.
-    fn enterSymlinkedDir(self: *FastWalker, target: *const Stat, parent_len: usize) !bool {
-        if (!try self.markDirVisited(target)) {
-            self.path_len = parent_len;
-            return false;
-        }
-        const sub_dir = libc.opendir(@ptrCast(&self.path_buf)) orelse {
-            self.path_len = parent_len;
-            return false;
-        };
-        self.stats.dirs_traversed += 1;
-        try self.dir_stack.append(self.allocator, .{
-            .dir = sub_dir,
-            .path_len = self.path_len,
-        });
-        self.maybeReportProgress();
-        return true;
-    }
-
     /// Add file from already-obtained stat buffer
     fn addFileFromStat(self: *FastWalker, stat_buf: *const Stat) !void {
         const size: u64 = stat_buf.size;
@@ -440,24 +637,35 @@ pub const FastWalker = struct {
             const result = try self.seen_inodes.?.getOrPut(self.allocator, file_id);
             if (result.found_existing) {
                 self.stats.hard_links_skipped += 1;
+                // No space to win back, so never a file-level duplicate. A
+                // directory still contains it though, so tree recording keeps
+                // the entry, pointed at the first one.
+                if (self.record_tree) {
+                    try self.appendFile(stat_buf, result.value_ptr.*);
+                }
                 return;
             }
+            result.value_ptr.* = self.files.items.len;
         }
 
-        // Copy path - use arena if enabled (faster bulk free), otherwise regular allocator
-        const path_alloc = if (self.arena) |*arena| arena.allocator() else self.allocator;
-        const path_copy = try path_alloc.dupe(u8, self.path_buf[0..self.path_len]);
-
-        try self.files.append(self.allocator, .{
-            .path = path_copy,
-            .size = size,
-            .ino = stat_buf.ino,
-            .dev = stat_buf.dev,
-            .mtime = stat_buf.mtime_sec,
-        });
+        try self.appendFile(stat_buf, null);
 
         self.stats.files_found += 1;
         self.stats.total_size += size;
+    }
+
+    fn appendFile(self: *FastWalker, stat_buf: *const Stat, link_of: ?usize) !void {
+        // Copy path - use arena if enabled (faster bulk free), otherwise regular allocator
+        const path_copy = try self.stringAllocator().dupe(u8, self.path_buf[0..self.path_len]);
+
+        try self.files.append(self.allocator, .{
+            .path = path_copy,
+            .size = stat_buf.size,
+            .ino = stat_buf.ino,
+            .dev = stat_buf.dev,
+            .mtime = stat_buf.mtime_sec,
+            .link_of = link_of,
+        });
     }
 
     fn maybeReportProgress(self: *FastWalker) void {
@@ -484,6 +692,7 @@ pub const FastWalker = struct {
                 .mtime = fast_entry.mtime,
                 .hash = null,
                 .quick_hash = null,
+                .link_of = fast_entry.link_of,
             });
         }
 

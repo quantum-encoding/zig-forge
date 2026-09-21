@@ -41,6 +41,8 @@ pub fn build(b: *std.Build) void {
         .name = "zdedupe",
         .root_module = shared_module,
         .linkage = .dynamic,
+        .use_llvm = true,
+        .use_lld = true,
     });
     shared_lib.root_module.link_libc = true;
     shared_lib.root_module.strip = optimize != .Debug;
@@ -62,9 +64,16 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Everything that links against the system libc is pinned to LLVM + LLD.
+    // Zig's self-hosted ELF linker (the Debug default on x86_64) rejects the
+    // R_X86_64_PC64 relocations in the `.sframe` section that glibc >= 2.44 /
+    // binutils >= 2.47 put in crt1.o, so Debug builds and `zig build test`
+    // fail at link time on current rolling distros. LLD handles them.
     const exe = b.addExecutable(.{
         .name = "zdedupe",
         .root_module = exe_module,
+        .use_llvm = true,
+        .use_lld = true,
     });
     exe.root_module.link_libc = true;
     b.installArtifact(exe);
@@ -94,6 +103,7 @@ pub fn build(b: *std.Build) void {
         "src/fast_walker.zig",
         "src/parallel.zig",
         "src/dedupe.zig",
+        "src/dirs.zig",
         "src/compare.zig",
         "src/report.zig",
         "src/lib.zig",
@@ -110,6 +120,8 @@ pub fn build(b: *std.Build) void {
 
         const mod_test = b.addTest(.{
             .root_module = test_mod,
+            .use_llvm = true,
+            .use_lld = true,
         });
         mod_test.root_module.link_libc = true;
         test_step.dependOn(&b.addRunArtifact(mod_test).step);

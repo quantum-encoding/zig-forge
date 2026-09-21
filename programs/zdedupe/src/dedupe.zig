@@ -6,6 +6,7 @@
 //! 3. Quick hash (first 4KB) for fast rejection - PARALLEL
 //! 4. Full hash (BLAKE3) for confirmation - PARALLEL
 //! 5. Group duplicates
+//! 6. Optionally roll file identities up into directory identities (dirs.zig)
 //!
 //! Performance: Uses parallel hashing to saturate NVMe bandwidth.
 //! NVMe drives perform best with high queue depth (32-64 concurrent I/O).
@@ -15,6 +16,7 @@ const types = @import("types.zig");
 const hasher = @import("hasher.zig");
 const fast_walker = @import("fast_walker.zig");
 const parallel = @import("parallel.zig");
+const dirs = @import("dirs.zig");
 const builtin = @import("builtin");
 
 /// Cross-platform timestamp for elapsed time measurement using clock_gettime
@@ -55,6 +57,8 @@ pub const DupeFinder = struct {
     /// Counted rather than printed: this type is linked into GUI apps over the
     /// C FFI, where a write to stderr is invisible at best.
     failed_paths: u64,
+    /// Directory-level results; present only when `config.analyze_dirs`.
+    dir_analysis: ?dirs.Analysis,
 
     pub fn init(allocator: std.mem.Allocator, config: types.Config) DupeFinder {
         return .{
@@ -74,6 +78,7 @@ pub const DupeFinder = struct {
             .summary = std.mem.zeroes(types.DuplicateSummary),
             .file_hasher = hasher.FileHasher.init(config.hash_algorithm),
             .failed_paths = 0,
+            .dir_analysis = null,
         };
     }
 
@@ -87,6 +92,8 @@ pub const DupeFinder = struct {
             g.deinit();
         }
         self.groups.deinit(self.allocator);
+
+        if (self.dir_analysis) |*analysis| analysis.deinit();
     }
 
     /// Set progress callback
@@ -101,38 +108,58 @@ pub const DupeFinder = struct {
         // Phase 1: Walk directories using fast_walker (statx optimization)
         self.updateProgress(.scanning, 0, 0, null);
 
-        var total_size: u64 = 0;
+        // One walker for every root: its inode table is what stops a file
+        // reachable from two roots being reported as a duplicate of itself.
+        var fw = fast_walker.FastWalker.init(self.allocator);
+        defer fw.deinit();
 
-        for (paths) |path| {
-            var fw = fast_walker.FastWalker.init(self.allocator);
-            defer fw.deinit();
+        fw.setIncludeHidden(self.config.include_hidden);
+        fw.setExcludes(self.config.excludes);
+        fw.setExcludeCacheDirs(self.config.exclude_cache_dirs);
+        fw.enableHardLinkDetection();
+        fw.enableArenaAllocator();
 
-            // Configure fast walker
+        if (self.config.analyze_dirs) {
+            // A directory verdict has to rest on everything the directory
+            // holds, so the size window moves from the walk to the reported
+            // groups (see buildDuplicateGroups). Symlinks are recorded, not
+            // followed: followed, a link to a sibling makes that sibling look
+            // like a second copy of itself.
+            fw.enableTreeRecording();
+            fw.setSizeFilter(0, 0);
+            fw.setFollowSymlinks(false);
+        } else {
             fw.setSizeFilter(self.config.min_size, self.config.max_size);
-            fw.setIncludeHidden(self.config.include_hidden);
             fw.setFollowSymlinks(self.config.follow_symlinks);
-            fw.enableHardLinkDetection();
-            fw.enableArenaAllocator();
-
-            // Walk this path
-            fw.walk(path) catch {
-                self.failed_paths += 1;
-                continue;
-            };
-
-            total_size += fw.stats.total_size;
-
-            // Convert to FileEntry and transfer ownership
-            var entries = try fw.toFileEntries(self.allocator);
-            defer entries.deinit(self.allocator);
-
-            for (entries.items) |entry| {
-                try self.files.append(self.allocator, entry);
-            }
         }
 
-        self.summary.files_scanned = self.files.items.len;
-        self.summary.bytes_scanned = total_size;
+        const roots = try self.coveringRoots(paths);
+        defer self.allocator.free(roots);
+        self.summary.overlapping_roots = paths.len - roots.len;
+
+        for (roots) |path| {
+            fw.walk(path) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => self.failed_paths += 1,
+            };
+        }
+
+        {
+            // Convert to FileEntry and transfer ownership. Indices are kept:
+            // `FileEntry.link_of` refers to positions in the walker's list.
+            var entries = try fw.toFileEntries(self.allocator);
+            defer entries.deinit(self.allocator);
+            errdefer for (entries.items) |*entry| entry.deinit(self.allocator);
+
+            std.debug.assert(self.files.items.len == 0);
+            try self.files.appendSlice(self.allocator, entries.items);
+        }
+
+        self.summary.excluded_entries = fw.stats.excluded;
+        self.summary.bytes_scanned = fw.stats.total_size;
+
+        // Extra hard links are carried for directory analysis only.
+        self.summary.files_scanned = fw.stats.files_found;
 
         if (self.files.items.len == 0) {
             self.updateProgress(.done, 0, 0, null);
@@ -174,12 +201,29 @@ pub const DupeFinder = struct {
         self.summary.duplicate_files = total_dupes;
         self.summary.space_savings = total_savings;
 
+        // Phase 6: Directory analysis (no I/O - reuses the hashes above)
+        if (self.config.analyze_dirs) {
+            self.dir_analysis = try dirs.analyze(
+                self.allocator,
+                self.files.items,
+                fw.dirs.items,
+                fw.links.items,
+                self.config.hash_algorithm,
+                .{},
+            );
+        }
+
         self.updateProgress(.done, self.files.items.len, self.files.items.len, null);
     }
 
     /// Get duplicate groups
     pub fn getGroups(self: *const DupeFinder) []types.DuplicateGroup {
         return self.groups.items;
+    }
+
+    /// Directory-level results, or null unless `config.analyze_dirs` was set.
+    pub fn getDirAnalysis(self: *const DupeFinder) ?*const dirs.Analysis {
+        return if (self.dir_analysis) |*analysis| analysis else null;
     }
 
     /// Number of input paths that could not be walked at all.
@@ -195,6 +239,48 @@ pub const DupeFinder = struct {
     // ========================================================================
     // Private implementation
     // ========================================================================
+
+    /// The subset of `paths` (order kept) left after dropping every root that
+    /// another root already covers — the same directory given twice, or a
+    /// directory inside another. Walking both would list each file under the
+    /// inner root twice, and the two entries would then be reported as
+    /// duplicates of each other: one file, offered for deletion as its own
+    /// copy. Compared by canonical path, so a symlinked spelling of a root is
+    /// caught too. Caller frees the slice (not the strings).
+    fn coveringRoots(self: *DupeFinder, paths: []const []const u8) ![]const []const u8 {
+        const canonical = try self.allocator.alloc(?[]u8, paths.len);
+        @memset(canonical, null);
+        defer {
+            for (canonical) |c| if (c) |owned| self.allocator.free(owned);
+            self.allocator.free(canonical);
+        }
+        for (paths, canonical) |path, *slot| {
+            slot.* = try canonicalPath(self.allocator, path);
+        }
+
+        var kept: std.ArrayListUnmanaged([]const u8) = .empty;
+        errdefer kept.deinit(self.allocator);
+
+        outer: for (paths, 0..) |path, i| {
+            // Unresolvable (missing, unreadable): keep it so the walk fails
+            // and the failure is counted where callers already look for it.
+            const mine = canonical[i] orelse {
+                try kept.append(self.allocator, path);
+                continue;
+            };
+            for (canonical, 0..) |maybe_other, j| {
+                const other = maybe_other orelse continue;
+                if (i == j) continue;
+                // zig-lens-ignore: EQL-FOR-SECRETS filesystem paths, not secrets
+                const same = std.mem.eql(u8, mine, other);
+                // Of two identical roots the first one wins.
+                if (same and j < i) continue :outer;
+                if (!same and isInside(mine, other)) continue :outer;
+            }
+            try kept.append(self.allocator, path);
+        }
+        return kept.toOwnedSlice(self.allocator);
+    }
 
     const SizeGroup = struct {
         size: u64,
@@ -223,6 +309,9 @@ pub const DupeFinder = struct {
         }
 
         for (self.files.items, 0..) |entry, idx| {
+            // An extra hard link is the same file, not a copy of it.
+            if (entry.link_of != null) continue;
+
             const gop = try groups.getOrPut(entry.size);
             if (!gop.found_existing) {
                 gop.value_ptr.* = SizeGroup.init(self.allocator, entry.size);
@@ -382,6 +471,10 @@ pub const DupeFinder = struct {
             const first_idx = kv.value_ptr.items[0];
             const size = self.files.items[first_idx].size;
 
+            // Under directory analysis the walk ignored the size window (see
+            // scan); it is applied here so the file groups are unchanged.
+            if (!self.config.sizeInRange(size)) continue;
+
             var group = types.DuplicateGroup.init(self.allocator, size, kv.key_ptr.*);
 
             for (kv.value_ptr.items) |idx| {
@@ -409,6 +502,26 @@ pub const DupeFinder = struct {
         if (self.progress_callback) |cb| cb(&self.progress);
     }
 };
+
+/// Canonical absolute form of `path` (symlinks resolved), or null if it cannot
+/// be resolved. Caller frees.
+fn canonicalPath(allocator: std.mem.Allocator, path: []const u8) !?[]u8 {
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+
+    var buf: [std.c.PATH_MAX]u8 = undefined;
+    const resolved = std.c.realpath(path_z.ptr, &buf) orelse return null;
+    return try allocator.dupe(u8, std.mem.span(resolved));
+}
+
+/// True if canonical path `inner` lies strictly inside canonical path `outer`.
+fn isInside(inner: []const u8, outer: []const u8) bool {
+    // zig-lens-ignore: EQL-FOR-SECRETS filesystem paths, not secrets
+    if (std.mem.eql(u8, outer, "/")) return inner.len > 1;
+    return inner.len > outer.len + 1 and
+        inner[outer.len] == '/' and
+        std.mem.startsWith(u8, inner, outer);
+}
 
 /// Convenience function to find duplicates
 pub fn findDuplicates(

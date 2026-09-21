@@ -120,6 +120,41 @@ void zdedupe_set_threads(zdedupe_ctx* ctx, uint32_t count);
  */
 void zdedupe_use_sha256(zdedupe_ctx* ctx, bool use_sha256);
 
+/**
+ * Also report identical and overlapping directories (the "directories"
+ * section of the find_duplicates JSON, see zdedupe_run_sync).
+ *
+ * While enabled, min/max size filter the reported file groups only - the walk
+ * sees every file, since a directory must not pass for a copy of another
+ * because the file that differs was outside the size window - and symlinks are
+ * compared by target rather than followed (follow_symlinks is ignored).
+ *
+ * @param ctx     Context handle
+ * @param analyze true to enable (default: false)
+ */
+void zdedupe_set_analyze_dirs(zdedupe_ctx* ctx, bool analyze);
+
+/**
+ * Ignore regenerable output: node_modules, __pycache__, .zig-cache,
+ * .svelte-kit, .DS_Store, ... (Config.default_excludes in src/types.zig) and
+ * any directory carrying a valid CACHEDIR.TAG, e.g. cargo's target/.
+ * .git is never part of the defaults. Scan roots are never excluded.
+ *
+ * @param ctx          Context handle
+ * @param use_defaults true to enable (default: false)
+ */
+void zdedupe_use_default_excludes(zdedupe_ctx* ctx, bool use_defaults);
+
+/**
+ * Ignore every entry (file or directory) with exactly this name. Additive,
+ * and independent of zdedupe_use_default_excludes. No globs.
+ *
+ * @param ctx  Context handle
+ * @param name A single path component; empty or containing '/' is rejected
+ * @return 0 on success, -1 on failure
+ */
+int zdedupe_add_exclude(zdedupe_ctx* ctx, const char* name);
+
 /* === Execution === */
 
 /**
@@ -143,7 +178,9 @@ void zdedupe_use_sha256(zdedupe_ctx* ctx, bool use_sha256);
  *     "duplicate_groups": 10,
  *     "duplicate_files": 25,
  *     "space_savings": 524288000,
- *     "space_savings_human": "500.0 MB"
+ *     "space_savings_human": "500.0 MB",
+ *     "excluded_entries": 12,
+ *     "overlapping_roots": 0
  *   },
  *   "groups": [
  *     {
@@ -160,6 +197,71 @@ void zdedupe_use_sha256(zdedupe_ctx* ctx, bool use_sha256);
  *     }
  *   ]
  * }
+ *
+ * "overlapping_roots" counts scan roots dropped because another root already
+ * covers them (nested, repeated, or a symlinked spelling of the same place).
+ *
+ * With zdedupe_set_analyze_dirs(ctx, true) the document gains one more
+ * top-level key (absent otherwise, so existing decoders are unaffected):
+ *
+ *   "directories": {
+ *     "analyzed": 2836,
+ *     "incomplete": 0,
+ *     "identical_sets": [
+ *       {
+ *         "digest": "7e75cf42...",
+ *         "count": 2,
+ *         "file_count": 261,
+ *         "bytes": 2086912,
+ *         "bytes_human": "1.99 MB",
+ *         "reclaimable": 2086912,
+ *         "reclaimable_human": "1.99 MB",
+ *         "dirs": [
+ *           { "path": "/a/proj", "newest_mtime": "2026-07-19T17:50:51Z", "skipped_entries": 1 },
+ *           { "path": "/a/proj copy", "newest_mtime": "2026-07-19T17:50:51Z", "skipped_entries": 0 }
+ *         ]
+ *       }
+ *     ],
+ *     "overlaps": [
+ *       {
+ *         "relation": "a_in_b",
+ *         "a": {
+ *           "path": "/backup/proj",
+ *           "files": 258, "bytes": 2000000, "bytes_human": "1.91 MB",
+ *           "newest_mtime": "2025-03-01T10:00:00Z",
+ *           "skipped_entries": 0,
+ *           "complete": true,
+ *           "identical_copies": 1,
+ *           "shared_files": 258, "shared_bytes": 2000000,
+ *           "only_count": 0,
+ *           "only": []
+ *         },
+ *         "b": { ...same fields... }
+ *       }
+ *     ]
+ *   }
+ *
+ * identical_sets: directories whose entire subtree matches - names, file
+ * content, symlink targets. Largest "reclaimable" first; only the top-most
+ * directory of each copied tree is listed. "reclaimable" is bytes * (count-1),
+ * an upper bound when the copies are hard links of one another.
+ *
+ * overlaps: directory pairs sharing at least half of one side's files, largest
+ * shared size first. "relation" is one of:
+ *   "same_content"  both hold exactly the same file content (names/layout differ)
+ *   "a_in_b"        every file in a also exists in b - a adds nothing
+ *   "b_in_a"        every file in b also exists in a - b adds nothing
+ *   "overlap"       each side has content the other lacks, OR the side that
+ *                   looks contained is not "complete"
+ * "only" lists (sorted, at most 100; "only_count" is exact) the files whose
+ * content exists nowhere on the other side: what deleting that side would
+ * lose. "complete": false means something beneath could not be read; such a
+ * directory is never in an identical set and never the contained side.
+ * "skipped_entries" counts entries ignored on purpose beneath it (excludes,
+ * cache dirs, hidden files when off, sockets/FIFOs); a consumer should surface
+ * a non-zero value next to any "identical"/"contained" claim.
+ * "identical_copies" > 1 means that side is the first path of an identical
+ * set and the pair stands for every member of it.
  *
  * Note: "files" is an array of OBJECTS, not of strings, and "mtime" /
  * "generated_at" are ISO-8601 UTC strings. Paths are JSON-escaped by

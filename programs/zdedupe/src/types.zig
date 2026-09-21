@@ -18,6 +18,11 @@ pub const FileEntry = struct {
     hash: ?[32]u8,
     /// Quick hash (first 4KB) for fast rejection
     quick_hash: ?[32]u8,
+    /// Index (into the same file list) of the first-seen entry sharing this
+    /// inode, when this entry is an additional hard link to it. Only populated
+    /// by directory analysis, which has to know that a directory *contains*
+    /// the file; the file-level pipeline never groups or hashes such entries.
+    link_of: ?usize = null,
 
     pub fn deinit(self: *FileEntry, allocator: std.mem.Allocator) void {
         allocator.free(self.path);
@@ -159,6 +164,53 @@ pub const Config = struct {
     quick_hash_size: usize = 4096,
     /// Hash algorithm
     hash_algorithm: HashAlgorithm = .blake3,
+    /// Entry basenames (files or directories) pruned from the walk, matched
+    /// exactly — no globs. A pruned entry is treated as if it did not exist,
+    /// and is counted so reports can say what was ignored. Scan roots are
+    /// never pruned: the user named them explicitly.
+    excludes: []const []const u8 = &.{},
+    /// Prune any directory carrying a valid CACHEDIR.TAG (bford.info/cachedir),
+    /// e.g. cargo's `target/`. Safer than excluding a generic name like
+    /// "target" or "build", which could just as well hold user data.
+    exclude_cache_dirs: bool = false,
+    /// Roll file identities up into directory identities: report identical
+    /// directories and directory pairs that largely overlap. See dirs.zig.
+    ///
+    /// While enabled, `min_size`/`max_size` stop filtering the *walk* and only
+    /// filter the reported file groups: a directory must never be declared a
+    /// copy of another because the file that differs was outside the size
+    /// window.
+    analyze_dirs: bool = false,
+
+    /// Basenames of regenerable output, safe to ignore when deciding whether
+    /// two project copies hold the same work. Deliberately absent: `.git`
+    /// (history is not regenerable — a stale copy can hold the only copy of a
+    /// branch or stash) and generic names such as `target`, `build`, `dist`
+    /// and `out` (`exclude_cache_dirs` covers cargo's `target/` by its tag).
+    pub const default_excludes = [_][]const u8{
+        // dependency / build caches
+        "node_modules",
+        "bower_components",
+        ".zig-cache",
+        "zig-cache",
+        "zig-out",
+        "__pycache__",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".tox",
+        ".gradle",
+        ".svelte-kit",
+        ".next",
+        ".nuxt",
+        ".turbo",
+        ".parcel-cache",
+        "DerivedData",
+        // desktop metadata that differs between otherwise identical copies
+        ".DS_Store",
+        "Thumbs.db",
+        "desktop.ini",
+    };
 
     pub const HashAlgorithm = enum {
         blake3,
@@ -171,6 +223,13 @@ pub const Config = struct {
             return @intCast(@max(1, std.Thread.getCpuCount() catch 4));
         }
         return self.threads;
+    }
+
+    /// True if `size` is inside the configured [min_size, max_size] window.
+    pub fn sizeInRange(self: *const Config, size: u64) bool {
+        if (size < self.min_size) return false;
+        if (self.max_size > 0 and size > self.max_size) return false;
+        return true;
     }
 };
 
@@ -240,6 +299,10 @@ pub const DuplicateSummary = struct {
     space_savings: u64,
     /// Time taken for scan (nanoseconds)
     scan_time_ns: u64,
+    /// Entries pruned by `Config.excludes` / `Config.exclude_cache_dirs`.
+    excluded_entries: u64 = 0,
+    /// Scan roots dropped because another root already covers them.
+    overlapping_roots: u64 = 0,
 
     pub fn spaceSavingsHuman(self: *const DuplicateSummary, buf: []u8) []const u8 {
         return formatBytes(self.space_savings, buf);

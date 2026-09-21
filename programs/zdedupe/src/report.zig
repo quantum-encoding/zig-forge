@@ -8,6 +8,7 @@
 const std = @import("std");
 const types = @import("types.zig");
 const hasher = @import("hasher.zig");
+const dirs = @import("dirs.zig");
 
 /// Report writer
 pub const ReportWriter = struct {
@@ -32,10 +33,23 @@ pub const ReportWriter = struct {
         groups: []const types.DuplicateGroup,
         summary: *const types.DuplicateSummary,
     ) !void {
+        try self.writeScanReport(writer, groups, summary, null);
+    }
+
+    /// Write duplicate report plus, when `dir_analysis` is given, the
+    /// directory-level results. Without it the output is exactly what
+    /// `writeDuplicateReport` produces.
+    pub fn writeScanReport(
+        self: *const ReportWriter,
+        writer: anytype,
+        groups: []const types.DuplicateGroup,
+        summary: *const types.DuplicateSummary,
+        dir_analysis: ?*const dirs.Analysis,
+    ) !void {
         switch (self.options.format) {
-            .text => try self.writeDuplicateText(writer, groups, summary),
-            .json => try self.writeDuplicateJson(writer, groups, summary),
-            .html => try self.writeDuplicateHtml(writer, groups, summary),
+            .text => try self.writeDuplicateText(writer, groups, summary, dir_analysis),
+            .json => try self.writeDuplicateJson(writer, groups, summary, dir_analysis),
+            .html => try self.writeDuplicateHtml(writer, groups, summary, dir_analysis),
         }
     }
 
@@ -44,6 +58,7 @@ pub const ReportWriter = struct {
         writer: anytype,
         groups: []const types.DuplicateGroup,
         summary: *const types.DuplicateSummary,
+        dir_analysis: ?*const dirs.Analysis,
     ) !void {
         // Header
         try writer.writeAll("=== Duplicate File Report ===\n\n");
@@ -55,7 +70,17 @@ pub const ReportWriter = struct {
         try writer.print("Duplicate groups: {}\n", .{summary.duplicate_groups});
         try writer.print("Duplicate files:  {}\n", .{summary.duplicate_files});
         try writer.print("Space savings:    {s}\n", .{summary.spaceSavingsHuman(&buf)});
-        try writer.print("Scan time:        {d:.2}s\n\n", .{@as(f64, @floatFromInt(summary.scan_time_ns)) / 1_000_000_000.0});
+        try writer.print("Scan time:        {d:.2}s\n", .{@as(f64, @floatFromInt(summary.scan_time_ns)) / 1_000_000_000.0});
+        if (summary.excluded_entries > 0) {
+            try writer.print("Excluded entries: {}\n", .{summary.excluded_entries});
+        }
+        if (summary.overlapping_roots > 0) {
+            try writer.print("Roots skipped:    {} (already covered by another root)\n", .{summary.overlapping_roots});
+        }
+        try writer.writeAll("\n");
+
+        // Folders first: one line here can stand for thousands of groups below.
+        if (dir_analysis) |analysis| try writeDirectoriesText(writer, analysis);
 
         if (groups.len == 0) {
             try writer.writeAll("No duplicates found.\n");
@@ -90,6 +115,7 @@ pub const ReportWriter = struct {
         writer: anytype,
         groups: []const types.DuplicateGroup,
         summary: *const types.DuplicateSummary,
+        dir_analysis: ?*const dirs.Analysis,
     ) !void {
         var size_buf: [64]u8 = undefined;
 
@@ -117,7 +143,9 @@ pub const ReportWriter = struct {
         try writer.print("    \"duplicate_groups\": {},\n", .{summary.duplicate_groups});
         try writer.print("    \"duplicate_files\": {},\n", .{summary.duplicate_files});
         try writer.print("    \"space_savings\": {},\n", .{summary.space_savings});
-        try writer.print("    \"space_savings_human\": \"{s}\"\n", .{types.formatBytes(summary.space_savings, &size_buf)});
+        try writer.print("    \"space_savings_human\": \"{s}\",\n", .{types.formatBytes(summary.space_savings, &size_buf)});
+        try writer.print("    \"excluded_entries\": {},\n", .{summary.excluded_entries});
+        try writer.print("    \"overlapping_roots\": {}\n", .{summary.overlapping_roots});
         try writer.writeAll("  },\n");
 
         // Groups
@@ -177,8 +205,16 @@ pub const ReportWriter = struct {
             try writer.writeAll("\n");
         }
 
-        try writer.writeAll("  ]\n");
-        try writer.writeAll("}\n");
+        try writer.writeAll("  ]");
+
+        // Present only when directory analysis ran, so existing consumers see
+        // the document they always have.
+        if (dir_analysis) |analysis| {
+            try writer.writeAll(",\n");
+            try writeDirectoriesJson(writer, analysis);
+        }
+
+        try writer.writeAll("\n}\n");
     }
 
     fn writeDuplicateHtml(
@@ -186,6 +222,7 @@ pub const ReportWriter = struct {
         writer: anytype,
         groups: []const types.DuplicateGroup,
         summary: *const types.DuplicateSummary,
+        dir_analysis: ?*const dirs.Analysis,
     ) !void {
         var buf: [64]u8 = undefined;
 
@@ -229,6 +266,8 @@ pub const ReportWriter = struct {
         try writer.print("        <div class=\"stat\"><div class=\"stat-value\">{}</div><div class=\"stat-label\">Duplicate Files</div></div>\n", .{summary.duplicate_files});
         try writer.print("        <div class=\"stat\"><div class=\"stat-value\">{s}</div><div class=\"stat-label\">Potential Savings</div></div>\n", .{summary.spaceSavingsHuman(&buf)});
         try writer.writeAll("      </div>\n    </div>\n\n");
+
+        if (dir_analysis) |analysis| try writeDirectoriesHtml(writer, analysis);
 
         // Groups
         if (groups.len == 0) {
@@ -476,6 +515,219 @@ pub const ReportWriter = struct {
         );
     }
 };
+
+// ============================================================================
+// Directory analysis sections
+// ============================================================================
+
+fn relationName(relation: dirs.Relation) []const u8 {
+    return switch (relation) {
+        .same_content => "same_content",
+        .a_in_b => "a_in_b",
+        .b_in_a => "b_in_a",
+        .overlap => "overlap",
+    };
+}
+
+/// One-line, human statement of what an overlap means for the two folders.
+fn relationSentence(relation: dirs.Relation) []const u8 {
+    return switch (relation) {
+        .same_content => "same files on both sides (names or layout differ)",
+        .a_in_b => "everything in A also exists in B",
+        .b_in_a => "everything in B also exists in A",
+        .overlap => "each side has files the other lacks",
+    };
+}
+
+fn writeDirectoriesText(writer: anytype, analysis: *const dirs.Analysis) !void {
+    var buf: [64]u8 = undefined;
+    var buf2: [64]u8 = undefined;
+
+    try writer.print("--- Identical Directories ({} sets, {} directories analyzed", .{
+        analysis.identical_sets.len,
+        analysis.dirs_analyzed,
+    });
+    if (analysis.dirs_incomplete > 0) {
+        try writer.print(", {} not fully readable", .{analysis.dirs_incomplete});
+    }
+    try writer.writeAll(") ---\n\n");
+
+    for (analysis.identical_sets, 0..) |set, idx| {
+        try writer.print("Set {} ({} copies, {} files, {s} each, up to {s} reclaimable):\n", .{
+            idx + 1,
+            set.dirs.len,
+            set.file_count,
+            types.formatBytes(set.bytes, &buf),
+            types.formatBytes(set.reclaimable, &buf2),
+        });
+        for (set.dirs) |dir| {
+            try writer.print("  = {s}", .{dir.path});
+            if (dir.skipped_entries > 0) {
+                try writer.print("  [ignoring {} excluded entries]", .{dir.skipped_entries});
+            }
+            try writer.writeAll("\n");
+        }
+        try writer.writeAll("\n");
+    }
+
+    try writer.print("--- Overlapping Directories ({} pairs) ---\n\n", .{analysis.overlaps.len});
+
+    for (analysis.overlaps, 0..) |overlap, idx| {
+        try writer.print("Pair {}: {s}\n", .{ idx + 1, relationSentence(overlap.relation) });
+        try writeOverlapSideText(writer, "A", &overlap.a);
+        try writeOverlapSideText(writer, "B", &overlap.b);
+        try writer.writeAll("\n");
+    }
+}
+
+fn writeOverlapSideText(writer: anytype, label: []const u8, side: *const dirs.OverlapSide) !void {
+    var buf: [64]u8 = undefined;
+    try writer.print("  {s}: {s}\n", .{ label, side.path });
+    try writer.print("     {} files, {s}; {} shared, {} only here", .{
+        side.files,
+        types.formatBytes(side.bytes, &buf),
+        side.shared_files,
+        side.only_count,
+    });
+    if (!side.complete) try writer.writeAll("; NOT FULLY READABLE");
+    if (side.identical_copies > 1) try writer.print("; one of {} identical copies", .{side.identical_copies});
+    if (side.skipped_entries > 0) try writer.print("; ignoring {} excluded entries", .{side.skipped_entries});
+    try writer.writeAll("\n");
+    for (side.only) |path| {
+        try writer.print("       only in {s}: {s}\n", .{ label, path });
+    }
+    if (side.only_count > side.only.len) {
+        try writer.print("       ... and {} more\n", .{side.only_count - side.only.len});
+    }
+}
+
+fn writeDirectoriesJson(writer: *std.Io.Writer, analysis: *const dirs.Analysis) !void {
+    var size_buf: [64]u8 = undefined;
+    var mtime_buf: [24]u8 = undefined;
+    var hex_buf: [64]u8 = undefined;
+
+    try writer.writeAll("  \"directories\": {\n");
+    try writer.print("    \"analyzed\": {},\n", .{analysis.dirs_analyzed});
+    try writer.print("    \"incomplete\": {},\n", .{analysis.dirs_incomplete});
+
+    try writer.writeAll("    \"identical_sets\": [");
+    for (analysis.identical_sets, 0..) |set, idx| {
+        try writer.writeAll(if (idx == 0) "\n" else ",\n");
+        try writer.writeAll("      {\n");
+        try writer.print("        \"digest\": \"{s}\",\n", .{hasher.hashToHex(&set.digest, &hex_buf)});
+        try writer.print("        \"count\": {},\n", .{set.dirs.len});
+        try writer.print("        \"file_count\": {},\n", .{set.file_count});
+        try writer.print("        \"bytes\": {},\n", .{set.bytes});
+        try writer.print("        \"bytes_human\": \"{s}\",\n", .{types.formatBytes(set.bytes, &size_buf)});
+        try writer.print("        \"reclaimable\": {},\n", .{set.reclaimable});
+        try writer.print("        \"reclaimable_human\": \"{s}\",\n", .{types.formatBytes(set.reclaimable, &size_buf)});
+        try writer.writeAll("        \"dirs\": [\n");
+        for (set.dirs, 0..) |dir, didx| {
+            try writer.writeAll("          { \"path\": ");
+            try writeJsonString(writer, dir.path);
+            try writer.print(", \"newest_mtime\": \"{s}\", \"skipped_entries\": {} }}", .{
+                formatIso8601(dir.newest_mtime, &mtime_buf),
+                dir.skipped_entries,
+            });
+            try writer.writeAll(if (didx + 1 < set.dirs.len) ",\n" else "\n");
+        }
+        try writer.writeAll("        ]\n");
+        try writer.writeAll("      }");
+    }
+    try writer.writeAll(if (analysis.identical_sets.len == 0) "],\n" else "\n    ],\n");
+
+    try writer.writeAll("    \"overlaps\": [");
+    for (analysis.overlaps, 0..) |overlap, idx| {
+        try writer.writeAll(if (idx == 0) "\n" else ",\n");
+        try writer.writeAll("      {\n");
+        try writer.print("        \"relation\": \"{s}\",\n", .{relationName(overlap.relation)});
+        try writeOverlapSideJson(writer, "a", &overlap.a);
+        try writer.writeAll(",\n");
+        try writeOverlapSideJson(writer, "b", &overlap.b);
+        try writer.writeAll("\n      }");
+    }
+    try writer.writeAll(if (analysis.overlaps.len == 0) "]\n" else "\n    ]\n");
+
+    try writer.writeAll("  }");
+}
+
+fn writeOverlapSideJson(writer: *std.Io.Writer, key: []const u8, side: *const dirs.OverlapSide) !void {
+    var size_buf: [64]u8 = undefined;
+    var mtime_buf: [24]u8 = undefined;
+
+    try writer.print("        \"{s}\": {{\n", .{key});
+    try writer.writeAll("          \"path\": ");
+    try writeJsonString(writer, side.path);
+    try writer.writeAll(",\n");
+    try writer.print("          \"files\": {},\n", .{side.files});
+    try writer.print("          \"bytes\": {},\n", .{side.bytes});
+    try writer.print("          \"bytes_human\": \"{s}\",\n", .{types.formatBytes(side.bytes, &size_buf)});
+    try writer.print("          \"newest_mtime\": \"{s}\",\n", .{formatIso8601(side.newest_mtime, &mtime_buf)});
+    try writer.print("          \"skipped_entries\": {},\n", .{side.skipped_entries});
+    try writer.print("          \"complete\": {},\n", .{side.complete});
+    try writer.print("          \"identical_copies\": {},\n", .{side.identical_copies});
+    try writer.print("          \"shared_files\": {},\n", .{side.shared_files});
+    try writer.print("          \"shared_bytes\": {},\n", .{side.shared_bytes});
+    try writer.print("          \"only_count\": {},\n", .{side.only_count});
+    try writer.writeAll("          \"only\": [");
+    for (side.only, 0..) |path, idx| {
+        try writer.writeAll(if (idx == 0) "\n            " else ",\n            ");
+        try writeJsonString(writer, path);
+    }
+    try writer.writeAll(if (side.only.len == 0) "]\n" else "\n          ]\n");
+    try writer.writeAll("        }");
+}
+
+fn writeDirectoriesHtml(writer: anytype, analysis: *const dirs.Analysis) !void {
+    var buf: [64]u8 = undefined;
+    var buf2: [64]u8 = undefined;
+
+    for (analysis.identical_sets, 0..) |set, idx| {
+        try writer.writeAll("    <div class=\"group\">\n      <div class=\"group-header\">\n");
+        try writer.print("        <span class=\"group-title\">Identical folders {} ({} copies, {} files, {s} each)</span>\n", .{
+            idx + 1,
+            set.dirs.len,
+            set.file_count,
+            types.formatBytes(set.bytes, &buf),
+        });
+        try writer.print("        <span class=\"group-savings\">up to {s} reclaimable</span>\n", .{types.formatBytes(set.reclaimable, &buf2)});
+        try writer.writeAll("      </div>\n      <ul class=\"file-list\">\n");
+        for (set.dirs) |dir| {
+            try writer.writeAll("        <li>");
+            try writeEscapedHtml(writer, dir.path);
+            if (dir.skipped_entries > 0) {
+                try writer.print(" <em>(ignoring {} excluded entries)</em>", .{dir.skipped_entries});
+            }
+            try writer.writeAll("</li>\n");
+        }
+        try writer.writeAll("      </ul>\n    </div>\n\n");
+    }
+
+    for (analysis.overlaps, 0..) |overlap, idx| {
+        try writer.writeAll("    <div class=\"group\">\n      <div class=\"group-header\">\n");
+        try writer.print("        <span class=\"group-title\">Overlapping folders {}: {s}</span>\n", .{
+            idx + 1,
+            relationSentence(overlap.relation),
+        });
+        try writer.writeAll("      </div>\n      <ul class=\"file-list\">\n");
+        for ([_]*const dirs.OverlapSide{ &overlap.a, &overlap.b }, [_][]const u8{ "A", "B" }) |side, label| {
+            try writer.print("        <li><strong>{s}</strong> ", .{label});
+            try writeEscapedHtml(writer, side.path);
+            try writer.print(" &mdash; {} files, {} shared, {} only here", .{ side.files, side.shared_files, side.only_count });
+            if (!side.complete) try writer.writeAll(", <strong>not fully readable</strong>");
+            try writer.writeAll("</li>\n");
+            for (side.only) |path| {
+                try writer.print("        <li>only in {s}: ", .{label});
+                try writeEscapedHtml(writer, path);
+                try writer.writeAll("</li>\n");
+            }
+            if (side.only_count > side.only.len) {
+                try writer.print("        <li>&hellip; and {} more only in {s}</li>\n", .{ side.only_count - side.only.len, label });
+            }
+        }
+        try writer.writeAll("      </ul>\n    </div>\n\n");
+    }
+}
 
 // ============================================================================
 // Helper functions

@@ -22,6 +22,7 @@ pub const dedupe = @import("dedupe.zig");
 pub const compare = @import("compare.zig");
 pub const report = @import("report.zig");
 pub const parallel = @import("parallel.zig");
+pub const dirs = @import("dirs.zig");
 
 // Re-export commonly used types
 pub const FileEntry = types.FileEntry;
@@ -33,6 +34,7 @@ pub const ReportFormat = types.ReportFormat;
 pub const ReportOptions = types.ReportOptions;
 pub const DuplicateSummary = types.DuplicateSummary;
 pub const CompareSummary = types.CompareSummary;
+pub const DirAnalysis = dirs.Analysis;
 
 pub const DupeFinder = dedupe.DupeFinder;
 pub const FolderComparator = compare.FolderComparator;
@@ -56,6 +58,9 @@ const InternalContext = struct {
     paths: std.ArrayListUnmanaged([]const u8),
     mode: Mode,
     result_json: ?[:0]u8,
+    /// Owned copies of the names passed to zdedupe_add_exclude.
+    user_excludes: std.ArrayListUnmanaged([]const u8),
+    use_default_excludes: bool,
 
     const Mode = enum(c_int) { find_duplicates = 0, compare_folders = 1 };
     const alloc = std.heap.c_allocator;
@@ -67,6 +72,8 @@ const InternalContext = struct {
             .paths = .empty,
             .mode = .find_duplicates,
             .result_json = null,
+            .user_excludes = .empty,
+            .use_default_excludes = false,
         };
         return self;
     }
@@ -76,6 +83,8 @@ const InternalContext = struct {
         for (self.paths.items) |p| alloc.free(p);
         self.paths.deinit(alloc);
         if (self.result_json) |j| alloc.free(j);
+        for (self.user_excludes.items) |name| alloc.free(name);
+        self.user_excludes.deinit(alloc);
         // Free the context using libc allocator
         libc_alloc.destroy(self);
     }
@@ -151,6 +160,36 @@ export fn zdedupe_use_sha256(ctx: ?*ZDedupeContext, use_sha256: bool) void {
     internal.config.hash_algorithm = if (use_sha256) .sha256 else .blake3;
 }
 
+export fn zdedupe_set_analyze_dirs(ctx: ?*ZDedupeContext, analyze: bool) void {
+    const c = ctx orelse return;
+    const internal: *InternalContext = @ptrCast(@alignCast(c));
+    internal.config.analyze_dirs = analyze;
+}
+
+export fn zdedupe_use_default_excludes(ctx: ?*ZDedupeContext, use_defaults: bool) void {
+    const c = ctx orelse return;
+    const internal: *InternalContext = @ptrCast(@alignCast(c));
+    internal.use_default_excludes = use_defaults;
+}
+
+export fn zdedupe_add_exclude(ctx: ?*ZDedupeContext, name: [*:0]const u8) c_int {
+    const c = ctx orelse return -1;
+    const internal: *InternalContext = @ptrCast(@alignCast(c));
+    const alloc = std.heap.c_allocator;
+
+    // An exclude is one path component. A name holding a slash could never
+    // match, so refuse it rather than accept a filter that silently does nothing.
+    const span = std.mem.span(name);
+    if (span.len == 0 or std.mem.indexOfScalar(u8, span, '/') != null) return -1;
+
+    const owned = alloc.dupe(u8, span) catch return -1;
+    internal.user_excludes.append(alloc, owned) catch {
+        alloc.free(owned);
+        return -1;
+    };
+    return 0;
+}
+
 // === Execution ===
 
 export fn zdedupe_run_sync(ctx: ?*ZDedupeContext) ?[*:0]const u8 {
@@ -186,7 +225,19 @@ export fn zdedupe_run_sync(ctx: ?*ZDedupeContext) ?[*:0]const u8 {
 fn runDuplicates(internal: *InternalContext) ?[]u8 {
     const alloc = std.heap.c_allocator;
 
-    var finder = DupeFinder.init(alloc, internal.config);
+    // Effective exclude list: the defaults (if asked for) plus added names.
+    var excludes: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer excludes.deinit(alloc);
+    if (internal.use_default_excludes) {
+        excludes.appendSlice(alloc, &Config.default_excludes) catch return null;
+    }
+    excludes.appendSlice(alloc, internal.user_excludes.items) catch return null;
+
+    var config = internal.config;
+    config.excludes = excludes.items;
+    config.exclude_cache_dirs = internal.use_default_excludes;
+
+    var finder = DupeFinder.init(alloc, config);
     defer finder.deinit();
 
     finder.scan(internal.paths.items) catch return null;
@@ -196,7 +247,7 @@ fn runDuplicates(internal: *InternalContext) ?[]u8 {
     errdefer alloc_writer.deinit();
 
     const reporter = ReportWriter.init(alloc, .{ .format = .json });
-    reporter.writeDuplicateReport(&alloc_writer.writer, finder.getGroups(), finder.getSummary()) catch return null;
+    reporter.writeScanReport(&alloc_writer.writer, finder.getGroups(), finder.getSummary(), finder.getDirAnalysis()) catch return null;
 
     return alloc_writer.toOwnedSlice() catch null;
 }
@@ -252,6 +303,7 @@ test "imports" {
     _ = compare;
     _ = report;
     _ = parallel;
+    _ = dirs;
 }
 
 test "C FFI lifecycle" {
@@ -263,6 +315,11 @@ test "C FFI lifecycle" {
     zdedupe_set_include_hidden(ctx, true);
     zdedupe_set_follow_symlinks(ctx, false);
     zdedupe_use_sha256(ctx, false);
+    zdedupe_set_analyze_dirs(ctx, true);
+    zdedupe_use_default_excludes(ctx, true);
+    try std.testing.expectEqual(@as(c_int, 0), zdedupe_add_exclude(ctx, "vendor"));
+    try std.testing.expectEqual(@as(c_int, -1), zdedupe_add_exclude(ctx, "some/path"));
+    try std.testing.expectEqual(@as(c_int, -1), zdedupe_add_exclude(ctx, ""));
     zdedupe_free(ctx);
 }
 

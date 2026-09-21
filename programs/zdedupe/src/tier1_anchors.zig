@@ -425,3 +425,511 @@ test "a symlink cycle terminates instead of recursing forever" {
         try testing.expectEqual(@as(usize, 1), result.files.items.len);
     }
 }
+
+// ===========================================================================
+// Directory analysis — what a user is told is safe to delete
+// ===========================================================================
+//
+// Anchors, none produced by dirs.zig:
+//   * `tools/dirdigest_reference.py`, an independent implementation of the
+//     documented digest format (os + hashlib), supplies the expected digests.
+//   * Every identity / containment expectation below is the verdict `diff -r`
+//     gives for the same fixture; the fixtures are small enough to check by eye.
+
+const dirs = @import("dirs.zig");
+
+const readme_text = "zdedupe directory digest fixture\n";
+const main_text = "int main(void) { return 0; }\n";
+const util_text = "/* strings */\n";
+const project_bytes = readme_text.len + main_text.len + util_text.len;
+
+/// `python3 tools/dirdigest_reference.py T` for the tree built by
+/// `buildGoldenProject`, and for its `src/` subdirectory.
+const DIR_DIGEST_PROJECT = "7e75cf42667ab61c3a42c149b4f7fb7d5d4216ac4b4ec4c77bf5d97179ad8b0a";
+const DIR_DIGEST_SRC = "ac80422eb3ec43a0afa16c807838f50c6e7128fa30f7e76b985c1e25b8659a43";
+
+/// A three-file project tree: readme.txt, src/main.c, src/util/str.c.
+fn buildProject(scratch: *Scratch, comptime root: []const u8) !void {
+    try scratch.makeDir(root);
+    try scratch.makeDir(root ++ "/src");
+    try scratch.makeDir(root ++ "/src/util");
+    try scratch.writeFile(root ++ "/readme.txt", readme_text);
+    try scratch.writeFile(root ++ "/src/main.c", main_text);
+    try scratch.writeFile(root ++ "/src/util/str.c", util_text);
+}
+
+/// `buildProject` plus an empty directory and a symlink — every entry kind the
+/// digest covers. Must stay in step with the tree the reference digests were
+/// computed from (see tools/dirdigest_reference.py).
+fn buildGoldenProject(scratch: *Scratch, comptime root: []const u8) !void {
+    try buildProject(scratch, root);
+    try scratch.makeDir(root ++ "/empty");
+    try scratch.symLink("src/main.c", root ++ "/link");
+}
+
+fn scanDirs(finder: *dedupe.DupeFinder, scratch: *const Scratch) !*const dirs.Analysis {
+    try finder.scan(&.{scratch.path});
+    return finder.getDirAnalysis() orelse error.NoDirectoryAnalysis;
+}
+
+fn pathIs(scratch: *const Scratch, path: []const u8, sub_path: []const u8) bool {
+    return path.len == scratch.path.len + 1 + sub_path.len and
+        std.mem.startsWith(u8, path, scratch.path) and
+        path[scratch.path.len] == '/' and
+        std.mem.endsWith(u8, path, sub_path);
+}
+
+/// The identical set that has `sub_path` as a member, if any.
+fn setWith(analysis: *const dirs.Analysis, scratch: *const Scratch, sub_path: []const u8) ?*const dirs.IdenticalSet {
+    for (analysis.identical_sets) |*set| {
+        for (set.dirs) |dir| {
+            if (pathIs(scratch, dir.path, sub_path)) return set;
+        }
+    }
+    return null;
+}
+
+fn setHas(set: *const dirs.IdenticalSet, scratch: *const Scratch, sub_path: []const u8) bool {
+    for (set.dirs) |dir| {
+        if (pathIs(scratch, dir.path, sub_path)) return true;
+    }
+    return false;
+}
+
+fn overlapOf(analysis: *const dirs.Analysis, scratch: *const Scratch, a: []const u8, b: []const u8) ?*const dirs.Overlap {
+    for (analysis.overlaps) |*overlap| {
+        if (pathIs(scratch, overlap.a.path, a) and pathIs(scratch, overlap.b.path, b)) return overlap;
+    }
+    return null;
+}
+
+fn expectOnly(scratch: *const Scratch, side: *const dirs.OverlapSide, expected: []const []const u8) !void {
+    try testing.expectEqual(@as(u64, expected.len), side.only_count);
+    try testing.expectEqual(expected.len, side.only.len);
+    for (expected, side.only) |want, got| {
+        if (!pathIs(scratch, got, want)) {
+            std.debug.print("expected only-path {s}, got {s}\n", .{ want, got });
+            return error.TestExpectedEqual;
+        }
+    }
+}
+
+test "anchor: directory digests match the independent Python reference" {
+    const allocator = testing.allocator;
+    var scratch = try Scratch.init(allocator, "dirs-golden");
+    defer scratch.deinit();
+
+    try buildGoldenProject(&scratch, "one");
+    try buildGoldenProject(&scratch, "two");
+    // A third copy of src/ alone, inside a parent that is no copy of the
+    // others, so the src/ set is not implied by its parents and gets reported.
+    try scratch.makeDir("three");
+    try scratch.makeDir("three/src");
+    try scratch.makeDir("three/src/util");
+    try scratch.writeFile("three/src/main.c", main_text);
+    try scratch.writeFile("three/src/util/str.c", util_text);
+    try scratch.writeFile("three/notes.txt", "not part of the project\n");
+
+    var finder = dedupe.DupeFinder.init(allocator, .{ .analyze_dirs = true, .hash_algorithm = .sha256 });
+    defer finder.deinit();
+    const analysis = try scanDirs(&finder, &scratch);
+
+    var hex: [64]u8 = undefined;
+
+    const project = setWith(analysis, &scratch, "one") orelse return error.ProjectSetMissing;
+    try testing.expectEqual(@as(usize, 2), project.dirs.len);
+    try testing.expect(setHas(project, &scratch, "two"));
+    try testing.expectEqualStrings(DIR_DIGEST_PROJECT, hasher.hashToHex(&project.digest, &hex));
+    try testing.expectEqual(@as(u64, 3), project.file_count);
+    try testing.expectEqual(@as(u64, project_bytes), project.bytes);
+    try testing.expectEqual(@as(u64, project_bytes), project.reclaimable);
+
+    const src = setWith(analysis, &scratch, "three/src") orelse return error.SrcSetMissing;
+    try testing.expectEqual(@as(usize, 3), src.dirs.len);
+    try testing.expectEqualStrings(DIR_DIGEST_SRC, hasher.hashToHex(&src.digest, &hex));
+
+    // one/src/util == two/src/util == three/src/util is implied by the src/
+    // set and must not be reported again.
+    try testing.expect(setWith(analysis, &scratch, "one/src/util") == null);
+    try testing.expectEqual(@as(usize, 2), analysis.identical_sets.len);
+}
+
+test "a one-byte, same-size change breaks identity and is named on both sides" {
+    const allocator = testing.allocator;
+    var scratch = try Scratch.init(allocator, "dirs-onebyte");
+    defer scratch.deinit();
+
+    try buildProject(&scratch, "p");
+    try buildProject(&scratch, "q");
+    // Same length as main_text, one byte different: size and name alone would
+    // call these trees identical.
+    try scratch.writeFile("q/src/main.c", "int main(void) { return 1; }\n");
+
+    var finder = dedupe.DupeFinder.init(allocator, .{ .analyze_dirs = true });
+    defer finder.deinit();
+    const analysis = try scanDirs(&finder, &scratch);
+
+    try testing.expect(setWith(analysis, &scratch, "p") == null);
+    try testing.expect(setWith(analysis, &scratch, "p/src") == null);
+
+    const overlap = overlapOf(analysis, &scratch, "p", "q") orelse return error.OverlapMissing;
+    try testing.expectEqual(dirs.Relation.overlap, overlap.relation);
+    try testing.expectEqual(@as(u64, 2), overlap.a.shared_files);
+    try testing.expectEqual(@as(u64, 2), overlap.b.shared_files);
+    try expectOnly(&scratch, &overlap.a, &.{"p/src/main.c"});
+    try expectOnly(&scratch, &overlap.b, &.{"q/src/main.c"});
+}
+
+test "a stale backup is contained in the current tree, never the reverse" {
+    const allocator = testing.allocator;
+    var scratch = try Scratch.init(allocator, "dirs-backup");
+    defer scratch.deinit();
+
+    try buildProject(&scratch, "backup");
+    try buildProject(&scratch, "current");
+    try scratch.writeFile("current/src/new.c", "work done after the backup\n");
+
+    var finder = dedupe.DupeFinder.init(allocator, .{ .analyze_dirs = true });
+    defer finder.deinit();
+    const analysis = try scanDirs(&finder, &scratch);
+
+    try testing.expect(setWith(analysis, &scratch, "backup") == null);
+
+    const overlap = overlapOf(analysis, &scratch, "backup", "current") orelse return error.OverlapMissing;
+    // Deleting `backup` loses nothing; deleting `current` loses new.c.
+    try testing.expectEqual(dirs.Relation.a_in_b, overlap.relation);
+    try expectOnly(&scratch, &overlap.a, &.{});
+    try expectOnly(&scratch, &overlap.b, &.{"current/src/new.c"});
+    try testing.expectEqual(@as(u64, 3), overlap.a.shared_files);
+}
+
+test "a rename alone, or an empty directory alone, is same content but not identical" {
+    const allocator = testing.allocator;
+    var scratch = try Scratch.init(allocator, "dirs-rename");
+    defer scratch.deinit();
+
+    try buildProject(&scratch, "p");
+
+    // renamed/: one file under a different name, nothing else changed.
+    try scratch.makeDir("renamed");
+    try scratch.makeDir("renamed/src");
+    try scratch.makeDir("renamed/src/util");
+    try scratch.writeFile("renamed/README.txt", readme_text);
+    try scratch.writeFile("renamed/src/main.c", main_text);
+    try scratch.writeFile("renamed/src/util/str.c", util_text);
+
+    // with-empty/: the same tree plus one empty directory.
+    try buildProject(&scratch, "with-empty");
+    try scratch.makeDir("with-empty/logs");
+
+    var finder = dedupe.DupeFinder.init(allocator, .{ .analyze_dirs = true });
+    defer finder.deinit();
+    const analysis = try scanDirs(&finder, &scratch);
+
+    // Three trees, the same three files, and not one identical pair.
+    try testing.expect(setWith(analysis, &scratch, "p") == null);
+    try testing.expect(setWith(analysis, &scratch, "renamed") == null);
+    try testing.expect(setWith(analysis, &scratch, "with-empty") == null);
+
+    for ([_][2][]const u8{
+        .{ "p", "renamed" },
+        .{ "p", "with-empty" },
+        .{ "renamed", "with-empty" },
+    }) |pair| {
+        const overlap = overlapOf(analysis, &scratch, pair[0], pair[1]) orelse return error.OverlapMissing;
+        try testing.expectEqual(dirs.Relation.same_content, overlap.relation);
+    }
+}
+
+test "symlink targets are part of directory identity" {
+    const allocator = testing.allocator;
+    var scratch = try Scratch.init(allocator, "dirs-symlink");
+    defer scratch.deinit();
+
+    inline for (.{ "p", "q", "r" }) |root| try buildProject(&scratch, root);
+    try scratch.symLink("src/main.c", "p/link");
+    try scratch.symLink("src/main.c", "q/link");
+    try scratch.symLink("readme.txt", "r/link");
+
+    var finder = dedupe.DupeFinder.init(allocator, .{ .analyze_dirs = true });
+    defer finder.deinit();
+    const analysis = try scanDirs(&finder, &scratch);
+
+    const set = setWith(analysis, &scratch, "p") orelse return error.SetMissing;
+    try testing.expect(setHas(set, &scratch, "q"));
+    try testing.expect(!setHas(set, &scratch, "r"));
+}
+
+test "hard-linked snapshot trees are identical yet hold no duplicate files" {
+    const allocator = testing.allocator;
+    var scratch = try Scratch.init(allocator, "dirs-hardlink");
+    defer scratch.deinit();
+
+    // What `cp -al p q` / `rsync --link-dest` produce.
+    try buildProject(&scratch, "p");
+    try scratch.makeDir("q");
+    try scratch.makeDir("q/src");
+    try scratch.makeDir("q/src/util");
+    try scratch.hardLink("p/readme.txt", "q/readme.txt");
+    try scratch.hardLink("p/src/main.c", "q/src/main.c");
+    try scratch.hardLink("p/src/util/str.c", "q/src/util/str.c");
+
+    var finder = dedupe.DupeFinder.init(allocator, .{ .analyze_dirs = true });
+    defer finder.deinit();
+    const analysis = try scanDirs(&finder, &scratch);
+
+    // Nothing to reclaim at file level: every "copy" is the same inode.
+    try testing.expectEqual(@as(usize, 0), finder.getGroups().len);
+    try testing.expectEqual(@as(u64, 3), finder.getSummary().files_scanned);
+
+    const set = setWith(analysis, &scratch, "p") orelse return error.SetMissing;
+    try testing.expect(setHas(set, &scratch, "q"));
+    try testing.expectEqual(@as(u64, 3), set.file_count);
+}
+
+extern "c" fn geteuid() c_uint;
+
+test "an unreadable subdirectory blocks every safety verdict" {
+    // root reads through mode 000, so the fixture would not be unreadable.
+    if (geteuid() == 0) return error.SkipZigTest;
+
+    const allocator = testing.allocator;
+    var scratch = try Scratch.init(allocator, "dirs-unreadable");
+    defer scratch.deinit();
+
+    try buildProject(&scratch, "p");
+    try buildProject(&scratch, "q");
+
+    const locked = try scratch.joinZ("q/src/util");
+    defer allocator.free(locked);
+    if (std.c.chmod(locked.ptr, 0) != 0) return error.SkipZigTest;
+    // Restore before Scratch.deinit, or the tree cannot be cleaned up.
+    defer _ = std.c.chmod(locked.ptr, 0o700);
+
+    var finder = dedupe.DupeFinder.init(allocator, .{ .analyze_dirs = true });
+    defer finder.deinit();
+    const analysis = try scanDirs(&finder, &scratch);
+
+    // q/src, q and the scan root all have something unknown beneath them.
+    try testing.expectEqual(@as(u64, 3), analysis.dirs_incomplete);
+    try testing.expect(setWith(analysis, &scratch, "q") == null);
+    try testing.expect(setWith(analysis, &scratch, "q/src") == null);
+
+    // Everything we *could* read of q exists in p — and that is exactly the
+    // trap: "q is contained in p" would invite deleting a directory whose
+    // contents were never seen.
+    const overlap = overlapOf(analysis, &scratch, "p", "q") orelse return error.OverlapMissing;
+    try testing.expect(!overlap.b.complete);
+    try testing.expectEqual(@as(u64, 0), overlap.b.only_count);
+    try testing.expectEqual(dirs.Relation.overlap, overlap.relation);
+}
+
+test "excluded names and tagged cache dirs are ignored, counted, and need a valid tag" {
+    const allocator = testing.allocator;
+    var scratch = try Scratch.init(allocator, "dirs-excludes");
+    defer scratch.deinit();
+
+    inline for (.{ "p", "q", "r" }) |root| try buildProject(&scratch, root);
+
+    try scratch.makeDir("p/node_modules");
+    try scratch.writeFile("p/node_modules/dep.js", "module.exports = 1;\n");
+
+    try scratch.makeDir("q/target");
+    try scratch.writeFile("q/target/CACHEDIR.TAG", "Signature: 8a477f597d28d172789f06886806bc55\n# cargo\n");
+    try scratch.writeFile("q/target/artifact.o", "object code\n");
+
+    // A file merely *named* CACHEDIR.TAG proves nothing: r/cache is real data
+    // and must keep r out of the set.
+    try scratch.makeDir("r/cache");
+    try scratch.writeFile("r/cache/CACHEDIR.TAG", "");
+    try scratch.writeFile("r/cache/data.bin", "user data\n");
+
+    var finder = dedupe.DupeFinder.init(allocator, .{
+        .analyze_dirs = true,
+        .excludes = &types.Config.default_excludes,
+        .exclude_cache_dirs = true,
+    });
+    defer finder.deinit();
+    const analysis = try scanDirs(&finder, &scratch);
+
+    try testing.expectEqual(@as(u64, 2), finder.getSummary().excluded_entries);
+
+    const set = setWith(analysis, &scratch, "p") orelse return error.SetMissing;
+    try testing.expectEqual(@as(usize, 2), set.dirs.len);
+    try testing.expect(setHas(set, &scratch, "q"));
+    try testing.expect(!setHas(set, &scratch, "r"));
+    for (set.dirs) |dir| try testing.expectEqual(@as(u64, 1), dir.skipped_entries);
+}
+
+test "excludes prune the file-level scan too, but never a scan root" {
+    const allocator = testing.allocator;
+    var scratch = try Scratch.init(allocator, "excludes-files");
+    defer scratch.deinit();
+
+    try scratch.makeDir("app");
+    try scratch.makeDir("app/node_modules");
+    try scratch.writeFile("app/index.js", "module.exports = 1;\n");
+    try scratch.writeFile("app/node_modules/index.js", "module.exports = 1;\n");
+
+    const config: types.Config = .{ .excludes = &.{"node_modules"} };
+
+    {
+        var finder = dedupe.DupeFinder.init(allocator, config);
+        defer finder.deinit();
+        try finder.scan(&.{scratch.path});
+        try testing.expectEqual(@as(usize, 0), finder.getGroups().len);
+        try testing.expectEqual(@as(u64, 1), finder.getSummary().files_scanned);
+    }
+    {
+        // Asked for by name, an excluded directory is scanned like any other.
+        const root = try scratch.join("app/node_modules");
+        defer allocator.free(root);
+        var finder = dedupe.DupeFinder.init(allocator, config);
+        defer finder.deinit();
+        try finder.scan(&.{root});
+        try testing.expectEqual(@as(u64, 1), finder.getSummary().files_scanned);
+    }
+}
+
+test "size filters narrow the file groups without blinding directory analysis" {
+    const allocator = testing.allocator;
+    var scratch = try Scratch.init(allocator, "dirs-sizefilter");
+    defer scratch.deinit();
+
+    inline for (.{ "p", "q", "r" }) |root| try buildProject(&scratch, root);
+    try scratch.writeFile("r/src/main.c", "int main(void) { return 1; }\n");
+
+    // Every fixture file is far below the window.
+    var finder = dedupe.DupeFinder.init(allocator, .{ .analyze_dirs = true, .min_size = 1024 * 1024 });
+    defer finder.deinit();
+    const analysis = try scanDirs(&finder, &scratch);
+
+    try testing.expectEqual(@as(usize, 0), finder.getGroups().len);
+
+    // Had the walk honoured min_size, p, q and r would all look empty — and
+    // r, which differs, would pass for a copy.
+    const set = setWith(analysis, &scratch, "p") orelse return error.SetMissing;
+    try testing.expect(setHas(set, &scratch, "q"));
+    try testing.expect(!setHas(set, &scratch, "r"));
+}
+
+test "overlapping scan roots never make a file its own duplicate" {
+    const allocator = testing.allocator;
+    var scratch = try Scratch.init(allocator, "roots");
+    defer scratch.deinit();
+
+    try scratch.makeDir("sub");
+    try scratch.writeFile("sub/precious.txt", "the only copy of this content\n");
+    try scratch.symLink("sub", "alias");
+
+    const sub = try scratch.join("sub");
+    defer allocator.free(sub);
+    const alias = try scratch.join("alias");
+    defer allocator.free(alias);
+
+    // Nested root, the same root twice, and a symlinked spelling of a root.
+    // Before roots were reconciled each of these listed precious.txt twice and
+    // reported it as a duplicate of itself — "keep one, delete the rest" then
+    // deletes the only copy.
+    const cases = [_][]const []const u8{
+        &.{ scratch.path, sub },
+        &.{ sub, scratch.path },
+        &.{ sub, sub },
+        &.{ sub, alias },
+    };
+    for (cases) |roots| {
+        var finder = dedupe.DupeFinder.init(allocator, .{});
+        defer finder.deinit();
+        try finder.scan(roots);
+
+        try testing.expectEqual(@as(usize, 0), finder.getGroups().len);
+        try testing.expectEqual(@as(u64, 1), finder.getSummary().files_scanned);
+        try testing.expectEqual(@as(u64, 1), finder.getSummary().overlapping_roots);
+    }
+}
+
+test "external contract: the directories JSON section parses with the documented shape" {
+    const allocator = testing.allocator;
+    var scratch = try Scratch.init(allocator, "dirs-json");
+    defer scratch.deinit();
+
+    const hostile_dir = "dir\" ,\"injected\":1, \\ <b>";
+    try buildProject(&scratch, "p");
+    try buildProject(&scratch, "q");
+    try buildProject(&scratch, hostile_dir);
+    try scratch.writeFile(hostile_dir ++ "/src/extra.c", "only in the hostile copy\n");
+
+    var finder = dedupe.DupeFinder.init(allocator, .{ .analyze_dirs = true });
+    defer finder.deinit();
+    try finder.scan(&.{scratch.path});
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    const writer = report.ReportWriter.init(allocator, .{ .format = .json });
+    try writer.writeScanReport(&out.writer, finder.getGroups(), finder.getSummary(), finder.getDirAnalysis());
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, out.written(), .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+
+    // The five original keys plus "directories"; nothing injected by the name.
+    try testing.expectEqual(@as(usize, 6), root.count());
+    try testing.expect(root.get("injected") == null);
+
+    const summary = root.get("summary").?.object;
+    _ = summary.get("excluded_entries").?.integer;
+    _ = summary.get("overlapping_roots").?.integer;
+
+    const directories = root.get("directories").?.object;
+    _ = directories.get("analyzed").?.integer;
+    _ = directories.get("incomplete").?.integer;
+
+    // {p, q}, then the three src/util copies (the hostile tree's src/ differs,
+    // so that smaller set is not implied by any parent). Largest first.
+    const sets = directories.get("identical_sets").?.array;
+    try testing.expectEqual(@as(usize, 2), sets.items.len);
+    try testing.expectEqual(@as(i64, 3), sets.items[1].object.get("count").?.integer);
+    const set = sets.items[0].object;
+    try testing.expectEqual(@as(usize, 64), set.get("digest").?.string.len);
+    try testing.expectEqual(@as(i64, 2), set.get("count").?.integer);
+    for ([_][]const u8{ "file_count", "bytes", "reclaimable" }) |field| _ = set.get(field).?.integer;
+    for ([_][]const u8{ "bytes_human", "reclaimable_human" }) |field| _ = set.get(field).?.string;
+    for (set.get("dirs").?.array.items) |dir| {
+        _ = dir.object.get("path").?.string;
+        _ = dir.object.get("newest_mtime").?.string;
+        _ = dir.object.get("skipped_entries").?.integer;
+    }
+
+    // p and q are identical, so the pair with the hostile copy is reported
+    // once, against the set's first path.
+    const overlaps = directories.get("overlaps").?.array;
+    try testing.expectEqual(@as(usize, 1), overlaps.items.len);
+    const overlap = overlaps.items[0].object;
+    try testing.expectEqualStrings("b_in_a", overlap.get("relation").?.string);
+
+    const side_a = overlap.get("a").?.object;
+    const side_b = overlap.get("b").?.object;
+    try testing.expect(std.mem.endsWith(u8, side_a.get("path").?.string, hostile_dir));
+    try testing.expect(std.mem.endsWith(u8, side_b.get("path").?.string, "/p"));
+    try testing.expectEqual(@as(i64, 2), side_b.get("identical_copies").?.integer);
+    for ([_]std.json.ObjectMap{ side_a, side_b }) |side| {
+        for ([_][]const u8{
+            "files",        "bytes",        "skipped_entries", "identical_copies",
+            "shared_files", "shared_bytes", "only_count",
+        }) |field| _ = side.get(field).?.integer;
+        _ = side.get("bytes_human").?.string;
+        _ = side.get("newest_mtime").?.string;
+        _ = side.get("complete").?.bool;
+        _ = side.get("only").?.array;
+    }
+    try testing.expectEqual(@as(usize, 1), side_a.get("only").?.array.items.len);
+
+    // Without an analysis the document is exactly the one consumers already
+    // parse: no "directories" key appears.
+    var plain: std.Io.Writer.Allocating = .init(allocator);
+    defer plain.deinit();
+    try writer.writeScanReport(&plain.writer, finder.getGroups(), finder.getSummary(), null);
+    var parsed_plain = try std.json.parseFromSlice(std.json.Value, allocator, plain.written(), .{});
+    defer parsed_plain.deinit();
+    try testing.expect(parsed_plain.value.object.get("directories") == null);
+}

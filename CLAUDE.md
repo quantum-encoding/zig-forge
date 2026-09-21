@@ -85,6 +85,15 @@ instead of extending them.
 - `@cImport` of `EndpointSecurity/EndpointSecurity.h` fails on the macOS 27 SDK (Zig's clang
   rejects a nullability attribute in `xpc/xpc.h`); bind by hand and anchor with
   `zig_endpoint_sec/tools/gen_layout_anchors.py`. `@Type` reification and `std.once` are gone.
+- On glibc >= 2.44 / binutils >= 2.47 (current Arch), `crt1.o` carries `.sframe` relocations
+  (`R_X86_64_PC64`) that Zig 0.16's self-hosted ELF linker rejects, so every **Debug** artifact
+  that links libc — including `zig build test` — dies with `fatal linker error: unhandled
+  relocation type`. Release modes use LLD and are fine. Set `.use_llvm = true, .use_lld = true`
+  on `addExecutable`/`addTest`/dynamic `addLibrary` (`zdedupe/build.zig`); ad hoc: `-fllvm -flld`.
+- Guardian Shield blocks Zig replacing an existing `.zig-cache/o/<hash>` entry, so rebuilding
+  byte-identical sources (e.g. re-running after reverting a mutation) fails with `failed to
+  rename compilation results … PermissionDenied`. It is the environment, not your code: pass a
+  fresh `--cache-dir` outside the repo for that run.
 - Apple APIs taking `^` blocks (`es_new_client`, libdispatch, XPC) need a real `Block_literal`:
   use `zig_darwin_kit.Block`. A bare `fn` pointer is dereferenced as a block header and
   crashes or misbehaves.
