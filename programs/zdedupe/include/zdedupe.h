@@ -365,6 +365,19 @@ int zdedupe_delete_file(const char* path);
 int zdedupe_move_file(const char* src, const char* dst);
 
 /**
+ * Hash one file with the algorithm a scan uses, into out[32].
+ *
+ * For hosts about to delete a duplicate PERMANENTLY: scan results describe
+ * the disk as it was. Re-hash the file and the copy being kept and compare
+ * both with the group's recorded hash before unlinking. Non-regular files are
+ * refused and a read error is a failure, exactly as during a scan.
+ *
+ * @param use_sha256 must match the scan (result store flag bit 1)
+ * @return 0 on success, -1 on failure
+ */
+int zdedupe_hash_file(const char* path, bool use_sha256, uint8_t out[32]);
+
+/**
  * Get library version string
  *
  * @return Version string (e.g., "0.1.0")

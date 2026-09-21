@@ -45,7 +45,7 @@ With `--dirs`, `--min-size`/`--max-size` filter the reported file groups only (t
 
 `zig build` produces `libzdedupe.a`; `zig build shared` produces the dynamic library; `zig build header` installs `include/zdedupe.h`.
 
-The C ABI is 20 symbols (`zdedupe_init` … `zdedupe_version`), all declared in `include/zdedupe.h`. **The JSON document returned by `zdedupe_run_sync` is part of the ABI**: the Tauri app (`src-tauri/src/ffi.rs`, serde) and the native Swift app (`ZDedupeEngine.swift`, `JSONDecoder`) decode it into typed models to decide which files to offer for deletion. Field names and types are documented in the header and asserted in `src/tier1_anchors.zig`; changing one without updating both consumers breaks them silently.
+The C ABI is 21 symbols (`zdedupe_init` … `zdedupe_version`), all declared in `include/zdedupe.h`. **The JSON document returned by `zdedupe_run_sync` is part of the ABI**: the Tauri app (`src-tauri/src/ffi.rs`, serde) and the native Swift app (`ZDedupeEngine.swift`, `JSONDecoder`) decode it into typed models to decide which files to offer for deletion. Field names and types are documented in the header and asserted in `src/tier1_anchors.zig`; changing one without updating both consumers breaks them silently.
 
 ### Result store, progress, cancel
 

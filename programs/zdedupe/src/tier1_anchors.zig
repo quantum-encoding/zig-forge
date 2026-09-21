@@ -1344,3 +1344,46 @@ test "a failed write never touches the store that is already there" {
     defer allocator.free(after);
     try testing.expectEqualStrings(previous, after);
 }
+
+test "FFI: zdedupe_hash_file agrees with the scan and refuses what the scan refuses" {
+    const allocator = testing.allocator;
+    var scratch = try Scratch.init(allocator, "ffi-hash");
+    defer scratch.deinit();
+    try buildFixture(&scratch);
+
+    var finder = dedupe.DupeFinder.init(allocator, .{});
+    defer finder.deinit();
+    try finder.scan(&.{scratch.path});
+    const group = finder.getGroups()[0];
+
+    // Every file of the group hashes, now, to the hash the scan recorded.
+    for (group.file_infos.items) |info| {
+        const path_z = try allocator.dupeZ(u8, info.path);
+        defer allocator.free(path_z);
+        var digest: [32]u8 = undefined;
+        try testing.expectEqual(@as(c_int, 0), lib.zdedupe_hash_file(path_z.ptr, false, &digest));
+        try testing.expect(hasher.hashEqual(&digest, &group.hash));
+    }
+
+    // The published BLAKE3 vector, through the FFI.
+    const data = try allocator.alloc(u8, 4096);
+    defer allocator.free(data);
+    vectorInput(data);
+    try scratch.writeFile("vector.bin", data);
+    const vector_path = try scratch.joinZ("vector.bin");
+    defer allocator.free(vector_path);
+    var digest: [32]u8 = undefined;
+    var hex: [64]u8 = undefined;
+    try testing.expectEqual(@as(c_int, 0), lib.zdedupe_hash_file(vector_path.ptr, false, &digest));
+    try testing.expectEqualStrings(B3_4096, hasher.hashToHex(&digest, &hex));
+    try testing.expectEqual(@as(c_int, 0), lib.zdedupe_hash_file(vector_path.ptr, true, &digest));
+    try testing.expectEqualStrings(SHA_4096, hasher.hashToHex(&digest, &hex));
+
+    // A directory, a missing file and NULLs are failures, not digests.
+    try testing.expectEqual(@as(c_int, -1), lib.zdedupe_hash_file(scratch.path.ptr, false, &digest));
+    const missing = try scratch.joinZ("no-such-file");
+    defer allocator.free(missing);
+    try testing.expectEqual(@as(c_int, -1), lib.zdedupe_hash_file(missing.ptr, false, &digest));
+    try testing.expectEqual(@as(c_int, -1), lib.zdedupe_hash_file(null, false, &digest));
+    try testing.expectEqual(@as(c_int, -1), lib.zdedupe_hash_file(vector_path.ptr, false, null));
+}

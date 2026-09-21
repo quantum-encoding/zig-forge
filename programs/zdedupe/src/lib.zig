@@ -414,6 +414,22 @@ pub export fn zdedupe_move_file(src: [*:0]const u8, dst: [*:0]const u8) c_int {
     return if (result == 0) 0 else -1;
 }
 
+/// Hash one file with the algorithm a scan would use, into `out` (32 bytes).
+///
+/// For hosts that are about to delete a duplicate *permanently*: a scan result
+/// says what a file contained when it was scanned, which may be hours ago.
+/// Re-hashing the file and the copy being kept, and comparing both with the
+/// group's recorded hash, turns that into a statement about the disk now.
+/// Same guards as the scan: non-regular files are refused, and a read error
+/// is a failure, never a hash of whatever was read so far.
+pub export fn zdedupe_hash_file(path: ?[*:0]const u8, use_sha256: bool, out: ?*[32]u8) c_int {
+    const path_z = path orelse return -1;
+    const result = out orelse return -1;
+    const file_hasher = hasher.FileHasher.init(if (use_sha256) .sha256 else .blake3);
+    result.* = file_hasher.hashFile(std.mem.span(path_z)) catch return -1;
+    return 0;
+}
+
 pub export fn zdedupe_version() [*:0]const u8 {
     return "0.1.0";
 }
