@@ -998,7 +998,8 @@ test "export writes every alive group in each format" {
     const html = try readFile(a, html_path);
     // The column header plus one row per file across the three groups.
     try testing.expectEqual(@as(usize, 1 + 8), std.mem.count(u8, html, "<tr"));
-    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, html, "group-header"));
+    // One banner row per group (the fourth mention of the class is its CSS).
+    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, html, "<tr class=\"group-header\">"));
     try testing.expect(std.mem.endsWith(u8, html, "</table>\n</body></html>\n"));
 
     // An unknown format is refused rather than guessed at.

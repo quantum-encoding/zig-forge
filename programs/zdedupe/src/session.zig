@@ -1470,9 +1470,10 @@ const FdSink = struct {
 // Tests
 // ============================================================================
 
-test {
-    _ = @import("session_test.zig");
-}
+// The end-to-end tests — the real engine into a real store, then the session
+// over it — are their own module (`session_test.zig`, registered in build.zig).
+// Pulling them in from here would also run them inside every module that
+// reaches this one.
 
 const testing = std.testing;
 
