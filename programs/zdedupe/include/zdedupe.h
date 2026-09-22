@@ -764,6 +764,13 @@ int zdedupe_hash_file(const char* path, bool use_sha256, uint8_t out[32]);
  */
 const char* zdedupe_version(void);
 
+/**
+ * The names zdedupe_use_credential_excludes skips, as a JSON array of
+ * strings, for a settings screen to show. Static; never freed. The list
+ * exists only here, so what the UI shows is what the engine does.
+ */
+const char* zdedupe_credential_excludes_json(void);
+
 #ifdef __cplusplus
 }
 #endif

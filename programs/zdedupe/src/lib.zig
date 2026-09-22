@@ -190,6 +190,21 @@ pub export fn zdedupe_use_credential_excludes(ctx: ?*ZDedupeContext, use: bool) 
     internal.use_credential_excludes = use;
 }
 
+/// The names zdedupe_use_credential_excludes skips, as a JSON array of
+/// strings, so a host can show the user what is left alone without keeping
+/// a copy of the list. Static; never freed.
+pub export fn zdedupe_credential_excludes_json() [*:0]const u8 {
+    return credential_excludes_json;
+}
+
+const credential_excludes_json: [:0]const u8 = blk: {
+    var out: []const u8 = "[";
+    for (types.Config.credential_excludes, 0..) |name, i| {
+        out = out ++ (if (i == 0) "\"" else ",\"") ++ name ++ "\"";
+    }
+    break :blk out ++ "]";
+};
+
 pub export fn zdedupe_add_exclude(ctx: ?*ZDedupeContext, name: [*:0]const u8) c_int {
     const c = ctx orelse return -1;
     const internal: *InternalContext = @ptrCast(@alignCast(c));
@@ -621,4 +636,12 @@ test "C FFI lifecycle" {
 test "version" {
     const v = zdedupe_version();
     try std.testing.expectEqualStrings("0.1.0", std.mem.span(v));
+}
+
+test "credential excludes are published as the list the engine applies" {
+    const json = std.mem.span(zdedupe_credential_excludes_json());
+    const parsed = try std.json.parseFromSlice([]const []const u8, std.testing.allocator, json, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(types.Config.credential_excludes.len, parsed.value.len);
+    for (types.Config.credential_excludes, parsed.value) |want, got| try std.testing.expectEqualStrings(want, got);
 }
