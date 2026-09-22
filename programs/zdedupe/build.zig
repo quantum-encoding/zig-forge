@@ -110,6 +110,11 @@ pub fn build(b: *std.Build) void {
         "src/store.zig",
         "src/compare.zig",
         "src/report.zig",
+        "src/filters.zig",
+        "src/removed.zig",
+        // Pulls in src/session_test.zig, which runs the engine and then the
+        // results session over its output.
+        "src/session.zig",
         "src/lib.zig",
         // External anchors + end-to-end contract tests (see file header).
         "src/tier1_anchors.zig",

@@ -25,6 +25,9 @@ pub const report = @import("report.zig");
 pub const parallel = @import("parallel.zig");
 pub const dirs = @import("dirs.zig");
 pub const store = @import("store.zig");
+pub const filters = @import("filters.zig");
+pub const removed = @import("removed.zig");
+pub const session = @import("session.zig");
 
 // Re-export commonly used types
 pub const FileEntry = types.FileEntry;
@@ -64,6 +67,7 @@ const InternalContext = struct {
     /// Owned copies of the names passed to zdedupe_add_exclude.
     user_excludes: std.ArrayListUnmanaged([]const u8),
     use_default_excludes: bool,
+    use_credential_excludes: bool,
     /// Progress out / cancellation in. Lives in the context so its address is
     /// stable for the whole run and other threads can reach it.
     monitor: types.Monitor,
@@ -80,6 +84,7 @@ const InternalContext = struct {
             .result_json = null,
             .user_excludes = .empty,
             .use_default_excludes = false,
+            .use_credential_excludes = false,
             .monitor = .{},
         };
         return self;
@@ -177,6 +182,12 @@ pub export fn zdedupe_use_default_excludes(ctx: ?*ZDedupeContext, use_defaults: 
     const c = ctx orelse return;
     const internal: *InternalContext = @ptrCast(@alignCast(c));
     internal.use_default_excludes = use_defaults;
+}
+
+pub export fn zdedupe_use_credential_excludes(ctx: ?*ZDedupeContext, use: bool) void {
+    const c = ctx orelse return;
+    const internal: *InternalContext = @ptrCast(@alignCast(c));
+    internal.use_credential_excludes = use;
 }
 
 pub export fn zdedupe_add_exclude(ctx: ?*ZDedupeContext, name: [*:0]const u8) c_int {
@@ -336,6 +347,9 @@ fn runDuplicateScan(
     if (internal.use_default_excludes) {
         excludes.appendSlice(alloc, &Config.default_excludes) catch return .failed;
     }
+    if (internal.use_credential_excludes) {
+        excludes.appendSlice(alloc, &Config.credential_excludes) catch return .failed;
+    }
     excludes.appendSlice(alloc, internal.user_excludes.items) catch return .failed;
 
     var config = internal.config;
@@ -396,6 +410,106 @@ fn runCompare(internal: *InternalContext) ?[]u8 {
     reporter.writeCompareReport(&alloc_writer.writer, &result) catch return null;
 
     return alloc_writer.toOwnedSlice() catch null;
+}
+
+// =============================================================================
+// === Results session ===
+// =============================================================================
+//
+// Everything that happens after a scan: paging, the bulk rule, verified
+// deletion, the removed overlay and export. See session.zig for the design and
+// include/zdedupe.h for the contract. Queries in and answers out are JSON;
+// every returned string is owned by the session and valid until the next call
+// on it.
+
+pub const ZDedupeResults = opaque {};
+
+/// Mirrors `zdedupe_delete_progress` in the C header.
+pub const ZDedupeDeleteProgress = session.DeleteProgress;
+
+/// Mirrors `zdedupe_trash_fn` in the C header.
+pub const ZDedupeTrashFn = session.TrashFn;
+
+fn asSession(r: ?*ZDedupeResults) ?*session.Session {
+    const handle = r orelse return null;
+    return @ptrCast(@alignCast(handle));
+}
+
+fn asSessionConst(r: ?*const ZDedupeResults) ?*const session.Session {
+    const handle = r orelse return null;
+    return @ptrCast(@alignCast(handle));
+}
+
+pub export fn zdedupe_results_open(store_path: ?[*:0]const u8, roots_json: ?[*:0]const u8) ?*ZDedupeResults {
+    const path = store_path orelse return null;
+    const roots: ?[]const u8 = if (roots_json) |j| std.mem.span(j) else null;
+    const opened = session.Session.open(std.heap.c_allocator, std.mem.span(path), roots) catch return null;
+    return @ptrCast(opened);
+}
+
+pub export fn zdedupe_results_close(r: ?*ZDedupeResults) void {
+    if (asSession(r)) |s| s.close();
+}
+
+pub export fn zdedupe_results_last_error(r: ?*const ZDedupeResults) ?[*:0]const u8 {
+    const s = asSessionConst(r) orelse return null;
+    const message = s.lastError() orelse return null;
+    return message.ptr;
+}
+
+pub export fn zdedupe_results_overview(r: ?*ZDedupeResults) ?[*:0]const u8 {
+    const s = asSession(r) orelse return null;
+    return (s.overview() orelse return null).ptr;
+}
+
+pub export fn zdedupe_results_groups(r: ?*ZDedupeResults, query_json: ?[*:0]const u8) ?[*:0]const u8 {
+    const s = asSession(r) orelse return null;
+    const query = query_json orelse return null;
+    return (s.groups(std.mem.span(query)) orelse return null).ptr;
+}
+
+pub export fn zdedupe_results_bulk_summary(r: ?*ZDedupeResults, filters_json: ?[*:0]const u8) ?[*:0]const u8 {
+    const s = asSession(r) orelse return null;
+    const query = filters_json orelse return null;
+    return (s.bulkSummary(std.mem.span(query)) orelse return null).ptr;
+}
+
+pub export fn zdedupe_results_delete(
+    r: ?*ZDedupeResults,
+    selection_json: ?[*:0]const u8,
+    use_trash: bool,
+    trash_fn: ?ZDedupeTrashFn,
+    user: ?*anyopaque,
+) ?[*:0]const u8 {
+    const s = asSession(r) orelse return null;
+    const selection = selection_json orelse return null;
+    return (s.delete(std.mem.span(selection), use_trash, trash_fn, user) orelse return null).ptr;
+}
+
+pub export fn zdedupe_results_delete_progress(r: ?*const ZDedupeResults, out: ?*ZDedupeDeleteProgress) void {
+    const s = asSessionConst(r) orelse return;
+    const result = out orelse return;
+    result.* = s.deleteProgress();
+}
+
+pub export fn zdedupe_results_cancel_delete(r: ?*ZDedupeResults) void {
+    if (asSession(r)) |s| s.cancelDelete();
+}
+
+pub export fn zdedupe_results_removed_status(r: ?*ZDedupeResults) ?[*:0]const u8 {
+    const s = asSession(r) orelse return null;
+    return (s.removedStatus() orelse return null).ptr;
+}
+
+pub export fn zdedupe_results_export(
+    r: ?*ZDedupeResults,
+    format: ?[*:0]const u8,
+    path: ?[*:0]const u8,
+) c_int {
+    const s = asSession(r) orelse return -1;
+    const format_z = format orelse return -1;
+    const path_z = path orelse return -1;
+    return if (s.exportTo(std.mem.span(format_z), std.mem.span(path_z))) 0 else -1;
 }
 
 // === Utilities ===

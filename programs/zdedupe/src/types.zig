@@ -215,6 +215,38 @@ pub const Config = struct {
         "desktop.ini",
     };
 
+    /// Key stores and credential files, never opened. A scan only ever
+    /// compares content and reports nothing about what it read, but a security
+    /// tool watching file access cannot know that: a duplicate finder walking
+    /// `~/.ssh` and `~/.aws` looks exactly like one exfiltrating them. Skipping
+    /// them costs a user nothing — nobody reclaims space by deduplicating a
+    /// private key — and keeps the scan off every such tool's radar.
+    ///
+    /// Exact path components, matched like any other exclude.
+    pub const credential_excludes = [_][]const u8{
+        ".ssh",
+        ".gnupg",
+        "Keychains",
+        ".password-store",
+        ".vault-token",
+        ".aws",
+        ".azure",
+        "gcloud",
+        ".kube",
+        ".docker",
+        ".terraform.d",
+        ".netrc",
+        ".git-credentials",
+        ".npmrc",
+        ".pypirc",
+        ".pgpass",
+        ".my.cnf",
+        ".boto",
+        ".s3cfg",
+        ".env",
+        ".envrc",
+    };
+
     pub const HashAlgorithm = enum {
         blake3,
         sha256,

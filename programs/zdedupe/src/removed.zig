@@ -88,8 +88,8 @@ pub const Removed = struct {
 
         self.overflowed = saved.overflowed;
         for (saved.paths_b64) |encoded| {
-            const len = base64.Decoder.calcSizeForSlice(encoded) catch continue;
-            const path = try self.gpa.alloc(u8, len);
+            const decoded_len = base64.Decoder.calcSizeForSlice(encoded) catch continue;
+            const path = try self.gpa.alloc(u8, decoded_len);
             base64.Decoder.decode(path, encoded) catch {
                 self.gpa.free(path);
                 continue;
