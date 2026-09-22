@@ -525,6 +525,8 @@ pub const FastWalker = struct {
     exclude_cache_dirs: bool = false,
     /// Do not enter a directory whose device is not one of the roots'.
     one_filesystem: bool = false,
+    /// Prune entries named like another app's library package.
+    skip_app_libraries: bool = false,
     /// Also record dirs, unfollowed symlinks and extra hard links.
     record_tree: bool = false,
     /// Progress out, cancellation in (borrowed).
@@ -608,6 +610,10 @@ pub const FastWalker = struct {
 
     pub fn setOneFilesystem(self: *FastWalker, one: bool) void {
         self.one_filesystem = one;
+    }
+
+    pub fn setSkipAppLibraries(self: *FastWalker, skip: bool) void {
+        self.skip_app_libraries = skip;
     }
 
     /// Record directories, unfollowed symlinks and extra hard links alongside
@@ -852,6 +858,11 @@ pub const FastWalker = struct {
             // zig-lens-ignore: EQL-FOR-SECRETS file names, not secrets
             if (std.mem.eql(u8, excluded, name)) return true;
         }
+        if (self.skip_app_libraries) {
+            for (types.Config.app_library_suffixes) |suffix| {
+                if (std.ascii.endsWithIgnoreCase(name, suffix)) return true;
+            }
+        }
         return false;
     }
 
@@ -964,4 +975,22 @@ test "a walk finds the same files whatever the thread count" {
         for (walker.files.items) |entry| digest +%= std.hash.Wyhash.hash(0, entry.path);
         if (expected) |want| try std.testing.expectEqual(want, digest) else expected = digest;
     }
+}
+
+test "another app's library package is skipped by its extension" {
+    const Scratch = @import("testing_scratch.zig").Scratch;
+    var scratch = try Scratch.init(std.testing.allocator, "applib");
+    defer scratch.deinit();
+    try scratch.makeDir("Syndication.photoslibrary");
+    try scratch.makeDir("Syndication.photoslibrary/originals");
+    try scratch.writeFile("Syndication.photoslibrary/originals/a.jpg", "x");
+    try scratch.writeFile("kept.jpg", "x");
+
+    var fw = FastWalker.init(std.testing.allocator);
+    defer fw.deinit();
+    fw.setSkipAppLibraries(true);
+    try fw.walk(scratch.path);
+    try fw.finish();
+    try std.testing.expectEqual(@as(usize, 1), fw.files.items.len);
+    try std.testing.expectEqual(@as(u64, 1), fw.stats.excluded);
 }

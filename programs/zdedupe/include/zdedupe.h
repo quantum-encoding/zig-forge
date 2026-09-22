@@ -144,6 +144,15 @@ void zdedupe_set_analyze_dirs(zdedupe_ctx* ctx, bool analyze);
 void zdedupe_set_one_filesystem(zdedupe_ctx* ctx, bool one);
 
 /**
+ * Skip library packages another app owns, by extension (default: true):
+ * .photoslibrary, .migratedphotolibrary, .photolibrary, .aplibrary,
+ * .musiclibrary, .tvlibrary. Their contents are the app's database, and
+ * opening a Photos library makes macOS ask for photo-library access. Applies
+ * to duplicate scans; a folder comparison compares everything it is given.
+ */
+void zdedupe_set_skip_app_libraries(zdedupe_ctx* ctx, bool skip);
+
+/**
  * Ignore regenerable output: node_modules, __pycache__, .zig-cache,
  * .svelte-kit, .DS_Store, ... (Config.default_excludes in src/types.zig) and
  * any directory carrying a valid CACHEDIR.TAG, e.g. cargo's target/.

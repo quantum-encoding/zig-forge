@@ -178,6 +178,11 @@ pub const Config = struct {
     /// Such mounts can block a read indefinitely, and a root on another
     /// volume still counts, because roots are named explicitly.
     one_filesystem: bool = true,
+    /// Skip library packages another app owns (Photos, Music, TV, iPhoto,
+    /// Aperture), by extension. Their contents are the app's database, not
+    /// the user's files, and opening one makes macOS ask for photo-library
+    /// access mid-scan.
+    skip_app_libraries: bool = true,
     /// Roll file identities up into directory identities: report identical
     /// directories and directory pairs that largely overlap. See dirs.zig.
     ///
@@ -228,6 +233,16 @@ pub const Config = struct {
     /// private key — and keeps the scan off every such tool's radar.
     ///
     /// Exact path components, matched like any other exclude.
+    /// Package extensions `skip_app_libraries` prunes.
+    pub const app_library_suffixes = [_][]const u8{
+        ".photoslibrary",
+        ".migratedphotolibrary",
+        ".photolibrary",
+        ".aplibrary",
+        ".musiclibrary",
+        ".tvlibrary",
+    };
+
     pub const credential_excludes = [_][]const u8{
         ".ssh",
         ".gnupg",
