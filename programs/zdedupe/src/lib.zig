@@ -172,6 +172,12 @@ pub export fn zdedupe_use_sha256(ctx: ?*ZDedupeContext, use_sha256: bool) void {
     internal.config.hash_algorithm = if (use_sha256) .sha256 else .blake3;
 }
 
+pub export fn zdedupe_set_one_filesystem(ctx: ?*ZDedupeContext, one: bool) void {
+    const c = ctx orelse return;
+    const internal: *InternalContext = @ptrCast(@alignCast(c));
+    internal.config.one_filesystem = one;
+}
+
 pub export fn zdedupe_set_analyze_dirs(ctx: ?*ZDedupeContext, analyze: bool) void {
     const c = ctx orelse return;
     const internal: *InternalContext = @ptrCast(@alignCast(c));

@@ -286,6 +286,21 @@ const Worker = struct {
         defer _ = libc.closedir(dir);
         const dir_fd = dirfd(dir);
 
+        // A mount point inside a root belongs to another filesystem; reading
+        // from one (a network share, a phone's DeviceFS) can block forever.
+        if (w.one_filesystem and !w.isRoot(dir_path)) {
+            const here = pstat.fstat(dir_fd) catch {
+                self.stats.errors += 1;
+                try self.markParent(dir_path, .incomplete);
+                return;
+            };
+            if (std.mem.indexOfScalar(u64, w.root_devs.items, here.dev) == null) {
+                self.stats.excluded += 1;
+                try self.markParent(dir_path, .skipped);
+                return;
+            }
+        }
+
         // When symlinks are followed a directory can be reached by more than
         // one route (`ln -s .. loop`), so every directory — not just the ones
         // entered through a link — is checked against the visited set, by the
@@ -508,6 +523,8 @@ pub const FastWalker = struct {
     excludes: []const []const u8 = &.{},
     /// Prune directories holding a valid CACHEDIR.TAG.
     exclude_cache_dirs: bool = false,
+    /// Do not enter a directory whose device is not one of the roots'.
+    one_filesystem: bool = false,
     /// Also record dirs, unfollowed symlinks and extra hard links.
     record_tree: bool = false,
     /// Progress out, cancellation in (borrowed).
@@ -529,6 +546,8 @@ pub const FastWalker = struct {
     marks: std.ArrayListUnmanaged(ParentMark) = .empty,
     /// The roots walked so far; never pruned, whatever they are called.
     roots: std.ArrayListUnmanaged([]const u8) = .empty,
+    /// The device of each root, for `one_filesystem`.
+    root_devs: std.ArrayListUnmanaged(u64) = .empty,
 
     // Visited directories, used only under follow_symlinks to break cycles.
     seen_dirs: std.AutoHashMapUnmanaged(FileId, void) = .empty,
@@ -545,6 +564,7 @@ pub const FastWalker = struct {
         self.links.deinit(self.allocator);
         self.marks.deinit(self.allocator);
         self.roots.deinit(self.allocator);
+        self.root_devs.deinit(self.allocator);
         self.seen_dirs.deinit(self.allocator);
     }
 
@@ -584,6 +604,10 @@ pub const FastWalker = struct {
     /// Prune directories that carry a valid CACHEDIR.TAG.
     pub fn setExcludeCacheDirs(self: *FastWalker, exclude: bool) void {
         self.exclude_cache_dirs = exclude;
+    }
+
+    pub fn setOneFilesystem(self: *FastWalker, one: bool) void {
+        self.one_filesystem = one;
     }
 
     /// Record directories, unfollowed symlinks and extra hard links alongside
@@ -643,6 +667,7 @@ pub const FastWalker = struct {
         _ = libc.closedir(probe);
 
         try self.roots.append(self.allocator, root);
+        try self.root_devs.append(self.allocator, root_stat.dev);
         try shared.pending.append(self.allocator, root);
 
         const wanted: usize = if (self.thread_count == 0)

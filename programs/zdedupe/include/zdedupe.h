@@ -136,6 +136,14 @@ void zdedupe_use_sha256(zdedupe_ctx* ctx, bool use_sha256);
 void zdedupe_set_analyze_dirs(zdedupe_ctx* ctx, bool analyze);
 
 /**
+ * Stay on the volumes the scan roots live on (default: true). A directory on
+ * another device inside a root - a mounted disk, a network share, a
+ * connected phone's DeviceFS - is not entered: such a mount can block a read
+ * indefinitely. A root on another volume is still scanned; it was named.
+ */
+void zdedupe_set_one_filesystem(zdedupe_ctx* ctx, bool one);
+
+/**
  * Ignore regenerable output: node_modules, __pycache__, .zig-cache,
  * .svelte-kit, .DS_Store, ... (Config.default_excludes in src/types.zig) and
  * any directory carrying a valid CACHEDIR.TAG, e.g. cargo's target/.

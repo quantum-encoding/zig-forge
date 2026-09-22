@@ -173,6 +173,11 @@ pub const Config = struct {
     /// e.g. cargo's `target/`. Safer than excluding a generic name like
     /// "target" or "build", which could just as well hold user data.
     exclude_cache_dirs: bool = false,
+    /// Stay on the volumes the roots live on: a directory on another device
+    /// (a mounted disk, a network share, a phone's DeviceFS) is not entered.
+    /// Such mounts can block a read indefinitely, and a root on another
+    /// volume still counts, because roots are named explicitly.
+    one_filesystem: bool = true,
     /// Roll file identities up into directory identities: report identical
     /// directories and directory pairs that largely overlap. See dirs.zig.
     ///

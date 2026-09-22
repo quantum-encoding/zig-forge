@@ -120,6 +120,7 @@ pub const DupeFinder = struct {
         fw.setIncludeHidden(self.config.include_hidden);
         fw.setExcludes(self.config.excludes);
         fw.setExcludeCacheDirs(self.config.exclude_cache_dirs);
+        fw.setOneFilesystem(self.config.one_filesystem);
         fw.enableHardLinkDetection();
         // The walk is syscall-bound, so it uses the same parallelism as hashing.
         fw.setThreads(self.config.getThreadCount());
