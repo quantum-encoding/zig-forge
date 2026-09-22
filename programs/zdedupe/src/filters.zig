@@ -82,6 +82,17 @@ pub fn extension(path: []const u8) []const u8 {
     return name[i..];
 }
 
+/// The extension, lower-cased, for use as a facet key. `Matcher` compares
+/// extensions case-insensitively and so needs no copy, but a facet key is a
+/// value people see and then select by, and `A.PNG` and `b.png` have to land
+/// in one bucket rather than two.
+pub fn extensionLower(arena: std.mem.Allocator, path: []const u8) ![]const u8 {
+    const ext = extension(path);
+    const out = try arena.alloc(u8, ext.len);
+    for (ext, out) |c, *slot| slot.* = std.ascii.toLower(c);
+    return out;
+}
+
 /// True if `path` is `base` itself or lies below it, by whole path components:
 /// `/a/proj-backup` is not below `/a/proj`.
 pub fn isAtOrUnder(path: []const u8, base_in: []const u8) bool {

@@ -536,6 +536,15 @@ pub const FileRef = struct {
     mtime: i64,
 };
 
+/// One member directory of an identical set. `path` borrows the mapped bytes.
+pub const DirRef = struct {
+    path: []const u8,
+    /// Newest file modification time in the subtree, seconds since the epoch.
+    newest_mtime: i64,
+    /// Entries beneath it the scan deliberately ignored.
+    skipped_entries: u64,
+};
+
 /// A read-only view over a mapped store. Holds no allocations: every accessor
 /// returns values, or slices borrowed from `bytes`.
 pub const Reader = struct {
@@ -676,11 +685,26 @@ pub const Reader = struct {
         return s;
     }
 
-    pub fn setDir(self: *const Reader, s: *const Set, i: usize) ReadError!FileRef {
+    pub fn setDir(self: *const Reader, s: *const Set, i: usize) ReadError!DirRef {
         if (i >= s.dir_count) return error.OutOfRange;
         const bytes = try self.record(.set_dirs, @as(usize, @intCast(s.first_dir)) + i);
         const r = std.mem.bytesToValue(SetDir, bytes[0..@sizeOf(SetDir)]);
-        return .{ .path = try self.string(r.path_offset, r.path_len), .mtime = r.newest_mtime };
+        return .{
+            .path = try self.string(r.path_offset, r.path_len),
+            .newest_mtime = r.newest_mtime,
+            .skipped_entries = r.skipped_entries,
+        };
+    }
+
+    /// The path of one side of an overlap pair. Validated by `overlap`, so
+    /// this cannot fail for a side that came from it.
+    pub fn sidePath(self: *const Reader, side: *const Side) ReadError![]const u8 {
+        return self.string(side.path_offset, side.path_len);
+    }
+
+    /// `relation` as the enum, once `overlap` has vouched for the value.
+    pub fn relationOfRecord(o: *const Overlap) Relation {
+        return @enumFromInt(o.relation);
     }
 
     pub fn overlap(self: *const Reader, i: usize) ReadError!Overlap {

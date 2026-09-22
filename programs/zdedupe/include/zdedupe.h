@@ -578,6 +578,134 @@ void zdedupe_results_cancel_delete(zdedupe_results* r);
  */
 const char* zdedupe_results_removed_status(zdedupe_results* r);
 
+/* --- Folders -------------------------------------------------------------
+ *
+ * Present only when the scan ran with zdedupe_set_analyze_dirs(ctx, true);
+ * without it the folder counts in the overview are zero and these page empty.
+ *
+ * Two kinds of finding. An IDENTICAL SET is a group of folders whose entire
+ * subtrees match - names, file content, symlink targets - and only the
+ * top-most folder of each copied tree is listed. An OVERLAP is a pair of
+ * folders sharing at least half of one side's files, which is what catches
+ * "this backup is last year's copy of that project, plus three files".
+ */
+
+/**
+ * One page of identical sets, largest reclaimable first.
+ *
+ * Query: { "offset": 0, "limit": 50, "filters": {...} } - no sort, because
+ * the store already holds them in that order; "limit" is clamped to 200. For
+ * a set, filters' "min_bytes" is the size of ONE copy.
+ *
+ * Page: { "rows": [SetRow], "total": N, "offset": 0 }, where a SetRow is
+ * { "index": 0, "digest": "64 hex", "count": 3, "common_parent": "/a",
+ *   "file_count": 261, "bytes": 2086912, "reclaimable": 4173824,
+ *   "dirs": [{ "path": "/a/proj", "newest_mtime": ms,
+ *              "skipped_entries": 0 }, ...] }
+ *
+ * "count" is the copies still ALIVE and "reclaimable" is bytes * (count - 1)
+ * over those - an upper bound, since copies that are hard links of one
+ * another take no extra space to begin with. A set with fewer than two alive
+ * copies is not a row. "dirs" carries at most 8 of them, because a set can
+ * have hundreds (879 in one real scan); the rest come from
+ * zdedupe_results_set_members, keyed by "index". "common_parent" is the
+ * deepest folder holding every alive copy. "skipped_entries" counts entries
+ * ignored on purpose beneath that folder (excludes, cache dirs, hidden files
+ * when off); surface a non-zero value next to any "identical" claim.
+ */
+const char* zdedupe_results_identical_sets(zdedupe_results* r, const char* query_json);
+
+/**
+ * Every alive member folder of one set, as a bare JSON array of the same
+ * objects a row's "dirs" holds. The one unpaged call in the API, and bounded
+ * by a single set. `index` is a SetRow's "index".
+ */
+const char* zdedupe_results_set_members(zdedupe_results* r, size_t index);
+
+/**
+ * One page of overlapping folder pairs, largest shared size first. Same query
+ * shape as the sets; for an overlap "min_bytes" is the SHARED size, and
+ * "redundant_only": true hides pairs where each side still has something
+ * unique - keeping only the ones where deleting a side loses nothing.
+ *
+ * Page: { "rows": [OverlapRow], "total": N, "offset": 0 }, where an
+ * OverlapRow is { "relation": ..., "a": SideRow, "b": SideRow } and a SideRow
+ * is { "path": "/backup/proj", "files": 258, "bytes": 2000000,
+ *      "newest_mtime": ms, "skipped_entries": 0, "complete": true,
+ *      "identical_copies": 1, "shared_files": 258, "shared_bytes": 2000000,
+ *      "only_count": 0, "only": [] }
+ *
+ * "relation" is one of:
+ *   "same_content"  both hold exactly the same content (names/layout differ)
+ *   "a_in_b"        every file in a also exists in b - a adds nothing
+ *   "b_in_a"        every file in b also exists in a - b adds nothing
+ *   "overlap"       each side has content the other lacks, OR the side that
+ *                   looks contained is not "complete"
+ *
+ * "only" lists the files whose content exists nowhere on the other side -
+ * what deleting that side would lose - sorted, at most 100, while
+ * "only_count" is exact. "complete": false means something beneath could not
+ * be read; such a folder is never in an identical set and never the contained
+ * side. "identical_copies" above 1 means that side is the first path of an
+ * identical set and the pair stands for every member of it, reported once
+ * rather than per copy. A pair with either side deleted is not a row: it says
+ * nothing once one of the two folders is gone.
+ */
+const char* zdedupe_results_overlaps(zdedupe_results* r, const char* query_json);
+
+/**
+ * Findings counted by where they are, what they are called, or what type they
+ * are - the "group by" of the UI, and what makes a whole-disk scan reviewable
+ * (one real scan: 13,370 identical sets, of which 602 held 96 of the 98 GB
+ * that could be reclaimed).
+ *
+ * Query: { "kind": "groups"|"sets"|"overlaps", "by": "location"|"name"|"type",
+ *          "filters": {...}, "limit": 50 } - "limit" clamped to 100.
+ *
+ * Page: { "base": "/home/u" | null, "facets": [{ "key": "/home/u/sdk",
+ *         "count": 2, "bytes": 1100 }, ...], "total": N }
+ *
+ * "key" is the value to put in filters' under / name / ext to select that
+ * facet, so a location facet drills down one level at a time: "base" is the
+ * folder being drilled into (filters.under, or the single scan root when
+ * nothing is chosen yet, else null) and the keys are its children. A finding
+ * contributes once to each DISTINCT facet it touches, however many of its
+ * members share that facet, so counts can add up to more than the total.
+ * Largest "bytes" first, then count, then key, so the same scan always lists
+ * its facets the same way. "total" is the distinct facets before the cut.
+ */
+const char* zdedupe_results_facets(zdedupe_results* r, const char* query_json);
+
+/**
+ * Remove whole folders. Blocks, with the same progress and cancellation as
+ * zdedupe_results_delete, and the same report shape.
+ *
+ * items_json: [{ "path": "/a/copy", "keepers": ["/a/orig"], "bytes": 0 }, ...]
+ * where "keepers" are folders holding the same content that are NOT being
+ * removed, and "bytes" is the size the UI showed, for "freed_bytes".
+ *
+ * use_trash = true moves each one with trash_fn (required). That is
+ * recoverable, so the selection rules in the UI are the safeguard and no
+ * comparison is made - but a symlink or a file is still refused, because
+ * removing "it" is not what the user picked.
+ *
+ * use_trash = false removes it FOR GOOD, and only after the folder has been
+ * compared with a surviving copy byte for byte, right then: the same relative
+ * paths, the same content, nothing extra on either side, hidden and empty
+ * files included. That comparison ignores the scan's size window entirely, so
+ * a folder can never pass for a copy of another because the file that differs
+ * was too small to have been scanned. A keeper that is itself in this list -
+ * or that contains, or sits inside, something in it - vouches for nothing.
+ * Refused outright: a relative path, "/" itself, a symlink, a file, a folder
+ * that cannot be read, and a folder with no keeper named.
+ *
+ * Whatever went is recorded in the removed overlay, and a removed folder
+ * covers everything the results list inside it, so the sets, overlaps, groups
+ * and facets all correct themselves without a rescan.
+ */
+const char* zdedupe_results_delete_folders(zdedupe_results* r, const char* items_json,
+                                           bool use_trash, zdedupe_trash_fn trash_fn, void* user);
+
 /**
  * Write every alive group, in store order, to `path`. Streams group by
  * group, so a scan with millions of duplicates never exists as one document

@@ -36,36 +36,52 @@ const Fixture = struct {
     tree: Scratch,
     out: Scratch,
     store_path: [:0]u8,
+    /// Roll file identities up into folder identities, so the store carries
+    /// the identical sets and overlap pairs the stage B calls page through.
+    analyze_dirs: bool = false,
 
     fn init(gpa: Allocator, label: []const u8, files: []const File) !Fixture {
+        return initWith(gpa, label, files, false);
+    }
+
+    /// The same, scanned with directory analysis on.
+    fn initDirs(gpa: Allocator, label: []const u8, files: []const File) !Fixture {
+        return initWith(gpa, label, files, true);
+    }
+
+    fn initWith(gpa: Allocator, label: []const u8, files: []const File, analyze_dirs: bool) !Fixture {
         var tree = try Scratch.init(gpa, label);
         errdefer tree.deinit();
         var out = try Scratch.init(gpa, "store");
         errdefer out.deinit();
-
-        var made: std.StringHashMapUnmanaged(void) = .empty;
-        defer made.deinit(gpa);
-        for (files) |file| {
-            const dir = std.fs.path.dirname(file.path) orelse "";
-            if (dir.len > 0 and !made.contains(dir)) {
-                try tree.makeDir(dir);
-                try made.put(gpa, dir, {});
-            }
-            const content = try gpa.alloc(u8, file.size);
-            defer gpa.free(content);
-            @memset(content, file.byte);
-            try tree.writeFile(file.path, content);
-        }
 
         var self: Fixture = .{
             .gpa = gpa,
             .tree = tree,
             .out = out,
             .store_path = try out.joinZ("result.zds"),
+            .analyze_dirs = analyze_dirs,
         };
         errdefer gpa.free(self.store_path);
+        try self.write(files);
         try self.scan();
         return self;
+    }
+
+    /// Create `files`, making each one's parent directories as needed.
+    fn write(self: *Fixture, files: []const File) !void {
+        for (files) |file| {
+            var cut: usize = 0;
+            while (std.mem.indexOfScalarPos(u8, file.path, cut, '/')) |slash| {
+                const dir = file.path[0..slash];
+                if (!self.exists(dir)) try self.tree.makeDir(dir);
+                cut = slash + 1;
+            }
+            const content = try self.gpa.alloc(u8, file.size);
+            defer self.gpa.free(content);
+            @memset(content, file.byte);
+            try self.tree.writeFile(file.path, content);
+        }
     }
 
     /// The engine, through the same C entry point a desktop host calls.
@@ -73,6 +89,7 @@ const Fixture = struct {
         const ctx = lib.zdedupe_init() orelse return error.ScannerInitFailed;
         defer lib.zdedupe_free(ctx);
         lib.zdedupe_set_mode(ctx, 0);
+        lib.zdedupe_set_analyze_dirs(ctx, self.analyze_dirs);
         const root = try self.gpa.dupeZ(u8, self.tree.path);
         defer self.gpa.free(root);
         if (lib.zdedupe_add_path(ctx, root.ptr) != 0) return error.AddPathFailed;
@@ -1068,6 +1085,616 @@ test "export leaves out what was deleted, and escapes a hostile name" {
 }
 
 // ===========================================================================
+// Folders: identical sets
+// ===========================================================================
+
+/// Three copies of a small project. `p` and `q` are byte-identical; `big` has
+/// one extra file, so it contains them without being a copy. That gives two
+/// identical sets — {p, q} and the three `src/util` copies — and one overlap
+/// pair, which is the shape `tier1_anchors.zig` already anchors the analyzer
+/// against.
+fn projectTree(comptime root: []const u8) [3]File {
+    return .{
+        .{ .path = root ++ "/readme.txt", .byte = 'r', .size = 400 },
+        .{ .path = root ++ "/src/main.c", .byte = 'm', .size = 900 },
+        .{ .path = root ++ "/src/util/str.c", .byte = 'u', .size = 300 },
+    };
+}
+
+const folder_tree = projectTree("p") ++ projectTree("q") ++ projectTree("big") ++
+    [_]File{.{ .path = "big/src/extra.c", .byte = 'x', .size = 150 }};
+
+fn openDirs(gpa: Allocator, label: []const u8) !struct { Fixture, *Session } {
+    var fixture = try Fixture.initDirs(gpa, label, &folder_tree);
+    errdefer fixture.deinit();
+    const s = try fixture.open(null);
+    return .{ fixture, s };
+}
+
+test "the overview counts the folder findings the store carries" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var fixture, const s = try openDirs(gpa, "session-dirs-overview");
+    defer fixture.deinit();
+    defer s.close();
+
+    const view = try parse(a, s.overview());
+    try testing.expect(field(view, "has_directories").bool);
+    try testing.expectEqual(@as(i64, 2), int(view, "identical_sets"));
+    try testing.expectEqual(@as(i64, 1), int(view, "overlaps"));
+    // The one pair is a containment, so it counts as redundant.
+    try testing.expectEqual(@as(i64, 1), int(view, "redundant_pairs"));
+    try testing.expect(int(view, "reclaimable") > 0);
+    try testing.expect(int(view, "dirs_analyzed") > 0);
+}
+
+test "identical sets page with their member folders" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var fixture, const s = try openDirs(gpa, "session-sets");
+    defer fixture.deinit();
+    defer s.close();
+
+    const page = try parse(a, s.identicalSets("{\"offset\":0,\"limit\":50}"));
+    try testing.expectEqual(@as(i64, 2), int(page, "total"));
+    try testing.expectEqual(@as(i64, 0), int(page, "offset"));
+    const rows = field(page, "rows").array.items;
+    try testing.expectEqual(@as(usize, 2), rows.len);
+
+    // Largest reclaimable first: the whole-project set, then the three
+    // src/util copies.
+    const whole = rows[0];
+    try testing.expectEqual(@as(usize, 64), field(whole, "digest").string.len);
+    try testing.expectEqual(@as(i64, 2), int(whole, "count"));
+    try testing.expectEqual(@as(i64, 3), int(whole, "file_count"));
+    try testing.expectEqual(@as(i64, 1600), int(whole, "bytes")); // 400 + 900 + 300
+    try testing.expectEqual(@as(i64, 1600), int(whole, "reclaimable"));
+    try testing.expectEqualStrings(fixture.tree.path, field(whole, "common_parent").string);
+
+    const dirs = field(whole, "dirs").array.items;
+    try testing.expectEqual(@as(usize, 2), dirs.len);
+    for (dirs) |dir| {
+        _ = int(dir, "skipped_entries");
+        try testing.expect(int(dir, "newest_mtime") > 1_500_000_000_000);
+    }
+    // Sorted by path, so p comes before q.
+    try testing.expect(std.mem.endsWith(u8, field(dirs[0], "path").string, "/p"));
+    try testing.expect(std.mem.endsWith(u8, field(dirs[1], "path").string, "/q"));
+
+    try testing.expectEqual(@as(i64, 3), int(rows[1], "count"));
+    try testing.expect(std.mem.endsWith(u8, field(rows[1], "common_parent").string, fixture.tree.path));
+
+    // The row's index is the handle set_members takes.
+    const members = try parse(a, s.setMembers(@intCast(int(whole, "index"))));
+    try testing.expectEqual(@as(usize, 2), members.array.items.len);
+}
+
+test "set rows cap their member list where set_members does not" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Ten identical copies: more than a row carries.
+    var files: std.ArrayListUnmanaged(File) = .empty;
+    for (0..10) |i| {
+        try files.append(a, .{
+            .path = try std.fmt.allocPrint(a, "copy{d}/data.bin", .{i}),
+            .byte = 'c',
+            .size = 700,
+        });
+    }
+    var fixture = try Fixture.initDirs(gpa, "session-set-members", files.items);
+    defer fixture.deinit();
+    var s = try fixture.open(null);
+    defer s.close();
+
+    const page = try parse(a, s.identicalSets("{\"offset\":0,\"limit\":50}"));
+    const row = field(page, "rows").array.items[0];
+    try testing.expectEqual(@as(i64, 10), int(row, "count"));
+    try testing.expectEqual(@as(usize, 8), field(row, "dirs").array.items.len);
+
+    // Uncapped, and every one of them.
+    const members = try parse(a, s.setMembers(@intCast(int(row, "index"))));
+    try testing.expectEqual(@as(usize, 10), members.array.items.len);
+    for (members.array.items) |member| _ = field(member, "path").string;
+
+    // A set that is not there is an error, not a trap.
+    try testing.expect(s.setMembers(9999) == null);
+    try testing.expectEqualStrings("scan results file is corrupted", s.lastError().?);
+}
+
+test "sets page and filter" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var fixture, const s = try openDirs(gpa, "session-sets-filter");
+    defer fixture.deinit();
+    defer s.close();
+
+    const second = try parse(a, s.identicalSets("{\"offset\":1,\"limit\":5}"));
+    try testing.expectEqual(@as(usize, 1), field(second, "rows").array.items.len);
+    try testing.expectEqual(@as(i64, 2), int(second, "total"));
+    try testing.expectEqual(@as(i64, 1), int(second, "offset"));
+    try testing.expectEqual(@as(i64, 3), int(field(second, "rows").array.items[0], "count"));
+
+    // min_bytes is the size of one copy, so it drops the small src/util set.
+    const big = try parse(a, s.identicalSets("{\"offset\":0,\"limit\":50,\"filters\":{\"min_bytes\":1000}}"));
+    try testing.expectEqual(@as(i64, 1), int(big, "total"));
+
+    // name matches a member folder, not the set.
+    const named = try parse(a, s.identicalSets("{\"offset\":0,\"limit\":50,\"filters\":{\"name\":\"util\"}}"));
+    try testing.expectEqual(@as(i64, 1), int(named, "total"));
+    try testing.expectEqual(@as(i64, 3), int(field(named, "rows").array.items[0], "count"));
+
+    const nowhere = try parse(a, s.identicalSets("{\"offset\":0,\"limit\":50,\"filters\":{\"text\":\"no-such-path\"}}"));
+    try testing.expectEqual(@as(i64, 0), int(nowhere, "total"));
+    try testing.expectEqual(@as(usize, 0), field(nowhere, "rows").array.items.len);
+
+    try testing.expect(s.identicalSets("{not json") == null);
+    try testing.expectEqualStrings("set query is not valid JSON", s.lastError().?);
+}
+
+// ===========================================================================
+// Folders: overlaps
+// ===========================================================================
+
+test "an overlap pair reports both sides and what only one of them holds" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var fixture, const s = try openDirs(gpa, "session-overlaps");
+    defer fixture.deinit();
+    defer s.close();
+
+    const page = try parse(a, s.overlaps("{\"offset\":0,\"limit\":50}"));
+    try testing.expectEqual(@as(i64, 1), int(page, "total"));
+    const row = field(page, "rows").array.items[0];
+
+    // p and q are identical, so the pair is reported once against the set's
+    // first path; big holds everything p does, so p adds nothing.
+    try testing.expectEqualStrings("b_in_a", field(row, "relation").string);
+    const side_a = field(row, "a");
+    const side_b = field(row, "b");
+    try testing.expect(std.mem.endsWith(u8, field(side_a, "path").string, "/big"));
+    try testing.expect(std.mem.endsWith(u8, field(side_b, "path").string, "/p"));
+
+    // The contained side has nothing of its own; the containing one has extra.c.
+    try testing.expectEqual(@as(i64, 0), int(side_b, "only_count"));
+    try testing.expectEqual(@as(usize, 0), field(side_b, "only").array.items.len);
+    try testing.expectEqual(@as(i64, 1), int(side_a, "only_count"));
+    const only = field(side_a, "only").array.items;
+    try testing.expectEqual(@as(usize, 1), only.len);
+    try testing.expect(std.mem.endsWith(u8, only[0].string, "/big/src/extra.c"));
+
+    for ([_][]const u8{ "files", "bytes", "skipped_entries", "identical_copies", "shared_files", "shared_bytes" }) |name| {
+        _ = int(side_a, name);
+    }
+    try testing.expect(field(side_a, "complete").bool);
+    try testing.expect(int(side_a, "newest_mtime") > 1_500_000_000_000);
+    // p stands for the whole {p, q} set.
+    try testing.expectEqual(@as(i64, 2), int(side_b, "identical_copies"));
+    try testing.expectEqual(@as(i64, 3), int(side_b, "shared_files"));
+}
+
+test "overlap filters, including redundant_only" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var fixture, const s = try openDirs(gpa, "session-overlap-filter");
+    defer fixture.deinit();
+    defer s.close();
+
+    // The one pair is a containment, so "hide pairs where each side has
+    // something unique" keeps it.
+    const redundant = try parse(a, s.overlaps("{\"offset\":0,\"limit\":50,\"filters\":{\"redundant_only\":true}}"));
+    try testing.expectEqual(@as(i64, 1), int(redundant, "total"));
+
+    // min_bytes is the shared size.
+    const huge = try parse(a, s.overlaps("{\"offset\":0,\"limit\":50,\"filters\":{\"min_bytes\":999999}}"));
+    try testing.expectEqual(@as(i64, 0), int(huge, "total"));
+
+    const named = try parse(a, s.overlaps("{\"offset\":0,\"limit\":50,\"filters\":{\"name\":\"big\"}}"));
+    try testing.expectEqual(@as(i64, 1), int(named, "total"));
+    const elsewhere = try parse(a, s.overlaps("{\"offset\":0,\"limit\":50,\"filters\":{\"name\":\"nowhere\"}}"));
+    try testing.expectEqual(@as(i64, 0), int(elsewhere, "total"));
+
+    try testing.expect(s.overlaps("[]") == null);
+    try testing.expectEqualStrings("overlap query is not valid JSON", s.lastError().?);
+}
+
+// ===========================================================================
+// Facets
+// ===========================================================================
+
+test "facets count findings by location, name and type" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var fixture = try Fixture.init(gpa, "session-facets", &results_tree);
+    defer fixture.deinit();
+    const roots_json = try query(a, "[{s}]", .{try jsonString(a, fixture.tree.path)});
+    var s = try fixture.open(roots_json);
+    defer s.close();
+
+    // One scan root, so locations start inside it rather than offering the
+    // root as the one and only facet. big.bin (4000 saved) is in Alpha+beta,
+    // mid.dat (500) in gamma+delta, small.txt (30) in all four.
+    const by_place = try parse(a, s.facets("{\"kind\":\"groups\",\"by\":\"location\",\"limit\":10}"));
+    try testing.expectEqualStrings(fixture.tree.path, field(by_place, "base").string);
+    try testing.expectEqual(@as(i64, 4), int(by_place, "total"));
+    const places = field(by_place, "facets").array.items;
+    const expected = [_]struct { dir: []const u8, count: i64, bytes: i64 }{
+        .{ .dir = "Alpha", .count = 2, .bytes = 4030 },
+        .{ .dir = "beta", .count = 2, .bytes = 4030 },
+        .{ .dir = "delta", .count = 2, .bytes = 530 },
+        .{ .dir = "gamma", .count = 2, .bytes = 530 },
+    };
+    try testing.expectEqual(expected.len, places.len);
+    for (places, expected) |got, want| {
+        const full = try std.fmt.allocPrint(a, "{s}/{s}", .{ fixture.tree.path, want.dir });
+        try testing.expectEqualStrings(full, field(got, "key").string);
+        try testing.expectEqual(want.count, int(got, "count"));
+        try testing.expectEqual(want.bytes, int(got, "bytes"));
+    }
+
+    // Drilling into one location narrows what the facets describe.
+    const in_alpha = try query(a, "{{\"kind\":\"groups\",\"by\":\"name\",\"limit\":10,\"filters\":{{\"under\":{s}}}}}", .{
+        try jsonString(a, try std.fmt.allocPrint(a, "{s}/Alpha", .{fixture.tree.path})),
+    });
+    const by_name = try parse(a, s.facets(in_alpha));
+    const names = field(by_name, "facets").array.items;
+    try testing.expectEqual(@as(usize, 2), names.len);
+    try testing.expectEqualStrings("big.bin", field(names[0], "key").string);
+    try testing.expectEqual(@as(i64, 1), int(names[0], "count"));
+    try testing.expectEqualStrings("small.txt", field(names[1], "key").string);
+
+    // By type, largest bytes first, and the extension lower-cased.
+    const by_type = try parse(a, s.facets("{\"kind\":\"groups\",\"by\":\"type\",\"limit\":10}"));
+    const types = field(by_type, "facets").array.items;
+    try testing.expectEqual(@as(usize, 3), types.len);
+    try testing.expectEqualStrings(".bin", field(types[0], "key").string);
+    try testing.expectEqual(@as(i64, 4000), int(types[0], "bytes"));
+    try testing.expectEqualStrings(".dat", field(types[1], "key").string);
+    try testing.expectEqualStrings(".txt", field(types[2], "key").string);
+    try testing.expectEqual(@as(i64, 30), int(types[2], "bytes"));
+    // A location facet is not offered when the question was about types.
+    try testing.expectEqual(std.json.Value.null, field(by_type, "base"));
+
+    // A minimum size drops small.txt everywhere, facets included.
+    const big_only = try parse(a, s.facets("{\"kind\":\"groups\",\"by\":\"type\",\"limit\":10,\"filters\":{\"min_bytes\":100}}"));
+    try testing.expectEqual(@as(usize, 2), field(big_only, "facets").array.items.len);
+
+    // The limit is clamped and `total` still reports what was there.
+    const one = try parse(a, s.facets("{\"kind\":\"groups\",\"by\":\"type\",\"limit\":1}"));
+    try testing.expectEqual(@as(usize, 1), field(one, "facets").array.items.len);
+    try testing.expectEqual(@as(i64, 3), int(one, "total"));
+
+    try testing.expect(s.facets("{\"kind\":\"nope\",\"by\":\"type\",\"limit\":1}") == null);
+    try testing.expectEqualStrings("facet query is not valid JSON", s.lastError().?);
+}
+
+test "a finding counts once per facet, however many members share it" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Two copies of the same file in ONE folder, and a third elsewhere: the
+    // group is one finding, counted once in each place, not twice in the first.
+    const tree = [_]File{
+        .{ .path = "one/a.bin", .byte = 'z', .size = 1000 },
+        .{ .path = "one/b.bin", .byte = 'z', .size = 1000 },
+        .{ .path = "two/c.bin", .byte = 'z', .size = 1000 },
+    };
+    var fixture = try Fixture.init(gpa, "session-facet-once", &tree);
+    defer fixture.deinit();
+    const roots_json = try query(a, "[{s}]", .{try jsonString(a, fixture.tree.path)});
+    var s = try fixture.open(roots_json);
+    defer s.close();
+
+    const page = try parse(a, s.facets("{\"kind\":\"groups\",\"by\":\"location\",\"limit\":10}"));
+    const places = field(page, "facets").array.items;
+    try testing.expectEqual(@as(usize, 2), places.len);
+    for (places) |place| {
+        try testing.expectEqual(@as(i64, 1), int(place, "count"));
+        try testing.expectEqual(@as(i64, 2000), int(place, "bytes")); // savings of the group
+    }
+}
+
+test "facets over folder findings follow the overlay" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var fixture, const s = try openDirs(gpa, "session-facets-folders");
+    defer fixture.deinit();
+    defer s.close();
+
+    const by_name = try parse(a, s.facets("{\"kind\":\"sets\",\"by\":\"name\",\"limit\":10}"));
+    const names = field(by_name, "facets").array.items;
+    // The {p, q} set contributes "p" and "q"; the src/util set contributes
+    // "util" once, for all three of its members.
+    try testing.expectEqual(@as(usize, 3), names.len);
+    for (names) |name| try testing.expectEqual(@as(i64, 1), int(name, "count"));
+
+    const overlaps_by_name = try parse(a, s.facets("{\"kind\":\"overlaps\",\"by\":\"name\",\"limit\":10}"));
+    try testing.expectEqual(@as(usize, 2), field(overlaps_by_name, "facets").array.items.len);
+
+    // Take q out from under them: the {p, q} set stops being a finding, so
+    // neither name is attributed any more.
+    const q = try fixture.path("q");
+    defer gpa.free(q);
+    _ = s.removed.record(&.{q});
+
+    const after = try parse(a, s.facets("{\"kind\":\"sets\",\"by\":\"name\",\"limit\":10}"));
+    const left = field(after, "facets").array.items;
+    try testing.expectEqual(@as(usize, 1), left.len);
+    try testing.expectEqualStrings("util", field(left[0], "key").string);
+    try testing.expectEqual(@as(i64, 1), int(left[0], "count"));
+}
+
+test "the overlay drops set members, whole sets and overlap pairs" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var fixture, const s = try openDirs(gpa, "session-folder-overlay");
+    defer fixture.deinit();
+    defer s.close();
+
+    const q = try fixture.path("q");
+    defer gpa.free(q);
+    _ = s.removed.record(&.{q});
+
+    // {p, q} is down to one copy and is no longer a set; the src/util set
+    // loses q's copy and keeps two — a deleted folder takes its contents.
+    const sets = try parse(a, s.identicalSets("{\"offset\":0,\"limit\":50}"));
+    try testing.expectEqual(@as(i64, 1), int(sets, "total"));
+    const row = field(sets, "rows").array.items[0];
+    try testing.expectEqual(@as(i64, 2), int(row, "count"));
+    for (field(row, "dirs").array.items) |dir| {
+        try testing.expect(std.mem.indexOf(u8, field(dir, "path").string, "/q/") == null);
+    }
+
+    // The pair named p, which survives, so it still stands.
+    try testing.expectEqual(@as(i64, 1), int(try parse(a, s.overlaps("{\"offset\":0,\"limit\":50}")), "total"));
+
+    // Take the other side and the pair says nothing at all.
+    const big = try fixture.path("big");
+    defer gpa.free(big);
+    _ = s.removed.record(&.{big});
+    try testing.expectEqual(@as(i64, 0), int(try parse(a, s.overlaps("{\"offset\":0,\"limit\":50}")), "total"));
+}
+
+// ===========================================================================
+// Folder deletes
+// ===========================================================================
+
+test "a folder goes only if it is identical to a surviving copy right now" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var fixture, const s = try openDirs(gpa, "session-folder-verify");
+    defer fixture.deinit();
+    defer s.close();
+
+    // A fourth copy that differs by one byte, in a hidden file the scan's
+    // size window could have skipped.
+    try fixture.write(&projectTree("drifted"));
+    try fixture.tree.writeFile("p/.env", "KEY=aaaa\n");
+    try fixture.tree.writeFile("q/.env", "KEY=aaaa\n");
+    try fixture.tree.writeFile("drifted/.env", "KEY=bbbb\n");
+
+    const items = try query(a, "[{{\"path\":{s},\"keepers\":[{s}],\"bytes\":1600}}," ++
+        "{{\"path\":{s},\"keepers\":[{s}],\"bytes\":1600}}]", .{
+        try jsonString(a, try treeJoin(a, &fixture, "q")),
+        try jsonString(a, try treeJoin(a, &fixture, "p")),
+        try jsonString(a, try treeJoin(a, &fixture, "drifted")),
+        try jsonString(a, try treeJoin(a, &fixture, "p")),
+    });
+    const report = try parse(a, s.deleteFolders(items, false, null, null));
+
+    try testing.expect(!fixture.exists("q"));
+    try testing.expect(fixture.exists("drifted")); // differs in a hidden file
+    try testing.expect(fixture.exists("p"));
+    try testing.expectEqual(@as(i64, 1), int(report, "deleted"));
+    try testing.expectEqual(@as(i64, 1600), int(report, "freed_bytes"));
+    try testing.expectEqual(@as(i64, 1), int(report, "failed_count"));
+    try testing.expectEqual(@as(i64, 1), int(report, "skipped_changed"));
+
+    const failed = field(report, "failed").array.items;
+    try testing.expect(std.mem.startsWith(u8, failed[0].array.items[1].string, "no longer identical"));
+
+    // The whole subtree went, not just its top level.
+    try testing.expect(!fixture.exists("q/src/util/str.c"));
+    // And the results stop listing it without a rescan.
+    try testing.expectEqual(@as(i64, 1), int(try parse(a, s.removedStatus()), "count"));
+    try testing.expectEqual(@as(i64, 1), int(try parse(a, s.identicalSets("{\"offset\":0,\"limit\":50}")), "total"));
+}
+
+test "a keeper that is itself being deleted vouches for nothing" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var fixture, const s = try openDirs(gpa, "session-folder-mutual");
+    defer fixture.deinit();
+    defer s.close();
+
+    // Each names the other as its surviving copy.
+    const items = try query(a, "[{{\"path\":{s},\"keepers\":[{s}]}},{{\"path\":{s},\"keepers\":[{s}]}}]", .{
+        try jsonString(a, try treeJoin(a, &fixture, "q")),
+        try jsonString(a, try treeJoin(a, &fixture, "p")),
+        try jsonString(a, try treeJoin(a, &fixture, "p")),
+        try jsonString(a, try treeJoin(a, &fixture, "q")),
+    });
+    const report = try parse(a, s.deleteFolders(items, false, null, null));
+
+    try testing.expect(fixture.exists("p") and fixture.exists("q"));
+    try testing.expectEqual(@as(i64, 0), int(report, "deleted"));
+    try testing.expectEqual(@as(i64, 2), int(report, "skipped_changed"));
+}
+
+test "links, relative paths and missing keepers are refused" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var fixture, const s = try openDirs(gpa, "session-folder-refuse");
+    defer fixture.deinit();
+    defer s.close();
+
+    try fixture.tree.symLink("q", "alias");
+
+    const items = try query(a,
+        \\[{{"path":{s},"keepers":[{s}]}},
+        \\ {{"path":{s},"keepers":[]}},
+        \\ {{"path":"relative/path","keepers":["/x"]}},
+        \\ {{"path":"/","keepers":["/x"]}},
+        \\ {{"path":{s},"keepers":[{s}]}}]
+    , .{
+        try jsonString(a, try treeJoin(a, &fixture, "alias")),
+        try jsonString(a, try treeJoin(a, &fixture, "p")),
+        try jsonString(a, try treeJoin(a, &fixture, "q")),
+        try jsonString(a, try treeJoin(a, &fixture, "gone")),
+        try jsonString(a, try treeJoin(a, &fixture, "p")),
+    });
+    const report = try parse(a, s.deleteFolders(items, false, null, null));
+
+    try testing.expectEqual(@as(i64, 0), int(report, "deleted"));
+    try testing.expectEqual(@as(i64, 5), int(report, "failed_count"));
+    try testing.expect(fixture.exists("q") and fixture.exists("alias") and fixture.exists("p"));
+
+    const reasons = field(report, "failed").array.items;
+    try testing.expectEqualStrings("not a real folder (a link or a file)", reasons[0].array.items[1].string);
+    try testing.expectEqualStrings("no surviving copy was named", reasons[1].array.items[1].string);
+    try testing.expectEqualStrings("not an absolute folder path", reasons[2].array.items[1].string);
+    try testing.expectEqualStrings("not an absolute folder path", reasons[3].array.items[1].string);
+    try testing.expectEqualStrings("cannot be read", reasons[4].array.items[1].string);
+}
+
+test "folders go to the Trash through the host, without a content check" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var fixture, const s = try openDirs(gpa, "session-folder-trash");
+    defer fixture.deinit();
+    defer s.close();
+
+    // Drifted on purpose: the Trash is recoverable, so the UI's selection
+    // rules are the safeguard and no comparison is made.
+    try fixture.write(&projectTree("drifted"));
+    try fixture.tree.writeFile("drifted/extra-file.txt", "not in any other copy\n");
+    try fixture.tree.symLink("p", "alias");
+
+    const bin = try fixture.out.join("bin");
+    defer gpa.free(bin);
+    try fixture.out.makeDir("bin");
+    var trash: FakeTrash = .{ .gpa = gpa, .bin = bin };
+    defer trash.deinit();
+
+    const items = try query(a, "[{{\"path\":{s},\"bytes\":1750}},{{\"path\":{s}}}]", .{
+        try jsonString(a, try treeJoin(a, &fixture, "drifted")),
+        try jsonString(a, try treeJoin(a, &fixture, "alias")),
+    });
+    const report = try parse(a, s.deleteFolders(items, true, FakeTrash.callback, &trash));
+
+    try testing.expect(!fixture.exists("drifted"));
+    try testing.expectEqual(@as(i64, 1), int(report, "deleted"));
+    try testing.expectEqual(@as(i64, 1750), int(report, "freed_bytes"));
+    // A symlink to a folder is still refused: removing "it" is not what the
+    // user picked.
+    try testing.expect(fixture.exists("alias"));
+    try testing.expectEqual(@as(i64, 1), int(report, "failed_count"));
+    try testing.expectEqualStrings(
+        "not a real folder (a link or a file)",
+        field(report, "failed").array.items[0].array.items[1].string,
+    );
+    try testing.expectEqual(@as(usize, 1), trash.moved.items.len);
+}
+
+test "a folder delete reports progress, cancels, and refuses to overlap another" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var fixture, const s = try openDirs(gpa, "session-folder-progress");
+    defer fixture.deinit();
+    defer s.close();
+
+    const items = try query(a, "[{{\"path\":{s},\"keepers\":[{s}]}}]", .{
+        try jsonString(a, try treeJoin(a, &fixture, "q")),
+        try jsonString(a, try treeJoin(a, &fixture, "p")),
+    });
+
+    // Cancelled before it starts, so nothing is touched.
+    s.cancelDelete();
+    const cancelled = try parse(a, s.deleteFolders(items, false, null, null));
+    try testing.expect(field(cancelled, "cancelled").bool);
+    try testing.expectEqual(@as(i64, 0), int(cancelled, "deleted"));
+    try testing.expect(fixture.exists("q"));
+
+    // And the cancel does not carry into the next one.
+    const bin = try fixture.out.join("bin2");
+    defer gpa.free(bin);
+    try fixture.out.makeDir("bin2");
+    var trash: FakeTrash = .{ .gpa = gpa, .bin = bin, .observe = s, .reenter = s };
+    defer trash.deinit();
+
+    const report = try parse(a, s.deleteFolders(items, true, FakeTrash.callback, &trash));
+    try testing.expect(!field(report, "cancelled").bool);
+    try testing.expectEqual(@as(i64, 1), int(report, "deleted"));
+
+    // The whole plan was on the progress before anything moved, and a second
+    // delete arriving mid-flight is refused rather than allowed to disturb it.
+    try testing.expect(trash.seen.running);
+    try testing.expectEqual(@as(u64, 1), trash.seen.total);
+    try testing.expect(trash.reentry_refused);
+    try testing.expectEqualStrings("A delete is already running", trash.reentry_message.?);
+
+    const done = s.deleteProgress();
+    try testing.expect(!done.running);
+    try testing.expectEqual(@as(u64, 1), done.done);
+}
+
+test "a folder delete asking for the Trash without a callback is refused" {
+    const gpa = testing.allocator;
+    var fixture, const s = try openDirs(gpa, "session-folder-no-trash");
+    defer fixture.deinit();
+    defer s.close();
+
+    try testing.expect(s.deleteFolders("[]", true, null, null) == null);
+    try testing.expectEqualStrings("no Trash callback was provided", s.lastError().?);
+    try testing.expect(s.deleteFolders("{not json", false, null, null) == null);
+    try testing.expectEqualStrings("folder list is not valid JSON", s.lastError().?);
+    try testing.expect(fixture.exists("p"));
+}
+
+// ===========================================================================
 // Helpers
 // ===========================================================================
 
@@ -1077,6 +1704,10 @@ test "export leaves out what was deleted, and escapes a hostile name" {
 const FakeTrash = struct {
     gpa: Allocator,
     moved: std.ArrayListUnmanaged([]u8) = .empty,
+    /// A directory to rename entries into. A real Trash moves rather than
+    /// erases, and a rename is the only thing that works for a folder as well
+    /// as a file. Null falls back to unlinking, which suits the file tests.
+    bin: ?[]const u8 = null,
     /// Progress read from inside the delete, on the first call.
     observe: ?*Session = null,
     seen: session.DeleteProgress = .{ .running = false, .done = 0, .total = 0 },
@@ -1110,7 +1741,7 @@ const FakeTrash = struct {
         self.calls += 1;
 
         for (paths[0..count]) |path| {
-            if (std.c.unlink(path) != 0) {
+            if (!self.take(path)) {
                 err_out[0] = 0;
                 return 1;
             }
@@ -1122,7 +1753,21 @@ const FakeTrash = struct {
         }
         return 0;
     }
+
+    fn take(self: *FakeTrash, path: [*:0]const u8) bool {
+        const bin = self.bin orelse return std.c.unlink(path) == 0;
+        const target = std.fmt.allocPrintSentinel(
+            self.gpa,
+            "{s}/{d}",
+            .{ bin, self.moved.items.len },
+            0,
+        ) catch return false;
+        defer self.gpa.free(target);
+        return rename(path, target.ptr) == 0;
+    }
 };
+
+extern "c" fn rename(old: [*:0]const u8, new: [*:0]const u8) c_int;
 
 extern "c" fn utimes(path: [*:0]const u8, times: ?*const [2]std.c.timeval) c_int;
 
@@ -1142,4 +1787,9 @@ fn readFile(arena: Allocator, path: []const u8) ![]u8 {
 /// `<tree>/<dir>/<name>`, in the test's arena rather than the scratch's owner.
 fn treePath(arena: Allocator, fixture: *const Fixture, dir: []const u8, name: []const u8) ![]u8 {
     return std.fmt.allocPrint(arena, "{s}/{s}/{s}", .{ fixture.tree.path, dir, name });
+}
+
+/// `<tree>/<sub_path>`, likewise.
+fn treeJoin(arena: Allocator, fixture: *const Fixture, sub_path: []const u8) ![]u8 {
+    return std.fmt.allocPrint(arena, "{s}/{s}", .{ fixture.tree.path, sub_path });
 }

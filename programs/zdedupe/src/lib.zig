@@ -501,6 +501,43 @@ pub export fn zdedupe_results_removed_status(r: ?*ZDedupeResults) ?[*:0]const u8
     return (s.removedStatus() orelse return null).ptr;
 }
 
+// === Folders ===
+
+pub export fn zdedupe_results_identical_sets(r: ?*ZDedupeResults, query_json: ?[*:0]const u8) ?[*:0]const u8 {
+    const s = asSession(r) orelse return null;
+    const query = query_json orelse return null;
+    return (s.identicalSets(std.mem.span(query)) orelse return null).ptr;
+}
+
+pub export fn zdedupe_results_set_members(r: ?*ZDedupeResults, index: usize) ?[*:0]const u8 {
+    const s = asSession(r) orelse return null;
+    return (s.setMembers(index) orelse return null).ptr;
+}
+
+pub export fn zdedupe_results_overlaps(r: ?*ZDedupeResults, query_json: ?[*:0]const u8) ?[*:0]const u8 {
+    const s = asSession(r) orelse return null;
+    const query = query_json orelse return null;
+    return (s.overlaps(std.mem.span(query)) orelse return null).ptr;
+}
+
+pub export fn zdedupe_results_facets(r: ?*ZDedupeResults, query_json: ?[*:0]const u8) ?[*:0]const u8 {
+    const s = asSession(r) orelse return null;
+    const query = query_json orelse return null;
+    return (s.facets(std.mem.span(query)) orelse return null).ptr;
+}
+
+pub export fn zdedupe_results_delete_folders(
+    r: ?*ZDedupeResults,
+    items_json: ?[*:0]const u8,
+    use_trash: bool,
+    trash_fn: ?ZDedupeTrashFn,
+    user: ?*anyopaque,
+) ?[*:0]const u8 {
+    const s = asSession(r) orelse return null;
+    const items = items_json orelse return null;
+    return (s.deleteFolders(std.mem.span(items), use_trash, trash_fn, user) orelse return null).ptr;
+}
+
 pub export fn zdedupe_results_export(
     r: ?*ZDedupeResults,
     format: ?[*:0]const u8,

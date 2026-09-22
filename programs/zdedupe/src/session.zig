@@ -41,6 +41,7 @@ const libc = std.c;
 const store = @import("store.zig");
 const hasher = @import("hasher.zig");
 const pstat = @import("pstat.zig");
+const compare = @import("compare.zig");
 const report_mod = @import("report.zig");
 const filters_mod = @import("filters.zig");
 const removed_mod = @import("removed.zig");
@@ -56,6 +57,12 @@ pub const max_page: usize = 200;
 /// carries the oldest ones and `count` says how many there are in all. A bulk
 /// rule covers the unlisted ones too — it works on the store, not on rows.
 pub const group_files_in_row: usize = 50;
+/// Member folders carried in an identical set's row. A set can have hundreds
+/// of copies (879 in one real scan); the row carries the first few and the
+/// rest come from `setMembers`.
+pub const set_members_in_row: usize = 8;
+/// Most facets one request may return, however many a caller asks for.
+pub const max_facets: usize = 100;
 /// Files handed to the Trash in one call, to amortise its per-call cost.
 /// Progress and cancel are per group, not per batch.
 pub const trash_batch: usize = 200;
@@ -104,6 +111,24 @@ const GroupQuery = struct {
     bulk: ?Filters = null,
 };
 
+/// Identical sets and overlap pairs page the same way: no sort, because the
+/// store already holds them largest-first.
+const FolderQuery = struct {
+    offset: usize = 0,
+    limit: usize = 50,
+    filters: Filters = .{},
+};
+
+const FindingKind = enum { groups, sets, overlaps };
+const FacetBy = enum { location, name, type };
+
+const FacetQuery = struct {
+    kind: FindingKind = .groups,
+    by: FacetBy = .location,
+    filters: Filters = .{},
+    limit: usize = 50,
+};
+
 const Selection = struct {
     rule: ?Rule = null,
     extra: []const []const u8 = &.{},
@@ -113,6 +138,17 @@ const Selection = struct {
         /// Files the user unticked, in their lossy spelling.
         excluded: []const []const u8 = &.{},
     };
+};
+
+/// One folder a caller asks to have removed, with the copies it says will
+/// survive it.
+const FolderItem = struct {
+    path: []const u8 = "",
+    /// Folders holding the same content that are NOT being deleted. A
+    /// permanent delete is verified against these; nothing else vouches.
+    keepers: []const []const u8 = &.{},
+    /// Size shown in the results, for the report's `freed_bytes`.
+    bytes: u64 = 0,
 };
 
 /// How a file is proven to still be the duplicate the scan found.
@@ -246,6 +282,14 @@ const AliveFile = struct {
     mtime: i64,
 };
 
+/// One member folder of an identical set that still exists as far as the
+/// overlay knows. `Matcher.matches` reads the `path` field off these.
+const AliveDir = struct {
+    path: []const u8,
+    newest_mtime: i64,
+    skipped_entries: u64,
+};
+
 const CachedOrder = struct {
     sort: GroupSort,
     /// Owned; the query's arena is gone by the time this is compared.
@@ -282,6 +326,8 @@ pub const Session = struct {
     del: DeleteState = .{},
     /// Reused across groups so paging a million of them does not churn.
     alive: std.ArrayListUnmanaged(AliveFile) = .empty,
+    /// The same, for the member folders of an identical set.
+    alive_dirs: std.ArrayListUnmanaged(AliveDir) = .empty,
 
     pub const OpenError = error{
         CannotOpenStore,
@@ -355,6 +401,7 @@ pub const Session = struct {
         const gpa = self.gpa;
         self.clearOrder();
         self.alive.deinit(gpa);
+        self.alive_dirs.deinit(gpa);
         self.removed.deinit();
         for (self.roots) |root| gpa.free(root);
         gpa.free(self.roots);
@@ -428,6 +475,19 @@ pub const Session = struct {
         return parseRoots(self.gpa, bytes);
     }
 
+    /// The scan roots with any trailing slash trimmed, and an empty one read
+    /// as "/". Location facets compare and emit these as keys, so `/mnt/` and
+    /// `/mnt` must not become two different places. `overview` reports the
+    /// roots as recorded instead, unaltered.
+    fn normalizedRoots(self: *Session, arena: Allocator) ![]const []const u8 {
+        const out = try arena.alloc([]const u8, self.roots.len);
+        for (self.roots, out) |root, *slot| {
+            const trimmed = std.mem.trimEnd(u8, root, "/");
+            slot.* = if (trimmed.len == 0) "/" else trimmed;
+        }
+        return out;
+    }
+
     /// The deepest directory containing every path in the results — the stand-in
     /// when nothing recorded what was scanned.
     fn deriveRoots(self: *Session) ![][]u8 {
@@ -479,8 +539,40 @@ pub const Session = struct {
         return self.alive.items;
     }
 
+    /// The member folders of `set` that still exist as far as the overlay
+    /// knows. Fewer than two and it is not a set of identical folders any
+    /// more. Refills a reused buffer: valid until the next call.
+    fn aliveDirs(self: *Session, set: *const store.Set) ![]const AliveDir {
+        self.alive_dirs.clearRetainingCapacity();
+        for (0..set.dir_count) |d| {
+            const dir = try self.reader.setDir(set, d);
+            if (self.removed.covers(dir.path)) continue;
+            try self.alive_dirs.append(self.gpa, .{
+                .path = dir.path,
+                .newest_mtime = dir.newest_mtime,
+                .skipped_entries = dir.skipped_entries,
+            });
+        }
+        return self.alive_dirs.items;
+    }
+
     fn liveSavings(size: u64, copies: usize) u64 {
         return size *| (@as(u64, copies) -| 1);
+    }
+
+    /// What "size" means for an overlap: the content the two folders share.
+    fn overlapBytes(o: *const store.Overlap) u64 {
+        return @max(o.a.shared_bytes, o.b.shared_bytes);
+    }
+
+    /// A pair says something about two folders; with either gone it says
+    /// nothing at all, so it stops being a finding.
+    fn overlapMatches(self: *Session, matcher: *const Matcher, o: *const store.Overlap) !bool {
+        const a = try self.reader.sidePath(&o.a);
+        const b = try self.reader.sidePath(&o.b);
+        if (self.removed.covers(a) or self.removed.covers(b)) return false;
+        if (matcher.redundant_only and store.Reader.relationOfRecord(o) == .overlap) return false;
+        return matcher.matches(overlapBytes(o), &[_][]const u8{ a, b });
     }
 
     /// Group indices in the requested order, restricted to groups passing
@@ -761,6 +853,443 @@ pub const Session = struct {
             return self.finishJson(&out);
         }
         return self.outOfMemory();
+    }
+
+    // --- folders: identical sets ------------------------------------------
+
+    /// The indices of the findings that fall inside the requested page, and
+    /// how many match in all.
+    ///
+    /// `match` is the cheap half of a row — the overlay and the filters — and
+    /// is asked about every finding, because `total` is the count a UI pages
+    /// against. Only the indices it keeps are built into rows afterwards, so
+    /// findings before the page are never materialised.
+    const Window = struct { indices: []const usize, total: usize };
+
+    fn windowOf(
+        arena: Allocator,
+        count: usize,
+        query: FolderQuery,
+        ctx: anytype,
+        comptime match: fn (@TypeOf(ctx), usize) anyerror!bool,
+    ) !Window {
+        const limit = @min(query.limit, max_page);
+        var indices: std.ArrayListUnmanaged(usize) = .empty;
+        var total: usize = 0;
+        for (0..count) |i| {
+            if (!try match(ctx, i)) continue;
+            if (total >= query.offset and indices.items.len < limit) {
+                try indices.append(arena, i);
+            }
+            total += 1;
+        }
+        return .{ .indices = indices.items, .total = total };
+    }
+
+    /// What `windowOf` asks about each finding, for the two folder lists.
+    const Cursor = struct {
+        session: *Session,
+        matcher: *const Matcher,
+
+        fn set(self: Cursor, index: usize) anyerror!bool {
+            const s = try self.session.reader.set(index);
+            const dirs = try self.session.aliveDirs(&s);
+            // One copy left is not a set of identical folders any more.
+            return dirs.len >= 2 and self.matcher.matches(s.bytes, dirs);
+        }
+
+        fn overlap(self: Cursor, index: usize) anyerror!bool {
+            const pair = try self.session.reader.overlap(index);
+            return self.session.overlapMatches(self.matcher, &pair);
+        }
+    };
+
+    pub fn identicalSets(self: *Session, query_json: []const u8) ?[:0]const u8 {
+        const arena = self.beginCall();
+        const query = std.json.parseFromSliceLeaky(FolderQuery, arena, query_json, .{
+            .ignore_unknown_fields = true,
+        }) catch {
+            self.fail("set query is not valid JSON", .{});
+            return null;
+        };
+        const matcher = Matcher.init(arena, query.filters) catch return self.outOfMemory();
+        const cursor: Cursor = .{ .session = self, .matcher = &matcher };
+
+        const window = windowOf(arena, self.reader.setCount(), query, cursor, Cursor.set) catch |err|
+            return self.callFailed(err);
+
+        var out: std.Io.Writer.Allocating = .init(arena);
+        var json: std.json.Stringify = .{ .writer = &out.writer };
+        self.writeSetPage(&json, arena, window, query) catch |err| return self.callFailed(err);
+        return self.finishJson(&out);
+    }
+
+    fn writeSetPage(
+        self: *Session,
+        json: *std.json.Stringify,
+        arena: Allocator,
+        window: Window,
+        query: FolderQuery,
+    ) !void {
+        try json.beginObject();
+        try json.objectField("rows");
+        try json.beginArray();
+        for (window.indices) |index| {
+            const set = try self.reader.set(index);
+            const dirs = try self.aliveDirs(&set);
+
+            var common: ?[]const u8 = null;
+            for (dirs) |dir| narrowToCommonDir(&common, dir.path);
+
+            try json.beginObject();
+            try json.objectField("index");
+            try json.write(index);
+            var hex: [64]u8 = undefined;
+            try json.objectField("digest");
+            try json.write(hasher.hashToHex(&set.digest, &hex));
+            try json.objectField("count");
+            try json.write(dirs.len);
+            try json.objectField("common_parent");
+            try json.write(try lossy(arena, common orelse ""));
+            try json.objectField("file_count");
+            try json.write(set.file_count);
+            try json.objectField("bytes");
+            try json.write(set.bytes);
+            try json.objectField("reclaimable");
+            try json.write(liveSavings(set.bytes, dirs.len));
+            try json.objectField("dirs");
+            try writeDirRows(json, arena, dirs[0..@min(dirs.len, set_members_in_row)]);
+            try json.endObject();
+        }
+        try json.endArray();
+        try json.objectField("total");
+        try json.write(window.total);
+        try json.objectField("offset");
+        try json.write(query.offset);
+        try json.endObject();
+    }
+
+    fn writeDirRows(json: *std.json.Stringify, arena: Allocator, dirs: []const AliveDir) !void {
+        try json.beginArray();
+        for (dirs) |dir| {
+            try json.beginObject();
+            try json.objectField("path");
+            try json.write(try lossy(arena, dir.path));
+            try json.objectField("newest_mtime");
+            try json.write(millis(dir.newest_mtime));
+            try json.objectField("skipped_entries");
+            try json.write(dir.skipped_entries);
+            try json.endObject();
+        }
+        try json.endArray();
+    }
+
+    /// Every member folder of one set — rows carry only the first few. The one
+    /// unpaged call, and bounded by a single set.
+    pub fn setMembers(self: *Session, index: usize) ?[:0]const u8 {
+        const arena = self.beginCall();
+        const set = self.reader.set(index) catch |err| return self.readFailed(err);
+        const dirs = self.aliveDirs(&set) catch |err| return self.callFailed(err);
+
+        var out: std.Io.Writer.Allocating = .init(arena);
+        var json: std.json.Stringify = .{ .writer = &out.writer };
+        writeDirRows(&json, arena, dirs) catch |err| return self.callFailed(err);
+        return self.finishJson(&out);
+    }
+
+    // --- folders: overlaps ------------------------------------------------
+
+    pub fn overlaps(self: *Session, query_json: []const u8) ?[:0]const u8 {
+        const arena = self.beginCall();
+        const query = std.json.parseFromSliceLeaky(FolderQuery, arena, query_json, .{
+            .ignore_unknown_fields = true,
+        }) catch {
+            self.fail("overlap query is not valid JSON", .{});
+            return null;
+        };
+        const matcher = Matcher.init(arena, query.filters) catch return self.outOfMemory();
+        const cursor: Cursor = .{ .session = self, .matcher = &matcher };
+
+        const window = windowOf(arena, self.reader.overlapCount(), query, cursor, Cursor.overlap) catch |err|
+            return self.callFailed(err);
+
+        var out: std.Io.Writer.Allocating = .init(arena);
+        var json: std.json.Stringify = .{ .writer = &out.writer };
+        self.writeOverlapPage(&json, arena, window, query) catch |err| return self.callFailed(err);
+        return self.finishJson(&out);
+    }
+
+    fn writeOverlapPage(
+        self: *Session,
+        json: *std.json.Stringify,
+        arena: Allocator,
+        window: Window,
+        query: FolderQuery,
+    ) !void {
+        try json.beginObject();
+        try json.objectField("rows");
+        try json.beginArray();
+        for (window.indices) |index| {
+            const pair = try self.reader.overlap(index);
+            try json.beginObject();
+            try json.objectField("relation");
+            try json.write(@tagName(store.Reader.relationOfRecord(&pair)));
+            try json.objectField("a");
+            try self.writeSideRow(json, arena, &pair.a);
+            try json.objectField("b");
+            try self.writeSideRow(json, arena, &pair.b);
+            try json.endObject();
+        }
+        try json.endArray();
+        try json.objectField("total");
+        try json.write(window.total);
+        try json.objectField("offset");
+        try json.write(query.offset);
+        try json.endObject();
+    }
+
+    fn writeSideRow(
+        self: *Session,
+        json: *std.json.Stringify,
+        arena: Allocator,
+        side: *const store.Side,
+    ) !void {
+        try json.beginObject();
+        try json.objectField("path");
+        try json.write(try lossy(arena, try self.reader.sidePath(side)));
+        inline for (.{
+            .{ "files", side.files },
+            .{ "bytes", side.bytes },
+        }) |f| {
+            try json.objectField(f[0]);
+            try json.write(f[1]);
+        }
+        try json.objectField("newest_mtime");
+        try json.write(millis(side.newest_mtime));
+        try json.objectField("skipped_entries");
+        try json.write(side.skipped_entries);
+        try json.objectField("complete");
+        try json.write(side.complete == 1);
+        inline for (.{
+            .{ "identical_copies", side.identical_copies },
+            .{ "shared_files", side.shared_files },
+            .{ "shared_bytes", side.shared_bytes },
+            .{ "only_count", side.only_count },
+        }) |f| {
+            try json.objectField(f[0]);
+            try json.write(f[1]);
+        }
+        // `only_count` is exact; `only` lists what the scan kept (<= 100).
+        try json.objectField("only");
+        try json.beginArray();
+        for (0..side.only_listed) |i| {
+            try json.write(try lossy(arena, try self.reader.onlyPath(side, i)));
+        }
+        try json.endArray();
+        try json.endObject();
+    }
+
+    // --- folders: facets --------------------------------------------------
+
+    /// Findings counted by where they are, what they are called, or what type
+    /// they are — the "group by" of the UI.
+    pub fn facets(self: *Session, query_json: []const u8) ?[:0]const u8 {
+        const arena = self.beginCall();
+        const query = std.json.parseFromSliceLeaky(FacetQuery, arena, query_json, .{
+            .ignore_unknown_fields = true,
+        }) catch {
+            self.fail("facet query is not valid JSON", .{});
+            return null;
+        };
+        const matcher = Matcher.init(arena, query.filters) catch return self.outOfMemory();
+        const roots = self.normalizedRoots(arena) catch return self.outOfMemory();
+
+        // Locations drill down from `filters.under`. With nothing chosen yet
+        // and a single scan root, start inside that root rather than offer it
+        // as the one and only facet.
+        const base: ?[]const u8 = switch (query.by) {
+            .location => query.filters.under orelse
+                (if (roots.len == 1) roots[0] else null),
+            else => null,
+        };
+
+        var counter: FacetCounter = .init(arena);
+        self.countFacets(arena, &counter, query, &matcher, base, roots) catch |err|
+            return self.callFailed(err);
+
+        var out: std.Io.Writer.Allocating = .init(arena);
+        var json: std.json.Stringify = .{ .writer = &out.writer };
+        counter.write(&json, arena, base, @min(query.limit, max_facets)) catch |err|
+            return self.callFailed(err);
+        return self.finishJson(&out);
+    }
+
+    fn countFacets(
+        self: *Session,
+        arena: Allocator,
+        counter: *FacetCounter,
+        query: FacetQuery,
+        matcher: *const Matcher,
+        base: ?[]const u8,
+        roots: []const []const u8,
+    ) !void {
+        // Only the members that satisfy the chosen facets say where a finding
+        // "is": under ~/work, a set spanning ~/work and /mnt is listed by its
+        // ~/work member, not pulled apart by the other one.
+        var keys: std.ArrayListUnmanaged([]const u8) = .empty;
+        var paths: std.ArrayListUnmanaged([]const u8) = .empty;
+
+        switch (query.kind) {
+            .groups => for (0..self.reader.groupCount()) |i| {
+                const group = try self.reader.group(i);
+                const alive = try self.aliveFiles(&group);
+                if (alive.len < 2 or !matcher.matches(group.size, alive)) continue;
+                paths.clearRetainingCapacity();
+                for (alive) |file| try paths.append(arena, file.path);
+                try collectKeys(arena, &keys, paths.items, query.by, matcher, base, roots);
+                try counter.add(arena, liveSavings(group.size, alive.len), keys.items);
+            },
+            .sets => for (0..self.reader.setCount()) |i| {
+                const set = try self.reader.set(i);
+                const dirs = try self.aliveDirs(&set);
+                if (dirs.len < 2 or !matcher.matches(set.bytes, dirs)) continue;
+                paths.clearRetainingCapacity();
+                for (dirs) |dir| try paths.append(arena, dir.path);
+                try collectKeys(arena, &keys, paths.items, query.by, matcher, base, roots);
+                try counter.add(arena, liveSavings(set.bytes, dirs.len), keys.items);
+            },
+            .overlaps => for (0..self.reader.overlapCount()) |i| {
+                const pair = try self.reader.overlap(i);
+                if (!try self.overlapMatches(matcher, &pair)) continue;
+                const sides = [_][]const u8{
+                    try self.reader.sidePath(&pair.a),
+                    try self.reader.sidePath(&pair.b),
+                };
+                try collectKeys(arena, &keys, &sides, query.by, matcher, base, roots);
+                try counter.add(arena, overlapBytes(&pair), keys.items);
+            },
+        }
+    }
+
+    // --- folder deletes ---------------------------------------------------
+
+    /// Remove whole folders: to the Trash, where the selection rules in the UI
+    /// are the safeguard, or for good, where each one is compared with a
+    /// surviving copy byte for byte immediately beforehand.
+    pub fn deleteFolders(
+        self: *Session,
+        items_json: []const u8,
+        use_trash: bool,
+        trash_fn: ?TrashFn,
+        user: ?*anyopaque,
+    ) ?[:0]const u8 {
+        // Claimed before `beginCall`, for the reason `delete` gives.
+        if (self.del.running.swap(true, .acq_rel)) {
+            self.fail("A delete is already running", .{});
+            return null;
+        }
+        defer self.del.running.store(false, .release);
+        defer self.del.cancel.store(false, .release);
+        self.del.done.store(0, .release);
+        self.del.total.store(0, .release);
+
+        const arena = self.beginCall();
+        const items = std.json.parseFromSliceLeaky([]const FolderItem, arena, items_json, .{
+            .ignore_unknown_fields = true,
+        }) catch {
+            self.fail("folder list is not valid JSON", .{});
+            return null;
+        };
+        if (use_trash and trash_fn == null) {
+            self.fail("no Trash callback was provided", .{});
+            return null;
+        }
+
+        var report: Report = .{};
+        self.runFolderDelete(arena, &report, items, use_trash, trash_fn, user);
+
+        if (report.removed_paths.items.len > 0) {
+            report.needs_rescan = !self.removed.record(report.removed_paths.items);
+            self.clearOrder();
+        } else {
+            report.needs_rescan = self.removed.needsRescan();
+        }
+
+        var out: std.Io.Writer.Allocating = .init(arena);
+        var json: std.json.Stringify = .{ .writer = &out.writer };
+        writeReport(&json, &report) catch return self.outOfMemory();
+        return self.finishJson(&out);
+    }
+
+    fn runFolderDelete(
+        self: *Session,
+        arena: Allocator,
+        report: *Report,
+        items: []const FolderItem,
+        use_trash: bool,
+        trash_fn: ?TrashFn,
+        user: ?*anyopaque,
+    ) void {
+        self.del.total.store(items.len, .release);
+
+        for (items) |item| {
+            if (self.del.cancel.load(.acquire)) {
+                report.cancelled = true;
+                break;
+            }
+            _ = self.del.done.fetchAdd(1, .release);
+
+            var path_buf: [4096]u8 = undefined;
+            const path_z = pathZ(&path_buf, item.path) orelse {
+                report.fail(arena, item.path, "path is too long");
+                continue;
+            };
+
+            if (use_trash) {
+                // Recoverable, so the UI's selection rules are the safeguard.
+                // But never follow a link, and never trash a non-folder.
+                if (folderKind(path_z)) |reason| {
+                    report.fail(arena, item.path, reason);
+                    continue;
+                }
+                var err_buf: [512]u8 = undefined;
+                err_buf[0] = 0;
+                const paths = [_][*:0]const u8{path_z};
+                if (trash_fn.?(user, &paths, 1, &err_buf, err_buf.len) == 0) {
+                    report.removed(arena, item.path, item.bytes);
+                } else {
+                    report.fail(arena, item.path, trashReason(arena, &err_buf));
+                }
+                continue;
+            }
+
+            if (folderRefusal(item, path_z)) |reason| {
+                report.fail(arena, item.path, reason);
+                continue;
+            }
+            // Compared right now, in full: same relative paths, same bytes,
+            // and nothing extra on either side, hidden files included. A
+            // keeper that is itself being removed vouches for nothing.
+            const verified = for (item.keepers) |keeper| {
+                if (touchedByAny(keeper, items)) continue;
+                if (foldersIdentical(self.gpa, item.path, keeper)) break true;
+            } else false;
+            if (!verified) {
+                report.skipped_changed += 1;
+                report.fail(arena, item.path, "no longer identical to a surviving copy " ++
+                    "(or it differs in files the scan ignored, such as dependency folders). " ++
+                    "Use the Trash instead.");
+                continue;
+            }
+            if (removeTree(path_z)) |errno| {
+                report.fail(arena, item.path, unlinkReason(errno));
+            } else {
+                // The overlay records the caller's spelling, which is the only
+                // one it had; a folder whose real name is not UTF-8 would have
+                // been refused above, because that spelling does not open.
+                report.removed(arena, item.path, item.bytes);
+            }
+        }
     }
 
     // --- delete -----------------------------------------------------------
@@ -1317,6 +1846,244 @@ fn writeReport(json: *std.json.Stringify, report: *const Report) !void {
     try json.objectField("needs_rescan");
     try json.write(report.needs_rescan);
     try json.endObject();
+}
+
+// ===========================================================================
+// Facets
+// ===========================================================================
+
+/// The facet key one member contributes, or null when it contributes none —
+/// a path under no scan root has no location to be counted in.
+fn facetKey(
+    arena: Allocator,
+    by: FacetBy,
+    path: []const u8,
+    base: ?[]const u8,
+    roots: []const []const u8,
+) !?[]const u8 {
+    return switch (by) {
+        .name => filters_mod.baseName(path),
+        .type => try filters_mod.extensionLower(arena, path),
+        .location => if (base) |b|
+            filters_mod.areaUnder(path, b)
+        else for (roots) |root| {
+            // At the top level the scan roots themselves are the areas.
+            if (filters_mod.isAtOrUnder(path, root)) break root;
+        } else null,
+    };
+}
+
+/// The distinct keys a finding's members contribute. Only members that
+/// satisfy the chosen facets count, so a finding spanning two places is
+/// listed under the one the query asked about rather than pulled apart.
+fn collectKeys(
+    arena: Allocator,
+    out: *std.ArrayListUnmanaged([]const u8),
+    members: []const []const u8,
+    by: FacetBy,
+    matcher: *const Matcher,
+    base: ?[]const u8,
+    roots: []const []const u8,
+) !void {
+    out.clearRetainingCapacity();
+    for (members) |path| {
+        if (!matcher.memberSelected(path)) continue;
+        const key = try facetKey(arena, by, path, base, roots) orelse continue;
+        try out.append(arena, key);
+    }
+}
+
+/// Counts findings per facet. A finding contributes once to each distinct
+/// facet it touches, however many of its members share that facet — so a set
+/// with two copies in one folder counts once there, not twice.
+const FacetCounter = struct {
+    totals: std.StringHashMapUnmanaged(Tally) = .empty,
+    /// Keys already credited for the finding in hand.
+    seen: std.ArrayListUnmanaged([]const u8) = .empty,
+
+    const Tally = struct { count: usize, bytes: u64 };
+    const Facet = struct { key: []const u8, count: usize, bytes: u64 };
+
+    fn init(arena: Allocator) FacetCounter {
+        _ = arena;
+        return .{};
+    }
+
+    fn add(self: *FacetCounter, arena: Allocator, bytes: u64, keys: []const []const u8) !void {
+        self.seen.clearRetainingCapacity();
+        for (keys) |key| {
+            const already = for (self.seen.items) |k| {
+                if (std.mem.eql(u8, k, key)) break true;
+            } else false;
+            if (already) continue;
+            try self.seen.append(arena, key);
+
+            const entry = try self.totals.getOrPut(arena, key);
+            if (!entry.found_existing) entry.value_ptr.* = .{ .count = 0, .bytes = 0 };
+            entry.value_ptr.count += 1;
+            entry.value_ptr.bytes +|= bytes;
+        }
+    }
+
+    fn write(
+        self: *FacetCounter,
+        json: *std.json.Stringify,
+        arena: Allocator,
+        base: ?[]const u8,
+        limit: usize,
+    ) !void {
+        var all: std.ArrayListUnmanaged(Facet) = .empty;
+        var it = self.totals.iterator();
+        while (it.next()) |entry| {
+            try all.append(arena, .{
+                .key = entry.key_ptr.*,
+                .count = entry.value_ptr.count,
+                .bytes = entry.value_ptr.bytes,
+            });
+        }
+        // Bytes first; count and key make the order total, so the same scan
+        // always lists its facets the same way.
+        std.mem.sort(Facet, all.items, {}, struct {
+            fn before(_: void, a: Facet, b: Facet) bool {
+                if (a.bytes != b.bytes) return a.bytes > b.bytes;
+                if (a.count != b.count) return a.count > b.count;
+                return std.mem.order(u8, a.key, b.key) == .lt;
+            }
+        }.before);
+
+        try json.beginObject();
+        try json.objectField("base");
+        if (base) |b| try json.write(try lossy(arena, b)) else try json.write(null);
+        try json.objectField("facets");
+        try json.beginArray();
+        for (all.items[0..@min(all.items.len, limit)]) |facet| {
+            try json.beginObject();
+            try json.objectField("key");
+            try json.write(try lossy(arena, facet.key));
+            try json.objectField("count");
+            try json.write(facet.count);
+            try json.objectField("bytes");
+            try json.write(facet.bytes);
+            try json.endObject();
+        }
+        try json.endArray();
+        // Distinct facets before the cut, so a UI can say "showing 100 of N".
+        try json.objectField("total");
+        try json.write(all.items.len);
+        try json.endObject();
+    }
+};
+
+// ===========================================================================
+// Folder removal
+// ===========================================================================
+
+/// Why `path` must not be trashed without even looking at it. Null means it
+/// is a real directory.
+fn folderKind(path: [*:0]const u8) ?[]const u8 {
+    const st = pstat.lstat(path) catch return "cannot be read";
+    if (!st.isDir()) return "not a real folder (a link or a file)";
+    return null;
+}
+
+/// Why `item` must not be removed for good without even looking at its
+/// content. Null means it may go on to be compared with its keepers.
+fn folderRefusal(item: FolderItem, path: [*:0]const u8) ?[]const u8 {
+    // An absolute path with a parent: never a relative path, and never "/".
+    if (item.path.len == 0 or item.path[0] != '/') return "not an absolute folder path";
+    if (std.mem.eql(u8, item.path, "/")) return "not an absolute folder path";
+    // A symlink to a folder: removing "it" is not what was verified.
+    if (folderKind(path)) |reason| return reason;
+    if (item.keepers.len == 0) return "no surviving copy was named";
+    return null;
+}
+
+/// True if `path` is, contains, or lies inside anything in `items`. Nothing
+/// that is being deleted can vouch for anything else.
+fn touchedByAny(path: []const u8, items: []const FolderItem) bool {
+    for (items) |item| {
+        if (filters_mod.isAtOrUnder(path, item.path)) return true;
+        if (filters_mod.isAtOrUnder(item.path, path)) return true;
+    }
+    return false;
+}
+
+/// Are the two folders identical right now: the same regular files at the
+/// same relative paths with the same content, hidden and empty files
+/// included, nothing extra on either side? Any error counts as "no".
+///
+/// `min_size` is 0 deliberately. The scan's own size window may have skipped
+/// small files, and a folder must never pass for a copy of another because
+/// the file that differs was below it.
+fn foldersIdentical(gpa: Allocator, a: []const u8, b: []const u8) bool {
+    var comparator = compare.FolderComparator.init(gpa, .{
+        .min_size = 0,
+        .include_hidden = true,
+    });
+    var result = comparator.compare(a, b) catch return false;
+    defer result.deinit();
+    return result.isIdentical();
+}
+
+/// Remove a directory and everything beneath it. Returns the errno that
+/// stopped it, or null on success.
+///
+/// Recursion is by directory descriptor (`openat` with NOFOLLOW, then
+/// `fdopendir`), never by re-resolving a path: the tree is being deleted
+/// precisely because it is a duplicate, and re-walking names would let a
+/// symlink swapped in mid-delete redirect the removal somewhere else. Entries
+/// are removed with `unlinkat`, so a symlink beneath is unlinked rather than
+/// followed.
+fn removeTree(path: [*:0]const u8) ?std.c.E {
+    const fd = libc.open(path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true }, @as(libc.mode_t, 0));
+    if (fd < 0) return libc.errno(@as(c_int, -1));
+    if (removeChildren(fd)) |errno| {
+        _ = libc.close(fd);
+        return errno;
+    }
+    _ = libc.close(fd);
+    if (libc.rmdir(path) != 0) return libc.errno(@as(c_int, -1));
+    return null;
+}
+
+/// Empty the directory `dir_fd` refers to. Takes ownership of nothing: the
+/// caller still closes `dir_fd`.
+fn removeChildren(dir_fd: c_int) ?std.c.E {
+    // fdopendir takes ownership of the fd it is given, so it gets a copy.
+    const dup_fd = libc.dup(dir_fd);
+    if (dup_fd < 0) return libc.errno(@as(c_int, -1));
+    const dir = libc.fdopendir(dup_fd) orelse {
+        _ = libc.close(dup_fd);
+        return libc.errno(@as(c_int, -1));
+    };
+    defer _ = libc.closedir(dir);
+
+    while (libc.readdir(dir)) |entry| {
+        const name_ptr: [*:0]const u8 = @ptrCast(&entry.name);
+        const name = std.mem.span(name_ptr);
+        if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
+
+        const st = pstat.lstatAt(dir_fd, name_ptr) catch return libc.errno(@as(c_int, -1));
+        if (st.isDir()) {
+            const child = libc.openat(dir_fd, name_ptr, .{
+                .ACCMODE = .RDONLY,
+                .DIRECTORY = true,
+                .NOFOLLOW = true,
+            }, @as(libc.mode_t, 0));
+            if (child < 0) return libc.errno(@as(c_int, -1));
+            if (removeChildren(child)) |errno| {
+                _ = libc.close(child);
+                return errno;
+            }
+            _ = libc.close(child);
+            if (libc.unlinkat(dir_fd, name_ptr, @intCast(libc.AT.REMOVEDIR)) != 0) {
+                return libc.errno(@as(c_int, -1));
+            }
+        } else if (libc.unlinkat(dir_fd, name_ptr, 0) != 0) {
+            return libc.errno(@as(c_int, -1));
+        }
+    }
+    return null;
 }
 
 /// True if `path` is still the file the scan hashed.
