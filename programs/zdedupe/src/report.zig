@@ -752,7 +752,7 @@ fn writeJsonArray(writer: anytype, name: []const u8, items: []const []const u8) 
 }
 
 /// Format Unix timestamp as ISO8601 string into buffer
-fn formatIso8601(timestamp: i64, buf: *[24]u8) []const u8 {
+pub fn formatIso8601(timestamp: i64, buf: *[24]u8) []const u8 {
     // Convert Unix timestamp to date/time components
     const epoch_secs: u64 = if (timestamp >= 0) @intCast(timestamp) else 0;
 

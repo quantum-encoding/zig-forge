@@ -169,10 +169,23 @@ pub const Config = struct {
     /// and is counted so reports can say what was ignored. Scan roots are
     /// never pruned: the user named them explicitly.
     excludes: []const []const u8 = &.{},
+    /// Absolute paths not to scan: a folder here is skipped with everything
+    /// beneath it, a file just itself. Roots are never skipped.
+    exclude_paths: []const []const u8 = &.{},
     /// Prune any directory carrying a valid CACHEDIR.TAG (bford.info/cachedir),
     /// e.g. cargo's `target/`. Safer than excluding a generic name like
     /// "target" or "build", which could just as well hold user data.
     exclude_cache_dirs: bool = false,
+    /// Stay on the volumes the roots live on: a directory on another device
+    /// (a mounted disk, a network share, a phone's DeviceFS) is not entered.
+    /// Such mounts can block a read indefinitely, and a root on another
+    /// volume still counts, because roots are named explicitly.
+    one_filesystem: bool = true,
+    /// Skip library packages another app owns (Photos, Music, TV, iPhoto,
+    /// Aperture), by extension. Their contents are the app's database, not
+    /// the user's files, and opening one makes macOS ask for photo-library
+    /// access mid-scan.
+    skip_app_libraries: bool = true,
     /// Roll file identities up into directory identities: report identical
     /// directories and directory pairs that largely overlap. See dirs.zig.
     ///
@@ -213,6 +226,48 @@ pub const Config = struct {
         ".DS_Store",
         "Thumbs.db",
         "desktop.ini",
+    };
+
+    /// Key stores and credential files, never opened. A scan only ever
+    /// compares content and reports nothing about what it read, but a security
+    /// tool watching file access cannot know that: a duplicate finder walking
+    /// `~/.ssh` and `~/.aws` looks exactly like one exfiltrating them. Skipping
+    /// them costs a user nothing — nobody reclaims space by deduplicating a
+    /// private key — and keeps the scan off every such tool's radar.
+    ///
+    /// Exact path components, matched like any other exclude.
+    /// Package extensions `skip_app_libraries` prunes.
+    pub const app_library_suffixes = [_][]const u8{
+        ".photoslibrary",
+        ".migratedphotolibrary",
+        ".photolibrary",
+        ".aplibrary",
+        ".musiclibrary",
+        ".tvlibrary",
+    };
+
+    pub const credential_excludes = [_][]const u8{
+        ".ssh",
+        ".gnupg",
+        "Keychains",
+        ".password-store",
+        ".vault-token",
+        ".aws",
+        ".azure",
+        "gcloud",
+        ".kube",
+        ".docker",
+        ".terraform.d",
+        ".netrc",
+        ".git-credentials",
+        ".npmrc",
+        ".pypirc",
+        ".pgpass",
+        ".my.cnf",
+        ".boto",
+        ".s3cfg",
+        ".env",
+        ".envrc",
     };
 
     pub const HashAlgorithm = enum {

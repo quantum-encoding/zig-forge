@@ -84,6 +84,8 @@ pub const Walker = struct {
     /// Track directories already descended into. Without this, a symlink cycle
     /// (`ln -s .. loop`) recurses until the stack is exhausted.
     seen_dirs: std.AutoHashMap(FileId, void),
+    /// Devices of the walked roots, for `Config.one_filesystem`.
+    root_devs: std.ArrayListUnmanaged(u64) = .empty,
     /// Progress callback
     progress_callback: ?types.ProgressCallback,
     /// Current progress state
@@ -110,6 +112,7 @@ pub const Walker = struct {
     pub fn deinit(self: *Walker) void {
         self.seen_inodes.deinit();
         self.seen_dirs.deinit();
+        self.root_devs.deinit(self.allocator);
     }
 
     /// Set progress callback
@@ -164,6 +167,16 @@ pub const Walker = struct {
             } else if (stat_buf.isLink() and self.config.follow_symlinks) {
                 try self.processSymlink(path, result, depth);
             }
+            return;
+        }
+
+        // A mount point inside a root belongs to another filesystem; reading
+        // from one (a network share, a phone's DeviceFS) can block forever.
+        if (depth == 0) {
+            try self.root_devs.append(self.allocator, stat_buf.dev);
+        } else if (self.config.one_filesystem and
+            std.mem.indexOfScalar(u64, self.root_devs.items, stat_buf.dev) == null)
+        {
             return;
         }
 

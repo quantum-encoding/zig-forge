@@ -16,6 +16,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -135,6 +136,23 @@ void zdedupe_use_sha256(zdedupe_ctx* ctx, bool use_sha256);
 void zdedupe_set_analyze_dirs(zdedupe_ctx* ctx, bool analyze);
 
 /**
+ * Stay on the volumes the scan roots live on (default: true). A directory on
+ * another device inside a root - a mounted disk, a network share, a
+ * connected phone's DeviceFS - is not entered: such a mount can block a read
+ * indefinitely. A root on another volume is still scanned; it was named.
+ */
+void zdedupe_set_one_filesystem(zdedupe_ctx* ctx, bool one);
+
+/**
+ * Skip library packages another app owns, by extension (default: true):
+ * .photoslibrary, .migratedphotolibrary, .photolibrary, .aplibrary,
+ * .musiclibrary, .tvlibrary. Their contents are the app's database, and
+ * opening a Photos library makes macOS ask for photo-library access. Applies
+ * to duplicate scans; a folder comparison compares everything it is given.
+ */
+void zdedupe_set_skip_app_libraries(zdedupe_ctx* ctx, bool skip);
+
+/**
  * Ignore regenerable output: node_modules, __pycache__, .zig-cache,
  * .svelte-kit, .DS_Store, ... (Config.default_excludes in src/types.zig) and
  * any directory carrying a valid CACHEDIR.TAG, e.g. cargo's target/.
@@ -146,6 +164,24 @@ void zdedupe_set_analyze_dirs(zdedupe_ctx* ctx, bool analyze);
 void zdedupe_use_default_excludes(zdedupe_ctx* ctx, bool use_defaults);
 
 /**
+ * Never open key stores or credential files: .ssh, .gnupg, Keychains,
+ * .password-store, .vault-token, .aws, .azure, gcloud, .kube, .docker,
+ * .terraform.d, .netrc, .git-credentials, .npmrc, .pypirc, .pgpass, .my.cnf,
+ * .boto, .s3cfg, .env, .envrc (Config.credential_excludes in src/types.zig).
+ *
+ * A scan only ever compares content and reports nothing about what it read,
+ * but a security tool watching file access cannot know that: a duplicate
+ * finder walking ~/.ssh looks exactly like one exfiltrating it. Skipping these
+ * costs a user nothing - nobody reclaims space by deduplicating a private key.
+ *
+ * Additive, and independent of zdedupe_use_default_excludes.
+ *
+ * @param ctx Context handle
+ * @param use true to enable (default: false)
+ */
+void zdedupe_use_credential_excludes(zdedupe_ctx* ctx, bool use);
+
+/**
  * Ignore every entry (file or directory) with exactly this name. Additive,
  * and independent of zdedupe_use_default_excludes. No globs.
  *
@@ -154,6 +190,16 @@ void zdedupe_use_default_excludes(zdedupe_ctx* ctx, bool use_defaults);
  * @return 0 on success, -1 on failure
  */
 int zdedupe_add_exclude(zdedupe_ctx* ctx, const char* name);
+
+/**
+ * Never scan this absolute path: a folder is skipped with everything beneath
+ * it, a file just itself. For the user's own "do not look here" rules, beside
+ * zdedupe_add_exclude's names. A scan root is never skipped. Applies to
+ * duplicate scans.
+ *
+ * @return 0 on success, -1 if the path is empty or not absolute
+ */
+int zdedupe_add_exclude_path(zdedupe_ctx* ctx, const char* path);
 
 /* === Progress & cancellation === */
 
@@ -345,6 +391,367 @@ int zdedupe_run_to_file(zdedupe_ctx* ctx, const char* path);
  */
 const char* zdedupe_run_sync(zdedupe_ctx* ctx);
 
+/* =========================================================================
+ * === Results session ===
+ * =========================================================================
+ *
+ * Everything that happens AFTER a scan, done here instead of in each
+ * frontend: paging the groups with a sort and filters, summarising the
+ * "select all duplicates" rule, deleting verified copies with progress and
+ * cancellation, remembering what went so a delete does not force a rescan,
+ * and export. A host does: zdedupe_run_to_file -> zdedupe_results_open ->
+ * page / summarise / delete / export -> zdedupe_results_close.
+ *
+ * CONVENTIONS
+ *
+ *  - Queries in and answers out are UTF-8 JSON, NUL-terminated. A returned
+ *    string is owned by the session and valid ONLY until the next call on
+ *    that session; copy anything you need to keep.
+ *  - Every call on a session happens on one thread at a time, EXCEPT
+ *    zdedupe_results_delete_progress and zdedupe_results_cancel_delete,
+ *    which touch nothing but atomics and may be called from another thread
+ *    while a delete runs (same contract as zdedupe_get_progress/_cancel).
+ *  - A failed call returns NULL (pointer-returning) or non-zero
+ *    (int-returning); zdedupe_results_last_error then gives the message.
+ *  - Paths inside JSON are the LOSSY UTF-8 spelling of the stored bytes -
+ *    invalid sequences become U+FFFD, the same spelling Rust's
+ *    String::from_utf8_lossy and Swift's String(decoding:as:) produce.
+ *    Paths sent back in (unticked, hand-picked) are matched against that
+ *    same spelling; everything touching the disk uses the exact bytes.
+ *  - Byte counts and timestamps are JSON integers. Timestamps are epoch
+ *    MILLISECONDS (the store holds seconds).
+ *  - Two sidecars sit beside the store file <dir>/<name>.zds and are owned
+ *    by the session: <name>.roots.json (["/root/a", ...], the scan roots,
+ *    which the store format does not record) and <name>.removed.json
+ *    ({"overflowed": bool, "paths_b64": [...]} - exact path bytes, base64,
+ *    because a name that is not UTF-8 must still match after a restart).
+ *
+ * FILTERS, shared by the group list and the bulk rule:
+ *
+ *   { "text": "", "min_bytes": 0, "redundant_only": false,
+ *     "under": null, "name": null, "ext": null }
+ *
+ * All fields optional. "text" is an ASCII-case-insensitive substring of any
+ * member's path (trimmed; non-ASCII bytes match exactly). "min_bytes" is the
+ * size of one file in the group. "under"/"name"/"ext" must hold for the SAME
+ * member - "a file called x under /a", not "something under /a and, some-
+ * where else, something called x"; "under" matches whole path components
+ * (/a/proj-backup is not under /a/proj) and "ext" is lower-case with the dot
+ * (".png"), "" meaning no extension. "redundant_only" applies to folder
+ * overlaps only. The whole value is the cache key for the row order.
+ */
+
+typedef struct zdedupe_results zdedupe_results;
+
+/**
+ * Map a finished result store.
+ *
+ * @param store_path the .zds file zdedupe_run_to_file wrote
+ * @param roots_json a JSON array of the scan's root paths, or NULL. When
+ *        given (a fresh scan) it is written to the roots sidecar and the
+ *        removed sidecar is discarded. When NULL (reopening) both sidecars
+ *        are loaded, and roots absent from the sidecar fall back to the
+ *        deepest directory containing every path in the results.
+ * @return a session, or NULL if the store fails validation, cannot be read,
+ *         or roots_json is not a JSON array of strings
+ */
+zdedupe_results* zdedupe_results_open(const char* store_path, const char* roots_json);
+
+/** Release a session and unmap the store. Safe to pass NULL. */
+void zdedupe_results_close(zdedupe_results* r);
+
+/** Why the last call on `r` failed, or NULL. Owned by the session. */
+const char* zdedupe_results_last_error(const zdedupe_results* r);
+
+/**
+ * The scan's own counters, plus what the folder sections add up to:
+ * { "roots": ["/a"], "generated_at": 1758530000000,
+ *   "files_scanned": 0, "bytes_scanned": 0, "duplicate_groups": 0,
+ *   "duplicate_files": 0, "space_savings": 0, "scan_time_ns": 0,
+ *   "excluded_entries": 0, "overlapping_roots": 0, "failed_paths": 0,
+ *   "has_directories": false, "dirs_analyzed": 0, "dirs_incomplete": 0,
+ *   "identical_sets": 0, "overlaps": 0, "redundant_pairs": 0,
+ *   "reclaimable": 0 }
+ *
+ * These counters are the SCAN's and do not change with deletes; say so
+ * beside them. "reclaimable" is the sum of bytes * (copies - 1) over
+ * identical folder sets; "redundant_pairs" counts overlap pairs where at
+ * least one side has nothing unique.
+ */
+const char* zdedupe_results_overview(zdedupe_results* r);
+
+/**
+ * One page of duplicate groups.
+ *
+ * Query: { "offset": 0, "limit": 50, "sort": "savings"|"size"|"count",
+ *          "filters": {...}, "bulk": {...} | null }
+ * "limit" is clamped to 200. "bulk" is the select-all rule in force: the
+ * rows it covers come back marked, so a UI shows them selected without ever
+ * holding the selection as a list.
+ *
+ * Page: { "rows": [GroupRow], "total": N, "offset": 0 }, where a GroupRow is
+ * { "hash": "64 hex", "count": 3, "size": 1048576, "savings": 2097152,
+ *   "files": ["/oldest", ...], "mtimes": [ms, ...], "bulk": false }
+ *
+ * "count" and "savings" are over the copies that are still ALIVE (the
+ * removed overlay applied), "files" lists at most 50 of them oldest first -
+ * index 0 is the keeper - and "bulk" is (alive >= 2 && the rule matches).
+ * A group with fewer than two alive copies is not a row at all. Order:
+ * "savings" is the store's own order until something has been deleted and
+ * live savings after that; "size" and "count" descending. The sort is
+ * stable, so ties keep largest-savings-first.
+ */
+const char* zdedupe_results_groups(zdedupe_results* r, const char* query_json);
+
+/**
+ * What the select-all rule covers, as three numbers:
+ * { "groups": N, "files": M, "bytes": B } - every copy but the oldest of
+ * each matching group. This never sees the unticked list; subtract it in the
+ * UI. Takes a bare filters object.
+ */
+const char* zdedupe_results_bulk_summary(zdedupe_results* r, const char* filters_json);
+
+/** Snapshot of a running delete. */
+typedef struct {
+    bool running;
+    uint64_t done;
+    uint64_t total;
+} zdedupe_delete_progress;
+
+/**
+ * Host-provided Trash - the one piece the core cannot do, because there is
+ * no portable API for it (trash::delete_all on Linux/Rust,
+ * NSWorkspace.recycle on macOS).
+ *
+ * Called with a batch of at most 200 exact path bytes, each NUL-terminated.
+ * Return 0 when EVERY path went; any other value and the session retries the
+ * batch one path at a time, so a failure can be attributed to a file. On a
+ * single-path call, write a NUL-terminated reason into err_out (at most
+ * err_cap bytes) and it is reported against that path.
+ *
+ * It runs inside the delete that called it, so the only entry points it may
+ * use are zdedupe_results_delete_progress and zdedupe_results_cancel_delete.
+ */
+typedef int (*zdedupe_trash_fn)(void* user, const char* const* paths, size_t count,
+                                char* err_out, size_t err_cap);
+
+/**
+ * Delete duplicates: what a rule covers, plus what was ticked by hand.
+ * BLOCKS until done; poll zdedupe_results_delete_progress from another
+ * thread and stop it with zdedupe_results_cancel_delete.
+ *
+ * selection_json:
+ *   { "rule": { "filters": {...}, "excluded": ["/path", ...] } | null,
+ *     "extra": ["/hand/picked", ...] }
+ *
+ * use_trash = false deletes PERMANENTLY (unlink) and verifies by content;
+ * use_trash = true calls trash_fn (required, or the call fails) and verifies
+ * by metadata.
+ *
+ * NOTHING IS DELETED ON THE STRENGTH OF A STALE HASH. Results describe the
+ * disk as it was, which may be hours ago, and a rule deletes files nobody
+ * looked at one by one. Every target is lstat'ed on its exact bytes and must
+ * still be a REGULAR file (a symlink standing where a file was is not a
+ * copy) of the group's recorded size; then its modification time must match
+ * (Trash) or its content must re-hash to the group's hash (permanent). A
+ * group only loses copies while some file OUTSIDE the targets verifies
+ * first, so ticking every copy of a group - the easiest mistake to make -
+ * deletes none of them. Whatever fails is skipped and counted.
+ *
+ * Plan: for each group in the rule's order, the targets are every alive copy
+ * after the oldest alive one, minus "excluded"; hand-picks merge into the
+ * same group's targets before any judgement. A hand-picked path that is in
+ * no group of these results fails with "not a duplicate in the current
+ * results" and is never touched.
+ *
+ * Report: { "deleted": N, "freed_bytes": B, "skipped_changed": N,
+ *           "failed_count": N, "failed": [["/path","reason"], ...] (<= 20),
+ *           "cancelled": bool, "needs_rescan": bool }
+ *
+ * What went is recorded in the removed overlay and persisted, so the rows
+ * correct themselves without a rescan. Past 100,000 tracked paths the
+ * overlay overflows, clears, persists "overflowed": true, and needs_rescan
+ * stays true from then on, a reopen included: a bulk delete of a million
+ * files is cheaper to rescan than to remember.
+ *
+ * A second delete while one runs fails with "A delete is already running".
+ */
+const char* zdedupe_results_delete(zdedupe_results* r, const char* selection_json,
+                                   bool use_trash, zdedupe_trash_fn trash_fn, void* user);
+
+/**
+ * THREAD-SAFE, like zdedupe_get_progress: this and
+ * zdedupe_results_cancel_delete touch nothing but atomics, so a UI can poll
+ * from a timer. "total" is the whole plan and is set before anything is
+ * deleted; "done" advances per group.
+ */
+void zdedupe_results_delete_progress(const zdedupe_results* r, zdedupe_delete_progress* out);
+
+/**
+ * Ask the running delete to stop. It stops before the next group, so what
+ * was already deleted stays deleted and the report says "cancelled": true.
+ * A cancel asked for before a delete begins cancels that delete; afterwards
+ * the session is reusable (as with zdedupe_cancel).
+ */
+void zdedupe_results_cancel_delete(zdedupe_results* r);
+
+/**
+ * How much has been deleted since the results were scanned, and whether they
+ * can still be corrected in place: { "count": N, "needs_rescan": bool }.
+ *
+ * The overlay covers a path itself or any ancestor, so a deleted folder
+ * takes everything the results list inside it - and /a/old-backup is not
+ * under /a/old.
+ */
+const char* zdedupe_results_removed_status(zdedupe_results* r);
+
+/* --- Folders -------------------------------------------------------------
+ *
+ * Present only when the scan ran with zdedupe_set_analyze_dirs(ctx, true);
+ * without it the folder counts in the overview are zero and these page empty.
+ *
+ * Two kinds of finding. An IDENTICAL SET is a group of folders whose entire
+ * subtrees match - names, file content, symlink targets - and only the
+ * top-most folder of each copied tree is listed. An OVERLAP is a pair of
+ * folders sharing at least half of one side's files, which is what catches
+ * "this backup is last year's copy of that project, plus three files".
+ */
+
+/**
+ * One page of identical sets, largest reclaimable first.
+ *
+ * Query: { "offset": 0, "limit": 50, "filters": {...} } - no sort, because
+ * the store already holds them in that order; "limit" is clamped to 200. For
+ * a set, filters' "min_bytes" is the size of ONE copy.
+ *
+ * Page: { "rows": [SetRow], "total": N, "offset": 0 }, where a SetRow is
+ * { "index": 0, "digest": "64 hex", "count": 3, "common_parent": "/a",
+ *   "file_count": 261, "bytes": 2086912, "reclaimable": 4173824,
+ *   "dirs": [{ "path": "/a/proj", "newest_mtime": ms,
+ *              "skipped_entries": 0 }, ...] }
+ *
+ * "count" is the copies still ALIVE and "reclaimable" is bytes * (count - 1)
+ * over those - an upper bound, since copies that are hard links of one
+ * another take no extra space to begin with. A set with fewer than two alive
+ * copies is not a row. "dirs" carries at most 8 of them, because a set can
+ * have hundreds (879 in one real scan); the rest come from
+ * zdedupe_results_set_members, keyed by "index". "common_parent" is the
+ * deepest folder holding every alive copy. "skipped_entries" counts entries
+ * ignored on purpose beneath that folder (excludes, cache dirs, hidden files
+ * when off); surface a non-zero value next to any "identical" claim.
+ */
+const char* zdedupe_results_identical_sets(zdedupe_results* r, const char* query_json);
+
+/**
+ * Every alive member folder of one set, as a bare JSON array of the same
+ * objects a row's "dirs" holds. The one unpaged call in the API, and bounded
+ * by a single set. `index` is a SetRow's "index".
+ */
+const char* zdedupe_results_set_members(zdedupe_results* r, size_t index);
+
+/**
+ * One page of overlapping folder pairs, largest shared size first. Same query
+ * shape as the sets; for an overlap "min_bytes" is the SHARED size, and
+ * "redundant_only": true hides pairs where each side still has something
+ * unique - keeping only the ones where deleting a side loses nothing.
+ *
+ * Page: { "rows": [OverlapRow], "total": N, "offset": 0 }, where an
+ * OverlapRow is { "relation": ..., "a": SideRow, "b": SideRow } and a SideRow
+ * is { "path": "/backup/proj", "files": 258, "bytes": 2000000,
+ *      "newest_mtime": ms, "skipped_entries": 0, "complete": true,
+ *      "identical_copies": 1, "shared_files": 258, "shared_bytes": 2000000,
+ *      "only_count": 0, "only": [] }
+ *
+ * "relation" is one of:
+ *   "same_content"  both hold exactly the same content (names/layout differ)
+ *   "a_in_b"        every file in a also exists in b - a adds nothing
+ *   "b_in_a"        every file in b also exists in a - b adds nothing
+ *   "overlap"       each side has content the other lacks, OR the side that
+ *                   looks contained is not "complete"
+ *
+ * "only" lists the files whose content exists nowhere on the other side -
+ * what deleting that side would lose - sorted, at most 100, while
+ * "only_count" is exact. "complete": false means something beneath could not
+ * be read; such a folder is never in an identical set and never the contained
+ * side. "identical_copies" above 1 means that side is the first path of an
+ * identical set and the pair stands for every member of it, reported once
+ * rather than per copy. A pair with either side deleted is not a row: it says
+ * nothing once one of the two folders is gone.
+ */
+const char* zdedupe_results_overlaps(zdedupe_results* r, const char* query_json);
+
+/**
+ * Findings counted by where they are, what they are called, or what type they
+ * are - the "group by" of the UI, and what makes a whole-disk scan reviewable
+ * (one real scan: 13,370 identical sets, of which 602 held 96 of the 98 GB
+ * that could be reclaimed).
+ *
+ * Query: { "kind": "groups"|"sets"|"overlaps", "by": "location"|"name"|"type",
+ *          "filters": {...}, "limit": 50 } - "limit" clamped to 100.
+ *
+ * Page: { "base": "/home/u" | null, "facets": [{ "key": "/home/u/sdk",
+ *         "count": 2, "bytes": 1100 }, ...], "total": N }
+ *
+ * "key" is the value to put in filters' under / name / ext to select that
+ * facet, so a location facet drills down one level at a time: "base" is the
+ * folder being drilled into (filters.under, or the single scan root when
+ * nothing is chosen yet, else null) and the keys are its children. A finding
+ * contributes once to each DISTINCT facet it touches, however many of its
+ * members share that facet, so counts can add up to more than the total.
+ * Largest "bytes" first, then count, then key, so the same scan always lists
+ * its facets the same way. "total" is the distinct facets before the cut.
+ */
+const char* zdedupe_results_facets(zdedupe_results* r, const char* query_json);
+
+/**
+ * Remove whole folders. Blocks, with the same progress and cancellation as
+ * zdedupe_results_delete, and the same report shape.
+ *
+ * items_json: [{ "path": "/a/copy", "keepers": ["/a/orig"], "bytes": 0 }, ...]
+ * where "keepers" are folders holding the same content that are NOT being
+ * removed, and "bytes" is the size the UI showed, for "freed_bytes".
+ *
+ * use_trash = true moves each one with trash_fn (required). That is
+ * recoverable, so the selection rules in the UI are the safeguard and no
+ * comparison is made - but a symlink or a file is still refused, because
+ * removing "it" is not what the user picked.
+ *
+ * use_trash = false removes it FOR GOOD, and only after the folder has been
+ * compared with a surviving copy byte for byte, right then: the same relative
+ * paths, the same content, nothing extra on either side, hidden and empty
+ * files included. That comparison ignores the scan's size window entirely, so
+ * a folder can never pass for a copy of another because the file that differs
+ * was too small to have been scanned. A keeper that is itself in this list -
+ * or that contains, or sits inside, something in it - vouches for nothing.
+ * Refused outright: a relative path, "/" itself, a symlink, a file, a folder
+ * that cannot be read, and a folder with no keeper named.
+ *
+ * Whatever went is recorded in the removed overlay, and a removed folder
+ * covers everything the results list inside it, so the sets, overlaps, groups
+ * and facets all correct themselves without a rescan.
+ */
+const char* zdedupe_results_delete_folders(zdedupe_results* r, const char* items_json,
+                                           bool use_trash, zdedupe_trash_fn trash_fn, void* user);
+
+/**
+ * Write every alive group, in store order, to `path`. Streams group by
+ * group, so a scan with millions of duplicates never exists as one document
+ * in memory. The file is created 0600 and truncated.
+ *
+ * @param format "json", "csv" or "html"
+ * @return 0 on success, -1 on failure
+ *
+ * CSV carries the header
+ * "Group Hash,File Path,File Size (bytes),Group Savings (bytes),Modified"
+ * and one line per file. JSON is
+ * {report_type, generated_at, summary{...},
+ *  groups:[{hash,size,count,savings,files:[{path,mtime}]}]}, with the scan's
+ * own summary counters. HTML is a table banner-rowed by group. Timestamps
+ * here are ISO-8601 UTC strings, not milliseconds - these are documents for
+ * a person, not answers for a UI.
+ */
+int zdedupe_results_export(zdedupe_results* r, const char* format, const char* path);
+
 /* === Utilities === */
 
 /**
@@ -383,6 +790,13 @@ int zdedupe_hash_file(const char* path, bool use_sha256, uint8_t out[32]);
  * @return Version string (e.g., "0.1.0")
  */
 const char* zdedupe_version(void);
+
+/**
+ * The names zdedupe_use_credential_excludes skips, as a JSON array of
+ * strings, for a settings screen to show. Static; never freed. The list
+ * exists only here, so what the UI shows is what the engine does.
+ */
+const char* zdedupe_credential_excludes_json(void);
 
 #ifdef __cplusplus
 }
