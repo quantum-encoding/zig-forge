@@ -3,6 +3,9 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    // LLD links ELF (see the exe below for why it is wanted there); it cannot
+    // link Mach-O, so Apple targets use Zig's own linker.
+    const use_lld = !target.result.os.tag.isDarwin();
 
     // ============================================================
     // Core Module
@@ -42,7 +45,7 @@ pub fn build(b: *std.Build) void {
         .root_module = shared_module,
         .linkage = .dynamic,
         .use_llvm = true,
-        .use_lld = true,
+        .use_lld = use_lld,
     });
     shared_lib.root_module.link_libc = true;
     shared_lib.root_module.strip = optimize != .Debug;
@@ -73,7 +76,7 @@ pub fn build(b: *std.Build) void {
         .name = "zdedupe",
         .root_module = exe_module,
         .use_llvm = true,
-        .use_lld = true,
+        .use_lld = use_lld,
     });
     exe.root_module.link_libc = true;
     b.installArtifact(exe);
@@ -122,7 +125,7 @@ pub fn build(b: *std.Build) void {
         const mod_test = b.addTest(.{
             .root_module = test_mod,
             .use_llvm = true,
-            .use_lld = true,
+            .use_lld = use_lld,
         });
         mod_test.root_module.link_libc = true;
         test_step.dependOn(&b.addRunArtifact(mod_test).step);
