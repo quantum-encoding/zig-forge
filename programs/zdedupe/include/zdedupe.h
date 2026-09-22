@@ -191,6 +191,16 @@ void zdedupe_use_credential_excludes(zdedupe_ctx* ctx, bool use);
  */
 int zdedupe_add_exclude(zdedupe_ctx* ctx, const char* name);
 
+/**
+ * Never scan this absolute path: a folder is skipped with everything beneath
+ * it, a file just itself. For the user's own "do not look here" rules, beside
+ * zdedupe_add_exclude's names. A scan root is never skipped. Applies to
+ * duplicate scans.
+ *
+ * @return 0 on success, -1 if the path is empty or not absolute
+ */
+int zdedupe_add_exclude_path(zdedupe_ctx* ctx, const char* path);
+
 /* === Progress & cancellation === */
 
 /**

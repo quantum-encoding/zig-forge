@@ -272,6 +272,12 @@ const Worker = struct {
         // The checks that need the directory itself happen here, in whichever
         // worker picked it up; what they find is reported to the parent's
         // record by path (see ParentMark). Scan roots have no parent record.
+        if (w.exclude_paths.len > 0 and !w.isRoot(dir_path) and w.isExcludedPath(dir_path)) {
+            self.stats.excluded += 1;
+            try self.markParent(dir_path, .skipped);
+            return;
+        }
+
         if (w.exclude_cache_dirs and !w.isRoot(dir_path) and self.isCacheDir(dir_path)) {
             self.stats.excluded += 1;
             try self.markParent(dir_path, .skipped);
@@ -370,6 +376,11 @@ const Worker = struct {
             switch (kind) {
                 DT_REG => {
                     const path = try self.join(dir_path, name);
+                    if (w.exclude_paths.len > 0 and w.isExcludedPath(path)) {
+                        self.stats.excluded += 1;
+                        record.skipped += 1;
+                        continue;
+                    }
                     if (try self.addFile(path, &known.?)) found_here += 1;
                 },
                 DT_DIR => try self.shared.push(try self.join(dir_path, name)),
@@ -521,6 +532,8 @@ pub const FastWalker = struct {
     track_hardlinks: bool = true,
     /// Entry basenames to prune (borrowed).
     excludes: []const []const u8 = &.{},
+    /// Absolute paths to prune, without a trailing slash (borrowed).
+    exclude_paths: []const []const u8 = &.{},
     /// Prune directories holding a valid CACHEDIR.TAG.
     exclude_cache_dirs: bool = false,
     /// Do not enter a directory whose device is not one of the roots'.
@@ -606,6 +619,17 @@ pub const FastWalker = struct {
     /// Prune directories that carry a valid CACHEDIR.TAG.
     pub fn setExcludeCacheDirs(self: *FastWalker, exclude: bool) void {
         self.exclude_cache_dirs = exclude;
+    }
+
+    pub fn setExcludePaths(self: *FastWalker, paths: []const []const u8) void {
+        self.exclude_paths = paths;
+    }
+
+    fn isExcludedPath(self: *const FastWalker, path: []const u8) bool {
+        for (self.exclude_paths) |p| {
+            if (std.mem.eql(u8, p, path)) return true;
+        }
+        return false;
     }
 
     pub fn setOneFilesystem(self: *FastWalker, one: bool) void {
@@ -993,4 +1017,27 @@ test "another app's library package is skipped by its extension" {
     try fw.finish();
     try std.testing.expectEqual(@as(usize, 1), fw.files.items.len);
     try std.testing.expectEqual(@as(u64, 1), fw.stats.excluded);
+}
+
+test "an excluded path skips that folder with its contents, or that one file" {
+    const Scratch = @import("testing_scratch.zig").Scratch;
+    var scratch = try Scratch.init(std.testing.allocator, "exclpath");
+    defer scratch.deinit();
+    try scratch.makeDir("private");
+    try scratch.makeDir("private/deep");
+    try scratch.writeFile("private/deep/a.txt", "x");
+    try scratch.writeFile("skip-me.txt", "x");
+    try scratch.writeFile("kept.txt", "x");
+    const folder = try scratch.join("private");
+    defer std.testing.allocator.free(folder);
+    const file = try scratch.join("skip-me.txt");
+    defer std.testing.allocator.free(file);
+
+    var fw = FastWalker.init(std.testing.allocator);
+    defer fw.deinit();
+    fw.setExcludePaths(&.{ folder, file });
+    try fw.walk(scratch.path);
+    try fw.finish();
+    try std.testing.expectEqual(@as(usize, 1), fw.files.items.len);
+    try std.testing.expectEqual(@as(u64, 2), fw.stats.excluded);
 }

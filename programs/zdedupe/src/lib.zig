@@ -66,6 +66,7 @@ const InternalContext = struct {
     result_json: ?[:0]u8,
     /// Owned copies of the names passed to zdedupe_add_exclude.
     user_excludes: std.ArrayListUnmanaged([]const u8),
+    exclude_paths: std.ArrayListUnmanaged([]const u8),
     use_default_excludes: bool,
     use_credential_excludes: bool,
     /// Progress out / cancellation in. Lives in the context so its address is
@@ -83,6 +84,7 @@ const InternalContext = struct {
             .mode = .find_duplicates,
             .result_json = null,
             .user_excludes = .empty,
+            .exclude_paths = .empty,
             .use_default_excludes = false,
             .use_credential_excludes = false,
             .monitor = .{},
@@ -97,6 +99,8 @@ const InternalContext = struct {
         if (self.result_json) |j| alloc.free(j);
         for (self.user_excludes.items) |name| alloc.free(name);
         self.user_excludes.deinit(alloc);
+        for (self.exclude_paths.items) |p| alloc.free(p);
+        self.exclude_paths.deinit(alloc);
         // Free the context using libc allocator
         libc_alloc.destroy(self);
     }
@@ -229,6 +233,25 @@ pub export fn zdedupe_add_exclude(ctx: ?*ZDedupeContext, name: [*:0]const u8) c_
 
     const owned = alloc.dupe(u8, span) catch return -1;
     internal.user_excludes.append(alloc, owned) catch {
+        alloc.free(owned);
+        return -1;
+    };
+    return 0;
+}
+
+pub export fn zdedupe_add_exclude_path(ctx: ?*ZDedupeContext, path: [*:0]const u8) c_int {
+    const c = ctx orelse return -1;
+    const internal: *InternalContext = @ptrCast(@alignCast(c));
+    const alloc = std.heap.c_allocator;
+
+    // Matched against the walk's absolute paths, which carry no trailing
+    // slash; a relative path could never match.
+    var span: []const u8 = std.mem.span(path);
+    while (span.len > 1 and span[span.len - 1] == '/') span = span[0 .. span.len - 1];
+    if (span.len < 2 or span[0] != '/') return -1;
+
+    const owned = alloc.dupe(u8, span) catch return -1;
+    internal.exclude_paths.append(alloc, owned) catch {
         alloc.free(owned);
         return -1;
     };
@@ -381,6 +404,7 @@ fn runDuplicateScan(
 
     var config = internal.config;
     config.excludes = excludes.items;
+    config.exclude_paths = internal.exclude_paths.items;
     config.exclude_cache_dirs = internal.use_default_excludes;
     config.monitor = monitor;
 

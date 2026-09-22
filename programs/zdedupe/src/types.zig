@@ -169,6 +169,9 @@ pub const Config = struct {
     /// and is counted so reports can say what was ignored. Scan roots are
     /// never pruned: the user named them explicitly.
     excludes: []const []const u8 = &.{},
+    /// Absolute paths not to scan: a folder here is skipped with everything
+    /// beneath it, a file just itself. Roots are never skipped.
+    exclude_paths: []const []const u8 = &.{},
     /// Prune any directory carrying a valid CACHEDIR.TAG (bford.info/cachedir),
     /// e.g. cargo's `target/`. Safer than excluding a generic name like
     /// "target" or "build", which could just as well hold user data.
