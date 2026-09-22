@@ -32,6 +32,11 @@
 //! the app's tests use to anchor this writer. Readers must bounds-check every
 //! offset: the file lives on disk and can be truncated or replaced.
 //!
+//! `Reader` is this file's own reader, over bytes the caller has mapped (see
+//! `session.zig`). It validates the header and the whole section table up
+//! front and bounds-checks every record and string reference, so a truncated
+//! or corrupted store yields an error rather than a trap or a wild read.
+//!
 //! The file is written to `<path>.partial` and renamed into place, so a reader
 //! never sees a half-written store.
 
@@ -498,11 +503,215 @@ const FileWriter = struct {
 };
 
 // ============================================================================
+// Reading
+// ============================================================================
+
+/// Bytes of one record section, per section. STRINGS counts bytes, so its
+/// record is one byte; everything else is derived from the layout above rather
+/// than restated as a number.
+pub fn recordSize(id: SectionId) usize {
+    return switch (id) {
+        .groups => @sizeOf(Group),
+        .group_files => @sizeOf(GroupFile),
+        .sets => @sizeOf(Set),
+        .set_dirs => @sizeOf(SetDir),
+        .overlaps => @sizeOf(Overlap),
+        .only_paths => @sizeOf(OnlyPath),
+        .strings => 1,
+    };
+}
+
+pub const ReadError = error{
+    /// Not a store, from another format version, or its internal offsets do
+    /// not fit inside it.
+    Invalid,
+    /// A record index or string reference points outside its section.
+    OutOfRange,
+};
+
+/// One file of a duplicate group. `path` borrows the mapped bytes.
+pub const FileRef = struct {
+    path: []const u8,
+    /// Modification time, seconds since the epoch.
+    mtime: i64,
+};
+
+/// A read-only view over a mapped store. Holds no allocations: every accessor
+/// returns values, or slices borrowed from `bytes`.
+pub const Reader = struct {
+    bytes: []const u8,
+    header: Header,
+
+    /// Why a file was rejected, for the message a host shows. Set alongside
+    /// `error.Invalid`; `init` is the only producer.
+    pub const Rejection = enum {
+        shorter_than_a_header,
+        not_a_zdedupe_result_store,
+        unsupported_format_version,
+        unexpected_header_size,
+        file_size_disagrees_with_the_header,
+        a_section_lies_outside_the_file,
+
+        pub fn message(self: Rejection) []const u8 {
+            return switch (self) {
+                .shorter_than_a_header => "shorter than a header",
+                .not_a_zdedupe_result_store => "not a zdedupe result store",
+                .unsupported_format_version => "unsupported format version",
+                .unexpected_header_size => "unexpected header size",
+                .file_size_disagrees_with_the_header => "file size does not match its header (truncated?)",
+                .a_section_lies_outside_the_file => "section lies outside the file",
+            };
+        }
+    };
+
+    /// Validate `bytes` as a store. `why`, when given, receives the reason for
+    /// an `error.Invalid`.
+    pub fn init(bytes: []const u8, why: ?*Rejection) ReadError!Reader {
+        const reject = struct {
+            fn set(out: ?*Rejection, reason: Rejection) ReadError {
+                if (out) |o| o.* = reason;
+                return error.Invalid;
+            }
+        }.set;
+
+        if (bytes.len < header_size) return reject(why, .shorter_than_a_header);
+        const header = std.mem.bytesToValue(Header, bytes[0..header_size]);
+        if (!std.mem.eql(u8, &header.magic, &magic)) return reject(why, .not_a_zdedupe_result_store);
+        if (header.version != format_version) return reject(why, .unsupported_format_version);
+        if (header.header_size != header_size) return reject(why, .unexpected_header_size);
+        if (header.file_size != bytes.len) return reject(why, .file_size_disagrees_with_the_header);
+
+        // Every section must lie wholly inside the file, with no arithmetic
+        // wrapping into range, before a single record is read.
+        for (header.sections, 0..) |section, i| {
+            const id: SectionId = @enumFromInt(i);
+            const offset = std.math.cast(usize, section.offset) orelse
+                return reject(why, .a_section_lies_outside_the_file);
+            const records = std.math.cast(usize, section.count) orelse
+                return reject(why, .a_section_lies_outside_the_file);
+            const byte_len = std.math.mul(usize, records, recordSize(id)) catch
+                return reject(why, .a_section_lies_outside_the_file);
+            const end = std.math.add(usize, offset, byte_len) catch
+                return reject(why, .a_section_lies_outside_the_file);
+            if (offset < header_size or offset % 8 != 0 or end > bytes.len) {
+                return reject(why, .a_section_lies_outside_the_file);
+            }
+        }
+        return .{ .bytes = bytes, .header = header };
+    }
+
+    pub fn count(self: *const Reader, id: SectionId) usize {
+        // Fits: `init` cast it to usize.
+        return @intCast(self.header.sections[@intFromEnum(id)].count);
+    }
+
+    pub fn groupCount(self: *const Reader) usize {
+        return self.count(.groups);
+    }
+
+    pub fn setCount(self: *const Reader) usize {
+        return self.count(.sets);
+    }
+
+    pub fn overlapCount(self: *const Reader) usize {
+        return self.count(.overlaps);
+    }
+
+    pub fn hasDirectories(self: *const Reader) bool {
+        return self.header.flags & flag_has_directories != 0;
+    }
+
+    pub fn isSha256(self: *const Reader) bool {
+        return self.header.flags & flag_sha256 != 0;
+    }
+
+    /// The bytes of record `i` in section `id`.
+    fn record(self: *const Reader, id: SectionId, i: usize) ReadError![]const u8 {
+        if (i >= self.count(id)) return error.OutOfRange;
+        const size = recordSize(id);
+        // In range by construction: `init` verified offset + count * size.
+        const start: usize = @intCast(self.header.sections[@intFromEnum(id)].offset + i * size);
+        return self.bytes[start .. start + size];
+    }
+
+    fn string(self: *const Reader, offset: u64, path_len: u32) ReadError![]const u8 {
+        const section = self.header.sections[@intFromEnum(SectionId.strings)];
+        const start = std.math.cast(usize, offset) orelse return error.OutOfRange;
+        const end = std.math.add(usize, start, path_len) catch return error.OutOfRange;
+        if (end > section.count) return error.OutOfRange;
+        const base: usize = @intCast(section.offset);
+        return self.bytes[base + start .. base + end];
+    }
+
+    /// A run of `run_count` records starting at `first` must fit in `id`.
+    fn checkRun(self: *const Reader, id: SectionId, first: u64, run_count: u32) ReadError!void {
+        const start = std.math.cast(usize, first) orelse return error.OutOfRange;
+        const end = std.math.add(usize, start, run_count) catch return error.OutOfRange;
+        if (end > self.count(id)) return error.OutOfRange;
+    }
+
+    pub fn group(self: *const Reader, i: usize) ReadError!Group {
+        const g = std.mem.bytesToValue(Group, (try self.record(.groups, i))[0..@sizeOf(Group)]);
+        try self.checkRun(.group_files, g.first_file, g.file_count);
+        return g;
+    }
+
+    /// File `i` (0-based within the group) of `g`.
+    pub fn groupFile(self: *const Reader, g: *const Group, i: usize) ReadError!FileRef {
+        if (i >= g.file_count) return error.OutOfRange;
+        const bytes = try self.record(.group_files, @as(usize, @intCast(g.first_file)) + i);
+        const r = std.mem.bytesToValue(GroupFile, bytes[0..@sizeOf(GroupFile)]);
+        return .{ .path = try self.string(r.path_offset, r.path_len), .mtime = r.mtime };
+    }
+
+    /// Savings over every copy the scan recorded. Live savings, once anything
+    /// has been deleted, are the session's business (see `session.zig`).
+    pub fn groupSavings(g: *const Group) u64 {
+        return g.size *| (@as(u64, g.file_count) -| 1);
+    }
+
+    pub fn set(self: *const Reader, i: usize) ReadError!Set {
+        const s = std.mem.bytesToValue(Set, (try self.record(.sets, i))[0..@sizeOf(Set)]);
+        try self.checkRun(.set_dirs, s.first_dir, s.dir_count);
+        return s;
+    }
+
+    pub fn setDir(self: *const Reader, s: *const Set, i: usize) ReadError!FileRef {
+        if (i >= s.dir_count) return error.OutOfRange;
+        const bytes = try self.record(.set_dirs, @as(usize, @intCast(s.first_dir)) + i);
+        const r = std.mem.bytesToValue(SetDir, bytes[0..@sizeOf(SetDir)]);
+        return .{ .path = try self.string(r.path_offset, r.path_len), .mtime = r.newest_mtime };
+    }
+
+    pub fn overlap(self: *const Reader, i: usize) ReadError!Overlap {
+        const bytes = try self.record(.overlaps, i);
+        const o = std.mem.bytesToValue(Overlap, bytes[0..@sizeOf(Overlap)]);
+        if (o.relation > @intFromEnum(Relation.overlap)) return error.Invalid;
+        // The side paths and only-path runs are what a caller reads next.
+        _ = try self.string(o.a.path_offset, o.a.path_len);
+        _ = try self.string(o.b.path_offset, o.b.path_len);
+        try self.checkRun(.only_paths, o.a.first_only, o.a.only_listed);
+        try self.checkRun(.only_paths, o.b.first_only, o.b.only_listed);
+        return o;
+    }
+
+    /// "Exists only on this side" path `i` of `side`.
+    pub fn onlyPath(self: *const Reader, side: *const Side, i: usize) ReadError![]const u8 {
+        if (i >= side.only_listed) return error.OutOfRange;
+        const bytes = try self.record(.only_paths, @as(usize, @intCast(side.first_only)) + i);
+        const r = std.mem.bytesToValue(OnlyPath, bytes[0..@sizeOf(OnlyPath)]);
+        return self.string(r.path_offset, r.path_len);
+    }
+};
+
+// ============================================================================
 // Tests
 // ============================================================================
 //
-// Layout only. Round-tripping a real scan through the file — and checking it
-// against the JSON report of the same scan — lives in tier1_anchors.zig.
+// Layout and reader validation only, the latter on hand-built buffers. Round-
+// tripping a real scan through the file — and checking it against the JSON
+// report of the same scan — lives in tier1_anchors.zig; reading one back
+// through the results session lives in session.zig.
 
 test "record layouts are the sizes the format documents" {
     try std.testing.expectEqual(@as(usize, 256), @sizeOf(Header));
@@ -527,4 +736,119 @@ test "StringCursor hands out running offsets" {
     try std.testing.expectEqual(@as(u64, 3), b.offset);
     try std.testing.expectEqual(@as(u64, 3), c.offset);
     try std.testing.expectEqual(@as(u64, 8), cursor.next);
+}
+
+/// A header-only store: every section empty and placed at the header's end.
+fn emptyStore(gpa: std.mem.Allocator) ![]u8 {
+    const header: Header = .{
+        .file_size = header_size,
+        .sections = @splat(.{ .offset = header_size, .count = 0 }),
+    };
+    return gpa.dupe(u8, std.mem.asBytes(&header));
+}
+
+test "the reader accepts a minimal store and refuses a row it does not have" {
+    const gpa = std.testing.allocator;
+    const bytes = try emptyStore(gpa);
+    defer gpa.free(bytes);
+
+    const reader = try Reader.init(bytes, null);
+    try std.testing.expectEqual(@as(usize, 0), reader.groupCount());
+    try std.testing.expectEqual(@as(usize, 0), reader.setCount());
+    try std.testing.expectError(error.OutOfRange, reader.group(0));
+}
+
+test "the reader refuses a wrong magic, version or length" {
+    const gpa = std.testing.allocator;
+
+    {
+        const bytes = try emptyStore(gpa);
+        defer gpa.free(bytes);
+        bytes[0] = 'X';
+        var why: Reader.Rejection = undefined;
+        try std.testing.expectError(error.Invalid, Reader.init(bytes, &why));
+        try std.testing.expectEqual(Reader.Rejection.not_a_zdedupe_result_store, why);
+    }
+    {
+        const bytes = try emptyStore(gpa);
+        defer gpa.free(bytes);
+        bytes[8] = 9;
+        var why: Reader.Rejection = undefined;
+        try std.testing.expectError(error.Invalid, Reader.init(bytes, &why));
+        try std.testing.expectEqual(Reader.Rejection.unsupported_format_version, why);
+    }
+    {
+        // Longer than the header claims: the file was replaced or extended.
+        const short = try emptyStore(gpa);
+        defer gpa.free(short);
+        const bytes = try std.mem.concat(gpa, u8, &.{ short, &[_]u8{0} ** 64 });
+        defer gpa.free(bytes);
+        var why: Reader.Rejection = undefined;
+        try std.testing.expectError(error.Invalid, Reader.init(bytes, &why));
+        try std.testing.expectEqual(Reader.Rejection.file_size_disagrees_with_the_header, why);
+    }
+    {
+        var why: Reader.Rejection = undefined;
+        try std.testing.expectError(error.Invalid, Reader.init(&[_]u8{0} ** 10, &why));
+        try std.testing.expectEqual(Reader.Rejection.shorter_than_a_header, why);
+    }
+}
+
+test "the reader refuses a section that runs past the file" {
+    const gpa = std.testing.allocator;
+
+    // A million groups in a header-only file.
+    {
+        const bytes = try emptyStore(gpa);
+        defer gpa.free(bytes);
+        var header = std.mem.bytesToValue(Header, bytes[0..header_size]);
+        header.sections[@intFromEnum(SectionId.groups)].count = 1_000_000;
+        @memcpy(bytes, std.mem.asBytes(&header));
+        var why: Reader.Rejection = undefined;
+        try std.testing.expectError(error.Invalid, Reader.init(bytes, &why));
+        try std.testing.expectEqual(Reader.Rejection.a_section_lies_outside_the_file, why);
+    }
+    // A count whose byte size overflows usize must not wrap into range.
+    {
+        const bytes = try emptyStore(gpa);
+        defer gpa.free(bytes);
+        var header = std.mem.bytesToValue(Header, bytes[0..header_size]);
+        header.sections[@intFromEnum(SectionId.groups)].count = std.math.maxInt(u64);
+        @memcpy(bytes, std.mem.asBytes(&header));
+        try std.testing.expectError(error.Invalid, Reader.init(bytes, null));
+    }
+}
+
+test "a group pointing outside its files is an error, not a trap" {
+    const gpa = std.testing.allocator;
+
+    // One structurally valid group record claiming five files, with an empty
+    // GROUP_FILES section behind it.
+    const group: Group = .{ .hash = @splat(0), .size = 10, .first_file = 0, .file_count = 5 };
+    const header_only = try emptyStore(gpa);
+    defer gpa.free(header_only);
+    const bytes = try std.mem.concat(gpa, u8, &.{ header_only, std.mem.asBytes(&group) });
+    defer gpa.free(bytes);
+
+    var header = std.mem.bytesToValue(Header, bytes[0..header_size]);
+    header.file_size = bytes.len;
+    header.sections[@intFromEnum(SectionId.groups)] = .{ .offset = header_size, .count = 1 };
+    // Every other section starts after the group record, still empty.
+    for (header.sections[1..]) |*section| section.* = .{ .offset = bytes.len, .count = 0 };
+    @memcpy(bytes[0..header_size], std.mem.asBytes(&header));
+
+    const reader = try Reader.init(bytes, null);
+    try std.testing.expectEqual(@as(usize, 1), reader.groupCount());
+    try std.testing.expectError(error.OutOfRange, reader.group(0));
+}
+
+test "savings is the size of every copy but one, and cannot overflow" {
+    const one: Group = .{ .hash = @splat(0), .size = 1024, .first_file = 0, .file_count = 1 };
+    try std.testing.expectEqual(@as(u64, 0), Reader.groupSavings(&one));
+
+    const three: Group = .{ .hash = @splat(0), .size = 1024, .first_file = 0, .file_count = 3 };
+    try std.testing.expectEqual(@as(u64, 2048), Reader.groupSavings(&three));
+
+    const absurd: Group = .{ .hash = @splat(0), .size = std.math.maxInt(u64), .first_file = 0, .file_count = 9 };
+    try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), Reader.groupSavings(&absurd));
 }
