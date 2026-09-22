@@ -67,6 +67,11 @@ pub const max_reported_failures: usize = 20;
 /// session retries the batch one path at a time so a failure can be attributed
 /// to a file. `err_out` receives a NUL-terminated message for a single-path
 /// failure.
+///
+/// It runs inside the delete that called it, so the only session entry points
+/// it may use are the two that touch nothing but atomics: `deleteProgress` and
+/// `cancelDelete`. A nested `delete` is refused rather than allowed to disturb
+/// the one in flight.
 pub const TrashFn = *const fn (
     user: ?*anyopaque,
     paths: [*]const [*:0]const u8,
@@ -781,6 +786,22 @@ pub const Session = struct {
         trash_fn: ?TrashFn,
         user: ?*anyopaque,
     ) ?[:0]const u8 {
+        // Claimed before anything else, because `beginCall` frees the arena the
+        // delete in flight is working out of. Only this refusal is safe to
+        // reach from inside a running delete — a Trash callback that calls
+        // anything else on the session pulls the ground out from under it.
+        if (self.del.running.swap(true, .acq_rel)) {
+            self.fail("A delete is already running", .{});
+            return null;
+        }
+        defer self.del.running.store(false, .release);
+        // Whatever happens, the next delete on this session starts uncancelled;
+        // a cancel asked for before this one began still counts, as it does for
+        // a scan (`zdedupe_cancel`).
+        defer self.del.cancel.store(false, .release);
+        self.del.done.store(0, .release);
+        self.del.total.store(0, .release);
+
         const arena = self.beginCall();
         const selection = std.json.parseFromSliceLeaky(Selection, arena, selection_json, .{
             .ignore_unknown_fields = true,
@@ -793,21 +814,10 @@ pub const Session = struct {
             return null;
         }
 
-        // The order is computed before the running flag is taken, so a failure
-        // here does not leave a delete looking live.
         const order: ?[]const u32 = if (selection.rule) |rule|
             self.cachedGroupOrder(.savings, rule.filters) catch |err| return self.callFailed(err)
         else
             null;
-
-        if (self.del.running.swap(true, .acq_rel)) {
-            self.fail("A delete is already running", .{});
-            return null;
-        }
-        defer self.del.running.store(false, .release);
-        self.del.cancel.store(false, .release);
-        self.del.done.store(0, .release);
-        self.del.total.store(0, .release);
 
         var report: Report = .{};
         self.runDelete(arena, &report, selection, order, use_trash, trash_fn, user) catch |err|
