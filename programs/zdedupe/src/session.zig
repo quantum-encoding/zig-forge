@@ -940,7 +940,7 @@ pub const Session = struct {
                     batch.clearRetainingCapacity();
                 }
             }
-            self.del.done.store(self.del.done.load(.acquire) +| entry.targets.len, .release);
+            _ = self.del.done.fetchAdd(entry.targets.len, .release);
         }
         self.removeBatch(arena, batch.items, use_trash, trash_fn, user, report);
     }
@@ -1140,6 +1140,12 @@ pub const Session = struct {
         return true;
     }
 
+    /// The three documents are written by hand rather than through
+    /// `std.json.Stringify`, so a group can be emitted and forgotten instead
+    /// of held. Everything interpolated is therefore either a fixed-alphabet
+    /// token (hex digest, ISO timestamp, integer) or goes through
+    /// `encodeJsonString` / `writeCsvField` / `writeEscapedHtml` — a path is
+    /// never written raw into any of them.
     fn writeExport(self: *Session, format: Format, writer: *std.Io.Writer) !void {
         const arena = self.arena.allocator();
         const header = &self.reader.header;
@@ -1328,6 +1334,9 @@ fn stillACopy(path: []const u8, size: u64, mtime: i64, hash: *const [32]u8, veri
         .content => |c| blk: {
             const file_hasher = hasher.FileHasher.init(if (c.sha256) .sha256 else .blake3);
             const digest = file_hasher.hashFile(path) catch break :blk false;
+            // zig-lens-ignore: EQL-FOR-SECRETS content digest of the user's own
+            // file against the scan's record of it — nothing is authenticated
+            // here and there is no attacker to leak a timing signal to.
             break :blk std.mem.eql(u8, &digest, hash);
         },
     };

@@ -880,11 +880,10 @@ test "an overflowed overlay asks for a rescan, through the session and after reo
         var s = try fixture.open(null);
         defer s.close();
 
-        var flood: std.ArrayListUnmanaged([]const u8) = .empty;
-        for (0..removed_mod.max_tracked + 1) |i| {
-            try flood.append(a, try std.fmt.allocPrint(a, "/f/{d}", .{i}));
-        }
-        try testing.expect(!s.removed.record(flood.items));
+        // The cap itself is exercised at full size in removed.zig; what
+        // matters here is that the session reports an overflowed overlay.
+        s.removed.cap = 2;
+        try testing.expect(!s.removed.record(&.{ "/f/0", "/f/1", "/f/2" }));
 
         const status = try parse(a, s.removedStatus());
         try testing.expectEqual(@as(i64, 0), int(status, "count"));

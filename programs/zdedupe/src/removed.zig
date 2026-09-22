@@ -35,6 +35,9 @@ pub const Removed = struct {
     overflowed: bool = false,
     /// Where the overlay is persisted; null until `attach`.
     sidecar: ?[:0]u8 = null,
+    /// How many paths this overlay will hold. Only a test lowers it, to reach
+    /// the boundary without allocating its way there.
+    cap: usize = max_tracked,
 
     pub fn init(gpa: std.mem.Allocator) Removed {
         return .{ .gpa = gpa };
@@ -142,7 +145,7 @@ pub const Removed = struct {
     pub fn record(self: *Removed, deleted: []const []const u8) bool {
         for (deleted) |path| {
             if (self.overflowed) break;
-            if (self.paths.count() >= max_tracked) {
+            if (self.paths.count() >= self.cap) {
                 self.overflowed = true;
                 self.clearPaths();
                 break;
@@ -388,25 +391,48 @@ test "too much to track asks for a rescan instead, and says so after a restart" 
     const store_file = try scratch.join("last.zds");
     defer gpa.free(store_file);
 
-    var flood: std.ArrayListUnmanaged([]const u8) = .empty;
-    defer {
-        for (flood.items) |p| gpa.free(p);
-        flood.deinit(gpa);
-    }
-    for (0..max_tracked + 1) |i| {
-        try flood.append(gpa, try std.fmt.allocPrint(gpa, "/f/{d}", .{i}));
-    }
-
     var first: Removed = .init(gpa);
+    first.cap = 4;
     try first.attach(store_file, true);
-    // Past the cap the results can no longer be corrected in place.
-    try testing.expect(!first.record(flood.items));
+    // Up to the cap the overlay still describes what went.
+    try testing.expect(first.record(&.{ "/f/0", "/f/1", "/f/2", "/f/3" }));
+    try testing.expectEqual(@as(usize, 4), first.len());
+    // One past it, and the results can no longer be corrected in place: the
+    // set is dropped rather than half-kept.
+    try testing.expect(!first.record(&.{"/f/4"}));
     try testing.expect(first.isEmpty());
     try testing.expect(first.needsRescan());
+    try testing.expect(!first.covers("/f/0"));
     first.deinit();
 
     var reopened: Removed = .init(gpa);
     defer reopened.deinit();
     try reopened.attach(store_file, false);
+    // The restart must still ask for a rescan rather than resurrect the lot.
     try testing.expect(reopened.needsRescan());
+    try testing.expect(reopened.isEmpty());
+}
+
+test "the shipped cap is a hundred thousand paths, and holds at that size" {
+    // The real cap, over an arena: 100k tracked paths is the size this has to
+    // work at, and the test allocator's per-allocation bookkeeping turns that
+    // into a minute of nothing.
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+
+    try testing.expectEqual(@as(usize, 100_000), max_tracked);
+
+    var removed: Removed = .init(gpa);
+    var flood: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (0..max_tracked) |i| {
+        try flood.append(gpa, try std.fmt.allocPrint(gpa, "/f/{d}", .{i}));
+    }
+    try testing.expect(removed.record(flood.items));
+    try testing.expectEqual(max_tracked, removed.len());
+    try testing.expect(!removed.needsRescan());
+    try testing.expect(removed.covers("/f/99999/inside"));
+
+    try testing.expect(!removed.record(&.{"/one/too/many"}));
+    try testing.expect(removed.needsRescan());
 }

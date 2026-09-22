@@ -28,6 +28,12 @@ pub fn build(b: *std.Build) void {
     });
     static_lib.root_module.link_libc = true;
     static_lib.root_module.strip = optimize != .Debug;
+    // The results session parses its queries with std.json, whose integer
+    // path falls back to f128 (`sliceToInt`), and f128 arithmetic is
+    // compiler_rt (__divtf3, __fixtfti, roundq, ...). Nothing in a host's
+    // toolchain provides those, so without this the archive links under
+    // `zig build` and fails under Xcode's ld and Rust's linker alike.
+    static_lib.bundle_compiler_rt = true;
     b.installArtifact(static_lib);
 
     // ============================================================
