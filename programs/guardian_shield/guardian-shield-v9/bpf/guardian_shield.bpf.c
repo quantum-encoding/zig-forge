@@ -143,6 +143,7 @@ enum event_type {
     EV_CAPABILITY = 23,
     EV_MOUNT = 24,
     EV_BPF = 25,       // bpf() syscall blocked (anti-tamper, hardening mode)
+    EV_PRIV_SOCKET = 26, // agent/tainted connect() to a privileged daemon socket
 };
 
 struct violation_event {
@@ -340,6 +341,19 @@ struct {
     __type(value, __u8);
     __uint(max_entries, 512);
 } trusted_inodes SEC(".maps");
+
+// Unix sockets of daemons that will act as root ON REQUEST. The filesystem
+// hooks tag process SUBTREES, so any capability reachable by asking a process
+// OUTSIDE that subtree is outside the model: an agent that cannot unlink a file
+// can ask dockerd (root, untagged) to do it inside a container with the host
+// bind-mounted, and every hook correctly sees an untagged kernel worker. Keyed
+// by the socket's reconstructed path.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, __u8[MAX_PATH_LEN]);
+    __type(value, __u8);
+    __uint(max_entries, 64);
+} privileged_sockets SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
@@ -1463,6 +1477,57 @@ static __always_inline bool v6_is_local(const __u8 *a)
 // verdict is independent of network reachability. Normal/trusted/untainted
 // processes are unaffected (the user's browser/curl keep working). AF_UNIX and
 // other local families are ignored.
+// Deny agent/tainted subtrees a connection to a privileged daemon's socket.
+//
+// This closes delegation, which no filesystem hook can: the daemon performs the
+// operation as root from its own untagged subtree, so the work is genuinely not
+// the agent's by the time any path hook sees it. The boundary has to be drawn
+// where the REQUEST is made.
+//
+// Scoped to the configured socket list, so ordinary unix-socket IPC (the X
+// server, the session bus, the shield's own tooling) is untouched.
+SEC("lsm/unix_stream_connect")
+int BPF_PROG(gs_unix_connect, struct sock *sock, struct sock *other, struct sock *newsk)
+{
+    struct gs_config *cfg = get_config();
+    if (!cfg || !cfg->ready)
+        return 0;
+
+    __u8 tag = current_tag();
+    bool restricted = cfg->hardening_mode ? (tag != TAG_TRUSTED)
+                                          : (tag == TAG_AGENT || tag == TAG_TAINTED);
+    if (!restricted)
+        return 0;
+
+    // The peer's bound path lives on the unix_sock, so the existing
+    // mount-correct reconstruction applies unchanged.
+    struct unix_sock *u = (struct unix_sock *)other;
+    struct dentry *d = BPF_CORE_READ(u, path.dentry);
+    struct vfsmount *mnt = BPF_CORE_READ(u, path.mnt);
+    if (!d || !mnt)
+        return 0;                       // abstract socket (no path) - not ours
+
+    struct recon_buf *buf = 0;
+    __u32 len = reconstruct_path(d, mnt, &buf, RECON_SLOT_SRC);
+    if (!buf || len == 0)
+        return 0;
+
+    __u8 key[MAX_PATH_LEN];
+    __builtin_memset(key, 0, sizeof(key));
+    __u32 clen = len < MAX_PATH_LEN ? len : MAX_PATH_LEN - 1;
+    bpf_probe_read_kernel(key, clen, buf->data);
+    if (!bpf_map_lookup_elem(&privileged_sockets, key))
+        return 0;
+
+    __u8 enforced = cfg->log_only ? 0 : 1;
+    log_violation(EV_PRIV_SOCKET, tag, enforced, buf->data, len, 0, 0, 0, 0);
+    bump(STAT_MEM_BLOCKED);
+    stamp(STAT_LAST_DENY_NS);
+    if (cfg->log_only)
+        return 0;
+    return -EPERM;
+}
+
 SEC("lsm/socket_connect")
 int BPF_PROG(gs_socket_connect, struct socket *sock, struct sockaddr *address, int addrlen)
 {

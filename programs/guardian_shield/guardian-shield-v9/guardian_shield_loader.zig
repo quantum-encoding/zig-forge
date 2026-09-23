@@ -240,6 +240,9 @@ const RawConfig = struct {
     protected_paths: []const std.json.Value = &.{},
     critical_paths: []const []const u8 = &.{},
     credential_paths: []const []const u8 = &.{},
+    // Unix sockets of daemons that act as root on request. An agent that can
+    // reach one of these can ask it to do what the agent itself is denied.
+    privileged_sockets: []const []const u8 = &.{},
     agent_exes: []const []const u8 = &.{},
     exempt_exes: []const []const u8 = &.{},
     trusted_exes: []const []const u8 = &.{},
@@ -342,7 +345,14 @@ fn printStatus(cfg: RawConfig) !u8 {
         std.debug.print("              Hooks can be attached and still see nothing if process\n", .{});
         std.debug.print("              tagging is broken - treat a long silence as suspect.\n", .{});
     } else {
-        std.debug.print("activity    : last check {s}s ago, last denial {s}s ago\n", .{ check_age, deny_age });
+        // "-1" means not since this instance loaded. Printing it as "-1s ago"
+        // is the same class of misleading output this verdict exists to kill.
+        var dbuf: [48]u8 = undefined;
+        const deny_txt = if (std.mem.eql(u8, deny_age, "-1"))
+            "never (this instance)"
+        else
+            std.fmt.bufPrint(&dbuf, "{s}s ago", .{deny_age}) catch "?";
+        std.debug.print("activity    : last check {s}s ago, last denial {s}\n", .{ check_age, deny_txt });
     }
 
     return if (std.mem.eql(u8, verdict, "ENFORCING")) 0 else 1;
@@ -650,6 +660,7 @@ const Loader = struct {
         // path string, so an entry the confined uid can write is an escape.
         const exempt_ok = try vetExeAllowlist("exempt_exes", self.cfg.exempt_exes, false);
         const trusted_ok = try vetExeAllowlist("trusted_exes", self.cfg.trusted_exes, true);
+        try self.populateSocketMap();
         self.vetted_exempt = exempt_ok;
         self.vetted_trusted = trusted_ok;
         try self.populateExeMap("exempt_exes", exempt_ok);
@@ -816,6 +827,27 @@ const Loader = struct {
             var one: u8 = 1;
             _ = c.bpf_map_update_elem(fd, &key, &one, c.BPF_ANY);
         }
+    }
+
+    /// Load the privileged-daemon socket list. Keyed by the socket's absolute
+    /// path, matched against the kernel's own reconstruction at connect time.
+    /// Paths are stored exactly as configured - a socket that does not exist
+    /// yet still matches once its daemon creates it.
+    fn populateSocketMap(self: *Loader) !void {
+        const fd = try self.mapFd("privileged_sockets");
+        var n: usize = 0;
+        for (self.cfg.privileged_sockets) |p| {
+            if (p.len == 0 or p.len >= MAX_PATH_LEN) {
+                std.log.warn("privileged_sockets entry '{s}' too long, skipping", .{p});
+                continue;
+            }
+            var key = std.mem.zeroes([MAX_PATH_LEN]u8);
+            @memcpy(key[0..p.len], p);
+            var one: u8 = 1;
+            if (c.bpf_map_update_elem(fd, &key, &one, c.BPF_ANY) == 0) n += 1;
+        }
+        if (n > 0)
+            std.log.info("privileged sockets: {d} daemon socket(s) denied to agent/tainted subtrees (delegation block).", .{n});
     }
 
     fn populateTrustedInodes(self: *Loader) !void {
@@ -1490,6 +1522,7 @@ fn eventName(t: u8) []const u8 {
         23 => "capability",
         24 => "mount",
         25 => "bpf",
+        26 => "privileged_socket",
         else => "unknown",
     };
 }
