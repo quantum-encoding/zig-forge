@@ -161,6 +161,7 @@ pub const ParallelHasher = struct {
 
             const job = self.jobs.items[idx];
             const entry = &self.files[job.file_idx];
+            if (self.monitor) |m| m.current.publish(entry.path);
 
             // Perform hashing
             if (job.quick_hash) {

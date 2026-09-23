@@ -260,7 +260,7 @@ pub export fn zdedupe_add_exclude_path(ctx: ?*ZDedupeContext, path: [*:0]const u
 
 // === Progress & cancellation ===
 //
-// The only two entry points that may be called from another thread while a
+// The only entry points that may be called from another thread while a
 // run is in progress: they touch nothing but atomics inside the context.
 
 /// Mirrors `zdedupe_progress` in the C header.
@@ -283,6 +283,22 @@ pub export fn zdedupe_get_progress(ctx: ?*const ZDedupeContext, out: ?*ZDedupePr
         .done = internal.monitor.done.load(.acquire),
         .total = internal.monitor.total.load(.acquire),
     };
+}
+
+/// Same threading contract as zdedupe_get_progress. Returns bytes written.
+pub export fn zdedupe_get_current_path(
+    ctx: ?*const ZDedupeContext,
+    buf: ?[*]u8,
+    cap: usize,
+    truncated: ?*bool,
+) usize {
+    if (truncated) |t| t.* = false;
+    const c = ctx orelse return 0;
+    const out = buf orelse return 0;
+    const internal: *const InternalContext = @ptrCast(@alignCast(c));
+    const snap = internal.monitor.current.read(out[0..cap]);
+    if (truncated) |t| t.* = snap.truncated;
+    return snap.written;
 }
 
 pub export fn zdedupe_cancel(ctx: ?*ZDedupeContext) void {

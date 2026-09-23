@@ -267,6 +267,7 @@ const Worker = struct {
         const w = self.shared.walker;
         if (w.monitor) |m| {
             if (m.cancelled()) return error.Cancelled;
+            m.current.publish(dir_path);
         }
 
         // The checks that need the directory itself happen here, in whichever
@@ -329,8 +330,20 @@ const Worker = struct {
         self.stats.dirs_traversed += 1;
         var record: DirRecord = .{ .path = dir_path };
         var found_here: u64 = 0;
+        // A directory can hold millions of entries: report and honour cancel
+        // as it is read, not only once it is finished.
+        var unreported: u64 = 0;
+        var entries_seen: u32 = 0;
 
         while (libc.readdir(dir)) |entry| {
+            entries_seen +%= 1;
+            if (entries_seen % 4096 == 0) {
+                if (w.monitor) |m| {
+                    if (m.cancelled()) return error.Cancelled;
+                    _ = m.files_found.fetchAdd(found_here - unreported, .monotonic);
+                    unreported = found_here;
+                }
+            }
             const name_ptr: [*:0]const u8 = @ptrCast(&entry.name);
 
             // Quick skip for . and ..
@@ -393,7 +406,7 @@ const Worker = struct {
         }
 
         if (w.record_tree) try self.dirs.append(self.scratch(), record);
-        if (w.monitor) |m| _ = m.files_found.fetchAdd(found_here, .monotonic);
+        if (w.monitor) |m| _ = m.files_found.fetchAdd(found_here - unreported, .monotonic);
     }
 
     fn join(self: *Worker, dir_path: []const u8, name: []const u8) ![]const u8 {

@@ -221,12 +221,25 @@ typedef struct {
 /**
  * Read the progress of the run currently executing on `ctx`.
  *
- * THREAD-SAFE: this and zdedupe_cancel() are the only functions that may be
- * called from another thread while zdedupe_run_sync()/zdedupe_run_to_file()
- * is running on the same context. They touch nothing but atomics, so a host
+ * THREAD-SAFE: this, zdedupe_get_current_path() and zdedupe_cancel() are the
+ * only functions that may be called from another thread while
+ * zdedupe_run_sync()/zdedupe_run_to_file() is running on the same context. They touch nothing but atomics, so a host
  * can poll from a UI timer - no callback re-enters the host.
  */
 void zdedupe_get_progress(const zdedupe_ctx* ctx, zdedupe_progress* out);
+
+/**
+ * Copy the path the running scan is working on - the directory being read
+ * while walking, the file being read while hashing - into `buf` (not NUL-
+ * terminated). Meant for display: a path that stays put names what is slow.
+ * A path longer than `cap` (or than the core's 1024-byte slot) is given as
+ * its TAIL, with *truncated set. Returns bytes written; 0 when there is no
+ * current path (between phases, idle) or the slot was busy - poll again.
+ * Bytes are the raw path spelling; decode lossily.
+ *
+ * THREAD-SAFE: same contract as zdedupe_get_progress().
+ */
+size_t zdedupe_get_current_path(const zdedupe_ctx* ctx, char* buf, size_t cap, bool* truncated);
 
 /**
  * Ask the run on `ctx` to stop. The walk stops at the next directory, hashing
