@@ -369,6 +369,15 @@ pub const DupeFinder = struct {
         return count;
     }
 
+    /// Files are indexed in the order the walk found them, which keeps a
+    /// directory's files together. Hashing in that order, rather than the
+    /// size map's, opens neighbouring files one after another, so the
+    /// filesystem's directory and metadata caches stay warm instead of every
+    /// open landing somewhere random on the disk.
+    fn sortWalkOrder(indices: []usize) void {
+        std.mem.sort(usize, indices, {}, std.sort.asc(usize));
+    }
+
     fn quickHashGroups(self: *DupeFinder, size_groups: *std.AutoHashMap(u64, SizeGroup)) !void {
         // Collect all file indices that need quick hashing
         var indices_to_hash: std.ArrayListUnmanaged(usize) = .empty;
@@ -388,6 +397,7 @@ pub const DupeFinder = struct {
         }
 
         if (indices_to_hash.items.len == 0) return;
+        sortWalkOrder(indices_to_hash.items);
 
         // Hash in parallel
         const thread_count = self.config.getThreadCount();
@@ -444,6 +454,7 @@ pub const DupeFinder = struct {
         }
 
         if (indices_to_hash.items.len == 0) return;
+        sortWalkOrder(indices_to_hash.items);
 
         // Hash in parallel
         const thread_count = self.config.getThreadCount();
