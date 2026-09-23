@@ -296,7 +296,7 @@ pub export fn zdedupe_get_current_path(
     const c = ctx orelse return 0;
     const out = buf orelse return 0;
     const internal: *const InternalContext = @ptrCast(@alignCast(c));
-    const snap = internal.monitor.current.read(out[0..cap]);
+    const snap = internal.monitor.longestRunning(out[0..cap]);
     if (truncated) |t| t.* = snap.truncated;
     return snap.written;
 }

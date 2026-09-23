@@ -337,9 +337,14 @@ pub const Monitor = struct {
     done: std.atomic.Value(u64) = .init(0),
     total: std.atomic.Value(u64) = .init(0),
     cancel_requested: std.atomic.Value(bool) = .init(false),
-    /// The directory being read or the file being hashed, for a person
-    /// watching the scan: a path that stops changing names what is slow.
-    current: PathSlot = .{},
+    /// What each worker is on right now (a directory being read, a file
+    /// being hashed), indexed by worker; see `longestRunning`.
+    slots: [slot_count]PathSlot = @splat(.{}),
+    /// Orders the items in `slots` by when they began.
+    next_ticket: std.atomic.Value(u64) = .init(1),
+
+    /// Workers with an index at or past this are not shown.
+    pub const slot_count = 64;
 
     /// Stable numbering: part of the C ABI (`zdedupe_progress.phase`).
     pub const Phase = enum(u32) {
@@ -359,11 +364,53 @@ pub const Monitor = struct {
         self.done.store(0, .release);
         self.total.store(0, .release);
         self.cancel_requested.store(false, .release);
-        self.current.clear();
+    }
+
+    /// Worker `worker` starts on `path`. Only that worker writes its slot.
+    pub fn begin(self: *Monitor, worker: usize, path: []const u8) void {
+        if (worker >= slot_count) return;
+        const ticket = self.next_ticket.fetchAdd(1, .monotonic);
+        self.slots[worker].set(ticket, path);
+    }
+
+    /// Worker `worker` is done with its item.
+    pub fn end(self: *Monitor, worker: usize) void {
+        if (worker >= slot_count) return;
+        self.slots[worker].set(0, "");
+    }
+
+    pub const Current = struct {
+        /// Bytes written to `out`.
+        written: usize,
+        /// The path was longer than what was written; `out` holds its tail.
+        truncated: bool,
+    };
+
+    /// Copy the path of the item that has been in progress longest: while a
+    /// scan flows it changes constantly, and when one directory or file holds
+    /// the scan up it is the one shown. written = 0 when nothing is in flight
+    /// (or every attempt raced a writer, which a poller simply retries).
+    pub fn longestRunning(self: *const Monitor, out: []u8) Current {
+        var attempt: u8 = 0;
+        while (attempt < 8) : (attempt += 1) {
+            var best: ?usize = null;
+            var best_ticket: u64 = std.math.maxInt(u64);
+            var best_seq: u64 = 0;
+            for (&self.slots, 0..) |*slot, i| {
+                const seen = slot.peek() orelse continue;
+                if (seen.ticket < best_ticket) {
+                    best = i;
+                    best_ticket = seen.ticket;
+                    best_seq = seen.seq;
+                }
+            }
+            const index = best orelse return .{ .written = 0, .truncated = false };
+            if (self.slots[index].copy(best_seq, out)) |current| return current;
+        }
+        return .{ .written = 0, .truncated = false };
     }
 
     pub fn enter(self: *Monitor, phase: Phase, total: u64) void {
-        self.current.clear();
         self.done.store(0, .release);
         self.total.store(total, .release);
         self.phase.store(@intFromEnum(phase), .release);
@@ -378,29 +425,24 @@ pub const Monitor = struct {
     }
 };
 
-/// One path shared between many writers and a polling reader, using only
-/// atomics (a seqlock over u64 words). A writer that finds the slot busy
-/// skips its update rather than waiting: the slot shows *a* recent path, and
-/// no worker ever blocks on it. Paths longer than `capacity` keep their tail,
-/// the part that names the file.
+/// The path one worker is on, written by that worker alone and read by a
+/// poller on another thread, using only atomics (a seqlock over u64 words).
+/// Paths longer than `capacity` keep their tail, the part naming the file.
 pub const PathSlot = struct {
     pub const capacity = 1024;
     const words = capacity / 8;
 
-    /// Odd while a writer is copying.
+    /// Odd while the owner is writing.
     seq: std.atomic.Value(u64) = .init(0),
-    /// Full length of the published path; at most `capacity` bytes are kept.
+    /// When the current item began, as a Monitor ticket; 0 = idle.
+    ticket: std.atomic.Value(u64) = .init(0),
+    /// Full length of the path; at most `capacity` bytes are kept.
     len: std.atomic.Value(u64) = .init(0),
     buf: [words]std.atomic.Value(u64) = @splat(.init(0)),
 
-    pub fn clear(self: *PathSlot) void {
-        self.publish("");
-    }
-
-    pub fn publish(self: *PathSlot, path: []const u8) void {
-        const s = self.seq.load(.monotonic);
-        if (s & 1 != 0) return;
-        if (self.seq.cmpxchgStrong(s, s + 1, .acquire, .monotonic) != null) return;
+    fn set(self: *PathSlot, ticket: u64, path: []const u8) void {
+        // Acquire on the RMW keeps the stores below after the odd count.
+        const s = self.seq.fetchAdd(1, .acquire);
         const tail = path[path.len - @min(path.len, capacity) ..];
         var i: usize = 0;
         while (i < tail.len) : (i += 8) {
@@ -410,90 +452,96 @@ pub const PathSlot = struct {
             self.buf[i / 8].store(std.mem.readInt(u64, &word, .little), .monotonic);
         }
         self.len.store(path.len, .monotonic);
+        self.ticket.store(ticket, .monotonic);
         self.seq.store(s + 2, .release);
     }
 
-    pub const Snapshot = struct {
-        /// Bytes written to `out`.
-        written: usize,
-        /// The path was longer than what was written; `out` holds its tail.
-        truncated: bool,
-    };
+    /// The slot's ticket if it holds an item and is not mid-write.
+    fn peek(self: *const PathSlot) ?struct { seq: u64, ticket: u64 } {
+        const s = self.seq.load(.acquire);
+        if (s & 1 != 0) return null;
+        const t = self.ticket.load(.acquire);
+        if (self.seq.load(.acquire) != s or t == 0) return null;
+        return .{ .seq = s, .ticket = t };
+    }
 
-    /// Copy the latest path into `out`. Gives up (written = 0) if writers
-    /// keep the slot busy for every attempt, which a poller simply retries.
-    pub fn read(self: *const PathSlot, out: []u8) Snapshot {
-        var attempt: u8 = 0;
-        while (attempt < 16) : (attempt += 1) {
-            const before = self.seq.load(.acquire);
-            if (before & 1 != 0) {
-                std.atomic.spinLoopHint();
-                continue;
-            }
-            const full: usize = @intCast(self.len.load(.acquire));
-            const stored = @min(full, capacity);
-            const n = @min(stored, out.len);
-            const start = stored - n;
-            var i: usize = 0;
-            while (i < n) {
-                const pos = start + i;
-                var word: [8]u8 = undefined;
-                std.mem.writeInt(u64, &word, self.buf[pos / 8].load(.acquire), .little);
-                const off = pos % 8;
-                const take = @min(8 - off, n - i);
-                @memcpy(out[i..][0..take], word[off..][0..take]);
-                i += take;
-            }
-            if (self.seq.load(.acquire) == before) return .{ .written = n, .truncated = n < full };
+    /// Copy the path if the slot still holds the write seen as `seq`.
+    fn copy(self: *const PathSlot, seq: u64, out: []u8) ?Monitor.Current {
+        const full: usize = @intCast(self.len.load(.acquire));
+        const stored = @min(full, capacity);
+        const n = @min(stored, out.len);
+        const start = stored - n;
+        var i: usize = 0;
+        while (i < n) {
+            const pos = start + i;
+            var word: [8]u8 = undefined;
+            std.mem.writeInt(u64, &word, self.buf[pos / 8].load(.acquire), .little);
+            const off = pos % 8;
+            const take = @min(8 - off, n - i);
+            @memcpy(out[i..][0..take], word[off..][0..take]);
+            i += take;
         }
-        return .{ .written = 0, .truncated = false };
+        if (self.seq.load(.acquire) != seq) return null;
+        return .{ .written = n, .truncated = n < full };
     }
 };
 
-test "PathSlot keeps the tail of a long path and reports truncation" {
-    var slot: PathSlot = .{};
+test "Monitor reports the longest-running item and keeps a long path's tail" {
+    var m: Monitor = .{};
     var out: [PathSlot.capacity]u8 = undefined;
-    try std.testing.expectEqual(@as(usize, 0), slot.read(&out).written);
+    try std.testing.expectEqual(@as(usize, 0), m.longestRunning(&out).written);
 
-    slot.publish("/Users/a/file.txt");
-    const short = slot.read(&out);
-    try std.testing.expectEqualStrings("/Users/a/file.txt", out[0..short.written]);
-    try std.testing.expect(!short.truncated);
+    m.begin(3, "/Users/a/old.txt");
+    m.begin(0, "/Users/a/new.txt");
+    const first = m.longestRunning(&out);
+    try std.testing.expectEqualStrings("/Users/a/old.txt", out[0..first.written]);
+    try std.testing.expect(!first.truncated);
 
-    var small: [5]u8 = undefined;
-    const clipped = slot.read(&small);
-    try std.testing.expectEqualStrings("e.txt", small[0..clipped.written]);
+    var small: [7]u8 = undefined;
+    const clipped = m.longestRunning(&small);
+    try std.testing.expectEqualStrings("old.txt", small[0..clipped.written]);
     try std.testing.expect(clipped.truncated);
+
+    m.end(3);
+    const next = m.longestRunning(&out);
+    try std.testing.expectEqualStrings("/Users/a/new.txt", out[0..next.written]);
 
     var long: [PathSlot.capacity + 100]u8 = undefined;
     for (&long, 0..) |*b, i| b.* = 'a' + @as(u8, @intCast(i % 26));
-    slot.publish(&long);
-    const tail = slot.read(&out);
+    m.end(0);
+    m.begin(5, &long);
+    const tail = m.longestRunning(&out);
     try std.testing.expectEqual(@as(usize, PathSlot.capacity), tail.written);
     try std.testing.expect(tail.truncated);
     try std.testing.expectEqualSlices(u8, long[100..], out[0..tail.written]);
 
-    slot.clear();
-    try std.testing.expectEqual(@as(usize, 0), slot.read(&out).written);
+    // A worker beyond the slots is simply not shown.
+    m.end(5);
+    m.begin(Monitor.slot_count + 1, "/ignored");
+    try std.testing.expectEqual(@as(usize, 0), m.longestRunning(&out).written);
 }
 
-test "PathSlot never shows a torn path while writers race" {
-    // Each writer publishes a path made of one repeated letter whose length
+test "Monitor never shows a torn path while workers race" {
+    // Each worker publishes a path of one repeated letter whose length
     // depends on the letter, so a read mixing two writes is detectable.
     const Ctx = struct {
-        slot: PathSlot = .{},
+        monitor: Monitor = .{},
         stop: std.atomic.Value(bool) = .init(false),
 
-        fn write(self: *@This(), letter: u8) void {
+        fn work(self: *@This(), worker: usize) void {
+            const letter: u8 = 'a' + @as(u8, @intCast(worker));
             var buf: [PathSlot.capacity]u8 = undefined;
             const len = 17 + @as(usize, letter - 'a') * 37;
             @memset(buf[0..len], letter);
-            while (!self.stop.load(.acquire)) self.slot.publish(buf[0..len]);
+            while (!self.stop.load(.acquire)) {
+                self.monitor.begin(worker, buf[0..len]);
+                self.monitor.end(worker);
+            }
         }
     };
     var ctx: Ctx = .{};
     var threads: [4]std.Thread = undefined;
-    for (&threads, 0..) |*t, i| t.* = try std.Thread.spawn(.{}, Ctx.write, .{ &ctx, @as(u8, 'a' + @as(u8, @intCast(i))) });
+    for (&threads, 0..) |*t, i| t.* = try std.Thread.spawn(.{}, Ctx.work, .{ &ctx, i });
     defer for (threads) |t| t.join();
     defer ctx.stop.store(true, .release);
 
@@ -501,7 +549,7 @@ test "PathSlot never shows a torn path while writers race" {
     var reads: usize = 0;
     var i: usize = 0;
     while (i < 200_000) : (i += 1) {
-        const snap = ctx.slot.read(&out);
+        const snap = ctx.monitor.longestRunning(&out);
         if (snap.written == 0) continue;
         reads += 1;
         const letter = out[0];

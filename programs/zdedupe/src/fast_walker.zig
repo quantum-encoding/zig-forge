@@ -230,6 +230,8 @@ const DT_OTHER: u8 = 255; // Anything else, once classified by stat
 /// One thread's private state.
 const Worker = struct {
     shared: *Shared,
+    /// Position among the walk's workers; names its Monitor slot.
+    index: usize = 0,
     arena: std.heap.ArenaAllocator,
     files: std.ArrayListUnmanaged(FastFileEntry) = .empty,
     dirs: std.ArrayListUnmanaged(DirRecord) = .empty,
@@ -267,8 +269,9 @@ const Worker = struct {
         const w = self.shared.walker;
         if (w.monitor) |m| {
             if (m.cancelled()) return error.Cancelled;
-            m.current.publish(dir_path);
+            m.begin(self.index, dir_path);
         }
+        defer if (w.monitor) |m| m.end(self.index);
 
         // The checks that need the directory itself happen here, in whichever
         // worker picked it up; what they find is reported to the parent's
@@ -726,8 +729,8 @@ pub const FastWalker = struct {
         const threads = try self.allocator.alloc(std.Thread, extra);
         defer self.allocator.free(threads);
 
-        for (workers) |*worker| {
-            worker.* = .{ .shared = &shared, .arena = std.heap.ArenaAllocator.init(self.allocator) };
+        for (workers, 1..) |*worker, index| {
+            worker.* = .{ .shared = &shared, .index = index, .arena = std.heap.ArenaAllocator.init(self.allocator) };
         }
         var started: usize = 0;
         for (threads, workers) |*thread, *worker| {

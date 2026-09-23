@@ -115,7 +115,7 @@ pub const ParallelHasher = struct {
 
         if (actual_threads <= 1) {
             // Single-threaded fallback
-            self.workerLoop();
+            self.workerLoop(0);
             return;
         }
 
@@ -123,13 +123,16 @@ pub const ParallelHasher = struct {
         self.threads = try self.allocator.alloc(std.Thread, actual_threads);
         errdefer self.allocator.free(self.threads);
 
-        // Spawn worker threads
-        for (self.threads) |*t| {
-            t.* = try std.Thread.spawn(.{}, workerThreadFn, .{self});
+        // Fewer threads than asked for is slower, not wrong; every thread
+        // that did start is joined before the handles are freed.
+        var started: usize = 0;
+        for (self.threads, 0..) |*t, index| {
+            t.* = std.Thread.spawn(.{}, workerThreadFn, .{ self, index }) catch break;
+            started += 1;
         }
+        if (started == 0) self.workerLoop(0);
 
-        // Wait for all threads to complete
-        for (self.threads) |t| {
+        for (self.threads[0..started]) |t| {
             t.join();
         }
 
@@ -139,12 +142,13 @@ pub const ParallelHasher = struct {
     }
 
     /// Worker thread function
-    fn workerThreadFn(self: *ParallelHasher) void {
-        self.workerLoop();
+    fn workerThreadFn(self: *ParallelHasher, index: usize) void {
+        self.workerLoop(index);
     }
 
     /// Main worker loop - atomically grab and process jobs
-    fn workerLoop(self: *ParallelHasher) void {
+    /// `index` names this worker's Monitor slot.
+    fn workerLoop(self: *ParallelHasher, index: usize) void {
         var file_hasher = hasher.FileHasher.init(self.algorithm);
         file_hasher.monitor = self.monitor;
 
@@ -161,7 +165,7 @@ pub const ParallelHasher = struct {
 
             const job = self.jobs.items[idx];
             const entry = &self.files[job.file_idx];
-            if (self.monitor) |m| m.current.publish(entry.path);
+            if (self.monitor) |m| m.begin(index, entry.path);
 
             // Perform hashing
             if (job.quick_hash) {
@@ -172,6 +176,8 @@ pub const ParallelHasher = struct {
             } else {
                 entry.hash = file_hasher.hashFile(entry.path) catch null;
             }
+
+            if (self.monitor) |m| m.end(index);
 
             // Update completed count
             const completed = self.completed.fetchAdd(1, .release) + 1;

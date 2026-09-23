@@ -229,9 +229,11 @@ typedef struct {
 void zdedupe_get_progress(const zdedupe_ctx* ctx, zdedupe_progress* out);
 
 /**
- * Copy the path the running scan is working on - the directory being read
- * while walking, the file being read while hashing - into `buf` (not NUL-
- * terminated). Meant for display: a path that stays put names what is slow.
+ * Copy the path the running scan has been working on LONGEST - of the
+ * directories being read (walk) or files being read (hashing) right now -
+ * into `buf` (not NUL-terminated). While a scan flows it changes constantly;
+ * when one directory or file holds the scan up, it is the one shown, so a
+ * path that stays put names what is slow.
  * A path longer than `cap` (or than the core's 1024-byte slot) is given as
  * its TAIL, with *truncated set. Returns bytes written; 0 when there is no
  * current path (between phases, idle) or the slot was busy - poll again.
