@@ -923,6 +923,7 @@ const stat_names = [_][]const u8{
     "mem_blocked",
     "path_trunc",
     "free_allow",
+    "guard_escape",
 };
 
 // ===================================================================

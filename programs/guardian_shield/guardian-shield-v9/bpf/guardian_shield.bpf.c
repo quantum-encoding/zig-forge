@@ -357,7 +357,14 @@ enum stat_counter {
     STAT_MEM_BLOCKED = 5,
     STAT_PATH_TRUNC = 6,   // path reconstruction hit depth/length cap
     STAT_FREE_ALLOW = 7,   // op allowed because a path component was a free basename
+    STAT_GUARD_ESCAPE = 8,  // rename/link denied: it would have moved a guarded
+                           // path somewhere less guarded than where it sat
 };
+
+// `aux` qualifier on a filesystem violation, so a denial the operator did not
+// configure explains itself in the feed. Scoped per event_type; rename/link
+// otherwise leave aux at 0.
+#define GS_AUX_GUARD_ESCAPE 1u
 
 // Runtime config (single entry). The loader flips `ready` after policy load.
 struct gs_config {
@@ -683,6 +690,51 @@ static __noinline bool path_is_protected(__u8 *path, __u32 len, __u16 op)
     return false;
 }
 
+// The set of operations policy guards AT this path: the matched rule's op mask,
+// or 0 where nothing is guarded. Exemption is folded in here rather than left to
+// the caller, because "this location is released as regenerable output" and
+// "this location is not guarded" mean the same thing to a caller comparing two
+// paths.
+//
+// Distinct from path_is_protected(), which answers a yes/no about ONE op. To
+// compare protection BETWEEN two paths the mask itself is needed: an explicit
+// {"block":[]} hole is a matched rule guarding nothing, and a bool cannot tell
+// it apart from a guarded tree.
+static __noinline __u16 path_guard_ops(__u8 *path, __u32 len, __u32 free_mask)
+{
+    struct path_lpm_key key;
+    __builtin_memset(&key, 0, sizeof(key));
+
+    if (len >= MAX_PATH_LEN)
+        len = MAX_PATH_LEN - 1;
+    key.prefixlen = len * 8;
+    if (len > 0)
+        bpf_probe_read_kernel(key.data, len, path);
+
+    struct path_rule *rule = bpf_map_lookup_elem(&protected_paths, &key);
+    if (!rule || rule->action != 1)
+        return 0;
+
+    // Same boundary rule as path_is_protected: an LPM hit at length L only
+    // covers the subtree, so /etc never matches /etcfoo.
+    __u32 mlen = rule->prefix_len;
+    bool within = false;
+    if (mlen >= len) {
+        within = true;
+    } else if (mlen < MAX_PATH_LEN) {
+        __u8 c = path[mlen & (MAX_PATH_LEN - 1)];
+        if (c == '/' || c == '\0')
+            within = true;
+    }
+    if (!within)
+        return 0;
+
+    if (free_mask & free_scope_bits(path, len))
+        return 0;
+
+    return rule->ops;
+}
+
 // Same longest-prefix + boundary check against the credential AssetMap trie.
 // Separate bpf2bpf function because the map reference must be known to the
 // verifier at the lookup site (a map can't be passed as a generic pointer).
@@ -780,11 +832,22 @@ static __always_inline int fs_guard_dentry(struct dentry *dentry,
     if (!buf)
         return 0;
     bool hit = path_is_protected(buf->data, len, ev_op_bit(ev));
+
+    // Protection the SOURCE carries, read BEFORE the destination is
+    // reconstructed - the per-CPU recon slot is reused and the source bytes are
+    // gone after that. Only rename/link have a destination, so this costs
+    // nothing on the single-path hooks.
+    __u16 src_ops = 0;
+    if (tdentry)
+        src_ops = path_guard_ops(buf->data, len, buf->free_mask);
+
     // Regenerable output (node_modules/.astro/...) inside a guarded tree: allow,
     // but COUNT it. A hole you cannot observe is indistinguishable from having
     // no guard at all - and this is the counter that later justifies (or
     // refutes) widening the basename set. Counted rather than logged on purpose:
     // a single `npm ci` touches thousands of files and would drown the feed.
+    // && short-circuits, so the exemption lookup stays off the path of every
+    // op that was not going to be blocked anyway.
     if (hit && (buf->free_mask & free_scope_bits(buf->data, len))) {
         bump(STAT_FREE_ALLOW);
         hit = false;
@@ -793,23 +856,54 @@ static __always_inline int fs_guard_dentry(struct dentry *dentry,
     // Secondary path (rename dst / link dst). path_is_protected copies out of
     // the buffer immediately, so it is safe to reuse the per-CPU slot here.
     bool thit = false;
+    bool escape = false;
     if (!hit && tdentry) {
         struct recon_buf *tbuf = 0;
         __u32 tlen = reconstruct_path(tdentry, tvfsmnt, &tbuf);
         if (tbuf) {
+            bool dst_free =
+                (tbuf->free_mask & free_scope_bits(tbuf->data, tlen)) != 0;
+
             thit = path_is_protected(tbuf->data, tlen, ev_op_bit(ev));
-            if (thit && (tbuf->free_mask & free_scope_bits(tbuf->data, tlen))) {
+            if (thit && dst_free) {
                 bump(STAT_FREE_ALLOW);
                 thit = false;
             }
+
+            // Guard integrity: protection must not DECREASE across a rename or
+            // link. A relocation cannot confer the right to destroy what could
+            // not be destroyed in place - the bytes and the owner are unchanged,
+            // so the guard has to travel with them.
+            //
+            // Denied when the destination drops any op the source guards, which
+            // covers every way protection can be shed: moving under a free
+            // basename, into an explicit {"block":[]} hole, out of a LOCKDOWN
+            // zone into a merely GUARDED one, or clean out of the guarded tree
+            // altogether. Deliberately independent of whether rename/link is
+            // itself in the op mask - it usually is not, because atomic-write
+            // tooling needs rename, and that allowance is for replacing a file
+            // in place, not for carrying one out of its zone.
+            //
+            // An unguarded or already-exempt source has src_ops == 0 and is
+            // never caught: moving regenerable output around stays ordinary
+            // work, as does any rename that keeps or raises protection.
+            __u16 dst_ops = path_guard_ops(tbuf->data, tlen, tbuf->free_mask);
+            if (src_ops & ~dst_ops)
+                escape = true;
+
             len = tlen;
             buf = tbuf;
         }
     }
 
-    if (hit || thit) {
+    if (hit || thit || escape) {
         __u8 enforced = cfg->log_only ? 0 : 1;
-        log_violation(ev, tag, enforced, buf->data, len, 0, 0, 0, 0);
+        __u32 aux = 0;
+        if (escape) {
+            bump(STAT_GUARD_ESCAPE);
+            aux = GS_AUX_GUARD_ESCAPE;
+        }
+        log_violation(ev, tag, enforced, buf->data, len, 0, 0, 0, aux);
         bump(STAT_FS_BLOCKED);
         if (cfg->log_only)
             return 0;
