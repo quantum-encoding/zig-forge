@@ -199,7 +199,11 @@ const ExeId = extern struct {
     _pad: u32 = 0,
 };
 
+// Mirror TAG_* in guardian_shield.bpf.c.
+const TAG_AGENT: u8 = 1;
+const TAG_EXEMPT: u8 = 2;
 const TAG_TRUSTED: u8 = 3;
+const TAG_TAINTED: u8 = 4;
 const MINORBITS: u5 = 20;
 
 const ViolationEvent = extern struct {
@@ -282,7 +286,67 @@ const Args = struct {
     obj_override: ?[]const u8 = null,
     unpin: bool = false,
     verbose: bool = false,
+    status: bool = false,
 };
+
+/// Print the enforcement verdict and exit non-zero when it is not ENFORCING.
+///
+/// Reads the snapshot the running loader publishes rather than the kernel, so
+/// it needs no privilege - and so a STALE file is itself a finding: if the
+/// loader is gone the verdict stops being refreshed, and saying so is more
+/// honest than reporting whatever it last said.
+fn printStatus(cfg: RawConfig) !u8 {
+    var path_buf: [512]u8 = undefined;
+    const stats_path = std.fmt.bufPrint(&path_buf, "{s}.stats", .{cfg.log_file}) catch return 2;
+
+    var buf: [4096]u8 = undefined;
+    const txt = readSmall(stats_path, &buf) catch {
+        std.debug.print("verdict     : UNKNOWN - no status snapshot at {s}\n", .{stats_path});
+        std.debug.print("              The loader publishes this every ~10s; its absence means it is\n", .{});
+        std.debug.print("              not running, or never got far enough to publish one.\n", .{});
+        return 2;
+    };
+
+    const field = struct {
+        fn get(hay: []const u8, key: []const u8) ?[]const u8 {
+            var kb: [64]u8 = undefined;
+            const pat = std.fmt.bufPrint(&kb, "\"{s}\":", .{key}) catch return null;
+            const i = std.mem.indexOf(u8, hay, pat) orelse return null;
+            var rest = hay[i + pat.len ..];
+            if (rest.len > 0 and rest[0] == '"') {
+                rest = rest[1..];
+                const e = std.mem.indexOfScalar(u8, rest, '"') orelse return null;
+                return rest[0..e];
+            }
+            const e = std.mem.indexOfAny(u8, rest, ",}") orelse return null;
+            return rest[0..e];
+        }
+    };
+
+    const verdict = field.get(txt, "verdict") orelse "UNKNOWN";
+    const expected = field.get(txt, "hooks_expected") orelse "?";
+    const pinned = field.get(txt, "hooks_pinned") orelse "?";
+    const missing = field.get(txt, "missing_hook") orelse "";
+    const check_age = field.get(txt, "last_check_age_s") orelse "-1";
+    const deny_age = field.get(txt, "last_deny_age_s") orelse "-1";
+    const uptime = field.get(txt, "uptime_s") orelse "?";
+
+    std.debug.print("verdict     : {s}  ({s}/{s} hooks pinned)\n", .{ verdict, pinned, expected });
+    if (!std.mem.eql(u8, verdict, "ENFORCING"))
+        std.debug.print("              MISSING HOOK: {s} - enforcement is INCOMPLETE.\n", .{missing});
+    std.debug.print("uptime      : {s}s (counters below are for THIS instance, not all time)\n", .{uptime});
+
+    // Positive evidence that the kernel side is live, not just attached.
+    if (std.mem.eql(u8, check_age, "-1")) {
+        std.debug.print("activity    : NO filesystem check has run since load.\n", .{});
+        std.debug.print("              Hooks can be attached and still see nothing if process\n", .{});
+        std.debug.print("              tagging is broken - treat a long silence as suspect.\n", .{});
+    } else {
+        std.debug.print("activity    : last check {s}s ago, last denial {s}s ago\n", .{ check_age, deny_age });
+    }
+
+    return if (std.mem.eql(u8, verdict, "ENFORCING")) 0 else 1;
+}
 
 pub fn main(init: std.process.Init) !void {
     var args = Args{};
@@ -293,6 +357,8 @@ pub fn main(init: std.process.Init) !void {
         if (expect_obj) {
             args.obj_override = try g_alloc.dupe(u8, a);
             expect_obj = false;
+        } else if (std.mem.eql(u8, a, "--status")) {
+            args.status = true;
         } else if (std.mem.eql(u8, a, "--unpin")) {
             args.unpin = true;
         } else if (std.mem.eql(u8, a, "--verbose")) {
@@ -320,6 +386,11 @@ pub fn main(init: std.process.Init) !void {
     defer parsed.deinit();
     const cfg = parsed.value;
 
+    if (args.status) {
+        const rc = try printStatus(cfg);
+        std.process.exit(rc);
+    }
+
     if (args.unpin) {
         try teardown(cfg.pin_dir);
         std.log.info("Guardian Shield v9: unpinned and detached.", .{});
@@ -339,6 +410,8 @@ pub fn main(init: std.process.Init) !void {
     try loader.load();
     try loader.populateMaps();
     try loader.tagSelfTrusted(); // loader tree = TAG_TRUSTED before enforcement
+    try loader.retagRunningProcesses(); // agents that predate this instance
+    loader.started_ns = monotonicNs();
     try loader.attachAndPin(); // fail-closed
     try loader.setReady(); // enforcement goes live here
 
@@ -362,7 +435,7 @@ pub fn main(init: std.process.Init) !void {
 
 fn fail(msg: []const u8) error{InvalidArgs} {
     std.log.err("{s}", .{msg});
-    std.log.err("usage: guardian_shield_loader <config.json> [--obj <path>] [--verbose] [--unpin]", .{});
+    std.log.err("usage: guardian_shield_loader <config.json> [--obj <path>] [--verbose] [--unpin] [--status]", .{});
     return error.InvalidArgs;
 }
 
@@ -495,6 +568,17 @@ const Loader = struct {
     links: std.ArrayListUnmanaged(*c.bpf_link) = .empty,
     v_rb: ?*c.ring_buffer = null,
     link_count: usize = 0,
+    // Allowlists AFTER vetting, kept so the /proc re-tag classifies live
+    // processes by exactly what was loaded - not by what the config asked for.
+    vetted_exempt: []const []const u8 = &.{},
+    vetted_trusted: []const []const u8 = &.{},
+    // Pin paths this instance created, kept so the watchdog can re-verify that
+    // the hooks it reported are STILL there. Without this the loader's only
+    // claim about enforcement is one it made once, at startup, and never
+    // rechecked.
+    pin_paths: std.ArrayListUnmanaged([]const u8) = .empty,
+    degraded: bool = false,
+    started_ns: u64 = 0,
 
     fn init(cfg: RawConfig) Loader {
         return .{ .cfg = cfg };
@@ -566,6 +650,8 @@ const Loader = struct {
         // path string, so an entry the confined uid can write is an escape.
         const exempt_ok = try vetExeAllowlist("exempt_exes", self.cfg.exempt_exes, false);
         const trusted_ok = try vetExeAllowlist("trusted_exes", self.cfg.trusted_exes, true);
+        self.vetted_exempt = exempt_ok;
+        self.vetted_trusted = trusted_ok;
         try self.populateExeMap("exempt_exes", exempt_ok);
         try self.populateExeMap("trusted_exes", trusted_ok); // MUST include the loader
         // --- trusted_inodes ({ino,dev}). Trust the loader by exe identity so a
@@ -770,6 +856,107 @@ const Loader = struct {
             std.log.warn("could not self-tag loader tgid {d} as trusted", .{tgid});
     }
 
+    /// Tag processes that were ALREADY RUNNING when this instance loaded.
+    ///
+    /// Tags are assigned at exec, and `agent_pids` is created fresh on every
+    /// load, so any agent alive across a restart would otherwise be untagged -
+    /// and therefore unconfined. That gap is INVISIBLE in the violation feed:
+    /// every hook returns at `is_restricted()` before it logs or counts
+    /// anything, so an untagged agent looks exactly like a quiet one.
+    ///
+    /// This matters beyond a manual restart. The unit carries
+    /// `Restart=on-failure`, so any loader crash re-loads with an empty map,
+    /// and policy changes require a restart because the config is read once.
+    /// Without this sweep, crashing the loader would be a way to shed
+    /// containment.
+    ///
+    /// Runs BEFORE `ready` flips, so no hook can consult a half-filled map.
+    ///
+    /// Tag resolution mirrors gs_exec, including INHERITANCE: a shell under a
+    /// tagged agent earns nothing from its own exe, so each process walks its
+    /// parent chain. The nearest TRUSTED/EXEMPT ancestor wins outright; failing
+    /// that an AGENT anywhere up the chain wins over a nearer TAINTED, matching
+    /// gs_exec's rule that a build tool does not override an inherited agent
+    /// tag. Ties resolve toward the MORE restrictive tag.
+    fn retagRunningProcesses(self: *Loader) !void {
+        const exempt = self.vetted_exempt;
+        const trusted = self.vetted_trusted;
+        const fd = try self.mapFd("agent_pids");
+
+        var procs = std.ArrayListUnmanaged(LiveProc).empty;
+        defer procs.deinit(g_alloc);
+
+        const dir = c.opendir("/proc") orelse {
+            std.log.warn("cannot open /proc: already-running processes stay untagged until they re-exec.", .{});
+            return;
+        };
+        defer _ = c.closedir(dir);
+
+        var exe_buf: [MAX_EXE_PATH]u8 = undefined;
+        while (c.readdir(dir)) |ent| {
+            const name = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(&ent.*.d_name)), 0);
+            const pid = std.fmt.parseInt(u32, name, 10) catch continue; // non-numeric = not a pid
+            const exe = readProcExe(pid, &exe_buf) orelse continue; // kernel thread / exited
+            const base = baseNameOf(exe);
+
+            // Same precedence as gs_exec: trusted, then exempt, then agent, then build.
+            var own: u8 = 0;
+            if (listHasPath(trusted, exe)) {
+                own = TAG_TRUSTED;
+            } else if (listHasPath(exempt, exe)) {
+                own = TAG_EXEMPT;
+            } else if (listHasName(self.cfg.agent_exes, base)) {
+                own = TAG_AGENT;
+            } else if (listHasName(self.cfg.build_exes, base)) {
+                own = TAG_TAINTED;
+            }
+            try procs.append(g_alloc, .{ .pid = pid, .ppid = readProcPpid(pid), .own = own });
+        }
+
+        var by_pid = std.AutoHashMapUnmanaged(u32, usize).empty;
+        defer by_pid.deinit(g_alloc);
+        for (procs.items, 0..) |pr, i| try by_pid.put(g_alloc, pr.pid, i);
+
+        var n_agent: u32 = 0;
+        var n_tainted: u32 = 0;
+        var n_other: u32 = 0;
+        for (procs.items) |pr| {
+            var tag: u8 = 0;
+            var saw_tainted = false;
+            var cur = pr;
+            var depth: u32 = 0;
+            while (depth < 64) : (depth += 1) {
+                if (cur.own == TAG_TRUSTED or cur.own == TAG_EXEMPT) {
+                    tag = cur.own;
+                    break;
+                }
+                if (cur.own == TAG_AGENT) {
+                    tag = TAG_AGENT;
+                    break;
+                }
+                if (cur.own == TAG_TAINTED) saw_tainted = true;
+                if (cur.ppid == 0) break;
+                const idx = by_pid.get(cur.ppid) orelse break;
+                cur = procs.items[idx];
+            }
+            if (tag == 0 and saw_tainted) tag = TAG_TAINTED;
+            if (tag == 0) continue;
+
+            var key: u32 = pr.pid;
+            var t = ProcTag{ .tag = tag, .root_tgid = pr.pid, .since_ns = 0 };
+            if (c.bpf_map_update_elem(fd, &key, &t, c.BPF_ANY) != 0) continue;
+            switch (tag) {
+                TAG_AGENT => n_agent += 1,
+                TAG_TAINTED => n_tainted += 1,
+                else => n_other += 1,
+            }
+        }
+
+        if (n_agent + n_tainted + n_other > 0) {
+            std.log.info("re-tagged {d} already-running process(es) from /proc: {d} agent, {d} tainted, {d} exempt/trusted (they exec'd before this instance loaded).", .{ n_agent + n_tainted + n_other, n_agent, n_tainted, n_other });
+        }
+    }
+
     fn attachAndPin(self: *Loader) !void {
         const o = self.obj orelse return error.NoObject;
 
@@ -809,6 +996,16 @@ const Loader = struct {
                 return error.PinFailed;
             }
             self.link_count += 1;
+            // Remember the pin so the watchdog can re-verify it later.
+            const owned = g_alloc.dupe(u8, std.mem.span(pin_path.ptr)) catch {
+                self.teardownLinks();
+                return error.OutOfMemory;
+            };
+            self.pin_paths.append(g_alloc, owned) catch {
+                g_alloc.free(owned);
+                self.teardownLinks();
+                return error.OutOfMemory;
+            };
         }
 
         if (self.link_count == 0) {
@@ -870,9 +1067,51 @@ const Loader = struct {
             ticks += 1;
             if (ticks >= snapshot_every) {
                 ticks = 0;
-                self.writeStats();
+                // Re-verify the hooks, not just the counters. If enforcement
+                // has been lost, exiting non-zero is deliberate: a silent,
+                // healthy-looking loader is the failure being fixed here.
+                if (!self.watchdogTick()) return error.EnforcementLost;
             }
         }
+    }
+
+    /// Re-verify that every hook this instance pinned is STILL pinned.
+    ///
+    /// This is the whole liveness question. A loader that attached 20 hooks and
+    /// then lost one keeps running, keeps consuming the ring buffer, and keeps
+    /// emitting events from the 19 that remain - so "process alive" and "events
+    /// flowing" both stay true while a guard is gone. Only asking the kernel
+    /// whether the pins are there can tell the difference.
+    ///
+    /// Returns the number of MISSING pins and, via out_first, the first one.
+    fn verifyPins(self: *Loader, out_first: *?[]const u8) usize {
+        var missing: usize = 0;
+        out_first.* = null;
+        for (self.pin_paths.items) |path| {
+            var zbuf: [MAX_PATH_BYTES]u8 = undefined;
+            const zp = std.fmt.bufPrintZ(&zbuf, "{s}", .{path}) catch continue;
+            if (c.access(zp.ptr, c.F_OK) != 0) {
+                missing += 1;
+                if (out_first.* == null) out_first.* = path;
+            }
+        }
+        return missing;
+    }
+
+    /// Check the hooks and publish the verdict. Called on the snapshot tick.
+    /// Returns false once enforcement is degraded, so the caller can stop.
+    fn watchdogTick(self: *Loader) bool {
+        var first: ?[]const u8 = null;
+        const missing = self.verifyPins(&first);
+        if (missing > 0 and !self.degraded) {
+            self.degraded = true;
+            // Loud, and at error level, because every other signal an operator
+            // has - systemctl, the process list, the event feed - still looks
+            // healthy at this moment.
+            std.log.err("NOT ENFORCING: {d} of {d} hooks are no longer pinned (first missing: {s}). Enforcement is INCOMPLETE. The loader is exiting non-zero so this surfaces in systemctl status instead of looking healthy.", .{ missing, self.pin_paths.items.len, first orelse "?" });
+        }
+        self.writeStats();
+        return !self.degraded;
     }
 
     /// Dump the stats array to `<log_file>.stats` as a single JSON object,
@@ -888,7 +1127,7 @@ const Loader = struct {
             vals[i] = v;
         }
 
-        var buf: [1024]u8 = undefined;
+        var buf: [2048]u8 = undefined;
         var n: usize = 0;
         buf[n] = '{';
         n += 1;
@@ -900,6 +1139,29 @@ const Loader = struct {
             }) catch return;
             n += seg.len;
         }
+        // The VERDICT, not just counters. A reader must not have to infer
+        // "is it enforcing" from a process being alive or a feed moving -
+        // both stay true with hooks missing. Ages are seconds since a hook
+        // last ran / last denied, or -1 for "not since this instance loaded",
+        // which is what distinguishes a quiet shield from a blind one.
+        var first: ?[]const u8 = null;
+        const missing = self.verifyPins(&first);
+        const total = self.pin_paths.items.len;
+        const now = monotonicNs();
+        const check_age: i64 = if (vals[STAT_LAST_CHECK] == 0) -1 else @intCast((now -| vals[STAT_LAST_CHECK]) / 1_000_000_000);
+        const deny_age: i64 = if (vals[STAT_LAST_DENY] == 0) -1 else @intCast((now -| vals[STAT_LAST_DENY]) / 1_000_000_000);
+
+        const seg2 = std.fmt.bufPrint(buf[n..], ",\"verdict\":\"{s}\",\"hooks_expected\":{d},\"hooks_pinned\":{d},\"missing_hook\":\"{s}\",\"last_check_age_s\":{d},\"last_deny_age_s\":{d},\"uptime_s\":{d}", .{
+            if (missing == 0) "ENFORCING" else "NOT_ENFORCING",
+            total,
+            total - missing,
+            if (first) |f| std.fs.path.basename(f) else "",
+            check_age,
+            deny_age,
+            (now -| self.started_ns) / 1_000_000_000,
+        }) catch return;
+        n += seg2.len;
+
         const tail = std.fmt.bufPrint(buf[n..], "}}\n", .{}) catch return;
         n += tail.len;
         const written = buf[0..n];
@@ -928,7 +1190,22 @@ const stat_names = [_][]const u8{
     "path_trunc",
     "free_allow",
     "guard_escape",
+    "last_check_ns",
+    "last_deny_ns",
 };
+
+/// Index of the timestamp slots in `stat_names` / enum stat_counter.
+const STAT_LAST_CHECK: usize = 9;
+const STAT_LAST_DENY: usize = 10;
+
+/// Monotonic now, in ns - the same clock the BPF side stamps with.
+fn monotonicNs() u64 {
+    // std.time.Instant/Timer do not exist in this Zig; time.h is not in the
+    // cImport either, so go through std.c (same clock the BPF side stamps).
+    var ts: std.c.timespec = undefined;
+    if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
+    return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
+}
 
 /// Why a path-keyed allowlist entry cannot be trusted, or that it is absent.
 const EntryCheck = struct {
@@ -1013,6 +1290,68 @@ fn vetExeAllowlist(list_name: []const u8, list: []const []const u8, critical: bo
         }
     }
     return kept[0..n];
+}
+
+// ===================================================================
+// Startup re-tag of ALREADY-RUNNING processes
+// ===================================================================
+
+/// One live process as seen in /proc during the startup sweep.
+const LiveProc = struct {
+    pid: u32,
+    ppid: u32,
+    own: u8, // tag earned from this process's OWN exe; 0 = no direct match
+};
+
+/// PPid from /proc/<pid>/status. 0 when unreadable (process exited mid-sweep).
+fn readProcPpid(pid: u32) u32 {
+    var pbuf: [64]u8 = undefined;
+    const path = std.fmt.bufPrint(&pbuf, "/proc/{d}/status", .{pid}) catch return 0;
+    var buf: [4096]u8 = undefined;
+    const txt = readSmall(path, &buf) catch return 0;
+    const idx = std.mem.indexOf(u8, txt, "PPid:") orelse return 0;
+    const rest = std.mem.trimStart(u8, txt[idx + 5 ..], " \t");
+    const end = std.mem.indexOfAny(u8, rest, " \n\r\t") orelse rest.len;
+    return std.fmt.parseInt(u32, rest[0..end], 10) catch 0;
+}
+
+/// Absolute exe path from /proc/<pid>/exe. Null for kernel threads (no exe) and
+/// for processes that exit mid-sweep - both are simply skipped.
+fn readProcExe(pid: u32, buf: []u8) ?[]const u8 {
+    var pbuf: [64]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&pbuf, "/proc/{d}/exe", .{pid}) catch return null;
+    const n = c.readlink(path.ptr, buf.ptr, buf.len);
+    if (n <= 0) return null;
+    var len: usize = @intCast(n);
+    if (len >= buf.len) return null;
+
+    // The kernel appends " (deleted)" when the executable has been replaced or
+    // unlinked since exec - which is the NORMAL state for anything installed by
+    // a package manager that rewrites in place (npm does this to claude.exe).
+    // Leaving the suffix on silently defeats every basename match, so the sweep
+    // would report a tally and tag nothing that mattered.
+    const deleted_suffix = " (deleted)";
+    if (len > deleted_suffix.len and
+        std.mem.eql(u8, buf[len - deleted_suffix.len .. len], deleted_suffix))
+    {
+        len -= deleted_suffix.len;
+    }
+    return buf[0..len];
+}
+
+fn baseNameOf(path: []const u8) []const u8 {
+    const i = std.mem.lastIndexOfScalar(u8, path, '/') orelse return path;
+    return path[i + 1 ..];
+}
+
+fn listHasPath(list: []const []const u8, path: []const u8) bool {
+    for (list) |e| if (std.mem.eql(u8, e, path)) return true;
+    return false;
+}
+
+fn listHasName(list: []const []const u8, name: []const u8) bool {
+    for (list) |e| if (std.mem.eql(u8, e, name)) return true;
+    return false;
 }
 
 // ===================================================================

@@ -28,6 +28,40 @@
 # plain copy of the harness binary).
 set -euo pipefail
 
+# ---------------------------------------------------------------------------
+# PRECONDITION: the shield must be verifiably ENFORCING before a single vector
+# runs. Every case in this suite asserts a REFUSAL, and a shield that is loaded
+# but not actually attached refuses nothing - so a blind shield produces a clean
+# PASS sheet. That is worse than having no suite at all, because it manufactures
+# evidence for the opposite of the truth.
+#
+# The loader publishes a verdict it derives from re-checking its own pins;
+# `--status` exits non-zero unless every hook is still attached.
+# ---------------------------------------------------------------------------
+GS_LOADER="${GS_LOADER:-/opt/guardian-shield/guardian_shield_loader}"
+GS_CONFIG="${GS_CONFIG:-/opt/guardian-shield/config.json}"
+
+require_enforcing() {
+    if [ ! -x "$GS_LOADER" ]; then
+        echo "REFUSING TO RUN: loader not found at $GS_LOADER" >&2
+        echo "  Set GS_LOADER/GS_CONFIG if the shield lives elsewhere." >&2
+        exit 2
+    fi
+    local out rc
+    out=$("$GS_LOADER" "$GS_CONFIG" --status 2>&1); rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "REFUSING TO RUN: the shield is not enforcing." >&2
+        echo "$out" | sed 's/^/  /' >&2
+        echo "  Every case here asserts a refusal, so this suite would report" >&2
+        echo "  PASS against a shield that is blind. Fix enforcement first." >&2
+        exit 2
+    fi
+    echo "precondition OK - shield verified enforcing:"
+    echo "$out" | sed 's/^/  /'
+}
+require_enforcing
+
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="${GS_BYPASS_BIN:-$HERE/../zig-out/bin/gs_bypass_test}"
 PROTECTED_DIR="${1:-$HOME/gs_test_protected}"   # MUST be covered by loader protected_paths

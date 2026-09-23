@@ -359,6 +359,12 @@ enum stat_counter {
     STAT_FREE_ALLOW = 7,   // op allowed because a path component was a free basename
     STAT_GUARD_ESCAPE = 8,  // rename/link denied: it would have moved a guarded
                            // path somewhere less guarded than where it sat
+
+    // TIMESTAMPS, not counters (ktime ns). A hook that is attached but never
+    // runs and a hook that is GONE look identical from userspace unless the
+    // kernel side says "I ran". These are that positive signal.
+    STAT_LAST_CHECK_NS = 9,  // a filesystem hook last evaluated something
+    STAT_LAST_DENY_NS = 10,  // a filesystem hook last denied something
 };
 
 // `aux` qualifier on a filesystem violation, so a denial the operator did not
@@ -446,6 +452,16 @@ struct walk_ctx {
 // ===================================================================
 // SMALL HELPERS
 // ===================================================================
+
+/// Record "a hook ran just now" into a stats slot. Distinct from bump(): the
+/// slot holds a monotonic timestamp, so userspace can tell a quiet shield from
+/// a detached one instead of inferring liveness from the process existing.
+static __always_inline void stamp(enum stat_counter c)
+{
+    __u32 k = c;
+    __u64 now = bpf_ktime_get_ns();
+    bpf_map_update_elem(&stats, &k, &now, BPF_ANY);
+}
 
 static __always_inline void bump(enum stat_counter c)
 {
@@ -835,6 +851,7 @@ static __always_inline int fs_guard_dentry(struct dentry *dentry,
         return 0;
 
     bump(STAT_FS_CHECKS);
+    stamp(STAT_LAST_CHECK_NS);
 
     // Source and destination occupy DIFFERENT per-CPU slots, so both sets of
     // path bytes are still intact at logging time. A denial names what was
@@ -915,6 +932,7 @@ static __always_inline int fs_guard_dentry(struct dentry *dentry,
         log_violation(ev, tag, enforced, buf->data, len,
                       tbuf ? tbuf->data : 0, tbuf ? tlen : 0, 0, aux);
         bump(STAT_FS_BLOCKED);
+        stamp(STAT_LAST_DENY_NS);
         if (cfg->log_only)
             return 0;
         return -EPERM;
