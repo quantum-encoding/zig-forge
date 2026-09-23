@@ -564,7 +564,9 @@ pub const FastWalker = struct {
     thread_count: u32 = 0,
 
     // Results. `files` is final (hard links resolved) only after `finish()`.
-    files: std.ArrayListUnmanaged(FastFileEntry) = .empty,
+    /// Every file found, in walk order: a worker's records are appended as
+    /// it is absorbed, so one directory's files stay together.
+    files: std.ArrayListUnmanaged(types.FileEntry) = .empty,
     dirs: std.ArrayListUnmanaged(DirRecord) = .empty,
     links: std.ArrayListUnmanaged(LinkRecord) = .empty,
     stats: WalkStats = .{},
@@ -774,7 +776,22 @@ pub const FastWalker = struct {
             return err;
         };
         self.stats.add(worker.stats);
-        try self.files.appendSlice(self.allocator, worker.files.items);
+        // Converted here, one worker's batch at a time, so the walk's own
+        // records and the final list are never both whole in memory.
+        try self.files.ensureUnusedCapacity(self.allocator, worker.files.items.len);
+        for (worker.files.items) |fast| {
+            self.files.appendAssumeCapacity(.{
+                .path = fast.path,
+                .size = fast.size,
+                .inode = fast.ino,
+                .dev = fast.dev,
+                .mtime = fast.mtime,
+                .hash = null,
+                .quick_hash = null,
+                .nlink = fast.nlink,
+            });
+        }
+        worker.files.clearAndFree(self.allocator);
         try self.dirs.appendSlice(self.allocator, worker.dirs.items);
         try self.links.appendSlice(self.allocator, worker.links.items);
         try self.marks.appendSlice(self.allocator, worker.marks.items);
@@ -809,7 +826,7 @@ pub const FastWalker = struct {
         // a file out without touching the map; 0 means "not reported".
         for (self.files.items, 0..) |entry, i| {
             if (self.cannotBeAliased(entry)) continue;
-            const gop = try primary.getOrPut(self.allocator, .{ .dev = entry.dev, .ino = entry.ino });
+            const gop = try primary.getOrPut(self.allocator, .{ .dev = entry.dev, .ino = entry.inode });
             if (!gop.found_existing or
                 std.mem.order(u8, entry.path, self.files.items[gop.value_ptr.*].path) == .lt)
             {
@@ -822,7 +839,7 @@ pub const FastWalker = struct {
             // Extra links stay, pointed at their primary.
             for (self.files.items, 0..) |*entry, i| {
                 if (self.cannotBeAliased(entry.*)) continue;
-                const first = primary.get(.{ .dev = entry.dev, .ino = entry.ino }).?;
+                const first = primary.get(.{ .dev = entry.dev, .ino = entry.inode }).?;
                 if (first != i) {
                     entry.link_of = first;
                     self.stats.hard_links_skipped += 1;
@@ -839,7 +856,7 @@ pub const FastWalker = struct {
         defer is_extra.deinit(self.allocator);
         for (self.files.items, 0..) |entry, i| {
             if (self.cannotBeAliased(entry)) continue;
-            if (primary.get(.{ .dev = entry.dev, .ino = entry.ino }).? != i) is_extra.set(i);
+            if (primary.get(.{ .dev = entry.dev, .ino = entry.inode }).? != i) is_extra.set(i);
         }
         var kept: usize = 0;
         for (self.files.items, 0..) |entry, i| {
@@ -858,7 +875,7 @@ pub const FastWalker = struct {
     /// symlink to a file — or a symlinked directory above it — gives the same
     /// inode a second path without being a hard link, and missing that would
     /// report a file as a duplicate of itself.
-    fn cannotBeAliased(self: *const FastWalker, entry: FastFileEntry) bool {
+    fn cannotBeAliased(self: *const FastWalker, entry: types.FileEntry) bool {
         return entry.nlink == 1 and !self.follow_symlinks;
     }
 
@@ -920,7 +937,7 @@ pub const FastWalker = struct {
     /// owns the storage and must `deinit` it. The walker's lists stay valid for
     /// as long as that storage lives.
     ///
-    /// Together with `toFileEntriesBorrowed` this is how a scan keeps ONE copy
+    /// Together with `takeFiles` this is how a scan keeps ONE copy
     /// of each path instead of two: measured on 642k files, the second copy
     /// (one small heap allocation per file) was a quarter of peak memory.
     pub fn takeStrings(self: *FastWalker) StringStorage {
@@ -930,28 +947,15 @@ pub const FastWalker = struct {
         return storage;
     }
 
-    /// The files as `types.FileEntry`, pointing at the walker's own path
-    /// strings. Only valid while the storage from `takeStrings` (or the walker)
-    /// is alive; the entries must NOT be passed to `FileEntry.deinit`.
-    pub fn toFileEntriesBorrowed(self: *FastWalker, allocator: std.mem.Allocator) !std.ArrayListUnmanaged(types.FileEntry) {
+    /// Hand the file list to the caller, who then owns it. The entries point
+    /// at the walker's path strings: they are only valid while the storage
+    /// from `takeStrings` (or the walker) is alive, and must NOT be passed to
+    /// `FileEntry.deinit`. Indices (`link_of`) are unchanged.
+    pub fn takeFiles(self: *FastWalker) std.ArrayListUnmanaged(types.FileEntry) {
         std.debug.assert(self.finished);
-        var entries: std.ArrayListUnmanaged(types.FileEntry) = .empty;
-        errdefer entries.deinit(allocator);
-        try entries.ensureTotalCapacityPrecise(allocator, self.files.items.len);
-
-        for (self.files.items) |fast_entry| {
-            entries.appendAssumeCapacity(.{
-                .path = fast_entry.path,
-                .size = fast_entry.size,
-                .inode = fast_entry.ino,
-                .dev = fast_entry.dev,
-                .mtime = fast_entry.mtime,
-                .hash = null,
-                .quick_hash = null,
-                .link_of = fast_entry.link_of,
-            });
-        }
-        return entries;
+        const files = self.files;
+        self.files = .empty;
+        return files;
     }
 };
 

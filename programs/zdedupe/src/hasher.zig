@@ -39,6 +39,25 @@ pub const FileHasher = struct {
         return self.hashFileLimited(path, null);
     }
 
+    /// Hash the file `name` inside the open directory `dir_fd`.
+    pub fn hashFileAt(self: *const FileHasher, dir_fd: c_int, name: [*:0]const u8) !Hash {
+        return self.hashAtLimited(dir_fd, name, null);
+    }
+
+    /// Quick hash of the file `name` inside the open directory `dir_fd`.
+    pub fn hashFileQuickAt(self: *const FileHasher, dir_fd: c_int, name: [*:0]const u8, max_bytes: usize) !Hash {
+        return self.hashAtLimited(dir_fd, name, max_bytes);
+    }
+
+    fn hashAtLimited(self: *const FileHasher, dir_fd: c_int, name: [*:0]const u8, max_bytes: ?usize) !Hash {
+        const fd = try openRegularFileAt(dir_fd, name);
+        defer _ = libc.close(fd);
+        return switch (self.algorithm) {
+            .blake3 => hashFd(std.crypto.hash.Blake3, fd, max_bytes, self.monitor),
+            .sha256 => hashFd(std.crypto.hash.sha2.Sha256, fd, max_bytes, self.monitor),
+        };
+    }
+
     /// Hash first N bytes of file (quick hash for fast rejection)
     pub fn hashFileQuick(self: *const FileHasher, path: []const u8, max_bytes: usize) !Hash {
         return self.hashFileLimited(path, max_bytes);
@@ -78,7 +97,17 @@ fn openRegularFile(path: []const u8) !c_int {
     path_buf[path.len] = 0;
     const path_z: [*:0]const u8 = @ptrCast(&path_buf);
 
-    const fd = libc.open(path_z, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, @as(libc.mode_t, 0));
+    return openRegularFileAt(AT_FDCWD, path_z);
+}
+
+const AT_FDCWD: c_int = if (builtin.os.tag.isDarwin()) -2 else -100;
+
+/// `openRegularFile` relative to an open directory: the kernel resolves one
+/// name instead of every component of an absolute path. On a scan of millions
+/// of files the vnode cache cannot hold the tree, so each of those components
+/// is a real lookup - this is what keeps hashing fast at scale.
+pub fn openRegularFileAt(dir_fd: c_int, name: [*:0]const u8) !c_int {
+    const fd = libc.openat(dir_fd, name, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, @as(libc.mode_t, 0));
     if (fd < 0) return error.CannotOpenFile;
     errdefer _ = libc.close(fd);
 
@@ -102,7 +131,10 @@ pub fn hashFileSha256(path: []const u8, max_bytes: ?usize) !Hash {
 fn hashFileWith(comptime Hasher: type, path: []const u8, max_bytes: ?usize, monitor: ?*const types.Monitor) !Hash {
     const fd = try openRegularFile(path);
     defer _ = libc.close(fd);
+    return hashFd(Hasher, fd, max_bytes, monitor);
+}
 
+fn hashFd(comptime Hasher: type, fd: c_int, max_bytes: ?usize, monitor: ?*const types.Monitor) !Hash {
     var hasher = Hasher.init(.{});
     var buf: [BUFFER_SIZE]u8 = undefined;
     var total_read: usize = 0;

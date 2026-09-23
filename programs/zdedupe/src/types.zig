@@ -23,6 +23,9 @@ pub const FileEntry = struct {
     /// by directory analysis, which has to know that a directory *contains*
     /// the file; the file-level pipeline never groups or hashes such entries.
     link_of: ?usize = null,
+    /// Hard-link count from the walk (0 = unknown); decides which entries can
+    /// share an inode.
+    nlink: u32 = 0,
 
     pub fn deinit(self: *FileEntry, allocator: std.mem.Allocator) void {
         allocator.free(self.path);
@@ -598,6 +601,19 @@ pub const DuplicateSummary = struct {
     excluded_entries: u64 = 0,
     /// Scan roots dropped because another root already covers them.
     overlapping_roots: u64 = 0,
+    /// Zero-byte files: identical by definition, never read or reported.
+    empty_files: u64 = 0,
+    /// Files dropped before any hashing because no other file has their size.
+    unique_size_files: u64 = 0,
+    /// Sizes shared by two or more files; only their files are read.
+    size_groups: u64 = 0,
+    /// Files in those groups.
+    candidate_files: u64 = 0,
+    /// Candidates larger than the quick-hash prefix, read for their prefix.
+    quick_hash_jobs: u64 = 0,
+    /// Files read in full: small candidates, and larger ones whose prefix
+    /// matched another's.
+    full_hash_jobs: u64 = 0,
 
     pub fn spaceSavingsHuman(self: *const DuplicateSummary, buf: []u8) []const u8 {
         return formatBytes(self.space_savings, buf);

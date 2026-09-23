@@ -77,6 +77,11 @@ pub const ReportWriter = struct {
         if (summary.overlapping_roots > 0) {
             try writer.print("Roots skipped:    {} (already covered by another root)\n", .{summary.overlapping_roots});
         }
+        try writer.print(
+            "Candidates:       {} files in {} shared sizes ({} empty and {} unique-size files never read)\n",
+            .{ summary.candidate_files, summary.size_groups, summary.empty_files, summary.unique_size_files },
+        );
+        try writer.print("Hashed:           {} prefixes, {} whole files\n", .{ summary.quick_hash_jobs, summary.full_hash_jobs });
         try writer.writeAll("\n");
 
         // Folders first: one line here can stand for thousands of groups below.
@@ -145,7 +150,13 @@ pub const ReportWriter = struct {
         try writer.print("    \"space_savings\": {},\n", .{summary.space_savings});
         try writer.print("    \"space_savings_human\": \"{s}\",\n", .{types.formatBytes(summary.space_savings, &size_buf)});
         try writer.print("    \"excluded_entries\": {},\n", .{summary.excluded_entries});
-        try writer.print("    \"overlapping_roots\": {}\n", .{summary.overlapping_roots});
+        try writer.print("    \"overlapping_roots\": {},\n", .{summary.overlapping_roots});
+        try writer.print("    \"empty_files\": {},\n", .{summary.empty_files});
+        try writer.print("    \"unique_size_files\": {},\n", .{summary.unique_size_files});
+        try writer.print("    \"size_groups\": {},\n", .{summary.size_groups});
+        try writer.print("    \"candidate_files\": {},\n", .{summary.candidate_files});
+        try writer.print("    \"quick_hash_jobs\": {},\n", .{summary.quick_hash_jobs});
+        try writer.print("    \"full_hash_jobs\": {}\n", .{summary.full_hash_jobs});
         try writer.writeAll("  },\n");
 
         // Groups
