@@ -414,13 +414,19 @@ struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
     __type(key, __u32);
     __type(value, struct recon_buf);
-    __uint(max_entries, 1);
+    // Two slots, not one: a rename/link decision needs BOTH paths, and a hook
+    // that logged only the surviving one would name a destination that does not
+    // exist. Per-CPU, so the second slot costs one buffer per core.
+    __uint(max_entries, 2);
 } recon_buf_map SEC(".maps");
 
-static __always_inline struct recon_buf *get_recon_buf(void)
+#define RECON_SLOT_SRC 0u
+#define RECON_SLOT_DST 1u
+
+static __always_inline struct recon_buf *get_recon_buf(__u32 slot)
 {
-    __u32 z = 0;
-    return bpf_map_lookup_elem(&recon_buf_map, &z);
+    __u32 k = slot & 1u;
+    return bpf_map_lookup_elem(&recon_buf_map, &k);
 }
 
 // Small STACK control struct = the bpf_loop context. Kernel pointers are stored
@@ -433,6 +439,7 @@ struct walk_ctx {
     __u32 off;         // emit offset
     __u8  done;
     __u32 free_mask;   // OR of scope masks of components matching free_basenames
+    __u32 slot;        // which recon_buf_map slot the callbacks write into
     __u8  _pad[2];
 };
 
@@ -496,7 +503,7 @@ static long collect_cb(__u32 i, void *c)
     if (ctx->done)
         return 1;
 
-    struct recon_buf *buf = get_recon_buf();
+    struct recon_buf *buf = get_recon_buf(ctx->slot);
     if (!buf) {
         ctx->done = 1;
         return 1;
@@ -546,7 +553,7 @@ static long emit_cb(__u32 k, void *c)
     if (k >= ctx->n)
         return 1;
 
-    struct recon_buf *buf = get_recon_buf();
+    struct recon_buf *buf = get_recon_buf(ctx->slot);
     if (!buf)
         return 1;
 
@@ -600,9 +607,11 @@ static long emit_cb(__u32 k, void *c)
 // buffer before the next reconstruct_path() call (they share the per-CPU slot).
 static __always_inline __u32 reconstruct_path(struct dentry *dentry,
                                               struct vfsmount *vfsmnt,
-                                              struct recon_buf **out_buf)
+                                              struct recon_buf **out_buf,
+                                              __u32 slot)
 {
     struct walk_ctx ctx = {};
+    ctx.slot = slot;
     // BPF_CORE_READ through a LOCAL typed pointer (relocates against struct mount).
     struct mount *m = container_of(vfsmnt, struct mount, mnt);
     ctx.d = (__u64)(long)dentry;
@@ -612,7 +621,7 @@ static __always_inline __u32 reconstruct_path(struct dentry *dentry,
     bpf_loop(MAX_DENTRY_DEPTH, collect_cb, &ctx, 0);
     bpf_loop(MAX_DENTRY_DEPTH, emit_cb, &ctx, 0);
 
-    struct recon_buf *buf = get_recon_buf();
+    struct recon_buf *buf = get_recon_buf(ctx.slot);
     if (!buf)
         return 0;
 
@@ -827,16 +836,18 @@ static __always_inline int fs_guard_dentry(struct dentry *dentry,
 
     bump(STAT_FS_CHECKS);
 
+    // Source and destination occupy DIFFERENT per-CPU slots, so both sets of
+    // path bytes are still intact at logging time. A denial names what was
+    // being moved and where it was going; naming only one leaves the operator
+    // reading a path that may not exist.
     struct recon_buf *buf = 0;
-    __u32 len = reconstruct_path(dentry, vfsmnt, &buf);
+    __u32 len = reconstruct_path(dentry, vfsmnt, &buf, RECON_SLOT_SRC);
     if (!buf)
         return 0;
     bool hit = path_is_protected(buf->data, len, ev_op_bit(ev));
 
-    // Protection the SOURCE carries, read BEFORE the destination is
-    // reconstructed - the per-CPU recon slot is reused and the source bytes are
-    // gone after that. Only rename/link have a destination, so this costs
-    // nothing on the single-path hooks.
+    // Protection the SOURCE carries. Only rename/link have a destination, so
+    // this costs nothing on the single-path hooks.
     __u16 src_ops = 0;
     if (tdentry)
         src_ops = path_guard_ops(buf->data, len, buf->free_mask);
@@ -853,13 +864,13 @@ static __always_inline int fs_guard_dentry(struct dentry *dentry,
         hit = false;
     }
 
-    // Secondary path (rename dst / link dst). path_is_protected copies out of
-    // the buffer immediately, so it is safe to reuse the per-CPU slot here.
+    // Secondary path (rename dst / link dst), into its own slot.
     bool thit = false;
     bool escape = false;
+    struct recon_buf *tbuf = 0;
+    __u32 tlen = 0;
     if (!hit && tdentry) {
-        struct recon_buf *tbuf = 0;
-        __u32 tlen = reconstruct_path(tdentry, tvfsmnt, &tbuf);
+        tlen = reconstruct_path(tdentry, tvfsmnt, &tbuf, RECON_SLOT_DST);
         if (tbuf) {
             bool dst_free =
                 (tbuf->free_mask & free_scope_bits(tbuf->data, tlen)) != 0;
@@ -890,9 +901,6 @@ static __always_inline int fs_guard_dentry(struct dentry *dentry,
             __u16 dst_ops = path_guard_ops(tbuf->data, tlen, tbuf->free_mask);
             if (src_ops & ~dst_ops)
                 escape = true;
-
-            len = tlen;
-            buf = tbuf;
         }
     }
 
@@ -903,7 +911,9 @@ static __always_inline int fs_guard_dentry(struct dentry *dentry,
             bump(STAT_GUARD_ESCAPE);
             aux = GS_AUX_GUARD_ESCAPE;
         }
-        log_violation(ev, tag, enforced, buf->data, len, 0, 0, 0, aux);
+        // Source as `path`, destination (when there is one) as `target_path`.
+        log_violation(ev, tag, enforced, buf->data, len,
+                      tbuf ? tbuf->data : 0, tbuf ? tlen : 0, 0, aux);
         bump(STAT_FS_BLOCKED);
         if (cfg->log_only)
             return 0;

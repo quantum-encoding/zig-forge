@@ -562,8 +562,12 @@ const Loader = struct {
         try self.populateFreeNames();
 
         // --- full-path allowlists ---
-        try self.populateExeMap("exempt_exes", self.cfg.exempt_exes);
-        try self.populateExeMap("trusted_exes", self.cfg.trusted_exes); // MUST include the loader
+        // Vetted before they are loaded: these two lists are matched on the exec
+        // path string, so an entry the confined uid can write is an escape.
+        const exempt_ok = try vetExeAllowlist("exempt_exes", self.cfg.exempt_exes, false);
+        const trusted_ok = try vetExeAllowlist("trusted_exes", self.cfg.trusted_exes, true);
+        try self.populateExeMap("exempt_exes", exempt_ok);
+        try self.populateExeMap("trusted_exes", trusted_ok); // MUST include the loader
         // --- trusted_inodes ({ino,dev}). Trust the loader by exe identity so a
         // relative-path --unpin still matches (path-string match would fail). ---
         try self.populateTrustedInodes();
@@ -584,7 +588,7 @@ const Loader = struct {
             n_creds,
             self.cfg.agent_exes.len,
             self.cfg.build_exes.len,
-            self.cfg.trusted_exes.len,
+            trusted_ok.len, // what actually loaded, not what was configured
             n_egress,
             self.cfg.free_basenames.len,
             self.cfg.hardening_mode,
@@ -925,6 +929,91 @@ const stat_names = [_][]const u8{
     "free_allow",
     "guard_escape",
 };
+
+/// Why a path-keyed allowlist entry cannot be trusted, or that it is absent.
+const EntryCheck = struct {
+    verdict: enum { ok, absent, unsafe },
+    reason: []const u8 = "",
+};
+
+/// A path-keyed allowlist entry is only as trustworthy as the weakest link in
+/// its own path. `exempt_exes` and `trusted_exes` are matched on the exec'd
+/// path STRING, so whoever can write that path chooses what runs under the tag
+/// - and these two tags are exactly what containment rests on. A file a
+/// non-root uid can rewrite, or a file inside a directory a non-root uid can
+/// write (the file can be unlinked and replaced), is an entry the confined
+/// process can point at its own binary.
+///
+/// Checks the leaf and every parent directory up to "/", because a root-owned
+/// file under a user-writable directory is not protected by its own mode.
+fn exeEntryCheck(path: []const u8) EntryCheck {
+    if (path.len == 0 or path[0] != '/') return .{ .verdict = .unsafe, .reason = "not an absolute path" };
+    if (path.len >= MAX_EXE_PATH) return .{ .verdict = .unsafe, .reason = "longer than the map key" };
+
+    var buf: [MAX_EXE_PATH + 1]u8 = undefined;
+    var end: usize = path.len;
+    var is_leaf = true;
+    while (true) {
+        const zp = std.fmt.bufPrintZ(&buf, "{s}", .{path[0..end]}) catch
+            return .{ .verdict = .unsafe, .reason = "longer than the map key" };
+
+        var st: c.struct_stat = undefined;
+        if (c.stat(zp.ptr, &st) != 0) {
+            // An absent leaf grants nothing today - nothing can exec it. It is
+            // still reported, because the day anything creates that path the
+            // entry starts handing out a tag nobody re-reviewed. A missing
+            // PARENT is different: the entry cannot be evaluated at all.
+            if (is_leaf) return .{ .verdict = .absent };
+            return .{ .verdict = .unsafe, .reason = "a parent directory does not exist" };
+        }
+        if (st.st_uid != 0) return .{ .verdict = .unsafe, .reason = "owned by a non-root uid" };
+        const mode: u32 = @intCast(st.st_mode);
+        if (mode & 0o022 != 0) return .{ .verdict = .unsafe, .reason = "writable by group or other" };
+
+        is_leaf = false;
+        if (end <= 1) break;
+        end = std.mem.lastIndexOfScalar(u8, path[0..end], '/') orelse break;
+        if (end == 0) end = 1; // keep the root slash
+    }
+    return .{ .verdict = .ok };
+}
+
+/// Vet an allowlist before it reaches the kernel. An unsafe entry is DROPPED,
+/// never fatal, in EITHER list - a shield that refuses to start protects
+/// nothing, so failing the load would trade a narrow hole for an unguarded
+/// machine. Dropping is the fail-secure direction: the tag is simply not
+/// granted, and whatever relied on it gets denied rather than silently
+/// escaping.
+///
+/// Dropping a TRUSTED entry does not lock the operator out of their own
+/// teardown: the loader additionally trusts itself by exe INODE
+/// (populateTrustedInodes inserts /proc/self/exe), which no path check can
+/// take away, so `--unpin` keeps working under hardening_mode even when a
+/// badly-placed trusted_exes path is rejected.
+fn vetExeAllowlist(list_name: []const u8, list: []const []const u8, critical: bool) ![]const []const u8 {
+    const kept = try g_alloc.alloc([]const u8, list.len);
+    var n: usize = 0;
+    for (list) |p| {
+        const chk = exeEntryCheck(p);
+        switch (chk.verdict) {
+            .ok => {
+                kept[n] = p;
+                n += 1;
+            },
+            .absent => std.log.warn("{s}: '{s}' does not exist - entry has no effect", .{ list_name, p }),
+            .unsafe => {
+                // Louder for trusted_exes: that tag may call bpf(), so a
+                // writable path there is a route to dismantling the shield.
+                if (critical) {
+                    std.log.err("{s}: '{s}' is {s} - DROPPED. A trusted exe may call bpf(); a path the confined uid can write must never carry that tag. Install it root-owned.", .{ list_name, p, chk.reason });
+                } else {
+                    std.log.warn("{s}: '{s}' is {s} - DROPPED (that path would let the confined uid claim this tag).", .{ list_name, p, chk.reason });
+                }
+            },
+        }
+    }
+    return kept[0..n];
+}
 
 // ===================================================================
 // Pin helpers / teardown
