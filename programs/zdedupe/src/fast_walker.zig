@@ -282,6 +282,12 @@ const Worker = struct {
             return;
         }
 
+        if (w.skip_app_libraries and !w.isRoot(dir_path) and isAppLibraryDir(dir_path)) {
+            self.stats.excluded += 1;
+            try self.markParent(dir_path, .skipped);
+            return;
+        }
+
         if (w.exclude_cache_dirs and !w.isRoot(dir_path) and self.isCacheDir(dir_path)) {
             self.stats.excluded += 1;
             try self.markParent(dir_path, .skipped);
@@ -534,6 +540,13 @@ const Worker = struct {
         try self.marks.append(self.scratch(), .{ .path = parent, .kind = kind });
     }
 };
+
+fn isAppLibraryDir(dir_path: []const u8) bool {
+    for (types.Config.app_library_dirs) |suffix| {
+        if (std.mem.endsWith(u8, dir_path, suffix)) return true;
+    }
+    return false;
+}
 
 /// High-performance directory walker
 pub const FastWalker = struct {
@@ -1037,6 +1050,43 @@ test "another app's library package is skipped by its extension" {
     try fw.finish();
     try std.testing.expectEqual(@as(usize, 1), fw.files.items.len);
     try std.testing.expectEqual(@as(u64, 1), fw.stats.excluded);
+}
+
+test "Steam's install and game libraries are skipped, unless picked as the root" {
+    const Scratch = @import("testing_scratch.zig").Scratch;
+    var scratch = try Scratch.init(std.testing.allocator, "steam");
+    defer scratch.deinit();
+    try scratch.makeDir(".local");
+    try scratch.makeDir(".local/share");
+    try scratch.makeDir(".local/share/Steam");
+    try scratch.writeFile(".local/share/Steam/steam.sh", "x");
+    try scratch.makeDir("Games");
+    try scratch.makeDir("Games/steamapps");
+    try scratch.makeDir("Games/steamapps/common");
+    try scratch.writeFile("Games/steamapps/common/game.pak", "x");
+    // Only whole components count.
+    try scratch.makeDir("notsteamapps");
+    try scratch.writeFile("notsteamapps/kept.txt", "x");
+    try scratch.writeFile("kept.txt", "x");
+
+    var fw = FastWalker.init(std.testing.allocator);
+    defer fw.deinit();
+    fw.setIncludeHidden(true);
+    fw.setSkipAppLibraries(true);
+    try fw.walk(scratch.path);
+    try fw.finish();
+    try std.testing.expectEqual(@as(usize, 2), fw.files.items.len);
+    try std.testing.expectEqual(@as(u64, 2), fw.stats.excluded);
+
+    // A library the user picks is scanned: they asked for it by name.
+    const lib = try scratch.join("Games/steamapps");
+    defer std.testing.allocator.free(lib);
+    var picked = FastWalker.init(std.testing.allocator);
+    defer picked.deinit();
+    picked.setSkipAppLibraries(true);
+    try picked.walk(lib);
+    try picked.finish();
+    try std.testing.expectEqual(@as(usize, 1), picked.files.items.len);
 }
 
 test "an excluded path skips that folder with its contents, or that one file" {

@@ -237,8 +237,6 @@ pub const Config = struct {
     /// `~/.ssh` and `~/.aws` looks exactly like one exfiltrating them. Skipping
     /// them costs a user nothing — nobody reclaims space by deduplicating a
     /// private key — and keeps the scan off every such tool's radar.
-    ///
-    /// Exact path components, matched like any other exclude.
     /// Package extensions `skip_app_libraries` prunes.
     pub const app_library_suffixes = [_][]const u8{
         ".photoslibrary",
@@ -249,6 +247,22 @@ pub const Config = struct {
         ".tvlibrary",
     };
 
+    /// Directories `skip_app_libraries` prunes by where they sit: a game
+    /// launcher's install and its game libraries. Steam checks game files
+    /// against its manifests, so a "duplicate" deleted there is downloaded
+    /// again or breaks the game, and Proton prefixes hold files games expect
+    /// at those exact paths. Matched as the end of a directory's path on
+    /// whole components; `steamapps` is every Steam library folder, on any
+    /// drive.
+    pub const app_library_dirs = [_][]const u8{
+        "/steamapps",
+        "/.local/share/Steam",
+        "/.steam",
+        "/.var/app/com.valvesoftware.Steam",
+        "/Library/Application Support/Steam",
+    };
+
+    /// Exact path components, matched like any other exclude.
     pub const credential_excludes = [_][]const u8{
         ".ssh",
         ".gnupg",

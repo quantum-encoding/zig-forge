@@ -147,7 +147,12 @@ void zdedupe_set_one_filesystem(zdedupe_ctx* ctx, bool one);
  * Skip library packages another app owns, by extension (default: true):
  * .photoslibrary, .migratedphotolibrary, .photolibrary, .aplibrary,
  * .musiclibrary, .tvlibrary. Their contents are the app's database, and
- * opening a Photos library makes macOS ask for photo-library access. Applies
+ * opening a Photos library makes macOS ask for photo-library access.
+ * The same switch skips Steam: every `steamapps` library folder, and the
+ * client's own install (~/.local/share/Steam, ~/.steam, the Flatpak's
+ * ~/.var/app/com.valvesoftware.Steam, ~/Library/Application Support/Steam).
+ * Steam checks game files against its manifests, so deleting a "duplicate"
+ * there re-downloads or breaks a game. A scan root is never skipped. Applies
  * to duplicate scans; a folder comparison compares everything it is given.
  */
 void zdedupe_set_skip_app_libraries(zdedupe_ctx* ctx, bool skip);
