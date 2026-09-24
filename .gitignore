@@ -150,3 +150,6 @@ programs/quantum_curl/root
 programs/zig_ai/test_ffi
 programs/zig_ai/test_delete.txt
 programs/zig-quantum-encryption/secrets
+
+# ── Git worktrees (never content; a worktree is a checkout, not a submodule) ──
+.worktrees/
