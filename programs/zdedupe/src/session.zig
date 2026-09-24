@@ -1122,7 +1122,9 @@ pub const Session = struct {
             if (!target) continue;
             if (unticked.count() > 0 and unticked.contains(try lossy(arena, member.path))) continue;
             taken += 1;
-            const key = try facetKey(arena, .location, member.path, base, roots) orelse continue;
+            // A file is somewhere by its folder: one directly in `base` counts
+            // as "here", never as a location of its own.
+            const key = try facetKey(arena, .location, parentOf(member.path), base, roots) orelse continue;
             try counter.add(arena, group.size, &.{key});
         }
         if (taken == 0) {
@@ -1522,7 +1524,7 @@ pub const Session = struct {
                 if (alive.len < 2 or !matcher.matches(group.size, alive)) continue;
                 paths.clearRetainingCapacity();
                 for (alive) |file| try paths.append(arena, file.path);
-                try collectKeys(arena, &keys, paths.items, query.by, matcher, base, roots);
+                try collectKeys(arena, &keys, paths.items, query.by, matcher, base, roots, .files);
                 try counter.add(arena, liveSavings(group.size, alive.len), keys.items);
             },
             .sets => for (0..self.reader.setCount()) |i| {
@@ -1531,7 +1533,7 @@ pub const Session = struct {
                 if (dirs.len < 2 or !matcher.matches(set.bytes, dirs)) continue;
                 paths.clearRetainingCapacity();
                 for (dirs) |dir| try paths.append(arena, dir.path);
-                try collectKeys(arena, &keys, paths.items, query.by, matcher, base, roots);
+                try collectKeys(arena, &keys, paths.items, query.by, matcher, base, roots, .folders);
                 try counter.add(arena, liveSavings(set.bytes, dirs.len), keys.items);
             },
             .overlaps => for (0..self.reader.overlapCount()) |i| {
@@ -1541,7 +1543,7 @@ pub const Session = struct {
                     try self.reader.sidePath(&pair.a),
                     try self.reader.sidePath(&pair.b),
                 };
-                try collectKeys(arena, &keys, &sides, query.by, matcher, base, roots);
+                try collectKeys(arena, &keys, &sides, query.by, matcher, base, roots, .folders);
                 try counter.add(arena, overlapBytes(&pair), keys.items);
             },
         }
@@ -2275,13 +2277,27 @@ fn collectKeys(
     matcher: *const Matcher,
     base: ?[]const u8,
     roots: []const []const u8,
+    kind: MemberKind,
 ) !void {
     out.clearRetainingCapacity();
     for (members) |path| {
         if (!matcher.memberSelected(path)) continue;
-        const key = try facetKey(arena, by, path, base, roots) orelse continue;
+        // A file's location is its folder, so a file directly in `base` counts
+        // as "here" rather than showing up as a location of its own.
+        const where = if (by == .location and kind == .files) parentOf(path) else path;
+        const key = try facetKey(arena, by, where, base, roots) orelse continue;
         try out.append(arena, key);
     }
+}
+
+/// What a finding's members are: files are located by their folder.
+const MemberKind = enum { files, folders };
+
+/// The folder holding `path`: everything before its last slash ("/" for a
+/// file at the top).
+fn parentOf(path: []const u8) []const u8 {
+    const i = std.mem.lastIndexOfScalar(u8, path, '/') orelse return path;
+    return if (i == 0) "/" else path[0..i];
 }
 
 /// Counts findings per facet. A finding contributes once to each distinct

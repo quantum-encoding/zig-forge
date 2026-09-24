@@ -2179,3 +2179,26 @@ test "identical sets sort by reclaim, by size or by copies" {
         try testing.expectEqual(c.counts[1], int(rows[1], "count"));
     }
 }
+
+test "a file is located by its folder, never as a location of its own" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const tree = [_]File{
+        .{ .path = "loose.bin", .byte = 'l', .size = 100 },
+        .{ .path = "sub/loose.bin", .byte = 'l', .size = 100 },
+    };
+    var fixture = try Fixture.init(gpa, "session-facet-files", &tree);
+    defer fixture.deinit();
+    const roots_json = try query(a, "[{s}]", .{try jsonString(a, fixture.tree.path)});
+    var s = try fixture.open(roots_json);
+    defer s.close();
+
+    const page = try parse(a, s.facets("{\"kind\":\"groups\",\"by\":\"location\",\"filters\":{},\"limit\":10}"));
+    for (field(page, "facets").array.items) |f| {
+        const key = field(f, "key").string;
+        try testing.expect(!std.mem.endsWith(u8, key, ".bin"));
+    }
+}
