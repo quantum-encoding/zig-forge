@@ -1248,7 +1248,7 @@ pub const Session = struct {
             try json.objectField("reclaimable");
             try json.write(liveSavings(set.bytes, dirs.len));
             try json.objectField("dirs");
-            try writeDirRows(json, arena, dirs[0..@min(dirs.len, set_members_in_row)]);
+            try writeDirRows(json, arena, dirs[0..@min(dirs.len, set_members_in_row)], self.protection());
             try json.endObject();
         }
         try json.endArray();
@@ -1259,7 +1259,14 @@ pub const Session = struct {
         try json.endObject();
     }
 
-    fn writeDirRows(json: *std.json.Stringify, arena: Allocator, dirs: []const AliveDir) !void {
+    /// `locked` is what a folder delete would say of the folder: it is, or
+    /// holds, a protected location, so it is never deleted.
+    fn writeDirRows(
+        json: *std.json.Stringify,
+        arena: Allocator,
+        dirs: []const AliveDir,
+        guard: protect_mod.Protection,
+    ) !void {
         try json.beginArray();
         for (dirs) |dir| {
             try json.beginObject();
@@ -1269,6 +1276,8 @@ pub const Session = struct {
             try json.write(millis(dir.newest_mtime));
             try json.objectField("skipped_entries");
             try json.write(dir.skipped_entries);
+            try json.objectField("locked");
+            try json.write(guard.guardsFolder(dir.path));
             try json.endObject();
         }
         try json.endArray();
@@ -1283,7 +1292,7 @@ pub const Session = struct {
 
         var out: std.Io.Writer.Allocating = .init(arena);
         var json: std.json.Stringify = .{ .writer = &out.writer };
-        writeDirRows(&json, arena, dirs) catch |err| return self.callFailed(err);
+        writeDirRows(&json, arena, dirs, self.protection()) catch |err| return self.callFailed(err);
         return self.finishJson(&out);
     }
 
@@ -1344,9 +1353,12 @@ pub const Session = struct {
         arena: Allocator,
         side: *const store.Side,
     ) !void {
+        const path = try self.reader.sidePath(side);
         try json.beginObject();
         try json.objectField("path");
-        try json.write(try lossy(arena, try self.reader.sidePath(side)));
+        try json.write(try lossy(arena, path));
+        try json.objectField("locked");
+        try json.write(self.protection().guardsFolder(path));
         inline for (.{
             .{ "files", side.files },
             .{ "bytes", side.bytes },

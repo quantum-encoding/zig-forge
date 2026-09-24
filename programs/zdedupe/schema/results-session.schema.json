@@ -225,9 +225,13 @@
       "description": "One member folder of an identical set.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "newest_mtime", "skipped_entries"],
+      "required": ["path", "newest_mtime", "skipped_entries", "locked"],
       "properties": {
         "path": { "type": "string", "minLength": 1 },
+        "locked": {
+          "description": "The folder is, or holds, a protected location: a folder delete refuses it.",
+          "type": "boolean"
+        },
         "newest_mtime": { "$ref": "#/$defs/EpochMillis" },
         "skipped_entries": {
           "description": "Entries beneath this folder ignored on purpose (excludes, cache dirs, hidden files when off). A non-zero value must be surfaced next to any 'identical' claim — the verdict rests on what was actually read.",
@@ -306,9 +310,13 @@
       "description": "One folder of an overlapping pair.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "files", "bytes", "newest_mtime", "skipped_entries", "complete", "identical_copies", "shared_files", "shared_bytes", "only_count", "only"],
+      "required": ["path", "locked", "files", "bytes", "newest_mtime", "skipped_entries", "complete", "identical_copies", "shared_files", "shared_bytes", "only_count", "only"],
       "properties": {
         "path": { "type": "string", "minLength": 1 },
+        "locked": {
+          "description": "The folder is, or holds, a protected location: a folder delete refuses it.",
+          "type": "boolean"
+        },
         "files": { "type": "integer", "minimum": 0 },
         "bytes": { "$ref": "#/$defs/ByteCount" },
         "newest_mtime": { "$ref": "#/$defs/EpochMillis" },

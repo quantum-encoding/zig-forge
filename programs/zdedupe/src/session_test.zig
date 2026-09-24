@@ -2066,3 +2066,30 @@ test "credential stores and shell history are never read" {
         try testing.expect(std.mem.endsWith(u8, f.string, "/notes.txt"));
     }
 }
+
+test "folders in a protected location come back locked" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var fixture, const s = try openDirs(gpa, "session-folder-locked");
+    defer fixture.deinit();
+    defer s.close();
+
+    const page = try parse(a, s.identicalSets("{\"offset\":0,\"limit\":10}"));
+    const dirs = field(field(page, "rows").array.items[0], "dirs").array.items;
+    for (dirs) |d| try testing.expect(!field(d, "locked").bool);
+
+    // Protect the first copy's folder: it, and only it, is now locked.
+    const first = field(dirs[0], "path").string;
+    try testing.expect(s.setProtected(try query(a, "[{s}]", .{try jsonString(a, first)})));
+    const again = try parse(a, s.identicalSets("{\"offset\":0,\"limit\":10}"));
+    for (field(field(again, "rows").array.items[0], "dirs").array.items) |d| {
+        try testing.expectEqual(std.mem.eql(u8, field(d, "path").string, first), field(d, "locked").bool);
+    }
+    const members = try parse(a, s.setMembers(0));
+    for (members.array.items) |d| {
+        try testing.expectEqual(std.mem.eql(u8, field(d, "path").string, first), field(d, "locked").bool);
+    }
+}
