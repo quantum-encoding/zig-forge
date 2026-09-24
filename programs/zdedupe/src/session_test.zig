@@ -1590,7 +1590,7 @@ test "links, relative paths and missing keepers are refused" {
     try testing.expectEqualStrings("not a real folder (a link or a file)", reasons[0].array.items[1].string);
     try testing.expectEqualStrings("no surviving copy was named", reasons[1].array.items[1].string);
     try testing.expectEqualStrings("not an absolute folder path", reasons[2].array.items[1].string);
-    try testing.expectEqualStrings("not an absolute folder path", reasons[3].array.items[1].string);
+    try testing.expectEqualStrings("is, or holds, a protected location", reasons[3].array.items[1].string);
     try testing.expectEqualStrings("cannot be read", reasons[4].array.items[1].string);
 }
 
@@ -1792,4 +1792,231 @@ fn treePath(arena: Allocator, fixture: *const Fixture, dir: []const u8, name: []
 /// `<tree>/<sub_path>`, likewise.
 fn treeJoin(arena: Allocator, fixture: *const Fixture, sub_path: []const u8) ![]u8 {
     return std.fmt.allocPrint(arena, "{s}/{s}", .{ fixture.tree.path, sub_path });
+}
+
+// ===========================================================================
+// Keep rules and protected locations
+// ===========================================================================
+
+/// Downloads holds a copy of everything; each file also lives where it belongs.
+const keep_tree = [_]File{
+    .{ .path = "Downloads/report.pdf", .byte = 'r', .size = 2000 },
+    .{ .path = "Documents/report.pdf", .byte = 'r', .size = 2000 },
+    .{ .path = "Downloads/photo.jpg", .byte = 'p', .size = 1000 },
+    .{ .path = "Downloads/x/photo.jpg", .byte = 'p', .size = 1000 },
+    .{ .path = "Pictures/photo.jpg", .byte = 'p', .size = 1000 },
+    .{ .path = "vault/master.wav", .byte = 'w', .size = 800 },
+    .{ .path = "Downloads/master.wav", .byte = 'w', .size = 800 },
+};
+
+fn rowOfSize(page: std.json.Value, size: i64) ?std.json.Value {
+    for (field(page, "rows").array.items) |row| {
+        if (int(row, "size") == size) return row;
+    }
+    return null;
+}
+
+test "rows say which copy the keep rule keeps and which it would delete" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var fixture = try Fixture.init(gpa, "session-keep-rows", &keep_tree);
+    defer fixture.deinit();
+    var s = try fixture.open(null);
+    defer s.close();
+
+    const q = try query(a, "{{\"keep\":{{\"prefer_under\":[{s}]}}}}", .{
+        try jsonString(a, try treeJoin(a, &fixture, "Documents")),
+    });
+    const row = rowOfSize(try parse(a, s.groups(q)), 2000).?;
+    try testing.expectEqualStrings(try treeJoin(a, &fixture, "Documents/report.pdf"), field(row, "keeper").string);
+
+    const files = field(row, "files").array.items;
+    const targets = field(row, "targets").array.items;
+    const locked = field(row, "locked").array.items;
+    try testing.expectEqual(files.len, targets.len);
+    for (files, targets, locked) |file, target, lock| {
+        try testing.expectEqual(std.mem.indexOf(u8, file.string, "/Downloads/") != null, target.bool);
+        try testing.expect(!lock.bool);
+    }
+}
+
+test "a rule per type keeps photos in Pictures, whatever their age" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var fixture = try Fixture.init(gpa, "session-keep-type", &keep_tree);
+    defer fixture.deinit();
+    var s = try fixture.open(null);
+    defer s.close();
+
+    const selection = try query(a,
+        \\{{"rule":{{"filters":{{}},"keep":{{"by_type":[{{"ext":".jpg","prefer_under":[{s}]}}]}}}}}}
+    , .{try jsonString(a, try treeJoin(a, &fixture, "Pictures"))});
+    const report = try parse(a, s.delete(selection, false, null, null));
+    try testing.expectEqual(@as(i64, 0), int(report, "failed_count"));
+
+    try testing.expect(fixture.exists("Pictures/photo.jpg"));
+    try testing.expect(!fixture.exists("Downloads/photo.jpg"));
+    try testing.expect(!fixture.exists("Downloads/x/photo.jpg"));
+    // The other types fell back to one copy each, as before.
+    try testing.expectEqual(@as(usize, 1), @as(usize, @intFromBool(fixture.exists("Downloads/report.pdf"))) +
+        @intFromBool(fixture.exists("Documents/report.pdf")));
+}
+
+test "a pinned copy is the one that stays" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var fixture = try Fixture.init(gpa, "session-keep-pin", &keep_tree);
+    defer fixture.deinit();
+    var s = try fixture.open(null);
+    defer s.close();
+
+    const hash = field(rowOfSize(try parse(a, s.groups("{}")), 1000).?, "hash").string;
+    const pinned = try treeJoin(a, &fixture, "Downloads/x/photo.jpg");
+    const selection = try query(a,
+        \\{{"rule":{{"filters":{{"name":"photo.jpg"}},"keep":{{"pins":[{{"hash":"{s}","path":{s}}}]}}}}}}
+    , .{ hash, try jsonString(a, pinned) });
+    const report = try parse(a, s.delete(selection, false, null, null));
+    try testing.expectEqual(@as(i64, 2), int(report, "deleted"));
+    try testing.expect(fixture.exists("Downloads/x/photo.jpg"));
+    try testing.expect(!fixture.exists("Pictures/photo.jpg"));
+}
+
+test "delete_only_under empties a folder of what exists elsewhere" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var fixture = try Fixture.init(gpa, "session-keep-only-under", &keep_tree);
+    defer fixture.deinit();
+    var s = try fixture.open(null);
+    defer s.close();
+
+    const selection = try query(a, "{{\"rule\":{{\"filters\":{{}},\"keep\":{{\"delete_only_under\":[{s}]}}}}}}", .{
+        try jsonString(a, try treeJoin(a, &fixture, "Downloads")),
+    });
+    const report = try parse(a, s.delete(selection, false, null, null));
+    try testing.expectEqual(@as(i64, 4), int(report, "deleted"));
+    for ([_][]const u8{ "Downloads/report.pdf", "Downloads/photo.jpg", "Downloads/x/photo.jpg", "Downloads/master.wav" }) |gone| {
+        try testing.expect(!fixture.exists(gone));
+    }
+    for ([_][]const u8{ "Documents/report.pdf", "Pictures/photo.jpg", "vault/master.wav" }) |kept| {
+        try testing.expect(fixture.exists(kept));
+    }
+}
+
+test "a protected copy is never deleted, by a rule or by hand" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var fixture = try Fixture.init(gpa, "session-protected", &keep_tree);
+    defer fixture.deinit();
+    var s = try fixture.open(null);
+    defer s.close();
+
+    const vault = try treeJoin(a, &fixture, "vault");
+    try testing.expect(s.setProtected(try query(a, "[{s}]", .{try jsonString(a, vault)})));
+
+    const row = rowOfSize(try parse(a, s.groups("{\"filters\":{\"name\":\"master.wav\"}}")), 800).?;
+    const files = field(row, "files").array.items;
+    const locked = field(row, "locked").array.items;
+    const targets = field(row, "targets").array.items;
+    for (files, locked, targets) |file, lock, target| {
+        const in_vault = std.mem.startsWith(u8, file.string, vault);
+        try testing.expectEqual(in_vault, lock.bool);
+        // The vault copy is protected and the other is the one kept: nothing
+        // is marked, because a system copy does not make an ordinary one
+        // expendable.
+        try testing.expect(!target.bool);
+    }
+
+    // Hand-ticked, it is refused and stays.
+    const master = try treeJoin(a, &fixture, "vault/master.wav");
+    const by_hand = try parse(a, s.delete(try query(a, "{{\"rule\":null,\"extra\":[{s}]}}", .{try jsonString(a, master)}), false, null, null));
+    try testing.expectEqual(@as(i64, 0), int(by_hand, "deleted"));
+    try testing.expectEqualStrings("is in a protected location", field(by_hand, "failed").array.items[0].array.items[1].string);
+    try testing.expect(fixture.exists("vault/master.wav"));
+
+    // Cleaning Downloads: here the protected copy is the survivor.
+    const clean = try parse(a, s.delete(try query(a, "{{\"rule\":{{\"filters\":{{\"name\":\"master.wav\"}},\"keep\":{{\"delete_only_under\":[{s}]}}}}}}", .{
+        try jsonString(a, try treeJoin(a, &fixture, "Downloads")),
+    }), false, null, null));
+    try testing.expectEqual(@as(i64, 1), int(clean, "deleted"));
+    try testing.expect(fixture.exists("vault/master.wav"));
+    try testing.expect(!fixture.exists("Downloads/master.wav"));
+
+    const listed = try parse(a, s.protectedJson());
+    try testing.expectEqualStrings(vault, field(listed, "user").array.items[0].string);
+    try testing.expect(field(listed, "system").array.items.len > 0);
+}
+
+test "the plan says how much goes, and from where" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var fixture = try Fixture.init(gpa, "session-plan", &keep_tree);
+    defer fixture.deinit();
+    const roots_json = try query(a, "[{s}]", .{try jsonString(a, fixture.tree.path)});
+    var s = try fixture.open(roots_json);
+    defer s.close();
+    try testing.expect(s.setProtected(try query(a, "[{s}]", .{try jsonString(a, try treeJoin(a, &fixture, "vault"))})));
+
+    const downloads = try treeJoin(a, &fixture, "Downloads");
+    const plan = try parse(a, s.bulkPlan(try query(a, "{{\"filters\":{{}},\"keep\":{{\"delete_only_under\":[{s}]}},\"excluded\":[{s}]}}", .{
+        try jsonString(a, downloads),
+        try jsonString(a, try treeJoin(a, &fixture, "Downloads/x/photo.jpg")),
+    })));
+    // report.pdf, photo.jpg and master.wav from Downloads; the unticked copy stays.
+    try testing.expectEqual(@as(i64, 3), int(plan, "files"));
+    try testing.expectEqual(@as(i64, 2000 + 1000 + 800), int(plan, "bytes"));
+    try testing.expectEqual(@as(i64, 3), int(plan, "groups"));
+    try testing.expectEqual(@as(i64, 1), int(plan, "locked"));
+    try testing.expectEqual(@as(i64, 0), int(plan, "untouched"));
+
+    const from = field(plan, "from");
+    try testing.expectEqualStrings(fixture.tree.path, field(from, "base").string);
+    const facets = field(from, "facets").array.items;
+    try testing.expectEqual(@as(usize, 1), facets.len);
+    try testing.expectEqualStrings(downloads, field(facets[0], "key").string);
+    try testing.expectEqual(@as(i64, 3), int(facets[0], "count"));
+
+    // A bare filters object is not a plan query.
+    try testing.expect(s.bulkPlan("{\"text\":\"x\"}") == null);
+}
+
+test "a folder that is, or holds, a protected location is not deleted" {
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var fixture = try Fixture.init(gpa, "session-protected-folders", &keep_tree);
+    defer fixture.deinit();
+    var s = try fixture.open(null);
+    defer s.close();
+    try testing.expect(s.setProtected(try query(a, "[{s}]", .{try jsonString(a, try treeJoin(a, &fixture, "vault"))})));
+
+    var trash: FakeTrash = .{ .gpa = gpa };
+    defer trash.deinit();
+    const items = try query(a, "[{{\"path\":{s},\"keepers\":[]}},{{\"path\":{s},\"keepers\":[]}}]", .{
+        try jsonString(a, try treeJoin(a, &fixture, "vault")),
+        try jsonString(a, fixture.tree.path),
+    });
+    const report = try parse(a, s.deleteFolders(items, true, FakeTrash.callback, &trash));
+    try testing.expectEqual(@as(i64, 0), int(report, "deleted"));
+    try testing.expectEqual(@as(i64, 2), int(report, "failed_count"));
+    try testing.expect(fixture.exists("vault/master.wav"));
 }

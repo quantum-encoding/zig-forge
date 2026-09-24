@@ -541,6 +541,23 @@ pub export fn zdedupe_results_bulk_summary(r: ?*ZDedupeResults, filters_json: ?[
     return (s.bulkSummary(std.mem.span(query)) orelse return null).ptr;
 }
 
+pub export fn zdedupe_results_bulk_plan(r: ?*ZDedupeResults, query_json: ?[*:0]const u8) ?[*:0]const u8 {
+    const s = asSession(r) orelse return null;
+    const query = query_json orelse return null;
+    return (s.bulkPlan(std.mem.span(query)) orelse return null).ptr;
+}
+
+pub export fn zdedupe_results_set_protected(r: ?*ZDedupeResults, paths_json: ?[*:0]const u8) c_int {
+    const s = asSession(r) orelse return -1;
+    const paths = paths_json orelse return -1;
+    return if (s.setProtected(std.mem.span(paths))) 0 else -1;
+}
+
+pub export fn zdedupe_results_protected(r: ?*ZDedupeResults) ?[*:0]const u8 {
+    const s = asSession(r) orelse return null;
+    return (s.protectedJson() orelse return null).ptr;
+}
+
 pub export fn zdedupe_results_delete(
     r: ?*ZDedupeResults,
     selection_json: ?[*:0]const u8,

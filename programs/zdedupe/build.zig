@@ -117,6 +117,8 @@ pub fn build(b: *std.Build) void {
         "src/compare.zig",
         "src/report.zig",
         "src/filters.zig",
+        "src/protect.zig",
+        "src/keep.zig",
         "src/removed.zig",
         "src/session.zig",
         // The results session end to end: the real engine into a real store,
