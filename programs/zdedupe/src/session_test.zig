@@ -2093,3 +2093,38 @@ test "folders in a protected location come back locked" {
         try testing.expectEqual(std.mem.eql(u8, field(d, "path").string, first), field(d, "locked").bool);
     }
 }
+
+test "the protected home is the user's real one, not $HOME" {
+    // A sandboxed Mac app runs with $HOME set to its container; the user
+    // database still names the real home, and that is what gets protected.
+    const gpa = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const pw = std.c.getpwuid(std.c.getuid()) orelse return error.SkipZigTest;
+    const real = std.mem.trimEnd(u8, std.mem.span(pw.dir orelse return error.SkipZigTest), "/");
+
+    var fixture = try Fixture.init(gpa, "session-real-home", &keep_tree);
+    defer fixture.deinit();
+
+    // What the sandbox does: $HOME names somewhere that is not the home.
+    const saved = std.c.getenv("HOME");
+    const saved_copy: ?[:0]u8 = if (saved) |h| try gpa.dupeZ(u8, std.mem.span(h)) else null;
+    defer if (saved_copy) |h| gpa.free(h);
+    _ = setenv("HOME", "/private/tmp/zdedupe-container-home", 1);
+    defer {
+        if (saved_copy) |h| _ = setenv("HOME", h.ptr, 1) else _ = unsetenv("HOME");
+    }
+
+    var s = try fixture.open(null);
+    defer s.close();
+
+    const listed = try parse(a, s.protectedJson());
+    const homes = field(listed, "home").array.items;
+    try testing.expect(homes.len > 0);
+    try testing.expectEqualStrings(try query(a, "{s}/Library", .{real}), homes[0].string);
+}
+
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;

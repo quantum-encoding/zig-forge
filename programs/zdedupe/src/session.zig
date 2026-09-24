@@ -290,6 +290,21 @@ fn pathZ(buf: *[4096]u8, path: []const u8) ?[*:0]const u8 {
     return @ptrCast(buf);
 }
 
+/// The user's real home directory, for the protected `~/Library` and the like.
+/// From the user database first: inside the macOS App Sandbox `$HOME` is the
+/// app's container, and protecting the container's `Library` would leave the
+/// real one unprotected. `$HOME` is the fallback where the database has none.
+fn userHome() ?[]const u8 {
+    if (libc.getpwuid(libc.getuid())) |pw| {
+        if (pw.dir) |dir| {
+            const home = std.mem.span(dir);
+            if (home.len > 0) return home;
+        }
+    }
+    const env = libc.getenv("HOME") orelse return null;
+    return std.mem.span(env);
+}
+
 // ===========================================================================
 // Session
 // ===========================================================================
@@ -422,8 +437,8 @@ pub const Session = struct {
             if (self.roots.len == 0) self.roots = try self.deriveRoots();
         }
         self.removed.attach(self.store_path, fresh) catch {};
-        if (libc.getenv("HOME")) |home| {
-            const trimmed = std.mem.trimEnd(u8, std.mem.span(home), "/");
+        if (userHome()) |home| {
+            const trimmed = std.mem.trimEnd(u8, home, "/");
             if (trimmed.len > 0) self.home = gpa.dupe(u8, trimmed) catch null;
         }
         return self;
